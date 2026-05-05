@@ -2777,6 +2777,12 @@ main =
 
 No type signature change is needed — `Live.app`'s record is open via the kernel's `appExt` extension. Either field is optional — partial overrides fall back to the English defaults (`"Reconnecting…"` / `"Connection lost — refresh to retry"`). Strings are JSON-encoded into the JS template (newlines, quotes, non-ASCII, emoji round-trip safely) and rendered via DOM `textContent`, never `innerHTML`, so user content can't break out of the banner.
 
+**Input preservation across re-renders** (v0.11.x post-release): three failure modes were closing in on production apps and have been fixed:
+
+1. **Empty patches → JSON ack, not HTML fallback.** When input-authority alignment correctly drops every diff (model advanced but client already has the typed value), `dispatchRoot` used to misclassify the empty patch list as "diff failed → send full HTML". The HTML fallback recreated every input — blanking uncontrolled fields like password. Now empty patches send an empty JSON envelope (with seq + ackInputs) so the DOM stays untouched.
+2. **Full-body swap preserves every uncontrolled input, not just the focused one.** `__skyReplaceHTMLPreservingFocus` now walks every `INPUT` / `TEXTAREA` / `SELECT` in the live container and splices any whose server-side placeholder is uncontrolled (no `value` / `checked` / `selected` attr). The previously-special focused-input path is unified into the same loop.
+3. **Open `<select>` defence.** Native dropdowns close on any DOM mutation in their subtree. While the user has a SELECT focused, `__skyApplyPatches` and the SSE patch handler skip patches that touch the SELECT or any element that contains it (or is contained by it). The next user interaction (option click, blur) triggers reconciliation. Active user paths (sky-nav, popstate, POST text fallback) are deliberately NOT defended — dropping them would freeze navigation.
+
 **Priority (highest wins):** system env vars > `.env` file > `sky.toml` defaults. System env vars always win so production deployments can override without editing files. `.env` is for local dev convenience.
 
 ### Importing Sky Dependencies

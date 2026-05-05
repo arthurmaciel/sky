@@ -156,6 +156,18 @@ main =
 
 Either field is optional — partial overrides fall back to the English defaults. Strings are JSON-encoded into the JS template (newlines, quotes, non-ASCII, emoji round-trip safely) and rendered via DOM `textContent`, never `innerHTML`, so user-supplied content can't break out of the banner context.
 
+## Input preservation across re-renders
+
+Sky.Live's input-authority protocol (full spec: `input-authority-protocol.md`) keeps the user's typing safe from server-driven re-renders. Three failure modes that previously slipped through the contract have been closed:
+
+1. **Empty patches stay on the JSON ack path.** When the server-side diff aligns away every patch (the model advanced but the client already has the typed value — the steady-state outcome of typing in a controlled field), the response is an empty JSON envelope with seq + ackInputs metadata, never a full HTML body. Before this fix, empty patches triggered the HTML fallback, which `innerHTML`-replaced the entire `sky-root` and recreated every input — blanking uncontrolled fields like password.
+
+2. **Full-body swaps preserve every uncontrolled input.** When a full HTML replacement is genuinely needed (legitimately structural diff, navigation, first interaction), the runtime now walks every `<input>` / `<textarea>` / `<select>` in the live container and splices any whose server-rendered placeholder is uncontrolled (no `value` / `checked` / `selected` attr) across the swap. The previously-special focused-input preservation is unified into the same loop. Result: an unfocused password field survives across SSE-pushed full-body re-renders. Controlled fields still let the server win — the existing authority discipline is preserved.
+
+3. **Open `<select>` defence.** Native dropdowns close on any DOM mutation in their subtree or in an ancestor that re-mounts them. While `document.activeElement` is a `<select>`, both the per-element patch handler (`__skyApplyPatches`) and the SSE patch handler (full-body) skip patches that touch the SELECT or any element that contains it (or is contained by it). The next user interaction (option click, blur) triggers reconciliation. Active user paths (sky-nav clicks, popstate, POST text fallback) are deliberately NOT defended — dropping them would freeze navigation. Trade-off: while a dropdown stays open, scheduled re-renders accumulate "pending" state on the server until the user blurs the SELECT.
+
+These rules play together. **For password / secret fields specifically**: don't round-trip the value through `Model`. The form-submit pattern — `onSubmit DoSignIn` with a typed-record `args : LoginForm` — is canonical. The server never sees the secret in `Model` (so it never enters the session store) AND, with the preservation rules above, never accidentally blanks it on a server-driven re-render.
+
 ### Env-var namespace prefix
 
 Sky.Live reads its config from env vars under the `SKY_` prefix by default — `SKY_LIVE_PORT`, `SKY_LIVE_STORE`, `SKY_LIVE_TTL`, etc. Two Sky binaries running on the same host share that namespace, which is fine for most setups but causes collision when each binary needs a different port/store/TTL.
