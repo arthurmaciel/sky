@@ -230,7 +230,7 @@ The compiler emits `rt.SetEnvPrefix("FENCE")` at the top of the generated `init(
 
 `System.setenv name value : Task Error ()` and `System.unsetenv name : Task Error ()` (also v0.11.5+) let user code mutate process env without Go FFI — useful when the value isn't known until runtime. Reach for `[env] prefix` first; `setenv` is the escape hatch for runtime-derived values.
 
-Sky.Live env vars (sky.toml keys live under `[live]` — there is no `[live.session]` section): `SKY_LIVE_PORT` (`port`), `SKY_LIVE_TTL` (`ttl`), `SKY_LIVE_STORE` (`store` — `memory` / `sqlite` / `redis` / `postgres`), `SKY_LIVE_STORE_PATH` (`storePath` — sqlite file or `host:port` / `redis://…` / `postgres://…` URL), `SKY_LIVE_STATIC_DIR` (`static`), `SKY_LIVE_INPUT` (`input`), `SKY_LIVE_POLL_INTERVAL` (`poll_interval`), `SKY_LIVE_MAX_BODY_BYTES` (`maxBodyBytes` — cap for `/_sky/event` POST body, default `5242880` = 5 MiB; bump for `Event.onFile` / `Event.onImage` uploads larger than that). Postgres falls back to `DATABASE_URL` and Redis to `REDIS_URL` when `SKY_LIVE_STORE_PATH` is unset (Redis defaults further to `localhost:6379`). Auth: `SKY_AUTH_TOKEN_TTL`, `SKY_AUTH_COOKIE`. Connection-status banner: `SKY_LIVE_BANNER` (default `on`; `off` / `0` / `false` to disable the chrome but keep the POST retry queue active), `SKY_LIVE_RETRY_BASE_MS` (default `500`), `SKY_LIVE_RETRY_MAX_MS` (default `16000`), `SKY_LIVE_RETRY_MAX_ATTEMPTS` (default `10`), `SKY_LIVE_QUEUE_MAX` (default `50`).
+Sky.Live env vars (sky.toml keys live under `[live]` — there is no `[live.session]` section): `SKY_LIVE_PORT` (`port`), `SKY_LIVE_TTL` (`ttl`), `SKY_LIVE_STORE` (`store` — `memory` / `sqlite` / `redis` / `postgres`), `SKY_LIVE_STORE_PATH` (`storePath` — sqlite file or `host:port` / `redis://…` / `postgres://…` URL), `SKY_LIVE_STATIC_DIR` (`static`), `SKY_LIVE_INPUT` (`input`), `SKY_LIVE_POLL_INTERVAL` (`poll_interval`), `SKY_LIVE_MAX_BODY_BYTES` (`maxBodyBytes` — cap for `/_sky/event` POST body, default `5242880` = 5 MiB; bump for `Event.onFile` / `Event.onImage` uploads larger than that). Postgres falls back to `DATABASE_URL` and Redis to `REDIS_URL` when `SKY_LIVE_STORE_PATH` is unset (Redis defaults further to `localhost:6379`). Auth: `SKY_AUTH_TOKEN_TTL`, `SKY_AUTH_COOKIE`. Connection-status banner: `SKY_LIVE_BANNER` (default `on`; `off` / `0` / `false` to disable the chrome but keep the POST retry queue active), `SKY_LIVE_RETRY_BASE_MS` (default `500`), `SKY_LIVE_RETRY_MAX_MS` (default `16000`), `SKY_LIVE_RETRY_MAX_ATTEMPTS` (default `10`), `SKY_LIVE_QUEUE_MAX` (default `50`), `SKY_LIVE_HELLO_TIMEOUT_MS` (default `8000` — how long the client waits for the server's SSE hello handshake before treating the connection as proxy-wedged and force-reopening), `SKY_LIVE_HEARTBEAT_TTL_MS` (default `35000` — max idle time on the SSE before the client treats the stream as silently dropped; tuned for the server's 15 s heartbeat interval × 2).
 
 **Logging (v0.10.0+)**: `SKY_LOG_FORMAT` (`plain` default | `json`) and `SKY_LOG_LEVEL` (`debug` | `info` default | `warn` | `error`) control `Log.*` output. Project-level defaults via sky.toml `[log] format = "json" / level = "info"` — same three-layer precedence (env > `.env` > `sky.toml`). Switch to JSON in production by setting `SKY_LOG_FORMAT=json` in the deployment env; no rebuild required.
 
@@ -644,19 +644,41 @@ update msg model =
 
 The `DoSignIn AuthCreds` constructor takes a typed record — v0.9.8's typed Msg dispatch decodes the wire form data directly into `State_AuthCreds_R{Email, Password}` via `json.Unmarshal`'s case-insensitive field matching. No runtime guessing, no per-Msg decoder boilerplate. Same pattern applies to API keys, credit-card details, anything you don't want resident in the session store.
 
-### Connection status banner (v0.9.9+)
+### Connection status banner (v0.9.9+, hardened against proxy wedges in v0.11.x post-release)
 
 Sky.Live's runtime injects a bottom-pinned status banner separate from the user's `view`. Three states:
 
 - **connected** — `display:none`, no chrome.
 - **reconnecting** — amber bar `Reconnecting…`. Shown when the SSE connection drops or a POST `/_sky/event` fails (network blip, deploy in progress, transient 5xx). 500ms grace period before painting so a one-off blip doesn't flicker.
-- **offline** — red bar `Connection lost — refresh to retry`. Reached after `SKY_LIVE_RETRY_MAX_ATTEMPTS` failed retries (default 10, ≈ 2 min of exponential backoff).
+- **offline** — red bar `Connection lost — refresh to retry`. Reached after `SKY_LIVE_RETRY_MAX_ATTEMPTS` failed retries (default 10, ≈ 2 min of exponential backoff). The runtime keeps trying the SSE in the background even past this point so a healed proxy is picked up automatically — no refresh needed once the network recovers.
 
-POST failures while reconnecting land in `__skyEventQueue` (FIFO, capped at `SKY_LIVE_QUEUE_MAX`); the SSE `open` handler drains the queue eagerly when the server comes back, so a click during the outage replays once the connection re-establishes. Server-side seq ordering tolerates the late delivery.
+POST failures while reconnecting land in `__skyEventQueue` (FIFO, capped at `SKY_LIVE_QUEUE_MAX`); the SSE `hello` handler drains the queue eagerly when the server comes back, so a click during the outage replays once the connection re-establishes. Server-side seq ordering tolerates the late delivery.
 
 **What users see during a deploy / restart**: the page pauses, banner shows `Reconnecting…` for the duration of the cutover, then clears and any in-flight clicks replay. With a persistent session store (Redis / Postgres / Firestore / SQLite) the user's Model rides through unchanged. With the memory store, the cookie still resolves but the session is gone — the user re-inits to `init`'s output. **For production deployments with restart/deploy expected, use a persistent session store**.
 
+**Reverse-proxy hardening** (v0.11.x post-release): some edges (Cloudflare, fly.io, custom Nginx configs) rewrite an upstream 502 into a 200 OK with a non-SSE / HTML body, leaving `EventSource` to fire `open` and silently never deliver a frame — the symptom was the page pinned at `Reconnecting…` even after the server itself recovered. The runtime now defends against this on three layers:
+
+1. **Server**: every `/_sky/sse` response sends `X-Accel-Buffering: no`, a 2 KB padding line to defeat residual proxy buffers, an immediate `event: hello\ndata: {"v":1,"sid":...}\n\n` handshake, and a `event: heartbeat` every 15 s. Every `/_sky/event` POST response carries `X-Sky-Live: 1`.
+2. **Client SSE**: `connected` only flips on the `hello` event, never on raw `EventSource.open`. A 5 s watchdog tears down + reopens the stream when no hello arrives within `SKY_LIVE_HELLO_TIMEOUT_MS` (default 8000) or no heartbeat within `SKY_LIVE_HEARTBEAT_TTL_MS` (default 35000 ≈ 2× heartbeat interval). Each forced reopen counts as a retry attempt and uses the existing exponential backoff schedule. After max attempts the banner flips to `offline` but reopens KEEP firing in the background at the max delay so a healed proxy recovers without a refresh.
+3. **Client POST**: a 200 OK without `X-Sky-Live: 1` is treated as a wedged proxy response — never applied as a patch, always rerouted through the retry path. JSON responses missing the `seq` field are also rejected (some proxies emit JSON error envelopes with 200 OK). A backwards-compat shim during rolling deploys: structurally-valid JSON (with `seq`) without the marker still passes, so an old binary returning {seq, patches} alongside a marker-aware client is non-breaking.
+
 Opt-out via `SKY_LIVE_BANNER=off` (or `0` / `false`) keeps the retry queue active but suppresses the chrome — useful when an app renders its own connection UI in the user's view. Override the styling via `#__sky-status { ... !important }` in the user's stylesheet; the runtime uses inline styles + max z-index so user CSS wins on conflict.
+
+**Localising the banner text** (i18n): override the two user-facing strings via the `status` field on `Live.app`. No type signature change is needed — `Live.app`'s record is open via the kernel's `appExt` extension, so the field is purely additive:
+
+```elm
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ Live.route "/" HomePage ], notFound = HomePage
+        , status =
+            { reconnecting = "Reconnexion…"
+            , offline = "Connexion perdue — actualisez la page"
+            }
+        }
+```
+
+Either field is optional — partial overrides fall back to the English defaults (`"Reconnecting…"` / `"Connection lost — refresh to retry"`). Strings are JSON-encoded into the JS template (so newlines, quotes, non-ASCII, emoji round-trip safely) and rendered via DOM `textContent`, never `innerHTML`, so user content can't break out of the banner. Same precedence as other Sky.Live config: app-level `status` field wins; env-var defaults fall through if absent.
 
 ### Dispatch error handling
 

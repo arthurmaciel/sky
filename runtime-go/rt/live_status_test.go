@@ -78,12 +78,175 @@ func TestLiveJS_SSEStateTransitions(t *testing.T) {
 		`__skySSE.addEventListener("open"`,
 		`__skySSE.addEventListener("error"`,
 		`__skyStatusGraceTimer`, // 500ms grace before showing reconnecting
-		`"reconnecting", "Reconnecting…"`,
+		`"reconnecting", __skyMsgReconnecting`,
 	}
 	for _, want := range required {
 		if !strings.Contains(js, want) {
 			t.Errorf("liveJS missing required SSE-state marker: %q", want)
 		}
+	}
+}
+
+// TestLiveJS_ClosedReadyStateForcesReopen guards the Caddy/Nginx 502
+// recovery path. EventSource's spec says any non-200 response (502 from
+// a reverse proxy when upstream is down, 504 timeout, wrong content
+// type) permanently closes the connection — readyState becomes
+// CLOSED(2) and the browser does NOT auto-retry. Without the
+// readyState===2 branches in both the error handler and the watchdog,
+// stopping the upstream behind Caddy and restarting it leaves the page
+// permanently disconnected (the user-reported bug).
+func TestLiveJS_ClosedReadyStateForcesReopen(t *testing.T) {
+	js := liveJS("test-sid")
+	required := []string{
+		// Error handler: if browser closed permanently, force reopen.
+		`if (__skySSE && __skySSE.readyState === 2) {`,
+		`__skyForceReopenSSE();`,
+		// Watchdog: same backstop for the case where the error event
+		// was missed (race during initial handshake, browser quirks).
+		`if (__skySSE.readyState === 2)`,
+		// Watchdog also covers the no-SSE-and-no-reopen-pending state.
+		`if (!__skySSE && __skySseReopenTimer === null)`,
+	}
+	for _, want := range required {
+		if !strings.Contains(js, want) {
+			t.Errorf("liveJS missing CLOSED-readyState recovery marker: %q", want)
+		}
+	}
+}
+
+// TestLiveJS_HandshakeAndHeartbeat asserts the wedge-detection plumbing
+// is wired into the embedded init script: a hello handler, a heartbeat
+// handler, the watchdog interval, and the force-reopen path that fires
+// when the proxy returns 200-OK without a real SSE stream. These are
+// the load-bearing pieces for recovering from a misbehaving reverse
+// proxy that would otherwise leave the client stuck at "Reconnecting…"
+// indefinitely. See docs/skylive/architecture.md §SSE wedge detection.
+func TestLiveJS_HandshakeAndHeartbeat(t *testing.T) {
+	js := liveJS("test-sid")
+	required := []string{
+		`__skySSE.addEventListener("hello"`,
+		`__skySSE.addEventListener("heartbeat"`,
+		`function __skyOpenSSE()`,
+		`function __skyForceReopenSSE()`,
+		`function __skyWatchdog()`,
+		`__skyHelloOk`,
+		`__skyOpenAt`,
+		`__skyLastSseAt`,
+		`setInterval(__skyWatchdog, 5000)`,
+		// On healed network, a successful POST also reopens SSE so a
+		// server-pushed UI doesn't stay silently broken.
+		`if (__skySSE === null)`,
+		// Wedge detection: refuse to apply non-Sky-Live POST responses.
+		`var skyMark = r.headers.get("X-Sky-Live")`,
+		`throw new Error("non-sky response`,
+	}
+	for _, want := range required {
+		if !strings.Contains(js, want) {
+			t.Errorf("liveJS missing wedge-detection marker: %q", want)
+		}
+	}
+}
+
+// TestLiveJS_I18nDefaults asserts the English defaults are templated
+// into the script when no cfg.status override is supplied. Catches the
+// case where someone removes a default and the banner ships empty
+// strings.
+func TestLiveJS_I18nDefaults(t *testing.T) {
+	js := liveJS("test-sid")
+	required := []string{
+		`var __skyMsgReconnecting = "Reconnecting…";`,
+		`var __skyMsgOffline = "Connection lost — refresh to retry";`,
+		`var __skyHelloTimeoutMs = 8000;`,
+		`var __skyHeartbeatTtlMs = 35000;`,
+	}
+	for _, want := range required {
+		if !strings.Contains(js, want) {
+			t.Errorf("liveJS missing i18n default: %q", want)
+		}
+	}
+}
+
+// TestLiveJS_I18nOverrides asserts user-supplied banner strings round-
+// trip through liveJSWithCfg JSON-encoded so non-ASCII (the whole point
+// of this knob) survives intact, and embedded quotes / newlines /
+// </script> sentinels can't escape the JS string context. The banner
+// renders via textContent so the DOM path is XSS-safe; this test guards
+// the JS-context escaping (which the JSON encoder already provides).
+func TestLiveJS_I18nOverrides(t *testing.T) {
+	cfg := loadLiveBannerConfig()
+	cfg.Reconnecting = "Reconnexion en cours…"
+	cfg.Offline = `Connexion perdue — actualisez la page`
+	js := liveJSWithCfg("sid", cfg)
+	if !strings.Contains(js, `"Reconnexion en cours…"`) &&
+		!strings.Contains(js, `"Reconnexion en cours…"`) {
+		t.Errorf("user-supplied reconnecting string missing or wrongly encoded\n%s", js)
+	}
+	if !strings.Contains(js, `Connexion perdue`) {
+		t.Errorf("user-supplied offline string missing")
+	}
+	// Adversarial: a string that would close the <script> if templated
+	// raw must be JSON-escaped. </script> in JSON is "</script>"
+	// or "<\/script>"; either form is safe.
+	cfg.Reconnecting = `</script><img src=x onerror=alert(1)>`
+	js2 := liveJSWithCfg("sid", cfg)
+	if strings.Contains(js2, "</script><img") {
+		t.Errorf("adversarial reconnecting string leaked unescaped: must be JSON-encoded\n%s", js2)
+	}
+}
+
+// TestResolveBannerStrings asserts the cfg.status overlay reads
+// PascalCase fields off both struct-shaped and map-shaped records.
+// Sky's typed-codegen emits inline records as Go structs (PascalCase
+// fields); maps come from an older code path used for some FFI shapes.
+// Both must work because we don't control which one the user ends up
+// with depending on whether they wrote the record inline or via a
+// type alias.
+func TestResolveBannerStrings(t *testing.T) {
+	base := liveBannerConfig{Reconnecting: "x", Offline: "y"}
+
+	// Struct shape (typical typed-codegen output).
+	type statusRec struct {
+		Reconnecting string
+		Offline      string
+	}
+	type appCfg struct {
+		Status statusRec
+	}
+	got := resolveBannerStrings(base, appCfg{Status: statusRec{
+		Reconnecting: "Reconnexion…",
+		Offline:      "Hors ligne",
+	}})
+	if got.Reconnecting != "Reconnexion…" || got.Offline != "Hors ligne" {
+		t.Errorf("struct overlay failed: %+v", got)
+	}
+
+	// Partial overlay: missing field falls back to the base default.
+	got = resolveBannerStrings(base, appCfg{Status: statusRec{
+		Reconnecting: "Reconnexion…",
+	}})
+	if got.Reconnecting != "Reconnexion…" {
+		t.Errorf("partial overlay reconnecting wrong: %q", got.Reconnecting)
+	}
+	if got.Offline != "y" {
+		t.Errorf("partial overlay offline should fall back to base, got %q", got.Offline)
+	}
+
+	// No status field at all → all defaults preserved.
+	type bareCfg struct{ Init any }
+	got = resolveBannerStrings(base, bareCfg{})
+	if got.Reconnecting != "x" || got.Offline != "y" {
+		t.Errorf("no-status cfg must preserve defaults, got %+v", got)
+	}
+
+	// Map-shaped status (rare but possible at the FFI boundary).
+	got = resolveBannerStrings(base, map[string]any{
+		"Status": map[string]any{
+			"Reconnecting": "Map-reconnexion",
+			"Offline":      "Map-hors-ligne",
+		},
+	})
+	if got.Reconnecting != "Map-reconnexion" || got.Offline != "Map-hors-ligne" {
+		t.Errorf("map overlay failed: %+v", got)
 	}
 }
 

@@ -118,6 +118,44 @@ storePath = "./data.db"
 ttl = 1800
 ```
 
+## Connection status banner
+
+Sky.Live's runtime injects a bottom-pinned banner the user's `view` doesn't have to manage. Three states:
+
+| State | Trigger | Default chrome |
+|-------|---------|----------------|
+| `connected` | normal operation | `display:none` |
+| `reconnecting` | SSE drops, POST `/_sky/event` fails, or proxy wedge detected | amber `Reconnecting…` (after 500 ms grace) |
+| `offline` | `SKY_LIVE_RETRY_MAX_ATTEMPTS` consecutive retry failures | red `Connection lost — refresh to retry` |
+
+After reaching `offline` the runtime keeps retrying SSE in the background at the max delay so a healed network recovers without a forced refresh. POST failures during the outage land in a FIFO queue (capped at `SKY_LIVE_QUEUE_MAX`) and replay automatically on reconnect.
+
+### Reverse-proxy wedge protection
+
+Some edges (Cloudflare without the right page rule, fly.io, custom Nginx) can rewrite an upstream 502 into a 200 OK with a non-SSE body, leaving `EventSource` to fire `open` and silently never deliver a frame. The user-visible symptom was the page pinned at `Reconnecting…` even after the server itself had recovered. The runtime defends against this on three layers:
+
+1. **Server-side hygiene.** Every `/_sky/sse` response sets `X-Accel-Buffering: no`, sends a 2 KB padding line so proxy buffers flush, then immediately sends `event: hello\ndata: {"v":1,"sid":...}\n\n`. A heartbeat fires every 15 s. Every `/_sky/event` POST response carries `X-Sky-Live: 1`.
+2. **Client SSE.** `connected` only flips on the `hello` event, never on raw `EventSource.open`. A 5 s watchdog tears down + reopens the stream if no hello arrives within `SKY_LIVE_HELLO_TIMEOUT_MS` (8 s default) or no heartbeat within `SKY_LIVE_HEARTBEAT_TTL_MS` (35 s default ≈ 2× heartbeat).
+3. **Client POST.** A 200 OK without `X-Sky-Live: 1` is treated as a wedged proxy response — never applied as a patch, always rerouted through the retry path.
+
+### Localising the banner
+
+Override the banner strings via the `status` field on `Live.app`. No type signature change is needed — `Live.app`'s record is open via the kernel's `appExt` extension.
+
+```elm
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ Live.route "/" HomePage ], notFound = HomePage
+        , status =
+            { reconnecting = "Reconnexion…"
+            , offline = "Connexion perdue — actualisez la page"
+            }
+        }
+```
+
+Either field is optional — partial overrides fall back to the English defaults. Strings are JSON-encoded into the JS template (newlines, quotes, non-ASCII, emoji round-trip safely) and rendered via DOM `textContent`, never `innerHTML`, so user-supplied content can't break out of the banner context.
+
 ### Env-var namespace prefix
 
 Sky.Live reads its config from env vars under the `SKY_` prefix by default — `SKY_LIVE_PORT`, `SKY_LIVE_STORE`, `SKY_LIVE_TTL`, etc. Two Sky binaries running on the same host share that namespace, which is fine for most setups but causes collision when each binary needs a different port/store/TTL.

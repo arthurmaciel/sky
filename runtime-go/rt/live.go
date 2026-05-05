@@ -1750,6 +1750,7 @@ type liveApp struct {
 	locker        *sessionLocker
 	msgTags       map[string]int // SkyName → Tag cache for direct-send events
 	msgTagsMu     sync.Mutex
+	bannerCfg     liveBannerConfig // resolved env-vars + cfg.status overrides
 }
 
 
@@ -2015,6 +2016,7 @@ func liveAppRun(cfg any) any {
 		guard:         Field(cfg, "Guard"),
 		locker:        newSessionLocker(),
 		msgTags:       make(map[string]int),
+		bannerCfg:     resolveBannerStrings(loadLiveBannerConfig(), cfg),
 	}
 	for _, r := range asList(Field(cfg, "Routes")) {
 		if lr, ok := r.(liveRoute); ok {
@@ -2259,7 +2261,7 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	// styleNode in their view, or static-served self-hosted webfonts).
 	// Privacy: no Google Fonts request. Accessibility: no !important
 	// override fighting app-level type choices.
-	fmt.Fprintf(w, "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body><div id=\"sky-root\">%s</div><script>%s</script></body></html>", body, liveJS(sid))
+	fmt.Fprintf(w, "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body><div id=\"sky-root\">%s</div><script>%s</script></body></html>", body, liveJSWithCfg(sid, app.bannerCfg))
 }
 
 // handleConfig exposes client-facing runtime config (no secrets) so the
@@ -2337,6 +2339,10 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 			app.dispatchBatched(sess, ev)
 		}
 		// sendBeacon can't read the response — 204 just signals OK.
+		// X-Sky-Live header is harmless here (sendBeacon ignores it) but
+		// keeps the response signature consistent across all _sky/event
+		// success paths.
+		w.Header().Set("X-Sky-Live", "1")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -2446,6 +2452,7 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 // so pre-upgrade clients continue to deserialise cleanly.
 func writeEventJSON(w http.ResponseWriter, seq, respondingTo int64, ackInputs map[string]int64, patches []Patch) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Sky-Live", "1")
 	payload := map[string]any{
 		"seq":     seq,
 		"patches": patches,
@@ -2469,6 +2476,7 @@ func writeEventJSON(w http.ResponseWriter, seq, respondingTo int64, ackInputs ma
 func writeEventHTML(w http.ResponseWriter, seq int64, ackInputs map[string]int64, body string) {
 	h := w.Header()
 	h.Set("Content-Type", "text/html")
+	h.Set("X-Sky-Live", "1")
 	h.Set("X-Sky-Seq", strconv.FormatInt(seq, 10))
 	if ackInputs != nil {
 		if b, err := json.Marshal(ackInputs); err == nil {
@@ -2768,6 +2776,24 @@ func (app *liveApp) setupSubscriptions(sess *liveSession) {
 }
 
 // handleSSE: Server-Sent Events endpoint. Pushes view patches as they arrive.
+//
+// Reverse-proxy hardening:
+//   - X-Sky-Live response header lets the client distinguish a real
+//     Sky.Live response from a proxy-rewritten error page (e.g. some
+//     edges turn upstream 502 into 200 + HTML body, which without the
+//     marker would silently look like a successful but empty SSE).
+//   - X-Accel-Buffering: no asks Nginx / Cloudflare / Vercel / fly.io
+//     edges to disable response buffering for this stream.
+//   - 2 KB padding comment up front defeats residual proxy buffers
+//     (some won't honour X-Accel-Buffering; the SSE spec recommends
+//     >2 KB initial chunk).
+//   - "hello" event with a protocol version + sid lands as a
+//     handshake; client treats absence-of-hello within helloTimeoutMs
+//     as a wedge and force-reconnects.
+//   - Periodic "heartbeat" event every sseHeartbeatInterval keeps the
+//     watchdog satisfied and surfaces silently-dropped connections
+//     (proxy holds socket open but no data flows) within 2× the
+//     interval.
 func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 	sid := ""
 	if c, err := r.Cookie("sky_sid"); err == nil {
@@ -2784,15 +2810,49 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("X-Sky-Live", "1")
 	flusher, _ := w.(http.Flusher)
 
-	// Send an initial ping
-	fmt.Fprintf(w, ": connected\n\n")
+	// Padding line (≥2 KB of `:` comment chars + newlines) primes
+	// proxy buffers that ignore X-Accel-Buffering. Sent BEFORE the
+	// hello event so by the time hello arrives the proxy has already
+	// flushed past its threshold.
+	pad := make([]byte, 0, 2050)
+	pad = append(pad, ':', ' ')
+	for i := 0; i < 2048; i++ {
+		pad = append(pad, '.')
+	}
+	pad = append(pad, '\n', '\n')
+	if _, err := w.Write(pad); err != nil {
+		return
+	}
+	// Handshake. v=1 lets future protocol versions tighten the
+	// handshake (e.g. require an ack from the client) without
+	// breaking older browsers. The sid echoes back the cookie so the
+	// client can sanity-check it landed on the right session.
+	helloPayload, _ := json.Marshal(map[string]any{
+		"v":   1,
+		"sid": sid,
+		"ts":  time.Now().UnixMilli(),
+	})
+	if _, err := fmt.Fprintf(w, "event: hello\ndata: %s\n\n", helloPayload); err != nil {
+		return
+	}
 	if flusher != nil {
 		flusher.Flush()
 	}
+
+	// Heartbeat ticker. Interval is intentionally LESS than the
+	// client's heartbeat-timeout (35s) by a factor of 2 so a single
+	// dropped frame doesn't trip the wedge detector. 15s is a
+	// pragmatic mid-point between battery / data cost on mobile and
+	// fast detection of a wedged connection. Test code can override
+	// via the package-level sseHeartbeatInterval var.
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
+	defer heartbeat.Stop()
 
 	for {
 		select {
@@ -2801,7 +2861,16 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 		case body := <-sess.sseCh:
 			// Escape newlines for SSE data lines
 			escaped := strings.ReplaceAll(body, "\n", "\\n")
-			fmt.Fprintf(w, "event: patch\ndata: %s\n\n", escaped)
+			if _, err := fmt.Fprintf(w, "event: patch\ndata: %s\n\n", escaped); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		case t := <-heartbeat.C:
+			if _, err := fmt.Fprintf(w, "event: heartbeat\ndata: {\"ts\":%d}\n\n", t.UnixMilli()); err != nil {
+				return
+			}
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -2824,21 +2893,59 @@ func sessionID(r *http.Request, w http.ResponseWriter) string {
 // influence the connection-status banner so they can be templated
 // into the init script. Each var has a sensible default; users
 // override via shell env or .env.
+//
+// Reconnecting / Offline are user-facing strings shown in the banner
+// when the connection is degraded. Defaults are English; override via
+// the `status` field on the Live.app config (see resolveBannerStrings)
+// to localise the chrome in the app's language. Strings are templated
+// in JSON-quoted form so any character is safe (newlines, quotes,
+// non-ASCII, emoji); the DOM uses textContent, not innerHTML, so XSS
+// is structurally impossible.
 type liveBannerConfig struct {
-	Enabled     bool
-	BaseMs      int
-	MaxMs       int
-	MaxAttempts int
-	QueueMax    int
+	Enabled         bool
+	BaseMs          int
+	MaxMs           int
+	MaxAttempts     int
+	QueueMax        int
+	Reconnecting    string
+	Offline         string
+	HelloTimeoutMs  int
+	HeartbeatTtlMs  int
 }
+
+// sseHeartbeatInterval is the cadence at which handleSSE emits a
+// `event: heartbeat\ndata: {"ts":N}\n\n` frame. Exposed as a var so
+// tests can dial it down to milliseconds; production code never
+// rewrites it.
+var sseHeartbeatInterval = 15 * time.Second
+
+const (
+	defaultReconnectingMsg = "Reconnecting…"
+	defaultOfflineMsg      = "Connection lost — refresh to retry"
+	// Client must see the server's "hello" event within this many ms
+	// of EventSource.open or it treats the connection as wedged
+	// (proxy-rewritten 200-OK or buffered SSE response). 8s is well
+	// past round-trip on slow mobile but tight enough that a stuck
+	// proxy is detected before the user notices.
+	defaultHelloTimeoutMs = 8000
+	// Client treats absence-of-events for this many ms as a wedged
+	// connection. Server's heartbeat fires every 15s, so 35s is just
+	// over 2× the heartbeat interval — survives one missed heartbeat
+	// (network blip, GC pause) but trips quickly on a real wedge.
+	defaultHeartbeatTtlMs = 35000
+)
 
 func loadLiveBannerConfig() liveBannerConfig {
 	cfg := liveBannerConfig{
-		Enabled:     true,
-		BaseMs:      500,
-		MaxMs:       16000,
-		MaxAttempts: 10,
-		QueueMax:    50,
+		Enabled:        true,
+		BaseMs:         500,
+		MaxMs:          16000,
+		MaxAttempts:    10,
+		QueueMax:       50,
+		Reconnecting:   defaultReconnectingMsg,
+		Offline:        defaultOfflineMsg,
+		HelloTimeoutMs: defaultHelloTimeoutMs,
+		HeartbeatTtlMs: defaultHeartbeatTtlMs,
 	}
 	// <PREFIX>_LIVE_BANNER=off disables the banner entirely (still
 	// queues + retries POSTs — just no chrome). Useful when an app
@@ -2858,6 +2965,35 @@ func loadLiveBannerConfig() liveBannerConfig {
 	if n, ok := parsePositiveInt(skyGetenv("LIVE_QUEUE_MAX")); ok {
 		cfg.QueueMax = n
 	}
+	if n, ok := parsePositiveInt(skyGetenv("LIVE_HELLO_TIMEOUT_MS")); ok {
+		cfg.HelloTimeoutMs = n
+	}
+	if n, ok := parsePositiveInt(skyGetenv("LIVE_HEARTBEAT_TTL_MS")); ok {
+		cfg.HeartbeatTtlMs = n
+	}
+	return cfg
+}
+
+// resolveBannerStrings overlays the optional `status` record from a
+// Live.app config onto the env-defaulted banner config. The kernel
+// signature for Live.app is open via the appExt row variable, so adding
+// `status = { reconnecting = "...", offline = "..." }` to a user's app
+// type-checks without any signature change. Missing fields fall back
+// to the defaults already in `cfg` — partial overrides are fine, and
+// a typo just silently misses (a closed-record check would force users
+// who only want one string in their language to write both, which is
+// a worse trade-off than the typo cost).
+func resolveBannerStrings(cfg liveBannerConfig, app any) liveBannerConfig {
+	status := Field(app, "Status")
+	if status == nil {
+		return cfg
+	}
+	if s := stringField(status, "Reconnecting"); s != "" {
+		cfg.Reconnecting = s
+	}
+	if s := stringField(status, "Offline"); s != "" {
+		cfg.Offline = s
+	}
 	return cfg
 }
 
@@ -2872,8 +3008,28 @@ func parsePositiveInt(s string) (int, bool) {
 	return n, true
 }
 
+// liveJS keeps the historical signature (used by tests + any external
+// callers that don't have a liveApp instance). Resolves the env-only
+// banner config and forwards to liveJSWithCfg. Production callers go
+// through liveJSWithCfg with the app's resolved cfg so the user's
+// `status = { reconnecting = ..., offline = ... }` overrides apply.
 func liveJS(sid string) string {
-	cfg := loadLiveBannerConfig()
+	return liveJSWithCfg(sid, loadLiveBannerConfig())
+}
+
+// jsString JSON-quotes s for safe embedding as a JS string literal.
+// JSON string syntax is a subset of JS; escaped form (\uXXXX for
+// non-ASCII) is portable across browsers without depending on the
+// containing script's charset declaration.
+func jsString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
+}
+
+func liveJSWithCfg(sid string, cfg liveBannerConfig) string {
 	return fmt.Sprintf(`
 var __skySid = %q;
 var __skyBannerEnabled = %t;
@@ -2881,6 +3037,10 @@ var __skyRetryBaseMs = %d;
 var __skyRetryMaxMs = %d;
 var __skyRetryMaxAttempts = %d;
 var __skyEventQueueMax = %d;
+var __skyMsgReconnecting = %s;
+var __skyMsgOffline = %s;
+var __skyHelloTimeoutMs = %d;
+var __skyHeartbeatTtlMs = %d;
 
 // ── Input authority protocol state ───────────────────────────
 // See docs/skylive/input-authority-protocol.md §Client state.
@@ -3333,9 +3493,32 @@ function __skyPostEvent(body) {
       // as transient — same retry path as a network failure.
       throw new Error("server " + r.status);
     }
+    // Reverse-proxy wedge detection: a real Sky.Live response always
+    // carries X-Sky-Live: 1. Without it, we're looking at a proxy-
+    // rewritten response (e.g. some edges turn upstream 502 into 200
+    // OK with an HTML error page). Applying that as a "patch" would
+    // replace the user's DOM with the proxy's error page, so we refuse
+    // it and route through the failure path instead.
+    //
+    // For JSON content-type we keep a backwards-compat shim during
+    // rolling deploys: a pre-marker server still returns valid JSON
+    // with seq + patches, structurally indistinguishable from the
+    // marked form, so accept it. HTML / text responses without the
+    // marker are always rejected — those are the proxy-wedge shape.
+    var skyMark = r.headers.get("X-Sky-Live");
     var ct = r.headers.get("Content-Type") || "";
-    if (ct.indexOf("application/json") >= 0) {
+    var isJson = ct.indexOf("application/json") >= 0;
+    if (skyMark !== "1" && !isJson) {
+      throw new Error("non-sky response " + r.status);
+    }
+    if (isJson) {
       return r.json().then(function(data) {
+        // Even JSON is rejected if it lacks the protocol shape (no
+        // seq field): some proxies (Cloudflare access denied, fly.io
+        // edge errors) return JSON error envelopes with 200 OK.
+        if (skyMark !== "1" && (!data || typeof data.seq === "undefined")) {
+          throw new Error("non-sky json response");
+        }
         __skyLoaderEnd();
         __skyOnPostSuccess();
         if (!data) return;
@@ -3371,6 +3554,18 @@ function __skyOnPostSuccess() {
   if (__skyStatus !== "connected") {
     __skySetStatus("connected", "");
   }
+  // SSE recovery: if the watchdog tore down the EventSource (offline
+  // terminal state), a successful POST proves the network is back, so
+  // reopen the stream too — otherwise subscriptions and Cmd.perform
+  // results would silently not arrive even though clicks work. Cancel
+  // any pending reopen-with-backoff and bring it forward.
+  if (__skySSE === null) {
+    if (__skySseReopenTimer !== null) {
+      clearTimeout(__skySseReopenTimer);
+      __skySseReopenTimer = null;
+    }
+    __skyOpenSSE();
+  }
   __skyDrainQueue();
 }
 function __skyOnPostFailure(body) {
@@ -3390,13 +3585,13 @@ function __skyOnPostFailure(body) {
 function __skyShowReconnecting() {
   if (__skyStatus === "offline") return;
   if (__skyStatus === "connected") {
-    __skySetStatus("reconnecting", "Reconnecting…");
+    __skySetStatus("reconnecting", __skyMsgReconnecting);
   }
 }
 function __skyScheduleRetry() {
   if (__skyRetryTimer !== null) return;  // already pending
   if (__skyRetryAttempts >= __skyRetryMaxAttempts) {
-    __skySetStatus("offline", "Connection lost — refresh to retry");
+    __skySetStatus("offline", __skyMsgOffline);
     return;
   }
   __skyRetryAttempts++;
@@ -3750,62 +3945,238 @@ function __skyInjectStatusBanner() {
   __skySetStatus(__skyStatus, "");
 }
 
-// Server-Sent Events: push updates from server (subscriptions, Cmd.perform results).
+// ── Server-Sent Events ───────────────────────────────────────
 // Frame envelope since v0.9.3+: {seq, body, ackInputs?}. Falls back to
 // treating e.data as a raw HTML body when JSON parsing fails, so a
 // mixed-version rollout doesn't break the open-SSE connection.
-var __skySSE = new EventSource("/_sky/sse");
-__skySSE.addEventListener("patch", function(e) {
-  var frame;
-  try { frame = JSON.parse(e.data); } catch (_) {
-    // Legacy frame (pre-v0.9.3 server) — raw HTML, no seq to gate on.
-    return __skyPatch(e.data.replace(/\\n/g, "\n"));
-  }
-  if (frame && typeof frame === "object") {
-    __skyHandleResponse(frame.seq, frame.ackInputs, function() {
-      if (frame.body) __skyPatch(frame.body.replace(/\\n/g, "\n"));
-    });
-  }
-});
+//
+// Reverse-proxy hardening: the browser's EventSource has no
+// application-level liveness check — if a misbehaving proxy holds the
+// socket open with no body or rewrites an upstream 502 to 200 with a
+// non-SSE HTML payload, EventSource will fire 'open' and never fire
+// 'error', leaving the client silently wedged. The server now sends
+// an immediate 'hello' event and a periodic 'heartbeat'; the client
+// watchdog (below) treats absence of either as a wedge and force-
+// reconnects with backoff. See docs/skylive/architecture.md
+// §SSE wedge detection.
+var __skySSE = null;
+var __skyOpenAt = 0;          // ms timestamp of last EventSource.open
+var __skyLastSseAt = 0;       // ms timestamp of any SSE event
+var __skyHelloOk = false;     // server sent its handshake this connection
+var __skyWatchdogTimer = null;
+var __skySseReopenTimer = null;
+var __skyForcedClose = false; // true while we're tearing down to reopen
+function __skyOpenSSE() {
+  __skyForcedClose = false;
+  __skyHelloOk = false;
+  __skyOpenAt = 0;
+  __skySSE = new EventSource("/_sky/sse");
+  __skySSE.addEventListener("hello", function(e) {
+    // Handshake received — we know we hit a real Sky.Live v2 server,
+    // not a proxy that intercepted with a generic 200. Anything
+    // before hello is suspect, so the connected-state flip happens
+    // HERE, not on EventSource.open. Remember that THIS page's
+    // server speaks v2 so future watchdog cycles can tighten the
+    // wedge-detection threshold to the fast 8s hello timeout.
+    __skyServerSpeaksV2 = true;
+    __skyHelloOk = true;
+    __skyLastSseAt = Date.now();
+    if (__skyStatusGraceTimer !== null) {
+      clearTimeout(__skyStatusGraceTimer);
+      __skyStatusGraceTimer = null;
+    }
+    if (__skyStatus !== "connected") {
+      __skySetStatus("connected", "");
+    }
+    __skyRetryAttempts = 0;
+    if (__skyRetryTimer !== null) {
+      clearTimeout(__skyRetryTimer);
+      __skyRetryTimer = null;
+    }
+    if (__skyEventQueue.length > 0) __skyDrainQueue();
+  });
+  __skySSE.addEventListener("heartbeat", function(e) {
+    __skyLastSseAt = Date.now();
+  });
+  __skySSE.addEventListener("patch", function(e) {
+    __skyLastSseAt = Date.now();
+    // Old servers (pre-handshake) only ever send "patch" events.
+    // A real patch is itself proof we're talking to a Sky.Live server,
+    // not a proxy-rewritten 200-OK, so treat first-patch-without-hello
+    // as an implicit handshake. This keeps a new client from trapping
+    // itself when a rolling deploy puts it in front of an old server.
+    if (!__skyHelloOk) {
+      __skyHelloOk = true;
+      if (__skyStatusGraceTimer !== null) {
+        clearTimeout(__skyStatusGraceTimer);
+        __skyStatusGraceTimer = null;
+      }
+      if (__skyStatus !== "connected") {
+        __skySetStatus("connected", "");
+      }
+      __skyRetryAttempts = 0;
+      if (__skyRetryTimer !== null) {
+        clearTimeout(__skyRetryTimer);
+        __skyRetryTimer = null;
+      }
+    }
+    var frame;
+    try { frame = JSON.parse(e.data); } catch (_) {
+      // Legacy frame (pre-v0.9.3 server) — raw HTML, no seq to gate on.
+      return __skyPatch(e.data.replace(/\\n/g, "\n"));
+    }
+    if (frame && typeof frame === "object") {
+      __skyHandleResponse(frame.seq, frame.ackInputs, function() {
+        if (frame.body) __skyPatch(frame.body.replace(/\\n/g, "\n"));
+      });
+    }
+  });
+  __skySSE.addEventListener("open", function() {
+    // EventSource fired open — but we don't trust this alone, since a
+    // proxy can rewrite a non-SSE 200 OK into something that fires
+    // open without ever delivering a frame. Wait for 'hello' to flip
+    // to connected. Just record the open timestamp so the watchdog
+    // can measure "how long have we been open without a hello".
+    __skyOpenAt = Date.now();
+    __skyLastSseAt = Date.now();
+  });
+  __skySSE.addEventListener("error", function() {
+    // Suppress the banner when we triggered the close ourselves
+    // (force-reopen path) — those errors are an artefact of our own
+    // teardown, not a real outage signal.
+    if (__skyForcedClose) return;
+    // CLOSED (2) means the browser failed the connection permanently.
+    // Per the EventSource spec, this happens for any non-200 HTTP
+    // response (Caddy/Nginx 502 when upstream is down, 504 timeout,
+    // 503 service unavailable) AND for the wrong Content-Type. The
+    // browser will NOT retry on its own — we have to drive the
+    // reconnect ourselves. Without this branch the whole reconnect
+    // story collapses behind a reverse proxy that returns proper
+    // 5xx codes during outages.
+    if (__skySSE && __skySSE.readyState === 2) {
+      __skyForceReopenSSE();
+      return;
+    }
+    // CONNECTING (0): browser is auto-retrying (network blip, no HTTP
+    // response received yet). Show the banner only if the situation
+    // persists past the grace window — a quick error+reopen burst
+    // shouldn't paint chrome.
+    if (__skyStatus !== "connected") return;
+    if (__skyStatusGraceTimer !== null) return;
+    __skyStatusGraceTimer = setTimeout(function() {
+      __skyStatusGraceTimer = null;
+      if (__skySSE && __skySSE.readyState === 1 && __skyHelloOk) return;
+      __skySetStatus("reconnecting", __skyMsgReconnecting);
+    }, 500);
+  });
+}
 
-// ── SSE → status state transitions ───────────────────────────
-// Browser EventSource auto-reconnects with its own backoff; we just
-// observe the open/error events to flip __skyStatus and surface a
-// banner. 500ms grace timer avoids flicker on transient blips:
-// a quick error+reopen burst (e.g. wifi handoff) shouldn't paint the
-// banner. Only show "reconnecting" if disconnect persists past the
-// grace window.
-__skySSE.addEventListener("open", function() {
-  if (__skyStatusGraceTimer !== null) {
-    clearTimeout(__skyStatusGraceTimer);
-    __skyStatusGraceTimer = null;
+// __skyForceReopenSSE — close the current EventSource and queue a
+// fresh open with backoff. Each call bumps the retry counter; once
+// it exceeds __skyRetryMaxAttempts the banner flips to "offline" but
+// reconnect attempts CONTINUE in the background at the max delay so
+// a healed proxy is picked up automatically (otherwise the user is
+// permanently stuck unless they click something or refresh, which is
+// surprising on push-driven UIs like dashboards or chat). Backoff
+// matches the POST retry schedule so the user doesn't see two
+// independent timers.
+function __skyForceReopenSSE() {
+  __skyForcedClose = true;
+  try { if (__skySSE) __skySSE.close(); } catch (_) {}
+  __skySSE = null;
+  if (__skyStatus === "connected") {
+    __skySetStatus("reconnecting", __skyMsgReconnecting);
   }
-  if (__skyStatus !== "connected") {
-    __skySetStatus("connected", "");
+  __skyRetryAttempts++;
+  if (__skyRetryAttempts >= __skyRetryMaxAttempts && __skyStatus !== "offline") {
+    __skySetStatus("offline", __skyMsgOffline);
   }
-  // Server is reachable again — drain any POSTs that failed during
-  // the outage. Successful drains will recurse via __skyOnPostSuccess.
-  // Reset the backoff counter so a fresh failure starts at 500ms not
-  // 16s.
-  __skyRetryAttempts = 0;
-  if (__skyRetryTimer !== null) {
-    clearTimeout(__skyRetryTimer);
-    __skyRetryTimer = null;
+  if (__skySseReopenTimer !== null) {
+    clearTimeout(__skySseReopenTimer);
   }
-  if (__skyEventQueue.length > 0) __skyDrainQueue();
-});
-__skySSE.addEventListener("error", function() {
-  // Don't flip state if we're already showing a banner — repeated
-  // error events fire during the browser's reconnect loop.
-  if (__skyStatus !== "connected") return;
-  if (__skyStatusGraceTimer !== null) return;
-  __skyStatusGraceTimer = setTimeout(function() {
-    __skyStatusGraceTimer = null;
-    // Re-check the EventSource state in case it reopened during
-    // the grace window — readyState OPEN(1) means we're back.
-    if (__skySSE.readyState === 1) return;
-    __skySetStatus("reconnecting", "Reconnecting…");
-  }, 500);
+  var delay = Math.min(__skyRetryBaseMs * Math.pow(2, __skyRetryAttempts - 1), __skyRetryMaxMs);
+  __skySseReopenTimer = setTimeout(function() {
+    __skySseReopenTimer = null;
+    __skyOpenSSE();
+  }, delay);
+}
+
+// __skyWatchdog — runs every 5s. Two wedge detectors layered:
+//   1. Connection has been quiet for longer than __skyHeartbeatTtlMs
+//      (35s default). Catches every wedge shape — a proxy holding
+//      the socket open with no body, an upstream 502 rewritten to
+//      200 + HTML, mid-stream TCP stalls. The 35s threshold is
+//      tuned to be just over 2× the server's 15s heartbeat; if the
+//      server is new we miss at most one heartbeat before reacting.
+//   2. Faster handshake check: once this PAGE has confirmed the
+//      server speaks the v2 protocol (any session received a hello),
+//      tighten the threshold to __skyHelloTimeoutMs (8s) on every
+//      subsequent connection. Pre-v2 servers stay on the slower
+//      heartbeat-ttl path so a rolling deploy doesn't wedge new
+//      clients hitting old pods. The page-scoped flag survives SSE
+//      teardowns + reopens within the same tab.
+// Both paths increment the retry counter via __skyForceReopenSSE,
+// so a wedge that persists reaches "offline" instead of looping
+// forever — but reopen attempts continue at the max delay so a
+// healed proxy reconnects automatically without a refresh.
+var __skyServerSpeaksV2 = false;
+function __skyWatchdog() {
+  // If we have no live EventSource AND no reopen scheduled, the
+  // 'error' handler must have missed (rare race) or some path tore
+  // it down without re-arming. Drive the reopen here so the page
+  // never gets permanently disconnected.
+  if (!__skySSE && __skySseReopenTimer === null) {
+    __skyForceReopenSSE();
+    return;
+  }
+  if (!__skySSE) return;
+  // CLOSED (2): browser failed the connection (non-200, wrong CT)
+  // and won't retry. The 'error' handler should have caught this,
+  // but cover the case where it didn't fire (e.g. error during
+  // initial handshake before listeners attached, or a browser
+  // implementation quirk). Single source of truth — both paths end
+  // in __skyForceReopenSSE.
+  if (__skySSE.readyState === 2) {
+    if (!__skyForcedClose) {
+      __skyForceReopenSSE();
+    }
+    return;
+  }
+  if (__skySSE.readyState !== 1) return;  // CONNECTING (0): browser is retrying, leave it
+  var now = Date.now();
+  // Effective threshold:
+  //   - Brand-new SSE on a v2-confirmed server → fast hello timeout
+  //     (8s) since we expect a hello promptly.
+  //   - Otherwise → conservative heartbeat ttl (35s) so old servers
+  //     and idle dashboards don't false-positive.
+  var quietMs = now - __skyLastSseAt;
+  var threshold = __skyHeartbeatTtlMs;
+  if (__skyServerSpeaksV2 && !__skyHelloOk) {
+    threshold = __skyHelloTimeoutMs;
+  }
+  if (quietMs > threshold) {
+    if (window.console && console.warn) {
+      console.warn("[sky.live] SSE quiet for " + quietMs +
+        "ms (threshold " + threshold + "ms) — reopening");
+    }
+    __skyForceReopenSSE();
+  }
+}
+
+// Kick off the SSE connection + watchdog. Watchdog interval is short
+// enough (5s) that a wedge is detected within 5s + helloTimeout / ttl
+// of the actual fault, and long enough to not be a measurable CPU cost.
+__skyOpenSSE();
+__skyWatchdogTimer = setInterval(__skyWatchdog, 5000);
+
+// On tab visibility change, re-evaluate immediately — when a tab
+// resumes from background the OS may have torn down the underlying
+// TCP, but EventSource sometimes lags in detecting it. Eager check
+// avoids the user staring at a stale UI for the full watchdog cycle.
+document.addEventListener("visibilitychange", function() {
+  if (document.visibilityState === "visible") {
+    __skyWatchdog();
+  }
 });
 
 // ── Init ─────────────────────────────────────────────────────
@@ -3821,7 +4192,11 @@ if (document.readyState === "loading") {
 } else {
   __skyInit();
 }
-`, sid, cfg.Enabled, cfg.BaseMs, cfg.MaxMs, cfg.MaxAttempts, cfg.QueueMax)
+`,
+		sid, cfg.Enabled, cfg.BaseMs, cfg.MaxMs, cfg.MaxAttempts, cfg.QueueMax,
+		jsString(cfg.Reconnecting), jsString(cfg.Offline),
+		cfg.HelloTimeoutMs, cfg.HeartbeatTtlMs,
+	)
 }
 
 // ═══════════════════════════════════════════════════════════

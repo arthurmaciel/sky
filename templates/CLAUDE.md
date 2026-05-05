@@ -2755,9 +2755,27 @@ Sky.Live config is embedded at compile time but can be overridden at runtime. En
 | `SKY_LIVE_TTL` | `ttl` | Session TTL (Go duration format, e.g. `30m`) |
 | `SKY_LIVE_MAX_BODY_BYTES` | `maxBodyBytes` | Cap for `/_sky/event` POST body (default `5242880` = 5 MiB; bump for `Event.onFile` / `Event.onImage` uploads larger than 5 MiB) |
 
-Connection-status banner (v0.9.9+): `SKY_LIVE_BANNER` (default `on`; `off` / `0` / `false` to suppress the chrome but keep the retry queue active), `SKY_LIVE_RETRY_BASE_MS` (default `500`), `SKY_LIVE_RETRY_MAX_MS` (default `16000`), `SKY_LIVE_RETRY_MAX_ATTEMPTS` (default `10`), `SKY_LIVE_QUEUE_MAX` (default `50`).
+Connection-status banner (v0.9.9+, hardened against proxy wedges in v0.11.x post-release): `SKY_LIVE_BANNER` (default `on`; `off` / `0` / `false` to suppress the chrome but keep the retry queue active), `SKY_LIVE_RETRY_BASE_MS` (default `500`), `SKY_LIVE_RETRY_MAX_MS` (default `16000`), `SKY_LIVE_RETRY_MAX_ATTEMPTS` (default `10`), `SKY_LIVE_QUEUE_MAX` (default `50`), `SKY_LIVE_HELLO_TIMEOUT_MS` (default `8000` — how long the client waits for the server's SSE handshake before treating the connection as proxy-wedged and force-reopening), `SKY_LIVE_HEARTBEAT_TTL_MS` (default `35000` — max idle time on the SSE before the client treats the stream as silently dropped; sized for 2× the server's 15 s heartbeat).
 
-**Connection status banner**: the runtime injects a bottom-pinned banner that shows `Reconnecting…` (amber) when the SSE connection drops or a POST `/_sky/event` fails, and `Connection lost — refresh to retry` (red) after the retry attempts are exhausted. POST failures during the outage land in a FIFO queue; the SSE re-open or a successful retry drains them, so clicks during a brief outage replay automatically. Use a persistent session store (Redis / Postgres / SQLite / Firestore) for production deployments — the memory store loses Model state on every server restart, so reconnect re-initialises from `init`. The banner is opt-out via `SKY_LIVE_BANNER=off`; styling can be overridden by `#__sky-status { ... !important }` in the user's stylesheet.
+**Connection status banner**: the runtime injects a bottom-pinned banner that shows `Reconnecting…` (amber) when the SSE connection drops or a POST `/_sky/event` fails, and `Connection lost — refresh to retry` (red) after the retry attempts are exhausted. POST failures during the outage land in a FIFO queue; the SSE re-open or a successful retry drains them, so clicks during a brief outage replay automatically. Use a persistent session store (Redis / Postgres / SQLite / Firestore) for production deployments — the memory store loses Model state on every server restart, so reconnect re-initialises from `init`. After reaching the offline state the runtime keeps trying SSE in the background at the max delay, so a healed network recovers without a refresh. The banner is opt-out via `SKY_LIVE_BANNER=off`; styling can be overridden by `#__sky-status { ... !important }` in the user's stylesheet.
+
+**Reverse-proxy hardening**: a misbehaving edge (Cloudflare, fly.io, custom Nginx) that rewrites an upstream 502 into a 200 OK with a non-SSE body would previously wedge the client at `Reconnecting…` even after the server itself recovered. The runtime now sends `X-Accel-Buffering: no`, a 2 KB padding line, an immediate `event: hello\ndata: {"v":1,"sid":...}\n\n` handshake, and a `event: heartbeat` every 15 s on `/_sky/sse`. Every `/_sky/event` POST response carries `X-Sky-Live: 1`. The client only flips to `connected` on the hello event, and a 5 s watchdog tears down + reopens the stream when no hello arrives within `SKY_LIVE_HELLO_TIMEOUT_MS` or no heartbeat within `SKY_LIVE_HEARTBEAT_TTL_MS`. POST responses without `X-Sky-Live: 1` are treated as wedged and never applied as patches (with a backwards-compat shim for structurally-valid JSON during rolling deploys).
+
+**Localising the banner text** (i18n): override the two user-facing strings via the `status` field on `Live.app`:
+
+```elm
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ Live.route "/" HomePage ], notFound = HomePage
+        , status =
+            { reconnecting = "Reconnexion…"
+            , offline = "Connexion perdue — actualisez la page"
+            }
+        }
+```
+
+No type signature change is needed — `Live.app`'s record is open via the kernel's `appExt` extension. Either field is optional — partial overrides fall back to the English defaults (`"Reconnecting…"` / `"Connection lost — refresh to retry"`). Strings are JSON-encoded into the JS template (newlines, quotes, non-ASCII, emoji round-trip safely) and rendered via DOM `textContent`, never `innerHTML`, so user content can't break out of the banner.
 
 **Priority (highest wins):** system env vars > `.env` file > `sky.toml` defaults. System env vars always win so production deployments can override without editing files. `.env` is for local dev convenience.
 
