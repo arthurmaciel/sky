@@ -116,6 +116,89 @@ func TestSSEHandshakeHeaders(t *testing.T) {
 	}
 }
 
+// TestSSEReconnectResyncPushesCurrentView is the regression fence for
+// the watch-restart-with-stale-view bug. After a Sky.Live binary
+// restart with a persistent session store, the browser's SSE
+// reconnects and gets a hello frame — but used to sit on stale HTML
+// rendered by the OLD binary, because nothing pushed to sess.sseCh
+// post-restart (subscriptions are goroutines launched in the old
+// process). The fix re-renders the view inside handleSSE and emits a
+// full-body patch frame as the next event after hello, guaranteeing
+// a fresh DOM on every fresh SSE connection. Critical for `sky
+// watch` hot-reload UX, but the same fix benefits prod deploys with
+// persistent storage.
+func TestSSEReconnectResyncPushesCurrentView(t *testing.T) {
+	app := &liveApp{
+		store:  newMemoryStore(30 * time.Minute),
+		locker: newSessionLocker(),
+		view: func(model any) any {
+			return velement("div", []any{attrPair{key: "id", val: "marker"}},
+				[]any{vtext("FRESH-RENDER-MARKER")})
+		},
+	}
+	// Pre-seed: session has model, but no prevTree/prevBody (the
+	// post-restart shape — these are deliberately not gob-encoded).
+	app.store.Set("sid-resync", &liveSession{
+		sseCh:     make(chan string, 4),
+		cancelSub: make(chan struct{}),
+		model:     "model-state",
+		handlers:  map[string]any{},
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(app.handleSSE))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL, nil)
+	req.AddCookie(&http.Cookie{Name: "sky_sid", Value: "sid-resync"})
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil && !strings.Contains(err.Error(), "context deadline exceeded") {
+		t.Fatalf("SSE GET failed: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("no response from SSE handler")
+	}
+	defer resp.Body.Close()
+
+	// Read the stream until we see the resync patch frame OR the
+	// context cancels. The frame is the first `event: patch` event
+	// (after padding + hello).
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	sawHello := false
+	sawPatchAfterHello := false
+	patchHasMarker := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: hello") {
+			sawHello = true
+			continue
+		}
+		if sawHello && strings.HasPrefix(line, "event: patch") {
+			sawPatchAfterHello = true
+			continue
+		}
+		if sawPatchAfterHello && strings.HasPrefix(line, "data: ") {
+			if strings.Contains(line, "FRESH-RENDER-MARKER") {
+				patchHasMarker = true
+			}
+			break
+		}
+	}
+	if !sawHello {
+		t.Errorf("hello event missing")
+	}
+	if !sawPatchAfterHello {
+		t.Errorf("no patch event after hello — reconnect-resync didn't fire")
+	}
+	if !patchHasMarker {
+		t.Errorf("patch frame body missing FRESH-RENDER-MARKER — view() wasn't re-evaluated")
+	}
+}
+
 // TestSSEHeartbeatFires verifies that the heartbeat ticker actually
 // emits frames (not just that it's wired up — the JS-side test asserts
 // the listener exists, but a server that never sends would still trip
@@ -225,6 +308,66 @@ func TestI18nBannerStringsReachClientPage(t *testing.T) {
 	}
 	if !strings.Contains(body, `Connexion perdue. Veuillez actualiser.`) {
 		t.Errorf("rendered page missing user-supplied offline string")
+	}
+}
+
+// TestSSESessionNotFoundCarriesSkyLiveHeader: when the SSE handler
+// returns 404 because the session is gone (memory-store restart,
+// sky.toml [live] store change, TTL expiry), the response MUST carry
+// X-Sky-Live: 1 so the client's __skyProbeSessionLost can distinguish
+// a real Sky.Live "session gone" from a proxy-rewritten 404. Without
+// this marker, the page would loop on reconnect forever — the user-
+// reported bug.
+func TestSSESessionNotFoundCarriesSkyLiveHeader(t *testing.T) {
+	app := &liveApp{
+		store:  newMemoryStore(30 * time.Minute),
+		locker: newSessionLocker(),
+	}
+	// Deliberately do NOT seed the session — we want the 404 path.
+	srv := httptest.NewServer(http.HandlerFunc(app.handleSSE))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL, nil)
+	req.AddCookie(&http.Cookie{Name: "sky_sid", Value: "ghost-session"})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("SSE GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404 for unknown session, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Sky-Live"); got != "1" {
+		t.Errorf("404 response missing X-Sky-Live: 1 (got %q) — client probe can't recover", got)
+	}
+}
+
+// TestEventSessionNotFoundCarriesSkyLiveHeader: same contract for
+// the POST /_sky/event 404 path. The client probe in
+// __skyProbeSessionLost specifically targets this endpoint, so its
+// header must be set or the reload-on-session-loss never fires.
+func TestEventSessionNotFoundCarriesSkyLiveHeader(t *testing.T) {
+	app := &liveApp{
+		store:  newMemoryStore(30 * time.Minute),
+		locker: newSessionLocker(),
+	}
+	body := strings.NewReader(`{"sessionId":"ghost","msg":"X","args":[]}`)
+	req := httptest.NewRequest("POST", "/_sky/event", body)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	app.handleEvent(rr, req)
+
+	if rr.Code != 404 {
+		t.Fatalf("expected 404, got %d body %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-Sky-Live"); got != "1" {
+		t.Errorf("404 missing X-Sky-Live: 1 (got %q)", got)
+	}
+	if !strings.Contains(rr.Body.String(), "session not found") {
+		t.Errorf("404 body should say 'session not found' so the probe can distinguish from handler-not-found, got %q",
+			rr.Body.String())
 	}
 }
 

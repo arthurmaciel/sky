@@ -2317,6 +2317,10 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, ok := app.store.Get(req.SessionID)
 	if !ok {
+		// Mark this 404 as a real Sky.Live response so the client's
+		// probe (in __skyForceReopenSSE) can distinguish "session gone,
+		// reload to recover" from a generic proxy-rewritten 404.
+		w.Header().Set("X-Sky-Live", "1")
 		http.Error(w, "session not found", 404)
 		return
 	}
@@ -2813,11 +2817,20 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 		sid = c.Value
 	}
 	if sid == "" {
+		w.Header().Set("X-Sky-Live", "1")
 		http.Error(w, "no session", 400)
 		return
 	}
 	sess, ok := app.store.Get(sid)
 	if !ok {
+		// X-Sky-Live: 1 marks this as a real Sky.Live response (not a
+		// proxy-rewritten 404). The client uses this signal in
+		// __skyForceReopenSSE's probe to decide "session gone → hard
+		// page reload" vs "transient network error → keep retrying".
+		// Critical for the memory-store-after-restart case (e.g. user
+		// flipped sky.toml [live] store from sqlite to memory, watch
+		// rebuilt, every browser session is now invalid).
+		w.Header().Set("X-Sky-Live", "1")
 		http.Error(w, "session not found", 404)
 		return
 	}
@@ -2856,6 +2869,54 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 	if flusher != nil {
 		flusher.Flush()
+	}
+
+	// Reconnect-resync: every fresh SSE connection re-renders the current
+	// view and pushes it as a full-body frame. Without this, a binary
+	// restart (deploy / `sky watch` rebuild) plus a persistent session
+	// store (sqlite / redis / postgres / firestore) leaves the browser's
+	// DOM stuck on the old view code — nothing ever pushes through
+	// sess.sseCh until the user dispatches a Msg, because subscriptions
+	// fire from goroutines launched by the OLD process and aren't
+	// recreated on session reload. The cost is one HTML body per SSE
+	// connect (~10-50 KB typical); the existing input-authority +
+	// __skyReplaceHTMLPreservingFocus rules keep the swap UX-neutral
+	// (uncontrolled inputs preserved, focused element spliced).
+	//
+	// Skips when sess.model is nil, which only happens before
+	// handleInitial has run for this session (defensive — the cookie
+	// path normally pre-creates the session before SSE opens).
+	sess.mu.Lock()
+	if sess.model != nil {
+		// Recover from any panic in view() so a bad render doesn't tear
+		// down the SSE connection. The recovered SSE just enters its
+		// for-select loop with the legacy prevTree/prevBody untouched.
+		func() {
+			defer func() { _ = recover() }()
+			vn, ok := sky_call(app.view, sess.model).(VNode)
+			if !ok {
+				return
+			}
+			assignSkyIDs(&vn, "r")
+			sess.handlers = map[string]any{}
+			body := renderVNode(vn, sess.handlers)
+			sess.prevTree = &vn
+			sess.prevBody = body
+			frame := encodeSSEFrame(sess, body)
+			// Encode + write while still under lock to avoid interleaving
+			// with concurrent dispatch frames pushed via sess.sseCh.
+			escaped := strings.ReplaceAll(frame, "\n", "\\n")
+			_, _ = fmt.Fprintf(w, "event: patch\ndata: %s\n\n", escaped)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}()
+		sess.mu.Unlock()
+		// Persist the rebuilt prevTree+prevBody so future events diff
+		// against the new-binary view and don't fall back to full-body.
+		app.store.Set(sid, sess)
+	} else {
+		sess.mu.Unlock()
 	}
 
 	// Heartbeat ticker. Interval is intentionally LESS than the
@@ -4173,6 +4234,19 @@ function __skyForceReopenSSE() {
     __skySetStatus("reconnecting", __skyMsgReconnecting);
   }
   __skyRetryAttempts++;
+  // Session-loss probe: when the SSE is wedged (typically a server
+  // restart with the memory store, or a sky.toml [live] store change
+  // wiping the persistent session), no amount of reopen retries can
+  // recover the lost session — the only path forward is a full page
+  // reload, which fires handleInitial and creates a fresh session.
+  // We probe with a fake POST: a 404 + X-Sky-Live: 1 + body
+  // containing "session not found" is the unambiguous signal that the
+  // server is up but doesn't know our cookie. Anything else (network
+  // error, 5xx, healthy 200) keeps the normal retry path engaged so
+  // we don't reload on a transient blip — full reload destroys
+  // uncontrolled-input state that v0.11.7's preservation rules can't
+  // bring back.
+  __skyProbeSessionLost();
   if (__skyRetryAttempts >= __skyRetryMaxAttempts && __skyStatus !== "offline") {
     __skySetStatus("offline", __skyMsgOffline);
   }
@@ -4184,6 +4258,50 @@ function __skyForceReopenSSE() {
     __skySseReopenTimer = null;
     __skyOpenSSE();
   }, delay);
+}
+
+// __skyProbeSessionLost — fire-and-forget POST whose only purpose is
+// to read the server's reaction to our existing sky_sid cookie. If
+// the server is up AND has lost our session (memory-store restart,
+// store-kind change, session TTL expiry), we get a 404 with the
+// X-Sky-Live marker and a "session not found" body. That's the cue
+// to hard-reload — every reopen attempt would otherwise loop on the
+// same 404 forever.
+//
+// Must NOT trigger any user-visible side effects on the server. We
+// send a Msg name that no real app registers and supply no
+// handlerId, so handleEvent's code path goes:
+//   session not found → 404 (the case we're probing for)
+//   session found, handler not found → 404 with a different body
+//   (we explicitly check the body string to avoid false positives).
+var __skyProbedReload = false;  // one-shot guard so we don't trigger
+                                // multiple reloads from a burst of
+                                // failed reopen attempts.
+function __skyProbeSessionLost() {
+  if (__skyProbedReload) return;
+  fetch("/_sky/event", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({sessionId: __skySid, msg: "__skySessionPing", args: []}),
+    credentials: "same-origin"
+  }).then(function(r) {
+    if (r.status !== 404) return;
+    if (r.headers.get("X-Sky-Live") !== "1") return;
+    return r.text().then(function(body) {
+      // Specifically "session not found" — distinguishes from
+      // "handler not found" (which means the session is fine, just
+      // our probe Msg name doesn't exist; that's expected and
+      // doesn't warrant a reload).
+      if (body.indexOf("session not found") < 0) return;
+      __skyProbedReload = true;
+      if (window.console && console.warn) {
+        console.warn("[sky.live] server lost our session — reloading page to recover");
+      }
+      window.location.reload();
+    });
+  }).catch(function() {
+    // Network error / server down. Keep retrying via normal path.
+  });
 }
 
 // __skyWatchdog — runs every 5s. Two wedge detectors layered:

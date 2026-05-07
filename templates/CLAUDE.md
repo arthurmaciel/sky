@@ -256,6 +256,7 @@ before writing non-trivial code.
 sky init [name]           # Create a new Sky project (sky.toml, src/Main.sky, .gitignore, CLAUDE.md)
 sky build src/Main.sky    # Compile to Go binary (output: sky-out/app)
 sky run src/Main.sky      # Build and run
+sky watch src/Main.sky    # Watch sources; rebuild + restart on save (incremental caches reused)
 sky check src/Main.sky    # Type-check without compiling (cross-module ADT + alias resolution)
 sky fmt src/Main.sky      # Format code (opinionated: 4-space indent, leading commas)
 sky test tests/MyTest.sky # Run a test module (exposes `tests : List Test`)

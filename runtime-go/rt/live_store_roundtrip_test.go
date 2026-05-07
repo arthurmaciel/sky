@@ -118,6 +118,36 @@ func TestValidateSessionValue_RejectsNestedFunc(t *testing.T) {
 	}
 }
 
+// TestEncodeSession_OutSeqRoundTrips guards the regression where the
+// new process's outSeq counter resets to 0 across a server restart.
+// Without persisting it, the reconnect-resync push goes out with seq=1
+// while the client's __skyLastAppliedSeq is whatever the OLD process
+// climbed to (e.g. 47) — the client treats seq=1 as stale and silently
+// drops it, leaving the DOM frozen on the old view's HTML even though
+// the binary was rebuilt with new view code. With persistence the new
+// process continues from outSeq=47, the resync uses seq=48, and the
+// client applies the frame.
+func TestEncodeSession_OutSeqRoundTrips(t *testing.T) {
+	sess := buildSess(map[string]any{"x": 1})
+	sess.outSeq = 47
+	blob, err := encodeSession(sess)
+	if err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	decoded, err := decodeSession(blob)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if decoded.outSeq != 47 {
+		t.Fatalf("outSeq did not round-trip: got %d, want 47", decoded.outSeq)
+	}
+	// nextOutSeq must continue from the loaded value, not from zero.
+	next := decoded.nextOutSeq()
+	if next != 48 {
+		t.Fatalf("nextOutSeq after restart: got %d, want 48", next)
+	}
+}
+
 func TestValidateSessionValue_AcceptsTypedNil(t *testing.T) {
 	// A typed-nil pointer/interface in the model is semantically
 	// "no value" and should round-trip unchanged, not trip the

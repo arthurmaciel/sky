@@ -47,6 +47,23 @@ Under the hood:
 5. It invokes `go build -o sky-out/app`.
 6. It executes `sky-out/app`.
 
+## Watch mode (hot reload)
+
+For tight feedback loops, use `sky watch` instead — it rebuilds and respawns the binary on every save, reusing all the existing compile caches:
+
+```bash
+sky watch                        # entry: src/Main.sky
+sky watch src/Main.sky           # explicit
+sky watch --no-run               # rebuild only (no spawn)
+sky watch --watch=docs/notes.md  # add an extra path (repeatable)
+```
+
+The watcher follows a strict allowlist: `sky.toml`, the entry-point's directory (recursive `.sky` walk), and `tests/` if present. Generated dirs (`sky-out/`, `.skycache/`, `.skydeps/`) are excluded.
+
+A failing rebuild is non-destructive — the previously-running binary keeps serving while you fix the typo. The next successful build kills + respawns. Ctrl-C cleans up cleanly with no zombie processes.
+
+For Sky.Live apps: pair `sky watch` with a persistent session store (sqlite/redis) and your in-progress UI state survives every restart — the runtime's SSE handshake auto-reconnects, the input-preservation rules keep typed values intact. Watch will print a one-line tip at startup if your sky.toml is configured with the memory store.
+
 ## Add a Go dependency
 
 ```bash
