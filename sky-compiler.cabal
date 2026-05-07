@@ -195,6 +195,7 @@ test-suite sky-tests
       Sky.Build.ConsCtorPatternSpec
       Sky.Build.CtorConsPatternSpec
       Sky.Build.EnvPrefixSpec
+      Sky.Build.FfiGenMultiSpec
       Sky.Build.TaskResultBridgesSpec
       Sky.Build.CheckIsBuildSpec
       Sky.Build.RecordFieldOrderSpec

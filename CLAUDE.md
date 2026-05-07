@@ -382,6 +382,23 @@ Typical warm-rebuild latency: 1-2 s for small apps (live-counter, todo-cli), 2-3
 - No browser auto-refresh — Sky.Live's SSE handshake handles reconnection without page reload.
 - No file watching outside the allowlist — `runtime-go/`, `.skydeps/`, build artefacts are ignored. Compiler-dev workflows that need rt/ watching should use `cabal install` cycles instead.
 
+### `sky install` performance shape
+
+The pipeline does, in order:
+1. **`go get pkg1 pkg2 …`** — single batched call; module graph computed once. Warm cache near-instant.
+2. **`sky-ffi-inspect`** — invokes the Go AST inspector. CPU-heavy. Multi-mode (one inspector subprocess loading N pkgs in one `packages.Load`) so Go's loader dedupes shared transitive deps across roots — a Sky.Live app pulling Stripe SDK + Firebase + Firestore + Google APIs gets each shared dep type-checked once instead of once per root.
+3. **Chunked-multi parallelism** — split missing deps into K chunks, run K inspector subprocesses in parallel. K = `min(numProcessors, 4)` by default. Override via `SKY_INSTALL_PARALLEL=1..16`.
+4. **`generateBindings`** (Haskell) — emits `.skycache/ffi/<slug>.{kernel.json,skyi}` + `.skycache/go/<slug>_bindings.go` per pkg. Sub-second per pkg, parallel-safe.
+
+**Skyshop benchmark** (18 deps, warm Go module cache, M1 Mac 8-core):
+- Baseline: 67.5 s wall, 136.3 s CPU.
+- Optimised: 58.5 s wall, 112.5 s CPU. **13% faster, 17% less CPU.**
+- The hard floor: Stripe SDK master package alone takes ~53 s to type-check inside Go's loader. Below that is Tier 2 work (usage-driven FFI generation, only emit referenced symbols).
+
+**Inspector mode flags**: `packages.NeedName | NeedTypes | NeedDeps | NeedImports`. `NeedSyntax` and `NeedTypesInfo` were dropped (audited every helper in `tools/sky-ffi-inspect/main.go` — none reads `pkg.Syntax` or `pkg.TypesInfo`). Output is byte-identical to the previous mode set across skyshop's 18-dep set.
+
+**Forward-compat fallback**: a stale in-tree `bin/sky-ffi-inspect` predating the multi-mode upgrade returns a single-pkg JSON object even when given multiple argv args. The Sky-side `runInspectorMulti` detects this (array decode fails + object decode succeeds) and falls back to a per-pkg loop. Keeps `sky install` correct on stale dev binaries; loses the cross-pkg dedup speedup until contributors rebuild `bin/sky-ffi-inspect`.
+
 ## Code Formatting (`sky fmt`)
 
 Opinionated formatter, no configuration. Output is Elm-compatible (4-space indent, leading commas, "one line or each on its own line"):

@@ -26,6 +26,7 @@ import qualified Sky.Build.NestedPatternSpec
 import qualified Sky.Build.ConsCtorPatternSpec
 import qualified Sky.Build.CtorConsPatternSpec
 import qualified Sky.Build.EnvPrefixSpec
+import qualified Sky.Build.FfiGenMultiSpec
 import qualified Sky.Build.TaskResultBridgesSpec
 import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
@@ -168,6 +169,11 @@ main = hspec $ do
     -- when the key is absent. Plus System.setenv / System.unsetenv
     -- stdlib helpers so users can mutate env without Go FFI.
     describe "Sky.Build.EnvPrefix"      Sky.Build.EnvPrefixSpec.spec
+    -- v0.11.x install perf: multi-package inspector mode + chunked
+    -- parallel calls. Spec asserts the JSON-array decode contract +
+    -- the empty-list fast-path that lets `sky install` skip the
+    -- inspector entirely on warm caches.
+    describe "Sky.Build.FfiGenMulti"    Sky.Build.FfiGenMultiSpec.spec
     -- Result/Task bridge helpers (Task.fromResult, Task.andThenResult,
     -- Result.andThenTask) — runtime + canonicaliser + kernel sigs gate.
     describe "Sky.Build.TaskResultBridges" Sky.Build.TaskResultBridgesSpec.spec
