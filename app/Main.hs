@@ -39,6 +39,11 @@ import qualified Sky.Format.Format as Format
 import qualified Sky.Lsp.Server as Lsp
 import qualified Sky.Build.FfiGen as FfiGen
 import qualified Sky.Build.SkyDeps as SkyDeps
+import qualified Sky.Cli.Watch as Watch
+
+import qualified Control.Concurrent.Async as Async
+import qualified Control.Concurrent.QSem as QSem
+import qualified GHC.Conc as GHC
 
 
 -- | End-to-end verification (replaces scripts/verify-examples.sh +
@@ -527,25 +532,147 @@ appendGoDependency pkg = do
 -- `.skycache/ffi/<slug>.kernel.json` file is absent. Used by `sky
 -- install` and the `sky build` auto-regen fallback. Silently skips
 -- inspector failures — user can still run `sky add <pkg>` manually.
+--
+-- Performance shape (skyshop benchmark, 18 Go deps including Stripe
+-- SDK + Firebase + Firestore):
+--   * `go get pkg` per dep: warm-cache near-instant, cold-cache
+--     dominated by network. Batched here into ONE `go get pkg1 pkg2
+--     ...` invocation so the module graph is updated atomically and
+--     transitive deps shared between Stripe and Firestore (e.g.
+--     golang.org/x/oauth2) are resolved once.
+--   * `sky-ffi-inspect pkg` per dep: CPU-heavy go/types load. This
+--     is the bottleneck. Bounded-parallel via QSem to cap memory
+--     pressure (each inspector holds 1-2 GB for big SDKs); user can
+--     override the cap via SKY_INSTALL_PARALLEL.
+--   * `generateBindings`: <1s per dep, parallel-safe (writes to
+--     distinct .skycache/ffi/<slug>.* files per dep).
 regenMissingBindings :: [(String, String)] -> IO ()
 regenMissingBindings deps = do
     createDirectoryIfMissing True ".skycache/ffi"
-    mapM_ regenOne deps
-  where
-    regenOne (pkg, _ver) = do
+    -- Filter once: only keep deps whose kernel.json is missing.
+    -- Subsequent `sky install` runs see this empty after a successful
+    -- first run, so the parallel machinery only kicks in on cold
+    -- caches and after `sky add`.
+    missing <- filterM (\(pkg, _) -> do
         let slug = FfiGen.slugify pkg
-            jsonPath = ".skycache/ffi/" ++ slug ++ ".kernel.json"
-        already <- doesFileExist jsonPath
-        if already then return ()
-        else do
-            -- Fetch Go module + generate bindings. Same flow as `sky add`.
-            callProcess "sh" ["-c", "cd sky-out && go get " ++ pkg ++ " 2>&1 | grep -v '^go:' >&2 || true"]
-            r <- FfiGen.runInspector pkg
-            case r of
-                Left _   -> return ()
-                Right info -> do
-                    _ <- FfiGen.generateBindings info
-                    return ()
+        cached <- doesFileExist (".skycache/ffi/" ++ slug ++ ".kernel.json")
+        return (not cached)) deps
+    case missing of
+        [] -> return ()
+        _  -> do
+            -- Batch `go get` for all missing deps in a single
+            -- invocation. Go's module resolver is faster than running
+            -- it N times because the dep graph is computed once.
+            let pkgList = unwords (map fst missing)
+            callProcess "sh"
+                [ "-c"
+                , "cd sky-out && go get " ++ pkgList ++ " 2>&1 | grep -v '^go:' >&2 || true"
+                ]
+            -- Chunked multi-inspector strategy:
+            --   * Split missing deps into K chunks (K = parallelism cap).
+            --   * Run K inspector subprocesses in parallel, each in
+            --     multi-mode over its chunk.
+            -- Why chunked rather than (a) one combined call or (b) N
+            -- separate calls:
+            --   Combined-only: single subprocess, internal Go-loader
+            --     goroutines saturate ~2 cores. Dedup benefit but no
+            --     cross-process parallelism — wall-clock-bound by the
+            --     slowest single load.
+            --   Separate-N: N subprocesses each loading one root,
+            --     each internally using ~2 cores. Saturates cores at
+            --     N=4, but every shared transitive dep is type-
+            --     checked N times (no dedup).
+            --   Chunked-K: K subprocesses each loading C/K deps in
+            --     multi-mode. Each chunk gets dedup within itself;
+            --     chunks run in parallel for wall speedup. Sweet
+            --     spot when K matches numProcessors/2 (so total
+            --     thread count matches core count).
+            -- For skyshop's 18 deps with K=4: 4-5 deps/chunk, 4
+            -- chunks running concurrently, ~halves wall vs combined-
+            -- only and saves ~10% CPU vs separate-N.
+            n <- resolveInstallParallelism
+            let pkgs   = map fst missing
+                chunks = chunkInto n pkgs
+            chunkResults <- mapConcurrentlyN n FfiGen.runInspectorMulti chunks
+            -- Concat back into a per-input results list, preserving
+            -- order. Each chunk's results are aligned to its input
+            -- subset (runInspectorMulti's contract).
+            let allResults = concat chunkResults
+            -- generateBindings is parallel-safe (each pkg writes to
+            -- distinct files). Sub-second per call so this loop is
+            -- fast either way; keep the parallel scaffolding so
+            -- future heavier post-processing scales for free.
+            _ <- mapConcurrentlyN n emit (zip pkgs allResults)
+            return ()
+  where
+    emit (_, Left _)     = return ()
+    emit (_, Right info) = do
+        _ <- FfiGen.generateBindings info
+        return ()
+
+
+-- | Split a list into N roughly-equal chunks. Used by the install
+-- chunked-multi strategy. Filters out empty chunks so callers don't
+-- spawn no-op subprocesses.
+chunkInto :: Int -> [a] -> [[a]]
+chunkInto n xs
+    | n <= 1    = [xs]
+    | null xs   = []
+    | otherwise =
+        let total       = length xs
+            chunkSize   = (total + n - 1) `div` n
+        in  filter (not . null) (chunkOf chunkSize xs)
+  where
+    chunkOf _ [] = []
+    chunkOf k ys = let (h, t) = splitAt k ys in h : chunkOf k t
+
+
+-- | Resolve the inspector concurrency cap. Honours
+-- SKY_INSTALL_PARALLEL (clamped to 1..16). Defaults to
+-- min(numProcessors, 4): more than 4 risks RAM exhaustion on
+-- Stripe-sized SDKs (each loader holds ~1.5 GB). Caps at 16 so a
+-- typo doesn't accidentally launch hundreds of workers.
+--
+-- We use GHC.getNumProcessors (physical/logical core count from
+-- the OS) rather than GHC.numCapabilities (RTS capability count,
+-- always 1 unless +RTS -N is passed). The async/QSem-based
+-- machinery doesn't need multiple capabilities — the inspector
+-- runs as N separate OS processes and our Haskell side is mostly
+-- IO-blocked waiting on them, which the runtime handles fine on
+-- a single capability via cooperative scheduling.
+resolveInstallParallelism :: IO Int
+resolveInstallParallelism = do
+    override <- System.Environment.lookupEnv "SKY_INSTALL_PARALLEL"
+    cores <- GHC.getNumProcessors
+    let defaultN = max 1 (min 4 cores)
+    case override >>= readMaybeInt of
+        Just n | n >= 1 && n <= 16 -> return n
+        _                          -> return defaultN
+  where
+    readMaybeInt s = case reads s of
+        [(n, "")] -> Just (n :: Int)
+        _         -> Nothing
+
+
+-- | Bounded-concurrency map: at most `n` workers in flight at once.
+-- Built on async + QSem so we don't take a new dep. Returns results
+-- in input order.
+mapConcurrentlyN :: Int -> (a -> IO b) -> [a] -> IO [b]
+mapConcurrentlyN n action xs = do
+    sem <- QSem.newQSem n
+    Async.mapConcurrently (\x -> Control.Exception.bracket_
+        (QSem.waitQSem sem)
+        (QSem.signalQSem sem)
+        (action x)) xs
+
+
+-- Local filterM (avoid pulling Control.Monad just for this).
+filterM :: Monad m => (a -> m Bool) -> [a] -> m [a]
+filterM _ []     = return []
+filterM p (x:xs) = do
+    keep <- p x
+    rest <- filterM p xs
+    return (if keep then x : rest else rest)
 
 
 -- | Sky compiler CLI
@@ -579,6 +706,7 @@ main = do
 data Command
     = Build FilePath
     | Run FilePath
+    | Watch Watch.WatchOpts      -- file-watch-driven rebuild + restart
     | Check FilePath
     | Fmt FmtTarget
     | Test FilePath
@@ -608,6 +736,9 @@ commandParser = subparser
         (info (Build <$> fileArg) (progDesc "Compile to binary"))
     <> command "run"
         (info (Run <$> fileArg) (progDesc "Build and run"))
+    <> command "watch"
+        (info (Watch <$> watchOptsParser)
+            (progDesc "Watch source files; rebuild + restart on change"))
     <> command "check"
         (info (Check <$> fileArg) (progDesc "Type-check only"))
     <> command "fmt"
@@ -652,6 +783,48 @@ commandParser = subparser
 
 fileArg :: Parser FilePath
 fileArg = argument str (metavar "FILE" <> value "src/Main.sky")
+
+
+-- Parser for `sky watch` flags. Defaults match
+-- Sky.Cli.Watch.defaultWatchOpts; CLI flags overlay onto them.
+watchOptsParser :: Parser Watch.WatchOpts
+watchOptsParser = build
+    <$> argument str (metavar "FILE" <> value "src/Main.sky")
+    <*> switch (long "no-run" <> help "Rebuild only; do not spawn the binary")
+    <*> switch (long "clear" <> help "Clear the screen between rebuilds")
+    <*> option auto
+            ( long "interval"
+           <> metavar "MS"
+           <> value 200
+           <> help "Poll interval in ms (default 200)"
+            )
+    <*> option auto
+            ( long "debounce"
+           <> metavar "MS"
+           <> value 150
+           <> help "Debounce window after a change in ms (default 150)"
+            )
+    <*> option auto
+            ( long "kill-timeout"
+           <> metavar "MS"
+           <> value 3000
+           <> help "Graceful SIGTERM timeout before SIGKILL (default 3000)"
+            )
+    <*> many (strOption
+            ( long "watch"
+           <> metavar "PATH"
+           <> help "Extra file or directory to watch (repeatable). Directories are walked recursively for .sky files."
+            ))
+  where
+    build entry noRun clearScreen interval debounce killTimeout extras =
+        (Watch.defaultWatchOpts entry)
+            { Watch.woNoRun         = noRun
+            , Watch.woClear         = clearScreen
+            , Watch.woPollMs        = interval
+            , Watch.woDebounceMs    = debounce
+            , Watch.woKillTimeoutMs = killTimeout
+            , Watch.woExtras        = extras
+            }
 
 
 -- Accept either `--stdin` / `-` / positional FILE. Used by `sky fmt`
@@ -800,6 +973,10 @@ runCommand cmd = case cmd of
                 putStrLn $ "Build complete, running..."
                 callProcess (outDir ++ "/" ++ Toml._binName config) []
                 return (Right ())
+
+    Watch opts -> do
+        Watch.runWatch opts
+        return (Right ())
 
     Check path -> do
         hasToml <- doesFileExist "sky.toml"

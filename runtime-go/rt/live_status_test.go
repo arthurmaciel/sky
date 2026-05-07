@@ -114,6 +114,39 @@ func TestLiveJS_ClosedReadyStateForcesReopen(t *testing.T) {
 	}
 }
 
+// TestLiveJS_SessionLossProbe asserts the session-loss-detect probe is
+// wired into the force-reopen path. Without it, a server restart with
+// the memory store (or a sky.toml [live] store change) leaves every
+// browser stuck at "Reconnecting…" forever — every reopen 404s on
+// session-not-found, every reopen attempt counts as a retry, and after
+// MaxAttempts the page sits at "offline" with no recovery short of
+// the user manually refreshing. The probe POSTs a fake Msg, reads the
+// 404 + X-Sky-Live: 1 + "session not found" body, and triggers
+// window.location.reload() to recover automatically.
+func TestLiveJS_SessionLossProbe(t *testing.T) {
+	js := liveJS("test-sid")
+	required := []string{
+		// Probe function exists and is invoked on every force-reopen.
+		`function __skyProbeSessionLost()`,
+		`__skyProbeSessionLost();`,
+		// One-shot guard so a burst of failed reopens doesn't kick off
+		// multiple reloads.
+		`var __skyProbedReload = false;`,
+		// The probe targets /_sky/event with a sentinel Msg name.
+		`"__skySessionPing"`,
+		// Body match — distinguishes session-not-found from
+		// handler-not-found (both are 404 + X-Sky-Live).
+		`indexOf("session not found")`,
+		// Reload trigger.
+		`window.location.reload();`,
+	}
+	for _, want := range required {
+		if !strings.Contains(js, want) {
+			t.Errorf("liveJS missing session-loss-probe marker: %q", want)
+		}
+	}
+}
+
 // TestLiveJS_HandshakeAndHeartbeat asserts the wedge-detection plumbing
 // is wired into the embedded init script: a hello handler, a heartbeat
 // handler, the watchdog interval, and the force-reopen path that fires

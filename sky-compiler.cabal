@@ -62,7 +62,8 @@ executable sky
     ansi-terminal >= 0.11,
     file-embed >= 0.0.15,
     template-haskell >= 2.18,
-    temporary >= 1.3
+    temporary >= 1.3,
+    unix >= 2.7
 
   autogen-modules: Paths_sky_compiler
   other-modules:
@@ -144,6 +145,9 @@ executable sky
     Sky.Sky.ModuleName
     Sky.Sky.Toml
 
+    -- CLI helpers
+    Sky.Cli.Watch
+
 
 test-suite sky-tests
   type:             exitcode-stdio-1.0
@@ -191,6 +195,7 @@ test-suite sky-tests
       Sky.Build.ConsCtorPatternSpec
       Sky.Build.CtorConsPatternSpec
       Sky.Build.EnvPrefixSpec
+      Sky.Build.FfiGenMultiSpec
       Sky.Build.TaskResultBridgesSpec
       Sky.Build.CheckIsBuildSpec
       Sky.Build.RecordFieldOrderSpec
@@ -219,3 +224,4 @@ test-suite sky-tests
     , Sky.Cli.CleanSpec
     , Sky.Cli.TestSpec
     , Sky.Cli.UpgradeClaudeSpec
+    , Sky.Cli.WatchSpec

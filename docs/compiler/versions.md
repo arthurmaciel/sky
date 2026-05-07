@@ -2,6 +2,50 @@
 
 This is a feature-level changelog covering major architectural shifts. For the line-level history see `git log`.
 
+## v0.11.x post-0 — DX (`sky watch`) + Sky.Live hot-reload + install perf (2026-05-07)
+
+A coordinated DX + perf release. None of the v0.11.0 surface changes; everything below is additive on top of it.
+
+### `sky watch` — file-watch-driven hot rebuild + restart
+
+A new top-level command: `sky watch [PATH]` polls a strict allowlist of paths (sky.toml + the entry point's directory walked recursively for `.sky` + `tests/` if it exists), debounces save bursts (default 150 ms), and re-runs the same compile pipeline as `sky build`. On success: `SIGTERM` the previously-running child, wait `--kill-timeout` ms (default 3000), `SIGKILL` if it ignores. On failure: print the build error and **keep the previously-running binary alive** — a typo halfway through a save doesn't tear down the dev session. Compile-pipeline panics (parser raising Haskell `error`) are caught at the watch boundary and treated as build failures so a single bad save can't crash the loop. SIGINT and SIGTERM both flow through a UserInterrupt async-exception handler that cleanly tears down the child without leaving zombies. Knobs: `--no-run`, `--clear`, `--interval`, `--debounce`, `--kill-timeout`, repeated `--watch=PATH` for extra paths. Spec: `test/Sky/Cli/WatchSpec.hs` (3 tests).
+
+### Sky.Live hot-reload story
+
+Four coordinated runtime fixes that make a `sky watch` rebuild actually update the browser DOM in production-like settings:
+
+1. **SSE reconnect-resync.** `handleSSE` only pushed via `sess.sseCh` (populated by `dispatch`). After a restart with persistent storage, sessions reload with `Model` but no `prevTree`/`prevBody`, and no `Msg` is firing post-restart, so the browser sat on stale OLD-view HTML even though SSE handshake completed and the banner cleared. Fix: handleSSE now re-renders the current view after `hello` and pushes the result as a full-body SSE frame on every fresh connection. Cost: one HTML body per SSE connect (~10–50 KB typical). The existing `__skyReplaceHTMLPreservingFocus` keeps the swap UX-neutral (uncontrolled inputs preserved, focused state survives).
+2. **Persist `outSeq`.** Client tracks `__skyLastAppliedSeq` and silently drops any frame with `seq <= lastAppliedSeq`. After restart the new process's `outSeq` reset to 0, so the resync push went out with `seq=1` while the client's `lastAppliedSeq` was whatever the old process climbed to (e.g. 47). Fix: persist `outSeq` on the session via `storableSession`; the new process continues monotonically. Frames stay newer across restarts.
+3. **Session-loss probe + hard reload.** With memory store (or after `sky.toml [live] store`-kind change), all sessions are gone post-restart. SSE reconnect 404s on session-not-found, force-reopen loops on the same 404 forever, page sits at "Reconnecting…" indefinitely. Fix: `handleSSE` and `handleEvent` now set `X-Sky-Live: 1` on their 404 paths so the client can distinguish a real "session gone" from a proxy-rewritten 404. The client's `__skyForceReopenSSE` fires `__skyProbeSessionLost` on every retry. The probe POSTs a fake Msg name and inspects the 404 body — `"session not found"` specifically (not "handler not found") triggers `window.location.reload()`. One-shot guard prevents burst-reload from a flurry of retries.
+4. **Open `<select>` defence in the SSE patch handler.** Native dropdowns close on any DOM mutation while open; the SSE full-body push path inherits the `__skyApplyPatches` open-select guard so a Tick subscription firing while a dropdown is open doesn't collapse it. Active user paths (sky-nav, popstate, POST text fallback) intentionally stay un-defended to avoid freezing navigation.
+
+### `sky install` — chunked-multi inspector + trimmed loader modes
+
+Three coordinated optimisations on top of the v0.11.0 install pipeline:
+
+- **Trimmed `packages.Config`** in `tools/sky-ffi-inspect/main.go`. Audited every helper (methodsOf, addPointerMethods, addInterfaceMethods, addFieldGetters, addZeroConstructor, describe, paramsOf, resultsOf, classifyEffect, implementsError) — none reads `pkg.Syntax` or `pkg.TypesInfo`. The inspector consumes go/types objects (Scope, Lookup, *Func, *Signature, *Named) that NeedTypes alone provides. Dropping `NeedSyntax | NeedTypesInfo` cuts loader work without changing output. Verified BYTE-IDENTICAL against the previous mode set on skyshop's 18-dep set (Stripe SDK + Firebase + Firestore + Google APIs + stdlib chunks).
+- **Multi-package inspector mode.** The inspector accepts N argv paths and emits a JSON ARRAY of PackageInfo objects. A single `packages.Load(roots…)` call lets Go's loader dedupe shared transitive deps across roots — when Stripe and Firestore both pull `golang.org/x/oauth2`, that package's type-checking happens once across the whole load instead of N times across N invocations. Single-arg invocation still emits a bare object for backwards compat. Per-package errors travel in the array entry's `errors` field.
+- **Chunked-multi parallelism in `regenMissingBindings`.** Split missing deps into K chunks (`K = SKY_INSTALL_PARALLEL`, default `min(numProcessors, 4)`). Run K inspector subprocesses in parallel, each in multi-mode over its chunk. Each chunk benefits from cross-pkg dedup; chunks themselves run in parallel for wall-clock speedup. Sweet spot when K matches `numProcessors / 2` (each inspector internally uses ~2 threads from Go's loader).
+- **Forward-compat fallback.** A stale in-tree `bin/sky-ffi-inspect` predating the multi-mode upgrade returns a single-pkg JSON object even when given multiple argv args. `runInspectorMulti` detects this (array decode fails + single-object decode succeeds) and falls back to a per-pkg loop. Stale dev binaries don't break `sky install`.
+
+**Skyshop benchmark** (18 Go deps including Stripe SDK + Firebase + Firestore + Google APIs, M1 Mac 8-core, warm Go module cache, cold `.skycache/ffi`):
+
+| | Wall | User CPU | Sys |
+|---|---|---|---|
+| Baseline (3-sample mean) | 67.5 s | 136.3 s | 9.6 s |
+| Optimised (3-sample mean) | 58.5 s | 112.5 s | 4.3 s |
+| Speedup | **13 %** | **17 %** | **55 %** |
+
+The hard floor: Stripe SDK master package alone takes ~53 s to type-check inside Go's loader (per-dep timing measured via inspector standalone). Below that needs Tier 2 work (usage-driven FFI generation — only emit bindings for symbols user code references), tracked separately.
+
+### Test coverage added
+
+- `test/Sky/Cli/WatchSpec.hs` — 3 specs (initial banner, edit-triggers-rebuild, broken-save-keeps-old-binary).
+- `test/Sky/Build/FfiGenMultiSpec.hs` — 5 specs (multi-mode array decode, input-order preservation, per-pkg error envelopes, single-mode object backwards compat, forward-compat fallback probe).
+- `runtime-go/rt/live_sse_handshake_test.go` — adds reconnect-resync wire test, X-Sky-Live header on the two 404 paths, session-not-found body contract.
+- `runtime-go/rt/live_status_test.go` — substring fences for the new client-side handlers (resync push consumer, session-loss probe, open-select defence in SSE).
+- `runtime-go/rt/live_store_roundtrip_test.go` — `outSeq` round-trip across the gob-encoded session boundary.
+
 ## v0.11.0 — Std.Ui (typed no-CSS layout DSL) + 5 root-cause compiler fixes + Apache 2.0 (2026-04-27)
 
 - **`Std.Ui`** — a typed, no-CSS layout DSL inspired by `mdgriffith/elm-ui`. Build a UI from typed primitives (`el` / `row` / `column` / `paragraph` / `textColumn` / `link` / `image` / `button` / `input` / `form` / `html`) and typed attributes from focused sub-modules: `Std.Ui.Background` (`color` / `image` / `linearGradient`), `Std.Ui.Border` (`color` / `width` / `widthEach` / `rounded` / `solid` / `dashed` / `dotted` / `shadow` / `glow` / `innerShadow`), `Std.Ui.Font` (`color` / `family` / `size` / `weight` / `bold` / `italic` / `underline` / `letterSpacing` / `wordSpacing`), `Std.Ui.Region` (semantic landmarks routed to `<h1..h6>` / `<main>` / `<nav>` / `<aside>` / `<footer>` + ARIA), `Std.Ui.Input` (typed form controls including `currentPassword` / `newPassword` / `radio` / `slider`), `Std.Ui.Lazy` / `Std.Ui.Keyed` / `Std.Ui.Responsive`. Renders to inline-styled HTML on the server side; Sky.Live ferries diffs to the browser. See [`docs/skyui/overview.md`](../skyui/overview.md) and [`examples/19-skyforum`](../../examples/19-skyforum) (~500 LOC, 8-module Reddit/HN-style demo).

@@ -26,6 +26,7 @@ import qualified Sky.Build.NestedPatternSpec
 import qualified Sky.Build.ConsCtorPatternSpec
 import qualified Sky.Build.CtorConsPatternSpec
 import qualified Sky.Build.EnvPrefixSpec
+import qualified Sky.Build.FfiGenMultiSpec
 import qualified Sky.Build.TaskResultBridgesSpec
 import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
@@ -53,6 +54,7 @@ import qualified Sky.Cli.FmtSpec
 import qualified Sky.Cli.CleanSpec
 import qualified Sky.Cli.TestSpec
 import qualified Sky.Cli.UpgradeClaudeSpec
+import qualified Sky.Cli.WatchSpec
 
 main :: IO ()
 main = hspec $ do
@@ -167,6 +169,11 @@ main = hspec $ do
     -- when the key is absent. Plus System.setenv / System.unsetenv
     -- stdlib helpers so users can mutate env without Go FFI.
     describe "Sky.Build.EnvPrefix"      Sky.Build.EnvPrefixSpec.spec
+    -- v0.11.x install perf: multi-package inspector mode + chunked
+    -- parallel calls. Spec asserts the JSON-array decode contract +
+    -- the empty-list fast-path that lets `sky install` skip the
+    -- inspector entirely on warm caches.
+    describe "Sky.Build.FfiGenMulti"    Sky.Build.FfiGenMultiSpec.spec
     -- Result/Task bridge helpers (Task.fromResult, Task.andThenResult,
     -- Result.andThenTask) — runtime + canonicaliser + kernel sigs gate.
     describe "Sky.Build.TaskResultBridges" Sky.Build.TaskResultBridgesSpec.spec
@@ -239,3 +246,8 @@ main = hspec $ do
     -- compiler self-upgrade and project doc, which used to leave
     -- AI assistants reading deprecated API names (e.g. `Ui.max`).
     describe "Sky.Cli.UpgradeClaude"       Sky.Cli.UpgradeClaudeSpec.spec
+    -- v0.11.x: `sky watch` file-watch + rebuild + restart loop.
+    -- Asserts the load-bearing UX promises: initial-build banner,
+    -- edit-triggers-rebuild, broken-save keeps previous binary
+    -- running (the most user-visible policy).
+    describe "Sky.Cli.Watch"               Sky.Cli.WatchSpec.spec
