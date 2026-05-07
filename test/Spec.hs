@@ -53,6 +53,7 @@ import qualified Sky.Cli.FmtSpec
 import qualified Sky.Cli.CleanSpec
 import qualified Sky.Cli.TestSpec
 import qualified Sky.Cli.UpgradeClaudeSpec
+import qualified Sky.Cli.WatchSpec
 
 main :: IO ()
 main = hspec $ do
@@ -239,3 +240,8 @@ main = hspec $ do
     -- compiler self-upgrade and project doc, which used to leave
     -- AI assistants reading deprecated API names (e.g. `Ui.max`).
     describe "Sky.Cli.UpgradeClaude"       Sky.Cli.UpgradeClaudeSpec.spec
+    -- v0.11.x: `sky watch` file-watch + rebuild + restart loop.
+    -- Asserts the load-bearing UX promises: initial-build banner,
+    -- edit-triggers-rebuild, broken-save keeps previous binary
+    -- running (the most user-visible policy).
+    describe "Sky.Cli.Watch"               Sky.Cli.WatchSpec.spec

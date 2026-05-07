@@ -39,6 +39,7 @@ import qualified Sky.Format.Format as Format
 import qualified Sky.Lsp.Server as Lsp
 import qualified Sky.Build.FfiGen as FfiGen
 import qualified Sky.Build.SkyDeps as SkyDeps
+import qualified Sky.Cli.Watch as Watch
 
 
 -- | End-to-end verification (replaces scripts/verify-examples.sh +
@@ -579,6 +580,7 @@ main = do
 data Command
     = Build FilePath
     | Run FilePath
+    | Watch Watch.WatchOpts      -- file-watch-driven rebuild + restart
     | Check FilePath
     | Fmt FmtTarget
     | Test FilePath
@@ -608,6 +610,9 @@ commandParser = subparser
         (info (Build <$> fileArg) (progDesc "Compile to binary"))
     <> command "run"
         (info (Run <$> fileArg) (progDesc "Build and run"))
+    <> command "watch"
+        (info (Watch <$> watchOptsParser)
+            (progDesc "Watch source files; rebuild + restart on change"))
     <> command "check"
         (info (Check <$> fileArg) (progDesc "Type-check only"))
     <> command "fmt"
@@ -652,6 +657,48 @@ commandParser = subparser
 
 fileArg :: Parser FilePath
 fileArg = argument str (metavar "FILE" <> value "src/Main.sky")
+
+
+-- Parser for `sky watch` flags. Defaults match
+-- Sky.Cli.Watch.defaultWatchOpts; CLI flags overlay onto them.
+watchOptsParser :: Parser Watch.WatchOpts
+watchOptsParser = build
+    <$> argument str (metavar "FILE" <> value "src/Main.sky")
+    <*> switch (long "no-run" <> help "Rebuild only; do not spawn the binary")
+    <*> switch (long "clear" <> help "Clear the screen between rebuilds")
+    <*> option auto
+            ( long "interval"
+           <> metavar "MS"
+           <> value 200
+           <> help "Poll interval in ms (default 200)"
+            )
+    <*> option auto
+            ( long "debounce"
+           <> metavar "MS"
+           <> value 150
+           <> help "Debounce window after a change in ms (default 150)"
+            )
+    <*> option auto
+            ( long "kill-timeout"
+           <> metavar "MS"
+           <> value 3000
+           <> help "Graceful SIGTERM timeout before SIGKILL (default 3000)"
+            )
+    <*> many (strOption
+            ( long "watch"
+           <> metavar "PATH"
+           <> help "Extra file or directory to watch (repeatable). Directories are walked recursively for .sky files."
+            ))
+  where
+    build entry noRun clearScreen interval debounce killTimeout extras =
+        (Watch.defaultWatchOpts entry)
+            { Watch.woNoRun         = noRun
+            , Watch.woClear         = clearScreen
+            , Watch.woPollMs        = interval
+            , Watch.woDebounceMs    = debounce
+            , Watch.woKillTimeoutMs = killTimeout
+            , Watch.woExtras        = extras
+            }
 
 
 -- Accept either `--stdin` / `-` / positional FILE. Used by `sky fmt`
@@ -800,6 +847,10 @@ runCommand cmd = case cmd of
                 putStrLn $ "Build complete, running..."
                 callProcess (outDir ++ "/" ++ Toml._binName config) []
                 return (Right ())
+
+    Watch opts -> do
+        Watch.runWatch opts
+        return (Right ())
 
     Check path -> do
         hasToml <- doesFileExist "sky.toml"

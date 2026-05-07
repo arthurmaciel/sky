@@ -650,14 +650,24 @@ func (s *redisStore) Close() error {
 
 // storableSession: gob-friendly subset of liveSession. Channels, mutexes,
 // and handlers (which contain live goroutine-dispatching closures) don't
-// round-trip, so we only persist the Model + prevTree. On Get we rebuild
-// the missing runtime bits.
+// round-trip, so we only persist the Model + the seq counters. On Get
+// we rebuild the missing runtime bits.
+//
+// OutSeq must persist: the client tracks the largest seq it has applied
+// (__skyLastAppliedSeq) and silently drops any frame with seq ≤ that.
+// Without this field, after a server restart the new process's outSeq
+// would reset to 0 and every frame would be classified stale by the
+// client — including the reconnect-resync push that's supposed to
+// refresh stale-view DOM after `sky watch` rebuilds. By persisting the
+// counter, the new process continues climbing past whatever the client
+// last saw, so resync frames register as fresh and apply.
 type storableSession struct {
 	Model    any
 	// PrevTree excluded: VNode.Events holds function values which
 	// gob can't encode. The tree is rebuilt from view(model) on
 	// restore — handleEvent already handles empty prevTree.
 	LastSeen time.Time
+	OutSeq   int64
 }
 
 func encodeSession(s *liveSession) ([]byte, error) {
@@ -681,6 +691,7 @@ func encodeSession(s *liveSession) ([]byte, error) {
 	if err := enc.Encode(storableSession{
 		Model:    s.model,
 		LastSeen: s.lastSeen,
+		OutSeq:   s.outSeq,
 	}); err != nil {
 		return nil, err
 	}
@@ -770,6 +781,7 @@ func decodeSession(blob []byte) (*liveSession, error) {
 		sseCh:     make(chan string, 16),
 		cancelSub: make(chan struct{}),
 		lastSeen:  st.LastSeen,
+		outSeq:    st.OutSeq,
 	}
 	return sess, nil
 }
