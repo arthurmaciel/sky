@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 -- | FFI binding generator — full auto, no hand-written wrappers required.
 --
 -- Architecture (mirrors the self-hosted Sky compiler's approach but adapted
@@ -36,6 +37,7 @@
 module Sky.Build.FfiGen
     ( generateBindings
     , runInspector
+    , runInspectorMulti
     , slugify
     ) where
 
@@ -119,6 +121,78 @@ runInspector pkgPath = do
                 else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
                     Left e  -> return (Left $ "sky-ffi-inspect: json: " ++ e)
                     Right p -> return (Right p)
+
+
+-- | Multi-package mode: invoke the inspector ONCE for the full pkg list.
+-- The inspector's underlying go/packages.Load(...) call dedupes shared
+-- transitive deps, so a Sky.Live app pulling Stripe SDK + Firestore +
+-- Firebase + Google APIs (~6 deps with overlapping internals like
+-- golang.org/x/oauth2, golang.org/x/net, etc.) type-checks each shared
+-- package once across the whole load instead of N times across N
+-- separate inspector invocations. For skyshop's 18 Go deps this is
+-- the dominant speedup over per-package invocation.
+--
+-- Returns one Either String PkgInfo per requested path, in input
+-- order. A whole-load failure (inspector crashed, JSON malformed)
+-- surfaces as Left for every entry. A per-package error (one bad
+-- import path) surfaces in that PkgInfo's _pkgErrors field — the
+-- other packages still load.
+--
+-- Falls back to single-mode loop when only one package is requested
+-- (avoids a JSON-array vs JSON-object decode-shape branch — the
+-- inspector emits a bare object for single-arg invocations).
+runInspectorMulti :: [String] -> IO [Either String PkgInfo]
+runInspectorMulti []        = return []
+runInspectorMulti [pkgPath] = do
+    r <- runInspector pkgPath
+    return [r]
+runInspectorMulti pkgPaths = do
+    resolved <- resolveInspector
+    case resolved of
+        Left e    -> return (map (const (Left e)) pkgPaths)
+        Right bin -> do
+            -- Quote each path defensively. Module paths can contain '/'
+            -- + alphanumerics + a few separators ('.', '-', '_'); Go's
+            -- module-path rules forbid shell metacharacters but we still
+            -- prefer single-quoting to be defensive against future
+            -- relaxations or tampered sky.toml.
+            let quoted = unwords (map (\p -> "'" ++ p ++ "'") pkgPaths)
+                cmd    = "cd sky-out && " ++ bin ++ " " ++ quoted
+            (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd] ""
+            if null out
+                then return (map (const (Left $ "sky-ffi-inspect: empty output; stderr: " ++ err)) pkgPaths)
+                else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
+                    Right (results :: [PkgInfo]) ->
+                        -- Inspector promises results in input order, but
+                        -- defend against a future regression by matching
+                        -- by _pkgPath. Missing entries → Left.
+                        let byPath = [(_pkgPath p, p) | p <- results]
+                            findFor path = case lookup path byPath of
+                                Just p  -> Right p
+                                Nothing -> Left ("sky-ffi-inspect: no result for " ++ path)
+                        in return (map findFor pkgPaths)
+                    Left _ ->
+                        -- Old (single-mode-only) inspector returns a
+                        -- bare object even when given multiple argv
+                        -- entries — it just inspects the first and
+                        -- ignores the rest. The array decode fails,
+                        -- and we'd write zero bindings. Detect that
+                        -- shape and fall back to a per-package loop
+                        -- so stale dev binaries (bin/sky-ffi-inspect
+                        -- predating the multi-mode upgrade) don't
+                        -- silently break `sky install`. The fallback
+                        -- loses the cross-pkg dedup speedup but
+                        -- keeps correctness — exactly what we want
+                        -- for graceful degradation.
+                        case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) :: Either String PkgInfo of
+                            Right _ -> do
+                                -- Single-object decode succeeded → confirms
+                                -- old single-mode inspector. Fall back.
+                                mapM runInspector pkgPaths
+                            Left e ->
+                                -- Genuinely malformed JSON. Surface the
+                                -- error per-input so the caller knows.
+                                return (map (const (Left $ "sky-ffi-inspect: json: " ++ e)) pkgPaths)
 
 
 -- | Resolve a working `sky-ffi-inspect` binary. Preference order:

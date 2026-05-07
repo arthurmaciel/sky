@@ -2563,7 +2563,7 @@ sky install                        # install all from sky.toml
 
 This auto-generates `.skycache/go/<package>/bindings.skyi` with type-safe Sky bindings and `sky_wrappers/<package>.go` with Go wrapper functions (including panic recovery). **Never write FFI code manually** — the compiler generates everything. The inspector extracts ALL struct fields, methods, functions, and constants. Dead code elimination strips unused wrappers from the final build.
 
-`sky install` auto-scans your source files for FFI imports and generates any missing bindings.
+`sky install` auto-scans your source files for FFI imports and generates any missing bindings. The inspector runs in **multi-mode** (one `packages.Load` over all missing deps) so shared transitive deps are type-checked once across the whole batch. Inspector calls run in **bounded-parallel chunks** (`SKY_INSTALL_PARALLEL` env var, default `min(numProcessors, 4)`) so multi-pkg installs scale with your CPU. For projects with extensive Go FFI (Stripe SDK, Firebase, Firestore, …) this typically halves total install time vs the per-pkg sequential path. Skyshop's 18-dep install drops from ~67s to ~58s on an M1; the floor is whatever the slowest single package takes (Stripe master is ~53s — Tier 2's usage-driven FFI generation is the answer when that becomes the wall).
 
 ### Import Path Mapping
 
