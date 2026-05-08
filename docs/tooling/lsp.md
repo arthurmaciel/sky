@@ -51,6 +51,11 @@ file-types = ["sky"]
 indent = { tab-width = 4, unit = "    " }
 auto-format = true
 formatter = { command = "sky", args = ["fmt", "--stdin" ] }
+comment-tokens = "--"
+# Ideally block-comment-tokens should be '{ start = "{-\n", end = "\n-}"}',
+# but `sky fmt` deletes the code when newlines are included.
+# TODO: fix `sky fmt` command?
+block-comment-tokens = { start = "{-", end = "-}"} 
 language-servers = ["sky-lsp"]
 
 [language-server.sky-lsp]
