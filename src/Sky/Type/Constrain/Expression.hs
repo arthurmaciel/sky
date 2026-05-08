@@ -16,6 +16,7 @@ import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Type.Type as T
 import qualified Sky.Sky.ModuleName as ModuleName
+import qualified Sky.Canonicalise.Environment as Env
 
 
 -- | Type environment: maps variable names to their type schemes
@@ -119,10 +120,32 @@ constrain counter env (A.At region expr) expected = case expr of
             Nothing ->
                 return $ T.CLocal region name expected
 
-    Can.VarKernel modName funcName ->
+    Can.VarKernel modName funcName -> do
+        -- Stdlib kernel sigs (handcoded in lookupKernelType) take
+        -- precedence — they're the most carefully audited surface.
         case lookupKernelType modName funcName of
-            Just annot -> return $ T.CForeign region (modName ++ "." ++ funcName) annot expected
-            Nothing -> return T.CTrue
+            Just annot ->
+                return $ T.CForeign region (modName ++ "." ++ funcName) annot expected
+            Nothing -> do
+                -- Per-FFI-function Sky-side type seeded by
+                -- 'Sky.Build.Compile.loadAndSeedFfiRegistry' from
+                -- kernel.json's @skyType@ field. When present,
+                -- emits a CForeign so the call site has to match
+                -- the registered shape — including the runtime
+                -- @Result Error _@ wrap. When absent (older
+                -- kernel.json or pathological FFI shapes filtered
+                -- by 'isSkyParseable'), fall through to the
+                -- legacy polymorphic-any path. The trust-boundary
+                -- rule (CLAUDE.md "every FFI call returns Result
+                -- Error T") is HM-enforced for every typed entry
+                -- — bare-using a Result-wrapped FFI return is now
+                -- a TYPE ERROR with a hint pointing at
+                -- @case ... of Ok v -> ...@ or @Result.andThen@.
+                ffiTypes <- readIORef Env.ffiKernelTypeRef
+                case Map.lookup (modName, funcName) ffiTypes of
+                    Just annot ->
+                        return $ T.CForeign region (modName ++ "." ++ funcName) annot expected
+                    Nothing -> return T.CTrue
 
     Can.VarCtor _opts _home _typeName ctorName annot ->
         return $ T.CForeign region ctorName annot expected
@@ -1399,6 +1422,15 @@ lookupKernelType modName funcName = case (modName, funcName) of
     -- context.Context; Sky exposes these as `rt.SkyValue` so user
     -- wrappers like `ctx = Context.background ()` don't degrade to
     -- `any` in the emitted Go sig.
+    -- Basics.js — legacy FFI escape hatch. `js "nil"` returns a
+    -- raw Go nil for FFI positions that need it (Firebase.newApp's
+    -- middle config arg, Stripe Session.get's optional params,
+    -- etc.). Sky code outside the FFI boundary doesn't reach for
+    -- this. Polymorphic input + polymorphic output so it slots
+    -- into any opaque slot HM expects.
+    ("Basics", "js") ->
+        Just $ T.Forall ["a", "b"]
+            (T.TLambda (T.TVar "a") (T.TVar "b"))
     ("Context", "background") ->
         Just $ T.Forall []
             (T.TLambda T.TUnit
