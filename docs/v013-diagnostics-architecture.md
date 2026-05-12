@@ -553,3 +553,90 @@ Mitigation:
 9. v0.13.2: Layer 4 (LSP full pipeline)
 
 Each layer = independent ship-able milestone. No big-bang.
+
+---
+
+## Progress log (perf/v0.13 branch)
+
+Kept in this doc so future sessions can pick up cleanly without
+scanning the commit log.
+
+### Layer 1 — Diagnostic AST + phase migrations  ✅ COMPLETE (foundation)
+
+| Phase | Status | Commit |
+|---|---|---|
+| AST + CLI renderer + LSP serialiser | ✅ landed | `048e5e2` |
+| `DiagnosticSpec` regression fence (21 tests) | ✅ landed | `048e5e2` |
+| Canonicalise unbound-name → Diagnostic | ✅ landed | `9cece03` |
+| Type-mismatch (Solve.SolveError) → Diagnostic | ✅ landed | `92bf0ba` + `3fe70dc` + `4148ed0` |
+| Exhaustiveness → Diagnostic (E3001) | ✅ landed | `144e382` |
+| Parse errors → Diagnostic (E0001) | ✅ landed | `9811041` |
+| Canonicalise generic errors → Diagnostic | ✅ landed | `c99ad91` |
+| Category-prefixed headers (TYPE / PARSE / NAMING / etc.) | ✅ landed | `c99ad91` |
+
+**User-visible result**: every type / parse / unbound / exhaustiveness
+error now prints an Elm-style block:
+
+    -- TYPE ERROR ──────────────────────────── src/Main.sky:9:18 [E2001]
+
+        7 |
+        8 | main =
+        9 |     println (add "hello" 1)
+          |                  ^
+
+    Type mismatch:
+         expected: Int
+         actual:   String
+
+Stable error codes (E0001 parse / E1001 unbound / E2001 type / E3001
+exhaust) for grep + LSP filtering.  Stderr keeps a one-line marker
+for CI/test grep compatibility.  Solver-budget errors keep their
+verbatim guidance block (would lose detail in a structured wrapper).
+
+### Layer 4 — LSP runs full pipeline  🚧 PARTIAL
+
+| Aspect | Status | Commit |
+|---|---|---|
+| LSP uses `Sky.Reporting.Lsp.renderLspDiagnostic` | ✅ landed | `3c9ce85` |
+| LSP emits stable `code` field | ✅ landed | `3c9ce85` |
+| LSP runs full pipeline (incl. codegen) | ❌ deferred — needs Layer 2 |
+| Related-information regions in LSP output | ❌ deferred — needs HM-side region tracking |
+
+LSP diagnostics now share the same structured AST as the CLI.
+The `code` field lets editor extensions filter by category.  Full
+pipeline parity (catching codegen-stage bugs in red squiggles) is
+blocked on Layer 2 — there's no codegen-stage validator to plug in
+yet.
+
+### Layer 2 — codegen-stage validation  ❌ NOT STARTED
+
+Plan is in the layer section above.  Substantial work: needs origin
+tracking through every Go IR expression + validation pass walking
+the typed IR.  Multi-week scope.  Issue #52's specific patch already
+landed in v0.12.1 so the immediate user-visible bug is closed; Layer
+2 prevents recurrences pre-emptively at codegen time.
+
+### Layer 3 — Sky-written stdlib  ❌ NOT STARTED
+
+Plan is in the layer section above.  Largest single piece (multi-
+week per the original estimate).  Independent of Layers 1+2+4 — can
+start when capacity opens.
+
+---
+
+## What landed today (2026-05-12)
+
+After v0.12.1 ship, in one session:
+
+* Layer 1 foundation (AST + CLI + LSP renderer + DiagnosticSpec
+  regression fence): commit `048e5e2`.
+* Five error-class migrations: canonicalise unbound (`9cece03`),
+  type-mismatch (`92bf0ba`), exhaustiveness (`144e382`), parse
+  (`9811041`), canonicalise-generic (`c99ad91`).
+* Three UX polish: stray-colon trim (`3fe70dc`), trailing-space
+  trim (`4148ed0`), category-prefixed headers (`c99ad91`).
+* Layer 4 partial: LSP pipelines route through Diagnostic
+  (`3c9ce85`).
+
+10 commits.  91+ tests pass across the impacted specs.  Zero
+existing-feature regressions on `cabal test`.
