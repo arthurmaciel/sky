@@ -437,7 +437,20 @@ solveHelpBody state constraint = case constraint of
                 at <- variableToType actualVar
                 et <- variableToType expectedVar
                 let hint = resultMismatchHint at et
-                return (Just $ posPrefix region ++ "Type mismatch: " ++ showType at ++ " vs " ++ showType et ++ " (from: " ++ showType actualType ++ " vs " ++ showExpected expected ++ ")" ++ hint, state)
+                    -- Smart diff for record-vs-record mismatches: if
+                    -- both sides are records that share most fields,
+                    -- show only the DIFFERING ones. Without this,
+                    -- error messages on TEA cfg shapes (Live.app's
+                    -- 6-field cfg) were unreadable walls of text.
+                    (diffSummary, isDiff) = renderTypeMismatchTagged at et
+                    -- Drop the `(from: ... vs ...)` trailer when we
+                    -- already gave a field-level diff — it adds noise
+                    -- without helping the user.
+                    trailer
+                        | isDiff = ""
+                        | otherwise = " (from: " ++ showType actualType
+                                   ++ " vs " ++ showExpected expected ++ ")"
+                return (Just $ posPrefix region ++ "Type mismatch: " ++ diffSummary ++ trailer ++ hint, state)
 
     T.CLocal region name expected -> do
         case Map.lookup name (_env state) of
@@ -660,6 +673,97 @@ showType ty = showTypeR (renameVars ty)
 -- two hovers doesn't see t108 as 'a' here and 'b' there.
 showTypeWith :: Map.Map String String -> T.Type -> String
 showTypeWith rename ty = showTypeR (substVar (\n -> Map.findWithDefault n n rename) ty)
+
+
+-- | Render a type-mismatch summary. When both sides are records that
+-- share most fields (typical of TEA cfg shapes like Live.app's
+-- `{init, update, view, subscriptions, routes, notFound}`), show
+-- only the DIFFERING fields so the user can see the bug at a glance:
+--
+--   Type mismatch in field `update`:
+--     expected: Msg -> { i : Int, n : Int } -> ...
+--     actual:   Msg -> { i : Int, n : String } -> ...
+--
+-- Falls back to "<actual> vs <expected>" for non-record or single-
+-- field mismatches.
+renderTypeMismatch :: T.Type -> T.Type -> String
+renderTypeMismatch a e = fst (renderTypeMismatchTagged a e)
+
+
+-- | Like renderTypeMismatch but also reports whether the result is a
+-- field-level diff (True) or a full type pair (False). Callers use
+-- the tag to decide whether to suppress the `(from: ...)` trailer.
+renderTypeMismatchTagged :: T.Type -> T.Type -> (String, Bool)
+renderTypeMismatchTagged actual expected =
+    let renamed = renameVars (T.TTuple actual expected [])
+    in case renamed of
+        T.TTuple a e _ -> case (a, e) of
+            (T.TRecord af _, T.TRecord ef _) ->
+                let diffFields = recordFieldDiff af ef
+                in case diffFields of
+                    -- Exactly one differing field — show it inline.
+                    [(name, aty, ety)] ->
+                        ( "field `" ++ name ++ "`:\n" ++
+                          "     expected: " ++ showTypeR ety ++ "\n" ++
+                          "     actual:   " ++ showTypeR aty
+                        , True )
+                    -- Multiple — list them all.
+                    diffs | not (null diffs) && length diffs <= 4 ->
+                        ( "in " ++ show (length diffs) ++ " field(s):\n" ++
+                          concatMap (\(name, aty, ety) ->
+                              "     " ++ name ++ ":\n" ++
+                              "       expected: " ++ showTypeR ety ++ "\n" ++
+                              "       actual:   " ++ showTypeR aty ++ "\n")
+                              diffs
+                        , True )
+                    -- Falling back: too many differing fields, render
+                    -- the full pair with the existing record helper.
+                    _ -> (showTypeR a ++ " vs " ++ showTypeR e, False)
+            _ -> (showTypeR a ++ " vs " ++ showTypeR e, False)
+        _ -> (showTypeR actual ++ " vs " ++ showTypeR expected, False)
+
+
+-- | Diff two record field maps. Returns (name, actualType,
+-- expectedType) tuples for fields that DIFFER (present on both sides
+-- with different types) or are MISSING from one side. Same-typed
+-- fields are dropped — they don't help the user understand the bug.
+recordFieldDiff :: Map.Map String T.FieldType -> Map.Map String T.FieldType
+                -> [(String, T.Type, T.Type)]
+recordFieldDiff af ef =
+    let allKeys = List.sort (List.nub (Map.keys af ++ Map.keys ef))
+        diffOne k = case (Map.lookup k af, Map.lookup k ef) of
+            (Just (T.FieldType _ at), Just (T.FieldType _ et))
+                | typeStructEq at et -> Nothing
+                | otherwise          -> Just (k, at, et)
+            (Just (T.FieldType _ at), Nothing) -> Just (k, at, T.TVar "<missing>")
+            (Nothing, Just (T.FieldType _ et)) -> Just (k, T.TVar "<missing>", et)
+            (Nothing, Nothing) -> Nothing
+    in [d | Just d <- map diffOne allKeys]
+
+
+-- | Structural type equality at the rendering layer (ignores TVar
+-- naming differences after our renaming pass — bare TVars unify
+-- with anything in HM, so they're not a useful "difference" signal
+-- for users reading error messages).
+typeStructEq :: T.Type -> T.Type -> Bool
+typeStructEq (T.TVar _) (T.TVar _) = True
+typeStructEq T.TUnit T.TUnit = True
+typeStructEq (T.TType _ n1 a1) (T.TType _ n2 a2) =
+    n1 == n2 && length a1 == length a2 && and (zipWith typeStructEq a1 a2)
+typeStructEq (T.TLambda f1 t1) (T.TLambda f2 t2) =
+    typeStructEq f1 f2 && typeStructEq t1 t2
+typeStructEq (T.TRecord f1 _) (T.TRecord f2 _) =
+    Map.keysSet f1 == Map.keysSet f2
+    && and [ case (Map.lookup k f1, Map.lookup k f2) of
+                (Just (T.FieldType _ t1), Just (T.FieldType _ t2)) ->
+                    typeStructEq t1 t2
+                _ -> False
+           | k <- Map.keys f1 ]
+typeStructEq (T.TTuple a1 b1 cs1) (T.TTuple a2 b2 cs2) =
+    typeStructEq a1 a2 && typeStructEq b1 b2
+    && length cs1 == length cs2 && and (zipWith typeStructEq cs1 cs2)
+typeStructEq (T.TAlias _ n1 _ _) (T.TAlias _ n2 _ _) = n1 == n2
+typeStructEq _ _ = False
 
 -- | Build a stable per-module renaming from all types that will be
 -- displayed (top-level function signatures + local binding types
