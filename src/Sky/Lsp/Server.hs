@@ -58,6 +58,7 @@ import qualified Sky.AST.Source as Src
 import qualified Sky.Sky.ModuleName as ModuleName
 import System.Timeout (timeout)
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Diagnostic as Diag
 import qualified Sky.Reporting.Lsp as LspR
 import qualified Sky.Format.Format as Fmt
 import qualified Sky.Lsp.Index as Idx
@@ -1263,20 +1264,20 @@ isLikelyExternalsFalsePositive err =
     tails xs@(_:rest) = xs : tails rest
 
 
--- | Convert an exhaustiveness diagnostic into an LSP diagnostic. The
--- region is the case-expression region carried by the `Diag`.
+-- | Convert an exhaustiveness diagnostic into an LSP diagnostic.
+-- v0.13 Layer 4: routes through the structured Diagnostic AST so
+-- the LSP wire shape (stable [E3001] code, source="sky") matches
+-- the CLI's.  Pre-v0.13 this built the JSON envelope inline via
+-- `mkDiagnostic`.
 exhaustDiagnostic :: Exhaust.Diag -> A.Value
 exhaustDiagnostic (Exhaust.Diag region missing hint) =
-    let A.Region (A.Position r1 c1) (A.Position r2 c2) = region
-        line1 = max 0 (r1 - 1)
-        col1  = max 0 (c1 - 1)
-        line2 = max 0 (r2 - 1)
-        col2  = max 0 (c2 - 1)
-        msg = case missing of
-            [] -> hint
-            _  -> "Non-exhaustive patterns: " ++ hint
-                ++ " (missing: " ++ listWithCommas missing ++ ")"
-    in mkDiagnostic line1 col1 line2 col2 msg 1
+    let body = "Non-exhaustive case expression. Missing pattern(s): "
+            ++ listWithCommas missing
+        diag = Diag.withHint hint
+                 (Diag.mkError "<buffer>" region
+                    Diag.CatExhaustiveness Diag.exhaustE_NonExhaustive
+                    body)
+    in LspR.renderLspDiagnostic diag
   where
     listWithCommas [] = ""
     listWithCommas [x] = x
