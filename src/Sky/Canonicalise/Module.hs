@@ -3,6 +3,8 @@
 module Sky.Canonicalise.Module
     ( canonicalise
     , canonicaliseWithDeps
+    , canonicaliseWithDiagnostics
+    , collectUnboundDiagnostics
     , DepInfo(..)
     )
     where
@@ -14,6 +16,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import qualified Sky.AST.Source as Src
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Diagnostic as Diag
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Canonicalise.Environment as Env
 import qualified Sky.Canonicalise.Expression as CanExpr
@@ -60,6 +63,75 @@ canonicalise = canonicaliseWithDeps Map.empty
 -- (by module path string). The deps contribute their exported constructors
 -- to the importer's environment when the importer uses `exposing (..)` or
 -- `exposing (Type(..))`.
+-- | v0.13 Layer 1: Diagnostic-producing canonicalise entry point.
+--
+-- Same logic as canonicaliseWithDeps but returns structured
+-- `[Diagnostic]` on failure (instead of a String). Caller decides
+-- whether to render via CLI or LSP serialiser.
+--
+-- The `filePath` arg is the source file path used to populate each
+-- Diagnostic's `_diag_file` field. Callers that don't have a path
+-- (LSP single-file mode) can pass "<unknown>" — the renderer falls
+-- back gracefully when the file doesn't exist on disk.
+--
+-- Currently covers ONLY the unbound-name diagnostic class. Other
+-- canonicalise error classes (import-hiding, collisions) still go
+-- through the legacy String path — they migrate in subsequent Layer 1
+-- phases. The two paths share the same env-building logic; this
+-- function differs only in error rendering.
+canonicaliseWithDiagnostics
+    :: FilePath
+    -> Map.Map String DepInfo
+    -> Src.Module
+    -> Either [Diag.Diagnostic] Can.Module
+canonicaliseWithDiagnostics path deps srcMod =
+    -- Delegate to canonicaliseWithDeps; convert its String error to
+    -- a Diagnostic at the boundary. As more canonicalise error
+    -- classes migrate (unbound has a typed Diagnostic; import-hiding
+    -- and collision diagnostics get migrated in subsequent Layer 1
+    -- phases), this wrapper shrinks.
+    case canonicaliseWithDeps deps srcMod of
+        Right canMod -> Right canMod
+        Left err     -> Left [legacyToDiag path err]
+
+
+-- | Lift a legacy String error into a Diagnostic for back-compat
+-- during the Layer 1 migration. Generic category; specific
+-- diagnostic codes get assigned as each error class is migrated.
+legacyToDiag :: FilePath -> String -> Diag.Diagnostic
+legacyToDiag path msg =
+    let -- Try to extract a leading "LINE:COL:" from the legacy
+        -- format; otherwise use a synthetic region at line 1 col 1.
+        region = case parseLeadingLineCol msg of
+            Just (l, c) -> A.Region (A.Position l c) (A.Position l c)
+            Nothing     -> A.Region (A.Position 1 1) (A.Position 1 1)
+    in Diag.mkError path region Diag.CatCanonical
+        Diag.canonE_UndefinedName  -- generic placeholder until full migration
+        (stripLeadingLineCol msg)
+
+
+parseLeadingLineCol :: String -> Maybe (Int, Int)
+parseLeadingLineCol s =
+    case break (== ':') s of
+        (lineStr, ':':rest)
+          | not (null lineStr), all (\c -> c >= '0' && c <= '9') lineStr ->
+            case break (== ':') rest of
+                (colStr, _)
+                  | not (null colStr), all (\c -> c >= '0' && c <= '9') colStr ->
+                    Just (read lineStr, read colStr)
+                _ -> Nothing
+        _ -> Nothing
+
+
+stripLeadingLineCol :: String -> String
+stripLeadingLineCol s =
+    case parseLeadingLineCol s of
+        Just _ -> drop 1 (dropWhile (/= ' ') (dropWhile (== ' ') (afterColon (afterColon s))))
+        Nothing -> s
+  where
+    afterColon = drop 1 . dropWhile (/= ':')
+
+
 canonicaliseWithDeps :: Map.Map String DepInfo -> Src.Module -> Either String Can.Module
 canonicaliseWithDeps deps srcMod =
     let
@@ -648,21 +720,62 @@ collectUnboundNameErrors env srcMod =
         unbound = [ (n, reg) | (n, reg) <- allRefs, not (isBound n) ]
 
         formatOne (n, A.Region (A.Position r c) _) =
-            "Line " ++ show r ++ ", column " ++ show c
+            show r ++ ":" ++ show c
                 ++ ": Undefined name: " ++ n
                 ++ "\n    I cannot find a `" ++ n
                 ++ "` in scope. Check for a typo, or add an import that exposes this name."
     in
-        map formatOne (dedupeByName unbound)
-  where
-    -- If `foo` is used 12 times and all 12 are unbound, report only the
-    -- first. Prevents a 12-line wall of the same message.
-    dedupeByName :: [(String, A.Region)] -> [(String, A.Region)]
-    dedupeByName xs =
-        let step (seen, acc) (n, reg)
-                | Set.member n seen = (seen, acc)
-                | otherwise         = (Set.insert n seen, (n, reg) : acc)
-        in reverse (snd (foldl step (Set.empty, []) xs))
+        map formatOne (dedupeByNameTop unbound)
+
+
+-- | v0.13 Layer 1 migration: collect unbound-name errors as
+-- structured `Diagnostic` values instead of formatted strings.
+--
+-- Same dedupe behaviour as `collectUnboundNameErrors`. Caller
+-- decides whether to render via the CLI or LSP serialiser.
+collectUnboundDiagnostics :: FilePath -> Env.Env -> Src.Module -> [Diag.Diagnostic]
+collectUnboundDiagnostics path env srcMod =
+    let
+        isBound n =
+               Map.member n (Env._vars env)
+            || Map.member n (Env._ctors env)
+
+        collect (A.At _ v) =
+            let pats     = Src._valuePatterns v
+                body     = Src._valueBody v
+                shadowed = Set.fromList (concatMap patternNames pats)
+            in collectUnqualExprRegions shadowed body
+
+        allRefs = concatMap collect (Src._values srcMod)
+        unbound = [ (n, reg) | (n, reg) <- allRefs, not (isBound n) ]
+
+        mkDiag (n, reg) =
+            Diag.mkError path reg Diag.CatCanonical Diag.canonE_UndefinedName
+                ("Undefined name: " ++ n)
+            & Diag.withHint ("I cannot find a `" ++ n
+                          ++ "` in scope. Check for a typo, or add"
+                          ++ " an import that exposes this name.")
+    in
+        map mkDiag (dedupeByNameTop unbound)
+
+
+-- | Reverse-application operator (`&`), used by the new Diagnostic-
+-- producing path. Kept at module top-level so both legacy and new
+-- collectors can use it.
+(&) :: a -> (a -> b) -> b
+x & f = f x
+infixl 1 &
+
+
+-- | Module-local dedupe used by both the legacy String collector and
+-- the new Diagnostic collector. If `foo` is used 12 times and all 12
+-- are unbound, report only the first. Prevents a 12-line wall.
+dedupeByNameTop :: [(String, A.Region)] -> [(String, A.Region)]
+dedupeByNameTop xs =
+    let step (seen, acc) (n, reg)
+            | Set.member n seen = (seen, acc)
+            | otherwise         = (Set.insert n seen, (n, reg) : acc)
+    in reverse (snd (foldl step (Set.empty, []) xs))
 
 
 -- | Same as collectUnqualExpr but also records each reference's source region.
