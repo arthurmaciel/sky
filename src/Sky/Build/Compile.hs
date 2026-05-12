@@ -31,6 +31,7 @@ import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Reporting.Diagnostic as Diag
 import qualified Sky.Reporting.Render as Render
+import qualified Sky.Build.Validator as Validator
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Parse.Module as Parse
 import qualified Sky.Canonicalise.Module as Canonicalise
@@ -803,32 +804,65 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                                  []    -> T.TVar "_unresolved"
                                         _   -> T.TVar "_ambig"
                         in Map.mapWithKey resolveKey keyToTypes
-                    goCode = generateGoMulti canMod entrySrcMod config typesWithDeps depDecls depRecAliases depUnionNames depArities depParamTypes depRetTypes depInferredParams depInferredRets depInferredSigs depAliasPairs
+                    goCodeRaw = generateGoMulti canMod entrySrcMod config typesWithDeps depDecls depRecAliases depUnionNames depArities depParamTypes depRetTypes depInferredParams depInferredRets depInferredSigs depAliasPairs
+                    -- v0.13 Layer 2: collect Sky-name → source-region
+                    -- for every top-level declaration so the post-emit
+                    -- pass can inject `// SKY-ORIGIN: <path>:<line>:<col>`
+                    -- comments next to the matching Go function decl.
+                    -- The validator + `go build` error refiner consult
+                    -- the resulting OriginMap to map Go-line errors back
+                    -- to Sky source.
+                    declOriginMap = collectDeclOrigins entryPath canMod
+                    goCode = Validator.injectOriginComments
+                                declOriginMap goCodeRaw
                 createDirectoryIfMissing True outDir
                 let mainGoPath = outDir </> "main.go"
                 writeFile mainGoPath goCode
                 putStrLn $ "   Wrote " ++ mainGoPath
-                -- copyRuntime also copies runtime-go/go.mod + go.sum into outDir
-                -- when it can locate the runtime. Only fall back to a minimal
-                -- go.mod here if copyRuntime didn't write one (no runtime found).
-                copyRuntime outDir
-                hasOutMod <- doesFileExist (outDir </> "go.mod")
-                if not hasOutMod
-                    then writeFile (outDir </> "go.mod") $ unlines ["module sky-app", "", "go 1.21"]
-                    else return ()
-                -- Pull in Go deps declared in sky.toml so generated ffi/*_bindings.go
-                -- can resolve imports.
-                seedGoDependencies outDir (Toml._goDeps config)
-                -- P7: strip unreferenced FFI wrappers from sky-out/rt/*_bindings.go.
-                -- This eliminates tens of thousands of any/any wrapper bodies
-                -- the user code never calls (stripe alone contributes 74k).
-                dceFfiWrappers outDir
-                -- Write cache hash to enable incremental rebuild skip
-                let cacheDir = ".skycache"
-                createDirectoryIfMissing True cacheDir
-                writeFile (cacheDir </> "source.hash") srcHash
-                putStrLn "Compilation successful"
-                return (Right mainGoPath)
+                -- v0.13 Layer 2: codegen-stage validator runs after
+                -- writing main.go but before any downstream tooling
+                -- (DCE / go build).  It scans the emitted Go for
+                -- known-bad shapes (typed-kernel call with raw any
+                -- arg, etc.) and emits a structured Diagnostic with
+                -- a Sky-source region if the bug shape is found.
+                -- This gives "if it compiles, it works" defence in
+                -- depth — even if a new codegen regression slips
+                -- past the cabal tests, the validator catches it
+                -- pre-build and prints an actionable Diagnostic
+                -- instead of a cryptic `go build` error.
+                let originMap = Validator.parseOriginComments goCode
+                    valDiags  = Validator.validateEmittedGo
+                                  mainGoPath originMap goCode
+                if not (null valDiags)
+                  then do
+                      rendered <- Render.renderCliMany valDiags
+                      putStrLn rendered
+                      removeStaleBuildOutput outDir (Toml._binName config)
+                      return (Left "Codegen validation rejected the emitted Go")
+                  else do
+                      -- copyRuntime also copies runtime-go/go.mod + go.sum into
+                      -- outDir when it can locate the runtime. Only fall back
+                      -- to a minimal go.mod here if copyRuntime didn't write
+                      -- one (no runtime found).
+                      copyRuntime outDir
+                      hasOutMod <- doesFileExist (outDir </> "go.mod")
+                      if not hasOutMod
+                          then writeFile (outDir </> "go.mod") $ unlines ["module sky-app", "", "go 1.21"]
+                          else return ()
+                      -- Pull in Go deps declared in sky.toml so generated
+                      -- ffi/*_bindings.go can resolve imports.
+                      seedGoDependencies outDir (Toml._goDeps config)
+                      -- P7: strip unreferenced FFI wrappers from
+                      -- sky-out/rt/*_bindings.go.  Tens of thousands of
+                      -- any/any wrapper bodies user code never calls
+                      -- (stripe alone contributes 74k).
+                      dceFfiWrappers outDir
+                      -- Write cache hash to enable incremental rebuild skip
+                      let cacheDir = ".skycache"
+                      createDirectoryIfMissing True cacheDir
+                      writeFile (cacheDir </> "source.hash") srcHash
+                      putStrLn "Compilation successful"
+                      return (Right mainGoPath)
 
 
 -- LEGACY: single-module parse entry (no longer used from compile)
@@ -906,6 +940,35 @@ parseSingle config entryPath outDir = do
 -- accidentally execute outdated code. Issue #52: a build that hits
 -- a TYPE ERROR used to leave the previous successful binary in place,
 -- which let users miss the error and run stale output.
+-- | v0.13 Layer 2: collect a Sky-name → (path, line, col) map
+-- from a canonical module's top-level declarations.  The map is
+-- used by `Validator.injectOriginComments` to seed SKY-ORIGIN
+-- comments into the emitted Go output.
+--
+-- Key choice: the EMITTED Go function name.  For most entry-module
+-- decls this is the bare Sky name (`update`, `view`).  Auto-record
+-- constructors share the type-alias name (`Model_R` for the struct,
+-- `Model` for the ctor).  We register both forms so the injector
+-- finds the match regardless of which side `func` it lands on.
+collectDeclOrigins :: FilePath -> Can.Module -> Map.Map String (FilePath, Int, Int)
+collectDeclOrigins path canMod =
+    let defs = collectDefs (Can._decls canMod)
+        decls = mapMaybe (\d -> case d of
+            Can.Def     (A.At reg name) _ _     -> Just (name, regionStart reg)
+            Can.TypedDef (A.At reg name) _ _ _ _ -> Just (name, regionStart reg)
+            Can.DestructDef _ _                  -> Nothing) defs
+    in Map.fromList
+        [ (name, (path, line, col))
+        | (name, (line, col)) <- decls ]
+  where
+    collectDefs :: Can.Decls -> [Can.Def]
+    collectDefs (Can.Declare d rest)     = d : collectDefs rest
+    collectDefs (Can.DeclareRec d ds rest) = d : ds ++ collectDefs rest
+    collectDefs Can.SaveTheEnvironment   = []
+
+    regionStart (A.Region (A.Position l c) _) = (l, c)
+
+
 removeStaleBuildOutput :: FilePath -> String -> IO ()
 removeStaleBuildOutput outDir binName = do
     let mainPath = outDir </> "main.go"

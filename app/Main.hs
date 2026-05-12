@@ -39,6 +39,8 @@ import qualified Sky.Format.Format as Format
 import qualified Sky.Lsp.Server as Lsp
 import qualified Sky.Build.FfiGen as FfiGen
 import qualified Sky.Build.SkyDeps as SkyDeps
+import qualified Sky.Build.Validator as Validator
+import qualified Sky.Reporting.Render as Render
 import qualified Sky.Cli.Watch as Watch
 
 import qualified Control.Concurrent.Async as Async
@@ -1837,18 +1839,45 @@ runGoBuildWithDiagnostics outDir binName _goPath = do
     case ec of
         System.Exit.ExitSuccess -> return ()
         System.Exit.ExitFailure _ -> do
-            -- Print stderr unchanged so the user sees what Go said.
-            hPutStr stderr berr
-            -- Detect known compiler-bug patterns and prepend a Sky note.
-            when (isCompilerBugPattern berr) $ do
-                hPutStrLn stderr ""
-                hPutStrLn stderr "─────────────────────────────────────────────────"
-                hPutStrLn stderr "Sky compiler bug detected (go build rejected our"
-                hPutStrLn stderr "generated code). The Sky type system accepted this"
-                hPutStrLn stderr "program; codegen produced incompatible Go. Please"
-                hPutStrLn stderr "file an issue at https://github.com/anzellai/sky/issues"
-                hPutStrLn stderr "with the source + the Go error above."
-                hPutStrLn stderr "─────────────────────────────────────────────────"
+            -- v0.13 Layer 2: when go build fails, parse the Go
+            -- error and try to map it back to Sky source via the
+            -- SKY-ORIGIN comments in main.go.  If we can resolve,
+            -- render a structured Diagnostic with code [E5001]
+            -- (go build rejected codegen output) instead of just
+            -- dumping the raw Go error to stderr.
+            let mainGoPath = outDir System.FilePath.</> "main.go"
+            mainGoExists <- doesFileExist mainGoPath
+            rendered <- if mainGoExists
+                then do
+                    goSrc <- readFile mainGoPath
+                    let originMap = Validator.parseOriginComments goSrc
+                        loc = Validator.parseGoBuildError berr
+                    case loc >>= Validator.resolveGoErrorToSky originMap of
+                        Just diag -> do
+                            r <- Render.renderCli diag
+                            return (Just r)
+                        Nothing -> return Nothing
+                else return Nothing
+            case rendered of
+                Just r -> do
+                    putStrLn r
+                    -- Keep the raw Go error too so contributors
+                    -- can copy-paste it when filing an issue.
+                    hPutStrLn stderr ""
+                    hPutStrLn stderr "Raw `go build` output for reference:"
+                    hPutStr stderr berr
+                Nothing -> do
+                    -- Fallback: pre-v0.13 behaviour.
+                    hPutStr stderr berr
+                    when (isCompilerBugPattern berr) $ do
+                        hPutStrLn stderr ""
+                        hPutStrLn stderr "─────────────────────────────────────────────────"
+                        hPutStrLn stderr "Sky compiler bug detected (go build rejected our"
+                        hPutStrLn stderr "generated code). The Sky type system accepted this"
+                        hPutStrLn stderr "program; codegen produced incompatible Go. Please"
+                        hPutStrLn stderr "file an issue at https://github.com/anzellai/sky/issues"
+                        hPutStrLn stderr "with the source + the Go error above."
+                        hPutStrLn stderr "─────────────────────────────────────────────────"
             System.Exit.exitWith ec
 
 

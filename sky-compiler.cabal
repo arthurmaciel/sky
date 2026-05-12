@@ -148,6 +148,7 @@ executable sky
     Sky.Build.FfiTypeParser
     Sky.Build.FfiTypeResolve
     Sky.Build.SkyDeps
+    Sky.Build.Validator
 
     -- Reporting
     Sky.Reporting.Annotation
@@ -183,6 +184,7 @@ test-suite sky-tests
     , directory >= 1.3
     , filepath >= 1.4
     , bytestring >= 0.11
+    , containers >= 0.6
     , text >= 1.2
     , temporary >= 1.3
     , aeson >= 2.0
@@ -190,6 +192,7 @@ test-suite sky-tests
     , time >= 1.9
 
   other-modules:
+      Sky.Build.Validator
       Sky.Build.CompileSpec
       Sky.Build.DepHmFatalSpec
       Sky.Build.ExampleSweepSpec
@@ -223,6 +226,7 @@ test-suite sky-tests
       Sky.Build.RecordCtorEmptyListSpec
       Sky.Build.HofTypedMsgSpec
       Sky.Build.Issue52Spec
+      Sky.Build.ValidatorSpec
       Sky.Reporting.DiagnosticSpec
       Sky.Build.KernelSigCoverageSpec
       Sky.Build.HeapBoundedHmSpec

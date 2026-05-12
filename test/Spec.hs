@@ -34,6 +34,7 @@ import qualified Sky.Build.RecordFieldOrderSpec
 import qualified Sky.Build.RecordCtorEmptyListSpec
 import qualified Sky.Build.HofTypedMsgSpec
 import qualified Sky.Build.Issue52Spec
+import qualified Sky.Build.ValidatorSpec
 import qualified Sky.Reporting.DiagnosticSpec
 import qualified Sky.Build.KernelSigCoverageSpec
 import qualified Sky.Build.HeapBoundedHmSpec
@@ -211,6 +212,11 @@ main = hspec $ do
     -- against the existing field type. Both used to slip past Sky
     -- and surface as cryptic Go-build / runtime panics.
     describe "Sky.Build.Issue52"             Sky.Build.Issue52Spec.spec
+    -- v0.13 Layer 2: codegen-stage validator regression fence.
+    -- Pins the typed-kernel-any-arg detector + the SKY-ORIGIN
+    -- comment parser + the go-build error → Sky-region mapper.
+    -- Fires BEFORE go build when a known-bad shape is emitted.
+    describe "Sky.Build.Validator"           Sky.Build.ValidatorSpec.spec
     -- v0.13 Layer 1: structured Diagnostic AST + CLI/LSP renderers.
     -- Locks the AST shape, the diagnostic code registry, and the
     -- renderer output for all consumers (CLI, LSP, future docgen).
