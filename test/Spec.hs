@@ -36,6 +36,7 @@ import qualified Sky.Build.HofTypedMsgSpec
 import qualified Sky.Build.Issue52Spec
 import qualified Sky.Build.ValidatorSpec
 import qualified Sky.Reporting.DiagnosticSpec
+import qualified Sky.Diagnostics.CoverageSpec
 import qualified Sky.Build.KernelSigCoverageSpec
 import qualified Sky.Build.HeapBoundedHmSpec
 import qualified Sky.Build.SolverBudgetSpec
@@ -221,6 +222,10 @@ main = hspec $ do
     -- Locks the AST shape, the diagnostic code registry, and the
     -- renderer output for all consumers (CLI, LSP, future docgen).
     describe "Sky.Reporting.Diagnostic"      Sky.Reporting.DiagnosticSpec.spec
+    -- v0.13 overall guarantee: one regression test per error
+    -- category, asserting the CLI surfaces the stable code +
+    -- prefix and the build never reaches the runtime.
+    describe "Sky.Diagnostics.Coverage"      Sky.Diagnostics.CoverageSpec.spec
     -- Limitation #16: kernel-sig coverage for the dangerous-class
     -- gaps (returns Maybe/Result/Task wrappers OR opaque FFI types).
     -- Without HM sigs, user pattern-matching against the wrapper
