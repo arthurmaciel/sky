@@ -609,10 +609,15 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     -- Prefix the entry file path so multi-file projects
                     -- show users WHERE the error is, not just LINE:COL.
                     -- Issue #52 feedback: "the compiler doesn't tell me
-                    -- the affected file name, but as I have only one
-                    -- at the moment I infer only one place to fix
-                    -- (bad when working with multiple files)".
+                    -- the affected file name". Plus render an Elm-style
+                    -- source-context snippet so users can see the
+                    -- offending code without leaving the terminal.
                     putStrLn $ "   TYPE ERROR: " ++ entryPath ++ ":" ++ err
+                    -- Best-effort source-snippet rendering: parse LINE:
+                    -- COL: from the head of the error message and emit
+                    -- a few lines of context with a caret. Silent on
+                    -- parse failure.
+                    renderSourceContext entryPath err
                     return Map.empty
             -- P3: exhaustiveness — walk the entry + every dep's canonical
             -- tree for non-exhaustive case expressions. A miss is a
@@ -840,6 +845,63 @@ removeStaleBuildOutput outDir binName = do
     when mainExists $ removeFile mainPath
     binExists <- doesFileExist binPath
     when binExists $ removeFile binPath
+
+
+-- | Render Elm-style source context for a type error. Parses the
+-- LINE:COL: prefix from the error message, reads the source file,
+-- and prints 2 lines before + the offending line + a caret line.
+--
+-- Example output (after the existing TYPE ERROR line):
+--
+--   13 |     update : Int -> M -> M
+--   14 |     update i m =
+--   15 |         { m | n = String.fromInt (i + 1) }
+--                            ^
+--
+-- Silent on parse failure / file-read failure — the existing
+-- TYPE ERROR line has already been printed, so user still sees
+-- where the error is even without the snippet.
+renderSourceContext :: FilePath -> String -> IO ()
+renderSourceContext path errMsg = do
+    case parseLineCol errMsg of
+        Nothing -> return ()
+        Just (lineN, colN) -> do
+            srcExists <- doesFileExist path
+            when srcExists $ do
+                src <- readFile path
+                let allLines = lines src
+                    totalLines = length allLines
+                when (lineN >= 1 && lineN <= totalLines) $ do
+                    let startLine = max 1 (lineN - 2)
+                        endLine   = min totalLines (lineN + 1)
+                        contextLines = take (endLine - startLine + 1)
+                                            (drop (startLine - 1) allLines)
+                        gutterWidth = length (show endLine)
+                        padNum n = replicate (gutterWidth - length (show n)) ' ' ++ show n
+                    putStrLn ""
+                    mapM_ (\(n, l) -> do
+                        putStrLn $ "   " ++ padNum n ++ " | " ++ l
+                        when (n == lineN) $ do
+                            let caret = replicate (colN - 1) ' ' ++ "^"
+                            putStrLn $ "   " ++ replicate gutterWidth ' '
+                                     ++ " | " ++ caret)
+                        (zip [startLine..] contextLines)
+                    putStrLn ""
+
+
+-- | Parse `LINE:COL:` from the head of a type-error message.
+-- Returns Just (line, col) on success.
+parseLineCol :: String -> Maybe (Int, Int)
+parseLineCol s =
+    case break (== ':') (dropWhile (== ' ') s) of
+        (lineStr, ':':rest)
+          | not (null lineStr), all (\c -> c >= '0' && c <= '9') lineStr ->
+            case break (== ':') rest of
+                (colStr, _)
+                  | not (null colStr), all (\c -> c >= '0' && c <= '9') colStr ->
+                    Just (read lineStr, read colStr)
+                _ -> Nothing
+        _ -> Nothing
 
 
 -- | Run `go get <pkg>[@<ver>]` for each Go dependency declared in sky.toml.
