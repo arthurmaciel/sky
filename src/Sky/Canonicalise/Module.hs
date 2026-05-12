@@ -5,6 +5,7 @@ module Sky.Canonicalise.Module
     , canonicaliseWithDeps
     , canonicaliseWithDiagnostics
     , collectUnboundDiagnostics
+    , legacyToDiag
     , DepInfo(..)
     )
     where
@@ -126,7 +127,7 @@ parseLeadingLineCol s =
 stripLeadingLineCol :: String -> String
 stripLeadingLineCol s =
     case parseLeadingLineCol s of
-        Just _ -> drop 1 (dropWhile (/= ' ') (dropWhile (== ' ') (afterColon (afterColon s))))
+        Just _ -> dropWhile (== ' ') (afterColon (afterColon s))
         Nothing -> s
   where
     afterColon = drop 1 . dropWhile (/= ':')

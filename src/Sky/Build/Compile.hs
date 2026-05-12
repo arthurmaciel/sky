@@ -418,11 +418,30 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 | (modName, depMod) <- validDeps
                 ]
         case depErrors of
-         ((n, err):_) ->
-            return (Left $ "Canonicalise error in " ++ n ++ ":\n" ++ err)
+         ((n, err):_) -> do
+            -- v0.13 Layer 1: render the dep-module canonicalise
+            -- error through the structured Diagnostic pipeline so
+            -- the user sees the Elm-style block (file:line:col +
+            -- source snippet + reason) instead of a bare prefixed
+            -- string.  Look up the dep's source path so the snippet
+            -- comes from the right file.
+            let depPath = case [p | mi <- moduleOrder
+                                  , Graph._mi_name mi == n
+                                  , let p = Graph._mi_path mi ] of
+                            (p:_) -> p
+                            _     -> entryPath
+                diag = Canonicalise.legacyToDiag depPath err
+            rendered <- Render.renderCli diag
+            putStrLn rendered
+            return (Left $ "Canonicalise error in " ++ n)
          [] ->
           case Canonicalise.canonicaliseWithDeps depInfoMap2 entrySrcMod of
-           Left err -> return (Left $ "Canonicalise error: " ++ err)
+           Left err -> do
+            -- v0.13 Layer 1: same treatment for the entry module.
+            let diag = Canonicalise.legacyToDiag entryPath err
+            rendered <- Render.renderCli diag
+            putStrLn rendered
+            return (Left "Canonicalise error")
            Right canMod -> do
             putStrLn "   Names resolved"
             -- T2/T6: prime the global codegen env's function-type

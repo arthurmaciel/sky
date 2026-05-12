@@ -75,18 +75,33 @@ renderCliMany diags = do
 
 renderHeader :: Diagnostic -> String
 renderHeader d =
-    let sev = severityBadge (_diag_severity d)
+    let sev = severityBadge (_diag_severity d) (_diag_category d)
         loc = _diag_file d ++ ":" ++ showRegionStart (_diag_region d)
         code = "[" ++ unDiagCode (_diag_code d) ++ "]"
         sep = replicate (max 1 (74 - length sev - length loc - length code - 4)) '─'
     in "-- " ++ sev ++ " " ++ sep ++ " " ++ loc ++ " " ++ code
 
 
-severityBadge :: Severity -> String
-severityBadge SevError   = "ERROR"
-severityBadge SevWarning = "WARNING"
-severityBadge SevInfo    = "INFO"
-severityBadge SevHint    = "HINT"
+-- | Severity badge with category prefix.  Matches the historical
+-- Sky/Elm convention of "TYPE ERROR", "PARSE ERROR", "NAMING ERROR"
+-- etc. so CI / grep tools that key off the existing wording keep
+-- matching.  Non-error severities use bare "WARNING" / "INFO" /
+-- "HINT" — category prefix would be noise there.
+severityBadge :: Severity -> Category -> String
+severityBadge SevError   cat = categoryPrefix cat ++ "ERROR"
+severityBadge SevWarning _   = "WARNING"
+severityBadge SevInfo    _   = "INFO"
+severityBadge SevHint    _   = "HINT"
+
+
+categoryPrefix :: Category -> String
+categoryPrefix CatParse          = "PARSE "
+categoryPrefix CatCanonical      = "NAMING "
+categoryPrefix CatType           = "TYPE "
+categoryPrefix CatExhaustiveness = "EXHAUSTIVENESS "
+categoryPrefix CatCodegen        = "CODEGEN "
+categoryPrefix CatGoBuild        = "GO BUILD "
+categoryPrefix CatRuntime        = "RUNTIME "
 
 
 showRegionStart :: A.Region -> String
