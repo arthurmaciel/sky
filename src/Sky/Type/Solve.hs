@@ -17,6 +17,7 @@ module Sky.Type.Solve
     , showType
     , showTypeWith
     , moduleRenaming
+    , solveErrorToDiagnostic
     )
     where
 
@@ -28,6 +29,7 @@ import qualified Sky.Type.UnionFind as UF
 import qualified Sky.Type.Unify as Unify
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Diagnostic as Diag
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 
@@ -997,3 +999,43 @@ showExpected :: T.Expected T.Type -> String
 showExpected (T.NoExpectation ty) = showType ty
 showExpected (T.FromContext _ _ ty) = showType ty
 showExpected (T.FromAnnotation _ _ _ ty) = showType ty
+
+
+-- ═══════════════════════════════════════════════════════════
+-- v0.13 LAYER 1 — Diagnostic conversion
+-- ═══════════════════════════════════════════════════════════
+
+-- | Convert a legacy String solver error to a structured Diagnostic.
+--
+-- The solver currently emits errors as strings with a `LINE:COL:`
+-- prefix and a "Type mismatch: ..." body. This converter parses the
+-- prefix to extract a Region and wraps the rest as a Diagnostic with
+-- code E2001.
+--
+-- Future Layer 1 work moves the solver itself to produce Diagnostic
+-- values directly (eliminating the parse-then-rewrap step). For now
+-- this lets Compile.hs render type errors via the new Sky.Reporting
+-- pipeline without changing every error-emission site at once.
+solveErrorToDiagnostic :: FilePath -> String -> Diag.Diagnostic
+solveErrorToDiagnostic path err =
+    let (region, body) = parsePrefix err
+    in Diag.mkError path region Diag.CatType Diag.typeE_Mismatch body
+
+
+parsePrefix :: String -> (A.Region, String)
+parsePrefix s =
+    case break (== ':') s of
+        (lineStr, ':':rest)
+          | not (null lineStr), all isDigit lineStr ->
+            case break (== ':') rest of
+                (colStr, ':':body)
+                  | not (null colStr), all isDigit colStr ->
+                    let l = read lineStr
+                        c = read colStr
+                        region = A.Region (A.Position l c) (A.Position l c)
+                    in (region, dropWhile (== ' ') body)
+                _ -> (synthetic, s)
+        _ -> (synthetic, s)
+  where
+    isDigit c = c >= '0' && c <= '9'
+    synthetic = A.Region (A.Position 1 1) (A.Position 1 1)

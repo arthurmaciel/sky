@@ -9,6 +9,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Data.IORef
 import Data.Maybe (isJust, fromMaybe)
+import Data.List (isPrefixOf)
 import qualified Data.Char as Char
 import qualified Data.List as List
 import qualified System.Directory
@@ -28,6 +29,7 @@ import Sky.Build.EmbeddedRuntime (embeddedRuntime, embeddedSkyStdlib)
 import qualified Sky.AST.Source as Src
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Render as Render
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Parse.Module as Parse
 import qualified Sky.Canonicalise.Module as Canonicalise
@@ -606,18 +608,22 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     putStrLn $ "   Types OK (" ++ show (length (Map.keys t)) ++ " bindings)"
                     return t
                 Solve.SolveError err -> do
-                    -- Prefix the entry file path so multi-file projects
-                    -- show users WHERE the error is, not just LINE:COL.
-                    -- Issue #52 feedback: "the compiler doesn't tell me
-                    -- the affected file name". Plus render an Elm-style
-                    -- source-context snippet so users can see the
-                    -- offending code without leaving the terminal.
-                    putStrLn $ "   TYPE ERROR: " ++ entryPath ++ ":" ++ err
-                    -- Best-effort source-snippet rendering: parse LINE:
-                    -- COL: from the head of the error message and emit
-                    -- a few lines of context with a caret. Silent on
-                    -- parse failure.
-                    renderSourceContext entryPath err
+                    -- v0.13 Layer 1: route position-prefixed type
+                    -- errors through the structured Diagnostic
+                    -- renderer (Elm-style ERROR header + source
+                    -- snippet + code). Solver-budget errors and
+                    -- other pre-formatted multi-line guidance blocks
+                    -- (anything that already begins with "TYPE
+                    -- ERROR") are printed verbatim — the renderer
+                    -- would otherwise wrap the helpful body inside
+                    -- a `[E2001]` header that misattributes the
+                    -- cause.
+                    if "TYPE ERROR" `isPrefixOf` err
+                        then putStrLn $ "   TYPE ERROR: " ++ entryPath ++ ":" ++ err
+                        else do
+                            let diag = Solve.solveErrorToDiagnostic entryPath err
+                            rendered <- Render.renderCli diag
+                            putStrLn rendered
                     return Map.empty
             -- P3: exhaustiveness — walk the entry + every dep's canonical
             -- tree for non-exhaustive case expressions. A miss is a
@@ -701,9 +707,16 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- and binary from a previous successful build so the user
             -- can't accidentally run an outdated executable. Issue #52.
             case (solverError, exhaustErr) of
-              (Just err, _) -> do
+              (Just _, _) -> do
                   removeStaleBuildOutput outDir (Toml._binName config)
-                  return (Left ("Type error: " ++ entryPath ++ ":" ++ err))
+                  -- v0.13 Layer 1: the structured Diagnostic has
+                  -- already been rendered above (renderCli at the
+                  -- SolveError branch, or the verbatim solver-
+                  -- budget block). Return a one-line marker so the
+                  -- outer caller can surface non-zero exit + a
+                  -- stable grep target ("Type error") without
+                  -- double-printing the full body.
+                  return (Left ("Type error: " ++ entryPath))
               (_, Just err) -> do
                   removeStaleBuildOutput outDir (Toml._binName config)
                   return (Left ("Non-exhaustive patterns: " ++ err))
