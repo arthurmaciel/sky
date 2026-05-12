@@ -814,11 +814,18 @@ findLeafMismatch path a e =
 --        actual:   String
 renderPathDiff :: [PathSeg] -> T.Type -> T.Type -> String
 renderPathDiff path actual expected =
-    let pathStr = if null path then "" else " in " ++ joinPath path
+    -- The caller prepends `"Type mismatch: "`. For a top-level
+    -- mismatch (no path), skip straight to the expected/actual
+    -- pair so we never produce a stray `Type mismatch: :` line.
+    -- For a deeper mismatch, lead with `in <path>:` so the user
+    -- sees where in the structure the divergence is.
+    let header = case path of
+            [] -> ""
+            _  -> "in " ++ joinPath path ++ ":"
         renderedLeaf =
               "\n     expected: " ++ showTypeR expected
            ++ "\n     actual:   " ++ showTypeR actual
-    in pathStr ++ ":" ++ renderedLeaf
+    in header ++ renderedLeaf
   where
     joinPath = List.intercalate " → " . map segText
 
