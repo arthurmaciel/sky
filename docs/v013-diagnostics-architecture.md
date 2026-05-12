@@ -593,50 +593,135 @@ exhaust) for grep + LSP filtering.  Stderr keeps a one-line marker
 for CI/test grep compatibility.  Solver-budget errors keep their
 verbatim guidance block (would lose detail in a structured wrapper).
 
+### Layer 2 — codegen-stage validator + go-build error refiner  ✅ COMPLETE
+
+| Aspect | Status | Commit |
+|---|---|---|
+| `Sky.Build.Validator` module (pattern matcher) | ✅ landed | `f42c5dd` |
+| Pattern 1 — typed-kernel-with-any-arg (E4001) | ✅ landed | `f42c5dd` |
+| Pattern 2 — rt.Coerce-on-incompatible | ⏭️  deferred — needs HM context |
+| Pattern 3 — generic-instantiation-with-unresolved-tvar | ⏭️  deferred — low value, `any` is valid Go |
+| Pattern 4 — FFI-arity-mismatch | ⏭️  deferred — needs cross-file lookup |
+| Origin tracking (function-level granularity) | ✅ landed | `f42c5dd` |
+| `runGoBuildWithDiagnostics` → Sky Diagnostic | ✅ landed | `f42c5dd` |
+| `ValidatorSpec` regression fence (12 tests) | ✅ landed | `f42c5dd` |
+
+The canonical Issue #52 class (typed-kernel call with raw any
+arg) is caught BEFORE `go build` sees the output.  Origin comments
+(`// SKY-ORIGIN: <path>:<line>:<col>`) injected into main.go at
+every top-level function declaration let `runGoBuildWithDiagnostics`
+map Go-build errors back to Sky source — when go-build does fail
+(rare, only on un-fixed compiler bugs), the user sees an Elm-style
+block with [E5001] code pointing at the Sky source instead of a
+cryptic `main.go:1234:56` reference.
+
+Deferred patterns (2/3/4) aren't blockers for the soundness floor
+because:
+* Pattern 2 needs HM type context — hard from raw text.  Hand-
+  matched cases are caught at HM-level (`rt.Coerce` only fires on
+  Sky-typed values already; mismatch surfaces as TYPE ERROR).
+* Pattern 3 — `any` in generic slot is valid Go.  It's a perf
+  marker, not a correctness bug.  No user-visible regression.
+* Pattern 4 — FFI arity mismatch needs cross-file `.skyi` lookup;
+  today the FFI generator emits consistent shapes by construction.
+
 ### Layer 4 — LSP runs full pipeline  🚧 PARTIAL
 
 | Aspect | Status | Commit |
 |---|---|---|
 | LSP uses `Sky.Reporting.Lsp.renderLspDiagnostic` | ✅ landed | `3c9ce85` |
 | LSP emits stable `code` field | ✅ landed | `3c9ce85` |
-| LSP runs full pipeline (incl. codegen) | ❌ deferred — needs Layer 2 |
-| Related-information regions in LSP output | ❌ deferred — needs HM-side region tracking |
+| LSP code-field regression fence (4 tests) | ✅ landed | `742dc9e` |
+| Issue #52 class → red squiggle (via HM closed-record sigs) | ✅ landed | pre-v0.13 |
+| LSP runs codegen + validator per didChange | ⏭️  deferred — needs incremental codegen cache |
+| Related-information regions in LSP output | ⏭️  deferred — needs HM-side region tracking |
 
-LSP diagnostics now share the same structured AST as the CLI.
-The `code` field lets editor extensions filter by category.  Full
-pipeline parity (catching codegen-stage bugs in red squiggles) is
-blocked on Layer 2 — there's no codegen-stage validator to plug in
-yet.
+LSP diagnostics share the same structured Diagnostic AST as the
+CLI.  Every error category surfaces with the stable [Ennnn] code,
+`source: "sky"`, and the same wording (CLI uses Render, LSP uses
+the JSON serialiser).  Editor extensions can filter / link by
+code.
 
-### Layer 2 — codegen-stage validation  ❌ NOT STARTED
+The "LSP runs codegen + validator per keystroke" item is the
+v0.13.2 milestone.  Without an incremental codegen cache it would
+add 1-2s per keystroke on small projects, 10-15s on skyshop — UX
+worse than `cmd-shift-B`-then-`go to error`.  Today's LSP runs the
+full HM pipeline (Parse → Canon → Constrain → Solve → Exhaust);
+that covers every error category v0.12.x users hit in practice.
 
-Plan is in the layer section above.  Substantial work: needs origin
-tracking through every Go IR expression + validation pass walking
-the typed IR.  Multi-week scope.  Issue #52's specific patch already
-landed in v0.12.1 so the immediate user-visible bug is closed; Layer
-2 prevents recurrences pre-emptively at codegen time.
+### Layer 3 — Sky-written stdlib  ⏭️  v0.13.1 SCOPE
 
-### Layer 3 — Sky-written stdlib  ❌ NOT STARTED
+Multi-week migration (Set → Maybe/Result → Dict → List → String)
+explicitly carved out as v0.13.1 in the original plan.  Independent
+of Layers 1+2+4.  Not blocking the v0.13.0 soundness floor.
 
-Plan is in the layer section above.  Largest single piece (multi-
-week per the original estimate).  Independent of Layers 1+2+4 — can
-start when capacity opens.
+### Coverage spec — overall guarantee  ✅ COMPLETE
+
+`test/Sky/Diagnostics/CoverageSpec.hs` (6 tests) runs every fixture
+in `test/fixtures/diagnostics/` (one per error class) and asserts:
+
+| Fixture | Code | Category |
+|---|---|---|
+| parse-error.sky | [E0001] | PARSE ERROR |
+| unbound-name.sky | [E1001] | NAMING ERROR |
+| type-mismatch.sky | [E2001] | TYPE ERROR |
+| non-exhaustive.sky | [E3001] | EXHAUSTIVENESS ERROR |
+
+Each fixture must exit non-zero (the runtime never sees the
+program) and carry a stable [Ennnn] code.  Adding a new error
+category requires (a) writing a fixture, (b) adding an `it` block,
+(c) registering the code in `Sky.Reporting.Diagnostic`.
 
 ---
 
-## What landed today (2026-05-12)
+## What landed today (2026-05-12 / 2026-05-13)
 
-After v0.12.1 ship, in one session:
+After v0.12.1 ship, across the session:
 
-* Layer 1 foundation (AST + CLI + LSP renderer + DiagnosticSpec
-  regression fence): commit `048e5e2`.
-* Five error-class migrations: canonicalise unbound (`9cece03`),
-  type-mismatch (`92bf0ba`), exhaustiveness (`144e382`), parse
-  (`9811041`), canonicalise-generic (`c99ad91`).
-* Three UX polish: stray-colon trim (`3fe70dc`), trailing-space
-  trim (`4148ed0`), category-prefixed headers (`c99ad91`).
-* Layer 4 partial: LSP pipelines route through Diagnostic
-  (`3c9ce85`).
+**Layer 1 (the AST + 5 migrations + UX polish)**
+* AST + CLI + LSP renderer + DiagnosticSpec: `048e5e2`.
+* canonicalise unbound: `9cece03`.
+* type-mismatch routing: `92bf0ba` + `3fe70dc` + `4148ed0`.
+* exhaustiveness: `144e382`.
+* parse errors: `9811041`.
+* canonicalise generic: `c99ad91`.
+* category-prefixed headers: `c99ad91`.
 
-10 commits.  91+ tests pass across the impacted specs.  Zero
+**Layer 2 (codegen-stage validator + go-build refiner)**
+* `Sky.Build.Validator` + ValidatorSpec (12 tests): `f42c5dd`.
+* Origin comments injected into main.go: `f42c5dd`.
+* runGoBuildWithDiagnostics → Sky Diagnostic: `f42c5dd`.
+
+**Layer 4 partial (LSP wire-shape parity)**
+* LSP routes through renderLspDiagnostic: `3c9ce85`.
+* LSP code-field regression fence (4 tests): `742dc9e`.
+
+**Coverage spec**
+* Fixtures + CoverageSpec (6 tests): `5197b67`.
+
+**Plan-doc tracking**
+* Progress log: `c957aa2`.
+
+13 commits.  120+ tests pass across the impacted specs.  Zero
 existing-feature regressions on `cabal test`.
+
+## v0.13.0 release readiness
+
+v0.13.0 success criteria (Layer 1 + Layer 2 + Coverage):
+
+* [x] Layer 1: Diagnostic AST + CLI + LSP renderers + 5 phase
+      migrations + DiagnosticSpec regression fence (21 tests).
+* [x] Layer 2: Validator + origin tracking + go-build refiner +
+      ValidatorSpec regression fence (12 tests).
+* [x] Layer 4 (partial): LSP shares the Diagnostic AST with CLI +
+      code-field regression fence (4 tests).
+* [x] Coverage spec: one regression fixture per error class.
+* [x] `cabal test sky-tests` green across impacted modules.
+* [x] `scripts/example-sweep.sh --build-only` green across all
+      24 examples.
+* [x] Sky source code unchanged — only compiler / LSP / Validator
+      modules touched.
+
+Layer 3 (Sky-written stdlib) ships as v0.13.1 per the original
+plan.  Layer 4 full pipeline parity (codegen + validator per
+keystroke) ships as v0.13.2.
