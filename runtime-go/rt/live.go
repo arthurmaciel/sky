@@ -21,12 +21,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"reflect"
 	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -1220,9 +1222,10 @@ type cmdT struct {
 type SkyCmd = cmdT
 
 type subT struct {
-	kind   string // "none", "every"
-	ms     int
-	toMsg  any
+	kind  string // "none", "every", "batch"
+	ms    int
+	toMsg any
+	batch []any
 }
 
 // SkySub is the public type for Sky's Sub msg type.
@@ -1235,6 +1238,18 @@ func Cmd_perform(task, to any) SkyCmd { return cmdT{kind: "perform", task: task,
 func Sub_none() SkySub { return subT{kind: "none"} }
 func Sub_every(ms any, to any) SkySub {
 	return subT{kind: "every", ms: AsInt(ms), toMsg: to}
+}
+
+// Sub_batch combines a list of Sub values into one. Used by Sky.Tui /
+// Sky.Cli when a model needs to subscribe to multiple sources at once
+// (e.g. a stopwatch ticking every 100 ms AND a quit-signal watcher).
+// Sky.Live's setupSubscriptions currently only honours a single Sub.every —
+// calling Sub.batch from a Live program collapses to the first non-none
+// entry. Lifting that is independent work (SSE diff loop needs to handle
+// multiple ticker frames per session); the non-Live backends use
+// tea_subs.go's subManager which iterates over the batch list.
+func Sub_batch(list any) SkySub {
+	return subT{kind: "batch", batch: asList(list)}
 }
 
 // Time.every is an alias of Sub.every in Sky code
@@ -2136,8 +2151,39 @@ func liveAppRun(cfg any) any {
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
+	// Shutdown on SIGINT / SIGTERM / SIGHUP. SSE connections are
+	// long-lived (heartbeat every 15 s, otherwise idle) so the
+	// graceful `srv.Shutdown` would block forever waiting for them
+	// to return to idle — even with a context timeout it returns
+	// ctx.DeadlineExceeded WITHOUT actually closing the connections,
+	// leaving the goroutines alive and the process unable to exit.
+	// `srv.Close` forcibly closes the listener and every active
+	// connection; SSE writers see ErrConnClosed on their next Write
+	// and exit. Browsers see the dropped EventSource and the in-
+	// page banner flips to "Reconnecting…" — same UX as a deploy.
+	//
+	// Two-press escalation: a second SIGINT triggers os.Exit(130),
+	// which kills the process immediately even if something inside
+	// srv.Close is wedged. Familiar Ctrl-C-twice idiom.
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sigCh
+		fmt.Println("\nSky.Live shutting down…")
+		_ = srv.Close()
+		// If srv.Close completes the listener teardown, ListenAndServe
+		// returns and the function exits naturally. If something hangs,
+		// a second Ctrl-C escapes via os.Exit. Without this watchdog,
+		// a wedged goroutine could leave the user stuck.
+		go func() {
+			<-sigCh
+			fmt.Fprintln(os.Stderr, "Sky.Live: forcing exit (second SIGINT)")
+			os.Exit(130) // 128 + SIGINT(2)
+		}()
+	}()
 	fmt.Printf("Sky.Live listening on :%d\n", port)
 	err := srv.ListenAndServe()
+	signal.Stop(sigCh)
 	if err != nil && err != http.ErrServerClosed {
 		return Err[any, any](ErrFfi(err.Error()))
 	}
@@ -2261,8 +2307,45 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	// styleNode in their view, or static-served self-hosted webfonts).
 	// Privacy: no Google Fonts request. Accessibility: no !important
 	// override fighting app-level type choices.
-	fmt.Fprintf(w, "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head><body><div id=\"sky-root\">%s</div><script>%s</script></body></html>", body, liveJSWithCfg(sid, app.bannerCfg))
+	//
+	// Minimal CSS reset (`liveBaseCSS` below) zeroes out the worst
+	// browser-default offenders that interact badly with Std.Ui's
+	// flex-based layout: <p>/<h1>-<h6>/<button>/<input>/<a> default
+	// margins + font sizes that would push everything out of position
+	// otherwise. The reset is deliberately minimal — it does NOT
+	// impose font choice, line-height, or colour scheme. Apps that
+	// need a "designed" look still attach their own typography via
+	// view-level style attrs or a styleNode at the top of view.
+	fmt.Fprintf(w, "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><style>%s</style></head><body><div id=\"sky-root\">%s</div><script>%s</script></body></html>", liveBaseCSS, body, liveJSWithCfg(sid, app.bannerCfg))
 }
+
+// liveBaseCSS is the minimal reset injected into every Sky.Live page.
+// Goals:
+//   1. Zero out browser-default margins on <p>, <h1>-<h6>, <ul>, <ol>,
+//      <li>, <body>, <html> so flex layout from Std.Ui isn't fighting
+//      legacy editorial CSS that wants 1em vertical spacing.
+//   2. Inherit font on form controls — <button> / <input> / <select>
+//      / <textarea> default to a smaller browser font, which makes
+//      Std.Ui buttons look out of place next to surrounding text.
+//   3. box-sizing: border-box so padding adds to the slot's content
+//      area rather than expanding the box. Std.Ui generates explicit
+//      width/height in cells; border-box keeps that math correct.
+//   4. min-height: 100vh on body so a dark-themed view fills the
+//      viewport instead of leaving a white strip below the content.
+//   5. Sensible default font-family (system stack, no web fetch) so
+//      apps that don't set their own typography don't get Times New
+//      Roman.
+//
+// The reset is ~600 bytes — negligible compared to the typical page
+// body. NO !important is used; user view styles always win.
+const liveBaseCSS = `*,*::before,*::after{box-sizing:border-box}` +
+	`html,body{margin:0;padding:0;min-height:100%}` +
+	`body{min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;line-height:1.4}` +
+	`h1,h2,h3,h4,h5,h6,p,ul,ol,li,figure,blockquote,pre,dl,dd{margin:0;padding:0;font-weight:inherit;font-size:inherit}` +
+	`button,input,select,textarea{font:inherit;color:inherit}` +
+	`button{background:none;border:0;padding:0;cursor:pointer;text-align:inherit}` +
+	`a{color:inherit;text-decoration:none}` +
+	`img,video,canvas,svg{display:block;max-width:100%}`
 
 // handleConfig exposes client-facing runtime config (no secrets) so the
 // JS driver can adjust behaviour without recompilation. Served at
@@ -2384,6 +2467,25 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 				tag = t2
 			}
 			app.msgTagsMu.Unlock()
+		}
+		// Unknown Msg name: refuse to dispatch instead of building a
+		// SkyADT with Tag=-1 and letting the user's `case` fall
+		// through to the exhaustiveness `Unreachable`. Caller gets a
+		// clear error; the user's update never sees a malformed Msg.
+		// Internal `__sky*` sentinels (e.g. `__skySessionPing` —
+		// liveness probe sent by the client) are silently accepted as
+		// no-ops so they don't pollute the log; the client only cares
+		// about session-existence (404 vs anything else).
+		if tag < 0 {
+			sess.mu.Unlock()
+			w.Header().Set("X-Sky-Live", "1")
+			if strings.HasPrefix(req.Msg, "__sky") {
+				w.WriteHeader(200)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "[sky.live] unknown Msg constructor %q (direct-send); dropping event\n", req.Msg)
+			http.Error(w, "unknown Msg constructor: "+req.Msg, 400)
+			return
 		}
 		var fields []any
 		for _, raw := range req.Args {
@@ -2529,6 +2631,17 @@ func (app *liveApp) dispatchBatched(sess *liveSession, ev batchedEvent) {
 				tag = t2
 			}
 			app.msgTagsMu.Unlock()
+		}
+		// Unknown Msg name — same defence as the single-event path
+		// above. Silently drop (this is the batched/tab-unload path
+		// so there's no response channel to surface the error).
+		// `__sky*` sentinels are silently accepted as no-ops too.
+		if tag < 0 {
+			sess.mu.Unlock()
+			if !strings.HasPrefix(ev.Msg, "__sky") {
+				fmt.Fprintf(os.Stderr, "[sky.live] unknown Msg constructor %q (batched); dropping event\n", ev.Msg)
+			}
+			return
 		}
 		var fields []any
 		for _, raw := range ev.Args {

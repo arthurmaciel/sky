@@ -261,6 +261,14 @@ classifyAndRun _cwd name dir bin logPath
 -- identified as M6.
 runScenario :: String -> FilePath -> FilePath -> Int -> FilePath -> IO ()
 runScenario name dir logPath port scenarioPath = do
+    -- Pre-flight: kill any process holding our port. Without this,
+    -- a stale `sky-out/app` from a prior session (or another
+    -- example running in the background) silently steals the
+    -- bind, our spawn no-ops, and the scenario probes hit the
+    -- WRONG server's responses. Verify reports "FAIL scenario:
+    -- body missing X" while the actual app under test never
+    -- started. (See CLAUDE.md "verify port-collision hardening".)
+    killPortHolder port
     raw <- B.readFile scenarioPath
     case Aeson.eitherDecode (BL.fromStrict raw) of
         Left err -> do
@@ -279,8 +287,10 @@ runScenario name dir logPath port scenarioPath = do
             (_, pidTxt, _) <- System.Process.readProcessWithExitCode "sh"
                 ["-c", serverCmd] ""
             let pid = takeWhile (\c -> c /= '\n' && c /= ' ') pidTxt
-            -- Wait for the server to come up (same 20-try / 0.5s
-            -- loop as the default probe).
+            -- Wait for the server to come up. Probes the port AND
+            -- confirms the listener PID matches OUR spawn — guards
+            -- against a stale process from a different example
+            -- having the port and serving unrelated responses.
             _ <- System.Process.readProcessWithExitCode "sh"
                 ["-c", unwords
                     [ "for i in $(seq 1 20); do"
@@ -290,6 +300,35 @@ runScenario name dir logPath port scenarioPath = do
                     , "  sleep 0.5;"
                     , "done"
                     ]] ""
+            -- Identity check: lsof -ti :PORT should return our pid.
+            -- If it returns a different pid, kill that imposter and
+            -- retry our spawn. Catches the rare race where a
+            -- pre-existing server bound the port between our pre-
+            -- flight kill and our spawn (or where a parallel test
+            -- in the same process beat us to bind).
+            (_, ownerTxt, _) <- System.Process.readProcessWithExitCode "sh"
+                ["-c", "lsof -ti :" ++ show port ++ " 2>/dev/null | head -1"] ""
+            let owner = takeWhile (\c -> c /= '\n' && c /= ' ') ownerTxt
+            when (not (null owner) && owner /= pid) $ do
+                -- Imposter on our port. Kill + respawn.
+                _ <- System.Process.readProcessWithExitCode "sh"
+                    ["-c", "kill " ++ owner ++ " 2>/dev/null; sleep 0.3;"
+                            ++ "kill -9 " ++ owner ++ " 2>/dev/null; sleep 0.2"]
+                    ""
+                -- Re-spawn (server we started already noticed bind
+                -- failure; spawn a fresh one).
+                _ <- System.Process.readProcessWithExitCode "sh"
+                    ["-c", serverCmd] ""
+                _ <- System.Process.readProcessWithExitCode "sh"
+                    ["-c", unwords
+                        [ "for i in $(seq 1 20); do"
+                        , "  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 1"
+                        , "    'http://localhost:" ++ show port ++ "/' 2>/dev/null);"
+                        , "  case \"$code\" in 2??|3??|4??) break;; esac;"
+                        , "  sleep 0.5;"
+                        , "done"
+                        ]] ""
+                return ()
             -- Run each scenario request, collecting failures.
             failures <- mapM (runScenarioRequest port) (scenarioRequests scenario)
             -- Stop the server.
@@ -311,6 +350,8 @@ runScenario name dir logPath port scenarioPath = do
 
 runDefaultProbe :: String -> FilePath -> FilePath -> Int -> IO ()
 runDefaultProbe name dir logPath port = do
+    -- Same port-collision pre-flight as runScenario.
+    killPortHolder port
     (_, stdoutTxt, _) <- System.Process.readProcessWithExitCode "sh"
         [ "-c"
         , unwords
@@ -333,6 +374,25 @@ runDefaultProbe name dir logPath port = do
             ]
         ] ""
     putStr stdoutTxt
+
+
+-- | Kill anything listening on `port`, then briefly wait for the
+-- socket to drain. Used by `sky verify` before launching the
+-- example's server so a stale process from a prior session can't
+-- steal the port and serve unrelated responses to our probes.
+-- macOS uses `lsof -ti :PORT`; Linux uses the same with
+-- `-w` to suppress warnings. Either way: best-effort, silent.
+killPortHolder :: Int -> IO ()
+killPortHolder port = do
+    let cmd = "pids=$(lsof -ti :" ++ show port ++ " 2>/dev/null);"
+           ++ " if [ -n \"$pids\" ]; then"
+           ++ "   kill $pids 2>/dev/null; sleep 0.3;"
+           ++ "   pids=$(lsof -ti :" ++ show port ++ " 2>/dev/null);"
+           ++ "   [ -n \"$pids\" ] && kill -9 $pids 2>/dev/null;"
+           ++ "   sleep 0.2;"
+           ++ " fi; true"
+    _ <- System.Process.readProcessWithExitCode "sh" ["-c", cmd] ""
+    return ()
 
 
 -- One scenario request; returns [] on success, [reason] on failure.

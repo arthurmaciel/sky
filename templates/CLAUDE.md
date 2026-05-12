@@ -1686,6 +1686,159 @@ update msg model =
             ( model, Cmd.batch [ cmd1, cmd2 ] )
 ```
 
+## Sky.Tui — Terminal-Rendering TEA (experimental, v0.12)
+
+Same `init` / `update` / `view` / `subscriptions` shape as Sky.Live,
+but the view returns `Element Msg` and the runtime paints to ANSI
+terminal cells. The same `Std.Ui` element tree renders in both
+backends.
+
+```elm
+import Std.Tui as Tui
+import Std.Ui as Ui
+import Std.Ui exposing (Element)
+
+view : Model -> Element Msg
+view model =
+    Ui.column
+        [ Ui.padding 16, Ui.spacing 8 ]
+        [ Ui.text ("Count: " ++ String.fromInt model.count)
+        , Ui.row [ Ui.spacing 8 ]
+            [ Ui.button [] { onPress = Just Decrement, label = Ui.text "−" }
+            , Ui.button [] { onPress = Just Increment, label = Ui.text "+" }
+            ]
+        ]
+
+main =
+    Tui.app
+        { init = init, update = update, view = view
+        , subscriptions = subscriptions
+        }
+        |> Task.run
+```
+
+Optional fields on `Tui.app`'s record:
+- `onKey : KeyEvent -> Msg` — global keypress handler. KeyEvent =
+  `{ kind, value, shift, alt, ctrl }`. `kind` is one of `"char"`,
+  `"enter"`, `"tab"`, `"space"`, `"backspace"`, `"escape"`, `"up"`,
+  `"down"`, `"left"`, `"right"`, `"home"`, `"end"`, `"delete"`,
+  `"pageup"`, `"pagedown"`, `"ctrl"`, `"fn"`, `"paste"`, `"mouse"`,
+  `"other"`. The runtime hard-exits on Ctrl-C if `onKey` is absent.
+- `guard : Msg -> Model -> Result Error ()` — same shape as
+  Live.app's auth-guard middleware. Portable across backends.
+- `canvasWidth` / `canvasHeight : Int` — logical-pixel canvas
+  default 1280×720. Override for denser layout.
+
+Mouse: left-press fires onClick on hit-tested focusables; scroll
+wheel scrolls the viewport. Release / drag / middle / right-click
+deferred for v0.12.
+
+Buttons activate on Enter AND Space when focused (browser
+convention). Tab / Shift-Tab cycle focus; arrow keys also navigate
+on non-input focusables.
+
+Teardown: Ctrl-C, SIGTERM/HUP/QUIT, panic, `System.exit` all
+restore the terminal (alt-screen exit, raw mode off, mouse
+tracking off, DECSTR soft reset).
+
+Sky.Cli is the line-oriented variant — non-raw terminal, view
+returns `String`, update consumes lines. `Cli.readPassword () :
+Task Error String` reads stdin with echo disabled.
+
+Run `sky run src/Main.sky` for examples 20-24:
+- 20-cli-counter (Sky.Cli)
+- 21-tui-stopwatch
+- 22-tui-stopwatch-ui (Std.Ui — same view function works under Sky.Live)
+- 23-tui-todo
+- 24-tui-kitchen-sink
+
+Full reference: `docs/skytui/overview.md`.
+
+### Cross-backend: same `view` + `update` for Sky.Live AND Sky.Tui
+
+Split into `App.sky` (shared business logic + view) and per-backend
+entry modules (`Main.sky` for web, `MainTui.sky` for terminal).
+
+`App.sky` — written once, runs on both:
+```elm
+module App exposing (Model, Msg, init, update, view, subscriptions)
+
+import Std.Ui as Ui
+import Std.Ui exposing (Element)
+import Std.Ui.Font as Font
+
+type alias Model = { count : Int }
+type Msg = Increment | Decrement
+
+init : () -> ( Model, Cmd Msg )
+init _ = ( { count = 0 }, Cmd.none )
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Increment -> ( { model | count = model.count + 1 }, Cmd.none )
+        Decrement -> ( { model | count = model.count - 1 }, Cmd.none )
+
+view : Model -> Element Msg
+view model =
+    Ui.column
+        [ Ui.spacing 8, Ui.padding 16 ]
+        [ Ui.el [ Font.bold, Font.size 24 ]
+              (Ui.text ("Count: " ++ String.fromInt model.count))
+        , Ui.row [ Ui.spacing 4 ]
+            [ Ui.button [] { onPress = Just Decrement, label = Ui.text "−" }
+            , Ui.button [] { onPress = Just Increment, label = Ui.text "+" }
+            ]
+        ]
+
+subscriptions : Model -> Sub Msg
+subscriptions _ = Sub.none
+```
+
+`Main.sky` (web entry — `sky run` serves at localhost:8000):
+```elm
+module Main exposing (main)
+import Std.Live as Live
+import App
+main =
+    Live.app
+        { init = App.init, update = App.update, view = App.view
+        , subscriptions = App.subscriptions
+        , routes = [ Live.route "/" () ], notFound = ()
+        }
+```
+
+`MainTui.sky` (terminal entry — `sky run MainTui.sky` renders ANSI cells):
+```elm
+module MainTui exposing (main)
+import Std.Tui as Tui
+import App
+main =
+    Tui.app
+        { init = App.init, update = App.update, view = App.view
+        , subscriptions = App.subscriptions
+        , onKey =
+            \k -> if k.value == "+" then App.Increment
+                  else if k.value == "-" then App.Decrement
+                  else App.Increment
+        }
+        |> Task.run
+```
+
+Same Std.Ui widgets, same Msg dispatch, two completely different
+outputs. The `view` function is portable because Std.Ui's `Element
+msg` is backend-agnostic — Live renders to HTML, Tui renders to
+ANSI cells via `runtime-go/rt/tui_ui.go`.
+
+Limits of portability:
+- Sky.Live-only: file uploads (`Event.onFile`), routing, session
+  stores. Tui has no equivalents.
+- Sky.Tui-only: keyboard event with modifiers, mouse press, scroll
+  wheel. Live receives DOM events with different shapes.
+- Where backends share: layout (row/column/grid/wrappedRow), text
+  styling, borders, padding/spacing, inputs (text/checkbox/radio/
+  slider), `onClick`/`onSubmit`/`onInput` events, focus management.
+
 ## Application Patterns — When to Use What
 
 ### 1. Simple CLI App

@@ -539,6 +539,30 @@ registry = Map.fromList
     , (("Live", "api"),           KernelInfo "rt.Live_api"   2 False)
 
     -- ═══════════════════════════════════════════════════════
+    -- Sky.Cli — line-oriented TEA program runner. Returns Task,
+    -- so call sites are `Cli.program cfg` and the caller decides
+    -- when to run via Task.run / discard.
+    -- ═══════════════════════════════════════════════════════
+    , (("Cli", "program"),        KernelInfo "rt.Cli_program" 1 False)
+    -- Cli.readPassword — read one line from stdin with terminal
+    -- echo disabled. Returns Task Error String. Used for auth
+    -- flows where the password mustn't show on screen or land
+    -- in scrollback. Falls back to a noisy line read if stdin
+    -- isn't a TTY (piped input).
+    , (("Cli", "readPassword"),   KernelInfo "rt.Cli_readPassword" 1 False)
+
+    -- ═══════════════════════════════════════════════════════
+    -- Sky.Tui — full-screen terminal UI program runner. Same
+    -- shape as Cli.program but with onKey instead of onLine and
+    -- a frame-render view shape.
+    -- ═══════════════════════════════════════════════════════
+    , (("Tui", "program"),        KernelInfo "rt.Tui_program" 1 False)
+    -- Tui.app — Element-shaped view variant. Same shape as
+    -- Tui.program but view : Model -> Std.Ui.Element Msg, runtime
+    -- handles layout + cell rendering + focus management.
+    , (("Tui", "app"),            KernelInfo "rt.Tui_app" 1 False)
+
+    -- ═══════════════════════════════════════════════════════
     -- Std.Live.Events
     -- ═══════════════════════════════════════════════════════
     , (("Event", "onClick"),      KernelInfo "rt.Event_onClick" 1 False)
@@ -560,6 +584,7 @@ registry = Map.fromList
     -- ═══════════════════════════════════════════════════════
     , (("Sub", "none"),           KernelInfo "rt.Sub_none" 0 False)
     , (("Sub", "every"),          KernelInfo "rt.Sub_every" 2 False)
+    , (("Sub", "batch"),          KernelInfo "rt.Sub_batch" 1 False)
 
     -- ═══════════════════════════════════════════════════════
     -- Set
@@ -656,4 +681,20 @@ registry = Map.fromList
     , (("JsonDecP", "optional"),   KernelInfo "rt.JsonDecP_optional" 4 False)
     , (("JsonDecP", "custom"),     KernelInfo "rt.JsonDecP_custom" 2 False)
     , (("JsonDecP", "requiredAt"), KernelInfo "rt.JsonDecP_requiredAt" 3 False)
+
+    -- ═══════════════════════════════════════════════════════
+    -- Std.Ui.Lazy (v0.12 — runtime memoisation)
+    --
+    -- Maps the Sky-side passthrough wrappers to Go runtime helpers
+    -- that memoise on (function-pointer, args fingerprint) with an
+    -- LRU bound (default 1024 entries; SKY_UI_LAZY_CAP override).
+    -- The Sky source in `sky-stdlib/Std/Ui/Lazy.sky` is now a
+    -- type-checker reference only — actual calls route through
+    -- the kernel registry below.
+    -- ═══════════════════════════════════════════════════════
+    , (("Lazy", "lazy"),  KernelInfo "rt.Std_Ui_Lazy_lazy"  2 False)
+    , (("Lazy", "lazy2"), KernelInfo "rt.Std_Ui_Lazy_lazy2" 3 False)
+    , (("Lazy", "lazy3"), KernelInfo "rt.Std_Ui_Lazy_lazy3" 4 False)
+    , (("Lazy", "lazy4"), KernelInfo "rt.Std_Ui_Lazy_lazy4" 5 False)
+    , (("Lazy", "lazy5"), KernelInfo "rt.Std_Ui_Lazy_lazy5" 6 False)
     ]

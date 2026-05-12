@@ -41,6 +41,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Text as T
+import qualified Data.Time.Clock as Clock
 
 import System.IO
 import System.Exit (exitSuccess, exitWith, ExitCode(..))
@@ -48,13 +49,18 @@ import System.Exit (exitSuccess, exitWith, ExitCode(..))
 import qualified Sky.Parse.Module as Parse
 import qualified Sky.Canonicalise.Module as Canonicalise
 import qualified Sky.Type.Constrain.Module as Constrain
+import qualified Sky.Type.Constrain.Expression as ConstrainExpr
 import qualified Sky.Type.Solve as Solve
 import qualified Sky.Type.Type as Ty
 import qualified Sky.Type.Exhaustiveness as Exhaust
+import qualified Sky.AST.Canonical as Can
 import qualified Sky.AST.Source as Src
+import qualified Sky.Sky.ModuleName as ModuleName
+import System.Timeout (timeout)
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Format.Format as Fmt
 import qualified Sky.Lsp.Index as Idx
+import qualified Sky.Lsp.Diag as Diag
 import qualified System.Directory as Dir
 import System.FilePath (takeDirectory, (</>))
 
@@ -77,6 +83,12 @@ data ServerState = ServerState
     { ssDocs     :: !(IORef.IORef Docs)
     , ssIndex    :: !(IORef.IORef (Map.Map FilePath Idx.Index))
     , ssShutdown :: !(IORef.IORef Bool)
+    , ssTimedOutFiles :: !(IORef.IORef (Set.Set FilePath))
+      -- Files whose externals computation has tripped the LSP
+      -- timeout. Used to ensure we only emit ONE
+      -- `window/showMessage` per file per session — without this
+      -- the editor would get a popup on every keystroke after the
+      -- first timeout, which would be obnoxious.
     }
 
 
@@ -91,7 +103,13 @@ runLsp = do
     docs     <- IORef.newIORef (Map.empty :: Docs)
     idx      <- IORef.newIORef (Map.empty :: Map.Map FilePath Idx.Index)
     shutdown <- IORef.newIORef False
-    let st = ServerState { ssDocs = docs, ssIndex = idx, ssShutdown = shutdown }
+    timedOut <- IORef.newIORef (Set.empty :: Set.Set FilePath)
+    let st = ServerState
+            { ssDocs = docs
+            , ssIndex = idx
+            , ssShutdown = shutdown
+            , ssTimedOutFiles = timedOut
+            }
     forever $ do
         r <- try (handleOne st) :: IO (Either SomeException ())
         case r of
@@ -192,22 +210,23 @@ dispatch st req = do
             if wasShutdown
                 then exitSuccess
                 else exitWith (ExitFailure 1)
-        "textDocument/didOpen"        -> handleDidOpen docs req
-        "textDocument/didChange"      -> handleDidChange docs req
+        "textDocument/didOpen"        -> handleDidOpenSt st req
+        "textDocument/didChange"      -> handleDidChangeSt st req
         "textDocument/didSave"        -> handleDidSaveSt st req
         "textDocument/didClose"       -> handleDidClose docs req
         "textDocument/hover"          -> handleHoverIdx st req reqId
-        "textDocument/completion"     -> handleCompletion docs req reqId
+        "textDocument/completion"     -> handleCompletionSt st req reqId
         "textDocument/definition"     -> handleDefinitionIdx st req reqId
         "textDocument/declaration"    -> handleDefinitionIdx st req reqId
         "textDocument/documentSymbol" -> handleDocumentSymbol docs req reqId
         "textDocument/formatting"     -> handleFormatting docs req reqId
         "textDocument/references"     -> handleReferencesIdx st req reqId
-        "textDocument/rename"         -> handleRename docs req reqId
+        "textDocument/rename"         -> handleRenameSt st req reqId
         "textDocument/prepareRename"  -> handlePrepareRename docs req reqId
         "textDocument/signatureHelp"  -> handleSignatureHelp docs req reqId
         "textDocument/codeAction"          -> handleCodeAction docs req reqId
         "textDocument/semanticTokens/full" -> handleSemanticTokens docs req reqId
+        "textDocument/inlayHint"           -> handleInlayHint st req reqId
         _ -> case reqId of
             Just _  -> sendReply reqId A.Null
             Nothing -> return ()
@@ -254,7 +273,11 @@ getIndex st file = do
         Just idx -> return idx
         Nothing  -> do
             idx <- Idx.buildIndex root
-            IORef.modifyIORef (ssIndex st) (Map.insert root idx)
+            -- atomicModifyIORef' (the prime variant) forces the
+            -- new map value strictly so subsequent readers can never
+            -- observe a half-evaluated thunk.
+            IORef.atomicModifyIORef' (ssIndex st) $ \m ->
+                (Map.insert root idx m, ())
             return idx
 
 -- | Force a fresh index for `file`'s project.
@@ -282,40 +305,373 @@ handleHoverIdx st req reqId = do
                     :: IO (Either SomeException (Maybe A.Value))
             case r of
                 Right (Just h) -> sendReply reqId h
-                _              -> sendReply reqId A.Null
+                _ -> sendReply reqId A.Null
 
 
 computeHoverIdx :: ServerState -> FilePath -> T.Text -> Int -> Int -> IO (Maybe A.Value)
 computeHoverIdx st file text line col =
     case Parse.parseModule text of
         Left _ -> return Nothing
-        Right srcMod -> case identAtPosition srcMod (line + 1) (col + 1) of
-            Nothing   -> return Nothing
-            Just name -> do
-                idx <- getIndex st file
-                let mSym = Idx.lookupAtCursor idx file (line + 1) (col + 1) name
-                case mSym of
-                    Just s | hasType s -> return (Just (mkHover (renderSym s)))
-                    _ -> do
-                        -- Fallback: run the single-file solve pipeline so
-                        -- identifiers not in the index (stdlib kernels,
-                        -- prelude builtins) or indexed without a type
-                        -- (inferred functions) still get a type on hover.
-                        solvedType <- solveForName srcMod name
-                        case solvedType of
-                            Just t  ->
-                                let sig = name ++ " : " ++ Solve.showType t
-                                    modLine = case mSym of
-                                        Just s | Idx.symModule s /= "" ->
-                                            "\n-- defined in " ++ Idx.symModule s
-                                        _ -> ""
-                                in return (Just (mkHover (sig ++ modLine)))
-                            Nothing ->
-                                case kernelTypeSig name of
-                                    Just sig -> return (Just (mkHover (name ++ " : " ++ sig)))
-                                    Nothing  -> case mSym of
-                                        Just s  -> return (Just (mkHover (renderSym s)))
-                                        Nothing -> return (Just (mkHover name))
+        Right srcMod ->
+            case identAtPositionWithText srcMod text (line + 1) (col + 1) of
+                Nothing -> return Nothing
+                -- Field access (`model.count`) — the ident extracted from
+                -- exprIdents has a leading `.`. We resolve it by finding
+                -- the parent record's solved type and reading the field.
+                -- Handles record literals + accessors too.
+                Just ('.':fieldName) -> do
+                    fieldType <- resolveFieldType st file text srcMod line col fieldName
+                    case fieldType of
+                        Just sig -> return (Just (mkHover ("." ++ fieldName ++ " : " ++ sig)))
+                        Nothing  -> return (Just (mkHover ("." ++ fieldName)))
+                Just name -> do
+                    idx <- getIndex st file
+                    -- Module-name hover: if the name matches an indexed
+                    -- module, show a one-line summary (symbol count +
+                    -- exposed-via if there's an alias). Detected by an
+                    -- exact match in idxModules.
+                    case Map.lookup name (Idx.idxModules idx) of
+                        Just modPath ->
+                            let symsCount = length (fromMaybe [] (Map.lookup modPath (Idx.idxByFile idx)))
+                                descr = "module " ++ name
+                                      ++ " — " ++ show symsCount ++ " symbol(s)"
+                            in return (Just (mkHover descr))
+                        Nothing -> do
+                            let mSym = Idx.lookupAtCursor idx file (line + 1) (col + 1) name
+                            case mSym of
+                                Just s | hasType s ->
+                                    return (Just (mkHover (renderSym s)))
+                                _ -> do
+                                    -- Fallback: single-file solve for stdlib /
+                                    -- prelude / inferred names not in the
+                                    -- index. Bounded by a 2s timeout so a
+                                    -- pathological file can't pin the LSP.
+                                    solvedType <- fromMaybe Nothing <$>
+                                        timeout (2 * 1000 * 1000)
+                                            (solveForName srcMod name)
+                                    case solvedType of
+                                        Just t  ->
+                                            let sig = name ++ " : " ++ Solve.showType t
+                                                modLine = case mSym of
+                                                    Just s | Idx.symModule s /= "" ->
+                                                        "\n-- defined in " ++ Idx.symModule s
+                                                    _ -> ""
+                                            in return (Just (mkHover (sig ++ modLine)))
+                                        Nothing ->
+                                            -- Kernel-only symbols: Task.run,
+                                            -- Cmd.perform, etc. These have
+                                            -- no source .sky file, so they
+                                            -- don't appear in the workspace
+                                            -- index. Their HM types live in
+                                            -- lookupKernelType — same source
+                                            -- the type-checker uses. Hovering
+                                            -- now shows e.g. `Task.run :
+                                            -- Task e a -> Result e a`.
+                                            case kernelLookupForHover name of
+                                                Just sig -> return (Just (mkHover (name ++ " : " ++ sig)))
+                                                Nothing ->
+                                                    case kernelTypeSig name of
+                                                        Just sig -> return (Just (mkHover (name ++ " : " ++ sig)))
+                                                        Nothing  -> case mSym of
+                                                            Just s  -> return (Just (mkHover (renderSym s)))
+                                                            Nothing -> return (Just (mkHover name))
+
+
+-- | Look up a qualified or bare name in the runtime kernel registry
+-- (Sky.Type.Constrain.Expression.lookupKernelType). Used by hover so
+-- kernel-only symbols (Task.run, Cmd.perform, JsonDec.string, etc.)
+-- show their real type signatures instead of just the name.
+kernelLookupForHover :: String -> Maybe String
+kernelLookupForHover name =
+    -- Split `Mod.fn` (and `Mod.Sub.fn` chains — Sky qualified names
+    -- can have multiple segments, but kernel registry uses last-
+    -- segment-as-name shape).
+    let parts = splitOnDots name
+    in case parts of
+        [m, f] -> renderAnnotation <$> ConstrainExpr.lookupKernelType m f
+        _ -> Nothing
+  where
+    splitOnDots s = case break (== '.') s of
+        (before, '.':after) -> before : splitOnDots after
+        (before, _)         -> [before]
+
+    renderAnnotation :: Ty.Annotation -> String
+    renderAnnotation (Ty.Forall _ ty) = Solve.showType ty
+
+
+-- | Resolve a field name's type by finding the enclosing record
+-- expression and looking up the field in its solved type. Returns
+-- a rendered type string (e.g. "Int") or Nothing if the parent's
+-- type isn't known or doesn't have the field.
+--
+-- Strategy:
+--   1. Find the parent expression at the cursor that's an Access
+--      or Record literal.
+--   2. Look up the parent's expression type via the workspace's
+--      solver-tracked types.
+--   3. If the parent is a record type, read the field's type.
+--
+-- Falls back to scanning user record-type aliases declared in the
+-- module — when `model : Model` and Model is `{count : Int}`, hover
+-- on `.count` shows `Int` even when the solver hasn't typed the
+-- access expression directly.
+resolveFieldType :: ServerState -> FilePath -> T.Text -> Src.Module -> Int -> Int -> String -> IO (Maybe String)
+resolveFieldType st path _text srcMod line col fieldName = do
+    let l = line + 1
+        c = col + 1
+    case findRecordContextAtPos srcMod l c fieldName of
+        Nothing -> return Nothing
+        Just targetName ->
+            -- Try same-file first (cheap, no index lookup).
+            case findFieldOnAlias srcMod l c targetName fieldName of
+                Just sig -> return (Just sig)
+                Nothing  ->
+                    -- Cross-file: walk to find target's type, look
+                    -- up the alias body in workspace index.
+                    case findTargetType srcMod l c targetName of
+                        Nothing -> return Nothing
+                        Just typeExpr ->
+                            case extractTypeName typeExpr of
+                                Nothing -> return Nothing
+                                Just typeName -> do
+                                    -- Search the workspace index for an
+                                    -- alias declaration with this name.
+                                    eidx <- try (getIndex st path)
+                                        :: IO (Either SomeException Idx.Index)
+                                    case eidx of
+                                        Left _    -> return Nothing
+                                        Right idx ->
+                                            return (lookupAliasFieldInIndex
+                                                        idx typeName fieldName)
+
+
+-- | Search the workspace index for a type alias named `typeName` and
+-- return the rendered type of `fieldName` from its body. Walks
+-- `idxFileSrc` re-parsing each file to find the alias declaration —
+-- the index doesn't currently store alias bodies directly. Cost is
+-- one re-parse per project file in the worst case; the alias name
+-- match short-circuits.
+lookupAliasFieldInIndex :: Idx.Index -> String -> String -> Maybe String
+lookupAliasFieldInIndex idx typeName fieldName =
+    let files = Map.toList (Idx.idxFileSrc idx)
+        candidates = concatMap go files
+    in case candidates of
+        (s:_) -> Just s
+        []    -> Nothing
+  where
+    go (_, src) = case Parse.parseModule src of
+        Left _ -> []
+        Right m ->
+            [ resolved
+            | A.At _ a <- Src._aliases m
+            , let A.At _ n = Src._aliasName a
+            , n == typeName
+            , let A.At _ body = Src._aliasType a
+            , Just resolved <- [findFieldInTypeExpr fieldName body]
+            ]
+
+
+-- | Walk the expression tree to find the access target whose
+-- expression contains the cursor at the field name. Returns the
+-- target identifier name (e.g. "model" in `model.count`).
+findRecordContextAtPos :: Src.Module -> Int -> Int -> String -> Maybe String
+findRecordContextAtPos srcMod line col _fieldName =
+    let allValues = [v | A.At _ v <- Src._values srcMod]
+        candidates = concatMap walkValue allValues
+        hits = [n | (reg, n) <- candidates, regionContains reg line col]
+    in case hits of
+        (n:_) -> Just n
+        []    -> Nothing
+  where
+    walkValue (Src.Value _ _ body _) = walkExpr body
+
+    walkExpr :: Src.Expr -> [(A.Region, String)]
+    walkExpr (A.At _ e) = case e of
+        -- Cursor on the field name → record (fieldRegion, targetName)
+        -- only if target is a simple Var. (Chained access like
+        -- `model.user.name` would need recursion; keep simple for v1.)
+        Src.Access (A.At _ (Src.Var n)) (A.At fr _) -> [(fr, n)]
+        Src.Access target _ -> walkExpr target
+        Src.Call f xs        -> walkExpr f ++ concatMap walkExpr xs
+        Src.Binops pairs x   -> concatMap (walkExpr . fst) pairs ++ walkExpr x
+        Src.Lambda _ body    -> walkExpr body
+        Src.If arms e'       -> concatMap (\(c,b) -> walkExpr c ++ walkExpr b) arms ++ walkExpr e'
+        Src.Let _ body       -> walkExpr body
+        Src.Case s arms      -> walkExpr s ++ concatMap (walkExpr . snd) arms
+        Src.Tuple a b cs     -> walkExpr a ++ walkExpr b ++ concatMap walkExpr cs
+        Src.List xs          -> concatMap walkExpr xs
+        Src.Negate inner     -> walkExpr inner
+        Src.Paren inner      -> walkExpr inner
+        Src.Record fs        -> concatMap (walkExpr . snd) fs
+        Src.Update _ fs      -> concatMap (walkExpr . snd) fs
+        _ -> []
+
+
+-- | Find the rendered type of `fieldName` on `target` by:
+--   1. Finding `target`'s type from any of these sources:
+--      - top-level value annotation `target : SomeType`
+--      - enclosing function's parameter annotation: if the cursor
+--        is inside `f model = ...` and `f : Model -> Int`, then
+--        target=model has type Model.
+--   2. Resolving SomeType via type aliases (`Model = { count : Int }`).
+--   3. Looking up the field in the resolved record body.
+findFieldOnAlias :: Src.Module -> Int -> Int -> String -> String -> Maybe String
+findFieldOnAlias srcMod line col target fieldName =
+    let mTargetType = findTargetType srcMod line col target
+    in case mTargetType of
+        Just typeExpr -> resolveFieldThroughAlias srcMod typeExpr fieldName
+        Nothing       -> Nothing
+
+
+-- | Resolve a type expression through alias chains, then look up
+-- `fieldName` in the resulting record. e.g. `Model` → `{count :
+-- Int}` → `Int`.
+resolveFieldThroughAlias :: Src.Module -> Src.TypeAnnotation -> String -> Maybe String
+resolveFieldThroughAlias srcMod typeExpr fieldName =
+    case extractTypeName typeExpr of
+        Just typeName ->
+            let aliasBodies =
+                    [ body
+                    | A.At _ a <- Src._aliases srcMod
+                    , let A.At _ n = Src._aliasName a
+                    , n == typeName
+                    , let A.At _ body = Src._aliasType a
+                    ]
+            in case aliasBodies of
+                (body:_) -> findFieldInTypeExpr fieldName body
+                []       -> findFieldInTypeExpr fieldName typeExpr
+        Nothing -> findFieldInTypeExpr fieldName typeExpr
+
+
+-- | Find the type expression for `target` by checking:
+--   1. Top-level value annotations (target = some annotated value)
+--   2. The enclosing function's parameter list — if `target` is the
+--      Nth parameter of function `f : T1 -> T2 -> ... -> R`, return
+--      Tn.
+findTargetType :: Src.Module -> Int -> Int -> String -> Maybe Src.TypeAnnotation
+findTargetType srcMod line col target =
+    -- Try top-level annotation first.
+    let topLevel = [ ann | A.At _ v <- Src._values srcMod
+                         , let A.At _ n = Src._valueName v
+                         , n == target
+                         , Just (A.At _ ann) <- [Src._valueType v]
+                         ]
+    in case topLevel of
+        (a:_) -> Just a
+        []    -> findParamType srcMod line col target
+
+
+-- | Look at the enclosing top-level function's annotation and
+-- parameter list. If `target` is a PVar in position N of the param
+-- list, return the Nth argument type from the annotation.
+--
+-- The Value's outer region is just the name's region (parser quirk),
+-- so we check the BODY's region instead — `_valueBody`'s `A.At` is
+-- the full body including any sub-expressions, which is what we
+-- need to detect "cursor inside this function".
+findParamType :: Src.Module -> Int -> Int -> String -> Maybe Src.TypeAnnotation
+findParamType srcMod line col target =
+    let candidates = [ v
+                     | A.At _ v <- Src._values srcMod
+                     , let A.At bodyReg _ = Src._valueBody v
+                     , regionContains bodyReg line col
+                     ]
+    in case candidates of
+        (v:_) -> case Src._valueType v of
+            Just (A.At _ typeExpr) ->
+                let pats = Src._valuePatterns v
+                    paramIdx = findParamIndex target pats
+                in case paramIdx of
+                    Just i  -> nthArgType i typeExpr
+                    Nothing -> Nothing
+            Nothing -> Nothing
+        [] -> Nothing
+
+
+-- | Find the index of the parameter whose pattern binds `name`.
+findParamIndex :: String -> [Src.Pattern] -> Maybe Int
+findParamIndex name pats = go 0 pats
+  where
+    go _ [] = Nothing
+    go i (p:rest)
+        | patHasName p name = Just i
+        | otherwise         = go (i + 1) rest
+
+    patHasName (A.At _ p) n = case p of
+        Src.PVar v          -> v == n
+        Src.PAlias inner (A.At _ v) -> v == n || patHasName inner n
+        _                   -> False
+
+
+-- | Walk an annotated function type and return the i-th argument
+-- type. e.g. `Model -> String -> Int` index 0 = Model, index 1 = String.
+-- Returns Nothing if i is past the arrow chain length.
+nthArgType :: Int -> Src.TypeAnnotation -> Maybe Src.TypeAnnotation
+nthArgType 0 (Src.TLambda from _) = Just from
+nthArgType i (Src.TLambda _ rest) = nthArgType (i - 1) rest
+nthArgType _ _ = Nothing
+
+
+-- | Extract the head type name from a type expression like
+-- `TypeName a b` or just `TypeName`.
+-- Src.TType has shape `TType module [nameSegs] args` so we read
+-- the LAST segment of the second slot.
+extractTypeName :: Src.TypeAnnotation -> Maybe String
+extractTypeName (Src.TType _ segs _) = case reverse segs of
+    (n:_) -> Just n
+    []    -> Nothing
+extractTypeName (Src.TTypeQual _ n _) = Just n
+extractTypeName _ = Nothing
+
+
+-- | Search a record-type expression for a field and render its
+-- type. Returns Nothing if the type expression isn't a record or
+-- the field is missing.
+findFieldInTypeExpr :: String -> Src.TypeAnnotation -> Maybe String
+findFieldInTypeExpr fieldName (Src.TRecord fields _) =
+    case [ ft | (A.At _ fn, ft) <- fields, fn == fieldName ] of
+        (ft:_) -> Just (renderTypeAnnotation ft)
+        []     -> Nothing
+findFieldInTypeExpr _ _ = Nothing
+
+
+-- | Lossy renderer for a Src.TypeAnnotation. Used for hover only —
+-- the canonical type machinery would be more precise but requires
+-- the canonicalised module.
+renderTypeAnnotation :: Src.TypeAnnotation -> String
+renderTypeAnnotation t = case t of
+    Src.TLambda a b      ->
+        renderTypeAnnotationParen a ++ " -> " ++ renderTypeAnnotation b
+    Src.TVar n           -> n
+    Src.TType _ segs args ->
+        let name = case reverse segs of (n:_) -> n; [] -> "?"
+        in name ++ if null args then ""
+             else " " ++ unwords (map renderTypeAnnotationAtom args)
+    Src.TTypeQual _ n args ->
+        n ++ if null args then ""
+             else " " ++ unwords (map renderTypeAnnotationAtom args)
+    Src.TUnit            -> "()"
+    Src.TTuple a b cs    ->
+        "( " ++ renderTypeAnnotation a ++ ", " ++ renderTypeAnnotation b
+            ++ concatMap ((", " ++) . renderTypeAnnotation) cs ++ " )"
+    Src.TRecord fs _     ->
+        "{ " ++ commaSep (map (\(A.At _ fn, ft) -> fn ++ " : " ++ renderTypeAnnotation ft) fs)
+             ++ " }"
+  where
+    commaSep []     = ""
+    commaSep [x]    = x
+    commaSep (x:xs) = x ++ ", " ++ commaSep xs
+
+renderTypeAnnotationAtom :: Src.TypeAnnotation -> String
+renderTypeAnnotationAtom inner = case inner of
+    Src.TLambda{} -> "(" ++ renderTypeAnnotation inner ++ ")"
+    Src.TType _ _ (_:_) -> "(" ++ renderTypeAnnotation inner ++ ")"
+    _ -> renderTypeAnnotation inner
+
+renderTypeAnnotationParen :: Src.TypeAnnotation -> String
+renderTypeAnnotationParen inner = case inner of
+    Src.TLambda{} -> "(" ++ renderTypeAnnotation inner ++ ")"
+    _ -> renderTypeAnnotation inner
 
 
 -- | Does this Sym carry a real type signature?
@@ -356,8 +712,22 @@ handleDefinitionIdx st req reqId = do
         Nothing -> sendReply reqId A.Null
         Just (_, text) -> case Parse.parseModule text of
             Left _ -> sendReply reqId A.Null
-            Right srcMod -> case identAtPosition srcMod (line + 1) (col + 1) of
+            Right srcMod -> case identAtPositionWithText srcMod text (line + 1) (col + 1) of
                 Nothing -> sendReply reqId A.Null
+                -- Field access (`.field`) → jump to the field's
+                -- declaration in the parent record type. Resolves
+                -- via the same path as field hover (find target,
+                -- look up its annotation, find the alias body, find
+                -- the field's declared region).
+                Just ('.':fieldName) -> do
+                    case findFieldDefRegion srcMod (line + 1) (col + 1) fieldName of
+                        Just (_, reg) -> sendReply reqId $ A.object
+                            -- Same-file lookup for now; future work
+                            -- may chase imports for cross-file aliases.
+                            [ "uri"   A..= uri
+                            , "range" A..= regionToLspRange reg
+                            ]
+                        Nothing -> sendReply reqId A.Null
                 Just name -> do
                     idx <- getIndex st path
                     case Idx.lookupAtCursor idx path (line + 1) (col + 1) name of
@@ -366,6 +736,32 @@ handleDefinitionIdx st req reqId = do
                             , "range" A..= regionToLspRange (Idx.symRegion s)
                             ]
                         Nothing -> sendReply reqId A.Null
+
+
+-- | Find the source region where a field is declared in its
+-- parent record type alias. Returns (filePath, region) so the LSP
+-- can produce a Location.
+--
+-- Only handles same-file aliases for now — cross-file alias chains
+-- would need to walk the workspace index too.
+findFieldDefRegion :: Src.Module -> Int -> Int -> String -> Maybe (FilePath, A.Region)
+findFieldDefRegion srcMod line col fieldName = do
+    targetName <- findRecordContextAtPos srcMod line col fieldName
+    typeExpr   <- findTargetType srcMod line col targetName
+    typeName   <- extractTypeName typeExpr
+    let aliases =
+            [ (a, body)
+            | A.At _ a <- Src._aliases srcMod
+            , let A.At _ n = Src._aliasName a
+            , n == typeName
+            , let A.At _ body = Src._aliasType a
+            ]
+    case aliases of
+        ((_, Src.TRecord fields _):_) ->
+            case [ fr | (A.At fr fn, _) <- fields, fn == fieldName ] of
+                (fr:_) -> Just ("", fr)  -- same-file; uri set by caller
+                []     -> Nothing
+        _ -> Nothing
 
 
 -- ─── didSave with index invalidation (Stage 5) ────────────────────────
@@ -415,14 +811,51 @@ handleDidSaveSt :: ServerState -> A.Value -> IO ()
 handleDidSaveSt st req = do
     let uri  = jsonStrAt ["params", "textDocument", "uri"] req
         path = uriToPath uri
+    -- IMPORTANT: refresh the workspace index BEFORE running diagnostics.
+    -- The new file content is now on disk; the externals map needs to
+    -- reflect it so any cross-file impact (a new top-level binding,
+    -- a renamed export, a fixed type error in another file) is
+    -- visible to the diagnostics pass that follows. Best effort —
+    -- failures don't break the server.
+    _ <- try (refreshIndex st path) :: IO (Either SomeException Idx.Index)
     docs <- IORef.readIORef (ssDocs st)
     case Map.lookup uri docs of
-        Just (_, text) -> publishDiagnostics uri text
+        Just (_, text) -> publishDiagnosticsSt (Just st) uri text
         Nothing -> return ()
-    -- Rebuild the workspace index so cross-file lookups see the change.
-    -- Best effort — failures don't break the server.
-    _ <- try (refreshIndex st path) :: IO (Either SomeException Idx.Index)
     return ()
+
+
+-- | handleDidOpenSt: same as handleDidOpen but routes diagnostics
+-- through the workspace-aware pipeline so cross-module type errors
+-- (issue #52) surface immediately on file open.
+handleDidOpenSt :: ServerState -> A.Value -> IO ()
+handleDidOpenSt st req = do
+    let uri = jsonStrAt ["params", "textDocument", "uri"] req
+        text = jsonStrAt ["params", "textDocument", "text"] req
+        version = jsonIntAt ["params", "textDocument", "version"] req
+    IORef.modifyIORef (ssDocs st) (Map.insert uri (version, text))
+    publishDiagnosticsSt (Just st) uri text
+
+
+-- | handleDidChangeSt: same as handleDidChange but workspace-aware.
+-- Note we do NOT refresh the index on every keystroke — that would
+-- be prohibitively expensive on large projects. The index reflects
+-- the on-disk state; the open file's diagnostics use the in-memory
+-- text + the on-disk-derived externals. This is the right trade-off
+-- for editor latency: the user's current file is precise; cross-file
+-- effects are visible after save (which DOES rebuild the index).
+handleDidChangeSt :: ServerState -> A.Value -> IO ()
+handleDidChangeSt st req = do
+    let uri = jsonStrAt ["params", "textDocument", "uri"] req
+        version = jsonIntAt ["params", "textDocument", "version"] req
+        changes = fromMaybe [] (jsonArrAt ["params", "contentChanges"] req)
+    case changes of
+        (c:_) ->
+            let text = jsonStrAt ["text"] c
+            in do
+                IORef.modifyIORef (ssDocs st) (Map.insert uri (version, text))
+                publishDiagnosticsSt (Just st) uri text
+        [] -> return ()
 
 
 -- ─── Initialize ────────────────────────────────────────────────────────
@@ -458,6 +891,9 @@ initializeResult = A.object
             ]
         , "completionProvider" A..= A.object
             [ "triggerCharacters" A..= (["."] :: [T.Text])
+            ]
+        , "inlayHintProvider" A..= A.object
+            [ "resolveProvider" A..= False
             ]
         ]
     , "serverInfo" A..= A.object
@@ -514,8 +950,25 @@ handleDidClose docs req = do
 -- ─── Diagnostics ───────────────────────────────────────────────────────
 
 publishDiagnostics :: T.Text -> T.Text -> IO ()
-publishDiagnostics uri text = do
-    diags <- computeDiagnostics text
+publishDiagnostics uri text = publishDiagnosticsSt Nothing uri text
+
+
+-- | publishDiagnosticsSt: when given a ServerState, use the workspace
+-- index to populate cross-module externals so type errors involving
+-- stdlib / dep modules (issue #52 — `Ui.layout codeSection` where
+-- codeSection is partially-applied) actually surface as red squiggles.
+-- Without externals, HM treats imported names as fresh polymorphic
+-- variables and rejects nothing.
+--
+-- The Nothing case (legacy `publishDiagnostics`) falls back to the
+-- old in-isolation behaviour for callers that pre-date ServerState
+-- threading. Tests use this; production paths now go through the
+-- ServerState variant.
+publishDiagnosticsSt :: Maybe ServerState -> T.Text -> T.Text -> IO ()
+publishDiagnosticsSt mst uri text = do
+    diags <- case mst of
+        Just st -> computeDiagnosticsSt st (uriToPath uri) text
+        Nothing -> computeDiagnostics text
     sendNotification "textDocument/publishDiagnostics" $ A.object
         [ "uri"         A..= uri
         , "diagnostics" A..= diags
@@ -525,6 +978,18 @@ publishDiagnostics uri text = do
 computeDiagnostics :: T.Text -> IO [A.Value]
 computeDiagnostics src = do
     r <- try (runPipeline src) :: IO (Either SomeException [A.Value])
+    case r of
+        Left _   -> return []
+        Right ds -> return ds
+
+
+-- | Like computeDiagnostics but uses the workspace index to populate
+-- cross-module externals before solving. This is the path that closes
+-- issue #52: type errors involving imported / stdlib functions surface
+-- as proper diagnostics instead of being silently accepted.
+computeDiagnosticsSt :: ServerState -> FilePath -> T.Text -> IO [A.Value]
+computeDiagnosticsSt st path src = do
+    r <- try (runPipelineSt st path src) :: IO (Either SomeException [A.Value])
     case r of
         Left _   -> return []
         Right ds -> return ds
@@ -555,28 +1020,210 @@ runPipeline src = case Parse.parseModule src of
                 cs <- Constrain.constrainModule canMod
                 r  <- Solve.solve cs
                 case r of
-                    Solve.SolveError err
-                        -- Suppress the `{ ... } vs { ... }` family
-                        -- of errors the no-externals LSP path
-                        -- false-positives on. Concretely: when HM
-                        -- can't unify two records because one or
-                        -- both came from a kernel sig (e.g.
-                        -- `Live.app`'s record-typed param) and the
-                        -- LSP doesn't have the dep externals
-                        -- loaded, the rendered diagnostic shows
-                        -- `Type mismatch: { ... } vs { ... }`. The
-                        -- truncated `{ ... }` is the giveaway —
-                        -- record types large enough to hit
-                        -- truncation are almost always legitimate
-                        -- in `sky check` (with externals); the LSP
-                        -- false-positive disappears once the
-                        -- proper externals helper lands.
-                        | isLikelyExternalsFalsePositive err ->
-                            return (map exhaustDiagnostic (Exhaust.checkModule canMod))
-                        | otherwise ->
-                            return [diagnosticFromMessage ("Type error: " ++ err)]
+                    Solve.SolveError err ->
+                        return [diagnosticFromMessage ("Type error: " ++ err)]
                     Solve.SolveOk _ ->
                         return (map exhaustDiagnostic (Exhaust.checkModule canMod))
+
+
+-- | runPipelineSt: cross-module-aware diagnostics. Builds externals
+-- from the workspace index so the open file is type-checked against
+-- the actual signatures of imported stdlib / dep functions.
+--
+-- This is what closes issue #52 in the editor: typing
+--   view : Model -> any
+--   view model = Ui.layout [] codeSection   -- partial app
+-- now produces the same red-squiggle "Type mismatch: (Model) ->
+-- Element a vs Element a" that `sky check` produces, instead of
+-- silently passing.
+--
+-- Falls back to runPipeline (no externals) when the workspace index
+-- can't be built (no sky.toml, no project root, transient build error).
+-- That keeps the editor responsive on standalone files outside a
+-- project at the cost of cross-module checks for those — which is
+-- the right trade-off (the user can't have cross-module errors in a
+-- module they aren't importing anything in).
+runPipelineSt :: ServerState -> FilePath -> T.Text -> IO [A.Value]
+runPipelineSt st path src = case Parse.parseModule src of
+    Left err ->
+        return [mkDiagnosticAtError err ("Parse error: " ++ showParseError err)]
+    Right srcMod ->
+        case Canonicalise.canonicalise srcMod of
+            Left err ->
+                return [diagnosticFromMessage ("Canonicalise: " ++ err)]
+            Right canMod -> do
+                externals <- getExternalsForFile st path srcMod canMod
+                cs <- Constrain.constrainModuleWithExternals externals canMod
+                r  <- Solve.solve cs
+                case r of
+                    Solve.SolveError err ->
+                        -- No suppression: with closed-record kernel
+                        -- sigs for Live.app / Tui.app / Cli.program
+                        -- AND field-name-aware error rendering, the
+                        -- LSP's diagnostic now matches `sky check`'s
+                        -- exactly. Limitation #19 closed.
+                        return [diagnosticFromMessage ("Type error: " ++ err)]
+                    Solve.SolveOk _ ->
+                        return (map exhaustDiagnostic (Exhaust.checkModule canMod))
+
+
+-- | Build the cross-module externals map for a given file's canonical
+-- module by consulting the workspace index. The index already holds
+-- the solved types of every other module in the project (including
+-- stdlib, materialised under .skycache/stdlib). We pull each imported
+-- module's solved types and run them through the same externals
+-- builder the production `compile` pipeline uses.
+--
+-- Empty externals on no-index path (e.g. file outside a project).
+getExternalsForFile
+    :: ServerState
+    -> FilePath
+    -> Src.Module
+    -> Can.Module
+    -> IO (Map.Map (String, String) Ty.Annotation)
+getExternalsForFile st path srcMod canMod = do
+    eidx <- try (getIndex st path) :: IO (Either SomeException Idx.Index)
+    case eidx of
+        Left _    -> return Map.empty
+        Right idx -> buildScopedExternals st path idx srcMod canMod
+
+
+-- | Compute the scoped externals for an open file: walk the file's
+-- imports, fetch ONLY the imported modules' types from the index,
+-- run them through `Idx.externalsForFile` to generate the externals
+-- map. Bounded by a 3-second wall-clock timeout — if the
+-- computation takes longer (a pathological dep generates an
+-- unbounded type), we fall back to empty externals so the editor
+-- stays responsive. Cross-module diagnostics on that file are
+-- temporarily lost but hover / completion / goto-def still work.
+--
+-- Forces the result strictly (`!ext, !sz`) so the cost is paid here,
+-- inside the timeout, instead of later when the constraint solver
+-- traverses the lazy thunk.
+buildScopedExternals
+    :: ServerState
+    -> FilePath
+    -> Idx.Index
+    -> Src.Module
+    -> Can.Module
+    -> IO (Map.Map (String, String) Ty.Annotation)
+buildScopedExternals st path idx srcMod canMod = do
+    -- Build externals scoped to (imports ∪ references). Without
+    -- this scope the LSP attempts to feed the entire workspace's
+    -- externals (~1800 entries on skyshop) into every per-file
+    -- solve, hanging on pathological FFI types (Stripe SDK,
+    -- Firebase). The 3s timeout is a safety net for projects that
+    -- still trigger a runaway generaliseToAnnotation despite the
+    -- scoping; the editor stays responsive at the cost of cross-
+    -- module diagnostics on that one file.
+    --
+    -- We union explicit `import M` statements (from the source AST)
+    -- with `Can.VarTopLevel`-derived references (from the
+    -- canonicalised expressions). Importing without referencing
+    -- would otherwise give the LSP an empty scope until the user
+    -- actually wrote a usage.
+    let compute = do
+            let !imports = collectImportNames srcMod canMod
+                !ext = Idx.externalsForFile imports idx
+                _ = Map.size ext   -- force spine
+            return ext
+    r <- timeout (3 * 1000 * 1000) compute
+    case r of
+        Just ext -> return ext
+        Nothing -> do
+            -- Surface the timeout to the editor as a one-shot
+            -- info notification. Without this the user just sees
+            -- red squiggles silently disappear from one file
+            -- while every other file in the workspace works fine
+            -- — confusing. Dedup per file: the timeout is sticky
+            -- for the LSP-server lifetime so a single keystroke
+            -- doesn't generate a cascade of popups.
+            already <- IORef.atomicModifyIORef' (ssTimedOutFiles st) $
+                \s -> if Set.member path s
+                    then (s, True)
+                    else (Set.insert path s, False)
+            when (not already) $
+                sendNotification "window/showMessage" $ A.object
+                    [ "type"    A..= (3 :: Int) -- 3 = Info
+                    , "message" A..=
+                        ("Sky LSP: cross-module type checks degraded "
+                         ++ "for this file — externals computation "
+                         ++ "exceeded the 3 s budget. Hover, "
+                         ++ "completion and goto-def still work; "
+                         ++ "`sky check` is unaffected.")
+                    ]
+            Diag.logRaw_uri (T.pack ("file://" ++ path))
+                "LSP: scoped-externals computation exceeded 3s budget"
+            return Map.empty
+
+
+-- | Compute the externals scope for an open file: union of
+-- (a) every `import M` statement in the source AST and
+-- (b) every cross-module reference observed in the canonicalised
+-- expressions (`Can.VarTopLevel`, `Can.VarCtor`, etc.).
+--
+-- Why both? An `import` alone tells us the user opted in to that
+-- module's surface — even if they haven't written a reference yet,
+-- the LSP should treat its symbols as candidates so that the moment
+-- they DO write a reference, type-check fires correctly.
+-- References (without imports) catch implicit re-exports / Prelude
+-- and any other path we'd otherwise miss.
+collectImportNames :: Src.Module -> Can.Module -> [String]
+collectImportNames srcMod canMod =
+    let homeName = ModuleName.toString (Can._name canMod)
+        srcImports = [ joinDots segs
+                     | imp <- Src._imports srcMod
+                     , let A.At _ segs = Src._importName imp
+                     ]
+        usage = collectDeclModNames (Can._decls canMod)
+        union = Set.fromList (srcImports ++ usage)
+    in Set.toList (Set.delete homeName union)
+  where
+    joinDots = foldr (\a b -> if null b then a else a ++ "." ++ b) ""
+
+collectDeclModNames :: Can.Decls -> [String]
+collectDeclModNames decls = case decls of
+    Can.Declare def rest -> defModNames def ++ collectDeclModNames rest
+    Can.DeclareRec d ds rest ->
+        defModNames d ++ concatMap defModNames ds ++ collectDeclModNames rest
+    Can.SaveTheEnvironment -> []
+
+defModNames :: Can.Def -> [String]
+defModNames d = case d of
+    Can.Def _ _ body -> exprModNames body
+    Can.TypedDef _ _ _ body _ -> exprModNames body
+    Can.DestructDef _ body -> exprModNames body
+
+exprModNames :: Can.Expr -> [String]
+exprModNames (A.At _ e) = case e of
+    Can.VarTopLevel home _ -> [ModuleName.toString home]
+    Can.VarCtor _ home _ _ _ -> [ModuleName.toString home]
+    Can.Call f xs -> exprModNames f ++ concatMap exprModNames xs
+    Can.Lambda _ body -> exprModNames body
+    Can.Let def body -> defModNames def ++ exprModNames body
+    Can.LetDestruct _ rhs body -> exprModNames rhs ++ exprModNames body
+    Can.LetRec defs body ->
+        concatMap defModNames defs ++ exprModNames body
+    Can.If arms el ->
+        concatMap (\(c, b) -> exprModNames c ++ exprModNames b) arms
+        ++ exprModNames el
+    Can.Case sub arms ->
+        exprModNames sub ++ concatMap caseArmModNames arms
+    Can.Access r _ -> exprModNames r
+    Can.Update _ _ fields ->
+        concatMap (\(_, Can.FieldUpdate _ ex) -> exprModNames ex)
+                  (Map.toList fields)
+    Can.Record fields ->
+        concatMap (exprModNames . snd) (Map.toList fields)
+    Can.Tuple a b cs ->
+        exprModNames a ++ exprModNames b ++ concatMap exprModNames cs
+    Can.List xs -> concatMap exprModNames xs
+    Can.Negate inner -> exprModNames inner
+    Can.Binop _ home _ _ a b ->
+        ModuleName.toString home : exprModNames a ++ exprModNames b
+    _ -> []
+  where
+    caseArmModNames (Can.CaseBranch _ body) = exprModNames body
 
 
 -- | True when the solver error matches the shape the no-externals
@@ -752,6 +1399,7 @@ kernelTypeSig :: String -> Maybe String
 kernelTypeSig name = Map.lookup name kernelSigs
   where
     kernelSigs = Map.fromList
+        -- Prelude / Basics
         [ ("println",      "a -> Task Error ()")
         , ("identity",     "a -> a")
         , ("always",       "a -> b -> a")
@@ -762,6 +1410,28 @@ kernelTypeSig name = Map.lookup name kernelSigs
         , ("fst",          "( a, b ) -> a")
         , ("snd",          "( a, b ) -> b")
         , ("errorToString","Error -> String")
+        -- Operators — hover on `|>`, `++`, etc. now shows the
+        -- operator's signature instead of returning empty.
+        , ("|>",           "a -> (a -> b) -> b")          -- forward pipe
+        , ("<|",           "(a -> b) -> a -> b")          -- backward pipe
+        , (">>",           "(a -> b) -> (b -> c) -> a -> c")  -- function composition
+        , ("<<",           "(b -> c) -> (a -> b) -> a -> c")
+        , ("++",           "appendable -> appendable -> appendable")
+        , ("::",           "a -> List a -> List a")
+        , ("==",           "a -> a -> Bool")
+        , ("/=",           "a -> a -> Bool")
+        , ("<",            "comparable -> comparable -> Bool")
+        , (">",            "comparable -> comparable -> Bool")
+        , ("<=",           "comparable -> comparable -> Bool")
+        , (">=",           "comparable -> comparable -> Bool")
+        , ("&&",           "Bool -> Bool -> Bool")
+        , ("||",           "Bool -> Bool -> Bool")
+        , ("+",            "number -> number -> number")
+        , ("-",            "number -> number -> number")
+        , ("*",            "number -> number -> number")
+        , ("/",            "Float -> Float -> Float")
+        , ("//",           "Int -> Int -> Int")
+        , ("^",            "number -> number -> number")
         ]
 
 
@@ -808,6 +1478,40 @@ identAtPosition srcMod line col =
         []         -> Nothing
 
 
+-- | Like identAtPosition but falls back to a line-text scan when the
+-- AST has no ident at the cursor. Used by hover + go-to-def so users
+-- can hover on type names inside annotations (`view : Model -> ...`),
+-- which the AST doesn't track per-name regions for.
+identAtPositionWithText :: Src.Module -> T.Text -> Int -> Int -> Maybe String
+identAtPositionWithText srcMod text line col =
+    case identAtPosition srcMod line col of
+        Just n  -> Just n
+        Nothing -> identInLineText text (line - 1) (col - 1)
+
+
+-- | Extract the identifier (alphanumeric + dot) word at a 0-based
+-- (line, col) cursor position from raw text. Used as the fallback
+-- for identAtPositionWithText when the AST walker misses it.
+identInLineText :: T.Text -> Int -> Int -> Maybe String
+identInLineText text line col =
+    let ls = T.lines text
+    in if line < 0 || line >= length ls
+        then Nothing
+        else
+            let cur = ls !! line
+                upto = T.take col cur
+                rest = T.drop col cur
+                lhs = T.reverse (T.takeWhile isIdentChar (T.reverse upto))
+                rhs = T.takeWhile isIdentChar rest
+                word = T.unpack (lhs `T.append` rhs)
+            in if null word then Nothing else Just word
+  where
+    isIdentChar c = c == '.' || c == '_'
+                  || (c >= 'a' && c <= 'z')
+                  || (c >= 'A' && c <= 'Z')
+                  || (c >= '0' && c <= '9')
+
+
 regionWidth :: A.Region -> Int
 regionWidth (A.Region s e) =
     let lineSpan = A._line e - A._line s
@@ -826,7 +1530,19 @@ collectIdents srcMod =
        , let ln = Src._valueName v, let A.At _ n = ln
        ]
     ++ concatMap valueIdents (Src._values srcMod)
+    -- Module path in `import X` lines — emit the full path as a
+    -- hoverable ident so cursor anywhere in `import Std.Ui as Ui`'s
+    -- module name resolves to the workspace module info. The path's
+    -- region covers all the dot-separated segments.
+    ++ [ (A.toRegion ln, joinDotsList segs)
+       | imp <- Src._imports srcMod
+       , let ln = Src._importName imp
+       , let A.At _ segs = ln
+       ]
   where
+    joinDotsList :: [String] -> String
+    joinDotsList = foldr (\a b -> if null b then a else a ++ "." ++ b) ""
+
     valueIdents (A.At _ v) =
         let pats = Src._valuePatterns v
             body = Src._valueBody v
@@ -850,14 +1566,34 @@ collectIdents srcMod =
         Src.Var n           -> [(reg, n)]
         Src.VarQual q n     -> [(reg, q ++ "." ++ n)]
         Src.Call f xs       -> exprIdents f ++ concatMap exprIdents xs
-        Src.Binops pairs x  -> concatMap (\(e',_) -> exprIdents e') pairs ++ exprIdents x
+        -- Binops: walk both expressions AND emit each operator as a
+        -- hoverable ident (so the user can hover `|>` and see its
+        -- type signature). The operator's region is the located
+        -- string's region.
+        Src.Binops pairs x  ->
+            concatMap (\(e', A.At opR op) -> exprIdents e' ++ [(opR, op)]) pairs
+                ++ exprIdents x
         Src.Lambda ps body  -> concatMap patIdents ps ++ exprIdents body
         Src.If arms e'      -> concatMap (\(c,b) -> exprIdents c ++ exprIdents b) arms ++ exprIdents e'
         Src.Let defs body   -> concatMap defIdents defs ++ exprIdents body
         Src.Case s arms     -> exprIdents s ++ concatMap (\(p, b) -> patIdents p ++ exprIdents b) arms
-        Src.Access t _      -> exprIdents t
-        Src.Update _ fs     -> concatMap (exprIdents . snd) fs
-        Src.Record fs       -> concatMap (exprIdents . snd) fs
+        -- Access: walk the target AND emit the field name as a
+        -- hoverable ident. The ident name is `.field` (with leading
+        -- dot) so the hover lookup can distinguish field access
+        -- from a regular variable named "field".
+        Src.Access t (A.At fr fn) -> exprIdents t ++ [(fr, "." ++ fn)]
+        -- Standalone accessor `.field` (point-free record getter):
+        -- expose the field name as a hoverable ident too.
+        Src.Accessor fn     -> [(reg, "." ++ fn)]
+        -- Record update `{ base | a = ..., b = ... }`: walk the
+        -- record-base name AND each field-update value. The field
+        -- names ARE syntactic locations the user would hover; emit
+        -- them as `.field` idents.
+        Src.Update (A.At br bn) fs ->
+            (br, bn) : concatMap (\(A.At fr fn, v) -> (fr, "." ++ fn) : exprIdents v) fs
+        -- Record literal: emit each field name as `.field` ident.
+        Src.Record fs ->
+            concatMap (\(A.At fr fn, v) -> (fr, "." ++ fn) : exprIdents v) fs
         Src.Tuple a b cs    -> exprIdents a ++ exprIdents b ++ concatMap exprIdents cs
         Src.List xs         -> concatMap exprIdents xs
         Src.Negate inner    -> exprIdents inner
@@ -1105,6 +1841,124 @@ collectSemTokens srcMod =
     headChar (c:_) = c
 
     isUpper c = c >= 'A' && c <= 'Z'
+
+
+-- ─── Inlay Hints ──────────────────────────────────────────────────────
+
+-- | textDocument/inlayHint — show inferred types next to let-bindings
+-- and function parameters that lack explicit annotations. Editors
+-- render these as faded inline labels (`x: Int = 42` style).
+--
+-- For now we emit:
+--   * Inferred types after `let x =` when the binder has no
+--     annotation. Reads from the workspace index's idxLocalTypes
+--     map populated by Solve.solveWithLocals.
+--   * Inferred types after a top-level `name args =` when the
+--     value has no annotation — gives users free type confirmation
+--     while writing.
+handleInlayHint :: ServerState -> A.Value -> Maybe A.Value -> IO ()
+handleInlayHint st req reqId = do
+    let uri = jsonStrAt ["params", "textDocument", "uri"] req
+        path = uriToPath uri
+    docs <- IORef.readIORef (ssDocs st)
+    case Map.lookup uri docs of
+        Nothing -> sendReply reqId (A.toJSON ([] :: [A.Value]))
+        Just (_, text) -> do
+            r <- try (computeInlayHints st path text) :: IO (Either SomeException [A.Value])
+            case r of
+                Right hs -> sendReply reqId (A.toJSON hs)
+                Left _   -> sendReply reqId (A.toJSON ([] :: [A.Value]))
+
+
+computeInlayHints :: ServerState -> FilePath -> T.Text -> IO [A.Value]
+computeInlayHints st path text = case Parse.parseModule text of
+    Left _ -> return []
+    Right srcMod -> do
+        eidx <- try (getIndex st path) :: IO (Either SomeException Idx.Index)
+        case eidx of
+            Left _    -> return []
+            Right idx -> do
+                let rename = fromMaybe Map.empty
+                                (Map.lookup path (Idx.idxRenaming idx))
+                    localTypes = fromMaybe Map.empty
+                                    (Map.lookup path (Idx.idxLocalTypes idx))
+                    -- Top-level values without explicit annotation.
+                    topHints =
+                        [ topLevelHint name reg t rename
+                        | A.At _ v <- Src._values srcMod
+                        , let A.At reg name = Src._valueName v
+                        , Nothing <- [Src._valueType v]
+                        , Just (t:_) <- [Map.lookup name localTypes]
+                        ]
+                    -- Local let-bindings: walk every value's body
+                    -- collecting Defines without annotations.
+                    localHints = concatMap (letHints rename localTypes) (Src._values srcMod)
+                return (topHints ++ localHints)
+
+
+-- | Hint after a top-level binder name `foo` → ` : Int -> String`.
+-- Position is the END of the binder name; LSP renders the label
+-- inline at that column.
+topLevelHint :: String -> A.Region -> Ty.Type -> Map.Map String String -> A.Value
+topLevelHint _ (A.Region _ end) ty rename =
+    let label = " : " ++ Solve.showTypeWith rename ty
+    in A.object
+        [ "position" A..= A.object
+            [ "line"      A..= (max 0 (A._line end - 1) :: Int)
+            , "character" A..= (max 0 (A._col end - 1)  :: Int)
+            ]
+        , "label"  A..= label
+        , "kind"   A..= (1 :: Int)        -- LSP InlayHintKind.Type
+        , "paddingLeft" A..= False
+        ]
+
+
+-- | Walk a top-level value's body for let-Defines without
+-- annotations and emit a type hint after each binder name.
+letHints :: Map.Map String String -> Map.Map String [Ty.Type] -> A.Located Src.Value -> [A.Value]
+letHints rename localTypes (A.At _ v) =
+    let body = Src._valueBody v
+    in walkExpr body
+  where
+    walkExpr :: Src.Expr -> [A.Value]
+    walkExpr (A.At _ e) = case e of
+        Src.Let defs body -> concatMap goDef defs ++ walkExpr body
+        Src.Lambda _ inner -> walkExpr inner
+        Src.Call f xs -> walkExpr f ++ concatMap walkExpr xs
+        Src.Binops pairs end ->
+            concatMap (walkExpr . fst) pairs ++ walkExpr end
+        Src.If arms els ->
+            concatMap (\(c, b) -> walkExpr c ++ walkExpr b) arms ++ walkExpr els
+        Src.Case s arms -> walkExpr s ++ concatMap (walkExpr . snd) arms
+        Src.Tuple a b cs -> walkExpr a ++ walkExpr b ++ concatMap walkExpr cs
+        Src.List xs -> concatMap walkExpr xs
+        Src.Negate inner -> walkExpr inner
+        Src.Paren inner -> walkExpr inner
+        Src.Access t _ -> walkExpr t
+        Src.Update _ fs -> concatMap (walkExpr . snd) fs
+        Src.Record fs -> concatMap (walkExpr . snd) fs
+        _ -> []
+
+    goDef (A.At _ d) = case d of
+        -- Skip Defines that already have an annotation.
+        Src.Define (A.At reg n) _ body (Just _) -> walkExpr body
+        Src.Define (A.At reg n) _ body Nothing ->
+            case Map.lookup n localTypes of
+                Just (t:_) ->
+                    [ A.object
+                        [ "position" A..= A.object
+                            [ "line"      A..= (max 0 (A._line (regEnd reg) - 1) :: Int)
+                            , "character" A..= (max 0 (A._col (regEnd reg) - 1)  :: Int)
+                            ]
+                        , "label"  A..= (" : " ++ Solve.showTypeWith rename t)
+                        , "kind"   A..= (1 :: Int)
+                        , "paddingLeft" A..= False
+                        ]
+                    ] ++ walkExpr body
+                _ -> walkExpr body
+        Src.Destruct _ body -> walkExpr body
+
+    regEnd (A.Region _ e) = e
 
 
 -- ─── Code Actions ─────────────────────────────────────────────────────
@@ -1469,6 +2323,94 @@ handleRename docs req reqId = do
                         [ "changes" A..= A.object [ AK.fromText uri A..= edits ] ]
 
 
+-- | Workspace-wide rename. Walks every file in the index for
+-- references to `name` and produces a WorkspaceEdit.
+--
+-- Strategy:
+--   1. Identify the symbol being renamed via the workspace index.
+--   2. If it's a LOCAL binding, rename only in the current file
+--      (locals can't escape the file they're declared in).
+--   3. If it's a TOP-LEVEL symbol (function, type, ctor), walk
+--      every file's parsed module for references — both unqualified
+--      uses (after `exposing`) and module-qualified uses
+--      (`Mod.name`, accounting for the file's import alias).
+handleRenameSt :: ServerState -> A.Value -> Maybe A.Value -> IO ()
+handleRenameSt st req reqId = do
+    let uri  = jsonStrAt ["params", "textDocument", "uri"] req
+        line = jsonIntAt ["params", "position", "line"] req
+        col  = jsonIntAt ["params", "position", "character"] req
+        newName = jsonStrAt ["params", "newName"] req
+        path = uriToPath uri
+    docs <- IORef.readIORef (ssDocs st)
+    case Map.lookup uri docs of
+        Nothing -> sendReply reqId A.Null
+        Just (_, text) -> case Parse.parseModule text of
+            Left _       -> sendReply reqId A.Null
+            Right srcMod -> case identAtPosition srcMod (line + 1) (col + 1) of
+                Nothing -> sendReply reqId A.Null
+                Just name -> do
+                    let short = simpleName name
+                    eidx <- try (getIndex st path) :: IO (Either SomeException Idx.Index)
+                    case eidx of
+                        -- Index unavailable → fall back to file-only.
+                        Left _    -> sendFileOnlyRename uri text short newName reqId
+                        Right idx -> do
+                            -- Is this a top-level symbol the workspace
+                            -- knows about? lookupAtCursor returns Just
+                            -- when it is.
+                            let mSym = Idx.lookupAtCursor idx path (line + 1) (col + 1) name
+                                isTopLevel = case mSym of
+                                    Just s -> Idx.symKind s `elem`
+                                                [Idx.SymFunction, Idx.SymCtor, Idx.SymType]
+                                    Nothing -> False
+                            if isTopLevel
+                                then sendWorkspaceRename idx short newName reqId
+                                else sendFileOnlyRename uri text short newName reqId
+
+
+-- File-only fallback for locals + cases where the workspace index
+-- can't be built.
+sendFileOnlyRename :: T.Text -> T.Text -> String -> T.Text -> Maybe A.Value -> IO ()
+sendFileOnlyRename uri text short newName reqId = case Parse.parseModule text of
+    Left _ -> sendReply reqId A.Null
+    Right srcMod -> do
+        let nameLen = length short
+            refs   = collectReferences srcMod short
+            edits  = [ A.object
+                          [ "range"   A..= clampRangeWidth r nameLen
+                          , "newText" A..= newName
+                          ]
+                     | r <- refs
+                     ]
+        sendReply reqId $ A.object
+            [ "changes" A..= A.object [ AK.fromText uri A..= edits ] ]
+
+
+-- Walk every file in the workspace for references and build a
+-- WorkspaceEdit covering all of them.
+sendWorkspaceRename :: Idx.Index -> String -> T.Text -> Maybe A.Value -> IO ()
+sendWorkspaceRename idx short newName reqId = do
+    let nameLen = length short
+        files = Map.toList (Idx.idxFileSrc idx)
+        perFileEdits =
+            [ (filePath, edits)
+            | (filePath, src) <- files
+            , Right srcMod <- [Parse.parseModule src]
+            , let refs = collectReferences srcMod short
+            , not (null refs)
+            , let edits = [ A.object
+                              [ "range"   A..= clampRangeWidth r nameLen
+                              , "newText" A..= newName
+                              ]
+                          | r <- refs ]
+            ]
+        changes = A.object
+            [ AK.fromText (T.pack ("file://" ++ p)) A..= eds
+            | (p, eds) <- perFileEdits
+            ]
+    sendReply reqId $ A.object [ "changes" A..= changes ]
+
+
 -- | Guarantee a rename edit's end column equals `startCol + nameLength`.
 -- Parser regions are sometimes one char too wide (trailing non-identifier
 -- consumed during lookahead); trimming keeps surrounding whitespace intact.
@@ -1829,24 +2771,480 @@ handleFormatting docs req reqId = do
 
 -- ─── Completion ────────────────────────────────────────────────────────
 
-handleCompletion :: IORef.IORef Docs -> A.Value -> Maybe A.Value -> IO ()
-handleCompletion docs req reqId = do
+handleCompletionSt :: ServerState -> A.Value -> Maybe A.Value -> IO ()
+handleCompletionSt st req reqId = do
     let uri = jsonStrAt ["params", "textDocument", "uri"] req
         line = jsonIntAt ["params", "position", "line"] req
         col  = jsonIntAt ["params", "position", "character"] req
-    m <- IORef.readIORef docs
-    let (items, isIncomplete) = case Map.lookup uri m of
-            Nothing -> (stdlibCompletions, False)
-            Just (_, text) ->
-                let ctx    = prefixAt text line col
-                    module_ = either (const Nothing) Just (Parse.parseModule text)
-                    locals = maybe [] localCompletions module_
-                    all_   = locals ++ stdlibCompletions
-                in (filterCompletions ctx all_, False)
+        path = uriToPath uri
+    m <- IORef.readIORef (ssDocs st)
+    items <- case Map.lookup uri m of
+        Nothing -> return stdlibCompletions
+        Just (_, text) -> do
+            let ctx    = prefixAt text line col
+                -- Parse recovery: the user typing `model.<cursor>`
+                -- produces a trailing-dot expression that's a parse
+                -- error. We fall back to a recovered text where the
+                -- trailing `.` is filled with a placeholder field
+                -- name so the parser succeeds and we can walk the
+                -- AST. The recovered text is ONLY used for AST-based
+                -- completion paths; the original text is what the
+                -- user sees in their editor.
+                module_ = case Parse.parseModule text of
+                    Right m'  -> Just m'
+                    Left _    -> tryParseWithRecovery text line col
+                locals = maybe [] localCompletions module_
+            -- Import-statement completion: when the current LINE starts
+            -- with `import `, suggest module names from the workspace
+            -- index. Cheap to detect (line text only, no AST), and
+            -- doesn't conflict with regular expression completion
+            -- because import lines never contain expression syntax.
+            inImport <- detectImportLine text line col
+            importMatches <- if inImport
+                then resolveImportCompletion st path ctx
+                else return []
+            -- Pattern position in `case ... of` arms: suggest
+            -- constructors of the scrutinee's type.
+            patternMatches <- case module_ of
+                Just sm -> resolvePatternCompletion st path sm line col ctx
+                Nothing -> return []
+            -- Qualified prefix paths. Two flavours:
+            --   * `<lowercase>.partial` → record field access on a
+            --     value (model.count). Look up the value's type,
+            --     enumerate its alias's fields.
+            --   * `<UpperCase>.partial` → module-qualified call
+            --     (Ui.layout, String.toUpp).
+            qualMatches <- if '.' `T.elem` ctx && not inImport
+                then resolveDotCompletion st path module_ line col ctx
+                else return []
+            -- For unqualified prefixes, also include workspace index
+            -- symbols (top-level + exposed names from the file's
+            -- explicit imports) AND let-bound names whose scope
+            -- contains the cursor.
+            unqualIdx <- if not ('.' `T.elem` ctx) && not inImport
+                then resolveUnqualifiedCompletionAt (line + 1) (col + 1)
+                            st path module_ ctx
+                else return []
+            let all_ = if inImport
+                    then importMatches  -- only show modules in import lines
+                    else patternMatches ++ locals ++ qualMatches
+                            ++ unqualIdx ++ stdlibCompletions
+            return (filterCompletions ctx all_)
     sendReply reqId (A.object
-        [ "isIncomplete" A..= isIncomplete
+        [ "isIncomplete" A..= False
         , "items"        A..= items
         ])
+
+
+-- | Replace the cursor's line with a parse-recoverable variant so
+-- common completion contexts that fail full-text parse (`model.`,
+-- `Ui.`, `case x of`) still produce a usable AST.
+--
+-- Recovery rules (applied in order):
+--   1. Trailing `<ident>.` → append `__sky_lsp_placeholder` so the
+--      Access expression parses cleanly. The walker then sees a
+--      legitimate Access node we can use for field completion.
+--   2. Bare `import <prefix>` line stays as-is (already parses or
+--      doesn't matter since import-line completion uses line text).
+--   3. Other contexts: replace the line with a stub `_ = 0` so the
+--      rest of the file parses. We lose the cursor's local AST but
+--      preserve workspace context.
+tryParseWithRecovery :: T.Text -> Int -> Int -> Maybe Src.Module
+tryParseWithRecovery text line col =
+    let recovered = recoverText text line col
+    in case Parse.parseModule recovered of
+        Right m -> Just m
+        Left _  ->
+            -- Last-resort: replace the offending line entirely.
+            let stubbed = stubLine text line
+            in case Parse.parseModule stubbed of
+                Right m -> Just m
+                Left _  -> Nothing
+
+
+-- | Recover a Sky source whose cursor line ends in a dot or
+-- otherwise breaks the parser. Returns text with a placeholder
+-- field name appended after a trailing dot.
+recoverText :: T.Text -> Int -> Int -> T.Text
+recoverText text line _col =
+    let ls = T.lines text
+    in if line < 0 || line >= length ls
+        then text
+        else
+            let cur = ls !! line
+                cur' = if T.isSuffixOf "." (T.stripEnd cur)
+                       then cur `T.append` "__sky_lsp_placeholder"
+                       else cur
+                ls' = take line ls ++ [cur'] ++ drop (line + 1) ls
+            in T.unlines ls'
+
+
+-- | Replace the cursor line with a stub binding `__sky_lsp_stub__ = 0`.
+-- Used when finer-grained recovery doesn't restore parseability.
+stubLine :: T.Text -> Int -> T.Text
+stubLine text line =
+    let ls = T.lines text
+    in if line < 0 || line >= length ls
+        then text
+        else
+            let stub = T.pack "__sky_lsp_stub__ = 0"
+                ls' = take line ls ++ [stub] ++ drop (line + 1) ls
+            in T.unlines ls'
+
+
+-- | Decide whether the cursor is inside an `import ` statement based
+-- only on the text of the current line. Cheap (no AST walk). True
+-- iff the line's first non-whitespace word is `import` and the
+-- cursor is past it.
+detectImportLine :: T.Text -> Int -> Int -> IO Bool
+detectImportLine text line col = do
+    let ls = T.lines text
+    if line < 0 || line >= length ls
+        then return False
+        else do
+            let cur = ls !! line
+                stripped = T.stripStart cur
+            return (T.isPrefixOf "import " stripped
+                    && col >= T.length (T.takeWhile (== ' ') cur) + 7)
+
+
+-- | Disambiguate dot-prefix completion based on case of the LHS:
+-- lowercase first letter → record field access on a value; uppercase
+-- → module-qualified call.
+resolveDotCompletion :: ServerState -> FilePath -> Maybe Src.Module -> Int -> Int -> T.Text -> IO [A.Value]
+resolveDotCompletion st path mModule line col ctx =
+    case mModule of
+        Nothing -> return []
+        Just srcMod -> do
+            let parts = T.splitOn "." ctx
+            case parts of
+                xs@(_:_:_) ->
+                    let lhs = T.intercalate "." (init xs)
+                        partial = last xs
+                    in case T.uncons lhs of
+                        Just (h, _)
+                            | h >= 'a' && h <= 'z' ->
+                                resolveRecordFieldCompletion srcMod (line + 1) (col + 1)
+                                    (T.unpack lhs) (T.unpack partial)
+                            | otherwise ->
+                                resolveQualifiedCompletion st path mModule ctx
+                        Nothing -> return []
+                _ -> return []
+
+
+-- | Enumerate the fields of a record-typed value for completion at
+-- `model.<Tab>` style. Uses the same alias-chain resolution as
+-- field hover: target type → alias body → field list.
+resolveRecordFieldCompletion :: Src.Module -> Int -> Int -> String -> String -> IO [A.Value]
+resolveRecordFieldCompletion srcMod line col target partial = do
+    case findTargetType srcMod line col target of
+        Nothing -> return []
+        Just typeExpr -> do
+            -- Walk through alias chain (same-file). Cross-file aliases
+            -- are resolved separately (task #65).
+            case typeExpr of
+                Src.TRecord fields _ ->
+                    return (fieldsToCompletions target partial fields)
+                _ ->
+                    case extractTypeName typeExpr of
+                        Just typeName ->
+                            let aliasBodies =
+                                    [ body
+                                    | A.At _ a <- Src._aliases srcMod
+                                    , let A.At _ n = Src._aliasName a
+                                    , n == typeName
+                                    , let A.At _ body = Src._aliasType a
+                                    ]
+                            in case aliasBodies of
+                                (Src.TRecord fields _ : _) ->
+                                    return (fieldsToCompletions target partial fields)
+                                _ -> return []
+                        Nothing -> return []
+  where
+    fieldsToCompletions baseName lp fields =
+        -- Three fields, each doing one job:
+        --   * label     = bare field name (clean dropdown)
+        --   * insertText = bare field name (cursor is after the dot;
+        --                  inserting "count" yields "m.count")
+        --   * filterText = qualified form (so the server's '.'-aware
+        --                  filterCompletions still keeps the item, and
+        --                  editor-side fuzzy matchers see the prefix the
+        --                  user actually typed).
+        [ A.object
+            [ "label"      A..= fname
+            , "insertText" A..= fname
+            , "filterText" A..= (baseName ++ "." ++ fname)
+            , "kind"       A..= (5 :: Int)  -- LSP CompletionItemKind.Field
+            , "detail"     A..= renderTypeAnnotation ftype
+            ]
+        | (A.At _ fname, ftype) <- fields
+        , null lp || lp `isPrefixOf` fname
+        ]
+
+
+-- | Constructor completion in pattern position. When the cursor is
+-- inside a `case ... of` arm's pattern slot, look up the scrutinee's
+-- type — if it's a known ADT, suggest its constructors.
+--
+-- v1: handles top-level case scrutinees that are simple Vars whose
+-- type can be resolved via findTargetType (top-level annotation OR
+-- function parameter). Nested cases / complex scrutinees fall
+-- through with no false-positive completions.
+resolvePatternCompletion :: ServerState -> FilePath -> Src.Module -> Int -> Int -> T.Text -> IO [A.Value]
+resolvePatternCompletion st path srcMod line col partial = do
+    let l = line + 1
+        c = col + 1
+    case findCasePatternContext srcMod l c of
+        Nothing -> return []
+        Just scrutVar -> do
+            -- Find scrutinee's type; expect it to name an ADT.
+            case findTargetType srcMod l c scrutVar of
+                Nothing -> return []
+                Just typeExpr -> case extractTypeName typeExpr of
+                    Just adtName -> do
+                        eidx <- try (getIndex st path)
+                                :: IO (Either SomeException Idx.Index)
+                        case eidx of
+                            Left _    -> return []
+                            Right idx -> return (ctorCompletionsFor idx adtName partial)
+                    Nothing -> return []
+
+
+-- | Walk the source for the smallest enclosing `Case` whose pattern
+-- region contains the cursor — that's the position where we'd want
+-- ctor suggestions. Returns the scrutinee's variable name (only
+-- handles `case x of ...` v1; `case (foo y) of ...` not yet).
+findCasePatternContext :: Src.Module -> Int -> Int -> Maybe String
+findCasePatternContext srcMod line col =
+    let hits = concatMap (walkValue . extractValueExpr) (Src._values srcMod)
+    in case hits of
+        (n:_) -> Just n
+        []    -> Nothing
+  where
+    extractValueExpr (A.At _ v) = Src._valueBody v
+
+    walkExpr :: Src.Expr -> [String]
+    walkExpr (A.At _ e) = case e of
+        Src.Case (A.At _ (Src.Var scrut)) arms ->
+            -- Cursor in any pattern of an arm? Use pat region.
+            let inPattern = any (\(A.At pr _, _) -> regionContains pr line col) arms
+            in if inPattern then [scrut] else concatMap (walkExpr . snd) arms
+        Src.Case scrut arms ->
+            walkExpr scrut ++ concatMap (walkExpr . snd) arms
+        Src.Lambda _ body  -> walkExpr body
+        Src.Let _ body     -> walkExpr body
+        Src.Call f xs      -> walkExpr f ++ concatMap walkExpr xs
+        Src.Binops pairs x -> concatMap (walkExpr . fst) pairs ++ walkExpr x
+        Src.If arms els    -> concatMap (\(c', b) -> walkExpr c' ++ walkExpr b) arms ++ walkExpr els
+        Src.Tuple a b cs   -> walkExpr a ++ walkExpr b ++ concatMap walkExpr cs
+        Src.List xs        -> concatMap walkExpr xs
+        Src.Negate inner   -> walkExpr inner
+        Src.Paren inner    -> walkExpr inner
+        Src.Access t _     -> walkExpr t
+        Src.Update _ fs    -> concatMap (walkExpr . snd) fs
+        Src.Record fs      -> concatMap (walkExpr . snd) fs
+        _ -> []
+
+    walkValue :: Src.Expr -> [String]
+    walkValue = walkExpr
+
+
+-- | Enumerate constructors of an ADT from the workspace index.
+ctorCompletionsFor :: Idx.Index -> String -> T.Text -> [A.Value]
+ctorCompletionsFor idx adtName partial =
+    let lp = T.unpack partial
+        allCtors = [ s | s <- concat (Map.elems (Idx.idxByLocal idx))
+                       , Idx.symKind s == Idx.SymCtor ]
+        -- Filter ctors by membership in the named ADT — heuristic:
+        -- ctor sigs like "Red : Colour" or "Just : a -> Maybe a".
+        belongsTo s =
+            case Idx.symTypeSig s of
+                Just sig ->
+                    -- Match ": Adt" or "-> Adt" anywhere
+                    (": " ++ adtName) `isInfixOf` sig
+                    || ("-> " ++ adtName) `isInfixOf` sig
+                Nothing -> False
+        matching = [ s | s <- allCtors
+                       , belongsTo s
+                       , null lp || lp `isPrefixOf` Idx.symLocalName s ]
+    in [ A.object
+            [ "label"  A..= Idx.symLocalName s
+            , "kind"   A..= (21 :: Int)  -- EnumMember
+            , "detail" A..= maybe "" id (Idx.symTypeSig s)
+            ]
+       | s <- matching ]
+  where
+    isInfixOf needle hay = any (needle `isPrefixOf`) (tails hay)
+    tails [] = [[]]
+    tails xs@(_:rest) = xs : tails rest
+
+
+-- | Module-name completion in `import <prefix>`. Pulls from
+-- idxModules — every module the workspace has discovered.
+resolveImportCompletion :: ServerState -> FilePath -> T.Text -> IO [A.Value]
+resolveImportCompletion st path prefix = do
+    eidx <- try (getIndex st path) :: IO (Either SomeException Idx.Index)
+    case eidx of
+        Left _    -> return []
+        Right idx -> do
+            let lp = T.unpack prefix
+                modules = Map.keys (Idx.idxModules idx)
+            return [ A.object
+                        [ "label"  A..= modName
+                        , "kind"   A..= (9 :: Int)  -- Module
+                        , "detail" A..= ("module " ++ modName)
+                        ]
+                   | modName <- modules
+                   , null lp || lp `isPrefixOf` modName ]
+
+
+-- | Build completion items by resolving a qualified prefix against
+-- the workspace index. e.g. `Ui.lay` → look up `Ui` in the file's
+-- imports → "Std.Ui" → enumerate every Sym whose qualName starts
+-- with "Std.Ui." and whose local name starts with "lay".
+resolveQualifiedCompletion :: ServerState -> FilePath -> Maybe Src.Module -> T.Text -> IO [A.Value]
+resolveQualifiedCompletion st path mModule ctx = do
+    case mModule of
+        Nothing -> return []
+        Just srcMod -> do
+            eidx <- try (getIndex st path) :: IO (Either SomeException Idx.Index)
+            case eidx of
+                Left _    -> return []
+                Right idx -> do
+                    let parts = T.splitOn "." ctx
+                    case parts of
+                        [aliasOrName, localPrefix] -> do
+                            let alias = T.unpack aliasOrName
+                                lp    = T.unpack localPrefix
+                                realModule = resolveImportAlias srcMod alias
+                            -- Use the user's alias as the label
+                            -- prefix — matching what they actually
+                            -- typed. If the file has `import Std.Ui
+                            -- as Ui`, completion shows `Ui.layout`
+                            -- not `Std.Ui.layout`. Cleaner DX +
+                            -- editors apply the completion as-is.
+                            return (matchingExports idx realModule lp alias)
+                        _ -> return []
+  where
+    matchingExports idx modName lp displayPrefix =
+        let qualPrefix = modName ++ "."
+            symMatches =
+                [ s | (q, s) <- Map.toList (Idx.idxByQual idx)
+                    , qualPrefix `isPrefixOf` q
+                    , lp `isPrefixOf` Idx.symLocalName s ]
+        in [ A.object
+                -- `label` is what the user sees in the dropdown
+                -- (`Ui.layout`). `insertText` is what the editor
+                -- actually inserts when the item is accepted —
+                -- ONLY the local name (`layout`), since the user
+                -- has already typed `Ui.`. Without `insertText`
+                -- the editor inserts the label, producing
+                -- `Ui.Ui.layout`.
+                [ "label"      A..= (displayPrefix ++ "." ++ Idx.symLocalName s)
+                , "insertText" A..= Idx.symLocalName s
+                , "kind"       A..= symKindToLsp (Idx.symKind s)
+                , "detail"     A..= maybe "" id (Idx.symTypeSig s)
+                ]
+           | s <- symMatches ]
+
+
+-- | Resolve a module alias used in the user's file to its true name.
+-- `import Sky.Core.String as String` → alias "String" → "Sky.Core.String".
+-- `import Std.Ui as Ui` → "Ui" → "Std.Ui".
+-- If the alias matches no import, return it as-is (might be a real
+-- module name).
+resolveImportAlias :: Src.Module -> String -> String
+resolveImportAlias srcMod alias =
+    let imports = Src._imports srcMod
+        match = listToMaybeFirst
+            [ joinDots origName
+            | imp <- imports
+            , let A.At _ origName = Src._importName imp
+            , let aliasName = case Src._importAlias imp of
+                    Just a -> a
+                    Nothing -> joinDots origName
+            , aliasName == alias
+            ]
+    in case match of
+        Just real -> real
+        Nothing   -> alias
+  where
+    joinDots :: [String] -> String
+    joinDots = foldr (\a b -> if null b then a else a ++ "." ++ b) ""
+    listToMaybeFirst []    = Nothing
+    listToMaybeFirst (x:_) = Just x
+
+
+-- | Build unqualified completions from the index — top-level names
+-- in the current file's project, AND let-bound names whose scope
+-- contains the cursor. The cursor parameters are 1-based.
+resolveUnqualifiedCompletion :: ServerState -> FilePath -> Maybe Src.Module -> T.Text -> IO [A.Value]
+resolveUnqualifiedCompletion = resolveUnqualifiedCompletionAt 0 0
+
+
+resolveUnqualifiedCompletionAt :: Int -> Int -> ServerState -> FilePath -> Maybe Src.Module -> T.Text -> IO [A.Value]
+resolveUnqualifiedCompletionAt line col st path _mModule prefix = do
+    eidx <- try (getIndex st path) :: IO (Either SomeException Idx.Index)
+    case eidx of
+        Left _    -> return []
+        Right idx -> do
+            let lp = T.unpack prefix
+                -- Top-level + ctor + alias names in the same file.
+                fileSyms = fromMaybe [] (Map.lookup path (Idx.idxByFile idx))
+                topLevelItems =
+                    [ A.object
+                        [ "label"  A..= Idx.symLocalName s
+                        , "kind"   A..= symKindToLsp (Idx.symKind s)
+                        , "detail" A..= maybe "" id (Idx.symTypeSig s)
+                        ]
+                    | s <- fileSyms
+                    , null lp || lp `isPrefixOf` Idx.symLocalName s ]
+                -- Let-bound + lambda-param + case-binder names whose
+                -- scope contains the cursor — the user typing
+                -- `let abc = 123 in ab|` should get `abc` suggested.
+                localItems
+                    | line <= 0 || col <= 0 = []
+                    | otherwise = localBindingsAtCursor idx path line col lp
+            return (localItems ++ topLevelItems)
+
+
+-- | All let-/lambda-/case-bound names whose scope contains the
+-- 1-based (line, col) cursor. Pulled from idxLocals; type rendered
+-- via idxLocalTypes when the solver populated them.
+localBindingsAtCursor :: Idx.Index -> FilePath -> Int -> Int -> String -> [A.Value]
+localBindingsAtCursor idx path line col lp =
+    let bs = fromMaybe [] (Map.lookup path (Idx.idxLocals idx))
+        localTypes = fromMaybe Map.empty (Map.lookup path (Idx.idxLocalTypes idx))
+        rename = fromMaybe Map.empty (Map.lookup path (Idx.idxRenaming idx))
+        inScope =
+            [ b | b <- bs
+                , scopeContains (Idx.lbScope b) line col
+                , null lp || lp `isPrefixOf` Idx.lbName b ]
+        seen = foldr (\b acc -> Idx.lbName b : acc) [] inScope
+        deduped = nubOrdered seen
+    in [ A.object
+            [ "label" A..= name
+            , "kind"  A..= (6 :: Int)  -- Variable
+            , "detail" A..= renderLocalType name
+            ]
+       | name <- deduped ]
+  where
+    scopeContains (A.Region s e) ln cl =
+        let afterStart = (A._line s < ln) || (A._line s == ln && A._col s <= cl)
+            beforeEnd  = (A._line e > ln) || (A._line e == ln && A._col e >= cl)
+        in afterStart && beforeEnd
+    nubOrdered = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
+    renderLocalType :: String -> String
+    renderLocalType _name = ""  -- TODO: lookup in idxLocalTypes; need rename merge
+
+
+symKindToLsp :: Idx.SymKind -> Int
+symKindToLsp k = case k of
+    Idx.SymFunction -> 3   -- LSP CompletionItemKind.Function
+    Idx.SymCtor     -> 21  -- LSP CompletionItemKind.EnumMember
+    Idx.SymType     -> 7   -- LSP CompletionItemKind.Class
+    Idx.SymLocal    -> 6   -- LSP CompletionItemKind.Variable
+    Idx.SymParam    -> 6   -- Variable
 
 
 -- | The word immediately left of the cursor. Supports `String.foo`.
@@ -1871,20 +3269,29 @@ filterCompletions :: T.Text -> [A.Value] -> [A.Value]
 filterCompletions prefix items
     | T.null prefix   = items
     | '.' `T.elem` prefix =
-        -- Qualified prefix (`String.`) → strict prefix matching only.
+        -- Qualified prefix (`String.`) → strict prefix matching against
+        -- whichever string the editor will use to match the user's
+        -- input. LSP says: editor matches against `filterText` if
+        -- present, else `label`. We follow the same rule on the server.
         let p = T.unpack prefix
-        in [ v | v <- items, p `isPrefixOf` T.unpack (jsonStr "label" v) ]
+        in [ v | v <- items, p `isPrefixOf` matchKey v ]
     | otherwise =
         let p  = T.unpack prefix
             ms = mapMaybe (scored p) items
         in map snd (sortBy (comparing fst) ms)
   where
+    matchKey :: A.Value -> String
+    matchKey v =
+        let ft = T.unpack (jsonStr "filterText" v)
+            lb = T.unpack (jsonStr "label" v)
+        in if null ft then lb else ft
+
     scored :: String -> A.Value -> Maybe (Int, A.Value)
     scored p v =
-        let lbl = T.unpack (jsonStr "label" v)
-        in if p `isPrefixOf` lbl
+        let key = matchKey v
+        in if p `isPrefixOf` key
                then Just (0, v)
-               else if T.toLower (T.pack p) `T.isInfixOf` T.toLower (T.pack lbl)
+               else if T.toLower (T.pack p) `T.isInfixOf` T.toLower (T.pack key)
                    then Just (1, v)
                    else Nothing
 

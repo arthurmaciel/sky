@@ -21,6 +21,7 @@ module Sky.Type.Solve
     where
 
 import Data.IORef
+import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import qualified Sky.Type.Type as T
 import qualified Sky.Type.UnionFind as UF
@@ -94,15 +95,105 @@ defaultSolverBudget :: Int
 defaultSolverBudget = 5000000
 
 
--- | Read SKY_SOLVER_BUDGET from the environment, falling back to
--- the default. Invalid values (non-numeric, negative) silently
--- fall back; not worth aborting on a misconfigured env var.
+-- | Per-constraint multiplier for the structural-budget computation.
+-- Effective budget = max(defaultSolverBudget, constraint_count *
+-- defaultSolverBudgetFactor). The default 200 means: a 100-constraint
+-- module gets the floor (5,000,000); a 1M-constraint module gets
+-- 200M. This scales with input size while still catching pathological
+-- expansion (where N constraints generate >> N×factor solver steps).
+defaultSolverBudgetFactor :: Int
+defaultSolverBudgetFactor = 200
+
+
+-- | Three-mode env var resolution for the solver budget:
+--
+--   * SKY_SOLVER_BUDGET unset  → STRUCTURAL mode (the v0.12+ default).
+--     Effective cap = max(defaultSolverBudget, constraint_count * factor).
+--     Scales with input size, so legitimately-large generated
+--     codebases don't trip a wall-clock-shaped constant cap, while
+--     pathological constraint expansion (which generates >> N×factor
+--     solver steps from N constraints) is still caught.
+--
+--   * SKY_SOLVER_BUDGET=0      → DISABLED (escape hatch).
+--     No cap at all. Debug only — risk of unbounded heap consumption.
+--
+--   * SKY_SOLVER_BUDGET=N (>0) → ABSOLUTE mode (legacy behaviour).
+--     Effective cap is exactly N. Backwards compatible with the
+--     pre-v0.12 wall-clock-shaped budget. Useful for regression
+--     tests that want to deterministically trip the bound.
+--
+-- SKY_SOLVER_BUDGET_FACTOR overrides the structural-mode multiplier
+-- (default 200). Ignored in DISABLED / ABSOLUTE modes.
+data SolverBudgetMode
+    = BudgetStructural  -- env unset
+    | BudgetDisabled    -- SKY_SOLVER_BUDGET=0
+    | BudgetAbsolute !Int  -- SKY_SOLVER_BUDGET=N>0
+
+
+readBudgetMode :: IO SolverBudgetMode
+readBudgetMode = do
+    s <- lookupEnv "SKY_SOLVER_BUDGET"
+    return $ case s of
+        Nothing -> BudgetStructural
+        Just str -> case readMaybe str of
+            Just n | n == 0 -> BudgetDisabled
+                   | n > 0  -> BudgetAbsolute n
+            _               -> BudgetStructural  -- malformed → fallback
+
+
+readSolverBudgetFactor :: IO Int
+readSolverBudgetFactor = do
+    s <- lookupEnv "SKY_SOLVER_BUDGET_FACTOR"
+    return $ case s >>= readMaybe of
+        Just n | n > 0 -> n
+        _              -> defaultSolverBudgetFactor
+
+
+-- | Count constraints in the input tree. Treats every leaf
+-- constraint (CEqual, CLocal, CForeign, CPattern, CTrue,
+-- CSaveTheEnvironment) as a single unit, plus recursively counting
+-- through CAnd / CLet branches. Used to derive a structural budget
+-- that scales with input size — catches pathological cases (which
+-- expand FAR beyond N×factor steps) while letting legitimate
+-- large-codebase compiles run to completion.
+countConstraints :: T.Constraint -> Int
+countConstraints = go
+  where
+    go c = case c of
+        T.CTrue                  -> 1
+        T.CSaveTheEnvironment    -> 1
+        T.CEqual _ _ _ _         -> 1
+        T.CLocal _ _ _           -> 1
+        T.CForeign _ _ _ _       -> 1
+        T.CPattern _ _ _ _       -> 1
+        T.CAnd cs                -> 1 + sum (map go cs)
+        T.CLet { T._headerCon = h, T._bodyCon = b } ->
+            1 + go h + go b
+
+
+effectiveSolverBudget :: T.Constraint -> IO Int
+effectiveSolverBudget root = do
+    mode <- readBudgetMode
+    case mode of
+        BudgetDisabled    -> return 0
+        BudgetAbsolute n  -> return n
+        BudgetStructural  -> do
+            factor <- readSolverBudgetFactor
+            let n = countConstraints root
+            return (max defaultSolverBudget (n * factor))
+
+
+-- Back-compat shim: callers that import readSolverBudget still get
+-- a number out, but the NEW caller path (via solve / solveWithLocals)
+-- routes through effectiveSolverBudget so the structural mode kicks
+-- in by default.
 readSolverBudget :: IO Int
 readSolverBudget = do
-    s <- lookupEnv "SKY_SOLVER_BUDGET"
-    return $ case s >>= readMaybe of
-        Just n | n >= 0 -> n
-        _               -> defaultSolverBudget
+    mode <- readBudgetMode
+    case mode of
+        BudgetDisabled   -> return 0
+        BudgetAbsolute n -> return n
+        BudgetStructural -> return defaultSolverBudget
 
 
 -- | Increment the solver-step counter. Returns Just errMsg when
@@ -151,7 +242,7 @@ solve constraint = do
     cache <- newIORef Map.empty
     locals <- newIORef Map.empty
     steps <- newIORef 0
-    budget <- readSolverBudget
+    budget <- effectiveSolverBudget constraint
     let state0 = SolverState Map.empty cache 0 locals steps budget
     (result, finalState) <- solveHelp state0 constraint
     case result of
@@ -164,8 +255,25 @@ solve constraint = do
                 mapM variableToType (filter (const True) vars)) localVars
             -- Merge: _locals captures every CLet-bound name including
             -- top-level declarations that _env loses after CLet restore.
-            -- Take the first (innermost) type for each name.
-            let localFirst = Map.map head (Map.filter (not . null) localTys)
+            -- Take the first (innermost) type for each name — UNLESS
+            -- the name was bound MULTIPLE TIMES with structurally-
+            -- different types (intra-module shadowing). In that case,
+            -- collapse to a sentinel TVar "_ambig" so downstream
+            -- codegen knows the lookup is ambiguous and falls back
+            -- to safe any-routing rather than picking the wrong one.
+            --
+            -- Concrete bug class this fixes: a module with multiple
+            -- `let result = ...` bindings (different types per
+            -- function — see examples/06-json/Main.sky) used to
+            -- collapse to one head-type, breaking typed-codegen at
+            -- the OTHER scopes' lookup sites.
+            let pickType tys = case List.nub (filter (not . isUnboundTVar) tys) of
+                    []  -> head tys  -- all unbound — keep first as-is
+                    [t] -> t          -- all resolved types agree
+                    _   -> T.TVar "_ambig"  -- distinct concrete types — ambiguous
+                isUnboundTVar (T.TVar n) = "_" `List.isPrefixOf` n || null n
+                isUnboundTVar _ = False
+                localFirst = Map.map pickType (Map.filter (not . null) localTys)
             let merged = Map.union localFirst envTypes
             return (SolveOk merged)
         Just err -> return (SolveError err)
@@ -181,7 +289,7 @@ solveWithLocals constraint = do
     cache <- newIORef Map.empty
     locals <- newIORef Map.empty
     steps <- newIORef 0
-    budget <- readSolverBudget
+    budget <- effectiveSolverBudget constraint
     let state0 = SolverState Map.empty cache 0 locals steps budget
     (result, finalState) <- solveHelp state0 constraint
     localVars <- readIORef (_locals finalState)
@@ -574,9 +682,40 @@ showTypeR ty = case ty of
     T.TType _ name [] -> name
     T.TType _ name args -> name ++ " " ++ unwords (map showTypeAtomR args)
     T.TLambda from to -> showTypeAtomR from ++ " -> " ++ showTypeR to
-    T.TRecord _ _ -> "{ ... }"
+    -- Render records with their field names + types up to a sane
+    -- limit. Pre-fix this was `{ ... }`, which made every record-
+    -- vs-record mismatch indistinguishable in error messages —
+    -- particularly painful for TEA cfg shapes (Live.app, Tui.app,
+    -- Cli.program) where the closed-record kernel sigs surface
+    -- exactly this kind of error when a required field is missing
+    -- or wrong-shaped. Limitation #19. Caps fields at 6 to keep
+    -- diagnostics readable; longer records get a trailing ", ...".
+    T.TRecord fields ext -> showRecord fields ext
     T.TTuple a b _ -> "( " ++ showTypeR a ++ ", " ++ showTypeR b ++ " )"
     T.TAlias _ name _ _ -> name
+
+
+-- Render the fields of a record. Extension marker (`| r`) shown
+-- when the record is row-polymorphic.
+showRecord :: Map.Map String T.FieldType -> Maybe String -> String
+showRecord fields ext =
+    let pairs = Map.toAscList fields
+        renderField (n, T.FieldType _ t) = n ++ " : " ++ showTypeR t
+        keep   = take 6 pairs
+        more   = length pairs - length keep
+        body   = if null pairs
+                 then ""
+                 else " " ++ unwords (intersperseCommas (map renderField keep))
+                       ++ (if more > 0 then ", ..." else "")
+                       ++ " "
+        extStr = case ext of
+                   Just _  -> "| ..."
+                   Nothing -> ""
+    in "{" ++ body ++ extStr ++ "}"
+  where
+    intersperseCommas []     = []
+    intersperseCommas [x]    = [x]
+    intersperseCommas (x:xs) = (x ++ ",") : intersperseCommas xs
 
 
 showTypeAtomR :: T.Type -> String
@@ -605,6 +744,16 @@ collectVarNames = nubOrdered . go
     go (T.TLambda a b) = go a ++ go b
     go (T.TTuple a b cs) = concatMap go (a : b : cs)
     go (T.TAlias _ _ subs b) = concatMap (go . snd) subs ++ goAlias b
+    -- TRecord previously fell through `_ -> []` so record field
+    -- types' TVars (notably the solver-generated `_rfld_*` names
+    -- that emerge from constraintRecord) were never collected for
+    -- renaming. Result: error messages and hover signatures that
+    -- showed `{ count : _rfld_count12 }` instead of `{ count : Int }`
+    -- (or `{ count : a }` for legitimately polymorphic fields).
+    -- Walk into every field's type AND the row-extension variable.
+    go (T.TRecord fields ext) =
+        concatMap (\(_, T.FieldType _ t) -> go t) (Map.toList fields)
+        ++ maybe [] (\n -> [n]) ext
     go _ = []
     goAlias (T.Hoisted t) = go t
     goAlias (T.Filled t)  = go t
@@ -618,6 +767,12 @@ substVar f ty = case ty of
     T.TTuple a b cs -> T.TTuple (substVar f a) (substVar f b) (map (substVar f) cs)
     T.TAlias m n subs body ->
         T.TAlias m n [(k, substVar f v) | (k, v) <- subs] (substAlias f body)
+    -- TRecord — substitute into every field's type AND the row-
+    -- extension variable. Same bug as collectVarNames above.
+    T.TRecord fields ext ->
+        let fields' = Map.map (\(T.FieldType i t) -> T.FieldType i (substVar f t)) fields
+            ext' = fmap f ext
+        in T.TRecord fields' ext'
     other -> other
   where
     substAlias g (T.Hoisted t) = T.Hoisted (substVar g t)

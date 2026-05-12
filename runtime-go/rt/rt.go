@@ -240,7 +240,8 @@ func ResultCoerce[E any, A any](src any) SkyResult[E, A] {
 		tagField := rv.FieldByName("Tag")
 		okField := rv.FieldByName("OkValue")
 		errField := rv.FieldByName("ErrValue")
-		if tagField.IsValid() && okField.IsValid() && errField.IsValid() {
+		if tagField.IsValid() && okField.IsValid() && errField.IsValid() &&
+			(tagField.Kind() == reflect.Int || tagField.Kind() == reflect.Int64) {
 			if tagField.Int() == 0 {
 				return Ok[E, A](coerceInner[A](okField.Interface()))
 			}
@@ -266,7 +267,8 @@ func MaybeCoerce[A any](src any) SkyMaybe[A] {
 	if rv.Kind() == reflect.Struct {
 		tagField := rv.FieldByName("Tag")
 		justField := rv.FieldByName("JustValue")
-		if tagField.IsValid() && justField.IsValid() {
+		if tagField.IsValid() && justField.IsValid() &&
+			(tagField.Kind() == reflect.Int || tagField.Kind() == reflect.Int64) {
 			if tagField.Int() == 0 {
 				return Just[A](coerceInner[A](justField.Interface()))
 			}
@@ -296,7 +298,8 @@ func coerceInner[T any](v any) T {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() == reflect.Struct {
 		tagField := rv.FieldByName("Tag")
-		if tagField.IsValid() {
+		if tagField.IsValid() &&
+			(tagField.Kind() == reflect.Int || tagField.Kind() == reflect.Int64) {
 			var zero T
 			zt := reflect.TypeOf(zero)
 			if zt != nil && zt.Kind() == reflect.Struct {
@@ -371,9 +374,31 @@ func coerceInner[T any](v any) T {
 			return out.Interface().(T)
 		}
 	}
-	// Final fallback: Go will panic on invalid assertion; let it.
-	// The panic is the correct "type mismatch at boundary" signal.
-	return v.(T)
+	// Final fallback: strict type assertion. If this panics, it
+	// means typed-codegen emitted a CALL with a wrong element type —
+	// a compiler bug, NOT a runtime input bug. Surfacing the panic
+	// loudly (rather than silently returning zero T) makes such
+	// bugs visible at the earliest test cycle, where they can be
+	// fixed at the source. The conflict-detection merge in
+	// typesWithDeps and sanitiseTypedElem should prevent wrong-
+	// typed routes from being emitted in the first place; if a
+	// panic fires here, that's a soundness gap to investigate.
+	if cast, ok := v.(T); ok {
+		return cast
+	}
+	// Construct a descriptive panic so the bug is easy to track
+	// down. Includes both source kind (rv) and target type (zt)
+	// when reflect can determine them.
+	var zero T
+	srcDesc := "<nil>"
+	if v != nil {
+		srcDesc = reflect.TypeOf(v).String()
+	}
+	targetDesc := reflect.TypeOf(zero).String()
+	if targetDesc == "" {
+		targetDesc = "<unknown>"
+	}
+	panic(fmt.Sprintf("rt.coerceInner: type mismatch — source %s cannot be cast to target %s. This is a compiler bug in typed-codegen routing. Reproduce, then investigate kernelTypedCall (Compile.hs) and the relevant inferXType helper.", srcDesc, targetDesc))
 }
 
 
@@ -433,11 +458,76 @@ func narrowReflectValue(src reflect.Value, target reflect.Type) reflect.Value {
 		if narrowed, ok := narrowSkyContainer(src, target); ok {
 			return narrowed
 		}
+		// Tuple cross-instantiation (T2[any,any] → T2[string,string],
+		// or any other element-type permutation across T2/T3/T4/T5).
+		// Detection: source and target are both structs with the same
+		// V0..Vn field set. Reconstruct field-by-field with element
+		// narrowing.
+		if narrowed, ok := narrowTupleStruct(src, target); ok {
+			return narrowed
+		}
 	}
 	if target.Kind() == reflect.String {
 		return reflect.ValueOf(fmt.Sprintf("%v", src.Interface()))
 	}
 	return reflect.Value{}
+}
+
+
+// narrowTupleStruct reconstructs an rt.T2/T3/T4/T5 across generic
+// instantiations. Sky's tuple structs use `V0..Vn` field names with
+// no Tag — distinguishes from ADT-shaped containers that
+// narrowSkyContainer handles. Each field is narrowed via
+// narrowReflectValue so nested mismatches (e.g. T2[any,any] holding
+// a SkyTuple2 inside a typed T2[string, SomeRecord]) round-trip.
+func narrowTupleStruct(src reflect.Value, target reflect.Type) (reflect.Value, bool) {
+	if src.FieldByName("Tag").IsValid() {
+		return reflect.Value{}, false // ADT shape — let narrowSkyContainer handle
+	}
+	if !src.FieldByName("V0").IsValid() || !src.FieldByName("V1").IsValid() {
+		return reflect.Value{}, false
+	}
+	out := reflect.New(target).Elem()
+	for i := 0; ; i++ {
+		fname := "V" + strconv.Itoa(i)
+		srcF := src.FieldByName(fname)
+		dstF := out.FieldByName(fname)
+		if !srcF.IsValid() || !dstF.IsValid() {
+			if i == 0 {
+				return reflect.Value{}, false
+			}
+			break // Reached end of common V-fields.
+		}
+		if !dstF.CanSet() {
+			return reflect.Value{}, false
+		}
+		// Element narrow: handle T2[any,any] → T2[string,string] by
+		// converting each V_i. If src field is already assignable to
+		// the target field, skip the reflect dance.
+		if srcF.Type().AssignableTo(dstF.Type()) {
+			dstF.Set(srcF)
+			continue
+		}
+		// Source V_i is `any` — unwrap to its concrete value first.
+		var sub reflect.Value
+		if srcF.Kind() == reflect.Interface {
+			sub = srcF.Elem()
+		} else {
+			sub = srcF
+		}
+		if !sub.IsValid() {
+			continue // leave the destination at its zero value
+		}
+		if sub.Type().AssignableTo(dstF.Type()) {
+			dstF.Set(sub)
+			continue
+		}
+		narrowed := narrowReflectValue(sub, dstF.Type())
+		if narrowed.IsValid() {
+			dstF.Set(narrowed)
+		}
+	}
+	return out, true
 }
 
 // narrowSkyContainer reconstructs a Sky-generic container (SkyMaybe,
@@ -454,9 +544,22 @@ func narrowSkyContainer(src reflect.Value, target reflect.Type) (reflect.Value, 
 	if !tagF.IsValid() {
 		return reflect.Value{}, false
 	}
+	// Sky containers (SkyMaybe / SkyResult / SkyTask / Tuples / ADTs)
+	// always carry an INT Tag. Some non-Sky Go structs (rt.VNode has
+	// `Tag string`) also have a "Tag" field — we MUST exclude those
+	// here, otherwise outTag.SetInt(tagF.Int()) panics with
+	// "SetInt on string Value". The bug surfaces when typed routing
+	// (e.g. AsListT[rt.VNode]) reaches a heterogeneous any-typed slice
+	// where the element value isn't actually a VNode.
+	if tagF.Kind() != reflect.Int && tagF.Kind() != reflect.Int64 {
+		return reflect.Value{}, false
+	}
 	out := reflect.New(target).Elem()
 	outTag := out.FieldByName("Tag")
 	if !outTag.IsValid() || !outTag.CanSet() {
+		return reflect.Value{}, false
+	}
+	if outTag.Kind() != reflect.Int && outTag.Kind() != reflect.Int64 {
 		return reflect.Value{}, false
 	}
 	outTag.SetInt(tagF.Int())
@@ -1409,6 +1512,39 @@ func AsListT[T any](v any) []T {
 		}
 		return out
 	}
+	// Typed-slice cross-instantiation: source is `[]SourceT` where
+	// SourceT != T. Common case: `[]SkyTuple2` → `[]T2[string,string]`
+	// when the typed-codegen monomorphises a lambda's tuple param to
+	// a typed instantiation but the runtime values are the legacy
+	// any-typed tuple. Walks each element through narrowReflectValue
+	// so the same struct/dict/list recursion applies element-by-
+	// element.
+	//
+	// Skip when T is itself `any` — `reflect.TypeOf(zero)` returns nil
+	// and AssignableTo(nil) panics. The any-typed source case is
+	// already handled by the `[]any` fast-path above.
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Slice {
+		var zero T
+		targetTy := reflect.TypeOf(zero)
+		if targetTy == nil {
+			return nil
+		}
+		n := rv.Len()
+		out := make([]T, n)
+		for i := 0; i < n; i++ {
+			elem := rv.Index(i)
+			if elem.Type().AssignableTo(targetTy) {
+				out[i] = elem.Interface().(T)
+				continue
+			}
+			narrowed := narrowReflectValue(elem, targetTy)
+			if narrowed.IsValid() {
+				out[i] = narrowed.Interface().(T)
+			}
+		}
+		return out
+	}
 	return nil
 }
 
@@ -1984,6 +2120,95 @@ func List_mapAnyT(fn any, xs []any) []any {
 	return out
 }
 
+// List_mapTA: typed input slice, any-typed Sky function, any-typed
+// output. v0.12.x typed-codegen routing target — call site has
+// `xs : List A` (concrete A) but the lambda still flows as
+// `func(any) any` (Gap 4 territory, lambda lowering not yet
+// type-preserving). Win: typed input slice means no AsListT
+// coercion at the call boundary; the iteration reads `xs[i]` of
+// type A directly. Per-element call still goes through SkyCall
+// (the lambda's runtime shape is preserved).
+//
+// Naming: `T` = typed slice, `A` = any-typed function. Distinct
+// from List_mapT[A, B] (typed slice + typed function, when both
+// HM types are known).
+func List_mapTA[A any](fn any, xs []A) []any {
+	out := make([]any, len(xs))
+	for i, x := range xs { out[i] = SkyCall(fn, x) }
+	return out
+}
+
+// List_filterTA: typed input slice + any-typed predicate. Returns
+// the input slice's typed shape (filter preserves element type).
+func List_filterTA[A any](fn any, xs []A) []A {
+	out := make([]A, 0, len(xs))
+	for _, x := range xs {
+		if AsBool(SkyCall(fn, x)) { out = append(out, x) }
+	}
+	return out
+}
+
+// List_foldlTA: typed input slice + any-typed reducer + any seed +
+// any output. The reducer receives one typed-A arg per element but
+// accumulates through any.
+func List_foldlTA[A any](fn any, seed any, xs []A) any {
+	acc := seed
+	for _, x := range xs {
+		acc = SkyCall(SkyCall(fn, x), acc)
+	}
+	return acc
+}
+
+// List_memberT: typed slice membership check. Returns true if item
+// equals any element. Comparable[A] would be tighter but generics
+// over `any` keeps the surface uniform with the rest of the *T
+// family. Internal eq uses sky_equal which handles deep equality
+// for ADTs / records / primitives uniformly.
+func List_memberT[A any](item any, xs []A) bool {
+	for _, x := range xs {
+		if AsBool(Eq(item, x)) {
+			return true
+		}
+	}
+	return false
+}
+
+// List_concatTA: flatten a typed slice of slices to a flat typed
+// slice. Used by List.concat when the outer list's element type is
+// itself a known list type.
+func List_concatTA[A any](xss []A) []any {
+	// xss is []A where A is itself meant to be a list — but Go's
+	// type system doesn't let us express that without HKT. Iterate
+	// reflectively via AsList per item; same as List_concat.
+	var out []any
+	for _, xs := range xss {
+		out = append(out, AsList(xs)...)
+	}
+	return out
+}
+
+// List_indexedMapTA: typed input slice + any-typed (Int -> A -> B)
+// callback + any output. Used by List.indexedMap which carries the
+// element index as an extra arg.
+func List_indexedMapTA[A any](fn any, xs []A) []any {
+	out := make([]any, len(xs))
+	for i, x := range xs {
+		out[i] = SkyCall(SkyCall(fn, i), x)
+	}
+	return out
+}
+
+// List_findTA: typed slice + any-typed predicate. Returns the typed
+// Maybe[A] for the first matching element, Nothing if none match.
+func List_findTA[A any](fn any, xs []A) SkyMaybe[A] {
+	for _, x := range xs {
+		if AsBool(SkyCall(fn, x)) {
+			return Just[A](x)
+		}
+	}
+	return Nothing[A]()
+}
+
 func List_filterAnyT(fn any, xs []any) []any {
 	out := make([]any, 0, len(xs))
 	for _, x := range xs {
@@ -2055,7 +2280,9 @@ func List_filterMapAnyT(fn any, xs []any) []any {
 		if rv.Kind() == reflect.Struct {
 			tag := rv.FieldByName("Tag")
 			val := rv.FieldByName("JustValue")
-			if tag.IsValid() && val.IsValid() && tag.Int() == 0 {
+			if tag.IsValid() && val.IsValid() &&
+				(tag.Kind() == reflect.Int || tag.Kind() == reflect.Int64) &&
+				tag.Int() == 0 {
 				out = append(out, val.Interface())
 			}
 		}
@@ -2823,7 +3050,8 @@ func anyResultView(result any) (int, any, any) {
 		tagField := rv.FieldByName("Tag")
 		okField  := rv.FieldByName("OkValue")
 		errField := rv.FieldByName("ErrValue")
-		if tagField.IsValid() && okField.IsValid() && errField.IsValid() {
+		if tagField.IsValid() && okField.IsValid() && errField.IsValid() &&
+			(tagField.Kind() == reflect.Int || tagField.Kind() == reflect.Int64) {
 			return int(tagField.Int()), okField.Interface(), errField.Interface()
 		}
 	}
@@ -2847,7 +3075,8 @@ func Result_withDefault(def any, result any) any {
 	if rv.Kind() == reflect.Struct {
 		tagField := rv.FieldByName("Tag")
 		okField  := rv.FieldByName("OkValue")
-		if tagField.IsValid() && okField.IsValid() {
+		if tagField.IsValid() && okField.IsValid() &&
+			(tagField.Kind() == reflect.Int || tagField.Kind() == reflect.Int64) {
 			if tagField.Int() == 0 {
 				return okField.Interface()
 			}
@@ -3036,7 +3265,8 @@ func anyMaybeView(maybe any) (int, any) {
 	if rv.Kind() == reflect.Struct {
 		tagField  := rv.FieldByName("Tag")
 		justField := rv.FieldByName("JustValue")
-		if tagField.IsValid() && justField.IsValid() {
+		if tagField.IsValid() && justField.IsValid() &&
+			(tagField.Kind() == reflect.Int || tagField.Kind() == reflect.Int64) {
 			return int(tagField.Int()), justField.Interface()
 		}
 	}
@@ -3269,6 +3499,68 @@ func Dict_valuesT[V any](d map[string]V) []any {
 func Dict_mapT[V, W any](fn func(V) W, d map[string]V) map[string]W {
 	out := make(map[string]W, len(d))
 	for k, v := range d { out[k] = fn(v) }
+	return out
+}
+
+// Dict_map2T: Sky's Dict.map signature is `(K -> V -> W) -> Dict K V -> Dict K W`
+// (curried 2-arg fn). The single-arg Dict_mapT (above) is the runtime
+// counterpart for the elided-key variant where the user writes `\_ v -> ...`,
+// but the natural Sky shape passes the key too. This variant accepts an
+// any-typed curried fn (the shape Sky lambdas always lower to) and calls
+// it as fn(k)(v), matching the lowered curry pattern. Used by typed
+// routing when the lambda input/output types are concrete.
+func Dict_map2T[V, W any](fn any, d map[string]V) map[string]W {
+	out := make(map[string]W, len(d))
+	for k, v := range d {
+		// fn is `func(K) func(V) W` shape (Sky-curried 2-arg). Call once
+		// with k to get the inner closure, then with v to get the result.
+		// Both SkyCall and direct invocation are tried for robustness.
+		step := SkyCall(fn, k)
+		result := SkyCall(step, v)
+		if cast, ok := result.(W); ok {
+			out[k] = cast
+		} else {
+			out[k] = Coerce[W](result)
+		}
+	}
+	return out
+}
+
+// Dict_fromListT: build a typed Dict from a list of (String, V) tuples.
+// Mirrors Dict_fromList but with concrete value type V — emitted when the
+// HM-inferred value type is concrete, avoiding the per-element any boxing
+// of the legacy path.
+func Dict_fromListT[V any](list []any) map[string]V {
+	out := make(map[string]V, len(list))
+	for _, item := range list {
+		switch t := item.(type) {
+		case SkyTuple2:
+			key := fmt.Sprintf("%v", t.V0)
+			if v, ok := t.V1.(V); ok {
+				out[key] = v
+			} else {
+				// Fall back via reflect coerce for heterogeneous slices
+				out[key] = Coerce[V](t.V1)
+			}
+		default:
+			// Unexpected shape — leave key absent. Matches Dict_fromList's
+			// silent-on-bad-pair behaviour (would panic in the type assert).
+		}
+	}
+	return out
+}
+
+// Dict_fromListTA: typed-input list version that delegates to the any
+// variant when the value type cannot be specialised. Kept for symmetry
+// with the List_*TA family even though Dict_fromList's any-output is
+// the trivial fallback.
+func Dict_fromListTA(list []any) any {
+	out := make(map[string]any, len(list))
+	for _, item := range list {
+		if t, ok := item.(SkyTuple2); ok {
+			out[fmt.Sprintf("%v", t.V0)] = t.V1
+		}
+	}
 	return out
 }
 
@@ -3527,6 +3819,10 @@ func unwrapAny(v any) any {
 	}
 	tagF := rv.FieldByName("Tag")
 	if !tagF.IsValid() {
+		return v
+	}
+	// Non-int Tag (e.g. rt.VNode's HTML tag string) — not a Sky container.
+	if tagF.Kind() != reflect.Int && tagF.Kind() != reflect.Int64 {
 		return v
 	}
 	// SkyResult: unwrap Ok (Tag==0 → OkValue)
@@ -3999,7 +4295,20 @@ func System_cwd(_ any) any {
 
 // System_exit: never returns (process terminates) — kept eager and
 // polymorphic per the rationale in lookupKernelType.
+//
+// IMPORTANT: os.Exit BYPASSES all `defer` blocks, including the
+// terminal teardown deferred by Sky.Tui's tuiAppRun. If the user
+// code calls System.exit from inside a Tui app, the terminal would
+// be left in raw mode + alt-screen + dirty modes — readline broken
+// for the rest of the shell session. Run tuiTeardown explicitly
+// before os.Exit so the user's terminal is restored regardless of
+// how the app exits.
+//
+// tuiTeardown is idempotent (deferred path will no-op when it
+// already ran via this fast path). On non-Tui programs the active
+// state is nil and the call returns immediately.
 func System_exit(code any) any {
+	tuiTeardown()
 	os.Exit(AsInt(code))
 	return struct{}{}
 }
