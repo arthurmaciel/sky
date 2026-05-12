@@ -227,6 +227,7 @@ test-suite sky-tests
       Sky.Build.HofTypedMsgSpec
       Sky.Build.Issue52Spec
       Sky.Build.ValidatorSpec
+      Sky.Build.GoBuildRefinerSpec
       Sky.Reporting.DiagnosticSpec
       Sky.Diagnostics.CoverageSpec
       Sky.Build.KernelSigCoverageSpec

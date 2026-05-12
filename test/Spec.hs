@@ -35,6 +35,7 @@ import qualified Sky.Build.RecordCtorEmptyListSpec
 import qualified Sky.Build.HofTypedMsgSpec
 import qualified Sky.Build.Issue52Spec
 import qualified Sky.Build.ValidatorSpec
+import qualified Sky.Build.GoBuildRefinerSpec
 import qualified Sky.Reporting.DiagnosticSpec
 import qualified Sky.Diagnostics.CoverageSpec
 import qualified Sky.Build.KernelSigCoverageSpec
@@ -218,6 +219,10 @@ main = hspec $ do
     -- comment parser + the go-build error → Sky-region mapper.
     -- Fires BEFORE go build when a known-bad shape is emitted.
     describe "Sky.Build.Validator"           Sky.Build.ValidatorSpec.spec
+    -- v0.13 Layer 2 integration: full sky build → corruption →
+    -- re-build → [E5001] Diagnostic round-trip.  Catches the
+    -- go-build error refiner end-to-end.
+    describe "Sky.Build.GoBuildRefiner"      Sky.Build.GoBuildRefinerSpec.spec
     -- v0.13 Layer 1: structured Diagnostic AST + CLI/LSP renderers.
     -- Locks the AST shape, the diagnostic code registry, and the
     -- renderer output for all consumers (CLI, LSP, future docgen).
