@@ -309,7 +309,7 @@ collectIncrementalHashInputs = do
 
 
 continueCompile :: Toml.SkyConfig -> FilePath -> FilePath -> [Graph.ModuleInfo] -> String -> IO (Either String FilePath)
-continueCompile config _entryPath outDir moduleOrder srcHash = do
+continueCompile config entryPath outDir moduleOrder srcHash = do
 
     -- Phase 2: Parse all modules in parallel — parsing is pure text→AST
     -- with no cross-module dependencies, so it parallelises trivially.
@@ -606,7 +606,13 @@ continueCompile config _entryPath outDir moduleOrder srcHash = do
                     putStrLn $ "   Types OK (" ++ show (length (Map.keys t)) ++ " bindings)"
                     return t
                 Solve.SolveError err -> do
-                    putStrLn $ "   TYPE ERROR: " ++ err
+                    -- Prefix the entry file path so multi-file projects
+                    -- show users WHERE the error is, not just LINE:COL.
+                    -- Issue #52 feedback: "the compiler doesn't tell me
+                    -- the affected file name, but as I have only one
+                    -- at the moment I infer only one place to fix
+                    -- (bad when working with multiple files)".
+                    putStrLn $ "   TYPE ERROR: " ++ entryPath ++ ":" ++ err
                     return Map.empty
             -- P3: exhaustiveness — walk the entry + every dep's canonical
             -- tree for non-exhaustive case expressions. A miss is a
@@ -692,7 +698,7 @@ continueCompile config _entryPath outDir moduleOrder srcHash = do
             case (solverError, exhaustErr) of
               (Just err, _) -> do
                   removeStaleBuildOutput outDir (Toml._binName config)
-                  return (Left ("Type error: " ++ err))
+                  return (Left ("Type error: " ++ entryPath ++ ":" ++ err))
               (_, Just err) -> do
                   removeStaleBuildOutput outDir (Toml._binName config)
                   return (Left ("Non-exhaustive patterns: " ++ err))
@@ -6461,18 +6467,22 @@ kernelTypedCall types modName funcName args goArgs =
                     (GoIr.GoIdent ("rt.List_reverseT[" ++ elemGo ++ "]"))
                     [wrapAsList elemGo goList])
         -- List.take n xs / List.drop n xs : Int -> List a -> List a.
+        -- The `n` arg's typed Go param is `int`; the runtime value
+        -- might be `any` (came from rt.AdtField, rt.Field record
+        -- access, or a function-call result). Coerce via rt.AsInt
+        -- to keep Go's typed-generic dispatch happy.
         ("List", "take", [_, _], [goN, goList]) ->
             let elemGo = inferListElemGoType types (args !! 1)
             in if elemGo == "any" then Nothing
                else Just (GoIr.GoCall
                     (GoIr.GoIdent ("rt.List_takeT[" ++ elemGo ++ "]"))
-                    [goN, wrapAsList elemGo goList])
+                    [wrapAsT "int" goN, wrapAsList elemGo goList])
         ("List", "drop", [_, _], [goN, goList]) ->
             let elemGo = inferListElemGoType types (args !! 1)
             in if elemGo == "any" then Nothing
                else Just (GoIr.GoCall
                     (GoIr.GoIdent ("rt.List_dropT[" ++ elemGo ++ "]"))
-                    [goN, wrapAsList elemGo goList])
+                    [wrapAsT "int" goN, wrapAsList elemGo goList])
         -- List.append a b : List x -> List x -> List x.
         ("List", "append", [_, _], [goA, goB]) ->
             let aElem = inferListElemGoType types (args !! 0)

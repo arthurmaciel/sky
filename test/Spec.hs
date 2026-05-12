@@ -33,6 +33,7 @@ import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
 import qualified Sky.Build.RecordCtorEmptyListSpec
 import qualified Sky.Build.HofTypedMsgSpec
+import qualified Sky.Build.Issue52Spec
 import qualified Sky.Build.KernelSigCoverageSpec
 import qualified Sky.Build.HeapBoundedHmSpec
 import qualified Sky.Build.SolverBudgetSpec
@@ -203,6 +204,12 @@ main = hspec $ do
     -- the inner-function return as `any`, breaking helpers with typed
     -- (String -> Msg) callbacks. Now routes via typeStrWithAliasesReg.
     describe "Sky.Build.HofTypedMsg"        Sky.Build.HofTypedMsgSpec.spec
+    -- Issue #52 regression: (1) List.drop with any-typed Int arg
+    -- needs rt.AsInt coercion at the typed-kernel boundary, and
+    -- (2) record update `{ m | n = X }` must HM-check the new value
+    -- against the existing field type. Both used to slip past Sky
+    -- and surface as cryptic Go-build / runtime panics.
+    describe "Sky.Build.Issue52"             Sky.Build.Issue52Spec.spec
     -- Limitation #16: kernel-sig coverage for the dangerous-class
     -- gaps (returns Maybe/Result/Task wrappers OR opaque FFI types).
     -- Without HM sigs, user pattern-matching against the wrapper

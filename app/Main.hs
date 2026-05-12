@@ -6,7 +6,7 @@ import Options.Applicative
 import System.Exit (exitFailure, exitSuccess, ExitCode(..))
 import qualified Data.Version
 import qualified Paths_sky_compiler
-import System.IO (hPutStrLn, stderr)
+import System.IO (hPutStr, hPutStrLn, stderr)
 
 import qualified System.Directory
 import qualified System.Environment
@@ -16,7 +16,7 @@ import System.IO.Error (catchIOError)
 import qualified Control.Exception
 import System.FilePath ((</>), takeExtension, takeDirectory, takeFileName, dropExtension, splitDirectories)
 import System.Exit (exitWith)
-import Data.List (isPrefixOf, stripPrefix, tails)
+import Data.List (isPrefixOf, isInfixOf, stripPrefix, tails)
 import System.Process (callProcess)
 import qualified System.Process
 import qualified System.IO.Temp
@@ -1003,7 +1003,7 @@ runCommand cmd = case cmd of
             Left err -> return (Left err)
             Right goPath -> do
                 putStrLn "Running go build..."
-                callProcess "sh" ["-c", "cd " ++ outDir ++ " && go build -o " ++ Toml._binName config ++ " ."]
+                runGoBuildWithDiagnostics outDir (Toml._binName config) goPath
                 putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config
                 return (Right ())
 
@@ -1029,7 +1029,7 @@ runCommand cmd = case cmd of
             Left err -> return (Left err)
             Right goPath -> do
                 putStrLn "Running go build..."
-                callProcess "sh" ["-c", "cd " ++ outDir ++ " && go build -o " ++ Toml._binName config ++ " ."]
+                runGoBuildWithDiagnostics outDir (Toml._binName config) goPath
                 putStrLn $ "Build complete, running..."
                 callProcess (outDir ++ "/" ++ Toml._binName config) []
                 return (Right ())
@@ -1814,3 +1814,51 @@ preserveTopLevelComments source formatted =
     indentLike ref cs =
         let indent = T.takeWhile (\c -> c == ' ' || c == '\t') ref
         in map (\c -> if T.null (T.strip c) then c else T.append indent (T.stripStart c)) cs
+
+
+-- | Wrap `go build` with stderr capture + Sky-shaped diagnostics.
+--
+-- The default `callProcess "sh" ["-c", "... go build ..."]` streams Go's
+-- raw error to the user and throws on failure. Go's errors for our
+-- typed-generic dispatch are particularly cryptic ("cannot use X (any)
+-- as int value in argument to rt.List_dropT[int]: need type assertion"),
+-- and crucially they indicate a SKY COMPILER BUG — Sky's type system
+-- accepted the program, but codegen produced incompatible Go. We:
+--   1. Run go build via readCreateProcessWithExitCode (captures stderr)
+--   2. Print stderr unchanged (user still sees the raw Go diagnostic)
+--   3. Detect known compiler-bug patterns and prepend a Sky-shaped note
+--      so the user knows where to file an issue
+--   4. Re-raise (via exitWith) so callers see the same failure
+runGoBuildWithDiagnostics :: FilePath -> String -> FilePath -> IO ()
+runGoBuildWithDiagnostics outDir binName _goPath = do
+    let cmd = "cd " ++ outDir ++ " && go build -o " ++ binName ++ " ."
+    (ec, _out, berr) <- System.Process.readCreateProcessWithExitCode
+        (System.Process.shell cmd) ""
+    case ec of
+        System.Exit.ExitSuccess -> return ()
+        System.Exit.ExitFailure _ -> do
+            -- Print stderr unchanged so the user sees what Go said.
+            hPutStr stderr berr
+            -- Detect known compiler-bug patterns and prepend a Sky note.
+            when (isCompilerBugPattern berr) $ do
+                hPutStrLn stderr ""
+                hPutStrLn stderr "─────────────────────────────────────────────────"
+                hPutStrLn stderr "Sky compiler bug detected (go build rejected our"
+                hPutStrLn stderr "generated code). The Sky type system accepted this"
+                hPutStrLn stderr "program; codegen produced incompatible Go. Please"
+                hPutStrLn stderr "file an issue at https://github.com/anzellai/sky/issues"
+                hPutStrLn stderr "with the source + the Go error above."
+                hPutStrLn stderr "─────────────────────────────────────────────────"
+            System.Exit.exitWith ec
+
+
+-- | Recognise the canonical compiler-bug shape: `cannot use X (any) ...
+-- in argument to rt.<helper>T[<type>]`. These are typed-codegen
+-- monomorphisation gaps — the kernel expects a typed primitive but the
+-- caller hands in an any-typed value without coercion. Issue #52 is
+-- the case study: List.drop with a record-field-derived Int arg.
+isCompilerBugPattern :: String -> Bool
+isCompilerBugPattern s =
+       ("need type assertion" `isInfixOf` s && "rt." `isInfixOf` s)
+    || ("cannot use" `isInfixOf` s && "rt." `isInfixOf` s)
+    || ("interface conversion" `isInfixOf` s && "rt." `isInfixOf` s)

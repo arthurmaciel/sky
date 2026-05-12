@@ -700,7 +700,25 @@ collectUnqualExprRegions shadowed (A.At reg e) = case e of
         ++ concatMap (collectUnqualExprRegions shadowed) cs
     Src.List xs -> concatMap (collectUnqualExprRegions shadowed) xs
     Src.Negate inner -> collectUnqualExprRegions shadowed inner
-    _ -> []
+    -- Src.Paren wraps grouped expressions like `(loadExample i)`.
+    -- Without this case the walker silently dropped through to the
+    -- catchall, missing every unbound Var inside parens. That's
+    -- exactly why issue #52's `loadExample i` slipped through —
+    -- the canonicaliser reported "Names resolved" but Go build
+    -- then complained about `undefined: loadExample`.
+    Src.Paren inner -> collectUnqualExprRegions shadowed inner
+    -- Explicit no-op for shapes with no Var references. Removing
+    -- the catchall forces future Src.Expr_ constructors to be
+    -- explicitly classified — see CLAUDE.md's "New AST nodes must
+    -- be matched explicitly in every walker" non-regression rule.
+    Src.Chr _ -> []
+    Src.Str _ -> []
+    Src.MultilineStr _ -> []
+    Src.Int _ -> []
+    Src.Float _ -> []
+    Src.Op _ -> []
+    Src.Accessor _ -> []
+    Src.Unit -> []
 
 
 defBodyExprRegions :: Set.Set String -> A.Located Src.Def -> [(String, A.Region)]

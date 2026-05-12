@@ -52,3 +52,27 @@ spec = do
                 -- And the error surface is Sky's, NOT Go's fallback message.
                 combined `shouldSatisfy` \s ->
                     not ("compiler-side bug" `isInfixOf` s)
+
+        it "rejects unbound names inside parens (issue #52 regression)" $ do
+            -- Pre-fix, the Src.Paren wrap on `(loadExample i)` caused
+            -- collectUnqualExprRegions to fall through `_ -> []` and
+            -- silently skip both `loadExample` and `i`. The user saw a
+            -- Go-side `undefined: loadExample` error instead of a Sky
+            -- diagnostic. Post-fix, Sky reports it at the canonicalise
+            -- stage with line:col.
+            sky <- findSky
+            cwd <- getCurrentDirectory
+            let fixtureRoot = cwd </> "test" </> "fixtures" </> "unbound-paren"
+            withSystemTempDirectory "sky-unbound-paren" $ \tmp -> do
+                copyTree fixtureRoot tmp
+                let cp = (proc sky ["check", "src/Main.sky"]) { cwd = Just tmp }
+                (ec, out, err) <- readCreateProcessWithExitCode cp ""
+                ec `shouldNotBe` ExitSuccess
+                let combined = out ++ err
+                combined `shouldSatisfy` \s -> "Undefined name" `isInfixOf` s
+                combined `shouldContain` "loadExample"
+                -- Must NOT be a Go-side error.
+                combined `shouldSatisfy` \s ->
+                    not ("rt.List_dropT" `isInfixOf` s)
+                combined `shouldSatisfy` \s ->
+                    not ("undefined: loadExample" `isInfixOf` s)
