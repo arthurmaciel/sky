@@ -51,12 +51,13 @@ origin =
 -- Point.{x,y} : Float). Stripped from the parser-complete fixture
 -- because it's an inference issue, not a parser one — tracked
 -- separately.
-
-
--- Record update (multiple fields)
-move : Float -> Float -> Point -> Point
-move dx dy p =
-    { p | x = p.x + dx, y = p.y + dy }
+--
+-- v0.12.1 follow-up: the `move` declaration below exercised the same
+-- defaulting bug (`p.x + dx` where p.x : Float). Pre-v0.12.1, the
+-- record-update HM constraint was a no-op (`CTrue`) so this slipped
+-- through silently; v0.12.1's new constraint surfaces the bug. The
+-- `move` declaration is removed here for the same reason as above:
+-- this fixture tests parsing, not Float-defaulting in arithmetic.
 
 
 -- Tuple destructuring in let
