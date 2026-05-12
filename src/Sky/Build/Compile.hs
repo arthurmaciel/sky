@@ -331,10 +331,18 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 Left $ "Parse error in " ++ Graph._mi_name modInfo ++ ": " ++ show err
             Right srcMod ->
                 Right (Graph._mi_name modInfo, srcMod)
-    -- Print summaries in deterministic order
+    -- v0.13 Layer 1: render each parser failure as a structured
+    -- Diagnostic.  The block carries the offending file + line:col,
+    -- a source snippet around the failure, and a short variant-
+    -- specific reason ("module name expected here", etc.).  This
+    -- replaces the previous `PARSE FAILED: <module> <ctor>` line
+    -- which surfaced the Haskell constructor name to end users.
     mapM_ (\(modInfo, r) -> case r of
-        Left err ->
-            putStrLn $ "   PARSE FAILED: " ++ Graph._mi_name modInfo ++ " " ++ show err
+        Left err -> do
+            let diag = Parse.moduleErrorToDiagnostic
+                         (Graph._mi_path modInfo) err
+            rendered <- Render.renderCli diag
+            putStrLn rendered
         Right srcMod ->
             let declCount = length (Src._values srcMod)
             in putStrLn $ "   " ++ Graph._mi_name modInfo ++ ": " ++ show declCount ++ " declarations"
