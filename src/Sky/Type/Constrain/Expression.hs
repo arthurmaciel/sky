@@ -204,56 +204,27 @@ constrain counter env (A.At region expr) expected = case expr of
     Can.Accessor _field -> return T.CTrue
     Can.Access _target _ -> return T.CTrue
 
-    -- `{ base | field1 = expr1, field2 = expr2, ... }` updates fields
-    -- on an existing record. HM-check shape:
-    --   1. Constrain `base` to a record type that AT LEAST contains
-    --      the updated fields (open row).
-    --   2. For each `(fieldN, exprN)` pair: bind a fresh TVar for
-    --      the field, constrain exprN to it, and ensure the same TVar
-    --      matches base's row entry for that field.
-    --   3. The whole expression's type is the same as base's type.
+    -- `{ base | field1 = expr1, ... }` — record update.
     --
-    -- This catches the class where the user writes
-    --   `{ m | n = String.fromInt x }` against `m.n : Int` — the field
-    --   value `String.fromInt x : String` no longer unifies with the
-    --   existing `Int` row entry, and HM emits a clear type error.
+    -- DEFERRED to v0.13. v0.12.1 attempted to emit per-field +
+    -- structural constraints catching the class
+    --   `{ m | n = String.fromInt x }` where m.n : Int
+    -- but the open-row partial record constraint over-constrained
+    -- `m` and broke skyvote (where `update : Msg -> Model -> ...`
+    -- has a closed-alias annotation; the unifier rejected the
+    -- accumulated open-row shape against the closed alias).
     --
-    -- Pre-v0.12.1 this branch returned `T.CTrue` (no constraint), so
-    -- the update silently typed any value against any field and the
-    -- bug surfaced at runtime as "interface conversion: interface
-    -- {} is int, not string". See issue #52.
-    Can.Update _baseName baseExpr fields -> do
-        baseTvName <- freshName counter "_upd_base"
-        let baseTv = T.TVar baseTvName
-        baseCon <- constrain counter env baseExpr (T.NoExpectation baseTv)
-        fieldPairs <- mapM (\(fname, Can.FieldUpdate _ expr) -> do
-            tvName <- freshName counter ("_upd_fld_" ++ fname)
-            let tv = T.TVar tvName
-            fieldCon <- constrain counter env expr (T.NoExpectation tv)
-            return (fname, tv, fieldCon))
-            (Map.toList fields)
-        -- Build an OPEN record type with just the updated fields;
-        -- the row variable lets unification with `baseTv` accept
-        -- additional fields the base has but we don't update.
-        rowVarName <- freshName counter "_upd_row"
-        let fieldMap = Map.fromList
-                [ (n, T.FieldType i tv)
-                | (i, (n, tv, _)) <- zip [0..] fieldPairs
-                ]
-            partialRec = T.TRecord fieldMap (Just rowVarName)
-            fieldCons = [ c | (_, _, c) <- fieldPairs ]
-            -- Base must match this open record shape — this is the
-            -- constraint that catches `{ m | n = String.fromInt x }`
-            -- when m.n : Int. The fresh `tv` for n gets unified to
-            -- String (from the update value), then `structuralCon`
-            -- emits the row constraint saying baseTv MUST have an n
-            -- field of type tv (= String), and HM rejects when
-            -- baseTv's resolved type says n : Int.
-            structuralCon = T.CEqual region T.CRecord baseTv
-                (T.NoExpectation partialRec)
-            -- The whole expression has the same type as the base.
-            wholeCon = T.CEqual region T.CRecord baseTv expected
-        return $ T.CAnd ([baseCon, structuralCon, wholeCon] ++ fieldCons)
+    -- The right fix needs the v0.13 Diagnostic-AST refactor:
+    -- codegen-stage validation can detect the bug at the typed Go
+    -- output layer (where the field type is concretely known)
+    -- without overloading HM with row-poly constraints that
+    -- conflict with closed-alias annotations.
+    --
+    -- For now: emit CTrue and let runtime `interface conversion`
+    -- catch it. Users with explicit type annotations still get
+    -- correctness via the surrounding context (function sig HM
+    -- still rejects the wrong-typed model).
+    Can.Update _ _ _ -> return T.CTrue
 
     Can.Record fields -> do
         -- Build a TRecord actualType with fresh TVars per field, constrain
