@@ -34,6 +34,7 @@ import qualified Sky.Build.RecordFieldOrderSpec
 import qualified Sky.Build.RecordCtorEmptyListSpec
 import qualified Sky.Build.HofTypedMsgSpec
 import qualified Sky.Build.Issue52Spec
+import qualified Sky.Reporting.DiagnosticSpec
 import qualified Sky.Build.KernelSigCoverageSpec
 import qualified Sky.Build.HeapBoundedHmSpec
 import qualified Sky.Build.SolverBudgetSpec
@@ -210,6 +211,10 @@ main = hspec $ do
     -- against the existing field type. Both used to slip past Sky
     -- and surface as cryptic Go-build / runtime panics.
     describe "Sky.Build.Issue52"             Sky.Build.Issue52Spec.spec
+    -- v0.13 Layer 1: structured Diagnostic AST + CLI/LSP renderers.
+    -- Locks the AST shape, the diagnostic code registry, and the
+    -- renderer output for all consumers (CLI, LSP, future docgen).
+    describe "Sky.Reporting.Diagnostic"      Sky.Reporting.DiagnosticSpec.spec
     -- Limitation #16: kernel-sig coverage for the dangerous-class
     -- gaps (returns Maybe/Result/Task wrappers OR opaque FFI types).
     -- Without HM sigs, user pattern-matching against the wrapper

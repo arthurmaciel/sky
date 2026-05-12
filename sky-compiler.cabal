@@ -151,6 +151,9 @@ executable sky
 
     -- Reporting
     Sky.Reporting.Annotation
+    Sky.Reporting.Diagnostic
+    Sky.Reporting.Render
+    Sky.Reporting.Lsp
 
     -- Sky infrastructure
     Sky.Sky.ModuleName
@@ -219,6 +222,8 @@ test-suite sky-tests
       Sky.Build.RecordFieldOrderSpec
       Sky.Build.RecordCtorEmptyListSpec
       Sky.Build.HofTypedMsgSpec
+      Sky.Build.Issue52Spec
+      Sky.Reporting.DiagnosticSpec
       Sky.Build.KernelSigCoverageSpec
       Sky.Build.HeapBoundedHmSpec
       Sky.Build.SolverBudgetSpec
