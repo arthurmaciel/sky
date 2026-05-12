@@ -29,6 +29,7 @@ import Sky.Build.EmbeddedRuntime (embeddedRuntime, embeddedSkyStdlib)
 import qualified Sky.AST.Source as Src
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Diagnostic as Diag
 import qualified Sky.Reporting.Render as Render
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Parse.Module as Parse
@@ -630,14 +631,38 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- compile-time error with source context; the `panic("non-
             -- exhaustive case expression")` fallback in codegen never
             -- fires on well-checked code.
-            let entryDiags = Exhaust.checkModule canMod
-                depDiags   = concatMap (\(_, dm) -> Exhaust.checkModule dm) validDeps
+            -- v0.13 Layer 1: each exhaustiveness `Exhaust.Diag`
+            -- becomes a structured `Diagnostic` (category=Exhaust,
+            -- code=E3001) with the offending region as the caret
+            -- target.  The renderer adds source-context lines so
+            -- the user sees the actual `case … of` block instead of
+            -- a bare "at line N:M — hint" prefix.  Entry-module
+            -- diags are attributed to the entry path; dep-module
+            -- diags fall back to the entry path too because
+            -- `Exhaust.checkModule` doesn't carry a per-module
+            -- source path today (deferred to Layer 1 follow-up).
+            let entryDiagsExh = Exhaust.checkModule canMod
+                depDiagsExh   = concatMap (\(_, dm) -> Exhaust.checkModule dm) validDeps
+                allExhDiags   = entryDiagsExh ++ depDiagsExh
+                exhDiagnostics =
+                    [ Diag.withHint (_diag_hintFor d)
+                      (Diag.mkError entryPath (_diag_locFor d)
+                          Diag.CatExhaustiveness Diag.exhaustE_NonExhaustive
+                          (_diag_msgFor d))
+                    | d <- allExhDiags ]
+                _diag_locFor (Exhaust.Diag r _ _) = r
+                _diag_hintFor (Exhaust.Diag _ _ h) = h
+                _diag_msgFor (Exhaust.Diag _ missing _) =
+                    "Non-exhaustive case expression. Missing pattern(s): " ++
+                    List.intercalate ", " missing
                 exhaustErr
-                    | null (entryDiags ++ depDiags) = Nothing
-                    | otherwise = Just $ renderExhaustDiags (entryDiags ++ depDiags)
-            case exhaustErr of
-                Just e  -> putStrLn ("   EXHAUSTIVENESS ERROR: " ++ e)
-                Nothing -> return ()
+                    | null allExhDiags = Nothing
+                    | otherwise = Just $ renderExhaustDiags allExhDiags
+            case exhDiagnostics of
+                [] -> return ()
+                ds -> do
+                    rendered <- Render.renderCliMany ds
+                    putStrLn rendered
             -- Merge inferred dep types into the param + return tables
             -- keyed by module-prefixed Go names. Annotation-derived
             -- entries already in the tables win over inferred ones.
@@ -717,9 +742,13 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                   -- stable grep target ("Type error") without
                   -- double-printing the full body.
                   return (Left ("Type error: " ++ entryPath))
-              (_, Just err) -> do
+              (_, Just _) -> do
                   removeStaleBuildOutput outDir (Toml._binName config)
-                  return (Left ("Non-exhaustive patterns: " ++ err))
+                  -- v0.13 Layer 1: the structured Diagnostic block
+                  -- has been rendered above (one per non-exhaustive
+                  -- branch).  Return a one-line marker; the renderer
+                  -- already shows where and how to fix each case.
+                  return (Left ("Non-exhaustive patterns: " ++ entryPath))
               _ -> do
                 putStrLn "-- Generating Go"
                 let depAliasPairs = [ (map (\c -> if c == '.' then '_' else c) mn, Can._aliases depMod)
