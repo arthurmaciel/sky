@@ -433,12 +433,11 @@ Mitigation:
 
 Risk: 8-12 weeks is a long time without intermediate ships.
 
-Mitigation: layer-by-layer release.
-- v0.13.0 — Layer 1 + Layer 2 (the soundness floor)
-- v0.13.1 — Layer 3 (stdlib migration, can be partial)
-- v0.13.2 — Layer 4 (LSP full pipeline)
-
-Each layer is independently useful + shippable.
+Mitigation: **single-tag release** — v0.13.0 covers Layer 1 +
+Layer 2 + Layer 3 + Layer 4.  We don't split this across multiple
+patch versions; the user owns release-tag scope and `v0.13` is one
+agreed milestone.  Progress is tracked in this doc's "Progress
+log" section instead of via intermediate tags.
 
 ### 9. Compiler self-host risk
 
@@ -530,29 +529,18 @@ Mitigation:
 
 1. ✅ Plan doc written (this file)
 2. Branch already exists: `perf/v0.13`
-3. Layer 1 — week 1-2:
-   - `src/Sky/Reporting/Diagnostic.hs` (the AST)
-   - `src/Sky/Reporting/Render.hs` (CLI renderer)
-   - `src/Sky/Reporting/Lsp.hs` (LSP JSON serialiser)
-   - Migrate Parse + Canonicalise phases first (smallest surface)
-   - Add `test/Sky/Reporting/DiagnosticSpec.hs` regression fence
-4. Layer 2 — week 2-3 (overlaps Layer 1 final week):
-   - Origin tracking in Go IR
-   - Validation patterns
-   - Issue #52 regression test from Sky stage
-5. Layer 3 — week 3-6 (overlaps Layer 2 final week):
-   - Bootstrap two-pass build
-   - Per-module migration
-   - Performance benchmarks
-6. Layer 4 — week 6-8:
-   - LSP pipeline extension
-   - Incremental codegen cache
-   - Editor-side smoke tests (VS Code + Neovim)
-7. v0.13.0 release: Layer 1+2 (the soundness floor)
-8. v0.13.1: Layer 3 (partial OK)
-9. v0.13.2: Layer 4 (LSP full pipeline)
+3. Layer 1 — Diagnostic AST + phase migrations.  See Progress
+   log below for per-commit status.
+4. Layer 2 — Codegen-stage validator + go-build refiner.
+5. Layer 3 — Sky-written stdlib (Set → Maybe/Result → Dict →
+   List → String) with bootstrap two-pass build.
+6. Layer 4 — LSP runs full pipeline (Parse → Canon → Solve →
+   Exhaust → Codegen → Validator) per textDocument/didChange,
+   with incremental codegen cache for sub-500ms p99 latency.
 
-Each layer = independent ship-able milestone. No big-bang.
+**Single tag release**: v0.13.0 ships Layer 1 + 2 + 3 + 4
+together.  Per-layer progress is tracked in this doc, not via
+intermediate tags.
 
 ---
 
@@ -705,23 +693,17 @@ After v0.12.1 ship, across the session:
 13 commits.  120+ tests pass across the impacted specs.  Zero
 existing-feature regressions on `cabal test`.
 
-## v0.13.0 release readiness
+## v0.13.0 release readiness (single tag covers Layer 1-4)
 
-v0.13.0 success criteria (Layer 1 + Layer 2 + Coverage):
-
-* [x] Layer 1: Diagnostic AST + CLI + LSP renderers + 5 phase
-      migrations + DiagnosticSpec regression fence (21 tests).
-* [x] Layer 2: Validator + origin tracking + go-build refiner +
-      ValidatorSpec regression fence (12 tests).
-* [x] Layer 4 (partial): LSP shares the Diagnostic AST with CLI +
-      code-field regression fence (4 tests).
-* [x] Coverage spec: one regression fixture per error class.
+* [x] **Layer 1** — Diagnostic AST + CLI + LSP renderers + 5
+      phase migrations + DiagnosticSpec regression fence (21 tests).
+* [x] **Layer 2** — Validator + origin tracking + go-build refiner
+      + ValidatorSpec (12 tests) + GoBuildRefinerSpec (1 e2e test).
+* [ ] **Layer 3** — Sky-written stdlib (Set / Maybe / Result /
+      Dict / List / String) with bootstrap two-pass build.
+* [ ] **Layer 4 full** — LSP runs codegen + validator per
+      textDocument/didChange with incremental codegen cache.
+* [x] Coverage spec — one regression fixture per error class.
 * [x] `cabal test sky-tests` green across impacted modules.
 * [x] `scripts/example-sweep.sh --build-only` green across all
       24 examples.
-* [x] Sky source code unchanged — only compiler / LSP / Validator
-      modules touched.
-
-Layer 3 (Sky-written stdlib) ships as v0.13.1 per the original
-plan.  Layer 4 full pipeline parity (codegen + validator per
-keystroke) ships as v0.13.2.
