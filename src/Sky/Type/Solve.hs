@@ -452,7 +452,15 @@ solveHelpBody state constraint = case constraint of
                         | isDiff = ""
                         | otherwise = " (from: " ++ showType actualType
                                    ++ " vs " ++ showExpected expected ++ ")"
-                return (Just $ posPrefix region ++ "Type mismatch: " ++ diffSummary ++ trailer ++ hint, state)
+                -- The diff summary either begins with `\n     expected: …`
+                -- (leaf form) or `in <path>:\n     expected: …` (path
+                -- form).  In the leaf case the `"Type mismatch: "`
+                -- prefix would leave a trailing space line before the
+                -- newline; trim that to keep the body tight.
+                let sep = case diffSummary of
+                        ('\n':_) -> "Type mismatch:"
+                        _        -> "Type mismatch: "
+                return (Just $ posPrefix region ++ sep ++ diffSummary ++ trailer ++ hint, state)
 
     T.CLocal region name expected -> do
         case Map.lookup name (_env state) of
