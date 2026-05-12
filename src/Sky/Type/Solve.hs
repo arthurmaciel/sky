@@ -693,34 +693,138 @@ renderTypeMismatch a e = fst (renderTypeMismatchTagged a e)
 -- | Like renderTypeMismatch but also reports whether the result is a
 -- field-level diff (True) or a full type pair (False). Callers use
 -- the tag to decide whether to suppress the `(from: ...)` trailer.
+--
+-- Recursively walks INTO the mismatching structure to surface the
+-- leaf mismatch. For nested cases like
+--   `Msg -> { i : Int, n : String } -> ...` vs
+--   `Msg -> { i : Int, n : Int } -> ...`
+-- the renderer walks: TLambda matches on the FROM (Msg = Msg),
+-- recurses into the TO; that's another TLambda, matches its TO,
+-- recurses into its FROM; that's a record with one differing field
+-- `n`; emits a path like "param 2 → field `n`: String vs Int".
+-- The user sees the exact leaf instead of two near-identical types.
 renderTypeMismatchTagged :: T.Type -> T.Type -> (String, Bool)
 renderTypeMismatchTagged actual expected =
     let renamed = renameVars (T.TTuple actual expected [])
     in case renamed of
-        T.TTuple a e _ -> case (a, e) of
-            (T.TRecord af _, T.TRecord ef _) ->
-                let diffFields = recordFieldDiff af ef
-                in case diffFields of
-                    -- Exactly one differing field — show it inline.
-                    [(name, aty, ety)] ->
-                        ( "field `" ++ name ++ "`:\n" ++
-                          "     expected: " ++ showTypeR ety ++ "\n" ++
-                          "     actual:   " ++ showTypeR aty
-                        , True )
-                    -- Multiple — list them all.
-                    diffs | not (null diffs) && length diffs <= 4 ->
-                        ( "in " ++ show (length diffs) ++ " field(s):\n" ++
-                          concatMap (\(name, aty, ety) ->
-                              "     " ++ name ++ ":\n" ++
-                              "       expected: " ++ showTypeR ety ++ "\n" ++
-                              "       actual:   " ++ showTypeR aty ++ "\n")
-                              diffs
-                        , True )
-                    -- Falling back: too many differing fields, render
-                    -- the full pair with the existing record helper.
-                    _ -> (showTypeR a ++ " vs " ++ showTypeR e, False)
-            _ -> (showTypeR a ++ " vs " ++ showTypeR e, False)
+        T.TTuple a e _ ->
+            case findLeafMismatch [] a e of
+                Just (path, leafA, leafE) ->
+                    ( renderPathDiff path leafA leafE, True )
+                Nothing -> shallowDiff a e
         _ -> (showTypeR actual ++ " vs " ++ showTypeR expected, False)
+  where
+    -- Fallback: same record-level diff as before (no recursive walk).
+    shallowDiff a e = case (a, e) of
+        (T.TRecord af _, T.TRecord ef _) ->
+            let diffs = recordFieldDiff af ef
+            in case diffs of
+                [(name, aty, ety)] ->
+                    ( "field `" ++ name ++ "`:\n" ++
+                      "     expected: " ++ showTypeR ety ++ "\n" ++
+                      "     actual:   " ++ showTypeR aty
+                    , True )
+                ds | not (null ds) && length ds <= 4 ->
+                    ( "in " ++ show (length ds) ++ " field(s):\n" ++
+                      concatMap (\(name, aty, ety) ->
+                          "     " ++ name ++ ":\n" ++
+                          "       expected: " ++ showTypeR ety ++ "\n" ++
+                          "       actual:   " ++ showTypeR aty ++ "\n")
+                          ds
+                    , True )
+                _ -> (showTypeR a ++ " vs " ++ showTypeR e, False)
+        _ -> (showTypeR a ++ " vs " ++ showTypeR e, False)
+
+
+-- | A path segment from the outer type down to the leaf mismatch.
+data PathSeg
+    = PsField !String       -- recordType -> field
+    | PsParam !Int          -- lambda arg position (1-based)
+    | PsReturn              -- lambda result
+    | PsTupleElem !Int      -- tuple element (1-based)
+    | PsArg !String !Int    -- type-constructor arg (e.g. `List Int` -> arg 1)
+    deriving (Show)
+
+
+-- | Walk two types in parallel until either finding a leaf where the
+-- two differ structurally OR confirming they're equivalent. Returns
+-- Just (path, leafActual, leafExpected) on mismatch.
+findLeafMismatch :: [PathSeg] -> T.Type -> T.Type -> Maybe ([PathSeg], T.Type, T.Type)
+findLeafMismatch path a e =
+    case (a, e) of
+        -- TVars always unify in HM; not a real mismatch leaf.
+        (T.TVar _, _) -> Nothing
+        (_, T.TVar _) -> Nothing
+        -- Identical primitives — no mismatch.
+        _ | typeStructEq a e -> Nothing
+        -- Lambdas: recurse into FROM first (positional). If FROM
+        -- matches, recurse into TO.
+        (T.TLambda f1 t1, T.TLambda f2 t2) ->
+            case findLeafMismatch (path ++ [PsParam (countParam path + 1)]) f1 f2 of
+                Just r -> Just r
+                Nothing -> findLeafMismatch (path ++ [PsReturn]) t1 t2
+        -- Records: walk the field diff.
+        (T.TRecord af _, T.TRecord ef _) ->
+            let diffs = recordFieldDiff af ef
+            in case diffs of
+                [(name, aty, ety)] ->
+                    -- Single differing field — recurse into it.
+                    findLeafMismatch (path ++ [PsField name]) aty ety
+                _ -> Just (path, a, e) -- multiple field diffs — stop here
+        -- TType: same head + same arity → recurse into args.
+        (T.TType _ n1 a1, T.TType _ n2 a2)
+          | n1 == n2 && length a1 == length a2 ->
+            firstDiffAt n1 (zip [1..] (zip a1 a2)) path
+        -- Tuples.
+        (T.TTuple x1 y1 zs1, T.TTuple x2 y2 zs2) | length zs1 == length zs2 ->
+            firstDiffTuple (zip [1..] (zip (x1:y1:zs1) (x2:y2:zs2))) path
+        -- Alias: unfold names — same name treated as equal at this
+        -- layer; differing names fall through to the leaf.
+        (T.TAlias _ n1 _ _, T.TAlias _ n2 _ _) | n1 == n2 -> Nothing
+        -- Anything else is a leaf mismatch at the current path.
+        _ -> Just (path, a, e)
+  where
+    countParam :: [PathSeg] -> Int
+    countParam = length . filter (\seg -> case seg of PsParam _ -> True; _ -> False)
+
+    firstDiffAt typeName parts pth = go parts
+      where
+        go [] = Nothing
+        go ((i, (t1, t2)) : rest) =
+            case findLeafMismatch (pth ++ [PsArg typeName i]) t1 t2 of
+                Just r -> Just r
+                Nothing -> go rest
+
+    firstDiffTuple parts pth = go parts
+      where
+        go [] = Nothing
+        go ((i, (t1, t2)) : rest) =
+            case findLeafMismatch (pth ++ [PsTupleElem i]) t1 t2 of
+                Just r -> Just r
+                Nothing -> go rest
+
+
+-- | Render a path + leaf-types diff.
+--
+-- Example output for a 3-segment path:
+--   in `update` → param 2 → field `n`:
+--        expected: Int
+--        actual:   String
+renderPathDiff :: [PathSeg] -> T.Type -> T.Type -> String
+renderPathDiff path actual expected =
+    let pathStr = if null path then "" else " in " ++ joinPath path
+        renderedLeaf =
+              "\n     expected: " ++ showTypeR expected
+           ++ "\n     actual:   " ++ showTypeR actual
+    in pathStr ++ ":" ++ renderedLeaf
+  where
+    joinPath = List.intercalate " → " . map segText
+
+    segText (PsField n)     = "field `" ++ n ++ "`"
+    segText (PsParam i)     = "param " ++ show i
+    segText PsReturn        = "return"
+    segText (PsTupleElem i) = "tuple element " ++ show i
+    segText (PsArg ty i)    = "`" ++ ty ++ "` arg " ++ show i
 
 
 -- | Diff two record field maps. Returns (name, actualType,

@@ -266,18 +266,26 @@ constrain counter env (A.At region expr) expected = case expr of
         -- Skip the CEqual when expected is a bare nominal TType (a union
         -- or non-alias type): unifying TRecord with TType would fail with
         -- no benefit, so we fall back to per-field constraints only.
-        fieldPairs <- mapM (\(fname, expr) -> do
+        --
+        -- Per-field region attribution: each field constraint carries
+        -- the field's source region (via the A.At wrapper on the
+        -- field's expression). When the solver fires on a field-level
+        -- mismatch, the error attributes to THAT field's region — not
+        -- the whole record literal. Critical for TEA cfg shapes where
+        -- the user wants the caret on `update = update` (the offending
+        -- field), not on `{ init = init` (the record's opening brace).
+        fieldPairs <- mapM (\(fname, expr@(A.At fieldRegion _)) -> do
             tvName <- freshName counter ("_rfld_" ++ fname)
             let tv = T.TVar tvName
             fieldCon <- constrain counter env expr (T.NoExpectation tv)
-            return (fname, tv, fieldCon))
+            return (fname, fieldRegion, tv, fieldCon))
             (Map.toList fields)
         let fieldMap = Map.fromList
                 [ (n, T.FieldType i tv)
-                | (i, (n, tv, _)) <- zip [0..] fieldPairs
+                | (i, (n, _, tv, _)) <- zip [0..] fieldPairs
                 ]
             recType = T.TRecord fieldMap Nothing
-            fieldCons = [ c | (_, _, c) <- fieldPairs ]
+            fieldCons = [ c | (_, _, _, c) <- fieldPairs ]
             expectedIsUnifiable = case expected of
                 T.NoExpectation t         -> isRecordUnifiable t
                 T.FromContext _ _ t       -> isRecordUnifiable t
@@ -287,8 +295,35 @@ constrain counter env (A.At region expr) expected = case expr of
                 T.TRecord{} -> True
                 T.TAlias _ _ _ _ -> True
                 _           -> False
+            -- For each field, if `expected` is a concrete record type
+            -- AND has the same-named field, emit a per-field CEqual
+            -- with the field's region. The solver fires THIS
+            -- constraint when the field mismatches — and uses the
+            -- field's region for the error location. Doesn't replace
+            -- the whole-record CEqual (which catches missing fields
+            -- and shape mismatches); supplements it.
+            expectedFieldType n = case expected of
+                T.NoExpectation t        -> lookupFieldType n t
+                T.FromContext _ _ t      -> lookupFieldType n t
+                T.FromAnnotation _ _ _ t -> lookupFieldType n t
+            lookupFieldType n ty = case ty of
+                T.TRecord fs _ -> case Map.lookup n fs of
+                    Just (T.FieldType _ ft) -> Just ft
+                    Nothing -> Nothing
+                T.TAlias _ _ _ aliasInner ->
+                    let inner = case aliasInner of
+                            T.Filled  i -> i
+                            T.Hoisted i -> i
+                    in lookupFieldType n inner
+                _ -> Nothing
+            perFieldCEquals =
+                [ T.CEqual fr T.CRecord tv (T.NoExpectation eft)
+                | (n, fr, tv, _) <- fieldPairs
+                , Just eft <- [expectedFieldType n]
+                ]
         if expectedIsUnifiable
-            then return $ T.CAnd (fieldCons ++ [T.CEqual region T.CRecord recType expected])
+            then return $ T.CAnd (fieldCons ++ perFieldCEquals
+                                ++ [T.CEqual region T.CRecord recType expected])
             else return $ T.CAnd fieldCons
 
     Can.Tuple a b rest -> do

@@ -865,12 +865,24 @@ renderSourceContext :: FilePath -> String -> IO ()
 renderSourceContext path errMsg = do
     case parseLineCol errMsg of
         Nothing -> return ()
-        Just (lineN, colN) -> do
+        Just (lineN0, colN0) -> do
             srcExists <- doesFileExist path
             when srcExists $ do
                 src <- readFile path
                 let allLines = lines src
                     totalLines = length allLines
+                -- If the error message mentions `field 'X'` (from the
+                -- record-diff renderer), re-point the caret to the
+                -- LINE where `X = ...` appears in the source, within
+                -- a small window of the original line. This makes
+                -- TEA cfg errors land on the offending field, not on
+                -- the cfg literal's opening brace.
+                let (lineN, colN) = case extractFieldName errMsg of
+                        Just fname ->
+                            case findFieldLine allLines lineN0 fname of
+                                Just (lN, cN) -> (lN, cN)
+                                Nothing       -> (lineN0, colN0)
+                        Nothing -> (lineN0, colN0)
                 when (lineN >= 1 && lineN <= totalLines) $ do
                     let startLine = max 1 (lineN - 2)
                         endLine   = min totalLines (lineN + 1)
@@ -887,6 +899,52 @@ renderSourceContext path errMsg = do
                                      ++ " | " ++ caret)
                         (zip [startLine..] contextLines)
                     putStrLn ""
+
+
+-- | Extract the first field name from a record-diff error message.
+-- The renderer emits "in field `X` → ..." or "field `X`:" — we want
+-- the X.
+extractFieldName :: String -> Maybe String
+extractFieldName s =
+    case findSubstring "field `" s of
+        Just rest -> case break (== '`') rest of
+            (name, _) | not (null name) -> Just name
+            _ -> Nothing
+        Nothing -> Nothing
+  where
+    findSubstring needle haystack
+        | needle `List.isPrefixOf` haystack = Just (drop (length needle) haystack)
+        | null haystack = Nothing
+        | otherwise = findSubstring needle (tail haystack)
+
+
+-- | Find the line where `fname = ...` or `, fname = ...` appears in
+-- the source, starting from `aroundLine` and scanning forward a few
+-- lines (TEA cfg literals are typically 6-12 lines). Returns the
+-- (line, column) where `fname` starts. Nothing if no match.
+findFieldLine :: [String] -> Int -> String -> Maybe (Int, Int)
+findFieldLine srcLines aroundLine fname =
+    let window = take 30 (drop (max 0 (aroundLine - 1)) srcLines)
+        indexed = zip [aroundLine..] window
+    in firstJust (map findOnLine indexed)
+  where
+    firstJust = foldr ((<|>) . id) Nothing
+    (<|>) Nothing y = y
+    (<|>) x       _ = x
+    findOnLine (n, l) =
+        -- Match `fname =` or `, fname =` or `{ fname =`. Skip leading
+        -- whitespace + optional `{` or `,`. The field name must be
+        -- followed by `=` (with optional whitespace).
+        case dropWhile (`elem` " \t,{") l of
+            rest | take (length fname) rest == fname ->
+                let afterName = drop (length fname) rest
+                in case dropWhile (== ' ') afterName of
+                    '=':_ ->
+                        -- Compute column: 1-based from line start.
+                        let col = length l - length rest + 1
+                        in Just (n, col)
+                    _ -> Nothing
+            _ -> Nothing
 
 
 -- | Parse `LINE:COL:` from the head of a type-error message.
