@@ -58,6 +58,7 @@ import qualified Sky.AST.Source as Src
 import qualified Sky.Sky.ModuleName as ModuleName
 import System.Timeout (timeout)
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Lsp as LspR
 import qualified Sky.Format.Format as Fmt
 import qualified Sky.Lsp.Index as Idx
 import qualified Sky.Lsp.Diag as Diag
@@ -1011,17 +1012,25 @@ computeDiagnosticsSt st path src = do
 runPipeline :: T.Text -> IO [A.Value]
 runPipeline src = case Parse.parseModule src of
     Left err ->
-        return [mkDiagnosticAtError err ("Parse error: " ++ showParseError err)]
+        -- v0.13 Layer 4: route LSP diagnostics through the same
+        -- structured Diagnostic AST the CLI uses.  Each phase's
+        -- error path produces a Diag.Diagnostic; renderLspDiagnostic
+        -- serialises it to the LSP wire shape with the stable code
+        -- field and (eventually) related-information regions.
+        return [ LspR.renderLspDiagnostic
+                   (Parse.moduleErrorToDiagnostic "<buffer>" err) ]
     Right srcMod ->
         case Canonicalise.canonicalise srcMod of
             Left err ->
-                return [diagnosticFromMessage ("Canonicalise: " ++ err)]
+                return [ LspR.renderLspDiagnostic
+                           (Canonicalise.legacyToDiag "<buffer>" err) ]
             Right canMod -> do
                 cs <- Constrain.constrainModule canMod
                 r  <- Solve.solve cs
                 case r of
                     Solve.SolveError err ->
-                        return [diagnosticFromMessage ("Type error: " ++ err)]
+                        return [ LspR.renderLspDiagnostic
+                                   (Solve.solveErrorToDiagnostic "<buffer>" err) ]
                     Solve.SolveOk _ ->
                         return (map exhaustDiagnostic (Exhaust.checkModule canMod))
 
@@ -1046,23 +1055,25 @@ runPipeline src = case Parse.parseModule src of
 runPipelineSt :: ServerState -> FilePath -> T.Text -> IO [A.Value]
 runPipelineSt st path src = case Parse.parseModule src of
     Left err ->
-        return [mkDiagnosticAtError err ("Parse error: " ++ showParseError err)]
+        return [ LspR.renderLspDiagnostic
+                   (Parse.moduleErrorToDiagnostic path err) ]
     Right srcMod ->
         case Canonicalise.canonicalise srcMod of
             Left err ->
-                return [diagnosticFromMessage ("Canonicalise: " ++ err)]
+                return [ LspR.renderLspDiagnostic
+                           (Canonicalise.legacyToDiag path err) ]
             Right canMod -> do
                 externals <- getExternalsForFile st path srcMod canMod
                 cs <- Constrain.constrainModuleWithExternals externals canMod
                 r  <- Solve.solve cs
                 case r of
                     Solve.SolveError err ->
-                        -- No suppression: with closed-record kernel
-                        -- sigs for Live.app / Tui.app / Cli.program
-                        -- AND field-name-aware error rendering, the
-                        -- LSP's diagnostic now matches `sky check`'s
-                        -- exactly. Limitation #19 closed.
-                        return [diagnosticFromMessage ("Type error: " ++ err)]
+                        -- v0.13 Layer 4: closed-record kernel sigs
+                        -- + field-name-aware error rendering means
+                        -- the LSP diagnostic matches `sky check`'s
+                        -- exactly.  Limitation #19 closed.
+                        return [ LspR.renderLspDiagnostic
+                                   (Solve.solveErrorToDiagnostic path err) ]
                     Solve.SolveOk _ ->
                         return (map exhaustDiagnostic (Exhaust.checkModule canMod))
 
