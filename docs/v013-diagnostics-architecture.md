@@ -695,6 +695,80 @@ Forward-compat work that DID land in this session:
 * Dep-module type errors → Diagnostic (commit `cd53c4e`)
 * Investigation captured here for the next session.
 
+### Layer 3 — Monomorphisation foundation  ✅ A1-A3 LANDED
+
+User's insight (2026-05-13): HM has already done the type analysis;
+monomorphisation is bookkeeping over its output, not new analysis.
+Solver records `(callsite-region, callee-name, fresh-vars)` at every
+`CForeign`; post-solve walks fresh-vars through union-find to
+produce a `Set (callee, concrete-type-args)`.  This kills every L3
+architectural blocker structurally:
+
+| Blocker | How monomorphisation fixes it |
+|---|---|
+| Cross-module typed-codegen coercion gap | No generics emitted. Concrete-typed Go per instance. |
+| Sky-source vs kernel ADT phantom duality | Sky source canonical; kernel pre-reg becomes optional fallback. |
+| Polymorphic typed-codegen recursion | Each instance is non-polymorphic; recursive calls resolve trivially. |
+| Missing `rt.Basics_compare` runtime helper | Sky source for `compare` generates per-type. |
+| Incremental codegen cache | Cache key = `(instance-mangled-name, body-hash, dep-hashes)`. |
+
+**Phase A — monomorphisation infrastructure**
+
+| Step | Status | Commit |
+|---|---|---|
+| A1 — solver instrumentation: capture call-site instances | ✅ landed | `d3b0b84` |
+| A2 — mangling (`mangleType`, `mangleInstance`) + substitution (`substituteType`) | ✅ landed | `96799ca` |
+| A3 — compile pipeline wires `solveWithInstances`, logs counts + names | ✅ landed | `c4aaaf3` |
+| A4 — per-instance Go emission (specialised functions) | ❌ pending |
+| A5 — call-site rewriting (qualName → mangled instance name) | ❌ pending |
+| A6 — `_Any` fallback for FFI / untyped boundaries | ❌ pending |
+| A7 — Sky-side DCE: only emit reachable instances | ❌ pending |
+| A8 — regression specs across emission + dedup + perf | partial (A1+A2 specs live) |
+
+Captured instance counts across the 10 spot-checked examples
+(from A3's logging):
+
+| Example | Instances | Polymorphic callees |
+|---|---|---|
+| 01-hello-world | 0 | 0 |
+| 02-go-stdlib | 4 | 3 |
+| 06-json | 37 | 17 |
+| 07-todo-cli | 14 | 13 |
+| 08-notes-app | 8 | 8 |
+| 09-live-counter | 7 | 7 |
+| 12-skyvote | 19 | 18 |
+| 14-task-demo | 2 | 2 |
+| 18-job-queue | 24 | 17 |
+| 19-skyforum | 11 | 11 |
+
+Sample mangled names (todo-cli, via `SKY_MONO_TRACE=1`):
+* `Maybe_withDefault__String`
+* `List_map__DictOf_String_String_String`
+* `Result_withDefault__Error_ListOf_String`
+* `Task_run__Error_ListOf_String`
+
+Concrete types throughout — no `any` or unresolved TVars in the
+captured set.  Foundation is solid for A4+ wire-up.
+
+**Phase B — Sky stdlib migration**  ❌ pending Phase A complete
+
+Once A4-A7 land, stdlib modules port mechanically:
+* B1. Basics, Maybe, Result (pure-Sky ADT eliminators)
+* B2. List, Dict, Set, String
+* B3. Effect modules (Time, Random, Http, File, Process, Io, System)
+* B4. UI / Live (Cmd, Sub, Log, Db, Auth, Html, Css, Event, Live, Server, Tui, Cli)
+* B5. Json, Test, Uuid, Crypto, Encoding, Math, Char, Path, Regex
+* B6. Remove kernel registry entries (now Sky-source-resolved)
+* B7. Perf budget verification (≤10% cabal regression, ≤5% example sweep)
+
+**Earlier-session failed migrations** (rolled back):
+* `Sky.Core.Maybe.sky` attempted in commit `b858d31`, reverted
+  `79e044f`.  Hit the typed-codegen coercion gap (`rt.MaybeCoerce[any]`
+  vs T1=String inference) AND the Sky-source / kernel-ADT duality
+  (`expected: Maybe; actual: Maybe (Dict String String)`).  Both
+  resolved structurally by monomorphisation once A4+A5 land —
+  no need to fight per-bug patches.
+
 ### Coverage spec — overall guarantee  ✅ COMPLETE
 
 `test/Sky/Diagnostics/CoverageSpec.hs` (6 tests) runs every fixture
