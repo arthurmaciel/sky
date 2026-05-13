@@ -1769,7 +1769,15 @@ generateDeclsForDep canMod modPrefix =
                     , Just retTy
                     )
                 Can.DestructDef{} -> error "unreachable: filtered above"
-              goName = modPrefix ++ "_" ++ name
+              -- v0.13 Layer 3 fix: dep-emitted function names must
+              -- pass through goSafeName so that Sky source files
+              -- exposing a Go-keyword identifier (e.g. `map` in
+              -- Sky.Core.Result) emit as `<mod>_map_` to match the
+              -- call-site name mangling at line 3954.  Pre-fix the
+              -- emit path used the raw Sky name, producing
+              -- `Sky_Core_Result_map` while call sites looked for
+              -- `Sky_Core_Result_map_` → `go build` undefined.
+              goName = modPrefix ++ "_" ++ goSafeName name
               (goParams', destructStmts) = destructureParams params
               -- T3 (dep path): annotated dep functions get typed return.
               -- T2/T6 (dep path): typed params too. When no annotation
