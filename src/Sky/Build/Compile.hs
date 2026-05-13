@@ -4991,6 +4991,30 @@ isGenericTypeParam :: String -> Bool
 isGenericTypeParam ('T':rest) = all (\c -> c >= '0' && c <= '9') rest && not (null rest)
 isGenericTypeParam _ = False
 
+
+-- | v0.13 Phase A5 — does a comma-separated type-param list
+-- contain any TVar placeholders?  Used by `coerceArg` to detect
+-- partially-erased generic parameters where coercion would mis-
+-- match Go's type inference.
+containsTypeParam :: String -> Bool
+containsTypeParam s =
+    any isGenericTypeParam (splitTopLevelCommas s)
+
+
+-- | Split a Go type-arg list on TOP-LEVEL commas (commas not
+-- inside brackets).  Handles nested generics like `Map[K, V]`
+-- without treating the inner comma as a separator.
+splitTopLevelCommas :: String -> [String]
+splitTopLevelCommas s = go 0 [] "" s
+  where
+    go _ acc cur [] = reverse (reverse (dropWhile (== ' ') cur) : acc)
+    go d acc cur (c:cs)
+        | c == '['  = go (d + 1) acc (c:cur) cs
+        | c == ']'  = go (d - 1) acc (c:cur) cs
+        | c == ',' && d == 0 =
+            go d (reverse (dropWhile (== ' ') cur) : acc) "" cs
+        | otherwise = go d acc (c:cur) cs
+
 -- | Replace callee-scoped type params (T1, T2, ...) with `any` in
 -- type strings so call-site coercions are valid.
 -- E.g. "any, T1" → "any, any", "func(T1) func(T2) any" → "func(any) func(any) any".
