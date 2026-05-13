@@ -16,6 +16,7 @@ module Sky.Generate.Go.Record
     , withRecordAliases
     , withUnionNames
     , withCallSiteInstances
+    , withFuncSkyToGoTVars
     , collectRecordAliases
     , withDepArities
     , collectFuncArities
@@ -84,6 +85,17 @@ data CodegenEnv = CodegenEnv
       -- unique enough across a single compile because Sky modules
       -- start at line 1 and few real call sites share both.  Full
       -- (file, line, col) keying is a B-phase follow-up.
+    , _cg_funcSkyToGoTVars :: !(Map.Map String [(String, String)])
+      -- v0.13 Phase A5+: per-function mapping from annotation Sky-
+      -- TVar names (e.g. "a", "e") to the emitted Go-generic names
+      -- (e.g. "T1", "T2") that survived codegen-time defaulting.
+      -- Used by `coerceCallArgsAt` to build the substitution map in
+      -- Sky-name space — necessary because `CallInstance` records
+      -- carry one entry per annotation Forall var (e in `Result e
+      -- a` included) but `_cg_funcInferredSigs.tps` only carries
+      -- the survivors (e collapses to `Sky_Core_Error_Error` at
+      -- codegen).  Annotation positions absent from this map have
+      -- already been baked into the Go sig as concrete types.
     }
 
 
@@ -132,6 +144,7 @@ buildCodegenEnv solvedTypes canMod = CodegenEnv
     , _cg_funcRetType = Map.empty
     , _cg_funcInferredSigs = Map.empty
     , _cg_callSiteInstances = Map.empty
+    , _cg_funcSkyToGoTVars = Map.empty
     }
 
 
@@ -201,6 +214,17 @@ withFuncTypes paramTys retTys env = env
 withInferredSigs :: Map.Map String ([String], [String], String) -> CodegenEnv -> CodegenEnv
 withInferredSigs sigs env = env
     { _cg_funcInferredSigs = Map.union sigs (_cg_funcInferredSigs env)
+    }
+
+
+-- | v0.13 Phase A5+: register the Sky-TVar → Go-TVar mapping for
+-- each polymorphic function in the env.  Drives `coerceCallArgsAt`
+-- so the call-site substitution map is keyed by SKY names (matching
+-- the `CallInstance.quantifiers` carried by the solver) and projected
+-- to Go names that the param-type strings actually use.
+withFuncSkyToGoTVars :: Map.Map String [(String, String)] -> CodegenEnv -> CodegenEnv
+withFuncSkyToGoTVars m env = env
+    { _cg_funcSkyToGoTVars = Map.union m (_cg_funcSkyToGoTVars env)
     }
 
 

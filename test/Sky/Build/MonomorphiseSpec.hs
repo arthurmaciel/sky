@@ -77,19 +77,19 @@ spec = do
     describe "mangleInstance" $ do
 
         it "produces deterministic Go names from CallInstance" $ do
-            let inst = Solve.CallInstance "Sky.Core.Maybe.withDefault" [tyInt]
+            let inst = Solve.CallInstance "Sky.Core.Maybe.withDefault" [tyInt] ["a"]
             mangleInstance inst `shouldBe` "Sky_Core_Maybe_withDefault__Int"
 
         it "preserves multi-type-arg order" $ do
-            let inst = Solve.CallInstance "Sky.Core.List.map" [tyInt, tyString]
+            let inst = Solve.CallInstance "Sky.Core.List.map" [tyInt, tyString] ["a", "b"]
             mangleInstance inst `shouldBe` "Sky_Core_List_map__Int_String"
 
         it "encodes nested generics in the type-args" $ do
-            let inst = Solve.CallInstance "f" [maybeOf tyInt, listOf tyString]
+            let inst = Solve.CallInstance "f" [maybeOf tyInt, listOf tyString] ["a", "b"]
             mangleInstance inst `shouldBe` "f__MaybeOf_Int_ListOf_String"
 
         it "omits the suffix when no type args (concrete instance)" $ do
-            let inst = Solve.CallInstance "Sky.Core.System.cwd" []
+            let inst = Solve.CallInstance "Sky.Core.System.cwd" [] []
             mangleInstance inst `shouldBe` "Sky_Core_System_cwd"
 
     describe "mangleQualName" $ do

@@ -59,7 +59,7 @@ import qualified System.Environment
 -- | Global codegen environment (set once per compilation, read during codegen)
 {-# NOINLINE globalCgEnv #-}
 globalCgEnv :: IORef Rec.CodegenEnv
-globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty)
+globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty)
 
 
 -- | v0.13 Phase A5: entry-module source path, set once per
@@ -808,6 +808,39 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 depInferredParams = Map.map (\(_, ps, _) -> ps) fullSigs
                 depInferredRets   = Map.map (\(_, _, r) -> r)  fullSigs
                 depInferredSigs   = fullSigs
+                -- v0.13 Phase A5+: per-function SkyName→GoName mapping
+                -- for the SAME dep functions.  Drives the call-site
+                -- coercion path so `CallInstance.quantifiers`
+                -- (annotation Forall names) project to the Go-generic
+                -- names that actually appear in the dep's emitted
+                -- signature.
+                -- Critical: align Sky-TVar names with what the
+                -- solver's CForeign captures.  Externals are stored
+                -- via `generaliseToAnnotation` which renames solver-
+                -- internal names (`_arg_47`) to user-friendly ones
+                -- (`a, b, c`); the CForeign's instantiation then
+                -- uses those user-friendly names as `quants`.  If
+                -- we computed `inferredSigSkyToGo` on the un-
+                -- renamed type, the SkyNames would be the solver-
+                -- internal forms and the lookup in `coerceCallArgsAt`
+                -- would always miss.  Rename first.
+                renameTypeForExternal t =
+                    case generaliseToAnnotation t of
+                        T.Forall _ renamed -> renamed
+                depSkyToGoTVars = Map.unions
+                    [ Map.fromList
+                        [ ( prefix ++ "_" ++ goSafeName n
+                          , inferredSigSkyToGo
+                                earlyAllRecAliases earlyAllFieldIdx
+                                (countParamsFor n depMod)
+                                (renameTypeForExternal ty) )
+                        | (n, ty) <- Map.toList depTypes
+                        , not (hasAnnotation n depMod)
+                        ]
+                    | (modName, depTypes) <- depSolved
+                    , let prefix = map (\c -> if c == '.' then '_' else c) modName
+                    , let depMod = head [ m | (mn, m) <- validDeps, mn == modName ]
+                    ]
             putStrLn $ "   HM infer (deps): "
                 ++ show (Map.size depInferredParams) ++ " functions typed"
             -- Merge each dep module's solvedTypes into the global
@@ -833,6 +866,8 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     Map.union (Rec._cg_funcRetType e) depInferredRets
                 , Rec._cg_funcInferredSigs =
                     Map.union (Rec._cg_funcInferredSigs e) depInferredSigs
+                , Rec._cg_funcSkyToGoTVars =
+                    Map.union (Rec._cg_funcSkyToGoTVars e) depSkyToGoTVars
                 }
             -- Bail BEFORE codegen if HM rejected the program. Previously
             -- "-- Generating Go" printed unconditionally, which made the
@@ -2115,6 +2150,28 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                     ]
                 entryInferredParams = Map.map (\(_, ps, _) -> ps) entryInferredSigs
                 entryInferredRets   = Map.map (\(_, _, r) -> r) entryInferredSigs
+                -- v0.13 Phase A5+: same Sky-TVar → Go-TVar mapping for
+                -- entry-module functions.  See depSkyToGoTVars above.
+                -- See depSkyToGoTVars comment — apply the same
+                -- generalisation-style rename so SkyNames match the
+                -- annotation Forall names the solver captures.  Entry-
+                -- module same-module call sites also go through this
+                -- path because cross-module dep callers see the entry
+                -- module via depExternals (and entry-module recursive
+                -- calls capture against the local CLet binding's
+                -- generalised annotation too).
+                renameTypeForExternal' t =
+                    case generaliseToAnnotation t of
+                        T.Forall _ renamed -> renamed
+                entrySkyToGoTVars = Map.fromList
+                    [ ( goSafeName n
+                      , inferredSigSkyToGo
+                            earlyRecAliases earlyFieldIdx
+                            (countParamsFor n canMod)
+                            (renameTypeForExternal' ty) )
+                    | (n, _) <- Map.toList solvedTypes
+                    , Just ty <- [sigTypeFor n]
+                    ]
             -- Gather the FULL record-alias set (entry + dep modules,
             -- prefixed and unprefixed forms) so collectFuncTypesWith's
             -- safeReturnTypeWith resolves `Piece` → `Chess_Piece_Piece_R`
@@ -2138,6 +2195,9 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                 -- the CSI map needs explicit threading.
                 cgEnv = Rec.withCallSiteInstances
                           (Rec._cg_callSiteInstances prevEnv)
+                      $ Rec.withFuncSkyToGoTVars
+                          (Map.union entrySkyToGoTVars
+                              (Rec._cg_funcSkyToGoTVars prevEnv))
                       $ Rec.withInferredSigs
                           (Map.union extraInferredSigs entryInferredSigs)
                       $ Rec.withFuncTypes allParamTys allRetTys
@@ -3419,6 +3479,45 @@ splitInferredSig = splitInferredSigWith Set.empty
 -- for resolving cross-module record aliases and ADT types.
 splitInferredSigWith :: Set.Set String -> Int -> T.Type -> ([String], [String], String)
 splitInferredSigWith recAliases = splitInferredSigWithReg recAliases Map.empty
+
+-- | v0.13 Phase A5+: extract the Sky-TVar → Go-TVar mapping for a
+-- polymorphic function's emitted signature.  Mirrors
+-- `splitInferredSigWithReg`'s internal `keptNumbered` computation
+-- so the call-site coercion path (`coerceCallArgsAt`) can map
+-- annotation Forall names (carried by `CallInstance.quantifiers`)
+-- to the Go-generic names that actually appear in the emitted
+-- signature.
+inferredSigSkyToGo
+    :: Set.Set String
+    -> Rec.RecordRegistry
+    -> Int
+    -> T.Type
+    -> [(String, String)]
+inferredSigSkyToGo recAliases fieldIdx arity funcType =
+    let defaulted =
+            if errorTypeAvailable recAliases
+                then defaultErrorTVars funcType
+                else defaultOpaqueTVars funcType
+        (paramTys, retTy) = collectParamsLocal arity defaulted
+        paramTVars = uniqLocal (concatMap tvarsInEmitted paramTys)
+        numbered = zip paramTVars ["T" ++ show i | i <- [1::Int ..]]
+        paramStrsRaw = map (renderHofParamTy recAliases fieldIdx numbered) paramTys
+        retStrRaw = typeStrWithAliasesReg recAliases fieldIdx numbered retTy
+        renderedSig = unwords (retStrRaw : paramStrsRaw)
+    in [ (skyName, goName)
+       | (skyName, goName) <- numbered
+       , goAppearsAsToken goName renderedSig
+       ]
+  where
+    collectParamsLocal 0 ty = ([], ty)
+    collectParamsLocal n (T.TLambda from to) =
+        let (rest, r) = collectParamsLocal (n - 1) to
+        in (from : rest, r)
+    collectParamsLocal _ ty = ([], ty)
+
+    uniqLocal [] = []
+    uniqLocal (x:xs) = x : uniqLocal (filter (/= x) xs)
+
 
 -- | Richer variant that also carries a field-set → alias-name
 -- registry so anonymous record types (TRecord) can resolve to their
@@ -4892,18 +4991,78 @@ coerceCallArgsAt region qualName args =
         siteKey = ( A._line (A._start region)
                   , A._col  (A._start region) )
         instM = Map.lookup siteKey (Rec._cg_callSiteInstances env)
-        inferred = Map.lookup qualName (Rec._cg_funcInferredSigs env)
-    in case (paramTypes, instM, inferred) of
-        ([], _, _) -> map exprToGo args
-        (_, Just (Solve.CallInstance _ concreteTys), Just (tps, _, _))
-            | length tps == length concreteTys ->
-                -- Build a Go-string substitution map: TVar name → Go
-                -- type string from `solvedTypeToGo`.  Apply it to each
-                -- declared param type with `substTVarsInGoType`.
-                let σ = Map.fromList (zip tps (map solvedTypeToGo concreteTys))
+        skyToGo = Map.findWithDefault [] qualName
+                    (Rec._cg_funcSkyToGoTVars env)
+    in case (paramTypes, instM) of
+        ([], _) -> map exprToGo args
+        (_, Just (Solve.CallInstance _ concreteTys quants))
+            | length quants == length concreteTys
+            , not (null skyToGo) ->
+                -- v0.13 Phase A5+: build σ in Sky-name space first
+                -- (zip annotation Forall names with concrete types),
+                -- then project to Go-name space via the function's
+                -- skyToGo mapping.  Annotation positions whose Sky-
+                -- name doesn't appear in skyToGo were defaulted at
+                -- codegen time (e.g. error-position TVar collapsed
+                -- to `Sky_Core_Error_Error`) — skip them; their slot
+                -- in the Go sig is already concrete.
+                --
+                -- Sanitise the projected Go-type strings via
+                -- `sanitiseTypedDeep`: if a concrete type contains
+                -- a non-emittable token (`Anon_R_xxx` synthesised
+                -- record name with no Go alias counterpart, or an
+                -- ambiguous-resolution sentinel), substitute that
+                -- subtree with `any` so the rest of the call's
+                -- type-arg map still reconciles.  Mirrors the
+                -- existing `sanitiseTypedElem` filter on the kernel-
+                -- routed path.
+                let skyToConcrete = Map.fromList (zip quants concreteTys)
+                    σ = Map.fromList
+                          [ (goName, sanitiseTypedDeep (solvedTypeToGo cty))
+                          | (skyName, goName) <- skyToGo
+                          , Just cty <- [Map.lookup skyName skyToConcrete]
+                          ]
                     substituted = map (substTVarsInGoType σ) paramTypes
-                in zipWithDefault coerceArg exprToGo substituted args
+                    -- When a substituted param type is exactly "any"
+                    -- because the call-site instance normalised this
+                    -- TVar to `any` (partial-resolution — surrounding
+                    -- function is itself polymorphic in this param),
+                    -- the raw value's Go static type would conflict
+                    -- with Go's generic-inference across other arg
+                    -- positions.  Example: Result.withDefault [] r
+                    -- where σ={a→any}.  The def slot's substituted
+                    -- type is "any" — passing `[]any{}` raw gives Go
+                    -- static type `[]any`, then the second arg's
+                    -- `ResultCoerce[Error, any]` conflicts with
+                    -- `T1=[]any` inferred from def.  Force `any(e)`
+                    -- widening so Go infers T1=any consistently
+                    -- across all positions.
+                    --
+                    -- Only fires when the ORIGINAL param mentioned a
+                    -- generic placeholder that got substituted away
+                    -- (`containsTypeParam orig`).  Non-generic
+                    -- `any`-typed params (untyped boundary calls)
+                    -- pass through unchanged.
+                    coerceOne orig subbed e =
+                        if subbed == "any" && containsTypeParam orig
+                            then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
+                            else coerceArg (exprToGo e) subbed
+                in zipWith3Default coerceOne paramTypes substituted args
         _ -> zipWithDefault coerceArg exprToGo paramTypes args
+
+
+-- | Three-way zip that pairs default args after lists run out.  Used
+-- by `coerceCallArgsAt` to walk (origParamTy, substitutedTy, argExpr)
+-- triples without losing trailing args when paramTypes is shorter
+-- than args (variadic / over-supplied positions fall back to
+-- exprToGo with no coercion).
+zipWith3Default
+    :: (String -> String -> Can.Expr -> GoIr.GoExpr)
+    -> [String] -> [String] -> [Can.Expr] -> [GoIr.GoExpr]
+zipWith3Default _ [] _ args = map exprToGo args
+zipWith3Default _ _ [] args = map exprToGo args
+zipWith3Default _ _ _ [] = []
+zipWith3Default f (o:os) (s:ss) (a:as) = f o s a : zipWith3Default f os ss as
 
 
 -- | Substitute generic type variables (`T1`, `T2`, …) in a
@@ -6520,6 +6679,40 @@ sanitiseTypedElem :: String -> String
 sanitiseTypedElem go
     | "Anon_R_" `List.isPrefixOf` go = "any"
     | otherwise = go
+
+
+-- | v0.13 Phase A5+: recursive variant of `sanitiseTypedElem` that
+-- walks a complete Go-type string and replaces every embedded
+-- `Anon_R_<hash>` identifier token (anonymous record with no Go
+-- type-alias counterpart) with `any`.  Used by the call-site
+-- substitution path so a Result/Maybe wrapper around an anonymous
+-- record (`Result Error { name : String, … }`) collapses to a
+-- usable `rt.SkyResult[Error, any]` instead of emitting
+-- `rt.SkyResult[Error, Anon_R_…]` which Go can't resolve.
+--
+-- Identifier-aware: only replaces tokens that BEGIN with `Anon_R_`
+-- and whose preceding char is a non-identifier boundary, so
+-- `Anon_R_xxx_in_a_bigger_name` isn't false-matched.  The walker
+-- preserves brackets, commas, and other type-string punctuation
+-- verbatim so structural shapes (`[]X`, `map[string]X`,
+-- `rt.SkyResult[E, A]`) survive intact.
+sanitiseTypedDeep :: String -> String
+sanitiseTypedDeep s = go s
+  where
+    go [] = []
+    go (c:cs)
+        | isIdentStart c =
+            let (word, rest) = span isIdentChar (c:cs)
+            in if "Anon_R_" `List.isPrefixOf` word
+                then "any" ++ go rest
+                else word ++ go rest
+        | otherwise = c : go cs
+
+    isIdentStart c = (c >= 'A' && c <= 'Z')
+                  || (c >= 'a' && c <= 'z')
+                  || c == '_'
+    isIdentChar c = isIdentStart c
+                 || (c >= '0' && c <= '9')
 
 
 -- | Strip a Go type string of the form `rt.SkyMaybe[INNER]` returning

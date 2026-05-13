@@ -105,17 +105,33 @@ data SolverState = SolverState
 -- solve.  Post-solve evaluation turns each `_ci_freshVars` UF
 -- variable into a concrete type via `variableToType`.
 data CallInstanceRecord = CallInstanceRecord
-    { _ci_region    :: !A.Region        -- where the reference appears
-    , _ci_callee    :: !String          -- qualified callee name
-    , _ci_freshVars :: ![T.Variable]    -- per quantified type var
+    { _ci_region      :: !A.Region        -- where the reference appears
+    , _ci_callee      :: !String          -- qualified callee name
+    , _ci_freshVars   :: ![T.Variable]    -- per quantified type var
+    , _ci_quantifiers :: ![String]        -- Sky-source Forall var names
+                                          -- in the same order as freshVars
+                                          -- (excludes the wildcard `any`)
+                                          -- so downstream codegen can map
+                                          -- each concrete type back to its
+                                          -- annotation TVar by name even
+                                          -- when codegen-time defaulting
+                                          -- collapses some positions.
     }
 
 
 -- | Public view of a resolved call-site instance.  Used by
 -- monomorphisation as the (callee, type-args) key.
 data CallInstance = CallInstance
-    { _instance_callee :: !String
-    , _instance_types  :: ![T.Type]
+    { _instance_callee      :: !String
+    , _instance_types       :: ![T.Type]
+    , _instance_quantifiers :: ![String]  -- annotation Forall names in
+                                          -- positional alignment with
+                                          -- `_instance_types`.  Used by
+                                          -- call-site coercion to build
+                                          -- σ in Sky-name space so it
+                                          -- doesn't depend on Go-side
+                                          -- defaulting collapsing some
+                                          -- positions away.
     }
     deriving (Eq, Ord, Show)
 
@@ -449,7 +465,8 @@ extractInstancesAndSites records = do
     resolveOne rec_ = do
         tys <- mapM variableToType (_ci_freshVars rec_)
         let normalised = map (normaliseUnresolved isConcreteType) tys
-        return (Just (CallInstance (_ci_callee rec_) normalised))
+        return (Just (CallInstance (_ci_callee rec_) normalised
+                                   (_ci_quantifiers rec_)))
 
 
 -- | Replace unresolved TVars (FlexVar with internal `_` prefix or
@@ -591,17 +608,24 @@ expectedToVar state (T.FromAnnotation _ _ _ ty) = typeToVar state ty
 -- entry is dead-write but the HM-side state shape is identical.  Only
 -- the RETURNED fresh-var list omits `any` (the monomorphiser doesn't
 -- specialise wildcards).
-instantiateAnnotation :: SolverState -> T.Annotation -> IO (T.Variable, [T.Variable])
+instantiateAnnotation :: SolverState -> T.Annotation -> IO (T.Variable, [T.Variable], [String])
 instantiateAnnotation state (T.Forall freeVars canType)
     -- No quantification: use the GLOBAL cache for sharing.  No fresh
     -- vars to track — the call site is not polymorphic.
     | null freeVars = do
         v <- typeToVar state canType
-        return (v, [])
+        return (v, [], [])
     -- With quantification: create a LOCAL cache so each use gets fresh
     -- vars (identical to pre-A1).  The fresh-var list returned to the
     -- caller excludes the `any` wildcard so the monomorphisation pass
-    -- doesn't try to specialise it.
+    -- doesn't try to specialise it.  The third return component is the
+    -- list of quantifier names IN THE SAME ORDER as the fresh-var
+    -- list — downstream codegen uses these names to map each concrete
+    -- type back to its annotation TVar (load-bearing for partial-
+    -- instance substitution when codegen-time defaulting collapses
+    -- some positions, e.g. `Result e a` → `Result Error a` where `e`
+    -- no longer appears as a Go generic but the call instance still
+    -- has 2 entries).
     | otherwise = do
         localCache <- newIORef Map.empty
         named <- mapM (\name -> do
@@ -610,8 +634,10 @@ instantiateAnnotation state (T.Forall freeVars canType)
             return (name, v)) freeVars
         let instState = state { _varCache = localCache }
         v <- typeToVar instState canType
-        let freshVars = [ uv | (n, uv) <- named, n /= "any" ]
-        return (v, freshVars)
+        let kept = [ (n, uv) | (n, uv) <- named, n /= "any" ]
+            freshVars = map snd kept
+            quantNames = map fst kept
+        return (v, freshVars, quantNames)
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -700,7 +726,7 @@ solveHelpBody state constraint = case constraint of
                 return (Nothing, state')
 
     T.CForeign region name annot expected -> do
-        (instVar, freshVars) <- instantiateAnnotation state annot
+        (instVar, freshVars, quants) <- instantiateAnnotation state annot
         expectedVar <- expectedToVar state expected
         ok <- Unify.unify instVar expectedVar
         if ok
@@ -710,7 +736,7 @@ solveHelpBody state constraint = case constraint of
                 -- vars (the call site is already concrete).
                 unless (null freshVars) $
                     modifyIORef' (_callInstances state) $
-                        \xs -> CallInstanceRecord region name freshVars : xs
+                        \xs -> CallInstanceRecord region name freshVars quants : xs
                 return (Nothing, state)
             else do
                 instType <- variableToType instVar

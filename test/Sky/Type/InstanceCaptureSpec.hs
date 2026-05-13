@@ -78,7 +78,7 @@ spec = do
                 Solve.SolveError e -> expectationFailure ("solve failed: " ++ e)
             length ci `shouldBe` 1
             case ci of
-                [Solve.CallInstance callee tyArgs] -> do
+                [Solve.CallInstance callee tyArgs _quants] -> do
                     callee `shouldBe` "Sky.Core.Maybe.withDefault"
                     -- One quantified TVar (`a`); one concrete type arg.
                     length tyArgs `shouldBe` 1
@@ -121,7 +121,7 @@ spec = do
                 Solve.SolveError e -> expectationFailure ("solve failed: " ++ e)
             length ci `shouldBe` 1
             case ci of
-                [Solve.CallInstance _ tyArgs] -> do
+                [Solve.CallInstance _ tyArgs _quants] -> do
                     -- Two quantified TVars (`a`, `b`).
                     length tyArgs `shouldBe` 2
                 _ -> expectationFailure "expected exactly one instance"

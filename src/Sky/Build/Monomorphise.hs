@@ -116,7 +116,7 @@ mangleType ty = case ty of
 -- gaining an underscore in its name) don't collide with type-arg
 -- separators.
 mangleInstance :: Solve.CallInstance -> String
-mangleInstance (Solve.CallInstance callee tys) =
+mangleInstance (Solve.CallInstance callee tys _) =
     mangleQualName callee
     ++ (if null tys
           then ""
