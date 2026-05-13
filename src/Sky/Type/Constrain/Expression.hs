@@ -370,6 +370,18 @@ binopTypes counter op = case op of
     ">=" -> do { n <- freshName counter "_cmp"; return (T.TVar n, T.TVar n, boolType) }
     "&&" -> return (boolType, boolType, boolType)
     "||" -> return (boolType, boolType, boolType)
+    -- Cons (`::`) needs proper element-type propagation:
+    -- left  : element type `a`
+    -- right : `List a`
+    -- result: `List a`
+    -- Pre-fix, `::` fell through to the catch-all (fresh a/b/r with
+    -- no relation), so `fn x :: map fn rest` left the result type
+    -- floating and HM inferred `List (List _)` for map's return.
+    "::" -> do
+              a <- freshName counter "_consElem"
+              let elemTy = T.TVar a
+                  listTy = T.TType ModuleName.list "List" [elemTy]
+              return (elemTy, listTy, listTy)
     "|>" -> do { a <- freshName counter "_pa"; b <- freshName counter "_pb"; return (T.TVar a, T.TLambda (T.TVar a) (T.TVar b), T.TVar b) }
     "<|" -> do { a <- freshName counter "_pa"; b <- freshName counter "_pb"; return (T.TLambda (T.TVar a) (T.TVar b), T.TVar a, T.TVar b) }
     ">>" -> do { a <- freshName counter "_ca"; b <- freshName counter "_cb"; c <- freshName counter "_cc"; return (T.TLambda (T.TVar a) (T.TVar b), T.TLambda (T.TVar b) (T.TVar c), T.TLambda (T.TVar a) (T.TVar c)) }
@@ -1322,6 +1334,18 @@ lookupKernelType modName funcName = case (modName, funcName) of
     ("List", "append") ->
         Just $ T.Forall ["a"]
             (T.TLambda (T.TType ModuleName.list "List" [T.TVar "a"])
+                (T.TLambda (T.TType ModuleName.list "List" [T.TVar "a"])
+                    (T.TType ModuleName.list "List" [T.TVar "a"])))
+    -- v0.13 Phase B3: cons (`::`) needs a kernel sig so HM can
+    -- propagate element-type constraints through pattern-match
+    -- + recursive bodies in Sky-source stdlib (Sky.Core.List.map
+    -- etc.).  Pre-fix, `lookupKernelType "List" "cons"` returned
+    -- Nothing and `x :: xs` constrained to CTrue — element types
+    -- of cons calls floated free and HM inferred map's return
+    -- type as `List (List c)` instead of `List b`.
+    ("List", "cons") ->
+        Just $ T.Forall ["a"]
+            (T.TLambda (T.TVar "a")
                 (T.TLambda (T.TType ModuleName.list "List" [T.TVar "a"])
                     (T.TType ModuleName.list "List" [T.TVar "a"])))
     ("List", "concat") ->
