@@ -2483,13 +2483,11 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
             writeIORef globalEmittedSpecs specNames
             return specials
         -- v0.13 Phase A4: keep generic versions alongside specs.
-        -- Drop pass needs more work — even the "no value-ref"
-        -- variant breaks Page_Roadmap_viewRoadmap because some
-        -- spec emissions produce wrong-type-args specs (e.g.
-        -- __Error_Unit for a function whose body uses
-        -- `model : Model_R`, not Error).  Spec emission needs
-        -- alignment with captured _quantifiers vs annotMap's
-        -- generaliseToAnnotation rename — another v0.14 follow-up.
+        -- Drop pass tracked for v0.14 — needs spec emission to
+        -- handle every reachable call-site instance, including
+        -- subtle alignment cases (Page_Roadmap_viewRoadmap's
+        -- __Error_Unit mismatch in skyvote, Sky_Core_Result_andThen's
+        -- third-instance miss in skyshop).
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
             , GoIr._pkg_imports = imports
