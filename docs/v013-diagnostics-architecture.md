@@ -820,18 +820,52 @@ Sample mangled names (todo-cli, via `SKY_MONO_TRACE=1`):
 Concrete types throughout — no `any` or unresolved TVars in the
 captured set.  Foundation is solid for A4+ wire-up.
 
-**Phase B — Sky stdlib migration**  🚧 partial
+**Phase B — Sky stdlib migration**  🚧 substantial progress
 
 | Module | Status | Notes |
 |---|---|---|
 | `Sky.Core.Maybe` | ✅ shipped (`68af62b`) | 11 combinators; ADT stays kernel-anchored |
 | `Sky.Core.Result` | ✅ shipped (`f43a2d4`) | 10 combinators; ADT stays kernel-anchored |
-| `Sky.Core.Basics` | ⏭️  pending | identity/always/fst/snd/clamp are trivial; toString/compare need runtime helpers |
-| `Sky.Core.List` | ❌ blocked on A6 | recursive let-group generalisation issue |
-| `Sky.Core.Dict` | ❌ blocked on A6 | same class as List |
-| `Sky.Core.Set` | ❌ blocked on A6 | same class as List |
-| `Sky.Core.String` | ⏭️  mostly FFI | String ops are mostly Go-side helpers — limited Sky-source surface |
+| `Sky.Core.Basics` | ✅ shipped (`8075882`) | identity/always/not/fst/snd/clamp; numerics + toString/compare stay kernel |
+| `Sky.Core.List` (non-HOF) | ✅ shipped (`36a03a4`) | isEmpty/length/head/tail/cons/reverse/take/drop/append/concat/member/range/zip |
+| `Sky.Core.List` (HOFs) | ❌ blocked on Gap 4 | map/filter/foldl/foldr/concatMap/filterMap/find/any/all need typed lambda lowering |
+| `Sky.Core.Dict` | ⏭️  intentionally kernel | Go-map semantics; Sky source has no value-add |
+| `Sky.Core.Set` | ⏭️  intentionally kernel | Same as Dict |
+| `Sky.Core.String` | ⏭️  intentionally kernel | Rune ops + Sprintf-style helpers — FFI surface |
 | Time / Random / Http / File / Crypto / Encoding / Regex | ⏭️  intentionally kernel | Pure FFI / Go-side primitives |
+| `Sky.Test` | ✅ already Sky source | Test harness module |
+| `Std.Ui` + sub-modules (Background, Border, Font, Input, Region, Lazy, Keyed, Responsive, Events) | ✅ already Sky source | Typed no-CSS layout DSL |
+
+**Two cross-cutting HM fixes landed alongside the migration:**
+
+1. **`::` binop typing** (`36a03a4`): pre-fix the cons operator
+   fell through to `binopTypes`'s catch-all, producing fresh
+   unrelated `a/b/r` tvars.  This broke HM inference for any
+   Sky-source body that constructs lists via `x :: xs` —
+   `Sky.Core.List.map` came out as `(a → List b) → List a →
+   List (List b)` instead of `(a → b) → List a → List b`.
+   Fixed: `"::"` now produces `(elem, List elem, List elem)` as
+   its binop types, matching the kernel cons sig.
+
+2. **`("List", "cons")` kernel sig** (`36a03a4`): direct
+   `List.cons` calls (from inside Sky-source stdlib that
+   imports `cons` explicitly) need the same HM-side sig.
+   Added.
+
+**Gap 4 (typed lambda lowering) remains the gating fix** for the
+HOF surface.  Sky lambdas lower to `func(any) any` regardless of
+HM-inferred input/output types.  When a Sky-source HOF in a dep
+module accepts a function param, the param's emitted Go sig
+collapses to `func(T1) any` — and HM-inferred return type
+information lost.  Symptom at user-side call sites: `cannot infer
+T2` from Go build.  Fix is a multi-day refactor that threads
+HM-inferred types through `curryLambdaPat`'s emission.
+
+**A6 (let-polymorphism)** turned out NOT to be the gating issue
+for the non-HOF surface — the `::` binop fall-through was the
+real culprit for the List.map "concatMap-shaped type" symptom.
+A6 remains open for future work as a robustness improvement, but
+isn't blocking any current B-phase work.
 
 **A6 let-polymorphism blocker (List/Dict/Set migration)**
 
