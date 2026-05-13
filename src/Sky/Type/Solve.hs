@@ -12,8 +12,10 @@
 module Sky.Type.Solve
     ( solve
     , solveWithLocals
+    , solveWithInstances
     , SolveResult(..)
     , SolvedTypes
+    , CallInstance(..)
     , showType
     , showTypeWith
     , moduleRenaming
@@ -21,9 +23,11 @@ module Sky.Type.Solve
     )
     where
 
+import Control.Monad (unless)
 import Data.IORef
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Sky.Type.Type as T
 import qualified Sky.Type.UnionFind as UF
 import qualified Sky.Type.Unify as Unify
@@ -85,7 +89,34 @@ data SolverState = SolverState
       -- var. Set to 0 to disable the bound entirely (debug only —
       -- DO NOT ship without the bound; that's what Limitation #17
       -- showed can OOM the host).
+    , _callInstances :: !(IORef [CallInstanceRecord])
+      -- v0.13 Phase A1: every CForeign solver step records the
+      -- (region, callee-name, fresh-TVars) triple here.  After
+      -- solve completes, the post-pass evaluates each fresh-TVar
+      -- through union-find to derive the concrete type instance
+      -- at that call site.  Front-of-list prepend; order doesn't
+      -- matter because the downstream consumer deduplicates by
+      -- (callee, type-args) anyway.
     }
+
+
+-- | A single call-site polymorphic-reference record captured during
+-- solve.  Post-solve evaluation turns each `_ci_freshVars` UF
+-- variable into a concrete type via `variableToType`.
+data CallInstanceRecord = CallInstanceRecord
+    { _ci_region    :: !A.Region        -- where the reference appears
+    , _ci_callee    :: !String          -- qualified callee name
+    , _ci_freshVars :: ![T.Variable]    -- per quantified type var
+    }
+
+
+-- | Public view of a resolved call-site instance.  Used by
+-- monomorphisation as the (callee, type-args) key.
+data CallInstance = CallInstance
+    { _instance_callee :: !String
+    , _instance_types  :: ![T.Type]
+    }
+    deriving (Eq, Ord, Show)
 
 
 -- | Default cap on solver steps before bailing with a defensive
@@ -245,7 +276,8 @@ solve constraint = do
     locals <- newIORef Map.empty
     steps <- newIORef 0
     budget <- effectiveSolverBudget constraint
-    let state0 = SolverState Map.empty cache 0 locals steps budget
+    instances <- newIORef []
+    let state0 = SolverState Map.empty cache 0 locals steps budget instances
     (result, finalState) <- solveHelp state0 constraint
     case result of
         Nothing -> do
@@ -292,7 +324,8 @@ solveWithLocals constraint = do
     locals <- newIORef Map.empty
     steps <- newIORef 0
     budget <- effectiveSolverBudget constraint
-    let state0 = SolverState Map.empty cache 0 locals steps budget
+    instances <- newIORef []
+    let state0 = SolverState Map.empty cache 0 locals steps budget instances
     (result, finalState) <- solveHelp state0 constraint
     localVars <- readIORef (_locals finalState)
     localTypes <- Map.traverseWithKey (\_ vars ->
@@ -303,6 +336,90 @@ solveWithLocals constraint = do
             return (SolveOk solvedTypes, localTypes)
         Just err ->
             return (SolveError err, localTypes)
+
+
+-- | v0.13 Phase A1: solve a constraint set and ALSO return the
+-- call-site instance map needed by the monomorphisation pass.
+--
+-- Every `T.CForeign` constraint hit during solve records a
+-- `CallInstanceRecord` carrying the call-site region, the callee's
+-- qualified name, and the list of fresh UF variables created for the
+-- callee's quantified type parameters.  After the solver successfully
+-- unifies all constraints, this function walks each record and
+-- evaluates each fresh var via `variableToType` to derive the
+-- concrete type the call site instantiated to.
+--
+-- Result: a list of `CallInstance` values, one per polymorphic
+-- reference, deduplicated by `(callee, type-args)`.  Concrete-typed
+-- pre-monomorphisation instances form the table that downstream
+-- codegen iterates to emit per-instance Go functions.
+--
+-- Skips records where any fresh var resolves to an unbound TVar
+-- (e.g. a polymorphic helper that's never called with a concrete
+-- type at this module's `main` boundary).  Those instances need
+-- the `_Any` fallback at emission time.
+solveWithInstances :: T.Constraint -> IO (SolveResult, [CallInstance])
+solveWithInstances constraint = do
+    cache <- newIORef Map.empty
+    locals <- newIORef Map.empty
+    steps <- newIORef 0
+    budget <- effectiveSolverBudget constraint
+    instances <- newIORef []
+    let state0 = SolverState Map.empty cache 0 locals steps budget instances
+    (result, finalState) <- solveHelp state0 constraint
+    case result of
+        Nothing -> do
+            solvedTypes <- readSolvedTypes (_env finalState)
+            records <- readIORef (_callInstances finalState)
+            ci <- extractInstances records
+            return (SolveOk solvedTypes, ci)
+        Just err -> do
+            -- Even on type error, return what we captured so far.
+            -- Downstream consumers can decide whether to use a partial
+            -- instance set or bail.  Today the only consumer is
+            -- monomorphisation which won't run on a type-error build.
+            return (SolveError err, [])
+
+
+-- | Walk the captured call-instance records, resolve each fresh
+-- UF var to its concrete type, deduplicate by (callee, type-args).
+-- Records where any fresh var doesn't resolve to a concrete type
+-- are skipped (the monomorphisation `_Any` fallback handles them).
+extractInstances :: [CallInstanceRecord] -> IO [CallInstance]
+extractInstances records = do
+    raw <- mapM resolveOne records
+    return $ Set.toList $ Set.fromList [ci | Just ci <- raw]
+  where
+    resolveOne rec_ = do
+        tys <- mapM variableToType (_ci_freshVars rec_)
+        -- If any resolved type is still an unbound TVar (FlexVar
+        -- with the placeholder name), this call site never got a
+        -- concrete instantiation — defer to `_Any` fallback.
+        if all isConcrete tys
+            then return (Just (CallInstance (_ci_callee rec_) tys))
+            else return Nothing
+
+    -- A type is considered concrete iff it contains no `T.TVar n`
+    -- whose name starts with `_` (the solver's internal placeholder
+    -- prefix for unresolved unification variables).  Real user-
+    -- declared type variables like `a` / `msg` are NOT considered
+    -- concrete here — they'd indicate the call site lives inside
+    -- a polymorphic context where the substitution is delayed
+    -- (e.g. a generic helper whose own type vars haven't been
+    -- pinned yet).  Those resolve once the outer call instantiates.
+    isConcrete (T.TVar n) = not (null n) && head n /= '_' && n /= "any"
+                          && all (\c -> c >= 'A' && c <= 'Z'
+                                       || c >= 'a' && c <= 'z'
+                                       || c == '_'
+                                       || c >= '0' && c <= '9') n
+                          && (head n >= 'A' && head n <= 'Z')
+    isConcrete (T.TLambda f t) = isConcrete f && isConcrete t
+    isConcrete (T.TType _ _ args) = all isConcrete args
+    isConcrete (T.TRecord fields _) =
+        all (\(T.FieldType _ ty) -> isConcrete ty) (Map.elems fields)
+    isConcrete T.TUnit = True
+    isConcrete (T.TTuple a b cs) = isConcrete a && isConcrete b && all isConcrete cs
+    isConcrete (T.TAlias _ _ pairs _) = all (isConcrete . snd) pairs
 
 
 -- | Convert a Type to a UF Variable, SHARING variables for the same TVar name.
@@ -382,19 +499,32 @@ expectedToVar state (T.FromContext _ _ ty) = typeToVar state ty
 expectedToVar state (T.FromAnnotation _ _ _ ty) = typeToVar state ty
 
 
--- | Instantiate an Annotation into a UF Variable (fresh vars for quantified names)
-instantiateAnnotation :: SolverState -> T.Annotation -> IO T.Variable
+-- | Instantiate an Annotation into a UF Variable (fresh vars for quantified names).
+-- Returns the instantiated variable plus the list of fresh UF vars created
+-- for the quantified type parameters, in declaration order (matching the
+-- `Forall` quantifier list).  v0.13 Phase A1 uses the fresh-var list to
+-- capture call-site instantiation: after solve completes, evaluating each
+-- fresh var via `variableToType` gives the concrete type at the call site.
+instantiateAnnotation :: SolverState -> T.Annotation -> IO (T.Variable, [T.Variable])
 instantiateAnnotation state (T.Forall freeVars canType)
-    -- No quantification: use the GLOBAL cache for sharing
-    | null freeVars = typeToVar state canType
-    -- With quantification: create a LOCAL cache so each use gets fresh vars
+    -- No quantification: use the GLOBAL cache for sharing.  No fresh
+    -- vars to track — the call site is not polymorphic.
+    | null freeVars = do
+        v <- typeToVar state canType
+        return (v, [])
+    -- With quantification: create a LOCAL cache so each use gets fresh vars,
+    -- and return the freshly-created vars in declaration order so the
+    -- monomorphisation pass can resolve them post-solve.
     | otherwise = do
         localCache <- newIORef Map.empty
-        mapM_ (\name -> do
-            var <- UF.fresh (T.Descriptor (T.FlexVar (Just name)) (_rank state) T.noMark Nothing)
-            modifyIORef' localCache (Map.insert name var)) freeVars
+        let realVars = filter (/= "any") freeVars
+        freshVars <- mapM (\name -> do
+            v <- UF.fresh (T.Descriptor (T.FlexVar (Just name)) (_rank state) T.noMark Nothing)
+            modifyIORef' localCache (Map.insert name v)
+            return v) realVars
         let instState = state { _varCache = localCache }
-        typeToVar instState canType
+        v <- typeToVar instState canType
+        return (v, freshVars)
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -482,12 +612,19 @@ solveHelpBody state constraint = case constraint of
                 let state' = state { _env = Map.insert name freshVar (_env state) }
                 return (Nothing, state')
 
-    T.CForeign _region name annot expected -> do
-        instVar <- instantiateAnnotation state annot
+    T.CForeign region name annot expected -> do
+        (instVar, freshVars) <- instantiateAnnotation state annot
         expectedVar <- expectedToVar state expected
         ok <- Unify.unify instVar expectedVar
         if ok
-            then return (Nothing, state)
+            then do
+                -- v0.13 Phase A1: capture this polymorphic reference for
+                -- monomorphisation.  Skip when there are no quantified
+                -- vars (the call site is already concrete).
+                unless (null freshVars) $
+                    modifyIORef' (_callInstances state) $
+                        \xs -> CallInstanceRecord region name freshVars : xs
+                return (Nothing, state)
             else do
                 instType <- variableToType instVar
                 expType <- variableToType expectedVar

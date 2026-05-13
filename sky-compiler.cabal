@@ -212,6 +212,7 @@ test-suite sky-tests
       Sky.Type.TupleLambdaSpec
       Sky.Type.UiOnSubmitTypedRecordSpec
       Sky.Type.RecordFieldExactnessSpec
+      Sky.Type.InstanceCaptureSpec
       Sky.Format.FormatSpec
       Sky.Build.GoKeywordCollisionSpec
       Sky.Build.NestedPatternSpec

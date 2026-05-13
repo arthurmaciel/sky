@@ -38,6 +38,7 @@ import qualified Sky.Build.ValidatorSpec
 import qualified Sky.Build.GoBuildRefinerSpec
 import qualified Sky.Reporting.DiagnosticSpec
 import qualified Sky.Diagnostics.CoverageSpec
+import qualified Sky.Type.InstanceCaptureSpec
 import qualified Sky.Build.KernelSigCoverageSpec
 import qualified Sky.Build.HeapBoundedHmSpec
 import qualified Sky.Build.SolverBudgetSpec
@@ -231,6 +232,10 @@ main = hspec $ do
     -- category, asserting the CLI surfaces the stable code +
     -- prefix and the build never reaches the runtime.
     describe "Sky.Diagnostics.Coverage"      Sky.Diagnostics.CoverageSpec.spec
+    -- v0.13 Phase A1: monomorphisation instance capture.  Locks
+    -- the solver's CForeign instance-recording mechanism that the
+    -- monomorphisation pass consumes downstream.
+    describe "Sky.Type.InstanceCapture"      Sky.Type.InstanceCaptureSpec.spec
     -- Limitation #16: kernel-sig coverage for the dangerous-class
     -- gaps (returns Maybe/Result/Task wrappers OR opaque FFI types).
     -- Without HM sigs, user pattern-matching against the wrapper
