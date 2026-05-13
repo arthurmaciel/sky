@@ -5383,8 +5383,11 @@ coerceCallArgsAt region qualName args =
                         case inner of
                             Can.Lambda pats body
                                 | all isSimpleVarPattern pats
-                                , Just (inputTy, _) <- splitFuncTypeStr subbed ->
-                                    curryLambdaPatTyped [inputTy] "any"
+                                , (inputTypes, finalRet) <-
+                                    splitCurriedFuncTypeStr (length pats) subbed
+                                , length inputTypes == length pats
+                                , length inputTypes > 0 ->
+                                    curryLambdaPatTyped inputTypes finalRet
                                         pats (exprToGo body)
                             _ ->
                                 if subbed == "any" && containsTypeParam orig
@@ -5447,6 +5450,25 @@ substTVarsInGoType σ s = goSubst s
                   || c == '_'
     isIdentChar c = isIdentStart c
                  || (c >= '0' && c <= '9')
+
+-- | v0.13 Phase A4: peel up to N curried function arrows from a Go
+-- type string `func(X1) func(X2) … func(Xn) R`, returning the list
+-- of input types and the final return type R.  Stops early if the
+-- string doesn't have N arrows — e.g. `func(int) int` peeled with
+-- depth 2 returns (["int"], "int").
+--
+-- Used by typed lambda emission for multi-arg curried HOFs like
+-- foldl (`(a -> b -> b) -> ...`): the spec's fn param has shape
+-- `func(A) func(B) B` and the Sky lambda has 2 patterns; we want
+-- to emit `func(_x A) func(_y B) B { ... }`.
+splitCurriedFuncTypeStr :: Int -> String -> ([String], String)
+splitCurriedFuncTypeStr 0 s = ([], s)
+splitCurriedFuncTypeStr n s = case splitFuncTypeStr s of
+    Just (inputTy, restTy) ->
+        let (more, final) = splitCurriedFuncTypeStr (n - 1) restTy
+        in (inputTy : more, final)
+    Nothing -> ([], s)
+
 
 -- | v0.13 Phase A4: parse a Go-type string of shape `func(X) Y`
 -- returning `(X, Y)`.  Used by typed lambda emission to derive the
@@ -7994,10 +8016,15 @@ curryLambdaPatTyped paramTypes retType pats body
                             Nothing -> case stripStringMap retGoTy of
                                 Just valGo -> GoIr.GoCall (GoIr.GoIdent ("rt.AsMapT[" ++ valGo ++ "]")) [expr]
                                 Nothing -> GoIr.GoCall (GoIr.GoIdent ("rt.Coerce[" ++ retGoTy ++ "]")) [expr]
-            -- Build nested typed lambdas. innermost gets the body
-            -- + return coercion to `retType`; outer ones return
-            -- `any` because there's no way to know their actual
-            -- function-type return at this layer.
+            -- Build nested typed lambdas.  v0.13 Phase A4: the
+            -- intermediate return type of each curried level is
+            -- `func(<remaining-param-types>) <finalRet>`.  Pre-fix,
+            -- inner curried lambdas returned `any` and the Go
+            -- compiler rejected the lambda when passed to a typed
+            -- HOF param like `fn func(A) func(B) B`.
+            paramTypesRest [] = retType
+            paramTypesRest ts =
+                "func(" ++ head ts ++ ") " ++ paramTypesRest (tail ts)
             buildLambdas [] = body
             buildLambdas [(pTy, pat)] =
                 let (param, rebindStmts, rebindAnyStmts) = typedLambdaParam pTy pat
@@ -8009,7 +8036,8 @@ curryLambdaPatTyped paramTypes retType pats body
                 let (param, rebindStmts, rebindAnyStmts) = typedLambdaParam pTy pat
                     rebindAll = rebindStmts ++ rebindAnyStmts
                     inner = buildLambdas rest
-                in GoIr.GoFuncLit [param] "any"
+                    innerRetTy = paramTypesRest (map fst rest)
+                in GoIr.GoFuncLit [param] innerRetTy
                     (rebindAll ++ [GoIr.GoReturn inner])
         in buildLambdas zipped
   where

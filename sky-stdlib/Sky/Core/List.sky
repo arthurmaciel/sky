@@ -34,6 +34,10 @@ module Sky.Core.List exposing
     , any
     , all
     , find
+    , foldl
+    , foldr
+    , concatMap
+    , indexedMap
     )
 
 
@@ -81,6 +85,34 @@ find pred list =
                 Just x
             else
                 find pred rest
+
+
+foldl fn acc list =
+    case list of
+        [] -> acc
+        (x :: rest) -> foldl fn (fn x acc) rest
+
+
+foldr fn acc list =
+    case list of
+        [] -> acc
+        (x :: rest) -> fn x (foldr fn acc rest)
+
+
+concatMap fn list =
+    case list of
+        [] -> []
+        (x :: rest) -> append (fn x) (concatMap fn rest)
+
+
+indexedMap fn list =
+    indexedMapHelp fn 0 list
+
+
+indexedMapHelp fn i list =
+    case list of
+        [] -> []
+        (x :: rest) -> fn i x :: indexedMapHelp fn (i + 1) rest
 
 
 isEmpty list =
