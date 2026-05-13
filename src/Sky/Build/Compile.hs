@@ -75,6 +75,18 @@ globalEntryPath = unsafePerformIO $ newIORef ""
 entryPathRef :: FilePath
 entryPathRef = unsafePerformIO $ readIORef globalEntryPath
 
+
+-- | v0.13 Phase A5++: per-module source path that codegen sets
+-- before lowering each dep module so `coerceCallArgsAt`'s CSI
+-- lookup uses the right (file, line, col) triple.  The entry
+-- module always uses `globalEntryPath`; each dep's lowering
+-- swaps this to the dep's `_mi_path`.  Without this, the CSI
+-- map collisions across files surface as bare-`T1` leaks in the
+-- emitted Go.
+{-# NOINLINE globalSourceFile #-}
+globalSourceFile :: IORef FilePath
+globalSourceFile = unsafePerformIO $ newIORef ""
+
 -- | Read the global codegen env (for use in pure codegen functions).
 -- NOINLINE so GHC doesn't CSE the IORef read across call sites —
 -- each `getCgEnv` invocation must see the LATEST mutation. Without

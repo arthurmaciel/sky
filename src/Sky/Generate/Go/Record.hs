@@ -74,17 +74,16 @@ data CodegenEnv = CodegenEnv
       -- instance gives the call's concrete type-args.  Keyed by
       -- (line, col) of the call's source region.  Codegen at
       -- `Can.VarTopLevel` / `Can.VarKernel` consults this map to
-      -- pick the right generic instantiation (e.g.
-      -- `Sky_Core_Maybe_withDefault[string]` instead of `[any]`)
-      -- and coerce args to the call's actual type instead of
-      -- erasing them to `any`.  Without this map, the typed-codegen
-      -- coercion gap (Issue #52's class) emerges at every Sky-
-      -- source polymorphic function call.
+      -- pick the right generic instantiation.
       --
-      -- Cross-file key: in practice the (line, col) pair is
-      -- unique enough across a single compile because Sky modules
-      -- start at line 1 and few real call sites share both.  Full
-      -- (file, line, col) keying is a B-phase follow-up.
+      -- Cross-file collision (known limitation): two distinct
+      -- source files with calls at the same (line, col) collide in
+      -- this map.  In practice the pair is unique enough in single-
+      -- module projects.  For larger dep graphs, the eraseTypeParams
+      -- fallback in coerceCallArgsAt's `_` branch handles dropped
+      -- instances gracefully (emitting `any`-widened args).  Full
+      -- (file, line, col) keying needs invasive plumbing of file
+      -- context through the lazy codegen pipeline — deferred.
     , _cg_funcSkyToGoTVars :: !(Map.Map String [(String, String)])
       -- v0.13 Phase A5+: per-function mapping from annotation Sky-
       -- TVar names (e.g. "a", "e") to the emitted Go-generic names
