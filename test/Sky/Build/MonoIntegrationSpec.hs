@@ -73,8 +73,8 @@ parseInstanceNames out =
     , all isMangleChar w
     , not (any (`isPrefixOf` w) ["Monomorphisation", "Compilation",
                                   "Running", "Build", "--", "HM",
-                                  "Wrote", "Types", "Sky", "Found",
-                                  "Names", "Main", "Loaded", "Lib",
+                                  "Wrote", "Types", "Found",
+                                  "Names", "Main:", "Loaded",
                                   "DCE", "resolving", "Incremental"])
     ]
   where

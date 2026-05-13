@@ -15,6 +15,7 @@ module Sky.Generate.Go.Record
     , withDepFieldIndex
     , withRecordAliases
     , withUnionNames
+    , withCallSiteInstances
     , collectRecordAliases
     , withDepArities
     , collectFuncArities
@@ -67,6 +68,22 @@ data CodegenEnv = CodegenEnv
       -- for TVars. Value is (typeParams, paramTypes, returnType).
       -- Populated per-dep from the solver, used by mkDef to emit
       -- generic Go signatures for unannotated polymorphic functions.
+    , _cg_callSiteInstances :: !(Map.Map (Int, Int) Solve.CallInstance)
+      -- v0.13 Phase A5: at each polymorphic call site, the captured
+      -- instance gives the call's concrete type-args.  Keyed by
+      -- (line, col) of the call's source region.  Codegen at
+      -- `Can.VarTopLevel` / `Can.VarKernel` consults this map to
+      -- pick the right generic instantiation (e.g.
+      -- `Sky_Core_Maybe_withDefault[string]` instead of `[any]`)
+      -- and coerce args to the call's actual type instead of
+      -- erasing them to `any`.  Without this map, the typed-codegen
+      -- coercion gap (Issue #52's class) emerges at every Sky-
+      -- source polymorphic function call.
+      --
+      -- Cross-file key: in practice the (line, col) pair is
+      -- unique enough across a single compile because Sky modules
+      -- start at line 1 and few real call sites share both.  Full
+      -- (file, line, col) keying is a B-phase follow-up.
     }
 
 
@@ -114,6 +131,7 @@ buildCodegenEnv solvedTypes canMod = CodegenEnv
     , _cg_funcParamTypes = Map.empty
     , _cg_funcRetType = Map.empty
     , _cg_funcInferredSigs = Map.empty
+    , _cg_callSiteInstances = Map.empty
     }
 
 
@@ -149,6 +167,18 @@ withRecordAliases extra env =
 withUnionNames :: Set.Set String -> CodegenEnv -> CodegenEnv
 withUnionNames extra env =
     env { _cg_unionNames = Set.union extra (_cg_unionNames env) }
+
+
+-- | v0.13 Phase A5: install the captured call-site instance map.
+-- Each entry maps a source `(file, line, col)` triple to the
+-- `CallInstance` recorded by the solver at that site.  Codegen
+-- consults this map when emitting `Can.Call` nodes to pick the
+-- right generic instantiation (concrete types vs `any`).
+withCallSiteInstances
+    :: Map.Map (Int, Int) Solve.CallInstance
+    -> CodegenEnv -> CodegenEnv
+withCallSiteInstances csi env =
+    env { _cg_callSiteInstances = csi }
 
 
 -- | Extend the function-arity map with dep-module qualified names.

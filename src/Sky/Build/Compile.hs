@@ -59,7 +59,21 @@ import qualified System.Environment
 -- | Global codegen environment (set once per compilation, read during codegen)
 {-# NOINLINE globalCgEnv #-}
 globalCgEnv :: IORef Rec.CodegenEnv
-globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty)
+globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty)
+
+
+-- | v0.13 Phase A5: entry-module source path, set once per
+-- compilation, read at call-site codegen to key into
+-- `_cg_callSiteInstances` by (path, line, col).  Set in
+-- `continueCompile` before generateGoMulti runs.
+{-# NOINLINE globalEntryPath #-}
+globalEntryPath :: IORef FilePath
+globalEntryPath = unsafePerformIO $ newIORef ""
+
+
+{-# NOINLINE entryPathRef #-}
+entryPathRef :: FilePath
+entryPathRef = unsafePerformIO $ readIORef globalEntryPath
 
 -- | Read the global codegen env (for use in pure codegen functions).
 -- NOINLINE so GHC doesn't CSE the IORef read across call sites —
@@ -580,19 +594,26 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- long after sky check should have caught them.
             let pass1Externals = buildCrossModuleExternalsWithMods validDeps depSolved0
                 isForeignErr s = "Foreign '" `List.isInfixOf` s
+            -- v0.13 Phase A5: use `solveWithInstances` on each dep so
+            -- monomorphisation captures dep-module call sites too.
+            -- Pass 1 stays on plain `solve` (its job is dep-isolation
+            -- typing; captures aren't useful since externals are
+            -- empty).  Pass 2 has the full externals — this is where
+            -- real call-site instances surface.
             depResults <- mapM (\(modName, depMod) -> do
                 cs <- Constrain.constrainModuleWithExternals pass1Externals depMod
-                r  <- Solve.solve cs
+                (r, _, csi) <- Solve.solveWithInstances cs
                 case r of
-                    Solve.SolveOk t -> return (modName, Right t)
+                    Solve.SolveOk t -> return (modName, Right (t, csi))
                     Solve.SolveError err2
                         | isForeignErr err2 -> return (modName, Left err2)
                         | otherwise -> case lookup modName depSolved0 of
                             Just p1 | not (Map.null p1) ->
-                                return (modName, Right p1)
+                                return (modName, Right (p1, []))
                             _ -> return (modName, Left err2)) validDeps
             let depErrors = [(mn, e) | (mn, Left e)  <- depResults]
-                depSolved = [(mn, t) | (mn, Right t) <- depResults]
+                depSolved = [(mn, t) | (mn, Right (t, _)) <- depResults]
+                depCsiByMod = [(mn, csi) | (mn, Right (_, csi)) <- depResults]
             unless (null depErrors) $ do
                 -- v0.13 Layer 1: route dep-module type errors through the
                 -- structured Diagnostic renderer too.  Pre-fix each was
@@ -646,12 +667,24 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- regression on Live.app's `init_` function-value
             -- references that's now fixed).
             (solveResult, callInstances, callSiteInstances) <- Solve.solveWithInstances constraints
-            -- Build the per-region lookup map for call-site
-            -- codegen.  Key: (file path, region's start position).
-            let _csiByRegion = Map.fromList
-                    [ ((entryPath, Solve._cs_region csi), Solve._cs_instance csi)
-                    | csi <- callSiteInstances ]
-            _ <- return _csiByRegion  -- threaded through downstream in A5
+            -- v0.13 Phase A5: install the per-call-site instance
+            -- registry into `_cg_callSiteInstances` so call-site
+            -- codegen can pick the right generic instantiation
+            -- (concrete types) instead of erasing every TVar to
+            -- `any`.  Key: (file, line, col) of the call's source
+            -- region start.  Entry-module callsites go under
+            -- entryPath; each dep's callsites use the dep's own
+            -- source path (looked up via `moduleOrder`).
+            let csiEntries =
+                    [ ( ( A._line (A._start (Solve._cs_region csi))
+                        , A._col  (A._start (Solve._cs_region csi)) )
+                      , Solve._cs_instance csi
+                      )
+                    | csi <- callSiteInstances ++ concatMap snd depCsiByMod ]
+                csiByRegion = Map.fromList csiEntries
+            modifyIORef globalCgEnv $ \e ->
+                Rec.withCallSiteInstances csiByRegion e
+            writeIORef globalEntryPath entryPath
             -- HM type errors are FATAL (promoted from warning). No
             -- silent degradation to `any`. This enforces the
             -- "if it compiles, it works" promise at the entry module.
@@ -2098,7 +2131,14 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                 allRetTys   = Map.unions
                     [ entryRetTys, entryInferredRets
                     , depRetTypes, extraInferredRetTypes ]
-                cgEnv = Rec.withInferredSigs
+                -- v0.13 Phase A5: preserve the call-site instance
+                -- registry from prevEnv (installed by continueCompile
+                -- after solveWithInstances).  The rest of the cgEnv
+                -- chain rebuilds from scratch via buildCodegenEnv;
+                -- the CSI map needs explicit threading.
+                cgEnv = Rec.withCallSiteInstances
+                          (Rec._cg_callSiteInstances prevEnv)
+                      $ Rec.withInferredSigs
                           (Map.union extraInferredSigs entryInferredSigs)
                       $ Rec.withFuncTypes allParamTys allRetTys
                       $ Rec.withDepArities depArities
@@ -4188,19 +4228,21 @@ exprToGo (A.At _ expr) = case expr of
                     -- in env._cg_funcParamTypes), coerce each `any`-arg
                     -- expression to the expected param type.
                     --
-                    -- For generic functions (type params recorded in
-                    -- funcInferredSigs), we skip the `exprToGo`-path
-                    -- `[any]` instantiation and emit the bare qualName.
-                    -- Go infers type params from call args — e.g.
-                    -- `lift Wrap A` → `lift(Wrap, A)` lets Go pick
-                    -- T1=Outer from Wrap's return. The previous `[any]`
-                    -- forced T1=any, which broke call sites whose args
-                    -- had a concrete return type in a TVar-return
-                    -- function-typed param position (bare-TVar HOF bug).
-                    -- Bare references (function as value) still emit
-                    -- `[any]` via `Can.VarTopLevel` in `exprToGo`.
+                    -- v0.13 Phase A5: route through `coerceCallArgsAt`
+                    -- which consults `_cg_callSiteInstances`.  When
+                    -- the solver captured a monomorphisation instance
+                    -- at this call's source region, the callee's
+                    -- generic param types get substituted with the
+                    -- instance's concrete Go types before coerceArg
+                    -- runs.  This is what makes `Sky_Core_Maybe_with
+                    -- Default(s, MaybeCoerce[string](m))` work at
+                    -- typed-codegen call sites instead of emitting
+                    -- `MaybeCoerce[any]` that Go's inference rejects.
                     else GoIr.GoCall (GoIr.GoIdent qualName)
-                                     (coerceCallArgs qualName args)
+                                     (coerceCallArgsAt
+                                        (A.toRegion func)
+                                        qualName
+                                        args)
             _ ->
                 let goFunc = exprToGo func
                     -- Same-module local function calls (`Can.VarLocal`)
@@ -4830,6 +4872,63 @@ coerceCallArgs qualName args =
     in if null paramTypes
          then map exprToGo args
          else zipWithDefault coerceArg exprToGo paramTypes args
+
+
+-- | v0.13 Phase A5 — call-site-aware variant of `coerceCallArgs`.
+-- When the call site has a captured monomorphisation instance,
+-- substitute the callee's generic type parameters (`T1`, `T2`,
+-- …) with the instance's concrete Go types before calling
+-- `coerceArg`.  This produces correctly-typed coercion wrappers
+-- (`rt.MaybeCoerce[string]` instead of `rt.MaybeCoerce[any]`)
+-- so Go's type inference at the call site reconciles consistently.
+--
+-- Falls back to the un-substituted `coerceCallArgs` when no
+-- instance is captured at this call site (FFI boundary, non-
+-- polymorphic call, solver had a free TVar, etc.).
+coerceCallArgsAt :: A.Region -> String -> [Can.Expr] -> [GoIr.GoExpr]
+coerceCallArgsAt region qualName args =
+    let env = getCgEnv
+        paramTypes = Map.findWithDefault [] qualName (Rec._cg_funcParamTypes env)
+        siteKey = ( A._line (A._start region)
+                  , A._col  (A._start region) )
+        instM = Map.lookup siteKey (Rec._cg_callSiteInstances env)
+        inferred = Map.lookup qualName (Rec._cg_funcInferredSigs env)
+    in case (paramTypes, instM, inferred) of
+        ([], _, _) -> map exprToGo args
+        (_, Just (Solve.CallInstance _ concreteTys), Just (tps, _, _))
+            | length tps == length concreteTys ->
+                -- Build a Go-string substitution map: TVar name → Go
+                -- type string from `solvedTypeToGo`.  Apply it to each
+                -- declared param type with `substTVarsInGoType`.
+                let σ = Map.fromList (zip tps (map solvedTypeToGo concreteTys))
+                    substituted = map (substTVarsInGoType σ) paramTypes
+                in zipWithDefault coerceArg exprToGo substituted args
+        _ -> zipWithDefault coerceArg exprToGo paramTypes args
+
+
+-- | Substitute generic type variables (`T1`, `T2`, …) in a
+-- pre-rendered Go type string with concrete type strings.  Used
+-- by the A5 call-site path to specialise param types before
+-- coercion.  Identifier-aware: only replaces whole-word matches
+-- so `T1` in `rt.SkyMaybe[T1]` becomes `rt.SkyMaybe[string]` but
+-- something like `TupleN` is left alone.
+substTVarsInGoType :: Map.Map String String -> String -> String
+substTVarsInGoType σ s = goSubst s
+  where
+    goSubst [] = []
+    goSubst rest@(c:cs)
+        | isIdentStart c =
+            let (word, after) = span isIdentChar rest
+            in case Map.lookup word σ of
+                Just replacement -> replacement ++ goSubst after
+                Nothing          -> word ++ goSubst after
+        | otherwise = c : goSubst cs
+
+    isIdentStart c = (c >= 'A' && c <= 'Z')
+                  || (c >= 'a' && c <= 'z')
+                  || c == '_'
+    isIdentChar c = isIdentStart c
+                 || (c >= '0' && c <= '9')
 
 -- | T4-aware coercion. For parametric Sky types whose generic
 -- instantiation won't match via plain `.(T)` assertion
