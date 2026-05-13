@@ -719,13 +719,16 @@ architectural blocker structurally:
 | A1 — solver instrumentation: capture call-site instances | ✅ landed | `d3b0b84` |
 | A2 — mangling (`mangleType`, `mangleInstance`) + substitution (`substituteType`) | ✅ landed | `96799ca` |
 | A3 — compile pipeline wires `solveWithInstances`, logs counts + names | ✅ landed | `c4aaaf3` |
-| A4 — per-instance Go emission (specialised functions) | ⏭️ deferred (works via A5 substitution for now) |
+| A4 — per-instance Go emission (specialised functions) | ✅ shipped (`6431680`, `6acbabd`, `99be0da`, `901781a`) — specs co-exist with generics; drop-pass deferred |
+| A4 — typed lambda emission at call sites | ✅ shipped (`8195752`) — handles single-arg + curried multi-arg HOFs |
+| A4 — pass-3 fixpoint for dep CSI capture | ✅ shipped (`901781a`) |
 | A5 — call-site rewriting (concrete-type substitution in coerceArg) | ✅ shipped (`68af62b`, `f43a2d4`, `4846566`) |
 | A5+ — partial-instance arg-consistency via Sky-name-aligned σ | ✅ shipped (`f43a2d4`) |
 | A5++ — eraseTypeParams fallback for un-captured call sites | ✅ shipped (`4846566`) |
 | A6 — `_Any` fallback for FFI / untyped boundaries | ✅ via normaliseUnresolved (`1511f18`) |
-| A6 — let-polymorphism for top-level recursive groups | ❌ pending (blocks List.sky migration) |
-| A7 — Sky-side DCE: only emit reachable instances | ❌ pending |
+| A6 — let-polymorphism for top-level recursive groups | ✅ unblocked via `::` binop fix (`36a03a4`) |
+| A7 — Sky-level DCE reachability walker | ✅ shipped (`06ce0d8`) |
+| A7 — drop generic versions when specs exist | ⏭️ blocked on reach-walker value-ref types (multi-day, v0.14) |
 | A8 — regression specs across emission + dedup + perf | partial (A1+A2 specs live) |
 
 **A5+ closed the partial-instance arg-consistency gap (`f43a2d4`)**
