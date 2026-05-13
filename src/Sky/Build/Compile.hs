@@ -5160,6 +5160,52 @@ coerceCallArgs qualName args =
 -- Falls back to the un-substituted `coerceCallArgs` when no
 -- instance is captured at this call site (FFI boundary, non-
 -- polymorphic call, solver had a free TVar, etc.).
+-- | v0.13 Phase A4: at a polymorphic Sky-source call site, return
+-- the mangled name of the specialised instance emitted for this
+-- call.  Returns Nothing when no spec exists (kernel / FFI / non-
+-- generic / unresolved instance).
+--
+-- The mangled name matches the one emitted by `Mono.specialiseFuncDecl`
+-- in `generateGoMulti`'s `specDecls` block — both derive it from
+-- `Mono.mangleInstance (CallInstance qualName tys _)` where `tys`
+-- comes from the captured `CallInstance` substituted by the outer
+-- function's σ.
+--
+-- For this MVP we only do a SHALLOW substitution: σ_outer is empty
+-- (we're at the entry-module call site).  Cross-instance σ
+-- propagation (recursive calls inside specialised bodies) is a
+-- follow-up; for now those still use the generic name.
+instanceMangledName :: A.Region -> String -> Maybe String
+instanceMangledName region qualName = unsafePerformIO $ do
+    env <- readIORef globalCgEnv
+    reached <- readIORef globalReachableSet
+    let siteKey = ( A._line (A._start region)
+                  , A._col  (A._start region) )
+    case Map.lookup siteKey (Rec._cg_callSiteInstances env) of
+        Just (Solve.CallInstance _ tys _) | not (null tys) ->
+            -- Map Go-side qualName back to Sky-source qualName for
+            -- the reach-set membership check (reach set keys are
+            -- in Sky form like "Sky.Core.Maybe.withDefault").
+            let skyForm = unmangleQual qualName
+                instance_ = (skyForm, tys)
+            in if Set.member instance_ reached
+                then return (Just (Mono.mangleInstance
+                    (Solve.CallInstance skyForm tys [])))
+                else return Nothing
+        _ -> return Nothing
+
+
+-- | Reverse `mangleQualName`: turn `"Sky_Core_Maybe_withDefault"`
+-- back into `"Sky.Core.Maybe.withDefault"`.  This is heuristic — it
+-- replaces every `_` with `.`, which is wrong for Sky names that
+-- naturally contain underscores (none in stdlib today, and goSafeName
+-- adds a trailing `_` for Go-keyword collisions that we strip).
+-- For v0.13's stdlib surface this works; full round-trip needs the
+-- Compile pipeline to thread Sky-form qualNames alongside Go names.
+unmangleQual :: String -> String
+unmangleQual = map (\c -> if c == '_' then '.' else c)
+
+
 coerceCallArgsAt :: A.Region -> String -> [Can.Expr] -> [GoIr.GoExpr]
 coerceCallArgsAt region qualName args =
     let env = getCgEnv
