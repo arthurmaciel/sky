@@ -37,6 +37,7 @@ import qualified Sky.Build.Issue52Spec
 import qualified Sky.Build.ValidatorSpec
 import qualified Sky.Build.GoBuildRefinerSpec
 import qualified Sky.Build.MonomorphiseSpec
+import qualified Sky.Build.MonoIntegrationSpec
 import qualified Sky.Reporting.DiagnosticSpec
 import qualified Sky.Diagnostics.CoverageSpec
 import qualified Sky.Type.InstanceCaptureSpec
@@ -241,6 +242,10 @@ main = hspec $ do
     -- the mangling encoding + substitution semantics that the
     -- downstream emission pass relies on.
     describe "Sky.Build.Monomorphise"        Sky.Build.MonomorphiseSpec.spec
+    -- v0.13 Phase A3: end-to-end monomorphisation capture from a
+    -- real `sky build` run with SKY_MONO_TRACE=1.  Locks the
+    -- data flow from solver → mangling → compile-pipeline log.
+    describe "Sky.Build.MonoIntegration"     Sky.Build.MonoIntegrationSpec.spec
     -- Limitation #16: kernel-sig coverage for the dangerous-class
     -- gaps (returns Maybe/Result/Task wrappers OR opaque FFI types).
     -- Without HM sigs, user pattern-matching against the wrapper

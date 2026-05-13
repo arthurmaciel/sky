@@ -231,6 +231,7 @@ test-suite sky-tests
       Sky.Build.ValidatorSpec
       Sky.Build.GoBuildRefinerSpec
       Sky.Build.MonomorphiseSpec
+      Sky.Build.MonoIntegrationSpec
       Sky.Reporting.DiagnosticSpec
       Sky.Diagnostics.CoverageSpec
       Sky.Build.KernelSigCoverageSpec
