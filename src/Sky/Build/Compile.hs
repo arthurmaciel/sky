@@ -5898,7 +5898,42 @@ toBoolExpr expr = case expr of
 -- | Convert let-in to Go (IIFE with local declarations)
 letToGo :: Can.Def -> Can.Expr -> GoIr.GoExpr
 letToGo def body =
-    GoIr.GoBlock (defToStmts def) (exprToGo body)
+    -- v0.13 typed lowerer: when the def binds a named local whose HM
+    -- type is a concrete primitive AND the def's value expression is
+    -- itself statically-typed (literal or typed-local reference), push
+    -- the binding into `globalLambdaTypes` for the body's lowering.
+    -- Lets `let x = 5 in x + 1` resolve `x` to Int in binop emission
+    -- and produce Go-native `x + 1` instead of `rt.Add(x, 1)`.
+    let solved = Rec._cg_solvedTypes getCgEnv
+        bodyExtras = case def of
+            Can.Def (A.At _ name) [] valExpr
+                | name /= "_"
+                , Just t <- inferExprType solved valExpr
+                , operandIsStaticallyTyped valExpr
+                , isTypedPrimitive t ->
+                    Map.singleton name t
+            Can.TypedDef (A.At _ name) _ [] valExpr _
+                | Just t <- inferExprType solved valExpr
+                , operandIsStaticallyTyped valExpr
+                , isTypedPrimitive t ->
+                    Map.singleton name t
+            _ -> Map.empty
+        bodyGo = withLambdaTypes bodyExtras (exprToGo body)
+    in GoIr.GoBlock (defToStmts def) bodyGo
+
+
+-- | v0.13 typed lowerer: is this Sky type one of the primitives we
+-- have Go-native binop support for?  Used as a gate for registering
+-- typed lambda / let locals so binop emission stays sound (only
+-- primitives where Go's static type matches Sky's HM type and a
+-- direct Go-native operation produces the expected semantics).
+isTypedPrimitive :: T.Type -> Bool
+isTypedPrimitive t =
+    t == ConstrainExpr.intType    ||
+    t == ConstrainExpr.floatType  ||
+    t == ConstrainExpr.stringType ||
+    t == ConstrainExpr.boolType   ||
+    t == ConstrainExpr.charType
 
 
 -- | Convert a definition to Go statements
