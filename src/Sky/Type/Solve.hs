@@ -425,7 +425,17 @@ solveWithInstances constraint = do
             (ci, csi) <- extractInstancesAndSites records
             return (SolveOk merged, ci, csi)
         Just err -> do
-            return (SolveError err, [], [])
+            -- v0.13 Phase A4: even on error, return whatever
+            -- call-site instances were captured BEFORE the error
+            -- bubbled up.  The CSIs are useful for spec emission +
+            -- mangled-name routing even when the dep had a non-
+            -- foreign type error.  Without this, dep modules that
+            -- pass-2 falls back to pass-1 lose their CSI capture,
+            -- and call sites inside them fall back to generic names
+            -- — breaking the drop-generics pass.
+            records <- readIORef (_callInstances finalState)
+            (ci, csi) <- extractInstancesAndSites records
+            return (SolveError err, ci, csi)
 
 
 -- | Walk the captured call-instance records, resolve each fresh

@@ -661,11 +661,45 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         | isForeignErr err2 -> return (modName, Left err2)
                         | otherwise -> case lookup modName depSolved0 of
                             Just p1 | not (Map.null p1) ->
-                                return (modName, Right (p1, []))
+                                -- v0.13 Phase A4: keep the PARTIAL
+                                -- CSI from pass-2 even when falling
+                                -- back to pass-1's types.  Call
+                                -- sites inside the dep's body need
+                                -- CSI for mangled-name routing.
+                                return (modName, Right (p1, csi))
                             _ -> return (modName, Left err2)) validDeps
-            let depErrors = [(mn, e) | (mn, Left e)  <- depResults]
-                depSolved = [(mn, t) | (mn, Right (t, _)) <- depResults]
-                depCsiByMod = [(mn, csi) | (mn, Right (_, csi)) <- depResults]
+            let depErrors0 = [(mn, e) | (mn, Left e)  <- depResults]
+                depSolved2 = [(mn, t) | (mn, Right (t, _)) <- depResults]
+            -- v0.13 Phase A4: pass-3 fixpoint.  Pass-2's results
+            -- are MORE COMPLETE than pass-1 (because pass-1 had
+            -- empty externals, many cross-module calls fell through
+            -- to CLocal and either failed silently or produced
+            -- under-typed defs).  Running pass-2 a SECOND time with
+            -- pass-2's own results as externals catches deps whose
+            -- pass-1 was incomplete — their self-references inside
+            -- bodies now route through CForeign and capture CSIs.
+            --
+            -- Without this, a `generateToken` ref inside Lib.Auth's
+            -- `createUser` body falls back to CLocal and the CSI is
+            -- never recorded — call sites then can't use the
+            -- specialised name.
+            let pass2Externals = buildCrossModuleExternalsWithMods validDeps depSolved2
+            pass3Results <- mapM (\(modName, depMod) -> do
+                cs <- Constrain.constrainModuleWithExternals pass2Externals depMod
+                (r, _, csi) <- Solve.solveWithInstances cs
+                case r of
+                    Solve.SolveOk t -> return (modName, Right (t, csi))
+                    Solve.SolveError err3
+                        | isForeignErr err3 -> return (modName, Left err3)
+                        | otherwise -> case lookup modName depSolved2 of
+                            Just p2 | not (Map.null p2) ->
+                                return (modName, Right (p2, csi))
+                            _ -> return (modName, Left err3)) validDeps
+            let depErrors = depErrors0
+                            ++ [(mn, e) | (mn, Left e) <- pass3Results
+                                        , not (any (\(mn', _) -> mn' == mn) depErrors0)]
+                depSolved = [(mn, t) | (mn, Right (t, _)) <- pass3Results]
+                depCsiByMod = [(mn, csi) | (mn, Right (_, csi)) <- pass3Results]
             unless (null depErrors) $ do
                 -- v0.13 Layer 1: route dep-module type errors through the
                 -- structured Diagnostic renderer too.  Pre-fix each was
@@ -2448,15 +2482,23 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
             -- generic version.
             writeIORef globalEmittedSpecs specNames
             return specials
-        -- v0.13 Phase A4 status: generics + specs coexist.
-        -- Dropping generic decls when specs exist is too aggressive
-        -- — some call sites still fall back to generic names (the
-        -- reach walker may miss certain code paths, e.g. functions
-        -- only reachable via dynamic dispatch through Sky.Live's
-        -- runtime).  Until the reach walker covers 100% of Sky-
-        -- source code paths, keep both forms.  Specs are dead
-        -- code for non-reached call sites; binary bloat ~30%
-        -- but correctness is preserved.
+        -- v0.13 Phase A4: keep generic versions alongside specs.
+        -- The drop-generics pass requires the reach walker to
+        -- cover 100% of call sites — including user-defined
+        -- helpers like Page_Roadmap_viewRoadmap or
+        -- Ui_Layout_viewNotification referenced via Sky.Live's
+        -- runtime dispatch.  Today, value references to those
+        -- helpers get added to the reach set with empty type-args
+        -- (`(qualName, [])`) because no CSI captures their call
+        -- types at the reference point — they're called dynamically
+        -- by the runtime, not at compile time.  Spec emission then
+        -- filters them out (empty σ_go), leaving only generic
+        -- versions for those names; dropping the generic breaks
+        -- the build.
+        --
+        -- Until the reach walker can derive instance types for
+        -- dynamically-dispatched value refs (e.g. by inspecting
+        -- the surrounding record's field type), keep both forms.
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
             , GoIr._pkg_imports = imports

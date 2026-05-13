@@ -15,6 +15,7 @@ module Sky.Type.Constrain.Expression
     )
     where
 
+import Control.Monad (forM)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import System.IO.Unsafe (unsafePerformIO)
@@ -224,7 +225,27 @@ constrain counter env (A.At region expr) expected = case expr of
     -- catch it. Users with explicit type annotations still get
     -- correctness via the surrounding context (function sig HM
     -- still rejects the wrong-typed model).
-    Can.Update _ _ _ -> return T.CTrue
+    --
+    -- v0.13 Phase A4: even though we don't constrain the row shape,
+    -- we DO descend into each field-value expression with a NoExpectation
+    -- TVar so polymorphic CForeigns (e.g. `List.filter ...` inside
+    -- a record update field) get captured for the monomorphisation
+    -- pass.  Without this, call sites inside Can.Update fields
+    -- have no CSI → spec emission misses them → call sites fall
+    -- back to generic names → can't drop generics safely.
+    --
+    -- Risk: type errors INSIDE field expressions surface that
+    -- previously didn't.  This is actually MORE sound (catches
+    -- real bugs) but may break user code that relied on the
+    -- silent acceptance.  Audit the sweep for false positives
+    -- when this flips on.
+    Can.Update _baseName _baseExpr fields -> do
+        subCons <- forM (Map.toList fields) $ \(_fname, fieldUpd) -> do
+            tvName <- freshName counter "_upd_fld"
+            let A.At _ _ = case fieldUpd of Can.FieldUpdate _ e -> e
+                expr = case fieldUpd of Can.FieldUpdate _ e -> e
+            constrain counter env expr (T.NoExpectation (T.TVar tvName))
+        return (T.CAnd subCons)
 
     Can.Record fields -> do
         -- Build a TRecord actualType with fresh TVars per field, constrain
