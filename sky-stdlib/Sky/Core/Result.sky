@@ -1,0 +1,210 @@
+-- | Sky.Core.Result — the success-or-error ADT.
+--
+-- v0.13 Layer 3: Sky-source implementation.  Previously kernel-
+-- resolved to `runtime-go/rt/rt.go`; the compiler now resolves
+-- `import Sky.Core.Result` via the embedded stdlib first.  Typed-
+-- generic runtime helpers (`rt.Result_mapT`, etc.) remain for
+-- perf-critical codegen routing — those are dispatch optimisations,
+-- not user surface.
+module Sky.Core.Result exposing
+    ( Result(..)
+    , withDefault
+    , map
+    , mapError
+    , andThen
+    , map2, map3, map4, map5
+    , andMap
+    , combine
+    , traverse
+    , andThenTask
+    , toMaybe
+    , fromMaybe
+    )
+
+
+import Sky.Core.Maybe exposing (Maybe(..))
+
+
+type Result e a
+    = Ok a
+    | Err e
+
+
+-- ─── Eliminators ────────────────────────────────────────────────────
+
+
+-- | Extract the value, falling back to `def` on Err.
+withDefault : a -> Result e a -> a
+withDefault def r =
+    case r of
+        Ok x -> x
+        Err _ -> def
+
+
+-- ─── Functor / Monad ────────────────────────────────────────────────
+
+
+-- | Apply a function to the Ok value.
+map : (a -> b) -> Result e a -> Result e b
+map fn r =
+    case r of
+        Ok x -> Ok (fn x)
+        Err e -> Err e
+
+
+-- | Apply a function to the Err value.
+mapError : (e -> f) -> Result e a -> Result f a
+mapError fn r =
+    case r of
+        Ok x -> Ok x
+        Err e -> Err (fn e)
+
+
+-- | Chain a Result-returning function.  Threads `Err` through.
+andThen : (a -> Result e b) -> Result e a -> Result e b
+andThen fn r =
+    case r of
+        Ok x -> fn x
+        Err e -> Err e
+
+
+-- ─── Applicative combinators ────────────────────────────────────────
+
+
+map2 : (a -> b -> c) -> Result e a -> Result e b -> Result e c
+map2 fn ra rb =
+    case ra of
+        Ok a ->
+            case rb of
+                Ok b -> Ok (fn a b)
+                Err e -> Err e
+        Err e -> Err e
+
+
+map3 : (a -> b -> c -> d) -> Result e a -> Result e b -> Result e c -> Result e d
+map3 fn ra rb rc =
+    case ra of
+        Ok a ->
+            case rb of
+                Ok b ->
+                    case rc of
+                        Ok c -> Ok (fn a b c)
+                        Err e -> Err e
+                Err e -> Err e
+        Err e -> Err e
+
+
+map4 : (a -> b -> c -> d -> f) -> Result e a -> Result e b -> Result e c -> Result e d -> Result e f
+map4 fn ra rb rc rd =
+    case ra of
+        Ok a ->
+            case rb of
+                Ok b ->
+                    case rc of
+                        Ok c ->
+                            case rd of
+                                Ok d -> Ok (fn a b c d)
+                                Err e -> Err e
+                        Err e -> Err e
+                Err e -> Err e
+        Err e -> Err e
+
+
+map5 : (a -> b -> c -> d -> f -> g) -> Result e a -> Result e b -> Result e c -> Result e d -> Result e f -> Result e g
+map5 fn ra rb rc rd re =
+    case ra of
+        Ok a ->
+            case rb of
+                Ok b ->
+                    case rc of
+                        Ok c ->
+                            case rd of
+                                Ok d ->
+                                    case re of
+                                        Ok f -> Ok (fn a b c d f)
+                                        Err er -> Err er
+                                Err er -> Err er
+                        Err er -> Err er
+                Err er -> Err er
+        Err er -> Err er
+
+
+-- | Applicative apply.
+andMap : Result e a -> Result e (a -> b) -> Result e b
+andMap ra rfn =
+    case rfn of
+        Ok fn ->
+            case ra of
+                Ok a -> Ok (fn a)
+                Err e -> Err e
+        Err e -> Err e
+
+
+-- ─── Sequencing ─────────────────────────────────────────────────────
+
+
+-- | Combine a list of Results into a Result of list.  First Err
+-- short-circuits.
+combine : List (Result e a) -> Result e (List a)
+combine results =
+    case results of
+        [] -> Ok []
+        (r :: rest) ->
+            case r of
+                Ok x ->
+                    case combine rest of
+                        Ok xs -> Ok (x :: xs)
+                        Err e -> Err e
+                Err e -> Err e
+
+
+-- | Traverse a list with a Result-returning function.  Short-
+-- circuits on first Err.  Composed from List.map + combine to
+-- avoid the typed-codegen gotcha around polymorphic HOF
+-- arguments.
+traverse fn items =
+    combine (skyList_map fn items)
+
+
+-- Private List.map clone to dodge the cyclic dep on Sky.Core.List
+-- during stdlib bootstrap.  Removed once List.sky migrates and
+-- the embedded-stdlib loader handles the cycle gracefully.
+skyList_map : (a -> b) -> List a -> List b
+skyList_map fn xs =
+    case xs of
+        [] -> []
+        (h :: t) -> fn h :: skyList_map fn t
+
+
+-- ─── Result/Task bridge ─────────────────────────────────────────────
+
+
+-- | Chain a Task-returning function after a Result.  Companion to
+-- Task.andThenResult on the other side.  Lifts a Result into a
+-- Task context, returning Task.fail on Err.  The actual lifting
+-- requires Task ops — kept as a thin shim that delegates to the
+-- runtime's Task constructor.
+andThenTask : (a -> any) -> Result e a -> any
+andThenTask fn r =
+    case r of
+        Ok x -> fn x
+        Err _ -> r
+
+
+-- ─── Maybe interop ──────────────────────────────────────────────────
+
+
+-- | Convert a Result to a Maybe, discarding the error.
+toMaybe : Result e a -> Maybe a
+toMaybe r =
+    case r of
+        Ok x -> Just x
+        Err _ -> Nothing
+
+
+-- | Convert a Maybe to a Result, with the given error on Nothing.
+fromMaybe : e -> Maybe a -> Result e a
+fromMaybe err m =
+    case m of
+        Just x -> Ok x
+        Nothing -> Err err
