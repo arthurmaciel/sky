@@ -127,6 +127,38 @@ globalEmittedSpecs = unsafePerformIO $ newIORef Set.empty
 globalCsiByCallee :: IORef (Map.Map String [String])
 globalCsiByCallee = unsafePerformIO $ newIORef Map.empty
 
+-- | v0.13 typed lowerer: per-lambda-scope local-variable type bindings.
+-- When emitting a typed lambda body, `withLambdaTypes` pushes the
+-- lambda's `pat → T.Type` bindings here so `inferExprType` /
+-- `Can.VarLocal` lookups resolve the param's HM-inferred type.
+-- Without this, `\x -> x + 1` inside a typed HOF (where `x : Int`
+-- was inferred) would lower `x + 1` as `rt.Add(x, 1)` (any-routed
+-- through reflect) instead of Go-native `x + 1` (typed).
+{-# NOINLINE globalLambdaTypes #-}
+globalLambdaTypes :: IORef (Map.Map String T.Type)
+globalLambdaTypes = unsafePerformIO $ newIORef Map.empty
+
+
+-- | Snapshot + restore the lambda-types map around an action.  Used at
+-- typed-lambda emission boundaries to nest scopes correctly when
+-- lambdas are nested.  The `a` argument is evaluated to WHNF inside
+-- the bracket so the push/pop ordering matches the lambda's lexical
+-- scope.
+withLambdaTypes :: Map.Map String T.Type -> a -> a
+withLambdaTypes additions x = unsafePerformIO $ do
+    prev <- readIORef globalLambdaTypes
+    writeIORef globalLambdaTypes (Map.union additions prev)
+    let forced = x
+    forced `seq` writeIORef globalLambdaTypes prev
+    return forced
+
+
+-- | Read the current lambda-types map (for use in pure codegen).
+{-# NOINLINE getLambdaTypes #-}
+getLambdaTypes :: Map.Map String T.Type
+getLambdaTypes = unsafePerformIO $ readIORef globalLambdaTypes
+
+
 -- | Read the global codegen env (for use in pure codegen functions).
 -- NOINLINE so GHC doesn't CSE the IORef read across call sites —
 -- each `getCgEnv` invocation must see the LATEST mutation. Without
@@ -5418,8 +5450,18 @@ coerceCallArgsAt region qualName args =
                                     splitCurriedFuncTypeStr (length pats) subbed
                                 , length inputTypes == length pats
                                 , length inputTypes > 0 ->
-                                    curryLambdaPatTyped inputTypes finalRet
-                                        pats (exprToGo body)
+                                    -- v0.13 typed lowerer: push the
+                                    -- lambda's typed inputs into the
+                                    -- local-type context so the body's
+                                    -- binops / var refs resolve to typed
+                                    -- Go-native forms (no `rt.Add` on
+                                    -- Int+Int; no `any(x).(string)`
+                                    -- on a typed local).
+                                    let skyTys = map goTypeStrToSkyType inputTypes
+                                        bindings = patVarTypes pats skyTys
+                                        body' = withLambdaTypes bindings (exprToGo body)
+                                    in curryLambdaPatTyped inputTypes finalRet
+                                        pats body'
                             _ ->
                                 if subbed == "any" && containsTypeParam orig
                                     then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
@@ -5701,7 +5743,34 @@ ctorToGo _opts home typeName ctorName _annot = case ctorName of
 
 -- | Convert a binary operator application to Go
 binopToGo :: String -> Can.Expr -> Can.Expr -> GoIr.GoExpr
-binopToGo op left right = case op of
+binopToGo op left right =
+    -- v0.13 typed lowerer: consult HM-inferred operand types to decide
+    -- Go-native vs `rt.*` any-routed.  Soundness restriction: only
+    -- optimise when BOTH operands are statically typed in Go — i.e.
+    -- they're literals (Int, Float, String, Bool, Char) or simple
+    -- references to typed lambda params (registered in
+    -- `globalLambdaTypes`).  Runtime kernel calls (e.g.
+    -- `rt.Crypto_sha256`) return `any` even when HM says the result
+    -- is String, so a naive `"prefix " + rt.Crypto_sha256(data)`
+    -- would fail Go's static type check.  Falls back to runtime
+    -- helpers in all other cases (correct, just slower).
+    let solved   = Rec._cg_solvedTypes getCgEnv
+        leftTy   = inferExprType solved left
+        rightTy  = inferExprType solved right
+        bothAre  prim = leftTy == Just prim && rightTy == Just prim
+                        && operandIsStaticallyTyped left
+                        && operandIsStaticallyTyped right
+        anyOf    prims = case (leftTy, rightTy) of
+            (Just l, Just r) | l == r && any (l ==) prims
+                             , operandIsStaticallyTyped left
+                             , operandIsStaticallyTyped right
+                             -> True
+            _ -> False
+        intTy    = ConstrainExpr.intType
+        floatTy  = ConstrainExpr.floatType
+        boolTy   = ConstrainExpr.boolType
+        strTy    = ConstrainExpr.stringType
+    in case op of
     -- Pipe operators — desugar to function application
     -- a |> f becomes f(a), but if f is already a call f(x), becomes f(x, a)
     "|>" -> pipeApply left right
@@ -5711,33 +5780,68 @@ binopToGo op left right = case op of
     ">>" -> GoIr.GoCall (GoIr.GoQualified "rt" "ComposeL") [exprToGo left, exprToGo right]
     "<<" -> GoIr.GoCall (GoIr.GoQualified "rt" "ComposeR") [exprToGo left, exprToGo right]
 
-    -- String/list concat — use runtime helper until type checker provides types
-    "++" -> GoIr.GoCall (GoIr.GoQualified "rt" "Concat") [exprToGo left, exprToGo right]
+    -- String concat (++) when both operands type to String: emit
+    -- Go-native concat which is `+` on string. List concat keeps the
+    -- runtime helper (slice concat needs reflect).
+    "++"
+      | bothAre strTy ->
+          GoIr.GoBinary "+" (exprToGo left) (exprToGo right)
+      | otherwise ->
+          GoIr.GoCall (GoIr.GoQualified "rt" "Concat") [exprToGo left, exprToGo right]
 
     -- Cons operator
     "::" -> GoIr.GoCall (GoIr.GoQualified "rt" "List_cons") [exprToGo left, exprToGo right]
 
-    -- Not-equal — runtime helper (Go's native `!=` doesn't work on
-    -- `any`-typed generic params; pre-fix this caused
-    -- `expected != actual (incomparable types in type set)` for
-    -- polymorphic helpers like Sky.Test.notEqual).
+    -- Equality — Go-native when both operands type to a known primitive
+    -- (Go's `==` is well-defined for these). Avoids reflect dispatch
+    -- through rt.Eq and the polymorphic-comparable trap.
+    "==" | anyOf [intTy, floatTy, boolTy, strTy] ->
+        GoIr.GoBinary "==" (exprToGo left) (exprToGo right)
+    "/=" | anyOf [intTy, floatTy, boolTy, strTy] ->
+        GoIr.GoBinary "!=" (exprToGo left) (exprToGo right)
+    "==" -> GoIr.GoCall (GoIr.GoQualified "rt" "Eq") [exprToGo left, exprToGo right]
     "/=" -> GoIr.GoCall (GoIr.GoQualified "rt" "NotEq") [exprToGo left, exprToGo right]
 
-    -- Arithmetic operators — use runtime helpers for any-typed values
+    -- Arithmetic — Go-native when both operands are Int OR both Float.
+    -- Mixed / unknown types fall back to rt.* helpers which reflect-
+    -- dispatch.  Sky's `+`/`-`/`*`/`/` are numeric only (string concat
+    -- is `++`); Go's `+` is overloaded for string but rt.Add handles
+    -- both numeric cases.
+    "+" | bothAre intTy || bothAre floatTy ->
+        GoIr.GoBinary "+" (exprToGo left) (exprToGo right)
+    "-" | bothAre intTy || bothAre floatTy ->
+        GoIr.GoBinary "-" (exprToGo left) (exprToGo right)
+    "*" | bothAre intTy || bothAre floatTy ->
+        GoIr.GoBinary "*" (exprToGo left) (exprToGo right)
+    "/" | bothAre floatTy ->
+        GoIr.GoBinary "/" (exprToGo left) (exprToGo right)
+    "//" | bothAre intTy ->
+        GoIr.GoBinary "/" (exprToGo left) (exprToGo right)
     "+"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Add") [exprToGo left, exprToGo right]
     "-"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Sub") [exprToGo left, exprToGo right]
     "*"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Mul") [exprToGo left, exprToGo right]
     "/"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Div") [exprToGo left, exprToGo right]
     "//" -> GoIr.GoCall (GoIr.GoQualified "rt" "IntDiv") [exprToGo left, exprToGo right]
 
-    -- Comparison operators
-    "==" -> GoIr.GoCall (GoIr.GoQualified "rt" "Eq") [exprToGo left, exprToGo right]
+    -- Comparison operators — Go-native for known orderable primitives.
+    ">"  | anyOf [intTy, floatTy, strTy] ->
+        GoIr.GoBinary ">" (exprToGo left) (exprToGo right)
+    "<"  | anyOf [intTy, floatTy, strTy] ->
+        GoIr.GoBinary "<" (exprToGo left) (exprToGo right)
+    ">=" | anyOf [intTy, floatTy, strTy] ->
+        GoIr.GoBinary ">=" (exprToGo left) (exprToGo right)
+    "<=" | anyOf [intTy, floatTy, strTy] ->
+        GoIr.GoBinary "<=" (exprToGo left) (exprToGo right)
     ">"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Gt") [exprToGo left, exprToGo right]
     "<"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Lt") [exprToGo left, exprToGo right]
     ">=" -> GoIr.GoCall (GoIr.GoQualified "rt" "Gte") [exprToGo left, exprToGo right]
     "<=" -> GoIr.GoCall (GoIr.GoQualified "rt" "Lte") [exprToGo left, exprToGo right]
 
-    -- Logic
+    -- Logic — Go-native when both Bool (the only valid operand type).
+    "&&" | bothAre boolTy ->
+        GoIr.GoBinary "&&" (exprToGo left) (exprToGo right)
+    "||" | bothAre boolTy ->
+        GoIr.GoBinary "||" (exprToGo left) (exprToGo right)
     "&&" -> GoIr.GoCall (GoIr.GoQualified "rt" "And") [exprToGo left, exprToGo right]
     "||" -> GoIr.GoCall (GoIr.GoQualified "rt" "Or") [exprToGo left, exprToGo right]
 
@@ -6901,7 +7005,9 @@ inferExprType types (A.At _ e) = case e of
     Can.Str _    -> Just ConstrainExpr.stringType
     Can.Chr _    -> Just ConstrainExpr.charType
     Can.Unit     -> Just T.TUnit
-    Can.VarLocal name    -> Map.lookup name types
+    Can.VarLocal name    -> case Map.lookup name getLambdaTypes of
+        Just t  -> Just t
+        Nothing -> Map.lookup name types
     Can.VarTopLevel _ n  -> Map.lookup n types
     -- VarKernel: instantiate the kernel's HM annotation. Strips the
     -- Forall wrapper (kernel sigs are universally quantified) so the
@@ -7092,6 +7198,82 @@ inferListElemGoType types e
                 T.TType _ "List" [elemTy] -> sanitiseTypedElem (solvedTypeToGo elemTy)
                 _ -> "any"
         _ -> "any"
+
+
+-- | Sister of `inferListElemGoType` that returns the Sky `T.Type` of
+-- the list element instead of the rendered Go type string.  Used by
+-- typed-lambda emission to populate `withLambdaTypes` so the lambda
+-- body's operations (binops, var lookups) resolve to typed Go-native
+-- forms rather than falling back to `rt.*` reflect helpers.
+inferListElemSkyType :: Solve.SolvedTypes -> Can.Expr -> Maybe T.Type
+inferListElemSkyType types e
+    | literalListElementsPolymorphic types e = Nothing
+    | otherwise = case inferExprType types e of
+        Just (T.TType _ "List" [elemTy]) -> Just elemTy
+        Just (T.TAlias _ _ _ aliasInner) ->
+            let inner = case aliasInner of
+                    T.Filled  i -> i
+                    T.Hoisted i -> i
+            in case inner of
+                T.TType _ "List" [elemTy] -> Just elemTy
+                _ -> Nothing
+        _ -> Nothing
+
+
+-- | Build a `Map String T.Type` from a list of simple-var Sky
+-- patterns paired with their HM-inferred types.  Skips non-PVar
+-- patterns (the caller has already gated typed routing on
+-- `isSimpleVarPattern`).  Used to wrap typed-lambda body emission
+-- with `withLambdaTypes` so locals resolve correctly.
+patVarTypes :: [Can.Pattern] -> [T.Type] -> Map.Map String T.Type
+patVarTypes pats tys =
+    Map.fromList
+        [ (n, t)
+        | (A.At _ (Can.PVar n), t) <- zip pats tys
+        , not (isWildcardSkyType t)
+        ]
+  where
+    isWildcardSkyType (T.TVar "_unknown") = True
+    isWildcardSkyType _                   = False
+
+
+-- | Best-effort conversion from a Go type string (e.g. "int",
+-- "string", "rt.SkyMaybe[string]") back to a Sky `T.Type`.  Used at
+-- typed-lambda emission boundaries where the lambda's input types
+-- are known as Go strings (from `splitCurriedFuncTypeStr`) but we
+-- need the Sky T.Type to register in `withLambdaTypes`.  Returns
+-- `T.TVar "_unknown"` for shapes we can't safely reverse-map — those
+-- are then filtered out by `patVarTypes` so binop emission falls
+-- through to the any-routed runtime helpers.
+goTypeStrToSkyType :: String -> T.Type
+goTypeStrToSkyType s = case s of
+    "int"        -> ConstrainExpr.intType
+    "float64"    -> ConstrainExpr.floatType
+    "string"     -> ConstrainExpr.stringType
+    "bool"       -> ConstrainExpr.boolType
+    "rune"       -> ConstrainExpr.charType
+    _            -> T.TVar "_unknown"
+
+
+-- | v0.13 typed lowerer guard: is this expression guaranteed to lower
+-- to a Go value whose STATIC type matches its HM-inferred Sky type?
+-- True for primitive literals (Int, Float, String, Bool, Char, Unit)
+-- and for `Can.VarLocal` references whose name is registered in
+-- `globalLambdaTypes` (typed lambda params).  False for everything
+-- else — call results, field access, etc. — because runtime kernels
+-- (e.g. `rt.Crypto_sha256`) return Go `any` even when HM says the
+-- result is String, and forcing a Go-native binop on those would
+-- produce `mismatched types string and any`.
+operandIsStaticallyTyped :: Can.Expr -> Bool
+operandIsStaticallyTyped (A.At _ e) = case e of
+    Can.Int _    -> True
+    Can.Float _  -> True
+    Can.Str _    -> True
+    Can.Chr _    -> True
+    Can.Unit     -> True
+    Can.VarLocal name -> Map.member name getLambdaTypes
+    Can.Negate inner -> operandIsStaticallyTyped inner
+    _            -> False
 
 
 -- | Like literalListHasPolymorphicReturn but checks raw element
@@ -7460,13 +7642,22 @@ kernelTypedCall types modName funcName args goArgs =
         -- slice, any-typed function).
         ("List", "map", [_, _], [goFn, goList]) ->
             let elemGo = elemTypeFromFnOrList (args !! 0) (args !! 1)
+                elemSkyTy = inferListElemSkyType types (args !! 1)
             in if elemGo == "any" then Nothing
                else case args !! 0 of
                     -- Lambda with simple var pattern: typed-T route is
                     -- safe — patternBindings doesn't need to destructure.
                     A.At _ (Can.Lambda pats body)
                       | all isSimpleVarPattern pats ->
-                        let typedFn = curryLambdaPatTyped [elemGo] "any" pats (exprToGo body)
+                        -- v0.13 typed lowerer: push the lambda's param
+                        -- HM-types into scope so the body's binops /
+                        -- var refs resolve to typed Go-native forms
+                        -- (e.g. `x + 1` instead of `rt.Add(x, 1)`).
+                        let lambdaTypes = case elemSkyTy of
+                                Just t  -> patVarTypes pats [t]
+                                Nothing -> Map.empty
+                            body' = withLambdaTypes lambdaTypes (exprToGo body)
+                            typedFn = curryLambdaPatTyped [elemGo] "any" pats body'
                         in Just (GoIr.GoCall
                             (GoIr.GoIdent ("rt.List_mapT[" ++ elemGo ++ ", any]"))
                             [typedFn, wrapAsList elemGo goList])
@@ -7490,12 +7681,18 @@ kernelTypedCall types modName funcName args goArgs =
         -- List.filter fn xs : (a -> Bool) -> List a -> List a
         ("List", "filter", [_, _], [goFn, goList]) ->
             let elemGo = elemTypeFromFnOrList (args !! 0) (args !! 1)
+                elemSkyTy = inferListElemSkyType types (args !! 1)
             in if elemGo == "any" then Nothing
                else case args !! 0 of
                     A.At _ (Can.Lambda pats body)
                       | all isSimpleVarPattern pats ->
                         -- List_filterT[A](fn func(A) bool, xs []A) []A
-                        let typedFn = curryLambdaPatTyped [elemGo] "bool" pats (exprToGo body)
+                        -- v0.13 typed lowerer: push elem type into scope.
+                        let lambdaTypes = case elemSkyTy of
+                                Just t  -> patVarTypes pats [t]
+                                Nothing -> Map.empty
+                            body' = withLambdaTypes lambdaTypes (exprToGo body)
+                            typedFn = curryLambdaPatTyped [elemGo] "bool" pats body'
                         in Just (GoIr.GoCall
                             (GoIr.GoIdent ("rt.List_filterT[" ++ elemGo ++ "]"))
                             [typedFn, wrapAsList elemGo goList])
@@ -7594,6 +7791,7 @@ kernelTypedCall types modName funcName args goArgs =
         -- List.find fn xs : (a -> Bool) -> List a -> Maybe a.
         ("List", "find", [_, _], [goFn, goList]) ->
             let elemGo = elemTypeFromFnOrList (args !! 0) (args !! 1)
+                elemSkyTy = inferListElemSkyType types (args !! 1)
             in if elemGo == "any" then Nothing
                else case args !! 0 of
                     A.At _ (Can.Lambda pats body)
@@ -7602,7 +7800,11 @@ kernelTypedCall types modName funcName args goArgs =
                         -- yet; the TA shape (typed slice, any fn) is
                         -- the best routing here. Reused for find/member
                         -- so the lambda shape stays the same.
-                        let typedFn = curryLambdaPatTyped [elemGo] "bool" pats (exprToGo body)
+                        let lambdaTypes = case elemSkyTy of
+                                Just t  -> patVarTypes pats [t]
+                                Nothing -> Map.empty
+                            body' = withLambdaTypes lambdaTypes (exprToGo body)
+                            typedFn = curryLambdaPatTyped [elemGo] "bool" pats body'
                             -- TA helper expects fn as any; box the
                             -- typed func.
                             anyFn = GoIr.GoCall (GoIr.GoIdent "any") [typedFn]
