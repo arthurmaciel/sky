@@ -2448,6 +2448,15 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
             -- generic version.
             writeIORef globalEmittedSpecs specNames
             return specials
+        -- v0.13 Phase A4 status: generics + specs coexist.
+        -- Dropping generic decls when specs exist is too aggressive
+        -- — some call sites still fall back to generic names (the
+        -- reach walker may miss certain code paths, e.g. functions
+        -- only reachable via dynamic dispatch through Sky.Live's
+        -- runtime).  Until the reach walker covers 100% of Sky-
+        -- source code paths, keep both forms.  Specs are dead
+        -- code for non-reached call sites; binary bloat ~30%
+        -- but correctness is preserved.
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
             , GoIr._pkg_imports = imports
