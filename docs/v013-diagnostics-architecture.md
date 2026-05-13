@@ -719,11 +719,40 @@ architectural blocker structurally:
 | A1 — solver instrumentation: capture call-site instances | ✅ landed | `d3b0b84` |
 | A2 — mangling (`mangleType`, `mangleInstance`) + substitution (`substituteType`) | ✅ landed | `96799ca` |
 | A3 — compile pipeline wires `solveWithInstances`, logs counts + names | ✅ landed | `c4aaaf3` |
-| A4 — per-instance Go emission (specialised functions) | ❌ pending |
-| A5 — call-site rewriting (qualName → mangled instance name) | ❌ pending |
-| A6 — `_Any` fallback for FFI / untyped boundaries | ❌ pending |
+| A4 — per-instance Go emission (specialised functions) | ⏭️ deferred (works via A5 substitution for now) |
+| A5 — call-site rewriting (concrete-type substitution in coerceArg) | ✅ partial (`68af62b`) |
+| A6 — `_Any` fallback for FFI / untyped boundaries | ✅ via normaliseUnresolved (`1511f18`) |
 | A7 — Sky-side DCE: only emit reachable instances | ❌ pending |
 | A8 — regression specs across emission + dedup + perf | partial (A1+A2 specs live) |
+
+**A5's partial-instance arg-consistency gap (the Result.sky blocker)**
+
+Captured instances with mixed resolution (e.g. `Result Error
+<free-a>` where `Error` is concrete and `a` is free) get
+normalised by `normaliseUnresolved` to `Result Error any`.  At
+the call site:
+
+* The Result-typed arg gets coerced via `rt.ResultCoerce[Error,
+  any]` — produces `SkyResult[Error, any]`.
+* The def arg (type `T1`, the polymorphic value type) goes
+  through `coerceArg`'s `isGenericTypeParam` short-circuit — no
+  coercion, raw emit.
+* When `def = []` (empty list), Sky emits `[]any{}` — Go infers
+  `T1 = []any`.
+* Conflict: T1 inferred as `[]any` from def, but Result arg says
+  T1 is `any`.
+
+The fix needs `coerceArg`'s `T1`-typed branch to also consult
+the call-site instance map — when T1 has a captured concrete
+type, coerce the value to that type so Go inference agrees
+across all arg positions.  Multi-day refactor because the
+`isGenericTypeParam` short-circuit is referenced from many
+codegen paths.
+
+Status: Maybe.sky works (1-tyvar, no partial-instance issue).
+Result.sky reverted (commit `cc03be5`); foundation pieces
+(`normaliseUnresolved`, `containsTypeParam`,
+`splitTopLevelCommas`) stay in place for the next attempt.
 
 Captured instance counts across the 10 spot-checked examples
 (from A3's logging):
