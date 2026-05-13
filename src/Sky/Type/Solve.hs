@@ -369,10 +369,29 @@ solveWithInstances constraint = do
     (result, finalState) <- solveHelp state0 constraint
     case result of
         Nothing -> do
-            solvedTypes <- readSolvedTypes (_env finalState)
+            -- Behaviour-equivalent to `solve` for the SolvedTypes
+            -- portion: merge the locals-captured bindings into the
+            -- env-derived map so let-bound + top-level declarations
+            -- both appear in the output map.  Without this,
+            -- downstream consumers (entryInferredSigs etc.) miss
+            -- top-level bindings tracked only via `_locals` and the
+            -- call-site value-reference codegen emits bare names
+            -- without `[any]` instantiation → Go build rejects.
+            envTypes <- readSolvedTypes (_env finalState)
+            localVars <- readIORef (_locals finalState)
+            localTys <- Map.traverseWithKey (\_ vars ->
+                mapM variableToType vars) localVars
+            let pickType tys = case List.nub (filter (not . isUnboundTVar) tys) of
+                    []  -> head tys
+                    [t] -> t
+                    _   -> T.TVar "_ambig"
+                isUnboundTVar (T.TVar n) = "_" `List.isPrefixOf` n || null n
+                isUnboundTVar _ = False
+                localFirst = Map.map pickType (Map.filter (not . null) localTys)
+                merged = Map.union localFirst envTypes
             records <- readIORef (_callInstances finalState)
             ci <- extractInstances records
-            return (SolveOk solvedTypes, ci)
+            return (SolveOk merged, ci)
         Just err -> do
             -- Even on type error, return what we captured so far.
             -- Downstream consumers can decide whether to use a partial
@@ -501,10 +520,17 @@ expectedToVar state (T.FromAnnotation _ _ _ ty) = typeToVar state ty
 
 -- | Instantiate an Annotation into a UF Variable (fresh vars for quantified names).
 -- Returns the instantiated variable plus the list of fresh UF vars created
--- for the quantified type parameters, in declaration order (matching the
--- `Forall` quantifier list).  v0.13 Phase A1 uses the fresh-var list to
--- capture call-site instantiation: after solve completes, evaluating each
--- fresh var via `variableToType` gives the concrete type at the call site.
+-- for the NON-WILDCARD quantified type parameters, in declaration order.
+-- v0.13 Phase A1 uses the fresh-var list to capture call-site
+-- instantiation: after solve completes, evaluating each fresh var via
+-- `variableToType` gives the concrete type at the call site.
+--
+-- Behaviour-preserving wrt pre-A1: every name in `freeVars` (including
+-- the `any` wildcard) gets a fresh UF var stored in the local cache as
+-- before — typeToVar's wildcard case bypasses the cache for `any` so the
+-- entry is dead-write but the HM-side state shape is identical.  Only
+-- the RETURNED fresh-var list omits `any` (the monomorphiser doesn't
+-- specialise wildcards).
 instantiateAnnotation :: SolverState -> T.Annotation -> IO (T.Variable, [T.Variable])
 instantiateAnnotation state (T.Forall freeVars canType)
     -- No quantification: use the GLOBAL cache for sharing.  No fresh
@@ -512,18 +538,19 @@ instantiateAnnotation state (T.Forall freeVars canType)
     | null freeVars = do
         v <- typeToVar state canType
         return (v, [])
-    -- With quantification: create a LOCAL cache so each use gets fresh vars,
-    -- and return the freshly-created vars in declaration order so the
-    -- monomorphisation pass can resolve them post-solve.
+    -- With quantification: create a LOCAL cache so each use gets fresh
+    -- vars (identical to pre-A1).  The fresh-var list returned to the
+    -- caller excludes the `any` wildcard so the monomorphisation pass
+    -- doesn't try to specialise it.
     | otherwise = do
         localCache <- newIORef Map.empty
-        let realVars = filter (/= "any") freeVars
-        freshVars <- mapM (\name -> do
+        named <- mapM (\name -> do
             v <- UF.fresh (T.Descriptor (T.FlexVar (Just name)) (_rank state) T.noMark Nothing)
             modifyIORef' localCache (Map.insert name v)
-            return v) realVars
+            return (name, v)) freeVars
         let instState = state { _varCache = localCache }
         v <- typeToVar instState canType
+        let freshVars = [ uv | (n, uv) <- named, n /= "any" ]
         return (v, freshVars)
 
 

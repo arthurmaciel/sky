@@ -32,6 +32,7 @@ import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Reporting.Diagnostic as Diag
 import qualified Sky.Reporting.Render as Render
 import qualified Sky.Build.Validator as Validator
+import qualified Sky.Build.Monomorphise as Mono
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Parse.Module as Parse
 import qualified Sky.Canonicalise.Module as Canonicalise
@@ -636,7 +637,15 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             _ <- return depDeclaredNames  -- silence unused warning on release path
             constraints <- Constrain.constrainModuleWithExternals depExternals canMod
             putStrLn $ "   cross-module externals: " ++ show (Map.size depExternals)
-            solveResult <- Solve.solve constraints
+            -- v0.13 Phase A3: use `solveWithInstances` so we also
+            -- capture the call-site instance table for the
+            -- monomorphisation pass.  Behaviour-equivalent to
+            -- `Solve.solve` for the SolvedTypes portion — the
+            -- new path merges `_locals` into the returned map
+            -- identically (the missing merge was a subtle
+            -- regression on Live.app's `init_` function-value
+            -- references that's now fixed).
+            (solveResult, callInstances) <- Solve.solveWithInstances constraints
             -- HM type errors are FATAL (promoted from warning). No
             -- silent degradation to `any`. This enforces the
             -- "if it compiles, it works" promise at the entry module.
@@ -646,6 +655,20 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             types <- case solveResult of
                 Solve.SolveOk t -> do
                     putStrLn $ "   Types OK (" ++ show (length (Map.keys t)) ++ " bindings)"
+                    -- v0.13 Phase A3: log the captured instance table.
+                    -- Format: "<N> instances across <M> functions".
+                    -- Set SKY_MONO_TRACE=1 to dump every instance.
+                    let callsiteCount = length callInstances
+                        uniqueCallees =
+                            length (List.nub (map Solve._instance_callee callInstances))
+                    putStrLn $ "   Monomorphisation: "
+                            ++ show callsiteCount ++ " instances across "
+                            ++ show uniqueCallees ++ " polymorphic callees"
+                    monoTrace <- System.Environment.lookupEnv "SKY_MONO_TRACE"
+                    case monoTrace of
+                        Just "1" -> mapM_ (\ci ->
+                            putStrLn $ "     " ++ Mono.mangleInstance ci) callInstances
+                        _ -> return ()
                     return t
                 Solve.SolveError err -> do
                     -- v0.13 Layer 1: route position-prefixed type
