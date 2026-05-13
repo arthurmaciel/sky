@@ -593,12 +593,23 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             let depErrors = [(mn, e) | (mn, Left e)  <- depResults]
                 depSolved = [(mn, t) | (mn, Right t) <- depResults]
             unless (null depErrors) $ do
-                mapM_ (\(mn, e) ->
-                        putStrLn ("   TYPE ERROR (" ++ mn ++ "): " ++ e))
-                    depErrors
-                error ("fatal: type errors in "
-                        ++ show (length depErrors)
-                        ++ " dep module(s)")
+                -- v0.13 Layer 1: route dep-module type errors through the
+                -- structured Diagnostic renderer too.  Pre-fix each was
+                -- printed as `   TYPE ERROR (Lib.Auth): 114:17: ...` and
+                -- then `error`'d out with a Haskell CallStack visible to
+                -- the user.  Now each emits the same Elm-style block
+                -- with TYPE ERROR header + source snippet + [E2001] code,
+                -- and the discovery stage exits cleanly with code 1.
+                mapM_ (\(mn, e) -> do
+                    let depPath = case [p | mi <- moduleOrder
+                                          , Graph._mi_name mi == mn
+                                          , let p = Graph._mi_path mi ] of
+                                    (p:_) -> p
+                                    _     -> entryPath
+                        diag = Solve.solveErrorToDiagnostic depPath e
+                    rendered <- Render.renderCli diag
+                    putStrLn rendered) depErrors
+                System.Exit.exitWith (System.Exit.ExitFailure 1)
             -- Entry module gets cross-module externals so VarTopLevel
             -- references to dep values emit CForeign with the dep's
             -- solved annotation. Only fully-concrete types (no free
