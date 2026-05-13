@@ -720,39 +720,80 @@ architectural blocker structurally:
 | A2 — mangling (`mangleType`, `mangleInstance`) + substitution (`substituteType`) | ✅ landed | `96799ca` |
 | A3 — compile pipeline wires `solveWithInstances`, logs counts + names | ✅ landed | `c4aaaf3` |
 | A4 — per-instance Go emission (specialised functions) | ⏭️ deferred (works via A5 substitution for now) |
-| A5 — call-site rewriting (concrete-type substitution in coerceArg) | ✅ partial (`68af62b`) |
+| A5 — call-site rewriting (concrete-type substitution in coerceArg) | ✅ shipped (`68af62b`, `f43a2d4`, `4846566`) |
+| A5+ — partial-instance arg-consistency via Sky-name-aligned σ | ✅ shipped (`f43a2d4`) |
+| A5++ — eraseTypeParams fallback for un-captured call sites | ✅ shipped (`4846566`) |
 | A6 — `_Any` fallback for FFI / untyped boundaries | ✅ via normaliseUnresolved (`1511f18`) |
+| A6 — let-polymorphism for top-level recursive groups | ❌ pending (blocks List.sky migration) |
 | A7 — Sky-side DCE: only emit reachable instances | ❌ pending |
 | A8 — regression specs across emission + dedup + perf | partial (A1+A2 specs live) |
 
-**A5's partial-instance arg-consistency gap (the Result.sky blocker)**
+**A5+ closed the partial-instance arg-consistency gap (`f43a2d4`)**
 
-Captured instances with mixed resolution (e.g. `Result Error
-<free-a>` where `Error` is concrete and `a` is free) get
-normalised by `normaliseUnresolved` to `Result Error any`.  At
-the call site:
+Three coordinated changes wire call-site coercion to the SKY-name
+space:
 
-* The Result-typed arg gets coerced via `rt.ResultCoerce[Error,
-  any]` — produces `SkyResult[Error, any]`.
-* The def arg (type `T1`, the polymorphic value type) goes
-  through `coerceArg`'s `isGenericTypeParam` short-circuit — no
-  coercion, raw emit.
-* When `def = []` (empty list), Sky emits `[]any{}` — Go infers
-  `T1 = []any`.
-* Conflict: T1 inferred as `[]any` from def, but Result arg says
-  T1 is `any`.
+1. **Solver captures quantifier names.** `CallInstance` and
+   `CallInstanceRecord` carry the annotation `Forall` var names
+   (`_instance_quantifiers`) in positional alignment with the
+   captured concrete types.  `instantiateAnnotation` returns the
+   quantifier-name list alongside the fresh-var list so CForeign
+   records both.
 
-The fix needs `coerceArg`'s `T1`-typed branch to also consult
-the call-site instance map — when T1 has a captured concrete
-type, coerce the value to that type so Go inference agrees
-across all arg positions.  Multi-day refactor because the
-`isGenericTypeParam` short-circuit is referenced from many
-codegen paths.
+2. **Per-function SkyName→GoName map.**  CgEnv gains
+   `_cg_funcSkyToGoTVars` (registered alongside
+   `_cg_funcInferredSigs`).  `inferredSigSkyToGo` mirrors
+   `splitInferredSigWithReg`'s `keptNumbered` and exposes the
+   mapping the substitution path needs.  Dep + entry registrations
+   apply `generaliseToAnnotation`'s renaming before computing the
+   map so SkyNames align with the user-friendly Forall names the
+   solver captures.
 
-Status: Maybe.sky works (1-tyvar, no partial-instance issue).
-Result.sky reverted (commit `cc03be5`); foundation pieces
-(`normaliseUnresolved`, `containsTypeParam`,
-`splitTopLevelCommas`) stay in place for the next attempt.
+3. **`coerceCallArgsAt` rebuilt with Sky-name substitution.** Zip
+   quantifiers with concrete types into σ_sky, then project to
+   σ_go through `_cg_funcSkyToGoTVars`.  Annotation positions
+   absent from the map (e.g. Result's `e` collapsed at codegen-
+   time to `Sky_Core_Error_Error` by error-position defaulting)
+   are skipped — their slot in the emitted Go sig is already
+   concrete.  Projected Go type strings go through
+   `sanitiseTypedDeep` to scrub anonymous-record names that have
+   no Go alias counterpart.
+
+**A5++ — `eraseTypeParams` fallback (`4846566`)**
+
+Some call sites don't get a captured CallInstance because the
+surrounding constraint emission is deferred (e.g. `Can.Update`
+lowers to `CTrue`, skipping every nested CForeign).  Pre-fix
+those sites fell through to the un-substituted branch and emitted
+raw `paramTypes` containing `T1`/`T2` tokens — leaking as bare
+identifiers in the Go output.  Fix: erase generic type-param
+tokens to `any` in the fallback path so `coerceArg` routes
+through the `_Any` variants (`AsListAny`, `Coerce[func(any) any]`,
+`ResultCoerce[..., any]`).
+
+Status:
+* **Maybe.sky** (1-tyvar): ✅ ships
+* **Result.sky** (2-tyvar with `e` defaulted to Error): ✅ ships
+* **List.sky** (multiple recursive top-level functions): ❌
+  blocked on A6 let-polymorphism.  Isolated foldl works
+  (`Sky_Core_TestList_foldl[T1 any, T2 any]`) but the same
+  function alongside `concat`, `reverse`, etc. in the same
+  recursive top-level group breaks generalisation.  Tracked as
+  task #121.
+
+Cross-file CSI key (file, line, col):
+* Pre-fix used `(line, col)` only — calls at the same position
+  in different dep modules collided in the Map and dropped
+  instances.  Attempted forcing approach (`mapM` with writeIORef
+  + length . show . seq) ran into a cgEnv ordering issue:
+  `solvedTypeToGo` consulted `_cg_recordAliases` before the
+  multi-module pass had registered dep record aliases, so
+  substituted types emitted as bare names instead of `_R`-suffixed
+  alias names.  Reverted to (line, col)-only with documented
+  collision behaviour: collisions trigger the `eraseTypeParams`
+  fallback, which produces correct (but `any`-widened) Go.  Full
+  file-qualified keying needs either reordering the multi-module
+  pipeline or invasive file-path threading — deferred.
 
 Captured instance counts across the 10 spot-checked examples
 (from A3's logging):
@@ -779,7 +820,44 @@ Sample mangled names (todo-cli, via `SKY_MONO_TRACE=1`):
 Concrete types throughout — no `any` or unresolved TVars in the
 captured set.  Foundation is solid for A4+ wire-up.
 
-**Phase B — Sky stdlib migration**  ❌ pending Phase A complete
+**Phase B — Sky stdlib migration**  🚧 partial
+
+| Module | Status | Notes |
+|---|---|---|
+| `Sky.Core.Maybe` | ✅ shipped (`68af62b`) | 11 combinators; ADT stays kernel-anchored |
+| `Sky.Core.Result` | ✅ shipped (`f43a2d4`) | 10 combinators; ADT stays kernel-anchored |
+| `Sky.Core.Basics` | ⏭️  pending | identity/always/fst/snd/clamp are trivial; toString/compare need runtime helpers |
+| `Sky.Core.List` | ❌ blocked on A6 | recursive let-group generalisation issue |
+| `Sky.Core.Dict` | ❌ blocked on A6 | same class as List |
+| `Sky.Core.Set` | ❌ blocked on A6 | same class as List |
+| `Sky.Core.String` | ⏭️  mostly FFI | String ops are mostly Go-side helpers — limited Sky-source surface |
+| Time / Random / Http / File / Crypto / Encoding / Regex | ⏭️  intentionally kernel | Pure FFI / Go-side primitives |
+
+**A6 let-polymorphism blocker (List/Dict/Set migration)**
+
+Sky's HM doesn't generalise top-level recursive let-groups
+correctly.  `Can.DeclareRec` adds each binder as `Forall []`
+(monomorphic) to the environment, then constrains each body
+against the pre-registered monomorphic type.  No generalisation
+happens at the end of the recursive group.  Same-module recursive
+references go through `CLocal` (not `CForeign`), so the recursive
+call uses the in-progress monomorphic type — and HM produces
+narrow inferred types.
+
+Example: `Sky.Core.List.foldl` placed alongside `append`, `concat`,
+`reverse`, etc. in the same module emits as
+`func Sky_Core_List_foldl[T1 any](fn func(T1) func([]any) any,
+acc []any, list []T1) []any` — `acc` and the function's second
+arg collapse to `[]any` instead of staying polymorphic.  But
+foldl in isolation (separate module with no other definitions)
+emits as `[T1 any, T2 any]` correctly.
+
+Fix needs constrainDecls' `Can.DeclareRec` path to use `CLet`
+with proper generalisation semantics — solving the recursive
+group's body bindings first, then generalising over the captured
+flex-vars, then making the bindings available to the body's
+free-var references with the generalised type.  Tracked as
+task #121.
 
 Once A4-A7 land, stdlib modules port mechanically:
 * B1. Basics, Maybe, Result (pure-Sky ADT eliminators)
