@@ -106,6 +106,27 @@ globalReachableSet = unsafePerformIO $ newIORef Set.empty
 globalAnnotMap :: IORef (Map.Map String T.Annotation)
 globalAnnotMap = unsafePerformIO $ newIORef Map.empty
 
+
+-- | v0.13 Phase A4: the set of specialised function names that
+-- `generateGoMulti` actually emitted as separate Go decls.  Used
+-- by `instanceMangledName` to gate call-site mangled-name
+-- rewriting — only use the mangled name when its spec exists,
+-- else fall back to the generic version.
+{-# NOINLINE globalEmittedSpecs #-}
+globalEmittedSpecs :: IORef (Set.Set String)
+globalEmittedSpecs = unsafePerformIO $ newIORef Set.empty
+
+
+-- | v0.13 Phase A4: per-callee annotation Forall quantifier-name list,
+-- captured from the actual `CallInstance.quantifiers` the solver
+-- recorded.  Used for spec emission's σ build instead of re-deriving
+-- via `generaliseToAnnotation` (which can produce DIFFERENT Forall
+-- ordering across pass 1 / pass 2 because the solver's internal TVar
+-- names differ between passes).
+{-# NOINLINE globalCsiByCallee #-}
+globalCsiByCallee :: IORef (Map.Map String [String])
+globalCsiByCallee = unsafePerformIO $ newIORef Map.empty
+
 -- | Read the global codegen env (for use in pure codegen functions).
 -- NOINLINE so GHC doesn't CSE the IORef read across call sites —
 -- each `getCgEnv` invocation must see the LATEST mutation. Without
@@ -706,13 +727,21 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- region start.  Entry-module callsites go under
             -- entryPath; each dep's callsites use the dep's own
             -- source path (looked up via `moduleOrder`).
+            -- v0.13 Phase A5++: CSI map is keyed by
+            -- (line, col) AND nested by callee name, so calls at the
+            -- same source position in different files (or different
+            -- callees inferred at the same point) don't overwrite
+            -- each other.  Lookups consult the inner map by the
+            -- expected callee's Sky-form name.
             let csiEntries =
                     [ ( ( A._line (A._start (Solve._cs_region csi))
                         , A._col  (A._start (Solve._cs_region csi)) )
-                      , Solve._cs_instance csi
+                      , Map.singleton
+                          (Solve._instance_callee (Solve._cs_instance csi))
+                          (Solve._cs_instance csi)
                       )
                     | csi <- callSiteInstances ++ concatMap snd depCsiByMod ]
-                csiByRegion = Map.fromList csiEntries
+                csiByRegion = Map.fromListWith Map.union csiEntries
             modifyIORef globalCgEnv $ \e ->
                 Rec.withCallSiteInstances csiByRegion e
             writeIORef globalEntryPath entryPath
@@ -760,6 +789,45 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             [(entryName, [])]
                     writeIORef globalReachableSet reached
                     writeIORef globalAnnotMap annotMap
+                    -- v0.13 Phase A4: stash per-callee captured
+                    -- quantifier names so spec emission uses the
+                    -- SAME ordering the solver instantiated with.
+                    let csiByCallee = Map.fromListWith (\a _ -> a)
+                            [ (Solve._instance_callee inst,
+                               Solve._instance_quantifiers inst)
+                            | csi <- callSiteInstances ++ concatMap snd depCsiByMod
+                            , let inst = Solve._cs_instance csi
+                            , not (null (Solve._instance_quantifiers inst))
+                            ]
+                    writeIORef globalCsiByCallee csiByCallee
+                    -- v0.13 Phase A4: eagerly compute the set of
+                    -- specialised mangled names that WOULD be
+                    -- emitted, so call-site codegen (which runs
+                    -- during lazy evaluation of `decls`) knows
+                    -- whether to use the mangled name without
+                    -- depending on `specDecls` having been forced
+                    -- first.  Skips instances whose σ_go is empty
+                    -- (no specialisation needed — original func is
+                    -- already non-generic) — the spec emission step
+                    -- in generateGoMulti applies the same filter.
+                    env0 <- readIORef globalCgEnv
+                    let specNames = Set.fromList
+                            [ Mono.mangleInstance
+                                (Solve.CallInstance skyName tys [])
+                            | (skyName, tys) <- Set.toList reached
+                            , not (null tys)
+                            , let goName = map (\c -> if c == '.' then '_' else c) skyName
+                                  skyToGo = Map.findWithDefault []
+                                      goName (Rec._cg_funcSkyToGoTVars env0)
+                                  quants = case Map.lookup skyName annotMap of
+                                      Just (T.Forall vs _) -> filter (/= "any") vs
+                                      Nothing -> []
+                                  σ_sky = Map.fromList (zip quants tys)
+                                  σ_go = [() | (sn, _) <- skyToGo
+                                             , Map.member sn σ_sky ]
+                            , not (null σ_go)
+                            ]
+                    writeIORef globalEmittedSpecs specNames
                     reachTrace <- System.Environment.lookupEnv "SKY_REACH_TRACE"
                     case reachTrace of
                         Just "1" -> do
@@ -2337,7 +2405,8 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
         -- use the mangled names and drop the generic emission.
         specDecls = unsafePerformIO $ do
             reached <- readIORef globalReachableSet
-            annotMap' <- readIORef globalAnnotMap
+            _annotMap' <- readIORef globalAnnotMap
+            csiByCallee <- readIORef globalCsiByCallee
             env <- readIORef globalCgEnv
             let
                 -- Index every emitted GoFuncDecl (entry + deps) by
@@ -2352,31 +2421,32 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                 -- emitted GoFuncDecl set (kernel / FFI / ctor names
                 -- aren't user-mono'd here).
                 reachableList = Set.toList reached
-                specials = mapMaybe
-                    (\(skyName, tys) ->
-                        let goName = map (\c -> if c == '.' then '_' else c) skyName
-                            mangled = Mono.mangleInstance
-                                (Solve.CallInstance skyName tys [])
-                            skyToGo = Map.findWithDefault []
-                                goName (Rec._cg_funcSkyToGoTVars env)
-                            annot = Map.lookup skyName annotMap'
-                            quants = case annot of
-                                Just (T.Forall vs _) ->
-                                    filter (/= "any") vs
-                                Nothing -> []
-                            σ_sky = Map.fromList (zip quants tys)
-                            σ_go = Map.fromList
-                                [ (gn, solvedTypeToGo cty)
-                                | (sn, gn) <- skyToGo
-                                , Just cty <- [Map.lookup sn σ_sky]
-                                ]
-                        in case Map.lookup goName funcByName of
-                            Just gfd | not (null tys), not (null σ_go) ->
-                                Just (GoIr.GoDeclFunc
-                                    (Mono.specialiseFuncDecl
-                                        mangled σ_go (Just goName) gfd))
-                            _ -> Nothing)
-                    reachableList
+                buildSpec (skyName, tys) =
+                    let goName = map (\c -> if c == '.' then '_' else c) skyName
+                        mangled = Mono.mangleInstance
+                            (Solve.CallInstance skyName tys [])
+                        skyToGo = Map.findWithDefault []
+                            goName (Rec._cg_funcSkyToGoTVars env)
+                        quants = Map.findWithDefault [] skyName csiByCallee
+                        σ_sky = Map.fromList (zip quants tys)
+                        σ_go = Map.fromList
+                            [ (gn, solvedTypeToGo cty)
+                            | (sn, gn) <- skyToGo
+                            , Just cty <- [Map.lookup sn σ_sky]
+                            ]
+                    in case Map.lookup goName funcByName of
+                        Just gfd | not (null tys), not (null σ_go) ->
+                            Just (mangled, GoIr.GoDeclFunc
+                                (Mono.specialiseFuncDecl
+                                    mangled σ_go (Just goName) gfd))
+                        _ -> Nothing
+                emittedSpecs = mapMaybe buildSpec reachableList
+                specNames = Set.fromList (map fst emittedSpecs)
+                specials = map snd emittedSpecs
+            -- Record emitted spec names so call sites can decide
+            -- whether to use the mangled name or fall back to the
+            -- generic version.
+            writeIORef globalEmittedSpecs specNames
             return specials
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
@@ -4513,11 +4583,23 @@ exprToGo (A.At _ expr) = case expr of
                     -- Default(s, MaybeCoerce[string](m))` work at
                     -- typed-codegen call sites instead of emitting
                     -- `MaybeCoerce[any]` that Go's inference rejects.
-                    else GoIr.GoCall (GoIr.GoIdent qualName)
-                                     (coerceCallArgsAt
-                                        (A.toRegion func)
-                                        qualName
-                                        args)
+                    else
+                        -- v0.13 Phase A4: if a specialised instance
+                        -- exists for this call's region, use its
+                        -- mangled name AND coerce args via the
+                        -- substitution path (which now includes
+                        -- typed lambda emission).  Args go through
+                        -- `coerceCallArgsAt` so the spec's typed
+                        -- param positions receive properly-typed
+                        -- values.  Falls back to the generic name
+                        -- when no spec was emitted.
+                        let mMangled = instanceMangledName (A.toRegion func) qualName
+                            callName = maybe qualName id mMangled
+                        in GoIr.GoCall (GoIr.GoIdent callName)
+                                       (coerceCallArgsAt
+                                            (A.toRegion func)
+                                            qualName
+                                            args)
             _ ->
                 let goFunc = exprToGo func
                     -- Same-module local function calls (`Can.VarLocal`)
@@ -5179,18 +5261,27 @@ instanceMangledName :: A.Region -> String -> Maybe String
 instanceMangledName region qualName = unsafePerformIO $ do
     env <- readIORef globalCgEnv
     reached <- readIORef globalReachableSet
+    _annotMap' <- readIORef globalAnnotMap
     let siteKey = ( A._line (A._start region)
                   , A._col  (A._start region) )
-    case Map.lookup siteKey (Rec._cg_callSiteInstances env) of
-        Just (Solve.CallInstance _ tys _) | not (null tys) ->
-            -- Map Go-side qualName back to Sky-source qualName for
-            -- the reach-set membership check (reach set keys are
-            -- in Sky form like "Sky.Core.Maybe.withDefault").
-            let skyForm = unmangleQual qualName
-                instance_ = (skyForm, tys)
-            in if Set.member instance_ reached
-                then return (Just (Mono.mangleInstance
-                    (Solve.CallInstance skyForm tys [])))
+        skyForm = unmangleQual qualName
+        nested = Map.lookup siteKey (Rec._cg_callSiteInstances env)
+    case nested >>= Map.lookup skyForm of
+        Just (Solve.CallInstance _ tys quantsCap) | not (null tys) ->
+            let instance_ = (skyForm, tys)
+                mangled = Mono.mangleInstance
+                    (Solve.CallInstance skyForm tys [])
+                -- Check inline whether a spec would be emitted:
+                -- needs non-empty σ_go.  Uses the same logic as
+                -- the spec emission step in generateGoMulti so the
+                -- two stay in sync regardless of evaluation order.
+                skyToGo = Map.findWithDefault [] qualName
+                    (Rec._cg_funcSkyToGoTVars env)
+                σ_sky_keys = Set.fromList (zip quantsCap (map (const ()) tys))
+                hasGoSubst = any (\(sn, _) ->
+                    Set.member (sn, ()) σ_sky_keys) skyToGo
+            in if Set.member instance_ reached && hasGoSubst
+                then return (Just mangled)
                 else return Nothing
         _ -> return Nothing
 
@@ -5212,7 +5303,9 @@ coerceCallArgsAt region qualName args =
         paramTypes = Map.findWithDefault [] qualName (Rec._cg_funcParamTypes env)
         siteKey = ( A._line (A._start region)
                   , A._col  (A._start region) )
+        skyForm = unmangleQual qualName
         instM = Map.lookup siteKey (Rec._cg_callSiteInstances env)
+                  >>= Map.lookup skyForm
         skyToGo = Map.findWithDefault [] qualName
                     (Rec._cg_funcSkyToGoTVars env)
     in case (paramTypes, instM) of
@@ -5265,10 +5358,29 @@ coerceCallArgsAt region qualName args =
                     -- (`containsTypeParam orig`).  Non-generic
                     -- `any`-typed params (untyped boundary calls)
                     -- pass through unchanged.
-                    coerceOne orig subbed e =
-                        if subbed == "any" && containsTypeParam orig
-                            then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
-                            else coerceArg (exprToGo e) subbed
+                    -- v0.13 Phase A4: typed lambda emission at
+                    -- Sky-source HOF call sites.  When an arg is a
+                    -- literal `Can.Lambda` AND the substituted param
+                    -- type is `func(X) Y`-shaped, emit the lambda
+                    -- via `curryLambdaPatTyped` with X as the input
+                    -- type.  This makes Sky lambdas concrete-typed
+                    -- at the call boundary so Go's type checker
+                    -- accepts them at typed-param positions
+                    -- (Sky_Core_Maybe_andThen__String_Int's `fn`
+                    -- param wants `func(string) any` — a
+                    -- `func(any) any` lambda fails Go's no-function-
+                    -- covariance rule).
+                    coerceOne orig subbed e@(A.At _ inner) =
+                        case inner of
+                            Can.Lambda pats body
+                                | all isSimpleVarPattern pats
+                                , Just (inputTy, _) <- splitFuncTypeStr subbed ->
+                                    curryLambdaPatTyped [inputTy] "any"
+                                        pats (exprToGo body)
+                            _ ->
+                                if subbed == "any" && containsTypeParam orig
+                                    then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
+                                    else coerceArg (exprToGo e) subbed
                 in zipWith3Default coerceOne paramTypes substituted args
         _ ->
             -- v0.13 Phase A5+: when no CSI is captured at this call
@@ -5326,6 +5438,31 @@ substTVarsInGoType σ s = goSubst s
                   || c == '_'
     isIdentChar c = isIdentStart c
                  || (c >= '0' && c <= '9')
+
+-- | v0.13 Phase A4: parse a Go-type string of shape `func(X) Y`
+-- returning `(X, Y)`.  Used by typed lambda emission to derive the
+-- lambda's input + output types from the call site's expected
+-- param shape.  Returns Nothing for non-function-shaped strings.
+splitFuncTypeStr :: String -> Maybe (String, String)
+splitFuncTypeStr s
+    | "func(" `List.isPrefixOf` s =
+        let afterFunc = drop 5 s
+            (inputTy, afterInput) = takeUntilTopLevelParen afterFunc
+        in case afterInput of
+            ')' : rest -> Just (inputTy, dropWhile (== ' ') rest)
+            _ -> Nothing
+    | otherwise = Nothing
+  where
+    takeUntilTopLevelParen = go 0 ""
+    go _ acc [] = (reverse acc, [])
+    go d acc (c:cs)
+        | c == '('  = go (d + 1) (c:acc) cs
+        | c == ')' && d == 0 = (reverse acc, c:cs)
+        | c == ')'  = go (d - 1) (c:acc) cs
+        | c == '['  = go (d + 1) (c:acc) cs
+        | c == ']'  = go (d - 1) (c:acc) cs
+        | otherwise = go d (c:acc) cs
+
 
 -- | T4-aware coercion. For parametric Sky types whose generic
 -- instantiation won't match via plain `.(T)` assertion

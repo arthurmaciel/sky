@@ -69,7 +69,7 @@ data CodegenEnv = CodegenEnv
       -- for TVars. Value is (typeParams, paramTypes, returnType).
       -- Populated per-dep from the solver, used by mkDef to emit
       -- generic Go signatures for unannotated polymorphic functions.
-    , _cg_callSiteInstances :: !(Map.Map (Int, Int) Solve.CallInstance)
+    , _cg_callSiteInstances :: !(Map.Map (Int, Int) (Map.Map String Solve.CallInstance))
       -- v0.13 Phase A5: at each polymorphic call site, the captured
       -- instance gives the call's concrete type-args.  Keyed by
       -- (line, col) of the call's source region.  Codegen at
@@ -187,7 +187,7 @@ withUnionNames extra env =
 -- consults this map when emitting `Can.Call` nodes to pick the
 -- right generic instantiation (concrete types vs `any`).
 withCallSiteInstances
-    :: Map.Map (Int, Int) Solve.CallInstance
+    :: Map.Map (Int, Int) (Map.Map String Solve.CallInstance)
     -> CodegenEnv -> CodegenEnv
 withCallSiteInstances csi env =
     env { _cg_callSiteInstances = csi }
