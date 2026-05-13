@@ -34,12 +34,22 @@ module Sky.Build.Monomorphise
     , buildSubstitution
     , substituteType
     , typesEquiv
+    , collectCallSites
+    , collectCallSitesDef
+    , reachableInstances
+    , ReachableSet
+    , Instance
     ) where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.List as List
+import Data.Maybe (mapMaybe)
 import qualified Sky.AST.Canonical as Can
+import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Type.Solve as Solve
+import qualified Sky.Type.Type as T
 
 
 -- ─── mangling ────────────────────────────────────────────────────────
@@ -258,3 +268,179 @@ shortHash = padHash . hex . foldl step (0 :: Int)
         | otherwise = toEnum (fromEnum 'a' + n - 10)
 
     padHash s = replicate (max 0 (8 - length s)) '0' ++ s
+
+
+-- ─── Sky-level DCE: reachability + transitive closure ──────────────
+
+
+-- | A specialised instance: the callee's qualified Sky name plus the
+-- list of concrete `Can.Type`s its quantified `Forall` vars resolved
+-- to at this usage.
+type Instance = (String, [Can.Type])
+
+
+-- | The reachable-instance set: every instance that needs to be
+-- emitted as a specialised Go function.  Computed by transitive
+-- closure from `main` (or any entry-point list) over the captured
+-- CallInstance map.
+type ReachableSet = Set.Set Instance
+
+
+-- | Walk a `Can.Expr`, collecting every USAGE site annotated with
+-- `(usage-region, callee-qualified-name)`.  "Usage" covers both
+-- direct calls (`Can.Call`) AND value references (`Can.VarTopLevel`
+-- / `Can.VarKernel` / `Can.VarCtor` appearing OUTSIDE the func slot
+-- of a `Can.Call`).  Used by the reachability walker to find what
+-- each function's body invokes OR passes as a value.
+--
+-- Why value references count: Sky's runtime invokes user functions
+-- dynamically through records (Sky.Live's `Live.app { update,
+-- view, … }`), through commands (`Cmd.perform task ToMsg`), and
+-- through Msg dispatch.  These references don't appear as
+-- `Can.Call` in the source AST but ARE reachable usages — DCE
+-- must keep them.
+--
+-- `Can.VarLocal` references are NOT included — locals are
+-- per-function-scope bindings (lambda args, let-binders) and don't
+-- need separate emission.
+--
+-- Recurses into every sub-expression so nested usages (inside
+-- lambdas, let bodies, case branches, binop operands, record
+-- field updates, etc.) all surface in the output.
+collectCallSites :: Can.Expr -> [(A.Region, String)]
+collectCallSites e@(A.At region expr) = case expr of
+    Can.Call func args ->
+        let funcSite = case A.toValue func of
+                Can.VarTopLevel home name ->
+                    [(A.toRegion func,
+                      ModuleName.toString home ++ "." ++ name)]
+                Can.VarKernel modName name ->
+                    [(A.toRegion func, modName ++ "." ++ name)]
+                Can.VarCtor _ home _ ctorName _ ->
+                    [(A.toRegion func,
+                      ModuleName.toString home ++ "." ++ ctorName)]
+                _ -> []
+        in funcSite
+           ++ collectCallSitesNonHead func  -- exclude the head ref
+                                            -- (already captured above)
+           ++ concatMap collectCallSites args
+    -- VALUE reference: a top-level / kernel / ctor name appearing
+    -- bare (not as the head of a Call).  Counts as a usage so DCE
+    -- doesn't drop the function.
+    Can.VarTopLevel home name ->
+        [(region, ModuleName.toString home ++ "." ++ name)]
+    Can.VarKernel modName name ->
+        [(region, modName ++ "." ++ name)]
+    Can.VarCtor _ home _ ctorName _ ->
+        [(region, ModuleName.toString home ++ "." ++ ctorName)]
+
+    Can.Lambda _ body -> collectCallSites body
+    Can.If branches elseE ->
+        concatMap (\(c, b) -> collectCallSites c ++ collectCallSites b) branches
+        ++ collectCallSites elseE
+    Can.Let def body -> collectCallSitesDef def ++ collectCallSites body
+    Can.LetRec defs body ->
+        concatMap collectCallSitesDef defs ++ collectCallSites body
+    Can.LetDestruct _ val body ->
+        collectCallSites val ++ collectCallSites body
+    Can.Case subj branches ->
+        collectCallSites subj
+        ++ concatMap (\(Can.CaseBranch _ b) -> collectCallSites b) branches
+    Can.Access tgt _ -> collectCallSites tgt
+    Can.Update _ baseE fields ->
+        collectCallSites baseE
+        ++ concatMap (\(_, Can.FieldUpdate _ fe) -> collectCallSites fe)
+                     (Map.toList fields)
+    Can.Record fields ->
+        concatMap collectCallSites (Map.elems fields)
+    Can.Negate inner -> collectCallSites inner
+    Can.Binop _ _ _ _ left right ->
+        collectCallSites left ++ collectCallSites right
+    Can.List items -> concatMap collectCallSites items
+    Can.Tuple a b cs ->
+        collectCallSites a ++ collectCallSites b
+        ++ concatMap collectCallSites cs
+    -- All other Expr_ constructors are leaves (no sub-exprs).
+    _ -> case e of _ -> []
+
+
+-- | Like `collectCallSites` but treats the head as an
+-- already-captured call site (i.e., does not re-emit a VALUE
+-- reference for the head of a `Can.Call`).
+collectCallSitesNonHead :: Can.Expr -> [(A.Region, String)]
+collectCallSitesNonHead (A.At _ expr) = case expr of
+    Can.VarTopLevel _ _ -> []
+    Can.VarKernel _ _ -> []
+    Can.VarCtor{} -> []
+    _ -> collectCallSites (A.At A.one expr)
+
+
+-- | Walk a `Can.Def`, descending into its body to collect call sites.
+collectCallSitesDef :: Can.Def -> [(A.Region, String)]
+collectCallSitesDef def = case def of
+    Can.Def _ _ body -> collectCallSites body
+    Can.TypedDef _ _ _ body _ -> collectCallSites body
+    Can.DestructDef _ body -> collectCallSites body
+
+
+-- | Compute the reachable instance set by transitive closure from a
+-- list of entry points (typically just `[(main-qualName, [])]`).
+--
+-- At each entry: look up the def, build σ from the instance's
+-- type-args via the annotation, walk the body's call sites,
+-- substitute the inner CallInstance type-args by σ, enqueue.
+-- Continue until fixpoint.
+--
+-- `defMap` is keyed by full Sky-qualified names (e.g.
+-- `"Sky.Core.List.foldl"`).  Names not present are leaves
+-- (kernel / FFI calls — emitted via separate paths).
+--
+-- `annotMap` carries each callee's GENERALISED annotation (post-
+-- `generaliseToAnnotation`), so the Forall var names align with what
+-- the solver captured as `_instance_quantifiers`.
+--
+-- `csiMap` is keyed by `(line, col)` of the call's func-expression
+-- region — same shape as `_cg_callSiteInstances`.
+--
+-- Returns: the set of reachable `(qualName, [concrete-types])`
+-- pairs.  Each is a function that must be emitted as a specialised
+-- instance.
+reachableInstances
+    :: Map.Map String Can.Def
+    -> Map.Map String Can.Annotation
+    -> Map.Map (Int, Int) Solve.CallInstance
+    -> [Instance]
+    -> ReachableSet
+reachableInstances defMap annotMap csiMap entries = go Set.empty entries
+  where
+    go reached [] = reached
+    go reached (inst : rest)
+        | Set.member inst reached = go reached rest
+        | otherwise =
+            let reached' = Set.insert inst reached
+                (qName, ts) = inst
+                σ = case Map.lookup qName annotMap of
+                        Just annot -> buildSubstitution annot ts
+                        Nothing    -> Map.empty
+                bodyCalls = case Map.lookup qName defMap of
+                        Just d  -> collectCallSitesDef d
+                        Nothing -> []
+                newCalls = mapMaybe
+                    (\(region, callee) ->
+                        let key = ( A._line (A._start region)
+                                  , A._col  (A._start region) )
+                            siteTypes = case Map.lookup key csiMap of
+                                Just (Solve.CallInstance _ tys _) -> tys
+                                Nothing -> []
+                            substituted = map (substituteType σ) siteTypes
+                        in if Map.member callee defMap
+                            then Just (callee, substituted)
+                            else
+                                -- Non-Sky-source callee (kernel /
+                                -- FFI / Ctor) — terminal node, no
+                                -- transitive instances to expand.
+                                -- Still record for the typed-call-
+                                -- site rewriting layer.
+                                Just (callee, substituted))
+                    bodyCalls
+            in go reached' (newCalls ++ rest)

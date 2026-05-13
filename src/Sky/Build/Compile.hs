@@ -720,6 +720,42 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         Just "1" -> mapM_ (\ci ->
                             putStrLn $ "     " ++ Mono.mangleInstance ci) callInstances
                         _ -> return ()
+                    -- v0.13 Phase A4 + A7: compute the REACHABLE
+                    -- subset of captured instances by walking
+                    -- transitively from `main`.  Captured instances
+                    -- include every CForeign hit during ANY module's
+                    -- pass-2 solve — a SUPER-SET.  The reachable
+                    -- subset is what should actually be emitted
+                    -- post-DCE.
+                    --
+                    -- This is currently DIAGNOSTIC ONLY: the
+                    -- per-instance Go emission isn't wired up yet,
+                    -- so the existing generic-emission path stays
+                    -- in place.  Set SKY_REACH_TRACE=1 to dump.
+                    reachTrace <- System.Environment.lookupEnv "SKY_REACH_TRACE"
+                    case reachTrace of
+                        Just "1" -> do
+                            let defMap = buildDefMap canMod validDeps
+                                annotMap = buildAnnotMap t depSolved
+                                csiMapForReach = Map.fromList
+                                    [ ( ( A._line (A._start (Solve._cs_region csi))
+                                        , A._col  (A._start (Solve._cs_region csi)) )
+                                      , Solve._cs_instance csi
+                                      )
+                                    | csi <- callSiteInstances ++ concatMap snd depCsiByMod ]
+                                entryName = case mainModuleName entrySrcMod of
+                                    Just n  -> n ++ ".main"
+                                    Nothing -> "Main.main"
+                                reached = Mono.reachableInstances
+                                    defMap annotMap csiMapForReach
+                                    [(entryName, [])]
+                            putStrLn $ "   [REACH] from " ++ entryName
+                                    ++ ": " ++ show (Set.size reached)
+                                    ++ " instances"
+                            mapM_ (\(q, ts) ->
+                                putStrLn $ "     " ++ Mono.mangleInstance
+                                    (Solve.CallInstance q ts [])) (Set.toList reached)
+                        _ -> return ()
                     return t
                 Solve.SolveError err -> do
                     -- v0.13 Layer 1: route position-prefixed type
@@ -2855,6 +2891,70 @@ stripParametric prefix s
 -- pass-1 canonicalisation in each dep uses that dep's own tmap,
 -- which misses type names the dep references without importing
 -- (Chess.Ai uses `Model` without `import State`).
+-- | v0.13 Phase A4: build a `Sky-qualName → Can.Def` map covering
+-- the entry module + every dep.  Keys use the FULL Sky-source
+-- qualified name (`"Sky.Core.List.foldl"`), not the mangled Go name
+-- (`"Sky_Core_List_foldl"`).  Names match what
+-- `Mono.collectCallSitesDef` produces from `Can.VarTopLevel` resolution.
+--
+-- Used by the reachability walker (`Mono.reachableInstances`) to find
+-- the body of each invoked function so it can collect THAT body's
+-- call sites and continue the transitive closure.
+buildDefMap
+    :: Can.Module
+    -> [(String, Can.Module)]
+    -> Map.Map String Can.Def
+buildDefMap canMod validDeps =
+    let entryName = case Can._name canMod of
+            ModuleName.Canonical s -> s
+        entryDefs = collectModuleDefs entryName canMod
+        depDefs = concatMap (\(mn, dm) -> collectModuleDefs mn dm) validDeps
+    in Map.fromList (entryDefs ++ depDefs)
+  where
+    collectModuleDefs modName m = walkDecls modName (Can._decls m) []
+    walkDecls _      Can.SaveTheEnvironment acc = acc
+    walkDecls modN (Can.Declare def rest) acc =
+        walkDecls modN rest (defEntry modN def ++ acc)
+    walkDecls modN (Can.DeclareRec def defs rest) acc =
+        walkDecls modN rest
+            (concatMap (defEntry modN) (def : defs) ++ acc)
+    defEntry modN def = case def of
+        Can.Def (A.At _ n) _ _      -> [(modN ++ "." ++ n, def)]
+        Can.TypedDef (A.At _ n) _ _ _ _ -> [(modN ++ "." ++ n, def)]
+        Can.DestructDef _ _         -> []  -- skip pattern-bindings
+
+
+-- | v0.13 Phase A4: build a `Sky-qualName → generalised-annotation`
+-- map covering the entry module + every dep.  Each annotation comes
+-- from `generaliseToAnnotation` applied to the function's solved
+-- type — same shape the solver registered in `globalExternals` so
+-- the Forall var names align with `_instance_quantifiers`.
+buildAnnotMap
+    :: Map.Map String T.Type                        -- entry solvedTypes
+    -> [(String, Map.Map String T.Type)]            -- dep solvedTypes
+    -> Map.Map String T.Annotation
+buildAnnotMap entrySolved depSolved =
+    let entryEntries =
+            [ ("Main." ++ n, generaliseToAnnotation ty)
+            | (n, ty) <- Map.toList entrySolved
+            ]
+        depEntries =
+            [ (modName ++ "." ++ n, generaliseToAnnotation ty)
+            | (modName, types) <- depSolved
+            , (n, ty) <- Map.toList types
+            ]
+    in Map.fromList (entryEntries ++ depEntries)
+
+
+-- | v0.13 Phase A4: extract the entry module's Sky-source module name
+-- (used as the qualifier for `main`).  Falls back to "Main" if the
+-- module header omits `module X exposing (…)`.
+mainModuleName :: Src.Module -> Maybe String
+mainModuleName srcMod = case Src._name srcMod of
+    Just (A.At _ segs) -> Just (List.intercalate "." segs)
+    Nothing -> Nothing
+
+
 buildCrossModuleExternalsWithMods
     :: [(String, Can.Module)]
     -> [(String, Map.Map String T.Type)]
