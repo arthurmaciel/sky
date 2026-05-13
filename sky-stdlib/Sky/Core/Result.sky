@@ -1,0 +1,129 @@
+module Sky.Core.Result exposing
+    ( withDefault
+    , map
+    , mapError
+    , andThen
+    , map2, map3, map4, map5
+    , andMap
+    , combine
+    , toMaybe
+    , fromMaybe
+    , andThenTask
+    )
+
+
+withDefault def r =
+    case r of
+        Ok x -> x
+        Err _ -> def
+
+
+map fn r =
+    case r of
+        Ok x -> Ok (fn x)
+        Err e -> Err e
+
+
+mapError fn r =
+    case r of
+        Ok x -> Ok x
+        Err e -> Err (fn e)
+
+
+andThen fn r =
+    case r of
+        Ok x -> fn x
+        Err e -> Err e
+
+
+map2 fn ra rb =
+    case ra of
+        Ok a ->
+            case rb of
+                Ok b -> Ok (fn a b)
+                Err e -> Err e
+        Err e -> Err e
+
+
+map3 fn ra rb rc =
+    case ra of
+        Ok a ->
+            case rb of
+                Ok b ->
+                    case rc of
+                        Ok c -> Ok (fn a b c)
+                        Err e -> Err e
+                Err e -> Err e
+        Err e -> Err e
+
+
+map4 fn ra rb rc rd =
+    case ra of
+        Ok a ->
+            case rb of
+                Ok b ->
+                    case rc of
+                        Ok c ->
+                            case rd of
+                                Ok d -> Ok (fn a b c d)
+                                Err e -> Err e
+                        Err e -> Err e
+                Err e -> Err e
+        Err e -> Err e
+
+
+map5 fn ra rb rc rd re =
+    case ra of
+        Ok a ->
+            case rb of
+                Ok b ->
+                    case rc of
+                        Ok c ->
+                            case rd of
+                                Ok d ->
+                                    case re of
+                                        Ok f -> Ok (fn a b c d f)
+                                        Err er -> Err er
+                                Err er -> Err er
+                        Err er -> Err er
+                Err er -> Err er
+        Err er -> Err er
+
+
+andMap ra rfn =
+    case rfn of
+        Ok fn ->
+            case ra of
+                Ok a -> Ok (fn a)
+                Err e -> Err e
+        Err e -> Err e
+
+
+combine results =
+    case results of
+        [] -> Ok []
+        (r :: rest) ->
+            case r of
+                Ok x ->
+                    case combine rest of
+                        Ok xs -> Ok (x :: xs)
+                        Err e -> Err e
+                Err e -> Err e
+
+
+toMaybe r =
+    case r of
+        Ok x -> Just x
+        Err _ -> Nothing
+
+
+fromMaybe err m =
+    case m of
+        Just x -> Ok x
+        Nothing -> Err err
+
+
+andThenTask fn r =
+    case r of
+        Ok x -> fn x
+        Err _ -> r

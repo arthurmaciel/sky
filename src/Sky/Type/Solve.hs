@@ -428,6 +428,15 @@ extractInstances records = do
 -- deduplicated set the monomorphiser emits one Go function for;
 -- the second is the call-site map codegen uses to pick the right
 -- mangled name at each emission site.
+--
+-- v0.13 Phase A5 update: instances with PARTIALLY-resolved type
+-- args (e.g. `Result Error <free-a>`) are captured with the free
+-- positions normalised to `T.TVar "any"`.  This is the `_Any`
+-- fallback at the type-arg level — it lets the monomorphisation
+-- substitution map say `T1 → any` instead of skipping the call
+-- entirely.  Without this normalisation, partial instances drop
+-- and the codegen falls back to the pre-A5 erase-to-any path
+-- (which mismatches Go's type inference at typed call sites).
 extractInstancesAndSites
     :: [CallInstanceRecord] -> IO ([CallInstance], [CallSiteInstance])
 extractInstancesAndSites records = do
@@ -439,31 +448,57 @@ extractInstancesAndSites records = do
   where
     resolveOne rec_ = do
         tys <- mapM variableToType (_ci_freshVars rec_)
-        if all isConcrete tys
-            then return (Just (CallInstance (_ci_callee rec_) tys))
-            else return Nothing
+        let normalised = map (normaliseUnresolved isConcreteType) tys
+        return (Just (CallInstance (_ci_callee rec_) normalised))
 
-    -- A type is considered concrete iff it contains no `T.TVar n`
-    -- whose name starts with `_` (the solver's internal placeholder
-    -- prefix for unresolved unification variables).  Real user-
-    -- declared type variables like `a` / `msg` are NOT considered
-    -- concrete here — they'd indicate the call site lives inside
-    -- a polymorphic context where the substitution is delayed
-    -- (e.g. a generic helper whose own type vars haven't been
-    -- pinned yet).  Those resolve once the outer call instantiates.
-    isConcrete (T.TVar n) = not (null n) && head n /= '_' && n /= "any"
-                          && all (\c -> c >= 'A' && c <= 'Z'
-                                       || c >= 'a' && c <= 'z'
-                                       || c == '_'
-                                       || c >= '0' && c <= '9') n
-                          && (head n >= 'A' && head n <= 'Z')
-    isConcrete (T.TLambda f t) = isConcrete f && isConcrete t
-    isConcrete (T.TType _ _ args) = all isConcrete args
-    isConcrete (T.TRecord fields _) =
-        all (\(T.FieldType _ ty) -> isConcrete ty) (Map.elems fields)
-    isConcrete T.TUnit = True
-    isConcrete (T.TTuple a b cs) = isConcrete a && isConcrete b && all isConcrete cs
-    isConcrete (T.TAlias _ _ pairs _) = all (isConcrete . snd) pairs
+
+-- | Replace unresolved TVars (FlexVar with internal `_` prefix or
+-- raw user-TVar names left polymorphic) with the wildcard
+-- `T.TVar "any"`.  Keeps concrete types and aliases intact.  Used
+-- by the A5 instance extractor so partial-resolution call sites
+-- still produce a usable monomorphisation key.
+normaliseUnresolved :: (T.Type -> Bool) -> T.Type -> T.Type
+normaliseUnresolved isConc = go
+  where
+    go t
+        | isConc t = t
+        | otherwise = case t of
+            T.TVar _ -> T.TVar "any"
+            T.TLambda f r -> T.TLambda (go f) (go r)
+            T.TType h n args -> T.TType h n (map go args)
+            T.TRecord fields ext ->
+                T.TRecord (Map.map (\(T.FieldType i ty) ->
+                                       T.FieldType i (go ty)) fields) ext
+            T.TUnit -> T.TUnit
+            T.TTuple a b cs -> T.TTuple (go a) (go b) (map go cs)
+            T.TAlias h n pairs aty ->
+                T.TAlias h n (map (\(k, v) -> (k, go v)) pairs) aty
+
+    isConcrete = isConcreteType
+
+
+-- | Concrete-type predicate.  A type is concrete iff it has no
+-- unresolved TVar (FlexVar with `_` prefix or empty name) or
+-- user-declared lowercase TVar (`a`, `msg`, …).  Uppercase TVar
+-- names are accepted because they correspond to nominal types
+-- (e.g. `Maybe`, `String`, …) in Sky's HM output.
+isConcreteType :: T.Type -> Bool
+isConcreteType (T.TVar n) =
+       not (null n) && head n /= '_' && n /= "any"
+    && all (\c -> c >= 'A' && c <= 'Z'
+                || c >= 'a' && c <= 'z'
+                || c == '_'
+                || c >= '0' && c <= '9') n
+    && (head n >= 'A' && head n <= 'Z')
+isConcreteType (T.TLambda f t) = isConcreteType f && isConcreteType t
+isConcreteType (T.TType _ _ args) = all isConcreteType args
+isConcreteType (T.TRecord fields _) =
+    all (\(T.FieldType _ ty) -> isConcreteType ty) (Map.elems fields)
+isConcreteType T.TUnit = True
+isConcreteType (T.TTuple a b cs) =
+    isConcreteType a && isConcreteType b && all isConcreteType cs
+isConcreteType (T.TAlias _ _ pairs _) =
+    all (isConcreteType . snd) pairs
 
 
 -- | Convert a Type to a UF Variable, SHARING variables for the same TVar name.
