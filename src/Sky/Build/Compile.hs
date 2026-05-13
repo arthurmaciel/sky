@@ -87,6 +87,25 @@ entryPathRef = unsafePerformIO $ readIORef globalEntryPath
 globalSourceFile :: IORef FilePath
 globalSourceFile = unsafePerformIO $ newIORef ""
 
+
+-- | v0.13 Phase A4: the transitively-reachable instance set from
+-- `main`.  Populated by `continueCompile` after the solver runs;
+-- consumed by `generateGoMulti` to emit per-instance specialised
+-- Go functions alongside (and eventually replacing) the generic
+-- versions.
+{-# NOINLINE globalReachableSet #-}
+globalReachableSet :: IORef Mono.ReachableSet
+globalReachableSet = unsafePerformIO $ newIORef Set.empty
+
+
+-- | v0.13 Phase A4: per-callee generalised annotation, used to
+-- derive σ for each reachable instance.  Same map shape as
+-- `buildCrossModuleExternalsWithMods` but keyed by full
+-- Sky-qualified name (`"Sky.Core.List.foldl"`).
+{-# NOINLINE globalAnnotMap #-}
+globalAnnotMap :: IORef (Map.Map String T.Annotation)
+globalAnnotMap = unsafePerformIO $ newIORef Map.empty
+
 -- | Read the global codegen env (for use in pure codegen functions).
 -- NOINLINE so GHC doesn't CSE the IORef read across call sites —
 -- each `getCgEnv` invocation must see the LATEST mutation. Without
@@ -722,33 +741,28 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         _ -> return ()
                     -- v0.13 Phase A4 + A7: compute the REACHABLE
                     -- subset of captured instances by walking
-                    -- transitively from `main`.  Captured instances
-                    -- include every CForeign hit during ANY module's
-                    -- pass-2 solve — a SUPER-SET.  The reachable
-                    -- subset is what should actually be emitted
-                    -- post-DCE.
-                    --
-                    -- This is currently DIAGNOSTIC ONLY: the
-                    -- per-instance Go emission isn't wired up yet,
-                    -- so the existing generic-emission path stays
-                    -- in place.  Set SKY_REACH_TRACE=1 to dump.
+                    -- transitively from `main`.  Stored globally for
+                    -- generateGoMulti to consume when emitting
+                    -- per-instance specialisations.
+                    let defMap = buildDefMap canMod validDeps
+                        annotMap = buildAnnotMap t depSolved
+                        csiMapForReach = Map.fromList
+                            [ ( ( A._line (A._start (Solve._cs_region csi))
+                                , A._col  (A._start (Solve._cs_region csi)) )
+                              , Solve._cs_instance csi
+                              )
+                            | csi <- callSiteInstances ++ concatMap snd depCsiByMod ]
+                        entryName = case mainModuleName entrySrcMod of
+                            Just n  -> n ++ ".main"
+                            Nothing -> "Main.main"
+                        reached = Mono.reachableInstances
+                            defMap annotMap csiMapForReach
+                            [(entryName, [])]
+                    writeIORef globalReachableSet reached
+                    writeIORef globalAnnotMap annotMap
                     reachTrace <- System.Environment.lookupEnv "SKY_REACH_TRACE"
                     case reachTrace of
                         Just "1" -> do
-                            let defMap = buildDefMap canMod validDeps
-                                annotMap = buildAnnotMap t depSolved
-                                csiMapForReach = Map.fromList
-                                    [ ( ( A._line (A._start (Solve._cs_region csi))
-                                        , A._col  (A._start (Solve._cs_region csi)) )
-                                      , Solve._cs_instance csi
-                                      )
-                                    | csi <- callSiteInstances ++ concatMap snd depCsiByMod ]
-                                entryName = case mainModuleName entrySrcMod of
-                                    Just n  -> n ++ ".main"
-                                    Nothing -> "Main.main"
-                                reached = Mono.reachableInstances
-                                    defMap annotMap csiMapForReach
-                                    [(entryName, [])]
                             putStrLn $ "   [REACH] from " ++ entryName
                                     ++ ": " ++ show (Set.size reached)
                                     ++ " instances"
@@ -2314,10 +2328,60 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                 ++ "}"
             ]
         portDefault = liveDefaults  -- preserve historical name for downstream splices
+        -- v0.13 Phase A4 (MVP): emit per-instance specialised copies
+        -- of every reachable Sky-source function.  The generic
+        -- version stays in place for now (call sites still reference
+        -- it).  This is the first wire-up — the specialised copies
+        -- aren't yet referenced by call sites, so they compile but
+        -- are dead.  Successive commits will switch call sites to
+        -- use the mangled names and drop the generic emission.
+        specDecls = unsafePerformIO $ do
+            reached <- readIORef globalReachableSet
+            annotMap' <- readIORef globalAnnotMap
+            env <- readIORef globalCgEnv
+            let
+                -- Index every emitted GoFuncDecl (entry + deps) by
+                -- the Go-side name so the specialiser can find the
+                -- generic source.
+                allDecls = depDecls ++ decls
+                funcByName = Map.fromList
+                    [ (GoIr._gf_name gfd, gfd)
+                    | GoIr.GoDeclFunc gfd <- allDecls ]
+                -- Build per-instance specialisations.  Filter to
+                -- Sky-source functions that ACTUALLY appear in the
+                -- emitted GoFuncDecl set (kernel / FFI / ctor names
+                -- aren't user-mono'd here).
+                reachableList = Set.toList reached
+                specials = mapMaybe
+                    (\(skyName, tys) ->
+                        let goName = map (\c -> if c == '.' then '_' else c) skyName
+                            mangled = Mono.mangleInstance
+                                (Solve.CallInstance skyName tys [])
+                            skyToGo = Map.findWithDefault []
+                                goName (Rec._cg_funcSkyToGoTVars env)
+                            annot = Map.lookup skyName annotMap'
+                            quants = case annot of
+                                Just (T.Forall vs _) ->
+                                    filter (/= "any") vs
+                                Nothing -> []
+                            σ_sky = Map.fromList (zip quants tys)
+                            σ_go = Map.fromList
+                                [ (gn, solvedTypeToGo cty)
+                                | (sn, gn) <- skyToGo
+                                , Just cty <- [Map.lookup sn σ_sky]
+                                ]
+                        in case Map.lookup goName funcByName of
+                            Just gfd | not (null tys), not (null σ_go) ->
+                                Just (GoIr.GoDeclFunc
+                                    (Mono.specialiseFuncDecl
+                                        mangled σ_go (Just goName) gfd))
+                            _ -> Nothing)
+                    reachableList
+            return specials
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
             , GoIr._pkg_imports = imports
-            , GoIr._pkg_decls = rtPin ++ portDefault ++ depDecls ++ unionDecls ++ aliasDecls ++ decls ++ mainDecl
+            , GoIr._pkg_decls = rtPin ++ portDefault ++ depDecls ++ unionDecls ++ aliasDecls ++ decls ++ specDecls ++ mainDecl
             }
     in GoBuilder.renderPackage pkg
 

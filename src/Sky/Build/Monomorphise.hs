@@ -39,6 +39,8 @@ module Sky.Build.Monomorphise
     , reachableInstances
     , ReachableSet
     , Instance
+    , substTypeParamsInString
+    , specialiseFuncDecl
     ) where
 
 import qualified Data.Map.Strict as Map
@@ -46,6 +48,7 @@ import qualified Data.Set as Set
 import qualified Data.List as List
 import Data.Maybe (mapMaybe)
 import qualified Sky.AST.Canonical as Can
+import qualified Sky.Generate.Go.Ir as Ir
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Type.Solve as Solve
@@ -444,3 +447,149 @@ reachableInstances defMap annotMap csiMap entries = go Set.empty entries
                                 Just (callee, substituted))
                     bodyCalls
             in go reached' (newCalls ++ rest)
+
+
+-- ─── Per-instance specialisation: GoIr substitution ─────────────────
+
+
+-- | Substitute generic Go type-parameter names (`T1`, `T2`, …) in a
+-- rendered Go type-string with concrete Go types.  Identifier-aware:
+-- only replaces whole-word matches so `T1` in `rt.SkyMaybe[T1]`
+-- becomes `rt.SkyMaybe[string]` but a hypothetical
+-- `T1_field_name` isn't touched.
+--
+-- Mirrors `substTVarsInGoType` in Compile.hs.  Kept duplicated here
+-- so the monomorphisation pass doesn't depend on Compile.hs (which
+-- depends on this module).
+substTypeParamsInString :: Map.Map String String -> String -> String
+substTypeParamsInString σ = goSubst
+  where
+    goSubst [] = []
+    goSubst rest@(c:cs)
+        | isIdentStart c =
+            let (word, after) = span isIdentChar rest
+            in case Map.lookup word σ of
+                Just replacement -> replacement ++ goSubst after
+                Nothing          -> word ++ goSubst after
+        | otherwise = c : goSubst cs
+
+    isIdentStart c = (c >= 'A' && c <= 'Z')
+                  || (c >= 'a' && c <= 'z')
+                  || c == '_'
+    isIdentChar c = isIdentStart c
+                 || (c >= '0' && c <= '9')
+
+
+-- | v0.13 Phase A4: specialise a generic `GoFuncDecl` per a captured
+-- instance.  Substitutes every `T1`, `T2`, … in the function's
+-- parameters, return type, and body with the instance's concrete
+-- Go types.  Drops the generic type-param list so the emitted
+-- function is non-generic.
+--
+-- The new name is mangled per `mangleInstance` and the function's
+-- name gets the `__<types>` suffix.
+--
+-- The body is recursively traversed; every `GoIdent`,
+-- `GoGenericCall`, `GoSliceLit`, `GoMapLit`, `GoStructLit`,
+-- `GoFuncLit`, `GoTypeAssert`, and the inline type strings get the
+-- substitution applied.
+--
+-- Recursive self-calls in the body are renamed: a call to
+-- `<originalName>[T1, ...]` (or `<originalName>(...)` if Go inferred
+-- the type params) becomes `<originalName>__<types>(...)` — the
+-- specialised name.  This makes the recursion resolve to the SAME
+-- specialised instance.
+specialiseFuncDecl
+    :: String                          -- mangled instance name
+    -> Map.Map String String           -- σ: T1 → "int" etc.
+    -> Maybe String                    -- original generic name to
+                                       -- rewrite recursive calls
+    -> Ir.GoFuncDecl                   -- generic source
+    -> Ir.GoFuncDecl                   -- specialised result
+specialiseFuncDecl mangledName σ originalName func =
+    Ir.GoFuncDecl
+        { Ir._gf_name       = mangledName
+        , Ir._gf_typeParams = []        -- drop type params
+        , Ir._gf_params     = map substParam (Ir._gf_params func)
+        , Ir._gf_returnType = substTypeParamsInString σ (Ir._gf_returnType func)
+        , Ir._gf_body       = map substStmt (Ir._gf_body func)
+        }
+  where
+    substParam (Ir.GoParam name ty) =
+        Ir.GoParam name (substTypeParamsInString σ ty)
+
+    substStmt stmt = case stmt of
+        Ir.GoExprStmt e -> Ir.GoExprStmt (substExpr e)
+        Ir.GoAssign n e -> Ir.GoAssign n (substExpr e)
+        Ir.GoShortDecl n e -> Ir.GoShortDecl n (substExpr e)
+        Ir.GoVarDecl n ty me ->
+            Ir.GoVarDecl n (substTypeParamsInString σ ty) (fmap substExpr me)
+        Ir.GoReturn e -> Ir.GoReturn (substExpr e)
+        Ir.GoReturnVoid -> stmt
+        Ir.GoIf cond thn els ->
+            Ir.GoIf (substExpr cond) (map substStmt thn) (map substStmt els)
+        Ir.GoSwitch e branches ->
+            Ir.GoSwitch (substExpr e)
+                [(substExpr v, map substStmt body) | (v, body) <- branches]
+        Ir.GoTypeSwitch n e branches ->
+            Ir.GoTypeSwitch n (substExpr e)
+                [(substTypeParamsInString σ t, map substStmt body)
+                | (t, body) <- branches]
+        Ir.GoFor n e body ->
+            Ir.GoFor n (substExpr e) (map substStmt body)
+        Ir.GoBlock_ stmts -> Ir.GoBlock_ (map substStmt stmts)
+        Ir.GoComment _ -> stmt
+        Ir.GoBlank -> stmt
+
+    substExpr e = case e of
+        Ir.GoIdent name ->
+            -- Identifier could be a TYPE name reference embedded in
+            -- a function-name path (rare) or a value identifier.
+            -- Apply the substitution to be safe (it's a no-op for
+            -- non-Tn identifiers).
+            Ir.GoIdent (substTypeParamsInString σ name)
+        Ir.GoQualified pkg n -> Ir.GoQualified pkg n
+        Ir.GoIntLit _ -> e
+        Ir.GoFloatLit _ -> e
+        Ir.GoStringLit _ -> e
+        Ir.GoRuneLit _ -> e
+        Ir.GoBoolLit _ -> e
+        Ir.GoNil -> e
+        Ir.GoCall f args -> Ir.GoCall (substExpr f) (map substExpr args)
+        Ir.GoGenericCall name typeArgs args ->
+            -- If the call is to the function we're specialising,
+            -- rewrite to the specialised mangled name and drop the
+            -- type args (specialised version is non-generic).
+            case originalName of
+                Just orig | orig == name ->
+                    Ir.GoCall (Ir.GoIdent mangledName) (map substExpr args)
+                _ ->
+                    Ir.GoGenericCall name
+                        (map (substTypeParamsInString σ) typeArgs)
+                        (map substExpr args)
+        Ir.GoSelector tgt n -> Ir.GoSelector (substExpr tgt) n
+        Ir.GoIndex tgt i -> Ir.GoIndex (substExpr tgt) (substExpr i)
+        Ir.GoSliceLit ty items ->
+            Ir.GoSliceLit (substTypeParamsInString σ ty) (map substExpr items)
+        Ir.GoMapLit k v entries ->
+            Ir.GoMapLit (substTypeParamsInString σ k)
+                        (substTypeParamsInString σ v)
+                        [(substExpr ke, substExpr ve) | (ke, ve) <- entries]
+        Ir.GoStructLit ty fields ->
+            Ir.GoStructLit (substTypeParamsInString σ ty)
+                [(n, substExpr fv) | (n, fv) <- fields]
+        Ir.GoFuncLit params retTy body ->
+            Ir.GoFuncLit
+                (map substParam params)
+                (substTypeParamsInString σ retTy)
+                (map substStmt body)
+        Ir.GoBinary op l r -> Ir.GoBinary op (substExpr l) (substExpr r)
+        Ir.GoUnary op x -> Ir.GoUnary op (substExpr x)
+        Ir.GoTypeAssert v ty ->
+            Ir.GoTypeAssert (substExpr v) (substTypeParamsInString σ ty)
+        Ir.GoBlock stmts result ->
+            Ir.GoBlock (map substStmt stmts) (substExpr result)
+        Ir.GoRaw s ->
+            -- Raw Go code may embed type-param tokens.  Apply
+            -- string-level substitution defensively.
+            Ir.GoRaw (substTypeParamsInString σ s)
