@@ -16,6 +16,7 @@ module Sky.Type.Solve
     , SolveResult(..)
     , SolvedTypes
     , CallInstance(..)
+    , CallSiteInstance(..)
     , showType
     , showTypeWith
     , moduleRenaming
@@ -117,6 +118,21 @@ data CallInstance = CallInstance
     , _instance_types  :: ![T.Type]
     }
     deriving (Eq, Ord, Show)
+
+
+-- | A call-site annotated with its resolved instance.  The compile
+-- pipeline keeps a Map keyed by (file, region) so codegen can pick
+-- the right mangled name when emitting each `Can.Call` node.
+--
+-- The CallInstance inside is the same key the monomorphisation
+-- registry uses, so a region-keyed lookup and a Set-of-instances
+-- table stay consistent: every CallSiteInstance's instance appears
+-- in the deduped instance set.
+data CallSiteInstance = CallSiteInstance
+    { _cs_region   :: !A.Region
+    , _cs_instance :: !CallInstance
+    }
+    deriving (Show)
 
 
 -- | Default cap on solver steps before bailing with a defensive
@@ -358,7 +374,7 @@ solveWithLocals constraint = do
 -- (e.g. a polymorphic helper that's never called with a concrete
 -- type at this module's `main` boundary).  Those instances need
 -- the `_Any` fallback at emission time.
-solveWithInstances :: T.Constraint -> IO (SolveResult, [CallInstance])
+solveWithInstances :: T.Constraint -> IO (SolveResult, [CallInstance], [CallSiteInstance])
 solveWithInstances constraint = do
     cache <- newIORef Map.empty
     locals <- newIORef Map.empty
@@ -390,14 +406,10 @@ solveWithInstances constraint = do
                 localFirst = Map.map pickType (Map.filter (not . null) localTys)
                 merged = Map.union localFirst envTypes
             records <- readIORef (_callInstances finalState)
-            ci <- extractInstances records
-            return (SolveOk merged, ci)
+            (ci, csi) <- extractInstancesAndSites records
+            return (SolveOk merged, ci, csi)
         Just err -> do
-            -- Even on type error, return what we captured so far.
-            -- Downstream consumers can decide whether to use a partial
-            -- instance set or bail.  Today the only consumer is
-            -- monomorphisation which won't run on a type-error build.
-            return (SolveError err, [])
+            return (SolveError err, [], [])
 
 
 -- | Walk the captured call-instance records, resolve each fresh
@@ -406,14 +418,27 @@ solveWithInstances constraint = do
 -- are skipped (the monomorphisation `_Any` fallback handles them).
 extractInstances :: [CallInstanceRecord] -> IO [CallInstance]
 extractInstances records = do
+    (ci, _) <- extractInstancesAndSites records
+    return ci
+
+
+-- | Same as `extractInstances` but ALSO returns the per-call-site
+-- registry — one `CallSiteInstance` per resolved record, indexable
+-- by `(file, region)` downstream.  The first return value is the
+-- deduplicated set the monomorphiser emits one Go function for;
+-- the second is the call-site map codegen uses to pick the right
+-- mangled name at each emission site.
+extractInstancesAndSites
+    :: [CallInstanceRecord] -> IO ([CallInstance], [CallSiteInstance])
+extractInstancesAndSites records = do
     raw <- mapM resolveOne records
-    return $ Set.toList $ Set.fromList [ci | Just ci <- raw]
+    let sites = [ CallSiteInstance (_ci_region r) ci
+                | (r, Just ci) <- zip records raw ]
+        deduped = Set.toList $ Set.fromList [ci | Just ci <- raw]
+    return (deduped, sites)
   where
     resolveOne rec_ = do
         tys <- mapM variableToType (_ci_freshVars rec_)
-        -- If any resolved type is still an unbound TVar (FlexVar
-        -- with the placeholder name), this call site never got a
-        -- concrete instantiation — defer to `_Any` fallback.
         if all isConcrete tys
             then return (Just (CallInstance (_ci_callee rec_) tys))
             else return Nothing

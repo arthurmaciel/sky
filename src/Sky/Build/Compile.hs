@@ -645,7 +645,13 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- identically (the missing merge was a subtle
             -- regression on Live.app's `init_` function-value
             -- references that's now fixed).
-            (solveResult, callInstances) <- Solve.solveWithInstances constraints
+            (solveResult, callInstances, callSiteInstances) <- Solve.solveWithInstances constraints
+            -- Build the per-region lookup map for call-site
+            -- codegen.  Key: (file path, region's start position).
+            let _csiByRegion = Map.fromList
+                    [ ((entryPath, Solve._cs_region csi), Solve._cs_instance csi)
+                    | csi <- callSiteInstances ]
+            _ <- return _csiByRegion  -- threaded through downstream in A5
             -- HM type errors are FATAL (promoted from warning). No
             -- silent degradation to `any`. This enforces the
             -- "if it compiles, it works" promise at the entry module.

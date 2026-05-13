@@ -72,7 +72,7 @@ spec = do
                             tyInt))
                 c = T.CForeign (mkRegion 5) "Sky.Core.Maybe.withDefault"
                         schemeMaybeWithDefault expected
-            (res, ci) <- Solve.solveWithInstances c
+            (res, ci, _) <- Solve.solveWithInstances c
             case res of
                 Solve.SolveOk _ -> return ()
                 Solve.SolveError e -> expectationFailure ("solve failed: " ++ e)
@@ -99,7 +99,7 @@ spec = do
                         [ mkCall tyInt 5
                         , mkCall tyString 10
                         ]
-            (res, ci) <- Solve.solveWithInstances c
+            (res, ci, _) <- Solve.solveWithInstances c
             case res of
                 Solve.SolveOk _ -> return ()
                 Solve.SolveError e -> expectationFailure ("solve failed: " ++ e)
@@ -115,7 +115,7 @@ spec = do
                             (T.TType ModuleName.list "List" [tyString])))
                 c = T.CForeign (mkRegion 7) "Sky.Core.List.map"
                         schemeListMap expected
-            (res, ci) <- Solve.solveWithInstances c
+            (res, ci, _) <- Solve.solveWithInstances c
             case res of
                 Solve.SolveOk _ -> return ()
                 Solve.SolveError e -> expectationFailure ("solve failed: " ++ e)
@@ -138,7 +138,7 @@ spec = do
                                 (T.TType ModuleName.maybe_ "Maybe" [tyInt])
                                 tyInt)))
                 c = T.CAnd [mkCall 5, mkCall 10, mkCall 15]
-            (res, ci) <- Solve.solveWithInstances c
+            (res, ci, _) <- Solve.solveWithInstances c
             case res of
                 Solve.SolveOk _ -> return ()
                 Solve.SolveError e -> expectationFailure ("solve failed: " ++ e)
@@ -147,7 +147,7 @@ spec = do
 
         it "returns an empty instance list when no polymorphic refs appear" $ do
             -- CTrue triggers no CForeign at all.
-            (res, ci) <- Solve.solveWithInstances T.CTrue
+            (res, ci, _) <- Solve.solveWithInstances T.CTrue
             case res of
                 Solve.SolveOk _ -> return ()
                 Solve.SolveError e -> expectationFailure ("solve failed: " ++ e)
@@ -159,7 +159,7 @@ spec = do
             -- consumers don't see partial data on a broken build.
             let c = T.CEqual (mkRegion 1) T.CString tyInt
                         (T.NoExpectation tyString)
-            (res, ci) <- Solve.solveWithInstances c
+            (res, ci, _) <- Solve.solveWithInstances c
             case res of
                 Solve.SolveError _ -> ci `shouldBe` []
                 Solve.SolveOk _ ->
