@@ -498,7 +498,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     , let prefix = map (\c -> if c == '.' then '_' else c) modName
                     ]
                 depArities = Map.unions
-                    [ Map.mapKeys (\n -> prefix ++ "_" ++ n)
+                    [ Map.mapKeys (\n -> prefix ++ "_" ++ goSafeName n)
                                   (Rec.collectFuncArities (Can._decls depMod))
                     | (modName, depMod) <- validDeps
                     , let prefix = map (\c -> if c == '.' then '_' else c) modName
@@ -714,7 +714,15 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 -- TVars become Go type params for polymorphic functions.
                 fullSigs = Map.unions
                     [ Map.fromList
-                        [ ( prefix ++ "_" ++ n
+                        -- v0.13 Layer 3 fix: dep-emitted Go names go
+                        -- through `goSafeName` (so a Sky function
+                        -- named `map` lands as `Sky_Core_X_map_`).
+                        -- The sig-table key MUST use the same
+                        -- mangled form or call-site coercion can't
+                        -- look it up.  Pre-fix, cross-module calls
+                        -- to Sky-source Result.map got no coercion
+                        -- and `go build` rejected the call site.
+                        [ ( prefix ++ "_" ++ goSafeName n
                           , splitInferredSigWithReg earlyAllRecAliases earlyAllFieldIdx (countParamsFor n depMod) ty )
                         | (n, ty) <- Map.toList depTypes
                         , not (hasAnnotation n depMod)
@@ -3113,7 +3121,15 @@ collectFuncTypesWith extraRecAliases prefix canMod =
                      then localRecAliases
                      else Set.map (\n -> prefix ++ "_" ++ n) localRecAliases
         knownRecAliases = Set.unions [extraRecAliases, localRecAliases, prefixed]
-        qualName n = if null prefix then n else prefix ++ "_" ++ n
+        -- v0.13 Layer 3 fix: align with goSafeName-mangled dep
+        -- emission.  Cross-module call sites look up funcParamTypes
+        -- by the mangled name (e.g. `Sky_Core_Result_map_` when
+        -- the Sky source declares `map`), so the table keys must
+        -- match.  Entry module (null prefix) keeps raw name —
+        -- local code lookups use goSafeName at the call site.
+        qualName n = if null prefix
+                       then goSafeName n
+                       else prefix ++ "_" ++ goSafeName n
         goDecls Can.SaveTheEnvironment = []
         goDecls (Can.Declare d rest)        = d : goDecls rest
         goDecls (Can.DeclareRec d ds rest)  = d : ds ++ goDecls rest
