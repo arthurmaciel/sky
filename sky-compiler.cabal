@@ -149,6 +149,7 @@ executable sky
     Sky.Build.FfiTypeResolve
     Sky.Build.SkyDeps
     Sky.Build.Validator
+    Sky.Build.Monomorphise
 
     -- Reporting
     Sky.Reporting.Annotation
@@ -229,6 +230,7 @@ test-suite sky-tests
       Sky.Build.Issue52Spec
       Sky.Build.ValidatorSpec
       Sky.Build.GoBuildRefinerSpec
+      Sky.Build.MonomorphiseSpec
       Sky.Reporting.DiagnosticSpec
       Sky.Diagnostics.CoverageSpec
       Sky.Build.KernelSigCoverageSpec

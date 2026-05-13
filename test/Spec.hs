@@ -36,6 +36,7 @@ import qualified Sky.Build.HofTypedMsgSpec
 import qualified Sky.Build.Issue52Spec
 import qualified Sky.Build.ValidatorSpec
 import qualified Sky.Build.GoBuildRefinerSpec
+import qualified Sky.Build.MonomorphiseSpec
 import qualified Sky.Reporting.DiagnosticSpec
 import qualified Sky.Diagnostics.CoverageSpec
 import qualified Sky.Type.InstanceCaptureSpec
@@ -236,6 +237,10 @@ main = hspec $ do
     -- the solver's CForeign instance-recording mechanism that the
     -- monomorphisation pass consumes downstream.
     describe "Sky.Type.InstanceCapture"      Sky.Type.InstanceCaptureSpec.spec
+    -- v0.13 Phase A2: monomorphisation type-level pieces.  Locks
+    -- the mangling encoding + substitution semantics that the
+    -- downstream emission pass relies on.
+    describe "Sky.Build.Monomorphise"        Sky.Build.MonomorphiseSpec.spec
     -- Limitation #16: kernel-sig coverage for the dangerous-class
     -- gaps (returns Maybe/Result/Task wrappers OR opaque FFI types).
     -- Without HM sigs, user pattern-matching against the wrapper
