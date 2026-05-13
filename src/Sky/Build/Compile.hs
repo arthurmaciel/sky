@@ -5048,7 +5048,23 @@ coerceCallArgsAt region qualName args =
                             then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
                             else coerceArg (exprToGo e) subbed
                 in zipWith3Default coerceOne paramTypes substituted args
-        _ -> zipWithDefault coerceArg exprToGo paramTypes args
+        _ ->
+            -- v0.13 Phase A5+: when no CSI is captured at this call
+            -- site (e.g. the call lives inside a `Can.Update` field
+            -- whose constraint emission is deferred and so the
+            -- CForeign never fires), every Go-generic placeholder
+            -- (`T1`, `T2`, …) in the callee's declared paramTypes
+            -- would leak into the call site as a bare identifier
+            -- and `go build` rejects with `undefined: T1`.  Erase
+            -- TVar placeholders to `any` in the fallback path so
+            -- coerceArg routes through `rt.AsListAny` /
+            -- `rt.Coerce[func(any) any]` /
+            -- `rt.ResultCoerce[..., any]` etc. instead.  The
+            -- value's static Go type widens at the boundary;
+            -- correctness is preserved (the callee accepts the
+            -- widened type via its generic instantiation).
+            let erased = map eraseTypeParams paramTypes
+            in zipWithDefault coerceArg exprToGo erased args
 
 
 -- | Three-way zip that pairs default args after lists run out.  Used
