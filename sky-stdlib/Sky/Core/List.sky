@@ -29,7 +29,58 @@ module Sky.Core.List exposing
     , member
     , range
     , zip
+    , map
+    , filter
+    , any
+    , all
+    , find
     )
+
+
+map fn list =
+    case list of
+        [] -> []
+        (x :: rest) -> fn x :: map fn rest
+
+
+filter pred list =
+    case list of
+        [] -> []
+        (x :: rest) ->
+            if pred x then
+                x :: filter pred rest
+            else
+                filter pred rest
+
+
+any pred list =
+    case list of
+        [] -> False
+        (x :: rest) ->
+            if pred x then
+                True
+            else
+                any pred rest
+
+
+all pred list =
+    case list of
+        [] -> True
+        (x :: rest) ->
+            if pred x then
+                all pred rest
+            else
+                False
+
+
+find pred list =
+    case list of
+        [] -> Nothing
+        (x :: rest) ->
+            if pred x then
+                Just x
+            else
+                find pred rest
 
 
 isEmpty list =
