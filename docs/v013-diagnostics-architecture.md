@@ -637,11 +637,63 @@ worse than `cmd-shift-B`-then-`go to error`.  Today's LSP runs the
 full HM pipeline (Parse → Canon → Constrain → Solve → Exhaust);
 that covers every error category v0.12.x users hit in practice.
 
-### Layer 3 — Sky-written stdlib  ⏭️  v0.13.1 SCOPE
+### Layer 3 — Sky-written stdlib  ❌ BLOCKED — multi-week compiler refactor
 
-Multi-week migration (Set → Maybe/Result → Dict → List → String)
-explicitly carved out as v0.13.1 in the original plan.  Independent
-of Layers 1+2+4.  Not blocking the v0.13.0 soundness floor.
+Investigation 2026-05-13: naive Sky-source migration of Maybe /
+Result / Basics / List surfaces multiple cross-cutting compiler
+bugs that each need focused refactor before stdlib modules can
+ship as Sky source.  Documented blockers:
+
+1. **Cross-module typed-codegen coercion gap.** Sky-source
+   `withDefault : a -> Maybe a -> a` emits `func Sky_Core_Maybe_
+   withDefault[T1 any](def T1, m rt.SkyMaybe[T1]) T1`.  Call
+   sites coerce the second arg via `rt.MaybeCoerce[any]`
+   (because `eraseTypeParams` in `coerceArg` strips type
+   params to `any`).  Go then infers T1=string from the first
+   arg's literal but sees `SkyMaybe[any]` from the second arg
+   → `does not match inferred type` error.  Fix needs HM-aware
+   coerce-instantiation: thread inferred type params from call
+   site through to the coercer.  Multi-day refactor.
+
+2. **Sky-source ADT vs kernel ADT unification.**  `case
+   List.head xs of Nothing -> ...` failed HM with
+   `expected: Maybe; actual: Maybe (Dict String String)` when
+   Sky-source `Maybe` was present.  The kernel's `Just` /
+   `Nothing` ctors (pre-registered with home=ModuleName.maybe_)
+   coexist with Sky-source ctors and the type checker can't
+   tell them apart at pattern-match sites.  Fix: remove
+   kernel-side Maybe/Just/Nothing pre-registration when Sky
+   source provides them.  Touches Canonicalise.Environment,
+   the canonicaliser's import-resolution path, and every
+   cross-module externals consumer.  Multi-day refactor.
+
+3. **Polymorphic recursion in typed codegen.**  Sky-source
+   `List.foldr fn acc xs` emits `Sky_Core_List_foldr[T1, T2]`
+   but the recursive call inside the body can't infer T2
+   → `cannot infer T2`.  Same class as v0.12 Limitation #18
+   (lambda lowering preserves types).  Fix: typed lambda
+   lowering for cross-module function defs.
+
+4. **Missing runtime helpers (compare).**  `Basics.compare`
+   has a kernel HM type signature but no runtime helper.  Any
+   Sky-source `List.sortBy` that uses `compare` emits
+   `rt.Basics_compare(...)` which doesn't exist.  Fix: add
+   the runtime helper + a typed-generic variant.
+
+5. **Go-keyword name mangling across dep boundaries.**  ✅
+   FIXED in commit `cdb8384`.  goSafeName now applied
+   consistently across dep-emit + sig tables.
+
+Conclusion: Layer 3 as ORIGINALLY scoped (every stdlib module
+migrated to Sky source with perf budget) is a 3-6 week project
+matching the plan doc's original estimate.  Items 1-4 above
+are each multi-day compiler refactors; combined they push the
+scope beyond a single session.
+
+Forward-compat work that DID land in this session:
+* `goSafeName` alignment (commit `cdb8384`)
+* Dep-module type errors → Diagnostic (commit `cd53c4e`)
+* Investigation captured here for the next session.
 
 ### Coverage spec — overall guarantee  ✅ COMPLETE
 
