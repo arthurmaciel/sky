@@ -2483,22 +2483,13 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
             writeIORef globalEmittedSpecs specNames
             return specials
         -- v0.13 Phase A4: keep generic versions alongside specs.
-        -- The drop-generics pass requires the reach walker to
-        -- cover 100% of call sites — including user-defined
-        -- helpers like Page_Roadmap_viewRoadmap or
-        -- Ui_Layout_viewNotification referenced via Sky.Live's
-        -- runtime dispatch.  Today, value references to those
-        -- helpers get added to the reach set with empty type-args
-        -- (`(qualName, [])`) because no CSI captures their call
-        -- types at the reference point — they're called dynamically
-        -- by the runtime, not at compile time.  Spec emission then
-        -- filters them out (empty σ_go), leaving only generic
-        -- versions for those names; dropping the generic breaks
-        -- the build.
-        --
-        -- Until the reach walker can derive instance types for
-        -- dynamically-dispatched value refs (e.g. by inspecting
-        -- the surrounding record's field type), keep both forms.
+        -- Drop pass needs more work — even the "no value-ref"
+        -- variant breaks Page_Roadmap_viewRoadmap because some
+        -- spec emissions produce wrong-type-args specs (e.g.
+        -- __Error_Unit for a function whose body uses
+        -- `model : Model_R`, not Error).  Spec emission needs
+        -- alignment with captured _quantifiers vs annotMap's
+        -- generaliseToAnnotation rename — another v0.14 follow-up.
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
             , GoIr._pkg_imports = imports
