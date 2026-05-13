@@ -6434,17 +6434,23 @@ patternBindings subject pat = case pat of
         let arity = 2 + length more
             allPats = aPat : bPat : more
             (tupleKind, accessor) = case arity of
-                2 -> ("SkyTuple2", \i -> GoIr.GoSelector (asTup "SkyTuple2") ("V" ++ show i))
-                3 -> ("SkyTuple3", \i -> GoIr.GoSelector (asTup "SkyTuple3") ("V" ++ show i))
+                2 -> ("SkyTuple2", \i -> GoIr.GoSelector (asTup "AsTuple2") ("V" ++ show i))
+                3 -> ("SkyTuple3", \i -> GoIr.GoSelector (asTup "AsTuple3") ("V" ++ show i))
                 _ -> ("SkyTupleN", \i -> GoIr.GoIndex
-                        (GoIr.GoSelector (asTup "SkyTupleN") "Vs")
+                        (GoIr.GoSelector (asTupAssert "SkyTupleN") "Vs")
                         (GoIr.GoIntLit i))
-            -- Wrap subject in `any(...)` before the type assertion so
-            -- it works regardless of whether subject is already
-            -- SkyTuple2 (typed return, concrete struct) or `any`
-            -- (legacy any-path). Go rejects `.(T)` on a non-interface,
-            -- but `any(x).(T)` always compiles.
-            asTup k = GoIr.GoTypeAssert
+            -- Route arity-2/3 destructure through `rt.AsTuple2` /
+            -- `rt.AsTuple3` helpers (reflect-backed re-box) instead
+            -- of a direct `.(rt.SkyTuple2)` assertion.  Sky lambdas
+            -- in typed-codegen contexts receive `T2[X, Y]` (typed
+            -- generic instantiation), which is NOT the same nominal
+            -- type as `SkyTuple2 = T2[any, any]` — the assertion
+            -- panics with `is rt.T2[string, R], not rt.T2[any, any]`.
+            -- The runtime helper handles both shapes uniformly.
+            asTup helper = GoIr.GoCall
+                (GoIr.GoIdent ("rt." ++ helper))
+                [GoIr.GoIdent subject]
+            asTupAssert k = GoIr.GoTypeAssert
                 (GoIr.GoCall (GoIr.GoIdent "any") [GoIr.GoIdent subject])
                 ("rt." ++ k)
             _ = tupleKind  -- silences warning; kept for grep-ability
@@ -7900,12 +7906,26 @@ solvedTypeToGo ty = case ty of
     T.TType _ "Set" _ -> "map[any]bool"
     T.TType home name _ ->
         let modStr = ModuleName.toString home
-            base = if null modStr || modStr == "Main"
-                then name
-                else map (\c -> if c == '.' then '_' else c) modStr ++ "_" ++ name
+            prefix = if null modStr || modStr == "Main"
+                       then ""
+                       else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+            base = prefix ++ name
             env = getCgEnv
-            isRecordAlias = Set.member base (Rec._cg_recordAliases env)
-                         || Set.member name (Rec._cg_recordAliases env)
+            allAliases = Rec._cg_recordAliases env
+            -- Mirror safeReturnType's qualified-candidate fallback so a
+            -- captured TType with empty home resolves to the correct
+            -- module-qualified Go alias (e.g. `Model` → `State_Model_R`).
+            qualifiedCandidates =
+                [ p ++ "_" ++ name
+                | a <- Set.toList allAliases
+                , '_' `elem` a
+                , let p = reverse (drop 1 (dropWhile (/= '_') (reverse a)))
+                , not (null p)
+                ]
+            candidates = if null prefix
+                           then qualifiedCandidates ++ [name]
+                           else base : qualifiedCandidates ++ [name]
+            matches = [ c | c <- candidates, Set.member c allAliases ]
             isRuntimeOnly = name `elem` runtimeOnlyTypes
             -- Sky-defined unions get a `type X = rt.SkyADT` alias
             -- emitted in main.go; FFI-opaque types do not. Without
@@ -7916,13 +7936,14 @@ solvedTypeToGo ty = case ty of
             runtimeTyped = case lookup (modStr, name) qualifiedRuntimeTypedMap of
                 Just goTy -> Just goTy
                 Nothing   -> lookup name runtimeTypedMap
-        in if isRecordAlias then base ++ "_R"
-           else case runtimeTyped of
-             Just goTy -> goTy
-             Nothing
-                | isRuntimeOnly -> "any"
-                | isKnownUnion  -> base
-                | otherwise     -> "any"
+        in case matches of
+            (m:_) -> m ++ "_R"
+            _     -> case runtimeTyped of
+                Just goTy -> goTy
+                Nothing
+                    | isRuntimeOnly -> "any"
+                    | isKnownUnion  -> base
+                    | otherwise     -> "any"
     T.TLambda from to -> "func(" ++ solvedTypeToGo from ++ ") " ++ solvedTypeToGo to
     T.TRecord fields _ ->
         -- P4: records always map to a named Go struct. If the shape
@@ -7953,14 +7974,37 @@ solvedTypeToGo ty = case ty of
             _ -> "rt.SkyTupleN"
     T.TAlias home name _ aliasTy ->
         let modStr = ModuleName.toString home
-            base = if null modStr || modStr == "Main"
-                then name
-                else map (\c -> if c == '.' then '_' else c) modStr ++ "_" ++ name
+            prefix = if null modStr || modStr == "Main"
+                       then ""
+                       else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+            base = prefix ++ name
+            env = getCgEnv
+            allAliases = Rec._cg_recordAliases env
+            -- Try every registered cross-module alias of the form
+            -- "<Mod>_<name>" so a captured TAlias with empty home (the
+            -- canonicaliser leaves home unset when the alias is imported
+            -- via `exposing (..)`) still resolves to the proper qualified
+            -- Go alias. Without this, `Model` (imported from State) emits
+            -- as `Model_R` which doesn't exist; the qualified candidate
+            -- "State_Model" matches and we emit "State_Model_R".
+            qualifiedCandidates =
+                [ p ++ "_" ++ name
+                | a <- Set.toList allAliases
+                , '_' `elem` a
+                , let p = reverse (drop 1 (dropWhile (/= '_') (reverse a)))
+                , not (null p)
+                ]
+            candidates = if null prefix
+                           then qualifiedCandidates ++ [name]
+                           else base : qualifiedCandidates ++ [name]
+            matches = [ c | c <- candidates, Set.member c allAliases ]
             isRecord = case aliasTy of
                 T.Hoisted (T.TRecord _ _) -> True
                 T.Filled  (T.TRecord _ _) -> True
                 _ -> False
-        in if isRecord then base ++ "_R" else base
+        in case matches of
+            (m:_) -> m ++ "_R"
+            _     -> if isRecord then base ++ "_R" else base
 
 
 -- | Generate a curried lambda: \a b -> body → func(a) { return func(b) { return body } }

@@ -104,24 +104,50 @@ func Nothing[A any]() SkyMaybe[A] {
 // args to `any`, calls skyFn, and unwraps/adapts the return. Recursive
 // for curried lambdas: if the target's return type is another func type
 // and the Sky return is an `any`-shaped func, wrap again at call time.
+//
+// Uncurried-to-curried adaptation: when skyFn is an uncurried Go func
+// (e.g. an auto-generated record constructor `func(name string, age
+// int, active bool) Foo_R`) and the target is a Sky-style curried
+// signature `func(string) func(int) func(bool) any`, we capture the
+// outer arg and return a reflect-built closure for the remaining
+// shape.  Without this branch, the adapter zero-padded skyFn's
+// missing args and called the uncurried func too early — producing
+// `func(name, 0, false)` then trying to extract a function value
+// from a Foo_R record (panic: call of nil function).
 func adaptFuncValue(skyFn reflect.Value, targetTy reflect.Type) reflect.Value {
+	return adaptFuncValueWithCapture(skyFn, targetTy, nil)
+}
+
+func adaptFuncValueWithCapture(skyFn reflect.Value, targetTy reflect.Type, captured []reflect.Value) reflect.Value {
 	return reflect.MakeFunc(targetTy, func(inArgs []reflect.Value) []reflect.Value {
 		boxedArgs := make([]reflect.Value, len(inArgs))
 		for i, a := range inArgs {
 			boxedArgs[i] = reflect.ValueOf(a.Interface())
 		}
+		// Accumulate captured args from outer curry levels.
+		allArgs := append(append([]reflect.Value{}, captured...), boxedArgs...)
 		skyTy := skyFn.Type()
 		nin := skyTy.NumIn()
-		if nin != len(boxedArgs) && !skyTy.IsVariadic() {
-			if nin > len(boxedArgs) {
-				for i := len(boxedArgs); i < nin; i++ {
-					boxedArgs = append(boxedArgs, reflect.Zero(skyTy.In(i)))
-				}
-			} else {
-				boxedArgs = boxedArgs[:nin]
+		// Uncurried-to-curried: we have fewer args than skyFn wants
+		// AND the target's return is another func — wrap and keep
+		// accumulating.
+		if !skyTy.IsVariadic() && nin > len(allArgs) && targetTy.NumOut() == 1 {
+			outTy := targetTy.Out(0)
+			if outTy.Kind() == reflect.Func {
+				return []reflect.Value{adaptFuncValueWithCapture(skyFn, outTy, allArgs)}
 			}
 		}
-		out := skyFn.Call(boxedArgs)
+		// Default behaviour: align argument count and invoke skyFn.
+		if nin != len(allArgs) && !skyTy.IsVariadic() {
+			if nin > len(allArgs) {
+				for i := len(allArgs); i < nin; i++ {
+					allArgs = append(allArgs, reflect.Zero(skyTy.In(i)))
+				}
+			} else {
+				allArgs = allArgs[:nin]
+			}
+		}
+		out := skyFn.Call(allArgs)
 		nOut := targetTy.NumOut()
 		results := make([]reflect.Value, nOut)
 		for i := 0; i < nOut; i++ {
@@ -1012,11 +1038,46 @@ func Basics_sndT[A, B any](t SkyTuple2) B { return t.V1.(B) }
 // AsTuple2 coerces Sky-side any to SkyTuple2. All Sky tuple values
 // are boxed as SkyTuple2 at runtime; the Sky checker enforces tuple
 // arity. Used by the typed kernel dispatch for Basics.fst/snd.
+// AsTuple2 narrows any typed tuple-shape (T2[X, Y] for any X, Y) to
+// the value-erased SkyTuple2 = T2[any, any].  Sky lambda bodies that
+// destructure tuple args via `pat.V0` / `pat.V1` assume SkyTuple2's
+// `any`-typed fields; without this widener, a call site passing a
+// typed `T2[string, TestResult]` would fail the `.(SkyTuple2)`
+// assertion (Go's generic instantiations are distinct nominal types).
+// Reflect over the V0/V1 fields and rebox into SkyTuple2.
 func AsTuple2(v any) SkyTuple2 {
 	if t, ok := v.(SkyTuple2); ok {
 		return t
 	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return SkyTuple2{}
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() == reflect.Struct && rv.NumField() >= 2 {
+		return SkyTuple2{V0: rv.Field(0).Interface(), V1: rv.Field(1).Interface()}
+	}
 	return SkyTuple2{}
+}
+
+// AsTuple3 — same shape-erasure for arity-3 tuples.
+func AsTuple3(v any) SkyTuple3 {
+	if t, ok := v.(SkyTuple3); ok {
+		return t
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return SkyTuple3{}
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() == reflect.Struct && rv.NumField() >= 3 {
+		return SkyTuple3{V0: rv.Field(0).Interface(), V1: rv.Field(1).Interface(), V2: rv.Field(2).Interface()}
+	}
+	return SkyTuple3{}
 }
 
 // AnyT shape tuple accessors: preserve Sky's `any`-valued element
