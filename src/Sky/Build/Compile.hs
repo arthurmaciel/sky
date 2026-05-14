@@ -152,6 +152,32 @@ withLambdaTypes additions x = unsafePerformIO $ do
     return x
 
 
+-- | GoExpr-specific scope: pushes bindings, renders the GoExpr to a
+-- String (forcing full evaluation), pops back to the previous
+-- bindings, then wraps the rendered String as a `GoRaw`.  This
+-- gives PROPER push/pop scoping (impossible with `withLambdaTypes`
+-- because GoExpr is lazy — pop in pure code races with deferred
+-- forcing).  Downstream consumers (rendering, specialiseFuncDecl)
+-- handle `GoRaw` correctly.
+--
+-- Use this at points where the bindings MUST NOT leak into sibling
+-- scopes — e.g. record field-access optimisation, let-binding
+-- typed registration, function-param registration.
+withScopedLambdaTypes :: Map.Map String T.Type -> GoIr.GoExpr -> GoIr.GoExpr
+withScopedLambdaTypes additions x = unsafePerformIO $ do
+    prev <- readIORef globalLambdaTypes
+    writeIORef globalLambdaTypes (Map.union additions prev)
+    -- Force the GoExpr to String form which fully evaluates the tree.
+    -- After this, the bindings are no longer needed (the rendered
+    -- String is final).  Restore the previous bindings so sibling
+    -- scopes see their own state.
+    let rendered = GoBuilder.renderExpr x
+        -- Force evaluation by demanding length (rendered is a String).
+        forced = length rendered
+    forced `seq` writeIORef globalLambdaTypes prev
+    return (GoIr.GoRaw rendered)
+
+
 -- | Read the current lambda-types map (for use in pure codegen).
 -- Takes a unit arg + NOINLINE so each call site forces a fresh read
 -- of the IORef.  Without the arg, GHC may cache the value across
@@ -2176,7 +2202,25 @@ generateDeclsForDep canMod modPrefix =
                   (\(GoIr.GoParam pname _) ty -> GoIr.GoParam pname ty)
                   goParams'
                   (depParamGoTys ++ repeat "any")
-              rawBody = exprToGo body
+              -- v0.13 typed lowerer: scope function params via
+              -- `withScopedLambdaTypes` so bindings don't leak into
+              -- sibling functions.  Only register params whose Go-
+              -- side declaration is concrete (not "any" / not T_N).
+              isGoTypedDecl gty =
+                  gty /= "any" && gty /= "" && not (isGenericTypeParam gty)
+              paramTypeBindings = case mAnnotArgs of
+                  Just argTys ->
+                      Map.fromList
+                          [ (n, t)
+                          | ((A.At _ (Can.PVar n), t), gty)
+                              <- zip (zip params argTys)
+                                     (depParamGoTys ++ repeat "any")
+                          , isGoTypedDecl gty
+                          ]
+                  Nothing -> Map.empty
+              rawBody = if Map.null paramTypeBindings
+                  then exprToGo body
+                  else withScopedLambdaTypes paramTypeBindings (exprToGo body)
               bodyExpr = wrapTypedReturn depRetType rawBody
           in [ GoIr.GoDeclFunc GoIr.GoFuncDecl
                 { GoIr._gf_name = goName
@@ -2895,9 +2939,24 @@ generateDef def solvedTypes =
     -- Skip "main" — handled separately
     if name == "main" then []
     else
-        let rawBody = if isTyped
+        let -- Register function params scoped to this function's body
+            -- so the bindings don't leak into sibling functions.
+            isGoTypedDeclE gty =
+                gty /= "any" && gty /= "" && not (isGenericTypeParam gty)
+            paramTypeBindings = case def of
+                Can.TypedDef _ _ typedPats _ _ ->
+                    Map.fromList
+                        [ (n, t)
+                        | ((A.At _ (Can.PVar n), t), gty)
+                            <- zip typedPats (entryParamGoTys ++ repeat "any")
+                        , isGoTypedDeclE gty
+                        ]
+                _ -> Map.empty
+            rawBody = if isTyped
                 then exprToGoTypedWithRet solvedTypes goRetType body
-                else exprToGo body
+                else if Map.null paramTypeBindings
+                       then exprToGo body
+                       else withScopedLambdaTypes paramTypeBindings (exprToGo body)
             bodyExpr = wrapTypedReturn goRetType rawBody
             (goParams', destructStmts) = destructureParams params
             -- Replace each param's Go type with the typed form (from
@@ -4762,15 +4821,33 @@ exprToGo (A.At _ expr) = case expr of
             [GoIr.GoReturn (GoIr.GoCall (GoIr.GoQualified "rt" "Field") [GoIr.GoIdent "__r", GoIr.GoStringLit (capitalise_ field)])]
 
     Can.Access target (A.At _ field) ->
-        -- Record field access via reflect-based runtime helper.
-        -- A typed Go-native variant (`target.Field`) would require
-        -- threading scoped local-variable types through codegen —
-        -- the IORef-based approach can't distinguish same-named
-        -- locals in different scopes, and a structural refactor is
-        -- needed.  rt.Field reflects on the runtime value's type
-        -- and handles both typed structs and any.
-        GoIr.GoCall (GoIr.GoQualified "rt" "Field")
-            [exprToGo target, GoIr.GoStringLit (capitalise_ field)]
+        -- v0.13 typed lowerer: emit Go-native field access
+        -- (`target.Field`) when the target's HM type resolves to a
+        -- known record alias AND the target is statically typed
+        -- (its Go static type matches a record-alias Go struct).
+        -- Falls back to `rt.Field` (reflect) otherwise.
+        let solved = Rec._cg_solvedTypes getCgEnv
+            targetTy = inferExprType solved target
+            isRecordAlias = case targetTy of
+                Just (T.TAlias _ name _ _) ->
+                    let env = getCgEnv
+                        recSet = Rec._cg_recordAliases env
+                    in Set.member name recSet ||
+                       any (\a -> let parts = splitOn '_' a
+                                  in not (null parts) && last parts == name)
+                          (Set.toList recSet)
+                Just (T.TType _ name _) ->
+                    let env = getCgEnv
+                        recSet = Rec._cg_recordAliases env
+                    in Set.member name recSet ||
+                       any (\a -> let parts = splitOn '_' a
+                                  in not (null parts) && last parts == name)
+                          (Set.toList recSet)
+                _ -> False
+        in if isRecordAlias && operandIsStaticallyTyped target
+              then GoIr.GoSelector (exprToGo target) (capitalise_ field)
+              else GoIr.GoCall (GoIr.GoQualified "rt" "Field")
+                       [exprToGo target, GoIr.GoStringLit (capitalise_ field)]
 
     Can.Update _name baseExpr fields ->
         -- Record update via reflect-based runtime helper (works on any + typed structs)
