@@ -1,0 +1,18 @@
+-- Test Sky module for Rust transpilation
+module Test where
+
+add : Int -> Int -> Int
+add a b = a + b
+
+factorial : Int -> Int
+factorial n =
+    case n of
+        0 -> 1
+        _ -> n * factorial (n - 1)
+
+isEven : Int -> Bool
+isEven n =
+    case n of
+        0 -> True
+        1 -> False
+        _ -> isEven (n - 2)
