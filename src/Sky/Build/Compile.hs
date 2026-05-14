@@ -2156,7 +2156,15 @@ generateDeclsForDep canMod modPrefix =
               -- type parameters (T4b) so partially-inferred functions
               -- get typed generically instead of falling back to `any`.
               env = getCgEnv
-              qualLookupName = modPrefix ++ "_" ++ name
+              -- v0.13 typed lowerer: the sig tables (`_cg_funcInferredSigs`,
+              -- `_cg_funcRetType`) are keyed with the `goSafeName`-mangled
+              -- form (`Sky_Core_List_map_`, not `Sky_Core_List_map`) — see
+              -- the `prefix ++ "_" ++ goSafeName n` key at the dep-sig
+              -- population site.  The lookup key here MUST mangle too, or
+              -- every Go-keyword-named dep function (`map`, `append`,
+              -- `range`, `type`, …) misses the lookup and falls back to a
+              -- fully-`any` signature.
+              qualLookupName = modPrefix ++ "_" ++ goSafeName name
               -- Typed dep sigs: annotation or HM-inferred types.
               -- wrapTypedReturn coerces the body to match the return type.
               -- Re-export fallback: if the body is a single Call to another
@@ -2168,8 +2176,8 @@ generateDeclsForDep canMod modPrefix =
                   ([], A.At _ (Can.Call (A.At _ (Can.VarTopLevel calleeHome calleeName)) [])) ->
                       let calleeModPrefix = map (\c -> if c == '.' then '_' else c)
                               (ModuleName.toString calleeHome)
-                          calleeKey = calleeModPrefix ++ "_" ++ calleeName
-                          sameNameKey = calleeName
+                          calleeKey = calleeModPrefix ++ "_" ++ goSafeName calleeName
+                          sameNameKey = goSafeName calleeName
                       in case Map.lookup calleeKey (Rec._cg_funcInferredSigs env) of
                           Just (_, _, r) | r /= "any" -> Just r
                           _ -> case Map.lookup calleeKey (Rec._cg_funcRetType env) of
@@ -2180,7 +2188,7 @@ generateDeclsForDep canMod modPrefix =
                   ([], A.At _ (Can.VarTopLevel calleeHome calleeName)) ->
                       let calleeModPrefix = map (\c -> if c == '.' then '_' else c)
                               (ModuleName.toString calleeHome)
-                          calleeKey = calleeModPrefix ++ "_" ++ calleeName
+                          calleeKey = calleeModPrefix ++ "_" ++ goSafeName calleeName
                       in case Map.lookup calleeKey (Rec._cg_funcInferredSigs env) of
                           Just (_, _, r) | r /= "any" -> Just r
                           _ -> case Map.lookup calleeKey (Rec._cg_funcRetType env) of
