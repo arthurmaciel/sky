@@ -6056,21 +6056,38 @@ coerceCallArgsAt region qualName args =
             -- leaving a sibling BARE-`T1` param's arg un-widened is
             -- unsound: `coerceArg e "any"` passes the bare arg RAW, so
             -- Go infers the callee's type param from its real static
-            -- type (`Maybe.withDefault model.quantity (String.toInt
-            -- s)` → `T1 = int` from `model.quantity`), and then the
-            -- compound arg's `rt.SkyMaybe[any]` clashes with the
-            -- inferred `rt.SkyMaybe[int]`.  Mirror the CSI path's
-            -- `any(e)` widening (see `coerceOne` above): when the
-            -- ORIGINAL param mentioned a type-param placeholder and
-            -- the erased form is bare `any`, wrap the arg `any(e)` so
-            -- Go infers the type param = `any` UNIFORMLY across every
-            -- position.
-            let erased = map eraseTypeParams paramTypes
-                coerceFallback orig er e =
-                    if er == "any" && containsTypeParam orig
+            -- type and the compound arg's `rt.SkyMaybe[any]` then
+            -- clashes with the inferred `rt.SkyMaybe[int]`.
+            --
+            -- The PROPER fix (not a blanket `any`-widen): RECOVER the
+            -- callee's type-param substitution from any arg whose Go
+            -- type is statically derivable — exactly what Go's own
+            -- inference does.  `Result.withDefault "" r`: arg0 lowers
+            -- to a Go string literal, so `T1 = string`; the `Result e
+            -- T1` arg then coerces to `rt.SkyResult[e, string]` (typed)
+            -- and arg0 stays the bare `""` (no `any(...)` wrap).  Only
+            -- type params that NO arg can pin fall back to the `any`-
+            -- widen — and there it's applied to EVERY position
+            -- mentioning that param, so Go infers it = any uniformly.
+            let goArgs = map exprToGo args
+                -- partial σ: bare-type-param ↦ concrete Go type, for
+                -- every position whose arg has a known static type.
+                recovered = Map.fromList
+                    [ (pty, cgo)
+                    | (pty, ga) <- zip paramTypes goArgs
+                    , isGenericTypeParam pty
+                    , Just cgo <- [goExprGoType ga]
+                    , cgo /= "any"
+                    , not (isGenericTypeParam cgo)
+                    ]
+                substituted =
+                    map (eraseTypeParams . substTVarsInGoType recovered)
+                        paramTypes
+                coerceFallback orig subbed e =
+                    if subbed == "any" && containsTypeParam orig
                         then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
-                        else coerceArg (exprToGo e) er
-            in zipWith3Default coerceFallback paramTypes erased args
+                        else coerceArg (exprToGo e) subbed
+            in zipWith3Default coerceFallback paramTypes substituted args
 
 
 -- | Three-way zip that pairs default args after lists run out.  Used
