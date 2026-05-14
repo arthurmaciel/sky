@@ -1,0 +1,20 @@
+[package]
+name = "sky-runtime-rust"
+version = "0.1.0"
+edition = "2021"
+description = "Sky language runtime for Rust - primitives, collections, FFI"
+
+[dependencies]
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"], optional = true }
+
+[features]
+default = []
+async = ["tokio"]
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full", "test-util", "macros"] }
+
+[package.metadata.sky]
+runtime_version = "0.13.0"
