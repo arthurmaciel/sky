@@ -1208,111 +1208,147 @@ shuffle : List a -> Task Error (List a)  -- Fisher-Yates shuffle
 
 ### Std.Html
 
-Html functions return VNode records (not strings). For non-Live apps, use `render` to convert to HTML string.
+v0.13: `Std.Html` / `Std.Html.Attributes` / `Std.Html.Events` are
+**typed Sky-source stdlib modules**, not Go kernels. Element builders
+return a typed `Html msg` ADT (not the old `VNode`). The compiler +
+LSP flag a handler-shape or attribute-type mismatch at the call site.
 
 ```elm
--- Core
-text : String -> VNode                                    -- escaped text
-raw : String -> VNode                                     -- raw HTML (trusted only)
-node : String -> List (String, String) -> List VNode -> VNode
-render : VNode -> String                                  -- VNode → HTML string
-toString : VNode -> String                                -- alias for render
+type Html msg
+    = HElement String (List (Attribute msg)) (List (Html msg))
+    | HText String
+    | HRaw String
 
--- Document: htmlNode, headNode, body, doctype
--- Sectioning: div, section, article, aside, headerNode, footerNode, nav, mainNode
--- Headings: h1, h2, h3, h4, h5, h6
+text : String -> Html msg                 -- escaped text node
+raw  : String -> Html msg                  -- raw, un-escaped HTML (trusted)
+render : Html msg -> String                -- Html → HTML string (SSR)
+toString : Html msg -> String              -- alias for render
+
+-- Sectioning: div, section, article, aside, headerNode, footerNode,
+--   nav, mainNode  | Headings: h1..h6
 -- Text: p, span, strong, em, small, pre, codeNode, blockquote, a
--- Lists: ul, ol, li
--- Forms: form, label, button, textarea, select, option, fieldset, legend
--- Tables: table, thead, tbody, tfoot, tr, th, td
--- Void (no children): input, br, hr, img, meta, linkNode
--- Special: script (raw JS), styleNode (raw CSS), titleNode
+-- Lists: ul, ol, li  | Forms: form, label, button, textarea, select,
+--   option, fieldset, legend  | Tables: table, thead, tbody, tfoot,
+--   tr, th, td  | Document: htmlNode, headNode, body, doctype, titleNode
+-- Void (attrs only, no children): input, br, hr, img, meta, link
+-- Special: script, styleNode
 ```
 
-All element functions have signature: `List (String, String) -> List VNode -> VNode`
-Void elements: `List (String, String) -> VNode`
+Element builders: `List (Attribute msg) -> List (Html msg) -> Html msg`.
+Void elements: `List (Attribute msg) -> Html msg`.
+`styleNode : List (Attribute msg) -> String -> Html msg` (CSS body is
+a String). `doctype : List (Html msg) -> Html msg` (wraps the document
+— `render (doctype [ htmlNode [] [...] ])`).
 
-**Important naming**: HTML5 elements that clash with common identifiers use suffixed names: `headerNode` (not `header`), `footerNode` (not `footer`), `mainNode`, `codeNode`, `linkNode`, `styleNode`, `titleNode`. The `textarea` function takes **2 arguments**: `textarea attrs children` (not just attrs).
+**Naming**: clashing HTML5 elements use suffixed names — `headerNode`,
+`footerNode`, `mainNode`, `codeNode`, `styleNode`, `titleNode`. For an
+inline `<script>` body, pass `[raw "...js..."]` (raw, un-escaped).
 
 ### Std.Html.Attributes
 
-All return `(String, String)` tuples.
+Each builder returns a typed `Attribute msg` — the compiler rejects
+`disabled "yes"` / `rows "five"` at the call site.
 
 ```elm
-attribute : String -> String -> (String, String)    -- generic key-value
-boolAttribute : String -> (String, String)          -- boolean (no value)
+type Attribute msg
+    = Attr String String
+    | BoolAttr String Bool
+    | EventAttr (Event msg)
+    | NoAttr
 
--- Global: class, id, style, title, hidden, tabindex, lang, dir, role
--- Links: href, target, rel, download
--- Forms: type_, name, value, placeholder, action, method, for, enctype
---   required, disabled, checked, readonly, autofocus, multiple, selected
---   autocomplete, minlength, maxlength, min, max, step, pattern, rows, cols
--- Media: src, alt, width, height
--- Meta: charset, content, httpEquiv
--- Tables: colspan, rowspan, scope
--- ARIA: ariaLabel, ariaHidden, ariaDescribedby, ariaExpanded
--- Data: dataAttribute key value
+-- String-valued: class, id, type_ (NOT `type`), value, href, src, alt,
+--   name, placeholder, title, for, rel, target, method, action, role,
+--   style, charset, content, httpEquiv, pattern, accept, autocomplete,
+--   ariaLabel, ariaHidden, ariaDescribedby, ariaExpanded, dir, lang, ...
+-- Int-valued (genuinely numeric): rows, cols, width, height, size,
+--   minlength, maxlength, tabindex, colspan, rowspan
+-- String-valued numeric-or-keyword: min, max, step
+-- Bool-valued: checked, disabled, readonly, required, autofocus,
+--   novalidate, selected, multiple, hidden, spellcheck
+-- Escape hatches: attribute k v, dataAttribute k v, boolAttribute k b
+-- none : Attribute msg   -- no-op, for the False branch of a conditional
+```
+
+### Std.Html.Events  (was `Std.Html.Events` pre-v0.13)
+
+Builders return `Attribute msg` carrying a typed `Event msg`.
+
+```elm
+onClick    : msg -> Attribute msg
+onInput    : (String -> msg) -> Attribute msg
+onChange   : (String -> msg) -> Attribute msg
+onSubmit   : a -> Attribute msg         -- plain Msg OR (formData -> Msg)
+on         : String -> a -> Attribute msg   -- generic escape hatch
+onDblClick / onFocus / onBlur / onMouseOver / onMouseOut / onMouseDown
+  / onMouseUp / onContextMenu / onReset / onScroll / onSelect
+  / onLoad / onError : msg -> Attribute msg
+onKeyDown / onKeyUp / onKeyPress : (String -> msg) -> Attribute msg
+onCheck    : (Bool -> msg) -> Attribute msg
+onFile / onImage : (String -> msg) -> Attribute msg   -- data-URL payload
+fileMaxSize / fileMaxWidth / fileMaxHeight : Int -> Attribute msg
+
+-- Usage:
+--     button [ onClick Increment ] [ text "+" ]
+--     input [ onInput UpdateDraft, value model.draft ] []
+--     form [ onSubmit AddTodo ] [ ... ]
 ```
 
 ### Std.Css
 
-CSS functions return `String`. Use with `styleNode [] (stylesheet [...])`.
+v0.13: typed Sky-source stdlib. Typed where the value space is bounded
+(`Length` / `Color` ADTs, keyword enums), `String` + `rawProp` escape
+hatch for the open-ended compound properties.
 
 ```elm
+type CssProp = CssProp String String
+type CssRule = CssRule String (List CssProp) | CssMedia ... | CssKeyframes ... | CssRaw String
+
+-- Length values: px (Int), rem/em/pct/ch/num (Float), vh/vw/fr (Int),
+--   zero ()/auto () (take unit), lengthRaw "calc(...)" , calc, minmax
+-- Color values: hex "ff6600", rgb/rgba/hsl/hsla, transparent ()/
+--   currentColor () (take unit), colorRaw "inherit"
+-- Keyword enums: Display (Flex/Grid/Block/InlineBlock/InlineFlex/
+--   Inline/DisplayNone/DisplayRaw), Position (Static/Relative/Absolute
+--   /Fixed/Sticky), Cursor (Pointer/CursorDefault/...), FlexDirection
+--   (Row/Column/...), FlexWrap, Align (Start/End/Center/SpaceBetween/
+--   ...), FontWeight (Normal/Bold/Weight Int/...), FontStyle, Overflow,
+--   WhiteSpace, BoxSizing, PointerEvents, TextDecoration, BorderStyle
+
 -- Composition
-stylesheet : List String -> String    -- join rules
-rule : String -> List String -> String    -- selector { props }
-media : String -> List String -> String   -- @media query { rules }
+rule : String -> List CssProp -> CssRule        -- selector { props }
+media : String -> List CssRule -> CssRule       -- @media query { rules }
+keyframes : String -> List String -> CssRule    -- build frames with `frame`
+stylesheet : List CssRule -> String             -- render to a <style> body
+styles : List CssProp -> String                 -- inline style="..." string
+property : String -> String -> CssProp          -- generic escape hatch
+rawProp : String -> CssProp                     -- a "name:value" decl string
 
--- Units: px, rem, em, pct, vh, vw, ch, fr, sec, ms, deg
--- Keywords: zero, auto, none, inherit
--- Colors: hex, rgb, rgba, hsl, hsla, transparent
-
--- Layout: display, position, top, right_, bottom, left, zIndex, overflow, float
--- Flexbox: flexDirection, flexWrap, justifyContent, alignItems, alignContent, flex, gap
--- Grid: gridTemplateColumns, gridTemplateRows, gridColumn, gridRow
--- Spacing: margin, margin2, margin4, marginTop, padding, padding2, padding4, paddingTop
--- Sizing: width, height, maxWidth, minWidth, maxHeight, minHeight
--- Typography: fontFamily, fontSize, fontWeight, fontStyle, lineHeight, textAlign,
---   textDecoration, textTransform, letterSpacing, wordSpacing, color
--- Background: backgroundColor, backgroundImage, backgroundSize, backgroundPosition
--- Border: border, borderTop, borderBottom, borderLeft, borderRight, borderRadius,
---   borderColor, borderWidth, borderStyle
--- Effects: boxShadow, opacity, transition, transform
--- Misc: cursor, property (for any CSS property not covered above)
+-- Length-valued props: width, height, maxWidth, minWidth, maxHeight,
+--   minHeight, fontSize, lineHeight, letterSpacing, padding(+Top/etc.,
+--   padding2, padding4), margin(+Top/etc., margin2, margin4), gap,
+--   rowGap, columnGap, borderRadius(4), top, bottom, left, right,
+--   flexBasis, borderWidth, borderSpacing, outlineOffset
+-- Color-valued: color, background, backgroundColor, borderColor
+-- Enum-valued: display, position, cursor, textAlign, fontWeight,
+--   fontStyle, flexDirection, flexWrap, justifyContent, alignItems,
+--   alignContent, overflow(X/Y), whiteSpace, boxSizing, pointerEvents,
+--   textDecoration, borderStyle
+-- String-valued (open-ended): transition, transform, animation,
+--   boxShadow, gridTemplateColumns/Rows, gridColumn/Row, fontFamily,
+--   content, filter, backgroundImage, border(+Top/etc.), flex, clear,
+--   float, visibility, objectFit, textTransform, ...
+-- Int/Float-valued: zIndex (Int), opacity (Float), flexGrow/Shrink (Int)
 ```
+
+Example: `rule ".btn" [ display Flex, padding (px 12), color (hex
+"fff"), backgroundColor (hex "2563eb"), cursor Pointer, fontWeight
+(Weight 600), border "1px solid #ccc" ]`.
 
 ### Std.Live
 
 ```elm
 app : config -> config     -- marks as Sky.Live app (compiler detects this)
 route : String -> page -> (String, page)   -- route "/" MyPage (supports :param)
-```
-
-### Std.Live.Events
-
-All return `(String, String)` attribute tuples.
-
-```elm
-onClick : msg -> (String, String)          -- typed Msg constructor
-onInput : (String -> msg) -> (String, String)  -- sends input value with msg
-onSubmit : msg -> (String, String)         -- sends form data with msg
-onChange : (String -> msg) -> (String, String)  -- for select, checkbox
-onDblClick : msg -> (String, String)
-onFocus : msg -> (String, String)
-onBlur : msg -> (String, String)
-onImage : (String -> msg) -> (String, String)  -- image input: resize + compress + base64
-onFile : (String -> msg) -> (String, String)   -- file input: base64 data URL (no compress)
-fileMaxWidth : Int -> (String, String)         -- max image width in px (onImage, default 1200)
-fileMaxHeight : Int -> (String, String)        -- max image height in px (onImage, default 1200)
-fileMaxSize : Int -> (String, String)          -- max file size in bytes; over-limit files are dropped client-side (no dispatch) + console.warn
-
--- Usage:
---     button [ onClick Increment ] [ text "+" ]
---     input [ onInput UpdateDraft, value model.draft ] []
---     form [ onSubmit AddTodo ] [ ... ]
---     input [ type_ "file", attribute "accept" "image/*"
---           , onImage UpdateImage, fileMaxWidth 1200 ] []
 ```
 
 **Sensitive inputs (passwords, API keys, card details): collect via `onSubmit` form data, not `onInput` per keystroke.** This is the recommended pattern as of v0.9.8:
@@ -1395,7 +1431,7 @@ view model =
 
 | Area | Helpers |
 |---|---|
-| Layout | `el / row / column / wrappedRow (children wrap to next line) / grid (CSS-Grid auto-fit — set min column width via `Ui.gridColumns N`; right primitive for product grids / dashboards / image galleries; use this NOT `wrappedRow` when card children contain `<img>` because flex-wrap collapses to 1-per-row in that case) / paragraph / textColumn / text / none / html` (`html` is the escape hatch wrapping a Std.Html VNode) |
+| Layout | `el / row / column / wrappedRow (children wrap to next line) / grid (CSS-Grid auto-fit — set min column width via `Ui.gridColumns N`; right primitive for product grids / dashboards / image galleries; use this NOT `wrappedRow` when card children contain `<img>` because flex-wrap collapses to 1-per-row in that case) / paragraph / textColumn / text / none / html` (`html` is the escape hatch wrapping a Std.Html `Html msg` node) |
 | Sized elements | `button` (`{onPress, label}`), `input` (real `<input>`), `form` (`<form>` + `onSubmit msg`), `link` (`{url, label}`), `image` (`{src, description}`) |
 | Length | `px Int` / `fill` (bare, no arg) / `fillPortion Int` / `content` / `shrink` / `minimum Int Length` / `maximum Int Length` / `vh Int` (viewport-height %) / `vw Int` (viewport-width %) |
 | Padding | `padding Int` / `paddingXY x y` (X-first / Y-second — `paddingXY 24 16` = 24px horizontal, 16px vertical, matches elm-ui) / `paddingEach { top, right, bottom, left }` (record-shaped, matches `Border.widthEach` and elm-ui) / `spacing Int` |
@@ -1441,8 +1477,8 @@ Callback receives a data URL (`data:image/jpeg;base64,...`). Decode with `Std.En
 -- `js` is a Prelude function for embedding raw JS/Go expressions (use sparingly)
 js : String -> a
 
--- View functions should annotate their return type as VNode:
-view : Model -> VNode
+-- View functions should annotate their return type as `Html msg`:
+view : Model -> Html msg
 view model =
     div [] [ text "hello" ]
 ```
@@ -1544,7 +1580,7 @@ import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Css exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick, onInput, onSubmit)
+import Std.Html.Events exposing (onClick, onInput, onSubmit)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 import Std.Time as Time
@@ -1630,7 +1666,7 @@ update msg counter =
         _ -> (counter, Cmd.none)
 
 -- View takes a Msg wrapper function from parent
-view : (Msg -> parentMsg) -> Counter -> VNode
+view : (Msg -> parentMsg) -> Counter -> Html msg
 view toMsg counter =
     div []
         [ text (String.fromInt counter.count)
@@ -1959,7 +1995,7 @@ import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Css exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick, onInput, onSubmit)
+import Std.Html.Events exposing (onClick, onInput, onSubmit)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 import Std.Db as Db
@@ -2164,7 +2200,7 @@ import Sky.Core.Error as Error exposing (Error, ErrorKind(..))
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick, onInput, onSubmit)
+import Std.Html.Events exposing (onClick, onInput, onSubmit)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 import Std.Auth as Auth
@@ -2372,7 +2408,7 @@ import Sky.Core.System as System
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick, onInput, onSubmit)
+import Std.Html.Events exposing (onClick, onInput, onSubmit)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 
@@ -3512,7 +3548,7 @@ RL.allow "login" userEmail 5 1   -- 5 attempts, 1/sec refill → Bool
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick)
+import Std.Html.Events exposing (onClick)
 
 type Msg = Increment | Decrement
 type alias Model = { count : Int }

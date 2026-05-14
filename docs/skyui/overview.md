@@ -408,7 +408,7 @@ The 8-module split (`State.sky` / `Update.sky` / `View/{Common,Posts,Detail,Comp
 | Layout: `link / image / button` | ✅ | |
 | Layout: `input` (real `<input>`) | ✅ | `Ui.el` renders as `<div>`, so a dedicated helper exists |
 | Layout: `form` (with `onSubmit`-into-typed-record) | ✅ | Wire driver decodes formData into a typed record |
-| Layout: `html` escape hatch | ✅ | `Ui.html node : any -> Element msg` wraps a Std.Html VNode |
+| Layout: `html` escape hatch | ✅ | `Ui.html node : any -> Element msg` wraps a Std.Html `Html msg` node |
 | **Length**: `px / content / fill / fillPortion / minimum / maximum / shrink / vh / vw` | ✅ | `fill : Length` is bare; use `fillPortion n` for proportional weights; `vh n` / `vw n` are viewport-relative |
 | **Alignment**: `centerX/Y / align*` | ✅ | |
 | **Padding**: `padding / paddingXY / paddingEach` / `spacing` | ✅ | `paddingXY x y` is X-first/Y-second (matches elm-ui — `paddingXY 24 16` = 24px horizontal, 16px vertical). `paddingEach` is record-shaped: `{ top, right, bottom, left }` (matches `Border.widthEach` and elm-ui). |
