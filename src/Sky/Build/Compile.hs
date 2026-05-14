@@ -2219,18 +2219,24 @@ generateDeclsForDep canMod modPrefix =
                           ]
                   Nothing -> Map.empty
               -- v0.13 typed lowerer: the body's expected Sky type for
-              -- dep-module functions — the return annotation
-              -- (TypedDef) or the HM-solved type with arity arrows
-              -- peeled (Can.Def).  When known, lower the body via
-              -- `exprToGoExpect` so a top-level case/if/let threads
-              -- the type into a typed IIFE.
+              -- dep-module functions.  Same CRITICAL gate as the
+              -- entry-module path: the threaded type's Go rendering
+              -- MUST equal the emitted `depRetType`, else threading
+              -- a mismatched type (anon record → `Anon_R_…`, no Go
+              -- decl) produces `undefined` references.
               depBodyExpectedTy = case mAnnotRet of
-                  Just retTy -> Just retTy
+                  Just retTy
+                      | depRetType /= "any"
+                      , solvedTypeToGo retTy == depRetType -> Just retTy
                   Nothing ->
                       case Map.lookup name (Rec._cg_solvedTypes env) of
-                          Just solvedTy ->
-                              Just (snd (splitFuncType (length params) solvedTy))
-                          Nothing -> Nothing
+                          Just solvedTy
+                              | depRetType /= "any"
+                              , let rt' = snd (splitFuncType (length params) solvedTy)
+                              , solvedTypeToGo rt' == depRetType ->
+                                  Just (snd (splitFuncType (length params) solvedTy))
+                          _ -> Nothing
+                  _ -> Nothing
               lowerDepBody e = case depBodyExpectedTy of
                   Just t  -> exprToGoExpect t e
                   Nothing -> exprToGo e
@@ -2976,13 +2982,26 @@ generateDef def solvedTypes =
             --   * TypedDef → the user's return annotation.
             --   * Can.Def → the HM-solved function type, with N
             --     param arrows peeled off (N = arity).
-            -- When known, the body is lowered via `exprToGoExpect`
-            -- which threads the expected type into a top-level
-            -- case/if/let (typed IIFE + branch-body recursion).
+            -- CRITICAL gate: the threaded type's Go rendering MUST
+            -- equal the function's EMITTED Go return type
+            -- (`goRetType`).  They can diverge — e.g. an anonymous
+            -- record return solves to a `TRecord` that
+            -- `solvedTypeToGo` renders as `Anon_R_…` (no Go decl
+            -- emitted), while `splitInferredSigWithReg` gave the sig
+            -- `goRetType = "any"`.  Threading the mismatched type
+            -- would emit `rt.Coerce[Anon_R_…]` against an undefined
+            -- Go type.  When they disagree (or goRetType is "any"),
+            -- don't thread — `exprToGo` + the existing
+            -- `typeIIFE goRetType` (a no-op for "any") stays correct.
             bodyExpectedTy = case (mAnnotTy, mSolvedType) of
-                (Just retTy, _) -> Just retTy
-                (Nothing, Just solvedTy) ->
-                    Just (snd (splitFuncType (length params) solvedTy))
+                (Just retTy, _)
+                    | goRetType /= "any"
+                    , solvedTypeToGo retTy == goRetType -> Just retTy
+                (Nothing, Just solvedTy)
+                    | goRetType /= "any"
+                    , let rt' = snd (splitFuncType (length params) solvedTy)
+                    , solvedTypeToGo rt' == goRetType ->
+                        Just (snd (splitFuncType (length params) solvedTy))
                 _ -> Nothing
             lowerFnBody e = case bodyExpectedTy of
                 Just t  -> exprToGoExpect t e
@@ -3150,11 +3169,40 @@ goZeroValue t = case t of
     "rune"     -> Just "0"
     "struct{}" -> Just "struct{}{}"
     "any"      -> Just "nil"
+    "rt.SkyCmd" -> Just "rt.SkyCmd{}"
+    "rt.SkySub" -> Just "rt.SkySub{}"
+    "rt.SkyValue" -> Just "nil"          -- alias for `any`
+    "rt.SkyDecoder" -> Just "nil"        -- alias for `any`
     _ | "[]" `List.isPrefixOf` t           -> Just "nil"  -- nil slice
       | "map[" `List.isPrefixOf` t         -> Just "nil"  -- nil map
       | "*" `List.isPrefixOf` t            -> Just "nil"  -- nil ptr
-      -- Record-alias structs (`Foo_R`) and Sky ADTs zero via `T{}`.
+      -- Parametric Sky runtime structs zero via `T{}` — the
+      -- generic-struct zero value is always valid Go and the
+      -- trailing IIFE `return` is provably unreachable (every
+      -- case/if branch returns), so the value is never observed.
+      -- EXCEPTION: `rt.SkyTask[E, A]` is `func() SkyResult[E, A]`
+      -- — a FUNC type, not a struct — so its zero is `nil`, not
+      -- `T{}` (which Go rejects: "invalid composite literal type").
+      | "rt.SkyResult[" `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.SkyMaybe["  `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.SkyTask["   `List.isPrefixOf` t -> Just "nil"
+      | "rt.T2["        `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.T3["        `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.T4["        `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.T5["        `List.isPrefixOf` t -> Just (t ++ "{}")
+      | t == "rt.SkyTuple2" || t == "rt.SkyTuple3"
+        || t == "rt.SkyTupleN"             -> Just (t ++ "{}")
+      | t == "rt.SkyADT"                   -> Just "rt.SkyADT{}"
+      | t == "rt.VNode"                    -> Just "rt.VNode{}"
+      -- Record-alias structs (`Foo_R`) and Sky ADT struct aliases
+      -- zero via `T{}`.
       | "_R" `List.isSuffixOf` t           -> Just (t ++ "{}")
+      -- A bare capitalised identifier is ambiguous: it could be a
+      -- struct (where `T{}` is the zero) OR an enum-int alias
+      -- (`type Colour int` — where `Colour{}` is INVALID Go).  We
+      -- can't tell from the string alone, so return Nothing —
+      -- `typeIIFE` then keeps the `func() any` shape for that one
+      -- IIFE rather than risk emitting invalid Go.
       | otherwise -> Nothing
 
 
