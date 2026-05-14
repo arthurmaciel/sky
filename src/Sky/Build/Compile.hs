@@ -5851,11 +5851,30 @@ coerceCallArgsAt region qualName args =
                                     -- Go-native forms (no `rt.Add` on
                                     -- Int+Int; no `any(x).(string)`
                                     -- on a typed local).
+                                    --
+                                    -- When the lambda's final return
+                                    -- type is a real emittable Go type,
+                                    -- lower the BODY via
+                                    -- `exprToGoExpectGo` too — a
+                                    -- case/if/let body emits
+                                    -- `func() <finalRet>` directly
+                                    -- instead of `rt.AsX(func() any
+                                    -- {…}())`.  `curryLambdaPatTypedPre`
+                                    -- then skips the redundant
+                                    -- innermost `wrapRet`.
                                     let skyTys = map goTypeStrToSkyType inputTypes
                                         bindings = patVarTypes pats skyTys
-                                        body' = withLambdaTypes bindings (exprToGo body)
-                                    in curryLambdaPatTyped inputTypes finalRet
-                                        pats body'
+                                        bodyPreTyped = isEmittableGoType finalRet
+                                        rawBody =
+                                            if bodyPreTyped
+                                                then exprToGoExpectGo finalRet body
+                                                else exprToGo body
+                                        body' = withScopedLambdaTypes bindings rawBody
+                                    in if bodyPreTyped
+                                        then curryLambdaPatTypedPre inputTypes finalRet
+                                                pats body'
+                                        else curryLambdaPatTyped inputTypes finalRet
+                                                pats body'
                             -- v0.13 typed lowerer: control-flow args
                             -- (case / if / let) at a typed param slot
                             -- lower via `exprToGoExpectGo` so the IIFE
@@ -8863,8 +8882,24 @@ curryLambdaPat pats body =
 -- `paramTypes` must have one entry per pattern in `pats`. Use "any"
 -- for params whose type isn't statically known.
 curryLambdaPatTyped :: [String] -> String -> [Can.Pattern] -> GoIr.GoExpr -> GoIr.GoExpr
-curryLambdaPatTyped [] _ pats body = curryLambdaPat pats body
-curryLambdaPatTyped paramTypes retType pats body
+curryLambdaPatTyped = curryLambdaPatTypedW False
+
+
+-- | v0.13 typed lowerer: variant of `curryLambdaPatTyped` for when
+-- the `body` GoExpr is ALREADY statically typed to `retType` (e.g.
+-- it was lowered via `exprToGoExpectGo retType` so it's a
+-- `GoTypedBlock retType …` or a `rt.CoerceX`-coerced leaf).  Skips
+-- the innermost `wrapRet` so we don't emit a redundant
+-- `rt.AsInt(rt.AsInt(…))`-style double coercion.
+curryLambdaPatTypedPre :: [String] -> String -> [Can.Pattern] -> GoIr.GoExpr -> GoIr.GoExpr
+curryLambdaPatTypedPre = curryLambdaPatTypedW True
+
+
+-- | Shared worker.  `bodyPreTyped` = the body GoExpr is already
+-- statically `retType`-typed (skip the final `wrapRet`).
+curryLambdaPatTypedW :: Bool -> [String] -> String -> [Can.Pattern] -> GoIr.GoExpr -> GoIr.GoExpr
+curryLambdaPatTypedW _ [] _ pats body = curryLambdaPat pats body
+curryLambdaPatTypedW bodyPreTyped paramTypes retType pats body
     | length paramTypes /= length pats = curryLambdaPat pats body
     | otherwise =
         let -- For each lambda level we know the param's typed Go
@@ -8901,7 +8936,8 @@ curryLambdaPatTyped paramTypes retType pats body
             buildLambdas [(pTy, pat)] =
                 let (param, rebindStmts, rebindAnyStmts) = typedLambdaParam pTy pat
                     rebindAll = rebindStmts ++ rebindAnyStmts
-                    finalRetExpr = wrapRet retType body
+                    finalRetExpr =
+                        if bodyPreTyped then body else wrapRet retType body
                 in GoIr.GoFuncLit [param] retType
                     (rebindAll ++ [GoIr.GoReturn finalRetExpr])
             buildLambdas ((pTy, pat):rest) =
