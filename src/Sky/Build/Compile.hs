@@ -2218,9 +2218,25 @@ generateDeclsForDep canMod modPrefix =
                           , isGoTypedDecl gty
                           ]
                   Nothing -> Map.empty
+              -- v0.13 typed lowerer: the body's expected Sky type for
+              -- dep-module functions — the return annotation
+              -- (TypedDef) or the HM-solved type with arity arrows
+              -- peeled (Can.Def).  When known, lower the body via
+              -- `exprToGoExpect` so a top-level case/if/let threads
+              -- the type into a typed IIFE.
+              depBodyExpectedTy = case mAnnotRet of
+                  Just retTy -> Just retTy
+                  Nothing ->
+                      case Map.lookup name (Rec._cg_solvedTypes env) of
+                          Just solvedTy ->
+                              Just (snd (splitFuncType (length params) solvedTy))
+                          Nothing -> Nothing
+              lowerDepBody e = case depBodyExpectedTy of
+                  Just t  -> exprToGoExpect t e
+                  Nothing -> exprToGo e
               rawBody = if Map.null paramTypeBindings
-                  then exprToGo body
-                  else withScopedLambdaTypes paramTypeBindings (exprToGo body)
+                  then lowerDepBody body
+                  else withScopedLambdaTypes paramTypeBindings (lowerDepBody body)
               -- v0.13 typed lowerer: when the body is an IIFE
               -- (`func() any { … }()` from a case/if/let), emit it
               -- as `func() <depRetType> { … }()` with every return
@@ -2956,14 +2972,31 @@ generateDef def solvedTypes =
                         , isGoTypedDeclE gty
                         ]
                 _ -> Map.empty
+            -- v0.13 typed lowerer: the body's expected Sky type.
+            --   * TypedDef → the user's return annotation.
+            --   * Can.Def → the HM-solved function type, with N
+            --     param arrows peeled off (N = arity).
+            -- When known, the body is lowered via `exprToGoExpect`
+            -- which threads the expected type into a top-level
+            -- case/if/let (typed IIFE + branch-body recursion).
+            bodyExpectedTy = case (mAnnotTy, mSolvedType) of
+                (Just retTy, _) -> Just retTy
+                (Nothing, Just solvedTy) ->
+                    Just (snd (splitFuncType (length params) solvedTy))
+                _ -> Nothing
+            lowerFnBody e = case bodyExpectedTy of
+                Just t  -> exprToGoExpect t e
+                Nothing -> exprToGo e
             rawBody = if isTyped
                 then exprToGoTypedWithRet solvedTypes goRetType body
                 else if Map.null paramTypeBindings
-                       then exprToGo body
-                       else withScopedLambdaTypes paramTypeBindings (exprToGo body)
+                       then lowerFnBody body
+                       else withScopedLambdaTypes paramTypeBindings (lowerFnBody body)
             -- v0.13 typed lowerer: typed IIFE for the function body —
             -- see typeIIFE.  Falls back to wrapTypedReturn when the
             -- body isn't an IIFE or the return type can't be zeroed.
+            -- (When `lowerFnBody` already produced a GoTypedBlock,
+            -- typeIIFE is a near-no-op — it only re-wraps GoBlock.)
             bodyExpr = typeIIFE goRetType rawBody
             (goParams', destructStmts) = destructureParams params
             -- Replace each param's Go type with the typed form (from
@@ -4624,6 +4657,39 @@ splitFuncType _ ty = ([], ty)  -- not enough arrows, return as-is
 -- EXPRESSION CODE GENERATION
 -- ═══════════════════════════════════════════════════════════
 
+-- | v0.13 typed lowerer: convert a canonical expression to Go IR
+-- WITH a known expected type from the surrounding context.
+--
+-- This is the typed entry point.  For control-flow shapes
+-- (`Can.Case` / `Can.If` / `Can.Let`) it threads the expected type
+-- into `caseToGo` / `ifToGo` / `letToGo`, which emit a `GoTypedBlock`
+-- (typed IIFE) and coerce every branch `return` — recursing into
+-- nested IIFE return values.  For every other shape it lowers via
+-- the generic `exprToGo` then coerces the leaf to the expected Go
+-- type via `coerceReturnExprT`.
+--
+-- The design keeps the refactor bounded: only three control-flow
+-- functions gain a `Maybe T.Type` parameter, not all ~200 `exprToGo`
+-- call sites.  The expected type still threads transitively because
+-- `caseToGo Just`/`ifToGo Just`/`letToGo Just` call `typeIIFE`, whose
+-- `coerceReturnExprT` recurses into nested `GoBlock` returns.
+exprToGoExpect :: T.Type -> Can.Expr -> GoIr.GoExpr
+exprToGoExpect expectedTy e@(A.At _ expr) = case expr of
+    Can.If branches elseExpr ->
+        ifToGo (Just expectedTy) branches elseExpr
+    Can.Let def body ->
+        letToGo (Just expectedTy) def body
+    Can.Case subject branches ->
+        caseToGo (Just expectedTy) subject branches
+    _ ->
+        -- Leaf / non-control-flow: lower generically, then coerce the
+        -- result to the expected Go type.  `coerceReturnExprT`
+        -- recurses into `GoBlock` (so a nested IIFE that slipped
+        -- through still gets typed) and is a no-op when the Go type
+        -- is already concrete + matching.
+        coerceReturnExprT (solvedTypeToGo expectedTy) (exprToGo e)
+
+
 -- | Convert a canonical expression to Go IR
 exprToGo :: Can.Expr -> GoIr.GoExpr
 exprToGo (A.At _ expr) = case expr of
@@ -4895,10 +4961,12 @@ exprToGo (A.At _ expr) = case expr of
                                     (goFunc : goArgs)
 
     Can.If branches elseExpr ->
-        ifToGo branches elseExpr
+        -- Generic context — no expected type known here.  The typed
+        -- path is reached via `exprToGoExpect`.
+        ifToGo Nothing branches elseExpr
 
     Can.Let def body ->
-        letToGo def body
+        letToGo Nothing def body
 
     Can.LetRec defs body ->
         let stmts = concatMap defToStmts defs
@@ -4916,7 +4984,7 @@ exprToGo (A.At _ expr) = case expr of
         in GoIr.GoBlock (valStmt : sink : bindStmts) (exprToGo body)
 
     Can.Case subject branches ->
-        caseToGo subject branches
+        caseToGo Nothing subject branches
 
     Can.Accessor field ->
         -- Record accessor function: .field → func(r any) any { return rt.Field(r, "Field") }
@@ -6076,14 +6144,31 @@ pipeApply valueExpr funcExpr =
 -- ═══════════════════════════════════════════════════════════
 
 -- | Convert if-then-else to Go (IIFE with if-else chain)
-ifToGo :: [(Can.Expr, Can.Expr)] -> Can.Expr -> GoIr.GoExpr
-ifToGo branches elseExpr =
+-- | v0.13 typed lowerer: `ifToGo` takes the surrounding context's
+-- expected type.  When `Just t`, the emitted IIFE is wrapped via
+-- `typeIIFE` so it returns the concrete Go type instead of `any` —
+-- and `typeIIFE`'s `coerceReturnExprT` recurses into nested IIFE
+-- return values, so a `case`/`if`/`let` in a branch position gets
+-- typed too.  `Nothing` keeps the legacy `func() any` shape (used
+-- when `ifToGo` is reached from generic `exprToGo` with no
+-- expected-type context).
+ifToGo :: Maybe T.Type -> [(Can.Expr, Can.Expr)] -> Can.Expr -> GoIr.GoExpr
+ifToGo mExpected branches elseExpr =
     let
-        buildIf [] = [GoIr.GoReturn (exprToGo elseExpr)]
+        -- When the expected type is known, lower each branch body
+        -- (and the else) via `exprToGoExpect` so a nested case/if/let
+        -- in a branch gets the type threaded DIRECTLY — not just
+        -- through `typeIIFE`'s return-position recursion.
+        lowerBody = case mExpected of
+            Just t  -> exprToGoExpect t
+            Nothing -> exprToGo
+        buildIf [] = [GoIr.GoReturn (lowerBody elseExpr)]
         buildIf ((cond, body):rest) =
-            [GoIr.GoIf (toBoolExpr (exprToGo cond)) [GoIr.GoReturn (exprToGo body)] (buildIf rest)]
-    in
-    GoIr.GoBlock (buildIf branches) (GoIr.GoRaw "nil")
+            [GoIr.GoIf (toBoolExpr (exprToGo cond)) [GoIr.GoReturn (lowerBody body)] (buildIf rest)]
+        raw = GoIr.GoBlock (buildIf branches) (GoIr.GoRaw "nil")
+    in case mExpected of
+        Just t  -> typeIIFE (solvedTypeToGo t) raw
+        Nothing -> raw
 
 
 -- | Ensure an expression is a Go bool (cast from any if needed)
@@ -6100,9 +6185,10 @@ toBoolExpr expr = case expr of
 -- LET-IN
 -- ═══════════════════════════════════════════════════════════
 
--- | Convert let-in to Go (IIFE with local declarations)
-letToGo :: Can.Def -> Can.Expr -> GoIr.GoExpr
-letToGo def body =
+-- | Convert let-in to Go (IIFE with local declarations).  Takes the
+-- surrounding context's expected type — see `ifToGo`.
+letToGo :: Maybe T.Type -> Can.Def -> Can.Expr -> GoIr.GoExpr
+letToGo mExpected def body =
     -- v0.13 typed lowerer: when the def binds a primitive-typed
     -- local from a statically-typed value, register it under the
     -- body's scope so binops on this local can emit Go-native.
@@ -6134,10 +6220,19 @@ letToGo def body =
                 , isTypedPrimitive t ->
                     Map.singleton name t
             _ -> Map.empty
+        -- When the expected type is known, lower the let-body via
+        -- `exprToGoExpect` so a nested case/if/let in the body gets
+        -- the type threaded directly.
+        lowerBody = case mExpected of
+            Just t  -> exprToGoExpect t
+            Nothing -> exprToGo
         bodyGo = if Map.null bindingExtras
-            then exprToGo body
-            else withScopedLambdaTypes bindingExtras (exprToGo body)
-    in GoIr.GoBlock (defToStmts def) bodyGo
+            then lowerBody body
+            else withScopedLambdaTypes bindingExtras (lowerBody body)
+        raw = GoIr.GoBlock (defToStmts def) bodyGo
+    in case mExpected of
+        Just t  -> typeIIFE (solvedTypeToGo t) raw
+        Nothing -> raw
 
 
 -- | v0.13 typed lowerer: is this Sky type one of the primitives we
@@ -6222,9 +6317,13 @@ defToStmts def = case def of
 -- CASE-OF
 -- ═══════════════════════════════════════════════════════════
 
--- | Convert case-of to Go (IIFE with switch or if-chain)
-caseToGo :: Can.Expr -> [Can.CaseBranch] -> GoIr.GoExpr
-caseToGo subject branches =
+-- | Convert case-of to Go (IIFE with switch or if-chain).  Takes the
+-- surrounding context's expected type — see `ifToGo`.  When `Just t`,
+-- the IIFE is wrapped via `typeIIFE` so it returns the concrete Go
+-- type and every branch `return` is coerced; nested IIFE return
+-- values recurse.
+caseToGo :: Maybe T.Type -> Can.Expr -> [Can.CaseBranch] -> GoIr.GoExpr
+caseToGo mExpected subject branches =
     let
         goSubject = exprToGo subject
         subjectType = detectSubjectType branches
@@ -6350,10 +6449,12 @@ caseToGo subject branches =
         -- case block in logs.
         unreachableStmt = GoIr.GoExprStmt
             (GoIr.GoRaw ("_ = rt.Unreachable(\"case/" ++ subjectName ++ "\")"))
-    in
-    GoIr.GoBlock
-        (subjectDecl : branchStmts ++ [unreachableStmt])
-        (GoIr.GoRaw "nil")  -- unreachable, branches return
+        raw = GoIr.GoBlock
+                (subjectDecl : branchStmts ++ [unreachableStmt])
+                (GoIr.GoRaw "nil")  -- unreachable, branches return
+    in case mExpected of
+        Just t  -> typeIIFE (solvedTypeToGo t) raw
+        Nothing -> raw
 
 
 -- | Detect the Go type of the case subject from the patterns
@@ -8517,9 +8618,30 @@ solvedTypeToGo ty = case ty of
                 T.Hoisted (T.TRecord _ _) -> True
                 T.Filled  (T.TRecord _ _) -> True
                 _ -> False
+            -- Runtime-only types (Attribute, Decoder, Handler, …)
+            -- have NO Go alias emitted — using `base` as a Go type
+            -- would produce `undefined: Attribute`.  Fall to `any`.
+            -- Also check runtimeTypedMap for types with a known
+            -- concrete Go counterpart (rt.SkyDecoder etc.).
+            isRuntimeOnly = name `elem` runtimeOnlyTypes
+            runtimeTyped = case lookup (modStr, name) qualifiedRuntimeTypedMap of
+                Just goTy -> Just goTy
+                Nothing   -> lookup name runtimeTypedMap
+            unionNames = Rec._cg_unionNames env
+            isKnownUnion = Set.member base unionNames || Set.member name unionNames
         in case matches of
             (m:_) -> m ++ "_R"
-            _     -> if isRecord then base ++ "_R" else base
+            _ -> case runtimeTyped of
+                Just goTy -> goTy
+                Nothing
+                    | isRecord      -> base ++ "_R"
+                    | isRuntimeOnly -> "any"
+                    | isKnownUnion  -> base
+                    -- Last resort: a TAlias whose name we can't
+                    -- resolve to a real Go type.  `base` would
+                    -- dangle (`undefined: X`).  Fall to `any` —
+                    -- correctness over a speculative typed emit.
+                    | otherwise     -> "any"
 
 
 -- | Generate a curried lambda: \a b -> body → func(a) { return func(b) { return body } }
