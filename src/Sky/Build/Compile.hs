@@ -60,7 +60,7 @@ import qualified Debug.Trace
 -- | Global codegen environment (set once per compilation, read during codegen)
 {-# NOINLINE globalCgEnv #-}
 globalCgEnv :: IORef Rec.CodegenEnv
-globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty)
+globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty)
 
 
 -- | v0.13 Phase A5: entry-module source path, set once per
@@ -640,6 +640,21 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     | (modName, depMod) <- validDeps
                     , let prefix = map (\c -> if c == '.' then '_' else c) modName
                     ]
+                -- v0.13 typed lowerer: dep-module ENUM union names
+                -- (prefixed).  An enum emits `type X = int`, so its
+                -- zero value is `0` — `goZeroValue` needs this to
+                -- distinguish from tagged ADTs (`type X = rt.SkyADT`,
+                -- zero `X{}`).
+                depEnumNames = Set.unions
+                    [ Set.map (\n -> prefix ++ "_" ++ n)
+                             (Set.fromList
+                                [ uname
+                                | (uname, u) <- Map.toList (Can._unions depMod)
+                                , Can._u_opts u == Can.Enum
+                                ])
+                    | (modName, depMod) <- validDeps
+                    , let prefix = map (\c -> if c == '.' then '_' else c) modName
+                    ]
                 depArities = Map.unions
                     [ Map.mapKeys (\n -> prefix ++ "_" ++ goSafeName n)
                                   (Rec.collectFuncArities (Can._decls depMod))
@@ -1160,7 +1175,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                                  []    -> T.TVar "_unresolved"
                                         _   -> T.TVar "_ambig"
                         in Map.mapWithKey resolveKey keyToTypes
-                    goCodeRaw = generateGoMulti canMod entrySrcMod config typesWithDeps depDecls depRecAliases depUnionNames depArities depParamTypes depRetTypes depInferredParams depInferredRets depInferredSigs depAliasPairs
+                    goCodeRaw = generateGoMulti canMod entrySrcMod config typesWithDeps depDecls depRecAliases depUnionNames depEnumNames depArities depParamTypes depRetTypes depInferredParams depInferredRets depInferredSigs depAliasPairs
                     -- v0.13 Layer 2: collect Sky-name → source-region
                     -- for every top-level declaration so the post-emit
                     -- pass can inject `// SKY-ORIGIN: <path>:<line>:<col>`
@@ -2380,8 +2395,8 @@ generateAliasForDep userDefs modPrefix (aliasName, Can.Alias _vars body) =
 
 
 -- | Generate Go with merged dependency declarations
-generateGoMulti :: Can.Module -> Src.Module -> Toml.SkyConfig -> Solve.SolvedTypes -> [GoIr.GoDecl] -> Set.Set String -> Set.Set String -> Map.Map String Int -> Map.Map String [String] -> Map.Map String String -> Map.Map String [String] -> Map.Map String String -> Map.Map String ([String], [String], String) -> [(String, Map.Map String Can.Alias)] -> String
-generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnionNames depArities depParamTypes depRetTypes extraInferredParamTypes extraInferredRetTypes extraInferredSigs depAliasPairs =
+generateGoMulti :: Can.Module -> Src.Module -> Toml.SkyConfig -> Solve.SolvedTypes -> [GoIr.GoDecl] -> Set.Set String -> Set.Set String -> Set.Set String -> Map.Map String Int -> Map.Map String [String] -> Map.Map String String -> Map.Map String [String] -> Map.Map String String -> Map.Map String ([String], [String], String) -> [(String, Map.Map String Can.Alias)] -> String
+generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnionNames depEnumNames depArities depParamTypes depRetTypes extraInferredParamTypes extraInferredRetTypes extraInferredSigs depAliasPairs =
     let
         imports = unsafePerformIO $ do
             -- T2/T6: register entry-module + dep-module typed function
@@ -2488,6 +2503,7 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                       $ Rec.withDepArities depArities
                       $ Rec.withRecordAliases depRecAliases
                       $ Rec.withUnionNames depUnionNames
+                      $ Rec.withEnumNames depEnumNames
                       $ Rec.withDepFieldIndex depAliasPairs
                       $ Rec.buildCodegenEnv solvedTypes canMod
             writeIORef globalCgEnv cgEnv
@@ -3197,13 +3213,35 @@ goZeroValue t = case t of
       -- Record-alias structs (`Foo_R`) and Sky ADT struct aliases
       -- zero via `T{}`.
       | "_R" `List.isSuffixOf` t           -> Just (t ++ "{}")
-      -- A bare capitalised identifier is ambiguous: it could be a
-      -- struct (where `T{}` is the zero) OR an enum-int alias
-      -- (`type Colour int` — where `Colour{}` is INVALID Go).  We
-      -- can't tell from the string alone, so return Nothing —
-      -- `typeIIFE` then keeps the `func() any` shape for that one
-      -- IIFE rather than risk emitting invalid Go.
+      -- A bare capitalised identifier: resolve via the codegen
+      -- env's union/enum registries.
+      --   * Enum union (`type X = int`)        → zero is `0`.
+      --   * Tagged ADT (`type X = rt.SkyADT`)  → zero is `X{}`.
+      --   * Unknown (FFI-opaque, unresolved)   → Nothing — keep
+      --     the IIFE `func() any` rather than risk invalid Go.
+      | isBareCapName t ->
+          let env = getCgEnv
+              enums  = Rec._cg_enumNames env
+              unions = Rec._cg_unionNames env
+              -- The Go type string may be module-qualified
+              -- (`Chess_Piece_Colour`) while the registry holds
+              -- both qualified (dep) and unqualified (entry)
+              -- forms.  Try the full name AND the last `_`-segment.
+              lastSeg = reverse (takeWhile (/= '_') (reverse t))
+              isEnum  = Set.member t enums  || Set.member lastSeg enums
+              isUnion = Set.member t unions || Set.member lastSeg unions
+          in if isEnum            then Just "0"
+             else if isUnion      then Just (t ++ "{}")
+             else Nothing
       | otherwise -> Nothing
+  where
+    isBareCapName s =
+        not (null s)
+        && (let c = head s in c >= 'A' && c <= 'Z')
+        && all (\c -> (c >= 'A' && c <= 'Z')
+                   || (c >= 'a' && c <= 'z')
+                   || (c >= '0' && c <= '9')
+                   || c == '_') s
 
 
 -- | v0.13 typed lowerer: convert a `GoBlock` (IIFE returning `any`)

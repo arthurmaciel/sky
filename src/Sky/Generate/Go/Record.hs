@@ -15,6 +15,7 @@ module Sky.Generate.Go.Record
     , withDepFieldIndex
     , withRecordAliases
     , withUnionNames
+    , withEnumNames
     , withCallSiteInstances
     , withFuncSkyToGoTVars
     , collectRecordAliases
@@ -52,6 +53,14 @@ data CodegenEnv = CodegenEnv
                                               --   to `any` for FFI-opaque type
                                               --   refs that don't correspond to
                                               --   any emitted Go type alias.
+    , _cg_enumNames     :: !(Set.Set String)  -- v0.13 typed lowerer: union
+                                              --   names whose Sky declaration is
+                                              --   a pure enum (all nullary
+                                              --   constructors).  These emit as
+                                              --   `type X = int` (NOT `= rt.SkyADT`),
+                                              --   so their zero value is `0`, not
+                                              --   `X{}`.  `goZeroValue` needs this
+                                              --   to type an enum-returning IIFE.
     , _cg_funcArities :: !(Map.Map String Int)  -- top-level function arities
                                                 -- used for partial-application
                                                 -- closure synthesis
@@ -138,6 +147,11 @@ buildCodegenEnv solvedTypes canMod = CodegenEnv
     , _cg_zeroArgs = collectZeroArgs (Can._decls canMod)
     , _cg_recordAliases = collectRecordAliases (Can._aliases canMod)
     , _cg_unionNames = Set.fromList (Map.keys (Can._unions canMod))
+    , _cg_enumNames = Set.fromList
+        [ uname
+        | (uname, u) <- Map.toList (Can._unions canMod)
+        , Can._u_opts u == Can.Enum
+        ]
     , _cg_funcArities = collectFuncArities (Can._decls canMod)
     , _cg_funcParamTypes = Map.empty
     , _cg_funcRetType = Map.empty
@@ -179,6 +193,15 @@ withRecordAliases extra env =
 withUnionNames :: Set.Set String -> CodegenEnv -> CodegenEnv
 withUnionNames extra env =
     env { _cg_unionNames = Set.union extra (_cg_unionNames env) }
+
+
+-- | v0.13 typed lowerer: extend the enum-name set with dep-module
+-- qualified enum-union names.  Mirrors `withUnionNames` — kept
+-- separate because enum-vs-tagged is a distinct property
+-- (`type X = int` vs `type X = rt.SkyADT`).
+withEnumNames :: Set.Set String -> CodegenEnv -> CodegenEnv
+withEnumNames extra env =
+    env { _cg_enumNames = Set.union extra (_cg_enumNames env) }
 
 
 -- | v0.13 Phase A5: install the captured call-site instance map.
