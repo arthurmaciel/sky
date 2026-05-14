@@ -6000,7 +6000,31 @@ toBoolExpr expr = case expr of
 -- | Convert let-in to Go (IIFE with local declarations)
 letToGo :: Can.Def -> Can.Expr -> GoIr.GoExpr
 letToGo def body =
-    GoIr.GoBlock (defToStmts def) (exprToGo body)
+    -- v0.13 typed lowerer: when the def binds a primitive-typed
+    -- local from a statically-typed value, register it under the
+    -- body's scope so binops on this local can emit Go-native.
+    -- Uses `withScopedLambdaTypes` for proper push/pop — sibling
+    -- let-bindings in the same function can't collide because they
+    -- have different names; cross-function leakage is prevented by
+    -- the scoping wrapper.
+    let solved = Rec._cg_solvedTypes getCgEnv
+        bindingExtras = case def of
+            Can.Def (A.At _ name) [] valExpr
+                | name /= "_"
+                , Just t <- inferExprType solved valExpr
+                , operandIsStaticallyTyped valExpr
+                , isTypedPrimitive t ->
+                    Map.singleton name t
+            Can.TypedDef (A.At _ name) _ [] valExpr _
+                | Just t <- inferExprType solved valExpr
+                , operandIsStaticallyTyped valExpr
+                , isTypedPrimitive t ->
+                    Map.singleton name t
+            _ -> Map.empty
+        bodyGo = if Map.null bindingExtras
+            then exprToGo body
+            else withScopedLambdaTypes bindingExtras (exprToGo body)
+    in GoIr.GoBlock (defToStmts def) bodyGo
 
 
 -- | v0.13 typed lowerer: is this Sky type one of the primitives we
@@ -7399,17 +7423,20 @@ operandIsStaticallyTyped (A.At _ e) = case e of
     Can.Unit     -> True
     Can.VarLocal name ->
         -- Gate on Go static type: registered HM type must map to a
-        -- concrete Go type (not "any", not bare `T_N`).  Without
-        -- this gate, lambda params whose Go declaration emitted as
-        -- `func(_lp_piece any)` would still be flagged static, and
-        -- `piece.Kind` would emit against an `any`-typed Go local
-        -- — `go build` rejects with `type any has no field Kind`.
+        -- concrete Go type (not "any", not bare `T_N`).
         case lookupLambdaType name of
             Just t  ->
                 let goTy = solvedTypeToGo t
                 in goTy /= "any" && not (isGenericTypeParam goTy)
             Nothing -> False
     Can.Negate inner -> operandIsStaticallyTyped inner
+    -- Record field access on a statically-typed target: the field
+    -- access emits `target.Field` (typed) AND the field's HM type
+    -- is the field's declared type in the record alias.  Both
+    -- conditions are gated by the same `operandIsStaticallyTyped`
+    -- check recursively + the `isRecordAlias` check in the Can.
+    -- Access emit branch.
+    Can.Access target _ -> operandIsStaticallyTyped target
     _            -> False
 
 
