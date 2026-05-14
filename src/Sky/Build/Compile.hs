@@ -2129,7 +2129,7 @@ generateDeclsForDep canMod modPrefix =
         _ ->
           let -- For TypedDef, the 5th field is the RETURN type only;
               -- per-pattern arg types live in `typedPats :: [(Pat, Type)]`.
-              (name, params, body, mAnnotArgs, mAnnotRet) = case def of
+              (name, params, body, mAnnotArgs, _mAnnotRet) = case def of
                 Can.Def (A.At _ n) pats expr ->
                     (n, pats, expr, Nothing, Nothing)
                 Can.TypedDef (A.At _ n) _ typedPats expr retTy ->
@@ -2233,36 +2233,30 @@ generateDeclsForDep canMod modPrefix =
                           , isGoTypedDecl gty
                           ]
                   Nothing -> Map.empty
-              -- v0.13 typed lowerer: the body's expected Sky type for
-              -- dep-module functions.  Same CRITICAL gate as the
-              -- entry-module path: the threaded type's Go rendering
-              -- MUST equal the emitted `depRetType`, else threading
-              -- a mismatched type (anon record → `Anon_R_…`, no Go
-              -- decl) produces `undefined` references.
-              depBodyExpectedTy = case mAnnotRet of
-                  Just retTy
-                      | depRetType /= "any"
-                      , solvedTypeToGo retTy == depRetType -> Just retTy
-                  Nothing ->
-                      case Map.lookup name (Rec._cg_solvedTypes env) of
-                          Just solvedTy
-                              | depRetType /= "any"
-                              , let rt' = snd (splitFuncType (length params) solvedTy)
-                              , solvedTypeToGo rt' == depRetType ->
-                                  Just (snd (splitFuncType (length params) solvedTy))
-                          _ -> Nothing
-                  _ -> Nothing
-              lowerDepBody e = case depBodyExpectedTy of
-                  Just t  -> exprToGoExpect t e
-                  Nothing -> exprToGo e
-              rawBody = if Map.null paramTypeBindings
-                  then lowerDepBody body
-                  else withScopedLambdaTypes paramTypeBindings (lowerDepBody body)
-              -- v0.13 typed lowerer: when the body is an IIFE
-              -- (`func() any { … }()` from a case/if/let), emit it
-              -- as `func() <depRetType> { … }()` with every return
-              -- coerced — eliminates the outer reflect-coerce wrap.
-              bodyExpr = typeIIFE depRetType rawBody
+              -- v0.13 typed lowerer: thread the EMITTED Go return
+              -- type (`depRetType`) directly into the body lowering.
+              -- `depRetType` is authoritative — it's exactly the Go
+              -- type in the function's emitted signature, so there's
+              -- no risk of a sig/body type divergence (the previous
+              -- `solvedTypeToGo retTy == depRetType` gate existed
+              -- precisely to detect that divergence — now structurally
+              -- impossible).  `exprToGoExpectGo`'s own
+              -- `isEmittableGoType` gate keeps it sound: a non-
+              -- emittable `depRetType` falls back to plain `exprToGo`
+              -- and the outer `typeIIFE` still coerces.
+              lowerDepBody e =
+                  if depRetType /= "any"
+                      then exprToGoExpectGo depRetType e
+                      else exprToGo e
+              -- `typeIIFE` runs on the GoExpr STRUCTURE — before
+              -- `withScopedLambdaTypes` renders it to a String — so it
+              -- can still see a `GoBlock` and convert it to a typed
+              -- `func() <depRetType>` IIFE.  Idempotent on an
+              -- already-typed `GoTypedBlock` (no redundant re-wrap).
+              typedBody = typeIIFE depRetType (lowerDepBody body)
+              bodyExpr = if Map.null paramTypeBindings
+                  then typedBody
+                  else withScopedLambdaTypes paramTypeBindings typedBody
           in [ GoIr.GoDeclFunc GoIr.GoFuncDecl
                 { GoIr._gf_name = goName
                 , GoIr._gf_typeParams = [ (tp, "any") | tp <- depTypeParams ]
@@ -2976,7 +2970,6 @@ generateDef def solvedTypes =
                     (length params)
                     funcType
             _ -> ([], replicate (length params) "any", "any")
-        isTyped = False  -- body codegen still uses exprToGo (any-typed)
     in
     -- Skip "main" — handled separately
     if name == "main" then []
@@ -2994,45 +2987,29 @@ generateDef def solvedTypes =
                         , isGoTypedDeclE gty
                         ]
                 _ -> Map.empty
-            -- v0.13 typed lowerer: the body's expected Sky type.
-            --   * TypedDef → the user's return annotation.
-            --   * Can.Def → the HM-solved function type, with N
-            --     param arrows peeled off (N = arity).
-            -- CRITICAL gate: the threaded type's Go rendering MUST
-            -- equal the function's EMITTED Go return type
-            -- (`goRetType`).  They can diverge — e.g. an anonymous
-            -- record return solves to a `TRecord` that
-            -- `solvedTypeToGo` renders as `Anon_R_…` (no Go decl
-            -- emitted), while `splitInferredSigWithReg` gave the sig
-            -- `goRetType = "any"`.  Threading the mismatched type
-            -- would emit `rt.Coerce[Anon_R_…]` against an undefined
-            -- Go type.  When they disagree (or goRetType is "any"),
-            -- don't thread — `exprToGo` + the existing
-            -- `typeIIFE goRetType` (a no-op for "any") stays correct.
-            bodyExpectedTy = case (mAnnotTy, mSolvedType) of
-                (Just retTy, _)
-                    | goRetType /= "any"
-                    , solvedTypeToGo retTy == goRetType -> Just retTy
-                (Nothing, Just solvedTy)
-                    | goRetType /= "any"
-                    , let rt' = snd (splitFuncType (length params) solvedTy)
-                    , solvedTypeToGo rt' == goRetType ->
-                        Just (snd (splitFuncType (length params) solvedTy))
-                _ -> Nothing
-            lowerFnBody e = case bodyExpectedTy of
-                Just t  -> exprToGoExpect t e
-                Nothing -> exprToGo e
-            rawBody = if isTyped
-                then exprToGoTypedWithRet solvedTypes goRetType body
-                else if Map.null paramTypeBindings
-                       then lowerFnBody body
-                       else withScopedLambdaTypes paramTypeBindings (lowerFnBody body)
-            -- v0.13 typed lowerer: typed IIFE for the function body —
-            -- see typeIIFE.  Falls back to wrapTypedReturn when the
-            -- body isn't an IIFE or the return type can't be zeroed.
-            -- (When `lowerFnBody` already produced a GoTypedBlock,
-            -- typeIIFE is a near-no-op — it only re-wraps GoBlock.)
-            bodyExpr = typeIIFE goRetType rawBody
+            -- v0.13 typed lowerer: thread the EMITTED Go return type
+            -- (`goRetType`) directly into the body lowering.
+            -- `goRetType` is authoritative — it's exactly the Go type
+            -- in the function's emitted signature, so a sig/body type
+            -- divergence is structurally impossible (the previous
+            -- `solvedTypeToGo retTy == goRetType` gate existed only to
+            -- detect that divergence).  `exprToGoExpectGo`'s own
+            -- `isEmittableGoType` gate keeps it sound: a non-emittable
+            -- `goRetType` falls back to plain `exprToGo` and the outer
+            -- `typeIIFE` still coerces.
+            lowerFnBody e =
+                if goRetType /= "any"
+                    then exprToGoExpectGo goRetType e
+                    else exprToGo e
+            -- `typeIIFE` runs on the GoExpr STRUCTURE — before
+            -- `withScopedLambdaTypes` renders it to a String — so it
+            -- can still see a `GoBlock` and convert it to a typed
+            -- `func() <goRetType>` IIFE.  Idempotent on an already-
+            -- typed `GoTypedBlock` (no redundant re-wrap).
+            typedBody = typeIIFE goRetType (lowerFnBody body)
+            bodyExpr = if Map.null paramTypeBindings
+                then typedBody
+                else withScopedLambdaTypes paramTypeBindings typedBody
             (goParams', destructStmts) = destructureParams params
             -- Replace each param's Go type with the typed form (from
             -- annotation or HM inference). destructureParams gave us
@@ -3277,6 +3254,11 @@ typeIIFE :: String -> GoIr.GoExpr -> GoIr.GoExpr
 typeIIFE retType body
     | retType == "any" = body
     | otherwise = case body of
+        -- Idempotent: a body already typed to `retType` (e.g. it
+        -- came through `exprToGoExpectGo retType` which produced a
+        -- `GoTypedBlock retType …`) is returned untouched — no
+        -- redundant `rt.Coerce` re-wrap.
+        GoIr.GoTypedBlock t _ _ | t == retType -> body
         GoIr.GoBlock stmts result ->
             let result' = case result of
                     GoIr.GoRaw "nil" -> case goZeroValue retType of
