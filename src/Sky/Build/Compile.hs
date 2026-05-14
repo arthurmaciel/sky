@@ -2221,7 +2221,11 @@ generateDeclsForDep canMod modPrefix =
               rawBody = if Map.null paramTypeBindings
                   then exprToGo body
                   else withScopedLambdaTypes paramTypeBindings (exprToGo body)
-              bodyExpr = wrapTypedReturn depRetType rawBody
+              -- v0.13 typed lowerer: when the body is an IIFE
+              -- (`func() any { … }()` from a case/if/let), emit it
+              -- as `func() <depRetType> { … }()` with every return
+              -- coerced — eliminates the outer reflect-coerce wrap.
+              bodyExpr = typeIIFE depRetType rawBody
           in [ GoIr.GoDeclFunc GoIr.GoFuncDecl
                 { GoIr._gf_name = goName
                 , GoIr._gf_typeParams = [ (tp, "any") | tp <- depTypeParams ]
@@ -2957,7 +2961,10 @@ generateDef def solvedTypes =
                 else if Map.null paramTypeBindings
                        then exprToGo body
                        else withScopedLambdaTypes paramTypeBindings (exprToGo body)
-            bodyExpr = wrapTypedReturn goRetType rawBody
+            -- v0.13 typed lowerer: typed IIFE for the function body —
+            -- see typeIIFE.  Falls back to wrapTypedReturn when the
+            -- body isn't an IIFE or the return type can't be zeroed.
+            bodyExpr = typeIIFE goRetType rawBody
             (goParams', destructStmts) = destructureParams params
             -- Replace each param's Go type with the typed form (from
             -- annotation or HM inference). destructureParams gave us
@@ -3093,6 +3100,102 @@ coerceExprFor goTy src = case goTy of
           let erased = eraseTypeParams goTy
           in if erased == "any" then src
              else "rt.Coerce[" ++ erased ++ "](" ++ src ++ ")"
+
+
+-- | v0.13 typed lowerer: zero value literal for a Go type.  Returns
+-- Nothing for types whose zero value can't be written as a simple
+-- literal (Result/Maybe/Task generic structs, opaque aliases) — in
+-- those cases the IIFE stays `func() any` (the trailing unreachable
+-- `return nil` sentinel needs `any`).
+goZeroValue :: String -> Maybe String
+goZeroValue t = case t of
+    "int"      -> Just "0"
+    "int64"    -> Just "0"
+    "float64"  -> Just "0.0"
+    "bool"     -> Just "false"
+    "string"   -> Just "\"\""
+    "rune"     -> Just "0"
+    "struct{}" -> Just "struct{}{}"
+    "any"      -> Just "nil"
+    _ | "[]" `List.isPrefixOf` t           -> Just "nil"  -- nil slice
+      | "map[" `List.isPrefixOf` t         -> Just "nil"  -- nil map
+      | "*" `List.isPrefixOf` t            -> Just "nil"  -- nil ptr
+      -- Record-alias structs (`Foo_R`) and Sky ADTs zero via `T{}`.
+      | "_R" `List.isSuffixOf` t           -> Just (t ++ "{}")
+      | otherwise -> Nothing
+
+
+-- | v0.13 typed lowerer: convert a `GoBlock` (IIFE returning `any`)
+-- into a `GoTypedBlock` (IIFE returning the concrete `retType`) when
+-- it's SAFE to do so.  "Safe" means:
+--   * `retType` is concrete (not "any"), AND
+--   * the block's trailing `result` either isn't the unreachable
+--     `nil` sentinel, OR `retType` has a writable zero value.
+--
+-- Every `return` inside the block (including those nested in
+-- `GoIf` / `GoSwitch` / `GoTypeSwitch` branches at the IIFE's own
+-- level — NOT inside nested `GoFuncLit`s) is coerced to `retType`
+-- via `wrapTypedReturn`.  Nested `GoBlock` return values are
+-- recursively typed.
+--
+-- When NOT safe, falls back to `wrapTypedReturn retType body` — the
+-- existing behaviour (outer `rt.CoerceX(func() any {...}())`).
+typeIIFE :: String -> GoIr.GoExpr -> GoIr.GoExpr
+typeIIFE retType body
+    | retType == "any" = body
+    | otherwise = case body of
+        GoIr.GoBlock stmts result ->
+            let result' = case result of
+                    GoIr.GoRaw "nil" -> case goZeroValue retType of
+                        Just zv -> GoIr.GoRaw zv
+                        Nothing -> result  -- can't zero — bail below
+                    _ -> coerceReturnExprT retType result
+                canType = case result of
+                    GoIr.GoRaw "nil" -> isJust (goZeroValue retType)
+                    _                -> True
+            in if canType
+                 then GoIr.GoTypedBlock retType
+                        (coerceBlockReturnsT retType stmts) result'
+                 else wrapTypedReturn retType body
+        _ -> wrapTypedReturn retType body
+
+
+-- | Walk IIFE-level statements coercing every `return` value to
+-- `retType`.  Descends into `GoIf` / `GoSwitch` / `GoTypeSwitch`
+-- branches (still the same IIFE's control flow) but NOT into
+-- `GoFuncLit` (a nested closure has its own return type).
+coerceBlockReturnsT :: String -> [GoIr.GoStmt] -> [GoIr.GoStmt]
+coerceBlockReturnsT retType = map go
+  where
+    go stmt = case stmt of
+        GoIr.GoReturn e          -> GoIr.GoReturn (coerceReturnExprT retType e)
+        GoIr.GoIf c thn els      -> GoIr.GoIf c (coerceBlockReturnsT retType thn)
+                                                (coerceBlockReturnsT retType els)
+        GoIr.GoSwitch e brs      -> GoIr.GoSwitch e
+                                      [ (v, coerceBlockReturnsT retType b)
+                                      | (v, b) <- brs ]
+        GoIr.GoTypeSwitch n e brs -> GoIr.GoTypeSwitch n e
+                                      [ (t, coerceBlockReturnsT retType b)
+                                      | (t, b) <- brs ]
+        GoIr.GoBlock_ ss         -> GoIr.GoBlock_ (coerceBlockReturnsT retType ss)
+        _                        -> stmt
+
+
+-- | Coerce a single return-value expression to `retType`.  If it's
+-- itself a `GoBlock` (nested IIFE), recursively type it instead of
+-- wrapping — that keeps the nesting `any`-free.  `GoRaw "nil"`
+-- (unreachable sentinel) is left as-is in branch positions; the
+-- caller's `coerceBlockReturnsT` only reaches it when a branch
+-- explicitly `return nil`s, which is the dead-code arm — Go accepts
+-- `return nil` only for nilable types, so for non-nilable retTypes
+-- we substitute the zero value.
+coerceReturnExprT :: String -> GoIr.GoExpr -> GoIr.GoExpr
+coerceReturnExprT retType e = case e of
+    GoIr.GoBlock _ _ -> typeIIFE retType e
+    GoIr.GoRaw "nil" -> case goZeroValue retType of
+        Just zv -> GoIr.GoRaw zv
+        Nothing -> e
+    _ -> wrapTypedReturn retType e
 
 
 wrapTypedReturn :: String -> GoIr.GoExpr -> GoIr.GoExpr

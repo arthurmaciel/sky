@@ -257,6 +257,15 @@ renderExpr expr = case expr of
         ++ concatMap (\s -> unlines' (renderStmt s) ++ "; ") stmts
         ++ "return " ++ renderExpr result ++ " }()"
 
+    -- v0.13 typed lowerer: typed IIFE.  Same shape as GoBlock but the
+    -- return type is the concrete Go type instead of `any`.  The
+    -- caller (typeIIFE in Compile.hs) guarantees every `return` in
+    -- `stmts` and `result` carries a value compatible with `T`.
+    GoTypedBlock retTy stmts result ->
+        "func() " ++ retTy ++ " { "
+        ++ concatMap (\s -> unlines' (renderStmt s) ++ "; ") stmts
+        ++ "return " ++ renderExpr result ++ " }()"
+
     GoRaw code -> code
 
 

@@ -589,6 +589,9 @@ specialiseFuncDecl mangledName σ originalName func =
             Ir.GoTypeAssert (substExpr v) (substTypeParamsInString σ ty)
         Ir.GoBlock stmts result ->
             Ir.GoBlock (map substStmt stmts) (substExpr result)
+        Ir.GoTypedBlock retTy stmts result ->
+            Ir.GoTypedBlock (substTypeParamsInString σ retTy)
+                (map substStmt stmts) (substExpr result)
         Ir.GoRaw s ->
             -- Raw Go code may embed type-param tokens.  Apply
             -- string-level substitution defensively.
