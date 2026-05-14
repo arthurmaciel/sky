@@ -7783,8 +7783,39 @@ inferExprType types (A.At _ e) = case e of
     Can.Lambda _ _ -> Nothing
     -- Negate inherits its operand's type.
     Can.Negate inner -> inferExprType types inner
-    -- Binop / Let / Update / others — out of v0.12.x scope; safe
-    -- fallback returns Nothing (caller falls back to any-routing).
+    -- Binop: most operators have a statically-known result type.
+    -- v0.13 typed lowerer: this lets `let diff = to - from` infer
+    -- `diff : Int` so a later `let absDiff = if diff < 0 …` types
+    -- its IIFE as `func() int` instead of `func() any`.
+    Can.Binop op _ _ _ left right -> case op of
+        -- Comparison / logical operators → Bool.
+        _ | op `elem` ["==", "/=", "<", ">", "<=", ">=", "&&", "||"] ->
+            Just ConstrainExpr.boolType
+        -- Integer-only / float-only operators.
+        "//" -> Just ConstrainExpr.intType
+        "/"  -> Just ConstrainExpr.floatType
+        -- Arithmetic (`+ - * ^`): the result type matches the
+        -- operands.  HM has already unified them, so either operand
+        -- is representative — try the left, then the right.
+        _ | op `elem` ["+", "-", "*", "^"] ->
+            case inferExprType types left of
+                Just t  -> Just t
+                Nothing -> inferExprType types right
+        -- `++`: string concat or list concat — the result type
+        -- matches the left operand.
+        "++" -> inferExprType types left
+        -- `::` cons: result is the right operand's list type, or a
+        -- list of the left operand's type.
+        "::" -> case inferExprType types right of
+            Just lt@(T.TType _ "List" _) -> Just lt
+            _ -> case inferExprType types left of
+                Just elemTy -> Just (mkListType elemTy)
+                Nothing     -> Nothing
+        -- Pipe / composition (`|>` `<|` `>>` `<<`) need application
+        -- inference — out of scope, fall back to Nothing.
+        _ -> Nothing
+    -- Let / Update / others — out of v0.13 scope; safe fallback
+    -- returns Nothing (caller falls back to any-routing).
     _ -> Nothing
   where
     mkListType elemTy = T.TType ModuleName.list "List" [elemTy]
