@@ -3369,7 +3369,15 @@ goExprGoType e = case e of
                 "AsString"     -> Just "string"
                 "AsBool"       -> Just "bool"
                 "AsFloat"      -> Just "float64"
-                _ | Just t <- stripParametric "rt.Coerce" fn'       -> Just t
+                -- `rt.Html_*` element builders return `rt.VNode`
+                -- (runtime ported in [v0.13] runtime — Html.*
+                -- builders return VNode).  `Html_render` renders to
+                -- a string; `Html_doctype` has a separate kernel-sig
+                -- mismatch — both stay `any`.
+                _ | "Html_" `List.isPrefixOf` fn
+                  , fn /= "Html_render"
+                  , fn /= "Html_doctype" -> Just "rt.VNode"
+                  | Just t <- stripParametric "rt.Coerce" fn'       -> Just t
                   | Just t <- stripParametric "rt.AsListT" fn'      -> Just ("[]" ++ t)
                   | Just t <- stripParametric "rt.AsMapT" fn'       -> Just ("map[string]" ++ t)
                   | Just t <- stripParametric "rt.MaybeCoerce" fn'  -> Just ("rt.SkyMaybe[" ++ t ++ "]")

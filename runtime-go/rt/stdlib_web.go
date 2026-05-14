@@ -173,21 +173,21 @@ func Css_boxSizingBorderBox(_ any) any {
 // Html — legacy parity additions
 // ═══════════════════════════════════════════════════════════
 
-func Html_aside(a, c any) any    { return htmlElem("aside")(a, c) }
-func Html_fieldset(a, c any) any { return htmlElem("fieldset")(a, c) }
-func Html_legend(a, c any) any   { return htmlElem("legend")(a, c) }
-func Html_tfoot(a, c any) any    { return htmlElem("tfoot")(a, c) }
+func Html_aside(a, c any) VNode    { return htmlElem("aside")(a, c) }
+func Html_fieldset(a, c any) VNode { return htmlElem("fieldset")(a, c) }
+func Html_legend(a, c any) VNode   { return htmlElem("legend")(a, c) }
+func Html_tfoot(a, c any) VNode    { return htmlElem("tfoot")(a, c) }
 
 // linkNode: self-closing <link> with attrs only.
-func Html_linkNode(a any) any { return htmlElem("link")(a, nil) }
+func Html_linkNode(a any) VNode { return htmlElem("link")(a, nil) }
 
 // mainNode / footerNode: aliases over htmlElem for explicit semantic naming
 // to match legacy exports.
-func Html_mainNode(a, c any) any   { return htmlElem("main")(a, c) }
-func Html_footerNode(a, c any) any { return htmlElem("footer")(a, c) }
+func Html_mainNode(a, c any) VNode   { return htmlElem("main")(a, c) }
+func Html_footerNode(a, c any) VNode { return htmlElem("footer")(a, c) }
 
 // voidNode: a self-closing element of arbitrary tag.
-func Html_voidNode(tag any, a any) any {
+func Html_voidNode(tag any, a any) VNode {
 	return htmlElem(fmt.Sprintf("%v", tag))(a, nil)
 }
 

@@ -132,12 +132,12 @@ func Html_span(a, c any) VNode {
 	return htmlElem("span")(a, c)
 }
 func Html_p(a, c any) VNode      { return htmlElem("p")(a, c) }
-func Html_h1(a, c any) any     { return htmlElem("h1")(a, c) }
-func Html_h2(a, c any) any     { return htmlElem("h2")(a, c) }
-func Html_h3(a, c any) any     { return htmlElem("h3")(a, c) }
-func Html_h4(a, c any) any     { return htmlElem("h4")(a, c) }
-func Html_h5(a, c any) any     { return htmlElem("h5")(a, c) }
-func Html_h6(a, c any) any     { return htmlElem("h6")(a, c) }
+func Html_h1(a, c any) VNode     { return htmlElem("h1")(a, c) }
+func Html_h2(a, c any) VNode     { return htmlElem("h2")(a, c) }
+func Html_h3(a, c any) VNode     { return htmlElem("h3")(a, c) }
+func Html_h4(a, c any) VNode     { return htmlElem("h4")(a, c) }
+func Html_h5(a, c any) VNode     { return htmlElem("h5")(a, c) }
+func Html_h6(a, c any) VNode     { return htmlElem("h6")(a, c) }
 func Html_a(a, c any) VNode      { return htmlElem("a")(a, c) }
 func Html_button(a, c any) VNode { return htmlElem("button")(a, c) }
 // input is void in HTML — no children. Sky API takes attrs only.
