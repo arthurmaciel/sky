@@ -54,6 +54,7 @@ import qualified Sky.Build.FfiTypeResolve as FfiTy
 import qualified Sky.Build.SkyDeps as SkyDeps
 import qualified Sky.Canonicalise.Environment as Env
 import qualified System.Environment
+import qualified Debug.Trace
 
 
 -- | Global codegen environment (set once per compilation, read during codegen)
@@ -148,15 +149,32 @@ withLambdaTypes :: Map.Map String T.Type -> a -> a
 withLambdaTypes additions x = unsafePerformIO $ do
     prev <- readIORef globalLambdaTypes
     writeIORef globalLambdaTypes (Map.union additions prev)
-    let forced = x
-    forced `seq` writeIORef globalLambdaTypes prev
-    return forced
+    return x
 
 
 -- | Read the current lambda-types map (for use in pure codegen).
-{-# NOINLINE getLambdaTypes #-}
-getLambdaTypes :: Map.Map String T.Type
-getLambdaTypes = unsafePerformIO $ readIORef globalLambdaTypes
+-- Takes a unit arg + NOINLINE so each call site forces a fresh read
+-- of the IORef.  Without the arg, GHC may cache the value across
+-- call sites and the bindings registered by `withLambdaTypes` after
+-- the first call stay invisible.
+-- | Lookup a variable in the current lambda-types map.  Inlined as
+-- `unsafePerformIO (readIORef ... >>= return . Map.lookup k)` so GHC
+-- doesn't memoise the map across calls.  A plain `Map.lookup k
+-- getLambdaTypes` would share the IORef-read across all call sites
+-- with the same `k`, defeating the per-call refresh needed for the
+-- lambda-scope binding to reach access-codegen sites later in the
+-- pipeline.
+lookupLambdaType :: String -> Maybe T.Type
+lookupLambdaType k = unsafePerformIO $ do
+    m <- readIORef globalLambdaTypes
+    return (Map.lookup k m)
+
+
+-- | Membership-only sister of `lookupLambdaType`.
+memberLambdaType :: String -> Bool
+memberLambdaType k = unsafePerformIO $ do
+    m <- readIORef globalLambdaTypes
+    return (Map.member k m)
 
 
 -- | Read the global codegen env (for use in pure codegen functions).
@@ -4744,8 +4762,15 @@ exprToGo (A.At _ expr) = case expr of
             [GoIr.GoReturn (GoIr.GoCall (GoIr.GoQualified "rt" "Field") [GoIr.GoIdent "__r", GoIr.GoStringLit (capitalise_ field)])]
 
     Can.Access target (A.At _ field) ->
-        -- Record field access via reflect-based runtime helper
-        GoIr.GoCall (GoIr.GoQualified "rt" "Field") [exprToGo target, GoIr.GoStringLit (capitalise_ field)]
+        -- Record field access via reflect-based runtime helper.
+        -- A typed Go-native variant (`target.Field`) would require
+        -- threading scoped local-variable types through codegen —
+        -- the IORef-based approach can't distinguish same-named
+        -- locals in different scopes, and a structural refactor is
+        -- needed.  rt.Field reflects on the runtime value's type
+        -- and handles both typed structs and any.
+        GoIr.GoCall (GoIr.GoQualified "rt" "Field")
+            [exprToGo target, GoIr.GoStringLit (capitalise_ field)]
 
     Can.Update _name baseExpr fields ->
         -- Record update via reflect-based runtime helper (works on any + typed structs)
@@ -5898,28 +5923,7 @@ toBoolExpr expr = case expr of
 -- | Convert let-in to Go (IIFE with local declarations)
 letToGo :: Can.Def -> Can.Expr -> GoIr.GoExpr
 letToGo def body =
-    -- v0.13 typed lowerer: when the def binds a named local whose HM
-    -- type is a concrete primitive AND the def's value expression is
-    -- itself statically-typed (literal or typed-local reference), push
-    -- the binding into `globalLambdaTypes` for the body's lowering.
-    -- Lets `let x = 5 in x + 1` resolve `x` to Int in binop emission
-    -- and produce Go-native `x + 1` instead of `rt.Add(x, 1)`.
-    let solved = Rec._cg_solvedTypes getCgEnv
-        bodyExtras = case def of
-            Can.Def (A.At _ name) [] valExpr
-                | name /= "_"
-                , Just t <- inferExprType solved valExpr
-                , operandIsStaticallyTyped valExpr
-                , isTypedPrimitive t ->
-                    Map.singleton name t
-            Can.TypedDef (A.At _ name) _ [] valExpr _
-                | Just t <- inferExprType solved valExpr
-                , operandIsStaticallyTyped valExpr
-                , isTypedPrimitive t ->
-                    Map.singleton name t
-            _ -> Map.empty
-        bodyGo = withLambdaTypes bodyExtras (exprToGo body)
-    in GoIr.GoBlock (defToStmts def) bodyGo
+    GoIr.GoBlock (defToStmts def) (exprToGo body)
 
 
 -- | v0.13 typed lowerer: is this Sky type one of the primitives we
@@ -5934,6 +5938,16 @@ isTypedPrimitive t =
     t == ConstrainExpr.stringType ||
     t == ConstrainExpr.boolType   ||
     t == ConstrainExpr.charType
+
+
+-- | Total split-on-char (returns [s] when char doesn't occur).
+splitOn :: Char -> String -> [String]
+splitOn c = foldr f [[]]
+  where
+    f x acc@(cur:rest)
+      | x == c    = [] : acc
+      | otherwise = (x:cur) : rest
+    f _ [] = [[]]
 
 
 -- | Convert a definition to Go statements
@@ -7040,9 +7054,9 @@ inferExprType types (A.At _ e) = case e of
     Can.Str _    -> Just ConstrainExpr.stringType
     Can.Chr _    -> Just ConstrainExpr.charType
     Can.Unit     -> Just T.TUnit
-    Can.VarLocal name    -> case Map.lookup name getLambdaTypes of
+    Can.VarLocal name    -> case Map.lookup name types of
         Just t  -> Just t
-        Nothing -> Map.lookup name types
+        Nothing -> lookupLambdaType name
     Can.VarTopLevel _ n  -> Map.lookup n types
     -- VarKernel: instantiate the kernel's HM annotation. Strips the
     -- Forall wrapper (kernel sigs are universally quantified) so the
@@ -7306,7 +7320,18 @@ operandIsStaticallyTyped (A.At _ e) = case e of
     Can.Str _    -> True
     Can.Chr _    -> True
     Can.Unit     -> True
-    Can.VarLocal name -> Map.member name getLambdaTypes
+    Can.VarLocal name ->
+        -- Gate on Go static type: registered HM type must map to a
+        -- concrete Go type (not "any", not bare `T_N`).  Without
+        -- this gate, lambda params whose Go declaration emitted as
+        -- `func(_lp_piece any)` would still be flagged static, and
+        -- `piece.Kind` would emit against an `any`-typed Go local
+        -- — `go build` rejects with `type any has no field Kind`.
+        case lookupLambdaType name of
+            Just t  ->
+                let goTy = solvedTypeToGo t
+                in goTy /= "any" && not (isGenericTypeParam goTy)
+            Nothing -> False
     Can.Negate inner -> operandIsStaticallyTyped inner
     _            -> False
 
@@ -8362,11 +8387,18 @@ curryLambdaPatTyped paramTypes retType pats body
             if goTy == "any"
                 then (GoIr.GoParam (goSafeName name) "any", [], [])
                 else
-                    -- `_lp_name TY`; body uses `name = any(_lp_name)`.
+                    -- v0.13 typed lowerer: preserve the typed param's
+                    -- Go static type so the body can use Go-native
+                    -- operations (e.g. `a + acc` for Int operands)
+                    -- without `+ not defined on any` errors.  Direct
+                    -- rebind (`a := _lp_a`) keeps `a`'s static type
+                    -- as `goTy`; Go widens to `any` implicitly at any
+                    -- function-call boundary so existing helpers that
+                    -- take `any` continue to accept it.
                     let tmpName = "_lp_" ++ goSafeName name
                     in ( GoIr.GoParam tmpName goTy
                        , [GoIr.GoShortDecl (goSafeName name)
-                           (GoIr.GoCall (GoIr.GoIdent "any") [GoIr.GoIdent tmpName])]
+                           (GoIr.GoIdent tmpName)]
                        , [] )
         Can.PAnything ->
             (GoIr.GoParam "_" (if goTy == "" then "any" else goTy), [], [])
