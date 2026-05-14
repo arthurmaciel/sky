@@ -125,6 +125,140 @@ func asList(v any) []any {
 	return []any{v}
 }
 
+// ─── Sky-source Std.Html → VNode converter (v0.13 Layer 3) ──────
+//
+// Std.Html / Std.Html.Attributes / Std.Html.Events are Sky-source
+// stdlib modules: their builders produce a typed `Html` ADT (an
+// rt.SkyADT) rather than calling Go kernels.  HtmlToVNode is the
+// single FFI boundary that lowers that ADT into the runtime VNode
+// the renderer + diff layer consume — those layers are unchanged.
+
+// HtmlToVNode converts a Sky `Html` ADT value to a VNode.  An
+// actual VNode is passed through unchanged (Std.Ui's `Raw` escape
+// hatch, and any value already in VNode form).
+func HtmlToVNode(node any) VNode {
+	node = unwrapAny(node)
+	if vn, ok := node.(VNode); ok {
+		return vn
+	}
+	adt, ok := node.(SkyADT)
+	if !ok {
+		// Defensive: a non-Html value reached the converter — render
+		// it as text rather than panicking.
+		return vtext(fmt.Sprintf("%v", node))
+	}
+	switch adt.SkyName {
+	case "HText":
+		if len(adt.Fields) > 0 {
+			return vtext(AsString(adt.Fields[0]))
+		}
+		return vtext("")
+	case "HRaw":
+		if len(adt.Fields) > 0 {
+			return VNode{Kind: "raw", Text: AsString(adt.Fields[0])}
+		}
+		return VNode{Kind: "raw"}
+	case "HElement":
+		if len(adt.Fields) < 3 {
+			return vtext("")
+		}
+		vn := VNode{
+			Kind:   "element",
+			Tag:    AsString(adt.Fields[0]),
+			Attrs:  map[string]string{},
+			Events: map[string]any{},
+		}
+		for _, a := range asList(adt.Fields[1]) {
+			applyHtmlAttr(&vn, a)
+		}
+		for _, c := range asList(adt.Fields[2]) {
+			vn.Children = append(vn.Children, HtmlToVNode(c))
+		}
+		return vn
+	default:
+		return vtext("")
+	}
+}
+
+// applyHtmlAttr folds one Sky `Attribute` ADT value into a VNode.
+func applyHtmlAttr(vn *VNode, a any) {
+	a = unwrapAny(a)
+	adt, ok := a.(SkyADT)
+	if !ok {
+		return
+	}
+	switch adt.SkyName {
+	case "Attr":
+		if len(adt.Fields) >= 2 {
+			vn.Attrs[AsString(adt.Fields[0])] = AsString(adt.Fields[1])
+		}
+	case "BoolAttr":
+		if len(adt.Fields) >= 2 && AsBool(adt.Fields[1]) {
+			k := AsString(adt.Fields[0])
+			vn.Attrs[k] = k
+		}
+	case "EventAttr":
+		if len(adt.Fields) >= 1 {
+			ev := unwrapAny(adt.Fields[0])
+			if evADT, ok := ev.(SkyADT); ok && len(evADT.Fields) >= 2 {
+				// OnMsg / OnString / OnBool: Fields[0] = event name,
+				// Fields[1] = Msg value (OnMsg) or handler fn.
+				vn.Events[AsString(evADT.Fields[0])] = evADT.Fields[1]
+			}
+		}
+	case "NoAttr":
+		// no-op sentinel — skip
+	}
+}
+
+// HtmlRender serialises a Sky `Html` ADT to an HTML string.
+func HtmlRender(node any) string {
+	return renderVNode(HtmlToVNode(node), map[string]any{})
+}
+
+func init() {
+	RegisterPure("htmlRender", func(args []any) any {
+		if len(args) < 1 {
+			return ""
+		}
+		return HtmlRender(args[0])
+	})
+	RegisterPure("htmlEscapeText", func(args []any) any {
+		if len(args) < 1 {
+			return ""
+		}
+		return htmlEscapeText(AsString(args[0]))
+	})
+	RegisterPure("htmlEscapeAttr", func(args []any) any {
+		if len(args) < 1 {
+			return ""
+		}
+		return htmlEscapeAttr(AsString(args[0]))
+	})
+	RegisterPure("htmlAttrToString", func(args []any) any {
+		if len(args) < 1 {
+			return ""
+		}
+		a := unwrapAny(args[0])
+		adt, ok := a.(SkyADT)
+		if !ok {
+			return ""
+		}
+		switch adt.SkyName {
+		case "Attr":
+			if len(adt.Fields) >= 2 {
+				return AsString(adt.Fields[0]) + "=\"" +
+					htmlEscapeAttr(AsString(adt.Fields[1])) + "\""
+			}
+		case "BoolAttr":
+			if len(adt.Fields) >= 2 && AsBool(adt.Fields[1]) {
+				return AsString(adt.Fields[0])
+			}
+		}
+		return ""
+	})
+}
+
 func Html_text(s any) VNode   { return vtext(fmt.Sprintf("%v", s)) }
 func Html_textT(s string) VNode { return vtext(s) }
 func Html_div(a, c any) VNode { return htmlElem("div")(a, c) }
@@ -2293,7 +2427,7 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	}
 	app.setupSubscriptions(sess)
 
-	vn := sky_call(app.view, model).(VNode)
+	vn := HtmlToVNode(sky_call(app.view, model))
 	assignSkyIDs(&vn, "r")
 	body := renderVNode(vn, sess.handlers)
 	sess.prevTree = &vn
@@ -2442,7 +2576,7 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 	// Handler IDs are <sky-id>.<event>, stable per model state.
 	if len(sess.handlers) == 0 && sess.model != nil {
 		sess.handlers = map[string]any{}
-		vn := sky_call(app.view, sess.model).(VNode)
+		vn := HtmlToVNode(sky_call(app.view, sess.model))
 		assignSkyIDs(&vn, "r")
 		_ = renderVNode(vn, sess.handlers)
 		sess.prevTree = &vn
@@ -2615,7 +2749,7 @@ func (app *liveApp) dispatchBatched(sess *liveSession, ev batchedEvent) {
 	sess.mu.Lock()
 	if len(sess.handlers) == 0 && sess.model != nil {
 		sess.handlers = map[string]any{}
-		vn := sky_call(app.view, sess.model).(VNode)
+		vn := HtmlToVNode(sky_call(app.view, sess.model))
 		assignSkyIDs(&vn, "r")
 		_ = renderVNode(vn, sess.handlers)
 		sess.prevTree = &vn
@@ -2745,7 +2879,7 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 	sess.model = tupleFirst(result)
 	cmd := tupleSecond(result)
 	sess.handlers = map[string]any{}
-	vn := sky_call(app.view, sess.model).(VNode)
+	vn := HtmlToVNode(sky_call(app.view, sess.model))
 	assignSkyIDs(&vn, "r")
 	body = renderVNode(vn, sess.handlers)
 	sess.prevTree = &vn
@@ -2769,7 +2903,7 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 // the model (used by dispatch when guard short-circuits).
 func (app *liveApp) renderView(sess *liveSession) string {
 	sess.handlers = map[string]any{}
-	vn := sky_call(app.view, sess.model).(VNode)
+	vn := HtmlToVNode(sky_call(app.view, sess.model))
 	assignSkyIDs(&vn, "r")
 	body := renderVNode(vn, sess.handlers)
 	sess.prevTree = &vn
@@ -3006,10 +3140,7 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 		// for-select loop with the legacy prevTree/prevBody untouched.
 		func() {
 			defer func() { _ = recover() }()
-			vn, ok := sky_call(app.view, sess.model).(VNode)
-			if !ok {
-				return
-			}
+			vn := HtmlToVNode(sky_call(app.view, sess.model))
 			assignSkyIDs(&vn, "r")
 			sess.handlers = map[string]any{}
 			body := renderVNode(vn, sess.handlers)

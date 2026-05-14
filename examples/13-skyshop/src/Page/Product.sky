@@ -8,7 +8,7 @@ import Std.Html exposing (..)
 import Std.Html as Html
 import Std.Html.Attributes exposing (..)
 import Std.Html.Attributes as Attr
-import Std.Live.Events exposing (onClick, onInput)
+import Std.Html.Events exposing (onClick, onInput)
 import State exposing (..)
 import Ui.Layout as Layout
 import Lib.Db as Db
@@ -132,7 +132,7 @@ viewProductDetail model product =
             ]
 
 
-viewFeature : String -> VNode
+viewFeature : String -> (Html Msg)
 viewFeature featureLabel =
     div
         [tw [ flex, itemsCenter, gap2 ]]
@@ -262,7 +262,7 @@ viewDetailStock model stock =
                     [text (Tr.t lang "product.unlimited")]]
 
 
-viewAddToCart : Model -> a -> Int -> VNode
+viewAddToCart : Model -> a -> Int -> (Html Msg)
 viewAddToCart model product stock =
     let
         lang = model.lang

@@ -510,12 +510,29 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
         --   1. Canonicalise each dep in isolation (only its own ADTs visible)
         --      to build a depInfoMap with every module's union constructors.
         --   2. Re-canonicalise every dep AND the entry with the full map.
-        firstPassDeps <- Async.forConcurrently depModules $ \(n, srcMod) ->
-            case Canonicalise.canonicalise srcMod of
-                Right cm -> return (Just (n, cm))
-                Left _   -> return Nothing
-        let firstValid = [x | Just x <- firstPassDeps]
-            depInfoMap = Map.fromList
+        -- Canonicalise dependency modules to a FIXPOINT.
+        --
+        -- A single isolated pass + one pass-with-deps is NOT enough.
+        -- A Sky-stdlib module can use ANOTHER stdlib module's ADT
+        -- constructors — e.g. `Std.Html.Events` builds `EventAttr
+        -- (OnMsg …)` from `Std.Html.Attributes`.  Those constructors
+        -- are invisible in isolation (pass 1), so `Std.Html.Events`
+        -- fails pass 1 and is absent from the dep map; a THIRD
+        -- module that imports it (`Page.Dashboard`) then canonicalises
+        -- in pass 2 WITHOUT `Std.Html.Events` in scope and silently
+        -- resolves `import Std.Html.Events` to the KERNEL — so
+        -- `onClick` came back as the kernel's arity-0 `Attribute`
+        -- alias instead of the Sky module's `Attribute msg`.
+        --
+        -- A dependency chain of depth N needs N canonicalisation
+        -- passes.  So iterate: rebuild the dep map from each pass's
+        -- successes and re-canonicalise EVERY dep (pass-1 home
+        -- resolutions are wrong anyway) until the success set
+        -- stabilises.  Capped at 16 iterations — a genuinely-broken
+        -- module never enters the success set, so the cap only
+        -- bounds wasted passes, and its error still surfaces in
+        -- `depErrors` below.
+        let buildDepInfoMap valids = Map.fromList
                 [ (modName, Canonicalise.DepInfo
                     { Canonicalise._dep_name = Can._name depMod
                     , Canonicalise._dep_unions =
@@ -527,40 +544,29 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     , Canonicalise._dep_values = Set.toList (collectDeclNames (Can._decls depMod))
                     , Canonicalise._dep_exports = Can._exports depMod
                     })
-                | (modName, depMod) <- firstValid
+                | (modName, depMod) <- valids
                 ]
-
-        -- Pass 2: re-canonicalise deps with full cross-module info.
-        depCanMods <- Async.forConcurrently depModules $ \(n, srcMod) ->
-            case Canonicalise.canonicaliseWithDeps depInfoMap srcMod of
-                Right cm -> return (Right (n, cm))
-                Left err -> return (Left (n, err))
-        let validDeps = [x | Right x <- depCanMods]
-            depErrors = [(n, err) | Left (n, err) <- depCanMods]
-
-        -- If any dep failed to canonicalise, fail the build with the first
-        -- error so users see actionable messages (e.g. ambiguous imports)
-        -- rather than a downstream "undefined" Go error.
-        -- Re-build depInfoMap from pass 2 results so cross-module alias
-        -- bodies carry the correct home resolutions (pass 1 canonicalises
-        -- with empty deps, so imports that expose types from OTHER dep
-        -- modules resolve with home="" — wrong). Pass 2 has all imports
-        -- visible and produces the correctly-homed bodies. Entry-module
-        -- canonicalisation uses this rebuilt map for alias expansion.
-        let depInfoMap2 = Map.fromList
-                [ (modName, Canonicalise.DepInfo
-                    { Canonicalise._dep_name = Can._name depMod
-                    , Canonicalise._dep_unions =
-                        [ (typeName, Can._u_vars union, Can._u_alts union)
-                        | (typeName, union) <- Map.toList (Can._unions depMod)
-                        ]
-                    , Canonicalise._dep_aliases = Map.keys (Can._aliases depMod)
-                    , Canonicalise._dep_aliasDefs = Can._aliases depMod
-                    , Canonicalise._dep_values = Set.toList (collectDeclNames (Can._decls depMod))
-                    , Canonicalise._dep_exports = Can._exports depMod
-                    })
-                | (modName, depMod) <- validDeps
-                ]
+            canonPassWith m = Async.forConcurrently depModules $ \(n, srcMod) ->
+                case Canonicalise.canonicaliseWithDeps m srcMod of
+                    Right cm -> return (Right (n, cm))
+                    Left err -> return (Left (n, err))
+            canonFixpoint
+                :: Set.Set String
+                -> Map.Map String Canonicalise.DepInfo
+                -> Int
+                -> IO ([(String, Can.Module)], [(String, String)])
+            canonFixpoint prevSucc curMap iter = do
+                results <- canonPassWith curMap
+                let valids = [x | Right x <- results]
+                    errs   = [(n, e) | Left (n, e) <- results]
+                    succSet = Set.fromList (map fst valids)
+                if succSet == prevSucc || iter >= 16
+                    then return (valids, errs)
+                    else canonFixpoint succSet (buildDepInfoMap valids) (iter + 1)
+        (validDeps, depErrors) <- canonFixpoint Set.empty Map.empty (0 :: Int)
+        -- The dep map for the entry module is rebuilt from the
+        -- fixpoint's final (complete) success set.
+        let depInfoMap2 = buildDepInfoMap validDeps
         case depErrors of
          ((n, err):_) -> do
             -- v0.13 Layer 1: render the dep-module canonicalise
@@ -735,62 +741,61 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- confusing `go build` errors like
             --   "too many arguments in call to Std_Ui_paddingEach"
             -- long after sky check should have caught them.
-            let pass1Externals = buildCrossModuleExternalsWithMods validDeps depSolved0
-                isForeignErr s = "Foreign '" `List.isInfixOf` s
+            let isForeignErr s = "Foreign '" `List.isInfixOf` s
             -- v0.13 Phase A5: use `solveWithInstances` on each dep so
             -- monomorphisation captures dep-module call sites too.
-            -- Pass 1 stays on plain `solve` (its job is dep-isolation
-            -- typing; captures aren't useful since externals are
-            -- empty).  Pass 2 has the full externals — this is where
+            -- Pass 1 (`depSolved0`, above) stays on plain `solve`: its
+            -- job is dep-isolation typing; captures aren't useful since
+            -- externals are empty.  Every subsequent round has the full
+            -- externals built from the previous round — that's where
             -- real call-site instances surface.
-            depResults <- mapM (\(modName, depMod) -> do
-                cs <- Constrain.constrainModuleWithExternals pass1Externals depMod
-                (r, _, csi) <- Solve.solveWithInstances cs
-                case r of
-                    Solve.SolveOk t -> return (modName, Right (t, csi))
-                    Solve.SolveError err2
-                        | isForeignErr err2 -> return (modName, Left err2)
-                        | otherwise -> case lookup modName depSolved0 of
-                            Just p1 | not (Map.null p1) ->
-                                -- v0.13 Phase A4: keep the PARTIAL
-                                -- CSI from pass-2 even when falling
-                                -- back to pass-1's types.  Call
-                                -- sites inside the dep's body need
-                                -- CSI for mangled-name routing.
-                                return (modName, Right (p1, csi))
-                            _ -> return (modName, Left err2)) validDeps
-            let depErrors0 = [(mn, e) | (mn, Left e)  <- depResults]
-                depSolved2 = [(mn, t) | (mn, Right (t, _)) <- depResults]
-            -- v0.13 Phase A4: pass-3 fixpoint.  Pass-2's results
-            -- are MORE COMPLETE than pass-1 (because pass-1 had
-            -- empty externals, many cross-module calls fell through
-            -- to CLocal and either failed silently or produced
-            -- under-typed defs).  Running pass-2 a SECOND time with
-            -- pass-2's own results as externals catches deps whose
-            -- pass-1 was incomplete — their self-references inside
-            -- bodies now route through CForeign and capture CSIs.
             --
-            -- Without this, a `generateToken` ref inside Lib.Auth's
-            -- `createUser` body falls back to CLocal and the CSI is
-            -- never recorded — call sites then can't use the
-            -- specialised name.
-            let pass2Externals = buildCrossModuleExternalsWithMods validDeps depSolved2
-            pass3Results <- mapM (\(modName, depMod) -> do
-                cs <- Constrain.constrainModuleWithExternals pass2Externals depMod
-                (r, _, csi) <- Solve.solveWithInstances cs
-                case r of
-                    Solve.SolveOk t -> return (modName, Right (t, csi))
-                    Solve.SolveError err3
-                        | isForeignErr err3 -> return (modName, Left err3)
-                        | otherwise -> case lookup modName depSolved2 of
-                            Just p2 | not (Map.null p2) ->
-                                return (modName, Right (p2, csi))
-                            _ -> return (modName, Left err3)) validDeps
-            let depErrors = depErrors0
-                            ++ [(mn, e) | (mn, Left e) <- pass3Results
-                                        , not (any (\(mn', _) -> mn' == mn) depErrors0)]
-                depSolved = [(mn, t) | (mn, Right (t, _)) <- pass3Results]
-                depCsiByMod = [(mn, csi) | (mn, Right (_, csi)) <- pass3Results]
+            -- v0.13 Layer 3: the dep-solve is now a true FIXPOINT, not
+            -- a fixed 2 extra passes.  Migrating
+            -- Std.Html{,/Attributes,/Events} from kernel pseudo-modules
+            -- to Sky-source stdlib deepened the dependency chain
+            -- (Std.Html.Attributes → Std.Html → Ui.Layout → Page.* →
+            -- Main).  A hard-coded pass count silently under-solves
+            -- every module past the cap: its cross-module callees
+            -- resolve against incomplete externals, HM infers a wrong
+            -- type (classically a `Dict String String`-polluted `msg`
+            -- var leaking out of an event handler), and that wrong type
+            -- propagates into every consumer.  Iterating until the
+            -- solved type sets stop changing makes the depth of the
+            -- module graph irrelevant.  The cap (16) only guards
+            -- against a pathological oscillation — real graphs
+            -- converge in `depth-of-chain` rounds.
+            let solveRound prevSolved = do
+                    let externals =
+                            buildCrossModuleExternalsWithMods validDeps prevSolved
+                    mapM (\(modName, depMod) -> do
+                        cs <- Constrain.constrainModuleWithExternals externals depMod
+                        (r, _, csi) <- Solve.solveWithInstances cs
+                        case r of
+                            Solve.SolveOk t -> return (modName, Right (t, csi))
+                            Solve.SolveError err
+                                | isForeignErr err -> return (modName, Left err)
+                                -- Non-Foreign error: keep the previous
+                                -- round's (partial) types so a latent
+                                -- bug in one dep doesn't erase the rest,
+                                -- but keep THIS round's CSI for mangled-
+                                -- name routing inside the dep body.
+                                | otherwise -> case lookup modName prevSolved of
+                                    Just p | not (Map.null p) ->
+                                        return (modName, Right (p, csi))
+                                    _ -> return (modName, Left err)) validDeps
+                depTypesOf results =
+                    [(mn, t) | (mn, Right (t, _)) <- results]
+                solveFixpoint prevSolved n = do
+                    results <- solveRound prevSolved
+                    let curSolved = depTypesOf results
+                    if curSolved == prevSolved || n >= (16 :: Int)
+                        then return results
+                        else solveFixpoint curSolved (n + 1)
+            finalResults <- solveFixpoint depSolved0 (0 :: Int)
+            let depErrors = [(mn, e) | (mn, Left e) <- finalResults]
+                depSolved = [(mn, t) | (mn, Right (t, _)) <- finalResults]
+                depCsiByMod = [(mn, csi) | (mn, Right (_, csi)) <- finalResults]
             unless (null depErrors) $ do
                 -- v0.13 Layer 1: route dep-module type errors through the
                 -- structured Diagnostic renderer too.  Pre-fix each was
@@ -6030,7 +6035,9 @@ coerceCallArgsAt region qualName args =
             -- v0.13 Phase A5+: when no CSI is captured at this call
             -- site (e.g. the call lives inside a `Can.Update` field
             -- whose constraint emission is deferred and so the
-            -- CForeign never fires), every Go-generic placeholder
+            -- CForeign never fires, or — v0.13 Layer 3 — the call
+            -- sits inside a lambda body whose instances aren't
+            -- captured yet), every Go-generic placeholder
             -- (`T1`, `T2`, …) in the callee's declared paramTypes
             -- would leak into the call site as a bare identifier
             -- and `go build` rejects with `undefined: T1`.  Erase
@@ -6041,8 +6048,27 @@ coerceCallArgsAt region qualName args =
             -- value's static Go type widens at the boundary;
             -- correctness is preserved (the callee accepts the
             -- widened type via its generic instantiation).
+            --
+            -- v0.13 Layer 3 fix: erasing `T1 → any` inside a COMPOUND
+            -- param (`rt.SkyMaybe[T1]` → `rt.SkyMaybe[any]`) while
+            -- leaving a sibling BARE-`T1` param's arg un-widened is
+            -- unsound: `coerceArg e "any"` passes the bare arg RAW, so
+            -- Go infers the callee's type param from its real static
+            -- type (`Maybe.withDefault model.quantity (String.toInt
+            -- s)` → `T1 = int` from `model.quantity`), and then the
+            -- compound arg's `rt.SkyMaybe[any]` clashes with the
+            -- inferred `rt.SkyMaybe[int]`.  Mirror the CSI path's
+            -- `any(e)` widening (see `coerceOne` above): when the
+            -- ORIGINAL param mentioned a type-param placeholder and
+            -- the erased form is bare `any`, wrap the arg `any(e)` so
+            -- Go infers the type param = `any` UNIFORMLY across every
+            -- position.
             let erased = map eraseTypeParams paramTypes
-            in zipWithDefault coerceArg exprToGo erased args
+                coerceFallback orig er e =
+                    if er == "any" && containsTypeParam orig
+                        then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
+                        else coerceArg (exprToGo e) er
+            in zipWith3Default coerceFallback paramTypes erased args
 
 
 -- | Three-way zip that pairs default args after lists run out.  Used

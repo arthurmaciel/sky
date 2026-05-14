@@ -1161,110 +1161,12 @@ lookupKernelType modName funcName = case (modName, funcName) of
                 (T.TLambda (T.TVar "b")
                     (T.TLambda (T.TType ModuleName.list "List" [T.TVar "a"])
                         (T.TVar "b"))))
-    -- Html kernel functions — catch-all for all element builders.
-    -- 1-arg elements: text (String → VNode), img/input (attrs → VNode)
-    ("Html", "text") ->
-        Just $ T.Forall [] (T.TLambda stringType vnodeType)
-    ("Html", "img") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "input") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "raw") ->
-        -- Html.raw : String → VNode (embed raw HTML)
-        Just $ T.Forall [] (T.TLambda stringType vnodeType)
-    ("Html", "styleNode") ->
-        -- styleNode : List Attribute -> String -> VNode (CSS body is a String)
-        Just $ T.Forall [] (T.TLambda attrListType (T.TLambda stringType vnodeType))
-    ("Html", "render") ->
-        -- Html.render : VNode -> String
-        Just $ T.Forall [] (T.TLambda vnodeType stringType)
-    ("Html", "doctype") ->
-        -- Html.doctype : () -> String (emits the DOCTYPE prefix)
-        Just $ T.Forall [] (T.TLambda T.TUnit stringType)
-    ("Html", "br") ->
-        -- Html.br : List Attribute -> VNode (void element)
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "hr") ->
-        -- Html.hr : List Attribute -> VNode
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "titleNode") ->
-        -- Html.titleNode : String -> VNode
-        Just $ T.Forall [] (T.TLambda stringType vnodeType)
-    ("Html", "script") ->
-        -- Html.script : List Attribute -> body -> VNode
-        -- The body parameter stays polymorphic so callers can pass
-        -- either a String (inline JS) or a List VNode (child nodes).
-        Just $ T.Forall ["b"]
-            (T.TLambda attrListType
-                (T.TLambda (T.TVar "b") vnodeType))
-    -- Void HTML elements (no children): attrs -> VNode
-    ("Html", "meta") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "link") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "area") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "base") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "col") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "embed") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "source") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "track") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    ("Html", "wbr") ->
-        Just $ T.Forall [] (T.TLambda attrListType vnodeType)
-    -- 3-arg: node (String → attrs → children → VNode)
-    ("Html", "node") ->
-        Just $ T.Forall [] (T.TLambda stringType (T.TLambda attrListType (T.TLambda vnodeListType vnodeType)))
-    -- All other Html.* functions: 2-arg (attrs → children → VNode)
-    ("Html", _) ->
-        Just $ T.Forall [] (T.TLambda attrListType (T.TLambda vnodeListType vnodeType))
-    -- Attr kernel functions
-    ("Attr", "class") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "attribute") ->
-        Just $ T.Forall [] (T.TLambda stringType (T.TLambda stringType attrType))
-    ("Attr", "dataAttribute") ->
-        Just $ T.Forall [] (T.TLambda stringType (T.TLambda stringType attrType))
-    ("Attr", "boolAttribute") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "id") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "href") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "src") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "type_") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "type") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "value") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "placeholder") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "style") ->
-        Just $ T.Forall [] (T.TLambda stringType attrType)
-    ("Attr", "attribute") ->
-        Just $ T.Forall [] (T.TLambda stringType (T.TLambda stringType attrType))
-    -- Catch-all for boolean attrs (checked, disabled, required, etc.)
-    -- Runtime helpers ignore the arg (it exists only to let Sky
-    -- callers use `Attr.required ()` or any other value as a
-    -- present/absent marker), so accept any type at the kernel
-    -- level rather than forcing String.
-    ("Attr", _) ->
-        Just $ T.Forall ["a"] (T.TLambda (T.TVar "a") attrType)
-    -- Event handlers
-    ("Event", "onClick") ->
-        Just $ T.Forall ["msg"] (T.TLambda (T.TVar "msg") attrType)
-    ("Event", "onInput") ->
-        Just $ T.Forall ["msg"] (T.TLambda (T.TLambda stringType (T.TVar "msg")) attrType)
-    ("Event", "onSubmit") ->
-        Just $ T.Forall ["msg"] (T.TLambda (T.TVar "msg") attrType)
-    ("Event", "onCheck") ->
-        Just $ T.Forall ["msg"] (T.TLambda (T.TLambda boolType (T.TVar "msg")) attrType)
+    -- v0.13 Layer 3: Html / Attr / Event are now Sky-source stdlib
+    -- modules (sky-stdlib/Std/Html{,/Attributes,/Events}.sky), so
+    -- their builders carry real HM signatures from the module
+    -- itself — no kernel sigs here.  Removing these entries also
+    -- stops the kernel pseudo-module shadowing the parsed Sky
+    -- module on `import Std.Html exposing (..)`.
     -- Cmd kernel functions
     ("Cmd", "none") ->
         Just $ T.Forall ["msg"] cmdType
@@ -1994,7 +1896,7 @@ lookupKernelType modName funcName = case (modName, funcName) of
                                 (T.TLambda (T.TVar "model")
                                     (T.TTuple (T.TVar "model") cmdTypeOfMsg []))))
                         , ("view", T.FieldType 2
-                            (T.TLambda (T.TVar "model") vnodeType))
+                            (T.TLambda (T.TVar "model") htmlType))
                         , ("subscriptions", T.FieldType 3
                             (T.TLambda (T.TVar "model") subTypeOfMsg))
                         , ("routes", T.FieldType 4
@@ -3079,17 +2981,15 @@ stringType = T.TType ModuleName.basics "String" []
 boolType = T.TType ModuleName.basics "Bool" []
 charType = T.TType ModuleName.basics "Char" []
 
-vnodeType, attrType, attrListType, vnodeListType, cmdType, subType :: T.Type
--- Use empty Canonical so VNode/Attribute unify with user annotations
--- that resolve VNode to Canonical "" (implicitly imported).
-vnodeType = T.TType (ModuleName.Canonical "") "VNode" []
--- Attribute is a transparent alias for (String, String). See
--- actuallyUnify's Alias case.
-attrType =
-    T.TAlias (ModuleName.Canonical "") "Attribute" []
-        (T.Filled (T.TTuple stringType stringType []))
-attrListType = T.TType ModuleName.list "List" [attrType]
-vnodeListType = T.TType ModuleName.list "List" [vnodeType]
+-- v0.13 Layer 3: the Sky-source `Std.Html.Html msg` ADT.  Empty
+-- home so it unifies with a user `Html Msg` annotation the same
+-- way `vnodeType` does for `VNode`.  `Live.app`'s `view` field now
+-- uses this — `view` returns the typed `Html` ADT, and the runtime
+-- `HtmlToVNode` converter lowers it to a VNode at the boundary.
+htmlType :: T.Type
+htmlType = T.TType (ModuleName.Canonical "") "Html" [T.TVar "msg"]
+
+cmdType, subType :: T.Type
 -- Use Canonical "" so Cmd/Sub unify with user annotations that
 -- resolve to empty-home module names (same as VNode/Attribute).
 cmdType = T.TType (ModuleName.Canonical "") "Cmd" [T.TVar "msg"]

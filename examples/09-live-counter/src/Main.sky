@@ -6,7 +6,7 @@ import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Css exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick)
+import Std.Html.Events exposing (onClick)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 import Std.Time as Time
@@ -114,7 +114,7 @@ view model =
         ]
 
 
-viewPage : Model -> VNode
+viewPage : Model -> Html Msg
 viewPage model =
     case model.page of
 

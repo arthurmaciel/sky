@@ -1003,32 +1003,9 @@ staticKernelFunctions = Map.fromList
     -- `System.getenvOr "" key` for the optional-default pattern.
     , ("Middleware", ["withCors", "withLogging", "withBasicAuth", "withRateLimit"])
     , ("Ffi",     ["call", "callPure", "callTask", "has", "isPure"])
-    , ("Html",    ["text", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6",
-                    "a", "button", "input", "form", "label", "nav", "section",
-                    "article", "header", "footer", "main", "ul", "ol", "li",
-                    "img", "br", "hr", "table", "thead", "tbody", "tr", "th", "td",
-                    "textarea", "select", "option", "pre", "code", "strong", "em",
-                    "small", "styleNode", "node", "raw", "headerNode",
-                    "codeNode", "blockquote", "figure", "figcaption", "doctype",
-                    "htmlNode", "headNode", "meta", "render", "body", "title",
-                    "titleNode", "link", "script",
-                    "details", "summary", "dialog", "video", "audio", "canvas",
-                    "iframe", "progress", "meter",
-                    "aside", "fieldset", "legend", "tfoot",
-                    "linkNode", "mainNode", "footerNode", "voidNode",
-                    "attrToString", "toString", "escapeHtml", "escapeAttr"])
-    , ("Attr",    ["class", "id", "style", "type", "type_", "value", "href", "src",
-                    "alt", "name", "placeholder", "title", "for", "checked",
-                    "disabled", "readonly", "required", "autofocus", "rel",
-                    "target", "method", "action", "attribute",
-                    "charset", "content", "httpEquiv", "rel",
-                    "rows", "cols", "maxlength", "minlength", "step", "min",
-                    "max", "pattern", "accept", "multiple", "size", "tabindex",
-                    "ariaLabel", "ariaHidden", "role", "dataAttr", "spellcheck",
-                    "dir", "lang", "translate",
-                    "hidden", "download", "enctype", "novalidate", "autocomplete",
-                    "colspan", "rowspan", "scope", "selected", "height", "width",
-                    "ariaDescribedby", "ariaExpanded", "boolAttribute", "dataAttribute"])
+    -- v0.13 Layer 3: Html / Attr whitelist entries removed — those
+    -- are Sky-source stdlib modules now; their exported names come
+    -- from the parsed module, not this kernel registry.
     , ("Css",     ["stylesheet", "rule", "property", "px", "rem", "em", "pct", "hex", "rgba",
                     "color", "background", "backgroundColor", "padding", "padding2",
                     "margin", "margin2", "fontSize", "fontWeight", "fontFamily",
@@ -1066,13 +1043,8 @@ staticKernelFunctions = Map.fromList
                     "shadows", "borderRadius4", "padding4",
                     "keyframes", "frame", "boxSizingBorderBox"])
     , ("Live",    ["app", "route", "api"])
-    , ("Event",   ["onClick", "onInput", "onChange", "onSubmit", "onDblClick",
-                    "onMouseOver", "onMouseOut", "onKeyDown", "onKeyUp",
-                    "onFocus", "onBlur",
-                    "on", "onContextMenu", "onError", "onKeyPress", "onLoad",
-                    "onMouseDown", "onMouseUp", "onReset", "onResize", "onScroll",
-                    "onSelect", "onImage", "onFile",
-                    "fileMaxWidth", "fileMaxHeight", "fileMaxSize"])
+    -- v0.13 Layer 3: Event whitelist removed — Std.Html.Events is a
+    -- Sky-source stdlib module now.
     , ("Sub",     ["none", "every"])
     , ("Set",     ["empty", "fromList", "insert", "remove", "member", "toList",
                     "size", "union", "intersect", "diff"])

@@ -13,7 +13,7 @@ import Sky.Core.Error as Error exposing (Error)
 import Std.Db as Db
 import Std.Live as Live exposing (app, route)
 import Std.Html exposing (..)
-import Std.Live.Events exposing (onClick)
+import Std.Html.Events exposing (onClick)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 

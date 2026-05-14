@@ -5,14 +5,14 @@ import Sky.Core.List as List
 import Sky.Core.String as String
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
-import Std.Live.Events exposing (onClick)
+import Std.Html.Events exposing (onClick)
 import State exposing (..)
 import Lib.Database as Database
 import Ui.Layout as Layout
 import Ui.Charts as Charts
 
 
-viewDashboard : Model -> VNode
+viewDashboard : Model -> (Html Msg)
 viewDashboard model =
     Layout.page
         model
@@ -24,7 +24,7 @@ viewDashboard model =
             ])
 
 
-viewOverview : Model -> VNode
+viewOverview : Model -> (Html Msg)
 viewOverview model =
     let
         totalMonitors = List.length model.monitors
@@ -43,7 +43,7 @@ viewOverview model =
             ]
 
 
-overviewCard : String -> String -> String -> VNode
+overviewCard : String -> String -> String -> (Html Msg)
 overviewCard value label color =
     div
         [class "card"]
@@ -52,7 +52,7 @@ overviewCard value label color =
         ]
 
 
-viewMonitorsSection : Model -> VNode
+viewMonitorsSection : Model -> (Html Msg)
 viewMonitorsSection model =
     div
         [style "margin-bottom: 32px"]
@@ -68,7 +68,7 @@ viewMonitorsSection model =
         ]
 
 
-viewMonitorGrid : Model -> VNode
+viewMonitorGrid : Model -> (Html Msg)
 viewMonitorGrid model =
     let
         visible = filterVisible model.session model.monitors
@@ -84,7 +84,7 @@ viewMonitorGrid model =
             div [class "grid"] (List.map viewMonitorCard visible)
 
 
-viewMonitorCard : Monitor -> VNode
+viewMonitorCard : Monitor -> (Html Msg)
 viewMonitorCard monitor =
     div
         [ class "card monitor-card"
@@ -117,7 +117,7 @@ viewMonitorCard monitor =
         ]
 
 
-viewMetricsSection : Model -> VNode
+viewMetricsSection : Model -> (Html Msg)
 viewMetricsSection model =
     div
         [style "margin-bottom: 32px"]
@@ -133,7 +133,7 @@ viewMetricsSection model =
         ]
 
 
-viewMetricGrid : Model -> VNode
+viewMetricGrid : Model -> (Html Msg)
 viewMetricGrid model =
     let
         visible = filterVisibleMetrics model.session model.metrics
@@ -149,7 +149,7 @@ viewMetricGrid model =
             div [class "grid"] (List.map viewMetricCard visible)
 
 
-viewMetricCard : Metric -> VNode
+viewMetricCard : Metric -> (Html Msg)
 viewMetricCard metric =
     div
         [ class "card", onClick (Navigate (MetricDetailPage metric.id)) ]
@@ -165,7 +165,7 @@ viewMetricCard metric =
         ]
 
 
-viewAdminButton : Model -> String -> VNode
+viewAdminButton : Model -> String -> (Html Msg)
 viewAdminButton model label =
     case model.session of
 
@@ -184,7 +184,7 @@ viewAdminButton model label =
             text ""
 
 
-viewVisibilityBadge : Visibility -> VNode
+viewVisibilityBadge : Visibility -> (Html Msg)
 viewVisibilityBadge vis =
     case vis of
 

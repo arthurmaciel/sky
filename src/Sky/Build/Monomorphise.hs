@@ -509,7 +509,22 @@ specialiseFuncDecl
 specialiseFuncDecl mangledName σ originalName func =
     Ir.GoFuncDecl
         { Ir._gf_name       = mangledName
-        , Ir._gf_typeParams = []        -- drop type params
+        -- Retain any type params the instance's σ did NOT substitute.
+        -- A CallInstance can be partial — it captures concrete types
+        -- for the type params it could resolve at the call site, but
+        -- a param whose type stayed polymorphic at the call site
+        -- (e.g. the call lives inside another generic function) has
+        -- no entry in σ.  Dropping the ENTIRE type-param list while
+        -- those `Tn` still appear in the params / body / return
+        -- emits undeclared-identifier Go (`undefined: T2`).  Keeping
+        -- the unsubstituted ones produces a PARTIALLY-specialised
+        -- generic function — `func F[T2 any](field T2, …)` — which
+        -- is valid Go and still monomorphic in the resolved params.
+        , Ir._gf_typeParams =
+            [ tp
+            | tp@(tpName, _) <- Ir._gf_typeParams func
+            , not (Map.member tpName σ)
+            ]
         , Ir._gf_params     = map substParam (Ir._gf_params func)
         , Ir._gf_returnType = substTypeParamsInString σ (Ir._gf_returnType func)
         , Ir._gf_body       = map substStmt (Ir._gf_body func)

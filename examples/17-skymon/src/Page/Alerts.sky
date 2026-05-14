@@ -7,14 +7,14 @@ import Sky.Core.String as String
 import Sky.Core.Maybe as Maybe
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
-import Std.Live.Events exposing (onClick, onInput)
+import Std.Html.Events exposing (onClick, onInput)
 import State exposing (..)
 import Lib.Database as Database
 import Lib.Alerts as Alerts
 import Ui.Layout as Layout
 
 
-viewAlerts : Model -> VNode
+viewAlerts : Model -> (Html Msg)
 viewAlerts model =
     Layout.page
         model
@@ -27,7 +27,7 @@ viewAlerts model =
             ])
 
 
-viewAddAlertForm : Model -> VNode
+viewAddAlertForm : Model -> (Html Msg)
 viewAddAlertForm model =
     div
         [ class "card", style "margin-bottom: 24px" ]
@@ -120,7 +120,7 @@ viewAddAlertForm model =
         ]
 
 
-viewAlertList : Model -> VNode
+viewAlertList : Model -> (Html Msg)
 viewAlertList model =
     if List.isEmpty model.alerts then
         div
@@ -153,7 +153,7 @@ viewAlertList model =
                 ]]
 
 
-viewAlertRow : Model -> AlertRule -> VNode
+viewAlertRow : Model -> AlertRule -> (Html Msg)
 viewAlertRow model alert =
     let
         metricName = findMetricName alert.metricId model.metrics
@@ -212,7 +212,7 @@ truncate maxLen s =
         s
 
 
-viewAlertHistory : VNode
+viewAlertHistory : (Html Msg)
 viewAlertHistory =
     let
         history = Alerts.getAlertHistory 50
@@ -224,7 +224,7 @@ viewAlertHistory =
             ]
 
 
-viewAlertHistoryContent : List (Dict String String) -> VNode
+viewAlertHistoryContent : List (Dict String String) -> (Html Msg)
 viewAlertHistoryContent history =
     if List.isEmpty history then
         div
@@ -256,7 +256,7 @@ viewAlertHistoryContent history =
                 ]]
 
 
-viewAlertHistoryRow : Dict String String -> VNode
+viewAlertHistoryRow : Dict String String -> (Html Msg)
 viewAlertHistoryRow row =
     tr
         []

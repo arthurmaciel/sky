@@ -9,7 +9,7 @@ import State exposing (..)
 import Ui.Styles exposing (globalStyles)
 
 
-viewStatus : Model -> VNode
+viewStatus : Model -> (Html Msg)
 viewStatus model =
     let
         publicMonitors =
@@ -29,7 +29,7 @@ viewStatus model =
             ]
 
 
-viewStatusHeader : Bool -> Bool -> VNode
+viewStatusHeader : Bool -> Bool -> (Html Msg)
 viewStatusHeader allHealthy hasMonitors =
     div
         [class "status-header"]
@@ -49,12 +49,12 @@ viewStatusHeader allHealthy hasMonitors =
         ]
 
 
-viewStatusList : List Monitor -> VNode
+viewStatusList : List Monitor -> (Html Msg)
 viewStatusList monitors =
     div [] (List.map viewStatusRow monitors)
 
 
-viewStatusRow : Monitor -> VNode
+viewStatusRow : Monitor -> (Html Msg)
 viewStatusRow monitor =
     div
         [ class "card"
@@ -95,7 +95,7 @@ statusToString s =
             "unknown"
 
 
-viewStatusFooter : VNode
+viewStatusFooter : (Html Msg)
 viewStatusFooter =
     div
         [style

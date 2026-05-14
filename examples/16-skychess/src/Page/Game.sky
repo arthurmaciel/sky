@@ -7,14 +7,14 @@ import Sky.Core.Dict as Dict
 import Sky.Core.String as String
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
-import Std.Live.Events exposing (onClick)
+import Std.Html.Events exposing (onClick)
 import State exposing (..)
 import Chess.Piece exposing (..)
 import Chess.Board as Board
 import Ui.Layout as Layout
 
 
-viewGame : Model -> VNode
+viewGame : Model -> (Html Msg)
 viewGame model =
     Layout.page
         model
@@ -81,7 +81,7 @@ viewBoard model =
         (List.map (\rank -> viewRank rank model) [ 0, 1, 2, 3, 4, 5, 6, 7 ])
 
 
-viewRank : Int -> Model -> VNode
+viewRank : Int -> Model -> (Html Msg)
 viewRank rank model =
     tr
         []
@@ -90,7 +90,7 @@ viewRank rank model =
             [ 0, 1, 2, 3, 4, 5, 6, 7 ])
 
 
-viewSquare : Int -> Model -> VNode
+viewSquare : Int -> Model -> (Html Msg)
 viewSquare sq model =
     let
         row = sq // 8
@@ -163,7 +163,7 @@ addLastClass isLast isSelected =
         ""
 
 
-viewPieceContent : Maybe Piece -> VNode
+viewPieceContent : Maybe Piece -> (Html Msg)
 viewPieceContent maybePiece =
     case maybePiece of
 
@@ -224,7 +224,7 @@ viewMoveHistory model =
         ]
 
 
-viewMoveRows : List String -> Int -> List VNode
+viewMoveRows : List String -> Int -> List (Html Msg)
 viewMoveRows moves num =
     if List.isEmpty moves then
         []

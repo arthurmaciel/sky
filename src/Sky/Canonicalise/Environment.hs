@@ -376,12 +376,13 @@ staticKernelModules = Map.fromList
     , ("Sky.Core.Random",  "Random")
     , ("Sky.Core.Http",    "Http")
     , ("Sky.Http.Server",  "Server")
-    , ("Std.Html",             "Html")
-    , ("Std.Html.Attributes",  "Attr")
+    -- v0.13 Layer 3: Std.Html / Std.Html.Attributes / Std.Html.Events
+    -- are Sky-source stdlib modules now — NOT kernel pseudo-modules.
+    -- They must NOT appear here or the kernel registry shadows the
+    -- parsed Sky module on import resolution.  Std.Live.Events was
+    -- the old name for Std.Html.Events; fully migrated, no alias.
     , ("Std.Css",              "Css")
     , ("Std.Live",             "Live")
-    , ("Std.Live.Events",      "Event")
-    , ("Std.Html.Events",      "Event")
     -- Sky.Cli — line-oriented TEA backend. Same Cmd/Sub/program shape
     -- as Sky.Live, view returns String (the prompt), onLine maps each
     -- stdin line to a Msg. See runtime-go/rt/cli.go.
@@ -452,13 +453,12 @@ staticKernelModules = Map.fromList
     , ("Random",     "Random")
     , ("Http",       "Http")
     , ("Server",     "Server")
-    , ("Html",       "Html")
-    , ("Attr",       "Attr")
+    -- Html / Attr / Event bare aliases removed (v0.13 Layer 3) —
+    -- those are Sky-source modules; resolve them via a real import.
     , ("Css",        "Css")
     , ("Live",       "Live")
     , ("Cli",        "Cli")
     , ("Tui",        "Tui")
-    , ("Event",      "Event")
     , ("JsonEnc",    "JsonEnc")
     , ("JsonDec",    "JsonDec")
     , ("JsonDecP",   "JsonDecP")

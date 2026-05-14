@@ -4,7 +4,7 @@ import Sky.Core.Prelude exposing (..)
 import Sky.Core.String as String
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
-import Std.Live.Events exposing (onClick)
+import Std.Html.Events exposing (onClick)
 import Std.Cmd as Cmd
 
 -- ============================================================
@@ -59,7 +59,7 @@ update msg counter =
 
 -- View with toMsg wrapper
 -- The toMsg function wraps internal Msgs for the parent's event system.
-view : (Msg -> parentMsg) -> Counter -> VNode
+view : (Msg -> parentMsg) -> Counter -> Html parentMsg
 view toMsg counter =
     div
         [class "counter-component"]
