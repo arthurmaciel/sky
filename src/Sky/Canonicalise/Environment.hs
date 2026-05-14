@@ -381,7 +381,8 @@ staticKernelModules = Map.fromList
     -- They must NOT appear here or the kernel registry shadows the
     -- parsed Sky module on import resolution.  Std.Live.Events was
     -- the old name for Std.Html.Events; fully migrated, no alias.
-    , ("Std.Css",              "Css")
+    -- Std.Css is a Sky-source stdlib module (v0.13 Layer 3) — NOT a
+    -- kernel pseudo-module.
     , ("Std.Live",             "Live")
     -- Sky.Cli — line-oriented TEA backend. Same Cmd/Sub/program shape
     -- as Sky.Live, view returns String (the prompt), onLine maps each
@@ -455,7 +456,8 @@ staticKernelModules = Map.fromList
     , ("Server",     "Server")
     -- Html / Attr / Event bare aliases removed (v0.13 Layer 3) —
     -- those are Sky-source modules; resolve them via a real import.
-    , ("Css",        "Css")
+    -- Css bare alias removed (v0.13 Layer 3) — Sky-source module;
+    -- resolve via a real `import Std.Css`.
     , ("Live",       "Live")
     , ("Cli",        "Cli")
     , ("Tui",        "Tui")

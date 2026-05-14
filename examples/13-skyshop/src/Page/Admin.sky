@@ -28,6 +28,7 @@ import Tailwind.Responsive as Responsive
 -- ══════════════════════════════════════════════════════
 -- ADMIN PRODUCT LIST
 -- ══════════════════════════════════════════════════════
+viewAdminProducts : Model -> Html Msg
 viewAdminProducts model =
     let
         lang = model.lang
@@ -102,6 +103,7 @@ viewAdminProducts model =
                 ])
 
 
+viewAdminProductRow : Model -> Dict String String -> Html Msg
 viewAdminProductRow model product =
     let
         productId = Db.getField "id" product
@@ -247,7 +249,7 @@ viewProductForm model =
                               , onInput UpdateEditTitle
                               , Layout.formInput
                               , placeholder "Product name"
-                              , required ()
+                              , required True
                               ]
                         ]
                   , div
@@ -280,7 +282,7 @@ viewProductForm model =
                                             option
                                                 [ value cat
                                                 , if cat == model.editCategory then
-                                                      selected ()
+                                                      selected True
 
                                                   else
                                                       class ""
@@ -302,7 +304,7 @@ viewProductForm model =
                                             option
                                                 [ value cur
                                                 , if cur == model.editCurrency then
-                                                      selected ()
+                                                      selected True
 
                                                   else
                                                       class ""
@@ -338,7 +340,7 @@ viewProductForm model =
                                                       (String.toInt s)))
                                     , Layout.formInput
                                     , placeholder "0"
-                                    , required ()
+                                    , required True
                                     , Attr.min "0"
                                     ]
                               ]

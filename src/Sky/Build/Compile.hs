@@ -765,6 +765,23 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- module graph irrelevant.  The cap (16) only guards
             -- against a pathological oscillation — real graphs
             -- converge in `depth-of-chain` rounds.
+            -- Each round's per-module result is
+            --   `Right (types, csi, mErr)` — solved (mErr=Nothing) OR
+            --     fell back to the previous round's types because THIS
+            --     round still had a non-Foreign error (mErr=Just err);
+            --   `Left err` — a Foreign error, or a non-Foreign error
+            --     with no previous-round types to fall back to.
+            -- The fell-back `Just err` is what closes the v0.13 Layer 3
+            -- soundness hole: DURING the fixpoint a module legitimately
+            -- errors because its externals aren't ready yet, so we keep
+            -- iterating; but at CONVERGENCE the externals are complete,
+            -- so a module that STILL errors has a REAL type bug and is
+            -- surfaced FATALLY (see `depErrors` below) instead of
+            -- silently shipping its stale round-1 typing.  Pre-fix, a
+            -- typed dep param (`Css.padding2 : Length -> Length`)
+            -- failed to reject a `String` arg in a consumer because the
+            -- consumer module's own non-Foreign solve error was
+            -- tolerated and its polymorphic round-1 types shipped.
             let solveRound prevSolved = do
                     let externals =
                             buildCrossModuleExternalsWithMods validDeps prevSolved
@@ -772,20 +789,21 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         cs <- Constrain.constrainModuleWithExternals externals depMod
                         (r, _, csi) <- Solve.solveWithInstances cs
                         case r of
-                            Solve.SolveOk t -> return (modName, Right (t, csi))
+                            Solve.SolveOk t ->
+                                return (modName, Right (t, csi, Nothing))
                             Solve.SolveError err
                                 | isForeignErr err -> return (modName, Left err)
                                 -- Non-Foreign error: keep the previous
-                                -- round's (partial) types so a latent
-                                -- bug in one dep doesn't erase the rest,
-                                -- but keep THIS round's CSI for mangled-
-                                -- name routing inside the dep body.
+                                -- round's types so a not-yet-ready dep
+                                -- doesn't erase the rest, but REMEMBER
+                                -- the error so convergence can decide
+                                -- whether it was transient or real.
                                 | otherwise -> case lookup modName prevSolved of
                                     Just p | not (Map.null p) ->
-                                        return (modName, Right (p, csi))
+                                        return (modName, Right (p, csi, Just err))
                                     _ -> return (modName, Left err)) validDeps
                 depTypesOf results =
-                    [(mn, t) | (mn, Right (t, _)) <- results]
+                    [(mn, t) | (mn, Right (t, _, _)) <- results]
                 solveFixpoint prevSolved n = do
                     results <- solveRound prevSolved
                     let curSolved = depTypesOf results
@@ -794,8 +812,12 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         else solveFixpoint curSolved (n + 1)
             finalResults <- solveFixpoint depSolved0 (0 :: Int)
             let depErrors = [(mn, e) | (mn, Left e) <- finalResults]
-                depSolved = [(mn, t) | (mn, Right (t, _)) <- finalResults]
-                depCsiByMod = [(mn, csi) | (mn, Right (_, csi)) <- finalResults]
+                         -- Converged-round non-Foreign errors are real.
+                         ++ [ (mn, e)
+                            | (mn, Right (_, _, Just e)) <- finalResults
+                            ]
+                depSolved = [(mn, t) | (mn, Right (t, _, _)) <- finalResults]
+                depCsiByMod = [(mn, csi) | (mn, Right (_, csi, _)) <- finalResults]
             unless (null depErrors) $ do
                 -- v0.13 Layer 1: route dep-module type errors through the
                 -- structured Diagnostic renderer too.  Pre-fix each was
@@ -4094,7 +4116,13 @@ safeReturnTypeWith recAliases = go
         T.TTuple _ _ [_]              -> "rt.SkyTuple3"
         T.TTuple _ _ _                -> "rt.SkyTupleN"
         T.TType _ name _ | Just goTy <- opaqueParameterisedGoTy name -> goTy
-        T.TType home name [] ->
+        -- v0.13 Layer 3: `_` (not `[]`) so a PARAMETERISED Sky ADT
+        -- (`Html msg`, `Attribute msg`, `Element msg`) renders to its
+        -- erased Go struct name — the ADT emits as a non-generic
+        -- `type Mod_Name = rt.SkyADT`, so the `msg` arg is irrelevant
+        -- to the Go type name.  Pre-fix these fell through to `any`,
+        -- giving 177/183 `Std_Html_*` functions `any`-typed sigs.
+        T.TType home name _ ->
             let modStr = ModuleName.toString home
                 prefix = if null modStr || modStr == "Main"
                            then ""
@@ -4690,13 +4718,15 @@ typeStrWithAliasesReg recAliases fieldIdx tvarMap ty = case ty of
     T.TUnit               -> "struct{}"
     -- User-defined types: resolve via record alias set + runtime map.
     -- NOTE: matches only `[]` (no type args) deliberately —
-    -- widening to `_` correctly types parameterised Sky ADTs like
-    -- `Element msg`, but the call-site coercion machinery
-    -- (`coerceCallArgsAt` / dep-body call lowering) doesn't yet
-    -- bridge `[]any` → `[]Mod_Name` for dep-to-dep ADT args, so
-    -- `Std.Ui`-heavy modules fail `go build`.  Re-attempt once that
-    -- coercion path is in place.
-    T.TType home name [] ->
+    -- v0.13 Layer 3: `_` (not `[]`) so a PARAMETERISED Sky ADT
+    -- (`Html msg`, `Attribute msg`, `Element msg`) renders to its
+    -- erased Go struct name (`Std_Html_Html`) rather than `any`.
+    -- The ADT emits as a non-generic `type Mod_Name = rt.SkyADT`,
+    -- so the type arg is irrelevant to the Go name.  The call-site
+    -- coercion bridges `[]any` → `[]Mod_Name` via
+    -- `rt.AsListT[Mod_Name]` (coerceArg's stripSlice arm) and
+    -- `Mod_Name` ↔ `any` via `rt.Coerce`.
+    T.TType home name _ ->
         let modStr = ModuleName.toString home
             prefix = if null modStr || modStr == "Main"
                        then ""
@@ -5545,14 +5575,9 @@ typedKernelArgCoerce = Map.fromList
     , (("Dict",   "keys"),    ["AsDict"])
     , (("Dict",   "values"),  ["AsDict"])
     , (("Dict",   "get"),     ["Pass", "Pass"])
-    -- Css.hex — simple string → X. High-frequency.
-    -- (Html.text / Attr.class entries removed in v0.13 Layer 3 —
-    -- Std.Html* are Sky-source modules now; kernel-call hints
-    -- never fire for them.)
-    , (("Css",    "hex"),     ["AsString"])
-    , (("Css",    "property"),["AsString", "AsString"])
-    , (("Css",    "px"),      ["AsFloat"])
-    , (("Css",    "rem"),     ["AsFloat"])
+    -- (Html / Attr / Css kernel-call hints removed in v0.13 Layer 3 —
+    -- Std.Html* and Std.Css are Sky-source modules now; their calls
+    -- resolve to VarTopLevel, so these hints never fired.)
     -- Log.println: single-arg, any → struct{}{}. Very high-frequency.
     , (("Log",    "println"), ["Pass"])
     , (("Server", "html"),    ["AsString"])
@@ -5630,9 +5655,7 @@ typedKernelLiterals = Set.fromList
     , ("List",   "isEmpty")
     , ("Dict",   "member"),     ("Dict",   "insert")
     , ("Dict",   "keys"),       ("Dict",   "values"),   ("Dict", "get")
-    -- (Html.text / Attr.class removed v0.13 Layer 3 — Sky-source modules.)
-    , ("Css",    "hex")
-    , ("Css",    "property"),   ("Css",    "px"),       ("Css", "rem")
+    -- (Html / Attr / Css removed v0.13 Layer 3 — Sky-source modules.)
     , ("Log",    "println")
     , ("Server", "html"),      ("Server", "redirect")
     , ("List",   "map"),       ("List",   "filter"),     ("List", "take"), ("List", "cons")

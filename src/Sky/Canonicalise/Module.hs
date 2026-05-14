@@ -1006,42 +1006,9 @@ staticKernelFunctions = Map.fromList
     -- v0.13 Layer 3: Html / Attr whitelist entries removed — those
     -- are Sky-source stdlib modules now; their exported names come
     -- from the parsed module, not this kernel registry.
-    , ("Css",     ["stylesheet", "rule", "property", "px", "rem", "em", "pct", "hex", "rgba",
-                    "color", "background", "backgroundColor", "padding", "padding2",
-                    "margin", "margin2", "fontSize", "fontWeight", "fontFamily",
-                    "lineHeight", "textAlign", "textDecoration", "border", "borderRadius",
-                    "borderTop", "borderBottom", "borderLeft", "borderRight", "borderColor",
-                    "display", "cursor", "gap", "justifyContent", "alignItems",
-                    "width", "height", "maxWidth", "minWidth", "maxHeight", "minHeight",
-                    "transform", "transition", "top", "bottom", "left", "right",
-                    "position", "zIndex", "opacity", "overflow", "overflowX", "overflowY",
-                    "flex", "flexDirection", "flexWrap", "flexGrow", "flexShrink", "flexBasis",
-                    "gridTemplateColumns", "gridTemplateRows", "gridColumn", "gridRow",
-                    "gridGap", "gap", "rowGap", "columnGap", "boxShadow", "boxSizing",
-                    "media", "shadow", "zero", "borderBox", "systemFont",
-                    "borderCollapse", "borderSpacing",
-                    "marginTop", "marginBottom", "marginLeft", "marginRight",
-                    "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
-                    "visibility", "content", "auto", "none", "transparent",
-                    "inherit", "initial", "monoFont",
-                    "textTransform", "letterSpacing",
-                    "linearGradient", "repeat", "fr",
-                    "margin4", "fontStyle", "styles",
-                    "transitionProp", "transitionDuration", "transitionTimingFunction",
-                    "outline", "outlineOffset", "filter", "backdropFilter",
-                    "pointerEvents", "objectFit", "objectPosition",
-                    "backgroundSize", "backgroundPosition", "backgroundRepeat",
-                    "listStyle", "listStyleType", "listStylePosition",
-                    "verticalAlign",
-                    "vh", "vw", "ch", "deg", "ms", "sec",
-                    "rgb", "hsl", "hsla",
-                    "alignSelf", "alignContent", "order", "gridArea",
-                    "borderWidth", "borderStyle", "textOverflow", "textShadow",
-                    "clear", "float", "right_", "animation",
-                    "minmax", "rotate", "scale", "translateX", "translateY",
-                    "cssVar", "cssVarOr", "defineVar", "calc", "important",
-                    "shadows", "borderRadius4", "padding4",
-                    "keyframes", "frame", "boxSizingBorderBox"])
+    -- v0.13 Layer 3: Css whitelist removed — Std.Css is a Sky-source
+    -- stdlib module now; its exported names come from the parsed
+    -- module, not this kernel registry.
     , ("Live",    ["app", "route", "api"])
     -- v0.13 Layer 3: Event whitelist removed — Std.Html.Events is a
     -- Sky-source stdlib module now.

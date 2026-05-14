@@ -69,7 +69,7 @@ borderMedium = hex "cbd5e1"
 globalStyles =
     stylesheet
         [ rule "*, *::before, *::after"
-              [ property "box-sizing" "border-box" , margin "0" , padding "0" ]
+              [ property "box-sizing" "border-box" , margin (zero ()) , padding (zero ()) ]
         -- Layout
         , rule "body"
               [ fontFamily
@@ -79,28 +79,28 @@ globalStyles =
         -- Buttons
               , color textPrimary
         -- Cards
-              , lineHeight "1.6"
+              , lineHeight (num 1.6)
         -- Forms
               , fontSize (px 16)
               ]
         -- Badges
-        , rule "a" [ color primary , textDecoration "none" ]
+        , rule "a" [ color primary , textDecoration NoDecoration ]
         -- Vote button
-        , rule "a:hover" [ textDecoration "underline" ]
+        , rule "a:hover" [ textDecoration Underline ]
         -- Idea list
         , rule ".container"
-              [ maxWidth (px 960) , margin2 "0" "auto" , padding2 "0" (px 20) ]
+              [ maxWidth (px 960) , margin2 (zero ()) (auto ()) , padding2 (zero ()) (px 20) ]
         -- Toolbar
         , rule ".header"
               [ backgroundColor bgCard
         -- Page title
-              , borderBottom ("1px solid " ++ borderLight)
+              , borderBottom ("1px solid " ++ colorToString borderLight)
         -- Detail page
-              , padding2 (px 16) "0"
+              , padding2 (px 16) (zero ())
         -- Comments
               , property "position" "sticky"
         -- Auth pages
-              , top "0"
+              , top (zero ())
         -- About & Roadmap
               , zIndex 100
               ]
@@ -108,39 +108,39 @@ globalStyles =
         , rule ".header-inner"
               [ maxWidth (px 960)
         -- Stats
-              , margin2 "0" "auto"
+              , margin2 (zero ()) (auto ())
         -- Empty state
-              , padding2 "0" (px 20)
+              , padding2 (zero ()) (px 20)
         -- Notification
-              , display "flex"
+              , display Flex
         -- Responsive
-              , justifyContent "space-between"
-              , alignItems "center"
+              , justifyContent SpaceBetween
+              , alignItems Center
               ]
         , rule ".logo"
               [ fontSize (px 22)
-              , fontWeight "700"
+              , fontWeight (Weight 700)
               , color primary
-              , textDecoration "none"
-              , display "flex"
-              , alignItems "center"
+              , textDecoration NoDecoration
+              , display Flex
+              , alignItems Center
               , gap (px 8)
               ]
-        , rule ".logo:hover" [ textDecoration "none" ]
-        , rule ".nav" [ display "flex" , gap (px 8) , alignItems "center" ]
+        , rule ".logo:hover" [ textDecoration NoDecoration ]
+        , rule ".nav" [ display Flex , gap (px 8) , alignItems Center ]
         , rule ".nav-link"
               [ padding2 (px 8) (px 16)
               , borderRadius (px 8)
               , color textSecondary
               , fontSize (px 14)
-              , fontWeight "500"
-              , textDecoration "none"
+              , fontWeight (Weight 500)
+              , textDecoration NoDecoration
               , transition "all 0.15s"
               ]
         , rule ".nav-link:hover"
               [ backgroundColor bgInput
               , color textPrimary
-              , textDecoration "none"
+              , textDecoration NoDecoration
               ]
         , rule ".nav-link.active"
               [ backgroundColor primaryLight , color primary ]
@@ -149,13 +149,13 @@ globalStyles =
               , borderRadius (px 8)
               , border "none"
               , fontSize (px 14)
-              , fontWeight "600"
-              , cursor "pointer"
+              , fontWeight (Weight 600)
+              , cursor Pointer
               , transition "all 0.15s"
-              , display "inline-flex"
-              , alignItems "center"
+              , display InlineFlex
+              , alignItems Center
               , gap (px 6)
-              , textDecoration "none"
+              , textDecoration NoDecoration
               ]
         , rule ".btn-primary" [ backgroundColor primary , color (hex "ffffff") ]
         , rule ".btn-primary:hover" [ backgroundColor primaryHover ]
@@ -172,15 +172,15 @@ globalStyles =
         , rule ".card"
               [ backgroundColor bgCard
               , borderRadius (px 12)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , padding (px 24)
               ]
         , rule ".card:hover" [ borderColor borderMedium ]
         , rule ".form-group" [ property "margin-bottom" "16px" ]
         , rule ".form-label"
-              [ display "block"
+              [ display Block
               , fontSize (px 14)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textPrimary
               , property "margin-bottom" "6px"
               ]
@@ -188,9 +188,9 @@ globalStyles =
               [ width (pct 100)
               , padding2 (px 10) (px 14)
               , borderRadius (px 8)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , fontSize (px 14)
-              , lineHeight "1.5"
+              , lineHeight (num 1.5)
               , backgroundColor bgCard
               , color textPrimary
               , transition "border-color 0.15s"
@@ -199,22 +199,22 @@ globalStyles =
         , rule ".form-input:focus"
               [ borderColor primary
               , property "outline" "none"
-              , property "box-shadow" ("0 0 0 3px " ++ primaryLight)
+              , property "box-shadow" ("0 0 0 3px " ++ colorToString primaryLight)
               ]
         , rule "textarea.form-input"
               [ property "min-height" "120px" , property "resize" "vertical" ]
-        , rule "select.form-input" [ cursor "pointer" ]
+        , rule "select.form-input" [ cursor Pointer ]
         , rule ".form-error"
               [ color danger , fontSize (px 13) , property "margin-top" "6px" ]
         , rule ".form-actions"
-              [ display "flex" , gap (px 12) , justifyContent "flex-end" ]
+              [ display Flex , gap (px 12) , justifyContent End ]
         , rule ".badge"
-              [ display "inline-flex"
-              , alignItems "center"
+              [ display InlineFlex
+              , alignItems Center
               , padding2 (px 3) (px 10)
               , borderRadius (px 12)
               , fontSize (px 12)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , property "text-transform" "capitalize"
               ]
         , rule ".badge-feature" [ backgroundColor primaryLight , color primary ]
@@ -228,14 +228,14 @@ globalStyles =
         , rule ".badge-done" [ backgroundColor successLight , color success ]
         , rule ".badge-declined" [ backgroundColor dangerLight , color danger ]
         , rule ".vote-btn"
-              [ display "flex"
-              , flexDirection "column"
-              , alignItems "center"
+              [ display Flex
+              , flexDirection Column
+              , alignItems Center
               , padding2 (px 8) (px 16)
               , borderRadius (px 10)
-              , border ("2px solid " ++ borderLight)
+              , border ("2px solid " ++ colorToString borderLight)
               , backgroundColor bgCard
-              , cursor "pointer"
+              , cursor Pointer
               , transition "all 0.15s"
               , property "min-width" "64px"
               ]
@@ -247,50 +247,51 @@ globalStyles =
               , color primary
               ]
         , rule ".vote-count"
-              [ fontSize (px 20) , fontWeight "700" , lineHeight "1.2" ]
+              [ fontSize (px 20) , fontWeight (Weight 700) , lineHeight (num 1.2) ]
         , rule ".vote-label"
               [ fontSize (px 11)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textMuted
               , property "text-transform" "uppercase"
               , property "letter-spacing" "0.5px"
               ]
         , rule ".idea-list"
-              [ display "flex"
-              , flexDirection "column"
+              [ display Flex
+              , flexDirection Column
               , gap (px 12)
               , property "margin-top" "20px"
               ]
         , rule ".idea-card"
-              [ display "flex"
+              [ display Flex
               , gap (px 16)
               , padding (px 20)
               , backgroundColor bgCard
               , borderRadius (px 12)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , transition "all 0.15s"
-              , cursor "pointer"
+              , cursor Pointer
               ]
         , rule ".idea-card:hover"
               [ borderColor borderMedium
-              , property "box-shadow" ("0 2px 8px 0 " ++ rgba 0 0 0 0.05)
+              , property "box-shadow"
+                    ("0 2px 8px 0 " ++ colorToString (rgba 0 0 0 0.05))
               ]
         , rule ".idea-content" [ flex "1 1 0%" , property "min-width" "0" ]
         , rule ".idea-title"
               [ fontSize (px 16)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textPrimary
               , property "margin-bottom" "4px"
               ]
         , rule ".idea-title-btn"
               [ property "background" "none"
               , border "none"
-              , cursor "pointer"
-              , textAlign "left"
+              , cursor Pointer
+              , textAlign AlignLeft
               , fontSize (px 16)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textPrimary
-              , padding "0"
+              , padding (zero ())
               ]
         , rule ".idea-desc"
               [ fontSize (px 14)
@@ -299,39 +300,39 @@ globalStyles =
               , property "display" "-webkit-box"
               , property "-webkit-line-clamp" "2"
               , property "-webkit-box-orient" "vertical"
-              , overflow "hidden"
+              , overflow Hidden
               ]
         , rule ".idea-meta"
-              [ display "flex"
+              [ display Flex
               , gap (px 12)
               , fontSize (px 13)
               , color textMuted
-              , alignItems "center"
+              , alignItems Center
               ]
         , rule ".toolbar"
-              [ display "flex"
+              [ display Flex
               , gap (px 12)
-              , alignItems "center"
-              , flexWrap "wrap"
+              , alignItems Center
+              , flexWrap Wrap
               , property "margin-bottom" "16px"
               ]
         , rule ".search-input"
               [ flex "1 1 200px"
               , padding2 (px 10) (px 14)
               , borderRadius (px 8)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , fontSize (px 14)
               ]
-        , rule ".filter-group" [ display "flex" , gap (px 4) ]
+        , rule ".filter-group" [ display Flex , gap (px 4) ]
         , rule ".filter-btn"
               [ padding2 (px 6) (px 14)
               , borderRadius (px 6)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , backgroundColor bgCard
               , fontSize (px 13)
-              , cursor "pointer"
+              , cursor Pointer
               , color textSecondary
-              , fontWeight "500"
+              , fontWeight (Weight 500)
               ]
         , rule ".filter-btn:hover"
               [ borderColor borderMedium , color textPrimary ]
@@ -342,7 +343,7 @@ globalStyles =
               ]
         , rule ".page-title"
               [ fontSize (px 28)
-              , fontWeight "700"
+              , fontWeight (Weight 700)
               , color textPrimary
               , property "margin-bottom" "8px"
               ]
@@ -354,25 +355,25 @@ globalStyles =
         , rule ".detail-header" [ property "margin-bottom" "24px" ]
         , rule ".detail-title"
               [ fontSize (px 24)
-              , fontWeight "700"
+              , fontWeight (Weight 700)
               , property "margin-bottom" "12px"
               ]
         , rule ".detail-body"
               [ fontSize (px 15)
-              , lineHeight "1.7"
+              , lineHeight (num 1.7)
               , color textSecondary
               , property "margin-bottom" "24px"
               ]
         , rule ".detail-actions"
-              [ display "flex"
+              [ display Flex
               , gap (px 12)
-              , alignItems "center"
+              , alignItems Center
               , property "margin-bottom" "32px"
               ]
         , rule ".comments-section" [ property "margin-top" "32px" ]
         , rule ".comments-title"
               [ fontSize (px 18)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , property "margin-bottom" "16px"
               ]
         , rule ".comment"
@@ -382,52 +383,52 @@ globalStyles =
               , property "margin-bottom" "12px"
               ]
         , rule ".comment-header"
-              [ display "flex"
-              , justifyContent "space-between"
+              [ display Flex
+              , justifyContent SpaceBetween
               , property "margin-bottom" "6px"
               , fontSize (px 13)
               ]
-        , rule ".comment-author" [ fontWeight "600" , color textPrimary ]
+        , rule ".comment-author" [ fontWeight (Weight 600) , color textPrimary ]
         , rule ".comment-date" [ color textMuted ]
         , rule ".comment-body"
-              [ fontSize (px 14) , color textSecondary , lineHeight "1.6" ]
+              [ fontSize (px 14) , color textSecondary , lineHeight (num 1.6) ]
         , rule ".comment-form" [ property "margin-top" "16px" ]
         , rule ".auth-container"
               [ maxWidth (px 420)
-              , margin2 (px 60) "auto"
-              , padding2 "0" (px 20)
+              , margin2 (px 60) (auto ())
+              , padding2 (zero ()) (px 20)
               ]
         , rule ".auth-card"
               [ backgroundColor bgCard
               , borderRadius (px 16)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , padding (px 32)
               ]
         , rule ".auth-title"
               [ fontSize (px 24)
-              , fontWeight "700"
-              , textAlign "center"
+              , fontWeight (Weight 700)
+              , textAlign AlignCenter
               , property "margin-bottom" "24px"
               ]
         , rule ".auth-footer"
-              [ textAlign "center"
+              [ textAlign AlignCenter
               , property "margin-top" "16px"
               , fontSize (px 14)
               , color textSecondary
               ]
         , rule ".content-page"
               [ maxWidth (px 720)
-              , margin2 (px 40) "auto"
-              , padding2 "0" (px 20)
+              , margin2 (px 40) (auto ())
+              , padding2 (zero ()) (px 20)
               ]
         , rule ".content-page h1"
               [ fontSize (px 32)
-              , fontWeight "700"
+              , fontWeight (Weight 700)
               , property "margin-bottom" "16px"
               ]
         , rule ".content-page h2"
               [ fontSize (px 22)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , property "margin-top" "32px"
               , property "margin-bottom" "12px"
               ]
@@ -435,7 +436,7 @@ globalStyles =
               [ fontSize (px 16)
               , color textSecondary
               , property "margin-bottom" "12px"
-              , lineHeight "1.7"
+              , lineHeight (num 1.7)
               ]
         , rule ".content-page ul"
               [ property "margin-left" "20px"
@@ -445,7 +446,7 @@ globalStyles =
               [ fontSize (px 15)
               , color textSecondary
               , property "margin-bottom" "6px"
-              , lineHeight "1.6"
+              , lineHeight (num 1.6)
               ]
         , rule ".content-page code"
               [ backgroundColor bgInput
@@ -456,7 +457,7 @@ globalStyles =
                     "ui-monospace, 'SF Mono', Monaco, 'Cascadia Code', monospace"
               ]
         , rule ".roadmap-grid"
-              [ display "grid"
+              [ display Grid
               , gridTemplateColumns "repeat(auto-fit, minmax(280px, 1fr))"
               , gap (px 20)
               , property "margin-top" "24px"
@@ -464,15 +465,15 @@ globalStyles =
         , rule ".roadmap-column"
               [ backgroundColor bgCard
               , borderRadius (px 12)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , padding (px 20)
               ]
         , rule ".roadmap-column-title"
               [ fontSize (px 16)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , property "margin-bottom" "16px"
-              , display "flex"
-              , alignItems "center"
+              , display Flex
+              , alignItems Center
               , gap (px 8)
               ]
         , rule ".roadmap-item"
@@ -484,17 +485,17 @@ globalStyles =
         , rule ".roadmap-item-title"
               [ property "background" "none"
               , border "none"
-              , cursor "pointer"
-              , textAlign "left"
+              , cursor Pointer
+              , textAlign AlignLeft
               , fontSize (px 14)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textPrimary
-              , padding "0"
+              , padding (zero ())
               , property "margin-bottom" "4px"
               ]
         , rule ".roadmap-count"
               [ fontSize (px 13)
-              , fontWeight "400"
+              , fontWeight (Weight 400)
               , color textMuted
               , property "margin-left" "8px"
               ]
@@ -506,12 +507,12 @@ globalStyles =
         , rule ".roadmap-empty"
               [ fontSize (px 13)
               , color borderMedium
-              , textAlign "center"
+              , textAlign AlignCenter
               , padding (px 12)
               ]
         , rule ".roadmap-item-votes" [ fontSize (px 12) , color textMuted ]
         , rule ".stats-grid"
-              [ display "grid"
+              [ display Grid
               , gridTemplateColumns "repeat(auto-fit, minmax(140px, 1fr))"
               , gap (px 12)
               , property "margin-bottom" "24px"
@@ -519,19 +520,19 @@ globalStyles =
         , rule ".stat-card"
               [ backgroundColor bgCard
               , borderRadius (px 10)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , padding (px 16)
-              , textAlign "center"
+              , textAlign AlignCenter
               ]
         , rule ".stat-value"
-              [ fontSize (px 28) , fontWeight "700" , color primary ]
+              [ fontSize (px 28) , fontWeight (Weight 700) , color primary ]
         , rule ".stat-label"
               [ fontSize (px 13)
               , color textMuted
               , property "margin-top" "4px"
               ]
         , rule ".empty-state"
-              [ textAlign "center"
+              [ textAlign AlignCenter
               , padding2 (px 48) (px 20)
               , color textMuted
               ]
@@ -542,7 +543,7 @@ globalStyles =
               , borderRadius (px 8)
               , backgroundColor successLight
               , color success
-              , fontWeight "500"
+              , fontWeight (Weight 500)
               , fontSize (px 14)
               , property "margin-bottom" "16px"
               ]
@@ -551,7 +552,7 @@ globalStyles =
         , rule ".mt-32" [ property "margin-top" "32px" ]
         , rule ".mb-16" [ property "margin-bottom" "16px" ]
         , rule ".mb-20" [ property "margin-bottom" "20px" ]
-        , rule ".text-center" [ textAlign "center" ]
+        , rule ".text-center" [ textAlign AlignCenter ]
         , rule ".text-muted-sm" [ color textMuted , fontSize (px 14) ]
         , rule ".text-secondary-sm"
               [ color textSecondary
@@ -559,37 +560,37 @@ globalStyles =
               , property "margin-bottom" "20px"
               ]
         , rule ".flex-row-gap-8"
-              [ display "flex" , gap (px 8) , property "margin-bottom" "12px" ]
+              [ display Flex , gap (px 8) , property "margin-bottom" "12px" ]
         , rule ".board-header"
-              [ display "flex"
-              , justifyContent "space-between"
-              , alignItems "flex-start"
+              [ display Flex
+              , justifyContent SpaceBetween
+              , alignItems Start
               , gap (px 24)
-              , flexWrap "wrap"
+              , flexWrap Wrap
               , property "margin-top" "32px"
               ]
         , rule ".submit-container"
-              [ maxWidth (px 640) , margin2 (px 32) "auto" ]
-        , rule ".auth-btn-full" [ width (pct 100) , justifyContent "center" ]
-        , rule ".auth-prompt" [ textAlign "center" , padding (px 20) ]
+              [ maxWidth (px 640) , margin2 (px 32) (auto ()) ]
+        , rule ".auth-btn-full" [ width (pct 100) , justifyContent Center ]
+        , rule ".auth-prompt" [ textAlign AlignCenter , padding (px 20) ]
         , rule ".auth-nav"
-              [ display "flex"
+              [ display Flex
               , gap (px 8)
-              , alignItems "center"
+              , alignItems Center
               , property "margin-left" "12px"
               , property "padding-left" "12px"
-              , borderLeft ("1px solid " ++ borderLight)
+              , borderLeft ("1px solid " ++ colorToString borderLight)
               ]
         , rule ".auth-nav-anon"
-              [ display "flex"
+              [ display Flex
               , gap (px 8)
-              , alignItems "center"
+              , alignItems Center
               , property "margin-left" "12px"
               ]
         , media "(max-width: 640px)"
-              [ rule ".toolbar" [ flexDirection "column" ]
-              , rule ".filter-group" [ flexWrap "wrap" ]
-              , rule ".idea-card" [ flexDirection "column" ]
-              , rule ".header-inner" [ flexDirection "column" , gap (px 12) ]
+              [ rule ".toolbar" [ flexDirection Column ]
+              , rule ".filter-group" [ flexWrap Wrap ]
+              , rule ".idea-card" [ flexDirection Column ]
+              , rule ".header-inner" [ flexDirection Column , gap (px 12) ]
               ]
         ]
