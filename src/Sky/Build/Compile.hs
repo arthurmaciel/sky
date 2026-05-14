@@ -4668,6 +4668,13 @@ typeStrWithAliasesReg recAliases fieldIdx tvarMap ty = case ty of
     T.TType _ "Bytes" []  -> "[]byte"
     T.TUnit               -> "struct{}"
     -- User-defined types: resolve via record alias set + runtime map.
+    -- NOTE: matches only `[]` (no type args) deliberately —
+    -- widening to `_` correctly types parameterised Sky ADTs like
+    -- `Element msg`, but the call-site coercion machinery
+    -- (`coerceCallArgsAt` / dep-body call lowering) doesn't yet
+    -- bridge `[]any` → `[]Mod_Name` for dep-to-dep ADT args, so
+    -- `Std.Ui`-heavy modules fail `go build`.  Re-attempt once that
+    -- coercion path is in place.
     T.TType home name [] ->
         let modStr = ModuleName.toString home
             prefix = if null modStr || modStr == "Main"
