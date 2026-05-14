@@ -6179,6 +6179,16 @@ caseToGo subject branches =
                 | Just (_, _, retTy) <- Map.lookup qualName inferredSigMap
                 , isConcreteResultOrMaybe retTy
                 -> True
+            -- v0.13 typed lowerer: a bare `GoIdent name` referring to a
+            -- typed local (registered in `globalLambdaTypes` with a
+            -- concrete Maybe/Result type) is also statically typed —
+            -- skip the ResultCoerce/MaybeCoerce reflect dance and let
+            -- bindCtorArg emit direct `.OkValue` / `.JustValue` access.
+            GoIr.GoIdent name
+                | Just t <- lookupLambdaType name
+                , let goTy = solvedTypeToGo t
+                , isConcreteResultOrMaybe goTy
+                -> True
             _ -> False
 
         funcRetTypeMap = Rec._cg_funcRetType getCgEnv
