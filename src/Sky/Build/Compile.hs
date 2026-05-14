@@ -3244,6 +3244,20 @@ goZeroValue t = case t of
                    || c == '_') s
 
 
+-- | v0.13 typed lowerer: is this Go type string a REAL, emittable Go
+-- type we can safely thread an expected-type into?  True iff we can
+-- name a zero value for it (`goZeroValue` Just — proof it's a known
+-- type) OR it's a `func(`-shaped type (valid Go, zero is `nil`).
+-- `"any"` is explicitly excluded — threading `any` is a no-op and
+-- the caller's fallback path (`coerceArg` / `any()` widening) must
+-- handle it instead.  Used by both `exprToGoExpectGo`'s safety gate
+-- and `coerceCallArgsAt`'s control-flow-arg branch.
+isEmittableGoType :: String -> Bool
+isEmittableGoType s =
+    s /= "any"
+    && (isJust (goZeroValue s) || "func(" `List.isPrefixOf` s)
+
+
 -- | v0.13 typed lowerer: convert a `GoBlock` (IIFE returning `any`)
 -- into a `GoTypedBlock` (IIFE returning the concrete `retType`) when
 -- it's SAFE to do so.  "Safe" means:
@@ -4755,30 +4769,39 @@ splitFuncType _ ty = ([], ty)  -- not enough arrows, return as-is
 -- type via `coerceReturnExprT`.
 --
 -- The design keeps the refactor bounded: only three control-flow
--- functions gain a `Maybe T.Type` parameter, not all ~200 `exprToGo`
--- call sites.  The expected type still threads transitively because
--- `caseToGo Just`/`ifToGo Just`/`letToGo Just` call `typeIIFE`, whose
--- `coerceReturnExprT` recurses into nested `GoBlock` returns.
+-- functions gain a `Maybe String` parameter (the EXPECTED GO TYPE),
+-- not all ~200 `exprToGo` call sites.  The expected type still
+-- threads transitively because `caseToGo Just`/`ifToGo Just`/`letToGo
+-- Just` call `typeIIFE`, whose `coerceReturnExprT` recurses into
+-- nested `GoBlock` returns.
 exprToGoExpect :: T.Type -> Can.Expr -> GoIr.GoExpr
-exprToGoExpect expectedTy e@(A.At _ expr)
+exprToGoExpect expectedTy = exprToGoExpectGo (solvedTypeToGo expectedTy)
+
+
+-- | Like `exprToGoExpect` but takes the expected GO TYPE STRING
+-- directly.  Used by call-site arg lowering (`coerceCallArgsAt`)
+-- where the param type is already known as a Go string.  The
+-- `T.Type` variant just renders and delegates here.
+exprToGoExpectGo :: String -> Can.Expr -> GoIr.GoExpr
+exprToGoExpectGo goRendering e@(A.At _ expr)
     -- Universal safety gate: only thread the expected type when its
     -- Go rendering is a REAL, emittable Go type.  `goZeroValue`
     -- returning `Just` proves it (it can name a zero literal).  For
-    -- anon-record names (`Anon_R_…` — may have no Go decl) and bare
-    -- capitalised names (struct-vs-enum-int ambiguous) `goZeroValue`
-    -- is `Nothing` — fall back to plain `exprToGo`, no coercion, no
-    -- typed IIFE.  This is what prevents the f2c7892-class
-    -- regression: a mismatched / undefined Go type can never reach
-    -- `rt.Coerce[…]` / `GoTypedBlock`.
+    -- anon-record names (`Anon_R_…` — may have no Go decl) and
+    -- unresolved names `goZeroValue` is `Nothing` — fall back to
+    -- plain `exprToGo`, no coercion, no typed IIFE.  This is what
+    -- prevents the f2c7892-class regression: a mismatched /
+    -- undefined Go type can never reach `rt.Coerce[…]` /
+    -- `GoTypedBlock`.
     | goRendering == "any" = exprToGo e
-    | not (emittable goRendering) = exprToGo e
+    | not (isEmittableGoType goRendering) = exprToGo e
     | otherwise = case expr of
         Can.If branches elseExpr ->
-            ifToGo (Just expectedTy) branches elseExpr
+            ifToGo (Just goRendering) branches elseExpr
         Can.Let def body ->
-            letToGo (Just expectedTy) def body
+            letToGo (Just goRendering) def body
         Can.Case subject branches ->
-            caseToGo (Just expectedTy) subject branches
+            caseToGo (Just goRendering) subject branches
         _ ->
             -- Leaf / non-control-flow: lower generically, then coerce
             -- the result to the expected Go type.  `coerceReturnExprT`
@@ -4786,14 +4809,6 @@ exprToGoExpect expectedTy e@(A.At _ expr)
             -- through still gets typed) and is a no-op when the Go
             -- type is already concrete + matching.
             coerceReturnExprT goRendering (exprToGo e)
-  where
-    goRendering = solvedTypeToGo expectedTy
-    -- A Go type is "emittable" iff we can name a zero value for it
-    -- (proof it's a real, known type), OR it's a `func(` type
-    -- (function-typed positions are valid Go even though they have
-    -- no struct-literal zero — their zero is `nil`, handled by
-    -- `wrapTypedReturn`'s rt.Coerce path).
-    emittable s = isJust (goZeroValue s) || "func(" `List.isPrefixOf` s
 
 
 -- | Convert a canonical expression to Go IR
@@ -5841,6 +5856,25 @@ coerceCallArgsAt region qualName args =
                                         body' = withLambdaTypes bindings (exprToGo body)
                                     in curryLambdaPatTyped inputTypes finalRet
                                         pats body'
+                            -- v0.13 typed lowerer: control-flow args
+                            -- (case / if / let) at a typed param slot
+                            -- lower via `exprToGoExpectGo` so the IIFE
+                            -- is `func() <subbed>` directly — no
+                            -- call-site `rt.Coerce[subbed]` wrap.
+                            -- Gated on `subbed` being a real emittable
+                            -- Go type (not `any`, not an un-nameable
+                            -- anon-record); otherwise fall through to
+                            -- the `coerceArg` path which still applies
+                            -- the runtime coercion.
+                            Can.Case{}
+                                | isEmittableGoType subbed ->
+                                    exprToGoExpectGo subbed e
+                            Can.If{}
+                                | isEmittableGoType subbed ->
+                                    exprToGoExpectGo subbed e
+                            Can.Let{}
+                                | isEmittableGoType subbed ->
+                                    exprToGoExpectGo subbed e
                             _ ->
                                 if subbed == "any" && containsTypeParam orig
                                     then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
@@ -6258,22 +6292,22 @@ pipeApply valueExpr funcExpr =
 -- typed too.  `Nothing` keeps the legacy `func() any` shape (used
 -- when `ifToGo` is reached from generic `exprToGo` with no
 -- expected-type context).
-ifToGo :: Maybe T.Type -> [(Can.Expr, Can.Expr)] -> Can.Expr -> GoIr.GoExpr
-ifToGo mExpected branches elseExpr =
+ifToGo :: Maybe String -> [(Can.Expr, Can.Expr)] -> Can.Expr -> GoIr.GoExpr
+ifToGo mExpectedGo branches elseExpr =
     let
-        -- When the expected type is known, lower each branch body
-        -- (and the else) via `exprToGoExpect` so a nested case/if/let
-        -- in a branch gets the type threaded DIRECTLY — not just
-        -- through `typeIIFE`'s return-position recursion.
-        lowerBody = case mExpected of
-            Just t  -> exprToGoExpect t
+        -- When the expected Go type is known, lower each branch body
+        -- (and the else) via `exprToGoExpectGo` so a nested
+        -- case/if/let in a branch gets the type threaded DIRECTLY —
+        -- not just through `typeIIFE`'s return-position recursion.
+        lowerBody = case mExpectedGo of
+            Just gt -> exprToGoExpectGo gt
             Nothing -> exprToGo
         buildIf [] = [GoIr.GoReturn (lowerBody elseExpr)]
         buildIf ((cond, body):rest) =
             [GoIr.GoIf (toBoolExpr (exprToGo cond)) [GoIr.GoReturn (lowerBody body)] (buildIf rest)]
         raw = GoIr.GoBlock (buildIf branches) (GoIr.GoRaw "nil")
-    in case mExpected of
-        Just t  -> typeIIFE (solvedTypeToGo t) raw
+    in case mExpectedGo of
+        Just gt -> typeIIFE gt raw
         Nothing -> raw
 
 
@@ -6293,8 +6327,8 @@ toBoolExpr expr = case expr of
 
 -- | Convert let-in to Go (IIFE with local declarations).  Takes the
 -- surrounding context's expected type — see `ifToGo`.
-letToGo :: Maybe T.Type -> Can.Def -> Can.Expr -> GoIr.GoExpr
-letToGo mExpected def body =
+letToGo :: Maybe String -> Can.Def -> Can.Expr -> GoIr.GoExpr
+letToGo mExpectedGo def body =
     -- v0.13 typed lowerer: when the def binds a primitive-typed
     -- local from a statically-typed value, register it under the
     -- body's scope so binops on this local can emit Go-native.
@@ -6326,11 +6360,11 @@ letToGo mExpected def body =
                 , isTypedPrimitive t ->
                     Map.singleton name t
             _ -> Map.empty
-        -- When the expected type is known, lower the let-body via
-        -- `exprToGoExpect` so a nested case/if/let in the body gets
+        -- When the expected Go type is known, lower the let-body via
+        -- `exprToGoExpectGo` so a nested case/if/let in the body gets
         -- the type threaded directly.
-        lowerBody = case mExpected of
-            Just t  -> exprToGoExpect t
+        lowerBody = case mExpectedGo of
+            Just gt -> exprToGoExpectGo gt
             Nothing -> exprToGo
         -- v0.13 typed lowerer: type the let-binding's RHS too.  When
         -- the bound value has a known HM type, lower its RHS via
@@ -6356,8 +6390,8 @@ letToGo mExpected def body =
             then lowerBody body
             else withScopedLambdaTypes bindingExtras (lowerBody body)
         raw = GoIr.GoBlock defStmts bodyGo
-    in case mExpected of
-        Just t  -> typeIIFE (solvedTypeToGo t) raw
+    in case mExpectedGo of
+        Just gt -> typeIIFE gt raw
         Nothing -> raw
 
 
@@ -6448,8 +6482,8 @@ defToStmts def = case def of
 -- the IIFE is wrapped via `typeIIFE` so it returns the concrete Go
 -- type and every branch `return` is coerced; nested IIFE return
 -- values recurse.
-caseToGo :: Maybe T.Type -> Can.Expr -> [Can.CaseBranch] -> GoIr.GoExpr
-caseToGo mExpected subject branches =
+caseToGo :: Maybe String -> Can.Expr -> [Can.CaseBranch] -> GoIr.GoExpr
+caseToGo mExpectedGo subject branches =
     let
         goSubject = exprToGo subject
         subjectType = detectSubjectType branches
@@ -6578,8 +6612,8 @@ caseToGo mExpected subject branches =
         raw = GoIr.GoBlock
                 (subjectDecl : branchStmts ++ [unreachableStmt])
                 (GoIr.GoRaw "nil")  -- unreachable, branches return
-    in case mExpected of
-        Just t  -> typeIIFE (solvedTypeToGo t) raw
+    in case mExpectedGo of
+        Just gt -> typeIIFE gt raw
         Nothing -> raw
 
 
