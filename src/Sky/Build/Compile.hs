@@ -7898,8 +7898,24 @@ inferExprType types (A.At _ e) = case e of
         -- Pipe / composition (`|>` `<|` `>>` `<<`) need application
         -- inference — out of scope, fall back to Nothing.
         _ -> Nothing
-    -- Let / Update / others — out of v0.13 scope; safe fallback
-    -- returns Nothing (caller falls back to any-routing).
+    -- Let: the let-expression's type IS the body's type.  Thread
+    -- the binding's inferred type into `types` first so the body
+    -- can resolve references to it — e.g. `let s = … in let r = …
+    -- in if s == "finished" then r else x` needs `r` registered
+    -- for the `if`'s first-arm inference to succeed.
+    Can.Let def body ->
+        let types' = case def of
+                Can.Def (A.At _ n) [] valExpr
+                    | n /= "_"
+                    , Just t <- inferExprType types valExpr ->
+                        Map.insert n t types
+                Can.TypedDef (A.At _ n) _ [] valExpr _
+                    | Just t <- inferExprType types valExpr ->
+                        Map.insert n t types
+                _ -> types
+        in inferExprType types' body
+    -- Update / others — out of v0.13 scope; safe fallback returns
+    -- Nothing (caller falls back to any-routing).
     _ -> Nothing
   where
     mkListType elemTy = T.TType ModuleName.list "List" [elemTy]
