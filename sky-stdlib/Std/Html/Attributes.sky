@@ -359,3 +359,27 @@ boolAttribute k b =
 none : Attribute msg
 none =
     NoAttr
+
+
+-- ─── Smart constructors for events ──────────────────────────────
+-- `Std.Html.Events` builds its handlers through these annotated
+-- functions rather than the raw `EventAttr` / `On*` constructors.
+-- Cross-module use of a parameterised ADT's *constructors* drops
+-- the type parameter in the current type-checker (`Event a` vs
+-- `Event`), but cross-module *function* calls preserve it (same
+-- as `List.map`).  These wrappers are intra-module here, so the
+-- annotation pins the type param; Events.sky then just calls them.
+
+eventMsg : String -> msg -> Attribute msg
+eventMsg name msg =
+    EventAttr (OnMsg name msg)
+
+
+eventString : String -> (String -> msg) -> Attribute msg
+eventString name handler =
+    EventAttr (OnString name handler)
+
+
+eventBool : String -> (Bool -> msg) -> Attribute msg
+eventBool name handler =
+    EventAttr (OnBool name handler)
