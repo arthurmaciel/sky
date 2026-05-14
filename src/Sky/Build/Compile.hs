@@ -6454,6 +6454,31 @@ splitOn c = foldr f [[]]
 
 
 -- | Convert a definition to Go statements
+-- | v0.13 typed lowerer: lower a `let _ = X` discard body.  When X
+-- is a control-flow expression (`case` / `if` / `let`) and its
+-- HM-inferred type renders to a real emittable Go type, lower it
+-- via `exprToGoExpectGo` so the discard IIFE is `func() <T>` rather
+-- than `func() any`.  Falls back to plain `exprToGo` for non-control-
+-- flow values (a bare call isn't an IIFE anyway) and for un-nameable
+-- types.  The caller still wraps the result in `rt.AnyTaskRun`, so
+-- the auto-force semantics are untouched — only the IIFE's own
+-- return type is tightened.
+loweredDiscard :: Can.Expr -> GoIr.GoExpr
+loweredDiscard body@(A.At _ inner) = case inner of
+    Can.Case{} -> typed
+    Can.If{}   -> typed
+    Can.Let{}  -> typed
+    _          -> exprToGo body
+  where
+    typed = case inferExprType (Rec._cg_solvedTypes getCgEnv) body of
+        Just t ->
+            let gt = solvedTypeToGo t
+            in if isEmittableGoType gt
+                 then exprToGoExpectGo gt body
+                 else exprToGo body
+        Nothing -> exprToGo body
+
+
 defToStmts :: Can.Def -> [GoIr.GoStmt]
 defToStmts def = case def of
     Can.DestructDef pat valExpr ->
@@ -6482,7 +6507,18 @@ defToStmts def = case def of
             -- every discard site is safe even when the body is a
             -- pure expression. Negligible runtime cost (one
             -- type-assertion).
-            [GoIr.GoAssign "_" (GoIr.GoCall (GoIr.GoQualified "rt" "AnyTaskRun") [exprToGo body])]
+            --
+            -- v0.13 typed lowerer: when the discarded value is a
+            -- control-flow expression (`case` / `if` / `let`), lower
+            -- it via `exprToGoExpectGo` so the IIFE is `func() <T>`
+            -- instead of `func() any`.  The discard's HM type comes
+            -- from `inferExprType`; the result is still handed to
+            -- `rt.AnyTaskRun` (whose param is `any`) so the auto-force
+            -- semantics are unchanged — only the IIFE's own return
+            -- type is tightened.
+            [GoIr.GoAssign "_"
+                (GoIr.GoCall (GoIr.GoQualified "rt" "AnyTaskRun")
+                    [loweredDiscard body])]
         else [ GoIr.GoShortDecl name (exprToGo body)
              , GoIr.GoAssign "_" (GoIr.GoIdent name)  -- suppress unused errors
              ]
