@@ -8918,20 +8918,19 @@ solvedTypeToGo ty = case ty of
                 Just aliasName -> aliasName ++ "_R"
                 Nothing        -> synthAnonRecordName fields
         in nonMatch
-    T.TTuple a b rest ->
-        -- P5: typed tuples. Arity 2-5 maps to rt.T2..T5 with concrete
-        -- element Go types. Arity >= 6 stays as rt.SkyTupleN (slice-
-        -- backed, heterogeneous) per the plan's "record-alias instead"
-        -- guidance. rt.T2[any, any] is a type alias for SkyTuple2, so
-        -- literal-site codegen continues to emit SkyTuple2{...} without
-        -- friction.
-        let goEls = map solvedTypeToGo (a : b : rest)
-            arity = length goEls
-        in case arity of
-            2 -> "rt.T2[" ++ intercalate_ ", " goEls ++ "]"
-            3 -> "rt.T3[" ++ intercalate_ ", " goEls ++ "]"
-            4 -> "rt.T4[" ++ intercalate_ ", " goEls ++ "]"
-            5 -> "rt.T5[" ++ intercalate_ ", " goEls ++ "]"
+    T.TTuple _ _ rest ->
+        -- v0.13: render tuples as `rt.SkyTuple2/3/N` — CONSISTENT
+        -- with `typeStrWithAliasesReg` / `safeReturnTypeWith` (which
+        -- drive function signatures) AND with the actual tuple-
+        -- literal emission (`GoStructLit "rt.SkyTuple2"`).  The old
+        -- `rt.T2[A,B]` rendering was an inconsistency: a variable
+        -- `solvedTypeToGo`-typed `[]rt.T2[int,int]` could never
+        -- accept a `[]rt.SkyTuple2` value (`rt.SkyTuple2 =
+        -- T2[any,any]`, a DIFFERENT Go type), so the "typed tuple"
+        -- claim was never actually honoured by codegen.
+        case length rest of
+            0 -> "rt.SkyTuple2"
+            1 -> "rt.SkyTuple3"
             _ -> "rt.SkyTupleN"
     T.TAlias home name _ aliasTy ->
         let modStr = ModuleName.toString home
