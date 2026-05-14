@@ -5545,13 +5545,14 @@ typedKernelArgCoerce = Map.fromList
     , (("Dict",   "keys"),    ["AsDict"])
     , (("Dict",   "values"),  ["AsDict"])
     , (("Dict",   "get"),     ["Pass", "Pass"])
-    -- Html.text / Css.hex — simple string → X. High-frequency.
-    , (("Html",   "text"),    ["AsString"])
+    -- Css.hex — simple string → X. High-frequency.
+    -- (Html.text / Attr.class entries removed in v0.13 Layer 3 —
+    -- Std.Html* are Sky-source modules now; kernel-call hints
+    -- never fire for them.)
     , (("Css",    "hex"),     ["AsString"])
     , (("Css",    "property"),["AsString", "AsString"])
     , (("Css",    "px"),      ["AsFloat"])
     , (("Css",    "rem"),     ["AsFloat"])
-    , (("Attr",   "class"),   ["AsString"])
     -- Log.println: single-arg, any → struct{}{}. Very high-frequency.
     , (("Log",    "println"), ["Pass"])
     , (("Server", "html"),    ["AsString"])
@@ -5629,9 +5630,10 @@ typedKernelLiterals = Set.fromList
     , ("List",   "isEmpty")
     , ("Dict",   "member"),     ("Dict",   "insert")
     , ("Dict",   "keys"),       ("Dict",   "values"),   ("Dict", "get")
-    , ("Html",   "text"),       ("Css",    "hex")
+    -- (Html.text / Attr.class removed v0.13 Layer 3 — Sky-source modules.)
+    , ("Css",    "hex")
     , ("Css",    "property"),   ("Css",    "px"),       ("Css", "rem")
-    , ("Attr",   "class"),     ("Log",    "println")
+    , ("Log",    "println")
     , ("Server", "html"),      ("Server", "redirect")
     , ("List",   "map"),       ("List",   "filter"),     ("List", "take"), ("List", "cons")
     , ("List",   "drop"),      ("List",   "foldl"),      ("List", "foldr")
