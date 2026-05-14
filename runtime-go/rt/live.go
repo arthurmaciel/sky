@@ -98,8 +98,8 @@ type eventPair struct {
 // HTML element builders (Std.Html)
 // ═══════════════════════════════════════════════════════════
 
-func htmlElem(tag string) func(any, any) any {
-	return func(attrs any, children any) any {
+func htmlElem(tag string) func(any, any) VNode {
+	return func(attrs any, children any) VNode {
 		return velement(tag, asList(attrs), asList(children))
 	}
 }
@@ -125,67 +125,67 @@ func asList(v any) []any {
 	return []any{v}
 }
 
-func Html_text(s any) any   { return vtext(fmt.Sprintf("%v", s)) }
-func Html_textT(s string) any { return vtext(s) }
-func Html_div(a, c any) any { return htmlElem("div")(a, c) }
-func Html_span(a, c any) any {
+func Html_text(s any) VNode   { return vtext(fmt.Sprintf("%v", s)) }
+func Html_textT(s string) VNode { return vtext(s) }
+func Html_div(a, c any) VNode { return htmlElem("div")(a, c) }
+func Html_span(a, c any) VNode {
 	return htmlElem("span")(a, c)
 }
-func Html_p(a, c any) any      { return htmlElem("p")(a, c) }
+func Html_p(a, c any) VNode      { return htmlElem("p")(a, c) }
 func Html_h1(a, c any) any     { return htmlElem("h1")(a, c) }
 func Html_h2(a, c any) any     { return htmlElem("h2")(a, c) }
 func Html_h3(a, c any) any     { return htmlElem("h3")(a, c) }
 func Html_h4(a, c any) any     { return htmlElem("h4")(a, c) }
 func Html_h5(a, c any) any     { return htmlElem("h5")(a, c) }
 func Html_h6(a, c any) any     { return htmlElem("h6")(a, c) }
-func Html_a(a, c any) any      { return htmlElem("a")(a, c) }
-func Html_button(a, c any) any { return htmlElem("button")(a, c) }
+func Html_a(a, c any) VNode      { return htmlElem("a")(a, c) }
+func Html_button(a, c any) VNode { return htmlElem("button")(a, c) }
 // input is void in HTML — no children. Sky API takes attrs only.
 // Void HTML elements accept an optional empty `[]` children argument
 // because elm-format convention writes them as `input [attrs] []`.
 // The runtime ignores the children and emits the void tag regardless;
 // the single-arg call site (`input [attrs]`) still works because
 // Sky's variadic FFI dispatch treats the missing arg as implicit nil.
-func Html_input(a any, _ ...any) any { return htmlElem("input")(a, nil) }
-func Html_form(a, c any) any   { return htmlElem("form")(a, c) }
-func Html_label(a, c any) any  { return htmlElem("label")(a, c) }
-func Html_nav(a, c any) any    { return htmlElem("nav")(a, c) }
-func Html_section(a, c any) any {
+func Html_input(a any, _ ...any) VNode { return htmlElem("input")(a, nil) }
+func Html_form(a, c any) VNode   { return htmlElem("form")(a, c) }
+func Html_label(a, c any) VNode  { return htmlElem("label")(a, c) }
+func Html_nav(a, c any) VNode    { return htmlElem("nav")(a, c) }
+func Html_section(a, c any) VNode {
 	return htmlElem("section")(a, c)
 }
-func Html_article(a, c any) any { return htmlElem("article")(a, c) }
-func Html_header(a, c any) any  { return htmlElem("header")(a, c) }
-func Html_footer(a, c any) any  { return htmlElem("footer")(a, c) }
-func Html_main(a, c any) any    { return htmlElem("main")(a, c) }
-func Html_ul(a, c any) any      { return htmlElem("ul")(a, c) }
-func Html_ol(a, c any) any      { return htmlElem("ol")(a, c) }
-func Html_li(a, c any) any      { return htmlElem("li")(a, c) }
+func Html_article(a, c any) VNode { return htmlElem("article")(a, c) }
+func Html_header(a, c any) VNode  { return htmlElem("header")(a, c) }
+func Html_footer(a, c any) VNode  { return htmlElem("footer")(a, c) }
+func Html_main(a, c any) VNode    { return htmlElem("main")(a, c) }
+func Html_ul(a, c any) VNode      { return htmlElem("ul")(a, c) }
+func Html_ol(a, c any) VNode      { return htmlElem("ol")(a, c) }
+func Html_li(a, c any) VNode      { return htmlElem("li")(a, c) }
 // img is a void element — emit as self-closing, attrs only.
 // Void HTML elements — same variadic trick as Html_input so both
 // `img [attrs]` and `img [attrs] []` compile. The second arg is
 // discarded.
-func Html_img(a any, _ ...any) any { return htmlElem("img")(a, nil) }
-func Html_br(a any, _ ...any) any  { return htmlElem("br")(a, nil) }
-func Html_hr(a any, _ ...any) any  { return htmlElem("hr")(a, nil) }
-func Html_table(a, c any) any   { return htmlElem("table")(a, c) }
-func Html_thead(a, c any) any   { return htmlElem("thead")(a, c) }
-func Html_tbody(a, c any) any   { return htmlElem("tbody")(a, c) }
-func Html_tr(a, c any) any      { return htmlElem("tr")(a, c) }
-func Html_th(a, c any) any      { return htmlElem("th")(a, c) }
-func Html_td(a, c any) any      { return htmlElem("td")(a, c) }
-func Html_textarea(a, c any) any {
+func Html_img(a any, _ ...any) VNode { return htmlElem("img")(a, nil) }
+func Html_br(a any, _ ...any) VNode  { return htmlElem("br")(a, nil) }
+func Html_hr(a any, _ ...any) VNode  { return htmlElem("hr")(a, nil) }
+func Html_table(a, c any) VNode   { return htmlElem("table")(a, c) }
+func Html_thead(a, c any) VNode   { return htmlElem("thead")(a, c) }
+func Html_tbody(a, c any) VNode   { return htmlElem("tbody")(a, c) }
+func Html_tr(a, c any) VNode      { return htmlElem("tr")(a, c) }
+func Html_th(a, c any) VNode      { return htmlElem("th")(a, c) }
+func Html_td(a, c any) VNode      { return htmlElem("td")(a, c) }
+func Html_textarea(a, c any) VNode {
 	return htmlElem("textarea")(a, c)
 }
-func Html_select(a, c any) any { return htmlElem("select")(a, c) }
-func Html_option(a, c any) any { return htmlElem("option")(a, c) }
-func Html_pre(a, c any) any    { return htmlElem("pre")(a, c) }
-func Html_code(a, c any) any   { return htmlElem("code")(a, c) }
-func Html_strong(a, c any) any { return htmlElem("strong")(a, c) }
-func Html_em(a, c any) any     { return htmlElem("em")(a, c) }
-func Html_small(a, c any) any  { return htmlElem("small")(a, c) }
+func Html_select(a, c any) VNode { return htmlElem("select")(a, c) }
+func Html_option(a, c any) VNode { return htmlElem("option")(a, c) }
+func Html_pre(a, c any) VNode    { return htmlElem("pre")(a, c) }
+func Html_code(a, c any) VNode   { return htmlElem("code")(a, c) }
+func Html_strong(a, c any) VNode { return htmlElem("strong")(a, c) }
+func Html_em(a, c any) VNode     { return htmlElem("em")(a, c) }
+func Html_small(a, c any) VNode  { return htmlElem("small")(a, c) }
 
 // styleNode: render CSS text inside a <style> tag
-func Html_styleNode(attrs any, css any) any {
+func Html_styleNode(attrs any, css any) VNode {
 	txt := fmt.Sprintf("%v", css)
 	// CSS inside <style> is parsed by the browser's CSS engine, which does
 	// NOT decode HTML entities. Wrap as raw so renderVNode emits literal
@@ -201,12 +201,12 @@ func Html_styleNode(attrs any, css any) any {
 
 // node: generic element builder for tags that don't have a dedicated helper
 // (e.g. "svg", "polyline").
-func Html_node(tag any, attrs any, children any) any {
+func Html_node(tag any, attrs any, children any) VNode {
 	return velement(fmt.Sprintf("%v", tag), asList(attrs), asList(children))
 }
 
 // raw: insert unescaped HTML — used for trusted content like pre-rendered markdown
-func Html_raw(s any) any {
+func Html_raw(s any) VNode {
 	return VNode{
 		Kind: "raw",
 		Text: fmt.Sprintf("%v", s),
@@ -215,24 +215,24 @@ func Html_raw(s any) any {
 
 // headerNode: specialised header tag with attrs + children (same as Html_header,
 // kept as a distinct entry for legacy-stdlib compat).
-func Html_headerNode(attrs any, children any) any {
+func Html_headerNode(attrs any, children any) VNode {
 	return htmlElem("header")(attrs, children)
 }
 
 // Extra Html elements used by some legacy stdlib code.
-func Html_codeNode(a, c any) any    { return htmlElem("code")(a, c) }
-func Html_blockquote(a, c any) any  { return htmlElem("blockquote")(a, c) }
-func Html_figure(a, c any) any      { return htmlElem("figure")(a, c) }
-func Html_figcaption(a, c any) any  { return htmlElem("figcaption")(a, c) }
-func Html_details(a, c any) any     { return htmlElem("details")(a, c) }
-func Html_summary(a, c any) any     { return htmlElem("summary")(a, c) }
-func Html_dialog(a, c any) any      { return htmlElem("dialog")(a, c) }
-func Html_video(a, c any) any       { return htmlElem("video")(a, c) }
-func Html_audio(a, c any) any       { return htmlElem("audio")(a, c) }
-func Html_canvas(a, c any) any      { return htmlElem("canvas")(a, c) }
-func Html_iframe(a, c any) any      { return htmlElem("iframe")(a, c) }
-func Html_progress(a, c any) any    { return htmlElem("progress")(a, c) }
-func Html_meter(a, c any) any       { return htmlElem("meter")(a, c) }
+func Html_codeNode(a, c any) VNode    { return htmlElem("code")(a, c) }
+func Html_blockquote(a, c any) VNode  { return htmlElem("blockquote")(a, c) }
+func Html_figure(a, c any) VNode      { return htmlElem("figure")(a, c) }
+func Html_figcaption(a, c any) VNode  { return htmlElem("figcaption")(a, c) }
+func Html_details(a, c any) VNode     { return htmlElem("details")(a, c) }
+func Html_summary(a, c any) VNode     { return htmlElem("summary")(a, c) }
+func Html_dialog(a, c any) VNode      { return htmlElem("dialog")(a, c) }
+func Html_video(a, c any) VNode       { return htmlElem("video")(a, c) }
+func Html_audio(a, c any) VNode       { return htmlElem("audio")(a, c) }
+func Html_canvas(a, c any) VNode      { return htmlElem("canvas")(a, c) }
+func Html_iframe(a, c any) VNode      { return htmlElem("iframe")(a, c) }
+func Html_progress(a, c any) VNode    { return htmlElem("progress")(a, c) }
+func Html_meter(a, c any) VNode       { return htmlElem("meter")(a, c) }
 
 // ═══════════════════════════════════════════════════════════
 // Attributes (Std.Html.Attributes)
@@ -669,16 +669,16 @@ func Html_doctype(children any) any {
 	return velement("!doctype-wrapper", nil, asList(children))
 }
 
-func Html_htmlNode(a, c any) any { return htmlElem("html")(a, c) }
-func Html_headNode(a, c any) any { return htmlElem("head")(a, c) }
-func Html_body(a, c any) any     { return htmlElem("body")(a, c) }
-func Html_title(a, c any) any    { return htmlElem("title")(a, c) }
-func Html_meta(a any, _ ...any) any { return htmlElem("meta")(a, nil) }
-func Html_link(a any) any        { return htmlElem("link")(a, nil) }
-func Html_script(a, c any) any   { return htmlElem("script")(a, c) }
+func Html_htmlNode(a, c any) VNode { return htmlElem("html")(a, c) }
+func Html_headNode(a, c any) VNode { return htmlElem("head")(a, c) }
+func Html_body(a, c any) VNode     { return htmlElem("body")(a, c) }
+func Html_title(a, c any) VNode    { return htmlElem("title")(a, c) }
+func Html_meta(a any, _ ...any) VNode { return htmlElem("meta")(a, nil) }
+func Html_link(a any) VNode        { return htmlElem("link")(a, nil) }
+func Html_script(a, c any) VNode   { return htmlElem("script")(a, c) }
 
 // Html_titleNode — takes a raw string and wraps it in <title>.
-func Html_titleNode(s any) any {
+func Html_titleNode(s any) VNode {
 	return htmlElem("title")(nil, []any{Html_text(s)})
 }
 
