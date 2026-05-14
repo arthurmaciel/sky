@@ -2644,8 +2644,19 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                             goName (Rec._cg_funcSkyToGoTVars env)
                         quants = Map.findWithDefault [] skyName csiByCallee
                         σ_sky = Map.fromList (zip quants tys)
+                        -- `sanitiseTypedDeep`: a monomorphisation
+                        -- type-arg can be an anonymous record
+                        -- (`{ age, name }` with no user `type alias`).
+                        -- `solvedTypeToGo` names it `Anon_R_<hash>`,
+                        -- but no Go `type` decl is emitted for an
+                        -- un-aliased record — substituting it raw
+                        -- gives `undefined: Anon_R_<hash>`. Sanitise
+                        -- those tokens back to `any` so the specialised
+                        -- copy still compiles (it's typed everywhere
+                        -- the record DOES have a Go alias; only the
+                        -- genuinely-anonymous slots widen).
                         σ_go = Map.fromList
-                            [ (gn, solvedTypeToGo cty)
+                            [ (gn, sanitiseTypedDeep (solvedTypeToGo cty))
                             | (sn, gn) <- skyToGo
                             , Just cty <- [Map.lookup sn σ_sky]
                             ]
@@ -2656,8 +2667,17 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                                     mangled σ_go (Just goName) gfd))
                         _ -> Nothing
                 emittedSpecs = mapMaybe buildSpec reachableList
-                specNames = Set.fromList (map fst emittedSpecs)
-                specials = map snd emittedSpecs
+                -- Dedup by mangled name. Two reachable-set entries can
+                -- be structurally-distinct `[T.Type]` lists that mangle
+                -- to the SAME name — e.g. a callee reached from two
+                -- modules where one carries `Model` as `TType` and the
+                -- other as `TAlias` (same nominal type, different
+                -- representation). Both specialise to byte-identical
+                -- Go; emitting both is a `redeclared in this block`
+                -- compile error. Map.fromList collapses on the key.
+                dedupedSpecs = Map.toList (Map.fromList emittedSpecs)
+                specNames = Set.fromList (map fst dedupedSpecs)
+                specials = map snd dedupedSpecs
             -- Record emitted spec names so call sites can decide
             -- whether to use the mangled name or fall back to the
             -- generic version.
@@ -3754,7 +3774,13 @@ collectFreeTVars = nubOrd . go
         T.TLambda a b -> go a ++ go b
         T.TType _ _ args -> concatMap go args
         T.TTuple a b cs -> concatMap go (a : b : cs)
-        T.TRecord fields _ -> concatMap (\(T.FieldType _ fTy) -> go fTy) (Map.elems fields)
+        T.TRecord fields mExt ->
+            concatMap (\(T.FieldType _ fTy) -> go fTy) (Map.elems fields)
+            -- The row-extension variable of an OPEN record is a free
+            -- type var; collect it so `generaliseToAnnotation`
+            -- quantifies it instead of leaking a bare row name into
+            -- the consumer module's solver cache.
+            ++ maybe [] (\n -> [n]) mExt
         T.TAlias _ _ pairs aliasType ->
             concatMap (go . snd) pairs ++ case aliasType of
                 T.Filled i -> go i

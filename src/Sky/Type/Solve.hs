@@ -863,7 +863,25 @@ flatTypeToType flat = case flat of
         fieldTypes <- Map.traverseWithKey (\_ fVar -> do
             ty <- variableToType fVar
             return (T.FieldType 0 ty)) fieldVars
-        return (T.TRecord fieldTypes Nothing)
+        -- Preserve the row-extension variable so an OPEN record reads
+        -- back open (not CLOSED) across the module boundary — without
+        -- it, a `Can.Access`-derived open record param closes on the
+        -- export boundary and rejects callers with extra fields.
+        --
+        -- NON-RECURSIVE on purpose: we look at the extension var's
+        -- content one level deep ONLY. Recursing into a `Record1`
+        -- extension (to flatten merged rows) risks an infinite loop
+        -- when the union-find graph is cyclic — a record extension
+        -- can transitively point back at itself after a chain of
+        -- merges. A `Record1` (or any non-flex) extension is read
+        -- back as CLOSED; that loses a little precision for the rare
+        -- merged-extension case but can never hang. Only a still-free
+        -- named `FlexVar` extension keeps the record OPEN.
+        extDesc <- UF.get extVar
+        case T._content extDesc of
+            T.FlexVar (Just n)      -> return (T.TRecord fieldTypes (Just n))
+            T.FlexSuper _ (Just n)  -> return (T.TRecord fieldTypes (Just n))
+            _                       -> return (T.TRecord fieldTypes Nothing)
     T.Unit1 ->
         return T.TUnit
     T.Tuple1 aVar bVar mcVar -> do

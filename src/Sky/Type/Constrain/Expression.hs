@@ -59,6 +59,8 @@ constrainModuleWithExternals
 constrainModuleWithExternals externals canMod = do
     counter <- newIORef 0
     writeIORef globalExternals externals
+    writeIORef globalCurrentModule
+        (ModuleName.toString (Can._name canMod))
     constrainDecls counter Map.empty (Can._decls canMod)
 
 
@@ -72,6 +74,23 @@ constrainModuleWithExternals externals canMod = do
 globalExternals :: IORef (Map.Map (String, String) T.Annotation)
 {-# NOINLINE globalExternals #-}
 globalExternals = unsafePerformIO (newIORef Map.empty)
+
+
+-- | The module currently being solved. Set by
+-- `constrainModuleWithExternals` alongside `globalExternals`.
+--
+-- VarTopLevel references whose `home` equals this MUST emit `CLocal`,
+-- never `CForeign` — even though the dep-solve fixpoint's
+-- `globalExternals` includes the module's own previous-round solved
+-- types. Binding a same-module reference against that stale
+-- generalised self-annotation breaks within-module mutual recursion:
+-- the two functions no longer share their parameter vars, and across
+-- fixpoint rounds the (now row-polymorphic) record param types drift
+-- and absorb concrete types from `Html msg` etc. A module's own
+-- functions must always be solved together as one unit.
+globalCurrentModule :: IORef String
+{-# NOINLINE globalCurrentModule #-}
+globalCurrentModule = unsafePerformIO (newIORef "")
 
 
 constrainDecls :: Counter -> Env -> Can.Decls -> IO T.Constraint
@@ -119,13 +138,29 @@ constrain counter env (A.At region expr) expected = case expr of
         -- instantiates fresh vars at this call site. Falls back to
         -- CLocal for same-module references or when no external
         -- annotation is registered.
+        --
+        -- SAME-MODULE GUARD: a reference whose `home` is the module
+        -- currently being solved MUST emit CLocal — never CForeign —
+        -- even though the dep-solve fixpoint's `globalExternals`
+        -- contains this module's OWN previous-round solved types.
+        -- Binding a same-module reference against that stale
+        -- generalised self-annotation severs within-module mutual
+        -- recursion (the two functions stop sharing their parameter
+        -- vars), and across fixpoint rounds the row-polymorphic
+        -- record param types drift and absorb concrete types from
+        -- `Html msg` etc. A module's own functions are solved as one
+        -- unit; only genuinely cross-module references go through the
+        -- CForeign / external channel.
         externals <- readIORef globalExternals
+        currentModule <- readIORef globalCurrentModule
         let homeStr = ModuleName.toString home
-        case Map.lookup (homeStr, name) externals of
-            Just annot ->
-                return $ T.CForeign region (homeStr ++ "." ++ name) annot expected
-            Nothing ->
-                return $ T.CLocal region name expected
+        if homeStr == currentModule
+            then return $ T.CLocal region name expected
+            else case Map.lookup (homeStr, name) externals of
+                Just annot ->
+                    return $ T.CForeign region (homeStr ++ "." ++ name) annot expected
+                Nothing ->
+                    return $ T.CLocal region name expected
 
     Can.VarKernel modName funcName -> do
         -- Stdlib kernel sigs (handcoded in lookupKernelType) take
@@ -202,8 +237,31 @@ constrain counter env (A.At region expr) expected = case expr of
     Can.Case subject branches ->
         constrainCase counter env region subject branches expected
 
-    Can.Accessor _field -> return T.CTrue
-    Can.Access _target _ -> return T.CTrue
+    -- `.field` — standalone accessor: `{ field : a | ρ } -> a`.
+    Can.Accessor field -> do
+        rowName   <- freshName counter "_accRow"
+        fieldName <- freshName counter "_accFld"
+        let fieldTy = T.TVar fieldName
+            recTy   = T.TRecord
+                        (Map.singleton field (T.FieldType 0 fieldTy))
+                        (Just rowName)
+        return $ T.CEqual region (T.CAccess field)
+                    (T.TLambda recTy fieldTy) expected
+
+    -- `target.field` — open-row record constraint on `target`.
+    Can.Access target (A.At _ field) -> do
+        rowName   <- freshName counter "_accRow"
+        fieldName <- freshName counter "_accFld"
+        let fieldTy = T.TVar fieldName
+            recTy   = T.TRecord
+                        (Map.singleton field (T.FieldType 0 fieldTy))
+                        (Just rowName)
+        targetCon <- constrain counter env target
+                       (T.FromContext region (T.RecordAccess field field) recTy)
+        return $ T.CAnd
+            [ targetCon
+            , T.CEqual region (T.CAccess field) fieldTy expected
+            ]
 
     -- `{ base | field1 = expr1, ... }` — record update.
     --
