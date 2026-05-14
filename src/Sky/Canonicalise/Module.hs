@@ -30,7 +30,12 @@ import qualified Sky.Canonicalise.Type as CanType
 -- constructors when another module imports this one with `exposing (..)`.
 data DepInfo = DepInfo
     { _dep_name    :: !ModuleName.Canonical
-    , _dep_unions  :: ![(String, [Can.Ctor])]   -- (type name, constructors)
+    , _dep_unions  :: ![(String, [String], [Can.Ctor])]
+        -- (type name, type vars, constructors).  The type vars are
+        -- load-bearing: a cross-module constructor's type scheme is
+        -- `forall vars. argTys -> TypeName vars` — without the vars
+        -- the result type collapses to a zero-arity `TypeName` and
+        -- HM rejects `Box x : Box a` with `Box vs Box a`.
     , _dep_aliases :: ![String]                 -- exported alias names
     , _dep_aliasDefs :: !(Map.Map String Can.Alias)  -- alias bodies (for type-expansion)
     , _dep_values  :: ![String]                 -- exported top-level value names
@@ -48,7 +53,7 @@ filterDepByExports d = case _dep_exports d of
     Can.ExportExplicit namesMap ->
         let keep = namesMap `Map.union` Map.empty
             isExposed n = Map.member n keep
-        in d { _dep_unions  = filter (isExposed . fst) (_dep_unions d)
+        in d { _dep_unions  = filter (\(n, _, _) -> isExposed n) (_dep_unions d)
              , _dep_aliases = filter isExposed (_dep_aliases d)
              , _dep_aliasDefs = Map.filterWithKey (\k _ -> isExposed k) (_dep_aliasDefs d)
              , _dep_values  = filter isExposed (_dep_values d)
@@ -259,7 +264,7 @@ buildTypeHomeMap home deps srcMod =
             | imp <- Src._imports srcMod
             , Just rawDep <- [Map.lookup (importPath imp) deps]
             , let dep = filterDepByExports rawDep
-            , typeName <- map fst (_dep_unions dep) ++ _dep_aliases dep
+            , typeName <- map (\(n, _, _) -> n) (_dep_unions dep) ++ _dep_aliases dep
             ]
     in
     Map.fromList (depEntries ++ localEntries)
@@ -308,7 +313,8 @@ checkImportExposingAgainstDep deps imps = concatMap check imps
                     Just d  ->
                         let values  = Set.fromList (_dep_values d)
                             aliases = Set.fromList (_dep_aliases d)
-                            unions  = Map.fromList (_dep_unions d)
+                            unions  = Map.fromList
+                                [ (n, cs) | (n, _, cs) <- _dep_unions d ]
                             ctors u = [ c | Can.Ctor c _ _ _ <- Map.findWithDefault [] u unions ]
                         in concatMap (checkItem path values aliases unions ctors) xs
 
@@ -397,11 +403,11 @@ processImportWith deps _home env imp =
             Just dep | useDep ->
                 [ (ctorName, Env.CtorHome importMod typeName ctorName
                     (fromIntegral idx) (fromIntegral nArgs) union annot)
-                | (typeName, ctors) <- _dep_unions dep
-                , let union = makeUnionFor typeName ctors
+                | (typeName, typeVars, ctors) <- _dep_unions dep
+                , let union = makeUnionFor typeName typeVars ctors
                 , (idx, ctor) <- zip [0::Int ..] ctors
                 , let Can.Ctor ctorName _ nArgs argTys = ctor
-                      annot = makeCtorAnnot importMod typeName ctorName argTys
+                      annot = makeCtorAnnot importMod typeName typeVars ctorName argTys
                 ]
             _ -> []
 
@@ -434,14 +440,14 @@ processImportWith deps _home env imp =
                 Just d   -> \n ->
                     n `elem` _dep_values d
                     || n `elem` _dep_aliases d
-                    || n `elem` map fst (_dep_unions d)
+                    || n `elem` map (\(un, _, _) -> un) (_dep_unions d)
             else if useKernel then const True
             else case depHere of
                 Nothing  -> const True  -- unknown dep → trust the import
                 Just d   -> \n ->
                     n `elem` _dep_values d
                     || n `elem` _dep_aliases d
-                    || n `elem` map fst (_dep_unions d)
+                    || n `elem` map (\(un, _, _) -> un) (_dep_unions d)
 
         envWithExposed = case Src._importExposing imp of
             A.At _ Src.ExposingAll ->
@@ -467,19 +473,26 @@ processImportWith deps _home env imp =
 
 -- | Build a synthetic Union record for use in CtorHome. We need this to
 -- represent "I know about this constructor from another module" — the real
--- Can.Union lives in the other module's canonicalised output.
-makeUnionFor :: String -> [Can.Ctor] -> Can.Union
-makeUnionFor typeName ctors =
-    Can.Union [] ctors (length ctors)
+-- Can.Union lives in the other module's canonicalised output.  The type
+-- vars MUST be carried through (not `[]`) so a parameterised cross-module
+-- ADT keeps its arity.
+makeUnionFor :: String -> [String] -> [Can.Ctor] -> Can.Union
+makeUnionFor _typeName typeVars ctors =
+    Can.Union typeVars ctors (length ctors)
         (if all (\(Can.Ctor _ _ n _) -> n == 0) ctors then Can.Enum else Can.Normal)
 
 
--- | Build an annotation for a constructor (T1 -> T2 -> … -> TypeName).
-makeCtorAnnot :: ModuleName.Canonical -> String -> String -> [Can.Type] -> Can.Annotation
-makeCtorAnnot home typeName _ctorName argTys =
-    let result = Can.TType home typeName []
+-- | Build an annotation for a constructor:
+-- `forall typeVars. argTy1 -> … -> argTyN -> TypeName typeVars`.
+-- The result type MUST apply the union's type vars (not `[]`) and the
+-- scheme MUST quantify them — otherwise a cross-module `Box x` types as
+-- the zero-arity `Box` instead of `Box a`, and HM rejects it against a
+-- `Box a` annotation.
+makeCtorAnnot :: ModuleName.Canonical -> String -> [String] -> String -> [Can.Type] -> Can.Annotation
+makeCtorAnnot home typeName typeVars _ctorName argTys =
+    let result = Can.TType home typeName (map Can.TVar typeVars)
         ty = foldr Can.TLambda result argTys
-    in Can.Forall [] ty
+    in Can.Forall typeVars ty
 
 
 -- | Pick record-alias auto-constructors matching `exposing (AliasName)`.
@@ -595,7 +608,7 @@ detectExposingCollisions deps imps =
             kernelFns  = Map.findWithDefault [] kernelName kernelFunctions
             depFns = case fmap filterDepByExports (Map.lookup path deps) of
                 Just d  -> _dep_aliases d ++ _dep_values d
-                            ++ map fst (_dep_unions d)
+                            ++ map (\(un, _, _) -> un) (_dep_unions d)
                 Nothing -> []
         in if null kernelName then depFns else kernelFns
 

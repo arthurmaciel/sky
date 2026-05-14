@@ -519,7 +519,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 [ (modName, Canonicalise.DepInfo
                     { Canonicalise._dep_name = Can._name depMod
                     , Canonicalise._dep_unions =
-                        [ (typeName, Can._u_alts union)
+                        [ (typeName, Can._u_vars union, Can._u_alts union)
                         | (typeName, union) <- Map.toList (Can._unions depMod)
                         ]
                     , Canonicalise._dep_aliases = Map.keys (Can._aliases depMod)
@@ -551,7 +551,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 [ (modName, Canonicalise.DepInfo
                     { Canonicalise._dep_name = Can._name depMod
                     , Canonicalise._dep_unions =
-                        [ (typeName, Can._u_alts union)
+                        [ (typeName, Can._u_vars union, Can._u_alts union)
                         | (typeName, union) <- Map.toList (Can._unions depMod)
                         ]
                     , Canonicalise._dep_aliases = Map.keys (Can._aliases depMod)
@@ -1965,7 +1965,7 @@ typecheckWorkspace config entryPath = do
             [ (modName, Canonicalise.DepInfo
                 { Canonicalise._dep_name = Can._name depMod
                 , Canonicalise._dep_unions =
-                    [ (typeName, Can._u_alts u)
+                    [ (typeName, Can._u_vars u, Can._u_alts u)
                     | (typeName, u) <- Map.toList (Can._unions depMod)
                     ]
                 , Canonicalise._dep_aliases = Map.keys (Can._aliases depMod)
@@ -2031,8 +2031,15 @@ typecheckWorkspace config entryPath = do
 -- | Variant of writeEmbeddedSkyStdlib that targets an arbitrary
 -- destination, used by the LSP path which mirrors stdlib next to the
 -- project source so jumps land on stable, user-visible paths.
+--
+-- Like `writeEmbeddedSkyStdlib`, clears the destination first so a
+-- stdlib file dropped from the embed (a module deleted / renamed
+-- between compiler builds) doesn't linger on disk and get
+-- discovered as a phantom module.
 writeStdlibTo :: FilePath -> IO FilePath
 writeStdlibTo root = do
+    exists <- doesDirectoryExist root
+    when exists (System.Directory.removeDirectoryRecursive root)
     createDirectoryIfMissing True root
     mapM_ (writeOne root) embeddedSkyStdlib
     return root
@@ -2045,11 +2052,20 @@ writeStdlibTo root = do
 
 -- | Materialise the embedded Sky stdlib (Sky.Core.Error,
 -- etc.) into <outDir>/.sky-stdlib/ at build start. Returns the root
--- path so `discoverModulesMulti` can probe it. Always rewritten so a
--- compiler upgrade picks up the latest stdlib without `sky clean`.
+-- path so `discoverModulesMulti` can probe it.
+--
+-- The destination is CLEARED first (not just written-over): when a
+-- stdlib module is deleted or renamed between compiler builds, the
+-- old materialised `.sky` file would otherwise linger and still be
+-- discovered — a phantom module that shadows nothing but breaks
+-- imports of the real (now-kernel-backed or removed) name. Always
+-- rewritten so a compiler upgrade picks up the latest stdlib
+-- without `sky clean`.
 writeEmbeddedSkyStdlib :: FilePath -> IO FilePath
 writeEmbeddedSkyStdlib outDir = do
     let root = outDir </> ".sky-stdlib"
+    exists <- doesDirectoryExist root
+    when exists (System.Directory.removeDirectoryRecursive root)
     createDirectoryIfMissing True root
     mapM_ (writeOne root) embeddedSkyStdlib
     return root
