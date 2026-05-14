@@ -117,3 +117,4 @@ sky.zip
 # screenshots, traces. Not source; per-developer; regenerated
 # whenever scripts/verify-examples.sh is run.
 _verify/
+runtime-rust/target/
