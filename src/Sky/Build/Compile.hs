@@ -4722,20 +4722,40 @@ splitFuncType _ ty = ([], ty)  -- not enough arrows, return as-is
 -- `caseToGo Just`/`ifToGo Just`/`letToGo Just` call `typeIIFE`, whose
 -- `coerceReturnExprT` recurses into nested `GoBlock` returns.
 exprToGoExpect :: T.Type -> Can.Expr -> GoIr.GoExpr
-exprToGoExpect expectedTy e@(A.At _ expr) = case expr of
-    Can.If branches elseExpr ->
-        ifToGo (Just expectedTy) branches elseExpr
-    Can.Let def body ->
-        letToGo (Just expectedTy) def body
-    Can.Case subject branches ->
-        caseToGo (Just expectedTy) subject branches
-    _ ->
-        -- Leaf / non-control-flow: lower generically, then coerce the
-        -- result to the expected Go type.  `coerceReturnExprT`
-        -- recurses into `GoBlock` (so a nested IIFE that slipped
-        -- through still gets typed) and is a no-op when the Go type
-        -- is already concrete + matching.
-        coerceReturnExprT (solvedTypeToGo expectedTy) (exprToGo e)
+exprToGoExpect expectedTy e@(A.At _ expr)
+    -- Universal safety gate: only thread the expected type when its
+    -- Go rendering is a REAL, emittable Go type.  `goZeroValue`
+    -- returning `Just` proves it (it can name a zero literal).  For
+    -- anon-record names (`Anon_R_…` — may have no Go decl) and bare
+    -- capitalised names (struct-vs-enum-int ambiguous) `goZeroValue`
+    -- is `Nothing` — fall back to plain `exprToGo`, no coercion, no
+    -- typed IIFE.  This is what prevents the f2c7892-class
+    -- regression: a mismatched / undefined Go type can never reach
+    -- `rt.Coerce[…]` / `GoTypedBlock`.
+    | goRendering == "any" = exprToGo e
+    | not (emittable goRendering) = exprToGo e
+    | otherwise = case expr of
+        Can.If branches elseExpr ->
+            ifToGo (Just expectedTy) branches elseExpr
+        Can.Let def body ->
+            letToGo (Just expectedTy) def body
+        Can.Case subject branches ->
+            caseToGo (Just expectedTy) subject branches
+        _ ->
+            -- Leaf / non-control-flow: lower generically, then coerce
+            -- the result to the expected Go type.  `coerceReturnExprT`
+            -- recurses into `GoBlock` (so a nested IIFE that slipped
+            -- through still gets typed) and is a no-op when the Go
+            -- type is already concrete + matching.
+            coerceReturnExprT goRendering (exprToGo e)
+  where
+    goRendering = solvedTypeToGo expectedTy
+    -- A Go type is "emittable" iff we can name a zero value for it
+    -- (proof it's a real, known type), OR it's a `func(` type
+    -- (function-typed positions are valid Go even though they have
+    -- no struct-literal zero — their zero is `nil`, handled by
+    -- `wrapTypedReturn`'s rt.Coerce path).
+    emittable s = isJust (goZeroValue s) || "func(" `List.isPrefixOf` s
 
 
 -- | Convert a canonical expression to Go IR
@@ -6274,10 +6294,30 @@ letToGo mExpected def body =
         lowerBody = case mExpected of
             Just t  -> exprToGoExpect t
             Nothing -> exprToGo
+        -- v0.13 typed lowerer: type the let-binding's RHS too.  When
+        -- the bound value has a known HM type, lower its RHS via
+        -- `exprToGoExpect` — `exprToGoExpect`'s own emittability
+        -- gate keeps it sound (un-nameable types fall back to plain
+        -- `exprToGo`).  This types `let x = <case-expr> in …` so the
+        -- RHS IIFE is `func() T` not `func() any`.
+        solvedTypes = solved
+        defStmts = case def of
+            Can.Def (A.At _ dn) [] valExpr
+                | dn /= "_"
+                , Just dt <- inferExprType solvedTypes valExpr ->
+                    [ GoIr.GoShortDecl dn (exprToGoExpect dt valExpr)
+                    , GoIr.GoAssign "_" (GoIr.GoIdent dn)
+                    ]
+            Can.TypedDef (A.At _ dn) _ [] valExpr _
+                | Just dt <- inferExprType solvedTypes valExpr ->
+                    [ GoIr.GoShortDecl dn (exprToGoExpect dt valExpr)
+                    , GoIr.GoAssign "_" (GoIr.GoIdent dn)
+                    ]
+            _ -> defToStmts def
         bodyGo = if Map.null bindingExtras
             then lowerBody body
             else withScopedLambdaTypes bindingExtras (lowerBody body)
-        raw = GoIr.GoBlock (defToStmts def) bodyGo
+        raw = GoIr.GoBlock defStmts bodyGo
     in case mExpected of
         Just t  -> typeIIFE (solvedTypeToGo t) raw
         Nothing -> raw
