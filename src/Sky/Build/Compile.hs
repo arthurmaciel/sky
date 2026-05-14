@@ -3332,9 +3332,81 @@ coerceReturnExprT retType e = case e of
     _ -> wrapTypedReturn retType e
 
 
+-- | v0.13 typed lowerer: best-effort STATIC Go type of a GoExpr.
+-- Returns `Just t` ONLY when the expression's Go type is provably
+-- `t`.  Used to elide redundant coercions — `rt.CoerceInt(x)` when
+-- `x` is already statically `int`.
+--
+-- Conservative by construction: `Nothing` ("unknown") always keeps
+-- the coercion, so a MISSED case is harmless.  A WRONG `Just` would
+-- skip a needed coercion and break `go build`, so every arm must be
+-- certain.
+goExprGoType :: GoIr.GoExpr -> Maybe String
+goExprGoType e = case e of
+    GoIr.GoIntLit _         -> Just "int"
+    GoIr.GoFloatLit _       -> Just "float64"
+    GoIr.GoStringLit _      -> Just "string"
+    GoIr.GoBoolLit _        -> Just "bool"
+    GoIr.GoRuneLit _        -> Just "rune"
+    GoIr.GoTypedBlock t _ _ -> Just t
+    GoIr.GoSliceLit t _     -> Just ("[]" ++ t)
+    -- Composite literals carry their type verbatim.  `rt.SkyTuple2{…}`
+    -- IS `rt.SkyTuple2`; `Foo_R{…}` IS `Foo_R` — no coercion needed.
+    GoIr.GoStructLit t _    -> Just t
+    GoIr.GoMapLit k v _     -> Just ("map[" ++ k ++ "]" ++ v)
+    -- Coercion-helper results have a statically-known type.  The
+    -- callee is emitted in two shapes — `GoIdent "rt.X"` and
+    -- `GoQualified "rt" "X"` — so normalise via `rtCalleeName`.
+    GoIr.GoCall callee _
+        | Just fn <- rtCalleeName callee ->
+            let fn' = "rt." ++ fn
+            in case fn of
+                "CoerceInt"    -> Just "int"
+                "CoerceString" -> Just "string"
+                "CoerceBool"   -> Just "bool"
+                "CoerceFloat"  -> Just "float64"
+                "AsInt"        -> Just "int"
+                "AsString"     -> Just "string"
+                "AsBool"       -> Just "bool"
+                "AsFloat"      -> Just "float64"
+                _ | Just t <- stripParametric "rt.Coerce" fn'       -> Just t
+                  | Just t <- stripParametric "rt.AsListT" fn'      -> Just ("[]" ++ t)
+                  | Just t <- stripParametric "rt.AsMapT" fn'       -> Just ("map[string]" ++ t)
+                  | Just t <- stripParametric "rt.MaybeCoerce" fn'  -> Just ("rt.SkyMaybe[" ++ t ++ "]")
+                  | Just t <- stripParametric "rt.ResultCoerce" fn' -> Just ("rt.SkyResult[" ++ t ++ "]")
+                  | Just t <- stripParametric "rt.TaskCoerceT" fn'  -> Just ("rt.SkyTask[" ++ t ++ "]")
+                  | otherwise -> Nothing
+    -- Comparison / logical binops are Go-bool.
+    GoIr.GoBinary op _ _
+        | op `elem` ["==", "!=", "<", ">", "<=", ">=", "&&", "||"] -> Just "bool"
+    -- Arithmetic binops: result type = operand type when both
+    -- operands have the SAME known primitive type.
+    GoIr.GoBinary op l r
+        | op `elem` ["+", "-", "*", "/", "%"]
+        , Just lt <- goExprGoType l
+        , Just rt' <- goExprGoType r
+        , lt == rt'
+        , lt `elem` ["int", "float64", "string"]
+        -> Just lt
+    -- A bare identifier registered in the lambda-type context.
+    GoIr.GoIdent name -> solvedTypeToGo <$> lookupLambdaType name
+    _ -> Nothing
+  where
+    -- Normalise an `rt.*` callee to its bare function name,
+    -- accepting both `GoIdent "rt.Foo"` and `GoQualified "rt" "Foo"`.
+    rtCalleeName (GoIr.GoQualified "rt" fn) = Just fn
+    rtCalleeName (GoIr.GoIdent name)
+        | "rt." `List.isPrefixOf` name = Just (drop 3 name)
+    rtCalleeName _ = Nothing
+
+
 wrapTypedReturn :: String -> GoIr.GoExpr -> GoIr.GoExpr
 wrapTypedReturn retType body
     | retType == "any" = body
+    -- v0.13 typed lowerer: skip the coercion when `body` is already
+    -- provably the target type — no redundant `rt.CoerceInt(int)` /
+    -- `rt.Coerce[T](T)` wrap.
+    | goExprGoType body == Just retType = body
     | Just params <- stripParametric "rt.SkyResult" retType =
         GoIr.GoCall
             (GoIr.GoIdent ("rt.ResultCoerce[" ++ params ++ "]"))
