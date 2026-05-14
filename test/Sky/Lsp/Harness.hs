@@ -31,6 +31,7 @@ module Sky.Lsp.Harness
       -- * Lifecycle
     , initializeLsp
     , didOpen
+    , didSave
 
       -- * Request builders
     , posRequest
@@ -245,6 +246,24 @@ didOpen hin path src = do
                 , "version"    .= (1 :: Int)
                 , "text"       .= src
                 ]
+            ]
+        ]
+    threadDelay 300000
+
+
+-- | v0.13 Layer 4: send a `textDocument/didSave` notification.  The
+-- server runs the type-check pass synchronously AND spawns a
+-- background `sky check` (full pipeline — codegen + go build).
+-- Tests await the publishDiagnostics that lands when the background
+-- check returns.
+didSave :: Handle -> FilePath -> IO ()
+didSave hin path = do
+    sendMsg hin $ Aeson.object
+        [ "jsonrpc" .= ("2.0" :: T.Text)
+        , "method"  .= ("textDocument/didSave" :: T.Text)
+        , "params"  .= Aeson.object
+            [ "textDocument" .= Aeson.object
+                [ "uri" .= ("file://" ++ path) ]
             ]
         ]
     threadDelay 300000

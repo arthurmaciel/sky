@@ -26,7 +26,7 @@ import System.IO.Temp (withSystemTempDirectory)
 
 import Sky.Lsp.Harness
     ( findSky, withLsp
-    , initializeLsp, didOpen
+    , initializeLsp, didOpen, didSave
     , awaitNotification
     )
 
@@ -537,6 +537,59 @@ spec = do
                             -- Sky diagnostics from other compilers'.
                             let sources = diagnosticSources payload
                             anyMatch "sky" sources `shouldBe` True
+
+        it "Layer 4 — didSave runs the full pipeline (sky check) in the background" $ do
+            -- v0.13 Layer 4: on save, the server spawns `sky check`
+            -- (codegen + go build, a superset of type-checking) and
+            -- publishes its diagnostics.  Here a type error is used
+            -- as the trigger because it's deterministic — the full-
+            -- pipeline path parses the same `-- TYPE ERROR …` block
+            -- the CLI emits and surfaces it with source="sky check".
+            -- Codegen-stage-only errors (Issue #52's Model_R class)
+            -- flow through the identical path; a type error is the
+            -- stable fixture.
+            sky <- findSky
+            let src = unlines
+                    [ "module Main exposing (main)"
+                    , ""
+                    , "import Std.Log exposing (println)"
+                    , ""
+                    , "bad : Int -> String"
+                    , "bad n = n"
+                    , ""
+                    , "main = println (bad 5)"
+                    ]
+            withSystemTempDirectory "sky-lsp-layer4-save" $ \dir -> do
+                fixture <- setupProject dir src
+                withLsp sky $ \hin hout -> do
+                    initializeLsp hin hout
+                    didOpen hin fixture src
+                    -- drain the didOpen diagnostics
+                    _ <- awaitNotification hout "textDocument/publishDiagnostics"
+                    didSave hin fixture
+                    -- The background `sky check` returns and publishes
+                    -- its own diagnostics.  Drain notifications until
+                    -- we see one carrying source="sky check" (the
+                    -- full-pipeline marker) — the synchronous type-
+                    -- check pass may emit one first.
+                    let drainForFullPipeline :: Int -> IO ()
+                        drainForFullPipeline 0 = expectationFailure
+                            "no full-pipeline (sky check) diagnostic within budget"
+                        drainForFullPipeline n = do
+                            r <- awaitNotification hout
+                                   "textDocument/publishDiagnostics"
+                            case r of
+                                Nothing -> expectationFailure
+                                    "publishDiagnostics stream ended early"
+                                Just payload ->
+                                    if anyMatch "sky check"
+                                         (diagnosticSources payload)
+                                      then do
+                                        let msgs = diagnosticMessages payload
+                                        anyMatch "type mismatch" msgs
+                                            `shouldBe` True
+                                      else drainForFullPipeline (n - 1)
+                    drainForFullPipeline 5
 
 
 -- | Extract `source` field strings from publishDiagnostics payload.
