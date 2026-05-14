@@ -3389,7 +3389,16 @@ goExprGoType e = case e of
         , lt `elem` ["int", "float64", "string"]
         -> Just lt
     -- A bare identifier registered in the lambda-type context.
-    GoIr.GoIdent name -> solvedTypeToGo <$> lookupLambdaType name
+    -- RESTRICTED to primitive types: `solvedTypeToGo` renders some
+    -- composite types (notably tuples → `rt.T2[A,B]`) differently
+    -- from how the variable is actually EMITTED (tuple vars are
+    -- `[]rt.SkyTuple2` / `rt.SkyTuple2`).  Trusting the HM type for
+    -- those would wrongly elide a needed coercion.  Primitives
+    -- (`int` / `float64` / `string` / `bool` / `rune`) render
+    -- identically everywhere, so they're safe.
+    GoIr.GoIdent name -> case lookupLambdaType name of
+        Just t | isTypedPrimitive t -> Just (solvedTypeToGo t)
+        _                           -> Nothing
     _ -> Nothing
   where
     -- Normalise an `rt.*` callee to its bare function name,
@@ -6099,6 +6108,9 @@ coerceArg e ty
     -- from the caller side since it's scoped to the callee. Let Go's
     -- type inference figure it out from the usage. Pass raw.
     | isGenericTypeParam ty = e
+    -- v0.13 typed lowerer: `e` is already provably the target type —
+    -- skip the coercion entirely (no `rt.CoerceInt(int)` etc.).
+    | goExprGoType e == Just ty = e
     | Just params <- stripParametric "rt.SkyResult" ty =
         GoIr.GoCall (GoIr.GoIdent ("rt.ResultCoerce[" ++ eraseTypeParams params ++ "]")) [e]
     | Just inner <- stripParametric "rt.SkyMaybe" ty =
