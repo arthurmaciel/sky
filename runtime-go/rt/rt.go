@@ -2468,7 +2468,11 @@ func List_range(lo any, hi any) any {
 
 func String_join(sep any, list any) any {
 	s := fmt.Sprintf("%v", sep)
-	items := list.([]any)
+	// AsList — not a hard `.([]any)` assertion: v0.13 typed codegen
+	// can hand this kernel a typed `[]string` (e.g. from a typed
+	// `List.map renderProp props` in Sky-source Std.Css). A hard
+	// assertion panics on those; AsList boxes any Go slice.
+	items := AsList(list)
 	parts := make([]string, len(items))
 	for i, item := range items { parts[i] = fmt.Sprintf("%v", item) }
 	return strings.Join(parts, s)
@@ -4627,7 +4631,7 @@ func Random_float(lo any, hi any) any {
 
 func Random_choice(list any) any {
 	return func() any {
-		items := list.([]any)
+		items := AsList(list)
 		if len(items) == 0 { return Err[any, any](ErrInvalidInput("empty list")) }
 		return Ok[any, any](items[mrand.Intn(len(items))])
 	}
@@ -4635,7 +4639,7 @@ func Random_choice(list any) any {
 
 func Random_shuffle(list any) any {
 	return func() any {
-		items := list.([]any)
+		items := AsList(list)
 		result := make([]any, len(items))
 		copy(result, items)
 		mrand.Shuffle(len(result), func(i, j int) { result[i], result[j] = result[j], result[i] })
@@ -4684,7 +4688,7 @@ func Random_shuffleT[A any](xs []A) SkyTask[any, []A] {
 func Process_run(cmd any, args any) any {
 	return func() any {
 		cmdStr := fmt.Sprintf("%v", cmd)
-		argList := args.([]any)
+		argList := AsList(args)
 		strArgs := make([]string, len(argList))
 		for i, a := range argList { strArgs[i] = fmt.Sprintf("%v", a) }
 		c := exec.Command(cmdStr, strArgs...)
@@ -5596,7 +5600,7 @@ const (
 
 func Server_listen(port any, routes any) any {
 	p := AsInt(port)
-	routeList := routes.([]any)
+	routeList := AsList(routes)
 	mux := http.NewServeMux()
 
 	for _, r := range routeList {

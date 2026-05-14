@@ -899,7 +899,7 @@ func tuiDispatchFocusChange(focusables []focusable, oldIdx, newIdx int, msgCh ch
 }
 
 // focusableEvent returns the eventPair on `f` matching the given name
-// ("click", "input", "change", ...). Sky.Live's Event_onClick et al.
+// ("click", "input", "change", ...). Std.Html.Events' on* builders
 // produce eventPair{name, msg} values; we filter the focusable's
 // events list by name for activation routing.
 func focusableEvent(f focusable, name string) any {
@@ -1168,8 +1168,8 @@ func tuiExtractInputMsg(evt any, buffer string) any {
 	return sky_call(ep.msg, buffer)
 }
 
-// tuiExtractClickMsg pulls the Msg out of a Std.Live.Events event
-// value. Event_onClick returns an `eventPair{name, msg}` (see live.go);
+// tuiExtractClickMsg pulls the Msg out of a Std.Html.Events event
+// value. onClick produces an `eventPair{name, msg}` (see live.go);
 // we just read its msg field. We also tolerate tuple-shaped values for
 // forward compatibility with future event payload shapes.
 func tuiExtractClickMsg(evt any) any {

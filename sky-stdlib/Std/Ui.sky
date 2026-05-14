@@ -1062,12 +1062,11 @@ ariaForDescription d =
         _                  -> Nothing
 
 
--- Sky.Std.Html.Attributes doesn't expose a generic
--- `Attr.attribute key value` kernel today, so dispatch by key name
--- for the common HTML attrs Std.Ui needs. Unknown keys fall back
--- to encoding the attr inline-style as `data-<key>="<v>"` via the
--- typed Attr.attribute style proxy. (Future work — promote this to
--- a kernel call once `rt.Attr_attribute` lands.)
+-- Dispatch by key name for the common HTML attrs Std.Ui needs, so
+-- each maps to its dedicated typed Attr.* builder. Any other key
+-- (sky-key, aria-*, custom data-*, …) falls through to the generic
+-- `Attr.attribute key value`, which Std.Html.Attributes exposes as
+-- Sky source.
 kernelAttr : String -> String -> any
 kernelAttr key value =
     if key == "href" then Attr.href value

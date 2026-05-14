@@ -50,11 +50,14 @@ spec = do
             -- back to "" on Err.  v0.13 Phase B2 migrated Result.withDefault
             -- to a Sky-source `Sky.Core.Result` module, so the emitted Go
             -- call now references `Sky_Core_Result_withDefault` rather than
-            -- the kernel-routed `rt.Result_withDefaultAnyT`.  Either
-            -- routing keeps the semantic guarantee; only the symbol
-            -- changes.  Accept both forms so a future re-route back to
-            -- the kernel doesn't trip this fence.
+            -- the kernel-routed `rt.Result_withDefaultAnyT`.  v0.13's
+            -- per-instance monomorphisation specialises it further to
+            -- `Sky_Core_Result_withDefault__String_Error("", ...)` — the
+            -- fully-typed, zero-`any` form.  Every routing keeps the
+            -- semantic guarantee; only the symbol changes.  Accept all
+            -- forms so a future re-route doesn't trip this fence.
             ( ("rt.Result_withDefaultAnyT(\"\"" `isInfixOf` body)
+              || ("Sky_Core_Result_withDefault__String_Error(\"\"" `isInfixOf` body)
               || ("Sky_Core_Result_withDefault(rt.CoerceString(\"\"" `isInfixOf` body)
               || ("Sky_Core_Result_withDefault(\"\"" `isInfixOf` body) )
                 `shouldBe` True

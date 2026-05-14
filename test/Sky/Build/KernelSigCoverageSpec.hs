@@ -107,16 +107,23 @@ spec = do
                 (key `isInfixOf` body) `shouldBe` True)
               [ "casefold", "equalFold", "isEmail", "isUrl", "trimEnd", "trimStart" ]
 
-        it "Css length / transform / value helpers (Sprintf-returning)" $ do
+        it "Css is a Sky-source stdlib module — no kernel sigs (v0.13)" $ do
+            -- v0.13 migrated Std.Css from a Go runtime kernel to a
+            -- fully-typed Sky-source stdlib module (sky-stdlib/Std/Css.sky).
+            -- It is type-checked from source like any other Sky module,
+            -- so it MUST NOT have any `lookupKernelType` entries — those
+            -- would shadow the real Sky declarations with stale Go shapes.
             body <- BS8.unpack <$> BS.readFile sigsFile
             mapM_ (\name -> do
                 let key = "(\"Css\", \"" ++ name ++ "\")"
-                (key `isInfixOf` body) `shouldBe` True)
+                (key `isInfixOf` body) `shouldBe` False)
               [ "vh", "vw", "ch", "fr", "deg", "ms", "sec"
               , "rotate", "scale", "translateX", "translateY"
               , "calc", "minmax", "repeat"
               , "cssVar", "cssVarOr"
               , "zero", "borderBox", "systemFont"
+              , "px", "rem", "em", "pct", "hex"
+              , "rgb", "rgba", "hsl", "hsla", "stylesheet", "shadow"
               ]
 
         it "Sky.Ffi escape-hatch: callPure / callTask / call / has / isPure (v0.12)" $ do

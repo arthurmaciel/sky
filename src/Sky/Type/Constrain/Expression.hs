@@ -1679,6 +1679,81 @@ lookupKernelType modName funcName = case (modName, funcName) of
         Just $ T.Forall []
             (T.TLambda intType (T.TLambda intType intType))
 
+    -- String — additional pure helpers
+    ("String", "casefold") ->
+        Just $ T.Forall [] (T.TLambda stringType stringType)
+    ("String", "equalFold") ->
+        Just $ T.Forall []
+            (T.TLambda stringType (T.TLambda stringType boolType))
+    ("String", "isEmail") ->
+        Just $ T.Forall [] (T.TLambda stringType boolType)
+    ("String", "isUrl") ->
+        Just $ T.Forall [] (T.TLambda stringType boolType)
+    ("String", "trimEnd") ->
+        Just $ T.Forall [] (T.TLambda stringType stringType)
+    ("String", "trimStart") ->
+        Just $ T.Forall [] (T.TLambda stringType stringType)
+    ("String", "concat") ->
+        Just $ T.Forall []
+            (T.TLambda (T.TType ModuleName.list "List" [stringType]) stringType)
+    ("String", "words") ->
+        Just $ T.Forall []
+            (T.TLambda stringType (T.TType ModuleName.list "List" [stringType]))
+    ("String", "lines") ->
+        Just $ T.Forall []
+            (T.TLambda stringType (T.TType ModuleName.list "List" [stringType]))
+    ("String", "fromChar") ->
+        Just $ T.Forall [] (T.TLambda charType stringType)
+    ("String", "toList") ->
+        Just $ T.Forall []
+            (T.TLambda stringType (T.TType ModuleName.list "List" [charType]))
+    ("String", "fromList") ->
+        Just $ T.Forall []
+            (T.TLambda (T.TType ModuleName.list "List" [charType]) stringType)
+    ("String", "repeat") ->
+        Just $ T.Forall []
+            (T.TLambda intType (T.TLambda stringType stringType))
+    ("String", "padLeft") ->
+        Just $ T.Forall []
+            (T.TLambda intType
+                (T.TLambda charType (T.TLambda stringType stringType)))
+    ("String", "padRight") ->
+        Just $ T.Forall []
+            (T.TLambda intType
+                (T.TLambda charType (T.TLambda stringType stringType)))
+
+    -- Basics
+    ("Basics", "compare") ->
+        Just $ T.Forall ["a"]
+            (T.TLambda (T.TVar "a") (T.TLambda (T.TVar "a") intType))
+    ("Basics", "fst") ->
+        Just $ T.Forall ["a", "b"]
+            (T.TLambda (T.TTuple (T.TVar "a") (T.TVar "b") []) (T.TVar "a"))
+    ("Basics", "snd") ->
+        Just $ T.Forall ["a", "b"]
+            (T.TLambda (T.TTuple (T.TVar "a") (T.TVar "b") []) (T.TVar "b"))
+    ("Basics", "clamp") ->
+        Just $ T.Forall []
+            (T.TLambda intType (T.TLambda intType (T.TLambda intType intType)))
+    ("Basics", "modBy") ->
+        Just $ T.Forall []
+            (T.TLambda intType (T.TLambda intType intType))
+    ("Basics", "toFloat") ->
+        Just $ T.Forall [] (T.TLambda intType floatType)
+    ("Basics", "round") ->
+        Just $ T.Forall [] (T.TLambda floatType intType)
+    ("Basics", "floor") ->
+        Just $ T.Forall [] (T.TLambda floatType intType)
+    ("Basics", "ceiling") ->
+        Just $ T.Forall [] (T.TLambda floatType intType)
+    ("Basics", "truncate") ->
+        Just $ T.Forall [] (T.TLambda floatType intType)
+    ("Basics", "errorToString") ->
+        Just $ T.Forall []
+            (T.TLambda
+                (T.TType (ModuleName.Canonical "Sky.Core.Error") "Error" [])
+                stringType)
+
     ("Log", "printlnT") ->
         Just $ T.Forall ["a", "e"]
             (T.TLambda (T.TVar "a")
