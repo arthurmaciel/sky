@@ -385,7 +385,9 @@ spec = do
             --      kernel sig had this; the LSP was hiding it).
             --   2. Rejected by the LSP with the SAME informative
             --      diagnostic, listing the expected view return
-            --      type (VNode) vs what the user wrote (String).
+            --      type (Html Msg — v0.13 Layer 3 migrated
+            --      Live.app's `view` field to the Sky-source
+            --      `Html msg` ADT) vs what the user wrote (String).
             -- This test fixture deliberately writes `view _ = "hi"`
             -- to assert the diagnostic surfaces.
             sky <- findSky
@@ -436,11 +438,14 @@ spec = do
                         Just payload -> do
                             let msgs = diagnosticMessages payload
                             -- The diagnostic surfaces with field-
-                            -- aware rendering — `view : (Model) ->
-                            -- String` vs `view : (Model) -> VNode`.
+                            -- aware rendering — `view`'s return is
+                            -- `String` where `Html Msg` is expected.
+                            -- (v0.13 Layer 3: Live.app's `view` field
+                            -- returns the Sky-source `Html msg` ADT,
+                            -- not the old runtime `VNode`.)
                             anyMatch "Type" msgs `shouldBe` True
                             anyMatch "view" msgs `shouldBe` True
-                            anyMatch "VNode" msgs `shouldBe` True
+                            anyMatch "Html" msgs `shouldBe` True
 
     describe "v0.13 Layer 4 — LSP carries stable diagnostic codes" $ do
 
