@@ -8,7 +8,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Data.IORef
-import Data.Maybe (isJust, fromMaybe)
+import Data.Maybe (isJust, isNothing, fromMaybe)
 import Data.List (isPrefixOf)
 import qualified Data.Char as Char
 import qualified Data.List as List
@@ -6203,6 +6203,13 @@ caseToGo subject branches =
         -- P7: typed-FFI-source subjects use a distinct name so
         -- bindCtorArg knows to skip the `any().(SkyResult[any,any])`
         -- assertion step. Saves one boxing per typed case match.
+        --
+        -- v0.13 typed lowerer: custom-ADT subjects (non-Result/Maybe)
+        -- ALWAYS go through `coerceSubject`'s `GoTypeAssert (any e)
+        -- typeName` path, so `__subject` is statically the ADT struct
+        -- type (`rt.SkyADT` alias).  Mark them `__subject_tAdt` so
+        -- `bindCtorArg` reads `.Fields[idx]` directly instead of
+        -- routing through `rt.AdtField(any(subject), idx)` (reflect).
         subjectName =
             case subjectType of
                 Just typeName
@@ -6210,6 +6217,9 @@ caseToGo subject branches =
                     -> "__subject_tFfi"
                     | isJust (stripParametric "rt.SkyMaybe" typeName) && isTypedFfiCall goSubject
                     -> "__subject_tFfi"
+                    | isNothing (stripParametric "rt.SkyResult" typeName)
+                    , isNothing (stripParametric "rt.SkyMaybe" typeName)
+                    -> "__subject_tAdt"
                 _ -> "__subject"
         subjectDecl = case subjectType of
             Just typeName ->
@@ -6777,6 +6787,16 @@ bindCtorArg subject ctorName (Can.PatternCtorArg idx _ty pat) =
         isTypedFfiSubject =
             take 5 (reverse subject) == "ifFt_"
             && not ("__sky_cf_" `List.isPrefixOf` subject)
+        -- v0.13 typed lowerer: `__subject_tAdt` is the outer case
+        -- subject for a custom (non-Result/Maybe) ADT — it was
+        -- type-asserted to the ADT struct (`rt.SkyADT` alias) in
+        -- `coerceSubject`, so `.Fields[idx]` reads directly without
+        -- the `rt.AdtField(any(subject), idx)` reflect helper.
+        -- Nested destructure temps (`__sky_cf_*`) are any-typed —
+        -- reject them so they fall through to the reflect path.
+        isTypedAdtSubject =
+            take 5 (reverse subject) == "tdAt_"
+            && not ("__sky_cf_" `List.isPrefixOf` subject)
         anyWrap n = GoIr.GoCall (GoIr.GoIdent "any") [GoIr.GoIdent n]
         -- Runtime helper unwraps any SkyResult/SkyMaybe instantiation
         -- without a type-assertion panic — used when the subject is
@@ -6797,6 +6817,12 @@ bindCtorArg subject ctorName (Can.PatternCtorArg idx _ty pat) =
             "Ok"   -> helperFor "ResultOk"
             "Err"  -> helperFor "ResultErr"
             "Just" -> helperFor "MaybeJust"
+            _ | isTypedAdtSubject ->
+                -- Custom ADT, statically-typed subject: direct
+                -- `.Fields[idx]` — no reflect.
+                GoIr.GoIndex
+                    (GoIr.GoSelector (GoIr.GoIdent subject) "Fields")
+                    (GoIr.GoIntLit idx)
             _      ->
                 -- Custom ADT: use rt.AdtField runtime helper so an
                 -- any-typed subject (e.g. bound from
