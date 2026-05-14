@@ -3198,6 +3198,17 @@ goZeroValue t = case t of
       -- Record-alias structs (`Foo_R`) and Sky ADT struct aliases
       -- zero via `T{}`.
       | "_R" `List.isSuffixOf` t           -> Just (t ++ "{}")
+      -- A Go generic type parameter (`T1`, `T2`, …) in scope: its
+      -- zero value is `*new(T)` (the standard expression-form zero
+      -- for a type param).  Only valid INSIDE the generic function
+      -- that declares the param — `exprToGoExpectGo` only threads a
+      -- type-param `goRendering` at function-body emit sites (where
+      -- the param IS in scope); `coerceCallArgsAt` explicitly
+      -- excludes type params from its call-site threading.  The
+      -- monomorphiser's `substTypeParamsInString` rewrites `*new(T1)`
+      -- → `*new(int)` etc. when specialising, so the zero stays
+      -- correct after instance expansion.
+      | isGenericTypeParam t               -> Just ("*new(" ++ t ++ ")")
       -- A bare capitalised identifier: resolve via the codegen
       -- env's union/enum registries.
       --   * Enum union (`type X = int`)        → zero is `0`.
@@ -5875,14 +5886,28 @@ coerceCallArgsAt region qualName args =
                             -- anon-record); otherwise fall through to
                             -- the `coerceArg` path which still applies
                             -- the runtime coercion.
+                            --
+                            -- EXCLUDES Go generic type params (`T1`,
+                            -- …): those name the CALLEE's type
+                            -- variables, which are NOT in scope at
+                            -- this (the caller's) site — threading
+                            -- `func() T1` here would emit an undefined
+                            -- identifier.  `goZeroValue` reports type
+                            -- params as emittable for the function-
+                            -- BODY emit path (where they ARE in
+                            -- scope), so the explicit exclusion is
+                            -- required here.
                             Can.Case{}
-                                | isEmittableGoType subbed ->
+                                | isEmittableGoType subbed
+                                , not (isGenericTypeParam subbed) ->
                                     exprToGoExpectGo subbed e
                             Can.If{}
-                                | isEmittableGoType subbed ->
+                                | isEmittableGoType subbed
+                                , not (isGenericTypeParam subbed) ->
                                     exprToGoExpectGo subbed e
                             Can.Let{}
-                                | isEmittableGoType subbed ->
+                                | isEmittableGoType subbed
+                                , not (isGenericTypeParam subbed) ->
                                     exprToGoExpectGo subbed e
                             _ ->
                                 if subbed == "any" && containsTypeParam orig
