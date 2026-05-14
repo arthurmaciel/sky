@@ -6111,6 +6111,16 @@ letToGo def body =
     -- have different names; cross-function leakage is prevented by
     -- the scoping wrapper.
     let solved = Rec._cg_solvedTypes getCgEnv
+        -- v0.13 typed lowerer: register a primitive-typed let-binding
+        -- under the body's scope so Go-native binops fire on it.
+        -- Restricted to primitives — broadening to record/ADT types
+        -- is unsound here: `operandIsStaticallyTyped valExpr` can be
+        -- True for a typed-local ref whose own type is a generic
+        -- instantiation (`T1`) rather than a concrete struct, and the
+        -- emitted Go local then isn't the record struct the typed
+        -- field-access path assumes.  Primitives don't have that
+        -- failure mode (int/string/bool/float/rune have no generic
+        -- form).
         bindingExtras = case def of
             Can.Def (A.At _ name) [] valExpr
                 | name /= "_"
