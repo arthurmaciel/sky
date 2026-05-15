@@ -20,7 +20,7 @@ data RustModule = RustModule
     }
 
 data RustItem
-    = RustFunction String [String] String
+    = RustFunction String String [String] String  -- name, generics_decl, params, body
     | RustStruct String [(String, String)]
     | RustEnum String [(String, Maybe String)]
     | RustTypeAlias String String
@@ -48,9 +48,9 @@ buildModule :: EmitCtx -> Can.Module -> RustModule
 buildModule ctx mod = 
     let modPrefix = moduleNameToRust (Can._name mod)
         items = declsToRustItems ctx (Can._decls mod)
-        prefixItem (RustFunction n p b)
-            | n == "sky_main" || n == "main" = RustFunction n p b
-            | otherwise = RustFunction (modPrefix ++ "_" ++ n) p b
+        prefixItem (RustFunction n g p b)
+            | n == "sky_main" || n == "main" = RustFunction n g p b
+            | otherwise = RustFunction (modPrefix ++ "_" ++ n) g p b
         prefixItem other = other
     in RustModule
         { modName = modPrefix
@@ -70,15 +70,17 @@ declsToRustItems ctx (Can.DeclareRec def defs rest) =
 defToRustItem :: EmitCtx -> Can.Def -> RustItem
 defToRustItem ctx (Can.Def (Ann.At _ name) params body) = 
     let rustName = if name == "main" then "sky_main" else name
-        -- Def functions lack type info; use String as default
-        params' = map (\p -> patternToRustParam p ++ ": String") params
-    in RustFunction rustName params' (exprToRustString ctx body)
+        n = length params
+        genVars = if null params then "" 
+                  else "<" ++ intercalate ", " (map (\i -> "T" ++ show i) [0..n-1]) ++ ">"
+        params' = map (\(i, p) -> patternToRustParam p ++ ": T" ++ show i) (zip [0..] params)
+    in RustFunction rustName genVars params' (exprToRustString ctx body)
 defToRustItem ctx (Can.TypedDef (Ann.At _ name) _ pats body _) = 
     let rustName = if name == "main" then "sky_main" else name
         params = map (\(pat, ty) -> patternToRustParam pat ++ ": " ++ typeToRustString ty) pats
-    in RustFunction rustName params (exprToRustString ctx body)
+    in RustFunction rustName "" params (exprToRustString ctx body)
 defToRustItem ctx (Can.DestructDef pat expr) =
-    RustFunction "_destruct" [patternToRustParam pat] (exprToRustString ctx expr)
+    RustFunction "_destruct" "" [patternToRustParam pat] (exprToRustString ctx expr)
 
 unionsToRustTypes :: String -> Map.Map String Can.Union -> [RustTypeDef]
 unionsToRustTypes modPrefix unions = map (\(name, u) -> unionToRustTypeDef modPrefix name u) (Map.toList unions)
@@ -110,8 +112,8 @@ typeToRustString t = case t of
     Can.TType _ "Task" [_, a] -> "Box<dyn Future<Output = Result<" ++ typeToRustString a ++ ", Error>> + Send>"
     Can.TUnit -> "()"
     Can.TType _ "List" [a] -> "Vec<" ++ typeToRustString a ++ ">"
-    Can.TType _ "Maybe" [a] -> "Option<" ++ typeToRustString a ++ ">"
-    Can.TType _ "Result" [e, a] -> "Result<" ++ typeToRustString a ++ ", " ++ typeToRustString e ++ ">"
+    Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString a ++ ">"
+    Can.TType _ "Result" [e, a] -> "SkyResult<" ++ typeToRustString a ++ ", " ++ typeToRustString e ++ ">"
     Can.TRecord _fields _ -> "()"  -- TRecord: emitted as named struct via alias
     Can.TTuple a b rest -> "(" ++ intercalate ", " (map typeToRustString (a:b:rest)) ++ ")"
     Can.TVar v -> v
@@ -175,12 +177,9 @@ exprToRustInner ctx e = case e of
     Can.VarTopLevel mod name -> 
         map (\c -> if c == '.' then '_' else c) (ModuleName._name mod) ++ "_" ++ name
     Can.VarKernel mod name -> kernelToRust mod name
-    Can.VarCtor _ modName typeName ctorName _ -> 
-        let modStr = ModuleName._name modName
-            modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-        in modPrefix ++ typeName ++ "::" ++ ctorName
+    Can.VarCtor _ modName typeName ctorName _ -> kernelCtorToRust modName typeName ctorName
     Can.Chr c -> show c
-    Can.Str s -> show s
+    Can.Str s -> show s ++ ".to_string()"
     Can.Int i -> show i
     Can.Float f -> show f
     Can.List es -> "vec![" ++ intercalate ", " (map (exprToRustString ctx) es) ++ "]"
@@ -267,10 +266,8 @@ patternToMatchString (Ann.At _ pat) = case pat of
     Can.PStr s -> show s
     Can.PUnit -> "()"
     Can.PCtor{Can._p_home = home, Can._p_type = typeName, Can._p_name = name, Can._p_args = args} ->
-        let modStr = ModuleName._name home
-            modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-            subPats = map ctorArgToPattern args
-            fullName = modPrefix ++ typeName ++ "::" ++ name
+        let subPats = map ctorArgToPattern args
+            fullName = kernelCtorToRust home typeName name
         in fullName ++ if null subPats then "" else "(" ++ intercalate ", " subPats ++ ")"
     Can.PTuple a b rest -> 
         "(" ++ intercalate ", " (map patternToMatchString (a:b:rest)) ++ ")"
@@ -301,12 +298,16 @@ buildProgram mods =
 emitRust :: RustBuilder -> String
 emitRust b = unlines $
     [ "// Generated by Sky compiler (Rust target)"
+    , "#![allow(unused)]"
     , ""
     , "// ==========================================="
     , "// SKY RUNTIME (inline)"
     , "// ==========================================="
     , ""
     , "use std::fmt;"
+    , "use std::future::Future;"
+    , "use std::future::ready;"
+    , "use std::pin::Pin;"
     , ""
     , "// Basic types"
     , "type SkyInt = i64;"
@@ -405,6 +406,47 @@ emitRust b = unlines $
     , "// Float helpers"
     , "pub fn sky_float_to_string(f: f64) -> String { format!(\"{}\", f) }"
     , ""
+    , "// ==========================================="
+    , "// KERNEL HELPER STUBS (sync impl, no async/await)"
+    , "// ==========================================="
+    , ""
+    , "// Task helpers (all stubs - real async needs external crate)"
+    , "type SkyTask<A> = Pin<Box<dyn Future<Output = SkyResult<String, A>> + Send>>;"
+    , "pub fn Task_succeed<A: Send + 'static>(a: A) -> SkyTask<A> { Box::pin(ready(SkyResult::Ok(a))) }"
+    , "pub fn Task_map<A: Send + 'static, B: Send + 'static>(_f: impl FnOnce(A) -> B + Clone + Send + 'static) -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
+    , "    move |_task| Box::pin(ready(SkyResult::Err(String::new())))"
+    , "}"
+    , "pub fn Task_andThen<A: Send + 'static, B: Send + 'static>(_f: impl FnOnce(A) -> SkyTask<B> + Clone + Send + 'static) -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
+    , "    move |_task| Box::pin(ready(SkyResult::Err(String::new())))"
+    , "}"
+    , "pub fn Task_onError<A: Send + 'static>(_f: impl FnOnce(SkyResult<String, A>) -> SkyTask<A> + Clone + Send + 'static) -> impl FnOnce(SkyTask<A>) -> SkyTask<A> {"
+    , "    move |_task| Box::pin(ready(SkyResult::Err(String::new())))"
+    , "}"
+    , "pub fn Task_run<A>(_task: SkyTask<A>) -> SkyResult<String, A> { unimplemented!() }"
+    , ""
+    , "// System helpers"
+    , "pub fn System_args() -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().collect()))) }"
+    , "pub fn System_exit(code: i64) -> ! { std::process::exit(code as i32) }"
+    , ""
+    , "// Log helpers"
+    , "pub fn Log_info(msg: String) -> SkyTask<()> { println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn Log_infoWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> { println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn Log_errorWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> { eprintln!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(()))) }"
+    , ""
+    , "// DB stubs (Db type defined as placeholder below)"
+    , "pub fn Db_connect(_url: String) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
+    , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<Vec<String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
+    , "pub fn Db_getField(_field: String, _row: Vec<String>) -> String { String::new() }"
+    , ""
+    , "// String helpers"
+    , "pub fn String_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }"
+    , ""
+    , "// Result helper"
+    , "pub fn Result_withDefault<A: Send + 'static>(def: A) -> impl FnOnce(SkyResult<String, A>) -> A {"
+    , "    move |r| match r { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }"
+    , "}"
     , "// Debug trait for logging"
     , "impl fmt::Debug for Error {"
     , "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {"
@@ -446,6 +488,17 @@ moduleToRustStrings m =
     ["// Module: " ++ modName m, ""] ++
     concatMap itemToRustStrings (modItems m) ++ [""]
 
+kernelCtorToRust :: ModuleName.Canonical -> String -> String -> String
+kernelCtorToRust modName typeName ctorName =
+    let modStr = ModuleName._name modName
+    in case (modStr, typeName, ctorName) of
+        ("Sky.Core.Basics", "Bool", "True") -> "true"
+        ("Sky.Core.Basics", "Bool", "False") -> "false"
+        ("Sky.Core.Maybe", "Maybe", c) -> "SkyMaybe::" ++ c
+        ("Sky.Core.Result", "Result", c) -> "SkyResult::" ++ c
+        _ -> let modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+             in modPrefix ++ typeName ++ "::" ++ ctorName
+
 kernelToRust :: String -> String -> String
 kernelToRust mod name = case (mod, name) of
     ("Log", "println") -> "println"
@@ -458,8 +511,8 @@ exprToStatement expr = if null expr then ""
     else expr ++ ";"  -- add semicolon for statement
 
 itemToRustStrings :: RustItem -> [String]
-itemToRustStrings (RustFunction name params body) = 
-    ["fn " ++ name ++ "(" ++ intercalate ", " params ++ ") {", "    " ++ exprToStatement body, "}"]
+itemToRustStrings (RustFunction name generics params body) = 
+    ["fn " ++ name ++ generics ++ "(" ++ intercalate ", " params ++ ") {", "    " ++ exprToStatement body, "}"]
 itemToRustStrings (RustStruct name fields) = 
     ["struct " ++ name ++ " {", 
      intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields), 
@@ -484,17 +537,18 @@ collectUndefinedTypes b =
             [ name | RAliasDef name _ <- builderTypes b ]
         -- Collect type names from function parameter types (after ": ")
         referenced = Set.fromList
-            [ t | RustFunction _ params _ <- allItems
+            [ t | RustFunction _ _ params _ <- allItems
                 , p <- params
                 , let (_, ':':ty) = break (== ':') p
                 , let t = dropWhile (== ' ') ty
                 , not (null t)
                 , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue"])
+                , not ("T" `isPrefixOf` t && all (\c -> c >= '0' && c <= '9') (drop 1 t))  -- generic params T0, T1, etc.
                 , not ("Vec<" `isPrefixOf` t)
-                , not ("Option<" `isPrefixOf` t)
-                , not ("Result<" `isPrefixOf` t)
-                , not ("SkyMaybe<" `isPrefixOf` t)
-                , not ("SkyResult<" `isPrefixOf` t)
+                , not ("Option" `isPrefixOf` t)
+                , not ("Result" `isPrefixOf` t)
+                , not ("SkyMaybe" `isPrefixOf` t)
+                , not ("SkyResult" `isPrefixOf` t)
                 , not ("Box<" `isPrefixOf` t)
                 , not ("fn(" `isPrefixOf` t)
             ]
