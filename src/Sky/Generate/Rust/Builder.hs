@@ -411,12 +411,24 @@ exprToRustInner ctx e = case e of
     Can.LetRec defs body ->
         "let mut " ++ intercalate "; let mut " (map (defToRustString ctx) defs) ++ "; " ++ exprToRustString ctx body
     Can.LetDestruct pat expr body ->
-        -- The Sky lowerer wraps Task.run in a zero-arg thunk (|| { expr }).
-        -- For "let _ = thunk in body", immediately call the thunk so the side
-        -- effect fires.  This mirrors Go's rt.AnyTaskRun auto-force.
+        -- Zero-arg lambda: Task auto-force (mirrors Go's rt.AnyTaskRun).
+        -- Non-zero-arg lambda: closure binding.
+        -- Clone declarations are wrapped in a {} block so the original
+        -- variable stays accessible afterward — only the block-scoped
+        -- clone is moved into the closure.
         let exprStr = case expr of
-                Ann.At _ (Can.Lambda [] _) ->
-                    "(" ++ exprToRustString ctx expr ++ ")()"
+                Ann.At _ (Can.Lambda [] lambdaBody) ->
+                    let captured = Set.toList (collectVarLocals lambdaBody)
+                        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+                        inner = "(move || { " ++ exprToRustString ctx lambdaBody ++ " })()"
+                    in if null captured then inner else "{ " ++ clones ++ inner ++ " }"
+                Ann.At _ (Can.Lambda ps lambdaBody) ->
+                    let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
+                        captured = Set.toList (Set.difference (collectVarLocals lambdaBody) paramNames)
+                        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+                        psStr = intercalate ", " (map patternToRustParam ps)
+                        inner = "move |" ++ psStr ++ "| { " ++ exprToRustString ctx lambdaBody ++ " }"
+                    in if null captured then inner else "{ " ++ clones ++ inner ++ " }"
                 _ -> exprToRustString ctx expr
         in "let " ++ patternToMatchString pat ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
     Can.Case scrut branches -> 
