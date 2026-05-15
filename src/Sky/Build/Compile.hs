@@ -4233,26 +4233,25 @@ safeReturnTypeWith recAliases = go
                         | otherwise     -> case inner of
                             T.TRecord{} -> if null base then "any" else base
                             _           -> go inner
-        -- Function-typed slots (HOF params): render as `func(X) any`
-        -- to match what renderHofParamTy emits at signature time. The
-        -- tail return is always `any` for the same reason — see
-        -- renderHofParamTy's third branch (Sky lambdas can't preserve
-        -- a concrete return type, so the param shape stays widened).
-        -- Crucially, registering the param as `func(X) any` (rather
-        -- than the bare `any` fallback) gives `coerceArg` the func
-        -- prefix it needs to route typed call-site args (e.g. a
-        -- `Msg_X : func(string) Msg` constructor) through
-        -- `rt.Coerce[func(X) any]` — Go's function-type-no-covariance
-        -- rule otherwise rejects the assignment.
+        -- Function-typed slots (HOF params): render typed return shape
+        -- to match what `renderHofParamTy` emits at signature time
+        -- (v0.13 D1). This drives `_cg_funcParamTypes[fn]`'s entry,
+        -- which `coerceCallArgsAt`'s fallback then uses to detect
+        -- the func-typed slot and route literal `Can.Lambda` args
+        -- through `curryLambdaPatTyped`. Bare-TVar returns stay typed
+        -- (Go call-site inference); concrete returns now render
+        -- through `go` instead of widening to `any`.
         T.TLambda _ _ -> renderFuncTy t
         _ -> "any"
       where
-        -- Curried multi-arg → nested `func(A) func(B) ...`. Tail
-        -- return widens to `any` regardless of the actual Sky type.
+        -- Curried multi-arg → nested `func(A) func(B) ...`.
         renderFuncTy (T.TLambda from to@T.TLambda{}) =
             "func(" ++ go from ++ ") " ++ renderFuncTy to
-        renderFuncTy (T.TLambda from _to) =
-            "func(" ++ go from ++ ") any"
+        renderFuncTy (T.TLambda from to@(T.TVar _)) =
+            "func(" ++ go from ++ ") " ++ go to
+        renderFuncTy (T.TLambda from to) =
+            "func(" ++ go from ++ ") " ++ go to
+        renderFuncTy other = go other
         renderFuncTy other = go other
 
 
@@ -4718,35 +4717,30 @@ renderHofParamTy recAliases fieldIdx tvarMap ty = case ty of
     renderLambdaInner (T.TLambda from to@(T.TVar _)) =
         -- Bare TVar return: keep typed so Go can infer via call site.
         "func(" ++ go from ++ ") " ++ go to
-    renderLambdaInner (T.TLambda from _to) =
-        -- Concrete-return HOF param sig stays `func(X) any` even when
-        -- the return is a real type like Msg or Result Error a. Reason:
-        -- Sky-side lambdas always lower to `func(any) any` (the lowerer
-        -- doesn't specialise lambda input/output types). A helper sig
-        -- of `func(X) Msg` would reject sky lambdas, and a sig of
-        -- `func(X) Result Error a` would reject typed Msg constructors
-        -- — Go has no function-type covariance. Keeping the sig at
-        -- `func(X) any` lets coerceArg's func branch route both shapes
-        -- through `rt.Coerce[func(X) any]`, which adapts via reflect.
-        -- See test/Sky/Build/CompileSpec.hs's "user-defined polymorphic
-        -- HOFs with Result-typed lambda params" test for the
-        -- regression that pinned this.
+    renderLambdaInner (T.TLambda from to) =
+        -- v0.13 D1: render the typed return shape for HOF param sigs.
         --
-        -- v0.13 D1 (deferred to broader scope): the v0.13-mid typed
-        -- lambda lowerer (`curryLambdaPatTyped`) types inputs +
-        -- outputs for kernel HOFs (List.map/filter/find,
-        -- Maybe/Result.{map,andThen}), but does NOT yet route
-        -- user-defined HOFs' lambda args through it. So a
-        -- user-defined `do : ... -> (a -> Result Error b) -> ...`
-        -- still has its `\a -> ...` lambda emitted as `func(any)
-        -- any`. Typing the return position here would surface the
-        -- mismatch at `rt.Coerce[func(any) rt.SkyResult[...]](...)`
-        -- → `func(any) any` lambda. Closing D1 fully requires
-        -- threading `_cg_funcParamTypes` through the lambda lowerer
-        -- so user-defined HOF param slots get
-        -- `curryLambdaPatTyped` too — multi-step work the v0.13
-        -- session has not yet executed.
-        "func(" ++ go from ++ ") any"
+        -- Pre-D1 this was a blanket `"any"` to accommodate Sky-side
+        -- lambdas lowered as `func(any) any`. The v0.13 D-Lambda-
+        -- Lowerer (the `coerceFallback`'s `Can.Lambda` arm in
+        -- `coerceCallArgsAt`'s no-CSI branch — see ~line 6229)
+        -- extends `curryLambdaPatTyped` routing to user-defined HOF
+        -- call sites: a literal `\a -> ...` lambda at a func-typed
+        -- param slot now emits `func(A) B` directly so the sig +
+        -- lowered shape agree end-to-end.
+        --
+        -- Non-literal func args (top-level helpers, Msg constructors,
+        -- partial applications) already have concrete Go signatures;
+        -- coerceArg's `rt.Coerce[func(X) Y]` reflect adapter
+        -- (makeFuncAdapter) bridges any residual shape mismatch.
+        --
+        -- The `test/Sky/Build/CompileSpec.hs:139` regression
+        -- ("user-defined polymorphic HOFs with Result-typed lambda
+        -- params") was the previous gating test for the blanket-
+        -- `any` workaround. D-Lambda-Lowerer makes the typed shape
+        -- consistent at user-defined HOFs too, so the regression
+        -- stays green.
+        "func(" ++ go from ++ ") " ++ go to
     renderLambdaInner other = go other
 
 -- | Like `typeStrWithAliases` but additionally consults a field-set →
@@ -6226,10 +6220,45 @@ coerceCallArgsAt region qualName args =
                 substituted =
                     map (eraseTypeParams . substTVarsInGoType recovered)
                         paramTypes
-                coerceFallback orig subbed e =
-                    if subbed == "any" && containsTypeParam orig
-                        then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
-                        else coerceArg (exprToGo e) subbed
+                -- v0.13 D-Lambda-Lowerer: when an arg is a literal
+                -- `Can.Lambda` at a func-typed param slot, route
+                -- through `curryLambdaPatTyped` instead of
+                -- `exprToGo + coerceArg`. The CSI-captured branch
+                -- above already does this; user-defined HOFs (which
+                -- fall through to THIS fallback because no CSI is
+                -- captured for them today) previously dropped the
+                -- lambda into `coerceArg(exprToGo lam) "func(...)"`,
+                -- producing `rt.Coerce[func(any) any](func(a any) any
+                -- {...})`. Once D1 types the param's return slot,
+                -- Go rejects the `func(any) any` shape against the
+                -- typed sig. Lifting the typed-lambda emission into
+                -- the fallback makes user-defined HOFs match too,
+                -- which unblocks D1 (typed HOF return).
+                coerceFallback orig subbed e@(A.At _ inner) =
+                    case inner of
+                        Can.Lambda pats body
+                            | all isSimpleVarPattern pats
+                            , (inputTypes, finalRet) <-
+                                splitCurriedFuncTypeStr (length pats) subbed
+                            , length inputTypes == length pats
+                            , length inputTypes > 0 ->
+                                let skyTys = map goTypeStrToSkyType inputTypes
+                                    bindings = patVarTypes pats skyTys
+                                    bodyPreTyped = isEmittableGoType finalRet
+                                    rawBody =
+                                        if bodyPreTyped
+                                            then exprToGoExpectGo finalRet body
+                                            else exprToGo body
+                                    body' = withScopedLambdaTypes bindings rawBody
+                                in if bodyPreTyped
+                                    then curryLambdaPatTypedPre inputTypes finalRet
+                                            pats body'
+                                    else curryLambdaPatTyped inputTypes finalRet
+                                            pats body'
+                        _ ->
+                            if subbed == "any" && containsTypeParam orig
+                                then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
+                                else coerceArg (exprToGo e) subbed
             in zipWith3Default coerceFallback paramTypes substituted args
 
 
@@ -7768,6 +7797,20 @@ exprToGoTyped types retType (A.At _ expr) = case expr of
                             Just (T.TLambda _ _) ->
                                 GoIr.GoCall (GoIr.GoRaw (name ++ ".(func(any) any)")) goArgs
                             _ -> GoIr.GoCall goFunc goArgs
+                    -- v0.13 D-Lambda-Lowerer: delegate top-level-call
+                    -- lowering to the untyped `exprToGo` path, which
+                    -- routes through `coerceCallArgsAt` and applies
+                    -- typed-lambda emission for func-typed param slots.
+                    -- Pre-fix, `exprToGoTyped`'s `Can.Call` lowered each
+                    -- arg via `exprToGoTyped types retType` — including
+                    -- `Can.Lambda` args, which fell through to the
+                    -- untyped `curryLambdaPat` at line ~7840, emitting
+                    -- `func(any) any`. After D1 types the HOF param's
+                    -- return slot (`func(T) rt.SkyResult[E, V]`), Go
+                    -- rejects the un-typed lambda. Delegating routes
+                    -- the call through the typed-aware path.
+                    A.At _ (Can.VarTopLevel _ _) ->
+                        exprToGo (A.At A.one (Can.Call func args))
                     _ -> GoIr.GoCall goFunc goArgs
             -- If the called function has a known return type and we need a primitive,
             -- assert the result. This handles: n * factorial(n-1) where factorial returns any.
@@ -9384,10 +9427,20 @@ curryLambdaPatTypedW bodyPreTyped paramTypes retType pats body
                     -- as `goTy`; Go widens to `any` implicitly at any
                     -- function-call boundary so existing helpers that
                     -- take `any` continue to accept it.
+                    --
+                    -- v0.13 D-Lambda-Lowerer follow-up: emit `_ = a`
+                    -- after the rebind to force-use the local. Sky
+                    -- lambdas often bind a param the body doesn't
+                    -- consume (e.g. `\_ -> ...` or a curry where the
+                    -- early arg names get shadowed). Without the
+                    -- discard, Go errors "declared and not used: a".
+                    -- This is cheap (no runtime cost) and uniform.
                     let tmpName = "_lp_" ++ goSafeName name
+                        sn = goSafeName name
                     in ( GoIr.GoParam tmpName goTy
-                       , [GoIr.GoShortDecl (goSafeName name)
-                           (GoIr.GoIdent tmpName)]
+                       , [ GoIr.GoShortDecl sn (GoIr.GoIdent tmpName)
+                         , GoIr.GoAssign "_" (GoIr.GoIdent sn)
+                         ]
                        , [] )
         Can.PAnything ->
             (GoIr.GoParam "_" (if goTy == "" then "any" else goTy), [], [])
