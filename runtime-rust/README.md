@@ -45,13 +45,19 @@ Rust codegen is implemented in the main compiler:
 | --target rust flag | ✅ Wired into CLI |
 | Expression translation | ✅ Functions, calls, patterns, let, binops, lambdas, if/case |
 | Kernel calls | ✅ Special handling (println! macro, Log::, Task::, etc.) |
-| Type mapping | ✅ Basic types (String, Int, Float, Bool, List, Maybe, Result) |
-| Union/ADT handling | ✅ Pattern matching → match expressions |
-| Type aliases (non-record) | ✅ Emitted as `type X = ...` |
-| Record aliases | ✅ Emitted as `struct X { ... }` |
+| Type mapping | ✅ Basic types + module-prefixed user types |
+| Union/ADT handling | ✅ Module-prefixed enum syntax (`Sky_Core_Error::Error`) |
+| Type aliases (non-record) | ✅ Module-prefixed `type X = ...` |
+| Record aliases | ✅ Module-prefixed `struct X { ... }` |
 | Record literals | ✅ Named struct syntax via field-set lookup |
-| Multi-module projects | ✅ All dep modules included in output |
-| Cons pattern | ✅ Valid Rust slice pattern `[head, tail @ ..]` |
+| Typed function params | ✅ From TypedDef annotations (`conn: Db`) |
+| Pipeline operator `|>` | ✅ Emitted as `f(x)` |
+| Cons `::` operator | ✅ `sky_list_cons(x, xs)` helper function |
+| String concat `++` | ✅ Emitted as `+` |
+| Rust keyword escaping | ✅ `fn` → `r#fn`, etc. for param/variable names |
+| Multi-module projects | ✅ All dep modules with module-prefixed names |
+| Cons/slice pattern | ✅ `[head, tail @ ..]` with `..` for unused tail |
+| FFI placeholder types | ✅ Auto-generated for undefined referenced types |
 | println! multiple args | ✅ Correct `{}{}` format string |
 
 ### Phase 3: FFI System (Next)
@@ -93,27 +99,43 @@ During implementation, these issues were resolved:
 13. **Record literals** - Now use named struct syntax (`ErrorInfo { field: val }`) looked up from alias field-set map
 14. **Multi-module support** - `generateRust` now receives all dep modules via `validDeps` and emits code for all of them
 
+### Session 3 (2026-05-14: typed params + module prefix round)
+15. **Constructor names** - `Ctor` placeholder replaced with `ModuleName_TypeName::CtorName` (e.g., `Sky_Core_Error::Error`)
+16. **Typed function params** - `TypedDef` params now emit `name: Type` annotations (e.g., `conn: Db`, `idStr: String`)
+17. **Module prefix** - All types, functions, unions, aliases prefixed with module name to prevent collision
+18. **Pipeline operator `|>`** - Emitted as `f(x)` function call (Rust has no native pipe)
+19. **Cons operator `::`** - Emitted as `sky_list_cons(x, xs)` helper
+20. **String concat `++`** - Emitted as `+` (Rust string concatenation)
+21. **Rust keyword escaping** - `fn`, `match`, `let`, `type`, etc. in param names get `r#` prefix
+22. **Slice pattern `_ @ ..`** - Fixed to emit `..` for unused tail bindings (invalid Rust syntax)
+23. **FFI placeholder types** - Auto-generate `type X = String;` for undefined referenced types
+24. **`sky_list_cons` runtime helper** - Added for cons operator support
+
 ## Known Issues (Next Steps)
 
-1. **Untyped function parameters** - Parameters lack type annotations (`fn foo(x)` instead of `fn foo(x: String)`). Need to thread `solvedTypes` through expression emitter
-2. **Constructor placeholder** - `Can.VarCtor{}` emits `"Ctor"` instead of actual ADT constructor name
-3. **Type information for record field access** - Destructured patterns lack proper field name resolution for nested access
+1. **Kernel runtime functions not defined** - `Task_run`, `Db_connect`, `System_args`, `Log_infoWith`, etc. are not implemented in the Rust runtime. These need either:
+   a. Inline Rust implementations in the runtime section, OR
+   b. An external `sky-runtime-rust` crate dependency
+2. **`Def` (untyped) params use `: String` default** - Functions without type annotations get `String` as default param type. `solvedTypes` should be threaded through for accurate types.
+3. **List types used as `String`** - Lists (`Vec<T>`) are typed as `String` in untyped `Def` functions, causing `expected an array or slice, found String` errors.
+4. **Non-camel-case naming** - Module-prefixed names like `Sky_Core_Error_ErrorKind` don't follow Rust naming conventions (cosmetic).
 
 ## Next Steps
 
-### Priority 1: Basic Completeness
-1. Thread type information from `solvedTypes` through expression emission for typed parameters
-2. Proper ADT constructor name emission (replace `"Ctor"` placeholder)
-3. Rust-native pattern matching for ADTs (use fully qualified `Enum::Variant` syntax)
+### Priority 1: Runtime Implementation
+1. Implement kernel runtime helpers in Rust (Task, Db, System, Log, etc.)
+2. Either inline in emitRust or link to sky-runtime-rust crate
+3. Test with todo-cli and other multi-module examples
 
 ### Priority 2: Type System
-4. Proper generic type parameter handling in struct/enum definitions
-5. Record field access with proper scope (destructured pattern bindings)
-6. Full ADT handling with type-safe constructors
+4. Thread `solvedTypes` through for accurate `Def` function param types
+5. Type-safe Vec handling (list types need Vec, not String)
+6. Generic type parameters for polymorphic functions
 
-### Priority 3: FFI
-7. Rust crate FFI (direct calls to Rust libs)
-8. WASM target support
+### Priority 3: Production Readiness
+7. Rust-idiomatic naming (snake_case params, CamelCase types)
+8. Separate module files (not single flat main.rs)
+9. WASM target support
 
 ### Priority 3: FFI
 7. Rust crate FFI (direct calls)
