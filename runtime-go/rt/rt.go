@@ -147,6 +147,37 @@ func adaptFuncValueWithCapture(skyFn reflect.Value, targetTy reflect.Type, captu
 				allArgs = allArgs[:nin]
 			}
 		}
+		// v0.13 follow-up: narrow each arg to skyFn's declared param
+		// type BEFORE reflect.Call. Typed-codegen routes things like
+		// `formatTodo : map[string]string -> ...` through
+		// `rt.Coerce[func(any) any](formatTodo)`. When that adapter
+		// fires from `Sky_Core_List_map_` over a list whose runtime
+		// shape is `[]map[string]any` (e.g. DB rows), the arg passed
+		// here is the raw `map[string]any` — reflect.Call panics with
+		// `Call using map[string]interface{} as type map[string]string`.
+		// `narrowReflectValue` already handles the dict/list element
+		// recursion, so a one-line pre-call narrow makes the adapter
+		// boundary-typed.
+		callMax := nin
+		if skyTy.IsVariadic() {
+			if callMax > 0 {
+				callMax--
+			}
+		}
+		for i := 0; i < callMax && i < len(allArgs); i++ {
+			wantTy := skyTy.In(i)
+			av := allArgs[i]
+			if !av.IsValid() {
+				continue
+			}
+			if av.Type().AssignableTo(wantTy) {
+				continue
+			}
+			narrowed := narrowReflectValue(av, wantTy)
+			if narrowed.IsValid() && narrowed.Type().AssignableTo(wantTy) {
+				allArgs[i] = narrowed
+			}
+		}
 		out := skyFn.Call(allArgs)
 		nOut := targetTy.NumOut()
 		results := make([]reflect.Value, nOut)
