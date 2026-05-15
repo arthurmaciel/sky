@@ -127,7 +127,8 @@ executable sky
     Sky.Generate.Go.Kernel
     Sky.Generate.Go.Record
 
-    -- Rust code generation (using inline stub in Compile.hs)
+    -- Rust code generation
+    Sky.Generate.Rust.Builder
 
     -- FFI
 

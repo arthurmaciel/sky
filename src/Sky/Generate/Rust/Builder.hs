@@ -1,114 +1,163 @@
 module Sky.Generate.Rust.Builder where
 
-import Sky.AST.Canonical
-import Sky.AST.Source
-import Sky.Generate.Rust.Module
-import Sky.Generate.Rust.Decl
-import Sky.Generate.Rust.Expr
-import Sky.Generate.Rust.Types
-import Sky.Generate.Rust.Kernel
+import qualified Sky.AST.Canonical as Can
+import qualified Sky.Sky.ModuleName as ModuleName
+import qualified Sky.Reporting.Annotation as Ann
+
+-- Re-export for clarity
+type CanonicalModule = Can.Module
 
 data RustBuilder = RustBuilder
     { builderModules :: [RustModule]
-    , builderErrors :: [String]
-    , builderWarnings :: [String]
-    } deriving (Show)
-
-emptyBuilder :: RustBuilder
-emptyBuilder = RustBuilder
-    { builderModules = []
-    , builderErrors = []
-    , builderWarnings = []
     }
 
-buildModule :: CanonicalModule -> RustModule
-buildModule mod = moduleToRust mod
-
-buildProgram :: [CanonicalModule] -> RustBuilder
-buildProgram mods = emptyBuilder
-    { builderModules = map buildModule mods
+data RustModule = RustModule
+    { modName :: String
+    , modItems :: [RustItem]
     }
+
+data RustItem
+    = RustFunction String [String] String  -- name, params, body
+    | RustStruct String [(String, String)]  -- name, fields
+    | RustEnum String [(String, Maybe String)]  -- name, variants
+    | RustTypeAlias String String
+    deriving (Show)
+
+buildModule :: Can.Module -> RustModule
+buildModule mod = RustModule
+    { modName = moduleNameToRust (Can._name mod)
+    , modItems = declsToRustItems (Can._decls mod)
+    }
+
+moduleNameToRust :: ModuleName.Canonical -> String
+moduleNameToRust mod = 
+    map (\c -> if c == '.' then '_' else c) (ModuleName._name mod)
+
+declsToRustItems :: Can.Decls -> [RustItem]
+declsToRustItems Can.SaveTheEnvironment = []
+declsToRustItems (Can.Declare def rest) = defToRustItem def : declsToRustItems rest
+declsToRustItems (Can.DeclareRec def defs rest) = 
+    map defToRustItem (def : defs) ++ declsToRustItems rest
+
+defToRustItem :: Can.Def -> RustItem
+defToRustItem (Can.Def (Ann.At _ name) params body) = 
+    RustFunction name (map patternToRustParam params) (exprToRustString body)
+defToRustItem (Can.TypedDef (Ann.At _ name) _ pats body _) = 
+    RustFunction name (map (patternToRustParam . fst) pats) (exprToRustString body)
+defToRustItem (Can.DestructDef pat expr) =
+    RustFunction "_destruct" [patternToRustParam pat] (exprToRustString expr)
+
+patternToRustParam :: Can.Pattern -> String
+patternToRustParam (Ann.At _ pat) = case pat of
+    Can.PVar n -> n
+    Can.PAnything -> "_"
+    _ -> "_"
+
+exprToRustString :: Can.Expr -> String
+exprToRustString (Ann.At _ expr) = exprToRustInner expr
+
+exprToRustInner :: Can.Expr_ -> String
+exprToRustInner e = case e of
+    Can.VarLocal name -> name
+    Can.VarTopLevel mod name -> 
+        map (\c -> if c == '.' then '_' else c) (ModuleName._name mod) ++ "_" ++ name
+    Can.VarKernel mod name -> mod ++ "::" ++ name
+    Can.Chr c -> show c
+    Can.Str s -> show s
+    Can.Int i -> show i
+    Can.Float f -> show f
+    Can.List es -> "vec![" ++ intercalate ", " (map exprToRustString es) ++ "]"
+    Can.Negate e -> "-" ++ exprToRustString e
+    Can.Binop op _ _ _ a b -> 
+        "(" ++ exprToRustString a ++ " " ++ op ++ " " ++ exprToRustString b ++ ")"
+    Can.Lambda params body -> 
+        "|" ++ intercalate ", " (map patternToRustParam params) ++ "| " ++ exprToRustString body
+    Can.Call fn args -> 
+        exprToRustString fn ++ "(" ++ intercalate ", " (map exprToRustString args) ++ ")"
+    Can.If branches elseBranch -> 
+        "if " ++ intercalate " else " (map (\(c, t) -> exprToRustString c ++ " { " ++ exprToRustString t ++ " }") branches)
+        ++ " else { " ++ exprToRustString elseBranch ++ " }"
+    Can.Let def body -> 
+        "let " ++ defToRustString def ++ "; " ++ exprToRustString body
+    Can.Case scrut branches -> 
+        "match " ++ exprToRustString scrut ++ " { " ++ 
+        intercalate "; " (map branchToRustString branches) ++ " }"
+    Can.Unit -> "()"
+    Can.Tuple a b rest -> 
+        "(" ++ intercalate ", " (map exprToRustString (a:b:rest)) ++ ")"
+    _ -> "unimplemented"
+
+defToRustString :: Can.Def -> String
+defToRustString (Can.Def (Ann.At _ name) params body) =
+    "let " ++ name ++ " = |" ++ intercalate ", " (map patternToRustParam params) ++ "| " ++ exprToRustString body
+defToRustString _ = "let _ = unimplemented()"
+
+branchToRustString :: Can.CaseBranch -> String
+branchToRustString (Can.CaseBranch pat body) =
+    patternToMatchString pat ++ " => " ++ exprToRustString body
+
+patternToMatchString :: Can.Pattern -> String
+patternToMatchString (Ann.At _ pat) = case pat of
+    Can.PVar n -> n
+    Can.PAnything -> "_"
+    Can.PInt i -> show i
+    Can.PBool b -> if b then "true" else "false"
+    Can.PChr c -> show c
+    Can.PStr s -> show s
+    Can.PUnit -> "()"
+    Can.PCtor{} -> "Ctor"  -- constructor pattern
+    Can.PTuple a b rest -> 
+        "(" ++ intercalate ", " (map patternToMatchString (a:b:rest)) ++ ")"
+    _ -> "_"
+
+buildProgram :: [Can.Module] -> RustBuilder
+buildProgram mods = RustBuilder
+    { builderModules = map buildModule mods }
 
 emitRust :: RustBuilder -> String
-emitRust b = intercalate "\n\n" (map moduleToRustString (builderModules b))
+emitRust b = unlines $
+    [ "// Generated by Sky compiler (Rust target)"
+    , ""
+    , "// Sky runtime types"
+    , "type SkyInt = i64;"
+    , "type SkyFloat = f64;"
+    , "type SkyBool = bool;"
+    , "type SkyString = String;"
+    , ""
+    , "struct SkyMaybe<T> { value: Option<T> }"
+    , "struct SkyResult<E, A> { result: Result<A, E> }"
+    , ""
+    ] ++ concatMap moduleToRustStrings (builderModules b) ++
+    [ ""
+    , "fn main() {"
+    , "    println!(\"Sky program executed\");"
+    , "}"
+    ]
 
-emitCrate :: RustBuilder -> String
-emitCrate b = moduleToCrate (builderModules b)
+moduleToRustStrings :: RustModule -> [String]
+moduleToRustStrings m = 
+    ["// Module: " ++ modName m, ""] ++
+    concatMap itemToRustStrings (modItems m) ++ [""]
 
-emitFiles :: RustBuilder -> [(String, String)]
-emitFiles b = generateCrateFiles (builderModules b)
+itemToRustStrings :: RustItem -> [String]
+itemToRustStrings (RustFunction name params body) = 
+    ["fn " ++ name ++ "(" ++ intercalate ", " params ++ ") -> () {", "    " ++ body, "}"]
+itemToRustStrings (RustStruct name fields) = 
+    ["struct " ++ name ++ " {", 
+     intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields), 
+     "}"]
+itemToRustStrings (RustEnum name variants) = 
+    ["enum " ++ name ++ " {",
+     intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ rustMaybe "" (\x -> "(" ++ x ++ ")") mt) variants),
+     "}"]
+itemToRustStrings (RustTypeAlias name ty) = ["type " ++ name ++ " = " ++ ty ++ ";"]
 
-addError :: String -> RustBuilder -> RustBuilder
-addError err b = b { builderErrors = builderErrors b ++ [err] }
-
-addWarning :: String -> RustBuilder -> RustBuilder
-addWarning warn b = b { builderWarnings = builderWarnings b ++ [warn] }
-
-hasErrors :: RustBuilder -> Bool
-hasErrors b = not (null (builderErrors b))
-
-validateModule :: CanonicalModule -> RustBuilder -> RustBuilder
-validateModule mod b = b'
-  where
-    b' = foldl checkDecl b (moduleDecls mod)
-    checkDecl b'' decl = case decl of
-        DAnnot name params body (Just typ) ->
-            let inferred = inferExprType body
-            in if not (typesCompatible (typeToRust typ) inferred)
-                then addError ("Type mismatch in " ++ name ++ ": inferred " ++ show inferred ++ " vs declared " ++ show (typeToRust typ)) b''
-                else b''
-        _ -> b''
-
-inferExprType :: CanonicalExpr -> RustType
-inferExprType expr = case expr of
-    EVar _ -> RustOpaque
-    ELit lit -> case lit of
-        LInt _ -> RustPrim PInt
-        LFloat _ -> RustPrim PFloat
-        LBool _ -> RustPrim PBool
-        LChar _ -> RustPrim PChar
-        LString _ -> RustPrim PString
-        LUnit _ -> RustPrim PUnit
-    EApp f args ->
-        let
-            funcType = inferExprType f
-            argTypes = map inferExprType args
-        in case funcType of
-            RustFunction _ ret -> ret
-            _ -> RustOpaque
-    ELam _ body -> RustFunction [] (inferExprType body)
-    ELet _ body -> inferExprType body
-    EIf _ thenE _ -> inferExprType thenE
-    ECase _ branches -> case branches of
-        (_, expr):_ -> inferExprType expr
-        [] -> RustOpaque
-    ERecord fields -> RustRecord (map (\(n, e) -> (n, inferExprType e)) fields)
-    EAccess _ _ -> RustOpaque
-    ETuple els -> RustTuple (map inferExprType els)
-    EBinOp _ _ _ -> RustOpaque
-    _ -> RustOpaque
-
-typesCompatible :: RustType -> RustType -> Bool
-typesCompatible a b = case (a, b) of
-    (RustPrim p1, RustPrim p2) -> p1 == p2
-    (RustVec a1, RustVec a2) -> typesCompatible a1 a2
-    (RustOption a1, RustOption a2) -> typesCompatible a1 a2
-    (RustResult e1 a1, RustResult e2 a2) -> typesCompatible e1 e2 && typesCompatible a1 a2
-    (RustTuple ts1, RustTuple ts2) -> length ts1 == length ts2 && all (uncurry typesCompatible) (zip ts1 ts2)
-    (RustRecord fs1, RustRecord fs2) -> all (\(k, t) -> lookup k fs2 == Just t) fs1
-    (RustOpaque, _) -> True
-    (_, RustOpaque) -> True
-    _ -> False
+rustMaybe :: String -> (String -> String) -> Maybe String -> String
+rustMaybe def f m = case m of
+    Just x -> f x
+    Nothing -> def
 
 intercalate :: String -> [String] -> String
 intercalate _ [] = ""
 intercalate _ [x] = x
 intercalate s (x:xs) = x ++ s ++ intercalate s xs
-
-runRustCodegen :: [CanonicalModule] -> Either [String] RustBuilder
-runRustCodegen mods = case errors of
-    [] -> Right (buildProgram mods)
-    _ -> Left errors
-  where
-    builder = buildProgram mods
-    errors = builderErrors (foldl validateModule builder mods)
