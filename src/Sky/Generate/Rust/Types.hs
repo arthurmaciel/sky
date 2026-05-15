@@ -1,8 +1,14 @@
-module Sky.Generate.Rust.Types where
+module Sky.Generate.Rust.Types
+  ( RustType(..)
+  , PrimType(..)
+  , typeToRust
+  , rustTypeToString
+  ) where
 
-import qualified Sky.AST.Canonical as Can
 import qualified Sky.Type.Type as T
 import qualified Data.Map.Strict as Map
+
+-- Don't export Pattern or intercalate to avoid conflicts
 
 data RustType
     = RustPrim PrimType
