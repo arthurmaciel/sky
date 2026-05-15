@@ -182,6 +182,37 @@ local function test_hover(bufnr, line, col, expected_substr)
 end
 
 
+-- v0.13 G follow-up: shared helper for goto-def assertions. Accepts
+-- an `expected_line` (0-based) the cursor should land on; matches
+-- either `result.range.start.line` or `result.targetRange.start.line`
+-- (LSP allows both shapes). Returns false with a debug message if
+-- the resolved line differs or the response is empty.
+local function test_goto_def(bufnr, line, col, expected_line)
+    local result = nil
+    vim.lsp.buf_request(bufnr, "textDocument/definition",
+        {
+            textDocument = vim.lsp.util.make_text_document_params(bufnr),
+            position     = { line = line, character = col },
+        },
+        function(_, res, _, _) result = res end)
+    vim.wait(5000, function() return result ~= nil end, 50)
+    if not result then return false, "no definition response" end
+    local first = result[1] or result
+    if not first then return false, "empty definition response" end
+    local target_line = nil
+    if first.range and first.range.start then
+        target_line = first.range.start.line
+    elseif first.targetRange and first.targetRange.start then
+        target_line = first.targetRange.start.line
+    end
+    if target_line ~= expected_line then
+        return false, string.format("definition went to line %s (expected %d)",
+            tostring(target_line), expected_line)
+    end
+    return true, string.format("jumped to line %d", target_line)
+end
+
+
 local function test_completion(bufnr, line, col, expected_label)
     local result = nil
     vim.lsp.buf_request(bufnr,
@@ -470,6 +501,42 @@ local tests = {
     ["hover-kernel-call"] = function()
         local bufnr = start_lsp(project_dir .. "/src/Main.sky")
         return test_hover(bufnr, 12, 14, "Int")
+    end,
+
+    -- v0.13 G follow-up — goto-def for the remaining USED symbol
+    -- classes the LSP-100% contract called for.
+
+    -- Goto-def on `Increment` (ADT ctor) at its USE SITE
+    -- (line 32 col 37). Expect to land on the `type Msg = ...`
+    -- declaration line (line 19).
+    ["goto-def-ctor"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        return test_goto_def(bufnr, 32, 37, 19)
+    end,
+
+    -- Goto-def on `abcLocal` at its USE site (line 17 col 7 in
+    -- `    in abcLocal`). Expect to land on the let-binding
+    -- decl line (line 16 — `    let abcLocal = 1`).
+    ["goto-def-let-binding"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        return test_goto_def(bufnr, 17, 8, 16)
+    end,
+
+    -- Goto-def on `x` (lambda param) at its USE site in
+    -- `\x -> x * 2` (line 29 col 17 — the right-hand `x`).
+    -- Expect to land on the binder (line 29 col 12).
+    ["goto-def-lambda-param"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        return test_goto_def(bufnr, 29, 17, 29)
+    end,
+
+    -- Goto-def on a record-field access. `model.count` (line 12
+    -- col 25). Expect to land on the alias decl (line 8 — the
+    -- `type alias Model = { count : Int, ... }` line where `count`
+    -- is declared).
+    ["goto-def-field"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        return test_goto_def(bufnr, 12, 25, 8)
     end,
 }
 

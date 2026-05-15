@@ -1704,13 +1704,83 @@ pruneBindingsText :: Set.Set String -> String -> String
 pruneBindingsText referenced src =
     let ls = lines src
         (header, body) = splitAfterImportBlock ls
-        kept = pruneFuncs referenced body
+        kept0 = pruneFuncs referenced body
+        -- v0.13 F3: after wrapper-body pruning, the FFI type aliases
+        -- (`type FfiT_Go_Stripe_xxx_P0 = *pkg.Foo`) emitted alongside
+        -- the wrappers become orphan when their owning wrapper was
+        -- dropped. Pre-fix, skyshop's stripe_bindings.go retained
+        -- 80,847 orphan `type FfiT_*` decls (one per param/return
+        -- position of every Stripe FFI fn that DCE removed). Each
+        -- alias is a single line; we keep only those whose name
+        -- still appears in the kept body OR in the caller-side
+        -- `referenced` set (main.go can reference `rt.FfiT_*`
+        -- aliases directly at typed call sites).
+        kept = pruneOrphanFfiTypes referenced kept0
         -- After stripping function bodies, some package aliases may no
         -- longer appear in the remaining source. Go rejects `imported
         -- and not used`, so rewrite each import to a blank `_` form
         -- when its alias no longer appears anywhere in the kept body.
         rewrittenHeader = rewriteImportsForDCE header kept
     in unlines (rewrittenHeader ++ kept)
+
+
+-- | v0.13 F3: drop `type FfiT_*` aliases whose name no longer
+-- appears anywhere in the surviving body OR in the caller-side
+-- `referenced` set. Each alias is a one-line decl. After
+-- `dceFfiWrappers` drops unused wrapper bodies, the type aliases
+-- emitted alongside them (one per param/return type position)
+-- become orphan. Stripe alone leaves ~80k orphan FfiT_* aliases —
+-- each is harmless (Go link-time DCE drops them) but they triple
+-- the source size and slow `go build`'s parse phase.
+--
+-- `referenced` is the set of `rt.<NAME>` identifiers found in
+-- caller-side `.go` files (main.go and siblings outside `rt/`).
+-- A `FfiT_*` alias that main.go references directly via
+-- `rt.FfiT_Go_Stripe_X_P0(...)` must stay alive even when none of
+-- the surviving binding-file funcs uses it.
+--
+-- Algorithm: O(blob + Σ name_lengths). Pre-compute a `Set String`
+-- of every identifier token appearing in non-FfiT lines, then per
+-- alias do an O(log N) membership test. The naive `isInfixOf` per
+-- alias was O(blob × n_aliases × name_length) which on Stripe
+-- scales to ~7TB of char comparisons — hung the build.
+pruneOrphanFfiTypes :: Set.Set String -> [String] -> [String]
+pruneOrphanFfiTypes referenced ls =
+    let nonTypeLines = [ l | l <- ls, ffiTypeName l == Nothing ]
+        usedIdents = Set.fromList
+            (concatMap extractIdents nonTypeLines)
+        keepLine l = case ffiTypeName l of
+            Just n  -> Set.member n usedIdents
+                    || Set.member n referenced
+            Nothing -> True
+    in filter keepLine ls
+  where
+    -- `type FfiT_…` decls all match `type <Name> = …`. The Name
+    -- must start with `FfiT_` to be eligible for this pruner.
+    ffiTypeName :: String -> Maybe String
+    ffiTypeName l
+        | take 5 l == "type "
+        , let rest = drop 5 l
+        , take 5 rest == "FfiT_"
+        , let (name, _) = span isGoIdentChar rest
+        , not (null name)
+        = Just name
+        | otherwise = Nothing
+
+    -- Tokenise a line into Go identifiers — Unicode-aware so a
+    -- caller-side identifier containing non-ASCII letters still
+    -- registers as a single token (Go allows Unicode letters in
+    -- identifiers; ignoring that would slice the token in two and
+    -- spuriously declare the FfiT alias unreferenced).
+    extractIdents :: String -> [String]
+    extractIdents = go
+      where
+        go [] = []
+        go (c:rest)
+            | isGoIdentStart c =
+                let (tok, after) = span isGoIdentChar (c:rest)
+                in tok : go after
+            | otherwise = go rest
 
 
 -- | Rewrite import lines inside the header so any alias that no longer
@@ -1869,23 +1939,23 @@ pruneFuncs referenced inputLines = go [] inputLines
 
 -- | `func Name` (possibly with generic `[...]` and `(`). Return Just
 -- the bare Name or Nothing if this isn't a top-level func line.
+--
+-- Identifier check uses Unicode-aware predicates (`Char.isLetter` +
+-- `Char.isAlphaNum`) to match Go's identifier spec — `letter (letter
+-- | unicode_digit)*` where `letter = unicode_letter | '_'`. Aligns
+-- with `Sky.Parse.Variable.isIdentChar` (parser side).
 matchFuncStart :: String -> Maybe String
 matchFuncStart l
     | take 5 l == "func "
     , let rest = drop 5 l
     , not (null rest)
-    , isIdentStart (head rest)
-    = let (name, tail_) = span isIdentChar rest
+    , isGoIdentStart (head rest)
+    = let (name, tail_) = span isGoIdentChar rest
       in if not (null name) && not (null tail_)
             && (head tail_ == '(' || head tail_ == '[')
          then Just name
          else Nothing
     | otherwise = Nothing
-  where
-    isIdentStart c = (c >= 'a' && c <= 'z')
-                  || (c >= 'A' && c <= 'Z')
-                  || c == '_'
-    isIdentChar c = isIdentStart c || (c >= '0' && c <= '9')
 
 
 -- | Consume until we see a line beginning with `}` at indent 0. Return
@@ -3274,6 +3344,24 @@ goSafeName n
 isDiscardName :: String -> Bool
 isDiscardName ('_':_) = True
 isDiscardName _       = False
+
+
+-- | Unicode-aware Go identifier predicates. Go's spec:
+-- `identifier = letter (letter | unicode_digit)*` where
+-- `letter = unicode_letter | '_'`. Sky source identifiers go
+-- through these via `Sky.Parse.Variable.isIdentChar` (parser
+-- side) which uses `Char.isAlphaNum` + `'_'`. Codegen-side
+-- token matching (FFI DCE, type-string substitution, func-name
+-- scanning) MUST stay aligned: an identifier with Unicode
+-- letters in the Sky source emits as the same identifier in
+-- Go, and string-based scanners that miss it will wrongly slice
+-- it as two adjacent tokens.
+isGoIdentStart :: Char -> Bool
+isGoIdentStart c = Char.isLetter c || c == '_'
+
+
+isGoIdentChar :: Char -> Bool
+isGoIdentChar c = Char.isAlphaNum c || c == '_'
 
 
 reservedGoNames :: [String]
@@ -6438,11 +6526,12 @@ substTVarsInGoType σ s = goSubst s
                 Nothing          -> word ++ goSubst after
         | otherwise = c : goSubst cs
 
-    isIdentStart c = (c >= 'A' && c <= 'Z')
-                  || (c >= 'a' && c <= 'z')
-                  || c == '_'
-    isIdentChar c = isIdentStart c
-                 || (c >= '0' && c <= '9')
+    -- Unicode-aware: see `isGoIdentStart` for the rationale. Names
+    -- with non-ASCII letters in the Sky source emit as those same
+    -- identifiers in Go; a naive ASCII walk would split the token
+    -- and apply σ-substitution to the ASCII prefix only.
+    isIdentStart = isGoIdentStart
+    isIdentChar = isGoIdentChar
 
 -- | v0.13 Phase A4: peel up to N curried function arrows from a Go
 -- type string `func(X1) func(X2) … func(Xn) R`, returning the list

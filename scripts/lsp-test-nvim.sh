@@ -38,6 +38,11 @@ TESTS=(
     hover-lambda-param
     hover-case-pattern
     hover-kernel-call
+    # v0.13 G follow-up — goto-def for the remaining symbol classes
+    goto-def-ctor
+    goto-def-let-binding
+    goto-def-lambda-param
+    goto-def-field
 )
 
 failures=()
