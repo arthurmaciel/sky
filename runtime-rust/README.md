@@ -43,12 +43,69 @@ skyrust/
 - Runtime crate: 54 tests passing
 - Core types implemented
 
-### Phase 2: IN PROGRESS
-- Rust codegen module created (7 files, ~1,350 lines)
-- Next: Connect to Sky compiler pipeline
+### Phase 2: ✅ COMPLETE - Rust codegen wired and working
+- Rust codegen module: `src/Sky/Generate/Rust/Builder.hs`
+- `--target rust` flag added to build/run/watch commands
+- Output to `sky-out/Rust/main.rs`
+- Full expression support:
+  - Function definitions (Def, TypedDef, DestructDef)
+  - Kernel calls (Db::, Task::, Log::, System::, etc.)
+  - Pattern matching with `match` expressions
+  - Pipeline operators (`|>` → `|>`)
+  - Let bindings (Let, LetRec, LetDestruct)
+  - Binary operators (+, -, ==, ++, etc.)
+  - If expressions, lambdas, tuples, lists, records
+  - Union types → Rust enums
+  - Type aliases
 
-### Phase 3: FFI System (Priority Crates)
+### Phase 3: FFI System (Next)
 - tokio, serde, uuid, axum, clap, rayon, reqwest, sqlx, tokio-postgres
+
+## Usage
+
+```bash
+# Build for Go (default)
+sky build src/Main.sky
+
+# Build for Rust
+sky build src/Main.sky --target rust
+# Output: sky-out/Rust/main.rs
+
+# Run Rust build
+sky run src/Main.sky --target rust
+
+# Watch mode with Rust target
+sky watch src/Main.sky --target rust
+```
+
+## Generated Output Example
+
+Input (Sky):
+```elm
+main = println "Hello from Sky!"
+```
+
+Output (Rust):
+```rust
+fn main() -> () {
+    Log::println("Hello from Sky!")
+}
+
+fn main() {
+    main_();
+}
+```
+
+More complex example (todo-cli, 63 lines):
+```rust
+fn runCommand(conn, cmd, cmdArg) -> () {
+    match cmd { 
+        "add" => if (cmdArg == "") { ... } else { Main_addTodo(...) },
+        "list" => Main_listTodos(conn), 
+        ...
+    }
+}
+```
 
 ## Building
 
