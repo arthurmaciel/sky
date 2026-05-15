@@ -19,6 +19,7 @@ import qualified System.Posix.Signals as Signals
 import System.FilePath ((</>), takeExtension, takeDirectory, takeFileName, dropExtension, splitDirectories)
 import System.Exit (exitWith)
 import Data.List (isPrefixOf, isInfixOf, stripPrefix, tails)
+import Data.Char (toLower)
 import System.Process (callProcess)
 import qualified System.Process
 import qualified System.IO.Temp
@@ -834,9 +835,9 @@ main = do
 
 
 data Command
-    = Build FilePath
-    | Run FilePath
-    | Watch Watch.WatchOpts      -- file-watch-driven rebuild + restart
+    = Build FilePath (Maybe String)      -- file path, optional target (go/rust)
+    | Run FilePath (Maybe String)       -- file path, optional target
+    | Watch Watch.WatchOpts (Maybe String) -- watch opts, optional target
     | Check FilePath
     | Fmt FmtTarget
     | Test FilePath
@@ -856,11 +857,19 @@ data Command
     deriving (Show)
 
 
+<<<<<<< HEAD
 -- | Options for `sky console`.
 data ConsoleOpts = ConsoleOpts
     { _consolePort :: Int        -- Sky.Live port (default 8025)
     , _consoleTui  :: Bool       -- --tui: run via Sky.Tui instead
     } deriving (Show)
+=======
+-- | Parse target string to CompileTarget
+parseTarget :: String -> Toml.CompileTarget
+parseTarget t = case map toLower t of
+    "rust" -> Toml.TargetRust
+    _      -> Toml.TargetGo
+>>>>>>> a08b164a (feat(rust): wire Rust codegen as separate --target)
 
 
 data FmtTarget
@@ -869,14 +878,23 @@ data FmtTarget
     deriving (Show)
 
 
+-- | Parser for optional --target flag
+targetFlag :: Parser (Maybe String)
+targetFlag = optional (strOption
+    ( long "target"
+   <> metavar "TARGET"
+   <> help "Compilation target: go (default) or rust"
+    ))
+
+
 commandParser :: Parser Command
 commandParser = subparser
     ( command "build"
-        (info (Build <$> fileArg) (progDesc "Compile to binary"))
+        (info (Build <$> fileArg <*> targetFlag) (progDesc "Compile to binary"))
     <> command "run"
-        (info (Run <$> fileArg) (progDesc "Build and run"))
+        (info (Run <$> fileArg <*> targetFlag) (progDesc "Build and run"))
     <> command "watch"
-        (info (Watch <$> watchOptsParser)
+        (info (Watch <$> watchOptsParser <*> targetFlag)
             (progDesc "Watch source files; rebuild + restart on change"))
     <> command "check"
         (info (Check <$> fileArg) (progDesc "Type-check only"))
@@ -1094,17 +1112,21 @@ runCommand cmd = case cmd of
         putStrLn skyVersionString
         return (Right ())
 
-    Build path -> do
+    Build path mTarget -> do
         -- Read sky.toml if it exists
         hasToml <- doesFileExist "sky.toml"
         config <- if hasToml
             then Toml.parseSkyToml <$> readFile "sky.toml"
             else return Toml.defaultConfig
+        -- CLI target overrides config
+        let config' = case mTarget of
+                Just t -> config { Toml._target = parseTarget t }
+                Nothing -> config
         let outDir = "sky-out"
         createDirectoryIfMissing True outDir
         -- Auto-regen missing Go FFI bindings before compile. Idempotent:
         -- skips deps whose .kernel.json is already present.
-        let goDeps = Toml._goDeps config
+        let goDeps = Toml._goDeps config'
         when (not (null goDeps)) $ do
             hasGoMod <- doesFileExist "sky-out/go.mod"
             when (not hasGoMod) $ do
@@ -1113,24 +1135,34 @@ runCommand cmd = case cmd of
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
             regenMissingBindings goDeps
-        result <- Compile.compile config path outDir
+        result <- Compile.compile config' path outDir
         case result of
             Left err -> return (Left err)
-            Right goPath -> do
-                putStrLn "Running go build..."
-                runGoBuildWithDiagnostics outDir (Toml._binName config) goPath
-                putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config
+            Right _ -> do
+                -- Handle based on target
+                case Toml._target config' of
+                    Toml.TargetGo -> do
+                        let goPath = outDir </> "main.go"
+                        putStrLn "Running go build..."
+                        runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
+                        putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config'
+                    Toml.TargetRust -> do
+                        putStrLn $ "Rust code written to " ++ outDir ++ "/Rust/"
                 return (Right ())
 
-    Run path -> do
+    Run path mTarget -> do
         -- Build first, then exec
         hasToml <- doesFileExist "sky.toml"
         config <- if hasToml
             then Toml.parseSkyToml <$> readFile "sky.toml"
             else return Toml.defaultConfig
+        -- CLI target overrides config
+        let config' = case mTarget of
+                Just t -> config { Toml._target = parseTarget t }
+                Nothing -> config
         let outDir = "sky-out"
         createDirectoryIfMissing True outDir
-        let goDeps = Toml._goDeps config
+        let goDeps = Toml._goDeps config'
         when (not (null goDeps)) $ do
             hasGoMod <- doesFileExist "sky-out/go.mod"
             when (not hasGoMod) $ do
@@ -1139,17 +1171,23 @@ runCommand cmd = case cmd of
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
             regenMissingBindings goDeps
-        result <- Compile.compile config path outDir
+        result <- Compile.compile config' path outDir
         case result of
             Left err -> return (Left err)
-            Right goPath -> do
-                putStrLn "Running go build..."
-                runGoBuildWithDiagnostics outDir (Toml._binName config) goPath
-                putStrLn $ "Build complete, running..."
-                callProcess (outDir ++ "/" ++ Toml._binName config) []
+            Right _ -> do
+                case Toml._target config' of
+                    Toml.TargetGo -> do
+                        let goPath = outDir </> "main.go"
+                        putStrLn "Running go build..."
+                        runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
+                        putStrLn $ "Build complete, running..."
+                        callProcess (outDir ++ "/" ++ Toml._binName config') []
+                    Toml.TargetRust -> do
+                        putStrLn $ "Rust code written to " ++ outDir ++ "/Rust/"
+                        putStrLn "Note: Rust execution not yet implemented"
                 return (Right ())
 
-    Watch opts -> do
+    Watch opts mTarget -> do
         Watch.runWatch opts
         return (Right ())
 
