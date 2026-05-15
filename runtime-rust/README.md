@@ -111,31 +111,68 @@ During implementation, these issues were resolved:
 23. **FFI placeholder types** - Auto-generate `type X = String;` for undefined referenced types
 24. **`sky_list_cons` runtime helper** - Added for cons operator support
 
-## Known Issues (Next Steps)
+### Session 4 (2026-05-14: return types + kernel stubs round)
+25. **Generics for `Def` params** - Untyped functions use `T0, T1` generics instead of hardcoded `String`
+26. **Kernel constructor mapping** - `Bool.True`→`true`, `Maybe.Just`→`SkyMaybe::Just`, `Result.Ok`→`SkyResult::Ok`
+27. **Kernel runtime stubs** - Task, System, Log, Db, String_join, Result_withDefault implemented as stubs
+28. **`#![allow(unused)]`** - Added to suppress dead_code warnings
+29. **String literals** - `.to_string()` for `vec![]` compatibility
+30. **Return type annotations** - Functions emit `-> ReturnType` from TypedDef's 5th field or solvedTypes
+31. **`hasTypeVars` filter** - Prevents HM type variables (`a`, `b`, `_ambig`) from leaking into Rust code
+32. **`sky_main` special case** - Always returns `()` since entry wrapper handles the Task
+33. **Task type mapping fix** - Uses `SkyTask<A>` (Pin+Box+dyn Future+SkyResult) matching the runtime stubs
 
-1. **Kernel runtime functions not defined** - `Task_run`, `Db_connect`, `System_args`, `Log_infoWith`, etc. are not implemented in the Rust runtime. These need either:
-   a. Inline Rust implementations in the runtime section, OR
-   b. An external `sky-runtime-rust` crate dependency
-2. **`Def` (untyped) params use `: String` default** - Functions without type annotations get `String` as default param type. `solvedTypes` should be threaded through for accurate types.
-3. **List types used as `String`** - Lists (`Vec<T>`) are typed as `String` in untyped `Def` functions, causing `expected an array or slice, found String` errors.
-4. **Non-camel-case naming** - Module-prefixed names like `Sky_Core_Error_ErrorKind` don't follow Rust naming conventions (cosmetic).
+## Known Issues (Root Causes - Next Session)
+
+### Critical: Task Monad Not Modeled (blocks all non-trivial programs)
+
+The Rust codegen emits function bodies as flat Rust expressions, but Sky uses the Task monad for all side effects. Every effectful function returns `Task Error a`, and the Go codegen uses lowerer-generated combinator chains. The Rust codegen inlines these directly, losing the Task structure:
+
+```rust
+// Current (wrong):
+fn Main_runApp(conn: Db) -> SkyTask<()> {
+    Task_andThen(|_| { ... })(Main_initDb(conn));  // semicolon drops return!
+}
+// Required:
+fn Main_runApp(conn: Db) -> SkyTask<()> {
+    Task_andThen(|_| { ... })(Main_initDb(conn))   // no semicolon - return the value
+}
+```
+
+**Root cause**: `exprToStatement` adds semicolons to all expressions, converting Task-returning tail expressions into discarded-unit statements. The Go codegen wraps everything in `rt.AnyTaskRun`, but the Rust codegen has no equivalent.
+
+**Fix required**: The codegen must detect when a function's body (or last let-binding) has type `Task Error a` and NOT add a semicolon. The last expression in a Rust function must be the Task value, not a statement discarding it.
+
+### Missing Type Info for `Def` (Untyped) Functions
+
+`Def` functions (no Sky type annotation) get generic type params `T0, T1, ...` without trait bounds. This causes:
+- `E0529`: expected array/slice, found `T1` (list params used as Vec)
+- `E0618`: expected function, found `T0` (function params used as FnOnce)
+- `E0369`: binary operations on generic types
+
+**Fix required**: Thread `solvedTypes` through `defToRustItem` for param types (not just return types). For polymorphic functions, emit Rust generics with proper trait bounds (`T: Clone`, `F: FnOnce(...)`).
+
+### Type Mapping Inconsistencies
+
+- `typeToRustString` maps Sky types to Rust strings, but the runtime stubs define different shapes (e.g., `SkyResult` vs native `Result`, `SkyMaybe` vs `Option`)
+- Non-camel-case naming convention warnings (cosmetic)
 
 ## Next Steps
 
-### Priority 1: Runtime Implementation
-1. Implement kernel runtime helpers in Rust (Task, Db, System, Log, etc.)
-2. Either inline in emitRust or link to sky-runtime-rust crate
+### Priority 1: Fix Task Monad (blocks all programs with effects)
+1. Fix `exprToStatement` to NOT add semicolon when the body returns `SkyTask<...>`
+2. Or: use `Task_run` wrapper in the entry point to properly execute Tasks
 3. Test with todo-cli and other multi-module examples
 
-### Priority 2: Type System
-4. Thread `solvedTypes` through for accurate `Def` function param types
-5. Type-safe Vec handling (list types need Vec, not String)
-6. Generic type parameters for polymorphic functions
+### Priority 2: Type System Completeness
+4. Thread `solvedTypes` through for `Def` function param types with trait bounds
+5. Detect list params and emit `Vec<T>` instead of generic `T0`
+6. Detect function params and emit `impl FnOnce(...)` bounds
 
 ### Priority 3: Production Readiness
 7. Rust-idiomatic naming (snake_case params, CamelCase types)
 8. Separate module files (not single flat main.rs)
-9. WASM target support
+9. Internal crate (`sky-runtime-rust`) for real Task runtime with async executor
 
 ### Priority 3: FFI
 7. Rust crate FFI (direct calls)
