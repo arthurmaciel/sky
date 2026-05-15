@@ -1195,50 +1195,73 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 let mainGoPath = outDir </> "main.go"
                 writeFile mainGoPath goCode
                 putStrLn $ "   Wrote " ++ mainGoPath
-                -- v0.13 Layer 2: codegen-stage validator runs after
-                -- writing main.go but before any downstream tooling
-                -- (DCE / go build).  It scans the emitted Go for
-                -- known-bad shapes (typed-kernel call with raw any
-                -- arg, etc.) and emits a structured Diagnostic with
-                -- a Sky-source region if the bug shape is found.
-                -- This gives "if it compiles, it works" defence in
-                -- depth — even if a new codegen regression slips
-                -- past the cabal tests, the validator catches it
-                -- pre-build and prints an actionable Diagnostic
-                -- instead of a cryptic `go build` error.
-                let originMap = Validator.parseOriginComments goCode
-                    valDiags  = Validator.validateEmittedGo
-                                  mainGoPath originMap goCode
-                if not (null valDiags)
-                  then do
-                      rendered <- Render.renderCliMany valDiags
-                      putStrLn rendered
-                      removeStaleBuildOutput outDir (Toml._binName config)
-                      return (Left "Codegen validation rejected the emitted Go")
-                  else do
-                      -- copyRuntime also copies runtime-go/go.mod + go.sum into
-                      -- outDir when it can locate the runtime. Only fall back
-                      -- to a minimal go.mod here if copyRuntime didn't write
-                      -- one (no runtime found).
-                      copyRuntime outDir
-                      hasOutMod <- doesFileExist (outDir </> "go.mod")
-                      if not hasOutMod
-                          then writeFile (outDir </> "go.mod") $ unlines ["module sky-app", "", "go 1.21"]
-                          else return ()
-                      -- Pull in Go deps declared in sky.toml so generated
-                      -- ffi/*_bindings.go can resolve imports.
-                      seedGoDependencies outDir (Toml._goDeps config)
-                      -- P7: strip unreferenced FFI wrappers from
-                      -- sky-out/rt/*_bindings.go.  Tens of thousands of
-                      -- any/any wrapper bodies user code never calls
-                      -- (stripe alone contributes 74k).
-                      dceFfiWrappers outDir
-                      -- Write cache hash to enable incremental rebuild skip
-                      let cacheDir = ".skycache"
-                      createDirectoryIfMissing True cacheDir
-                      writeFile (cacheDir </> "source.hash") srcHash
-                      putStrLn "Compilation successful"
-                      return (Right mainGoPath)
+
+                -- Generate Rust code only when target is Rust
+                case Toml._target config of
+                    Toml.TargetRust -> do
+                        let rustCode = generateRust canMod entrySrcMod typesWithDeps
+                            rustDir = outDir </> "Rust"
+                        createDirectoryIfMissing True rustDir
+                        let mainRustPath = rustDir </> "main.rs"
+                        writeFile mainRustPath rustCode
+                        putStrLn $ "   Wrote " ++ mainRustPath
+                    Toml.TargetGo -> return ()
+
+                -- Go-specific post-codegen steps only for Go target
+                case Toml._target config of
+                    Toml.TargetRust -> do
+                        -- Write cache hash to enable incremental rebuild skip
+                        let cacheDir = ".skycache"
+                        createDirectoryIfMissing True cacheDir
+                        writeFile (cacheDir </> "source.hash") srcHash
+                        putStrLn "Compilation successful"
+                        return (Right (outDir </> "Rust/main.rs"))
+
+                    Toml.TargetGo -> do
+                        -- v0.13 Layer 2: codegen-stage validator runs after
+                        -- writing main.go but before any downstream tooling
+                        -- (DCE / go build).  It scans the emitted Go for
+                        -- known-bad shapes (typed-kernel call with raw any
+                        -- arg, etc.) and emits a structured Diagnostic with
+                        -- a Sky-source region if the bug shape is found.
+                        -- This gives "if it compiles, it works" defence in
+                        -- depth — even if a new codegen regression slips
+                        -- past the cabal tests, the validator catches it
+                        -- pre-build and prints an actionable Diagnostic
+                        -- instead of a cryptic `go build` error.
+                        let originMap = Validator.parseOriginComments goCode
+                            valDiags  = Validator.validateEmittedGo
+                                          mainGoPath originMap goCode
+                        if not (null valDiags)
+                          then do
+                              rendered <- Render.renderCliMany valDiags
+                              putStrLn rendered
+                              removeStaleBuildOutput outDir (Toml._binName config)
+                              return (Left "Codegen validation rejected the emitted Go")
+                          else do
+                              -- copyRuntime also copies runtime-go/go.mod + go.sum into
+                              -- outDir when it can locate the runtime. Only fall back
+                              -- to a minimal go.mod here if copyRuntime didn't write
+                              -- one (no runtime found).
+                              copyRuntime outDir
+                              hasOutMod <- doesFileExist (outDir </> "go.mod")
+                              if not hasOutMod
+                                  then writeFile (outDir </> "go.mod") $ unlines ["module sky-app", "", "go 1.21"]
+                                  else return ()
+                              -- Pull in Go deps declared in sky.toml so generated
+                              -- ffi/*_bindings.go can resolve imports.
+                              seedGoDependencies outDir (Toml._goDeps config)
+                              -- P7: strip unreferenced FFI wrappers from
+                              -- sky-out/rt/*_bindings.go.  Tens of thousands of
+                              -- any/any wrapper bodies user code never calls
+                              -- (stripe alone contributes 74k).
+                              dceFfiWrappers outDir
+                              -- Write cache hash to enable incremental rebuild skip
+                              let cacheDir = ".skycache"
+                              createDirectoryIfMissing True cacheDir
+                              writeFile (cacheDir </> "source.hash") srcHash
+                              putStrLn "Compilation successful"
+                              return (Right mainGoPath)
 
 
 -- LEGACY: single-module parse entry (no longer used from compile)
@@ -2702,6 +2725,20 @@ generateGo canMod srcMod config solvedTypes =
             , GoIr._pkg_decls = unionDecls ++ aliasDecls ++ decls ++ mainDecl
             }
     in GoBuilder.renderPackage pkg
+
+
+-- | Generate Rust source from a canonical module with solved types
+-- STUB: Returns a placeholder Rust program. The actual codegen needs fixing
+-- to handle the Canonical AST pattern constructors correctly.
+generateRust :: Can.Module -> Src.Module -> Solve.SolvedTypes -> String
+generateRust _canMod _srcMod _solvedTypes = unlines
+    [ "// Generated by Sky compiler (Rust target)"
+    , "// TODO: Fix Rust codegen module to handle Canonical AST properly"
+    , ""
+    , "fn main() {"
+    , "    println!(\"Sky Rust stub - codegen needs implementation\");"
+    , "}"
+    ]
 
 
 -- | Collect Go imports needed

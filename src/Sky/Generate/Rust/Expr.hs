@@ -4,7 +4,7 @@ import qualified Data.Map.Strict as Map
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Sky.ModuleName as ModuleName
-import Sky.Generate.Rust.Types
+import Sky.Generate.Rust.Types hiding (RustTuple, RustRecord)
 
 data RustExpr
     = RustLit Literal
@@ -176,23 +176,21 @@ binopToRust op = case op of
     _ -> Add
 
 patternToRust :: Can.Pattern -> Pattern
-patternToRust pat = case pat of
+patternToRust (A.Located _ pat) = case pat of
     Can.PVar name -> PVar name
-    Can.PWild -> PWild
+    Can.PAnything -> PWild
+    Can.PUnit -> PUnit
     Can.PInt i -> PInt i
-    Can.PFloat f -> PFloat f
     Can.PBool b -> PBool b
     Can.PChr c -> PChar c
     Can.PStr s -> PString s
-    Can.PUnit -> PUnit
-    Can.PConstructor name pats ->
-        PConstructor name (map patternToRust pats)
     Can.PTuple a b rest ->
         PTuple (patternToRust a : patternToRust b : map patternToRust rest)
-    Can.PRecord fields ->
-        PRecord (map (\(k, v) -> (k, patternToRust v)) fields)
+    Can.PList pats -> PTuple (map patternToRust pats)
     Can.PCons a b -> PConstructor "Cons" [patternToRust a, patternToRust b]
-    _ -> PWild
+    Can.PRecord fields -> PRecord (map (\f -> (f, PWild)) fields)
+    Can.PCtor ctor -> PConstructor (Can._p_name ctor) (map (\arg -> patternToRust (Can._pca_pat arg)) (Can._p_args ctor))
+    Can.PAlias pat _ -> patternToRust pat
 
 patternToVar :: Can.Pattern -> String
 patternToVar pat = case pat of
@@ -231,20 +229,6 @@ binOpToRust op = case op of
     "::" -> Cons
     "++" -> Append
     _ -> Add
-
-patternToRust :: CanonicalPattern -> Pattern
-patternToRust pat = case pat of
-    PWildcard -> PWild
-    PVar name -> PVar name
-    PInt n -> PInt n
-    PFloat f -> PFloat f
-    PBool b -> PBool b
-    PChar c -> PChar c
-    PString s -> PString s
-    PCtor name args -> PConstructor name (map patternToRust args)
-    PTuple pats -> PTuple (map patternToRust pats)
-    PRecord fields -> PRecord (map (\(n, p) -> (n, patternToRust p)) fields)
-    _ -> PWild
 
 exprToRustString :: RustExpr -> String
 exprToRustString e = case e of

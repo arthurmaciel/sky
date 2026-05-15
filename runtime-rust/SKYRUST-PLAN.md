@@ -34,7 +34,7 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 - **Reuse existing parser, type checker, canonicaliser** from Sky compiler (Haskell)
 - New Rust-specific codegen module (not Go backend clone)
 - Design codegen for Rust idioms from start
-- Runtime as separate crate (`sky-runtime-rust`)
+- Runtime as separate crate (`runtime-rust`)
 - **Rust-native FFI**: Generated Rust code calls Rust libraries directly — no Go runtime
 
 **Why Hybrid?**:
@@ -353,20 +353,19 @@ These crates will be the first integration targets for FFI testing:
 ## Project Structure
 
 ```
-skyrust/
+sky/
 ├── SKYRUST-PLAN.md           # This file
 ├── README.md                 # Project overview
 ├── CLAUDE.md                 # Project context
 ├── LICENSE                   # Apache 2.0 (matching Sky)
 │
-├── sky-compiler/             # Sky compiler (copied from sky-anzel)
-│   └── src/Sky/
-│       ├── Parse/            # Parser (~2,685 lines)
-│       ├── Canonicalise/     # Name resolution (~2,758 lines)
-│       ├── Type/             # HM type checker (~5,503 lines)
-│       └── Generate/
-│           ├── Go/           # Go codegen (reference)
-│           └── Rust/         # ✅ NEW: Rust codegen module (~1,350 lines)
+├── src/Sky/
+│   ├── Parse/            # Parser (~2,685 lines)
+│   ├── Canonicalise/     # Name resolution (~2,758 lines)
+│   ├── Type/             # HM type checker (~5,503 lines)
+│   └── Generate/
+│       ├── Go/           # Go codegen (reference)
+│       └── Rust/         # ✅ NEW: Rust codegen module (~1,350 lines)
 │                               ├── Types.hs       - Type mapping
 │                               ├── Expr.hs        - Expression transpilation
 │                               ├── Pattern.hs     - Pattern matching
@@ -375,12 +374,12 @@ skyrust/
 │                               ├── Module.hs      - Module organization
 │                               └── Builder.hs     - Orchestration
 │
-├── sky-runtime-rust/         # ✅ COMPLETE - Rust runtime crate
+├── runtime-rust/         # ✅ COMPLETE - Rust runtime crate
 │   ├── Cargo.toml
 │   └── src/
 │       └── lib.rs            # Single-file runtime (~500 lines, 54 tests)
 │
-├── sky-ffi-rust/             # FFI binding generator (Phase 3)
+├── ffi-rust/             # FFI binding generator (Phase 3)
 │   └── src/
 │
 ├── tests/                    # Transpiled test suite
@@ -394,7 +393,7 @@ skyrust/
 
 ## Key Components
 
-### 1. Rust Codegen (`sky-compiler/src/Sky/Generate/Rust/`)
+### 1. Rust Codegen (`src/Sky/Generate/Rust/`)
 
 **Responsibilities**:
 - Convert Sky AST to Rust source code
@@ -414,7 +413,7 @@ Rust/
 └── Module.hs        -- Module emit and organization
 ```
 
-### 2. Runtime Crate (`sky-runtime-rust`)
+### 2. Runtime Crate (`runtime-rust`)
 
 **Purpose**: Provide Sky primitives in Rust
 
@@ -425,7 +424,7 @@ Rust/
 - Task/Future adapters
 - FFI conversion utilities
 
-### 3. FFI Generator (`sky-ffi-rust`)
+### 3. FFI Generator (`ffi-rust`)
 
 **Purpose**: Generate Sky bindings for Rust crates
 

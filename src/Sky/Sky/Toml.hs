@@ -7,6 +7,10 @@ import Data.Char (isSpace)
 import Data.List (isPrefixOf, stripPrefix)
 
 
+-- | Compilation target: go or rust
+data CompileTarget = TargetGo | TargetRust
+    deriving (Show, Eq)
+
 -- | Sky project configuration
 data SkyConfig = SkyConfig
     { _name          :: !String           -- project name
@@ -14,6 +18,7 @@ data SkyConfig = SkyConfig
     , _entry         :: !String           -- entry file (src/Main.sky)
     , _sourceRoot    :: !String           -- source root (src)
     , _binName       :: !String           -- output binary name (app)
+    , _target        :: !CompileTarget   -- compilation target (go or rust)
     , _goDeps        :: [(String, String)]-- Go dependencies [(pkg, version)]
     , _skyDeps       :: [(String, String)]-- Sky-source dependencies [(repo, version)]
     , _livePort      :: !Int              -- [live] port (default 8000)
@@ -43,6 +48,7 @@ defaultConfig = SkyConfig
     , _entry         = "src/Main.sky"
     , _sourceRoot    = "src"
     , _binName       = "app"
+    , _target        = TargetGo
     , _goDeps        = []
     , _skyDeps       = []
     , _livePort      = 8000

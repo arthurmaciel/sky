@@ -1,4 +1,4 @@
-module Main where
+module Sky.Generate.Rust.Test where
 
 import Sky.AST.Canonical
 import Sky.Generate.Rust.Module

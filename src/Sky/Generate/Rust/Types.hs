@@ -1,7 +1,8 @@
 module Sky.Generate.Rust.Types where
 
-import Sky.AST.Canonical (CanonicalType, Type(..))
-import Sky.AST.Source (SourceType)
+import qualified Sky.AST.Canonical as Can
+import qualified Sky.Type.Type as T
+import qualified Data.Map.Strict as Map
 
 data RustType
     = RustPrim PrimType
@@ -26,23 +27,24 @@ data PrimType
     | PUnit
     deriving (Eq, Show)
 
-typeToRust :: CanonicalType -> RustType
+typeToRust :: T.Type -> RustType
 typeToRust t = case t of
-    TInt -> RustPrim PInt
-    TFloat -> RustPrim PFloat
-    TBool -> RustPrim PBool
-    TChar -> RustPrim PChar
-    TString -> RustPrim PString
-    TUnit -> RustPrim PUnit
-    TVar _ -> RustOpaque
-    TCon "List" [a] -> RustVec (typeToRust a)
-    TCon "Maybe" [a] -> RustOption (typeToRust a)
-    TCon "Result" [e, a] -> RustResult (typeToRust e) (typeToRust a)
-    TCon "Task" [e, a] -> RustFuture (typeToRust a)
-    TTuple ts -> RustTuple (map typeToRust ts)
-    TRecord fields -> RustRecord (map (\(k, v) -> (k, typeToRust v)) fields)
-    TApp (TCon name _) [] -> RustCustom name
-    TLambda a b -> RustFunction [typeToRust a] (typeToRust b)
+    T.TType _ "Int" [] -> RustPrim PInt
+    T.TType _ "Float" [] -> RustPrim PFloat
+    T.TType _ "Bool" [] -> RustPrim PBool
+    T.TType _ "Char" [] -> RustPrim PChar
+    T.TType _ "String" [] -> RustPrim PString
+    T.TUnit -> RustPrim PUnit
+    T.TVar _ -> RustOpaque
+    T.TType _ "List" [a] -> RustVec (typeToRust a)
+    T.TType _ "Maybe" [a] -> RustOption (typeToRust a)
+    T.TType _ "Result" [e, a] -> RustResult (typeToRust e) (typeToRust a)
+    T.TType _ "Task" [_, a] -> RustFuture (typeToRust a)
+    T.TTuple a b rest -> RustTuple (map typeToRust (a:b:rest))
+    T.TRecord fields _ -> RustRecord (map (\(k, T.FieldType _ v) -> (k, typeToRust v)) (Map.toList fields))
+    T.TType _ name [] -> RustCustom name
+    T.TLambda a b -> RustFunction [typeToRust a] (typeToRust b)
+    T.TAlias _ name _ _ -> RustCustom name
     _ -> RustOpaque
 
 rustTypeToString :: RustType -> String
@@ -56,13 +58,13 @@ rustTypeToString rt = case rt of
         PUnit -> "()"
     RustVec a -> formatGeneric "Vec" [a]
     RustOption a -> formatGeneric "Option" [a]
-    RustResult e a -> formatGeneric "Result" [a, e]
-    RustFuture a -> formatGeneric "impl Future" [formatGeneric "Output" [a]]
+    RustResult e a -> formatGeneric "Result" [e, a]
+    RustFuture _a -> "impl Future<Output = ()>"
     RustTuple ts -> "(" ++ intercalate ", " (map rustTypeToString ts) ++ ")"
-    RustRecord fields -> "{" ++ intercalate ", " (map (\(n, t) -> n ++ " : " ++ rustTypeToString t) fields) ++ "}"
-    RustEnum variants -> "enum with variants: " ++ show (length variants)
+    RustRecord fields -> "{" ++ intercalate ", " (map (\(n, t) -> n ++ ": " ++ rustTypeToString t) fields) ++ "}"
+    RustEnum variants -> "enum with " ++ show (length variants) ++ " variants"
     RustCustom name -> name
-    RustFunction args ret -> formatGeneric "fn" [intercalate " -> " (map rustTypeToString args ++ [rustTypeToString ret])]
+    RustFunction args ret -> "fn(" ++ intercalate ", " (map rustTypeToString args) ++ ") -> " ++ rustTypeToString ret
     RustOpaque -> "SkyValue"
   where
     formatGeneric name args = name ++ "<" ++ intercalate ", " (map rustTypeToString args) ++ ">"
