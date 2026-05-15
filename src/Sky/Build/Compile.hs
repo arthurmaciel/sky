@@ -112,6 +112,27 @@ globalReachableSet :: IORef Mono.ReachableSet
 globalReachableSet = unsafePerformIO $ newIORef Set.empty
 
 
+-- | v0.13 F: whole-program Sky-side reachable set.  Populated by
+-- continueCompile after the canon fixpoint runs (the same hook where
+-- `globalReachableSet` gets the mono-instance reachable set).  Read by
+-- `loadAndSeedFfiRegistry` to prune unused FFI sigs (the Stripe-SDK
+-- win) and by `generateDeclsForDep` to skip emission of unreachable
+-- dep-module decls.  Set `SKY_DCE=0` to disable pruning (escape
+-- hatch — value stays Set.empty so every reachable check returns True
+-- via the empty-set fallback below).
+{-# NOINLINE globalReachableProgram #-}
+globalReachableProgram :: IORef (Set.Set Dce.Ref)
+globalReachableProgram = unsafePerformIO $ newIORef Set.empty
+
+
+-- | v0.13 F: dce-disabled flag.  Read once at compile start from
+-- `SKY_DCE`.  When True, all reachability checks return True so no
+-- pruning fires — debug aid.
+{-# NOINLINE globalDceDisabled #-}
+globalDceDisabled :: IORef Bool
+globalDceDisabled = unsafePerformIO $ newIORef False
+
+
 -- | v0.13 Phase A4: per-callee generalised annotation, used to
 -- derive σ for each reachable instance.  Same map shape as
 -- `buildCrossModuleExternalsWithMods` but keyed by full
@@ -954,6 +975,26 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             [(entryName, [])]
                     writeIORef globalReachableSet reached
                     writeIORef globalAnnotMap annotMap
+                    -- v0.13 F: whole-program Sky DCE.  Walk every
+                    -- module's call graph from `(entryMod, "main")`
+                    -- across module boundaries, tracking VarTopLevel
+                    -- + VarKernel (FFI) + VarCtor refs.  Stored
+                    -- globally for loadAndSeedFfiRegistry's pruning
+                    -- step + generateDeclsForDep's per-decl skip.
+                    dceOff <- System.Environment.lookupEnv "SKY_DCE"
+                    let dceDisabled = dceOff == Just "0"
+                    writeIORef globalDceDisabled dceDisabled
+                    if dceDisabled
+                        then return ()
+                        else do
+                            let entryModName = case mainModuleName entrySrcMod of
+                                    Just n  -> n
+                                    Nothing -> "Main"
+                                allModsMap = Map.fromList
+                                    ((entryModName, canMod) : validDeps)
+                                progReached = Dce.reachableWholeProgram
+                                    entryModName allModsMap Set.empty
+                            writeIORef globalReachableProgram progReached
                     -- v0.13 Phase A4: stash per-callee captured
                     -- quantifier names so spec emission uses the
                     -- SAME ordering the solver instantiated with.
@@ -2172,16 +2213,34 @@ locateRuntimeDir = do
 generateDeclsForDep :: Can.Module -> String -> [GoIr.GoDecl]
 generateDeclsForDep canMod modPrefix =
     let userDefs = collectDeclNames (Can._decls canMod)
+        -- v0.13 F: whole-program DCE. Drop dep-module decls that
+        -- aren't transitively reachable from the entry module's
+        -- `main`. Empty reached set → keep everything (DCE off via
+        -- `SKY_DCE=0` or pre-canon-fixpoint code path).
+        canonicalModName = ModuleName.toString (Can._name canMod)
+        reached = unsafePerformIO (readIORef globalReachableProgram)
+        dceOff  = unsafePerformIO (readIORef globalDceDisabled)
+        keepName n =
+            dceOff
+            || Set.null reached
+            || Set.member (Dce.TopRef canonicalModName n) reached
     in concatMap (generateUnionForDep modPrefix) (Map.toList (Can._unions canMod))
     ++ concatMap (generateAliasForDep userDefs modPrefix) (Map.toList (Can._aliases canMod))
-    ++ go (Can._decls canMod)
+    ++ go keepName (Can._decls canMod)
   where
-    go Can.SaveTheEnvironment = []
-    go (Can.Declare def rest) = mkDef def ++ go rest
-    go (Can.DeclareRec def defs rest) = mkDef def ++ concatMap mkDef defs ++ go rest
+    defName d = case d of
+        Can.Def (A.At _ n) _ _          -> n
+        Can.TypedDef (A.At _ n) _ _ _ _ -> n
+        Can.DestructDef _ _             -> ""
 
-    mkDef def = case def of
+    go _ Can.SaveTheEnvironment = []
+    go keepName (Can.Declare def rest) = mkDef keepName def ++ go keepName rest
+    go keepName (Can.DeclareRec def defs rest) =
+        mkDef keepName def ++ concatMap (mkDef keepName) defs ++ go keepName rest
+
+    mkDef keepName def = case def of
         Can.DestructDef _ _ -> []
+        _ | not (keepName (defName def)) -> []
         _ ->
           let -- For TypedDef, the 5th field is the RETURN type only;
               -- per-pattern arg types live in `typedPats :: [(Pat, Type)]`.
