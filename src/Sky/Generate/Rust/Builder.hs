@@ -106,6 +106,8 @@ knownDefSig :: String -> String -> Int -> Maybe ([String], String)
 knownDefSig p n a | "Sky_Core_List" `isPrefixOf` p = listSig n a
 -- Maybe module
 knownDefSig p n a | "Sky_Core_Maybe" `isPrefixOf` p = maybeSig n a
+-- Error module
+knownDefSig p n a | "Sky_Core_Error" `isPrefixOf` p = errorSig n a
 knownDefSig _ _ _ = Nothing
 
 listSig :: String -> Int -> Maybe ([String], String)
@@ -144,6 +146,26 @@ maybeSig "andMap" 2 = Just (["SkyMaybe<T0>", "SkyMaybe<impl Fn(T0) -> T1>"], "Sk
 maybeSig "isJust" 1 = Just (["SkyMaybe<T0>"], "bool")
 maybeSig "isNothing" 1 = Just (["SkyMaybe<T0>"], "bool")
 maybeSig _ _ = Nothing
+
+errorSig :: String -> Int -> Maybe ([String], String)
+errorSig "mkInfo" 1 = Just (["String"], "Sky_Core_Error_Error")
+errorSig "io" 1 = Just (["String"], "Sky_Core_Error_Error")
+errorSig "network" 1 = Just (["String"], "Sky_Core_Error_Error")
+errorSig "ffi" 1 = Just (["String"], "Sky_Core_Error_Error")
+errorSig "decode" 1 = Just (["String"], "Sky_Core_Error_Error")
+errorSig "timeout" 0 = Just ([], "Sky_Core_Error_Error")
+errorSig "notFound" 0 = Just ([], "Sky_Core_Error_Error")
+errorSig "permissionDenied" 0 = Just ([], "Sky_Core_Error_Error")
+errorSig "invalidInput" 1 = Just (["String"], "Sky_Core_Error_Error")
+errorSig "conflict" 1 = Just (["String"], "Sky_Core_Error_Error")
+errorSig "unavailable" 1 = Just (["String"], "Sky_Core_Error_Error")
+errorSig "unexpected" 1 = Just (["String"], "Sky_Core_Error_Error")
+errorSig "withMessage" 2 = Just (["String", "Sky_Core_Error_Error"], "Sky_Core_Error_Error")
+errorSig "withDetails" 2 = Just (["Sky_Core_Error_ErrorDetails", "Sky_Core_Error_Error"], "Sky_Core_Error_Error")
+errorSig "kindLabel" 1 = Just (["Sky_Core_Error_ErrorKind"], "String")
+errorSig "toString" 1 = Just (["Sky_Core_Error_Error"], "String")
+errorSig "isRetryable" 1 = Just (["Sky_Core_Error_Error"], "bool")
+errorSig _ _ = Nothing
 
 -- | Extract type variable names from a param type string for generics declaration
 sigTVars :: [String] -> String -> [String]
@@ -220,8 +242,9 @@ unionToRustTypeDef :: String -> String -> Can.Union -> RustTypeDef
 unionToRustTypeDef modPrefix typeName (Can.Union _ alts _ _) = 
     REnumDef (modPrefix ++ "_" ++ typeName) (map ctorToRust alts)
   where
-    ctorToRust (Can.Ctor name idx arity _) = 
-        (name, if arity == 0 then Nothing else Just (intercalate ", " (replicate arity "()")))
+    ctorToRust (Can.Ctor name _idx _arity argTypes) = 
+        (name, if null argTypes then Nothing 
+               else Just (intercalate ", " (map typeToRustString argTypes)))
 
 aliasesToRustTypes :: String -> Map.Map String Can.Alias -> [RustTypeDef]
 aliasesToRustTypes modPrefix aliases = concatMap (\(name, alias) -> aliasToRustTypeDef modPrefix name alias) (Map.toList aliases)
@@ -240,7 +263,7 @@ typeToRustString t = case t of
     Can.TType _ "Bool" [] -> "bool"
     Can.TType _ "Char" [] -> "char"
     Can.TType _ "String" [] -> "String"
-    Can.TType _ "Task" [_, a] -> "SkyTask<" ++ typeToRustString a ++ ">"
+    Can.TType _ "Task" [e, a] -> "SkyTask<" ++ typeToRustString e ++ ", " ++ typeToRustString a ++ ">"
     Can.TUnit -> "()"
     Can.TType _ "List" [a] -> "Vec<" ++ typeToRustString a ++ ">"
     Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString a ++ ">"
@@ -319,7 +342,7 @@ exprToRustInner ctx e = case e of
         | op == "|>" -> exprToRustString ctx b ++ "(" ++ exprToRustString ctx a ++ ")"
         | op == "<|" -> exprToRustString ctx a ++ "(" ++ exprToRustString ctx b ++ ")"
         | op == "::" -> "sky_list_cons(" ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
-        | op == "++" -> "(" ++ exprToRustString ctx a ++ " + " ++ exprToRustString ctx b ++ ")"
+        | op == "++" -> "format!(\"{}{}\", " ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
         | otherwise -> 
             "(" ++ exprToRustString ctx a ++ " " ++ binopToRust op ++ " " ++ exprToRustString ctx b ++ ")"
     Can.Lambda params body -> 
@@ -337,7 +360,14 @@ exprToRustInner ctx e = case e of
     Can.LetRec defs body ->
         "let mut " ++ intercalate "; let mut " (map (defToRustString ctx) defs) ++ "; " ++ exprToRustString ctx body
     Can.LetDestruct pat expr body ->
-        "let " ++ patternToMatchString pat ++ " = " ++ exprToRustString ctx expr ++ "; " ++ exprToRustString ctx body
+        -- The Sky lowerer wraps Task.run in a zero-arg thunk (|| { expr }).
+        -- For "let _ = thunk in body", immediately call the thunk so the side
+        -- effect fires.  This mirrors Go's rt.AnyTaskRun auto-force.
+        let exprStr = case expr of
+                Ann.At _ (Can.Lambda [] _) ->
+                    "(" ++ exprToRustString ctx expr ++ ")()"
+                _ -> exprToRustString ctx expr
+        in "let " ++ patternToMatchString pat ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
     Can.Case scrut branches -> 
         let scrutStr = exprToRustString ctx scrut
             -- Detect slice patterns in branches (cons patterns) and wrap scrutinee with as_slice()
@@ -449,6 +479,9 @@ emitRust b = unlines $
     , "use std::future::Future;"
     , "use std::future::ready;"
     , "use std::pin::Pin;"
+    , "use std::sync::Arc;"
+    , "use std::task::{Wake, Waker, Context, Poll};"
+    , "use tokio::runtime::Runtime;"
     , ""
     , "// Basic types"
     , "type SkyInt = i64;"
@@ -548,38 +581,91 @@ emitRust b = unlines $
     , "pub fn sky_float_to_string(f: f64) -> String { format!(\"{}\", f) }"
     , ""
     , "// ==========================================="
-    , "// KERNEL HELPER STUBS (sync impl, no async/await)"
+    , "// KERNEL HELPERS (genuine async/await with std-only executor)"
     , "// ==========================================="
     , ""
-    , "// Task helpers (all stubs - real async needs external crate)"
-    , "type SkyTask<A> = Pin<Box<dyn Future<Output = SkyResult<String, A>> + Send>>;"
-    , "pub fn Task_succeed<A: Send + 'static>(a: A) -> SkyTask<A> { Box::pin(ready(SkyResult::Ok(a))) }"
-    , "pub fn Task_map<A: Send + 'static, B: Send + 'static>(_f: impl FnOnce(A) -> B + Clone + Send + 'static) -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
-    , "    move |_task| Box::pin(ready(SkyResult::Err(String::new())))"
+    , "// --- Tokio runtime glue ---"
+    , "fn block_on<F: Future>(future: F) -> F::Output {"
+    , "    Runtime::new().unwrap().block_on(future)"
     , "}"
-    , "pub fn Task_andThen<A: Send + 'static, B: Send + 'static>(_f: impl FnOnce(A) -> SkyTask<B> + Clone + Send + 'static) -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
-    , "    move |_task| Box::pin(ready(SkyResult::Err(String::new())))"
+    , ""
+    , "// --- Task type (generic over error E and success A) ---"
+    , "type SkyTask<E, A> = Pin<Box<dyn Future<Output = SkyResult<E, A>> + Send>>;"
+    , ""
+    , "// --- Task combinators (proper async/await, no external crates) ---"
+    , "pub fn Task_succeed<E: Send + 'static, A: Send + 'static>(a: A) -> SkyTask<E, A> {"
+    , "    Box::pin(ready(SkyResult::Ok(a)))"
     , "}"
-    , "pub fn Task_onError<E: Send + 'static, A: Send + 'static>(_f: impl FnOnce(E) -> SkyTask<A> + Clone + Send + 'static) -> impl FnOnce(SkyTask<A>) -> SkyTask<A> {"
-    , "    move |_task| Box::pin(ready(SkyResult::Err(String::new())))"
+    , "pub fn Task_map<E: Send + 'static, A: Send + 'static, B: Send + 'static>("
+    , "    f: impl FnOnce(A) -> B + Send + 'static,"
+    , ") -> impl FnOnce(SkyTask<E, A>) -> SkyTask<E, B> {"
+    , "    move |task| Box::pin(async move {"
+    , "        match task.await {"
+    , "            SkyResult::Ok(a) => SkyResult::Ok(f(a)),"
+    , "            SkyResult::Err(e) => SkyResult::Err(e),"
+    , "        }"
+    , "    })"
     , "}"
-    , "pub fn Task_run<A>(_task: SkyTask<A>) -> SkyResult<String, A> { unimplemented!() }"
+    , "pub fn Task_andThen<E: Send + 'static, A: Send + 'static, B: Send + 'static>("
+    , "    f: impl FnOnce(A) -> SkyTask<E, B> + Send + 'static,"
+    , ") -> impl FnOnce(SkyTask<E, A>) -> SkyTask<E, B> {"
+    , "    move |task| Box::pin(async move {"
+    , "        match task.await {"
+    , "            SkyResult::Ok(a) => f(a).await,"
+    , "            SkyResult::Err(e) => SkyResult::Err(e),"
+    , "        }"
+    , "    })"
+    , "}"
+    , "pub fn Task_onError<E: Send + 'static, A: Send + 'static>("
+    , "    f: impl FnOnce(E) -> SkyTask<E, A> + Send + 'static,"
+    , ") -> impl FnOnce(SkyTask<E, A>) -> SkyTask<E, A> {"
+    , "    move |task| Box::pin(async move {"
+    , "        match task.await {"
+    , "            SkyResult::Ok(a) => SkyResult::Ok(a),"
+    , "            SkyResult::Err(e) => f(e).await,"
+    , "        }"
+    , "    })"
+    , "}"
+    , "pub fn Task_run<E: Send + 'static, A: Send + 'static>(task: SkyTask<E, A>) -> SkyResult<E, A> {"
+    , "    block_on(task)"
+    , "}"
+    , "// --- Parallel execution (tokio::spawn, ~Go goroutines) ---"
+    , "pub fn Task_parallel<E: Send + 'static, A: Send + 'static>(tasks: Vec<SkyTask<E, A>>) -> SkyTask<E, Vec<A>> {"
+    , "    Box::pin(async move {"
+    , "        let handles: Vec<tokio::task::JoinHandle<SkyResult<E, A>>> ="
+    , "            tasks.into_iter().map(|t| tokio::spawn(t)).collect();"
+    , "        let mut out = Vec::with_capacity(handles.len());"
+    , "        for h in handles {"
+    , "            match h.await.expect(\"tokio::spawn panicked\") {"
+    , "                SkyResult::Ok(a) => out.push(a),"
+    , "                SkyResult::Err(e) => return SkyResult::Err(e),"
+    , "            }"
+    , "        }"
+    , "        SkyResult::Ok(out)"
+    , "    })"
+    , "}"
     , ""
     , "// System helpers"
-    , "pub fn System_args() -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().collect()))) }"
+    , "pub fn System_args() -> SkyTask<String, Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().collect()))) }"
     , "pub fn System_exit(code: i64) -> ! { std::process::exit(code as i32) }"
     , ""
     , "// Log helpers"
-    , "pub fn Log_info(msg: String) -> SkyTask<()> { println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Log_infoWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> { println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Log_errorWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> { eprintln!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn Log_info(msg: String) -> SkyTask<String, ()> {"
+    , "    println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
+    , "}"
+    , "pub fn Log_infoWith(msg: String, _attrs: Vec<String>) -> SkyTask<String, ()> {"
+    , "    println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
+    , "}"
+    , "pub fn Log_errorWith(msg: String, _attrs: Vec<String>) -> SkyTask<String, ()> {"
+    , "    eprintln!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
+    , "}"
     , ""
     , "// DB stubs"
     , "type Db = String;"
-    , "pub fn Db_connect(_url: String) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
-    , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<Vec<String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
+    , "pub fn Db_connect(_url: String) -> SkyTask<String, Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
+    , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<String, ()> { Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<String, ()> { Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<String, Vec<Vec<String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
     , "pub fn Db_getField(_field: String, _row: Vec<String>) -> String { String::new() }"
     , ""
     , "// String helpers"
@@ -703,6 +789,18 @@ collectUndefinedTypes b =
 
 ffiPlaceholder :: String -> String
 ffiPlaceholder name = "type " ++ name ++ " = String;"
+
+-- | Generate Cargo.toml for the Rust project
+emitCargoToml :: String
+emitCargoToml = unlines
+    [ "[package]"
+    , "name = \"sky-app\""
+    , "version = \"0.1.0\""
+    , "edition = \"2021\""
+    , ""
+    , "[dependencies]"
+    , "tokio = { version = \"1\", features = [\"rt\", \"rt-multi-thread\", \"macros\"] }"
+    ]
 
 intercalate :: String -> [String] -> String
 intercalate _ [] = ""

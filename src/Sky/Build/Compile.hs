@@ -1204,9 +1204,14 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             rustCode = generateRust allMods entrySrcMod typesWithDeps
                             rustDir = outDir </> "Rust"
                         createDirectoryIfMissing True rustDir
-                        let mainRustPath = rustDir </> "main.rs"
+                        let srcDir = rustDir </> "src"
+                            mainRustPath = srcDir </> "main.rs"
+                            cargoTomlPath = rustDir </> "Cargo.toml"
+                        createDirectoryIfMissing True srcDir
                         writeFile mainRustPath rustCode
+                        writeFile cargoTomlPath RustBuilder.emitCargoToml
                         putStrLn $ "   Wrote " ++ mainRustPath
+                        putStrLn $ "   Wrote " ++ cargoTomlPath
                     Toml.TargetGo -> return ()
 
                 -- Go-specific post-codegen steps only for Go target
@@ -1217,7 +1222,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         createDirectoryIfMissing True cacheDir
                         writeFile (cacheDir </> "source.hash") srcHash
                         putStrLn "Compilation successful"
-                        return (Right (outDir </> "Rust/main.rs"))
+                        return (Right (outDir </> "Rust/src/main.rs"))
 
                     Toml.TargetGo -> do
                         -- v0.13 Layer 2: codegen-stage validator runs after
