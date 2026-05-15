@@ -20,41 +20,70 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 - Runtime crate: `sky-runtime-rust` implemented with 54 tests passing
 - Core types: SkyResult, SkyMaybe, SkyString, SkyList, SkyDict, SkyTask
 
-## Phase 2: Codegen Module (Next)
+## Phase 2: Codegen Implementation — ✅ DONE
 
-**Add Rust codegen to Sky compiler** (`src/Sky/Generate/Rust/`):
-- Convert Sky AST to Rust source code
-- Type mapping (Sky → Rust)
-- Pattern matching translation (`case` → `match`)
-- Lambda/closure handling
-- Module organization
+**Rust codegen is implemented in the compiler** (`src/Sky/Generate/Rust/Builder.hs`):
+- Full expression translation (functions, kernel calls, patterns, let bindings, binops, unions)
+- Works for simple examples (hello-world compiles and runs)
+- Triggered via `--target rust` CLI flag
 
-## Phase 3: FFI System (Priority Crates)
+### Key Implementation Details
 
-Test crates for FFI integration:
-- tokio, serde, uuid, axum, clap, rayon, reqwest, sqlx, tokio-postgres
+- **Entry point**: `generateRust` in `src/Sky/Build/Compile.hs` (line ~8400)
+- **Output directory**: `sky-out/Rust/` (not `sky-out/rust/`)
+- **Runtime**: Inlined (no external crate dependency)
+- **Default target**: Go (when no `--target` flag specified)
 
-## Key Files
+### Working Features
+
+| Feature | Status |
+|---------|--------|
+| Hello world | ✅ Compiles and runs ("Hello from Sky!") |
+| --target rust flag | ✅ Wired into CLI |
+| Expression translation | ✅ Functions, calls, patterns, let, binops |
+| Kernel calls | ✅ Special handling (Log.println → println! macro) |
+| Type mapping | ✅ Basic types (String, Int, Float, Bool) |
+| Union/ADT handling | ✅ Pattern matching → match expressions |
+
+### Fixes Applied During Implementation
+
+1. `Can.TAlias` field access - uses pairs, not ty field
+2. Removed `Can.Forall` pattern - not in Type, in Annotation
+3. Renamed main → sky_main to avoid duplicate
+4. Removed `#[derive(Debug)]` causing conflict with manual impl
+5. Fixed list functions with Clone bounds (sky_list_head, map, filter, fold, drop)
+6. Fixed println! macro generation (kernelToRust + Call handler)
+7. Cleaned up unused std imports (Future, Pin, Context, Poll)
+8. Fixed build syntax error (comma before "use std::fmt")
+
+### Known Issues / Next Steps
+
+1. **TRecord handling**: Anonymous structs aren't valid Rust syntax - need to emit named structs
+2. **Cons pattern**: "::" is not valid Rust identifier
+3. **Generic type parameters**: Need proper handling for Sky type variables
+4. **Multi-module projects**: todo-cli only generates Go, not Rust (generateRust not called for multi-module)
+
+### Code Locations
 
 | File | Purpose |
 |------|---------|
-| `SKYRUST-PLAN.md` | Detailed project plan |
-| `README.md` | Project overview |
-| `sky-runtime-rust/src/lib.rs` | Runtime primitives (54 tests) |
-| `sky-compiler/src/Sky/Generate/Rust/` | Rust codegen module (7 files) |
+| `src/Sky/Generate/Rust/Builder.hs` | Core codegen (366 lines) - the actual working implementation |
+| `src/Sky/Build/Compile.hs` | generateRust function (line ~8400) |
+| `app/Main.hs` | --target CLI flag handling |
+| `src/Sky/Sky/Toml.hs` | CompileTarget type (TargetGo/TargetRust) |
 
-## Rust Codegen Module (`sky-compiler/src/Sky/Generate/Rust/`)
+### Technical Decisions Made
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `Types.hs` | ~100 | Type mapping from Sky to Rust |
-| `Expr.hs` | ~200 | Expression transpilation |
-| `Pattern.hs` | ~150 | Pattern matching → match expressions |
-| `Decl.hs` | ~250 | Declaration transpilation |
-| `Kernel.hs` | ~350 | Runtime function calls mapping |
-| `Module.hs` | ~150 | Module emit and organization |
-| `Builder.hs` | ~150 | Orchestration, validation |
-| **Total** | ~1,350 | |
+- Used `Ann.At` instead of `A.Located` (data constructor is `At`, not `Located`)
+- `ModuleName.Canonical` wraps a single `String` field, not a list
+- Simplified Union/Alias field access to avoid record pattern issues
+- Removed explicit `-> ()` return type from generated functions
+- Kernel calls use special handling: Log.println → println! macro
+
+## Phase 3: FFI System (Future)
+
+Test crates for FFI integration:
+- tokio, serde, uuid, axum, clap, rayon, reqwest, sqlx, tokio-postgres
 
 ## Constraints
 
@@ -65,7 +94,7 @@ Test crates for FFI integration:
 
 ## Relevant Context from Sky Compiler
 
-- Parser: `/home/arthur/Documentos/comp/sky-anzel/src/Sky/Parse/*.hs` (2,685 lines)
-- Type Checker: `/home/arthur/Documentos/comp/sky-anzel/src/Sky/Type/**/*.hs` (5,503 lines)
-- Canonicaliser: `/home/arthur/Documentos/comp/sky-anzel/src/Sky/Canonicalise/*.hs` (2,758 lines)
-- Go Codegen: `/home/arthur/Documentos/comp/sky-anzel/src/Sky/Generate/Go/*.hs` (1,624 lines) — reference for Rust codegen structure
+- Parser: `/home/arthur/Documentos/comp/sky/src/Sky/Parse/*.hs`
+- Type Checker: `/home/arthur/Documentos/comp/sky/src/Sky/Type/**/*.hs`
+- Canonicaliser: `/home/arthur/Documentos/comp/sky/src/Sky/Canonicalise/*.hs`
+- Go Codegen: `/home/arthur/Documentos/comp/sky/src/Sky/Generate/Go/*.hs` — reference for Rust codegen structure
