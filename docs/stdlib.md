@@ -1,5 +1,11 @@
 # Standard library reference
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`compiler/journey.md`](compiler/journey.md) for the changelog.
+
+
 Sky's standard library is **batteries-included** — there's one canonical module per concern, no plugin ecosystem to navigate, no `npm install` for crypto. This page is the complete user-facing reference.
 
 > Each kernel module is reachable via its bare name. `import Log` works the same as `import Std.Log as Log`. The long `Sky.Core.X` / `Std.X` paths are kept for cross-language familiarity, but you can usually drop them.

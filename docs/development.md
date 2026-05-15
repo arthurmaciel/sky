@@ -1,5 +1,11 @@
 # Development
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`compiler/journey.md`](compiler/journey.md) for the changelog.
+
+
 Building Sky from source — for contributors, language-tooling work,
 or anyone who wants to run the compiler before a release lands.
 

@@ -1,5 +1,11 @@
 # Sky.Tui overview
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 **Terminal-rendering TEA backend.** `Sky.Tui` runs an `init` / `update`
 / `view` / `subscriptions` app the same way Sky.Live runs a web app —
 but the view function paints to ANSI terminal cells instead of HTML.

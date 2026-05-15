@@ -1,5 +1,11 @@
 # Pattern matching
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 Pattern matching is exhaustive — missing variants cause build errors, not runtime panics.
 
 ## Case expressions

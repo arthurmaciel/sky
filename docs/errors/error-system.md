@@ -1,5 +1,11 @@
 # Error system
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 Since v0.9, **every fallible operation in Sky returns a value whose error slot is `Sky.Core.Error`** — a structured ADT with eleven kinds and typed details. There is no more `Result String` or `Task String` on any public surface.
 
 ## The shape

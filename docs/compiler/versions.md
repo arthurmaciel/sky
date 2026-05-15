@@ -1,6 +1,53 @@
 # Version history
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 This is a feature-level changelog covering major architectural shifts. For the line-level history see `git log`.
+
+## v0.13 — typed-codegen completion (perf/v0.13, 2026-05-15)
+
+All seven workstreams A→G landed. The agreed contract — "all USED Sky
+code → fully-typed Go; ONLY genuinely-generic OR genuinely-unused may
+use Go-generic / `any`; Sky-side DCE pre-lowering; LSP 100 %" — is
+satisfied end-to-end.
+
+**Commits** (most recent first):
+
+```
+8ac27a8  docs — CLAUDE.md + templates + journey.md + LSP + Known-Limitations
+584d2e1  verifier scripts + reflect-adapter arg narrowing fix
+80dcdf9  G goto-def coverage + F3 orphan FfiT pruning + Unicode-aware ident matching
+316accc  regression tests — AnonLambda + AnonRecord specs
+5d2d8df  E anon-record struct decls — remove sanitiseTypedDeep cover-up
+041bd70  B0 prefer Sky-defined union over runtimeTypedMap any-alias
+5b59e68  G LSP 100% — every USED symbol class
+ecf024f  F whole-program Sky DCE — per-dep decl pruning
+3757025  D-Lambda-Lowerer + D1 typed HOF return
+22ee8e0  A2/A1/B1/C — pre-register + superset records + container TVars + parametric ADTs
+```
+
+**Skyshop benchmark** (the most expensive real example — Stripe SDK +
+Firebase + Tailwind + Std.Ui):
+
+| Metric | Pre-v0.13 | Post-v0.13 |
+|---|---|---|
+| `main.go` lines | 14,398 | **4,178** (−71 %) |
+| Total funcs in main.go | 3,518 | **975** (−72 %) |
+| Emitted `Stripe_*` user refs | (full) | **0** (all DCE-pruned) |
+| `stripe_bindings.go` lines | 326,327 | **58,059** (−82 %) |
+| `type FfiT_*` aliases | 80,847 | **29** |
+| Wrapper funcs | 124,312 | **57** |
+
+**Runtime verification** added: `scripts/verify-all-web.sh` (Playwright
+headless Chromium for 10 Sky.Live + Sky.Http.Server apps) +
+`scripts/verify-cli.sh` (CLI / Sky.Cli / Sky.Tui). 25/26 examples PASS
+end-to-end (Fyne `11-fyne-stopwatch` skip — needs X11).
+
+See `journey.md` for the full per-workstream technical write-up.
 
 ## v0.11.x post-0 — DX (`sky watch`) + Sky.Live hot-reload + install perf (2026-05-07)
 

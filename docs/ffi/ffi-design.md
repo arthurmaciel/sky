@@ -1,5 +1,11 @@
 # FFI design
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 Technical reference for how the FFI generator classifies and emits wrappers. For user-facing usage see [go-interop.md](go-interop.md).
 
 ## Pipeline
