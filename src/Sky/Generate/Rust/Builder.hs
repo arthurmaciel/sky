@@ -20,7 +20,7 @@ data RustModule = RustModule
     }
 
 data RustItem
-    = RustFunction String String [String] String  -- name, generics_decl, params, body
+    = RustFunction String String [String] String String  -- name, generics_decl, params, ret_type, body
     | RustStruct String [(String, String)]
     | RustEnum String [(String, Maybe String)]
     | RustTypeAlias String String
@@ -33,6 +33,7 @@ data RustTypeDef
 -- | Context threaded through expression emission
 data EmitCtx = EmitCtx
     { ecRecordMap :: Map.Map String String  -- field-key -> struct name
+    , ecSolvedTypes :: Map.Map String Can.Type  -- function name -> inferred type
     }
 
 -- | Build a map from field-name-signature to struct name
@@ -48,9 +49,9 @@ buildModule :: EmitCtx -> Can.Module -> RustModule
 buildModule ctx mod = 
     let modPrefix = moduleNameToRust (Can._name mod)
         items = declsToRustItems ctx (Can._decls mod)
-        prefixItem (RustFunction n g p b)
-            | n == "sky_main" || n == "main" = RustFunction n g p b
-            | otherwise = RustFunction (modPrefix ++ "_" ++ n) g p b
+        prefixItem (RustFunction n g p r b)
+            | n == "sky_main" || n == "main" = RustFunction n g p r b
+            | otherwise = RustFunction (modPrefix ++ "_" ++ n) g p r b
         prefixItem other = other
     in RustModule
         { modName = modPrefix
@@ -67,6 +68,20 @@ declsToRustItems ctx (Can.Declare def rest) = defToRustItem ctx def : declsToRus
 declsToRustItems ctx (Can.DeclareRec def defs rest) = 
     map (defToRustItem ctx) (def : defs) ++ declsToRustItems ctx rest
 
+-- | Walk TLambda chain to extract the innermost (return) type
+extractReturnType :: Can.Type -> Can.Type
+extractReturnType (Can.TLambda _ ret) = extractReturnType ret
+extractReturnType ty = ty
+
+-- | Check if a type contains unresolved type variables (should not be emitted)
+hasTypeVars :: Can.Type -> Bool
+hasTypeVars (Can.TVar _) = True
+hasTypeVars (Can.TLambda a b) = hasTypeVars a || hasTypeVars b
+hasTypeVars (Can.TType _ _ args) = any hasTypeVars args
+hasTypeVars (Can.TTuple a b rest) = any hasTypeVars (a:b:rest)
+hasTypeVars (Can.TRecord fields _) = any (hasTypeVars . Can._fieldType) (Map.elems fields)
+hasTypeVars _ = False
+
 defToRustItem :: EmitCtx -> Can.Def -> RustItem
 defToRustItem ctx (Can.Def (Ann.At _ name) params body) = 
     let rustName = if name == "main" then "sky_main" else name
@@ -74,13 +89,21 @@ defToRustItem ctx (Can.Def (Ann.At _ name) params body) =
         genVars = if null params then "" 
                   else "<" ++ intercalate ", " (map (\i -> "T" ++ show i) [0..n-1]) ++ ">"
         params' = map (\(i, p) -> patternToRustParam p ++ ": T" ++ show i) (zip [0..] params)
-    in RustFunction rustName genVars params' (exprToRustString ctx body)
-defToRustItem ctx (Can.TypedDef (Ann.At _ name) _ pats body _) = 
+        -- sky_main always returns () since the entry wrapper handles the Task
+        retTy = if name == "main" then "()"
+                else case Map.lookup name (ecSolvedTypes ctx) of
+                    Just ty -> let ret = extractReturnType ty
+                              in if hasTypeVars ret then "()" else typeToRustString ret
+                    Nothing -> "()"
+    in RustFunction rustName genVars params' retTy (exprToRustString ctx body)
+defToRustItem ctx (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
     let rustName = if name == "main" then "sky_main" else name
         params = map (\(pat, ty) -> patternToRustParam pat ++ ": " ++ typeToRustString ty) pats
-    in RustFunction rustName "" params (exprToRustString ctx body)
+        -- sky_main always returns () since the entry wrapper handles the Task
+        ret = if name == "main" then "()" else typeToRustString retTy
+    in RustFunction rustName "" params ret (exprToRustString ctx body)
 defToRustItem ctx (Can.DestructDef pat expr) =
-    RustFunction "_destruct" "" [patternToRustParam pat] (exprToRustString ctx expr)
+    RustFunction "_destruct" "" [patternToRustParam pat] "()" (exprToRustString ctx expr)
 
 unionsToRustTypes :: String -> Map.Map String Can.Union -> [RustTypeDef]
 unionsToRustTypes modPrefix unions = map (\(name, u) -> unionToRustTypeDef modPrefix name u) (Map.toList unions)
@@ -109,7 +132,7 @@ typeToRustString t = case t of
     Can.TType _ "Bool" [] -> "bool"
     Can.TType _ "Char" [] -> "char"
     Can.TType _ "String" [] -> "String"
-    Can.TType _ "Task" [_, a] -> "Box<dyn Future<Output = Result<" ++ typeToRustString a ++ ", Error>> + Send>"
+    Can.TType _ "Task" [_, a] -> "SkyTask<" ++ typeToRustString a ++ ">"
     Can.TUnit -> "()"
     Can.TType _ "List" [a] -> "Vec<" ++ typeToRustString a ++ ">"
     Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString a ++ ">"
@@ -284,10 +307,10 @@ patternToMatchString (Ann.At _ pat) = case pat of
 ctorArgToPattern :: Can.PatternCtorArg -> String
 ctorArgToPattern (Can.PatternCtorArg _ _ pat) = patternToMatchString pat
 
-buildProgram :: [Can.Module] -> RustBuilder
-buildProgram mods = 
+buildProgram :: [Can.Module] -> Map.Map String Can.Type -> RustBuilder
+buildProgram mods solvedTypes = 
     let recordMap = buildRecordMap mods
-        ctx = EmitCtx { ecRecordMap = recordMap }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes }
     in RustBuilder
         { builderModules = map (buildModule ctx) mods
         , builderTypes = concatMap (\m -> 
@@ -433,7 +456,8 @@ emitRust b = unlines $
     , "pub fn Log_infoWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> { println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(()))) }"
     , "pub fn Log_errorWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> { eprintln!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(()))) }"
     , ""
-    , "// DB stubs (Db type defined as placeholder below)"
+    , "// DB stubs"
+    , "type Db = String;"
     , "pub fn Db_connect(_url: String) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
     , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
     , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
@@ -511,8 +535,9 @@ exprToStatement expr = if null expr then ""
     else expr ++ ";"  -- add semicolon for statement
 
 itemToRustStrings :: RustItem -> [String]
-itemToRustStrings (RustFunction name generics params body) = 
-    ["fn " ++ name ++ generics ++ "(" ++ intercalate ", " params ++ ") {", "    " ++ exprToStatement body, "}"]
+itemToRustStrings (RustFunction name generics params retType body) = 
+    let ret = if retType == "()" then "" else " -> " ++ retType
+    in ["fn " ++ name ++ generics ++ "(" ++ intercalate ", " params ++ ")" ++ ret ++ " {", "    " ++ exprToStatement body, "}"]
 itemToRustStrings (RustStruct name fields) = 
     ["struct " ++ name ++ " {", 
      intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields), 
@@ -537,12 +562,12 @@ collectUndefinedTypes b =
             [ name | RAliasDef name _ <- builderTypes b ]
         -- Collect type names from function parameter types (after ": ")
         referenced = Set.fromList
-            [ t | RustFunction _ _ params _ <- allItems
+            [ t | RustFunction _ _ params _ _ <- allItems
                 , p <- params
                 , let (_, ':':ty) = break (== ':') p
                 , let t = dropWhile (== ' ') ty
                 , not (null t)
-                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue"])
+                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue", "Db"])
                 , not ("T" `isPrefixOf` t && all (\c -> c >= '0' && c <= '9') (drop 1 t))  -- generic params T0, T1, etc.
                 , not ("Vec<" `isPrefixOf` t)
                 , not ("Option" `isPrefixOf` t)
