@@ -148,23 +148,23 @@ maybeSig "isNothing" 1 = Just (["SkyMaybe<T0>"], "bool")
 maybeSig _ _ = Nothing
 
 errorSig :: String -> Int -> Maybe ([String], String)
-errorSig "mkInfo" 1 = Just (["String"], "Sky_Core_Error_Error")
-errorSig "io" 1 = Just (["String"], "Sky_Core_Error_Error")
-errorSig "network" 1 = Just (["String"], "Sky_Core_Error_Error")
-errorSig "ffi" 1 = Just (["String"], "Sky_Core_Error_Error")
-errorSig "decode" 1 = Just (["String"], "Sky_Core_Error_Error")
-errorSig "timeout" 0 = Just ([], "Sky_Core_Error_Error")
-errorSig "notFound" 0 = Just ([], "Sky_Core_Error_Error")
-errorSig "permissionDenied" 0 = Just ([], "Sky_Core_Error_Error")
-errorSig "invalidInput" 1 = Just (["String"], "Sky_Core_Error_Error")
-errorSig "conflict" 1 = Just (["String"], "Sky_Core_Error_Error")
-errorSig "unavailable" 1 = Just (["String"], "Sky_Core_Error_Error")
-errorSig "unexpected" 1 = Just (["String"], "Sky_Core_Error_Error")
-errorSig "withMessage" 2 = Just (["String", "Sky_Core_Error_Error"], "Sky_Core_Error_Error")
-errorSig "withDetails" 2 = Just (["Sky_Core_Error_ErrorDetails", "Sky_Core_Error_Error"], "Sky_Core_Error_Error")
+errorSig "mkInfo" 1 = Just (["String"], "SkyError")
+errorSig "io" 1 = Just (["String"], "SkyError")
+errorSig "network" 1 = Just (["String"], "SkyError")
+errorSig "ffi" 1 = Just (["String"], "SkyError")
+errorSig "decode" 1 = Just (["String"], "SkyError")
+errorSig "timeout" 0 = Just ([], "SkyError")
+errorSig "notFound" 0 = Just ([], "SkyError")
+errorSig "permissionDenied" 0 = Just ([], "SkyError")
+errorSig "invalidInput" 1 = Just (["String"], "SkyError")
+errorSig "conflict" 1 = Just (["String"], "SkyError")
+errorSig "unavailable" 1 = Just (["String"], "SkyError")
+errorSig "unexpected" 1 = Just (["String"], "SkyError")
+errorSig "withMessage" 2 = Just (["String", "SkyError"], "SkyError")
+errorSig "withDetails" 2 = Just (["Sky_Core_Error_ErrorDetails", "SkyError"], "SkyError")
 errorSig "kindLabel" 1 = Just (["Sky_Core_Error_ErrorKind"], "String")
-errorSig "toString" 1 = Just (["Sky_Core_Error_Error"], "String")
-errorSig "isRetryable" 1 = Just (["Sky_Core_Error_Error"], "bool")
+errorSig "toString" 1 = Just (["SkyError"], "String")
+errorSig "isRetryable" 1 = Just (["SkyError"], "bool")
 errorSig _ _ = Nothing
 
 -- | Extract type variable names from a param type string for generics declaration
@@ -263,11 +263,12 @@ typeToRustString t = case t of
     Can.TType _ "Bool" [] -> "bool"
     Can.TType _ "Char" [] -> "char"
     Can.TType _ "String" [] -> "String"
-    Can.TType _ "Task" [e, a] -> "SkyTask<" ++ typeToRustString e ++ ", " ++ typeToRustString a ++ ">"
+    Can.TType _ "Task" [_, a] -> "SkyTask<" ++ typeToRustString a ++ ">"
     Can.TUnit -> "()"
     Can.TType _ "List" [a] -> "Vec<" ++ typeToRustString a ++ ">"
     Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString a ++ ">"
     Can.TType _ "Result" [e, a] -> "SkyResult<" ++ typeToRustString a ++ ", " ++ typeToRustString e ++ ">"
+    Can.TType _ "Error" [] -> "SkyError"  -- Sky unified error type (maps to Error ADT or String)
     Can.TRecord _fields _ -> "()"  -- TRecord: emitted as named struct via alias
     Can.TTuple a b rest -> "(" ++ intercalate ", " (map typeToRustString (a:b:rest)) ++ ")"
     Can.TVar v -> v
@@ -589,16 +590,16 @@ emitRust b = unlines $
     , "    Runtime::new().unwrap().block_on(future)"
     , "}"
     , ""
-    , "// --- Task type (generic over error E and success A) ---"
-    , "type SkyTask<E, A> = Pin<Box<dyn Future<Output = SkyResult<E, A>> + Send>>;"
+    , "// --- Task type (unified error type = SkyError) ---"
+    , "type SkyTask<A> = Pin<Box<dyn Future<Output = SkyResult<SkyError, A>> + Send>>;"
     , ""
-    , "// --- Task combinators (proper async/await, no external crates) ---"
-    , "pub fn Task_succeed<E: Send + 'static, A: Send + 'static>(a: A) -> SkyTask<E, A> {"
+    , "// --- Task combinators ---"
+    , "pub fn Task_succeed<A: Send + 'static>(a: A) -> SkyTask<A> {"
     , "    Box::pin(ready(SkyResult::Ok(a)))"
     , "}"
-    , "pub fn Task_map<E: Send + 'static, A: Send + 'static, B: Send + 'static>("
+    , "pub fn Task_map<A: Send + 'static, B: Send + 'static>("
     , "    f: impl FnOnce(A) -> B + Send + 'static,"
-    , ") -> impl FnOnce(SkyTask<E, A>) -> SkyTask<E, B> {"
+    , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
     , "    move |task| Box::pin(async move {"
     , "        match task.await {"
     , "            SkyResult::Ok(a) => SkyResult::Ok(f(a)),"
@@ -606,9 +607,9 @@ emitRust b = unlines $
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_andThen<E: Send + 'static, A: Send + 'static, B: Send + 'static>("
-    , "    f: impl FnOnce(A) -> SkyTask<E, B> + Send + 'static,"
-    , ") -> impl FnOnce(SkyTask<E, A>) -> SkyTask<E, B> {"
+    , "pub fn Task_andThen<A: Send + 'static, B: Send + 'static>("
+    , "    f: impl FnOnce(A) -> SkyTask<B> + Send + 'static,"
+    , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
     , "    move |task| Box::pin(async move {"
     , "        match task.await {"
     , "            SkyResult::Ok(a) => f(a).await,"
@@ -616,9 +617,9 @@ emitRust b = unlines $
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_onError<E: Send + 'static, A: Send + 'static>("
-    , "    f: impl FnOnce(E) -> SkyTask<E, A> + Send + 'static,"
-    , ") -> impl FnOnce(SkyTask<E, A>) -> SkyTask<E, A> {"
+    , "pub fn Task_onError<A: Send + 'static>("
+    , "    f: impl FnOnce(SkyError) -> SkyTask<A> + Send + 'static,"
+    , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<A> {"
     , "    move |task| Box::pin(async move {"
     , "        match task.await {"
     , "            SkyResult::Ok(a) => SkyResult::Ok(a),"
@@ -626,13 +627,13 @@ emitRust b = unlines $
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_run<E: Send + 'static, A: Send + 'static>(task: SkyTask<E, A>) -> SkyResult<E, A> {"
+    , "pub fn Task_run<A: Send + 'static>(task: SkyTask<A>) -> SkyResult<SkyError, A> {"
     , "    block_on(task)"
     , "}"
     , "// --- Parallel execution (tokio::spawn, ~Go goroutines) ---"
-    , "pub fn Task_parallel<E: Send + 'static, A: Send + 'static>(tasks: Vec<SkyTask<E, A>>) -> SkyTask<E, Vec<A>> {"
+    , "pub fn Task_parallel<A: Send + 'static>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
     , "    Box::pin(async move {"
-    , "        let handles: Vec<tokio::task::JoinHandle<SkyResult<E, A>>> ="
+    , "        let handles: Vec<tokio::task::JoinHandle<SkyResult<SkyError, A>>> ="
     , "            tasks.into_iter().map(|t| tokio::spawn(t)).collect();"
     , "        let mut out = Vec::with_capacity(handles.len());"
     , "        for h in handles {"
@@ -646,26 +647,26 @@ emitRust b = unlines $
     , "}"
     , ""
     , "// System helpers"
-    , "pub fn System_args() -> SkyTask<String, Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().collect()))) }"
+    , "pub fn System_args() -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().collect()))) }"
     , "pub fn System_exit(code: i64) -> ! { std::process::exit(code as i32) }"
     , ""
     , "// Log helpers"
-    , "pub fn Log_info(msg: String) -> SkyTask<String, ()> {"
+    , "pub fn Log_info(msg: String) -> SkyTask<()> {"
     , "    println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
     , "}"
-    , "pub fn Log_infoWith(msg: String, _attrs: Vec<String>) -> SkyTask<String, ()> {"
+    , "pub fn Log_infoWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> {"
     , "    println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
     , "}"
-    , "pub fn Log_errorWith(msg: String, _attrs: Vec<String>) -> SkyTask<String, ()> {"
+    , "pub fn Log_errorWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> {"
     , "    eprintln!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
     , "}"
     , ""
     , "// DB stubs"
     , "type Db = String;"
-    , "pub fn Db_connect(_url: String) -> SkyTask<String, Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
-    , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<String, ()> { Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<String, ()> { Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<String, Vec<Vec<String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
+    , "pub fn Db_connect(_url: String) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
+    , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<Vec<String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
     , "pub fn Db_getField(_field: String, _row: Vec<String>) -> String { String::new() }"
     , ""
     , "// String helpers"
@@ -687,7 +688,11 @@ emitRust b = unlines $
     , "// ==========================================="
     , ""
     ] ++ map typeDefToString (builderTypes b) ++
-    [ "" ] ++ concatMap moduleToRustStrings (builderModules b) ++
+    [ ""
+    -- SkyError: points to the concrete Error ADT when the Error module is
+    -- present, otherwise falls back to String so Tasks compile everywhere.
+    , if hasErrorType b then "type SkyError = Sky_Core_Error_Error;" else "type SkyError = String;"
+    , "" ] ++ concatMap moduleToRustStrings (builderModules b) ++
     [ ""
     , "// ==========================================="
     , "// FFI PLACEHOLDER TYPES (types referenced but not defined)"
@@ -706,9 +711,9 @@ emitRust b = unlines $
 
 typeDefToString :: RustTypeDef -> String
 typeDefToString (REnumDef name variants) = 
-    "enum " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
+    "#[derive(Clone)]\nenum " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
 typeDefToString (RStructDef name fields) =
-    "struct " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
+    "#[derive(Clone)]\nstruct " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
 typeDefToString (RAliasDef name ty) = "type " ++ name ++ " = " ++ ty ++ ";"
 
 moduleToRustStrings :: RustModule -> [String]
@@ -746,11 +751,13 @@ itemToRustStrings (RustFunction name generics params retType body) =
         bodyLine = if retType == "()" then exprToStatement body else body
     in ["fn " ++ name ++ generics ++ "(" ++ intercalate ", " params ++ ")" ++ ret ++ " {", "    " ++ bodyLine, "}"]
 itemToRustStrings (RustStruct name fields) = 
-    ["struct " ++ name ++ " {", 
+    ["#[derive(Clone)]",
+     "struct " ++ name ++ " {", 
      intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields), 
      "}"]
 itemToRustStrings (RustEnum name variants) = 
-    ["enum " ++ name ++ " {",
+    ["#[derive(Clone)]",
+     "enum " ++ name ++ " {",
      intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants),
      "}"]
 itemToRustStrings (RustTypeAlias name ty) = ["type " ++ name ++ " = " ++ ty ++ ";"]
@@ -774,7 +781,7 @@ collectUndefinedTypes b =
                 , let (_, ':':ty) = break (== ':') p
                 , let t = dropWhile (== ' ') ty
                 , not (null t)
-                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue", "Db", "SkyTask"])
+                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue", "Db", "SkyTask", "SkyError"])
                 , not ("impl " `isPrefixOf` t)
                 , not ("&" `isPrefixOf` t)
                 , not ("Vec<" `isPrefixOf` t)
@@ -786,6 +793,14 @@ collectUndefinedTypes b =
                 , not ("fn(" `isPrefixOf` t)
             ]
     in Set.toList (Set.difference referenced defined)
+
+-- | Check if the generated output contains the Sky.Core.Error.Error ADT.
+-- If so, SkyError points to it; otherwise SkyError = String.
+hasErrorType :: RustBuilder -> Bool
+hasErrorType b = any isErrorEnum (builderTypes b)
+  where
+    isErrorEnum (REnumDef "Sky_Core_Error_Error" _) = True
+    isErrorEnum _ = False
 
 ffiPlaceholder :: String -> String
 ffiPlaceholder name = "type " ++ name ++ " = String;"
