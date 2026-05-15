@@ -1,6 +1,6 @@
 module Sky.Generate.Rust.Builder where
 
-import Data.List (isSuffixOf, isPrefixOf)
+import Data.List (isSuffixOf, isPrefixOf, stripPrefix, span)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
@@ -48,7 +48,7 @@ buildRecordMap mods = Map.fromList
 buildModule :: EmitCtx -> Can.Module -> RustModule
 buildModule ctx mod = 
     let modPrefix = moduleNameToRust (Can._name mod)
-        items = declsToRustItems ctx (Can._decls mod)
+        items = declsToRustItems ctx modPrefix (Can._decls mod)
         prefixItem (RustFunction n g p r b)
             | n == "sky_main" || n == "main" = RustFunction n g p r b
             | otherwise = RustFunction (modPrefix ++ "_" ++ n) g p r b
@@ -62,11 +62,11 @@ moduleNameToRust :: ModuleName.Canonical -> String
 moduleNameToRust mod = 
     map (\c -> if c == '.' then '_' else c) (ModuleName._name mod)
 
-declsToRustItems :: EmitCtx -> Can.Decls -> [RustItem]
-declsToRustItems _ctx Can.SaveTheEnvironment = []
-declsToRustItems ctx (Can.Declare def rest) = defToRustItem ctx def : declsToRustItems ctx rest
-declsToRustItems ctx (Can.DeclareRec def defs rest) = 
-    map (defToRustItem ctx) (def : defs) ++ declsToRustItems ctx rest
+declsToRustItems :: EmitCtx -> String -> Can.Decls -> [RustItem]
+declsToRustItems _ctx _mod Can.SaveTheEnvironment = []
+declsToRustItems ctx modPrefix (Can.Declare def rest) = defToRustItem ctx modPrefix def : declsToRustItems ctx modPrefix rest
+declsToRustItems ctx modPrefix (Can.DeclareRec def defs rest) = 
+    map (defToRustItem ctx modPrefix) (def : defs) ++ declsToRustItems ctx modPrefix rest
 
 -- | Walk TLambda chain to extract the innermost (return) type
 extractReturnType :: Can.Type -> Can.Type
@@ -82,28 +82,136 @@ hasTypeVars (Can.TTuple a b rest) = any hasTypeVars (a:b:rest)
 hasTypeVars (Can.TRecord fields _) = any (hasTypeVars . Can._fieldType) (Map.elems fields)
 hasTypeVars _ = False
 
-defToRustItem :: EmitCtx -> Can.Def -> RustItem
-defToRustItem ctx (Can.Def (Ann.At _ name) params body) = 
+-- | Simple check: does the body match a parameter with list patterns (cons, list)?
+bodyUsesList :: Can.Expr -> Bool
+bodyUsesList (Ann.At _ e) = case e of
+    Can.Case scrut branches ->
+        any (\(Can.CaseBranch pat _) -> isListPat pat) branches
+        || any (\(Can.CaseBranch _ body) -> bodyUsesList body) branches
+    Can.Let _ body -> bodyUsesList body
+    Can.LetRec _ body -> bodyUsesList body
+    Can.LetDestruct _ _ body -> bodyUsesList body
+    Can.If branches elseBranch -> any (\(_, t) -> bodyUsesList t) branches || bodyUsesList elseBranch
+    _ -> False
+  where
+    isListPat (Ann.At _ p) = case p of
+        Can.PCons _ _ -> True
+        Can.PList _ -> True
+        Can.PAlias pat _ -> isListPat pat
+        _ -> False
+
+-- | Known signatures for common Def functions (stdlib etc.), keyed by (module_prefix, name, arity)
+knownDefSig :: String -> String -> Int -> Maybe ([String], String)
+-- List module
+knownDefSig p n a | "Sky_Core_List" `isPrefixOf` p = listSig n a
+-- Maybe module
+knownDefSig p n a | "Sky_Core_Maybe" `isPrefixOf` p = maybeSig n a
+knownDefSig _ _ _ = Nothing
+
+listSig :: String -> Int -> Maybe ([String], String)
+listSig "map" 2 = Just (["impl Fn(T0) -> T1", "Vec<T0>"], "Vec<T1>")
+listSig "filter" 2 = Just (["impl Fn(&T0) -> bool", "Vec<T0>"], "Vec<T0>")
+listSig "foldl" 3 = Just (["impl Fn(T1, T0) -> T1", "T1", "Vec<T0>"], "T1")
+listSig "foldr" 3 = Just (["impl Fn(T0, T1) -> T1", "T1", "Vec<T0>"], "T1")
+listSig "cons" 2 = Just (["T0", "Vec<T0>"], "Vec<T0>")
+listSig "head" 1 = Just (["Vec<T0>"], "SkyMaybe<T0>")
+listSig "tail" 1 = Just (["Vec<T0>"], "SkyMaybe<Vec<T0>>")
+listSig "isEmpty" 1 = Just (["Vec<T0>"], "bool")
+listSig "length" 1 = Just (["Vec<T0>"], "i64")
+listSig "reverse" 1 = Just (["Vec<T0>"], "Vec<T0>")
+listSig "append" 2 = Just (["Vec<T0>", "Vec<T0>"], "Vec<T0>")
+listSig "member" 2 = Just (["T0", "Vec<T0>"], "bool")
+listSig "any" 2 = Just (["impl Fn(&T0) -> bool", "Vec<T0>"], "bool")
+listSig "all" 2 = Just (["impl Fn(&T0) -> bool", "Vec<T0>"], "bool")
+listSig "find" 2 = Just (["impl Fn(&T0) -> bool", "Vec<T0>"], "SkyMaybe<T0>")
+listSig "range" 2 = Just (["i64", "i64"], "Vec<i64>")
+listSig "take" 2 = Just (["i64", "Vec<T0>"], "Vec<T0>")
+listSig "drop" 2 = Just (["i64", "Vec<T0>"], "Vec<T0>")
+listSig "concatMap" 2 = Just (["impl Fn(T0) -> Vec<T1>", "Vec<T0>"], "Vec<T1>")
+listSig "indexedMap" 2 = Just (["impl Fn(i64, T0) -> T1", "Vec<T0>"], "Vec<T1>")
+listSig "indexedMapHelp" 3 = Just (["impl Fn(i64, T0) -> T1", "i64", "Vec<T0>"], "Vec<T1>")
+listSig _ _ = Nothing
+
+maybeSig :: String -> Int -> Maybe ([String], String)
+maybeSig "map" 2 = Just (["impl Fn(T0) -> T1", "SkyMaybe<T0>"], "SkyMaybe<T1>")
+maybeSig "andThen" 2 = Just (["impl Fn(T0) -> SkyMaybe<T1>", "SkyMaybe<T0>"], "SkyMaybe<T1>")
+maybeSig "withDefault" 2 = Just (["T0", "SkyMaybe<T0>"], "T0")
+maybeSig "map2" 3 = Just (["impl Fn(T0, T1) -> T2", "SkyMaybe<T0>", "SkyMaybe<T1>"], "SkyMaybe<T2>")
+maybeSig "map3" 4 = Just (["impl Fn(T0, T1, T2) -> T3", "SkyMaybe<T0>", "SkyMaybe<T1>", "SkyMaybe<T2>"], "SkyMaybe<T3>")
+maybeSig "map4" 5 = Just (["impl Fn(T0, T1, T2, T3) -> T4", "SkyMaybe<T0>", "SkyMaybe<T1>", "SkyMaybe<T2>", "SkyMaybe<T3>"], "SkyMaybe<T4>")
+maybeSig "map5" 6 = Just (["impl Fn(T0, T1, T2, T3, T4) -> T5", "SkyMaybe<T0>", "SkyMaybe<T1>", "SkyMaybe<T2>", "SkyMaybe<T3>", "SkyMaybe<T4>"], "SkyMaybe<T5>")
+maybeSig "andMap" 2 = Just (["SkyMaybe<T0>", "SkyMaybe<impl Fn(T0) -> T1>"], "SkyMaybe<T1>")
+maybeSig "isJust" 1 = Just (["SkyMaybe<T0>"], "bool")
+maybeSig "isNothing" 1 = Just (["SkyMaybe<T0>"], "bool")
+maybeSig _ _ = Nothing
+
+-- | Extract type variable names from a param type string for generics declaration
+sigTVars :: [String] -> String -> [String]
+sigTVars paramTypes retType = 
+    let allWords = words (unwords (paramTypes ++ [retType]))
+        vars = [ w | w <- allWords
+               , "T" `isPrefixOf` w && all (\c -> c >= '0' && c <= '9') (drop 1 w) && not (null (drop 1 w))
+               , not ("Vec<" `isPrefixOf` w)
+               , not ("SkyMaybe<" `isPrefixOf` w) 
+               , "impl" /= w
+               , "FnOnce" /= w
+               , "Fn" /= w
+               , "bool" /= w
+               , "i64" /= w
+               , "&" /= w
+             ]
+        nested = concatMap extractNestedTVars paramTypes
+    in Set.toList $ Set.fromList (vars ++ nested)
+
+extractNestedTVars :: String -> [String]
+extractNestedTVars s = case s of
+    'V':'e':'c':'<':rest -> case break (== '>') rest of 
+        (inner, _) -> if isTVar inner then [inner] else extractNestedTVars inner
+    'S':'k':'y':'M':'a':'y':'b':'e':'<':rest -> case break (== '>') rest of
+        (inner, _) -> if isTVar inner then [inner] else extractNestedTVars inner
+    'i':'m':'p':'l':' ':rest -> 
+        let (_args, rest2) = break (== ')') (drop 7 rest)  -- skip "FnOnce("
+            ret = drop 4 (drop 1 rest2)  -- skip ") -> "
+        in [ w | w <- words ret, isTVar w ]
+    _ -> []
+  where
+    isTVar s = "T" `isPrefixOf` s && all (\c -> c >= '0' && c <= '9') (drop 1 s) && not (null (drop 1 s))
+
+defToRustItem :: EmitCtx -> String -> Can.Def -> RustItem
+defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) = 
     let rustName = if name == "main" then "sky_main" else name
         n = length params
-        genVars = if null params then "" 
-                  else "<" ++ intercalate ", " (map (\i -> "T" ++ show i) [0..n-1]) ++ ">"
-        params' = map (\(i, p) -> patternToRustParam p ++ ": T" ++ show i) (zip [0..] params)
+        -- Check if this is a known Def function with known signature
+        (paramStrs, genVars) = case knownDefSig modPrefix name n of
+            Just (paramTypes, retType) ->
+                let safeParams = map (\(p, t) -> patternToRustParam p ++ ": " ++ t) (zip params paramTypes)
+                    tvars = sigTVars paramTypes retType
+                    gens = if null tvars then "" else "<" ++ intercalate ", " tvars ++ ">"
+                in (safeParams, gens)
+            Nothing ->
+                -- Fallback: if body does list matching, use Vec<Tn> for all params
+                let useVec = bodyUsesList body
+                    safeParams = map (\(i, p) -> 
+                        let tn = "T" ++ show i
+                        in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "SkyValue")
+                        ) (zip [0..] params)
+                    gens = if useVec then "<" ++ intercalate ", " (map (\i -> "T" ++ show i) [0..length params - 1]) ++ ">" else ""
+                in (safeParams, gens)
         -- sky_main always returns () since the entry wrapper handles the Task
         retTy = if name == "main" then "()"
                 else case Map.lookup name (ecSolvedTypes ctx) of
                     Just ty -> let ret = extractReturnType ty
                               in if hasTypeVars ret then "()" else typeToRustString ret
                     Nothing -> "()"
-    in RustFunction rustName genVars params' retTy (exprToRustString ctx body)
-defToRustItem ctx (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
+    in RustFunction rustName genVars paramStrs retTy (exprToRustString ctx body)
+defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
     let rustName = if name == "main" then "sky_main" else name
         params = map (\(pat, ty) -> patternToRustParam pat ++ ": " ++ typeToRustString ty) pats
         -- sky_main always returns () since the entry wrapper handles the Task
         ret = if name == "main" then "()" else typeToRustString retTy
     in RustFunction rustName "" params ret (exprToRustString ctx body)
-defToRustItem ctx (Can.DestructDef pat expr) =
-    RustFunction "_destruct" "" [patternToRustParam pat] "()" (exprToRustString ctx expr)
+defToRustItem _ctx _modPrefix (Can.DestructDef pat expr) =
+    RustFunction "_destruct" "" [patternToRustParam pat] "()" (exprToRustString _ctx expr)
 
 unionsToRustTypes :: String -> Map.Map String Can.Union -> [RustTypeDef]
 unionsToRustTypes modPrefix unions = map (\(name, u) -> unionToRustTypeDef modPrefix name u) (Map.toList unions)
@@ -231,8 +339,18 @@ exprToRustInner ctx e = case e of
     Can.LetDestruct pat expr body ->
         "let " ++ patternToMatchString pat ++ " = " ++ exprToRustString ctx expr ++ "; " ++ exprToRustString ctx body
     Can.Case scrut branches -> 
-        "match " ++ exprToRustString ctx scrut ++ " { " ++ 
+        let scrutStr = exprToRustString ctx scrut
+            -- Detect slice patterns in branches (cons patterns) and wrap scrutinee with as_slice()
+            hasCons = any (\(Can.CaseBranch pat _) -> hasConsP pat) branches
+            wrapped = if hasCons then "(" ++ scrutStr ++ ").as_slice()" else scrutStr
+        in "match " ++ wrapped ++ " { " ++ 
         intercalate ", " (map (branchToRustString ctx) branches) ++ " }"
+      where
+        hasConsP (Ann.At _ p) = case p of
+            Can.PCons _ _ -> True
+            Can.PList _ -> True
+            Can.PAlias pat _ -> hasConsP pat
+            _ -> False
     Can.Accessor field -> "|_record| _record." ++ field
     Can.Access record (Ann.At _ field) -> 
         exprToRustString ctx record ++ "." ++ field
@@ -442,7 +560,7 @@ emitRust b = unlines $
     , "pub fn Task_andThen<A: Send + 'static, B: Send + 'static>(_f: impl FnOnce(A) -> SkyTask<B> + Clone + Send + 'static) -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
     , "    move |_task| Box::pin(ready(SkyResult::Err(String::new())))"
     , "}"
-    , "pub fn Task_onError<A: Send + 'static>(_f: impl FnOnce(SkyResult<String, A>) -> SkyTask<A> + Clone + Send + 'static) -> impl FnOnce(SkyTask<A>) -> SkyTask<A> {"
+    , "pub fn Task_onError<E: Send + 'static, A: Send + 'static>(_f: impl FnOnce(E) -> SkyTask<A> + Clone + Send + 'static) -> impl FnOnce(SkyTask<A>) -> SkyTask<A> {"
     , "    move |_task| Box::pin(ready(SkyResult::Err(String::new())))"
     , "}"
     , "pub fn Task_run<A>(_task: SkyTask<A>) -> SkyResult<String, A> { unimplemented!() }"
@@ -537,7 +655,10 @@ exprToStatement expr = if null expr then ""
 itemToRustStrings :: RustItem -> [String]
 itemToRustStrings (RustFunction name generics params retType body) = 
     let ret = if retType == "()" then "" else " -> " ++ retType
-    in ["fn " ++ name ++ generics ++ "(" ++ intercalate ", " params ++ ")" ++ ret ++ " {", "    " ++ exprToStatement body, "}"]
+        -- Task-returning functions must NOT have semicolon after the body expression:
+        -- the last expression IS the return value (Task combinator chain).
+        bodyLine = if retType == "()" then exprToStatement body else body
+    in ["fn " ++ name ++ generics ++ "(" ++ intercalate ", " params ++ ")" ++ ret ++ " {", "    " ++ bodyLine, "}"]
 itemToRustStrings (RustStruct name fields) = 
     ["struct " ++ name ++ " {", 
      intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields), 
@@ -567,8 +688,9 @@ collectUndefinedTypes b =
                 , let (_, ':':ty) = break (== ':') p
                 , let t = dropWhile (== ' ') ty
                 , not (null t)
-                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue", "Db"])
-                , not ("T" `isPrefixOf` t && all (\c -> c >= '0' && c <= '9') (drop 1 t))  -- generic params T0, T1, etc.
+                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue", "Db", "SkyTask"])
+                , not ("impl " `isPrefixOf` t)
+                , not ("&" `isPrefixOf` t)
                 , not ("Vec<" `isPrefixOf` t)
                 , not ("Option" `isPrefixOf` t)
                 , not ("Result" `isPrefixOf` t)
