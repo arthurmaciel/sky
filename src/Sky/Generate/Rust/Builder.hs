@@ -323,6 +323,45 @@ patternToRustParam (Ann.At _ pat) = case pat of
     Can.PAnything -> "_"
     _ -> "_"
 
+-- | Walk an expression and collect VarLocal names that refer to variables
+-- from ENCLOSING scopes (not bound within the expression itself).
+-- Used to insert .clone() calls for ownership-safe closure capture.
+collectVarLocals :: Can.Expr -> Set.Set String
+collectVarLocals = go Set.empty
+  where
+    go :: Set.Set String -> Can.Expr -> Set.Set String
+    go bound (Ann.At _ expr) = case expr of
+        Can.VarLocal n | n `Set.notMember` bound -> Set.singleton n
+        Can.VarLocal _ -> Set.empty
+        Can.Call fn args -> foldl (\a e -> Set.union a (go bound e)) (go bound fn) args
+        Can.Lambda params body ->
+            let bound' = foldl (\s p -> case p of { Ann.At _ (Can.PVar n) -> Set.insert n s; _ -> s }) bound params
+            in go bound' body
+        Can.Let (Can.Def (Ann.At _ name) _ _) body -> go (Set.insert name bound) body
+        Can.LetRec defs body ->
+            let bound' = foldl (\s (Can.Def (Ann.At _ n) _ _) -> Set.insert n s) bound defs
+            in go bound' body
+        Can.LetDestruct _ _ body -> go bound body
+        Can.Case _ branches -> foldl (\a (Can.CaseBranch _ b) -> Set.union a (go bound b)) Set.empty branches
+        Can.If branches elseBranch ->
+            foldl (\a (c, t) -> Set.union a (Set.union (go bound c) (go bound t))) (go bound elseBranch) branches
+        Can.Binop _ _ _ _ a b -> Set.union (go bound a) (go bound b)
+        Can.Access r _ -> go bound r
+        Can.Update _ r updates -> Set.union (go bound r) (foldl (\a (_, Can.FieldUpdate _ e) -> Set.union a (go bound e)) Set.empty (Map.toList updates))
+        Can.Record fields -> foldl (\a (_, v) -> Set.union a (go bound v)) Set.empty (Map.toList fields)
+        Can.List es -> foldl (\a e -> Set.union a (go bound e)) Set.empty es
+        Can.Tuple a b rest -> foldl (\a e -> Set.union a (go bound e)) Set.empty (a:b:rest)
+        Can.Negate e -> go bound e
+        Can.Accessor _ -> Set.empty
+        Can.VarTopLevel _ _ -> Set.empty
+        Can.VarKernel _ _ -> Set.empty
+        Can.VarCtor _ _ _ _ _ -> Set.empty
+        Can.Chr _ -> Set.empty
+        Can.Str _ -> Set.empty
+        Can.Int _ -> Set.empty
+        Can.Float _ -> Set.empty
+        Can.Unit -> Set.empty
+
 exprToRustString :: EmitCtx -> Can.Expr -> String
 exprToRustString ctx (Ann.At _ expr) = exprToRustInner ctx expr
 
@@ -352,7 +391,18 @@ exprToRustInner ctx e = case e of
         fnName | "println" `isSuffixOf` fnName -> 
             let fmt = concat (replicate (length args) "{}")
             in "println!(\"" ++ fmt ++ "\", " ++ intercalate ", " (map (exprToRustString ctx) args) ++ ")"
-        _ -> exprToRustString ctx fn ++ "(" ++ intercalate ", " (map (exprToRustString ctx) args) ++ ")"
+        _ -> 
+            let argsStrs = map (\a -> case a of
+                    Ann.At _ (Can.Lambda ps body) ->
+                        let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
+                            captured = Set.toList (Set.difference (collectVarLocals body) paramNames)
+                            clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+                            psStr = intercalate ", " (map patternToRustParam ps)
+                        in if null captured
+                           then "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " }"
+                           else "{ " ++ clones ++ "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " } }"
+                    _ -> exprToRustString ctx a) args
+            in exprToRustString ctx fn ++ "(" ++ intercalate ", " argsStrs ++ ")"
     Can.If branches elseBranch -> 
         "if " ++ intercalate " else " (map (\(c, t) -> exprToRustString ctx c ++ " { " ++ exprToRustString ctx t ++ " }") branches)
         ++ " else { " ++ exprToRustString ctx elseBranch ++ " }"
@@ -399,6 +449,21 @@ exprToRustInner ctx e = case e of
     Can.Unit -> "()"
     Can.Tuple a b rest -> 
         "(" ++ intercalate ", " (map (exprToRustString ctx) (a:b:rest)) ++ ")"
+
+-- | Emit a function-call argument, cloning captured locals when the argument
+-- is a closure (the Task_map(|_| { use(x) })(f(x)) pattern).  Uses move so
+-- each closure owns its clones; outer scope keeps the original.
+argToRust :: EmitCtx -> Can.Expr -> String
+argToRust ctx (Ann.At _ (Can.Lambda params body)) =
+    let paramNames = Set.fromList [ n | Ann.At _ p <- params, let n = case p of Can.PVar s -> s; _ -> "_" ]
+        captured = Set.toList (Set.difference (collectVarLocals body) paramNames)
+        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+        paramsStr = intercalate ", " (map patternToRustParam params)
+    in if null captured
+       then "|" ++ paramsStr ++ "| { " ++ exprToRustString ctx body ++ " }"
+       else "{ " ++ clones ++ "move |" ++ paramsStr ++ "| { " ++ exprToRustString ctx body ++ " } }"
+argToRust ctx (Ann.At _ (Can.VarLocal name)) = rustSafeIdent name  -- keep as is
+argToRust ctx expr = exprToRustString ctx expr
 
 binopToRust :: String -> String
 binopToRust op = case op of
@@ -575,7 +640,7 @@ emitRust b = unlines $
     , "// Int helpers"
     , "pub fn sky_int_to_string(i: i64) -> String { format!(\"{}\", i) }"
     , "pub fn sky_string_to_int(s: &String) -> SkyResult<String, i64> {"
-    , "    match s.parse::<i64>() { Ok(v) => SkyResult::Ok(v), Err(_) => SkyResult::Err(\"parse error\".to_string()) }"
+    , "    match s.parse::<i64>() { Ok(v) => SkyResult::Ok(v), Err(_) => SkyResult::Err(String::new()) }"
     , "}"
     , ""
     , "// Float helpers"
@@ -594,44 +659,44 @@ emitRust b = unlines $
     , "type SkyTask<A> = Pin<Box<dyn Future<Output = SkyResult<SkyError, A>> + Send>>;"
     , ""
     , "// --- Task combinators ---"
-    , "pub fn Task_succeed<A: Send + 'static>(a: A) -> SkyTask<A> {"
+    , "pub fn Task_succeed<A>(a: A) -> SkyTask<A> {"
     , "    Box::pin(ready(SkyResult::Ok(a)))"
     , "}"
-    , "pub fn Task_map<A: Send + 'static, B: Send + 'static>("
-    , "    f: impl FnOnce(A) -> B + Send + 'static,"
+    , "pub fn Task_map<A, B>("
+    , "    f: impl FnOnce(A) -> B,"
     , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
-    , "    move |task| Box::pin(async move {"
+    , "    |task| Box::pin(async move {"
     , "        match task.await {"
     , "            SkyResult::Ok(a) => SkyResult::Ok(f(a)),"
     , "            SkyResult::Err(e) => SkyResult::Err(e),"
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_andThen<A: Send + 'static, B: Send + 'static>("
-    , "    f: impl FnOnce(A) -> SkyTask<B> + Send + 'static,"
+    , "pub fn Task_andThen<A, B>("
+    , "    f: impl FnOnce(A) -> SkyTask<B>,"
     , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
-    , "    move |task| Box::pin(async move {"
+    , "    |task| Box::pin(async move {"
     , "        match task.await {"
     , "            SkyResult::Ok(a) => f(a).await,"
     , "            SkyResult::Err(e) => SkyResult::Err(e),"
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_onError<A: Send + 'static>("
-    , "    f: impl FnOnce(SkyError) -> SkyTask<A> + Send + 'static,"
+    , "pub fn Task_onError<A>("
+    , "    f: impl FnOnce(SkyError) -> SkyTask<A>,"
     , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<A> {"
-    , "    move |task| Box::pin(async move {"
+    , "    |task| Box::pin(async move {"
     , "        match task.await {"
     , "            SkyResult::Ok(a) => SkyResult::Ok(a),"
     , "            SkyResult::Err(e) => f(e).await,"
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_run<A: Send + 'static>(task: SkyTask<A>) -> SkyResult<SkyError, A> {"
+    , "pub fn Task_run<A>(task: SkyTask<A>) -> SkyResult<SkyError, A> {"
     , "    block_on(task)"
     , "}"
     , "// --- Parallel execution (tokio::spawn, ~Go goroutines) ---"
-    , "pub fn Task_parallel<A: Send + 'static>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
+    , "pub fn Task_parallel<A>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
     , "    Box::pin(async move {"
     , "        let handles: Vec<tokio::task::JoinHandle<SkyResult<SkyError, A>>> ="
     , "            tasks.into_iter().map(|t| tokio::spawn(t)).collect();"
@@ -647,7 +712,7 @@ emitRust b = unlines $
     , "}"
     , ""
     , "// System helpers"
-    , "pub fn System_args() -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().collect()))) }"
+    , "pub fn System_args(_: ()) -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().collect()))) }"
     , "pub fn System_exit(code: i64) -> ! { std::process::exit(code as i32) }"
     , ""
     , "// Log helpers"
@@ -663,7 +728,7 @@ emitRust b = unlines $
     , ""
     , "// DB stubs"
     , "type Db = String;"
-    , "pub fn Db_connect(_url: String) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
+    , "pub fn Db_connect<T>(_url: T) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
     , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
     , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
     , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<Vec<String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
@@ -673,8 +738,8 @@ emitRust b = unlines $
     , "pub fn String_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }"
     , ""
     , "// Result helper"
-    , "pub fn Result_withDefault<A: Send + 'static>(def: A) -> impl FnOnce(SkyResult<String, A>) -> A {"
-    , "    move |r| match r { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }"
+    , "pub fn Result_withDefault<A>(def: A) -> impl FnOnce(SkyResult<SkyError, A>) -> A {"
+    , "    |r| match r { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }"
     , "}"
     , "// Debug trait for logging"
     , "impl fmt::Debug for Error {"
