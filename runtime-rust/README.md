@@ -41,12 +41,18 @@ Rust codegen is implemented in the main compiler:
 **Working Features**:
 | Feature | Status |
 |---------|--------|
-| Hello world | ✅ Compiles and runs |
+| Hello world | ✅ Compiles and runs ("Hello from Sky!") |
 | --target rust flag | ✅ Wired into CLI |
-| Expression translation | ✅ Functions, calls, patterns, let, binops |
-| Kernel calls | ✅ Special handling (println! macro) |
-| Type mapping | ✅ Basic types (String, Int, Float, Bool) |
+| Expression translation | ✅ Functions, calls, patterns, let, binops, lambdas, if/case |
+| Kernel calls | ✅ Special handling (println! macro, Log::, Task::, etc.) |
+| Type mapping | ✅ Basic types (String, Int, Float, Bool, List, Maybe, Result) |
 | Union/ADT handling | ✅ Pattern matching → match expressions |
+| Type aliases (non-record) | ✅ Emitted as `type X = ...` |
+| Record aliases | ✅ Emitted as `struct X { ... }` |
+| Record literals | ✅ Named struct syntax via field-set lookup |
+| Multi-module projects | ✅ All dep modules included in output |
+| Cons pattern | ✅ Valid Rust slice pattern `[head, tail @ ..]` |
+| println! multiple args | ✅ Correct `{}{}` format string |
 
 ### Phase 3: FFI System (Next)
 Priority crates: tokio, serde, uuid, axum, clap, rayon, reqwest, sqlx, tokio-postgres
@@ -69,6 +75,7 @@ sky run src/Main.sky --target rust
 
 During implementation, these issues were resolved:
 
+### Session 1 (initial implementation)
 1. **Can.TAlias field** - Uses `.ty` (single type), not a list
 2. **Can.Forall pattern** - Doesn't exist in `Can.Type`, only in `Annotation`
 3. **Main naming conflict** - Renamed user `main` to `sky_main`
@@ -78,23 +85,35 @@ During implementation, these issues were resolved:
 7. **Unused imports** - Cleaned: Future, Pin, Context, Poll
 8. **Syntax error** - Removed stray comma before `use std::fmt`
 
+### Session 2 (2026-05-14: fix issues round)
+9. **Lambda trailing empty string** - `|param, |` invalid syntax, removed empty string from param list
+10. **println! format string** - Hardcoded single `{}` for multiple args; now generates N `{}` placeholders
+11. **Cons pattern** - `"::"` invalid in pattern position; now emits `[head, tail @ ..]` Rust slice pattern
+12. **TRecord alias → struct** - Record aliases now emit `struct Name { ... }` instead of invalid `type Name = { ... }`
+13. **Record literals** - Now use named struct syntax (`ErrorInfo { field: val }`) looked up from alias field-set map
+14. **Multi-module support** - `generateRust` now receives all dep modules via `validDeps` and emits code for all of them
+
 ## Known Issues (Next Steps)
 
-1. **TRecord → Rust struct** - Anonymous structs invalid, need named struct emission
-2. **Cons pattern** - "::" not valid Rust identifier in pattern position
-3. **Multi-module projects** - `todo-cli` only generates Go, not Rust
+1. **Untyped function parameters** - Parameters lack type annotations (`fn foo(x)` instead of `fn foo(x: String)`). Need to thread `solvedTypes` through expression emitter
+2. **Constructor placeholder** - `Can.VarCtor{}` emits `"Ctor"` instead of actual ADT constructor name
+3. **Type information for record field access** - Destructured patterns lack proper field name resolution for nested access
 
 ## Next Steps
 
 ### Priority 1: Basic Completeness
-1. Fix TRecord → struct emission (anonymous → named)
-2. Fix Cons pattern ("::" → valid identifier)
-3. Fix multi-module Rust output
+1. Thread type information from `solvedTypes` through expression emission for typed parameters
+2. Proper ADT constructor name emission (replace `"Ctor"` placeholder)
+3. Rust-native pattern matching for ADTs (use fully qualified `Enum::Variant` syntax)
 
 ### Priority 2: Type System
-4. Proper generic type parameter handling
-5. Record type → Rust struct syntax
-6. Full ADT handling with generic parameters
+4. Proper generic type parameter handling in struct/enum definitions
+5. Record field access with proper scope (destructured pattern bindings)
+6. Full ADT handling with type-safe constructors
+
+### Priority 3: FFI
+7. Rust crate FFI (direct calls to Rust libs)
+8. WASM target support
 
 ### Priority 3: FFI
 7. Rust crate FFI (direct calls)

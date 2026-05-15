@@ -1,7 +1,8 @@
 module Sky.Generate.Rust.Builder where
 
-import Data.List (isSuffixOf)
+import Data.List (isSuffixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Reporting.Annotation as Ann
@@ -37,16 +38,24 @@ data EmitCtx = EmitCtx
 -- | Build a map from field-name-signature to struct name
 buildRecordMap :: [Can.Module] -> Map.Map String String
 buildRecordMap mods = Map.fromList
-    [ (intercalate "," (Map.keys fields), name)
+    [ (intercalate "," (Map.keys fields), modPrefix ++ "_" ++ name)
     | mod <- mods
+    , let modPrefix = moduleNameToRust (Can._name mod)
     , (name, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)
     ]
 
 buildModule :: EmitCtx -> Can.Module -> RustModule
-buildModule ctx mod = RustModule
-    { modName = moduleNameToRust (Can._name mod)
-    , modItems = declsToRustItems ctx (Can._decls mod)
-    }
+buildModule ctx mod = 
+    let modPrefix = moduleNameToRust (Can._name mod)
+        items = declsToRustItems ctx (Can._decls mod)
+        prefixItem (RustFunction n p b)
+            | n == "sky_main" || n == "main" = RustFunction n p b
+            | otherwise = RustFunction (modPrefix ++ "_" ++ n) p b
+        prefixItem other = other
+    in RustModule
+        { modName = modPrefix
+        , modItems = map prefixItem items
+        }
 
 moduleNameToRust :: ModuleName.Canonical -> String
 moduleNameToRust mod = 
@@ -61,36 +70,39 @@ declsToRustItems ctx (Can.DeclareRec def defs rest) =
 defToRustItem :: EmitCtx -> Can.Def -> RustItem
 defToRustItem ctx (Can.Def (Ann.At _ name) params body) = 
     let rustName = if name == "main" then "sky_main" else name
-    in RustFunction rustName (map patternToRustParam params) (exprToRustString ctx body)
+        -- Def functions lack type info; use String as default
+        params' = map (\p -> patternToRustParam p ++ ": String") params
+    in RustFunction rustName params' (exprToRustString ctx body)
 defToRustItem ctx (Can.TypedDef (Ann.At _ name) _ pats body _) = 
     let rustName = if name == "main" then "sky_main" else name
-    in RustFunction rustName (map (patternToRustParam . fst) pats) (exprToRustString ctx body)
+        params = map (\(pat, ty) -> patternToRustParam pat ++ ": " ++ typeToRustString ty) pats
+    in RustFunction rustName params (exprToRustString ctx body)
 defToRustItem ctx (Can.DestructDef pat expr) =
     RustFunction "_destruct" [patternToRustParam pat] (exprToRustString ctx expr)
 
-unionsToRustTypes :: Map.Map String Can.Union -> [RustTypeDef]
-unionsToRustTypes unions = map unionToRustTypeDef (Map.elems unions)
+unionsToRustTypes :: String -> Map.Map String Can.Union -> [RustTypeDef]
+unionsToRustTypes modPrefix unions = map (\(name, u) -> unionToRustTypeDef modPrefix name u) (Map.toList unions)
 
-unionToRustTypeDef :: Can.Union -> RustTypeDef
-unionToRustTypeDef (Can.Union _ alts _ _) = 
-    REnumDef "SkyEnum" (map ctorToRust alts)
+unionToRustTypeDef :: String -> String -> Can.Union -> RustTypeDef
+unionToRustTypeDef modPrefix typeName (Can.Union _ alts _ _) = 
+    REnumDef (modPrefix ++ "_" ++ typeName) (map ctorToRust alts)
   where
     ctorToRust (Can.Ctor name idx arity _) = 
         (name, if arity == 0 then Nothing else Just (intercalate ", " (replicate arity "()")))
 
-aliasesToRustTypes :: Map.Map String Can.Alias -> [RustTypeDef]
-aliasesToRustTypes aliases = concatMap (\(name, alias) -> aliasToRustTypeDef name alias) (Map.toList aliases)
+aliasesToRustTypes :: String -> Map.Map String Can.Alias -> [RustTypeDef]
+aliasesToRustTypes modPrefix aliases = concatMap (\(name, alias) -> aliasToRustTypeDef modPrefix name alias) (Map.toList aliases)
 
-aliasToRustTypeDef :: String -> Can.Alias -> [RustTypeDef]
-aliasToRustTypeDef name (Can.Alias _vars ty) = case ty of
+aliasToRustTypeDef :: String -> String -> Can.Alias -> [RustTypeDef]
+aliasToRustTypeDef modPrefix name (Can.Alias _vars ty) = case ty of
     Can.TRecord fields _ -> 
-        [RStructDef name (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString ft)) (Map.toList fields))]
+        [RStructDef (modPrefix ++ "_" ++ name) (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString ft)) (Map.toList fields))]
     _ -> 
-        [RAliasDef name (typeToRustString ty)]
+        [RAliasDef (modPrefix ++ "_" ++ name) (typeToRustString ty)]
 
 typeToRustString :: Can.Type -> String
 typeToRustString t = case t of
-    Can.TType _ "Int" [] -> "i64"
+    Can.TType modName "Int" [] -> "i64"
     Can.TType _ "Float" [] -> "f64"
     Can.TType _ "Bool" [] -> "bool"
     Can.TType _ "Char" [] -> "char"
@@ -103,14 +115,54 @@ typeToRustString t = case t of
     Can.TRecord _fields _ -> "()"  -- TRecord: emitted as named struct via alias
     Can.TTuple a b rest -> "(" ++ intercalate ", " (map typeToRustString (a:b:rest)) ++ ")"
     Can.TVar v -> v
-    Can.TType _ name [] -> name  -- User-defined type
-    Can.TType _ name args -> name ++ "<" ++ intercalate ", " (map typeToRustString args) ++ ">"
+    Can.TType modName name [] ->
+        let modStr = ModuleName._name modName
+            modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+        in modPrefix ++ name
+    Can.TType modName name args ->
+        let modStr = ModuleName._name modName
+            modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+        in modPrefix ++ name ++ "<" ++ intercalate ", " (map typeToRustString args) ++ ">"
     Can.TLambda a b -> "fn(" ++ typeToRustString a ++ ") -> " ++ typeToRustString b
     _ -> "SkyValue"
 
+rustSafeIdent :: String -> String
+rustSafeIdent "fn" = "r#fn"
+rustSafeIdent "match" = "r#match"
+rustSafeIdent "let" = "r#let"
+rustSafeIdent "mod" = "r#mod"
+rustSafeIdent "type" = "r#type"
+rustSafeIdent "ref" = "r#ref"
+rustSafeIdent "self" = "r#self"
+rustSafeIdent "Self" = "r#Self"
+rustSafeIdent "static" = "r#static"
+rustSafeIdent "mut" = "r#mut"
+rustSafeIdent "return" = "r#return"
+rustSafeIdent "while" = "r#while"
+rustSafeIdent "for" = "r#for"
+rustSafeIdent "in" = "r#in"
+rustSafeIdent "if" = "r#if"
+rustSafeIdent "else" = "r#else"
+rustSafeIdent "loop" = "r#loop"
+rustSafeIdent "where" = "r#where"
+rustSafeIdent "async" = "r#async"
+rustSafeIdent "await" = "r#await"
+rustSafeIdent "dyn" = "r#dyn"
+rustSafeIdent "impl" = "r#impl"
+rustSafeIdent "trait" = "r#trait"
+rustSafeIdent "enum" = "r#enum"
+rustSafeIdent "struct" = "r#struct"
+rustSafeIdent "union" = "r#union"
+rustSafeIdent "use" = "r#use"
+rustSafeIdent "crate" = "r#crate"
+rustSafeIdent "super" = "r#super"
+rustSafeIdent "pub" = "r#pub"
+rustSafeIdent "move" = "r#move"
+rustSafeIdent name = name
+
 patternToRustParam :: Can.Pattern -> String
 patternToRustParam (Ann.At _ pat) = case pat of
-    Can.PVar n -> n
+    Can.PVar n -> rustSafeIdent n
     Can.PAnything -> "_"
     _ -> "_"
 
@@ -119,19 +171,27 @@ exprToRustString ctx (Ann.At _ expr) = exprToRustInner ctx expr
 
 exprToRustInner :: EmitCtx -> Can.Expr_ -> String
 exprToRustInner ctx e = case e of
-    Can.VarLocal name -> name
+    Can.VarLocal name -> rustSafeIdent name
     Can.VarTopLevel mod name -> 
         map (\c -> if c == '.' then '_' else c) (ModuleName._name mod) ++ "_" ++ name
     Can.VarKernel mod name -> kernelToRust mod name
-    Can.VarCtor _ _ typeName ctorName _ -> typeName ++ "::" ++ ctorName
+    Can.VarCtor _ modName typeName ctorName _ -> 
+        let modStr = ModuleName._name modName
+            modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+        in modPrefix ++ typeName ++ "::" ++ ctorName
     Can.Chr c -> show c
     Can.Str s -> show s
     Can.Int i -> show i
     Can.Float f -> show f
     Can.List es -> "vec![" ++ intercalate ", " (map (exprToRustString ctx) es) ++ "]"
     Can.Negate e -> "-" ++ exprToRustString ctx e
-    Can.Binop op _ _ _ a b -> 
-        "(" ++ exprToRustString ctx a ++ " " ++ binopToRust op ++ " " ++ exprToRustString ctx b ++ ")"
+    Can.Binop op _ _ _ a b 
+        | op == "|>" -> exprToRustString ctx b ++ "(" ++ exprToRustString ctx a ++ ")"
+        | op == "<|" -> exprToRustString ctx a ++ "(" ++ exprToRustString ctx b ++ ")"
+        | op == "::" -> "sky_list_cons(" ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
+        | op == "++" -> "(" ++ exprToRustString ctx a ++ " + " ++ exprToRustString ctx b ++ ")"
+        | otherwise -> 
+            "(" ++ exprToRustString ctx a ++ " " ++ binopToRust op ++ " " ++ exprToRustString ctx b ++ ")"
     Can.Lambda params body -> 
         "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ exprToRustString ctx body ++ " }"
     Can.Call fn args -> case exprToRustString ctx fn of
@@ -199,20 +259,27 @@ branchToRustString ctx (Can.CaseBranch pat body) =
 
 patternToMatchString :: Can.Pattern -> String
 patternToMatchString (Ann.At _ pat) = case pat of
-    Can.PVar n -> n
+    Can.PVar n -> rustSafeIdent n
     Can.PAnything -> "_"
     Can.PInt i -> show i
     Can.PBool b -> if b then "true" else "false"
     Can.PChr c -> show c
     Can.PStr s -> show s
     Can.PUnit -> "()"
-    Can.PCtor{Can._p_type = typeName, Can._p_name = name, Can._p_args = args} ->
-        let subPats = map ctorArgToPattern args
-        in typeName ++ "::" ++ name ++ if null subPats then "" else "(" ++ intercalate ", " subPats ++ ")"
+    Can.PCtor{Can._p_home = home, Can._p_type = typeName, Can._p_name = name, Can._p_args = args} ->
+        let modStr = ModuleName._name home
+            modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+            subPats = map ctorArgToPattern args
+            fullName = modPrefix ++ typeName ++ "::" ++ name
+        in fullName ++ if null subPats then "" else "(" ++ intercalate ", " subPats ++ ")"
     Can.PTuple a b rest -> 
         "(" ++ intercalate ", " (map patternToMatchString (a:b:rest)) ++ ")"
     Can.PRecord fields -> "{" ++ intercalate ", " fields ++ "}"
-    Can.PCons a b -> "[" ++ patternToMatchString a ++ ", " ++ patternToMatchString b ++ " @ ..]"
+    Can.PCons a b -> 
+        let headPat = patternToMatchString a
+            restPat = patternToMatchString b
+            restPart = if restPat == "_" then ".." else restPat ++ " @ .."
+        in "[" ++ headPat ++ ", " ++ restPart ++ "]"
     Can.PList items -> "[" ++ intercalate ", " (map patternToMatchString items) ++ "]"
     Can.PAlias pat _ -> patternToMatchString pat
     _ -> "_"
@@ -226,7 +293,9 @@ buildProgram mods =
         ctx = EmitCtx { ecRecordMap = recordMap }
     in RustBuilder
         { builderModules = map (buildModule ctx) mods
-        , builderTypes = concatMap (\m -> unionsToRustTypes (Can._unions m) ++ aliasesToRustTypes (Can._aliases m)) mods
+        , builderTypes = concatMap (\m -> 
+            let prefix = moduleNameToRust (Can._name m)
+            in unionsToRustTypes prefix (Can._unions m) ++ aliasesToRustTypes prefix (Can._aliases m)) mods
         }
 
 emitRust :: RustBuilder -> String
@@ -244,6 +313,8 @@ emitRust b = unlines $
     , "type SkyFloat = f64;"
     , "type SkyBool = bool;"
     , "type SkyString = String;"
+    , "type SkyValue = String;"
+
     , ""
     , "// Error type for Task"
     , "pub struct Error(pub String);"
@@ -316,6 +387,10 @@ emitRust b = unlines $
     , "    v.iter().skip(n).cloned().collect()"
     , "}"
     , ""
+    , "pub fn sky_list_cons<T: Clone>(x: T, xs: Vec<T>) -> Vec<T> {"
+    , "    std::iter::once(x).chain(xs).collect()"
+    , "}"
+    , ""
     , "// String helpers"
     , "pub fn sky_string_append(a: String, b: String) -> String { a + &b }"
     , "pub fn sky_string_len(s: &String) -> usize { s.len() }"
@@ -343,6 +418,12 @@ emitRust b = unlines $
     , ""
     ] ++ map typeDefToString (builderTypes b) ++
     [ "" ] ++ concatMap moduleToRustStrings (builderModules b) ++
+    [ ""
+    , "// ==========================================="
+    , "// FFI PLACEHOLDER TYPES (types referenced but not defined)"
+    , "// ==========================================="
+    , ""
+    ] ++ map ffiPlaceholder (collectUndefinedTypes b) ++
     [ ""
     , "// ==========================================="
     , "// ENTRY POINT"
@@ -388,6 +469,39 @@ itemToRustStrings (RustEnum name variants) =
      intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants),
      "}"]
 itemToRustStrings (RustTypeAlias name ty) = ["type " ++ name ++ " = " ++ ty ++ ";"]
+
+-- | Collect the set of type names referenced in func signatures but not defined
+collectUndefinedTypes :: RustBuilder -> [String]
+collectUndefinedTypes b = 
+    let allItems = concatMap modItems (builderModules b)
+        defined = Set.fromList 
+            [ name | RustStruct name _ <- allItems ] 
+            `Set.union` Set.fromList
+            [ name | RStructDef name _ <- builderTypes b ]
+            `Set.union` Set.fromList
+            [ name | REnumDef name _ <- builderTypes b ]
+            `Set.union` Set.fromList
+            [ name | RAliasDef name _ <- builderTypes b ]
+        -- Collect type names from function parameter types (after ": ")
+        referenced = Set.fromList
+            [ t | RustFunction _ params _ <- allItems
+                , p <- params
+                , let (_, ':':ty) = break (== ':') p
+                , let t = dropWhile (== ' ') ty
+                , not (null t)
+                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue"])
+                , not ("Vec<" `isPrefixOf` t)
+                , not ("Option<" `isPrefixOf` t)
+                , not ("Result<" `isPrefixOf` t)
+                , not ("SkyMaybe<" `isPrefixOf` t)
+                , not ("SkyResult<" `isPrefixOf` t)
+                , not ("Box<" `isPrefixOf` t)
+                , not ("fn(" `isPrefixOf` t)
+            ]
+    in Set.toList (Set.difference referenced defined)
+
+ffiPlaceholder :: String -> String
+ffiPlaceholder name = "type " ++ name ++ " = String;"
 
 intercalate :: String -> [String] -> String
 intercalate _ [] = ""
