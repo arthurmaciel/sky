@@ -3963,12 +3963,27 @@ safeReturnType t = case t of
                         || Set.member name knownUnions
         in case matches of
             (m:_) -> m ++ "_R"
-            _     -> case runtimeTyped of
-                Just goTy -> goTy
-                Nothing
-                    | isRuntimeOnly -> "any"
-                    | isKnownUnion  -> base
-                    | otherwise     -> "any"
+            _
+                -- v0.13 B0: a Sky-defined union with a populated home
+                -- takes precedence over `runtimeTypedMap`'s `rt.SkyX`
+                -- alias. `Attribute` lives in both Std.Ui AND
+                -- Std.Html.Attributes as a Sky-source ADT — emitting
+                -- `rt.SkyAttribute` (= type alias for `any`) for the
+                -- inferred `T.TType (Canonical "Std.Ui") "Attribute"`
+                -- loses the typed Sky-emitted struct name and
+                -- violates the v0.13 contract (no bare/aliased `any`
+                -- for used types). The `_cg_unionNames` membership
+                -- check confirms the Sky-emitted Go alias actually
+                -- exists; empty-home callers still fall through to
+                -- runtimeTyped (their cross-module recovery via
+                -- `globalUnionNames` is separate).
+                | not (null modStr) && Set.member base knownUnions -> base
+                | otherwise -> case runtimeTyped of
+                    Just goTy -> goTy
+                    Nothing
+                        | isRuntimeOnly -> "any"
+                        | isKnownUnion  -> base
+                        | otherwise     -> "any"
     -- TAlias emitted by the canonicaliser's alias-expansion pass.
     -- Resolve using the same record-alias / runtime-type lookup as
     -- TType so `Profile` → `Main_Profile_R` instead of degenerating
