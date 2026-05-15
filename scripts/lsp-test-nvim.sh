@@ -31,6 +31,13 @@ TESTS=(
     completion-field
     completion-let-binding
     goto-def-type-name
+    # v0.13 G — every USED symbol class
+    hover-function-use
+    goto-def-function
+    hover-ctor-use
+    hover-lambda-param
+    hover-case-pattern
+    hover-kernel-call
 )
 
 failures=()

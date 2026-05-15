@@ -56,6 +56,7 @@ import qualified Sky.Lsp.DiagnosticsSpec
 import qualified Sky.Lsp.HoverTypesSpec
 import qualified Sky.Lsp.CompletionSpec
 import qualified Sky.Lsp.ScaleSpec
+import qualified Sky.Lsp.NvimDriverSpec
 import qualified Sky.Build.EmbeddedRuntimeSpec
 import qualified Sky.Build.EmbeddedInspectorSpec
 import qualified Sky.Cli.ExitCodesSpec
@@ -284,6 +285,11 @@ main = hspec $ do
     describe "Sky.Lsp.Completion"         Sky.Lsp.CompletionSpec.spec
     -- v0.12 gap 6: pin the externals-scope cap with a real benchmark.
     describe "Sky.Lsp.Scale"              Sky.Lsp.ScaleSpec.spec
+    -- v0.13 G: end-to-end LSP coverage via headless Neovim driver.
+    -- Exercises every USED symbol class: function, type alias, ADT
+    -- ctor, record-field access, kernel call, lambda param, let-
+    -- binding, case-pattern binder. Pending if nvim not installed.
+    describe "Sky.Lsp.NvimDriver"         Sky.Lsp.NvimDriverSpec.spec
     -- Audit P3-3: embedded runtime must track on-disk tree.
     describe "Sky.Build.EmbeddedRuntime"  Sky.Build.EmbeddedRuntimeSpec.spec
     -- Embedded sky-ffi-inspect: single-binary release shape.

@@ -66,8 +66,20 @@ letDemo =
     let abcLocal = 1
     in abcLocal
 
+type Msg = Increment | Decrement | SetCount Int
+
+applyMsg : Msg -> Int -> Int
+applyMsg msg current =
+    case msg of
+        Increment -> current + 1
+        Decrement -> current - 1
+        SetCount n -> n
+
+doubleIt : Int -> Int
+doubleIt = \x -> x * 2
+
 main =
-    Task.run (Task.succeed 42)
+    Task.run (Task.succeed (applyMsg Increment 41))
 ]]
 
 local function reset_fixture()
@@ -212,10 +224,11 @@ end
 -- ─── Test runner ─────────────────────────────────────────────────────
 
 local tests = {
-    -- Hover on `run` in `Task.run` (line 20 0-based, col 9). Expect Task type.
+    -- Hover on `run` in `Task.run` (line 32 0-based, col 9). Expect Task type.
+    -- (Fixture extension shifted the `main` line from 20 → 32.)
     ["hover-task-run"] = function()
         local bufnr = start_lsp(project_dir .. "/src/Main.sky")
-        return test_hover(bufnr, 20, 9, "Task")
+        return test_hover(bufnr, 32, 9, "Task")
     end,
 
     -- Hover on `count` in `model.count` (line 12 0-based, col 25).
@@ -387,6 +400,76 @@ local tests = {
                 tostring(target_line))
         end
         return true, "Model jumps to alias decl on line 8"
+    end,
+
+    -- v0.13 G — every USED symbol class gets hover + (where relevant) goto-def.
+
+    -- Hover on `applyMsg` at its USE SITE in main (line 32 col 30).
+    -- `    Task.run (Task.succeed (applyMsg Increment 41))`
+    --                              ^ col 28-35 ── applyMsg ──
+    -- Expect the function's annotation to surface (`Msg -> Int -> Int`).
+    ["hover-function-use"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        return test_hover(bufnr, 32, 30, "Int")
+    end,
+
+    -- Goto-def on `applyMsg` at the use site (line 32 col 30). Expect
+    -- to land on the def (line 22 — `applyMsg msg current =`) or its
+    -- annotation (line 21). LSP servers typically prefer the def line;
+    -- accept either.
+    ["goto-def-function"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        local result = nil
+        vim.lsp.buf_request(bufnr, "textDocument/definition",
+            {
+                textDocument = vim.lsp.util.make_text_document_params(bufnr),
+                position     = { line = 32, character = 30 },
+            },
+            function(_, res, _, _) result = res end)
+        vim.wait(5000, function() return result ~= nil end, 50)
+        if not result then return false, "no definition response" end
+        local first = result[1] or result
+        if not first then return false, "empty definition response" end
+        local target_line = nil
+        if first.range and first.range.start then
+            target_line = first.range.start.line
+        elseif first.targetRange and first.targetRange.start then
+            target_line = first.targetRange.start.line
+        end
+        -- Accept either the annotation (21) or the def (22).
+        if target_line ~= 21 and target_line ~= 22 then
+            return false, string.format("definition went to line %s (expected 21 or 22)",
+                tostring(target_line))
+        end
+        return true, "applyMsg jumps to decl on line " .. tostring(target_line)
+    end,
+
+    -- Hover on `Increment` (ADT constructor use) at line 32 col 37.
+    -- Expect the ADT type to appear in hover.
+    ["hover-ctor-use"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        return test_hover(bufnr, 32, 37, "Msg")
+    end,
+
+    -- Hover on lambda parameter `x` at line 29 col 12 in `doubleIt = \x -> x * 2`.
+    -- Expect Int (since the annotation says Int -> Int).
+    ["hover-lambda-param"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        return test_hover(bufnr, 29, 12, "Int")
+    end,
+
+    -- Hover on `n` (case-pattern binding) at line 26 col 17 in
+    -- `SetCount n -> n`. Expect Int (SetCount's single param type).
+    ["hover-case-pattern"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        return test_hover(bufnr, 26, 17, "Int")
+    end,
+
+    -- Hover on `fromInt` (kernel call) at line 12 col 14 in
+    -- `String.fromInt model.count`. Expect Int → String shape.
+    ["hover-kernel-call"] = function()
+        local bufnr = start_lsp(project_dir .. "/src/Main.sky")
+        return test_hover(bufnr, 12, 14, "Int")
     end,
 }
 
