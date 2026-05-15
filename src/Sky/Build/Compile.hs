@@ -5751,6 +5751,13 @@ coerceToFieldType targetTy e
         GoIr.GoCall (GoIr.GoIdent ("rt.MaybeCoerce[" ++ eraseTypeParams inner ++ "]")) [e]
     | isJust (stripParametric "rt.SkyTask" targetTy) =
         GoIr.GoCall (GoIr.GoIdent ("rt.TaskCoerceT[" ++ eraseTypeParams (fromMaybe "" (stripParametric "rt.SkyTask" targetTy)) ++ "]")) [e]
+    -- `[]any` / `map[string]any` widening: typed source may be `[]T` /
+    -- `map[string]T`. Direct assertion panics — route through the
+    -- widener helpers analogous to AsListT / AsMapT.
+    | targetTy == "[]any" =
+        GoIr.GoCall (GoIr.GoIdent "rt.AsListAny") [e]
+    | targetTy == "map[string]any" =
+        GoIr.GoCall (GoIr.GoIdent "rt.AsMapAny") [e]
     -- Typed slices: runtime produces []any, so walk-and-cast via
     -- rt.AsListT[T] instead of a hard `any(v).([]T)` assertion.
     | Just elt <- stripListType targetTy =
@@ -5762,7 +5769,28 @@ coerceToFieldType targetTy e
         let erasedTy = eraseTypeParams targetTy
         in if erasedTy == "any"
              then e
-             else GoIr.GoTypeAssert (GoIr.GoCall (GoIr.GoIdent "any") [e]) erasedTy
+             -- v0.13.x #158: record-alias targets (`_R` suffix) route
+             -- through `rt.Coerce[T]` so a `map[string]any` source
+             -- (Db.query rows, Firestore snapshots, JSON-decoded blobs)
+             -- narrows to the typed struct via the map→struct field
+             -- builder in Coerce. Other target shapes (ADT names, FFI
+             -- opaque types) keep the direct assertion — they have no
+             -- map-source panic class.
+             else if isRecordAliasTy erasedTy
+                  then GoIr.GoCall (GoIr.GoIdent ("rt.Coerce[" ++ erasedTy ++ "]")) [e]
+                  else GoIr.GoTypeAssert (GoIr.GoCall (GoIr.GoIdent "any") [e]) erasedTy
+
+
+-- | True when `ty` looks like a record alias the codegen emits:
+-- a Go identifier ending in `_R`, optionally module-qualified.
+-- Conservative — matches Sky-generated record aliases without
+-- catching arbitrary Go types that happen to share the suffix.
+isRecordAliasTy :: String -> Bool
+isRecordAliasTy ty =
+    not (null ty)
+    && "_R" `List.isSuffixOf` ty
+    && all (\c -> c == '_' || c == '.' || (c >= 'A' && c <= 'Z')
+                || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) ty
 
 
 -- | If `ty` is a Go slice type `[]T` with T ≠ any, return Just "T".
@@ -6612,6 +6640,14 @@ coerceArg e ty
     -- `[]T` source via rt.AsListAny which widens.
     | ty == "[]any" =
         GoIr.GoCall (GoIr.GoIdent "rt.AsListAny") [e]
+    -- Target is map[string]any: accept either map[string]any source
+    -- or a typed map[string]T source via rt.AsMapAny which widens.
+    -- Without this the call site emits `any(x).(map[string]any)` —
+    -- a direct assertion that panics with
+    -- `interface {} is map[string]string, not map[string]interface{}`
+    -- (real panic class from examples/13-skyshop's Firebase auth flow).
+    | ty == "map[string]any" =
+        GoIr.GoCall (GoIr.GoIdent "rt.AsMapAny") [e]
     -- Typed slice `[]T`: runtime may hand us `[]any`, walk-and-cast.
     | Just elt <- stripListType ty =
         GoIr.GoCall (GoIr.GoIdent ("rt.AsListT[" ++ elt ++ "]")) [e]
@@ -6631,8 +6667,16 @@ coerceArg e ty
              else if take 5 erasedTy == "func("
                   then GoIr.GoCall
                         (GoIr.GoIdent ("rt.Coerce[" ++ erasedTy ++ "]")) [e]
-                  else GoIr.GoTypeAssert
-                        (GoIr.GoCall (GoIr.GoIdent "any") [e]) erasedTy
+                  -- v0.13.x #158: record-alias targets route through
+                  -- `rt.Coerce[T]` so a `map[string]any` source narrows
+                  -- to the typed struct via Coerce's map→struct field
+                  -- builder. ADT names + FFI opaque types still use
+                  -- direct assertion (no map-source panic class).
+                  else if isRecordAliasTy erasedTy
+                       then GoIr.GoCall
+                            (GoIr.GoIdent ("rt.Coerce[" ++ erasedTy ++ "]")) [e]
+                       else GoIr.GoTypeAssert
+                            (GoIr.GoCall (GoIr.GoIdent "any") [e]) erasedTy
 
 -- | True when a Go type string is a generic type parameter name we
 -- emitted (T1, T2, ...). These are scoped to the function they were

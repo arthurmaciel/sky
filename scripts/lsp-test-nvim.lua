@@ -551,6 +551,23 @@ end
 reset_fixture()
 
 local ok, msg = fn()
+
+-- Cleanup: stop every spawned LSP client BEFORE os.exit so the
+-- child `sky lsp` subprocesses don't get reparented to launchd
+-- as orphans. Without this each invocation leaks one sky lsp
+-- proc (PPID=1) that survives nvim's exit — across the test
+-- suite that accumulates into a process-table exhaustion class
+-- (CLAUDE.md "Background-Task Hygiene"). `force=true` skips
+-- the LSP graceful-shutdown handshake and sends SIGKILL to
+-- the child immediately, which is what we want at script exit.
+local clients = vim.lsp.get_clients and vim.lsp.get_clients()
+                or vim.lsp.get_active_clients()
+for _, client in ipairs(clients or {}) do
+    pcall(vim.lsp.stop_client, client.id, true)
+end
+-- Brief wait so SIGKILL signal-delivery happens before nvim exits.
+vim.wait(200)
+
 if ok then
     io.stdout:write("PASS: " .. test_name .. "\n")
     os.exit(0)

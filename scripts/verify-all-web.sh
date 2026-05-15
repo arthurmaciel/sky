@@ -20,21 +20,25 @@ mkdir -p "$RESULTS_DIR"
 # port before each test, so even the port-8000 group runs cleanly
 # in sequence.
 TESTS=(
-    "05-mux-server smoke 8000"
-    "08-notes-app smoke 8000"
+    "05-mux-server mux-routes 8000"
+    "08-notes-app notes-crud 8000"
     "09-live-counter live-counter 8009"
-    "10-live-component smoke 8010"
-    "12-skyvote smoke 8012"
-    "15-http-server smoke 8000"
-    "16-skychess smoke 8016"
-    "17-skymon smoke 8017"
-    "18-job-queue smoke 8018"
-    "19-skyforum smoke 8019"
+    "10-live-component live-component 8010"
+    "12-skyvote skyvote 8012"
+    "15-http-server http-routes 8000"
+    "16-skychess skychess 8016"
+    "17-skymon skymon 8017"
+    "18-job-queue job-queue 8018"
+    "19-skyforum skyforum 8019"
 )
 
-# Skyshop omitted by default — needs Stripe + Firebase live keys to
-# get past the index route. Pass SKY_VERIFY_SKYSHOP=1 to include.
-[ "${SKY_VERIFY_SKYSHOP:-0}" = "1" ] && TESTS+=("13-skyshop smoke 8013")
+# Skyshop opt-in: Google OAuth gates account features, plus 5 console-
+# error 404s appear during the verifier run from a yet-untraced image-
+# URL pattern (not reproducible in standalone Playwright probes, no
+# panic in server.log — the codegen contract holds). Pass
+# SKY_VERIFY_SKYSHOP=1 to include in the sweep; deferred to a v0.13.x
+# follow-up.
+[ "${SKY_VERIFY_SKYSHOP:-0}" = "1" ] && TESTS+=("13-skyshop skyshop 8013")
 
 pass=0
 fail=0

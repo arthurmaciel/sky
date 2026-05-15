@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -1733,6 +1734,21 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	// both run init — the user sees [APP] initialised twice.
 	_, routed := matchAnyRoute(app, r.URL.Path)
 	if !routed && isBrowserNoisePath(r.URL.Path) {
+		// If staticDir is configured and the requested file exists at the
+		// root of it (favicon.ico, robots.txt, apple-touch-icon.png, …),
+		// serve it before 404'ing. Browsers always request /favicon.ico
+		// from root, never from /static/, so without this serve-from-root
+		// shortcut the user has no way to suppress the 404 short of adding
+		// a `<link rel="icon">` to every page's head AND ensuring the
+		// browser honours it instead of also probing the root.
+		if app.staticDir != "" {
+			candidate := filepath.Join(app.staticDir,
+				filepath.Clean("/"+strings.TrimPrefix(r.URL.Path, "/")))
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				http.ServeFile(w, r, candidate)
+				return
+			}
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -4005,7 +4021,21 @@ if (document.readyState === "loading") {
 // Helpers: tuple access, sky_call dispatch
 // ═══════════════════════════════════════════════════════════
 
+// tupleFirst / tupleSecond extract V0 / V1 from a Sky-emitted 2-tuple.
+//
+// v0.13 codegen erases all tuples to `rt.SkyTuple2 = T2[any, any]` — see
+// the design comment in `Sky.Build.Compile.solvedTypeToGo`'s TTuple
+// arm. The TEA dispatch path (`update` returning `(Model, Cmd msg)`)
+// is the hot caller. Fast-path the common case via direct type
+// assertion, falling back to reflect for shape-erased values arriving
+// from generic kernels (`AsTuple2`-style wideners).
 func tupleFirst(v any) any {
+	if t, ok := v.(SkyTuple2); ok {
+		return t.V0
+	}
+	if t, ok := v.(SkyTuple3); ok {
+		return t.V0
+	}
 	r := reflect.ValueOf(v)
 	if r.Kind() == reflect.Struct {
 		f := r.FieldByName("V0")
@@ -4023,6 +4053,12 @@ func tupleFirst(v any) any {
 }
 
 func tupleSecond(v any) any {
+	if t, ok := v.(SkyTuple2); ok {
+		return t.V1
+	}
+	if t, ok := v.(SkyTuple3); ok {
+		return t.V1
+	}
 	r := reflect.ValueOf(v)
 	if r.Kind() == reflect.Struct {
 		f := r.FieldByName("V1")

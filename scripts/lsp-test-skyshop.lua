@@ -226,6 +226,17 @@ if not fn then
 end
 
 local ok, msg = fn()
+
+-- Cleanup: stop every spawned LSP client BEFORE os.exit so the
+-- child `sky lsp` subprocesses don't get reparented as orphans
+-- (see lsp-test-nvim.lua's matching block for context).
+local clients = vim.lsp.get_clients and vim.lsp.get_clients()
+                or vim.lsp.get_active_clients()
+for _, client in ipairs(clients or {}) do
+    pcall(vim.lsp.stop_client, client.id, true)
+end
+vim.wait(200)
+
 if ok then
     io.stdout:write("PASS: " .. test_name .. "\n")
     os.exit(0)

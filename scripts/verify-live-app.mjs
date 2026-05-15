@@ -24,7 +24,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import net from 'net';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -118,7 +118,12 @@ async function main() {
 
     const consoleErrors = [];
     page.on('console', msg => {
-        if (msg.type() === 'error') consoleErrors.push(msg.text());
+        if (msg.type() === 'error') {
+            const loc = msg.location();
+            const where = loc && loc.url ? ` (${loc.url})` : '';
+            consoleErrors.push(msg.text());
+            /* debug removed */
+        }
     });
     page.on('pageerror', err => consoleErrors.push(`pageerror: ${err.message}`));
 
@@ -131,26 +136,18 @@ async function main() {
         await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
         await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
 
-        // Scenario-specific interactions
-        if (scenarioName === 'smoke') {
-            // Just verify the home page renders SOMETHING.
-            const bodyText = await page.locator('body').innerText();
-            if (!bodyText || bodyText.trim().length === 0) {
-                throw new Error('home page rendered empty body');
-            }
-        } else if (scenarioName === 'live-counter') {
-            // Click increment, observe counter advance, click decrement.
-            const before = await page.locator('body').innerText();
-            const incBtn = page.locator('button:has-text("+"), button:has-text("Increment"), [data-action="increment"]').first();
-            if (await incBtn.count() > 0) {
-                await incBtn.click();
-                await page.waitForTimeout(300);
-                const after = await page.locator('body').innerText();
-                if (before === after) {
-                    throw new Error('counter did not change after increment click');
-                }
-            }
+        // Helper for animated walk-through interactions when recording.
+        const pause = (ms) => page.waitForTimeout(ms);
+
+        // Load the per-app scenario module (defined in verify-scenarios.mjs).
+        // Scenario name maps directly to the exported function name.
+        const scenarioMod = await import(pathToFileURL(path.join(__dirname, 'verify-scenarios.mjs')).href);
+        const scenarios = scenarioMod.scenarios || scenarioMod.default;
+        const scenarioFn = scenarios[scenarioName];
+        if (typeof scenarioFn !== 'function') {
+            throw new Error(`unknown scenario: ${scenarioName} (known: ${Object.keys(scenarios).join(', ')})`);
         }
+        await scenarioFn(page, { baseUrl, pause });
 
         await page.screenshot({ path: path.join(artefactDir, 'home.png'), fullPage: false });
 
