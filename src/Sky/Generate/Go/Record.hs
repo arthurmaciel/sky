@@ -305,10 +305,38 @@ collectZeroArgs = go Set.empty
         _                             -> acc
 
 
--- | Look up a record alias name by field names
+-- | Look up a record alias name by field names.
+--
+-- v0.13 A1: superset match for open records. The HM solver emits
+-- `T.TRecord fields (Just rowExt)` for any function that only
+-- accesses a SUBSET of a record's fields (e.g. `\m -> m.count`
+-- constrains `m : {count : Int | ρ}`). The exact-match registry
+-- lookup (pre-A1) returned Nothing for these, so the renderer
+-- fell back to `any`. With superset match: if the target is a
+-- strict subset of EXACTLY one alias's field set, return that
+-- alias name. Multiple distinct sizes → smallest superset wins.
+-- Tied sizes → ambiguous, fall back to Nothing (renderer emits
+-- `any`; correctness preserved at the cost of typing precision).
 lookupRecordAlias :: RecordRegistry -> [String] -> Maybe String
 lookupRecordAlias registry fieldNames =
-    Map.lookup (Set.fromList fieldNames) registry
+    let target = Set.fromList fieldNames
+    in case Map.lookup target registry of
+        Just aliasName -> Just aliasName
+        Nothing
+          | Set.null target -> Nothing
+          | otherwise       ->
+              let supersets =
+                      [ (Set.size fs, name)
+                      | (fs, name) <- Map.toList registry
+                      , target `Set.isSubsetOf` fs
+                      , target /= fs
+                      ]
+              in case List.sortOn fst supersets of
+                  []                          -> Nothing
+                  [(_, n)]                    -> Just n
+                  ((s1, n1) : (s2, _) : _)
+                      | s1 < s2   -> Just n1
+                      | otherwise -> Nothing
 
 
 -- | Classify a type alias as data record, behaviour record, or non-record.

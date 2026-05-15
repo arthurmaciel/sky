@@ -93,32 +93,69 @@ globalCurrentModule :: IORef String
 globalCurrentModule = unsafePerformIO (newIORef "")
 
 
+-- | Constrain a whole module's declarations.
+--
+-- v0.13 A2: pre-register every UNANNOTATED top-level `Can.Def` via an
+-- OUTER CLet header (so its UF var is in the solver's `_env` BEFORE
+-- any def body is solved). The OLD nested-CLet structure walked
+-- decls in source order, so a forward reference (e.g. `main` →
+-- `view` declared later) hit `CLocal "view"` while "view" was
+-- absent from `_env`; the solver minted a throwaway fresh var and
+-- any constraint propagating `view`'s real shape (e.g. `Live.app`'s
+-- view-field record constraint) never reached `view`'s actual def.
+-- Pre-registering binds those forward refs to the real defType var.
+--
+-- ANNOTATED `Can.TypedDef` decls are deliberately NOT pre-registered.
+-- Their polymorphic annotations like `f : a -> Task e a -> Task e a`
+-- would, under `Forall []` pre-registration, share the same `a` var
+-- across distinct same-module call sites (CLocal would resolve to
+-- the pre-bound solver var, which then unifies with each call
+-- site's concrete `a` — conflict). Keeping TypedDef sequential
+-- preserves the OLD behavior: same-module callers emit `CLocal`,
+-- the solver mints fresh vars per first-encounter, and the
+-- annotation's `a` only becomes concrete at the def's own decl
+-- site (where it defaults to `SkyValue` for unconstrained ok-slots,
+-- per the codegen TVar-defaulting rule). Promoting these to real
+-- Go-generic `[A any]` signatures is workstream B/C, not A2.
 constrainDecls :: Counter -> Env -> Can.Decls -> IO T.Constraint
-constrainDecls counter env decls = case decls of
-    Can.SaveTheEnvironment ->
-        return T.CTrue
+constrainDecls counter env decls = do
+    let allDefs = flattenDecls decls
+        unannotated = [d | d@(Can.Def _ _ _) <- allDefs]
+    unannInfos <- mapM (defTypeInfoIO counter) unannotated
+    let preEnv = foldr (\(n, t, _) e -> Map.insert n (T.Forall [] t) e) env unannInfos
+        knownTypes = Map.fromList [(n, t) | (n, t, _) <- unannInfos]
+        outerHeader = Map.fromList [ (n, (A.one, t)) | (n, t, _) <- unannInfos ]
+    innerCon <- walkDecls counter preEnv knownTypes decls
+    return $ T.CLet [] [] outerHeader T.CTrue innerCon
+  where
+    flattenDecls Can.SaveTheEnvironment = []
+    flattenDecls (Can.Declare def rest) = def : flattenDecls rest
+    flattenDecls (Can.DeclareRec def defs rest) = def : defs ++ flattenDecls rest
 
-    Can.Declare def rest -> do
-        (defCon, name, defType) <- constrainDefWithType counter env def
-        let env' = Map.insert name (T.Forall [] defType) env
-        restCon <- constrainDecls counter env' rest
-        -- Use CLet to introduce the def binding into the solver env for rest
-        let defHeader = Map.singleton name (A.one, defType)
-        return $ T.CLet [] [] defHeader defCon restCon
 
-    Can.DeclareRec def defs rest -> do
-        -- For recursive defs, we need the types first (for mutual references)
-        -- Use defTypeInfoIO to pre-register, then constrainDef uses the SAME names
-        let allDefs = def : defs
-        -- Pre-generate type info and add to env
-        defInfos <- mapM (defTypeInfoIO counter) allDefs
-        let recEnv = foldr (\(n, t) e -> Map.insert n (T.Forall [] t) e) env defInfos
-        -- Now constrain each def — constrainDef will generate its OWN type vars
-        -- which are different from defInfos. We need them to share.
-        -- Fix: pass the pre-generated type vars into constrainDef
-        defCons <- zipWithM (\d (_, ty) -> constrainDefWithKnownType counter recEnv d ty) allDefs defInfos
-        restCon <- constrainDecls counter recEnv rest
-        return $ T.CAnd (defCons ++ [restCon])
+-- | Sequential walk used by `constrainDecls`. For a `Can.Def` whose
+-- type was pre-registered in `knownTypes`, body constraints reuse the
+-- pre-bound UF var. `Can.TypedDef` and `Can.DestructDef` use the OLD
+-- `constrainDefWithType` path unchanged.
+walkDecls :: Counter -> Env -> Map.Map String T.Type -> Can.Decls -> IO T.Constraint
+walkDecls _ _ _ Can.SaveTheEnvironment = return T.CTrue
+walkDecls counter env known (Can.Declare def rest) = do
+    (defCon, name, defType) <- case def of
+        Can.Def (A.At _ n) _ _ | Just t <- Map.lookup n known -> do
+            c <- constrainDefWithKnownType counter env def t
+            return (c, n, t)
+        _ -> constrainDefWithType counter env def
+    let env' = Map.insert name (T.Forall [] defType) env
+    restCon <- walkDecls counter env' known rest
+    let header = Map.singleton name (A.one, defType)
+    return $ T.CLet [] [] header defCon restCon
+walkDecls counter env known (Can.DeclareRec def defs rest) = do
+    let allDefs = def : defs
+    defInfos <- mapM (defTypeInfoIO counter) allDefs
+    let recEnv = foldr (\(n, t, _) e -> Map.insert n (T.Forall [] t) e) env defInfos
+    defCons <- mapM (\(_, ty, rdef) -> constrainDefWithKnownType counter recEnv rdef ty) defInfos
+    restCon <- walkDecls counter recEnv known rest
+    return $ T.CAnd (defCons ++ [restCon])
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -562,13 +599,14 @@ constrainLet counter env def body expected = do
 
 constrainLetRec :: Counter -> Env -> [Can.Def] -> Can.Expr -> T.Expected T.Type -> IO T.Constraint
 constrainLetRec counter env defs body expected = do
-    -- Pre-generate type info and add to env (for mutual references)
+    -- Pre-generate type info and add to env (for mutual references).
+    -- `defTypeInfoIO` returns the (alpha-renamed) def whose body is
+    -- constrained against the SAME type that went into recEnv.
     defInfos <- mapM (defTypeInfoIO counter) defs
-    let recEnv = foldr (\(n, t) e -> Map.insert n (T.Forall [] t) e) env defInfos
-    -- Constrain each def using its pre-generated type
-    defCons <- zipWithM (\d (_, ty) -> constrainDefWithKnownType counter recEnv d ty) defs defInfos
+    let recEnv = foldr (\(n, t, _) e -> Map.insert n (T.Forall [] t) e) env defInfos
+    defCons <- mapM (\(_, ty, rdef) -> constrainDefWithKnownType counter recEnv rdef ty) defInfos
     bodyCon <- constrain counter recEnv body expected
-    let header = Map.fromList [(n, (A.one, t)) | (n, t) <- defInfos]
+    let header = Map.fromList [(n, (A.one, t)) | (n, t, _) <- defInfos]
     return $ T.CAnd (defCons ++ [T.CLet [] [] header T.CTrue bodyCon])
 
 
@@ -654,12 +692,23 @@ constrainDefWithKnownType counter env def knownType = case def of
         let (paramTypes, resultType) = splitFuncTypeN (length params) knownType
             paramBindings = concatMap patternBindings (zip params paramTypes)
             bodyEnv = foldr (\(n, ann) e -> Map.insert n ann e) env paramBindings
-        constrain counter bodyEnv body (T.NoExpectation resultType)
+        bodyCon <- constrain counter bodyEnv body (T.NoExpectation resultType)
+        -- Wrap body in CLet so param names are scoped in the solver's
+        -- runtime env — without this, sibling defs' param vars leak
+        -- into each other (matches `constrainDefWithType`).
+        let paramHeader = Map.fromList
+                [ (pname, (A.one, ptype))
+                | (pname, T.Forall _ ptype) <- paramBindings ]
+        return $ T.CLet [] [] paramHeader T.CTrue bodyCon
 
     Can.TypedDef (A.At _region _name) _freeVars typedPats body retType -> do
         let paramBindings = concatMap (\(pat, ty) -> patternBindings (pat, ty)) typedPats
             bodyEnv = foldr (\(n, ann) e -> Map.insert n ann e) env paramBindings
-        constrain counter bodyEnv body (T.NoExpectation retType)
+        bodyCon <- constrain counter bodyEnv body (T.NoExpectation retType)
+        let paramHeader = Map.fromList
+                [ (pname, (A.one, ptype))
+                | (pname, T.Forall _ ptype) <- paramBindings ]
+        return $ T.CLet [] [] paramHeader T.CTrue bodyCon
 
     -- Destructure binding: constrain the value's body with no expectation.
     Can.DestructDef _ body ->
@@ -960,19 +1009,39 @@ patternBindingsIO counter (A.At region pat) ty = case pat of
 -- HELPERS
 -- ═══════════════════════════════════════════════════════════
 
-defTypeInfoIO :: Counter -> Can.Def -> IO (String, T.Type)
-defTypeInfoIO counter (Can.Def (A.At _ name) params _body) = do
+-- | Pre-generate a decl's name + type-var skeleton, and return the
+-- (possibly alpha-renamed) def whose body must be constrained against
+-- THAT skeleton. Two-pass constraint generation (`constrainDecls`,
+-- `constrainLetRec`) calls this for every decl first, builds the rec
+-- env from the returned types, then constrains each returned def's
+-- body with `constrainDefWithKnownType`.
+--
+-- For `Can.TypedDef` the annotation's free TVars are alpha-renamed
+-- here (so sibling annotated defs with same-letter vars — `a` in
+-- `f : Bool -> a` and `a` in `g : Int -> a` — don't collide in the
+-- solver's by-name TVar cache). The renamed def is returned so the
+-- body is constrained against EXACTLY the renamed types that went
+-- into the rec env.
+defTypeInfoIO :: Counter -> Can.Def -> IO (String, T.Type, Can.Def)
+defTypeInfoIO counter def@(Can.Def (A.At _ name) params _body) = do
     paramNames <- mapM (\_ -> freshName counter ("_" ++ name ++ "_arg")) params
     resultName <- freshName counter ("_" ++ name ++ "_res")
     let paramTypes = map T.TVar paramNames
         resultType = T.TVar resultName
-    return (name, foldr T.TLambda resultType paramTypes)
-defTypeInfoIO _counter (Can.TypedDef (A.At _ name) _freeVars typedPats _body retType) =
-    let funcType = foldr (\(_, ty) acc -> T.TLambda ty acc) retType typedPats
-    in return (name, funcType)
-defTypeInfoIO counter (Can.DestructDef _ _) = do
+    return (name, foldr T.TLambda resultType paramTypes, def)
+defTypeInfoIO counter (Can.TypedDef loc@(A.At _ name) freeVars typedPats body retType) = do
+    renameMap <- Map.fromList <$>
+        mapM (\(v, _) -> do
+            fresh <- freshName counter ("_" ++ name ++ "_" ++ v)
+            return (v, fresh)) freeVars
+    let renameT = substTypeVarNames renameMap
+        typedPats' = [ (pat, renameT ty) | (pat, ty) <- typedPats ]
+        retType'   = renameT retType
+        funcType   = foldr (\(_, ty) acc -> T.TLambda ty acc) retType' typedPats'
+    return (name, funcType, Can.TypedDef loc freeVars typedPats' body retType')
+defTypeInfoIO counter def@(Can.DestructDef _ _) = do
     resultName <- freshName counter "_destruct_res"
-    return ("__destruct__", T.TVar resultName)
+    return ("__destruct__", T.TVar resultName, def)
 
 
 zipWithM :: Monad m => (a -> b -> m c) -> [a] -> [b] -> m [c]

@@ -63,6 +63,19 @@ globalCgEnv :: IORef Rec.CodegenEnv
 globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty)
 
 
+-- | v0.13 A2 follow-up: dedicated, eagerly-populated union-name
+-- registry. Mirrors `_cg_unionNames` inside `globalCgEnv`, but the
+-- separate IORef lets `typeStrWithAliasesReg` (called during
+-- dep-function-sig emission, possibly INSIDE `modifyIORef
+-- globalCgEnv` callbacks) read union names without forcing a lazy
+-- thunk that would re-enter the in-flight cgEnv update and
+-- black-hole (<<loop>>). Written eagerly via `writeIORef` at the
+-- same moments cgEnv's `_cg_unionNames` is updated.
+{-# NOINLINE globalUnionNames #-}
+globalUnionNames :: IORef (Set.Set String)
+globalUnionNames = unsafePerformIO $ newIORef Set.empty
+
+
 -- | v0.13 Phase A5: entry-module source path, set once per
 -- compilation, read at call-site codegen to key into
 -- `_cg_callSiteInstances` by (path, line, col).  Set in
@@ -2552,6 +2565,7 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                       $ Rec.withDepFieldIndex depAliasPairs
                       $ Rec.buildCodegenEnv solvedTypes canMod
             writeIORef globalCgEnv cgEnv
+            writeIORef globalUnionNames $! Rec._cg_unionNames cgEnv
             return $ collectGoImports canMod srcMod
         -- Force `imports` before anything else so the env is set up
         -- before depDecls / decls are evaluated (they read getCgEnv).
@@ -2733,6 +2747,7 @@ generateGo canMod srcMod config solvedTypes =
         imports = unsafePerformIO $ do
             let cgEnv = Rec.buildCodegenEnv solvedTypes canMod
             writeIORef globalCgEnv cgEnv
+            writeIORef globalUnionNames $! Rec._cg_unionNames cgEnv
             return $ collectGoImports canMod srcMod
         unionDecls = generateUnionTypes canMod
         aliasDecls = generateAliasTypes canMod
@@ -3841,7 +3856,16 @@ safeReturnType t = case t of
     -- alias (then use `_R` suffix). Plain ADT unions stay `any` until
     -- we can guarantee every call site produces the exact struct type
     -- (not just `any(expr)`). Re-enable when T6 lands.
-    T.TType home name [] ->
+    --
+    -- v0.13 B1: match `_` so parametric ADTs (e.g. `Html msg`,
+    -- `Element msg`, `Attribute msg`) get the SAME erased-Go-name
+    -- treatment as nullary types. Since `type Mod_Name = rt.SkyADT`
+    -- is non-generic, the type arg is irrelevant to the Go name.
+    -- The `isKnownUnion` gate at the bottom of this arm still
+    -- keeps FFI-opaque parametric types (where no Go alias was
+    -- emitted) falling through to `any`. Mirrors the equivalent
+    -- arm in `safeReturnTypeWith` (which landed earlier in v0.13).
+    T.TType home name _ ->
         let modStr = ModuleName.toString home
             prefix = if null modStr || modStr == "Main"
                        then ""
@@ -4016,6 +4040,14 @@ runtimeTypedMap =
     , ("Middleware", "rt.SkyMiddleware")
     , ("Session",    "rt.SkySession")
     , ("Store",      "rt.SkyStore")
+    -- v0.13 A2 follow-up: kernel `Http.get`/`Http.post` declare
+    -- their return type with empty `home` and name `HttpResponse`.
+    -- Once A2's pre-registration connects forward refs (e.g. an
+    -- unannotated `checkResponseStatus resp` param), the renderer
+    -- sees `T.TType "" "HttpResponse" []` and otherwise emits
+    -- bare `HttpResponse` (undefined Go). Maps to the existing
+    -- runtime struct.
+    , ("HttpResponse", "rt.HttpResponse")
     -- Db is stored as a pointer at runtime — Db_connect/Db_open
     -- return `&SkyDb{…}`. Typing as `*rt.SkyDb` matches the
     -- `Ok[any,any](db)` branch so the ResultCoerce type assertion
@@ -4357,11 +4389,24 @@ splitInferredSigWithReg recAliases fieldIdx arity funcType =
         -- of their type params (e.g. `Element msg` emits as
         -- `Std_Ui_Element`). Keep only the TVars that survive
         -- rendering.
-        renderedSig = unwords (retStrRaw : paramStrsRaw)
+        --
+        -- v0.13 C follow-up: filter against PARAM strings only,
+        -- not return. Go's generic inference works from input
+        -- positions; a TVar appearing only in the return type
+        -- (e.g. `b` in `concatMap : (a -> List b) -> List a ->
+        -- List b`, after C propagates the `b` inside `List b`)
+        -- isn't inferable from any call-site arg — Go rejects
+        -- with "cannot infer T2". Dropping the return-only TVar
+        -- collapses the return slot to `[]any`; the caller's
+        -- existing `rt.AsListT[T]` boundary coercion already
+        -- bridges that. Once D1 (typed lambda output) lands,
+        -- fn's return position will surface the TVar in the
+        -- HOF-param sig and the input-only filter will keep it.
+        paramSig = unwords paramStrsRaw
         usedTypeParams =
             [ goName
             | (_, goName) <- numbered
-            , goName `appearsAsToken` renderedSig
+            , goName `appearsAsToken` paramSig
             ]
         -- Re-render with only the surviving TVars in the numbered
         -- map so unused-TVar slots fall back to `any` instead of a
@@ -4686,6 +4731,21 @@ renderHofParamTy recAliases fieldIdx tvarMap ty = case ty of
         -- See test/Sky/Build/CompileSpec.hs's "user-defined polymorphic
         -- HOFs with Result-typed lambda params" test for the
         -- regression that pinned this.
+        --
+        -- v0.13 D1 (deferred to broader scope): the v0.13-mid typed
+        -- lambda lowerer (`curryLambdaPatTyped`) types inputs +
+        -- outputs for kernel HOFs (List.map/filter/find,
+        -- Maybe/Result.{map,andThen}), but does NOT yet route
+        -- user-defined HOFs' lambda args through it. So a
+        -- user-defined `do : ... -> (a -> Result Error b) -> ...`
+        -- still has its `\a -> ...` lambda emitted as `func(any)
+        -- any`. Typing the return position here would surface the
+        -- mismatch at `rt.Coerce[func(any) rt.SkyResult[...]](...)`
+        -- → `func(any) any` lambda. Closing D1 fully requires
+        -- threading `_cg_funcParamTypes` through the lambda lowerer
+        -- so user-defined HOF param slots get
+        -- `curryLambdaPatTyped` too — multi-step work the v0.13
+        -- session has not yet executed.
         "func(" ++ go from ++ ") any"
     renderLambdaInner other = go other
 
@@ -4774,11 +4834,36 @@ typeStrWithAliasesReg recAliases fieldIdx tvarMap ty = case ty of
             runtimeTyped = case lookup (modStr, name) qualifiedRuntimeTypedMap of
                 Just goTy -> Just goTy
                 Nothing   -> lookup name runtimeTypedMap
+            -- v0.13 A2 follow-up: empty-home cross-module ADT
+            -- recovery. When `home` is empty (a TVar resolved to
+            -- a Sky ADT via cross-decl constraint propagation but
+            -- with the module attribution lost), the bare
+            -- `base = name` renders undefined Go (`Colour` vs.
+            -- declared `Chess_Piece_Colour`). Look up via the
+            -- dedicated `globalUnionNames` IORef (kept separate
+            -- from `globalCgEnv` so the read can't black-hole
+            -- inside a `modifyIORef globalCgEnv` callback).
+            unionRecovery
+              | not (null modStr) = Nothing
+              | otherwise =
+                  let allUnions = unsafePerformIO (readIORef globalUnionNames)
+                  in if Set.null allUnions
+                       then Nothing
+                       else if Set.member name allUnions
+                              then Just name
+                              else case [ u | u <- Set.toList allUnions
+                                            , '_' `elem` u
+                                            , reverse (takeWhile (/= '_') (reverse u)) == name
+                                            ] of
+                                       [u] -> Just u
+                                       _   -> Nothing
         in case matches of
             (m:_) -> m ++ "_R"
             _     -> case runtimeTyped of
                 Just goTy -> goTy
-                Nothing   -> if isRuntimeOnly then "any" else base
+                Nothing   -> case unionRecovery of
+                    Just u  -> u
+                    Nothing -> if isRuntimeOnly then "any" else base
     T.TAlias home name _ aliasType ->
         let modStr = ModuleName.toString home
             prefix = if null modStr || modStr == "Main"
@@ -4841,11 +4926,20 @@ tvarsInEmitted ty = case ty of
         | take 1 n == "_" -> [n]
         | otherwise       -> [n]
     T.TLambda a b -> tvarsInEmitted a ++ tvarsInEmitted b
-    -- Container types erase their inner TVars (they become []any etc.)
-    -- so TVars inside don't propagate to the Go type.
-    T.TType _ "List" _ -> []
-    T.TType _ "Dict" _ -> []
-    T.TType _ "Set"  _ -> []
+    -- v0.13 C: container TVars propagate. The renderer (`safeReturnType*`
+    -- / `typeStrWithAliasesReg`) already emits typed Go containers
+    -- like `[]T1` / `map[string]V1` when an element TVar is known —
+    -- collecting them here lets `splitInferredSigWithReg` declare
+    -- `[T1 any]` Go generics, so user code calling
+    -- `List.map : (a -> b) -> List a -> List b` gets a typed sig
+    -- rather than collapsing the body to `[]any`. The
+    -- `usedTypeParams` filter at the call site already drops any
+    -- TVar that never appears in the rendered string, so
+    -- overshooting here is safe — phantom params are stripped
+    -- before the Go generic-param list is committed.
+    T.TType _ "List" args -> concatMap tvarsInEmitted args
+    T.TType _ "Dict" args -> concatMap tvarsInEmitted args
+    T.TType _ "Set"  args -> concatMap tvarsInEmitted args
     T.TType _ "Result" args -> concatMap tvarsInEmitted args
     T.TType _ "Maybe"  args -> concatMap tvarsInEmitted args
     T.TType _ "Task"   args -> concatMap tvarsInEmitted args
@@ -7792,20 +7886,38 @@ normaliseTypeForMerge = go
 -- the alias body (a TRecord) on match. Used as a fallback when a stored
 -- record type has unresolved TVars in its field types — the alias body
 -- carries the user's declared concrete types.
+-- v0.13 A1: superset match for open records (parallels
+-- `lookupRecordAlias` in Record.hs). Used by typed-codegen field
+-- inference (`Can.Access` arm) to resolve an open-row record
+-- against a concrete declared alias. Exact match takes priority;
+-- on miss, try strict supersets and pick the smallest one.
+-- Ambiguous (multiple at the same size) → Nothing.
 matchAliasByFieldSet :: Rec.CodegenEnv -> Set.Set String -> Maybe T.Type
 matchAliasByFieldSet env target =
     let aliases = Rec._cg_aliases env
-        candidates =
-            [ body
+        recordAliases =
+            [ (Set.fromList (Map.keys fields), body)
             | (_aname, Can.Alias _ body) <- Map.toList aliases
-            , case body of
-                T.TRecord fields _
-                    | Set.fromList (Map.keys fields) == target -> True
-                _ -> False
+            , T.TRecord fields _ <- [body]
             ]
-    in case candidates of
+        exact = [ body | (fs, body) <- recordAliases, fs == target ]
+    in case exact of
         (b:_) -> Just b
-        _ -> Nothing
+        []
+          | Set.null target -> Nothing
+          | otherwise       ->
+              let supersets =
+                      [ (Set.size fs, body)
+                      | (fs, body) <- recordAliases
+                      , target `Set.isSubsetOf` fs
+                      , target /= fs
+                      ]
+              in case List.sortOn fst supersets of
+                  []                          -> Nothing
+                  [(_, b)]                    -> Just b
+                  ((s1, b1) : (s2, _) : _)
+                      | s1 < s2   -> Just b1
+                      | otherwise -> Nothing
 
 
 -- | Recursively substitute internal TVars in a type by looking them up
