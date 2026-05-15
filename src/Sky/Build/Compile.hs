@@ -2731,8 +2731,8 @@ generateGo canMod srcMod config solvedTypes =
 
 -- | Generate Rust source from a canonical module with solved types
 generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes -> String
-generateRust canMods _srcMod _solvedTypes = 
-    RustBuilder.emitRust (RustBuilder.buildProgram canMods)
+generateRust canMods _srcMod solvedTypes = 
+    RustBuilder.emitRust (RustBuilder.buildProgram canMods solvedTypes)
 
 
 -- | Collect Go imports needed
