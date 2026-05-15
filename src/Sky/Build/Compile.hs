@@ -1200,7 +1200,8 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 -- Generate Rust code only when target is Rust
                 case Toml._target config of
                     Toml.TargetRust -> do
-                        let rustCode = generateRust canMod entrySrcMod typesWithDeps
+                        let allMods = canMod : map snd validDeps
+                            rustCode = generateRust allMods entrySrcMod typesWithDeps
                             rustDir = outDir </> "Rust"
                         createDirectoryIfMissing True rustDir
                         let mainRustPath = rustDir </> "main.rs"
@@ -2729,9 +2730,9 @@ generateGo canMod srcMod config solvedTypes =
 
 
 -- | Generate Rust source from a canonical module with solved types
-generateRust :: Can.Module -> Src.Module -> Solve.SolvedTypes -> String
-generateRust canMod _srcMod _solvedTypes = 
-    RustBuilder.emitRust (RustBuilder.buildProgram [canMod])
+generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes -> String
+generateRust canMods _srcMod _solvedTypes = 
+    RustBuilder.emitRust (RustBuilder.buildProgram canMods)
 
 
 -- | Collect Go imports needed
