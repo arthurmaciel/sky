@@ -1,6 +1,26 @@
 # Language Server
 
-`sky lsp` starts the Sky Language Server over JSON-RPC on stdin/stdout. It's used by the Helix, Zed, and VS Code integrations, and any LSP-aware editor.
+`sky lsp` starts the Sky Language Server over JSON-RPC on stdin/stdout.
+It's used by the Helix, Zed, and VS Code integrations, and any
+LSP-aware editor.
+
+**v0.13 contract (LSP 100 %)**: every USED symbol class has hover +
+goto-definition coverage. 17 cabal-fenced end-to-end tests via headless
+Neovim driver (`scripts/lsp-test-nvim.{lua,sh}`, wired through
+`Sky.Lsp.NvimDriverSpec`):
+
+- hover-task-run, hover-field, hover-type-name
+- hover-function-use, hover-ctor-use, hover-lambda-param,
+  hover-case-pattern, hover-kernel-call
+- goto-def-type-name, goto-def-function, goto-def-ctor,
+  goto-def-let-binding, goto-def-lambda-param, goto-def-field
+- completion-qualified-insert-text, completion-field,
+  completion-let-binding
+
+Plus 3 huge-FFI tests against `examples/13-skyshop` (Stripe SDK +
+Firebase) via `scripts/lsp-test-skyshop.lua`. The driver runs as part
+of `cabal test`; pending if `nvim` isn't on PATH (so CI environments
+without headless Neovim setup stay green).
 
 ## Capabilities declared
 

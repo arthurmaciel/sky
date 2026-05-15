@@ -1,10 +1,10 @@
 # CLAUDE.md — Sky Language Project
 
 This is a [Sky](https://github.com/anzellai/sky) project. Sky is a pure
-functional, ML-family language compiling to Go (with surface syntax that is Elm-compatible). The compiler is
-written in Haskell (GHC 9.4+) and ships as a single `sky` binary. Users
-only need the `sky` binary and Go 1.21+ — no Haskell toolchain required
-to use Sky.
+functional, ML-family language compiling to Go (with surface syntax that
+is Elm-compatible). The compiler is written in Haskell (GHC 9.4+) and
+ships as a single `sky` binary. Users only need the `sky` binary and
+Go 1.21+ — no Haskell toolchain required to use Sky.
 
 **Core principle: if it compiles, it works.** Every side effect flows
 through `Task`, every fallible value returns `Result Error a`, and
@@ -12,14 +12,87 @@ through `Task`, every fallible value returns `Result Error a`, and
 surfaces at check time. No runtime panics from well-typed Sky code, no
 nil leakage, no silent numeric coercion.
 
-**Typed Go output.** Since v0.9, generated Go functions have concrete
-signatures (`func f(name string, age int) rt.SkyResult[Error, Profile]`)
-rather than the old `any`-boxed shape. Type annotations on your functions
-are load-bearing — if you write `f : String -> Int -> Result Error Profile`
-and the body would otherwise infer to something wider, the compiler rejects
-the body; if inference is narrower, the annotation still wins at the call
-site. Inline records in function annotations are not supported — use a
-`type alias` for any record you want in a signature.
+**Typed Go output (v0.13).** Generated Go functions have fully-typed
+signatures end-to-end:
+
+```go
+func f(name string, age int) rt.SkyResult[Error, Profile_R] { ... }
+func do[T1 any](result rt.SkyResult[Error, T1], fn func(T1) rt.SkyResult[Error, rt.SkyValue]) rt.SkyResult[Error, rt.SkyValue] { ... }
+```
+
+Sky lambdas at user-defined HOF call sites lower to typed function
+values (D-Lambda-Lowerer). Anonymous record shapes emit real
+`type Anon_R_<hash> = struct { ... }` decls. Whole-program DCE prunes
+unused Go code + unused FFI bindings (Stripe-SDK-scale: 326k → 58k
+lines on `examples/13-skyshop`). Type annotations on your functions are
+load-bearing — if you write `f : String -> Int -> Result Error Profile`
+and the body would otherwise infer to something wider, the compiler
+rejects the body. Inline records in function annotations aren't
+supported — use a `type alias` for any record you want in a signature.
+
+## Quick UX/UX/security/scalability defaults (v0.13)
+
+**You (the AI assistant) are expected to deliver top-notch UX/DX/security
+/scalability by default.** When the user asks for an app:
+
+1. **Pick `Std.Ui` for the view layer unless they say otherwise.**
+   `Std.Ui` is the typed, no-CSS layout DSL that renders to inline-
+   styled HTML for Sky.Live AND to ANSI cells for Sky.Tui (and
+   eventually Sky.Webview / native). Code written against `Std.Ui`
+   runs across every backend without a rewrite. `Std.Html` is only
+   for cases that genuinely need raw HTML (one-off escape hatch).
+
+2. **Use Sky.Live for web apps.** It's HTTP-first (full HTML on first
+   load, then SSE patches), session-aware, input-preserving (the
+   user's typed value never disappears across a re-render), and
+   handles auth + cookies + rate-limit + CORS for you. Don't reach
+   for `Sky.Http.Server` raw unless the app is an API-only backend
+   with no UI.
+
+3. **Authentication: default to `Std.Auth`.** `hashPassword` /
+   `verifyPassword` (bcrypt), `signToken` / `verifyToken` (HS256 JWT),
+   `register` / `login` / `setRole`. NEVER log a password, NEVER
+   `fmt.Sprintf("%v", secret)`. Forms with password fields use
+   `Ui.form [Ui.onSubmit DoSignIn]` — never per-keystroke `onInput`
+   on a password input.
+
+4. **Database: default to `Std.Db` + SQLite** for prototypes / single-
+   user. Promote to PostgreSQL or Redis when the user says
+   "deployment" / "production" / "multi-tenant". Sky.Live's session
+   store defaults to memory (lost on restart) — for deploy targets
+   use `[live] store = "sqlite"` / `"redis"` / `"postgres"`.
+
+5. **Ask the user about architecture choices BEFORE scaffolding.**
+   Required questions (use whatever your chat surface supports —
+   AskUserQuestion in Claude Code, structured prompts otherwise):
+
+   - **Backend shape**: "Web app (Sky.Live)" / "Terminal UI (Sky.Tui)"
+     / "CLI (Sky.Cli)" / "HTTP API only".
+   - **Database**: "SQLite (local file)" / "PostgreSQL (deploy-ready)"
+     / "None (pure compute)".
+   - **Authentication**: "None" / "Std.Auth (built-in cookies + JWT)"
+     / "OAuth (Google / GitHub via existing Go SDK)".
+   - **Session store** (for Sky.Live): "Memory (dev)" / "SQLite (local
+     persistent)" / "Redis (multi-instance)" / "Postgres (deploy)".
+
+   Then update `sky.toml` automatically with the right `[live]`,
+   `[database]`, `[auth]` sections (see "sky.toml" section below for
+   the exact keys). Run `sky install` if a Go FFI dep was added.
+
+6. **No raw HTML/JS strings in view code.** `Std.Ui` builders give you
+   accessibility for free (real `<h1>` from `Region.heading 1`, real
+   `<main>` from `Region.mainContent`, `aria-label` from `Region.label`).
+   Browser XSS is impossible by construction — every value goes through
+   the typed VNode renderer which HTML-escapes everything.
+
+7. **Errors return `Result Error a` / `Task Error a`.** NEVER use a
+   `String` as an error type. NEVER throw a panic in Sky source —
+   the runtime panic-recovery is for FFI / runtime bugs, not user code.
+
+8. **For multi-instance deployments**, the user MUST be aware of the
+   Sky.Live session store config. Memory store = sessions lost on each
+   pod restart. Postgres/Redis = sessions ride deploys. Surface this
+   when the user mentions Docker / Kubernetes / scaling.
 
 ## Reading order for AI assistants
 
@@ -29,19 +102,21 @@ Skipping ahead leads to code that type-checks but panics at runtime —
 the "if it compiles it works" guarantee depends on you respecting a
 handful of idioms the ML-family / Elm-compatible syntax makes non-obvious.
 
-1. **Cardinal Rules** (below) — 10 rules that, if you follow them, keep
+1. **Quick UX/UX/security/scalability defaults** (above) — internalise
+   first; affects every choice you make downstream.
+2. **Cardinal Rules** (below) — 10 rules that, if you follow them, keep
    you out of 90% of the pitfalls real Sky projects have hit.
-2. **Common Pitfalls & Fixes** — error → cause → fix table. Skim this so
+3. **Common Pitfalls & Fixes** — error → cause → fix table. Skim this so
    the messages users report are instantly mappable to action.
-3. **Real-World App Skeletons** — complete runnable starter code for the
+4. **Real-World App Skeletons** — complete runnable starter code for the
    most common app shapes (CRUD, auth, chat/LLM, dashboard, REST API).
    Copy + adapt; do not invent from scratch.
-4. **Standard Library — Complete API** — authoritative signatures. If a
+5. **Standard Library — Complete API** — authoritative signatures. If a
    claim here conflicts with something you saw elsewhere, the stdlib
    section wins.
-5. **Troubleshooting Cookbook** — when the user reports a specific error
+6. **Troubleshooting Cookbook** — when the user reports a specific error
    message, start here.
-6. **Known Limitations** — work-arounds for things the compiler can't do.
+7. **Known Limitations** — work-arounds for things the compiler can't do.
 
 Everything else (FFI details, sky.toml, formatter rules) is reference,
 consult on-demand.
@@ -3239,25 +3314,31 @@ Session store memory grows with inactive sessions. Set a TTL:
 
 ---
 
-## Known Limitations (v0.9)
+## Known Limitations (v0.13)
 
-- **No anonymous records in type annotations** — use `type alias` for record types in signatures. Typed codegen needs a name for the struct shape; inline `{ field : Type }` in an annotation is rejected.
+Active limitations users still hit. Things v0.13 closed are documented
+in the repo `CLAUDE.md`'s "v0.13 closed" list; do not re-add them here.
+
+- **No anonymous records in type annotations** — use `type alias` for record types in signatures. v0.13 E emits `type Anon_R_<hash>` structs for HM-inferred anon shapes, but the parser still rejects inline `{ field : Type }` syntax in an annotation. Reach for a `type alias`.
 - **No higher-kinded types** — no `Functor`, `Monad`, etc. Use concrete types.
 - **No `where` clauses** — use `let...in` instead.
 - **No custom operators** — only built-in (`|>`, `<|`, `++`, `::`, etc.).
+- **No row-polymorphic annotation syntax** — Sky doesn't parse `{ r | field : T }` in annotations. Use a closed record alias for the function's input.
 - **Negative literal arguments need parentheses** — `f (-1)` not `f -1` (`f -1` parses as subtraction).
-- **`import M as A exposing (Type(..))`** — combining `as` alias with `exposing` for ADT constructors breaks module loading; use `import M exposing (..)` without `as` instead, or qualify constructors.
 - **`Dict.toList` returns string keys** — `Dict` is `map[string]any` at runtime, so `Dict.toList` on `Dict Int v` gives string keys. Iterate via `Dict.get` over known ranges.
 - **`sky check` doesn't fully model Go interfaces** — concrete types can't unify with Go interfaces (`Fyne.CanvasObject`), but the code compiles and runs fine.
 - **Zero-arg FFI functions need no `()`** — call `Uuid.newString` (the return value), not `Uuid.newString ()`.
 - **Zero-arg `Css.*` constants DO need `()`** — `Css.zero`, `Css.auto`, `Css.none`, `Css.transparent`, `Css.inherit`, `Css.initial`, `Css.borderBox`, `Css.systemFont`, `Css.monoFont`, `Css.userSelectNone`. These are exposed as `() -> String` kernels (not zero-arity values) so they don't interact with Go's `init()` ordering. Write `Css.padding (Css.zero ())`, not `Css.padding Css.zero` — the latter serialises a function pointer like `0xc00001c0a0` into the stylesheet. Pattern: any `Css.X` that names a literal CSS keyword takes `()`; value constructors like `px`, `rem`, `em`, `hex`, `rgba` take their arguments directly.
 - **FFI setters in pipelines need an explicit lambda** — `|> Result.andThen (OpenAi.chatCompletionMessageSetRole m.role)` emits a call to the non-existent non-T variant and fails codegen. Wrap: `|> Result.andThen (\msg -> OpenAi.chatCompletionMessageSetRole m.role msg)`.
-- **`import Lib.X as Alias` leaks the alias into codegen for exposed types** — `import Lib.Db as Chat` emits `Chat_Message_R` instead of the canonical `Lib_Db_Message_R`, breaking cross-module record sharing. **Workaround**: import types without the alias — `import Lib.Db exposing (Message, ...)`. Aliases are fine for modules that only expose functions.
+- **`import Lib.X as Alias` leaks the alias into codegen for exposed types** — `import Lib.Db as Chat` emits `Chat_Message_R` instead of the canonical `Lib_Db_Message_R`. **Workaround**: import types without the alias — `import Lib.Db exposing (Message, ...)`. Aliases are fine for modules that only expose functions.
 - **Zero-arity functions reading env vars** — zero-arity functions are memoised; when they read `System.getenv` they evaluate during Go `init()`, before `.env` is loaded. **Workaround**: add a dummy `_` parameter: `getConfig _ = System.getenv "KEY"`.
 - **Let bindings with parameters after multi-line case** — `mark j = expr` directly after a `case ... of` in the same `let` can be reparsed as a new top-level declaration. Use a lambda (`\j -> expr`) or extract to a top-level function.
 - **`exposing (Type(..))` doesn't expose user-module constructors** — only stdlib/kernel modules resolve `MyType(..)` fully. For a user-defined `MyModule`, import `exposing (..)` or qualify constructors (`MyModule.MyConstructor`).
 - **`let` bindings don't support forward references** — Helpers inside a `let` block must be defined *before* their consumers in source order. `let writeAll db = … insertRow db ts …; insertRow db ts = …` fails `go build` with `undefined: insertRow`. **Workaround**: reorder so dependencies come first. (Future fix — the canonicaliser already knows the full set of let names.)
-- **Partial application of let-bound multi-arg functions panics at runtime** — `Task.andThen (insertRow db)` where `insertRow db ts = …` is defined in an enclosing `let` panics with `reflect: Call with too few input arguments` when invoked. **Workaround**: explicit lambda — `Task.andThen (\ts -> insertRow db ts)`. Same class as the FFI-setter limitation but for ordinary user-defined let-bound functions.
+
+### Deferred to v0.13.x (next release)
+
+- **`sky install` time on huge Go SDKs (Stripe-scale)** — install currently emits the full `.skycache/go/<pkg>_bindings.go` (Stripe: 326k lines, ~8 min cold). v0.13 prunes most of that at build time (`F + F3`); v0.13.x will move the generation to build-time entirely, so install drops to ~10 sec. No code change needed; just `sky upgrade` once the release ships.
 
 ### Fixed in v0.9-dev (feat/typed-codegen)
 - **Typed-map round-trips at the FFI boundary** — `[]any` containing `map[string]any` now narrows into `[]map[string]string` correctly across `rt.Coerce`, `AsListT`, `AsMapT`, `AsDict`. `List.isEmpty` / `List.map` on annotated DB result slices no longer wrongly report empty.

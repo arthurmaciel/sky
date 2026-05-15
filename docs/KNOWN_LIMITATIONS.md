@@ -1,9 +1,36 @@
 # Known limitations
 
-Deliberate scope decisions for the v0.9 line. Each entry explains
-the gap, the justification for deferring, and the workaround.
-Limits below are **won't-fix in v0.9**; the roadmap treats them as
-v0.10+ / v1.0 concerns.
+Active limitations users still hit (as of v0.13). Each entry explains
+the gap, why, and the workaround. Anything v0.13 closed has been
+removed from this file — see `docs/compiler/journey.md` and the
+repo `CLAUDE.md`'s "v0.13 State" / "Recently Fixed" sections for
+the fix log.
+
+**Closed by v0.13**:
+
+- Anonymous-record struct emission (E) replaces the pre-v0.13
+  `sanitiseTypedDeep` cover-up. `synthAnonRecordName` now registers
+  shapes and `generateAnonRecordDecls` emits real
+  `type Anon_R_<hash> = struct { ... }` decls.
+- Typed lambda OUTPUT at user-defined HOF call sites
+  (D-Lambda-Lowerer + D1). User-defined
+  `do : Result e a -> (a -> Result e b) -> ...` now emits with
+  typed `func(T1) rt.SkyResult[E, V]` HOF param signatures.
+- Whole-program Sky DCE (F + F3). Stripe-skyshop benchmark:
+  main.go 14 k → 4 k lines (−71 %); `stripe_bindings.go` 326 k
+  → 58 k lines (−82 %); FFI type-alias bloat 80,847 → 29.
+- LSP 100 % (G). Hover + goto-def for every USED symbol class;
+  17 cabal-fenced tests.
+- Unicode-aware codegen identifier matching.
+- Reflect-adapter arg narrowing in the FFI runtime (closes a real
+  panic class surfaced by `verify-cli.sh` on `examples/07-todo-cli`).
+
+**v0.13.x deferred** (single-item known scope for the next release):
+
+- Install-time Go-binding generation: `sky install` skips Stripe-
+  scale Go-source emission; `sky build` generates only the
+  reachable subset on demand. Stripe cold install ~8 min → ~10 sec;
+  `.skycache/go/` per-pkg ~12 MB → <100 KB.
 
 ---
 
