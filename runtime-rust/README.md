@@ -169,25 +169,29 @@ fn main() {
 41. **ADT ctor field types** - Uses actual types from `Can.Ctor` instead of `()` placeholders
 42. **`format!` for `++`** - Fixes `String + String` compilation error
 
+### Session 6 (Task error type unification)
+43. **`SkyTask<A>` simplified** - Removed generic `E` parameter; `SkyError` hardcoded
+44. **Conditional `SkyError`** - Points to `Sky_Core_Error_Error` when Error module present, `String` fallback
+45. **`Task_onError`** - Uses concrete `SkyError` instead of generic `E`, ending type mismatch
+46. **All stubs unified** - `System_args`, `Log_info`, `Db_connect` etc. now return `SkyTask<A>` (no `String` error parameter)
+47. **`typeToRustString`** - Maps `Sky.Core.Error.Error` to `SkyError`; `Task e a` to `SkyTask<A>`
+48. **`#[derive(Clone)]`** - Added to all generated enums and structs for ownership compatibility
+
 ## Known Issues (Root Causes)
 
-### Critical: Task Error Type Inconsistency (blocks todo-cli)
+### Critical: Closure Ownership (blocks todo-cli)
 
-**Symptom**: 107 E0308 (mismatched types) in todo-cli. All from `Task_onError`, `Task_andThen`, etc. where the caller's error type doesn't match the function's error type.
+**Symptom**: 111 errors in todo-cli: `E0382` (use after move), `E0505` (cannot move out of borrow), `E0373` (closure outlives reference).
 
-**Root cause**: The Task runtime stubs use `String` as the Task's error type (`SkyTask<String, A>`), but:
-- Typed Error module functions have return type `SkyTask<Sky_Core_Error_Error, A>` (because `typeToRustString` maps `Sky.Core.Error.Error` to `Sky_Core_Error_Error`)
-- `Task_onError`'s generic error param `E` must unify BOTH the callback's and the task's error type
-- When `Task_onError(reportError)` is called: `reportError` takes `Sky_Core_Error_Error` but the stub Tasks use `String`
+**Root cause**: The Sky lowerer generates patterns of the form:
+```rust
+let _ = || { use(x) };   // closure captures x
+let _ = || { use(x) };   // second closure tries to capture x
+f(x);                     // x also passed to function
+```
+Rust's ownership tracking requires each variable use to be a move or borrow. Multiple closures and function calls can't all own the same value without explicit `.clone()`.
 
-**Fix required**: Use a SINGLE unified error type for ALL Task operations. Either:
-- (a) Make ALL Tasks use `Sky_Core_Error_Error` as the error type (requires defining it even when Error module isn't imported)
-- (b) Make ALL Tasks use `String` and make `typeToRustString` map ALL error types to `String`
-- (c) Define `SkyError` as a configurable type alias
-
-### `String ++ &str` Edge Cases
-
-The `format!` fix handles `String + String`, but `String + &str` (through the `+` operator for non-`++` binops) can still fail when both operands are owned `String`s. The _ operator table needs `Add<&str>` considerations.
+**Fix required**: In the codegen's `LetDestruct` handler, when the expression is a zero-arg closure that captures local variables, emit `.clone()` on each variable used inside the closure. The body expression analysis needs to walk the closure AST and insert clones before the closure definition.
 
 ### Non-CamelCase Naming
 
@@ -195,21 +199,20 @@ Module-prefixed names like `Sky_Core_Error_ErrorKind` generate Rust warnings. Fi
 
 ## Next Steps
 
-### Priority 1: Fix Task Error Type Unification
-1. Define `type SkyError = String;` and use `SkyTask<SkyError, A>` in ALL stubs and type mappings
-2. In `typeToRustString`, map `Task [e, a]` to `SkyTask<SkyError, ` ++ typeToRustString a ++ ">"`
-3. Change stub System/Log/Db functions to use `SkyTask<SkyError, A>` instead of `SkyTask<String, A>`
-4. Test with todo-cli - should eliminate ~100 E0308 errors
+### Priority 1: Fix Closure Ownership (blocks todo-cli)
+1. In `LetDestruct`, detect closures that capture local variables
+2. Walk the closure body AST to identify captured variables
+3. Emit `.clone()` on each captured variable before the closure
+4. Add `move` keyword to closures (`move || { ... }`) for by-value capture
 
-### Priority 2: Thread solvedTypes for Def Param Types
-5. Pass `solvedTypes` through for `Def` function PARAM types (not just return types)
-6. Detect list/function usage and emit proper trait bounds
-7. Remove `knownDefSig` hardcoding once generic type threading works
+### Priority 2: Production Readiness
+5. CamelCase type names (eliminate cosmetic warnings)
+6. Separate module files (`mod` declarations instead of flat file)
+7. Benchmark Task_parallel vs Go goroutines
 
-### Priority 3: Production Readiness
-8. CamelCase type names (cosmetic warnings)
-9. Separate module files (`mod` declarations instead of flat file)
-10. Benchmark Task_parallel vs Go goroutines
+### Priority 3: Type System Completeness
+8. Remove `knownDefSig` hardcoding, thread `solvedTypes` for all Def params
+9. True generic trait bounds (`Clone`, `FnOnce`) inferred from body usage
 
 ## Technical Notes
 
