@@ -46,17 +46,25 @@ jobs:
       # Firebase takes 15+ min cold. Restoring `.skycache/ffi/` (typed
       # .skyi + kernel JSON) and `.skydeps/` (Sky package lockfile)
       # between CI runs drops the sweep from ~25 min to ~3 min when
-      # the upstream Go modules haven't moved. The key includes sky.toml
-      # hashes so a dependency bump busts the cache.
+      # the upstream Go modules haven't moved.
+      #
+      # Cache key includes a `v0.13` version prefix — bump on every
+      # Sky-language minor release. Pre-v0.13 sky-tailwind / dep
+      # packages may use APIs that no longer compile (e.g. `right_`
+      # removed in the typed Std.Css migration); without bumping the
+      # prefix, the loose restore-keys fallback restores stale
+      # `.skydeps` from a v0.12 CI run and breaks the sweep on the
+      # new compiler. Restore-keys also include the version prefix so
+      # only same-version partial restores are eligible.
       - name: Cache example FFI bindings
         uses: actions/cache@v4
         with:
           path: |
             examples/*/.skycache/ffi
             examples/*/.skydeps
-          key: ${{ runner.os }}-ffi-${{ hashFiles('examples/*/sky.toml') }}
+          key: ${{ runner.os }}-ffi-v0.13-${{ hashFiles('examples/*/sky.toml') }}
           restore-keys: |
-            ${{ runner.os }}-ffi-
+            ${{ runner.os }}-ffi-v0.13-
 
       # Single-command local/CI parity: scripts/build.sh does everything
       # the manual steps below used to — compile sky, build sky-ffi-inspect,
