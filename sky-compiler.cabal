@@ -127,16 +127,7 @@ executable sky
     Sky.Generate.Go.Kernel
     Sky.Generate.Go.Record
 
-    -- Rust code generation (stub - see Compile.hs generateRust)
-    -- TODO: Fix and re-enable these modules
-    -- Sky.Generate.Rust.Builder
-    -- Sky.Generate.Rust.Types
-    -- Sky.Generate.Rust.Expr
-    -- Sky.Generate.Rust.Pattern
-    -- Sky.Generate.Rust.Decl
-    -- Sky.Generate.Rust.Kernel
-    -- Sky.Generate.Rust.Module
-    -- Sky.Generate.Rust.Test
+    -- Rust code generation (using inline stub in Compile.hs)
 
     -- FFI
 

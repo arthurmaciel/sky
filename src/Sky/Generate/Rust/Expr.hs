@@ -2,9 +2,9 @@ module Sky.Generate.Rust.Expr where
 
 import qualified Data.Map.Strict as Map
 import qualified Sky.AST.Canonical as Can
-import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Annotation as Ann
 import qualified Sky.Sky.ModuleName as ModuleName
-import Sky.Generate.Rust.Types hiding (RustTuple, RustRecord)
+import Sky.Generate.Rust.Types hiding (RustTuple, RustRecord, PChar, PString, PWild, PVar, PInt, PBool, PUnit, PConstructor, PTuple)
 
 data RustExpr
     = RustLit Literal
@@ -57,7 +57,7 @@ data Pattern
     deriving (Eq, Show)
 
 exprToRust :: Can.Expr -> RustExpr
-exprToRust (A.Located _ expr) = exprToRust_ expr
+exprToRust (Ann.At _ expr) = exprToRust_ expr
 
 exprToRust_ :: Can.Expr_ -> RustExpr
 exprToRust_ expr = case expr of
@@ -92,7 +92,7 @@ exprToRust_ expr = case expr of
     Can.Case scrut branches ->
         RustCase (exprToRust scrut) (map branchToRust branches)
     Can.Accessor field -> RustLambda "self" (RustAccess (RustVar "self") field)
-    Can.Access record (A.Located _ field) ->
+    Can.Access record (Ann.At _ field) ->
         RustAccess (exprToRust record) field
     Can.Update _name record updates ->
         RustFieldUpdate (exprToRust record)
@@ -118,12 +118,12 @@ varToRust name = case name of
 
 defToBindings :: Can.Def -> [(String, RustExpr)]
 defToBindings def = case def of
-    Can.Def (A.Located _ name) pats body ->
+    Can.Def (Ann.At _ name) pats body ->
         case pats of
             [] -> [(name, exprToRust body)]
             (p:_) -> [(name, foldr (\ap acc -> RustLambda (patternToVar ap) acc)
                               (exprToRust body) pats)]
-    Can.TypedDef (A.Located _ name) _ pats body _ ->
+    Can.TypedDef (Ann.At _ name) _ pats body _ ->
         case pats of
             [] -> [(name, exprToRust body)]
             (p:_) -> [(name, foldr (\(ap, _) acc -> RustLambda (patternToVar ap) acc)
@@ -176,13 +176,13 @@ binopToRust op = case op of
     _ -> Add
 
 patternToRust :: Can.Pattern -> Pattern
-patternToRust (A.Located _ pat) = case pat of
+patternToRust (Ann.At _ pat) = case pat of
     Can.PVar name -> PVar name
     Can.PAnything -> PWild
     Can.PUnit -> PUnit
     Can.PInt i -> PInt i
     Can.PBool b -> PBool b
-    Can.PChr c -> PChar c
+    Can.PChr c -> PChar (head c)  -- PChr is String in Canonical
     Can.PStr s -> PString s
     Can.PTuple a b rest ->
         PTuple (patternToRust a : patternToRust b : map patternToRust rest)
@@ -193,20 +193,22 @@ patternToRust (A.Located _ pat) = case pat of
     Can.PAlias pat _ -> patternToRust pat
 
 patternToVar :: Can.Pattern -> String
-patternToVar pat = case pat of
+patternToVar (Ann.At _ pat) = patternToVarInner pat
+
+patternToVarInner :: Can.Pattern_ -> String
+patternToVarInner pat = case pat of
     Can.PVar name -> name
-    Can.PWild -> "_"
+    Can.PAnything -> "_"
     Can.PInt i -> show i
-    Can.PFloat f -> show f
     Can.PBool b -> if b then "true" else "false"
-    Can.PChr c -> [c]
+    Can.PChr c -> c
     Can.PStr s -> s
     Can.PUnit -> "()"
-    Can.PConstructor name _ -> name
-    Can.PTuple a b rest -> "(" ++ patternToVar a ++ ", " ++ patternToVar b ++ concatMap ((", " ++) . patternToVar) rest ++ ")"
-    Can.PRecord fields -> "record"
-    Can.PCons a b -> "list"
-    _ -> "_"
+    Can.PCtor ctor -> Can._p_name ctor
+    Can.PTuple a b rest -> "(" ++ patternToVar (Ann.At undefined a) ++ ", " ++ patternToVar (Ann.At undefined b) ++ concatMap ((", " ++) . (patternToVar . Ann.At undefined)) rest ++ ")"
+    Can.PRecord _ -> "record"
+    Can.PCons _ _ -> "list"
+    Can.PAlias p _ -> patternToVar (Ann.At undefined p)
 
 litToRust :: Literal -> Literal
 litToRust = id
@@ -256,12 +258,29 @@ exprToRustString e = case e of
     RustNative name -> name
   where
     branchToString (pat, body) = patternToString pat ++ " => " ++ exprToRustString body
-    binOpToString op = case op of
-        Add -> "+"; Sub -> "-"; Mul -> "*"; Div -> "/"; Mod -> "%"
-        Eq -> "=="; Neq -> "!="; Lt -> "<"; Gt -> ">"; Le -> "<="; Ge -> ">="
-        And -> "&&"; Or -> "||"
-        Cons -> "::"
-        Append -> "++"
-    intercalate s [] = ""
-    intercalate s [x] = x
-    intercalate s (x:xs) = x ++ s ++ intercalate s xs
+
+patternToString :: Pattern -> String
+patternToString p = case p of
+    PWild -> "_"
+    PVar n -> n
+    PInt i -> show i
+    PBool b -> if b then "true" else "false"
+    PChar c -> [c]
+    PString s -> s
+    PUnit -> "()"
+    PConstructor name _ -> name
+    PTuple els -> "(" ++ intercalate ", " (map patternToString els) ++ ")"
+    PRecord fields -> "{" ++ intercalate ", " (map (\(n, _) -> n) fields) ++ "}"
+
+binOpToString :: BinOp -> String
+binOpToString op = case op of
+    Add -> "+"; Sub -> "-"; Mul -> "*"; Div -> "/"; Mod -> "%"
+    Eq -> "=="; Neq -> "!="; Lt -> "<"; Gt -> ">"; Le -> "<="; Ge -> ">="
+    And -> "&&"; Or -> "||"
+    Cons -> "::"
+    Append -> "++"
+
+intercalate :: String -> [String] -> String
+intercalate _ [] = ""
+intercalate _ [x] = x
+intercalate s (x:xs) = x ++ s ++ intercalate s xs
