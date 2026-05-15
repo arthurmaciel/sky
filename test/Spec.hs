@@ -33,6 +33,8 @@ import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
 import qualified Sky.Build.RecordCtorEmptyListSpec
 import qualified Sky.Build.HofTypedMsgSpec
+import qualified Sky.Build.AnonLambdaSpec
+import qualified Sky.Build.AnonRecordSpec
 import qualified Sky.Build.Issue52Spec
 import qualified Sky.Build.ValidatorSpec
 import qualified Sky.Build.GoBuildRefinerSpec
@@ -212,6 +214,15 @@ main = hspec $ do
     -- the inner-function return as `any`, breaking helpers with typed
     -- (String -> Msg) callbacks. Now routes via typeStrWithAliasesReg.
     describe "Sky.Build.HofTypedMsg"        Sky.Build.HofTypedMsgSpec.spec
+    -- v0.13 D-Lambda-Lowerer regression: Sky lambdas at user-
+    -- defined HOF slots lower to typed `func(X) Y` shapes via
+    -- curryLambdaPatTyped (was only kernel HOFs pre-v0.13).
+    describe "Sky.Build.AnonLambda"         Sky.Build.AnonLambdaSpec.spec
+    -- v0.13 E regression: synthAnonRecordName registers shapes
+    -- into globalAnonRecords; generateAnonRecordDecls emits
+    -- `type Anon_R_<hash> = struct{...}` so the typed Go name
+    -- resolves. Removed the pre-E `sanitiseTypedDeep` cover-up.
+    describe "Sky.Build.AnonRecord"         Sky.Build.AnonRecordSpec.spec
     -- Issue #52 regression: (1) List.drop with any-typed Int arg
     -- needs rt.AsInt coercion at the typed-kernel boundary, and
     -- (2) record update `{ m | n = X }` must HM-check the new value
