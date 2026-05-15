@@ -133,6 +133,24 @@ globalDceDisabled :: IORef Bool
 globalDceDisabled = unsafePerformIO $ newIORef False
 
 
+-- | v0.13 E: anon-record shape registry. Populated by
+-- `synthAnonRecordName` whenever the renderer hits an unmatched
+-- `T.TRecord` shape and synthesises a `Anon_R_<hash>` name.
+-- Consumed by `generateAnonRecordDecls` (wired into `generateGoMulti`
+-- before user decls) which emits one `type Anon_R_<hash> = struct
+-- { ... }` per registered shape, plus a `gob.RegisterName` so the
+-- session-store round-tripping works.
+--
+-- Pre-E (`sanitiseTypedDeep` rewriting `Anon_R_*` → `any`) was a
+-- contract-violation cover-up: any function signature that
+-- mentioned an anon-record collapsed to `any`-typed. Now the
+-- struct decls actually exist, so the typed Go names round-trip
+-- without the workaround.
+{-# NOINLINE globalAnonRecords #-}
+globalAnonRecords :: IORef (Map.Map String (Map.Map String T.FieldType))
+globalAnonRecords = unsafePerformIO $ newIORef Map.empty
+
+
 -- | v0.13 Phase A4: per-callee generalised annotation, used to
 -- derive σ for each reachable instance.  Same map shape as
 -- `buildCrossModuleExternalsWithMods` but keyed by full
@@ -2633,6 +2651,15 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
         aliasDecls = generateAliasTypes canMod
         decls = generateDecls canMod solvedTypes
         mainDecl = generateMainFunc canMod srcMod solvedTypes
+        -- v0.13 E: emit `type Anon_R_<hash> = struct { … }` decls
+        -- for every anon-record shape that `synthAnonRecordName`
+        -- produced during this compilation. Wired AFTER `decls`
+        -- in `_pkg_decls`; the renderer walks the list in order,
+        -- so by the time it forces `anonRecordDecls`'s thunk
+        -- every preceding decl has been rendered to a String —
+        -- which is exactly when `synthAnonRecordName` fires its
+        -- `atomicModifyIORef'` registrations.
+        anonRecordDecls = unsafePerformIO generateAnonRecordDecls
         -- Pin the rt import so Go doesn't error out with "imported and not used"
         -- when the user's program doesn't happen to reference rt.* directly
         -- (e.g. main = 42). The blank var reference is zero-cost at runtime.
@@ -2765,7 +2792,7 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
             , GoIr._pkg_imports = imports
-            , GoIr._pkg_decls = rtPin ++ portDefault ++ depDecls ++ unionDecls ++ aliasDecls ++ decls ++ specDecls ++ mainDecl
+            , GoIr._pkg_decls = rtPin ++ portDefault ++ depDecls ++ unionDecls ++ aliasDecls ++ decls ++ anonRecordDecls ++ specDecls ++ mainDecl
             }
     in GoBuilder.renderPackage pkg
 
@@ -2812,10 +2839,12 @@ generateGo canMod srcMod config solvedTypes =
         aliasDecls = generateAliasTypes canMod
         decls = generateDecls canMod solvedTypes
         mainDecl = generateMainFunc canMod srcMod solvedTypes
+        -- v0.13 E: see generateGoMulti for the rationale.
+        anonRecordDecls = unsafePerformIO generateAnonRecordDecls
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
             , GoIr._pkg_imports = imports
-            , GoIr._pkg_decls = unionDecls ++ aliasDecls ++ decls ++ mainDecl
+            , GoIr._pkg_decls = unionDecls ++ aliasDecls ++ decls ++ anonRecordDecls ++ mainDecl
             }
     in GoBuilder.renderPackage pkg
 
@@ -2944,6 +2973,47 @@ generateUnionTypes canMod =
         T.TAlias _ _ pairs (T.Hoisted inner) -> any hasTVar (inner : map snd pairs)
         T.TRecord _ _   -> False
         T.TUnit         -> False
+
+
+-- | v0.13 E: emit one Go struct decl per registered anon-record
+-- shape so the renderer's `Anon_R_<hash>` names actually resolve.
+--
+-- Pre-E `sanitiseTypedDeep` rewrote every `Anon_R_*` token in
+-- emitted type strings to `any` (a cover-up that hid the
+-- contract violation — anon records inferred at typed-codegen
+-- positions silently collapsed to `any`). Now `synthAnonRecordName`
+-- registers its produced shapes in `globalAnonRecords`, and this
+-- function emits a `type Anon_R_<hash> = struct {…}` for every
+-- registered shape so the typed name round-trips end-to-end.
+--
+-- Field order: sorted by `_fieldIndex` (matches the declared
+-- positional API used everywhere else in codegen — see
+-- generateAlias's `List.sortOn (T._fieldIndex . snd)`). Field Go
+-- types are rendered via `solvedTypeToGo`; unresolved TVars
+-- collapse to `any` per the renderer's policy — the resulting Go
+-- struct is well-formed even when the shape's element types stay
+-- polymorphic.
+--
+-- Lives in `IO` because `globalAnonRecords` is an IORef. Called
+-- from `generateGoMulti` via `unsafePerformIO` (matching the
+-- pattern used for `imports`).
+generateAnonRecordDecls :: IO [GoIr.GoDecl]
+generateAnonRecordDecls = do
+    anons <- readIORef globalAnonRecords
+    return $ concatMap structDecl (Map.toAscList anons)
+  where
+    structDecl (name, fields) =
+        let sortedFields =
+                List.sortOn (T._fieldIndex . snd) (Map.toList fields)
+            goField (fname, T.FieldType _ ty) =
+                capitalise_ fname ++ " " ++ solvedTypeToGo ty
+            fieldStrs = map goField sortedFields
+            structBody =
+                if null fieldStrs
+                    then "{}"
+                    else "{ " ++ intercalate_ "; " fieldStrs ++ " }"
+        in [ GoIr.GoDeclRaw $
+                "type " ++ name ++ " = struct " ++ structBody ]
 
 
 -- | Generate Go type declarations for record type aliases.
@@ -8450,23 +8520,17 @@ sanitiseTypedElem go
 -- preserves brackets, commas, and other type-string punctuation
 -- verbatim so structural shapes (`[]X`, `map[string]X`,
 -- `rt.SkyResult[E, A]`) survive intact.
+-- | v0.13 E removed the `Anon_R_*` → `any` rewrite that this
+-- function used to apply: `synthAnonRecordName` now registers
+-- every produced shape into `globalAnonRecords`, and
+-- `generateAnonRecordDecls` (wired into `generateGoMulti` after
+-- the user decls evaluate) emits one `type Anon_R_<hash> =
+-- struct {…}` for each. The token is now a valid Go type
+-- identifier, so the pre-E defensive cover-up is no longer
+-- needed. Kept as a no-op pass-through so call sites don't
+-- have to be touched.
 sanitiseTypedDeep :: String -> String
-sanitiseTypedDeep s = go s
-  where
-    go [] = []
-    go (c:cs)
-        | isIdentStart c =
-            let (word, rest) = span isIdentChar (c:cs)
-            in if "Anon_R_" `List.isPrefixOf` word
-                then "any" ++ go rest
-                else word ++ go rest
-        | otherwise = c : go cs
-
-    isIdentStart c = (c >= 'A' && c <= 'Z')
-                  || (c >= 'a' && c <= 'z')
-                  || c == '_'
-    isIdentChar c = isIdentStart c
-                 || (c >= '0' && c <= '9')
+sanitiseTypedDeep s = s
 
 
 -- | Strip a Go type string of the form `rt.SkyMaybe[INNER]` returning
@@ -10116,7 +10180,17 @@ synthAnonRecordName fields =
         nameTag = case names of
             [] -> "Empty"
             _  -> intercalate_ "_" (map sanitiseField names)
-    in "Anon_R_" ++ nameTag ++ "__" ++ shortHash (nameTag ++ typeStr)
+        nameStr = "Anon_R_" ++ nameTag ++ "__" ++ shortHash (nameTag ++ typeStr)
+    in unsafePerformIO $ do
+        -- v0.13 E: register the shape so `generateAnonRecordDecls`
+        -- can emit a concrete Go struct decl for this name.
+        -- atomicModifyIORef' so racing typed-codegen passes (which
+        -- compute renderer strings concurrently for different
+        -- modules) accumulate every shape; the latest one wins on
+        -- collision because identical shapes hash to the same name.
+        atomicModifyIORef' globalAnonRecords
+            (\m -> (Map.insertWith (\_ old -> old) nameStr fields m, ()))
+        return nameStr
   where
     sanitiseField = map (\c -> if c == '.' || c == '\'' || c == '"' then '_' else c)
 
