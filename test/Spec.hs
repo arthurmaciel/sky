@@ -19,6 +19,7 @@ import qualified Sky.Type.ExhaustivenessSpec
 import qualified Sky.Type.AnyWildcardSpec
 import qualified Sky.Type.TupleLambdaSpec
 import qualified Sky.Type.UiOnSubmitTypedRecordSpec
+import qualified Sky.Type.UfCycleGuardSpec
 import qualified Sky.Type.RecordFieldExactnessSpec
 import qualified Sky.Format.FormatSpec
 import qualified Sky.Build.GoKeywordCollisionSpec
@@ -139,6 +140,14 @@ main = hspec $ do
     -- wrapper is `(a -> Attribute b)`.
     describe "Sky.Type.UiOnSubmitTypedRecord"
                                          Sky.Type.UiOnSubmitTypedRecordSpec.spec
+    -- v0.13.1 UF cycle guard: importing Std.Ui.Events (or any
+    -- Sky-source stdlib module that brings the recursive Element /
+    -- Attribute ADT through cross-module externals) used to OOM
+    -- the compiler during the dep-fixpoint round-1 solve. Pre-fix
+    -- a missing occurs check in Unify.actuallyUnify spliced a
+    -- self-referential cycle into the UF graph; variableToType
+    -- then recursed forever through cyclic App1 args.
+    describe "Sky.Type.UfCycleGuard"     Sky.Type.UfCycleGuardSpec.spec
     -- Closed-record exactness + cross-module externals registration:
     --   1. unifyRecords (Sky.Type.Unify) used to silently merge field-
     --      mismatched closed records under a fresh extension. Now

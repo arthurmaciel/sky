@@ -17,6 +17,7 @@ import qualified Data.Map.Strict as Map
 import System.IO.Unsafe (unsafePerformIO)
 import qualified Sky.Type.UnionFind as UF
 import qualified Sky.Type.Type as T
+import qualified Sky.Type.Occurs as Occurs
 import qualified Sky.Sky.ModuleName as ModuleName
 
 
@@ -50,7 +51,56 @@ actuallyUnify v1 v2 = do
     d2 <- UF.get v2
     case (T._content d1, T._content d2) of
 
-        -- FlexVar unifies with anything
+        -- FlexVar unifies with anything — but if the OTHER side is a
+        -- Structure / Alias whose transitive UF graph contains this
+        -- FlexVar's representative, merging would create a self-
+        -- referential cycle (infinite type). Reject via occurs check
+        -- to prevent the unify / variableToType walk from looping
+        -- forever and OOMing the host. Pre-fix bug class: mini-notion
+        -- (Sky.Live + Std.Ui + Std.Ui.Events) saw the v0.13 dep-
+        -- fixpoint round-1 solve of Std.Ui.Events explode to >3 GB
+        -- heap; a structural mistake in Std.Ui's round-0 externals
+        -- fed an annotation back into Std.Ui.Events's body and the
+        -- FlexVar↔Structure merge built a cycle that later unifies
+        -- walked forever. Pair with the path-tracking guard in
+        -- `Solve.variableToType` so existing cyclic graphs (built
+        -- before this check landed) still read back as a finite
+        -- `TVar "_cycle"` sentinel without looping.
+        (T.FlexVar _, T.Structure _) -> do
+            cyc <- Occurs.occurs v2
+            if cyc
+                then return False
+                else do
+                    merge v1 v2 (T._content d2)
+                    return True
+
+        (T.Structure _, T.FlexVar _) -> do
+            cyc <- Occurs.occurs v1
+            if cyc
+                then return False
+                else do
+                    merge v1 v2 (T._content d1)
+                    return True
+
+        (T.FlexVar _, T.Alias _ _ _ _) -> do
+            cyc <- Occurs.occurs v2
+            if cyc
+                then return False
+                else do
+                    merge v1 v2 (T._content d2)
+                    return True
+
+        (T.Alias _ _ _ _, T.FlexVar _) -> do
+            cyc <- Occurs.occurs v1
+            if cyc
+                then return False
+                else do
+                    merge v1 v2 (T._content d1)
+                    return True
+
+        -- FlexVar ↔ FlexVar / FlexSuper / RigidVar / RigidSuper /
+        -- Error — no cycle possible from a bare variable merge
+        -- (neither side carries transitive structure).
         (T.FlexVar _, _) -> do
             merge v1 v2 (T._content d2)
             return True

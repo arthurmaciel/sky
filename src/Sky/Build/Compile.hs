@@ -834,9 +834,29 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- failed to reject a `String` arg in a consumer because the
             -- consumer module's own non-Foreign solve error was
             -- tolerated and its polymorphic round-1 types shipped.
+            -- Per-dep top-level declaration names. Computed ONCE
+            -- outside the fixpoint so each round can filter the
+            -- externals map down to genuine top-level decls (the
+            -- merged solve result includes let-locals + lambda
+            -- params via the `_locals` merge — those are bound by
+            -- structural keys and would silently pollute the
+            -- cross-module externals if exported).
+            let depDeclaredNamesFix =
+                    [ (mn, Set.toList (collectDeclNames (Can._decls dm)))
+                    | (mn, dm) <- validDeps
+                    ]
+                filterToTopLevel ext = Map.filterWithKey
+                    (\(m, n) _ -> case lookup m depDeclaredNamesFix of
+                        Just names -> n `elem` names
+                        Nothing    -> False)
+                    ext
             let solveRound prevSolved = do
                     let externals =
-                            buildCrossModuleExternalsWithMods validDeps prevSolved
+                            filterToTopLevel
+                                (buildCrossModuleExternalsWithMods validDeps prevSolved)
+                    -- v0.13 Phase A5: use `solveWithInstances` so per-call
+                    -- instance capture flows through dep-module callsites
+                    -- (used by monomorphisation).
                     mapM (\(modName, depMod) -> do
                         cs <- Constrain.constrainModuleWithExternals externals depMod
                         (r, _, csi) <- Solve.solveWithInstances cs
@@ -845,11 +865,6 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                 return (modName, Right (t, csi, Nothing))
                             Solve.SolveError err
                                 | isForeignErr err -> return (modName, Left err)
-                                -- Non-Foreign error: keep the previous
-                                -- round's types so a not-yet-ready dep
-                                -- doesn't erase the rest, but REMEMBER
-                                -- the error so convergence can decide
-                                -- whether it was transient or real.
                                 | otherwise -> case lookup modName prevSolved of
                                     Just p | not (Map.null p) ->
                                         return (modName, Right (p, csi, Just err))

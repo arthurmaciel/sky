@@ -213,6 +213,7 @@ test-suite sky-tests
       Sky.Type.AnyWildcardSpec
       Sky.Type.TupleLambdaSpec
       Sky.Type.UiOnSubmitTypedRecordSpec
+      Sky.Type.UfCycleGuardSpec
       Sky.Type.RecordFieldExactnessSpec
       Sky.Type.InstanceCaptureSpec
       Sky.Format.FormatSpec
