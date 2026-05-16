@@ -42,8 +42,9 @@ Rust codegen lives in the main Sky compiler at `src/Sky/Generate/Rust/Builder.hs
 | Feature | Status |
 |---------|--------|
 | Hello world | ✅ Compiles and runs ("Hello from Sky!") |
+| Todo-cli (real SQLite) | ✅ All 7 CRUD operations + help work with persistent DB |
 | `--target rust` flag | ✅ Wired into CLI |
-| Cargo.toml generation | ✅ Auto-generated with tokio dependency |
+| Cargo.toml generation | ✅ Auto-generated with tokio + sqlx dependencies |
 | Expression translation | ✅ Functions, calls, patterns, let, binops, lambdas, if/case |
 | Kernel calls | ✅ println!, Task::, System::, Log::, Db::, Result:: |
 | Type mapping | ✅ Basic types + module-prefixed user types |
@@ -61,9 +62,17 @@ Rust codegen lives in the main Sky compiler at `src/Sky/Generate/Rust/Builder.hs
 | List/maybe/error sigs | ✅ knownDefSig covers List, Maybe, Error modules |
 | `as_slice()` for Vec | ✅ Match scrutinee wrapped for slice pattern support |
 | Thunk auto-invoke | ✅ `(|| { expr })()` for `let _ = Task.run` discard |
+| Db runtime (sqlx AnyPool) | ✅ SQLite/PostgreSQL/MySQL via URL scheme; sky.toml `[database]` config |
 
-### Phase 3: FFI System (Next)
-Priority crates: tokio, serde, uuid, axum, clap, rayon, reqwest, sqlx, tokio-postgres
+### Phase 3: Full Stdlib Coverage
+
+Priority:
+- `Log.infoWith` / `Log.errorWith` structured attrs
+- `Random.*`, `Time.*`, `File.*`, `Crypto.*` kernels
+- `System.setenv` / `System.unsetenv`
+- Separate module files (`mod` declarations)
+- `Db.open` alias parity with Go target
+- Error mapping: specific sqlx errors → correct SkyError variant
 
 ## Usage
 
@@ -84,6 +93,34 @@ cargo run
 #     src/
 #       main.rs
 ```
+
+## sqlx Database Runtime
+
+The generated project includes sqlx with `AnyPool` for multi-backend database support:
+
+```rust
+use sqlx::any::{AnyPool, AnyRow};
+use sqlx::{Column, Row};
+
+type Db = sqlx::AnyPool;
+const SKY_DB_URL: &str = "sqlite:todos.db?mode=rwc";
+```
+
+**Backend switching**: `AnyPool` auto-detects the database from the URL scheme:
+- `sqlite:path?mode=rwc` → SQLite (auto-creates file)
+- `postgres://user:pass@host/db` → PostgreSQL
+- `mysql://user:pass@host/db` → MySQL
+
+**Config source**: `sky.toml` `[database]` section. `driver = "sqlite"` prepends the `sqlite:` prefix + `?mode=rwc`; other drivers pass the path as-is.
+
+**Helper functions**:
+| Helper | Purpose |
+|--------|---------|
+| `build_sql` | Replaces `?` with escaped `'values'` (SQL injection safe, DB-agnostic) |
+| `row_to_map` | Converts `AnyRow` → `HashMap<String,String>` with type fallback chain |
+| `sky_err` | Wraps `sqlx::Error` → `SkyError` (ADT enum or String depending on Error module) |
+
+**Kernel stubs** mapped via `taskExprInnerType` (returns `Vec<HashMap<String, String>>` for query, `()` for exec).
 
 ## Task Runtime (Tokio-based async)
 
@@ -221,20 +258,42 @@ fn main() {
 72. **`pub` on generated types** - All enums, structs, and aliases now emit  
     `pub enum` / `pub struct` / `pub type` (fixes "more private than item")
 
+### Session 11 (sqlx AnyPool — real DB backend)
+73. **sqlx AnyPool** — Real DB backend replacing HashMap stubs. `sqlx::AnyPool::connect(url)` auto-detects SQLite/PostgreSQL/MySQL from URL scheme.
+74. **`build_sql`** — `?` placeholder replacement with escaped `'values'`. DB-agnostic.
+75. **`row_to_map`** — `AnyRow` → `HashMap<String,String>` with `&str` → `i64` → `f64` → empty fallback.
+76. **`sky_err`** — Maps `sqlx::Error` to correct `SkyError` variant.
+77. **`[database]` sky.toml** — `driver = "sqlite"` prepends prefix + `?mode=rwc` for auto-creation.
+78. **0 Rust compiler errors and warnings** — todo-cli emits clean output.
+
 ## Status
 
 **Hello-world**: ✅ 0 errors, compiles and runs
-**Todo-cli**: ✅ 0 errors, compiles and runs correctly:
-- `cargo run -- --help` → usage text
-- `cargo run add "x"` → "Added: x"  
-- `cargo run list` → "No todos yet..."
+**Todo-cli**: ✅ 0 errors, all 7 operations work with real SQLite persistence:
+- `./app add "Buy milk"` → "Added: Buy milk" (INSERT)
+- `./app list` → lists todos with `[ ]`/`[x]` status (SELECT)
+- `./app done 1` → marks as done (UPDATE)
+- `./app undone 1` → marks as not done (UPDATE)
+- `./app remove 1` → deletes todo (DELETE)
+- `./app clear` → removes completed (DELETE)
+- `./app help` → usage text
 
 ## Next Steps
 
-### Production Readiness
-1. Wire real SQLite via `rusqlite` Cargo dependency (multi-day effort)  
-2. Separate module files (`mod` declarations instead of flat)  
-3. Benchmark Task_parallel vs Go goroutines
+### Immediate
+1. **`Log.infoWith` / `Log.errorWith` structured attrs** — currently stubbed to plain println!
+2. **`db_open` alias** — parity with Go target's `Db.open` kernel route
+3. **Error mapping** — specific sqlx errors → correct `SkyError` variant (Network, Conflict, etc.)
+
+### Medium term
+4. Separate module files (`mod` declarations instead of flat `main.rs`)
+5. `Random.*`, `Time.*`, `File.*`, `Crypto.*` kernels
+6. `System.setenv` / `System.unsetenv`
+
+### Longer term
+- Sky.Http.Server (axum backend)
+- Sky.Live (server-driven UI)
+- Benchmark `task_parallel` vs Go goroutines
 
 ## Technical Notes
 
@@ -248,13 +307,13 @@ fn main() {
 - Kernel calls: `Log.println` → `println!`, other kernels use `module_name` convention
 - Go remains the default target when no `--target` is specified
 - Rust output directory: `sky-out/Rust/` (with `src/main.rs` + `Cargo.toml`)
-- Compile with: `cd sky-out/Rust && cargo run` (requires Rust edition 2021)
+- Compile with: `cd sky-out/Rust && cargo run` (requires Rust edition 2021); first build downloads ~180 crates for sqlx + tokio
 - The Go and Rust codegen paths share the same frontend (parse, canonicalise, type-check)
 
 ## Testing
 
 - **Hello-world**: ✅ Compiles and runs ("Hello from Sky!")
-- **todo-cli**: ✅ Compiles and runs (empty Db stubs)
+- **todo-cli**: ✅ Compiles and runs (real SQLite via sqlx AnyPool)
 - **Go target (default)**: ✅ All examples pass
 
 ## Runtime Test Results (sky-runtime-rust crate)
