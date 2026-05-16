@@ -215,6 +215,12 @@ fn main() {
 69. **`System_args` skip(1)** - Excludes binary path (matches Go behaviour)  
 70. **`mainSig formatTodo`** - Explicit sig for `HashMap<String,String>` row
 
+### Session 10 (zero warnings — `pub` types, `#[allow]` attributes)
+71. **`#![allow(non_snake_case, non_camel_case_types)]`** - Suppresses Rust  
+    naming convention warnings for module-prefixed Sky names
+72. **`pub` on generated types** - All enums, structs, and aliases now emit  
+    `pub enum` / `pub struct` / `pub type` (fixes "more private than item")
+
 ## Status
 
 **Hello-world**: ✅ 0 errors, compiles and runs
@@ -227,9 +233,8 @@ fn main() {
 
 ### Production Readiness
 1. Wire real SQLite via `rusqlite` Cargo dependency (multi-day effort)  
-2. CamelCase type names (eliminate cosmetic warnings)  
-3. Separate module files (`mod` declarations instead of flat)  
-4. Benchmark Task_parallel vs Go goroutines
+2. Separate module files (`mod` declarations instead of flat)  
+3. Benchmark Task_parallel vs Go goroutines
 
 ## Technical Notes
 
