@@ -56,12 +56,19 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 7. Cleaned up unused std imports (Future, Pin, Context, Poll)
 8. Fixed build syntax error (comma before "use std::fmt")
 
-### Known Issues / Next Steps
+## Non-Negotiable Rule: Rust API Naming Conventions
 
-1. **TRecord handling**: Anonymous structs aren't valid Rust syntax - need to emit named structs
-2. **Cons pattern**: "::" is not valid Rust identifier
-3. **Generic type parameters**: Need proper handling for Sky type variables
-4. **Multi-module projects**: todo-cli only generates Go, not Rust (generateRust not called for multi-module)
+All generated Rust code MUST follow the [Rust API naming conventions](https://rust-lang.github.io/api-guidelines/naming.html):
+
+- **Types** (structs, enums, type aliases): `CamelCase` — `SkyCoreErrorError`, `SkyCoreErrorErrorKind`
+- **Functions** (including kernel stubs): `snake_case` — `task_map`, `task_and_then`, `db_query`
+- **Module-prefixed names**: Converted via `toCamelCase` for types and `toSnakeCase` for functions
+
+The naming helpers `toCamelCase` and `toSnakeCase` in `Builder.hs` handle the conversion:
+- `Sky_Core_List_map` → type: `SkyCoreListMap`, function: `sky_core_list_map`
+- `Sky_Core_Error_ErrorKind` → type: `SkyCoreErrorErrorKind`, function: `sky_core_error_error_kind`
+
+**Exception**: Variable names from Sky source code retain their Sky naming (CamelCase like `todoTitle`). The `#![allow(non_snake_case)]` attribute is added to suppress these. This is accepted because Sky's variable naming conventions differ from Rust's.
 
 ### Code Locations
 
