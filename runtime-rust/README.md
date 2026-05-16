@@ -177,42 +177,55 @@ fn main() {
 47. **`typeToRustString`** - Maps `Sky.Core.Error.Error` to `SkyError`; `Task e a` to `SkyTask<A>`
 48. **`#[derive(Clone)]`** - Added to all generated enums and structs for ownership compatibility
 
+### Session 7 (closure ownership — E0382/E0505/E0373 -95%)
+49. **`LetDestruct` wildcard thunks** - `\_ -> body` treated as thunk (auto-invoked)  
+    fixing `Pin<Box<dyn Future>>::clone` panic
+50. **`collectVarLocalsMulti`** - Count-based variable tracking; only clone vars  
+    used ≥ 2 times, avoiding non-Clone types like `Pin<Box<dyn Future>>`
+51. **`defToRustString` clone injection** - Zero-arg Def wraps expression in  
+    `{ let x = x.clone(); expr }` when `x` is used ≥ 2 times
+52. **`collectVarLocals` walks defBody** - Fix: `Can.Let` now traverses both the  
+    definition expression AND the continuation body
+53. **`Can.Call` VarLocal clone** - Every function-call argument gets `.clone()`  
+    except `Task_run` (avoids non-Clone Pipeline type)
+54. **`IsWildcard` helper** - Correctly detects `PAnything` for thunk detection
+55. **`branchToRustString`** - Injects `.clone()`/`.to_vec()` for cons/slice  
+    pattern bindings (owned values from &T references)
+56. **`scanTVars`** - Robust type variable scanner replacing ad-hoc extraction
+
 ## Known Issues (Root Causes)
 
-### Critical: Closure Ownership (blocks todo-cli)
-
-**Symptom**: 111 errors in todo-cli: `E0382` (use after move), `E0505` (cannot move out of borrow), `E0373` (closure outlives reference).
-
-**Root cause**: The Sky lowerer generates patterns of the form:
-```rust
-let _ = || { use(x) };   // closure captures x
-let _ = || { use(x) };   // second closure tries to capture x
-f(x);                     // x also passed to function
-```
-Rust's ownership tracking requires each variable use to be a move or borrow. Multiple closures and function calls can't all own the same value without explicit `.clone()`.
-
-**Fix required**: In the codegen's `LetDestruct` handler, when the expression is a zero-arg closure that captures local variables, emit `.clone()` on each variable used inside the closure. The body expression analysis needs to walk the closure AST and insert clones before the closure definition.
+### Remaining: 9 errors in todo-cli
+- **7 E0308**: Type mismatches from `.clone()` operations (e.g., `Vec<String>`  
+  cloned from `userArgs` but `Main_getArg` expects `SkyValue = String`)
+- **1 E0382**: `todoTitle` used twice inside a `move` closure — the initial  
+  clone at the start of the closure body is consumed by the first use;  
+  per-use `.clone()` needed
+- **1 E0282**: Type annotation needed for `Task_map(move |rows| ...)` —  
+  `rows` type can't be inferred through the `move` closure boundary
 
 ### Non-CamelCase Naming
-
-Module-prefixed names like `Sky_Core_Error_ErrorKind` generate Rust warnings. Fix would require CamelCase conversion (`SkyCoreErrorErrorKind`).
+Module-prefixed names like `Sky_Core_Error_ErrorKind` generate Rust warnings
 
 ## Next Steps
 
-### Priority 1: Fix Closure Ownership (blocks todo-cli)
-1. In `LetDestruct`, detect closures that capture local variables
-2. Walk the closure body AST to identify captured variables
-3. Emit `.clone()` on each captured variable before the closure
-4. Add `move` keyword to closures (`move || { ... }`) for by-value capture
+### Priority 1: Fix remaining E0382 (per-use clone inside closures)
+When a variable is used ≥ 2 times inside a single `move` closure, clone it  
+before EACH use (not just once at the start). Requires walking the closure  
+body AST and injecting `.clone()` at each `VarLocal` occurrence.
 
-### Priority 2: Production Readiness
+### Priority 2: Fix E0308 type mismatches from .clone()
+`Main_getArg(userArgs.clone())` gives `Vec<String>` but function expects  
+`SkyValue = String`. Need to match clone result type to function param type.
+
+### Priority 3: Fix E0282 type annotation
+`Task_map(move |rows| { ... })` — `rows` type needs explicit annotation  
+when inferred through `move` boundary.
+
+### Priority 4: Production Readiness
 5. CamelCase type names (eliminate cosmetic warnings)
 6. Separate module files (`mod` declarations instead of flat file)
 7. Benchmark Task_parallel vs Go goroutines
-
-### Priority 3: Type System Completeness
-8. Remove `knownDefSig` hardcoding, thread `solvedTypes` for all Def params
-9. True generic trait bounds (`Clone`, `FnOnce`) inferred from body usage
 
 ## Technical Notes
 

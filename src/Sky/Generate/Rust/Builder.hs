@@ -100,6 +100,25 @@ bodyUsesList (Ann.At _ e) = case e of
         Can.PAlias pat _ -> isListPat pat
         _ -> False
 
+-- | Does this top-level pattern match a string literal?
+hasStrPat :: Can.Pattern -> Bool
+hasStrPat (Ann.At _ p) = case p of
+    Can.PStr _ -> True
+    _ -> False
+
+-- | Collect all (non-wildcard) variable names bound by a pattern.
+-- For PCons head bindings these will be &T0; for tail bindings &[T0].
+patBindingVars :: Can.Pattern -> [String]
+patBindingVars (Ann.At _ pat) = case pat of
+    Can.PVar n -> [n]
+    Can.PCons a b -> patBindingVars a ++ patBindingVars b
+    Can.PList items -> concatMap patBindingVars items
+    Can.PAlias inner n -> n : patBindingVars inner
+    Can.PTuple a b rest -> concatMap patBindingVars (a:b:rest)
+    Can.PCtor{Can._p_args = args} -> concatMap (\(Can.PatternCtorArg _ _ p) -> patBindingVars p) args
+    Can.PRecord fields -> fields
+    _ -> []
+
 -- | Known signatures for common Def functions (stdlib etc.), keyed by (module_prefix, name, arity)
 knownDefSig :: String -> String -> Int -> Maybe ([String], String)
 -- List module
@@ -111,44 +130,56 @@ knownDefSig p n a | "Sky_Core_Error" `isPrefixOf` p = errorSig n a
 knownDefSig _ _ _ = Nothing
 
 listSig :: String -> Int -> Maybe ([String], String)
-listSig "map" 2 = Just (["impl Fn(T0) -> T1", "Vec<T0>"], "Vec<T1>")
-listSig "filter" 2 = Just (["impl Fn(&T0) -> bool", "Vec<T0>"], "Vec<T0>")
-listSig "foldl" 3 = Just (["impl Fn(T1, T0) -> T1", "T1", "Vec<T0>"], "T1")
-listSig "foldr" 3 = Just (["impl Fn(T0, T1) -> T1", "T1", "Vec<T0>"], "T1")
+listSig "map" 2 = Just (["impl Fn(T0) -> T1 + Clone", "Vec<T0>"], "Vec<T1>")
+-- filter pred takes T0 by value; double-clone in branch prefix + VarLocal clone in body covers the two uses
+listSig "filter" 2 = Just (["impl Fn(T0) -> bool + Clone", "Vec<T0>"], "Vec<T0>")
+-- Generated body calls r#fn(x, acc) — element first, accumulator second
+listSig "foldl" 3 = Just (["impl Fn(T0, T1) -> T1 + Clone", "T1", "Vec<T0>"], "T1")
+listSig "foldr" 3 = Just (["impl Fn(T0, T1) -> T1 + Clone", "T1", "Vec<T0>"], "T1")
 listSig "cons" 2 = Just (["T0", "Vec<T0>"], "Vec<T0>")
 listSig "head" 1 = Just (["Vec<T0>"], "SkyMaybe<T0>")
 listSig "tail" 1 = Just (["Vec<T0>"], "SkyMaybe<Vec<T0>>")
 listSig "isEmpty" 1 = Just (["Vec<T0>"], "bool")
 listSig "length" 1 = Just (["Vec<T0>"], "i64")
 listSig "reverse" 1 = Just (["Vec<T0>"], "Vec<T0>")
+-- reverseHelp list acc = case list of { [] -> acc; x::rest -> reverseHelp rest (x::acc) }
+listSig "reverseHelp" 2 = Just (["Vec<T0>", "Vec<T0>"], "Vec<T0>")
 listSig "append" 2 = Just (["Vec<T0>", "Vec<T0>"], "Vec<T0>")
+-- concat : List (List a) -> List a
+listSig "concat" 1 = Just (["Vec<Vec<T0>>"], "Vec<T0>")
 listSig "member" 2 = Just (["T0", "Vec<T0>"], "bool")
-listSig "any" 2 = Just (["impl Fn(&T0) -> bool", "Vec<T0>"], "bool")
-listSig "all" 2 = Just (["impl Fn(&T0) -> bool", "Vec<T0>"], "bool")
-listSig "find" 2 = Just (["impl Fn(&T0) -> bool", "Vec<T0>"], "SkyMaybe<T0>")
+-- any/all: pred takes T0 by value; Clone required for recursive pass
+listSig "any" 2 = Just (["impl Fn(T0) -> bool + Clone", "Vec<T0>"], "bool")
+listSig "all" 2 = Just (["impl Fn(T0) -> bool + Clone", "Vec<T0>"], "bool")
+-- find pred takes T0 by value; Clone for recursive pass
+listSig "find" 2 = Just (["impl Fn(T0) -> bool + Clone", "Vec<T0>"], "SkyMaybe<T0>")
 listSig "range" 2 = Just (["i64", "i64"], "Vec<i64>")
 listSig "take" 2 = Just (["i64", "Vec<T0>"], "Vec<T0>")
 listSig "drop" 2 = Just (["i64", "Vec<T0>"], "Vec<T0>")
-listSig "concatMap" 2 = Just (["impl Fn(T0) -> Vec<T1>", "Vec<T0>"], "Vec<T1>")
-listSig "indexedMap" 2 = Just (["impl Fn(i64, T0) -> T1", "Vec<T0>"], "Vec<T1>")
-listSig "indexedMapHelp" 3 = Just (["impl Fn(i64, T0) -> T1", "i64", "Vec<T0>"], "Vec<T1>")
+listSig "concatMap" 2 = Just (["impl Fn(T0) -> Vec<T1> + Clone", "Vec<T0>"], "Vec<T1>")
+-- zip : List a -> List b -> List (a, b)
+listSig "zip" 2 = Just (["Vec<T0>", "Vec<T1>"], "Vec<(T0, T1)>")
+listSig "indexedMap" 2 = Just (["impl Fn(i64, T0) -> T1 + Clone", "Vec<T0>"], "Vec<T1>")
+listSig "indexedMapHelp" 3 = Just (["impl Fn(i64, T0) -> T1 + Clone", "i64", "Vec<T0>"], "Vec<T1>")
 listSig _ _ = Nothing
 
 maybeSig :: String -> Int -> Maybe ([String], String)
-maybeSig "map" 2 = Just (["impl Fn(T0) -> T1", "SkyMaybe<T0>"], "SkyMaybe<T1>")
-maybeSig "andThen" 2 = Just (["impl Fn(T0) -> SkyMaybe<T1>", "SkyMaybe<T0>"], "SkyMaybe<T1>")
+maybeSig "map" 2 = Just (["impl Fn(T0) -> T1 + Clone", "SkyMaybe<T0>"], "SkyMaybe<T1>")
+maybeSig "andThen" 2 = Just (["impl Fn(T0) -> SkyMaybe<T1> + Clone", "SkyMaybe<T0>"], "SkyMaybe<T1>")
 maybeSig "withDefault" 2 = Just (["T0", "SkyMaybe<T0>"], "T0")
-maybeSig "map2" 3 = Just (["impl Fn(T0, T1) -> T2", "SkyMaybe<T0>", "SkyMaybe<T1>"], "SkyMaybe<T2>")
-maybeSig "map3" 4 = Just (["impl Fn(T0, T1, T2) -> T3", "SkyMaybe<T0>", "SkyMaybe<T1>", "SkyMaybe<T2>"], "SkyMaybe<T3>")
-maybeSig "map4" 5 = Just (["impl Fn(T0, T1, T2, T3) -> T4", "SkyMaybe<T0>", "SkyMaybe<T1>", "SkyMaybe<T2>", "SkyMaybe<T3>"], "SkyMaybe<T4>")
-maybeSig "map5" 6 = Just (["impl Fn(T0, T1, T2, T3, T4) -> T5", "SkyMaybe<T0>", "SkyMaybe<T1>", "SkyMaybe<T2>", "SkyMaybe<T3>", "SkyMaybe<T4>"], "SkyMaybe<T5>")
-maybeSig "andMap" 2 = Just (["SkyMaybe<T0>", "SkyMaybe<impl Fn(T0) -> T1>"], "SkyMaybe<T1>")
+maybeSig "map2" 3 = Just (["impl Fn(T0, T1) -> T2 + Clone", "SkyMaybe<T0>", "SkyMaybe<T1>"], "SkyMaybe<T2>")
+maybeSig "map3" 4 = Just (["impl Fn(T0, T1, T2) -> T3 + Clone", "SkyMaybe<T0>", "SkyMaybe<T1>", "SkyMaybe<T2>"], "SkyMaybe<T3>")
+maybeSig "map4" 5 = Just (["impl Fn(T0, T1, T2, T3) -> T4 + Clone", "SkyMaybe<T0>", "SkyMaybe<T1>", "SkyMaybe<T2>", "SkyMaybe<T3>"], "SkyMaybe<T4>")
+maybeSig "map5" 6 = Just (["impl Fn(T0, T1, T2, T3, T4) -> T5 + Clone", "SkyMaybe<T0>", "SkyMaybe<T1>", "SkyMaybe<T2>", "SkyMaybe<T3>", "SkyMaybe<T4>"], "SkyMaybe<T5>")
+maybeSig "andMap" 2 = Just (["SkyMaybe<T0>", "SkyMaybe<impl Fn(T0) -> T1 + Clone>"], "SkyMaybe<T1>")
 maybeSig "isJust" 1 = Just (["SkyMaybe<T0>"], "bool")
 maybeSig "isNothing" 1 = Just (["SkyMaybe<T0>"], "bool")
+-- combine : List (Maybe a) -> Maybe (List a)
+maybeSig "combine" 1 = Just (["Vec<SkyMaybe<T0>>"], "SkyMaybe<Vec<T0>>")
 maybeSig _ _ = Nothing
 
 errorSig :: String -> Int -> Maybe ([String], String)
-errorSig "mkInfo" 1 = Just (["String"], "SkyError")
+errorSig "mkInfo" 1 = Just (["String"], "Sky_Core_Error_ErrorInfo")
 errorSig "io" 1 = Just (["String"], "SkyError")
 errorSig "network" 1 = Just (["String"], "SkyError")
 errorSig "ffi" 1 = Just (["String"], "SkyError")
@@ -167,64 +198,60 @@ errorSig "toString" 1 = Just (["SkyError"], "String")
 errorSig "isRetryable" 1 = Just (["SkyError"], "bool")
 errorSig _ _ = Nothing
 
--- | Extract type variable names from a param type string for generics declaration
+-- | Extract type variable names (T0, T1, …) from parameter and return type strings.
+-- Works for any nesting depth: Vec<Vec<T0>>, Vec<(T0,T1)>, SkyMaybe<Vec<T0>>, etc.
 sigTVars :: [String] -> String -> [String]
-sigTVars paramTypes retType = 
-    let allWords = words (unwords (paramTypes ++ [retType]))
-        vars = [ w | w <- allWords
-               , "T" `isPrefixOf` w && all (\c -> c >= '0' && c <= '9') (drop 1 w) && not (null (drop 1 w))
-               , not ("Vec<" `isPrefixOf` w)
-               , not ("SkyMaybe<" `isPrefixOf` w) 
-               , "impl" /= w
-               , "FnOnce" /= w
-               , "Fn" /= w
-               , "bool" /= w
-               , "i64" /= w
-               , "&" /= w
-             ]
-        nested = concatMap extractNestedTVars paramTypes
-    in Set.toList $ Set.fromList (vars ++ nested)
+sigTVars paramTypes retType =
+    Set.toList $ Set.fromList $ concatMap scanTVars (paramTypes ++ [retType])
 
-extractNestedTVars :: String -> [String]
-extractNestedTVars s = case s of
-    'V':'e':'c':'<':rest -> case break (== '>') rest of 
-        (inner, _) -> if isTVar inner then [inner] else extractNestedTVars inner
-    'S':'k':'y':'M':'a':'y':'b':'e':'<':rest -> case break (== '>') rest of
-        (inner, _) -> if isTVar inner then [inner] else extractNestedTVars inner
-    'i':'m':'p':'l':' ':rest -> 
-        let (_args, rest2) = break (== ')') (drop 7 rest)  -- skip "FnOnce("
-            ret = drop 4 (drop 1 rest2)  -- skip ") -> "
-        in [ w | w <- words ret, isTVar w ]
-    _ -> []
+-- | Scan a type string for all Tnn identifiers (T0, T1, T10, …).
+scanTVars :: String -> [String]
+scanTVars [] = []
+scanTVars ('T':rest)
+    | not (null digits) && (null after || not (isIdentChar (head after))) =
+        ('T':digits) : scanTVars after
   where
-    isTVar s = "T" `isPrefixOf` s && all (\c -> c >= '0' && c <= '9') (drop 1 s) && not (null (drop 1 s))
+    digits = takeWhile isDigit rest
+    after  = dropWhile isDigit rest
+    isDigit c = c >= '0' && c <= '9'
+    isIdentChar c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || isDigit c || c == '_'
+scanTVars (_:rest) = scanTVars rest
 
 defToRustItem :: EmitCtx -> String -> Can.Def -> RustItem
 defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) = 
     let rustName = if name == "main" then "sky_main" else name
         n = length params
-        -- Check if this is a known Def function with known signature
         (paramStrs, genVars) = case knownDefSig modPrefix name n of
             Just (paramTypes, retType) ->
                 let safeParams = map (\(p, t) -> patternToRustParam p ++ ": " ++ t) (zip params paramTypes)
                     tvars = sigTVars paramTypes retType
-                    gens = if null tvars then "" else "<" ++ intercalate ", " tvars ++ ">"
+                    -- Always add Clone; member also needs PartialEq for equality comparison
+                    extraBound tv = if name == "member" && tv == "T0" then " + PartialEq" else ""
+                    genList = map (\tv -> tv ++ ": Clone" ++ extraBound tv) tvars
+                    gens = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
                 in (safeParams, gens)
             Nothing ->
                 -- Fallback: if body does list matching, use Vec<Tn> for all params
                 let useVec = bodyUsesList body
-                    safeParams = map (\(i, p) -> 
+                    safeParams = map (\(i, p) ->
                         let tn = "T" ++ show i
                         in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "SkyValue")
                         ) (zip [0..] params)
-                    gens = if useVec then "<" ++ intercalate ", " (map (\i -> "T" ++ show i) [0..length params - 1]) ++ ">" else ""
+                    genList = if useVec
+                              then map (\i -> "T" ++ show i ++ ": Clone") [0..length params - 1]
+                              else []
+                    gens = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
                 in (safeParams, gens)
-        -- sky_main always returns () since the entry wrapper handles the Task
+        -- sky_main always returns () since the entry wrapper handles the Task.
+        -- knownDefSig takes priority so stdlib functions get correct return types
+        -- even when not in ecSolvedTypes (which only covers the entry module).
         retTy = if name == "main" then "()"
-                else case Map.lookup name (ecSolvedTypes ctx) of
-                    Just ty -> let ret = extractReturnType ty
-                              in if hasTypeVars ret then "()" else typeToRustString ret
-                    Nothing -> "()"
+                else case knownDefSig modPrefix name n of
+                    Just (_, knownRetType) -> knownRetType
+                    Nothing -> case Map.lookup name (ecSolvedTypes ctx) of
+                        Just ty -> let ret = extractReturnType ty
+                                  in if hasTypeVars ret then "()" else typeToRustString ret
+                        Nothing -> "()"
     in RustFunction rustName genVars paramStrs retTy (exprToRustString ctx body)
 defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
     let rustName = if name == "main" then "sky_main" else name
@@ -281,6 +308,10 @@ typeToRustString t = case t of
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
         in modPrefix ++ name ++ "<" ++ intercalate ", " (map typeToRustString args) ++ ">"
     Can.TLambda a b -> "fn(" ++ typeToRustString a ++ ") -> " ++ typeToRustString b
+    Can.TAlias modName name _pairs _inner ->
+        let modStr = ModuleName._name modName
+            modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+        in modPrefix ++ name
     _ -> "SkyValue"
 
 rustSafeIdent :: String -> String
@@ -317,11 +348,55 @@ rustSafeIdent "pub" = "r#pub"
 rustSafeIdent "move" = "r#move"
 rustSafeIdent name = name
 
+isWildcard :: Can.Pattern -> Bool
+isWildcard (Ann.At _ Can.PAnything) = True
+isWildcard _ = False
+
 patternToRustParam :: Can.Pattern -> String
 patternToRustParam (Ann.At _ pat) = case pat of
     Can.PVar n -> rustSafeIdent n
     Can.PAnything -> "_"
     _ -> "_"
+
+-- | Walk an expression and collect VarLocal names, counting occurrences.
+-- Used to decide which variables need .clone() (those used ≥ 2 times).
+collectVarLocalsMulti :: Can.Expr -> Map.Map String Int
+collectVarLocalsMulti = go Set.empty
+  where
+    go bound (Ann.At _ expr) = case expr of
+        Can.VarLocal n | n `Set.notMember` bound -> Map.singleton n 1
+        Can.VarLocal _ -> Map.empty
+        Can.Call fn args -> Map.unionsWith (+) (go bound fn : map (go bound) args)
+        Can.Lambda params body ->
+            let bound' = foldl (\s p -> case p of { Ann.At _ (Can.PVar n) -> Set.insert n s; _ -> s }) bound params
+            in go bound' body
+        Can.Let (Can.Def (Ann.At _ name) _ defBody) body ->
+            let bound' = Set.insert name bound
+            in Map.unionWith (+) (go bound' defBody) (go bound' body)
+        Can.LetRec defs body ->
+            let bound' = foldl (\s (Can.Def (Ann.At _ n) _ _) -> Set.insert n s) bound defs
+                goDefs = foldl (\a (Can.Def _ _ d) -> Map.unionWith (+) a (go bound' d)) Map.empty defs
+            in Map.unionWith (+) (go bound' body) goDefs
+        Can.LetDestruct _ expr body -> Map.unionWith (+) (go bound expr) (go bound body)
+        Can.Case _ branches -> foldl (\a (Can.CaseBranch _ b) -> Map.unionWith (+) a (go bound b)) Map.empty branches
+        Can.If branches elseBranch ->
+            foldl (\a (c, t) -> Map.unionWith (+) a (Map.unionWith (+) (go bound c) (go bound t))) (go bound elseBranch) branches
+        Can.Binop _ _ _ _ a b -> Map.unionWith (+) (go bound a) (go bound b)
+        Can.Access r _ -> go bound r
+        Can.Update _ r updates -> Map.unionWith (+) (go bound r) (foldl (\a (_, Can.FieldUpdate _ e) -> Map.unionWith (+) a (go bound e)) Map.empty (Map.toList updates))
+        Can.Record fields -> foldl (\a (_, v) -> Map.unionWith (+) a (go bound v)) Map.empty (Map.toList fields)
+        Can.List es -> foldl (\a e -> Map.unionWith (+) a (go bound e)) Map.empty es
+        Can.Tuple a b rest -> foldl (\a e -> Map.unionWith (+) a (go bound e)) Map.empty (a:b:rest)
+        Can.Negate e -> go bound e
+        Can.Accessor _ -> Map.empty
+        Can.VarTopLevel _ _ -> Map.empty
+        Can.VarKernel _ _ -> Map.empty
+        Can.VarCtor _ _ _ _ _ -> Map.empty
+        Can.Chr _ -> Map.empty
+        Can.Str _ -> Map.empty
+        Can.Int _ -> Map.empty
+        Can.Float _ -> Map.empty
+        Can.Unit -> Map.empty
 
 -- | Walk an expression and collect VarLocal names that refer to variables
 -- from ENCLOSING scopes (not bound within the expression itself).
@@ -337,11 +412,14 @@ collectVarLocals = go Set.empty
         Can.Lambda params body ->
             let bound' = foldl (\s p -> case p of { Ann.At _ (Can.PVar n) -> Set.insert n s; _ -> s }) bound params
             in go bound' body
-        Can.Let (Can.Def (Ann.At _ name) _ _) body -> go (Set.insert name bound) body
+        Can.Let (Can.Def (Ann.At _ name) _ defBody) body ->
+            let bound' = Set.insert name bound
+            in Set.union (go bound' defBody) (go bound' body)
         Can.LetRec defs body ->
             let bound' = foldl (\s (Can.Def (Ann.At _ n) _ _) -> Set.insert n s) bound defs
-            in go bound' body
-        Can.LetDestruct _ _ body -> go bound body
+                goDefs = foldl (\a (Can.Def _ _ d) -> Set.union a (go bound' d)) Set.empty defs
+            in Set.union (go bound' body) goDefs
+        Can.LetDestruct _ expr body -> Set.union (go bound expr) (go bound body)
         Can.Case _ branches -> foldl (\a (Can.CaseBranch _ b) -> Set.union a (go bound b)) Set.empty branches
         Can.If branches elseBranch ->
             foldl (\a (c, t) -> Set.union a (Set.union (go bound c) (go bound t))) (go bound elseBranch) branches
@@ -392,15 +470,26 @@ exprToRustInner ctx e = case e of
             let fmt = concat (replicate (length args) "{}")
             in "println!(\"" ++ fmt ++ "\", " ++ intercalate ", " (map (exprToRustString ctx) args) ++ ")"
         _ -> 
-            let argsStrs = map (\a -> case a of
+            -- Clone VarLocal args for every function call EXCEPT Task_run,
+            -- whose argument is a Pin<Box<dyn Future>> which does not implement Clone.
+            let isTaskRun = case fn of Ann.At _ (Can.VarKernel "Task" "run") -> True; _ -> False
+                argsStrs = map (\a -> case a of
                     Ann.At _ (Can.Lambda ps body) ->
                         let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
                             captured = Set.toList (Set.difference (collectVarLocals body) paramNames)
                             clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+                            -- Also detect multi-use variables INSIDE the closure body and clone them
+                            innerCounts = collectVarLocalsMulti body
+                            innerMulti = [ v | (v, c) <- Map.toList innerCounts, c >= 2, v `notElem` map snd (zip [0..] (map patternToRustParam ps)) ]
+                            innerClones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") innerMulti
                             psStr = intercalate ", " (map patternToRustParam ps)
-                        in if null captured
+                        in if null captured && null innerMulti
                            then "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " }"
-                           else "{ " ++ clones ++ "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " } }"
+                           else let outerBlock = if null captured then "" else "{ " ++ clones
+                                    innerPart = "move |" ++ psStr ++ "| { " ++ innerClones ++ exprToRustString ctx body ++ " }"
+                                in if null captured then innerPart
+                                   else "{ " ++ clones ++ innerPart ++ " }"
+                    Ann.At _ (Can.VarLocal n) | not isTaskRun -> rustSafeIdent n ++ ".clone()"
                     _ -> exprToRustString ctx a) args
             in exprToRustString ctx fn ++ "(" ++ intercalate ", " argsStrs ++ ")"
     Can.If branches elseBranch -> 
@@ -411,32 +500,37 @@ exprToRustInner ctx e = case e of
     Can.LetRec defs body ->
         "let mut " ++ intercalate "; let mut " (map (defToRustString ctx) defs) ++ "; " ++ exprToRustString ctx body
     Can.LetDestruct pat expr body ->
-        -- Zero-arg lambda: Task auto-force (mirrors Go's rt.AnyTaskRun).
-        -- Non-zero-arg lambda: closure binding.
-        -- Clone declarations are wrapped in a {} block so the original
-        -- variable stays accessible afterward — only the block-scoped
-        -- clone is moved into the closure.
-        let exprStr = case expr of
-                Ann.At _ (Can.Lambda [] lambdaBody) ->
-                    let captured = Set.toList (collectVarLocals lambdaBody)
-                        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
-                        inner = "(move || { " ++ exprToRustString ctx lambdaBody ++ " })()"
-                    in if null captured then inner else "{ " ++ clones ++ inner ++ " }"
+        -- Clone captured locals used ≥ 2 times so each use gets its own copy.
+        let counts = collectVarLocalsMulti expr
+            multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
+            clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") multi
+            hasClone = not (null multi)
+            exprStr = case expr of
+                Ann.At _ (Can.Lambda ps lambdaBody)
+                    | null ps || all isWildcard ps ->
+                        let inner = "(move || { " ++ exprToRustString ctx lambdaBody ++ " })()"
+                        in if not hasClone then inner else "{ " ++ clones ++ inner ++ " }"
                 Ann.At _ (Can.Lambda ps lambdaBody) ->
                     let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
-                        captured = Set.toList (Set.difference (collectVarLocals lambdaBody) paramNames)
-                        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+                        innerCapt = Set.toList (Set.difference (collectVarLocals lambdaBody) paramNames)
+                        innerClones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") innerCapt
                         psStr = intercalate ", " (map patternToRustParam ps)
                         inner = "move |" ++ psStr ++ "| { " ++ exprToRustString ctx lambdaBody ++ " }"
-                    in if null captured then inner else "{ " ++ clones ++ inner ++ " }"
-                _ -> exprToRustString ctx expr
+                    in if null innerCapt && not hasClone then inner
+                       else "{ " ++ clones ++ innerClones ++ inner ++ " }"
+                _ -> if not hasClone then exprToRustString ctx expr
+                     else "{ " ++ clones ++ exprToRustString ctx expr ++ " }"
         in "let " ++ patternToMatchString pat ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
-    Can.Case scrut branches -> 
+    Can.Case scrut branches ->
         let scrutStr = exprToRustString ctx scrut
-            -- Detect slice patterns in branches (cons patterns) and wrap scrutinee with as_slice()
+            -- Detect slice patterns → wrap with .as_slice()
             hasCons = any (\(Can.CaseBranch pat _) -> hasConsP pat) branches
-            wrapped = if hasCons then "(" ++ scrutStr ++ ").as_slice()" else scrutStr
-        in "match " ++ wrapped ++ " { " ++ 
+            -- Detect string literal patterns → wrap with .as_str() so &str patterns compile
+            hasStr  = any (\(Can.CaseBranch pat _) -> hasStrPat pat) branches
+            wrapped = if hasCons then "(" ++ scrutStr ++ ").as_slice()"
+                      else if hasStr then scrutStr ++ ".as_str()"
+                      else scrutStr
+        in "match " ++ wrapped ++ " { " ++
         intercalate ", " (map (branchToRustString ctx) branches) ++ " }"
       where
         hasConsP (Ann.At _ p) = case p of
@@ -497,13 +591,41 @@ binopToRust op = case op of
     _ -> op
 
 defToRustString :: EmitCtx -> Can.Def -> String
+-- Zero-arg Def: inject .clone() for captured locals that are used ≥ 2 times,
+-- so multiple uses of the same variable (f(x); g(x) pattern) compile.
+defToRustString ctx (Can.Def (Ann.At _ name) [] body) =
+    let counts = collectVarLocalsMulti body
+        multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
+        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") multi
+    in case body of
+        Ann.At _ (Can.Lambda [] lambdaBody) ->
+            let inner = "|| { " ++ exprToRustString ctx lambdaBody ++ " }"
+            in name ++ " = " ++ if null multi then inner else "{ " ++ clones ++ inner ++ " }"
+        _ ->
+            let inner = exprToRustString ctx body
+            in name ++ " = " ++ if null multi then inner else "{ " ++ clones ++ inner ++ " }"
+-- Multi-arg Def: closure binding.
 defToRustString ctx (Can.Def (Ann.At _ name) params body) =
     name ++ " = |" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ exprToRustString ctx body ++ " }"
 defToRustString _ctx _ = "_ = unimplemented()"
 
 branchToRustString :: EmitCtx -> Can.CaseBranch -> String
 branchToRustString ctx (Can.CaseBranch pat body) =
-    patternToMatchString pat ++ " => " ++ exprToRustString ctx body
+    let patStr  = patternToMatchString pat
+        bodyStr = exprToRustString ctx body
+        -- Slice patterns bind references (&T for head, &[T] for tail).
+        -- Inject .clone() / .to_vec() so the body sees owned values.
+        prefix = case pat of
+            Ann.At _ (Can.PCons headPat tailPat) ->
+                let hc = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") (patBindingVars headPat)
+                    tv = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".to_vec(); ") (patBindingVars tailPat)
+                in hc ++ tv
+            Ann.At _ (Can.PList items) ->
+                concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") (concatMap patBindingVars items)
+            _ -> ""
+    in if null prefix
+       then patStr ++ " => " ++ bodyStr
+       else patStr ++ " => { " ++ prefix ++ bodyStr ++ " }"
 
 patternToMatchString :: Can.Pattern -> String
 patternToMatchString (Ann.At _ pat) = case pat of
@@ -573,6 +695,7 @@ emitRust b = unlines $
     , "pub struct Error(pub String);"
     , ""
     , "// Maybe equivalent"
+    , "#[derive(Clone)]"
     , "pub enum SkyMaybe<T> {"
     , "    Nothing,"
     , "    Just(T),"
@@ -668,14 +791,14 @@ emitRust b = unlines $
     , "}"
     , ""
     , "// --- Task type (unified error type = SkyError) ---"
-    , "type SkyTask<A> = Pin<Box<dyn Future<Output = SkyResult<SkyError, A>> + Send>>;"
+    , "type SkyTask<A> = Pin<Box<dyn Future<Output = SkyResult<SkyError, A>> + Send + 'static>>;"
     , ""
     , "// --- Task combinators ---"
-    , "pub fn Task_succeed<A>(a: A) -> SkyTask<A> {"
+    , "pub fn Task_succeed<A: Send + 'static>(a: A) -> SkyTask<A> {"
     , "    Box::pin(ready(SkyResult::Ok(a)))"
     , "}"
-    , "pub fn Task_map<A, B>("
-    , "    f: impl FnOnce(A) -> B,"
+    , "pub fn Task_map<A: Send + 'static, B: Send + 'static>("
+    , "    f: impl FnOnce(A) -> B + Send + 'static,"
     , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
     , "    |task| Box::pin(async move {"
     , "        match task.await {"
@@ -684,8 +807,8 @@ emitRust b = unlines $
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_andThen<A, B>("
-    , "    f: impl FnOnce(A) -> SkyTask<B>,"
+    , "pub fn Task_andThen<A: Send + 'static, B: Send + 'static>("
+    , "    f: impl FnOnce(A) -> SkyTask<B> + Send + 'static,"
     , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
     , "    |task| Box::pin(async move {"
     , "        match task.await {"
@@ -694,8 +817,8 @@ emitRust b = unlines $
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_onError<A>("
-    , "    f: impl FnOnce(SkyError) -> SkyTask<A>,"
+    , "pub fn Task_onError<A: Send + 'static>("
+    , "    f: impl FnOnce(SkyError) -> SkyTask<A> + Send + 'static,"
     , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<A> {"
     , "    |task| Box::pin(async move {"
     , "        match task.await {"
@@ -704,11 +827,11 @@ emitRust b = unlines $
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_run<A>(task: SkyTask<A>) -> SkyResult<SkyError, A> {"
+    , "pub fn Task_run<A: Send + 'static>(task: SkyTask<A>) -> SkyResult<SkyError, A> {"
     , "    block_on(task)"
     , "}"
     , "// --- Parallel execution (tokio::spawn, ~Go goroutines) ---"
-    , "pub fn Task_parallel<A>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
+    , "pub fn Task_parallel<A: Send + 'static>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
     , "    Box::pin(async move {"
     , "        let handles: Vec<tokio::task::JoinHandle<SkyResult<SkyError, A>>> ="
     , "            tasks.into_iter().map(|t| tokio::spawn(t)).collect();"
