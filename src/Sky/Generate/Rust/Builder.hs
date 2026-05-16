@@ -478,17 +478,10 @@ exprToRustInner ctx e = case e of
                         let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
                             captured = Set.toList (Set.difference (collectVarLocals body) paramNames)
                             clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
-                            -- Also detect multi-use variables INSIDE the closure body and clone them
-                            innerCounts = collectVarLocalsMulti body
-                            innerMulti = [ v | (v, c) <- Map.toList innerCounts, c >= 2, v `notElem` map snd (zip [0..] (map patternToRustParam ps)) ]
-                            innerClones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") innerMulti
                             psStr = intercalate ", " (map patternToRustParam ps)
-                        in if null captured && null innerMulti
+                        in if null captured
                            then "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " }"
-                           else let outerBlock = if null captured then "" else "{ " ++ clones
-                                    innerPart = "move |" ++ psStr ++ "| { " ++ innerClones ++ exprToRustString ctx body ++ " }"
-                                in if null captured then innerPart
-                                   else "{ " ++ clones ++ innerPart ++ " }"
+                           else "{ " ++ clones ++ "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " } }"
                     Ann.At _ (Can.VarLocal n) | not isTaskRun -> rustSafeIdent n ++ ".clone()"
                     _ -> exprToRustString ctx a) args
             in exprToRustString ctx fn ++ "(" ++ intercalate ", " argsStrs ++ ")"
