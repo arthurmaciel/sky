@@ -120,6 +120,7 @@ data EmitCtx = EmitCtx
     , ecSolvedTypes :: Map.Map String Can.Type  -- function name -> inferred type
     , ecCloneVars :: Set.Set String  -- vars that need .clone() at every use site
     , ecPipeInnerType :: Maybe String  -- inner type of piped Task<A>, set by |>
+    , ecUsesTaskRun :: Bool  -- user calls Task.run → main returns ()
     }
 
 -- | Build a map from field-name-signature to struct name
@@ -404,16 +405,17 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                                 gs = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
                             in (pStrs, gs)
                 in (safeParams, genVars)
-        -- sky_main always returns () since the entry wrapper handles the Task.
-        -- knownDefSig takes priority so stdlib functions get correct return types
-        -- even when not in ecSolvedTypes (which only covers the entry module).
-        retTy = if name == "main" then "()"
+        -- sky_main returns SkyTask<()> when the user doesn't use Task.run
+        -- (body is the Task, e.g. `main = println "Hello"`).
+        -- When Task.run is used, main returns () (side effect is piped through run).
+        retTy = if name == "main"
+                then if ecUsesTaskRun ctx then "()" else "SkyTask<()>"
                 else case knownDefSig modPrefix name n of
                     Just (_, knownRetType) -> knownRetType
                     Nothing -> case Map.lookup name (ecSolvedTypes ctx) of
                         Just ty -> let ret = extractReturnType ty
-                                  in if hasTypeVars ret then "()" else typeToRustString ret
-                        Nothing -> "()"
+                                  in if hasTypeVars ret then "SkyTask<()>" else typeToRustString ret
+                        Nothing -> "SkyTask<()>"
     in RustFunction rustName genVars paramStrs retTy (exprToRustString ctx body)
 defToRustItem _ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
     let rustName = if name == "main" then "sky_main" else name
@@ -631,9 +633,8 @@ exprToRustInner ctx e = case e of
     Can.Lambda params body -> 
         "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ exprToRustString ctx body ++ " }"
     Can.Call fn args -> case exprToRustString ctx fn of
-        fnName | "println" `isSuffixOf` fnName -> 
-            let fmt = concat (replicate (length args) "{}")
-            in "{ println!(\"" ++ fmt ++ "\", " ++ intercalate ", " (map (exprToRustString ctx) args) ++ "); Box::pin(ready(ok_res(()))) }"
+        fnName | "println" `isSuffixOf` fnName ->
+            "log_info(" ++ intercalate " ++ \" \" ++ " (map (exprToRustString ctx) args) ++ ")"
         _ -> 
             -- Clone VarLocal args for every function call EXCEPT Task_run,
             -- whose argument is a Pin<Box<dyn Future>> which does not implement Clone.
@@ -914,7 +915,7 @@ buildProgram mods solvedTypes =
         
         recordMap = Map.union aliasMap anonKeyMap
         
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty, ecPipeInnerType = Nothing }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage }
         usage = analyzeKernelUsage mods
         existingTypes = concatMap (\m -> 
             let prefix = moduleNameToRust (Can._name m)
@@ -953,7 +954,7 @@ emitRust b dbPath dbDriver = unlines $ concat
     , skyErrorLine b
     , userModuleSection b
     , ffiPlaceholderSection b
-    , entryPointSection
+    , entryPointSection (builderKernels b)
     ]
 
 -- | Header and file-level attributes
@@ -1128,14 +1129,14 @@ taskSection uk =
     , ""
     , "// --- Task combinators (std::future only, no tokio needed) ---"
     , "pub fn task_succeed<A: Send + 'static>(a: A) -> SkyTask<A> {"
-    , "    Box::pin(ready(SkyResult::Ok(a)))"
+    , "    Box::pin(ready(ok_res(a)))"
     , "}"
     , "pub fn task_map<A: Send + 'static, B: Send + 'static>("
     , "    f: impl FnOnce(A) -> B + Send + 'static,"
     , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> + Send + 'static {"
     , "    |task| Box::pin(async move {"
     , "        match task.await {"
-    , "            SkyResult::Ok(a) => SkyResult::Ok(f(a)),"
+    , "            SkyResult::Ok(a) => ok_res(f(a)),"
     , "            SkyResult::Err(e) => SkyResult::Err(e),"
     , "        }"
     , "    })"
@@ -1155,7 +1156,7 @@ taskSection uk =
     , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<A> + Send + 'static {"
     , "    |task| Box::pin(async move {"
     , "        match task.await {"
-    , "            SkyResult::Ok(a) => SkyResult::Ok(a),"
+    , "            SkyResult::Ok(a) => ok_res(a),"
     , "            SkyResult::Err(e) => f(e).await,"
     , "        }"
     , "    })"
@@ -1164,13 +1165,13 @@ taskSection uk =
     , "    Box::pin(ready(SkyResult::Err(e)))"
     , "}"
     , "pub fn task_perform<A: Send + 'static>(task: SkyTask<A>) -> SkyTask<()> {"
-    , "    Box::pin(async move { let _ = task.await; SkyResult::Ok(()) })"
+    , "    Box::pin(async move { let _ = task.await; ok_res(()) })"
     , "}"
     , "pub fn task_sequence<A: Send + 'static>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
     , "    Box::pin(async move {"
     , "        let mut out = Vec::with_capacity(tasks.len());"
     , "        for t in tasks { match t.await { SkyResult::Ok(a) => out.push(a), SkyResult::Err(e) => return SkyResult::Err(e) } }"
-    , "        SkyResult::Ok(out)"
+    , "        ok_res(out)"
     , "    })"
     , "}"
     ] ++
@@ -1195,7 +1196,7 @@ taskSection uk =
         , "                SkyResult::Err(e) => return SkyResult::Err(e),"
         , "            }"
         , "        }"
-        , "        SkyResult::Ok(out)"
+        , "        ok_res(out)"
         , "    })"
         , "}"
         ]
@@ -1284,7 +1285,7 @@ dbSection uk dbPath dbDriver b =
     , "pub fn db_connect(_unit: ()) -> SkyTask<Db> {"
     , "    Box::pin(async move {"
     , "        match DbPool::connect(SKY_DB_URL).await {"
-    , "            Ok(pool) => SkyResult::Ok(pool),"
+    , "            Ok(pool) => ok_res(pool),"
     , "            Err(e) => SkyResult::Err(sky_err(&e)),"
     , "        }"
     , "    })"
@@ -1292,7 +1293,7 @@ dbSection uk dbPath dbDriver b =
     , "pub fn db_exec_raw(conn: Db, sql: String) -> SkyTask<()> {"
     , "    Box::pin(async move {"
     , "        match sqlx::query(&sql).execute(&conn).await {"
-    , "            Ok(_) => SkyResult::Ok(()),"
+    , "            Ok(_) => ok_res(()),"
     , "            Err(e) => SkyResult::Err(sky_err(&e)),"
     , "        }"
     , "    })"
@@ -1301,7 +1302,7 @@ dbSection uk dbPath dbDriver b =
     , "    Box::pin(async move {"
     , "        let final_sql = build_sql(&sql, &params);"
     , "        match sqlx::query(&final_sql).execute(&conn).await {"
-    , "            Ok(_) => SkyResult::Ok(()),"
+    , "            Ok(_) => ok_res(()),"
     , "            Err(e) => SkyResult::Err(sky_err(&e)),"
     , "        }"
     , "    })"
@@ -1312,7 +1313,7 @@ dbSection uk dbPath dbDriver b =
     , "        match sqlx::query(&final_sql).fetch_all(&conn).await {"
     , "            Ok(rows) => {"
     , "                let result: Vec<HashMap<String, String>> = rows.iter().map(|r| row_to_map(r)).collect();"
-    , "                SkyResult::Ok(result)"
+    , "                ok_res(result)"
     , "            },"
     , "            Err(e) => SkyResult::Err(sky_err(&e)),"
     , "        }"
@@ -1332,7 +1333,7 @@ systemHelperSection :: [String]
 systemHelperSection =
     [ ""
     , "// System helpers"
-    , "pub fn system_args(_: ()) -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().skip(1).collect()))) }"
+    , "pub fn system_args(_: ()) -> SkyTask<Vec<String>> { Box::pin(ready(ok_res(std::env::args().skip(1).collect()))) }"
     , "pub fn system_exit(code: i64) -> ! { std::process::exit(code as i32) }"
     ]
 
@@ -1342,7 +1343,7 @@ logHelperSection =
     [ ""
     , "// Log helpers"
     , "pub fn log_info(msg: String) -> SkyTask<()> {"
-    , "    println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
+    , "    println!(\"{}\", msg); Box::pin(ready(ok_res(())))"
     , "}"
     , ""
     , "// Format attrs list [k,v,k,v,...] into \" key=value\" segments"
@@ -1360,17 +1361,17 @@ logHelperSection =
     , "}"
     , ""
     , "pub fn log_info_with(msg: String, attrs: Vec<String>) -> SkyTask<()> {"
-    , "    println!(\"{}{}\", msg, fmt_attrs(&attrs)); Box::pin(ready(SkyResult::Ok(())))"
+    , "    println!(\"{}{}\", msg, fmt_attrs(&attrs)); Box::pin(ready(ok_res(())))"
     , "}"
     , "pub fn log_error_with(msg: String, attrs: Vec<String>) -> SkyTask<()> {"
-    , "    eprintln!(\"{}{}\", msg, fmt_attrs(&attrs)); Box::pin(ready(SkyResult::Ok(())))"
+    , "    eprintln!(\"{}{}\", msg, fmt_attrs(&attrs)); Box::pin(ready(ok_res(())))"
     , "}"
     , ""
     , "pub fn log_debug(msg: String) -> SkyTask<()> {"
-    , "    eprintln!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
+    , "    eprintln!(\"{}\", msg); Box::pin(ready(ok_res(())))"
     , "}"
     , "pub fn log_warn(msg: String) -> SkyTask<()> {"
-    , "    eprintln!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
+    , "    eprintln!(\"{}\", msg); Box::pin(ready(ok_res(())))"
     , "}"
     ]
 
@@ -1453,7 +1454,7 @@ jsonSection uk =
     , "    Box::new(move |v| { let a = da(v); let b = db(v); match a { SkyResult::Ok(av) => match b { SkyResult::Ok(bv) => json_dec_ok(f(av, bv)), SkyResult::Err(_) => json_dec_err_str(\"decode error\".into()) }, SkyResult::Err(_) => json_dec_err_str(\"decode error\".into()) } })"
     , "}"
     , "pub fn json_dec_succeed<A>(a: A) -> Decoder<A> {"
-    , "    Box::new(move |_| SkyResult::Ok(a))"
+    , "    Box::new(move |_| ok_res(a))"
     , "}"
     , "pub fn json_dec_fail<A>(msg: String) -> Decoder<A> {"
     , "    Box::new(move |_| json_dec_err_str(msg))"
@@ -1473,7 +1474,7 @@ jsonSection uk =
     , "    move |next_decoder| {"
     , "        Box::new(move |v| {"
     , "            let field_val = match v.get(&name) { Some(f) => match decoder(f) { SkyResult::Ok(t) => t, SkyResult::Err(_) => return json_dec_err_str(\"required field decode error\".into()) }, None => return json_dec_err_str(format!(\"missing required: {}\", name)) };"
-    , "            match next_decoder(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), SkyResult::Err(_) => json_dec_err_str(\"next decode error\".into()) }"
+    , "            match next_decoder(v) { SkyResult::Ok(f) => ok_res(f(field_val)), SkyResult::Err(_) => json_dec_err_str(\"next decode error\".into()) }"
     , "        })"
     , "    }"
     , "}"
@@ -1481,7 +1482,7 @@ jsonSection uk =
     , "    move |next_decoder| {"
     , "        Box::new(move |v| {"
     , "            let field_val = match v.get(&name) { Some(_) => match decoder(v.get(&name)) { SkyResult::Ok(t) => t, SkyResult::Err(_) => default.clone() }, None => default.clone() };"
-    , "            match next_decoder(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), SkyResult::Err(_) => json_dec_err_str(\"next decode error\".into()) }"
+    , "            match next_decoder(v) { SkyResult::Ok(f) => ok_res(f(field_val)), SkyResult::Err(_) => json_dec_err_str(\"next decode error\".into()) }"
     , "        })"
     , "    }"
     , "}"
@@ -1507,11 +1508,11 @@ extraKernelSection b =
     , "        .duration_since(std::time::UNIX_EPOCH)"
     , "        .unwrap_or_default()"
     , "        .as_millis() as i64;"
-    , "    Box::pin(ready(SkyResult::Ok(ms)))"
+    , "    Box::pin(ready(ok_res(ms)))"
     , "}"
     , "pub fn time_sleep(ms: i64) -> SkyTask<()> {"
     , "    std::thread::sleep(std::time::Duration::from_millis(ms as u64));"
-    , "    Box::pin(ready(SkyResult::Ok(())))"
+    , "    Box::pin(ready(ok_res(())))"
     , "}"
     , "pub fn time_unix_millis(_: ()) -> SkyTask<i64> { time_now(()) }"
     , ""
@@ -1530,38 +1531,38 @@ extraKernelSection b =
     , "pub fn random_int(_: ()) -> SkyTask<i64> {"
     , "    let mut seed = lcg_seed();"
     , "    let v = lcg_next(&mut seed) as i64;"
-    , "    Box::pin(ready(SkyResult::Ok(v)))"
+    , "    Box::pin(ready(ok_res(v)))"
     , "}"
     , "pub fn random_float(_: ()) -> SkyTask<f64> {"
     , "    let mut seed = lcg_seed();"
     , "    let v = (lcg_next(&mut seed) >> 11) as f64 * (1.0 / 9007199254740992.0);"
-    , "    Box::pin(ready(SkyResult::Ok(v)))"
+    , "    Box::pin(ready(ok_res(v)))"
     , "}"
     , "pub fn random_choice(items: Vec<String>) -> SkyTask<String> {"
     , "    let mut seed = lcg_seed();"
     , "    let idx = (lcg_next(&mut seed) as usize) % items.len().max(1);"
-    , "    Box::pin(ready(SkyResult::Ok(items.get(idx).cloned().unwrap_or_default())))"
+    , "    Box::pin(ready(ok_res(items.get(idx).cloned().unwrap_or_default())))"
     , "}"
     , ""
     , "// --- File ---"
     , "pub fn file_read_file(path: String) -> SkyTask<String> {"
     , "    match std::fs::read_to_string(&path) {"
-    , "        Ok(s) => Box::pin(ready(SkyResult::Ok(s))),"
+    , "        Ok(s) => Box::pin(ready(ok_res(s))),"
     , "        Err(e) => Box::pin(ready(SkyResult::Err(str_err(format!(\"{}\", e)))))"
     , "    }"
     , "}"
     , "pub fn file_write_file(path: String, content: String) -> SkyTask<()> {"
     , "    match std::fs::write(&path, &content) {"
-    , "        Ok(_) => Box::pin(ready(SkyResult::Ok(()))),"
+    , "        Ok(_) => Box::pin(ready(ok_res(()))),"
     , "        Err(e) => Box::pin(ready(SkyResult::Err(str_err(format!(\"{}\", e)))))"
     , "    }"
     , "}"
     , "pub fn file_exists(path: String) -> SkyTask<bool> {"
-    , "    Box::pin(ready(SkyResult::Ok(std::path::Path::new(&path).exists())))"
+    , "    Box::pin(ready(ok_res(std::path::Path::new(&path).exists())))"
     , "}"
     , "pub fn file_delete(path: String) -> SkyTask<()> {"
     , "    match std::fs::remove_file(&path) {"
-    , "        Ok(_) => Box::pin(ready(SkyResult::Ok(()))),"
+    , "        Ok(_) => Box::pin(ready(ok_res(()))),"
     , "        Err(e) => Box::pin(ready(SkyResult::Err(str_err(format!(\"{}\", e)))))"
     , "    }"
     , "}"
@@ -1573,7 +1574,7 @@ extraKernelSection b =
     , "    for _ in 0..n {"
     , "        out.push(lcg_next(&mut seed) as i64);"
     , "    }"
-    , "    Box::pin(ready(SkyResult::Ok(out)))"
+    , "    Box::pin(ready(ok_res(out)))"
     , "}"
     , "pub fn crypto_random_token(n: i64) -> SkyTask<String> {"
     , "    let mut seed = lcg_seed();"
@@ -1584,7 +1585,7 @@ extraKernelSection b =
     , "        out.push(hex.as_bytes()[(b & 0x0f) as usize] as char);"
     , "        out.push(hex.as_bytes()[((b >> 4) & 0x0f) as usize] as char);"
     , "    }"
-    , "    Box::pin(ready(SkyResult::Ok(out)))"
+    , "    Box::pin(ready(ok_res(out)))"
     , "}"
     , ""
     , "// --- Crypto.sha256 (HEX stub) ---"
@@ -1682,17 +1683,28 @@ ffiPlaceholderSection b =
     ] ++ map ffiPlaceholder (collectUndefinedTypes b)
 
 -- | Entry point
-entryPointSection :: [String]
-entryPointSection =
+entryPointSection :: UsedKernels -> [String]
+entryPointSection uk =
+    let hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk
+        mainIsTask = not (usesTaskRun uk)  -- if user uses Task.run, main returns ()
+    in
     [ ""
     , "// ==========================================="
     , "// ENTRY POINT"
     , "// ==========================================="
     , ""
     , "fn main() {"
-    , "    sky_main();"
-    , "}"
-    ]
+    ] ++ (if hasTokio && mainIsTask then
+        -- sky_main returns SkyTask<()>, run it via block_on
+        [ "    let _ = block_on(sky_main());"
+        , "}"
+        ]
+      else
+        -- sky_main returns () (Task.run is used) or there's no tokio:
+        -- just call, side effects fire eagerly via log_info etc.
+        [ "    sky_main();"
+        , "}"
+        ])
 
 typeDefToString :: RustTypeDef -> String
 typeDefToString (REnumDef name variants) = 
