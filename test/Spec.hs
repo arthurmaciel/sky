@@ -21,6 +21,7 @@ import qualified Sky.Type.TupleLambdaSpec
 import qualified Sky.Type.UiOnSubmitTypedRecordSpec
 import qualified Sky.Type.UfCycleGuardSpec
 import qualified Sky.Type.RecordFieldExactnessSpec
+import qualified Sky.Build.UiFillCascadeSpec
 import qualified Sky.Format.FormatSpec
 import qualified Sky.Build.GoKeywordCollisionSpec
 import qualified Sky.Build.NestedPatternSpec
@@ -148,6 +149,12 @@ main = hspec $ do
     -- self-referential cycle into the UF graph; variableToType
     -- then recursed forever through cyclic App1 args.
     describe "Sky.Type.UfCycleGuard"     Sky.Type.UfCycleGuardSpec.spec
+    -- v0.13.3 Std.Ui Fill cross-axis cascade fix: widthCss/heightCss
+    -- used to emit `flex-grow:1; align-self:stretch;` for any Fill
+    -- regardless of parent flex-direction. In a column parent every
+    -- child marked `width: fill` then competed for vertical space,
+    -- breaking the typical header/main/footer layout.
+    describe "Sky.Build.UiFillCascade"   Sky.Build.UiFillCascadeSpec.spec
     -- Closed-record exactness + cross-module externals registration:
     --   1. unifyRecords (Sky.Type.Unify) used to silently merge field-
     --      mismatched closed records under a fresh extension. Now
