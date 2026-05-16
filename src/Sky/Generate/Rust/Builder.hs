@@ -1085,6 +1085,16 @@ taskSection uk =
     , "pub fn task_fail<A: Send + 'static>(e: SkyError) -> SkyTask<A> {"
     , "    Box::pin(ready(SkyResult::Err(e)))"
     , "}"
+    , "pub fn task_perform<A: Send + 'static>(task: SkyTask<A>) -> SkyTask<()> {"
+    , "    Box::pin(async move { let _ = task.await; SkyResult::Ok(()) })"
+    , "}"
+    , "pub fn task_sequence<A: Send + 'static>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
+    , "    Box::pin(async move {"
+    , "        let mut out = Vec::with_capacity(tasks.len());"
+    , "        for t in tasks { match t.await { SkyResult::Ok(a) => out.push(a), SkyResult::Err(e) => return SkyResult::Err(e) } }"
+    , "        SkyResult::Ok(out)"
+    , "    })"
+    , "}"
     ] ++
     (if needsTokio
      then
