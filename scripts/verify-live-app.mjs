@@ -127,6 +127,23 @@ async function main() {
     });
     page.on('pageerror', err => consoleErrors.push(`pageerror: ${err.message}`));
 
+    // v0.13.2: hard-fail probe to catch the "click is a no-op" class
+    // (Std.Ui events stripped at render time → button has no
+    // sky-click attr → DOM click never POSTs /_sky/event).  Watch
+    // every /_sky/event POST; the scenario runner asserts at least
+    // one round-trip on apps with interactive scenarios so a silent
+    // regression in the event-emission pipeline can't ship.
+    const skyEventPosts = [];
+    page.on('request', req => {
+        if (req.method() === 'POST' && req.url().includes('/_sky/event')) {
+            skyEventPosts.push({
+                url: req.url(),
+                postData: req.postData() || '',
+                ts: Date.now(),
+            });
+        }
+    });
+
     let outcome = 'PASS';
     let detail = '';
     try {
@@ -147,9 +164,28 @@ async function main() {
         if (typeof scenarioFn !== 'function') {
             throw new Error(`unknown scenario: ${scenarioName} (known: ${Object.keys(scenarios).join(', ')})`);
         }
-        await scenarioFn(page, { baseUrl, pause });
+        await scenarioFn(page, { baseUrl, pause, skyEventPosts });
 
         await page.screenshot({ path: path.join(artefactDir, 'home.png'), fullPage: false });
+
+        // v0.13.2: structural HTML assertion — if the rendered home
+        // page has <button> or <form>, it MUST have at least one
+        // `sky-(click|input|change|submit)=` attribute. A silent
+        // event-dropping regression (Std.Ui types coerced to []any
+        // returning nil from AsListT[any] pre-v0.13.2) would render
+        // buttons without any sky-* event marker.  Scenario-runner
+        // probes confirm the round-trip; this check catches even
+        // scenarios that don't exercise a click but still have an
+        // event-bearing UI.
+        const homeHtml = await page.content();
+        const hasInteractive = /<button|<form/i.test(homeHtml);
+        const hasSkyEvent = /sky-(click|input|change|submit)="/i.test(homeHtml);
+        if (hasInteractive && !hasSkyEvent && outcome === 'PASS') {
+            outcome = 'FAIL';
+            detail = 'rendered HTML has <button>/<form> but ZERO sky-event '
+                + 'attributes — events stripped at render time (probable '
+                + 'Std.Ui → []any coercion regression)';
+        }
 
         if (consoleErrors.length > 0) {
             outcome = 'FAIL';

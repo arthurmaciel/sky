@@ -1646,11 +1646,24 @@ func AsListT[T any](v any) []T {
 	if rv.Kind() == reflect.Slice {
 		var zero T
 		targetTy := reflect.TypeOf(zero)
-		if targetTy == nil {
-			return nil
-		}
 		n := rv.Len()
 		out := make([]T, n)
+		if targetTy == nil {
+			// T is `any` (or another interface type whose dynamic type
+			// is unknown at runtime).  Widen each element to `any` via
+			// reflect — every value is assignable to `any`, so this is
+			// always safe.  Pre-fix bug: this branch returned `nil`,
+			// silently dropping every attribute when Std.Ui's typed
+			// `[]Std_Ui_Attribute` (a `[]SkyADT` alias) was coerced to
+			// `[]rt.SkyAttribute` (`= []any`).  The button/event attrs
+			// vanished from rendered HTML — observable as Sky.Live
+			// `sky-click=` markers missing entirely on Std.Ui apps
+			// (mini-notion, skyforum) post-v0.13.0.
+			for i := 0; i < n; i++ {
+				out[i] = rv.Index(i).Interface().(T)
+			}
+			return out
+		}
 		for i := 0; i < n; i++ {
 			elem := rv.Index(i)
 			if elem.Type().AssignableTo(targetTy) {

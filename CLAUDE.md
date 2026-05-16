@@ -434,23 +434,23 @@ cd examples/01-hello-world && sky build src/Main.sky
 
 ## Git Push / Release Checklist
 
-1. `cabal install --overwrite-policy=always --installdir=./sky-out --install-method=copy exe:sky` — rebuild compiler
-2. `sky-out/sky --version` — must print version, NOT start a server
-3. `cabal test` — cabal test suite must pass (18/18 ExampleSweep + TypedFfi + ErrorUnification specs)
-4. **Clean-slate validation of ALL examples (mandatory before every push/tag):**
-   ```bash
-   for d in examples/*/; do
-       cd "$d" && rm -rf sky-out .skycache .skydeps
-       # run `sky install` first if sky.toml has [go.dependencies]
-       sky build src/Main.sky   # must succeed
-       ./sky-out/app            # must run (kill servers after verifying HTTP 200)
-       cd ../..
-   done
-   ```
-   Every example must build **and** run from a completely clean slate. If any example fails, fix it before pushing. No exceptions.
-5. `cd examples/12-skyvote && sky check` — 0 errors
-6. Test in temp dir: `sky init mytest`, `sky build && sky run`, `sky add fmt`, `sky remove fmt`, `sky upgrade`
-7. Verify `.github/workflows/ci.yml` matches build steps
+**These steps are non-negotiable. `--build-only` is NOT a substitute for runtime verification. Skipping step 5 has previously shipped silent runtime regressions (v0.13.0 → v0.13.2 Std.Ui event-emission bug — buttons rendered without any sky-click attrs; cabal test passed; example-sweep --build-only passed; only step 5 would have caught it).**
+
+1. **DID YOU rebuild the compiler?** `cabal install --overwrite-policy=always --installdir=./sky-out --install-method=copy exe:sky`
+2. **DID YOU smoke-test the binary?** `sky-out/sky --version` — must print version, NOT start a server.
+3. **DID YOU run the cabal test suite?** `cabal test` — every spec must pass. Pending count must match prior runs.
+4. **DID YOU clean-build every example?** Loop over `examples/*/`, `rm -rf sky-out .skycache .skydeps`, `sky build src/Main.sky`. All 19+ must succeed.
+5. **DID YOU runtime-verify every Sky.Live / Sky.Http app?** `scripts/verify-all-web.sh` MUST exit 0. This is the only check that catches the "click is a no-op" class of regression (events stripped at render time, page still renders, Playwright clicks succeed silently). The script enforces TWO assertions per scenario:
+   - **Structural**: rendered HTML containing `<button>` or `<form>` MUST contain at least one `sky-(click|input|change|submit)=` attribute. Zero means events were dropped.
+   - **Round-trip**: scenarios using `expectSkyEventAfter` MUST observe a `POST /_sky/event` after a click. Zero means the wire dispatch is dead.
+6. **DID YOU runtime-verify every CLI / Sky.Tui / Sky.Cli app?** `scripts/verify-cli.sh` MUST exit 0.
+7. `cd examples/12-skyvote && sky check` — 0 errors.
+8. **DID YOU test in a temp dir from scratch?** `sky init mytest`, `sky build && sky run`, `sky add fmt`, `sky remove fmt`, `sky upgrade`.
+9. **DID YOU verify `.github/workflows/ci.yml` matches?** New verification scripts MUST be added to CI or the regression class can ship through CI green.
+
+**If step 5 or 6 fails, fix the root cause then re-run from step 1. Do NOT tag with a known runtime failure — even one example failing is a release blocker.**
+
+**Why we are strict here**: the typed-codegen v0.13 work introduced new type-conversion paths (`AsListT[T]`, `AsMapT[V]`, `Coerce[T]`) whose runtime behaviour depends on `T`. A subtle T=any edge case can flip an entire app's behaviour (events dropped, lists empty, dicts missing values) without affecting the type checker. The verification scripts watch the wire, not the types.
 
 ## CI/CD Rules
 

@@ -1,6 +1,13 @@
 // Per-app end-to-end interaction scenarios used by verify-live-app.mjs.
 // Each scenario is async (page, opts) => void. Throw to fail.
 // `opts.baseUrl` available. `opts.pause(ms)` helps with video pacing.
+// `opts.skyEventPosts` is a live array the driver pushes to whenever a
+// POST /_sky/event fires — use `expectSkyEventAfter(opts, fn, msg)` to
+// assert a click really round-tripped to the server.  Pre-v0.13.2 a
+// regression silently dropped Std.Ui events at render time, so the
+// click became a no-op; the page still rendered and Playwright still
+// "succeeded", masking the bug. The expectSkyEvent assertion forces
+// the test to fail loudly on that class.
 //
 // Goal: cover every meaningful page + every user-facing action (auth,
 // CRUD, navigation, form submit) for v0.13 regression verification.
@@ -33,6 +40,29 @@ async function gotoAndSettle(page, url, pauseMs = 800) {
     await wait(page, pauseMs);
 }
 
+// Run fn, then assert AT LEAST ONE new POST /_sky/event fired during
+// fn or in the 500ms after. Throws when none fired — that's the
+// silent-event-drop regression class. `opts.skyEventPosts` is the
+// driver's live event log.
+async function expectSkyEventAfter(opts, fn, label) {
+    if (!opts || !Array.isArray(opts.skyEventPosts)) {
+        // Driver may not have wired up the event log (older driver
+        // version). Skip the assertion — falling back to the
+        // structural HTML check in verify-live-app.mjs.
+        await fn();
+        return;
+    }
+    const before = opts.skyEventPosts.length;
+    await fn();
+    // Give the SSE round-trip a moment to land.
+    await opts.pause ? opts.pause(500) : new Promise(r => setTimeout(r, 500));
+    const fired = opts.skyEventPosts.length - before;
+    if (fired === 0) {
+        throw new Error(`expected /_sky/event POST after "${label}" but none fired `
+            + `(event-emission pipeline broken? button/form may be missing sky-* attrs)`);
+    }
+}
+
 // ─── Scenario definitions ───────────────────────────────────────────
 
 export const scenarios = {
@@ -46,10 +76,15 @@ export const scenarios = {
     },
 
     // 09-live-counter — Increment / Decrement / Reset + About nav.
-    async 'live-counter'(page, { baseUrl }) {
+    async 'live-counter'(page, opts) {
         const incBtn = page.locator('button:has-text("+")').first();
         if (await incBtn.count() === 0) throw new Error('+ button not found');
-        await incBtn.click();
+        // First click MUST round-trip through /_sky/event — proves the
+        // event-emission pipeline is intact end-to-end. Pre-v0.13.2
+        // Std.Ui apps would silently skip this (no sky-click attr).
+        await expectSkyEventAfter(opts, async () => {
+            await incBtn.click();
+        }, 'Increment click');
         await wait(page, 300);
         await incBtn.click();
         await wait(page, 300);
