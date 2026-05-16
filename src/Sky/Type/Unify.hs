@@ -12,10 +12,26 @@ module Sky.Type.Unify
     )
     where
 
+import Data.IORef
 import qualified Data.Map.Strict as Map
+import System.IO.Unsafe (unsafePerformIO)
 import qualified Sky.Type.UnionFind as UF
 import qualified Sky.Type.Type as T
 import qualified Sky.Sky.ModuleName as ModuleName
+
+
+-- | Monotonic counter for naming the fresh row-extension variable a
+-- record merge introduces — must be unique so the merged record reads
+-- back OPEN and never collides with an unrelated record's row.
+rowExtCounter :: IORef Int
+{-# NOINLINE rowExtCounter #-}
+rowExtCounter = unsafePerformIO (newIORef 0)
+
+freshRowExtName :: IO String
+freshRowExtName = do
+    n <- readIORef rowExtCounter
+    writeIORef rowExtCounter (n + 1)
+    return ("_rowext" ++ show n)
 
 
 -- | Unify two type variables. Returns True on success, False on failure.
@@ -141,6 +157,31 @@ unifyStructure v1 v2 flat1 flat2 = case (flat1, flat2) of
     (T.Record1 fields1 ext1, T.Record1 fields2 ext2) ->
         unifyRecords v1 v2 fields1 ext1 fields2 ext2
 
+    -- An OPEN record pattern unifies with an FFI-opaque nominal type.
+    -- `Can.Access` lowers `expr.field` to an open-row record
+    -- constraint `{ field : a | ρ }`. When `expr` is an FFI-opaque
+    -- type (`HttpResponse`, `Route`, `Db`, … — carried with the
+    -- empty-home sentinel `Canonical ""`), the field is read via a
+    -- generated Go getter, not an HM record projection — so the
+    -- opaque type satisfies the open-row pattern structurally without
+    -- the unifier needing its field list. The record must be OPEN: a
+    -- CLOSED record literal still cannot be passed where an opaque
+    -- FFI value is expected. Builtins (Int/String/…) carry a real
+    -- `Sky.Core.Basics` home, so `(5).field` is still rejected.
+    (T.Record1 _ ext1, T.App1 home _ _)
+        | null (ModuleName.toString home) -> do
+            closed <- isClosedRecordExt ext1
+            if closed
+                then return False
+                else do merge v1 v2 (T.Structure flat2); return True
+
+    (T.App1 home _ _, T.Record1 _ ext2)
+        | null (ModuleName.toString home) -> do
+            closed <- isClosedRecordExt ext2
+            if closed
+                then return False
+                else do merge v1 v2 (T.Structure flat1); return True
+
     _ -> return False  -- incompatible structures
 
 
@@ -203,10 +244,10 @@ unifyRecords v1 v2 fields1 ext1 fields2 ext2 = do
                             then do merge v1 v2 (T.Structure (T.Record1 fields1 ext1)); return True
                             else return False
                     else do
-                        -- Both open (or one open with extras only on
-                        -- the open side) — row-poly merge under a
-                        -- fresh extension.
-                        newExt <- UF.fresh (T.Descriptor (T.FlexVar Nothing) 0 T.noMark Nothing)
+                        -- Both open — row-poly merge under a fresh,
+                        -- UNIQUELY-NAMED extension.
+                        extName <- freshRowExtName
+                        newExt <- UF.fresh (T.Descriptor (T.FlexVar (Just extName)) 0 T.noMark Nothing)
                         merge v1 v2 (T.Structure (T.Record1 (Map.union fields1 fields2) newExt))
                         return True
 

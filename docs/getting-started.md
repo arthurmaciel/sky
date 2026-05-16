@@ -1,5 +1,11 @@
 # Getting started
 
+> **v0.13 state**: typed Go output end-to-end (no bare `any` for used
+> code). Whole-program Sky DCE prunes unused FFI bindings (Stripe-SDK
+> scale: −82 % source). LSP 100 % — hover + goto-def for every used
+> symbol class. Real runtime verification across all 26 examples. See
+> [`compiler/journey.md`](compiler/journey.md) for the changelog.
+
 ## Install
 
 ```bash

@@ -15,6 +15,9 @@ module Sky.Generate.Go.Record
     , withDepFieldIndex
     , withRecordAliases
     , withUnionNames
+    , withEnumNames
+    , withCallSiteInstances
+    , withFuncSkyToGoTVars
     , collectRecordAliases
     , withDepArities
     , collectFuncArities
@@ -50,6 +53,14 @@ data CodegenEnv = CodegenEnv
                                               --   to `any` for FFI-opaque type
                                               --   refs that don't correspond to
                                               --   any emitted Go type alias.
+    , _cg_enumNames     :: !(Set.Set String)  -- v0.13 typed lowerer: union
+                                              --   names whose Sky declaration is
+                                              --   a pure enum (all nullary
+                                              --   constructors).  These emit as
+                                              --   `type X = int` (NOT `= rt.SkyADT`),
+                                              --   so their zero value is `0`, not
+                                              --   `X{}`.  `goZeroValue` needs this
+                                              --   to type an enum-returning IIFE.
     , _cg_funcArities :: !(Map.Map String Int)  -- top-level function arities
                                                 -- used for partial-application
                                                 -- closure synthesis
@@ -67,6 +78,32 @@ data CodegenEnv = CodegenEnv
       -- for TVars. Value is (typeParams, paramTypes, returnType).
       -- Populated per-dep from the solver, used by mkDef to emit
       -- generic Go signatures for unannotated polymorphic functions.
+    , _cg_callSiteInstances :: !(Map.Map (Int, Int) (Map.Map String Solve.CallInstance))
+      -- v0.13 Phase A5: at each polymorphic call site, the captured
+      -- instance gives the call's concrete type-args.  Keyed by
+      -- (line, col) of the call's source region.  Codegen at
+      -- `Can.VarTopLevel` / `Can.VarKernel` consults this map to
+      -- pick the right generic instantiation.
+      --
+      -- Cross-file collision (known limitation): two distinct
+      -- source files with calls at the same (line, col) collide in
+      -- this map.  In practice the pair is unique enough in single-
+      -- module projects.  For larger dep graphs, the eraseTypeParams
+      -- fallback in coerceCallArgsAt's `_` branch handles dropped
+      -- instances gracefully (emitting `any`-widened args).  Full
+      -- (file, line, col) keying needs invasive plumbing of file
+      -- context through the lazy codegen pipeline — deferred.
+    , _cg_funcSkyToGoTVars :: !(Map.Map String [(String, String)])
+      -- v0.13 Phase A5+: per-function mapping from annotation Sky-
+      -- TVar names (e.g. "a", "e") to the emitted Go-generic names
+      -- (e.g. "T1", "T2") that survived codegen-time defaulting.
+      -- Used by `coerceCallArgsAt` to build the substitution map in
+      -- Sky-name space — necessary because `CallInstance` records
+      -- carry one entry per annotation Forall var (e in `Result e
+      -- a` included) but `_cg_funcInferredSigs.tps` only carries
+      -- the survivors (e collapses to `Sky_Core_Error_Error` at
+      -- codegen).  Annotation positions absent from this map have
+      -- already been baked into the Go sig as concrete types.
     }
 
 
@@ -110,10 +147,17 @@ buildCodegenEnv solvedTypes canMod = CodegenEnv
     , _cg_zeroArgs = collectZeroArgs (Can._decls canMod)
     , _cg_recordAliases = collectRecordAliases (Can._aliases canMod)
     , _cg_unionNames = Set.fromList (Map.keys (Can._unions canMod))
+    , _cg_enumNames = Set.fromList
+        [ uname
+        | (uname, u) <- Map.toList (Can._unions canMod)
+        , Can._u_opts u == Can.Enum
+        ]
     , _cg_funcArities = collectFuncArities (Can._decls canMod)
     , _cg_funcParamTypes = Map.empty
     , _cg_funcRetType = Map.empty
     , _cg_funcInferredSigs = Map.empty
+    , _cg_callSiteInstances = Map.empty
+    , _cg_funcSkyToGoTVars = Map.empty
     }
 
 
@@ -151,6 +195,27 @@ withUnionNames extra env =
     env { _cg_unionNames = Set.union extra (_cg_unionNames env) }
 
 
+-- | v0.13 typed lowerer: extend the enum-name set with dep-module
+-- qualified enum-union names.  Mirrors `withUnionNames` — kept
+-- separate because enum-vs-tagged is a distinct property
+-- (`type X = int` vs `type X = rt.SkyADT`).
+withEnumNames :: Set.Set String -> CodegenEnv -> CodegenEnv
+withEnumNames extra env =
+    env { _cg_enumNames = Set.union extra (_cg_enumNames env) }
+
+
+-- | v0.13 Phase A5: install the captured call-site instance map.
+-- Each entry maps a source `(file, line, col)` triple to the
+-- `CallInstance` recorded by the solver at that site.  Codegen
+-- consults this map when emitting `Can.Call` nodes to pick the
+-- right generic instantiation (concrete types vs `any`).
+withCallSiteInstances
+    :: Map.Map (Int, Int) (Map.Map String Solve.CallInstance)
+    -> CodegenEnv -> CodegenEnv
+withCallSiteInstances csi env =
+    env { _cg_callSiteInstances = csi }
+
+
 -- | Extend the function-arity map with dep-module qualified names.
 withDepArities :: Map.Map String Int -> CodegenEnv -> CodegenEnv
 withDepArities extra env =
@@ -171,6 +236,17 @@ withFuncTypes paramTys retTys env = env
 withInferredSigs :: Map.Map String ([String], [String], String) -> CodegenEnv -> CodegenEnv
 withInferredSigs sigs env = env
     { _cg_funcInferredSigs = Map.union sigs (_cg_funcInferredSigs env)
+    }
+
+
+-- | v0.13 Phase A5+: register the Sky-TVar → Go-TVar mapping for
+-- each polymorphic function in the env.  Drives `coerceCallArgsAt`
+-- so the call-site substitution map is keyed by SKY names (matching
+-- the `CallInstance.quantifiers` carried by the solver) and projected
+-- to Go names that the param-type strings actually use.
+withFuncSkyToGoTVars :: Map.Map String [(String, String)] -> CodegenEnv -> CodegenEnv
+withFuncSkyToGoTVars m env = env
+    { _cg_funcSkyToGoTVars = Map.union m (_cg_funcSkyToGoTVars env)
     }
 
 
@@ -229,10 +305,38 @@ collectZeroArgs = go Set.empty
         _                             -> acc
 
 
--- | Look up a record alias name by field names
+-- | Look up a record alias name by field names.
+--
+-- v0.13 A1: superset match for open records. The HM solver emits
+-- `T.TRecord fields (Just rowExt)` for any function that only
+-- accesses a SUBSET of a record's fields (e.g. `\m -> m.count`
+-- constrains `m : {count : Int | ρ}`). The exact-match registry
+-- lookup (pre-A1) returned Nothing for these, so the renderer
+-- fell back to `any`. With superset match: if the target is a
+-- strict subset of EXACTLY one alias's field set, return that
+-- alias name. Multiple distinct sizes → smallest superset wins.
+-- Tied sizes → ambiguous, fall back to Nothing (renderer emits
+-- `any`; correctness preserved at the cost of typing precision).
 lookupRecordAlias :: RecordRegistry -> [String] -> Maybe String
 lookupRecordAlias registry fieldNames =
-    Map.lookup (Set.fromList fieldNames) registry
+    let target = Set.fromList fieldNames
+    in case Map.lookup target registry of
+        Just aliasName -> Just aliasName
+        Nothing
+          | Set.null target -> Nothing
+          | otherwise       ->
+              let supersets =
+                      [ (Set.size fs, name)
+                      | (fs, name) <- Map.toList registry
+                      , target `Set.isSubsetOf` fs
+                      , target /= fs
+                      ]
+              in case List.sortOn fst supersets of
+                  []                          -> Nothing
+                  [(_, n)]                    -> Just n
+                  ((s1, n1) : (s2, _) : _)
+                      | s1 < s2   -> Just n1
+                      | otherwise -> Nothing
 
 
 -- | Classify a type alias as data record, behaviour record, or non-record.

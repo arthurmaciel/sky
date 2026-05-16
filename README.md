@@ -2,17 +2,17 @@
 
 [sky-lang.org](https://sky-lang.org) · [Examples](examples/) · [Docs](docs/)
 
-> **Experimental · v0.12** — Sky is under active development. APIs and internals may change between minor versions.
+> **Experimental · v0.13** — Sky is under active development. APIs and internals may change between minor versions.
 
 Sky is an experimental fullstack programming language that combines **Go's pragmatism** with the **elegance of pure-functional, ML-family languages**. You write functional, strongly-typed code with a batteries-included stdlib — `Sky.Live` for server-driven UI, `Sky.Tui` for terminal UI (sharing the same Std.Ui code), `Std.Db` for SQL persistence, `Std.Auth` for sessions, `Sky.Core.Error` for unified error handling — import any Go package with auto-generated FFI bindings (no hand-written glue), and ship a single portable binary. Sky's explicit types, exhaustive pattern matching, and strict `Task` effect boundary make it **AI-friendly by design**: both humans and LLMs tend to write code that compiles the first time.
 
-### What's new in v0.12
+### What's new in v0.13
 
-- **Sky.Tui** — TEA architecture for the terminal. Same `init / update / view / subscriptions` shape as Sky.Live, but renders `Std.Ui` to ANSI cells. Cross-backend code: one Std.Ui view runs in the browser via Sky.Live AND in the terminal via Sky.Tui without changes. See [Sky.Tui v1](docs/skytui/overview.md) and [examples/24-tui-kitchen-sink](examples/24-tui-kitchen-sink).
-- **Typed codegen overhaul** — ~200 typed kernel call sites across the 24-example sweep (was 0). Lambda-input-derived element typing guarantees typed routing produces only correct types (HM enforces fn input == list element). Strict `coerceInner` panic surfaces any compiler-bug-introduced type mismatch loudly — no silent zero-T fallback.
-- **Compiler hardening** — every `tagField.Int()` reflect site in the runtime now int-kind-gated. `narrowSkyContainer` rejects non-Sky structs (e.g. `rt.VNode` with `Tag string`). Cross-call inference for `List.{take,drop,filter,find,...}` propagates element types through the call chain.
-- **LSP at scale** — works on huge FFI surfaces (skyshop's 76 141-symbol Stripe SDK catalogue). Hover, autocompletion, goto-definition, real-time diagnostics on every example.
-- **Per-example HTTP-200 verification** — `sky verify` now boots every Live example, hits it with curl, and confirms intact rendered content. Run in `cabal test`'s 180-case sweep — zero failures, zero panics.
+- **Fully-typed Go output, end-to-end.** Every USED Sky symbol — vars, functions, lambdas, ADTs, records — emits a typed Go signature. No bare `any` for used code. Only genuinely-generic (`[T any]`) or genuinely-unused declarations may use `any` (and DCE prunes the latter). See workstreams A–G in `CLAUDE.md`.
+- **Whole-program Sky DCE.** Pre-lowering dead-code elimination in the Haskell phase. Stripe-SDK-scale measurement on `examples/13-skyshop`: `main.go` 14 k → 4 k lines (−71 %); `stripe_bindings.go` 326 k → 58 k lines (−82 %); FFI type-alias bloat 80 847 → 29.
+- **LSP 100 %.** Hover + goto-definition for every USED symbol class (function, type alias, ADT ctor, record-field, kernel call, lambda param, let-binding, case-pattern binder). 17 cabal-fenced end-to-end tests through real Neovim via headless driver — plus huge-FFI coverage on skyshop's 76 141-symbol Stripe catalogue.
+- **Runtime hardening.** Map→struct narrowing in `rt.Coerce[T]` closes the Db.query → typed-record panic class. Reflect-adapter arg narrowing closes the `[]map[string]any` → `map[string]string` typed-callback class. `rt.AsMapAny` widener closes the symmetric `map[string]string` → `map[string]any` polymorphic-callee class. Tuple dispatch fast-path (~40 % faster per TEA update). Static-dir favicon serving from root so browser auto-requests don't 404. All fixes have regression specs in `runtime-go/rt/*_test.go`.
+- **Full end-to-end verification.** All 25 examples build clean from a wiped state; Sky.Live + Sky.Http.Server apps drive sign-up / sign-in / CRUD / sign-out scenarios via Playwright with screen-recording artefacts (`scripts/verify-all-web.sh` with `SKY_RECORD=1`); Sky.Tui + Sky.Cli apps run panic-free.
 
 ```elm
 module Main exposing (main)

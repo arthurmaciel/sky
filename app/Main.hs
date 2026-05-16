@@ -20,6 +20,7 @@ import Data.List (isPrefixOf, isInfixOf, stripPrefix, tails)
 import System.Process (callProcess)
 import qualified System.Process
 import qualified System.IO.Temp
+import qualified System.Timeout
 import qualified System.Exit
 import Control.Monad (when)
 import Data.FileEmbed (embedStringFile)
@@ -39,6 +40,8 @@ import qualified Sky.Format.Format as Format
 import qualified Sky.Lsp.Server as Lsp
 import qualified Sky.Build.FfiGen as FfiGen
 import qualified Sky.Build.SkyDeps as SkyDeps
+import qualified Sky.Build.Validator as Validator
+import qualified Sky.Reporting.Render as Render
 import qualified Sky.Cli.Watch as Watch
 
 import qualified Control.Concurrent.Async as Async
@@ -199,47 +202,74 @@ shouldSkipGui name
 
 
 classifyAndRun :: FilePath -> String -> FilePath -> FilePath -> FilePath -> IO ()
-classifyAndRun _cwd name dir bin logPath
-    | isGui name = putStrLn $ "  gui skipped runtime: " ++ name
-    | isServer name = do
-        port <- readPortFromToml (dir </> "sky.toml")
-        -- Audit P2-4: per-example scenario file. If
-        -- examples/<n>/verify.json exists, run each listed request
-        -- and assert status + body-substring. Otherwise fall back
-        -- to the single GET / probe.
-        let scenarioPath = dir </> "verify.json"
-        hasScenario <- doesFileExist scenarioPath
-        if hasScenario
-            then runScenario name dir logPath port scenarioPath
-            else runDefaultProbe name dir logPath port
-    | otherwise = do
-        -- CLI example: run; panic / non-zero exit = fail.
-        (ec, _, _) <- System.Process.readProcessWithExitCode "sh"
-            [ "-c"
-            , "cd " ++ shellQuote dir ++ " && ./sky-out/app > " ++ shellQuote logPath ++ " 2>&1"
-            ] ""
-        hasPanic <- hasPanicIn logPath
-        case (ec, hasPanic) of
-            (_, True) -> do
-                putStrLn $ "  FAIL panic: " ++ name
-                appendFile "/tmp/sky-verify-fails.txt" (name ++ ":panic\n")
-            (System.Exit.ExitFailure n, _) -> do
-                putStrLn $ "  FAIL exit " ++ show n ++ ": " ++ name
-                appendFile "/tmp/sky-verify-fails.txt" (name ++ ":exit\n")
-            _ -> do
-                -- expected.txt comparison if the file exists.
-                let expected = dir </> "expected.txt"
-                hasExpected <- doesFileExist expected
-                if hasExpected
-                    then do
-                        want <- readFile expected
-                        got  <- readFile logPath
-                        if want == got
-                            then putStrLn $ "  runtime ok: " ++ name
-                            else do
-                                putStrLn $ "  FAIL expected.txt mismatch: " ++ name
-                                appendFile "/tmp/sky-verify-fails.txt" (name ++ ":expected\n")
-                    else putStrLn $ "  runtime ok: " ++ name
+classifyAndRun _cwd name dir bin logPath = do
+    isSrv <- isServerExample dir
+    if isGui name
+      then putStrLn $ "  gui skipped runtime: " ++ name
+      else if isSrv
+        then do
+            port <- readPortFromToml (dir </> "sky.toml")
+            -- Audit P2-4: per-example scenario file. If
+            -- examples/<n>/verify.json exists, run each listed request
+            -- and assert status + body-substring. Otherwise fall back
+            -- to the single GET / probe.
+            let scenarioPath = dir </> "verify.json"
+            hasScenario <- doesFileExist scenarioPath
+            if hasScenario
+                then runScenario name dir logPath port scenarioPath
+                else runDefaultProbe name dir logPath port
+        else do
+            -- CLI example: run; panic / non-zero exit / no-exit = fail.
+            -- The wait is TIMEOUT-BOUNDED (60s): a CLI example that
+            -- doesn't terminate is itself a bug — an infinite loop, or
+            -- a server example `isServerExample` somehow missed. Before
+            -- this bound the wait was an unbounded
+            -- `readProcessWithExitCode`; when the hardcoded `isServer`
+            -- list rotted (19-skyforum was never added to it) verify
+            -- spawned skyforum's never-exiting Sky.Live server here and
+            -- waited forever, wedging the whole verify run AND the
+            -- `cabal test` ExampleSweep/VerifyAll specs with it.
+            mResult <- System.Timeout.timeout (60 * 1000000) $
+                System.Process.readProcessWithExitCode "sh"
+                    [ "-c"
+                    , "cd " ++ shellQuote dir ++ " && ./sky-out/app > "
+                        ++ shellQuote logPath ++ " 2>&1"
+                    ] ""
+            case mResult of
+                Nothing -> do
+                    -- The timed-out `sh` is torn down by readProcess's
+                    -- exception cleanup, but its `./sky-out/app` child
+                    -- was a separate fork — kill that orphan explicitly.
+                    _ <- System.Process.readProcessWithExitCode "sh"
+                        [ "-c"
+                        , "pkill -f " ++ shellQuote (dir </> "sky-out" </> "app")
+                            ++ " 2>/dev/null; true"
+                        ] ""
+                    putStrLn $ "  FAIL timeout (>60s, did not exit): " ++ name
+                    appendFile "/tmp/sky-verify-fails.txt" (name ++ ":timeout\n")
+                Just (ec, _, _) -> do
+                    hasPanic <- hasPanicIn logPath
+                    case (ec, hasPanic) of
+                        (_, True) -> do
+                            putStrLn $ "  FAIL panic: " ++ name
+                            appendFile "/tmp/sky-verify-fails.txt" (name ++ ":panic\n")
+                        (System.Exit.ExitFailure n, _) -> do
+                            putStrLn $ "  FAIL exit " ++ show n ++ ": " ++ name
+                            appendFile "/tmp/sky-verify-fails.txt" (name ++ ":exit\n")
+                        _ -> do
+                            -- expected.txt comparison if the file exists.
+                            let expected = dir </> "expected.txt"
+                            hasExpected <- doesFileExist expected
+                            if hasExpected
+                                then do
+                                    want <- readFile expected
+                                    got  <- readFile logPath
+                                    if want == got
+                                        then putStrLn $ "  runtime ok: " ++ name
+                                        else do
+                                            putStrLn $ "  FAIL expected.txt mismatch: " ++ name
+                                            appendFile "/tmp/sky-verify-fails.txt" (name ++ ":expected\n")
+                                else putStrLn $ "  runtime ok: " ++ name
 
 
 -- Audit P2-4: scenario-driven server example verification.
@@ -478,12 +508,48 @@ readPortFromToml path = do
     return (if null digits then 8000 else read digits)
 
 
-isServer :: String -> Bool
-isServer n = n `elem`
-    [ "05-mux-server", "08-notes-app", "09-live-counter"
-    , "10-live-component", "12-skyvote", "13-skyshop"
-    , "15-http-server", "16-skychess", "17-skymon", "18-job-queue"
-    ]
+-- | Classify an example as a long-lived "server" (Sky.Live,
+-- Sky.Http.Server, or a raw gorilla/mux + net/http listener) by
+-- SOURCE CONTENT — not a hardcoded name list. The previous
+-- hardcoded `isServer` list silently rotted when 19-skyforum was
+-- added: `sky verify` misclassified it as a CLI example and did an
+-- unbounded process-wait on the never-exiting Sky.Live server,
+-- wedging the whole verify run (and `cabal test`) forever. A
+-- content scan can't rot — a new server example is detected the
+-- moment its source lands.
+isServerExample :: FilePath -> IO Bool
+isServerExample dir = do
+    let srcDir = dir </> "src"
+    hasSrc <- System.Directory.doesDirectoryExist srcDir
+    if not hasSrc
+        then return False
+        else do
+            files <- listSkyFilesRec srcDir
+            blobs <- mapM readFileSafe files
+            let blob = concat blobs
+            return $ any (`isInfixOf` blob)
+                [ "Live.app", "Server.listen"
+                , "import Sky.Http.Server", "import Std.Live"
+                , "listenAndServe", "ListenAndServe"
+                , "Gorilla.Mux", "gorilla/mux"
+                ]
+  where
+    readFileSafe f = readFile f `catchIOError` (\_ -> return "")
+
+
+-- | Recursively list every `.sky` file under a directory.
+listSkyFilesRec :: FilePath -> IO [FilePath]
+listSkyFilesRec dir = do
+    entries <- System.Directory.listDirectory dir
+    nested <- mapM
+        (\e -> do
+            let p = dir </> e
+            isDir <- System.Directory.doesDirectoryExist p
+            if isDir
+                then listSkyFilesRec p
+                else return [ p | takeExtension p == ".sky" ])
+        entries
+    return (concat nested)
 
 
 isGui :: String -> Bool
@@ -1837,18 +1903,45 @@ runGoBuildWithDiagnostics outDir binName _goPath = do
     case ec of
         System.Exit.ExitSuccess -> return ()
         System.Exit.ExitFailure _ -> do
-            -- Print stderr unchanged so the user sees what Go said.
-            hPutStr stderr berr
-            -- Detect known compiler-bug patterns and prepend a Sky note.
-            when (isCompilerBugPattern berr) $ do
-                hPutStrLn stderr ""
-                hPutStrLn stderr "─────────────────────────────────────────────────"
-                hPutStrLn stderr "Sky compiler bug detected (go build rejected our"
-                hPutStrLn stderr "generated code). The Sky type system accepted this"
-                hPutStrLn stderr "program; codegen produced incompatible Go. Please"
-                hPutStrLn stderr "file an issue at https://github.com/anzellai/sky/issues"
-                hPutStrLn stderr "with the source + the Go error above."
-                hPutStrLn stderr "─────────────────────────────────────────────────"
+            -- v0.13 Layer 2: when go build fails, parse the Go
+            -- error and try to map it back to Sky source via the
+            -- SKY-ORIGIN comments in main.go.  If we can resolve,
+            -- render a structured Diagnostic with code [E5001]
+            -- (go build rejected codegen output) instead of just
+            -- dumping the raw Go error to stderr.
+            let mainGoPath = outDir System.FilePath.</> "main.go"
+            mainGoExists <- doesFileExist mainGoPath
+            rendered <- if mainGoExists
+                then do
+                    goSrc <- readFile mainGoPath
+                    let originMap = Validator.parseOriginComments goSrc
+                        loc = Validator.parseGoBuildError berr
+                    case loc >>= Validator.resolveGoErrorToSky originMap of
+                        Just diag -> do
+                            r <- Render.renderCli diag
+                            return (Just r)
+                        Nothing -> return Nothing
+                else return Nothing
+            case rendered of
+                Just r -> do
+                    putStrLn r
+                    -- Keep the raw Go error too so contributors
+                    -- can copy-paste it when filing an issue.
+                    hPutStrLn stderr ""
+                    hPutStrLn stderr "Raw `go build` output for reference:"
+                    hPutStr stderr berr
+                Nothing -> do
+                    -- Fallback: pre-v0.13 behaviour.
+                    hPutStr stderr berr
+                    when (isCompilerBugPattern berr) $ do
+                        hPutStrLn stderr ""
+                        hPutStrLn stderr "─────────────────────────────────────────────────"
+                        hPutStrLn stderr "Sky compiler bug detected (go build rejected our"
+                        hPutStrLn stderr "generated code). The Sky type system accepted this"
+                        hPutStrLn stderr "program; codegen produced incompatible Go. Please"
+                        hPutStrLn stderr "file an issue at https://github.com/anzellai/sky/issues"
+                        hPutStrLn stderr "with the source + the Go error above."
+                        hPutStrLn stderr "─────────────────────────────────────────────────"
             System.Exit.exitWith ec
 
 

@@ -1,5 +1,11 @@
 # Sky.Auth overview
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 **Authentication, in the box.** Sky ships with bcrypt password hashing, JWT signing/verification, and database-backed user registration / login as kernel modules. No `passport`, no `bcrypt-cost-finder`, no separate auth service — `import Std.Auth as Auth` and you have the surface every web app needs.
 
 ```elm

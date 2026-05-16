@@ -33,7 +33,16 @@ import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
 import qualified Sky.Build.RecordCtorEmptyListSpec
 import qualified Sky.Build.HofTypedMsgSpec
+import qualified Sky.Build.AnonLambdaSpec
+import qualified Sky.Build.AnonRecordSpec
 import qualified Sky.Build.Issue52Spec
+import qualified Sky.Build.ValidatorSpec
+import qualified Sky.Build.GoBuildRefinerSpec
+import qualified Sky.Build.MonomorphiseSpec
+import qualified Sky.Build.MonoIntegrationSpec
+import qualified Sky.Reporting.DiagnosticSpec
+import qualified Sky.Diagnostics.CoverageSpec
+import qualified Sky.Type.InstanceCaptureSpec
 import qualified Sky.Build.KernelSigCoverageSpec
 import qualified Sky.Build.HeapBoundedHmSpec
 import qualified Sky.Build.SolverBudgetSpec
@@ -49,6 +58,7 @@ import qualified Sky.Lsp.DiagnosticsSpec
 import qualified Sky.Lsp.HoverTypesSpec
 import qualified Sky.Lsp.CompletionSpec
 import qualified Sky.Lsp.ScaleSpec
+import qualified Sky.Lsp.NvimDriverSpec
 import qualified Sky.Build.EmbeddedRuntimeSpec
 import qualified Sky.Build.EmbeddedInspectorSpec
 import qualified Sky.Cli.ExitCodesSpec
@@ -204,12 +214,50 @@ main = hspec $ do
     -- the inner-function return as `any`, breaking helpers with typed
     -- (String -> Msg) callbacks. Now routes via typeStrWithAliasesReg.
     describe "Sky.Build.HofTypedMsg"        Sky.Build.HofTypedMsgSpec.spec
+    -- v0.13 D-Lambda-Lowerer regression: Sky lambdas at user-
+    -- defined HOF slots lower to typed `func(X) Y` shapes via
+    -- curryLambdaPatTyped (was only kernel HOFs pre-v0.13).
+    describe "Sky.Build.AnonLambda"         Sky.Build.AnonLambdaSpec.spec
+    -- v0.13 E regression: synthAnonRecordName registers shapes
+    -- into globalAnonRecords; generateAnonRecordDecls emits
+    -- `type Anon_R_<hash> = struct{...}` so the typed Go name
+    -- resolves. Removed the pre-E `sanitiseTypedDeep` cover-up.
+    describe "Sky.Build.AnonRecord"         Sky.Build.AnonRecordSpec.spec
     -- Issue #52 regression: (1) List.drop with any-typed Int arg
     -- needs rt.AsInt coercion at the typed-kernel boundary, and
     -- (2) record update `{ m | n = X }` must HM-check the new value
     -- against the existing field type. Both used to slip past Sky
     -- and surface as cryptic Go-build / runtime panics.
     describe "Sky.Build.Issue52"             Sky.Build.Issue52Spec.spec
+    -- v0.13 Layer 2: codegen-stage validator regression fence.
+    -- Pins the typed-kernel-any-arg detector + the SKY-ORIGIN
+    -- comment parser + the go-build error → Sky-region mapper.
+    -- Fires BEFORE go build when a known-bad shape is emitted.
+    describe "Sky.Build.Validator"           Sky.Build.ValidatorSpec.spec
+    -- v0.13 Layer 2 integration: full sky build → corruption →
+    -- re-build → [E5001] Diagnostic round-trip.  Catches the
+    -- go-build error refiner end-to-end.
+    describe "Sky.Build.GoBuildRefiner"      Sky.Build.GoBuildRefinerSpec.spec
+    -- v0.13 Layer 1: structured Diagnostic AST + CLI/LSP renderers.
+    -- Locks the AST shape, the diagnostic code registry, and the
+    -- renderer output for all consumers (CLI, LSP, future docgen).
+    describe "Sky.Reporting.Diagnostic"      Sky.Reporting.DiagnosticSpec.spec
+    -- v0.13 overall guarantee: one regression test per error
+    -- category, asserting the CLI surfaces the stable code +
+    -- prefix and the build never reaches the runtime.
+    describe "Sky.Diagnostics.Coverage"      Sky.Diagnostics.CoverageSpec.spec
+    -- v0.13 Phase A1: monomorphisation instance capture.  Locks
+    -- the solver's CForeign instance-recording mechanism that the
+    -- monomorphisation pass consumes downstream.
+    describe "Sky.Type.InstanceCapture"      Sky.Type.InstanceCaptureSpec.spec
+    -- v0.13 Phase A2: monomorphisation type-level pieces.  Locks
+    -- the mangling encoding + substitution semantics that the
+    -- downstream emission pass relies on.
+    describe "Sky.Build.Monomorphise"        Sky.Build.MonomorphiseSpec.spec
+    -- v0.13 Phase A3: end-to-end monomorphisation capture from a
+    -- real `sky build` run with SKY_MONO_TRACE=1.  Locks the
+    -- data flow from solver → mangling → compile-pipeline log.
+    describe "Sky.Build.MonoIntegration"     Sky.Build.MonoIntegrationSpec.spec
     -- Limitation #16: kernel-sig coverage for the dangerous-class
     -- gaps (returns Maybe/Result/Task wrappers OR opaque FFI types).
     -- Without HM sigs, user pattern-matching against the wrapper
@@ -248,6 +296,11 @@ main = hspec $ do
     describe "Sky.Lsp.Completion"         Sky.Lsp.CompletionSpec.spec
     -- v0.12 gap 6: pin the externals-scope cap with a real benchmark.
     describe "Sky.Lsp.Scale"              Sky.Lsp.ScaleSpec.spec
+    -- v0.13 G: end-to-end LSP coverage via headless Neovim driver.
+    -- Exercises every USED symbol class: function, type alias, ADT
+    -- ctor, record-field access, kernel call, lambda param, let-
+    -- binding, case-pattern binder. Pending if nvim not installed.
+    describe "Sky.Lsp.NvimDriver"         Sky.Lsp.NvimDriverSpec.spec
     -- Audit P3-3: embedded runtime must track on-disk tree.
     describe "Sky.Build.EmbeddedRuntime"  Sky.Build.EmbeddedRuntimeSpec.spec
     -- Embedded sky-ffi-inspect: single-binary release shape.

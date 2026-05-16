@@ -70,61 +70,61 @@ sqLastDark = hex "aba23a"
 globalStyles =
     stylesheet
         [ rule "*, *::before, *::after"
-              [ property "box-sizing" "border-box" , margin "0" , padding "0" ]
+              [ property "box-sizing" "border-box" , margin (zero ()) , padding (zero ()) ]
         , rule "body"
               [ fontFamily
                     "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif"
               , backgroundColor bgPage
               , color textPrimary
-              , lineHeight "1.6"
+              , lineHeight (num 1.6)
               , fontSize (px 16)
               ]
-        , rule "a" [ color primary , textDecoration "none" ]
-        , rule "a:hover" [ textDecoration "underline" ]
+        , rule "a" [ color primary , textDecoration NoDecoration ]
+        , rule "a:hover" [ textDecoration Underline ]
         , rule ".container"
-              [ maxWidth (px 1100) , margin2 "0" "auto" , padding2 "0" (px 20) ]
+              [ maxWidth (px 1100) , margin2 (zero ()) (auto ()) , padding2 (zero ()) (px 20) ]
         , rule ".header"
               [ backgroundColor bgCard
-              , borderBottom ("1px solid " ++ borderLight)
-              , padding2 (px 16) "0"
+              , borderBottom ("1px solid " ++ colorToString borderLight)
+              , padding2 (px 16) (zero ())
               , property "position" "sticky"
-              , top "0"
+              , top (zero ())
               , zIndex 100
               ]
         , rule ".header-inner"
               [ maxWidth (px 1100)
-              , margin2 "0" "auto"
-              , padding2 "0" (px 20)
-              , display "flex"
-              , justifyContent "space-between"
-              , alignItems "center"
+              , margin2 (zero ()) (auto ())
+              , padding2 (zero ()) (px 20)
+              , display Flex
+              , justifyContent SpaceBetween
+              , alignItems Center
               ]
         , rule ".logo"
               [ fontSize (px 22)
-              , fontWeight "700"
+              , fontWeight (Weight 700)
               , color textPrimary
-              , textDecoration "none"
-              , display "flex"
-              , alignItems "center"
+              , textDecoration NoDecoration
+              , display Flex
+              , alignItems Center
               , gap (px 8)
               ]
-        , rule ".logo:hover" [ textDecoration "none" ]
-        , rule ".nav" [ display "flex" , gap (px 8) , alignItems "center" ]
+        , rule ".logo:hover" [ textDecoration NoDecoration ]
+        , rule ".nav" [ display Flex , gap (px 8) , alignItems Center ]
         , rule ".nav-info"
-              [ display "flex" , gap (px 12) , alignItems "center" ]
-        , rule ".nav-player" [ fontWeight "600" , color textSecondary ]
+              [ display Flex , gap (px 12) , alignItems Center ]
+        , rule ".nav-player" [ fontWeight (Weight 600) , color textSecondary ]
         , rule ".btn"
               [ padding2 (px 10) (px 20)
               , borderRadius (px 8)
               , border "none"
               , fontSize (px 14)
-              , fontWeight "600"
-              , cursor "pointer"
+              , fontWeight (Weight 600)
+              , cursor Pointer
               , transition "all 0.15s"
-              , display "inline-flex"
-              , alignItems "center"
+              , display InlineFlex
+              , alignItems Center
               , gap (px 6)
-              , textDecoration "none"
+              , textDecoration NoDecoration
               ]
         , rule ".btn-primary" [ backgroundColor primary , color (hex "ffffff") ]
         , rule ".btn-primary:hover" [ backgroundColor primaryHover ]
@@ -141,28 +141,28 @@ globalStyles =
         , rule ".card"
               [ backgroundColor bgCard
               , borderRadius (px 12)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , padding (px 24)
               ]
         -- Home page
-        , rule ".home-container" [ maxWidth (px 600) , margin2 (px 40) "auto" ]
+        , rule ".home-container" [ maxWidth (px 600) , margin2 (px 40) (auto ()) ]
         , rule ".home-title"
               [ fontSize (px 36)
-              , fontWeight "700"
-              , textAlign "center"
+              , fontWeight (Weight 700)
+              , textAlign AlignCenter
               , property "margin-bottom" "8px"
               ]
         , rule ".home-subtitle"
               [ fontSize (px 16)
               , color textSecondary
-              , textAlign "center"
+              , textAlign AlignCenter
               , property "margin-bottom" "32px"
               ]
         , rule ".form-group" [ property "margin-bottom" "16px" ]
         , rule ".form-label"
-              [ display "block"
+              [ display Block
               , fontSize (px 14)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textPrimary
               , property "margin-bottom" "6px"
               ]
@@ -170,9 +170,9 @@ globalStyles =
               [ width (pct 100)
               , padding2 (px 10) (px 14)
               , borderRadius (px 8)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , fontSize (px 14)
-              , lineHeight "1.5"
+              , lineHeight (num 1.5)
               , backgroundColor bgCard
               , color textPrimary
               , transition "border-color 0.15s"
@@ -181,13 +181,13 @@ globalStyles =
         , rule ".form-input:focus"
               [ borderColor primary
               , property "outline" "none"
-              , property "box-shadow" ("0 0 0 3px " ++ primaryLight)
+              , property "box-shadow" ("0 0 0 3px " ++ colorToString primaryLight)
               ]
         , rule ".form-actions"
-              [ display "flex" , gap (px 12) , justifyContent "center" ]
+              [ display Flex , gap (px 12) , justifyContent Center ]
         -- Stats
         , rule ".stats-grid"
-              [ display "grid"
+              [ display Grid
               , gridTemplateColumns "repeat(4, 1fr)"
               , gap (px 12)
               , property "margin-bottom" "24px"
@@ -195,12 +195,12 @@ globalStyles =
         , rule ".stat-card"
               [ backgroundColor bgCard
               , borderRadius (px 10)
-              , border ("1px solid " ++ borderLight)
+              , border ("1px solid " ++ colorToString borderLight)
               , padding (px 16)
-              , textAlign "center"
+              , textAlign AlignCenter
               ]
         , rule ".stat-value"
-              [ fontSize (px 28) , fontWeight "700" , color primary ]
+              [ fontSize (px 28) , fontWeight (Weight 700) , color primary ]
         , rule ".stat-label"
               [ fontSize (px 13)
               , color textMuted
@@ -208,56 +208,56 @@ globalStyles =
               ]
         -- Game list
         , rule ".game-list"
-              [ display "flex" , flexDirection "column" , gap (px 8) ]
+              [ display Flex , flexDirection Column , gap (px 8) ]
         , rule ".game-row"
-              [ display "flex"
-              , justifyContent "space-between"
-              , alignItems "center"
+              [ display Flex
+              , justifyContent SpaceBetween
+              , alignItems Center
               , padding2 (px 12) (px 16)
               , backgroundColor bgInput
               , borderRadius (px 8)
               ]
         , rule ".game-info"
-              [ display "flex" , gap (px 16) , alignItems "center" ]
+              [ display Flex , gap (px 16) , alignItems Center ]
         , rule ".game-status"
               [ fontSize (px 13)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , property "text-transform" "capitalize"
               ]
         , rule ".game-date" [ fontSize (px 13) , color textMuted ]
         , rule ".game-moves" [ fontSize (px 13) , color textSecondary ]
-        , rule ".game-actions" [ display "flex" , gap (px 8) ]
+        , rule ".game-actions" [ display Flex , gap (px 8) ]
         -- Chess board layout
         , rule ".game-layout"
-              [ display "flex"
+              [ display Flex
               , gap (px 24)
-              , justifyContent "center"
+              , justifyContent Center
               , property "margin-top" "24px"
-              , flexWrap "wrap"
+              , flexWrap Wrap
               ]
         , rule ".board-section" [ property "flex-shrink" "0" ]
         , rule ".side-panel"
               [ width (px 260)
-              , display "flex"
-              , flexDirection "column"
+              , display Flex
+              , flexDirection Column
               , gap (px 16)
               ]
         -- Chess board
         , rule ".chess-board"
               [ borderCollapse "collapse"
               , property "user-select" "none"
-              , border ("2px solid " ++ textPrimary)
+              , border ("2px solid " ++ colorToString textPrimary)
               ]
         , rule ".chess-board td"
               [ width (px 64)
               , height (px 64)
-              , textAlign "center"
+              , textAlign AlignCenter
               , property "vertical-align" "middle"
               , fontSize (px 44)
-              , cursor "pointer"
-              , position "relative"
-              , padding "0"
-              , lineHeight "1"
+              , cursor Pointer
+              , position Relative
+              , padding (zero ())
+              , lineHeight (num 1.0)
               ]
         , rule ".sq-light" [ backgroundColor sqLight ]
         , rule ".sq-dark" [ backgroundColor sqDark ]
@@ -265,10 +265,10 @@ globalStyles =
         , rule ".sq-selected-dark" [ backgroundColor sqSelectedDark ]
         , rule ".sq-last.sq-light" [ backgroundColor sqLastLight ]
         , rule ".sq-last.sq-dark" [ backgroundColor sqLastDark ]
-        , rule ".sq-legal" [ position "relative" ]
+        , rule ".sq-legal" [ position Relative ]
         , rule ".sq-legal::after"
               [ property "content" "''"
-              , position "absolute"
+              , position Absolute
               , width (px 18)
               , height (px 18)
               , borderRadius (pct 50)
@@ -286,27 +286,27 @@ globalStyles =
               ]
         , rule ".rank-label"
               [ width (px 24)
-              , textAlign "center"
+              , textAlign AlignCenter
               , fontSize (px 13)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textMuted
               , property "vertical-align" "middle"
               ]
         , rule ".file-labels td"
-              [ textAlign "center"
+              [ textAlign AlignCenter
               , fontSize (px 13)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textMuted
-              , padding2 (px 4) "0"
+              , padding2 (px 4) (zero ())
               ]
         -- Status bar
         , rule ".status-bar"
               [ padding2 (px 12) (px 16)
               , borderRadius (px 8)
               , backgroundColor bgCard
-              , border ("1px solid " ++ borderLight)
-              , textAlign "center"
-              , fontWeight "600"
+              , border ("1px solid " ++ colorToString borderLight)
+              , textAlign AlignCenter
+              , fontWeight (Weight 600)
               , property "margin-bottom" "16px"
               ]
         , rule ".status-thinking"
@@ -317,7 +317,7 @@ globalStyles =
         -- Move history
         , rule ".move-list"
               [ maxHeight (px 360)
-              , overflow "auto"
+              , overflow OverflowAuto
               , padding (px 12)
               , backgroundColor bgInput
               , borderRadius (px 8)
@@ -325,7 +325,7 @@ globalStyles =
               , fontFamily "ui-monospace, 'SF Mono', Monaco, monospace"
               ]
         , rule ".move-row"
-              [ display "flex" , gap (px 8) , property "margin-bottom" "2px" ]
+              [ display Flex , gap (px 8) , property "margin-bottom" "2px" ]
         , rule ".move-num" [ color textMuted , property "min-width" "32px" ]
         , rule ".move-white" [ property "min-width" "64px" ]
         , rule ".move-black" [ property "min-width" "64px" ]
@@ -338,23 +338,23 @@ globalStyles =
               ]
         , rule ".captured-label"
               [ fontSize (px 12)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textMuted
               , property "text-transform" "uppercase"
               , property "letter-spacing" "0.5px"
               , property "margin-bottom" "4px"
               ]
-        , rule ".captured-pieces" [ fontSize (px 22) , lineHeight "1.4" ]
+        , rule ".captured-pieces" [ fontSize (px 22) , lineHeight (num 1.4) ]
         -- Game actions
         , rule ".game-actions-bar"
-              [ display "flex"
+              [ display Flex
               , gap (px 8)
-              , justifyContent "center"
+              , justifyContent Center
               , property "margin-top" "16px"
               ]
         , rule ".section-title"
               [ fontSize (px 14)
-              , fontWeight "600"
+              , fontWeight (Weight 600)
               , color textPrimary
               , property "margin-bottom" "8px"
               ]
@@ -364,17 +364,17 @@ globalStyles =
               , borderRadius (px 8)
               , backgroundColor successLight
               , color success
-              , fontWeight "500"
+              , fontWeight (Weight 500)
               , fontSize (px 14)
               , property "margin-bottom" "16px"
-              , textAlign "center"
+              , textAlign AlignCenter
               ]
         , rule ".notification-error"
               [ backgroundColor dangerLight , color danger ]
         -- Responsive
         , media "(max-width: 768px)"
               [ rule ".game-layout"
-                    [ flexDirection "column" , alignItems "center" ]
+                    [ flexDirection Column , alignItems Center ]
               , rule ".side-panel" [ width (pct 100) , maxWidth (px 520) ]
               , rule ".chess-board td"
                     [ width (px 48) , height (px 48) , fontSize (px 32) ]

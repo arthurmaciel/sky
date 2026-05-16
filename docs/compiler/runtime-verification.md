@@ -1,5 +1,11 @@
 # Runtime verification
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 Build success is necessary but not sufficient. Sky's runtime verification layer ensures the contract "if it compiles, it works" is enforced end-to-end, not only at `sky build` time.
 
 ## Layers

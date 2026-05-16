@@ -314,7 +314,7 @@ func Db_queryDecode(db any, query any, args any, decoder any) any {
 		if !ok || r.Tag != 0 {
 			return resp
 		}
-		rows := r.OkValue.([]any)
+		rows := AsList(r.OkValue)
 		d, isDec := capDec.(JsonDecoder)
 		if !isDec {
 			return Ok[any, any](rows)
@@ -404,7 +404,7 @@ func Db_getById(db any, table any, id any) any {
 		if !ok || r.Tag != 0 {
 			return result
 		}
-		rows := r.OkValue.([]any)
+		rows := AsList(r.OkValue)
 		if len(rows) == 0 {
 			return Err[any, any](ErrNotFound())
 		}

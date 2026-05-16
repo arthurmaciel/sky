@@ -26,7 +26,7 @@ import System.IO.Temp (withSystemTempDirectory)
 
 import Sky.Lsp.Harness
     ( findSky, withLsp
-    , initializeLsp, didOpen
+    , initializeLsp, didOpen, didSave
     , awaitNotification
     )
 
@@ -57,6 +57,25 @@ diagnosticMessages v = case v of
         Just (String t) -> [t]
         _ -> []
     getMsg _ = []
+
+
+-- | Extract the list of `code` fields from a publishDiagnostics
+-- notification payload.  v0.13 Layer 4: every LSP diagnostic
+-- carries the same stable code the CLI emits, so editor
+-- extensions can filter / link by code.
+diagnosticCodes :: Aeson.Value -> [T.Text]
+diagnosticCodes v = case v of
+    Object o -> case KM.lookup "params" o of
+        Just (Object p) -> case KM.lookup "diagnostics" p of
+            Just (Array arr) -> concatMap getCode (V.toList arr)
+            _ -> []
+        _ -> []
+    _ -> []
+  where
+    getCode (Object d) = case KM.lookup "code" d of
+        Just (String t) -> [t]
+        _ -> []
+    getCode _ = []
 
 
 anyMatch :: T.Text -> [T.Text] -> Bool
@@ -366,7 +385,9 @@ spec = do
             --      kernel sig had this; the LSP was hiding it).
             --   2. Rejected by the LSP with the SAME informative
             --      diagnostic, listing the expected view return
-            --      type (VNode) vs what the user wrote (String).
+            --      type (Html Msg — v0.13 Layer 3 migrated
+            --      Live.app's `view` field to the Sky-source
+            --      `Html msg` ADT) vs what the user wrote (String).
             -- This test fixture deliberately writes `view _ = "hi"`
             -- to assert the diagnostic surfaces.
             sky <- findSky
@@ -417,8 +438,176 @@ spec = do
                         Just payload -> do
                             let msgs = diagnosticMessages payload
                             -- The diagnostic surfaces with field-
-                            -- aware rendering — `view : (Model) ->
-                            -- String` vs `view : (Model) -> VNode`.
+                            -- aware rendering — `view`'s return is
+                            -- `String` where `Html Msg` is expected.
+                            -- (v0.13 Layer 3: Live.app's `view` field
+                            -- returns the Sky-source `Html msg` ADT,
+                            -- not the old runtime `VNode`.)
                             anyMatch "Type" msgs `shouldBe` True
                             anyMatch "view" msgs `shouldBe` True
-                            anyMatch "VNode" msgs `shouldBe` True
+                            anyMatch "Html" msgs `shouldBe` True
+
+    describe "v0.13 Layer 4 — LSP carries stable diagnostic codes" $ do
+
+        it "type-mismatch publishDiagnostics includes code E2001" $ do
+            sky <- findSky
+            let src = unlines
+                    [ "module Main exposing (main)"
+                    , ""
+                    , "import Std.Log exposing (println)"
+                    , ""
+                    , "add : Int -> Int -> Int"
+                    , "add x y = x + y"
+                    , ""
+                    , "main = println (add \"hello\" 1)"
+                    ]
+            withSystemTempDirectory "sky-lsp-code-e2001" $ \dir -> do
+                fixture <- setupProject dir src
+                withLsp sky $ \hin hout -> do
+                    initializeLsp hin hout
+                    didOpen hin fixture src
+                    result <- awaitNotification hout "textDocument/publishDiagnostics"
+                    case result of
+                        Nothing -> expectationFailure
+                            "no publishDiagnostics on type-mismatch file"
+                        Just payload -> do
+                            let codes = diagnosticCodes payload
+                            anyMatch "E2001" codes `shouldBe` True
+
+        it "unbound-name publishDiagnostics includes code E1001" $ do
+            sky <- findSky
+            let src = unlines
+                    [ "module Main exposing (main)"
+                    , ""
+                    , "import Std.Log exposing (println)"
+                    , ""
+                    , "main = println (frobnicate 42)"
+                    ]
+            withSystemTempDirectory "sky-lsp-code-e1001" $ \dir -> do
+                fixture <- setupProject dir src
+                withLsp sky $ \hin hout -> do
+                    initializeLsp hin hout
+                    didOpen hin fixture src
+                    result <- awaitNotification hout "textDocument/publishDiagnostics"
+                    case result of
+                        Nothing -> expectationFailure
+                            "no publishDiagnostics on unbound-name file"
+                        Just payload -> do
+                            let codes = diagnosticCodes payload
+                            anyMatch "E1001" codes `shouldBe` True
+
+        it "parse-error publishDiagnostics includes code E0001" $ do
+            sky <- findSky
+            let src = unlines
+                    [ "module Main exposing (main)"
+                    , ""
+                    , "tyep alias Foo = Int"  -- typo: misspelled keyword
+                    , ""
+                    , "main = 1"
+                    ]
+            withSystemTempDirectory "sky-lsp-code-e0001" $ \dir -> do
+                fixture <- setupProject dir src
+                withLsp sky $ \hin hout -> do
+                    initializeLsp hin hout
+                    didOpen hin fixture src
+                    result <- awaitNotification hout "textDocument/publishDiagnostics"
+                    case result of
+                        Nothing -> expectationFailure
+                            "no publishDiagnostics on parse-error file"
+                        Just payload -> do
+                            let codes = diagnosticCodes payload
+                            anyMatch "E0001" codes `shouldBe` True
+
+        it "every diagnostic includes a non-empty source field" $ do
+            sky <- findSky
+            let src = unlines
+                    [ "module Main exposing (main)"
+                    , ""
+                    , "import Std.Log exposing (println)"
+                    , ""
+                    , "main = println bogus"
+                    ]
+            withSystemTempDirectory "sky-lsp-source-field" $ \dir -> do
+                fixture <- setupProject dir src
+                withLsp sky $ \hin hout -> do
+                    initializeLsp hin hout
+                    didOpen hin fixture src
+                    result <- awaitNotification hout "textDocument/publishDiagnostics"
+                    case result of
+                        Nothing -> expectationFailure
+                            "no publishDiagnostics on unbound file"
+                        Just payload -> do
+                            -- Every diagnostic should have source="sky"
+                            -- so VS Code / Cursor / Neovim disambiguate
+                            -- Sky diagnostics from other compilers'.
+                            let sources = diagnosticSources payload
+                            anyMatch "sky" sources `shouldBe` True
+
+        it "Layer 4 — didSave runs the full pipeline (sky check) in the background" $ do
+            -- v0.13 Layer 4: on save, the server spawns `sky check`
+            -- (codegen + go build, a superset of type-checking) and
+            -- publishes its diagnostics.  Here a type error is used
+            -- as the trigger because it's deterministic — the full-
+            -- pipeline path parses the same `-- TYPE ERROR …` block
+            -- the CLI emits and surfaces it with source="sky check".
+            -- Codegen-stage-only errors (Issue #52's Model_R class)
+            -- flow through the identical path; a type error is the
+            -- stable fixture.
+            sky <- findSky
+            let src = unlines
+                    [ "module Main exposing (main)"
+                    , ""
+                    , "import Std.Log exposing (println)"
+                    , ""
+                    , "bad : Int -> String"
+                    , "bad n = n"
+                    , ""
+                    , "main = println (bad 5)"
+                    ]
+            withSystemTempDirectory "sky-lsp-layer4-save" $ \dir -> do
+                fixture <- setupProject dir src
+                withLsp sky $ \hin hout -> do
+                    initializeLsp hin hout
+                    didOpen hin fixture src
+                    -- drain the didOpen diagnostics
+                    _ <- awaitNotification hout "textDocument/publishDiagnostics"
+                    didSave hin fixture
+                    -- The background `sky check` returns and publishes
+                    -- its own diagnostics.  Drain notifications until
+                    -- we see one carrying source="sky check" (the
+                    -- full-pipeline marker) — the synchronous type-
+                    -- check pass may emit one first.
+                    let drainForFullPipeline :: Int -> IO ()
+                        drainForFullPipeline 0 = expectationFailure
+                            "no full-pipeline (sky check) diagnostic within budget"
+                        drainForFullPipeline n = do
+                            r <- awaitNotification hout
+                                   "textDocument/publishDiagnostics"
+                            case r of
+                                Nothing -> expectationFailure
+                                    "publishDiagnostics stream ended early"
+                                Just payload ->
+                                    if anyMatch "sky check"
+                                         (diagnosticSources payload)
+                                      then do
+                                        let msgs = diagnosticMessages payload
+                                        anyMatch "type mismatch" msgs
+                                            `shouldBe` True
+                                      else drainForFullPipeline (n - 1)
+                    drainForFullPipeline 5
+
+
+-- | Extract `source` field strings from publishDiagnostics payload.
+diagnosticSources :: Aeson.Value -> [T.Text]
+diagnosticSources v = case v of
+    Object o -> case KM.lookup "params" o of
+        Just (Object p) -> case KM.lookup "diagnostics" p of
+            Just (Array arr) -> concatMap getSrc (V.toList arr)
+            _ -> []
+        _ -> []
+    _ -> []
+  where
+    getSrc (Object d) = case KM.lookup "source" d of
+        Just (String t) -> [t]
+        _ -> []
+    getSrc _ = []

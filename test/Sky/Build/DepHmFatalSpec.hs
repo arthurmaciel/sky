@@ -51,12 +51,18 @@ spec = do
                 (ec, out, err) <- readCreateProcessWithExitCode cp ""
                 let combined = out ++ err
                 ec `shouldNotBe` ExitSuccess
-                combined `shouldSatisfy` ("TYPE ERROR (Lib.Config)" `isInfixOf`)
+                -- v0.13 Layer 1: dep-module type errors now flow
+                -- through the structured Diagnostic renderer.  Output
+                -- shape: `-- TYPE ERROR ── src/Lib/Config.sky:N:M [E2001]`
+                -- (where the source path comes from moduleOrder) plus
+                -- the Type mismatch body.  We pin the [E2001] code
+                -- and the Sky source path as the stable markers.
+                combined `shouldSatisfy` ("TYPE ERROR" `isInfixOf`)
+                combined `shouldSatisfy` ("[E2001]" `isInfixOf`)
+                combined `shouldSatisfy` ("Lib/Config.sky" `isInfixOf`)
                 combined `shouldSatisfy` \s ->
                     "Task Error String" `isInfixOf` s
                     || "Type mismatch" `isInfixOf` s
-                -- The fatal label tells the user this isn't a warning.
-                combined `shouldSatisfy` ("fatal" `isInfixOf`)
                 -- And no `app` binary should have been produced.
                 appExists <- doesFileExist (tmp </> "sky-out" </> "app")
                 appExists `shouldBe` False

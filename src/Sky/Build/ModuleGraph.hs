@@ -18,10 +18,12 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import System.Directory (doesFileExist, doesDirectoryExist, listDirectory)
+import System.Exit (exitWith, ExitCode(..))
 import System.FilePath ((</>), takeDirectory, dropExtension, makeRelative, takeExtension)
 
 import qualified Sky.AST.Source as Src
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Render as Render
 import qualified Sky.Parse.Module as Parse
 
 
@@ -77,8 +79,20 @@ discoverModulesFromSeeds roots seeds = do
             else do
                 source <- TIO.readFile path
                 case Parse.parseModule source of
-                    Left err ->
-                        error $ "PARSE ERROR: " ++ path ++ ": " ++ show err
+                    Left err -> do
+                        -- v0.13 Layer 1: render the Diagnostic and
+                        -- exit cleanly.  The previous `error`-based
+                        -- halt printed a Haskell CallStack to stderr
+                        -- which leaked GHC internals to end users —
+                        -- the Elm-style block above already tells
+                        -- them everything they need (file, line:col,
+                        -- source snippet, fix guidance), so we exit
+                        -- with code 1 and let the shell see the
+                        -- failure naturally.
+                        let diag = Parse.moduleErrorToDiagnostic path err
+                        rendered <- Render.renderCli diag
+                        putStrLn rendered
+                        exitWith (ExitFailure 1)
                     Right srcMod -> do
                         let declaredName = case Src._name srcMod of
                                 Just (A.At _ segs) -> joinDots segs

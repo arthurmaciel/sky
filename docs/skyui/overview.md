@@ -1,5 +1,11 @@
 # Std.Ui overview
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 **A typed, no-CSS layout DSL for Sky.Live.** Build a UI from typed primitives (`el`, `row`, `column`, `paragraph`, `textColumn`) and typed attributes (`Background.color`, `Border.rounded`, `Font.size`, `Region.heading`) — Std.Ui renders to inline-styled HTML on the server side and Sky.Live's wire ferries diffs to the browser. No CSS files. No template languages. No client framework.
 
 > Std.Ui's API surface adopts conventions from prior typed-layout DSLs in the Elm community. Implementation, runtime, and code generator are independent Sky / Haskell work — see [NOTICE.md](../../NOTICE.md) for full attribution.
@@ -408,7 +414,7 @@ The 8-module split (`State.sky` / `Update.sky` / `View/{Common,Posts,Detail,Comp
 | Layout: `link / image / button` | ✅ | |
 | Layout: `input` (real `<input>`) | ✅ | `Ui.el` renders as `<div>`, so a dedicated helper exists |
 | Layout: `form` (with `onSubmit`-into-typed-record) | ✅ | Wire driver decodes formData into a typed record |
-| Layout: `html` escape hatch | ✅ | `Ui.html node : any -> Element msg` wraps a Std.Html VNode |
+| Layout: `html` escape hatch | ✅ | `Ui.html node : any -> Element msg` wraps a Std.Html `Html msg` node |
 | **Length**: `px / content / fill / fillPortion / minimum / maximum / shrink / vh / vw` | ✅ | `fill : Length` is bare; use `fillPortion n` for proportional weights; `vh n` / `vw n` are viewport-relative |
 | **Alignment**: `centerX/Y / align*` | ✅ | |
 | **Padding**: `padding / paddingXY / paddingEach` / `spacing` | ✅ | `paddingXY x y` is X-first/Y-second (matches elm-ui — `paddingXY 24 16` = 24px horizontal, 16px vertical). `paddingEach` is record-shaped: `{ top, right, bottom, left }` (matches `Border.widthEach` and elm-ui). |

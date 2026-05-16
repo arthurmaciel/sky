@@ -104,24 +104,81 @@ func Nothing[A any]() SkyMaybe[A] {
 // args to `any`, calls skyFn, and unwraps/adapts the return. Recursive
 // for curried lambdas: if the target's return type is another func type
 // and the Sky return is an `any`-shaped func, wrap again at call time.
+//
+// Uncurried-to-curried adaptation: when skyFn is an uncurried Go func
+// (e.g. an auto-generated record constructor `func(name string, age
+// int, active bool) Foo_R`) and the target is a Sky-style curried
+// signature `func(string) func(int) func(bool) any`, we capture the
+// outer arg and return a reflect-built closure for the remaining
+// shape.  Without this branch, the adapter zero-padded skyFn's
+// missing args and called the uncurried func too early — producing
+// `func(name, 0, false)` then trying to extract a function value
+// from a Foo_R record (panic: call of nil function).
 func adaptFuncValue(skyFn reflect.Value, targetTy reflect.Type) reflect.Value {
+	return adaptFuncValueWithCapture(skyFn, targetTy, nil)
+}
+
+func adaptFuncValueWithCapture(skyFn reflect.Value, targetTy reflect.Type, captured []reflect.Value) reflect.Value {
 	return reflect.MakeFunc(targetTy, func(inArgs []reflect.Value) []reflect.Value {
 		boxedArgs := make([]reflect.Value, len(inArgs))
 		for i, a := range inArgs {
 			boxedArgs[i] = reflect.ValueOf(a.Interface())
 		}
+		// Accumulate captured args from outer curry levels.
+		allArgs := append(append([]reflect.Value{}, captured...), boxedArgs...)
 		skyTy := skyFn.Type()
 		nin := skyTy.NumIn()
-		if nin != len(boxedArgs) && !skyTy.IsVariadic() {
-			if nin > len(boxedArgs) {
-				for i := len(boxedArgs); i < nin; i++ {
-					boxedArgs = append(boxedArgs, reflect.Zero(skyTy.In(i)))
-				}
-			} else {
-				boxedArgs = boxedArgs[:nin]
+		// Uncurried-to-curried: we have fewer args than skyFn wants
+		// AND the target's return is another func — wrap and keep
+		// accumulating.
+		if !skyTy.IsVariadic() && nin > len(allArgs) && targetTy.NumOut() == 1 {
+			outTy := targetTy.Out(0)
+			if outTy.Kind() == reflect.Func {
+				return []reflect.Value{adaptFuncValueWithCapture(skyFn, outTy, allArgs)}
 			}
 		}
-		out := skyFn.Call(boxedArgs)
+		// Default behaviour: align argument count and invoke skyFn.
+		if nin != len(allArgs) && !skyTy.IsVariadic() {
+			if nin > len(allArgs) {
+				for i := len(allArgs); i < nin; i++ {
+					allArgs = append(allArgs, reflect.Zero(skyTy.In(i)))
+				}
+			} else {
+				allArgs = allArgs[:nin]
+			}
+		}
+		// v0.13 follow-up: narrow each arg to skyFn's declared param
+		// type BEFORE reflect.Call. Typed-codegen routes things like
+		// `formatTodo : map[string]string -> ...` through
+		// `rt.Coerce[func(any) any](formatTodo)`. When that adapter
+		// fires from `Sky_Core_List_map_` over a list whose runtime
+		// shape is `[]map[string]any` (e.g. DB rows), the arg passed
+		// here is the raw `map[string]any` — reflect.Call panics with
+		// `Call using map[string]interface{} as type map[string]string`.
+		// `narrowReflectValue` already handles the dict/list element
+		// recursion, so a one-line pre-call narrow makes the adapter
+		// boundary-typed.
+		callMax := nin
+		if skyTy.IsVariadic() {
+			if callMax > 0 {
+				callMax--
+			}
+		}
+		for i := 0; i < callMax && i < len(allArgs); i++ {
+			wantTy := skyTy.In(i)
+			av := allArgs[i]
+			if !av.IsValid() {
+				continue
+			}
+			if av.Type().AssignableTo(wantTy) {
+				continue
+			}
+			narrowed := narrowReflectValue(av, wantTy)
+			if narrowed.IsValid() && narrowed.Type().AssignableTo(wantTy) {
+				allArgs[i] = narrowed
+			}
+		}
+		out := skyFn.Call(allArgs)
 		nOut := targetTy.NumOut()
 		results := make([]reflect.Value, nOut)
 		for i := 0; i < nOut; i++ {
@@ -1012,11 +1069,46 @@ func Basics_sndT[A, B any](t SkyTuple2) B { return t.V1.(B) }
 // AsTuple2 coerces Sky-side any to SkyTuple2. All Sky tuple values
 // are boxed as SkyTuple2 at runtime; the Sky checker enforces tuple
 // arity. Used by the typed kernel dispatch for Basics.fst/snd.
+// AsTuple2 narrows any typed tuple-shape (T2[X, Y] for any X, Y) to
+// the value-erased SkyTuple2 = T2[any, any].  Sky lambda bodies that
+// destructure tuple args via `pat.V0` / `pat.V1` assume SkyTuple2's
+// `any`-typed fields; without this widener, a call site passing a
+// typed `T2[string, TestResult]` would fail the `.(SkyTuple2)`
+// assertion (Go's generic instantiations are distinct nominal types).
+// Reflect over the V0/V1 fields and rebox into SkyTuple2.
 func AsTuple2(v any) SkyTuple2 {
 	if t, ok := v.(SkyTuple2); ok {
 		return t
 	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return SkyTuple2{}
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() == reflect.Struct && rv.NumField() >= 2 {
+		return SkyTuple2{V0: rv.Field(0).Interface(), V1: rv.Field(1).Interface()}
+	}
 	return SkyTuple2{}
+}
+
+// AsTuple3 — same shape-erasure for arity-3 tuples.
+func AsTuple3(v any) SkyTuple3 {
+	if t, ok := v.(SkyTuple3); ok {
+		return t
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return SkyTuple3{}
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() == reflect.Struct && rv.NumField() >= 3 {
+		return SkyTuple3{V0: rv.Field(0).Interface(), V1: rv.Field(1).Interface(), V2: rv.Field(2).Interface()}
+	}
+	return SkyTuple3{}
 }
 
 // AnyT shape tuple accessors: preserve Sky's `any`-valued element
@@ -1474,6 +1566,33 @@ func AsListAny(v any) []any {
 	out := make([]any, n)
 	for i := 0; i < n; i++ {
 		out[i] = rv.Index(i).Interface()
+	}
+	return out
+}
+
+// AsMapAny widens a typed map[string]T to map[string]any. Sky's
+// runtime stores Dict values as map[string]any, but typed-codegen
+// can narrow downstream callees to map[string]string / map[string]int.
+// When such a typed map then flows BACK to a polymorphic-value Dict
+// helper (e.g. Lib_Auth_claimString[T1 any](k, claims map[string]T1)
+// being called with claims widened to map[string]any), the direct
+// type assertion `any(m).(map[string]any)` panics because the two
+// generic instantiations are distinct nominal types. AsMapAny rebuilds
+// the map by value-erasing each entry, mirroring AsListAny.
+func AsMapAny(v any) map[string]any {
+	if already, ok := v.(map[string]any); ok {
+		return already
+	}
+	if v == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Map || rv.Type().Key().Kind() != reflect.String {
+		return nil
+	}
+	out := make(map[string]any, rv.Len())
+	for _, k := range rv.MapKeys() {
+		out[k.String()] = rv.MapIndex(k).Interface()
 	}
 	return out
 }
@@ -2407,7 +2526,11 @@ func List_range(lo any, hi any) any {
 
 func String_join(sep any, list any) any {
 	s := fmt.Sprintf("%v", sep)
-	items := list.([]any)
+	// AsList — not a hard `.([]any)` assertion: v0.13 typed codegen
+	// can hand this kernel a typed `[]string` (e.g. from a typed
+	// `List.map renderProp props` in Sky-source Std.Css). A hard
+	// assertion panics on those; AsList boxes any Go slice.
+	items := AsList(list)
 	parts := make([]string, len(items))
 	for i, item := range items { parts[i] = fmt.Sprintf("%v", item) }
 	return strings.Join(parts, s)
@@ -3799,6 +3922,60 @@ func Coerce[T any](v any) T {
 			p.Elem().Set(rv)
 			return p.Interface().(T)
 		}
+		// v0.13.x #158 — map→struct narrowing. Source: `map[string]any`
+		// (the runtime shape of Db.query rows, Firestore snapshots,
+		// JSON-decoded blobs). Target: a record alias
+		// `Foo_R = struct { Field1 T1; Field2 T2; ... }`.
+		// Without this branch, `rt.Coerce[Foo_R](dbRow)` panics with
+		// `expected Foo_R, got map[string]interface {}` even though
+		// every field is recoverable by name. Build T field-by-field,
+		// applying narrowReflectValue per field so nested container
+		// types (typed maps, typed slices) round-trip too.
+		if rv.Kind() == reflect.Map && targetTy.Kind() == reflect.Struct &&
+			rv.Type().Key().Kind() == reflect.String {
+			out := reflect.New(targetTy).Elem()
+			n := targetTy.NumField()
+			for i := 0; i < n; i++ {
+				fld := targetTy.Field(i)
+				if !fld.IsExported() {
+					continue
+				}
+				// Probe three forms in order: PascalCase exact
+				// ("Foo" / "ID"), lowercase-first ("foo" / "iD",
+				// matching Sky's `capitalise_`-emitted record
+				// fields), and full lowercase ("id", matching FFI
+				// all-caps acronyms + JSON / Db.getField output).
+				mv := rv.MapIndex(reflect.ValueOf(fld.Name))
+				if !mv.IsValid() && len(fld.Name) > 0 {
+					lowered := string(fld.Name[0]|0x20) + fld.Name[1:]
+					mv = rv.MapIndex(reflect.ValueOf(lowered))
+					if !mv.IsValid() {
+						buf := make([]byte, len(fld.Name))
+						for j := 0; j < len(fld.Name); j++ {
+							c := fld.Name[j]
+							if c >= 'A' && c <= 'Z' {
+								c |= 0x20
+							}
+							buf[j] = c
+						}
+						mv = rv.MapIndex(reflect.ValueOf(string(buf)))
+					}
+				}
+				if !mv.IsValid() {
+					continue
+				}
+				inner := mv.Interface()
+				if inner == nil {
+					continue
+				}
+				ev := reflect.ValueOf(inner)
+				narrowed := narrowReflectValue(ev, fld.Type)
+				if narrowed.IsValid() && narrowed.Type().AssignableTo(fld.Type) {
+					out.Field(i).Set(narrowed)
+				}
+			}
+			return out.Interface().(T)
+		}
 	}
 	panic(fmt.Sprintf("rt.Coerce: expected %T, got %T (%v)", zero, v, v))
 }
@@ -4566,7 +4743,7 @@ func Random_float(lo any, hi any) any {
 
 func Random_choice(list any) any {
 	return func() any {
-		items := list.([]any)
+		items := AsList(list)
 		if len(items) == 0 { return Err[any, any](ErrInvalidInput("empty list")) }
 		return Ok[any, any](items[mrand.Intn(len(items))])
 	}
@@ -4574,7 +4751,7 @@ func Random_choice(list any) any {
 
 func Random_shuffle(list any) any {
 	return func() any {
-		items := list.([]any)
+		items := AsList(list)
 		result := make([]any, len(items))
 		copy(result, items)
 		mrand.Shuffle(len(result), func(i, j int) { result[i], result[j] = result[j], result[i] })
@@ -4623,7 +4800,7 @@ func Random_shuffleT[A any](xs []A) SkyTask[any, []A] {
 func Process_run(cmd any, args any) any {
 	return func() any {
 		cmdStr := fmt.Sprintf("%v", cmd)
-		argList := args.([]any)
+		argList := AsList(args)
 		strArgs := make([]string, len(argList))
 		for i, a := range argList { strArgs[i] = fmt.Sprintf("%v", a) }
 		c := exec.Command(cmdStr, strArgs...)
@@ -5535,7 +5712,7 @@ const (
 
 func Server_listen(port any, routes any) any {
 	p := AsInt(port)
-	routeList := routes.([]any)
+	routeList := AsList(routes)
 	mux := http.NewServeMux()
 
 	for _, r := range routeList {

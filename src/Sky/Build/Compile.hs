@@ -8,7 +8,8 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Data.IORef
-import Data.Maybe (isJust, fromMaybe)
+import Data.Maybe (isJust, isNothing, fromMaybe)
+import Data.List (isPrefixOf)
 import qualified Data.Char as Char
 import qualified Data.List as List
 import qualified System.Directory
@@ -28,6 +29,10 @@ import Sky.Build.EmbeddedRuntime (embeddedRuntime, embeddedSkyStdlib)
 import qualified Sky.AST.Source as Src
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Diagnostic as Diag
+import qualified Sky.Reporting.Render as Render
+import qualified Sky.Build.Validator as Validator
+import qualified Sky.Build.Monomorphise as Mono
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Parse.Module as Parse
 import qualified Sky.Canonicalise.Module as Canonicalise
@@ -49,12 +54,206 @@ import qualified Sky.Build.FfiTypeResolve as FfiTy
 import qualified Sky.Build.SkyDeps as SkyDeps
 import qualified Sky.Canonicalise.Environment as Env
 import qualified System.Environment
+import qualified Debug.Trace
 
 
 -- | Global codegen environment (set once per compilation, read during codegen)
 {-# NOINLINE globalCgEnv #-}
 globalCgEnv :: IORef Rec.CodegenEnv
-globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty)
+globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty Set.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty)
+
+
+-- | v0.13 A2 follow-up: dedicated, eagerly-populated union-name
+-- registry. Mirrors `_cg_unionNames` inside `globalCgEnv`, but the
+-- separate IORef lets `typeStrWithAliasesReg` (called during
+-- dep-function-sig emission, possibly INSIDE `modifyIORef
+-- globalCgEnv` callbacks) read union names without forcing a lazy
+-- thunk that would re-enter the in-flight cgEnv update and
+-- black-hole (<<loop>>). Written eagerly via `writeIORef` at the
+-- same moments cgEnv's `_cg_unionNames` is updated.
+{-# NOINLINE globalUnionNames #-}
+globalUnionNames :: IORef (Set.Set String)
+globalUnionNames = unsafePerformIO $ newIORef Set.empty
+
+
+-- | v0.13 Phase A5: entry-module source path, set once per
+-- compilation, read at call-site codegen to key into
+-- `_cg_callSiteInstances` by (path, line, col).  Set in
+-- `continueCompile` before generateGoMulti runs.
+{-# NOINLINE globalEntryPath #-}
+globalEntryPath :: IORef FilePath
+globalEntryPath = unsafePerformIO $ newIORef ""
+
+
+{-# NOINLINE entryPathRef #-}
+entryPathRef :: FilePath
+entryPathRef = unsafePerformIO $ readIORef globalEntryPath
+
+
+-- | v0.13 Phase A5++: per-module source path that codegen sets
+-- before lowering each dep module so `coerceCallArgsAt`'s CSI
+-- lookup uses the right (file, line, col) triple.  The entry
+-- module always uses `globalEntryPath`; each dep's lowering
+-- swaps this to the dep's `_mi_path`.  Without this, the CSI
+-- map collisions across files surface as bare-`T1` leaks in the
+-- emitted Go.
+{-# NOINLINE globalSourceFile #-}
+globalSourceFile :: IORef FilePath
+globalSourceFile = unsafePerformIO $ newIORef ""
+
+
+-- | v0.13 Phase A4: the transitively-reachable instance set from
+-- `main`.  Populated by `continueCompile` after the solver runs;
+-- consumed by `generateGoMulti` to emit per-instance specialised
+-- Go functions alongside (and eventually replacing) the generic
+-- versions.
+{-# NOINLINE globalReachableSet #-}
+globalReachableSet :: IORef Mono.ReachableSet
+globalReachableSet = unsafePerformIO $ newIORef Set.empty
+
+
+-- | v0.13 F: whole-program Sky-side reachable set.  Populated by
+-- continueCompile after the canon fixpoint runs (the same hook where
+-- `globalReachableSet` gets the mono-instance reachable set).  Read by
+-- `loadAndSeedFfiRegistry` to prune unused FFI sigs (the Stripe-SDK
+-- win) and by `generateDeclsForDep` to skip emission of unreachable
+-- dep-module decls.  Set `SKY_DCE=0` to disable pruning (escape
+-- hatch — value stays Set.empty so every reachable check returns True
+-- via the empty-set fallback below).
+{-# NOINLINE globalReachableProgram #-}
+globalReachableProgram :: IORef (Set.Set Dce.Ref)
+globalReachableProgram = unsafePerformIO $ newIORef Set.empty
+
+
+-- | v0.13 F: dce-disabled flag.  Read once at compile start from
+-- `SKY_DCE`.  When True, all reachability checks return True so no
+-- pruning fires — debug aid.
+{-# NOINLINE globalDceDisabled #-}
+globalDceDisabled :: IORef Bool
+globalDceDisabled = unsafePerformIO $ newIORef False
+
+
+-- | v0.13 E: anon-record shape registry. Populated by
+-- `synthAnonRecordName` whenever the renderer hits an unmatched
+-- `T.TRecord` shape and synthesises a `Anon_R_<hash>` name.
+-- Consumed by `generateAnonRecordDecls` (wired into `generateGoMulti`
+-- before user decls) which emits one `type Anon_R_<hash> = struct
+-- { ... }` per registered shape, plus a `gob.RegisterName` so the
+-- session-store round-tripping works.
+--
+-- Pre-E (`sanitiseTypedDeep` rewriting `Anon_R_*` → `any`) was a
+-- contract-violation cover-up: any function signature that
+-- mentioned an anon-record collapsed to `any`-typed. Now the
+-- struct decls actually exist, so the typed Go names round-trip
+-- without the workaround.
+{-# NOINLINE globalAnonRecords #-}
+globalAnonRecords :: IORef (Map.Map String (Map.Map String T.FieldType))
+globalAnonRecords = unsafePerformIO $ newIORef Map.empty
+
+
+-- | v0.13 Phase A4: per-callee generalised annotation, used to
+-- derive σ for each reachable instance.  Same map shape as
+-- `buildCrossModuleExternalsWithMods` but keyed by full
+-- Sky-qualified name (`"Sky.Core.List.foldl"`).
+{-# NOINLINE globalAnnotMap #-}
+globalAnnotMap :: IORef (Map.Map String T.Annotation)
+globalAnnotMap = unsafePerformIO $ newIORef Map.empty
+
+
+-- | v0.13 Phase A4: the set of specialised function names that
+-- `generateGoMulti` actually emitted as separate Go decls.  Used
+-- by `instanceMangledName` to gate call-site mangled-name
+-- rewriting — only use the mangled name when its spec exists,
+-- else fall back to the generic version.
+{-# NOINLINE globalEmittedSpecs #-}
+globalEmittedSpecs :: IORef (Set.Set String)
+globalEmittedSpecs = unsafePerformIO $ newIORef Set.empty
+
+
+-- | v0.13 Phase A4: per-callee annotation Forall quantifier-name list,
+-- captured from the actual `CallInstance.quantifiers` the solver
+-- recorded.  Used for spec emission's σ build instead of re-deriving
+-- via `generaliseToAnnotation` (which can produce DIFFERENT Forall
+-- ordering across pass 1 / pass 2 because the solver's internal TVar
+-- names differ between passes).
+{-# NOINLINE globalCsiByCallee #-}
+globalCsiByCallee :: IORef (Map.Map String [String])
+globalCsiByCallee = unsafePerformIO $ newIORef Map.empty
+
+-- | v0.13 typed lowerer: per-lambda-scope local-variable type bindings.
+-- When emitting a typed lambda body, `withLambdaTypes` pushes the
+-- lambda's `pat → T.Type` bindings here so `inferExprType` /
+-- `Can.VarLocal` lookups resolve the param's HM-inferred type.
+-- Without this, `\x -> x + 1` inside a typed HOF (where `x : Int`
+-- was inferred) would lower `x + 1` as `rt.Add(x, 1)` (any-routed
+-- through reflect) instead of Go-native `x + 1` (typed).
+{-# NOINLINE globalLambdaTypes #-}
+globalLambdaTypes :: IORef (Map.Map String T.Type)
+globalLambdaTypes = unsafePerformIO $ newIORef Map.empty
+
+
+-- | Snapshot + restore the lambda-types map around an action.  Used at
+-- typed-lambda emission boundaries to nest scopes correctly when
+-- lambdas are nested.  The `a` argument is evaluated to WHNF inside
+-- the bracket so the push/pop ordering matches the lambda's lexical
+-- scope.
+withLambdaTypes :: Map.Map String T.Type -> a -> a
+withLambdaTypes additions x = unsafePerformIO $ do
+    prev <- readIORef globalLambdaTypes
+    writeIORef globalLambdaTypes (Map.union additions prev)
+    return x
+
+
+-- | GoExpr-specific scope: pushes bindings, renders the GoExpr to a
+-- String (forcing full evaluation), pops back to the previous
+-- bindings, then wraps the rendered String as a `GoRaw`.  This
+-- gives PROPER push/pop scoping (impossible with `withLambdaTypes`
+-- because GoExpr is lazy — pop in pure code races with deferred
+-- forcing).  Downstream consumers (rendering, specialiseFuncDecl)
+-- handle `GoRaw` correctly.
+--
+-- Use this at points where the bindings MUST NOT leak into sibling
+-- scopes — e.g. record field-access optimisation, let-binding
+-- typed registration, function-param registration.
+withScopedLambdaTypes :: Map.Map String T.Type -> GoIr.GoExpr -> GoIr.GoExpr
+withScopedLambdaTypes additions x = unsafePerformIO $ do
+    prev <- readIORef globalLambdaTypes
+    writeIORef globalLambdaTypes (Map.union additions prev)
+    -- Force the GoExpr to String form which fully evaluates the tree.
+    -- After this, the bindings are no longer needed (the rendered
+    -- String is final).  Restore the previous bindings so sibling
+    -- scopes see their own state.
+    let rendered = GoBuilder.renderExpr x
+        -- Force evaluation by demanding length (rendered is a String).
+        forced = length rendered
+    forced `seq` writeIORef globalLambdaTypes prev
+    return (GoIr.GoRaw rendered)
+
+
+-- | Read the current lambda-types map (for use in pure codegen).
+-- Takes a unit arg + NOINLINE so each call site forces a fresh read
+-- of the IORef.  Without the arg, GHC may cache the value across
+-- call sites and the bindings registered by `withLambdaTypes` after
+-- the first call stay invisible.
+-- | Lookup a variable in the current lambda-types map.  Inlined as
+-- `unsafePerformIO (readIORef ... >>= return . Map.lookup k)` so GHC
+-- doesn't memoise the map across calls.  A plain `Map.lookup k
+-- getLambdaTypes` would share the IORef-read across all call sites
+-- with the same `k`, defeating the per-call refresh needed for the
+-- lambda-scope binding to reach access-codegen sites later in the
+-- pipeline.
+lookupLambdaType :: String -> Maybe T.Type
+lookupLambdaType k = unsafePerformIO $ do
+    m <- readIORef globalLambdaTypes
+    return (Map.lookup k m)
+
+
+-- | Membership-only sister of `lookupLambdaType`.
+memberLambdaType :: String -> Bool
+memberLambdaType k = unsafePerformIO $ do
+    m <- readIORef globalLambdaTypes
+    return (Map.member k m)
+
 
 -- | Read the global codegen env (for use in pure codegen functions).
 -- NOINLINE so GHC doesn't CSE the IORef read across call sites —
@@ -328,10 +527,18 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 Left $ "Parse error in " ++ Graph._mi_name modInfo ++ ": " ++ show err
             Right srcMod ->
                 Right (Graph._mi_name modInfo, srcMod)
-    -- Print summaries in deterministic order
+    -- v0.13 Layer 1: render each parser failure as a structured
+    -- Diagnostic.  The block carries the offending file + line:col,
+    -- a source snippet around the failure, and a short variant-
+    -- specific reason ("module name expected here", etc.).  This
+    -- replaces the previous `PARSE FAILED: <module> <ctor>` line
+    -- which surfaced the Haskell constructor name to end users.
     mapM_ (\(modInfo, r) -> case r of
-        Left err ->
-            putStrLn $ "   PARSE FAILED: " ++ Graph._mi_name modInfo ++ " " ++ show err
+        Left err -> do
+            let diag = Parse.moduleErrorToDiagnostic
+                         (Graph._mi_path modInfo) err
+            rendered <- Render.renderCli diag
+            putStrLn rendered
         Right srcMod ->
             let declCount = length (Src._values srcMod)
             in putStrLn $ "   " ++ Graph._mi_name modInfo ++ ": " ++ show declCount ++ " declarations"
@@ -355,16 +562,33 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
         --   1. Canonicalise each dep in isolation (only its own ADTs visible)
         --      to build a depInfoMap with every module's union constructors.
         --   2. Re-canonicalise every dep AND the entry with the full map.
-        firstPassDeps <- Async.forConcurrently depModules $ \(n, srcMod) ->
-            case Canonicalise.canonicalise srcMod of
-                Right cm -> return (Just (n, cm))
-                Left _   -> return Nothing
-        let firstValid = [x | Just x <- firstPassDeps]
-            depInfoMap = Map.fromList
+        -- Canonicalise dependency modules to a FIXPOINT.
+        --
+        -- A single isolated pass + one pass-with-deps is NOT enough.
+        -- A Sky-stdlib module can use ANOTHER stdlib module's ADT
+        -- constructors — e.g. `Std.Html.Events` builds `EventAttr
+        -- (OnMsg …)` from `Std.Html.Attributes`.  Those constructors
+        -- are invisible in isolation (pass 1), so `Std.Html.Events`
+        -- fails pass 1 and is absent from the dep map; a THIRD
+        -- module that imports it (`Page.Dashboard`) then canonicalises
+        -- in pass 2 WITHOUT `Std.Html.Events` in scope and silently
+        -- resolves `import Std.Html.Events` to the KERNEL — so
+        -- `onClick` came back as the kernel's arity-0 `Attribute`
+        -- alias instead of the Sky module's `Attribute msg`.
+        --
+        -- A dependency chain of depth N needs N canonicalisation
+        -- passes.  So iterate: rebuild the dep map from each pass's
+        -- successes and re-canonicalise EVERY dep (pass-1 home
+        -- resolutions are wrong anyway) until the success set
+        -- stabilises.  Capped at 16 iterations — a genuinely-broken
+        -- module never enters the success set, so the cap only
+        -- bounds wasted passes, and its error still surfaces in
+        -- `depErrors` below.
+        let buildDepInfoMap valids = Map.fromList
                 [ (modName, Canonicalise.DepInfo
                     { Canonicalise._dep_name = Can._name depMod
                     , Canonicalise._dep_unions =
-                        [ (typeName, Can._u_alts union)
+                        [ (typeName, Can._u_vars union, Can._u_alts union)
                         | (typeName, union) <- Map.toList (Can._unions depMod)
                         ]
                     , Canonicalise._dep_aliases = Map.keys (Can._aliases depMod)
@@ -372,46 +596,54 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     , Canonicalise._dep_values = Set.toList (collectDeclNames (Can._decls depMod))
                     , Canonicalise._dep_exports = Can._exports depMod
                     })
-                | (modName, depMod) <- firstValid
+                | (modName, depMod) <- valids
                 ]
-
-        -- Pass 2: re-canonicalise deps with full cross-module info.
-        depCanMods <- Async.forConcurrently depModules $ \(n, srcMod) ->
-            case Canonicalise.canonicaliseWithDeps depInfoMap srcMod of
-                Right cm -> return (Right (n, cm))
-                Left err -> return (Left (n, err))
-        let validDeps = [x | Right x <- depCanMods]
-            depErrors = [(n, err) | Left (n, err) <- depCanMods]
-
-        -- If any dep failed to canonicalise, fail the build with the first
-        -- error so users see actionable messages (e.g. ambiguous imports)
-        -- rather than a downstream "undefined" Go error.
-        -- Re-build depInfoMap from pass 2 results so cross-module alias
-        -- bodies carry the correct home resolutions (pass 1 canonicalises
-        -- with empty deps, so imports that expose types from OTHER dep
-        -- modules resolve with home="" — wrong). Pass 2 has all imports
-        -- visible and produces the correctly-homed bodies. Entry-module
-        -- canonicalisation uses this rebuilt map for alias expansion.
-        let depInfoMap2 = Map.fromList
-                [ (modName, Canonicalise.DepInfo
-                    { Canonicalise._dep_name = Can._name depMod
-                    , Canonicalise._dep_unions =
-                        [ (typeName, Can._u_alts union)
-                        | (typeName, union) <- Map.toList (Can._unions depMod)
-                        ]
-                    , Canonicalise._dep_aliases = Map.keys (Can._aliases depMod)
-                    , Canonicalise._dep_aliasDefs = Can._aliases depMod
-                    , Canonicalise._dep_values = Set.toList (collectDeclNames (Can._decls depMod))
-                    , Canonicalise._dep_exports = Can._exports depMod
-                    })
-                | (modName, depMod) <- validDeps
-                ]
+            canonPassWith m = Async.forConcurrently depModules $ \(n, srcMod) ->
+                case Canonicalise.canonicaliseWithDeps m srcMod of
+                    Right cm -> return (Right (n, cm))
+                    Left err -> return (Left (n, err))
+            canonFixpoint
+                :: Set.Set String
+                -> Map.Map String Canonicalise.DepInfo
+                -> Int
+                -> IO ([(String, Can.Module)], [(String, String)])
+            canonFixpoint prevSucc curMap iter = do
+                results <- canonPassWith curMap
+                let valids = [x | Right x <- results]
+                    errs   = [(n, e) | Left (n, e) <- results]
+                    succSet = Set.fromList (map fst valids)
+                if succSet == prevSucc || iter >= 16
+                    then return (valids, errs)
+                    else canonFixpoint succSet (buildDepInfoMap valids) (iter + 1)
+        (validDeps, depErrors) <- canonFixpoint Set.empty Map.empty (0 :: Int)
+        -- The dep map for the entry module is rebuilt from the
+        -- fixpoint's final (complete) success set.
+        let depInfoMap2 = buildDepInfoMap validDeps
         case depErrors of
-         ((n, err):_) ->
-            return (Left $ "Canonicalise error in " ++ n ++ ":\n" ++ err)
+         ((n, err):_) -> do
+            -- v0.13 Layer 1: render the dep-module canonicalise
+            -- error through the structured Diagnostic pipeline so
+            -- the user sees the Elm-style block (file:line:col +
+            -- source snippet + reason) instead of a bare prefixed
+            -- string.  Look up the dep's source path so the snippet
+            -- comes from the right file.
+            let depPath = case [p | mi <- moduleOrder
+                                  , Graph._mi_name mi == n
+                                  , let p = Graph._mi_path mi ] of
+                            (p:_) -> p
+                            _     -> entryPath
+                diag = Canonicalise.legacyToDiag depPath err
+            rendered <- Render.renderCli diag
+            putStrLn rendered
+            return (Left $ "Canonicalise error in " ++ n)
          [] ->
           case Canonicalise.canonicaliseWithDeps depInfoMap2 entrySrcMod of
-           Left err -> return (Left $ "Canonicalise error: " ++ err)
+           Left err -> do
+            -- v0.13 Layer 1: same treatment for the entry module.
+            let diag = Canonicalise.legacyToDiag entryPath err
+            rendered <- Render.renderCli diag
+            putStrLn rendered
+            return (Left "Canonicalise error")
            Right canMod -> do
             putStrLn "   Names resolved"
             -- T2/T6: prime the global codegen env's function-type
@@ -466,8 +698,23 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     | (modName, depMod) <- validDeps
                     , let prefix = map (\c -> if c == '.' then '_' else c) modName
                     ]
+                -- v0.13 typed lowerer: dep-module ENUM union names
+                -- (prefixed).  An enum emits `type X = int`, so its
+                -- zero value is `0` — `goZeroValue` needs this to
+                -- distinguish from tagged ADTs (`type X = rt.SkyADT`,
+                -- zero `X{}`).
+                depEnumNames = Set.unions
+                    [ Set.map (\n -> prefix ++ "_" ++ n)
+                             (Set.fromList
+                                [ uname
+                                | (uname, u) <- Map.toList (Can._unions depMod)
+                                , Can._u_opts u == Can.Enum
+                                ])
+                    | (modName, depMod) <- validDeps
+                    , let prefix = map (\c -> if c == '.' then '_' else c) modName
+                    ]
                 depArities = Map.unions
-                    [ Map.mapKeys (\n -> prefix ++ "_" ++ n)
+                    [ Map.mapKeys (\n -> prefix ++ "_" ++ goSafeName n)
                                   (Rec.collectFuncArities (Can._decls depMod))
                     | (modName, depMod) <- validDeps
                     , let prefix = map (\c -> if c == '.' then '_' else c) modName
@@ -546,28 +793,101 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- confusing `go build` errors like
             --   "too many arguments in call to Std_Ui_paddingEach"
             -- long after sky check should have caught them.
-            let pass1Externals = buildCrossModuleExternalsWithMods validDeps depSolved0
-                isForeignErr s = "Foreign '" `List.isInfixOf` s
-            depResults <- mapM (\(modName, depMod) -> do
-                cs <- Constrain.constrainModuleWithExternals pass1Externals depMod
-                r  <- Solve.solve cs
-                case r of
-                    Solve.SolveOk t -> return (modName, Right t)
-                    Solve.SolveError err2
-                        | isForeignErr err2 -> return (modName, Left err2)
-                        | otherwise -> case lookup modName depSolved0 of
-                            Just p1 | not (Map.null p1) ->
-                                return (modName, Right p1)
-                            _ -> return (modName, Left err2)) validDeps
-            let depErrors = [(mn, e) | (mn, Left e)  <- depResults]
-                depSolved = [(mn, t) | (mn, Right t) <- depResults]
+            let isForeignErr s = "Foreign '" `List.isInfixOf` s
+            -- v0.13 Phase A5: use `solveWithInstances` on each dep so
+            -- monomorphisation captures dep-module call sites too.
+            -- Pass 1 (`depSolved0`, above) stays on plain `solve`: its
+            -- job is dep-isolation typing; captures aren't useful since
+            -- externals are empty.  Every subsequent round has the full
+            -- externals built from the previous round — that's where
+            -- real call-site instances surface.
+            --
+            -- v0.13 Layer 3: the dep-solve is now a true FIXPOINT, not
+            -- a fixed 2 extra passes.  Migrating
+            -- Std.Html{,/Attributes,/Events} from kernel pseudo-modules
+            -- to Sky-source stdlib deepened the dependency chain
+            -- (Std.Html.Attributes → Std.Html → Ui.Layout → Page.* →
+            -- Main).  A hard-coded pass count silently under-solves
+            -- every module past the cap: its cross-module callees
+            -- resolve against incomplete externals, HM infers a wrong
+            -- type (classically a `Dict String String`-polluted `msg`
+            -- var leaking out of an event handler), and that wrong type
+            -- propagates into every consumer.  Iterating until the
+            -- solved type sets stop changing makes the depth of the
+            -- module graph irrelevant.  The cap (16) only guards
+            -- against a pathological oscillation — real graphs
+            -- converge in `depth-of-chain` rounds.
+            -- Each round's per-module result is
+            --   `Right (types, csi, mErr)` — solved (mErr=Nothing) OR
+            --     fell back to the previous round's types because THIS
+            --     round still had a non-Foreign error (mErr=Just err);
+            --   `Left err` — a Foreign error, or a non-Foreign error
+            --     with no previous-round types to fall back to.
+            -- The fell-back `Just err` is what closes the v0.13 Layer 3
+            -- soundness hole: DURING the fixpoint a module legitimately
+            -- errors because its externals aren't ready yet, so we keep
+            -- iterating; but at CONVERGENCE the externals are complete,
+            -- so a module that STILL errors has a REAL type bug and is
+            -- surfaced FATALLY (see `depErrors` below) instead of
+            -- silently shipping its stale round-1 typing.  Pre-fix, a
+            -- typed dep param (`Css.padding2 : Length -> Length`)
+            -- failed to reject a `String` arg in a consumer because the
+            -- consumer module's own non-Foreign solve error was
+            -- tolerated and its polymorphic round-1 types shipped.
+            let solveRound prevSolved = do
+                    let externals =
+                            buildCrossModuleExternalsWithMods validDeps prevSolved
+                    mapM (\(modName, depMod) -> do
+                        cs <- Constrain.constrainModuleWithExternals externals depMod
+                        (r, _, csi) <- Solve.solveWithInstances cs
+                        case r of
+                            Solve.SolveOk t ->
+                                return (modName, Right (t, csi, Nothing))
+                            Solve.SolveError err
+                                | isForeignErr err -> return (modName, Left err)
+                                -- Non-Foreign error: keep the previous
+                                -- round's types so a not-yet-ready dep
+                                -- doesn't erase the rest, but REMEMBER
+                                -- the error so convergence can decide
+                                -- whether it was transient or real.
+                                | otherwise -> case lookup modName prevSolved of
+                                    Just p | not (Map.null p) ->
+                                        return (modName, Right (p, csi, Just err))
+                                    _ -> return (modName, Left err)) validDeps
+                depTypesOf results =
+                    [(mn, t) | (mn, Right (t, _, _)) <- results]
+                solveFixpoint prevSolved n = do
+                    results <- solveRound prevSolved
+                    let curSolved = depTypesOf results
+                    if curSolved == prevSolved || n >= (16 :: Int)
+                        then return results
+                        else solveFixpoint curSolved (n + 1)
+            finalResults <- solveFixpoint depSolved0 (0 :: Int)
+            let depErrors = [(mn, e) | (mn, Left e) <- finalResults]
+                         -- Converged-round non-Foreign errors are real.
+                         ++ [ (mn, e)
+                            | (mn, Right (_, _, Just e)) <- finalResults
+                            ]
+                depSolved = [(mn, t) | (mn, Right (t, _, _)) <- finalResults]
+                depCsiByMod = [(mn, csi) | (mn, Right (_, csi, _)) <- finalResults]
             unless (null depErrors) $ do
-                mapM_ (\(mn, e) ->
-                        putStrLn ("   TYPE ERROR (" ++ mn ++ "): " ++ e))
-                    depErrors
-                error ("fatal: type errors in "
-                        ++ show (length depErrors)
-                        ++ " dep module(s)")
+                -- v0.13 Layer 1: route dep-module type errors through the
+                -- structured Diagnostic renderer too.  Pre-fix each was
+                -- printed as `   TYPE ERROR (Lib.Auth): 114:17: ...` and
+                -- then `error`'d out with a Haskell CallStack visible to
+                -- the user.  Now each emits the same Elm-style block
+                -- with TYPE ERROR header + source snippet + [E2001] code,
+                -- and the discovery stage exits cleanly with code 1.
+                mapM_ (\(mn, e) -> do
+                    let depPath = case [p | mi <- moduleOrder
+                                          , Graph._mi_name mi == mn
+                                          , let p = Graph._mi_path mi ] of
+                                    (p:_) -> p
+                                    _     -> entryPath
+                        diag = Solve.solveErrorToDiagnostic depPath e
+                    rendered <- Render.renderCli diag
+                    putStrLn rendered) depErrors
+                System.Exit.exitWith (System.Exit.ExitFailure 1)
             -- Entry module gets cross-module externals so VarTopLevel
             -- references to dep values emit CForeign with the dep's
             -- solved annotation. Only fully-concrete types (no free
@@ -594,7 +914,41 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             _ <- return depDeclaredNames  -- silence unused warning on release path
             constraints <- Constrain.constrainModuleWithExternals depExternals canMod
             putStrLn $ "   cross-module externals: " ++ show (Map.size depExternals)
-            solveResult <- Solve.solve constraints
+            -- v0.13 Phase A3: use `solveWithInstances` so we also
+            -- capture the call-site instance table for the
+            -- monomorphisation pass.  Behaviour-equivalent to
+            -- `Solve.solve` for the SolvedTypes portion — the
+            -- new path merges `_locals` into the returned map
+            -- identically (the missing merge was a subtle
+            -- regression on Live.app's `init_` function-value
+            -- references that's now fixed).
+            (solveResult, callInstances, callSiteInstances) <- Solve.solveWithInstances constraints
+            -- v0.13 Phase A5: install the per-call-site instance
+            -- registry into `_cg_callSiteInstances` so call-site
+            -- codegen can pick the right generic instantiation
+            -- (concrete types) instead of erasing every TVar to
+            -- `any`.  Key: (file, line, col) of the call's source
+            -- region start.  Entry-module callsites go under
+            -- entryPath; each dep's callsites use the dep's own
+            -- source path (looked up via `moduleOrder`).
+            -- v0.13 Phase A5++: CSI map is keyed by
+            -- (line, col) AND nested by callee name, so calls at the
+            -- same source position in different files (or different
+            -- callees inferred at the same point) don't overwrite
+            -- each other.  Lookups consult the inner map by the
+            -- expected callee's Sky-form name.
+            let csiEntries =
+                    [ ( ( A._line (A._start (Solve._cs_region csi))
+                        , A._col  (A._start (Solve._cs_region csi)) )
+                      , Map.singleton
+                          (Solve._instance_callee (Solve._cs_instance csi))
+                          (Solve._cs_instance csi)
+                      )
+                    | csi <- callSiteInstances ++ concatMap snd depCsiByMod ]
+                csiByRegion = Map.fromListWith Map.union csiEntries
+            modifyIORef globalCgEnv $ \e ->
+                Rec.withCallSiteInstances csiByRegion e
+            writeIORef globalEntryPath entryPath
             -- HM type errors are FATAL (promoted from warning). No
             -- silent degradation to `any`. This enforces the
             -- "if it compiles, it works" promise at the entry module.
@@ -604,34 +958,166 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             types <- case solveResult of
                 Solve.SolveOk t -> do
                     putStrLn $ "   Types OK (" ++ show (length (Map.keys t)) ++ " bindings)"
+                    -- v0.13 Phase A3: log the captured instance table.
+                    -- Format: "<N> instances across <M> functions".
+                    -- Set SKY_MONO_TRACE=1 to dump every instance.
+                    let callsiteCount = length callInstances
+                        uniqueCallees =
+                            length (List.nub (map Solve._instance_callee callInstances))
+                    putStrLn $ "   Monomorphisation: "
+                            ++ show callsiteCount ++ " instances across "
+                            ++ show uniqueCallees ++ " polymorphic callees"
+                    monoTrace <- System.Environment.lookupEnv "SKY_MONO_TRACE"
+                    case monoTrace of
+                        Just "1" -> mapM_ (\ci ->
+                            putStrLn $ "     " ++ Mono.mangleInstance ci) callInstances
+                        _ -> return ()
+                    -- v0.13 Phase A4 + A7: compute the REACHABLE
+                    -- subset of captured instances by walking
+                    -- transitively from `main`.  Stored globally for
+                    -- generateGoMulti to consume when emitting
+                    -- per-instance specialisations.
+                    let defMap = buildDefMap canMod validDeps
+                        annotMap = buildAnnotMap t depSolved
+                        csiMapForReach = Map.fromList
+                            [ ( ( A._line (A._start (Solve._cs_region csi))
+                                , A._col  (A._start (Solve._cs_region csi)) )
+                              , Solve._cs_instance csi
+                              )
+                            | csi <- callSiteInstances ++ concatMap snd depCsiByMod ]
+                        entryName = case mainModuleName entrySrcMod of
+                            Just n  -> n ++ ".main"
+                            Nothing -> "Main.main"
+                        reached = Mono.reachableInstances
+                            defMap annotMap csiMapForReach
+                            [(entryName, [])]
+                    writeIORef globalReachableSet reached
+                    writeIORef globalAnnotMap annotMap
+                    -- v0.13 F: whole-program Sky DCE.  Walk every
+                    -- module's call graph from `(entryMod, "main")`
+                    -- across module boundaries, tracking VarTopLevel
+                    -- + VarKernel (FFI) + VarCtor refs.  Stored
+                    -- globally for loadAndSeedFfiRegistry's pruning
+                    -- step + generateDeclsForDep's per-decl skip.
+                    dceOff <- System.Environment.lookupEnv "SKY_DCE"
+                    let dceDisabled = dceOff == Just "0"
+                    writeIORef globalDceDisabled dceDisabled
+                    if dceDisabled
+                        then return ()
+                        else do
+                            let entryModName = case mainModuleName entrySrcMod of
+                                    Just n  -> n
+                                    Nothing -> "Main"
+                                allModsMap = Map.fromList
+                                    ((entryModName, canMod) : validDeps)
+                                progReached = Dce.reachableWholeProgram
+                                    entryModName allModsMap Set.empty
+                            writeIORef globalReachableProgram progReached
+                    -- v0.13 Phase A4: stash per-callee captured
+                    -- quantifier names so spec emission uses the
+                    -- SAME ordering the solver instantiated with.
+                    let csiByCallee = Map.fromListWith (\a _ -> a)
+                            [ (Solve._instance_callee inst,
+                               Solve._instance_quantifiers inst)
+                            | csi <- callSiteInstances ++ concatMap snd depCsiByMod
+                            , let inst = Solve._cs_instance csi
+                            , not (null (Solve._instance_quantifiers inst))
+                            ]
+                    writeIORef globalCsiByCallee csiByCallee
+                    -- v0.13 Phase A4: eagerly compute the set of
+                    -- specialised mangled names that WOULD be
+                    -- emitted, so call-site codegen (which runs
+                    -- during lazy evaluation of `decls`) knows
+                    -- whether to use the mangled name without
+                    -- depending on `specDecls` having been forced
+                    -- first.  Skips instances whose σ_go is empty
+                    -- (no specialisation needed — original func is
+                    -- already non-generic) — the spec emission step
+                    -- in generateGoMulti applies the same filter.
+                    env0 <- readIORef globalCgEnv
+                    let specNames = Set.fromList
+                            [ Mono.mangleInstance
+                                (Solve.CallInstance skyName tys [])
+                            | (skyName, tys) <- Set.toList reached
+                            , not (null tys)
+                            , let goName = map (\c -> if c == '.' then '_' else c) skyName
+                                  skyToGo = Map.findWithDefault []
+                                      goName (Rec._cg_funcSkyToGoTVars env0)
+                                  quants = case Map.lookup skyName annotMap of
+                                      Just (T.Forall vs _) -> filter (/= "any") vs
+                                      Nothing -> []
+                                  σ_sky = Map.fromList (zip quants tys)
+                                  σ_go = [() | (sn, _) <- skyToGo
+                                             , Map.member sn σ_sky ]
+                            , not (null σ_go)
+                            ]
+                    writeIORef globalEmittedSpecs specNames
+                    reachTrace <- System.Environment.lookupEnv "SKY_REACH_TRACE"
+                    case reachTrace of
+                        Just "1" -> do
+                            putStrLn $ "   [REACH] from " ++ entryName
+                                    ++ ": " ++ show (Set.size reached)
+                                    ++ " instances"
+                            mapM_ (\(q, ts) ->
+                                putStrLn $ "     " ++ Mono.mangleInstance
+                                    (Solve.CallInstance q ts [])) (Set.toList reached)
+                        _ -> return ()
                     return t
                 Solve.SolveError err -> do
-                    -- Prefix the entry file path so multi-file projects
-                    -- show users WHERE the error is, not just LINE:COL.
-                    -- Issue #52 feedback: "the compiler doesn't tell me
-                    -- the affected file name". Plus render an Elm-style
-                    -- source-context snippet so users can see the
-                    -- offending code without leaving the terminal.
-                    putStrLn $ "   TYPE ERROR: " ++ entryPath ++ ":" ++ err
-                    -- Best-effort source-snippet rendering: parse LINE:
-                    -- COL: from the head of the error message and emit
-                    -- a few lines of context with a caret. Silent on
-                    -- parse failure.
-                    renderSourceContext entryPath err
+                    -- v0.13 Layer 1: route position-prefixed type
+                    -- errors through the structured Diagnostic
+                    -- renderer (Elm-style ERROR header + source
+                    -- snippet + code). Solver-budget errors and
+                    -- other pre-formatted multi-line guidance blocks
+                    -- (anything that already begins with "TYPE
+                    -- ERROR") are printed verbatim — the renderer
+                    -- would otherwise wrap the helpful body inside
+                    -- a `[E2001]` header that misattributes the
+                    -- cause.
+                    if "TYPE ERROR" `isPrefixOf` err
+                        then putStrLn $ "   TYPE ERROR: " ++ entryPath ++ ":" ++ err
+                        else do
+                            let diag = Solve.solveErrorToDiagnostic entryPath err
+                            rendered <- Render.renderCli diag
+                            putStrLn rendered
                     return Map.empty
             -- P3: exhaustiveness — walk the entry + every dep's canonical
             -- tree for non-exhaustive case expressions. A miss is a
             -- compile-time error with source context; the `panic("non-
             -- exhaustive case expression")` fallback in codegen never
             -- fires on well-checked code.
-            let entryDiags = Exhaust.checkModule canMod
-                depDiags   = concatMap (\(_, dm) -> Exhaust.checkModule dm) validDeps
+            -- v0.13 Layer 1: each exhaustiveness `Exhaust.Diag`
+            -- becomes a structured `Diagnostic` (category=Exhaust,
+            -- code=E3001) with the offending region as the caret
+            -- target.  The renderer adds source-context lines so
+            -- the user sees the actual `case … of` block instead of
+            -- a bare "at line N:M — hint" prefix.  Entry-module
+            -- diags are attributed to the entry path; dep-module
+            -- diags fall back to the entry path too because
+            -- `Exhaust.checkModule` doesn't carry a per-module
+            -- source path today (deferred to Layer 1 follow-up).
+            let entryDiagsExh = Exhaust.checkModule canMod
+                depDiagsExh   = concatMap (\(_, dm) -> Exhaust.checkModule dm) validDeps
+                allExhDiags   = entryDiagsExh ++ depDiagsExh
+                exhDiagnostics =
+                    [ Diag.withHint (_diag_hintFor d)
+                      (Diag.mkError entryPath (_diag_locFor d)
+                          Diag.CatExhaustiveness Diag.exhaustE_NonExhaustive
+                          (_diag_msgFor d))
+                    | d <- allExhDiags ]
+                _diag_locFor (Exhaust.Diag r _ _) = r
+                _diag_hintFor (Exhaust.Diag _ _ h) = h
+                _diag_msgFor (Exhaust.Diag _ missing _) =
+                    "Non-exhaustive case expression. Missing pattern(s): " ++
+                    List.intercalate ", " missing
                 exhaustErr
-                    | null (entryDiags ++ depDiags) = Nothing
-                    | otherwise = Just $ renderExhaustDiags (entryDiags ++ depDiags)
-            case exhaustErr of
-                Just e  -> putStrLn ("   EXHAUSTIVENESS ERROR: " ++ e)
-                Nothing -> return ()
+                    | null allExhDiags = Nothing
+                    | otherwise = Just $ renderExhaustDiags allExhDiags
+            case exhDiagnostics of
+                [] -> return ()
+                ds -> do
+                    rendered <- Render.renderCliMany ds
+                    putStrLn rendered
             -- Merge inferred dep types into the param + return tables
             -- keyed by module-prefixed Go names. Annotation-derived
             -- entries already in the tables win over inferred ones.
@@ -655,7 +1141,15 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 -- TVars become Go type params for polymorphic functions.
                 fullSigs = Map.unions
                     [ Map.fromList
-                        [ ( prefix ++ "_" ++ n
+                        -- v0.13 Layer 3 fix: dep-emitted Go names go
+                        -- through `goSafeName` (so a Sky function
+                        -- named `map` lands as `Sky_Core_X_map_`).
+                        -- The sig-table key MUST use the same
+                        -- mangled form or call-site coercion can't
+                        -- look it up.  Pre-fix, cross-module calls
+                        -- to Sky-source Result.map got no coercion
+                        -- and `go build` rejected the call site.
+                        [ ( prefix ++ "_" ++ goSafeName n
                           , splitInferredSigWithReg earlyAllRecAliases earlyAllFieldIdx (countParamsFor n depMod) ty )
                         | (n, ty) <- Map.toList depTypes
                         , not (hasAnnotation n depMod)
@@ -668,6 +1162,39 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 depInferredParams = Map.map (\(_, ps, _) -> ps) fullSigs
                 depInferredRets   = Map.map (\(_, _, r) -> r)  fullSigs
                 depInferredSigs   = fullSigs
+                -- v0.13 Phase A5+: per-function SkyName→GoName mapping
+                -- for the SAME dep functions.  Drives the call-site
+                -- coercion path so `CallInstance.quantifiers`
+                -- (annotation Forall names) project to the Go-generic
+                -- names that actually appear in the dep's emitted
+                -- signature.
+                -- Critical: align Sky-TVar names with what the
+                -- solver's CForeign captures.  Externals are stored
+                -- via `generaliseToAnnotation` which renames solver-
+                -- internal names (`_arg_47`) to user-friendly ones
+                -- (`a, b, c`); the CForeign's instantiation then
+                -- uses those user-friendly names as `quants`.  If
+                -- we computed `inferredSigSkyToGo` on the un-
+                -- renamed type, the SkyNames would be the solver-
+                -- internal forms and the lookup in `coerceCallArgsAt`
+                -- would always miss.  Rename first.
+                renameTypeForExternal t =
+                    case generaliseToAnnotation t of
+                        T.Forall _ renamed -> renamed
+                depSkyToGoTVars = Map.unions
+                    [ Map.fromList
+                        [ ( prefix ++ "_" ++ goSafeName n
+                          , inferredSigSkyToGo
+                                earlyAllRecAliases earlyAllFieldIdx
+                                (countParamsFor n depMod)
+                                (renameTypeForExternal ty) )
+                        | (n, ty) <- Map.toList depTypes
+                        , not (hasAnnotation n depMod)
+                        ]
+                    | (modName, depTypes) <- depSolved
+                    , let prefix = map (\c -> if c == '.' then '_' else c) modName
+                    , let depMod = head [ m | (mn, m) <- validDeps, mn == modName ]
+                    ]
             putStrLn $ "   HM infer (deps): "
                 ++ show (Map.size depInferredParams) ++ " functions typed"
             -- Merge each dep module's solvedTypes into the global
@@ -693,6 +1220,8 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     Map.union (Rec._cg_funcRetType e) depInferredRets
                 , Rec._cg_funcInferredSigs =
                     Map.union (Rec._cg_funcInferredSigs e) depInferredSigs
+                , Rec._cg_funcSkyToGoTVars =
+                    Map.union (Rec._cg_funcSkyToGoTVars e) depSkyToGoTVars
                 }
             -- Bail BEFORE codegen if HM rejected the program. Previously
             -- "-- Generating Go" printed unconditionally, which made the
@@ -701,12 +1230,23 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
             -- and binary from a previous successful build so the user
             -- can't accidentally run an outdated executable. Issue #52.
             case (solverError, exhaustErr) of
-              (Just err, _) -> do
+              (Just _, _) -> do
                   removeStaleBuildOutput outDir (Toml._binName config)
-                  return (Left ("Type error: " ++ entryPath ++ ":" ++ err))
-              (_, Just err) -> do
+                  -- v0.13 Layer 1: the structured Diagnostic has
+                  -- already been rendered above (renderCli at the
+                  -- SolveError branch, or the verbatim solver-
+                  -- budget block). Return a one-line marker so the
+                  -- outer caller can surface non-zero exit + a
+                  -- stable grep target ("Type error") without
+                  -- double-printing the full body.
+                  return (Left ("Type error: " ++ entryPath))
+              (_, Just _) -> do
                   removeStaleBuildOutput outDir (Toml._binName config)
-                  return (Left ("Non-exhaustive patterns: " ++ err))
+                  -- v0.13 Layer 1: the structured Diagnostic block
+                  -- has been rendered above (one per non-exhaustive
+                  -- branch).  Return a one-line marker; the renderer
+                  -- already shows where and how to fix each case.
+                  return (Left ("Non-exhaustive patterns: " ++ entryPath))
               _ -> do
                 putStrLn "-- Generating Go"
                 let depAliasPairs = [ (map (\c -> if c == '.' then '_' else c) mn, Can._aliases depMod)
@@ -734,32 +1274,65 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                                  []    -> T.TVar "_unresolved"
                                         _   -> T.TVar "_ambig"
                         in Map.mapWithKey resolveKey keyToTypes
-                    goCode = generateGoMulti canMod entrySrcMod config typesWithDeps depDecls depRecAliases depUnionNames depArities depParamTypes depRetTypes depInferredParams depInferredRets depInferredSigs depAliasPairs
+                    goCodeRaw = generateGoMulti canMod entrySrcMod config typesWithDeps depDecls depRecAliases depUnionNames depEnumNames depArities depParamTypes depRetTypes depInferredParams depInferredRets depInferredSigs depAliasPairs
+                    -- v0.13 Layer 2: collect Sky-name → source-region
+                    -- for every top-level declaration so the post-emit
+                    -- pass can inject `// SKY-ORIGIN: <path>:<line>:<col>`
+                    -- comments next to the matching Go function decl.
+                    -- The validator + `go build` error refiner consult
+                    -- the resulting OriginMap to map Go-line errors back
+                    -- to Sky source.
+                    declOriginMap = collectDeclOrigins entryPath canMod
+                    goCode = Validator.injectOriginComments
+                                declOriginMap goCodeRaw
                 createDirectoryIfMissing True outDir
                 let mainGoPath = outDir </> "main.go"
                 writeFile mainGoPath goCode
                 putStrLn $ "   Wrote " ++ mainGoPath
-                -- copyRuntime also copies runtime-go/go.mod + go.sum into outDir
-                -- when it can locate the runtime. Only fall back to a minimal
-                -- go.mod here if copyRuntime didn't write one (no runtime found).
-                copyRuntime outDir
-                hasOutMod <- doesFileExist (outDir </> "go.mod")
-                if not hasOutMod
-                    then writeFile (outDir </> "go.mod") $ unlines ["module sky-app", "", "go 1.21"]
-                    else return ()
-                -- Pull in Go deps declared in sky.toml so generated ffi/*_bindings.go
-                -- can resolve imports.
-                seedGoDependencies outDir (Toml._goDeps config)
-                -- P7: strip unreferenced FFI wrappers from sky-out/rt/*_bindings.go.
-                -- This eliminates tens of thousands of any/any wrapper bodies
-                -- the user code never calls (stripe alone contributes 74k).
-                dceFfiWrappers outDir
-                -- Write cache hash to enable incremental rebuild skip
-                let cacheDir = ".skycache"
-                createDirectoryIfMissing True cacheDir
-                writeFile (cacheDir </> "source.hash") srcHash
-                putStrLn "Compilation successful"
-                return (Right mainGoPath)
+                -- v0.13 Layer 2: codegen-stage validator runs after
+                -- writing main.go but before any downstream tooling
+                -- (DCE / go build).  It scans the emitted Go for
+                -- known-bad shapes (typed-kernel call with raw any
+                -- arg, etc.) and emits a structured Diagnostic with
+                -- a Sky-source region if the bug shape is found.
+                -- This gives "if it compiles, it works" defence in
+                -- depth — even if a new codegen regression slips
+                -- past the cabal tests, the validator catches it
+                -- pre-build and prints an actionable Diagnostic
+                -- instead of a cryptic `go build` error.
+                let originMap = Validator.parseOriginComments goCode
+                    valDiags  = Validator.validateEmittedGo
+                                  mainGoPath originMap goCode
+                if not (null valDiags)
+                  then do
+                      rendered <- Render.renderCliMany valDiags
+                      putStrLn rendered
+                      removeStaleBuildOutput outDir (Toml._binName config)
+                      return (Left "Codegen validation rejected the emitted Go")
+                  else do
+                      -- copyRuntime also copies runtime-go/go.mod + go.sum into
+                      -- outDir when it can locate the runtime. Only fall back
+                      -- to a minimal go.mod here if copyRuntime didn't write
+                      -- one (no runtime found).
+                      copyRuntime outDir
+                      hasOutMod <- doesFileExist (outDir </> "go.mod")
+                      if not hasOutMod
+                          then writeFile (outDir </> "go.mod") $ unlines ["module sky-app", "", "go 1.21"]
+                          else return ()
+                      -- Pull in Go deps declared in sky.toml so generated
+                      -- ffi/*_bindings.go can resolve imports.
+                      seedGoDependencies outDir (Toml._goDeps config)
+                      -- P7: strip unreferenced FFI wrappers from
+                      -- sky-out/rt/*_bindings.go.  Tens of thousands of
+                      -- any/any wrapper bodies user code never calls
+                      -- (stripe alone contributes 74k).
+                      dceFfiWrappers outDir
+                      -- Write cache hash to enable incremental rebuild skip
+                      let cacheDir = ".skycache"
+                      createDirectoryIfMissing True cacheDir
+                      writeFile (cacheDir </> "source.hash") srcHash
+                      putStrLn "Compilation successful"
+                      return (Right mainGoPath)
 
 
 -- LEGACY: single-module parse entry (no longer used from compile)
@@ -837,6 +1410,35 @@ parseSingle config entryPath outDir = do
 -- accidentally execute outdated code. Issue #52: a build that hits
 -- a TYPE ERROR used to leave the previous successful binary in place,
 -- which let users miss the error and run stale output.
+-- | v0.13 Layer 2: collect a Sky-name → (path, line, col) map
+-- from a canonical module's top-level declarations.  The map is
+-- used by `Validator.injectOriginComments` to seed SKY-ORIGIN
+-- comments into the emitted Go output.
+--
+-- Key choice: the EMITTED Go function name.  For most entry-module
+-- decls this is the bare Sky name (`update`, `view`).  Auto-record
+-- constructors share the type-alias name (`Model_R` for the struct,
+-- `Model` for the ctor).  We register both forms so the injector
+-- finds the match regardless of which side `func` it lands on.
+collectDeclOrigins :: FilePath -> Can.Module -> Map.Map String (FilePath, Int, Int)
+collectDeclOrigins path canMod =
+    let defs = collectDefs (Can._decls canMod)
+        decls = mapMaybe (\d -> case d of
+            Can.Def     (A.At reg name) _ _     -> Just (name, regionStart reg)
+            Can.TypedDef (A.At reg name) _ _ _ _ -> Just (name, regionStart reg)
+            Can.DestructDef _ _                  -> Nothing) defs
+    in Map.fromList
+        [ (name, (path, line, col))
+        | (name, (line, col)) <- decls ]
+  where
+    collectDefs :: Can.Decls -> [Can.Def]
+    collectDefs (Can.Declare d rest)     = d : collectDefs rest
+    collectDefs (Can.DeclareRec d ds rest) = d : ds ++ collectDefs rest
+    collectDefs Can.SaveTheEnvironment   = []
+
+    regionStart (A.Region (A.Position l c) _) = (l, c)
+
+
 removeStaleBuildOutput :: FilePath -> String -> IO ()
 removeStaleBuildOutput outDir binName = do
     let mainPath = outDir </> "main.go"
@@ -1102,13 +1704,83 @@ pruneBindingsText :: Set.Set String -> String -> String
 pruneBindingsText referenced src =
     let ls = lines src
         (header, body) = splitAfterImportBlock ls
-        kept = pruneFuncs referenced body
+        kept0 = pruneFuncs referenced body
+        -- v0.13 F3: after wrapper-body pruning, the FFI type aliases
+        -- (`type FfiT_Go_Stripe_xxx_P0 = *pkg.Foo`) emitted alongside
+        -- the wrappers become orphan when their owning wrapper was
+        -- dropped. Pre-fix, skyshop's stripe_bindings.go retained
+        -- 80,847 orphan `type FfiT_*` decls (one per param/return
+        -- position of every Stripe FFI fn that DCE removed). Each
+        -- alias is a single line; we keep only those whose name
+        -- still appears in the kept body OR in the caller-side
+        -- `referenced` set (main.go can reference `rt.FfiT_*`
+        -- aliases directly at typed call sites).
+        kept = pruneOrphanFfiTypes referenced kept0
         -- After stripping function bodies, some package aliases may no
         -- longer appear in the remaining source. Go rejects `imported
         -- and not used`, so rewrite each import to a blank `_` form
         -- when its alias no longer appears anywhere in the kept body.
         rewrittenHeader = rewriteImportsForDCE header kept
     in unlines (rewrittenHeader ++ kept)
+
+
+-- | v0.13 F3: drop `type FfiT_*` aliases whose name no longer
+-- appears anywhere in the surviving body OR in the caller-side
+-- `referenced` set. Each alias is a one-line decl. After
+-- `dceFfiWrappers` drops unused wrapper bodies, the type aliases
+-- emitted alongside them (one per param/return type position)
+-- become orphan. Stripe alone leaves ~80k orphan FfiT_* aliases —
+-- each is harmless (Go link-time DCE drops them) but they triple
+-- the source size and slow `go build`'s parse phase.
+--
+-- `referenced` is the set of `rt.<NAME>` identifiers found in
+-- caller-side `.go` files (main.go and siblings outside `rt/`).
+-- A `FfiT_*` alias that main.go references directly via
+-- `rt.FfiT_Go_Stripe_X_P0(...)` must stay alive even when none of
+-- the surviving binding-file funcs uses it.
+--
+-- Algorithm: O(blob + Σ name_lengths). Pre-compute a `Set String`
+-- of every identifier token appearing in non-FfiT lines, then per
+-- alias do an O(log N) membership test. The naive `isInfixOf` per
+-- alias was O(blob × n_aliases × name_length) which on Stripe
+-- scales to ~7TB of char comparisons — hung the build.
+pruneOrphanFfiTypes :: Set.Set String -> [String] -> [String]
+pruneOrphanFfiTypes referenced ls =
+    let nonTypeLines = [ l | l <- ls, ffiTypeName l == Nothing ]
+        usedIdents = Set.fromList
+            (concatMap extractIdents nonTypeLines)
+        keepLine l = case ffiTypeName l of
+            Just n  -> Set.member n usedIdents
+                    || Set.member n referenced
+            Nothing -> True
+    in filter keepLine ls
+  where
+    -- `type FfiT_…` decls all match `type <Name> = …`. The Name
+    -- must start with `FfiT_` to be eligible for this pruner.
+    ffiTypeName :: String -> Maybe String
+    ffiTypeName l
+        | take 5 l == "type "
+        , let rest = drop 5 l
+        , take 5 rest == "FfiT_"
+        , let (name, _) = span isGoIdentChar rest
+        , not (null name)
+        = Just name
+        | otherwise = Nothing
+
+    -- Tokenise a line into Go identifiers — Unicode-aware so a
+    -- caller-side identifier containing non-ASCII letters still
+    -- registers as a single token (Go allows Unicode letters in
+    -- identifiers; ignoring that would slice the token in two and
+    -- spuriously declare the FfiT alias unreferenced).
+    extractIdents :: String -> [String]
+    extractIdents = go
+      where
+        go [] = []
+        go (c:rest)
+            | isGoIdentStart c =
+                let (tok, after) = span isGoIdentChar (c:rest)
+                in tok : go after
+            | otherwise = go rest
 
 
 -- | Rewrite import lines inside the header so any alias that no longer
@@ -1267,23 +1939,23 @@ pruneFuncs referenced inputLines = go [] inputLines
 
 -- | `func Name` (possibly with generic `[...]` and `(`). Return Just
 -- the bare Name or Nothing if this isn't a top-level func line.
+--
+-- Identifier check uses Unicode-aware predicates (`Char.isLetter` +
+-- `Char.isAlphaNum`) to match Go's identifier spec — `letter (letter
+-- | unicode_digit)*` where `letter = unicode_letter | '_'`. Aligns
+-- with `Sky.Parse.Variable.isIdentChar` (parser side).
 matchFuncStart :: String -> Maybe String
 matchFuncStart l
     | take 5 l == "func "
     , let rest = drop 5 l
     , not (null rest)
-    , isIdentStart (head rest)
-    = let (name, tail_) = span isIdentChar rest
+    , isGoIdentStart (head rest)
+    = let (name, tail_) = span isGoIdentChar rest
       in if not (null name) && not (null tail_)
             && (head tail_ == '(' || head tail_ == '[')
          then Just name
          else Nothing
     | otherwise = Nothing
-  where
-    isIdentStart c = (c >= 'a' && c <= 'z')
-                  || (c >= 'A' && c <= 'Z')
-                  || c == '_'
-    isIdentChar c = isIdentStart c || (c >= '0' && c <= '9')
 
 
 -- | Consume until we see a line beginning with `}` at indent 0. Return
@@ -1462,7 +2134,7 @@ typecheckWorkspace config entryPath = do
             [ (modName, Canonicalise.DepInfo
                 { Canonicalise._dep_name = Can._name depMod
                 , Canonicalise._dep_unions =
-                    [ (typeName, Can._u_alts u)
+                    [ (typeName, Can._u_vars u, Can._u_alts u)
                     | (typeName, u) <- Map.toList (Can._unions depMod)
                     ]
                 , Canonicalise._dep_aliases = Map.keys (Can._aliases depMod)
@@ -1528,8 +2200,15 @@ typecheckWorkspace config entryPath = do
 -- | Variant of writeEmbeddedSkyStdlib that targets an arbitrary
 -- destination, used by the LSP path which mirrors stdlib next to the
 -- project source so jumps land on stable, user-visible paths.
+--
+-- Like `writeEmbeddedSkyStdlib`, clears the destination first so a
+-- stdlib file dropped from the embed (a module deleted / renamed
+-- between compiler builds) doesn't linger on disk and get
+-- discovered as a phantom module.
 writeStdlibTo :: FilePath -> IO FilePath
 writeStdlibTo root = do
+    exists <- doesDirectoryExist root
+    when exists (System.Directory.removeDirectoryRecursive root)
     createDirectoryIfMissing True root
     mapM_ (writeOne root) embeddedSkyStdlib
     return root
@@ -1542,11 +2221,20 @@ writeStdlibTo root = do
 
 -- | Materialise the embedded Sky stdlib (Sky.Core.Error,
 -- etc.) into <outDir>/.sky-stdlib/ at build start. Returns the root
--- path so `discoverModulesMulti` can probe it. Always rewritten so a
--- compiler upgrade picks up the latest stdlib without `sky clean`.
+-- path so `discoverModulesMulti` can probe it.
+--
+-- The destination is CLEARED first (not just written-over): when a
+-- stdlib module is deleted or renamed between compiler builds, the
+-- old materialised `.sky` file would otherwise linger and still be
+-- discovered — a phantom module that shadows nothing but breaks
+-- imports of the real (now-kernel-backed or removed) name. Always
+-- rewritten so a compiler upgrade picks up the latest stdlib
+-- without `sky clean`.
 writeEmbeddedSkyStdlib :: FilePath -> IO FilePath
 writeEmbeddedSkyStdlib outDir = do
     let root = outDir </> ".sky-stdlib"
+    exists <- doesDirectoryExist root
+    when exists (System.Directory.removeDirectoryRecursive root)
     createDirectoryIfMissing True root
     mapM_ (writeOne root) embeddedSkyStdlib
     return root
@@ -1613,20 +2301,38 @@ locateRuntimeDir = do
 generateDeclsForDep :: Can.Module -> String -> [GoIr.GoDecl]
 generateDeclsForDep canMod modPrefix =
     let userDefs = collectDeclNames (Can._decls canMod)
+        -- v0.13 F: whole-program DCE. Drop dep-module decls that
+        -- aren't transitively reachable from the entry module's
+        -- `main`. Empty reached set → keep everything (DCE off via
+        -- `SKY_DCE=0` or pre-canon-fixpoint code path).
+        canonicalModName = ModuleName.toString (Can._name canMod)
+        reached = unsafePerformIO (readIORef globalReachableProgram)
+        dceOff  = unsafePerformIO (readIORef globalDceDisabled)
+        keepName n =
+            dceOff
+            || Set.null reached
+            || Set.member (Dce.TopRef canonicalModName n) reached
     in concatMap (generateUnionForDep modPrefix) (Map.toList (Can._unions canMod))
     ++ concatMap (generateAliasForDep userDefs modPrefix) (Map.toList (Can._aliases canMod))
-    ++ go (Can._decls canMod)
+    ++ go keepName (Can._decls canMod)
   where
-    go Can.SaveTheEnvironment = []
-    go (Can.Declare def rest) = mkDef def ++ go rest
-    go (Can.DeclareRec def defs rest) = mkDef def ++ concatMap mkDef defs ++ go rest
+    defName d = case d of
+        Can.Def (A.At _ n) _ _          -> n
+        Can.TypedDef (A.At _ n) _ _ _ _ -> n
+        Can.DestructDef _ _             -> ""
 
-    mkDef def = case def of
+    go _ Can.SaveTheEnvironment = []
+    go keepName (Can.Declare def rest) = mkDef keepName def ++ go keepName rest
+    go keepName (Can.DeclareRec def defs rest) =
+        mkDef keepName def ++ concatMap (mkDef keepName) defs ++ go keepName rest
+
+    mkDef keepName def = case def of
         Can.DestructDef _ _ -> []
+        _ | not (keepName (defName def)) -> []
         _ ->
           let -- For TypedDef, the 5th field is the RETURN type only;
               -- per-pattern arg types live in `typedPats :: [(Pat, Type)]`.
-              (name, params, body, mAnnotArgs, mAnnotRet) = case def of
+              (name, params, body, mAnnotArgs, _mAnnotRet) = case def of
                 Can.Def (A.At _ n) pats expr ->
                     (n, pats, expr, Nothing, Nothing)
                 Can.TypedDef (A.At _ n) _ typedPats expr retTy ->
@@ -1637,7 +2343,15 @@ generateDeclsForDep canMod modPrefix =
                     , Just retTy
                     )
                 Can.DestructDef{} -> error "unreachable: filtered above"
-              goName = modPrefix ++ "_" ++ name
+              -- v0.13 Layer 3 fix: dep-emitted function names must
+              -- pass through goSafeName so that Sky source files
+              -- exposing a Go-keyword identifier (e.g. `map` in
+              -- Sky.Core.Result) emit as `<mod>_map_` to match the
+              -- call-site name mangling at line 3954.  Pre-fix the
+              -- emit path used the raw Sky name, producing
+              -- `Sky_Core_Result_map` while call sites looked for
+              -- `Sky_Core_Result_map_` → `go build` undefined.
+              goName = modPrefix ++ "_" ++ goSafeName name
               (goParams', destructStmts) = destructureParams params
               -- T3 (dep path): annotated dep functions get typed return.
               -- T2/T6 (dep path): typed params too. When no annotation
@@ -1645,7 +2359,15 @@ generateDeclsForDep canMod modPrefix =
               -- type parameters (T4b) so partially-inferred functions
               -- get typed generically instead of falling back to `any`.
               env = getCgEnv
-              qualLookupName = modPrefix ++ "_" ++ name
+              -- v0.13 typed lowerer: the sig tables (`_cg_funcInferredSigs`,
+              -- `_cg_funcRetType`) are keyed with the `goSafeName`-mangled
+              -- form (`Sky_Core_List_map_`, not `Sky_Core_List_map`) — see
+              -- the `prefix ++ "_" ++ goSafeName n` key at the dep-sig
+              -- population site.  The lookup key here MUST mangle too, or
+              -- every Go-keyword-named dep function (`map`, `append`,
+              -- `range`, `type`, …) misses the lookup and falls back to a
+              -- fully-`any` signature.
+              qualLookupName = modPrefix ++ "_" ++ goSafeName name
               -- Typed dep sigs: annotation or HM-inferred types.
               -- wrapTypedReturn coerces the body to match the return type.
               -- Re-export fallback: if the body is a single Call to another
@@ -1657,8 +2379,8 @@ generateDeclsForDep canMod modPrefix =
                   ([], A.At _ (Can.Call (A.At _ (Can.VarTopLevel calleeHome calleeName)) [])) ->
                       let calleeModPrefix = map (\c -> if c == '.' then '_' else c)
                               (ModuleName.toString calleeHome)
-                          calleeKey = calleeModPrefix ++ "_" ++ calleeName
-                          sameNameKey = calleeName
+                          calleeKey = calleeModPrefix ++ "_" ++ goSafeName calleeName
+                          sameNameKey = goSafeName calleeName
                       in case Map.lookup calleeKey (Rec._cg_funcInferredSigs env) of
                           Just (_, _, r) | r /= "any" -> Just r
                           _ -> case Map.lookup calleeKey (Rec._cg_funcRetType env) of
@@ -1669,7 +2391,7 @@ generateDeclsForDep canMod modPrefix =
                   ([], A.At _ (Can.VarTopLevel calleeHome calleeName)) ->
                       let calleeModPrefix = map (\c -> if c == '.' then '_' else c)
                               (ModuleName.toString calleeHome)
-                          calleeKey = calleeModPrefix ++ "_" ++ calleeName
+                          calleeKey = calleeModPrefix ++ "_" ++ goSafeName calleeName
                       in case Map.lookup calleeKey (Rec._cg_funcInferredSigs env) of
                           Just (_, _, r) | r /= "any" -> Just r
                           _ -> case Map.lookup calleeKey (Rec._cg_funcRetType env) of
@@ -1706,8 +2428,46 @@ generateDeclsForDep canMod modPrefix =
                   (\(GoIr.GoParam pname _) ty -> GoIr.GoParam pname ty)
                   goParams'
                   (depParamGoTys ++ repeat "any")
-              rawBody = exprToGo body
-              bodyExpr = wrapTypedReturn depRetType rawBody
+              -- v0.13 typed lowerer: scope function params via
+              -- `withScopedLambdaTypes` so bindings don't leak into
+              -- sibling functions.  Only register params whose Go-
+              -- side declaration is concrete (not "any" / not T_N).
+              isGoTypedDecl gty =
+                  gty /= "any" && gty /= "" && not (isGenericTypeParam gty)
+              paramTypeBindings = case mAnnotArgs of
+                  Just argTys ->
+                      Map.fromList
+                          [ (n, t)
+                          | ((A.At _ (Can.PVar n), t), gty)
+                              <- zip (zip params argTys)
+                                     (depParamGoTys ++ repeat "any")
+                          , isGoTypedDecl gty
+                          ]
+                  Nothing -> Map.empty
+              -- v0.13 typed lowerer: thread the EMITTED Go return
+              -- type (`depRetType`) directly into the body lowering.
+              -- `depRetType` is authoritative — it's exactly the Go
+              -- type in the function's emitted signature, so there's
+              -- no risk of a sig/body type divergence (the previous
+              -- `solvedTypeToGo retTy == depRetType` gate existed
+              -- precisely to detect that divergence — now structurally
+              -- impossible).  `exprToGoExpectGo`'s own
+              -- `isEmittableGoType` gate keeps it sound: a non-
+              -- emittable `depRetType` falls back to plain `exprToGo`
+              -- and the outer `typeIIFE` still coerces.
+              lowerDepBody e =
+                  if depRetType /= "any"
+                      then exprToGoExpectGo depRetType e
+                      else exprToGo e
+              -- `typeIIFE` runs on the GoExpr STRUCTURE — before
+              -- `withScopedLambdaTypes` renders it to a String — so it
+              -- can still see a `GoBlock` and convert it to a typed
+              -- `func() <depRetType>` IIFE.  Idempotent on an
+              -- already-typed `GoTypedBlock` (no redundant re-wrap).
+              typedBody = typeIIFE depRetType (lowerDepBody body)
+              bodyExpr = if Map.null paramTypeBindings
+                  then typedBody
+                  else withScopedLambdaTypes paramTypeBindings typedBody
           in [ GoIr.GoDeclFunc GoIr.GoFuncDecl
                 { GoIr._gf_name = goName
                 , GoIr._gf_typeParams = [ (tp, "any") | tp <- depTypeParams ]
@@ -1840,8 +2600,8 @@ generateAliasForDep userDefs modPrefix (aliasName, Can.Alias _vars body) =
 
 
 -- | Generate Go with merged dependency declarations
-generateGoMulti :: Can.Module -> Src.Module -> Toml.SkyConfig -> Solve.SolvedTypes -> [GoIr.GoDecl] -> Set.Set String -> Set.Set String -> Map.Map String Int -> Map.Map String [String] -> Map.Map String String -> Map.Map String [String] -> Map.Map String String -> Map.Map String ([String], [String], String) -> [(String, Map.Map String Can.Alias)] -> String
-generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnionNames depArities depParamTypes depRetTypes extraInferredParamTypes extraInferredRetTypes extraInferredSigs depAliasPairs =
+generateGoMulti :: Can.Module -> Src.Module -> Toml.SkyConfig -> Solve.SolvedTypes -> [GoIr.GoDecl] -> Set.Set String -> Set.Set String -> Set.Set String -> Map.Map String Int -> Map.Map String [String] -> Map.Map String String -> Map.Map String [String] -> Map.Map String String -> Map.Map String ([String], [String], String) -> [(String, Map.Map String Can.Alias)] -> String
+generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnionNames depEnumNames depArities depParamTypes depRetTypes extraInferredParamTypes extraInferredRetTypes extraInferredSigs depAliasPairs =
     let
         imports = unsafePerformIO $ do
             -- T2/T6: register entry-module + dep-module typed function
@@ -1894,6 +2654,28 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                     ]
                 entryInferredParams = Map.map (\(_, ps, _) -> ps) entryInferredSigs
                 entryInferredRets   = Map.map (\(_, _, r) -> r) entryInferredSigs
+                -- v0.13 Phase A5+: same Sky-TVar → Go-TVar mapping for
+                -- entry-module functions.  See depSkyToGoTVars above.
+                -- See depSkyToGoTVars comment — apply the same
+                -- generalisation-style rename so SkyNames match the
+                -- annotation Forall names the solver captures.  Entry-
+                -- module same-module call sites also go through this
+                -- path because cross-module dep callers see the entry
+                -- module via depExternals (and entry-module recursive
+                -- calls capture against the local CLet binding's
+                -- generalised annotation too).
+                renameTypeForExternal' t =
+                    case generaliseToAnnotation t of
+                        T.Forall _ renamed -> renamed
+                entrySkyToGoTVars = Map.fromList
+                    [ ( goSafeName n
+                      , inferredSigSkyToGo
+                            earlyRecAliases earlyFieldIdx
+                            (countParamsFor n canMod)
+                            (renameTypeForExternal' ty) )
+                    | (n, _) <- Map.toList solvedTypes
+                    , Just ty <- [sigTypeFor n]
+                    ]
             -- Gather the FULL record-alias set (entry + dep modules,
             -- prefixed and unprefixed forms) so collectFuncTypesWith's
             -- safeReturnTypeWith resolves `Piece` → `Chess_Piece_Piece_R`
@@ -1910,15 +2692,27 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                 allRetTys   = Map.unions
                     [ entryRetTys, entryInferredRets
                     , depRetTypes, extraInferredRetTypes ]
-                cgEnv = Rec.withInferredSigs
+                -- v0.13 Phase A5: preserve the call-site instance
+                -- registry from prevEnv (installed by continueCompile
+                -- after solveWithInstances).  The rest of the cgEnv
+                -- chain rebuilds from scratch via buildCodegenEnv;
+                -- the CSI map needs explicit threading.
+                cgEnv = Rec.withCallSiteInstances
+                          (Rec._cg_callSiteInstances prevEnv)
+                      $ Rec.withFuncSkyToGoTVars
+                          (Map.union entrySkyToGoTVars
+                              (Rec._cg_funcSkyToGoTVars prevEnv))
+                      $ Rec.withInferredSigs
                           (Map.union extraInferredSigs entryInferredSigs)
                       $ Rec.withFuncTypes allParamTys allRetTys
                       $ Rec.withDepArities depArities
                       $ Rec.withRecordAliases depRecAliases
                       $ Rec.withUnionNames depUnionNames
+                      $ Rec.withEnumNames depEnumNames
                       $ Rec.withDepFieldIndex depAliasPairs
                       $ Rec.buildCodegenEnv solvedTypes canMod
             writeIORef globalCgEnv cgEnv
+            writeIORef globalUnionNames $! Rec._cg_unionNames cgEnv
             return $ collectGoImports canMod srcMod
         -- Force `imports` before anything else so the env is set up
         -- before depDecls / decls are evaluated (they read getCgEnv).
@@ -1927,6 +2721,15 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
         aliasDecls = generateAliasTypes canMod
         decls = generateDecls canMod solvedTypes
         mainDecl = generateMainFunc canMod srcMod solvedTypes
+        -- v0.13 E: emit `type Anon_R_<hash> = struct { … }` decls
+        -- for every anon-record shape that `synthAnonRecordName`
+        -- produced during this compilation. Wired AFTER `decls`
+        -- in `_pkg_decls`; the renderer walks the list in order,
+        -- so by the time it forces `anonRecordDecls`'s thunk
+        -- every preceding decl has been rendered to a String —
+        -- which is exactly when `synthAnonRecordName` fires its
+        -- `atomicModifyIORef'` registrations.
+        anonRecordDecls = unsafePerformIO generateAnonRecordDecls
         -- Pin the rt import so Go doesn't error out with "imported and not used"
         -- when the user's program doesn't happen to reference rt.* directly
         -- (e.g. main = 42). The blank var reference is zero-cost at runtime.
@@ -1978,10 +2781,88 @@ generateGoMulti canMod srcMod config solvedTypes depDecls depRecAliases depUnion
                 ++ "}"
             ]
         portDefault = liveDefaults  -- preserve historical name for downstream splices
+        -- v0.13 Phase A4 (MVP): emit per-instance specialised copies
+        -- of every reachable Sky-source function.  The generic
+        -- version stays in place for now (call sites still reference
+        -- it).  This is the first wire-up — the specialised copies
+        -- aren't yet referenced by call sites, so they compile but
+        -- are dead.  Successive commits will switch call sites to
+        -- use the mangled names and drop the generic emission.
+        specDecls = unsafePerformIO $ do
+            reached <- readIORef globalReachableSet
+            _annotMap' <- readIORef globalAnnotMap
+            csiByCallee <- readIORef globalCsiByCallee
+            env <- readIORef globalCgEnv
+            let
+                -- Index every emitted GoFuncDecl (entry + deps) by
+                -- the Go-side name so the specialiser can find the
+                -- generic source.
+                allDecls = depDecls ++ decls
+                funcByName = Map.fromList
+                    [ (GoIr._gf_name gfd, gfd)
+                    | GoIr.GoDeclFunc gfd <- allDecls ]
+                -- Build per-instance specialisations.  Filter to
+                -- Sky-source functions that ACTUALLY appear in the
+                -- emitted GoFuncDecl set (kernel / FFI / ctor names
+                -- aren't user-mono'd here).
+                reachableList = Set.toList reached
+                buildSpec (skyName, tys) =
+                    let goName = map (\c -> if c == '.' then '_' else c) skyName
+                        mangled = Mono.mangleInstance
+                            (Solve.CallInstance skyName tys [])
+                        skyToGo = Map.findWithDefault []
+                            goName (Rec._cg_funcSkyToGoTVars env)
+                        quants = Map.findWithDefault [] skyName csiByCallee
+                        σ_sky = Map.fromList (zip quants tys)
+                        -- `sanitiseTypedDeep`: a monomorphisation
+                        -- type-arg can be an anonymous record
+                        -- (`{ age, name }` with no user `type alias`).
+                        -- `solvedTypeToGo` names it `Anon_R_<hash>`,
+                        -- but no Go `type` decl is emitted for an
+                        -- un-aliased record — substituting it raw
+                        -- gives `undefined: Anon_R_<hash>`. Sanitise
+                        -- those tokens back to `any` so the specialised
+                        -- copy still compiles (it's typed everywhere
+                        -- the record DOES have a Go alias; only the
+                        -- genuinely-anonymous slots widen).
+                        σ_go = Map.fromList
+                            [ (gn, sanitiseTypedDeep (solvedTypeToGo cty))
+                            | (sn, gn) <- skyToGo
+                            , Just cty <- [Map.lookup sn σ_sky]
+                            ]
+                    in case Map.lookup goName funcByName of
+                        Just gfd | not (null tys), not (null σ_go) ->
+                            Just (mangled, GoIr.GoDeclFunc
+                                (Mono.specialiseFuncDecl
+                                    mangled σ_go (Just goName) gfd))
+                        _ -> Nothing
+                emittedSpecs = mapMaybe buildSpec reachableList
+                -- Dedup by mangled name. Two reachable-set entries can
+                -- be structurally-distinct `[T.Type]` lists that mangle
+                -- to the SAME name — e.g. a callee reached from two
+                -- modules where one carries `Model` as `TType` and the
+                -- other as `TAlias` (same nominal type, different
+                -- representation). Both specialise to byte-identical
+                -- Go; emitting both is a `redeclared in this block`
+                -- compile error. Map.fromList collapses on the key.
+                dedupedSpecs = Map.toList (Map.fromList emittedSpecs)
+                specNames = Set.fromList (map fst dedupedSpecs)
+                specials = map snd dedupedSpecs
+            -- Record emitted spec names so call sites can decide
+            -- whether to use the mangled name or fall back to the
+            -- generic version.
+            writeIORef globalEmittedSpecs specNames
+            return specials
+        -- v0.13 Phase A4: keep generic versions alongside specs.
+        -- Drop pass tracked for v0.14 — needs spec emission to
+        -- handle every reachable call-site instance, including
+        -- subtle alignment cases (Page_Roadmap_viewRoadmap's
+        -- __Error_Unit mismatch in skyvote, Sky_Core_Result_andThen's
+        -- third-instance miss in skyshop).
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
             , GoIr._pkg_imports = imports
-            , GoIr._pkg_decls = rtPin ++ portDefault ++ depDecls ++ unionDecls ++ aliasDecls ++ decls ++ mainDecl
+            , GoIr._pkg_decls = rtPin ++ portDefault ++ depDecls ++ unionDecls ++ aliasDecls ++ decls ++ anonRecordDecls ++ specDecls ++ mainDecl
             }
     in GoBuilder.renderPackage pkg
 
@@ -2022,15 +2903,18 @@ generateGo canMod srcMod config solvedTypes =
         imports = unsafePerformIO $ do
             let cgEnv = Rec.buildCodegenEnv solvedTypes canMod
             writeIORef globalCgEnv cgEnv
+            writeIORef globalUnionNames $! Rec._cg_unionNames cgEnv
             return $ collectGoImports canMod srcMod
         unionDecls = generateUnionTypes canMod
         aliasDecls = generateAliasTypes canMod
         decls = generateDecls canMod solvedTypes
         mainDecl = generateMainFunc canMod srcMod solvedTypes
+        -- v0.13 E: see generateGoMulti for the rationale.
+        anonRecordDecls = unsafePerformIO generateAnonRecordDecls
         pkg = GoIr.GoPackage
             { GoIr._pkg_name = "main"
             , GoIr._pkg_imports = imports
-            , GoIr._pkg_decls = unionDecls ++ aliasDecls ++ decls ++ mainDecl
+            , GoIr._pkg_decls = unionDecls ++ aliasDecls ++ decls ++ anonRecordDecls ++ mainDecl
             }
     in GoBuilder.renderPackage pkg
 
@@ -2159,6 +3043,47 @@ generateUnionTypes canMod =
         T.TAlias _ _ pairs (T.Hoisted inner) -> any hasTVar (inner : map snd pairs)
         T.TRecord _ _   -> False
         T.TUnit         -> False
+
+
+-- | v0.13 E: emit one Go struct decl per registered anon-record
+-- shape so the renderer's `Anon_R_<hash>` names actually resolve.
+--
+-- Pre-E `sanitiseTypedDeep` rewrote every `Anon_R_*` token in
+-- emitted type strings to `any` (a cover-up that hid the
+-- contract violation — anon records inferred at typed-codegen
+-- positions silently collapsed to `any`). Now `synthAnonRecordName`
+-- registers its produced shapes in `globalAnonRecords`, and this
+-- function emits a `type Anon_R_<hash> = struct {…}` for every
+-- registered shape so the typed name round-trips end-to-end.
+--
+-- Field order: sorted by `_fieldIndex` (matches the declared
+-- positional API used everywhere else in codegen — see
+-- generateAlias's `List.sortOn (T._fieldIndex . snd)`). Field Go
+-- types are rendered via `solvedTypeToGo`; unresolved TVars
+-- collapse to `any` per the renderer's policy — the resulting Go
+-- struct is well-formed even when the shape's element types stay
+-- polymorphic.
+--
+-- Lives in `IO` because `globalAnonRecords` is an IORef. Called
+-- from `generateGoMulti` via `unsafePerformIO` (matching the
+-- pattern used for `imports`).
+generateAnonRecordDecls :: IO [GoIr.GoDecl]
+generateAnonRecordDecls = do
+    anons <- readIORef globalAnonRecords
+    return $ concatMap structDecl (Map.toAscList anons)
+  where
+    structDecl (name, fields) =
+        let sortedFields =
+                List.sortOn (T._fieldIndex . snd) (Map.toList fields)
+            goField (fname, T.FieldType _ ty) =
+                capitalise_ fname ++ " " ++ solvedTypeToGo ty
+            fieldStrs = map goField sortedFields
+            structBody =
+                if null fieldStrs
+                    then "{}"
+                    else "{ " ++ intercalate_ "; " fieldStrs ++ " }"
+        in [ GoIr.GoDeclRaw $
+                "type " ++ name ++ " = struct " ++ structBody ]
 
 
 -- | Generate Go type declarations for record type aliases.
@@ -2330,15 +3255,46 @@ generateDef def solvedTypes =
                     (length params)
                     funcType
             _ -> ([], replicate (length params) "any", "any")
-        isTyped = False  -- body codegen still uses exprToGo (any-typed)
     in
     -- Skip "main" — handled separately
     if name == "main" then []
     else
-        let rawBody = if isTyped
-                then exprToGoTypedWithRet solvedTypes goRetType body
-                else exprToGo body
-            bodyExpr = wrapTypedReturn goRetType rawBody
+        let -- Register function params scoped to this function's body
+            -- so the bindings don't leak into sibling functions.
+            isGoTypedDeclE gty =
+                gty /= "any" && gty /= "" && not (isGenericTypeParam gty)
+            paramTypeBindings = case def of
+                Can.TypedDef _ _ typedPats _ _ ->
+                    Map.fromList
+                        [ (n, t)
+                        | ((A.At _ (Can.PVar n), t), gty)
+                            <- zip typedPats (entryParamGoTys ++ repeat "any")
+                        , isGoTypedDeclE gty
+                        ]
+                _ -> Map.empty
+            -- v0.13 typed lowerer: thread the EMITTED Go return type
+            -- (`goRetType`) directly into the body lowering.
+            -- `goRetType` is authoritative — it's exactly the Go type
+            -- in the function's emitted signature, so a sig/body type
+            -- divergence is structurally impossible (the previous
+            -- `solvedTypeToGo retTy == goRetType` gate existed only to
+            -- detect that divergence).  `exprToGoExpectGo`'s own
+            -- `isEmittableGoType` gate keeps it sound: a non-emittable
+            -- `goRetType` falls back to plain `exprToGo` and the outer
+            -- `typeIIFE` still coerces.
+            lowerFnBody e =
+                if goRetType /= "any"
+                    then exprToGoExpectGo goRetType e
+                    else exprToGo e
+            -- `typeIIFE` runs on the GoExpr STRUCTURE — before
+            -- `withScopedLambdaTypes` renders it to a String — so it
+            -- can still see a `GoBlock` and convert it to a typed
+            -- `func() <goRetType>` IIFE.  Idempotent on an already-
+            -- typed `GoTypedBlock` (no redundant re-wrap).
+            typedBody = typeIIFE goRetType (lowerFnBody body)
+            bodyExpr = if Map.null paramTypeBindings
+                then typedBody
+                else withScopedLambdaTypes paramTypeBindings typedBody
             (goParams', destructStmts) = destructureParams params
             -- Replace each param's Go type with the typed form (from
             -- annotation or HM inference). destructureParams gave us
@@ -2388,6 +3344,24 @@ goSafeName n
 isDiscardName :: String -> Bool
 isDiscardName ('_':_) = True
 isDiscardName _       = False
+
+
+-- | Unicode-aware Go identifier predicates. Go's spec:
+-- `identifier = letter (letter | unicode_digit)*` where
+-- `letter = unicode_letter | '_'`. Sky source identifiers go
+-- through these via `Sky.Parse.Variable.isIdentChar` (parser
+-- side) which uses `Char.isAlphaNum` + `'_'`. Codegen-side
+-- token matching (FFI DCE, type-string substitution, func-name
+-- scanning) MUST stay aligned: an identifier with Unicode
+-- letters in the Sky source emits as the same identifier in
+-- Go, and string-based scanners that miss it will wrongly slice
+-- it as two adjacent tokens.
+isGoIdentStart :: Char -> Bool
+isGoIdentStart c = Char.isLetter c || c == '_'
+
+
+isGoIdentChar :: Char -> Bool
+isGoIdentChar c = Char.isAlphaNum c || c == '_'
 
 
 reservedGoNames :: [String]
@@ -2476,9 +3450,275 @@ coerceExprFor goTy src = case goTy of
              else "rt.Coerce[" ++ erased ++ "](" ++ src ++ ")"
 
 
+-- | v0.13 typed lowerer: zero value literal for a Go type.  Returns
+-- Nothing for types whose zero value can't be written as a simple
+-- literal (Result/Maybe/Task generic structs, opaque aliases) — in
+-- those cases the IIFE stays `func() any` (the trailing unreachable
+-- `return nil` sentinel needs `any`).
+goZeroValue :: String -> Maybe String
+goZeroValue t = case t of
+    "int"      -> Just "0"
+    "int64"    -> Just "0"
+    "float64"  -> Just "0.0"
+    "bool"     -> Just "false"
+    "string"   -> Just "\"\""
+    "rune"     -> Just "0"
+    "struct{}" -> Just "struct{}{}"
+    "any"      -> Just "nil"
+    "rt.SkyCmd" -> Just "rt.SkyCmd{}"
+    "rt.SkySub" -> Just "rt.SkySub{}"
+    "rt.SkyValue" -> Just "nil"          -- alias for `any`
+    "rt.SkyDecoder" -> Just "nil"        -- alias for `any`
+    _ | "[]" `List.isPrefixOf` t           -> Just "nil"  -- nil slice
+      | "map[" `List.isPrefixOf` t         -> Just "nil"  -- nil map
+      | "*" `List.isPrefixOf` t            -> Just "nil"  -- nil ptr
+      -- Parametric Sky runtime structs zero via `T{}` — the
+      -- generic-struct zero value is always valid Go and the
+      -- trailing IIFE `return` is provably unreachable (every
+      -- case/if branch returns), so the value is never observed.
+      -- EXCEPTION: `rt.SkyTask[E, A]` is `func() SkyResult[E, A]`
+      -- — a FUNC type, not a struct — so its zero is `nil`, not
+      -- `T{}` (which Go rejects: "invalid composite literal type").
+      | "rt.SkyResult[" `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.SkyMaybe["  `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.SkyTask["   `List.isPrefixOf` t -> Just "nil"
+      | "rt.T2["        `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.T3["        `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.T4["        `List.isPrefixOf` t -> Just (t ++ "{}")
+      | "rt.T5["        `List.isPrefixOf` t -> Just (t ++ "{}")
+      | t == "rt.SkyTuple2" || t == "rt.SkyTuple3"
+        || t == "rt.SkyTupleN"             -> Just (t ++ "{}")
+      | t == "rt.SkyADT"                   -> Just "rt.SkyADT{}"
+      | t == "rt.VNode"                    -> Just "rt.VNode{}"
+      -- Record-alias structs (`Foo_R`) and Sky ADT struct aliases
+      -- zero via `T{}`.
+      | "_R" `List.isSuffixOf` t           -> Just (t ++ "{}")
+      -- A Go generic type parameter (`T1`, `T2`, …) in scope: its
+      -- zero value is `*new(T)` (the standard expression-form zero
+      -- for a type param).  Only valid INSIDE the generic function
+      -- that declares the param — `exprToGoExpectGo` only threads a
+      -- type-param `goRendering` at function-body emit sites (where
+      -- the param IS in scope); `coerceCallArgsAt` explicitly
+      -- excludes type params from its call-site threading.  The
+      -- monomorphiser's `substTypeParamsInString` rewrites `*new(T1)`
+      -- → `*new(int)` etc. when specialising, so the zero stays
+      -- correct after instance expansion.
+      | isGenericTypeParam t               -> Just ("*new(" ++ t ++ ")")
+      -- A bare capitalised identifier: resolve via the codegen
+      -- env's union/enum registries.
+      --   * Enum union (`type X = int`)        → zero is `0`.
+      --   * Tagged ADT (`type X = rt.SkyADT`)  → zero is `X{}`.
+      --   * Unknown (FFI-opaque, unresolved)   → Nothing — keep
+      --     the IIFE `func() any` rather than risk invalid Go.
+      | isBareCapName t ->
+          let env = getCgEnv
+              enums  = Rec._cg_enumNames env
+              unions = Rec._cg_unionNames env
+              -- The Go type string may be module-qualified
+              -- (`Chess_Piece_Colour`) while the registry holds
+              -- both qualified (dep) and unqualified (entry)
+              -- forms.  Try the full name AND the last `_`-segment.
+              lastSeg = reverse (takeWhile (/= '_') (reverse t))
+              isEnum  = Set.member t enums  || Set.member lastSeg enums
+              isUnion = Set.member t unions || Set.member lastSeg unions
+          in if isEnum            then Just "0"
+             else if isUnion      then Just (t ++ "{}")
+             else Nothing
+      | otherwise -> Nothing
+  where
+    isBareCapName s =
+        not (null s)
+        && (let c = head s in c >= 'A' && c <= 'Z')
+        && all (\c -> (c >= 'A' && c <= 'Z')
+                   || (c >= 'a' && c <= 'z')
+                   || (c >= '0' && c <= '9')
+                   || c == '_') s
+
+
+-- | v0.13 typed lowerer: is this Go type string a REAL, emittable Go
+-- type we can safely thread an expected-type into?  True iff we can
+-- name a zero value for it (`goZeroValue` Just — proof it's a known
+-- type) OR it's a `func(`-shaped type (valid Go, zero is `nil`).
+-- `"any"` is explicitly excluded — threading `any` is a no-op and
+-- the caller's fallback path (`coerceArg` / `any()` widening) must
+-- handle it instead.  Used by both `exprToGoExpectGo`'s safety gate
+-- and `coerceCallArgsAt`'s control-flow-arg branch.
+isEmittableGoType :: String -> Bool
+isEmittableGoType s =
+    s /= "any"
+    && (isJust (goZeroValue s) || "func(" `List.isPrefixOf` s)
+
+
+-- | v0.13 typed lowerer: convert a `GoBlock` (IIFE returning `any`)
+-- into a `GoTypedBlock` (IIFE returning the concrete `retType`) when
+-- it's SAFE to do so.  "Safe" means:
+--   * `retType` is concrete (not "any"), AND
+--   * the block's trailing `result` either isn't the unreachable
+--     `nil` sentinel, OR `retType` has a writable zero value.
+--
+-- Every `return` inside the block (including those nested in
+-- `GoIf` / `GoSwitch` / `GoTypeSwitch` branches at the IIFE's own
+-- level — NOT inside nested `GoFuncLit`s) is coerced to `retType`
+-- via `wrapTypedReturn`.  Nested `GoBlock` return values are
+-- recursively typed.
+--
+-- When NOT safe, falls back to `wrapTypedReturn retType body` — the
+-- existing behaviour (outer `rt.CoerceX(func() any {...}())`).
+typeIIFE :: String -> GoIr.GoExpr -> GoIr.GoExpr
+typeIIFE retType body
+    | retType == "any" = body
+    | otherwise = case body of
+        -- Idempotent: a body already typed to `retType` (e.g. it
+        -- came through `exprToGoExpectGo retType` which produced a
+        -- `GoTypedBlock retType …`) is returned untouched — no
+        -- redundant `rt.Coerce` re-wrap.
+        GoIr.GoTypedBlock t _ _ | t == retType -> body
+        GoIr.GoBlock stmts result ->
+            let result' = case result of
+                    GoIr.GoRaw "nil" -> case goZeroValue retType of
+                        Just zv -> GoIr.GoRaw zv
+                        Nothing -> result  -- can't zero — bail below
+                    _ -> coerceReturnExprT retType result
+                canType = case result of
+                    GoIr.GoRaw "nil" -> isJust (goZeroValue retType)
+                    _                -> True
+            in if canType
+                 then GoIr.GoTypedBlock retType
+                        (coerceBlockReturnsT retType stmts) result'
+                 else wrapTypedReturn retType body
+        _ -> wrapTypedReturn retType body
+
+
+-- | Walk IIFE-level statements coercing every `return` value to
+-- `retType`.  Descends into `GoIf` / `GoSwitch` / `GoTypeSwitch`
+-- branches (still the same IIFE's control flow) but NOT into
+-- `GoFuncLit` (a nested closure has its own return type).
+coerceBlockReturnsT :: String -> [GoIr.GoStmt] -> [GoIr.GoStmt]
+coerceBlockReturnsT retType = map go
+  where
+    go stmt = case stmt of
+        GoIr.GoReturn e          -> GoIr.GoReturn (coerceReturnExprT retType e)
+        GoIr.GoIf c thn els      -> GoIr.GoIf c (coerceBlockReturnsT retType thn)
+                                                (coerceBlockReturnsT retType els)
+        GoIr.GoSwitch e brs      -> GoIr.GoSwitch e
+                                      [ (v, coerceBlockReturnsT retType b)
+                                      | (v, b) <- brs ]
+        GoIr.GoTypeSwitch n e brs -> GoIr.GoTypeSwitch n e
+                                      [ (t, coerceBlockReturnsT retType b)
+                                      | (t, b) <- brs ]
+        GoIr.GoBlock_ ss         -> GoIr.GoBlock_ (coerceBlockReturnsT retType ss)
+        _                        -> stmt
+
+
+-- | Coerce a single return-value expression to `retType`.  If it's
+-- itself a `GoBlock` (nested IIFE), recursively type it instead of
+-- wrapping — that keeps the nesting `any`-free.  `GoRaw "nil"`
+-- (unreachable sentinel) is left as-is in branch positions; the
+-- caller's `coerceBlockReturnsT` only reaches it when a branch
+-- explicitly `return nil`s, which is the dead-code arm — Go accepts
+-- `return nil` only for nilable types, so for non-nilable retTypes
+-- we substitute the zero value.
+coerceReturnExprT :: String -> GoIr.GoExpr -> GoIr.GoExpr
+coerceReturnExprT retType e = case e of
+    GoIr.GoBlock _ _ -> typeIIFE retType e
+    GoIr.GoRaw "nil" -> case goZeroValue retType of
+        Just zv -> GoIr.GoRaw zv
+        Nothing -> e
+    _ -> wrapTypedReturn retType e
+
+
+-- | v0.13 typed lowerer: best-effort STATIC Go type of a GoExpr.
+-- Returns `Just t` ONLY when the expression's Go type is provably
+-- `t`.  Used to elide redundant coercions — `rt.CoerceInt(x)` when
+-- `x` is already statically `int`.
+--
+-- Conservative by construction: `Nothing` ("unknown") always keeps
+-- the coercion, so a MISSED case is harmless.  A WRONG `Just` would
+-- skip a needed coercion and break `go build`, so every arm must be
+-- certain.
+goExprGoType :: GoIr.GoExpr -> Maybe String
+goExprGoType e = case e of
+    GoIr.GoIntLit _         -> Just "int"
+    GoIr.GoFloatLit _       -> Just "float64"
+    GoIr.GoStringLit _      -> Just "string"
+    GoIr.GoBoolLit _        -> Just "bool"
+    GoIr.GoRuneLit _        -> Just "rune"
+    GoIr.GoTypedBlock t _ _ -> Just t
+    GoIr.GoSliceLit t _     -> Just ("[]" ++ t)
+    -- Composite literals carry their type verbatim.  `rt.SkyTuple2{…}`
+    -- IS `rt.SkyTuple2`; `Foo_R{…}` IS `Foo_R` — no coercion needed.
+    GoIr.GoStructLit t _    -> Just t
+    GoIr.GoMapLit k v _     -> Just ("map[" ++ k ++ "]" ++ v)
+    -- Coercion-helper results have a statically-known type.  The
+    -- callee is emitted in two shapes — `GoIdent "rt.X"` and
+    -- `GoQualified "rt" "X"` — so normalise via `rtCalleeName`.
+    GoIr.GoCall callee _
+        | Just fn <- rtCalleeName callee ->
+            let fn' = "rt." ++ fn
+            in case fn of
+                "CoerceInt"    -> Just "int"
+                "CoerceString" -> Just "string"
+                "CoerceBool"   -> Just "bool"
+                "CoerceFloat"  -> Just "float64"
+                "AsInt"        -> Just "int"
+                "AsString"     -> Just "string"
+                "AsBool"       -> Just "bool"
+                "AsFloat"      -> Just "float64"
+                -- `rt.Html_*` element builders return `rt.VNode`
+                -- (runtime ported in [v0.13] runtime — Html.*
+                -- builders return VNode).  `Html_render` renders to
+                -- a string; `Html_doctype` has a separate kernel-sig
+                -- mismatch — both stay `any`.
+                _ | "Html_" `List.isPrefixOf` fn
+                  , fn /= "Html_render"
+                  , fn /= "Html_doctype" -> Just "rt.VNode"
+                  | Just t <- stripParametric "rt.Coerce" fn'       -> Just t
+                  | Just t <- stripParametric "rt.AsListT" fn'      -> Just ("[]" ++ t)
+                  | Just t <- stripParametric "rt.AsMapT" fn'       -> Just ("map[string]" ++ t)
+                  | Just t <- stripParametric "rt.MaybeCoerce" fn'  -> Just ("rt.SkyMaybe[" ++ t ++ "]")
+                  | Just t <- stripParametric "rt.ResultCoerce" fn' -> Just ("rt.SkyResult[" ++ t ++ "]")
+                  | Just t <- stripParametric "rt.TaskCoerceT" fn'  -> Just ("rt.SkyTask[" ++ t ++ "]")
+                  | otherwise -> Nothing
+    -- Comparison / logical binops are Go-bool.
+    GoIr.GoBinary op _ _
+        | op `elem` ["==", "!=", "<", ">", "<=", ">=", "&&", "||"] -> Just "bool"
+    -- Arithmetic binops: result type = operand type when both
+    -- operands have the SAME known primitive type.
+    GoIr.GoBinary op l r
+        | op `elem` ["+", "-", "*", "/", "%"]
+        , Just lt <- goExprGoType l
+        , Just rt' <- goExprGoType r
+        , lt == rt'
+        , lt `elem` ["int", "float64", "string"]
+        -> Just lt
+    -- A bare identifier registered in the lambda-type context.
+    -- RESTRICTED to primitive types: `solvedTypeToGo` renders some
+    -- composite types (notably tuples → `rt.T2[A,B]`) differently
+    -- from how the variable is actually EMITTED (tuple vars are
+    -- `[]rt.SkyTuple2` / `rt.SkyTuple2`).  Trusting the HM type for
+    -- those would wrongly elide a needed coercion.  Primitives
+    -- (`int` / `float64` / `string` / `bool` / `rune`) render
+    -- identically everywhere, so they're safe.
+    GoIr.GoIdent name -> case lookupLambdaType name of
+        Just t | isTypedPrimitive t -> Just (solvedTypeToGo t)
+        _                           -> Nothing
+    _ -> Nothing
+  where
+    -- Normalise an `rt.*` callee to its bare function name,
+    -- accepting both `GoIdent "rt.Foo"` and `GoQualified "rt" "Foo"`.
+    rtCalleeName (GoIr.GoQualified "rt" fn) = Just fn
+    rtCalleeName (GoIr.GoIdent name)
+        | "rt." `List.isPrefixOf` name = Just (drop 3 name)
+    rtCalleeName _ = Nothing
+
+
 wrapTypedReturn :: String -> GoIr.GoExpr -> GoIr.GoExpr
 wrapTypedReturn retType body
     | retType == "any" = body
+    -- v0.13 typed lowerer: skip the coercion when `body` is already
+    -- provably the target type — no redundant `rt.CoerceInt(int)` /
+    -- `rt.Coerce[T](T)` wrap.
+    | goExprGoType body == Just retType = body
     | Just params <- stripParametric "rt.SkyResult" retType =
         GoIr.GoCall
             (GoIr.GoIdent ("rt.ResultCoerce[" ++ params ++ "]"))
@@ -2555,6 +3795,70 @@ stripParametric prefix s
 -- pass-1 canonicalisation in each dep uses that dep's own tmap,
 -- which misses type names the dep references without importing
 -- (Chess.Ai uses `Model` without `import State`).
+-- | v0.13 Phase A4: build a `Sky-qualName → Can.Def` map covering
+-- the entry module + every dep.  Keys use the FULL Sky-source
+-- qualified name (`"Sky.Core.List.foldl"`), not the mangled Go name
+-- (`"Sky_Core_List_foldl"`).  Names match what
+-- `Mono.collectCallSitesDef` produces from `Can.VarTopLevel` resolution.
+--
+-- Used by the reachability walker (`Mono.reachableInstances`) to find
+-- the body of each invoked function so it can collect THAT body's
+-- call sites and continue the transitive closure.
+buildDefMap
+    :: Can.Module
+    -> [(String, Can.Module)]
+    -> Map.Map String Can.Def
+buildDefMap canMod validDeps =
+    let entryName = case Can._name canMod of
+            ModuleName.Canonical s -> s
+        entryDefs = collectModuleDefs entryName canMod
+        depDefs = concatMap (\(mn, dm) -> collectModuleDefs mn dm) validDeps
+    in Map.fromList (entryDefs ++ depDefs)
+  where
+    collectModuleDefs modName m = walkDecls modName (Can._decls m) []
+    walkDecls _      Can.SaveTheEnvironment acc = acc
+    walkDecls modN (Can.Declare def rest) acc =
+        walkDecls modN rest (defEntry modN def ++ acc)
+    walkDecls modN (Can.DeclareRec def defs rest) acc =
+        walkDecls modN rest
+            (concatMap (defEntry modN) (def : defs) ++ acc)
+    defEntry modN def = case def of
+        Can.Def (A.At _ n) _ _      -> [(modN ++ "." ++ n, def)]
+        Can.TypedDef (A.At _ n) _ _ _ _ -> [(modN ++ "." ++ n, def)]
+        Can.DestructDef _ _         -> []  -- skip pattern-bindings
+
+
+-- | v0.13 Phase A4: build a `Sky-qualName → generalised-annotation`
+-- map covering the entry module + every dep.  Each annotation comes
+-- from `generaliseToAnnotation` applied to the function's solved
+-- type — same shape the solver registered in `globalExternals` so
+-- the Forall var names align with `_instance_quantifiers`.
+buildAnnotMap
+    :: Map.Map String T.Type                        -- entry solvedTypes
+    -> [(String, Map.Map String T.Type)]            -- dep solvedTypes
+    -> Map.Map String T.Annotation
+buildAnnotMap entrySolved depSolved =
+    let entryEntries =
+            [ ("Main." ++ n, generaliseToAnnotation ty)
+            | (n, ty) <- Map.toList entrySolved
+            ]
+        depEntries =
+            [ (modName ++ "." ++ n, generaliseToAnnotation ty)
+            | (modName, types) <- depSolved
+            , (n, ty) <- Map.toList types
+            ]
+    in Map.fromList (entryEntries ++ depEntries)
+
+
+-- | v0.13 Phase A4: extract the entry module's Sky-source module name
+-- (used as the qualifier for `main`).  Falls back to "Main" if the
+-- module header omits `module X exposing (…)`.
+mainModuleName :: Src.Module -> Maybe String
+mainModuleName srcMod = case Src._name srcMod of
+    Just (A.At _ segs) -> Just (List.intercalate "." segs)
+    Nothing -> Nothing
+
+
 buildCrossModuleExternalsWithMods
     :: [(String, Can.Module)]
     -> [(String, Map.Map String T.Type)]
@@ -2702,7 +4006,13 @@ collectFreeTVars = nubOrd . go
         T.TLambda a b -> go a ++ go b
         T.TType _ _ args -> concatMap go args
         T.TTuple a b cs -> concatMap go (a : b : cs)
-        T.TRecord fields _ -> concatMap (\(T.FieldType _ fTy) -> go fTy) (Map.elems fields)
+        T.TRecord fields mExt ->
+            concatMap (\(T.FieldType _ fTy) -> go fTy) (Map.elems fields)
+            -- The row-extension variable of an OPEN record is a free
+            -- type var; collect it so `generaliseToAnnotation`
+            -- quantifies it instead of leaking a bare row name into
+            -- the consumer module's solver cache.
+            ++ maybe [] (\n -> [n]) mExt
         T.TAlias _ _ pairs aliasType ->
             concatMap (go . snd) pairs ++ case aliasType of
                 T.Filled i -> go i
@@ -2763,7 +4073,16 @@ safeReturnType t = case t of
     -- alias (then use `_R` suffix). Plain ADT unions stay `any` until
     -- we can guarantee every call site produces the exact struct type
     -- (not just `any(expr)`). Re-enable when T6 lands.
-    T.TType home name [] ->
+    --
+    -- v0.13 B1: match `_` so parametric ADTs (e.g. `Html msg`,
+    -- `Element msg`, `Attribute msg`) get the SAME erased-Go-name
+    -- treatment as nullary types. Since `type Mod_Name = rt.SkyADT`
+    -- is non-generic, the type arg is irrelevant to the Go name.
+    -- The `isKnownUnion` gate at the bottom of this arm still
+    -- keeps FFI-opaque parametric types (where no Go alias was
+    -- emitted) falling through to `any`. Mirrors the equivalent
+    -- arm in `safeReturnTypeWith` (which landed earlier in v0.13).
+    T.TType home name _ ->
         let modStr = ModuleName.toString home
             prefix = if null modStr || modStr == "Main"
                        then ""
@@ -2802,12 +4121,27 @@ safeReturnType t = case t of
                         || Set.member name knownUnions
         in case matches of
             (m:_) -> m ++ "_R"
-            _     -> case runtimeTyped of
-                Just goTy -> goTy
-                Nothing
-                    | isRuntimeOnly -> "any"
-                    | isKnownUnion  -> base
-                    | otherwise     -> "any"
+            _
+                -- v0.13 B0: a Sky-defined union with a populated home
+                -- takes precedence over `runtimeTypedMap`'s `rt.SkyX`
+                -- alias. `Attribute` lives in both Std.Ui AND
+                -- Std.Html.Attributes as a Sky-source ADT — emitting
+                -- `rt.SkyAttribute` (= type alias for `any`) for the
+                -- inferred `T.TType (Canonical "Std.Ui") "Attribute"`
+                -- loses the typed Sky-emitted struct name and
+                -- violates the v0.13 contract (no bare/aliased `any`
+                -- for used types). The `_cg_unionNames` membership
+                -- check confirms the Sky-emitted Go alias actually
+                -- exists; empty-home callers still fall through to
+                -- runtimeTyped (their cross-module recovery via
+                -- `globalUnionNames` is separate).
+                | not (null modStr) && Set.member base knownUnions -> base
+                | otherwise -> case runtimeTyped of
+                    Just goTy -> goTy
+                    Nothing
+                        | isRuntimeOnly -> "any"
+                        | isKnownUnion  -> base
+                        | otherwise     -> "any"
     -- TAlias emitted by the canonicaliser's alias-expansion pass.
     -- Resolve using the same record-alias / runtime-type lookup as
     -- TType so `Profile` → `Main_Profile_R` instead of degenerating
@@ -2938,6 +4272,14 @@ runtimeTypedMap =
     , ("Middleware", "rt.SkyMiddleware")
     , ("Session",    "rt.SkySession")
     , ("Store",      "rt.SkyStore")
+    -- v0.13 A2 follow-up: kernel `Http.get`/`Http.post` declare
+    -- their return type with empty `home` and name `HttpResponse`.
+    -- Once A2's pre-registration connects forward refs (e.g. an
+    -- unannotated `checkResponseStatus resp` param), the renderer
+    -- sees `T.TType "" "HttpResponse" []` and otherwise emits
+    -- bare `HttpResponse` (undefined Go). Maps to the existing
+    -- runtime struct.
+    , ("HttpResponse", "rt.HttpResponse")
     -- Db is stored as a pointer at runtime — Db_connect/Db_open
     -- return `&SkyDb{…}`. Typing as `*rt.SkyDb` matches the
     -- `Ok[any,any](db)` branch so the ResultCoerce type assertion
@@ -2973,7 +4315,15 @@ collectFuncTypesWith extraRecAliases prefix canMod =
                      then localRecAliases
                      else Set.map (\n -> prefix ++ "_" ++ n) localRecAliases
         knownRecAliases = Set.unions [extraRecAliases, localRecAliases, prefixed]
-        qualName n = if null prefix then n else prefix ++ "_" ++ n
+        -- v0.13 Layer 3 fix: align with goSafeName-mangled dep
+        -- emission.  Cross-module call sites look up funcParamTypes
+        -- by the mangled name (e.g. `Sky_Core_Result_map_` when
+        -- the Sky source declares `map`), so the table keys must
+        -- match.  Entry module (null prefix) keeps raw name —
+        -- local code lookups use goSafeName at the call site.
+        qualName n = if null prefix
+                       then goSafeName n
+                       else prefix ++ "_" ++ goSafeName n
         goDecls Can.SaveTheEnvironment = []
         goDecls (Can.Declare d rest)        = d : goDecls rest
         goDecls (Can.DeclareRec d ds rest)  = d : ds ++ goDecls rest
@@ -3056,7 +4406,13 @@ safeReturnTypeWith recAliases = go
         T.TTuple _ _ [_]              -> "rt.SkyTuple3"
         T.TTuple _ _ _                -> "rt.SkyTupleN"
         T.TType _ name _ | Just goTy <- opaqueParameterisedGoTy name -> goTy
-        T.TType home name [] ->
+        -- v0.13 Layer 3: `_` (not `[]`) so a PARAMETERISED Sky ADT
+        -- (`Html msg`, `Attribute msg`, `Element msg`) renders to its
+        -- erased Go struct name — the ADT emits as a non-generic
+        -- `type Mod_Name = rt.SkyADT`, so the `msg` arg is irrelevant
+        -- to the Go type name.  Pre-fix these fell through to `any`,
+        -- giving 177/183 `Std_Html_*` functions `any`-typed sigs.
+        T.TType home name _ ->
             let modStr = ModuleName.toString home
                 prefix = if null modStr || modStr == "Main"
                            then ""
@@ -3109,26 +4465,25 @@ safeReturnTypeWith recAliases = go
                         | otherwise     -> case inner of
                             T.TRecord{} -> if null base then "any" else base
                             _           -> go inner
-        -- Function-typed slots (HOF params): render as `func(X) any`
-        -- to match what renderHofParamTy emits at signature time. The
-        -- tail return is always `any` for the same reason — see
-        -- renderHofParamTy's third branch (Sky lambdas can't preserve
-        -- a concrete return type, so the param shape stays widened).
-        -- Crucially, registering the param as `func(X) any` (rather
-        -- than the bare `any` fallback) gives `coerceArg` the func
-        -- prefix it needs to route typed call-site args (e.g. a
-        -- `Msg_X : func(string) Msg` constructor) through
-        -- `rt.Coerce[func(X) any]` — Go's function-type-no-covariance
-        -- rule otherwise rejects the assignment.
+        -- Function-typed slots (HOF params): render typed return shape
+        -- to match what `renderHofParamTy` emits at signature time
+        -- (v0.13 D1). This drives `_cg_funcParamTypes[fn]`'s entry,
+        -- which `coerceCallArgsAt`'s fallback then uses to detect
+        -- the func-typed slot and route literal `Can.Lambda` args
+        -- through `curryLambdaPatTyped`. Bare-TVar returns stay typed
+        -- (Go call-site inference); concrete returns now render
+        -- through `go` instead of widening to `any`.
         T.TLambda _ _ -> renderFuncTy t
         _ -> "any"
       where
-        -- Curried multi-arg → nested `func(A) func(B) ...`. Tail
-        -- return widens to `any` regardless of the actual Sky type.
+        -- Curried multi-arg → nested `func(A) func(B) ...`.
         renderFuncTy (T.TLambda from to@T.TLambda{}) =
             "func(" ++ go from ++ ") " ++ renderFuncTy to
-        renderFuncTy (T.TLambda from _to) =
-            "func(" ++ go from ++ ") any"
+        renderFuncTy (T.TLambda from to@(T.TVar _)) =
+            "func(" ++ go from ++ ") " ++ go to
+        renderFuncTy (T.TLambda from to) =
+            "func(" ++ go from ++ ") " ++ go to
+        renderFuncTy other = go other
         renderFuncTy other = go other
 
 
@@ -3184,6 +4539,45 @@ splitInferredSig = splitInferredSigWith Set.empty
 splitInferredSigWith :: Set.Set String -> Int -> T.Type -> ([String], [String], String)
 splitInferredSigWith recAliases = splitInferredSigWithReg recAliases Map.empty
 
+-- | v0.13 Phase A5+: extract the Sky-TVar → Go-TVar mapping for a
+-- polymorphic function's emitted signature.  Mirrors
+-- `splitInferredSigWithReg`'s internal `keptNumbered` computation
+-- so the call-site coercion path (`coerceCallArgsAt`) can map
+-- annotation Forall names (carried by `CallInstance.quantifiers`)
+-- to the Go-generic names that actually appear in the emitted
+-- signature.
+inferredSigSkyToGo
+    :: Set.Set String
+    -> Rec.RecordRegistry
+    -> Int
+    -> T.Type
+    -> [(String, String)]
+inferredSigSkyToGo recAliases fieldIdx arity funcType =
+    let defaulted =
+            if errorTypeAvailable recAliases
+                then defaultErrorTVars funcType
+                else defaultOpaqueTVars funcType
+        (paramTys, retTy) = collectParamsLocal arity defaulted
+        paramTVars = uniqLocal (concatMap tvarsInEmitted paramTys)
+        numbered = zip paramTVars ["T" ++ show i | i <- [1::Int ..]]
+        paramStrsRaw = map (renderHofParamTy recAliases fieldIdx numbered) paramTys
+        retStrRaw = typeStrWithAliasesReg recAliases fieldIdx numbered retTy
+        renderedSig = unwords (retStrRaw : paramStrsRaw)
+    in [ (skyName, goName)
+       | (skyName, goName) <- numbered
+       , goAppearsAsToken goName renderedSig
+       ]
+  where
+    collectParamsLocal 0 ty = ([], ty)
+    collectParamsLocal n (T.TLambda from to) =
+        let (rest, r) = collectParamsLocal (n - 1) to
+        in (from : rest, r)
+    collectParamsLocal _ ty = ([], ty)
+
+    uniqLocal [] = []
+    uniqLocal (x:xs) = x : uniqLocal (filter (/= x) xs)
+
+
 -- | Richer variant that also carries a field-set → alias-name
 -- registry so anonymous record types (TRecord) can resolve to their
 -- `_R` Go struct name in emitted signatures. Without this, HM-inferred
@@ -3226,11 +4620,24 @@ splitInferredSigWithReg recAliases fieldIdx arity funcType =
         -- of their type params (e.g. `Element msg` emits as
         -- `Std_Ui_Element`). Keep only the TVars that survive
         -- rendering.
-        renderedSig = unwords (retStrRaw : paramStrsRaw)
+        --
+        -- v0.13 C follow-up: filter against PARAM strings only,
+        -- not return. Go's generic inference works from input
+        -- positions; a TVar appearing only in the return type
+        -- (e.g. `b` in `concatMap : (a -> List b) -> List a ->
+        -- List b`, after C propagates the `b` inside `List b`)
+        -- isn't inferable from any call-site arg — Go rejects
+        -- with "cannot infer T2". Dropping the return-only TVar
+        -- collapses the return slot to `[]any`; the caller's
+        -- existing `rt.AsListT[T]` boundary coercion already
+        -- bridges that. Once D1 (typed lambda output) lands,
+        -- fn's return position will surface the TVar in the
+        -- HOF-param sig and the input-only filter will keep it.
+        paramSig = unwords paramStrsRaw
         usedTypeParams =
             [ goName
             | (_, goName) <- numbered
-            , goName `appearsAsToken` renderedSig
+            , goName `appearsAsToken` paramSig
             ]
         -- Re-render with only the surviving TVars in the numbered
         -- map so unused-TVar slots fall back to `any` instead of a
@@ -3542,20 +4949,30 @@ renderHofParamTy recAliases fieldIdx tvarMap ty = case ty of
     renderLambdaInner (T.TLambda from to@(T.TVar _)) =
         -- Bare TVar return: keep typed so Go can infer via call site.
         "func(" ++ go from ++ ") " ++ go to
-    renderLambdaInner (T.TLambda from _to) =
-        -- Concrete-return HOF param sig stays `func(X) any` even when
-        -- the return is a real type like Msg or Result Error a. Reason:
-        -- Sky-side lambdas always lower to `func(any) any` (the lowerer
-        -- doesn't specialise lambda input/output types). A helper sig
-        -- of `func(X) Msg` would reject sky lambdas, and a sig of
-        -- `func(X) Result Error a` would reject typed Msg constructors
-        -- — Go has no function-type covariance. Keeping the sig at
-        -- `func(X) any` lets coerceArg's func branch route both shapes
-        -- through `rt.Coerce[func(X) any]`, which adapts via reflect.
-        -- See test/Sky/Build/CompileSpec.hs's "user-defined polymorphic
-        -- HOFs with Result-typed lambda params" test for the
-        -- regression that pinned this.
-        "func(" ++ go from ++ ") any"
+    renderLambdaInner (T.TLambda from to) =
+        -- v0.13 D1: render the typed return shape for HOF param sigs.
+        --
+        -- Pre-D1 this was a blanket `"any"` to accommodate Sky-side
+        -- lambdas lowered as `func(any) any`. The v0.13 D-Lambda-
+        -- Lowerer (the `coerceFallback`'s `Can.Lambda` arm in
+        -- `coerceCallArgsAt`'s no-CSI branch — see ~line 6229)
+        -- extends `curryLambdaPatTyped` routing to user-defined HOF
+        -- call sites: a literal `\a -> ...` lambda at a func-typed
+        -- param slot now emits `func(A) B` directly so the sig +
+        -- lowered shape agree end-to-end.
+        --
+        -- Non-literal func args (top-level helpers, Msg constructors,
+        -- partial applications) already have concrete Go signatures;
+        -- coerceArg's `rt.Coerce[func(X) Y]` reflect adapter
+        -- (makeFuncAdapter) bridges any residual shape mismatch.
+        --
+        -- The `test/Sky/Build/CompileSpec.hs:139` regression
+        -- ("user-defined polymorphic HOFs with Result-typed lambda
+        -- params") was the previous gating test for the blanket-
+        -- `any` workaround. D-Lambda-Lowerer makes the typed shape
+        -- consistent at user-defined HOFs too, so the regression
+        -- stays green.
+        "func(" ++ go from ++ ") " ++ go to
     renderLambdaInner other = go other
 
 -- | Like `typeStrWithAliases` but additionally consults a field-set →
@@ -3612,7 +5029,16 @@ typeStrWithAliasesReg recAliases fieldIdx tvarMap ty = case ty of
     T.TType _ "Bytes" []  -> "[]byte"
     T.TUnit               -> "struct{}"
     -- User-defined types: resolve via record alias set + runtime map.
-    T.TType home name [] ->
+    -- NOTE: matches only `[]` (no type args) deliberately —
+    -- v0.13 Layer 3: `_` (not `[]`) so a PARAMETERISED Sky ADT
+    -- (`Html msg`, `Attribute msg`, `Element msg`) renders to its
+    -- erased Go struct name (`Std_Html_Html`) rather than `any`.
+    -- The ADT emits as a non-generic `type Mod_Name = rt.SkyADT`,
+    -- so the type arg is irrelevant to the Go name.  The call-site
+    -- coercion bridges `[]any` → `[]Mod_Name` via
+    -- `rt.AsListT[Mod_Name]` (coerceArg's stripSlice arm) and
+    -- `Mod_Name` ↔ `any` via `rt.Coerce`.
+    T.TType home name _ ->
         let modStr = ModuleName.toString home
             prefix = if null modStr || modStr == "Main"
                        then ""
@@ -3634,11 +5060,36 @@ typeStrWithAliasesReg recAliases fieldIdx tvarMap ty = case ty of
             runtimeTyped = case lookup (modStr, name) qualifiedRuntimeTypedMap of
                 Just goTy -> Just goTy
                 Nothing   -> lookup name runtimeTypedMap
+            -- v0.13 A2 follow-up: empty-home cross-module ADT
+            -- recovery. When `home` is empty (a TVar resolved to
+            -- a Sky ADT via cross-decl constraint propagation but
+            -- with the module attribution lost), the bare
+            -- `base = name` renders undefined Go (`Colour` vs.
+            -- declared `Chess_Piece_Colour`). Look up via the
+            -- dedicated `globalUnionNames` IORef (kept separate
+            -- from `globalCgEnv` so the read can't black-hole
+            -- inside a `modifyIORef globalCgEnv` callback).
+            unionRecovery
+              | not (null modStr) = Nothing
+              | otherwise =
+                  let allUnions = unsafePerformIO (readIORef globalUnionNames)
+                  in if Set.null allUnions
+                       then Nothing
+                       else if Set.member name allUnions
+                              then Just name
+                              else case [ u | u <- Set.toList allUnions
+                                            , '_' `elem` u
+                                            , reverse (takeWhile (/= '_') (reverse u)) == name
+                                            ] of
+                                       [u] -> Just u
+                                       _   -> Nothing
         in case matches of
             (m:_) -> m ++ "_R"
             _     -> case runtimeTyped of
                 Just goTy -> goTy
-                Nothing   -> if isRuntimeOnly then "any" else base
+                Nothing   -> case unionRecovery of
+                    Just u  -> u
+                    Nothing -> if isRuntimeOnly then "any" else base
     T.TAlias home name _ aliasType ->
         let modStr = ModuleName.toString home
             prefix = if null modStr || modStr == "Main"
@@ -3701,11 +5152,20 @@ tvarsInEmitted ty = case ty of
         | take 1 n == "_" -> [n]
         | otherwise       -> [n]
     T.TLambda a b -> tvarsInEmitted a ++ tvarsInEmitted b
-    -- Container types erase their inner TVars (they become []any etc.)
-    -- so TVars inside don't propagate to the Go type.
-    T.TType _ "List" _ -> []
-    T.TType _ "Dict" _ -> []
-    T.TType _ "Set"  _ -> []
+    -- v0.13 C: container TVars propagate. The renderer (`safeReturnType*`
+    -- / `typeStrWithAliasesReg`) already emits typed Go containers
+    -- like `[]T1` / `map[string]V1` when an element TVar is known —
+    -- collecting them here lets `splitInferredSigWithReg` declare
+    -- `[T1 any]` Go generics, so user code calling
+    -- `List.map : (a -> b) -> List a -> List b` gets a typed sig
+    -- rather than collapsing the body to `[]any`. The
+    -- `usedTypeParams` filter at the call site already drops any
+    -- TVar that never appears in the rendered string, so
+    -- overshooting here is safe — phantom params are stripped
+    -- before the Go generic-param list is committed.
+    T.TType _ "List" args -> concatMap tvarsInEmitted args
+    T.TType _ "Dict" args -> concatMap tvarsInEmitted args
+    T.TType _ "Set"  args -> concatMap tvarsInEmitted args
     T.TType _ "Result" args -> concatMap tvarsInEmitted args
     T.TType _ "Maybe"  args -> concatMap tvarsInEmitted args
     T.TType _ "Task"   args -> concatMap tvarsInEmitted args
@@ -3790,6 +5250,60 @@ splitFuncType _ ty = ([], ty)  -- not enough arrows, return as-is
 -- ═══════════════════════════════════════════════════════════
 -- EXPRESSION CODE GENERATION
 -- ═══════════════════════════════════════════════════════════
+
+-- | v0.13 typed lowerer: convert a canonical expression to Go IR
+-- WITH a known expected type from the surrounding context.
+--
+-- This is the typed entry point.  For control-flow shapes
+-- (`Can.Case` / `Can.If` / `Can.Let`) it threads the expected type
+-- into `caseToGo` / `ifToGo` / `letToGo`, which emit a `GoTypedBlock`
+-- (typed IIFE) and coerce every branch `return` — recursing into
+-- nested IIFE return values.  For every other shape it lowers via
+-- the generic `exprToGo` then coerces the leaf to the expected Go
+-- type via `coerceReturnExprT`.
+--
+-- The design keeps the refactor bounded: only three control-flow
+-- functions gain a `Maybe String` parameter (the EXPECTED GO TYPE),
+-- not all ~200 `exprToGo` call sites.  The expected type still
+-- threads transitively because `caseToGo Just`/`ifToGo Just`/`letToGo
+-- Just` call `typeIIFE`, whose `coerceReturnExprT` recurses into
+-- nested `GoBlock` returns.
+exprToGoExpect :: T.Type -> Can.Expr -> GoIr.GoExpr
+exprToGoExpect expectedTy = exprToGoExpectGo (solvedTypeToGo expectedTy)
+
+
+-- | Like `exprToGoExpect` but takes the expected GO TYPE STRING
+-- directly.  Used by call-site arg lowering (`coerceCallArgsAt`)
+-- where the param type is already known as a Go string.  The
+-- `T.Type` variant just renders and delegates here.
+exprToGoExpectGo :: String -> Can.Expr -> GoIr.GoExpr
+exprToGoExpectGo goRendering e@(A.At _ expr)
+    -- Universal safety gate: only thread the expected type when its
+    -- Go rendering is a REAL, emittable Go type.  `goZeroValue`
+    -- returning `Just` proves it (it can name a zero literal).  For
+    -- anon-record names (`Anon_R_…` — may have no Go decl) and
+    -- unresolved names `goZeroValue` is `Nothing` — fall back to
+    -- plain `exprToGo`, no coercion, no typed IIFE.  This is what
+    -- prevents the f2c7892-class regression: a mismatched /
+    -- undefined Go type can never reach `rt.Coerce[…]` /
+    -- `GoTypedBlock`.
+    | goRendering == "any" = exprToGo e
+    | not (isEmittableGoType goRendering) = exprToGo e
+    | otherwise = case expr of
+        Can.If branches elseExpr ->
+            ifToGo (Just goRendering) branches elseExpr
+        Can.Let def body ->
+            letToGo (Just goRendering) def body
+        Can.Case subject branches ->
+            caseToGo (Just goRendering) subject branches
+        _ ->
+            -- Leaf / non-control-flow: lower generically, then coerce
+            -- the result to the expected Go type.  `coerceReturnExprT`
+            -- recurses into `GoBlock` (so a nested IIFE that slipped
+            -- through still gets typed) and is a no-op when the Go
+            -- type is already concrete + matching.
+            coerceReturnExprT goRendering (exprToGo e)
+
 
 -- | Convert a canonical expression to Go IR
 exprToGo :: Can.Expr -> GoIr.GoExpr
@@ -3992,19 +5506,33 @@ exprToGo (A.At _ expr) = case expr of
                     -- in env._cg_funcParamTypes), coerce each `any`-arg
                     -- expression to the expected param type.
                     --
-                    -- For generic functions (type params recorded in
-                    -- funcInferredSigs), we skip the `exprToGo`-path
-                    -- `[any]` instantiation and emit the bare qualName.
-                    -- Go infers type params from call args — e.g.
-                    -- `lift Wrap A` → `lift(Wrap, A)` lets Go pick
-                    -- T1=Outer from Wrap's return. The previous `[any]`
-                    -- forced T1=any, which broke call sites whose args
-                    -- had a concrete return type in a TVar-return
-                    -- function-typed param position (bare-TVar HOF bug).
-                    -- Bare references (function as value) still emit
-                    -- `[any]` via `Can.VarTopLevel` in `exprToGo`.
-                    else GoIr.GoCall (GoIr.GoIdent qualName)
-                                     (coerceCallArgs qualName args)
+                    -- v0.13 Phase A5: route through `coerceCallArgsAt`
+                    -- which consults `_cg_callSiteInstances`.  When
+                    -- the solver captured a monomorphisation instance
+                    -- at this call's source region, the callee's
+                    -- generic param types get substituted with the
+                    -- instance's concrete Go types before coerceArg
+                    -- runs.  This is what makes `Sky_Core_Maybe_with
+                    -- Default(s, MaybeCoerce[string](m))` work at
+                    -- typed-codegen call sites instead of emitting
+                    -- `MaybeCoerce[any]` that Go's inference rejects.
+                    else
+                        -- v0.13 Phase A4: if a specialised instance
+                        -- exists for this call's region, use its
+                        -- mangled name AND coerce args via the
+                        -- substitution path (which now includes
+                        -- typed lambda emission).  Args go through
+                        -- `coerceCallArgsAt` so the spec's typed
+                        -- param positions receive properly-typed
+                        -- values.  Falls back to the generic name
+                        -- when no spec was emitted.
+                        let mMangled = instanceMangledName (A.toRegion func) qualName
+                            callName = maybe qualName id mMangled
+                        in GoIr.GoCall (GoIr.GoIdent callName)
+                                       (coerceCallArgsAt
+                                            (A.toRegion func)
+                                            qualName
+                                            args)
             _ ->
                 let goFunc = exprToGo func
                     -- Same-module local function calls (`Can.VarLocal`)
@@ -4048,10 +5576,12 @@ exprToGo (A.At _ expr) = case expr of
                                     (goFunc : goArgs)
 
     Can.If branches elseExpr ->
-        ifToGo branches elseExpr
+        -- Generic context — no expected type known here.  The typed
+        -- path is reached via `exprToGoExpect`.
+        ifToGo Nothing branches elseExpr
 
     Can.Let def body ->
-        letToGo def body
+        letToGo Nothing def body
 
     Can.LetRec defs body ->
         let stmts = concatMap defToStmts defs
@@ -4069,7 +5599,7 @@ exprToGo (A.At _ expr) = case expr of
         in GoIr.GoBlock (valStmt : sink : bindStmts) (exprToGo body)
 
     Can.Case subject branches ->
-        caseToGo subject branches
+        caseToGo Nothing subject branches
 
     Can.Accessor field ->
         -- Record accessor function: .field → func(r any) any { return rt.Field(r, "Field") }
@@ -4077,8 +5607,33 @@ exprToGo (A.At _ expr) = case expr of
             [GoIr.GoReturn (GoIr.GoCall (GoIr.GoQualified "rt" "Field") [GoIr.GoIdent "__r", GoIr.GoStringLit (capitalise_ field)])]
 
     Can.Access target (A.At _ field) ->
-        -- Record field access via reflect-based runtime helper
-        GoIr.GoCall (GoIr.GoQualified "rt" "Field") [exprToGo target, GoIr.GoStringLit (capitalise_ field)]
+        -- v0.13 typed lowerer: emit Go-native field access
+        -- (`target.Field`) when the target's HM type resolves to a
+        -- known record alias AND the target is statically typed
+        -- (its Go static type matches a record-alias Go struct).
+        -- Falls back to `rt.Field` (reflect) otherwise.
+        let solved = Rec._cg_solvedTypes getCgEnv
+            targetTy = inferExprType solved target
+            isRecordAlias = case targetTy of
+                Just (T.TAlias _ name _ _) ->
+                    let env = getCgEnv
+                        recSet = Rec._cg_recordAliases env
+                    in Set.member name recSet ||
+                       any (\a -> let parts = splitOn '_' a
+                                  in not (null parts) && last parts == name)
+                          (Set.toList recSet)
+                Just (T.TType _ name _) ->
+                    let env = getCgEnv
+                        recSet = Rec._cg_recordAliases env
+                    in Set.member name recSet ||
+                       any (\a -> let parts = splitOn '_' a
+                                  in not (null parts) && last parts == name)
+                          (Set.toList recSet)
+                _ -> False
+        in if isRecordAlias && operandIsStaticallyTyped target
+              then GoIr.GoSelector (exprToGo target) (capitalise_ field)
+              else GoIr.GoCall (GoIr.GoQualified "rt" "Field")
+                       [exprToGo target, GoIr.GoStringLit (capitalise_ field)]
 
     Can.Update _name baseExpr fields ->
         -- Record update via reflect-based runtime helper (works on any + typed structs)
@@ -4196,6 +5751,13 @@ coerceToFieldType targetTy e
         GoIr.GoCall (GoIr.GoIdent ("rt.MaybeCoerce[" ++ eraseTypeParams inner ++ "]")) [e]
     | isJust (stripParametric "rt.SkyTask" targetTy) =
         GoIr.GoCall (GoIr.GoIdent ("rt.TaskCoerceT[" ++ eraseTypeParams (fromMaybe "" (stripParametric "rt.SkyTask" targetTy)) ++ "]")) [e]
+    -- `[]any` / `map[string]any` widening: typed source may be `[]T` /
+    -- `map[string]T`. Direct assertion panics — route through the
+    -- widener helpers analogous to AsListT / AsMapT.
+    | targetTy == "[]any" =
+        GoIr.GoCall (GoIr.GoIdent "rt.AsListAny") [e]
+    | targetTy == "map[string]any" =
+        GoIr.GoCall (GoIr.GoIdent "rt.AsMapAny") [e]
     -- Typed slices: runtime produces []any, so walk-and-cast via
     -- rt.AsListT[T] instead of a hard `any(v).([]T)` assertion.
     | Just elt <- stripListType targetTy =
@@ -4207,7 +5769,28 @@ coerceToFieldType targetTy e
         let erasedTy = eraseTypeParams targetTy
         in if erasedTy == "any"
              then e
-             else GoIr.GoTypeAssert (GoIr.GoCall (GoIr.GoIdent "any") [e]) erasedTy
+             -- v0.13.x #158: record-alias targets (`_R` suffix) route
+             -- through `rt.Coerce[T]` so a `map[string]any` source
+             -- (Db.query rows, Firestore snapshots, JSON-decoded blobs)
+             -- narrows to the typed struct via the map→struct field
+             -- builder in Coerce. Other target shapes (ADT names, FFI
+             -- opaque types) keep the direct assertion — they have no
+             -- map-source panic class.
+             else if isRecordAliasTy erasedTy
+                  then GoIr.GoCall (GoIr.GoIdent ("rt.Coerce[" ++ erasedTy ++ "]")) [e]
+                  else GoIr.GoTypeAssert (GoIr.GoCall (GoIr.GoIdent "any") [e]) erasedTy
+
+
+-- | True when `ty` looks like a record alias the codegen emits:
+-- a Go identifier ending in `_R`, optionally module-qualified.
+-- Conservative — matches Sky-generated record aliases without
+-- catching arbitrary Go types that happen to share the suffix.
+isRecordAliasTy :: String -> Bool
+isRecordAliasTy ty =
+    not (null ty)
+    && "_R" `List.isSuffixOf` ty
+    && all (\c -> c == '_' || c == '.' || (c >= 'A' && c <= 'Z')
+                || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) ty
 
 
 -- | If `ty` is a Go slice type `[]T` with T ≠ any, return Just "T".
@@ -4366,13 +5949,9 @@ typedKernelArgCoerce = Map.fromList
     , (("Dict",   "keys"),    ["AsDict"])
     , (("Dict",   "values"),  ["AsDict"])
     , (("Dict",   "get"),     ["Pass", "Pass"])
-    -- Html.text / Css.hex — simple string → X. High-frequency.
-    , (("Html",   "text"),    ["AsString"])
-    , (("Css",    "hex"),     ["AsString"])
-    , (("Css",    "property"),["AsString", "AsString"])
-    , (("Css",    "px"),      ["AsFloat"])
-    , (("Css",    "rem"),     ["AsFloat"])
-    , (("Attr",   "class"),   ["AsString"])
+    -- (Html / Attr / Css kernel-call hints removed in v0.13 Layer 3 —
+    -- Std.Html* and Std.Css are Sky-source modules now; their calls
+    -- resolve to VarTopLevel, so these hints never fired.)
     -- Log.println: single-arg, any → struct{}{}. Very high-frequency.
     , (("Log",    "println"), ["Pass"])
     , (("Server", "html"),    ["AsString"])
@@ -4450,9 +6029,8 @@ typedKernelLiterals = Set.fromList
     , ("List",   "isEmpty")
     , ("Dict",   "member"),     ("Dict",   "insert")
     , ("Dict",   "keys"),       ("Dict",   "values"),   ("Dict", "get")
-    , ("Html",   "text"),       ("Css",    "hex")
-    , ("Css",    "property"),   ("Css",    "px"),       ("Css", "rem")
-    , ("Attr",   "class"),     ("Log",    "println")
+    -- (Html / Attr / Css removed v0.13 Layer 3 — Sky-source modules.)
+    , ("Log",    "println")
     , ("Server", "html"),      ("Server", "redirect")
     , ("List",   "map"),       ("List",   "filter"),     ("List", "take"), ("List", "cons")
     , ("List",   "drop"),      ("List",   "foldl"),      ("List", "foldr")
@@ -4635,6 +6213,398 @@ coerceCallArgs qualName args =
          then map exprToGo args
          else zipWithDefault coerceArg exprToGo paramTypes args
 
+
+-- | v0.13 Phase A5 — call-site-aware variant of `coerceCallArgs`.
+-- When the call site has a captured monomorphisation instance,
+-- substitute the callee's generic type parameters (`T1`, `T2`,
+-- …) with the instance's concrete Go types before calling
+-- `coerceArg`.  This produces correctly-typed coercion wrappers
+-- (`rt.MaybeCoerce[string]` instead of `rt.MaybeCoerce[any]`)
+-- so Go's type inference at the call site reconciles consistently.
+--
+-- Falls back to the un-substituted `coerceCallArgs` when no
+-- instance is captured at this call site (FFI boundary, non-
+-- polymorphic call, solver had a free TVar, etc.).
+-- | v0.13 Phase A4: at a polymorphic Sky-source call site, return
+-- the mangled name of the specialised instance emitted for this
+-- call.  Returns Nothing when no spec exists (kernel / FFI / non-
+-- generic / unresolved instance).
+--
+-- The mangled name matches the one emitted by `Mono.specialiseFuncDecl`
+-- in `generateGoMulti`'s `specDecls` block — both derive it from
+-- `Mono.mangleInstance (CallInstance qualName tys _)` where `tys`
+-- comes from the captured `CallInstance` substituted by the outer
+-- function's σ.
+--
+-- For this MVP we only do a SHALLOW substitution: σ_outer is empty
+-- (we're at the entry-module call site).  Cross-instance σ
+-- propagation (recursive calls inside specialised bodies) is a
+-- follow-up; for now those still use the generic name.
+instanceMangledName :: A.Region -> String -> Maybe String
+instanceMangledName region qualName = unsafePerformIO $ do
+    env <- readIORef globalCgEnv
+    reached <- readIORef globalReachableSet
+    _annotMap' <- readIORef globalAnnotMap
+    let siteKey = ( A._line (A._start region)
+                  , A._col  (A._start region) )
+        skyForm = unmangleQual qualName
+        nested = Map.lookup siteKey (Rec._cg_callSiteInstances env)
+    case nested >>= Map.lookup skyForm of
+        Just (Solve.CallInstance _ tys quantsCap) | not (null tys) ->
+            let instance_ = (skyForm, tys)
+                mangled = Mono.mangleInstance
+                    (Solve.CallInstance skyForm tys [])
+                -- Check inline whether a spec would be emitted:
+                -- needs non-empty σ_go.  Uses the same logic as
+                -- the spec emission step in generateGoMulti so the
+                -- two stay in sync regardless of evaluation order.
+                skyToGo = Map.findWithDefault [] qualName
+                    (Rec._cg_funcSkyToGoTVars env)
+                σ_sky_keys = Set.fromList (zip quantsCap (map (const ()) tys))
+                hasGoSubst = any (\(sn, _) ->
+                    Set.member (sn, ()) σ_sky_keys) skyToGo
+            in if Set.member instance_ reached && hasGoSubst
+                then return (Just mangled)
+                else return Nothing
+        _ -> return Nothing
+
+
+-- | Reverse `mangleQualName`: turn `"Sky_Core_Maybe_withDefault"`
+-- back into `"Sky.Core.Maybe.withDefault"`.  This is heuristic — it
+-- replaces every `_` with `.`, which is wrong for Sky names that
+-- naturally contain underscores (none in stdlib today, and goSafeName
+-- adds a trailing `_` for Go-keyword collisions that we strip).
+-- For v0.13's stdlib surface this works; full round-trip needs the
+-- Compile pipeline to thread Sky-form qualNames alongside Go names.
+unmangleQual :: String -> String
+unmangleQual = map (\c -> if c == '_' then '.' else c)
+
+
+coerceCallArgsAt :: A.Region -> String -> [Can.Expr] -> [GoIr.GoExpr]
+coerceCallArgsAt region qualName args =
+    let env = getCgEnv
+        paramTypes = Map.findWithDefault [] qualName (Rec._cg_funcParamTypes env)
+        siteKey = ( A._line (A._start region)
+                  , A._col  (A._start region) )
+        skyForm = unmangleQual qualName
+        instM = Map.lookup siteKey (Rec._cg_callSiteInstances env)
+                  >>= Map.lookup skyForm
+        skyToGo = Map.findWithDefault [] qualName
+                    (Rec._cg_funcSkyToGoTVars env)
+    in case (paramTypes, instM) of
+        ([], _) -> map exprToGo args
+        (_, Just (Solve.CallInstance _ concreteTys quants))
+            | length quants == length concreteTys
+            , not (null skyToGo) ->
+                -- v0.13 Phase A5+: build σ in Sky-name space first
+                -- (zip annotation Forall names with concrete types),
+                -- then project to Go-name space via the function's
+                -- skyToGo mapping.  Annotation positions whose Sky-
+                -- name doesn't appear in skyToGo were defaulted at
+                -- codegen time (e.g. error-position TVar collapsed
+                -- to `Sky_Core_Error_Error`) — skip them; their slot
+                -- in the Go sig is already concrete.
+                --
+                -- Sanitise the projected Go-type strings via
+                -- `sanitiseTypedDeep`: if a concrete type contains
+                -- a non-emittable token (`Anon_R_xxx` synthesised
+                -- record name with no Go alias counterpart, or an
+                -- ambiguous-resolution sentinel), substitute that
+                -- subtree with `any` so the rest of the call's
+                -- type-arg map still reconciles.  Mirrors the
+                -- existing `sanitiseTypedElem` filter on the kernel-
+                -- routed path.
+                let skyToConcrete = Map.fromList (zip quants concreteTys)
+                    σ = Map.fromList
+                          [ (goName, sanitiseTypedDeep (solvedTypeToGo cty))
+                          | (skyName, goName) <- skyToGo
+                          , Just cty <- [Map.lookup skyName skyToConcrete]
+                          ]
+                    substituted = map (substTVarsInGoType σ) paramTypes
+                    -- When a substituted param type is exactly "any"
+                    -- because the call-site instance normalised this
+                    -- TVar to `any` (partial-resolution — surrounding
+                    -- function is itself polymorphic in this param),
+                    -- the raw value's Go static type would conflict
+                    -- with Go's generic-inference across other arg
+                    -- positions.  Example: Result.withDefault [] r
+                    -- where σ={a→any}.  The def slot's substituted
+                    -- type is "any" — passing `[]any{}` raw gives Go
+                    -- static type `[]any`, then the second arg's
+                    -- `ResultCoerce[Error, any]` conflicts with
+                    -- `T1=[]any` inferred from def.  Force `any(e)`
+                    -- widening so Go infers T1=any consistently
+                    -- across all positions.
+                    --
+                    -- Only fires when the ORIGINAL param mentioned a
+                    -- generic placeholder that got substituted away
+                    -- (`containsTypeParam orig`).  Non-generic
+                    -- `any`-typed params (untyped boundary calls)
+                    -- pass through unchanged.
+                    -- v0.13 Phase A4: typed lambda emission at
+                    -- Sky-source HOF call sites.  When an arg is a
+                    -- literal `Can.Lambda` AND the substituted param
+                    -- type is `func(X) Y`-shaped, emit the lambda
+                    -- via `curryLambdaPatTyped` with X as the input
+                    -- type.  This makes Sky lambdas concrete-typed
+                    -- at the call boundary so Go's type checker
+                    -- accepts them at typed-param positions
+                    -- (Sky_Core_Maybe_andThen__String_Int's `fn`
+                    -- param wants `func(string) any` — a
+                    -- `func(any) any` lambda fails Go's no-function-
+                    -- covariance rule).
+                    coerceOne orig subbed e@(A.At _ inner) =
+                        case inner of
+                            Can.Lambda pats body
+                                | all isSimpleVarPattern pats
+                                , (inputTypes, finalRet) <-
+                                    splitCurriedFuncTypeStr (length pats) subbed
+                                , length inputTypes == length pats
+                                , length inputTypes > 0 ->
+                                    -- v0.13 typed lowerer: push the
+                                    -- lambda's typed inputs into the
+                                    -- local-type context so the body's
+                                    -- binops / var refs resolve to typed
+                                    -- Go-native forms (no `rt.Add` on
+                                    -- Int+Int; no `any(x).(string)`
+                                    -- on a typed local).
+                                    --
+                                    -- When the lambda's final return
+                                    -- type is a real emittable Go type,
+                                    -- lower the BODY via
+                                    -- `exprToGoExpectGo` too — a
+                                    -- case/if/let body emits
+                                    -- `func() <finalRet>` directly
+                                    -- instead of `rt.AsX(func() any
+                                    -- {…}())`.  `curryLambdaPatTypedPre`
+                                    -- then skips the redundant
+                                    -- innermost `wrapRet`.
+                                    let skyTys = map goTypeStrToSkyType inputTypes
+                                        bindings = patVarTypes pats skyTys
+                                        bodyPreTyped = isEmittableGoType finalRet
+                                        rawBody =
+                                            if bodyPreTyped
+                                                then exprToGoExpectGo finalRet body
+                                                else exprToGo body
+                                        body' = withScopedLambdaTypes bindings rawBody
+                                    in if bodyPreTyped
+                                        then curryLambdaPatTypedPre inputTypes finalRet
+                                                pats body'
+                                        else curryLambdaPatTyped inputTypes finalRet
+                                                pats body'
+                            -- v0.13 typed lowerer: control-flow args
+                            -- (case / if / let) at a typed param slot
+                            -- lower via `exprToGoExpectGo` so the IIFE
+                            -- is `func() <subbed>` directly — no
+                            -- call-site `rt.Coerce[subbed]` wrap.
+                            -- Gated on `subbed` being a real emittable
+                            -- Go type (not `any`, not an un-nameable
+                            -- anon-record); otherwise fall through to
+                            -- the `coerceArg` path which still applies
+                            -- the runtime coercion.
+                            --
+                            -- EXCLUDES Go generic type params (`T1`,
+                            -- …): those name the CALLEE's type
+                            -- variables, which are NOT in scope at
+                            -- this (the caller's) site — threading
+                            -- `func() T1` here would emit an undefined
+                            -- identifier.  `goZeroValue` reports type
+                            -- params as emittable for the function-
+                            -- BODY emit path (where they ARE in
+                            -- scope), so the explicit exclusion is
+                            -- required here.
+                            Can.Case{}
+                                | isEmittableGoType subbed
+                                , not (isGenericTypeParam subbed) ->
+                                    exprToGoExpectGo subbed e
+                            Can.If{}
+                                | isEmittableGoType subbed
+                                , not (isGenericTypeParam subbed) ->
+                                    exprToGoExpectGo subbed e
+                            Can.Let{}
+                                | isEmittableGoType subbed
+                                , not (isGenericTypeParam subbed) ->
+                                    exprToGoExpectGo subbed e
+                            _ ->
+                                if subbed == "any" && containsTypeParam orig
+                                    then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
+                                    else coerceArg (exprToGo e) subbed
+                in zipWith3Default coerceOne paramTypes substituted args
+        _ ->
+            -- v0.13 Phase A5+: when no CSI is captured at this call
+            -- site (e.g. the call lives inside a `Can.Update` field
+            -- whose constraint emission is deferred and so the
+            -- CForeign never fires, or — v0.13 Layer 3 — the call
+            -- sits inside a lambda body whose instances aren't
+            -- captured yet), every Go-generic placeholder
+            -- (`T1`, `T2`, …) in the callee's declared paramTypes
+            -- would leak into the call site as a bare identifier
+            -- and `go build` rejects with `undefined: T1`.  Erase
+            -- TVar placeholders to `any` in the fallback path so
+            -- coerceArg routes through `rt.AsListAny` /
+            -- `rt.Coerce[func(any) any]` /
+            -- `rt.ResultCoerce[..., any]` etc. instead.  The
+            -- value's static Go type widens at the boundary;
+            -- correctness is preserved (the callee accepts the
+            -- widened type via its generic instantiation).
+            --
+            -- v0.13 Layer 3 fix: erasing `T1 → any` inside a COMPOUND
+            -- param (`rt.SkyMaybe[T1]` → `rt.SkyMaybe[any]`) while
+            -- leaving a sibling BARE-`T1` param's arg un-widened is
+            -- unsound: `coerceArg e "any"` passes the bare arg RAW, so
+            -- Go infers the callee's type param from its real static
+            -- type and the compound arg's `rt.SkyMaybe[any]` then
+            -- clashes with the inferred `rt.SkyMaybe[int]`.
+            --
+            -- The PROPER fix (not a blanket `any`-widen): RECOVER the
+            -- callee's type-param substitution from any arg whose Go
+            -- type is statically derivable — exactly what Go's own
+            -- inference does.  `Result.withDefault "" r`: arg0 lowers
+            -- to a Go string literal, so `T1 = string`; the `Result e
+            -- T1` arg then coerces to `rt.SkyResult[e, string]` (typed)
+            -- and arg0 stays the bare `""` (no `any(...)` wrap).  Only
+            -- type params that NO arg can pin fall back to the `any`-
+            -- widen — and there it's applied to EVERY position
+            -- mentioning that param, so Go infers it = any uniformly.
+            let goArgs = map exprToGo args
+                -- partial σ: bare-type-param ↦ concrete Go type, for
+                -- every position whose arg has a known static type.
+                recovered = Map.fromList
+                    [ (pty, cgo)
+                    | (pty, ga) <- zip paramTypes goArgs
+                    , isGenericTypeParam pty
+                    , Just cgo <- [goExprGoType ga]
+                    , cgo /= "any"
+                    , not (isGenericTypeParam cgo)
+                    ]
+                substituted =
+                    map (eraseTypeParams . substTVarsInGoType recovered)
+                        paramTypes
+                -- v0.13 D-Lambda-Lowerer: when an arg is a literal
+                -- `Can.Lambda` at a func-typed param slot, route
+                -- through `curryLambdaPatTyped` instead of
+                -- `exprToGo + coerceArg`. The CSI-captured branch
+                -- above already does this; user-defined HOFs (which
+                -- fall through to THIS fallback because no CSI is
+                -- captured for them today) previously dropped the
+                -- lambda into `coerceArg(exprToGo lam) "func(...)"`,
+                -- producing `rt.Coerce[func(any) any](func(a any) any
+                -- {...})`. Once D1 types the param's return slot,
+                -- Go rejects the `func(any) any` shape against the
+                -- typed sig. Lifting the typed-lambda emission into
+                -- the fallback makes user-defined HOFs match too,
+                -- which unblocks D1 (typed HOF return).
+                coerceFallback orig subbed e@(A.At _ inner) =
+                    case inner of
+                        Can.Lambda pats body
+                            | all isSimpleVarPattern pats
+                            , (inputTypes, finalRet) <-
+                                splitCurriedFuncTypeStr (length pats) subbed
+                            , length inputTypes == length pats
+                            , length inputTypes > 0 ->
+                                let skyTys = map goTypeStrToSkyType inputTypes
+                                    bindings = patVarTypes pats skyTys
+                                    bodyPreTyped = isEmittableGoType finalRet
+                                    rawBody =
+                                        if bodyPreTyped
+                                            then exprToGoExpectGo finalRet body
+                                            else exprToGo body
+                                    body' = withScopedLambdaTypes bindings rawBody
+                                in if bodyPreTyped
+                                    then curryLambdaPatTypedPre inputTypes finalRet
+                                            pats body'
+                                    else curryLambdaPatTyped inputTypes finalRet
+                                            pats body'
+                        _ ->
+                            if subbed == "any" && containsTypeParam orig
+                                then GoIr.GoCall (GoIr.GoIdent "any") [exprToGo e]
+                                else coerceArg (exprToGo e) subbed
+            in zipWith3Default coerceFallback paramTypes substituted args
+
+
+-- | Three-way zip that pairs default args after lists run out.  Used
+-- by `coerceCallArgsAt` to walk (origParamTy, substitutedTy, argExpr)
+-- triples without losing trailing args when paramTypes is shorter
+-- than args (variadic / over-supplied positions fall back to
+-- exprToGo with no coercion).
+zipWith3Default
+    :: (String -> String -> Can.Expr -> GoIr.GoExpr)
+    -> [String] -> [String] -> [Can.Expr] -> [GoIr.GoExpr]
+zipWith3Default _ [] _ args = map exprToGo args
+zipWith3Default _ _ [] args = map exprToGo args
+zipWith3Default _ _ _ [] = []
+zipWith3Default f (o:os) (s:ss) (a:as) = f o s a : zipWith3Default f os ss as
+
+
+-- | Substitute generic type variables (`T1`, `T2`, …) in a
+-- pre-rendered Go type string with concrete type strings.  Used
+-- by the A5 call-site path to specialise param types before
+-- coercion.  Identifier-aware: only replaces whole-word matches
+-- so `T1` in `rt.SkyMaybe[T1]` becomes `rt.SkyMaybe[string]` but
+-- something like `TupleN` is left alone.
+substTVarsInGoType :: Map.Map String String -> String -> String
+substTVarsInGoType σ s = goSubst s
+  where
+    goSubst [] = []
+    goSubst rest@(c:cs)
+        | isIdentStart c =
+            let (word, after) = span isIdentChar rest
+            in case Map.lookup word σ of
+                Just replacement -> replacement ++ goSubst after
+                Nothing          -> word ++ goSubst after
+        | otherwise = c : goSubst cs
+
+    -- Unicode-aware: see `isGoIdentStart` for the rationale. Names
+    -- with non-ASCII letters in the Sky source emit as those same
+    -- identifiers in Go; a naive ASCII walk would split the token
+    -- and apply σ-substitution to the ASCII prefix only.
+    isIdentStart = isGoIdentStart
+    isIdentChar = isGoIdentChar
+
+-- | v0.13 Phase A4: peel up to N curried function arrows from a Go
+-- type string `func(X1) func(X2) … func(Xn) R`, returning the list
+-- of input types and the final return type R.  Stops early if the
+-- string doesn't have N arrows — e.g. `func(int) int` peeled with
+-- depth 2 returns (["int"], "int").
+--
+-- Used by typed lambda emission for multi-arg curried HOFs like
+-- foldl (`(a -> b -> b) -> ...`): the spec's fn param has shape
+-- `func(A) func(B) B` and the Sky lambda has 2 patterns; we want
+-- to emit `func(_x A) func(_y B) B { ... }`.
+splitCurriedFuncTypeStr :: Int -> String -> ([String], String)
+splitCurriedFuncTypeStr 0 s = ([], s)
+splitCurriedFuncTypeStr n s = case splitFuncTypeStr s of
+    Just (inputTy, restTy) ->
+        let (more, final) = splitCurriedFuncTypeStr (n - 1) restTy
+        in (inputTy : more, final)
+    Nothing -> ([], s)
+
+
+-- | v0.13 Phase A4: parse a Go-type string of shape `func(X) Y`
+-- returning `(X, Y)`.  Used by typed lambda emission to derive the
+-- lambda's input + output types from the call site's expected
+-- param shape.  Returns Nothing for non-function-shaped strings.
+splitFuncTypeStr :: String -> Maybe (String, String)
+splitFuncTypeStr s
+    | "func(" `List.isPrefixOf` s =
+        let afterFunc = drop 5 s
+            (inputTy, afterInput) = takeUntilTopLevelParen afterFunc
+        in case afterInput of
+            ')' : rest -> Just (inputTy, dropWhile (== ' ') rest)
+            _ -> Nothing
+    | otherwise = Nothing
+  where
+    takeUntilTopLevelParen = go 0 ""
+    go _ acc [] = (reverse acc, [])
+    go d acc (c:cs)
+        | c == '('  = go (d + 1) (c:acc) cs
+        | c == ')' && d == 0 = (reverse acc, c:cs)
+        | c == ')'  = go (d - 1) (c:acc) cs
+        | c == '['  = go (d + 1) (c:acc) cs
+        | c == ']'  = go (d - 1) (c:acc) cs
+        | otherwise = go d (c:acc) cs
+
+
 -- | T4-aware coercion. For parametric Sky types whose generic
 -- instantiation won't match via plain `.(T)` assertion
 -- (e.g. `SkyResult[any,any]` vs `SkyResult[IoError,string]`), use the
@@ -4647,6 +6617,9 @@ coerceArg e ty
     -- from the caller side since it's scoped to the callee. Let Go's
     -- type inference figure it out from the usage. Pass raw.
     | isGenericTypeParam ty = e
+    -- v0.13 typed lowerer: `e` is already provably the target type —
+    -- skip the coercion entirely (no `rt.CoerceInt(int)` etc.).
+    | goExprGoType e == Just ty = e
     | Just params <- stripParametric "rt.SkyResult" ty =
         GoIr.GoCall (GoIr.GoIdent ("rt.ResultCoerce[" ++ eraseTypeParams params ++ "]")) [e]
     | Just inner <- stripParametric "rt.SkyMaybe" ty =
@@ -4667,6 +6640,14 @@ coerceArg e ty
     -- `[]T` source via rt.AsListAny which widens.
     | ty == "[]any" =
         GoIr.GoCall (GoIr.GoIdent "rt.AsListAny") [e]
+    -- Target is map[string]any: accept either map[string]any source
+    -- or a typed map[string]T source via rt.AsMapAny which widens.
+    -- Without this the call site emits `any(x).(map[string]any)` —
+    -- a direct assertion that panics with
+    -- `interface {} is map[string]string, not map[string]interface{}`
+    -- (real panic class from examples/13-skyshop's Firebase auth flow).
+    | ty == "map[string]any" =
+        GoIr.GoCall (GoIr.GoIdent "rt.AsMapAny") [e]
     -- Typed slice `[]T`: runtime may hand us `[]any`, walk-and-cast.
     | Just elt <- stripListType ty =
         GoIr.GoCall (GoIr.GoIdent ("rt.AsListT[" ++ elt ++ "]")) [e]
@@ -4686,8 +6667,16 @@ coerceArg e ty
              else if take 5 erasedTy == "func("
                   then GoIr.GoCall
                         (GoIr.GoIdent ("rt.Coerce[" ++ erasedTy ++ "]")) [e]
-                  else GoIr.GoTypeAssert
-                        (GoIr.GoCall (GoIr.GoIdent "any") [e]) erasedTy
+                  -- v0.13.x #158: record-alias targets route through
+                  -- `rt.Coerce[T]` so a `map[string]any` source narrows
+                  -- to the typed struct via Coerce's map→struct field
+                  -- builder. ADT names + FFI opaque types still use
+                  -- direct assertion (no map-source panic class).
+                  else if isRecordAliasTy erasedTy
+                       then GoIr.GoCall
+                            (GoIr.GoIdent ("rt.Coerce[" ++ erasedTy ++ "]")) [e]
+                       else GoIr.GoTypeAssert
+                            (GoIr.GoCall (GoIr.GoIdent "any") [e]) erasedTy
 
 -- | True when a Go type string is a generic type parameter name we
 -- emitted (T1, T2, ...). These are scoped to the function they were
@@ -4695,6 +6684,30 @@ coerceArg e ty
 isGenericTypeParam :: String -> Bool
 isGenericTypeParam ('T':rest) = all (\c -> c >= '0' && c <= '9') rest && not (null rest)
 isGenericTypeParam _ = False
+
+
+-- | v0.13 Phase A5 — does a comma-separated type-param list
+-- contain any TVar placeholders?  Used by `coerceArg` to detect
+-- partially-erased generic parameters where coercion would mis-
+-- match Go's type inference.
+containsTypeParam :: String -> Bool
+containsTypeParam s =
+    any isGenericTypeParam (splitTopLevelCommas s)
+
+
+-- | Split a Go type-arg list on TOP-LEVEL commas (commas not
+-- inside brackets).  Handles nested generics like `Map[K, V]`
+-- without treating the inner comma as a separator.
+splitTopLevelCommas :: String -> [String]
+splitTopLevelCommas s = go 0 [] "" s
+  where
+    go _ acc cur [] = reverse (reverse (dropWhile (== ' ') cur) : acc)
+    go d acc cur (c:cs)
+        | c == '['  = go (d + 1) acc (c:cur) cs
+        | c == ']'  = go (d - 1) acc (c:cur) cs
+        | c == ',' && d == 0 =
+            go d (reverse (dropWhile (== ' ') cur) : acc) "" cs
+        | otherwise = go d acc (c:cur) cs
 
 -- | Replace callee-scoped type params (T1, T2, ...) with `any` in
 -- type strings so call-site coercions are valid.
@@ -4786,7 +6799,34 @@ ctorToGo _opts home typeName ctorName _annot = case ctorName of
 
 -- | Convert a binary operator application to Go
 binopToGo :: String -> Can.Expr -> Can.Expr -> GoIr.GoExpr
-binopToGo op left right = case op of
+binopToGo op left right =
+    -- v0.13 typed lowerer: consult HM-inferred operand types to decide
+    -- Go-native vs `rt.*` any-routed.  Soundness restriction: only
+    -- optimise when BOTH operands are statically typed in Go — i.e.
+    -- they're literals (Int, Float, String, Bool, Char) or simple
+    -- references to typed lambda params (registered in
+    -- `globalLambdaTypes`).  Runtime kernel calls (e.g.
+    -- `rt.Crypto_sha256`) return `any` even when HM says the result
+    -- is String, so a naive `"prefix " + rt.Crypto_sha256(data)`
+    -- would fail Go's static type check.  Falls back to runtime
+    -- helpers in all other cases (correct, just slower).
+    let solved   = Rec._cg_solvedTypes getCgEnv
+        leftTy   = inferExprType solved left
+        rightTy  = inferExprType solved right
+        bothAre  prim = leftTy == Just prim && rightTy == Just prim
+                        && operandIsStaticallyTyped left
+                        && operandIsStaticallyTyped right
+        anyOf    prims = case (leftTy, rightTy) of
+            (Just l, Just r) | l == r && any (l ==) prims
+                             , operandIsStaticallyTyped left
+                             , operandIsStaticallyTyped right
+                             -> True
+            _ -> False
+        intTy    = ConstrainExpr.intType
+        floatTy  = ConstrainExpr.floatType
+        boolTy   = ConstrainExpr.boolType
+        strTy    = ConstrainExpr.stringType
+    in case op of
     -- Pipe operators — desugar to function application
     -- a |> f becomes f(a), but if f is already a call f(x), becomes f(x, a)
     "|>" -> pipeApply left right
@@ -4796,33 +6836,68 @@ binopToGo op left right = case op of
     ">>" -> GoIr.GoCall (GoIr.GoQualified "rt" "ComposeL") [exprToGo left, exprToGo right]
     "<<" -> GoIr.GoCall (GoIr.GoQualified "rt" "ComposeR") [exprToGo left, exprToGo right]
 
-    -- String/list concat — use runtime helper until type checker provides types
-    "++" -> GoIr.GoCall (GoIr.GoQualified "rt" "Concat") [exprToGo left, exprToGo right]
+    -- String concat (++) when both operands type to String: emit
+    -- Go-native concat which is `+` on string. List concat keeps the
+    -- runtime helper (slice concat needs reflect).
+    "++"
+      | bothAre strTy ->
+          GoIr.GoBinary "+" (exprToGo left) (exprToGo right)
+      | otherwise ->
+          GoIr.GoCall (GoIr.GoQualified "rt" "Concat") [exprToGo left, exprToGo right]
 
     -- Cons operator
     "::" -> GoIr.GoCall (GoIr.GoQualified "rt" "List_cons") [exprToGo left, exprToGo right]
 
-    -- Not-equal — runtime helper (Go's native `!=` doesn't work on
-    -- `any`-typed generic params; pre-fix this caused
-    -- `expected != actual (incomparable types in type set)` for
-    -- polymorphic helpers like Sky.Test.notEqual).
+    -- Equality — Go-native when both operands type to a known primitive
+    -- (Go's `==` is well-defined for these). Avoids reflect dispatch
+    -- through rt.Eq and the polymorphic-comparable trap.
+    "==" | anyOf [intTy, floatTy, boolTy, strTy] ->
+        GoIr.GoBinary "==" (exprToGo left) (exprToGo right)
+    "/=" | anyOf [intTy, floatTy, boolTy, strTy] ->
+        GoIr.GoBinary "!=" (exprToGo left) (exprToGo right)
+    "==" -> GoIr.GoCall (GoIr.GoQualified "rt" "Eq") [exprToGo left, exprToGo right]
     "/=" -> GoIr.GoCall (GoIr.GoQualified "rt" "NotEq") [exprToGo left, exprToGo right]
 
-    -- Arithmetic operators — use runtime helpers for any-typed values
+    -- Arithmetic — Go-native when both operands are Int OR both Float.
+    -- Mixed / unknown types fall back to rt.* helpers which reflect-
+    -- dispatch.  Sky's `+`/`-`/`*`/`/` are numeric only (string concat
+    -- is `++`); Go's `+` is overloaded for string but rt.Add handles
+    -- both numeric cases.
+    "+" | bothAre intTy || bothAre floatTy ->
+        GoIr.GoBinary "+" (exprToGo left) (exprToGo right)
+    "-" | bothAre intTy || bothAre floatTy ->
+        GoIr.GoBinary "-" (exprToGo left) (exprToGo right)
+    "*" | bothAre intTy || bothAre floatTy ->
+        GoIr.GoBinary "*" (exprToGo left) (exprToGo right)
+    "/" | bothAre floatTy ->
+        GoIr.GoBinary "/" (exprToGo left) (exprToGo right)
+    "//" | bothAre intTy ->
+        GoIr.GoBinary "/" (exprToGo left) (exprToGo right)
     "+"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Add") [exprToGo left, exprToGo right]
     "-"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Sub") [exprToGo left, exprToGo right]
     "*"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Mul") [exprToGo left, exprToGo right]
     "/"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Div") [exprToGo left, exprToGo right]
     "//" -> GoIr.GoCall (GoIr.GoQualified "rt" "IntDiv") [exprToGo left, exprToGo right]
 
-    -- Comparison operators
-    "==" -> GoIr.GoCall (GoIr.GoQualified "rt" "Eq") [exprToGo left, exprToGo right]
+    -- Comparison operators — Go-native for known orderable primitives.
+    ">"  | anyOf [intTy, floatTy, strTy] ->
+        GoIr.GoBinary ">" (exprToGo left) (exprToGo right)
+    "<"  | anyOf [intTy, floatTy, strTy] ->
+        GoIr.GoBinary "<" (exprToGo left) (exprToGo right)
+    ">=" | anyOf [intTy, floatTy, strTy] ->
+        GoIr.GoBinary ">=" (exprToGo left) (exprToGo right)
+    "<=" | anyOf [intTy, floatTy, strTy] ->
+        GoIr.GoBinary "<=" (exprToGo left) (exprToGo right)
     ">"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Gt") [exprToGo left, exprToGo right]
     "<"  -> GoIr.GoCall (GoIr.GoQualified "rt" "Lt") [exprToGo left, exprToGo right]
     ">=" -> GoIr.GoCall (GoIr.GoQualified "rt" "Gte") [exprToGo left, exprToGo right]
     "<=" -> GoIr.GoCall (GoIr.GoQualified "rt" "Lte") [exprToGo left, exprToGo right]
 
-    -- Logic
+    -- Logic — Go-native when both Bool (the only valid operand type).
+    "&&" | bothAre boolTy ->
+        GoIr.GoBinary "&&" (exprToGo left) (exprToGo right)
+    "||" | bothAre boolTy ->
+        GoIr.GoBinary "||" (exprToGo left) (exprToGo right)
     "&&" -> GoIr.GoCall (GoIr.GoQualified "rt" "And") [exprToGo left, exprToGo right]
     "||" -> GoIr.GoCall (GoIr.GoQualified "rt" "Or") [exprToGo left, exprToGo right]
 
@@ -4852,14 +6927,31 @@ pipeApply valueExpr funcExpr =
 -- ═══════════════════════════════════════════════════════════
 
 -- | Convert if-then-else to Go (IIFE with if-else chain)
-ifToGo :: [(Can.Expr, Can.Expr)] -> Can.Expr -> GoIr.GoExpr
-ifToGo branches elseExpr =
+-- | v0.13 typed lowerer: `ifToGo` takes the surrounding context's
+-- expected type.  When `Just t`, the emitted IIFE is wrapped via
+-- `typeIIFE` so it returns the concrete Go type instead of `any` —
+-- and `typeIIFE`'s `coerceReturnExprT` recurses into nested IIFE
+-- return values, so a `case`/`if`/`let` in a branch position gets
+-- typed too.  `Nothing` keeps the legacy `func() any` shape (used
+-- when `ifToGo` is reached from generic `exprToGo` with no
+-- expected-type context).
+ifToGo :: Maybe String -> [(Can.Expr, Can.Expr)] -> Can.Expr -> GoIr.GoExpr
+ifToGo mExpectedGo branches elseExpr =
     let
-        buildIf [] = [GoIr.GoReturn (exprToGo elseExpr)]
+        -- When the expected Go type is known, lower each branch body
+        -- (and the else) via `exprToGoExpectGo` so a nested
+        -- case/if/let in a branch gets the type threaded DIRECTLY —
+        -- not just through `typeIIFE`'s return-position recursion.
+        lowerBody = case mExpectedGo of
+            Just gt -> exprToGoExpectGo gt
+            Nothing -> exprToGo
+        buildIf [] = [GoIr.GoReturn (lowerBody elseExpr)]
         buildIf ((cond, body):rest) =
-            [GoIr.GoIf (toBoolExpr (exprToGo cond)) [GoIr.GoReturn (exprToGo body)] (buildIf rest)]
-    in
-    GoIr.GoBlock (buildIf branches) (GoIr.GoRaw "nil")
+            [GoIr.GoIf (toBoolExpr (exprToGo cond)) [GoIr.GoReturn (lowerBody body)] (buildIf rest)]
+        raw = GoIr.GoBlock (buildIf branches) (GoIr.GoRaw "nil")
+    in case mExpectedGo of
+        Just gt -> typeIIFE gt raw
+        Nothing -> raw
 
 
 -- | Ensure an expression is a Go bool (cast from any if needed)
@@ -4876,13 +6968,126 @@ toBoolExpr expr = case expr of
 -- LET-IN
 -- ═══════════════════════════════════════════════════════════
 
--- | Convert let-in to Go (IIFE with local declarations)
-letToGo :: Can.Def -> Can.Expr -> GoIr.GoExpr
-letToGo def body =
-    GoIr.GoBlock (defToStmts def) (exprToGo body)
+-- | Convert let-in to Go (IIFE with local declarations).  Takes the
+-- surrounding context's expected type — see `ifToGo`.
+letToGo :: Maybe String -> Can.Def -> Can.Expr -> GoIr.GoExpr
+letToGo mExpectedGo def body =
+    -- v0.13 typed lowerer: when the def binds a primitive-typed
+    -- local from a statically-typed value, register it under the
+    -- body's scope so binops on this local can emit Go-native.
+    -- Uses `withScopedLambdaTypes` for proper push/pop — sibling
+    -- let-bindings in the same function can't collide because they
+    -- have different names; cross-function leakage is prevented by
+    -- the scoping wrapper.
+    let solved = Rec._cg_solvedTypes getCgEnv
+        -- v0.13 typed lowerer: register a primitive-typed let-binding
+        -- under the body's scope so Go-native binops fire on it.
+        -- Restricted to primitives — broadening to record/ADT types
+        -- is unsound here: `operandIsStaticallyTyped valExpr` can be
+        -- True for a typed-local ref whose own type is a generic
+        -- instantiation (`T1`) rather than a concrete struct, and the
+        -- emitted Go local then isn't the record struct the typed
+        -- field-access path assumes.  Primitives don't have that
+        -- failure mode (int/string/bool/float/rune have no generic
+        -- form).
+        bindingExtras = case def of
+            Can.Def (A.At _ name) [] valExpr
+                | name /= "_"
+                , Just t <- inferExprType solved valExpr
+                , operandIsStaticallyTyped valExpr
+                , isTypedPrimitive t ->
+                    Map.singleton name t
+            Can.TypedDef (A.At _ name) _ [] valExpr _
+                | Just t <- inferExprType solved valExpr
+                , operandIsStaticallyTyped valExpr
+                , isTypedPrimitive t ->
+                    Map.singleton name t
+            _ -> Map.empty
+        -- When the expected Go type is known, lower the let-body via
+        -- `exprToGoExpectGo` so a nested case/if/let in the body gets
+        -- the type threaded directly.
+        lowerBody = case mExpectedGo of
+            Just gt -> exprToGoExpectGo gt
+            Nothing -> exprToGo
+        -- v0.13 typed lowerer: type the let-binding's RHS too.  When
+        -- the bound value has a known HM type, lower its RHS via
+        -- `exprToGoExpect` — `exprToGoExpect`'s own emittability
+        -- gate keeps it sound (un-nameable types fall back to plain
+        -- `exprToGo`).  This types `let x = <case-expr> in …` so the
+        -- RHS IIFE is `func() T` not `func() any`.
+        solvedTypes = solved
+        defStmts = case def of
+            Can.Def (A.At _ dn) [] valExpr
+                | dn /= "_"
+                , Just dt <- inferExprType solvedTypes valExpr ->
+                    [ GoIr.GoShortDecl dn (exprToGoExpect dt valExpr)
+                    , GoIr.GoAssign "_" (GoIr.GoIdent dn)
+                    ]
+            Can.TypedDef (A.At _ dn) _ [] valExpr _
+                | Just dt <- inferExprType solvedTypes valExpr ->
+                    [ GoIr.GoShortDecl dn (exprToGoExpect dt valExpr)
+                    , GoIr.GoAssign "_" (GoIr.GoIdent dn)
+                    ]
+            _ -> defToStmts def
+        bodyGo = if Map.null bindingExtras
+            then lowerBody body
+            else withScopedLambdaTypes bindingExtras (lowerBody body)
+        raw = GoIr.GoBlock defStmts bodyGo
+    in case mExpectedGo of
+        Just gt -> typeIIFE gt raw
+        Nothing -> raw
+
+
+-- | v0.13 typed lowerer: is this Sky type one of the primitives we
+-- have Go-native binop support for?  Used as a gate for registering
+-- typed lambda / let locals so binop emission stays sound (only
+-- primitives where Go's static type matches Sky's HM type and a
+-- direct Go-native operation produces the expected semantics).
+isTypedPrimitive :: T.Type -> Bool
+isTypedPrimitive t =
+    t == ConstrainExpr.intType    ||
+    t == ConstrainExpr.floatType  ||
+    t == ConstrainExpr.stringType ||
+    t == ConstrainExpr.boolType   ||
+    t == ConstrainExpr.charType
+
+
+-- | Total split-on-char (returns [s] when char doesn't occur).
+splitOn :: Char -> String -> [String]
+splitOn c = foldr f [[]]
+  where
+    f x acc@(cur:rest)
+      | x == c    = [] : acc
+      | otherwise = (x:cur) : rest
+    f _ [] = [[]]
 
 
 -- | Convert a definition to Go statements
+-- | v0.13 typed lowerer: lower a `let _ = X` discard body.  When X
+-- is a control-flow expression (`case` / `if` / `let`) and its
+-- HM-inferred type renders to a real emittable Go type, lower it
+-- via `exprToGoExpectGo` so the discard IIFE is `func() <T>` rather
+-- than `func() any`.  Falls back to plain `exprToGo` for non-control-
+-- flow values (a bare call isn't an IIFE anyway) and for un-nameable
+-- types.  The caller still wraps the result in `rt.AnyTaskRun`, so
+-- the auto-force semantics are untouched — only the IIFE's own
+-- return type is tightened.
+loweredDiscard :: Can.Expr -> GoIr.GoExpr
+loweredDiscard body@(A.At _ inner) = case inner of
+    Can.Case{} -> typed
+    Can.If{}   -> typed
+    Can.Let{}  -> typed
+    _          -> exprToGo body
+  where
+    typed = case inferExprType (Rec._cg_solvedTypes getCgEnv) body of
+        Just t ->
+            let gt = solvedTypeToGo t
+            in if isEmittableGoType gt
+                 then exprToGoExpectGo gt body
+                 else exprToGo body
+        Nothing -> exprToGo body
+
+
 defToStmts :: Can.Def -> [GoIr.GoStmt]
 defToStmts def = case def of
     Can.DestructDef pat valExpr ->
@@ -4911,7 +7116,18 @@ defToStmts def = case def of
             -- every discard site is safe even when the body is a
             -- pure expression. Negligible runtime cost (one
             -- type-assertion).
-            [GoIr.GoAssign "_" (GoIr.GoCall (GoIr.GoQualified "rt" "AnyTaskRun") [exprToGo body])]
+            --
+            -- v0.13 typed lowerer: when the discarded value is a
+            -- control-flow expression (`case` / `if` / `let`), lower
+            -- it via `exprToGoExpectGo` so the IIFE is `func() <T>`
+            -- instead of `func() any`.  The discard's HM type comes
+            -- from `inferExprType`; the result is still handed to
+            -- `rt.AnyTaskRun` (whose param is `any`) so the auto-force
+            -- semantics are unchanged — only the IIFE's own return
+            -- type is tightened.
+            [GoIr.GoAssign "_"
+                (GoIr.GoCall (GoIr.GoQualified "rt" "AnyTaskRun")
+                    [loweredDiscard body])]
         else [ GoIr.GoShortDecl name (exprToGo body)
              , GoIr.GoAssign "_" (GoIr.GoIdent name)  -- suppress unused errors
              ]
@@ -4940,9 +7156,13 @@ defToStmts def = case def of
 -- CASE-OF
 -- ═══════════════════════════════════════════════════════════
 
--- | Convert case-of to Go (IIFE with switch or if-chain)
-caseToGo :: Can.Expr -> [Can.CaseBranch] -> GoIr.GoExpr
-caseToGo subject branches =
+-- | Convert case-of to Go (IIFE with switch or if-chain).  Takes the
+-- surrounding context's expected type — see `ifToGo`.  When `Just t`,
+-- the IIFE is wrapped via `typeIIFE` so it returns the concrete Go
+-- type and every branch `return` is coerced; nested IIFE return
+-- values recurse.
+caseToGo :: Maybe String -> Can.Expr -> [Can.CaseBranch] -> GoIr.GoExpr
+caseToGo mExpectedGo subject branches =
     let
         goSubject = exprToGo subject
         subjectType = detectSubjectType branches
@@ -5010,6 +7230,16 @@ caseToGo subject branches =
                 | Just (_, _, retTy) <- Map.lookup qualName inferredSigMap
                 , isConcreteResultOrMaybe retTy
                 -> True
+            -- v0.13 typed lowerer: a bare `GoIdent name` referring to a
+            -- typed local (registered in `globalLambdaTypes` with a
+            -- concrete Maybe/Result type) is also statically typed —
+            -- skip the ResultCoerce/MaybeCoerce reflect dance and let
+            -- bindCtorArg emit direct `.OkValue` / `.JustValue` access.
+            GoIr.GoIdent name
+                | Just t <- lookupLambdaType name
+                , let goTy = solvedTypeToGo t
+                , isConcreteResultOrMaybe goTy
+                -> True
             _ -> False
 
         funcRetTypeMap = Rec._cg_funcRetType getCgEnv
@@ -5024,6 +7254,13 @@ caseToGo subject branches =
         -- P7: typed-FFI-source subjects use a distinct name so
         -- bindCtorArg knows to skip the `any().(SkyResult[any,any])`
         -- assertion step. Saves one boxing per typed case match.
+        --
+        -- v0.13 typed lowerer: custom-ADT subjects (non-Result/Maybe)
+        -- ALWAYS go through `coerceSubject`'s `GoTypeAssert (any e)
+        -- typeName` path, so `__subject` is statically the ADT struct
+        -- type (`rt.SkyADT` alias).  Mark them `__subject_tAdt` so
+        -- `bindCtorArg` reads `.Fields[idx]` directly instead of
+        -- routing through `rt.AdtField(any(subject), idx)` (reflect).
         subjectName =
             case subjectType of
                 Just typeName
@@ -5031,6 +7268,9 @@ caseToGo subject branches =
                     -> "__subject_tFfi"
                     | isJust (stripParametric "rt.SkyMaybe" typeName) && isTypedFfiCall goSubject
                     -> "__subject_tFfi"
+                    | isNothing (stripParametric "rt.SkyResult" typeName)
+                    , isNothing (stripParametric "rt.SkyMaybe" typeName)
+                    -> "__subject_tAdt"
                 _ -> "__subject"
         subjectDecl = case subjectType of
             Just typeName ->
@@ -5048,10 +7288,12 @@ caseToGo subject branches =
         -- case block in logs.
         unreachableStmt = GoIr.GoExprStmt
             (GoIr.GoRaw ("_ = rt.Unreachable(\"case/" ++ subjectName ++ "\")"))
-    in
-    GoIr.GoBlock
-        (subjectDecl : branchStmts ++ [unreachableStmt])
-        (GoIr.GoRaw "nil")  -- unreachable, branches return
+        raw = GoIr.GoBlock
+                (subjectDecl : branchStmts ++ [unreachableStmt])
+                (GoIr.GoRaw "nil")  -- unreachable, branches return
+    in case mExpectedGo of
+        Just gt -> typeIIFE gt raw
+        Nothing -> raw
 
 
 -- | Detect the Go type of the case subject from the patterns
@@ -5519,17 +7761,23 @@ patternBindings subject pat = case pat of
         let arity = 2 + length more
             allPats = aPat : bPat : more
             (tupleKind, accessor) = case arity of
-                2 -> ("SkyTuple2", \i -> GoIr.GoSelector (asTup "SkyTuple2") ("V" ++ show i))
-                3 -> ("SkyTuple3", \i -> GoIr.GoSelector (asTup "SkyTuple3") ("V" ++ show i))
+                2 -> ("SkyTuple2", \i -> GoIr.GoSelector (asTup "AsTuple2") ("V" ++ show i))
+                3 -> ("SkyTuple3", \i -> GoIr.GoSelector (asTup "AsTuple3") ("V" ++ show i))
                 _ -> ("SkyTupleN", \i -> GoIr.GoIndex
-                        (GoIr.GoSelector (asTup "SkyTupleN") "Vs")
+                        (GoIr.GoSelector (asTupAssert "SkyTupleN") "Vs")
                         (GoIr.GoIntLit i))
-            -- Wrap subject in `any(...)` before the type assertion so
-            -- it works regardless of whether subject is already
-            -- SkyTuple2 (typed return, concrete struct) or `any`
-            -- (legacy any-path). Go rejects `.(T)` on a non-interface,
-            -- but `any(x).(T)` always compiles.
-            asTup k = GoIr.GoTypeAssert
+            -- Route arity-2/3 destructure through `rt.AsTuple2` /
+            -- `rt.AsTuple3` helpers (reflect-backed re-box) instead
+            -- of a direct `.(rt.SkyTuple2)` assertion.  Sky lambdas
+            -- in typed-codegen contexts receive `T2[X, Y]` (typed
+            -- generic instantiation), which is NOT the same nominal
+            -- type as `SkyTuple2 = T2[any, any]` — the assertion
+            -- panics with `is rt.T2[string, R], not rt.T2[any, any]`.
+            -- The runtime helper handles both shapes uniformly.
+            asTup helper = GoIr.GoCall
+                (GoIr.GoIdent ("rt." ++ helper))
+                [GoIr.GoIdent subject]
+            asTupAssert k = GoIr.GoTypeAssert
                 (GoIr.GoCall (GoIr.GoIdent "any") [GoIr.GoIdent subject])
                 ("rt." ++ k)
             _ = tupleKind  -- silences warning; kept for grep-ability
@@ -5592,6 +7840,16 @@ bindCtorArg subject ctorName (Can.PatternCtorArg idx _ty pat) =
         isTypedFfiSubject =
             take 5 (reverse subject) == "ifFt_"
             && not ("__sky_cf_" `List.isPrefixOf` subject)
+        -- v0.13 typed lowerer: `__subject_tAdt` is the outer case
+        -- subject for a custom (non-Result/Maybe) ADT — it was
+        -- type-asserted to the ADT struct (`rt.SkyADT` alias) in
+        -- `coerceSubject`, so `.Fields[idx]` reads directly without
+        -- the `rt.AdtField(any(subject), idx)` reflect helper.
+        -- Nested destructure temps (`__sky_cf_*`) are any-typed —
+        -- reject them so they fall through to the reflect path.
+        isTypedAdtSubject =
+            take 5 (reverse subject) == "tdAt_"
+            && not ("__sky_cf_" `List.isPrefixOf` subject)
         anyWrap n = GoIr.GoCall (GoIr.GoIdent "any") [GoIr.GoIdent n]
         -- Runtime helper unwraps any SkyResult/SkyMaybe instantiation
         -- without a type-assertion panic — used when the subject is
@@ -5612,6 +7870,12 @@ bindCtorArg subject ctorName (Can.PatternCtorArg idx _ty pat) =
             "Ok"   -> helperFor "ResultOk"
             "Err"  -> helperFor "ResultErr"
             "Just" -> helperFor "MaybeJust"
+            _ | isTypedAdtSubject ->
+                -- Custom ADT, statically-typed subject: direct
+                -- `.Fields[idx]` — no reflect.
+                GoIr.GoIndex
+                    (GoIr.GoSelector (GoIr.GoIdent subject) "Fields")
+                    (GoIr.GoIntLit idx)
             _      ->
                 -- Custom ADT: use rt.AdtField runtime helper so an
                 -- any-typed subject (e.g. bound from
@@ -5810,6 +8074,20 @@ exprToGoTyped types retType (A.At _ expr) = case expr of
                             Just (T.TLambda _ _) ->
                                 GoIr.GoCall (GoIr.GoRaw (name ++ ".(func(any) any)")) goArgs
                             _ -> GoIr.GoCall goFunc goArgs
+                    -- v0.13 D-Lambda-Lowerer: delegate top-level-call
+                    -- lowering to the untyped `exprToGo` path, which
+                    -- routes through `coerceCallArgsAt` and applies
+                    -- typed-lambda emission for func-typed param slots.
+                    -- Pre-fix, `exprToGoTyped`'s `Can.Call` lowered each
+                    -- arg via `exprToGoTyped types retType` — including
+                    -- `Can.Lambda` args, which fell through to the
+                    -- untyped `curryLambdaPat` at line ~7840, emitting
+                    -- `func(any) any`. After D1 types the HOF param's
+                    -- return slot (`func(T) rt.SkyResult[E, V]`), Go
+                    -- rejects the un-typed lambda. Delegating routes
+                    -- the call through the typed-aware path.
+                    A.At _ (Can.VarTopLevel _ _) ->
+                        exprToGo (A.At A.one (Can.Call func args))
                     _ -> GoIr.GoCall goFunc goArgs
             -- If the called function has a known return type and we need a primitive,
             -- assert the result. This handles: n * factorial(n-1) where factorial returns any.
@@ -5928,20 +8206,38 @@ normaliseTypeForMerge = go
 -- the alias body (a TRecord) on match. Used as a fallback when a stored
 -- record type has unresolved TVars in its field types — the alias body
 -- carries the user's declared concrete types.
+-- v0.13 A1: superset match for open records (parallels
+-- `lookupRecordAlias` in Record.hs). Used by typed-codegen field
+-- inference (`Can.Access` arm) to resolve an open-row record
+-- against a concrete declared alias. Exact match takes priority;
+-- on miss, try strict supersets and pick the smallest one.
+-- Ambiguous (multiple at the same size) → Nothing.
 matchAliasByFieldSet :: Rec.CodegenEnv -> Set.Set String -> Maybe T.Type
 matchAliasByFieldSet env target =
     let aliases = Rec._cg_aliases env
-        candidates =
-            [ body
+        recordAliases =
+            [ (Set.fromList (Map.keys fields), body)
             | (_aname, Can.Alias _ body) <- Map.toList aliases
-            , case body of
-                T.TRecord fields _
-                    | Set.fromList (Map.keys fields) == target -> True
-                _ -> False
+            , T.TRecord fields _ <- [body]
             ]
-    in case candidates of
+        exact = [ body | (fs, body) <- recordAliases, fs == target ]
+    in case exact of
         (b:_) -> Just b
-        _ -> Nothing
+        []
+          | Set.null target -> Nothing
+          | otherwise       ->
+              let supersets =
+                      [ (Set.size fs, body)
+                      | (fs, body) <- recordAliases
+                      , target `Set.isSubsetOf` fs
+                      , target /= fs
+                      ]
+              in case List.sortOn fst supersets of
+                  []                          -> Nothing
+                  [(_, b)]                    -> Just b
+                  ((s1, b1) : (s2, _) : _)
+                      | s1 < s2   -> Just b1
+                      | otherwise -> Nothing
 
 
 -- | Recursively substitute internal TVars in a type by looking them up
@@ -5980,7 +8276,9 @@ inferExprType types (A.At _ e) = case e of
     Can.Str _    -> Just ConstrainExpr.stringType
     Can.Chr _    -> Just ConstrainExpr.charType
     Can.Unit     -> Just T.TUnit
-    Can.VarLocal name    -> Map.lookup name types
+    Can.VarLocal name    -> case Map.lookup name types of
+        Just t  -> Just t
+        Nothing -> lookupLambdaType name
     Can.VarTopLevel _ n  -> Map.lookup n types
     -- VarKernel: instantiate the kernel's HM annotation. Strips the
     -- Forall wrapper (kernel sigs are universally quantified) so the
@@ -6126,8 +8424,55 @@ inferExprType types (A.At _ e) = case e of
     Can.Lambda _ _ -> Nothing
     -- Negate inherits its operand's type.
     Can.Negate inner -> inferExprType types inner
-    -- Binop / Let / Update / others — out of v0.12.x scope; safe
-    -- fallback returns Nothing (caller falls back to any-routing).
+    -- Binop: most operators have a statically-known result type.
+    -- v0.13 typed lowerer: this lets `let diff = to - from` infer
+    -- `diff : Int` so a later `let absDiff = if diff < 0 …` types
+    -- its IIFE as `func() int` instead of `func() any`.
+    Can.Binop op _ _ _ left right -> case op of
+        -- Comparison / logical operators → Bool.
+        _ | op `elem` ["==", "/=", "<", ">", "<=", ">=", "&&", "||"] ->
+            Just ConstrainExpr.boolType
+        -- Integer-only / float-only operators.
+        "//" -> Just ConstrainExpr.intType
+        "/"  -> Just ConstrainExpr.floatType
+        -- Arithmetic (`+ - * ^`): the result type matches the
+        -- operands.  HM has already unified them, so either operand
+        -- is representative — try the left, then the right.
+        _ | op `elem` ["+", "-", "*", "^"] ->
+            case inferExprType types left of
+                Just t  -> Just t
+                Nothing -> inferExprType types right
+        -- `++`: string concat or list concat — the result type
+        -- matches the left operand.
+        "++" -> inferExprType types left
+        -- `::` cons: result is the right operand's list type, or a
+        -- list of the left operand's type.
+        "::" -> case inferExprType types right of
+            Just lt@(T.TType _ "List" _) -> Just lt
+            _ -> case inferExprType types left of
+                Just elemTy -> Just (mkListType elemTy)
+                Nothing     -> Nothing
+        -- Pipe / composition (`|>` `<|` `>>` `<<`) need application
+        -- inference — out of scope, fall back to Nothing.
+        _ -> Nothing
+    -- Let: the let-expression's type IS the body's type.  Thread
+    -- the binding's inferred type into `types` first so the body
+    -- can resolve references to it — e.g. `let s = … in let r = …
+    -- in if s == "finished" then r else x` needs `r` registered
+    -- for the `if`'s first-arm inference to succeed.
+    Can.Let def body ->
+        let types' = case def of
+                Can.Def (A.At _ n) [] valExpr
+                    | n /= "_"
+                    , Just t <- inferExprType types valExpr ->
+                        Map.insert n t types
+                Can.TypedDef (A.At _ n) _ [] valExpr _
+                    | Just t <- inferExprType types valExpr ->
+                        Map.insert n t types
+                _ -> types
+        in inferExprType types' body
+    -- Update / others — out of v0.13 scope; safe fallback returns
+    -- Nothing (caller falls back to any-routing).
     _ -> Nothing
   where
     mkListType elemTy = T.TType ModuleName.list "List" [elemTy]
@@ -6173,6 +8518,96 @@ inferListElemGoType types e
         _ -> "any"
 
 
+-- | Sister of `inferListElemGoType` that returns the Sky `T.Type` of
+-- the list element instead of the rendered Go type string.  Used by
+-- typed-lambda emission to populate `withLambdaTypes` so the lambda
+-- body's operations (binops, var lookups) resolve to typed Go-native
+-- forms rather than falling back to `rt.*` reflect helpers.
+inferListElemSkyType :: Solve.SolvedTypes -> Can.Expr -> Maybe T.Type
+inferListElemSkyType types e
+    | literalListElementsPolymorphic types e = Nothing
+    | otherwise = case inferExprType types e of
+        Just (T.TType _ "List" [elemTy]) -> Just elemTy
+        Just (T.TAlias _ _ _ aliasInner) ->
+            let inner = case aliasInner of
+                    T.Filled  i -> i
+                    T.Hoisted i -> i
+            in case inner of
+                T.TType _ "List" [elemTy] -> Just elemTy
+                _ -> Nothing
+        _ -> Nothing
+
+
+-- | Build a `Map String T.Type` from a list of simple-var Sky
+-- patterns paired with their HM-inferred types.  Skips non-PVar
+-- patterns (the caller has already gated typed routing on
+-- `isSimpleVarPattern`).  Used to wrap typed-lambda body emission
+-- with `withLambdaTypes` so locals resolve correctly.
+patVarTypes :: [Can.Pattern] -> [T.Type] -> Map.Map String T.Type
+patVarTypes pats tys =
+    Map.fromList
+        [ (n, t)
+        | (A.At _ (Can.PVar n), t) <- zip pats tys
+        , not (isWildcardSkyType t)
+        ]
+  where
+    isWildcardSkyType (T.TVar "_unknown") = True
+    isWildcardSkyType _                   = False
+
+
+-- | Best-effort conversion from a Go type string (e.g. "int",
+-- "string", "rt.SkyMaybe[string]") back to a Sky `T.Type`.  Used at
+-- typed-lambda emission boundaries where the lambda's input types
+-- are known as Go strings (from `splitCurriedFuncTypeStr`) but we
+-- need the Sky T.Type to register in `withLambdaTypes`.  Returns
+-- `T.TVar "_unknown"` for shapes we can't safely reverse-map — those
+-- are then filtered out by `patVarTypes` so binop emission falls
+-- through to the any-routed runtime helpers.
+goTypeStrToSkyType :: String -> T.Type
+goTypeStrToSkyType s = case s of
+    "int"        -> ConstrainExpr.intType
+    "float64"    -> ConstrainExpr.floatType
+    "string"     -> ConstrainExpr.stringType
+    "bool"       -> ConstrainExpr.boolType
+    "rune"       -> ConstrainExpr.charType
+    _            -> T.TVar "_unknown"
+
+
+-- | v0.13 typed lowerer guard: is this expression guaranteed to lower
+-- to a Go value whose STATIC type matches its HM-inferred Sky type?
+-- True for primitive literals (Int, Float, String, Bool, Char, Unit)
+-- and for `Can.VarLocal` references whose name is registered in
+-- `globalLambdaTypes` (typed lambda params).  False for everything
+-- else — call results, field access, etc. — because runtime kernels
+-- (e.g. `rt.Crypto_sha256`) return Go `any` even when HM says the
+-- result is String, and forcing a Go-native binop on those would
+-- produce `mismatched types string and any`.
+operandIsStaticallyTyped :: Can.Expr -> Bool
+operandIsStaticallyTyped (A.At _ e) = case e of
+    Can.Int _    -> True
+    Can.Float _  -> True
+    Can.Str _    -> True
+    Can.Chr _    -> True
+    Can.Unit     -> True
+    Can.VarLocal name ->
+        -- Gate on Go static type: registered HM type must map to a
+        -- concrete Go type (not "any", not bare `T_N`).
+        case lookupLambdaType name of
+            Just t  ->
+                let goTy = solvedTypeToGo t
+                in goTy /= "any" && not (isGenericTypeParam goTy)
+            Nothing -> False
+    Can.Negate inner -> operandIsStaticallyTyped inner
+    -- Record field access on a statically-typed target: the field
+    -- access emits `target.Field` (typed) AND the field's HM type
+    -- is the field's declared type in the record alias.  Both
+    -- conditions are gated by the same `operandIsStaticallyTyped`
+    -- check recursively + the `isRecordAlias` check in the Can.
+    -- Access emit branch.
+    Can.Access target _ -> operandIsStaticallyTyped target
+    _            -> False
+
+
 -- | Like literalListHasPolymorphicReturn but checks raw element
 -- expressions (not nested tuples). Used by inferListElemGoType for
 -- typed-routing of List.map / List.filter / etc.
@@ -6201,6 +8636,34 @@ sanitiseTypedElem :: String -> String
 sanitiseTypedElem go
     | "Anon_R_" `List.isPrefixOf` go = "any"
     | otherwise = go
+
+
+-- | v0.13 Phase A5+: recursive variant of `sanitiseTypedElem` that
+-- walks a complete Go-type string and replaces every embedded
+-- `Anon_R_<hash>` identifier token (anonymous record with no Go
+-- type-alias counterpart) with `any`.  Used by the call-site
+-- substitution path so a Result/Maybe wrapper around an anonymous
+-- record (`Result Error { name : String, … }`) collapses to a
+-- usable `rt.SkyResult[Error, any]` instead of emitting
+-- `rt.SkyResult[Error, Anon_R_…]` which Go can't resolve.
+--
+-- Identifier-aware: only replaces tokens that BEGIN with `Anon_R_`
+-- and whose preceding char is a non-identifier boundary, so
+-- `Anon_R_xxx_in_a_bigger_name` isn't false-matched.  The walker
+-- preserves brackets, commas, and other type-string punctuation
+-- verbatim so structural shapes (`[]X`, `map[string]X`,
+-- `rt.SkyResult[E, A]`) survive intact.
+-- | v0.13 E removed the `Anon_R_*` → `any` rewrite that this
+-- function used to apply: `synthAnonRecordName` now registers
+-- every produced shape into `globalAnonRecords`, and
+-- `generateAnonRecordDecls` (wired into `generateGoMulti` after
+-- the user decls evaluate) emits one `type Anon_R_<hash> =
+-- struct {…}` for each. The token is now a valid Go type
+-- identifier, so the pre-E defensive cover-up is no longer
+-- needed. Kept as a no-op pass-through so call sites don't
+-- have to be touched.
+sanitiseTypedDeep :: String -> String
+sanitiseTypedDeep s = s
 
 
 -- | Strip a Go type string of the form `rt.SkyMaybe[INNER]` returning
@@ -6505,13 +8968,22 @@ kernelTypedCall types modName funcName args goArgs =
         -- slice, any-typed function).
         ("List", "map", [_, _], [goFn, goList]) ->
             let elemGo = elemTypeFromFnOrList (args !! 0) (args !! 1)
+                elemSkyTy = inferListElemSkyType types (args !! 1)
             in if elemGo == "any" then Nothing
                else case args !! 0 of
                     -- Lambda with simple var pattern: typed-T route is
                     -- safe — patternBindings doesn't need to destructure.
                     A.At _ (Can.Lambda pats body)
                       | all isSimpleVarPattern pats ->
-                        let typedFn = curryLambdaPatTyped [elemGo] "any" pats (exprToGo body)
+                        -- v0.13 typed lowerer: push the lambda's param
+                        -- HM-types into scope so the body's binops /
+                        -- var refs resolve to typed Go-native forms
+                        -- (e.g. `x + 1` instead of `rt.Add(x, 1)`).
+                        let lambdaTypes = case elemSkyTy of
+                                Just t  -> patVarTypes pats [t]
+                                Nothing -> Map.empty
+                            body' = withLambdaTypes lambdaTypes (exprToGo body)
+                            typedFn = curryLambdaPatTyped [elemGo] "any" pats body'
                         in Just (GoIr.GoCall
                             (GoIr.GoIdent ("rt.List_mapT[" ++ elemGo ++ ", any]"))
                             [typedFn, wrapAsList elemGo goList])
@@ -6535,12 +9007,18 @@ kernelTypedCall types modName funcName args goArgs =
         -- List.filter fn xs : (a -> Bool) -> List a -> List a
         ("List", "filter", [_, _], [goFn, goList]) ->
             let elemGo = elemTypeFromFnOrList (args !! 0) (args !! 1)
+                elemSkyTy = inferListElemSkyType types (args !! 1)
             in if elemGo == "any" then Nothing
                else case args !! 0 of
                     A.At _ (Can.Lambda pats body)
                       | all isSimpleVarPattern pats ->
                         -- List_filterT[A](fn func(A) bool, xs []A) []A
-                        let typedFn = curryLambdaPatTyped [elemGo] "bool" pats (exprToGo body)
+                        -- v0.13 typed lowerer: push elem type into scope.
+                        let lambdaTypes = case elemSkyTy of
+                                Just t  -> patVarTypes pats [t]
+                                Nothing -> Map.empty
+                            body' = withLambdaTypes lambdaTypes (exprToGo body)
+                            typedFn = curryLambdaPatTyped [elemGo] "bool" pats body'
                         in Just (GoIr.GoCall
                             (GoIr.GoIdent ("rt.List_filterT[" ++ elemGo ++ "]"))
                             [typedFn, wrapAsList elemGo goList])
@@ -6639,6 +9117,7 @@ kernelTypedCall types modName funcName args goArgs =
         -- List.find fn xs : (a -> Bool) -> List a -> Maybe a.
         ("List", "find", [_, _], [goFn, goList]) ->
             let elemGo = elemTypeFromFnOrList (args !! 0) (args !! 1)
+                elemSkyTy = inferListElemSkyType types (args !! 1)
             in if elemGo == "any" then Nothing
                else case args !! 0 of
                     A.At _ (Can.Lambda pats body)
@@ -6647,7 +9126,11 @@ kernelTypedCall types modName funcName args goArgs =
                         -- yet; the TA shape (typed slice, any fn) is
                         -- the best routing here. Reused for find/member
                         -- so the lambda shape stays the same.
-                        let typedFn = curryLambdaPatTyped [elemGo] "bool" pats (exprToGo body)
+                        let lambdaTypes = case elemSkyTy of
+                                Just t  -> patVarTypes pats [t]
+                                Nothing -> Map.empty
+                            body' = withLambdaTypes lambdaTypes (exprToGo body)
+                            typedFn = curryLambdaPatTyped [elemGo] "bool" pats body'
                             -- TA helper expects fn as any; box the
                             -- typed func.
                             anyFn = GoIr.GoCall (GoIr.GoIdent "any") [typedFn]
@@ -6951,12 +9434,26 @@ solvedTypeToGo ty = case ty of
     T.TType _ "Set" _ -> "map[any]bool"
     T.TType home name _ ->
         let modStr = ModuleName.toString home
-            base = if null modStr || modStr == "Main"
-                then name
-                else map (\c -> if c == '.' then '_' else c) modStr ++ "_" ++ name
+            prefix = if null modStr || modStr == "Main"
+                       then ""
+                       else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+            base = prefix ++ name
             env = getCgEnv
-            isRecordAlias = Set.member base (Rec._cg_recordAliases env)
-                         || Set.member name (Rec._cg_recordAliases env)
+            allAliases = Rec._cg_recordAliases env
+            -- Mirror safeReturnType's qualified-candidate fallback so a
+            -- captured TType with empty home resolves to the correct
+            -- module-qualified Go alias (e.g. `Model` → `State_Model_R`).
+            qualifiedCandidates =
+                [ p ++ "_" ++ name
+                | a <- Set.toList allAliases
+                , '_' `elem` a
+                , let p = reverse (drop 1 (dropWhile (/= '_') (reverse a)))
+                , not (null p)
+                ]
+            candidates = if null prefix
+                           then qualifiedCandidates ++ [name]
+                           else base : qualifiedCandidates ++ [name]
+            matches = [ c | c <- candidates, Set.member c allAliases ]
             isRuntimeOnly = name `elem` runtimeOnlyTypes
             -- Sky-defined unions get a `type X = rt.SkyADT` alias
             -- emitted in main.go; FFI-opaque types do not. Without
@@ -6967,13 +9464,14 @@ solvedTypeToGo ty = case ty of
             runtimeTyped = case lookup (modStr, name) qualifiedRuntimeTypedMap of
                 Just goTy -> Just goTy
                 Nothing   -> lookup name runtimeTypedMap
-        in if isRecordAlias then base ++ "_R"
-           else case runtimeTyped of
-             Just goTy -> goTy
-             Nothing
-                | isRuntimeOnly -> "any"
-                | isKnownUnion  -> base
-                | otherwise     -> "any"
+        in case matches of
+            (m:_) -> m ++ "_R"
+            _     -> case runtimeTyped of
+                Just goTy -> goTy
+                Nothing
+                    | isRuntimeOnly -> "any"
+                    | isKnownUnion  -> base
+                    | otherwise     -> "any"
     T.TLambda from to -> "func(" ++ solvedTypeToGo from ++ ") " ++ solvedTypeToGo to
     T.TRecord fields _ ->
         -- P4: records always map to a named Go struct. If the shape
@@ -6987,31 +9485,74 @@ solvedTypeToGo ty = case ty of
                 Just aliasName -> aliasName ++ "_R"
                 Nothing        -> synthAnonRecordName fields
         in nonMatch
-    T.TTuple a b rest ->
-        -- P5: typed tuples. Arity 2-5 maps to rt.T2..T5 with concrete
-        -- element Go types. Arity >= 6 stays as rt.SkyTupleN (slice-
-        -- backed, heterogeneous) per the plan's "record-alias instead"
-        -- guidance. rt.T2[any, any] is a type alias for SkyTuple2, so
-        -- literal-site codegen continues to emit SkyTuple2{...} without
-        -- friction.
-        let goEls = map solvedTypeToGo (a : b : rest)
-            arity = length goEls
-        in case arity of
-            2 -> "rt.T2[" ++ intercalate_ ", " goEls ++ "]"
-            3 -> "rt.T3[" ++ intercalate_ ", " goEls ++ "]"
-            4 -> "rt.T4[" ++ intercalate_ ", " goEls ++ "]"
-            5 -> "rt.T5[" ++ intercalate_ ", " goEls ++ "]"
+    T.TTuple _ _ rest ->
+        -- v0.13: render tuples as `rt.SkyTuple2/3/N` — CONSISTENT
+        -- with `typeStrWithAliasesReg` / `safeReturnTypeWith` (which
+        -- drive function signatures) AND with the actual tuple-
+        -- literal emission (`GoStructLit "rt.SkyTuple2"`).  The old
+        -- `rt.T2[A,B]` rendering was an inconsistency: a variable
+        -- `solvedTypeToGo`-typed `[]rt.T2[int,int]` could never
+        -- accept a `[]rt.SkyTuple2` value (`rt.SkyTuple2 =
+        -- T2[any,any]`, a DIFFERENT Go type), so the "typed tuple"
+        -- claim was never actually honoured by codegen.
+        case length rest of
+            0 -> "rt.SkyTuple2"
+            1 -> "rt.SkyTuple3"
             _ -> "rt.SkyTupleN"
     T.TAlias home name _ aliasTy ->
         let modStr = ModuleName.toString home
-            base = if null modStr || modStr == "Main"
-                then name
-                else map (\c -> if c == '.' then '_' else c) modStr ++ "_" ++ name
+            prefix = if null modStr || modStr == "Main"
+                       then ""
+                       else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+            base = prefix ++ name
+            env = getCgEnv
+            allAliases = Rec._cg_recordAliases env
+            -- Try every registered cross-module alias of the form
+            -- "<Mod>_<name>" so a captured TAlias with empty home (the
+            -- canonicaliser leaves home unset when the alias is imported
+            -- via `exposing (..)`) still resolves to the proper qualified
+            -- Go alias. Without this, `Model` (imported from State) emits
+            -- as `Model_R` which doesn't exist; the qualified candidate
+            -- "State_Model" matches and we emit "State_Model_R".
+            qualifiedCandidates =
+                [ p ++ "_" ++ name
+                | a <- Set.toList allAliases
+                , '_' `elem` a
+                , let p = reverse (drop 1 (dropWhile (/= '_') (reverse a)))
+                , not (null p)
+                ]
+            candidates = if null prefix
+                           then qualifiedCandidates ++ [name]
+                           else base : qualifiedCandidates ++ [name]
+            matches = [ c | c <- candidates, Set.member c allAliases ]
             isRecord = case aliasTy of
                 T.Hoisted (T.TRecord _ _) -> True
                 T.Filled  (T.TRecord _ _) -> True
                 _ -> False
-        in if isRecord then base ++ "_R" else base
+            -- Runtime-only types (Attribute, Decoder, Handler, …)
+            -- have NO Go alias emitted — using `base` as a Go type
+            -- would produce `undefined: Attribute`.  Fall to `any`.
+            -- Also check runtimeTypedMap for types with a known
+            -- concrete Go counterpart (rt.SkyDecoder etc.).
+            isRuntimeOnly = name `elem` runtimeOnlyTypes
+            runtimeTyped = case lookup (modStr, name) qualifiedRuntimeTypedMap of
+                Just goTy -> Just goTy
+                Nothing   -> lookup name runtimeTypedMap
+            unionNames = Rec._cg_unionNames env
+            isKnownUnion = Set.member base unionNames || Set.member name unionNames
+        in case matches of
+            (m:_) -> m ++ "_R"
+            _ -> case runtimeTyped of
+                Just goTy -> goTy
+                Nothing
+                    | isRecord      -> base ++ "_R"
+                    | isRuntimeOnly -> "any"
+                    | isKnownUnion  -> base
+                    -- Last resort: a TAlias whose name we can't
+                    -- resolve to a real Go type.  `base` would
+                    -- dangle (`undefined: X`).  Fall to `any` —
+                    -- correctness over a speculative typed emit.
+                    | otherwise     -> "any"
 
 
 -- | Generate a curried lambda: \a b -> body → func(a) { return func(b) { return body } }
@@ -7073,8 +9614,24 @@ curryLambdaPat pats body =
 -- `paramTypes` must have one entry per pattern in `pats`. Use "any"
 -- for params whose type isn't statically known.
 curryLambdaPatTyped :: [String] -> String -> [Can.Pattern] -> GoIr.GoExpr -> GoIr.GoExpr
-curryLambdaPatTyped [] _ pats body = curryLambdaPat pats body
-curryLambdaPatTyped paramTypes retType pats body
+curryLambdaPatTyped = curryLambdaPatTypedW False
+
+
+-- | v0.13 typed lowerer: variant of `curryLambdaPatTyped` for when
+-- the `body` GoExpr is ALREADY statically typed to `retType` (e.g.
+-- it was lowered via `exprToGoExpectGo retType` so it's a
+-- `GoTypedBlock retType …` or a `rt.CoerceX`-coerced leaf).  Skips
+-- the innermost `wrapRet` so we don't emit a redundant
+-- `rt.AsInt(rt.AsInt(…))`-style double coercion.
+curryLambdaPatTypedPre :: [String] -> String -> [Can.Pattern] -> GoIr.GoExpr -> GoIr.GoExpr
+curryLambdaPatTypedPre = curryLambdaPatTypedW True
+
+
+-- | Shared worker.  `bodyPreTyped` = the body GoExpr is already
+-- statically `retType`-typed (skip the final `wrapRet`).
+curryLambdaPatTypedW :: Bool -> [String] -> String -> [Can.Pattern] -> GoIr.GoExpr -> GoIr.GoExpr
+curryLambdaPatTypedW _ [] _ pats body = curryLambdaPat pats body
+curryLambdaPatTypedW bodyPreTyped paramTypes retType pats body
     | length paramTypes /= length pats = curryLambdaPat pats body
     | otherwise =
         let -- For each lambda level we know the param's typed Go
@@ -7098,22 +9655,29 @@ curryLambdaPatTyped paramTypes retType pats body
                             Nothing -> case stripStringMap retGoTy of
                                 Just valGo -> GoIr.GoCall (GoIr.GoIdent ("rt.AsMapT[" ++ valGo ++ "]")) [expr]
                                 Nothing -> GoIr.GoCall (GoIr.GoIdent ("rt.Coerce[" ++ retGoTy ++ "]")) [expr]
-            -- Build nested typed lambdas. innermost gets the body
-            -- + return coercion to `retType`; outer ones return
-            -- `any` because there's no way to know their actual
-            -- function-type return at this layer.
+            -- Build nested typed lambdas.  v0.13 Phase A4: the
+            -- intermediate return type of each curried level is
+            -- `func(<remaining-param-types>) <finalRet>`.  Pre-fix,
+            -- inner curried lambdas returned `any` and the Go
+            -- compiler rejected the lambda when passed to a typed
+            -- HOF param like `fn func(A) func(B) B`.
+            paramTypesRest [] = retType
+            paramTypesRest ts =
+                "func(" ++ head ts ++ ") " ++ paramTypesRest (tail ts)
             buildLambdas [] = body
             buildLambdas [(pTy, pat)] =
                 let (param, rebindStmts, rebindAnyStmts) = typedLambdaParam pTy pat
                     rebindAll = rebindStmts ++ rebindAnyStmts
-                    finalRetExpr = wrapRet retType body
+                    finalRetExpr =
+                        if bodyPreTyped then body else wrapRet retType body
                 in GoIr.GoFuncLit [param] retType
                     (rebindAll ++ [GoIr.GoReturn finalRetExpr])
             buildLambdas ((pTy, pat):rest) =
                 let (param, rebindStmts, rebindAnyStmts) = typedLambdaParam pTy pat
                     rebindAll = rebindStmts ++ rebindAnyStmts
                     inner = buildLambdas rest
-                in GoIr.GoFuncLit [param] "any"
+                    innerRetTy = paramTypesRest (map fst rest)
+                in GoIr.GoFuncLit [param] innerRetTy
                     (rebindAll ++ [GoIr.GoReturn inner])
         in buildLambdas zipped
   where
@@ -7126,11 +9690,28 @@ curryLambdaPatTyped paramTypes retType pats body
             if goTy == "any"
                 then (GoIr.GoParam (goSafeName name) "any", [], [])
                 else
-                    -- `_lp_name TY`; body uses `name = any(_lp_name)`.
+                    -- v0.13 typed lowerer: preserve the typed param's
+                    -- Go static type so the body can use Go-native
+                    -- operations (e.g. `a + acc` for Int operands)
+                    -- without `+ not defined on any` errors.  Direct
+                    -- rebind (`a := _lp_a`) keeps `a`'s static type
+                    -- as `goTy`; Go widens to `any` implicitly at any
+                    -- function-call boundary so existing helpers that
+                    -- take `any` continue to accept it.
+                    --
+                    -- v0.13 D-Lambda-Lowerer follow-up: emit `_ = a`
+                    -- after the rebind to force-use the local. Sky
+                    -- lambdas often bind a param the body doesn't
+                    -- consume (e.g. `\_ -> ...` or a curry where the
+                    -- early arg names get shadowed). Without the
+                    -- discard, Go errors "declared and not used: a".
+                    -- This is cheap (no runtime cost) and uniform.
                     let tmpName = "_lp_" ++ goSafeName name
+                        sn = goSafeName name
                     in ( GoIr.GoParam tmpName goTy
-                       , [GoIr.GoShortDecl (goSafeName name)
-                           (GoIr.GoCall (GoIr.GoIdent "any") [GoIr.GoIdent tmpName])]
+                       , [ GoIr.GoShortDecl sn (GoIr.GoIdent tmpName)
+                         , GoIr.GoAssign "_" (GoIr.GoIdent sn)
+                         ]
                        , [] )
         Can.PAnything ->
             (GoIr.GoParam "_" (if goTy == "" then "any" else goTy), [], [])
@@ -7732,7 +10313,17 @@ synthAnonRecordName fields =
         nameTag = case names of
             [] -> "Empty"
             _  -> intercalate_ "_" (map sanitiseField names)
-    in "Anon_R_" ++ nameTag ++ "__" ++ shortHash (nameTag ++ typeStr)
+        nameStr = "Anon_R_" ++ nameTag ++ "__" ++ shortHash (nameTag ++ typeStr)
+    in unsafePerformIO $ do
+        -- v0.13 E: register the shape so `generateAnonRecordDecls`
+        -- can emit a concrete Go struct decl for this name.
+        -- atomicModifyIORef' so racing typed-codegen passes (which
+        -- compute renderer strings concurrently for different
+        -- modules) accumulate every shape; the latest one wins on
+        -- collision because identical shapes hash to the same name.
+        atomicModifyIORef' globalAnonRecords
+            (\m -> (Map.insertWith (\_ old -> old) nameStr fields m, ()))
+        return nameStr
   where
     sanitiseField = map (\c -> if c == '.' || c == '\'' || c == '"' then '_' else c)
 

@@ -45,19 +45,21 @@ spec = do
 
         it "feeds typed results through Result.withDefault in skyshop" $ do
             body <- readFile "examples/13-skyshop/sky-out/main.go"
-            -- Canonical pattern: `Result.withDefault "" (Uuid.newString ())`
-            -- lowers to `rt.Result_withDefault("", rt.Go_Uuid_newStringT())`.
-            -- Before the reflect-fallback fix in Result_withDefault this
-            -- would have silently returned the whole SkyResult struct
-            -- because the old type-asserted path rejected typed shapes.
-            -- P8: typed kernel dispatch now routes Result.withDefault
-            -- to Result_withDefaultAnyT. v0.12 update: the explicit
-            -- any(...) wrap is no longer needed — Go's interface{} auto-
-            -- converts at the call boundary. Both shapes (with or without
-            -- the explicit any wrap) are functionally equivalent; this
-            -- check accepts either.
-            ( ("rt.Result_withDefaultAnyT(\"\", any(rt.Go_Uuid_newStringT()" `isInfixOf` body)
-              || ("rt.Result_withDefaultAnyT(\"\", rt.Go_Uuid_newStringT()" `isInfixOf` body) )
+            -- Canonical pattern: `Result.withDefault "" <FFI-result>` must
+            -- correctly extract the string when the FFI returns Ok / fall
+            -- back to "" on Err.  v0.13 Phase B2 migrated Result.withDefault
+            -- to a Sky-source `Sky.Core.Result` module, so the emitted Go
+            -- call now references `Sky_Core_Result_withDefault` rather than
+            -- the kernel-routed `rt.Result_withDefaultAnyT`.  v0.13's
+            -- per-instance monomorphisation specialises it further to
+            -- `Sky_Core_Result_withDefault__String_Error("", ...)` — the
+            -- fully-typed, zero-`any` form.  Every routing keeps the
+            -- semantic guarantee; only the symbol changes.  Accept all
+            -- forms so a future re-route doesn't trip this fence.
+            ( ("rt.Result_withDefaultAnyT(\"\"" `isInfixOf` body)
+              || ("Sky_Core_Result_withDefault__String_Error(\"\"" `isInfixOf` body)
+              || ("Sky_Core_Result_withDefault(rt.CoerceString(\"\"" `isInfixOf` body)
+              || ("Sky_Core_Result_withDefault(\"\"" `isInfixOf` body) )
                 `shouldBe` True
 
         it "elides case-subject boxing for typed-FFI sources" $ do

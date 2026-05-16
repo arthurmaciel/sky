@@ -12,22 +12,29 @@
 module Sky.Type.Solve
     ( solve
     , solveWithLocals
+    , solveWithInstances
     , SolveResult(..)
     , SolvedTypes
+    , CallInstance(..)
+    , CallSiteInstance(..)
     , showType
     , showTypeWith
     , moduleRenaming
+    , solveErrorToDiagnostic
     )
     where
 
+import Control.Monad (unless)
 import Data.IORef
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Sky.Type.Type as T
 import qualified Sky.Type.UnionFind as UF
 import qualified Sky.Type.Unify as Unify
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Diagnostic as Diag
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 
@@ -83,7 +90,65 @@ data SolverState = SolverState
       -- var. Set to 0 to disable the bound entirely (debug only —
       -- DO NOT ship without the bound; that's what Limitation #17
       -- showed can OOM the host).
+    , _callInstances :: !(IORef [CallInstanceRecord])
+      -- v0.13 Phase A1: every CForeign solver step records the
+      -- (region, callee-name, fresh-TVars) triple here.  After
+      -- solve completes, the post-pass evaluates each fresh-TVar
+      -- through union-find to derive the concrete type instance
+      -- at that call site.  Front-of-list prepend; order doesn't
+      -- matter because the downstream consumer deduplicates by
+      -- (callee, type-args) anyway.
     }
+
+
+-- | A single call-site polymorphic-reference record captured during
+-- solve.  Post-solve evaluation turns each `_ci_freshVars` UF
+-- variable into a concrete type via `variableToType`.
+data CallInstanceRecord = CallInstanceRecord
+    { _ci_region      :: !A.Region        -- where the reference appears
+    , _ci_callee      :: !String          -- qualified callee name
+    , _ci_freshVars   :: ![T.Variable]    -- per quantified type var
+    , _ci_quantifiers :: ![String]        -- Sky-source Forall var names
+                                          -- in the same order as freshVars
+                                          -- (excludes the wildcard `any`)
+                                          -- so downstream codegen can map
+                                          -- each concrete type back to its
+                                          -- annotation TVar by name even
+                                          -- when codegen-time defaulting
+                                          -- collapses some positions.
+    }
+
+
+-- | Public view of a resolved call-site instance.  Used by
+-- monomorphisation as the (callee, type-args) key.
+data CallInstance = CallInstance
+    { _instance_callee      :: !String
+    , _instance_types       :: ![T.Type]
+    , _instance_quantifiers :: ![String]  -- annotation Forall names in
+                                          -- positional alignment with
+                                          -- `_instance_types`.  Used by
+                                          -- call-site coercion to build
+                                          -- σ in Sky-name space so it
+                                          -- doesn't depend on Go-side
+                                          -- defaulting collapsing some
+                                          -- positions away.
+    }
+    deriving (Eq, Ord, Show)
+
+
+-- | A call-site annotated with its resolved instance.  The compile
+-- pipeline keeps a Map keyed by (file, region) so codegen can pick
+-- the right mangled name when emitting each `Can.Call` node.
+--
+-- The CallInstance inside is the same key the monomorphisation
+-- registry uses, so a region-keyed lookup and a Set-of-instances
+-- table stay consistent: every CallSiteInstance's instance appears
+-- in the deduped instance set.
+data CallSiteInstance = CallSiteInstance
+    { _cs_region   :: !A.Region
+    , _cs_instance :: !CallInstance
+    }
+    deriving (Show)
 
 
 -- | Default cap on solver steps before bailing with a defensive
@@ -243,7 +308,8 @@ solve constraint = do
     locals <- newIORef Map.empty
     steps <- newIORef 0
     budget <- effectiveSolverBudget constraint
-    let state0 = SolverState Map.empty cache 0 locals steps budget
+    instances <- newIORef []
+    let state0 = SolverState Map.empty cache 0 locals steps budget instances
     (result, finalState) <- solveHelp state0 constraint
     case result of
         Nothing -> do
@@ -290,7 +356,8 @@ solveWithLocals constraint = do
     locals <- newIORef Map.empty
     steps <- newIORef 0
     budget <- effectiveSolverBudget constraint
-    let state0 = SolverState Map.empty cache 0 locals steps budget
+    instances <- newIORef []
+    let state0 = SolverState Map.empty cache 0 locals steps budget instances
     (result, finalState) <- solveHelp state0 constraint
     localVars <- readIORef (_locals finalState)
     localTypes <- Map.traverseWithKey (\_ vars ->
@@ -301,6 +368,164 @@ solveWithLocals constraint = do
             return (SolveOk solvedTypes, localTypes)
         Just err ->
             return (SolveError err, localTypes)
+
+
+-- | v0.13 Phase A1: solve a constraint set and ALSO return the
+-- call-site instance map needed by the monomorphisation pass.
+--
+-- Every `T.CForeign` constraint hit during solve records a
+-- `CallInstanceRecord` carrying the call-site region, the callee's
+-- qualified name, and the list of fresh UF variables created for the
+-- callee's quantified type parameters.  After the solver successfully
+-- unifies all constraints, this function walks each record and
+-- evaluates each fresh var via `variableToType` to derive the
+-- concrete type the call site instantiated to.
+--
+-- Result: a list of `CallInstance` values, one per polymorphic
+-- reference, deduplicated by `(callee, type-args)`.  Concrete-typed
+-- pre-monomorphisation instances form the table that downstream
+-- codegen iterates to emit per-instance Go functions.
+--
+-- Skips records where any fresh var resolves to an unbound TVar
+-- (e.g. a polymorphic helper that's never called with a concrete
+-- type at this module's `main` boundary).  Those instances need
+-- the `_Any` fallback at emission time.
+solveWithInstances :: T.Constraint -> IO (SolveResult, [CallInstance], [CallSiteInstance])
+solveWithInstances constraint = do
+    cache <- newIORef Map.empty
+    locals <- newIORef Map.empty
+    steps <- newIORef 0
+    budget <- effectiveSolverBudget constraint
+    instances <- newIORef []
+    let state0 = SolverState Map.empty cache 0 locals steps budget instances
+    (result, finalState) <- solveHelp state0 constraint
+    case result of
+        Nothing -> do
+            -- Behaviour-equivalent to `solve` for the SolvedTypes
+            -- portion: merge the locals-captured bindings into the
+            -- env-derived map so let-bound + top-level declarations
+            -- both appear in the output map.  Without this,
+            -- downstream consumers (entryInferredSigs etc.) miss
+            -- top-level bindings tracked only via `_locals` and the
+            -- call-site value-reference codegen emits bare names
+            -- without `[any]` instantiation → Go build rejects.
+            envTypes <- readSolvedTypes (_env finalState)
+            localVars <- readIORef (_locals finalState)
+            localTys <- Map.traverseWithKey (\_ vars ->
+                mapM variableToType vars) localVars
+            let pickType tys = case List.nub (filter (not . isUnboundTVar) tys) of
+                    []  -> head tys
+                    [t] -> t
+                    _   -> T.TVar "_ambig"
+                isUnboundTVar (T.TVar n) = "_" `List.isPrefixOf` n || null n
+                isUnboundTVar _ = False
+                localFirst = Map.map pickType (Map.filter (not . null) localTys)
+                merged = Map.union localFirst envTypes
+            records <- readIORef (_callInstances finalState)
+            (ci, csi) <- extractInstancesAndSites records
+            return (SolveOk merged, ci, csi)
+        Just err -> do
+            -- v0.13 Phase A4: even on error, return whatever
+            -- call-site instances were captured BEFORE the error
+            -- bubbled up.  The CSIs are useful for spec emission +
+            -- mangled-name routing even when the dep had a non-
+            -- foreign type error.  Without this, dep modules that
+            -- pass-2 falls back to pass-1 lose their CSI capture,
+            -- and call sites inside them fall back to generic names
+            -- — breaking the drop-generics pass.
+            records <- readIORef (_callInstances finalState)
+            (ci, csi) <- extractInstancesAndSites records
+            return (SolveError err, ci, csi)
+
+
+-- | Walk the captured call-instance records, resolve each fresh
+-- UF var to its concrete type, deduplicate by (callee, type-args).
+-- Records where any fresh var doesn't resolve to a concrete type
+-- are skipped (the monomorphisation `_Any` fallback handles them).
+extractInstances :: [CallInstanceRecord] -> IO [CallInstance]
+extractInstances records = do
+    (ci, _) <- extractInstancesAndSites records
+    return ci
+
+
+-- | Same as `extractInstances` but ALSO returns the per-call-site
+-- registry — one `CallSiteInstance` per resolved record, indexable
+-- by `(file, region)` downstream.  The first return value is the
+-- deduplicated set the monomorphiser emits one Go function for;
+-- the second is the call-site map codegen uses to pick the right
+-- mangled name at each emission site.
+--
+-- v0.13 Phase A5 update: instances with PARTIALLY-resolved type
+-- args (e.g. `Result Error <free-a>`) are captured with the free
+-- positions normalised to `T.TVar "any"`.  This is the `_Any`
+-- fallback at the type-arg level — it lets the monomorphisation
+-- substitution map say `T1 → any` instead of skipping the call
+-- entirely.  Without this normalisation, partial instances drop
+-- and the codegen falls back to the pre-A5 erase-to-any path
+-- (which mismatches Go's type inference at typed call sites).
+extractInstancesAndSites
+    :: [CallInstanceRecord] -> IO ([CallInstance], [CallSiteInstance])
+extractInstancesAndSites records = do
+    raw <- mapM resolveOne records
+    let sites = [ CallSiteInstance (_ci_region r) ci
+                | (r, Just ci) <- zip records raw ]
+        deduped = Set.toList $ Set.fromList [ci | Just ci <- raw]
+    return (deduped, sites)
+  where
+    resolveOne rec_ = do
+        tys <- mapM variableToType (_ci_freshVars rec_)
+        let normalised = map (normaliseUnresolved isConcreteType) tys
+        return (Just (CallInstance (_ci_callee rec_) normalised
+                                   (_ci_quantifiers rec_)))
+
+
+-- | Replace unresolved TVars (FlexVar with internal `_` prefix or
+-- raw user-TVar names left polymorphic) with the wildcard
+-- `T.TVar "any"`.  Keeps concrete types and aliases intact.  Used
+-- by the A5 instance extractor so partial-resolution call sites
+-- still produce a usable monomorphisation key.
+normaliseUnresolved :: (T.Type -> Bool) -> T.Type -> T.Type
+normaliseUnresolved isConc = go
+  where
+    go t
+        | isConc t = t
+        | otherwise = case t of
+            T.TVar _ -> T.TVar "any"
+            T.TLambda f r -> T.TLambda (go f) (go r)
+            T.TType h n args -> T.TType h n (map go args)
+            T.TRecord fields ext ->
+                T.TRecord (Map.map (\(T.FieldType i ty) ->
+                                       T.FieldType i (go ty)) fields) ext
+            T.TUnit -> T.TUnit
+            T.TTuple a b cs -> T.TTuple (go a) (go b) (map go cs)
+            T.TAlias h n pairs aty ->
+                T.TAlias h n (map (\(k, v) -> (k, go v)) pairs) aty
+
+    isConcrete = isConcreteType
+
+
+-- | Concrete-type predicate.  A type is concrete iff it has no
+-- unresolved TVar (FlexVar with `_` prefix or empty name) or
+-- user-declared lowercase TVar (`a`, `msg`, …).  Uppercase TVar
+-- names are accepted because they correspond to nominal types
+-- (e.g. `Maybe`, `String`, …) in Sky's HM output.
+isConcreteType :: T.Type -> Bool
+isConcreteType (T.TVar n) =
+       not (null n) && head n /= '_' && n /= "any"
+    && all (\c -> c >= 'A' && c <= 'Z'
+                || c >= 'a' && c <= 'z'
+                || c == '_'
+                || c >= '0' && c <= '9') n
+    && (head n >= 'A' && head n <= 'Z')
+isConcreteType (T.TLambda f t) = isConcreteType f && isConcreteType t
+isConcreteType (T.TType _ _ args) = all isConcreteType args
+isConcreteType (T.TRecord fields _) =
+    all (\(T.FieldType _ ty) -> isConcreteType ty) (Map.elems fields)
+isConcreteType T.TUnit = True
+isConcreteType (T.TTuple a b cs) =
+    isConcreteType a && isConcreteType b && all isConcreteType cs
+isConcreteType (T.TAlias _ _ pairs _) =
+    all (isConcreteType . snd) pairs
 
 
 -- | Convert a Type to a UF Variable, SHARING variables for the same TVar name.
@@ -380,19 +605,49 @@ expectedToVar state (T.FromContext _ _ ty) = typeToVar state ty
 expectedToVar state (T.FromAnnotation _ _ _ ty) = typeToVar state ty
 
 
--- | Instantiate an Annotation into a UF Variable (fresh vars for quantified names)
-instantiateAnnotation :: SolverState -> T.Annotation -> IO T.Variable
+-- | Instantiate an Annotation into a UF Variable (fresh vars for quantified names).
+-- Returns the instantiated variable plus the list of fresh UF vars created
+-- for the NON-WILDCARD quantified type parameters, in declaration order.
+-- v0.13 Phase A1 uses the fresh-var list to capture call-site
+-- instantiation: after solve completes, evaluating each fresh var via
+-- `variableToType` gives the concrete type at the call site.
+--
+-- Behaviour-preserving wrt pre-A1: every name in `freeVars` (including
+-- the `any` wildcard) gets a fresh UF var stored in the local cache as
+-- before — typeToVar's wildcard case bypasses the cache for `any` so the
+-- entry is dead-write but the HM-side state shape is identical.  Only
+-- the RETURNED fresh-var list omits `any` (the monomorphiser doesn't
+-- specialise wildcards).
+instantiateAnnotation :: SolverState -> T.Annotation -> IO (T.Variable, [T.Variable], [String])
 instantiateAnnotation state (T.Forall freeVars canType)
-    -- No quantification: use the GLOBAL cache for sharing
-    | null freeVars = typeToVar state canType
-    -- With quantification: create a LOCAL cache so each use gets fresh vars
+    -- No quantification: use the GLOBAL cache for sharing.  No fresh
+    -- vars to track — the call site is not polymorphic.
+    | null freeVars = do
+        v <- typeToVar state canType
+        return (v, [], [])
+    -- With quantification: create a LOCAL cache so each use gets fresh
+    -- vars (identical to pre-A1).  The fresh-var list returned to the
+    -- caller excludes the `any` wildcard so the monomorphisation pass
+    -- doesn't try to specialise it.  The third return component is the
+    -- list of quantifier names IN THE SAME ORDER as the fresh-var
+    -- list — downstream codegen uses these names to map each concrete
+    -- type back to its annotation TVar (load-bearing for partial-
+    -- instance substitution when codegen-time defaulting collapses
+    -- some positions, e.g. `Result e a` → `Result Error a` where `e`
+    -- no longer appears as a Go generic but the call instance still
+    -- has 2 entries).
     | otherwise = do
         localCache <- newIORef Map.empty
-        mapM_ (\name -> do
-            var <- UF.fresh (T.Descriptor (T.FlexVar (Just name)) (_rank state) T.noMark Nothing)
-            modifyIORef' localCache (Map.insert name var)) freeVars
+        named <- mapM (\name -> do
+            v <- UF.fresh (T.Descriptor (T.FlexVar (Just name)) (_rank state) T.noMark Nothing)
+            modifyIORef' localCache (Map.insert name v)
+            return (name, v)) freeVars
         let instState = state { _varCache = localCache }
-        typeToVar instState canType
+        v <- typeToVar instState canType
+        let kept = [ (n, uv) | (n, uv) <- named, n /= "any" ]
+            freshVars = map snd kept
+            quantNames = map fst kept
+        return (v, freshVars, quantNames)
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -450,7 +705,15 @@ solveHelpBody state constraint = case constraint of
                         | isDiff = ""
                         | otherwise = " (from: " ++ showType actualType
                                    ++ " vs " ++ showExpected expected ++ ")"
-                return (Just $ posPrefix region ++ "Type mismatch: " ++ diffSummary ++ trailer ++ hint, state)
+                -- The diff summary either begins with `\n     expected: …`
+                -- (leaf form) or `in <path>:\n     expected: …` (path
+                -- form).  In the leaf case the `"Type mismatch: "`
+                -- prefix would leave a trailing space line before the
+                -- newline; trim that to keep the body tight.
+                let sep = case diffSummary of
+                        ('\n':_) -> "Type mismatch:"
+                        _        -> "Type mismatch: "
+                return (Just $ posPrefix region ++ sep ++ diffSummary ++ trailer ++ hint, state)
 
     T.CLocal region name expected -> do
         case Map.lookup name (_env state) of
@@ -472,12 +735,19 @@ solveHelpBody state constraint = case constraint of
                 let state' = state { _env = Map.insert name freshVar (_env state) }
                 return (Nothing, state')
 
-    T.CForeign _region name annot expected -> do
-        instVar <- instantiateAnnotation state annot
+    T.CForeign region name annot expected -> do
+        (instVar, freshVars, quants) <- instantiateAnnotation state annot
         expectedVar <- expectedToVar state expected
         ok <- Unify.unify instVar expectedVar
         if ok
-            then return (Nothing, state)
+            then do
+                -- v0.13 Phase A1: capture this polymorphic reference for
+                -- monomorphisation.  Skip when there are no quantified
+                -- vars (the call site is already concrete).
+                unless (null freshVars) $
+                    modifyIORef' (_callInstances state) $
+                        \xs -> CallInstanceRecord region name freshVars quants : xs
+                return (Nothing, state)
             else do
                 instType <- variableToType instVar
                 expType <- variableToType expectedVar
@@ -593,7 +863,25 @@ flatTypeToType flat = case flat of
         fieldTypes <- Map.traverseWithKey (\_ fVar -> do
             ty <- variableToType fVar
             return (T.FieldType 0 ty)) fieldVars
-        return (T.TRecord fieldTypes Nothing)
+        -- Preserve the row-extension variable so an OPEN record reads
+        -- back open (not CLOSED) across the module boundary — without
+        -- it, a `Can.Access`-derived open record param closes on the
+        -- export boundary and rejects callers with extra fields.
+        --
+        -- NON-RECURSIVE on purpose: we look at the extension var's
+        -- content one level deep ONLY. Recursing into a `Record1`
+        -- extension (to flatten merged rows) risks an infinite loop
+        -- when the union-find graph is cyclic — a record extension
+        -- can transitively point back at itself after a chain of
+        -- merges. A `Record1` (or any non-flex) extension is read
+        -- back as CLOSED; that loses a little precision for the rare
+        -- merged-extension case but can never hang. Only a still-free
+        -- named `FlexVar` extension keeps the record OPEN.
+        extDesc <- UF.get extVar
+        case T._content extDesc of
+            T.FlexVar (Just n)      -> return (T.TRecord fieldTypes (Just n))
+            T.FlexSuper _ (Just n)  -> return (T.TRecord fieldTypes (Just n))
+            _                       -> return (T.TRecord fieldTypes Nothing)
     T.Unit1 ->
         return T.TUnit
     T.Tuple1 aVar bVar mcVar -> do
@@ -812,11 +1100,18 @@ findLeafMismatch path a e =
 --        actual:   String
 renderPathDiff :: [PathSeg] -> T.Type -> T.Type -> String
 renderPathDiff path actual expected =
-    let pathStr = if null path then "" else " in " ++ joinPath path
+    -- The caller prepends `"Type mismatch: "`. For a top-level
+    -- mismatch (no path), skip straight to the expected/actual
+    -- pair so we never produce a stray `Type mismatch: :` line.
+    -- For a deeper mismatch, lead with `in <path>:` so the user
+    -- sees where in the structure the divergence is.
+    let header = case path of
+            [] -> ""
+            _  -> "in " ++ joinPath path ++ ":"
         renderedLeaf =
               "\n     expected: " ++ showTypeR expected
            ++ "\n     actual:   " ++ showTypeR actual
-    in pathStr ++ ":" ++ renderedLeaf
+    in header ++ renderedLeaf
   where
     joinPath = List.intercalate " → " . map segText
 
@@ -997,3 +1292,43 @@ showExpected :: T.Expected T.Type -> String
 showExpected (T.NoExpectation ty) = showType ty
 showExpected (T.FromContext _ _ ty) = showType ty
 showExpected (T.FromAnnotation _ _ _ ty) = showType ty
+
+
+-- ═══════════════════════════════════════════════════════════
+-- v0.13 LAYER 1 — Diagnostic conversion
+-- ═══════════════════════════════════════════════════════════
+
+-- | Convert a legacy String solver error to a structured Diagnostic.
+--
+-- The solver currently emits errors as strings with a `LINE:COL:`
+-- prefix and a "Type mismatch: ..." body. This converter parses the
+-- prefix to extract a Region and wraps the rest as a Diagnostic with
+-- code E2001.
+--
+-- Future Layer 1 work moves the solver itself to produce Diagnostic
+-- values directly (eliminating the parse-then-rewrap step). For now
+-- this lets Compile.hs render type errors via the new Sky.Reporting
+-- pipeline without changing every error-emission site at once.
+solveErrorToDiagnostic :: FilePath -> String -> Diag.Diagnostic
+solveErrorToDiagnostic path err =
+    let (region, body) = parsePrefix err
+    in Diag.mkError path region Diag.CatType Diag.typeE_Mismatch body
+
+
+parsePrefix :: String -> (A.Region, String)
+parsePrefix s =
+    case break (== ':') s of
+        (lineStr, ':':rest)
+          | not (null lineStr), all isDigit lineStr ->
+            case break (== ':') rest of
+                (colStr, ':':body)
+                  | not (null colStr), all isDigit colStr ->
+                    let l = read lineStr
+                        c = read colStr
+                        region = A.Region (A.Position l c) (A.Position l c)
+                    in (region, dropWhile (== ' ') body)
+                _ -> (synthetic, s)
+        _ -> (synthetic, s)
+  where
+    isDigit c = c >= '0' && c <= '9'
+    synthetic = A.Region (A.Position 1 1) (A.Position 1 1)

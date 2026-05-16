@@ -1,15 +1,16 @@
 // live.go — Sky.Live runtime (session store, VDom, SSE, routing).
 //
 // Audit P3-4: every `fmt.Sprintf("%v", x)` in this file is bound
-// to HTML/attribute value rendering (Attr_*, Html_text, velement)
-// or error-message composition. None of them flow secret material,
-// session IDs, cookie values, or auth tokens: the session-id path
-// passes string directly to http.SetCookie (see Server_setCookie),
-// and CSRF/rate-limit tokens use the constant-time compare helpers
-// in rt.go. Callers at the Sky layer pass String values; the %v
-// sites tolerate any stringifiable input for codegen-uniformity
-// (Attr_value can accept a lowered Int literal and render "42").
-// The justification therefore applies file-wide.
+// to VNode rendering or error-message composition. None of them
+// flow secret material, session IDs, cookie values, or auth
+// tokens: the session-id path passes string directly to
+// http.SetCookie (see Server_setCookie), and CSRF/rate-limit
+// tokens use the constant-time compare helpers in rt.go. Callers
+// at the Sky layer pass String values; the %v sites tolerate any
+// stringifiable input for codegen-uniformity. All text / attribute
+// values emitted into HTML route through html.EscapeString in
+// renderVNode — never raw string interpolation. The justification
+// therefore applies file-wide.
 package rt
 
 import (
@@ -22,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"runtime/debug"
@@ -54,54 +56,13 @@ func vtext(s string) VNode {
 	return VNode{Kind: "text", Text: s}
 }
 
-func velement(tag string, attrs []any, children []any) VNode {
-	node := VNode{
-		Kind:   "element",
-		Tag:    tag,
-		Attrs:  map[string]string{},
-		Events: map[string]any{},
-	}
-	for _, a := range attrs {
-		switch v := a.(type) {
-		case attrPair:
-			// Empty-key attrPair is the "no-op" sentinel returned by
-			// bool-conditional helpers like `disabled False` so
-			// False-valued booleans don't render the attribute.
-			if v.key == "" {
-				continue
-			}
-			node.Attrs[v.key] = v.val
-		case eventPair:
-			node.Events[v.name] = v.msg
-		case SkyTuple2:
-			node.Attrs[fmt.Sprintf("%v", v.V0)] = fmt.Sprintf("%v", v.V1)
-		}
-	}
-	for _, c := range children {
-		switch v := c.(type) {
-		case VNode:
-			node.Children = append(node.Children, v)
-		case string:
-			node.Children = append(node.Children, vtext(v))
-		}
-	}
-	return node
-}
-
-type attrPair struct{ key, val string }
+// eventPair is a rendered event binding (event name → Sky Msg value).
+// Produced by the Sky-source Std.Html.Events module through the
+// htmlAttrToString FFI path and consumed by renderVNode + the TUI
+// renderer (tui_ui.go).
 type eventPair struct {
 	name string
 	msg  any
-}
-
-// ═══════════════════════════════════════════════════════════
-// HTML element builders (Std.Html)
-// ═══════════════════════════════════════════════════════════
-
-func htmlElem(tag string) func(any, any) any {
-	return func(attrs any, children any) any {
-		return velement(tag, asList(attrs), asList(children))
-	}
 }
 
 func asList(v any) []any {
@@ -125,589 +86,138 @@ func asList(v any) []any {
 	return []any{v}
 }
 
-func Html_text(s any) any   { return vtext(fmt.Sprintf("%v", s)) }
-func Html_textT(s string) any { return vtext(s) }
-func Html_div(a, c any) any { return htmlElem("div")(a, c) }
-func Html_span(a, c any) any {
-	return htmlElem("span")(a, c)
-}
-func Html_p(a, c any) any      { return htmlElem("p")(a, c) }
-func Html_h1(a, c any) any     { return htmlElem("h1")(a, c) }
-func Html_h2(a, c any) any     { return htmlElem("h2")(a, c) }
-func Html_h3(a, c any) any     { return htmlElem("h3")(a, c) }
-func Html_h4(a, c any) any     { return htmlElem("h4")(a, c) }
-func Html_h5(a, c any) any     { return htmlElem("h5")(a, c) }
-func Html_h6(a, c any) any     { return htmlElem("h6")(a, c) }
-func Html_a(a, c any) any      { return htmlElem("a")(a, c) }
-func Html_button(a, c any) any { return htmlElem("button")(a, c) }
-// input is void in HTML — no children. Sky API takes attrs only.
-// Void HTML elements accept an optional empty `[]` children argument
-// because elm-format convention writes them as `input [attrs] []`.
-// The runtime ignores the children and emits the void tag regardless;
-// the single-arg call site (`input [attrs]`) still works because
-// Sky's variadic FFI dispatch treats the missing arg as implicit nil.
-func Html_input(a any, _ ...any) any { return htmlElem("input")(a, nil) }
-func Html_form(a, c any) any   { return htmlElem("form")(a, c) }
-func Html_label(a, c any) any  { return htmlElem("label")(a, c) }
-func Html_nav(a, c any) any    { return htmlElem("nav")(a, c) }
-func Html_section(a, c any) any {
-	return htmlElem("section")(a, c)
-}
-func Html_article(a, c any) any { return htmlElem("article")(a, c) }
-func Html_header(a, c any) any  { return htmlElem("header")(a, c) }
-func Html_footer(a, c any) any  { return htmlElem("footer")(a, c) }
-func Html_main(a, c any) any    { return htmlElem("main")(a, c) }
-func Html_ul(a, c any) any      { return htmlElem("ul")(a, c) }
-func Html_ol(a, c any) any      { return htmlElem("ol")(a, c) }
-func Html_li(a, c any) any      { return htmlElem("li")(a, c) }
-// img is a void element — emit as self-closing, attrs only.
-// Void HTML elements — same variadic trick as Html_input so both
-// `img [attrs]` and `img [attrs] []` compile. The second arg is
-// discarded.
-func Html_img(a any, _ ...any) any { return htmlElem("img")(a, nil) }
-func Html_br(a any, _ ...any) any  { return htmlElem("br")(a, nil) }
-func Html_hr(a any, _ ...any) any  { return htmlElem("hr")(a, nil) }
-func Html_table(a, c any) any   { return htmlElem("table")(a, c) }
-func Html_thead(a, c any) any   { return htmlElem("thead")(a, c) }
-func Html_tbody(a, c any) any   { return htmlElem("tbody")(a, c) }
-func Html_tr(a, c any) any      { return htmlElem("tr")(a, c) }
-func Html_th(a, c any) any      { return htmlElem("th")(a, c) }
-func Html_td(a, c any) any      { return htmlElem("td")(a, c) }
-func Html_textarea(a, c any) any {
-	return htmlElem("textarea")(a, c)
-}
-func Html_select(a, c any) any { return htmlElem("select")(a, c) }
-func Html_option(a, c any) any { return htmlElem("option")(a, c) }
-func Html_pre(a, c any) any    { return htmlElem("pre")(a, c) }
-func Html_code(a, c any) any   { return htmlElem("code")(a, c) }
-func Html_strong(a, c any) any { return htmlElem("strong")(a, c) }
-func Html_em(a, c any) any     { return htmlElem("em")(a, c) }
-func Html_small(a, c any) any  { return htmlElem("small")(a, c) }
-
-// styleNode: render CSS text inside a <style> tag
-func Html_styleNode(attrs any, css any) any {
-	txt := fmt.Sprintf("%v", css)
-	// CSS inside <style> is parsed by the browser's CSS engine, which does
-	// NOT decode HTML entities. Wrap as raw so renderVNode emits literal
-	// characters (including single quotes, `<`, `>` — none of which can
-	// terminate a <style> block except the literal text `</style>`).
-	return VNode{
-		Kind:     "element",
-		Tag:      "style",
-		Attrs:    map[string]string{},
-		Children: []VNode{{Kind: "raw", Text: txt}},
-	}
-}
-
-// node: generic element builder for tags that don't have a dedicated helper
-// (e.g. "svg", "polyline").
-func Html_node(tag any, attrs any, children any) any {
-	return velement(fmt.Sprintf("%v", tag), asList(attrs), asList(children))
-}
-
-// raw: insert unescaped HTML — used for trusted content like pre-rendered markdown
-func Html_raw(s any) any {
-	return VNode{
-		Kind: "raw",
-		Text: fmt.Sprintf("%v", s),
-	}
-}
-
-// headerNode: specialised header tag with attrs + children (same as Html_header,
-// kept as a distinct entry for legacy-stdlib compat).
-func Html_headerNode(attrs any, children any) any {
-	return htmlElem("header")(attrs, children)
-}
-
-// Extra Html elements used by some legacy stdlib code.
-func Html_codeNode(a, c any) any    { return htmlElem("code")(a, c) }
-func Html_blockquote(a, c any) any  { return htmlElem("blockquote")(a, c) }
-func Html_figure(a, c any) any      { return htmlElem("figure")(a, c) }
-func Html_figcaption(a, c any) any  { return htmlElem("figcaption")(a, c) }
-func Html_details(a, c any) any     { return htmlElem("details")(a, c) }
-func Html_summary(a, c any) any     { return htmlElem("summary")(a, c) }
-func Html_dialog(a, c any) any      { return htmlElem("dialog")(a, c) }
-func Html_video(a, c any) any       { return htmlElem("video")(a, c) }
-func Html_audio(a, c any) any       { return htmlElem("audio")(a, c) }
-func Html_canvas(a, c any) any      { return htmlElem("canvas")(a, c) }
-func Html_iframe(a, c any) any      { return htmlElem("iframe")(a, c) }
-func Html_progress(a, c any) any    { return htmlElem("progress")(a, c) }
-func Html_meter(a, c any) any       { return htmlElem("meter")(a, c) }
-
-// ═══════════════════════════════════════════════════════════
-// Attributes (Std.Html.Attributes)
-// ═══════════════════════════════════════════════════════════
-
-func attr(k, v string) any          { return attrPair{key: k, val: v} }
-func Attr_class(v any) any          { return attr("class", fmt.Sprintf("%v", v)) }
-func Attr_classT(v string) any      { return attr("class", v) }
-func Attr_id(v any) any             { return attr("id", fmt.Sprintf("%v", v)) }
-func Attr_style(v any) any          { return attr("style", fmt.Sprintf("%v", v)) }
-func Attr_type(v any) any           { return attr("type", fmt.Sprintf("%v", v)) }
-func Attr_value(v any) any          { return attr("value", fmt.Sprintf("%v", v)) }
-func Attr_href(v any) any           { return attr("href", fmt.Sprintf("%v", v)) }
-func Attr_src(v any) any            { return attr("src", fmt.Sprintf("%v", v)) }
-func Attr_alt(v any) any            { return attr("alt", fmt.Sprintf("%v", v)) }
-func Attr_name(v any) any           { return attr("name", fmt.Sprintf("%v", v)) }
-func Attr_placeholder(v any) any    { return attr("placeholder", fmt.Sprintf("%v", v)) }
-func Attr_title(v any) any          { return attr("title", fmt.Sprintf("%v", v)) }
-func Attr_for(v any) any            { return attr("for", fmt.Sprintf("%v", v)) }
-// Boolean HTML attributes honour two calling conventions:
+// ─── Sky-source Std.Html → VNode converter (v0.13 Layer 3) ──────
 //
-//   * `disabled model.loading` — typed bool (same convention as
-//     Elm's `Html.Attributes` boolean attrs). True renders,
-//     False omits. sky-chat's compose form needs this.
-//   * `Attr.required ()` / `Attr.checked ()` — unit-arg presence style
-//     used by many Sky projects (notes-app, skyvote, skyshop) where
-//     the user just wants the attribute present. Anything non-bool
-//     is treated as True.
-//
-// Before this logic was added, every call emitted the attribute
-// regardless of value, so `disabled False` still disabled the input;
-// the first fix made them strict-bool, which crashed any call-site
-// that passed `()`. This lenient form accepts both.
-func boolAttrPresent(v any) bool {
-	if v == nil {
-		return false
-	}
-	if b, ok := v.(bool); ok {
-		return b
-	}
-	// Unit `()` → struct{}{} in Go. Treat as "present".
-	if _, ok := v.(struct{}); ok {
-		return true
-	}
-	// Any other non-nil value: treat as present (True-ish). This
-	// covers Sky's `Bool`-alias case where the runtime hands us an
-	// `any` carrying a bool through a typed slot.
-	return true
-}
-func Attr_checked(v any) any {
-	if boolAttrPresent(v) {
-		return attr("checked", "checked")
-	}
-	return attr("", "")
-}
-func Attr_disabled(v any) any {
-	if boolAttrPresent(v) {
-		return attr("disabled", "disabled")
-	}
-	return attr("", "")
-}
-func Attr_readonly(v any) any {
-	if boolAttrPresent(v) {
-		return attr("readonly", "readonly")
-	}
-	return attr("", "")
-}
-func Attr_required(v any) any {
-	if boolAttrPresent(v) {
-		return attr("required", "required")
-	}
-	return attr("", "")
-}
-func Attr_autofocus(v any) any {
-	if boolAttrPresent(v) {
-		return attr("autofocus", "autofocus")
-	}
-	return attr("", "")
-}
-func Attr_rel(v any) any            { return attr("rel", fmt.Sprintf("%v", v)) }
-func Attr_target(v any) any         { return attr("target", fmt.Sprintf("%v", v)) }
-func Attr_method(v any) any         { return attr("method", fmt.Sprintf("%v", v)) }
-func Attr_action(v any) any         { return attr("action", fmt.Sprintf("%v", v)) }
+// Std.Html / Std.Html.Attributes / Std.Html.Events are Sky-source
+// stdlib modules: their builders produce a typed `Html` ADT (an
+// rt.SkyADT) rather than calling Go kernels.  HtmlToVNode is the
+// single FFI boundary that lowers that ADT into the runtime VNode
+// the renderer + diff layer consume — those layers are unchanged.
 
-// ═══════════════════════════════════════════════════════════
-// Events (Std.Live.Events)
-// ═══════════════════════════════════════════════════════════
-
-func Event_onClick(msg any) any  { return eventPair{name: "click", msg: msg} }
-func Event_onInput(f any) any    { return eventPair{name: "input", msg: f} }
-func Event_onChange(f any) any   { return eventPair{name: "change", msg: f} }
-func Event_onSubmit(msg any) any { return eventPair{name: "submit", msg: msg} }
-func Event_onDblClick(msg any) any { return eventPair{name: "dblclick", msg: msg} }
-func Event_onMouseOver(msg any) any { return eventPair{name: "mouseover", msg: msg} }
-func Event_onMouseOut(msg any) any  { return eventPair{name: "mouseout", msg: msg} }
-func Event_onKeyDown(f any) any     { return eventPair{name: "keydown", msg: f} }
-func Event_onKeyUp(f any) any       { return eventPair{name: "keyup", msg: f} }
-func Event_onFocus(msg any) any     { return eventPair{name: "focus", msg: msg} }
-func Event_onBlur(msg any) any      { return eventPair{name: "blur", msg: msg} }
-
-// Event_onFile / Event_onImage / Event_fileMax{Width,Height,Size}
-// live in stdlib_web.go — kept there next to the JS-side file
-// driver code for locality. The kernel registry entries point at
-// those `rt.Event_*` symbols and resolve cross-file just fine
-// because the package is one Go package.
-
-// Attr_attribute: generic attribute builder for tags with non-standard attrs
-// (e.g. SVG viewBox).
-func Attr_attribute(k any, v any) any {
-	return attr(fmt.Sprintf("%v", k), fmt.Sprintf("%v", v))
-}
-
-// Form / number / a11y / data attributes.
-func Attr_rows(v any) any        { return attr("rows", fmt.Sprintf("%v", v)) }
-func Attr_cols(v any) any        { return attr("cols", fmt.Sprintf("%v", v)) }
-func Attr_maxlength(v any) any   { return attr("maxlength", fmt.Sprintf("%v", v)) }
-func Attr_minlength(v any) any   { return attr("minlength", fmt.Sprintf("%v", v)) }
-func Attr_step(v any) any        { return attr("step", fmt.Sprintf("%v", v)) }
-func Attr_min(v any) any         { return attr("min", fmt.Sprintf("%v", v)) }
-func Attr_max(v any) any         { return attr("max", fmt.Sprintf("%v", v)) }
-func Attr_pattern(v any) any     { return attr("pattern", fmt.Sprintf("%v", v)) }
-func Attr_accept(v any) any      { return attr("accept", fmt.Sprintf("%v", v)) }
-func Attr_multiple(v any) any    { return attr("multiple", fmt.Sprintf("%v", v)) }
-func Attr_size(v any) any        { return attr("size", fmt.Sprintf("%v", v)) }
-func Attr_tabindex(v any) any    { return attr("tabindex", fmt.Sprintf("%v", v)) }
-func Attr_ariaLabel(v any) any   { return attr("aria-label", fmt.Sprintf("%v", v)) }
-func Attr_ariaHidden(v any) any  { return attr("aria-hidden", fmt.Sprintf("%v", v)) }
-func Attr_role(v any) any        { return attr("role", fmt.Sprintf("%v", v)) }
-func Attr_dataAttr(k, v any) any { return attr("data-"+fmt.Sprintf("%v", k), fmt.Sprintf("%v", v)) }
-func Attr_spellcheck(v any) any  { return attr("spellcheck", fmt.Sprintf("%v", v)) }
-func Attr_dir(v any) any         { return attr("dir", fmt.Sprintf("%v", v)) }
-func Attr_lang(v any) any        { return attr("lang", fmt.Sprintf("%v", v)) }
-func Attr_translate(v any) any   { return attr("translate", fmt.Sprintf("%v", v)) }
-
-// ═══════════════════════════════════════════════════════════
-// CSS (Std.Css)
-// ═══════════════════════════════════════════════════════════
-
-type cssRule struct {
-	selector string
-	props    []cssProp
-}
-type cssProp struct {
-	k, v string
-}
-
-func Css_stylesheet(rules any) any {
-	rs := asList(rules)
-	var sb strings.Builder
-	for _, r := range rs {
-		renderCssRule(&sb, r)
+// HtmlToVNode converts a Sky `Html` ADT value to a VNode.  An
+// actual VNode is passed through unchanged (Std.Ui's `Raw` escape
+// hatch, and any value already in VNode form).
+func HtmlToVNode(node any) VNode {
+	node = unwrapAny(node)
+	if vn, ok := node.(VNode); ok {
+		return vn
 	}
-	return sb.String()
-}
-
-// renderCssRule handles the three rule shapes (cssRule, cssMediaRule,
-// cssKeyframesRule) plus plain strings (already-rendered fragments from
-// legacy-style APIs) and nested []any lists.
-func renderCssRule(sb *strings.Builder, r any) {
-	switch cr := r.(type) {
-	case cssRule:
-		sb.WriteString(cr.selector)
-		sb.WriteString(" {\n")
-		for _, p := range cr.props {
-			sb.WriteString("  ")
-			sb.WriteString(p.k)
-			sb.WriteString(": ")
-			sb.WriteString(p.v)
-			sb.WriteString(";\n")
+	adt, ok := node.(SkyADT)
+	if !ok {
+		// Defensive: a non-Html value reached the converter — render
+		// it as text rather than panicking.
+		return vtext(fmt.Sprintf("%v", node))
+	}
+	switch adt.SkyName {
+	case "HText":
+		if len(adt.Fields) > 0 {
+			return vtext(AsString(adt.Fields[0]))
 		}
-		sb.WriteString("}\n")
-	case cssMediaRule:
-		sb.WriteString("@media ")
-		sb.WriteString(cr.query)
-		sb.WriteString(" {\n")
-		for _, inner := range asList(cr.rules) {
-			renderCssRule(sb, inner)
+		return vtext("")
+	case "HRaw":
+		if len(adt.Fields) > 0 {
+			return VNode{Kind: "raw", Text: AsString(adt.Fields[0])}
 		}
-		sb.WriteString("}\n")
-	case cssKeyframesRule:
-		sb.WriteString("@keyframes ")
-		sb.WriteString(cr.name)
-		sb.WriteString(" { ")
-		for _, f := range cr.frames {
-			sb.WriteString(f)
-			sb.WriteString(" ")
+		return VNode{Kind: "raw"}
+	case "HElement":
+		if len(adt.Fields) < 3 {
+			return vtext("")
 		}
-		sb.WriteString("}\n")
-	case string:
-		sb.WriteString(cr)
-		if !strings.HasSuffix(cr, "\n") {
-			sb.WriteString("\n")
+		vn := VNode{
+			Kind:   "element",
+			Tag:    AsString(adt.Fields[0]),
+			Attrs:  map[string]string{},
+			Events: map[string]any{},
 		}
-	case []any:
-		for _, inner := range cr {
-			renderCssRule(sb, inner)
+		for _, a := range asList(adt.Fields[1]) {
+			applyHtmlAttr(&vn, a)
 		}
+		for _, c := range asList(adt.Fields[2]) {
+			vn.Children = append(vn.Children, HtmlToVNode(c))
+		}
+		return vn
+	default:
+		return vtext("")
 	}
 }
 
-func Css_rule(selector any, props any) any {
-	ps := asList(props)
-	var out []cssProp
-	for _, p := range ps {
-		if cp, ok := p.(cssProp); ok {
-			out = append(out, cp)
+// applyHtmlAttr folds one Sky `Attribute` ADT value into a VNode.
+func applyHtmlAttr(vn *VNode, a any) {
+	a = unwrapAny(a)
+	adt, ok := a.(SkyADT)
+	if !ok {
+		return
+	}
+	switch adt.SkyName {
+	case "Attr":
+		if len(adt.Fields) >= 2 {
+			vn.Attrs[AsString(adt.Fields[0])] = AsString(adt.Fields[1])
 		}
-	}
-	return cssRule{selector: fmt.Sprintf("%v", selector), props: out}
-}
-
-func Css_property(k any, v any) any {
-	return cssProp{k: fmt.Sprintf("%v", k), v: fmt.Sprintf("%v", v)}
-}
-func Css_propertyT(k, v string) any {
-	return cssProp{k: k, v: v}
-}
-
-// Unit helpers
-func Css_px(n any) any  { return fmt.Sprintf("%vpx", n) }
-func Css_rem(n any) any { return fmt.Sprintf("%vrem", n) }
-// Css_pxT / Css_remT: take float64 so both `px 12` (int literal promoted)
-// and `rem 0.9` (float literal) work without separate variants. Sky's
-// dispatch coerces via AsFloat at the call site.
-func Css_pxT(n float64) string  {
-	if n == float64(int(n)) { return fmt.Sprintf("%dpx", int(n)) }
-	return fmt.Sprintf("%gpx", n)
-}
-func Css_remT(n float64) string {
-	if n == float64(int(n)) { return fmt.Sprintf("%drem", int(n)) }
-	return fmt.Sprintf("%grem", n)
-}
-func Css_em(n any) any  { return fmt.Sprintf("%vem", n) }
-func Css_pct(n any) any { return fmt.Sprintf("%v%%", n) }
-// Css.hex accepts both "#fff" and "fff" forms — the leading '#' is
-// idempotent so users can paste palette values either way without
-// accidentally emitting ##fff which browsers treat as an unknown
-// colour and silently ignore.
-func Css_hex(s any) any {
-	str := fmt.Sprintf("%v", s)
-	if strings.HasPrefix(str, "#") {
-		return str
-	}
-	return "#" + str
-}
-
-func Css_hexT(s string) string {
-	if strings.HasPrefix(s, "#") {
-		return s
-	}
-	return "#" + s
-}
-
-// Common property shortcuts (name in Sky = lowerCamel → Css_<name>)
-func cssP(k string) func(any) any {
-	return func(v any) any { return cssProp{k: k, v: fmt.Sprintf("%v", v)} }
-}
-func cssP2(k string) func(any, any) any {
-	return func(a, b any) any { return cssProp{k: k, v: fmt.Sprintf("%v %v", a, b)} }
-}
-
-var (
-	Css_color           = cssP("color")
-	Css_background      = cssP("background")
-	Css_backgroundColor = cssP("background-color")
-	Css_padding         = cssP("padding")
-	Css_padding2        = cssP2("padding")
-	Css_margin          = cssP("margin")
-	Css_margin2         = cssP2("margin")
-	Css_fontSize        = cssP("font-size")
-	Css_fontWeight      = cssP("font-weight")
-	Css_fontFamily      = cssP("font-family")
-	Css_lineHeight      = cssP("line-height")
-	Css_textAlign       = cssP("text-align")
-	Css_border          = cssP("border")
-	Css_borderRadius    = cssP("border-radius")
-	Css_borderBottom    = cssP("border-bottom")
-	Css_display         = cssP("display")
-	Css_cursor          = cssP("cursor")
-	Css_gap             = cssP("gap")
-	Css_justifyContent  = cssP("justify-content")
-	Css_alignItems      = cssP("align-items")
-	Css_width           = cssP("width")
-	Css_height          = cssP("height")
-	Css_maxWidth        = cssP("max-width")
-	Css_minWidth        = cssP("min-width")
-	Css_transform       = cssP("transform")
-	Css_textDecoration  = cssP("text-decoration")
-	Css_zIndex          = cssP("z-index")
-	Css_opacity         = cssP("opacity")
-	Css_overflow        = cssP("overflow")
-	Css_overflowY       = cssP("overflow-y")
-	Css_overflowX       = cssP("overflow-x")
-	Css_top             = cssP("top")
-	Css_bottom          = cssP("bottom")
-	Css_left            = cssP("left")
-	Css_right           = cssP("right")
-	Css_position        = cssP("position")
-	Css_transition      = cssP("transition")
-	Css_animation       = cssP("animation")
-	Css_boxShadow       = cssP("box-shadow")
-	Css_outline         = cssP("outline")
-	Css_backgroundImage = cssP("background-image")
-	Css_whiteSpace      = cssP("white-space")
-	Css_wordBreak       = cssP("word-break")
-	Css_lineClamp       = cssP("line-clamp")
-	Css_flexDirection   = cssP("flex-direction")
-	Css_flexWrap        = cssP("flex-wrap")
-	Css_alignContent    = cssP("align-content")
-	Css_gridTemplateColumns = cssP("grid-template-columns")
-	Css_gridTemplateRows    = cssP("grid-template-rows")
-	Css_gridGap             = cssP("grid-gap")
-	Css_borderTop    = cssP("border-top")
-	Css_borderLeft   = cssP("border-left")
-	Css_borderRight  = cssP("border-right")
-	Css_letterSpacing = cssP("letter-spacing")
-	Css_userSelect   = cssP("user-select")
-	Css_fontStyle    = cssP("font-style")
-	Css_maxHeight    = cssP("max-height")
-	Css_minHeight    = cssP("min-height")
-	Css_borderColor  = cssP("border-color")
-	Css_flex         = cssP("flex")
-	Css_flexGrow     = cssP("flex-grow")
-	Css_flexShrink   = cssP("flex-shrink")
-	Css_flexBasis    = cssP("flex-basis")
-	Css_gridColumn   = cssP("grid-column")
-	Css_gridRow      = cssP("grid-row")
-	Css_rowGap       = cssP("row-gap")
-	Css_columnGap   = cssP("column-gap")
-	Css_borderCollapse = cssP("border-collapse")
-	Css_borderSpacing  = cssP("border-spacing")
-	Css_marginTop     = cssP("margin-top")
-	Css_marginBottom  = cssP("margin-bottom")
-	Css_marginLeft    = cssP("margin-left")
-	Css_marginRight   = cssP("margin-right")
-	Css_paddingTop    = cssP("padding-top")
-	Css_paddingBottom = cssP("padding-bottom")
-	Css_paddingLeft   = cssP("padding-left")
-	Css_paddingRight  = cssP("padding-right")
-	Css_visibility    = cssP("visibility")
-	Css_content       = cssP("content")
-	Css_auto          = cssP("auto")
-	Css_none          = func(_ any) any { return "none" }
-	Css_transparent   = func(_ any) any { return "transparent" }
-	Css_inherit       = func(_ any) any { return "inherit" }
-	Css_initial       = func(_ any) any { return "initial" }
-	Css_monoFont      = func(_ any) any { return "ui-monospace, 'SF Mono', Monaco, 'Cascadia Code', monospace" }
-	Css_transitionDuration = cssP("transition-duration")
-	Css_transitionTimingFunction = cssP("transition-timing-function")
-	Css_outlineOffset = cssP("outline-offset")
-	Css_filter        = cssP("filter")
-	Css_backdropFilter = cssP("backdrop-filter")
-	Css_pointerEvents = cssP("pointer-events")
-	Css_userSelectNone = func(_ any) any { return "none" }
-	Css_objectFit     = cssP("object-fit")
-	Css_objectPosition = cssP("object-position")
-	Css_backgroundSize = cssP("background-size")
-	Css_backgroundPosition = cssP("background-position")
-	Css_backgroundRepeat = cssP("background-repeat")
-	Css_listStyle     = cssP("list-style")
-	Css_listStyleType = cssP("list-style-type")
-	Css_listStylePosition = cssP("list-style-position")
-	Css_verticalAlign = cssP("vertical-align")
-	Css_boxSizing    = cssP("box-sizing")
-)
-
-// Zero-arg CSS values take a unit param to match Sky's `Css.zero ()` call form.
-func Css_borderBox(_ any) any  { return "border-box" }
-func Css_zero(_ any) any       { return "0" }
-func Css_systemFont(_ any) any { return "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" }
-
-// rgba(r,g,b,a) -> "rgba(r, g, b, a)"
-func Css_rgba(r, g, b, a any) any {
-	return fmt.Sprintf("rgba(%v, %v, %v, %v)", r, g, b, a)
-}
-
-// transitionProp(property, duration, timing) -> "property duration timing"
-func Css_transitionProp(p, d, t any) any {
-	return cssProp{k: "transition", v: fmt.Sprintf("%v %vs %v", p, d, t)}
-}
-
-// linearGradient(angle, stops) -> "linear-gradient(angle, stop1, stop2, ...)"
-func Css_linearGradient(angle, stops any) any {
-	var parts []string
-	if xs, ok := stops.([]any); ok {
-		for _, s := range xs {
-			parts = append(parts, fmt.Sprintf("%v", s))
+	case "BoolAttr":
+		if len(adt.Fields) >= 2 && AsBool(adt.Fields[1]) {
+			k := AsString(adt.Fields[0])
+			vn.Attrs[k] = k
 		}
-	}
-	return fmt.Sprintf("linear-gradient(%v, %s)", angle, strings.Join(parts, ", "))
-}
-
-// repeat(n, template) -> "repeat(n, template)"
-func Css_repeat(n, t any) any {
-	return fmt.Sprintf("repeat(%v, %v)", n, t)
-}
-
-// fr(n) -> "Nfr" (grid template unit)
-func Css_fr(n any) any {
-	return fmt.Sprintf("%vfr", n)
-}
-
-// textTransform alias for Css_property("text-transform", v)
-func Css_textTransform(v any) any {
-	return cssProp{k: "text-transform", v: fmt.Sprintf("%v", v)}
-}
-
-// Css_margin4(top, right, bottom, left)
-func Css_margin4(t, r, b, l any) any {
-	return cssProp{k: "margin", v: fmt.Sprintf("%v %v %v %v", t, r, b, l)}
-}
-
-// Css_fontStyle(v)
-func Css_fontStyle2(v any) any {
-	return cssProp{k: "font-style", v: fmt.Sprintf("%v", v)}
-}
-
-// Css_styles: bulk merge — takes a list of property pairs, serialises them
-// as a single style="a:b;c:d;" string for placement on an element.
-func Css_styles(rules any) any {
-	var parts []string
-	if xs, ok := rules.([]any); ok {
-		for _, r := range xs {
-			if cp, ok := r.(cssProp); ok {
-				parts = append(parts, cp.k+":"+cp.v)
+	case "EventAttr":
+		if len(adt.Fields) >= 1 {
+			ev := unwrapAny(adt.Fields[0])
+			if evADT, ok := ev.(SkyADT); ok && len(evADT.Fields) >= 2 {
+				// OnMsg / OnString / OnBool: Fields[0] = event name,
+				// Fields[1] = Msg value (OnMsg) or handler fn.
+				vn.Events[AsString(evADT.Fields[0])] = evADT.Fields[1]
 			}
 		}
+	case "NoAttr":
+		// no-op sentinel — skip
 	}
-	return strings.Join(parts, ";")
 }
 
-// Html_doctype — emit a plain <!DOCTYPE html> root that wraps children.
-func Html_doctype(children any) any {
-	return velement("!doctype-wrapper", nil, asList(children))
+// HtmlRender serialises a Sky `Html` ADT to an HTML string.
+func HtmlRender(node any) string {
+	return renderVNode(HtmlToVNode(node), map[string]any{})
 }
 
-func Html_htmlNode(a, c any) any { return htmlElem("html")(a, c) }
-func Html_headNode(a, c any) any { return htmlElem("head")(a, c) }
-func Html_body(a, c any) any     { return htmlElem("body")(a, c) }
-func Html_title(a, c any) any    { return htmlElem("title")(a, c) }
-func Html_meta(a any, _ ...any) any { return htmlElem("meta")(a, nil) }
-func Html_link(a any) any        { return htmlElem("link")(a, nil) }
-func Html_script(a, c any) any   { return htmlElem("script")(a, c) }
-
-// Html_titleNode — takes a raw string and wraps it in <title>.
-func Html_titleNode(s any) any {
-	return htmlElem("title")(nil, []any{Html_text(s)})
-}
-
-// Html_render: serialise a VNode to HTML string (for server-side rendering).
-func Html_render(node any) any {
-	if vn, ok := node.(VNode); ok {
-		return renderVNode(vn, map[string]any{})
-	}
-	return ""
-}
-
-// Attr_charset / httpEquiv / content / rel — meta-tag friends.
-func Attr_charset(v any) any   { return attr("charset", fmt.Sprintf("%v", v)) }
-func Attr_httpEquiv(v any) any { return attr("http-equiv", fmt.Sprintf("%v", v)) }
-func Attr_content(v any) any   { return attr("content", fmt.Sprintf("%v", v)) }
-
-// shadow(offX, offY, blur, colour) -> a short-hand box-shadow value string
-func Css_shadow(offX, offY, blur, colour any) any {
-	return fmt.Sprintf("%v %v %v %v", offX, offY, blur, colour)
-}
-
-// media("(max-width: 640px)", rules) -> wraps rules under a media query
-func Css_media(query any, rules any) any {
-	return cssMediaRule{query: fmt.Sprintf("%v", query), rules: rules}
-}
-
-type cssMediaRule struct {
-	query string
-	rules any
+func init() {
+	RegisterPure("htmlRender", func(args []any) any {
+		if len(args) < 1 {
+			return ""
+		}
+		return HtmlRender(args[0])
+	})
+	RegisterPure("htmlEscapeText", func(args []any) any {
+		if len(args) < 1 {
+			return ""
+		}
+		return htmlEscapeText(AsString(args[0]))
+	})
+	RegisterPure("htmlEscapeAttr", func(args []any) any {
+		if len(args) < 1 {
+			return ""
+		}
+		return htmlEscapeAttr(AsString(args[0]))
+	})
+	RegisterPure("htmlAttrToString", func(args []any) any {
+		if len(args) < 1 {
+			return ""
+		}
+		a := unwrapAny(args[0])
+		adt, ok := a.(SkyADT)
+		if !ok {
+			return ""
+		}
+		switch adt.SkyName {
+		case "Attr":
+			if len(adt.Fields) >= 2 {
+				return AsString(adt.Fields[0]) + "=\"" +
+					htmlEscapeAttr(AsString(adt.Fields[1])) + "\""
+			}
+		case "BoolAttr":
+			if len(adt.Fields) >= 2 && AsBool(adt.Fields[1]) {
+				return AsString(adt.Fields[0])
+			}
+		}
+		return ""
+	})
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -860,12 +370,12 @@ func copyAttrs(src map[string]string) map[string]string {
 // msgDisplayName extracts a Sky Msg constructor name from its runtime
 // representation.
 //
-//   * ADT struct values (e.g. Msg{Tag: 1, SkyName: "Increment"}) expose
+//   - ADT struct values (e.g. Msg{Tag: 1, SkyName: "Increment"}) expose
 //     their constructor name via the SkyName field the compiler emits.
-//   * Function values are Msg constructors whose name is discoverable
+//   - Function values are Msg constructors whose name is discoverable
 //     via runtime.FuncForPC — we pull the last `_`-segment so
 //     `main.Msg_UpdateEmail` → "UpdateEmail".
-//   * Anything else falls back to "" so the client knows to treat it
+//   - Anything else falls back to "" so the client knows to treat it
 //     as an opaque handler-id only.
 func msgDisplayName(msg any) string {
 	if msg == nil {
@@ -891,7 +401,6 @@ func msgDisplayName(msg any) string {
 	return ""
 }
 
-
 // isDOMEventName: true when `ev` is a plain lowercase identifier safe
 // to embed in `on<name>=`. Rejects hyphens, dots, digits-first, etc.
 func isDOMEventName(ev string) bool {
@@ -906,7 +415,6 @@ func isDOMEventName(ev string) bool {
 	}
 	return true
 }
-
 
 // assignSkyIDs walks a tree and stamps every element (not text/raw) with
 // a deterministic structural path id. Each non-root segment is
@@ -976,7 +484,6 @@ func sanitiseSkyIDKey(s string) string {
 	return b.String()
 }
 
-
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -1000,7 +507,6 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
-
 // VNode equality — compare without recursing on SkyID (since that's
 // assigned per render). Two nodes are attribute-equal if their tag,
 // attributes, and events match; children are compared structurally.
@@ -1019,13 +525,12 @@ func vnodeEqualShallow(a, b *VNode) bool {
 	return true
 }
 
-
 // Patch describes one DOM mutation the client will apply.
 type Patch struct {
-	ID     string            `json:"id"`               // target element's sky-id
+	ID     string            `json:"id"` // target element's sky-id
 	Text   *string           `json:"text,omitempty"`
 	HTML   *string           `json:"html,omitempty"`
-	Attrs  map[string]string `json:"attrs,omitempty"`  // value "" => remove
+	Attrs  map[string]string `json:"attrs,omitempty"` // value "" => remove
 	Remove bool              `json:"remove,omitempty"`
 }
 
@@ -1051,7 +556,6 @@ type batchedEvent struct {
 	Value     string            `json:"value,omitempty"`
 }
 
-
 // diffTrees: produce patches to transform `old` into `new_`. If either
 // tree is missing (first render) the caller should fall back to a full
 // innerHTML replace — diffTrees returns a single patch with the full
@@ -1070,7 +574,6 @@ func diffTrees(old, new_ *VNode, clientState map[string]string) []Patch {
 	diffNodes(old, new_, clientState, &out)
 	return out
 }
-
 
 func diffNodes(old, new_ *VNode, clientState map[string]string, out *[]Patch) {
 	if old == nil || new_ == nil {
@@ -1191,7 +694,6 @@ func isAuthorityControlledAttr(k string) bool {
 	return k == "value" || k == "checked" || k == "selected"
 }
 
-
 func isVoidTag(t string) bool {
 	switch t {
 	case "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -1212,8 +714,8 @@ func randID() string {
 // ═══════════════════════════════════════════════════════════
 
 type cmdT struct {
-	kind string // "none", "perform", "batch"
-	task any
+	kind  string // "none", "perform", "batch"
+	task  any
 	toMsg any
 	batch []any
 }
@@ -1231,8 +733,8 @@ type subT struct {
 // SkySub is the public type for Sky's Sub msg type.
 type SkySub = subT
 
-func Cmd_none() SkyCmd             { return cmdT{kind: "none"} }
-func Cmd_batch(list any) SkyCmd    { return cmdT{kind: "batch", batch: asList(list)} }
+func Cmd_none() SkyCmd                { return cmdT{kind: "none"} }
+func Cmd_batch(list any) SkyCmd       { return cmdT{kind: "batch", batch: asList(list)} }
 func Cmd_perform(task, to any) SkyCmd { return cmdT{kind: "perform", task: task, toMsg: to} }
 
 func Sub_none() SkySub { return subT{kind: "none"} }
@@ -1757,17 +1259,16 @@ type liveApp struct {
 	subscriptions any // Model -> Sub Msg
 	routes        []liveRoute
 	notFound      any
-	guard         any // Maybe (Msg -> Model -> Result String ()) — nil = no guard
-	api           []apiRoute  // REST-style custom handlers alongside Live pages
-	staticDir     string      // Serves files from this directory under /static/…
-	staticURL     string      // URL mount prefix (default "/static")
+	guard         any          // Maybe (Msg -> Model -> Result String ()) — nil = no guard
+	api           []apiRoute   // REST-style custom handlers alongside Live pages
+	staticDir     string       // Serves files from this directory under /static/…
+	staticURL     string       // URL mount prefix (default "/static")
 	store         SessionStore // sessionID -> *liveSession (memory, sqlite, or postgres)
 	locker        *sessionLocker
 	msgTags       map[string]int // SkyName → Tag cache for direct-send events
 	msgTagsMu     sync.Mutex
 	bannerCfg     liveBannerConfig // resolved env-vars + cfg.status overrides
 }
-
 
 // apiRoute represents a custom handler mounted outside the TEA cycle.
 // Created from Sky code via `Live.api "GET /webhook/stripe" handleStripe`.
@@ -1790,11 +1291,12 @@ func Live_route(path any, page any) any {
 	return liveRoute{path: fmt.Sprintf("%v", path), page: page}
 }
 
-
 // Live_api registers a custom HTTP handler outside the TEA cycle. Used
 // for OAuth callbacks, webhooks, REST endpoints that coexist with a
 // Live app. The Sky-side handler has signature
-//   Request -> Task String Response
+//
+//	Request -> Task String Response
+//
 // mirroring Sky.Http.Server.
 //
 // `spec` is a pattern string like "GET /webhook/stripe" or
@@ -1809,10 +1311,9 @@ func Live_api(spec any, handler any) any {
 	return apiRoute{method: method, pattern: pattern, handler: handler}
 }
 
-
 // dispatchRoot routes a request to:
-//   1. a matching apiRoute (REST handler), OR
-//   2. handleInitial (Live page render).
+//  1. a matching apiRoute (REST handler), OR
+//  2. handleInitial (Live page render).
 func (app *liveApp) dispatchRoot(w http.ResponseWriter, r *http.Request) {
 	for _, ar := range app.api {
 		if ar.method != "" && !strings.EqualFold(ar.method, r.Method) {
@@ -1829,7 +1330,6 @@ func (app *liveApp) dispatchRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
-
 
 // serveAPI calls the Sky handler with a Request-like map and renders
 // the returned Response.
@@ -1864,7 +1364,6 @@ func (app *liveApp) serveAPI(ar apiRoute, params []string, w http.ResponseWriter
 	w.WriteHeader(status)
 	w.Write([]byte(respBody))
 }
-
 
 func unpackResponse(v any) (int, map[string]string, string) {
 	// Sky.Http.Server Response shape:
@@ -1915,7 +1414,6 @@ func unpackResponse(v any) (int, map[string]string, string) {
 	return 200, nil, fmt.Sprintf("%v", v)
 }
 
-
 // applyRoute matches `urlPath` against app.routes and returns a new
 // model with its Page field set to the matching route's page (or
 // app.notFound when no route matches).
@@ -1960,7 +1458,6 @@ func applyRoute(app *liveApp, model any, urlPath string) any {
 	return model
 }
 
-
 // matchRoute compares a pattern like `/product/:id` against an incoming
 // path. Returns the ordered list of captured segment values on success.
 func matchRoute(pattern, path string) ([]string, bool) {
@@ -1980,7 +1477,6 @@ func matchRoute(pattern, path string) ([]string, bool) {
 	return params, true
 }
 
-
 func splitPath(p string) []string {
 	// Trim leading/trailing `/` so `/a/b/` and `/a/b` match the same.
 	p = strings.Trim(p, "/")
@@ -1989,7 +1485,6 @@ func splitPath(p string) []string {
 	}
 	return strings.Split(p, "/")
 }
-
 
 // If a route page is a function (ADT constructor expecting URL params),
 // apply the captured params via sky_call; otherwise pass through.
@@ -2231,7 +1726,6 @@ func isBrowserNoisePath(p string) bool {
 	return false
 }
 
-
 func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	// Browser-noise paths (favicons, devtools prefetch, static asset
 	// probes, .well-known) 404 BEFORE session creation. Without this
@@ -2240,6 +1734,21 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	// both run init — the user sees [APP] initialised twice.
 	_, routed := matchAnyRoute(app, r.URL.Path)
 	if !routed && isBrowserNoisePath(r.URL.Path) {
+		// If staticDir is configured and the requested file exists at the
+		// root of it (favicon.ico, robots.txt, apple-touch-icon.png, …),
+		// serve it before 404'ing. Browsers always request /favicon.ico
+		// from root, never from /static/, so without this serve-from-root
+		// shortcut the user has no way to suppress the 404 short of adding
+		// a `<link rel="icon">` to every page's head AND ensuring the
+		// browser honours it instead of also probing the root.
+		if app.staticDir != "" {
+			candidate := filepath.Join(app.staticDir,
+				filepath.Clean("/"+strings.TrimPrefix(r.URL.Path, "/")))
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				http.ServeFile(w, r, candidate)
+				return
+			}
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -2293,7 +1802,7 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	}
 	app.setupSubscriptions(sess)
 
-	vn := sky_call(app.view, model).(VNode)
+	vn := HtmlToVNode(sky_call(app.view, model))
 	assignSkyIDs(&vn, "r")
 	body := renderVNode(vn, sess.handlers)
 	sess.prevTree = &vn
@@ -2321,20 +1830,20 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 
 // liveBaseCSS is the minimal reset injected into every Sky.Live page.
 // Goals:
-//   1. Zero out browser-default margins on <p>, <h1>-<h6>, <ul>, <ol>,
-//      <li>, <body>, <html> so flex layout from Std.Ui isn't fighting
-//      legacy editorial CSS that wants 1em vertical spacing.
-//   2. Inherit font on form controls — <button> / <input> / <select>
-//      / <textarea> default to a smaller browser font, which makes
-//      Std.Ui buttons look out of place next to surrounding text.
-//   3. box-sizing: border-box so padding adds to the slot's content
-//      area rather than expanding the box. Std.Ui generates explicit
-//      width/height in cells; border-box keeps that math correct.
-//   4. min-height: 100vh on body so a dark-themed view fills the
-//      viewport instead of leaving a white strip below the content.
-//   5. Sensible default font-family (system stack, no web fetch) so
-//      apps that don't set their own typography don't get Times New
-//      Roman.
+//  1. Zero out browser-default margins on <p>, <h1>-<h6>, <ul>, <ol>,
+//     <li>, <body>, <html> so flex layout from Std.Ui isn't fighting
+//     legacy editorial CSS that wants 1em vertical spacing.
+//  2. Inherit font on form controls — <button> / <input> / <select>
+//     / <textarea> default to a smaller browser font, which makes
+//     Std.Ui buttons look out of place next to surrounding text.
+//  3. box-sizing: border-box so padding adds to the slot's content
+//     area rather than expanding the box. Std.Ui generates explicit
+//     width/height in cells; border-box keeps that math correct.
+//  4. min-height: 100vh on body so a dark-themed view fills the
+//     viewport instead of leaving a white strip below the content.
+//  5. Sensible default font-family (system stack, no web fetch) so
+//     apps that don't set their own typography don't get Times New
+//     Roman.
 //
 // The reset is ~600 bytes — negligible compared to the typical page
 // body. NO !important is used; user view styles always win.
@@ -2357,7 +1866,6 @@ func (app *liveApp) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"pollInterval": 0,          // 0 = SSE only
 	})
 }
-
 
 func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 	// TEA wire format — see docs/skylive/input-authority-protocol.md
@@ -2442,7 +1950,7 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 	// Handler IDs are <sky-id>.<event>, stable per model state.
 	if len(sess.handlers) == 0 && sess.model != nil {
 		sess.handlers = map[string]any{}
-		vn := sky_call(app.view, sess.model).(VNode)
+		vn := HtmlToVNode(sky_call(app.view, sess.model))
 		assignSkyIDs(&vn, "r")
 		_ = renderVNode(vn, sess.handlers)
 		sess.prevTree = &vn
@@ -2615,7 +2123,7 @@ func (app *liveApp) dispatchBatched(sess *liveSession, ev batchedEvent) {
 	sess.mu.Lock()
 	if len(sess.handlers) == 0 && sess.model != nil {
 		sess.handlers = map[string]any{}
-		vn := sky_call(app.view, sess.model).(VNode)
+		vn := HtmlToVNode(sky_call(app.view, sess.model))
 		assignSkyIDs(&vn, "r")
 		_ = renderVNode(vn, sess.handlers)
 		sess.prevTree = &vn
@@ -2679,7 +2187,6 @@ func (app *liveApp) dispatchBatched(sess *liveSession, ev batchedEvent) {
 		}
 	}
 }
-
 
 // patchesAreFullReplace: a single Patch targeting the root that just
 // replaces HTML is no better than returning the body directly — keep the
@@ -2745,7 +2252,7 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 	sess.model = tupleFirst(result)
 	cmd := tupleSecond(result)
 	sess.handlers = map[string]any{}
-	vn := sky_call(app.view, sess.model).(VNode)
+	vn := HtmlToVNode(sky_call(app.view, sess.model))
 	assignSkyIDs(&vn, "r")
 	body = renderVNode(vn, sess.handlers)
 	sess.prevTree = &vn
@@ -2769,13 +2276,12 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 // the model (used by dispatch when guard short-circuits).
 func (app *liveApp) renderView(sess *liveSession) string {
 	sess.handlers = map[string]any{}
-	vn := sky_call(app.view, sess.model).(VNode)
+	vn := HtmlToVNode(sky_call(app.view, sess.model))
 	assignSkyIDs(&vn, "r")
 	body := renderVNode(vn, sess.handlers)
 	sess.prevTree = &vn
 	return body
 }
-
 
 // isErrResult: True when v is a SkyResult with Tag == 1 (Err).
 func isErrResult(v any) bool {
@@ -2803,7 +2309,6 @@ func extractErrResultValue(v any) any {
 	}
 	return fv.Interface()
 }
-
 
 // runCmd processes a Cmd value, spawning goroutines for Cmd.perform.
 // Goroutines dispatch their result back through dispatch via SSE.
@@ -3006,10 +2511,7 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 		// for-select loop with the legacy prevTree/prevBody untouched.
 		func() {
 			defer func() { _ = recover() }()
-			vn, ok := sky_call(app.view, sess.model).(VNode)
-			if !ok {
-				return
-			}
+			vn := HtmlToVNode(sky_call(app.view, sess.model))
 			assignSkyIDs(&vn, "r")
 			sess.handlers = map[string]any{}
 			body := renderVNode(vn, sess.handlers)
@@ -3089,15 +2591,15 @@ func sessionID(r *http.Request, w http.ResponseWriter) string {
 // non-ASCII, emoji); the DOM uses textContent, not innerHTML, so XSS
 // is structurally impossible.
 type liveBannerConfig struct {
-	Enabled         bool
-	BaseMs          int
-	MaxMs           int
-	MaxAttempts     int
-	QueueMax        int
-	Reconnecting    string
-	Offline         string
-	HelloTimeoutMs  int
-	HeartbeatTtlMs  int
+	Enabled        bool
+	BaseMs         int
+	MaxMs          int
+	MaxAttempts    int
+	QueueMax       int
+	Reconnecting   string
+	Offline        string
+	HelloTimeoutMs int
+	HeartbeatTtlMs int
 }
 
 // sseHeartbeatInterval is the cadence at which handleSSE emits a
@@ -4519,7 +4021,21 @@ if (document.readyState === "loading") {
 // Helpers: tuple access, sky_call dispatch
 // ═══════════════════════════════════════════════════════════
 
+// tupleFirst / tupleSecond extract V0 / V1 from a Sky-emitted 2-tuple.
+//
+// v0.13 codegen erases all tuples to `rt.SkyTuple2 = T2[any, any]` — see
+// the design comment in `Sky.Build.Compile.solvedTypeToGo`'s TTuple
+// arm. The TEA dispatch path (`update` returning `(Model, Cmd msg)`)
+// is the hot caller. Fast-path the common case via direct type
+// assertion, falling back to reflect for shape-erased values arriving
+// from generic kernels (`AsTuple2`-style wideners).
 func tupleFirst(v any) any {
+	if t, ok := v.(SkyTuple2); ok {
+		return t.V0
+	}
+	if t, ok := v.(SkyTuple3); ok {
+		return t.V0
+	}
 	r := reflect.ValueOf(v)
 	if r.Kind() == reflect.Struct {
 		f := r.FieldByName("V0")
@@ -4537,6 +4053,12 @@ func tupleFirst(v any) any {
 }
 
 func tupleSecond(v any) any {
+	if t, ok := v.(SkyTuple2); ok {
+		return t.V1
+	}
+	if t, ok := v.(SkyTuple3); ok {
+		return t.V1
+	}
 	r := reflect.ValueOf(v)
 	if r.Kind() == reflect.Struct {
 		f := r.FieldByName("V1")

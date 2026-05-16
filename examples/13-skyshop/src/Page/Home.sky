@@ -8,7 +8,7 @@ import Std.Html exposing (..)
 import Std.Html as Html
 import Std.Html.Attributes exposing (..)
 import Std.Html.Attributes as Attr
-import Std.Live.Events exposing (onClick, onInput)
+import Std.Html.Events exposing (onClick, onInput)
 import State exposing (..)
 import Ui.Layout as Layout
 import Lib.Db as Db
@@ -387,7 +387,7 @@ viewPrice pricing =
             [span [tw [ fontBold, textLg, textGray900 ]] [text pricing.original]]
 
 
-viewStockDot : Int -> VNode
+viewStockDot : Int -> (Html Msg)
 viewStockDot stock =
     if stock == 0 then
         span [tw [ w2, Layout.h2_, roundedFull, bgRed500, inlineBlock ]] []

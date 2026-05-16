@@ -139,4 +139,9 @@ spec = do
                     ]
             (ec, out) <- buildLiteral src
             ec `shouldNotBe` 0
-            out `shouldSatisfy` ("PARSE ERROR" `isInfixOf`)
+            -- v0.13 Layer 1: parser failures emit a structured
+            -- Diagnostic with the stable code [E0001] (parse-error
+            -- category).  Pre-v0.13 the test looked for the raw
+            -- `PARSE ERROR: <path>: <ctor>` message that surfaced
+            -- the Haskell constructor name to end users.
+            out `shouldSatisfy` ("[E0001]" `isInfixOf`)

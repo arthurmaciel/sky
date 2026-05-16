@@ -528,9 +528,20 @@ collectLocalBindings srcMod = concatMap valueLocals (Src._values srcMod)
 
     -- Each case arm is its own scope (the arm body), so binders from
     -- the pattern are visible only there.
+    --
+    -- v0.13 G fix: extend the scope to ALSO span the pattern's own
+    -- region so a hover on the pattern binder itself (`n` in
+    -- `SetCount n -> n`) resolves to a `LocalBinding`. Previously the
+    -- scope was just the body's region — the binder's source position
+    -- was BEFORE the body's start, so `lookupLocal`'s regionContains
+    -- check rejected it and hover returned a bare name with no type.
     caseArm scope (pat, body) =
-        let bodyReg = case body of A.At r _ -> r
-        in patBinders bodyReg pat ++ exprLocals bodyReg body
+        let A.At patReg _  = pat
+            A.At bodyReg _ = body
+            -- Union: start of pattern's region, end of body's region.
+            armScope = A.Region (A._start patReg) (A._end bodyReg)
+            _ = scope  -- outer scope not needed; armScope is tighter
+        in patBinders armScope pat ++ exprLocals armScope body
 
     defLocals scope (A.At _ d) = case d of
         Src.Define (A.At nr n) ps body _ ->

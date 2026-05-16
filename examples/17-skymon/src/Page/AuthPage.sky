@@ -5,12 +5,12 @@ import Sky.Core.Dict as Dict
 import Sky.Core.Maybe as Maybe
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
-import Std.Live.Events exposing (onClick, onInput, onChange)
+import Std.Html.Events exposing (onClick, onInput, onChange)
 import State exposing (..)
 import Ui.Layout as Layout
 
 
-viewAuth : Model -> VNode
+viewAuth : Model -> (Html Msg)
 viewAuth model =
     Layout.page
         model
@@ -26,7 +26,7 @@ viewAuth model =
                 ]])
 
 
-viewAuthBody : Model -> VNode
+viewAuthBody : Model -> (Html Msg)
 viewAuthBody model =
     case model.session of
 
@@ -37,7 +37,7 @@ viewAuthBody model =
             viewLoginContent model
 
 
-viewSignedIn : UserSession -> VNode
+viewSignedIn : UserSession -> (Html Msg)
 viewSignedIn session =
     div
         [style "text-align: center"]
@@ -58,12 +58,12 @@ viewSignedIn session =
         ]
 
 
-viewLoginContent : Model -> VNode
+viewLoginContent : Model -> (Html Msg)
 viewLoginContent model =
     div [] [ viewLoginForm model, viewError model.errorMessage ]
 
 
-viewLoginForm : Model -> VNode
+viewLoginForm : Model -> (Html Msg)
 viewLoginForm model =
     div
         []
@@ -111,7 +111,7 @@ viewLoginForm model =
         ]
 
 
-viewError : String -> VNode
+viewError : String -> (Html Msg)
 viewError msg =
     if msg == "" then
         text ""

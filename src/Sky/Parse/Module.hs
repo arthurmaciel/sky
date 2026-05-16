@@ -9,6 +9,7 @@ import Sky.Parse.Variable (lower, upper)
 import Sky.Parse.Declaration (declaration, DeclType(..), DeclPayload(..))
 import qualified Sky.AST.Source as Src
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Diagnostic as Diag
 
 
 -- | Parse error for module level
@@ -18,6 +19,48 @@ data ModuleError
     | ImportExpected Row Col
     | DeclarationError Row Col
     deriving (Show)
+
+
+-- | v0.13 Layer 1: lift a parser error to a structured Diagnostic.
+-- The parser is positionally-rich (Row + Col) but otherwise opaque
+-- — we render the variant as a short, user-facing reason rather than
+-- the constructor name. Future Layer 1 work moves the parser to
+-- produce Diagnostics directly with related-region pointers (e.g.
+-- "module header missing — expected `module Foo exposing (…)`
+-- on line 1" + caret on first non-blank line); for now this gives
+-- the Elm-style header + source snippet + stable [E0001] code that
+-- LSP renders as a red squiggle.
+moduleErrorToDiagnostic :: FilePath -> ModuleError -> Diag.Diagnostic
+moduleErrorToDiagnostic path err =
+    let (r, c, reason) = describe err
+        region = A.Region (A.Position r c) (A.Position r c)
+    in Diag.mkError path region Diag.CatParse
+         Diag.parseE_SyntaxError reason
+  where
+    describe (ModuleExpected r c) =
+        ( r, c
+        , "Unexpected token here while parsing the module body."
+       ++ "\n\nThe module body is a sequence of top-level declarations"
+       ++ "\n(`name = ...`, `type alias`, `type`, `import`).  This usually"
+       ++ "\nmeans:"
+       ++ "\n  * A typo in a keyword (`tyep` for `type`)."
+       ++ "\n  * An expression continuing onto the next line without"
+       ++ "\n    enough indentation to count as a continuation."
+       ++ "\n  * A stray `=` or `:` not associated with any binding.")
+    describe (ModuleNameExpected r c) =
+        ( r, c
+        , "Module name expected here. Module names start with an"
+       ++ "\nupper-case letter and use `.` to nest, e.g. `Main` or"
+       ++ "\n`Sky.Core.List`.")
+    describe (ImportExpected r c) =
+        ( r, c
+        , "Import declaration expected here. Syntax: `import Foo` or"
+       ++ "\n`import Foo as F exposing (..)`.")
+    describe (DeclarationError r c) =
+        ( r, c
+        , "Top-level declaration expected here. A declaration is"
+       ++ "\n`name : Type` (annotation) or `name args = body` (value)"
+       ++ "\n or `type alias Foo = …` / `type Foo = A | B`.")
 
 
 -- | Parse a complete Sky module.

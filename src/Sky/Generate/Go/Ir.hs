@@ -30,7 +30,8 @@ data GoExpr
     | GoBinary !String !GoExpr !GoExpr              -- a op b
     | GoUnary !String !GoExpr                       -- op a
     | GoTypeAssert !GoExpr !String                  -- expr.(Type)
-    | GoBlock [GoStmt] !GoExpr                      -- IIFE: func() T { stmts; return expr }()
+    | GoBlock [GoStmt] !GoExpr                      -- IIFE: func() any { stmts; return expr }()
+    | GoTypedBlock !String [GoStmt] !GoExpr         -- IIFE: func() T { stmts; return expr }() — v0.13 typed lowerer
     | GoRaw !String                                 -- raw Go code (escape hatch)
     deriving (Show)
 

@@ -26,8 +26,9 @@
 -- exception machinery and invalid Sky produces diagnostics, not aborts.
 module Sky.Lsp.Server (runLsp) where
 
+import Control.Concurrent (forkIO)
 import Control.Exception (SomeException, fromException, throwIO, try)
-import Control.Monad (forever, when)
+import Control.Monad (forever, when, void)
 import Data.List (isPrefixOf, sortBy)
 import Data.Ord (comparing)
 import qualified Data.Aeson as A
@@ -58,11 +59,17 @@ import qualified Sky.AST.Source as Src
 import qualified Sky.Sky.ModuleName as ModuleName
 import System.Timeout (timeout)
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Diagnostic as Diag
+import qualified Sky.Reporting.Lsp as LspR
 import qualified Sky.Format.Format as Fmt
 import qualified Sky.Lsp.Index as Idx
 import qualified Sky.Lsp.Diag as Diag
 import qualified System.Directory as Dir
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (takeDirectory, (</>), makeRelative, isAbsolute)
+import qualified System.Process as Proc
+import System.Environment (getExecutablePath)
+import Data.Char (isDigit, isSpace)
+import Data.List (isInfixOf)
 
 
 -- ─── State ─────────────────────────────────────────────────────────────
@@ -822,7 +829,197 @@ handleDidSaveSt st req = do
     case Map.lookup uri docs of
         Just (_, text) -> publishDiagnosticsSt (Just st) uri text
         Nothing -> return ()
+    -- v0.13 Layer 4: on save, ALSO run the FULL pipeline (codegen +
+    -- `go build`) in the background.  Per-keystroke (`didChange`)
+    -- stays fast — Parse + Canon + Solve + Exhaust only.  But on
+    -- save we shell out to `sky check`, which is a superset of
+    -- `sky build`: it runs the Go emitter and `go build`, surfacing
+    -- the codegen-stage bug classes (Issue #52's `Model_R`, typed-
+    -- tuple destructure panics, etc.) that the type-checker alone
+    -- can't see.  Background so the editor stays responsive; the
+    -- diagnostics land when the subprocess returns.
+    void $ forkIO $ runFullCheckBackground st path uri
     return ()
+
+
+-- | v0.13 Layer 4: spawn `sky check` on the saved file's project in
+-- a background thread, parse its codegen / go-build diagnostics, and
+-- publish them.  This closes the LSP-vs-CLI asymmetry: any error
+-- `sky check` catches now also surfaces as an editor diagnostic on
+-- save.
+--
+-- Best-effort throughout: a missing sky.toml, a missing `sky`
+-- binary, a subprocess crash — none of these break the server.  The
+-- background nature means a slow project build (skyshop) doesn't
+-- block the editor.
+runFullCheckBackground :: ServerState -> FilePath -> T.Text -> IO ()
+runFullCheckBackground _st path uri = do
+    result <- try go :: IO (Either SomeException ())
+    case result of
+        Left _  -> return ()   -- swallow — never break the server
+        Right _ -> return ()
+  where
+    go = do
+        root <- findProjectRoot path
+        -- Resolve the entry point from sky.toml; default to
+        -- src/Main.sky.  We type-check the WHOLE project from the
+        -- entry, not the saved file in isolation — that's what
+        -- `sky check` does and it's the only way codegen-stage
+        -- errors (which need the full module graph) surface.
+        let tomlPath = root </> "sky.toml"
+        hasToml <- Dir.doesFileExist tomlPath
+        entry <- if hasToml
+                   then do
+                       tomlSrc <- readFile tomlPath
+                       return (extractEntry tomlSrc)
+                   else return "src/Main.sky"
+        skyBin <- getExecutablePath
+        -- Run `sky check <entry>` with cwd = project root.
+        (_ec, out, err) <- Proc.readCreateProcessWithExitCode
+            (Proc.shell (shellQuoteArg skyBin ++ " check "
+                         ++ shellQuoteArg entry))
+                { Proc.cwd = Just root }
+            ""
+        -- `sky check` writes its rendered error block to stdout
+        -- (the Compile pipeline's progress + error text) — capture
+        -- both streams to be safe.
+        let combined = out ++ "\n" ++ err
+            parsed   = parseSkyCheckErrors combined
+        -- Group diagnostics by file so each file gets ONE
+        -- publishDiagnostics with its full set (replacing the
+        -- per-file diagnostics from the type-check pass for that
+        -- file).  Only publish for the saved file's URI for now —
+        -- cross-file diagnostics on OTHER files would need their
+        -- own URI mapping, which we keep simple here.
+        let savedRel = makeRelative root path
+            forSaved = [ d | d@(f, _, _, _, _) <- parsed
+                           , f == savedRel || f == path ]
+        case forSaved of
+            [] -> return ()  -- no full-pipeline errors for this file
+            ds -> sendNotification "textDocument/publishDiagnostics" $
+                    A.object
+                      [ "uri"         A..= uri
+                      , "diagnostics" A..= map skyCheckErrToLsp ds
+                      ]
+
+    -- Naive `entry = "..."` extractor from sky.toml.  Falls back to
+    -- src/Main.sky on any parse miss.
+    extractEntry :: String -> String
+    extractEntry tomlSrc =
+        case [ v | l <- lines tomlSrc
+                 , let t = dropWhile isSpace l
+                 , "entry" `isPrefixOf` t
+                 , let afterEq = drop 1 (dropWhile (/= '=') t)
+                 , let v = unquote (dropWhile isSpace afterEq)
+                 , not (null v) ] of
+            (v:_) -> v
+            []    -> "src/Main.sky"
+
+    unquote s = case s of
+        ('"':rest) -> takeWhile (/= '"') rest
+        _          -> takeWhile (not . isSpace) s
+
+    shellQuoteArg s = "'" ++ concatMap esc s ++ "'"
+      where esc '\'' = "'\\''"; esc c = [c]
+
+
+-- | Parse `sky check`'s rendered error blocks into structured
+-- (file, line, col, code, message) tuples.
+--
+-- Block shape (Elm-style, emitted by `Sky.Reporting.Diagnostic`):
+--
+--   -- TYPE ERROR ───…─── src/Main.sky:5:9 [E2001]
+--   <blank>
+--      3 | …
+--      …context…
+--   <blank>
+--   Variable 'n' type mismatch: Int vs String
+--
+-- The header line reliably: starts with `-- `, ends with
+-- ` [<CODE>]`, and the token immediately before ` [` is
+-- `<file>:<line>:<col>`.  The message is the first column-0
+-- (non-indented) non-empty line after the header that is not
+-- itself a `-- ` header — the source-context block is always
+-- indented.
+parseSkyCheckErrors :: String -> [(FilePath, Int, Int, String, String)]
+parseSkyCheckErrors src = go (lines src)
+  where
+    go [] = []
+    go (l:ls)
+        | Just (file, ln, col, code) <- parseHeader l =
+            let (msg, rest) = grabMessage ls
+            in (file, ln, col, code, msg) : go rest
+        | otherwise = go ls
+
+    -- Header: `-- <CATEGORY> ─…─ <file>:<line>:<col> [<CODE>]`.
+    parseHeader line
+        | "-- " `isPrefixOf` line
+        , " [" `isInfixOf` line
+        , "]" `isSuffixOf'` line =
+            let -- everything before the final ` [CODE]`
+                beforeCode = reverse (drop 1 (dropWhile (/= '[')
+                                  (reverse line)))
+                code = reverse (takeWhile (/= '[')
+                          (drop 1 (reverse line)))
+                code' = filter (\c -> c /= ']' && not (isSpace c)) code
+                -- The location token is the LAST whitespace-delimited
+                -- word of `beforeCode` (the ─ runs are space-padded).
+                toks = words beforeCode
+            in case reverse toks of
+                 (locTok:_) -> case parseLoc locTok of
+                     Just (f, ln, c) -> Just (f, ln, c, code')
+                     Nothing         -> Nothing
+                 [] -> Nothing
+        | otherwise = Nothing
+
+    isSuffixOf' suf s = suf `isInfixOf` s && drop (length s - length suf) s == suf
+
+    -- `<file>:<line>:<col>` — split on the last two colons.
+    parseLoc tok =
+        case reverse (splitColons tok) of
+            (colS:lnS:fileParts)
+                | all isDigit colS, not (null colS)
+                , all isDigit lnS, not (null lnS)
+                , not (null fileParts) ->
+                    Just ( intercalateColon (reverse fileParts)
+                         , read lnS, read colS )
+            _ -> Nothing
+
+    splitColons = foldr f [[]]
+      where
+        f ':' acc       = [] : acc
+        f ch  (cur:rest) = (ch:cur) : rest
+        f _   []         = [[]]
+    intercalateColon []     = ""
+    intercalateColon [x]    = x
+    intercalateColon (x:xs) = x ++ ":" ++ intercalateColon xs
+
+    -- After a header, skip the indented source-context block; the
+    -- message is the first column-0 non-empty non-header line.
+    grabMessage [] = ("", [])
+    grabMessage (m:ms)
+        | null (dropWhile isSpace m)        = grabMessage ms  -- blank
+        | take 3 m == "   "                 = grabMessage ms  -- context / progress
+        | "-- " `isPrefixOf` m              = ("", m:ms)      -- next header, no msg
+        | otherwise                         = (m, ms)        -- the message
+
+
+-- | Convert a parsed `sky check` error tuple to the LSP diagnostic
+-- wire shape.  1-based (line, col) from the CLI → 0-based LSP.
+skyCheckErrToLsp :: (FilePath, Int, Int, String, String) -> A.Value
+skyCheckErrToLsp (_file, ln, col, code, msg) =
+    let l0 = max 0 (ln - 1)
+        c0 = max 0 (col - 1)
+    in A.object
+        [ "range" A..= A.object
+            [ "start" A..= A.object [ "line" A..= l0, "character" A..= c0 ]
+            , "end"   A..= A.object [ "line" A..= l0, "character" A..= (c0 + 1) ]
+            ]
+        , "severity" A..= (1 :: Int)   -- Error
+        , "source"   A..= ("sky check" :: String)
+        , "code"     A..= code
+        , "message"  A..= msg
+        ]
 
 
 -- | handleDidOpenSt: same as handleDidOpen but routes diagnostics
@@ -1011,17 +1208,25 @@ computeDiagnosticsSt st path src = do
 runPipeline :: T.Text -> IO [A.Value]
 runPipeline src = case Parse.parseModule src of
     Left err ->
-        return [mkDiagnosticAtError err ("Parse error: " ++ showParseError err)]
+        -- v0.13 Layer 4: route LSP diagnostics through the same
+        -- structured Diagnostic AST the CLI uses.  Each phase's
+        -- error path produces a Diag.Diagnostic; renderLspDiagnostic
+        -- serialises it to the LSP wire shape with the stable code
+        -- field and (eventually) related-information regions.
+        return [ LspR.renderLspDiagnostic
+                   (Parse.moduleErrorToDiagnostic "<buffer>" err) ]
     Right srcMod ->
         case Canonicalise.canonicalise srcMod of
             Left err ->
-                return [diagnosticFromMessage ("Canonicalise: " ++ err)]
+                return [ LspR.renderLspDiagnostic
+                           (Canonicalise.legacyToDiag "<buffer>" err) ]
             Right canMod -> do
                 cs <- Constrain.constrainModule canMod
                 r  <- Solve.solve cs
                 case r of
                     Solve.SolveError err ->
-                        return [diagnosticFromMessage ("Type error: " ++ err)]
+                        return [ LspR.renderLspDiagnostic
+                                   (Solve.solveErrorToDiagnostic "<buffer>" err) ]
                     Solve.SolveOk _ ->
                         return (map exhaustDiagnostic (Exhaust.checkModule canMod))
 
@@ -1046,23 +1251,25 @@ runPipeline src = case Parse.parseModule src of
 runPipelineSt :: ServerState -> FilePath -> T.Text -> IO [A.Value]
 runPipelineSt st path src = case Parse.parseModule src of
     Left err ->
-        return [mkDiagnosticAtError err ("Parse error: " ++ showParseError err)]
+        return [ LspR.renderLspDiagnostic
+                   (Parse.moduleErrorToDiagnostic path err) ]
     Right srcMod ->
         case Canonicalise.canonicalise srcMod of
             Left err ->
-                return [diagnosticFromMessage ("Canonicalise: " ++ err)]
+                return [ LspR.renderLspDiagnostic
+                           (Canonicalise.legacyToDiag path err) ]
             Right canMod -> do
                 externals <- getExternalsForFile st path srcMod canMod
                 cs <- Constrain.constrainModuleWithExternals externals canMod
                 r  <- Solve.solve cs
                 case r of
                     Solve.SolveError err ->
-                        -- No suppression: with closed-record kernel
-                        -- sigs for Live.app / Tui.app / Cli.program
-                        -- AND field-name-aware error rendering, the
-                        -- LSP's diagnostic now matches `sky check`'s
-                        -- exactly. Limitation #19 closed.
-                        return [diagnosticFromMessage ("Type error: " ++ err)]
+                        -- v0.13 Layer 4: closed-record kernel sigs
+                        -- + field-name-aware error rendering means
+                        -- the LSP diagnostic matches `sky check`'s
+                        -- exactly.  Limitation #19 closed.
+                        return [ LspR.renderLspDiagnostic
+                                   (Solve.solveErrorToDiagnostic path err) ]
                     Solve.SolveOk _ ->
                         return (map exhaustDiagnostic (Exhaust.checkModule canMod))
 
@@ -1252,20 +1459,20 @@ isLikelyExternalsFalsePositive err =
     tails xs@(_:rest) = xs : tails rest
 
 
--- | Convert an exhaustiveness diagnostic into an LSP diagnostic. The
--- region is the case-expression region carried by the `Diag`.
+-- | Convert an exhaustiveness diagnostic into an LSP diagnostic.
+-- v0.13 Layer 4: routes through the structured Diagnostic AST so
+-- the LSP wire shape (stable [E3001] code, source="sky") matches
+-- the CLI's.  Pre-v0.13 this built the JSON envelope inline via
+-- `mkDiagnostic`.
 exhaustDiagnostic :: Exhaust.Diag -> A.Value
 exhaustDiagnostic (Exhaust.Diag region missing hint) =
-    let A.Region (A.Position r1 c1) (A.Position r2 c2) = region
-        line1 = max 0 (r1 - 1)
-        col1  = max 0 (c1 - 1)
-        line2 = max 0 (r2 - 1)
-        col2  = max 0 (c2 - 1)
-        msg = case missing of
-            [] -> hint
-            _  -> "Non-exhaustive patterns: " ++ hint
-                ++ " (missing: " ++ listWithCommas missing ++ ")"
-    in mkDiagnostic line1 col1 line2 col2 msg 1
+    let body = "Non-exhaustive case expression. Missing pattern(s): "
+            ++ listWithCommas missing
+        diag = Diag.withHint hint
+                 (Diag.mkError "<buffer>" region
+                    Diag.CatExhaustiveness Diag.exhaustE_NonExhaustive
+                    body)
+    in LspR.renderLspDiagnostic diag
   where
     listWithCommas [] = ""
     listWithCommas [x] = x

@@ -5,7 +5,7 @@ import Sky.Core.List as List
 import Sky.Core.String as String
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
-import Std.Live.Events exposing (onClick)
+import Std.Html.Events exposing (onClick)
 import State exposing (..)
 import Lib.Database as Database
 import Lib.Monitors as Monitors
@@ -13,7 +13,7 @@ import Ui.Layout as Layout
 import Ui.Charts as Charts
 
 
-viewMonitorDetail : String -> Model -> VNode
+viewMonitorDetail : String -> Model -> (Html Msg)
 viewMonitorDetail monId model =
     let
         monitor =
@@ -30,7 +30,7 @@ viewMonitorDetail monId model =
                     viewNotFound)
 
 
-viewMonitorContent : Monitor -> VNode
+viewMonitorContent : Monitor -> (Html Msg)
 viewMonitorContent mon =
     div
         []
@@ -41,7 +41,7 @@ viewMonitorContent mon =
         ]
 
 
-viewBackButton : VNode
+viewBackButton : (Html Msg)
 viewBackButton =
     button
         [ onClick (Navigate DashboardPage)
@@ -51,7 +51,7 @@ viewBackButton =
         [text "← Back to Dashboard"]
 
 
-viewMonitorHeader : Monitor -> VNode
+viewMonitorHeader : Monitor -> (Html Msg)
 viewMonitorHeader mon =
     div
         [ class "card", style "margin-bottom: 24px" ]
@@ -70,7 +70,7 @@ viewMonitorHeader mon =
             ]]
 
 
-viewStatusBadge : MonitorStatus -> VNode
+viewStatusBadge : MonitorStatus -> (Html Msg)
 viewStatusBadge status =
     let
         color = statusColor status
@@ -115,7 +115,7 @@ statusLabel s =
         "? Unknown"
 
 
-viewMonitorStats : Monitor -> VNode
+viewMonitorStats : Monitor -> (Html Msg)
 viewMonitorStats mon =
     div
         [ class "grid", style "margin-bottom: 24px" ]
@@ -131,7 +131,7 @@ viewMonitorStats mon =
         ]
 
 
-statCard : String -> String -> String -> VNode
+statCard : String -> String -> String -> (Html Msg)
 statCard value label color =
     div
         [class "card"]
@@ -144,7 +144,7 @@ statCard value label color =
         ]
 
 
-viewMonitorHistory : String -> VNode
+viewMonitorHistory : String -> (Html Msg)
 viewMonitorHistory monId =
     let
         history = Monitors.getMonitorHistory monId 50
@@ -172,7 +172,7 @@ viewMonitorHistory monId =
             ]
 
 
-viewHistoryTable : List (Dict String String) -> VNode
+viewHistoryTable : List (Dict String String) -> (Html Msg)
 viewHistoryTable history =
     if List.isEmpty history then
         p
@@ -200,7 +200,7 @@ viewHistoryTable history =
                 ]]
 
 
-viewHistoryRow : Dict String String -> VNode
+viewHistoryRow : Dict String String -> (Html Msg)
 viewHistoryRow row =
     tr
         []
@@ -221,7 +221,7 @@ viewHistoryRow row =
         ]
 
 
-viewNotFound : VNode
+viewNotFound : (Html Msg)
 viewNotFound =
     div
         [class "empty-state"]

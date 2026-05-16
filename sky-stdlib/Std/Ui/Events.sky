@@ -6,7 +6,7 @@ module Std.Ui.Events exposing (onClick, onSubmit, onInput)
 --
 -- Tier 1 ships static rendering only — the AttrEvent constructor
 -- is recorded on the Element but the inline-style renderer drops
--- it. Tier 2 wires AttrEvent through Std.Live.Events for actual
+-- it. Tier 2 wires AttrEvent through Std.Html.Events for actual
 -- Sky.Live event dispatch.
 
 import Sky.Core.Prelude exposing (..)

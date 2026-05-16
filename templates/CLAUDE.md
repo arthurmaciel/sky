@@ -1,10 +1,10 @@
 # CLAUDE.md — Sky Language Project
 
 This is a [Sky](https://github.com/anzellai/sky) project. Sky is a pure
-functional, ML-family language compiling to Go (with surface syntax that is Elm-compatible). The compiler is
-written in Haskell (GHC 9.4+) and ships as a single `sky` binary. Users
-only need the `sky` binary and Go 1.21+ — no Haskell toolchain required
-to use Sky.
+functional, ML-family language compiling to Go (with surface syntax that
+is Elm-compatible). The compiler is written in Haskell (GHC 9.4+) and
+ships as a single `sky` binary. Users only need the `sky` binary and
+Go 1.21+ — no Haskell toolchain required to use Sky.
 
 **Core principle: if it compiles, it works.** Every side effect flows
 through `Task`, every fallible value returns `Result Error a`, and
@@ -12,14 +12,87 @@ through `Task`, every fallible value returns `Result Error a`, and
 surfaces at check time. No runtime panics from well-typed Sky code, no
 nil leakage, no silent numeric coercion.
 
-**Typed Go output.** Since v0.9, generated Go functions have concrete
-signatures (`func f(name string, age int) rt.SkyResult[Error, Profile]`)
-rather than the old `any`-boxed shape. Type annotations on your functions
-are load-bearing — if you write `f : String -> Int -> Result Error Profile`
-and the body would otherwise infer to something wider, the compiler rejects
-the body; if inference is narrower, the annotation still wins at the call
-site. Inline records in function annotations are not supported — use a
-`type alias` for any record you want in a signature.
+**Typed Go output (v0.13).** Generated Go functions have fully-typed
+signatures end-to-end:
+
+```go
+func f(name string, age int) rt.SkyResult[Error, Profile_R] { ... }
+func do[T1 any](result rt.SkyResult[Error, T1], fn func(T1) rt.SkyResult[Error, rt.SkyValue]) rt.SkyResult[Error, rt.SkyValue] { ... }
+```
+
+Sky lambdas at user-defined HOF call sites lower to typed function
+values (D-Lambda-Lowerer). Anonymous record shapes emit real
+`type Anon_R_<hash> = struct { ... }` decls. Whole-program DCE prunes
+unused Go code + unused FFI bindings (Stripe-SDK-scale: 326k → 58k
+lines on `examples/13-skyshop`). Type annotations on your functions are
+load-bearing — if you write `f : String -> Int -> Result Error Profile`
+and the body would otherwise infer to something wider, the compiler
+rejects the body. Inline records in function annotations aren't
+supported — use a `type alias` for any record you want in a signature.
+
+## Quick UX/UX/security/scalability defaults (v0.13)
+
+**You (the AI assistant) are expected to deliver top-notch UX/DX/security
+/scalability by default.** When the user asks for an app:
+
+1. **Pick `Std.Ui` for the view layer unless they say otherwise.**
+   `Std.Ui` is the typed, no-CSS layout DSL that renders to inline-
+   styled HTML for Sky.Live AND to ANSI cells for Sky.Tui (and
+   eventually Sky.Webview / native). Code written against `Std.Ui`
+   runs across every backend without a rewrite. `Std.Html` is only
+   for cases that genuinely need raw HTML (one-off escape hatch).
+
+2. **Use Sky.Live for web apps.** It's HTTP-first (full HTML on first
+   load, then SSE patches), session-aware, input-preserving (the
+   user's typed value never disappears across a re-render), and
+   handles auth + cookies + rate-limit + CORS for you. Don't reach
+   for `Sky.Http.Server` raw unless the app is an API-only backend
+   with no UI.
+
+3. **Authentication: default to `Std.Auth`.** `hashPassword` /
+   `verifyPassword` (bcrypt), `signToken` / `verifyToken` (HS256 JWT),
+   `register` / `login` / `setRole`. NEVER log a password, NEVER
+   `fmt.Sprintf("%v", secret)`. Forms with password fields use
+   `Ui.form [Ui.onSubmit DoSignIn]` — never per-keystroke `onInput`
+   on a password input.
+
+4. **Database: default to `Std.Db` + SQLite** for prototypes / single-
+   user. Promote to PostgreSQL or Redis when the user says
+   "deployment" / "production" / "multi-tenant". Sky.Live's session
+   store defaults to memory (lost on restart) — for deploy targets
+   use `[live] store = "sqlite"` / `"redis"` / `"postgres"`.
+
+5. **Ask the user about architecture choices BEFORE scaffolding.**
+   Required questions (use whatever your chat surface supports —
+   AskUserQuestion in Claude Code, structured prompts otherwise):
+
+   - **Backend shape**: "Web app (Sky.Live)" / "Terminal UI (Sky.Tui)"
+     / "CLI (Sky.Cli)" / "HTTP API only".
+   - **Database**: "SQLite (local file)" / "PostgreSQL (deploy-ready)"
+     / "None (pure compute)".
+   - **Authentication**: "None" / "Std.Auth (built-in cookies + JWT)"
+     / "OAuth (Google / GitHub via existing Go SDK)".
+   - **Session store** (for Sky.Live): "Memory (dev)" / "SQLite (local
+     persistent)" / "Redis (multi-instance)" / "Postgres (deploy)".
+
+   Then update `sky.toml` automatically with the right `[live]`,
+   `[database]`, `[auth]` sections (see "sky.toml" section below for
+   the exact keys). Run `sky install` if a Go FFI dep was added.
+
+6. **No raw HTML/JS strings in view code.** `Std.Ui` builders give you
+   accessibility for free (real `<h1>` from `Region.heading 1`, real
+   `<main>` from `Region.mainContent`, `aria-label` from `Region.label`).
+   Browser XSS is impossible by construction — every value goes through
+   the typed VNode renderer which HTML-escapes everything.
+
+7. **Errors return `Result Error a` / `Task Error a`.** NEVER use a
+   `String` as an error type. NEVER throw a panic in Sky source —
+   the runtime panic-recovery is for FFI / runtime bugs, not user code.
+
+8. **For multi-instance deployments**, the user MUST be aware of the
+   Sky.Live session store config. Memory store = sessions lost on each
+   pod restart. Postgres/Redis = sessions ride deploys. Surface this
+   when the user mentions Docker / Kubernetes / scaling.
 
 ## Reading order for AI assistants
 
@@ -29,19 +102,21 @@ Skipping ahead leads to code that type-checks but panics at runtime —
 the "if it compiles it works" guarantee depends on you respecting a
 handful of idioms the ML-family / Elm-compatible syntax makes non-obvious.
 
-1. **Cardinal Rules** (below) — 10 rules that, if you follow them, keep
+1. **Quick UX/UX/security/scalability defaults** (above) — internalise
+   first; affects every choice you make downstream.
+2. **Cardinal Rules** (below) — 10 rules that, if you follow them, keep
    you out of 90% of the pitfalls real Sky projects have hit.
-2. **Common Pitfalls & Fixes** — error → cause → fix table. Skim this so
+3. **Common Pitfalls & Fixes** — error → cause → fix table. Skim this so
    the messages users report are instantly mappable to action.
-3. **Real-World App Skeletons** — complete runnable starter code for the
+4. **Real-World App Skeletons** — complete runnable starter code for the
    most common app shapes (CRUD, auth, chat/LLM, dashboard, REST API).
    Copy + adapt; do not invent from scratch.
-4. **Standard Library — Complete API** — authoritative signatures. If a
+5. **Standard Library — Complete API** — authoritative signatures. If a
    claim here conflicts with something you saw elsewhere, the stdlib
    section wins.
-5. **Troubleshooting Cookbook** — when the user reports a specific error
+6. **Troubleshooting Cookbook** — when the user reports a specific error
    message, start here.
-6. **Known Limitations** — work-arounds for things the compiler can't do.
+7. **Known Limitations** — work-arounds for things the compiler can't do.
 
 Everything else (FFI details, sky.toml, formatter rules) is reference,
 consult on-demand.
@@ -1208,111 +1283,147 @@ shuffle : List a -> Task Error (List a)  -- Fisher-Yates shuffle
 
 ### Std.Html
 
-Html functions return VNode records (not strings). For non-Live apps, use `render` to convert to HTML string.
+v0.13: `Std.Html` / `Std.Html.Attributes` / `Std.Html.Events` are
+**typed Sky-source stdlib modules**, not Go kernels. Element builders
+return a typed `Html msg` ADT (not the old `VNode`). The compiler +
+LSP flag a handler-shape or attribute-type mismatch at the call site.
 
 ```elm
--- Core
-text : String -> VNode                                    -- escaped text
-raw : String -> VNode                                     -- raw HTML (trusted only)
-node : String -> List (String, String) -> List VNode -> VNode
-render : VNode -> String                                  -- VNode → HTML string
-toString : VNode -> String                                -- alias for render
+type Html msg
+    = HElement String (List (Attribute msg)) (List (Html msg))
+    | HText String
+    | HRaw String
 
--- Document: htmlNode, headNode, body, doctype
--- Sectioning: div, section, article, aside, headerNode, footerNode, nav, mainNode
--- Headings: h1, h2, h3, h4, h5, h6
+text : String -> Html msg                 -- escaped text node
+raw  : String -> Html msg                  -- raw, un-escaped HTML (trusted)
+render : Html msg -> String                -- Html → HTML string (SSR)
+toString : Html msg -> String              -- alias for render
+
+-- Sectioning: div, section, article, aside, headerNode, footerNode,
+--   nav, mainNode  | Headings: h1..h6
 -- Text: p, span, strong, em, small, pre, codeNode, blockquote, a
--- Lists: ul, ol, li
--- Forms: form, label, button, textarea, select, option, fieldset, legend
--- Tables: table, thead, tbody, tfoot, tr, th, td
--- Void (no children): input, br, hr, img, meta, linkNode
--- Special: script (raw JS), styleNode (raw CSS), titleNode
+-- Lists: ul, ol, li  | Forms: form, label, button, textarea, select,
+--   option, fieldset, legend  | Tables: table, thead, tbody, tfoot,
+--   tr, th, td  | Document: htmlNode, headNode, body, doctype, titleNode
+-- Void (attrs only, no children): input, br, hr, img, meta, link
+-- Special: script, styleNode
 ```
 
-All element functions have signature: `List (String, String) -> List VNode -> VNode`
-Void elements: `List (String, String) -> VNode`
+Element builders: `List (Attribute msg) -> List (Html msg) -> Html msg`.
+Void elements: `List (Attribute msg) -> Html msg`.
+`styleNode : List (Attribute msg) -> String -> Html msg` (CSS body is
+a String). `doctype : List (Html msg) -> Html msg` (wraps the document
+— `render (doctype [ htmlNode [] [...] ])`).
 
-**Important naming**: HTML5 elements that clash with common identifiers use suffixed names: `headerNode` (not `header`), `footerNode` (not `footer`), `mainNode`, `codeNode`, `linkNode`, `styleNode`, `titleNode`. The `textarea` function takes **2 arguments**: `textarea attrs children` (not just attrs).
+**Naming**: clashing HTML5 elements use suffixed names — `headerNode`,
+`footerNode`, `mainNode`, `codeNode`, `styleNode`, `titleNode`. For an
+inline `<script>` body, pass `[raw "...js..."]` (raw, un-escaped).
 
 ### Std.Html.Attributes
 
-All return `(String, String)` tuples.
+Each builder returns a typed `Attribute msg` — the compiler rejects
+`disabled "yes"` / `rows "five"` at the call site.
 
 ```elm
-attribute : String -> String -> (String, String)    -- generic key-value
-boolAttribute : String -> (String, String)          -- boolean (no value)
+type Attribute msg
+    = Attr String String
+    | BoolAttr String Bool
+    | EventAttr (Event msg)
+    | NoAttr
 
--- Global: class, id, style, title, hidden, tabindex, lang, dir, role
--- Links: href, target, rel, download
--- Forms: type_, name, value, placeholder, action, method, for, enctype
---   required, disabled, checked, readonly, autofocus, multiple, selected
---   autocomplete, minlength, maxlength, min, max, step, pattern, rows, cols
--- Media: src, alt, width, height
--- Meta: charset, content, httpEquiv
--- Tables: colspan, rowspan, scope
--- ARIA: ariaLabel, ariaHidden, ariaDescribedby, ariaExpanded
--- Data: dataAttribute key value
+-- String-valued: class, id, type_ (NOT `type`), value, href, src, alt,
+--   name, placeholder, title, for, rel, target, method, action, role,
+--   style, charset, content, httpEquiv, pattern, accept, autocomplete,
+--   ariaLabel, ariaHidden, ariaDescribedby, ariaExpanded, dir, lang, ...
+-- Int-valued (genuinely numeric): rows, cols, width, height, size,
+--   minlength, maxlength, tabindex, colspan, rowspan
+-- String-valued numeric-or-keyword: min, max, step
+-- Bool-valued: checked, disabled, readonly, required, autofocus,
+--   novalidate, selected, multiple, hidden, spellcheck
+-- Escape hatches: attribute k v, dataAttribute k v, boolAttribute k b
+-- none : Attribute msg   -- no-op, for the False branch of a conditional
+```
+
+### Std.Html.Events  (was `Std.Html.Events` pre-v0.13)
+
+Builders return `Attribute msg` carrying a typed `Event msg`.
+
+```elm
+onClick    : msg -> Attribute msg
+onInput    : (String -> msg) -> Attribute msg
+onChange   : (String -> msg) -> Attribute msg
+onSubmit   : a -> Attribute msg         -- plain Msg OR (formData -> Msg)
+on         : String -> a -> Attribute msg   -- generic escape hatch
+onDblClick / onFocus / onBlur / onMouseOver / onMouseOut / onMouseDown
+  / onMouseUp / onContextMenu / onReset / onScroll / onSelect
+  / onLoad / onError : msg -> Attribute msg
+onKeyDown / onKeyUp / onKeyPress : (String -> msg) -> Attribute msg
+onCheck    : (Bool -> msg) -> Attribute msg
+onFile / onImage : (String -> msg) -> Attribute msg   -- data-URL payload
+fileMaxSize / fileMaxWidth / fileMaxHeight : Int -> Attribute msg
+
+-- Usage:
+--     button [ onClick Increment ] [ text "+" ]
+--     input [ onInput UpdateDraft, value model.draft ] []
+--     form [ onSubmit AddTodo ] [ ... ]
 ```
 
 ### Std.Css
 
-CSS functions return `String`. Use with `styleNode [] (stylesheet [...])`.
+v0.13: typed Sky-source stdlib. Typed where the value space is bounded
+(`Length` / `Color` ADTs, keyword enums), `String` + `rawProp` escape
+hatch for the open-ended compound properties.
 
 ```elm
+type CssProp = CssProp String String
+type CssRule = CssRule String (List CssProp) | CssMedia ... | CssKeyframes ... | CssRaw String
+
+-- Length values: px (Int), rem/em/pct/ch/num (Float), vh/vw/fr (Int),
+--   zero ()/auto () (take unit), lengthRaw "calc(...)" , calc, minmax
+-- Color values: hex "ff6600", rgb/rgba/hsl/hsla, transparent ()/
+--   currentColor () (take unit), colorRaw "inherit"
+-- Keyword enums: Display (Flex/Grid/Block/InlineBlock/InlineFlex/
+--   Inline/DisplayNone/DisplayRaw), Position (Static/Relative/Absolute
+--   /Fixed/Sticky), Cursor (Pointer/CursorDefault/...), FlexDirection
+--   (Row/Column/...), FlexWrap, Align (Start/End/Center/SpaceBetween/
+--   ...), FontWeight (Normal/Bold/Weight Int/...), FontStyle, Overflow,
+--   WhiteSpace, BoxSizing, PointerEvents, TextDecoration, BorderStyle
+
 -- Composition
-stylesheet : List String -> String    -- join rules
-rule : String -> List String -> String    -- selector { props }
-media : String -> List String -> String   -- @media query { rules }
+rule : String -> List CssProp -> CssRule        -- selector { props }
+media : String -> List CssRule -> CssRule       -- @media query { rules }
+keyframes : String -> List String -> CssRule    -- build frames with `frame`
+stylesheet : List CssRule -> String             -- render to a <style> body
+styles : List CssProp -> String                 -- inline style="..." string
+property : String -> String -> CssProp          -- generic escape hatch
+rawProp : String -> CssProp                     -- a "name:value" decl string
 
--- Units: px, rem, em, pct, vh, vw, ch, fr, sec, ms, deg
--- Keywords: zero, auto, none, inherit
--- Colors: hex, rgb, rgba, hsl, hsla, transparent
-
--- Layout: display, position, top, right_, bottom, left, zIndex, overflow, float
--- Flexbox: flexDirection, flexWrap, justifyContent, alignItems, alignContent, flex, gap
--- Grid: gridTemplateColumns, gridTemplateRows, gridColumn, gridRow
--- Spacing: margin, margin2, margin4, marginTop, padding, padding2, padding4, paddingTop
--- Sizing: width, height, maxWidth, minWidth, maxHeight, minHeight
--- Typography: fontFamily, fontSize, fontWeight, fontStyle, lineHeight, textAlign,
---   textDecoration, textTransform, letterSpacing, wordSpacing, color
--- Background: backgroundColor, backgroundImage, backgroundSize, backgroundPosition
--- Border: border, borderTop, borderBottom, borderLeft, borderRight, borderRadius,
---   borderColor, borderWidth, borderStyle
--- Effects: boxShadow, opacity, transition, transform
--- Misc: cursor, property (for any CSS property not covered above)
+-- Length-valued props: width, height, maxWidth, minWidth, maxHeight,
+--   minHeight, fontSize, lineHeight, letterSpacing, padding(+Top/etc.,
+--   padding2, padding4), margin(+Top/etc., margin2, margin4), gap,
+--   rowGap, columnGap, borderRadius(4), top, bottom, left, right,
+--   flexBasis, borderWidth, borderSpacing, outlineOffset
+-- Color-valued: color, background, backgroundColor, borderColor
+-- Enum-valued: display, position, cursor, textAlign, fontWeight,
+--   fontStyle, flexDirection, flexWrap, justifyContent, alignItems,
+--   alignContent, overflow(X/Y), whiteSpace, boxSizing, pointerEvents,
+--   textDecoration, borderStyle
+-- String-valued (open-ended): transition, transform, animation,
+--   boxShadow, gridTemplateColumns/Rows, gridColumn/Row, fontFamily,
+--   content, filter, backgroundImage, border(+Top/etc.), flex, clear,
+--   float, visibility, objectFit, textTransform, ...
+-- Int/Float-valued: zIndex (Int), opacity (Float), flexGrow/Shrink (Int)
 ```
+
+Example: `rule ".btn" [ display Flex, padding (px 12), color (hex
+"fff"), backgroundColor (hex "2563eb"), cursor Pointer, fontWeight
+(Weight 600), border "1px solid #ccc" ]`.
 
 ### Std.Live
 
 ```elm
 app : config -> config     -- marks as Sky.Live app (compiler detects this)
 route : String -> page -> (String, page)   -- route "/" MyPage (supports :param)
-```
-
-### Std.Live.Events
-
-All return `(String, String)` attribute tuples.
-
-```elm
-onClick : msg -> (String, String)          -- typed Msg constructor
-onInput : (String -> msg) -> (String, String)  -- sends input value with msg
-onSubmit : msg -> (String, String)         -- sends form data with msg
-onChange : (String -> msg) -> (String, String)  -- for select, checkbox
-onDblClick : msg -> (String, String)
-onFocus : msg -> (String, String)
-onBlur : msg -> (String, String)
-onImage : (String -> msg) -> (String, String)  -- image input: resize + compress + base64
-onFile : (String -> msg) -> (String, String)   -- file input: base64 data URL (no compress)
-fileMaxWidth : Int -> (String, String)         -- max image width in px (onImage, default 1200)
-fileMaxHeight : Int -> (String, String)        -- max image height in px (onImage, default 1200)
-fileMaxSize : Int -> (String, String)          -- max file size in bytes; over-limit files are dropped client-side (no dispatch) + console.warn
-
--- Usage:
---     button [ onClick Increment ] [ text "+" ]
---     input [ onInput UpdateDraft, value model.draft ] []
---     form [ onSubmit AddTodo ] [ ... ]
---     input [ type_ "file", attribute "accept" "image/*"
---           , onImage UpdateImage, fileMaxWidth 1200 ] []
 ```
 
 **Sensitive inputs (passwords, API keys, card details): collect via `onSubmit` form data, not `onInput` per keystroke.** This is the recommended pattern as of v0.9.8:
@@ -1395,7 +1506,7 @@ view model =
 
 | Area | Helpers |
 |---|---|
-| Layout | `el / row / column / wrappedRow (children wrap to next line) / grid (CSS-Grid auto-fit — set min column width via `Ui.gridColumns N`; right primitive for product grids / dashboards / image galleries; use this NOT `wrappedRow` when card children contain `<img>` because flex-wrap collapses to 1-per-row in that case) / paragraph / textColumn / text / none / html` (`html` is the escape hatch wrapping a Std.Html VNode) |
+| Layout | `el / row / column / wrappedRow (children wrap to next line) / grid (CSS-Grid auto-fit — set min column width via `Ui.gridColumns N`; right primitive for product grids / dashboards / image galleries; use this NOT `wrappedRow` when card children contain `<img>` because flex-wrap collapses to 1-per-row in that case) / paragraph / textColumn / text / none / html` (`html` is the escape hatch wrapping a Std.Html `Html msg` node) |
 | Sized elements | `button` (`{onPress, label}`), `input` (real `<input>`), `form` (`<form>` + `onSubmit msg`), `link` (`{url, label}`), `image` (`{src, description}`) |
 | Length | `px Int` / `fill` (bare, no arg) / `fillPortion Int` / `content` / `shrink` / `minimum Int Length` / `maximum Int Length` / `vh Int` (viewport-height %) / `vw Int` (viewport-width %) |
 | Padding | `padding Int` / `paddingXY x y` (X-first / Y-second — `paddingXY 24 16` = 24px horizontal, 16px vertical, matches elm-ui) / `paddingEach { top, right, bottom, left }` (record-shaped, matches `Border.widthEach` and elm-ui) / `spacing Int` |
@@ -1441,8 +1552,8 @@ Callback receives a data URL (`data:image/jpeg;base64,...`). Decode with `Std.En
 -- `js` is a Prelude function for embedding raw JS/Go expressions (use sparingly)
 js : String -> a
 
--- View functions should annotate their return type as VNode:
-view : Model -> VNode
+-- View functions should annotate their return type as `Html msg`:
+view : Model -> Html msg
 view model =
     div [] [ text "hello" ]
 ```
@@ -1544,7 +1655,7 @@ import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Css exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick, onInput, onSubmit)
+import Std.Html.Events exposing (onClick, onInput, onSubmit)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 import Std.Time as Time
@@ -1630,7 +1741,7 @@ update msg counter =
         _ -> (counter, Cmd.none)
 
 -- View takes a Msg wrapper function from parent
-view : (Msg -> parentMsg) -> Counter -> VNode
+view : (Msg -> parentMsg) -> Counter -> Html msg
 view toMsg counter =
     div []
         [ text (String.fromInt counter.count)
@@ -1959,7 +2070,7 @@ import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Css exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick, onInput, onSubmit)
+import Std.Html.Events exposing (onClick, onInput, onSubmit)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 import Std.Db as Db
@@ -2164,7 +2275,7 @@ import Sky.Core.Error as Error exposing (Error, ErrorKind(..))
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick, onInput, onSubmit)
+import Std.Html.Events exposing (onClick, onInput, onSubmit)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 import Std.Auth as Auth
@@ -2372,7 +2483,7 @@ import Sky.Core.System as System
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick, onInput, onSubmit)
+import Std.Html.Events exposing (onClick, onInput, onSubmit)
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 
@@ -3203,25 +3314,31 @@ Session store memory grows with inactive sessions. Set a TTL:
 
 ---
 
-## Known Limitations (v0.9)
+## Known Limitations (v0.13)
 
-- **No anonymous records in type annotations** — use `type alias` for record types in signatures. Typed codegen needs a name for the struct shape; inline `{ field : Type }` in an annotation is rejected.
+Active limitations users still hit. Things v0.13 closed are documented
+in the repo `CLAUDE.md`'s "v0.13 closed" list; do not re-add them here.
+
+- **No anonymous records in type annotations** — use `type alias` for record types in signatures. v0.13 E emits `type Anon_R_<hash>` structs for HM-inferred anon shapes, but the parser still rejects inline `{ field : Type }` syntax in an annotation. Reach for a `type alias`.
 - **No higher-kinded types** — no `Functor`, `Monad`, etc. Use concrete types.
 - **No `where` clauses** — use `let...in` instead.
 - **No custom operators** — only built-in (`|>`, `<|`, `++`, `::`, etc.).
+- **No row-polymorphic annotation syntax** — Sky doesn't parse `{ r | field : T }` in annotations. Use a closed record alias for the function's input.
 - **Negative literal arguments need parentheses** — `f (-1)` not `f -1` (`f -1` parses as subtraction).
-- **`import M as A exposing (Type(..))`** — combining `as` alias with `exposing` for ADT constructors breaks module loading; use `import M exposing (..)` without `as` instead, or qualify constructors.
 - **`Dict.toList` returns string keys** — `Dict` is `map[string]any` at runtime, so `Dict.toList` on `Dict Int v` gives string keys. Iterate via `Dict.get` over known ranges.
 - **`sky check` doesn't fully model Go interfaces** — concrete types can't unify with Go interfaces (`Fyne.CanvasObject`), but the code compiles and runs fine.
 - **Zero-arg FFI functions need no `()`** — call `Uuid.newString` (the return value), not `Uuid.newString ()`.
 - **Zero-arg `Css.*` constants DO need `()`** — `Css.zero`, `Css.auto`, `Css.none`, `Css.transparent`, `Css.inherit`, `Css.initial`, `Css.borderBox`, `Css.systemFont`, `Css.monoFont`, `Css.userSelectNone`. These are exposed as `() -> String` kernels (not zero-arity values) so they don't interact with Go's `init()` ordering. Write `Css.padding (Css.zero ())`, not `Css.padding Css.zero` — the latter serialises a function pointer like `0xc00001c0a0` into the stylesheet. Pattern: any `Css.X` that names a literal CSS keyword takes `()`; value constructors like `px`, `rem`, `em`, `hex`, `rgba` take their arguments directly.
 - **FFI setters in pipelines need an explicit lambda** — `|> Result.andThen (OpenAi.chatCompletionMessageSetRole m.role)` emits a call to the non-existent non-T variant and fails codegen. Wrap: `|> Result.andThen (\msg -> OpenAi.chatCompletionMessageSetRole m.role msg)`.
-- **`import Lib.X as Alias` leaks the alias into codegen for exposed types** — `import Lib.Db as Chat` emits `Chat_Message_R` instead of the canonical `Lib_Db_Message_R`, breaking cross-module record sharing. **Workaround**: import types without the alias — `import Lib.Db exposing (Message, ...)`. Aliases are fine for modules that only expose functions.
+- **`import Lib.X as Alias` leaks the alias into codegen for exposed types** — `import Lib.Db as Chat` emits `Chat_Message_R` instead of the canonical `Lib_Db_Message_R`. **Workaround**: import types without the alias — `import Lib.Db exposing (Message, ...)`. Aliases are fine for modules that only expose functions.
 - **Zero-arity functions reading env vars** — zero-arity functions are memoised; when they read `System.getenv` they evaluate during Go `init()`, before `.env` is loaded. **Workaround**: add a dummy `_` parameter: `getConfig _ = System.getenv "KEY"`.
 - **Let bindings with parameters after multi-line case** — `mark j = expr` directly after a `case ... of` in the same `let` can be reparsed as a new top-level declaration. Use a lambda (`\j -> expr`) or extract to a top-level function.
 - **`exposing (Type(..))` doesn't expose user-module constructors** — only stdlib/kernel modules resolve `MyType(..)` fully. For a user-defined `MyModule`, import `exposing (..)` or qualify constructors (`MyModule.MyConstructor`).
 - **`let` bindings don't support forward references** — Helpers inside a `let` block must be defined *before* their consumers in source order. `let writeAll db = … insertRow db ts …; insertRow db ts = …` fails `go build` with `undefined: insertRow`. **Workaround**: reorder so dependencies come first. (Future fix — the canonicaliser already knows the full set of let names.)
-- **Partial application of let-bound multi-arg functions panics at runtime** — `Task.andThen (insertRow db)` where `insertRow db ts = …` is defined in an enclosing `let` panics with `reflect: Call with too few input arguments` when invoked. **Workaround**: explicit lambda — `Task.andThen (\ts -> insertRow db ts)`. Same class as the FFI-setter limitation but for ordinary user-defined let-bound functions.
+
+### Deferred to v0.13.x (next release)
+
+- **`sky install` time on huge Go SDKs (Stripe-scale)** — install currently emits the full `.skycache/go/<pkg>_bindings.go` (Stripe: 326k lines, ~8 min cold). v0.13 prunes most of that at build time (`F + F3`); v0.13.x will move the generation to build-time entirely, so install drops to ~10 sec. No code change needed; just `sky upgrade` once the release ships.
 
 ### Fixed in v0.9-dev (feat/typed-codegen)
 - **Typed-map round-trips at the FFI boundary** — `[]any` containing `map[string]any` now narrows into `[]map[string]string` correctly across `rt.Coerce`, `AsListT`, `AsMapT`, `AsDict`. `List.isEmpty` / `List.map` on annotated DB result slices no longer wrongly report empty.
@@ -3512,7 +3629,7 @@ RL.allow "login" userEmail 5 1   -- 5 attempts, 1/sec refill → Bool
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
 import Std.Live exposing (app, route)
-import Std.Live.Events exposing (onClick)
+import Std.Html.Events exposing (onClick)
 
 type Msg = Increment | Decrement
 type alias Model = { count : Int }

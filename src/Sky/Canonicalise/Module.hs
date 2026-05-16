@@ -3,6 +3,9 @@
 module Sky.Canonicalise.Module
     ( canonicalise
     , canonicaliseWithDeps
+    , canonicaliseWithDiagnostics
+    , collectUnboundDiagnostics
+    , legacyToDiag
     , DepInfo(..)
     )
     where
@@ -14,6 +17,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import qualified Sky.AST.Source as Src
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as A
+import qualified Sky.Reporting.Diagnostic as Diag
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Canonicalise.Environment as Env
 import qualified Sky.Canonicalise.Expression as CanExpr
@@ -26,7 +30,12 @@ import qualified Sky.Canonicalise.Type as CanType
 -- constructors when another module imports this one with `exposing (..)`.
 data DepInfo = DepInfo
     { _dep_name    :: !ModuleName.Canonical
-    , _dep_unions  :: ![(String, [Can.Ctor])]   -- (type name, constructors)
+    , _dep_unions  :: ![(String, [String], [Can.Ctor])]
+        -- (type name, type vars, constructors).  The type vars are
+        -- load-bearing: a cross-module constructor's type scheme is
+        -- `forall vars. argTys -> TypeName vars` — without the vars
+        -- the result type collapses to a zero-arity `TypeName` and
+        -- HM rejects `Box x : Box a` with `Box vs Box a`.
     , _dep_aliases :: ![String]                 -- exported alias names
     , _dep_aliasDefs :: !(Map.Map String Can.Alias)  -- alias bodies (for type-expansion)
     , _dep_values  :: ![String]                 -- exported top-level value names
@@ -44,7 +53,7 @@ filterDepByExports d = case _dep_exports d of
     Can.ExportExplicit namesMap ->
         let keep = namesMap `Map.union` Map.empty
             isExposed n = Map.member n keep
-        in d { _dep_unions  = filter (isExposed . fst) (_dep_unions d)
+        in d { _dep_unions  = filter (\(n, _, _) -> isExposed n) (_dep_unions d)
              , _dep_aliases = filter isExposed (_dep_aliases d)
              , _dep_aliasDefs = Map.filterWithKey (\k _ -> isExposed k) (_dep_aliasDefs d)
              , _dep_values  = filter isExposed (_dep_values d)
@@ -60,6 +69,75 @@ canonicalise = canonicaliseWithDeps Map.empty
 -- (by module path string). The deps contribute their exported constructors
 -- to the importer's environment when the importer uses `exposing (..)` or
 -- `exposing (Type(..))`.
+-- | v0.13 Layer 1: Diagnostic-producing canonicalise entry point.
+--
+-- Same logic as canonicaliseWithDeps but returns structured
+-- `[Diagnostic]` on failure (instead of a String). Caller decides
+-- whether to render via CLI or LSP serialiser.
+--
+-- The `filePath` arg is the source file path used to populate each
+-- Diagnostic's `_diag_file` field. Callers that don't have a path
+-- (LSP single-file mode) can pass "<unknown>" — the renderer falls
+-- back gracefully when the file doesn't exist on disk.
+--
+-- Currently covers ONLY the unbound-name diagnostic class. Other
+-- canonicalise error classes (import-hiding, collisions) still go
+-- through the legacy String path — they migrate in subsequent Layer 1
+-- phases. The two paths share the same env-building logic; this
+-- function differs only in error rendering.
+canonicaliseWithDiagnostics
+    :: FilePath
+    -> Map.Map String DepInfo
+    -> Src.Module
+    -> Either [Diag.Diagnostic] Can.Module
+canonicaliseWithDiagnostics path deps srcMod =
+    -- Delegate to canonicaliseWithDeps; convert its String error to
+    -- a Diagnostic at the boundary. As more canonicalise error
+    -- classes migrate (unbound has a typed Diagnostic; import-hiding
+    -- and collision diagnostics get migrated in subsequent Layer 1
+    -- phases), this wrapper shrinks.
+    case canonicaliseWithDeps deps srcMod of
+        Right canMod -> Right canMod
+        Left err     -> Left [legacyToDiag path err]
+
+
+-- | Lift a legacy String error into a Diagnostic for back-compat
+-- during the Layer 1 migration. Generic category; specific
+-- diagnostic codes get assigned as each error class is migrated.
+legacyToDiag :: FilePath -> String -> Diag.Diagnostic
+legacyToDiag path msg =
+    let -- Try to extract a leading "LINE:COL:" from the legacy
+        -- format; otherwise use a synthetic region at line 1 col 1.
+        region = case parseLeadingLineCol msg of
+            Just (l, c) -> A.Region (A.Position l c) (A.Position l c)
+            Nothing     -> A.Region (A.Position 1 1) (A.Position 1 1)
+    in Diag.mkError path region Diag.CatCanonical
+        Diag.canonE_UndefinedName  -- generic placeholder until full migration
+        (stripLeadingLineCol msg)
+
+
+parseLeadingLineCol :: String -> Maybe (Int, Int)
+parseLeadingLineCol s =
+    case break (== ':') s of
+        (lineStr, ':':rest)
+          | not (null lineStr), all (\c -> c >= '0' && c <= '9') lineStr ->
+            case break (== ':') rest of
+                (colStr, _)
+                  | not (null colStr), all (\c -> c >= '0' && c <= '9') colStr ->
+                    Just (read lineStr, read colStr)
+                _ -> Nothing
+        _ -> Nothing
+
+
+stripLeadingLineCol :: String -> String
+stripLeadingLineCol s =
+    case parseLeadingLineCol s of
+        Just _ -> dropWhile (== ' ') (afterColon (afterColon s))
+        Nothing -> s
+  where
+    afterColon = drop 1 . dropWhile (/= ':')
+
+
 canonicaliseWithDeps :: Map.Map String DepInfo -> Src.Module -> Either String Can.Module
 canonicaliseWithDeps deps srcMod =
     let
@@ -186,7 +264,7 @@ buildTypeHomeMap home deps srcMod =
             | imp <- Src._imports srcMod
             , Just rawDep <- [Map.lookup (importPath imp) deps]
             , let dep = filterDepByExports rawDep
-            , typeName <- map fst (_dep_unions dep) ++ _dep_aliases dep
+            , typeName <- map (\(n, _, _) -> n) (_dep_unions dep) ++ _dep_aliases dep
             ]
     in
     Map.fromList (depEntries ++ localEntries)
@@ -235,7 +313,8 @@ checkImportExposingAgainstDep deps imps = concatMap check imps
                     Just d  ->
                         let values  = Set.fromList (_dep_values d)
                             aliases = Set.fromList (_dep_aliases d)
-                            unions  = Map.fromList (_dep_unions d)
+                            unions  = Map.fromList
+                                [ (n, cs) | (n, _, cs) <- _dep_unions d ]
                             ctors u = [ c | Can.Ctor c _ _ _ <- Map.findWithDefault [] u unions ]
                         in concatMap (checkItem path values aliases unions ctors) xs
 
@@ -324,11 +403,11 @@ processImportWith deps _home env imp =
             Just dep | useDep ->
                 [ (ctorName, Env.CtorHome importMod typeName ctorName
                     (fromIntegral idx) (fromIntegral nArgs) union annot)
-                | (typeName, ctors) <- _dep_unions dep
-                , let union = makeUnionFor typeName ctors
+                | (typeName, typeVars, ctors) <- _dep_unions dep
+                , let union = makeUnionFor typeName typeVars ctors
                 , (idx, ctor) <- zip [0::Int ..] ctors
                 , let Can.Ctor ctorName _ nArgs argTys = ctor
-                      annot = makeCtorAnnot importMod typeName ctorName argTys
+                      annot = makeCtorAnnot importMod typeName typeVars ctorName argTys
                 ]
             _ -> []
 
@@ -361,14 +440,14 @@ processImportWith deps _home env imp =
                 Just d   -> \n ->
                     n `elem` _dep_values d
                     || n `elem` _dep_aliases d
-                    || n `elem` map fst (_dep_unions d)
+                    || n `elem` map (\(un, _, _) -> un) (_dep_unions d)
             else if useKernel then const True
             else case depHere of
                 Nothing  -> const True  -- unknown dep → trust the import
                 Just d   -> \n ->
                     n `elem` _dep_values d
                     || n `elem` _dep_aliases d
-                    || n `elem` map fst (_dep_unions d)
+                    || n `elem` map (\(un, _, _) -> un) (_dep_unions d)
 
         envWithExposed = case Src._importExposing imp of
             A.At _ Src.ExposingAll ->
@@ -394,19 +473,26 @@ processImportWith deps _home env imp =
 
 -- | Build a synthetic Union record for use in CtorHome. We need this to
 -- represent "I know about this constructor from another module" — the real
--- Can.Union lives in the other module's canonicalised output.
-makeUnionFor :: String -> [Can.Ctor] -> Can.Union
-makeUnionFor typeName ctors =
-    Can.Union [] ctors (length ctors)
+-- Can.Union lives in the other module's canonicalised output.  The type
+-- vars MUST be carried through (not `[]`) so a parameterised cross-module
+-- ADT keeps its arity.
+makeUnionFor :: String -> [String] -> [Can.Ctor] -> Can.Union
+makeUnionFor _typeName typeVars ctors =
+    Can.Union typeVars ctors (length ctors)
         (if all (\(Can.Ctor _ _ n _) -> n == 0) ctors then Can.Enum else Can.Normal)
 
 
--- | Build an annotation for a constructor (T1 -> T2 -> … -> TypeName).
-makeCtorAnnot :: ModuleName.Canonical -> String -> String -> [Can.Type] -> Can.Annotation
-makeCtorAnnot home typeName _ctorName argTys =
-    let result = Can.TType home typeName []
+-- | Build an annotation for a constructor:
+-- `forall typeVars. argTy1 -> … -> argTyN -> TypeName typeVars`.
+-- The result type MUST apply the union's type vars (not `[]`) and the
+-- scheme MUST quantify them — otherwise a cross-module `Box x` types as
+-- the zero-arity `Box` instead of `Box a`, and HM rejects it against a
+-- `Box a` annotation.
+makeCtorAnnot :: ModuleName.Canonical -> String -> [String] -> String -> [Can.Type] -> Can.Annotation
+makeCtorAnnot home typeName typeVars _ctorName argTys =
+    let result = Can.TType home typeName (map Can.TVar typeVars)
         ty = foldr Can.TLambda result argTys
-    in Can.Forall [] ty
+    in Can.Forall typeVars ty
 
 
 -- | Pick record-alias auto-constructors matching `exposing (AliasName)`.
@@ -522,7 +608,7 @@ detectExposingCollisions deps imps =
             kernelFns  = Map.findWithDefault [] kernelName kernelFunctions
             depFns = case fmap filterDepByExports (Map.lookup path deps) of
                 Just d  -> _dep_aliases d ++ _dep_values d
-                            ++ map fst (_dep_unions d)
+                            ++ map (\(un, _, _) -> un) (_dep_unions d)
                 Nothing -> []
         in if null kernelName then depFns else kernelFns
 
@@ -648,21 +734,62 @@ collectUnboundNameErrors env srcMod =
         unbound = [ (n, reg) | (n, reg) <- allRefs, not (isBound n) ]
 
         formatOne (n, A.Region (A.Position r c) _) =
-            "Line " ++ show r ++ ", column " ++ show c
+            show r ++ ":" ++ show c
                 ++ ": Undefined name: " ++ n
                 ++ "\n    I cannot find a `" ++ n
                 ++ "` in scope. Check for a typo, or add an import that exposes this name."
     in
-        map formatOne (dedupeByName unbound)
-  where
-    -- If `foo` is used 12 times and all 12 are unbound, report only the
-    -- first. Prevents a 12-line wall of the same message.
-    dedupeByName :: [(String, A.Region)] -> [(String, A.Region)]
-    dedupeByName xs =
-        let step (seen, acc) (n, reg)
-                | Set.member n seen = (seen, acc)
-                | otherwise         = (Set.insert n seen, (n, reg) : acc)
-        in reverse (snd (foldl step (Set.empty, []) xs))
+        map formatOne (dedupeByNameTop unbound)
+
+
+-- | v0.13 Layer 1 migration: collect unbound-name errors as
+-- structured `Diagnostic` values instead of formatted strings.
+--
+-- Same dedupe behaviour as `collectUnboundNameErrors`. Caller
+-- decides whether to render via the CLI or LSP serialiser.
+collectUnboundDiagnostics :: FilePath -> Env.Env -> Src.Module -> [Diag.Diagnostic]
+collectUnboundDiagnostics path env srcMod =
+    let
+        isBound n =
+               Map.member n (Env._vars env)
+            || Map.member n (Env._ctors env)
+
+        collect (A.At _ v) =
+            let pats     = Src._valuePatterns v
+                body     = Src._valueBody v
+                shadowed = Set.fromList (concatMap patternNames pats)
+            in collectUnqualExprRegions shadowed body
+
+        allRefs = concatMap collect (Src._values srcMod)
+        unbound = [ (n, reg) | (n, reg) <- allRefs, not (isBound n) ]
+
+        mkDiag (n, reg) =
+            Diag.mkError path reg Diag.CatCanonical Diag.canonE_UndefinedName
+                ("Undefined name: " ++ n)
+            & Diag.withHint ("I cannot find a `" ++ n
+                          ++ "` in scope. Check for a typo, or add"
+                          ++ " an import that exposes this name.")
+    in
+        map mkDiag (dedupeByNameTop unbound)
+
+
+-- | Reverse-application operator (`&`), used by the new Diagnostic-
+-- producing path. Kept at module top-level so both legacy and new
+-- collectors can use it.
+(&) :: a -> (a -> b) -> b
+x & f = f x
+infixl 1 &
+
+
+-- | Module-local dedupe used by both the legacy String collector and
+-- the new Diagnostic collector. If `foo` is used 12 times and all 12
+-- are unbound, report only the first. Prevents a 12-line wall.
+dedupeByNameTop :: [(String, A.Region)] -> [(String, A.Region)]
+dedupeByNameTop xs =
+    let step (seen, acc) (n, reg)
+            | Set.member n seen = (seen, acc)
+            | otherwise         = (Set.insert n seen, (n, reg) : acc)
+    in reverse (snd (foldl step (Set.empty, []) xs))
 
 
 -- | Same as collectUnqualExpr but also records each reference's source region.
@@ -876,76 +1003,15 @@ staticKernelFunctions = Map.fromList
     -- `System.getenvOr "" key` for the optional-default pattern.
     , ("Middleware", ["withCors", "withLogging", "withBasicAuth", "withRateLimit"])
     , ("Ffi",     ["call", "callPure", "callTask", "has", "isPure"])
-    , ("Html",    ["text", "div", "span", "p", "h1", "h2", "h3", "h4", "h5", "h6",
-                    "a", "button", "input", "form", "label", "nav", "section",
-                    "article", "header", "footer", "main", "ul", "ol", "li",
-                    "img", "br", "hr", "table", "thead", "tbody", "tr", "th", "td",
-                    "textarea", "select", "option", "pre", "code", "strong", "em",
-                    "small", "styleNode", "node", "raw", "headerNode",
-                    "codeNode", "blockquote", "figure", "figcaption", "doctype",
-                    "htmlNode", "headNode", "meta", "render", "body", "title",
-                    "titleNode", "link", "script",
-                    "details", "summary", "dialog", "video", "audio", "canvas",
-                    "iframe", "progress", "meter",
-                    "aside", "fieldset", "legend", "tfoot",
-                    "linkNode", "mainNode", "footerNode", "voidNode",
-                    "attrToString", "toString", "escapeHtml", "escapeAttr"])
-    , ("Attr",    ["class", "id", "style", "type", "type_", "value", "href", "src",
-                    "alt", "name", "placeholder", "title", "for", "checked",
-                    "disabled", "readonly", "required", "autofocus", "rel",
-                    "target", "method", "action", "attribute",
-                    "charset", "content", "httpEquiv", "rel",
-                    "rows", "cols", "maxlength", "minlength", "step", "min",
-                    "max", "pattern", "accept", "multiple", "size", "tabindex",
-                    "ariaLabel", "ariaHidden", "role", "dataAttr", "spellcheck",
-                    "dir", "lang", "translate",
-                    "hidden", "download", "enctype", "novalidate", "autocomplete",
-                    "colspan", "rowspan", "scope", "selected", "height", "width",
-                    "ariaDescribedby", "ariaExpanded", "boolAttribute", "dataAttribute"])
-    , ("Css",     ["stylesheet", "rule", "property", "px", "rem", "em", "pct", "hex", "rgba",
-                    "color", "background", "backgroundColor", "padding", "padding2",
-                    "margin", "margin2", "fontSize", "fontWeight", "fontFamily",
-                    "lineHeight", "textAlign", "textDecoration", "border", "borderRadius",
-                    "borderTop", "borderBottom", "borderLeft", "borderRight", "borderColor",
-                    "display", "cursor", "gap", "justifyContent", "alignItems",
-                    "width", "height", "maxWidth", "minWidth", "maxHeight", "minHeight",
-                    "transform", "transition", "top", "bottom", "left", "right",
-                    "position", "zIndex", "opacity", "overflow", "overflowX", "overflowY",
-                    "flex", "flexDirection", "flexWrap", "flexGrow", "flexShrink", "flexBasis",
-                    "gridTemplateColumns", "gridTemplateRows", "gridColumn", "gridRow",
-                    "gridGap", "gap", "rowGap", "columnGap", "boxShadow", "boxSizing",
-                    "media", "shadow", "zero", "borderBox", "systemFont",
-                    "borderCollapse", "borderSpacing",
-                    "marginTop", "marginBottom", "marginLeft", "marginRight",
-                    "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
-                    "visibility", "content", "auto", "none", "transparent",
-                    "inherit", "initial", "monoFont",
-                    "textTransform", "letterSpacing",
-                    "linearGradient", "repeat", "fr",
-                    "margin4", "fontStyle", "styles",
-                    "transitionProp", "transitionDuration", "transitionTimingFunction",
-                    "outline", "outlineOffset", "filter", "backdropFilter",
-                    "pointerEvents", "objectFit", "objectPosition",
-                    "backgroundSize", "backgroundPosition", "backgroundRepeat",
-                    "listStyle", "listStyleType", "listStylePosition",
-                    "verticalAlign",
-                    "vh", "vw", "ch", "deg", "ms", "sec",
-                    "rgb", "hsl", "hsla",
-                    "alignSelf", "alignContent", "order", "gridArea",
-                    "borderWidth", "borderStyle", "textOverflow", "textShadow",
-                    "clear", "float", "right_", "animation",
-                    "minmax", "rotate", "scale", "translateX", "translateY",
-                    "cssVar", "cssVarOr", "defineVar", "calc", "important",
-                    "shadows", "borderRadius4", "padding4",
-                    "keyframes", "frame", "boxSizingBorderBox"])
+    -- v0.13 Layer 3: Html / Attr whitelist entries removed — those
+    -- are Sky-source stdlib modules now; their exported names come
+    -- from the parsed module, not this kernel registry.
+    -- v0.13 Layer 3: Css whitelist removed — Std.Css is a Sky-source
+    -- stdlib module now; its exported names come from the parsed
+    -- module, not this kernel registry.
     , ("Live",    ["app", "route", "api"])
-    , ("Event",   ["onClick", "onInput", "onChange", "onSubmit", "onDblClick",
-                    "onMouseOver", "onMouseOut", "onKeyDown", "onKeyUp",
-                    "onFocus", "onBlur",
-                    "on", "onContextMenu", "onError", "onKeyPress", "onLoad",
-                    "onMouseDown", "onMouseUp", "onReset", "onResize", "onScroll",
-                    "onSelect", "onImage", "onFile",
-                    "fileMaxWidth", "fileMaxHeight", "fileMaxSize"])
+    -- v0.13 Layer 3: Event whitelist removed — Std.Html.Events is a
+    -- Sky-source stdlib module now.
     , ("Sub",     ["none", "every"])
     , ("Set",     ["empty", "fromList", "insert", "remove", "member", "toList",
                     "size", "union", "intersect", "diff"])

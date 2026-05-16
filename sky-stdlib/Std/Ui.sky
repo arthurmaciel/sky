@@ -34,7 +34,7 @@ import Sky.Core.String as String
 import Sky.Core.Math as Math
 import Std.Html as Html
 import Std.Html.Attributes as Attr
-import Std.Live.Events as Event
+import Std.Html.Events as Event
 
 
 -- ─── Core types ──────────────────────────────────────────────────
@@ -68,7 +68,7 @@ type Attribute msg
     | AttrStyle String String
     | AttrDescribe Description
     | AttrClass String
-    | AttrEvent any                        -- pre-constructed Std.Live.Events.* value (eventPair)
+    | AttrEvent any                        -- pre-constructed Std.Html.Events.* value (eventPair)
     | AttrAttribute String String          -- raw attribute (href, src, name, ...)
     | AttrFontSize Int
     | AttrFontColor Color
@@ -548,7 +548,7 @@ descLiveAssertive = DescLiveAssertive
 
 -- Bind a click handler. The msg is dispatched on the wire when the
 -- user clicks the element. Inside Sky.Live, this becomes an SSE
--- round-trip + Msg dispatch through update. The Std.Live.Events
+-- round-trip + Msg dispatch through update. The Std.Html.Events
 -- helper is invoked here at construction time so msg's concrete
 -- type is preserved through the AttrEvent carrier (any-typed).
 onClick : msg -> Attribute msg
@@ -1062,12 +1062,11 @@ ariaForDescription d =
         _                  -> Nothing
 
 
--- Sky.Std.Html.Attributes doesn't expose a generic
--- `Attr.attribute key value` kernel today, so dispatch by key name
--- for the common HTML attrs Std.Ui needs. Unknown keys fall back
--- to encoding the attr inline-style as `data-<key>="<v>"` via the
--- typed Attr.attribute style proxy. (Future work — promote this to
--- a kernel call once `rt.Attr_attribute` lands.)
+-- Dispatch by key name for the common HTML attrs Std.Ui needs, so
+-- each maps to its dedicated typed Attr.* builder. Any other key
+-- (sky-key, aria-*, custom data-*, …) falls through to the generic
+-- `Attr.attribute key value`, which Std.Html.Attributes exposes as
+-- Sky source.
 kernelAttr : String -> String -> any
 kernelAttr key value =
     if key == "href" then Attr.href value
@@ -1090,7 +1089,7 @@ kernelAttr key value =
         Attr.attribute key value
 
 
--- Tier 1 stops at static rendering. Std.Live.Events binding for
+-- Tier 1 stops at static rendering. Std.Html.Events binding for
 -- AttrEvent → Sky.Live wire events lives in Tier 2 once we wire
 -- the Sky.Live integration. The constructor stays in the ADT so
 -- user code can already use `Ui.onClick MyMsg` even though it

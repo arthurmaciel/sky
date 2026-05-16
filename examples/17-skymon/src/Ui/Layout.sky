@@ -4,12 +4,12 @@ import Sky.Core.Prelude exposing (..)
 import Sky.Core.Maybe as Maybe
 import Std.Html exposing (..)
 import Std.Html.Attributes exposing (..)
-import Std.Live.Events exposing (onClick)
+import Std.Html.Events exposing (onClick)
 import State exposing (..)
 import Ui.Styles exposing (globalStyles)
 
 
-page : Model -> VNode -> VNode
+page : Model -> (Html Msg) -> (Html Msg)
 page model content =
     div
         []
@@ -19,7 +19,7 @@ page model content =
         ]
 
 
-viewHeader : Model -> VNode
+viewHeader : Model -> (Html Msg)
 viewHeader model =
     node
         "header"
@@ -38,7 +38,7 @@ viewHeader model =
             ]]
 
 
-viewSettingsLink : Model -> VNode
+viewSettingsLink : Model -> (Html Msg)
 viewSettingsLink model =
     case model.session of
 
@@ -53,7 +53,7 @@ viewSettingsLink model =
             text ""
 
 
-viewAlertsLink : Model -> VNode
+viewAlertsLink : Model -> (Html Msg)
 viewAlertsLink model =
     case model.session of
 
@@ -64,7 +64,7 @@ viewAlertsLink model =
             text ""
 
 
-viewAuthNav : Model -> VNode
+viewAuthNav : Model -> (Html Msg)
 viewAuthNav model =
     case model.session of
 
@@ -75,7 +75,7 @@ viewAuthNav model =
             a [ href "/auth", class "nav-link" ] [text "Sign In"]
 
 
-viewLoggedIn : UserSession -> VNode
+viewLoggedIn : UserSession -> (Html Msg)
 viewLoggedIn session =
     div
         [class "user-info"]
@@ -87,7 +87,7 @@ viewLoggedIn session =
         ]
 
 
-viewRoleBadge : Role -> VNode
+viewRoleBadge : Role -> (Html Msg)
 viewRoleBadge role =
     case role of
 

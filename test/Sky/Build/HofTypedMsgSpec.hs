@@ -53,16 +53,17 @@ spec = do
                 ("Build complete" `isInfixOf` combined) `shouldBe` True
 
         it "coerces the typed Msg ctor at the call site via rt.Coerce" $ do
-            -- The helper sig stays `cb func(string) any` (this is
-            -- load-bearing — Sky lambdas always lower to func(any) any
-            -- and Go has no function-type covariance, so widening to
-            -- `any` lets the same helper accept BOTH lambdas and typed
-            -- ctors). The fix is at the call site: a typed Msg ctor
-            -- like `Msg_UserChanged : func(string) Msg` gets adapted
-            -- via `rt.Coerce[func(string) any]` to fit. Pre-fix the
-            -- registry didn't know `field`'s param was a func type, so
-            -- coerceArg short-circuited (ty = "any") and the typed
-            -- ctor went through unwrapped — go build then rejected.
+            -- v0.13 D1 update: helper sig emits the typed return
+            -- (`cb func(string) Msg`) — D-Lambda-Lowerer routes
+            -- literal `\x -> ...` lambdas at typed-func slots through
+            -- `curryLambdaPatTyped` so the lowered shape matches the
+            -- sig. Typed ctor args like
+            -- `Msg_UserChanged : func(string) Msg` still pass through
+            -- `rt.Coerce` — but now `rt.Coerce[func(string) Msg]`
+            -- (typed) rather than `rt.Coerce[func(string) any]`
+            -- (pre-D1 widened). The reflect adapter handles both;
+            -- the typed shape unblocks Go's call-site inference at
+            -- user-defined HOF slots.
             sky <- findSky
             cwd <- getCurrentDirectory
             let fixtureRoot = cwd </> "test" </> "fixtures" </> "hof-typed-msg"
@@ -71,14 +72,11 @@ spec = do
                 let cp = (proc sky ["build", "src/Main.sky"]) { cwd = Just tmp }
                 (_, _, _) <- readCreateProcessWithExitCode cp ""
                 body <- readFile (tmp </> "sky-out" </> "main.go")
-                -- Helper sig uses widened `func(string) any` (NOT
-                -- `func(string) Msg` — the widening is correct, see
-                -- renderHofParamTy and the CompileSpec "Result-typed
-                -- lambda params" test).
-                ("cb func(string) any" `isInfixOf` body) `shouldBe` True
-                -- Call site MUST route the typed Msg ctor through
-                -- rt.Coerce so the func-type adapter fires.
-                ("rt.Coerce[func(string) any](Msg_UserChanged)"
+                -- Helper sig emits the typed return shape (D1).
+                ("cb func(string) Msg" `isInfixOf` body) `shouldBe` True
+                -- Call site routes the typed Msg ctor through
+                -- `rt.Coerce[func(string) Msg]` (typed coerce).
+                ("rt.Coerce[func(string) Msg](Msg_UserChanged)"
                     `isInfixOf` body) `shouldBe` True
                 -- Bare-pass form (pre-fix shape) must be GONE.
                 ("field(\"alice\", Msg_UserChanged)" `isInfixOf` body)

@@ -1,5 +1,11 @@
 # Standard library reference
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`compiler/journey.md`](compiler/journey.md) for the changelog.
+
+
 Sky's standard library is **batteries-included** — there's one canonical module per concern, no plugin ecosystem to navigate, no `npm install` for crypto. This page is the complete user-facing reference.
 
 > Each kernel module is reachable via its bare name. `import Log` works the same as `import Std.Log as Log`. The long `Sky.Core.X` / `Std.X` paths are kept for cross-language familiarity, but you can usually drop them.
@@ -449,19 +455,37 @@ main =
 
 See [Sky.Live overview](skylive/overview.md) for the full TEA flow.
 
-### `Event` — Sky.Live event bindings
+### `Event` — typed DOM event bindings (`Std.Html.Events`)
 
-`onClick`, `onInput`, `onChange`, `onSubmit`, `onFocus`, `onBlur`, `onMouseOver`, `onMouseOut`, `onKeyDown`, `onKeyUp`, `onKeyPress`, `onImage` (with `fileMaxWidth` / `fileMaxHeight` / `fileMaxSize` constraints), `onFile`.
+v0.13: `Std.Html.Events` (renamed from `Std.Live.Events`). Each builder
+returns an `Attribute msg` carrying a typed `Event msg`, so the compiler
+flags a handler-shape mismatch (`onInput` bound to a `msg` instead of a
+`String -> msg`) at the call site. `onClick`, `onInput`, `onChange`,
+`onSubmit`, `onFocus`, `onBlur`, `onMouseOver`, `onMouseOut`, `onKeyDown`,
+`onKeyUp`, `onKeyPress`, `onCheck`, `onImage` (with `fileMaxWidth` /
+`fileMaxHeight` / `fileMaxSize`), `onFile`, `on` (generic escape hatch).
 
 ### `Html` — HTML elements
 
-~70 element constructors: `text`, `div`, `span`, `p`, `h1`-`h6`, `a`, `button`, `input`, `form`, `table`, `tr`, `td`, ... plus `render` and `escape` helpers.
+v0.13: a typed Sky-source stdlib module. ~75 element builders returning
+the typed `Html msg` ADT (`text`, `div`, `span`, `p`, `h1`-`h6`, `a`,
+`button`, `input`, `form`, `table`, `tr`, `td`, …). `render : Html msg
+-> String` for server-side rendering; `raw` for trusted un-escaped HTML.
 
-### `Attr` — HTML attributes
+### `Attr` — HTML attributes (`Std.Html.Attributes`)
 
-~60 attribute helpers: `class`, `id`, `style`, `type`, `value`, `href`, `src`, `checked`, `disabled`, `required`, ... plus `boolAttribute` and `dataAttribute` for custom attrs.
+v0.13: ~60 builders returning the typed `Attribute msg` ADT, so the
+compiler rejects `disabled "yes"` / `rows "five"`. String-valued
+(`class`, `id`, `href`, `src`, `style`, …), Int-valued (`rows`, `cols`,
+`width`, `height`, `tabindex`, …), Bool-valued (`checked`, `disabled`,
+`required`, `readonly`, `autofocus`, …). `type_` (keyword clash with
+`type`). `attribute` / `dataAttribute` / `boolAttribute` escape hatches;
+`none : Attribute msg` for the False branch of a conditional attr.
 
 ### `Css` — typed stylesheets
+
+v0.13: a typed Sky-source stdlib module — typed where the value space
+is bounded, `String` + `rawProp` escape hatch where it is not.
 
 ```elm
 import Std.Css as Css
@@ -469,16 +493,27 @@ import Std.Css as Css
 myStyles =
     Css.stylesheet
         [ Css.rule ".btn"
-            [ Css.padding (Css.rem 0.5)
-            , Css.background (Css.hex "#3b82f6")
-            , Css.color (Css.hex "#ffffff")
+            [ Css.display Css.Flex          -- keyword enum
+            , Css.padding (Css.rem 0.5)     -- Length
+            , Css.background (Css.hex "3b82f6")  -- Color
+            , Css.color (Css.hex "ffffff")
+            , Css.cursor Css.Pointer
             ]
         ]
 ```
 
-~120 helpers covering layout (`flex*`, `grid*`), spacing (`px`, `rem`, `em`), colours (`hex`, `rgb`, `rgba`, `hsl`, `hsla`), typography (`font*`), transitions, transforms.
+`Length` ADT (`px`, `rem`, `em`, `pct`, `vh`, `vw`, `ch`, `fr`, `num`,
+`zero ()`, `auto ()`, `lengthRaw`, `calc`, `minmax`), `Color` ADT
+(`hex`, `rgb`, `rgba`, `hsl`, `hsla`, `transparent ()`, `currentColor
+()`, `colorRaw`), keyword enums (`Display`, `Position`, `Cursor`,
+`FontWeight`, `FlexDirection`, `Align`, `Overflow`, …). Open-ended
+compound properties (`transition`, `transform`, `gridTemplateColumns`,
+`fontFamily`, `border`, …) take a `String`. `rule` / `media` /
+`keyframes` / `stylesheet` / `styles` (inline) / `property` / `rawProp`.
 
-> Zero-arg CSS keywords (`Css.zero`, `Css.auto`, `Css.none`, `Css.transparent`) take `()` to sidestep zero-arity memoisation. Write `Css.margin (Css.zero ())`, not `Css.margin Css.zero` — see [Limitation #13](../CLAUDE.md#known-limitations-v09-dev).
+> Bare keyword constants (`Css.zero`, `Css.auto`, `Css.none`,
+> `Css.transparent`) take `()` to sidestep zero-arity memoisation —
+> write `Css.margin (Css.zero ())`. See [Limitation #13](../CLAUDE.md#known-limitations-v09-dev).
 
 ### `Ui` — typed no-CSS layout DSL
 

@@ -46,17 +46,33 @@ jobs:
       # Firebase takes 15+ min cold. Restoring `.skycache/ffi/` (typed
       # .skyi + kernel JSON) and `.skydeps/` (Sky package lockfile)
       # between CI runs drops the sweep from ~25 min to ~3 min when
-      # the upstream Go modules haven't moved. The key includes sky.toml
-      # hashes so a dependency bump busts the cache.
+      # the upstream Go modules haven't moved.
+      #
+      # Cache key components:
+      #   1. `runner.os` — same-platform builds share artefacts
+      #   2. hash of `runtime-go/rt/**.go` — when the runtime API
+      #      surface changes, Sky deps (sky-tailwind, etc.) may use
+      #      removed identifiers and fail to compile. Dropping the
+      #      cache forces a fresh `sky install` that re-fetches the
+      #      latest upstream commit. Caught: v0.13 migration removed
+      #      `Std.Css.right_` → `right`; pre-v0.13 cached
+      #      `.skydeps/sky-tailwind` would fail E1001 on a v0.13 run.
+      #   3. hash of `sky-stdlib/**.sky` — same reason for the
+      #      Sky-side stdlib (kernel sigs, public surface).
+      #   4. hash of every `sky.toml` — dep-version bumps invalidate
+      #      the relevant slice.
+      # Restore-keys include components 1–3 so only same-runtime
+      # caches are eligible (cross-runtime restores would re-introduce
+      # the staleness bug).
       - name: Cache example FFI bindings
         uses: actions/cache@v4
         with:
           path: |
             examples/*/.skycache/ffi
             examples/*/.skydeps
-          key: ${{ runner.os }}-ffi-${{ hashFiles('examples/*/sky.toml') }}
+          key: ${{ runner.os }}-ffi-${{ hashFiles('runtime-go/rt/**.go', 'sky-stdlib/**.sky') }}-${{ hashFiles('examples/*/sky.toml') }}
           restore-keys: |
-            ${{ runner.os }}-ffi-
+            ${{ runner.os }}-ffi-${{ hashFiles('runtime-go/rt/**.go', 'sky-stdlib/**.sky') }}-
 
       # Single-command local/CI parity: scripts/build.sh does everything
       # the manual steps below used to — compile sky, build sky-ffi-inspect,
