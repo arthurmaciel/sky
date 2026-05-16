@@ -1204,7 +1204,8 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             dbUrl = case Toml._dbDriver config of
                                 "sqlite" -> "sqlite:" ++ Toml._dbPath config ++ "?mode=rwc"
                                 _        -> Toml._dbPath config
-                            rustCode = generateRust allMods entrySrcMod typesWithDeps dbUrl
+                            dbDriver = if null (Toml._dbDriver config) then "sqlite" else Toml._dbDriver config
+                            (rustCode, usage) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver
                             rustDir = outDir </> "Rust"
                         createDirectoryIfMissing True rustDir
                         let srcDir = rustDir </> "src"
@@ -1212,7 +1213,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             cargoTomlPath = rustDir </> "Cargo.toml"
                         createDirectoryIfMissing True srcDir
                         writeFile mainRustPath rustCode
-                        writeFile cargoTomlPath RustBuilder.emitCargoToml
+                        writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver)
                         putStrLn $ "   Wrote " ++ mainRustPath
                         putStrLn $ "   Wrote " ++ cargoTomlPath
                     Toml.TargetGo -> return ()
@@ -2738,9 +2739,12 @@ generateGo canMod srcMod config solvedTypes =
 
 
 -- | Generate Rust source from a canonical module with solved types
-generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes -> String -> String
-generateRust canMods _srcMod solvedTypes dbPath = 
-    RustBuilder.emitRust (RustBuilder.buildProgram canMods solvedTypes) dbPath
+generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes -> String -> String -> (String, RustBuilder.UsedKernels)
+generateRust canMods _srcMod solvedTypes dbPath dbDriver = 
+    let builder = RustBuilder.buildProgram canMods solvedTypes
+        code = RustBuilder.emitRust builder dbPath dbDriver
+        usage = RustBuilder.builderKernels builder
+    in (code, usage)
 
 
 -- | Collect Go imports needed
