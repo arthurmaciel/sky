@@ -472,7 +472,10 @@ exprToRustInner ctx e = case e of
         _ -> 
             -- Clone VarLocal args for every function call EXCEPT Task_run,
             -- whose argument is a Pin<Box<dyn Future>> which does not implement Clone.
-            let isTaskRun = case fn of Ann.At _ (Can.VarKernel "Task" "run") -> True; _ -> False
+            let noCloneFn = case fn of
+                    Ann.At _ (Can.VarKernel _ n) -> n == "run" || n == "list_is_empty"
+                    Ann.At _ (Can.VarTopLevel _ n) -> "isEmpty" `isSuffixOf` n
+                    _ -> False
                 argsStrs = map (\a -> case a of
                     Ann.At _ (Can.Lambda ps body) ->
                         let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
@@ -482,7 +485,7 @@ exprToRustInner ctx e = case e of
                         in if null captured
                            then "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " }"
                            else "{ " ++ clones ++ "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " } }"
-                    Ann.At _ (Can.VarLocal n) | not isTaskRun -> rustSafeIdent n ++ ".clone()"
+                    Ann.At _ (Can.VarLocal n) | not noCloneFn -> rustSafeIdent n ++ ".clone()"
                     _ -> exprToRustString ctx a) args
             in exprToRustString ctx fn ++ "(" ++ intercalate ", " argsStrs ++ ")"
     Can.If branches elseBranch -> 
@@ -860,7 +863,7 @@ emitRust b = unlines $
     , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
     , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
     , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<Vec<String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
-    , "pub fn Db_getField(_field: String, _row: Vec<String>) -> String { String::new() }"
+    , "pub fn Db_getField(_field: String, _row: String) -> String { String::new() }"
     , ""
     , "// String helpers"
     , "pub fn String_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }"
