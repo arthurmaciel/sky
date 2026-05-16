@@ -2030,9 +2030,37 @@ func walkAttrs(attrs []any, ctx tuiLayoutCtx) walkedAttrs {
 			// at layoutElement time. No attr-level work here.
 		case 10: // AttrClass — CSS class, ignored in TUI by design
 			tuiWarn("style", "AttrClass (CSS classes don't apply in terminal)")
-		case 11: // AttrEvent — pre-built event payload (eventPair{name, msg})
+		case 11: // AttrEvent — event payload. Two shapes accepted:
+			//   * Sky-source Layer-3 form (v0.13+): Fields[0] is a
+			//     `Std.Html.Attributes.Attribute_EventAttr` SkyADT
+			//     whose Fields[0] in turn is an `Event` SkyADT
+			//     (`OnMsg name msg`, `OnString name fn`, etc.).
+			//     The Event's Fields[0]=name (string), Fields[1]=msg
+			//     or handler.
+			//   * Legacy Go-kernel form: Fields[0] is a raw
+			//     `eventPair{name, msg}` struct (pre-Layer-3 kernel
+			//     output).
+			// The TUI's focusableEvent expects eventPair, so we
+			// normalise Layer-3 SkyADTs into eventPair here. Without
+			// this, typed Std.Ui apps using v0.13 Sky-source events
+			// render correctly but fire NO key events — every
+			// keystroke / mouse click silently drops because the
+			// type assertion in focusableEvent silently rejects the
+			// SkyADT shape.
 			if len(adt.Fields) > 0 {
-				out.events = append(out.events, adt.Fields[0])
+				payload := unwrapAny(adt.Fields[0])
+				if ep, ok := payload.(eventPair); ok {
+					out.events = append(out.events, ep)
+				} else if evAttr, ok := payload.(SkyADT); ok && len(evAttr.Fields) >= 1 {
+					// EventAttr wrapping Event — unwrap once more.
+					if inner, ok := unwrapAny(evAttr.Fields[0]).(SkyADT); ok && len(inner.Fields) >= 2 {
+						name, _ := inner.Fields[0].(string)
+						out.events = append(out.events, eventPair{
+							name: name,
+							msg:  inner.Fields[1],
+						})
+					}
+				}
 			}
 		case 12: // AttrAttribute "k" "v" — raw HTML attr; we read "value"/"placeholder"/"name"
 			if len(adt.Fields) >= 2 {
