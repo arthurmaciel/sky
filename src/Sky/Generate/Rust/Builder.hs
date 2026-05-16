@@ -35,6 +35,7 @@ data EmitCtx = EmitCtx
     { ecRecordMap :: Map.Map String String  -- field-key -> struct name
     , ecSolvedTypes :: Map.Map String Can.Type  -- function name -> inferred type
     , ecCloneVars :: Set.Set String  -- vars that need .clone() at every use site
+    , ecPipeInnerType :: Maybe String  -- inner type of piped Task<A>, set by |>
     }
 
 -- | Build a map from field-name-signature to struct name
@@ -477,7 +478,10 @@ exprToRustInner ctx e = case e of
     Can.List es -> "vec![" ++ intercalate ", " (map (exprToRustString ctx) es) ++ "]"
     Can.Negate e -> "-" ++ exprToRustString ctx e
     Can.Binop op _ _ _ a b 
-        | op == "|>" -> exprToRustString ctx b ++ "(" ++ exprToRustString ctx a ++ ")"
+        | op == "|>" ->
+            let inner = taskExprInnerType a
+                ctx' = ctx { ecPipeInnerType = if null inner then Nothing else Just inner }
+            in exprToRustString ctx' b ++ "(" ++ exprToRustString ctx a ++ ")"
         | op == "<|" -> exprToRustString ctx a ++ "(" ++ exprToRustString ctx b ++ ")"
         | op == "::" -> "sky_list_cons(" ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
         | op == "++" -> "format!(\"{}{}\", " ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
@@ -502,9 +506,14 @@ exprToRustInner ctx e = case e of
                             clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
                             innerCounts = collectVarLocalsMulti body
                             innerMulti = [ v | (v, c) <- Map.toList innerCounts, c >= 2
-                                           , v `notElem` map (\(Ann.At _ p) -> case p of Can.PVar s -> s; _ -> "_") ps ]
+                                           , v `notElem` paramNames ]
                             ctx' = ctx { ecCloneVars = Set.fromList innerMulti }
-                            psStr = intercalate ", " (map patternToRustParam ps)
+                            -- Add type annotation on closure params when the
+                            -- enclosing pipeline's task type is known (E0282 fix).
+                            annot = case ecPipeInnerType ctx of
+                                Just t | length ps == 1 -> ": " ++ t
+                                _ -> ""
+                            psStr = intercalate ", " (map (\p -> patternToRustParam p ++ annot) ps)
                         in if null captured
                            then "move |" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " }"
                            else "{ " ++ clones ++ "move |" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " } }"
@@ -589,6 +598,31 @@ argToRust ctx (Ann.At _ (Can.Lambda params body)) =
        else "{ " ++ clones ++ "move |" ++ paramsStr ++ "| { " ++ exprToRustString ctx body ++ " } }"
 argToRust ctx (Ann.At _ (Can.VarLocal name)) = rustSafeIdent name  -- keep as is
 argToRust ctx expr = exprToRustString ctx expr
+
+-- | Given a Task-typed expression (like Db_query(…)), return the Rust type
+-- string of the SkyTask's inner success type A (i.e.  SkyTask<A> → A).
+-- Returns "" when the type can't be determined.
+taskExprInnerType :: Can.Expr -> String
+taskExprInnerType (Ann.At _ expr) = case expr of
+    Can.Call (Ann.At _ (Can.VarKernel modName fnName)) _args
+        | "Db" `isSuffixOf` modName || modName == "Db" -> case fnName of
+            "query"    -> "Vec<String>"
+            "exec"     -> "()"
+            "execRaw"  -> "()"
+            "connect"  -> "String"
+            "getField" -> "String"
+            _ -> ""
+        | "System" `isSuffixOf` modName || modName == "System" -> case fnName of
+            "args"     -> "Vec<String>"
+            "exit"     -> "()"
+            _ -> ""
+    -- Fallback: try to look up known signature from solvedTypes
+    Can.VarTopLevel modName name ->
+        let modStr = ModuleName._name modName
+            modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
+            qualified = modPrefix ++ name
+        in ""  -- solvedTypes lookup would go here (complex, defer for now)
+    _ -> ""
 
 binopToRust :: String -> String
 binopToRust op = case op of
@@ -683,7 +717,7 @@ ctorArgToPattern (Can.PatternCtorArg _ _ pat) = patternToMatchString pat
 buildProgram :: [Can.Module] -> Map.Map String Can.Type -> RustBuilder
 buildProgram mods solvedTypes = 
     let recordMap = buildRecordMap mods
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty, ecPipeInnerType = Nothing }
     in RustBuilder
         { builderModules = map (buildModule ctx) mods
         , builderTypes = concatMap (\m -> 

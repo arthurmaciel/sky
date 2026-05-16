@@ -204,29 +204,26 @@ fn main() {
 62. **Always `: Clone`** - Reverts faulty heuristic; all type vars get Clone  
     (pattern variables like `x` in `Just(x) => x.clone()` need it)
 
-## Known Issues
+### Session 9 (zero errors — ecPipeInnerType closure annotation)
+63. **`ecPipeInnerType`** - EmitCtx field set by `|>` handler with the inner  
+    type of the piped Task expression (e.g. `Vec<String>` from Db_query)
+64. **Lambda param type annotation** - `Can.Call` Lambda handler reads  
+    `ecPipeInnerType` and emits `move |rows: Vec<String>| { ... }`  
+    fixing E0282 (Rust type inference through `move` closure boundary)
+65. **`taskExprInnerType`** - Helper mapping known kernel calls to their  
+    Task inner type (Db_query→Vec<String>, Db_exec→(), etc.)
 
-### Remaining: 1 error in todo-cli (E0282)
-`Task_map(move |rows| { ... rows.clone() ... })(Db_query(...))` — the  
-closure's `rows` type can't be inferred through the `move` boundary because  
-`isEmpty(rows.clone())` uses `Vec<T0>` where `T0` is unconstrained. The  
-else branch `list_map(f, rows.clone())` constrains `T0 = String`, but Rust's  
-type inference can't unify across branches through a generic `move` closure.
+## Status
 
-**Fix**: Thread the task-arg's return type from `solvedTypes` into closure  
-parameter emission, generating `move |rows: Vec<String>| { ... }`.
+**Hello-world**: ✅ 0 errors, compiles and runs
+**Todo-cli**: ✅ 0 errors
 
 ## Next Steps
 
-### Priority 1: Fix E0282 closure param type
-Add explicit type annotations on closure params for higher-order kernel calls  
-(Task_map, Task_andThen, List.map, etc.) using the OTHER arg's type from  
-solvedTypes or stub signatures.
-
-### Priority 2: Production Readiness
-2. CamelCase type names
-3. Separate module files
-4. Benchmark Task_parallel vs Go goroutines
+### Production Readiness
+1. CamelCase type names (eliminate cosmetic warnings)
+2. Separate module files (`mod` declarations instead of flat file)
+3. Benchmark Task_parallel vs Go goroutines
 
 ## Technical Notes
 
