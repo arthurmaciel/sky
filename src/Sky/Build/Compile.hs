@@ -1201,7 +1201,10 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 case Toml._target config of
                     Toml.TargetRust -> do
                         let allMods = canMod : map snd validDeps
-                            rustCode = generateRust allMods entrySrcMod typesWithDeps
+                            dbUrl = case Toml._dbDriver config of
+                                "sqlite" -> "sqlite:" ++ Toml._dbPath config ++ "?mode=rwc"
+                                _        -> Toml._dbPath config
+                            rustCode = generateRust allMods entrySrcMod typesWithDeps dbUrl
                             rustDir = outDir </> "Rust"
                         createDirectoryIfMissing True rustDir
                         let srcDir = rustDir </> "src"
@@ -2735,9 +2738,9 @@ generateGo canMod srcMod config solvedTypes =
 
 
 -- | Generate Rust source from a canonical module with solved types
-generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes -> String
-generateRust canMods _srcMod solvedTypes = 
-    RustBuilder.emitRust (RustBuilder.buildProgram canMods solvedTypes)
+generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes -> String -> String
+generateRust canMods _srcMod solvedTypes dbPath = 
+    RustBuilder.emitRust (RustBuilder.buildProgram canMods solvedTypes) dbPath
 
 
 -- | Collect Go imports needed
