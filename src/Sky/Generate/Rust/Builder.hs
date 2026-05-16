@@ -131,6 +131,53 @@ buildRecordMap mods = Map.fromList
     , (name, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)
     ]
 
+-- | Anonymous record struct name prefix
+anonStructName :: String -> String
+anonStructName key = toCamelCase ("__anon__" ++ map (\c -> if c == ',' then '_' else c) key)
+
+-- | Walk all expressions collecting anonymous record field signatures.
+-- Returns field-key → [(field-name, HM-inferred-type)] for records NOT
+-- covered by type-alias-defined structs.  Skips records with unresolved
+-- type variables (TVar) to avoid emitting invalid generic struct fields.
+collectAnonRecordTypes :: [Can.Module] -> Map.Map String [String]
+collectAnonRecordTypes = foldMap walkMod
+  where
+    walkMod m = walkDecls (Can._decls m)
+
+    walkDecls Can.SaveTheEnvironment = Map.empty
+    walkDecls (Can.Declare def rest) = walkDef def <> walkDecls rest
+    walkDecls (Can.DeclareRec def defs rest) = walkDef def <> foldMap walkDef defs <> walkDecls rest
+
+    walkDef (Can.Def _ _ body) = walkExpr body
+    walkDef (Can.TypedDef _ _ _ body _) = walkExpr body
+    walkDef (Can.DestructDef _ expr) = walkExpr expr
+
+    walkExpr (Ann.At _ expr) = case expr of
+        Can.Record fields ->
+            let key = intercalate "," (Map.keys fields)
+                fieldNames = map fst (Map.toList fields)
+            in Map.singleton key fieldNames <> walkFields fields
+        _ -> walkSubExprs expr
+      where
+        walkFields flds = foldMap (\(_, e) -> walkExpr e) (Map.toList flds)
+
+        walkSubExprs e = case e of
+            Can.Call fn args -> walkExpr fn <> foldMap walkExpr args
+            Can.Lambda _ body -> walkExpr body
+            Can.Let def body -> walkDef def <> walkExpr body
+            Can.LetRec defs body -> foldMap walkDef defs <> walkExpr body
+            Can.LetDestruct _ e0 body -> walkExpr e0 <> walkExpr body
+            Can.Case scrut branches -> walkExpr scrut <> foldMap (\(Can.CaseBranch _ b) -> walkExpr b) branches
+            Can.If branches elseBranch -> foldMap (\(c, t) -> walkExpr c <> walkExpr t) branches <> walkExpr elseBranch
+            Can.Binop _ _ _ _ a b -> walkExpr a <> walkExpr b
+            Can.Access r _ -> walkExpr r
+            Can.Update _ r updates -> walkExpr r <> foldMap (\(_, Can.FieldUpdate _ e) -> walkExpr e) (Map.toList updates)
+            Can.Record _ -> mempty  -- already handled above
+            Can.List es -> foldMap walkExpr es
+            Can.Tuple a b rest -> foldMap walkExpr (a:b:rest)
+            Can.Negate e0 -> walkExpr e0
+            _ -> mempty  -- literals, variables: no sub-expressions
+
 buildModule :: EmitCtx -> Can.Module -> RustModule
 buildModule ctx mod = 
     let modPrefix = moduleNameToRust (Can._name mod)
@@ -674,7 +721,15 @@ exprToRustInner ctx e = case e of
         let key = intercalate "," (Map.keys fields)
         in case Map.lookup key (ecRecordMap ctx) of
             Just structName -> 
-                structName ++ " { " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)) ++ " }"
+                let fieldStrs = map (\(k, v) -> k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)
+                    -- Anonymous record structs (from collectAnonRecordTypes) have
+                    -- SkyValue fields.  Wrap each expression with .to_string()
+                    -- so any Rust type (i64, bool, String) converts to String.
+                    anonWrap f = if "__Anon" `isPrefixOf` structName
+                                 then f ++ ".to_string()"
+                                 else f
+                in structName ++ " { " ++ intercalate ", " (map (\(k, v) -> 
+                    k ++ ": " ++ anonWrap (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
             Nothing -> 
                 "{ " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)) ++ " }"
     Can.Unit -> "()"
@@ -840,14 +895,33 @@ ctorArgToPattern (Can.PatternCtorArg _ _ pat) = patternToMatchString pat
 
 buildProgram :: [Can.Module] -> Map.Map String Can.Type -> RustBuilder
 buildProgram mods solvedTypes = 
-    let recordMap = buildRecordMap mods
+    let aliasMap = buildRecordMap mods
+        rawAnon = collectAnonRecordTypes mods
+        -- Only include anonymous record keys NOT already covered by a type alias
+        anonEntries = Map.filterWithKey (\k _ -> not (Map.member k aliasMap)) rawAnon
+        
+        -- Generate RStructDef entries with SkyValue (String) for all fields.
+        -- This avoids type-unsafe anonymous record emission.  The struct is
+        -- type-safe for String-valued records; mixed-type records compile
+        -- but lose precision (all fields become String/SkyValue).
+        (anonDefs, anonKeyMap) =
+            foldr (\(key, flds) (defs, km) ->
+                let name = anonStructName key
+                    rustFlds = [(n, "SkyValue") | n <- flds]
+                in if null rustFlds then (defs, km)
+                   else (RStructDef name rustFlds : defs, Map.insert key name km)
+                ) ([], Map.empty) (Map.toList anonEntries)
+        
+        recordMap = Map.union aliasMap anonKeyMap
+        
         ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty, ecPipeInnerType = Nothing }
         usage = analyzeKernelUsage mods
-    in RustBuilder
-        { builderModules = map (buildModule ctx) mods
-        , builderTypes = concatMap (\m -> 
+        existingTypes = concatMap (\m -> 
             let prefix = moduleNameToRust (Can._name m)
             in unionsToRustTypes prefix (Can._unions m) ++ aliasesToRustTypes prefix (Can._aliases m)) mods
+    in RustBuilder
+        { builderModules = map (buildModule ctx) mods
+        , builderTypes = existingTypes ++ anonDefs
         , builderKernels = usage
         }
 
