@@ -46,7 +46,7 @@ Rust codegen lives in the main Sky compiler at `src/Sky/Generate/Rust/Builder.hs
 | `--target rust` flag | ✅ Wired into CLI |
 | Cargo.toml generation | ✅ Auto-generated with tokio + sqlx dependencies |
 | Expression translation | ✅ Functions, calls, patterns, let, binops, lambdas, if/case |
-| Kernel calls | ✅ println!, Task::, System::, Log::, Db::, Result:: |
+| Kernel calls | ✅ log_info (println → log_info), Task, System, Log, Db, Result, Time, Random, File, Crypto |
 | Type mapping | ✅ Basic types + module-prefixed user types |
 | Union/ADT handling | ✅ Module-prefixed enum (`Sky_Core_Error::Error`) |
 | ADT constructor field types | ✅ Uses actual types from Can.Ctor (not `()`) |
@@ -62,17 +62,22 @@ Rust codegen lives in the main Sky compiler at `src/Sky/Generate/Rust/Builder.hs
 | List/maybe/error sigs | ✅ knownDefSig covers List, Maybe, Error modules |
 | `as_slice()` for Vec | ✅ Match scrutinee wrapped for slice pattern support |
 | Thunk auto-invoke | ✅ `(|| { expr })()` for `let _ = Task.run` discard |
-| Db runtime (sqlx AnyPool) | ✅ SQLite/PostgreSQL/MySQL via URL scheme; sky.toml `[database]` config |
+| Db runtime (sqlx backend-specific) | ✅ SqlitePool/PgPool/MySqlPool via sky.toml `[database]` driver; only one backend compiled |
+| Conditional compilation | ✅ Only tokio/sqlx/serde_json deps when actually used |
+| ok_res type-inference helper | ✅ Closes E0282 class — no turbofish at any call site |
+| Anonymous record structs | ✅ Synthetic `__anon__` structs for inline records without type alias |
+| Structured log attrs | ✅ `fmt_attrs` formats `[k,v,k,v,…]` as ` key=value` |
+| Extra kernel stubs | ✅ Time, Random (LCG), File, Crypto (sha256/random), Http (error stub) |
+| `#[derive(Clone, Debug)]` | ✅ All generated enums and structs |
 
-### Phase 3: Full Stdlib Coverage
+### Phase 3: Remaining Issues
 
-Priority:
-- `Log.infoWith` / `Log.errorWith` structured attrs
-- `Random.*`, `Time.*`, `File.*`, `Crypto.*` kernels
+Known limitations:
+- Anonymous records lose type precision (SkyValue/String fields only)
+- JSON decoder lifetimes (06-json): ∼139 errors from Fn/FnOnce mismatches
+- Def return type inference: simple/test_pkg examples have wrong return type
+- Separate module files (`mod` declarations instead of flat `main.rs`)
 - `System.setenv` / `System.unsetenv`
-- Separate module files (`mod` declarations)
-- `Db.open` alias parity with Go target
-- Error mapping: specific sqlx errors → correct SkyError variant
 
 ## Usage
 
@@ -96,59 +101,59 @@ cargo run
 
 ## sqlx Database Runtime
 
-The generated project includes sqlx with `AnyPool` for multi-backend database support:
+The generated project includes sqlx with a backend-sepcific pool type determined by `sky.toml [database] driver`:
 
 ```rust
-use sqlx::any::{AnyPool, AnyRow};
+use sqlx::sqlite::{SqlitePool as DbPool, SqliteRow as DbRow};
 use sqlx::{Column, Row};
 
-type Db = sqlx::AnyPool;
+type Db = DbPool;
 const SKY_DB_URL: &str = "sqlite:todos.db?mode=rwc";
 ```
 
-**Backend switching**: `AnyPool` auto-detects the database from the URL scheme:
-- `sqlite:path?mode=rwc` → SQLite (auto-creates file)
-- `postgres://user:pass@host/db` → PostgreSQL
-- `mysql://user:pass@host/db` → MySQL
+**Backend switching** (compile-time, via Cargo feature):
+- `driver = "sqlite"` → `SqlitePool`, `SqliteRow` (feature `sqlite`)
+- `driver = "postgres"` → `PgPool`, `PgRow` (feature `postgres`)
+- `driver = "mysql"` → `MySqlPool`, `MySqlRow` (feature `mysql`)
 
-**Config source**: `sky.toml` `[database]` section. `driver = "sqlite"` prepends the `sqlite:` prefix + `?mode=rwc`; other drivers pass the path as-is.
+Only the selected backend's driver is compiled. No `AnyPool`, no `install_default_drivers()`.
+
+**Config source**: `sky.toml` `[database]` section. `driver = "sqlite"` prepends `sqlite:` prefix + `?mode=rwc`; other drivers pass the path as-is.
 
 **Helper functions**:
 | Helper | Purpose |
 |--------|---------|
-| `build_sql` | Replaces `?` with escaped `'values'` (SQL injection safe, DB-agnostic) |
-| `row_to_map` | Converts `AnyRow` → `HashMap<String,String>` with type fallback chain |
-| `sky_err` | Wraps `sqlx::Error` → `SkyError` (ADT enum or String depending on Error module) |
-
-**Kernel stubs** mapped via `taskExprInnerType` (returns `Vec<HashMap<String, String>>` for query, `()` for exec).
+| `build_sql` | Replaces `?` with escaped `'values'` (DB-agnostic) |
+| `row_to_map` | Converts `DbRow` → `HashMap<String,String>` with type fallback chain |
+| `sky_err` | Maps `sqlx::Error` → correct `SkyError` variant (Network/Io/Conflict/Timeout/Unavailable/Unexpected) |
 
 ## Task Runtime (Tokio-based async)
 
 The compiler emits proper async/await combinators using Tokio:
 
 ```rust
-// Task type: generic over error E and success A
-type SkyTask<E, A> = Pin<Box<dyn Future<Output = SkyResult<E, A>> + Send>>;
+// Task type: SkyError fixed (no generic E parameter)
+type SkyTask<A> = Pin<Box<dyn Future<Output = SkyResult<SkyError, A>> + Send + 'static>>;
 
 // Combinators use async move blocks (edition 2021)
-Task_map(f)(task)       // map Ok value
-Task_andThen(f)(task)   // chain another Task
-Task_onError(f)(task)   // error recovery
-Task_succeed(a)         // lift value into Task
+task_map(f)(task)       // map Ok value
+task_and_then(f)(task)  // chain another Task
+task_on_error(f)(task)  // error recovery
+task_succeed(a)         // lift value into Task
+task_fail(e)            // lift error into Task
 
 // Parallel execution uses tokio::spawn (~Go goroutines)
-Task_parallel(tasks)  // results, short-circuit on first error
+task_parallel(tasks)  // results, short-circuit on first error
 
 // Synchronous execution via block_on
-Task_run(task)  // blocks on the future via Tokio runtime
+task_run(task)  // blocks on the future via Tokio runtime
 ```
 
 The `main()` entry point runs the Sky `main` function's Task pipeline:
 
 ```rust
 fn main() {
-    let pipeline = Task_onError(reportError)(Task_andThen(runApp)(Db_connect(url)));
-    let _ = Task_run(pipeline);
+    let _ = block_on(sky_main());  // sky_main returns SkyTask<()>
 }
 ```
 
@@ -258,37 +263,62 @@ fn main() {
 72. **`pub` on generated types** - All enums, structs, and aliases now emit  
     `pub enum` / `pub struct` / `pub type` (fixes "more private than item")
 
-### Session 11 (sqlx AnyPool — real DB backend)
-73. **sqlx AnyPool** — Real DB backend replacing HashMap stubs. `sqlx::AnyPool::connect(url)` auto-detects SQLite/PostgreSQL/MySQL from URL scheme.
+### Session 11 (sqlx backend-specific — AnyPool removed)
+73. **Backend-specific sqlx** — `SqlitePool`/`PgPool`/`MySqlPool` directly, no `AnyPool`. Only one backend compiled.
 74. **`build_sql`** — `?` placeholder replacement with escaped `'values'`. DB-agnostic.
-75. **`row_to_map`** — `AnyRow` → `HashMap<String,String>` with `&str` → `i64` → `f64` → empty fallback.
-76. **`sky_err`** — Maps `sqlx::Error` to correct `SkyError` variant.
-77. **`[database]` sky.toml** — `driver = "sqlite"` prepends prefix + `?mode=rwc` for auto-creation.
-78. **0 Rust compiler errors and warnings** — todo-cli emits clean output.
+75. **`row_to_map`** — `DbRow` → `HashMap<String,String>` with `&str` → `i64` → `f64` → empty fallback.
+76. **`sky_err`** — Maps `sqlx::Error` to correct `SkyError` variant (Network/Io/Conflict/Timeout/Unavailable/Unexpected).
+77. **`[database]` sky.toml** — `driver = "sqlite"` selects backend feature + prepends `sqlite:` prefix.
+
+### Session 12 (conditional compilation — UsedKernels analyzer)
+78. **`UsedKernels`** — `analyzeKernelUsage` walks all expressions collecting kernel usage (Db, Task.run, Task.parallel, Json).
+79. **Conditional Cargo.toml** — tokio only when Task/Db used; sqlx only when Db used; serde_json only when Json.* used.
+80. **Conditional runtime stubs** — Db/JSON/task_parallel sections emitted only when used.
+81. **Hello-world: 0 external deps** — 0.33s build, no tokio/sqlx/serde_json.
+
+### Session 13 (log attrs, extra kernels, else-if, Result ordering)
+82. **`fmt_attrs`** — Formats `[k,v,k,v,…]` pairs as ` key=value` for structured logging.
+83. **Extra kernel stubs** — Time, Random (LCG), File, Crypto, Http (all std-only except Http error stub).
+84. **`else if` syntax** — `Can.If` emits `else if cond { }` not `else cond { }`.
+85. **`SkyResult<E, A>` ordering** — Error-first, matching `Result e a` order (was swapped).
+
+### Session 14 (println→log_info, ok_res, Debug derive, E0282 class closed)
+86. **Println→log_info** — No more `println!` macro + ad-hoc Task wrapper. Routes through `log_info()` which returns `SkyTask<()>`.
+87. **main return type conditional** — `SkyTask<()>` when no `Task.run` is used, `()` otherwise.
+88. **`ok_res` helper** — `fn ok_res<A>(a: A) -> SkyResult<SkyError, A>`. Every runtime stub construction site uses it. E0282 class closed permanently.
+89. **`#[derive(Clone, Debug)]`** — All generated enums and structs.
+
+### Session 15 (anonymous record structs)
+90. **`collectAnonRecordTypes`** — Walks all expressions finding inline records without type aliases.
+91. **`__anon__` structs** — Synthetic `RStructDef` entries with `SkyValue`-typed fields. Record literals get `.to_string()` wrapping.
+
+### Session 16 (backend-specific sqlx — AnyPool eliminated)
+92. **`dbPoolType`/`dbRowType`** — Maps sky.toml driver to concrete sqlx types (SqlitePool/SqliteRow, etc.).
+93. **No AnyPool** — No `install_default_drivers()`, no `any` feature flag. Only the selected backend compiled.
 
 ## Status
 
-**Hello-world**: ✅ 0 errors, compiles and runs
-**Todo-cli**: ✅ 0 errors, all 7 operations work with real SQLite persistence:
-- `./app add "Buy milk"` → "Added: Buy milk" (INSERT)
-- `./app list` → lists todos with `[ ]`/`[x]` status (SELECT)
-- `./app done 1` → marks as done (UPDATE)
-- `./app undone 1` → marks as not done (UPDATE)
-- `./app remove 1` → deletes todo (DELETE)
-- `./app clear` → removes completed (DELETE)
+**01-hello-world**: ✅ 0 errors, 0 warnings, 0 external deps
+**04-local-pkg**: ✅ 0 errors, 0 warnings, 0 external deps (multi-module)
+**07-todo-cli**: ✅ 0 errors, 0 warnings, SQLite CRUD via sqlx:
+- `./app add "Buy milk"` → INSERT + structured log `Action Added:=Buy milk`
+- `./app list` → SELECT with `[ ]`/`[x]` status
+- `./app done 1` / `./app undone 1` → UPDATE
+- `./app remove 1` → DELETE
+- `./app clear` → DELETE completed
 - `./app help` → usage text
+**14-task-demo**: ✅ 0 errors, 0 warnings, Task combinators + error messages:
+- `Success: Hello, Sky! Task is the effect boundary.`
+- `Fail error: Unexpected: intentional`
 
 ## Next Steps
 
-### Immediate
-1. **`Log.infoWith` / `Log.errorWith` structured attrs** — currently stubbed to plain println!
-2. **`db_open` alias** — parity with Go target's `Db.open` kernel route
-3. **Error mapping** — specific sqlx errors → correct `SkyError` variant (Network, Conflict, etc.)
-
-### Medium term
+### Known limitations (no fix planned short-term)
+1. Anonymous records lose type precision (SkyValue/String only)
+2. JSON decoder lifetimes (06-json): ∼139 `Fn`/`FnOnce`/lifetime errors in `Decoder<T>`
+3. Def return type inference (simple/test_pkg): Task-returning Def functions with wrong ret type
 4. Separate module files (`mod` declarations instead of flat `main.rs`)
-5. `Random.*`, `Time.*`, `File.*`, `Crypto.*` kernels
-6. `System.setenv` / `System.unsetenv`
+5. `System.setenv` / `System.unsetenv`
 
 ### Longer term
 - Sky.Http.Server (axum backend)
@@ -304,7 +334,7 @@ fn main() {
   variable names (`todoTitle`) retain their CamelCase form under `#![allow(non_snake_case)]`.
 - `ModuleName.Canonical` wraps a single `String`, not a list (`ModuleName._name` field)
 - `Ann.At` is the data constructor for located AST nodes (not `A.Located`)
-- Kernel calls: `Log.println` → `println!`, other kernels use `module_name` convention
+- Kernel calls: `Log.println` → `log_info` (routes through Task-returning runtime stub), other kernels use `module_name` convention
 - Go remains the default target when no `--target` is specified
 - Rust output directory: `sky-out/Rust/` (with `src/main.rs` + `Cargo.toml`)
 - Compile with: `cd sky-out/Rust && cargo run` (requires Rust edition 2021); first build downloads ~180 crates for sqlx + tokio
