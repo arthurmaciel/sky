@@ -73,6 +73,12 @@ extractReturnType :: Can.Type -> Can.Type
 extractReturnType (Can.TLambda _ ret) = extractReturnType ret
 extractReturnType ty = ty
 
+-- | Extract parameter types from a function type (TLambda chain), converting
+-- each to a Rust type string.  Returns [] for non-function types.
+extractParamTypes :: Can.Type -> [Can.Type]
+extractParamTypes (Can.TLambda paramTy restTy) = paramTy : extractParamTypes restTy
+extractParamTypes _ = []
+
 -- | Check if a type contains unresolved type variables (should not be emitted)
 hasTypeVars :: Can.Type -> Bool
 hasTypeVars (Can.TVar _) = True
@@ -140,6 +146,7 @@ listSig "cons" 2 = Just (["T0", "Vec<T0>"], "Vec<T0>")
 listSig "head" 1 = Just (["Vec<T0>"], "SkyMaybe<T0>")
 listSig "tail" 1 = Just (["Vec<T0>"], "SkyMaybe<Vec<T0>>")
 listSig "isEmpty" 1 = Just (["Vec<T0>"], "bool")
+-- length needs no Clone (just counts elements)
 listSig "length" 1 = Just (["Vec<T0>"], "i64")
 listSig "reverse" 1 = Just (["Vec<T0>"], "Vec<T0>")
 -- reverseHelp list acc = case list of { [] -> acc; x::rest -> reverseHelp rest (x::acc) }
@@ -221,6 +228,7 @@ defToRustItem :: EmitCtx -> String -> Can.Def -> RustItem
 defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) = 
     let rustName = if name == "main" then "sky_main" else name
         n = length params
+        needsClone = bodyUsesList body
         (paramStrs, genVars) = case knownDefSig modPrefix name n of
             Just (paramTypes, retType) ->
                 let safeParams = map (\(p, t) -> patternToRustParam p ++ ": " ++ t) (zip params paramTypes)
@@ -231,17 +239,31 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                     gens = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
                 in (safeParams, gens)
             Nothing ->
-                -- Fallback: if body does list matching, use Vec<Tn> for all params
-                let useVec = bodyUsesList body
-                    safeParams = map (\(i, p) ->
-                        let tn = "T" ++ show i
-                        in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "SkyValue")
-                        ) (zip [0..] params)
-                    genList = if useVec
-                              then map (\i -> "T" ++ show i ++ ": Clone") [0..length params - 1]
-                              else []
-                    gens = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
-                in (safeParams, gens)
+                -- Try solvedTypes (HM-inferred types) for param types.
+                -- This correctly types Def functions like getArg : List String -> String
+                -- even when the lowerer desugars case expressions.
+                let solvedParamTys = case Map.lookup name (ecSolvedTypes ctx) of
+                        Just ty -> extractParamTypes ty
+                        Nothing -> []
+                    (safeParams, genVars) =
+                        if length solvedParamTys == length params
+                           && all (not . hasTypeVars) solvedParamTys
+                        then -- Use solved types (all concrete, no TVars)
+                            let pStrs = map (\(p, t) -> patternToRustParam p ++ ": " ++ typeToRustString t)
+                                        (zip params solvedParamTys)
+                            in (pStrs, "")
+                        else -- Fallback: body analysis or SkyValue
+                            let useVec = bodyUsesList body
+                                pStrs = map (\(i, p) ->
+                                    let tn = "T" ++ show i
+                                    in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "SkyValue")
+                                    ) (zip [0..] params)
+                                genList = if useVec
+                                          then map (\i -> "T" ++ show i ++ ": Clone") [0..length params - 1]
+                                          else []
+                                gs = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
+                            in (pStrs, gs)
+                in (safeParams, genVars)
         -- sky_main always returns () since the entry wrapper handles the Task.
         -- knownDefSig takes priority so stdlib functions get correct return types
         -- even when not in ecSolvedTypes (which only covers the entry module).
@@ -473,8 +495,7 @@ exprToRustInner ctx e = case e of
             -- Clone VarLocal args for every function call EXCEPT Task_run,
             -- whose argument is a Pin<Box<dyn Future>> which does not implement Clone.
             let noCloneFn = case fn of
-                    Ann.At _ (Can.VarKernel _ n) -> n == "run" || n == "list_is_empty"
-                    Ann.At _ (Can.VarTopLevel _ n) -> "isEmpty" `isSuffixOf` n
+                    Ann.At _ (Can.VarKernel _ n) -> n == "run"
                     _ -> False
                 argsStrs = map (\a -> case a of
                     Ann.At _ (Can.Lambda ps body) ->
@@ -608,7 +629,13 @@ defToRustString _ctx _ = "_ = unimplemented()"
 branchToRustString :: EmitCtx -> Can.CaseBranch -> String
 branchToRustString ctx (Can.CaseBranch pat body) =
     let patStr  = patternToMatchString pat
-        bodyStr = exprToRustString ctx body
+        -- Zero-arg top-level functions used as case values must be called.
+        bodyExpr = case body of
+            Ann.At _ (Can.VarTopLevel mod name) ->
+                let modStr = ModuleName._name mod
+                    fnName = (if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_") ++ name
+                in fnName ++ "()"
+            _ -> exprToRustString ctx body
         -- Slice patterns bind references (&T for head, &[T] for tail).
         -- Inject .clone() / .to_vec() so the body sees owned values.
         prefix = case pat of
@@ -620,8 +647,8 @@ branchToRustString ctx (Can.CaseBranch pat body) =
                 concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") (concatMap patBindingVars items)
             _ -> ""
     in if null prefix
-       then patStr ++ " => " ++ bodyStr
-       else patStr ++ " => { " ++ prefix ++ bodyStr ++ " }"
+       then patStr ++ " => " ++ bodyExpr
+       else patStr ++ " => { " ++ prefix ++ bodyExpr ++ " }"
 
 patternToMatchString :: Can.Pattern -> String
 patternToMatchString (Ann.At _ pat) = case pat of
@@ -862,7 +889,7 @@ emitRust b = unlines $
     , "pub fn Db_connect<T>(_url: T) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
     , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
     , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<Vec<String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
+    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
     , "pub fn Db_getField(_field: String, _row: String) -> String { String::new() }"
     , ""
     , "// String helpers"
