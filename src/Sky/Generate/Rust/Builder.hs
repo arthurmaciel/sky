@@ -35,6 +35,7 @@ data UsedKernels = UsedKernels
     { usesDb :: Bool           -- Std.Db imported → needs sqlx
     , usesTaskRun :: Bool       -- Task.run called → needs tokio runtime
     , usesTaskParallel :: Bool  -- Task.parallel called → needs tokio::spawn
+    , usesJson :: Bool          -- Json.* imported → needs serde_json
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -42,9 +43,10 @@ instance Semigroup UsedKernels where
         { usesDb = usesDb a || usesDb b
         , usesTaskRun = usesTaskRun a || usesTaskRun b
         , usesTaskParallel = usesTaskParallel a || usesTaskParallel b
+        , usesJson = usesJson a || usesJson b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False
+    mempty = UsedKernels False False False False
 
 -- | Walk all expressions across all modules to detect kernel usage.
 -- Ensures we only emit the runtime stubs and Cargo deps that are actually needed.
@@ -70,6 +72,8 @@ analyzeKernelUsage = foldMap analyzeMod
                   then mempty { usesTaskRun = True } else mempty
                 , if modName == "Task" && fnName == "parallel"
                   then mempty { usesTaskParallel = True } else mempty
+                , if "Json" `isPrefixOf` modName || "Sky.Core.Json" `isPrefixOf` modName
+                  then mempty { usesJson = True } else mempty
                 ]
         Can.Call fn args -> walkExpr fn <> foldMap walkExpr args
         Can.Lambda _ body -> walkExpr body
@@ -405,7 +409,7 @@ typeToRustString t = case t of
     Can.TType _ "List" [a] -> "Vec<" ++ typeToRustString a ++ ">"
     Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString a ++ ">"
     Can.TType _ "Dict" [k, v] -> "HashMap<" ++ typeToRustString k ++ ", " ++ typeToRustString v ++ ">"
-    Can.TType _ "Result" [e, a] -> "SkyResult<" ++ typeToRustString a ++ ", " ++ typeToRustString e ++ ">"
+    Can.TType _ "Result" [e, a] -> "SkyResult<" ++ typeToRustString e ++ ", " ++ typeToRustString a ++ ">"
     Can.TType _ "Error" [] -> "SkyError"  -- Sky unified error type (maps to Error ADT or String)
     Can.TRecord _fields _ -> "()"  -- TRecord: emitted as named struct via alias
     Can.TTuple a b rest -> "(" ++ intercalate ", " (map typeToRustString (a:b:rest)) ++ ")"
@@ -582,7 +586,7 @@ exprToRustInner ctx e = case e of
     Can.Call fn args -> case exprToRustString ctx fn of
         fnName | "println" `isSuffixOf` fnName -> 
             let fmt = concat (replicate (length args) "{}")
-            in "println!(\"" ++ fmt ++ "\", " ++ intercalate ", " (map (exprToRustString ctx) args) ++ ")"
+            in "{ println!(\"" ++ fmt ++ "\", " ++ intercalate ", " (map (exprToRustString ctx) args) ++ "); Box::pin(ready(SkyResult::Ok(()))) }"
         _ -> 
             -- Clone VarLocal args for every function call EXCEPT Task_run,
             -- whose argument is a Pin<Box<dyn Future>> which does not implement Clone.
@@ -610,8 +614,11 @@ exprToRustInner ctx e = case e of
                     Ann.At _ (Can.VarLocal n) | not noCloneFn -> rustSafeIdent n ++ ".clone()"
                     _ -> exprToRustString ctx a) args
             in exprToRustString ctx fn ++ "(" ++ intercalate ", " argsStrs ++ ")"
-    Can.If branches elseBranch -> 
-        "if " ++ intercalate " else " (map (\(c, t) -> exprToRustString ctx c ++ " { " ++ exprToRustString ctx t ++ " }") branches)
+    Can.If [] elseBranch ->
+        exprToRustString ctx elseBranch
+    Can.If ((firstCond, firstBody):rest) elseBranch ->
+        "if " ++ exprToRustString ctx firstCond ++ " { " ++ exprToRustString ctx firstBody ++ " }"
+        ++ concatMap (\(c, t) -> " else if " ++ exprToRustString ctx c ++ " { " ++ exprToRustString ctx t ++ " }") rest
         ++ " else { " ++ exprToRustString ctx elseBranch ++ " }"
     Can.Let def body -> 
         "let " ++ defToRustString ctx def ++ "; " ++ exprToRustString ctx body
@@ -695,6 +702,13 @@ argToRust ctx expr = exprToRustString ctx expr
 taskExprInnerType :: Can.Expr -> String
 taskExprInnerType (Ann.At _ expr) = case expr of
     Can.Call (Ann.At _ (Can.VarKernel modName fnName)) _args
+        | "Task" `isSuffixOf` modName || modName == "Task" -> case fnName of
+            "succeed"  -> "String"
+            "fail"     -> "()"
+            "map"      -> "String"
+            "andThen"  -> "String"
+            "onError"  -> "String"
+            _ -> ""
         | "Db" `isSuffixOf` modName || modName == "Db" -> case fnName of
             "query"    -> "Vec<HashMap<String, String>>"
             "exec"     -> "()"
@@ -858,6 +872,7 @@ emitRust b dbPath dbDriver = unlines $ concat
     , dbSection (builderKernels b) dbPath dbDriver b
     , systemHelperSection
     , logHelperSection
+    , jsonSection (builderKernels b)
     , extraKernelSection b
     , miscHelperSection
     , userTypeSection b
@@ -928,6 +943,7 @@ coreHelperSection =
     , "}"
     , ""
     , "// Result equivalent"
+    , "#[derive(Clone)]"
     , "pub enum SkyResult<E, A> {"
     , "    Err(E),"
     , "    Ok(A),"
@@ -1065,6 +1081,9 @@ taskSection uk =
     , "            SkyResult::Err(e) => f(e).await,"
     , "        }"
     , "    })"
+    , "}"
+    , "pub fn task_fail<A: Send + 'static>(e: SkyError) -> SkyTask<A> {"
+    , "    Box::pin(ready(SkyResult::Err(e)))"
     , "}"
     ] ++
     (if needsTokio
@@ -1268,6 +1287,118 @@ logHelperSection =
     ]
 
 -- | Misc helpers + Debug impl
+-- | JSON encode/decode stubs (serde_json-backed)
+jsonSection :: UsedKernels -> [String]
+jsonSection uk =
+    if not (usesJson uk) then [] else
+    [ ""
+    , "// ==========================================="
+    , "// JSON helpers (serde_json-backed)"
+    , "// ==========================================="
+    , "type JsonVal = serde_json::Value;"
+    , "type Decoder<T> = Box<dyn Fn(&JsonVal) -> SkyResult<SkyError, T> + Send + Sync>;"
+    , ""
+    , "fn json_dec_ok<T>(t: T) -> SkyResult<SkyError, T> { SkyResult::Ok(t) }"
+    , "fn json_dec_err_str<T>(s: String) -> SkyResult<SkyError, T> { SkyResult::Err(s) }"
+    , ""
+    , "// --- Encode ---"
+    , "pub fn json_enc_encode(indent: i64, val: JsonVal) -> String {"
+    , "    if indent > 0 { serde_json::to_string_pretty(&val).unwrap_or_default() }"
+    , "    else { serde_json::to_string(&val).unwrap_or_default() }"
+    , "}"
+    , "pub fn json_enc_string(s: String) -> JsonVal { JsonVal::String(s) }"
+    , "pub fn json_enc_int(i: i64) -> JsonVal { JsonVal::Number(i.into()) }"
+    , "pub fn json_enc_float(f: f64) -> JsonVal { JsonVal::from(f) }"
+    , "pub fn json_enc_bool(b: bool) -> JsonVal { JsonVal::Bool(b) }"
+    , "pub fn json_enc_null(_: ()) -> JsonVal { JsonVal::Null }"
+    , "pub fn json_enc_list<A>(f: impl Fn(A) -> JsonVal, items: Vec<A>) -> JsonVal {"
+    , "    JsonVal::Array(items.into_iter().map(|x| f(x)).collect())"
+    , "}"
+    , "pub fn json_enc_object(pairs: Vec<(String, JsonVal)>) -> JsonVal {"
+    , "    JsonVal::Object(pairs.into_iter().collect())"
+    , "}"
+    , ""
+    , "// --- Decode primitives ---"
+    , "pub fn json_dec_string() -> Decoder<String> {"
+    , "    Box::new(|v| match v { JsonVal::String(s) => json_dec_ok(s.clone()), _ => json_dec_err_str(\"expected string\".into()) })"
+    , "}"
+    , "pub fn json_dec_int() -> Decoder<i64> {"
+    , "    Box::new(|v| match v.as_i64() { Some(i) => json_dec_ok(i), None => json_dec_err_str(\"expected int\".into()) })"
+    , "}"
+    , "pub fn json_dec_float() -> Decoder<f64> {"
+    , "    Box::new(|v| match v.as_f64() { Some(f) => json_dec_ok(f), None => json_dec_err_str(\"expected float\".into()) })"
+    , "}"
+    , "pub fn json_dec_bool() -> Decoder<bool> {"
+    , "    Box::new(|v| match v.as_bool() { Some(b) => json_dec_ok(b), None => json_dec_err_str(\"expected bool\".into()) })"
+    , "}"
+    , "pub fn json_dec_null<A: Default>() -> Decoder<A> {"
+    , "    Box::new(|v| match v { JsonVal::Null => json_dec_ok(A::default()), _ => json_dec_err_str(\"expected null\".into()) })"
+    , "}"
+    , ""
+    , "// --- Decode combinators ---"
+    , "pub fn json_dec_field<T>(name: String, decoder: Decoder<T>) -> Decoder<T> {"
+    , "    Box::new(move |v| match v.get(&name) { Some(field) => decoder(field), None => json_dec_err_str(format!(\"missing field: {}\", name)) })"
+    , "}"
+    , "pub fn json_dec_at<T>(path: Vec<String>, decoder: Decoder<T>) -> Decoder<T> {"
+    , "    Box::new(move |v| {"
+    , "        let mut cur = v;"
+    , "        for key in &path { match cur.get(key) { Some(n) => cur = n, None => return json_dec_err_str(format!(\"missing path: {}\", key)) } }"
+    , "        decoder(cur)"
+    , "    })"
+    , "}"
+    , "pub fn json_dec_list<T>(decoder: Decoder<T>) -> Decoder<Vec<T>> {"
+    , "    Box::new(move |v| match v.as_array() {"
+    , "        Some(arr) => {"
+    , "            let mut out = Vec::with_capacity(arr.len());"
+    , "            for item in arr { match decoder(item) { SkyResult::Ok(t) => out.push(t), SkyResult::Err(_) => return json_dec_err_str(\"decode error\".into()) } }"
+    , "            json_dec_ok(out)"
+    , "        },"
+    , "        None => json_dec_err_str(\"expected array\".into())"
+    , "    })"
+    , "}"
+    , "pub fn json_dec_map<A, B>(f: impl Fn(A) -> B + Send + Sync + 'static, decoder: Decoder<A>) -> Decoder<B> {"
+    , "    Box::new(move |v| match decoder(v) { SkyResult::Ok(a) => json_dec_ok(f(a)), SkyResult::Err(_) => json_dec_err_str(\"map error\".into()) })"
+    , "}"
+    , "pub fn json_dec_map2<A, B, C>("
+    , "    f: impl Fn(A, B) -> C + Send + Sync + 'static, da: Decoder<A>, db: Decoder<B>"
+    , ") -> Decoder<C> {"
+    , "    Box::new(move |v| { let a = da(v); let b = db(v); match a { SkyResult::Ok(av) => match b { SkyResult::Ok(bv) => json_dec_ok(f(av, bv)), SkyResult::Err(_) => json_dec_err_str(\"decode error\".into()) }, SkyResult::Err(_) => json_dec_err_str(\"decode error\".into()) } })"
+    , "}"
+    , "pub fn json_dec_succeed<A>(a: A) -> Decoder<A> {"
+    , "    Box::new(move |_| SkyResult::Ok(a))"
+    , "}"
+    , "pub fn json_dec_fail<A>(msg: String) -> Decoder<A> {"
+    , "    Box::new(move |_| json_dec_err_str(msg))"
+    , "}"
+    , "pub fn json_dec_one_of<T>(decoders: Vec<Decoder<T>>) -> Decoder<T> {"
+    , "    Box::new(move |v| { for d in &decoders { let r = d(v); if r.is_ok() { return r; } } json_dec_err_str(\"oneOf: no match\".into()) })"
+    , "}"
+    , "pub fn json_dec_decode_string<T>(decoder: Decoder<T>, json: String) -> SkyResult<SkyError, T> {"
+    , "    match serde_json::from_str(&json) {"
+    , "        Ok(val) => decoder(&val),"
+    , "        Err(e) => json_dec_err_str(format!(\"json parse: {}\", e))"
+    , "    }"
+    , "}"
+    , ""
+    , "// --- Pipeline (curried decoder combinators) ---"
+    , "pub fn json_dec_p_required<T, F>(name: String, decoder: Decoder<T>) -> impl Fn(Decoder<Box<dyn Fn(T) -> F + Send + Sync>>) -> Decoder<F> {"
+    , "    move |next_decoder| {"
+    , "        Box::new(move |v| {"
+    , "            let field_val = match v.get(&name) { Some(f) => match decoder(f) { SkyResult::Ok(t) => t, SkyResult::Err(_) => return json_dec_err_str(\"required field decode error\".into()) }, None => return json_dec_err_str(format!(\"missing required: {}\", name)) };"
+    , "            match next_decoder(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), SkyResult::Err(_) => json_dec_err_str(\"next decode error\".into()) }"
+    , "        })"
+    , "    }"
+    , "}"
+    , "pub fn json_dec_p_optional<T: Clone, F>(name: String, decoder: Decoder<T>, default: T) -> impl Fn(Decoder<Box<dyn Fn(T) -> F + Send + Sync>>) -> Decoder<F> {"
+    , "    move |next_decoder| {"
+    , "        Box::new(move |v| {"
+    , "            let field_val = match v.get(&name) { Some(_) => match decoder(v.get(&name)) { SkyResult::Ok(t) => t, SkyResult::Err(_) => default.clone() }, None => default.clone() };"
+    , "            match next_decoder(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), SkyResult::Err(_) => json_dec_err_str(\"next decode error\".into()) }"
+    , "        })"
+    , "    }"
+    , "}"
+    ]
+
 -- | Extra kernel stubs: Time, Random, File, Crypto (std-only, no extra deps)
 extraKernelSection :: RustBuilder -> [String]
 extraKernelSection b =
@@ -1372,8 +1503,20 @@ extraKernelSection b =
 miscHelperSection :: [String]
 miscHelperSection =
     [ ""
-    , "// String helpers"
+    , "// String helpers (used by Sky.Core.String via VarTopLevel)"
+    , "pub fn string_from_int(i: i64) -> String { format!(\"{}\", i) }"
     , "pub fn string_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }"
+    , "pub fn string_append(a: String, b: String) -> String { a + &b }"
+    , "pub fn string_length(s: String) -> i64 { s.len() as i64 }"
+    , "pub fn string_is_empty(s: String) -> bool { s.is_empty() }"
+    , "pub fn string_reverse(s: String) -> String { s.chars().rev().collect() }"
+    , "pub fn string_to_upper(s: String) -> String { s.to_uppercase() }"
+    , "pub fn string_to_lower(s: String) -> String { s.to_lowercase() }"
+    , "pub fn string_trim(s: String) -> String { s.trim().to_string() }"
+    , "pub fn string_contains(haystack: String, needle: String) -> bool { haystack.contains(&needle) }"
+    , "pub fn string_to_int(s: String) -> SkyResult<String, i64> {"
+    , "    match s.parse::<i64>() { Ok(v) => SkyResult::Ok(v), Err(_) => SkyResult::Err(String::new()) }"
+    , "}"
     , ""
     , "// Result helper"
     , "pub fn result_with_default<A>(def: A) -> impl FnOnce(SkyResult<SkyError, A>) -> A {"
@@ -1540,7 +1683,7 @@ emitCargoToml uk dbDriver = unlines $
     , "edition = \"2021\""
     , ""
     , "[dependencies]"
-    ] ++ tokioDep ++ sqlxDep
+    ] ++ tokioDep ++ sqlxDep ++ jsonDep
   where
     needsTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk
     tokioDep = if needsTokio
@@ -1548,6 +1691,9 @@ emitCargoToml uk dbDriver = unlines $
         else []
     sqlxDep = if usesDb uk
         then [ "sqlx = { version = \"0.8\", features = [\"runtime-tokio-rustls\", \"" ++ dbFeature dbDriver ++ "\"] }" ]
+        else []
+    jsonDep = if usesJson uk
+        then [ "serde_json = \"1\"" ]
         else []
 
 -- | Map sky.toml driver name to sqlx cargo feature
