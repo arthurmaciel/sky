@@ -204,26 +204,32 @@ fn main() {
 62. **Always `: Clone`** - Reverts faulty heuristic; all type vars get Clone  
     (pattern variables like `x` in `Just(x) => x.clone()` need it)
 
-### Session 9 (zero errors — ecPipeInnerType closure annotation)
+### Session 9 (zero errors — closure annotation, HashMap stubs, runtime)
 63. **`ecPipeInnerType`** - EmitCtx field set by `|>` handler with the inner  
-    type of the piped Task expression (e.g. `Vec<String>` from Db_query)
-64. **Lambda param type annotation** - `Can.Call` Lambda handler reads  
-    `ecPipeInnerType` and emits `move |rows: Vec<String>| { ... }`  
-    fixing E0282 (Rust type inference through `move` closure boundary)
-65. **`taskExprInnerType`** - Helper mapping known kernel calls to their  
-    Task inner type (Db_query→Vec<String>, Db_exec→(), etc.)
+    type of the piped Task expression (fixes E0282)
+64. **Lambda param type annotation** - `move |rows: Vec<String>| { ... }`  
+65. **`taskExprInnerType`** - Helper mapping kernel calls to Task inner type  
+66. **`typeToRustString Dict`** - Maps `Dict K V` → `HashMap<K, V>`  
+67. **Db stubs** - `HashMap<String,String>` for rows, proper getField  
+68. **`block_on` threading** - `std::thread::spawn` to avoid nested Runtime  
+69. **`System_args` skip(1)** - Excludes binary path (matches Go behaviour)  
+70. **`mainSig formatTodo`** - Explicit sig for `HashMap<String,String>` row
 
 ## Status
 
 **Hello-world**: ✅ 0 errors, compiles and runs
-**Todo-cli**: ✅ 0 errors
+**Todo-cli**: ✅ 0 errors, compiles and runs correctly:
+- `cargo run -- --help` → usage text
+- `cargo run add "x"` → "Added: x"  
+- `cargo run list` → "No todos yet..."
 
 ## Next Steps
 
 ### Production Readiness
-1. CamelCase type names (eliminate cosmetic warnings)
-2. Separate module files (`mod` declarations instead of flat file)
-3. Benchmark Task_parallel vs Go goroutines
+1. Wire real SQLite via `rusqlite` Cargo dependency (multi-day effort)  
+2. CamelCase type names (eliminate cosmetic warnings)  
+3. Separate module files (`mod` declarations instead of flat)  
+4. Benchmark Task_parallel vs Go goroutines
 
 ## Technical Notes
 
@@ -238,8 +244,8 @@ fn main() {
 ## Testing
 
 - **Hello-world**: ✅ Compiles and runs ("Hello from Sky!")
+- **todo-cli**: ✅ Compiles and runs (empty Db stubs)
 - **Go target (default)**: ✅ All examples pass
-- **todo-cli Rust**: ❌ 107 E0308 errors (Task error type unification needed)
 
 ## Runtime Test Results (sky-runtime-rust crate)
 
