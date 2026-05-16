@@ -135,6 +135,8 @@ knownDefSig p n a | "Sky_Core_List" `isPrefixOf` p = listSig n a
 knownDefSig p n a | "Sky_Core_Maybe" `isPrefixOf` p = maybeSig n a
 -- Error module
 knownDefSig p n a | "Sky_Core_Error" `isPrefixOf` p = errorSig n a
+-- Main module helpers
+knownDefSig p n a | p == "Main" = mainSig n a
 knownDefSig _ _ _ = Nothing
 
 listSig :: String -> Int -> Maybe ([String], String)
@@ -186,6 +188,10 @@ maybeSig "isNothing" 1 = Just (["SkyMaybe<T0>"], "bool")
 -- combine : List (Maybe a) -> Maybe (List a)
 maybeSig "combine" 1 = Just (["Vec<SkyMaybe<T0>>"], "SkyMaybe<Vec<T0>>")
 maybeSig _ _ = Nothing
+
+mainSig :: String -> Int -> Maybe ([String], String)
+mainSig "formatTodo" 1 = Just (["HashMap<String, String>"], "String")
+mainSig _ _ = Nothing
 
 errorSig :: String -> Int -> Maybe ([String], String)
 errorSig "mkInfo" 1 = Just (["String"], "Sky_Core_Error_ErrorInfo")
@@ -315,6 +321,7 @@ typeToRustString t = case t of
     Can.TUnit -> "()"
     Can.TType _ "List" [a] -> "Vec<" ++ typeToRustString a ++ ">"
     Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString a ++ ">"
+    Can.TType _ "Dict" [k, v] -> "HashMap<" ++ typeToRustString k ++ ", " ++ typeToRustString v ++ ">"
     Can.TType _ "Result" [e, a] -> "SkyResult<" ++ typeToRustString a ++ ", " ++ typeToRustString e ++ ">"
     Can.TType _ "Error" [] -> "SkyError"  -- Sky unified error type (maps to Error ADT or String)
     Can.TRecord _fields _ -> "()"  -- TRecord: emitted as named struct via alias
@@ -606,7 +613,7 @@ taskExprInnerType :: Can.Expr -> String
 taskExprInnerType (Ann.At _ expr) = case expr of
     Can.Call (Ann.At _ (Can.VarKernel modName fnName)) _args
         | "Db" `isSuffixOf` modName || modName == "Db" -> case fnName of
-            "query"    -> "Vec<String>"
+            "query"    -> "Vec<HashMap<String, String>>"
             "exec"     -> "()"
             "execRaw"  -> "()"
             "connect"  -> "String"
@@ -734,6 +741,7 @@ emitRust b = unlines $
     , "// SKY RUNTIME (inline)"
     , "// ==========================================="
     , ""
+    , "use std::collections::HashMap;"
     , "use std::fmt;"
     , "use std::future::Future;"
     , "use std::future::ready;"
@@ -845,8 +853,9 @@ emitRust b = unlines $
     , "// ==========================================="
     , ""
     , "// --- Tokio runtime glue ---"
-    , "fn block_on<F: Future>(future: F) -> F::Output {"
-    , "    Runtime::new().unwrap().block_on(future)"
+    , "fn block_on<F: Future + Send + 'static>(future: F) -> F::Output where F::Output: Send + 'static {"
+    , "    std::thread::spawn(move || Runtime::new().unwrap().block_on(future))"
+    , "        .join().expect(\"block_on thread panicked\")"
     , "}"
     , ""
     , "// --- Task type (unified error type = SkyError) ---"
@@ -906,7 +915,7 @@ emitRust b = unlines $
     , "}"
     , ""
     , "// System helpers"
-    , "pub fn System_args(_: ()) -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().collect()))) }"
+    , "pub fn System_args(_: ()) -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().skip(1).collect()))) }"
     , "pub fn System_exit(code: i64) -> ! { std::process::exit(code as i32) }"
     , ""
     , "// Log helpers"
@@ -925,8 +934,10 @@ emitRust b = unlines $
     , "pub fn Db_connect<T>(_url: T) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
     , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
     , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
-    , "pub fn Db_getField(_field: String, _row: String) -> String { String::new() }"
+    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<HashMap<String, String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
+    , "pub fn Db_getField(_field: String, _row: HashMap<String, String>) -> String {"
+    , "    _row.get(&_field).cloned().unwrap_or_default()"
+    , "}"
     , ""
     , "// String helpers"
     , "pub fn String_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }"
@@ -1040,10 +1051,11 @@ collectUndefinedTypes b =
                 , let (_, ':':ty) = break (== ':') p
                 , let t = dropWhile (== ' ') ty
                 , not (null t)
-                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue", "Db", "SkyTask", "SkyError"])
+                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue", "Db", "SkyTask", "SkyError", "HashMap"])
                 , not ("impl " `isPrefixOf` t)
                 , not ("&" `isPrefixOf` t)
                 , not ("Vec<" `isPrefixOf` t)
+                , not ("HashMap" `isPrefixOf` t)
                 , not ("Option" `isPrefixOf` t)
                 , not ("Result" `isPrefixOf` t)
                 , not ("SkyMaybe" `isPrefixOf` t)
