@@ -633,7 +633,7 @@ exprToRustInner ctx e = case e of
     Can.Call fn args -> case exprToRustString ctx fn of
         fnName | "println" `isSuffixOf` fnName -> 
             let fmt = concat (replicate (length args) "{}")
-            in "{ println!(\"" ++ fmt ++ "\", " ++ intercalate ", " (map (exprToRustString ctx) args) ++ "); Box::pin(ready(SkyResult::Ok(()))) }"
+            in "{ println!(\"" ++ fmt ++ "\", " ++ intercalate ", " (map (exprToRustString ctx) args) ++ "); Box::pin(ready(ok_res(()))) }"
         _ -> 
             -- Clone VarLocal args for every function call EXCEPT Task_run,
             -- whose argument is a Pin<Box<dyn Future>> which does not implement Clone.
@@ -1022,6 +1022,10 @@ coreHelperSection =
     , "    Err(E),"
     , "    Ok(A),"
     , "}"
+    , ""
+    , "// Helper: construct Ok with E=SkyError so call sites don't need"
+    , "// explicit ::<SkyError, A> turbofish on every Ok(()) usage."
+    , "fn ok_res<A>(a: A) -> SkyResult<SkyError, A> { SkyResult::Ok(a) }"
     , ""
     , "// Maybe helpers"
     , "impl<T> SkyMaybe<T> {"
