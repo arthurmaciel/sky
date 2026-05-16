@@ -193,42 +193,39 @@ fn main() {
     pattern bindings (owned values from &T references)
 56. **`scanTVars`** - Robust type variable scanner replacing ad-hoc extraction
 
-### Session 8 (Def param types from solvedTypes, final fixes)
+### Session 8 (Def param types from solvedTypes, ecCloneVars)
 57. **`extractParamTypes`** - Extract Def param types from HM-inferred types  
-    (replaces `bodyUsesList` heuristic for functions with resolved types)
-58. **Def params from solvedTypes** - `getArg: List String -> String` now  
-    properly types `argList: Vec<String>` instead of `SkyValue`
-59. **`branchToRustString` zero-arg call** - `case arm => showUsage` now emits  
-    `Main_showUsage()` instead of just `Main_showUsage`
-60. **`Db_query` stub** - Returns `SkyTask<Vec<String>>` instead of  
-    `SkyTask<Vec<Vec<String>>>` (matches row access pattern)
-61. **`noCloneFn` filter** - Skips `.clone()` for `Task_run` (avoids non-Clone  
-    `Pin<Box<dyn Future>>`); `isEmpty` now gets `.clone()` for ownership
+58. **Def params from solvedTypes** - `getArg: List String -> String` types  
+    `argList: Vec<String>` instead of `SkyValue`
+59. **`branchToRustString` zero-arg call** - `case arm => showUsage()`  
+60. **`Db_query` stub** - Returns `SkyTask<Vec<String>>`
+61. **`ecCloneVars`** - Per-use `.clone()` for multi-use vars inside `move`  
+    closures (fixes `todoTitle` E0382, `e` use-after-move)
+62. **Always `: Clone`** - Reverts faulty heuristic; all type vars get Clone  
+    (pattern variables like `x` in `Just(x) => x.clone()` need it)
 
-## Known Issues (Root Causes)
+## Known Issues
 
-### Remaining: 2 errors in todo-cli
-- **1 E0282**: `Task_map(move |rows| { ... rows.clone() ... })` — the first  
-  use `isEmpty(rows.clone())` produces `Vec<T0>` where `T0` can't be inferred  
-  through the `move` boundary. Fix: pass `&rows` instead of `rows.clone()`.
-- **1 E0382**: `todoTitle` used twice inside a `move` closure — the pre-clone  
-  at the closure start is consumed by `vec![..., todoTitle]`; the second use  
-  `println!(todoTitle)` can't access it. Fix: per-use `.clone()`.
+### Remaining: 1 error in todo-cli (E0282)
+`Task_map(move |rows| { ... rows.clone() ... })(Db_query(...))` — the  
+closure's `rows` type can't be inferred through the `move` boundary because  
+`isEmpty(rows.clone())` uses `Vec<T0>` where `T0` is unconstrained. The  
+else branch `list_map(f, rows.clone())` constrains `T0 = String`, but Rust's  
+type inference can't unify across branches through a generic `move` closure.
 
-### Root cause
-Both stem from the same pattern: a `move` closure body uses a variable ≥ 2  
-times. The first use moves it, the second fails. Fix requires body-rewriting  
-to inject `.clone()` at each `VarLocal` occurrence inside `move` closures.
+**Fix**: Thread the task-arg's return type from `solvedTypes` into closure  
+parameter emission, generating `move |rows: Vec<String>| { ... }`.
 
 ## Next Steps
 
-### Priority 1: Per-use clone inside `move` closures
-Walk the closure body AST and inject `.clone()` before each `VarLocal` use  
-when the variable is used ≥ 2 times inside the same closure.
+### Priority 1: Fix E0282 closure param type
+Add explicit type annotations on closure params for higher-order kernel calls  
+(Task_map, Task_andThen, List.map, etc.) using the OTHER arg's type from  
+solvedTypes or stub signatures.
 
 ### Priority 2: Production Readiness
-2. CamelCase type names (eliminate cosmetic warnings)
-3. Separate module files (`mod` declarations instead of flat file)
+2. CamelCase type names
+3. Separate module files
 4. Benchmark Task_parallel vs Go goroutines
 
 ## Technical Notes
