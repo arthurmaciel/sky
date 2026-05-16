@@ -238,6 +238,11 @@ fn main() {
 
 ## Technical Notes
 
+- **Rust naming convention** (non-negotiable): All generated Rust code MUST follow
+  [Rust API naming guidelines](https://rust-lang.github.io/api-guidelines/naming.html).
+  Types use `CamelCase` (`SkyCoreErrorError`), functions use `snake_case` (`task_map`).
+  The `toCamelCase`/`toSnakeCase` helpers in Builder.hs enforce this. Sky source
+  variable names (`todoTitle`) retain their CamelCase form under `#![allow(non_snake_case)]`.
 - `ModuleName.Canonical` wraps a single `String`, not a list (`ModuleName._name` field)
 - `Ann.At` is the data constructor for located AST nodes (not `A.Located`)
 - Kernel calls: `Log.println` → `println!`, other kernels use `module_name` convention

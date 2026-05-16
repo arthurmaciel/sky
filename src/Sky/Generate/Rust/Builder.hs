@@ -6,6 +6,27 @@ import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Reporting.Annotation as Ann
+import Data.Char (toLower, toUpper, isUpper)
+
+-- | Convert Sky module-prefixed names to Rust conventions:
+--   Types:     Sky_Core_Error_Error  →  SkyCoreErrorError     (CamelCase)
+--   Functions: Sky_Core_List_map     →  sky_core_list_map     (snake_case)
+toCamelCase :: String -> String
+toCamelCase [] = []
+toCamelCase (c:cs) = toUpper c : go cs
+  where go [] = []
+        go ('_':c:cs) = toUpper c : go cs
+        go (c:cs) = c : go cs
+
+toSnakeCase :: String -> String
+toSnakeCase [] = []
+toSnakeCase (c:cs) = toLower c : go cs
+  where go [] = []
+        go (c:cs) | c == '_' && not (null cs) = '_' : toLower (head cs) : go (tail cs)
+                  | isUpper c = '_' : toLower c : go cs
+                  | otherwise = c : go cs
+
+
 
 type CanonicalModule = Can.Module
 
@@ -41,7 +62,7 @@ data EmitCtx = EmitCtx
 -- | Build a map from field-name-signature to struct name
 buildRecordMap :: [Can.Module] -> Map.Map String String
 buildRecordMap mods = Map.fromList
-    [ (intercalate "," (Map.keys fields), modPrefix ++ "_" ++ name)
+    [ (intercalate "," (Map.keys fields), toCamelCase (modPrefix ++ "_" ++ name))
     | mod <- mods
     , let modPrefix = moduleNameToRust (Can._name mod)
     , (name, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)
@@ -53,7 +74,10 @@ buildModule ctx mod =
         items = declsToRustItems ctx modPrefix (Can._decls mod)
         prefixItem (RustFunction n g p r b)
             | n == "sky_main" || n == "main" = RustFunction n g p r b
-            | otherwise = RustFunction (modPrefix ++ "_" ++ n) g p r b
+            | otherwise = RustFunction (toSnakeCase (modPrefix ++ "_" ++ n)) g p r b
+        prefixItem (RustStruct n f) = RustStruct (toCamelCase (modPrefix ++ "_" ++ n)) f
+        prefixItem (RustEnum n v) = RustEnum (toCamelCase (modPrefix ++ "_" ++ n)) v
+        prefixItem (RustTypeAlias n t) = RustTypeAlias (toCamelCase (modPrefix ++ "_" ++ n)) t
         prefixItem other = other
     in RustModule
         { modName = modPrefix
@@ -207,8 +231,8 @@ errorSig "conflict" 1 = Just (["String"], "SkyError")
 errorSig "unavailable" 1 = Just (["String"], "SkyError")
 errorSig "unexpected" 1 = Just (["String"], "SkyError")
 errorSig "withMessage" 2 = Just (["String", "SkyError"], "SkyError")
-errorSig "withDetails" 2 = Just (["Sky_Core_Error_ErrorDetails", "SkyError"], "SkyError")
-errorSig "kindLabel" 1 = Just (["Sky_Core_Error_ErrorKind"], "String")
+errorSig "withDetails" 2 = Just ([toCamelCase "Sky_Core_Error_ErrorDetails", "SkyError"], "SkyError")
+errorSig "kindLabel" 1 = Just ([toCamelCase "Sky_Core_Error_ErrorKind"], "String")
 errorSig "toString" 1 = Just (["SkyError"], "String")
 errorSig "isRetryable" 1 = Just (["SkyError"], "bool")
 errorSig _ _ = Nothing
@@ -294,7 +318,7 @@ unionsToRustTypes modPrefix unions = map (\(name, u) -> unionToRustTypeDef modPr
 
 unionToRustTypeDef :: String -> String -> Can.Union -> RustTypeDef
 unionToRustTypeDef modPrefix typeName (Can.Union _ alts _ _) = 
-    REnumDef (modPrefix ++ "_" ++ typeName) (map ctorToRust alts)
+    REnumDef (toCamelCase (modPrefix ++ "_" ++ typeName)) (map ctorToRust alts)
   where
     ctorToRust (Can.Ctor name _idx _arity argTypes) = 
         (name, if null argTypes then Nothing 
@@ -306,9 +330,9 @@ aliasesToRustTypes modPrefix aliases = concatMap (\(name, alias) -> aliasToRustT
 aliasToRustTypeDef :: String -> String -> Can.Alias -> [RustTypeDef]
 aliasToRustTypeDef modPrefix name (Can.Alias _vars ty) = case ty of
     Can.TRecord fields _ -> 
-        [RStructDef (modPrefix ++ "_" ++ name) (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString ft)) (Map.toList fields))]
+        [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString ft)) (Map.toList fields))]
     _ -> 
-        [RAliasDef (modPrefix ++ "_" ++ name) (typeToRustString ty)]
+        [RAliasDef (toCamelCase (modPrefix ++ "_" ++ name)) (typeToRustString ty)]
 
 typeToRustString :: Can.Type -> String
 typeToRustString t = case t of
@@ -330,16 +354,16 @@ typeToRustString t = case t of
     Can.TType modName name [] ->
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-        in modPrefix ++ name
+        in toCamelCase (modPrefix ++ name)
     Can.TType modName name args ->
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-        in modPrefix ++ name ++ "<" ++ intercalate ", " (map typeToRustString args) ++ ">"
+        in toCamelCase (modPrefix ++ name) ++ "<" ++ intercalate ", " (map typeToRustString args) ++ ">"
     Can.TLambda a b -> "fn(" ++ typeToRustString a ++ ") -> " ++ typeToRustString b
     Can.TAlias modName name _pairs _inner ->
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-        in modPrefix ++ name
+        in toCamelCase (modPrefix ++ name)
     _ -> "SkyValue"
 
 rustSafeIdent :: String -> String
@@ -475,7 +499,7 @@ exprToRustInner :: EmitCtx -> Can.Expr_ -> String
 exprToRustInner ctx e = case e of
     Can.VarLocal name -> rustSafeIdent name ++ if name `Set.member` ecCloneVars ctx then ".clone()" else ""
     Can.VarTopLevel mod name -> 
-        map (\c -> if c == '.' then '_' else c) (ModuleName._name mod) ++ "_" ++ name
+        toSnakeCase (map (\c -> if c == '.' then '_' else c) (ModuleName._name mod) ++ "_" ++ name)
     Can.VarKernel mod name -> kernelToRust mod name
     Can.VarCtor _ modName typeName ctorName _ -> kernelCtorToRust modName typeName ctorName
     Can.Chr c -> show c
@@ -676,8 +700,8 @@ branchToRustString ctx (Can.CaseBranch pat body) =
         bodyExpr = case body of
             Ann.At _ (Can.VarTopLevel mod name) ->
                 let modStr = ModuleName._name mod
-                    fnName = (if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_") ++ name
-                in fnName ++ "()"
+                    rawName = (if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_") ++ name
+                in toSnakeCase rawName ++ "()"
             _ -> exprToRustString ctx body
         -- Slice patterns bind references (&T for head, &[T] for tail).
         -- Inject .clone() / .to_vec() so the body sees owned values.
@@ -735,7 +759,7 @@ buildProgram mods solvedTypes =
 emitRust :: RustBuilder -> String
 emitRust b = unlines $
     [ "// Generated by Sky compiler (Rust target)"
-    , "#![allow(unused, non_snake_case, non_camel_case_types)]"
+    , "#![allow(unused, non_snake_case)]"
     , ""
     , "// ==========================================="
     , "// SKY RUNTIME (inline)"
@@ -862,12 +886,12 @@ emitRust b = unlines $
     , "type SkyTask<A> = Pin<Box<dyn Future<Output = SkyResult<SkyError, A>> + Send + 'static>>;"
     , ""
     , "// --- Task combinators ---"
-    , "pub fn Task_succeed<A: Send + 'static>(a: A) -> SkyTask<A> {"
+    , "pub fn task_succeed<A: Send + 'static>(a: A) -> SkyTask<A> {"
     , "    Box::pin(ready(SkyResult::Ok(a)))"
     , "}"
-    , "pub fn Task_map<A: Send + 'static, B: Send + 'static>("
+    , "pub fn task_map<A: Send + 'static, B: Send + 'static>("
     , "    f: impl FnOnce(A) -> B + Send + 'static,"
-    , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
+    , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> + Send + 'static {"
     , "    |task| Box::pin(async move {"
     , "        match task.await {"
     , "            SkyResult::Ok(a) => SkyResult::Ok(f(a)),"
@@ -875,9 +899,9 @@ emitRust b = unlines $
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_andThen<A: Send + 'static, B: Send + 'static>("
+    , "pub fn task_and_then<A: Send + 'static, B: Send + 'static>("
     , "    f: impl FnOnce(A) -> SkyTask<B> + Send + 'static,"
-    , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> {"
+    , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<B> + Send + 'static {"
     , "    |task| Box::pin(async move {"
     , "        match task.await {"
     , "            SkyResult::Ok(a) => f(a).await,"
@@ -885,9 +909,9 @@ emitRust b = unlines $
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_onError<A: Send + 'static>("
+    , "pub fn task_on_error<A: Send + 'static>("
     , "    f: impl FnOnce(SkyError) -> SkyTask<A> + Send + 'static,"
-    , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<A> {"
+    , ") -> impl FnOnce(SkyTask<A>) -> SkyTask<A> + Send + 'static {"
     , "    |task| Box::pin(async move {"
     , "        match task.await {"
     , "            SkyResult::Ok(a) => SkyResult::Ok(a),"
@@ -895,11 +919,11 @@ emitRust b = unlines $
     , "        }"
     , "    })"
     , "}"
-    , "pub fn Task_run<A: Send + 'static>(task: SkyTask<A>) -> SkyResult<SkyError, A> {"
+    , "pub fn task_run<A: Send + 'static>(task: SkyTask<A>) -> SkyResult<SkyError, A> {"
     , "    block_on(task)"
     , "}"
     , "// --- Parallel execution (tokio::spawn, ~Go goroutines) ---"
-    , "pub fn Task_parallel<A: Send + 'static>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
+    , "pub fn task_parallel<A: Send + 'static>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
     , "    Box::pin(async move {"
     , "        let handles: Vec<tokio::task::JoinHandle<SkyResult<SkyError, A>>> ="
     , "            tasks.into_iter().map(|t| tokio::spawn(t)).collect();"
@@ -915,35 +939,35 @@ emitRust b = unlines $
     , "}"
     , ""
     , "// System helpers"
-    , "pub fn System_args(_: ()) -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().skip(1).collect()))) }"
-    , "pub fn System_exit(code: i64) -> ! { std::process::exit(code as i32) }"
+    , "pub fn system_args(_: ()) -> SkyTask<Vec<String>> { Box::pin(ready(SkyResult::Ok(std::env::args().skip(1).collect()))) }"
+    , "pub fn system_exit(code: i64) -> ! { std::process::exit(code as i32) }"
     , ""
     , "// Log helpers"
-    , "pub fn Log_info(msg: String) -> SkyTask<()> {"
+    , "pub fn log_info(msg: String) -> SkyTask<()> {"
     , "    println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
     , "}"
-    , "pub fn Log_infoWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> {"
+    , "pub fn log_info_with(msg: String, _attrs: Vec<String>) -> SkyTask<()> {"
     , "    println!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
     , "}"
-    , "pub fn Log_errorWith(msg: String, _attrs: Vec<String>) -> SkyTask<()> {"
+    , "pub fn log_error_with(msg: String, _attrs: Vec<String>) -> SkyTask<()> {"
     , "    eprintln!(\"{}\", msg); Box::pin(ready(SkyResult::Ok(())))"
     , "}"
     , ""
     , "// DB stubs"
     , "type Db = String;"
-    , "pub fn Db_connect<T>(_url: T) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
-    , "pub fn Db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Db_execRaw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
-    , "pub fn Db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<HashMap<String, String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
-    , "pub fn Db_getField(_field: String, _row: HashMap<String, String>) -> String {"
+    , "pub fn db_connect<T>(_url: T) -> SkyTask<Db> { Box::pin(ready(SkyResult::Ok(String::new()))) }"
+    , "pub fn db_exec(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn db_exec_raw(_conn: Db, _sql: String) -> SkyTask<()> { Box::pin(ready(SkyResult::Ok(()))) }"
+    , "pub fn db_query(_conn: Db, _sql: String, _params: Vec<String>) -> SkyTask<Vec<HashMap<String, String>>> { Box::pin(ready(SkyResult::Ok(vec![]))) }"
+    , "pub fn db_get_field(_field: String, _row: HashMap<String, String>) -> String {"
     , "    _row.get(&_field).cloned().unwrap_or_default()"
     , "}"
     , ""
     , "// String helpers"
-    , "pub fn String_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }"
+    , "pub fn string_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }"
     , ""
     , "// Result helper"
-    , "pub fn Result_withDefault<A>(def: A) -> impl FnOnce(SkyResult<SkyError, A>) -> A {"
+    , "pub fn result_with_default<A>(def: A) -> impl FnOnce(SkyResult<SkyError, A>) -> A {"
     , "    |r| match r { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }"
     , "}"
     , "// Debug trait for logging"
@@ -961,7 +985,7 @@ emitRust b = unlines $
     [ ""
     -- SkyError: points to the concrete Error ADT when the Error module is
     -- present, otherwise falls back to String so Tasks compile everywhere.
-    , if hasErrorType b then "type SkyError = Sky_Core_Error_Error;" else "type SkyError = String;"
+    , if hasErrorType b then "type SkyError = " ++ toCamelCase "Sky_Core_Error_Error" ++ ";" else "type SkyError = String;"
     , "" ] ++ concatMap moduleToRustStrings (builderModules b) ++
     [ ""
     , "// ==========================================="
@@ -1000,13 +1024,13 @@ kernelCtorToRust modName typeName ctorName =
         ("Sky.Core.Maybe", "Maybe", c) -> "SkyMaybe::" ++ c
         ("Sky.Core.Result", "Result", c) -> "SkyResult::" ++ c
         _ -> let modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-             in modPrefix ++ typeName ++ "::" ++ ctorName
+             in toCamelCase (modPrefix ++ typeName) ++ "::" ++ ctorName
 
 kernelToRust :: String -> String -> String
 kernelToRust mod name = case (mod, name) of
     ("Log", "println") -> "println"
     ("Std.Log", "println") -> "println"
-    _ -> mod ++ "_" ++ name
+    _ -> toSnakeCase (mod ++ "_" ++ name)
 
 exprToStatement :: String -> String
 exprToStatement expr = if null expr then "" 
@@ -1070,7 +1094,7 @@ collectUndefinedTypes b =
 hasErrorType :: RustBuilder -> Bool
 hasErrorType b = any isErrorEnum (builderTypes b)
   where
-    isErrorEnum (REnumDef "Sky_Core_Error_Error" _) = True
+    isErrorEnum (REnumDef n _) = n == toCamelCase "Sky_Core_Error_Error"
     isErrorEnum _ = False
 
 ffiPlaceholder :: String -> String
