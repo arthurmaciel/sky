@@ -1010,14 +1010,14 @@ coreHelperSection :: [String]
 coreHelperSection =
     [ ""
     , "// Maybe equivalent"
-    , "#[derive(Clone)]"
+    , "#[derive(Clone, Debug)]"
     , "pub enum SkyMaybe<T> {"
     , "    Nothing,"
     , "    Just(T),"
     , "}"
     , ""
     , "// Result equivalent"
-    , "#[derive(Clone)]"
+    , "#[derive(Clone, Debug)]"
     , "pub enum SkyResult<E, A> {"
     , "    Err(E),"
     , "    Ok(A),"
@@ -1600,7 +1600,7 @@ extraKernelSection b =
     , "}"
     , ""
     , "// --- Http stub (returns error — no HTTP client yet) ---"
-    , "#[derive(Clone)]"
+    , "#[derive(Clone, Debug)]"
     , "pub struct SkyCoreHttpResponse { pub body: String, pub status: i64 }"
     , "pub fn http_get(url: String) -> SkyTask<SkyCoreHttpResponse> {"
     , "    let _ = url;"
@@ -1692,9 +1692,9 @@ entryPointSection =
 
 typeDefToString :: RustTypeDef -> String
 typeDefToString (REnumDef name variants) = 
-    "#[derive(Clone)]\npub enum " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
+    "#[derive(Clone, Debug)]\npub enum " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
 typeDefToString (RStructDef name fields) =
-    "#[derive(Clone)]\npub struct " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
+    "#[derive(Clone, Debug)]\npub struct " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
 typeDefToString (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
 
 moduleToRustStrings :: RustModule -> [String]
@@ -1732,12 +1732,12 @@ itemToRustStrings (RustFunction name generics params retType body) =
         bodyLine = if retType == "()" then exprToStatement body else body
     in ["fn " ++ name ++ generics ++ "(" ++ intercalate ", " params ++ ")" ++ ret ++ " {", "    " ++ bodyLine, "}"]
 itemToRustStrings (RustStruct name fields) = 
-    ["#[derive(Clone)]",
+    ["#[derive(Clone, Debug)]",
      "pub struct " ++ name ++ " {", 
      intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields), 
      "}"]
 itemToRustStrings (RustEnum name variants) = 
-    ["#[derive(Clone)]",
+    ["#[derive(Clone, Debug)]",
      "pub enum " ++ name ++ " {",
      intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants),
      "}"]
