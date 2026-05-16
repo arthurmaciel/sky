@@ -193,39 +193,43 @@ fn main() {
     pattern bindings (owned values from &T references)
 56. **`scanTVars`** - Robust type variable scanner replacing ad-hoc extraction
 
+### Session 8 (Def param types from solvedTypes, final fixes)
+57. **`extractParamTypes`** - Extract Def param types from HM-inferred types  
+    (replaces `bodyUsesList` heuristic for functions with resolved types)
+58. **Def params from solvedTypes** - `getArg: List String -> String` now  
+    properly types `argList: Vec<String>` instead of `SkyValue`
+59. **`branchToRustString` zero-arg call** - `case arm => showUsage` now emits  
+    `Main_showUsage()` instead of just `Main_showUsage`
+60. **`Db_query` stub** - Returns `SkyTask<Vec<String>>` instead of  
+    `SkyTask<Vec<Vec<String>>>` (matches row access pattern)
+61. **`noCloneFn` filter** - Skips `.clone()` for `Task_run` (avoids non-Clone  
+    `Pin<Box<dyn Future>>`); `isEmpty` now gets `.clone()` for ownership
+
 ## Known Issues (Root Causes)
 
-### Remaining: 9 errors in todo-cli
-- **7 E0308**: Type mismatches from `.clone()` operations (e.g., `Vec<String>`  
-  cloned from `userArgs` but `Main_getArg` expects `SkyValue = String`)
-- **1 E0382**: `todoTitle` used twice inside a `move` closure — the initial  
-  clone at the start of the closure body is consumed by the first use;  
-  per-use `.clone()` needed
-- **1 E0282**: Type annotation needed for `Task_map(move |rows| ...)` —  
-  `rows` type can't be inferred through the `move` closure boundary
+### Remaining: 2 errors in todo-cli
+- **1 E0282**: `Task_map(move |rows| { ... rows.clone() ... })` — the first  
+  use `isEmpty(rows.clone())` produces `Vec<T0>` where `T0` can't be inferred  
+  through the `move` boundary. Fix: pass `&rows` instead of `rows.clone()`.
+- **1 E0382**: `todoTitle` used twice inside a `move` closure — the pre-clone  
+  at the closure start is consumed by `vec![..., todoTitle]`; the second use  
+  `println!(todoTitle)` can't access it. Fix: per-use `.clone()`.
 
-### Non-CamelCase Naming
-Module-prefixed names like `Sky_Core_Error_ErrorKind` generate Rust warnings
+### Root cause
+Both stem from the same pattern: a `move` closure body uses a variable ≥ 2  
+times. The first use moves it, the second fails. Fix requires body-rewriting  
+to inject `.clone()` at each `VarLocal` occurrence inside `move` closures.
 
 ## Next Steps
 
-### Priority 1: Fix remaining E0382 (per-use clone inside closures)
-When a variable is used ≥ 2 times inside a single `move` closure, clone it  
-before EACH use (not just once at the start). Requires walking the closure  
-body AST and injecting `.clone()` at each `VarLocal` occurrence.
+### Priority 1: Per-use clone inside `move` closures
+Walk the closure body AST and inject `.clone()` before each `VarLocal` use  
+when the variable is used ≥ 2 times inside the same closure.
 
-### Priority 2: Fix E0308 type mismatches from .clone()
-`Main_getArg(userArgs.clone())` gives `Vec<String>` but function expects  
-`SkyValue = String`. Need to match clone result type to function param type.
-
-### Priority 3: Fix E0282 type annotation
-`Task_map(move |rows| { ... })` — `rows` type needs explicit annotation  
-when inferred through `move` boundary.
-
-### Priority 4: Production Readiness
-5. CamelCase type names (eliminate cosmetic warnings)
-6. Separate module files (`mod` declarations instead of flat file)
-7. Benchmark Task_parallel vs Go goroutines
+### Priority 2: Production Readiness
+2. CamelCase type names (eliminate cosmetic warnings)
+3. Separate module files (`mod` declarations instead of flat file)
+4. Benchmark Task_parallel vs Go goroutines
 
 ## Technical Notes
 
