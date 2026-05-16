@@ -34,6 +34,7 @@ data RustTypeDef
 data EmitCtx = EmitCtx
     { ecRecordMap :: Map.Map String String  -- field-key -> struct name
     , ecSolvedTypes :: Map.Map String Can.Type  -- function name -> inferred type
+    , ecCloneVars :: Set.Set String  -- vars that need .clone() at every use site
     }
 
 -- | Build a map from field-name-signature to struct name
@@ -228,12 +229,10 @@ defToRustItem :: EmitCtx -> String -> Can.Def -> RustItem
 defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) = 
     let rustName = if name == "main" then "sky_main" else name
         n = length params
-        needsClone = bodyUsesList body
         (paramStrs, genVars) = case knownDefSig modPrefix name n of
             Just (paramTypes, retType) ->
                 let safeParams = map (\(p, t) -> patternToRustParam p ++ ": " ++ t) (zip params paramTypes)
                     tvars = sigTVars paramTypes retType
-                    -- Always add Clone; member also needs PartialEq for equality comparison
                     extraBound tv = if name == "member" && tv == "T0" then " + PartialEq" else ""
                     genList = map (\tv -> tv ++ ": Clone" ++ extraBound tv) tvars
                     gens = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
@@ -275,12 +274,11 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                                   in if hasTypeVars ret then "()" else typeToRustString ret
                         Nothing -> "()"
     in RustFunction rustName genVars paramStrs retTy (exprToRustString ctx body)
-defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
+defToRustItem _ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
     let rustName = if name == "main" then "sky_main" else name
         params = map (\(pat, ty) -> patternToRustParam pat ++ ": " ++ typeToRustString ty) pats
-        -- sky_main always returns () since the entry wrapper handles the Task
         ret = if name == "main" then "()" else typeToRustString retTy
-    in RustFunction rustName "" params ret (exprToRustString ctx body)
+    in RustFunction rustName "" params ret (exprToRustString _ctx body)
 defToRustItem _ctx _modPrefix (Can.DestructDef pat expr) =
     RustFunction "_destruct" "" [patternToRustParam pat] "()" (exprToRustString _ctx expr)
 
@@ -467,7 +465,7 @@ exprToRustString ctx (Ann.At _ expr) = exprToRustInner ctx expr
 
 exprToRustInner :: EmitCtx -> Can.Expr_ -> String
 exprToRustInner ctx e = case e of
-    Can.VarLocal name -> rustSafeIdent name
+    Can.VarLocal name -> rustSafeIdent name ++ if name `Set.member` ecCloneVars ctx then ".clone()" else ""
     Can.VarTopLevel mod name -> 
         map (\c -> if c == '.' then '_' else c) (ModuleName._name mod) ++ "_" ++ name
     Can.VarKernel mod name -> kernelToRust mod name
@@ -502,10 +500,14 @@ exprToRustInner ctx e = case e of
                         let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
                             captured = Set.toList (Set.difference (collectVarLocals body) paramNames)
                             clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+                            innerCounts = collectVarLocalsMulti body
+                            innerMulti = [ v | (v, c) <- Map.toList innerCounts, c >= 2
+                                           , v `notElem` map (\(Ann.At _ p) -> case p of Can.PVar s -> s; _ -> "_") ps ]
+                            ctx' = ctx { ecCloneVars = Set.fromList innerMulti }
                             psStr = intercalate ", " (map patternToRustParam ps)
                         in if null captured
-                           then "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " }"
-                           else "{ " ++ clones ++ "move |" ++ psStr ++ "| { " ++ exprToRustString ctx body ++ " } }"
+                           then "move |" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " }"
+                           else "{ " ++ clones ++ "move |" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " } }"
                     Ann.At _ (Can.VarLocal n) | not noCloneFn -> rustSafeIdent n ++ ".clone()"
                     _ -> exprToRustString ctx a) args
             in exprToRustString ctx fn ++ "(" ++ intercalate ", " argsStrs ++ ")"
@@ -681,7 +683,7 @@ ctorArgToPattern (Can.PatternCtorArg _ _ pat) = patternToMatchString pat
 buildProgram :: [Can.Module] -> Map.Map String Can.Type -> RustBuilder
 buildProgram mods solvedTypes = 
     let recordMap = buildRecordMap mods
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty }
     in RustBuilder
         { builderModules = map (buildModule ctx) mods
         , builderTypes = concatMap (\m -> 
