@@ -31,7 +31,7 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 
 - **Entry point**: `generateRust` in `src/Sky/Build/Compile.hs` (line ~8400)
 - **Output directory**: `sky-out/Rust/` (not `sky-out/rust/`)
-- **Runtime**: Inlined (no external crate dependency)
+- **Runtime**: Inlined with external deps (tokio, sqlx)
 - **Default target**: Go (when no `--target` flag specified)
 
 ### Working Features
@@ -39,11 +39,14 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 | Feature | Status |
 |---------|--------|
 | Hello world | ✅ Compiles and runs ("Hello from Sky!") |
+| Todo-cli (real SQLite) | ✅ All 7 operations work: add, list, done, undone, remove, clear, help |
 | --target rust flag | ✅ Wired into CLI |
 | Expression translation | ✅ Functions, calls, patterns, let, binops |
 | Kernel calls | ✅ Special handling (Log.println → println! macro) |
-| Type mapping | ✅ Basic types (String, Int, Float, Bool) |
+| Type mapping | ✅ Basic types, ADTs, records, Tasks |
 | Union/ADT handling | ✅ Pattern matching → match expressions |
+| Db backend (sqlx AnyPool) | ✅ SQLite, PostgreSQL, MySQL via URL scheme |
+| Rust API naming convention | ✅ Types CamelCase, functions snake_case |
 
 ### Fixes Applied During Implementation
 
@@ -55,6 +58,15 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 6. Fixed println! macro generation (kernelToRust + Call handler)
 7. Cleaned up unused std imports (Future, Pin, Context, Poll)
 8. Fixed build syntax error (comma before "use std::fmt")
+
+### Session 11 — sqlx AnyPool DB Integration
+
+9. **sqlx AnyPool** — Real DB backend replacing HashMap stubs. Supports SQLite/PostgreSQL/MySQL via URL scheme auto-detection. `AnyPool::connect("sqlite:path?mode=rwc")` creates files on demand. `install_default_drivers()` registers backends at runtime.
+10. **URL construction from sky.toml** — `[database] driver = "sqlite", path = "todos.db"` compiles to const `SKY_DB_URL`. `?mode=rwc` auto-creates SQLite files. Non-sqlite drivers pass the path as-is.
+11. **`build_sql` helper** — Replaces `?` placeholders with escaped `'values'` (single-quote doubling). DB-agnostic: works for SQLite, PostgreSQL, MySQL.
+12. **`row_to_map` helper** — Converts `AnyRow` → `HashMap<String,String>` with multi-type fallback (`&str` → `i64` → `f64` → empty).
+13. **`sky_err` helper** — Maps `sqlx::Error` to the correct `SkyError` variant: Error ADT (`SkyCoreErrorError::Error(kind, info)`) when the Error module is imported, bare `String` otherwise.
+14. **0 Rust compiler errors and warnings** — todo-cli emits clean output end-to-end.
 
 ## Non-Negotiable Rule: Rust API Naming Conventions
 
@@ -74,7 +86,7 @@ The naming helpers `toCamelCase` and `toSnakeCase` in `Builder.hs` handle the co
 
 | File | Purpose |
 |------|---------|
-| `src/Sky/Generate/Rust/Builder.hs` | Core codegen (366 lines) - the actual working implementation |
+| `src/Sky/Generate/Rust/Builder.hs` | Core codegen (~1200 lines) - the actual working implementation |
 | `src/Sky/Build/Compile.hs` | generateRust function (line ~8400) |
 | `app/Main.hs` | --target CLI flag handling |
 | `src/Sky/Sky/Toml.hs` | CompileTarget type (TargetGo/TargetRust) |
@@ -87,10 +99,22 @@ The naming helpers `toCamelCase` and `toSnakeCase` in `Builder.hs` handle the co
 - Removed explicit `-> ()` return type from generated functions
 - Kernel calls use special handling: Log.println → println! macro
 
-## Phase 3: FFI System (Future)
+## Phase 3: Multi-module + Full Stdlib Coverage
 
-Test crates for FFI integration:
-- tokio, serde, uuid, axum, clap, rayon, reqwest, sqlx, tokio-postgres
+### Immediate (todo-cli needs)
+1. **`Log.info` / `Log.errorWith` with attrs** — currently stubbed to `println!`. Need proper structured logging.
+2. **`Db.open` alias** — Currently only `Db.connect` is mapped. `Db.open` (the Go API) also needs a kernel route.
+3. **Error type for `sky_err`** — Currently uses `Unexpected` variant for all DB errors. Map specific sqlx errors (connection refused → `Network`, constraint violation → `Conflict`, etc.).
+
+### Medium term
+4. **Separate module files** — `mod` declarations instead of flat `main.rs`.
+5. **`Random.*`, `Time.*`, `File.*`, `Crypto.*` kernels** — Currently stubbed or missing.
+6. **`System.setenv` / `System.unsetenv`** — Go target has these in v0.11.5+.
+
+### Longer term
+- Sky.Http.Server (axum backend)
+- Sky.Live (server-driven UI)
+- Benchmark `task_parallel` vs Go goroutines
 
 ## Constraints
 
