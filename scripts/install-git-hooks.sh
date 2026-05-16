@@ -46,7 +46,17 @@ if [ ! -f "$STAMP" ]; then
 fi
 
 now=$(date +%s)
-stamp_age=$(( now - $(stat -f %m "$STAMP" 2>/dev/null || stat -c %Y "$STAMP") ))
+# Portable mtime read: try BSD `stat -f %m` first (macOS), then GNU
+# `stat -c %Y` (Linux). Capture stderr to /dev/null so the wrong-OS
+# form doesn't pollute the hook output. Both forms return a bare
+# integer on success.
+stamp_mtime=$(stat -f %m "$STAMP" 2>/dev/null || stat -c %Y "$STAMP" 2>/dev/null)
+if [ -z "$stamp_mtime" ]; then
+    echo "✗ Could not read mtime of $STAMP (stat -f / -c both failed)." >&2
+    echo "  Re-run scripts/preflight-tag.sh and retry." >&2
+    exit 1
+fi
+stamp_age=$(( now - stamp_mtime ))
 if [ $stamp_age -gt $MAX_AGE_SECONDS ]; then
     echo "✗ Refusing to push tag: preflight stamp is $stamp_age s old (>${MAX_AGE_SECONDS}s)." >&2
     echo "  Re-run scripts/preflight-tag.sh, then re-push." >&2
