@@ -321,6 +321,12 @@ fn main() {
 109. **Inline-let in `Can.Let`** — When a let-bound variable is a `List` used ≥ 2 times, inline `vec![]` at each use site. Avoids `::clone()` on non-Clone elements.
 110. **`simple` 0 errors** — Was blocked by `Vec<SkyTask>.clone()` (`Pin<Box<dyn Future>>` not Clone).
 
+### Session 20 — 06-json: 138→43 errors, test_pkg 0 errors
+111. **`resultSig`** — map, andThen, mapError, withDefault, map2-5, andMap, combine, traverse for Result module.
+112. **Decoder `'static` bounds** — Added to json_dec_field, at, list, map, map2, succeed, fail.
+113. **Synthetic record ctors** — Record aliases without matching Def get auto-generated constructor functions.
+114. **Zero-arg VarTopLevel in println** — Added `()` for function references passed as values.
+
 ## Status
 
 ## Status
@@ -333,8 +339,8 @@ fn main() {
 - **simple**: tokio only, task_sequence + task_parallel
 
 **Known issues**:
-- **06-json**: ~174 errors (FnOnce revert, decoder lifetimes)
-- **test_pkg**: 1 error (Def return type inference)
+- **06-json**: 43 errors (Fn/FnOnce/Send/Sync in Decoder<T> closures)
+- **test_pkg**: 0 errors (resolved)
 - `Success: Hello, Sky! Task is the effect boundary.`
 - `Fail error: Unexpected: intentional`
 

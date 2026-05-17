@@ -79,11 +79,19 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 110. **Inline-let in `Can.Let`** — When a let-bound variable is a `List` used ≥ 2 times, inline `vec![]` at each use site. Avoids `Vec::clone()` on non-Clone elements.
 111. **`simple` example 0 errors** — Was blocked by `Vec<SkyTask>.clone()` (`Pin<Box<dyn Future>>` not Clone).
 
+### Session 20 — 06-json: 138→43 errors, test_pkg 1→0 errors
+
+112. **Result kernel sigs** — `resultSig` for map, andThen, mapError, withDefault, map2-5, andMap, combine, traverse for `Sky.Core.Result` and bare `Result` module.
+113. **Decoder lifetime bounds** — `T: 'static` on `json_dec_field`, `json_dec_at`, `json_dec_list`. `Send+Sync` bounds removed (over-constrains FnOnce capture).
+114. **Synthetic record constructors** — `buildModule` scans `Can._aliases` for record type aliases missing matching `Def` declarations and emits constructor functions (fixes `main_user_profile` missing).
+115. **Zero-arg VarTopLevel in println args** — `fnName | "println"`  matches, VarTopLevel args get `()` appended to call the function.
+116. **`test_pkg` now 0 errors** — Resolved by earlier fixes.
+
 ## Phase 3: Remaining Issues
 
 ### Known limitations
 1. **Anonymous records lose type precision** — SkyValue/String fields only.
-2. **JSON decoder lifetimes (06-json)** — ~174 errors from `Fn`/`FnOnce`/lifetime mismatches in `Decoder<T>` closure types (FnOnce revert).
+2. **JSON decoder lifetimes (06-json)** — 43 remaining errors (`Fn`/`FnOnce`/`Send`/`Sync` in `Decoder<T>` closures). Progress from 138.
 3. **Separate module files** — `mod` declarations instead of flat `main.rs`.
 
 ### Resolved
