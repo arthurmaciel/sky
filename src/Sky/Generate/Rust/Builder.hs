@@ -36,6 +36,10 @@ data UsedKernels = UsedKernels
     , usesTaskRun :: Bool       -- Task.run called → needs tokio runtime
     , usesTaskParallel :: Bool  -- Task.parallel called → needs tokio::spawn
     , usesJson :: Bool          -- Json.* imported → needs serde_json
+    , usesCrypto :: Bool         -- Crypto.* imported → needs sha2
+    , usesTime :: Bool            -- Time.* imported
+    , usesRandom :: Bool          -- Random.* imported
+    , usesFile :: Bool            -- File.* imported
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -44,9 +48,13 @@ instance Semigroup UsedKernels where
         , usesTaskRun = usesTaskRun a || usesTaskRun b
         , usesTaskParallel = usesTaskParallel a || usesTaskParallel b
         , usesJson = usesJson a || usesJson b
+        , usesCrypto = usesCrypto a || usesCrypto b
+        , usesTime = usesTime a || usesTime b
+        , usesRandom = usesRandom a || usesRandom b
+        , usesFile = usesFile a || usesFile b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False
+    mempty = UsedKernels False False False False False False False False
 
 -- | Walk all expressions across all modules to detect kernel usage.
 -- Ensures we only emit the runtime stubs and Cargo deps that are actually needed.
@@ -68,12 +76,20 @@ analyzeKernelUsage = foldMap analyzeMod
             mconcat
                 [ if "Db" `isSuffixOf` modName || modName == "Db"
                   then mempty { usesDb = True } else mempty
-                , if modName == "Task" && fnName == "run"
+                , if modName == "Task" && (fnName == "run" || fnName == "sequence" || fnName == "perform")
                   then mempty { usesTaskRun = True } else mempty
                 , if modName == "Task" && fnName == "parallel"
                   then mempty { usesTaskParallel = True } else mempty
                 , if "Json" `isPrefixOf` modName || "Sky.Core.Json" `isPrefixOf` modName
                   then mempty { usesJson = True } else mempty
+                , if "Crypto" `isPrefixOf` modName || "Sky.Core.Crypto" `isPrefixOf` modName
+                  then mempty { usesCrypto = True } else mempty
+                , if "Time" `isPrefixOf` modName || "Sky.Core.Time" `isPrefixOf` modName
+                  then mempty { usesTime = True } else mempty
+                , if "Random" `isPrefixOf` modName || "Sky.Core.Random" `isPrefixOf` modName
+                  then mempty { usesRandom = True } else mempty
+                , if "File" `isPrefixOf` modName || "Sky.Core.File" `isPrefixOf` modName
+                  then mempty { usesFile = True } else mempty
                 ]
         Can.Call fn args -> walkExpr fn <> foldMap walkExpr args
         Can.Lambda _ body -> walkExpr body
@@ -541,8 +557,12 @@ collectVarLocalsMulti = go Set.empty
             let bound' = foldl (\s (Can.Def (Ann.At _ n) _ _) -> Set.insert n s) bound defs
                 goDefs = foldl (\a (Can.Def _ _ d) -> Map.unionWith (+) a (go bound' d)) Map.empty defs
             in Map.unionWith (+) (go bound' body) goDefs
-        Can.LetDestruct _ expr body -> Map.unionWith (+) (go bound expr) (go bound body)
-        Can.Case _ branches -> foldl (\a (Can.CaseBranch _ b) -> Map.unionWith (+) a (go bound b)) Map.empty branches
+        Can.LetDestruct pat expr body ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Map.unionWith (+) (go bound expr) (go bound' body)
+        Can.Case _ branches -> foldl (\a (Can.CaseBranch pat b) ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Map.unionWith (+) a (go bound' b)) Map.empty branches
         Can.If branches elseBranch ->
             foldl (\a (c, t) -> Map.unionWith (+) a (Map.unionWith (+) (go bound c) (go bound t))) (go bound elseBranch) branches
         Can.Binop _ _ _ _ a b -> Map.unionWith (+) (go bound a) (go bound b)
@@ -583,8 +603,12 @@ collectVarLocals = go Set.empty
             let bound' = foldl (\s (Can.Def (Ann.At _ n) _ _) -> Set.insert n s) bound defs
                 goDefs = foldl (\a (Can.Def _ _ d) -> Set.union a (go bound' d)) Set.empty defs
             in Set.union (go bound' body) goDefs
-        Can.LetDestruct _ expr body -> Set.union (go bound expr) (go bound body)
-        Can.Case _ branches -> foldl (\a (Can.CaseBranch _ b) -> Set.union a (go bound b)) Set.empty branches
+        Can.LetDestruct pat expr body ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Set.union (go bound expr) (go bound' body)
+        Can.Case _ branches -> foldl (\a (Can.CaseBranch pat b) ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Set.union a (go bound' b)) Set.empty branches
         Can.If branches elseBranch ->
             foldl (\a (c, t) -> Set.union a (Set.union (go bound c) (go bound t))) (go bound elseBranch) branches
         Can.Binop _ _ _ _ a b -> Set.union (go bound a) (go bound b)
@@ -693,7 +717,7 @@ exprToRustInner ctx e = case e of
                        else "{ " ++ clones ++ innerClones ++ inner ++ " }"
                 _ -> if not hasClone then exprToRustString ctx expr
                      else "{ " ++ clones ++ exprToRustString ctx expr ++ " }"
-        in "let " ++ patternToMatchString pat ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
+        in "let " ++ patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
     Can.Case scrut branches ->
         let scrutStr = exprToRustString ctx scrut
             -- Detect slice patterns → wrap with .as_slice()
@@ -715,9 +739,9 @@ exprToRustInner ctx e = case e of
     Can.Access record (Ann.At _ field) -> 
         exprToRustString ctx record ++ "." ++ field
     Can.Update (Ann.At _ _field) record updates ->
-        "let mut result = " ++ exprToRustString ctx record ++ "; " ++
+        "{ let mut result = " ++ exprToRustString ctx record ++ "; " ++
         intercalate "; " (map (\(f, Can.FieldUpdate _ expr) -> "result." ++ f ++ " = " ++ exprToRustString ctx expr) (Map.toList updates)) ++
-        "; result"
+        "; result }"
     Can.Record fields -> 
         let key = intercalate "," (Map.keys fields)
         in case Map.lookup key (ecRecordMap ctx) of
@@ -736,21 +760,6 @@ exprToRustInner ctx e = case e of
     Can.Unit -> "()"
     Can.Tuple a b rest -> 
         "(" ++ intercalate ", " (map (exprToRustString ctx) (a:b:rest)) ++ ")"
-
--- | Emit a function-call argument, cloning captured locals when the argument
--- is a closure (the Task_map(|_| { use(x) })(f(x)) pattern).  Uses move so
--- each closure owns its clones; outer scope keeps the original.
-argToRust :: EmitCtx -> Can.Expr -> String
-argToRust ctx (Ann.At _ (Can.Lambda params body)) =
-    let paramNames = Set.fromList [ n | Ann.At _ p <- params, let n = case p of Can.PVar s -> s; _ -> "_" ]
-        captured = Set.toList (Set.difference (collectVarLocals body) paramNames)
-        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
-        paramsStr = intercalate ", " (map patternToRustParam params)
-    in if null captured
-       then "|" ++ paramsStr ++ "| { " ++ exprToRustString ctx body ++ " }"
-       else "{ " ++ clones ++ "move |" ++ paramsStr ++ "| { " ++ exprToRustString ctx body ++ " } }"
-argToRust ctx (Ann.At _ (Can.VarLocal name)) = rustSafeIdent name  -- keep as is
-argToRust ctx expr = exprToRustString ctx expr
 
 -- | Given a Task-typed expression (like Db_query(…)), return the Rust type
 -- string of the SkyTask's inner success type A (i.e.  SkyTask<A> → A).
@@ -844,7 +853,7 @@ defToRustString _ctx _ = "_ = unimplemented()"
 
 branchToRustString :: EmitCtx -> Can.CaseBranch -> String
 branchToRustString ctx (Can.CaseBranch pat body) =
-    let patStr  = patternToMatchString pat
+    let patStr  = patternToMatchString (ecRecordMap ctx) pat
         -- Zero-arg top-level functions used as case values must be called.
         bodyExpr = case body of
             Ann.At _ (Can.VarTopLevel mod name) ->
@@ -866,8 +875,8 @@ branchToRustString ctx (Can.CaseBranch pat body) =
        then patStr ++ " => " ++ bodyExpr
        else patStr ++ " => { " ++ prefix ++ bodyExpr ++ " }"
 
-patternToMatchString :: Can.Pattern -> String
-patternToMatchString (Ann.At _ pat) = case pat of
+patternToMatchString :: Map.Map String String -> Can.Pattern -> String
+patternToMatchString _recMap (Ann.At _ pat) = case pat of
     Can.PVar n -> rustSafeIdent n
     Can.PAnything -> "_"
     Can.PInt i -> show i
@@ -876,23 +885,27 @@ patternToMatchString (Ann.At _ pat) = case pat of
     Can.PStr s -> show s
     Can.PUnit -> "()"
     Can.PCtor{Can._p_home = home, Can._p_type = typeName, Can._p_name = name, Can._p_args = args} ->
-        let subPats = map ctorArgToPattern args
+        let subPats = map (\(Can.PatternCtorArg _ _ p) -> patternToMatchString _recMap p) args
             fullName = kernelCtorToRust home typeName name
         in fullName ++ if null subPats then "" else "(" ++ intercalate ", " subPats ++ ")"
     Can.PTuple a b rest -> 
-        "(" ++ intercalate ", " (map patternToMatchString (a:b:rest)) ++ ")"
-    Can.PRecord fields -> "{" ++ intercalate ", " fields ++ "}"
+        "(" ++ intercalate ", " (map (patternToMatchString _recMap) (a:b:rest)) ++ ")"
+    Can.PRecord fields ->
+        let key = intercalate "," fields
+        in case Map.lookup key _recMap of
+            Just structName -> structName ++ " { " ++ intercalate ", " fields ++ " }"
+            Nothing -> "{ " ++ intercalate ", " fields ++ " }"
     Can.PCons a b -> 
-        let headPat = patternToMatchString a
-            restPat = patternToMatchString b
+        let headPat = patternToMatchString _recMap a
+            restPat = patternToMatchString _recMap b
             restPart = if restPat == "_" then ".." else restPat ++ " @ .."
         in "[" ++ headPat ++ ", " ++ restPart ++ "]"
-    Can.PList items -> "[" ++ intercalate ", " (map patternToMatchString items) ++ "]"
-    Can.PAlias pat _ -> patternToMatchString pat
+    Can.PList items -> "[" ++ intercalate ", " (map (patternToMatchString _recMap) items) ++ "]"
+    Can.PAlias pat _ -> patternToMatchString _recMap pat
     _ -> "_"
 
 ctorArgToPattern :: Can.PatternCtorArg -> String
-ctorArgToPattern (Can.PatternCtorArg _ _ pat) = patternToMatchString pat
+ctorArgToPattern (Can.PatternCtorArg _ _ pat) = patternToMatchString Map.empty pat
 
 buildProgram :: [Can.Module] -> Map.Map String Can.Type -> RustBuilder
 buildProgram mods solvedTypes = 
@@ -948,7 +961,7 @@ emitRust b dbPath dbDriver = unlines $ concat
     , systemHelperSection
     , logHelperSection
     , jsonSection (builderKernels b)
-    , extraKernelSection b
+    , extraKernelSection (builderKernels b) b
     , miscHelperSection
     , userTypeSection b
     , skyErrorLine b
@@ -1489,20 +1502,28 @@ jsonSection uk =
     ]
 
 -- | Extra kernel stubs: Time, Random, File, Crypto (std-only, no extra deps)
-extraKernelSection :: RustBuilder -> [String]
-extraKernelSection b =
+extraKernelSection :: UsedKernels -> RustBuilder -> [String]
+extraKernelSection uk b =
     let errCtor = if hasErrorType b
             then "fn str_err(s: String) -> SkyError { " ++ toCamelCase "Sky_Core_Error_Error" ++ "::Error(" ++ toCamelCase "Sky_Core_Error_ErrorKind" ++ "::Unexpected, " ++ toCamelCase "Sky_Core_Error_ErrorInfo" ++ " { details: SkyMaybe::Nothing, message: s }) }"
             else "fn str_err(s: String) -> SkyError { s }"
-    in
-    [ ""
-    , "// ==========================================="
-    , "// EXTRA KERNEL STUBS (Time, Random, File, Crypto)"
-    , "// ==========================================="
-    , ""
-    , errCtor
-    , ""
-    , "// --- Time ---"
+    in concat
+    [ [ ""
+      , "// ==========================================="
+      , "// EXTRA KERNEL STUBS (Time, Random, File, Crypto)"
+      , "// ==========================================="
+      , ""
+      , errCtor
+      , "" ]
+    ++ (if usesTime uk then timeSection else [])
+    ++ (if usesRandom uk then randomSection else [])
+    ++ (if usesFile uk then fileSection else [])
+    ++ (if usesCrypto uk then cryptoSections else [])
+    ]
+
+-- | Time kernel stubs (→ usesTime)
+timeSection :: [String]
+timeSection = [ "// --- Time ---"
     , "pub fn time_now(_: ()) -> SkyTask<i64> {"
     , "    let ms = std::time::SystemTime::now()"
     , "        .duration_since(std::time::UNIX_EPOCH)"
@@ -1515,35 +1536,50 @@ extraKernelSection b =
     , "    Box::pin(ready(ok_res(())))"
     , "}"
     , "pub fn time_unix_millis(_: ()) -> SkyTask<i64> { time_now(()) }"
-    , ""
-    , "// --- Random (std-hash-based, not cryptographically secure) ---"
-    , "fn lcg_seed() -> u64 {"
-    , "    std::time::SystemTime::now()"
+    , "pub fn time_time_string(ms: i64) -> String {"
+    , "    format!(\"timestamp:{}\", ms)"
+    , "}"
+    ]
+
+-- | Random kernel stubs (→ usesRandom)
+randomSection :: [String]
+randomSection = [ ""
+    , "// --- Random (LCG, persisted across calls via AtomicU64) ---"
+    , "use std::sync::atomic::{AtomicU64, Ordering};"
+    , "static LCG_STATE: AtomicU64 = AtomicU64::new(0);"
+    , "fn lcg_init() {"
+    , "    LCG_STATE.store(std::time::SystemTime::now()"
     , "        .duration_since(std::time::UNIX_EPOCH)"
     , "        .unwrap_or_default()"
-    , "        .as_nanos() as u64"
+    , "        .as_nanos() as u64, Ordering::Relaxed);"
     , "}"
-    , "fn lcg_next(seed: &mut u64) -> u64 {"
-    , "    // LCG constants (Numerical Recipes)"
-    , "    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);"
-    , "    *seed"
+    , "fn lcg_next() -> u64 {"
+    , "    let s = LCG_STATE.load(Ordering::Relaxed);"
+    , "    let n = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);"
+    , "    LCG_STATE.store(n, Ordering::Relaxed);"
+    , "    n"
     , "}"
     , "pub fn random_int(_: ()) -> SkyTask<i64> {"
-    , "    let mut seed = lcg_seed();"
-    , "    let v = lcg_next(&mut seed) as i64;"
+    , "    lcg_init();"
+    , "    let v = lcg_next() as i64;"
     , "    Box::pin(ready(ok_res(v)))"
     , "}"
     , "pub fn random_float(_: ()) -> SkyTask<f64> {"
-    , "    let mut seed = lcg_seed();"
-    , "    let v = (lcg_next(&mut seed) >> 11) as f64 * (1.0 / 9007199254740992.0);"
+    , "    lcg_init();"
+    , "    let v = (lcg_next() >> 11) as f64 * (1.0 / 9007199254740992.0);"
     , "    Box::pin(ready(ok_res(v)))"
     , "}"
     , "pub fn random_choice(items: Vec<String>) -> SkyTask<String> {"
-    , "    let mut seed = lcg_seed();"
-    , "    let idx = (lcg_next(&mut seed) as usize) % items.len().max(1);"
+    , "    lcg_init();"
+    , "    if items.is_empty() { return Box::pin(ready(SkyResult::Err(str_err(\"empty list\".into())))); }"
+    , "    let idx = lcg_next() as usize % items.len();"
     , "    Box::pin(ready(ok_res(items.get(idx).cloned().unwrap_or_default())))"
     , "}"
-    , ""
+    ]
+
+-- | File kernel stubs (→ usesFile)
+fileSection :: [String]
+fileSection = [ ""
     , "// --- File ---"
     , "pub fn file_read_file(path: String) -> SkyTask<String> {"
     , "    match std::fs::read_to_string(&path) {"
@@ -1566,42 +1602,37 @@ extraKernelSection b =
     , "        Err(e) => Box::pin(ready(SkyResult::Err(str_err(format!(\"{}\", e)))))"
     , "    }"
     , "}"
-    , ""
-    , "// --- Crypto (deterministic LCG-based, NOT cryptographically secure) ---"
+    ]
+
+-- | Crypto kernel stubs (→ usesCrypto)
+cryptoSections :: [String]
+cryptoSections = [ ""
+    , "// --- Crypto ---"
     , "pub fn crypto_random_bytes(n: i64) -> SkyTask<Vec<i64>> {"
-    , "    let mut seed = lcg_seed();"
+    , "    lcg_init();"
     , "    let mut out = Vec::with_capacity(n as usize);"
     , "    for _ in 0..n {"
-    , "        out.push(lcg_next(&mut seed) as i64);"
+    , "        out.push(lcg_next() as i64);"
     , "    }"
     , "    Box::pin(ready(ok_res(out)))"
     , "}"
     , "pub fn crypto_random_token(n: i64) -> SkyTask<String> {"
-    , "    let mut seed = lcg_seed();"
+    , "    lcg_init();"
     , "    let hex = \"0123456789abcdef\";"
     , "    let mut out = String::with_capacity((n * 2) as usize);"
     , "    for _ in 0..n {"
-    , "        let b = lcg_next(&mut seed);"
+    , "        let b = lcg_next();"
     , "        out.push(hex.as_bytes()[(b & 0x0f) as usize] as char);"
     , "        out.push(hex.as_bytes()[((b >> 4) & 0x0f) as usize] as char);"
     , "    }"
     , "    Box::pin(ready(ok_res(out)))"
     , "}"
-    , ""
-    , "// --- Crypto.sha256 (HEX stub) ---"
     , "pub fn crypto_sha256(s: String) -> String {"
-    , "    let hex = \"0123456789abcdef\";"
-    , "    use std::collections::hash_map::DefaultHasher;"
-    , "    use std::hash::{Hash, Hasher};"
-    , "    let mut h = DefaultHasher::new();"
-    , "    s.hash(&mut h);"
-    , "    let v = h.finish();"
-    , "    format!(\"{:016x}\", v)"
-    , "}"
-    , ""
-    , "// --- Time helpers ---"
-    , "pub fn time_time_string(ms: i64) -> String {"
-    , "    format!(\"timestamp:{}\", ms)"
+    , "    use sha2::{Sha256, Digest};"
+    , "    let mut h = Sha256::new();"
+    , "    h.update(s.as_bytes());"
+    , "    let result = h.finalize();"
+    , "    result.iter().map(|b| format!(\"{:02x}\", b)).collect::<Vec<_>>().join(\"\")"
     , "}"
     , ""
     , "// --- Http stub (returns error — no HTTP client yet) ---"
@@ -1696,12 +1727,20 @@ entryPointSection uk =
     , "fn main() {"
     ] ++ (if hasTokio && mainIsTask then
         -- sky_main returns SkyTask<()>, run it via block_on
-        [ "    let _ = block_on(sky_main());"
+        [ "    match block_on(sky_main()) {"
+        , "        SkyResult::Ok(_) => (),"
+        , "        SkyResult::Err(e) => { eprintln!(\"{:?}\", e); std::process::exit(1); }"
+        , "    }"
         , "}"
         ]
+      else if mainIsTask then
+        -- sky_main returns SkyTask<()> but no tokio: side effects fire
+        -- eagerly inside log_info etc.  Call and drop.
+        [ "    sky_main();",
+          "}"
+        ]
       else
-        -- sky_main returns () (Task.run is used) or there's no tokio:
-        -- just call, side effects fire eagerly via log_info etc.
+        -- sky_main returns (), Task.run is used inside
         [ "    sky_main();"
         , "}"
         ])
@@ -1733,7 +1772,7 @@ kernelToRust :: String -> String -> String
 kernelToRust mod name = case (mod, name) of
     ("Log", "println") -> "println"
     ("Std.Log", "println") -> "println"
-    _ -> toSnakeCase (mod ++ "_" ++ name)
+    _ -> toSnakeCase (map (\c -> if c == '.' then '_' else c) mod ++ "_" ++ name)
 
 exprToStatement :: String -> String
 exprToStatement expr = if null expr then "" 
@@ -1812,7 +1851,7 @@ emitCargoToml uk dbDriver = unlines $
     , "edition = \"2021\""
     , ""
     , "[dependencies]"
-    ] ++ tokioDep ++ sqlxDep ++ jsonDep
+    ] ++ tokioDep ++ sqlxDep ++ jsonDep ++ cryptoDep
   where
     needsTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk
     tokioDep = if needsTokio
@@ -1823,6 +1862,9 @@ emitCargoToml uk dbDriver = unlines $
         else []
     jsonDep = if usesJson uk
         then [ "serde_json = \"1\"" ]
+        else []
+    cryptoDep = if usesCrypto uk
+        then [ "sha2 = \"0.10\"" ]
         else []
 
 -- | Map sky.toml driver name to sqlx cargo feature
