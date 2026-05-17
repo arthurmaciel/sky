@@ -22,20 +22,22 @@ Sky Source → Haskell Parser/Type-Check → Sky AST → Rust Codegen → Rust C
 runtime-rust/
 ├── README.md                       # This file
 ├── CLAUDE.md                       # Project context (for AI tooling)
-├── sky-runtime-rust/               # Standalone runtime crate (54 tests, Phase 1)
+├── sky-runtime-rust/               # Standalone crate (54 tests, NOT linked by generated code)
 │   ├── Cargo.toml
 │   └── src/lib.rs
 └── sky-compiler/
-    └── src/Sky/Generate/Rust/Builder.hs  # Core codegen (~780 lines)
+    └── src/Sky/Generate/Rust/Builder.hs  # Core codegen (~1830 lines) — the only compiled module
 ```
+
+Note: `Sky/Generate/Rust/{Decl,Expr,Kernel,Module,Pattern,Test,Types}.hs` were deleted (7 files, 1192 lines of never-compiled dead code).
 
 ## Status
 
-### ✅ Phase 1: Runtime Prototype
-- `sky-runtime-rust` crate with 54 tests passing
+### ✅ Phase 1: Runtime Prototype (standalone crate, not linked by generated code)
+- `sky-runtime-rust` crate with 54 tests passing (not used by codegen — runtime is inlined)
 - Core types: SkyResult, SkyMaybe, SkyString, SkyList, SkyDict, SkyTask
 
-### ✅ Phase 2: Codegen Implementation (800+ lines)
+### ✅ Phase 2: Codegen Implementation (1830+ lines in Builder.hs)
 Rust codegen lives in the main Sky compiler at `src/Sky/Generate/Rust/Builder.hs`.
 
 **Working Features**:
@@ -296,6 +298,19 @@ fn main() {
 92. **`dbPoolType`/`dbRowType`** — Maps sky.toml driver to concrete sqlx types (SqlitePool/SqliteRow, etc.).
 93. **No AnyPool** — No `install_default_drivers()`, no `any` feature flag. Only the selected backend compiled.
 
+### Session 17 — Dead file deletion + batch bugfix from audit
+94. **Dead files deleted** — 7 files (Decl, Expr, Kernel, Module, Pattern, Test, Types), 1192 lines removed from repo. Never compiled.
+95. **LCG persistence** — `static AtomicU64` seeded once, not per-call. Eliminates duplicate "random" values.
+96. **Real SHA-256** — `sha2` crate (gated on `usesCrypto`). Was `DefaultHasher` (64-bit SipHash, wrong).
+97. **`task_run` error honoured** — `match block_on(...)` with `eprintln!` + `exit(1)` on error.
+98. **`collectVarLocals` binds pattern vars** — Case/LetDestruct/LetRec register pattern-bound variables.
+99. **`Can.Update` wrapped in `{ … }`** — valid in argument position.
+100. **`Can.VarKernel` dot→underscore** — valid Rust identifier for all kernel names.
+101. **`Can.PRecord` struct-name prefix** — `{ field }` → `StructName { field }` via record map.
+102. **`extraKernelSection` gated** — Time/Random/File/Crypto only when touched.
+103. **`sha2` dep** — only when `Crypto.*` imported.
+104. **Dead `argToRust` removed** — diverged duplicate of inline closure logic.
+
 ## Status
 
 **01-hello-world**: ✅ 0 errors, 0 warnings, 0 external deps
@@ -342,26 +357,11 @@ fn main() {
 
 ## Testing
 
-- **Hello-world**: ✅ Compiles and runs ("Hello from Sky!")
-- **todo-cli**: ✅ Compiles and runs (real SQLite via sqlx AnyPool)
-- **Go target (default)**: ✅ All examples pass
-
-## Runtime Test Results (sky-runtime-rust crate)
-
-- **Total**: 54 tests
-- **Passing**: 54 (100%)
-
-| Category | Tests |
-|----------|-------|
-| SkyResult | 6 (ok, err, map, and_then, with_default, is_ok/is_err) |
-| SkyMaybe | 4 (just, nothing, map, and_then, with_default) |
-| SkyString | 4 (from_str, is_empty, len, concat) |
-| SkyList | 8 (from_vec, push, head, tail, map, filter, fold, reverse) |
-| SkyDict | 7 (new, insert, get, contains_key, remove, keys, values) |
-| SkyTask | 4 (succeed, fail, map, and_then) |
-| Basic Ops | 14 (int/float/bool ops, eq, lt, gt, identity, to_string) |
-| FFI Helpers | 4 (to_owned_string, from_owned_string, to_owned_list, from_owned_list) |
-| Allocator | 2 (allocate, alloc_string) |
+**All 4 working examples**: 0 errors, 0 warnings:
+- **01-hello-world**: 0 external deps, 0.4s build
+- **04-local-pkg**: 0 external deps, 0.4s build (multi-module)
+- **07-todo-cli**: tokio + sqlx-sqlite only, all CRUD operations work
+- **14-task-demo**: tokio only, Task combinators + error messages
 
 ## License
 

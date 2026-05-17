@@ -48,6 +48,25 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 | Db backend (sqlx, backend-specific) | ✅ SqlitePool/PgPool/MySqlPool via sky.toml driver |
 | Rust API naming convention | ✅ Types CamelCase, functions snake_case |
 
+### Dead files deleted (Session 17)
+
+93. **`Sky/Generate/Rust/{Decl,Expr,Kernel,Module,Pattern,Test,Types}.hs`** — 7 files (1192 lines), never compiled (only `Builder.hs` in cabal:131). Several had syntax errors, broken patterns, and stale `Result` type orders. Wiped from repo.
+
+### Session 17 — Batch bugfix from BUGFIX-PLAN.md audit
+
+94. **LCG persistence** — `static AtomicU64` seeded once, not per-call wall clock. Eliminates duplicate "random" values from rapid calls.
+95. **Real SHA-256** — `sha2` crate (Cargo feature gated on `usesCrypto`). Previously used `DefaultHasher` (SipHash, 64-bit).
+96. **`task_run` error honoured** — entry point matches `block_on()` result: `eprintln!("{:?}", e)` + `exit(1)` on error.
+97. **`collectVarLocals(Multi)` binds pattern vars** — Case/LetDestruct/LetRec branches register pattern-bound variables, eliminating spurious `.clone()` injections.
+98. **`Can.Update` wrapped in `{ … }`** — record update expressions now valid in argument position.
+99. **`Can.VarKernel` dot→underscore** — `Sky.Core.Foo` kernel names become `sky_core_foo` (valid Rust identifier).
+100. **`Can.PRecord` struct-name prefix** — `{ field }` patterns become `StructName { field }` via `ecRecordMap` lookup.
+101. **`extraKernelSection` gated** — Time/Random/File/Crypto stubs only emitted when user touches the module.
+102. **`Task.sequence`/`Task.perform` set `usesTaskRun`** — `hasTokio` correctly True when only sequence/perform used.
+103. **`sha2` dep added** — only when `Crypto.*` imported (pattern: same as `sqlx` for `Db.*`).
+104. **New `UsedKernels` flags** — `usesTime`, `usesRandom`, `usesFile`, `usesCrypto`.
+105. **Dead `argToRust` removed** — diverged duplicate of inline closure logic.
+
 ### Fixes Applied During Implementation
 
 1. `Can.TAlias` field access - uses pairs, not ty field
