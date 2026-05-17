@@ -202,6 +202,19 @@ buildModule :: EmitCtx -> Can.Module -> RustModule
 buildModule ctx mod = 
     let modPrefix = moduleNameToRust (Can._name mod)
         items = declsToRustItems ctx modPrefix (Can._decls mod)
+        -- Existing function names after prefixing (to avoid double-emit)
+        prefixed = map (\(RustFunction n g p r b) -> toSnakeCase (modPrefix ++ "_" ++ n)) 
+                    [ f | f@(RustFunction _ _ _ _ _) <- items ]
+        existingNames = Set.fromList prefixed
+        -- Synthesize record alias constructors
+        synCtorItems = concat [synCtor aliasName fields | (aliasName, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)]
+        synCtor aliasName fields =
+            let ctorName = toSnakeCase (modPrefix ++ "_" ++ aliasName)
+                structName = toCamelCase (modPrefix ++ "_" ++ aliasName)
+                rustFlds = [(n, typeToRustString ft) | (n, Can.FieldType _ ft) <- Map.toList fields]
+                body = structName ++ " { " ++ intercalate ", " (map (\(n, _) -> n ++ ": " ++ n) (Map.toList fields)) ++ " }"
+            in if Set.member ctorName existingNames then []
+               else [RustFunction ctorName "" (map (\(n, t) -> n ++ ": " ++ t) rustFlds) structName body]
         prefixItem (RustFunction n g p r b)
             | n == "sky_main" || n == "main" = RustFunction n g p r b
             | otherwise = RustFunction (toSnakeCase (modPrefix ++ "_" ++ n)) g p r b
@@ -211,7 +224,7 @@ buildModule ctx mod =
         prefixItem other = other
     in RustModule
         { modName = modPrefix
-        , modItems = map prefixItem items
+        , modItems = map prefixItem items ++ synCtorItems
         }
 
 moduleNameToRust :: ModuleName.Canonical -> String
@@ -289,6 +302,7 @@ knownDefSig p n a | "Sky_Core_List" `isPrefixOf` p = listSig n a
 knownDefSig p n a | "Sky_Core_Maybe" `isPrefixOf` p = maybeSig n a
 -- Error module
 knownDefSig p n a | "Sky_Core_Error" `isPrefixOf` p = errorSig n a
+knownDefSig p n a | "Sky_Core_Result" `isPrefixOf` p = resultSig n a
 -- Main module helpers
 knownDefSig p n a | p == "Main" = mainSig n a
 knownDefSig _ _ _ = Nothing
@@ -342,6 +356,20 @@ maybeSig "isNothing" 1 = Just (["SkyMaybe<T0>"], "bool")
 -- combine : List (Maybe a) -> Maybe (List a)
 maybeSig "combine" 1 = Just (["Vec<SkyMaybe<T0>>"], "SkyMaybe<Vec<T0>>")
 maybeSig _ _ = Nothing
+
+resultSig :: String -> Int -> Maybe ([String], String)
+resultSig "map" 2 = Just (["impl Fn(T0) -> T1 + Clone", "SkyResult<SkyError, T0>"], "SkyResult<SkyError, T1>")
+resultSig "andThen" 2 = Just (["impl Fn(T0) -> SkyResult<SkyError, T1> + Clone", "SkyResult<SkyError, T0>"], "SkyResult<SkyError, T1>")
+resultSig "mapError" 2 = Just (["impl Fn(SkyError) -> String + Clone", "SkyResult<SkyError, T0>"], "SkyResult<String, T0>")
+resultSig "withDefault" 2 = Just (["T0", "SkyResult<SkyError, T0>"], "T0")
+resultSig "map2" 3 = Just (["impl Fn(T0, T1) -> T2 + Clone", "SkyResult<SkyError, T0>", "SkyResult<SkyError, T1>"], "SkyResult<SkyError, T2>")
+resultSig "map3" 4 = Just (["impl Fn(T0, T1, T2) -> T3 + Clone", "SkyResult<SkyError, T0>", "SkyResult<SkyError, T1>", "SkyResult<SkyError, T2>"], "SkyResult<SkyError, T3>")
+resultSig "map4" 5 = Just (["impl Fn(T0, T1, T2, T3) -> T4 + Clone", "SkyResult<SkyError, T0>", "SkyResult<SkyError, T1>", "SkyResult<SkyError, T2>", "SkyResult<SkyError, T3>"], "SkyResult<SkyError, T4>")
+resultSig "map5" 6 = Just (["impl Fn(T0, T1, T2, T3, T4) -> T5 + Clone", "SkyResult<SkyError, T0>", "SkyResult<SkyError, T1>", "SkyResult<SkyError, T2>", "SkyResult<SkyError, T3>", "SkyResult<SkyError, T4>"], "SkyResult<SkyError, T5>")
+resultSig "andMap" 2 = Just (["SkyResult<SkyError, T0>", "SkyResult<SkyError, impl Fn(T0) -> T1 + Clone>"], "SkyResult<SkyError, T1>")
+resultSig "combine" 1 = Just (["Vec<SkyResult<SkyError, T0>>"], "SkyResult<SkyError, Vec<T0>>")
+resultSig "traverse" 2 = Just (["impl Fn(T0) -> SkyResult<SkyError, T1> + Clone", "Vec<T0>"], "SkyResult<SkyError, Vec<T1>>")
+resultSig _ _ = Nothing
 
 mainSig :: String -> Int -> Maybe ([String], String)
 mainSig "formatTodo" 1 = Just (["HashMap<String, String>"], "String")
@@ -736,7 +764,10 @@ exprToRustInner ctx e = case e of
         "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ exprToRustString ctx body ++ " }"
     Can.Call fn args -> case exprToRustString ctx fn of
         fnName | "println" `isSuffixOf` fnName ->
-            "log_info(" ++ intercalate " ++ \" \" ++ " (map (exprToRustString ctx) args) ++ ")"
+            let fmtArg a = case a of
+                    Ann.At _ (Can.VarTopLevel _ _) -> exprToRustString ctx a ++ "()"
+                    _ -> exprToRustString ctx a
+            in "log_info(" ++ intercalate " ++ \" \" ++ " (map fmtArg args) ++ ")"
         _ -> 
             -- Clone VarLocal args for every function call EXCEPT Task_run,
             -- whose argument is a Pin<Box<dyn Future>> which does not implement Clone.
@@ -1583,17 +1614,17 @@ jsonSection uk =
     , "}"
     , ""
     , "// --- Decode combinators ---"
-    , "pub fn json_dec_field<T>(name: String, decoder: Decoder<T>) -> Decoder<T> {"
+    , "pub fn json_dec_field<T: 'static>(name: String, decoder: Decoder<T>) -> Decoder<T> {"
     , "    Box::new(move |v| match v.get(&name) { Some(field) => decoder(field), None => json_dec_err_str(format!(\"missing field: {}\", name)) })"
     , "}"
-    , "pub fn json_dec_at<T>(path: Vec<String>, decoder: Decoder<T>) -> Decoder<T> {"
+    , "pub fn json_dec_at<T: 'static>(path: Vec<String>, decoder: Decoder<T>) -> Decoder<T> {"
     , "    Box::new(move |v| {"
     , "        let mut cur = v;"
     , "        for key in &path { match cur.get(key) { Some(n) => cur = n, None => return json_dec_err_str(format!(\"missing path: {}\", key)) } }"
     , "        decoder(cur)"
     , "    })"
     , "}"
-    , "pub fn json_dec_list<T>(decoder: Decoder<T>) -> Decoder<Vec<T>> {"
+    , "pub fn json_dec_list<T: 'static>(decoder: Decoder<T>) -> Decoder<Vec<T>> {"
     , "    Box::new(move |v| match v.as_array() {"
     , "        Some(arr) => {"
     , "            let mut out = Vec::with_capacity(arr.len());"
@@ -1603,21 +1634,21 @@ jsonSection uk =
     , "        None => json_dec_err_str(\"expected array\".into())"
     , "    })"
     , "}"
-    , "pub fn json_dec_map<A, B>(f: impl Fn(A) -> B + Send + Sync + 'static, decoder: Decoder<A>) -> Decoder<B> {"
+    , "pub fn json_dec_map<A: 'static + Send, B: 'static + Send>(f: impl Fn(A) -> B + Send + Sync + 'static, decoder: Decoder<A>) -> Decoder<B> {"
     , "    Box::new(move |v| match decoder(v) { SkyResult::Ok(a) => json_dec_ok(f(a)), SkyResult::Err(_) => json_dec_err_str(\"map error\".into()) })"
     , "}"
-    , "pub fn json_dec_map2<A, B, C>("
+    , "pub fn json_dec_map2<A: 'static + Send, B: 'static + Send, C: 'static + Send>("
     , "    f: impl Fn(A, B) -> C + Send + Sync + 'static, da: Decoder<A>, db: Decoder<B>"
     , ") -> Decoder<C> {"
     , "    Box::new(move |v| { let a = da(v); let b = db(v); match a { SkyResult::Ok(av) => match b { SkyResult::Ok(bv) => json_dec_ok(f(av, bv)), SkyResult::Err(_) => json_dec_err_str(\"decode error\".into()) }, SkyResult::Err(_) => json_dec_err_str(\"decode error\".into()) } })"
     , "}"
-    , "pub fn json_dec_succeed<A>(a: A) -> Decoder<A> {"
-    , "    Box::new(move |_| ok_res(a))"
+    , "pub fn json_dec_succeed<A: 'static + Send>(a: A) -> Decoder<A> {"
+    , "    Box::new(move |_| SkyResult::Ok(a))"
     , "}"
-    , "pub fn json_dec_fail<A>(msg: String) -> Decoder<A> {"
-    , "    Box::new(move |_| json_dec_err_str(msg))"
+    , "pub fn json_dec_fail<A: 'static + Send>(msg: String) -> Decoder<A> {"
+    , "    let m = msg; Box::new(move |_| json_dec_err_str(m.clone()))"
     , "}"
-    , "pub fn json_dec_one_of<T>(decoders: Vec<Decoder<T>>) -> Decoder<T> {"
+    , "pub fn json_dec_one_of<T: 'static>(decoders: Vec<Decoder<T>>) -> Decoder<T> {"
     , "    Box::new(move |v| { for d in &decoders { let r = d(v); if r.is_ok() { return r; } } json_dec_err_str(\"oneOf: no match\".into()) })"
     , "}"
     , "pub fn json_dec_decode_string<T>(decoder: Decoder<T>, json: String) -> SkyResult<SkyError, T> {"
@@ -1628,22 +1659,25 @@ jsonSection uk =
     , "}"
     , ""
     , "// --- Pipeline (curried decoder combinators) ---"
-    , "pub fn json_dec_p_required<T, F>(name: String, decoder: Decoder<T>) -> impl Fn(Decoder<Box<dyn Fn(T) -> F + Send + Sync>>) -> Decoder<F> {"
+    , "pub fn json_dec_p_required<T: 'static, F: 'static>(name: String, decoder: Decoder<T>) -> impl FnOnce(Decoder<Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<F> {"
     , "    move |next_decoder| {"
+    , "        let n = name; let d = decoder; let nd = next_decoder;"
     , "        Box::new(move |v| {"
-    , "            let field_val = match v.get(&name) { Some(f) => match decoder(f) { SkyResult::Ok(t) => t, SkyResult::Err(_) => return json_dec_err_str(\"required field decode error\".into()) }, None => return json_dec_err_str(format!(\"missing required: {}\", name)) };"
-    , "            match next_decoder(v) { SkyResult::Ok(f) => ok_res(f(field_val)), SkyResult::Err(_) => json_dec_err_str(\"next decode error\".into()) }"
+    , "            let field_val = match v.get(&n) { Some(f) => match d(f) { SkyResult::Ok(t) => t, _ => return json_dec_err_str(\"required decode error\".into()) }, None => return json_dec_err_str(format!(\"missing required: {}\", n)) };"
+    , "            match nd(v) { SkyResult::Ok(f) => ok_res(f(field_val)), _ => json_dec_err_str(\"next decode error\".into()) }"
     , "        })"
     , "    }"
     , "}"
-    , "pub fn json_dec_p_optional<T: Clone, F>(name: String, decoder: Decoder<T>, default: T) -> impl Fn(Decoder<Box<dyn Fn(T) -> F + Send + Sync>>) -> Decoder<F> {"
+    , "pub fn json_dec_p_optional<T: Clone + 'static, F: 'static>(name: String, decoder: Decoder<T>, default: T) -> impl FnOnce(Decoder<Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<F> {"
     , "    move |next_decoder| {"
+    , "        let n = name; let d = decoder; let nd = next_decoder; let def = default;"
     , "        Box::new(move |v| {"
-    , "            let field_val = match v.get(&name) { Some(_) => match decoder(v.get(&name)) { SkyResult::Ok(t) => t, SkyResult::Err(_) => default.clone() }, None => default.clone() };"
-    , "            match next_decoder(v) { SkyResult::Ok(f) => ok_res(f(field_val)), SkyResult::Err(_) => json_dec_err_str(\"next decode error\".into()) }"
+    , "            let field_val = match v.get(&n) { Some(val) => match d(val.clone()) { SkyResult::Ok(t) => t, _ => def.clone() }, None => def.clone() };"
+    , "            match nd(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), _ => json_dec_err_str(\"opt next error\".into()) }"
     , "        })"
     , "    }"
     , "}"
+
     ]
 
 -- | Extra kernel stubs: Time, Random, File, Crypto (std-only, no extra deps)
