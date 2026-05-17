@@ -80,6 +80,8 @@ analyzeKernelUsage = foldMap analyzeMod
                   then mempty { usesTaskRun = True } else mempty
                 , if modName == "Task" && fnName == "parallel"
                   then mempty { usesTaskParallel = True } else mempty
+                , if "System" `isSuffixOf` modName || modName == "System"
+                  then mempty { usesTaskRun = True } else mempty
                 , if "Json" `isPrefixOf` modName || "Sky.Core.Json" `isPrefixOf` modName
                   then mempty { usesJson = True } else mempty
                 , if "Crypto" `isPrefixOf` modName || "Sky.Core.Crypto" `isPrefixOf` modName
@@ -436,9 +438,13 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                     Just ty | not (hasTypeVars (extractReturnType ty)) ->
                         let ret = extractReturnType ty
                         in typeToRustString ret
-                    _ -> case knownDefSig modPrefix name n of
-                        Just (_, knownRetType) -> knownRetType
-                        Nothing -> "SkyTask<()>"
+                    _ ->
+                        let bodyInner = taskExprInnerType (ecSolvedTypes ctx) body
+                        in if null bodyInner
+                           then case knownDefSig modPrefix name n of
+                               Just (_, knownRetType) -> knownRetType
+                               Nothing -> "()"
+                           else "SkyTask<" ++ bodyInner ++ ">"
     in RustFunction rustName genVars paramStrs retTy (exprToRustString ctx body)
 defToRustItem _ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
     let rustName = if name == "main" then "sky_main" else name
@@ -792,8 +798,10 @@ taskExprInnerType solved (Ann.At _ expr) = case expr of
             "getField" -> "String"
             _ -> ""
         | "System" `isSuffixOf` modName || modName == "System" -> case fnName of
-            "args"     -> "Vec<String>"
-            "exit"     -> "()"
+            "args"        -> "Vec<String>"
+            "exit"        -> "()"
+            "setenv"      -> "()"
+            "unsetenv"    -> "()"
             _ -> ""
         | "Log" `isSuffixOf` modName || modName == "Log" -> "()"
         | "Time" `isSuffixOf` modName || modName == "Time" -> case fnName of
@@ -1409,6 +1417,12 @@ systemHelperSection =
     , "// System helpers"
     , "pub fn system_args(_: ()) -> SkyTask<Vec<String>> { Box::pin(ready(ok_res(std::env::args().skip(1).collect()))) }"
     , "pub fn system_exit(code: i64) -> ! { std::process::exit(code as i32) }"
+    , "pub fn system_setenv(name: String, value: String) -> SkyTask<()> {"
+    , "    std::env::set_var(&name, &value); Box::pin(ready(ok_res(())))"
+    , "}"
+    , "pub fn system_unsetenv(name: String) -> SkyTask<()> {"
+    , "    std::env::remove_var(&name); Box::pin(ready(ok_res(())))"
+    , "}"
     ]
 
 -- | Log helpers (always emitted — just println!)
