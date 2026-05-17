@@ -730,7 +730,13 @@ input : List (Attribute msg) -> Element msg
 input attrs =
     TaggedNode "input" NoDescription attrs []
 
-
+-- A `<textarea>`. The browser fires `input` and `change` events
+-- natively, so wire `Ui.onInput`/`Ui.onChange` for keystroke /
+-- commit semantics. 
+textarea : List (Attribute msg) -> Element msg
+textarea attrs =
+    TaggedNode "textarea" NoDescription attrs []
+    
 -- A `<form>`. Wrap inputs to use the `<form onSubmit=...>` pattern
 -- — recommended for sensitive inputs (password, API key, credit
 -- card) per Sky.Live's "Forms with passwords" doctrine in CLAUDE.md.
@@ -1029,6 +1035,8 @@ dispatchTag tag attrs children =
         let _ = children in Html.img attrs
     else if tag == "input" then
         let _ = children in Html.input attrs
+    else if tag == "textarea" then
+        Html.textarea attrs children
     else
         Html.div attrs children
 
