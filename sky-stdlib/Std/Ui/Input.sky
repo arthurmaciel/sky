@@ -244,17 +244,16 @@ inputBase inputType attrs cfg =
                 Nothing ->
                     []
         baseAttrs =
-            Ui.onInput cfg.onChange
+            Ui.htmlAttribute "type" inputType
+                :: Ui.htmlAttribute "value" cfg.text
+                :: Ui.onInput cfg.onChange
                 :: placeholderAttr
                 ++ attrs
         inputEl = case inputType of
             "textarea" ->
                 Ui.textarea baseAttrs
             _ ->
-                Ui.input
-                    (Ui.htmlAttribute "type" inputType
-                        :: Ui.htmlAttribute "value" cfg.text
-                        :: baseAttrs)
+                Ui.input baseAttrs
     in
         wrapWithLabel cfg.label [] inputEl
 
