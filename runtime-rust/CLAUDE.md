@@ -67,6 +67,12 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 104. **New `UsedKernels` flags** — `usesTime`, `usesRandom`, `usesFile`, `usesCrypto`.
 105. **Dead `argToRust` removed** — diverged duplicate of inline closure logic.
 
+### Session 18 — Def return type inference + System.setenv/unsetenv
+
+106. **Def return type via body inference** — when `hasTypeVars ret` is True (polymorphic), fall back to `taskExprInnerType(ecSolvedTypes, body)`. Fixes `main_expensive_task` having `-> SkyTask<i64>` (was `SkyTask<()>`).
+107. **`System.setenv`/`System.unsetenv`** — `std::env::set_var`/`remove_var` with `SkyTask<()>` wrappers. Analyzer sets `usesTaskRun` for System.*.
+108. **`taskExprInnerType` System entries** — `setenv`/`unsetenv` return `"()"`.
+
 ### Fixes Applied During Implementation
 
 1. `Can.TAlias` field access - uses pairs, not ty field
@@ -156,12 +162,16 @@ The naming helpers `toCamelCase` and `toSnakeCase` in `Builder.hs` handle the co
 
 ## Phase 3: Remaining Issues
 
-### Known limitations (no fix planned short-term)
+### Known limitations
 1. **Anonymous records lose type precision** — SkyValue/String fields only.
-2. **JSON decoder lifetimes (06-json)** — 139 errors from `Fn`/`FnOnce`/lifetime mismatches in `Decoder<T>` closure types.
-3. **Def return type inference** — simple/test_pkg examples have Task-returning Def functions with wrong return type.
+2. **JSON decoder lifetimes (06-json)** — 174 errors from `Fn`/`FnOnce`/lifetime mismatches in `Decoder<T>` closure types (FnOnce revert).
+3. **`Vec<SkyTask>.clone()`** — 2 errors in `simple` example. `SkyTask = Pin<Box<dyn Future>>` is not Clone, but codegen clones `Vec<SkyTask>` when both `task_sequence` and `task_parallel` use the same task list.
 4. **Separate module files** — `mod` declarations instead of flat `main.rs`.
-5. **`System.setenv` / `System.unsetenv`** — Go target has these in v0.11.5+.
+
+### Resolved
+- **Def return type inference**: body-based fallback via `taskExprInnerType` — `main_expensive_task` now correctly returns `SkyTask<i64>`.
+- **`System.setenv`/`System.unsetenv`**: stubs added via `std::env::set_var`/`remove_var`. Analyzer sets `usesTaskRun` for System.*.
+- **`mainSig "formatTodo"` hack**: kept as last-resort (Db.getField polymorphic). solvedTypes takes priority for monomorphic functions.
 
 ### Working examples
 - **01-hello-world**: 0 errors, 0 warnings, 0 external deps

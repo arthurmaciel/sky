@@ -311,18 +311,25 @@ fn main() {
 103. **`sha2` dep** — only when `Crypto.*` imported.
 104. **Dead `argToRust` removed** — diverged duplicate of inline closure logic.
 
+### Session 18 — Def return type inference + System.setenv/unsetenv
+105. **Def return type via body inference** — when `hasTypeVars ret` (polymorphic), fall back to `taskExprInnerType(body)`. `main_expensive_task` → `SkyTask<i64>`.
+106. **`System.setenv`/`System.unsetenv`** — `std::env::set_var`/`remove_var` stubs. Analyzer sets `usesTaskRun` for System.*.
+107. **`taskExprInnerType` System entries** — `setenv`/`unsetenv` return `"()"`.
+
 ## Status
 
-**01-hello-world**: ✅ 0 errors, 0 warnings, 0 external deps
-**04-local-pkg**: ✅ 0 errors, 0 warnings, 0 external deps (multi-module)
-**07-todo-cli**: ✅ 0 errors, 0 warnings, SQLite CRUD via sqlx:
-- `./app add "Buy milk"` → INSERT + structured log `Action Added:=Buy milk`
-- `./app list` → SELECT with `[ ]`/`[x]` status
-- `./app done 1` / `./app undone 1` → UPDATE
-- `./app remove 1` → DELETE
-- `./app clear` → DELETE completed
-- `./app help` → usage text
-**14-task-demo**: ✅ 0 errors, 0 warnings, Task combinators + error messages:
+## Status
+
+**Working**: 0 errors, 0 warnings:
+- **01-hello-world**: 0 external deps, 0.4s build
+- **04-local-pkg**: 0 external deps, 0.4s build (multi-module)
+- **07-todo-cli**: tokio + sqlx-sqlite only, all CRUD operations work
+- **14-task-demo**: tokio only, Task combinators + error messages
+
+**Known issues**:
+- **simple**: 2 errors (`Vec<SkyTask>.clone()` — `Pin<Box<dyn Future>>` not Clone)
+- **06-json**: 174 errors (FnOnce revert, decoder lifetimes)
+- **test_pkg**: 1 error (Def return type inference)
 - `Success: Hello, Sky! Task is the effect boundary.`
 - `Fail error: Unexpected: intentional`
 
@@ -356,12 +363,6 @@ fn main() {
 - The Go and Rust codegen paths share the same frontend (parse, canonicalise, type-check)
 
 ## Testing
-
-**All 4 working examples**: 0 errors, 0 warnings:
-- **01-hello-world**: 0 external deps, 0.4s build
-- **04-local-pkg**: 0 external deps, 0.4s build (multi-module)
-- **07-todo-cli**: tokio + sqlx-sqlite only, all CRUD operations work
-- **14-task-demo**: tokio only, Task combinators + error messages
 
 ## License
 
