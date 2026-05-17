@@ -388,55 +388,56 @@ defToRustItem :: EmitCtx -> String -> Can.Def -> RustItem
 defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) = 
     let rustName = if name == "main" then "sky_main" else name
         n = length params
-        (paramStrs, genVars) = case knownDefSig modPrefix name n of
-            Just (paramTypes, retType) ->
-                let safeParams = map (\(p, t) -> patternToRustParam p ++ ": " ++ t) (zip params paramTypes)
-                    tvars = sigTVars paramTypes retType
-                    extraBound tv = if name == "member" && tv == "T0" then " + PartialEq" else ""
-                    genList = map (\tv -> tv ++ ": Clone" ++ extraBound tv) tvars
-                    gens = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
-                in (safeParams, gens)
-            Nothing ->
-                -- Try solvedTypes (HM-inferred types) for param types.
-                -- This correctly types Def functions like getArg : List String -> String
-                -- even when the lowerer desugars case expressions.
-                let solvedParamTys = case Map.lookup name (ecSolvedTypes ctx) of
-                        Just ty -> extractParamTypes ty
-                        Nothing -> []
-                    (safeParams, genVars) =
-                        if length solvedParamTys == length params
-                           && all (not . hasTypeVars) solvedParamTys
-                        then -- Use solved types (all concrete, no TVars)
-                            let pStrs = map (\(p, t) -> patternToRustParam p ++ ": " ++ typeToRustString t)
-                                        (zip params solvedParamTys)
-                            in (pStrs, "")
-                        else -- Fallback: body analysis or SkyValue
-                            -- Check if ANY param is cloned ≥2 times in body
-                            let counts = collectVarLocalsMulti body
-                                paramNames = [ n | Ann.At _ (Can.PVar n) <- params ]
-                                anyCloneNeeded = any (\n -> Map.lookup n counts >= Just 2) paramNames
-                                    || bodyUsesList body
-                                useVec = bodyUsesList body
-                                pStrs = map (\(i, p) ->
-                                    let tn = "T" ++ show i
-                                    in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "SkyValue")
-                                    ) (zip [0..] params)
-                                genList = if anyCloneNeeded
-                                          then map (\i -> "T" ++ show i ++ ": Clone") [0..length params - 1]
-                                          else []
-                                gs = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
-                            in (pStrs, gs)
-                in (safeParams, genVars)
+        (paramStrs, genVars) =
+            -- Try solvedTypes FIRST (HM-inferred types, most accurate).
+            -- Falls through to knownDefSig (stdlib overrides) then body analysis.
+            let solvedParamTys = case Map.lookup name (ecSolvedTypes ctx) of
+                    Just ty -> extractParamTypes ty
+                    Nothing -> []
+            -- Only use solved types when they're fully concrete (no TVars).
+            -- Polymorphic functions still route through knownDefSig for
+            -- proper generic bounds like `T0: Clone`.
+            in if length solvedParamTys == length params
+                  && all (not . hasTypeVars) solvedParamTys
+               then -- Use solved types (all concrete, no TVars)
+                   let pStrs = map (\(p, t) -> patternToRustParam p ++ ": " ++ typeToRustString t)
+                               (zip params solvedParamTys)
+                   in (pStrs, "")
+               else case knownDefSig modPrefix name n of
+                   Just (paramTypes, retType) ->
+                       let safeParams = map (\(p, t) -> patternToRustParam p ++ ": " ++ t) (zip params paramTypes)
+                           tvars = sigTVars paramTypes retType
+                           extraBound tv = if name == "member" && tv == "T0" then " + PartialEq" else ""
+                           genList = map (\tv -> tv ++ ": Clone" ++ extraBound tv) tvars
+                           gens = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
+                       in (safeParams, gens)
+                   Nothing ->
+                       -- Fallback: body analysis or SkyValue
+                       let counts = collectVarLocalsMulti body
+                           paramNames = [ n | Ann.At _ (Can.PVar n) <- params ]
+                           anyCloneNeeded = any (\n -> Map.lookup n counts >= Just 2) paramNames
+                               || bodyUsesList body
+                           useVec = bodyUsesList body
+                           pStrs = map (\(i, p) ->
+                               let tn = "T" ++ show i
+                               in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "SkyValue")
+                               ) (zip [0..] params)
+                           genList = if anyCloneNeeded
+                                     then map (\i -> "T" ++ show i ++ ": Clone") [0..length params - 1]
+                                     else []
+                           gs = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
+                       in (pStrs, gs)
         -- sky_main returns SkyTask<()> when the user doesn't use Task.run
         -- (body is the Task, e.g. `main = println "Hello"`).
         -- When Task.run is used, main returns () (side effect is piped through run).
         retTy = if name == "main"
                 then if ecUsesTaskRun ctx then "()" else "SkyTask<()>"
-                else case knownDefSig modPrefix name n of
-                    Just (_, knownRetType) -> knownRetType
-                    Nothing -> case Map.lookup name (ecSolvedTypes ctx) of
-                        Just ty -> let ret = extractReturnType ty
-                                  in if hasTypeVars ret then "SkyTask<()>" else typeToRustString ret
+                else case Map.lookup name (ecSolvedTypes ctx) of
+                    Just ty | not (hasTypeVars (extractReturnType ty)) ->
+                        let ret = extractReturnType ty
+                        in typeToRustString ret
+                    _ -> case knownDefSig modPrefix name n of
+                        Just (_, knownRetType) -> knownRetType
                         Nothing -> "SkyTask<()>"
     in RustFunction rustName genVars paramStrs retTy (exprToRustString ctx body)
 defToRustItem _ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
