@@ -447,6 +447,142 @@ spec = do
                             anyMatch "view" msgs `shouldBe` True
                             anyMatch "Html" msgs `shouldBe` True
 
+        it "cross-module record-alias usage is not flagged as a type error" $ do
+            -- Regression for the v0.13.4 LSP false-positive surfaced
+            -- by examples/19-skyforum + mini-notion: when a buffer
+            -- references a record alias from another module
+            -- (`Db.Page`) AND accesses its fields (`page.id`), the
+            -- LSP previously reported `Page vs { id : a | ...}` even
+            -- though `sky check` was clean. Same diagnostics file
+            -- also flagged unqualified cross-module type references
+            -- (`Model` in `viewLive : Model -> any` when Model is
+            -- defined in src/Model.sky) as `Model vs Model` (same
+            -- name, different identity).
+            --
+            -- Root cause: `runPipelineSt` called
+            -- `Canonicalise.canonicalise srcMod` (no deps). Without
+            -- dep info, cross-module record-alias references stayed
+            -- as nominal `TType` instead of being expanded to
+            -- `TAlias` (so `.id` field access couldn't unify), and
+            -- unqualified type names resolved to empty-home
+            -- `Canonical ""` while the externals-side reference
+            -- (built by the workspace pipeline, which DID have full
+            -- deps) resolved to `Canonical "Model"` — HM saw two
+            -- distinct identities.
+            --
+            -- Fix: thread `Idx.depInfoFromIndex idx` into a
+            -- `canonicaliseWithDeps` call so the buffer's
+            -- canonicalisation matches the CLI pipeline. This test
+            -- asserts EMPTY diagnostics on a multi-file project
+            -- whose Main.sky exhibits both shapes of the bug.
+            sky <- findSky
+            let dbSrc = unlines
+                    [ "module Db exposing (Page, getPage)"
+                    , ""
+                    , "type alias Page ="
+                    , "    { id : Int"
+                    , "    , title : String"
+                    , "    , content : String"
+                    , "    }"
+                    , ""
+                    , "getPage : Int -> Page"
+                    , "getPage n ="
+                    , "    { id = n, title = \"\", content = \"\" }"
+                    ]
+                modelSrc = unlines
+                    [ "module Model exposing (Model, initial)"
+                    , ""
+                    , "type alias Model ="
+                    , "    { count : Int"
+                    , "    , name : String"
+                    , "    }"
+                    , ""
+                    , "initial : Model"
+                    , "initial = { count = 0, name = \"\" }"
+                    ]
+                viewSrc = unlines
+                    [ "module View exposing (titleOf, pageIdOf)"
+                    , ""
+                    , "import Db"
+                    , ""
+                    -- Cross-module record-alias usage: parameter
+                    -- annotated `Db.Page` (a nominal TType pre-fix)
+                    -- accessing `.id` (requires TAlias expansion).
+                    , "pageIdOf : Db.Page -> Int"
+                    , "pageIdOf page ="
+                    , "    page.id"
+                    , ""
+                    , "titleOf : Db.Page -> String"
+                    , "titleOf page ="
+                    , "    page.title"
+                    ]
+                mainSrc = unlines
+                    [ "module Main exposing (main)"
+                    , ""
+                    , "import Sky.Core.Prelude exposing (..)"
+                    , "import Sky.Core.String as String"
+                    , "import Std.Log exposing (println)"
+                    , "import Model exposing (..)"
+                    , "import View"
+                    , "import Db"
+                    , ""
+                    -- Unqualified cross-module type reference
+                    -- (`Model`): pre-fix resolved to empty-home in
+                    -- this buffer, but its externals-side counter-
+                    -- part resolved to home="Model" — "Model vs
+                    -- Model" mismatch on identity, not display.
+                    , "render : Model -> String"
+                    , "render model ="
+                    , "    \"count: \" ++ String.fromInt model.count"
+                    , ""
+                    -- And cross-module use of View.pageIdOf, which
+                    -- itself depends on Db.Page alias expansion.
+                    , "main ="
+                    , "    let"
+                    , "        m = initial"
+                    , "        p = Db.getPage 42"
+                    , "        _ = println (render m)"
+                    , "    in"
+                    , "        println (String.fromInt (View.pageIdOf p))"
+                    ]
+            withSystemTempDirectory "sky-lsp-cross-mod-alias" $ \dir -> do
+                let srcDir = dir </> "src"
+                createDirectoryIfMissing True srcDir
+                writeFile (dir </> "sky.toml")
+                    "name = \"lsp-cross-alias\"\nentry = \"src/Main.sky\"\n"
+                writeFile (srcDir </> "Db.sky") dbSrc
+                writeFile (srcDir </> "Model.sky") modelSrc
+                writeFile (srcDir </> "View.sky") viewSrc
+                let mainPath = srcDir </> "Main.sky"
+                writeFile mainPath mainSrc
+                withLsp sky $ \hin hout -> do
+                    initializeLsp hin hout
+                    -- Open Main.sky (the file with BOTH bug shapes:
+                    -- unqualified cross-module type + transitive
+                    -- reliance on View.pageIdOf which itself uses
+                    -- Db.Page alias expansion).
+                    didOpen hin mainPath mainSrc
+                    resMain <- awaitNotification hout
+                        "textDocument/publishDiagnostics"
+                    case resMain of
+                        Nothing -> expectationFailure
+                            "no publishDiagnostics on Main.sky"
+                        Just payload -> do
+                            let msgs = diagnosticMessages payload
+                            msgs `shouldBe` []
+                    -- Then open View.sky (cross-module record-alias
+                    -- field access only).
+                    let viewPath = srcDir </> "View.sky"
+                    didOpen hin viewPath viewSrc
+                    resView <- awaitNotification hout
+                        "textDocument/publishDiagnostics"
+                    case resView of
+                        Nothing -> expectationFailure
+                            "no publishDiagnostics on View.sky"
+                        Just payload -> do
+                            let msgs = diagnosticMessages payload
+                            msgs `shouldBe` []
+
     describe "v0.13 Layer 4 — LSP carries stable diagnostic codes" $ do
 
         it "type-mismatch publishDiagnostics includes code E2001" $ do

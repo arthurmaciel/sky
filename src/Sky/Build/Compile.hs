@@ -396,6 +396,15 @@ compile config entryPath outDir = do
         sourceRoot = if Toml._sourceRoot config == "src"
             then entryDir  -- entry IS in the source root
             else Toml._sourceRoot config
+        -- Project root = parent of src/. Used for the implicit `tests/`
+        -- extra discovery root below. Resolving against projectRoot
+        -- (not cwd) prevents a stale `tests/` from an unrelated dir
+        -- — e.g. the sky compiler repo's own tests/ — leaking into
+        -- the workspace when the user invokes `sky` from a foreign
+        -- working directory.
+        compileProjectRoot = case takeDirectory entryDir of
+            "" -> "."
+            d  -> d
 
     -- Phase 0: Load FFI registry (ffi/*.kernel.json) and seed the kernel
     -- module/function IORefs so FFI packages resolve as first-class kernels.
@@ -419,8 +428,9 @@ compile config entryPath outDir = do
     -- roots for the import to resolve. Harmless for non-test builds
     -- because a tests/ dir without modules contributes no modules.
     putStrLn "-- Discovering modules"
-    testsRootExists <- doesDirectoryExist "tests"
-    let extraTestsRoot = if testsRootExists then ["tests"] else []
+    let testsRootPath = compileProjectRoot </> "tests"
+    testsRootExists <- doesDirectoryExist testsRootPath
+    let extraTestsRoot = if testsRootExists then [testsRootPath] else []
     modules <- Graph.discoverModulesMulti (sourceRoot : depRoots ++ extraTestsRoot ++ [stdlibRoot]) entryPath
     let moduleOrder = Graph.compilationOrder modules
     putStrLn $ "   Found " ++ show (length moduleOrder) ++ " module(s)"
@@ -2096,8 +2106,20 @@ typecheckWorkspace config entryPath = do
     -- shows up under the user's source tree in `git status`.
     let stdlibSideDir = projectRoot </> ".skycache" </> "stdlib"
     stdlibRoot <- writeStdlibTo stdlibSideDir
-    testsRootExists2 <- doesDirectoryExist "tests"
-    let extraTestsRoot2 = if testsRootExists2 then ["tests"] else []
+    -- Resolve `tests/` against projectRoot, NOT cwd. When the LSP is
+    -- launched from a different working directory (e.g. an editor
+    -- spawned `sky lsp` from a global location while opening a file
+    -- in /tmp/some-project), a bare "tests" path picks up whatever
+    -- tests/ sits in cwd — typically the sky compiler repo's own
+    -- tests/ — and floods the workspace index with foreign modules.
+    -- Symptom: alias-name collisions silently win in
+    -- `collectDepAliases` (left-biased Map.unions) and the open
+    -- file's diagnostics reference unrelated record shapes
+    -- ("Model vs Model" where one body is the user's and the other
+    -- is from tests/Live/CounterTest.sky).
+    let testsRootPath2 = projectRoot </> "tests"
+    testsRootExists2 <- doesDirectoryExist testsRootPath2
+    let extraTestsRoot2 = if testsRootExists2 then [testsRootPath2] else []
     -- Workspace discovery: seed module discovery with EVERY .sky file
     -- in the source roots + tests, not just the entry point. Without
     -- this, helper modules (Lib/Helper.sky, src/Foo/Bar.sky) that
@@ -2110,7 +2132,7 @@ typecheckWorkspace config entryPath = do
     -- needs the broader view.
     extraSrcFiles <- Graph.listSkyFiles sourceRoot
     extraTestFiles <- if testsRootExists2
-                      then Graph.listSkyFiles "tests"
+                      then Graph.listSkyFiles testsRootPath2
                       else return []
     -- Also seed stdlib + dep roots so their modules end up in the
     -- index regardless of whether the entry imports them. Critical

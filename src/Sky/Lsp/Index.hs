@@ -21,6 +21,7 @@ module Sky.Lsp.Index
     , symFromTopLevel
     , externalsForLsp
     , externalsForFile
+    , depInfoFromIndex
     ) where
 
 import qualified Data.Map.Strict as Map
@@ -40,6 +41,7 @@ import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Type.Type as Ty
 import qualified Sky.Type.Solve as Solve
 import qualified Sky.Build.Compile as Compile
+import qualified Sky.Canonicalise.Module as Canonicalise
 import qualified Sky.Sky.Toml as Toml
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as BL
@@ -627,6 +629,43 @@ externalsForFile imports idx =
 -- production path uses externalsForFile directly.
 externalsForLsp :: Index -> Map (String, String) Ty.Annotation
 externalsForLsp _ = Map.empty
+
+
+-- | Build a `DepInfo` map from the workspace index for use with
+-- `Canonicalise.canonicaliseWithDeps`. Without dep info, the LSP's
+-- per-file canonicalise can't:
+--
+--   * Expand cross-module record-alias references (`Db.Page` stays a
+--     nominal `TType` instead of becoming `TAlias` with body filled),
+--     so field access on dep-typed params (`page.id`) fails to unify
+--     with `{ id : a | ... }`.
+--
+--   * Resolve unqualified type names (`Model` in `viewLive : Model ->
+--     any`) to their defining module's home. Without dep info, the
+--     `tmap` only carries local types; cross-module references fall
+--     through to empty-home `Canonical ""`. The externals-side
+--     reference resolves to `Canonical "Model"` (because each dep's
+--     canon ran with full deps in the workspace pipeline), so HM sees
+--     two distinct "Model" identities and reports `Model vs Model`.
+--
+-- This helper mirrors `buildDepInfoMap` in `Sky.Build.Compile` (which
+-- the CLI pipeline uses). Keep the two in sync.
+depInfoFromIndex :: Index -> Map String Canonicalise.DepInfo
+depInfoFromIndex idx = Map.fromList
+    [ (modName, Canonicalise.DepInfo
+        { Canonicalise._dep_name = Can._name depMod
+        , Canonicalise._dep_unions =
+            [ (typeName, Can._u_vars union, Can._u_alts union)
+            | (typeName, union) <- Map.toList (Can._unions depMod)
+            ]
+        , Canonicalise._dep_aliases = Map.keys (Can._aliases depMod)
+        , Canonicalise._dep_aliasDefs = Can._aliases depMod
+        , Canonicalise._dep_values =
+            Set.toList (Compile.collectDeclNames (Can._decls depMod))
+        , Canonicalise._dep_exports = Can._exports depMod
+        })
+    | (modName, depMod) <- idxModCanons idx
+    ]
 
 
 -- | Look up the symbol referenced at (file, line, col) for hover/jump.

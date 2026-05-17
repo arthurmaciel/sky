@@ -1253,8 +1253,28 @@ runPipelineSt st path src = case Parse.parseModule src of
     Left err ->
         return [ LspR.renderLspDiagnostic
                    (Parse.moduleErrorToDiagnostic path err) ]
-    Right srcMod ->
-        case Canonicalise.canonicalise srcMod of
+    Right srcMod -> do
+        -- Build dep info from the workspace index BEFORE
+        -- canonicalising the buffer. Without dep info the buffer's
+        -- canonicalisation can't expand cross-module record-alias
+        -- references (`Db.Page` stays nominal `TType` instead of
+        -- becoming `TAlias` with body filled), and unqualified type
+        -- names with cross-module homes (`Model`) resolve to
+        -- empty-home `Canonical ""` while the externals-side
+        -- reference resolves to the proper `Canonical "Model"`. HM
+        -- then sees two distinct identities and reports cryptic
+        -- `Model vs Model` mismatches. Mirrors the CLI's
+        -- `canonFixpoint` setup in `Sky.Build.Compile`.
+        --
+        -- Fall back to no-deps canonicalise when the index can't be
+        -- built (no sky.toml, transient indexing exception); the
+        -- editor stays responsive at the cost of cross-module
+        -- alias-expansion diagnostics on that file.
+        eidx <- try (getIndex st path) :: IO (Either SomeException Idx.Index)
+        let depInfo = case eidx of
+                Right idx -> Idx.depInfoFromIndex idx
+                Left _    -> Map.empty
+        case Canonicalise.canonicaliseWithDeps depInfo srcMod of
             Left err ->
                 return [ LspR.renderLspDiagnostic
                            (Canonicalise.legacyToDiag path err) ]
