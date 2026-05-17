@@ -3395,6 +3395,25 @@ function __skyApplyPatches(patches) {
     if (p.attrs) {
       var dirty = __skyIsDirty(el);
       var keys = Object.keys(p.attrs);
+      // Cursor preservation: when applying a "value" attr to a
+      // focused INPUT or TEXTAREA, snapshot the selection range
+      // BEFORE setting .value (which otherwise resets the cursor
+      // to the end of the new string). Common case: user clicked
+      // into a textarea, paused so their dirty flag cleared, and
+      // the server pushes a fresh value via SSE. Without this,
+      // the cursor jumps to the end mid-edit. Clamping handles
+      // shorter new values (selectionStart > newLen -> newLen).
+      var isInputLike = el.tagName === "INPUT" || el.tagName === "TEXTAREA";
+      var hadFocus = isInputLike && el === document.activeElement;
+      var savedSelStart = null, savedSelEnd = null, savedScrollTop = 0;
+      if (hadFocus) {
+        try {
+          savedSelStart = el.selectionStart;
+          savedSelEnd = el.selectionEnd;
+        } catch (_) {}
+        savedScrollTop = el.scrollTop;
+      }
+      var valueChanged = false;
       for (var j = 0; j < keys.length; j++) {
         var k = keys[j], v = p.attrs[k];
         // Authority filter: the user is currently editing this
@@ -3408,11 +3427,27 @@ function __skyApplyPatches(patches) {
         else {
           el.setAttribute(k, v);
           // Sync DOM properties that don't reflect from attrs.
-          if (k === "value" && ("value" in el)) el.value = v;
+          if (k === "value" && ("value" in el)) {
+            el.value = v;
+            valueChanged = true;
+          }
           if (k === "checked") el.checked = v !== "" && v !== "false";
           if (k === "selected") el.selected = v !== "" && v !== "false";
           if (k === "disabled") el.disabled = v !== "" && v !== "false";
         }
+      }
+      // Restore selection on focused input/textarea after a value
+      // update. Clamp to the new value length so a shorter server
+      // value does not throw RangeError. Scroll restore matters
+      // mostly for multi-line textarea where the user may have
+      // scrolled below the visible area.
+      if (hadFocus && valueChanged && savedSelStart !== null &&
+          typeof el.setSelectionRange === "function") {
+        var newLen = (el.value || "").length;
+        var s = Math.min(savedSelStart, newLen);
+        var e = Math.min(savedSelEnd === null ? s : savedSelEnd, newLen);
+        try { el.setSelectionRange(s, e); } catch (_) {}
+        if (savedScrollTop) el.scrollTop = savedScrollTop;
       }
     }
     if (p.remove) el.remove();

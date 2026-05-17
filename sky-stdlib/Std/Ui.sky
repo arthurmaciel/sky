@@ -1029,6 +1029,18 @@ dispatchTag tag attrs children =
         let _ = children in Html.img attrs
     else if tag == "input" then
         let _ = children in Html.input attrs
+    else if tag == "textarea" then
+        -- <textarea> is NOT a void element — its value lives between
+        -- the tags as text content. The `Std.Ui.Input.multiline` path
+        -- builds `TaggedNode "textarea"` directly; pre-fix it routed
+        -- through `inputBase "textarea"` which produced
+        -- `<input type="textarea">` — browsers fell back to a
+        -- single-line text input, so multiline was broken in the
+        -- browser regardless of what the Sky source said. Sky.Live's
+        -- VNode renderer already understands textarea (strips the
+        -- `value` attr and splices it in as text content); routing
+        -- through Html.textarea here is the missing link.
+        Html.textarea attrs children
     else
         Html.div attrs children
 

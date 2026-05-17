@@ -216,6 +216,7 @@ test-suite sky-tests
       Sky.Type.UfCycleGuardSpec
       Sky.Type.RecordFieldExactnessSpec
       Sky.Build.UiFillCascadeSpec
+      Sky.Build.UiMultilineTextareaSpec
       Sky.Type.InstanceCaptureSpec
       Sky.Format.FormatSpec
       Sky.Build.GoKeywordCollisionSpec

@@ -22,6 +22,7 @@ import qualified Sky.Type.UiOnSubmitTypedRecordSpec
 import qualified Sky.Type.UfCycleGuardSpec
 import qualified Sky.Type.RecordFieldExactnessSpec
 import qualified Sky.Build.UiFillCascadeSpec
+import qualified Sky.Build.UiMultilineTextareaSpec
 import qualified Sky.Format.FormatSpec
 import qualified Sky.Build.GoKeywordCollisionSpec
 import qualified Sky.Build.NestedPatternSpec
@@ -155,6 +156,12 @@ main = hspec $ do
     -- child marked `width: fill` then competed for vertical space,
     -- breaking the typical header/main/footer layout.
     describe "Sky.Build.UiFillCascade"   Sky.Build.UiFillCascadeSpec.spec
+    -- Std.Ui.Input.multiline used to call `inputBase "textarea"` which
+    -- built a `Ui.input` element with type="textarea" — invalid HTML
+    -- that browsers silently degrade to single-line text input. Fix
+    -- routes through a real <textarea> element with the value-attr
+    -- → text-content splice the Live runtime already supports.
+    describe "Sky.Build.UiMultilineTextarea" Sky.Build.UiMultilineTextareaSpec.spec
     -- Closed-record exactness + cross-module externals registration:
     --   1. unifyRecords (Sky.Type.Unify) used to silently merge field-
     --      mismatched closed records under a fresh extension. Now

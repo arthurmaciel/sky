@@ -154,7 +154,24 @@ newPassword attrs cfg =
             }
 
 
--- Multi-line `<textarea>`. Same shape as `text`.
+-- Multi-line `<textarea>`. Same shape as `text` but the underlying
+-- HTML element is `<textarea>`, not `<input>`. `<input type="textarea">`
+-- is NOT a valid HTML form control — every browser silently falls
+-- back to a single-line text input, so routing through `inputBase
+-- "textarea"` (which builds a `Ui.input` element) silently broke
+-- multi-line editing in the browser. Pre-fix symptom: the
+-- `<textarea>` mini-notion needs (page body editor, multi-paragraph
+-- forms) rendered as a one-line field that swallowed every Enter
+-- keystroke into form submit. TUI was unaffected (it inspects the
+-- `type` attr directly and has its own textarea editor).
+--
+-- The textarea's value lives between the tags as text content, not
+-- as a `value` attribute. Sky.Live's renderer already strips the
+-- `value` attr and splices it as text content, so we pass `cfg.text`
+-- via the value attr for codegen uniformity; the renderer's textarea
+-- branch in `runtime-go/rt/live.go` handles the dance. The TUI side
+-- still consults the `type="textarea"` attr for its multiline-editor
+-- code path, so keep it on the attribute list.
 multiline : List (Attribute msg) -> { onChange : String -> msg, text : String, placeholder : Maybe (Placeholder msg), label : Label msg, spellcheck : Bool } -> Element msg
 multiline attrs cfg =
     let
@@ -163,14 +180,26 @@ multiline attrs cfg =
                 Ui.htmlAttribute "spellcheck" "true"
             else
                 Ui.htmlAttribute "spellcheck" "false"
+        placeholderAttr =
+            case cfg.placeholder of
+                Just (Placeholder _ el) ->
+                    placeholderTextOf el
+                Nothing ->
+                    []
+        baseAttrs =
+            -- `type="textarea"` is kept for TUI's input-type detection
+            -- (see `runtime-go/rt/tui_ui.go`'s walkAttrs picking up
+            -- `inputType`). The web renderer ignores `type` on a
+            -- `<textarea>` element; the TUI editor uses it.
+            Ui.htmlAttribute "type" "textarea"
+                :: Ui.htmlAttribute "value" cfg.text
+                :: spellAttr
+                :: Ui.onInput cfg.onChange
+                :: placeholderAttr
+                ++ attrs
+        textareaEl = Ui.TaggedNode "textarea" Ui.NoDescription baseAttrs []
     in
-        inputBase "textarea"
-            (spellAttr :: attrs)
-            { onChange = cfg.onChange
-            , text = cfg.text
-            , placeholder = cfg.placeholder
-            , label = cfg.label
-            }
+        wrapWithLabel cfg.label [] textareaEl
 
 
 -- Checkbox. The icon is the visual checkmark element (use a simple
