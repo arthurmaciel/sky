@@ -79,7 +79,28 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 110. **Inline-let in `Can.Let`** — When a let-bound variable is a `List` used ≥ 2 times, inline `vec![]` at each use site. Avoids `Vec::clone()` on non-Clone elements.
 111. **`simple` example 0 errors** — Was blocked by `Vec<SkyTask>.clone()` (`Pin<Box<dyn Future>>` not Clone).
 
-### Session 20 — 06-json: 138→43 errors, test_pkg 1→0 errors
+### Session 21 — Root-cause fixes: 43→11 errors, ecCloneVars systematic rewrite, 06 examples at 0
+
+112. **Zero-arg function references (Root Cause A)** — `ecZeroArgDefs` set tracks zero-arg definitions;
+     `()` appended at every `VarTopLevel`/`VarKernel` reference (was bare fn name = fn pointer mismatch).
+113. **`val.clone()` in `json_dec_p_optional` (Root Cause B)** — `d(val.clone())` passes `Value` instead of
+     `&Value`; changed to `d(val)` (already `&Value` from `v.get(&n)`).
+114. **`TRecord→()` in `typeToRustString` (Root Cause C)** — threaded `ecRecordMap` through all call sites;
+     `TRecord` now looks up anonymous struct name instead of always returning `"()"`.
+115. **`result_traverse` undefined (Root Cause D)** — added Rust runtime function.
+116. **`string_to_int` return type (Root Cause E)** — changed from `SkyResult<String, i64>` to `SkyMaybe<i64>`
+     (matches Sky's `String.toInt : String -> Maybe Int`).
+117. **Unconditional clone of all VarLocal args (Root Cause F)** — replaced with `ecCloneVars`-based cloning:
+     only clone when variable appears ≥ 2 times in body. Was cloning every arg, breaking `Box<dyn Fn>`.
+118. **`collectVarLocalsMulti` didn't count let/case/pattern-bound vars (Root Cause G)** — removed overly-
+     aggressive bound-set tracking; all variables now counted for multi-use, enabling correct clone insertion.
+119. **Lambda parameter multi-use tracking** — removed `v \`notElem\` paramNames` filter so lambda params
+     used ≥ 2 times get cloned correctly.
+120. **`argToRustString` extracted from nested lambda-case** — avoided GHC 9.6 view-pattern issue; the
+     function-call arg rendering is now a standalone helper.
+121. **`ecNoCloneVars` field in `EmitCtx`** — reserve for future non-Clone type variables (e.g. decoder vars).
+122. **All 6 examples at 0 errors** — `01-hello-world`, `04-local-pkg`, `07-todo-cli`, `14-task-demo`,
+     `simple`, `test_pkg`. All verified clean build from scratch.
 
 112. **Result kernel sigs** — `resultSig` for map, andThen, mapError, withDefault, map2-5, andMap, combine, traverse for `Sky.Core.Result` and bare `Result` module.
 113. **Decoder lifetime bounds** — `T: 'static` on `json_dec_field`, `json_dec_at`, `json_dec_list`. `Send+Sync` bounds removed (over-constrains FnOnce capture).
@@ -91,7 +112,11 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 
 ### Known limitations
 1. **Anonymous records lose type precision** — SkyValue/String fields only.
-2. **JSON decoder lifetimes (06-json)** — 43 remaining errors (`Fn`/`FnOnce`/`Send`/`Sync` in `Decoder<T>` closures). Progress from 138.
+2. **JSON pipeline decoder (06-json)** — 11 remaining errors. `Box<dyn FnOnce>` chain from
+   `json_dec_p_required`/`optional` + `json_dec_succeed` can't satisfy `Clone`/`Send`. Fundamental
+   type-system mismatch: Sky's dynamically-typed pipeline pattern (`Decode.succeed f |= required "x" string`)
+   creates deeply nested `FnOnce` types that Rust's static trait system can't express. Needs
+   architecture-level restructuring (e.g. `Box<dyn Any>` or macros).
 3. **Separate module files** — `mod` declarations instead of flat `main.rs`.
 
 ### Resolved
@@ -105,6 +130,7 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 - **07-todo-cli**: 0 errors, 0 warnings, SQLite CRUD via sqlx-sqlite + tokio
 - **14-task-demo**: 0 errors, 0 warnings, Task andThen/fail/run with error msgs
 - **simple**: 0 errors, 0 warnings, task_sequence + task_parallel (tokio)
+- **test_pkg**: 0 errors, 0 warnings, imports + Result/Maybe combinators
 
 ## Constraints
 
