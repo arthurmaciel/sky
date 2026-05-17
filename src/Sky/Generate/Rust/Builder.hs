@@ -553,6 +553,71 @@ patternToRustParam (Ann.At _ pat) = case pat of
 
 -- | Walk an expression and collect VarLocal names, counting occurrences.
 -- Used to decide which variables need .clone() (those used ≥ 2 times).
+-- | Substitute every VarLocal matching a name with an inline string
+-- (e.g. `vec![...]`).  Handles common expression forms.  The println
+-- special case (Log.println → log_info) is mirrored from exprToRustInner.
+substVar :: EmitCtx -> String -> String -> Can.Expr -> String
+substVar ctx name inline = go
+  where
+    go (Ann.At _ expr) = case expr of
+        Can.VarLocal n | n == name -> inline
+        Can.VarLocal n -> rustSafeIdent n ++ if n `Set.member` ecCloneVars ctx then ".clone()" else ""
+        Can.VarTopLevel mod n -> toSnakeCase (map (\c -> if c == '.' then '_' else c) (ModuleName._name mod) ++ "_" ++ n)
+        Can.VarKernel mod n -> kernelToRust mod n
+        Can.VarCtor _ mn tn cn _ -> kernelCtorToRust mn tn cn
+        Can.Chr c -> show c
+        Can.Str s -> show s ++ ".to_string()"
+        Can.Int i -> show i
+        Can.Float f -> show f
+        Can.Unit -> "()"
+        Can.List es -> "vec![" ++ intercalate ", " (map go es) ++ "]"
+        Can.Negate e -> "-" ++ go e
+        Can.Lambda params body ->
+            "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ go body ++ " }"
+        Can.Call fn args ->
+            let fs = go fn
+                isPrintln = "println" `isSuffixOf` fs
+            in if isPrintln
+               then "log_info(" ++ intercalate " ++ \" \" ++ " (map go args) ++ ")"
+               else let noClone = case fn of
+                            Ann.At _ (Can.VarKernel _ n2) -> n2 == "run" || n2 == "sequence" || n2 == "parallel"
+                            _ -> False
+                        as = map (\a -> case a of
+                            Ann.At _ (Can.VarLocal n2) | n2 == name -> inline
+                            Ann.At _ (Can.VarLocal n2) | noClone -> rustSafeIdent n2
+                            Ann.At _ (Can.VarLocal n2) -> rustSafeIdent n2 ++ ".clone()"
+                            _ -> go a) args
+                    in fs ++ "(" ++ intercalate ", " as ++ ")"
+        Can.Let def body -> goDef def ++ go body
+          where
+            goDef (Can.Def (Ann.At _ n) [] dBody) = "let " ++ n ++ " = " ++ go dBody ++ "; "
+            goDef (Can.Def (Ann.At _ n) ps dBody) = "let " ++ n ++ " = |" ++ intercalate ", " (map patternToRustParam ps) ++ "| { " ++ go dBody ++ " }; "
+            goDef _ = "_ = unimplemented(); "
+        Can.LetRec defs body ->
+            let strs = map (\(Can.Def (Ann.At _ n) ps d) -> n ++ " = |" ++ intercalate ", " (map patternToRustParam ps) ++ "| { " ++ go d ++ " }") defs
+            in "let mut " ++ intercalate "; let mut " strs ++ "; " ++ go body
+        Can.LetDestruct pat e0 body ->
+            "let " ++ patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ go e0 ++ "; " ++ go body
+        Can.Case scrut branches ->
+            "match " ++ go scrut ++ " { " ++ intercalate ", " (map (\(Can.CaseBranch p b) -> patternToMatchString (ecRecordMap ctx) p ++ " => " ++ go b) branches) ++ " }"
+        Can.If [] elseExpr -> go elseExpr
+        Can.If ((c,t):rest) elseExpr ->
+            "if " ++ go c ++ " { " ++ go t ++ " }"
+            ++ concatMap (\(c2,t2) -> " else if " ++ go c2 ++ " { " ++ go t2 ++ " }") rest
+            ++ " else { " ++ go elseExpr ++ " }"
+        Can.Binop op _ _ _ a b
+            | op == "|>" -> go b ++ "(" ++ go a ++ ")"
+            | op == "<|" -> go a ++ "(" ++ go b ++ ")"
+            | op == "::" -> "sky_list_cons(" ++ go a ++ ", " ++ go b ++ ")"
+            | op == "++" -> "format!(\"{}{}\", " ++ go a ++ ", " ++ go b ++ ")"
+            | otherwise -> "(" ++ go a ++ " " ++ binopToRust op ++ " " ++ go b ++ ")"
+        -- Uncommon expression forms — fall back to normal emission
+        Can.Record _ -> exprToRustString ctx (Ann.At (error "substVar span") expr)
+        Can.Tuple _ _ _ -> exprToRustString ctx (Ann.At (error "substVar span") expr)
+        Can.Access _ _ -> exprToRustString ctx (Ann.At (error "substVar span") expr)
+        Can.Accessor _ -> exprToRustString ctx (Ann.At (error "substVar span") expr)
+        Can.Update _ _ _ -> exprToRustString ctx (Ann.At (error "substVar span") expr)
+
 collectVarLocalsMulti :: Can.Expr -> Map.Map String Int
 collectVarLocalsMulti = go Set.empty
   where
@@ -705,8 +770,13 @@ exprToRustInner ctx e = case e of
         "if " ++ exprToRustString ctx firstCond ++ " { " ++ exprToRustString ctx firstBody ++ " }"
         ++ concatMap (\(c, t) -> " else if " ++ exprToRustString ctx c ++ " { " ++ exprToRustString ctx t ++ " }") rest
         ++ " else { " ++ exprToRustString ctx elseBranch ++ " }"
-    Can.Let def body -> 
-        "let " ++ defToRustString ctx def ++ "; " ++ exprToRustString ctx body
+    Can.Let def body ->
+        case def of
+            Can.Def (Ann.At _ name) [] (Ann.At _ (Can.List items))
+                | Just n <- Map.lookup name (collectVarLocalsMulti body), n >= 2 ->
+                    let inline = "vec![" ++ intercalate ", " (map (exprToRustString ctx) items) ++ "]"
+                    in substVar ctx name inline body
+            _ -> "let " ++ defToRustString ctx def ++ "; " ++ exprToRustString ctx body
     Can.LetRec defs body ->
         "let mut " ++ intercalate "; let mut " (map (defToRustString ctx) defs) ++ "; " ++ exprToRustString ctx body
     Can.LetDestruct pat expr body ->
