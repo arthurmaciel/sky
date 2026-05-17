@@ -316,6 +316,11 @@ fn main() {
 106. **`System.setenv`/`System.unsetenv`** — `std::env::set_var`/`remove_var` stubs. Analyzer sets `usesTaskRun` for System.*.
 107. **`taskExprInnerType` System entries** — `setenv`/`unsetenv` return `"()"`.
 
+### Session 19 — Inline-let optimization (Vec<SkyTask>.clone() fix)
+108. **`substVar` walker** — Substitutes `VarLocal name` with inline `vec![...]` throughout expression tree.
+109. **Inline-let in `Can.Let`** — When a let-bound variable is a `List` used ≥ 2 times, inline `vec![]` at each use site. Avoids `::clone()` on non-Clone elements.
+110. **`simple` 0 errors** — Was blocked by `Vec<SkyTask>.clone()` (`Pin<Box<dyn Future>>` not Clone).
+
 ## Status
 
 ## Status
@@ -325,10 +330,10 @@ fn main() {
 - **04-local-pkg**: 0 external deps, 0.4s build (multi-module)
 - **07-todo-cli**: tokio + sqlx-sqlite only, all CRUD operations work
 - **14-task-demo**: tokio only, Task combinators + error messages
+- **simple**: tokio only, task_sequence + task_parallel
 
 **Known issues**:
-- **simple**: 2 errors (`Vec<SkyTask>.clone()` — `Pin<Box<dyn Future>>` not Clone)
-- **06-json**: 174 errors (FnOnce revert, decoder lifetimes)
+- **06-json**: ~174 errors (FnOnce revert, decoder lifetimes)
 - **test_pkg**: 1 error (Def return type inference)
 - `Success: Hello, Sky! Task is the effect boundary.`
 - `Fail error: Unexpected: intentional`
