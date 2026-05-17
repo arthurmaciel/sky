@@ -411,12 +411,17 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                                         (zip params solvedParamTys)
                             in (pStrs, "")
                         else -- Fallback: body analysis or SkyValue
-                            let useVec = bodyUsesList body
+                            -- Check if ANY param is cloned ≥2 times in body
+                            let counts = collectVarLocalsMulti body
+                                paramNames = [ n | Ann.At _ (Can.PVar n) <- params ]
+                                anyCloneNeeded = any (\n -> Map.lookup n counts >= Just 2) paramNames
+                                    || bodyUsesList body
+                                useVec = bodyUsesList body
                                 pStrs = map (\(i, p) ->
                                     let tn = "T" ++ show i
                                     in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "SkyValue")
                                     ) (zip [0..] params)
-                                genList = if useVec
+                                genList = if anyCloneNeeded
                                           then map (\i -> "T" ++ show i ++ ": Clone") [0..length params - 1]
                                           else []
                                 gs = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
