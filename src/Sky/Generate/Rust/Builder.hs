@@ -85,7 +85,8 @@ analyzeKernelUsage = foldMap analyzeMod
                 , if "Crypto" `isPrefixOf` modName || "Sky.Core.Crypto" `isPrefixOf` modName
                   then mempty { usesCrypto = True } else mempty
                 , if "Time" `isPrefixOf` modName || "Sky.Core.Time" `isPrefixOf` modName
-                  then mempty { usesTime = True } else mempty
+                  then mempty { usesTime = True } <> (if fnName == "sleep" then mempty { usesTaskRun = True } else mempty)
+                  else mempty
                 , if "Random" `isPrefixOf` modName || "Sky.Core.Random" `isPrefixOf` modName
                   then mempty { usesRandom = True } else mempty
                 , if "File" `isPrefixOf` modName || "Sky.Core.File" `isPrefixOf` modName
@@ -646,7 +647,7 @@ exprToRustInner ctx e = case e of
     Can.Negate e -> "-" ++ exprToRustString ctx e
     Can.Binop op _ _ _ a b 
         | op == "|>" ->
-            let inner = taskExprInnerType a
+            let inner = taskExprInnerType (ecSolvedTypes ctx) a
                 ctx' = ctx { ecPipeInnerType = if null inner then Nothing else Just inner }
             in exprToRustString ctx' b ++ "(" ++ exprToRustString ctx a ++ ")"
         | op == "<|" -> exprToRustString ctx a ++ "(" ++ exprToRustString ctx b ++ ")"
@@ -764,11 +765,14 @@ exprToRustInner ctx e = case e of
 -- | Given a Task-typed expression (like Db_query(…)), return the Rust type
 -- string of the SkyTask's inner success type A (i.e.  SkyTask<A> → A).
 -- Returns "" when the type can't be determined.
-taskExprInnerType :: Can.Expr -> String
-taskExprInnerType (Ann.At _ expr) = case expr of
-    Can.Call (Ann.At _ (Can.VarKernel modName fnName)) _args
+-- Takes a solvedTypes map so Task.succeed(arg) can look up arg's type.
+taskExprInnerType :: Map.Map String Can.Type -> Can.Expr -> String
+taskExprInnerType solved (Ann.At _ expr) = case expr of
+    Can.Call (Ann.At _ (Can.VarKernel modName fnName)) args
         | "Task" `isSuffixOf` modName || modName == "Task" -> case fnName of
-            "succeed"  -> "String"
+            "succeed"  -> case args of
+                [arg] -> solveArgType solved arg
+                _ -> "String"
             "fail"     -> "()"
             "map"      -> "String"
             "andThen"  -> "String"
@@ -812,6 +816,28 @@ taskExprInnerType (Ann.At _ expr) = case expr of
             qualified = modPrefix ++ name
         in ""  -- solvedTypes lookup would go here (complex, defer for now)
     _ -> ""
+  where
+    -- | Try to extract the Rust type string from a single argument expression
+    -- by looking up its type in solvedTypes.
+    solveArgType :: Map.Map String Can.Type -> Can.Expr -> String
+    solveArgType solvedMap arg = case arg of
+        Ann.At _ (Can.Int _)   -> "i64"
+        Ann.At _ (Can.Float _) -> "f64"
+        Ann.At _ (Can.Str _)   -> "String"
+        Ann.At _ (Can.Chr _)   -> "char"
+        Ann.At _ (Can.VarLocal name) ->
+            case Map.lookup name solvedMap of
+                Just ty -> typeToRustString ty
+                Nothing -> "String"
+        Ann.At _ (Can.Binop op _ _ _ a _) ->
+            case op of
+                "+" -> "i64"; "-" -> "i64"; "*" -> "i64"
+                "/" -> "i64"; "%" -> "i64"
+                "++" -> "String"
+                "&&" -> "bool"; "||" -> "bool"
+                "==" -> "bool"; "/=" -> "bool"
+                _ -> solveArgType solvedMap a
+        _ -> "String"
 
 binopToRust :: String -> String
 binopToRust op = case op of
@@ -895,17 +921,38 @@ patternToMatchString _recMap (Ann.At _ pat) = case pat of
         in case Map.lookup key _recMap of
             Just structName -> structName ++ " { " ++ intercalate ", " fields ++ " }"
             Nothing -> "{ " ++ intercalate ", " fields ++ " }"
-    Can.PCons a b -> 
-        let headPat = patternToMatchString _recMap a
-            restPat = patternToMatchString _recMap b
-            restPart = if restPat == "_" then ".." else restPat ++ " @ .."
-        in "[" ++ headPat ++ ", " ++ restPart ++ "]"
+    Can.PCons a b ->
+        let (heads, tailPat) = flattenCons _recMap a b
+            allParts = heads ++ if tailPat == "_" then [".."] else [tailPat ++ " @ .."]
+        in "[" ++ intercalate ", " allParts ++ "]"
     Can.PList items -> "[" ++ intercalate ", " (map (patternToMatchString _recMap) items) ++ "]"
     Can.PAlias pat _ -> patternToMatchString _recMap pat
     _ -> "_"
 
 ctorArgToPattern :: Can.PatternCtorArg -> String
 ctorArgToPattern (Can.PatternCtorArg _ _ pat) = patternToMatchString Map.empty pat
+
+-- | Flatten nested cons patterns into a head-list and tail.
+-- e.g. x::y::rest → (["x", "y"], "rest")  → emits [x, y, rest @ ..]
+flattenCons :: Map.Map String String -> Can.Pattern -> Can.Pattern -> ([String], String)
+flattenCons recMap headPat tailPat =
+    let h = patternToMatchString recMap headPat
+    in case tailPat of
+        Ann.At _ (Can.PCons h2 t2) ->
+            let (moreHeads, tail) = flattenCons recMap h2 t2
+            in (h : moreHeads, tail)
+        Ann.At _ (Can.PList items) ->
+            let itemStrs = map (patternToMatchString recMap) items
+            in (h : itemStrs, "_")
+        Ann.At _ (Can.PVar v) ->
+            ([h], v)
+        Ann.At _ Can.PAnything ->
+            ([h], "_")
+        _ ->
+            ([h], "_")
+    where
+    unwrapPat (Ann.At _ (Can.PAlias inner _)) = inner
+    unwrapPat p = p
 
 buildProgram :: [Can.Module] -> Map.Map String Can.Type -> RustBuilder
 buildProgram mods solvedTypes = 
@@ -1334,10 +1381,18 @@ dbSection uk dbPath dbDriver b =
     , "}"
     , "// Alias: Db.open is the same as Db.connect"
     , "pub fn db_open(_unit: ()) -> SkyTask<Db> { db_connect(_unit) }"
-    , "pub fn db_open_with_path(_path: String) -> SkyTask<Db> { db_connect(()) }"
+    , "pub fn db_open_with_path(path: String) -> SkyTask<Db> {"
+    , "    Box::pin(async move { match DbPool::connect(&path).await {"
+    , "        Ok(pool) => ok_res(pool),"
+    , "        Err(e) => SkyResult::Err(sky_err(&e)),"
+    , "    } })"
+    , "}"
     , ""
     , "pub fn db_get_field(field: String, row: HashMap<String, String>) -> String {"
     , "    row.get(&field).cloned().unwrap_or_default()"
+    , "}"
+    , "pub fn db_get_field_or_null(field: String, row: HashMap<String, String>) -> SkyMaybe<String> {"
+    , "    match row.get(&field) { Some(v) => SkyMaybe::Just(v.clone()), None => SkyMaybe::Nothing }"
     , "}"
     ]
 
@@ -1532,8 +1587,10 @@ timeSection = [ "// --- Time ---"
     , "    Box::pin(ready(ok_res(ms)))"
     , "}"
     , "pub fn time_sleep(ms: i64) -> SkyTask<()> {"
-    , "    std::thread::sleep(std::time::Duration::from_millis(ms as u64));"
-    , "    Box::pin(ready(ok_res(())))"
+    , "    Box::pin(async move {"
+    , "        tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;"
+    , "        ok_res(())"
+    , "    })"
     , "}"
     , "pub fn time_unix_millis(_: ()) -> SkyTask<i64> { time_now(()) }"
     , "pub fn time_time_string(ms: i64) -> String {"
