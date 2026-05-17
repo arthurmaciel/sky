@@ -1,9 +1,67 @@
 # Known limitations
 
-Deliberate scope decisions for the v0.9 line. Each entry explains
-the gap, the justification for deferring, and the workaround.
-Limits below are **won't-fix in v0.9**; the roadmap treats them as
-v0.10+ / v1.0 concerns.
+Active limitations users still hit (as of v0.13). Each entry explains
+the gap, why, and the workaround. Anything v0.13 closed has been
+removed from this file — see `docs/compiler/journey.md` and the
+repo `CLAUDE.md`'s "v0.13 State" / "Recently Fixed" sections for
+the fix log.
+
+**Closed by v0.13**:
+
+- Anonymous-record struct emission (E) replaces the pre-v0.13
+  `sanitiseTypedDeep` cover-up. `synthAnonRecordName` now registers
+  shapes and `generateAnonRecordDecls` emits real
+  `type Anon_R_<hash> = struct { ... }` decls.
+- Typed lambda OUTPUT at user-defined HOF call sites
+  (D-Lambda-Lowerer + D1). User-defined
+  `do : Result e a -> (a -> Result e b) -> ...` now emits with
+  typed `func(T1) rt.SkyResult[E, V]` HOF param signatures.
+- Whole-program Sky DCE (F + F3). Stripe-skyshop benchmark:
+  main.go 14 k → 4 k lines (−71 %); `stripe_bindings.go` 326 k
+  → 58 k lines (−82 %); FFI type-alias bloat 80,847 → 29.
+- LSP 100 % (G). Hover + goto-def for every USED symbol class;
+  17 cabal-fenced tests.
+- Unicode-aware codegen identifier matching.
+- Reflect-adapter arg narrowing in the FFI runtime (closes a real
+  panic class surfaced by `verify-cli.sh` on `examples/07-todo-cli`).
+
+**v0.13.x deferred** (known scope for the next release):
+
+- Install-time Go-binding generation: `sky install` skips Stripe-
+  scale Go-source emission; `sky build` generates only the
+  reachable subset on demand. Stripe cold install ~8 min → ~10 sec;
+  `.skycache/go/` per-pkg ~12 MB → <100 KB.
+- **Skyshop image-URL console-error trace** — under
+  `scripts/verify-all-web.sh` with `SKY_VERIFY_SKYSHOP=1`, the
+  13-skyshop verifier reports 5 console 404s for URLs of the
+  shape `/[data:image/jpeg;base64,…]`. The shape only appears in
+  the verifier environment (Playwright with `recordVideo`
+  context), not in standalone curl / Playwright probes. Zero
+  server panics. Likely a Sky.Live SSE patch-state restoration
+  rendering a stale productImages list with literal brackets;
+  needs a targeted reproducer + trace. Not a typed-codegen
+  contract violation (no `map[string]any` direct casts; whole-
+  sweep `Coerce` audit clean — see CLAUDE.md "Cross-cutting
+  fixes shipped in v0.13"). Skyshop excluded from default sweep
+  via `SKY_VERIFY_SKYSHOP=0`.
+- **Fully-typed tuple instantiation across boundaries.** v0.13
+  emits every tuple — function return AND variable type AND list
+  element type AND dict value type — as `rt.SkyTuple2 = T2[any,
+  any]`. This is a *consistency* choice, not a contract gap: the
+  function-signature renderer (`safeReturnType`),
+  variable-type renderer (`solvedTypeToGo`), and tuple-literal
+  emitter (`Can.Tuple` arm) all agree. The earlier "typed T2[A,
+  B]" attempt was rolled back because `[]rt.T2[int, int]` and
+  `[]rt.SkyTuple2` are distinct Go nominal types — any divergence
+  between signature and literal needed a coercion at every
+  list/dict-of-tuples site, which scaled badly. The hot perf
+  path was addressed instead: `tupleFirst` / `tupleSecond` now
+  type-assert before falling back to reflect (~40 % faster per
+  dispatch — see `runtime-go/rt/tuple_dispatch_test.go`). A
+  proper "typed update return" would need threading the function's
+  HM return type into `Can.Tuple` emission so the literal matches;
+  scoped to v0.14+ once the lambda-output type plumbing reaches
+  feature parity (see "Typed Codegen TODO" in `CLAUDE.md`).
 
 ---
 

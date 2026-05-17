@@ -143,19 +143,105 @@ Coverage of `Std.Ui` primitives: ~95%+. Layout (`row/column/wrappedRow/grid/para
 
 Reliability floor (enforced runtime invariants): goroutine panics (Cmd.perform, key reader) wrap through `safeGo` which restores the TTY; SIGTERM/SIGHUP/SIGQUIT/SIGINT-from-outside trapped and routed to `tuiTeardown`; main-goroutine panics fall through `tuiTeardown + DECSTR soft reset`; ANSI injection via user text sanitised at every paint path; hard cap at `tuiMaxContentH = 50 000` rows; `TERM=dumb` / non-TTY stdin refused before raw mode.
 
-### What's left
+### What's left from v0.12
 
 The remaining 10 `List_mapAny` residuals across the 24-example sweep are all FFI-opaque element types (Firestore returns, JSON-decoded list types) or unresolved HM types that genuinely can't be typed at codegen without rewriting Sky's curry semantics. These any-routed call sites use SkyCall reflect dispatch — functionally correct, ~100 ns/element slower than typed routes. The strict `coerceInner` panic guarantees no wrong-typed route can fire silently.
 
+## v0.13 (perf/v0.13 — typed-codegen completion, 2026-05-15)
+
+v0.13 is where the typed-codegen contract is genuinely complete: **all USED Sky code emits fully-typed Go**. The pre-v0.13 codepath had several layers of "type-then-cover-up" — defensive `any` fallbacks (`sanitiseTypedDeep` rewrote `Anon_R_*` → `any`; HOF return slots stayed blanket `any` even when the HM said otherwise; FFI registry kept dead Stripe bindings alive). v0.13 closes each gap at root, removes the cover-ups, pins regressions.
+
+Seven coordinated workstreams (A→G) plus cross-cutting runtime fixes. Commits, most recent first:
+
+| Commit | Workstream |
+|---|---|
+| `584d2e1` | verifier scripts (Playwright + CLI) + reflect-adapter arg narrowing |
+| `80dcdf9` | G goto-def coverage + F3 orphan FfiT pruning + Unicode-aware ident matching |
+| `316accc` | regression tests — AnonLambda + AnonRecord specs |
+| `5d2d8df` | E anon-record struct decls — remove sanitiseTypedDeep cover-up |
+| `041bd70` | B0 prefer Sky-defined union over runtimeTypedMap any-alias |
+| `5b59e68` | G LSP 100% — every USED symbol class |
+| `ecf024f` | F whole-program Sky DCE — per-dep decl pruning |
+| `3757025` | D-Lambda-Lowerer + D1 typed HOF return |
+| `22ee8e0` | A2/A1/B1/C — pre-register + superset records + container TVars + parametric ADTs |
+
+### A — forward-ref pre-registration + open-record alias match
+
+`Sky.Type.Constrain.Expression.constrainDecls` now pre-registers UNANNOTATED `Can.Def` declarations via an outer `CLet` header so forward refs (e.g. `main` calling a `view` declared later) bind to the real `defType` var rather than the throwaway `CLocal` fresh var the solver used to mint. Annotated `Can.TypedDef` stays sequential — pre-registering with `Forall []` would collapse same-letter type-vars across distinct same-module call sites, defeating polymorphism.
+
+`Sky.Generate.Go.Record.lookupRecordAlias` + `Sky.Build.Compile.matchAliasByFieldSet` do superset match on open records (the row-polymorphic `T.TRecord fields (Just rowExt)` HM emits for any function reading a record subset). Smallest-superset wins; tied sizes → Nothing → falls back to `any`.
+
+### B — parametric-ADT erased name + Sky-union priority
+
+`safeReturnType`'s `T.TType home name _` arm renders parametric Sky ADTs (`Html msg`, `Element msg`, `Attribute msg`) as their erased Go-name. Sky-defined unions in `_cg_unionNames` take precedence over `runtimeTypedMap`'s any-aliased entry, so `Attribute` from `Std.Ui` / `Std.Html.Attributes` emits as the typed Sky struct instead of `rt.SkyAttribute = any`.
+
+### C — container TVars propagate
+
+`tvarsInEmitted` recurses into `List`/`Dict`/`Set`. Paired with a PARAM-only filter in `splitInferredSigWithReg`'s `usedTypeParams` — Go's generic inference only works from input positions; a TVar appearing only in the return collapses to `[]any` rather than emit a `cannot infer T2` Go-build error.
+
+### D — typed lambda at user-defined HOF call sites
+
+Pre-v0.13 only kernel-HOF call sites routed Sky lambdas through `curryLambdaPatTyped`. User-defined HOFs like `do : ... -> (a -> Result Error b) -> ...` dropped the lambda into `exprToGo + coerceArg` and emitted `func(any) any`. D fixes this:
+
+- `coerceCallArgsAt`'s no-CSI fallback routes literal `Can.Lambda` args at func-typed param slots through `curryLambdaPatTyped`.
+- `exprToGoTyped`'s `Can.Call` branch delegates `Can.VarTopLevel`-headed calls to `exprToGo`.
+- `renderHofParamTy` concrete-return arm: blanket `"any"` → `go _to` (D1).
+- `safeReturnTypeWith`'s `renderFuncTy` arm mirrors D1 — must sync, otherwise `_cg_funcParamTypes` reports `func(any) any` while `renderHofParamTy` emits the typed shape and the routing silently no-ops.
+- `typedLambdaParam`'s `Can.PVar` arm emits `_ = paramName` after the rebind so Go's "declared and not used" doesn't fire when a Sky lambda binds an unused param.
+
+Pinned regression (`CompileSpec.hs:139` Result-typed lambda params) now passes WITH typed shape. `HofTypedMsgSpec` updated: `cb func(string) Msg` (was `cb func(string) any`).
+
+### E — anon-record struct decls; cover-up removed
+
+`synthAnonRecordName` registers each produced shape in `globalAnonRecords :: IORef (Map String (Map String T.FieldType))`. New `generateAnonRecordDecls` emits one `type Anon_R_<hash> = struct { ... }` per shape (fields sorted by `_fieldIndex`). The pre-v0.13 `sanitiseTypedDeep` `Anon_R_*` → `any` rewrite is now a no-op pass-through.
+
+### F + F3 — whole-program Sky DCE + orphan FfiT pruning
+
+New `Sky.Build.Dce.Ref` ADT (TopRef | FfiRef | CtorRef); `reachableWholeProgram entryMod allMods extraRoots` walks the call graph across module boundaries. `globalReachableProgram :: IORef (Set Dce.Ref)` populated after canon-fixpoint; `generateDeclsForDep` filters via `keepName`. `globalDceDisabled` honours `SKY_DCE=0`.
+
+F3: orphan FfiT type-alias pruning. The pre-v0.13 `dceFfiWrappers` stripped wrapper bodies but left 80,847 `type FfiT_*` aliases orphan on Stripe-scale. New `pruneOrphanFfiTypes` (Unicode-aware identifier scan, O(blob + Σ name_lengths) via pre-computed identifier `Set` — naive `isInfixOf` per alias was 7 TB of char comparisons that hung the build).
+
+Stripe-skyshop benchmark:
+
+| Metric | Pre-v0.13 | Post-v0.13 |
+|---|---|---|
+| `main.go` lines | 14,398 | **4,178** (−71%) |
+| Total funcs in main.go | 3,518 | **975** (−72%) |
+| Emitted `Stripe_*` user refs | (full) | **0** |
+| `stripe_bindings.go` lines | 326,327 | **58,059** (−82%) |
+| `type FfiT_*` aliases | 80,847 | **29** |
+| Wrapper funcs | 124,312 | **57** |
+
+### G — LSP 100% (every USED symbol class)
+
+17 cabal-fenced tests via headless Neovim driver (`scripts/lsp-test-nvim.{lua,sh}` + `test/Sky/Lsp/NvimDriverSpec.hs`). Hover + goto-def for: function, type alias, ADT constructor, record-field access, kernel call, lambda parameter, let-binding, case-pattern binder. `Sky.Lsp.Index.exprLocals` `caseArm` scope fix: case-pattern binders' scope spans `pattern ∪ body` (was body-only).
+
+### Unicode-aware Go ident matching
+
+Four ASCII-only `isIdentStart` / `isIdentChar` sites replaced with shared `isGoIdentStart` / `isGoIdentChar` (`Char.isLetter` / `Char.isAlphaNum`). Aligns with the parser side (`Sky.Parse.Variable.isIdentChar`). ASCII walks would silently slice Unicode-letter identifiers.
+
+### Reflect-adapter arg narrowing
+
+Real runtime panic surfaced by `verify-cli.sh` on `examples/07-todo-cli`: `reflect.Call using map[string]interface{} as type map[string]string` in `makeFuncAdapter`. Fix: narrow each arg to `skyFn.In(i)` via `narrowReflectValue` BEFORE `reflect.Call`.
+
+### Runtime verification
+
+`scripts/verify-all-web.sh` + `scripts/verify-live-app.mjs` (Playwright headless Chromium for 10 Sky.Live / Sky.Http.Server apps) + `scripts/verify-cli.sh` (CLI / Sky.Cli / Sky.Tui). 25 / 26 examples PASS end-to-end (Fyne `11-fyne-stopwatch` skipped — needs X11).
+
+### Deferred to v0.13.x
+
+- **Install-time Go binding generation**: `sky install` still emits the full `.skycache/go/<pkg>_bindings.go`. With Sky DCE now identifying the reachable set pre-lowering, install could skip Go-source generation entirely and let `sky build` generate only the reachable subset on demand. Stripe install would drop from ~8 min to ~10 sec, disk usage from ~12 MB to <100 KB per FFI pkg. Right architecture; deferred for risk-isolation.
+
 ## What's next
 
-No compiler rewrite is planned. The Haskell implementation is the long-term home. Future work is:
+No compiler rewrite is planned. The Haskell implementation is the long-term home. Future work (post-v0.13):
 
+- v0.13.x — install-time Go-binding generation (see above).
 - Port runtime kernels (`Dict_*`, `List_*`, `Html_*`) to Go generics so the typed surface no longer narrows through reflect at the boundary.
 - Record-struct emission for `update` / `view` tuples in TEA apps.
 - Formal exhaustiveness for nested patterns.
 - Smarter cache invalidation (source-hash that covers transitive annotations).
 - Selective import emission (currently emits all 18 runtime subpackages).
-- Rewrite Sky's curry semantics so partial-application closures emit typed `func(A) B` Go signatures — would unlock the remaining 10 typed routes. Estimated multi-week scope.
+- Rewrite Sky's curry semantics so partial-application closures emit typed `func(A) B` Go signatures — would unlock the remaining 10 typed routes.
 
 See [versions.md](versions.md) for the feature-level changelog.

@@ -147,6 +147,37 @@ func adaptFuncValueWithCapture(skyFn reflect.Value, targetTy reflect.Type, captu
 				allArgs = allArgs[:nin]
 			}
 		}
+		// v0.13 follow-up: narrow each arg to skyFn's declared param
+		// type BEFORE reflect.Call. Typed-codegen routes things like
+		// `formatTodo : map[string]string -> ...` through
+		// `rt.Coerce[func(any) any](formatTodo)`. When that adapter
+		// fires from `Sky_Core_List_map_` over a list whose runtime
+		// shape is `[]map[string]any` (e.g. DB rows), the arg passed
+		// here is the raw `map[string]any` — reflect.Call panics with
+		// `Call using map[string]interface{} as type map[string]string`.
+		// `narrowReflectValue` already handles the dict/list element
+		// recursion, so a one-line pre-call narrow makes the adapter
+		// boundary-typed.
+		callMax := nin
+		if skyTy.IsVariadic() {
+			if callMax > 0 {
+				callMax--
+			}
+		}
+		for i := 0; i < callMax && i < len(allArgs); i++ {
+			wantTy := skyTy.In(i)
+			av := allArgs[i]
+			if !av.IsValid() {
+				continue
+			}
+			if av.Type().AssignableTo(wantTy) {
+				continue
+			}
+			narrowed := narrowReflectValue(av, wantTy)
+			if narrowed.IsValid() && narrowed.Type().AssignableTo(wantTy) {
+				allArgs[i] = narrowed
+			}
+		}
 		out := skyFn.Call(allArgs)
 		nOut := targetTy.NumOut()
 		results := make([]reflect.Value, nOut)
@@ -1539,6 +1570,33 @@ func AsListAny(v any) []any {
 	return out
 }
 
+// AsMapAny widens a typed map[string]T to map[string]any. Sky's
+// runtime stores Dict values as map[string]any, but typed-codegen
+// can narrow downstream callees to map[string]string / map[string]int.
+// When such a typed map then flows BACK to a polymorphic-value Dict
+// helper (e.g. Lib_Auth_claimString[T1 any](k, claims map[string]T1)
+// being called with claims widened to map[string]any), the direct
+// type assertion `any(m).(map[string]any)` panics because the two
+// generic instantiations are distinct nominal types. AsMapAny rebuilds
+// the map by value-erasing each entry, mirroring AsListAny.
+func AsMapAny(v any) map[string]any {
+	if already, ok := v.(map[string]any); ok {
+		return already
+	}
+	if v == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Map || rv.Type().Key().Kind() != reflect.String {
+		return nil
+	}
+	out := make(map[string]any, rv.Len())
+	for _, k := range rv.MapKeys() {
+		out[k.String()] = rv.MapIndex(k).Interface()
+	}
+	return out
+}
+
 // AsListT coerces a Sky-side any value to a typed Go slice. Sky
 // lists are []any at runtime; this walks the list and type-asserts
 // each element to T with a nil-safe fallback. Called by typed
@@ -1588,11 +1646,24 @@ func AsListT[T any](v any) []T {
 	if rv.Kind() == reflect.Slice {
 		var zero T
 		targetTy := reflect.TypeOf(zero)
-		if targetTy == nil {
-			return nil
-		}
 		n := rv.Len()
 		out := make([]T, n)
+		if targetTy == nil {
+			// T is `any` (or another interface type whose dynamic type
+			// is unknown at runtime).  Widen each element to `any` via
+			// reflect — every value is assignable to `any`, so this is
+			// always safe.  Pre-fix bug: this branch returned `nil`,
+			// silently dropping every attribute when Std.Ui's typed
+			// `[]Std_Ui_Attribute` (a `[]SkyADT` alias) was coerced to
+			// `[]rt.SkyAttribute` (`= []any`).  The button/event attrs
+			// vanished from rendered HTML — observable as Sky.Live
+			// `sky-click=` markers missing entirely on Std.Ui apps
+			// (mini-notion, skyforum) post-v0.13.0.
+			for i := 0; i < n; i++ {
+				out[i] = rv.Index(i).Interface().(T)
+			}
+			return out
+		}
 		for i := 0; i < n; i++ {
 			elem := rv.Index(i)
 			if elem.Type().AssignableTo(targetTy) {
@@ -2468,7 +2539,11 @@ func List_range(lo any, hi any) any {
 
 func String_join(sep any, list any) any {
 	s := fmt.Sprintf("%v", sep)
-	items := list.([]any)
+	// AsList — not a hard `.([]any)` assertion: v0.13 typed codegen
+	// can hand this kernel a typed `[]string` (e.g. from a typed
+	// `List.map renderProp props` in Sky-source Std.Css). A hard
+	// assertion panics on those; AsList boxes any Go slice.
+	items := AsList(list)
 	parts := make([]string, len(items))
 	for i, item := range items { parts[i] = fmt.Sprintf("%v", item) }
 	return strings.Join(parts, s)
@@ -3860,6 +3935,60 @@ func Coerce[T any](v any) T {
 			p.Elem().Set(rv)
 			return p.Interface().(T)
 		}
+		// v0.13.x #158 — map→struct narrowing. Source: `map[string]any`
+		// (the runtime shape of Db.query rows, Firestore snapshots,
+		// JSON-decoded blobs). Target: a record alias
+		// `Foo_R = struct { Field1 T1; Field2 T2; ... }`.
+		// Without this branch, `rt.Coerce[Foo_R](dbRow)` panics with
+		// `expected Foo_R, got map[string]interface {}` even though
+		// every field is recoverable by name. Build T field-by-field,
+		// applying narrowReflectValue per field so nested container
+		// types (typed maps, typed slices) round-trip too.
+		if rv.Kind() == reflect.Map && targetTy.Kind() == reflect.Struct &&
+			rv.Type().Key().Kind() == reflect.String {
+			out := reflect.New(targetTy).Elem()
+			n := targetTy.NumField()
+			for i := 0; i < n; i++ {
+				fld := targetTy.Field(i)
+				if !fld.IsExported() {
+					continue
+				}
+				// Probe three forms in order: PascalCase exact
+				// ("Foo" / "ID"), lowercase-first ("foo" / "iD",
+				// matching Sky's `capitalise_`-emitted record
+				// fields), and full lowercase ("id", matching FFI
+				// all-caps acronyms + JSON / Db.getField output).
+				mv := rv.MapIndex(reflect.ValueOf(fld.Name))
+				if !mv.IsValid() && len(fld.Name) > 0 {
+					lowered := string(fld.Name[0]|0x20) + fld.Name[1:]
+					mv = rv.MapIndex(reflect.ValueOf(lowered))
+					if !mv.IsValid() {
+						buf := make([]byte, len(fld.Name))
+						for j := 0; j < len(fld.Name); j++ {
+							c := fld.Name[j]
+							if c >= 'A' && c <= 'Z' {
+								c |= 0x20
+							}
+							buf[j] = c
+						}
+						mv = rv.MapIndex(reflect.ValueOf(string(buf)))
+					}
+				}
+				if !mv.IsValid() {
+					continue
+				}
+				inner := mv.Interface()
+				if inner == nil {
+					continue
+				}
+				ev := reflect.ValueOf(inner)
+				narrowed := narrowReflectValue(ev, fld.Type)
+				if narrowed.IsValid() && narrowed.Type().AssignableTo(fld.Type) {
+					out.Field(i).Set(narrowed)
+				}
+			}
+			return out.Interface().(T)
+		}
 	}
 	panic(fmt.Sprintf("rt.Coerce: expected %T, got %T (%v)", zero, v, v))
 }
@@ -4627,7 +4756,7 @@ func Random_float(lo any, hi any) any {
 
 func Random_choice(list any) any {
 	return func() any {
-		items := list.([]any)
+		items := AsList(list)
 		if len(items) == 0 { return Err[any, any](ErrInvalidInput("empty list")) }
 		return Ok[any, any](items[mrand.Intn(len(items))])
 	}
@@ -4635,7 +4764,7 @@ func Random_choice(list any) any {
 
 func Random_shuffle(list any) any {
 	return func() any {
-		items := list.([]any)
+		items := AsList(list)
 		result := make([]any, len(items))
 		copy(result, items)
 		mrand.Shuffle(len(result), func(i, j int) { result[i], result[j] = result[j], result[i] })
@@ -4684,7 +4813,7 @@ func Random_shuffleT[A any](xs []A) SkyTask[any, []A] {
 func Process_run(cmd any, args any) any {
 	return func() any {
 		cmdStr := fmt.Sprintf("%v", cmd)
-		argList := args.([]any)
+		argList := AsList(args)
 		strArgs := make([]string, len(argList))
 		for i, a := range argList { strArgs[i] = fmt.Sprintf("%v", a) }
 		c := exec.Command(cmdStr, strArgs...)
@@ -5596,7 +5725,7 @@ const (
 
 func Server_listen(port any, routes any) any {
 	p := AsInt(port)
-	routeList := routes.([]any)
+	routeList := AsList(routes)
 	mux := http.NewServeMux()
 
 	for _, r := range routeList {

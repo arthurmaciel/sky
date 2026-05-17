@@ -77,6 +77,7 @@ textLight _ =
     Css.hex "64748b"
 
 
+pageBg : () -> Css.Color
 pageBg _ =
     Css.hex "f8fafc"
 
@@ -122,7 +123,7 @@ radiusLg _ =
 
 
 cardShadow _ =
-    Css.shadow 0 1 3 (Css.rgba 0 0 0 0.1)
+    Css.boxShadow (Css.shadow 0 1 3 (Css.rgba 0 0 0 0.1))
 
 
 -- ============================================================
@@ -136,7 +137,7 @@ appStyles _ =
               -- Layout
               , Css.padding (Css.zero ())
               -- Navigation
-              , Css.boxSizing (Css.borderBox ())
+              , Css.boxSizing Css.BorderBox
               ]
               -- Buttons
         , Css.rule
@@ -147,7 +148,7 @@ appStyles _ =
               -- Alerts
               , Css.color (textColor ())
               -- Note cards
-              , Css.lineHeight "1.6"
+              , Css.lineHeight (Css.num 1.6)
               ]
               -- Headings & links
         , Css.rule
@@ -178,43 +179,43 @@ appStyles _ =
               ".nav-inner"
               [ Css.maxWidth (Css.px 800)
               , Css.margin2 (Css.zero ()) (Css.auto ())
-              , Css.display "flex"
-              , Css.justifyContent "space-between"
-              , Css.alignItems "center"
+              , Css.display Css.Flex
+              , Css.justifyContent Css.SpaceBetween
+              , Css.alignItems Css.Center
               ]
         , Css.rule
               ".nav a"
               [ Css.color (Css.hex "fff")
-              , Css.textDecoration "none"
+              , Css.textDecoration Css.NoDecoration
               , Css.marginLeft (sp 4)
               , Css.fontSize (Css.px 14)
               ]
         , Css.rule ".nav a:hover" [Css.opacity 0.8]
         , Css.rule
               ".nav-brand"
-              [ Css.fontWeight "700"
+              [ Css.fontWeight (Css.Weight 700)
               , Css.fontSize (Css.em 1.2)
               , Css.marginLeft (Css.zero ())
               ]
         , Css.rule
               ".btn"
-              [ Css.display "inline-block"
+              [ Css.display Css.InlineBlock
               , Css.padding2 (sp 2) (sp 6)
               , Css.backgroundColor (primaryColor ())
               , Css.color (Css.hex "fff")
               , Css.border (Css.none ())
               , Css.borderRadius (radius ())
-              , Css.cursor "pointer"
+              , Css.cursor Css.Pointer
               , Css.fontSize (Css.px 14)
-              , Css.textDecoration "none"
-              , Css.fontWeight "500"
+              , Css.textDecoration Css.NoDecoration
+              , Css.fontWeight (Css.Weight 500)
               , Css.transitionProp "background" 0.2 "ease"
               ]
         , Css.rule ".btn:hover" [Css.backgroundColor (primaryDark ())]
         , Css.rule
               ".btn-outline"
               [ Css.backgroundColor (Css.transparent ())
-              , Css.border ("2px solid " ++ primaryColor ())
+              , Css.border ("2px solid " ++ Css.colorToString (primaryColor ()))
               , Css.color (primaryColor ())
               ]
         , Css.rule
@@ -231,7 +232,7 @@ appStyles _ =
               "input,textarea"
               [ Css.width (Css.pct 100)
               , Css.padding (sp 3)
-              , Css.border ("1px solid " ++ inputBorder ())
+              , Css.border ("1px solid " ++ Css.colorToString (inputBorder ()))
               , Css.borderRadius (radius ())
               , Css.fontSize (Css.px 14)
               , Css.marginTop (Css.px 4)
@@ -241,7 +242,7 @@ appStyles _ =
               "input:focus,textarea:focus"
               [ Css.outline (Css.none ())
               , Css.borderColor (primaryColor ())
-              , Css.boxShadow ("0 0 0 3px " ++ Css.rgba 37 99 235 0.1)
+              , Css.boxShadow ("0 0 0 3px " ++ Css.colorToString (Css.rgba 37 99 235 0.1))
               ]
         , Css.rule
               "textarea"
@@ -249,13 +250,13 @@ appStyles _ =
               , Css.fontFamily (Css.monoFont ())
               , Css.fontSize (Css.px 13)
               , Css.property "resize" "vertical"
-              , Css.lineHeight "1.5"
+              , Css.lineHeight (Css.num 1.5)
               ]
         , Css.rule ".form-group" [Css.marginBottom (sp 5)]
         , Css.rule
               "label"
-              [ Css.display "block"
-              , Css.fontWeight "600"
+              [ Css.display Css.Block
+              , Css.fontWeight (Css.Weight 600)
               , Css.fontSize (Css.px 14)
               , Css.color (Css.hex "374151")
               , Css.marginBottom (Css.px 2)
@@ -267,7 +268,7 @@ appStyles _ =
               , Css.padding2 (sp 3) (sp 4)
               , Css.borderRadius (radius ())
               , Css.marginBottom (sp 5)
-              , Css.border ("1px solid " ++ errorBorder ())
+              , Css.border ("1px solid " ++ Css.colorToString (errorBorder ()))
               ]
         , Css.rule
               ".success"
@@ -276,11 +277,11 @@ appStyles _ =
               , Css.padding2 (sp 3) (sp 4)
               , Css.borderRadius (radius ())
               , Css.marginBottom (sp 5)
-              , Css.border ("1px solid " ++ successBorder ())
+              , Css.border ("1px solid " ++ Css.colorToString (successBorder ()))
               ]
         , Css.rule
               ".note-card"
-              [ Css.borderLeft ("4px solid " ++ primaryColor ())
+              [ Css.borderLeft ("4px solid " ++ Css.colorToString (primaryColor ()))
               , Css.transition "transform .2s,box-shadow .2s"
               ]
         , Css.rule
@@ -290,9 +291,9 @@ appStyles _ =
               ]
         , Css.rule
               ".note-card a"
-              [ Css.color (Css.inherit ())
-              , Css.textDecoration "none"
-              , Css.display "block"
+              [ Css.color (Css.colorRaw "inherit")
+              , Css.textDecoration Css.NoDecoration
+              , Css.display Css.Block
               ]
         , Css.rule
               ".note-meta"
@@ -305,7 +306,7 @@ appStyles _ =
               [ Css.color (textLight ())
               , Css.fontSize (Css.px 14)
               , Css.marginTop (sp 2)
-              , Css.overflow "hidden"
+              , Css.overflow Css.Hidden
               , Css.property "display" "-webkit-box"
               , Css.property "-webkit-line-clamp" "2"
               , Css.property "-webkit-box-orient" "vertical"
@@ -315,13 +316,17 @@ appStyles _ =
         , Css.rule "a" [Css.color (primaryColor ())]
         , Css.rule
               ".hero"
-              [ Css.textAlign "center", Css.padding2 (Css.px 80) (sp 5) ]
+              [ Css.textAlign Css.AlignCenter, Css.padding2 (Css.px 80) (sp 5) ]
         , Css.rule
               ".hero h1"
               [ Css.fontSize (Css.em 3.0)
               , Css.marginBottom (sp 3)
-              , Css.background
-                    (Css.linearGradient "135deg" [ navBg (), Css.hex "7c3aed" ])
+              , Css.backgroundImage
+                    (Css.linearGradient "135deg"
+                        [ Css.colorToString (navBg ())
+                        , Css.colorToString (Css.hex "7c3aed")
+                        ]
+                    )
               , Css.property "-webkit-background-clip" "text"
               , Css.property "-webkit-text-fill-color" "transparent"
               , Css.property "background-clip" "text"
@@ -334,14 +339,14 @@ appStyles _ =
               ]
         , Css.rule
               ".features"
-              [ Css.display "grid"
+              [ Css.display Css.Grid
               , Css.gridTemplateColumns (Css.repeat 3 (Css.fr 1))
               , Css.gap (sp 6)
               , Css.marginTop (sp 12)
               ]
         , Css.rule
               ".feature"
-              [ Css.textAlign "center"
+              [ Css.textAlign Css.AlignCenter
               , Css.padding (sp 6)
               , Css.backgroundColor (cardBg ())
               , Css.borderRadius (radiusLg ())
@@ -358,28 +363,28 @@ appStyles _ =
               [ Css.color (textLight ()), Css.fontSize (Css.px 14) ]
         , Css.rule
               ".split-view"
-              [ Css.display "grid"
+              [ Css.display Css.Grid
               , Css.gridTemplateColumns "1fr 1fr"
               , Css.gap (sp 5)
               , Css.marginTop (Css.px 4)
               ]
         , Css.rule
               ".preview-pane"
-              [ Css.border ("1px solid " ++ borderColor ())
+              [ Css.border ("1px solid " ++ Css.colorToString (borderColor ()))
               , Css.borderRadius (radius ())
               , Css.padding (sp 4)
               , Css.minHeight (Css.px 300)
-              , Css.overflowY "auto"
+              , Css.overflowY Css.OverflowAuto
               , Css.backgroundColor (Css.hex "fafafa")
               ]
         , Css.rule
               ".preview-label"
               [ Css.fontSize (Css.px 12)
               , Css.textTransform "uppercase"
-              , Css.letterSpacing ".05em"
+              , Css.letterSpacing (Css.em 0.05)
               , Css.color (textMuted ())
               , Css.marginBottom (Css.px 4)
-              , Css.fontWeight "600"
+              , Css.fontWeight (Css.Weight 600)
               ]
         , Css.rule
               ".md h1,.md h2,.md h3"
@@ -389,7 +394,7 @@ appStyles _ =
         , Css.rule
               ".md h1"
               [ Css.fontSize (Css.em 1.5)
-              , Css.borderBottom ("1px solid " ++ borderColor ())
+              , Css.borderBottom ("1px solid " ++ Css.colorToString (borderColor ()))
               , Css.paddingBottom (sp 2)
               ]
         , Css.rule ".md h2" [Css.fontSize (Css.em 1.3)]
@@ -409,14 +414,14 @@ appStyles _ =
               , Css.color (Css.hex "e2e8f0")
               , Css.padding (sp 4)
               , Css.borderRadius (radius ())
-              , Css.overflowX "auto"
+              , Css.overflowX Css.OverflowAuto
               , Css.marginBottom (sp 4)
               ]
         , Css.rule
               ".md pre code"
               [ Css.backgroundColor (Css.transparent ())
               , Css.padding (Css.zero ())
-              , Css.color (Css.inherit ())
+              , Css.color (Css.colorRaw "inherit")
               ]
         , Css.rule
               ".md ul,.md ol"
@@ -424,11 +429,11 @@ appStyles _ =
         , Css.rule ".md li" [Css.marginBottom (Css.px 4)]
         , Css.rule
               ".md blockquote"
-              [ Css.borderLeft ("4px solid " ++ primaryColor ())
+              [ Css.borderLeft ("4px solid " ++ Css.colorToString (primaryColor ()))
               , Css.paddingLeft (sp 4)
               , Css.color (textLight ())
               , Css.marginBottom (sp 3)
-              , Css.fontStyle "italic"
+              , Css.fontStyle Css.Italic
               ]
         , Css.rule
               ".md img"
@@ -437,7 +442,7 @@ appStyles _ =
         , Css.rule
               ".md hr"
               [ Css.border (Css.none ())
-              , Css.borderTop ("1px solid " ++ borderColor ())
+              , Css.borderTop ("1px solid " ++ Css.colorToString (borderColor ()))
               , Css.margin2 (sp 6) (Css.zero ())
               ]
         , Css.rule
@@ -448,13 +453,13 @@ appStyles _ =
               ]
         , Css.rule
               ".md th,.md td"
-              [ Css.border ("1px solid " ++ borderColor ())
+              [ Css.border ("1px solid " ++ Css.colorToString (borderColor ()))
               , Css.padding2 (sp 2) (sp 3)
-              , Css.textAlign "left"
+              , Css.textAlign Css.AlignLeft
               ]
         , Css.rule
               ".md th"
-              [ Css.backgroundColor (pageBg ()), Css.fontWeight "600" ]
+              [ Css.backgroundColor (pageBg ()), Css.fontWeight (Css.Weight 600) ]
         , Css.rule
               ".auth-card"
               [ Css.maxWidth (Css.px 420)
@@ -463,21 +468,21 @@ appStyles _ =
         , Css.rule
               ".auth-footer"
               [ Css.marginTop (sp 5)
-              , Css.textAlign "center"
+              , Css.textAlign Css.AlignCenter
               , Css.fontSize (Css.px 14)
               , Css.color (textMuted ())
               ]
         , Css.rule ".auth-footer a" [Css.margin2 (Css.zero ()) (Css.px 4)]
         , Css.rule
               ".header-row"
-              [ Css.display "flex"
-              , Css.justifyContent "space-between"
-              , Css.alignItems "center"
+              [ Css.display Css.Flex
+              , Css.justifyContent Css.SpaceBetween
+              , Css.alignItems Css.Center
               , Css.marginBottom (sp 6)
               ]
         , Css.rule
               ".empty-state"
-              [ Css.textAlign "center"
+              [ Css.textAlign Css.AlignCenter
               , Css.padding2 (sp 12) (sp 5)
               , Css.color (textMuted ())
               ]
@@ -502,9 +507,9 @@ fullWidthBlock _ =
         s =
             Css.styles
                 [ Css.width (Css.pct 100)
-                , Css.textAlign "center"
+                , Css.textAlign Css.AlignCenter
                 , Css.marginTop (sp 5)
-                , Css.display "block"
+                , Css.display Css.Block
                 ]
     in
         Attr.style s
@@ -514,23 +519,24 @@ fullWidthBlock _ =
 -- Layout
 -- ============================================================
 layout title navEl content =
-    doctype ()
-        ++ render
-               (htmlNode
-                   [Attr.lang "en"]
-                   [ headNode
-                         []
-                         [ meta [Attr.charset "UTF-8"]
-                         , meta
-                               [ Attr.name "viewport"
-                               , Attr.content
-                                     "width=device-width,initial-scale=1.0"
-                               ]
-                         , titleNode (title ++ " - SkyNotes")
-                         , styleNode [] (appStyles ())
-                         ]
-                   , body [] [ navEl, div [Attr.class "container"] [content] ]
-                   ])
+    render
+        (doctype
+            [ htmlNode
+                  [Attr.lang "en"]
+                  [ headNode
+                        []
+                        [ meta [Attr.charset "UTF-8"]
+                        , meta
+                              [ Attr.name "viewport"
+                              , Attr.content
+                                    "width=device-width,initial-scale=1.0"
+                              ]
+                        , titleNode (title ++ " - SkyNotes")
+                        , styleNode [] (appStyles ())
+                        ]
+                  , body [] [ navEl, div [Attr.class "container"] [content] ]
+                  ]
+            ])
 
 
 -- ============================================================
@@ -659,7 +665,7 @@ signInPage errorMsg =
                             [ Attr.type_ "email"
                             , Attr.name "email"
                             , Attr.placeholder "you@example.com"
-                            , Attr.required ()
+                            , Attr.required True
                             ])
                   , formGroup
                         "Password"
@@ -667,7 +673,7 @@ signInPage errorMsg =
                             [ Attr.type_ "password"
                             , Attr.name "password"
                             , Attr.placeholder "Your password"
-                            , Attr.required ()
+                            , Attr.required True
                             ])
                   , button
                         [ Attr.type_ "submit", Attr.class "btn", fullWidth () ]
@@ -700,7 +706,7 @@ signUpPage errorMsg =
                             [ Attr.type_ "email"
                             , Attr.name "email"
                             , Attr.placeholder "you@example.com"
-                            , Attr.required ()
+                            , Attr.required True
                             ])
                   , formGroup
                         "Password"
@@ -709,7 +715,7 @@ signUpPage errorMsg =
                             , Attr.name "password"
                             , Attr.placeholder "Min 8 characters"
                             , Attr.minlength 8
-                            , Attr.required ()
+                            , Attr.required True
                             ])
                   , formGroup
                         "Confirm Password"
@@ -717,7 +723,7 @@ signUpPage errorMsg =
                             [ Attr.type_ "password"
                             , Attr.name "confirm_password"
                             , Attr.placeholder "Repeat your password"
-                            , Attr.required ()
+                            , Attr.required True
                             ])
                   , button
                         [ Attr.type_ "submit", Attr.class "btn", fullWidth () ]
@@ -780,7 +786,7 @@ forgotPasswordPage errorMsg =
                             [ Attr.type_ "email"
                             , Attr.name "email"
                             , Attr.placeholder "you@example.com"
-                            , Attr.required ()
+                            , Attr.required True
                             ])
                   , button
                         [ Attr.type_ "submit", Attr.class "btn", fullWidth () ]
@@ -957,7 +963,7 @@ noteViewPage email note =
                                   [ Attr.method "POST"
                                   , Attr.action ("/notes/delete?id=" ++ noteId)
                                   , Attr.style
-                                        (Css.styles [Css.display "inline"])
+                                        (Css.styles [Css.display Css.Inline])
                                   , Events.onSubmit
                                         "return confirm('Delete this note?')"
                                   ]
@@ -972,22 +978,24 @@ noteViewPage email note =
                       [Attr.style
                           (Css.styles
                               [ Css.border (Css.none ())
-                              , Css.borderTop ("1px solid " ++ borderColor ())
+                              , Css.borderTop ("1px solid " ++ Css.colorToString (borderColor ()))
                               , Css.margin2 (sp 5) (Css.zero ())
                               ])]
                 , textarea
                       [ Attr.id "raw-md"
-                      , Attr.style (Css.styles [Css.display "none"])
+                      , Attr.style (Css.styles [Css.display Css.DisplayNone])
                       ]
                       [text content]
                 , div [ Attr.id "rendered", Attr.class "md" ] []
                 , script
                       [Attr.src
                           "https://cdn.jsdelivr.net/npm/marked/marked.min.js"]
-                      ""
+                      []
                 , script
                       []
-                      "window.addEventListener('DOMContentLoaded',function(){document.getElementById('rendered').innerHTML=marked.parse(document.getElementById('raw-md').value);});"
+                      [raw
+                          "window.addEventListener('DOMContentLoaded',function(){document.getElementById('rendered').innerHTML=marked.parse(document.getElementById('raw-md').value);});"
+                      ]
                 ])
 
 
@@ -1025,7 +1033,7 @@ noteFormPage email noteTitle content noteId isEdit =
                                 , Attr.name "title"
                                 , Attr.value noteTitle
                                 , Attr.placeholder "Note title"
-                                , Attr.required ()
+                                , Attr.required True
                                 ])
                       , div
                             [Attr.class "form-group"]
@@ -1038,7 +1046,7 @@ noteFormPage email noteTitle content noteId isEdit =
                                             [ Attr.id "editor"
                                             , Attr.name "content"
                                             , Attr.placeholder placeholderText
-                                            , Attr.required ()
+                                            , Attr.required True
                                             ]
                                             [text content]]
                                   , div
@@ -1073,10 +1081,12 @@ noteFormPage email noteTitle content noteId isEdit =
                 , script
                       [Attr.src
                           "https://cdn.jsdelivr.net/npm/marked/marked.min.js"]
-                      ""
+                      []
                 , script
                       []
-                      "window.addEventListener('DOMContentLoaded',function(){var e=document.getElementById('editor'),p=document.getElementById('preview');function u(){p.innerHTML=marked.parse(e.value)}e.addEventListener('input',u);u();});"
+                      [raw
+                          "window.addEventListener('DOMContentLoaded',function(){var e=document.getElementById('editor'),p=document.getElementById('preview');function u(){p.innerHTML=marked.parse(e.value)}e.addEventListener('input',u);u();});"
+                      ]
                 ])
 
 

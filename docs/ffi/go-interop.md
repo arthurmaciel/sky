@@ -1,5 +1,11 @@
 # Go interop
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 Sky imports any Go package and uses it with full type safety.
 
 > **See also:** [boundary-philosophy.md](boundary-philosophy.md) — why every FFI call returns `Result Error T`, when to reach for FFI vs Sky's stdlib, and the Result-vs-Task distinction.

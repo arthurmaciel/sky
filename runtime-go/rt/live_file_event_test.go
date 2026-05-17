@@ -1,11 +1,17 @@
 package rt
 
-// Wire-level pin for Event_onFile / Event_onImage. The renderer must
-// emit `data-sky-ev-sky-file="<MsgName>"` (NOT the legacy
+// Wire-level pin for the file / image upload events. The renderer
+// must emit `data-sky-ev-sky-file="<MsgName>"` (NOT the legacy
 // `sky-file="..."`) so the embedded JS file-driver picks it up via
 // the data-attribute convention. The leading `sky-` on the eventPair
 // name is the marker that triggers the data-attribute branch in
-// renderVNode (see live.go ~line 781).
+// renderVNode.
+//
+// v0.13: the `onFile` / `onImage` constructors themselves now live in
+// the Sky-source Std.Html.Events module; this test pins the *renderer*
+// half of the contract (the still-in-Go renderVNode path), so it
+// builds the eventPair directly — `eventPair{name:"sky-file", …}` is
+// exactly the shape the Sky-side constructor produces over the FFI.
 
 import (
 	"strings"
@@ -18,10 +24,7 @@ func TestEvent_onFile_RendersDataAttribute(t *testing.T) {
 	// give the test func that exact shape so the test pins the rendered
 	// attribute value end-to-end.
 	avatarSelected := Msg_AvatarSelected
-	ev := Event_onFile(avatarSelected).(eventPair)
-	if ev.name != "sky-file" {
-		t.Errorf("Event_onFile name = %q, want %q", ev.name, "sky-file")
-	}
+	ev := eventPair{name: "sky-file", msg: avatarSelected}
 
 	tree := velement("input", []any{ev}, nil)
 	assignSkyIDs(&tree, "r")
@@ -45,10 +48,7 @@ func Msg_AvatarUploaded(s any) any { _ = s; return nil }
 
 func TestEvent_onImage_RendersDataAttribute(t *testing.T) {
 	avatarUploaded := Msg_AvatarUploaded
-	ev := Event_onImage(avatarUploaded).(eventPair)
-	if ev.name != "sky-image" {
-		t.Errorf("Event_onImage name = %q, want %q", ev.name, "sky-image")
-	}
+	ev := eventPair{name: "sky-image", msg: avatarUploaded}
 
 	tree := velement("input", []any{ev}, nil)
 	assignSkyIDs(&tree, "r")

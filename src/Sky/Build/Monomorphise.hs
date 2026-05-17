@@ -43,6 +43,7 @@ module Sky.Build.Monomorphise
     , specialiseFuncDecl
     ) where
 
+import qualified Data.Char as Char
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.List as List
@@ -473,11 +474,13 @@ substTypeParamsInString σ = goSubst
                 Nothing          -> word ++ goSubst after
         | otherwise = c : goSubst cs
 
-    isIdentStart c = (c >= 'A' && c <= 'Z')
-                  || (c >= 'a' && c <= 'z')
-                  || c == '_'
-    isIdentChar c = isIdentStart c
-                 || (c >= '0' && c <= '9')
+    -- Unicode-aware Go identifier predicates so a Sky source name
+    -- with non-ASCII letters (allowed by Go's spec — see
+    -- `Sky.Parse.Variable.isIdentChar` for the parser side) is
+    -- treated as one token here too. ASCII-only walks would slice
+    -- the identifier and apply σ-substitution to the ASCII prefix.
+    isIdentStart c = Char.isLetter c || c == '_'
+    isIdentChar c  = Char.isAlphaNum c || c == '_'
 
 
 -- | v0.13 Phase A4: specialise a generic `GoFuncDecl` per a captured

@@ -832,46 +832,98 @@ readSolvedTypes env =
 
 
 variableToType :: T.Variable -> IO T.Type
-variableToType var = do
-    desc <- UF.get var
-    case T._content desc of
-        T.FlexVar (Just name) -> return (T.TVar name)
-        T.FlexVar Nothing -> return (T.TVar "_")
-        T.FlexSuper T.Number _ -> return (T.TType ModuleName.basics "Int" [])
-        T.FlexSuper _ _ -> return (T.TVar "_super")
-        T.RigidVar name -> return (T.TVar name)
-        T.RigidSuper _ name -> return (T.TVar name)
-        T.Structure flat -> flatTypeToType flat
-        T.Alias home name _ realVar -> do
-            inner <- variableToType realVar
-            return (T.TAlias home name [] (T.Filled inner))
-        T.Error -> return (T.TVar "_error")
+variableToType = variableToTypeSeen []
+
+
+-- | Convert a UF variable to T.Type, defending against cycles in
+-- the union-find graph. When `unify` merges a FlexVar with a
+-- Structure that transitively contains the same FlexVar (a missed
+-- occurs check), the UF graph develops a self-loop. Without this
+-- guard, recursive descent through App1/Fun1/Tuple1 args loops
+-- forever and OOMs the host — the symptom is heap-exhaustion in
+-- the v0.13 dep-fixpoint round-1 solve when mutually-recursive
+-- ADT types (Element/Attribute) leak through cross-module
+-- externals.
+--
+-- Cycle detection uses representative equivalence (`UF.equivalent`)
+-- along the depth-first path. When we re-encounter a var on the
+-- current path, return a `TVar "_cycle"` sentinel — downstream
+-- consumers (codegen, generaliseToAnnotation) treat this as an
+-- opaque any-typed slot and emit safe fall-back routing.
+variableToTypeSeen :: [T.Variable] -> T.Variable -> IO T.Type
+variableToTypeSeen seen var = do
+    cyc <- anyEquivSeen seen var
+    if cyc
+        then return (T.TVar "_cycle")
+        else do
+            desc <- UF.get var
+            case T._content desc of
+                T.FlexVar (Just name) -> return (T.TVar name)
+                T.FlexVar Nothing -> return (T.TVar "_")
+                T.FlexSuper T.Number _ -> return (T.TType ModuleName.basics "Int" [])
+                T.FlexSuper _ _ -> return (T.TVar "_super")
+                T.RigidVar name -> return (T.TVar name)
+                T.RigidSuper _ name -> return (T.TVar name)
+                T.Structure flat -> flatTypeToTypeSeen (var : seen) flat
+                T.Alias home name _ realVar -> do
+                    inner <- variableToTypeSeen (var : seen) realVar
+                    return (T.TAlias home name [] (T.Filled inner))
+                T.Error -> return (T.TVar "_error")
+
+
+anyEquivSeen :: [T.Variable] -> T.Variable -> IO Bool
+anyEquivSeen [] _ = return False
+anyEquivSeen (v : vs) target = do
+    eq <- UF.equivalent v target
+    if eq then return True else anyEquivSeen vs target
 
 
 flatTypeToType :: T.FlatType -> IO T.Type
-flatTypeToType flat = case flat of
+flatTypeToType = flatTypeToTypeSeen []
+
+
+flatTypeToTypeSeen :: [T.Variable] -> T.FlatType -> IO T.Type
+flatTypeToTypeSeen seen flat = case flat of
     T.App1 home name argVars -> do
-        argTypes <- mapM variableToType argVars
+        argTypes <- mapM (variableToTypeSeen seen) argVars
         return (T.TType home name argTypes)
     T.Fun1 argVar resVar -> do
-        argType <- variableToType argVar
-        resType <- variableToType resVar
+        argType <- variableToTypeSeen seen argVar
+        resType <- variableToTypeSeen seen resVar
         return (T.TLambda argType resType)
     T.EmptyRecord1 ->
         return (T.TRecord Map.empty Nothing)
     T.Record1 fieldVars extVar -> do
         fieldTypes <- Map.traverseWithKey (\_ fVar -> do
-            ty <- variableToType fVar
+            ty <- variableToTypeSeen seen fVar
             return (T.FieldType 0 ty)) fieldVars
-        return (T.TRecord fieldTypes Nothing)
+        -- Preserve the row-extension variable so an OPEN record reads
+        -- back open (not CLOSED) across the module boundary — without
+        -- it, a `Can.Access`-derived open record param closes on the
+        -- export boundary and rejects callers with extra fields.
+        --
+        -- NON-RECURSIVE on purpose: we look at the extension var's
+        -- content one level deep ONLY. Recursing into a `Record1`
+        -- extension (to flatten merged rows) risks an infinite loop
+        -- when the union-find graph is cyclic — a record extension
+        -- can transitively point back at itself after a chain of
+        -- merges. A `Record1` (or any non-flex) extension is read
+        -- back as CLOSED; that loses a little precision for the rare
+        -- merged-extension case but can never hang. Only a still-free
+        -- named `FlexVar` extension keeps the record OPEN.
+        extDesc <- UF.get extVar
+        case T._content extDesc of
+            T.FlexVar (Just n)      -> return (T.TRecord fieldTypes (Just n))
+            T.FlexSuper _ (Just n)  -> return (T.TRecord fieldTypes (Just n))
+            _                       -> return (T.TRecord fieldTypes Nothing)
     T.Unit1 ->
         return T.TUnit
     T.Tuple1 aVar bVar mcVar -> do
-        aType <- variableToType aVar
-        bType <- variableToType bVar
+        aType <- variableToTypeSeen seen aVar
+        bType <- variableToTypeSeen seen bVar
         moreType <- case mcVar of
             Nothing -> return []
-            Just cVar -> (:[]) <$> variableToType cVar
+            Just cVar -> (:[]) <$> variableToTypeSeen seen cVar
         return (T.TTuple aType bType moreType)
 
 

@@ -1,5 +1,11 @@
 # Std.Db overview
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 **One database API, two backends.** `Std.Db` is a thin, parameter-safe wrapper over `database/sql` that works identically against SQLite and PostgreSQL. Pick the driver in `sky.toml`; never touch it again in your code.
 
 ```elm

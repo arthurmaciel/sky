@@ -1,5 +1,11 @@
 # `sky.toml` — project manifest reference
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`compiler/journey.md`](compiler/journey.md) for the changelog.
+
+
 Every Sky project has a `sky.toml` at its root. It declares
 metadata, build settings, dependencies, and runtime defaults.
 Created automatically by `sky init`; hand-edited as the project

@@ -19,7 +19,9 @@ import qualified Sky.Type.ExhaustivenessSpec
 import qualified Sky.Type.AnyWildcardSpec
 import qualified Sky.Type.TupleLambdaSpec
 import qualified Sky.Type.UiOnSubmitTypedRecordSpec
+import qualified Sky.Type.UfCycleGuardSpec
 import qualified Sky.Type.RecordFieldExactnessSpec
+import qualified Sky.Build.UiFillCascadeSpec
 import qualified Sky.Format.FormatSpec
 import qualified Sky.Build.GoKeywordCollisionSpec
 import qualified Sky.Build.NestedPatternSpec
@@ -33,6 +35,8 @@ import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
 import qualified Sky.Build.RecordCtorEmptyListSpec
 import qualified Sky.Build.HofTypedMsgSpec
+import qualified Sky.Build.AnonLambdaSpec
+import qualified Sky.Build.AnonRecordSpec
 import qualified Sky.Build.Issue52Spec
 import qualified Sky.Build.ValidatorSpec
 import qualified Sky.Build.GoBuildRefinerSpec
@@ -56,6 +60,7 @@ import qualified Sky.Lsp.DiagnosticsSpec
 import qualified Sky.Lsp.HoverTypesSpec
 import qualified Sky.Lsp.CompletionSpec
 import qualified Sky.Lsp.ScaleSpec
+import qualified Sky.Lsp.NvimDriverSpec
 import qualified Sky.Build.EmbeddedRuntimeSpec
 import qualified Sky.Build.EmbeddedInspectorSpec
 import qualified Sky.Cli.ExitCodesSpec
@@ -136,6 +141,20 @@ main = hspec $ do
     -- wrapper is `(a -> Attribute b)`.
     describe "Sky.Type.UiOnSubmitTypedRecord"
                                          Sky.Type.UiOnSubmitTypedRecordSpec.spec
+    -- v0.13.1 UF cycle guard: importing Std.Ui.Events (or any
+    -- Sky-source stdlib module that brings the recursive Element /
+    -- Attribute ADT through cross-module externals) used to OOM
+    -- the compiler during the dep-fixpoint round-1 solve. Pre-fix
+    -- a missing occurs check in Unify.actuallyUnify spliced a
+    -- self-referential cycle into the UF graph; variableToType
+    -- then recursed forever through cyclic App1 args.
+    describe "Sky.Type.UfCycleGuard"     Sky.Type.UfCycleGuardSpec.spec
+    -- v0.13.3 Std.Ui Fill cross-axis cascade fix: widthCss/heightCss
+    -- used to emit `flex-grow:1; align-self:stretch;` for any Fill
+    -- regardless of parent flex-direction. In a column parent every
+    -- child marked `width: fill` then competed for vertical space,
+    -- breaking the typical header/main/footer layout.
+    describe "Sky.Build.UiFillCascade"   Sky.Build.UiFillCascadeSpec.spec
     -- Closed-record exactness + cross-module externals registration:
     --   1. unifyRecords (Sky.Type.Unify) used to silently merge field-
     --      mismatched closed records under a fresh extension. Now
@@ -211,6 +230,15 @@ main = hspec $ do
     -- the inner-function return as `any`, breaking helpers with typed
     -- (String -> Msg) callbacks. Now routes via typeStrWithAliasesReg.
     describe "Sky.Build.HofTypedMsg"        Sky.Build.HofTypedMsgSpec.spec
+    -- v0.13 D-Lambda-Lowerer regression: Sky lambdas at user-
+    -- defined HOF slots lower to typed `func(X) Y` shapes via
+    -- curryLambdaPatTyped (was only kernel HOFs pre-v0.13).
+    describe "Sky.Build.AnonLambda"         Sky.Build.AnonLambdaSpec.spec
+    -- v0.13 E regression: synthAnonRecordName registers shapes
+    -- into globalAnonRecords; generateAnonRecordDecls emits
+    -- `type Anon_R_<hash> = struct{...}` so the typed Go name
+    -- resolves. Removed the pre-E `sanitiseTypedDeep` cover-up.
+    describe "Sky.Build.AnonRecord"         Sky.Build.AnonRecordSpec.spec
     -- Issue #52 regression: (1) List.drop with any-typed Int arg
     -- needs rt.AsInt coercion at the typed-kernel boundary, and
     -- (2) record update `{ m | n = X }` must HM-check the new value
@@ -284,6 +312,11 @@ main = hspec $ do
     describe "Sky.Lsp.Completion"         Sky.Lsp.CompletionSpec.spec
     -- v0.12 gap 6: pin the externals-scope cap with a real benchmark.
     describe "Sky.Lsp.Scale"              Sky.Lsp.ScaleSpec.spec
+    -- v0.13 G: end-to-end LSP coverage via headless Neovim driver.
+    -- Exercises every USED symbol class: function, type alias, ADT
+    -- ctor, record-field access, kernel call, lambda param, let-
+    -- binding, case-pattern binder. Pending if nvim not installed.
+    describe "Sky.Lsp.NvimDriver"         Sky.Lsp.NvimDriverSpec.spec
     -- Audit P3-3: embedded runtime must track on-disk tree.
     describe "Sky.Build.EmbeddedRuntime"  Sky.Build.EmbeddedRuntimeSpec.spec
     -- Embedded sky-ffi-inspect: single-binary release shape.

@@ -1,5 +1,11 @@
 # Language syntax
 
+> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
+> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 26 examples. See
+> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+
+
 Sky's surface syntax is Elm-compatible: most expressions that parse in Elm also parse in Sky. (See [NOTICE.md](../../NOTICE.md) for prior-art attribution; programming-language syntax is not itself copyrightable.)
 
 ## A module

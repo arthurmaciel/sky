@@ -213,7 +213,9 @@ test-suite sky-tests
       Sky.Type.AnyWildcardSpec
       Sky.Type.TupleLambdaSpec
       Sky.Type.UiOnSubmitTypedRecordSpec
+      Sky.Type.UfCycleGuardSpec
       Sky.Type.RecordFieldExactnessSpec
+      Sky.Build.UiFillCascadeSpec
       Sky.Type.InstanceCaptureSpec
       Sky.Format.FormatSpec
       Sky.Build.GoKeywordCollisionSpec
@@ -228,6 +230,8 @@ test-suite sky-tests
       Sky.Build.RecordFieldOrderSpec
       Sky.Build.RecordCtorEmptyListSpec
       Sky.Build.HofTypedMsgSpec
+      Sky.Build.AnonLambdaSpec
+      Sky.Build.AnonRecordSpec
       Sky.Build.Issue52Spec
       Sky.Build.ValidatorSpec
       Sky.Build.GoBuildRefinerSpec
@@ -251,6 +255,7 @@ test-suite sky-tests
     , Sky.Lsp.CapabilitiesSpec
     , Sky.Lsp.CompletionSpec
     , Sky.Lsp.ScaleSpec
+    , Sky.Lsp.NvimDriverSpec
     , Sky.Build.EmbeddedRuntimeSpec
     , Sky.Build.EmbeddedInspectorSpec
     , Sky.Cli.ExitCodesSpec

@@ -43,7 +43,17 @@ firebaseAuthScript _ =
                 ""
                 (Task.run (System.getenv "GOOGLE_CLOUD_PROJECT"))
     in
-        """<script>
+        if apiKey == "" then
+            -- Skip Firebase SDK injection when the API key is missing.
+            -- Browsers would otherwise fire `Firebase: Error
+            -- (auth/invalid-api-key)` plus 4xx console errors from the
+            -- Firebase auth-metadata probes. Sign-in buttons no-op
+            -- harmlessly until the user sets FIREBASE_API_KEY +
+            -- AUTH_DOMAIN + GOOGLE_CLOUD_PROJECT.
+            "<script>function skySignIn(){alert('Sign-in is disabled: set FIREBASE_API_KEY, AUTH_DOMAIN, GOOGLE_CLOUD_PROJECT.');} function skySignOut(){}</script>"
+
+        else
+            """<script>
 var _fbReady=false,_fbUser=null;
 function _fbLoad(url,cb){var s=document.createElement('script');s.src=url;s.onload=cb;document.head.appendChild(s);}
 _fbLoad('https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js',function(){

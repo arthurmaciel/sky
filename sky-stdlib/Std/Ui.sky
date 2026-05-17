@@ -1070,12 +1070,11 @@ ariaForDescription d =
         _                  -> Nothing
 
 
--- Sky.Std.Html.Attributes doesn't expose a generic
--- `Attr.attribute key value` kernel today, so dispatch by key name
--- for the common HTML attrs Std.Ui needs. Unknown keys fall back
--- to encoding the attr inline-style as `data-<key>="<v>"` via the
--- typed Attr.attribute style proxy. (Future work — promote this to
--- a kernel call once `rt.Attr_attribute` lands.)
+-- Dispatch by key name for the common HTML attrs Std.Ui needs, so
+-- each maps to its dedicated typed Attr.* builder. Any other key
+-- (sky-key, aria-*, custom data-*, …) falls through to the generic
+-- `Attr.attribute key value`, which Std.Html.Attributes exposes as
+-- Sky source.
 kernelAttr : String -> String -> any
 kernelAttr key value =
     if key == "href" then Attr.href value
@@ -1190,9 +1189,9 @@ collectStyle parentCtx myCtx attr acc =
         NoAttribute ->
             acc
         AttrWidth lng ->
-            acc ++ " " ++ widthCss lng
+            acc ++ " " ++ widthCssIn parentCtx lng
         AttrHeight lng ->
-            acc ++ " " ++ heightCss lng
+            acc ++ " " ++ heightCssIn parentCtx lng
         AttrPadding t r b l ->
             acc ++ " padding: " ++ String.fromInt t ++ "px " ++ String.fromInt r ++ "px " ++ String.fromInt b ++ "px " ++ String.fromInt l ++ "px;"
         AttrSpacing n ->
@@ -1315,28 +1314,78 @@ colorCss c =
 -- `len` would shadow Go's built-in `len` in the emitted code (Sky's
 -- name-mangler renames the parameter but doesn't rewrite uses inside
 -- the function body), so we use `lng` as the param name throughout.
-widthCss : Length -> String
-widthCss lng =
+--
+-- Fill is parent-direction-aware. CSS flexbox interprets
+-- `flex-grow: 1` along the parent's main axis and `align-self:
+-- stretch` along the cross axis — applying both unconditionally
+-- (the pre-fix behaviour) caused `Ui.width Ui.fill` on every child
+-- of a column parent to fight for vertical space, collapsing
+-- header/main/footer into 1/3 viewport each instead of growing
+-- only the main region. Same class of bug for `Ui.height Ui.fill`
+-- inside a row.
+--
+-- The mapping (rendered by `widthCssIn parentCtx` /
+-- `heightCssIn parentCtx`):
+--   * Column parent (`AsColumn` / `AsTextColumn`): width = cross,
+--     so `width fill` = `align-self: stretch; width: 100%`;
+--     height = main, so `height fill` = `flex-grow: 1`.
+--   * Row parent (`AsRow`): the inverse.
+--   * El / Paragraph: no flex on parent — `fill` becomes plain
+--     `width:100%` / `height:100%`.
+widthCssIn : LayoutContext -> Length -> String
+widthCssIn parentCtx lng =
     case lng of
         Px n        -> "width: " ++ String.fromInt n ++ "px;"
         Content     -> "width: max-content;"
-        Fill _      -> "flex-grow: 1; align-self: stretch;"
-        Min n inner -> widthCss inner ++ " min-width: " ++ String.fromInt n ++ "px;"
-        Max n inner -> widthCss inner ++ " max-width: " ++ String.fromInt n ++ "px;"
+        Fill _      -> widthFillFor parentCtx
+        Min n inner -> widthCssIn parentCtx inner ++ " min-width: " ++ String.fromInt n ++ "px;"
+        Max n inner -> widthCssIn parentCtx inner ++ " max-width: " ++ String.fromInt n ++ "px;"
         Vh n        -> "width: " ++ String.fromInt n ++ "vh;"
         Vw n        -> "width: " ++ String.fromInt n ++ "vw;"
 
 
-heightCss : Length -> String
-heightCss lng =
+widthFillFor : LayoutContext -> String
+widthFillFor parentCtx =
+    case parentCtx of
+        AsRow        -> "flex-grow: 1; min-width: 0;"
+        AsColumn     -> "align-self: stretch; width: 100%;"
+        AsEl         -> "width: 100%;"
+        AsParagraph  -> "width: 100%;"
+        AsTextColumn -> "align-self: stretch; width: 100%;"
+
+
+heightCssIn : LayoutContext -> Length -> String
+heightCssIn parentCtx lng =
     case lng of
         Px n        -> "height: " ++ String.fromInt n ++ "px;"
         Content     -> "height: max-content;"
-        Fill _      -> "flex-grow: 1; align-self: stretch;"
-        Min n inner -> heightCss inner ++ " min-height: " ++ String.fromInt n ++ "px;"
-        Max n inner -> heightCss inner ++ " max-height: " ++ String.fromInt n ++ "px;"
+        Fill _      -> heightFillFor parentCtx
+        Min n inner -> heightCssIn parentCtx inner ++ " min-height: " ++ String.fromInt n ++ "px;"
+        Max n inner -> heightCssIn parentCtx inner ++ " max-height: " ++ String.fromInt n ++ "px;"
         Vh n        -> "height: " ++ String.fromInt n ++ "vh;"
         Vw n        -> "height: " ++ String.fromInt n ++ "vw;"
+
+
+heightFillFor : LayoutContext -> String
+heightFillFor parentCtx =
+    case parentCtx of
+        AsRow        -> "align-self: stretch; height: 100%;"
+        AsColumn     -> "flex-grow: 1; min-height: 0;"
+        AsEl         -> "height: 100%;"
+        AsParagraph  -> "height: 100%;"
+        AsTextColumn -> "height: 100%;"
+
+
+-- Back-compat shims so any caller / fixture importing the old names
+-- keeps compiling.  Both default to AsColumn (matches the
+-- pre-fix CSS for `width fill` in column parents — the most common
+-- case in real apps).
+widthCss : Length -> String
+widthCss lng = widthCssIn AsColumn lng
+
+
+heightCss : Length -> String
+heightCss lng = heightCssIn AsColumn lng
 
 
 alignXCss : LayoutContext -> HAlign -> String
