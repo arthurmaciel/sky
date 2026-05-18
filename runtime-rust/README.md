@@ -344,6 +344,175 @@ fn main() {
 - `Success: Hello, Sky! Task is the effect boundary.`
 - `Fail error: Unexpected: intentional`
 
+## FFI Design Possibilities
+
+The Rust target ships kernel-triggered external crates today (tokio, sqlx,
+serde_json, sha2 — gated by `UsedKernels` flags in `Builder.hs`). There is
+**no user-FFI path yet**: `sky.toml` has `[go.dependencies]` but no
+`[rust.dependencies]`, and no Rust analogue of `tools/sky-ffi-inspect/`
+exists. This section evaluates three architecturally distinct ways to ship
+user-declared Rust crate bindings against the same criteria Sky's Go FFI
+already meets: **security**, **soundness**, **efficiency**.
+
+The Go FFI pipeline is the reference baseline (`sky add github.com/some/pkg`
+→ inspector extracts types → compiler emits typed `.skyi` + wrapped Go
+bindings → DCE prunes unused → user code calls them as if they were Sky
+kernels; every wrapped call returns `Result Error T`; panics → `Err`;
+nil-receivers → `Err`). Each option below differs in **what fills the
+inspector role** and **what trust model wraps each symbol**.
+
+### Option A — `rustdoc-JSON` inspector + generated wrapper crate
+
+Direct mirror of the Go pipeline. Spawns `cargo doc --output-format=json`
+per declared dep, parses [rustdoc-types](https://docs.rs/rustdoc-types)
+to extract fn sigs / struct fields / impl methods / generics, emits a
+`<crate>_bindings.rs` wrapper module exposing `sky_<crate>_<fn>`-shaped
+functions returning `SkyResult<SkyError, T>`. Every wrapper wraps the
+real call in `std::panic::catch_unwind`; opaque types stored as `Arc<T>`.
+
+- **Security**: ambient — same as the host process. A hostile dep can
+  call `unsafe`, read files, leak addresses. `catch_unwind` is the
+  only enforced floor. No capability boundary.
+- **Soundness**: strong on type-shape (rustdoc-JSON is rustc's own
+  output); weak on lifetimes (cloned-by-default, same as Go's
+  pointer handling). Drift is detected loud at next `sky install`.
+- **Efficiency**: per-call `catch_unwind` (~3 ns) + 1 SkyResult
+  alloc; binary size ≈ 50-200 bytes per wrapped symbol after Sky's
+  DCE prunes unreached refs. `cargo doc` is heavy cold (30-60 s on
+  Stripe-scale); a `.skycache/rustdoc/<crate>-<version>.json` cache
+  brings warm regen to ~1 s.
+- **Risks**: rustdoc-JSON is nightly-only today (RFC 2963; stable
+  targeted late 2026). Mitigation: pin a nightly rustc for the
+  inspector, or fall back to `syn`-based source parsing.
+- **Fit**: shippable in the 1-year window (~6-8 weeks for inspector
+  + ~3 weeks for wrapper-crate emitter + ~2 weeks for sky.toml
+  schema + lockfile). Works with arbitrary crates. Maps 1:1 to the
+  Go target's mental model and reuses every Sky-side FFI piece
+  already written (`Dce.reachableWholeProgram`,
+  `Env.ffiKernelTypeRef`, `loadAndSeedFfiRegistry`).
+
+### Option B — Procedural macros + traits, zero-cost dispatch
+
+Define `SkyExportable` / `SkyImportable` traits in a published
+`sky-ffi` crate. Crate authors (or Sky-community wrapper-crate
+maintainers) apply `#[sky_export(module = "image", effect = "task")]`
+to functions they want exposed. The proc macro emits both a typed Rust
+shim AND a `target/sky-meta/<crate>.json` manifest. Sky's compiler reads
+the manifest instead of running rustdoc.
+
+- **Security**: ambient (same as A) unless paired with a sandbox.
+  Macro can enforce `Result<T, E: Into<SkyError>>` → no implicit
+  error stringification. Capability annotations possible
+  (`reads = ["filesystem"]`).
+- **Soundness**: **strongest of the three**. The conversion code
+  lives in the Rust source where rustc enforces it. No JSON-schema
+  drift, no rustdoc-version skew. Lifetime-aware (macro sees
+  `&self`, `&'a Foo`, `&mut T` directly).
+- **Efficiency**: **zero-cost in the common case**. Shim is
+  `#[inline]`-eligible. No `.into()` chain through generic
+  adapters. Cargo-speed build (no rustdoc invocation).
+  Per-symbol binary cost lower than A.
+- **Risks**: requires upstream cooperation OR Sky-community
+  wrapper crates (`image-sky`, `tokio-sky`, etc.). Niche crates
+  without a `*-sky` wrapper force users back to writing Rust —
+  violates "users never write FFI". Needs the stable `sky-ffi`
+  crate published BEFORE wrappers can target it (~3-month
+  sub-project before viable).
+- **Fit**: not day-1. Right call as a layered v2 for hot kernels
+  (crypto, image, ML) where catch_unwind cost shows up in
+  benchmarks.
+
+### Option C — WASM Component Model + WIT-driven bindings
+
+Use [WIT (WebAssembly Interface Types)](https://component-model.bytecodealliance.org/design/wit.html)
+as the IDL. Each FFI crate compiled to a WASM component via `cargo
+component build`. Sky's compiler reads the `.wit` file to derive
+`.skyi`. On native targets, wasmtime instantiates components and
+Sky-host calls cross the canonical ABI. On the WASM target,
+component composition links wasm-to-wasm at build time (zero VM
+overhead).
+
+- **Security**: **strongest by a wide margin**. Components run in
+  a WASM sandbox; no syscalls except those granted via WASI
+  capabilities. Memory isolation by construction (canonical ABI
+  copies, not pointers). Supply-chain risk minimised; untrusted
+  plugins loadable at runtime with explicit capability lists.
+  Aligns with Sky's broader capability-first design.
+- **Soundness**: WIT is the single source of truth — both Sky and
+  the Rust component read it. Drift is impossible by construction.
+  WIT's type system (records, variants, lists, results, options,
+  **resources**) maps directly onto Sky's HM. Resource types
+  model opaque handles cleanly — better fit for Sky's opaque-type
+  conventions than rustdoc's `pub struct + impl` shape.
+- **Efficiency**: **WASM target zero-cost** (component
+  composition at link time; per-call ~3-5 ns). **Native target
+  real overhead** (wasmtime VM ~5-10 ms startup, ~30-100 ns
+  per-call + canonical-ABI serialise). Acceptable for app code;
+  problematic for hot kernels (mitigation: hot kernels stay
+  native, only user-FFI goes through components).
+- **Risks**: not all Rust crates compile to WASM components
+  (libc, raw sockets outside WASI preview2, platform-specific
+  code excluded). Tooling immaturity (`cargo component`, WIT
+  stabilising through 2026). Component-aware ecosystem is tiny
+  today.
+- **Fit**: best long-term security + WASM story; aligns with
+  stated WASM priority. **Not day-1 viable** — ecosystem + tooling
+  is a year-plus journey on its own.
+
+### Comparison
+
+| Criterion | A (rustdoc) | B (proc-macro) | C (WASM components) |
+|---|---|---|---|
+| Security blast radius | Native process | Native process | **Sandboxed (WASI)** |
+| Memory isolation | No | No | **Yes** |
+| Type-drift detection | Re-derive at install | rustc at macro site | WIT single source |
+| Lifetime/borrow fidelity | Lost (clone) | **Preserved** | N/A (ABI copies) |
+| Per-call cost (native) | catch_unwind (~3 ns) | **Inlined, ~0 ns** | wasmtime (~30-100 ns) |
+| Per-call cost (WASM) | identical to native | identical to native | **wasm call (~5 ns)** |
+| Build-time cost | cargo doc per crate | proc-macro expansion | cargo component per crate |
+| Works with arbitrary crates | **Yes** (modulo nightly) | No (needs wrappers) | Partial (non-WASM excluded) |
+| 1-year shippable | **Yes** (~3 months) | Partial (sky-ffi + wrappers) | No (ecosystem) |
+| Aligns with Go FFI mental model | **Direct mirror** | Different idiom | Different idiom |
+
+### Recommended sequencing
+
+**Ship A as v1 in the 1-year window. Plan C as v2. Hold B for
+performance-critical hot paths only.**
+
+1. A is the only day-1 option meeting "Rust-native FFI mandatory
+   from day 1" + "works with arbitrary crates" + 1-year timeline.
+   Reuses every Sky-side FFI piece already written for Go.
+2. C is the right long-term security model and aligns with the
+   WASM-first stack. Design the WIT-equivalent of `Result Error T`
+   in parallel with shipping A, so when component tooling stabilises
+   the migration path is "wrap each existing native dep in a
+   component" rather than "redesign the FFI surface". The two
+   coexist: native deps through A, sandboxed deps (plugins,
+   untrusted code) through C.
+3. B's zero-cost story is real but its ecosystem story isn't.
+   Reserve it for a small set of Sky-maintained `sky-ffi-<X>`
+   wrappers around perf-critical kernels (crypto, image, ML)
+   where catch_unwind cost shows up in benchmarks. Don't bet
+   the FFI surface on it.
+
+Critical files for the v1 (Option A) implementation:
+
+| Path | Change |
+|---|---|
+| `tools/sky-ffi-inspect-rs/` | NEW — rustdoc-JSON inspector (mirror of `tools/sky-ffi-inspect/main.go` shape) |
+| `src/Sky/Build/FfiGenRust.hs` | NEW — mirror of `FfiGen.hs`; reuses `classifyEffect`, kernel-registry, DCE |
+| `src/Sky/Build/Compile.hs` | Dispatch `loadAndSeedFfiRegistry` to FfiGenRust when `--target rust` |
+| `src/Sky/Generate/Rust/Builder.hs` | Merge user `[rust.dependencies]` into emitted Cargo.toml; skip-emit symbols defined in `<crate>_bindings.rs` |
+| `runtime-rust/src/lib.rs` | DELETE or formalise as single source of truth (currently divergent — see BUGFIX-PLAN.md §A) |
+| `sky.toml` schema | NEW `[rust.dependencies]` table; new `sky-rust.lock` for content-hash pinning |
+
+Verification: smoke test (`sky init` → declare `image = "0.24"` →
+build clean), soundness regression (6 currently-green examples stay
+green; 06-json reaches 12/12), DCE check (Stripe-sized crate using
+3 symbols emits ~3 wrappers), cross-target parity (diff stdout vs
+`--target go`), WASM build (`cargo build --target wasm32-wasi`),
+BUGFIX-PLAN F-section closure + B.1.3/4/5/6/7 + B.1.14/15.
+
 ## Next Steps
 
 ### Known limitations (no fix planned short-term)
