@@ -315,3 +315,314 @@ tree as if they were and may mislead future contributors:
 9. **Wrap `Can.Update`'s emission in `{ … }`** to make it an expression.
 10. **Add a struct-name prefix to `Can.PRecord` patterns** (look up the
     type via `ecSolvedTypes`).
+
+---
+
+## E. Status update — 2026-05-17 (post-Session 21)
+
+Sessions 17–21 closed multiple A/B/C-class items above. Re-audit while
+preparing the next agent to land 06-json runtime-correct.
+
+### What's now FIXED (do NOT re-attempt)
+
+The line numbers reference the original sections above; ✅ means landed
+and verified through `cargo build` on the 6 working examples.
+
+- **A. Dead Haskell files deleted** (Session 17). Only `Builder.hs` in
+  cabal. `Decl/Expr/Kernel/Module/Pattern/Test/Types.hs` removed from
+  the repo.
+- **B.2 — `Log.println` codegen-vs-runtime mismatch (#18)**. Builder
+  routes `println` as a Call only; bare-value references covered by
+  Session-21 `ecZeroArgDefs` plumbing.
+- **B.2 — `Can.VarKernel` with dots (#17)**. Session 17 dot→underscore
+  rewrite landed.
+- **B.3 — `collectVarLocals(Multi)` pattern binding (#23)**. Session 17.
+  Then Session 21 (item 118) reverted the bound-set tracking back out
+  because it over-suppressed multi-use counting in lambda params and
+  destructures — the *correct* spec is "count every reference; let the
+  clone-decision logic factor pattern shadowing later". Currently all
+  references count.
+- **B.3 — `argToRust` dead-code (#24)**. Session 21 (item 120) extracted
+  `argToRustString` as the single source; the old `argToRust` is gone.
+- **B.3 — `Can.Call` clones VarLocal args unconditionally (#25)**.
+  Replaced by `ecCloneVars`-based per-function clone decisions
+  (Session 21 item 117). Now only multi-use vars get `.clone()`.
+- **B.2 — Result type ordering (#10)**. `sky_string_to_int` /
+  `string_to_int` now return `SkyMaybe<i64>` matching Sky's
+  `String.toInt : String -> Maybe Int` (Session 21 item 116).
+- **B.1 — `crypto_sha256` non-cryptographic (#1)**. Real `sha2` crate,
+  feature-gated on `usesCrypto` (Session 17 item 95).
+- **B.1 — LCG reseeds per call (#2)**. Persistent `AtomicU64` seeded
+  once at process start (Session 17 item 94).
+- **B.1 — Main entry drops `SkyTask<()>` (#8)**. Session 18 wrap
+  through `block_on` always emits when `main`'s return is Task.
+- **B.1 — `task_run` exit code (#9)**. Session 17 item 96: entry point
+  matches `block_on` and `eprintln! + exit(1)` on Err.
+- **B.1 — `Can.Update` wrapped in `{ … }` (#11)**. Session 17 item 98.
+- **B.2 — `Can.PRecord` struct-name prefix (#13)**. Session 17 item
+  100 via `ecRecordMap` lookup.
+- **B.4 — `extraKernelSection` gated by use (#29)**. Session 17 items
+  101 + 104: `usesTime/usesRandom/usesFile/usesCrypto` flags.
+- **B.4 — `UsedKernels` ignores Task.sequence/perform/lazy (#30)**.
+  Session 17 item 102. `hasTokio` now True for any of them.
+
+### What's still OPEN (carry forward)
+
+Re-audit of `Builder.hs` and the 06-json build on 2026-05-17 (HEAD =
+`0f02a9d8`) confirms these are STILL live in `cargo build` output or
+in source. Numbers below match the original section labels for easy
+cross-reference; new items get F.* prefixes.
+
+**Soundness / silent-bug class (do these FIRST, regardless of 06-json):**
+
+- **B.1.3 — `random_choice []` returns `""`** (Builder.hs ~1543). Wrap
+  empty-list case as `Err(str_err("random_choice: empty list".into()))`
+  so the Task pipeline surfaces the error.
+- **B.1.4 — `time_sleep` blocks the tokio executor** (~1514). Change
+  `std::thread::sleep` to `tokio::time::sleep(...).await` inside the
+  `Box::pin(async move { ... })` body. Currently stalls every other
+  `Task.parallel` branch.
+- **B.1.5 — `db_open_with_path(_path)` ignores its argument** (~1324).
+  Pass `path` through to `db_connect` instead of delegating to the
+  hardcoded `SKY_DB_URL` reader.
+- **B.1.6 — `row_to_map` NULL vs empty string** (~1262). Track NULL
+  distinctly (return `SkyMaybe::Nothing` per cell, then collapse to
+  `""` only at the consumer if requested). Today `Db.getField`
+  silently treats both as `""`.
+- **B.1.7 — `task_perform` swallows errors** (~1167). Either propagate
+  (`match task.await { Ok(_) => ok_res(()), Err(e) => err_res(e) }`)
+  or document loudly + add a `task_perform_fire_and_forget` variant
+  and route the Sky-side `Task.perform` to whichever matches the
+  upstream Go target's semantics. The latter is what CLAUDE.md
+  ("Cmd.perform" docs) implies, but the Rust runtime drops the Err
+  silently — divergence from Go.
+- **B.1.14 — `Can.PCons` nested pattern crash** (~885). Source like
+  `x :: y :: rest` emits `[x, [y, rest @..] @..]` which is not a valid
+  slice pattern. Need to FLATTEN cons chains during pattern lowering:
+  walk PCons recursively, accumulate head patterns, then emit as
+  `[x, y, rest @ ..]` with one trailing `..`-tail at the end.
+- **B.1.15 — `Can.Chr` emitted as string literal** (~617). `show c`
+  works only because `Can.Chr` carries a `String` payload; emit as
+  `\'x\'` (single-quote literal) and update `Can.PChr` (~875) to
+  match. Symptom today: scrutinee `char` vs pattern `&str` mismatch
+  on any user code that does `case ch of 'a' -> ...`.
+- **B.4.26 — `Can.Update` reorders side effects alphabetically**
+  (~717). `Map.toList updates` sorts by field name; Sky semantics
+  is **source order**. Use the AST's stable field-ordering map (or
+  switch to a `[(FieldName, expr)]` shape upstream) so
+  `{r | b = print "B", a = print "A"}` prints "B" then "A".
+- **B.4.27 — `hasErrorType` only matches `Sky_Core_Error_Error`**
+  (~1800). User-defined `type Error = ...` falls back to
+  `SkyError = String` and loses structure when piped through
+  runtime kernels. Detect a user-defined `type Error` in any
+  module and emit the matching enum + use it as `SkyError`.
+- **B.4.28 — `Can.DestructDef` emits a bogus function** (~425).
+  Top-level destructuring binds names that disappear; multiple
+  destructures collide on the synthetic `_destruct` name. Emit
+  as a `let` binding at module init (e.g. inside a `lazy_static!`
+  or `OnceCell`) or refuse at codegen time with a clear error.
+- **B.4.31 — `runtime-tokio-rustls` is hardcoded for sqlx** (~1822).
+  Accept a `sky.toml [rust] sqlx_runtime = "tokio-native-tls"`
+  override; default unchanged.
+- **A — standalone `runtime-rust/` crate still dead.** Either link
+  it from generated `Cargo.toml` (preferred — single source of
+  truth) or delete it. Current divergent definitions
+  (`SkyResult` struct vs enum) are a maintenance trap.
+
+**`mainSig "formatTodo"` hardcoded example leak — STILL PRESENT:**
+
+- **B.2.22**. Builder.hs:403 still has
+  `mainSig "formatTodo" 1 = Just (["HashMap<String, String>"], "String")`.
+  CLAUDE.md self-admits "last-resort". Replace with a principled
+  fix: when `Db.getField`-typed values flow through a user function,
+  thread the inferred `HashMap<String, String>` row type via
+  `ecSolvedTypes` instead of name-matching. Any user with a function
+  literally named `formatTodo` today silently gets the wrong types.
+
+**`taskExprInnerType` hardcoded wrong inner types — STILL PRESENT:**
+
+- **B.2.20**. Builder.hs:961-1012. Several entries are observably
+  wrong: `Task.map/andThen/onError -> "String"`,
+  `Random.choice -> "String"`, `Time.now -> "i64"` (vs Sky's
+  `Time.now : Task Error Time`). The function exists ONLY to
+  annotate closure params on pipe expressions (`a |> b`); use
+  `ecSolvedTypes` lookup on the *callee binding* of the pipe RHS
+  to derive the real inner type from HM, then fall back to this
+  table only when HM has no entry.
+
+### F. NEW issues surfaced by 2026-05-17 06-json re-build
+
+After Session 21's 43→11→6 reduction, the remaining 6 `cargo build`
+errors cluster into **two real root causes** (not 6). Both need
+architectural decisions, not patches.
+
+#### F.1 — Pipeline decoder type mismatches (4 errors)
+
+`Decode.succeed f |> Pipeline.required ... |> ...` lowering produces
+`Box<dyn FnOnce(T1) -> Box<dyn FnOnce(T2) -> ... -> R>>` chains.
+Two failure modes:
+
+1. **Closure param types default to `String`** when the curried
+   record body has all `SkyValue` (= `String`) fields. Generated:
+   ```rust
+   curry4(|name, email, age, verified| {
+       AnonAgeEmailNameVerified { age, email, name, verified }
+   })
+   ```
+   The closure has no input-type annotation; Rust unifies all four
+   params to `String` because the anon-record fields ARE `String`
+   (via `SkyValue = String`). But the surrounding
+   `json_dec_p_required("verified", json_dec_bool())(...)`
+   expects `Box<dyn FnOnce(bool) -> ...>` for the last argument,
+   not `Box<dyn FnOnce(String) -> ...>`. This is **driven by the
+   `SkyValue = String` fallback** — see F.2 — and unblocks if F.2
+   lands.
+
+2. **Bare fn-item passed to `json_dec_succeed`** (line 481):
+   ```rust
+   json_dec_succeed(main_user_profile)
+   ```
+   `main_user_profile` has type
+   `fn(String, i64, String) -> MainUserProfile`. `json_dec_p_required`
+   downstream expects
+   `Box<dyn FnOnce(String) -> Box<dyn FnOnce(i64) -> Box<dyn FnOnce(String) -> MainUserProfile + Send> + Send> + Send>`.
+   Builder.hs:843-865 (`succeedArity` branch) only curry-wraps
+   `Can.Lambda` and `Can.VarTopLevel` args when `length ps > 1`,
+   but the `VarTopLevel` arm only checks `n > 1` and falls through
+   to bare-name emission. **Concrete fix**: in the `succeedArity =
+   Just n, arg = VarTopLevel _ fnName` branch, emit
+   `curry{n}({calleeName})` instead of `curry{n}({arg-as-lambda})`.
+   The `curry{n}` helpers already accept any `F: FnOnce(...) -> R`
+   so this just works.
+
+#### F.2 — Record type precision loss (2 errors)
+
+Generated:
+```rust
+fn main_profile_from_inputs(name: String, age: String, active: String)
+    -> SkyResult<SkyError, SkyValue> {  // ← should be MainProfile
+    sky_core_result_map3(main_profile, ...)
+}
+```
+Sky source: `profileFromInputs name age active = Result.map3 Profile ...`
+where `Profile : String -> Int -> Bool -> Profile` (auto-record-ctor).
+HM correctly infers the return as `Result Error Profile`, but
+`typeToRustString` (Builder.hs:558-562) returns `"SkyValue"` for the
+`Can.TRecord` because the record-key lookup in `ecRecordMap` misses.
+
+Two layered fixes:
+
+1. **Replace the `SkyValue` fallback** for `Can.TRecord`. When the
+   record-key lookup misses, the codegen should emit a synthetic
+   `AnonXxx` struct (the same mechanism used in
+   `collectAnonRecordTypes` at line 189) and register it in
+   `recordMap` before this lookup runs. The `walkExpr` pass that
+   builds anon records must also see records reached through
+   `Result.map3 Ctor ...` — investigate why `MainProfile`'s field
+   signature isn't in `ecRecordMap` at this call site (likely:
+   `walkExpr` doesn't follow ctor-applied records, only literal
+   `Can.Record` nodes).
+
+2. **Drop the `type SkyValue = String;` alias** (line 1259) entirely
+   once #1 lands. Today it silently masks every "this record type
+   wasn't resolved" bug as "this field is now a `String`", surfacing
+   only at the consumer with `no field 'name' on type 'String'`. The
+   alias has no legitimate use; it's the indistinguishable "I didn't
+   know" sentinel. Replace with an explicit `SkyOpaque` newtype that
+   panics on any field access — at least the symptom names the layer
+   that failed.
+
+The downstream errors at line 523 (`p.clone().name`, `p.clone().age`)
+are pure consequences of F.2 — once `main_profile_from_inputs`
+returns `SkyResult<SkyError, MainProfile>`, `match Ok(p)` gives
+`p: MainProfile` and the field accesses succeed.
+
+### Sequencing for the next agent
+
+To get 06-json compile-clean **without** introducing new
+example-leak hacks:
+
+1. **Land F.1.2** — `succeedArity` should curry-wrap `VarTopLevel`
+   too. ~3 lines in Builder.hs:854-865. Closes the
+   `main_profile_decoder` line-481 error directly.
+2. **Land F.2.1** — synthesise `AnonXxx` for unresolved `TRecord`
+   in `typeToRustString`, OR teach `walkExpr` /
+   `collectAnonRecordTypes` to follow records flowing through
+   `Result.map*` and other combinators. Closes the line-519/523
+   errors AND the F.1.1 cluster (because closure param types are
+   pulled from the registered struct, not the bare `SkyValue`).
+3. **Land F.2.2** — delete the `SkyValue = String` alias to force
+   future "I didn't know" misses to fail loud. Re-run the 6
+   green examples to catch any unaudited fallback.
+4. **Verify**: `cargo build` clean on 06-json, then `cargo run`
+   prints the 12 example sections without panic. Compare output
+   text-for-text against `sky build --target go` output to catch
+   silent ordering / formatting divergence.
+5. **Only then** start on the soundness backlog above
+   (B.1.3/4/5/6/7, B.1.14/15, B.4.26/27/28, B.2.20/22). These
+   don't affect 06-json's *compile* status but ship as silent
+   bugs the moment a user touches `Time.sleep`, `Random.choice []`,
+   char patterns, cons chains, or user-defined `type Error`.
+
+### F.3 — Session 22 (2026-05-17) — Soundness backlog + 06‑json full run
+
+All 12 soundness items addressed. 06‑json compiles and runs all 12
+sections. `sky build --target rust` and `sky run --target rust` now
+compile and execute the Rust binary. Cross-target verification script
+(`scripts/verify-cross-target.sh`) reports 6/6 examples matching
+between Go and Rust output.
+
+**Closed in Session 22:**
+
+| Item | Fix | Where |
+|---|---|---|
+| B.1.3 random_choice [] | Already had empty→Err check | Builder.hs ~1894 |
+| B.1.4 time_sleep | Already uses tokio::time::sleep | Builder.hs ~1854 |
+| B.1.5 db_open_with_path | Already passes &path | Builder.hs ~1613 |
+| B.1.6 row_to_map NULL | `Option<String>` detection chain | Builder.hs ~1556 |
+| B.1.7 task_perform err | `match task.await { Ok→ok, Err→err }` | Builder.hs ~1456 |
+| B.1.14 Can.PCons | flattenCons already handles nesting | Builder.hs ~1156 |
+| B.1.15 Can.Chr | `'X'` char literals, not `"X"` strings | Builder.hs ~673/851/1129 |
+| B.2.20 taskExprInnerType | VarTopLevel solvedTypes lookup | Builder.hs ~1034 |
+| B.2.22 mainSig formatTodo | Removed (dead code, gone in prior session) | Builder.hs ~404 |
+| B.4.26 Can.Update | Sort by source position (`_start._line`) | Builder.hs ~966 |
+| B.4.27 hasErrorType | Detect user-defined `type Error` aliases | Builder.hs ~2165 |
+| B.4.28 Can.DestructDef | Unique function names per binding | Builder.hs ~522 |
+| F.1.2 succeed+VarTopLevel | `ecCtorArity` fallback for ctors | Builder.hs ~871 |
+| F.2.1 TRecord subset | Superset matching for row‑polymorphism | Builder.hs ~566 |
+| F.2.2 SkyValue removed | `type SkyValue = String` deleted | Builder.hs ~1293 |
+| F.1.1 anon‑struct generics | `T0..Tn` generic params, not `SkyValue` | Builder.hs ~1182 |
+| json_dec_list factory | Factory closure, each element fresh | Builder.hs ~1742 |
+| json_dec_succeed robust | `RefCell::take()` → `Err` on reuse | Builder.hs ~1758 |
+| Field order by index | `sortFieldsByIndex` for alias structs/ctors | Builder.hs ~539 |
+| `sky run --target rust` | cargo build + exec the Rust binary | Main.hs:1139 |
+| `sky build --target rust` | cargo build after codegen | Main.hs:1099 |
+
+**Post‑Session 22 known issues (deferred):**
+- 06-json section 7+ decoder reuse: fixed via factory closure approach
+- `SkyValue = String` alias deleted per F.2.2; any "unknown type" now
+  falls back to `"String"` rather than the masked `SkyValue`
+- The standalone `runtime-rust/` crate still links divergent types
+  (struct-based `SkyResult` vs inline enum). Linking deferred to a
+  future crate‑reconciliation session.
+
+### What NOT to do
+
+- **Do not add more `mainSig "userFnName"` entries.** Any user
+  function whose name happens to match would silently get bogus
+  types. The CLAUDE.md "Root-cause fixes only" rule is
+  non-negotiable here.
+- **Do not widen `taskExprInnerType`'s hardcoded table.** Replace
+  it with `ecSolvedTypes` lookups on the pipe RHS callee instead.
+- **Do not keep `SkyValue = String` as a fallback** when adding
+  the synthetic anon-record path. The alias actively masks bugs
+  and conflates "no record type registered" with "this is
+  literally a String".
+- **Do not patch the Pipeline decoder's static-type chain with
+  `Box<dyn Any>` downcasts** as a shortcut for F.1.1. It compiles
+  and erases the type-system guarantees Sky's HM is supposed to
+  give the Rust target. If F.2.1 doesn't close F.1.1 cleanly,
+  the right next move is enum-based decoder representation
+  (similar to serde's untagged enum) — bigger refactor, but
+  preserves soundness. CLAUDE.md item 2 under "Known limitations"
+  already flags this as architecture-level.
