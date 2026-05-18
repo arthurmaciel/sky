@@ -6,7 +6,7 @@ import Options.Applicative
 import System.Exit (exitFailure, exitSuccess, ExitCode(..))
 import qualified Data.Version
 import qualified Paths_sky_compiler
-import System.IO (hPutStr, hPutStrLn, stderr)
+import System.IO (hPutStr, hPutStrLn, hFlush, stdout, stderr)
 
 import qualified System.Directory
 import qualified System.Environment
@@ -1147,7 +1147,11 @@ runCommand cmd = case cmd of
                         runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
                         putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config'
                     Toml.TargetRust -> do
-                        putStrLn $ "Rust code written to " ++ outDir ++ "/Rust/"
+                        let rustDir = outDir ++ "/Rust"
+                        hFlush stdout
+                        putStrLn "Running cargo build..."
+                        callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
+                        putStrLn $ "Build complete: " ++ rustDir ++ "/target/debug/sky-app"
                 return (Right ())
 
     Run path mTarget -> do
@@ -1183,8 +1187,17 @@ runCommand cmd = case cmd of
                         putStrLn $ "Build complete, running..."
                         callProcess (outDir ++ "/" ++ Toml._binName config') []
                     Toml.TargetRust -> do
-                        putStrLn $ "Rust code written to " ++ outDir ++ "/Rust/"
-                        putStrLn "Note: Rust execution not yet implemented"
+                        let rustDir = outDir ++ "/Rust"
+                        hFlush stdout
+                        putStrLn $ "Running cargo build in " ++ rustDir
+                        callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
+                        putStrLn $ "Build complete, running..."
+                        hFlush stdout
+                        let binPath = rustDir ++ "/target/debug/sky-app"
+                        hasBin <- doesFileExist binPath
+                        if hasBin
+                            then callProcess binPath []
+                            else putStrLn "Error: binary not found"
                 return (Right ())
 
     Watch opts mTarget -> do
