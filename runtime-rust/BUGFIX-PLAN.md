@@ -643,3 +643,31 @@ Rust internals leaking to Sky users. 5 messages fixed:
 All decoder messages (`expected string/int/float/bool/array/null`,
 `missing field/path`, `required/opt decode error`) were already
 Rust-neutral.
+
+### H — 2026-05-17 — runtime crate reconciliation (Session 23)
+
+The `runtime-rust/` crate is now the single source of truth for
+error-independent types.  Builder.hs emits `mod sky_runtime; use
+sky_runtime::*;` instead of duplicating these definitions inline.
+
+| What | Where | Change |
+|---|---|---|
+| `SkyResult<E, A>` | crate `core.rs` | Enum with Ok(A)/Err(E), generic E |
+| `SkyMaybe<T>` | crate `core.rs` | Enum with Just(T)/Nothing |
+| List helpers | crate `core.rs` | `sky_list_{map,filter,fold,...}` |
+| String helpers | crate `core.rs` | `sky_string_*`, `string_*` |
+| Int/Float helpers | crate `core.rs` | `sky_int_to_string`, etc. |
+| Result helpers | crate `core.rs` | `result_with_default`, `result_traverse` (generic over E) |
+| `Error` struct | inline `coreHelperSection` | Error-dependent (SkyError is conditional) |
+| `ok_res` | inline `coreHelperSection` | Uses `SkyError` directly |
+| `SkyTask<A>` | inline `taskSection` | Uses `SkyError` directly |
+| Task combinators | inline `taskSection` | All use `SkyError` |
+| Log/System helpers | inline | All use `SkyTask` |
+
+The compiler copies `runtime-rust/src/sky_runtime/` into
+`sky-out/Rust/src/sky_runtime/` at build time.
+
+**Still open**: `dbSection`, `jsonSection`, `extraKernelSection`,
+`entryPointSection` remain fully inline — they either depend on
+Haskell-computed config strings (`dbPath`, `hasErrorType` type names)
+or on `SkyError`.
