@@ -5,8 +5,6 @@ edition = "2021"
 description = "Sky language runtime for Rust - primitives, collections, FFI"
 
 [dependencies]
-thiserror = "2.0"
-serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.0", features = ["full"], optional = true }
 
 [features]

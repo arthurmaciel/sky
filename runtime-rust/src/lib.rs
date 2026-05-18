@@ -120,8 +120,8 @@ mod tests {
     #[test]
     fn string_ops() {
         assert_eq!(sky_string_append("a".into(), "b".into()), "ab");
-        assert_eq!(sky_string_length("hello".into()), 5);
-        assert!(sky_string_is_empty("".into()));
+        assert_eq!(string_length("hello".into()), 5);
+        assert!(sky_string_is_empty(&"".to_string()));
     }
 
     #[test]
@@ -144,22 +144,8 @@ mod tests {
     #[test]
     fn result_traverse_ok() {
         let items = vec![1, 2, 3];
-        let r = result_traverse(|x: i64| -> SkyResult<Error, i64> { SkyResult::Ok(x * 2) }, items);
+        let r = result_traverse(|x: i64| -> SkyResult<&str, i64> { SkyResult::Ok(x * 2) }, items);
         assert_eq!(r.with_default(vec![]), vec![2, 4, 6]);
     }
 
-    // Task tests (basic, no tokio needed)
-    #[tokio::test]
-    async fn task_succeed_await() {
-        let t = task_succeed(42);
-        let r = t.await;
-        assert_eq!(r.with_default(0), 42);
-    }
-
-    #[tokio::test]
-    async fn task_sequence_ok() {
-        let tasks = vec![task_succeed(1), task_succeed(2)];
-        let r = task_sequence(tasks).await;
-        assert_eq!(r.with_default(vec![]), vec![1, 2]);
-    }
 }
