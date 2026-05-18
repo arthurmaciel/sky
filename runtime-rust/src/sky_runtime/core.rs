@@ -1,0 +1,131 @@
+// Sky Runtime — Core types (always included)
+// These types are error-type-independent.  The generated code defines
+// `SkyError` separately (inline) since it depends on whether the user
+// imports `Sky.Core.Error`.
+//
+// Source of truth: this file. Builder.hs emits `use sky_runtime::*;`
+// instead of duplicating these definitions.
+
+use std::fmt;
+
+// ===========================================
+// Maybe
+// ===========================================
+#[derive(Clone, Debug, PartialEq)]
+pub enum SkyMaybe<T> {
+    Nothing,
+    Just(T),
+}
+
+impl<T> SkyMaybe<T> {
+    pub fn with_default(self, def: T) -> T {
+        match self { SkyMaybe::Just(v) => v, SkyMaybe::Nothing => def }
+    }
+    pub fn is_just(&self) -> bool { matches!(self, SkyMaybe::Just(_)) }
+    pub fn is_nothing(&self) -> bool { matches!(self, SkyMaybe::Nothing) }
+}
+
+pub fn sky_maybe_map<T, U>(m: SkyMaybe<T>, f: impl FnOnce(T) -> U) -> SkyMaybe<U> {
+    match m { SkyMaybe::Just(v) => SkyMaybe::Just(f(v)), SkyMaybe::Nothing => SkyMaybe::Nothing }
+}
+
+pub fn sky_maybe_and_then<T, U>(m: SkyMaybe<T>, f: impl FnOnce(T) -> SkyMaybe<U>) -> SkyMaybe<U> {
+    match m { SkyMaybe::Just(v) => f(v), SkyMaybe::Nothing => SkyMaybe::Nothing }
+}
+
+// ===========================================
+// Result (generic over error type E)
+// ===========================================
+#[derive(Clone, Debug, PartialEq)]
+pub enum SkyResult<E, A> {
+    Ok(A),
+    Err(E),
+}
+
+impl<E, A> SkyResult<E, A> {
+    pub fn is_ok(&self) -> bool { matches!(self, SkyResult::Ok(_)) }
+    pub fn is_err(&self) -> bool { matches!(self, SkyResult::Err(_)) }
+    pub fn with_default(self, def: A) -> A {
+        match self { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }
+    }
+}
+
+pub fn sky_result_map<E, A, B>(r: SkyResult<E, A>, f: impl FnOnce(A) -> B) -> SkyResult<E, B> {
+    match r { SkyResult::Ok(v) => SkyResult::Ok(f(v)), SkyResult::Err(e) => SkyResult::Err(e) }
+}
+
+pub fn sky_result_and_then<E, A, B>(r: SkyResult<E, A>, f: impl FnOnce(A) -> SkyResult<E, B>) -> SkyResult<E, B> {
+    match r { SkyResult::Ok(v) => f(v), SkyResult::Err(e) => SkyResult::Err(e) }
+}
+
+// ===========================================
+// List helpers
+// ===========================================
+pub fn sky_list_is_empty<T>(v: &Vec<T>) -> bool { v.is_empty() }
+
+pub fn sky_list_head<T: Clone>(v: &Vec<T>) -> SkyMaybe<T> {
+    v.first().map(|x| SkyMaybe::Just(x.clone())).unwrap_or(SkyMaybe::Nothing)
+}
+
+pub fn sky_list_map<T: Clone, U>(f: impl Fn(T) -> U, v: &Vec<T>) -> Vec<U> {
+    v.iter().map(|x| f(x.clone())).collect()
+}
+
+pub fn sky_list_filter<T: Clone>(f: impl Fn(&T) -> bool, v: &Vec<T>) -> Vec<T> {
+    v.iter().filter(|x| f(*x)).cloned().collect()
+}
+
+pub fn sky_list_fold<T: Clone, B>(f: impl Fn(B, T) -> B, init: B, v: &Vec<T>) -> B {
+    v.iter().fold(init, |acc, x| f(acc, x.clone()))
+}
+
+pub fn sky_list_drop<T: Clone>(n: usize, v: &Vec<T>) -> Vec<T> {
+    v.iter().skip(n).cloned().collect()
+}
+
+pub fn sky_list_cons<T: Clone>(x: T, xs: Vec<T>) -> Vec<T> {
+    std::iter::once(x).chain(xs).collect()
+}
+
+// ===========================================
+// String helpers
+// ===========================================
+pub fn sky_string_append(a: String, b: String) -> String { a + &b }
+pub fn sky_string_len(s: &String) -> usize { s.len() }
+pub fn sky_string_is_empty(s: &String) -> bool { s.is_empty() }
+
+// ===========================================
+// Int / Float helpers
+// ===========================================
+pub fn sky_int_to_string(i: i64) -> String { format!("{}", i) }
+pub fn sky_string_to_int(s: &String) -> SkyResult<String, i64> {
+    match s.parse::<i64>() { Ok(v) => SkyResult::Ok(v), Err(_) => SkyResult::Err(String::new()) }
+}
+pub fn sky_float_to_string(f: f64) -> String { format!("{}", f) }
+
+// ===========================================
+// Misc helpers
+// ===========================================
+pub fn string_from_int(i: i64) -> String { format!("{}", i) }
+pub fn string_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }
+pub fn string_append(a: String, b: String) -> String { a + &b }
+pub fn string_length(s: String) -> i64 { s.len() as i64 }
+pub fn string_is_empty(s: String) -> bool { s.is_empty() }
+pub fn string_reverse(s: String) -> String { s.chars().rev().collect() }
+pub fn string_to_upper(s: String) -> String { s.to_uppercase() }
+pub fn string_to_lower(s: String) -> String { s.to_lowercase() }
+pub fn string_trim(s: String) -> String { s.trim().to_string() }
+pub fn string_contains(haystack: String, needle: String) -> bool { haystack.contains(&needle) }
+pub fn string_to_int(s: String) -> SkyMaybe<i64> {
+    match s.parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
+}
+
+pub fn result_with_default<E, A>(def: A) -> impl FnOnce(SkyResult<E, A>) -> A {
+    |r| match r { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }
+}
+
+pub fn result_traverse<T0: Clone, T1: Clone, E>(f: impl Fn(T0) -> SkyResult<E, T1> + Clone, items: Vec<T0>) -> SkyResult<E, Vec<T1>> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items { match f(item) { SkyResult::Ok(v) => out.push(v), SkyResult::Err(e) => return SkyResult::Err(e) } }
+    SkyResult::Ok(out)
+}

@@ -1445,6 +1445,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             mainRustPath = srcDir </> "main.rs"
                             cargoTomlPath = rustDir </> "Cargo.toml"
                         createDirectoryIfMissing True srcDir
+                        copyRustRuntime outDir
                         writeFile mainRustPath rustCode
                         writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver)
                         putStrLn $ "   Wrote " ++ mainRustPath
@@ -2207,6 +2208,34 @@ copyRuntime outDir = do
             if hasSum then copyFile srcSum (outDir </> "go.sum") else return ()
     -- User FFI: copy ./ffi/*.go into sky-out/rt/ regardless of runtime-go location.
     copyFfiDir outDir
+
+
+-- | Copy the Rust sky_runtime module into sky-out/Rust/src/sky_runtime/
+-- so `mod sky_runtime; use sky_runtime::*;` resolves at compile time.
+copyRustRuntime :: FilePath -> IO ()
+copyRustRuntime outDir = do
+    let targetDir = outDir </> "Rust" </> "src" </> "sky_runtime"
+    createDirectoryIfMissing True targetDir
+    -- Locate runtime-rust/src/sky_runtime/ (same binary-relative search as copyRuntime)
+    exePath <- System.Environment.getExecutablePath
+    let candidates =
+            [ takeDirectory exePath </> ".." </> "runtime-rust" </> "src" </> "sky_runtime"
+            , takeDirectory exePath </> ".." </> ".." </> "runtime-rust" </> "src" </> "sky_runtime"
+            , "runtime-rust" </> "src" </> "sky_runtime"
+            ]
+    mSrcDir <- findM doesDirectoryExist candidates
+    case mSrcDir of
+        Nothing -> putStrLn "  [warn] could not locate runtime-rust/src/sky_runtime/"
+        Just srcDir -> do
+            files <- System.Directory.listDirectory srcDir
+            let rsFiles = filter (\f -> takeExtension f == ".rs") files
+            mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) rsFiles
+            putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " files)"
+  where
+    findM _ [] = return Nothing
+    findM f (x:xs) = do
+        exists <- f x
+        if exists then return (Just x) else findM f xs
 
 
 -- ═══════════════════════════════════════════════════════════
