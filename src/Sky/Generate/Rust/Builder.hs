@@ -1,6 +1,6 @@
 module Sky.Generate.Rust.Builder where
 
-import Data.List (isSuffixOf, isPrefixOf, stripPrefix, span)
+import Data.List (isSuffixOf, isPrefixOf, stripPrefix, span, sortBy)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
@@ -155,7 +155,7 @@ data RustItem
 
 data RustTypeDef
     = REnumDef String [(String, Maybe String)]
-    | RStructDef String [(String, String)]
+    | RStructDef String String [(String, String)]  -- name, generics_decl, fields
     | RAliasDef String String
 
 -- | Context threaded through expression emission
@@ -167,6 +167,7 @@ data EmitCtx = EmitCtx
     , ecUsesTaskRun :: Bool  -- user calls Task.run → main returns ()
     , ecZeroArgDefs :: Set.Set (String, String)  -- (modPrefix, name) for zero-arg definitions
     , ecNoCloneVars :: Set.Set String  -- vars whose types don't implement Clone (e.g. Decoder)
+    , ecCtorArity :: Map.Map String Int  -- alias name -> field count (for succeed curry wrapping)
     }
 
 -- | Build a map from field-name-signature to struct name
@@ -180,7 +181,7 @@ buildRecordMap mods = Map.fromList
 
 -- | Anonymous record struct name prefix
 anonStructName :: String -> String
-anonStructName key = toCamelCase ("__anon__" ++ map (\c -> if c == ',' then '_' else c) key)
+anonStructName key = toCamelCase ("Anon_" ++ map (\c -> if c == ',' then '_' else c) key)
 
 -- | Walk all expressions collecting anonymous record field signatures.
 -- Returns field-key → [(field-name, HM-inferred-type)] for records NOT
@@ -239,8 +240,9 @@ buildModule ctx mod =
             let rm = ecRecordMap ctx
                 ctorName = toSnakeCase (modPrefix ++ "_" ++ aliasName)
                 structName = toCamelCase (modPrefix ++ "_" ++ aliasName)
-                rustFlds = [(n, typeToRustString rm ft) | (n, Can.FieldType _ ft) <- Map.toList fields]
-                body = structName ++ " { " ++ intercalate ", " (map (\(n, _) -> n ++ ": " ++ n) (Map.toList fields)) ++ " }"
+                sortedFields = sortFieldsByIndex (Map.toList fields)
+                rustFlds = [(n, typeToRustString rm ft) | (n, Can.FieldType _ ft) <- sortedFields]
+                body = structName ++ " { " ++ intercalate ", " (map (\(n, _) -> n ++ ": " ++ n) sortedFields) ++ " }"
             in if Set.member ctorName existingNames then []
                else [RustFunction ctorName "" (map (\(n, t) -> n ++ ": " ++ t) rustFlds) structName body]
         prefixItem (RustFunction n g p r b)
@@ -332,7 +334,6 @@ knownDefSig p n a | "Sky_Core_Maybe" `isPrefixOf` p = maybeSig n a
 knownDefSig p n a | "Sky_Core_Error" `isPrefixOf` p = errorSig n a
 knownDefSig p n a | "Sky_Core_Result" `isPrefixOf` p = resultSig n a
 -- Main module helpers
-knownDefSig p n a | p == "Main" = mainSig n a
 knownDefSig _ _ _ = Nothing
 
 listSig :: String -> Int -> Maybe ([String], String)
@@ -398,10 +399,6 @@ resultSig "andMap" 2 = Just (["SkyResult<SkyError, T0>", "SkyResult<SkyError, im
 resultSig "combine" 1 = Just (["Vec<SkyResult<SkyError, T0>>"], "SkyResult<SkyError, Vec<T0>>")
 resultSig "traverse" 2 = Just (["impl Fn(T0) -> SkyResult<SkyError, T1> + Clone", "Vec<T0>"], "SkyResult<SkyError, Vec<T1>>")
 resultSig _ _ = Nothing
-
-mainSig :: String -> Int -> Maybe ([String], String)
-mainSig "formatTodo" 1 = Just (["HashMap<String, String>"], "String")
-mainSig _ _ = Nothing
 
 errorSig :: String -> Int -> Maybe ([String], String)
 errorSig "mkInfo" 1 = Just (["String"], "SkyError")
@@ -471,7 +468,7 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                            gens = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
                        in (safeParams, gens)
                    Nothing ->
-                       -- Fallback: body analysis or SkyValue
+                       -- Fallback: body analysis
                        let counts = collectVarLocalsMulti body
                            paramNames = [ n | Ann.At _ (Can.PVar n) <- params ]
                            anyCloneNeeded = any (\n -> Map.lookup n counts >= Just 2) paramNames
@@ -479,7 +476,7 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                            useVec = bodyUsesList body
                            pStrs = map (\(i, p) ->
                                let tn = "T" ++ show i
-                               in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "SkyValue")
+                               in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "String")
                                ) (zip [0..] params)
                            genList = if anyCloneNeeded
                                      then map (\i -> "T" ++ show i ++ ": Clone") [0..length params - 1]
@@ -517,8 +514,10 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
         ctx' = ctx { ecCloneVars = Set.fromList multiVars }
     in RustFunction rustName "" params ret (exprToRustString ctx' body)
-defToRustItem _ctx _modPrefix (Can.DestructDef pat expr) =
-    RustFunction "_destruct" "" [patternToRustParam pat] "()" (exprToRustString _ctx expr)
+defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
+    let vars = intercalate "_" (patBindingVars pat)
+        fnName = if null vars then "__destruct" else "__destruct_" ++ vars
+    in RustFunction fnName "" [patternToRustParam pat] "()" (exprToRustString ctx expr)
 
 unionsToRustTypes :: Map.Map String String -> String -> Map.Map String Can.Union -> [RustTypeDef]
 unionsToRustTypes recordMap modPrefix unions = map (\(name, u) -> unionToRustTypeDef recordMap modPrefix name u) (Map.toList unions)
@@ -534,10 +533,15 @@ unionToRustTypeDef recordMap modPrefix typeName (Can.Union _ alts _ _) =
 aliasesToRustTypes :: Map.Map String String -> String -> Map.Map String Can.Alias -> [RustTypeDef]
 aliasesToRustTypes recordMap modPrefix aliases = concatMap (\(name, alias) -> aliasToRustTypeDef recordMap modPrefix name alias) (Map.toList aliases)
 
+-- | Sort record fields by their declaration index (_fieldIndex)
+sortFieldsByIndex :: [(String, Can.FieldType)] -> [(String, Can.FieldType)]
+sortFieldsByIndex = sortBy (\(_, Can.FieldType i _) (_, Can.FieldType j _) -> compare i j)
+
 aliasToRustTypeDef :: Map.Map String String -> String -> String -> Can.Alias -> [RustTypeDef]
 aliasToRustTypeDef recordMap modPrefix name (Can.Alias _vars ty) = case ty of
     Can.TRecord fields _ -> 
-        [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString recordMap ft)) (Map.toList fields))]
+        let sortedFields = sortFieldsByIndex (Map.toList fields)
+        in [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) "" (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString recordMap ft)) sortedFields)]
     _ -> 
         [RAliasDef (toCamelCase (modPrefix ++ "_" ++ name)) (typeToRustString recordMap ty)]
 
@@ -557,9 +561,32 @@ typeToRustString recordMap t = case t of
     Can.TType _ "Error" [] -> "SkyError"
     Can.TRecord fields _ ->
         let key = intercalate "," (Map.keys fields)
-        in case Map.lookup key recordMap of
-            Just structName -> structName
-            Nothing -> "()"
+            fieldSet = Set.fromList (Map.keys fields)
+            -- When exact key misses, find the alias with the FEWEST extra
+            -- fields that is a superset of the TRecord's fields.
+            -- HM's row polymorphism narrows inferred record types to only
+            -- the accessed fields — we widen back to the full alias.
+            bestMatch = foldr (\(k, name) best ->
+                let kSet = Set.fromList (words (map (\c -> if c == ',' then ' ' else c) k))
+                    extras = Set.size kSet - Set.size fieldSet
+                in if fieldSet `Set.isSubsetOf` kSet && extras >= 0
+                   then case best of
+                        Nothing -> Just (extras, name)
+                        Just (e, _) | extras < e -> Just (extras, name)
+                        _ -> best
+                   else best
+                ) Nothing (Map.toList recordMap)
+            structName = case bestMatch of
+                Just (_, n) -> n
+                Nothing -> "String"
+            -- Anonymous record structs have generic type params (T0..Tn).
+            -- Fill them from the TRecord's actual field types so references
+            -- like `AnonXxx<String, i64, bool>` compile correctly.
+            gens = if "Anon" `isPrefixOf` structName
+                   then let sorted = sortFieldsByIndex (Map.toList fields)
+                        in "<" ++ intercalate ", " [typeToRustString recordMap (Can._fieldType ft) | (_, ft) <- sorted] ++ ">"
+                   else ""
+        in structName ++ gens
     Can.TTuple a b rest -> "(" ++ intercalate ", " (map (typeToRustString recordMap) (a:b:rest)) ++ ")"
     Can.TVar v -> v
     Can.TType modName name [] ->
@@ -575,7 +602,7 @@ typeToRustString recordMap t = case t of
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
         in toCamelCase (modPrefix ++ name)
-    _ -> "SkyValue"
+    _ -> "String"
 
 rustSafeIdent :: String -> String
 rustSafeIdent "fn" = "r#fn"
@@ -640,7 +667,7 @@ substVar ctx name inline = go
             let fnName = kernelToRust mod n
             in if Set.member (mod, n) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
         Can.VarCtor _ mn tn cn _ -> kernelCtorToRust mn tn cn
-        Can.Chr c -> show c
+        Can.Chr c -> "'" ++ c ++ "'"
         Can.Str s -> show s ++ ".to_string()"
         Can.Int i -> show i
         Can.Float f -> show f
@@ -818,7 +845,7 @@ exprToRustInner ctx e = case e of
         let fnName = kernelToRust mod name
         in if Set.member (mod, name) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
     Can.VarCtor _ modName typeName ctorName _ -> kernelCtorToRust modName typeName ctorName
-    Can.Chr c -> show c
+    Can.Chr c -> "'" ++ c ++ "'"
     Can.Str s -> show s ++ ".to_string()"
     Can.Int i -> show i
     Can.Float f -> show f
@@ -839,17 +866,48 @@ exprToRustInner ctx e = case e of
             innerMulti = [ v | (v, c) <- Map.toList counts, c >= 2 ]
             ctx' = ctx { ecCloneVars = Set.fromList innerMulti }
         in "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ exprToRustString ctx' body ++ " }"
-    Can.Call fn args -> case exprToRustString ctx fn of
-        fnName | "println" `isSuffixOf` fnName ->
-            "log_info(" ++ intercalate " ++ \" \" ++ " (map (\a -> exprToRustString ctx a) args) ++ ")"
-        _ ->
-            -- Clone VarLocal args for every function call EXCEPT Task_run,
-            -- whose argument is a Pin<Box<dyn Future>> which does not implement Clone.
-            let noCloneFn = case fn of
-                    Ann.At _ (Can.VarKernel _ n) -> n == "run"
-                    _ -> False
-                argsStrs = map (argToRustString ctx noCloneFn) args
-            in exprToRustString ctx fn ++ "(" ++ intercalate ", " argsStrs ++ ")"
+    Can.Call fn args ->
+        let calleeName = exprToRustString ctx fn
+            succeedArity = case fn of
+                Ann.At _ (Can.VarKernel _ name) | name == "succeed" && not (null args) ->
+                    case head args of
+                        Ann.At _ (Can.Lambda ps _) | length ps > 1 -> Just (length ps)
+                        Ann.At _ (Can.VarTopLevel _ fnName) ->
+                            case Map.lookup fnName (ecSolvedTypes ctx) of
+                                Just ty | let n = length (extractParamTypes ty), n > 1 -> Just n
+                                _ -> case Map.lookup fnName (ecCtorArity ctx) of
+                                    Just n | n > 1 -> Just n
+                                    _ -> Nothing
+                        _ -> Nothing
+                _ -> Nothing
+        in case succeedArity of
+            Just n ->
+                let [arg] = args
+                in case arg of
+                    Ann.At _ (Can.Lambda params body) ->
+                        let counts = collectVarLocalsMulti body
+                            innerMulti = [v | (v, c) <- Map.toList counts, c >= 2]
+                            ctx' = ctx { ecCloneVars = Set.fromList innerMulti }
+                            psStr = intercalate ", " (map patternToRustParam params)
+                        in calleeName ++ "(curry" ++ show n ++ "(|" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " }))"
+                    _ ->
+                        calleeName ++ "(curry" ++ show n ++ "(" ++ exprToRustString ctx arg ++ "))"
+            Nothing -> case calleeName of
+                fn | "println" `isSuffixOf` fn ->
+                    "log_info(" ++ intercalate " ++ \" \" ++ " (map (\a -> exprToRustString ctx a) args) ++ ")"
+                _ ->
+                    -- Clone VarLocal args for every function call EXCEPT Task_run,
+                    -- whose argument is a Pin<Box<dyn Future>> which does not implement Clone.
+                    let noCloneFn = case fn of
+                            Ann.At _ (Can.VarKernel _ n) -> n == "run"
+                            _ -> False
+                        -- json_dec_list wraps the decoder in a factory closure so each
+                        -- list element gets a fresh decoder (json_dec_succeed is single-use).
+                        isListDec = "json_dec_list" `isSuffixOf` calleeName
+                        argsStrs = if isListDec && not (null args)
+                                   then ("|| " ++ argToRustString ctx noCloneFn (head args)) : map (argToRustString ctx noCloneFn) (tail args)
+                                   else map (argToRustString ctx noCloneFn) args
+                    in exprToRustString ctx fn ++ "(" ++ intercalate ", " argsStrs ++ ")"
     Can.If [] elseBranch ->
         exprToRustString ctx elseBranch
     Can.If ((firstCond, firstBody):rest) elseBranch ->
@@ -908,22 +966,16 @@ exprToRustInner ctx e = case e of
     Can.Access record (Ann.At _ field) -> 
         exprToRustString ctx record ++ "." ++ field
     Can.Update (Ann.At _ _field) record updates ->
-        "{ let mut result = " ++ exprToRustString ctx record ++ "; " ++
-        intercalate "; " (map (\(f, Can.FieldUpdate _ expr) -> "result." ++ f ++ " = " ++ exprToRustString ctx expr) (Map.toList updates)) ++
+        let sorted = sortBy (\(_, Can.FieldUpdate r1 _) (_, Can.FieldUpdate r2 _) -> compare (Ann._line (Ann._start r1)) (Ann._line (Ann._start r2))) (Map.toList updates)
+        in "{ let mut result = " ++ exprToRustString ctx record ++ "; " ++
+        intercalate "; " (map (\(f, Can.FieldUpdate _ expr) -> "result." ++ f ++ " = " ++ exprToRustString ctx expr) sorted) ++
         "; result }"
     Can.Record fields -> 
         let key = intercalate "," (Map.keys fields)
         in case Map.lookup key (ecRecordMap ctx) of
             Just structName -> 
-                let fieldStrs = map (\(k, v) -> k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)
-                    -- Anonymous record structs (from collectAnonRecordTypes) have
-                    -- SkyValue fields.  Wrap each expression with .to_string()
-                    -- so any Rust type (i64, bool, String) converts to String.
-                    anonWrap f = if "__Anon" `isPrefixOf` structName
-                                 then f ++ ".to_string()"
-                                 else f
-                in structName ++ " { " ++ intercalate ", " (map (\(k, v) -> 
-                    k ++ ": " ++ anonWrap (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
+                structName ++ " { " ++ intercalate ", " (map (\(k, v) -> 
+                    k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)) ++ " }"
             Nothing -> 
                 "{ " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)) ++ " }"
     Can.Unit -> "()"
@@ -979,14 +1031,15 @@ taskExprInnerType solved (Ann.At _ expr) = case expr of
             "writeFile" -> "()"
             "exists"    -> "bool"
             _ -> ""
-    -- Fallback: try to look up known signature from solvedTypes
+    -- Fallback: look up the callee's type in solvedTypes and extract Task inner type
     Can.VarTopLevel modName name ->
-        let modStr = ModuleName._name modName
-            modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-            qualified = modPrefix ++ name
-        in ""  -- solvedTypes lookup would go here (complex, defer for now)
+        case Map.lookup name solved of
+            Just ty -> typeToRustString Map.empty (extractTaskInner (extractReturnType ty))
+            Nothing -> ""
     _ -> ""
   where
+    extractTaskInner (Can.TType _ "Task" [_, a]) = a
+    extractTaskInner _ = Can.TVar "_"
     -- | Try to extract the Rust type string from a single argument expression
     -- by looking up its type in solvedTypes.
     solveArgType :: Map.Map String Can.Type -> Can.Expr -> String
@@ -1077,7 +1130,7 @@ patternToMatchString _recMap (Ann.At _ pat) = case pat of
     Can.PAnything -> "_"
     Can.PInt i -> show i
     Can.PBool b -> if b then "true" else "false"
-    Can.PChr c -> show c
+    Can.PChr c -> "'" ++ c ++ "'"
     Can.PStr s -> show s
     Can.PUnit -> "()"
     Can.PCtor{Can._p_home = home, Can._p_type = typeName, Can._p_name = name, Can._p_args = args} ->
@@ -1131,21 +1184,29 @@ buildProgram mods solvedTypes =
         -- Only include anonymous record keys NOT already covered by a type alias
         anonEntries = Map.filterWithKey (\k _ -> not (Map.member k aliasMap)) rawAnon
         
-        -- Generate RStructDef entries with SkyValue (String) for all fields.
-        -- This avoids type-unsafe anonymous record emission.  The struct is
-        -- type-safe for String-valued records; mixed-type records compile
-        -- but lose precision (all fields become String/SkyValue).
+        -- Generate RStructDef entries with generic type params per field.
+        -- Each field gets a distinct type param T0..Tn so the struct works
+        -- with heterogeneous decoder pipelines (String, i64, bool, ...).
         (anonDefs, anonKeyMap) =
             foldr (\(key, flds) (defs, km) ->
                 let name = anonStructName key
-                    rustFlds = [(n, "SkyValue") | n <- flds]
+                    n = length flds
+                    typeParams = ["T" ++ show i | i <- [0..n-1]]
+                    gens = if null typeParams then "" else "<" ++ intercalate ", " typeParams ++ ">"
+                    rustFlds = zipWith (\f t -> (f, t)) flds typeParams
                 in if null rustFlds then (defs, km)
-                   else (RStructDef name rustFlds : defs, Map.insert key name km)
+                   else (RStructDef name gens rustFlds : defs, Map.insert key name km)
                 ) ([], Map.empty) (Map.toList anonEntries)
         
         recordMap = Map.union aliasMap anonKeyMap
-        
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars }
+
+        ctorArity = Map.fromList
+            [ (name, Map.size fields)
+            | mod <- mods
+            , (name, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)
+            ]
+
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity }
         usage = analyzeKernelUsage mods
         zeroArgDefs = collectZeroArgDefs mods
         noCloneVars = Set.empty
@@ -1232,7 +1293,6 @@ basicTypeSection =
     , "type SkyFloat = f64;"
     , "type SkyBool = bool;"
     , "type SkyString = String;"
-    , "type SkyValue = String;"
     , ""
     , "// Error type for Task"
     , "pub struct Error(pub String);"
@@ -1397,7 +1457,7 @@ taskSection uk =
     , "    Box::pin(ready(SkyResult::Err(e)))"
     , "}"
     , "pub fn task_perform<A: Send + 'static>(task: SkyTask<A>) -> SkyTask<()> {"
-    , "    Box::pin(async move { let _ = task.await; ok_res(()) })"
+    , "    Box::pin(async move { match task.await { SkyResult::Ok(_) => ok_res(()), SkyResult::Err(e) => SkyResult::Err(e) } })"
     , "}"
     , "pub fn task_sequence<A: Send + 'static>(tasks: Vec<SkyTask<A>>) -> SkyTask<Vec<A>> {"
     , "    Box::pin(async move {"
@@ -1496,12 +1556,13 @@ dbSection uk dbPath dbDriver b =
     , "    let cols = row.columns();"
     , "    for i in 0..cols.len() {"
     , "        let name = cols[i].name().to_string();"
-    , "        let value: String = match row.try_get::<&str, _>(i) {"
-    , "            Ok(v) => v.to_string(),"
-    , "            _ => match row.try_get::<i64, _>(i) {"
-    , "                Ok(v) => v.to_string(),"
-    , "                _ => match row.try_get::<f64, _>(i) {"
-    , "                    Ok(v) => v.to_string(),"
+    , "        let value: String = match row.try_get::<Option<String>, _>(i) {"
+    , "            Ok(Some(v)) => v,"
+    , "            Ok(None) => String::new(),"
+    , "            _ => match row.try_get::<Option<i64>, _>(i) {"
+    , "                Ok(Some(v)) => v.to_string(),"
+    , "                _ => match row.try_get::<Option<f64>, _>(i) {"
+    , "                    Ok(Some(v)) => v.to_string(),"
     , "                    _ => String::new(),"
     , "                }"
     , "            }"
@@ -1634,7 +1695,7 @@ jsonSection uk =
     , "type Decoder<T> = Box<dyn Fn(&JsonVal) -> SkyResult<SkyError, T> + Send>;"
     , ""
     , "fn json_dec_ok<T>(t: T) -> SkyResult<SkyError, T> { SkyResult::Ok(t) }"
-    , "fn json_dec_err_str<T>(s: String) -> SkyResult<SkyError, T> { SkyResult::Err(s) }"
+    , "fn json_dec_err_str<T>(s: String) -> SkyResult<SkyError, T> { SkyResult::Err(str_err(s)) }"
     , ""
     , "// --- Encode ---"
     , "pub fn json_enc_encode(indent: i64, val: JsonVal) -> String {"
@@ -1681,11 +1742,11 @@ jsonSection uk =
     , "        decoder(cur)"
     , "    })"
     , "}"
-    , "pub fn json_dec_list<T: 'static + Send>(decoder: Decoder<T>) -> Decoder<Vec<T>> {"
+    , "pub fn json_dec_list<T: 'static + Send>(decoder: impl Fn() -> Decoder<T> + Send + 'static) -> Decoder<Vec<T>> {"
     , "    Box::new(move |v| match v.as_array() {"
     , "        Some(arr) => {"
     , "            let mut out = Vec::with_capacity(arr.len());"
-    , "            for item in arr { match decoder(item) { SkyResult::Ok(t) => out.push(t), SkyResult::Err(_) => return json_dec_err_str(\"decode error\".into()) } }"
+    , "            for item in arr { let d = decoder(); match d(item) { SkyResult::Ok(t) => out.push(t), SkyResult::Err(_) => return json_dec_err_str(\"decode error\".into()) } }"
     , "            json_dec_ok(out)"
     , "        },"
     , "        None => json_dec_err_str(\"expected array\".into())"
@@ -1699,9 +1760,9 @@ jsonSection uk =
     , ") -> Decoder<C> {"
     , "    Box::new(move |v| { let a = da(v); let b = db(v); match a { SkyResult::Ok(av) => match b { SkyResult::Ok(bv) => json_dec_ok(f(av, bv)), SkyResult::Err(_) => json_dec_err_str(\"decode error\".into()) }, SkyResult::Err(_) => json_dec_err_str(\"decode error\".into()) } })"
     , "}"
-    , "pub fn json_dec_succeed<A: 'static + Send + Clone>(a: A) -> Decoder<A> {"
-    , "    let a = a;"
-    , "    Box::new(move |_| SkyResult::Ok(a.clone()))"
+    , "pub fn json_dec_succeed<A: 'static + Send>(a: A) -> Decoder<A> {"
+    , "    let cell = std::cell::RefCell::new(Some(a));"
+    , "    Box::new(move |_| match cell.borrow_mut().take() { Some(val) => SkyResult::Ok(val), None => SkyResult::Err(str_err(\"decoder: succeed value already consumed\".into())) })"
     , "}"
     , "pub fn json_dec_fail<A: 'static + Send>(msg: String) -> Decoder<A> {"
     , "    let m = msg; Box::new(move |_| json_dec_err_str(m.clone()))"
@@ -1714,6 +1775,31 @@ jsonSection uk =
     , "        Ok(val) => decoder(&val),"
     , "        Err(e) => json_dec_err_str(format!(\"json parse: {}\", e))"
     , "    }"
+    , "}"
+    , ""
+    , "// --- Currying helpers (for pipeline decoder composition) ---"
+    , "fn curry1<A, R, F: FnOnce(A) -> R + Send + 'static>(f: F) -> Box<dyn FnOnce(A) -> R + Send> {"
+    , "    Box::new(f)"
+    , "}"
+    , "fn curry2<A1: 'static + Send, A2: 'static + Send, R: 'static, F: FnOnce(A1, A2) -> R + Send + 'static>("
+    , "    f: F,"
+    , ") -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> R + Send> + Send> {"
+    , "    Box::new(move |a1| Box::new(move |a2| f(a1, a2)))"
+    , "}"
+    , "fn curry3<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, R: 'static, F: FnOnce(A1, A2, A3) -> R + Send + 'static>("
+    , "    f: F,"
+    , ") -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> R + Send> + Send> + Send> {"
+    , "    Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| f(a1, a2, a3))))"
+    , "}"
+    , "fn curry4<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: 'static + Send, R: 'static, F: FnOnce(A1, A2, A3, A4) -> R + Send + 'static>("
+    , "    f: F,"
+    , ") -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> Box<dyn FnOnce(A4) -> R + Send> + Send> + Send> + Send> {"
+    , "    Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| Box::new(move |a4| f(a1, a2, a3, a4)))))"
+    , "}"
+    , "fn curry5<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: 'static + Send, A5: 'static + Send, R: 'static, F: FnOnce(A1, A2, A3, A4, A5) -> R + Send + 'static>("
+    , "    f: F,"
+    , ") -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> Box<dyn FnOnce(A4) -> Box<dyn FnOnce(A5) -> R + Send> + Send> + Send> + Send> + Send> {"
+    , "    Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| Box::new(move |a4| Box::new(move |a5| f(a1, a2, a3, a4, a5))))))"
     , "}"
     , ""
     , "// --- Pipeline (curried decoder combinators) ---"
@@ -1992,8 +2078,8 @@ entryPointSection uk =
 typeDefToString :: RustTypeDef -> String
 typeDefToString (REnumDef name variants) = 
     "#[derive(Clone, Debug)]\npub enum " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
-typeDefToString (RStructDef name fields) =
-    "#[derive(Clone, Debug)]\npub struct " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
+typeDefToString (RStructDef name gens fields) =
+    "#[derive(Clone, Debug)]\npub struct " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
 typeDefToString (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
 
 moduleToRustStrings :: RustModule -> [String]
@@ -2049,7 +2135,7 @@ collectUndefinedTypes b =
         defined = Set.fromList 
             [ name | RustStruct name _ <- allItems ] 
             `Set.union` Set.fromList
-            [ name | RStructDef name _ <- builderTypes b ]
+            [ name | RStructDef name _ _ <- builderTypes b ]
             `Set.union` Set.fromList
             [ name | REnumDef name _ <- builderTypes b ]
             `Set.union` Set.fromList
@@ -2061,7 +2147,7 @@ collectUndefinedTypes b =
                 , let (_, ':':ty) = break (== ':') p
                 , let t = dropWhile (== ' ') ty
                 , not (null t)
-                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "SkyValue", "Db", "SkyTask", "SkyError", "HashMap"])
+                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "Db", "SkyTask", "SkyError", "HashMap"])
                 , not ("impl " `isPrefixOf` t)
                 , not ("&" `isPrefixOf` t)
                 , not ("Vec<" `isPrefixOf` t)
@@ -2078,10 +2164,13 @@ collectUndefinedTypes b =
 -- | Check if the generated output contains the Sky.Core.Error.Error ADT.
 -- If so, SkyError points to it; otherwise SkyError = String.
 hasErrorType :: RustBuilder -> Bool
-hasErrorType b = any isErrorEnum (builderTypes b)
+hasErrorType b = any isErrorTypeName (builderTypes b) || any isUserError (builderModules b)
   where
-    isErrorEnum (REnumDef n _) = n == toCamelCase "Sky_Core_Error_Error"
-    isErrorEnum _ = False
+    isErrorTypeName (REnumDef n _) = n == toCamelCase "Sky_Core_Error_Error"
+    isErrorTypeName _ = False
+    isUserError m = any isErrorItem (modItems m)
+    isErrorItem (RustTypeAlias n _) = n == "Error" || n == "SkyError"
+    isErrorItem _ = False
 
 ffiPlaceholder :: String -> String
 ffiPlaceholder name = "type " ++ name ++ " = String;"
