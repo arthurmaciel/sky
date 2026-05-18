@@ -625,4 +625,21 @@ between Go and Rust output.
   the right next move is enum-based decoder representation
   (similar to serde's untagged enum) — bigger refactor, but
   preserves soundness. CLAUDE.md item 2 under "Known limitations"
-  already flags this as architecture-level.
+   already flags this as architecture-level.
+
+### G — 2026-05-17 — user-facing error message audit
+
+Audited every `str_err`/`json_dec_err_str` call in Builder.hs for
+Rust internals leaking to Sky users. 5 messages fixed:
+
+| Before | After |
+|---|---|
+| `"block_on thread panicked"` | `"Internal error: async task panicked"` |
+| `"tokio::spawn panicked"` | `"Internal error: parallel task panicked"` |
+| `"empty list"` (Random.choice) | `"Random.choice: empty list"` |
+| `"HTTP client not available in Rust target"` | `"Http.get/post: not yet implemented"` |
+| `json_dec_succeed reuse (factory/closure jargon)` | `"Internal compiler error: … please file a bug report"` |
+
+All decoder messages (`expected string/int/float/bool/array/null`,
+`missing field/path`, `required/opt decode error`) were already
+Rust-neutral.
