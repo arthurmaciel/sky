@@ -1463,7 +1463,8 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         writeFile modPath modCode
                         putStrLn $ "   Wrote " ++ modPath
                         writeFile mainRustPath rustCode
-                        writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver)
+                        let sqlxTls = Toml._sqlxTls config
+                        writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls)
                         putStrLn $ "   Wrote " ++ mainRustPath
                         putStrLn $ "   Wrote " ++ cargoTomlPath
                     Toml.TargetGo -> return ()

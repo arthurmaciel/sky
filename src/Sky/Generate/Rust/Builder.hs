@@ -2092,8 +2092,8 @@ ffiPlaceholder :: String -> String
 ffiPlaceholder name = "type " ++ name ++ " = String;"
 
 -- | Generate Cargo.toml for the Rust project
-emitCargoToml :: UsedKernels -> String -> String
-emitCargoToml uk dbDriver = unlines $
+emitCargoToml :: UsedKernels -> String -> String -> String
+emitCargoToml uk dbDriver sqlxTls = unlines $
     [ "[package]"
     , "name = \"sky-app\""
     , "version = \"0.1.0\""
@@ -2106,8 +2106,9 @@ emitCargoToml uk dbDriver = unlines $
     tokioDep = if needsTokio
         then [ "tokio = { version = \"1\", features = [\"rt\", \"rt-multi-thread\", \"macros\"] }" ]
         else []
+    sqlxTlsFeature = if sqlxTls == "native-tls" then "runtime-tokio-native-tls" else "runtime-tokio-rustls"
     sqlxDep = if usesDb uk
-        then [ "sqlx = { version = \"0.8\", features = [\"runtime-tokio-rustls\", \"" ++ dbFeature dbDriver ++ "\"] }" ]
+        then [ "sqlx = { version = \"0.8\", features = [\"" ++ sqlxTlsFeature ++ "\", \"" ++ dbFeature dbDriver ++ "\"] }" ]
         else []
     jsonDep = if usesJson uk
         then [ "serde_json = \"1\"" ]

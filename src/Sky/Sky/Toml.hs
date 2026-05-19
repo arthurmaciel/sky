@@ -36,6 +36,7 @@ data SkyConfig = SkyConfig
     , _logFormat     :: !String           -- [log] format: plain (default) | json
     , _logLevel      :: !String           -- [log] level: debug | info (default) | warn | error
     , _envPrefix     :: !String           -- [env] prefix: namespace for runtime SKY_* env reads (default "SKY")
+    , _sqlxTls       :: !String           -- [rust] sqlx_tls: "rustls" (default) | "native-tls"
     }
     deriving (Show)
 
@@ -66,6 +67,7 @@ defaultConfig = SkyConfig
     , _logFormat     = ""
     , _logLevel      = ""
     , _envPrefix     = ""
+    , _sqlxTls       = "rustls"
     }
 
 
@@ -147,6 +149,10 @@ applyKeyValue section config key value = case section of
     "env" -> case key of
         "prefix" -> config { _envPrefix = value }
         _        -> config
+    -- [rust] section: Rust target configuration
+    "rust" -> case key of
+        "sqlx_tls" -> config { _sqlxTls = value }
+        _          -> config
     -- Top-level / [source] / [project] — project metadata.
     _ -> case key of
         "name"    -> config { _name = value }
