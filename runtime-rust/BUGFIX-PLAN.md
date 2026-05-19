@@ -667,7 +667,21 @@ sky_runtime::*;` instead of duplicating these definitions inline.
 The compiler copies `runtime-rust/src/sky_runtime/` into
 `sky-out/Rust/src/sky_runtime/` at build time.
 
+**Session 23b fixes**:
+- `skyErrorLine` now emits `str_err` before `taskSection`/`dbSection`/`jsonSection` use it
+- `userTypeSection` moved before `taskSection` (SkyCoreErrorError ADT must be defined first)
+- `str_err` signature changed to `&str` throughout (was `String`)
+- Generated `config.rs` + `mod.rs` override the static copies at build time
+- Removed `db.rs` from crate (DB stubs are inline — depend on SkyTask/SkyError)
+- `dead deps (thiserror, serde) removed from runtime-rust/Cargo.toml
+
 **Still open**: `dbSection`, `jsonSection`, `extraKernelSection`,
 `entryPointSection` remain fully inline — they either depend on
 Haskell-computed config strings (`dbPath`, `hasErrorType` type names)
 or on `SkyError`.
+
+**Perf summary** (Session 23): Rust warm `cargo build` 0.09-2.2s
+(competitive with Go cold 1.5-5.5s). Debug binary ~4-8M vs Go ~12-13M.
+See `runtime-rust/PERF.md` for full measurements.
+
+**Step 4 (separate module files) deferred**: large refactor, needs own session.
