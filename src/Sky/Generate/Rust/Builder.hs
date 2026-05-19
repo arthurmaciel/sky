@@ -1230,9 +1230,22 @@ dbRowType "postgres" = "sqlx::postgres::PgRow"
 dbRowType "mysql"    = "sqlx::mysql::MySqlRow"
 dbRowType _          = "sqlx::sqlite::SqliteRow"
 
-emitRust :: RustBuilder -> String -> String -> String
-emitRust b dbPath dbDriver = unlines $ concat
+emitRust :: RustBuilder -> String -> String -> (String, [(String, String)])
+emitRust b dbPath dbDriver =
+    let modules = builderModules b
+        -- Each module gets its own .rs file (except Main — kept inline
+        -- to avoid naming conflict with main.rs).  Included via
+        -- pub mod + pub use so re-exports keep bare names working.
+        moduleFiles = map moduleToRustFile (filter (\m -> modName m /= "Main") modules)
+        inlineModules = filter (\m -> modName m == "Main") modules
+        modDecls = concatMap (\(name, _) ->
+            [ "pub mod " ++ toSnakeCase name ++ ";"
+            , "pub use " ++ toSnakeCase name ++ "::*;"
+            ]) moduleFiles
+        mainCode = unlines $ concat
             [ headerSection
+            , modDecls
+            , [""]
             , importSection (builderKernels b) dbDriver
             , basicTypeSection
             , coreHelperSection
@@ -1245,10 +1258,11 @@ emitRust b dbPath dbDriver = unlines $ concat
             , jsonSection (builderKernels b)
             , extraKernelSection (builderKernels b) b
             , miscHelperSection
-            , userModuleSection b
+            , concatMap (concatMap itemToRustStrings . modItems) inlineModules
             , ffiPlaceholderSection b
             , entryPointSection (builderKernels b)
             ]
+    in (mainCode, moduleFiles)
 
 -- | Header and file-level attributes
 headerSection :: [String]
@@ -1995,13 +2009,16 @@ typeDefToString (RStructDef name gens fields) =
     "#[derive(Clone, Debug)]\npub struct " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
 typeDefToString (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
 
-userModuleSection :: RustBuilder -> [String]
-userModuleSection b = concatMap moduleToRustStrings (builderModules b)
-
-moduleToRustStrings :: RustModule -> [String]
-moduleToRustStrings m = 
-    ["// Module: " ++ modName m, ""] ++
-    concatMap itemToRustStrings (modItems m) ++ [""]
+-- | Extract a module's content as (snake_case_file_stem, source_content).
+-- Used by emitRust to produce per-module .rs files.
+-- Each module file starts with `use crate::*;` so inline stubs (ok_res,
+-- SkyResult, task_*, etc.) and sky_runtime types are visible inside the
+-- real module boundary created by `pub mod`.
+moduleToRustFile :: RustModule -> (String, String)
+moduleToRustFile m =
+    let name = modName m
+        items = concatMap itemToRustStrings (modItems m)
+    in (toSnakeCase name, "#[allow(unused)]\nuse crate::*;\n\n" ++ unlines items)
 
 kernelCtorToRust :: ModuleName.Canonical -> String -> String -> String
 kernelCtorToRust modName typeName ctorName =
@@ -2031,7 +2048,7 @@ itemToRustStrings (RustFunction name generics params retType body) =
         -- Task-returning functions must NOT have semicolon after the body expression:
         -- the last expression IS the return value (Task combinator chain).
         bodyLine = if retType == "()" then exprToStatement body else body
-    in ["fn " ++ name ++ generics ++ "(" ++ intercalate ", " params ++ ")" ++ ret ++ " {", "    " ++ bodyLine, "}"]
+    in ["pub fn " ++ name ++ generics ++ "(" ++ intercalate ", " params ++ ")" ++ ret ++ " {", "    " ++ bodyLine, "}"]
 itemToRustStrings (RustStruct name fields) = 
     ["#[derive(Clone, Debug)]",
      "pub struct " ++ name ++ " {", 
