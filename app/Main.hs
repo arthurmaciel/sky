@@ -857,19 +857,17 @@ data Command
     deriving (Show)
 
 
-<<<<<<< HEAD
 -- | Options for `sky console`.
 data ConsoleOpts = ConsoleOpts
     { _consolePort :: Int        -- Sky.Live port (default 8025)
     , _consoleTui  :: Bool       -- --tui: run via Sky.Tui instead
     } deriving (Show)
-=======
+
 -- | Parse target string to CompileTarget
 parseTarget :: String -> Toml.CompileTarget
 parseTarget t = case map toLower t of
     "rust" -> Toml.TargetRust
     _      -> Toml.TargetGo
->>>>>>> a08b164a (feat(rust): wire Rust codegen as separate --target)
 
 
 data FmtTarget
