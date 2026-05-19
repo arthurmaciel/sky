@@ -31,6 +31,12 @@ jobs:
           go-version: '1.26'
           cache: true
 
+      - name: Install Rust toolchain
+        uses: actions-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+
       - name: Cache cabal store
         uses: actions/cache@v4
         with:
@@ -108,6 +114,18 @@ jobs:
       # example sweep on a cold runner.
       - name: Example sweep (build + run + HTTP probe, bounded)
         run: bash scripts/example-sweep.sh
+
+      # Cross-target verification — build each example with both Go and
+      # Rust targets, run both, diff stdout. 6/6 must pass.
+      - name: Cross-target verification (Go vs Rust)
+        run: bash scripts/verify-cross-target.sh
+        # Cargo may take 30+ min on a cold runner (compiling serde_json,
+        # tokio, sqlx, etc. from scratch). The cabal build + example
+        # sweep already took ~10 min, so this step can push CI past
+        # the default 60 min limit.  The runner OS image has cached
+        # Rust crates in ~/.cargo/registry, so most of the download
+        # time is avoided; actual compile time is 2-5 min.
+        timeout-minutes: 15
 
       # E2E harness — behavioural contracts per example (CLI flow
       # dispatch, HTTP body assertions, DB-error-log checks) that
