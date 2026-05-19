@@ -1237,7 +1237,6 @@ emitRust b dbPath dbDriver = unlines $ concat
     , basicTypeSection
     , coreHelperSection
     , taskSection (builderKernels b)
-    , dbSection (builderKernels b) dbPath dbDriver b
     , systemHelperSection
     , logHelperSection
     , jsonSection (builderKernels b)
@@ -1277,11 +1276,7 @@ importSection uk dbDriver =
     (if usesTaskParallel uk
      then [] else []) ++  -- tokio::spawn used via fully-qualified path
     (if usesDb uk
-     then
-        [ "use " ++ dbPoolType dbDriver ++ " as DbPool;"
-        , "use " ++ dbRowType dbDriver ++ " as DbRow;"
-        , "use sqlx::{Column, Row};"
-        ]
+     then ["use sqlx::{Column, Row};"]  -- Column/Row traits needed by inline code
      else [])
 
 -- | Core types and helpers (only SkyError-dependent parts — the rest are in sky_runtime crate)
