@@ -1230,16 +1230,9 @@ dbRowType "postgres" = "sqlx::postgres::PgRow"
 dbRowType "mysql"    = "sqlx::mysql::MySqlRow"
 dbRowType _          = "sqlx::sqlite::SqliteRow"
 
--- | Emit the generated Rust code: (main.rs content, [(module_file_name, content)])
-emitRust :: RustBuilder -> String -> String -> (String, [(String, String)])
-emitRust b dbPath dbDriver =
-    let moduleFiles = map moduleToRustFile (builderModules b)
-        includeStmts = map (\(name, _) ->
-            "include!(\"" ++ name ++ ".rs\");") moduleFiles
-        mainCode = unlines $ concat
+emitRust :: RustBuilder -> String -> String -> String
+emitRust b dbPath dbDriver = unlines $ concat
             [ headerSection
-            , includeStmts
-            , [""]
             , importSection (builderKernels b) dbDriver
             , basicTypeSection
             , coreHelperSection
@@ -1252,10 +1245,10 @@ emitRust b dbPath dbDriver =
             , jsonSection (builderKernels b)
             , extraKernelSection (builderKernels b) b
             , miscHelperSection
+            , userModuleSection b
             , ffiPlaceholderSection b
             , entryPointSection (builderKernels b)
             ]
-    in (mainCode, moduleFiles)
 
 -- | Header and file-level attributes
 headerSection :: [String]
@@ -2002,15 +1995,13 @@ typeDefToString (RStructDef name gens fields) =
     "#[derive(Clone, Debug)]\npub struct " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
 typeDefToString (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
 
--- | Convert a module to a standalone file included via include!():
--- (file_stem, content).  No module boundary — include! pastes content
--- at the inclusion site, so all scope references (SkyResult, ok_res,
--- cross-module fn calls) resolve as if everything were in one file.
-moduleToRustFile :: RustModule -> (String, String)
-moduleToRustFile m =
-    let name = modName m
-        items = concatMap itemToRustStrings (modItems m)
-    in (name, unlines items)
+userModuleSection :: RustBuilder -> [String]
+userModuleSection b = concatMap moduleToRustStrings (builderModules b)
+
+moduleToRustStrings :: RustModule -> [String]
+moduleToRustStrings m = 
+    ["// Module: " ++ modName m, ""] ++
+    concatMap itemToRustStrings (modItems m) ++ [""]
 
 kernelCtorToRust :: ModuleName.Canonical -> String -> String -> String
 kernelCtorToRust modName typeName ctorName =
