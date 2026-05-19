@@ -840,7 +840,7 @@ data Command
     | Watch Watch.WatchOpts (Maybe String) -- watch opts, optional target
     | Check FilePath
     | Fmt FmtTarget
-    | Test FilePath
+    | Test FilePath (Maybe String)  -- file path, optional target (go/rust)
     | Verify (Maybe String)      -- Nothing = all examples; Just name = one
     | Init (Maybe String)
     | Add String
@@ -902,7 +902,7 @@ commandParser = subparser
         (info (Fmt <$> fmtTargetArg)
             (progDesc "Format source file (or stdin with --stdin / -)"))
     <> command "test"
-        (info (Test <$> fileArg) (progDesc "Run a Sky test module (exposing `tests : List Test`)"))
+        (info (Test <$> fileArg <*> targetFlag) (progDesc "Run a Sky test module (exposing `tests : List Test`)"))
     <> command "verify"
         (info (Verify <$> optional (argument str (metavar "EXAMPLE")))
             (progDesc "Build + run + panic-check every example; enforce forbidden-pattern gate"))
@@ -1250,7 +1250,7 @@ runCommand cmd = case cmd of
                                 ++ berr
                         return (Left msg)
 
-    Test path -> do
+    Test path mTarget -> do
         -- Synthesise a temporary Main.sky that imports the user's test
         -- module and calls `Sky.Test.runMain tests`. Build + run via the
         -- same pipeline as `sky build`; exit code is propagated so CI
@@ -1260,6 +1260,10 @@ runCommand cmd = case cmd of
         config <- if hasToml
             then Toml.parseSkyToml <$> readFile "sky.toml"
             else return Toml.defaultConfig
+        -- CLI target overrides config
+        let config' = case mTarget of
+                Just t -> config { Toml._target = parseTarget t }
+                Nothing -> config
         absPath <- System.Directory.canonicalizePath path
         cwd <- System.Directory.getCurrentDirectory
         -- Honour the configured source root (default src/) and the
@@ -1299,7 +1303,7 @@ runCommand cmd = case cmd of
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
             regenMissingBindings goDeps
-        result <- Compile.compile config entryFile outDir
+        result <- Compile.compile config' entryFile outDir
         -- Clean up the entry regardless of compile outcome. Pre-fix,
         -- a go-build exception skipped the cleanup line, leaving
         -- SkyTestEntry__.sky in src/ across sessions.
@@ -1311,29 +1315,49 @@ runCommand cmd = case cmd of
                 cleanup
                 return (Left err)
             Right _ -> do
-                let binName = Toml._binName config
-                -- go build may fail (undefined references etc.);
-                -- wrap in try so cleanup always runs.
-                buildRc <- Control.Exception.try
-                    (callProcess "sh"
-                        ["-c", "cd " ++ outDir ++ " && go build -o " ++ binName ++ " ."])
-                    :: IO (Either Control.Exception.SomeException ())
-                cleanup
-                case buildRc of
-                    Left e -> do
-                        hPutStrLn stderr $
-                            "sky test: go build failed: " ++ show e
-                        exitWith (System.Exit.ExitFailure 1)
-                    Right () -> do
-                        -- Run with inherited stdout/stderr so test
-                        -- output is visible; propagate exit code.
-                        (_, _, _, ph) <- System.Process.createProcess
-                            (System.Process.proc (outDir ++ "/" ++ binName) [])
-                        ec <- System.Process.waitForProcess ph
-                        case ec of
-                            System.Exit.ExitSuccess   -> return (Right ())
-                            System.Exit.ExitFailure n ->
-                                exitWith (System.Exit.ExitFailure n)
+                let binName = Toml._binName config'
+                case Toml._target config' of
+                    Toml.TargetGo -> do
+                        -- go build may fail (undefined references etc.);
+                        -- wrap in try so cleanup always runs.
+                        buildRc <- Control.Exception.try
+                            (callProcess "sh"
+                                ["-c", "cd " ++ outDir ++ " && go build -o " ++ binName ++ " ."])
+                            :: IO (Either Control.Exception.SomeException ())
+                        cleanup
+                        case buildRc of
+                            Left e -> do
+                                hPutStrLn stderr $
+                                    "sky test: go build failed: " ++ show e
+                                exitWith (System.Exit.ExitFailure 1)
+                            Right () -> do
+                                (_, _, _, ph) <- System.Process.createProcess
+                                    (System.Process.proc (outDir ++ "/" ++ binName) [])
+                                ec <- System.Process.waitForProcess ph
+                                case ec of
+                                    System.Exit.ExitSuccess   -> return (Right ())
+                                    System.Exit.ExitFailure n ->
+                                        exitWith (System.Exit.ExitFailure n)
+                    Toml.TargetRust -> do
+                        let rustDir = outDir ++ "/Rust"
+                        buildRc <- Control.Exception.try
+                            (callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"])
+                            :: IO (Either Control.Exception.SomeException ())
+                        cleanup
+                        case buildRc of
+                            Left e -> do
+                                hPutStrLn stderr $
+                                    "sky test: cargo build failed: " ++ show e
+                                exitWith (System.Exit.ExitFailure 1)
+                            Right () -> do
+                                let binPath = rustDir ++ "/target/debug/sky-app"
+                                (_, _, _, ph) <- System.Process.createProcess
+                                    (System.Process.proc binPath [])
+                                ec <- System.Process.waitForProcess ph
+                                case ec of
+                                    System.Exit.ExitSuccess   -> return (Right ())
+                                    System.Exit.ExitFailure n ->
+                                        exitWith (System.Exit.ExitFailure n)
 
     Verify target -> do
         ok <- runVerify target
