@@ -1438,7 +1438,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                 "sqlite" -> "sqlite:" ++ Toml._dbPath config ++ "?mode=rwc"
                                 _        -> Toml._dbPath config
                             dbDriver = if null (Toml._dbDriver config) then "sqlite" else Toml._dbDriver config
-                            (rustCode, usage) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver
+                            (rustCode, moduleFiles, usage) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver
                             rustDir = outDir </> "Rust"
                         createDirectoryIfMissing True rustDir
                         let srcDir = rustDir </> "src"
@@ -1463,9 +1463,15 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         writeFile modPath modCode
                         putStrLn $ "   Wrote " ++ modPath
                         writeFile mainRustPath rustCode
+                        putStrLn $ "   Wrote " ++ mainRustPath
+                        -- Write per-module files
+                        mapM_ (\(modName, modContent) -> do
+                            let modPath = srcDir </> modName ++ ".rs"
+                            writeFile modPath modContent
+                            putStrLn $ "   Wrote " ++ modPath
+                            ) moduleFiles
                         let sqlxTls = Toml._sqlxTls config
                         writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls)
-                        putStrLn $ "   Wrote " ++ mainRustPath
                         putStrLn $ "   Wrote " ++ cargoTomlPath
                     Toml.TargetGo -> return ()
 
@@ -3313,12 +3319,12 @@ generateGo canMod srcMod config solvedTypes =
 
 
 -- | Generate Rust source from a canonical module with solved types
-generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes -> String -> String -> (String, RustBuilder.UsedKernels)
+generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes -> String -> String -> (String, [(String, String)], RustBuilder.UsedKernels)
 generateRust canMods _srcMod solvedTypes dbPath dbDriver = 
     let builder = RustBuilder.buildProgram canMods solvedTypes
-        code = RustBuilder.emitRust builder dbPath dbDriver
+        (code, moduleFiles) = RustBuilder.emitRust builder dbPath dbDriver
         usage = RustBuilder.builderKernels builder
-    in (code, usage)
+    in (code, moduleFiles, usage)
 
 
 -- | Collect Go imports needed
