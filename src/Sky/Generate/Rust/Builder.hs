@@ -1236,14 +1236,15 @@ emitRust b dbPath dbDriver = unlines $ concat
     , importSection (builderKernels b) dbDriver
     , basicTypeSection
     , coreHelperSection
+    , userTypeSection b
+    , skyErrorLine b
     , taskSection (builderKernels b)
+    , dbSection (builderKernels b) dbPath dbDriver b
     , systemHelperSection
     , logHelperSection
     , jsonSection (builderKernels b)
     , extraKernelSection (builderKernels b) b
     , miscHelperSection
-    , userTypeSection b
-    , skyErrorLine b
     , userModuleSection b
     , ffiPlaceholderSection b
     , entryPointSection (builderKernels b)
@@ -1276,7 +1277,11 @@ importSection uk dbDriver =
     (if usesTaskParallel uk
      then [] else []) ++  -- tokio::spawn used via fully-qualified path
     (if usesDb uk
-     then ["use sqlx::{Column, Row};"]  -- Column/Row traits needed by inline code
+     then
+        [ "use " ++ dbPoolType dbDriver ++ " as DbPool;"
+        , "use " ++ dbRowType dbDriver ++ " as DbRow;"
+        , "use sqlx::{Column, Row};"
+        ]
      else [])
 
 -- | Core types and helpers (only SkyError-dependent parts — the rest are in sky_runtime crate)
@@ -1603,7 +1608,7 @@ jsonSection uk =
     , "type Decoder<T> = Box<dyn Fn(&JsonVal) -> SkyResult<SkyError, T> + Send>;"
     , ""
     , "fn json_dec_ok<T>(t: T) -> SkyResult<SkyError, T> { SkyResult::Ok(t) }"
-    , "fn json_dec_err_str<T>(s: String) -> SkyResult<SkyError, T> { SkyResult::Err(str_err(s)) }"
+    , "fn json_dec_err_str<T>(s: String) -> SkyResult<SkyError, T> { SkyResult::Err(str_err(&s)) }"
     , ""
     , "// --- Encode ---"
     , "pub fn json_enc_encode(indent: i64, val: JsonVal) -> String {"
@@ -1739,16 +1744,11 @@ jsonSection uk =
 -- | Extra kernel stubs: Time, Random, File, Crypto (std-only, no extra deps)
 extraKernelSection :: UsedKernels -> RustBuilder -> [String]
 extraKernelSection uk b =
-    let errCtor = if hasErrorType b
-            then "fn str_err(s: String) -> SkyError { " ++ toCamelCase "Sky_Core_Error_Error" ++ "::Error(" ++ toCamelCase "Sky_Core_Error_ErrorKind" ++ "::Unexpected, " ++ toCamelCase "Sky_Core_Error_ErrorInfo" ++ " { details: SkyMaybe::Nothing, message: s }) }"
-            else "fn str_err(s: String) -> SkyError { s }"
-    in concat
+    concat
     [ [ ""
       , "// ==========================================="
       , "// EXTRA KERNEL STUBS (Time, Random, File, Crypto)"
       , "// ==========================================="
-      , ""
-      , errCtor
       , "" ]
     ++ (if usesTime uk then timeSection else [])
     ++ (if usesRandom uk then randomSection else [])
@@ -1922,13 +1922,26 @@ userTypeSection b =
     , ""
     ] ++ map typeDefToString (builderTypes b)
 
--- | SkyError type alias — conditional on Error module presence
+-- | SkyError type alias + str_err helper — conditional on Error module presence.
+-- Must be emitted AFTER userTypeSection (SkyCoreErrorError ADT) and BEFORE
+-- dbSection/jsonSection/extraKernelSection (which call str_err).
 skyErrorLine :: RustBuilder -> [String]
 skyErrorLine b =
     [ ""
     , if hasErrorType b
-      then "type SkyError = " ++ toCamelCase "Sky_Core_Error_Error" ++ ";"
-      else "type SkyError = String;"
+      then let errName = toCamelCase "Sky_Core_Error_Error"
+               kindName = toCamelCase "Sky_Core_Error_ErrorKind"
+               infoName = toCamelCase "Sky_Core_Error_ErrorInfo"
+           in unlines
+                [ "type SkyError = " ++ errName ++ ";"
+                , "fn str_err(s: &str) -> SkyError {"
+                , "    " ++ errName ++ "::Error("
+                , "        " ++ kindName ++ "::Unexpected,"
+                , "        " ++ infoName ++ " { details: SkyMaybe::Nothing, message: s.to_string() }"
+                , "    )"
+                , "}"
+                ]
+      else "type SkyError = String;\nfn str_err(s: &str) -> SkyError { s.to_string() }"
     , ""
     ]
 
