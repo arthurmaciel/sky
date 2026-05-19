@@ -1242,22 +1242,73 @@ emitRust b dbPath dbDriver =
             [ "pub mod " ++ toSnakeCase name ++ ";"
             , "pub use " ++ toSnakeCase name ++ "::*;"
             ]) moduleFiles
+        -- Wrappers for functions where E can't be inferred from args.
+        -- These delegate to the generic sky_runtime functions, instantiating E = SkyError.
+        wrapperFns = 
+            [ "type SkyTask<A> = sky_runtime::SkyTask<SkyError, A>;"
+            , "type Decoder<T> = sky_runtime::json::Decoder<SkyError, T>;"
+            , ""
+            ] ++
+            -- Wrappers for functions where E can't be inferred from args.
+            -- These shadow the re-exported generic versions from sky_runtime
+            -- (with #[allow(unused)] the warning is suppressed).
+            [ "pub fn ok_res<A>(a: A) -> SkyResult<SkyError, A> { sky_runtime::core::ok_res(a) }"
+            , "pub fn task_succeed<A: Send + 'static>(a: A) -> SkyTask<A> { sky_runtime::task::task_succeed(a) }"
+            , "pub fn log_info(msg: String) -> SkyTask<()> { sky_runtime::log::log_info(msg) }"
+            , "pub fn log_debug(msg: String) -> SkyTask<()> { sky_runtime::log::log_debug(msg) }"
+            , "pub fn log_warn(msg: String) -> SkyTask<()> { sky_runtime::log::log_warn(msg) }"
+            , "pub fn log_info_with(msg: String, attrs: Vec<String>) -> SkyTask<()> { sky_runtime::log::log_info_with(msg, attrs) }"
+            , "pub fn log_error_with(msg: String, attrs: Vec<String>) -> SkyTask<()> { sky_runtime::log::log_error_with(msg, attrs) }"
+            , "pub fn system_args(_: ()) -> SkyTask<Vec<String>> { sky_runtime::system::system_args(()) }"
+            , "pub fn system_setenv(key: String, val: String) -> SkyTask<()> { sky_runtime::system::system_setenv(key, val) }"
+            , "pub fn system_unsetenv(key: String) -> SkyTask<()> { sky_runtime::system::system_unsetenv(key) }"
+            , "pub fn time_now(_: ()) -> SkyTask<i64> { sky_runtime::time::time_now(()) }"
+            , "pub fn time_sleep(ms: i64) -> SkyTask<()> { sky_runtime::time::time_sleep(ms) }"
+            , "pub fn time_unix_millis(_: ()) -> SkyTask<i64> { sky_runtime::time::time_unix_millis(()) }"
+            , "pub fn random_int(lo: i64, hi: i64) -> SkyTask<i64> { sky_runtime::random::random_int(lo, hi) }"
+            , "pub fn random_float(_: ()) -> SkyTask<f64> { sky_runtime::random::random_float(()) }"
+            , "pub fn random_choice(items: Vec<String>) -> SkyTask<String> { sky_runtime::random::random_choice(items) }"
+            , "pub fn file_read_file(path: String) -> SkyTask<String> { sky_runtime::file::file_read_file(path) }"
+            , "pub fn file_write_file(path: String, content: String) -> SkyTask<()> { sky_runtime::file::file_write_file(path, content) }"
+            , "pub fn file_delete(path: String) -> SkyTask<()> { sky_runtime::file::file_delete(path) }"
+            , "pub fn crypto_random_bytes(n: i64) -> SkyTask<Vec<i64>> { sky_runtime::crypto::crypto_random_bytes(n) }"
+            , "pub fn crypto_random_token(n: i64) -> SkyTask<String> { sky_runtime::crypto::crypto_random_token(n) }"
+            ] ++
+            (if usesDb (builderKernels b)
+             then [ "pub fn db_connect(_: ()) -> SkyTask<Db> { sky_runtime::db::db_connect(()) }"
+                  , "pub fn db_open(_: ()) -> SkyTask<Db> { sky_runtime::db::db_open(()) }"
+                  , "pub fn db_open_with_path(path: String) -> SkyTask<Db> { sky_runtime::db::db_open_with_path(path) }"
+                  , "pub fn db_exec_raw(conn: Db, sql: String) -> SkyTask<()> { sky_runtime::db::db_exec_raw(conn, sql) }"
+                  , "pub fn db_exec(conn: Db, sql: String, params: Vec<String>) -> SkyTask<()> { sky_runtime::db::db_exec(conn, sql, params) }"
+                  , "pub fn db_query(conn: Db, sql: String, params: Vec<String>) -> SkyTask<Vec<HashMap<String, String>>> { sky_runtime::db::db_query(conn, sql, params) }"
+                  ]
+             else [])
+        -- impl From<String> for SkyError when Sky.Core.Error is present
+        fromStrImpl = if hasErrorType b
+            then let errName = "SkyCoreErrorError"
+                     kindName = "SkyCoreErrorErrorKind"
+                     infoName = "SkyCoreErrorErrorInfo"
+                 in [ "impl From<String> for " ++ errName ++ " {"
+                    , "    fn from(s: String) -> Self {"
+                    , "        " ++ errName ++ "::Error("
+                    , "            " ++ kindName ++ "::Unexpected,"
+                    , "            " ++ infoName ++ " { details: SkyMaybe::Nothing, message: s }"
+                    , "        )"
+                    , "    }"
+                    , "}"
+                    ]
+            else []
         mainCode = unlines $ concat
             [ headerSection
             , modDecls
             , [""]
             , importSection (builderKernels b) dbDriver
             , basicTypeSection
-            , coreHelperSection
             , userTypeSection b
+            , fromStrImpl
             , skyErrorLine b
-            , taskSection (builderKernels b)
-            , dbSection (builderKernels b) dbPath dbDriver b
-            , systemHelperSection
-            , logHelperSection
-            , jsonSection (builderKernels b)
-            , extraKernelSection (builderKernels b) b
-            , miscHelperSection
+            , wrapperFns
+            , [""]
             , concatMap (concatMap itemToRustStrings . modItems) inlineModules
             , ffiPlaceholderSection b
             , entryPointSection (builderKernels b)
@@ -2117,28 +2168,19 @@ emitCargoToml uk dbDriver sqlxTls = unlines $
     , "edition = \"2021\""
     , ""
     , "[dependencies]"
-    ] ++ tokioDep ++ sqlxDep ++ jsonDep ++ cryptoDep
+    , "tokio = { version = \"1\", features = [\"rt\", \"rt-multi-thread\", \"macros\", \"time\"] }"
+    ] ++
+    (if usesDb uk
+     then let sqlxTlsFeature = if sqlxTls == "native-tls" then "runtime-tokio-native-tls" else "runtime-tokio-rustls"
+          in [ "sqlx = { version = \"0.8\", features = [\"" ++ sqlxTlsFeature ++ "\", \"" ++ dbFeature dbDriver ++ "\"] }" ]
+     else []) ++
+    [ "serde_json = \"1\""
+    , "sha2 = \"0.10\""
+    ]
   where
-    needsTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk
-    tokioDep = if needsTokio
-        then [ "tokio = { version = \"1\", features = [\"rt\", \"rt-multi-thread\", \"macros\"] }" ]
-        else []
-    sqlxTlsFeature = if sqlxTls == "native-tls" then "runtime-tokio-native-tls" else "runtime-tokio-rustls"
-    sqlxDep = if usesDb uk
-        then [ "sqlx = { version = \"0.8\", features = [\"" ++ sqlxTlsFeature ++ "\", \"" ++ dbFeature dbDriver ++ "\"] }" ]
-        else []
-    jsonDep = if usesJson uk
-        then [ "serde_json = \"1\"" ]
-        else []
-    cryptoDep = if usesCrypto uk
-        then [ "sha2 = \"0.10\"" ]
-        else []
-
--- | Map sky.toml driver name to sqlx cargo feature
-dbFeature :: String -> String
-dbFeature "postgres" = "postgres"
-dbFeature "mysql"    = "mysql"
-dbFeature _          = "sqlite"
+    dbFeature "postgres" = "postgres"
+    dbFeature "mysql"    = "mysql"
+    dbFeature _          = "sqlite"
 
 intercalate :: String -> [String] -> String
 intercalate _ [] = ""

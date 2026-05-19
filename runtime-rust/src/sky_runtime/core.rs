@@ -1,12 +1,23 @@
 // Sky Runtime — Core types (always included)
-// These types are error-type-independent.  The generated code defines
-// `SkyError` separately (inline) since it depends on whether the user
-// imports `Sky.Core.Error`.
-//
-// Source of truth: this file. Builder.hs emits `use sky_runtime::*;`
-// instead of duplicating these definitions.
+// Generic over E (error type).  Builder.hs emits `use sky_runtime::*;`
+// and thin wrappers that instantiate E = SkyError.
 
 use std::fmt;
+use std::pin::Pin;
+use std::future::Future;
+
+// ===========================================
+// Task type (generic over error type E)
+// ===========================================
+pub type SkyTask<E, A> = Pin<Box<dyn Future<Output = SkyResult<E, A>> + Send + 'static>>;
+
+/// Construct Ok with generic error type.  Use `ok_res::<SkyError>` to
+/// instantiate with the project's concrete error type.
+pub fn ok_res<E, A>(a: A) -> SkyResult<E, A> { SkyResult::Ok(a) }
+
+/// Construct an error value from a string.  Requires `E: From<String>`.
+/// When E = SkyCoreErrorError, the generated code provides the impl.
+pub fn str_err<E: From<String>>(s: &str) -> E { s.to_string().into() }
 
 // ===========================================
 // Maybe
