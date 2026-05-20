@@ -1,0 +1,14 @@
+/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/deps/serde-cc4acd4fe6a08762.d: /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/serde-0c79bc1bb5bf9eba/out/private.rs
+
+/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/deps/libserde-cc4acd4fe6a08762.rlib: /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/serde-0c79bc1bb5bf9eba/out/private.rs
+
+/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/deps/libserde-cc4acd4fe6a08762.rmeta: /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/serde-0c79bc1bb5bf9eba/out/private.rs
+
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/serde-0c79bc1bb5bf9eba/out/private.rs:
+
+# env-dep:OUT_DIR=/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/serde-0c79bc1bb5bf9eba/out

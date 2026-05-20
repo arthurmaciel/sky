@@ -1,0 +1,14 @@
+/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/deps/thiserror-72ef0e5c71883178.d: /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/thiserror-f120952bacb12ece/out/private.rs
+
+/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/deps/libthiserror-72ef0e5c71883178.rlib: /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/thiserror-f120952bacb12ece/out/private.rs
+
+/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/deps/libthiserror-72ef0e5c71883178.rmeta: /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/thiserror-f120952bacb12ece/out/private.rs
+
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs:
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs:
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs:
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs:
+/home/arthur/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs:
+/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/thiserror-f120952bacb12ece/out/private.rs:
+
+# env-dep:OUT_DIR=/home/arthur/Documentos/comp/sky/tools/sky-ffi-inspect-rs/target/debug/build/thiserror-f120952bacb12ece/out
