@@ -7,6 +7,10 @@ import Data.Char (isSpace)
 import Data.List (isPrefixOf, stripPrefix)
 
 
+-- | Compilation target: go or rust
+data CompileTarget = TargetGo | TargetRust
+    deriving (Show, Eq)
+
 -- | Sky project configuration
 data SkyConfig = SkyConfig
     { _name          :: !String           -- project name
@@ -14,7 +18,9 @@ data SkyConfig = SkyConfig
     , _entry         :: !String           -- entry file (src/Main.sky)
     , _sourceRoot    :: !String           -- source root (src)
     , _binName       :: !String           -- output binary name (app)
+    , _target        :: !CompileTarget   -- compilation target (go or rust)
     , _goDeps        :: [(String, String)]-- Go dependencies [(pkg, version)]
+    , _rustDeps      :: [(String, String)]-- Rust crate deps [(crate, version)]
     , _skyDeps       :: [(String, String)]-- Sky-source dependencies [(repo, version)]
     , _livePort      :: !Int              -- [live] port (default 8000)
     , _liveStore     :: !String           -- [live] store: memory / sqlite / postgres
@@ -31,6 +37,7 @@ data SkyConfig = SkyConfig
     , _logFormat     :: !String           -- [log] format: plain (default) | json
     , _logLevel      :: !String           -- [log] level: debug | info (default) | warn | error
     , _envPrefix     :: !String           -- [env] prefix: namespace for runtime SKY_* env reads (default "SKY")
+    , _sqlxTls       :: !String           -- [rust] sqlx_tls: "rustls" (default) | "native-tls"
     }
     deriving (Show)
 
@@ -43,7 +50,9 @@ defaultConfig = SkyConfig
     , _entry         = "src/Main.sky"
     , _sourceRoot    = "src"
     , _binName       = "app"
+    , _target        = TargetGo
     , _goDeps        = []
+    , _rustDeps      = []
     , _skyDeps       = []
     , _livePort      = 8000
     , _liveStore     = ""
@@ -60,6 +69,7 @@ defaultConfig = SkyConfig
     , _logFormat     = ""
     , _logLevel      = ""
     , _envPrefix     = ""
+    , _sqlxTls       = "rustls"
     }
 
 
@@ -94,6 +104,8 @@ applyKeyValue :: String -> SkyConfig -> String -> String -> SkyConfig
 applyKeyValue section config key value = case section of
     "go.dependencies" ->
         config { _goDeps = _goDeps config ++ [(stripQuotes key, value)] }
+    "rust.dependencies" ->
+        config { _rustDeps = _rustDeps config ++ [(stripQuotes key, value)] }
     "dependencies" ->
         config { _skyDeps = _skyDeps config ++ [(stripQuotes key, value)] }
     -- [live] section: Sky.Live runtime config.
@@ -141,6 +153,10 @@ applyKeyValue section config key value = case section of
     "env" -> case key of
         "prefix" -> config { _envPrefix = value }
         _        -> config
+    -- [rust] section: Rust target configuration
+    "rust" -> case key of
+        "sqlx_tls" -> config { _sqlxTls = value }
+        _          -> config
     -- Top-level / [source] / [project] — project metadata.
     _ -> case key of
         "name"    -> config { _name = value }
@@ -148,6 +164,7 @@ applyKeyValue section config key value = case section of
         "entry"   -> config { _entry = value }
         "root"    -> config { _sourceRoot = value }
         "bin"     -> config { _binName = value }
+        "target"  -> config { _target = parseCompileTarget value }
         -- top-level `port = 8000` (legacy — before [live] section existed)
         "port"    -> config { _livePort = safeReadInt value (_livePort config) }
         _         -> config
@@ -168,3 +185,7 @@ stripQuotes ('"' : rest) = case reverse rest of
     '"' : inner -> reverse inner
     _ -> rest
 stripQuotes s = s
+
+parseCompileTarget :: String -> CompileTarget
+parseCompileTarget "rust" = TargetRust
+parseCompileTarget _      = TargetGo

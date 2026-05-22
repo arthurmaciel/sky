@@ -7,7 +7,7 @@ import Options.Applicative
 import System.Exit (exitFailure, exitSuccess, ExitCode(..))
 import qualified Data.Version
 import qualified Paths_sky_compiler
-import System.IO (hPutStr, hPutStrLn, stderr)
+import System.IO (hPutStr, hPutStrLn, hFlush, stdout, stderr)
 
 import qualified System.Directory
 import qualified System.Environment
@@ -23,6 +23,7 @@ import qualified System.Posix.Signals as Signals
 import System.FilePath ((</>), takeExtension, takeDirectory, takeFileName, dropExtension, splitDirectories)
 import System.Exit (exitWith)
 import Data.List (isPrefixOf, isInfixOf, stripPrefix, tails)
+import Data.Char (toLower)
 import System.Process (callProcess, rawSystem)
 import qualified System.Process
 import qualified System.IO.Temp
@@ -45,6 +46,7 @@ import qualified Sky.Parse.Module as ParseMod
 import qualified Sky.Format.Format as Format
 import qualified Sky.Lsp.Server as Lsp
 import qualified Sky.Build.FfiGen as FfiGen
+import Sky.Sky.Toml (CompileTarget(..))
 import qualified Sky.Build.SkyDeps as SkyDeps
 import qualified Sky.Build.Validator as Validator
 import qualified Sky.Reporting.Render as Render
@@ -703,7 +705,7 @@ runProject path = do
             if hasRt
                 then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                 else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-        regenMissingBindings goDeps
+        regenMissingBindings (Toml._target config) goDeps
     result <- Compile.compile config path outDir
     case result of
         Left err -> return (Left err)
@@ -711,18 +713,14 @@ runProject path = do
             putStrLn "Running go build..."
             runGoBuildWithDiagnostics outDir (Toml._binName config) goPath
             putStrLn "Build complete, running..."
-            -- Propagate the child's exit code verbatim rather than
-            -- surfacing a `callProcess … failed` exception — a
-            -- non-zero exit (e.g. `sky db status` finding drift) is
-            -- a legitimate, scriptable outcome.
             ec <- rawSystem (outDir ++ "/" ++ Toml._binName config) []
             case ec of
                 ExitSuccess   -> return (Right ())
                 ExitFailure _ -> exitWith ec
 
 
-regenMissingBindings :: [(String, String)] -> IO ()
-regenMissingBindings deps = do
+regenMissingBindings :: CompileTarget -> [(String, String)] -> IO ()
+regenMissingBindings target deps = do
     createDirectoryIfMissing True ".skycache/ffi"
     -- Filter once: only keep deps whose kernel.json is missing.
     -- Subsequent `sky install` runs see this empty after a successful
@@ -735,40 +733,24 @@ regenMissingBindings deps = do
     case missing of
         [] -> return ()
         _  -> do
-            -- Batch `go get` for all missing deps in a single
-            -- invocation. Go's module resolver is faster than running
-            -- it N times because the dep graph is computed once.
-            let pkgList = unwords (map fst missing)
-            callProcess "sh"
-                [ "-c"
-                , "cd sky-out && go get " ++ pkgList ++ " 2>&1 | grep -v '^go:' >&2 || true"
-                ]
+            -- Fetch dependencies: `go get` for Go, no-op for Rust (inspector does it)
+            case target of
+                TargetGo -> do
+                    let pkgList = unwords (map fst missing)
+                    callProcess "sh"
+                        [ "-c"
+                        , "cd sky-out && go get " ++ pkgList ++ " 2>&1 | grep -v '^go:' >&2 || true"
+                        ]
+                TargetRust -> return ()
+
             -- Chunked multi-inspector strategy:
             --   * Split missing deps into K chunks (K = parallelism cap).
             --   * Run K inspector subprocesses in parallel, each in
             --     multi-mode over its chunk.
-            -- Why chunked rather than (a) one combined call or (b) N
-            -- separate calls:
-            --   Combined-only: single subprocess, internal Go-loader
-            --     goroutines saturate ~2 cores. Dedup benefit but no
-            --     cross-process parallelism — wall-clock-bound by the
-            --     slowest single load.
-            --   Separate-N: N subprocesses each loading one root,
-            --     each internally using ~2 cores. Saturates cores at
-            --     N=4, but every shared transitive dep is type-
-            --     checked N times (no dedup).
-            --   Chunked-K: K subprocesses each loading C/K deps in
-            --     multi-mode. Each chunk gets dedup within itself;
-            --     chunks run in parallel for wall speedup. Sweet
-            --     spot when K matches numProcessors/2 (so total
-            --     thread count matches core count).
-            -- For skyshop's 18 deps with K=4: 4-5 deps/chunk, 4
-            -- chunks running concurrently, ~halves wall vs combined-
-            -- only and saves ~10% CPU vs separate-N.
             n <- resolveInstallParallelism
             let pkgs   = map fst missing
                 chunks = chunkInto n pkgs
-            chunkResults <- mapConcurrentlyN n FfiGen.runInspectorMulti chunks
+            chunkResults <- mapConcurrentlyN n (FfiGen.runInspectorMultiForTarget target) chunks
             -- Concat back into a per-input results list, preserving
             -- order. Each chunk's results are aligned to its input
             -- subset (runInspectorMulti's contract).
@@ -782,7 +764,7 @@ regenMissingBindings deps = do
   where
     emit (_, Left _)     = return ()
     emit (_, Right info) = do
-        _ <- FfiGen.generateBindings info
+        _ <- FfiGen.generateBindings target info
         return ()
 
 
@@ -887,15 +869,15 @@ main = do
 
 
 data Command
-    = Build FilePath
-    | Run FilePath
-    | Watch Watch.WatchOpts      -- file-watch-driven rebuild + restart
+    = Build FilePath (Maybe String)      -- file path, optional target (go/rust)
+    | Run FilePath (Maybe String)       -- file path, optional target
+    | Watch Watch.WatchOpts (Maybe String) -- watch opts, optional target
     | Check FilePath
     | Fmt FmtTarget
-    | Test FilePath
+    | Test FilePath (Maybe String)  -- file path, optional target (go/rust)
     | Verify (Maybe String)      -- Nothing = all examples; Just name = one
     | Init (Maybe String)
-    | Add String
+    | Add String (Maybe String)       -- package name, optional target (go/rust)
     | Remove String
     | Install
     | Update
@@ -924,6 +906,12 @@ data ConsoleOpts = ConsoleOpts
     , _consoleTui  :: Bool       -- --tui: run via Sky.Tui instead
     } deriving (Show)
 
+-- | Parse target string to CompileTarget
+parseTarget :: String -> Toml.CompileTarget
+parseTarget t = case map toLower t of
+    "rust" -> Toml.TargetRust
+    _      -> Toml.TargetGo
+
 
 -- | Options for `sky doc`.
 data DocOpts = DocOpts
@@ -941,14 +929,23 @@ data FmtTarget
     deriving (Show)
 
 
+-- | Parser for optional --target flag
+targetFlag :: Parser (Maybe String)
+targetFlag = optional (strOption
+    ( long "target"
+   <> metavar "TARGET"
+   <> help "Compilation target: go (default) or rust"
+    ))
+
+
 commandParser :: Parser Command
 commandParser = subparser
     ( command "build"
-        (info (Build <$> fileArg) (progDesc "Compile to binary"))
+        (info (Build <$> fileArg <*> targetFlag) (progDesc "Compile to binary"))
     <> command "run"
-        (info (Run <$> fileArg) (progDesc "Build and run"))
+        (info (Run <$> fileArg <*> targetFlag) (progDesc "Build and run"))
     <> command "watch"
-        (info (Watch <$> watchOptsParser)
+        (info (Watch <$> watchOptsParser <*> targetFlag)
             (progDesc "Watch source files; rebuild + restart on change"))
     <> command "check"
         (info (Check <$> fileArg) (progDesc "Type-check only"))
@@ -956,7 +953,7 @@ commandParser = subparser
         (info (Fmt <$> fmtTargetArg)
             (progDesc "Format source file (or stdin with --stdin / -)"))
     <> command "test"
-        (info (Test <$> fileArg) (progDesc "Run a Sky test module (exposing `tests : List Test`)"))
+        (info (Test <$> fileArg <*> targetFlag) (progDesc "Run a Sky test module (exposing `tests : List Test`)"))
     <> command "verify"
         (info (Verify <$> optional (argument str (metavar "EXAMPLE")))
             (progDesc "Build + run + panic-check every example; enforce forbidden-pattern gate"))
@@ -964,11 +961,11 @@ commandParser = subparser
         (info (Init <$> optional (argument str (metavar "NAME")))
             (progDesc "Create new project"))
     <> command "add"
-        (info (Add <$> argument str (metavar "PACKAGE"))
-            (progDesc "Add Go dependency"))
+        (info (Add <$> argument str (metavar "PACKAGE") <*> targetFlag)
+            (progDesc "Add dependency (Go or Rust crate)"))
     <> command "remove"
         (info (Remove <$> argument str (metavar "PACKAGE"))
-            (progDesc "Remove Go dependency"))
+            (progDesc "Remove dependency (from sky.toml)"))
     <> command "install"
         (info (pure Install) (progDesc "Install dependencies"))
     <> command "update"
@@ -1212,17 +1209,21 @@ runCommand cmd = case cmd of
         putStrLn skyVersionString
         return (Right ())
 
-    Build path -> do
+    Build path mTarget -> do
         -- Read sky.toml if it exists
         hasToml <- doesFileExist "sky.toml"
         config <- if hasToml
             then Toml.parseSkyToml <$> readFile "sky.toml"
             else return Toml.defaultConfig
+        -- CLI target overrides config
+        let config' = case mTarget of
+                Just t -> config { Toml._target = parseTarget t }
+                Nothing -> config
         let outDir = "sky-out"
         createDirectoryIfMissing True outDir
         -- Auto-regen missing Go FFI bindings before compile. Idempotent:
         -- skips deps whose .kernel.json is already present.
-        let goDeps = Toml._goDeps config
+        let goDeps = Toml._goDeps config'
         when (not (null goDeps)) $ do
             hasGoMod <- doesFileExist "sky-out/go.mod"
             when (not hasGoMod) $ do
@@ -1230,28 +1231,77 @@ runCommand cmd = case cmd of
                 if hasRt
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings goDeps
-        result <- Compile.compile config path outDir
+            regenMissingBindings (Toml._target config') goDeps
+        result <- Compile.compile config' path outDir
         case result of
             Left err -> return (Left err)
-            Right goPath -> do
-                putStrLn "Running go build..."
-                runGoBuildWithDiagnostics outDir (Toml._binName config) goPath
-                putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config
+            Right _ -> do
+                -- Handle based on target
+                case Toml._target config' of
+                    Toml.TargetGo -> do
+                        let goPath = outDir </> "main.go"
+                        putStrLn "Running go build..."
+                        runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
+                        putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config'
+                    Toml.TargetRust -> do
+                        let rustDir = outDir ++ "/Rust"
+                        hFlush stdout
+                        putStrLn "Running cargo build..."
+                        callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
+                        putStrLn $ "Build complete: " ++ rustDir ++ "/target/debug/sky-app"
                 return (Right ())
 
-    Run path -> runProject path
+    Run path mTarget -> do
+        hasToml <- doesFileExist "sky.toml"
+        config <- if hasToml
+            then Toml.parseSkyToml <$> readFile "sky.toml"
+            else return Toml.defaultConfig
+        let config' = case mTarget of
+                Just t -> config { Toml._target = parseTarget t }
+                Nothing -> config
+            outDir = "sky-out"
+        createDirectoryIfMissing True outDir
+        let goDeps = Toml._goDeps config'
+        when (not (null goDeps)) $ do
+            hasGoMod <- doesFileExist "sky-out/go.mod"
+            when (not hasGoMod) $ do
+                hasRt <- doesFileExist "runtime-go/go.mod"
+                if hasRt
+                    then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
+                    else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
+            regenMissingBindings (Toml._target config') goDeps
+        result <- Compile.compile config' path outDir
+        case result of
+            Left err -> return (Left err)
+            Right _ -> do
+                case Toml._target config' of
+                    Toml.TargetGo -> do
+                        let goPath = outDir </> "main.go"
+                        putStrLn "Running go build..."
+                        runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
+                        putStrLn $ "Build complete, running..."
+                        callProcess (outDir ++ "/" ++ Toml._binName config') []
+                    Toml.TargetRust -> do
+                        let rustDir = outDir ++ "/Rust"
+                        hFlush stdout
+                        putStrLn $ "Running cargo build in " ++ rustDir
+                        callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
+                        putStrLn $ "Build complete, running..."
+                        hFlush stdout
+                        let binPath = rustDir ++ "/target/debug/sky-app"
+                        hasBin <- doesFileExist binPath
+                        if hasBin
+                            then callProcess binPath []
+                            else putStrLn "Error: binary not found"
+                return (Right ())
 
     Db action path -> do
-        -- Drive the runtime's SKY_DB_OP mode: the built app's
-        -- Db.migrate call detects the env var, prints a report /
-        -- applies migrations, and exits before serving.
         System.Environment.setEnv "SKY_DB_OP" $ case action of
             DbStatus  -> "status"
             DbMigrate -> "migrate"
         runProject path
 
-    Watch opts -> do
+    Watch opts mTarget -> do
         Watch.runWatch opts
         return (Right ())
 
@@ -1272,7 +1322,7 @@ runCommand cmd = case cmd of
                 if hasRt
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings goDeps
+            regenMissingBindings (Toml._target config) goDeps
         -- P0-1 (audit): sky check must be a superset of sky build. Run
         -- the full emit + `go build` so codegen-stage failures surface
         -- here instead of only when the user runs `sky build`. Without
@@ -1301,7 +1351,7 @@ runCommand cmd = case cmd of
                                 ++ berr
                         return (Left msg)
 
-    Test path -> do
+    Test path mTarget -> do
         -- Synthesise a temporary Main.sky that imports the user's test
         -- module and calls `Sky.Test.runMain tests`. Build + run via the
         -- same pipeline as `sky build`; exit code is propagated so CI
@@ -1311,6 +1361,10 @@ runCommand cmd = case cmd of
         config <- if hasToml
             then Toml.parseSkyToml <$> readFile "sky.toml"
             else return Toml.defaultConfig
+        -- CLI target overrides config
+        let config' = case mTarget of
+                Just t -> config { Toml._target = parseTarget t }
+                Nothing -> config
         absPath <- System.Directory.canonicalizePath path
         cwd <- System.Directory.getCurrentDirectory
         -- Honour the configured source root (default src/) and the
@@ -1349,8 +1403,8 @@ runCommand cmd = case cmd of
                 if hasRt
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings goDeps
-        result <- Compile.compile config entryFile outDir
+            regenMissingBindings (Toml._target config') goDeps
+        result <- Compile.compile config' entryFile outDir
         -- Clean up the entry regardless of compile outcome. Pre-fix,
         -- a go-build exception skipped the cleanup line, leaving
         -- SkyTestEntry__.sky in src/ across sessions.
@@ -1362,29 +1416,49 @@ runCommand cmd = case cmd of
                 cleanup
                 return (Left err)
             Right _ -> do
-                let binName = Toml._binName config
-                -- go build may fail (undefined references etc.);
-                -- wrap in try so cleanup always runs.
-                buildRc <- Control.Exception.try
-                    (callProcess "sh"
-                        ["-c", "cd " ++ outDir ++ " && go build -o " ++ binName ++ " ."])
-                    :: IO (Either Control.Exception.SomeException ())
-                cleanup
-                case buildRc of
-                    Left e -> do
-                        hPutStrLn stderr $
-                            "sky test: go build failed: " ++ show e
-                        exitWith (System.Exit.ExitFailure 1)
-                    Right () -> do
-                        -- Run with inherited stdout/stderr so test
-                        -- output is visible; propagate exit code.
-                        (_, _, _, ph) <- System.Process.createProcess
-                            (System.Process.proc (outDir ++ "/" ++ binName) [])
-                        ec <- System.Process.waitForProcess ph
-                        case ec of
-                            System.Exit.ExitSuccess   -> return (Right ())
-                            System.Exit.ExitFailure n ->
-                                exitWith (System.Exit.ExitFailure n)
+                let binName = Toml._binName config'
+                case Toml._target config' of
+                    Toml.TargetGo -> do
+                        -- go build may fail (undefined references etc.);
+                        -- wrap in try so cleanup always runs.
+                        buildRc <- Control.Exception.try
+                            (callProcess "sh"
+                                ["-c", "cd " ++ outDir ++ " && go build -o " ++ binName ++ " ."])
+                            :: IO (Either Control.Exception.SomeException ())
+                        cleanup
+                        case buildRc of
+                            Left e -> do
+                                hPutStrLn stderr $
+                                    "sky test: go build failed: " ++ show e
+                                exitWith (System.Exit.ExitFailure 1)
+                            Right () -> do
+                                (_, _, _, ph) <- System.Process.createProcess
+                                    (System.Process.proc (outDir ++ "/" ++ binName) [])
+                                ec <- System.Process.waitForProcess ph
+                                case ec of
+                                    System.Exit.ExitSuccess   -> return (Right ())
+                                    System.Exit.ExitFailure n ->
+                                        exitWith (System.Exit.ExitFailure n)
+                    Toml.TargetRust -> do
+                        let rustDir = outDir ++ "/Rust"
+                        buildRc <- Control.Exception.try
+                            (callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"])
+                            :: IO (Either Control.Exception.SomeException ())
+                        cleanup
+                        case buildRc of
+                            Left e -> do
+                                hPutStrLn stderr $
+                                    "sky test: cargo build failed: " ++ show e
+                                exitWith (System.Exit.ExitFailure 1)
+                            Right () -> do
+                                let binPath = rustDir ++ "/target/debug/sky-app"
+                                (_, _, _, ph) <- System.Process.createProcess
+                                    (System.Process.proc binPath [])
+                                ec <- System.Process.waitForProcess ph
+                                case ec of
+                                    System.Exit.ExitSuccess   -> return (Right ())
+                                    System.Exit.ExitFailure n ->
+                                        exitWith (System.Exit.ExitFailure n)
 
     Verify target -> do
         ok <- runVerify target
@@ -1498,43 +1572,56 @@ runCommand cmd = case cmd of
         putStrLn $ "Next: cd " ++ name ++ " && sky build src/Main.sky"
         return (Right ())
 
-    Add pkg -> do
+    Add pkg mTarget -> do
         putStrLn $ "Adding " ++ pkg ++ "..."
-        -- Ensure sky-out exists with go.mod (copy from runtime-go to inherit deps)
-        createDirectoryIfMissing True "sky-out"
-        hasGoMod <- doesFileExist "sky-out/go.mod"
-        if not hasGoMod
-            then do
-                hasRuntimeMod <- doesFileExist "runtime-go/go.mod"
-                if hasRuntimeMod
-                    then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
-                    else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            else return ()
-        -- Fetch the package
-        callProcess "sh" ["-c", "cd sky-out && go get " ++ pkg]
-        -- Generate bindings via the Go inspector
-        do
-                putStrLn $ "Inspecting " ++ pkg ++ "..."
-                r <- FfiGen.runInspector pkg
-                case r of
-                    Left err -> do
-                        putStrLn $ "   FFI inspector warning: " ++ err
-                        putStrLn $ "   (You can still write hand-written bindings in ffi/.)"
-                        return (Right ())
-                    Right info -> do
-                        names <- FfiGen.generateBindings info
-                        putStrLn $ "Generated " ++ show (length names) ++ " bindings in ffi/"
-                        mapM_ (\n -> putStrLn $ "   " ++ n) (take 10 names)
-                        if length names > 10
-                            then putStrLn $ "   ... and " ++ show (length names - 10) ++ " more"
-                            else return ()
-                        -- Persist the dep into sky.toml so subsequent
-                        -- `sky build` / `sky install` round-trips see it.
-                        -- Idempotent: if the package is already present
-                        -- (any version), the file is left untouched.
-                        appendGoDependency pkg
-                        putStrLn "Call from Sky via: Ffi.callPure \"<name>\" [args]  (or callTask for effectful)"
-                        return (Right ())
+        hasToml <- doesFileExist "sky.toml"
+        config <- if hasToml
+            then Toml.parseSkyToml <$> readFile "sky.toml"
+            else return Toml.defaultConfig
+        -- CLI target overrides sky.toml
+        let target = case mTarget of
+                Just t  -> parseTarget t
+                Nothing -> Toml._target config
+        let inspName = case target of
+                TargetGo   -> "sky-ffi-inspect"
+                TargetRust -> "sky-ffi-inspect-rs"
+        case target of
+            TargetGo -> do
+                -- Ensure sky-out exists with go.mod
+                createDirectoryIfMissing True "sky-out"
+                hasGoMod <- doesFileExist "sky-out/go.mod"
+                when (not hasGoMod) $ do
+                    hasRuntimeMod <- doesFileExist "runtime-go/go.mod"
+                    if hasRuntimeMod
+                        then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
+                        else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
+                callProcess "sh" ["-c", "cd sky-out && go get " ++ pkg]
+                appendGoDependency pkg
+            TargetRust ->
+                return ()
+        -- Generate bindings via the target-aware inspector
+        r <- FfiGen.runInspectorForTarget target pkg
+        case r of
+            Left err -> do
+                putStrLn $ "   " ++ inspName ++ " warning: " ++ err
+                putStrLn $ "   (You can still write hand-written bindings in ffi/.)"
+                return (Right ())
+            Right info -> do
+                names <- FfiGen.generateBindings target info
+                putStrLn $ "Generated " ++ show (length names) ++ " bindings in .skycache/"
+                mapM_ (\n -> putStrLn $ "   " ++ n) (take 10 names)
+                when (length names > 10) $
+                    putStrLn $ "   ... and " ++ show (length names - 10) ++ " more"
+                case target of
+                    TargetGo    -> appendGoDependency pkg
+                    TargetRust  -> return ()
+                let outputMsg = case target of
+                        TargetGo ->
+                            "Call from Sky via: import " ++ pkg ++ " as Pkg; Pkg.fnName args"
+                        TargetRust ->
+                            "Import in your Sky module, e.g.: import " ++ pkg ++ " as Uuid; Uuid.v4 (). Wrapper at .skycache/rust/*_bindings.rs"
+                putStrLn outputMsg
+                return (Right ())
 
     Remove pkg -> do
         putStrLn $ "Removing " ++ pkg ++ "..."
@@ -1565,7 +1652,7 @@ runCommand cmd = case cmd of
                 if hasRt
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings goDeps
+            regenMissingBindings (Toml._target config) goDeps
             putStrLn $ "Go dependencies installed."
         case Toml._skyDeps config of
             [] -> return ()

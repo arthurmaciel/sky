@@ -52,6 +52,7 @@ import qualified Sky.Type.Solve as Solve
 import qualified Sky.Type.Type as T
 import qualified Sky.Generate.Go.Type as GoType
 import qualified Sky.Generate.Go.Record as Rec
+import qualified Sky.Generate.Rust.Builder as RustBuilder
 import qualified Sky.Build.ModuleGraph as Graph
 import qualified Sky.Build.Dce as Dce
 import qualified Sky.Build.FfiRegistry as FfiReg
@@ -1456,50 +1457,140 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 let mainGoPath = outDir </> "main.go"
                 writeFile mainGoPath goCode
                 putStrLn $ "   Wrote " ++ mainGoPath
-                -- v0.13 Layer 2: codegen-stage validator runs after
-                -- writing main.go but before any downstream tooling
-                -- (DCE / go build).  It scans the emitted Go for
-                -- known-bad shapes (typed-kernel call with raw any
-                -- arg, etc.) and emits a structured Diagnostic with
-                -- a Sky-source region if the bug shape is found.
-                -- This gives "if it compiles, it works" defence in
-                -- depth — even if a new codegen regression slips
-                -- past the cabal tests, the validator catches it
-                -- pre-build and prints an actionable Diagnostic
-                -- instead of a cryptic `go build` error.
-                let originMap = Validator.parseOriginComments goCode
-                    valDiags  = Validator.validateEmittedGo
-                                  mainGoPath originMap goCode
-                if not (null valDiags)
-                  then do
-                      rendered <- Render.renderCliMany valDiags
-                      putStrLn rendered
-                      removeStaleBuildOutput outDir (Toml._binName config)
-                      return (Left "Codegen validation rejected the emitted Go")
-                  else do
-                      -- copyRuntime also copies runtime-go/go.mod + go.sum into
-                      -- outDir when it can locate the runtime. Only fall back
-                      -- to a minimal go.mod here if copyRuntime didn't write
-                      -- one (no runtime found).
-                      copyRuntime outDir
-                      hasOutMod <- doesFileExist (outDir </> "go.mod")
-                      if not hasOutMod
-                          then writeFile (outDir </> "go.mod") $ unlines ["module sky-app", "", "go 1.21"]
-                          else return ()
-                      -- Pull in Go deps declared in sky.toml so generated
-                      -- ffi/*_bindings.go can resolve imports.
-                      seedGoDependencies outDir (Toml._goDeps config)
-                      -- P7: strip unreferenced FFI wrappers from
-                      -- sky-out/rt/*_bindings.go.  Tens of thousands of
-                      -- any/any wrapper bodies user code never calls
-                      -- (stripe alone contributes 74k).
-                      dceFfiWrappers outDir
-                      -- Write cache hash to enable incremental rebuild skip
-                      let cacheDir = ".skycache"
-                      createDirectoryIfMissing True cacheDir
-                      writeFile (cacheDir </> "source.hash") srcHash
-                      putStrLn "Compilation successful"
-                      return (Right mainGoPath)
+
+                -- Generate Rust code only when target is Rust
+                case Toml._target config of
+                    Toml.TargetRust -> do
+                        let allMods = canMod : map snd validDeps
+                            dbUrl = case Toml._dbDriver config of
+                                "sqlite" -> "sqlite:" ++ Toml._dbPath config ++ "?mode=rwc"
+                                _        -> Toml._dbPath config
+                            dbDriver = if null (Toml._dbDriver config) then "sqlite" else Toml._dbDriver config
+                            ffiSlugs = [ map (\c -> if Char.isAlphaNum c then c else '_') (fst dep) ++ "_bindings"
+                                       | dep <- Toml._rustDeps config ]
+                        -- Read the Stage-4 kernel alias table and convert keys to plain strings
+                        rawAliases <- readIORef globalKernelAlias
+                        let kernelAliases = Map.mapKeys (\(cn, fn) -> (ModuleName._name cn, fn)) rawAliases
+                            (rustCode, moduleFiles, usage) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases
+                            rustDir = outDir </> "Rust"
+                        createDirectoryIfMissing True rustDir
+                        let srcDir = rustDir </> "src"
+                            mainRustPath = srcDir </> "main.rs"
+                            cargoTomlPath = rustDir </> "Cargo.toml"
+                        createDirectoryIfMissing True srcDir
+                        copyRustRuntime outDir
+                        -- Generate sky_runtime/config.rs — DB types when usesDb
+                        let configPath = srcDir </> "sky_runtime" </> "config.rs"
+                            usesDb = RustBuilder.usesDb usage
+                            dbPool = RustBuilder.dbPoolType dbDriver
+                            dbRow = RustBuilder.dbRowType dbDriver
+                            configCode = unlines
+                                ([ "// GENERATED by Sky compiler — do not edit" ] ++
+                                 (if usesDb
+                                  then [ "pub type DbPool = " ++ dbPool ++ ";"
+                                       , "pub type DbRow = " ++ dbRow ++ ";"
+                                       , "pub const SKY_DB_URL: &str = " ++ show dbUrl ++ ";"
+                                       ]
+                                  else [ "// (no DB)" ]))
+                        writeFile configPath configCode
+                        putStrLn $ "   Wrote " ++ configPath
+                        -- Override the static mod.rs — include all sky_runtime modules
+                        let modPath = srcDir </> "sky_runtime" </> "mod.rs"
+                            baseMods = ["// GENERATED by Sky compiler — do not edit"
+                                       ,"pub mod config;","pub mod core;","pub mod task;"
+                                       ,"pub mod log;","pub mod system;","pub mod time;"
+                                       ,"pub mod random;","pub mod file;","pub mod crypto;"
+                                       ,"pub mod json;"]
+                            dbMod = if RustBuilder.usesDb usage then ["pub mod db;"] else []
+                            baseUse = ["pub use config::*;","pub use core::*;"
+                                      ,"pub use task::*;","pub use log::*;"
+                                      ,"pub use system::*;","pub use time::*;"
+                                      ,"pub use random::*;","pub use file::*;"
+                                      ,"pub use crypto::*;","pub use json::*;"]
+                            dbUse = if RustBuilder.usesDb usage then ["pub use db::*;"] else []
+                            modCode = unlines (baseMods ++ dbMod ++ baseUse ++ dbUse)
+                        writeFile modPath modCode
+                        putStrLn $ "   Wrote " ++ modPath
+                        writeFile mainRustPath rustCode
+                        putStrLn $ "   Wrote " ++ mainRustPath
+                        -- Write per-module files (separate compilation units,
+                        -- parallel cargo build, better error messages).
+                        mapM_ (\(modName, modContent) -> do
+                            let modPath = srcDir </> modName ++ ".rs"
+                            writeFile modPath modContent
+                            putStrLn $ "   Wrote " ++ modPath
+                            ) moduleFiles
+                        let sqlxTls = Toml._sqlxTls config
+                            rustDeps = Toml._rustDeps config
+                        writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDeps)
+                        putStrLn $ "   Wrote " ++ cargoTomlPath
+                        -- Copy Rust FFI binding files into sky-out/Rust/src/
+                        -- so `mod uuid_bindings; use uuid_bindings::*;` resolves.
+                        mapM_ (\(depName, _) -> do
+                            let slug = map (\c -> if Char.isAlphaNum c then c else '_') depName
+                                srcPath = ".skycache/rust" </> slug ++ "_bindings.rs"
+                            exists <- doesFileExist srcPath
+                            when exists $ do
+                                copyFile srcPath (srcDir </> slug ++ "_bindings.rs")
+                                putStrLn $ "   Copied " ++ srcPath
+                            ) (Toml._rustDeps config)
+                    Toml.TargetGo -> return ()
+
+                -- Go-specific post-codegen steps only for Go target
+                case Toml._target config of
+                    Toml.TargetRust -> do
+                        -- Write cache hash to enable incremental rebuild skip
+                        let cacheDir = ".skycache"
+                        createDirectoryIfMissing True cacheDir
+                        writeFile (cacheDir </> "source.hash") srcHash
+                        putStrLn "Compilation successful"
+                        return (Right (outDir </> "Rust/src/main.rs"))
+
+                    Toml.TargetGo -> do
+                        -- v0.13 Layer 2: codegen-stage validator runs after
+                        -- writing main.go but before any downstream tooling
+                        -- (DCE / go build).  It scans the emitted Go for
+                        -- known-bad shapes (typed-kernel call with raw any
+                        -- arg, etc.) and emits a structured Diagnostic with
+                        -- a Sky-source region if the bug shape is found.
+                        -- This gives "if it compiles, it works" defence in
+                        -- depth — even if a new codegen regression slips
+                        -- past the cabal tests, the validator catches it
+                        -- pre-build and prints an actionable Diagnostic
+                        -- instead of a cryptic `go build` error.
+                        let originMap = Validator.parseOriginComments goCode
+                            valDiags  = Validator.validateEmittedGo
+                                          mainGoPath originMap goCode
+                        if not (null valDiags)
+                          then do
+                              rendered <- Render.renderCliMany valDiags
+                              putStrLn rendered
+                              removeStaleBuildOutput outDir (Toml._binName config)
+                              return (Left "Codegen validation rejected the emitted Go")
+                          else do
+                              -- copyRuntime also copies runtime-go/go.mod + go.sum into
+                              -- outDir when it can locate the runtime. Only fall back
+                              -- to a minimal go.mod here if copyRuntime didn't write
+                              -- one (no runtime found).
+                              copyRuntime outDir
+                              hasOutMod <- doesFileExist (outDir </> "go.mod")
+                              if not hasOutMod
+                                  then writeFile (outDir </> "go.mod") $ unlines ["module sky-app", "", "go 1.21"]
+                                  else return ()
+                              -- Pull in Go deps declared in sky.toml so generated
+                              -- ffi/*_bindings.go can resolve imports.
+                              seedGoDependencies outDir (Toml._goDeps config)
+                              -- P7: strip unreferenced FFI wrappers from
+                              -- sky-out/rt/*_bindings.go.  Tens of thousands of
+                              -- any/any wrapper bodies user code never calls
+                              -- (stripe alone contributes 74k).
+                              dceFfiWrappers outDir
+                              -- Write cache hash to enable incremental rebuild skip
+                              let cacheDir = ".skycache"
+                              createDirectoryIfMissing True cacheDir
+                              writeFile (cacheDir </> "source.hash") srcHash
+                              putStrLn "Compilation successful"
+                              return (Right mainGoPath)
 
 
 -- LEGACY: single-module parse entry (no longer used from compile)
@@ -2201,6 +2292,34 @@ copyRuntime outDir = do
             if hasSum then copyFile srcSum (outDir </> "go.sum") else return ()
     -- User FFI: copy ./ffi/*.go into sky-out/rt/ regardless of runtime-go location.
     copyFfiDir outDir
+
+
+-- | Copy the Rust sky_runtime module into sky-out/Rust/src/sky_runtime/
+-- so `mod sky_runtime; use sky_runtime::*;` resolves at compile time.
+copyRustRuntime :: FilePath -> IO ()
+copyRustRuntime outDir = do
+    let targetDir = outDir </> "Rust" </> "src" </> "sky_runtime"
+    createDirectoryIfMissing True targetDir
+    -- Locate runtime-rust/src/sky_runtime/ (same binary-relative search as copyRuntime)
+    exePath <- System.Environment.getExecutablePath
+    let candidates =
+            [ takeDirectory exePath </> ".." </> "runtime-rust" </> "src" </> "sky_runtime"
+            , takeDirectory exePath </> ".." </> ".." </> "runtime-rust" </> "src" </> "sky_runtime"
+            , "runtime-rust" </> "src" </> "sky_runtime"
+            ]
+    mSrcDir <- findM doesDirectoryExist candidates
+    case mSrcDir of
+        Nothing -> putStrLn "  [warn] could not locate runtime-rust/src/sky_runtime/"
+        Just srcDir -> do
+            files <- System.Directory.listDirectory srcDir
+            let rsFiles = filter (\f -> takeExtension f == ".rs") files
+            mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) rsFiles
+            putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " files)"
+  where
+    findM _ [] = return Nothing
+    findM f (x:xs) = do
+        exists <- f x
+        if exists then return (Just x) else findM f xs
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -3274,6 +3393,18 @@ generateGo canMod srcMod config solvedTypes =
     in GoBuilder.renderPackage pkg
 
 
+-- | Generate Rust source from a canonical module with solved types
+generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes
+    -> String -> String -> [String]
+    -> Map.Map (String, String) (String, String)  -- kernel alias map (keys as strings)
+    -> (String, [(String, String)], RustBuilder.UsedKernels)
+generateRust canMods _srcMod solvedTypes dbPath dbDriver ffiSlugs kernelAliases = 
+    let builder = RustBuilder.buildProgram canMods solvedTypes kernelAliases
+        (code, moduleFiles) = RustBuilder.emitRust builder dbPath dbDriver ffiSlugs
+        usage = RustBuilder.builderKernels builder
+    in (code, moduleFiles, usage)
+
+
 -- | Collect Go imports needed
 collectGoImports :: Can.Module -> Src.Module -> [GoIr.GoImport]
 collectGoImports _canMod srcMod =
@@ -3703,28 +3834,12 @@ destructureParams pats =
             in (GoIr.GoParam tmp "any", patternBindings tmp pat)
 
 
--- | Escape Sky identifiers that collide with Go reserved/builtin
--- names. The canonical Sky-local-name -> Go-identifier map: applied
--- at every emission of a local — parameter declarations, let-binding
--- declarations, pattern-bound names, AND every reference
--- (Can.VarLocal) — so a Sky identifier named after a Go keyword
--- (var, type, range, ...) emits consistently as <name>_ at both its
--- declaration and its uses. Idempotent for non-reserved names.
+-- | Escape Sky identifiers that collide with Go reserved/builtin names.
+-- Only applies to top-level Sky functions emitted as Go funcs.
 goSafeName :: String -> String
 goSafeName n
     | n `elem` reservedGoNames = n ++ "_"
     | otherwise = n
-
-
--- | The two statements a let-binding emits — the declaration and an
--- unused-suppressing assign — with the bound name keyword-escaped so
--- it matches the goSafeName-escaped references emitted for it.
-letBindStmts :: String -> GoIr.GoExpr -> [GoIr.GoStmt]
-letBindStmts name expr =
-    let sn = goSafeName name
-    in [ GoIr.GoShortDecl sn expr
-       , GoIr.GoAssign "_" (GoIr.GoIdent sn)
-       ]
 
 
 -- | Sky convention: identifiers starting with `_` mean the value is unused.
@@ -6020,9 +6135,7 @@ exprToGo (A.At _ expr) = case expr of
         GoIr.GoRaw "struct{}{}"
 
     Can.VarLocal name ->
-        -- Keyword-escape: a Sky local named var/type/range/etc. must
-        -- reference as <name>_ to match its escaped declaration.
-        GoIr.GoIdent (goSafeName name)
+        GoIr.GoIdent name
 
     Can.VarTopLevel home name
         -- v0.14.x Stage 4: Sky-source binding aliased to a kernel via
@@ -8433,10 +8546,14 @@ letToGo mExpectedGo def body =
             Can.Def (A.At _ dn) [] valExpr
                 | dn /= "_"
                 , Just dt <- inferExprType solvedTypes valExpr ->
-                    letBindStmts dn (exprToGoExpect dt valExpr)
+                    [ GoIr.GoShortDecl dn (exprToGoExpect dt valExpr)
+                    , GoIr.GoAssign "_" (GoIr.GoIdent dn)
+                    ]
             Can.TypedDef (A.At _ dn) _ [] valExpr _
                 | Just dt <- inferExprType solvedTypes valExpr ->
-                    letBindStmts dn (exprToGoExpect dt valExpr)
+                    [ GoIr.GoShortDecl dn (exprToGoExpect dt valExpr)
+                    , GoIr.GoAssign "_" (GoIr.GoIdent dn)
+                    ]
             _ -> defToStmts def
         bodyGo = if Map.null bindingExtras
             then lowerBody body
@@ -8537,7 +8654,9 @@ defToStmts def = case def of
             [GoIr.GoAssign "_"
                 (GoIr.GoCall (GoIr.GoQualified "rt" "AnyTaskRun")
                     [loweredDiscard body])]
-        else letBindStmts name (exprToGo body)
+        else [ GoIr.GoShortDecl name (exprToGo body)
+             , GoIr.GoAssign "_" (GoIr.GoIdent name)  -- suppress unused errors
+             ]
 
     Can.Def (A.At _ name) params body ->
         -- v0.13 Stage 1 — for unannotated multi-pattern let-defs,
@@ -8574,11 +8693,16 @@ defToStmts def = case def of
             bodyExpr = if retGoTy == "any"
                 then exprToGo body
                 else exprToGoExpectGo retGoTy body
-        in letBindStmts name
-            (GoIr.GoFuncLit goParams retGoTy [GoIr.GoReturn bodyExpr])
+        in [ GoIr.GoShortDecl name
+                (GoIr.GoFuncLit goParams retGoTy
+                    [GoIr.GoReturn bodyExpr])
+           , GoIr.GoAssign "_" (GoIr.GoIdent name)
+           ]
 
     Can.TypedDef (A.At _ name) _ [] body _ ->
-        letBindStmts name (exprToGo body)
+        [ GoIr.GoShortDecl name (exprToGo body)
+        , GoIr.GoAssign "_" (GoIr.GoIdent name)
+        ]
 
     Can.TypedDef (A.At _ name) _ typedPats body retType ->
         -- v0.13 Stage 1 — multi-pattern annotated let-def: use the
@@ -8595,8 +8719,11 @@ defToStmts def = case def of
                 if isEmittableGoType retGoTy
                     then (retGoTy, exprToGoExpectGo retGoTy body)
                     else ("any", exprToGo body)
-        in letBindStmts name
-            (GoIr.GoFuncLit typedGoParams effectiveRet [GoIr.GoReturn bodyExpr])
+        in [ GoIr.GoShortDecl name
+                (GoIr.GoFuncLit typedGoParams effectiveRet
+                    [GoIr.GoReturn bodyExpr])
+           , GoIr.GoAssign "_" (GoIr.GoIdent name)
+           ]
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -9081,13 +9208,8 @@ patternCondition subject pat = case pat of
                 [ GoIr.GoCall (GoIr.GoIdent "rt.AsList") [GoIr.GoIdent subject] ])
             (GoIr.GoIntLit (length xs))
 
-    -- A tuple's shape is guaranteed by HM, but its components can
-    -- carry discriminating sub-patterns (`(Just x, Just y)`) — those
-    -- MUST gate the arm. Without this the arm fired unconditionally
-    -- and ran its body on a non-matching tuple (issue #56).
-    Can.PTuple aPat bPat more ->
-        tuplePatternCondition subject (aPat : bPat : more)
-
+    -- Tuples, records, aliases: structure is guaranteed by HM — bindings carry the work.
+    Can.PTuple{} -> Nothing
     Can.PRecord _    -> Nothing
     Can.PAlias inner _ ->
         let (A.At _ innerPat) = inner
@@ -9253,12 +9375,8 @@ patternConditionForExpr subjectRaw pat = case pat of
     Can.PAnything -> Nothing
     Can.PVar _    -> Nothing
     Can.PUnit     -> Nothing
+    Can.PTuple{}  -> Nothing
     Can.PRecord _ -> Nothing
-
-    -- A nested tuple (a tuple inside a ctor arg, a cons, or another
-    -- tuple) recurses the same way — issue #56, "similar patterns".
-    Can.PTuple aPat bPat more ->
-        tuplePatternCondition subjectRaw (aPat : bPat : more)
 
     Can.PInt n ->
         Just $ GoIr.GoBinary "=="
@@ -9285,20 +9403,8 @@ patternConditionForExpr subjectRaw pat = case pat of
                 "rune")
             (GoIr.GoRuneLit c)
 
-    Can.PCtor _home typeName union ctorName ctorIdx _args ->
-        -- Sky's `Bool` lowers to a raw Go `bool`, so a True/False
-        -- ctor pattern must compare the value directly — `rt.EnumTagIs`
-        -- expects an SkyADT and is always false on a `bool`. The
-        -- top-level `patternCondition` already special-cases this;
-        -- the gap here surfaced once tuple components began routing
-        -- through `patternConditionForExpr` (issue #56, a Bool inside
-        -- a tuple pattern).
-        if typeName == "Bool" && (ctorName == "True" || ctorName == "False") then
-            Just $ GoIr.GoBinary "=="
-                (GoIr.GoCall (GoIr.GoQualified "rt" "AsBool")
-                    [GoIr.GoRaw subjectRaw])
-                (GoIr.GoBoolLit (ctorName == "True"))
-        else case Can._u_opts union of
+    Can.PCtor _home _typeName union _ctorName ctorIdx _args ->
+        case Can._u_opts union of
             Can.Enum ->
                 -- Enum (zero-arg ADT): use rt.EnumTagIs which tolerates
                 -- both Sky-side typed-int and rt.SkyADT-shaped values.
@@ -9340,39 +9446,15 @@ patternConditionForExpr subjectRaw pat = case pat of
         in patternConditionForExpr subjectRaw innerPat
 
 
--- | Conjoin the sub-pattern conditions of a tuple, each tested
--- against its component — `rt.AsTuple2/3(subj).V<i>`, or
--- `SkyTupleN.Vs[i]` for arity ≥ 4 (matching the binding accessors).
--- `subj` is spliced raw, so it works whether the tuple subject is a
--- plain identifier or itself a Go expression (a nested tuple).
--- Nothing when every component is irrefutable (a pure-`PVar` tuple).
-tuplePatternCondition :: String -> [Can.Pattern] -> Maybe GoIr.GoExpr
-tuplePatternCondition subj pats =
-    let arity = length pats
-        compRaw i = case arity of
-            2 -> "rt.AsTuple2(" ++ subj ++ ").V" ++ show i
-            3 -> "rt.AsTuple3(" ++ subj ++ ").V" ++ show i
-            _ -> "any(" ++ subj ++ ").(rt.SkyTupleN).Vs[" ++ show i ++ "]"
-        conds =
-            [ c
-            | (i, A.At _ subPat) <- zip [0 :: Int ..] pats
-            , Just c <- [patternConditionForExpr (compRaw i) subPat]
-            ]
-    in case conds of
-        [] ->
-            Nothing
-
-        (h : t) ->
-            Just (foldl (GoIr.GoBinary "&&") h t)
-
-
 -- | Generate Go variable bindings from a pattern
 patternBindings :: String -> Can.Pattern_ -> [GoIr.GoStmt]
 patternBindings subject pat = case pat of
     Can.PVar name ->
         if isDiscardName name
             then [ GoIr.GoAssign "_" (GoIr.GoIdent subject) ]
-            else letBindStmts name (GoIr.GoIdent subject)
+            else [ GoIr.GoShortDecl name (GoIr.GoIdent subject)
+                 , GoIr.GoAssign "_" (GoIr.GoIdent name)
+                 ]
 
     Can.PAnything -> []
     Can.PUnit -> []
@@ -11509,7 +11591,7 @@ isSimpleVarPattern (A.At _ pat) = case pat of
 -- | Extract a single name from a pattern (for destructuring)
 patternName :: Can.Pattern -> String
 patternName (A.At _ pat) = case pat of
-    Can.PVar name -> goSafeName name
+    Can.PVar name -> name
     _ -> "_"
 
 

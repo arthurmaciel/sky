@@ -36,15 +36,15 @@
 --    callable via Ffi.callTask, with `defer/recover` on every call.
 module Sky.Build.FfiGen
     ( generateBindings
-    , runInspector
-    , runInspectorMulti
+    , runInspectorForTarget
+    , runInspectorMultiForTarget
     , slugify
     ) where
 
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isAlphaNum, isLower, isUpper, toUpper, toLower)
-import Data.List (foldl', intercalate, nub, sortOn)
+import Data.List (foldl', intercalate, isPrefixOf, nub, sortOn, stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -54,6 +54,8 @@ import System.Environment (lookupEnv)
 import System.FilePath ((</>), takeDirectory)
 import System.Process (readProcessWithExitCode)
 import qualified Sky.Build.EmbeddedInspector as EI
+import qualified Sky.Build.EmbeddedInspectorRust as EIRust
+import Sky.Sky.Toml (CompileTarget(..))
 
 
 -- | Information extracted about one Go function
@@ -126,91 +128,76 @@ instance A.FromJSON PkgInfo where
         <*> o A..:? "errors" A..!= []
 
 
-runInspector :: String -> IO (Either String PkgInfo)
-runInspector pkgPath = do
-    resolved <- resolveInspector
+-- | Inspect a single package/crate for the given target.
+runInspectorForTarget :: CompileTarget -> String -> IO (Either String PkgInfo)
+runInspectorForTarget target pkgPath = do
+    let prefix = inspectorCallPrefix target
+    resolved <- resolveInspector target
     case resolved of
         Left e    -> return (Left e)
         Right bin -> do
-            let cmd = "cd sky-out && " ++ bin ++ " " ++ pkgPath
-            (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd] ""
+            let cmd' = if null prefix
+                        then bin ++ " " ++ pkgPath
+                        else prefix ++ " && " ++ bin ++ " " ++ pkgPath
+            (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
             if null out
-                then return (Left $ "sky-ffi-inspect: empty output; stderr: " ++ err)
+                then return (Left $ inspectorName target ++ ": empty output; stderr: " ++ err)
                 else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
-                    Left e  -> return (Left $ "sky-ffi-inspect: json: " ++ e)
+                    Left e  -> return (Left $ inspectorName target ++ ": json: " ++ e)
                     Right p -> return (Right p)
 
 
--- | Multi-package mode: invoke the inspector ONCE for the full pkg list.
--- The inspector's underlying go/packages.Load(...) call dedupes shared
--- transitive deps, so a Sky.Live app pulling Stripe SDK + Firestore +
--- Firebase + Google APIs (~6 deps with overlapping internals like
--- golang.org/x/oauth2, golang.org/x/net, etc.) type-checks each shared
--- package once across the whole load instead of N times across N
--- separate inspector invocations. For skyshop's 18 Go deps this is
--- the dominant speedup over per-package invocation.
+-- | Multi-package mode for the given target.
 --
--- Returns one Either String PkgInfo per requested path, in input
--- order. A whole-load failure (inspector crashed, JSON malformed)
--- surfaces as Left for every entry. A per-package error (one bad
--- import path) surfaces in that PkgInfo's _pkgErrors field — the
--- other packages still load.
+-- For Go: invokes the inspector ONCE for the full pkg list, deduping
+-- shared transitive deps via go/packages.Load.
 --
--- Falls back to single-mode loop when only one package is requested
--- (avoids a JSON-array vs JSON-object decode-shape branch — the
--- inspector emits a bare object for single-arg invocations).
-runInspectorMulti :: [String] -> IO [Either String PkgInfo]
-runInspectorMulti []        = return []
-runInspectorMulti [pkgPath] = do
-    r <- runInspector pkgPath
+-- For Rust: invokes the inspector once per chunk (the Rust inspector
+-- resolves each crate independently via temp-project + cargo fetch).
+--
+-- Falls back to single-mode when only one package is requested
+-- (avoids JSON-array vs JSON-object decode-shape branch).
+runInspectorMultiForTarget :: CompileTarget -> [String] -> IO [Either String PkgInfo]
+runInspectorMultiForTarget _        []        = return []
+runInspectorMultiForTarget target   [pkgPath] = do
+    r <- runInspectorForTarget target pkgPath
     return [r]
-runInspectorMulti pkgPaths = do
-    resolved <- resolveInspector
+runInspectorMultiForTarget target pkgPaths = do
+    let prefix = inspectorCallPrefix target
+    resolved <- resolveInspector target
     case resolved of
         Left e    -> return (map (const (Left e)) pkgPaths)
         Right bin -> do
-            -- Quote each path defensively. Module paths can contain '/'
-            -- + alphanumerics + a few separators ('.', '-', '_'); Go's
-            -- module-path rules forbid shell metacharacters but we still
-            -- prefer single-quoting to be defensive against future
-            -- relaxations or tampered sky.toml.
             let quoted = unwords (map (\p -> "'" ++ p ++ "'") pkgPaths)
-                cmd    = "cd sky-out && " ++ bin ++ " " ++ quoted
-            (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd] ""
+                cmd' = if null prefix
+                        then bin ++ " " ++ quoted
+                        else prefix ++ " && " ++ bin ++ " " ++ quoted
+            (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
+            let inspName = inspectorName target
             if null out
-                then return (map (const (Left $ "sky-ffi-inspect: empty output; stderr: " ++ err)) pkgPaths)
+                then return (map (const (Left $ inspName ++ ": empty output; stderr: " ++ err)) pkgPaths)
                 else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
                     Right (results :: [PkgInfo]) ->
-                        -- Inspector promises results in input order, but
-                        -- defend against a future regression by matching
-                        -- by _pkgPath. Missing entries → Left.
                         let byPath = [(_pkgPath p, p) | p <- results]
                             findFor path = case lookup path byPath of
                                 Just p  -> Right p
-                                Nothing -> Left ("sky-ffi-inspect: no result for " ++ path)
+                                Nothing -> Left (inspName ++ ": no result for " ++ path)
                         in return (map findFor pkgPaths)
                     Left _ ->
-                        -- Old (single-mode-only) inspector returns a
-                        -- bare object even when given multiple argv
-                        -- entries — it just inspects the first and
-                        -- ignores the rest. The array decode fails,
-                        -- and we'd write zero bindings. Detect that
-                        -- shape and fall back to a per-package loop
-                        -- so stale dev binaries (bin/sky-ffi-inspect
-                        -- predating the multi-mode upgrade) don't
-                        -- silently break `sky install`. The fallback
-                        -- loses the cross-pkg dedup speedup but
-                        -- keeps correctness — exactly what we want
-                        -- for graceful degradation.
+                        -- Single-object fallback for old single-mode inspectors
                         case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) :: Either String PkgInfo of
-                            Right _ -> do
-                                -- Single-object decode succeeded → confirms
-                                -- old single-mode inspector. Fall back.
-                                mapM runInspector pkgPaths
-                            Left e ->
-                                -- Genuinely malformed JSON. Surface the
-                                -- error per-input so the caller knows.
-                                return (map (const (Left $ "sky-ffi-inspect: json: " ++ e)) pkgPaths)
+                            Right _ -> mapM (runInspectorForTarget target) pkgPaths
+                            Left e  -> return (map (const (Left $ inspName ++ ": json: " ++ e)) pkgPaths)
+
+
+inspectorName :: CompileTarget -> String
+inspectorName TargetGo   = "sky-ffi-inspect"
+inspectorName TargetRust = "sky-ffi-inspect-rs"
+
+
+inspectorCallPrefix :: CompileTarget -> String
+inspectorCallPrefix TargetGo   = "cd sky-out"
+inspectorCallPrefix TargetRust = ""
 
 
 -- | Resolve a working `sky-ffi-inspect` binary. Preference order:
@@ -226,18 +213,32 @@ runInspectorMulti pkgPaths = do
 --
 -- Returns the path, or a descriptive error if every strategy fails
 -- (most commonly: no `go` on PATH).
-resolveInspector :: IO (Either String FilePath)
-resolveInspector = do
-    disk <- findInspector
+-- | Resolve an inspector binary for the given target.
+resolveInspector :: CompileTarget -> IO (Either String FilePath)
+resolveInspector TargetGo   = resolveGoInspector
+resolveInspector TargetRust = resolveRustInspector
+
+
+resolveGoInspector :: IO (Either String FilePath)
+resolveGoInspector = do
+    disk <- findGoInspector
     case disk of
         Just p  -> return (Right p)
         Nothing -> EI.ensureInspector
 
 
+resolveRustInspector :: IO (Either String FilePath)
+resolveRustInspector = do
+    disk <- findRustInspector
+    case disk of
+        Just p  -> return (Right p)
+        Nothing -> EIRust.ensureInspectorRust
+
+
 -- | Probe common locations for the sky-ffi-inspect binary.
 -- Looks at: SKY_FFI_INSPECTOR env var, ./bin, ../bin … walking up ancestors.
-findInspector :: IO (Maybe FilePath)
-findInspector = do
+findGoInspector :: IO (Maybe FilePath)
+findGoInspector = do
     envPath <- lookupEnv "SKY_FFI_INSPECTOR"
     case envPath of
         Just p | not (null p) -> do
@@ -260,18 +261,58 @@ findInspector = do
                         else go parent (n - 1)
 
 
-generateBindings :: PkgInfo -> IO [String]
-generateBindings pkg = do
+-- | Probe common locations for the sky-ffi-inspect-rs binary.
+-- Looks at: SKY_FFI_INSPECTOR_RS env var, ./bin, ../bin … walking up ancestors.
+findRustInspector :: IO (Maybe FilePath)
+findRustInspector = do
+    envPath <- lookupEnv "SKY_FFI_INSPECTOR_RS"
+    case envPath of
+        Just p | not (null p) -> do
+            ok <- doesFileExist p
+            if ok then return (Just p) else walkUp
+        _ -> walkUp
+  where
+    walkUp = do
+        cwd <- getCurrentDirectory
+        go cwd 12
+    go _   0 = return Nothing
+    go dir n = do
+        let candidate = dir </> "bin" </> "sky-ffi-inspect-rs"
+        ok <- doesFileExist candidate
+        if ok
+            then return (Just candidate)
+            else let parent = takeDirectory dir
+                 in if parent == dir
+                        then return Nothing
+                        else go parent (n - 1)
+
+
+generateBindings :: CompileTarget -> PkgInfo -> IO [String]
+generateBindings TargetGo pkg = do
     createDirectoryIfMissing True ".skycache/ffi"
     createDirectoryIfMissing True ".skycache/go"
     let slug = slugify (_pkgName pkg)
-        kname = kernelNameFromPkg pkg
+        kname = kernelNameFromPkg TargetGo pkg
         mname = pkgToModuleName (_pkgPath pkg)
         goFile   = ".skycache/go"  </> (slug ++ "_bindings.go")
         skyiFile = ".skycache/ffi" </> (slug ++ ".skyi")
         jsonFile = ".skycache/ffi" </> (slug ++ ".kernel.json")
         names = map (\fn -> mname ++ "." ++ lowerFirst (_fnName fn)) (_pkgFns pkg)
     writeFile goFile (emitGoFile kname pkg)
+    writeFile skyiFile (emitSkyi pkg)
+    writeFile jsonFile (emitKernelJson mname kname pkg)
+    return names
+generateBindings TargetRust pkg = do
+    createDirectoryIfMissing True ".skycache/ffi"
+    createDirectoryIfMissing True ".skycache/rust"
+    let slug = slugify (_pkgName pkg)
+        kname = kernelNameFromPkg TargetRust pkg
+        mname = pkgToModuleName (_pkgPath pkg)
+        rsFile   = ".skycache/rust" </> (slug ++ "_bindings.rs")
+        skyiFile = ".skycache/ffi" </> (slug ++ ".skyi")
+        jsonFile = ".skycache/ffi" </> (slug ++ ".kernel.json")
+        names = map (\fn -> mname ++ "." ++ lowerFirst (_fnName fn)) (_pkgFns pkg)
+    writeFile rsFile (emitRustFile kname pkg)
     writeFile skyiFile (emitSkyi pkg)
     writeFile jsonFile (emitKernelJson mname kname pkg)
     return names
@@ -306,21 +347,25 @@ pkgToModuleName path =
           | otherwise    = '_' : go False cs
 
 
--- | Pick the Sky-kernel-name (the prefix used for Go wrapper fns).
--- Always prefixed with "Go_" so FFI-generated wrappers can't collide with
--- hand-written stdlib kernel functions (e.g. the stdlib exposes Uuid_v4 /
--- Uuid_parse from Sky.Core.Uuid — an FFI binding to github.com/google/uuid
--- becomes Go_Uuid_newString etc., never clashing).
-kernelNameFromPkg :: PkgInfo -> String
-kernelNameFromPkg pkg =
-    let segs = filter (not . null) (splitOnChar '/' (_pkgPath pkg))
+-- | Pick the Sky-kernel-name (the prefix used for wrapper fns).
+-- Go target uses "Go_" prefix so FFI-generated wrappers can't collide
+-- with hand-written stdlib kernel functions (e.g. the stdlib exposes
+-- Uuid_v4 / Uuid_parse from Sky.Core.Uuid — an FFI binding to
+-- github.com/google/uuid becomes Go_Uuid_newString etc.).
+-- Rust target uses "Rust_" prefix, same collision-avoidance rationale.
+kernelNameFromPkg :: CompileTarget -> PkgInfo -> String
+kernelNameFromPkg target pkg =
+    let prefix = case target of
+            TargetGo   -> "Go_"
+            TargetRust -> "Rust_"
+        segs = filter (not . null) (splitOnChar '/' (_pkgPath pkg))
         capOf s = capitaliseFirst (map (\c -> if isAlphaNum c then c else '_') s)
         baseName = case reverse segs of
             (last1 : prev : _) | isVersion last1 ->
                 capOf prev ++ capOf last1
             (last1 : _) -> capOf last1
             []          -> "Ffi"
-    in  "Go_" ++ baseName
+    in  prefix ++ baseName
   where
     isVersion ('v':rest) = all (`elem` ("0123456789" :: String)) rest && not (null rest)
     isVersion _ = False
@@ -810,6 +855,58 @@ emitGoFile kernelName pkg =
         , "// Pin fmt against \"imported and not used\" across partial files."
         , "var _ = fmt.Sprintf"
         ]
+
+
+-- | Convert a Sky type string (as output by the inspector's
+-- type_str_to_sky) to a Rust type string.
+-- | Emit a Rust wrapper module for a single crate, to be placed at
+-- .skycache/rust/<slug>_bindings.rs.  Mirrors emitGoFile but for Rust.
+emitRustFile :: String -> PkgInfo -> String
+emitRustFile kernelName pkg =
+    let pkgPath   = _pkgPath pkg
+        crateName = takeWhile (\c -> c /= '/' && c /= '-')
+                    (reverse (takeWhile (\c -> c /= '/') (reverse pkgPath)))
+        seen      = dedupByFirst (_pkgFns pkg)
+        fnLines   = concatMap emitRustFnSimple (zip [0::Int ..] seen)
+    in unlines $
+        [ "// Code generated by sky-ffi-inspect-rs from " ++ pkgPath ++ ". DO NOT EDIT."
+        , "// Re-run `sky add " ++ pkgPath ++ "` to regenerate."
+        , ""
+        , "use sky_runtime::*;"
+        , "use std::collections::HashMap;"
+        , ""
+        ]
+        ++ fnLines
+        ++
+        [ ""
+        ]
+  where
+    emitRustFnSimple (i, fn) =
+        let skyName   = lowerFirst (_fnName fn)
+            wrapper   = kernelName ++ "_" ++ skyName
+            rustName  = lowerFirst (map (\c -> if c == '.' then '_' else c) (drop 5 kernelName ++ "_" ++ skyName))
+            nParams   = length (_fnParams fn)
+            paramDecl = if nParams == 0 then ""
+                        else intercalate ", " [ "arg" ++ show j ++ ": String" | j <- [0..nParams - 1] ]
+            retType   = case _fnEffect fn of
+                "effectful" -> "SkyTask<SkyError, String>"
+                _           -> "SkyResult<SkyError, String>"
+            crateImport = pkgToCrateImport (_pkgPath pkg)
+        in [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
+           , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
+           , "    todo!()"
+           , "}"
+           ]
+
+
+-- | Convert a pkg path to a Rust crate import path.
+-- "github.com/google/uuid" -> "uuid"
+-- "github.com/some/crate-name" -> "crate_name"
+pkgToCrateImport :: String -> String
+pkgToCrateImport path =
+    let segs = filter (not . null) (splitOnChar '/' path)
+        lastSeg = if null segs then path else last segs
+    in  map (\c -> if c == '-' then '_' else c) lastSeg
 
 
 -- | Emit the import block. Requested package keeps alias `pkg`; every other

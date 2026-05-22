@@ -146,6 +146,9 @@ executable sky
     Sky.Generate.Go.Kernel
     Sky.Generate.Go.Record
 
+    -- Rust code generation
+    Sky.Generate.Rust.Builder
+
     -- FFI
 
     -- Formatter
@@ -164,6 +167,7 @@ executable sky
     Sky.Build.EmbedDirTH
     Sky.Build.EmbeddedRuntime
     Sky.Build.EmbeddedInspector
+    Sky.Build.EmbeddedInspectorRust
     Sky.Build.EmbeddedConsole
     Sky.Build.FfiGen
     Sky.Build.FfiRegistry

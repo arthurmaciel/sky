@@ -1,0 +1,19 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Log as Log
+import Sky.Core.Error as Error exposing (Error)
+
+main =
+    let
+        -- Direct call form (tupled, post-§A0):
+        _ = Task.run (Task.mapError (\e -> e) (Task.succeed 42))
+        -- Piped form (must produce identical output):
+        _ = Task.run (Task.succeed 42 |> Task.mapError (\e -> e))
+        -- Chained pipes (folds inside-out):
+        _ = Task.run (Task.succeed 42 |> Task.map (\x -> x + 1) |> Task.andThen (\x -> Task.succeed (x * 2)))
+        -- Log.info:
+        _ = Task.run (Log.info "test")
+    in
+    Task.succeed ()

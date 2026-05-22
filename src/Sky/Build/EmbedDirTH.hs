@@ -14,6 +14,7 @@
 -- forbids using a locally-defined function in a top-level splice.
 module Sky.Build.EmbedDirTH
     ( embedDirRecursive
+    , embedDirFiltered
     ) where
 
 import qualified Data.ByteString as BS
@@ -52,4 +53,31 @@ embedDirRecursive root = do
             isDir <- Dir.doesDirectoryExist abs_
             if isDir
                 then walk base rel
+                else return [(rel, abs_)]
+
+-- | Like `embedDirRecursive`, but skips directory names in the `excluded` list.
+-- This avoids embedding build artifacts like `target/` in the TH splice.
+embedDirFiltered :: FilePath -> [FilePath] -> Q Exp
+embedDirFiltered root excluded = do
+    entries <- runIO (walkFiltered root "" excluded)
+    forM_ entries $ \(_, p) -> qAddDependentFile p
+    let mkPair (rel, abs_) = do
+            bs <- runIO (BS.readFile abs_)
+            bsExp <- FE.bsToExp bs
+            [| (rel, $(return bsExp)) |]
+    let pairs = map mkPair entries
+    listE pairs
+  where
+    walkFiltered :: FilePath -> FilePath -> [FilePath] -> IO [(FilePath, FilePath)]
+    walkFiltered base sub excluded = do
+        let dirPath = base </> sub
+        items <- Dir.listDirectory dirPath
+        fmap concat $ forM items $ \name -> do
+            let rel = if null sub then name else sub </> name
+                abs_ = base </> rel
+            isDir <- Dir.doesDirectoryExist abs_
+            if isDir
+                then if name `elem` excluded
+                     then return []
+                     else walkFiltered base rel excluded
                 else return [(rel, abs_)]
