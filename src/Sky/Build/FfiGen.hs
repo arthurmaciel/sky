@@ -36,6 +36,7 @@
 --    callable via Ffi.callTask, with `defer/recover` on every call.
 module Sky.Build.FfiGen
     ( generateBindings
+    , pkgToModuleName
     , runInspectorForTarget
     , runInspectorMultiForTarget
     , slugify
@@ -293,7 +294,7 @@ generateBindings TargetGo pkg = do
     createDirectoryIfMissing True ".skycache/go"
     let slug = slugify (_pkgName pkg)
         kname = kernelNameFromPkg TargetGo pkg
-        mname = pkgToModuleName (_pkgPath pkg)
+        mname = pkgToModuleName TargetGo (_pkgPath pkg)
         goFile   = ".skycache/go"  </> (slug ++ "_bindings.go")
         skyiFile = ".skycache/ffi" </> (slug ++ ".skyi")
         jsonFile = ".skycache/ffi" </> (slug ++ ".kernel.json")
@@ -307,7 +308,7 @@ generateBindings TargetRust pkg = do
     createDirectoryIfMissing True ".skycache/rust"
     let slug = slugify (_pkgName pkg)
         kname = kernelNameFromPkg TargetRust pkg
-        mname = pkgToModuleName (_pkgPath pkg)
+        mname = pkgToModuleName TargetRust (_pkgPath pkg)
         rsFile   = ".skycache/rust" </> (slug ++ "_bindings.rs")
         skyiFile = ".skycache/ffi" </> (slug ++ ".skyi")
         jsonFile = ".skycache/ffi" </> (slug ++ ".kernel.json")
@@ -328,8 +329,12 @@ generateBindings TargetRust pkg = do
 -- Hyphen handling: drop the hyphen, upper-case the next char — matches
 -- the legacy Sky convention and what Sky users write in real code
 -- (e.g., `import Github.Com.Stripe.StripeGo.V84 as Stripe`).
-pkgToModuleName :: String -> String
-pkgToModuleName path =
+pkgToModuleName :: CompileTarget -> String -> String
+pkgToModuleName TargetRust path =
+    let clean = map (\c -> if isAlphaNum c then c else '_') path
+        cap   = capitaliseFirst clean
+    in "Rust." ++ cap
+pkgToModuleName TargetGo path =
     let slashed = splitOnChar '/' path
         dotted  = concatMap (splitOnChar '.') slashed
         cleaned = map camelHyphen dotted
@@ -835,7 +840,7 @@ emitGoFile kernelName pkg =
         , "// Re-run `sky add " ++ _pkgPath pkg ++ "` to regenerate."
         , "//"
         , "// Wrapper functions are in `package rt` with names <Kernel>_<lowerFn>."
-        , "// Sky source resolves `import " ++ pkgToModuleName (_pkgPath pkg) ++
+        , "// Sky source resolves `import " ++ pkgToModuleName TargetGo (_pkgPath pkg) ++
           " as X` and calls `X.<lowerFn>` — the canonicaliser routes it via"
         , "// the FFI registry to these typed Go functions. Every wrapper wraps"
         , "// panics in Err[any, any] via SkyFfiRecover."

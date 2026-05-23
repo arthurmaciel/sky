@@ -1615,11 +1615,16 @@ runCommand cmd = case cmd of
                 case target of
                     TargetGo    -> appendGoDependency pkg
                     TargetRust  -> return ()
-                let outputMsg = case target of
+                let skyModuleName = FfiGen.pkgToModuleName target pkg
+                    shortAlias = reverse (takeWhile (/= '.') (reverse skyModuleName))
+                    outputMsg = case target of
                         TargetGo ->
-                            "Call from Sky via: import " ++ pkg ++ " as Pkg; Pkg.fnName args"
+                            "Call from Sky via: import " ++ skyModuleName ++ " as Pkg; Pkg.fnName args"
                         TargetRust ->
-                            "Import in your Sky module, e.g.: import " ++ pkg ++ " as Uuid; Uuid.v4 (). Wrapper at .skycache/rust/*_bindings.rs"
+                            "Import in your Sky module, e.g.:\n"
+                            ++ "  import " ++ skyModuleName ++ " as " ++ shortAlias ++ "\n"
+                            ++ "Then call any of the " ++ show (length names) ++ " functions"
+                            ++ " (see .skycache/ffi/ -- slug " ++ pkg ++ ".skyi for signatures)."
                 putStrLn outputMsg
                 return (Right ())
 
