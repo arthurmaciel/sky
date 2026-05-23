@@ -572,6 +572,12 @@ fn classify_effect(
 // ── Type mapping (Rust → Sky) ─────────────────────────────────────────
 
 fn type_to_sky(ty: &Type, aliases: &HashMap<String, String>) -> String {
+    // Handle arrays early: [T; N] → [T; N] string form, then sanitized by type_str_to_sky
+    if let Type::Array(arr) = ty {
+        let elem = type_to_sky(&arr.elem, aliases);
+        let len = quote::quote! { #arr.len }.to_string();
+        return format!("[{}; {}]", elem, len);
+    }
     let type_str = quote::quote! { #ty }.to_string();
     type_str_to_sky(&type_str, aliases)
 }
@@ -724,6 +730,26 @@ fn type_str_to_sky(type_str: &str, aliases: &HashMap<String, String>) -> String 
             return format!("Task SkyError {}", type_str_to_sky(out_ty, aliases));
         }
         return "Task SkyError String".into();
+    }
+
+    // ── T3: sanitise unrepresentable Rust type syntax ─────────────────
+    // If we reach here and the type still contains Rust-specific syntax
+    // (tuples, arrays, impl Trait, Self, u128), map to safe Sky types.
+    if s.contains('(') && !s.starts_with("Result ") && !s.starts_with("Maybe ") {
+        return "String".to_string();  // bare tuple — opaque
+    }
+    if s.contains('[') && !s.starts_with("Task ") {
+        let inner_trimmed = s.trim_start_matches('&').trim();
+        if inner_trimmed.starts_with('[') {
+            return "Bytes".to_string();  // array like [u8; 16] or &[u8; N]
+        }
+    }
+    if s.starts_with("impl ") || s.starts_with("dyn ") {
+        return "String".to_string();
+    }
+    let s_clean = s.trim_start_matches('&').trim();
+    if s_clean == "u128" || s_clean == "i128" || s_clean == "Self" {
+        return "String".to_string();
     }
 
     // Path types: module::Type or just Type

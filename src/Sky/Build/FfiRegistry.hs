@@ -14,13 +14,15 @@ module Sky.Build.FfiRegistry
 import qualified Data.Aeson as A
 import Data.Aeson ((.:), (.:?), (.!=))
 import qualified Data.ByteString.Lazy as BL
-import Control.Monad (filterM)
-import Data.List (isSuffixOf)
+import Control.Monad (filterM, when)
+import Data.List (isPrefixOf, isSuffixOf)
 import qualified Data.Map.Strict as Map
 import System.Directory (doesDirectoryExist, listDirectory)
 import System.FilePath ((</>))
+import System.IO (putStrLn)
 
 import Sky.Build.FfiTypeParser (FtyAst, parseFty)
+import Sky.Sky.Toml (CompileTarget(TargetGo, TargetRust))
 
 
 data FfiFunction = FfiFunction
@@ -94,13 +96,26 @@ instance A.FromJSON FfiModule where
 -- Disk scanning
 -- ═══════════════════════════════════════════════════════════
 
--- | Load the FfiRegistry from `.skycache/ffi/*.kernel.json` in the current
--- working directory. Silently returns an empty registry if the cache
--- directory is absent — this is the common case for projects with no
--- FFI deps.
-loadRegistry :: IO FfiRegistry
-loadRegistry = do
-    let ffiDir = ".skycache/ffi"
+-- | Load the FfiRegistry from the target-appropriate .skycache/ffi/ directory.
+-- For Go target: reads `.skycache/ffi/*.kernel.json` at the root (unchanged
+-- behavior). For Rust target: reads `.skycache/ffi/rust/*.kernel.json`.
+-- Silently returns an empty registry if the cache directory is absent.
+loadRegistry :: CompileTarget -> IO FfiRegistry
+loadRegistry TargetGo =
+    loadFromDir ".skycache/ffi"
+loadRegistry TargetRust = do
+    reg <- loadFromDir ".skycache/ffi/rust"
+    if null (_fr_modules reg)
+        then do
+            stale <- findStaleRustFiles
+            when stale $
+                putStrLn "   legacy Rust FFI cache layout detected at .skycache/ffi/<slug>.kernel.json; re-run `sky install` or re-add the dep -- file ignored"
+            return emptyRegistry
+        else return reg
+
+-- | Load all valid .kernel.json files from a given directory.
+loadFromDir :: FilePath -> IO FfiRegistry
+loadFromDir ffiDir = do
     exists <- doesDirectoryExist ffiDir
     if not exists
         then return emptyRegistry
@@ -116,3 +131,22 @@ loadRegistry = do
         case A.eitherDecode bytes of
             Left _  -> return []  -- bad JSON: ignore so partial registry still works
             Right m -> return [m]
+
+-- | Check for legacy Rust FFI .kernel.json files sitting flat at
+-- `.skycache/ffi/` root (from before the U1 layout change).  Any file
+-- whose kernelName starts with "Rust_" is a stale Rust artifact.
+findStaleRustFiles :: IO Bool
+findStaleRustFiles = do
+    let ffiDir = ".skycache/ffi"
+    exists <- doesDirectoryExist ffiDir
+    if not exists then return False else do
+        entries <- listDirectory ffiDir
+        let kernelJsons = filter (".kernel.json" `isSuffixOf`) entries
+        results <- mapM hasRustKernelName (map (ffiDir </>) kernelJsons)
+        return (or results)
+  where
+    hasRustKernelName path = do
+        bytes <- BL.readFile path
+        case A.eitherDecode bytes of
+            Left _  -> return False
+            Right m -> return $ "Rust_" `isPrefixOf` _fm_kernelName m

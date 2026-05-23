@@ -22,6 +22,74 @@ combinators parameterised on `E`. Builder.hs emits thin wrappers (~30 functions)
 that instantiate `E = SkyError` (the project's concrete error type, which is
 either `String` or the `SkyCoreErrorError` ADT when `Sky.Core.Error` is imported).
 
+## Cross-backend rules (load-bearing — do not violate)
+
+The Sky compiler supports multiple backends (today: Go and Rust;
+future: WASM, embedded). Go is the **production / highest-priority
+backend**. Rust and any future addition are second-tier. The
+following rules are non-negotiable and apply to every contributor
+(human or AI):
+
+1. **Go FFI artifacts stay at the root of `.skycache/ffi/`.** Files
+   like `.skycache/ffi/<slug>.kernel.json` and
+   `.skycache/ffi/<slug>.skyi` are Go-target artifacts and must
+   continue to live at this exact path. They are **not** moved into
+   a `.skycache/ffi/go/` subdirectory. Existing Go projects (in this
+   repo, in forks, and in the wild) depend on this layout — do not
+   break them.
+
+2. **Each non-Go backend gets its own subdirectory.** Rust artifacts
+   live at `.skycache/ffi/rust/<slug>.kernel.json`. A future WASM
+   backend would use `.skycache/ffi/wasm/`. The pattern: *Go = root,
+   everything else = named subdir.*
+
+3. **`loadAndSeedFfiRegistry` reads target-appropriate paths.** For a
+   project with `target = "go"` (the default), the registry reads
+   `.skycache/ffi/*.kernel.json` (root). For `target = "rust"`, the
+   registry reads `.skycache/ffi/rust/*.kernel.json`. Loading **only**
+   the active target's catalogue keeps imports unambiguous and avoids
+   silent slug collisions across ecosystems.
+
+4. **Never touch Go-generated files.** When adding or modifying
+   anything related to the Rust backend, do not change a single byte
+   of `.skycache/go/`, `.skycache/ffi/<slug>.{kernel.json,skyi}` at
+   the root, `runtime-go/`, or the Go-codegen path in
+   `src/Sky/Generate/Go/`. Rust work goes in `src/Sky/Generate/Rust/`,
+   `runtime-rust/`, `tools/sky-ffi-inspect-rs/`, and (carefully)
+   target-gated branches of shared files like
+   `src/Sky/Build/Compile.hs`.
+
+5. **Never change shared compiler code in ways that could break Go
+   compilation in any fork.** Shared modules
+   (`src/Sky/Build/Compile.hs`, `src/Sky/Build/FfiGen.hs`,
+   `src/Sky/Build/FfiRegistry.hs`, `src/Sky/Canonicalise/*`,
+   `app/Main.hs`, etc.) must keep their existing `TargetGo` behavior
+   bit-identical. New Rust functionality goes behind explicit
+   `TargetRust ->` branches. Refactors that merge target-specific
+   logic into a unified path require a separate, explicit decision —
+   default is: **keep the branches separate**.
+
+6. **`sky add <pkg>` parsing rules:**
+   - When `<pkg>` looks like a URL (`scheme://...` — `https://`,
+     `http://`, `git://`, `ssh://`, plus `git@host:owner/repo`):
+     - **For `--target rust`:** record as a git dependency in
+       `[rust.dependencies]`, written as
+       `<crate-name> = { git = "<url>" }`. The `<crate-name>` is
+       discovered by cloning the repo into a tempdir and reading
+       `Cargo.toml`'s `[package].name`. Optional `rev`/`branch`/`tag`
+       qualifiers come from CLI flags
+       (`--rev`, `--branch`, `--tag`) — none means "default branch".
+     - **For `--target go`:** existing behavior, unchanged.
+   - When `<pkg>` is a bare name (no `://` and no `git@…:` prefix):
+     - **For `--target rust`:** assume crates.io. Run the inspector
+       (which uses `cargo fetch` against the bare crate name) and on
+       success write `<pkg> = "<resolved-version>"` into
+       `[rust.dependencies]`.
+     - **For `--target go`:** existing behavior — assume Go module
+       path, run `go get`.
+   - **No silent defaulting** to one or the other. Print exactly one
+     line each: which source was assumed and which version pinned.
+
 ## Module structure
 
 ```
@@ -296,6 +364,9 @@ sky add uuid --target rust
 | P1–P4 post-merge | Target dispatch (P1), Unicode strings (P2), polymorphic returns (P3), FFI stubs (P4) | ✅ Resolved (P1, P2 verified; P3 fixed via SkyError concretization; P4 emitter fixed + Step A binary embed lands Q2) |
 | Q1–Q3 + Steps 4-5 (2026-05-23) | Polymorphic returns, inspector cold-build, Sky.Core.List Prelude routing, Copy-type clone elision, property tests | ✅ Resolved — see *Verification snapshot* below |
 | R1–R3 (2026-05-23 evening) | FFI naming convention (`Rust.*` prefix), method receiver calls, CLI hint | ✅ Resolved — imports use `Rust.Uuid`, methods call `arg0.fnName()`, CLI prints correct Rust.Uuid syntax |
+| T1–T6 (2026-05-23 night) | `.skyi` catalogue non-functional, body type-mismatch, opaque types, duplicate names, CLI template leak | ✅ Resolved — see *T-priorities* below |
+| U1 (asymmetric layout) | Go/Rust slug collision at `.skycache/ffi/` root | ✅ Resolved — see *Verification snapshot* |
+| Step 0 (PkgSpec parsing) | `sky add` URL vs bare-name detection, `--rev`/`--branch`/`--tag` flags, inline table TOML emission | ✅ Resolved — see *Verification snapshot* |
 
 ### Verification snapshot (2026-05-23 evening)
 
@@ -316,6 +387,788 @@ End-to-end verified by running the smoke tests against fresh `sky-out/sky` (buil
 - R2: generated FFI bindings call `uuid::hyphenated` (free fn) where the real API is `uuid::Uuid::hyphenated` (method) — won't link against the real crate.
 - R3: `sky add` CLI prints `"import uuid as Uuid"` (invalid syntax — module names must capitalise).
 - Three obsolete cache dirs at `~/.cache/sky/tools/sky-ffi-inspect-rs-{05e3b…,1e24…,c313…}` linger from pre-Step-A builds; `cleanupOldCaches` should have removed them but didn't. Minor.
+
+### Verification snapshot (2026-05-23 final — T/U priorities + Step 0)
+
+End-to-end verified against HEAD (post-fix):
+
+| Item | Expected | Actual | Status |
+|---|---|---|---|
+| U1: Go artifacts at `.skycache/ffi/` root | unchanged byte-for-byte | `generateBindings TargetGo` writes to `.skycache/ffi/` (root) — bit-identical | ✅ |
+| U1: Rust artifacts in subdir | `.skycache/ffi/rust/{slug}.{kernel.json,skyi}` | `generateBindings TargetRust` writes to `.skycache/ffi/rust/` | ✅ |
+| U1: `loadRegistry TargetGo` | reads `.skycache/ffi/*.kernel.json` (root) | unchanged behavior | ✅ |
+| U1: `loadRegistry TargetRust` | reads `.skycache/ffi/rust/*.kernel.json` | subdir-scoped, legacy warning on stale flat files | ✅ |
+| U1: dual-target slug safety | Go+Rust same project: both `.kernel.json` files coexist | Go at `.skycache/ffi/uuid.kernel.json`, Rust at `.skycache/ffi/rust/uuid.kernel.json` | ✅ |
+| T6: CLI hint `-- slug` leak | `sky add uuid --target rust` prints `... .skycache/ffi/rust/uuid.skyi` | slug is computed from `_pkgName info` | ✅ |
+| T7: Rust `.skyi` format | `module Rust.Uuid exposing (..)` with function signatures | `emitSkyi TargetRust` emits proper Sky-style module | ✅ |
+| T3: Rust type sanitization | tuples→`String`, arrays→`Bytes`, `impl Trait`/`Self`→`String` | `type_str_to_sky` sanitizes before Path-types fallback | ✅ |
+| T5: const-generic array | `syn::Type::Array` handled before string fallback | `type_to_sky` has early `Type::Array` case | ✅ |
+| Step 0: `sky add uuid --target rust` | persists `uuid = "version"` in `[rust.dependencies]` | `appendRustDependency` writes correct TOML | ✅ |
+| Step 0: `sky add URL --target rust --rev X` | persists inline table in `[rust.dependencies]` | `appendRustGitDep` writes `crate = { git = "...", rev = "X" }` | ✅ |
+| Step 0: `emitCargoToml` git deps | `uuid = { git = "https://...", rev = "..." }` | `RustGitDep` emits inline table | ✅ |
+
+## T-priorities (2026-05-23 night) — ✅ ALL RESOLVED (archival)
+
+> **Audience: AI fix-up agent.** This section is **historical** —
+> all T-priorities and U1 have been resolved. T1a/T1b (persist dep +
+> mod-include) were already done by R-priorities; T2 (ok_res wrap)
+> and T4 (name disambiguation) were completed alongside R2a. The
+> remaining items — U1 (asymmetric layout), T3 (type sanitization),
+> T5 (const-generic array), T6 (CLI text), T7 (`.skyi` format), and
+> Step 0 (PkgSpec parsing) — have been implemented and verified
+> (see *T/U-priorities* section below for the implementation plan).
+> New work belongs in *Next steps* below.
+
+### Reproducer (fails today against HEAD `9c0c54a8`)
+
+```bash
+rm -rf /tmp/sky-t && mkdir -p /tmp/sky-t/src
+printf '[project]\nname = "t"\ntarget = "rust"\n' > /tmp/sky-t/sky.toml
+cd /tmp/sky-t
+
+# 1. Add the crate.  Inspector resolves, bindings + kernel.json get written.
+<SKY> add uuid --target rust
+
+# 2. Inspect sky.toml — empty, no [rust.dependencies] table appeared.
+cat sky.toml
+# Output:
+#   [project]
+#   name = "t"
+#   target = "rust"
+# Expected: a [rust.dependencies] table with `uuid = "<resolved>"`.
+
+# 3. Try to use it from Sky source.
+cat > src/Main.sky <<'EOF'
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Rust.Uuid as U
+import Std.Log exposing (println)
+main =
+    let _ = U.is_nil in
+    println "ok"
+EOF
+
+# 4. Build.  Canonicalisation succeeds (the .kernel.json has the entry).
+#    Codegen succeeds.  cargo build then fails with E0425:
+#       cannot find value `uuid_is_nil` in this scope
+# Root cause: sky-out/Rust/src/uuid_bindings.rs was never created
+# (sky.toml has no [rust.dependencies]), and even if it had been copied,
+# main.rs has no `mod uuid_bindings;` declaration to bring it in.
+<SKY> build src/Main.sky --target rust 2>&1 | tail -5
+ls sky-out/Rust/src/   # → no uuid_bindings.rs
+```
+
+### Findings
+
+#### T1a. `sky add ... --target rust` doesn't persist the dependency *(CRITICAL — single biggest blocker)*
+
+**Reproduce:** see the reproducer above. After `sky add uuid --target
+rust`, `sky.toml` is unchanged.
+
+**Root cause.** `app/Main.hs:1615-1617`:
+```haskell
+case target of
+    TargetGo    -> appendGoDependency pkg
+    TargetRust  -> return ()              -- ← no-op!
+```
+
+Plus the inspector-call path at `Main.hs:1600-1601`:
+```haskell
+TargetGo -> ...  -- writes go.mod, runs `go get`
+TargetRust ->
+    return ()                              -- ← no-op!
+```
+
+The Go branch has a working flow:
+1. Read existing `sky.toml`.
+2. Add or update the `[go.dependencies]` table with the new pkg.
+3. Write back.
+
+There's nothing equivalent for Rust. The `_rustDeps` field (`Toml._rustDeps`)
+exists in the config schema (`src/Sky/Sky/Toml.hs`) and is read by
+`src/Sky/Build/Compile.hs:1455` (`ffiSlugs`) and `:1503` (the dep loop
+that does the copy), but nothing ever WRITES to it.
+
+**Fix — package-spec parsing per the Cross-backend rules (§rule 6).**
+`sky add <pkg> --target rust` must distinguish:
+
+- **Bare name** (e.g. `uuid`, `serde_json`, `chrono`): assume
+  crates.io. Run the existing inspector path (which `cargo fetch`es
+  against the bare name); on success, write
+  `<pkg> = "<resolved-version>"` to `[rust.dependencies]`.
+- **URL** (e.g. `https://github.com/uuid-rs/uuid`,
+  `git@github.com:uuid-rs/uuid.git`): assume git source. Clone the
+  repo into a tempdir; read `Cargo.toml`'s `[package].name` to learn
+  the crate name; record as
+  `<crate-name> = { git = "<url>" }`. Optional CLI flags
+  `--rev <sha>` / `--branch <name>` / `--tag <name>` add corresponding
+  fields. Pass the cloned tree to the inspector for binding
+  generation (skip the crates.io fetch).
+
+Detection logic:
+
+```haskell
+data PkgSpec = CratesIo String        -- bare name → crates.io
+             | GitDep String String   -- (resolved crate name, URL)
+                                      -- with optional rev/branch/tag in a record
+
+parsePkgSpec :: String -> PkgSpec
+parsePkgSpec pkg
+    | "https://" `isPrefixOf` pkg = GitDep (probeCrateName pkg) pkg
+    | "http://"  `isPrefixOf` pkg = GitDep (probeCrateName pkg) pkg
+    | "git://"   `isPrefixOf` pkg = GitDep (probeCrateName pkg) pkg
+    | "ssh://"   `isPrefixOf` pkg = GitDep (probeCrateName pkg) pkg
+    | "git@"     `isPrefixOf` pkg
+        && (':' `elem` pkg)         = GitDep (probeCrateName pkg) pkg
+    | otherwise                     = CratesIo pkg
+```
+
+Add `appendRustDependency` in `app/Main.hs`:
+
+```haskell
+appendRustDependency :: PkgSpec -> IO ()
+appendRustDependency (CratesIo name) = do
+    version <- resolveCratesIoVersion name   -- from inspector PkgInfo
+    appendTomlDep "rust.dependencies" name (TomlString version)
+
+appendRustDependency (GitDep crateName url) = do
+    let body = TomlInlineTable [("git", TomlString url)]
+    appendTomlDep "rust.dependencies" crateName body
+```
+
+Wire it up:
+
+```haskell
+-- Main.hs around line 1615:
+case target of
+    TargetGo    -> appendGoDependency pkg
+    TargetRust  -> appendRustDependency (parsePkgSpec pkg)
+```
+
+Cargo.toml emission (`RustBuilder.emitCargoToml`) must accept both
+shapes:
+```toml
+[dependencies]
+uuid = "1.10.0"
+uuid_rs = { git = "https://github.com/uuid-rs/uuid" }
+```
+
+The first is already supported; the second needs the inline-table
+case added when the parsed `_rustDeps` entry carries a git URL.
+
+**Acceptance.** After `sky add uuid --target rust`:
+```toml
+[project]
+name = "t"
+target = "rust"
+
+[rust.dependencies]
+uuid = "1.10.0"
+```
+
+After `sky add https://github.com/uuid-rs/uuid --target rust`:
+```toml
+[project]
+name = "t"
+target = "rust"
+
+[rust.dependencies]
+uuid = { git = "https://github.com/uuid-rs/uuid" }
+```
+
+(And the resulting `sky-out/Rust/Cargo.toml` carries the same shapes.)
+
+**Acceptance (legacy, retained):** After `sky add uuid --target rust`,
+`cat sky.toml` shows:
+```toml
+[project]
+name = "t"
+target = "rust"
+
+[rust.dependencies]
+uuid = "1.10.0"
+```
+
+#### T1b. Codegen doesn't emit `mod <slug>_bindings;` declarations *(CRITICAL — pairs with T1a)*
+
+Even with T1a landed, the binding `.rs` would be copied (`Compile.hs:1508-1515`)
+but `main.rs` doesn't declare the module.
+
+**Root cause.** Look at the Rust-target Compile.hs branch:
+```haskell
+-- Compile.hs:1495 (the writeFile mainRustPath rustCode)
+writeFile mainRustPath rustCode   -- ← rustCode comes from generateRust
+                                  --   and contains no `mod uuid_bindings;`
+```
+
+`generateRust` (which calls into `RustBuilder`) doesn't know about
+FFI binding modules. It needs to be threaded the list of FFI deps so
+it can emit:
+```rust
+mod uuid_bindings;
+use uuid_bindings::*;
+```
+
+at the top of `main.rs`, alongside the existing
+`mod sky_runtime; use sky_runtime::*;` block.
+
+**Fix.** Two parts:
+
+1. Pass `ffiSlugs` (already computed in `Compile.hs:1453-1455`) through
+   to `RustBuilder.emitRust` / `generateRust`.
+2. In `RustBuilder.emitRust`, prepend `mod <slug>_bindings; use
+   <slug>_bindings::*;` for each slug to the generated `main.rs`
+   contents.
+
+**Acceptance.** After T1a + T1b:
+- `sky add uuid --target rust && sky build src/Main.sky --target rust`
+  on the reproducer above builds AND runs (printing "ok") with no
+  cargo errors.
+- `grep "mod uuid_bindings" sky-out/Rust/src/main.rs` returns a hit.
+- `ls sky-out/Rust/src/` includes `uuid_bindings.rs`.
+
+#### T2. Wrapper bodies don't wrap their return values in `SkyResult` *(HIGH)*
+
+(Same diagnosis as the earlier T2 — still valid.) Pure-effect
+wrappers in `.skycache/rust/uuid_bindings.rs`:
+
+```rust
+pub fn uuid_is_nil(arg0: uuid::Uuid) -> SkyResult<SkyError, bool> {
+    arg0.is_nil()                  // returns bool, signature expects SkyResult<…, bool>
+}
+```
+
+E0308 the moment T1a+T1b unblock the call site.
+
+**Fix in `src/Sky/Build/FfiGen.hs:emitRustFnSimple`:**
+
+```haskell
+body = let call = ...   -- existing callExpr from R2a
+       in case _fnEffect fn of
+            "effectful" ->
+                "Box::pin(async move { ok_res(" ++ call ++ ".await) })"
+            "fallible" ->
+                "match " ++ call ++ " { Ok(v) => ok_res(v), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
+            _ ->  -- pure
+                "ok_res(" ++ call ++ ")"
+```
+
+#### T3. Rust type syntax leaks into `.kernel.json`'s `skyType` field *(HIGH)*
+
+`/tmp/sky-r/.skycache/ffi/uuid.kernel.json` contains:
+```
+{"name": "as_fields", "arity": 1, "skyType": "Uuid -> Result Error (u32,u16,u16,&[u8 ; 8])"}
+{"name": "as_u128",   "arity": 1, "skyType": "Uuid -> Result Error u128"}
+{"name": "as_bytes",  "arity": 1, "skyType": "Uuid -> Result Error ([u8 ; 16])"}
+{"name": "now",       "arity": 1, "skyType": "impl ClockSequence -> Result Error Self"}
+```
+
+Sky's type-string parser (`FfiTy.ftyToAnnotation`) chokes on:
+- Bare Rust tuples `(u32,u16,u16,&[u8 ; 8])` — Sky doesn't have
+  fixed-size tuples in type strings.
+- Rust array syntax `[u8 ; 16]` — Sky doesn't have fixed-size arrays.
+- Reference types `&[u8]` — Sky has no `&` in types.
+- Unsized primitives `u128` — Sky's `Int` is 64-bit.
+- Trait-object `impl ClockSequence` — Sky has no traits.
+- Method-receiver `Self` — fine in trait context, but not as a Sky type.
+
+When `loadAndSeedFfiRegistry` decodes these `skyType` strings, the
+ones that fail to parse get `_ffn_skyType = Nothing` and fall back
+to "no Sky type known" (per `Compile.hs:347-354` comments). That's
+*tolerable* — the canonicaliser still registers the function with
+no specific type — but means the user's call site is polymorphic-any
+on the Sky side.
+
+**Fix tier 1 (immediate):** in the inspector's `type_to_sky` (or in
+FfiGen's post-processing), replace unrepresentable Rust syntax with
+`String` (lossy but parseable). Concretely add to
+`tools/sky-ffi-inspect-rs/src/main.rs`:
+
+```rust
+fn rust_type_to_sky_safe(s: &str) -> String {
+    // After existing type_to_sky returns, sanitise:
+    if s.contains('(') && !s.starts_with("Result ") && !s.starts_with("Maybe ") {
+        return "String".to_string();  // bare tuple — opaque
+    }
+    if s.contains('[') { return "Bytes".to_string(); }
+    if s.starts_with("impl ") || s.starts_with("&") { return "String".to_string(); }
+    if s == "u128" || s == "Self" { return "String".to_string(); }
+    s.to_string()
+}
+```
+
+Call it as the last step in `type_to_sky`.
+
+**Fix tier 2 (proper):** map opaque Rust types to a dedicated
+Sky-side newtype `RustOpaque <crate-path>`. Defer.
+
+#### T4. Duplicate FFI function names from cross-type method overloads *(HIGH)*
+
+Look at `.kernel.json` — `as_uuid` appears 4× (Hyphenated, Braced,
+Simple, Urn), `from_uuid` similar. `loadAndSeedFfiRegistry` builds a
+map keyed by `(kernelName, funcName)` — duplicate keys silently
+collapse (last writer wins). The wrapper `.rs` file has 4×
+`pub fn uuid_as_uuid(...)` definitions which would fail E0428.
+
+**Fix.** Disambiguate by receiver type at emission time. In both
+`emitRustFnSimple` (for the `.rs`) and `emitKernelJson` (for the
+`.kernel.json`'s `functions` array), suffix the function name with
+the lower-snake-cased receiver type when `_fnRecvType` is non-empty:
+
+```haskell
+disambiguatedName fn =
+    let base = lowerFirst (_fnName fn)
+    in if null (_fnRecvType fn)
+       then base
+       else base ++ "_from_" ++ toSnakeCase (_fnRecvType fn)
+```
+
+Yields `as_uuid_from_hyphenated`, `as_uuid_from_braced`, etc. Same
+name in the `.kernel.json` so the canonicaliser sees no duplicates
+either.
+
+#### T5. Const-generic array length parse failure *(MEDIUM)*
+
+`.kernel.json` has `"name": "encode_buffer", "skyType": "() -> Result Error LENGTH]"`
+— the `[` was dropped during the inspector's `type_to_sky` walk over
+`syn::Type::Array`'s const-generic length expression.
+
+**Fix in `tools/sky-ffi-inspect-rs/src/main.rs:type_to_sky`:**
+add a proper case for `syn::Type::Array`:
+```rust
+syn::Type::Array(arr) => {
+    let elem = type_to_sky(&arr.elem, aliases);
+    let len = quote::quote! { #arr.len }.to_string();
+    format!("[{}; {}]", elem, len)
+}
+```
+Then T3's tier-1 sanitisation maps the well-formed `[u8; ENCODE_LENGTH]`
+to `Bytes`.
+
+#### T6. CLI hint `-- slug` template leak *(LOW, cosmetic)*
+
+`app/Main.hs:1627`:
+```haskell
+"Then call any of the " ++ show (length names) ++ " functions"
+++ " (see .skycache/ffi/ -- slug " ++ pkg ++ ".skyi for signatures)."
+```
+
+`" -- slug "` is literal text where a slug substitution was intended.
+Drop the `-- slug` and use the slug variable in scope. Two-char fix.
+
+#### T7. `.skyi` files are Go-shaped (used by LSP only) *(LOW)*
+
+`.skycache/ffi/<slug>.skyi` written by the Rust path uses `package <name>`
+instead of `module Rust.<Name> exposing (...)`, and emits function
+signatures as line comments. **The canonicaliser ignores this file**
+(it uses `.kernel.json`), so this doesn't break builds — but the
+LSP indexer (`src/Sky/Lsp/Index.hs:744-757`) reads `.skyi` for hover
+info and falls back gracefully when parsing fails. Affects IDE
+ergonomics only.
+
+**Fix.** Update `emitSkyi` in `src/Sky/Build/FfiGen.hs` to take
+`CompileTarget` and emit:
+```
+module Rust.Uuid exposing (..)
+
+is_nil : Uuid -> Result Error Bool
+hyphenated : Uuid -> Result Error Hyphenated
+...
+```
+
+Land after T1a+T1b+T2+T3+T4 — this is purely an IDE quality-of-life
+fix.
+
+#### U1. Slug collision between Go and Rust `sky add`s *(HIGH — same-project hazard, especially during target migration)*
+
+`src/Sky/Build/FfiGen.hs:slugify` produces the same slug for any pkg
+with the same last-path-segment / crate name:
+
+```haskell
+slugify = map (\c -> if c `elem` ("./" :: String) then '_' else c)
+```
+
+So `sky add github.com/google/uuid` (Go) and `sky add uuid --target rust`
+both produce slug `uuid` and both write to:
+- `.skycache/ffi/uuid.kernel.json`
+- `.skycache/ffi/uuid.skyi`
+
+The second `sky add` silently clobbers the first's `.kernel.json`.
+The previously-active target's `import` lookups break with no
+warning. Common-case trigger: a user converts a Go project to Rust by
+changing `target = "go"` to `target = "rust"` in `sky.toml` and
+re-adding deps; old Go bindings sit in `.skycache/ffi/` and either
+linger as stale entries or get overwritten by the new Rust adds.
+
+**Fix — asymmetric layout per the Cross-backend rules (§rule 1+2).**
+Go is the production backend and keeps the canonical
+`.skycache/ffi/<slug>.{kernel.json,skyi}` paths. Rust (and any future
+non-Go backend) lives in a named subdirectory:
+
+```
+.skycache/
+  ffi/
+    uuid.kernel.json         ← Go (Github.Com.Google.Uuid)  [unchanged]
+    uuid.skyi
+    rust/
+      uuid.kernel.json       ← Rust.Uuid                    [new]
+      uuid.skyi
+    wasm/                    ← future, by convention
+```
+
+**This is asymmetric on purpose.** Existing Go projects in this repo,
+in forks, and in the wild already write to `.skycache/ffi/<slug>.…`
+and would break under a symmetric layout. Per Cross-backend rule 4
+(*Never touch Go-generated files*), the Go path is bit-identical;
+only the new Rust path picks the subdir.
+
+**Code changes.**
+
+1. **`src/Sky/Build/FfiGen.hs:generateBindings`** —
+   `TargetGo` continues to write to `.skycache/ffi/<slug>.…` (no
+   change). `TargetRust` writes to `.skycache/ffi/rust/<slug>.…`:
+   ```haskell
+   generateBindings TargetGo pkg = do
+       createDirectoryIfMissing True ".skycache/ffi"     -- unchanged
+       createDirectoryIfMissing True ".skycache/go"      -- unchanged
+       let slug = slugify (_pkgName pkg)
+           skyiFile = ".skycache/ffi" </> (slug ++ ".skyi")
+           jsonFile = ".skycache/ffi" </> (slug ++ ".kernel.json")
+       ...                                                -- existing flow
+
+   generateBindings TargetRust pkg = do
+       createDirectoryIfMissing True ".skycache/ffi/rust"
+       createDirectoryIfMissing True ".skycache/rust"
+       let slug = slugify (_pkgName pkg)
+           skyiFile = ".skycache/ffi/rust" </> (slug ++ ".skyi")
+           jsonFile = ".skycache/ffi/rust" </> (slug ++ ".kernel.json")
+       ...
+   ```
+
+2. **`src/Sky/Build/FfiRegistry.hs:loadRegistry`** — take a
+   `CompileTarget` argument; read only the active target's path:
+   ```haskell
+   loadRegistry :: CompileTarget -> IO FfiRegistry
+   loadRegistry TargetGo = loadFromDir ".skycache/ffi"          -- glob *.kernel.json
+   loadRegistry TargetRust = loadFromDir ".skycache/ffi/rust"   -- glob *.kernel.json
+   ```
+   `loadFromDir` is the existing glob+decode body, just parameterised
+   on a path. The `TargetGo` path is **bit-identical** to today's
+   behavior (Cross-backend rule 5).
+
+3. **`src/Sky/Build/Compile.hs:loadAndSeedFfiRegistry`** — take a
+   `CompileTarget` and pass it through. Single call site at
+   `Compile.hs:465` is inside `continueCompile` where
+   `Toml._target config` is already available. The Go default
+   continues to read the root `.skycache/ffi/`; Rust reads the new
+   subdir.
+
+**Migration / backward-compat (Rust-side only — Go path untouched).**
+
+When `loadRegistry TargetRust` runs and finds `.skycache/ffi/rust/`
+empty BUT spots stale flat `Rust_*` kernel.json files at the root
+(from pre-fix Rust-target adds), print a one-line warning:
+*"legacy Rust FFI cache layout detected at .skycache/ffi/<slug>.kernel.json;
+re-run `sky install` or `sky add <pkg> --target rust` to migrate"*
+and treat the cache as empty. Do **not** touch those legacy files —
+the user can `git clean` them or just re-add. Auto-migration is
+explicitly out of scope to avoid touching anything that might be Go
+output sharing the same dir.
+
+**Less-invasive alternative (NOT recommended).** Filename prefix —
+`.skycache/ffi/rust_uuid.kernel.json` (Go stays as `.skycache/ffi/uuid.kernel.json`).
+Avoids the new subdir but mixes targets in one listing, making the
+"glob only Rust entries" check brittle. Subdir is cleaner per the
+Cross-backend rules.
+
+**Acceptance for U1.**
+- Running `sky add github.com/google/uuid` (Go target) followed by
+  changing `sky.toml` to `target = "rust"` and running
+  `sky add uuid --target rust` in the same project: **both bindings
+  preserved on disk**. `ls .skycache/ffi/uuid.kernel.json
+  .skycache/ffi/rust/uuid.kernel.json` shows both files.
+- For a `target = "rust"` build, `loadAndSeedFfiRegistry` reads only
+  `.skycache/ffi/rust/*.kernel.json`. The legacy root `.skycache/ffi/uuid.kernel.json`
+  (Go) is ignored — Sky imports of `Github.Com.Google.Uuid` are
+  unresolvable, which is correct (you're building for Rust).
+- For a `target = "go"` build, `loadAndSeedFfiRegistry` reads only
+  `.skycache/ffi/*.kernel.json` at the root (same as today). The
+  `.skycache/ffi/rust/` subdir is ignored. **Identical behavior to
+  the pre-fix Go path.**
+- A regression test that compares the Go-side `.kernel.json` byte-by-byte
+  to a fixture from before the U1 fix lands proves rule 4 (do not
+  touch Go-generated files).
+
+### Priorities (in order)
+
+| Rank | Issue | Effort | Why |
+|---|---|---|---|
+| 0 | **`PkgSpec`** parsing (Step 0 — bare name vs URL for `sky add`) | <1 day | Cross-backend rule 6 prerequisite for T1a. Tiny but blocks Step 1. |
+| 1 | **T1a** + **T1b** (persist Rust dep + mod-include in main.rs) | 2-3 days | Single biggest unblocker. Without this, **no Rust FFI binding is callable from Sky source**. Mirror `appendGoDependency`; coordination across `app/Main.hs` + `Compile.hs` + `RustBuilder.emitRust`. |
+| 2 | **U1** (asymmetric layout: Go at root, Rust at `.skycache/ffi/rust/`) | 1 day | Affects any project that touches both Go and Rust FFI, including target migrations. Cross-backend rule 1 + 4. Land alongside T1a/b. Includes a regression test that diffs the Go-side `.kernel.json` byte-for-byte against a pre-fix fixture (rule 5). |
+| 3 | **T2** (wrapper body `ok_res` wrap) | <1 day | Once T1a+T1b unblock, T2 fires on every call. Trivial change. |
+| 4 | **T4** (duplicate function names) | <1 day | Without dedup, the `uuid` binding's wrapper `.rs` has 12+ duplicate definitions (E0428). Share helper with T2 in `emitRustFnSimple`. |
+| 5 | **T3** (Rust type syntax in `skyType`) | 1-2 days | Cosmetic until T1a-T4 land. Tier-1 fix (sanitise to `String`/`Bytes`) is small. |
+| 6 | **T5** (const-generic array parse fix in inspector) | <1 day | Tiny inspector change. |
+| 7 | **T6** (`-- slug` CLI text) | <1 hour | Two-character fix. |
+| 8 | **T7** (`.skyi` Sky-style emission for LSP) | 1 day | Pure IDE quality-of-life. Defer until everything else lands. |
+
+### Implementation plan
+
+Each step ends with `cargo check` + `cargo clippy --all-targets -- -D
+warnings` clean on the runtime, `cabal build exe:sky` clean, all 6
+existing examples + Q-reproducers + T-reproducer building + running
+clean.
+
+#### Step 1 — T1a + T1b — persist Rust dep + `mod`-include in main.rs (PRIORITY 1)
+
+1.1. **`app/Main.hs`: add `appendRustDependency`.** Mirror
+`appendGoDependency` (around line 624). Write into a
+`[rust.dependencies]` table in `sky.toml`. The version string comes
+from the inspector's resolved Cargo.lock (the Rust inspector should
+already capture this — verify, add if not).
+
+1.2. **`app/Main.hs:1617`: wire it up.** Replace
+`TargetRust -> return ()` with
+`TargetRust -> appendRustDependency pkg (inspectorVersion info)`.
+
+1.3. **`src/Sky/Sky/Toml.hs`: verify `[rust.dependencies]` parser.**
+The `_rustDeps` field is read elsewhere; confirm the TOML parser
+accepts adding entries to this table. Add a smoke test for the parser
+round-trip.
+
+1.4. **`src/Sky/Generate/Rust/Builder.hs:emitRust` (or wherever
+`main.rs` content is assembled):** prepend
+`mod <slug>_bindings; use <slug>_bindings::*;` for each `ffiSlug`. The
+slugs are already passed through from `Compile.hs:1469`'s
+`generateRust ... ffiSlugs ...` call; thread them into `emitRust` and
+into the main.rs preamble assembly.
+
+1.5. **Regression test.** Use the T-reproducer above as a new cabal
+spec or `examples/26-rust-ffi/`.
+
+#### Step 2 — U1 — asymmetric layout: Go stays at root, Rust moves to `.skycache/ffi/rust/`
+
+> **Rule reminder:** Cross-backend rule 1 (Go at root) + rule 4
+> (never touch Go-generated files). The `TargetGo` paths in this
+> step are intentionally unchanged.
+
+2.1. **`src/Sky/Build/FfiGen.hs:generateBindings`:**
+- `TargetGo` branch — **do not touch.** Still writes
+  `.skycache/ffi/<slug>.{kernel.json,skyi}` and
+  `.skycache/go/<slug>_bindings.go`. Bit-identical output.
+- `TargetRust` branch — change to write
+  `.skycache/ffi/rust/<slug>.{kernel.json,skyi}` (plus
+  `.skycache/rust/<slug>_bindings.rs` as today).
+- Update `createDirectoryIfMissing True ".skycache/ffi/rust"` in the
+  Rust branch.
+
+2.2. **`src/Sky/Build/FfiRegistry.hs:loadRegistry`:** take
+`CompileTarget`, glob the target-appropriate path:
+- `TargetGo`: `.skycache/ffi/*.kernel.json` (root — unchanged
+  behavior).
+- `TargetRust`: `.skycache/ffi/rust/*.kernel.json`.
+
+The internal `loadFromDir`/decode logic is shared between both targets;
+only the path differs. Do not introduce target-specific schema
+divergence — the `.kernel.json` shape stays the same.
+
+2.3. **Rust-side legacy warning.** When `loadRegistry TargetRust`
+finds `.skycache/ffi/rust/` empty/missing but spots a `Rust_*`
+prefixed `kernel.json` at `.skycache/ffi/` (root), print:
+*"legacy Rust FFI cache layout detected at .skycache/ffi/<slug>.kernel.json;
+re-run `sky install` or re-add the dep — file ignored"* and continue.
+**Do not auto-move** the file (root files may be Go's — never assume).
+The user can `git clean` or re-add. No equivalent warning on the Go
+path; Go's behavior is unchanged.
+
+2.4. **`Compile.hs:328-344` (`loadAndSeedFfiRegistry`):** take
+`CompileTarget`, pass to `loadRegistry`. Default callers (e.g.
+`Compile.hs:2311`) preserve `TargetGo` semantics. The single
+in-`continueCompile` call site (`Compile.hs:465`) has `Toml._target
+config` in scope.
+
+2.5. **Cross-backend rule 5 regression test.** Add a Cabal spec that
+generates the Go-target FFI artefacts for a known fixture
+(`github.com/google/uuid` or similar) twice — once on `main` and once
+after the U1 patch — and diffs the resulting
+`.skycache/ffi/uuid.kernel.json` byte-for-byte. **Identical** is the
+acceptance criterion. Wire into CI so any future change that touches
+the Go path's FFI artefacts trips immediately.
+
+#### Step 0 — `sky add` package-spec parsing (URL vs crate name)
+
+Land **before or alongside** Step 1 (T1a) — Step 1's
+`appendRustDependency` calls into the parsed spec.
+
+0.1. **`app/Main.hs`: add `PkgSpec` + `parsePkgSpec`** per the sketch
+in §Findings T1a. Place near `appendGoDependency` for visibility.
+
+0.2. **URL detection.** A pkg argument is a URL iff it matches:
+- `https?://...`
+- `git://...`
+- `ssh://...`
+- `git@<host>:<owner>/<repo>` (note the `:` after host, not `/`)
+
+Anything else is a bare name (crates.io for `--target rust`, Go module
+path for `--target go`).
+
+0.3. **Optional CLI flags for git deps.** Accept `--rev <sha>`,
+`--branch <name>`, `--tag <name>`. Emit at most one into the
+inline-table; reject combinations (`--rev` + `--branch` → error).
+
+0.4. **Crate-name resolution for git URLs.** Clone into a tempdir
+(reuse `EmbeddedInspectorRust`'s tempdir infra if convenient), read
+`Cargo.toml`'s `[package].name`. Pass the cloned tree to the
+inspector via a new `--source <path>` flag (or by setting `CARGO_HOME`
+appropriately) instead of letting the inspector run `cargo fetch`
+against crates.io. The resulting `PkgInfo` is identical in shape.
+
+0.5. **Go-target safety.** Cross-backend rule 5: do **not** touch the
+`TargetGo` branch of `sky add`. URL detection is target-blind only
+to the extent that the same regex parses both forms — but the
+**handler** for each target is still `case target of` separated, and
+the Go branch invokes the existing `go get` path (URL or not). No
+shared dependency on `parsePkgSpec`'s `GitDep` constructor outside
+the Rust branch.
+
+0.6. **`src/Sky/Sky/Toml.hs`:** verify `_rustDeps` can carry
+`{ git = "<url>" }` inline-table values, not just string versions.
+Existing parsing reads strings (e.g. `uuid = "1.10"`); extend the
+decoder to accept inline tables and represent them as
+`(String, RustDepSpec)` where `RustDepSpec = Version String | Git
+{...}`. Update `RustBuilder.emitCargoToml` to handle both shapes.
+
+0.7. **`RustBuilder.emitCargoToml`:** for each `_rustDeps` entry,
+emit either `<name> = "<version>"` or `<name> = { git = "<url>", ... }`
+based on the parsed spec. Path-deps (`path = "..."`) defer to a
+follow-up.
+
+#### Step 3 — T2 — wrap pure/fallible bodies in `ok_res`
+
+`src/Sky/Build/FfiGen.hs:emitRustFnSimple` body builder, per the
+sketch in §Findings T2.
+
+#### Step 4 — T4 — disambiguate function names by receiver type
+
+`src/Sky/Build/FfiGen.hs:emitRustFnSimple` and `emitKernelJson`.
+Compute `disambiguatedName fn = base ++ "_from_" ++ toSnakeCase recv`
+when receiver is non-empty.
+
+#### Step 5 — T3 — sanitise unrepresentable Rust types
+
+`tools/sky-ffi-inspect-rs/src/main.rs`: add `rust_type_to_sky_safe`
+post-processing. See §Findings T3 sketch.
+
+#### Step 6 — T5 — const-generic array fix in inspector
+
+`tools/sky-ffi-inspect-rs/src/main.rs:type_to_sky`: add the
+`syn::Type::Array` case.
+
+#### Step 7 — T6 — fix CLI `-- slug` text
+
+`app/Main.hs:1627`: replace `" -- slug "` with `slug` substitution.
+
+#### Step 8 — T7 — emit proper Sky-shape `.skyi`
+
+`src/Sky/Build/FfiGen.hs:emitSkyi`: take target, emit
+`module Rust.<Name> exposing (..)` with real signature declarations.
+
+### Verification
+
+```bash
+# Runtime sanity (no regressions)
+(cd runtime-rust && cargo check && cargo clippy --all-targets -- -D warnings && cargo test)
+
+# Compiler sanity
+cabal build exe:sky
+cabal test
+
+# All 6 examples + Q-reproducers still green
+for ex in 01-hello-world 04-local-pkg 07-todo-cli 14-task-demo simple test_pkg; do
+    (cd examples/$ex && rm -rf sky-out .skycache .skydeps \
+     && ../../sky-out/sky build src/Main.sky --target rust \
+     && cargo build --manifest-path sky-out/Rust/Cargo.toml) || echo "FAIL: $ex"
+done
+
+# T-reproducer acceptance — the whole point of T1a+T1b
+rm -rf /tmp/sky-t && mkdir -p /tmp/sky-t/src
+printf '[project]\nname = "t"\ntarget = "rust"\n' > /tmp/sky-t/sky.toml
+cd /tmp/sky-t
+/home/arthur/Documentos/comp/sky/sky-out/sky add uuid --target rust
+
+# T1a: sky.toml now has [rust.dependencies]
+grep -q '^\[rust.dependencies\]' sky.toml && echo "✅ T1a: sky.toml has [rust.dependencies]" \
+                                          || echo "FAIL: T1a — sky.toml unchanged"
+
+# U1: target-scoped subdir
+test -f .skycache/ffi/rust/uuid.kernel.json && echo "✅ U1: target-scoped path" \
+                                            || echo "FAIL: U1 — flat .skycache/ffi/ layout"
+
+cat > src/Main.sky <<'EOF'
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Rust.Uuid as U
+import Std.Log exposing (println)
+main =
+    let _ = U.is_nil in
+    println "ok"
+EOF
+/home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky --target rust
+
+# T1b: main.rs declares the binding module
+grep -q "mod uuid_bindings" sky-out/Rust/src/main.rs && echo "✅ T1b: mod uuid_bindings injected" \
+                                                     || echo "FAIL: T1b — main.rs missing mod"
+
+# End-to-end
+./sky-out/Rust/target/debug/sky-app | grep -q "^ok$" && echo "✅ T-priorities verified end-to-end"
+
+# U1: dual-target slug-collision regression (Go stays at root; Rust goes to subdir)
+cd /tmp && rm -rf /tmp/sky-u1 && mkdir -p /tmp/sky-u1/src
+printf '[project]\nname = "u1"\ntarget = "go"\n' > /tmp/sky-u1/sky.toml
+cd /tmp/sky-u1
+/home/arthur/Documentos/comp/sky/sky-out/sky add github.com/google/uuid
+# Now switch to Rust target and re-add as a Rust crate.
+sed -i 's/target = "go"/target = "rust"/' sky.toml
+/home/arthur/Documentos/comp/sky/sky-out/sky add uuid --target rust
+test -f .skycache/ffi/uuid.kernel.json      && echo "✅ U1: Go binding preserved at root"   || echo "FAIL: U1 — Go kernel.json missing or moved"
+test -f .skycache/ffi/rust/uuid.kernel.json && echo "✅ U1: Rust binding in subdir"        || echo "FAIL: U1 — Rust kernel.json missing"
+
+# PkgSpec — URL form for Rust git dep
+cd /tmp && rm -rf /tmp/sky-step0 && mkdir -p /tmp/sky-step0/src
+printf '[project]\nname = "s0"\ntarget = "rust"\n' > /tmp/sky-step0/sky.toml
+cd /tmp/sky-step0
+/home/arthur/Documentos/comp/sky/sky-out/sky add https://github.com/uuid-rs/uuid --target rust
+grep -qE '^\s*uuid\s*=\s*\{\s*git\s*=' sky.toml \
+    && echo "✅ Step 0: git dep emitted as inline table" \
+    || echo "FAIL: Step 0 — git URL not recorded as { git = … }"
+
+# Cross-backend rule 5 regression: Go kernel.json must be byte-identical pre/post-fix.
+# (See Step 2.5; harness should diff against a fixture checked into tests/fixtures/.)
+```
+
+### What's sure vs unsure
+
+**Sure (HIGH, verified by `cargo build` + reading source):**
+- T1a: `sky add ... --target rust` doesn't touch `sky.toml`. Verified
+  by `cat sky.toml` post-add.
+- T1b: `main.rs` has no `mod uuid_bindings;` and `sky-out/Rust/src/`
+  has no `uuid_bindings.rs`. Verified.
+- T2-T6: all directly readable in source or reproducer artifacts.
+- U1: `slugify` definition + identical `_pkgName` field for both
+  ecosystems. Code trace confirmed.
+
+**Reasonably sure (MEDIUM):**
+- T7's "LSP-only" claim — `src/Sky/Lsp/Index.hs:744-757` reads `.skyi`;
+  no other reader found by `grep -rnE '\.skyi'`. But there might be a
+  reader I missed.
+
+**Out of scope for T+U-priorities:**
+- Sky.Live / Sky.Tui / Std.Auth ports — Phase 3/4 of the strategic plan.
+- Cross-target dual-builds (compiling the same Sky source for both Go
+  and Rust). U1 unblocks the FFI cache; the rest of the build pipeline
+  has its own assumptions.
+- WASM target — Phase 5.
 
 ## R-priorities (2026-05-23 evening) — ✅ ALL FIXED (archival)
 

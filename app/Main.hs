@@ -22,7 +22,7 @@ import qualified System.Posix.Signals as Signals
 #endif
 import System.FilePath ((</>), takeExtension, takeDirectory, takeFileName, dropExtension, splitDirectories)
 import System.Exit (exitWith)
-import Data.List (isPrefixOf, isInfixOf, stripPrefix, tails)
+import Data.List (intercalate, isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, tails)
 import Data.Char (toLower)
 import System.Process (callProcess, rawSystem)
 import qualified System.Process
@@ -668,6 +668,162 @@ appendGoDependency pkg = do
             []             -> ls  -- shouldn't reach (hasSection was True)
 
 
+appendRustDependency :: String -> String -> IO ()
+appendRustDependency pkg version = do
+    hasToml <- doesFileExist "sky.toml"
+    if not hasToml
+        then putStrLn "   (no sky.toml — skipping dep registration; create one with `sky init`)"
+        else do
+            content <- readFile "sky.toml"
+            length content `seq` return ()
+            let lns = lines content
+                alreadyListed = any (\l ->
+                        let trimmed = dropWhile (== ' ') l
+                            quotedPkg = "\"" ++ pkg ++ "\""
+                        in (pkg `elem` words trimmed) && ('=' `elem` trimmed)
+                            || (quotedPkg `isInfixOf` trimmed))
+                    lns
+            if alreadyListed
+                then putStrLn $ "   (already listed in sky.toml — left as-is)"
+                else do
+                    let entry = "\"" ++ pkg ++ "\" = \"" ++ version ++ "\""
+                        sectionHeader = "[\"rust.dependencies\"]"
+                        hasSection = any (\l ->
+                                let t = dropWhile (== ' ') l
+                                in t == sectionHeader) lns
+                        newLines =
+                            if hasSection
+                            then let (before, rest) = break (\l ->
+                                        let t = dropWhile (== ' ') l
+                                        in t == sectionHeader) lns
+                                     (header:after) = rest
+                                 in before ++ [header, entry] ++ after
+                            else lns ++ ["", sectionHeader, entry]
+                    writeFile "sky.toml" (unlines newLines)
+                    putStrLn $ "   Added to sky.toml [rust.dependencies]"
+
+-- | Append a git-source Rust dependency to sky.toml as an inline table:
+--   crate_name = { git = "url", rev = "...", branch = "...", tag = "..." }
+appendRustGitDep :: String -> String -> Maybe String -> Maybe String -> Maybe String -> IO ()
+appendRustGitDep crateName url mRev mBranch mTag = do
+    hasToml <- doesFileExist "sky.toml"
+    if not hasToml
+        then putStrLn "   (no sky.toml — skipping dep registration; create one with `sky init`)"
+        else do
+            content <- readFile "sky.toml"
+            length content `seq` return ()
+            let lns = lines content
+                alreadyListed = any (\l ->
+                        let trimmed = dropWhile (== ' ') l
+                        in (crateName `elem` words trimmed) && ('=' `elem` trimmed))
+                    lns
+            if alreadyListed
+                then putStrLn $ "   (already listed in sky.toml — left as-is)"
+                else do
+                    let fields = [ "git = " ++ show url ]
+                            ++ maybe [] (\r -> ["rev = " ++ show r]) mRev
+                            ++ maybe [] (\b -> ["branch = " ++ show b]) mBranch
+                            ++ maybe [] (\t -> ["tag = " ++ show t]) mTag
+                        entry = "\"" ++ crateName ++ "\" = { " ++ intercalate ", " fields ++ " }"
+                        sectionHeader = "[\"rust.dependencies\"]"
+                        hasSection = any (\l ->
+                                let t = dropWhile (== ' ') l
+                                in t == sectionHeader) lns
+                        newLines =
+                            if hasSection
+                            then let (before, rest) = break (\l ->
+                                        let t = dropWhile (== ' ') l
+                                        in t == sectionHeader) lns
+                                     (header:after) = rest
+                                 in before ++ [header, entry] ++ after
+                            else lns ++ ["", sectionHeader, entry]
+                    writeFile "sky.toml" (unlines newLines)
+                    putStrLn $ "   Added to sky.toml [rust.dependencies]"
+
+-- | Handle `sky add <pkg>` command.
+addHandler :: AddOpts -> IO (Either String ())
+addHandler opts = do
+    let pkg = _addPkg opts
+        mTarget = _addTarget opts
+        mRev = _addRev opts
+        mBranch = _addBranch opts
+        mTag = _addTag opts
+        pkgSpec = parsePkgSpec pkg mRev mBranch mTag
+    putStrLn $ "Adding " ++ pkg ++ "..."
+    -- Validate --rev/--branch/--tag are mutually exclusive
+    let validationError = case (mRev, mBranch, mTag) of
+            (Just _, Just _, _) -> Just "--rev and --branch are mutually exclusive"
+            (Just _, _, Just _) -> Just "--rev and --tag are mutually exclusive"
+            (_, Just _, Just _) -> Just "--branch and --tag are mutually exclusive"
+            _                  -> Nothing
+    case validationError of
+        Just err -> do
+            putStrLn $ "error: " ++ err
+            return (Right ())
+        Nothing -> do
+            hasToml <- doesFileExist "sky.toml"
+            config <- if hasToml
+                then Toml.parseSkyToml <$> readFile "sky.toml"
+                else return Toml.defaultConfig
+            let target = case mTarget of
+                    Just t  -> parseTarget t
+                    Nothing -> Toml._target config
+            -- Handle Rust git deps separately (inspector can't resolve URLs)
+            case (target, pkgSpec) of
+                (TargetRust, GitDep url mr mb mt) -> do
+                    appendRustGitDep (basename url) url mr mb mt
+                    putStrLn "   Git dependency added. Run `sky build src/Main.sky --target rust` to generate bindings."
+                    return (Right ())
+                _ -> do
+                    let inspName = case target of
+                            TargetGo   -> "sky-ffi-inspect"
+                            TargetRust -> "sky-ffi-inspect-rs"
+                    case target of
+                        TargetGo -> do
+                            createDirectoryIfMissing True "sky-out"
+                            hasGoMod <- doesFileExist "sky-out/go.mod"
+                            when (not hasGoMod) $ do
+                                hasRuntimeMod <- doesFileExist "runtime-go/go.mod"
+                                if hasRuntimeMod
+                                    then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
+                                    else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
+                            callProcess "sh" ["-c", "cd sky-out && go get " ++ pkg]
+                            appendGoDependency pkg
+                        TargetRust ->
+                            return ()
+                    r <- FfiGen.runInspectorForTarget target pkg
+                    case r of
+                        Left err -> do
+                            putStrLn $ "   " ++ inspName ++ " warning: " ++ err
+                            putStrLn "   (You can still write hand-written bindings in ffi/.)"
+                            return (Right ())
+                        Right info -> do
+                            names <- FfiGen.generateBindings target info
+                            putStrLn $ "Generated " ++ show (length names) ++ " bindings in .skycache/"
+                            mapM_ (\n -> putStrLn $ "   " ++ n) (take 10 names)
+                            when (length names > 10) $
+                                putStrLn $ "   ... and " ++ show (length names - 10) ++ " more"
+                            case target of
+                                TargetGo -> appendGoDependency pkg
+                                TargetRust ->
+                                    appendRustDependency pkg (FfiGen._pkgVersion info)
+                            let skyModuleName = FfiGen.pkgToModuleName target pkg
+                                shortAlias = reverse (takeWhile (/= '.') (reverse skyModuleName))
+                                slug = FfiGen.slugify (FfiGen._pkgName info)
+                                ffiDir = case target of
+                                    TargetGo   -> ".skycache/ffi/"
+                                    TargetRust -> ".skycache/ffi/rust/"
+                                outputMsg = case target of
+                                    TargetGo ->
+                                        "Call from Sky via: import " ++ skyModuleName ++ " as Pkg; Pkg.fnName args"
+                                    TargetRust ->
+                                        "Import in your Sky module, e.g.:\n"
+                                        ++ "  import " ++ skyModuleName ++ " as " ++ shortAlias ++ "\n"
+                                        ++ "Then call any of the " ++ show (length names) ++ " functions"
+                                        ++ " (see " ++ ffiDir ++ slug ++ ".skyi for signatures)."
+                            putStrLn outputMsg
+                            return (Right ())
+
 -- | For each declared go dep, regenerate the FFI bindings when its
 -- `.skycache/ffi/<slug>.kernel.json` file is absent. Used by `sky
 -- install` and the `sky build` auto-regen fallback. Silently skips
@@ -877,7 +1033,7 @@ data Command
     | Test FilePath (Maybe String)  -- file path, optional target (go/rust)
     | Verify (Maybe String)      -- Nothing = all examples; Just name = one
     | Init (Maybe String)
-    | Add String (Maybe String)       -- package name, optional target (go/rust)
+    | Add AddOpts           -- package name, optional target, git dep flags
     | Remove String
     | Install
     | Update
@@ -928,6 +1084,56 @@ data FmtTarget
     | FmtStdin
     deriving (Show)
 
+-- | Package spec for `sky add` — bare crates.io name or git URL with optional qualifiers.
+data PkgSpec = CratesIo String          -- bare name → crates.io
+             | GitDep String            -- git URL → { git = "<url>" }
+                 (Maybe String)         -- --rev
+                 (Maybe String)         -- --branch
+                 (Maybe String)         -- --tag
+    deriving (Show)
+
+-- | Options for `sky add` command.
+data AddOpts = AddOpts
+    { _addPkg    :: String
+    , _addTarget :: Maybe String
+    , _addRev    :: Maybe String
+    , _addBranch :: Maybe String
+    , _addTag    :: Maybe String
+    } deriving (Show)
+
+-- | Parse a package argument into a PkgSpec: bare name or git URL.
+parsePkgSpec :: String -> Maybe String -> Maybe String -> Maybe String -> PkgSpec
+parsePkgSpec pkg mRev mBranch mTag
+    | "https://" `isPrefixOf` pkg = GitDep pkg mRev mBranch mTag
+    | "http://"  `isPrefixOf` pkg = GitDep pkg mRev mBranch mTag
+    | "git://"   `isPrefixOf` pkg = GitDep pkg mRev mBranch mTag
+    | "ssh://"   `isPrefixOf` pkg = GitDep pkg mRev mBranch mTag
+    | "git@"     `isPrefixOf` pkg && ':' `elem` pkg = GitDep pkg mRev mBranch mTag
+    | otherwise                   = CratesIo pkg
+
+-- | Extract the last path segment (repo name) from a git URL.
+-- "https://github.com/uuid-rs/uuid"       → "uuid"
+-- "git@github.com:uuid-rs/uuid.git"       → "uuid"
+-- "https://github.com/user/crate.git"     → "crate"
+basename :: String -> String
+basename url =
+    let cleaned = dropTrailing (== '.') ".git" url
+        afterColon = if "git@" `isPrefixOf` url
+                     then reverse (takeWhile (/= ':') (reverse url))
+                     else url
+        segments = splitOn '/' afterColon
+    in last segments
+  where
+    dropTrailing _ _ [] = []
+    dropTrailing p suffix s
+        | suffix `isSuffixOf` s = take (length s - length suffix) s
+        | null s = s
+        | otherwise = s
+    splitOn _ [] = []
+    splitOn c s = case break (== c) s of
+        (part, _ : rest) -> part : splitOn c rest
+        (part, [])       -> [part]
+
 
 -- | Parser for optional --target flag
 targetFlag :: Parser (Maybe String)
@@ -936,6 +1142,15 @@ targetFlag = optional (strOption
    <> metavar "TARGET"
    <> help "Compilation target: go (default) or rust"
     ))
+
+-- | Parser for `sky add` options: package, --target, --rev, --branch, --tag.
+addOptsParser :: Parser AddOpts
+addOptsParser = AddOpts
+    <$> argument str (metavar "PACKAGE")
+    <*> targetFlag
+    <*> optional (strOption (long "rev" <> metavar "SHA" <> help "Git commit SHA for git dependencies"))
+    <*> optional (strOption (long "branch" <> metavar "NAME" <> help "Git branch for git dependencies"))
+    <*> optional (strOption (long "tag" <> metavar "NAME" <> help "Git tag for git dependencies"))
 
 
 commandParser :: Parser Command
@@ -961,7 +1176,7 @@ commandParser = subparser
         (info (Init <$> optional (argument str (metavar "NAME")))
             (progDesc "Create new project"))
     <> command "add"
-        (info (Add <$> argument str (metavar "PACKAGE") <*> targetFlag)
+        (info (Add <$> addOptsParser)
             (progDesc "Add dependency (Go or Rust crate)"))
     <> command "remove"
         (info (Remove <$> argument str (metavar "PACKAGE"))
@@ -1572,61 +1787,7 @@ runCommand cmd = case cmd of
         putStrLn $ "Next: cd " ++ name ++ " && sky build src/Main.sky"
         return (Right ())
 
-    Add pkg mTarget -> do
-        putStrLn $ "Adding " ++ pkg ++ "..."
-        hasToml <- doesFileExist "sky.toml"
-        config <- if hasToml
-            then Toml.parseSkyToml <$> readFile "sky.toml"
-            else return Toml.defaultConfig
-        -- CLI target overrides sky.toml
-        let target = case mTarget of
-                Just t  -> parseTarget t
-                Nothing -> Toml._target config
-        let inspName = case target of
-                TargetGo   -> "sky-ffi-inspect"
-                TargetRust -> "sky-ffi-inspect-rs"
-        case target of
-            TargetGo -> do
-                -- Ensure sky-out exists with go.mod
-                createDirectoryIfMissing True "sky-out"
-                hasGoMod <- doesFileExist "sky-out/go.mod"
-                when (not hasGoMod) $ do
-                    hasRuntimeMod <- doesFileExist "runtime-go/go.mod"
-                    if hasRuntimeMod
-                        then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
-                        else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-                callProcess "sh" ["-c", "cd sky-out && go get " ++ pkg]
-                appendGoDependency pkg
-            TargetRust ->
-                return ()
-        -- Generate bindings via the target-aware inspector
-        r <- FfiGen.runInspectorForTarget target pkg
-        case r of
-            Left err -> do
-                putStrLn $ "   " ++ inspName ++ " warning: " ++ err
-                putStrLn $ "   (You can still write hand-written bindings in ffi/.)"
-                return (Right ())
-            Right info -> do
-                names <- FfiGen.generateBindings target info
-                putStrLn $ "Generated " ++ show (length names) ++ " bindings in .skycache/"
-                mapM_ (\n -> putStrLn $ "   " ++ n) (take 10 names)
-                when (length names > 10) $
-                    putStrLn $ "   ... and " ++ show (length names - 10) ++ " more"
-                case target of
-                    TargetGo    -> appendGoDependency pkg
-                    TargetRust  -> return ()
-                let skyModuleName = FfiGen.pkgToModuleName target pkg
-                    shortAlias = reverse (takeWhile (/= '.') (reverse skyModuleName))
-                    outputMsg = case target of
-                        TargetGo ->
-                            "Call from Sky via: import " ++ skyModuleName ++ " as Pkg; Pkg.fnName args"
-                        TargetRust ->
-                            "Import in your Sky module, e.g.:\n"
-                            ++ "  import " ++ skyModuleName ++ " as " ++ shortAlias ++ "\n"
-                            ++ "Then call any of the " ++ show (length names) ++ " functions"
-                            ++ " (see .skycache/ffi/ -- slug " ++ pkg ++ ".skyi for signatures)."
-                putStrLn outputMsg
-                return (Right ())
+    Add opts -> addHandler opts
 
     Remove pkg -> do
         putStrLn $ "Removing " ++ pkg ++ "..."

@@ -325,9 +325,9 @@ getCgEnv = unsafePerformIO $ readIORef globalCgEnv
 -- | Read ffi/*.kernel.json and write the resulting module/function maps into
 -- Env.ffiKernelModulesRef and Env.ffiKernelFunctionsRef. After this call the
 -- pure kernelModules / kernelFunctions lookups include FFI entries.
-loadAndSeedFfiRegistry :: IO ()
-loadAndSeedFfiRegistry = do
-    reg <- FfiReg.loadRegistry
+loadAndSeedFfiRegistry :: Toml.CompileTarget -> IO ()
+loadAndSeedFfiRegistry target = do
+    reg <- FfiReg.loadRegistry target
     let mods = FfiReg._fr_modules reg
         moduleMap =
             Map.fromList [ (FfiReg._fm_moduleName m, FfiReg._fm_kernelName m) | m <- mods ]
@@ -462,7 +462,7 @@ compile config entryPath outDir = do
 
     -- Phase 0: Load FFI registry (ffi/*.kernel.json) and seed the kernel
     -- module/function IORefs so FFI packages resolve as first-class kernels.
-    loadAndSeedFfiRegistry
+    loadAndSeedFfiRegistry (Toml._target config)
 
     -- Phase 0b: Install Sky-source dependencies declared in [dependencies].
     -- Each dep contributes an extra source root that discovery will probe
@@ -2308,7 +2308,7 @@ typecheckWorkspace config entryPath = do
         projectRoot = case takeDirectory entryDir of
             "" -> "."
             d  -> d
-    loadAndSeedFfiRegistry
+    loadAndSeedFfiRegistry (Toml._target config)
     depRoots <- SkyDeps.installDeps (Toml._skyDeps config)
     -- Materialise stdlib inside `.skycache/` so it lives in the already-
     -- gitignored cache dir instead of polluting `src/`. LSP goto-def can

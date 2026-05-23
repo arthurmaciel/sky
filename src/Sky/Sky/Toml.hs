@@ -1,14 +1,32 @@
 -- | Minimal sky.toml parser for Sky project configuration.
 -- No external TOML library dependency — hand-written for simplicity.
-module Sky.Sky.Toml where
+module Sky.Sky.Toml
+    ( CompileTarget(..)
+    , RustDepSpec(..)
+    , SkyConfig(..)
+    , defaultConfig
+    , parseSkyToml
+    , parseCompileTarget
+    ) where
 
 import qualified Data.Map.Strict as Map
 import Data.Char (isSpace)
 import Data.List (isPrefixOf, stripPrefix)
+import Data.Maybe (mapMaybe)
 
 
 -- | Compilation target: go or rust
 data CompileTarget = TargetGo | TargetRust
+    deriving (Show, Eq)
+
+-- | Rust dependency specification: crates.io version or git source.
+data RustDepSpec = RustVersion String
+                 | RustGitDep
+                     { _gitUrl    :: String
+                     , _gitRev    :: Maybe String
+                     , _gitBranch :: Maybe String
+                     , _gitTag    :: Maybe String
+                     }
     deriving (Show, Eq)
 
 -- | Sky project configuration
@@ -20,7 +38,7 @@ data SkyConfig = SkyConfig
     , _binName       :: !String           -- output binary name (app)
     , _target        :: !CompileTarget   -- compilation target (go or rust)
     , _goDeps        :: [(String, String)]-- Go dependencies [(pkg, version)]
-    , _rustDeps      :: [(String, String)]-- Rust crate deps [(crate, version)]
+    , _rustDeps      :: [(String, RustDepSpec)]-- Rust crate deps
     , _skyDeps       :: [(String, String)]-- Sky-source dependencies [(repo, version)]
     , _livePort      :: !Int              -- [live] port (default 8000)
     , _liveStore     :: !String           -- [live] store: memory / sqlite / postgres
@@ -105,7 +123,8 @@ applyKeyValue section config key value = case section of
     "go.dependencies" ->
         config { _goDeps = _goDeps config ++ [(stripQuotes key, value)] }
     "rust.dependencies" ->
-        config { _rustDeps = _rustDeps config ++ [(stripQuotes key, value)] }
+        let spec = parseRustDepSpec value
+        in config { _rustDeps = _rustDeps config ++ [(stripQuotes key, spec)] }
     "dependencies" ->
         config { _skyDeps = _skyDeps config ++ [(stripQuotes key, value)] }
     -- [live] section: Sky.Live runtime config.
@@ -185,6 +204,42 @@ stripQuotes ('"' : rest) = case reverse rest of
     '"' : inner -> reverse inner
     _ -> rest
 stripQuotes s = s
+
+-- | Parse a Rust dependency spec from a TOML value string.
+-- Handles both simple version strings ("1.10.0") and inline tables
+-- ({ git = "https://...", rev = "abc123" }).
+parseRustDepSpec :: String -> RustDepSpec
+parseRustDepSpec s
+    | "{" `isPrefixOf` trim s = parseInlineTable (trim s)
+    | otherwise               = RustVersion s
+
+-- | Parse a TOML inline table like: { git = "url", rev = "sha" }
+parseInlineTable :: String -> RustDepSpec
+parseInlineTable s =
+    let inner = takeWhile (/= '}') (drop 1 (trim s))
+        rawPairs = splitOn ',' inner
+        kv = map (\(k, v) -> (trim k, stripQuotes (trim v)))
+             (mapMaybe parseKeyValue rawPairs)
+        gitUrl = lookup "git" kv
+        rev    = lookup "rev" kv
+        branch = lookup "branch" kv
+        tag    = lookup "tag" kv
+    in case gitUrl of
+        Just url -> RustGitDep url rev branch tag
+        Nothing  -> RustVersion s  -- fallback: treat as literal version
+
+-- | Parse a single key=value pair. Returns Nothing on malformed input.
+parseKeyValue :: String -> Maybe (String, String)
+parseKeyValue s = case break (== '=') s of
+    (k, '=' : v) -> Just (trim k, v)
+    _            -> Nothing
+
+-- | Split a string on a delimiter (not CSV-aware, fine for inline tables).
+splitOn :: Char -> String -> [String]
+splitOn _ [] = []
+splitOn c s = case break (== c) s of
+    (part, _ : rest) -> part : splitOn c (dropWhile isSpace rest)
+    (part, [])       -> [part]
 
 parseCompileTarget :: String -> CompileTarget
 parseCompileTarget "rust" = TargetRust

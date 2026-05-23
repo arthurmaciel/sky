@@ -40,6 +40,8 @@ module Sky.Build.FfiGen
     , runInspectorForTarget
     , runInspectorMultiForTarget
     , slugify
+    , _pkgName
+    , _pkgVersion
     ) where
 
 import qualified Data.Aeson as A
@@ -90,6 +92,7 @@ data FnInfo = FnInfo
 data PkgInfo = PkgInfo
     { _pkgPath   :: String
     , _pkgName   :: String
+    , _pkgVersion :: String  -- semver from cargo metadata (or "" for Go)
     , _pkgFns    :: [FnInfo]
     , _pkgErrors :: [String]
     }
@@ -125,6 +128,7 @@ instance A.FromJSON PkgInfo where
     parseJSON = A.withObject "PkgInfo" $ \o -> PkgInfo
         <$> o A..: "pkg"
         <*> o A..:? "name" A..!= ""
+        <*> o A..:? "version" A..!= ""
         <*> o A..:? "functions" A..!= []
         <*> o A..:? "errors" A..!= []
 
@@ -300,21 +304,21 @@ generateBindings TargetGo pkg = do
         jsonFile = ".skycache/ffi" </> (slug ++ ".kernel.json")
         names = map (\fn -> mname ++ "." ++ lowerFirst (_fnName fn)) (_pkgFns pkg)
     writeFile goFile (emitGoFile kname pkg)
-    writeFile skyiFile (emitSkyi pkg)
+    writeFile skyiFile (emitSkyi TargetGo pkg)
     writeFile jsonFile (emitKernelJson mname kname pkg)
     return names
 generateBindings TargetRust pkg = do
-    createDirectoryIfMissing True ".skycache/ffi"
+    createDirectoryIfMissing True ".skycache/ffi/rust"
     createDirectoryIfMissing True ".skycache/rust"
     let slug = slugify (_pkgName pkg)
         kname = kernelNameFromPkg TargetRust pkg
         mname = pkgToModuleName TargetRust (_pkgPath pkg)
         rsFile   = ".skycache/rust" </> (slug ++ "_bindings.rs")
-        skyiFile = ".skycache/ffi" </> (slug ++ ".skyi")
-        jsonFile = ".skycache/ffi" </> (slug ++ ".kernel.json")
+        skyiFile = ".skycache/ffi/rust" </> (slug ++ ".skyi")
+        jsonFile = ".skycache/ffi/rust" </> (slug ++ ".kernel.json")
         names = map (\fn -> mname ++ "." ++ lowerFirst (_fnName fn)) (_pkgFns pkg)
     writeFile rsFile (emitRustFile kname pkg)
-    writeFile skyiFile (emitSkyi pkg)
+    writeFile skyiFile (emitSkyi TargetRust pkg)
     writeFile jsonFile (emitKernelJson mname kname pkg)
     return names
 
@@ -405,7 +409,9 @@ emitKernelJson moduleName kernelName pkg =
         fnEntries = intercalate ",\n" (map emitFnEntry fns)
         emitFnEntry fn =
             let st = wrapperSkyType fn
-                base = "    {\"name\": " ++ quote (lowerFirst (_fnName fn)) ++
+                recv = _fnRecvType fn
+                disamb = if null recv then "" else "_from_" ++ lowerFirst recv
+                base = "    {\"name\": " ++ quote (lowerFirst (_fnName fn) ++ disamb) ++
                        ", \"arity\": " ++ show (max 1 (length (_fnParams fn)))
             in if isSkyParseable st
                   then base ++ ", \"skyType\": " ++ quote st ++ "}"
@@ -928,21 +934,18 @@ emitRustFile kernelName pkg =
 
     emitRustFnSimple (i, fn) =
         let skyName   = lowerFirst (_fnName fn)
-            wrapper   = kernelName ++ "_" ++ skyName
-            rustName  = lowerFirst (map (\c -> if c == '.' then '_' else c) (drop 5 kernelName ++ "_" ++ skyName))
+            recvType  = _fnRecvType fn
+            -- T4: disambiguate duplicate wrapper names by suffixing with receiver type
+            disambSfx = if null recvType then "" else "_from_" ++ lowerFirst recvType
+            wrapper   = kernelName ++ "_" ++ skyName ++ disambSfx
+            rustName  = lowerFirst (map (\c -> if c == '.' then '_' else c) (drop 5 kernelName ++ "_" ++ skyName ++ disambSfx))
             params    = _fnParams fn
             results   = _fnResults fn
             paramSkyTypes = _fnParamSkyTypes fn ++ repeat ""
-            -- Resolve each param's Sky type to a Rust type; fall back to String.
-            -- Use take to bound the potentially-infinite zip, avoiding a
-            -- non-terminating comprehension for 0-parameter functions (Q2 root cause).
             nParams = length params
-            -- R2b: resolve param types: prefer skyTypeToRust for known types,
-            -- fall back to crate-qualified opaque types (Uuid→uuid::Uuid, etc.)
             paramTypes = [ resolveRustType crateImport st | (_, st) <- take nParams (zip [0::Int ..] paramSkyTypes) ]
             paramDecl = if null paramTypes then ""
                         else intercalate ", " [ "arg" ++ show j ++ ": " ++ t | (j, t) <- zip [0..] paramTypes ]
-            -- Determine return type from effect and results
             retInner = case results of
                 ((_, rt):_) -> if null rt then "SkyError" else resolveRustType crateImport rt
                 _           -> "()"
@@ -951,7 +954,6 @@ emitRustFile kernelName pkg =
                 _           -> "SkyResult<SkyError, " ++ retInner ++ ">"
             crateImport = pkgToCrateImport (_pkgPath pkg)
             fnName    = _fnName fn
-            recvType  = _fnRecvType fn
             methodName = _fnMethodName fn
             isInstance = not (null recvType) && not (null methodName)
                          && not (null params)
@@ -981,7 +983,8 @@ emitRustFile kernelName pkg =
                 "fallible" ->
                     "match " ++ callExpr ++ " { Ok(v) => ok_res(v), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
                 _ ->
-                    callExpr
+                    -- T2: wrap pure calls in ok_res() to match the SkyResult return type
+                    "ok_res(" ++ callExpr ++ ")"
         in [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
            , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
            , "    " ++ body
@@ -1879,8 +1882,8 @@ isSubstringOf needle hay = go hay
 -- .skyi catalogue
 -- ══════════════════════════════════════════════════════════════════════════
 
-emitSkyi :: PkgInfo -> String
-emitSkyi pkg =
+emitSkyi :: CompileTarget -> PkgInfo -> String
+emitSkyi TargetGo pkg =
     let aliases = buildAliasTable pkg
     in unlines $
         [ "-- Auto-generated FFI binding catalogue for " ++ _pkgPath pkg
@@ -1903,17 +1906,29 @@ emitSkyi pkg =
         [ ""
         , "package " ++ _pkgName pkg
         ]
-        ++ map emitSkyiFn (_pkgFns pkg)
+        ++ map emitSkyiGoFn (_pkgFns pkg)
+emitSkyi TargetRust pkg =
+    let mname = pkgToModuleName TargetRust (_pkgPath pkg)
+    in unlines $
+        [ "module " ++ mname ++ " exposing (..)"
+        , ""
+        ]
+        ++ map emitSkyiRustFn (_pkgFns pkg)
 
-
-emitSkyiFn :: FnInfo -> String
-emitSkyiFn fn =
+emitSkyiGoFn :: FnInfo -> String
+emitSkyiGoFn fn =
     let sig = if null (_fnParams fn)
             then "() -> " ++ goResultsToSky (_fnResults fn)
             else intercalate " -> " (map (goTypeToSky . snd) (_fnParams fn))
                     ++ " -> " ++ goResultsToSky (_fnResults fn)
     in "-- [" ++ _fnEffect fn ++ "] " ++ _fnName fn ++ " : " ++ sig
        ++ "   -- runtime wrap: Task Error"
+
+emitSkyiRustFn :: FnInfo -> String
+emitSkyiRustFn fn =
+    let sig = wrapperSkyType fn
+        name = lowerFirst (_fnName fn)
+    in name ++ " : " ++ sig
 
 
 goResultsToSky :: [(String, String)] -> String

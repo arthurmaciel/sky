@@ -2,6 +2,7 @@ module Sky.Generate.Rust.Builder where
 
 import Data.List (isSuffixOf, isPrefixOf, stripPrefix, sortBy, nub)
 import Data.Maybe (fromMaybe)
+import qualified Sky.Sky.Toml as Toml (RustDepSpec(..))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
@@ -2088,7 +2089,7 @@ ffiPlaceholder :: String -> String
 ffiPlaceholder name = "type " ++ name ++ " = String;"
 
 -- | Generate Cargo.toml for the Rust project
-emitCargoToml :: UsedKernels -> String -> String -> [(String, String)] -> String
+emitCargoToml :: UsedKernels -> String -> String -> [(String, Toml.RustDepSpec)] -> String
 emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     [ "[package]"
     , "name = \"sky-app\""
@@ -2105,14 +2106,22 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     [ "serde_json = \"1\""
     , "sha2 = \"0.10\""
     ] ++
-    [ name ++ " = \"" ++ version ++ "\""
-    | (name, version) <- rustDeps
+    [ emitDepLine name spec
+    | (name, spec) <- rustDeps
     , not (null name)
     ]
   where
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"
+    emitDepLine name (Toml.RustVersion ver) =
+        name ++ " = \"" ++ ver ++ "\""
+    emitDepLine name (Toml.RustGitDep url mRev mBranch mTag) =
+        let fields = [ "git = " ++ show url ]
+                ++ maybe [] (\r -> ["rev = " ++ show r]) mRev
+                ++ maybe [] (\b -> ["branch = " ++ show b]) mBranch
+                ++ maybe [] (\t -> ["tag = " ++ show t]) mTag
+        in name ++ " = { " ++ intercalate ", " fields ++ " }"
 
 intercalate :: String -> [String] -> String
 intercalate _ [] = ""
