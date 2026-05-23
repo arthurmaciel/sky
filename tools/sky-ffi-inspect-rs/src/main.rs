@@ -304,12 +304,12 @@ fn collect_from_file(
                                     params: vec![Param {
                                         name: "self".into(),
                                         ty: sn.clone(),
-                                        sky_type: String::new(),
+                                        sky_type: type_str_to_sky(&sn, &type_aliases),
                                     }],
                                     results: vec![Param {
                                         name: String::new(),
                                         ty: field_ty.clone(),
-                                        sky_type: String::new(),
+                                        sky_type: field_ty.clone(),
                                     }],
                                     variadic: false,
                                     effect: "pure".into(),
@@ -327,12 +327,12 @@ fn collect_from_file(
                                         Param {
                                             name: "self".into(),
                                             ty: sn.clone(),
-                                            sky_type: String::new(),
+                                            sky_type: type_str_to_sky(&sn, &type_aliases),
                                         },
                                         Param {
                                             name: "value".into(),
                                             ty: field_ty.clone(),
-                                            sky_type: String::new(),
+                                            sky_type: field_ty.clone(),
                                         },
                                     ],
                                     results: vec![Param {
@@ -464,8 +464,8 @@ fn inspect_fn(
                 };
                 params.push(Param {
                     name: "self".into(),
-                    ty,
-                    sky_type: String::new(),
+                    ty: fn_recv_type.clone(),
+                    sky_type: type_str_to_sky(&fn_recv_type, type_aliases),
                 });
             }
             syn::FnArg::Typed(pat_type) => {
@@ -474,7 +474,7 @@ fn inspect_fn(
                 params.push(Param {
                     name,
                     ty: ty.clone(),
-                    sky_type: String::new(),
+                    sky_type: ty.clone(),
                 });
                 // Check for function pointers (effectful signal)
                 if is_fn_ptr_type(&pat_type.ty) {
@@ -493,16 +493,16 @@ fn inspect_fn(
             if ret_str_contains_result(&ret_ty_str) {
                 results.push(Param {
                     name: String::new(),
-                    ty: sky,
-                    sky_type: String::new(),
+                    ty: sky.clone(),
+                    sky_type: sky,
                 });
             } else if ret_ty_str == "()" || ret_ty_str.is_empty() {
                 // void return — no results
             } else {
                 results.push(Param {
                     name: String::new(),
-                    ty: sky,
-                    sky_type: String::new(),
+                    ty: sky.clone(),
+                    sky_type: sky,
                 });
             }
         }
