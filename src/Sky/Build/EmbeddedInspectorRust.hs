@@ -2,50 +2,72 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Bundle the `sky-ffi-inspect-rs` Rust helper into the sky binary so
--- releases ship a single executable rather than a pair. The source
--- tree (`tools/sky-ffi-inspect-rs/`) is embedded via Template Haskell
--- at build time. On first use, `ensureInspectorRust` materialises the
--- tree into a content-hashed cache dir under `$XDG_CACHE_HOME/sky/tools/`,
--- runs `cargo build`, and returns the path to the compiled binary.
--- Subsequent calls are O(stat) — the hash changes only when sky is
--- rebuilt with new inspector source, so `sky upgrade` auto-invalidates
--- without manual cleanup.
+-- releases ship a single executable rather than a pair.  On first use,
+-- `ensureInspectorRust` materialises the binary into
+-- `$XDG_CACHE_HOME/sky/tools/sky-ffi-inspect-rs/` and returns its path.
 --
--- Trust model: Rust (cargo) is already a hard requirement of `sky build
--- --target rust`, so building a small helper on first `sky add` is a
--- no-new-dependency cost. The embedded Cargo.lock + vendored-ish deps
--- (via cargo metadata resolution) keep builds reproducible.
+-- Embedding strategy (checked at compile time, in order):
+--   1. Pre-built release binary at `tools/sky-ffi-inspect-rs/target/release/sky-ffi-inspect-rs`
+--      → embed via `embedFile` (fast, zero cargo runtime).
+--   2. Source tree at `tools/sky-ffi-inspect-rs/` (excluding target/)
+--      → embed via `embedDirFiltered`; first-use does a cargo build.
+--
+-- Strategy 2 is the development fallback — it matches what the Go
+-- inspector does (EmbeddedInspector.hs).  Strategy 1 is the preferred
+-- path for releases: run `cargo build --release` in
+-- `tools/sky-ffi-inspect-rs/` before `cabal build` so TH picks up the
+-- binary.
 module Sky.Build.EmbeddedInspectorRust
     ( ensureInspectorRust
     , embeddedInspectorRustBytes
     ) where
 
-import Control.Monad (unless, forM_)
+import Control.Monad (unless, forM_, when)
 import qualified Crypto.Hash.SHA256 as SHA256
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.List (sortOn)
-import qualified Sky.Build.EmbedDirTH as EmbedDir
+import Data.List (sortOn, isPrefixOf)
+import Language.Haskell.TH
+import Language.Haskell.TH.Syntax (qAddDependentFile, runIO)
+import qualified Data.FileEmbed as FE
 import Numeric (showHex)
 import System.Directory (createDirectoryIfMissing, doesFileExist,
                          getPermissions, setPermissions, setOwnerExecutable,
-                         getXdgDirectory, XdgDirectory(..))
+                         getXdgDirectory, XdgDirectory(..), listDirectory,
+                         removeDirectoryRecursive)
 import System.FilePath ((</>), takeDirectory)
-import System.Process (readCreateProcessWithExitCode, proc, CreateProcess(..))
 import System.Exit (ExitCode(..))
+import System.Process (readCreateProcessWithExitCode, proc, CreateProcess(..))
+import qualified Sky.Build.EmbedDirTH as EmbedDir
 
 
-
--- | The `tools/sky-ffi-inspect-rs/` source tree, keyed by relative
--- path. Re-embedded whenever any file changes (file-embed registers
--- each file via qAddDependentFile).
+-- | Try to embed the pre-built release binary; fall back to source tree.
+-- The TH splice runs at compile time.
 embeddedInspectorRustBytes :: [(FilePath, ByteString)]
-embeddedInspectorRustBytes = $(EmbedDir.embedDirFiltered "tools/sky-ffi-inspect-rs" ["target"])
+embeddedInspectorRustBytes = $(do
+    let binaryPath = "tools/sky-ffi-inspect-rs/target/release/sky-ffi-inspect-rs"
+    binExists <- runIO $ doesFileExist binaryPath
+    if binExists
+        then do
+            -- Strategy 1: embed the pre-built binary
+            qAddDependentFile binaryPath
+            bs <- runIO $ BS.readFile binaryPath
+            bsExp <- FE.bsToExp bs
+            [| [("sky-ffi-inspect-rs", $(return bsExp))] |]
+        else do
+            -- Strategy 2: fall back to source tree embed
+            reportWarning $
+                "EmbeddedInspectorRust: no pre-built binary at " ++ binaryPath
+                ++ "; falling back to source-tree embed (first 'sky add' "
+                ++ "will do a slow cargo build).  Run 'cargo build --release' "
+                ++ "in tools/sky-ffi-inspect-rs/ before cabal build to avoid this."
+            EmbedDir.embedDirFiltered "tools/sky-ffi-inspect-rs" ["target"]
+    )
 
 
--- | Content hash of the embedded tree. Entries are sorted by path
--- so the hash is independent of embed-order. First 12 hex chars
--- are plenty to disambiguate across sky versions.
+-- | Content hash of the embedded data.  For the binary path this is the
+-- SHA-256 of the binary itself (stable for identical builds).  For the
+-- source-tree fallback it's the hash of all source bytes (sorted by path).
 inspectorRustHash :: String
 inspectorRustHash =
     let sorted = sortOn fst embeddedInspectorRustBytes
@@ -58,49 +80,80 @@ inspectorRustHash =
     pad2 s   = s
 
 
--- | Return the path to a ready-to-run `sky-ffi-inspect-rs`. Uses a
--- stable cache path (`$XDG_CACHE_HOME/sky/tools/sky-ffi-inspect-rs/`)
--- with a `.hash` file to detect content changes. Only triggers a full
--- `cargo build` when the embedded source hash differs from the cached
--- hash — so `sky upgrade` without inspector source changes reuses the
--- existing binary (avoids the 3-7 min cold build).
+-- | Return the path to a ready-to-run `sky-ffi-inspect-rs`.
+-- Materialises the embedded binary/source to a stable cache path
+-- (`$XDG_CACHE_HOME/sky/tools/sky-ffi-inspect-rs/`).  For the source-tree
+-- fallback, runs `cargo build` on first materialisation.
 ensureInspectorRust :: IO (Either String FilePath)
 ensureInspectorRust = do
     cache <- getXdgDirectory XdgCache "sky"
     let root = cache </> "tools" </> "sky-ffi-inspect-rs"
-        bin  = root </> "target" </> "debug" </> "sky-ffi-inspect-rs"
+        bin  = root </> "sky-ffi-inspect-rs"
         hashFile = root </> ".hash"
+    -- Check if a cached binary exists with matching hash
     binReady <- doesFileExist bin
-    hashReady <- if binReady then do
+    hashMatch <- if binReady then do
         hashOk <- doesFileExist hashFile
-        if not hashOk then return False else do
+        if hashOk then do
             oldHash <- readFile hashFile
             return (oldHash == inspectorRustHash)
         else return False
-    if hashReady
+    else return False
+    if hashMatch
         then return (Right bin)
-        else buildInspectorRust root bin hashFile
+        else materialiseInspector root bin hashFile cache
 
 
-buildInspectorRust :: FilePath -> FilePath -> FilePath -> IO (Either String FilePath)
-buildInspectorRust root bin hashFile = do
+-- | Materialise the embedded data and make the binary executable.
+-- For the source-tree path, also runs `cargo build`.
+materialiseInspector :: FilePath -> FilePath -> FilePath -> FilePath -> IO (Either String FilePath)
+materialiseInspector root bin hashFile cache = do
     createDirectoryIfMissing True root
-    -- Materialise source.
-    forM_ embeddedInspectorRustBytes $ \(rel, bytes) -> do
-        let dst = root </> rel
-        createDirectoryIfMissing True (takeDirectory dst)
-        BS.writeFile dst bytes
-    -- cargo build .
-    let cargoBuild = (proc "cargo" ["build", "--manifest-path", root </> "Cargo.toml"])
-                      { cwd = Just root }
-    (ec, _out, err) <- readCreateProcessWithExitCode cargoBuild ""
-    case ec of
-        ExitSuccess -> do
-            let bin' = root </> "target" </> "debug" </> "sky-ffi-inspect-rs"
-            perms <- getPermissions bin'
-            setPermissions bin' (setOwnerExecutable True perms)
-            -- Write hash file so subsequent calls skip the cargo build
+    let entries = embeddedInspectorRustBytes
+        isBinary = length entries == 1 && fst (head entries) == "sky-ffi-inspect-rs"
+    if isBinary
+        then do
+            -- Strategy 1: just write the binary and make it executable
+            let (_rel, bytes) = head entries
+            BS.writeFile bin bytes
+            perms <- getPermissions bin
+            setPermissions bin (setOwnerExecutable True perms)
             writeFile hashFile inspectorRustHash
-            return (Right bin')
-        _ ->
-            return (Left $ "sky-ffi-inspect-rs: cargo build failed:\n" ++ err)
+            -- Remove old source-tree caches (target/ subdirs from prior builds)
+            cleanupOldCaches cache
+            return (Right bin)
+        else do
+            -- Strategy 2: write source tree, then cargo build
+            forM_ entries $ \(rel, bytes) -> do
+                let dst = root </> rel
+                createDirectoryIfMissing True (takeDirectory dst)
+                BS.writeFile dst bytes
+            let cargoBuild = (proc "cargo" ["build", "--manifest-path", root </> "Cargo.toml"])
+                              { cwd = Just root }
+            (ec, _out, err) <- readCreateProcessWithExitCode cargoBuild ""
+            case ec of
+                ExitSuccess -> do
+                    let bin' = root </> "target" </> "debug" </> "sky-ffi-inspect-rs"
+                    perms <- getPermissions bin'
+                    setPermissions bin' (setOwnerExecutable True perms)
+                    writeFile hashFile inspectorRustHash
+                    return (Right bin')
+                _ ->
+                    return (Left $ "sky-ffi-inspect-rs: cargo build failed:\n" ++ err)
+
+
+-- | Remove old source-tree cache directories that still have `target/`
+-- subdirectories (accumulated from prior embed-source builds).
+cleanupOldCaches :: FilePath -> IO ()
+cleanupOldCaches root = do
+    let parent = takeDirectory root
+    entries <- listDirectory parent
+    mapM_ (\entry -> do
+        let full = parent </> entry
+        if full == root then return ()
+        else if "sky-ffi-inspect-rs" `isPrefixOf` entry then do
+            hasTarget <- doesFileExist (full </> "target")
+            when hasTarget $
+                removeDirectoryRecursive full
+        else return ()
+        ) entries

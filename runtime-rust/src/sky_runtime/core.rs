@@ -122,9 +122,9 @@ pub fn string_from_float(f: f64) -> String { format!("{}", f) }
 pub fn string_split(sep: String, s: String) -> Vec<String> { s.split(&sep).map(|x| x.to_string()).collect() }
 
 // List operations (Q3)
-pub fn list_foldl<T0, T1>(f: impl Fn(T1, T0) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
+pub fn list_foldl<T0, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
     let mut acc = init;
-    for item in list { acc = f(acc, item); }
+    for item in list { acc = f(item, acc); }
     acc
 }
 pub fn list_foldr<T0: Clone, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
