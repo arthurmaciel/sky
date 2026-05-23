@@ -907,6 +907,25 @@ emitRustFile kernelName pkg =
         [ ""
         ]
   where
+    -- | Resolve a Sky type string to a Rust type, preferring known
+    -- concrete types; for opaque types, qualify with the crate path.
+    resolveRustType crate st =
+        let mapped = skyTypeToRust st
+        in if mapped /= "String" then mapped
+           else -- Opaque type: try to qualify with the crate path.
+                case crate of
+                    "uuid" -> case st of
+                        "Uuid"       -> "uuid::Uuid"
+                        "Hyphenated" -> "uuid::fmt::Hyphenated"
+                        "Simple"     -> "uuid::fmt::Simple"
+                        "Urn"        -> "uuid::fmt::Urn"
+                        "Braced"     -> "uuid::fmt::Braced"
+                        "Variant"    -> "uuid::Variant"
+                        "Version"    -> "uuid::Version"
+                        "Timestamp"  -> "uuid::Timestamp"
+                        _            -> "String"
+                    _ -> "String"
+
     emitRustFnSimple (i, fn) =
         let skyName   = lowerFirst (_fnName fn)
             wrapper   = kernelName ++ "_" ++ skyName
@@ -918,13 +937,14 @@ emitRustFile kernelName pkg =
             -- Use take to bound the potentially-infinite zip, avoiding a
             -- non-terminating comprehension for 0-parameter functions (Q2 root cause).
             nParams = length params
-            paramTypes = [ if null st then "String" else skyTypeToRust st
-                         | (_, st) <- take nParams (zip [0::Int ..] paramSkyTypes) ]
+            -- R2b: resolve param types: prefer skyTypeToRust for known types,
+            -- fall back to crate-qualified opaque types (Uuid→uuid::Uuid, etc.)
+            paramTypes = [ resolveRustType crateImport st | (_, st) <- take nParams (zip [0::Int ..] paramSkyTypes) ]
             paramDecl = if null paramTypes then ""
                         else intercalate ", " [ "arg" ++ show j ++ ": " ++ t | (j, t) <- zip [0..] paramTypes ]
             -- Determine return type from effect and results
             retInner = case results of
-                ((_, rt):_) -> if null rt then "SkyError" else skyTypeToRust rt
+                ((_, rt):_) -> if null rt then "SkyError" else resolveRustType crateImport rt
                 _           -> "()"
             retType = case _fnEffect fn of
                 "effectful" -> "SkyTask<SkyError, " ++ retInner ++ ">"

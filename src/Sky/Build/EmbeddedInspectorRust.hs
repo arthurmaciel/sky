@@ -31,7 +31,7 @@ import Language.Haskell.TH
 import Language.Haskell.TH.Syntax (qAddDependentFile, runIO)
 import qualified Data.FileEmbed as FE
 import Numeric (showHex)
-import System.Directory (createDirectoryIfMissing, doesFileExist,
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
                          getPermissions, setPermissions, setOwnerExecutable,
                          getXdgDirectory, XdgDirectory(..), listDirectory,
                          removeDirectoryRecursive)
@@ -146,14 +146,16 @@ materialiseInspector root bin hashFile cache = do
 -- subdirectories (accumulated from prior embed-source builds).
 cleanupOldCaches :: FilePath -> IO ()
 cleanupOldCaches root = do
-    let parent = takeDirectory root
-    entries <- listDirectory parent
-    mapM_ (\entry -> do
-        let full = parent </> entry
-        if full == root then return ()
-        else if "sky-ffi-inspect-rs" `isPrefixOf` entry then do
-            hasTarget <- doesFileExist (full </> "target")
-            when hasTarget $
-                removeDirectoryRecursive full
-        else return ()
-        ) entries
+    -- root = ~/.cache/sky; hash-suffixed dirs live in ~/.cache/sky/tools/
+    let toolsDir = root </> "tools"
+    hasTools <- doesDirectoryExist toolsDir
+    when hasTools $ do
+        entries <- listDirectory toolsDir
+        mapM_ (\entry -> do
+            let full = toolsDir </> entry
+            if "sky-ffi-inspect-rs-" `isPrefixOf` entry then do
+                hasTarget <- doesDirectoryExist (full </> "target")
+                when hasTarget $
+                    removeDirectoryRecursive full
+            else return ()
+            ) entries
