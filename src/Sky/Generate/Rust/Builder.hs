@@ -8,6 +8,7 @@ import qualified Sky.AST.Canonical as Can
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Reporting.Annotation as Ann
 import Data.Char (toLower, toUpper, isUpper)
+import Numeric (showHex)
 
 -- | Convert Sky module-prefixed names to Rust conventions:
 --   Types:     Sky_Core_Error_Error  →  SkyCoreErrorError     (CamelCase)
@@ -535,22 +536,27 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                         let ret = extractReturnType ty
                         in if not (hasTypeVars ret)
                            then typeToRustString (ecRecordMap ctx) ret
-                           else case knownDefSig modPrefix name n of
-                               Just (_, knownRetType) -> knownRetType
-                               Nothing ->
-                                   let (retStr, newGens) = returnTypeWithGenerics (ecRecordMap ctx) ret (ecSolvedTypes ctx)
-                                   in retStr
+                            else case knownDefSig modPrefix name n of
+                                Just (_, knownRetType) -> knownRetType
+                                Nothing ->
+                                    -- Return type has TVars: use body inference
+                                    let bodyInner = taskExprInnerType (ecSolvedTypes ctx) body
+                                    in if null bodyInner
+                                       then case knownDefSig modPrefix name n of
+                                           Just (_, knownRetType2) -> knownRetType2
+                                           Nothing -> "()"
+                                       else "SkyTask<" ++ bodyInner ++ ">"
                     Nothing ->
-                        -- No solved type available — use knownDefSig, body inference,
-                        -- or (for main) the hardcoded Task/unit convention.
-                        let bodyInner = taskExprInnerType (ecSolvedTypes ctx) body
-                        in if null bodyInner
-                           then case knownDefSig modPrefix name n of
-                               Just (_, knownRetType) -> knownRetType
-                               Nothing -> if name == "main"
-                                          then if ecUsesTaskRun ctx then "()" else "SkyTask<()>"
-                                          else "()"
-                           else "SkyTask<" ++ bodyInner ++ ">"
+                         -- No solved type available — use knownDefSig, body inference,
+                         -- or (for main) the hardcoded Task/unit convention.
+                         let bodyInner = taskExprInnerType (ecSolvedTypes ctx) body
+                         in if null bodyInner
+                            then case knownDefSig modPrefix name n of
+                                Just (_, knownRetType) -> knownRetType
+                                Nothing -> if name == "main"
+                                           then if ecUsesTaskRun ctx then "()" else "SkyTask<()>"
+                                           else "()"
+                            else "SkyTask<" ++ bodyInner ++ ">"
         -- Track multi-use variables in the function body so they get
         -- cloned at each function-call argument site (ownership safety).
         multiBody = collectVarLocalsMulti body
@@ -564,7 +570,7 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         bodyWrapped = if "SkyTask<" `isPrefixOf` retTy && needsTaskWrap (ecSolvedTypes ctx) body
                       then "task_succeed({ " ++ bodyStr ++ " })"
                       else bodyStr
-    in RustFunction rustName genVars paramStrs retTy bodyWrapped
+     in RustFunction rustName genVars paramStrs retTy bodyWrapped
 defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
     let rm = ecRecordMap ctx
         rustName = if name == "main" then "sky_main" else name
@@ -792,8 +798,9 @@ substVar ctx name inline = go
             let fnName = kernelToRust mod n
             in if Set.member (mod, n) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
         Can.VarCtor _ mn tn cn _ -> kernelCtorToRust mn tn cn
-        Can.Chr c -> "'" ++ c ++ "'"
-        Can.Str s -> show s ++ ".to_string()"
+        Can.Chr [c] -> rustCharLit c
+        Can.Chr s -> rustStringLit s  -- multi-char or empty: fall back to string
+        Can.Str s -> rustStringLit s ++ ".to_string()"
         Can.Int i -> show i
         Can.Float f -> show f
         Can.Unit -> "()"
@@ -965,6 +972,30 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
         in if needsClone then rustSafeIdent n ++ ".clone()" else rustSafeIdent n
     _ -> exprToRustString ctx (Ann.At Ann.one a)
 
+-- | Emit a Rust string literal from a Haskell string.
+-- Handles non-ASCII characters via \\u{NNNN} escapes (Rust uses hex, not
+-- Haskell's decimal \\NNN).  Inline UTF-8 for ASCII-safe chars.
+rustStringLit :: String -> String
+rustStringLit s = "\"" ++ concatMap escapeChar s ++ "\""
+  where
+    escapeChar '\"' = "\\\""
+    escapeChar '\\' = "\\\\"
+    escapeChar '\n' = "\\n"
+    escapeChar '\t' = "\\t"
+    escapeChar '\r' = "\\r"
+    escapeChar c
+        | c < ' ' || c == '\x7f' = "\\u{" ++ showHex (fromEnum c) "}"
+        | c > '\x7f'             = "\\u{" ++ showHex (fromEnum c) "}"
+        | otherwise              = [c]
+
+-- | Emit a Rust char literal, using \\u{NNNN} for non-ASCII.
+rustCharLit :: Char -> String
+rustCharLit c
+    | c > '\x7f' = "'\\u{" ++ showHex (fromEnum c) "}'"
+    | c == '\''  = "'\\''"
+    | c == '\\'  = "'\\\\'"
+    | otherwise  = "'" ++ [c] ++ "'"
+
 exprToRustString :: EmitCtx -> Can.Expr -> String
 exprToRustString ctx (Ann.At _ expr) = exprToRustInner ctx expr
 
@@ -1022,8 +1053,9 @@ exprToRustInner ctx e = case e of
         in if mod == "Basics" && name == "not" then "!"
            else if Set.member (mod, name) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
     Can.VarCtor _ modName typeName ctorName _ -> kernelCtorToRust modName typeName ctorName
-    Can.Chr c -> "'" ++ c ++ "'"
-    Can.Str s -> show s ++ ".to_string()"
+    Can.Chr [c] -> rustCharLit c
+    Can.Chr s -> rustStringLit s
+    Can.Str s -> rustStringLit s ++ ".to_string()"
     Can.Int i -> show i
     Can.Float f -> show f
     Can.List es -> "vec![" ++ intercalate ", " (map (exprToRustString ctx) es) ++ "]"

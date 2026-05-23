@@ -859,6 +859,25 @@ emitGoFile kernelName pkg =
 
 -- | Convert a Sky type string (as output by the inspector's
 -- type_str_to_sky) to a Rust type string.
+-- | Convert a Sky type string (as emitted by the inspector's
+-- type_str_to_sky) to a Rust type string.
+skyTypeToRust :: String -> String
+skyTypeToRust "Int"    = "i64"
+skyTypeToRust "Float"  = "f64"
+skyTypeToRust "Bool"   = "bool"
+skyTypeToRust "String" = "String"
+skyTypeToRust "()"     = "()"
+skyTypeToRust "Bytes"  = "Vec<u8>"
+skyTypeToRust s
+    | Just inner <- stripPrefix "List " s      = "Vec<" ++ skyTypeToRust inner ++ ">"
+    | Just inner <- stripPrefix "Maybe " s     = "SkyMaybe<" ++ skyTypeToRust inner ++ ">"
+    | Just rest <- stripPrefix "Result " s     = case words rest of
+        [e, a] -> "SkyResult<" ++ skyTypeToRust e ++ ", " ++ skyTypeToRust a ++ ">"
+        _      -> "SkyResult<SkyError, String>"
+    | Just rest <- stripPrefix "Dict String " s = "HashMap<String, " ++ skyTypeToRust rest ++ ">"
+    | Just rest <- stripPrefix "Task SkyError " s = "SkyTask<SkyError, " ++ skyTypeToRust rest ++ ">"
+    | otherwise = "String"  -- fallback for unrecognised types
+
 -- | Emit a Rust wrapper module for a single crate, to be placed at
 -- .skycache/rust/<slug>_bindings.rs.  Mirrors emitGoFile but for Rust.
 emitRustFile :: String -> PkgInfo -> String
@@ -885,16 +904,40 @@ emitRustFile kernelName pkg =
         let skyName   = lowerFirst (_fnName fn)
             wrapper   = kernelName ++ "_" ++ skyName
             rustName  = lowerFirst (map (\c -> if c == '.' then '_' else c) (drop 5 kernelName ++ "_" ++ skyName))
-            nParams   = length (_fnParams fn)
-            paramDecl = if nParams == 0 then ""
-                        else intercalate ", " [ "arg" ++ show j ++ ": String" | j <- [0..nParams - 1] ]
-            retType   = case _fnEffect fn of
-                "effectful" -> "SkyTask<SkyError, String>"
-                _           -> "SkyResult<SkyError, String>"
+            params    = _fnParams fn
+            results   = _fnResults fn
+            paramSkyTypes = _fnParamSkyTypes fn ++ repeat ""
+            -- Resolve each param's Sky type to a Rust type; fall back to String
+            paramTypes = [ if null st then "String" else skyTypeToRust st
+                         | (i, st) <- zip [0::Int ..] paramSkyTypes
+                         , i < length params ]
+            paramDecl = if null paramTypes then ""
+                        else intercalate ", " [ "arg" ++ show j ++ ": " ++ t | (j, t) <- zip [0..] paramTypes ]
+            -- Determine return type from effect and results
+            retInner = case results of
+                ((_, rt):_) -> if null rt then "SkyError" else skyTypeToRust rt
+                _           -> "()"
+            retType = case _fnEffect fn of
+                "effectful" -> "SkyTask<SkyError, " ++ retInner ++ ">"
+                _           -> "SkyResult<SkyError, " ++ retInner ++ ">"
             crateImport = pkgToCrateImport (_pkgPath pkg)
+            fnName    = _fnName fn
+            argRefs   = intercalate ", " [ "arg" ++ show j | j <- [0..length params - 1] ]
+            -- Build the function body based on effect
+            body = case _fnEffect fn of
+                "effectful" ->
+                    let fnCall = crateImport ++ "::" ++ fnName ++ "(" ++ argRefs ++ ")"
+                    in "Box::pin(async move { match " ++ fnCall ++ ".await { Ok(v) => ok_res(v), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) } })"
+                "fallible" ->
+                    let fnCall = crateImport ++ "::" ++ fnName ++ "(" ++ argRefs ++ ")"
+                    in "match " ++ fnCall ++ " { Ok(v) => ok_res(v), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
+                _ ->
+                    -- pure: just call the function (result needs no wrapping)
+                    if null params then crateImport ++ "::" ++ fnName ++ "()"
+                    else crateImport ++ "::" ++ fnName ++ "(" ++ argRefs ++ ")"
         in [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
            , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
-           , "    todo!()"
+           , "    " ++ body
            , "}"
            ]
 

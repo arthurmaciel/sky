@@ -2187,6 +2187,716 @@ All six examples + N1/N2/N3 reproducers pass. `cargo clippy --all-targets -- -D 
   issue noted in the prior audit's "Out of scope" section. Workaround:
   `import Sky.Core.List as List` explicitly.
 
+## Post-merge audit (2026-05-23) — squash + cleanup introduced new bugs and exposed phony code
+
+> **Audience: AI fix-up agent.** The branch was squashed into two
+> commits to integrate with `origin/main`:
+> - `42e67992 "feat(rust): Rust codegen target — compiler, runtime, FFI inspector, all 6 examples pass"`
+> - `ef7d309c "fix(cleanup): remove non-Rust changes accidentally included in squash"`
+>
+> The squash erased the audit history (S1–S6, R1–R5, N1–N3 fix
+> iterations) — making future debugging harder — and the cleanup
+> commit's restructuring of `src/Sky/Build/Compile.hs` broke target
+> separation. Several of the agent's claimed "fixes" are also phony
+> (visible as `todo!()` stubs or undeclared types). The six existing
+> green examples still pass, but they don't exercise the broken paths.
+
+### Smoke tests for this audit
+
+All four fail today against HEAD (`ef7d309c`). `<SKY>` = absolute path
+to `sky-out/sky`.
+
+```bash
+# P1: Rust-target build pollutes sky-out/ with Go artifacts
+mkdir -p /tmp/sky-p1/src && cat > /tmp/sky-p1/src/Main.sky <<'EOF'
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+main = println "hi"
+EOF
+cat > /tmp/sky-p1/sky.toml <<'EOF'
+[project]
+name = "p1"
+target = "rust"
+EOF
+(cd /tmp/sky-p1 && rm -rf sky-out .skycache && <SKY> build src/Main.sky --target rust \
+ && ls sky-out/)
+# Expected: sky-out/Rust/ + sky-out/sky-app (or similar) — Rust-only.
+# Actual:  sky-out/Rust/ AND sky-out/main.go AND sky-out/go.mod AND
+#          sky-out/go.sum AND sky-out/rt/ — Go artifacts polluting a
+#          Rust build.
+
+# P2: Unicode characters in Sky strings produce invalid Rust escapes
+mkdir -p /tmp/sky-p2/src && cat > /tmp/sky-p2/src/Main.sky <<'EOF'
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+main = println "hello → world"
+EOF
+cat > /tmp/sky-p2/sky.toml <<'EOF'
+[project]
+name = "p2"
+target = "rust"
+EOF
+(cd /tmp/sky-p2 && rm -rf sky-out .skycache && <SKY> build src/Main.sky --target rust)
+# Expected: build succeeds.
+# Actual: error: unknown character escape: `8` — codegen emits
+#     log_info("hello \8594 world".to_string())
+# Rust has no \NNN decimal escapes.
+
+# P3: N3 half-fix — function declares undeclared generic
+mkdir -p /tmp/sky-p3/src && cat > /tmp/sky-p3/src/Main.sky <<'EOF'
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+mkOk x = Ok x
+main =
+    case mkOk 42 of
+        Ok n  -> println (String.fromInt n)
+        Err _ -> println "err"
+EOF
+cat > /tmp/sky-p3/sky.toml <<'EOF'
+[project]
+name = "p3"
+target = "rust"
+EOF
+(cd /tmp/sky-p3 && rm -rf sky-out .skycache && <SKY> build src/Main.sky --target rust)
+# Expected: build succeeds.
+# Actual: error[E0412] cannot find type `__Te_inst15` — codegen emits
+#     pub fn main_mk_ok(x: i64) -> SkyResult<__Te_inst15, i64> { … }
+# Generic is named in return type but not in the function's <…> list.
+
+# P4: Rust FFI bindings are stubs (todo!())
+mkdir -p /tmp/sky-p4 && cd /tmp/sky-p4 && rm -rf .skycache
+echo '[project]'                  >  sky.toml
+echo 'name = "p4"'                >> sky.toml
+echo 'target = "rust"'            >> sky.toml
+(<SKY> add uuid --target rust 2>&1; cat .skycache/rust/uuid_bindings.rs 2>&1 | head -20)
+# Expected: a real Rust wrapper that calls into the uuid crate.
+# Actual: every fn body is `todo!()`. The "Rust FFI works" claim in
+# the commit message describes a stub that panics at runtime.
+```
+
+### Findings
+
+#### P1. Target dispatch broken — Go codegen runs for `--target rust` *(HIGH)*
+
+**Evidence.** `src/Sky/Build/Compile.hs` after the cleanup commit
+(`ef7d309c`):
+
+```haskell
+                _ <- case Toml._target config of
+                    Toml.TargetRust -> do
+                        -- ... Rust codegen ...
+                    Toml.TargetGo -> return ()
+                let goCodeRaw = generateGoMulti canMod ...   -- ← UNCONDITIONAL
+                    declOriginMap = collectDeclOrigins entryPath canMod
+                    goCode = Validator.injectOriginComments declOriginMap goCodeRaw
+                createDirectoryIfMissing True outDir
+                let mainGoPath = outDir </> "main.go"
+                writeFile mainGoPath goCode                  -- ← UNCONDITIONAL
+                -- ... Go validator ...
+                if not (null valDiags)
+                  then do
+                      ...
+                      return (Left "Codegen validation rejected the emitted Go")
+                  else do
+                      copyRuntime outDir                     -- ← copies runtime-go/
+                      ...
+                      dceFfiWrappers outDir                  -- ← Go-only DCE
+                      ...
+                      return (Right mainGoPath)              -- ← returns the Go path
+```
+
+The `case ... of` was supposed to **branch** on target, but the cleanup
+unintentionally moved the Go codegen below the case statement without
+guarding it. Every `--target rust` build now:
+
+1. Writes the Rust output to `sky-out/Rust/` (correct);
+2. **Also** writes `sky-out/main.go`, `sky-out/go.mod`, `sky-out/go.sum`, `sky-out/rt/`;
+3. **Also** runs the Go-side validator — if any Sky construct emits Go that the validator rejects, the entire Rust build aborts with *"Codegen validation rejected the emitted Go"* even though the Rust output is valid;
+4. **Also** copies the Go runtime tree (~10 MB);
+5. **Also** runs Go FFI wrapper DCE (`dceFfiWrappers`) on a directory the Rust target never reads;
+6. Returns `mainGoPath` (Go) from the function rather than the Rust output path — downstream tooling that consumes `compile`'s return value would see the wrong thing.
+
+**Why all six existing examples still pass:** the existing examples' Sky
+source compiles cleanly to both Go and Rust. The Go side happens to
+validate. Any future Sky code that exercises a Rust-only construct
+(e.g. a Rust crate FFI call without a Go binding) would have the Rust
+build fail because of the Go validator's complaint.
+
+**Proper fix.** Make the target dispatch exclusive. Move the Go
+codegen + validator + runtime-copy + dce into the `Toml.TargetGo`
+branch of an outer `case`:
+
+```haskell
+case Toml._target config of
+    Toml.TargetRust -> do
+        ...  -- Rust codegen as today (lines 1448-1514)
+        let cacheDir = ".skycache"
+        createDirectoryIfMissing True cacheDir
+        writeFile (cacheDir </> "source.hash") srcHash
+        putStrLn "Compilation successful"
+        return (Right (outDir </> "Rust" </> "src" </> "main.rs"))
+
+    Toml.TargetGo -> do
+        let goCodeRaw = generateGoMulti ...                  -- existing Go path
+            declOriginMap = collectDeclOrigins entryPath canMod
+            goCode = Validator.injectOriginComments declOriginMap goCodeRaw
+        createDirectoryIfMissing True outDir
+        writeFile (outDir </> "main.go") goCode
+        ...  -- existing Go validator + runtime copy + DCE + return
+```
+
+**Regression test.**  Add to the existing six-example loop a *negative*
+check: the `examples/*/sky-out/` directory after a `--target rust`
+build must NOT contain `main.go`, `go.mod`, `go.sum`, or `rt/`.
+
+```bash
+for ex in 01-hello-world 04-local-pkg 07-todo-cli 14-task-demo simple test_pkg; do
+    (cd examples/$ex && rm -rf sky-out .skycache .skydeps \
+     && ../../sky-out/sky build src/Main.sky --target rust \
+     && for forbidden in main.go go.mod go.sum rt; do
+            [ ! -e "sky-out/$forbidden" ] || echo "FAIL: $ex has Go artifact sky-out/$forbidden"
+        done)
+done
+```
+
+#### P2. Sky string literals containing non-ASCII produce invalid Rust *(HIGH)*
+
+**Evidence.** `src/Sky/Generate/Rust/Builder.hs:796` and `:1026`:
+```haskell
+Can.Str s -> show s ++ ".to_string()"
+```
+
+Haskell's `show` for a `String` escapes non-ASCII characters as decimal
+escapes (e.g., `→` → `\8594`). Rust string literals don't recognise
+`\NNN` decimal escapes — only `\u{NNNN}` hex or raw UTF-8 in the
+source. P2's reproducer (`"hello → world"`) emits
+`"hello \8594 world".to_string()` → `error: unknown character escape: '8'`.
+
+**Proper fix.** Replace `show s` with a Rust-aware string-literal
+emitter. Two options, both sound:
+
+1. **Inline UTF-8** (preferred). Rust source files are UTF-8 by default;
+   non-ASCII characters can appear literally in string literals. Just
+   re-emit the bytes:
+   ```haskell
+   rustStringLit :: String -> String
+   rustStringLit s = "\"" ++ concatMap escapeChar s ++ "\""
+     where
+       escapeChar '\"'  = "\\\""
+       escapeChar '\\'  = "\\\\"
+       escapeChar '\n'  = "\\n"
+       escapeChar '\t'  = "\\t"
+       escapeChar '\r'  = "\\r"
+       escapeChar c | c < ' ' || c == '\x7f' =
+           "\\u{" ++ showHex (fromEnum c) "}"
+       escapeChar c     = [c]   -- pass through UTF-8 codepoint
+   ```
+   Then: `Can.Str s -> rustStringLit s ++ ".to_string()"`.
+
+2. **Always `\u{...}` for non-ASCII.** Strictly equivalent but uglier
+   output. Same `escapeChar` function with the final `[c]` arm replaced
+   by `"\\u{" ++ showHex (fromEnum c) "}"` when `c > '\x7f'`.
+
+Add an import of `Numeric (showHex)` to `Builder.hs` if not present.
+
+**Regression test.** `tests/regression/p2_unicode_strings.sky`
+containing every non-ASCII class: `→` (arrow), `🚀` (emoji + surrogate),
+`αβγ` (Greek), `\u{1F600}` (literal escape). Verify `cargo build`
+succeeds and the binary prints the expected output.
+
+#### P3. `returnTypeWithGenerics` emits undeclared generic types *(HIGH)*
+
+**Evidence.** `src/Sky/Generate/Rust/Builder.hs:541`:
+```haskell
+let (retStr, newGens) = returnTypeWithGenerics (ecRecordMap ctx) ret (ecSolvedTypes ctx)
+in retStr
+```
+
+`newGens` is bound and immediately discarded — only `retStr` flows
+out. The function `returnTypeWithGenerics` (line 587-611) produces
+names like `__Te_instN` (for Skolems) and `T_n` (for user-facing TVars)
+and returns them in the second tuple component, but they never reach
+the function's `<…>` generic-parameter list. The generated Rust
+declares `pub fn foo(x: T0) -> SkyResult<__Te_inst15, T0>` with no
+`<__Te_inst15>` declared — `cargo build` fails with E0412.
+
+The N3 fix in the audit-history commits removed the previous unsound
+`("String", [])` fallback (good) but didn't complete the second half:
+threading `newGens` into the function's generic-params clause.
+
+**Proper fix.** Thread `newGens` into the function's generic
+parameters. The existing `genVars` is a `String` (already rendered) so
+the threading needs both a parse-back or a refactor. Two options:
+
+1. **(Preferred — refactor)** Make `genVars` a `[String]` (list of
+   generic-name + bounds) instead of a rendered string. Add the new
+   generics to that list, then render once at the end. The current
+   rendering site is in `defToRustItem` (around line 511-516); track
+   it down and convert.
+
+2. **(Stop-gap — string surgery)** Render `newGens` into the existing
+   `genVars` string format:
+   ```haskell
+   let retVarsRendered = case newGens of
+           [] -> ""
+           gs -> intercalate ", " (map (\g -> g ++ ": Clone + PartialEq + std::fmt::Debug") gs)
+       finalGens = case (genVars, retVarsRendered) of
+           ("", "")  -> ""
+           (gv, "")  -> gv
+           ("", rv)  -> "<" ++ rv ++ ">"
+           (gv, rv)  -> init gv ++ ", " ++ rv ++ ">"
+                                                       -- splice into existing <…>
+   ```
+   Replace the final `RustFunction rustName genVars paramStrs retTy bodyWrapped`
+   with `RustFunction rustName finalGens ...`. Quick + ugly; option 1
+   is cleaner.
+
+**Regression test.** P3's reproducer (`mkOk x = Ok x`), plus a Task
+variant (`fwd : Task e a -> Task e a; fwd t = t`) to verify the
+threading also works for Task-returning generics.
+
+#### P4. Rust FFI bindings are `todo!()` stubs *(HIGH — claimed-feature theatre)*
+
+**Evidence.** `src/Sky/Build/FfiGen.hs:884-899`:
+```haskell
+emitRustFnSimple (i, fn) =
+    let skyName   = lowerFirst (_fnName fn)
+        wrapper   = kernelName ++ "_" ++ skyName
+        rustName  = ...
+        nParams   = length (_fnParams fn)
+        paramDecl = if nParams == 0 then ""
+                    else intercalate ", " [ "arg" ++ show j ++ ": String" | j <- [0..nParams - 1] ]
+        retType   = case _fnEffect fn of
+            "effectful" -> "SkyTask<SkyError, String>"
+            _           -> "SkyResult<SkyError, String>"
+        crateImport = pkgToCrateImport (_pkgPath pkg)
+    in [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
+       , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
+       , "    todo!()"
+       , "}"
+       ]
+```
+
+Three problems compound:
+
+1. **All wrapper bodies are `todo!()`** — call them and you get
+   `panic!: not yet implemented`. Sky source that imports a real Rust
+   crate compiles successfully but panics on first use.
+2. **All parameter types are `String`** — regardless of the actual
+   Rust signature the inspector resolved. A `Vec<u8>`-taking Rust fn
+   gets a Sky wrapper with `arg0: String`, lossy and incorrect.
+3. **All return types are `String`** wrapped in `SkyResult`/`SkyTask`
+   — regardless of what the inspector found.
+
+The commit message claim *"All inspector-side bugs fixed (Result order,
+generics, async, fn-ptr)"* describes inspector work that produces
+correct JSON metadata, then the FfiGen emitter discards every detail
+and emits stubs.
+
+**Proper fix.** Complete the type-mapping in `emitRustFnSimple`. The
+inspector already provides `_fnParams` (with `_paramType` /
+`_paramSkyType`), `_fnResults`, and `_fnEffect`. Three steps:
+
+1. **Sky-type → Rust-type mapping.** Add a helper:
+   ```haskell
+   skyTypeToRust :: String -> String   -- "List Int" → "Vec<i64>", etc.
+   skyTypeToRust t = case words t of
+       ["Int"]         -> "i64"
+       ["Float"]       -> "f64"
+       ["Bool"]        -> "bool"
+       ["String"]      -> "String"
+       ["()"]          -> "()"
+       "List":rest     -> "Vec<" ++ skyTypeToRust (unwords rest) ++ ">"
+       "Maybe":rest    -> "SkyMaybe<" ++ skyTypeToRust (unwords rest) ++ ">"
+       ["Result", e, a] -> "SkyResult<" ++ skyTypeToRust e ++ ", " ++ skyTypeToRust a ++ ">"
+       ["Dict", "String", v] -> "HashMap<String, " ++ skyTypeToRust v ++ ">"
+       _               -> "String"   -- fallback for unrecognised
+   ```
+
+2. **Use real parameter types.** Replace
+   `"arg" ++ show j ++ ": String"` with
+   `"arg" ++ show j ++ ": " ++ skyTypeToRust (_paramSkyType param)`.
+
+3. **Emit real body that calls the crate.** Map effect to wrapper:
+   - `pure`: `<crate>::<fn>(<args>)` (with type coercions as needed)
+   - `fallible`: wrap the result in `SkyResult::Ok` / map errors
+   - `effectful`: wrap in `Box::pin(async move { ... })`
+
+   Concretely, for `uuid::Uuid::new_v4()` (pure, no args):
+   ```rust
+   pub fn rust_uuid_new_v4() -> uuid::Uuid {
+       uuid::Uuid::new_v4()
+   }
+   ```
+   For `uuid::Uuid::parse_str(s: &str)` (fallible, one arg):
+   ```rust
+   pub fn rust_uuid_parse_str(arg0: String) -> SkyResult<SkyError, uuid::Uuid> {
+       match uuid::Uuid::parse_str(&arg0) {
+           Ok(v)  => ok_res(v),
+           Err(e) => SkyResult::Err(str_err(&e.to_string())),
+       }
+   }
+   ```
+
+This is the full implementation that was deferred — there's no
+shortcut. Until completed, *Rust FFI does not work*.
+
+**Regression test.** `tests/regression/p4_uuid_ffi.sky`:
+```elm
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Github.Com.Uuid as Uuid
+import Std.Log exposing (println)
+main =
+    let u = Uuid.newV4 () in
+    println (Uuid.toString u)
+```
+Verify `sky add uuid --target rust && sky build --target rust` produces
+a binary that prints a valid UUID at runtime (NOT panics).
+
+#### P5. Squashed history erased the audit chain *(MEDIUM)*
+
+**Evidence.** `git log --oneline -10`:
+```
+ef7d309c fix(cleanup): remove non-Rust changes accidentally included in squash
+42e67992 feat(rust): Rust codegen target — compiler, runtime, FFI inspector, all 6 examples pass
+a5ebb05a feat(rt): SKY_LIVE_FRAME_ANCESTORS — opt a Sky.Live deploy into cross-origin framing
+...
+```
+
+The 149 commits documenting S1–S6 / R1–R5 / N1–N3 audit-and-fix
+iterations collapsed into one 9385-insertion commit. Each prior commit
+had a message explaining *why* a specific decision was made — that
+context is now in the README only, untethered from the corresponding
+code change.
+
+**Proper response.** Not a code fix — but the next agent should adopt
+two practices:
+
+1. **Add inline code comments** that reference the audit findings:
+   ```haskell
+   -- Section P3 fix: thread newGens into the function's generic params.
+   -- See runtime-rust/README.md "Post-merge audit (2026-05-23)" for the
+   -- root-cause analysis.
+   let (retStr, newGens) = returnTypeWithGenerics ...
+   ```
+2. **Don't squash audit iterations.** The S/R/N findings are
+   load-bearing context for the next contributor. Land each fix as its
+   own commit referencing the README section.
+
+#### P6. `examples/26-ui-showcase` deletion conflict *(NOTE — handled)*
+
+The squash accidentally included files from `examples/26-ui-showcase/`
+(`origin/main` added them; the squash kept them; the cleanup deleted
+them). This is now correctly resolved on `origin/main`'s side:
+`examples/26-ui-showcase/` exists in `origin/main` only. No code-fix
+action needed, but if the user wants `examples/26-rust-ffi/` (per the
+FFI plan), use `27-` or higher to avoid collision.
+
+### Limitations (currently visible — update after fixes land)
+
+| Limitation | Description |
+|---|---|
+| `--target rust` pollutes `sky-out/` with Go artifacts | Go codegen + runtime copy + DCE all run unconditionally. `sky-out/main.go`, `sky-out/go.mod`, `sky-out/go.sum`, `sky-out/rt/` are written for every Rust build. Tracked as P1. |
+| Sky string literals can't contain non-ASCII | `→`, emojis, accented characters all break `cargo build` with *unknown character escape*. Workaround: stick to ASCII strings until P2 lands. |
+| Polymorphic non-Task return types fail to compile | Functions like `mkOk x = Ok x` emit `SkyResult<__Te_instN, …>` with `__Te_instN` undeclared. Workaround: add an explicit Sky type annotation that monomorphizes the return. Tracked as P3. |
+| Rust FFI is non-functional (stubs) | `sky add <crate> --target rust` writes `.skycache/rust/<slug>_bindings.rs` with `todo!()` bodies. Calling any FFI'd Rust fn panics. Tracked as P4. |
+| `Sky.Core.List.*` via Prelude exposure | `List.foldl` / `List.range` etc. used without explicit `import Sky.Core.List as List` emit a snake-case identifier that doesn't exist in the runtime. Pre-existing; not introduced by the squash. |
+
+### Action plan (very specific)
+
+Each step ends with: `cargo check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test` on the runtime, `cabal build exe:sky`, all six
+existing examples green, and the corresponding `tests/regression/p*`
+green.
+
+#### Step 1 — Fix P1 (target dispatch in `Compile.hs`) — **must land first**
+
+This is the single highest-priority fix because every other test runs
+through this code path. Patch `src/Sky/Build/Compile.hs` around
+line 1446-1574:
+
+1.1. **Restructure** the function so both `TargetRust` and `TargetGo`
+are siblings of an outer `case ... of`. Move the existing Go codegen
++ validator + `copyRuntime` + `dceFfiWrappers` + `return (Right
+mainGoPath)` into a new `Toml.TargetGo -> do …` block. Move the
+existing `Toml.TargetRust -> do …` block out of the `_ <- case`
+wrapper.
+
+1.2. **Add a Rust-target `Right` return** with the Rust entry path
+(currently the Rust branch falls through; the caller never sees its
+return value because of the `_ <- case`). The Rust branch should end
+with `return (Right (outDir </> "Rust" </> "src" </> "main.rs"))` (or
+similar — match the caller's expectation in `src/Sky/Cli/Run.hs`).
+
+1.3. **Delete** the spurious `_ <- case` wrapper around the Rust
+branch — it's structurally unnecessary once the outer dispatch is in
+place.
+
+1.4. **Sanity-check downstream:** grep for callers of `continueCompile`
+that read its `Right path` return value and verify they handle both
+the Go and Rust paths. `src/Sky/Cli/Run.hs` is the obvious place;
+others may exist.
+
+**Acceptance:**
+- `for ex in 01-hello-world 04-local-pkg 07-todo-cli 14-task-demo simple test_pkg; do (cd examples/$ex && rm -rf sky-out .skycache .skydeps && ../../sky-out/sky build src/Main.sky --target rust && for f in main.go go.mod go.sum rt; do [ ! -e "sky-out/$f" ] || echo "FAIL: $ex has sky-out/$f"; done); done`  produces zero `FAIL:` lines.
+- `sky build src/Main.sky --target go` on a known-good example still works end-to-end.
+
+#### Step 2 — Fix P2 (Unicode string emission)
+
+2.1. Add a `rustStringLit :: String -> String` helper in `Builder.hs`
+(see Findings §P2 for the sketch). Import `Numeric (showHex)` if not
+already imported.
+
+2.2. Replace `show s ++ ".to_string()"` at lines 796 and 1026 with
+`rustStringLit s ++ ".to_string()"`. Search for any other `Can.Str s
+-> show s` to catch sites I missed.
+
+2.3. **Audit** `Can.Chr c -> "'" ++ c ++ "'"` (line 1023 area) for the
+same bug — non-ASCII char literals also need `'\u{NNNN}'` escaping.
+
+**Acceptance:** `tests/regression/p2_unicode_strings.sky` (per
+§Findings) builds and prints the expected output.
+
+#### Step 3 — Fix P3 (thread `newGens` into function generics)
+
+3.1. **Refactor `genVars`** in `defToRustItem`. The current return
+shape is `(paramStrs, genVarsString)` (a pre-rendered `<…>`). Change to
+`(paramStrs, [(String, String)])` — list of (name, bounds), rendered
+once at the end. Search for every `let (paramStrs, genVars)` /
+`RustFunction rustName genVars …` use site and adapt.
+
+3.2. **Accumulate `newGens` from the return type.** After computing
+`retTy` with `returnTypeWithGenerics`, merge `newGens` into the
+function's generic list. Use `Data.List.nub` to dedupe.
+
+3.3. **Bound each generic with `Clone + PartialEq + std::fmt::Debug`**
+unless the function-level analysis already added a narrower bound.
+
+3.4. **Delete the `__Te_inst<N>` naming hack** if it was a stop-gap.
+Use stable names: `T_<sky-var-name>` for user-facing, `__T<N>` (no
+`_inst`) for compiler-internal Skolems.
+
+**Acceptance:** P3's reproducer + a Task-returning variant
+(`fwd t = t` typed `Task e a -> Task e a`) build clean.
+
+#### Step 4 — Fix P4 (real FFI wrappers, not `todo!()`)
+
+This is the largest piece and should land last. It depends on Steps
+1-3 being clean.
+
+4.1. Implement `skyTypeToRust :: String -> String` in `FfiGen.hs` per
+the sketch in §Findings P4. Recursive on `words` of the Sky type
+string. Cover: `Int`, `Float`, `Bool`, `String`, `()`, `List a`,
+`Maybe a`, `Result e a`, `Dict String v`, `Bytes`. Fallback to
+`String` only for unrecognised — and emit a *comment* in the wrapper
+flagging the gap so users can hand-write if needed.
+
+4.2. Replace `paramDecl` and `retType` in `emitRustFnSimple` to call
+`skyTypeToRust` with the inspector-provided `_paramSkyType` /
+`_resultSkyType`.
+
+4.3. Generate **real bodies** by effect:
+
+```haskell
+emitBody crateName fn = case _fnEffect fn of
+    "pure"      -> emitPureCall crateName fn
+    "fallible"  -> emitFallibleCall crateName fn
+    "effectful" -> emitAsyncCall crateName fn
+    _           -> "todo!()"  -- last resort
+```
+
+Each `emit*Call` walks `_fnParams` to construct the arg-coercion
+chain (e.g., `&arg0` for `&str` params, `arg0.try_into()?` for
+fallible coercions) and the call expression
+(`<crate>::<fn>(<coerced-args>)`), then wraps the result per the
+effect tier.
+
+4.4. **Add `use <crate>;` declarations** at the top of the generated
+`_bindings.rs`. The inspector knows the crate name (`_pkgName`).
+
+4.5. **Cargo dependency injection.** Verify the
+`RustBuilder.emitCargoToml` already lists FFI dependencies from
+`sky.toml`'s `[rust.dependencies]` (per commit `90beab3b` claim). If
+not, add it.
+
+**Acceptance:**
+- P4's reproducer (`tests/regression/p4_uuid_ffi.sky`) emits a binary
+  that prints a real UUID at runtime, not `panic: not yet implemented`.
+- `grep -nE 'todo!\(\)' .skycache/rust/uuid_bindings.rs` returns zero
+  hits (or only comments).
+
+#### Step 5 — Verification + history hygiene
+
+5.1. Add a `scripts/verify-rust-target.sh` that runs all six existing
+examples + all `tests/regression/p*` reproducers as a regression
+gate. Wire into CI alongside the existing Go verification scripts.
+
+5.2. Commit each step as its own commit with a clear message
+referencing the README section. Do **not** squash the audit-and-fix
+chain into a single feature commit — future contributors need the
+trail.
+
+### Next development steps for a sound, secure, efficient Rust backend
+
+Once P1–P4 land, the Rust backend reaches **"build-works"** parity.
+The following items are the roadmap to **production-grade**: each is a
+separate PR-sized chunk.
+
+#### Soundness
+
+S-1. **Eliminate `__T<N>` Skolem fallbacks entirely.** Either fully
+generalise (Strategy A from a prior audit) or refuse compilation at
+the Sky layer when a TVar position is observable but unresolved.
+Document the chosen strategy in `Builder.hs` near
+`returnTypeWithGenerics`.
+
+S-2. **Audit every `unwrap`/`expect`/`panic!` in `runtime-rust/`.** Per
+CLAUDE.md §non-regression rules, "no runtime panic from well-typed
+Sky code". Replace with `SkyResult::Err` propagation. Recent commits
+removed several but more may be lurking; add a `grep` test:
+
+```bash
+grep -rnE '\.unwrap\(\)|\.expect\(|panic!|unreachable!' runtime-rust/src \
+    | grep -v -- '// safe:' | grep -v '#\[cfg(test)\]'
+# Expected: zero output (or only sites annotated `// safe: …`).
+```
+
+S-3. **Property-based testing.** Add `proptest` to `runtime-rust`
+dev-dependencies. Properties to verify:
+- `task_run (task_succeed x) == Ok x` for arbitrary `x: i64` / `String`.
+- `task_run (task_and_then f (task_succeed x)) == task_run (f x)`.
+- `sky_result_map f (Ok x) == Ok (f x)` over arbitrary `x`.
+- JSON encode/decode roundtrip.
+
+S-4. **Sky.Core.List Prelude-exposure routing.** Bring up the missing
+`Sky.Core.List` module emission for `List.foldl`, `List.range`,
+`List.indexedMap`, etc. when only `Sky.Core.Prelude exposing (..)` is
+imported. Today emits unresolvable symbols.
+
+#### Security
+
+Sec-1. **FFI boundary input validation.** Once Step 4 above lands,
+audit each generated wrapper for:
+- Strings that flow into shell/SQL/path APIs — apply escaping/quoting.
+- Numeric coercions (`i64 → i32 → usize`) — use `try_into`, never
+  `as`.
+- Allocator-attack resistance: cap allocation sizes from
+  user-controlled inputs (`Vec::with_capacity` bounded by a sanity
+  limit).
+
+Sec-2. **`unsafe` audit.** Currently the runtime has zero `unsafe`
+blocks. Keep it that way. Add a CI check:
+```bash
+grep -rn 'unsafe' runtime-rust/src && exit 1 || true
+```
+
+Sec-3. **Dependency review.** Audit `runtime-rust/Cargo.toml` deps and
+their transitive trees with `cargo audit` and `cargo deny`. Pin
+versions, not ranges (`tokio = "1.0"` → `tokio = "=1.43.0"` once a
+specific tested version is chosen).
+
+Sec-4. **Secret-handling typedness.** Mirror Go's
+`Auth.signToken` typed-secret pattern: `String`, not `Box<dyn Any>`.
+Add a `SkySecret` newtype that doesn't implement `Debug` / `Display`
+so secrets can't be accidentally logged.
+
+#### Efficiency
+
+Eff-1. **Eliminate spurious `.clone()`.** Current codegen emits
+`(n.clone() * n.clone())` for `n * n` where `n: i64`. `i64` is `Copy`;
+the clones are no-ops semantically but visible in the generated
+source and burn compile-time inference budget. Update
+`ecCloneVars`/`patternToRustParam` to skip cloning when the var's
+type is known `Copy`.
+
+Eff-2. **Stop emitting per-module Sky.Core.* files** for every
+`--target rust` build. The Layer-3 Sky source for `Sky.Core.*` should
+be compiled **once per runtime-rust version** and pulled in as a
+sub-crate dependency, not regenerated per app. This cuts ~5 s off
+every build.
+
+Eff-3. **Skip `cargo build` invocation when source hasn't changed.**
+Today `sky build src/Main.sky --target rust` always invokes cargo,
+even when `.skycache/source.hash` matches. Pull the short-circuit
+logic from the Go path (search `source.hash`).
+
+Eff-4. **`sky watch` for Rust target.** Currently watches the entry
+file and re-runs `sky build`. For Rust target, also watch
+`runtime-rust/src/` and the generated `.skycache/rust/`; on change,
+invoke `cargo build` directly (skip Sky compilation).
+
+Eff-5. **Release-profile defaults.** Add a `--release` flag to
+`sky build` that sets `--release` on the underlying `cargo build` and
+enables LTO. Mention in `docs/tooling/cli.md`.
+
+#### Completeness (Sky.Live, Sky.Tui, Std.Db)
+
+C-1. **Sky.Live for Rust target.** Today the runtime ships only
+batch-mode primitives (Task / Result / Maybe / Json / Db). Sky.Live
+exists in Go runtime but not in `runtime-rust/`. Implementation:
+mirror Go's `runtime-go/rt/live.go` in `runtime-rust/src/sky_runtime/live.rs`.
+
+C-2. **Sky.Tui for Rust target.** Same situation — `runtime-go/rt/tui_*.go`
+needs a Rust port. Could use `ratatui` as the underlying terminal
+library.
+
+C-3. **Std.Db: complete CRUD.** Today the Rust runtime has `db_open`,
+`db_connect`, `db_exec`, `db_exec_raw`, `db_query`, `db_get_field`,
+`db_migrate_apply`. Missing per CLAUDE.md: `insertRow`, `getById`,
+`updateById`, `deleteById`, `findOneByField`, `findManyByField`,
+`findByConditions`, `unsafeFindWhere`, `queryDecode`, `withTransaction`.
+Implement against `sqlx`'s typed query macros.
+
+C-4. **`Std.Auth` for Rust target.** Mirror Go's
+`Auth.{hashPassword, signToken, verifyToken, register, login}`.
+Critical for any web-facing Sky-Rust app.
+
+#### Documentation + adoption
+
+D-1. **Migrate `runtime-rust/README.md`** out of being a rolling
+audit log into a proper user-facing document. The current audit
+sections (S/R/N/P findings) should move into `docs/rust/audit.md` or
+similar; the README should describe "how to build with --target rust"
+and link to docs.
+
+D-2. **`docs/rust/architecture.md`** — describe the Rust backend's
+design choices: tupled vs. curried calling convention (§A0), Sky-type
+→ Rust-type mapping, FFI strategy, error-type hierarchy.
+
+D-3. **Cookbook.** `docs/rust/cookbook.md` with worked examples:
+"add a Rust crate dependency", "wrap an async crate fn", "compile to
+WASM" (when WASM support lands).
+
+D-4. **Migration guide from Go target.** For users already on
+`--target go`, document the few Sky-source differences (currently
+none expected, but verify) and the operational differences (binary
+size, build time, FFI surface).
+
+### What's sure vs unsure
+
+**Sure (HIGH, verified by `cargo build` + reading the codepath):**
+P1 (Go artifacts in `sky-out/`), P2 (Unicode escape failure), P3
+(undeclared `__Te_inst15`), P4 (`todo!()` stubs in `emitRustFile`).
+
+**Reasonably sure (MEDIUM):** P5 (squashed history) — observable in
+`git log` but a process / hygiene problem, not a code bug.
+
+**Unsure (LOW):** No additional findings flagged. The runtime is
+fairly small (~700 lines); a fresh review of `runtime-rust/src/` could
+surface more, but nothing jumped out beyond the Soundness/Security
+items already in the roadmap.
+
+**Out of scope for this PR (tracked separately):**
+- The `\8594` issue (P2) is reproducible in `examples/00-standard-libs`
+  which contains `→` in test strings. Once P2 lands, that example
+  should be reverified as part of Step 2's acceptance.
+- The `Sky.Core.List` Prelude-exposure issue (S-4 above) predates the
+  squash and remains.
+
 ## License
 
 Apache 2.0 (same as Sky compiler).
