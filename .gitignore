@@ -21,6 +21,7 @@ firebaseadminsdk*.json
 
 # AI agent config
 .claude/
+.opencode/
 
 # Databases
 *.db
