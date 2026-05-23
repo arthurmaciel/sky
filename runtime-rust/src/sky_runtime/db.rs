@@ -26,6 +26,7 @@ fn build_sql(sql: &str, params: &[String]) -> String {
     result
 }
 
+#[allow(clippy::needless_range_loop)]
 fn row_to_map(row: &DbRow) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let cols = row.columns();
@@ -90,7 +91,7 @@ pub fn db_query<E: Send + From<String> + 'static>(conn: Db, sql: String, params:
         let final_sql = build_sql(&sql, &params);
         match sqlx::query(&final_sql).fetch_all(&conn).await {
             Ok(rows) => {
-                let result: Vec<HashMap<String, String>> = rows.iter().map(|r| row_to_map(r)).collect();
+                let result: Vec<HashMap<String, String>> = rows.iter().map(row_to_map).collect();
                 ok_res(result)
             },
             Err(e) => SkyResult::Err(sky_err(&e)),

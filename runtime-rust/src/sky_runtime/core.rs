@@ -149,10 +149,10 @@ pub fn list_member<T0: PartialEq>(x: T0, list: Vec<T0>) -> bool {
     list.contains(&x)
 }
 pub fn list_any<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
-    list.into_iter().any(|x| f(x))
+    list.into_iter().any(f)
 }
 pub fn list_all<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
-    list.into_iter().all(|x| f(x))
+    list.into_iter().all(f)
 }
 
 pub fn result_with_default<E, A>(def: A, r: SkyResult<E, A>) -> A {

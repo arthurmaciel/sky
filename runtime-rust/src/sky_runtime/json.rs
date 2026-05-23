@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 // JSON encode/decode, pipeline, and currying helpers.
 // Generic over E for error type.
 use super::*;
@@ -22,7 +23,7 @@ pub fn json_enc_float(f: f64) -> JsonVal { JsonVal::from(f) }
 pub fn json_enc_bool(b: bool) -> JsonVal { JsonVal::Bool(b) }
 pub fn json_enc_null(_: ()) -> JsonVal { JsonVal::Null }
 pub fn json_enc_list<A>(f: impl Fn(A) -> JsonVal, items: Vec<A>) -> JsonVal {
-    JsonVal::Array(items.into_iter().map(|x| f(x)).collect())
+    JsonVal::Array(items.into_iter().map(f).collect())
 }
 pub fn json_enc_object(pairs: Vec<(String, JsonVal)>) -> JsonVal {
     JsonVal::Object(pairs.into_iter().collect())

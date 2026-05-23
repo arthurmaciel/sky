@@ -97,7 +97,7 @@ pub fn task_run<E: From<String> + Send + 'static, A: Send + 'static>(task: SkyTa
 pub fn task_parallel<E: From<String> + Send + 'static, A: Send + 'static>(tasks: Vec<SkyTask<E, A>>) -> SkyTask<E, Vec<A>> {
     Box::pin(async move {
         let handles: Vec<tokio::task::JoinHandle<SkyResult<E, A>>> =
-            tasks.into_iter().map(|t| tokio::spawn(t)).collect();
+            tasks.into_iter().map(tokio::spawn).collect();
         let mut out = Vec::with_capacity(handles.len());
         for h in handles {
             let result = match h.await {
