@@ -283,30 +283,455 @@ sky add uuid --target rust
 
 | Limitation | Description |
 |---|---|
-| **Polymorphic non-`Task` return types fail to build** | Functions like `mkOk x = Ok x` (`a -> Result e a`) emit `pub fn main_mk_ok(x: i64) {` — no return type → defaults to `()` — but the body produces `SkyResult`. Failure: E0282 + E0308. The "P3 fix" reverted to this behaviour from a worse one (undeclared `__Te_inst15`). See *Q-priorities → Q1* below. |
-| **`sky add <crate> --target rust` times out (>10 min)** | The embedded inspector hash invalidates on **any** edit to `tools/sky-ffi-inspect-rs/src/main.rs`, forcing a cold `cargo build` of the inspector (55 transitive deps) on the next `sky add`. 3-7 min build + 30-90 s inspector run-time = typically exceeds command timeouts. The 0-byte `.skycache/rust/<crate>_bindings.rs` left behind is the harness killing the process mid-build, not an orchestration bug. See *Q-priorities → Q2*. |
+| **FFI binding bodies call non-existent free functions** | The inspector reports method receivers correctly (`recv_type: "Uuid"`) but `emitRustFnSimple` discards them. Result: `uuid_bindings.rs` emits `uuid::hyphenated(arg0)` for what's actually `uuid::Uuid::hyphenated(&self)`. The crate doesn't have a free `hyphenated` fn so `cargo build` fails. See *R-priorities → R2* below. |
+| **No way to disambiguate Rust-crate imports from stdlib / Go FFI** | `sky add uuid --target rust` produces Sky module `Uuid` — collides with stdlib `Sky.Core.Uuid` and any user-defined `src/Uuid.sky`. There's no syntactic marker in the import line that says "this is a Rust crate" vs "this is the stdlib". See *R-priorities → R1*. |
+| **`sky add` prints wrong import syntax in its CLI hint** | After `sky add uuid --target rust`, the hint reads *"import uuid as Uuid"* (lowercase) — invalid Sky syntax. Should be *"import Uuid as Uuid"* (capitalised). See *R-priorities → R3*. |
 | Partial application of kernels | Writing `let f = Task.map myFn in f task` emits a bare under-applied call to the kernel — Rust type-errors. Workaround: wrap in an explicit closure (`let f = \\t -> Task.map myFn t`). True lifting requires a kernel-arity table in `Builder.hs`. |
 | `Db.migrateApply` | Migrations applied sequentially via `db_exec_raw`; no transaction wrapping or rollback. |
-| Prelude re-export resolution for `Sky.Core.List.*` | Functions like `List.foldl`, `List.length` imported via `Prelude` emit `list_foldl` which has no runtime counterpart. Workaround: `import Sky.Core.List as List`. |
-| Spurious `.clone()` on `Copy` types | `(n.clone() * n.clone())` for `n: i64` — wastes compile time but doesn't cause failure. |
 
 ## Completed audits
-
-The Rust codegen has been through four sequential audits.
 
 | Audit | Scope | Status |
 |---|---|---|
 | S1–S6 (2026-05-22) | Calling convention, missing kernels, panic paths, dead code, task routing, return inference | ✅ Resolved |
 | R1–R5 re-audit | Simplified fixes, new regressions | ✅ Resolved |
 | N1–N3 re-re-audit | `task_fail` overpin, `sky_main` return, Skolem fallback | ✅ Resolved |
-| P1–P4 post-merge | Target dispatch (P1), Unicode strings (P2), polymorphic returns (P3), FFI stubs (P4) | ⚠️ **Partial** — P1 ✅, P2 ✅, P3 **renamed-not-fixed**, P4 **emitter-fixed-but-blocked-by-inspector-cold-build** |
-| Q1–Q3 (2026-05-23) | Below | 🚧 Open |
+| P1–P4 post-merge | Target dispatch (P1), Unicode strings (P2), polymorphic returns (P3), FFI stubs (P4) | ✅ Resolved (P1, P2 verified; P3 fixed via SkyError concretization; P4 emitter fixed + Step A binary embed lands Q2) |
+| Q1–Q3 + Steps 4-5 (2026-05-23) | Polymorphic returns, inspector cold-build, Sky.Core.List Prelude routing, Copy-type clone elision, property tests | ✅ Resolved — see *Verification snapshot* below |
+| R1–R3 (2026-05-23 evening) | FFI naming convention, binding-body method receivers, CLI hint | 🚧 Open — see *R-priorities* |
+
+### Verification snapshot (2026-05-23 evening)
+
+End-to-end verified by running the smoke tests against fresh `sky-out/sky` (built from HEAD `dd79d333`):
+
+| Item | Expected | Actual | Status |
+|---|---|---|---|
+| Q1 reproducer `mkOk x = Ok x` | builds clean | emits `pub fn main_mk_ok(x: i64) -> SkyResult<SkyError, i64>`; builds clean | ✅ |
+| Q2 `time sky add uuid --target rust` | <30 s | **24.6 s** (was >10 min); 48 functions discovered | ✅ |
+| Q3 `List.foldl` via Prelude (no explicit `import Sky.Core.List`) | builds clean | builds clean | ✅ |
+| Step 4 Copy-type `.clone()` elision | `n * n` for `n: i64` | `task_succeed((n * n))` in `examples/simple` | ✅ |
+| Step 5 property tests | `cargo test` green | 11 test results pass; 0 failures | ✅ |
+| All 6 examples | clean rebuild + cargo build | all green | ✅ |
+| Step A inspector embed | binary in `~/.cache/sky/tools/sky-ffi-inspect-rs/sky-ffi-inspect-rs`; no `target/` rebuild on cache hit | binary present, 3 MB, materialised on first call | ✅ |
+
+**Caveats found during verification (now logged as R-priorities below):**
+- R1: collisions between `Uuid` (Rust crate) and `Sky.Core.Uuid` (stdlib) — no syntactic distinction.
+- R2: generated FFI bindings call `uuid::hyphenated` (free fn) where the real API is `uuid::Uuid::hyphenated` (method) — won't link against the real crate.
+- R3: `sky add` CLI prints `"import uuid as Uuid"` (invalid syntax — module names must capitalise).
+- Three obsolete cache dirs at `~/.cache/sky/tools/sky-ffi-inspect-rs-{05e3b…,1e24…,c313…}` linger from pre-Step-A builds; `cleanupOldCaches` should have removed them but didn't. Minor.
+
+## R-priorities (2026-05-23 evening) — FFI ergonomics + binding correctness
+
+> **Audience: AI fix-up agent.** Q1–Q3 + Steps 4–5 landed cleanly.
+> End-to-end testing of `sky add uuid --target rust` then `sky build`
+> on a Sky file that imports the crate surfaced three new issues
+> that block actually-using FFI. These are not regressions from the
+> Q-fixes — they're the next layer of problems hidden behind them.
+
+### Reproducer for R1 + R2 + R3 (all in one)
+
+```bash
+mkdir -p /tmp/sky-r-ffi/src
+printf '[project]\nname = "r"\ntarget = "rust"\n' > /tmp/sky-r-ffi/sky.toml
+cd /tmp/sky-r-ffi && rm -rf sky-out .skycache
+
+# R3: the CLI hint that follows is broken Sky syntax.
+<SKY> add uuid --target rust 2>&1 | grep -i "import in your"
+# Observed: "Import in your Sky module, e.g.: import uuid as Uuid."
+# Sky parsers require capitalised module names. The correct hint is
+#   "import Uuid as Uuid" (or any capitalised alias).
+
+# R1: try the literal hint — it fails to canonicalise.
+cat > src/Main.sky <<'EOF'
+module Main exposing (main)
+import uuid as Uuid           -- ❌ rejected: parse error / unknown module
+import Std.Log exposing (println)
+main = println "hi"
+EOF
+<SKY> build src/Main.sky --target rust 2>&1 | tail -5
+
+# R1+R2: try the actual canonical name.
+cat > src/Main.sky <<'EOF'
+module Main exposing (main)
+import Uuid as U              -- ✅ parses; resolves to Sky.Core.Uuid OR
+                              --    the Rust crate, ambiguously
+import Std.Log exposing (println)
+main =
+    case U.hyphenated "550e8400-e29b-41d4-a716-446655440000" of
+        Ok s  -> println s
+        Err _ -> println "fail"
+EOF
+<SKY> build src/Main.sky --target rust 2>&1 | tail -8
+# Observed (after canonicalising past R1): error[E0425] cannot find
+# function `uuid_hyphenated` in this scope — because the Rust binding
+# emits `uuid::hyphenated(arg0)` but the uuid crate exports
+# `uuid::Uuid::hyphenated(&self)`. The "free function" call doesn't
+# exist.  Even if it did, the param type is wrong: `String`, not `&Uuid`.
+```
+
+### Findings
+
+#### R1. No syntactic marker distinguishes Rust-FFI imports from stdlib *(HIGH)*
+
+**Current naming, by `pkgToModuleName` in `src/Sky/Build/FfiGen.hs`:**
+
+| Source | `sky add` input | Sky-side import name |
+|---|---|---|
+| Core stdlib | (built-in) | `Sky.Core.<X>` |
+| Sky stdlib | (built-in) | `Std.<X>` |
+| Go FFI | `github.com/google/uuid` | `Github.Com.Google.Uuid` |
+| Go FFI | `net/http` | `Net.Http` |
+| **Rust FFI** | `uuid` | `Uuid` *(single segment, just capitalised)* |
+| **Rust FFI** | `serde_json` | `SerdeJson` |
+| User module | n/a | whatever they declared in `module Foo exposing …` |
+
+The first four are unambiguous: Sky.Core.* / Std.* / multi-segment-dotted
+is the lexical fingerprint. **Rust-FFI single-segment names collide
+with stdlib single-segment names** (`Std.Db` → exposed as `Db`,
+`Sky.Core.Uuid` → exposed as `Uuid`, etc.) AND with any user-defined
+`src/Uuid.sky` module.
+
+The canonicaliser resolves these by precedence (user > stdlib > FFI,
+broadly), but the resolution is invisible at the import line —
+a contributor reading Sky source can't tell whether `Uuid.v4 ()` calls
+into `Sky.Core.Uuid` or a `uuid` Rust crate without checking the
+filesystem.
+
+**Recommended fix.** Prefix Rust-FFI Sky modules with `Rust.` (mirrors
+the Go path's de-facto dotted-path convention):
+
+- `sky add uuid --target rust` → Sky module `Rust.Uuid`.
+- `sky add serde_json --target rust` → Sky module `Rust.SerdeJson`.
+- `sky add chrono --target rust` → Sky module `Rust.Chrono`.
+
+Then the import shape directly tells you the source:
+
+```elm
+import Sky.Core.Uuid as Uuid     -- stdlib
+import Rust.Uuid as RUuid         -- Rust crate
+import Github.Com.Google.Uuid as GUuid  -- Go crate
+```
+
+**Implementation.** `src/Sky/Build/FfiGen.hs:pkgToModuleName` already
+takes the package path. Add the target as a second argument:
+
+```haskell
+pkgToModuleName :: CompileTarget -> String -> String
+pkgToModuleName TargetRust path =
+    let cap = capitaliseFirst (camelHyphen path)
+    in "Rust." ++ cap
+pkgToModuleName TargetGo path = ...   -- existing dotted-path logic
+```
+
+Update both call sites:
+- `FfiGen.hs:generateBindings` (Step 1 in this section's plan).
+- `app/Main.hs:1622-1624` (CLI hint — see R3 below).
+
+Update the `_pkgFns` → Sky-module-name flow in `generateBindings` so
+the `.skyi` file's `module ` declaration matches. The kernel-name
+side already uses `"Rust_"` prefix (per `kernelNameFromPkg`) so
+codegen already routes correctly.
+
+**Acceptance.** `sky add uuid --target rust` produces a `.skyi` that
+begins with `module Rust.Uuid` (not `module Uuid`). Sky source that
+does `import Rust.Uuid as U` resolves to the crate; `import Uuid` /
+`import Sky.Core.Uuid` resolves to the stdlib. No silent shadowing.
+
+**Migration.** Existing `.skycache/ffi/*.skyi` files that say
+`module Uuid` get re-generated next `sky install`/`sky add` invocation
+— there's no migration cost for in-progress projects (the cache is
+ephemeral). If shipped projects exist, document the rename in a
+changelog entry.
+
+#### R2. FFI binding bodies discard the method receiver *(HIGH)*
+
+**Reproduce.** `cat /tmp/sky-r-ffi/.skycache/rust/uuid_bindings.rs`
+shows:
+
+```rust
+// [pure] Rust_Uuid_hyphenated
+pub fn uuid_hyphenated(arg0: String) -> SkyResult<SkyError, String> {
+    uuid::hyphenated(arg0)         // ❌ no such free function in uuid crate
+}
+```
+
+The `uuid` crate exports `uuid::Uuid::hyphenated(&self) -> Hyphenated`
+— a method on the `Uuid` type. The inspector correctly captured this
+(its JSON includes `recv_type: "Uuid"`), but `emitRustFnSimple` in
+`src/Sky/Build/FfiGen.hs` ignores `_fnRecvType` and emits a flat
+`crate::fnName(...)` call.
+
+**Root cause.** `FfiGen.hs:emitRustFnSimple` lines (look for `let
+crateImport = pkgToCrateImport (_pkgPath pkg)` and the body
+construction below it). The body builder is currently:
+
+```haskell
+body = case _fnEffect fn of
+    "effectful" -> "Box::pin(async move { match " ++ crateImport ++ "::" ++ fnName ++ "(" ++ argRefs ++ ") ... })"
+    "fallible"  -> "match " ++ crateImport ++ "::" ++ fnName ++ "(" ++ argRefs ++ ") ... "
+    _           -> crateImport ++ "::" ++ fnName ++ "(" ++ argRefs ++ ")"
+```
+
+It needs to branch on `_fnRecvType`:
+
+```haskell
+let callExpr = case _fnRecvType fn of
+        "" -> -- free function: crate::fn(args)
+            crateImport ++ "::" ++ fnName ++ "(" ++ argRefs ++ ")"
+        recv ->
+            -- method: arg0.fnName(rest_args) — arg0 IS the receiver.
+            -- The first param's type is `recv` (or `&recv` / `&mut recv`).
+            -- argRefs without the receiver:
+            let restArgs = intercalate ", " ["arg" ++ show j | j <- [1..length params - 1]]
+            in "arg0." ++ fnName ++ "(" ++ restArgs ++ ")"
+    body = case _fnEffect fn of
+        "effectful" -> "Box::pin(async move { match " ++ callExpr ++ ".await { ... } })"
+        "fallible"  -> "match " ++ callExpr ++ " { ... }"
+        _           -> callExpr
+```
+
+**Receiver-type coercion.** `arg0`'s declared type comes from
+`paramTypes[0]`. If the receiver in Rust is `&Uuid` and the inspector
+emits `Uuid` as the param Sky-type, the wrapper has `arg0: Uuid`
+(or whatever skyTypeToRust maps `Uuid` to — currently `String`
+because opaque types fall through to the catch-all).
+
+So R2 has **two layers**:
+
+R2a. **Branch on `_fnRecvType` to emit method calls vs free functions.**
+Land first — this is the immediately-broken path.
+
+R2b. **Map opaque crate types to real Rust types (`uuid::Uuid`),
+not `String`.** `skyTypeToRust` currently has a catch-all
+`_ -> "String"`. Add a runtime table or per-pkg type registry that
+maps `Uuid` → `uuid::Uuid`. The inspector already knows the Rust-side
+type (it tracked it as `recv_type` for methods); persist that
+information through to FfiGen.
+
+**Acceptance for R2.** `cat .skycache/rust/uuid_bindings.rs` shows
+generated bodies matching:
+```rust
+pub fn uuid_hyphenated(arg0: uuid::Uuid) -> SkyResult<SkyError, uuid::fmt::Hyphenated> {
+    SkyResult::Ok(arg0.hyphenated())
+}
+```
+*and* a Sky test program calling `Rust.Uuid.hyphenated` (post-R1)
+builds + runs without `cargo build` errors.
+
+**Out of scope for R2 (defer):** the *constructor* problem. The
+inspector lists `uuid::Uuid::parse_str`, `uuid::Uuid::new_v4` etc.
+as methods too — `parse_str` has `recv_type: ""` (static fn, no
+receiver) and IS a free function on the type
+`uuid::Uuid::parse_str(...)`. After R2a fires, distinguish
+"static method on a type" from "instance method on a value":
+- Static (`recv_type == "" && method_name != ""`): emit
+  `<Crate>::<Type>::<fn>(args)`.
+- Instance (`recv_type != ""`): emit `arg0.<fn>(rest)`.
+- Free function (`method_name == ""`): emit `crate::<fn>(args)`.
+
+The inspector already has all three pieces of info in its JSON
+output. Just need FfiGen to consume them.
+
+#### R3. CLI hint after `sky add ... --target rust` is broken Sky syntax *(LOW)*
+
+**Reproduce.** `app/Main.hs:1620-1625`:
+
+```haskell
+let outputMsg = case target of
+        TargetGo ->
+            "Call from Sky via: Ffi.callPure \"<name>\" [args]  (or callTask for effectful)"
+        TargetRust ->
+            "Import in your Sky module, e.g.: import uuid as Uuid; Uuid.v4 (). Wrapper at .skycache/rust/*_bindings.rs"
+putStrLn outputMsg
+```
+
+Two bugs in the Rust branch:
+
+- `import uuid as Uuid` — lowercase `uuid` is invalid Sky (parse
+  error: module names start uppercase).
+- `Uuid.v4 ()` — assumes a function named `v4` exists, which is true
+  for the stdlib `Sky.Core.Uuid` but **not** for the Rust crate `uuid`
+  (whose exported constructors look more like `parse_str`,
+  `new_v4` etc. via `Uuid::` methods — which R2 needs to expose
+  correctly anyway).
+
+**Fix.** Update the message to:
+
+1. Use the correct Sky module name post-R1: `import Rust.Uuid as Uuid`.
+2. Drop the hardcoded `v4 ()` example — instead, point at the
+   discovered functions:
+   ```haskell
+   TargetRust ->
+       "Import in your Sky module, e.g.:\n  import "
+         ++ skyModuleName ++ " as " ++ shortAlias ++ "\n"
+         ++ "Then call any of the " ++ show (length names) ++ " functions"
+         ++ " (see .skycache/ffi/" ++ slug ++ ".skyi for signatures)."
+   ```
+3. Use `skyModuleName` from the post-R1 `pkgToModuleName TargetRust`.
+
+**Acceptance for R3.** `sky add uuid --target rust` prints
+exactly *"import Rust.Uuid as Uuid"* (capitalised, correct prefix).
+
+### Priorities (in order)
+
+| Rank | Issue | Effort | Why |
+|---|---|---|---|
+| 1 | **R2** (binding bodies discard receiver) | 2-3 days | Without this, **no Rust crate FFI actually works** — every method call generates undefined-symbol errors. Blocks every other FFI use. |
+| 2 | **R1** (Rust.* prefix for FFI imports) | 1-2 days | Eliminates the silent shadowing risk between stdlib and FFI crates. Smaller scope than R2 but the convention change should land while the Sky/.skyi cache is still empty in most projects. |
+| 3 | **R3** (CLI hint correctness) | <1 day | Cosmetic but actively misleads users on first contact with the feature. Land alongside R1 since the fix uses R1's new module name. |
+| 4 | `cleanupOldCaches` actually removing hash-suffixed dirs from prior cold-build era | <1 day | Frees ~600 MB on every dev machine that has rebuilt the inspector since 2026-05-19. Currently the cleanup runs but doesn't match these dirs. |
+
+### Implementation plan
+
+Each step ends with: `cargo check` + `cargo clippy --all-targets -- -D
+warnings` clean on the runtime, `cabal build exe:sky` clean on the
+compiler, all six existing examples + Q1/Q2/Q3 reproducers + the new
+R1/R2/R3 reproducer building clean.
+
+#### Step 1 — R2a: branch on receiver type in `emitRustFnSimple`
+
+`src/Sky/Build/FfiGen.hs:emitRustFnSimple`. Read `_fnRecvType fn`. When
+non-empty, emit `arg0.<fnName>(rest)` for the call expression instead
+of `<crate>::<fnName>(args)`. Reuse the existing `argRefs` machinery
+but skip index 0 when there's a receiver.
+
+Add a unit test (Haskell-side `cabal test` or a regression Sky file):
+import a method-heavy crate, build it, assert no `error[E0425]` /
+`error[E0061]` from cargo.
+
+#### Step 2 — R2b: thread the Rust-side type info through to FfiGen
+
+Currently `_fnParamSkyTypes` and `_fnResultSkyTypes` give Sky-language
+types only (Int, Float, …, String catch-all). Add a parallel
+`_fnParamRustTypes` / `_fnResultRustTypes` field carrying the actual
+Rust type string (e.g. `&Uuid`, `Option<u8>`, `Vec<u8>`).
+
+Inspector side (`tools/sky-ffi-inspect-rs/src/main.rs`): preserve the
+original `quote!{ #ty }.to_string()` alongside the `type_to_sky`
+mapping. Emit both in JSON.
+
+FfiGen side: prefer the Rust-type string over `skyTypeToRust` when
+emitting wrapper params. Keep the Sky-type for the `.skyi` (Sky-side
+type checking still wants Sky types).
+
+This is the larger half of R2; if Step 2 proves too invasive, an
+acceptable smaller path is to emit `uuid::Uuid` directly for any param
+whose Sky-type is the *crate's own opaque type* — detectable by
+crate-name match.
+
+#### Step 3 — R1: rename Sky-side modules to `Rust.*`
+
+`src/Sky/Build/FfiGen.hs`:
+
+3.1. Change `pkgToModuleName` to take `CompileTarget`:
+```haskell
+pkgToModuleName :: CompileTarget -> String -> String
+pkgToModuleName TargetRust path = "Rust." ++ rustCrateToCamel path
+pkgToModuleName TargetGo path = goPkgToDotted path   -- existing
+```
+
+3.2. Update all call sites: `generateBindings`, `kernelNameFromPkg`,
+`emitSkyi` (the `.skyi` file's `module ` declaration must match).
+
+3.3. Update `kernelToRust` in `src/Sky/Generate/Rust/Builder.hs` so
+that `("Rust.Uuid", "hyphenated") -> "rust_uuid_hyphenated"` routes
+to the wrapper module's snake_case name.
+
+3.4. Add a regression test that uses the explicit prefix:
+`import Rust.Uuid as U` and calls into the bound crate.
+
+#### Step 4 — R3: fix the CLI hint
+
+`app/Main.hs:1620-1625`. Compute `skyModuleName` from R1's
+`pkgToModuleName TargetRust pkg`. Print it verbatim:
+
+```haskell
+let alias = lastDottedSegment skyModuleName   -- "Uuid" from "Rust.Uuid"
+putStrLn $ "Generated " ++ show (length names) ++ " bindings."
+putStrLn $ "Import in your Sky module: import " ++ skyModuleName ++ " as " ++ alias
+putStrLn $ "Function signatures: .skycache/ffi/" ++ slug ++ ".skyi"
+```
+
+Also update the matching `TargetGo` hint to recommend
+`import Github.Com.Google.Uuid as Uuid` syntax (the current message
+suggests `Ffi.callPure` which is the *old* pre-Layer-3 path and
+should probably go away too — separate cleanup).
+
+#### Step 5 — cleanup obsolete inspector caches
+
+`src/Sky/Build/EmbeddedInspectorRust.hs:cleanupOldCaches`. The
+function exists but doesn't remove the hash-suffixed dirs from before
+Step A. Verify by listing
+`~/.cache/sky/tools/sky-ffi-inspect-rs-*` (with the dash-hash) and
+deleting any that match. Idempotent.
+
+### Verification
+
+```bash
+# Runtime sanity
+(cd runtime-rust && cargo check && cargo clippy --all-targets -- -D warnings && cargo test)
+
+# Compiler sanity
+cabal build exe:sky
+cabal test
+
+# All examples + Q-reproducers still green
+for ex in 01-hello-world 04-local-pkg 07-todo-cli 14-task-demo simple test_pkg; do
+    (cd examples/$ex && rm -rf sky-out .skycache .skydeps \
+     && ../../sky-out/sky build src/Main.sky --target rust \
+     && cargo build --manifest-path sky-out/Rust/Cargo.toml) || echo "FAIL: $ex"
+done
+for q in q1 q2 q3; do
+    (cd /tmp/sky-$q && rm -rf sky-out .skycache \
+     && /home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky --target rust \
+     && cargo build --manifest-path sky-out/Rust/Cargo.toml) || echo "FAIL: $q"
+done
+
+# R1+R2+R3 acceptance
+cd /tmp/sky-r-ffi && rm -rf sky-out .skycache
+/home/arthur/Documentos/comp/sky/sky-out/sky add uuid --target rust 2>&1 | grep -F "import Rust.Uuid as Uuid"
+# Source uses the explicit prefix:
+cat > src/Main.sky <<'EOF'
+module Main exposing (main)
+import Rust.Uuid as U
+import Std.Log exposing (println)
+main =
+    case U.parseStr "550e8400-e29b-41d4-a716-446655440000" of
+        Ok _  -> println "parsed"
+        Err _ -> println "fail"
+EOF
+/home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky --target rust \
+    && cargo build --manifest-path sky-out/Rust/Cargo.toml \
+    && ./sky-out/Rust/target/debug/sky-app | grep -q "^parsed$" \
+    && echo "✅ R1+R2+R3 verified"
+```
+
+### What's sure vs unsure
+
+**Sure (HIGH, verified by `cargo build`):**
+- R2 (binding bodies discard receiver) — reproducer at `/tmp/sky-r-ffi`
+  produces E0425 `cannot find function uuid_hyphenated` because the
+  generated `uuid::hyphenated(arg0)` is bogus.
+- R3 (CLI hint syntax) — direct read of `app/Main.hs:1620-1625`.
+
+**Reasonably sure (MEDIUM):**
+- R1 (Rust prefix) — the convention choice is opinionated; reasonable
+  alternatives exist (explicit-alias-only, target-aware resolution
+  from sky.toml). Recommended path is `Rust.*` prefix because it
+  matches Sky's existing pattern of using module-name shape to signal
+  origin (Sky.Core.*, Std.*, Github.Com.*).
+
+**Out of scope (tracked but not blocking R1-R3):**
+- Static methods vs instance methods vs free functions disambiguation
+  in `emitRustFnSimple` (R2's "Out of scope" subitem above).
+- `Std.Auth` / `Std.Db` CRUD / Sky.Live ports — Phase 3 and 4 of the
+  strategic plan.
 
 ## Next steps
 
 ### Short-term
 
-- **Upgrade `emitRustFile` type mapping.** The current `emitRustFnSimple` uses `skyTypeToRust` but the inspector's `_fnParamSkyTypes` is often empty; until populated, all FFI wrapper params default to `String`. Fix: either complete the inspector's skyType population or add hardcoded type maps for common crates in `FfiGen.hs`.
+- <s>Upgrade `emitRustFile` type mapping.</s> ✅ The inspector now populates `skyType` per param and result. Types `Int`, `Float`, `Bool`, `String`, `List`, `Maybe`, `Result`, `Dict` map correctly. Opaque types (struct names, enums) still fall back to `String` — a Rust-crate-type mapping table is the remaining gap.
 - **Prelude re-export resolution.** `List.foldl`, `List.range`, `List.indexedMap` fail when imported via `Sky.Core.Prelude exposing (..)`. Fix: add per-module emission for `Sky.Core.List` in the Rust codegen path, or add runtime functions for the missing names.
 
 ### Medium-term
@@ -327,8 +752,16 @@ The Rust codegen has been through four sequential audits.
 
 ---
 
-## Q-priorities (2026-05-23) — re-audit after the P1–P4 fixes claimed to land
+## Q-priorities (2026-05-23) — ✅ RESOLVED (archival)
 
+> **Audience: AI fix-up agent.** This section is **historical** —
+> Q1–Q3 and Step 4–5 have all landed and been verified end-to-end
+> (see *Verification snapshot* in the *Completed audits* section
+> above). It's kept here as the reference for *why* the code looks
+> the way it does and *which* commits implemented each fix
+> (`9bde0c52`, `7b1d9ac4`, `cc9192e6`, `2f38f944`, `0094e2f4`,
+> `dd79d333`). New work belongs in *R-priorities* above.
+>
 > **Audience: AI fix-up agent.** This section is the result of an
 > end-to-end verification of the P1–P4 fixes that `2faef85f "fix(rust):
 > P1-P4 post-merge audit fixes"` claimed to deliver. P1 and P2 verified
