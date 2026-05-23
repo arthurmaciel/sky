@@ -283,9 +283,6 @@ sky add uuid --target rust
 
 | Limitation | Description |
 |---|---|
-| **FFI binding bodies call non-existent free functions** | The inspector reports method receivers correctly (`recv_type: "Uuid"`) but `emitRustFnSimple` discards them. Result: `uuid_bindings.rs` emits `uuid::hyphenated(arg0)` for what's actually `uuid::Uuid::hyphenated(&self)`. The crate doesn't have a free `hyphenated` fn so `cargo build` fails. See *R-priorities → R2* below. |
-| **No way to disambiguate Rust-crate imports from stdlib / Go FFI** | `sky add uuid --target rust` produces Sky module `Uuid` — collides with stdlib `Sky.Core.Uuid` and any user-defined `src/Uuid.sky`. There's no syntactic marker in the import line that says "this is a Rust crate" vs "this is the stdlib". See *R-priorities → R1*. |
-| **`sky add` prints wrong import syntax in its CLI hint** | After `sky add uuid --target rust`, the hint reads *"import uuid as Uuid"* (lowercase) — invalid Sky syntax. Should be *"import Uuid as Uuid"* (capitalised). See *R-priorities → R3*. |
 | Partial application of kernels | Writing `let f = Task.map myFn in f task` emits a bare under-applied call to the kernel — Rust type-errors. Workaround: wrap in an explicit closure (`let f = \\t -> Task.map myFn t`). True lifting requires a kernel-arity table in `Builder.hs`. |
 | `Db.migrateApply` | Migrations applied sequentially via `db_exec_raw`; no transaction wrapping or rollback. |
 
@@ -298,7 +295,7 @@ sky add uuid --target rust
 | N1–N3 re-re-audit | `task_fail` overpin, `sky_main` return, Skolem fallback | ✅ Resolved |
 | P1–P4 post-merge | Target dispatch (P1), Unicode strings (P2), polymorphic returns (P3), FFI stubs (P4) | ✅ Resolved (P1, P2 verified; P3 fixed via SkyError concretization; P4 emitter fixed + Step A binary embed lands Q2) |
 | Q1–Q3 + Steps 4-5 (2026-05-23) | Polymorphic returns, inspector cold-build, Sky.Core.List Prelude routing, Copy-type clone elision, property tests | ✅ Resolved — see *Verification snapshot* below |
-| R1–R3 (2026-05-23 evening) | FFI naming convention, binding-body method receivers, CLI hint | 🚧 Open — see *R-priorities* |
+| R1–R3 (2026-05-23 evening) | FFI naming convention (`Rust.*` prefix), method receiver calls, CLI hint | ✅ Resolved — imports use `Rust.Uuid`, methods call `arg0.fnName()`, CLI prints correct Rust.Uuid syntax |
 
 ### Verification snapshot (2026-05-23 evening)
 
@@ -320,54 +317,18 @@ End-to-end verified by running the smoke tests against fresh `sky-out/sky` (buil
 - R3: `sky add` CLI prints `"import uuid as Uuid"` (invalid syntax — module names must capitalise).
 - Three obsolete cache dirs at `~/.cache/sky/tools/sky-ffi-inspect-rs-{05e3b…,1e24…,c313…}` linger from pre-Step-A builds; `cleanupOldCaches` should have removed them but didn't. Minor.
 
-## R-priorities (2026-05-23 evening) — FFI ergonomics + binding correctness
+## R-priorities (2026-05-23 evening) — ✅ ALL FIXED (archival)
 
-> **Audience: AI fix-up agent.** Q1–Q3 + Steps 4–5 landed cleanly.
-> End-to-end testing of `sky add uuid --target rust` then `sky build`
-> on a Sky file that imports the crate surfaced three new issues
-> that block actually-using FFI. These are not regressions from the
-> Q-fixes — they're the next layer of problems hidden behind them.
+R1–R3 and the auxiliary cleanup are resolved in commits `3f5f2d84`,
+`6b17992f`, `5dc5b58d`:
 
-### Reproducer for R1 + R2 + R3 (all in one)
-
-```bash
-mkdir -p /tmp/sky-r-ffi/src
-printf '[project]\nname = "r"\ntarget = "rust"\n' > /tmp/sky-r-ffi/sky.toml
-cd /tmp/sky-r-ffi && rm -rf sky-out .skycache
-
-# R3: the CLI hint that follows is broken Sky syntax.
-<SKY> add uuid --target rust 2>&1 | grep -i "import in your"
-# Observed: "Import in your Sky module, e.g.: import uuid as Uuid."
-# Sky parsers require capitalised module names. The correct hint is
-#   "import Uuid as Uuid" (or any capitalised alias).
-
-# R1: try the literal hint — it fails to canonicalise.
-cat > src/Main.sky <<'EOF'
-module Main exposing (main)
-import uuid as Uuid           -- ❌ rejected: parse error / unknown module
-import Std.Log exposing (println)
-main = println "hi"
-EOF
-<SKY> build src/Main.sky --target rust 2>&1 | tail -5
-
-# R1+R2: try the actual canonical name.
-cat > src/Main.sky <<'EOF'
-module Main exposing (main)
-import Uuid as U              -- ✅ parses; resolves to Sky.Core.Uuid OR
-                              --    the Rust crate, ambiguously
-import Std.Log exposing (println)
-main =
-    case U.hyphenated "550e8400-e29b-41d4-a716-446655440000" of
-        Ok s  -> println s
-        Err _ -> println "fail"
-EOF
-<SKY> build src/Main.sky --target rust 2>&1 | tail -8
-# Observed (after canonicalising past R1): error[E0425] cannot find
-# function `uuid_hyphenated` in this scope — because the Rust binding
-# emits `uuid::hyphenated(arg0)` but the uuid crate exports
-# `uuid::Uuid::hyphenated(&self)`. The "free function" call doesn't
-# exist.  Even if it did, the param type is wrong: `String`, not `&Uuid`.
-```
+| Issue | What | Fix |
+|---|---|---|
+| **R1** | No way to disambiguate Rust-FFI imports from stdlib | `pkgToModuleName` now takes `CompileTarget`; Rust crates get `Rust.` prefix (`uuid`→`Rust.Uuid`). Go crates keep the existing dotted-path logic. |
+| **R2a** | FFI binding bodies emit free-function calls for methods | `emitRustFnSimple` branches on `_fnRecvType`: instance methods emit `arg0.fnName(rest)`, static/associated fns emit `Type::fnName(args)`, free fns emit `crate::fnName(args)`. |
+| **R2b** | Opaque types default to `String` in FFI wrappers | `resolveRustType` helper maps known opaque types to their crate paths via per-crate table (uuid: `Uuid`→`uuid::Uuid`, `Hyphenated`→`uuid::fmt::Hyphenated`, etc.). Also `use <crate>::*;` injected at top of bindings file. |
+| **R3** | CLI hint after `sky add` shows broken Sky syntax | Hint now shows `import Rust.Uuid as Uuid`, prints function count, points to `.skycache/ffi/` for signatures. |
+| **Cleanup** | Old hash-suffixed cache dirs not removed | Fixed `cleanupOldCaches` to look in `~/.cache/sky/tools/` and use `doesDirectoryExist`. Removes 3 old dirs (~600 MB). |
 
 ### Findings
 
