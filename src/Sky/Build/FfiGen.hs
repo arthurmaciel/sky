@@ -907,10 +907,12 @@ emitRustFile kernelName pkg =
             params    = _fnParams fn
             results   = _fnResults fn
             paramSkyTypes = _fnParamSkyTypes fn ++ repeat ""
-            -- Resolve each param's Sky type to a Rust type; fall back to String
+            -- Resolve each param's Sky type to a Rust type; fall back to String.
+            -- Use take to bound the potentially-infinite zip, avoiding a
+            -- non-terminating comprehension for 0-parameter functions (Q2 root cause).
+            nParams = length params
             paramTypes = [ if null st then "String" else skyTypeToRust st
-                         | (i, st) <- zip [0::Int ..] paramSkyTypes
-                         , i < length params ]
+                         | (_, st) <- take nParams (zip [0::Int ..] paramSkyTypes) ]
             paramDecl = if null paramTypes then ""
                         else intercalate ", " [ "arg" ++ show j ++ ": " ++ t | (j, t) <- zip [0..] paramTypes ]
             -- Determine return type from effect and results

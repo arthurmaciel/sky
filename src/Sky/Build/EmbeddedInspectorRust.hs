@@ -35,6 +35,7 @@ import System.Process (readCreateProcessWithExitCode, proc, CreateProcess(..))
 import System.Exit (ExitCode(..))
 
 
+
 -- | The `tools/sky-ffi-inspect-rs/` source tree, keyed by relative
 -- path. Re-embedded whenever any file changes (file-embed registers
 -- each file via qAddDependentFile).
@@ -57,22 +58,32 @@ inspectorRustHash =
     pad2 s   = s
 
 
--- | Return the path to a ready-to-run `sky-ffi-inspect-rs`. Builds
--- into `$XDG_CACHE_HOME/sky/tools/sky-ffi-inspect-rs-<hash>/` on first
--- use; reuses the cached binary thereafter.
+-- | Return the path to a ready-to-run `sky-ffi-inspect-rs`. Uses a
+-- stable cache path (`$XDG_CACHE_HOME/sky/tools/sky-ffi-inspect-rs/`)
+-- with a `.hash` file to detect content changes. Only triggers a full
+-- `cargo build` when the embedded source hash differs from the cached
+-- hash — so `sky upgrade` without inspector source changes reuses the
+-- existing binary (avoids the 3-7 min cold build).
 ensureInspectorRust :: IO (Either String FilePath)
 ensureInspectorRust = do
     cache <- getXdgDirectory XdgCache "sky"
-    let root = cache </> "tools" </> ("sky-ffi-inspect-rs-" ++ inspectorRustHash)
+    let root = cache </> "tools" </> "sky-ffi-inspect-rs"
         bin  = root </> "target" </> "debug" </> "sky-ffi-inspect-rs"
-    ready <- doesFileExist bin
-    if ready
+        hashFile = root </> ".hash"
+    binReady <- doesFileExist bin
+    hashReady <- if binReady then do
+        hashOk <- doesFileExist hashFile
+        if not hashOk then return False else do
+            oldHash <- readFile hashFile
+            return (oldHash == inspectorRustHash)
+        else return False
+    if hashReady
         then return (Right bin)
-        else buildInspectorRust root bin
+        else buildInspectorRust root bin hashFile
 
 
-buildInspectorRust :: FilePath -> FilePath -> IO (Either String FilePath)
-buildInspectorRust root bin = do
+buildInspectorRust :: FilePath -> FilePath -> FilePath -> IO (Either String FilePath)
+buildInspectorRust root bin hashFile = do
     createDirectoryIfMissing True root
     -- Materialise source.
     forM_ embeddedInspectorRustBytes $ \(rel, bytes) -> do
@@ -88,9 +99,8 @@ buildInspectorRust root bin = do
             let bin' = root </> "target" </> "debug" </> "sky-ffi-inspect-rs"
             perms <- getPermissions bin'
             setPermissions bin' (setOwnerExecutable True perms)
-            exists <- doesFileExist bin'
-            unless exists $
-                return ()
+            -- Write hash file so subsequent calls skip the cargo build
+            writeFile hashFile inspectorRustHash
             return (Right bin')
         _ ->
             return (Left $ "sky-ffi-inspect-rs: cargo build failed:\n" ++ err)

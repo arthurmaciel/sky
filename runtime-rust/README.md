@@ -284,7 +284,7 @@ sky add uuid --target rust
 | Limitation | Description |
 |---|---|
 | **Polymorphic non-`Task` return types fail to build** | Functions like `mkOk x = Ok x` (`a -> Result e a`) emit `pub fn main_mk_ok(x: i64) {` — no return type → defaults to `()` — but the body produces `SkyResult`. Failure: E0282 + E0308. The "P3 fix" reverted to this behaviour from a worse one (undeclared `__Te_inst15`). See *Q-priorities → Q1* below. |
-| **`sky add <crate> --target rust` produces empty bindings** | `sky add uuid --target rust` writes a **0-byte** `.skycache/rust/uuid_bindings.rs` and doesn't write `.skycache/ffi/<crate>.skyi` / `.kernel.json`. End-to-end FFI is unusable even though the binding *emitter* (`emitRustFnSimple`) was updated. See *Q-priorities → Q2*. |
+| **`sky add <crate> --target rust` times out (>10 min)** | The embedded inspector hash invalidates on **any** edit to `tools/sky-ffi-inspect-rs/src/main.rs`, forcing a cold `cargo build` of the inspector (55 transitive deps) on the next `sky add`. 3-7 min build + 30-90 s inspector run-time = typically exceeds command timeouts. The 0-byte `.skycache/rust/<crate>_bindings.rs` left behind is the harness killing the process mid-build, not an orchestration bug. See *Q-priorities → Q2*. |
 | Partial application of kernels | Writing `let f = Task.map myFn in f task` emits a bare under-applied call to the kernel — Rust type-errors. Workaround: wrap in an explicit closure (`let f = \\t -> Task.map myFn t`). True lifting requires a kernel-arity table in `Builder.hs`. |
 | `Db.migrateApply` | Migrations applied sequentially via `db_exec_raw`; no transaction wrapping or rollback. |
 | Prelude re-export resolution for `Sky.Core.List.*` | Functions like `List.foldl`, `List.length` imported via `Prelude` emit `list_foldl` which has no runtime counterpart. Workaround: `import Sky.Core.List as List`. |
@@ -299,7 +299,7 @@ The Rust codegen has been through four sequential audits.
 | S1–S6 (2026-05-22) | Calling convention, missing kernels, panic paths, dead code, task routing, return inference | ✅ Resolved |
 | R1–R5 re-audit | Simplified fixes, new regressions | ✅ Resolved |
 | N1–N3 re-re-audit | `task_fail` overpin, `sky_main` return, Skolem fallback | ✅ Resolved |
-| P1–P4 post-merge | Target dispatch (P1), Unicode strings (P2), polymorphic returns (P3), FFI stubs (P4) | ⚠️ **Partial** — P1 ✅, P2 ✅, P3 **renamed-not-fixed**, P4 **emitter-fixed-orchestration-broken** |
+| P1–P4 post-merge | Target dispatch (P1), Unicode strings (P2), polymorphic returns (P3), FFI stubs (P4) | ⚠️ **Partial** — P1 ✅, P2 ✅, P3 **renamed-not-fixed**, P4 **emitter-fixed-but-blocked-by-inspector-cold-build** |
 | Q1–Q3 (2026-05-23) | Below | 🚧 Open |
 
 ## Next steps
@@ -335,10 +335,20 @@ The Rust codegen has been through four sequential audits.
 > green. P3's "fix" only renamed the failure mode — polymorphic
 > non-Task returns now emit no return type and default to `()`, which
 > still doesn't compile. P4's binding *emitter* (`emitRustFnSimple`)
-> was rewritten with real type mapping, but the orchestration that
-> drives `sky add <crate> --target rust` writes a **0-byte** binding
-> file. This section catalogues exactly what's broken, with concrete
-> reproducers, and prescribes the next fix sequence.
+> was rewritten with real type mapping, but **`sky add <crate>
+> --target rust` times out before any binding can be written** — root
+> cause is the inspector cold-build, not the orchestration logic (see
+> Q2 below). This section catalogues exactly what's broken, with
+> concrete reproducers, and prescribes the next fix sequence.
+>
+> **Diagnosis correction (2026-05-23 evening):** an earlier version of
+> Q2 below described a "broken orchestration" bug. That diagnosis was
+> wrong. The 0-byte `uuid_bindings.rs` is what gets written when the
+> harness kills `sky add` mid-process during the inspector's cold
+> cargo build (3-7 min for ~55 transitive deps). The fix is a
+> caching-strategy change in `EmbeddedInspectorRust.hs`, not in the
+> FFI orchestration code. The Q2 section has been rewritten to
+> reflect this.
 
 ### Reproducers (all fail today against `2faef85f` / `addd340f`)
 
@@ -365,19 +375,23 @@ printf '[project]\nname = "q1"\ntarget = "rust"\n' > /tmp/sky-q1/sky.toml
 # Expected: `pub fn main_mk_ok<T_e>(x: i64) -> SkyResult<T_e, i64>`.
 # OR: `pub fn main_mk_ok(x: i64) -> SkyResult<SkyError, i64>` (concrete).
 
-# Q2: `sky add <crate> --target rust` end-to-end produces nothing usable
+# Q2: `sky add <crate> --target rust` times out (>10 min) on first call
+# after any `sky` rebuild
 mkdir -p /tmp/sky-q2 && cd /tmp/sky-q2
 printf '[project]\nname = "q2"\ntarget = "rust"\n' > sky.toml
 rm -rf .skycache
-<SKY> add uuid --target rust
-wc -c .skycache/rust/uuid_bindings.rs   # → 0 bytes
-ls .skycache/ffi/                       # → empty (no .skyi, no .kernel.json)
-# Expected after sky add:
-#   .skycache/rust/uuid_bindings.rs   ≥ 7 lines (header + per-fn wrappers)
-#   .skycache/ffi/uuid.skyi           Sky-side type signatures
-#   .skycache/ffi/uuid.kernel.json    kernel routing entries
-# All three are required for `sky build --target rust` on a file that
-# imports the crate to type-check and link.
+time <SKY> add uuid --target rust         # → killed by harness after 10 min
+wc -c .skycache/rust/uuid_bindings.rs     # → 0 bytes (process killed mid-build)
+ls .skycache/ffi/                         # → empty (inspector never returned)
+ls ~/.cache/sky/tools/                    # → look for new inspector-rs-<hash>
+                                          #   dir with ~190 MB target/ — cold
+                                          #   cargo build in progress when killed
+# Expected after Q2 lands:
+#   time sky add uuid --target rust completes in <30 s.
+#   .skycache/rust/uuid_bindings.rs is non-empty (header + wrappers).
+#   .skycache/ffi/uuid.{skyi,kernel.json} both exist.
+#   ~/.cache/sky/tools/sky-ffi-inspect-rs-<hash>/sky-ffi-inspect-rs
+#   exists as a single ~10-20 MB binary, no target/ dir.
 ```
 
 ### Findings
@@ -457,89 +471,128 @@ the work:
 **Acceptance** for Q1: the Q1 reproducer above (`mkOk`) builds clean
 and runs.
 
-#### Q2. `sky add <crate> --target rust` orchestration is broken *(HIGH)*
+#### Q2. `sky add <crate> --target rust` times out on first call after `sky` rebuild *(HIGH)*
 
-**Reproduce:** `cd /tmp/sky-q2 && <SKY> add uuid --target rust`. Result:
-`.skycache/rust/uuid_bindings.rs` is **0 bytes**; `.skycache/ffi/`
-is empty.
-
-**Two possible roots** (the agent must diagnose which):
-
-1. **The inspector silently failed.** `sky-ffi-inspect-rs` returned a
-   `PkgInfo` with `errors` set but `runInspectorForTarget` discarded
-   the error and produced an empty result. `generateBindings TargetRust`
-   then ran on an empty `_pkgFns`, emitting only the header — which
-   *should* be ~7 lines, **not** 0 bytes.
-
-2. **`generateBindings` was never called.** The 0-byte file was created
-   by `createDirectoryIfMissing`/`writeFile` racing or by some other
-   path. The empty `.skycache/ffi/` (no .skyi, no .kernel.json) is
-   evidence that the second and third `writeFile` calls in
-   `FfiGen.hs:305-318` didn't execute — but the first one (rsFile)
-   somehow produced a 0-byte file.
-
-**Diagnosis steps.** Run with verbose output and inspect each stage:
-
+**Reproduce:**
 ```bash
 cd /tmp/sky-q2 && rm -rf .skycache
-RUST_LOG=trace <SKY> add uuid --target rust 2>&1 | tee /tmp/skyadd.log
-# Look for:
-#   - "Inspecting with sky-ffi-inspect-rs..." (Main.hs:1604 area)
-#   - inspector exit code / stderr
-#   - "Generated N bindings in .skycache/" (Main.hs:1613 area)
-#   - any unhandled exception trace
+time <SKY> add uuid --target rust   # ⏱ exceeds 10 min; killed by harness
+ls -la .skycache/rust/               # uuid_bindings.rs is 0 bytes
+ls -la .skycache/ffi/                # empty
 ```
 
-If the inspector fails: check `EmbeddedInspectorRust.ensureInspectorRust`
-— the embedded `tools/sky-ffi-inspect-rs/` may not be rebuilding the
-cached binary correctly. Verify
-`~/.cache/sky/tools/sky-ffi-inspect-rs-<hash>/target/debug/sky-ffi-inspect-rs`
-exists and runs.
+**Root cause: cold cargo build of the embedded inspector source.**
 
-If the inspector returns 0 functions: that's the previously-documented
-"only top-level lib.rs parsed" limitation. The agent's claim of
-"submodule traversal" (commit `2c480e15`) needs verification — `uuid`
-crate likely re-exports from `src/uuid.rs`, `src/v4.rs`, etc.
+The chain (all evidence gathered 2026-05-23):
 
-**Proper fix.** Both pieces:
+1. `EmbeddedInspectorRust.inspectorRustHash` (`EmbeddedInspectorRust.hs:48-57`)
+   computes a SHA-256 of every byte in the TH-embedded
+   `tools/sky-ffi-inspect-rs/` source tree. Any edit to the inspector
+   source — including formatting-only or comment-only changes —
+   invalidates this hash.
+2. The Sky binary at `sky-out/sky` was rebuilt at 02:44 today; the
+   inspector source was last touched 19:17 yesterday. So this `sky`
+   binary carries a new hash.
+3. `ensureInspectorRust` looks for
+   `~/.cache/sky/tools/sky-ffi-inspect-rs-<hash>/target/debug/sky-ffi-inspect-rs`
+   — doesn't exist (cache miss).
+4. Falls into `buildInspectorRust`, which `cargo build`s the inspector
+   tree cold.
+5. The inspector pulls **55 transitive crates** (per its `Cargo.lock`):
+   `syn` (full + extra-traits features), `cargo_metadata`,
+   `serde_json`, `quote`, `proc-macro2`, `tempfile`. Cold cargo build:
+   **3-7 minutes warm registry, 5-10 minutes cold**.
+6. Once built, the inspector itself adds another **30-90 s** running
+   `cargo fetch` then `cargo metadata` in a tempdir for `uuid`.
 
-**Q2a.** Capture and surface inspector errors. In `app/Main.hs:1605-1610`
-(the `Add` case path):
+**Total: 4-9 minutes before any binding file is written.** When the
+harness's command timeout fires (defaults often 10 min, sometimes
+less), the inspector's cargo-build child process is killed mid-build,
+leaving the 0-byte `uuid_bindings.rs` that
+`createDirectoryIfMissing`/`writeFile` set up before the inspector
+ever returned.
+
+**Evidence in the filesystem.** Three cache dirs at
+`~/.cache/sky/tools/sky-ffi-inspect-rs-{05e3b0621ff0,1e2441b58668,c313e5d5381a}`
+(May 19, 21, 22) accumulated in three days, each ~192 MB of `target/`
+artifacts. Every minor inspector-source edit creates a new cache dir
+and forces a fresh cold build.
+
+**Earlier-misdiagnosed alternatives** (the previous version of this
+section listed both; both are wrong — keeping for reference):
+- ❌ "The inspector silently failed and returned empty PkgInfo." The
+  inspector never returns at all; it's killed mid-build.
+- ❌ "`generateBindings` was never called." Wrong — `generateBindings`
+  isn't reached because the inspector never completes. The 0-byte
+  file is artifact of the directory setup, not a partial write.
+
+**Proper fix — embed the compiled binary, not the source.**
+
+Mirror what the Go inspector path does (`EmbeddedInspector.hs`):
+ship the inspector as a pre-built executable bundled into the `sky`
+binary, materialise it on first call, and skip cargo build entirely.
 
 ```haskell
-r <- FfiGen.runInspectorForTarget target pkg
-case r of
-    Left err -> do
-        putStrLn $ "   " ++ inspName ++ " warning: " ++ err
-        return (Right ())
-    Right info | not (null (_pkgErrors info)) -> do
-        putStrLn $ "   " ++ inspName ++ " errors:"
-        mapM_ (\e -> putStrLn $ "      " ++ e) (_pkgErrors info)
-        when (null (_pkgFns info)) $
-            putStrLn "   No public functions found; no bindings emitted."
-        names <- FfiGen.generateBindings target info
-        ...
-    Right info -> ...
+-- src/Sky/Build/EmbeddedInspectorRust.hs
+
+embeddedInspectorRustBinary :: ByteString
+embeddedInspectorRustBinary =
+    $(embedFile "tools/sky-ffi-inspect-rs/target/release/sky-ffi-inspect-rs")
+
+ensureInspectorRust :: IO (Either String FilePath)
+ensureInspectorRust = do
+    cache <- getXdgDirectory XdgCache "sky"
+    let dir = cache </> "tools" </> ("sky-ffi-inspect-rs-" ++ inspectorRustHash)
+        bin = dir </> "sky-ffi-inspect-rs"
+    exists <- doesFileExist bin
+    unless exists $ do
+        createDirectoryIfMissing True dir
+        BS.writeFile bin embeddedInspectorRustBinary
+        perms <- getPermissions bin
+        setPermissions bin (setOwnerExecutable True perms)
+    return (Right bin)
 ```
 
-When `_pkgFns` is empty, `emitRustFile` still produces a header. If
-the current code is producing 0 bytes, something is short-circuiting
-before `writeFile`. Add a `putStrLn $ "Writing " ++ rsFile ++ " (" ++
-show (length rendered) ++ " bytes)"` in `generateBindings` to find
-out where bytes vanish.
+Cabal-side requirements:
+- Either a `Setup.hs` `preBuild` hook or a `build-tool-depends`
+  declaration that runs `cargo build --release` in
+  `tools/sky-ffi-inspect-rs/` before TH evaluation, so the binary
+  exists when `embedFile` opens it.
+- The hash function can now be the inspector binary's SHA-256
+  (cheap, stable on identical source).
+- `sky` binary grows by ~10-20 MB (release-mode inspector binary).
+  Acceptable — `sky` is already ~40 MB.
 
-**Q2b.** Strengthen the inspector. `tools/sky-ffi-inspect-rs/src/main.rs`
-should follow `pub mod <name>;` declarations recursively. Today the
-inspector reads only `src/lib.rs` (or `src/main.rs`). For a crate
-with `pub use crate::v4::*;` in `lib.rs`, recurse into `src/v4.rs`.
-Mirror the pattern from the Go inspector
-(`tools/sky-ffi-inspect/main.go`).
+**Smaller alternatives, in order of preference:**
 
-**Acceptance** for Q2: `sky add uuid --target rust` produces
-`.skycache/rust/uuid_bindings.rs` with ≥ 1 working wrapper fn (e.g.
-`Uuid::new_v4`) AND `.skycache/ffi/uuid.skyi` AND
-`.skycache/ffi/uuid.kernel.json`. A Sky program calling `Uuid.newV4 ()`
-then builds and runs, printing a real UUID.
+- **Option B: stabler hashing.** Hash only `tools/sky-ffi-inspect-rs/src/`
+  (skip `Cargo.lock`/`Cargo.toml` whitespace). Cuts cache misses on
+  inspector formatting changes. Doesn't help when actual code changes
+  — still pays the cold build.
+- **Option C: persistent daemon.** Spawn the inspector once per Sky
+  session, send pkg queries via a Unix socket. Amortises
+  `cargo metadata` across multiple `sky add` calls. Complexity
+  cost; defer past Q2.
+
+**Acceptance** for Q2:
+- `time <SKY> add uuid --target rust` on a freshly-rebuilt sky binary
+  completes in **<30 s wall-clock**.
+- `~/.cache/sky/tools/sky-ffi-inspect-rs-<hash>/sky-ffi-inspect-rs`
+  materialises instantly; no `target/` dir.
+- `.skycache/rust/uuid_bindings.rs` is non-empty (the header + ≥1
+  wrapper fn for a function the inspector discovers).
+- `.skycache/ffi/uuid.skyi` and `.skycache/ffi/uuid.kernel.json` exist.
+- A Sky program calling `Uuid.newV4 ()` then builds and runs,
+  printing a real UUID.
+
+**Out of scope for Q2 (defer to follow-ups):**
+- *Whether the inspector finds any uuid functions at all.* If `lib.rs`
+  re-exports submodules and the inspector reads only top-level
+  `lib.rs`, the binding file ends up with the header only and 0
+  wrappers. This is the "submodule traversal" task tracked separately
+  (see commit `2c480e15` which claimed to fix it; verify after Q2
+  lands). Different bug; doesn't block Q2's acceptance — the timeout
+  is what's blocking everyone today.
 
 #### Q3. Sky.Core.List Prelude exposure — runtime symbols missing *(MEDIUM)*
 
@@ -585,7 +638,7 @@ Builds and runs.
 | Rank | Issue | Effort | Why this order |
 |---|---|---|---|
 | 1 | **Q1** (polymorphic returns) | 1-5 days (Q1a stop-gap → Q1b proper) | Affects any Sky code that returns `Result`/`Maybe`/custom ADT polymorphically. Most common user-written pattern. |
-| 2 | **Q2** (FFI orchestration) | 2-4 days | The README and CLI advertise `sky add <crate> --target rust` as working. Right now it isn't. Until Q2 lands, the Rust target's differentiator (crate ecosystem access) is theatre. |
+| 2 | **Q2** (inspector cold-build) | 2-3 days | The README and CLI advertise `sky add <crate> --target rust` as working. Right now the first call after any `sky` rebuild times out at 4-9 min for a cold cargo build of the embedded inspector tree. Fix: embed the compiled inspector binary, not source. |
 | 3 | **Q3** (Sky.Core.List Prelude exposure) | 1-2 days | Affects all users who imported `Sky.Core.Prelude exposing (..)` and used `List.foldl` (the canonical idiom). |
 | 4 | Spurious `.clone()` on `Copy` types | 1 day | Quality-of-life; doesn't break builds, but bloats every generated function. Land after Q1-Q3. |
 | 5 | Property-based tests + `cargo audit` in CI | 2-3 days | Guards against regressions when Q1-Q4 land. |
@@ -616,43 +669,70 @@ local's solved type and emit it).
 exercising `mkOk x = Ok x`, `mkErr s = Err s`, `mkJust y = Just y`,
 `mkNothing _ = Nothing`. Drive from the existing test harness.
 
-#### Step 2 — Q2 (FFI orchestration)
+#### Step 2 — Q2 (inspector cold-build elimination)
 
-2.1. **Add diagnostic output.** In `src/Sky/Build/FfiGen.hs:generateBindings
-TargetRust`, log the size of each written file:
-```haskell
-let rsContent = emitRustFile kname pkg
-putStrLn $ "   Writing " ++ rsFile ++ " (" ++ show (length rsContent) ++ " bytes, " ++ show (length (_pkgFns pkg)) ++ " fns)"
-writeFile rsFile rsContent
-```
-Do the same for skyiFile and jsonFile. Rerun the Q2 reproducer to
-diagnose where the 0-byte output is coming from.
+The diagnostic-output / orchestration-fix steps that used to live
+here have been deleted — they were chasing the wrong root cause. The
+real fix is a caching-strategy change in `EmbeddedInspectorRust.hs`.
 
-2.2. **Fix the actual silent failure.** Once 2.1 reveals the root
-cause, fix it. Likely candidates:
-- Inspector returns `Left` and Main.hs writes 0 bytes anyway via a
-  prior `createDirectoryIfMissing` race.
-- `emitRustFile` returns `""` when `_pkgFns` is empty — verify by
-  reading the function (it should at minimum emit the 7-line header).
-- The `sky add` command silently uses a wrong target somewhere.
+2.1. **Switch from embed-source to embed-binary.** Edit
+`src/Sky/Build/EmbeddedInspectorRust.hs`. Replace the
+`embedDirFiltered` source-tree embed with `embedFile` on the built
+binary at `tools/sky-ffi-inspect-rs/target/release/sky-ffi-inspect-rs`.
+Replace `buildInspectorRust`'s `cargo build` with a single
+`BS.writeFile bin embeddedInspectorRustBinary + setOwnerExecutable`.
+See the code sketch in §Findings Q2.
 
-2.3. **Inspector submodule traversal verify-or-implement.** Run the
-inspector directly:
-```bash
-~/.cache/sky/tools/sky-ffi-inspect-rs-*/target/debug/sky-ffi-inspect-rs uuid 2>&1 | head -30
-```
-If it returns 0 functions, the "submodule traversal" claim from
-commit `2c480e15` isn't actually wired up. Implement it by recursively
-parsing `pub mod <name>;` files (see §Findings Q2b).
+2.2. **Wire `cargo build --release` into the Cabal build.** Choose one:
+- **Setup.hs hook.** Add a `Setup.hs` with `userHooks { preBuild =
+  buildRustInspector ... }` that runs `cargo build --release
+  --manifest-path tools/sky-ffi-inspect-rs/Cargo.toml` before any
+  Haskell module is compiled (so TH's `embedFile` finds the binary).
+- **`build-tool-depends`.** Declare a synthetic `build-tool-depends:
+  sky-ffi-inspect-rs:sky-ffi-inspect-rs` in `sky-compiler.cabal` and
+  rely on Cabal to invoke it. Simpler but less control.
 
-2.4. **End-to-end test.** Add `examples/26-rust-ffi/` (or next free
+Choose Setup.hs if cross-platform binary embedding becomes needed
+later (`#ifdef`s for host triple).
+
+2.3. **Update the inspector-hash.** With the binary embedded, the
+"hash" can simply be the SHA-256 of the embedded binary bytes (not
+the source tree). Or keep the source-tree hash but drop the cargo
+build branch entirely — the cache miss now just means "materialise
+binary to disk", which is cheap.
+
+2.4. **Delete the cold-build path.** `buildInspectorRust`'s
+`readCreateProcessWithExitCode (proc "cargo" ["build", ...])` block
+becomes dead. Remove it. Verify
+`grep -nE 'cargo build|readCreateProcessWithExitCode' src/Sky/Build/EmbeddedInspectorRust.hs`
+returns zero hits.
+
+2.5. **Clean up the old caches.** Add a one-time migration in
+`ensureInspectorRust`: on cache-dir-write success, scan
+`~/.cache/sky/tools/sky-ffi-inspect-rs-*` for dirs containing a
+`target/` subdir, and delete them. This reclaims the ~192 MB × N
+accumulated from prior cold builds. Idempotent and safe.
+
+2.6. **End-to-end test.** Add `examples/26-rust-ffi/` (or next free
 slot) with:
 - Sky source importing `uuid` and printing `Uuid.newV4 ()`.
 - `sky.toml` declaring `target = "rust"` and the `[rust.dependencies]`
   uuid entry.
-- A bash script that runs `sky add uuid --target rust && sky build
-  --target rust && ./sky-out/Rust/target/debug/sky-app` and checks the
-  output matches the UUID regex.
+- A bash test script that runs `time sky add uuid --target rust` and
+  asserts the wall-clock is **<30 s** AND
+  `.skycache/rust/uuid_bindings.rs` is non-empty AND the eventual
+  binary prints a UUID matching `^[0-9a-f]{8}-...`.
+
+**Deferred to Q2.7 (separate follow-up, not blocking Q2 acceptance):**
+inspector submodule traversal. Once Q2.1-2.6 land, run the inspector
+directly:
+```bash
+~/.cache/sky/tools/sky-ffi-inspect-rs-<hash>/sky-ffi-inspect-rs uuid 2>&1 | head -30
+```
+If it returns 0 functions, the "submodule traversal" claim from
+commit `2c480e15` isn't actually wired up — implement it by
+recursively parsing `pub mod <name>;` files. This is a separate bug
+class (correctness of the parser) from Q2 (latency of the build).
 
 #### Step 3 — Q3 (Sky.Core.List runtime functions)
 

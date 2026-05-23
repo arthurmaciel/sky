@@ -142,8 +142,8 @@ pub fn list_concat_map<T0, T1>(f: impl Fn(T0) -> Vec<T1> + Clone, list: Vec<T0>)
 pub fn list_zip<T0, T1>(a: Vec<T0>, b: Vec<T1>) -> Vec<(T0, T1)> {
     a.into_iter().zip(b).collect()
 }
-pub fn list_filter<T0>(f: impl Fn(&T0) -> bool + Clone, list: Vec<T0>) -> Vec<T0> {
-    list.into_iter().filter(|x| f(x)).collect()
+pub fn list_filter<T0: Clone>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> Vec<T0> {
+    list.into_iter().filter(|x| f(x.clone())).collect()
 }
 pub fn list_member<T0: PartialEq>(x: T0, list: Vec<T0>) -> bool {
     list.contains(&x)
