@@ -539,13 +539,17 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                             else case knownDefSig modPrefix name n of
                                 Just (_, knownRetType) -> knownRetType
                                 Nothing ->
-                                    -- Return type has TVars: use body inference
-                                    let bodyInner = taskExprInnerType (ecSolvedTypes ctx) body
-                                    in if null bodyInner
-                                       then case knownDefSig modPrefix name n of
-                                           Just (_, knownRetType2) -> knownRetType2
-                                           Nothing -> "()"
-                                       else "SkyTask<" ++ bodyInner ++ ">"
+                                    -- Return type has TVars: try constructor-shape inference (Q1a)
+                                    let ctorTy = inferCtorReturnType (ecRecordMap ctx) (ecSolvedTypes ctx) body
+                                    in if null ctorTy
+                                       then -- Fallback: body inference for Task returns
+                                            let bodyInner = taskExprInnerType (ecSolvedTypes ctx) body
+                                            in if null bodyInner
+                                               then case knownDefSig modPrefix name n of
+                                                   Just (_, knownRetType2) -> knownRetType2
+                                                   Nothing -> "()"
+                                               else "SkyTask<" ++ bodyInner ++ ">"
+                                       else ctorTy
                     Nothing ->
                          -- No solved type available — use knownDefSig, body inference,
                          -- or (for main) the hardcoded Task/unit convention.
@@ -615,6 +619,37 @@ returnTypeWithGenerics recMap ty solved = case ty of
         in (g, [g])
     _ ->
         (typeToRustString recMap ty, [])
+
+-- | Infer the return type of a function whose body is a constructor call
+-- (Ok x, Err e, Just y, Nothing, ::, etc.) by inspecting the constructor
+-- and the types of its arguments via solveArgType.
+inferCtorReturnType :: Map.Map String String -> Map.Map String Can.Type -> Can.Expr -> String
+inferCtorReturnType recMap solved (Ann.At _ expr) = case expr of
+    Can.Call (Ann.At _ (Can.VarCtor _ _ tyName ctorName _)) args ->
+        case (tyName, ctorName, args) of
+            -- Result: Ok x / Err e
+            ("Result", "Ok", [arg]) ->
+                let okT = solveArgType solved arg
+                in "SkyResult<SkyError, " ++ okT ++ ">"
+            ("Result", "Err", [arg]) ->
+                let errT = solveArgType solved arg
+                in "SkyResult<" ++ errT ++ ", String>"
+            -- Maybe: Just y / Nothing
+            ("Maybe", "Just", [arg]) ->
+                let valT = solveArgType solved arg
+                in "SkyMaybe<" ++ valT ++ ">"
+            ("Maybe", "Nothing", []) -> "SkyMaybe<String>"
+            -- List: cons (::) / empty
+            ("List", "::", [arg, _]) ->
+                let elT = solveArgType solved arg
+                in "Vec<" ++ elT ++ ">"
+            ("List", "[]", []) -> "Vec<String>"
+            _ -> ""
+    -- For a plain local variable, look up its solved type
+    Can.VarLocal name -> case Map.lookup name solved of
+        Just ty -> typeToRustString recMap ty
+        Nothing -> ""
+    _ -> ""
 
 -- | Walk through let chains to find the tail expression.
 tailExpr :: Can.Expr -> Can.Expr
@@ -1781,9 +1816,29 @@ kernelCtorToRust modName typeName ctorName =
 
 kernelToRust :: String -> String -> String
 kernelToRust mod name = case (mod, name) of
-    -- List.map: use non-recursive version (no T1: Clone required)
+    -- List functions (Q3)
     ("List", "map") -> "list_map_consume"
     ("Sky.Core.List", "map") -> "list_map_consume"
+    ("List", "foldl") -> "list_foldl"
+    ("Sky.Core.List", "foldl") -> "list_foldl"
+    ("List", "foldr") -> "list_foldr"
+    ("Sky.Core.List", "foldr") -> "list_foldr"
+    ("List", "range") -> "list_range"
+    ("Sky.Core.List", "range") -> "list_range"
+    ("List", "indexedMap") -> "list_indexed_map"
+    ("Sky.Core.List", "indexedMap") -> "list_indexed_map"
+    ("List", "concatMap") -> "list_concat_map"
+    ("Sky.Core.List", "concatMap") -> "list_concat_map"
+    ("List", "zip") -> "list_zip"
+    ("Sky.Core.List", "zip") -> "list_zip"
+    ("List", "filter") -> "list_filter"
+    ("Sky.Core.List", "filter") -> "list_filter"
+    ("List", "member") -> "list_member"
+    ("Sky.Core.List", "member") -> "list_member"
+    ("List", "any") -> "list_any"
+    ("Sky.Core.List", "any") -> "list_any"
+    ("List", "all") -> "list_all"
+    ("Sky.Core.List", "all") -> "list_all"
     -- String kernel functions: route directly to runtime implementations
     ("String", "fromInt") -> "string_from_int"
     ("Sky.Core.String", "fromInt") -> "string_from_int"

@@ -283,22 +283,24 @@ sky add uuid --target rust
 
 | Limitation | Description |
 |---|---|
+| **Polymorphic non-`Task` return types fail to build** | Functions like `mkOk x = Ok x` (`a -> Result e a`) emit `pub fn main_mk_ok(x: i64) {` — no return type → defaults to `()` — but the body produces `SkyResult`. Failure: E0282 + E0308. The "P3 fix" reverted to this behaviour from a worse one (undeclared `__Te_inst15`). See *Q-priorities → Q1* below. |
+| **`sky add <crate> --target rust` produces empty bindings** | `sky add uuid --target rust` writes a **0-byte** `.skycache/rust/uuid_bindings.rs` and doesn't write `.skycache/ffi/<crate>.skyi` / `.kernel.json`. End-to-end FFI is unusable even though the binding *emitter* (`emitRustFnSimple`) was updated. See *Q-priorities → Q2*. |
 | Partial application of kernels | Writing `let f = Task.map myFn in f task` emits a bare under-applied call to the kernel — Rust type-errors. Workaround: wrap in an explicit closure (`let f = \\t -> Task.map myFn t`). True lifting requires a kernel-arity table in `Builder.hs`. |
 | `Db.migrateApply` | Migrations applied sequentially via `db_exec_raw`; no transaction wrapping or rollback. |
 | Prelude re-export resolution for `Sky.Core.List.*` | Functions like `List.foldl`, `List.length` imported via `Prelude` emit `list_foldl` which has no runtime counterpart. Workaround: `import Sky.Core.List as List`. |
-| Unicode-escape in Sky source (`→`) | `examples/00-standard-libs` (containing `→`) may fail `cargo build`. |
-| `emitRustFile` `todo!()` stubs | `.skycache/rust/*_bindings.rs` emit `todo!()` for wrapper bodies. Type-mapped wrappers deferred. |
+| Spurious `.clone()` on `Copy` types | `(n.clone() * n.clone())` for `n: i64` — wastes compile time but doesn't cause failure. |
 
 ## Completed audits
 
-The Rust codegen has been through three sequential audits — all findings resolved:
+The Rust codegen has been through four sequential audits.
 
-| Audit | Scope | Resolved issues |
+| Audit | Scope | Status |
 |---|---|---|
-| S1–S6 (2026-05-22) | Calling convention, missing kernels, panic paths, dead code, task routing, return inference | All 6 examples green with tupled convention, kernel alias routing, proper return inference |
-| R1–R5 re-audit | Simplified fixes, new regressions | `tailExpr`/`needsTaskWrap`, `returnTypeWithGenerics`, `task_fail` turbofish, explicit alias threading, calling convention test |
-| N1–N3 re-re-audit | `task_fail` overpin, `sky_main` return, Skolem fallback | Context-aware pinning at combinator sites, non-unit `main` support, Skolem generics emit proper names |
-| P1–P4 post-merge | Target dispatch, Unicode strings, undeclared generics, FFI stubs | Exclusive target paths, `rustStringLit` with `\u{}` escapes, `skyTypeToRust` real wrapper bodies |
+| S1–S6 (2026-05-22) | Calling convention, missing kernels, panic paths, dead code, task routing, return inference | ✅ Resolved |
+| R1–R5 re-audit | Simplified fixes, new regressions | ✅ Resolved |
+| N1–N3 re-re-audit | `task_fail` overpin, `sky_main` return, Skolem fallback | ✅ Resolved |
+| P1–P4 post-merge | Target dispatch (P1), Unicode strings (P2), polymorphic returns (P3), FFI stubs (P4) | ⚠️ **Partial** — P1 ✅, P2 ✅, P3 **renamed-not-fixed**, P4 **emitter-fixed-orchestration-broken** |
+| Q1–Q3 (2026-05-23) | Below | 🚧 Open |
 
 ## Next steps
 
@@ -322,443 +324,433 @@ The Rust codegen has been through three sequential audits — all findings resol
 - **Release profile defaults.** Add `--release` flag to `sky build --target rust` with LTO.
 - **`sky watch` for Rust target.** Rebuild on `runtime-rust/src/` changes without re-running Sky compilation.
 
-> **Audience: AI fix-up agent.** This section catalogues every dead-code item
-> and latent bug found in a 2026-05-21 audit of `src/Sky/Generate/Rust/Builder.hs`
-> (1824 lines) and `runtime-rust/src/sky_runtime/` (~700 lines). Each finding
-> has a confidence rating, exact line numbers, and a fix sketch. Land the
-> action-plan steps as one PR; each step must end with `cargo check` +
-> `cargo clippy --all-targets -- -D warnings` clean on the runtime and
-> `cabal build exe:sky` clean on the compiler.
+
+---
+
+## Q-priorities (2026-05-23) — re-audit after the P1–P4 fixes claimed to land
+
+> **Audience: AI fix-up agent.** This section is the result of an
+> end-to-end verification of the P1–P4 fixes that `2faef85f "fix(rust):
+> P1-P4 post-merge audit fixes"` claimed to deliver. P1 and P2 verified
+> green. P3's "fix" only renamed the failure mode — polymorphic
+> non-Task returns now emit no return type and default to `()`, which
+> still doesn't compile. P4's binding *emitter* (`emitRustFnSimple`)
+> was rewritten with real type mapping, but the orchestration that
+> drives `sky add <crate> --target rust` writes a **0-byte** binding
+> file. This section catalogues exactly what's broken, with concrete
+> reproducers, and prescribes the next fix sequence.
+
+### Reproducers (all fail today against `2faef85f` / `addd340f`)
+
+Use `<SKY> = /home/arthur/Documentos/comp/sky/sky-out/sky`.
+
+```bash
+# Q1: polymorphic non-Task return type (regression of P3)
+mkdir -p /tmp/sky-q1/src && cat > /tmp/sky-q1/src/Main.sky <<'EOF'
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+mkOk x = Ok x
+main =
+    case mkOk 42 of
+        Ok n  -> println (String.fromInt n)
+        Err _ -> println "err"
+EOF
+printf '[project]\nname = "q1"\ntarget = "rust"\n' > /tmp/sky-q1/sky.toml
+(cd /tmp/sky-q1 && rm -rf sky-out .skycache && <SKY> build src/Main.sky --target rust)
+# Generated:
+#     pub fn main_mk_ok(x: i64) {                    // ← no return type → ()
+#         SkyResult::Ok(x);                          // ← E0282, then E0308 at caller
+#     }
+# Expected: `pub fn main_mk_ok<T_e>(x: i64) -> SkyResult<T_e, i64>`.
+# OR: `pub fn main_mk_ok(x: i64) -> SkyResult<SkyError, i64>` (concrete).
+
+# Q2: `sky add <crate> --target rust` end-to-end produces nothing usable
+mkdir -p /tmp/sky-q2 && cd /tmp/sky-q2
+printf '[project]\nname = "q2"\ntarget = "rust"\n' > sky.toml
+rm -rf .skycache
+<SKY> add uuid --target rust
+wc -c .skycache/rust/uuid_bindings.rs   # → 0 bytes
+ls .skycache/ffi/                       # → empty (no .skyi, no .kernel.json)
+# Expected after sky add:
+#   .skycache/rust/uuid_bindings.rs   ≥ 7 lines (header + per-fn wrappers)
+#   .skycache/ffi/uuid.skyi           Sky-side type signatures
+#   .skycache/ffi/uuid.kernel.json    kernel routing entries
+# All three are required for `sky build --target rust` on a file that
+# imports the crate to type-check and link.
+```
 
 ### Findings
 
-#### A. Critical — broken codegen contract
+#### Q1. Polymorphic non-Task returns still don't compile *(HIGH)*
 
-**A0. Inconsistent calling convention: tupled vs curried** *(HIGH confidence)*
-
-The codegen and the runtime disagree on how multi-argument kernel calls
-are shaped:
-
-| Path | What's emitted / declared | Example |
-|---|---|---|
-| `Can.Call` direct (`Builder.hs:989`) | **tupled** — `f(a1, a2, ...)` | `Task.map fn task` → `task_map(fn, task)` |
-| `\|>` operator (`Builder.hs:919`) | **curried** — `b(a)` | `task \|> Task.map fn` → `task_map(fn)(task)` |
-| `<\|` operator (`Builder.hs:920`) | **curried** — `a(b)` | same shape |
-| Runtime `task_map` / `task_and_then` / `task_on_error` (`task.rs:14-45`) | **curried** — `f: ... -> impl FnOnce(SkyTask) -> SkyTask` | accepts only the piped form |
-| Every other runtime function (`db_exec`, `string_split`, `task_sequence`, …) | **tupled** — all args at once | accepts only the direct form |
-
-Consequence: piped Task code compiles; direct Task code doesn't. The "Task
-combinator type inference" item that lived in *Known limitations* is a
-downstream symptom — `impl FnOnce(...) -> impl FnOnce(...)` return chains
-make Rust's inference brittle, which is exactly what kills `06-json`'s
-pipeline decoder per `CLAUDE.md` (11 errors, `Box<dyn FnOnce>` chain can't
-satisfy `Clone`/`Send`).
-
-**Decision: tupled everywhere.** Reasons:
-1. Sky's canonicalised AST is already saturated/tupled (`Call !Expr [Expr]`
-   in `src/Sky/AST/Canonical.hs:86`). Tupled emission is the natural fit.
-2. Rust's type inference handles `f(a, b)` reliably; curried `f(a)(b)` with
-   `impl FnOnce` returns is exactly the inference cliff.
-3. The rest of the runtime is already tupled — Task is the outlier.
-4. The pipe operators can rewrite at codegen time (fold the piped arg into
-   the callee's `Can.Call` args) and reuse the single tupled emission path.
-   No runtime needs to expose a curried entry point.
-5. The `Json.Decode.Pipeline` decoder keeps the existing `curry1`–`curry5`
-   helpers; those serve a different purpose (threading `Box<dyn FnOnce>`
-   chains for the pipeline pattern) and are out of scope.
-
-*Fix:* Two-part.
-
-**Part 1 — runtime (`runtime-rust/src/sky_runtime/task.rs`).** Rewrite three
-curried combinators to tupled. Drop the unused `E: Clone` bound on
-`task_on_error`.
-
-```rust
-pub fn task_map<E, A, B>(f: impl FnOnce(A) -> B + Send + 'static, task: SkyTask<E, A>)
-    -> SkyTask<E, B>
-where E: Send + 'static, A: Send + 'static, B: Send + 'static
-{ Box::pin(async move { match task.await {
-    SkyResult::Ok(a) => ok_res(f(a)),
-    SkyResult::Err(e) => SkyResult::Err(e),
-} }) }
-
-pub fn task_and_then<E, A, B>(f: impl FnOnce(A) -> SkyTask<E, B> + Send + 'static, task: SkyTask<E, A>)
-    -> SkyTask<E, B>
-where E: Send + 'static, A: Send + 'static, B: Send + 'static
-{ Box::pin(async move { match task.await {
-    SkyResult::Ok(a) => f(a).await,
-    SkyResult::Err(e) => SkyResult::Err(e),
-} }) }
-
-pub fn task_on_error<E, A>(f: impl FnOnce(E) -> SkyTask<E, A> + Send + 'static, task: SkyTask<E, A>)
-    -> SkyTask<E, A>
-where E: Send + 'static, A: Send + 'static
-{ Box::pin(async move { match task.await {
-    SkyResult::Ok(a) => ok_res(a),
-    SkyResult::Err(e) => f(e).await,
-} }) }
-```
-
-The four new kernels from §A2 (`task_map_error`, `task_lazy`,
-`task_from_result`, `task_and_then_result`) MUST be added in tupled form
-too — the sketches under §A2 below have been updated accordingly. Do not
-reintroduce curried returns for any Task kernel.
-
-**Part 2 — codegen (`src/Sky/Generate/Rust/Builder.hs:919-920`).** Rewrite
-the `|>` and `<|` arms so that, when the callee is itself a `Can.Call`,
-the piped argument is folded into the call's argument list and emission
-recurses through the saturated-call path:
+**Root cause.** `src/Sky/Generate/Rust/Builder.hs:537-561`. When the
+solved return type has TVars and `knownDefSig` has no entry, the patch
+in `2faef85f` falls through to:
 
 ```haskell
-| op == "|>" -> case b of
-    Ann.At loc (Can.Call fn callArgs) ->
-        exprToRustString ctx (Ann.At loc (Can.Call fn (callArgs ++ [a])))
-    _ ->
-        exprToRustString ctx b ++ "(" ++ exprToRustString ctx a ++ ")"
-| op == "<|" -> case a of
-    Ann.At loc (Can.Call fn callArgs) ->
-        exprToRustString ctx (Ann.At loc (Can.Call fn (callArgs ++ [b])))
-    _ ->
-        exprToRustString ctx a ++ "(" ++ exprToRustString ctx b ++ ")"
+-- Return type has TVars: use body inference
+let bodyInner = taskExprInnerType (ecSolvedTypes ctx) body
+in if null bodyInner
+   then case knownDefSig modPrefix name n of   -- duplicate lookup
+       Just (_, knownRetType2) -> knownRetType2
+       Nothing -> "()"                          -- ← silent default
+   else "SkyTask<" ++ bodyInner ++ ">"
 ```
 
-The fallback (callee is not a `Can.Call`) keeps the bare function-call
-form, which is correct for piping into bare kernel refs
-(`task |> Task.run` → `task_run(task)`) and into user-defined local
-function values.
+For `mkOk x = Ok x`:
+- `bodyInner = taskExprInnerType ...` — the body `Ok x` is not a Task
+  expression, so this returns `""` (empty).
+- `knownDefSig` has no entry for the user-defined `mkOk`.
+- Falls through to `Nothing -> "()"`.
+- Function signature emits `pub fn main_mk_ok(x: i64) {` (no `->`
+  clause, so Rust infers `()`).
+- Body emits `SkyResult::Ok(x);` → mismatch with the inferred `()`
+  return type → E0282 + E0308.
 
-Chained pipes work via recursion: `task |> Task.map f |> Task.andThen g`
-folds inside-out to `task_and_then(g, task_map(f, task))`. Verified by
-walking the recursion before committing the fix.
+The previous attempt at this fix (`__Te_inst15` undeclared generics)
+was at least pointing at the right shape — it just didn't thread the
+new generics into the function's `<…>` parameter list. The current
+"fix" *deleted* that effort and reverted to a silent `()` default,
+which is strictly worse: the failure surfaces at the call site instead
+of in the signature, making it harder to diagnose.
 
-**What stays unsupported:** true partial application of kernels — i.e.
-`let mapper = Task.map fn in mapper task`. Today the codegen emits
-`let mapper = task_map(fn); mapper(task)` which is a Rust type error
-(currently "wrong return type"; after the fix, the cleaner "missing
-argument"). Lifting this requires a kernel-arity table in `Builder.hs`
-that wraps under-applied calls in synthesised closures. Document it under
-*Known limitations*; do not attempt in this PR.
+**Proper fix.** Two paths, in increasing order of investment:
 
-**A1. Shadowed `Log.println` arms in `kernelToRust`** *(HIGH confidence)*
-
-`src/Sky/Generate/Rust/Builder.hs:1579-1580` maps `("Log", "println") -> "println"`
-**before** `:1688-1689` which correctly maps to `"log_info"`. Haskell evaluates
-top-down, so the proper arm is dead, and `println` is a Rust **macro**, not a
-function — `println(x)` is invalid Rust. Currently masked by special-cases at
-`Builder.hs:729-731` and `:958-959` that catch `"println" \`isSuffixOf\` fs` in
-`Can.Call`, but any non-Call path (partial application, function-value passing)
-emits broken Rust.
-
-*Fix:* Delete lines 1579-1580. The `log_info` arms at 1688-89 then fire.
-
-**A2. Seven runtime symbols missing — emitter routes to them, runtime doesn't define them** *(HIGH confidence)*
-
-| Builder.hs line | Sky kernel | Emits | Status |
-|---|---|---|---|
-| 1662-63 | `Task.mapError` | `task_map_error` | ❌ missing |
-| 1674-75 | `Task.lazy` | `task_lazy` | ❌ missing |
-| 1678-79 | `Task.fromResult` | `task_from_result` | ❌ missing |
-| 1680-81 | `Task.andThenResult` | `task_and_then_result` | ❌ missing |
-| 1696-97 | `Log.error` | `log_error` | ❌ only `log_error_with` exists |
-| 1700-01 | `Log.debugWith` | `log_debug_with` | ❌ missing |
-| 1702-03 | `Log.warnWith` | `log_warn_with` | ❌ missing |
-
-Latent because none of the six green examples exercises these kernels —
-`cargo check` on the runtime passes because the runtime doesn't reference
-them either. A user writing `Task.mapError` today gets `cannot find function`
-from `cargo build` on the generated crate.
-
-*Fix:* Add to `runtime-rust/src/sky_runtime/{task,log}.rs`. All Task
-kernels MUST be tupled per §A0. Sky argument order is preserved
-(`Task.mapError : (e1 -> e2) -> Task e1 a -> Task e2 a` → `f` first, `task`
-second).
-
-```rust
-// task.rs — tupled per §A0
-pub fn task_map_error<E1, E2, A>(f: impl FnOnce(E1) -> E2 + Send + 'static, task: SkyTask<E1, A>)
-    -> SkyTask<E2, A>
-where E1: Send + 'static, E2: Send + 'static, A: Send + 'static
-{ Box::pin(async move { match task.await {
-    SkyResult::Ok(a) => ok_res(a),
-    SkyResult::Err(e) => SkyResult::Err(f(e)),
-} }) }
-
-pub fn task_lazy<E, A>(f: impl FnOnce() -> SkyTask<E, A> + Send + 'static) -> SkyTask<E, A>
-where E: Send + 'static, A: Send + 'static
-{ Box::pin(async move { f().await }) }
-
-pub fn task_from_result<E, A>(r: SkyResult<E, A>) -> SkyTask<E, A>
-where E: Send + 'static, A: Send + 'static
-{ Box::pin(std::future::ready(r)) }
-
-pub fn task_and_then_result<E, A, B>(f: impl FnOnce(A) -> SkyResult<E, B> + Send + 'static, task: SkyTask<E, A>)
-    -> SkyTask<E, B>
-where E: Send + 'static, A: Send + 'static, B: Send + 'static
-{ Box::pin(async move { match task.await {
-    SkyResult::Ok(a) => f(a),
-    SkyResult::Err(e) => SkyResult::Err(e),
-} }) }
-
-// log.rs
-pub fn log_error<E: Send+'static>(msg: String) -> SkyTask<E, ()> {
-    eprintln!("{}", msg); Box::pin(async move { ok_res(()) })
-}
-pub fn log_debug_with<E: Send+'static>(msg: String, _attrs: Vec<String>) -> SkyTask<E, ()> {
-    println!("{}", msg); Box::pin(async move { ok_res(()) })
-}
-pub fn log_warn_with<E: Send+'static>(msg: String, _attrs: Vec<String>) -> SkyTask<E, ()> {
-    println!("{}", msg); Box::pin(async move { ok_res(()) })
-}
-```
-
-**A3. `substVar` fallback arms panic instead of recursing** *(HIGH bug, MEDIUM exact fix)*
-
-`src/Sky/Generate/Rust/Builder.hs:767-771`:
+**Q1a. (Stop-gap, ~1 day.)** When `bodyInner` is empty and the body's
+top expression is a known ADT constructor (`Can.VarCtor _ _ "Result" _ _`,
+`Can.VarCtor _ _ "Maybe" _ _`, `Can.VarCtor _ _ "List" _ _`), emit a
+concrete-error fallback: pin the error type to `SkyError`. For `Result`:
 
 ```haskell
-Can.Record _    -> exprToRustString ctx (Ann.At (error "substVar span") expr)
-Can.Tuple _ _ _ -> exprToRustString ctx (Ann.At (error "substVar span") expr)
-Can.Access _ _  -> exprToRustString ctx (Ann.At (error "substVar span") expr)
-Can.Accessor _  -> exprToRustString ctx (Ann.At (error "substVar span") expr)
-Can.Update _ _ _-> exprToRustString ctx (Ann.At (error "substVar span") expr)
+Nothing ->
+    case body of
+        Ann.At _ (Can.Call (Ann.At _ (Can.VarCtor _ _ _ "Ok" _)) [arg]) ->
+            let okType = solveArgType (ecSolvedTypes ctx) arg
+            in "SkyResult<SkyError, " ++ okType ++ ">"
+        Ann.At _ (Can.Call (Ann.At _ (Can.VarCtor _ _ _ "Err" _)) [arg]) ->
+            let errType = solveArgType (ecSolvedTypes ctx) arg
+            in "SkyResult<" ++ errType ++ ", String>"
+        ...
+        _ -> "()"
 ```
 
-The Haskell `error "substVar span"` is the **span argument** to `Ann.At`.
-When `substVar` walks any of these expression forms, GHC evaluates the
-`error` and the compiler crashes with `substVar span`. The preceding
-comment ("Uncommon expression forms — fall back to normal emission") proves
-the intent was to recurse with the real span — this is a copy-paste bug.
+Covers the common case (`mkOk`, `mkErr`, `mkJust`, `mkNothing` etc.).
+Doesn't help truly-polymorphic helpers but unblocks the failing
+reproducer.
 
-*Fix:* Capture the outer `Ann.At sp expr` and thread `sp` through. Read
-the ~30 lines above line 767 first to identify the destructuring shape
-(probably `go (Ann.At sp inner) = case inner of ...`) and re-wrap with
-`Ann.At sp inner` in each fallback arm.
+**Q1b. (Proper, ~3-5 days.)** Reinstate `returnTypeWithGenerics` (the
+helper still exists at `Builder.hs:587-611`) AND thread its
+`newGens` return value into the function's generic-parameter list.
+The previous attempt landed step 1 but stopped before step 2; complete
+the work:
 
-#### B. High — correctness / non-regression-rule violations
+1. Change `genVars` from a pre-rendered `String` (e.g. `"<T0: Clone>"`)
+   to a `[(String, String)]` list of `(name, bounds)`. Search for every
+   `RustFunction rustName genVars …` use site and adapt.
+2. In `defToRustItem`, capture `newGens` from `returnTypeWithGenerics`
+   and merge into the param-derived `genVars` list (use `Data.List.nub`).
+3. Render the combined list once at the bottom of `defToRustItem`.
+4. Default bounds on emitted-from-return generics: `Clone + PartialEq +
+   std::fmt::Debug` (matches the existing per-generic bound style).
 
-**B1. `task_run` and `task_parallel` panic on well-typed Sky** *(HIGH confidence)*
+**Acceptance** for Q1: the Q1 reproducer above (`mkOk`) builds clean
+and runs.
 
-`runtime-rust/src/sky_runtime/task.rs:5-8` and `:73`:
+#### Q2. `sky add <crate> --target rust` orchestration is broken *(HIGH)*
 
-```rust
-fn block_on<E,A>(future: SkyTask<E, A>) -> SkyResult<E, A> {
-    std::thread::spawn(move || tokio::runtime::Runtime::new().unwrap().block_on(future))
-        .join().expect("Internal error: async task panicked")
-}
-// task_parallel:
-match h.await.expect("Internal error: parallel task panicked") { … }
+**Reproduce:** `cd /tmp/sky-q2 && <SKY> add uuid --target rust`. Result:
+`.skycache/rust/uuid_bindings.rs` is **0 bytes**; `.skycache/ffi/`
+is empty.
+
+**Two possible roots** (the agent must diagnose which):
+
+1. **The inspector silently failed.** `sky-ffi-inspect-rs` returned a
+   `PkgInfo` with `errors` set but `runInspectorForTarget` discarded
+   the error and produced an empty result. `generateBindings TargetRust`
+   then ran on an empty `_pkgFns`, emitting only the header — which
+   *should* be ~7 lines, **not** 0 bytes.
+
+2. **`generateBindings` was never called.** The 0-byte file was created
+   by `createDirectoryIfMissing`/`writeFile` racing or by some other
+   path. The empty `.skycache/ffi/` (no .skyi, no .kernel.json) is
+   evidence that the second and third `writeFile` calls in
+   `FfiGen.hs:305-318` didn't execute — but the first one (rsFile)
+   somehow produced a 0-byte file.
+
+**Diagnosis steps.** Run with verbose output and inspect each stage:
+
+```bash
+cd /tmp/sky-q2 && rm -rf .skycache
+RUST_LOG=trace <SKY> add uuid --target rust 2>&1 | tee /tmp/skyadd.log
+# Look for:
+#   - "Inspecting with sky-ffi-inspect-rs..." (Main.hs:1604 area)
+#   - inspector exit code / stderr
+#   - "Generated N bindings in .skycache/" (Main.hs:1613 area)
+#   - any unhandled exception trace
 ```
 
-`Runtime::new()` fails on OS thread/kernel-resource denial. `JoinHandle::await`
-returns `Err(JoinError)` if the spawned task panics or is cancelled. Both
-panic paths violate CLAUDE.md non-regression rule §4: *"No runtime panic
-from well-typed Sky code."*
+If the inspector fails: check `EmbeddedInspectorRust.ensureInspectorRust`
+— the embedded `tools/sky-ffi-inspect-rs/` may not be rebuilding the
+cached binary correctly. Verify
+`~/.cache/sky/tools/sky-ffi-inspect-rs-<hash>/target/debug/sky-ffi-inspect-rs`
+exists and runs.
 
-*Fix:* Propagate as `SkyResult::Err`:
+If the inspector returns 0 functions: that's the previously-documented
+"only top-level lib.rs parsed" limitation. The agent's claim of
+"submodule traversal" (commit `2c480e15`) needs verification — `uuid`
+crate likely re-exports from `src/uuid.rs`, `src/v4.rs`, etc.
 
-```rust
-fn block_on<E,A>(future: SkyTask<E,A>) -> SkyResult<E,A>
-where E: From<String> + Send + 'static, A: Send + 'static {
-    let rt = match tokio::runtime::Runtime::new() {
-        Ok(r) => r,
-        Err(e) => return SkyResult::Err(format!("tokio runtime init failed: {e}").into()),
-    };
-    match std::thread::spawn(move || rt.block_on(future)).join() {
-        Ok(r) => r,
-        Err(_) => SkyResult::Err("async task panicked".to_string().into()),
-    }
-}
-```
+**Proper fix.** Both pieces:
 
-If `E: From<String>` doesn't compose with existing signatures, reuse the
-project's `str_err` helper at `core.rs:20`. Same treatment for
-`task_parallel`'s `.expect(...)`.
-
-**B2. `taskExprInnerType` returns stub types** *(HIGH confidence)*
-
-`src/Sky/Generate/Rust/Builder.hs:1077-1087`:
+**Q2a.** Capture and surface inspector errors. In `app/Main.hs:1605-1610`
+(the `Add` case path):
 
 ```haskell
-"map"      -> "String"   -- wrong; depends on the mapper's return type
-"andThen"  -> "String"   -- wrong
-"onError"  -> "String"   -- wrong
--- Db case missing entries for getString, getInt
+r <- FfiGen.runInspectorForTarget target pkg
+case r of
+    Left err -> do
+        putStrLn $ "   " ++ inspName ++ " warning: " ++ err
+        return (Right ())
+    Right info | not (null (_pkgErrors info)) -> do
+        putStrLn $ "   " ++ inspName ++ " errors:"
+        mapM_ (\e -> putStrLn $ "      " ++ e) (_pkgErrors info)
+        when (null (_pkgFns info)) $
+            putStrLn "   No public functions found; no bindings emitted."
+        names <- FfiGen.generateBindings target info
+        ...
+    Right info -> ...
 ```
 
-Causes `argToRustString` to emit closures with the wrong type annotation.
-Masked because green examples either use `Task.succeed` (which
-`solveArgType`s correctly at 1074) or `|>` (which has its own recurse arm
-at 1115-1117).
+When `_pkgFns` is empty, `emitRustFile` still produces a header. If
+the current code is producing 0 bytes, something is short-circuiting
+before `writeFile`. Add a `putStrLn $ "Writing " ++ rsFile ++ " (" ++
+show (length rendered) ++ " bytes)"` in `generateBindings` to find
+out where bytes vanish.
 
-*Fix:* Recurse into the task-typed argument for map/andThen/onError; add
-`"getString" -> "String"` and `"getInt" -> "i64"` to the Db arm. Verify
-`Task.map`'s arg order against `sky-stdlib/Sky/Core/Task.sky`
-(Elm convention: `(a -> b) -> Task e a -> Task e b`).
+**Q2b.** Strengthen the inspector. `tools/sky-ffi-inspect-rs/src/main.rs`
+should follow `pub mod <name>;` declarations recursively. Today the
+inspector reads only `src/lib.rs` (or `src/main.rs`). For a crate
+with `pub use crate::v4::*;` in `lib.rs`, recurse into `src/v4.rs`.
+Mirror the pattern from the Go inspector
+(`tools/sky-ffi-inspect/main.go`).
 
-#### C. Medium — dead code in Builder.hs
+**Acceptance** for Q2: `sky add uuid --target rust` produces
+`.skycache/rust/uuid_bindings.rs` with ≥ 1 working wrapper fn (e.g.
+`Uuid::new_v4`) AND `.skycache/ffi/uuid.skyi` AND
+`.skycache/ffi/uuid.kernel.json`. A Sky program calling `Uuid.newV4 ()`
+then builds and runs, printing a real UUID.
 
-| # | Location | Issue | Fix |
+#### Q3. Sky.Core.List Prelude exposure — runtime symbols missing *(MEDIUM)*
+
+**Status.** Already a documented limitation; not introduced by recent
+work. Promoted to Q-priorities now that Q1 and Q2 are the only larger
+blockers.
+
+**Root cause.** `Sky.Core.Prelude exposing (..)` exposes `List.foldl`
+/ `List.range` / `List.indexedMap` etc., but the per-module Sky.Core.List
+file isn't emitted for the Rust target when the user *only* imports
+Prelude. The codegen routes `Can.VarTopLevel "List" "foldl"` through
+`kernelToRust "List" "foldl"` → falls through to snake-case `list_foldl`
+→ undefined symbol at link time.
+
+**Proper fix.** Two parts:
+
+**Q3a.** Add missing runtime functions in
+`runtime-rust/src/sky_runtime/core.rs` (or a new `list.rs`):
+- `list_foldl<T0, T1>(f, init, list)`
+- `list_foldr<T0, T1>(f, init, list)`
+- `list_range(lo, hi) -> Vec<i64>`
+- `list_indexed_map<T0, T1>(f, list)`
+- `list_concat_map<T0, T1>(f, list)`
+- `list_zip<T0, T1>(a, b)`
+- `list_filter<T0>(pred, list)`
+- `list_member<T0: PartialEq>(x, list)`
+- `list_any<T0>(pred, list)`
+- `list_all<T0>(pred, list)`
+
+Use the existing `sky_list_*` and runtime fallback patterns as the
+template (see `Builder.hs:1481-1483` `list_map_consume`).
+
+**Q3b.** Add `kernelToRust` arms for each `("List", X)` and
+`("Sky.Core.List", X)` mapping. The pattern is identical to the
+Task/Result/Maybe arms already present.
+
+**Acceptance** for Q3: build a Sky file using `List.foldl`,
+`List.range`, `List.indexedMap` via only `Sky.Core.Prelude` import.
+Builds and runs.
+
+### Priorities (in order)
+
+| Rank | Issue | Effort | Why this order |
 |---|---|---|---|
-| C1 | `:358` + `:387` | `listSig "filterMap" 2` defined twice, identical. Second is unreachable. | Delete line 387. |
-| C2 | `:3` | `import Data.List (..., span, ...)` — `span` never used (only the string literal `"span"` appears in error messages at 767-771). | Drop `span` from the import list. |
-| C3 | `:747` | `goDef _ = "_ = unimplemented(); "` catchall. Per CLAUDE.md §4, new AST nodes need explicit walker arms — silent stub emission hides future bugs. | Verify `Can.Def` constructors in `src/Sky/AST/Canonical.hs`. Either add explicit arms or change fallback to `error "Builder.Rust.goDef: unsupported Can.Def variant"`. |
+| 1 | **Q1** (polymorphic returns) | 1-5 days (Q1a stop-gap → Q1b proper) | Affects any Sky code that returns `Result`/`Maybe`/custom ADT polymorphically. Most common user-written pattern. |
+| 2 | **Q2** (FFI orchestration) | 2-4 days | The README and CLI advertise `sky add <crate> --target rust` as working. Right now it isn't. Until Q2 lands, the Rust target's differentiator (crate ecosystem access) is theatre. |
+| 3 | **Q3** (Sky.Core.List Prelude exposure) | 1-2 days | Affects all users who imported `Sky.Core.Prelude exposing (..)` and used `List.foldl` (the canonical idiom). |
+| 4 | Spurious `.clone()` on `Copy` types | 1 day | Quality-of-life; doesn't break builds, but bloats every generated function. Land after Q1-Q3. |
+| 5 | Property-based tests + `cargo audit` in CI | 2-3 days | Guards against regressions when Q1-Q4 land. |
 
-#### D. Medium — dead code in runtime-rust
+### Implementation plan
 
-All confirmed by grep across `runtime-rust/src/` and `Builder.hs`:
+Land each priority as its own commit referencing the section below.
+Each commit must end with: `cargo check`, `cargo clippy --all-targets
+-- -D warnings` on `runtime-rust/`, `cabal build exe:sky`, all six
+existing examples building clean, AND the corresponding Q-reproducer
+above building clean.
 
-| Symbol | Location | Why dead | Action |
-|---|---|---|---|
-| `use std::fmt;` | `core.rs:5` | Never used; `cargo check` warns | Delete |
-| `sky_int_to_string` | `core.rs:111` | Duplicates `string_from_int` at `:120` | Delete |
-| `sky_string_to_int` | `core.rs:112-114` | Returns wrong type `SkyResult<String, i64>`; superseded by `string_to_int` at `:130-132` returning `SkyMaybe<i64>` (matches Sky's `String.toInt : String -> Maybe Int`). Leaving both invites a footgun. | Delete |
-| `sky_float_to_string` | `core.rs:115` | Duplicates `string_from_float` at `:133` | Delete |
-| `sky_list_drop` | `core.rs:93-95` | Never called | Delete |
-| `json_dec_map2` | `json.rs:69-73` | Never called | Delete |
-| `db_get_field_or_null` | `db.rs:~105` | Never called; users access HashMap directly | Delete |
+#### Step 1 — Q1a (stop-gap for polymorphic returns)
 
-#### E. Low — silent error suppression in JSON encode
+1.1. In `src/Sky/Generate/Rust/Builder.hs:defToRustItem`, add a
+constructor-shape check before the `Nothing -> "()"` fallback. Match
+on the body's outermost `Can.Call (Can.VarCtor _ home typeName ctorName _) args`
+and use `solveArgType` on `args` to derive the inner type. Use Sky
+`SkyError` for any unresolved polymorphic error/value position.
 
-`runtime-rust/src/sky_runtime/json.rs:13-14`:
-`serde_json::to_string_pretty(&val).unwrap_or_default()` returns `""` on
-encode error. Whether this is acceptable depends on `Json.Encode.encode`'s
-Sky-side signature.
+1.2. Add the sketch (per §Findings Q1a) covering `Result` (Ok/Err),
+`Maybe` (Just/Nothing), and bare `Can.VarLocal name` (look up the
+local's solved type and emit it).
 
-*Fix:* Read `sky-stdlib/Sky/Core/Json/Encode.sky` first.
-- If `encode : Value -> String` (pure) — keep as-is and add a one-line
-  comment ("serde never fails on Value; default-empty preserves total
-  signature").
-- If effectful — propagate as `SkyResult<SkyError, String>` and update
-  Builder accordingly.
+1.3. Verify the Q1 reproducer builds.
+
+1.4. **Regression test.** Add `runtime-rust/tests/missing_kernels/Q1.sky`
+exercising `mkOk x = Ok x`, `mkErr s = Err s`, `mkJust y = Just y`,
+`mkNothing _ = Nothing`. Drive from the existing test harness.
+
+#### Step 2 — Q2 (FFI orchestration)
+
+2.1. **Add diagnostic output.** In `src/Sky/Build/FfiGen.hs:generateBindings
+TargetRust`, log the size of each written file:
+```haskell
+let rsContent = emitRustFile kname pkg
+putStrLn $ "   Writing " ++ rsFile ++ " (" ++ show (length rsContent) ++ " bytes, " ++ show (length (_pkgFns pkg)) ++ " fns)"
+writeFile rsFile rsContent
+```
+Do the same for skyiFile and jsonFile. Rerun the Q2 reproducer to
+diagnose where the 0-byte output is coming from.
+
+2.2. **Fix the actual silent failure.** Once 2.1 reveals the root
+cause, fix it. Likely candidates:
+- Inspector returns `Left` and Main.hs writes 0 bytes anyway via a
+  prior `createDirectoryIfMissing` race.
+- `emitRustFile` returns `""` when `_pkgFns` is empty — verify by
+  reading the function (it should at minimum emit the 7-line header).
+- The `sky add` command silently uses a wrong target somewhere.
+
+2.3. **Inspector submodule traversal verify-or-implement.** Run the
+inspector directly:
+```bash
+~/.cache/sky/tools/sky-ffi-inspect-rs-*/target/debug/sky-ffi-inspect-rs uuid 2>&1 | head -30
+```
+If it returns 0 functions, the "submodule traversal" claim from
+commit `2c480e15` isn't actually wired up. Implement it by recursively
+parsing `pub mod <name>;` files (see §Findings Q2b).
+
+2.4. **End-to-end test.** Add `examples/26-rust-ffi/` (or next free
+slot) with:
+- Sky source importing `uuid` and printing `Uuid.newV4 ()`.
+- `sky.toml` declaring `target = "rust"` and the `[rust.dependencies]`
+  uuid entry.
+- A bash script that runs `sky add uuid --target rust && sky build
+  --target rust && ./sky-out/Rust/target/debug/sky-app` and checks the
+  output matches the UUID regex.
+
+#### Step 3 — Q3 (Sky.Core.List runtime functions)
+
+3.1. Implement the 10 missing list functions in
+`runtime-rust/src/sky_runtime/core.rs` (or extract to a new `list.rs`
+if the file is growing too large).
+
+3.2. Wire `kernelToRust` arms in
+`src/Sky/Generate/Rust/Builder.hs:kernelToRust`. Pattern:
+```haskell
+("List", "foldl") -> "list_foldl"
+("Sky.Core.List", "foldl") -> "list_foldl"
+-- repeat for foldr, range, indexedMap, concatMap, zip, filter,
+-- member, any, all
+```
+
+3.3. **Regression test.** Add a Sky test exercising each function via
+Prelude exposure (NO `import Sky.Core.List` line).
+
+#### Step 4 — Spurious `.clone()` removal (optional, post-Q1-Q3)
+
+4.1. Add an `ecCopyVars :: Set String` field to `EmitCtx`. Populate
+during `defToRustItem` from `params` whose Sky type maps to a Rust
+`Copy` type (`Int`, `Float`, `Bool`, `Char`).
+
+4.2. In `patternToRustParam` / `argToRustString`, skip `.clone()` when
+the local is in `ecCopyVars`.
+
+4.3. Verify by reading the generated `n * n` for the Q1 reproducer —
+should be `(n * n)` not `(n.clone() * n.clone())`.
+
+### Verification
+
+Final acceptance — run all of these after Steps 1-3 land:
+
+```bash
+# Runtime sanity
+(cd runtime-rust && cargo check && \
+ cargo clippy --all-targets -- -D warnings && \
+ cargo test)
+
+# Compiler sanity
+cabal build exe:sky
+cabal test
+
+# The six existing green examples must remain green
+for ex in 01-hello-world 04-local-pkg 07-todo-cli 14-task-demo simple test_pkg; do
+    (cd examples/$ex && rm -rf sky-out .skycache .skydeps \
+     && ../../sky-out/sky build src/Main.sky --target rust \
+     && cargo build --manifest-path sky-out/Rust/Cargo.toml) || echo "FAIL: $ex"
+done
+
+# Q1, Q2, Q3 reproducers
+for q in q1 q2 q3; do
+    (cd /tmp/sky-$q && rm -rf sky-out .skycache \
+     && /home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky --target rust \
+     && cargo build --manifest-path sky-out/Rust/Cargo.toml) || echo "FAIL: $q"
+done
+
+# Sanity: no Go artifacts polluting Rust builds
+for ex in 01-hello-world; do
+    for f in main.go go.mod go.sum rt; do
+        [ ! -e examples/$ex/sky-out/$f ] || echo "FAIL: Go artifact $f in $ex"
+    done
+done
+
+# Sanity: P3-renamed-not-fixed has been fixed
+grep -nE '\-> "\(\)"' src/Sky/Generate/Rust/Builder.hs | \
+    grep -iE 'polymorphic|TVar|tvars' && \
+    echo "WARNING: silent () fallback for polymorphic returns may still exist"
+```
 
 ### What's sure vs unsure
 
-**Sure (HIGH, verified end-to-end):** A0, A1, A2, B1, C1, C2, all of D.
+**Sure (HIGH, verified by `cargo build` + reading source):**
+- Q1: polymorphic Result/Maybe/ADT returns emit no return type. Repro: `/tmp/sky-q1/src/Main.sky` (mkOk).
+- Q2: `sky add uuid --target rust` produces 0-byte `uuid_bindings.rs`. Repro: `/tmp/sky-q2`.
 
-**Reasonably sure (MEDIUM):** A3 (bug confirmed; exact patch shape needs
-inspection of `substVar`'s enclosing destructuring), B2 (bug confirmed;
-needs `Task.map` arg-order verification in `sky-stdlib/`), C3 (depends on
-`Can.Def` constructor count).
+**Reasonably sure (MEDIUM):**
+- Q3: Sky.Core.List Prelude routing. Documented prior; not re-verified
+  in this audit but the codepath in `Builder.hs:kernelToRust` plainly
+  lacks the arms.
 
-**Unsure (LOW):** E (depends on Sky-side signature of `Json.Encode.encode`).
+**Unsure (LOW):**
+- Whether the inspector submodule traversal (claimed in `2c480e15`)
+  actually works for crates with simple `pub use` re-exports. Step 2.3
+  is the verification.
 
-**Out of scope (worth follow-up but not in this PR):**
-- Whether the Go runtime's panic-recovery wrappers (`runWithRecover`) need
-  a Rust equivalent. The Go side wraps every FFI call; the Rust side
-  doesn't appear to.
-- Whether `sqlx` pool cloning in `db_migrate_apply` (commit 5fd4ea91) leaks
-  connections under transaction error.
+### Out of scope (tracked but not in this PR)
 
-### Action plan
-
-Land as one PR. Each step must end with `cargo check` + `cargo clippy
---all-targets -- -D warnings` clean on the runtime and `cabal build
-exe:sky` clean on the compiler.
-
-**Order matters:** Step 1 (calling convention) must land before Step 2
-(missing kernels), because the §A2 sketches are tupled and assume the
-convention is in place. Within Step 1, Part 1 (runtime rewrite) must land
-before Part 2 (codegen pipe rewrite) — otherwise the runtime accepts
-nothing.
-
-1. ✅ **Unify calling convention: tupled (§A0).**
-
-   **1a. Runtime (`runtime-rust/src/sky_runtime/task.rs`).** Rewrote
-   `task_map`, `task_and_then`, `task_on_error`, `task_map_error`,
-   `task_and_then_result` to tupled signatures. Dropped the unused
-   `E: Clone` bound on `task_on_error`. All now accept `(f, task)` as
-   separate parameters.
-
-   **1b. Codegen (`src/Sky/Generate/Rust/Builder.hs:919-920`).** Rewrote
-   the `|>` and `<|` arms to fold the piped argument into the callee's
-   `Can.Call` argument list when the callee is a `Can.Call`; fallback
-   preserves the existing `b(a)` / `a(b)` form for non-Call callees.
-
-   *Verification:* `cargo check` after 1a; `cabal build exe:sky` after 1b.
-   Chained pipes (`task |> Task.map f |> Task.andThen g`) fold inside-out
-   to `task_and_then(g, task_map(f, task))` — verified by codegen output.
-
-2. ✅ **Runtime: add 7 missing kernels (§A2).** Added `task_map_error`,
-   `task_lazy`, `task_from_result`, `task_and_then_result` to `task.rs`;
-   `log_error`, `log_debug_with`, `log_warn_with` to `log.rs`.
-
-3. ✅ **Runtime: kill panic paths (§B1).** `block_on` and `task_parallel`
-   now propagate errors via `SkyResult::Err` instead of `unwrap`/`expect`.
-
-4. ✅ **Builder: delete shadowed Log.println arms (§A1).** Lines 1579-1580
-   removed; only `("Log", "println") -> "log_info"` remains at 1687-88.
-
-5. ✅ **Builder: fix `substVar` span panic (§A3).** Changed `error "substVar span"`
-   to use the outer `Ann.At` span (`e`) in the fallback arms.
-
-6. ✅ **Builder: tighten `taskExprInnerType` (§B2).** `onError` and `mapError`
-   now recurse into the task argument (args[1]) to derive the success type.
-   `map`/`andThen` remain stubs (`"String"`) because the result success type
-   is the closure's return type, not derivable statically.
-
-7. ✅ **Builder: dead-code cleanup (§C).** `span` already absent from imports;
-   `goDef` catchall tightened to `error "unsupported Can.Def variant"`.
-   Duplicate `listSig` verified — only one `filterMap` entry.
-
-8. ✅ **Runtime: dead-code cleanup (§D).** Deleted `sky_int_to_string`,
-   `sky_string_to_int`, `sky_float_to_string`, `sky_list_drop`,
-   `json_dec_map2`, `db_get_field_or_null`, and `use std::fmt`.
-
-9. ✅ **JSON encode error policy (§E).** Confirmed pure (`encode : Int ->
-   Value -> String`); added clarifying comment that `unwrap_or_default()` is
-   safe because `serde_json::to_string` never fails on a well-constructed Value.
-
-10. ✅ **Regression test — calling convention + missing kernels.** Added
-    `runtime-rust/tests/missing_kernels/src/Main.sky` exercising direct call,
-    piped, and chained pipe forms. Builds and runs successfully.
-
-    ```elm
-    module Test exposing (main)
-    import Sky.Core.Prelude exposing (..)
-    import Sky.Core.Task as Task
-    import Std.Log as Log
-
-    main =
-        let
-            t1 = Task.fromResult (Ok 42)
-            -- Direct call form (post-§A0 must work):
-            t2 = Task.mapError (\e -> e) t1
-            -- Piped form (must produce identical output):
-            t3 = t1 |> Task.mapError (\e -> e)
-            -- Chained pipes (folds inside-out):
-            t4 = t1 |> Task.map (\x -> x + 1) |> Task.andThen (\x -> Task.succeed (x * 2))
-            t5 = Task.lazy (\_ -> Task.succeed 1)
-            t6 = Task.andThenResult (\x -> Ok (x + 1)) t1
-        in
-        Task.run t4
-            |> Result.withDefault 0
-            |> String.fromInt
-            |> (\s ->
-                 let _ = Log.error s in
-                 let _ = Log.debugWith "dbg"  [ "k", "v" ] in
-                 let _ = Log.warnWith  "warn" [ "k", "v" ] in
-                 Task.succeed ())
-            |> Task.run
-    ```
-
-### Final verification
-
-```bash
-# Runtime
-cd runtime-rust && cargo check 2>&1 | tail -20
-cd runtime-rust && cargo clippy --all-targets -- -D warnings 2>&1 | tail -20
-cd runtime-rust && cargo test 2>&1 | tail -20
-
-# Compiler
-cabal build exe:sky 2>&1 | tail -10
-cabal test 2>&1 | tail -30
-
-# All six green Rust examples — clean rebuild from scratch
-for ex in 01-hello-world 04-local-pkg 07-todo-cli 14-task-demo; do
-    (cd examples/$ex && rm -rf sky-out .skycache .skydeps \
-        && ../../sky-out/sky build src/Main.sky --target rust) || echo "FAIL: $ex"
-
-
-
-
+- **Sky.Live / Sky.Tui ports** to the Rust runtime. Significant work
+  (~4-8 weeks); land after Q1-Q3.
+- **Std.Auth + complete Std.Db CRUD** for Rust target. Mirror Go
+  runtime's surface; ~2-3 weeks each.
+- **WASM target.** Cross-compile runtime and generated code to
+  `wasm32-unknown-unknown`. Requires runtime feature gating to strip
+  `tokio` / `sqlx` from WASM builds.
+- **Documentation reorg.** Move per-audit sections out of this README
+  into `docs/rust/audit-log.md`; keep README as a steady-state user
+  doc with links into the audit archive.
 

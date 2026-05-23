@@ -121,6 +121,40 @@ pub fn string_to_int(s: String) -> SkyMaybe<i64> {
 pub fn string_from_float(f: f64) -> String { format!("{}", f) }
 pub fn string_split(sep: String, s: String) -> Vec<String> { s.split(&sep).map(|x| x.to_string()).collect() }
 
+// List operations (Q3)
+pub fn list_foldl<T0, T1>(f: impl Fn(T1, T0) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
+    let mut acc = init;
+    for item in list { acc = f(acc, item); }
+    acc
+}
+pub fn list_foldr<T0: Clone, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
+    let mut acc = init;
+    for item in list.into_iter().rev() { acc = f(item.clone(), acc); }
+    acc
+}
+pub fn list_range(lo: i64, hi: i64) -> Vec<i64> { (lo..hi).collect() }
+pub fn list_indexed_map<T0, T1>(f: impl Fn(i64, T0) -> T1 + Clone, list: Vec<T0>) -> Vec<T1> {
+    list.into_iter().enumerate().map(|(i, x)| f(i as i64, x)).collect()
+}
+pub fn list_concat_map<T0, T1>(f: impl Fn(T0) -> Vec<T1> + Clone, list: Vec<T0>) -> Vec<T1> {
+    list.into_iter().flat_map(f).collect()
+}
+pub fn list_zip<T0, T1>(a: Vec<T0>, b: Vec<T1>) -> Vec<(T0, T1)> {
+    a.into_iter().zip(b).collect()
+}
+pub fn list_filter<T0>(f: impl Fn(&T0) -> bool + Clone, list: Vec<T0>) -> Vec<T0> {
+    list.into_iter().filter(|x| f(x)).collect()
+}
+pub fn list_member<T0: PartialEq>(x: T0, list: Vec<T0>) -> bool {
+    list.contains(&x)
+}
+pub fn list_any<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
+    list.into_iter().any(|x| f(x))
+}
+pub fn list_all<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
+    list.into_iter().all(|x| f(x))
+}
+
 pub fn result_with_default<E, A>(def: A, r: SkyResult<E, A>) -> A {
     match r { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }
 }
