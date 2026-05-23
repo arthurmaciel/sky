@@ -173,6 +173,7 @@ data EmitCtx = EmitCtx
     { ecRecordMap :: Map.Map String String  -- field-key -> struct name
     , ecSolvedTypes :: Map.Map String Can.Type  -- function name -> inferred type
     , ecCloneVars :: Set.Set String  -- vars that need .clone() at every use site
+    , ecCopyVars  :: Set.Set String  -- vars whose type is Rust Copy (i64, f64, bool, ...)
     , ecPipeInnerType :: Maybe String  -- inner type of piped Task<A>, set by |>
     , ecUsesTaskRun :: Bool  -- user calls Task.run → main returns ()
     , ecZeroArgDefs :: Set.Set (String, String)  -- (modPrefix, name) for zero-arg definitions
@@ -565,7 +566,16 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         -- cloned at each function-call argument site (ownership safety).
         multiBody = collectVarLocalsMulti body
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
-        ctx' = ctx { ecCloneVars = Set.fromList multiVars }
+        -- Step 4: skip .clone() for params whose type is Rust Copy (i64, f64, bool, ...)
+        paramNames = [ n | Ann.At _ (Can.PVar n) <- params ]
+        paramTys = case Map.lookup name (ecSolvedTypes ctx) of
+            Just ty -> extractParamTypes ty
+            Nothing -> []
+        copyVars = Set.fromList
+            [ n | (n, t) <- zip paramNames paramTys
+            , not (hasTypeVars t) && isCanTypeCopy t ]
+        ctx' = ctx { ecCloneVars = Set.fromList multiVars
+                   , ecCopyVars = copyVars }
         bodyStr = exprToRustString ctx' body
         -- S6: When the function returns SkyTask<T> but the body tail is a
         -- bare value (not already a Task expression), wrap in task_succeed({...}).
@@ -587,7 +597,7 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
                   else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug") tvarNames) ++ ">"
         multiBody = collectVarLocalsMulti body
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
-        ctx' = ctx { ecCloneVars = Set.fromList multiVars }
+        ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx }
     in RustFunction rustName genDecl params ret (exprToRustString ctx' body)
 defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
     let vars = intercalate "_" (patBindingVars pat)
@@ -650,6 +660,18 @@ inferCtorReturnType recMap solved (Ann.At _ expr) = case expr of
         Just ty -> typeToRustString recMap ty
         Nothing -> ""
     _ -> ""
+
+-- | Is a Can.Type a Rust `Copy` type?  When true, the codegen should
+-- skip `.clone()` even if the variable is used ≥ 2 times, because
+-- `Copy` types are cheap to copy and Rust's borrow checker doesn't
+-- require explicit `.clone()` for them.
+isCanTypeCopy :: Can.Type -> Bool
+isCanTypeCopy Can.TUnit                          = True
+isCanTypeCopy (Can.TType _ "Int" [])             = True
+isCanTypeCopy (Can.TType _ "Float" [])           = True
+isCanTypeCopy (Can.TType _ "Bool" [])            = True
+isCanTypeCopy (Can.TType _ "Char" [])            = True
+isCanTypeCopy _                                   = False
 
 -- | Walk through let chains to find the tail expression.
 tailExpr :: Can.Expr -> Can.Expr
@@ -817,7 +839,7 @@ substVar ctx name inline = go
   where
     go e@(Ann.At _ expr) = case expr of
         Can.VarLocal n | n == name -> inline
-        Can.VarLocal n -> rustSafeIdent n ++ if n `Set.member` ecCloneVars ctx then ".clone()" else ""
+        Can.VarLocal n -> rustSafeIdent n ++ if n `Set.member` ecCloneVars ctx && not (n `Set.member` ecCopyVars ctx) then ".clone()" else ""
         Can.VarTopLevel mod n ->
             let modName = ModuleName._name mod
                 modPrefix = map (\c -> if c == '.' then '_' else c) modName
@@ -855,7 +877,7 @@ substVar ctx name inline = go
                              Ann.At _ (Can.VarLocal n2) | n2 == name -> inline
                              Ann.At _ (Can.VarLocal n2) | noClone -> rustSafeIdent n2
                              Ann.At _ (Can.VarLocal n2) ->
-                                 (let needClone = Set.member n2 (ecCloneVars ctx)
+                                 (let needClone = Set.member n2 (ecCloneVars ctx) && not (Set.member n2 (ecCopyVars ctx))
                                   in if needClone then rustSafeIdent n2 ++ ".clone()" else rustSafeIdent n2)
                              _ -> go a) args
                     in fs ++ "(" ++ intercalate ", " as ++ ")"
@@ -985,7 +1007,7 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
             clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
             innerCounts = collectVarLocalsMulti body
             innerMulti = [ v | (v, c) <- Map.toList innerCounts, c >= 2 ]
-            ctx' = ctx { ecCloneVars = Set.fromList innerMulti }
+            ctx' = ctx { ecCloneVars = Set.fromList innerMulti, ecCopyVars = ecCopyVars ctx }
             annot = case ecPipeInnerType ctx of
                 Just t | length ps == 1 -> ": " ++ t
                 _ -> ""
@@ -1004,6 +1026,7 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
                 else "{ " ++ clones ++ closure ++ " }"
     Can.VarLocal n ->
         let needsClone = (not noCloneFn) && (n `Set.member` ecCloneVars ctx)
+                         && not (n `Set.member` ecCopyVars ctx)
         in if needsClone then rustSafeIdent n ++ ".clone()" else rustSafeIdent n
     _ -> exprToRustString ctx (Ann.At Ann.one a)
 
@@ -1068,7 +1091,7 @@ emitPinnedTask ctx _ other = exprToRustString ctx other  -- fallback: no pin
 
 exprToRustInner :: EmitCtx -> Can.Expr_ -> String
 exprToRustInner ctx e = case e of
-    Can.VarLocal name -> rustSafeIdent name ++ if name `Set.member` ecCloneVars ctx then ".clone()" else ""
+    Can.VarLocal name -> rustSafeIdent name ++ if name `Set.member` ecCloneVars ctx && not (name `Set.member` ecCopyVars ctx) then ".clone()" else ""
     Can.VarTopLevel mod name ->
         let modName = ModuleName._name mod
             modPrefix = map (\c -> if c == '.' then '_' else c) modName
@@ -1117,7 +1140,7 @@ exprToRustInner ctx e = case e of
     Can.Lambda params body -> 
         let counts = collectVarLocalsMulti body
             innerMulti = [ v | (v, c) <- Map.toList counts, c >= 2 ]
-            ctx' = ctx { ecCloneVars = Set.fromList innerMulti }
+            ctx' = ctx { ecCloneVars = Set.fromList innerMulti, ecCopyVars = ecCopyVars ctx }
         in "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ exprToRustString ctx' body ++ " }"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
@@ -1140,7 +1163,7 @@ exprToRustInner ctx e = case e of
                     Ann.At _ (Can.Lambda params body) ->
                         let counts = collectVarLocalsMulti body
                             innerMulti = [v | (v, c) <- Map.toList counts, c >= 2]
-                            ctx' = ctx { ecCloneVars = Set.fromList innerMulti }
+                            ctx' = ctx { ecCloneVars = Set.fromList innerMulti, ecCopyVars = ecCopyVars ctx }
                             psStr = intercalate ", " (map patternToRustParam params)
                         in calleeName ++ "(curry" ++ show n ++ "(|" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " }))"
                     _ ->
@@ -1526,7 +1549,7 @@ buildProgram mods solvedTypes kernelAliases =
             , (name, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecKernelAliases = kernelAliases }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecKernelAliases = kernelAliases }
         usage = analyzeKernelUsage mods
         zeroArgDefs = collectZeroArgDefs mods
         noCloneVars = Set.empty
