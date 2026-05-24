@@ -1451,7 +1451,10 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                 "sqlite" -> "sqlite:" ++ Toml._dbPath config ++ "?mode=rwc"
                                 _        -> Toml._dbPath config
                             dbDriver = if null (Toml._dbDriver config) then "sqlite" else Toml._dbDriver config
-                            ffiSlugs = [ map (\c -> if Char.isAlphaNum c then c else '_') (fst dep) ++ "_bindings"
+                            -- Derive a Rust-valid module name from the dep name.
+                        -- Replaces non-alphanumeric (including hyphens) with _.
+                        let depToIdent = map (\c -> if Char.isAlphaNum c then c else '_')
+                            ffiSlugs = [ depToIdent (fst dep) ++ "_bindings"
                                        | dep <- Toml._rustDeps config ]
                         rawAliases <- readIORef globalKernelAlias
                         let kernelAliases = Map.mapKeys (\(cn, fn) -> (ModuleName._name cn, fn)) rawAliases
@@ -1505,12 +1508,15 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDeps)
                         putStrLn $ "   Wrote " ++ cargoTomlPath
                         -- Copy Rust FFI binding files into sky-out/Rust/src/
+                        -- Slugs must match what generateBindings writes (via slugify).
                         mapM_ (\(depName, _) -> do
-                            let slug = map (\c -> if Char.isAlphaNum c then c else '_') depName
-                                srcPath' = ".skycache/rust" </> slug ++ "_bindings.rs"
+                            let fileSlug = map (\c -> if c `elem` ("./" :: String) then '_' else c) depName
+                                modSlug  = map (\c -> if Char.isAlphaNum c then c else '_') depName
+                                srcPath' = ".skycache/rust" </> fileSlug ++ "_bindings.rs"
+                                dstPath' = srcDir </> modSlug ++ "_bindings.rs"
                             exists <- doesFileExist srcPath'
                             when exists $ do
-                                copyFile srcPath' (srcDir </> slug ++ "_bindings.rs")
+                                copyFile srcPath' dstPath'
                                 putStrLn $ "   Copied " ++ srcPath'
                             ) (Toml._rustDeps config)
                         let cacheDir = ".skycache"

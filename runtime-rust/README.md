@@ -401,8 +401,8 @@ End-to-end verified against HEAD (post-fix):
 | U1: dual-target slug safety | Go+Rust same project: both `.kernel.json` files coexist | Go at `.skycache/ffi/uuid.kernel.json`, Rust at `.skycache/ffi/rust/uuid.kernel.json` | ✅ |
 | T6: CLI hint `-- slug` leak | `sky add uuid --target rust` prints `... .skycache/ffi/rust/uuid.skyi` | slug is computed from `_pkgName info` | ✅ |
 | T7: Rust `.skyi` format | `module Rust.Uuid exposing (..)` with function signatures | `emitSkyi TargetRust` emits proper Sky-style module | ✅ |
-| T3: Rust type sanitization | tuples→`String`, arrays→`Bytes`, `impl Trait`/`Self`→`String` | `type_str_to_sky` sanitizes before Path-types fallback | ✅ |
-| T5: const-generic array | `syn::Type::Array` handled before string fallback | `type_to_sky` has early `Type::Array` case | ✅ |
+| T3: Rust type sanitization | tuples→`String`, arrays→`Bytes`, `impl Trait`/`Self`→`String` | `type_str_to_sky` sanitizes before Path-types fallback | ⚠️ source-correct, deployment-pending — see [V2](#v2--inspector-source-edits-never-reach-the-bundled-binary-high) |
+| T5: const-generic array | `syn::Type::Array` handled before string fallback | `type_to_sky` has early `Type::Array` case | ⚠️ source-correct, deployment-pending — see [V2](#v2--inspector-source-edits-never-reach-the-bundled-binary-high) |
 | Step 0: `sky add uuid --target rust` | persists `uuid = "version"` in `[rust.dependencies]` | `appendRustDependency` writes correct TOML | ✅ |
 | Step 0: `sky add URL --target rust --rev X` | persists inline table in `[rust.dependencies]` | `appendRustGitDep` writes `crate = { git = "...", rev = "X" }` | ✅ |
 | Step 0: `emitCargoToml` git deps | `uuid = { git = "https://...", rev = "..." }` | `RustGitDep` emits inline table | ✅ |
@@ -1170,6 +1170,282 @@ grep -qE '^\s*uuid\s*=\s*\{\s*git\s*=' sky.toml \
   has its own assumptions.
 - WASM target — Phase 5.
 
+## V-priorities (2026-05-24) — bugs revealed by end-to-end verification of commit `997b29b1`
+
+> **Audience: AI fix-up agent.** After the T/U + Step 0 commit landed,
+> an end-to-end run against a freshly-rebuilt `sky-out/sky` exposed
+> three real bugs the agent's source-only review missed, plus one
+> build-pipeline fragility that hid one of them. **All four must be
+> fixed before any further "Rust FFI works" claim.**
+>
+> Cross-backend rules (top of this file, §"Cross-backend rules") apply
+> in full. In particular: V4 enforces rule 5 (Go-side byte-identity)
+> with a checked-in fixture; rules 1–4 still hold byte-for-byte on
+> `.skycache/ffi/` root.
+
+### V1. `sky add <URL> --target rust` silently swallows the dep (CRITICAL)
+
+**Reproducer (fails today against HEAD `997b29b1`):**
+
+```bash
+rm -rf /tmp/v1 && mkdir /tmp/v1 && cd /tmp/v1
+<SKY> init t && cd t
+<SKY> add https://github.com/uuid-rs/uuid --target rust
+# Output:
+#   Adding https://github.com/uuid-rs/uuid...
+#   sky: sky.toml: withFile: resource busy (file is locked)
+grep rust sky.toml          # ← nothing was written
+```
+
+**Root cause — lazy `readFile` + `--target` short-circuit.** In
+`app/Main.hs:763-770`:
+
+```haskell
+config <- if hasToml
+    then Toml.parseSkyToml <$> readFile "sky.toml"   -- lazy IO
+    else return Toml.defaultConfig
+let target = case mTarget of
+    Just t  -> parseTarget t                         -- _target field
+                                                     -- NEVER accessed
+                                                     -- → thunk held
+    Nothing -> Toml._target config
+```
+
+When `--target rust` is passed, `Toml._target config` is never
+evaluated. The lazy thunk holding `sky.toml`'s read handle stays
+live. `appendRustGitDep` then opens `sky.toml` for write → OS lock
+conflict → `"resource busy (file is locked)"`. The dep is silently
+dropped.
+
+The bare-name path (`sky add uuid --target rust`) accidentally
+sidesteps this because the intervening inspector subprocess
+(~600 ms) gives GHC time to GC the thunk; the URL branch returns
+synchronously so the thunk is still live when the write fires.
+
+**Fix — strict read.**
+
+```haskell
+config <- if hasToml
+    then do
+        content <- readFile "sky.toml"
+        length content `seq` return (Toml.parseSkyToml content)
+        -- or with base >= 4.15: readFile' "sky.toml"
+        -- or: BS.readFile "sky.toml" >>= …
+    else return Toml.defaultConfig
+```
+
+The pattern matches existing `appendRustGitDep` / `appendRustDependency`
+which already use `length content `seq` return ()` for the same
+reason.
+
+**Acceptance.** The reproducer above must end with the line
+`grep -E '^\s*"?uuid"?\s*=' sky.toml` printing the git-dep line and
+zero `withFile: resource busy` output.
+
+### V2. Inspector source edits never reach the bundled binary (HIGH)
+
+The agent's T3 (type sanitisation) and T5 (const-generic array)
+patches to `tools/sky-ffi-inspect-rs/src/main.rs` are correctly
+implemented — but **they never reach end-users**. Real `sky add uuid
+--target rust` against HEAD produces a `kernel.json` where **27 of 48
+functions** still carry leaky Rust syntax:
+
+```
+$ python3 -c "
+import json
+d = json.load(open('.skycache/ffi/rust/uuid.kernel.json'))
+bad = [f['name'] for f in d['functions']
+       if any(x in f.get('skyType','')
+              for x in ['Self','u128','i128','impl ','LENGTH'])]
+print('Functions with leaky Rust syntax:', len(bad), '/', len(d['functions']))
+"
+Functions with leaky Rust syntax: 27 / 48
+```
+
+Categories of leakage (current output):
+
+| Pattern | Count | Examples |
+|---|---|---|
+| `Self`            | 9 | `from_uuid : Uuid -> Result Error Self` |
+| `u128`            | 2 | `as_u128 : Uuid -> Result Error u128` |
+| `impl <Trait>`    | 2 | `now : impl ClockSequence -> Result Error Self` |
+| `(T, U, …)` tuple | 6 | `to_gregorian : Timestamp -> Result Error (u64,u16)` |
+| `[u8; N]` array   | 8 | `as_bytes : Uuid -> Result Error ([u8 ; 16])` |
+| `LENGTH]` parse   | 1 | `encode_buffer : () -> Result Error LENGTH]` |
+
+**Root cause — TH embeds a pre-built binary, never auto-rebuilds.**
+`src/Sky/Build/EmbeddedInspectorRust.hs:47-65`:
+
+```haskell
+if binExists                 -- target/release/sky-ffi-inspect-rs exists?
+    then [| [("sky-ffi-inspect-rs", $(return bsExp))] |]
+                              -- ↑ embed the PRE-BUILT binary
+    else EmbedDir.embedDirFiltered "tools/sky-ffi-inspect-rs" ["target"]
+                              -- ↑ embed SOURCE (registered as deps via qAddDependentFile)
+```
+
+The first branch fires whenever the agent has previously run
+`cargo build --release` in `tools/sky-ffi-inspect-rs/`. After that,
+**no edit to the source tree ever invalidates the TH splice** —
+`qAddDependentFile` is called on the binary, not the sources, so
+later `src/main.rs` changes don't even recompile the
+`EmbeddedInspectorRust` Haskell module. The agent's T3/T5 fixes sit
+in the source tree, are not in the pre-built binary, and the sky
+binary embeds the stale pre-built binary.
+
+This is the root cause of why T3/T5 read "✅" in the verification
+snapshot at the code level but fail in practice.
+
+**Fix — two-line guard in the TH splice.**
+
+```haskell
+embeddedInspectorRustBytes = $(do
+    let binaryPath = "tools/sky-ffi-inspect-rs/target/release/sky-ffi-inspect-rs"
+    binExists <- runIO $ doesFileExist binaryPath
+    -- NEW: if any src/*.rs is newer than the pre-built binary,
+    -- fall through to the source-tree embed so qAddDependentFile
+    -- registers the .rs files as TH dependencies.
+    binFresh <- if binExists
+        then runIO $ do
+            binMtime <- getModificationTime binaryPath
+            srcs <- listDirectoryRecursive "tools/sky-ffi-inspect-rs/src"
+            mtimes <- mapM getModificationTime srcs
+            return (all (<= binMtime) mtimes)
+        else return False
+    if binFresh
+        then do
+            qAddDependentFile binaryPath
+            ...embedFile...
+        else do
+            -- source-tree path; qAddDependentFile fires per file
+            EmbedDir.embedDirFiltered "tools/sky-ffi-inspect-rs" ["target"]
+    )
+```
+
+Side benefit: contributors who edit the inspector no longer have to
+remember to wipe `target/` first. Release-tarball builds that ship a
+pre-built binary still work — the binary's mtime is post-source by
+construction.
+
+**Acceptance.**
+
+```bash
+# 1. Touch the inspector source, rebuild sky
+touch tools/sky-ffi-inspect-rs/src/main.rs
+cabal install --overwrite-policy=always --installdir=./sky-out \
+    --install-method=copy exe:sky
+# `Sky.Build.EmbeddedInspectorRust` must recompile — visible in
+# the cabal output.
+
+# 2. End-to-end verify leaky-syntax count is 0
+rm -rf /tmp/v2 && mkdir /tmp/v2 && cd /tmp/v2
+<SKY> init t && cd t && echo 'target = "rust"' >> sky.toml
+<SKY> add uuid
+python3 -c "
+import json
+d = json.load(open('.skycache/ffi/rust/uuid.kernel.json'))
+bad = [f['name'] for f in d['functions']
+       if any(x in f.get('skyType','')
+              for x in ['Self','u128','i128','impl ','LENGTH'])]
+assert len(bad) == 0, f'still leaky: {bad}'
+print('V2 passes — 0 leaky signatures across', len(d['functions']), 'fns')
+"
+```
+
+### V3. `cabal install` fails cryptically when `target/release/` is absent (MEDIUM)
+
+**Reproducer.**
+
+```bash
+rm -rf tools/sky-ffi-inspect-rs/target
+cabal install --overwrite-policy=always --installdir=./sky-out \
+    --install-method=copy exe:sky
+# Result:
+#   src/Sky/Build/EmbeddedInspectorRust.hs:47:30: error: [GHC-87897]
+#     • Exception when trying to run compile-time code:
+#         tools/sky-ffi-inspect-rs:
+#         getDirectoryContents:openDirStream: does not exist
+```
+
+`cabal build` succeeds (uses the in-tree files); `cabal install`
+fails because its sdist phase strips files not declared in
+`extra-source-files`. The Rust inspector's source tree is not
+declared:
+
+```
+sky-compiler.cabal:43-45  (Go inspector — listed)
+    tools/sky-ffi-inspect/main.go
+    tools/sky-ffi-inspect/go.mod
+    tools/sky-ffi-inspect/go.sum
+    -- ↓ Rust inspector NOT listed — invisible to sdist
+```
+
+**Fix.** Extend `extra-source-files`:
+
+```
+    tools/sky-ffi-inspect-rs/Cargo.toml
+    tools/sky-ffi-inspect-rs/Cargo.lock
+    tools/sky-ffi-inspect-rs/src/main.rs
+    tools/sky-ffi-inspect-rs/src/*.rs
+```
+
+(Listing `Cargo.lock` is required — `cargo build` needs it for
+reproducible inspector builds in the user's `~/.cache/sky/`.)
+
+**Acceptance.** The V3 reproducer above must succeed end-to-end after
+the change.
+
+### V4. No regression test for Go-side `.kernel.json` byte-identity (MEDIUM)
+
+The Cross-backend rules header (top of this file) declares:
+
+> **Rule 5.** Never change shared compiler code in ways that could
+> break Go compilation in any fork.
+
+There is currently **no test** asserting that `generateBindings
+TargetGo` produces bit-identical `.kernel.json` output to a known
+baseline. A future agent that "tidies" `FfiGen.hs` — or that fixes
+a Rust-side issue by editing a shared helper — could silently change
+the Go-side shape and break every downstream user.
+
+**Fix.**
+
+1. Add a checked-in fixture
+   `test/fixtures/go-kernel-json/uuid.golden.json` capturing the
+   current output of `<SKY> add uuid --target go` for the
+   `github.com/google/uuid` package.
+2. Add a Cabal-test spec
+   `test/Sky/Build/FfiGenGoKernelJsonSpec.hs` that loads a fixed
+   `PkgInfo`, calls `FfiGen.generateBindings TargetGo`, reads the
+   resulting `.skycache/ffi/uuid.kernel.json`, and `assertEqual`s the
+   bytes against the fixture.
+3. Wire into `cabal test`'s default sweep.
+
+**Acceptance.** `cabal test FfiGenGoKernelJsonSpec` passes today;
+fails loudly the moment anyone changes Go-side `.kernel.json` shape.
+
+### Suggested commit order
+
+| Step | Commit message |
+|---|---|
+| V1 | `fix(rust): force strict sky.toml read in addHandler — file-handle leak blocked URL git-dep persist` |
+| V2 | `fix(rust): refresh inspector embed when source > binary mtime — T3/T5 sanitisation now reaches the bundled binary` |
+| V3 | `fix(rust): include sky-ffi-inspect-rs in extra-source-files — fix cabal install without pre-built target/` |
+| V4 | `test(rust): pin Go .kernel.json byte-shape — Cross-backend rule 5 enforcement` |
+| Cleanup | `docs(rust): mark T3/T5/V1-V4 ✅ in verification snapshot; archive V-priorities` |
+
+After all five commits, drop the ⚠️ marks on T3/T5 in the verification
+snapshot (return them to ✅) and re-archive this V-priorities section.
+
+### Out of scope for V-priorities
+
+- Phase 1 onwards of the strategic roadmap (Sky.Live / Sky.Tui /
+  Std.Auth ports / WASM). Re-plan once V1–V4 are closed.
+- Changes to Go-side codegen, `runtime-go/`, or `src/Sky/Generate/Go/`
+  — Cross-backend rule 4.
+- Refactors that merge `TargetGo`/`TargetRust` code paths into a single
+  branch — Cross-backend rule 5 keeps them separate by default.
+
 ## R-priorities (2026-05-23 evening) — ✅ ALL FIXED (archival)
 
 R1–R3 and the auxiliary cleanup are resolved in commits `3f5f2d84`,
@@ -1542,6 +1818,16 @@ EOF
   strategic plan.
 
 ## Next steps
+
+### Immediate (V-priorities)
+
+- **Land V1–V4** in the order documented in *V-priorities (2026-05-24)*
+  below.  Required before any further "Rust FFI works" claim — V2 in
+  particular is load-bearing for T3/T5/T6/T7's deployed state.
+- **Add Go-side byte-identity regression test** (V4) — keeps the
+  Go-side `.kernel.json` shape pinned against
+  `test/fixtures/go-kernel-json/*.golden.json`.  Cross-backend rule 5
+  is currently aspirational; V4 makes it machine-checked.
 
 ### Short-term
 

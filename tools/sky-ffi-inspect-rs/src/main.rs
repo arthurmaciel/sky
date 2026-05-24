@@ -553,7 +553,9 @@ fn classify_effect(
         _ => String::new(),
     };
 
-    if ret_str.starts_with("Result ") || ret_str.starts_with("Result<") {
+    if ret_str.starts_with("Result ") || ret_str.starts_with("Result<")
+        || ret_str.contains("::Result ") || ret_str.contains("::Result<")
+    {
         return "fallible".into();
     }
 

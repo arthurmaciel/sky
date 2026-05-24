@@ -1,0 +1,6 @@
+[project]
+name = "num-cpus-example"
+target = "rust"
+
+["rust.dependencies"]
+"num_cpus" = "1.17.0"

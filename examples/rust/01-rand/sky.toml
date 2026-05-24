@@ -1,0 +1,6 @@
+[project]
+name = "rand-example"
+target = "rust"
+
+["rust.dependencies"]
+"rand" = "0.10.1"
