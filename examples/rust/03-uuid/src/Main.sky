@@ -1,9 +1,0 @@
-module Main exposing (main)
-import Sky.Core.Prelude exposing (..)
-import Std.Log exposing (println)
-import Rust.Num_cpus as NC
-
-main =
-    case NC.get_physical () of
-        Ok n  -> println (String.fromInt n)
-        Err _ -> println "Error"

@@ -43,6 +43,12 @@ extra-source-files:
     tools/sky-ffi-inspect/main.go
     tools/sky-ffi-inspect/go.mod
     tools/sky-ffi-inspect/go.sum
+    -- Rust FFI inspector — same sdist requirement as the Go inspector.
+    -- Cargo.lock is included for reproducible cargo builds in the user's
+    -- cache directory (~/.cache/sky/tools/).
+    tools/sky-ffi-inspect-rs/Cargo.toml
+    tools/sky-ffi-inspect-rs/Cargo.lock
+    tools/sky-ffi-inspect-rs/src/main.rs
     -- Bundled Sky Console mini-app (sky-bundled/console/) — embedded
     -- via TH for the `sky console` CLI subcommand. Listed explicitly
     -- so cabal sdist picks the subdirs up; same issue class as the
@@ -229,6 +235,7 @@ test-suite sky-tests
     , time >= 1.9
     , file-embed >= 0.0.15
     , template-haskell >= 2.16
+    , cryptohash-sha256 >= 0.11
 
   other-modules:
       Sky.Build.Validator
@@ -302,6 +309,7 @@ test-suite sky-tests
     , Sky.Lsp.NvimDriverSpec
     , Sky.Build.EmbeddedRuntimeSpec
     , Sky.Build.EmbeddedInspectorSpec
+    , Sky.Build.FfiGenGoKernelJsonSpec
     , Sky.Cli.ExitCodesSpec
     , Sky.Cli.InitSpec
     , Sky.Cli.RunSpec

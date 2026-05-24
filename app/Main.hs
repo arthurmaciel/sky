@@ -29,7 +29,7 @@ import qualified System.Process
 import qualified System.IO.Temp
 import qualified System.Timeout
 import qualified System.Exit
-import Control.Monad (when)
+import Control.Monad (when, forM_)
 import Data.FileEmbed (embedStringFile)
 
 import qualified Data.Map.Strict as Map
@@ -46,7 +46,7 @@ import qualified Sky.Parse.Module as ParseMod
 import qualified Sky.Format.Format as Format
 import qualified Sky.Lsp.Server as Lsp
 import qualified Sky.Build.FfiGen as FfiGen
-import Sky.Sky.Toml (CompileTarget(..))
+import Sky.Sky.Toml (CompileTarget(..), RustDepSpec(..))
 import qualified Sky.Build.SkyDeps as SkyDeps
 import qualified Sky.Build.Validator as Validator
 import qualified Sky.Reporting.Render as Render
@@ -763,7 +763,9 @@ addHandler opts = do
         Nothing -> do
             hasToml <- doesFileExist "sky.toml"
             config <- if hasToml
-                then Toml.parseSkyToml <$> readFile "sky.toml"
+                then do
+                    content <- readFile "sky.toml"
+                    length content `seq` return (Toml.parseSkyToml content)
                 else return Toml.defaultConfig
             let target = case mTarget of
                     Just t  -> parseTarget t
@@ -938,6 +940,29 @@ chunkInto n xs
   where
     chunkOf _ [] = []
     chunkOf k ys = let (h, t) = splitAt k ys in h : chunkOf k t
+
+
+-- | For each declared Rust dep missing its .skycache/ffi/rust/<slug>.kernel.json,
+-- regenerate FFI bindings by running the inspector. Git deps (RustGitDep) are
+-- skipped with a warning.
+regenMissingRustBindings :: [(String, RustDepSpec)] -> IO ()
+regenMissingRustBindings deps = do
+    createDirectoryIfMissing True ".skycache/ffi/rust"
+    missing <- filterM (\(name, _) -> do
+        let slug = FfiGen.slugify name
+        not <$> doesFileExist (".skycache/ffi/rust/" ++ slug ++ ".kernel.json")
+        ) deps
+    forM_ missing $ \(name, spec) -> case spec of
+        RustVersion _ -> do
+            r <- FfiGen.runInspectorForTarget TargetRust name
+            case r of
+                Left err ->
+                    putStrLn $ "   " ++ name ++ ": " ++ err
+                Right info -> do
+                    names <- FfiGen.generateBindings TargetRust info
+                    putStrLn $ "   " ++ name ++ ": " ++ show (length names) ++ " bindings"
+        RustGitDep{} ->
+            putStrLn $ "   " ++ name ++ ": git dep -- run `sky add` manually"
 
 
 -- | Resolve the inspector concurrency cap. Honours
@@ -1820,11 +1845,18 @@ runCommand cmd = case cmd of
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
             regenMissingBindings (Toml._target config) goDeps
             putStrLn $ "Go dependencies installed."
+        -- Auto-regen Rust FFI bindings for every declared rust dep whose
+        -- `.skycache/ffi/rust/<slug>.kernel.json` is absent.
+        let rustDeps = Toml._rustDeps config
+        when (not (null rustDeps)) $ do
+            putStrLn $ "Installing " ++ show (length rustDeps) ++ " Rust dependency(ies)"
+            regenMissingRustBindings rustDeps
+            putStrLn $ "Rust dependencies installed."
         case Toml._skyDeps config of
             [] -> return ()
             _  -> putStrLn "Sky dependencies installed."
-        when (null (Toml._skyDeps config) && null goDeps) $
-            putStrLn "No [dependencies] or [go.dependencies] entries in sky.toml."
+        when (null (Toml._skyDeps config) && null goDeps && null rustDeps) $
+            putStrLn "No [dependencies], [go.dependencies], or [rust.dependencies] entries in sky.toml."
         return (Right ())
 
     Update -> do

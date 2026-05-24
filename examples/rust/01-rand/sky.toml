@@ -2,5 +2,5 @@
 name = "rand-example"
 target = "rust"
 
-["rust.dependencies"]
-"rand" = "0.10.1"
+[rust.dependencies]
+rand = "0.10.1"

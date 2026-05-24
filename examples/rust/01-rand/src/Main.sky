@@ -1,10 +1,18 @@
 module Main exposing (main)
+
 import Sky.Core.Prelude exposing (..)
 import Std.Log exposing (println)
 import Rust.Rand as Rand
 
+
 main =
     case Rand.random_bool 0.5 of
-        Ok True  -> println "Heads"
-        Ok False -> println "Tails"
-        Err _    -> println "Error"
+
+        Ok True ->
+            println "Heads"
+
+        Ok False ->
+            println "Tails"
+
+        Err _ ->
+            println "Error"

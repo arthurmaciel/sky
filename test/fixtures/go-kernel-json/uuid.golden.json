@@ -1,0 +1,8 @@
+{
+  "moduleName": "Github.Com.Google.Uuid",
+  "kernelName": "Go_Uuid",
+  "package": "github.com/google/uuid",
+  "functions": [
+    {"name": "new", "arity": 1, "skyType": "() -> Result Error String"}
+  ]
+}

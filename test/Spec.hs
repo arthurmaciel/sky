@@ -70,6 +70,7 @@ import qualified Sky.Lsp.ScaleSpec
 import qualified Sky.Lsp.NvimDriverSpec
 import qualified Sky.Build.EmbeddedRuntimeSpec
 import qualified Sky.Build.EmbeddedInspectorSpec
+import qualified Sky.Build.FfiGenGoKernelJsonSpec
 import qualified Sky.Cli.ExitCodesSpec
 import qualified Sky.Cli.InitSpec
 import qualified Sky.Cli.RunSpec
@@ -224,6 +225,8 @@ main = hspec $ do
     -- the empty-list fast-path that lets `sky install` skip the
     -- inspector entirely on warm caches.
     describe "Sky.Build.FfiGenMulti"    Sky.Build.FfiGenMultiSpec.spec
+    -- Cross-backend rule 5: Go-side .kernel.json shape must be pinned.
+    describe "Sky.Build.FfiGenGoKernelJson" Sky.Build.FfiGenGoKernelJsonSpec.spec
     -- Phase B regression fence for the FFI Sky-type parser used
     -- by Sky.Build.FfiRegistry to lift kernel.json's `skyType`
     -- field into a typed AST. Locks the closed grammar against

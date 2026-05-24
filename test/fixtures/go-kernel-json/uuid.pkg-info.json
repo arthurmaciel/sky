@@ -1,0 +1,22 @@
+{
+  "pkg": "github.com/google/uuid",
+  "name": "uuid",
+  "version": "",
+  "functions": [
+    {
+      "name": "New",
+      "params": [],
+      "results": [
+        {"name": "", "type": "string"},
+        {"name": "", "type": "error"}
+      ],
+      "effect": "fallible",
+      "recvType": "",
+      "methodName": "",
+      "isField": false,
+      "isFieldSet": false,
+      "isPkgVar": false
+    }
+  ],
+  "errors": []
+}
