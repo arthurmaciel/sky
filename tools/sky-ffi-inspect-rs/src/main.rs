@@ -11,10 +11,10 @@
 
 use cargo_metadata::MetadataCommand;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
-use syn::{Item, ItemFn, Type, Visibility};
+use syn::{Item, ItemFn, Path, Type, Visibility};
 
 // ── JSON output types (match Go inspector schema exactly) ──────────────
 
@@ -234,9 +234,72 @@ fn parse_package(pkg: &cargo_metadata::Package, crate_name: &str) -> PkgInfo {
     let mut type_aliases: HashMap<String, String> = HashMap::new();
     let mut errors: Vec<String> = Vec::new();
     let mut processed_mods: Vec<PathBuf> = Vec::new();
+    let mut display_types: HashSet<String> = HashSet::new();
+    let mut fromstr_types: HashSet<String> = HashSet::new();
 
     // Parse root module and walk submodules recursively
-    collect_from_file(&source_path, &src_dir, &mut functions, &mut type_aliases, &mut errors, &mut processed_mods);
+    collect_from_file(&source_path, &src_dir, &mut functions, &mut type_aliases, &mut errors, &mut processed_mods, &mut display_types, &mut fromstr_types);
+
+    // ── X4: Emit synthetic Display/FromStr bridge functions (one per type) ──
+    let mut bridge_emitted: HashSet<String> = HashSet::new();
+    for ty in display_types.iter() {
+        let key = format!("to_string_{}", ty);
+        if !bridge_emitted.insert(key) { continue; }
+        let sky = type_str_to_sky(ty, &type_aliases);
+        functions.push(Function {
+            name: "to_string".into(),
+            params: vec![Param {
+                name: "self".into(),
+                ty: ty.clone(),
+                sky_type: sky.clone(),
+                rust_type: ty.clone(),
+            }],
+            results: vec![Param {
+                name: String::new(),
+                ty: "String".into(),
+                sky_type: "String".into(),
+                rust_type: String::new(),
+            }],
+            variadic: false,
+            effect: "pure".into(),
+            exported: true,
+            recv_type: ty.clone(),
+            recv_rust_type: ty.clone(),
+            method_name: "to_string".into(),
+            is_field: false,
+            is_field_set: false,
+            is_pkg_var: false,
+        });
+    }
+    for ty in fromstr_types.iter() {
+        let key = format!("from_string_{}", ty);
+        if !bridge_emitted.insert(key) { continue; }
+        let sky = type_str_to_sky(ty, &type_aliases);
+        functions.push(Function {
+            name: "from_string".into(),
+            params: vec![Param {
+                name: "s".into(),
+                ty: "&str".into(),
+                sky_type: "String".into(),
+                rust_type: "&str".into(),
+            }],
+            results: vec![Param {
+                name: String::new(),
+                ty: ty.clone(),
+                sky_type: sky.clone(),
+                rust_type: ty.clone(),
+            }],
+            variadic: false,
+            effect: "fallible".into(),
+            exported: true,
+            recv_type: ty.clone(),
+            recv_rust_type: ty.clone(),
+            method_name: "from_string".into(),
+            is_field: false,
+            is_field_set: false,
+            is_pkg_var: false,
+        });
+    }
 
     PkgInfo {
         pkg: pkg.name.clone(),
@@ -255,6 +318,8 @@ fn collect_from_file(
     type_aliases: &mut HashMap<String, String>,
     errors: &mut Vec<String>,
     processed: &mut Vec<PathBuf>,
+    display_types: &mut HashSet<String>,
+    fromstr_types: &mut HashSet<String>,
 ) {
     // Dedup: skip already-processed files
     if processed.contains(path) { return; }
@@ -299,6 +364,16 @@ fn collect_from_file(
             }
             Item::Impl(imp) => {
                 let self_ty_str = type_to_sky(&imp.self_ty, type_aliases);
+                // Detect trait impls for Display/FromStr bridge
+                if let Some((_, trait_path, _)) = &imp.trait_ {
+                    let trait_str = path_to_string(trait_path);
+                    if trait_str == "Display" || trait_str.ends_with("::Display") {
+                        display_types.insert(self_ty_str.clone());
+                    }
+                    if trait_str == "FromStr" || trait_str.ends_with("::FromStr") {
+                        fromstr_types.insert(self_ty_str.clone());
+                    }
+                }
                 for impl_item in &imp.items {
                     if let syn::ImplItem::Fn(method) = impl_item {
                         if matches!(method.vis, Visibility::Public(_)) {
@@ -424,7 +499,7 @@ fn collect_from_file(
                             continue;
                         }
                     };
-                    collect_from_file(&mod_path, src_dir, functions, type_aliases, errors, processed);
+                    collect_from_file(&mod_path, src_dir, functions, type_aliases, errors, processed, display_types, fromstr_types);
                 }
             }
             Item::Use(u) => {
@@ -443,9 +518,9 @@ fn collect_from_file(
                             let candidate1 = src_dir.join(format!("{}.rs", cleaned));
                             let candidate2 = src_dir.join(cleaned).join("mod.rs");
                             if candidate1.exists() {
-                                collect_from_file(&candidate1, src_dir, functions, type_aliases, errors, processed);
+                                collect_from_file(&candidate1, src_dir, functions, type_aliases, errors, processed, display_types, fromstr_types);
                             } else if candidate2.exists() {
-                                collect_from_file(&candidate2, src_dir, functions, type_aliases, errors, processed);
+                                collect_from_file(&candidate2, src_dir, functions, type_aliases, errors, processed, display_types, fromstr_types);
                             }
                             // Silently skip unresolved glob re-exports (common for external crate re-exports)
                         }
@@ -455,6 +530,9 @@ fn collect_from_file(
             _ => {}
         }
     }
+
+    // ── X4: Emit synthetic Display/FromStr bridge functions ─────────
+    // (emitted once in parse_package after the full module tree has been walked)
 }
 
 // ── Function inspection ────────────────────────────────────────────────
@@ -824,6 +902,13 @@ fn type_str_to_sky(type_str: &str, aliases: &HashMap<String, String>) -> String 
             _ => base,
         }
     }
+}
+
+/// Convert a syn::Path to a string representation for trait matching.
+/// Handles single-segment paths (Display), two-segment (fmt::Display),
+/// and multi-segment (std::fmt::Display).
+fn path_to_string(path: &Path) -> String {
+    path.segments.iter().map(|seg| seg.ident.to_string()).collect::<Vec<_>>().join("::")
 }
 
 fn strip_prefixes(s: &str) -> String {

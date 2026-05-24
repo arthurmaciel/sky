@@ -997,6 +997,11 @@ emitRustFile kernelName pkg =
                 | isInstance =
                     let restArgs = intercalate ", " (map argCall [1..nParams - 1])
                     in "arg0." ++ fnName ++ "(" ++ restArgs ++ ")"
+                | isStaticFn && fnName == "from_string" =
+                    -- X4: emit `<T as std::str::FromStr>::from_str(args)` for the
+                    -- Display/FromStr bridge synthetic functions.
+                    let recvResolved = resolveRustType crateImport recvType (_fnRecvRustType fn)
+                    in "<" ++ recvResolved ++ " as std::str::FromStr>::from_str(" ++ callArgs ++ ")"
                 | isStaticFn =
                     let recvResolved = resolveRustType crateImport recvType (_fnRecvRustType fn)
                     in recvResolved ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"

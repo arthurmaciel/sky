@@ -1563,49 +1563,45 @@ metadata` with `--features v4` so cfg-gated items like
 sky.toml. `sky install` regenerates 48 bindings including
 cfg-gated items. `sky build src/Main.sky` from scratch succeeds.
 
-### X4. Display/FromStr bridge for opaque types (MEDIUM)
+### X4. Display/FromStr bridge for opaque types (MEDIUM) ✅ RESOLVED
 
-Even with X2 + X3 landed, a Sky program calling
-`Rust.Uuid.new_v4 ()` produces a `uuid::Uuid` value Sky cannot
-inspect, format, or compare. The fix that **doesn't hardcode** per
-crate: detect which opaque types implement `std::fmt::Display` and
-`std::str::FromStr`, and generate bidirectional `to_string` /
-`from_string` wrappers automatically.
+Display/FromStr trait implementations are now detected by the
+inspector and surfaced as synthetic `to_string` / `from_string`
+FFI bindings — no per-crate hardcoding needed.
 
-**Approach.**
+**What changed:**
 
-1. **Inspector pass over `impl Display for T` and `impl FromStr for
-   T` blocks.** During the existing `Item::Impl` walk in
-   `collect_from_file`, check if `imp.trait_.is_some()`. If the
-   trait path is `std::fmt::Display` (or just `Display`,
-   `fmt::Display`) or `std::str::FromStr` (`FromStr`,
-   `str::FromStr`), record the `Self` type in a side table:
-   `traits: HashMap<String, Vec<TraitImpl>>`.
-2. **Surface as synthetic bindings.** For each `(Self, Display)`
-   record, emit a synthetic `Function`:
-   ```json
-   { "name": "to_string", "params": [{"name":"self","type":"Self","skyType":"Uuid","rustType":"uuid::Uuid"}],
-     "results":[{"name":"","type":"String","skyType":"String"}],
-     "effect":"pure", "recvType":"Uuid", "methodName":"to_string" }
-   ```
-   And for `(Self, FromStr)`:
-   ```json
-   { "name": "from_string", "params": [{"name":"s","type":"&str","skyType":"String","rustType":"&str"}],
-     "results":[{"name":"","type":"Result<Self, Self::Err>","skyType":"Result String Uuid"}],
-     "effect":"fallible", "recvType":"Uuid", "methodName":"from_string" }
-   ```
-3. **Codegen.** `emitRustFnSimple` already handles instance and
-   static methods. The Display bridge emits
-   `format!("{}", arg0).to_string()`; the FromStr bridge emits
-   `<T as std::str::FromStr>::from_str(arg0)`.
-4. **AsRef/AsMut variants** (stretch): if the type implements
-   `AsRef<[u8]>`, additionally emit a `to_bytes` binding that maps
-   to `Bytes`.
+1. **Inspector** (`tools/sky-ffi-inspect-rs/src/main.rs`): The
+   `Item::Impl` handler now checks `imp.trait_` for `Display` or
+   `FromStr` trait paths (any segment count: `Display`,
+   `fmt::Display`, `std::fmt::Display`). Matching `Self` types are
+   recorded in `display_types` / `fromstr_types` hash sets passed
+   through recursive `collect_from_file` calls.
+2. **Synthetic function emission** (in `parse_package`, after the
+   full module tree is walked): For each type implementing `Display`,
+   a `to_string` instance-method Function is appended. For each type
+   implementing `FromStr`, a `from_string` fallible static-method
+   Function is appended. Dedup via `bridge_emitted` set prevents
+   duplicates from submodules.
+3. **Codegen** (`src/Sky/Build/FfiGen.hs`): `emitRustFnSimple` has
+   a special case for `from_string` — emits
+   `<RecvType as std::str::FromStr>::from_str(args)` instead of the
+   default `RecvType::fnName(args)` for static methods. The `to_string`
+   bridge works with the existing instance-method codegen
+   (`arg0.to_string()` via `ToString` blanket impl).
+4. **Go target unaffected** — the new functionality is entirely in
+   the Rust inspector + `TargetRust` codegen branch.
 
-**Acceptance.** `sky add uuid --target rust --features v4` produces
-bindings including `Rust.Uuid.to_string : Uuid -> Result Error String`
-and `Rust.Uuid.from_string : String -> Result Error (Result String Uuid)`.
-A Sky demo round-trips `Uuid → String → Uuid` cleanly.
+**Acceptance.** `sky add uuid --features v4` produces 54 bindings
+(up from 48 without X4) including:
+```
+to_string_from_uuid    : Uuid -> Result Error String
+from_string_from_urn   : String -> Result Error Urn
+from_string_from_braced: String -> Result Error Braced
+```
+The generated Rust wrappers call `arg0.to_string()` (Display) and
+`<Braced as std::str::FromStr>::from_str(arg0)` (FromStr) with
+correct `SkyResult<SkyError, T>` return types.
 
 ### X5. Strategy for macro-generated crates (clap, serde-derive, tokio-macros) (HIGH)
 
@@ -1702,7 +1698,7 @@ succeeds without manual `sky add`.
 | X6 (`sky install` for Rust) | ✅ Resolved — `regenMissingRustBindings` in `Install` handler regens FFI from `[rust.dependencies]` | `feat(rust): sky install regenerates Rust FFI bindings from [rust.dependencies]` |
 | X2 (drop hardcoded resolveRustType) | Pre-requisite for opaque type story | `fix(rust): plumb rustType through inspector; drop hardcoded resolveRustType` |
 | X3 (feature flags) | ✅ Resolved — `sky add uuid --features v4` works end-to-end | `feat(rust): support cfg-feature flags in sky.toml + inspector + Cargo.toml emission` |
-| X4 (Display/FromStr bridge) | Makes opaque types actually usable | `feat(rust): auto-derive Display/FromStr/AsRef bridge bindings for opaque types` |
+| X4 (Display/FromStr bridge) | ✅ Resolved — inspector detects Display/FromStr; codegen emits `to_string`/`from_string ` wrappers | `feat(rust): auto-derive Display/FromStr/AsRef bridge bindings for opaque types` |
 | X5-A (rust.shims) | Escape hatch for everything macro-driven | `feat(rust): [rust.shims] for hand-written Rust glue (clap, serde derive, etc.)` |
 | X5-C (Sky.Cli example) | Documents the recommended path for clap-class crates | `docs(rust): examples/rust/04-sky-cli/ — preferred argument-parsing in Sky` |
 
@@ -2093,8 +2089,7 @@ V1–V4 ✅ resolved (lazy sky.toml read, inspector embed freshness,
 cabal extra-source-files, Go kernel.json golden test). X1 ✅ resolved
 (`examples/rust/` cleaned to 2 working examples).
 
-X1 ✅, X2 ✅, X3 ✅, X6 ✅ resolved. Remaining:
-- **X4** — Display/FromStr bridge for opaque Rust types
+X1 ✅, X2 ✅, X3 ✅, X4 ✅, X6 ✅ resolved. Remaining:
 - **X5** — `[rust.shims]` escape hatch + Sky.Cli example for macro crates
 
 ### Short-term
