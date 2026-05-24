@@ -67,15 +67,36 @@ struct PkgInfo {
 // ── Entry point ────────────────────────────────────────────────────────
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        eprintln!("Usage: sky-ffi-inspect-rs <crate-name> [crate-name...]");
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let mut features: Vec<String> = Vec::new();
+    let mut crate_args: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < raw_args.len() {
+        if raw_args[i] == "--features" {
+            i += 1;
+            if i < raw_args.len() {
+                for feat in raw_args[i].split(',') {
+                    let f = feat.trim().to_string();
+                    if !f.is_empty() {
+                        features.push(f);
+                    }
+                }
+            }
+        } else {
+            crate_args.push(raw_args[i].clone());
+        }
+        i += 1;
+    }
+
+    if crate_args.is_empty() {
+        eprintln!("Usage: sky-ffi-inspect-rs [--features f1,f2] <crate-name> [crate-name...]");
         std::process::exit(1);
     }
 
-    let results: Vec<PkgInfo> = args.iter().map(|name| inspect_crate(name)).collect();
+    let results: Vec<PkgInfo> = crate_args.iter().map(|name| inspect_crate(name, &features)).collect();
 
-    let json = if args.len() == 1 {
+    let json = if crate_args.len() == 1 {
         serde_json::to_string_pretty(&results[0])
     } else {
         serde_json::to_string_pretty(&results)
@@ -85,7 +106,7 @@ fn main() {
         Ok(s) => println!("{}", s),
         Err(e) => {
             let err = PkgInfo {
-                pkg: args.join(" "),
+                pkg: crate_args.join(" "),
                 name: "error".into(),
                 version: String::new(),
                 functions: vec![],
@@ -98,14 +119,14 @@ fn main() {
 
 // ── Crate inspection ────────────────────────────────────────────────────
 
-fn inspect_crate(crate_name: &str) -> PkgInfo {
+fn inspect_crate(crate_name: &str, features: &[String]) -> PkgInfo {
     // Try workspace resolution first (fast path — already in this project)
     if let Some(pkg) = resolve_workspace_package(crate_name) {
         return parse_package(&pkg, crate_name);
     }
 
     // Fall back to external resolution (temp project + cargo fetch)
-    match resolve_external_package(crate_name) {
+    match resolve_external_package(crate_name, features) {
         Some(pkg) => parse_package(&pkg, crate_name),
         None => pkg_error(
             crate_name,
@@ -126,13 +147,22 @@ fn resolve_workspace_package(crate_name: &str) -> Option<cargo_metadata::Package
 
 /// Resolve an external crate by creating a temporary Cargo project,
 /// adding it as a dependency, fetching its source, and returning its metadata.
-fn resolve_external_package(crate_name: &str) -> Option<cargo_metadata::Package> {
+fn resolve_external_package(crate_name: &str, features: &[String]) -> Option<cargo_metadata::Package> {
     let tmp = tempfile::tempdir().ok()?;
     let dir = tmp.path();
 
     // Write a minimal Cargo.toml with the dependency.
     // Use `"*"` to support both 1.x and 0.x crates (chrono, etc.).
     let safe_name = crate_name.replace('-', "_");
+    let dep_entry = if features.is_empty() {
+        format!("{} = \"*\"", crate_name)
+    } else {
+        let feats = features.iter()
+            .map(|f| format!("\"{}\"", f))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{} = {{ version = \"*\", features = [{}] }}", crate_name, feats)
+    };
     let toml_content = format!(
         r#"[package]
 name = "_sky_ffi_resolver_{}"
@@ -140,9 +170,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-{} = "*"
+{}
 "#,
-        safe_name, crate_name
+        safe_name, dep_entry
     );
     let src_dir = dir.join("src");
     std::fs::create_dir_all(&src_dir).ok()?;

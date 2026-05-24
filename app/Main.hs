@@ -668,8 +668,8 @@ appendGoDependency pkg = do
             []             -> ls  -- shouldn't reach (hasSection was True)
 
 
-appendRustDependency :: String -> String -> IO ()
-appendRustDependency pkg version = do
+appendRustDependency :: String -> String -> [String] -> IO ()
+appendRustDependency pkg version features = do
     hasToml <- doesFileExist "sky.toml"
     if not hasToml
         then putStrLn "   (no sky.toml — skipping dep registration; create one with `sky init`)"
@@ -686,7 +686,9 @@ appendRustDependency pkg version = do
             if alreadyListed
                 then putStrLn $ "   (already listed in sky.toml — left as-is)"
                 else do
-                    let entry = "\"" ++ pkg ++ "\" = \"" ++ version ++ "\""
+                    let entry = if null features
+                            then "\"" ++ pkg ++ "\" = \"" ++ version ++ "\""
+                            else "\"" ++ pkg ++ "\" = { version = \"" ++ version ++ "\", features = [" ++ intercalate ", " (map (\f -> "\"" ++ f ++ "\"") features) ++ "] }"
                         sectionHeader = "[\"rust.dependencies\"]"
                         hasSection = any (\l ->
                                 let t = dropWhile (== ' ') l
@@ -748,6 +750,10 @@ addHandler opts = do
         mRev = _addRev opts
         mBranch = _addBranch opts
         mTag = _addTag opts
+        mFeatures = _addFeatures opts
+        features = case mFeatures of
+            Just f  -> words (map (\c -> if c == ',' then ' ' else c) f)
+            Nothing -> []
         pkgSpec = parsePkgSpec pkg mRev mBranch mTag
     putStrLn $ "Adding " ++ pkg ++ "..."
     -- Validate --rev/--branch/--tag are mutually exclusive
@@ -793,7 +799,7 @@ addHandler opts = do
                             appendGoDependency pkg
                         TargetRust ->
                             return ()
-                    r <- FfiGen.runInspectorForTarget target pkg
+                    r <- FfiGen.runInspectorForTarget target pkg features
                     case r of
                         Left err -> do
                             putStrLn $ "   " ++ inspName ++ " warning: " ++ err
@@ -808,7 +814,7 @@ addHandler opts = do
                             case target of
                                 TargetGo -> appendGoDependency pkg
                                 TargetRust ->
-                                    appendRustDependency pkg (FfiGen._pkgVersion info)
+                                    appendRustDependency pkg (FfiGen._pkgVersion info) features
                             let skyModuleName = FfiGen.pkgToModuleName target pkg
                                 shortAlias = reverse (takeWhile (/= '.') (reverse skyModuleName))
                                 slug = FfiGen.slugify (FfiGen._pkgName info)
@@ -908,7 +914,7 @@ regenMissingBindings target deps = do
             n <- resolveInstallParallelism
             let pkgs   = map fst missing
                 chunks = chunkInto n pkgs
-            chunkResults <- mapConcurrentlyN n (FfiGen.runInspectorMultiForTarget target) chunks
+            chunkResults <- mapConcurrentlyN n (\chunk -> FfiGen.runInspectorMultiForTarget target (map (const []) chunk) chunk) chunks
             -- Concat back into a per-input results list, preserving
             -- order. Each chunk's results are aligned to its input
             -- subset (runInspectorMulti's contract).
@@ -953,8 +959,8 @@ regenMissingRustBindings deps = do
         not <$> doesFileExist (".skycache/ffi/rust/" ++ slug ++ ".kernel.json")
         ) deps
     forM_ missing $ \(name, spec) -> case spec of
-        RustVersion _ -> do
-            r <- FfiGen.runInspectorForTarget TargetRust name
+        RustVersion ver feats -> do
+            r <- FfiGen.runInspectorForTarget TargetRust name feats
             case r of
                 Left err ->
                     putStrLn $ "   " ++ name ++ ": " ++ err
@@ -1119,11 +1125,12 @@ data PkgSpec = CratesIo String          -- bare name → crates.io
 
 -- | Options for `sky add` command.
 data AddOpts = AddOpts
-    { _addPkg    :: String
-    , _addTarget :: Maybe String
-    , _addRev    :: Maybe String
-    , _addBranch :: Maybe String
-    , _addTag    :: Maybe String
+    { _addPkg      :: String
+    , _addTarget   :: Maybe String
+    , _addRev      :: Maybe String
+    , _addBranch   :: Maybe String
+    , _addTag      :: Maybe String
+    , _addFeatures :: Maybe String
     } deriving (Show)
 
 -- | Parse a package argument into a PkgSpec: bare name or git URL.
@@ -1176,6 +1183,7 @@ addOptsParser = AddOpts
     <*> optional (strOption (long "rev" <> metavar "SHA" <> help "Git commit SHA for git dependencies"))
     <*> optional (strOption (long "branch" <> metavar "NAME" <> help "Git branch for git dependencies"))
     <*> optional (strOption (long "tag" <> metavar "NAME" <> help "Git tag for git dependencies"))
+    <*> optional (strOption (long "features" <> metavar "FEATURES" <> help "Comma-separated feature flags for Rust crates (e.g. --features v4,serde)"))
 
 
 commandParser :: Parser Command

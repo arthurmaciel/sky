@@ -2114,8 +2114,10 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"
-    emitDepLine name (Toml.RustVersion ver) =
-        name ++ " = \"" ++ ver ++ "\""
+    emitDepLine name (Toml.RustVersion ver feats) =
+        if null feats
+            then name ++ " = \"" ++ ver ++ "\""
+            else name ++ " = { version = \"" ++ ver ++ "\", features = [" ++ intercalate ", " (map show feats) ++ "] }"
     emitDepLine name (Toml.RustGitDep url mRev mBranch mTag) =
         let fields = [ "git = " ++ show url ]
                 ++ maybe [] (\r -> ["rev = " ++ show r]) mRev

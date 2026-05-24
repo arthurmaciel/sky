@@ -20,7 +20,7 @@ data CompileTarget = TargetGo | TargetRust
     deriving (Show, Eq)
 
 -- | Rust dependency specification: crates.io version or git source.
-data RustDepSpec = RustVersion String
+data RustDepSpec = RustVersion { _rvVersion :: String, _rvFeatures :: [String] }
                  | RustGitDep
                      { _gitUrl    :: String
                      , _gitRev    :: Maybe String
@@ -211,9 +211,10 @@ stripQuotes s = s
 parseRustDepSpec :: String -> RustDepSpec
 parseRustDepSpec s
     | "{" `isPrefixOf` trim s = parseInlineTable (trim s)
-    | otherwise               = RustVersion s
+    | otherwise               = RustVersion s []
 
--- | Parse a TOML inline table like: { git = "url", rev = "sha" }
+-- | Parse a TOML inline table like: { git = "url", rev = "sha" } or
+-- { version = "1.0", features = ["feat1", "feat2"] }.
 parseInlineTable :: String -> RustDepSpec
 parseInlineTable s =
     let inner = takeWhile (/= '}') (drop 1 (trim s))
@@ -224,9 +225,18 @@ parseInlineTable s =
         rev    = lookup "rev" kv
         branch = lookup "branch" kv
         tag    = lookup "tag" kv
+        version = lookup "version" kv
+        featuresStr = lookup "features" kv
+        features = case featuresStr of
+            Just f | "[" `isPrefixOf` f ->
+                let inner2 = takeWhile (/= ']') (drop 1 f)
+                in map stripQuotes (splitOn ',' inner2)
+            _ -> []
     in case gitUrl of
         Just url -> RustGitDep url rev branch tag
-        Nothing  -> RustVersion s  -- fallback: treat as literal version
+        Nothing  -> case version of
+            Just v  -> RustVersion v features
+            Nothing -> RustVersion s []  -- fallback: treat as literal version
 
 -- | Parse a single key=value pair. Returns Nothing on malformed input.
 parseKeyValue :: String -> Maybe (String, String)

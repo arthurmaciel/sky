@@ -150,16 +150,18 @@ instance A.FromJSON PkgInfo where
 
 
 -- | Inspect a single package/crate for the given target.
-runInspectorForTarget :: CompileTarget -> String -> IO (Either String PkgInfo)
-runInspectorForTarget target pkgPath = do
+-- Optional features (comma-separated) are passed to the Rust inspector.
+runInspectorForTarget :: CompileTarget -> String -> [String] -> IO (Either String PkgInfo)
+runInspectorForTarget target pkgPath features = do
     let prefix = inspectorCallPrefix target
     resolved <- resolveInspector target
     case resolved of
         Left e    -> return (Left e)
         Right bin -> do
-            let cmd' = if null prefix
-                        then bin ++ " " ++ pkgPath
-                        else prefix ++ " && " ++ bin ++ " " ++ pkgPath
+            let featuresArg = if null features then "" else " --features " ++ intercalate "," features
+                cmd' = if null prefix
+                        then bin ++ " " ++ pkgPath ++ featuresArg
+                        else prefix ++ " && " ++ bin ++ " " ++ pkgPath ++ featuresArg
             (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
             if null out
                 then return (Left $ inspectorName target ++ ": empty output; stderr: " ++ err)
@@ -178,21 +180,22 @@ runInspectorForTarget target pkgPath = do
 --
 -- Falls back to single-mode when only one package is requested
 -- (avoids JSON-array vs JSON-object decode-shape branch).
-runInspectorMultiForTarget :: CompileTarget -> [String] -> IO [Either String PkgInfo]
-runInspectorMultiForTarget _        []        = return []
-runInspectorMultiForTarget target   [pkgPath] = do
-    r <- runInspectorForTarget target pkgPath
+runInspectorMultiForTarget :: CompileTarget -> [String] -> [String] -> IO [Either String PkgInfo]
+runInspectorMultiForTarget _        []        _   = return []
+runInspectorMultiForTarget target   [pkgPath] feats = do
+    r <- runInspectorForTarget target pkgPath feats
     return [r]
-runInspectorMultiForTarget target pkgPaths = do
+runInspectorMultiForTarget target pkgPaths features = do
     let prefix = inspectorCallPrefix target
     resolved <- resolveInspector target
     case resolved of
         Left e    -> return (map (const (Left e)) pkgPaths)
         Right bin -> do
-            let quoted = unwords (map (\p -> "'" ++ p ++ "'") pkgPaths)
+            let featuresArg = if null features then "" else " --features " ++ intercalate "," features
+                quoted = unwords (map (\p -> "'" ++ p ++ "'") pkgPaths)
                 cmd' = if null prefix
-                        then bin ++ " " ++ quoted
-                        else prefix ++ " && " ++ bin ++ " " ++ quoted
+                        then bin ++ " " ++ quoted ++ featuresArg
+                        else prefix ++ " && " ++ bin ++ " " ++ quoted ++ featuresArg
             (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
             let inspName = inspectorName target
             if null out
@@ -207,7 +210,7 @@ runInspectorMultiForTarget target pkgPaths = do
                     Left _ ->
                         -- Single-object fallback for old single-mode inspectors
                         case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) :: Either String PkgInfo of
-                            Right _ -> mapM (runInspectorForTarget target) pkgPaths
+                            Right _ -> mapM (\p -> runInspectorForTarget target p features) pkgPaths
                             Left e  -> return (map (const (Left $ inspName ++ ": json: " ++ e)) pkgPaths)
 
 

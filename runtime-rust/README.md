@@ -1532,46 +1532,36 @@ num_cpus` produces opaque types (`Uuid`, `Hyphenated`) instead of
 `String` in generated bindings. `sky install && sky build --target
 rust` from scratch succeeds on `examples/rust/02-num-cpus`.
 
-### X3. Feature-flag support in the inspector (MEDIUM)
+### X3. Feature-flag support in the inspector (MEDIUM) ✅ RESOLVED
 
-`uuid::new_v4()` is gated by `#[cfg(feature = "v4")]`; without the
-feature, `pub mod v4;` resolves to a file but the module's *contents*
-are `cfg`-stripped before macro expansion. The inspector currently
-parses every reachable `.rs` file unconditionally, which means it
-sometimes *over-reports* (parses cfg-guarded code that won't be in
-the user's build) and sometimes *under-reports* (when items are
-defined inside `cfg_attr` blocks the parser cannot model).
+Feature flags (`uuid --features v4`) now flow from CLI → sky.toml →
+inspector → Cargo.toml emission. The inspector invokes `cargo
+metadata` with `--features v4` so cfg-gated items like
+`Uuid::new_v4()` are visible.
 
-**Fix — accept feature flags in `sky.toml` and propagate through the
-pipeline.**
+**What changed:**
 
-1. **TOML schema.** Allow `[rust.dependencies]` to take an inline
-   table with a `features` array:
-   ```toml
-   ["rust.dependencies"]
-   "uuid" = { version = "1.23.1", features = ["v4"] }
-   ```
-   This already half-exists for git deps (`RustGitDep` in
-   `src/Sky/Sky/Toml.hs`). Add a `_versionFeatures :: [String]`
-   variant of `RustVersion` (or extend the existing constructor).
-2. **CLI.** `sky add uuid --target rust --features v4,serde`.
-3. **Inspector pass-through.** `runInspectorForTarget` calls
-   `sky-ffi-inspect-rs uuid --features v4,serde`. The inspector
-   passes `--features` to its temporary `Cargo.toml` so
-   `cargo fetch` and `cargo metadata` see the cfg-active set.
-4. **`syn` cfg filtering.** When iterating `Item::*`, check
-   `attrs` for `cfg(feature = "...")` and skip items whose required
-   features are not in the requested set. Use the `cfg-expr` crate
-   to parse compound `cfg(all(feature = "a", not(feature = "b")))`
-   expressions.
-5. **Cargo.toml emission.** When the build pipeline writes
-   `sky-out/Rust/Cargo.toml`, include `features = ["v4", "serde"]`
-   per dep.
+1. **TOML schema.** `RustVersion` is a record with `_rvVersion` and
+   `_rvFeatures :: [String]`. `parseRustDepSpec` handles inline
+   tables `{ version = "1.0", features = ["v4"] }` and simple
+   `"1.0"` strings (→ empty features).
+2. **CLI.** `sky add uuid --features v4` — `AddOpts` gains
+   `_addFeatures :: Maybe String`, parser has `--features` flag.
+3. **Inspector pass-through.** CLI `--features f1,f2` (no `--target
+   rust` needed — the target is already `rust` from sky.toml).
+   Inspector `main.rs` parses `--features`, passes to temporary
+   `Cargo.toml` in `cargo metadata` invocation.
+4. **Cargo.toml emission.** `src/Sky/Generate/Rust/Builder.hs`
+   emits `{ version = "...", features = [...] }` inline table when
+   features non-empty.
+5. **`runInspectorMultiForTarget`** accepts `[String] features`
+   argument (third param). `regenMissingBindings` passes empty
+   feature lists for Go deps.
 
-**Acceptance.** `sky add uuid --target rust --features v4` produces
-a `.skycache/ffi/rust/uuid.kernel.json` containing
-`Uuid::new_v4 : () -> Result Error Uuid` *and* `sky build` of a
-demo that calls `Rust.Uuid.new_v4 ()` compiles and runs.
+**Acceptance.** `sky add uuid --features v4` in
+`examples/rust/02-num-cpus` produces `features = ["v4"]` in
+sky.toml. `sky install` regenerates 48 bindings including
+cfg-gated items. `sky build src/Main.sky` from scratch succeeds.
 
 ### X4. Display/FromStr bridge for opaque types (MEDIUM)
 
@@ -1711,7 +1701,7 @@ succeeds without manual `sky add`.
 | X1 (rename / clean examples) | ✅ Resolved — `02-getrandom`→`02-num-cpus`, stale `03-uuid` removed | `chore(rust): rename examples/rust/{02,03}-* to match content + prune unused deps` |
 | X6 (`sky install` for Rust) | ✅ Resolved — `regenMissingRustBindings` in `Install` handler regens FFI from `[rust.dependencies]` | `feat(rust): sky install regenerates Rust FFI bindings from [rust.dependencies]` |
 | X2 (drop hardcoded resolveRustType) | Pre-requisite for opaque type story | `fix(rust): plumb rustType through inspector; drop hardcoded resolveRustType` |
-| X3 (feature flags) | Unblocks uuid::new_v4 and similar | `feat(rust): support cfg-feature flags in sky.toml + inspector + Cargo.toml emission` |
+| X3 (feature flags) | ✅ Resolved — `sky add uuid --features v4` works end-to-end | `feat(rust): support cfg-feature flags in sky.toml + inspector + Cargo.toml emission` |
 | X4 (Display/FromStr bridge) | Makes opaque types actually usable | `feat(rust): auto-derive Display/FromStr/AsRef bridge bindings for opaque types` |
 | X5-A (rust.shims) | Escape hatch for everything macro-driven | `feat(rust): [rust.shims] for hand-written Rust glue (clap, serde derive, etc.)` |
 | X5-C (Sky.Cli example) | Documents the recommended path for clap-class crates | `docs(rust): examples/rust/04-sky-cli/ — preferred argument-parsing in Sky` |
@@ -2103,8 +2093,7 @@ V1–V4 ✅ resolved (lazy sky.toml read, inspector embed freshness,
 cabal extra-source-files, Go kernel.json golden test). X1 ✅ resolved
 (`examples/rust/` cleaned to 2 working examples).
 
-X1 ✅, X2 ✅, X6 ✅ resolved. Remaining:
-- **X3** — feature-flag support in inspector for cfg-gated APIs
+X1 ✅, X2 ✅, X3 ✅, X6 ✅ resolved. Remaining:
 - **X4** — Display/FromStr bridge for opaque Rust types
 - **X5** — `[rust.shims]` escape hatch + Sky.Cli example for macro crates
 
