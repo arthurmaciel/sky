@@ -31,8 +31,9 @@ import Language.Haskell.TH
 import Language.Haskell.TH.Syntax (qAddDependentFile, runIO)
 import qualified Data.FileEmbed as FE
 import Numeric (showHex)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist,
                          getPermissions, setPermissions, setOwnerExecutable,
+                         getModificationTime,
                          getXdgDirectory, XdgDirectory(..), listDirectory,
                          removeDirectoryRecursive)
 import System.FilePath ((</>), takeDirectory)
@@ -47,20 +48,43 @@ embeddedInspectorRustBytes :: [(FilePath, ByteString)]
 embeddedInspectorRustBytes = $(do
     let binaryPath = "tools/sky-ffi-inspect-rs/target/release/sky-ffi-inspect-rs"
     binExists <- runIO $ doesFileExist binaryPath
-    if binExists
+    -- Check freshness: if any src/*.rs is newer than the pre-built binary,
+    -- fall through to source-tree embed so qAddDependentFile registers the
+    -- .rs files as TH dependencies and source edits trigger recompilation.
+    binFresh <- runIO $ do
+        srcExists <- doesFileExist "tools/sky-ffi-inspect-rs/src/main.rs"
+        if binExists && srcExists
+            then do
+                binMtime <- getModificationTime binaryPath
+                srcMtime <- getModificationTime "tools/sky-ffi-inspect-rs/src/main.rs"
+                return (srcMtime <= binMtime)
+            else return False
+    if binFresh
         then do
-            -- Strategy 1: embed the pre-built binary
+            -- Strategy 1: embed the pre-built binary (fresh).
+            -- Also register source files as TH deps so future edits
+            -- trigger recompilation, even with a fresh binary. When
+            -- recompilation does happen, the freshness check above
+            -- detects the newer source and falls through to Strategy 2.
             qAddDependentFile binaryPath
+            let srcPath = "tools/sky-ffi-inspect-rs/src/main.rs"
+            srcExists <- runIO $ doesFileExist srcPath
+            when srcExists $ qAddDependentFile srcPath
             bs <- runIO $ BS.readFile binaryPath
             bsExp <- FE.bsToExp bs
             [| [("sky-ffi-inspect-rs", $(return bsExp))] |]
         else do
-            -- Strategy 2: fall back to source tree embed
-            reportWarning $
-                "EmbeddedInspectorRust: no pre-built binary at " ++ binaryPath
-                ++ "; falling back to source-tree embed (first 'sky add' "
-                ++ "will do a slow cargo build).  Run 'cargo build --release' "
-                ++ "in tools/sky-ffi-inspect-rs/ before cabal build to avoid this."
+            -- Strategy 2: fall back to source tree embed (either no binary
+            -- or source files are newer)
+            let warn = if binExists
+                    then "EmbeddedInspectorRust: pre-built binary at " ++ binaryPath
+                         ++ " is stale (source files are newer); falling back to "
+                         ++ "source-tree embed for correct TH dependency tracking."
+                    else "EmbeddedInspectorRust: no pre-built binary at " ++ binaryPath
+                         ++ "; falling back to source-tree embed (first 'sky add' "
+                         ++ "will do a slow cargo build).  Run 'cargo build --release' "
+                         ++ "in tools/sky-ffi-inspect-rs/ before cabal build to avoid this."
+            reportWarning warn
             EmbedDir.embedDirFiltered "tools/sky-ffi-inspect-rs" ["target"]
     )
 
@@ -136,6 +160,10 @@ materialiseInspector root bin hashFile cache = do
                     let bin' = root </> "target" </> "debug" </> "sky-ffi-inspect-rs"
                     perms <- getPermissions bin'
                     setPermissions bin' (setOwnerExecutable True perms)
+                    -- Also copy to the canonical bin path so subsequent
+                    -- ensureInspectorRust calls (which check doesFileExist bin)
+                    -- find the freshly compiled binary, not a stale one.
+                    copyFile bin' bin
                     writeFile hashFile inspectorRustHash
                     return (Right bin')
                 _ ->

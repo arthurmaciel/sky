@@ -85,6 +85,18 @@ data FnInfo = FnInfo
         -- wrapper-call side.
     , _fnResultSkyTypes :: [String]
         -- ^ Same shape, for results.
+    , _fnRustParamTypes :: [String]
+        -- ^ Per-param Rust type override. Populated from the
+        -- inspector's per-Param rustType field. Used by
+        -- resolveRustType to qualify opaque types without the
+        -- per-crate case blocks. Entry is "" when unknown.
+    , _fnRustResultTypes :: [String]
+        -- ^ Same shape, for results.
+    , _fnRecvRustType :: String
+        -- ^ Rust type override for the receiver type. Populated
+        -- from the inspector's recvRustType field. Used by
+        -- resolveRustType for static method receiver resolution.
+        -- Entry is "" when unknown.
     }
     deriving (Show)
 
@@ -105,8 +117,8 @@ instance A.FromJSON FnInfo where
         results <- o A..: "results" >>= mapM parseParamFull
         FnInfo
             <$> o A..: "name"
-            <*> pure (map (\(n, t, _) -> (n, t)) params)
-            <*> pure (map (\(n, t, _) -> (n, t)) results)
+            <*> pure (map (\(n, t, _, _) -> (n, t)) params)
+            <*> pure (map (\(n, t, _, _) -> (n, t)) results)
             <*> o A..:? "variadic" A..!= False
             <*> o A..: "effect"
             <*> o A..:? "recvType" A..!= ""
@@ -114,14 +126,18 @@ instance A.FromJSON FnInfo where
             <*> o A..:? "isField" A..!= False
             <*> o A..:? "isFieldSet" A..!= False
             <*> o A..:? "isPkgVar" A..!= False
-            <*> pure (map (\(_, _, s) -> s) params)
-            <*> pure (map (\(_, _, s) -> s) results)
+            <*> pure (map (\(_, _, s, _) -> s) params)
+            <*> pure (map (\(_, _, s, _) -> s) results)
+            <*> pure (map (\(_, _, _, r) -> r) params)
+            <*> pure (map (\(_, _, _, r) -> r) results)
+            <*> o A..:? "recvRustType" A..!= ""
       where
         parseParamFull = A.withObject "param" $ \o -> do
             n <- o A..:? "name" A..!= ""
             t <- o A..: "type"
             s <- o A..:? "skyType" A..!= ""
-            return (n, t, s)
+            r <- o A..:? "rustType" A..!= ""
+            return (n, t, s, r)
 
 
 instance A.FromJSON PkgInfo where
@@ -915,37 +931,11 @@ emitRustFile kernelName pkg =
   where
     -- | Resolve a Sky type string to a Rust type, preferring known
     -- concrete types; for opaque types, qualify with the crate path.
-    resolveRustType crate st =
+    resolveRustType _crate st rtOverride =
         let mapped = skyTypeToRust st
         in if mapped /= "String" then mapped
-           else -- Opaque type: try to qualify with the crate path.
-                case crate of
-                    "uuid" -> case st of
-                        "Uuid"       -> "uuid::Uuid"
-                        "Hyphenated" -> "uuid::fmt::Hyphenated"
-                        "Simple"     -> "uuid::fmt::Simple"
-                        "Urn"        -> "uuid::fmt::Urn"
-                        "Braced"     -> "uuid::fmt::Braced"
-                        "Variant"    -> "uuid::Variant"
-                        "Version"    -> "uuid::Version"
-                        "Timestamp"  -> "uuid::Timestamp"
-                        _            -> "String"
-                    "same_file" -> case st of
-                        "Handle" -> "same_file::Handle"
-                        "File"   -> "same_file::File"
-                        _        -> "String"
-                    "version_check" -> case st of
-                        "Version" -> "version_check::Version"
-                        "Channel" -> "version_check::Channel"
-                        "Date"    -> "version_check::Date"
-                        _        -> "String"
-                    "os_info" -> case st of
-                        "Type"     -> "os_info::Type"
-                        "Info"     -> "os_info::Info"
-                        "Bitness"  -> "os_info::Bitness"
-                        "Version"  -> "os_info::Version"
-                        _          -> "String"
-                    _ -> "String"
+           else if not (null rtOverride) then rtOverride
+           else "String"
 
     emitRustFnSimple (i, fn) =
         let skyName   = lowerFirst (_fnName fn)
@@ -958,11 +948,19 @@ emitRustFile kernelName pkg =
             results   = _fnResults fn
             paramSkyTypes = _fnParamSkyTypes fn ++ repeat ""
             nParams = length params
-            paramTypes = [ resolveRustType crateImport st | (_, st) <- take nParams (zip [0::Int ..] paramSkyTypes) ]
+            rawRustParamTypes = _fnRustParamTypes fn
+            rawRustResultTypes = _fnRustResultTypes fn
+            nRawRustParam = length rawRustParamTypes
+            nRawRustResult = length rawRustResultTypes
+            paramTypes = [ resolveRustType crateImport st
+                            (if j < nRawRustParam then rawRustParamTypes !! j else "")
+                         | (j, st) <- zip [0::Int ..] (take nParams paramSkyTypes) ]
             paramDecl = if null paramTypes then "_: ()"
                         else intercalate ", " [ "arg" ++ show j ++ ": " ++ t | (j, t) <- zip [0..] paramTypes ]
             retInner = case results of
-                ((_, rt):_) -> if null rt then "SkyError" else resolveRustType crateImport rt
+                ((_, rt):_) -> if null rt then "SkyError"
+                               else resolveRustType crateImport rt
+                                    (if nRawRustResult > 0 then rawRustResultTypes !! 0 else "")
                 _           -> "()"
             retType = case _fnEffect fn of
                 "effectful" -> "SkyTask<SkyError, " ++ retInner ++ ">"
@@ -984,6 +982,7 @@ emitRustFile kernelName pkg =
             -- resolved Rust type.
             argCall j =
                 let resolvedTy = resolveRustType crateImport (paramSkyTypes !! j)
+                                    (if j < nRawRustParam then rawRustParamTypes !! j else "")
                     base = arg j
                 in if resolvedTy == "i64" || resolvedTy == "f64"
                    then base ++ ".try_into().unwrap()"
@@ -996,7 +995,7 @@ emitRustFile kernelName pkg =
                     let restArgs = intercalate ", " (map argCall [1..nParams - 1])
                     in "arg0." ++ fnName ++ "(" ++ restArgs ++ ")"
                 | isStaticFn =
-                    let recvResolved = resolveRustType crateImport recvType
+                    let recvResolved = resolveRustType crateImport recvType (_fnRecvRustType fn)
                     in recvResolved ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
                 | otherwise =
                     if null params then crateImport ++ "::" ++ fnName ++ "()"

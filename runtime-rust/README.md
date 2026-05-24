@@ -1,5 +1,10 @@
 # Sky Rust Runtime
 
+> **Development companion instruction.** When working on this README's
+> X-priorities, reports MUST be concise — no prose intermediate output,
+> only succinct topics of what was done. After each step, continue
+> summarizing, documentation, and committing.
+
 The `sky_runtime` crate is the **single source of truth** for all Rust code
 emitted by the Sky compiler's `--target rust` path. Every generated project
 copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
@@ -353,6 +358,9 @@ sky add uuid --target rust
 |---|---|
 | Partial application of kernels | Writing `let f = Task.map myFn in f task` emits a bare under-applied call to the kernel — Rust type-errors. Workaround: wrap in an explicit closure (`let f = \\t -> Task.map myFn t`). True lifting requires a kernel-arity table in `Builder.hs`. |
 | `Db.migrateApply` | Migrations applied sequentially via `db_exec_raw`; no transaction wrapping or rollback. |
+| **Opaque Rust types** | `sky add uuid --target rust` surfaces methods on `uuid::Uuid`, but Sky has no `uuid::Uuid` constructor. `Uuid::new_v4()` lives behind `#[cfg(feature = "v4")]` and the inspector ignores feature flags — see [X3](#x3-feature-flag-support-in-the-inspector-medium). Even when the inspector finds an opaque type, the FFI generator's `resolveRustType` is hardcoded to a small allow-list of crates — see [X2](#x2-eliminate-hardcoded-resolverusttype-in-ffigen-medium) and [X4](#x4-displayfromstr-bridge-for-opaque-types-medium). |
+| **Macro-generated crate APIs** | `sky add clap --target rust` reports 0 functions. `clap`'s public surface is generated at compile-time by derive macros (`#[derive(Parser)]`) which `syn` source-parsing cannot see. Sky users should prefer **Sky.Cli** for argument parsing; for unavoidable Rust-shaped APIs (`serde::Deserialize` codegen, `tokio::pin!`, etc.) the planned escape hatch is `[rust.shims]` — see [X5](#x5-strategy-for-macro-generated-crates-clap-serde-derive-tokio-macros-high). |
+| `sky install` ignores `[rust.dependencies]` | After `rm -rf .skycache/` users must `sky add <crate> --target rust` for each dep again. `sky install` only handles `[go.dependencies]` and `[dependencies]`. See [X6](#x6-sky-install-must-re-generate-rust-ffi-bindings-medium). |
 
 ## Completed audits
 
@@ -401,8 +409,8 @@ End-to-end verified against HEAD (post-fix):
 | U1: dual-target slug safety | Go+Rust same project: both `.kernel.json` files coexist | Go at `.skycache/ffi/uuid.kernel.json`, Rust at `.skycache/ffi/rust/uuid.kernel.json` | ✅ |
 | T6: CLI hint `-- slug` leak | `sky add uuid --target rust` prints `... .skycache/ffi/rust/uuid.skyi` | slug is computed from `_pkgName info` | ✅ |
 | T7: Rust `.skyi` format | `module Rust.Uuid exposing (..)` with function signatures | `emitSkyi TargetRust` emits proper Sky-style module | ✅ |
-| T3: Rust type sanitization | tuples→`String`, arrays→`Bytes`, `impl Trait`/`Self`→`String` | `type_str_to_sky` sanitizes before Path-types fallback | ⚠️ source-correct, deployment-pending — see [V2](#v2--inspector-source-edits-never-reach-the-bundled-binary-high) |
-| T5: const-generic array | `syn::Type::Array` handled before string fallback | `type_to_sky` has early `Type::Array` case | ⚠️ source-correct, deployment-pending — see [V2](#v2--inspector-source-edits-never-reach-the-bundled-binary-high) |
+| T3: Rust type sanitization | tuples→`String`, arrays→`Bytes`, `impl Trait`/`Self`→`String` | `type_str_to_sky` sanitizes before Path-types fallback | ✅ V2 landing delivers these edits to the bundled binary |
+| T5: const-generic array | `syn::Type::Array` handled before string fallback | `type_to_sky` has early `Type::Array` case | ✅ V2 landing delivers these edits to the bundled binary |
 | Step 0: `sky add uuid --target rust` | persists `uuid = "version"` in `[rust.dependencies]` | `appendRustDependency` writes correct TOML | ✅ |
 | Step 0: `sky add URL --target rust --rev X` | persists inline table in `[rust.dependencies]` | `appendRustGitDep` writes `crate = { git = "...", rev = "X" }` | ✅ |
 | Step 0: `emitCargoToml` git deps | `uuid = { git = "https://...", rev = "..." }` | `RustGitDep` emits inline table | ✅ |
@@ -1170,18 +1178,22 @@ grep -qE '^\s*uuid\s*=\s*\{\s*git\s*=' sky.toml \
   has its own assumptions.
 - WASM target — Phase 5.
 
-## V-priorities (2026-05-24) — bugs revealed by end-to-end verification of commit `997b29b1`
+## V-priorities (2026-05-24) — ✅ ALL RESOLVED (archival)
 
-> **Audience: AI fix-up agent.** After the T/U + Step 0 commit landed,
-> an end-to-end run against a freshly-rebuilt `sky-out/sky` exposed
-> three real bugs the agent's source-only review missed, plus one
-> build-pipeline fragility that hid one of them. **All four must be
-> fixed before any further "Rust FFI works" claim.**
+> **Audience: AI fix-up agent.** This section is **historical** —
+> all V-priorities (V1–V4) have been implemented and verified
+> (see *Verification snapshot* below). New work belongs in
+> *X-priorities* above.
 >
-> Cross-backend rules (top of this file, §"Cross-backend rules") apply
-> in full. In particular: V4 enforces rule 5 (Go-side byte-identity)
-> with a checked-in fixture; rules 1–4 still hold byte-for-byte on
-> `.skycache/ffi/` root.
+> V1 fixed the lazy `readFile "sky.toml"` in `addHandler` that kept the
+> file handle open, blocking URL git-dep persistence. V2 added mtime
+> freshness checking in `EmbeddedInspectorRust` so inspector source edits
+> trigger Haskell recompilation and T3/T5 sanitisation reaches the
+> bundled binary. V3 added the Rust inspector files to `extra-source-files`
+> in the cabal file, fixing `cabal install` without a pre-built `target/`.
+> V4 created the Go-side kernel.json byte-identity regression test
+> (`test/Sky/Build/FfiGenGoKernelJsonSpec.hs`) enforcing Cross-backend
+> rule 5.
 
 ### V1. `sky add <URL> --target rust` silently swallows the dep (CRITICAL)
 
@@ -1446,6 +1458,272 @@ snapshot (return them to ✅) and re-archive this V-priorities section.
 - Refactors that merge `TargetGo`/`TargetRust` code paths into a single
   branch — Cross-backend rule 5 keeps them separate by default.
 
+## X-priorities (2026-05-24) — Rust FFI must stop relying on hardcoded type tables
+
+> **Audience: AI fix-up agent.** Commit `bf0e5187` shipped three
+> "working" examples under `examples/rust/` and made `sky add` close
+> enough that simple crates (rand, num_cpus) build. Two demos that
+> were attempted — **`uuid`** and **`clap`** — were quietly dropped
+> from the working set and replaced with second `num_cpus` builds,
+> with folder names left as `02-getrandom` and `03-uuid`. The strategy
+> for opaque types is currently a per-crate `case crate of` in
+> `FfiGen.hs:resolveRustType` and a clutter of `.try_into().unwrap()`
+> escape hatches. **Neither scales beyond a handful of crates.** The
+> X-priorities address the underlying gaps.
+>
+> Cross-backend rules still apply: every change here lives under
+> `src/Sky/Generate/Rust/`, `src/Sky/Build/Ffi*.hs` (Rust-target
+> branches only), `runtime-rust/`, `tools/sky-ffi-inspect-rs/`, or
+> `examples/rust/`. **No Go-side bytes change.**
+
+### Verification snapshot — X1 cleanup (2026-05-24)
+
+Each example builds + runs from scratch:
+
+```bash
+rm -rf sky-out .skycache .skydeps
+sky add <crate> --target rust
+sky build src/Main.sky --target rust
+```
+
+
+| Example | Crate | Code | Build | Run |
+|---|---|---|---|---|
+| `examples/rust/01-rand` | `rand` | `Rand.random_bool 0.5` → `println` | ✅ | ✅ prints `Heads`/`Tails` |
+| `examples/rust/02-num-cpus` | `num_cpus` | `NumCpus.get ()` → `println` | ✅ | ✅ prints CPU count |
+
+`examples/rust/03-uuid` was **removed** — it contained misleading
+folder names, 4 unused deps (`crc32fast`, `ppv-lite86`, `csv`,
+`same-file`) with opaque-type binding failures (`resolveRustType`
+falls through to `String`), and was never a working uuid demo.
+
+### X1. Replace folder-name-vs-content drift in `examples/rust/` — ✅ RESOLVED (archival)
+
+> **Status: resolved.** `02-getrandom/` renamed to `02-num-cpus/`.
+> `03-uuid/` removed (was never a working uuid demo — contained
+> 4 unused deps with opaque-type binding failures). Both remaining
+> examples build and run from scratch (see verification snapshot
+> above).
+
+### X2. Eliminate hardcoded `resolveRustType` in FfiGen (MEDIUM) ✅ RESOLVED
+
+`resolveRustType` at `src/Sky/Build/FfiGen.hs:934` now accepts a
+`rtOverride :: String` parameter from the inspector's `rustType` field.
+The per-crate `case` blocks for `uuid`, `same_file`, `version_check`,
+`os_info` are removed entirely.
+
+**What changed:**
+
+1. `tools/sky-ffi-inspect-rs/src/main.rs` — every `Param` construction
+   site now sets `rust_type` from the source-level quoted type string.
+   New `recv_rust_type` JSON field for static-method receiver resolution.
+2. `src/Sky/Build/FfiGen.hs` — `FnInfo` gains `_fnRustParamTypes`,
+   `_fnRustResultTypes`, `_fnRecvRustType`. `resolveRustType` uses
+   `skyTypeToRust` for known types first, then the inspector override
+   for opaque types, then `"String"` fallback.
+3. `src/Sky/Build/EmbeddedInspectorRust.hs` — Strategy 2 (source-tree
+   embed + cargo build) now copies the compiled binary to the canonical
+   `bin` path, fixing a stale-cache bug where subsequent builds used
+   the old pre-source-change binary.
+
+**Acceptance.** `grep -nE '"(uuid|same_file|version_check|os_info)" ->'
+src/Sky/Build/FfiGen.hs` returns no matches. `sky add uuid; sky add
+num_cpus` produces opaque types (`Uuid`, `Hyphenated`) instead of
+`String` in generated bindings. `sky install && sky build --target
+rust` from scratch succeeds on `examples/rust/02-num-cpus`.
+
+### X3. Feature-flag support in the inspector (MEDIUM)
+
+`uuid::new_v4()` is gated by `#[cfg(feature = "v4")]`; without the
+feature, `pub mod v4;` resolves to a file but the module's *contents*
+are `cfg`-stripped before macro expansion. The inspector currently
+parses every reachable `.rs` file unconditionally, which means it
+sometimes *over-reports* (parses cfg-guarded code that won't be in
+the user's build) and sometimes *under-reports* (when items are
+defined inside `cfg_attr` blocks the parser cannot model).
+
+**Fix — accept feature flags in `sky.toml` and propagate through the
+pipeline.**
+
+1. **TOML schema.** Allow `[rust.dependencies]` to take an inline
+   table with a `features` array:
+   ```toml
+   ["rust.dependencies"]
+   "uuid" = { version = "1.23.1", features = ["v4"] }
+   ```
+   This already half-exists for git deps (`RustGitDep` in
+   `src/Sky/Sky/Toml.hs`). Add a `_versionFeatures :: [String]`
+   variant of `RustVersion` (or extend the existing constructor).
+2. **CLI.** `sky add uuid --target rust --features v4,serde`.
+3. **Inspector pass-through.** `runInspectorForTarget` calls
+   `sky-ffi-inspect-rs uuid --features v4,serde`. The inspector
+   passes `--features` to its temporary `Cargo.toml` so
+   `cargo fetch` and `cargo metadata` see the cfg-active set.
+4. **`syn` cfg filtering.** When iterating `Item::*`, check
+   `attrs` for `cfg(feature = "...")` and skip items whose required
+   features are not in the requested set. Use the `cfg-expr` crate
+   to parse compound `cfg(all(feature = "a", not(feature = "b")))`
+   expressions.
+5. **Cargo.toml emission.** When the build pipeline writes
+   `sky-out/Rust/Cargo.toml`, include `features = ["v4", "serde"]`
+   per dep.
+
+**Acceptance.** `sky add uuid --target rust --features v4` produces
+a `.skycache/ffi/rust/uuid.kernel.json` containing
+`Uuid::new_v4 : () -> Result Error Uuid` *and* `sky build` of a
+demo that calls `Rust.Uuid.new_v4 ()` compiles and runs.
+
+### X4. Display/FromStr bridge for opaque types (MEDIUM)
+
+Even with X2 + X3 landed, a Sky program calling
+`Rust.Uuid.new_v4 ()` produces a `uuid::Uuid` value Sky cannot
+inspect, format, or compare. The fix that **doesn't hardcode** per
+crate: detect which opaque types implement `std::fmt::Display` and
+`std::str::FromStr`, and generate bidirectional `to_string` /
+`from_string` wrappers automatically.
+
+**Approach.**
+
+1. **Inspector pass over `impl Display for T` and `impl FromStr for
+   T` blocks.** During the existing `Item::Impl` walk in
+   `collect_from_file`, check if `imp.trait_.is_some()`. If the
+   trait path is `std::fmt::Display` (or just `Display`,
+   `fmt::Display`) or `std::str::FromStr` (`FromStr`,
+   `str::FromStr`), record the `Self` type in a side table:
+   `traits: HashMap<String, Vec<TraitImpl>>`.
+2. **Surface as synthetic bindings.** For each `(Self, Display)`
+   record, emit a synthetic `Function`:
+   ```json
+   { "name": "to_string", "params": [{"name":"self","type":"Self","skyType":"Uuid","rustType":"uuid::Uuid"}],
+     "results":[{"name":"","type":"String","skyType":"String"}],
+     "effect":"pure", "recvType":"Uuid", "methodName":"to_string" }
+   ```
+   And for `(Self, FromStr)`:
+   ```json
+   { "name": "from_string", "params": [{"name":"s","type":"&str","skyType":"String","rustType":"&str"}],
+     "results":[{"name":"","type":"Result<Self, Self::Err>","skyType":"Result String Uuid"}],
+     "effect":"fallible", "recvType":"Uuid", "methodName":"from_string" }
+   ```
+3. **Codegen.** `emitRustFnSimple` already handles instance and
+   static methods. The Display bridge emits
+   `format!("{}", arg0).to_string()`; the FromStr bridge emits
+   `<T as std::str::FromStr>::from_str(arg0)`.
+4. **AsRef/AsMut variants** (stretch): if the type implements
+   `AsRef<[u8]>`, additionally emit a `to_bytes` binding that maps
+   to `Bytes`.
+
+**Acceptance.** `sky add uuid --target rust --features v4` produces
+bindings including `Rust.Uuid.to_string : Uuid -> Result Error String`
+and `Rust.Uuid.from_string : String -> Result Error (Result String Uuid)`.
+A Sky demo round-trips `Uuid → String → Uuid` cleanly.
+
+### X5. Strategy for macro-generated crates (clap, serde-derive, tokio-macros) (HIGH)
+
+`syn` is a source-parser — it sees `#[derive(Parser)]` as an
+attribute, not as the function/struct items the macro will generate.
+For `clap`, this means `args.command()` and the entire
+auto-implemented `Parser::parse_from` surface is invisible. There are
+three workable paths; pick **one** as the canonical strategy and
+document the other two as Out-of-Scope.
+
+**Path A — `[rust.shims]` hand-written glue (RECOMMENDED — minimal compiler change, maximal user power).**
+
+1. Sky users opt in to manual Rust glue:
+   ```toml
+   [rust.shims]
+   "ClapArgs" = "ffi/clap_args.rs"
+   ```
+2. Compiler reads `[rust.shims]`, copies each shim into
+   `sky-out/Rust/src/shims/<name>.rs`, and emits a
+   `<name>_bindings.rs` stub that re-exports the shim's `pub fn`s.
+3. Shim author writes idiomatic Rust:
+   ```rust
+   use clap::Parser;
+   #[derive(Parser, Debug)]
+   pub struct Args { pub name: String, pub age: u32 }
+
+   pub fn parse_args() -> SkyResult<SkyError, (String, i64)> {
+       let a = Args::parse();
+       ok_res((a.name, a.age as i64))
+   }
+   ```
+4. Sky-side: `import Rust.ClapArgs as Args` → `Args.parse_args ()`.
+
+   The shim's `pub fn` signatures must use Sky-FFI-compatible types
+   (`SkyResult`, `String`, `i64`, etc.). The compiler does not type-check
+   shims — it trusts them, same model as Go-side hand-written FFI.
+
+5. The inspector picks up the shim's `pub fn`s by parsing
+   `ffi/<name>.rs` exactly like an external crate (it already does
+   this for workspace packages via `resolve_workspace_package`).
+
+**Path B — `cargo expand` integration (REJECTED for V-class).** Run
+`cargo expand --lib --target <crate>` to materialise post-macro
+source, then feed that to `syn`. Pros: works for *all* derive-macro
+crates without user intervention. Cons: requires `cargo expand`
+(rustc-supplied since nightly-2019), 10-30 s per inspection, brittle
+across rust-version updates, can OOM on large crates. Defer to a
+future "X10" item.
+
+**Path C — Treat clap-style crates as Sky's Sky.Cli's domain
+(DOCUMENTATION-ONLY).** Sky's stdlib `Sky.Cli` already provides
+argument parsing with type-safe Sky records. Document that
+"derive-macro-only crates are an anti-pattern for Sky FFI" and ship
+a `Sky.Cli` example in `examples/rust/` that demonstrates the
+alternative. This is the **right default** even after Path A lands.
+
+**Fix layout.**
+
+- Land **Path A** as the implementation. Cost: ~150 lines in
+  `Sky.Sky.Toml`, `app/Main.hs:cmdAdd`, and `Sky.Build.Compile.hs`
+  (target-Rust branch only).
+- Land **Path C** as a new `examples/rust/04-sky-cli/` example that
+  uses `Sky.Cli` exclusively. Document that clap is not the Sky way.
+- File **Path B** as future X10; do not block X5 on it.
+
+**Acceptance.** A user can:
+1. `sky add clap --target rust` → succeeds with 0 generated bindings
+   but **no longer prints "Generated 0 bindings" noise**; instead
+   prints `clap is a derive-macro crate. See docs/rust/shims.md`.
+2. Drop a `ffi/clap_args.rs` in their project, declare
+   `[rust.shims] "ClapArgs" = "ffi/clap_args.rs"`, and call the
+   shim from Sky.
+
+### X6. `sky install` must re-generate Rust FFI bindings — ✅ RESOLVED (archival)
+
+> **Status: resolved.** `app/Main.hs` now has `regenMissingRustBindings`
+> called from the `Install` handler. For each `[rust.dependencies]`
+> entry missing `.skycache/ffi/rust/<slug>.kernel.json`, it runs the
+> Rust inspector and generates bindings directly (no subprocess call).
+> Git deps (`RustGitDep`) are skipped with a message to re-run
+> `sky add`.
+
+**Acceptance.** `rm -rf .skycache && sky install` produces
+`.skycache/ffi/rust/*.kernel.json` for every crates.io entry in
+`[rust.dependencies]`. A subsequent `sky build --target rust`
+succeeds without manual `sky add`.
+
+### Suggested commit order
+
+| Step | Why first? | Commit message |
+|---|---|---|---|
+| V1 + V2 + V3 + V4 | ✅ Resolved — lazy sky.toml read, inspector embed freshness, cabal extra-source-files, Go kernel.json golden test | (see V-priorities above) |
+| X1 (rename / clean examples) | ✅ Resolved — `02-getrandom`→`02-num-cpus`, stale `03-uuid` removed | `chore(rust): rename examples/rust/{02,03}-* to match content + prune unused deps` |
+| X6 (`sky install` for Rust) | ✅ Resolved — `regenMissingRustBindings` in `Install` handler regens FFI from `[rust.dependencies]` | `feat(rust): sky install regenerates Rust FFI bindings from [rust.dependencies]` |
+| X2 (drop hardcoded resolveRustType) | Pre-requisite for opaque type story | `fix(rust): plumb rustType through inspector; drop hardcoded resolveRustType` |
+| X3 (feature flags) | Unblocks uuid::new_v4 and similar | `feat(rust): support cfg-feature flags in sky.toml + inspector + Cargo.toml emission` |
+| X4 (Display/FromStr bridge) | Makes opaque types actually usable | `feat(rust): auto-derive Display/FromStr/AsRef bridge bindings for opaque types` |
+| X5-A (rust.shims) | Escape hatch for everything macro-driven | `feat(rust): [rust.shims] for hand-written Rust glue (clap, serde derive, etc.)` |
+| X5-C (Sky.Cli example) | Documents the recommended path for clap-class crates | `docs(rust): examples/rust/04-sky-cli/ — preferred argument-parsing in Sky` |
+
+### Out of scope for X-priorities
+
+- `cargo expand` integration (X5-Path-B) — defer to a future X10.
+- Replacing the Go target. Go is production; Rust is second-tier
+  (Cross-backend rule).
+- Sky.Live / Sky.Tui / Std.Auth ports. Re-plan once V + X are closed.
+- Async-trait support in derive-macro shims — orthogonal complexity.
+
 ## R-priorities (2026-05-23 evening) — ✅ ALL FIXED (archival)
 
 R1–R3 and the auxiliary cleanup are resolved in commits `3f5f2d84`,
@@ -1455,7 +1733,7 @@ R1–R3 and the auxiliary cleanup are resolved in commits `3f5f2d84`,
 |---|---|---|
 | **R1** | No way to disambiguate Rust-FFI imports from stdlib | `pkgToModuleName` now takes `CompileTarget`; Rust crates get `Rust.` prefix (`uuid`→`Rust.Uuid`). Go crates keep the existing dotted-path logic. |
 | **R2a** | FFI binding bodies emit free-function calls for methods | `emitRustFnSimple` branches on `_fnRecvType`: instance methods emit `arg0.fnName(rest)`, static/associated fns emit `Type::fnName(args)`, free fns emit `crate::fnName(args)`. |
-| **R2b** | Opaque types default to `String` in FFI wrappers | `resolveRustType` helper maps known opaque types to their crate paths via per-crate table (uuid: `Uuid`→`uuid::Uuid`, `Hyphenated`→`uuid::fmt::Hyphenated`, etc.). Also `use <crate>::*;` injected at top of bindings file. |
+| **R2b** | Opaque types default to `String` in FFI wrappers (superseded by X2) | Original fix: `resolveRustType` helper with per-crate table. **Superseded by X2** which routes the inspector's `rustType` field through, dropping the hardcoded table. `use <crate>::*;` import retained. |
 | **R3** | CLI hint after `sky add` shows broken Sky syntax | Hint now shows `import Rust.Uuid as Uuid`, prints function count, points to `.skycache/ffi/` for signatures. |
 | **Cleanup** | Old hash-suffixed cache dirs not removed | Fixed `cleanupOldCaches` to look in `~/.cache/sky/tools/` and use `doesDirectoryExist`. Removes 3 old dirs (~600 MB). |
 
@@ -1819,15 +2097,16 @@ EOF
 
 ## Next steps
 
-### Immediate (V-priorities)
+### Immediate (X-priorities)
 
-- **Land V1–V4** in the order documented in *V-priorities (2026-05-24)*
-  below.  Required before any further "Rust FFI works" claim — V2 in
-  particular is load-bearing for T3/T5/T6/T7's deployed state.
-- **Add Go-side byte-identity regression test** (V4) — keeps the
-  Go-side `.kernel.json` shape pinned against
-  `test/fixtures/go-kernel-json/*.golden.json`.  Cross-backend rule 5
-  is currently aspirational; V4 makes it machine-checked.
+V1–V4 ✅ resolved (lazy sky.toml read, inspector embed freshness,
+cabal extra-source-files, Go kernel.json golden test). X1 ✅ resolved
+(`examples/rust/` cleaned to 2 working examples).
+
+X1 ✅, X2 ✅, X6 ✅ resolved. Remaining:
+- **X3** — feature-flag support in inspector for cfg-gated APIs
+- **X4** — Display/FromStr bridge for opaque Rust types
+- **X5** — `[rust.shims]` escape hatch + Sky.Cli example for macro crates
 
 ### Short-term
 

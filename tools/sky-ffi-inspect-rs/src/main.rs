@@ -26,6 +26,8 @@ struct Param {
     ty: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     sky_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    rust_type: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -39,6 +41,8 @@ struct Function {
     exported: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     recv_type: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    recv_rust_type: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     method_name: String,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -297,6 +301,7 @@ fn collect_from_file(
                             if matches!(field.vis, Visibility::Public(_)) {
                                 let field_name = field.ident.as_ref().unwrap().to_string();
                                 let field_ty = type_to_sky(&field.ty, type_aliases);
+                                let field_rust = quote::quote! { #field.ty }.to_string();
                                 let sn = struct_name.clone();
 
                                 functions.push(Function {
@@ -305,16 +310,19 @@ fn collect_from_file(
                                         name: "self".into(),
                                         ty: sn.clone(),
                                         sky_type: type_str_to_sky(&sn, &type_aliases),
+                                        rust_type: sn.clone(),
                                     }],
                                     results: vec![Param {
                                         name: String::new(),
                                         ty: field_ty.clone(),
                                         sky_type: field_ty.clone(),
+                                        rust_type: field_rust.clone(),
                                     }],
                                     variadic: false,
                                     effect: "pure".into(),
                                     exported: true,
                                     recv_type: sn.clone(),
+                                    recv_rust_type: sn.clone(),
                                     method_name: field_name.clone(),
                                     is_field: true,
                                     is_field_set: false,
@@ -328,22 +336,26 @@ fn collect_from_file(
                                             name: "self".into(),
                                             ty: sn.clone(),
                                             sky_type: type_str_to_sky(&sn, &type_aliases),
+                                            rust_type: sn.clone(),
                                         },
                                         Param {
                                             name: "value".into(),
                                             ty: field_ty.clone(),
                                             sky_type: field_ty.clone(),
+                                            rust_type: field_rust.clone(),
                                         },
                                     ],
                                     results: vec![Param {
                                         name: String::new(),
                                         ty: String::new(),
                                         sky_type: String::new(),
+                                        rust_type: String::new(),
                                     }],
                                     variadic: false,
                                     effect: "pure".into(),
                                     exported: true,
-                                    recv_type: sn,
+                                    recv_type: sn.clone(),
+                                    recv_rust_type: sn,
                                     method_name: field_name,
                                     is_field: false,
                                     is_field_set: true,
@@ -466,15 +478,18 @@ fn inspect_fn(
                     name: "self".into(),
                     ty: fn_recv_type.clone(),
                     sky_type: type_str_to_sky(&fn_recv_type, type_aliases),
+                    rust_type: fn_recv_type.clone(),
                 });
             }
             syn::FnArg::Typed(pat_type) => {
                 let name = pat_to_name(&pat_type.pat);
-                let ty = type_to_sky(&pat_type.ty, type_aliases);
+                let sky = type_to_sky(&pat_type.ty, type_aliases);
+                let rust_ty = quote::quote! { #pat_type.ty }.to_string();
                 params.push(Param {
                     name,
-                    ty: ty.clone(),
-                    sky_type: ty.clone(),
+                    ty: sky.clone(),
+                    sky_type: sky.clone(),
+                    rust_type: rust_ty,
                 });
                 // Check for function pointers (effectful signal)
                 if is_fn_ptr_type(&pat_type.ty) {
@@ -495,6 +510,7 @@ fn inspect_fn(
                     name: String::new(),
                     ty: sky.clone(),
                     sky_type: sky,
+                    rust_type: ret_ty_str.clone(),
                 });
             } else if ret_ty_str == "()" || ret_ty_str.is_empty() {
                 // void return — no results
@@ -503,6 +519,7 @@ fn inspect_fn(
                     name: String::new(),
                     ty: sky.clone(),
                     sky_type: sky,
+                    rust_type: ret_ty_str.clone(),
                 });
             }
         }
@@ -521,7 +538,8 @@ fn inspect_fn(
         variadic,
         effect,
         exported: matches!(item_fn.vis, Visibility::Public(_)),
-        recv_type: fn_recv_type,
+        recv_type: fn_recv_type.clone(),
+        recv_rust_type: fn_recv_type,
         method_name,
         is_field,
         is_field_set,
