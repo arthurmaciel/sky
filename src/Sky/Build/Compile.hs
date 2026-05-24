@@ -3361,24 +3361,30 @@ copyRustRuntime outDir = do
     let targetDir = outDir </> "Rust" </> "src" </> "sky_runtime"
     createDirectoryIfMissing True targetDir
     exePath <- System.Environment.getExecutablePath
-    let candidates =
-            [ takeDirectory exePath </> ".." </> "runtime-rust" </> "src" </> "sky_runtime"
-            , takeDirectory exePath </> ".." </> ".." </> "runtime-rust" </> "src" </> "sky_runtime"
-            , "runtime-rust" </> "src" </> "sky_runtime"
-            ]
-    mSrcDir <- findM doesDirectoryExist candidates
+    -- Walk up from the exe directory looking for runtime-rust/src/sky_runtime/
+    let dir = takeDirectory exePath
+        walkUp d = do
+            let candidate = d </> "runtime-rust" </> "src" </> "sky_runtime"
+            ok <- doesDirectoryExist candidate
+            if ok then return (Just candidate) else
+                if takeDirectory d == d then return Nothing  -- reached filesystem root
+                else walkUp (takeDirectory d)
+    mSrcDir <- walkUp dir
     case mSrcDir of
-        Nothing -> putStrLn "  [warn] could not locate runtime-rust/src/sky_runtime/"
+        Nothing -> do
+            -- Fallback: try cwd-relative path
+            cwdOk <- doesDirectoryExist "runtime-rust/src/sky_runtime"
+            if cwdOk then do
+                files <- System.Directory.listDirectory "runtime-rust/src/sky_runtime"
+                let rsFiles = filter (\f -> takeExtension f == ".rs") files
+                mapM_ (\name -> copyFile ("runtime-rust/src/sky_runtime" </> name) (targetDir </> name)) rsFiles
+                putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " files)"
+            else putStrLn "  [warn] could not locate runtime-rust/src/sky_runtime/"
         Just srcDir -> do
             files <- System.Directory.listDirectory srcDir
             let rsFiles = filter (\f -> takeExtension f == ".rs") files
             mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) rsFiles
             putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " files)"
-  where
-    findM _ [] = return Nothing
-    findM f (x:xs) = do
-        exists <- f x
-        if exists then return (Just x) else findM f xs
 
 
 -- | Collect Go imports needed
