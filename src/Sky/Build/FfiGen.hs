@@ -42,11 +42,8 @@ module Sky.Build.FfiGen
     , slugify
     , _pkgName
     , _pkgVersion
-    , runInspectorForShim
     , PkgInfo(..)
     , FnInfo(..)
-    , shimReexportStub
-    , materialiseShim
     ) where
 
 import qualified Data.Aeson as A
@@ -218,23 +215,6 @@ runInspectorMultiForTarget target pkgPaths features = do
                             Right _ -> mapM (\p -> runInspectorForTarget target p features) pkgPaths
                             Left e  -> return (map (const (Left $ inspName ++ ": json: " ++ e)) pkgPaths)
 
-
--- | Run the Rust inspector in `--shim` mode: parse a single `.rs` file
--- and return its public functions as PkgInfo.
-runInspectorForShim :: String -> FilePath -> IO (Either String PkgInfo)
-runInspectorForShim name shimPath = do
-    resolved <- resolveInspector TargetRust
-    case resolved of
-        Left e    -> return (Left e)
-        Right bin -> do
-            absPath <- canonicalizePath shimPath
-            let cmd' = bin ++ " --shim " ++ name ++ " " ++ absPath
-            (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
-            if null out
-                then return (Left $ "sky-ffi-inspect-rs (shim mode): empty output; stderr: " ++ err)
-                else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
-                    Right (pkg :: PkgInfo) -> return (Right pkg)
-                    Left e                -> return (Left $ "sky-ffi-inspect-rs (shim mode): json: " ++ e)
 
 inspectorName :: CompileTarget -> String
 inspectorName TargetGo   = "sky-ffi-inspect"
@@ -2136,23 +2116,7 @@ slugify :: String -> String
 slugify = map (\c -> if c `elem` ("./" :: String) then '_' else c)
 
 
--- | Rust snake_case conversion matching Sky.Generate.Rust.Builder.toSnakeCase.
-shimToSnakeCase :: String -> String
-shimToSnakeCase [] = []
-shimToSnakeCase (c:cs) = toLower c : go cs
-  where
-    go [] = []
-    go (c:cs)
-        | c == '_' && not (null cs) = '_' : toLower (head cs) : go (tail cs)
-        | isUpper c = '_' : toLower c : go cs
-        | otherwise = c : go cs
-
-
--- | Generate a re-export stub for a shim's _bindings.rs.
--- Each shim function already returns SkyResult<SkyError, T>, so instead of
--- the ok_res()-wrapped wrapper from 'generateBindings', we emit explicit
--- re-exports with the kernel-prefixed name that the Rust codegen expects.
--- | Strip extra spaces from Rust type strings produced by quote!.
+-- | Strip extra spaces from Rust type strings produced by the inspector.
 -- The Rust inspector emits types like "SkyResult < SkyError , (String , i64) >"
 -- which need normalization to valid Rust: "SkyResult<SkyError, (String, i64)>".
 normalizeRustType :: String -> String
@@ -2170,65 +2134,4 @@ normalizeRustType s =
     go (c:cs) = c : go cs
 
 
-shimReexportStub :: String -> PkgInfo -> String
-shimReexportStub shimName pkg =
-    let lowerName = map (\c -> if c == '-' then '_' else c) (map toLower shimName)
-        shimMod   = "crate::shims::" ++ lowerName
-        fns       = _pkgFns pkg
-        lines'    = [ "use crate::*;"
-                    , ""
-                    , "// Auto-generated wrapper for shim '" ++ shimName ++ "'"
-                    , "// Each wrapper delegates to the shim's native function,"
-                    , "// wrapping zero-arg fns with `_: ()` to match the"
-                    , "// codegen convention (all FFI calls pass `()` for 0 args)."
-                    ]
-        wrappers  = map (\fn ->
-            let fnName   = _fnName fn
-                rustName = shimToSnakeCase (shimName ++ "_" ++ fnName)
-                params   = _fnParams fn
-                nParams  = length params
-                nRawRustParams = length (_fnRustParamTypes fn)
-                rawRustResultTypes = _fnRustResultTypes fn
-                -- Build param declarations: use raw Rust type if available,
-                -- otherwise derive from Sky type via skyTypeToRust.
-                paramDecls = if nParams == 0
-                             then ["_: ()"]
-                             else [ "arg" ++ show j ++ ": "
-                                    ++ let rt = if j < nRawRustParams
-                                                then _fnRustParamTypes fn !! j
-                                                else ""
-                                       in if null rt
-                                          then skyTypeToRust (snd (params !! j))
-                                          else normalizeRustType rt
-                                  | j <- [0..nParams - 1] ]
-                paramStr  = intercalate ", " paramDecls
-                callArgs  = if nParams == 0 then "" else intercalate ", " [ "arg" ++ show j | j <- [0..nParams - 1] ]
-                call      = shimMod ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
-                retTy     = if null rawRustResultTypes then "()"
-                            else normalizeRustType (head rawRustResultTypes)
-            in "pub fn " ++ rustName ++ "(" ++ paramStr ++ ") -> " ++ retTy ++ " {\n    " ++ call ++ "\n}"
-            ) fns
-    in unlines (lines' ++ wrappers)
-
-
--- | Run the inspector on a single shim file, generate the .skyi / .kernel.json
--- FFI metadata and write the '_bindings.rs' re-export stub to
--- '.skycache/rust/<slug>_bindings.rs'.
---
--- Returns 'Right names' (the list of exported function names) on success, or
--- 'Left errMsg' on inspector / codegen failure.  This is the single source of
--- truth used by both the compile pipeline ('Compile.hs') and 'sky install'.
-materialiseShim :: String -> FilePath -> IO (Either String [String])
-materialiseShim shimName absShimPath = do
-    r <- runInspectorForShim shimName absShimPath
-    case r of
-        Left e -> return (Left e)
-        Right info -> do
-            names <- generateBindings TargetRust info
-            let slug    = slugify shimName
-                rsFile  = ".skycache/rust" </> slug ++ "_bindings.rs"
-                reexport = shimReexportStub shimName info
-            createDirectoryIfMissing True ".skycache/rust"
-            writeFile rsFile reexport
-            return (Right names)
 

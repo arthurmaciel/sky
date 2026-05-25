@@ -56,7 +56,6 @@ data SkyConfig = SkyConfig
     , _logLevel      :: !String           -- [log] level: debug | info (default) | warn | error
     , _envPrefix     :: !String           -- [env] prefix: namespace for runtime SKY_* env reads (default "SKY")
     , _sqlxTls       :: !String           -- [rust] sqlx_tls: "rustls" (default) | "native-tls"
-    , _rustShims     :: [(String, String)]-- [rust.shims] name → file path for hand-written Rust glue
     }
     deriving (Show)
 
@@ -89,7 +88,6 @@ defaultConfig = SkyConfig
     , _logLevel      = ""
     , _envPrefix     = ""
     , _sqlxTls       = "rustls"
-    , _rustShims     = []
     }
 
 
@@ -178,9 +176,6 @@ applyKeyValue section config key value = case section of
     "rust" -> case key of
         "sqlx_tls" -> config { _sqlxTls = value }
         _          -> config
-    -- [rust.shims] section: hand-written Rust glue files for macro-driven crates
-    "rust.shims" ->
-        config { _rustShims = _rustShims config ++ [(stripQuotes key, value)] }
     -- Top-level / [source] / [project] — project metadata.
     _ -> case key of
         "name"    -> config { _name = value }

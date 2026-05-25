@@ -1,0 +1,17 @@
+module Main exposing (main)
+
+-- Date/time via chrono — fully automatic FFI, no shims needed.
+-- All bindings are discovered by `cargo +nightly rustdoc --output-format json`.
+--
+-- Run:  sky add chrono --target rust
+--       sky run src/Main.sky --target rust
+
+import Rust.Chrono as Chrono
+import Std.Log exposing (println)
+
+main =
+    let
+        now = Chrono.local_now ()
+        formatted = Chrono.format now "%Y-%m-%d %H:%M:%S"
+    in
+    println ("Current date/time: " ++ formatted)

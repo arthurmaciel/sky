@@ -1457,9 +1457,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         let depToIdent = map (\c -> if Char.isAlphaNum c then c else '_')
                             depSlugs = [ depToIdent (fst dep) ++ "_bindings"
                                        | dep <- Toml._rustDeps config ]
-                            shimSlugs = [ FfiGen.slugify name ++ "_bindings"
-                                        | (name, _) <- Toml._rustShims config ]
-                            ffiSlugs = depSlugs ++ shimSlugs
+                            ffiSlugs = depSlugs
                         rawAliases <- readIORef globalKernelAlias
                         let kernelAliases = Map.mapKeys (\(cn, fn) -> (ModuleName._name cn, fn)) rawAliases
                             (rustCode, moduleFiles, usage) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases
@@ -1523,55 +1521,6 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                 copyFile srcPath' dstPath'
                                 putStrLn $ "   Copied " ++ srcPath'
                             ) (Toml._rustDeps config)
-                        -- Process [rust.shims] — copy hand-written glue files and generate bindings
-                        let shims = Toml._rustShims config
-                        unless (null shims) $ do
-                            let shimsDir = srcDir </> "shims"
-                            createDirectoryIfMissing True shimsDir
-                            shimModLines <- forM shims $ \(shimName, shimPath) -> do
-                                absShimPath <- System.Directory.canonicalizePath shimPath
-                                exists <- doesFileExist absShimPath
-                                if not exists
-                                    then do
-                                        putStrLn $ "   WARNING: shim " ++ shimName ++ " not found at " ++ shimPath
-                                        return Nothing
-                                    else do
-                                        -- Run inspector + generate .skyi, .kernel.json, _bindings.rs
-                                        r <- FfiGen.materialiseShim shimName absShimPath
-                                        case r of
-                                            Left e -> do
-                                                putStrLn $ "   WARNING: shim " ++ shimName ++ " inspector: " ++ e
-                                                return Nothing
-                                            Right names -> do
-                                                -- Copy the shim source file into the shims directory
-                                                let lowerName = map (\c -> if c == '-' then '_' else c) (map Char.toLower shimName)
-                                                    shimDest = shimsDir </> lowerName ++ ".rs"
-                                                copyFile absShimPath shimDest
-                                                putStrLn $ "   Shim " ++ shimName ++ ": " ++ show (length names) ++ " bindings"
-                                                return (Just lowerName)
-                            -- Write shims/mod.rs with pub mod declarations
-                            let shimModNames = catMaybes shimModLines
-                            unless (null shimModNames) $ do
-                                let shimModRs = "pub mod " ++ List.intercalate ";\npub mod " shimModNames ++ ";"
-                                writeFile (shimsDir </> "mod.rs") shimModRs
-                                putStrLn $ "   Wrote " ++ shimsDir </> "mod.rs"
-                                -- Add pub mod shims; to main.rs so the re-export
-                                -- bindings (*_bindings.rs) can resolve shims:: paths.
-                                mainContent <- readFile' mainRustPath
-                                let mainLines = lines mainContent
-                                    (before, after) = break (\l -> "pub use sky_runtime::*;" `List.isPrefixOf` l) mainLines
-                                    newMain = unlines (before ++ ["pub mod shims;"] ++ after)
-                                writeFile mainRustPath newMain
-                                putStrLn $ "   Patched " ++ mainRustPath
-                        -- Copy shim _bindings.rs files into sky-out/Rust/src/
-                        forM_ shims $ \(shimName, _) -> do
-                            let slug = FfiGen.slugify shimName
-                                srcPath' = ".skycache/rust" </> slug ++ "_bindings.rs"
-                                dstPath' = srcDir </> slug ++ "_bindings.rs"
-                            exists <- doesFileExist srcPath'
-                            when exists $ do
-                                copyFile srcPath' dstPath'
-                                putStrLn $ "   Copied shim bindings " ++ srcPath'
                         let cacheDir = ".skycache"
                         createDirectoryIfMissing True cacheDir
                         writeFile (cacheDir </> "source.hash") srcHash

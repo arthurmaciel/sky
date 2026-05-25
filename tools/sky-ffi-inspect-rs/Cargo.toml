@@ -1,13 +1,10 @@
 [package]
 name = "sky-ffi-inspect-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Rust crate inspector for Sky FFI — mirrors sky-ffi-inspect (Go)"
+description = "Rust crate inspector for Sky FFI — uses rustdoc JSON for complete API discovery including macro-generated items"
 
 [dependencies]
-syn = { version = "2", features = ["full", "extra-traits"] }
-cargo_metadata = "0.19"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-quote = "1"
 tempfile = "3"

@@ -979,27 +979,6 @@ regenMissingRustBindings deps = do
             putStrLn $ "   " ++ name ++ ": git dep -- run `sky add` manually"
 
 
--- | For each declared Rust shim missing its .skycache/ffi/rust/<slug>.kernel.json,
--- generate FFI bindings by running the inspector in shim mode.
-regenMissingShimBindings :: [(String, String)] -> IO ()
-regenMissingShimBindings shims = do
-    createDirectoryIfMissing True ".skycache/ffi/rust"
-    missing <- filterM (\(name, _) -> do
-        let slug = FfiGen.slugify name
-        not <$> doesFileExist (".skycache/ffi/rust/" ++ slug ++ ".kernel.json")
-        ) shims
-    forM_ missing $ \(shimName, shimPath) -> do
-        absPath <- canonicalizePath shimPath
-        exists <- doesFileExist absPath
-        if not exists
-            then putStrLn $ "   WARNING: shim '" ++ shimName ++ "' not found at " ++ shimPath
-            else do
-                r <- FfiGen.materialiseShim shimName absPath
-                case r of
-                    Left e  -> putStrLn $ "   " ++ shimName ++ ": " ++ e
-                    Right names -> putStrLn $ "   " ++ shimName ++ ": " ++ show (length names) ++ " bindings"
-
-
 -- | Resolve the inspector concurrency cap. Honours
 -- SKY_INSTALL_PARALLEL (clamped to 1..16). Defaults to
 -- min(numProcessors, 4): more than 4 risks RAM exhaustion on
@@ -1508,11 +1487,6 @@ runCommand cmd = case cmd of
         let rustDeps = Toml._rustDeps config'
         when (not (null rustDeps)) $
             regenMissingRustBindings rustDeps
-        -- Regen missing shim .skyi/.kernel.json so the type-checker can resolve
-        -- shim imports before the Sky compilation phase runs.
-        let shims = Toml._rustShims config'
-        when (not (null shims)) $
-            regenMissingShimBindings shims
         result <- Compile.compile config' path outDir
         case result of
             Left err -> return (Left err)
@@ -1551,9 +1525,6 @@ runCommand cmd = case cmd of
         let rustDeps = Toml._rustDeps config'
         when (not (null rustDeps)) $
             regenMissingRustBindings rustDeps
-        let shims = Toml._rustShims config'
-        when (not (null shims)) $
-            regenMissingShimBindings shims
         result <- Compile.compile config' path outDir
         case result of
             Left err -> return (Left err)
@@ -1607,9 +1578,6 @@ runCommand cmd = case cmd of
         let rustDeps = Toml._rustDeps config
         when (not (null rustDeps)) $
             regenMissingRustBindings rustDeps
-        let shims = Toml._rustShims config
-        when (not (null shims)) $
-            regenMissingShimBindings shims
         -- P0-1 (audit): sky check must be a superset of sky build. Run
         -- the full emit + `go build` so codegen-stage failures surface
         -- here instead of only when the user runs `sky build`. Without
@@ -1691,9 +1659,6 @@ runCommand cmd = case cmd of
         let rustDeps = Toml._rustDeps config'
         when (not (null rustDeps)) $
             regenMissingRustBindings rustDeps
-        let shims = Toml._rustShims config'
-        when (not (null shims)) $
-            regenMissingShimBindings shims
         result <- Compile.compile config' entryFile outDir
         -- Clean up the entry regardless of compile outcome. Pre-fix,
         -- a go-build exception skipped the cleanup line, leaving
@@ -1899,21 +1864,6 @@ runCommand cmd = case cmd of
             putStrLn $ "Installing " ++ show (length rustDeps) ++ " Rust dependency(ies)"
             regenMissingRustBindings rustDeps
             putStrLn $ "Rust dependencies installed."
-        -- Auto-regen shim bindings (unconditional on install, unlike regenMissingShimBindings)
-        let shims = Toml._rustShims config
-        unless (null shims) $ do
-            putStrLn $ "Installing " ++ show (length shims) ++ " Rust shim(s)"
-            forM_ shims $ \(shimName, shimPath) -> do
-                absPath <- canonicalizePath shimPath
-                exists <- doesFileExist absPath
-                if not exists
-                    then putStrLn $ "   WARNING: shim '" ++ shimName ++ "' not found at " ++ shimPath
-                    else do
-                        r <- FfiGen.materialiseShim shimName absPath
-                        case r of
-                            Left e       -> putStrLn $ "   " ++ shimName ++ ": " ++ e
-                            Right names  -> putStrLn $ "   " ++ shimName ++ ": " ++ show (length names) ++ " bindings"
-            putStrLn "Rust shims installed."
         case Toml._skyDeps config of
             [] -> return ()
             _  -> putStrLn "Sky dependencies installed."
