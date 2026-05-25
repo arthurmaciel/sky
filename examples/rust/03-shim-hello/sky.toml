@@ -1,0 +1,6 @@
+[project]
+name = "shim-hello"
+target = "rust"
+
+[rust.shims]
+"Greet" = "ffi/greet.rs"
