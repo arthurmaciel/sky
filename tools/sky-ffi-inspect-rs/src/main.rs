@@ -68,6 +68,28 @@ struct PkgInfo {
 
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Check for --shim mode: sky-ffi-inspect-rs --shim <name> <file>
+    if raw_args.len() >= 3 && raw_args[0] == "--shim" {
+        let shim_name = &raw_args[1];
+        let shim_path = &raw_args[2];
+        let result = inspect_shim_file(shim_name, &PathBuf::from(shim_path));
+        match serde_json::to_string_pretty(&result) {
+            Ok(s) => println!("{}", s),
+            Err(e) => {
+                let err = PkgInfo {
+                    pkg: shim_name.clone(),
+                    name: shim_name.clone(),
+                    version: String::new(),
+                    functions: vec![],
+                    errors: vec![format!("JSON serialization failed: {}", e)],
+                };
+                println!("{}", serde_json::to_string_pretty(&err).unwrap());
+            }
+        }
+        return;
+    }
+
     let mut features: Vec<String> = Vec::new();
     let mut crate_args: Vec<String> = Vec::new();
 
@@ -91,6 +113,7 @@ fn main() {
 
     if crate_args.is_empty() {
         eprintln!("Usage: sky-ffi-inspect-rs [--features f1,f2] <crate-name> [crate-name...]");
+        eprintln!("   or: sky-ffi-inspect-rs --shim <name> <file>");
         std::process::exit(1);
     }
 
@@ -118,6 +141,108 @@ fn main() {
 }
 
 // ── Crate inspection ────────────────────────────────────────────────────
+
+/// Parse a single `.rs` shim file and return its public functions as PkgInfo.
+/// The shim is treated as a standalone crate root — `collect_from_file` walks
+/// its `pub use` and `pub mod` re-exports recursively.
+fn inspect_shim_file(name: &str, path: &PathBuf) -> PkgInfo {
+    let src_dir = match path.parent() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return pkg_error(name, &format!("cannot determine parent directory of {}", path.display()));
+        }
+    };
+
+    let mut functions: Vec<Function> = Vec::new();
+    let mut type_aliases: HashMap<String, String> = HashMap::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut processed_mods: Vec<PathBuf> = Vec::new();
+    let mut display_types: HashSet<String> = HashSet::new();
+    let mut fromstr_types: HashSet<String> = HashSet::new();
+
+    collect_from_file(path, &src_dir, &mut functions, &mut type_aliases, &mut errors, &mut processed_mods, &mut display_types, &mut fromstr_types);
+
+    // Emit Display/FromStr bridge functions (same logic as parse_package)
+    emit_bridge_functions(&mut functions, &type_aliases, &mut HashSet::new(), &display_types, &fromstr_types);
+
+    PkgInfo {
+        pkg: name.to_string(),
+        name: name.to_string(),
+        version: String::new(),
+        functions,
+        errors,
+    }
+}
+
+/// Emit synthetic to_string / from_string bridge functions for types
+/// implementing Display / FromStr. Used by both parse_package and
+/// inspect_shim_file.
+fn emit_bridge_functions(
+    functions: &mut Vec<Function>,
+    type_aliases: &HashMap<String, String>,
+    bridge_emitted: &mut HashSet<String>,
+    display_types: &HashSet<String>,
+    fromstr_types: &HashSet<String>,
+) {
+    for ty in display_types.iter() {
+        let key = format!("to_string_{}", ty);
+        if !bridge_emitted.insert(key) { continue; }
+        let sky = type_str_to_sky(ty, type_aliases);
+        functions.push(Function {
+            name: "to_string".into(),
+            params: vec![Param {
+                name: "self".into(),
+                ty: ty.clone(),
+                sky_type: sky.clone(),
+                rust_type: ty.clone(),
+            }],
+            results: vec![Param {
+                name: String::new(),
+                ty: "String".into(),
+                sky_type: "String".into(),
+                rust_type: String::new(),
+            }],
+            variadic: false,
+            effect: "pure".into(),
+            exported: true,
+            recv_type: ty.clone(),
+            recv_rust_type: ty.clone(),
+            method_name: "to_string".into(),
+            is_field: false,
+            is_field_set: false,
+            is_pkg_var: false,
+        });
+    }
+    for ty in fromstr_types.iter() {
+        let key = format!("from_string_{}", ty);
+        if !bridge_emitted.insert(key) { continue; }
+        let sky = type_str_to_sky(ty, type_aliases);
+        functions.push(Function {
+            name: "from_string".into(),
+            params: vec![Param {
+                name: "s".into(),
+                ty: "&str".into(),
+                sky_type: "String".into(),
+                rust_type: "&str".into(),
+            }],
+            results: vec![Param {
+                name: String::new(),
+                ty: ty.clone(),
+                sky_type: sky.clone(),
+                rust_type: ty.clone(),
+            }],
+            variadic: false,
+            effect: "fallible".into(),
+            exported: true,
+            recv_type: ty.clone(),
+            recv_rust_type: ty.clone(),
+            method_name: "from_string".into(),
+            is_field: false,
+            is_field_set: false,
+            is_pkg_var: false,
+        });
+    }
+}
 
 fn inspect_crate(crate_name: &str, features: &[String]) -> PkgInfo {
     // Try workspace resolution first (fast path — already in this project)
@@ -241,65 +366,7 @@ fn parse_package(pkg: &cargo_metadata::Package, crate_name: &str) -> PkgInfo {
     collect_from_file(&source_path, &src_dir, &mut functions, &mut type_aliases, &mut errors, &mut processed_mods, &mut display_types, &mut fromstr_types);
 
     // ── X4: Emit synthetic Display/FromStr bridge functions (one per type) ──
-    let mut bridge_emitted: HashSet<String> = HashSet::new();
-    for ty in display_types.iter() {
-        let key = format!("to_string_{}", ty);
-        if !bridge_emitted.insert(key) { continue; }
-        let sky = type_str_to_sky(ty, &type_aliases);
-        functions.push(Function {
-            name: "to_string".into(),
-            params: vec![Param {
-                name: "self".into(),
-                ty: ty.clone(),
-                sky_type: sky.clone(),
-                rust_type: ty.clone(),
-            }],
-            results: vec![Param {
-                name: String::new(),
-                ty: "String".into(),
-                sky_type: "String".into(),
-                rust_type: String::new(),
-            }],
-            variadic: false,
-            effect: "pure".into(),
-            exported: true,
-            recv_type: ty.clone(),
-            recv_rust_type: ty.clone(),
-            method_name: "to_string".into(),
-            is_field: false,
-            is_field_set: false,
-            is_pkg_var: false,
-        });
-    }
-    for ty in fromstr_types.iter() {
-        let key = format!("from_string_{}", ty);
-        if !bridge_emitted.insert(key) { continue; }
-        let sky = type_str_to_sky(ty, &type_aliases);
-        functions.push(Function {
-            name: "from_string".into(),
-            params: vec![Param {
-                name: "s".into(),
-                ty: "&str".into(),
-                sky_type: "String".into(),
-                rust_type: "&str".into(),
-            }],
-            results: vec![Param {
-                name: String::new(),
-                ty: ty.clone(),
-                sky_type: sky.clone(),
-                rust_type: ty.clone(),
-            }],
-            variadic: false,
-            effect: "fallible".into(),
-            exported: true,
-            recv_type: ty.clone(),
-            recv_rust_type: ty.clone(),
-            method_name: "from_string".into(),
-            is_field: false,
-            is_field_set: false,
-            is_pkg_var: false,
-        });
-    }
+    emit_bridge_functions(&mut functions, &type_aliases, &mut HashSet::new(), &display_types, &fromstr_types);
 
     PkgInfo {
         pkg: pkg.name.clone(),
@@ -592,7 +659,8 @@ fn inspect_fn(
             syn::FnArg::Typed(pat_type) => {
                 let name = pat_to_name(&pat_type.pat);
                 let sky = type_to_sky(&pat_type.ty, type_aliases);
-                let rust_ty = quote::quote! { #pat_type.ty }.to_string();
+                let rust_ty_raw = &pat_type.ty;
+                let rust_ty = quote::quote! { #rust_ty_raw }.to_string();
                 params.push(Param {
                     name,
                     ty: sky.clone(),
@@ -745,13 +813,47 @@ fn type_str_to_sky(type_str: &str, aliases: &HashMap<String, String>) -> String 
 
     // Helper: extract generic from a base-name-matched string
     // e.g. "std::collections::HashMap<String,String>" matches HashMap
-    fn try_extract<'a>(s: &'a str, base: &str) -> Option<String> {
-        let base_angle = format!("{}<", base);
+    // Extract the generic inner content from a type like `base<inner>`.
+    // Only matches when `base` is the *outermost* type constructor — i.e. the
+    // occurrence of `base<` is at the very start of the string (modulo leading
+    // `&`, `*`, `mut ` prefixes and a `path::` qualifier).  This prevents
+    // `try_extract(s, "Vec")` from accidentally matching `Vec<T>` *inside*
+    // `SkyResult<SkyError, Vec<T>>`.
+    fn try_extract_outermost(s: &str, base: &str) -> Option<String> {
+        let base_angle  = format!("{}<",  base);
         let base_angle2 = format!("{} <", base);
-        // Look for "base<" anywhere in the string
-        if let Some(pos) = s.find(&base_angle) {
-            let rest = &s[pos + base_angle.len()..];
-            let mut depth = 0;
+
+        // Determine where the type name starts, skipping & / * / mut prefixes
+        // and an optional `path::` qualifier.
+        let skip_prefix = |s: &str| -> usize {
+            let mut i = 0;
+            // skip & and * and whitespace
+            while i < s.len() && (s.as_bytes()[i] == b'&' || s.as_bytes()[i] == b'*' || s.as_bytes()[i] == b' ') {
+                i += 1;
+            }
+            // skip "mut "
+            if s[i..].starts_with("mut ") { i += 4; }
+            // skip path qualifier (everything up to and including the last "::")
+            if let Some(rel) = s[i..].rfind("::") {
+                if !s[i + rel + 2..].contains("::") {
+                    // the part after the last "::" is the type name — skip the path
+                    if s[i..i + rel + 2].chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':' || c == '<' || c == '>' || c == ',') {
+                        i += rel + 2;
+                    }
+                }
+            }
+            i
+        };
+
+        let name_start = skip_prefix(s);
+        let tail = &s[name_start..];
+
+        let inner_from = |pattern: &str| -> Option<String> {
+            if !tail.starts_with(pattern) {
+                return None;
+            }
+            let rest = &tail[pattern.len()..];
+            let mut depth = 0usize;
             for (i, c) in rest.char_indices() {
                 match c {
                     '<' => depth += 1,
@@ -760,20 +862,25 @@ fn type_str_to_sky(type_str: &str, aliases: &HashMap<String, String>) -> String 
                     _ => {}
                 }
             }
-        }
-        if let Some(pos) = s.find(&base_angle2) {
-            let rest = &s[pos + base_angle2.len()..];
-            let mut depth = 0;
-            for (i, c) in rest.char_indices() {
-                match c {
-                    '<' => depth += 1,
-                    '>' if depth == 0 => return Some(rest[..i].trim().to_string()),
-                    '>' => depth -= 1,
-                    _ => {}
-                }
-            }
-        }
-        None
+            None
+        };
+
+        inner_from(&base_angle).or_else(|| inner_from(&base_angle2))
+    }
+
+    // Alias kept for call sites that intentionally want substring matching
+    // (none currently — all callers switch to try_extract_outermost).
+    fn try_extract<'a>(s: &'a str, base: &str) -> Option<String> {
+        try_extract_outermost(s, base)
+    }
+
+    // Word-boundary variant: only matches when the character immediately before
+    // `base<` (or `base <`) is NOT alphanumeric/underscore.  With the new
+    // `try_extract_outermost` approach this is now equivalent — the outermost
+    // check already guarantees we're at the type-name start, never inside a
+    // nested generic.  Kept as a named alias for clarity at the call site.
+    fn try_extract_word(s: &str, base: &str) -> Option<String> {
+        try_extract_outermost(s, base)
     }
 
     // Vec<T> → List T
@@ -786,13 +893,26 @@ fn type_str_to_sky(type_str: &str, aliases: &HashMap<String, String>) -> String 
         return format!("Maybe {}", type_str_to_sky(&inner, aliases));
     }
 
+    // SkyResult<E, A> → Result SkyE SkyA
+    // SkyResult<E, A> has the same generic order as Rust's Result<A, E>
+    // but with the error type first: E = error, A = ok.
+    if let Some(inner) = try_extract(&s, "SkyResult") {
+        let parts: Vec<&str> = split_top_level(&inner, ',');
+        let err_ty = if parts.len() >= 1 { type_str_to_sky(parts[0].trim(), aliases) } else { "String".into() };
+        let ok_ty = if parts.len() >= 2 { type_str_to_sky(parts[1].trim(), aliases) } else { "()".into() };
+        return format!("Result {} {}", err_ty, ok_ty);
+    }
+
     // Result<T, E> → Result SkyE SkyT
     // Rust: Result<T, E> where T = ok, E = error.
     // Sky:  Result ErrorType OkType (error first, ok second).
-    if let Some(inner) = try_extract(&s, "Result") {
+    // Use word-boundary match so "SkyResult<...>" is not matched here (it has
+    // its own arm above). The order of the two arms is also correct, but the
+    // word-boundary check makes it order-independent and easier to audit.
+    if let Some(inner) = try_extract_word(&s, "Result") {
         let parts: Vec<&str> = split_top_level(&inner, ',');
-        let ok_ty = if parts.len() >= 1 { type_str_to_sky(parts[0], aliases) } else { "()".into() };
-        let err_ty = if parts.len() >= 2 { type_str_to_sky(parts[1], aliases) } else { "String".into() };
+        let ok_ty = if parts.len() >= 1 { type_str_to_sky(parts[0].trim(), aliases) } else { "()".into() };
+        let err_ty = if parts.len() >= 2 { type_str_to_sky(parts[1].trim(), aliases) } else { "String".into() };
         return format!("Result {} {}", err_ty, ok_ty);
     }
 
@@ -855,16 +975,32 @@ fn type_str_to_sky(type_str: &str, aliases: &HashMap<String, String>) -> String 
                 }
             }
             let out_ty = trimmed[..end].trim();
-            return format!("Task SkyError {}", type_str_to_sky(out_ty, aliases));
+            return format!("Task Error {}", type_str_to_sky(out_ty, aliases));
         }
-        return "Task SkyError String".into();
+        return "Task Error String".into();
     }
 
     // ── T3: sanitise unrepresentable Rust type syntax ─────────────────
     // If we reach here and the type still contains Rust-specific syntax
     // (tuples, arrays, impl Trait, Self, u128), map to safe Sky types.
+    if s.starts_with('(') && s.ends_with(')') {
+        // Tuple: (T1, T2, ...) → (SkyT1, SkyT2, ...)
+        // Empty tuple () → ()
+        let inner = &s[1..s.len()-1].trim();
+        if inner.is_empty() {
+            return "()".to_string();
+        }
+        let parts: Vec<&str> = split_top_level(inner, ',');
+        if parts.len() == 1 {
+            return type_str_to_sky(parts[0].trim(), aliases);
+        }
+        let mapped: Vec<String> = parts.iter()
+            .map(|p| type_str_to_sky(p.trim(), aliases))
+            .collect();
+        return format!("({})", mapped.join(", "));
+    }
     if s.contains('(') && !s.starts_with("Result ") && !s.starts_with("Maybe ") {
-        return "String".to_string();  // bare tuple — opaque
+        return "String".to_string();  // bare parenthesized type — opaque
     }
     if s.contains('[') && !s.starts_with("Task ") {
         let inner_trimmed = s.trim_start_matches('&').trim();
@@ -878,6 +1014,11 @@ fn type_str_to_sky(type_str: &str, aliases: &HashMap<String, String>) -> String 
     let s_clean = s.trim_start_matches('&').trim();
     if s_clean == "u128" || s_clean == "i128" || s_clean == "Self" {
         return "String".to_string();
+    }
+
+    // Known runtime type aliases → canonical Sky names
+    if s == "SkyError" {
+        return "Error".to_string();
     }
 
     // Path types: module::Type or just Type
@@ -946,12 +1087,14 @@ fn matches_float(s: &str) -> bool {
 /// Split a type string at the top level (respecting nested <>)
 fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     let mut result = Vec::new();
-    let mut depth = 0;
+    let mut depth = 0i32;
     let mut start = 0;
     for (i, c) in s.char_indices() {
         match c {
             '<' => depth += 1,
             '>' => depth -= 1,
+            '(' => depth += 1,
+            ')' => depth -= 1,
             _ if depth == 0 && c == sep => {
                 result.push(s[start..i].trim());
                 start = i + 1;
@@ -967,6 +1110,7 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
 
 fn ret_str_contains_result(s: &str) -> bool {
     s.starts_with("Result ") || s.starts_with("Result<")
+        || s.starts_with("SkyResult ") || s.starts_with("SkyResult<")
 }
 
 fn pat_to_name(pat: &syn::Pat) -> String {
@@ -1003,5 +1147,57 @@ fn pkg_error(crate_name: &str, msg: &str) -> PkgInfo {
         version: String::new(),
         functions: vec![],
         errors: vec![msg.into()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sky(s: &str) -> String {
+        let aliases = HashMap::new();
+        type_str_to_sky(s, &aliases)
+    }
+
+    // B6: SkyResult<E, A> must map to `Result E A` (not interfere with Result<T, E>).
+    // This test guards against reordering the SkyResult / Result arms in type_str_to_sky.
+    #[test]
+    fn test_sky_result_not_confused_with_result() {
+        // SkyResult<SkyError, String> → Result Error String
+        assert_eq!(sky("SkyResult<SkyError, String>"), "Result Error String");
+        // Plain Result<String, SkyError> → Result Error String
+        assert_eq!(sky("Result<String, SkyError>"), "Result Error String");
+        // Nested: Result inside SkyResult should NOT double-match
+        assert_eq!(sky("SkyResult<SkyError, Vec<String>>"), "Result Error List String");
+    }
+
+    // B6: outermost-type check — "SomeResult<T>" must NOT match the Result arm,
+    // and must NOT be confused with SkyResult either.
+    #[test]
+    fn test_word_boundary_result() {
+        // "SomeResult<T>" doesn't match Result< or SkyResult< at the outermost
+        // level, so it falls through to the opaque-type path which strips generics
+        // and returns the bare type name.
+        assert_eq!(sky("SomeResult<String>"), "SomeResult");
+    }
+
+    // Basic primitive mappings.
+    #[test]
+    fn test_primitives() {
+        assert_eq!(sky("u64"), "Int");
+        assert_eq!(sky("usize"), "Int");
+        assert_eq!(sky("i32"), "Int");
+        assert_eq!(sky("f32"), "Float");
+        assert_eq!(sky("bool"), "Bool");
+        assert_eq!(sky("String"), "String");
+        assert_eq!(sky("&str"), "String");
+    }
+
+    // Vec and Option.
+    #[test]
+    fn test_generic_containers() {
+        assert_eq!(sky("Vec<u64>"), "List Int");
+        assert_eq!(sky("Option<String>"), "Maybe String");
+        assert_eq!(sky("HashMap<String, u64>"), "Dict String Int");
     }
 }

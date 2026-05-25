@@ -7,12 +7,12 @@ import Options.Applicative
 import System.Exit (exitFailure, exitSuccess, ExitCode(..))
 import qualified Data.Version
 import qualified Paths_sky_compiler
-import System.IO (hPutStr, hPutStrLn, hFlush, stdout, stderr)
+import System.IO (hPutStr, hPutStrLn, hFlush, stdout, stderr, readFile')
 
 import qualified System.Directory
 import qualified System.Environment
 import qualified Language.Haskell.TH.Syntax
-import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, renameFile, getCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, removeFile, renameFile, getCurrentDirectory)
 import System.IO.Error (catchIOError)
 import qualified Control.Concurrent
 import qualified Control.Exception
@@ -29,7 +29,7 @@ import qualified System.Process
 import qualified System.IO.Temp
 import qualified System.Timeout
 import qualified System.Exit
-import Control.Monad (when, forM_)
+import Control.Monad (unless, when, forM_, forM)
 import Data.FileEmbed (embedStringFile)
 
 import qualified Data.Map.Strict as Map
@@ -61,6 +61,17 @@ import qualified Sky.Build.EmbeddedConsole
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Concurrent.QSem as QSem
 import qualified GHC.Conc as GHC
+
+
+-- | Strictly read and parse sky.toml; returns 'Toml.defaultConfig' when absent.
+-- Uses 'readFile'' so the handle is closed before any subsequent write, preventing
+-- the "withFile: resource busy (file is locked)" error class.
+readConfigStrict :: IO Toml.SkyConfig
+readConfigStrict = do
+    hasToml <- doesFileExist "sky.toml"
+    if hasToml
+        then Toml.parseSkyToml <$> readFile' "sky.toml"
+        else return Toml.defaultConfig
 
 
 -- | End-to-end verification (replaces scripts/verify-examples.sh +
@@ -855,10 +866,7 @@ addHandler opts = do
 -- pre-sets SKY_DB_OP so the app runs in DB-ops mode).
 runProject :: FilePath -> IO (Either String ())
 runProject path = do
-    hasToml <- doesFileExist "sky.toml"
-    config <- if hasToml
-        then Toml.parseSkyToml <$> readFile "sky.toml"
-        else return Toml.defaultConfig
+    config <- readConfigStrict
     let outDir = "sky-out"
     createDirectoryIfMissing True outDir
     let goDeps = Toml._goDeps config
@@ -969,6 +977,27 @@ regenMissingRustBindings deps = do
                     putStrLn $ "   " ++ name ++ ": " ++ show (length names) ++ " bindings"
         RustGitDep{} ->
             putStrLn $ "   " ++ name ++ ": git dep -- run `sky add` manually"
+
+
+-- | For each declared Rust shim missing its .skycache/ffi/rust/<slug>.kernel.json,
+-- generate FFI bindings by running the inspector in shim mode.
+regenMissingShimBindings :: [(String, String)] -> IO ()
+regenMissingShimBindings shims = do
+    createDirectoryIfMissing True ".skycache/ffi/rust"
+    missing <- filterM (\(name, _) -> do
+        let slug = FfiGen.slugify name
+        not <$> doesFileExist (".skycache/ffi/rust/" ++ slug ++ ".kernel.json")
+        ) shims
+    forM_ missing $ \(shimName, shimPath) -> do
+        absPath <- canonicalizePath shimPath
+        exists <- doesFileExist absPath
+        if not exists
+            then putStrLn $ "   WARNING: shim '" ++ shimName ++ "' not found at " ++ shimPath
+            else do
+                r <- FfiGen.materialiseShim shimName absPath
+                case r of
+                    Left e  -> putStrLn $ "   " ++ shimName ++ ": " ++ e
+                    Right names -> putStrLn $ "   " ++ shimName ++ ": " ++ show (length names) ++ " bindings"
 
 
 -- | Resolve the inspector concurrency cap. Honours
@@ -1458,11 +1487,7 @@ runCommand cmd = case cmd of
         return (Right ())
 
     Build path mTarget -> do
-        -- Read sky.toml if it exists
-        hasToml <- doesFileExist "sky.toml"
-        config <- if hasToml
-            then Toml.parseSkyToml <$> readFile "sky.toml"
-            else return Toml.defaultConfig
+        config <- readConfigStrict
         -- CLI target overrides config
         let config' = case mTarget of
                 Just t -> config { Toml._target = parseTarget t }
@@ -1480,6 +1505,14 @@ runCommand cmd = case cmd of
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
             regenMissingBindings (Toml._target config') goDeps
+        let rustDeps = Toml._rustDeps config'
+        when (not (null rustDeps)) $
+            regenMissingRustBindings rustDeps
+        -- Regen missing shim .skyi/.kernel.json so the type-checker can resolve
+        -- shim imports before the Sky compilation phase runs.
+        let shims = Toml._rustShims config'
+        when (not (null shims)) $
+            regenMissingShimBindings shims
         result <- Compile.compile config' path outDir
         case result of
             Left err -> return (Left err)
@@ -1500,10 +1533,7 @@ runCommand cmd = case cmd of
                 return (Right ())
 
     Run path mTarget -> do
-        hasToml <- doesFileExist "sky.toml"
-        config <- if hasToml
-            then Toml.parseSkyToml <$> readFile "sky.toml"
-            else return Toml.defaultConfig
+        config <- readConfigStrict
         let config' = case mTarget of
                 Just t -> config { Toml._target = parseTarget t }
                 Nothing -> config
@@ -1518,6 +1548,12 @@ runCommand cmd = case cmd of
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
             regenMissingBindings (Toml._target config') goDeps
+        let rustDeps = Toml._rustDeps config'
+        when (not (null rustDeps)) $
+            regenMissingRustBindings rustDeps
+        let shims = Toml._rustShims config'
+        when (not (null shims)) $
+            regenMissingShimBindings shims
         result <- Compile.compile config' path outDir
         case result of
             Left err -> return (Left err)
@@ -1554,10 +1590,7 @@ runCommand cmd = case cmd of
         return (Right ())
 
     Check path -> do
-        hasToml <- doesFileExist "sky.toml"
-        config <- if hasToml
-            then Toml.parseSkyToml <$> readFile "sky.toml"
-            else return Toml.defaultConfig
+        config <- readConfigStrict
         -- Regen missing FFI bindings so type-check sees up-to-date .skyi
         -- signatures without needing the user to run `sky build` first.
         let outDir = "sky-out"
@@ -1571,6 +1604,12 @@ runCommand cmd = case cmd of
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
             regenMissingBindings (Toml._target config) goDeps
+        let rustDeps = Toml._rustDeps config
+        when (not (null rustDeps)) $
+            regenMissingRustBindings rustDeps
+        let shims = Toml._rustShims config
+        when (not (null shims)) $
+            regenMissingShimBindings shims
         -- P0-1 (audit): sky check must be a superset of sky build. Run
         -- the full emit + `go build` so codegen-stage failures surface
         -- here instead of only when the user runs `sky build`. Without
@@ -1605,10 +1644,7 @@ runCommand cmd = case cmd of
         -- same pipeline as `sky build`; exit code is propagated so CI
         -- picks up failures. The synthesis keeps user test modules
         -- minimal: `module FooTest exposing (tests); tests = [...]`.
-        hasToml <- doesFileExist "sky.toml"
-        config <- if hasToml
-            then Toml.parseSkyToml <$> readFile "sky.toml"
-            else return Toml.defaultConfig
+        config <- readConfigStrict
         -- CLI target overrides config
         let config' = case mTarget of
                 Just t -> config { Toml._target = parseTarget t }
@@ -1652,6 +1688,12 @@ runCommand cmd = case cmd of
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
             regenMissingBindings (Toml._target config') goDeps
+        let rustDeps = Toml._rustDeps config'
+        when (not (null rustDeps)) $
+            regenMissingRustBindings rustDeps
+        let shims = Toml._rustShims config'
+        when (not (null shims)) $
+            regenMissingShimBindings shims
         result <- Compile.compile config' entryFile outDir
         -- Clean up the entry regardless of compile outcome. Pre-fix,
         -- a go-build exception skipped the cleanup line, leaving
@@ -1833,10 +1875,7 @@ runCommand cmd = case cmd of
         return (Right ())
 
     Install -> do
-        hasToml <- doesFileExist "sky.toml"
-        config <- if hasToml
-            then Toml.parseSkyToml <$> readFile "sky.toml"
-            else return Toml.defaultConfig
+        config <- readConfigStrict
         _ <- SkyDeps.installDeps (Toml._skyDeps config)
         -- Auto-regen Go FFI bindings for every declared go dep whose
         -- `.skycache/ffi/<slug>.kernel.json` is absent. This replaces
@@ -1860,6 +1899,21 @@ runCommand cmd = case cmd of
             putStrLn $ "Installing " ++ show (length rustDeps) ++ " Rust dependency(ies)"
             regenMissingRustBindings rustDeps
             putStrLn $ "Rust dependencies installed."
+        -- Auto-regen shim bindings (unconditional on install, unlike regenMissingShimBindings)
+        let shims = Toml._rustShims config
+        unless (null shims) $ do
+            putStrLn $ "Installing " ++ show (length shims) ++ " Rust shim(s)"
+            forM_ shims $ \(shimName, shimPath) -> do
+                absPath <- canonicalizePath shimPath
+                exists <- doesFileExist absPath
+                if not exists
+                    then putStrLn $ "   WARNING: shim '" ++ shimName ++ "' not found at " ++ shimPath
+                    else do
+                        r <- FfiGen.materialiseShim shimName absPath
+                        case r of
+                            Left e       -> putStrLn $ "   " ++ shimName ++ ": " ++ e
+                            Right names  -> putStrLn $ "   " ++ shimName ++ ": " ++ show (length names) ++ " bindings"
+            putStrLn "Rust shims installed."
         case Toml._skyDeps config of
             [] -> return ()
             _  -> putStrLn "Sky dependencies installed."

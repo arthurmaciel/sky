@@ -42,6 +42,11 @@ module Sky.Build.FfiGen
     , slugify
     , _pkgName
     , _pkgVersion
+    , runInspectorForShim
+    , PkgInfo(..)
+    , FnInfo(..)
+    , shimReexportStub
+    , materialiseShim
     ) where
 
 import qualified Data.Aeson as A
@@ -52,7 +57,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, getCurrentDirectory)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>), takeDirectory)
 import System.Process (readProcessWithExitCode)
@@ -213,6 +218,23 @@ runInspectorMultiForTarget target pkgPaths features = do
                             Right _ -> mapM (\p -> runInspectorForTarget target p features) pkgPaths
                             Left e  -> return (map (const (Left $ inspName ++ ": json: " ++ e)) pkgPaths)
 
+
+-- | Run the Rust inspector in `--shim` mode: parse a single `.rs` file
+-- and return its public functions as PkgInfo.
+runInspectorForShim :: String -> FilePath -> IO (Either String PkgInfo)
+runInspectorForShim name shimPath = do
+    resolved <- resolveInspector TargetRust
+    case resolved of
+        Left e    -> return (Left e)
+        Right bin -> do
+            absPath <- canonicalizePath shimPath
+            let cmd' = bin ++ " --shim " ++ name ++ " " ++ absPath
+            (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
+            if null out
+                then return (Left $ "sky-ffi-inspect-rs (shim mode): empty output; stderr: " ++ err)
+                else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
+                    Right (pkg :: PkgInfo) -> return (Right pkg)
+                    Left e                -> return (Left $ "sky-ffi-inspect-rs (shim mode): json: " ++ e)
 
 inspectorName :: CompileTarget -> String
 inspectorName TargetGo   = "sky-ffi-inspect"
@@ -501,7 +523,11 @@ wrapperSkyType fn =
             (_, multi)            ->
                 -- Multi non-error returns pack into a Sky tuple.
                 "(" ++ intercalate ", " (map skyOf multi) ++ ")"
-        okType = case innerOk of
+        okType
+            -- Inspector already produced a Result type (shims, or union
+            -- returns that already carry the Result layer) — don't double-wrap.
+            | "Result " `isPrefixOf` innerOk = innerOk
+            | otherwise = case innerOk of
             -- Result wrap composites need parens to bind tightly.
             ('(':_) -> "Result Error " ++ innerOk
             _       -> "Result Error " ++ wrapIfMulti innerOk
@@ -908,6 +934,16 @@ skyTypeToRust s
     | Just rest <- stripPrefix "Task SkyError " s = "SkyTask<SkyError, " ++ skyTypeToRust rest ++ ">"
     | otherwise = "String"  -- fallback for unrecognised types
 
+
+-- | True when the given Rust type string is a primitive numeric type.
+-- Used to pick `as <T>` casts instead of `.try_into().unwrap()` or `.into()`.
+isNumericRust :: String -> Bool
+isNumericRust t = t `elem`
+    [ "i8", "i16", "i32", "i64", "i128"
+    , "u8", "u16", "u32", "u64", "u128"
+    , "isize", "usize", "f32", "f64" ]
+
+
 -- | Emit a Rust wrapper module for a single crate, to be placed at
 -- .skycache/rust/<slug>_bindings.rs.  Mirrors emitGoFile but for Rust.
 emitRustFile :: String -> PkgInfo -> String
@@ -978,20 +1014,24 @@ emitRustFile kernelName pkg =
                          && not (isInstance)
             -- R2a: build the call expression — instance method vs static fn vs free fn
             arg j = "arg" ++ show j
-            -- Add .try_into().unwrap() when the wrapper param is i64/f64
-            -- but the Rust fn expects a narrower numeric type (u32, f32, etc).
-            -- We detect this by checking if the inspector's raw type string
-            -- (which is already the Sky type) suggests a mismatch with the
-            -- resolved Rust type.
+            -- Shape-aware argument coercion: compare the declared wrapper param
+            -- type (declTy) against the raw Rust function param type (rawTy).
+            -- • same type → pass through unchanged.
+            -- • String → pass as &str via "&base".
+            -- • declared i64/f64, raw is narrower numeric → `as rawTy` cast
+            --   (silent truncation is better than a runtime panic from unwrap()).
+            -- • everything else → pass through (opaque types, already matching).
             argCall j =
-                let resolvedTy = resolveRustType crateImport (paramSkyTypes !! j)
-                                    (if j < nRawRustParam then rawRustParamTypes !! j else "")
-                    base = arg j
-                in if resolvedTy == "i64" || resolvedTy == "f64"
-                   then base ++ ".try_into().unwrap()"
-                   else if resolvedTy == "String"
-                   then "&" ++ base
-                   else base
+                let rawTy  = if j < nRawRustParam then rawRustParamTypes !! j else ""
+                    declTy = paramTypes !! j
+                    base   = arg j
+                in if declTy == "String"
+                   then "&" ++ base          -- Sky String → &str
+                   else if null rawTy || rawTy == declTy
+                   then base                 -- same type, pass through
+                   else if isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
+                   then base ++ " as " ++ rawTy   -- narrowing cast (e.g. i64 → u32)
+                   else base                 -- opaque: pass through unchanged
             callArgs = intercalate ", " (map argCall [0..nParams - 1])
             callExpr
                 | isInstance =
@@ -1008,22 +1048,37 @@ emitRustFile kernelName pkg =
                 | otherwise =
                     if null params then crateImport ++ "::" ++ fnName ++ "()"
                     else crateImport ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
+            -- Shape-aware return coercion helper.
+            -- rawResultTy: the inspector's raw Rust return type (may be "").
+            -- retInner:    the declared Sky-mapped wrapper return type.
+            -- Rules (applied in order):
+            --   1. rawResultTy is empty or equals retInner → no conversion.
+            --   2. rawResultTy starts with '&' → .to_owned() (handles &str→String
+            --      and similar ref→owned conversions; opaque &T that doesn't impl
+            --      ToOwned will need a Clone-based shim, caught at cargo time).
+            --   3. rawResultTy is numeric AND retInner is i64/f64 → `as` cast.
+            --   4. Fallback → .into() (relies on From; cargo reports missing impl).
+            rawResultTy = if nRawRustResult > 0 then rawRustResultTypes !! 0 else ""
+            coerceRet v
+                | null rawResultTy || rawResultTy == retInner = v
+                | "&" `isPrefixOf` rawResultTy = v ++ ".to_owned()"
+                | isNumericRust rawResultTy && retInner `elem` ["i64","f64"] = v ++ " as " ++ retInner
+                | otherwise = v ++ ".into()"
             -- Build the function body based on effect
             body = case _fnEffect fn of
                 "effectful" ->
                     "Box::pin(async move { match " ++ callExpr ++ ".await { Ok(v) => ok_res(v), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) } })"
                 "fallible" ->
-                    "match " ++ callExpr ++ " { Ok(v) => ok_res(v.into()), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
+                    "match " ++ callExpr ++ " { Ok(v) => ok_res(" ++ coerceRet "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
                 _ ->
                     -- T2: wrap pure calls in ok_res() to match the SkyResult return type.
-                    -- For numeric types (usize→i64, etc.), add .try_into().unwrap().
                     -- For Option<T>, convert to SkyMaybe<T>.
                     let isMaybeResult = case results of
                             ((_, rt):_) -> "Maybe " `isPrefixOf` rt
                             _           -> False
                     in if isMaybeResult
-                       then "ok_res(match " ++ callExpr ++ " { Some(v) => SkyMaybe::Just(v.into()), None => SkyMaybe::Nothing })"
-                       else "ok_res(" ++ callExpr ++ ".try_into().unwrap())"
+                       then "ok_res(match " ++ callExpr ++ " { Some(v) => SkyMaybe::Just(" ++ coerceRet "v" ++ "), None => SkyMaybe::Nothing })"
+                       else "ok_res(" ++ coerceRet callExpr ++ ")"
         in [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
            , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
            , "    " ++ body
@@ -2079,3 +2134,101 @@ quote s = "\"" ++ concatMap esc s ++ "\""
 
 slugify :: String -> String
 slugify = map (\c -> if c `elem` ("./" :: String) then '_' else c)
+
+
+-- | Rust snake_case conversion matching Sky.Generate.Rust.Builder.toSnakeCase.
+shimToSnakeCase :: String -> String
+shimToSnakeCase [] = []
+shimToSnakeCase (c:cs) = toLower c : go cs
+  where
+    go [] = []
+    go (c:cs)
+        | c == '_' && not (null cs) = '_' : toLower (head cs) : go (tail cs)
+        | isUpper c = '_' : toLower c : go cs
+        | otherwise = c : go cs
+
+
+-- | Generate a re-export stub for a shim's _bindings.rs.
+-- Each shim function already returns SkyResult<SkyError, T>, so instead of
+-- the ok_res()-wrapped wrapper from 'generateBindings', we emit explicit
+-- re-exports with the kernel-prefixed name that the Rust codegen expects.
+-- | Strip extra spaces from Rust type strings produced by quote!.
+-- The Rust inspector emits types like "SkyResult < SkyError , (String , i64) >"
+-- which need normalization to valid Rust: "SkyResult<SkyError, (String, i64)>".
+normalizeRustType :: String -> String
+normalizeRustType s =
+    let s' = go s
+    in if s' == s then s else normalizeRustType s'  -- fixpoint for nested generics
+  where
+    go [] = []
+    go (' ':'<':cs) = '<' : go cs   -- B7: "SkyResult <T>" → "SkyResult<T>"
+    go ('<':' ':cs) = '<' : go cs
+    go (' ':'>':cs) = '>' : go cs
+    go (' ':',':cs) = ',' : go cs
+    go (',':' ':cs) = ',' : go cs
+    go ('>':' ':cs) = '>' : go cs
+    go (c:cs) = c : go cs
+
+
+shimReexportStub :: String -> PkgInfo -> String
+shimReexportStub shimName pkg =
+    let lowerName = map (\c -> if c == '-' then '_' else c) (map toLower shimName)
+        shimMod   = "crate::shims::" ++ lowerName
+        fns       = _pkgFns pkg
+        lines'    = [ "use crate::*;"
+                    , ""
+                    , "// Auto-generated wrapper for shim '" ++ shimName ++ "'"
+                    , "// Each wrapper delegates to the shim's native function,"
+                    , "// wrapping zero-arg fns with `_: ()` to match the"
+                    , "// codegen convention (all FFI calls pass `()` for 0 args)."
+                    ]
+        wrappers  = map (\fn ->
+            let fnName   = _fnName fn
+                rustName = shimToSnakeCase (shimName ++ "_" ++ fnName)
+                params   = _fnParams fn
+                nParams  = length params
+                nRawRustParams = length (_fnRustParamTypes fn)
+                rawRustResultTypes = _fnRustResultTypes fn
+                -- Build param declarations: use raw Rust type if available,
+                -- otherwise derive from Sky type via skyTypeToRust.
+                paramDecls = if nParams == 0
+                             then ["_: ()"]
+                             else [ "arg" ++ show j ++ ": "
+                                    ++ let rt = if j < nRawRustParams
+                                                then _fnRustParamTypes fn !! j
+                                                else ""
+                                       in if null rt
+                                          then skyTypeToRust (snd (params !! j))
+                                          else normalizeRustType rt
+                                  | j <- [0..nParams - 1] ]
+                paramStr  = intercalate ", " paramDecls
+                callArgs  = if nParams == 0 then "" else intercalate ", " [ "arg" ++ show j | j <- [0..nParams - 1] ]
+                call      = shimMod ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
+                retTy     = if null rawRustResultTypes then "()"
+                            else normalizeRustType (head rawRustResultTypes)
+            in "pub fn " ++ rustName ++ "(" ++ paramStr ++ ") -> " ++ retTy ++ " {\n    " ++ call ++ "\n}"
+            ) fns
+    in unlines (lines' ++ wrappers)
+
+
+-- | Run the inspector on a single shim file, generate the .skyi / .kernel.json
+-- FFI metadata and write the '_bindings.rs' re-export stub to
+-- '.skycache/rust/<slug>_bindings.rs'.
+--
+-- Returns 'Right names' (the list of exported function names) on success, or
+-- 'Left errMsg' on inspector / codegen failure.  This is the single source of
+-- truth used by both the compile pipeline ('Compile.hs') and 'sky install'.
+materialiseShim :: String -> FilePath -> IO (Either String [String])
+materialiseShim shimName absShimPath = do
+    r <- runInspectorForShim shimName absShimPath
+    case r of
+        Left e -> return (Left e)
+        Right info -> do
+            names <- generateBindings TargetRust info
+            let slug    = slugify shimName
+                rsFile  = ".skycache/rust" </> slug ++ "_bindings.rs"
+                reexport = shimReexportStub shimName info
+            createDirectoryIfMissing True ".skycache/rust"
+            writeFile rsFile reexport
+            return (Right names)
+

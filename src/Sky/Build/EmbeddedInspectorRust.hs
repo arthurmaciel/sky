@@ -38,6 +38,7 @@ import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist,
                          removeDirectoryRecursive)
 import System.FilePath ((</>), takeDirectory)
 import System.Exit (ExitCode(..))
+import System.IO (readFile')
 import System.Process (readCreateProcessWithExitCode, proc, CreateProcess(..))
 import qualified Sky.Build.EmbedDirTH as EmbedDir
 
@@ -119,7 +120,7 @@ ensureInspectorRust = do
     hashMatch <- if binReady then do
         hashOk <- doesFileExist hashFile
         if hashOk then do
-            oldHash <- readFile hashFile
+            oldHash <- readFile' hashFile
             return (oldHash == inspectorRustHash)
         else return False
     else return False

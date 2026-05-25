@@ -8,7 +8,7 @@ import qualified Data.Set as Set
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import Data.IORef
-import Data.Maybe (isJust, isNothing, fromMaybe)
+import Data.Maybe (catMaybes, isJust, isNothing, fromMaybe)
 import Data.List (isPrefixOf)
 import qualified Data.Char as Char
 import qualified Data.List as List
@@ -52,6 +52,7 @@ import qualified Sky.Type.Solve as Solve
 import qualified Sky.Type.Type as T
 import qualified Sky.Generate.Go.Type as GoType
 import qualified Sky.Generate.Go.Record as Rec
+import qualified Sky.Build.FfiGen as FfiGen
 import qualified Sky.Generate.Rust.Builder as RustBuilder
 import qualified Sky.Build.ModuleGraph as Graph
 import qualified Sky.Build.Dce as Dce
@@ -1374,7 +1375,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                   -- already shows where and how to fix each case.
                   return (Left ("Non-exhaustive patterns: " ++ entryPath))
               _ -> do
-                putStrLn "-- Generating Go"
+                putStrLn "-- Generating code"
                 -- v0.13 Stage 1 (task #189) — emit dep-module decls
                 -- AFTER typecheck has populated `funcSkyToGoTVars`.
                 -- This is the critical point: dep bodies use
@@ -1454,8 +1455,11 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             -- Derive a Rust-valid module name from the dep name.
                         -- Replaces non-alphanumeric (including hyphens) with _.
                         let depToIdent = map (\c -> if Char.isAlphaNum c then c else '_')
-                            ffiSlugs = [ depToIdent (fst dep) ++ "_bindings"
+                            depSlugs = [ depToIdent (fst dep) ++ "_bindings"
                                        | dep <- Toml._rustDeps config ]
+                            shimSlugs = [ FfiGen.slugify name ++ "_bindings"
+                                        | (name, _) <- Toml._rustShims config ]
+                            ffiSlugs = depSlugs ++ shimSlugs
                         rawAliases <- readIORef globalKernelAlias
                         let kernelAliases = Map.mapKeys (\(cn, fn) -> (ModuleName._name cn, fn)) rawAliases
                             (rustCode, moduleFiles, usage) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases
@@ -1519,6 +1523,55 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                 copyFile srcPath' dstPath'
                                 putStrLn $ "   Copied " ++ srcPath'
                             ) (Toml._rustDeps config)
+                        -- Process [rust.shims] — copy hand-written glue files and generate bindings
+                        let shims = Toml._rustShims config
+                        unless (null shims) $ do
+                            let shimsDir = srcDir </> "shims"
+                            createDirectoryIfMissing True shimsDir
+                            shimModLines <- forM shims $ \(shimName, shimPath) -> do
+                                absShimPath <- System.Directory.canonicalizePath shimPath
+                                exists <- doesFileExist absShimPath
+                                if not exists
+                                    then do
+                                        putStrLn $ "   WARNING: shim " ++ shimName ++ " not found at " ++ shimPath
+                                        return Nothing
+                                    else do
+                                        -- Run inspector + generate .skyi, .kernel.json, _bindings.rs
+                                        r <- FfiGen.materialiseShim shimName absShimPath
+                                        case r of
+                                            Left e -> do
+                                                putStrLn $ "   WARNING: shim " ++ shimName ++ " inspector: " ++ e
+                                                return Nothing
+                                            Right names -> do
+                                                -- Copy the shim source file into the shims directory
+                                                let lowerName = map (\c -> if c == '-' then '_' else c) (map Char.toLower shimName)
+                                                    shimDest = shimsDir </> lowerName ++ ".rs"
+                                                copyFile absShimPath shimDest
+                                                putStrLn $ "   Shim " ++ shimName ++ ": " ++ show (length names) ++ " bindings"
+                                                return (Just lowerName)
+                            -- Write shims/mod.rs with pub mod declarations
+                            let shimModNames = catMaybes shimModLines
+                            unless (null shimModNames) $ do
+                                let shimModRs = "pub mod " ++ List.intercalate ";\npub mod " shimModNames ++ ";"
+                                writeFile (shimsDir </> "mod.rs") shimModRs
+                                putStrLn $ "   Wrote " ++ shimsDir </> "mod.rs"
+                                -- Add pub mod shims; to main.rs so the re-export
+                                -- bindings (*_bindings.rs) can resolve shims:: paths.
+                                mainContent <- readFile' mainRustPath
+                                let mainLines = lines mainContent
+                                    (before, after) = break (\l -> "pub use sky_runtime::*;" `List.isPrefixOf` l) mainLines
+                                    newMain = unlines (before ++ ["pub mod shims;"] ++ after)
+                                writeFile mainRustPath newMain
+                                putStrLn $ "   Patched " ++ mainRustPath
+                        -- Copy shim _bindings.rs files into sky-out/Rust/src/
+                        forM_ shims $ \(shimName, _) -> do
+                            let slug = FfiGen.slugify shimName
+                                srcPath' = ".skycache/rust" </> slug ++ "_bindings.rs"
+                                dstPath' = srcDir </> slug ++ "_bindings.rs"
+                            exists <- doesFileExist srcPath'
+                            when exists $ do
+                                copyFile srcPath' dstPath'
+                                putStrLn $ "   Copied shim bindings " ++ srcPath'
                         let cacheDir = ".skycache"
                         createDirectoryIfMissing True cacheDir
                         writeFile (cacheDir </> "source.hash") srcHash
@@ -3378,14 +3431,22 @@ copyRustRuntime outDir = do
     mSrcDir <- walkUp dir
     case mSrcDir of
         Nothing -> do
-            -- Fallback: try cwd-relative path
-            cwdOk <- doesDirectoryExist "runtime-rust/src/sky_runtime"
-            if cwdOk then do
-                files <- System.Directory.listDirectory "runtime-rust/src/sky_runtime"
-                let rsFiles = filter (\f -> takeExtension f == ".rs") files
-                mapM_ (\name -> copyFile ("runtime-rust/src/sky_runtime" </> name) (targetDir </> name)) rsFiles
-                putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " files)"
-            else putStrLn "  [warn] could not locate runtime-rust/src/sky_runtime/"
+            -- Fallback: walk up from CWD to find the repo root
+            cwd <- System.Directory.getCurrentDirectory
+            let walkUpFromCwd d = do
+                    let candidate = d </> "runtime-rust" </> "src" </> "sky_runtime"
+                    ok <- doesDirectoryExist candidate
+                    if ok then return (Just candidate)
+                    else if takeDirectory d == d then return Nothing
+                    else walkUpFromCwd (takeDirectory d)
+            mCwdSrc <- walkUpFromCwd cwd
+            case mCwdSrc of
+                Just srcDir -> do
+                    files <- System.Directory.listDirectory srcDir
+                    let rsFiles = filter (\f -> takeExtension f == ".rs") files
+                    mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) rsFiles
+                    putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " files)"
+                Nothing -> putStrLn "  [warn] could not locate runtime-rust/src/sky_runtime/"
         Just srcDir -> do
             files <- System.Directory.listDirectory srcDir
             let rsFiles = filter (\f -> takeExtension f == ".rs") files
