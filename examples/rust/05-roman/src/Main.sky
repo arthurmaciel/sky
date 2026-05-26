@@ -1,0 +1,18 @@
+module Main exposing (main)
+
+-- Roman numeral conversion via the `roman` crate — fully automatic FFI.
+-- `roman::to` / `roman::from` are plain free functions returning Option.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Rust.Roman as Roman
+import Std.Log exposing (println)
+
+main =
+    case Roman.to 2024 of
+        Err _ ->
+            println "Conversion failed"
+        Ok Nothing ->
+            println "2024 has no Roman representation"
+        Ok (Just s) ->
+            println ("2024 in Roman numerals: " ++ s)

@@ -1,0 +1,8 @@
+[project]
+name = "09-bytesize"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+["rust.dependencies"]
+bytesize = "2"

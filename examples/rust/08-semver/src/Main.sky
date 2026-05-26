@@ -1,0 +1,20 @@
+module Main exposing (main)
+
+-- Semantic-version parsing via the `semver` crate — fully automatic FFI.
+-- `Version::parse` is a static method; Display gives the `to_string` bridge.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Rust.Semver as Semver
+import Std.Log exposing (println)
+
+main =
+    case Semver.parse_from_version "1.4.2-beta.1+build.7" of
+        Err _ ->
+            println "Invalid version string"
+        Ok v ->
+            case Semver.to_string_from_version v of
+                Err _ ->
+                    println "Failed to render version"
+                Ok s ->
+                    println ("Parsed semver: " ++ s)

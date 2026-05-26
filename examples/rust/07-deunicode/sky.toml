@@ -1,0 +1,8 @@
+[project]
+name = "07-deunicode"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+["rust.dependencies"]
+deunicode = "1"

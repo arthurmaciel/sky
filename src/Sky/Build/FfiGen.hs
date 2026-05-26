@@ -330,9 +330,15 @@ generateBindings TargetGo pkg = do
     writeFile skyiFile (emitSkyi TargetGo pkg)
     writeFile jsonFile (emitKernelJson mname kname pkg)
     return names
-generateBindings TargetRust pkg = do
+generateBindings TargetRust pkg0 = do
     createDirectoryIfMissing True ".skycache/ffi/rust"
-    let slug = slugify (_pkgName pkg)
+    -- Dedup once at the source so the .rs wrapper, the .skyi catalogue, and the
+    -- .kernel.json dispatch table all agree on the same set of bindings.  A
+    -- real `to_string`/`from_string` method colliding with the synthetic
+    -- Display/FromStr bridge (e.g. ulid::Ulid) would otherwise produce a
+    -- duplicate Sky binding in the .skyi while the .rs keeps only one.
+    let pkg = pkg0 { _pkgFns = dedupByRustName (_pkgFns pkg0) }
+        slug = slugify (_pkgName pkg)
         kname = kernelNameFromPkg TargetRust pkg
         mname = pkgToModuleName TargetRust (_pkgPath pkg)
         rsFile   = ".skycache/ffi/rust" </> (slug ++ "_bindings.rs")
@@ -1060,13 +1066,24 @@ emitRustFile kernelName pkg =
         [ ""
         ]
   where
-    -- | Resolve a Sky type string to a Rust type, preferring known
-    -- concrete types; for opaque types, qualify with the crate path.
-    resolveRustType _crate st rtOverride =
-        let mapped = skyTypeToRust st
-        in if mapped /= "String" then mapped
-           else if not (null rtOverride) then rtOverride
-           else "String"
+    -- | Resolve a Sky type string to the Rust type used in a wrapper PARAMETER
+    -- (and static-method receiver) position.  Known Sky types use their direct
+    -- mapping so the wrapper takes the owned value the Sky call site passes
+    -- (`String`, not `&str` — argCall borrows internally).  Only genuinely
+    -- opaque types (skyTypeToRust falls back to "String") use the inspector's
+    -- raw Rust type, which is now fully-qualified (`chrono::NaiveDate`).
+    resolveRustType _crate st rtOverride
+        | isKnownSky st                = skyTypeToRust st
+        | not (null rtOverride)        = rtOverride
+        | otherwise                    = "String"
+
+    -- | True when `skyTypeToRust` gives a faithful (non-fallback) mapping —
+    -- i.e. the type is a primitive/container Sky understands, not an opaque
+    -- crate type that merely defaults to "String".
+    isKnownSky st =
+        st `elem` ["String", "Int", "Float", "Bool", "Bytes", "()"]
+        || any (`isPrefixOf` st)
+               ["List ", "Maybe ", "Result ", "Dict String ", "Task SkyError "]
 
     emitRustFnSimple (i, fn) =
         let skyName   = lowerFirst (_fnName fn)

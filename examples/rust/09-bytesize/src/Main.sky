@@ -1,0 +1,20 @@
+module Main exposing (main)
+
+-- Human-readable byte sizes via the `bytesize` crate — fully automatic FFI.
+-- `ByteSize::mb` is a static method; Display gives the `to_string` bridge.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Rust.Bytesize as Bytesize
+import Std.Log exposing (println)
+
+main =
+    case Bytesize.mb_from_byteSize 1500 of
+        Err _ ->
+            println "Failed to build ByteSize"
+        Ok size ->
+            case Bytesize.to_string_from_byteSize size of
+                Err _ ->
+                    println "Failed to format size"
+                Ok s ->
+                    println ("1500 MB is " ++ s)

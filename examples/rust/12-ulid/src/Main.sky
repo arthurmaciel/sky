@@ -1,0 +1,20 @@
+module Main exposing (main)
+
+-- ULID generation via the `ulid` crate — fully automatic FFI.
+-- `Ulid::new` is a static method; Display gives the `to_string` bridge.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Rust.Ulid as Ulid
+import Std.Log exposing (println)
+
+main =
+    case Ulid.new_from_ulid () of
+        Err _ ->
+            println "Failed to generate ULID"
+        Ok u ->
+            case Ulid.to_string_from_ulid u of
+                Err _ ->
+                    println "Failed to format ULID"
+                Ok s ->
+                    println ("Generated ULID: " ++ s)

@@ -1,0 +1,18 @@
+module Main exposing (main)
+
+-- Friendly random names via the `petname` crate — fully automatic FFI.
+-- `petname::petname` is a free function: Int -> String -> Option String.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Rust.Petname as Petname
+import Std.Log exposing (println)
+
+main =
+    case Petname.petname 3 "-" of
+        Err _ ->
+            println "Name generation failed"
+        Ok Nothing ->
+            println "No name generated"
+        Ok (Just name) ->
+            println ("Your petname: " ++ name)

@@ -1,0 +1,20 @@
+module Main exposing (main)
+
+-- UUID v4 generation via the `uuid` crate — fully automatic FFI, no shims.
+-- All bindings are discovered by `cargo +nightly rustdoc --output-format json`.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Rust.Uuid as Uuid
+import Std.Log exposing (println)
+
+main =
+    case Uuid.new_v4_from_uuid () of
+        Err _ ->
+            println "Failed to generate UUID"
+        Ok u ->
+            case Uuid.to_string_from_uuid u of
+                Err _ ->
+                    println "Failed to format UUID"
+                Ok s ->
+                    println ("Generated UUID v4: " ++ s)

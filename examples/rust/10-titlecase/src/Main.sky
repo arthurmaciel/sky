@@ -1,0 +1,16 @@
+module Main exposing (main)
+
+-- Title-casing via the `titlecase` crate — fully automatic FFI.
+-- `titlecase::titlecase` is a free function: String -> String.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Rust.Titlecase as Titlecase
+import Std.Log exposing (println)
+
+main =
+    case Titlecase.titlecase "a tale of two cities: a story of london" of
+        Err _ ->
+            println "Title-casing failed"
+        Ok s ->
+            println s

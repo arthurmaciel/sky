@@ -377,6 +377,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // rustdoc_type_to_rust_str so it can fully-qualify opaque types.  Must be
     // set BEFORE any function is parsed (parse_fn_item -> rust_str reads it).
     REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
+    ALIAS_MAP.with(|c| *c.borrow_mut() = collect_aliases(doc));
 
     let index = match doc["index"].as_object() {
         Some(idx) => idx,
@@ -579,6 +580,15 @@ fn parse_fn_item(
     let is_async = fn_data["header"]["is_async"].as_bool().unwrap_or(false)
         || fn_data["header"]["async_"].as_bool().unwrap_or(false);
 
+    // Skip `unsafe fn`: the generated wrapper calls it outside an `unsafe`
+    // block, and auto-exposing unsafe constructors (e.g. new_unchecked) to
+    // Sky would bypass the very invariants `unsafe` exists to protect.
+    let is_unsafe = fn_data["header"]["is_unsafe"].as_bool().unwrap_or(false)
+        || fn_data["header"]["unsafe_"].as_bool().unwrap_or(false);
+    if is_unsafe {
+        return None;
+    }
+
     // Skip generic functions — type parameters can't be resolved without
     // a concrete call site.  This matches the previous syn-based behaviour.
     if let Some(params) = fn_data["generics"]["params"].as_array() {
@@ -671,6 +681,32 @@ fn parse_fn_item(
         return None;
     }
 
+    // Skip functions whose RESULT is a borrow (`&mut Builder` from a builder
+    // setter, a nested `(.., &[u8; 8])` tuple, `&InnerType`).  A borrowed
+    // return binds to a lifetime the owned wrapper can't supply (E0106) or
+    // needs a ToOwned impl that may not exist (E0599).  Plain `&str`/`&String`
+    // is fine — FfiGen copies it to an owned String.  References in PARAMETER
+    // position are unaffected (the wrapper takes an owned value and borrows).
+    let result_borrows = results.iter().any(|p| {
+        let rt = p.rust_type.trim();
+        rt.contains('&') && rt != "&str" && rt != "&String"
+    });
+    if result_borrows {
+        return None;
+    }
+
+    // Skip fixed-size arrays / slices (`[u8; 16]`, `&[u8]`, `&[u8; 6]`).  Sky's
+    // `Bytes` maps to `Vec<u8>`, which doesn't coerce to a fixed-size array or
+    // borrowed slice parameter, and such a result can't be returned by value.
+    // (`Vec<u8>` itself has no brackets and is unaffected.)
+    let has_array_or_slice = params
+        .iter()
+        .chain(results.iter())
+        .any(|p| p.rust_type.contains('['));
+    if has_array_or_slice {
+        return None;
+    }
+
     let effect = classify_effect(output, &params, is_async);
     let (recv_sky, recv_rust) = recv.unwrap_or(("", ""));
 
@@ -699,6 +735,12 @@ thread_local! {
     // collect_reachable_paths).  Used to qualify opaque types unambiguously.
     static REACHABLE_PATHS: std::cell::RefCell<HashMap<String, String>> =
         std::cell::RefCell::new(HashMap::new());
+
+    // Crate-local NON-generic type-alias id -> the aliased type JSON.  Lets the
+    // type converters see through aliases like `uuid::Bytes = [u8; 16]` so the
+    // array/slice filter drops constructors that can't take a Sky Vec<u8>.
+    static ALIAS_MAP: std::cell::RefCell<HashMap<String, serde_json::Value>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 
 /// Fully-qualified public path of a crate-local type by its rustdoc id, if
@@ -707,6 +749,44 @@ thread_local! {
 fn reachable_local_path(id: &serde_json::Value) -> Option<String> {
     let key = item_id_to_str(id);
     REACHABLE_PATHS.with(|c| c.borrow().get(&key).cloned())
+}
+
+/// If `id` is a crate-local non-generic type alias, return the aliased type.
+fn resolve_alias(id: &serde_json::Value) -> Option<serde_json::Value> {
+    let key = item_id_to_str(id);
+    ALIAS_MAP.with(|c| c.borrow().get(&key).cloned())
+}
+
+/// Build the id -> aliased-type map for every crate-local, NON-generic type
+/// alias (`pub type Bytes = [u8; 16];`).  Generic aliases are skipped — their
+/// definitions reference the alias's own type params, which we can't bind.
+fn collect_aliases(doc: &serde_json::Value) -> HashMap<String, serde_json::Value> {
+    let mut out = HashMap::new();
+    let index = match doc["index"].as_object() {
+        Some(i) => i,
+        None => return out,
+    };
+    for (id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let alias = item["inner"]
+            .get("type_alias")
+            .or_else(|| item["inner"].get("typedef"));
+        if let Some(a) = alias {
+            let generic = a["generics"]["params"]
+                .as_array()
+                .map(|p| !p.is_empty())
+                .unwrap_or(false);
+            if generic {
+                continue;
+            }
+            if let Some(ty) = a.get("type").or_else(|| a.get("type_")) {
+                out.insert(id.clone(), ty.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Replace every whole-word `Self` token in a type string with `replacement`.
@@ -1024,6 +1104,10 @@ fn rustdoc_type_to_sky(val: &serde_json::Value, aliases: &HashMap<String, String
 
     // { "resolved_path": { "name": "Vec", "args": { "angle_bracketed": … } } }
     if let Some(rp) = val.get("resolved_path") {
+        // See through a crate-local non-generic alias (uuid::Bytes -> [u8;16]).
+        if let Some(aliased) = rp.get("id").and_then(resolve_alias) {
+            return rustdoc_type_to_sky(&aliased, aliases);
+        }
         return resolve_path_to_sky(rp, aliases);
     }
 
@@ -1229,6 +1313,11 @@ fn rustdoc_type_to_rust_str(val: &serde_json::Value) -> String {
     }
 
     if let Some(rp) = val.get("resolved_path") {
+        // See through a crate-local non-generic alias (uuid::Bytes -> [u8;16]),
+        // so the array/slice filter sees the real shape.
+        if let Some(aliased) = rp.get("id").and_then(resolve_alias) {
+            return rustdoc_type_to_rust_str(&aliased);
+        }
         let raw_name = rp["name"]
             .as_str()
             .or_else(|| rp["path"].as_str())

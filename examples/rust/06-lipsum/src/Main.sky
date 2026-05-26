@@ -1,0 +1,16 @@
+module Main exposing (main)
+
+-- Lorem ipsum text generation via the `lipsum` crate — fully automatic FFI.
+-- `lipsum::lipsum` is a free function: Int -> String.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Rust.Lipsum as Lipsum
+import Std.Log exposing (println)
+
+main =
+    case Lipsum.lipsum 24 of
+        Err _ ->
+            println "Failed to generate text"
+        Ok text ->
+            println text

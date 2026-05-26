@@ -1,0 +1,8 @@
+[project]
+name = "12-ulid"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+["rust.dependencies"]
+ulid = "1"

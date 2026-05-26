@@ -1,0 +1,16 @@
+module Main exposing (main)
+
+-- Unicode → ASCII transliteration via the `deunicode` crate — automatic FFI.
+-- `deunicode::deunicode` is a free function: String -> String.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Rust.Deunicode as Deunicode
+import Std.Log exposing (println)
+
+main =
+    case Deunicode.deunicode "Æneid café — naïve Москва 北京" of
+        Err _ ->
+            println "Transliteration failed"
+        Ok s ->
+            println ("ASCII: " ++ s)
