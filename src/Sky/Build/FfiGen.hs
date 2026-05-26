@@ -48,7 +48,7 @@ module Sky.Build.FfiGen
 
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BL
-import Data.Char (isAlphaNum, isLower, isUpper, toUpper, toLower)
+import Data.Char (isAlphaNum, isDigit, isLower, isUpper, toUpper, toLower)
 import Data.List (foldl', intercalate, isPrefixOf, nub, sortOn, stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -980,6 +980,27 @@ okTypeOfResult s0 =
           | otherwise            = go d (c:acc) cs
 
 
+-- | Classification of a read-only byte-sequence Rust type.
+data ByteKind = BSlice | BVec | BArr Int | BRefArr Int
+
+-- | Classify a raw Rust type as a byte sequence (mirrors the inspector's
+-- is_byte_seq). N is parsed from `[u8; N]` / `&[u8; N]`.
+byteSeqKind :: String -> Maybe ByteKind
+byteSeqKind raw =
+    case trimStr raw of
+        "&[u8]"   -> Just BSlice
+        "Vec<u8>" -> Just BVec
+        s -> case arrN "&[u8; " s of
+               Just n  -> Just (BRefArr n)
+               Nothing -> BArr <$> arrN "[u8; " s
+  where
+    arrN pfx s = do
+        rest <- stripPrefix pfx s
+        case span (/= ']') rest of
+            (digits, "]") | not (null digits) && all isDigit digits -> Just (read digits)
+            _ -> Nothing
+
+
 -- | Translate a raw Rust (Ok-)type into the wrapper's declared inner return
 -- type plus a coercion that lifts an expression of the raw type into that
 -- declared type.  Driven by the inspector's real Rust type (the source of
@@ -1000,30 +1021,38 @@ translateRustRet :: String -> (String, String -> String)
 translateRustRet raw0 =
     let raw = trimStr raw0 in
     if raw == "" || raw == "()" then ("()", id)
-    else case stripGeneric1 "Option" raw of
-      Just inner ->
-        let (dt, co) = translateRustRet inner
-        in ( "SkyMaybe<" ++ dt ++ ">"
-           , \e -> "match " ++ e ++ " { Some(v) => SkyMaybe::Just(" ++ co "v"
-                   ++ "), None => SkyMaybe::Nothing }" )
-      Nothing -> case stripGeneric1 "Vec" raw of
+    else case byteSeqKind raw of
+      Just bk ->
+        ( "Vec<i64>"
+        , \e -> case bk of
+            BVec      -> "from_u8_slice(&" ++ e ++ ")"
+            BArr _    -> "from_u8_slice(&" ++ e ++ ")"
+            BSlice    -> "from_u8_slice(" ++ e ++ ")"
+            BRefArr _ -> "from_u8_slice(" ++ e ++ ")" )
+      Nothing -> case stripGeneric1 "Option" raw of
         Just inner ->
           let (dt, co) = translateRustRet inner
-          in ( "Vec<" ++ dt ++ ">"
-             , \e -> if co "x" == "x" then e
-                     else e ++ ".into_iter().map(|x| " ++ co "x" ++ ").collect()" )
-        Nothing
-          | raw `elem` intRusts   -> ("i64", \e -> "(" ++ e ++ ") as i64")
-          | raw `elem` floatRusts -> ("f64", \e -> "(" ++ e ++ ") as f64")
-          | raw == "bool"   -> ("bool", id)
-          | raw == "String" -> ("String", id)
-          | "&" `isPrefixOf` raw ->
-              let inner = stripRef raw
-              in if inner == "str" || inner == "String"
-                 then ("String", \e -> e ++ ".to_string()")
-                 else let (dt, _) = translateRustRet inner
-                      in (dt, \e -> e ++ ".to_owned()")
-          | otherwise -> (raw, id)   -- opaque type: keep as-is, no coercion
+          in ( "SkyMaybe<" ++ dt ++ ">"
+             , \e -> "match " ++ e ++ " { Some(v) => SkyMaybe::Just(" ++ co "v"
+                     ++ "), None => SkyMaybe::Nothing }" )
+        Nothing -> case stripGeneric1 "Vec" raw of
+          Just inner ->
+            let (dt, co) = translateRustRet inner
+            in ( "Vec<" ++ dt ++ ">"
+               , \e -> if co "x" == "x" then e
+                       else e ++ ".into_iter().map(|x| " ++ co "x" ++ ").collect()" )
+          Nothing
+            | raw `elem` intRusts   -> ("i64", \e -> "(" ++ e ++ ") as i64")
+            | raw `elem` floatRusts -> ("f64", \e -> "(" ++ e ++ ") as f64")
+            | raw == "bool"   -> ("bool", id)
+            | raw == "String" -> ("String", id)
+            | "&" `isPrefixOf` raw ->
+                let inner = stripRef raw
+                in if inner == "str" || inner == "String"
+                   then ("String", \e -> e ++ ".to_string()")
+                   else let (dt, _) = translateRustRet inner
+                        in (dt, \e -> e ++ ".to_owned()")
+            | otherwise -> (raw, id)   -- opaque type: keep as-is, no coercion
   where
     intRusts   = [ "i8","i16","i32","i64","i128","isize"
                  , "u8","u16","u32","u64","u128","usize" ]
@@ -1161,13 +1190,19 @@ emitRustFile kernelName pkg =
                 let rawTy  = if j < nRawRustParam then rawRustParamTypes !! j else ""
                     declTy = paramTypes !! j
                     base   = arg j
-                in if declTy == "String"
-                   then "&" ++ base          -- Sky String → &str
-                   else if null rawTy || rawTy == declTy
-                   then base                 -- same type, pass through
-                   else if isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
-                   then base ++ " as " ++ rawTy   -- narrowing cast (e.g. i64 → u32)
-                   else base                 -- opaque: pass through unchanged
+                in case byteSeqKind rawTy of
+                    Just BSlice      -> "&to_u8_vec(&" ++ base ++ ")"
+                    Just BVec        -> "to_u8_vec(&" ++ base ++ ")"
+                    Just (BArr _)    -> "b" ++ show j        -- prelude local (owned)
+                    Just (BRefArr _) -> "&b" ++ show j       -- prelude local (by ref)
+                    Nothing ->
+                        if declTy == "String"
+                        then "&" ++ base          -- Sky String → &str
+                        else if null rawTy || rawTy == declTy
+                        then base                 -- same type, pass through
+                        else if isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
+                        then base ++ " as " ++ rawTy   -- narrowing cast (e.g. i64 → u32)
+                        else base                 -- opaque: pass through unchanged
             callArgs = intercalate ", " (map argCall [0..nParams - 1])
             callExpr
                 | isInstance =
@@ -1227,13 +1262,30 @@ emitRustFile kernelName pkg =
                         (c:rest) -> isUpper c
                                     && (null rest || head rest == ',' || head rest == '>' || (isLower (head rest) && length rest <= 2))
                         []       -> False
+            -- Fixed-array byte params (`[u8; N]` / `&[u8; N]`) need a fallible
+            -- conversion from Sky `List Int`; bind each to a local `bN` and
+            -- early-return Err on a length mismatch (no panic).
+            arrPrelude =
+                [ "let b" ++ show j ++ ": [u8; " ++ show n ++ "] = "
+                  ++ "match to_u8_array::<SkyError, " ++ show n
+                  ++ ">(&arg" ++ show j ++ ") { SkyResult::Ok(a) => a, "
+                  ++ "SkyResult::Err(e) => return SkyResult::Err(e), };"
+                | j <- [0 .. nParams - 1]
+                , let rawTy = if j < nRawRustParam then rawRustParamTypes !! j else ""
+                , n <- case byteSeqKind rawTy of
+                         Just (BArr m)    -> [m]
+                         Just (BRefArr m) -> [m]
+                         _                -> []
+                ]
         in if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
            then []
            else [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
                 , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
-                , "    " ++ body
-                , "}"
                 ]
+                ++ map ("    " ++) arrPrelude
+                ++ [ "    " ++ body
+                   , "}"
+                   ]
 
 
 -- | Convert a pkg path to a Rust crate import path.
