@@ -1,0 +1,17 @@
+module Main exposing (main)
+
+-- CRC32 over a byte slice via the `crc32fast` crate — fully automatic FFI.
+-- `crc32fast::hash` takes `&[u8]`; Sky passes a `List Int` (auto-coerced).
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+import Rust.Crc32fast as Crc32fast
+
+main =
+    case Crc32fast.hash [104, 105] of
+        Ok checksum ->
+            println ("CRC32 of \"hi\" = " ++ String.fromInt checksum)
+        Err _ ->
+            println "hash failed"

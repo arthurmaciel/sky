@@ -1,0 +1,8 @@
+[project]
+name = "14-crc32fast"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+["rust.dependencies"]
+crc32fast = "1"
