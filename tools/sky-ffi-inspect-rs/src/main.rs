@@ -689,7 +689,7 @@ fn parse_fn_item(
     // position are unaffected (the wrapper takes an owned value and borrows).
     let result_borrows = results.iter().any(|p| {
         let rt = p.rust_type.trim();
-        rt.contains('&') && rt != "&str" && rt != "&String"
+        rt.contains('&') && rt != "&str" && rt != "&String" && !is_byte_seq(rt)
     });
     if result_borrows {
         return None;
@@ -699,11 +699,11 @@ fn parse_fn_item(
     // `Bytes` maps to `Vec<u8>`, which doesn't coerce to a fixed-size array or
     // borrowed slice parameter, and such a result can't be returned by value.
     // (`Vec<u8>` itself has no brackets and is unaffected.)
-    let has_array_or_slice = params
+    let has_bad_array_or_slice = params
         .iter()
         .chain(results.iter())
-        .any(|p| p.rust_type.contains('['));
-    if has_array_or_slice {
+        .any(|p| p.rust_type.contains('[') && !is_byte_seq(&p.rust_type));
+    if has_bad_array_or_slice {
         return None;
     }
 
@@ -961,6 +961,24 @@ fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
     out
 }
 
+/// True for a read-only byte sequence: `&[u8]`, `Vec<u8>`, `[u8; N]`, or
+/// `&[u8; N]` (N = literal digits). Excludes `&mut [u8]` and non-u8 elements.
+fn is_byte_seq(rt: &str) -> bool {
+    let t = rt.trim();
+    if t == "Vec<u8>" || t == "&[u8]" {
+        return true;
+    }
+    // [u8; N] or &[u8; N] (the leading & has no `mut`, since &mut is excluded)
+    let body = t.strip_prefix('&').unwrap_or(t).trim();
+    if let Some(rest) = body.strip_prefix("[u8;") {
+        if let Some(inner) = rest.strip_suffix(']') {
+            let n = inner.trim();
+            return !n.is_empty() && n.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
+}
+
 /// True if a Rust type string contains a lifetime token (`'a`, `'static`,
 /// `'_`).  A `'` in a type string is always a lifetime (char literals never
 /// appear in type positions), so detecting `'` followed by an identifier
@@ -1136,12 +1154,9 @@ fn rustdoc_type_to_sky(val: &serde_json::Value, aliases: &HashMap<String, String
     // { "array": { "type": …, "len": "N" } }
     if let Some(arr) = val.get("array") {
         let inner = rustdoc_type_to_sky(inner_type(arr), aliases);
-        // [u8; N] → Bytes, other fixed arrays → List T
-        return if inner == "Int" {
-            "Bytes".to_string()
-        } else {
-            format!("List {}", inner)
-        };
+        // Fixed arrays surface as `List T`; `[u8; N]` -> `List Int`, matching
+        // slices and Vec<u8>. The real Rust shape is preserved in rust_type.
+        return format!("List {}", inner);
     }
 
     // { "generic": "T" }  — unresolved type parameter
@@ -1590,5 +1605,19 @@ mod tests {
             sky(&borrowed(path_with_args("Vec", vec![prim("u64")]))),
             "List Int"
         );
+    }
+
+    #[test]
+    fn test_is_byte_seq() {
+        assert!(is_byte_seq("&[u8]"));
+        assert!(is_byte_seq("Vec<u8>"));
+        assert!(is_byte_seq("[u8; 16]"));
+        assert!(is_byte_seq("&[u8; 32]"));
+        // Not byte sequences:
+        assert!(!is_byte_seq("&mut [u8]"));
+        assert!(!is_byte_seq("&[u16]"));
+        assert!(!is_byte_seq("[f64; 3]"));
+        assert!(!is_byte_seq("Vec<i64>"));
+        assert!(!is_byte_seq("&str"));
     }
 }
