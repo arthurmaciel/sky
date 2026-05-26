@@ -32,12 +32,13 @@ implementation strings in the Haskell codegen.
 |---|---|
 | `runtime-rust/` | Rust runtime crate (`sky_runtime` modules, property tests) |
 | `src/Sky/Generate/Rust/` | Rust codegen — `Builder.hs` only |
-| `tools/sky-ffi-inspect-rs/` | Rust crate inspector (crate introspection via `syn`) |
+| `tools/sky-ffi-inspect-rs/` | Rust crate inspector (rustdoc JSON backend) |
 
 **Files outside these directories** (`src/Sky/Build/*.hs`, `app/Main.hs`,
 `src/Sky/Sky/Toml.hs`, `src/Sky/Canonicalise/*.hs`, etc.) may only be touched
-with **explicit permission**. Every change to shared compiler infrastructure must
-be gated behind `TargetRust ->` branches so the Go backend is byte-identical.
+if the changes do not affect the Go backend. Every change to shared compiler
+infrastructure must be gated behind `TargetRust ->` branches so the Go backend
+is byte-identical.
 
 ---
 
@@ -48,8 +49,7 @@ These rules are non-negotiable for every contributor (human or AI):
 
 1. **Go FFI artifacts stay at the root of `.skycache/ffi/`.**
    `.skycache/ffi/<slug>.kernel.json` and `.skycache/ffi/<slug>.skyi` are
-   Go-target files. They are never moved into a subdirectory. Existing Go
-   projects in this repo, in forks, and in the wild depend on this layout.
+   Go-target files. They are never moved into a subdirectory.
 
 2. **Each non-Go backend gets its own subdirectory.** Rust artifacts live at
    `.skycache/ffi/rust/<slug>.kernel.json`. Future WASM → `.skycache/ffi/wasm/`.
@@ -57,29 +57,20 @@ These rules are non-negotiable for every contributor (human or AI):
 
 3. **`loadAndSeedFfiRegistry` reads target-appropriate paths.** For `target = "go"`
    (the default), the registry reads `.skycache/ffi/*.kernel.json`. For
-   `target = "rust"`, it reads `.skycache/ffi/rust/*.kernel.json`. Loading only
-   the active target's catalogue keeps imports unambiguous.
+   `target = "rust"`, it reads `.skycache/ffi/rust/*.kernel.json`.
 
 4. **Never touch Go-generated files.** When working on the Rust backend, do not
    change a single byte of `runtime-go/`, `.skycache/ffi/<slug>.{kernel.json,skyi}`
-   at the root, or `src/Sky/Generate/Go/`. Rust work goes in `src/Sky/Generate/Rust/`,
-   `runtime-rust/`, `tools/sky-ffi-inspect-rs/`, and (carefully) target-gated
-   branches of shared files.
+   at the root, or `src/Sky/Generate/Go/`.
 
 5. **Never change shared compiler code in ways that could break Go compilation
-   in any fork.** `src/Sky/Build/Compile.hs`, `src/Sky/Build/FfiGen.hs`,
-   `app/Main.hs`, `src/Sky/Canonicalise/*`, etc. must keep their existing
-   `TargetGo` behavior bit-identical. New Rust functionality always goes behind
-   explicit `TargetRust ->` branches. Merging target-specific logic into a
-   unified path requires a separate, explicit decision — the default is
-   **keep the branches separate**.
+   in any fork.** New Rust functionality always goes behind explicit `TargetRust ->`
+   branches. Merging target-specific logic into a unified path requires a separate,
+   explicit decision — the default is **keep the branches separate**.
 
 6. **`sky add <pkg>` routing rules:**
-   - URL (`https://…`, `git@host:…`): Go → `[go.dependencies]` (unchanged);
-     Rust → `[rust.dependencies]` as `{ git = "<url>" }`.
+   - URL (`https://…`, `git@host:…`): Go → `[go.dependencies]`; Rust → `[rust.dependencies]` as `{ git = "<url>" }`.
    - Bare name: Go → `go get`; Rust → crates.io via `cargo fetch`.
-   - No silent defaulting: print exactly what was assumed and what version was
-     pinned.
 
 ---
 
@@ -96,16 +87,17 @@ mylib   = { git = "https://github.com/org/mylib", rev = "abc123" }  # git dep
 
 [rust]
 sqlx_tls = "rustls"               # default; alt: "native-tls"
-
-[rust.shims]
-"Greet" = "ffi/greet.rs"          # hand-written Rust glue for macro-generated crates
 ```
+
+There is no `[rust.shims]` section — Rust FFI is fully automatic via
+`rustdoc --output-format json`. No hand-written Rust glue files are required,
+even for crates that use proc macros or derive macros.
 
 ---
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### Core Sky examples (compile with `--target rust`)
+### Core Sky examples (compiled with `--target rust`)
 
 | Example | Status | Notes |
 |---|---|---|
@@ -113,18 +105,14 @@ sqlx_tls = "rustls"               # default; alt: "native-tls"
 | 04-local-pkg | ✅ builds + runs | multi-module |
 | 07-todo-cli | ✅ builds + runs | SQLite CRUD via sqlx |
 | 14-task-demo | ✅ builds + runs | Task combinators |
-| simple | ✅ builds + runs | task_sequence + task_parallel |
-| test_pkg | ✅ builds + runs | Result/Maybe combinators |
 
 ### Rust FFI examples (`examples/rust/`)
 
-| Example | Crate | Description |
-|---|---|---|
-| 01-rand | `rand` | `Rand.random_bool 0.5` → prints Heads/Tails |
-| 02-num-cpus | `num_cpus` | `NumCpus.get ()` → prints CPU count |
-| 03-shim-hello | `[rust.shims]` | `greet "World"` via hand-written shim → `Hello, World!` |
-
-All three examples build and run clean from a wiped `.skycache`.
+| Example | Crate | Status | Notes |
+|---|---|---|---|
+| 01-rand | `rand` | ✅ builds + runs | `Rand.random_bool 0.5` → Heads/Tails |
+| 02-num-cpus | `num_cpus` | ✅ builds + runs | `NumCpus.get ()` → CPU count |
+| 03-chrono | `chrono` | ❓ not yet built | `Chrono.local_now()` + format — awaits end-to-end test |
 
 ---
 
@@ -167,47 +155,40 @@ pub fn task_map<A, B>(f: impl FnOnce(A) -> B + Send + 'static,
 }
 ```
 
-`SkyError` is:
-- `String` when `Sky.Core.Error` is not imported
-- The `SkyCoreErrorError` ADT when `Sky.Core.Error` is imported
-
 ---
 
 ## Rust FFI
 
 `sky add <crate> --target rust` invokes `sky-ffi-inspect-rs`, which:
 
-1. Creates a temporary Cargo project with the crate as a dependency
-2. Runs `cargo fetch` (cached) to download the source
-3. Uses `syn` to parse `pub fn`, `pub struct`, `impl Type { pub fn }` items
-4. Maps Rust types → Sky types (`Vec→List`, `Option→Maybe`, `HashMap→Dict`, `Result→Result E A`, `SkyResult<E,A>→Result E A`)
-5. Emits JSON matching the `PkgInfo` schema consumed by `FfiGen.hs`
-6. Writes `.skycache/ffi/rust/<slug>.kernel.json` + `.skycache/ffi/rust/<slug>.skyi`
-7. Writes `.skycache/rust/<slug>_bindings.rs` (the wrapper module)
+1. Creates a temporary Cargo project with the crate as a dependency.
+2. Runs `cargo +nightly rustdoc --package <crate> --lib --output-format json`.
+   This executes **after** proc macro expansion, so derive-generated impls
+   (clap `Parser`, serde `Serialize`, etc.) are fully visible.
+3. Parses the JSON output to extract public functions, impl block methods,
+   and trait impls — including those generated by macros.
+4. **Facade detection:** if the crate is a thin re-export (`pub use underlying::*`)
+   with zero functions, the inspector follows the glob to the underlying crate
+   and re-runs rustdoc on it automatically (e.g. `clap` → `clap_builder`).
+5. Maps Rust types → Sky types (`Vec→List`, `Option→Maybe`, `HashMap→Dict`,
+   `Result→Result E A`, `SkyResult<E,A>→Result E A`).
+6. Emits JSON matching the `PkgInfo` schema consumed by `FfiGen.hs`.
+7. Writes `.skycache/ffi/rust/<slug>.kernel.json` + `.skycache/ffi/rust/<slug>.skyi`.
+8. Writes `.skycache/rust/<slug>_bindings.rs` (the generated wrapper module).
 
 Generated bindings use `import Rust.<Name> as Name` in Sky source.
 
-### Shims — escape hatch for macro-generated crates
+### Inspector binary resolution (priority order)
 
-Crates whose public API comes from derive macros (clap, serde-derive, etc.) export
-zero functions from `syn`'s perspective. Use `[rust.shims]` instead:
+| Priority | Source |
+|---|---|
+| 1 | `$SKY_FFI_INSPECTOR_RS` env var |
+| 2 | `./bin/sky-ffi-inspect-rs` (walking up ancestors) |
+| 3 | Binary embedded in the `sky` binary (materialised on first use at `~/.cache/sky/tools/sky-ffi-inspect-rs/`) |
 
-```toml
-[rust.shims]
-"Greet" = "ffi/greet.rs"
-```
-
-The shim file is hand-written Rust that exposes a Sky-FFI-compatible interface
-(`SkyResult<SkyError, T>` returns, `String`/`i64`/`bool` params). During
-`sky build`, the compiler:
-
-1. Runs the inspector in `--shim` mode on the file
-2. Generates `.skycache/ffi/rust/<slug>.kernel.json` and `.skyi`
-3. Writes a re-export stub at `.skycache/rust/<slug>_bindings.rs`
-4. Copies the shim source to `sky-out/Rust/src/shims/<name>.rs`
-5. Injects `pub mod shims;` into `main.rs`
-
-See `examples/rust/03-shim-hello/` for a complete working example.
+The embedded path bundles the pre-built release binary via Template Haskell.
+Source files in `tools/sky-ffi-inspect-rs/` are registered as TH dependencies;
+editing them triggers a rebuild of both the inspector and the `sky` binary.
 
 ### Feature flags
 
@@ -221,28 +202,14 @@ passed through to `Cargo.toml` by `emitCargoToml`.
 ### Display/FromStr bridge
 
 For opaque types that implement `Display`/`FromStr`, the inspector auto-generates
-synthetic `to_string`/`from_string` bindings so Sky code can convert to/from `String`
-without hand-written shims.
-
-### Inspector binary resolution (priority order)
-
-| Priority | Source |
-|---|---|
-| 1 | `$SKY_FFI_INSPECTOR_RS` env var |
-| 2 | `./bin/sky-ffi-inspect-rs` (walking up ancestors) |
-| 3 | Binary embedded in the `sky` binary (default, materialised on first use) |
-
-The embedded path bundles the pre-built release binary via Template Haskell into
-`~/.cache/sky/tools/sky-ffi-inspect-rs/` on first `sky add --target rust`. Source
-files are registered as TH dependencies; editing them recompiles both the inspector
-and the sky binary automatically.
+synthetic `to_string`/`from_string` bindings so Sky code can convert to/from
+`String` without any manual glue.
 
 ---
 
 ## FFI codegen type-coercion rules
 
 `FfiGen.hs` (`emitRustFnSimple`) uses these rules when emitting wrapper bodies.
-Knowing them is essential when debugging generated bindings.
 
 **Parameter coercion (`argCall`):**
 
@@ -263,8 +230,8 @@ Knowing them is essential when debugging generated bindings.
 | `i64` / `f64` | numeric type | `as i64` / `as f64` |
 | fallback | differs | `.into()` (requires `From` impl — cargo catches missing impl) |
 
-`.try_into().unwrap()` is **never** emitted (removed in B2 — was causing E0277
-compile errors on reference-returning methods and runtime panics on numeric overflow).
+`.try_into().unwrap()` is **never** emitted (causes E0277 on reference-returning
+methods and panics on numeric overflow).
 
 ---
 
@@ -283,9 +250,10 @@ sky check src/Main.sky --target rust
 # Run tests
 sky test tests/MyTest.sky --target rust
 
-# Add a crate dependency
+# Add a crate dependency (fully automatic — no shims needed)
 sky add uuid --target rust
 sky add rand --features="small_rng" --target rust
+sky add clap --features="derive" --target rust   # proc macros fully visible
 
 # Regenerate all Rust FFI bindings (after rm -rf .skycache)
 sky install
@@ -297,19 +265,21 @@ sky install
 
 | Limitation | Description | Workaround |
 |---|---|---|
-| Macro-generated APIs | `sky add clap` reports 0 functions — derive macros are invisible to `syn` | `[rust.shims]` in `sky.toml` |
 | Partial application of kernels | `let f = Task.map myFn` emits an under-applied call | Wrap in explicit closure: `\t -> Task.map myFn t` |
 | JSON pipeline decoder | `Box<dyn FnOnce>` chain from `json_dec_p_required` + `json_dec_succeed` can't satisfy `Clone+Send` | Architecture-level fix needed |
 | Polymorphic ADT returns | Functions returning `Result`/`Maybe` with unresolved type vars may default to `()` | Annotate return type explicitly |
 | Flat main.rs | All Sky modules compile into a single `main.rs`; no `mod` declarations | Planned |
 | `sky install` git deps | git-source Rust deps may need manual `sky add` after `rm -rf .skycache` | Run `sky add <crate> --target rust` for each git dep |
 | `Db.migrateApply` | No transaction wrapping or rollback | Planned |
+| `rustdoc` requires nightly | Inspector runs `cargo +nightly rustdoc`; nightly toolchain must be installed | `rustup install nightly` |
 
 ---
 
 ## Remaining work
 
 ### Short-term
+- **End-to-end test `03-chrono`** — build and run the chrono example to confirm
+  `rustdoc` discovers `local_now` and `format` correctly for a date/time crate.
 - **JSON pipeline decoder** — restructure `Decoder<E, T>` to avoid `FnOnce` trait-bound
   mismatch in pipeline combinators (`06-json` example).
 - **Separate module files** — emit `pub mod <name>;` declarations instead of flattening
