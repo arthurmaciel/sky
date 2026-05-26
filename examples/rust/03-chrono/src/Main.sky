@@ -10,8 +10,12 @@ import Rust.Chrono as Chrono
 import Std.Log exposing (println)
 
 main =
-    let
-        now = Chrono.local_now ()
-        formatted = Chrono.format now "%Y-%m-%d %H:%M:%S"
-    in
-    println ("Current date/time: " ++ formatted)
+    case Chrono.now_from_utc () of
+        Err _ ->
+            println "Failed to get time"
+        Ok now ->
+            case Chrono.to_string_from_dateTime now of
+                Err _ ->
+                    println "Failed to format time"
+                Ok formatted ->
+                    println ("Current UTC date/time: " ++ formatted)

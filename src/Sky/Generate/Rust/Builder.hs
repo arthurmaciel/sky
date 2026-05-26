@@ -2010,7 +2010,7 @@ kernelToRust mod name = case (mod, name) of
     -- a polyfill call site — emit a diagnostic panic.
     ("Ffi", "kernel") -> "ffi_kernel_polyfill"
     -- Rust user-FFI kernel: snake_case the suffix, no panic stub.
-    -- The wrapper function lives in a .skycache/rust/*_bindings.rs file
+    -- The wrapper function lives in a .skycache/ffi/rust/*_bindings.rs file
     -- that gets copied into sky-out/Rust/src/ at codegen time.
     _ | "Rust_" `isPrefixOf` mod ->
         toSnakeCase (drop 5 mod ++ "_" ++ name)

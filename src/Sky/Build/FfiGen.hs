@@ -108,6 +108,7 @@ data PkgInfo = PkgInfo
     , _pkgName   :: String
     , _pkgVersion :: String  -- semver from cargo metadata (or "" for Go)
     , _pkgFns    :: [FnInfo]
+    , _pkgModules :: [String]  -- Rust target: public module paths to glob-import
     , _pkgErrors :: [String]
     }
     deriving (Show)
@@ -148,6 +149,7 @@ instance A.FromJSON PkgInfo where
         <*> o A..:? "name" A..!= ""
         <*> o A..:? "version" A..!= ""
         <*> o A..:? "functions" A..!= []
+        <*> o A..:? "modules" A..!= []
         <*> o A..:? "errors" A..!= []
 
 
@@ -330,11 +332,10 @@ generateBindings TargetGo pkg = do
     return names
 generateBindings TargetRust pkg = do
     createDirectoryIfMissing True ".skycache/ffi/rust"
-    createDirectoryIfMissing True ".skycache/rust"
     let slug = slugify (_pkgName pkg)
         kname = kernelNameFromPkg TargetRust pkg
         mname = pkgToModuleName TargetRust (_pkgPath pkg)
-        rsFile   = ".skycache/rust" </> (slug ++ "_bindings.rs")
+        rsFile   = ".skycache/ffi/rust" </> (slug ++ "_bindings.rs")
         skyiFile = ".skycache/ffi/rust" </> (slug ++ ".skyi")
         jsonFile = ".skycache/ffi/rust" </> (slug ++ ".kernel.json")
         names = map (\fn -> mname ++ "." ++ lowerFirst (_fnName fn)) (_pkgFns pkg)
@@ -915,6 +916,22 @@ skyTypeToRust s
     | otherwise = "String"  -- fallback for unrecognised types
 
 
+-- | Snake-case a Rust identifier EXACTLY as Sky.Generate.Rust.Builder.toSnakeCase
+-- does.  The Rust codegen snake-cases the kernel call site
+-- (`chrono_to_string_from_date_time`); the binding's `pub fn` name must match
+-- byte-for-byte or the call fails to resolve.  Both camelCase boundaries and
+-- existing underscores map to `_<lower>`.
+rustSnakeCase :: String -> String
+rustSnakeCase []     = []
+rustSnakeCase (c:cs) = toLower c : go cs
+  where
+    go [] = []
+    go (x:xs)
+      | x == '_' && not (null xs) = '_' : toLower (head xs) : go (tail xs)
+      | isUpper x                 = '_' : toLower x : go xs
+      | otherwise                 = x : go xs
+
+
 -- | True when the given Rust type string is a primitive numeric type.
 -- Used to pick `as <T>` casts instead of `.try_into().unwrap()` or `.into()`.
 isNumericRust :: String -> Bool
@@ -924,23 +941,118 @@ isNumericRust t = t `elem`
     , "isize", "usize", "f32", "f64" ]
 
 
+-- | Strip leading/trailing spaces.
+trimStr :: String -> String
+trimStr = f . f where f = reverse . dropWhile (== ' ')
+
+
+-- | If the type is `Wrapper<...>`, return the inner argument string.
+stripGeneric1 :: String -> String -> Maybe String
+stripGeneric1 wrapper s0 =
+    let s = trimStr s0
+    in case stripPrefix (wrapper ++ "<") s of
+         Just rest | not (null rest) && last rest == '>' -> Just (trimStr (init rest))
+         _ -> Nothing
+
+
+-- | For a `Result<T, E>` string return the Ok type `T`; otherwise the input
+-- unchanged.  Respects nested angle brackets so `Result<Vec<T>, E>` works.
+okTypeOfResult :: String -> String
+okTypeOfResult s0 =
+    case stripPrefix "Result<" (trimStr s0) of
+        Just rest -> trimStr (firstArg rest)
+        Nothing   -> trimStr s0
+  where
+    firstArg = go (0 :: Int) []
+      where
+        go _ acc [] = reverse acc
+        go d acc (c:cs)
+          | c == '<' || c == '(' = go (d + 1) (c:acc) cs
+          | (c == '>' || c == ')') && d == 0 = reverse acc
+          | c == '>' || c == ')' = go (d - 1) (c:acc) cs
+          | c == ',' && d == 0   = reverse acc
+          | otherwise            = go d (c:acc) cs
+
+
+-- | Translate a raw Rust (Ok-)type into the wrapper's declared inner return
+-- type plus a coercion that lifts an expression of the raw type into that
+-- declared type.  Driven by the inspector's real Rust type (the source of
+-- truth for opaque types) rather than the lossy Sky type — which collapses
+-- every opaque type to "String" and would force a bogus `.into()`.
+--
+--   Option<T>   -> (SkyMaybe<T'>, match-wrap)
+--   Vec<T>      -> (Vec<T'>, per-element map when T needs coercion)
+--   iN / uN     -> (i64, `(e) as i64`)
+--   f32 / f64   -> (f64, `(e) as f64`)
+--   bool        -> (bool, identity)
+--   String      -> (String, identity)
+--   &str/&String-> (String, `e.to_string()`)
+--   &T          -> (T', `e.to_owned()`)
+--   () / ""     -> ((), identity — the call still executes)
+--   opaque T    -> (T, identity)
+translateRustRet :: String -> (String, String -> String)
+translateRustRet raw0 =
+    let raw = trimStr raw0 in
+    if raw == "" || raw == "()" then ("()", id)
+    else case stripGeneric1 "Option" raw of
+      Just inner ->
+        let (dt, co) = translateRustRet inner
+        in ( "SkyMaybe<" ++ dt ++ ">"
+           , \e -> "match " ++ e ++ " { Some(v) => SkyMaybe::Just(" ++ co "v"
+                   ++ "), None => SkyMaybe::Nothing }" )
+      Nothing -> case stripGeneric1 "Vec" raw of
+        Just inner ->
+          let (dt, co) = translateRustRet inner
+          in ( "Vec<" ++ dt ++ ">"
+             , \e -> if co "x" == "x" then e
+                     else e ++ ".into_iter().map(|x| " ++ co "x" ++ ").collect()" )
+        Nothing
+          | raw `elem` intRusts   -> ("i64", \e -> "(" ++ e ++ ") as i64")
+          | raw `elem` floatRusts -> ("f64", \e -> "(" ++ e ++ ") as f64")
+          | raw == "bool"   -> ("bool", id)
+          | raw == "String" -> ("String", id)
+          | "&" `isPrefixOf` raw ->
+              let inner = stripRef raw
+              in if inner == "str" || inner == "String"
+                 then ("String", \e -> e ++ ".to_string()")
+                 else let (dt, _) = translateRustRet inner
+                      in (dt, \e -> e ++ ".to_owned()")
+          | otherwise -> (raw, id)   -- opaque type: keep as-is, no coercion
+  where
+    intRusts   = [ "i8","i16","i32","i64","i128","isize"
+                 , "u8","u16","u32","u64","u128","usize" ]
+    floatRusts = [ "f32", "f64" ]
+    stripRef s =
+        let s1 = dropWhile (\c -> c == '&' || c == ' ') s
+        in case stripPrefix "mut " s1 of
+             Just r  -> trimStr r
+             Nothing -> trimStr s1
+
+
 -- | Emit a Rust wrapper module for a single crate, to be placed at
--- .skycache/rust/<slug>_bindings.rs.  Mirrors emitGoFile but for Rust.
+-- .skycache/ffi/rust/<slug>_bindings.rs.  Mirrors emitGoFile but for Rust.
 emitRustFile :: String -> PkgInfo -> String
 emitRustFile kernelName pkg =
     let pkgPath   = _pkgPath pkg
         crateName = takeWhile (\c -> c /= '/' && c /= '-')
                     (reverse (takeWhile (\c -> c /= '/') (reverse pkgPath)))
-        seen      = dedupByFirst (_pkgFns pkg)
+        seen      = dedupByRustName (_pkgFns pkg)
         fnLines   = concatMap emitRustFnSimple (zip [0::Int ..] seen)
         _ = seq (length fnLines) ()  -- force evaluation for timing
+        crateImp  = pkgToCrateImport pkgPath
+        -- Opaque types are emitted fully-qualified by the inspector
+        -- (`chrono::NaiveDate`, `chrono::format::Parsed`), so no submodule glob
+        -- imports are needed.  A single root glob stays as a safety net; using
+        -- only one glob avoids the multi-glob name ambiguity (e.g. `Error`
+        -- defined in two submodules) that broke the rand bindings.
     in unlines $
         [ "// Code generated by sky-ffi-inspect-rs from " ++ pkgPath ++ ". DO NOT EDIT."
         , "// Re-run `sky add " ++ pkgPath ++ "` to regenerate."
         , ""
+        , "#![allow(unused_imports, unused_mut, dead_code)]"
         , "use crate::*;"
         , "use std::collections::HashMap;"
-        , "use " ++ pkgToCrateImport pkgPath ++ "::*;"
+        , "use " ++ crateImp ++ "::*;"
         , ""
         ]
         ++ fnLines
@@ -962,7 +1074,9 @@ emitRustFile kernelName pkg =
             -- T4: disambiguate duplicate wrapper names by suffixing with receiver type
             disambSfx = if null recvType then "" else "_from_" ++ lowerFirst recvType
             wrapper   = kernelName ++ "_" ++ skyName ++ disambSfx
-            rustName  = lowerFirst (map (\c -> if c == '.' then '_' else c) (drop 5 kernelName ++ "_" ++ skyName ++ disambSfx))
+            -- Must match Builder.kernelToRustFn for the Rust_ case:
+            -- toSnakeCase (drop 5 mod ++ "_" ++ name).
+            rustName  = rustSnakeCase (drop 5 kernelName ++ "_" ++ skyName ++ disambSfx)
             params    = _fnParams fn
             results   = _fnResults fn
             paramSkyTypes = _fnParamSkyTypes fn ++ repeat ""
@@ -974,13 +1088,38 @@ emitRustFile kernelName pkg =
             paramTypes = [ resolveRustType crateImport st
                             (if j < nRawRustParam then rawRustParamTypes !! j else "")
                          | (j, st) <- zip [0::Int ..] (take nParams paramSkyTypes) ]
-            paramDecl = if null paramTypes then "_: ()"
-                        else intercalate ", " [ "arg" ++ show j ++ ": " ++ t | (j, t) <- zip [0..] paramTypes ]
-            retInner = case results of
-                ((_, rt):_) -> if null rt then "SkyError"
-                               else resolveRustType crateImport rt
-                                    (if nRawRustResult > 0 then rawRustResultTypes !! 0 else "")
-                _           -> "()"
+            -- Display bridge on a generic receiver type (e.g. DateTime<Tz>):
+            -- emit `arg0: impl std::fmt::Display` so the wrapper accepts any
+            -- concrete instantiation without needing to spell out trait bounds.
+            -- The synthetic Display bridge never names the receiver type — it
+            -- takes `impl std::fmt::Display`.  This both supports generic
+            -- receivers (DateTime<Tz>) and dodges any name-ambiguity for the
+            -- receiver type (e.g. a crate with two `Error` types).
+            isDisplayBridge = _fnMethodName fn == "to_string" && isInstance
+            -- Receiver of an instance method is bound `mut` so that methods
+            -- taking `&mut self` (e.g. WeekdaySet::insert) auto-ref correctly.
+            -- `#![allow(unused_mut)]` silences the no-op case.
+            declOne j t =
+                let pfx = if j == (0 :: Int) && isInstance then "mut arg0" else "arg" ++ show j
+                in pfx ++ ": " ++ t
+            paramDecl
+                | isDisplayBridge = "arg0: impl std::fmt::Display"
+                | null paramTypes = "_: ()"
+                | otherwise = intercalate ", "
+                    [ declOne j t | (j, t) <- zip [0..] paramTypes ]
+            -- Declared wrapper return type + a coercion lifting the raw Rust
+            -- value into it.  Driven by the inspector's raw Rust type (source
+            -- of truth for opaque types).  When the inspector left the raw
+            -- type blank (synthetic Display/FromStr bridges) fall back to the
+            -- Sky type mapping.
+            rawResultTy = if nRawRustResult > 0 then rawRustResultTypes !! 0 else ""
+            skyResultTy = case results of ((_, rt):_) -> rt; _ -> "()"
+            effRawResult = if null rawResultTy
+                           then skyTypeToRust skyResultTy
+                           else rawResultTy
+            (retInner, retCoerce) = case _fnEffect fn of
+                "fallible" -> translateRustRet (okTypeOfResult effRawResult)
+                _          -> translateRustRet effRawResult
             retType = case _fnEffect fn of
                 "effectful" -> "SkyTask<SkyError, " ++ retInner ++ ">"
                 _           -> "SkyResult<SkyError, " ++ retInner ++ ">"
@@ -1024,46 +1163,60 @@ emitRustFile kernelName pkg =
                     in "<" ++ recvResolved ++ " as std::str::FromStr>::from_str(" ++ callArgs ++ ")"
                 | isStaticFn =
                     let recvResolved = resolveRustType crateImport recvType (_fnRecvRustType fn)
-                    in recvResolved ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
+                        -- Turbofish (<Type<Param>>::fn) avoids Rust parsing
+                        -- `Type<Param>::fn(args)` as chained comparisons.
+                        recv' = if '<' `elem` recvResolved
+                                then "<" ++ recvResolved ++ ">"
+                                else recvResolved
+                    in recv' ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
                 | otherwise =
                     if null params then crateImport ++ "::" ++ fnName ++ "()"
                     else crateImport ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
-            -- Shape-aware return coercion helper.
-            -- rawResultTy: the inspector's raw Rust return type (may be "").
-            -- retInner:    the declared Sky-mapped wrapper return type.
-            -- Rules (applied in order):
-            --   1. rawResultTy is empty or equals retInner → no conversion.
-            --   2. rawResultTy starts with '&' → .to_owned() (handles &str→String
-            --      and similar ref→owned conversions; opaque &T that doesn't impl
-            --      ToOwned will need a Clone-based shim, caught at cargo time).
-            --   3. rawResultTy is numeric AND retInner is i64/f64 → `as` cast.
-            --   4. Fallback → .into() (relies on From; cargo reports missing impl).
-            rawResultTy = if nRawRustResult > 0 then rawRustResultTypes !! 0 else ""
-            coerceRet v
-                | null rawResultTy || rawResultTy == retInner = v
-                | "&" `isPrefixOf` rawResultTy = v ++ ".to_owned()"
-                | isNumericRust rawResultTy && retInner `elem` ["i64","f64"] = v ++ " as " ++ retInner
-                | otherwise = v ++ ".into()"
-            -- Build the function body based on effect
+            -- Build the function body based on effect.  retCoerce lifts the
+            -- raw Rust value into the declared return type (Option→SkyMaybe,
+            -- Vec element map, numeric widening to i64/f64, &T→owned, opaque
+            -- → identity).
             body = case _fnEffect fn of
                 "effectful" ->
-                    "Box::pin(async move { match " ++ callExpr ++ ".await { Ok(v) => ok_res(v), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) } })"
+                    "Box::pin(async move { match " ++ callExpr ++ ".await { Ok(v) => ok_res(" ++ retCoerce "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) } })"
                 "fallible" ->
-                    "match " ++ callExpr ++ " { Ok(v) => ok_res(" ++ coerceRet "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
+                    "match " ++ callExpr ++ " { Ok(v) => ok_res(" ++ retCoerce "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
                 _ ->
-                    -- T2: wrap pure calls in ok_res() to match the SkyResult return type.
-                    -- For Option<T>, convert to SkyMaybe<T>.
-                    let isMaybeResult = case results of
-                            ((_, rt):_) -> "Maybe " `isPrefixOf` rt
-                            _           -> False
-                    in if isMaybeResult
-                       then "ok_res(match " ++ callExpr ++ " { Some(v) => SkyMaybe::Just(" ++ coerceRet "v" ++ "), None => SkyMaybe::Nothing })"
-                       else "ok_res(" ++ coerceRet callExpr ++ ")"
-        in [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
-           , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
-           , "    " ++ body
-           , "}"
-           ]
+                    "ok_res(" ++ retCoerce callExpr ++ ")"
+            -- Skip degenerate method entries: functions with no recvType
+            -- but whose first param is named "self".  These originate from
+            -- trait-impl methods where the inspector couldn't determine the
+            -- concrete receiver type.  The generated call
+            -- `crateImport::fn(arg0)` would reference a non-existent free
+            -- function and fail to compile.  The correct receiver-tagged
+            -- variant (with recvType set) is kept by dedupByRustName.
+            isDegenerateMethod = null recvType
+                && not (null params)
+                && fst (head params) == "self"
+            -- Skip methods/statics whose receiver Rust type has an unresolved
+            -- generic type parameter (e.g. DateTime<Tz>, Date<Tz>).  We
+            -- detect this by a loose heuristic: recvRustType contains '<'
+            -- followed immediately by an uppercase letter (type parameter
+            -- convention) that is not part of a longer concrete-type word
+            -- that starts with a capital.  This correctly lets
+            -- DateTime<Utc>, DateTime<Local> through while skipping
+            -- DateTime<Tz> / Date<T> / Vec<T> etc.
+            -- Display bridges are exempt — they already use `impl Display`.
+            hasGenericRecvParam =
+                let rrt = _fnRecvRustType fn
+                    afterAngle = dropWhile (/= '<') rrt
+                in not (null afterAngle) && not isDisplayBridge
+                   && case drop 1 afterAngle of
+                        (c:rest) -> isUpper c
+                                    && (null rest || head rest == ',' || head rest == '>' || (isLower (head rest) && length rest <= 2))
+                        []       -> False
+        in if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
+           then []
+           else [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
+                , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
+                , "    " ++ body
+                , "}"
+                ]
 
 
 -- | Convert a pkg path to a Rust crate import path.
@@ -1139,6 +1292,24 @@ dedupByFirst = go Set.empty
         | otherwise           = fn : go (Set.insert key seen) rest
       where
         key = lowerFirst (_fnName fn)
+
+
+-- | Rust-aware deduplication: keyed on the full disambiguated name
+-- (bare name for free functions, name_from_RecvType for methods).
+-- This preserves both a free `to_rfc3339` and a method
+-- `to_rfc3339_from_dateTime` as distinct entries, where the Go-target
+-- `dedupByFirst` would drop the second.
+dedupByRustName :: [FnInfo] -> [FnInfo]
+dedupByRustName = go Set.empty
+  where
+    go _ []     = []
+    go seen (fn:rest)
+        | Set.member key seen = go seen rest
+        | otherwise           = fn : go (Set.insert key seen) rest
+      where
+        sfx = if null (_fnRecvType fn) then ""
+              else "_from_" ++ lowerFirst (_fnRecvType fn)
+        key = lowerFirst (_fnName fn) ++ sfx
 
 
 emitTypedWrapper :: String -> AliasTable -> FnInfo -> String

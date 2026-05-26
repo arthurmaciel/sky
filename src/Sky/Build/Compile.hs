@@ -1514,7 +1514,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         mapM_ (\(depName, _) -> do
                             let fileSlug = map (\c -> if c `elem` ("./" :: String) then '_' else c) depName
                                 modSlug  = map (\c -> if Char.isAlphaNum c then c else '_') depName
-                                srcPath' = ".skycache/rust" </> fileSlug ++ "_bindings.rs"
+                                srcPath' = ".skycache/ffi/rust" </> fileSlug ++ "_bindings.rs"
                                 dstPath' = srcDir </> modSlug ++ "_bindings.rs"
                             exists <- doesFileExist srcPath'
                             when exists $ do

@@ -64,6 +64,12 @@ struct PkgInfo {
     #[serde(skip_serializing_if = "String::is_empty")]
     version: String,
     functions: Vec<Function>,
+    // Full `::`-paths of every PUBLIC module in the crate (e.g.
+    // "chrono::format").  FfiGen glob-imports each (`use <mod>::*;`) so that
+    // types re-exported only in submodules resolve by their bare name in the
+    // generated wrappers.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    modules: Vec<String>,
     errors: Vec<String>,
 }
 
@@ -119,6 +125,7 @@ fn main() {
                 name: "error".into(),
                 version: String::new(),
                 functions: vec![],
+                modules: vec![],
                 errors: vec![format!("JSON serialization failed: {}", e)],
             };
             println!("{}", serde_json::to_string_pretty(&err).unwrap());
@@ -366,6 +373,11 @@ fn extract_crate_version(json: &str) -> Option<String> {
 // ── Parse rustdoc JSON → PkgInfo ───────────────────────────────────────
 
 fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> PkgInfo {
+    // Make the crate-local public-path map available to
+    // rustdoc_type_to_rust_str so it can fully-qualify opaque types.  Must be
+    // set BEFORE any function is parsed (parse_fn_item -> rust_str reads it).
+    REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
+
     let index = match doc["index"].as_object() {
         Some(idx) => idx,
         None => return pkg_error(crate_name, "rustdoc JSON missing 'index' field"),
@@ -373,11 +385,37 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
 
     let aliases: HashMap<String, String> = HashMap::new();
     let mut functions: Vec<Function> = Vec::new();
-    let mut display_types: HashSet<String> = HashSet::new();
-    let mut fromstr_types: HashSet<String> = HashSet::new();
+    // Maps Sky type name → full Rust type string (may include generic params).
+    // Used by emit_display_fromstr_bridges to carry the concrete Rust type
+    // through to FfiGen so it can detect generic receivers and emit
+    // `impl Display` / `impl FromStr` bounds rather than bare type names.
+    let mut display_types: HashMap<String, String> = HashMap::new();
+    let mut fromstr_types: HashMap<String, String> = HashMap::new();
     let mut errors: Vec<String> = Vec::new();
 
+    // First pass: collect the IDs of every item that belongs to an impl or
+    // trait `items` list — i.e. every associated function / method.  In the
+    // flat rustdoc index, an associated function (e.g. `NaiveDate::from_ymd`)
+    // appears BOTH as a standalone `function` item AND inside the owning
+    // impl's `items` list.  Emitting the standalone copy as a free function
+    // would generate a bogus `crate::from_ymd(..)` call that doesn't exist.
+    // We skip the standalone copy here; the impl-block walk below emits the
+    // correct receiver-tagged variant (`NaiveDate::from_ymd` / `arg0.method`).
+    let mut associated_ids: HashSet<String> = HashSet::new();
     for (_, item) in index {
+        let inner = &item["inner"];
+        for kind in ["impl", "trait"] {
+            if let Some(block) = inner.get(kind) {
+                if let Some(items) = block.get("items").and_then(|i| i.as_array()) {
+                    for mid in items {
+                        associated_ids.insert(item_id_to_str(mid));
+                    }
+                }
+            }
+        }
+    }
+
+    for (item_id, item) in index {
         // Only items from this crate (crate_id == 0); deps have crate_id > 0
         let crate_id = item["crate_id"].as_u64().unwrap_or(1);
         if crate_id != 0 {
@@ -387,9 +425,10 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         let name = item["name"].as_str().unwrap_or("").to_string();
         let inner = &item["inner"];
 
-        // Free function — must be public
+        // Free function — must be public AND not an associated item of an
+        // impl/trait (those are handled by the impl-block walk with a receiver).
         if let Some(fn_data) = inner.get("function") {
-            if is_public(item) {
+            if is_public(item) && !associated_ids.contains(item_id.as_str()) {
                 if let Some(f) = parse_fn_item(&name, fn_data, &aliases, None) {
                     functions.push(f);
                 }
@@ -423,10 +462,11 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             if trait_name == "Display" || trait_name.ends_with("::Display") {
-                display_types.insert(self_sky.clone());
+                // key = Sky type name; value = full Rust type (may have generics)
+                display_types.entry(self_sky.clone()).or_insert_with(|| self_rust.clone());
             }
             if trait_name == "FromStr" || trait_name.ends_with("::FromStr") {
-                fromstr_types.insert(self_sky.clone());
+                fromstr_types.entry(self_sky.clone()).or_insert_with(|| self_rust.clone());
             }
 
             // Walk method items.
@@ -455,6 +495,15 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // Synthetic to_string / from_string bridge functions (Display/FromStr)
     emit_display_fromstr_bridges(&mut functions, &display_types, &fromstr_types);
 
+    // Drop functions whose param/result/receiver types can't be named in the
+    // generated wrapper: impl-level generics (`Tz`), private crate types, and
+    // external types whose canonical path runs through a private module.  After
+    // qualification, a reachable type appears as `crate::Path::Type`; anything
+    // still bare-and-unknown is unresolved.  `to_string` bridges are exempt —
+    // FfiGen emits them with an `impl std::fmt::Display` bound and never spells
+    // the receiver type.
+    functions.retain(|f| f.method_name == "to_string" || fn_types_nameable(f));
+
     if functions.is_empty() && !errors.is_empty() {
         // surface errors visibly
         errors.insert(0, format!("{}: 0 functions extracted", crate_name));
@@ -465,8 +514,47 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         name: crate_name.to_string(),
         version: version.to_string(),
         functions,
+        modules: collect_public_modules(doc),
         errors,
     }
+}
+
+/// Collect the `::`-joined paths of every PUBLIC module defined in this crate
+/// (crate_id == 0).  FfiGen glob-imports each so that types re-exported only
+/// inside a submodule (e.g. `chrono::format::ParseErrorKind`) resolve by their
+/// bare name in the generated wrappers.  Private modules are excluded — they
+/// can't be `use`d — and so are crates' synthetic/hidden internals.
+fn collect_public_modules(doc: &serde_json::Value) -> Vec<String> {
+    let index = match doc["index"].as_object() {
+        Some(i) => i,
+        None => return vec![],
+    };
+    let paths = doc["paths"].as_object();
+    let mut mods: Vec<String> = Vec::new();
+    for (id, item) in index {
+        let inner = &item["inner"];
+        if inner.get("module").is_some()
+            && item["crate_id"].as_u64().unwrap_or(1) == 0
+            && is_public(item)
+        {
+            if let Some(segs) = paths
+                .and_then(|m| m.get(id))
+                .and_then(|e| e.get("path"))
+                .and_then(|p| p.as_array())
+            {
+                let joined: Vec<String> = segs
+                    .iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect();
+                if !joined.is_empty() {
+                    mods.push(joined.join("::"));
+                }
+            }
+        }
+    }
+    mods.sort();
+    mods.dedup();
+    mods
 }
 
 fn is_public(item: &serde_json::Value) -> bool {
@@ -501,22 +589,48 @@ fn parse_fn_item(
 
     let mut params: Vec<Param> = Vec::new();
 
-    // Receiver param for methods
+    // Determine if this is an instance method by checking whether `self`
+    // appears as the first entry in sig["inputs"].  Associated (static)
+    // functions don't have a self input even though they live in an impl block.
+    let has_self_in_inputs = inputs
+        .first()
+        .and_then(|i| i[0].as_str())
+        .map(|n| n == "self")
+        .unwrap_or(false);
+
+    // For instance methods: push the receiver as first param so FfiGen
+    // can generate `arg0.method(rest...)`.  For static/associated functions
+    // in an impl block (recv.is_some() but no self input): don't push a
+    // receiver param — FfiGen will use `RecvType::fn(args)` via isStaticFn.
     if let Some((sky_ty, rust_ty)) = recv {
-        params.push(Param {
-            name: "self".into(),
-            ty: sky_ty.to_string(),
-            sky_type: sky_ty.to_string(),
-            rust_type: rust_ty.to_string(),
-        });
+        if has_self_in_inputs {
+            params.push(Param {
+                name: "self".into(),
+                ty: sky_ty.to_string(),
+                sky_type: sky_ty.to_string(),
+                rust_type: rust_ty.to_string(),
+            });
+        }
     }
 
-    // Ordinary parameters: inputs is [(name, type_json)]
+    // Ordinary parameters: inputs is [(name, type_json)].
+    // Skip the "self" entry — it is already accounted for by the receiver
+    // push above (instance method) or is not needed (static method).
     for input in inputs {
         let param_name = input[0].as_str().unwrap_or("_");
+        if param_name == "self" {
+            continue;
+        }
         let type_json = &input[1];
         let sky = rustdoc_type_to_sky(type_json, aliases);
         let rust = rustdoc_type_to_rust_str(type_json);
+        // `Self` in a parameter position means "the receiver type" (e.g.
+        // `fn signed_duration_since(self, rhs: Self)`, or nested as
+        // `Option<Self>`).  `Self` is not valid in a free-function signature,
+        // so substitute the concrete receiver type token throughout.
+        let (rsky, rrust) = recv.unwrap_or(("", ""));
+        let sky = subst_self(&sky, rsky);
+        let rust = subst_self(&rust, rrust);
         params.push(Param {
             name: param_name.to_string(),
             ty: sky.clone(),
@@ -530,6 +644,11 @@ fn parse_fn_item(
     if !output.is_null() {
         let sky = rustdoc_type_to_sky(output, aliases);
         let rust = rustdoc_type_to_rust_str(output);
+        // Substitute `Self` (possibly nested, e.g. `Option<Self>`) with the
+        // concrete receiver type so the wrapper's return type is valid Rust.
+        let (rsky, rrust) = recv.unwrap_or(("", ""));
+        let sky = subst_self(&sky, rsky);
+        let rust = subst_self(&rust, rrust);
         if sky != "()" {
             results.push(Param {
                 name: String::new(),
@@ -538,6 +657,18 @@ fn parse_fn_item(
                 rust_type: rust,
             });
         }
+    }
+
+    // Skip functions whose params or results carry a lifetime parameter
+    // (e.g. `Item<'_>`, `StrftimeItems<'a>`, `&'a str`).  Such types are tied
+    // to a borrow scope and cannot be expressed in a monomorphic, owned FFI
+    // wrapper — the wrapper signature would reference an undeclared lifetime.
+    // These are iterator / borrowed-view types that aren't usable from Sky
+    // anyway, so dropping them is the correct boundary behaviour.
+    let touches_lifetime = params.iter().any(|p| has_lifetime(&p.rust_type))
+        || results.iter().any(|p| has_lifetime(&p.rust_type));
+    if touches_lifetime {
+        return None;
     }
 
     let effect = classify_effect(output, &params, is_async);
@@ -557,6 +688,215 @@ fn parse_fn_item(
         is_field_set: false,
         is_pkg_var: false,
     })
+}
+
+fn is_ident_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+thread_local! {
+    // Crate-local type id -> fully-qualified public path (see
+    // collect_reachable_paths).  Used to qualify opaque types unambiguously.
+    static REACHABLE_PATHS: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Fully-qualified public path of a crate-local type by its rustdoc id, if
+/// reachable via a public module.  None for unreachable (private) types and
+/// for external-crate types (which are dropped by the nameability filter).
+fn reachable_local_path(id: &serde_json::Value) -> Option<String> {
+    let key = item_id_to_str(id);
+    REACHABLE_PATHS.with(|c| c.borrow().get(&key).cloned())
+}
+
+/// Replace every whole-word `Self` token in a type string with `replacement`.
+/// Used to monomorphise `Self`-typed params/results to the concrete receiver
+/// type (`Option<Self>` -> `Option<NaiveDate>`).  Type strings are ASCII.
+fn subst_self(ty: &str, replacement: &str) -> String {
+    if replacement.is_empty() || !ty.contains("Self") {
+        return ty.to_string();
+    }
+    let b = ty.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i..].starts_with(b"Self")
+            && (i == 0 || !is_ident_byte(b[i - 1]))
+            && (i + 4 >= b.len() || !is_ident_byte(b[i + 4]))
+        {
+            out.push_str(replacement);
+            i += 4;
+        } else {
+            out.push(b[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Container / std-prelude type names that are always nameable in generated
+/// wrappers, regardless of crate re-exports.  Anything else with an
+/// uppercase-initial name must be reachable via the crate's public modules.
+const ALWAYS_NAMEABLE: &[&str] = &[
+    "Option", "Result", "Vec", "Box", "Rc", "Arc", "Mutex", "RwLock", "Cell",
+    "RefCell", "HashMap", "BTreeMap", "HashSet", "BTreeSet", "VecDeque", "Cow",
+    "String",
+];
+
+const TYPE_KINDS: &[&str] =
+    &["struct", "enum", "trait", "type_alias", "typedef", "union", "primitive"];
+
+fn item_is_type(it: &serde_json::Value) -> bool {
+    let ik = &it["inner"];
+    TYPE_KINDS.iter().any(|k| ik.get(*k).is_some())
+}
+
+/// True if a Rust type string is fully nameable in a generated wrapper: every
+/// uppercase-initial token is either already qualified (preceded by `::`, e.g.
+/// `chrono::NaiveDate`, `std::time::Duration`) or an always-nameable container
+/// (`Option`, `Result`, `Vec`, …).  A *bare* uppercase token that is neither
+/// means an unresolved type — an impl-level generic (`Tz`), a private crate
+/// type, or an external type with no public path — so the function is dropped.
+fn type_is_nameable(ty: &str) -> bool {
+    let b = ty.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < b.len() && is_ident_byte(b[i]) {
+                i += 1;
+            }
+            let tok = &ty[start..i];
+            if tok.as_bytes()[0].is_ascii_uppercase() {
+                let qualified = start >= 2 && &ty[start - 2..start] == "::";
+                if !qualified && !ALWAYS_NAMEABLE.contains(&tok) {
+                    return false;
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    true
+}
+
+/// All of a function's param / result / receiver types are nameable.
+fn fn_types_nameable(f: &Function) -> bool {
+    f.params.iter().all(|p| type_is_nameable(&p.rust_type))
+        && f.results.iter().all(|p| type_is_nameable(&p.rust_type))
+        && (f.recv_rust_type.is_empty() || type_is_nameable(&f.recv_rust_type))
+}
+
+/// Map every crate-local type's rustdoc item id to a fully-qualified PUBLIC
+/// path (`chrono::NaiveDate`, `chrono::format::Parsed`).  Walks each public
+/// module, recording defined types as `<module-path>::<name>` and named
+/// re-exports as `<module-path>::<reexport-name>`, following `use` edges into
+/// other modules transitively.  Prefers the shortest path so root re-exports
+/// win over deep submodule definitions.  rustdoc_type_to_rust_str uses this to
+/// qualify opaque types unambiguously instead of relying on glob imports.
+fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    let index = match doc["index"].as_object() {
+        Some(i) => i,
+        None => return out,
+    };
+    let paths = doc["paths"].as_object();
+    let mpath = |mid: &str| -> Option<String> {
+        paths
+            .and_then(|m| m.get(mid))
+            .and_then(|e| e.get("path"))
+            .and_then(|p| p.as_array())
+            .map(|segs| {
+                segs.iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::")
+            })
+    };
+    let insert_shorter = |out: &mut HashMap<String, String>, id: String, path: String| {
+        if out.get(&id).map_or(true, |e| path.len() < e.len()) {
+            out.insert(id, path);
+        }
+    };
+
+    let mut stack: Vec<String> = Vec::new();
+    for (id, item) in index {
+        if item["inner"].get("module").is_some()
+            && item["crate_id"].as_u64().unwrap_or(1) == 0
+            && is_public(item)
+        {
+            stack.push(id.clone());
+        }
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Some(mid) = stack.pop() {
+        if !seen.insert(mid.clone()) {
+            continue;
+        }
+        let mp = match mpath(&mid) {
+            Some(p) => p,
+            None => continue,
+        };
+        let module = match index.get(&mid).and_then(|it| it["inner"].get("module")) {
+            Some(m) => m,
+            None => continue,
+        };
+        let items = match module["items"].as_array() {
+            Some(a) => a,
+            None => continue,
+        };
+        for child in items {
+            let cid = item_id_to_str(child);
+            let it = match index.get(&cid) {
+                Some(x) => x,
+                None => continue,
+            };
+            if item_is_type(it) {
+                if let Some(n) = it["name"].as_str() {
+                    insert_shorter(&mut out, cid.clone(), format!("{}::{}", mp, n));
+                }
+            }
+            if let Some(u) = it["inner"].get("use") {
+                let tid = u.get("id").map(item_id_to_str);
+                if !u["is_glob"].as_bool().unwrap_or(false) {
+                    if let (Some(n), Some(tids)) = (u["name"].as_str(), tid.as_ref()) {
+                        if index.get(tids).map(item_is_type).unwrap_or(false) {
+                            insert_shorter(&mut out, tids.clone(), format!("{}::{}", mp, n));
+                        }
+                    }
+                }
+                if let Some(tids) = tid {
+                    if index
+                        .get(&tids)
+                        .and_then(|x| x["inner"].get("module"))
+                        .is_some()
+                    {
+                        stack.push(tids);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// True if a Rust type string contains a lifetime token (`'a`, `'static`,
+/// `'_`).  A `'` in a type string is always a lifetime (char literals never
+/// appear in type positions), so detecting `'` followed by an identifier
+/// char is sufficient and unambiguous.
+fn has_lifetime(ty: &str) -> bool {
+    let bytes = ty.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\'' {
+            if let Some(&next) = bytes.get(i + 1) {
+                if next.is_ascii_alphanumeric() || next == b'_' {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn classify_effect(
@@ -594,17 +934,20 @@ fn is_future_type(val: &serde_json::Value) -> bool {
 
 fn emit_display_fromstr_bridges(
     functions: &mut Vec<Function>,
-    display_types: &HashSet<String>,
-    fromstr_types: &HashSet<String>,
+    display_types: &HashMap<String, String>,
+    fromstr_types: &HashMap<String, String>,
 ) {
-    for ty in display_types {
+    for (sky_ty, rust_ty) in display_types {
+        // recv_rust_type carries the FULL Rust type string (e.g. "DateTime<Tz>")
+        // so FfiGen can detect generic params and emit `impl Display` instead of
+        // a bare (possibly incomplete) type name.
         functions.push(Function {
             name: "to_string".into(),
             params: vec![Param {
                 name: "self".into(),
-                ty: ty.clone(),
-                sky_type: ty.clone(),
-                rust_type: ty.clone(),
+                ty: sky_ty.clone(),
+                sky_type: sky_ty.clone(),
+                rust_type: rust_ty.clone(),
             }],
             results: vec![Param {
                 name: String::new(),
@@ -615,8 +958,8 @@ fn emit_display_fromstr_bridges(
             variadic: false,
             effect: "pure".into(),
             exported: true,
-            recv_type: ty.clone(),
-            recv_rust_type: ty.clone(),
+            recv_type: sky_ty.clone(),
+            recv_rust_type: rust_ty.clone(),
             method_name: "to_string".into(),
             is_field: false,
             is_field_set: false,
@@ -624,7 +967,7 @@ fn emit_display_fromstr_bridges(
         });
     }
 
-    for ty in fromstr_types {
+    for (sky_ty, rust_ty) in fromstr_types {
         functions.push(Function {
             name: "from_string".into(),
             params: vec![Param {
@@ -635,15 +978,15 @@ fn emit_display_fromstr_bridges(
             }],
             results: vec![Param {
                 name: String::new(),
-                ty: ty.clone(),
-                sky_type: ty.clone(),
-                rust_type: ty.clone(),
+                ty: sky_ty.clone(),
+                sky_type: sky_ty.clone(),
+                rust_type: rust_ty.clone(),
             }],
             variadic: false,
             effect: "fallible".into(),
             exported: true,
-            recv_type: ty.clone(),
-            recv_rust_type: ty.clone(),
+            recv_type: sky_ty.clone(),
+            recv_rust_type: rust_ty.clone(),
             method_name: "from_string".into(),
             is_field: false,
             is_field_set: false,
@@ -669,14 +1012,14 @@ fn rustdoc_type_to_sky(val: &serde_json::Value, aliases: &HashMap<String, String
         return type_str_to_sky(prim.as_str().unwrap_or(""), aliases);
     }
 
-    // { "borrowed_ref": { "type_": … } }  →  strip the reference
+    // { "borrowed_ref": { "type": … } }  →  strip the reference
     if let Some(inner) = val.get("borrowed_ref") {
-        return rustdoc_type_to_sky(&inner["type_"], aliases);
+        return rustdoc_type_to_sky(inner_type(inner), aliases);
     }
 
-    // { "raw_pointer": { "type_": … } }
+    // { "raw_pointer": { "type": … } }
     if let Some(inner) = val.get("raw_pointer") {
-        return rustdoc_type_to_sky(&inner["type_"], aliases);
+        return rustdoc_type_to_sky(inner_type(inner), aliases);
     }
 
     // { "resolved_path": { "name": "Vec", "args": { "angle_bracketed": … } } }
@@ -706,9 +1049,9 @@ fn rustdoc_type_to_sky(val: &serde_json::Value, aliases: &HashMap<String, String
         return format!("List {}", rustdoc_type_to_sky(inner, aliases));
     }
 
-    // { "array": { "type_": …, "len": "N" } }
+    // { "array": { "type": …, "len": "N" } }
     if let Some(arr) = val.get("array") {
-        let inner = rustdoc_type_to_sky(&arr["type_"], aliases);
+        let inner = rustdoc_type_to_sky(inner_type(arr), aliases);
         // [u8; N] → Bytes, other fixed arrays → List T
         return if inner == "Int" {
             "Bytes".to_string()
@@ -867,32 +1210,50 @@ fn rustdoc_type_to_rust_str(val: &serde_json::Value) -> String {
     }
 
     if let Some(inner) = val.get("borrowed_ref") {
-        let m = if inner["mutable"].as_bool().unwrap_or(false) {
-            "mut "
-        } else {
-            ""
-        };
+        let m = if is_mutable(inner) { "mut " } else { "" };
+        // rustdoc JSON stores lifetimes WITH the leading apostrophe already
+        // (e.g. "'static", "'a").  Don't prepend another one.
         let lt = inner["lifetime"]
             .as_str()
-            .map(|l| format!("'{} ", l))
+            .map(|l| {
+                let s = if l.starts_with('\'') { l.to_string() } else { format!("'{}", l) };
+                format!("{} ", s)
+            })
             .unwrap_or_default();
-        return format!("&{}{}{}", lt, m, rustdoc_type_to_rust_str(&inner["type_"]));
+        return format!("&{}{}{}", lt, m, rustdoc_type_to_rust_str(inner_type(inner)));
     }
 
     if let Some(inner) = val.get("raw_pointer") {
-        let m = if inner["mutable"].as_bool().unwrap_or(false) {
-            "mut"
-        } else {
-            "const"
-        };
-        return format!("*{} {}", m, rustdoc_type_to_rust_str(&inner["type_"]));
+        let m = if is_mutable(inner) { "mut" } else { "const" };
+        return format!("*{} {}", m, rustdoc_type_to_rust_str(inner_type(inner)));
     }
 
     if let Some(rp) = val.get("resolved_path") {
-        let name = rp["name"]
+        let raw_name = rp["name"]
             .as_str()
             .or_else(|| rp["path"].as_str())
             .unwrap_or("");
+        // For an EXTERNAL-crate type (crate_id != 0, e.g. `core::time::Duration`),
+        // emit the fully-qualified path: it's unambiguous and avoids colliding
+        // with a same-named crate-local re-export (chrono aliases `Duration`).
+        // For a CRATE-LOCAL type strip to the last segment — the generated
+        // bindings glob-import the crate's public modules so the bare name is
+        // in scope; a `crate::`-prefixed path would wrongly resolve against the
+        // sky-app crate.  External types whose canonical path runs through a
+        // private module (e.g. `core::ops::range::RangeInclusive`) are emitted
+        // verbatim but get dropped later by the nameability filter.
+        // Qualify CRATE-LOCAL opaque types with their public path
+        // (`chrono::NaiveDate`).  External/std types are left bare: the only
+        // ones usable are the always-nameable containers (Vec, Option, …);
+        // anything else (`Duration`, `RangeInclusive`) stays a bare unknown
+        // and is dropped by the nameability filter, since std's rustdoc paths
+        // route through private modules and can't be reproduced reliably.
+        let qualified = rp.get("id").and_then(reachable_local_path);
+        let name: String = match qualified {
+            Some(full) => full,
+            None => raw_name.rsplit("::").next().unwrap_or(raw_name).to_string(),
+        };
+        let name = name.as_str();
         let args: Vec<String> = rp
             .get("args")
             .and_then(|a| a.get("angle_bracketed"))
@@ -904,7 +1265,9 @@ fn rustdoc_type_to_rust_str(val: &serde_json::Value) -> String {
                         if let Some(t) = arg.get("type") {
                             Some(rustdoc_type_to_rust_str(t))
                         } else if let Some(l) = arg.get("lifetime") {
-                            Some(format!("'{}", l.as_str().unwrap_or("a")))
+                            // rustdoc JSON already includes the leading apostrophe
+                            let s = l.as_str().unwrap_or("'a");
+                            Some(if s.starts_with('\'') { s.to_string() } else { format!("'{}", s) })
                         } else {
                             None
                         }
@@ -933,7 +1296,7 @@ fn rustdoc_type_to_rust_str(val: &serde_json::Value) -> String {
 
     if let Some(arr) = val.get("array") {
         let len = arr["len"].as_str().unwrap_or("?");
-        return format!("[{}; {}]", rustdoc_type_to_rust_str(&arr["type_"]), len);
+        return format!("[{}; {}]", rustdoc_type_to_rust_str(inner_type(arr)), len);
     }
 
     if let Some(g) = val.get("generic") {
@@ -981,6 +1344,28 @@ fn type_str_to_sky(s: &str, aliases: &HashMap<String, String>) -> String {
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/// Fetch the wrapped inner type from a `borrowed_ref` / `raw_pointer` /
+/// `array` node, tolerating rustdoc format drift: older formats use the
+/// key `"type_"`, newer formats use `"type"`.  Returns the JSON null value
+/// when neither is present (callers map that to `()`).
+fn inner_type(wrapper: &serde_json::Value) -> &serde_json::Value {
+    let t = &wrapper["type"];
+    if !t.is_null() {
+        t
+    } else {
+        &wrapper["type_"]
+    }
+}
+
+/// Read a reference/pointer mutability flag, tolerating both the newer
+/// `"is_mutable"` and older `"mutable"` rustdoc keys.
+fn is_mutable(wrapper: &serde_json::Value) -> bool {
+    wrapper["is_mutable"]
+        .as_bool()
+        .or_else(|| wrapper["mutable"].as_bool())
+        .unwrap_or(false)
+}
+
 /// Convert a rustdoc item ID to a string key for index lookups.
 /// Item IDs appear as integers in new format (35+) and strings in old format.
 fn item_id_to_str(id: &serde_json::Value) -> String {
@@ -996,6 +1381,7 @@ fn pkg_error(name: &str, msg: &str) -> PkgInfo {
         name: name.into(),
         version: String::new(),
         functions: vec![],
+        modules: vec![],
         errors: vec![msg.into()],
     }
 }
