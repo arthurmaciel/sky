@@ -108,7 +108,7 @@ even for crates that use proc macros or derive macros.
 
 ### Rust FFI examples (`examples/rust/`)
 
-All 13 build and run from a clean slate (`rm -rf sky-out .skycache && sky add … && sky run`).
+All 15 build and run from a clean slate (`rm -rf sky-out .skycache && sky add … && sky run`).
 
 | Example | Crate | Status | What it shows |
 |---|---|---|---|
@@ -125,10 +125,13 @@ All 13 build and run from a clean slate (`rm -rf sky-out .skycache && sky add �
 | 11-fastrand | `fastrand` | ✅ builds + runs | `fastrand::bool` → coin flip |
 | 12-ulid | `ulid` | ✅ builds + runs | `Ulid::new` + Display → ULID string |
 | 13-petname | `petname` | ✅ builds + runs | `petname n sep` → friendly random name |
+| 14-crc32fast | `crc32fast` | ✅ builds + runs | `hash : List Int -> …` (`&[u8]` slice param) → CRC32 |
+| 15-uuid-bytes | `uuid` | ✅ builds + runs | `from_bytes` `[u8;16]` param + `as_bytes` `&[u8;16]` result, via `List Int` |
 
 These span the common shapes auto-FFI must handle: free functions, static
 methods (`Type::fn`), instance methods (`arg0.method`), `Display`/`FromStr`
-bridges, `Option`/`Result` returns, and primitive ⇄ opaque round-tripping.
+bridges, `Option`/`Result` returns, byte sequences (`&[u8]`/`[u8; N]` ⇄
+`List Int`), and primitive ⇄ opaque round-tripping.
 
 ---
 
@@ -138,7 +141,8 @@ bridges, `Option`/`Result` returns, and primitive ⇄ opaque round-tripping.
 runtime-rust/src/sky_runtime/
 ├── config.rs      GENERATED at build time — DbPool, DbRow, SKY_DB_URL
 ├── core.rs        SkyResult<E,A>, SkyMaybe<T>, SkyTask<E,A>, ok_res, str_err,
-│                  list/string/float helpers, result_with_default, result_traverse
+│                  list/string/float helpers, result_with_default, result_traverse,
+│                  byte FFI coercion: to_u8_vec / from_u8_slice / to_u8_array
 ├── task.rs        task_succeed, task_map, task_and_then, task_on_error,
 │                  task_fail, task_perform, task_sequence, task_run, task_parallel
 ├── log.rs         log_info, log_debug, log_warn, log_error, *_with variants
@@ -215,13 +219,15 @@ wrapper, so the generated `_bindings.rs` always compiles:
 | Generic functions (`fn f<T>`) and impl-level generics (`DateTime<Tz>`) | no concrete type at the FFI boundary |
 | Lifetime-parameterised types (`Item<'a>`, `&'a str`) | borrow scope can't be expressed in an owned wrapper |
 | Borrowed results (`&mut Builder`, nested `(.., &[u8;8])`) | tie to a lifetime the wrapper can't supply |
-| Fixed-size arrays / slices (`[u8;16]`, `&[u8]`) | Sky's `Vec<u8>` doesn't coerce to them |
+| Non-byte arrays / slices (`[f64; 3]`, `&[String]`) | element coercion not implemented |
 | `unsafe fn` | auto-exposing e.g. `new_unchecked` would bypass invariants |
 | Private crate types & external/std types (`Duration`, `RangeInclusive`) | no nameable public path |
 
-Plain `&str`/`&String` results are kept (copied to an owned `String`). Crate-local
-**non-generic type aliases** are resolved to their underlying type first
-(`uuid::Bytes = [u8; 16]`), so the array filter sees the real shape.
+Plain `&str`/`&String` results are kept (copied to an owned `String`). **Byte
+sequences** (`&[u8]`, `Vec<u8>`, `[u8; N]`, `&[u8; N]`) are kept and bridged to
+Sky `List Int` (see the coercion rules below). Crate-local **non-generic type
+aliases** are resolved to their underlying type first (`uuid::Bytes = [u8; 16]`)
+so the byte/array detection sees the real shape.
 
 ### Deduplication
 
@@ -274,13 +280,21 @@ fully-qualified):
 | `List a` / `Maybe a` / `Dict String v` | `Vec<…>` / `SkyMaybe<…>` / `HashMap<…>` |
 | opaque type | the fully-qualified raw type (`chrono::NaiveDate`) |
 
-**Parameter coercion (`argCall`):**
+**Parameter coercion (`argCall`).** Byte-sequence params take a Sky `List Int`
+(`Vec<i64>`) and coerce to the raw Rust shape:
 
 | Declared wrapper type | Raw Rust fn param type | Emitted arg |
 |---|---|---|
 | `String` | `&str` | `&argN` |
 | `i64` / `f64` | narrower numeric (`u32`, `usize`, `f32`, …) | `argN as <rawType>` |
+| `Vec<i64>` | `&[u8]` | `&to_u8_vec(&argN)` |
+| `Vec<i64>` | `Vec<u8>` | `to_u8_vec(&argN)` |
+| `Vec<i64>` | `[u8; N]` / `&[u8; N]` | body-prelude local `bN` / `&bN` (see below) |
 | anything | same / absent | `argN` |
+
+A `[u8; N]` / `&[u8; N]` param adds a prelude line to the wrapper body:
+`let bN: [u8; N] = match to_u8_array::<SkyError, N>(&argN) { Ok(a) => a, Err(e) => return Err(e) };`
+— a length mismatch returns `Err`, never panics.
 
 **Return type + coercion (`translateRustRet`).** The declared return type and the
 lifting expression are derived from the *raw Rust return type* (the source of
@@ -288,6 +302,7 @@ truth — the Sky type collapses opaque types to `String`):
 
 | Raw Rust return | Declared wrapper return | Lift |
 |---|---|---|
+| `&[u8]` / `Vec<u8>` / `[u8; N]` / `&[u8; N]` | `Vec<i64>` (Sky `List Int`) | `from_u8_slice(&e)` (or `from_u8_slice(e)` for refs) |
 | `Option<T>` | `SkyMaybe<T'>` | `match … { Some(v) => SkyMaybe::Just(co v), None => SkyMaybe::Nothing }` |
 | `Vec<T>` | `Vec<T'>` | per-element `.map` only when `T` needs coercion |
 | `iN` / `uN` | `i64` | `(e) as i64` |
@@ -342,17 +357,19 @@ sky install
 | `sky install` git deps | git-source Rust deps may need manual `sky add` after `rm -rf .skycache` | Run `sky add <crate> --target rust` for each git dep |
 | `Db.migrateApply` | No transaction wrapping or rollback | Planned |
 | `rustdoc` requires nightly | Inspector runs `cargo +nightly rustdoc`; nightly toolchain must be installed | `rustup install nightly` |
-| Un-nameable bindings dropped | Functions taking/returning generics, slices/arrays, borrows, std types, or unsafe fns are skipped (see nameability filter) | Use a wrapper crate exposing owned/primitive signatures, or a crate whose API is self-typed |
+| Un-nameable bindings dropped | Functions taking/returning generics, NON-byte slices/arrays, borrows, std types, or unsafe fns are skipped (byte sequences are kept — see nameability filter) | Use a wrapper crate exposing owned/primitive signatures, or a crate whose API is self-typed |
 
 ---
 
 ## Remaining work
 
 ### Short-term
-- **Slice / byte-array params** — coerce Sky `Bytes` (`Vec<u8>`) to `&[u8]` /
-  `[u8; N]` params (currently dropped) so hashing/encoding crates bind.
+- **Non-byte slices/arrays** — `&[String]`, `[f64; 3]` still drop; add
+  per-element coercion (byte sequences already bind as `List Int`).
 - **Enum-argument constructors** — many crate fns take a crate enum (e.g.
   `base32::encode(Alphabet, …)`); expose enum variants so Sky can pass them.
+- **`&mut [u8]` fill params** — in/out byte buffers (e.g. `fastrand::fill`)
+  are still dropped; add write-back coercion.
 - **JSON pipeline decoder** — restructure `Decoder<E, T>` to avoid `FnOnce` trait-bound
   mismatch in pipeline combinators (`06-json` example).
 - **Separate module files** — emit `pub mod <name>;` declarations instead of flattening
