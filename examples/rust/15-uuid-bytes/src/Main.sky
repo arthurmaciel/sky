@@ -1,0 +1,26 @@
+module Main exposing (main)
+
+-- UUID byte round-trip via the `uuid` crate — fully automatic FFI.
+-- `Uuid::from_bytes` takes `[u8; 16]` (fixed array, length-checked → Err);
+-- `Uuid::as_bytes` returns `&[u8; 16]`. Both cross as Sky `List Int`.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+import Rust.Uuid as Uuid
+
+main =
+    case Uuid.from_bytes_from_uuid [0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255] of
+        Ok u ->
+            case Uuid.as_bytes_from_uuid u of
+                Ok bytes ->
+                    case bytes of
+                        first :: _ ->
+                            println ("UUID byte round-trip OK, first byte = " ++ String.fromInt first)
+                        [] ->
+                            println "UUID byte round-trip OK (empty)"
+                Err _ ->
+                    println "as_bytes failed"
+        Err _ ->
+            println "from_bytes failed"

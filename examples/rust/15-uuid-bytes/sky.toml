@@ -1,0 +1,8 @@
+[project]
+name = "15-uuid-bytes"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+["rust.dependencies"]
+uuid = "1"
