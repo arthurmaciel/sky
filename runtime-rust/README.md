@@ -108,11 +108,27 @@ even for crates that use proc macros or derive macros.
 
 ### Rust FFI examples (`examples/rust/`)
 
-| Example | Crate | Status | Notes |
+All 13 build and run from a clean slate (`rm -rf sky-out .skycache && sky add … && sky run`).
+
+| Example | Crate | Status | What it shows |
 |---|---|---|---|
 | 01-rand | `rand` | ✅ builds + runs | `Rand.random_bool 0.5` → Heads/Tails |
 | 02-num-cpus | `num_cpus` | ✅ builds + runs | `NumCpus.get ()` → CPU count |
-| 03-chrono | `chrono` | ❓ not yet built | `Chrono.local_now()` + format — awaits end-to-end test |
+| 03-chrono | `chrono` | ✅ builds + runs | `Utc::now` + Display → current UTC timestamp |
+| 04-uuid | `uuid` (feat v4) | ✅ builds + runs | `Uuid::new_v4` + Display → UUID string |
+| 05-roman | `roman` | ✅ builds + runs | free fns `to`/`from` → `MMXXIV` |
+| 06-lipsum | `lipsum` | ✅ builds + runs | `lipsum n` → lorem ipsum text |
+| 07-deunicode | `deunicode` | ✅ builds + runs | `deunicode s` → ASCII transliteration |
+| 08-semver | `semver` | ✅ builds + runs | `Version::parse` + Display → re-rendered version |
+| 09-bytesize | `bytesize` | ✅ builds + runs | `ByteSize::mb` + Display → `1.4 GiB` |
+| 10-titlecase | `titlecase` | ✅ builds + runs | `titlecase s` → Title Cased string |
+| 11-fastrand | `fastrand` | ✅ builds + runs | `fastrand::bool` → coin flip |
+| 12-ulid | `ulid` | ✅ builds + runs | `Ulid::new` + Display → ULID string |
+| 13-petname | `petname` | ✅ builds + runs | `petname n sep` → friendly random name |
+
+These span the common shapes auto-FFI must handle: free functions, static
+methods (`Type::fn`), instance methods (`arg0.method`), `Display`/`FromStr`
+bridges, `Option`/`Result` returns, and primitive ⇄ opaque round-tripping.
 
 ---
 
@@ -173,10 +189,45 @@ pub fn task_map<A, B>(f: impl FnOnce(A) -> B + Send + 'static,
 5. Maps Rust types → Sky types (`Vec→List`, `Option→Maybe`, `HashMap→Dict`,
    `Result→Result E A`, `SkyResult<E,A>→Result E A`).
 6. Emits JSON matching the `PkgInfo` schema consumed by `FfiGen.hs`.
-7. Writes `.skycache/ffi/rust/<slug>.kernel.json` + `.skycache/ffi/rust/<slug>.skyi`.
-8. Writes `.skycache/rust/<slug>_bindings.rs` (the generated wrapper module).
+7. Writes `.skycache/ffi/rust/<slug>.kernel.json`, `.skycache/ffi/rust/<slug>.skyi`,
+   and `.skycache/ffi/rust/<slug>_bindings.rs` (all three Rust artifacts share
+   the `.skycache/ffi/rust/` subdirectory).
 
-Generated bindings use `import Rust.<Name> as Name` in Sky source.
+Generated bindings use `import Rust.<Name> as Name` in Sky source. Method
+bindings are disambiguated by receiver: `Utc::now` → `now_from_utc`,
+`DateTime::to_string` → `to_string_from_dateTime`.
+
+### Opaque-type qualification
+
+Every crate-local opaque type is emitted **fully-qualified by its public
+re-export path** (`chrono::NaiveDate`, `chrono::format::Parsed`), keyed on the
+rustdoc item id. This is unambiguous — it avoids glob-import name clashes (e.g.
+a crate with two `Error` types in different submodules) — so the wrappers need
+only a single root `use <crate>::*;`.
+
+### Nameability filter — bindings that can't compile are dropped, not emitted
+
+The inspector skips any function it cannot turn into a sound monomorphic
+wrapper, so the generated `_bindings.rs` always compiles:
+
+| Dropped | Why |
+|---|---|
+| Generic functions (`fn f<T>`) and impl-level generics (`DateTime<Tz>`) | no concrete type at the FFI boundary |
+| Lifetime-parameterised types (`Item<'a>`, `&'a str`) | borrow scope can't be expressed in an owned wrapper |
+| Borrowed results (`&mut Builder`, nested `(.., &[u8;8])`) | tie to a lifetime the wrapper can't supply |
+| Fixed-size arrays / slices (`[u8;16]`, `&[u8]`) | Sky's `Vec<u8>` doesn't coerce to them |
+| `unsafe fn` | auto-exposing e.g. `new_unchecked` would bypass invariants |
+| Private crate types & external/std types (`Duration`, `RangeInclusive`) | no nameable public path |
+
+Plain `&str`/`&String` results are kept (copied to an owned `String`). Crate-local
+**non-generic type aliases** are resolved to their underlying type first
+(`uuid::Bytes = [u8; 16]`), so the array filter sees the real shape.
+
+### Deduplication
+
+Bindings are deduped once in `generateBindings` (Rust path) so the `.rs`, `.skyi`,
+and `.kernel.json` agree. A real `to_string`/`from_string` method colliding with
+the synthetic Display/FromStr bridge (e.g. `ulid::Ulid`) collapses to one entry.
 
 ### Inspector binary resolution (priority order)
 
@@ -211,27 +262,46 @@ synthetic `to_string`/`from_string` bindings so Sky code can convert to/from
 
 `FfiGen.hs` (`emitRustFnSimple`) uses these rules when emitting wrapper bodies.
 
+**Parameter type (`resolveRustType`).** A param's wrapper type is the *Sky-mapped*
+type for known Sky types, so the wrapper takes the owned value the call site
+passes. The inspector's raw Rust type is used only for opaque types (and is
+fully-qualified):
+
+| Sky param type | Wrapper param type |
+|---|---|
+| `String` | `String` (borrowed internally via `&argN`) |
+| `Int` / `Float` / `Bool` / `Bytes` | `i64` / `f64` / `bool` / `Vec<u8>` |
+| `List a` / `Maybe a` / `Dict String v` | `Vec<…>` / `SkyMaybe<…>` / `HashMap<…>` |
+| opaque type | the fully-qualified raw type (`chrono::NaiveDate`) |
+
 **Parameter coercion (`argCall`):**
 
-| Declared wrapper type | Raw Rust fn param type | Emitted arg expression |
+| Declared wrapper type | Raw Rust fn param type | Emitted arg |
 |---|---|---|
-| `i64` / `f64` (Sky Int/Float) | same type | `argN` (pass through) |
+| `String` | `&str` | `&argN` |
 | `i64` / `f64` | narrower numeric (`u32`, `usize`, `f32`, …) | `argN as <rawType>` |
-| `String` | `&str` or absent | `&argN` |
-| anything | same type or absent | `argN` (pass through) |
-| opaque type | opaque type | `argN` (pass through) |
+| anything | same / absent | `argN` |
 
-**Return coercion (`coerceRet`):**
+**Return type + coercion (`translateRustRet`).** The declared return type and the
+lifting expression are derived from the *raw Rust return type* (the source of
+truth — the Sky type collapses opaque types to `String`):
 
-| Declared wrapper return | Raw Rust fn return | Emitted conversion |
+| Raw Rust return | Declared wrapper return | Lift |
 |---|---|---|
-| same type or absent | same type | no conversion |
-| any | starts with `&` (reference) | `.to_owned()` |
-| `i64` / `f64` | numeric type | `as i64` / `as f64` |
-| fallback | differs | `.into()` (requires `From` impl — cargo catches missing impl) |
+| `Option<T>` | `SkyMaybe<T'>` | `match … { Some(v) => SkyMaybe::Just(co v), None => SkyMaybe::Nothing }` |
+| `Vec<T>` | `Vec<T'>` | per-element `.map` only when `T` needs coercion |
+| `iN` / `uN` | `i64` | `(e) as i64` |
+| `f32` / `f64` | `f64` | `(e) as f64` |
+| `bool` / `String` | `bool` / `String` | identity |
+| `&str` / `&String` | `String` | `e.to_string()` |
+| `()` / none | `()` | identity (the call still executes) |
+| opaque `T` | `T` (qualified) | identity — no `.into()` |
 
-`.try_into().unwrap()` is **never** emitted (causes E0277 on reference-returning
-methods and panics on numeric overflow).
+Effect drives the wrapper body: `pure` → `ok_res(lift(call))`; `fallible` →
+`match call { Ok(v) => ok_res(lift(v)), Err(e) => SkyResult::Err(str_err(…)) }`
+(the Ok type is extracted from `Result<T, E>` before lifting); `effectful` →
+the same inside `Box::pin(async move { … .await })`. `.into()` and
+`.try_into().unwrap()` are never emitted.
 
 ---
 
@@ -272,14 +342,17 @@ sky install
 | `sky install` git deps | git-source Rust deps may need manual `sky add` after `rm -rf .skycache` | Run `sky add <crate> --target rust` for each git dep |
 | `Db.migrateApply` | No transaction wrapping or rollback | Planned |
 | `rustdoc` requires nightly | Inspector runs `cargo +nightly rustdoc`; nightly toolchain must be installed | `rustup install nightly` |
+| Un-nameable bindings dropped | Functions taking/returning generics, slices/arrays, borrows, std types, or unsafe fns are skipped (see nameability filter) | Use a wrapper crate exposing owned/primitive signatures, or a crate whose API is self-typed |
 
 ---
 
 ## Remaining work
 
 ### Short-term
-- **End-to-end test `03-chrono`** — build and run the chrono example to confirm
-  `rustdoc` discovers `local_now` and `format` correctly for a date/time crate.
+- **Slice / byte-array params** — coerce Sky `Bytes` (`Vec<u8>`) to `&[u8]` /
+  `[u8; N]` params (currently dropped) so hashing/encoding crates bind.
+- **Enum-argument constructors** — many crate fns take a crate enum (e.g.
+  `base32::encode(Alphabet, …)`); expose enum variants so Sky can pass them.
 - **JSON pipeline decoder** — restructure `Decoder<E, T>` to avoid `FnOnce` trait-bound
   mismatch in pipeline combinators (`06-json` example).
 - **Separate module files** — emit `pub mod <name>;` declarations instead of flattening
