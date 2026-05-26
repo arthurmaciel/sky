@@ -166,3 +166,28 @@ fn string_to_lower_upper_consistent() {
     let lower = string_to_lower(s);
     assert_eq!(lower_upper, lower);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Byte-sequence FFI coercion helpers
+// ═══════════════════════════════════════════════════════════════════
+
+proptest! {
+    // to_u8_vec then widen back is identity on in-range bytes.
+    #[test]
+    fn byte_vec_roundtrip(xs in proptest::collection::vec(0u8..=255, 0..64)) {
+        let as_i64: Vec<i64> = xs.iter().map(|&b| b as i64).collect();
+        prop_assert_eq!(to_u8_vec(&as_i64), xs.clone());
+        prop_assert_eq!(from_u8_slice(&xs), as_i64);
+    }
+
+    // to_u8_array succeeds iff the input length matches N; never panics.
+    #[test]
+    fn to_u8_array_len_checked(xs in proptest::collection::vec(0i64..256, 0..40)) {
+        let r: SkyResult<String, [u8; 16]> = to_u8_array(&xs);
+        if xs.len() == 16 {
+            prop_assert!(r.is_ok());
+        } else {
+            prop_assert!(r.is_err());
+        }
+    }
+}

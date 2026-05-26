@@ -20,6 +20,37 @@ pub fn ok_res<E, A>(a: A) -> SkyResult<E, A> { SkyResult::Ok(a) }
 pub fn str_err<E: From<String>>(s: &str) -> E { s.to_string().into() }
 
 // ===========================================
+// Byte-sequence FFI coercion (Sky List Int <-> Rust bytes)
+// ===========================================
+
+/// Sky `List Int` (Vec<i64>) -> owned bytes. Each element is narrowed `as u8`,
+/// mirroring the numeric param narrowing the FFI codegen already emits.
+/// Used for `&[u8]` and `Vec<u8>` parameters.
+pub fn to_u8_vec(xs: &[i64]) -> Vec<u8> {
+    xs.iter().map(|&x| x as u8).collect()
+}
+
+/// Owned/borrowed bytes -> Sky `List Int` (Vec<i64>). Used for byte results.
+pub fn from_u8_slice(bs: &[u8]) -> Vec<i64> {
+    bs.iter().map(|&b| b as i64).collect()
+}
+
+/// Sky `List Int` -> `[u8; N]`. A length mismatch returns `Err` and never
+/// panics (honours "no runtime panic from well-typed Sky code"). Used for
+/// `[u8; N]` / `&[u8; N]` parameters; the generated wrapper instantiates
+/// `E = SkyError` and the concrete `N`.
+pub fn to_u8_array<E: From<String>, const N: usize>(xs: &[i64]) -> SkyResult<E, [u8; N]> {
+    if xs.len() != N {
+        return SkyResult::Err(format!("expected {} bytes, got {}", N, xs.len()).into());
+    }
+    let mut a = [0u8; N];
+    for (i, &x) in xs.iter().enumerate() {
+        a[i] = x as u8;
+    }
+    ok_res(a)
+}
+
+// ===========================================
 // Maybe
 // ===========================================
 #[derive(Clone, Debug, PartialEq)]
