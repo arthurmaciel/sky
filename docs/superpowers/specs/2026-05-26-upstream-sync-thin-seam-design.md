@@ -26,11 +26,46 @@ Meanwhile the genuinely-isolated Rust code (`runtime-rust/`,
 `EmbeddedInspectorRust.hs`, `examples/rust/`) **never conflicts** — upstream
 doesn't have those paths.
 
+## Measurement (dry-run merge, 2026-05-26)
+
+Added `upstream` and dry-run-merged `upstream/main` (v0.15.18, **68 commits**
+ahead of our HEAD; we are 39 ahead of it) onto a throwaway branch. Result —
+exactly **2 conflicted files**, both single-hunk:
+
+| File | Conflict | Nature |
+|---|---|---|
+| `src/Sky/Build/Compile.hs` | 1 hunk, ~228 lines | Our `case Toml._target of { TargetRust -> … ; TargetGo -> … }` wraps upstream's Go-codegen block, which upstream churns every release (v0.15 lowering, Auth boundary gate). The wrap + upstream's edits overlap. **The one real code conflict.** |
+| `sky-compiler.cabal` | 1 hunk, trivial | Both sides appended test-stanza `build-depends`. Resolve by taking both. |
+
+`FfiGen.hs`, `app/Main.hs`, and `Toml.hs` **auto-merged cleanly** — git's 3-way
+merge absorbs our additions there because they sit in regions upstream didn't
+touch. So those three files do **not** conflict *today*.
+
+**Decision (recorded):** proceed with the **full four-file extraction anyway**,
+treating it as *proactive future-proofing* rather than fixing a present-day
+conflict. Rationale: the latent risk is real — our additions changed upstream
+function *signatures* (`generateBindings`, `emitSkyi`, `runInspector` gained a
+`CompileTarget` param), so the next time upstream edits any of those bodies the
+clean auto-merge becomes a conflict. Restoring upstream signatures now removes
+that latent fault line across all four files. The honest per-file value:
+
+- `Compile.hs` — fixes a **present** conflict (and can only be *shrunk*, not
+  eliminated; see Goal note).
+- `FfiGen.hs` / `Main.hs` / `Toml.hs` — **latent** protection (no conflict today;
+  removes signature-drift risk for future upstream edits).
+
 ## Goal
 
 Shrink the shared-file conflict surface to near-zero so `git merge upstream/main`
 into `feat/runtime-rust` lands cleanly almost every time, **without** changing
 the merge-based topology and **without** any behavior change to either backend.
+
+**Honest caveat for `Compile.hs`:** because the target dispatch must wrap
+upstream's Go-codegen block (which upstream actively churns), extraction
+*shrinks* that conflict (move the ~228-line `TargetRust` body to `Rust.Project`,
+leaving a small dispatch) but cannot fully eliminate it — moving upstream's Go
+block out instead would make future upstream edits fail to apply, which is
+worse. The other three files can reach zero residual conflict.
 
 ## Guiding principle
 
@@ -116,12 +151,17 @@ primitives). Dependency flows one way (Rust → upstream): **no import cycle**.
 
 ### Fork hygiene + sync runbook
 
-One-time:
+One-time (the remote is **already added** as of the 2026-05-26 measurement):
 ```bash
-git remote add upstream https://github.com/anzellai/sky.git
+git remote add upstream https://github.com/anzellai/sky.git   # done
+git remote set-url --push upstream DISABLED                   # fetch-only nicety
 ```
 `main` is a pristine mirror of `upstream/main` (never receives Rust commits);
 `feat/runtime-rust` carries our work on top.
+
+The runbook should note the recurring **trivial** conflicts to expect:
+`sky-compiler.cabal` (both sides add `build-depends` → take both) and, until/if
+the Go-codegen seam stabilises, a small `Compile.hs` dispatch hunk.
 
 Per-release runbook (`docs/runtime-rust/syncing-upstream.md`, ~10 lines):
 ```bash
@@ -153,11 +193,14 @@ surface shrank.
   export-list names. `git diff main -- src/Sky/Build/FfiGen.hs` should show the
   Rust logic removed (FfiGen reconverged to upstream).
 
-**Merge dry-run:** with `upstream` added, throwaway
-`git merge --no-commit --no-ff upstream/<tag newer than our base>` on a scratch
-branch; confirm conflicts (if any) are confined to the `CompileTarget` /
-config / dispatch seams, never the Rust logic. Abort the scratch merge.
-Best-effort (local `main` is far behind).
+**Merge dry-run (re-measure against the known baseline):** the pre-refactor
+baseline is **2 conflicts** merging `upstream/main` (v0.15.18) — `Compile.hs`
+(~228-line hunk) + `sky-compiler.cabal` (trivial). After the refactor, repeat the
+throwaway `git merge --no-commit --no-ff upstream/main` on a scratch branch and
+confirm: `FfiGen.hs` / `Main.hs` / `Toml.hs` still auto-merge (now signature-
+clean, so they stay clean under future upstream edits too); the `Compile.hs`
+hunk has **shrunk** to the small dispatch wrapper (not the 228-line body); the
+cabal hunk is unchanged (trivial). Abort the scratch merge.
 
 **Sequencing safety:** extract one file at a time; `cabal build` + Rust
 regression sweep after each; commit per file. Any perturbation to Go or Rust
