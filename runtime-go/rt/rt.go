@@ -30,6 +30,11 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/subtle"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha1"
+	"crypto/x509"
+	"encoding/pem"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -473,6 +478,17 @@ func coerceInner[T any](v any) T {
 			return adapted.(T)
 		}
 	}
+	// Numeric convert: a kernel can hand back int64 where typed
+	// codegen routed a plain int (Time.unixMillis and friends) —
+	// same value, different Go width. reflect.Convert bridges them
+	// rather than panicking on the strict assertion below.
+	if isNumericKind(rv.Kind()) {
+		var zero T
+		zt := reflect.TypeOf(zero)
+		if zt != nil && isNumericKind(zt.Kind()) {
+			return rv.Convert(zt).Interface().(T)
+		}
+	}
 	// Final fallback: strict type assertion. If this panics, it
 	// means typed-codegen emitted a CALL with a wrong element type —
 	// a compiler bug, NOT a runtime input bug. Surfacing the panic
@@ -498,6 +514,19 @@ func coerceInner[T any](v any) T {
 		targetDesc = "<unknown>"
 	}
 	panic(fmt.Sprintf("rt.coerceInner: type mismatch — source %s cannot be cast to target %s. This is a compiler bug in typed-codegen routing. Reproduce, then investigate kernelTypedCall (Compile.hs) and the relevant inferXType helper.", srcDesc, targetDesc))
+}
+
+// isNumericKind reports whether k is an integer or float reflect.Kind —
+// the kinds reflect.Value.Convert can bridge without loss of meaning.
+func isNumericKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
+	default:
+		return false
+	}
 }
 
 // narrowReflectValue converts `src` to a value of type `target`, handling:
@@ -4092,6 +4121,14 @@ func Dict_member(key any, dict any) any {
 	return ok
 }
 
+func Dict_size(dict any) any {
+	return len(AsDict(unwrapAny(dict)))
+}
+
+func Dict_isEmpty(dict any) any {
+	return len(AsDict(unwrapAny(dict))) == 0
+}
+
 func Dict_keys(dict any) any {
 	m := AsDict(unwrapAny(dict))
 	result := make([]any, 0, len(m))
@@ -4445,6 +4482,24 @@ func TaskCoerceT[E any, A any](v any) SkyTask[E, A] {
 func Coerce[T any](v any) T {
 	if t, ok := v.(T); ok {
 		return t
+	}
+	// Fix A for docs/parametric-record-aliases-bugs.md Surface 2:
+	// function-targeted Coerce must always go via makeFuncAdapter
+	// when the source signature differs from T. Go function types
+	// are nominal in their parameter/return types — partial-applied
+	// ADT ctors lowered into `func(Concrete_R) Msg` then asked to
+	// fit `func(any) Msg` would otherwise panic at the wire
+	// dispatcher. (The exact-signature happy path is already
+	// caught by the v.(T) assertion above.)
+	if v != nil {
+		rv0 := reflect.ValueOf(v)
+		if rv0.IsValid() && rv0.Kind() == reflect.Func {
+			var zero T
+			tt := reflect.TypeOf(zero)
+			if tt != nil && tt.Kind() == reflect.Func {
+				return makeFuncAdapter[T](rv0, tt).(T)
+			}
+		}
 	}
 	// If the source is a Sky Result/Maybe but the target isn't,
 	// unwrap the Ok/Just first. Fixes the path where Ffi.callPure's
@@ -5015,7 +5070,7 @@ func AnyTaskRun(task any) any {
 //     just strftime-equivalent). No wrapper — bare String.
 func Time_now(_ any) any {
 	return func() any {
-		return Ok[any, any](time.Now().UnixMilli())
+		return Ok[any, any](int(time.Now().UnixMilli()))
 	}
 }
 
@@ -5301,7 +5356,7 @@ func Time_sleep(ms any) any {
 // returns the thunk for auto-force discard or Task chain consumption.
 func Time_unixMillis(_ any) any {
 	return func() any {
-		return Ok[any, any](time.Now().UnixMilli())
+		return Ok[any, any](int(time.Now().UnixMilli()))
 	}
 }
 
@@ -5359,7 +5414,7 @@ func Time_parseISO8601(s any) any {
 			return Err[any, any](ErrDecode("parseISO8601: " + err.Error()))
 		}
 	}
-	return Ok[any, any](t.UnixMilli())
+	return Ok[any, any](int(t.UnixMilli()))
 }
 
 // Time.parse : String -> String -> Result String Int
@@ -5369,7 +5424,7 @@ func Time_parse(layout any, s any) any {
 	if err != nil {
 		return Err[any, any](ErrDecode("time.parse: " + err.Error()))
 	}
-	return Ok[any, any](t.UnixMilli())
+	return Ok[any, any](int(t.UnixMilli()))
 }
 
 // Time.addMillis : Int -> Int -> Int
@@ -5840,6 +5895,79 @@ func Crypto_hmacSha256(key any, msg any) any {
 	mac := hmac.New(sha256.New, []byte(fmt.Sprintf("%v", key)))
 	mac.Write([]byte(fmt.Sprintf("%v", msg)))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// Crypto.hmacSha512 : String -> String -> String
+// (key, message) → hex HMAC-SHA512.
+func Crypto_hmacSha512(key any, msg any) any {
+	mac := hmac.New(sha512.New, []byte(fmt.Sprintf("%v", key)))
+	mac.Write([]byte(fmt.Sprintf("%v", msg)))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// Crypto.sha1 : String -> String — hex SHA-1 digest.
+// Retained for interop (git object ids, legacy webhook signatures).
+// Not for security hashing — use sha256/sha512.
+func Crypto_sha1(s any) any {
+	h := sha1.Sum([]byte(fmt.Sprintf("%v", s)))
+	return hex.EncodeToString(h[:])
+}
+
+// Crypto.rsaSha256Sign : String -> String -> Result Error String
+// (PEM private key, message) → standard-base64 RSASSA-PKCS1-v1_5
+// signature over the SHA-256 digest. Accepts PKCS#1 and PKCS#8 PEM
+// keys. The signing key never leaves this process.
+func Crypto_rsaSha256Sign(pemKey any, msg any) any {
+	block, _ := pem.Decode([]byte(fmt.Sprintf("%v", pemKey)))
+	if block == nil {
+		return Err[any, any](ErrFfi("Crypto.rsaSha256Sign: not a PEM-encoded key"))
+	}
+	var priv *rsa.PrivateKey
+	if k, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		priv = k
+	} else if k, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		rk, ok := k.(*rsa.PrivateKey)
+		if !ok {
+			return Err[any, any](ErrFfi("Crypto.rsaSha256Sign: PEM key is not RSA"))
+		}
+		priv = rk
+	} else {
+		return Err[any, any](ErrFfi("Crypto.rsaSha256Sign: could not parse the private key"))
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%v", msg)))
+	sig, err := rsa.SignPKCS1v15(cryptorand.Reader, priv, crypto.SHA256, digest[:])
+	if err != nil {
+		return Err[any, any](ErrFfi("Crypto.rsaSha256Sign: " + err.Error()))
+	}
+	return Ok[any, any](base64.StdEncoding.EncodeToString(sig))
+}
+
+// Crypto.rsaSha256Verify : String -> String -> String -> Bool
+// (PEM public key, message, standard-base64 signature) → valid?
+// False on any parse or verification failure.
+func Crypto_rsaSha256Verify(pemKey any, msg any, sigB64 any) any {
+	block, _ := pem.Decode([]byte(fmt.Sprintf("%v", pemKey)))
+	if block == nil {
+		return false
+	}
+	var pub *rsa.PublicKey
+	if k, err := x509.ParsePKIXPublicKey(block.Bytes); err == nil {
+		rk, ok := k.(*rsa.PublicKey)
+		if !ok {
+			return false
+		}
+		pub = rk
+	} else if k, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
+		pub = k
+	} else {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(fmt.Sprintf("%v", sigB64))
+	if err != nil {
+		return false
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%v", msg)))
+	return rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest[:], sig) == nil
 }
 
 // Crypto.constantTimeEqual : String -> String -> Bool

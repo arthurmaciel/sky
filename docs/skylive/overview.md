@@ -1,9 +1,15 @@
 # Sky.Live overview
 
-> **v0.13 state**: typed Go output end-to-end. Whole-program Sky DCE
-> prunes unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
-> coverage; runtime verification across all 26 examples. See
-> [`../compiler/journey.md`](../compiler/journey.md) for the changelog.
+> **v0.15 state**: type-directed lowering across callback fields,
+> record-field inits, list elements, and call args; Go generics on
+> parametric record aliases (`type alias Cfg msg = {…}` emits
+> `Cfg_R[T1 any]` with per-instance type args so callback fields
+> keep their typed callee param). Whole-program Sky DCE prunes
+> unused FFI bindings (Stripe-SDK scale: −82 % source). LSP 100 %
+> coverage; runtime verification across all 27 examples
+> (`examples/00-standard-libs` ships 120 Sky.Test assertions;
+> ~306 cabal specs). See [`../compiler/journey.md`](../compiler/journey.md)
+> for the changelog.
 
 
 **Server-driven UI with the TEA architecture** (`init` / `update` / `view` / `subscriptions`). Sky.Live lets you build interactive web apps where all state, logic, and rendering live on the server. The browser runs no client-side framework — just minimal JavaScript for DOM patching and SSE reconnection.
@@ -11,9 +17,12 @@
 ```elm
 module Main exposing (main)
 
-import Sky.Live as Live
-import Html exposing (..)
-import Html.Events exposing (onClick)
+import Sky.Core.Prelude exposing (..)
+import Std.Live exposing (app, route)
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+import Std.Html as Html
+import Std.Html.Events as Event
 
 
 type Msg
@@ -23,6 +32,10 @@ type Msg
 
 type alias Model =
     { count : Int }
+
+
+type Page
+    = HomePage
 
 
 init : () -> ( Model, Cmd Msg )
@@ -40,12 +53,12 @@ update msg model =
             ( { model | count = model.count - 1 }, Cmd.none )
 
 
-view : Model -> Html Msg
+view : Model -> any
 view model =
-    div []
-        [ button [ onClick Increment ] [ text "+" ]
-        , span [] [ text (String.fromInt model.count) ]
-        , button [ onClick Decrement ] [ text "-" ]
+    Html.div []
+        [ Html.button [ Event.onClick Increment ] [ Html.text "+" ]
+        , Html.span [] [ Html.text (String.fromInt model.count) ]
+        , Html.button [ Event.onClick Decrement ] [ Html.text "-" ]
         ]
 
 
@@ -55,14 +68,12 @@ subscriptions _ =
 
 
 main =
-    Live.app
+    app
         { init = init
         , update = update
         , view = view
         , subscriptions = subscriptions
-        , routes =
-            [ Live.route "/" HomePage
-            ]
+        , routes = [ route "/" HomePage ]
         , notFound = HomePage
         }
 ```
@@ -97,7 +108,7 @@ See [architecture.md](architecture.md) for the detailed flow and session managem
 
 - Auth-gated pages: check `session` in `update` or in the route handler.
 - Async work: `Cmd.perform (Http.get url) GotResponse` dispatches a task, the result comes back as `GotResponse (Result Error Response)`.
-- Scheduled updates: `Sub.interval 1000 Tick` emits `Tick` every second.
+- Scheduled updates: `Sub.every 1000 Tick` emits `Tick` every second.
 - Multi-page: `routes` maps URL paths to route messages; `update` responds to navigation.
 
 See [`examples/09-live-counter`](../../examples/09-live-counter/), [`examples/12-skyvote`](../../examples/12-skyvote/), [`examples/16-skychess`](../../examples/16-skychess/) for worked examples.
@@ -143,6 +154,17 @@ Some edges (Cloudflare without the right page rule, fly.io, custom Nginx) can re
 1. **Server-side hygiene.** Every `/_sky/sse` response sets `X-Accel-Buffering: no`, sends a 2 KB padding line so proxy buffers flush, then immediately sends `event: hello\ndata: {"v":1,"sid":...}\n\n`. A heartbeat fires every 15 s. Every `/_sky/event` POST response carries `X-Sky-Live: 1`.
 2. **Client SSE.** `connected` only flips on the `hello` event, never on raw `EventSource.open`. A 5 s watchdog tears down + reopens the stream if no hello arrives within `SKY_LIVE_HELLO_TIMEOUT_MS` (8 s default) or no heartbeat within `SKY_LIVE_HEARTBEAT_TTL_MS` (35 s default ≈ 2× heartbeat).
 3. **Client POST.** A 200 OK without `X-Sky-Live: 1` is treated as a wedged proxy response — never applied as a patch, always rerouted through the retry path.
+
+### SSE frame buffer + drop visibility
+
+Each session has a buffered `chan string` between its SSE producers (`dispatchBatched`, `runPerformBody`, the `Time.every` tick goroutine) and the SSE consumer (the `handleSSE` for-select loop). Default capacity is **16 frames**. Under heavy load (rapid keystrokes + tight `Time.every` + parallel `Cmd.perform` completions), the buffer can fill; the producer's `select { default: }` arm drops the frame to keep the dispatcher unblocked.
+
+Two knobs:
+
+- **`SKY_LIVE_SSE_BUFFER`** (default `16`, clamped to `[1, 1024]`) — raise the capacity for apps that burst-render (e.g. screen-share, collaborative cursors, high-frequency dashboards). Lower it to `1` in tests that want to deterministically trigger drops.
+- **`sky_live_sse_drops_total{session=<sid>}`** — Prometheus counter exported at `/_sky/metrics`. Increments once per dropped frame, labelled by session id so operators can pinpoint hot loops. Per-session cardinality is bounded by the telemetry store's 10k label-combination cap; deployments expecting many more unique sessions should rely on the unlabelled total (sum across the label).
+
+The drop is a correctness loss in transit (the client misses that specific frame), but the next view-changing dispatch supersedes it, so the user's eventual state is consistent. Watching `rate(sky_live_sse_drops_total[5m])` is the production signal that the buffer needs raising.
 
 ### Localising the banner
 
@@ -241,7 +263,7 @@ rt.MountSubApp(mux, "/admin",   rt.SpawnBinary("./admin-app"))
 rt.MountSubApp(mux, "/docs", rt.SpawnBinary("./hugo-server"))
 ```
 
-A Sky-side ergonomic API (`Live.app { subApps = [Live.subApp "/admin" "./admin-app", ...] }`) is on the v0.14 list. The Go-side API is the contract for v0.13.x.
+A Sky-side ergonomic API (`Live.app { subApps = [Live.subApp "/admin" "./admin-app", ...] }`) is on the roadmap; the Go-side API above is the stable contract.
 
 ### Sub-app-aware `SKY_LIVE_BASE_PATH`
 

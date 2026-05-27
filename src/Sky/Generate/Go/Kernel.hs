@@ -184,6 +184,8 @@ registry = Map.fromList
     , (("Dict", "map"),           KernelInfo "rt.Dict_map" 2 False)
     , (("Dict", "foldl"),         KernelInfo "rt.Dict_foldl" 3 False)
     , (("Dict", "union"),         KernelInfo "rt.Dict_union" 2 False)
+    , (("Dict", "size"),          KernelInfo "rt.Dict_size" 1 False)
+    , (("Dict", "isEmpty"),       KernelInfo "rt.Dict_isEmpty" 1 False)
 
     -- ═══════════════════════════════════════════════════════
     -- Maybe
@@ -305,6 +307,10 @@ registry = Map.fromList
     , (("Crypto", "sha512"),      KernelInfo "rt.Crypto_sha512" 1 False)
     , (("Crypto", "md5"),         KernelInfo "rt.Crypto_md5" 1 False)
     , (("Crypto", "hmacSha256"),  KernelInfo "rt.Crypto_hmacSha256" 2 False)
+    , (("Crypto", "hmacSha512"),  KernelInfo "rt.Crypto_hmacSha512" 2 False)
+    , (("Crypto", "sha1"),        KernelInfo "rt.Crypto_sha1" 1 False)
+    , (("Crypto", "rsaSha256Sign"),   KernelInfo "rt.Crypto_rsaSha256Sign" 2 False)
+    , (("Crypto", "rsaSha256Verify"), KernelInfo "rt.Crypto_rsaSha256Verify" 3 False)
     , (("Crypto", "constantTimeEqual"), KernelInfo "rt.Crypto_constantTimeEqual" 2 False)
     , (("Crypto", "randomBytes"), KernelInfo "rt.Crypto_randomBytes" 1 False)
     , (("Crypto", "randomToken"), KernelInfo "rt.Crypto_randomToken" 1 False)

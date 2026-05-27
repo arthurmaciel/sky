@@ -170,6 +170,7 @@ executable sky
     -- Build system
     Sky.Build.ModuleGraph
     Sky.Build.Compile
+    Sky.Build.LowerCtx
     Sky.Build.Dce
     Sky.Build.EmbedDirTH
     Sky.Build.EmbeddedRuntime
@@ -238,7 +239,24 @@ test-suite sky-tests
     , time >= 1.9
     , file-embed >= 0.0.15
     , template-haskell >= 2.16
+    -- v0.15.x hardening / P3: IsPlainIdentSpec imports
+    -- `Sky.Build.Compile` directly to unit-test the structural
+    -- `isPlainIdent` classifier.  `Compile.hs` and its transitive
+    -- imports pull in `async`, `mtl`, `binary`, `utf8-string`,
+    -- `optparse-applicative`, `cryptohash-sha256`, `ansi-terminal`,
+    -- `unix` (POSIX), which previously only the library stanza
+    -- carried.  Keep parity so the test stanza compiles every
+    -- module it needs to host the unit test.
+    , async >= 2.2
+    , mtl >= 2.2
+    , binary >= 0.8
+    , utf8-string >= 1.0
+    , optparse-applicative >= 0.17
     , cryptohash-sha256 >= 0.11
+    , ansi-terminal >= 0.11
+
+  if !os(windows)
+    build-depends: unix >= 2.7
 
   other-modules:
       Sky.Build.Validator
@@ -268,9 +286,12 @@ test-suite sky-tests
       Sky.Build.ExposingTypeCtorsSpec
       Sky.Build.LetForwardRefSpec
       Sky.Build.EntryLocalShadowsDepSpec
+      Sky.Build.CaseSubjectNameShadowSpec
       Sky.Build.FfiKernelAliasSpec
       Sky.Parse.MultiLineCaseSubjectSpec
+      Sky.Parse.MultiLineSignatureSpec
       Sky.Type.InstanceCaptureSpec
+      Sky.Type.SolvedTypesRegionMapSpec
       Sky.Format.FormatSpec
       Sky.Build.GoKeywordCollisionSpec
       Sky.Build.NestedPatternSpec
@@ -284,8 +305,17 @@ test-suite sky-tests
       Sky.Build.RecordFieldOrderSpec
       Sky.Build.RecordCtorEmptyListSpec
       Sky.Build.HofTypedMsgSpec
+      Sky.Build.CoerceArgParametricSpec
+      Sky.Build.IsPlainIdentSpec
+      Sky.Build.InferExprTypeBinopSpec
+      Sky.Build.CoerceArgListMapInterplaySpec
+      Sky.Build.LowerCtxCascadeSpec
+      Sky.Build.LetBodyCascadeResumeSpec
+      Sky.Build.SnapshotCallerCtxSpec
+      Sky.Build.SkyshopCompilesSpec
       Sky.Build.AnonLambdaSpec
       Sky.Build.AnonRecordSpec
+      Sky.Build.AuthUntypedBoundarySpec
       Sky.Build.Issue52Spec
       Sky.Build.ValidatorSpec
       Sky.Build.GoBuildRefinerSpec
@@ -295,6 +325,7 @@ test-suite sky-tests
       Sky.Diagnostics.CoverageSpec
       Sky.Build.KernelSigCoverageSpec
       Sky.Build.HeapBoundedHmSpec
+      Sky.Build.IORefBoundarySpec
       Sky.Build.SolverBudgetSpec
       Sky.Build.UnreachableGateSpec
       Sky.Parse.CommentsSpec

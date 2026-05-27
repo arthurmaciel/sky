@@ -13,7 +13,7 @@
 //   storePath = "sessions.db"                    (sqlite)
 //            = "postgres://user:pass@host/db"    (postgres)
 //            = "redis://:password@host:6379/0"   (redis; or bare "host:6379")
-//   ttl       = 1800                             (seconds; default 30m)
+//   ttl       = "30m"                            (Go duration or bare-int seconds; default 30m)
 
 package rt
 
@@ -29,6 +29,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -212,6 +213,39 @@ func stringField(cfg any, name string) string {
 }
 
 
+// parseTTL — resolve a TTL value from env > sky.toml > default in
+// precedence order. Each layer accepts EITHER a Go-duration string
+// ("30m", "24h", "1h30m") OR a bare integer interpreted as seconds.
+// Empty or unparseable values fall through to the next layer.
+//
+// History: the pre-fix implementation read only the env var AND
+// accepted only bare-integer seconds via strconv.Atoi.  So both
+// `SKY_LIVE_TTL=24h` AND any `ttl = "24h"` in sky.toml's [live]
+// section silently fell back to the 30-minute default — at odds
+// with the documented `30m`-style default in CLAUDE.md.  This
+// helper makes the documented shape the canonical one while
+// preserving bare-integer-seconds for backward compatibility.
+func parseTTL(envVal, tomlVal string, def time.Duration) time.Duration {
+	for _, raw := range []string{envVal, tomlVal} {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		// Duration-string form first (more specific — "24h" parses
+		// as duration, NOT as the integer 24).
+		if d, err := time.ParseDuration(s); err == nil && d > 0 {
+			return d
+		}
+		// Bare-integer fallback — interpreted as seconds.
+		if secs, err := strconv.Atoi(s); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+		// Unparseable at this layer — fall through to the next.
+	}
+	return def
+}
+
+
 // SessionStore: common interface for the three backends. The runtime
 // reads/writes via `Get`, `Set`, `Delete`, and generates IDs via
 // `NewID`. Callers are responsible for per-session locking (the runtime
@@ -251,7 +285,12 @@ func (s *memoryStore) Get(sid string) (*liveSession, bool) {
 	defer s.mu.RUnlock()
 	sess, ok := s.sessions[sid]
 	if ok {
-		sess.lastSeen = time.Now()
+		// Task #326: atomic.Int64 store keeps Get race-free under the
+		// RLock-only gate. Two concurrent Get calls used to race on the
+		// `sess.lastSeen` struct field (visible under `go test -race
+		// -run TestConcurrentEventsSerialise`); the atomic field
+		// closes that without escalating Get to a write lock.
+		sess.touchLastSeen()
 	}
 	return sess, ok
 }
@@ -259,14 +298,23 @@ func (s *memoryStore) Get(sid string) (*liveSession, bool) {
 func (s *memoryStore) Set(sid string, sess *liveSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess.lastSeen = time.Now()
+	sess.touchLastSeen()
 	s.sessions[sid] = sess
 }
 
 func (s *memoryStore) Delete(sid string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	sess := s.sessions[sid]
 	delete(s.sessions, sid)
+	s.mu.Unlock()
+	// Cycle 3 P36 / Gap C4: signal terminal teardown OUTSIDE the
+	// store lock so any Time.every / runPerformBody goroutine that
+	// is currently blocked on `sess.mu` can resolve (close is
+	// idempotent via doneOnce so concurrent Delete + cleanupLoop
+	// can't double-close).
+	if sess != nil {
+		sess.markDone()
+	}
 }
 
 func (s *memoryStore) NewID() string { return generateSkySessionID() }
@@ -284,13 +332,25 @@ func (s *memoryStore) cleanupLoop() {
 		case <-s.stop:
 			return
 		case now := <-t.C:
+			// Cycle 3 P36 / Gap C4: collect expired sessions under
+			// the lock, but signal their terminal teardown OUTSIDE
+			// the lock — markDone is fast (a sync.Once gate + a
+			// close on an unbuffered channel) but conceptually it
+			// hands control to whatever goroutines are blocked on
+			// `sess.done`, and we don't want to hold `s.mu` while
+			// those resume.
 			s.mu.Lock()
+			var expired []*liveSession
 			for id, sess := range s.sessions {
-				if now.Sub(sess.lastSeen) > s.ttl {
+				if now.Sub(sess.lastSeenTime()) > s.ttl {
+					expired = append(expired, sess)
 					delete(s.sessions, id)
 				}
 			}
 			s.mu.Unlock()
+			for _, sess := range expired {
+				sess.markDone()
+			}
 		}
 	}
 }
@@ -366,7 +426,10 @@ func (s *sqliteStore) Get(sid string) (*liveSession, bool) {
 }
 
 func (s *sqliteStore) Set(sid string, sess *liveSession) {
-	sess.lastSeen = time.Now()
+	// Task #326: atomic.Int64 store — safe to write from any goroutine
+	// without holding s.memMu (sibling memCache readers under RLock no
+	// longer race on the field).
+	sess.touchLastSeen()
 	// Always keep the live pointer in memory so intra-process requests
 	// find the session even when the value isn't gob-encodable.
 	s.memMu.Lock()
@@ -384,7 +447,7 @@ func (s *sqliteStore) Set(sid string, sess *liveSession) {
 	_, err = s.db.Exec(`
 		INSERT INTO sky_sessions (sid, blob, last_seen) VALUES (?, ?, ?)
 		ON CONFLICT(sid) DO UPDATE SET blob=excluded.blob, last_seen=excluded.last_seen`,
-		sid, blob, sess.lastSeen.Unix())
+		sid, blob, sess.lastSeenTime().Unix())
 	if err != nil {
 		log.Printf("[sky.live] sqlite: failed to save session %s: %v", sid, err)
 	}
@@ -392,8 +455,16 @@ func (s *sqliteStore) Set(sid string, sess *liveSession) {
 
 func (s *sqliteStore) Delete(sid string) {
 	s.memMu.Lock()
+	sess := s.memCache[sid]
 	delete(s.memCache, sid)
 	s.memMu.Unlock()
+	// Cycle 3 P36 / Gap C4: signal terminal teardown for the in-memory
+	// pointer so any subscription goroutine bound to it exits. The
+	// blob in SQLite owns no goroutines (it's just a checkpoint), so
+	// only the live pointer needs the signal.
+	if sess != nil {
+		sess.markDone()
+	}
 	_, _ = s.db.Exec(`DELETE FROM sky_sessions WHERE sid = ?`, sid)
 }
 
@@ -414,6 +485,25 @@ func (s *sqliteStore) cleanupLoop() {
 		case now := <-t.C:
 			_, _ = s.db.Exec(`DELETE FROM sky_sessions WHERE last_seen < ?`,
 				now.Add(-s.ttl).Unix())
+			// Cycle 3 P36 / Gap C4: also evict the matching memCache
+			// entries and signal terminal teardown. The memCache holds
+			// the LIVE pointer (the one that owns Time.every goroutines);
+			// without this, a session whose blob expires on disk still
+			// keeps its in-process pointer + subscription goroutines alive
+			// for the lifetime of the process.
+			cutoff := now.Add(-s.ttl)
+			s.memMu.Lock()
+			var expired []*liveSession
+			for sid, sess := range s.memCache {
+				if sess.lastSeenTime().Before(cutoff) {
+					expired = append(expired, sess)
+					delete(s.memCache, sid)
+				}
+			}
+			s.memMu.Unlock()
+			for _, sess := range expired {
+				sess.markDone()
+			}
 		}
 	}
 }
@@ -478,7 +568,7 @@ func (s *postgresStore) Get(sid string) (*liveSession, bool) {
 }
 
 func (s *postgresStore) Set(sid string, sess *liveSession) {
-	sess.lastSeen = time.Now()
+	sess.touchLastSeen()
 	s.memMu.Lock()
 	s.memCache[sid] = sess
 	s.memMu.Unlock()
@@ -492,7 +582,7 @@ func (s *postgresStore) Set(sid string, sess *liveSession) {
 	_, err = s.db.Exec(`
 		INSERT INTO sky_sessions (sid, blob, last_seen) VALUES ($1, $2, $3)
 		ON CONFLICT (sid) DO UPDATE SET blob = EXCLUDED.blob, last_seen = EXCLUDED.last_seen`,
-		sid, blob, sess.lastSeen.Unix())
+		sid, blob, sess.lastSeenTime().Unix())
 	if err != nil {
 		log.Printf("[sky.live] postgres: failed to save session %s: %v", sid, err)
 	}
@@ -500,8 +590,13 @@ func (s *postgresStore) Set(sid string, sess *liveSession) {
 
 func (s *postgresStore) Delete(sid string) {
 	s.memMu.Lock()
+	sess := s.memCache[sid]
 	delete(s.memCache, sid)
 	s.memMu.Unlock()
+	// Cycle 3 P36 / Gap C4: see sqliteStore.Delete for rationale.
+	if sess != nil {
+		sess.markDone()
+	}
 	_, _ = s.db.Exec(`DELETE FROM sky_sessions WHERE sid = $1`, sid)
 }
 
@@ -522,6 +617,22 @@ func (s *postgresStore) cleanupLoop() {
 		case now := <-t.C:
 			_, _ = s.db.Exec(`DELETE FROM sky_sessions WHERE last_seen < $1`,
 				now.Add(-s.ttl).Unix())
+			// Cycle 3 P36 / Gap C4: also evict the matching memCache
+			// entries and signal terminal teardown. See sqliteStore
+			// cleanupLoop for the full rationale.
+			cutoff := now.Add(-s.ttl)
+			s.memMu.Lock()
+			var expired []*liveSession
+			for sid, sess := range s.memCache {
+				if sess.lastSeenTime().Before(cutoff) {
+					expired = append(expired, sess)
+					delete(s.memCache, sid)
+				}
+			}
+			s.memMu.Unlock()
+			for _, sess := range expired {
+				sess.markDone()
+			}
 		}
 	}
 }
@@ -607,7 +718,7 @@ func (s *redisStore) Get(sid string) (*liveSession, bool) {
 }
 
 func (s *redisStore) Set(sid string, sess *liveSession) {
-	sess.lastSeen = time.Now()
+	sess.touchLastSeen()
 	// Keep an in-process pointer so values that fail gob encoding
 	// (closures, channels) still work within this instance. They won't
 	// survive a restart or cross-instance routing, which is the same
@@ -629,8 +740,16 @@ func (s *redisStore) Set(sid string, sess *liveSession) {
 
 func (s *redisStore) Delete(sid string) {
 	s.memMu.Lock()
+	sess := s.memCache[sid]
 	delete(s.memCache, sid)
 	s.memMu.Unlock()
+	// Cycle 3 P36 / Gap C4: signal terminal teardown for the in-memory
+	// pointer. Redis uses native TTL (no cleanupLoop), so per-key
+	// expiry races with Redis itself; in-process memCache eviction is
+	// what frees the Go-side goroutines.
+	if sess != nil {
+		sess.markDone()
+	}
 	if err := s.client.Del(s.ctx, redisKey(sid)).Err(); err != nil {
 		log.Printf("[sky.live] redis: delete session %s: %v", sid, err)
 	}
@@ -690,7 +809,7 @@ func encodeSession(s *liveSession) ([]byte, error) {
 	enc := gob.NewEncoder(&buf)
 	if err := enc.Encode(storableSession{
 		Model:    s.model,
-		LastSeen: s.lastSeen,
+		LastSeen: s.lastSeenTime(),
 		OutSeq:   s.outSeq,
 	}); err != nil {
 		return nil, err
@@ -778,11 +897,17 @@ func decodeSession(blob []byte) (*liveSession, error) {
 		model:     st.Model,
 		prevTree:  nil, // rebuilt on next render via handleEvent
 		handlers:  map[string]any{},
-		sseCh:     make(chan string, 16),
+		sseCh:     make(chan string, sseChanBuffer),
 		cancelSub: make(chan struct{}),
-		lastSeen:  st.LastSeen,
-		outSeq:    st.OutSeq,
+		// Cycle 3 P36 / Gap C4: provision the terminal-teardown
+		// channel so persistent-store rehydrates can also be cleanly
+		// stopped by markDone when the session is later evicted.
+		done:   make(chan struct{}),
+		outSeq: st.OutSeq,
 	}
+	// Task #326: lastSeen is now an atomic.Int64 — can't be set in a
+	// struct literal, so seed it after construction.
+	sess.setLastSeenTime(st.LastSeen)
 	return sess, nil
 }
 

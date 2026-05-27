@@ -13,8 +13,15 @@ module Sky.Type.Solve
     ( solve
     , solveWithLocals
     , solveWithInstances
+    , solveWithInstancesAndRegions   -- v0.15 Stage A
     , SolveResult(..)
-    , SolvedTypes
+    , SolvedTypes(..)
+    , emptySolvedTypes               -- v0.15.x P37a
+    , lookupSolvedVar                -- v0.15.x P37a
+    , lookupSolvedRegion             -- v0.15.x P37a
+    , insertSolvedVar                -- v0.15.x P37a
+    , unionSolvedEnv                 -- v0.15.x P37a
+    , RegionTypes                    -- v0.15 Stage A
     , CallInstance(..)
     , CallSiteInstance(..)
     , showType
@@ -55,8 +62,90 @@ data SolveResult
     deriving (Show)
 
 
--- | Solved type environment: maps variable names to their resolved types
-type SolvedTypes = Map.Map String T.Type
+-- | v0.15.x P37a — `SolvedTypes` is now a record that carries BOTH
+-- the resolved per-name HM-type environment AND the per-region HM
+-- type map.  Pre-P37a this was a bare `Map.Map String T.Type` and the
+-- region map was returned alongside via a 4-tuple from
+-- `solveWithInstancesAndRegions`; the lowerer snapshotted the region
+-- map into `scopeStateRef`'s `_lc_regionTypes` slot and consulted it
+-- through `lookupRegionType :: A.Region -> Maybe T.Type` (an
+-- `unsafePerformIO`-wrapped IORef read).  That IORef read sits at the
+-- heart of `letBindingType`'s shared seam with `letToGo` (cycle-3
+-- audit gap C5) and is the load-bearing reason the LowerCtx cascade
+-- can't migrate the remaining record-field / list-element / let-body
+-- slots without GHC blackholing on deferred thunks.
+--
+-- P37a's job is purely SOLVER-SIDE: extend `SolvedTypes` to also
+-- carry the region map (same shape as the pre-P37a `RegionTypes`
+-- value the IORef holds), and populate it at solve time.  P37b will
+-- migrate `letBindingType` to read from this pure value instead of
+-- the IORef and then delete the `_lc_regionTypes` IORef field.  This
+-- PR is a zero-behaviour-change extension: the IORef remains the
+-- source of truth for `lookupRegionType` reads; the new field is
+-- populated but not yet consumed by `letBindingType` /
+-- `lookupRegionType`.
+--
+-- Field naming convention (`_st<thing>`) matches the project's
+-- record-field style (cf. `_lc_*` on `LowerCtx`).
+data SolvedTypes = SolvedTypes
+    { _stEnv     :: !(Map.Map String T.Type)
+        -- ^ Pre-P37a's plain map: maps variable names to their
+        -- resolved HM types.  Every consumer that did
+        -- `Map.lookup name solvedTypes` now goes through this field
+        -- (or the convenience helper `lookupSolvedVar`).
+    , _stRegions :: !RegionTypes
+        -- ^ v0.15 Stage A's per-region type map, now stored as
+        -- pure data alongside the env.  Populated by every solve
+        -- entry point (`solve` / `solveWithLocals` /
+        -- `solveWithInstancesAndRegions`) so the SolvedTypes value
+        -- always carries the full pure snapshot.  P37b consumes
+        -- this to make `letBindingType`'s region lookup pure.
+    }
+    deriving (Eq, Show)
+
+
+-- | An empty `SolvedTypes`.  Used at LSP boundaries where the solver
+-- errored before producing a usable map AND in tests that need a
+-- placeholder.
+emptySolvedTypes :: SolvedTypes
+emptySolvedTypes = SolvedTypes Map.empty Map.empty
+
+
+-- | Look up a top-level / let-bound name's HM-resolved type.
+-- Convenience for the common `Map.lookup name (_stEnv st)` idiom.
+lookupSolvedVar :: String -> SolvedTypes -> Maybe T.Type
+lookupSolvedVar n = Map.lookup n . _stEnv
+
+
+-- | Look up the HM type recorded at a given source region.
+-- Pure substitute for the `lookupRegionType` IORef read that P37b
+-- will migrate `letBindingType` over to.  Today this is consulted
+-- only by the new P37a spec; the lowerer still reads via the
+-- IORef-backed path.
+lookupSolvedRegion :: A.Region -> SolvedTypes -> Maybe T.Type
+lookupSolvedRegion r = Map.lookup r . _stRegions
+
+
+-- | Insert a binding into the env map, leaving the region map
+-- untouched.  Convenience for callers that previously did
+-- `Map.insert n t solved` on the bare-Map shape.
+insertSolvedVar :: String -> T.Type -> SolvedTypes -> SolvedTypes
+insertSolvedVar n t st = st { _stEnv = Map.insert n t (_stEnv st) }
+
+
+-- | Extend the env map with the entries from another map.  The
+-- argument map's entries take precedence on key clash (matches
+-- `Map.union` semantics on `Map.union additions existing`).
+unionSolvedEnv :: Map.Map String T.Type -> SolvedTypes -> SolvedTypes
+unionSolvedEnv additions st =
+    st { _stEnv = Map.union additions (_stEnv st) }
+
+
+-- | v0.15 Stage A — per-region type map.  Every solved constraint's
+-- actual type, keyed by the constraint's source region.  Consumed
+-- by the typed-directed lowerer in v0.15 Stage B+ to look up the
+-- concrete HM type of any sub-expression by its source position.
+type RegionTypes = Map.Map A.Region T.Type
 
 
 -- | Solver state
@@ -98,6 +187,17 @@ data SolverState = SolverState
       -- at that call site.  Front-of-list prepend; order doesn't
       -- matter because the downstream consumer deduplicates by
       -- (callee, type-args) anyway.
+    , _regionVars :: !(IORef (Map.Map A.Region T.Variable))
+      -- v0.15 Stage A — per-region UF-variable map.  Every solved
+      -- CEqual / CLocal / CForeign records its actualVar against
+      -- the constraint's region here.  After solve completes,
+      -- variables are walked to concrete `T.Type`s, producing the
+      -- region-keyed `RegionTypes` map the typed-directed lowerer
+      -- queries in Stage B+.  Behaviour-preserving: existing
+      -- consumers (LSP, codegen, monomorphisation) don't read this
+      -- map yet.  Front-of-write: last-write-wins per region (a
+      -- constraint may fire multiple times during fixpoint
+      -- iteration; final entry is the converged type).
     }
 
 
@@ -277,6 +377,35 @@ bumpSolverStep state
             else return Nothing
 
 
+-- | v0.15 Stage A — record a region → UF-variable mapping.
+--
+-- Called from every solved CEqual / CLocal / CForeign once unify has
+-- succeeded.  Variables (not types) are stored because subsequent
+-- constraints can further unify the variable's transitive structure.
+-- Post-solve, callers (`solveWithRegions` / wrappers) walk each var
+-- to a concrete `T.Type`.
+--
+-- The skip on `A.zero`-position regions filters synthetic constraints
+-- the constraint generator emits with `A.one` / `A.zero` sentinels for
+-- bookkeeping (let-binding header, lambda-param scope, etc.).  Real
+-- source positions carry non-zero line:col, so this filter loses no
+-- user-facing type info.
+recordRegionVar :: SolverState -> A.Region -> T.Variable -> IO ()
+recordRegionVar state region var =
+    case A._start region of
+        A.Position 0 0 -> return ()
+        _ -> modifyIORef' (_regionVars state) (Map.insert region var)
+
+
+-- | v0.15 Stage A — convert the per-region UF-variable map to typed
+-- form.  Walked at solve-end so every variable's transitive structure
+-- is fully unified.
+freezeRegionTypes :: IORef (Map.Map A.Region T.Variable) -> IO RegionTypes
+freezeRegionTypes ref = do
+    raw <- readIORef ref
+    Map.traverseWithKey (\_ v -> variableToType v) raw
+
+
 budgetExceededMsg :: Int -> String
 budgetExceededMsg budget = unlines
     [ "TYPE ERROR: constraint solver exceeded budget (" ++ show budget ++ " operations)."
@@ -309,7 +438,8 @@ solve constraint = do
     steps <- newIORef 0
     budget <- effectiveSolverBudget constraint
     instances <- newIORef []
-    let state0 = SolverState Map.empty cache 0 locals steps budget instances
+    regions <- newIORef Map.empty
+    let state0 = SolverState Map.empty cache 0 locals steps budget instances regions
     (result, finalState) <- solveHelp state0 constraint
     case result of
         Nothing -> do
@@ -341,7 +471,16 @@ solve constraint = do
                 isUnboundTVar _ = False
                 localFirst = Map.map pickType (Map.filter (not . null) localTys)
             let merged = Map.union localFirst envTypes
-            return (SolveOk merged)
+            -- v0.15.x P37a — freeze the per-region var map alongside
+            -- the per-name env so the SolvedTypes record carries
+            -- both as pure data.  Same data the IORef-backed
+            -- `lookupRegionType` reads via the
+            -- `solveWithInstancesAndRegions` path; populating it
+            -- here too means LSP / single-module entry points emit
+            -- a complete SolvedTypes even though they don't yet
+            -- consume the regions field.
+            regionTys <- freezeRegionTypes (_regionVars finalState)
+            return (SolveOk (SolvedTypes merged regionTys))
         Just err -> return (SolveError err)
 
 
@@ -357,15 +496,18 @@ solveWithLocals constraint = do
     steps <- newIORef 0
     budget <- effectiveSolverBudget constraint
     instances <- newIORef []
-    let state0 = SolverState Map.empty cache 0 locals steps budget instances
+    regions <- newIORef Map.empty
+    let state0 = SolverState Map.empty cache 0 locals steps budget instances regions
     (result, finalState) <- solveHelp state0 constraint
     localVars <- readIORef (_locals finalState)
     localTypes <- Map.traverseWithKey (\_ vars ->
         mapM variableToType vars) localVars
     case result of
         Nothing -> do
-            solvedTypes <- readSolvedTypes (_env finalState)
-            return (SolveOk solvedTypes, localTypes)
+            envTypes <- readSolvedTypes (_env finalState)
+            -- v0.15.x P37a — same freeze pattern as `solve` above.
+            regionTys <- freezeRegionTypes (_regionVars finalState)
+            return (SolveOk (SolvedTypes envTypes regionTys), localTypes)
         Just err ->
             return (SolveError err, localTypes)
 
@@ -392,23 +534,31 @@ solveWithLocals constraint = do
 -- the `_Any` fallback at emission time.
 solveWithInstances :: T.Constraint -> IO (SolveResult, [CallInstance], [CallSiteInstance])
 solveWithInstances constraint = do
+    (result, ci, csi, _) <- solveWithInstancesAndRegions constraint
+    return (result, ci, csi)
+
+
+-- | v0.15 Stage A — superset of `solveWithInstances` that ALSO
+-- returns the per-region type map.  The lowerer (Stage B+) calls
+-- this and threads `RegionTypes` into `LowerCtx` so any
+-- sub-expression's HM type can be queried by its source region.
+-- The 4-tuple shape preserves backward compatibility with
+-- `solveWithInstances` (which now delegates here and discards the
+-- regions component).
+solveWithInstancesAndRegions
+    :: T.Constraint
+    -> IO (SolveResult, [CallInstance], [CallSiteInstance], RegionTypes)
+solveWithInstancesAndRegions constraint = do
     cache <- newIORef Map.empty
     locals <- newIORef Map.empty
     steps <- newIORef 0
     budget <- effectiveSolverBudget constraint
     instances <- newIORef []
-    let state0 = SolverState Map.empty cache 0 locals steps budget instances
+    regions <- newIORef Map.empty
+    let state0 = SolverState Map.empty cache 0 locals steps budget instances regions
     (result, finalState) <- solveHelp state0 constraint
     case result of
         Nothing -> do
-            -- Behaviour-equivalent to `solve` for the SolvedTypes
-            -- portion: merge the locals-captured bindings into the
-            -- env-derived map so let-bound + top-level declarations
-            -- both appear in the output map.  Without this,
-            -- downstream consumers (entryInferredSigs etc.) miss
-            -- top-level bindings tracked only via `_locals` and the
-            -- call-site value-reference codegen emits bare names
-            -- without `[any]` instantiation → Go build rejects.
             envTypes <- readSolvedTypes (_env finalState)
             localVars <- readIORef (_locals finalState)
             localTys <- Map.traverseWithKey (\_ vars ->
@@ -423,7 +573,16 @@ solveWithInstances constraint = do
                 merged = Map.union localFirst envTypes
             records <- readIORef (_callInstances finalState)
             (ci, csi) <- extractInstancesAndSites records
-            return (SolveOk merged, ci, csi)
+            regionTys <- freezeRegionTypes (_regionVars finalState)
+            -- v0.15.x P37a — the new pure `SolvedTypes` record
+            -- carries the region map alongside the env.  Existing
+            -- consumers (compile.hs, lsp) keep reading `_stEnv`;
+            -- the IORef-backed `lookupRegionType` retains its
+            -- previous semantics until P37b's migration.  The
+            -- fourth tuple slot (`regionTys`) stays for backward
+            -- compatibility — `Compile.hs` still threads it into
+            -- `scopeStateRef._lc_regionTypes` directly today.
+            return (SolveOk (SolvedTypes merged regionTys), ci, csi, regionTys)
         Just err -> do
             -- v0.13 Phase A4: even on error, return whatever
             -- call-site instances were captured BEFORE the error
@@ -435,7 +594,8 @@ solveWithInstances constraint = do
             -- — breaking the drop-generics pass.
             records <- readIORef (_callInstances finalState)
             (ci, csi) <- extractInstancesAndSites records
-            return (SolveError err, ci, csi)
+            regionTys <- freezeRegionTypes (_regionVars finalState)
+            return (SolveError err, ci, csi, regionTys)
 
 
 -- | Walk the captured call-instance records, resolve each fresh
@@ -686,7 +846,9 @@ solveHelpBody state constraint = case constraint of
         expectedVar <- expectedToVar state expected
         ok <- Unify.unify actualVar expectedVar
         if ok
-            then return (Nothing, state)
+            then do
+                recordRegionVar state region actualVar
+                return (Nothing, state)
             else do
                 -- Debug: read back actual resolved types
                 at <- variableToType actualVar
@@ -721,7 +883,9 @@ solveHelpBody state constraint = case constraint of
                 expectedVar <- expectedToVar state expected
                 ok <- Unify.unify var expectedVar
                 if ok
-                    then return (Nothing, state)
+                    then do
+                        recordRegionVar state region var
+                        return (Nothing, state)
                     else do
                         vt <- variableToType var
                         et <- variableToType expectedVar
@@ -747,6 +911,7 @@ solveHelpBody state constraint = case constraint of
                 unless (null freshVars) $
                     modifyIORef' (_callInstances state) $
                         \xs -> CallInstanceRecord region name freshVars quants : xs
+                recordRegionVar state region instVar
                 return (Nothing, state)
             else do
                 instType <- variableToType instVar
@@ -826,7 +991,12 @@ solveAll state (c:cs) = do
 -- READ SOLVED TYPES
 -- ═══════════════════════════════════════════════════════════
 
-readSolvedTypes :: Map.Map String T.Variable -> IO SolvedTypes
+-- | v0.15.x P37a: returns the bare env map.  The full `SolvedTypes`
+-- record is constructed at the solver-entry callers (`solve` etc.)
+-- which know whether to attach the region map (only
+-- `solveWithInstancesAndRegions` does — `solve`/`solveWithLocals`
+-- leave it empty).
+readSolvedTypes :: Map.Map String T.Variable -> IO (Map.Map String T.Type)
 readSolvedTypes env =
     Map.traverseWithKey (\_ var -> variableToType var) env
 
@@ -865,9 +1035,18 @@ variableToTypeSeen seen var = do
                 T.RigidVar name -> return (T.TVar name)
                 T.RigidSuper _ name -> return (T.TVar name)
                 T.Structure flat -> flatTypeToTypeSeen (var : seen) flat
-                T.Alias home name _ realVar -> do
+                T.Alias home name pairVars realVar -> do
                     inner <- variableToTypeSeen (var : seen) realVar
-                    return (T.TAlias home name [] (T.Filled inner))
+                    -- Read back the type-arg pair vars too — parametric
+                    -- aliases (post Surface 1 / Canonicalise expansion)
+                    -- carry their bindings here.  Pre-fix this was `[]`
+                    -- which made `Cfg Msg` and `Cfg Int` look identical
+                    -- in error messages ("Cfg vs Cfg") and made
+                    -- `typeStructEq`'s arg comparison meaningless.
+                    pairTys <- mapM (\(n, pv) -> do
+                                        pty <- variableToTypeSeen (var : seen) pv
+                                        return (n, pty)) pairVars
+                    return (T.TAlias home name pairTys (T.Filled inner))
                 T.Error -> return (T.TVar "_error")
 
 
@@ -1195,7 +1374,13 @@ typeStructEq (T.TRecord f1 _) (T.TRecord f2 _) =
 typeStructEq (T.TTuple a1 b1 cs1) (T.TTuple a2 b2 cs2) =
     typeStructEq a1 a2 && typeStructEq b1 b2
     && length cs1 == length cs2 && and (zipWith typeStructEq cs1 cs2)
-typeStructEq (T.TAlias _ n1 _ _) (T.TAlias _ n2 _ _) = n1 == n2
+-- Parametric aliases must compare type-args too: `Cfg Msg` and
+-- `Cfg Int` share the alias name but are distinct types. Pre-fix
+-- this returned True for any matching name, so error-message diff
+-- generation skipped the actual type-arg mismatch.
+typeStructEq (T.TAlias _ n1 p1 _) (T.TAlias _ n2 p2 _) =
+    n1 == n2 && length p1 == length p2
+    && and (zipWith typeStructEq (map snd p1) (map snd p2))
 typeStructEq _ _ = False
 
 -- | Build a stable per-module renaming from all types that will be
@@ -1229,7 +1414,12 @@ showTypeR ty = case ty of
     -- diagnostics readable; longer records get a trailing ", ...".
     T.TRecord fields ext -> showRecord fields ext
     T.TTuple a b _ -> "( " ++ showTypeR a ++ ", " ++ showTypeR b ++ " )"
-    T.TAlias _ name _ _ -> name
+    -- Parametric aliases (post Surface 1 in Canonicalise/Module.hs)
+    -- carry their type-arg bindings in `pairs`. Render them so the
+    -- error message stays informative: `Cfg Msg` not just `Cfg`.
+    T.TAlias _ name pairs _
+        | null pairs -> name
+        | otherwise  -> name ++ " " ++ unwords (map (showTypeAtomR . snd) pairs)
 
 
 -- Render the fields of a record. Extension marker (`| r`) shown

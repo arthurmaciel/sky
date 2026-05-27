@@ -2,6 +2,222 @@
 
 Notable user-visible changes. Keep this file additive — never rewrite history.
 
+## v0.15.3 — typed let-binding RHS + sibling-helper call sites (2026-05-25)
+
+### Codegen
+
+- **Closed `interface conversion: Cfg_R[Msg] vs Cfg_R[any]` panic
+  in the REVERSE direction from v0.15.2.** Surface: a library
+  module (sky-editor's `Editor.view`) defines `view : Cfg msg ->
+  Element msg` whose body forwards `cfg` to sibling polymorphic
+  helpers (`editorBody cfg`, `toolbar cfg onCheck`, `diagnostics
+  cfg onDismissCheck`). v0.15.2 closed the *literal*-into-typed-
+  slot direction (`Cfg_R[any]{...}` → `Cfg_R[Msg]`); v0.15.3
+  closes the *typed-source*-into-erased-slot direction
+  (`Cfg_R[Msg]` arg → `Cfg_R[any]` callee param at the sibling
+  call site, plus `Cfg_R[T1]` arg → `Cfg_R[any]` sibling call
+  inside the generic body itself).
+  - **Symptom in production:** clicking the Source tab in the
+    skydeploy file editor panicked at every render with
+    `Cfg_R[State_Msg] vs Cfg_R[any]`.
+  - **Fix mechanism (4 surgical changes, all in `Sky.Build.Compile`):**
+    1. `letBindingType` — types the RHS of a zero-param let-
+       binding from the source region or HM solver, gated on
+       `canRouteTyped` (only record literals, lambdas, and
+       control flow get typed routing — Can.Call/Access pass
+       through untyped so FFI return wrappers like `rt.AsListT`
+       don't strip Result-Ok wrappers).
+    2. `Can.Access` typed-field-access path — now also fires
+       when `inferExprType` returns an ambig TVar but
+       `lookupLambdaType` carries the concrete `TAlias`
+       (function param via `withScopedLambdaTypes` from the
+       dep-emission registration). Includes a secondary check
+       via `lookupLambdaGoStr` to catch the lazy-rendering race
+       where the Go-string registry is active but the Sky-type
+       registry isn't yet populated.
+    3. `coerceArg` — short-circuits `any(arg).(Foo_R[any])`
+       nominal cast when source's static Go type is the SAME
+       parametric record alias base. Lets Go's call-site type
+       inference pin the callee's T from the source's
+       instantiation, which is the only correct behaviour
+       across Go's nominal generic typing.
+    4. Param registration in dep-emission (`goStringBindings` +
+       `inferredArgTys`) now includes parametric record alias
+       params, not just func-typed ones — so the call-arg short-
+       circuit has the info to fire.
+  - **Regression test:** `test-files/v0.15-stress/src/Widget/
+    Form.sky` is a synthetic library mirroring sky-editor's
+    `Editor.sky` shape (top-level polymorphic `view cfg`,
+    sibling helpers, mixed `_ -> msg` + bare `msg` fields,
+    Std.Ui body, let-extracted polymorphic fields). The L1-L7
+    assertion in `examples/00-standard-libs`-style `Main.sky`
+    fails on v0.15.2, passes on v0.15.3.
+
+### `defToStmts` zero-param let-binding
+
+- `Can.Def name [] body` now consults the same `letBindingType`
+  helper before lowering, so `main`'s top-level let-bindings of
+  record literals emit as `Setup_R[Msg]{...}` instead of the
+  type-erased `Setup_R[any]{...}` shape that propagated the
+  panic at downstream call sites.
+
+### Known gap (documented in regression test)
+
+- Passing a let-bound func-typed field-access (`let submit =
+  cfg.wfSubmit in submitProbe cfg submit`) to a SAME-MODULE
+  generic helper still emits `rt.Coerce[func(P) any](submit)`,
+  which fails Go's call-site inference against the callee's
+  `func(P) T1` slot. Workaround in user code: pass the field
+  directly (`submitProbe cfg cfg.wfSubmit`). Sky-editor's
+  actual code does NOT hit this — it passes such fields to
+  Std.Ui kernels (`Ui.onSubmit cfg.onSubmit`) where the kernel's
+  reflect-adapter handles the conversion. The synthetic
+  `submitProbe` case is commented out in the regression test
+  with a forward-looking note for the next iteration.
+
+### Verification gates (all green pre-merge)
+
+- Cabal test: 306 examples, 0 failures, 1 pending (matches v0.15.2).
+- 27/27 examples build clean from wiped slate.
+- `examples/00-standard-libs` stdlib smoke test: 120/120 assertions pass.
+- `sky check` clean on `examples/{12-skyvote, 13-skyshop,
+  19-skyforum, 26-ui-showcase, 00-standard-libs}` + synthetic
+  stress test + skydeploy control plane.
+- `scripts/verify-cli.sh`: 13 pass / 0 fail / 1 skip.
+- `scripts/verify-all-web.sh`: 10 pass / 0 fail + console-e2e green.
+- `scripts/lsp-test-nvim.sh`: 17/17 LSP requests pass (hover,
+  completion, goto-def across kernel calls, field access, let-
+  bindings, lambda params, case patterns).
+- Skydeploy control plane: generated Go for `Editor_view` /
+  `Editor_view__Msg_...` no longer emits the panic-causing
+  `any(cfg).(Editor_Cfg_R[any])` cast at sibling helper calls.
+
+
+## v0.15.2 — Cfg_R[any] panic fix + version propagation (2026-05-24)
+
+### Codegen
+
+- **Closed `interface conversion: Cfg_R[any] vs Cfg_R[Msg]` runtime
+  panic** at every place a `Can.Record` literal sits in a typed
+  call-arg slot whose Go target is a parametric record alias
+  instantiation. Surfaced by skydeploy's Editor (`Editor.view
+  editorCfg` at AppDetail.sky:Source tab) on every mount — Go
+  generic types are nominal, so `any(Cfg_R[any]{...}).(Cfg_R[Msg])`
+  fails at runtime even though Go's type checker accepts it.
+  - **Fix:** call-arg lowering at every site (`zipWithDefault
+    coerceArg exprToGo`, `coerceCallArgsAt`'s `coerceOne`,
+    `kernelCoerceArg`, bare ctor-call zip) now routes
+    `Can.Record` literals targeting parametric record slots
+    through `exprToGoExpectGo` → `lowerRecordLiteralTo`, which
+    emits the literal with the target's concrete type args
+    directly (no nominal-type-assert wrapper).
+  - **Symmetry:** the same pipeline also routes `Can.Lambda` at
+    typed `func(...) ...` slots through `lowerTypedLambda` (was
+    already happening at some call sites; now uniform across all
+    five).
+  - **Edge cases handled:** the new arms are uniformly gated on
+    `not (containsGenericTypeParam ty)` so call sites where σ
+    hasn't pinned the callee's TVar (`Cfg_R[T1]`) fall back to
+    the legacy `coerceArg` path — emitting `Cfg_R[T1]{...}` at
+    the caller would trigger `undefined: T1` since T1 names the
+    callee's type variable, not in scope here. The existing
+    `exprToGoExpectGo` arms (record-field-init, list-elem) are
+    unchanged because they're only reached from contexts where σ
+    is already concrete.
+  - Stage E shipped the parametric record alias struct generation
+    + Stage E.2 routed the record-field-init context; v0.15.2 closes
+    the call-arg context that Stage E missed.
+
+### `sky build`
+
+- **`sky build` now injects `-ldflags "-X sky-app/rt.skyVersion=<compiler version>"`** into the underlying `go build`. Every Sky-built app's `/_sky/buildinfo` now reports the actual Sky version that built it instead of the default `"dev"`. No deploy-script ceremony — a tagged Sky binary built with `cabal install -ldflags="-X main.skyBuildVersion=0.15.2"` propagates that string to every app it compiles.
+  - **Why:** pre-v0.15.2, the `rt.skyVersion` package-level var defaulted to `"dev"` and was only populated by the Sky compiler's own release CI (`-X main.skyBuildVersion=...`). The compiler's own version never reached the apps it built — every deployed Sky app reported `"skyVersion":"dev"` regardless of which tagged compiler had built it.
+  - **Migration:** none. Existing apps rebuild → buildinfo flips from `"dev"` to the real version on next `sky build`. Deploy scripts that previously injected the ldflag manually (none in the public examples) can remove that step.
+
+## v0.15.1 — Docs: `SKY_ADMIN_TOKEN` canonical (2026-05-24)
+
+- **Docs: `SKY_ADMIN_TOKEN` is the canonical env var** for gating
+  `/_sky/metrics` and `/_sky/console` in production. The v0.15.0 doc
+  refresh accidentally kept `SKY_METRICS_TOKEN` (a v0.14.21 legacy
+  alias) as the recommended name in `README.md` + `CLAUDE.md` +
+  `templates/CLAUDE.md`. Runtime behaviour unchanged — both
+  `SKY_METRICS_TOKEN` (v0.14.21) and `SKY_CONSOLE_TOKEN_SECRET`
+  (v0.14.20) are still honoured by `adminTokenSecret()` in
+  `runtime-go/rt/subapp.go`.
+
+## v0.15.0 — Type-directed lowering (2026-05-24)
+
+### Type system
+
+- **Type-directed lowering throughout.** Sub-expressions at lambda
+  bodies, record-field inits, list elements, and call args lower with
+  the slot's typed Go form propagated. The solver writes a per-region
+  type map (`globalRegionTypes`); `LowerCtx` threads the expected
+  type down through `exprToGoExpectGo`. Closes the long-standing
+  parametric-record-alias bug class (every Surface 1/2/3 is now
+  shipped). Architecture: [`docs/v1-rfc/type-soundness-deep-analysis.md`](docs/v1-rfc/type-soundness-deep-analysis.md).
+- **Go generics on parametric record aliases.** `type alias Cfg msg
+  = { onSubmit : msg, label : String, ... }` now emits
+  `type Cfg_R[T1 any] struct { OnSubmit T1; Label string; ... }`
+  with per-instance type args (`Cfg_R[Msg]`, `Cfg_R[Int]`). Callback
+  fields keep their typed callee parameter — no more `func(any) any`
+  fallback at parametric-record slots.
+- **Inline lambdas keep their typed shape at record-field slots.**
+  `{ onSubmit = \s -> Tag ("L:" ++ s), ... }` against `Cfg Msg` now
+  emits `func(string) Msg` for the lambda, not `func(any) any`.
+- **Cross-alias call without the alias-chain workaround.** Structurally-
+  equal records can be passed across module boundaries without the
+  `type alias State.FileForm = Editor.Form` redirect. The redirect
+  remains a valid idiom but is no longer required.
+- **Same-module polymorphic call re-instantiation.** Annotated `f :
+  Cfg msg -> msg` called with `msg=Int` AND `msg=Bool` in the SAME
+  module both work — sibling references alpha-rename per call site.
+  Previously the first call pinned `msg`.
+- **Wildcard-`any` soundness gate.** `view : Model -> any` returning
+  a String against an expected `Model -> Html msg` slot now correctly
+  surfaces as a type error. Mid-development the v0.15 same-mod
+  CForeign change wrongly treated wildcard-only sigs as polymorphic;
+  the final gate requires at least one non-`any` freeVar before
+  routing through CForeign. The pair `Canonicalise.Type.freeTypeVars`
+  (collects wildcards) + `Instantiate.fromAnnotation` (filters them
+  + per-occurrence fresh UF var) is documented in CLAUDE.md as
+  load-bearing.
+
+### Type errors / diagnostics
+
+- **TAlias type-args propagate through readback + showType +
+  typeStructEq.** Errors like `Cfg Msg vs Cfg Int` are now shown
+  with their type args instead of the unhelpful `Cfg vs Cfg`.
+- **Unify.hs App1 ↔ Alias same-name bridge.** Recursive parametric
+  alias bodies (`type alias Tree a = { value : a, kids : List (Tree
+  a) }`) unify with external `TAlias` references correctly.
+- **Canonicaliser parametric-alias var substitution (Surface 1).**
+  Sky source can now access fields on `Cfg msg`-typed function
+  parameters without dropping to structural inference.
+
+### Limitations closed in v0.15 (with the older list trimmed)
+
+- ~~Let bindings with parameters after multi-line case~~
+- ~~Zero-arity functions reading env vars memoised at init()~~
+- ~~`exposing (Type(..))` for user-module ADT constructors~~
+- ~~`import X as Alias` leaks the alias into codegen~~
+- ~~`let` bindings don't support forward references~~
+- ~~Parametric record alias bugs (Surfaces 1, 2, 3)~~
+
+### Verification
+
+- 27/27 examples clean-build from a wiped slate
+- 120/120 stdlib Sky.Test assertions (`examples/00-standard-libs`)
+- 21/21 v0.15 parametric-record-alias stress test sections
+- 306/306 cabal tests (0 failures, 1 pending) — including the LSP
+  `DiagnosticsSpec` "TEA with Live.app: wrong view return type
+  surfaces as a real diagnostic" case
+- `scripts/verify-all-web.sh` — 10/10 Sky.Live + Sky.Http.Server
+  Playwright runs + console-e2e
+- `scripts/verify-cli.sh` — 13/13 CLI / Tui / Cli (Fyne X11 skipped)
+- Skydeploy clean rebuild + runtime probe (`/`, `/_sky/healthz`,
+  `/_sky/buildinfo`, console mounted)
+
 ## Unreleased
 
 ### Std.Ui — surface complete

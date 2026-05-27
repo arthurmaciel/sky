@@ -12,12 +12,18 @@ through `Task`, every fallible value returns `Result Error a`, and
 surfaces at check time. No runtime panics from well-typed Sky code, no
 nil leakage, no silent numeric coercion.
 
-**Typed Go output (v0.14.x).** Generated Go functions have fully-typed
-signatures end-to-end. Layer 3 stdlib: every kernel module surfaced as
-Sky source under `sky-stdlib/{Sky/Core,Std,Sky/Http}/*.sky` — typed
-kernel dispatch preserved via the `Ffi.kernel` mechanism. Tail-recursive
-Sky functions auto-TCO to `for { ... continue }` Go loops (constant
-stack). Browse the full API surface with `sky doc --serve`.
+**Typed Go output (v0.15.x).** Generated Go functions have fully-typed
+signatures end-to-end. Type-directed lowering propagates the slot's
+expected type into lambda bodies, record-field inits, list elements,
+and call args — so `{ onSubmit = \s -> Tag ("L:" ++ s), ... }` against
+`Cfg Msg` emits `func(string) Msg`, not `func(any) any`. Parametric
+record aliases compile to Go generics (`type Cfg_R[T1 any] struct{...}`
+with per-instance type args). Layer 3 stdlib: every kernel module
+surfaced as Sky source under `sky-stdlib/{Sky/Core,Std,Sky/Http}/*.sky`
+— typed kernel dispatch preserved via the `Ffi.kernel` mechanism.
+Tail-recursive Sky functions auto-TCO to `for { ... continue }` Go
+loops (constant stack). Browse the full API surface with
+`sky doc --serve`.
 
 ```go
 func f(name string, age int) rt.SkyResult[Error, Profile_R] { ... }
@@ -34,7 +40,7 @@ and the body would otherwise infer to something wider, the compiler
 rejects the body. Inline records in function annotations aren't
 supported — use a `type alias` for any record you want in a signature.
 
-## Quick UX/UX/security/scalability defaults (v0.14.x)
+## Quick UX/UX/security/scalability defaults (v0.15.x)
 
 **You (the AI assistant) are expected to deliver top-notch UX/DX/security
 /scalability by default.** When the user asks for an app:
@@ -391,6 +397,7 @@ Non-regression rules (enforced by `sky verify`):
 - Every bug you fix must land with a regression test in `tests/`.
 - `sky check` is a full soundness gate (runs `go build` on the generated Go). Don't work around check failures by disabling it.
 - Secrets (`Auth.signToken` / `Auth.verifyToken`) take `String` and reject short keys (< 32 bytes) — don't stringify a `Maybe` or `Dict` into an auth secret.
+- **Security-critical Auth kernels require typed-String arguments.** `Auth.hashPassword`, `Auth.hashPasswordCost`, `Auth.passwordStrength`, `Auth.signToken`, `Auth.verifyToken`, `Auth.register`, `Auth.login`, `Auth.setRole` each gate at compile time on every String-typed slot — bridging an `any`-typed binding (`bridge : any` annotation; raw `Ffi.kernel "K"` without a signature) into any of those slots is a compile-time `Sky.Auth.UntypedBoundary` (E4006) error, not a runtime surprise. The user-visible runtime error on a non-String value is the fixed `<kernel>: expected String` blurb; the actual Go type lands in the server-side audit log (`[WARN] auth.boundary kernel=… goType=… …`), never in the API response.
 
 
 ## Language Syntax
@@ -1778,9 +1785,29 @@ Regex.split "[,;]" "a,b;c"           -- ["a", "b", "c"]
 ### Sky.Core.Crypto (pure)
 
 ```elm
-Crypto.sha256 "hello"      -- "2cf24dba..."
-Crypto.hmacSha256 "key" "msg"  -- HMAC signature
+Crypto.sha256 "hello"               -- "2cf24dba..." (also sha512, sha1, md5)
+Crypto.hmacSha256 "key" "msg"       -- hex HMAC (also hmacSha512)
+Crypto.rsaSha256Sign pemKey "msg"   -- Result Error String — RS256 signature
+Crypto.rsaSha256Verify pub "msg" s  -- Bool
+Crypto.constantTimeEqual a b        -- compare secrets safely, never ==
 ```
+
+### Sky.Core.Jwt (pure)
+
+```elm
+import Sky.Core.Jwt as Jwt
+
+token =
+    Jwt.encode (Jwt.hs256 secret)
+        (Jwt.claims |> Jwt.subject "u1" |> Jwt.expiresAt 1999999999)
+-- token : Result Error String
+
+payload = Jwt.decode (Jwt.hs256 secret) now token
+-- verifies the signature + exp/nbf against `now` → Result Error String
+```
+
+`Jwt.rs256 pemKey` selects RS256 (GitHub Apps, service accounts) —
+pass the private key to `encode`, the public key to `decode`.
 
 ### Sky.Core.Random (Task)
 
@@ -1947,6 +1974,99 @@ main =
 
 **Navigation**: `a [ href "/about", attribute "sky-nav" "" ] [ text "About" ]`
 **Styling**: Use `Std.Css` with `stylesheet`/`rule` — not inline style strings.
+
+### URL routing + history (Sky.Live)
+
+`routes` is the URL → Page mapping; the runtime matches in
+declaration order, captures `:param` segments, and reflect-calls
+the Page constructor with the captured values (`String`).
+
+```elm
+type Page
+    = LoginPage
+    | DashboardPage
+    | NewAppPage
+    | AppDetailPage String          -- :slug delivers a String
+    | InsightsPage
+
+main = app
+    { …
+    , routes =
+        [ route "/" LoginPage
+        , route "/apps" DashboardPage
+        , route "/apps/new" NewAppPage           -- literal BEFORE pattern
+        , route "/apps/:slug" AppDetailPage      -- ctor: String -> Page
+        , route "/insights" InsightsPage
+        ]
+    , notFound = LoginPage
+    }
+```
+
+Put literals before patterns — otherwise `"new"` matches as a
+slug.
+
+**URL-from-Page.** After a programmatic `Navigate` Msg, the
+address bar follows via Sky.Live's `data-sky-path` hook — a typed
+attribute the runtime checks on EVERY patch (`__skyPatch` for
+sky-nav fetches, `__skyApplyPatches` for SSE-driven Msg patches).
+No JS-in-string, no `new Function()`, CSP-safe.
+
+```elm
+import Std.Html as Html
+import Std.Html.Attributes as Attr
+
+urlSync : Model -> Element msg
+urlSync model =
+    Ui.html
+        (Html.node "div"
+            [ Attr.attribute "data-sky-path" (currentPath model) ]
+            []
+        )
+
+-- Place urlSync inside the view's top-level column.
+```
+
+Do NOT remove the `data-sky-path` element after the runtime
+processes it — Sky.Live's diff looks elements up by `sky-id` via
+querySelector, and a removed element orphans its sky-id so the next
+attribute patch silently skips. The path-check is idempotent so
+leaving it in place is cheap.
+
+**Link clicks.** Add the `sky-nav` attribute to an `<a>`: the
+runtime intercepts the click, fetches with `X-Sky-Nav: 1`,
+full-body-patches, and pushes history. No app code needed.
+`Back/Forward` is handled by a built-in popstate listener — also
+no app code.
+
+`data-sky-eval` (older, runs the attribute via `new Function()`)
+is CSP-incompatible and only fires from `__skyPatch`, not from
+SSE patches. Always prefer `data-sky-path` for URL updates.
+
+**Auth-gated routing pattern.** Outer-case `pageBody` on
+`model.session` (signed-out always renders sign-in regardless of
+page) and have a single `currentPath : Model -> String` that
+returns `/auth/sign-in` when unauthed, so the URL follows the
+surface the user actually sees.
+
+```elm
+currentPath : Model -> String
+currentPath model =
+    case model.session of
+        Nothing -> "/auth/sign-in"
+        Just _ ->
+            case model.page of
+                LoginPage          -> "/apps"           -- authed at sign-in → bounce
+                DashboardPage      -> "/apps"
+                NewAppPage         -> "/apps/new"
+                AppDetailPage slug -> "/apps/" ++ slug
+                InsightsPage       -> "/insights"
+```
+
+**Slug ↔ subdomain.** When apps deploy under a wildcard domain
+(`*.platform.app`), prefer slug-keyed URLs (`/apps/<slug>`) that
+match the subdomain (`<slug>.platform.app`) — bookmarkable, follows
+renames. Carry the slug on the Page constructor; handlers that need
+the numeric id resolve via a `findBySlug` helper.
 
 ### Event binding — radio groups
 
@@ -3270,7 +3390,7 @@ Sky.Live config is embedded at compile time but can be overridden at runtime. En
 | `SKY_LIVE_TTL` | `ttl` | Session TTL (Go duration format, e.g. `30m`) |
 | `SKY_LIVE_MAX_BODY_BYTES` | `maxBodyBytes` | Cap for `/_sky/event` POST body (default `5242880` = 5 MiB; bump for `Event.onFile` / `Event.onImage` uploads larger than 5 MiB) |
 
-Connection-status banner (v0.9.9+, hardened against proxy wedges in v0.11.x post-release): `SKY_LIVE_BANNER` (default `on`; `off` / `0` / `false` to suppress the chrome but keep the retry queue active), `SKY_LIVE_RETRY_BASE_MS` (default `500`), `SKY_LIVE_RETRY_MAX_MS` (default `16000`), `SKY_LIVE_RETRY_MAX_ATTEMPTS` (default `10`), `SKY_LIVE_QUEUE_MAX` (default `50`), `SKY_LIVE_HELLO_TIMEOUT_MS` (default `8000` — how long the client waits for the server's SSE handshake before treating the connection as proxy-wedged and force-reopening), `SKY_LIVE_HEARTBEAT_TTL_MS` (default `35000` — max idle time on the SSE before the client treats the stream as silently dropped; sized for 2× the server's 15 s heartbeat).
+Connection-status banner (v0.9.9+, hardened against proxy wedges in v0.11.x post-release): `SKY_LIVE_BANNER` (default `on`; `off` / `0` / `false` to suppress the chrome but keep the retry queue active), `SKY_LIVE_RETRY_BASE_MS` (default `500`), `SKY_LIVE_RETRY_MAX_MS` (default `16000`), `SKY_LIVE_RETRY_MAX_ATTEMPTS` (default `10`), `SKY_LIVE_QUEUE_MAX` (default `50`), `SKY_LIVE_HELLO_TIMEOUT_MS` (default `8000` — how long the client waits for the server's SSE handshake before treating the connection as proxy-wedged and force-reopening), `SKY_LIVE_HEARTBEAT_TTL_MS` (default `35000` — max idle time on the SSE before the client treats the stream as silently dropped; sized for 2× the server's 15 s heartbeat), `SKY_LIVE_SSE_BUFFER` (default `16`, clamped to `[1, 1024]` — capacity of the per-session SSE frame buffer between producers (`dispatchBatched` / `runPerformBody` / `Time.every` tick) and the SSE consumer. Drops when full surface as the Prometheus counter `sky_live_sse_drops_total{session=<sid>}` at `/_sky/metrics`).
 
 **Connection status banner**: the runtime injects a bottom-pinned banner that shows `Reconnecting…` (amber) when the SSE connection drops or a POST `/_sky/event` fails, and `Connection lost — refresh to retry` (red) after the retry attempts are exhausted. POST failures during the outage land in a FIFO queue; the SSE re-open or a successful retry drains them, so clicks during a brief outage replay automatically. Use a persistent session store (Redis / Postgres / SQLite / Firestore) for production deployments — the memory store loses Model state on every server restart, so reconnect re-initialises from `init`. After reaching the offline state the runtime keeps trying SSE in the background at the max delay, so a healed network recovers without a refresh. The banner is opt-out via `SKY_LIVE_BANNER=off`; styling can be overridden by `#__sky-status { ... !important }` in the user's stylesheet.
 
@@ -3462,7 +3582,8 @@ DATABASE_URL=postgres://user:pass@host/db  # fallback if SKY_LIVE_STORE_PATH uns
 # ─── observability ─────────────────────────────────────────────────
 SKY_LOG_FORMAT=json
 SKY_LOG_LEVEL=info
-SKY_METRICS_TOKEN=…             # /_sky/metrics requires `Authorization: Bearer <this>`
+SKY_ADMIN_TOKEN=…               # gates /_sky/metrics + /_sky/console in production
+                                # legacy aliases: SKY_METRICS_TOKEN (v0.14.21), SKY_CONSOLE_TOKEN_SECRET (v0.14.20)
 # OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318  # optional OTel export
 
 # ─── secrets ───────────────────────────────────────────────────────
@@ -3476,7 +3597,7 @@ SKY_AUTH_TOKEN_SECRET=…         # ≥32 bytes; Sky errors at startup if shorte
 | `ENV` value | Mode | Console mount | `🔍 Console` banner | `/_sky/metrics` auth |
 |---|---|---|---|---|
 | unset / `dev` / `development` / `local` | dev | ✓ at `/_sky/console` | ✓ floating link | open (any read) |
-| `production` / `prod` / `staging` / `qa` / `preview` / anything else | prod | hidden | hidden | `Authorization: Bearer $SKY_METRICS_TOKEN` |
+| `production` / `prod` / `staging` / `qa` / `preview` / anything else | prod | hidden | hidden | `Authorization: Bearer $SKY_ADMIN_TOKEN` |
 
 Bias-to-gate: if you bother to set `ENV` at all, you mean it's not dev.
 
@@ -3498,7 +3619,7 @@ A Sky-side ergonomic API (`Live.app { subApps = [...] }`) is on the v0.14 list; 
 
 | Platform | What it gives you | What you set |
 |---|---|---|
-| Fly.io / Render / Railway | `PORT`, `DATABASE_URL`, secret manager | `ENV=production`, `SKY_AUTH_TOKEN_SECRET`, `SKY_METRICS_TOKEN` |
+| Fly.io / Render / Railway | `PORT`, `DATABASE_URL`, secret manager | `ENV=production`, `SKY_AUTH_TOKEN_SECRET`, `SKY_ADMIN_TOKEN` |
 | Cloud Run | `PORT`, secret manager | same + map `PORT` → `SKY_LIVE_PORT` if your code reads SKY_LIVE_PORT explicitly |
 | Kubernetes | ConfigMap + Secret + Service | mount `/_sky/healthz` as liveness probe, `/_sky/readyz` as readiness probe |
 | Docker compose | env_file: `.env.production` | same |
@@ -3653,45 +3774,39 @@ Session store memory grows with inactive sessions. Set a TTL:
 
 ---
 
-## Known Limitations (v0.13)
+## Known Limitations (v0.15)
 
-Active limitations users still hit. Things v0.13 closed are documented
-in the repo `CLAUDE.md`'s "v0.13 closed" list; do not re-add them here.
+Active limitations users still hit at HEAD. Anything not on this list
+was either never a limitation or has been fixed; the repo `CHANGELOG.md`
+records the per-version closures if you want history.
 
-- **No anonymous records in type annotations** — use `type alias` for record types in signatures. v0.13 E emits `type Anon_R_<hash>` structs for HM-inferred anon shapes, but the parser still rejects inline `{ field : Type }` syntax in an annotation. Reach for a `type alias`.
+- **Anonymous records in function signatures (parser-side)** — the
+  parser accepts `f : { name : String, age : Int } -> String` cleanly;
+  what previously broke was a separate multi-line-sig issue (see
+  "Multi-line function signatures" below). If you want to share a
+  record shape across functions, a `type alias` is still preferable.
 - **No higher-kinded types** — no `Functor`, `Monad`, etc. Use concrete types.
 - **No `where` clauses** — use `let...in` instead.
 - **No custom operators** — only built-in (`|>`, `<|`, `++`, `::`, etc.).
 - **No row-polymorphic annotation syntax** — Sky doesn't parse `{ r | field : T }` in annotations. Use a closed record alias for the function's input.
 - **Negative literal arguments need parentheses** — `f (-1)` not `f -1` (`f -1` parses as subtraction).
-- **`Dict.toList` returns string keys** — `Dict` is `map[string]any` at runtime, so `Dict.toList` on `Dict Int v` gives string keys. Iterate via `Dict.get` over known ranges.
+- **`Dict.toList` returns string keys** — `Dict` is `map[string]any` at runtime, so `Dict.toList` on `Dict Int v` gives string keys; arithmetic on them silently produces 0. Iterate via `Dict.get` over known ranges.
 - **`sky check` doesn't fully model Go interfaces** — concrete types can't unify with Go interfaces (`Fyne.CanvasObject`), but the code compiles and runs fine.
-- **Zero-arg FFI functions need no `()`** — call `Uuid.newString` (the return value), not `Uuid.newString ()`.
-- **Zero-arg `Css.*` constants DO need `()`** — `Css.zero`, `Css.auto`, `Css.none`, `Css.transparent`, `Css.inherit`, `Css.initial`, `Css.borderBox`, `Css.systemFont`, `Css.monoFont`, `Css.userSelectNone`. These are exposed as `() -> String` kernels (not zero-arity values) so they don't interact with Go's `init()` ordering. Write `Css.padding (Css.zero ())`, not `Css.padding Css.zero` — the latter serialises a function pointer like `0xc00001c0a0` into the stylesheet. Pattern: any `Css.X` that names a literal CSS keyword takes `()`; value constructors like `px`, `rem`, `em`, `hex`, `rgba` take their arguments directly.
+- **Zero-arg calls follow the binding's declared type** — bare `Uuid.v4` works because its stdlib sig is `v4 : String`; `Time.now ()` / `Time.unixMillis ()` / `FyneApp.new ()` are *all* needed because their sigs are `() -> Task Error a`. Calling a `: String` binding with `()` triggers a known codegen bug for arity-0 kernels — stick to the declared shape.
 - **FFI setters in pipelines need an explicit lambda** — `|> Result.andThen (OpenAi.chatCompletionMessageSetRole m.role)` emits a call to the non-existent non-T variant and fails codegen. Wrap: `|> Result.andThen (\msg -> OpenAi.chatCompletionMessageSetRole m.role msg)`.
-- **`import Lib.X as Alias` leaks the alias into codegen for exposed types** — `import Lib.Db as Chat` emits `Chat_Message_R` instead of the canonical `Lib_Db_Message_R`. **Workaround**: import types without the alias — `import Lib.Db exposing (Message, ...)`. Aliases are fine for modules that only expose functions.
-- **Zero-arity functions reading env vars** — zero-arity functions are memoised; when they read `System.getenv` they evaluate during Go `init()`, before `.env` is loaded. **Workaround**: add a dummy `_` parameter: `getConfig _ = System.getenv "KEY"`.
-- **Let bindings with parameters after multi-line case** — `mark j = expr` directly after a `case ... of` in the same `let` can be reparsed as a new top-level declaration. Use a lambda (`\j -> expr`) or extract to a top-level function.
-- **`exposing (Type(..))` doesn't expose user-module constructors** — only stdlib/kernel modules resolve `MyType(..)` fully. For a user-defined `MyModule`, import `exposing (..)` or qualify constructors (`MyModule.MyConstructor`).
-- **`let` bindings don't support forward references** — Helpers inside a `let` block must be defined *before* their consumers in source order. `let writeAll db = … insertRow db ts …; insertRow db ts = …` fails `go build` with `undefined: insertRow`. **Workaround**: reorder so dependencies come first. (Future fix — the canonicaliser already knows the full set of let names.)
+- **Zero-arg `Css.*` constants DO need `()`** — `Css.zero ()`, `Css.auto ()`, `Css.none ()`, `Css.transparent ()`, `Css.inherit ()`, `Css.initial ()`, `Css.borderBox ()`, `Css.systemFont ()`, `Css.monoFont ()`, `Css.userSelectNone ()`. Bare form is now a clean type error (no longer the silent function-pointer leak it used to be), but the `()` is still required. Pattern: any `Css.X` that names a literal CSS keyword takes `()`; value constructors like `px`, `rem`, `em`, `hex`, `rgba` take their arguments directly.
+- **Non-tail-recursive list operations are O(N) on Go stack** — `map`, `filter`, `foldr`, `length`, `concat`, `concatMap`, `take`, `append`, `range`, `zip`, `indexedMap`, `Maybe.combine`, `Result.combine` recurse. Tail-recursive operations (`foldl`, `find`, `any`, `all`, `member`, `drop`) are auto-TCO'd to constant stack. For very large lists (200k+ elements) prefer the tail-recursive accumulator pattern.
+- **Multi-line function signatures with continuation INSIDE the type body** — `name\n    : T` (the `:` on a continuation line) parses cleanly. Continuation INSIDE the type body (`T1\n    -> T2`) is not supported — extract a `type alias` for the whole arrow type.
 
-### Deferred to v0.13.x (next release)
+### Closed in v0.15 (for grep)
 
-- **`sky install` time on huge Go SDKs (Stripe-scale)** — install currently emits the full `.skycache/go/<pkg>_bindings.go` (Stripe: 326k lines, ~8 min cold). v0.13 prunes most of that at build time (`F + F3`); v0.13.x will move the generation to build-time entirely, so install drops to ~10 sec. No code change needed; just `sky upgrade` once the release ships.
-
-### Fixed in v0.9-dev (feat/typed-codegen)
-- **Typed-map round-trips at the FFI boundary** — `[]any` containing `map[string]any` now narrows into `[]map[string]string` correctly across `rt.Coerce`, `AsListT`, `AsMapT`, `AsDict`. `List.isEmpty` / `List.map` on annotated DB result slices no longer wrongly report empty.
-- **Curried lambdas passed to Go-typed callbacks** — `rt.Coerce[func(X) func(Y) Z]` over a Sky `func(any) any { return func(any) any {...} }` now wraps the inner func too; requireAuth → route-handler style no longer panics.
-- **Server-rendered form events** — `Html_render` for a form with `onSubmit="..."` no longer panics on `assignment to entry in nil map`.
-- **Signin on annotated auth rows** — `Db.getField` accepts both `map[string]string` (typed) and `map[string]any` (raw) sources.
-- **Pattern literal inference** — `case foo of "idle" -> _` now forces `foo : String` at check time.
-
-### Fixed earlier (historical)
-- **Nested `case...of`** — fixed v0.7.21; cases at any depth compile.
-- **Cross-module type alias unification** — record aliases defined in module A unify correctly in module B's type annotations.
-- **Cross-module ADT exhaustiveness** — missing case branches for imported ADTs are caught at compile time.
-- **`exposing (Constructor(..))` qualified call issue** — resolved; use `import M exposing (..)` for unqualified constructors on stdlib/kernel modules.
-- **Type annotations are load-bearing** — since v0.7.28, the annotation wins when the body would infer a wider type.
+- ~~Let bindings with parameters after multi-line case~~ — `let mark j = …` after a `case … of` arm now parses cleanly.
+- ~~Zero-arity functions reading env vars memoised at init()~~ — `apiKey = System.getenvOr "K" "def"` now reads the runtime environment.
+- ~~`exposing (Type(..))` for user-module ADT constructors~~ — user `type Color = Red | Green` exporting `Color(..)` and imported `exposing (Color(..))` now exposes unqualified constructors.
+- ~~`import X as Alias` leaks the alias into codegen~~ — `import Lib.Db as Chat` now emits `Lib_Db_Message_R` (source module name), not `Chat_Message_R`.
+- ~~`let` bindings don't support forward references~~ — `let a = b + 1; b = 5 in a` now compiles and evaluates correctly.
+- ~~Parametric record alias bugs (Surfaces 1, 2, 3)~~ — closed by v0.15 type-directed lowering + Go generics on parametric records.
+- ~~Same-module polymorphic call pinned by first instantiation~~ — sibling refs to polymorphic annotated TypedDefs now alpha-rename per call site.
 
 ## Coding Conventions
 
@@ -4063,9 +4178,10 @@ Time.diffMillis later earlier
 ### New Crypto Functions
 
 ```elm
-Crypto.sha256 "hello"                    -- hex digest
-Crypto.sha512 "hello"
-Crypto.hmacSha256 "secret" "message"     -- for signing cookies/tokens
+Crypto.sha256 "hello"                    -- hex digest (also sha512, sha1, md5)
+Crypto.hmacSha256 "secret" "message"     -- hex HMAC (also hmacSha512)
+Crypto.rsaSha256Sign pemKey "message"    -- Result Error String — RS256
+Crypto.rsaSha256Verify pubKey msg sig    -- Bool
 Crypto.constantTimeEqual a b             -- use for comparing secrets, NOT ==
 Crypto.randomBytes 16                    -- Task Error String, hex
 Crypto.randomToken 32                    -- Task Error String, URL-safe base64

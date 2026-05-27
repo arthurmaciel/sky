@@ -205,12 +205,24 @@ func SpawnSkyConsole(parentPort int) SpawnFn {
 		if err := cmd.Start(); err != nil {
 			return 0, nil, fmt.Errorf("sky console spawn failed: %w", err)
 		}
-		// 60 × 100ms = 6 s — long enough for sky console's
-		// first-run build (which compiles the bundled mini-app)
-		// to finish, short enough to fail fast on broken setups.
-		if !waitForPort("127.0.0.1", port, 60, 100*time.Millisecond) {
+		// Wait up to 30 s. Local dev usually has the bundled
+		// console mini-app ready in ~1 s, but Cloud Run cold
+		// starts on small instances (e2-micro / 256 MiB / 1 vCPU)
+		// take significantly longer — `sky console` has to load
+		// the runtime, init its SQLite + memory store, bind a
+		// port, and respond. SKY_CONSOLE_READY_TIMEOUT_MS overrides
+		// for unusual environments. Was 6 s pre-2026-05-23 and
+		// regularly timed out on Cloud Run e2-micro deploys.
+		readyMs := 30000
+		if v := os.Getenv("SKY_CONSOLE_READY_TIMEOUT_MS"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				readyMs = n
+			}
+		}
+		ticks := readyMs / 100
+		if !waitForPort("127.0.0.1", port, ticks, 100*time.Millisecond) {
 			_ = cmd.Process.Kill()
-			return 0, nil, fmt.Errorf("sky console on :%d did not become ready within 6s", port)
+			return 0, nil, fmt.Errorf("sky console on :%d did not become ready within %dms", port, readyMs)
 		}
 		return port, cmd, nil
 	}
@@ -438,15 +450,36 @@ func ConsoleAutoMounted() bool { return consoleAutoMounted.Load() }
 // never blocked by console-mount issues; the legacy
 // MountConsoleEndpoints path then provides a working fallback.
 func maybeAutoMountConsole(mux *http.ServeMux, parentBasePath string, parentPort int) {
-	if productionFromEnv() {
+	if parentBasePath != "" {
+		// We're running AS a sub-app — don't recursively mount
+		// another console inside ourselves.
 		return
 	}
 	if v := os.Getenv("SKY_CONSOLE_EMBED"); v == "off" || v == "0" || v == "false" {
 		return
 	}
-	if parentBasePath != "" {
-		// We're running AS a sub-app — don't recursively mount
-		// another console inside ourselves.
+
+	// PRO+ CONSOLE — a single per-app admin secret unlocks the
+	// console AND the /_sky/metrics scrape behind the same trust
+	// domain. Canonical env var SKY_ADMIN_TOKEN; SKY_METRICS_TOKEN
+	// and SKY_CONSOLE_TOKEN_SECRET are honoured as v0.14.21 / v0.14.20
+	// legacy aliases (see adminTokenSecret). Setting any of them:
+	//   – wraps /_sky/console in MountConsoleAuth (JWT URL token
+	//     + session cookie; see console_auth.go),
+	//   – leaves the production gate on for the dev banner.
+	// The control-plane (skydeploy.app) mints the URL JWT signed
+	// with the same secret it provisions per tenant.
+	if secret := adminTokenSecret(); secret != "" {
+		IngestTokenInit()
+		if err := MountConsoleAuth(mux, parentPort, secret); err == nil {
+			consoleAutoMounted.Store(true)
+		}
+		return
+	}
+
+	// DEV-MODE CONSOLE — production gate blocks; everything below
+	// is the existing pre-2026-05-23 behaviour, unchanged.
+	if productionFromEnv() {
 		return
 	}
 	// IMPORTANT: materialise the ingest token NOW so SpawnSkyConsole
@@ -461,6 +494,103 @@ func maybeAutoMountConsole(mux *http.ServeMux, parentBasePath string, parentPort
 	if err := MountSubApp(mux, "/_sky/console", SpawnSkyConsole(parentPort)); err == nil {
 		consoleAutoMounted.Store(true)
 	}
+}
+
+
+// adminTokenSecret returns the per-app admin secret that gates
+// every privileged Sky.Live surface — /_sky/console (HS256 JWT
+// signing), /_sky/metrics (Bearer auth), and any future admin-
+// only endpoint. One secret per app, multiple surfaces, one
+// trust domain.
+//
+// The canonical env var is SKY_ADMIN_TOKEN. Two legacy aliases
+// are honoured for tenants seeded on earlier Sky versions:
+//
+//   - SKY_METRICS_TOKEN — v0.14.21's first-pass unification name
+//     (kept "metrics" in the name; promoted to admin-wide).
+//   - SKY_CONSOLE_TOKEN_SECRET — v0.14.20's console-specific
+//     secret before any unification.
+//
+// Returns "" when nothing is set — Pro+ console auth stays off
+// and the deploy falls back to dev-mode rules (nothing mounts
+// in production).
+func adminTokenSecret() string {
+	if s := os.Getenv("SKY_ADMIN_TOKEN"); s != "" {
+		return s
+	}
+	if s := os.Getenv("SKY_METRICS_TOKEN"); s != "" {
+		return s
+	}
+	return os.Getenv("SKY_CONSOLE_TOKEN_SECRET")
+}
+
+
+// consoleAdminSecret is a thin alias kept so callers that imported
+// this name from v0.14.21 keep compiling. Use adminTokenSecret for
+// new code.
+func consoleAdminSecret() string {
+	return adminTokenSecret()
+}
+
+
+// MountConsoleAuth mounts the Sky Console as a token-gated sub-app
+// at /_sky/console. Used by Pro+ deploy mode to expose the console
+// in production with the owner's skydeploy.app session validating
+// access. The token is a JWT issued by the control-plane and
+// signed with the shared SKY_CONSOLE_TOKEN_SECRET; this runtime
+// verifies + issues a session cookie + strips token from URL.
+// See console_auth.go for the middleware + cookie flow.
+//
+// Mirrors MountSubApp's proxy setup but inserts consoleTokenAuth
+// between the mux and the reverse-proxy.
+func MountConsoleAuth(mux *http.ServeMux, parentPort int, secret string) error {
+	if mux == nil {
+		return fmt.Errorf("MountConsoleAuth: mux is nil")
+	}
+	const prefix = "/_sky/console"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	port, cmd, err := SpawnSkyConsole(parentPort)(ctx, prefix)
+	if err != nil {
+		cancel()
+		fmt.Fprintf(os.Stderr, "[sky.console-auth] mount skipped: %v\n", err)
+		return err
+	}
+	registerSubAppChild(cmd, cancel)
+
+	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.FlushInterval = -1
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[sky.console-auth] proxy %s %s -> %s: %v\n",
+			r.Method, r.URL.Path, target.Host, err)
+		w.WriteHeader(http.StatusBadGateway)
+	}
+	proxy.ErrorLog = log.New(filteredProxyLog{}, "", 0)
+
+	// Auth wraps the prefix-stripped proxy. StripPrefix is OUTSIDE
+	// the auth gate so the gate sees the original `/_sky/console`
+	// path (its 401 page and redirect-to-strip-token logic both
+	// use r.URL.Path / RequestURI as-is).
+	gated := consoleTokenAuth(secret, http.StripPrefix(prefix, proxy))
+
+	mux.Handle(prefix+"/", gated)
+	// Bare path (no trailing slash) — the iframe src from skydeploy
+	// hits exactly this URL with `?token=…`. Don't pre-redirect
+	// before auth: the auth wrapper handles the token + sets the
+	// cookie, then redirects to the slash-form WITHOUT the token.
+	mux.HandleFunc(prefix, func(w http.ResponseWriter, r *http.Request) {
+		target := prefix + "/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+	})
+	fmt.Fprintf(os.Stderr, "[sky.console-auth] mounted %s (token-gated) -> 127.0.0.1:%d\n", prefix, port)
+	return nil
 }
 
 // filteredProxyLog is the io.Writer behind a reverse proxy's

@@ -126,7 +126,9 @@ generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes
     -> Map.Map (String, String) (String, String)  -- kernel alias map (keys as strings)
     -> (String, [(String, String)], RustBuilder.UsedKernels)
 generateRust canMods _srcMod solvedTypes dbPath dbDriver ffiSlugs kernelAliases =
-    let builder = RustBuilder.buildProgram canMods solvedTypes kernelAliases
+    -- v0.15: Solve.SolvedTypes became a record; the Rust codegen (RustBuilder)
+    -- consumes the bare env map, so project the `_stEnv` field out.
+    let builder = RustBuilder.buildProgram canMods (Solve._stEnv solvedTypes) kernelAliases
         (code, moduleFiles) = RustBuilder.emitRust builder dbPath dbDriver ffiSlugs
         usage = RustBuilder.builderKernels builder
     in (code, moduleFiles, usage)

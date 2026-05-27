@@ -28,13 +28,17 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"sky-app/rt/telemetry"
 )
 
 // ═══════════════════════════════════════════════════════════
@@ -293,17 +297,49 @@ func renderVNode(n VNode, handlers map[string]any) string {
 			textareaValue = v
 		}
 	}
-	for k, v := range n.Attrs {
+	// Deterministic attribute order — Go map iteration is randomised,
+	// so without sorting the same VNode emits attrs in a different
+	// order across renders.  That doesn't affect the diff's correctness
+	// (diffNodes walks new.Attrs and key-looks-up in old.Attrs, which
+	// is order-independent) BUT it does mean:
+	//   * Two identical states produce byte-different HTML strings
+	//     — golden/snapshot tests can flake, log diffs are noisy.
+	//   * Browsers parse innerHTML into DOM in source order; when a
+	//     parent's subtree gets replaced via the focus-preserving
+	//     splicer, deterministic attr order on the re-parsed nodes
+	//     lets future attribute-level patches target stable property
+	//     positions (modern browsers don't care, but tooling that
+	//     inspects the serialised HTML does).
+	//   * Server-side caching (ETag of rendered HTML, Sky.Doc HTML
+	//     diffing in CI) collapses to a no-op when the rendered bytes
+	//     are stable across runs.
+	// Sort by key — alphabetical is fine; the only authority-controlled
+	// attrs (value/checked/selected) are still routed via the diff's
+	// alignment path, not via render order.
+	attrKeys := make([]string, 0, len(n.Attrs))
+	for k := range n.Attrs {
+		attrKeys = append(attrKeys, k)
+	}
+	sort.Strings(attrKeys)
+	for _, k := range attrKeys {
 		if (isTextarea || n.Tag == "select") && k == "value" {
 			continue
 		}
 		sb.WriteString(" ")
 		sb.WriteString(k)
 		sb.WriteString(`="`)
-		sb.WriteString(html.EscapeString(v))
+		sb.WriteString(html.EscapeString(n.Attrs[k]))
 		sb.WriteString(`"`)
 	}
-	for ev, msg := range n.Events {
+	// Same determinism for event attributes — also a Go map, also
+	// previously emitted in randomised order.
+	evKeys := make([]string, 0, len(n.Events))
+	for ev := range n.Events {
+		evKeys = append(evKeys, ev)
+	}
+	sort.Strings(evKeys)
+	for _, ev := range evKeys {
+		msg := n.Events[ev]
 		// Sky.Live TEA protocol:
 		//   * Every event attribute is `sky-<event>="<MsgName>"` —
 		//     MsgName is the Sky-side Msg constructor (e.g. "Increment",
@@ -640,6 +676,68 @@ func diffNodes(old, new_ *VNode, clientState map[string]string, out *[]Patch) {
 				attrChanges = map[string]string{}
 			}
 			attrChanges[k] = ""
+		}
+	}
+	// Events diff — VNode.Events stores DOM event handlers separately
+	// from Attrs, but renderVNode emits them as `sky-<event>` /
+	// `data-sky-ev-<event>` attributes plus a `data-sky-hid` companion.
+	// Without diffing Events, an element that toggles handlers (a
+	// canvas-wrap gaining `Events.onKeyDown` when an edit overlay
+	// closes, a button losing its onClick when a permission changes)
+	// produces no patch for those attributes — the previous bound
+	// listeners stay attached but the runtime's per-event lookup via
+	// `target.getAttribute("sky-<event>")` returns null, so no Msg is
+	// dispatched and the user's keypress / click is silently dropped.
+	//
+	// Repro that surfaced this: sky-diagram's canvas-wrap conditionally
+	// includes `Events.onKeyDown (keyDown model)` only when
+	// `editingShapeId == Nothing`. After CommitText flips back to
+	// Nothing, the HTTP diff used to emit only a `p.html` patch on the
+	// canvas child div (overlay removed), never touching canvas-wrap's
+	// own attrs. Result: every subsequent keypress on canvas-wrap was a
+	// no-op. Pre-v0.15.13 the full-body SSE frame following Cmd
+	// completions accidentally re-rendered #sky-root and restored the
+	// attribute; v0.15.13's Tick suppression + v0.15.14's runPerform
+	// suppression both peeled away that safety net and exposed the
+	// genuine diff bug.
+	for ev, newMsg := range new_.Events {
+		attrName := "sky-" + ev
+		if strings.HasPrefix(ev, "sky-") {
+			attrName = "data-sky-ev-" + ev
+		}
+		newMsgName := msgDisplayName(newMsg)
+		if oldMsg, ok := old.Events[ev]; !ok || msgDisplayName(oldMsg) != newMsgName {
+			if attrChanges == nil {
+				attrChanges = map[string]string{}
+			}
+			attrChanges[attrName] = newMsgName
+			// data-sky-hid encodes the sky-id + event suffix the runtime
+			// expects when routing the user gesture back to its handler.
+			// Re-emit it on any event change so a stale hid (from a
+			// previous render that bound a different handler) can't
+			// outlive the new wiring.
+			attrChanges["data-sky-hid"] = new_.SkyID + "." + ev
+		}
+	}
+	for ev := range old.Events {
+		if _, ok := new_.Events[ev]; !ok {
+			attrName := "sky-" + ev
+			if strings.HasPrefix(ev, "sky-") {
+				attrName = "data-sky-ev-" + ev
+			}
+			if attrChanges == nil {
+				attrChanges = map[string]string{}
+			}
+			attrChanges[attrName] = ""
+			// If the element has lost ALL its events the data-sky-hid
+			// companion is now stale; clear it. When other events
+			// remain, the new_.Events loop above will have rewritten
+			// data-sky-hid to one of them already (last-write wins,
+			// matching renderVNode's HTML emission order over the
+			// sorted event keys).
+			if len(new_.Events) == 0 {
+				attrChanges["data-sky-hid"] = ""
+			}
 		}
 	}
 	if attrChanges != nil && old.SkyID != "" {
@@ -1162,20 +1260,79 @@ type liveSession struct {
 	model    any
 	handlers map[string]any
 	prevTree *VNode // Last rendered tree; used by the diff protocol.
-	// Last rendered body string. Any dispatch that produces a byte-
-	// identical body is a no-op from the client's perspective; we
-	// suppress the SSE push to avoid flooding the wire when a
-	// Time.every subscription ticks but the model-derived view
-	// hasn't actually changed.
-	prevBody string
-	lastSeen time.Time
+	// View-body bookkeeping for the SSE no-op suppression contract
+	// (Cycle 3 P39 / Gap C2 — split out from the historical single
+	// `prevBody` field whose dual meaning had bitten v0.15.14).
+	//
+	// Two distinct invariants are tracked:
+	//
+	//   * lastComputedBody — every dispatch / renderView / initial-
+	//     mount writes this with the just-rendered HTML. Mirrors the
+	//     `prevTree` field. dispatch's contract is to ALWAYS update
+	//     it (rolled back on a render panic so a partial render
+	//     doesn't poison the next dispatch's diff baseline).
+	//
+	//   * lastShippedBody — only the SSE-producing call sites
+	//     (dispatchBatched, runPerformBody, the Time.every tick
+	//     subscription, handleInitial's HTTP-response push, the SSE
+	//     reconnect-resync push) write this — and ONLY when they
+	//     actually emit a frame to the client (sseCh enqueue or
+	//     direct write to the SSE/HTTP response writer).
+	//
+	// Suppression checks ("a tick whose view byte-equals the last
+	// thing the client saw is a wasted frame — drop it") compare
+	// against `lastShippedBody`. Comparing against `lastComputedBody`
+	// would be a tautology: dispatch wrote it post-render.
+	//
+	// Why the split matters: a future cleanup that made dispatch
+	// skip the write (e.g. "only update on actual ship") would
+	// silently break suppression of every byte-identical view —
+	// because every check would see the SAME value before and
+	// after. Splitting names the two invariants so the contract is
+	// resilient to that refactor class.
+	lastComputedBody string
+	lastShippedBody  string
+	// lastSeen — UnixNano timestamp of the most recent store touch
+	// (Get / Set / decodeSession seed). Stored as atomic.Int64 so the
+	// store-level RWMutex (memoryStore.mu et al.) can keep using RLock
+	// in the read path without the touch-update racing with a sibling
+	// Get on the SAME session. Read via lastSeenTime(), written via
+	// touchLastSeen() / setLastSeenTime().
+	//
+	// Race history (v0.15.x hardening task #326): `memoryStore.Get`
+	// holds s.mu.RLock and writes `sess.lastSeen = time.Now()` — two
+	// concurrent /_sky/event requests for the same session both pass
+	// the RLock-only gate and race on the struct field. Equivalent
+	// pattern present in sqliteStore / postgresStore / redisStore Set
+	// + decodeSession. atomic.Int64 fixes the lot uniformly.
+	lastSeen atomic.Int64
 	mu       sync.Mutex
 	// SSE outbound channel: any writer goroutine may push a frame.
 	// Frame contents are JSON envelopes produced by encodeSSEFrame
 	// (carry seq + ackInputs alongside the body), not raw HTML.
 	sseCh chan string
-	// Cancel function for any active subscription ticker
+	// Cancel function for any active subscription ticker. Re-created
+	// by setupSubscriptions on every dispatch (the old one is closed
+	// first); see also the session-wide `done` field which signals
+	// TERMINAL teardown (TTL eviction / Delete) regardless of how
+	// many setupSubscriptions cycles have run.
 	cancelSub chan struct{}
+
+	// Terminal teardown signal — closed exactly once when the session
+	// is evicted from its Store (Delete or TTL cleanup). Any goroutine
+	// holding a reference to this session (Time.every Tick loop,
+	// in-flight runPerformBody, future broadcast handlers) MUST select
+	// on `done` so they exit promptly when the session is dead. Closing
+	// is gated by `doneOnce` so concurrent Delete calls (or test
+	// teardown that fires both Delete + Close on the store) are safe.
+	//
+	// Cycle 3 P36 / Gap C4: the previous implementation only signalled
+	// the per-subscription `cancelSub`, which is replaced on every
+	// dispatch — so a session deleted between dispatches kept its
+	// Time.every goroutine alive forever, pushing to `sseCh` with no
+	// reader. The leak persisted for the lifetime of the process.
+	done     chan struct{}
+	doneOnce sync.Once
 
 	// Single session-wide monotonic counter for EVERY outgoing frame
 	// (event reply OR SSE patch). Bumped under sess.mu so the value
@@ -1189,11 +1346,106 @@ type liveSession struct {
 	inputSeqs map[string]int64
 }
 
+// touchLastSeen — stamp the lastSeen counter with the current wall
+// clock. Race-free under concurrent readers holding the store's
+// RLock (the field is atomic.Int64, not a struct copy).
+func (s *liveSession) touchLastSeen() {
+	s.lastSeen.Store(time.Now().UnixNano())
+}
+
+// setLastSeenTime — write a specific time (used by decodeSession to
+// restore a persisted timestamp, and by tests that need to backdate
+// for TTL eviction). A zero `time.Time` lands as `Store(0)`, which
+// lastSeenTime() reads back as a zero time.Time (`now.Sub(0)` is a
+// huge positive duration → looks expired, matching the prior
+// semantics of an uninitialised `time.Time{}` field).
+func (s *liveSession) setLastSeenTime(t time.Time) {
+	if t.IsZero() {
+		s.lastSeen.Store(0)
+		return
+	}
+	s.lastSeen.Store(t.UnixNano())
+}
+
+// lastSeenTime — read the lastSeen counter as a time.Time. A stored
+// value of 0 returns the zero time (`time.Time{}`) so existing
+// `time.Time.IsZero()` / `now.Sub(t)` callers keep working.
+func (s *liveSession) lastSeenTime() time.Time {
+	ns := s.lastSeen.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
+
+// markDone signals terminal teardown for this session. Idempotent;
+// safe to call from multiple stores or from concurrent Delete calls.
+// Goroutines that hold a reference to the session (Time.every Tick,
+// runPerformBody, future broadcast handlers) MUST select on
+// `sess.done` so they exit promptly once this fires.
+//
+// Sessions constructed by tests that never enter a Store keep
+// `done == nil`; that's intentional — those sessions are never
+// Deleted, so no signal is required. A `nil` channel in a select
+// blocks forever, which is the desired semantics (Time.every keeps
+// running until the test cancels its own context).
+func (s *liveSession) markDone() {
+	s.doneOnce.Do(func() {
+		if s.done == nil {
+			// Lazily provision the channel so a session that was
+			// constructed without one (test fixtures, decoded-from-blob
+			// sessions whose store-write path didn't initialise it) can
+			// still receive a terminal signal once it lands in a Store.
+			s.done = make(chan struct{})
+		}
+		close(s.done)
+	})
+}
+
 // nextOutSeq advances and returns the session-wide outgoing seq.
 // MUST be called with sess.mu held.
 func (s *liveSession) nextOutSeq() int64 {
 	s.outSeq++
 	return s.outSeq
+}
+
+// commitRender writes both `prevTree` and `lastComputedBody` as a single
+// atomic step. Caller MUST hold sess.mu so the two fields are observed
+// in lockstep by any concurrent reader holding the same mutex.
+//
+// Cycle 3 P40 / Gap C7: prior to extraction, this 2-field invariant was
+// fanned out across FIVE call sites (handleInitial, dispatch's late
+// write at the end of the success path, dispatch's handler-rebuild
+// branch in handleEvent, the same rebuild in dispatchBatched, the SSE
+// reconnect-resync in handleSSE, and renderView's guard-rejected path).
+// Each site re-implemented "render → set prevTree → maybe set body"
+// with subtle variations:
+//
+//   - dispatch wrote prevTree EARLY (pre-runCmd) and lastComputedBody
+//     LATE (post-setupSubscriptions), with a panic-rollback snapshot
+//     bracketing both writes.
+//   - renderView wrote ONLY prevTree, leaving lastComputedBody stale
+//     against the freshly-rendered tree — a silent contract break that
+//     the audit (Cycle 3 C7) called out specifically.
+//   - The handler-rebuild branches in handleEvent + dispatchBatched
+//     discarded the rebuilt body entirely, leaving lastComputedBody
+//     pointing at whatever the prior dispatch (potentially in a prior
+//     process, decoded from sqlite/redis/postgres) had written. After
+//     P40 these write the rebuilt body too, strengthening the invariant.
+//
+// `lastShippedBody` is INTENTIONALLY NOT touched here — it tracks "last
+// body the client actually received" (post-P39 / Gap C2), an invariant
+// owned by the SSE-producing call sites (dispatchBatched, runPerformBody,
+// the Time.every tick goroutine, handleInitial's HTTP-response write,
+// handleSSE's reconnect-resync push). Those sites still write
+// `lastShippedBody` explicitly after commitRender so the "computed vs
+// shipped" split stays explicit at every callsite that ships.
+//
+// vn MUST NOT be nil; passing nil would corrupt the diff baseline used
+// by every subsequent dispatch.
+func (s *liveSession) commitRender(vn *VNode, body string) {
+	s.prevTree = vn
+	s.lastComputedBody = body
 }
 
 // ingestInputState absorbs the client's dirty-input snapshot into
@@ -1263,25 +1515,81 @@ func ackInputsForPrevTree(s *liveSession) map[string]int64 {
 	return out
 }
 
-// encodeSSEFrame serialises a body plus the session-wide seq + ack
-// inputs into a JSON envelope. The consumer-side EventSource listener
-// parses it back out. MUST be called with sess.mu held.
-func encodeSSEFrame(sess *liveSession, body string) string {
-	frame := map[string]any{
-		"seq":  sess.nextOutSeq(),
-		"body": body,
+// frameSnapshot captures every piece of session state encodeSSEFrame
+// reads — bumped seq, body, ackInputs — so the JSON marshal can run
+// AFTER sess.mu has been released. Cycle 3 P41 / Gap C6: prior to
+// this, encodeSSEFrame was called under sess.mu at four call sites
+// (dispatchBatched, runPerformBody, the Time.every Tick goroutine,
+// the SSE reconnect-resync in handleSSE). Marshalling a ~14 KB body
+// while holding the session mutex blocked every other dispatch on
+// the same session for the duration of the encode (~200µs for 50 KB
+// on M1). The snapshot makes that block strictly the bump+ack-build
+// + map-copy cost; the marshal moves outside.
+type frameSnapshot struct {
+	seq       int64
+	body      string
+	ackInputs map[string]int64
+}
+
+// prepareFrameSnapshot captures (seq, body, ackInputs) under sess.mu so
+// the JSON marshal can run after the caller releases the lock. Caller
+// MUST already hold sess.mu — both nextOutSeq and ackInputsForPrevTree
+// mutate session state (outSeq counter; inputSeqs eviction of unmounted
+// ids). After this returns, the caller is free to Unlock and then call
+// encodeSSEFrameFromSnapshot on the returned value without re-locking;
+// the snapshot is pure data with no aliasing back to sess.
+//
+// seq monotonicity across concurrent producers is preserved by the
+// existing sess.mu serialisation of nextOutSeq: two dispatch paths
+// that race for the lock take the seq in the order they acquire the
+// lock, regardless of how their post-unlock marshal interleaves. The
+// SSE channel reader writes frames to the wire in arrival order; the
+// client's __skyHandleResponse applies frames in seq order (already
+// the contract — see live_adversarial_test.go for the lock-out test).
+func (s *liveSession) prepareFrameSnapshot(body string) frameSnapshot {
+	return frameSnapshot{
+		seq:       s.nextOutSeq(),
+		body:      body,
+		ackInputs: ackInputsForPrevTree(s),
 	}
-	if ack := ackInputsForPrevTree(sess); ack != nil {
-		frame["ackInputs"] = ack
+}
+
+// encodeSSEFrameFromSnapshot serialises a snapshot to the SSE wire
+// envelope. Pure function — safe to call without holding sess.mu.
+// The fallback branch uses snap.seq (not sess.outSeq) so a marshal
+// failure post-unlock still names the frame's true seq.
+func encodeSSEFrameFromSnapshot(snap frameSnapshot) string {
+	frame := map[string]any{
+		"seq":  snap.seq,
+		"body": snap.body,
+	}
+	if snap.ackInputs != nil {
+		frame["ackInputs"] = snap.ackInputs
 	}
 	b, err := json.Marshal(frame)
 	if err != nil {
 		// Marshalling a map of primitives can't fail in practice, but
 		// fall back to a bare seq+body frame just in case so the
 		// channel never carries a garbage string.
-		return fmt.Sprintf(`{"seq":%d,"body":%q}`, sess.outSeq, body)
+		return fmt.Sprintf(`{"seq":%d,"body":%q}`, snap.seq, snap.body)
 	}
 	return string(b)
+}
+
+// encodeSSEFrame is the legacy lock-held shape kept for callers that
+// still need the synchronous "snapshot + marshal under one lock"
+// behaviour. Internally it now defers to prepareFrameSnapshot +
+// encodeSSEFrameFromSnapshot so the wire envelope is bit-identical to
+// the unlocked path. New call sites SHOULD use the snapshot-then-
+// marshal-outside-lock pattern instead (see runPerformBody / Tick /
+// dispatchBatched for the canonical shape post-P41); this wrapper
+// stays for handleSSE's reconnect-resync, which writes directly to
+// the HTTP response writer rather than enqueueing onto sess.sseCh,
+// and benefits from a single synchronous call shape.
+//
+// MUST be called with sess.mu held.
+func encodeSSEFrame(sess *liveSession, body string) string {
+	return encodeSSEFrameFromSnapshot(sess.prepareFrameSnapshot(body))
 }
 
 type liveApp struct {
@@ -1618,12 +1926,22 @@ func liveAppRun(cfg any) any {
 	// fallback is memory.
 	storeKind := stringField(cfg, "Store")
 	storePath := stringField(cfg, "StorePath")
-	ttl := 30 * time.Minute
-	if v := skyGetenv("LIVE_TTL"); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-			ttl = time.Duration(secs) * time.Second
-		}
-	}
+	// TTL resolution order:  env > sky.toml > default (30m).
+	// Two value shapes accepted at BOTH layers, per CLAUDE.md
+	// docs ("30m" default form):
+	//
+	//   1. Go-duration string — "30m", "24h", "1h30m", "45s"
+	//      (anything time.ParseDuration handles, the documented
+	//      shape).
+	//   2. Bare integer — interpreted as SECONDS for backward-
+	//      compatibility with the original env-only path.
+	//
+	// Empty / unparseable values fall through to the next layer;
+	// the final fallback is 30m.  The previous implementation only
+	// read the env var AND only accepted bare-integer seconds, so
+	// `SKY_LIVE_TTL=24h` and any `ttl = "24h"` in sky.toml were
+	// both silently ignored.
+	ttl := parseTTL(skyGetenv("LIVE_TTL"), stringField(cfg, "Ttl"), 30*time.Minute)
 	app.store = chooseStore(storeKind, storePath, ttl)
 	app.sessionTTL = ttl
 
@@ -1958,8 +2276,9 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 		// session stores can decode them on future Get calls.
 		gobRegisterAll(model)
 		sess = &liveSession{
-			sseCh:     make(chan string, 16),
+			sseCh:     make(chan string, sseChanBuffer),
 			cancelSub: make(chan struct{}),
+			done:      make(chan struct{}),
 		}
 	}
 	// Always set sid — both on fresh sessions AND on resumes from
@@ -1982,8 +2301,11 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	vn := HtmlToVNode(sky_call(app.view, model))
 	assignSkyIDs(&vn, "r")
 	body := renderVNode(vn, sess.handlers)
-	sess.prevTree = &vn
-	sess.prevBody = body
+	// Initial mount writes the full HTML directly into the HTTP
+	// response below — the client receives this body as the page,
+	// so it counts as BOTH "last computed" and "last shipped".
+	sess.commitRender(&vn, body)
+	sess.lastShippedBody = body
 	app.store.Set(sid, sess)
 
 	setSecurityHeaders(w.Header())
@@ -2156,8 +2478,13 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 		sess.handlers = map[string]any{}
 		vn := HtmlToVNode(sky_call(app.view, sess.model))
 		assignSkyIDs(&vn, "r")
-		_ = renderVNode(vn, sess.handlers)
-		sess.prevTree = &vn
+		body := renderVNode(vn, sess.handlers)
+		// Route through commitRender (Cycle 3 P40 / Gap C7) so
+		// the rebuilt-handlers branch keeps prevTree +
+		// lastComputedBody coherent. Previously the body was
+		// discarded, so lastComputedBody pointed at whatever the
+		// prior process (or prior dispatch) had written.
+		sess.commitRender(&vn, body)
 	}
 	msg, ok := sess.handlers[req.HandlerID]
 	if !ok && req.Msg != "" && req.HandlerID == "" {
@@ -2230,6 +2557,18 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 	prev := sess.prevTree
 	body2 := app.dispatch(sess, msg)
 	newTree := sess.prevTree
+	// /_sky/event ships its reply directly down the POST response
+	// (writeEventJSON / writeEventHTML below), so for the suppression
+	// contract this counts as "the client received the new body".
+	// Advance lastShippedBody under sess.mu so any concurrent SSE
+	// producer (tick subscription, runPerformBody) reading
+	// lastShippedBody picks up the post-click value and correctly
+	// suppresses a redundant frame on its next tick. Skip the empty-
+	// body case (no-op dispatch — body2 == "") so the field continues
+	// to reflect whatever the client genuinely last received.
+	if body2 != "" {
+		sess.lastShippedBody = body2
+	}
 	// Capture outgoing protocol metadata before releasing the lock so
 	// the seq reflects this session's true mutation order. Bumped once
 	// per reply (including no-op replies) so the client's cross-channel
@@ -2329,8 +2668,12 @@ func (app *liveApp) dispatchBatched(sess *liveSession, ev batchedEvent) {
 		sess.handlers = map[string]any{}
 		vn := HtmlToVNode(sky_call(app.view, sess.model))
 		assignSkyIDs(&vn, "r")
-		_ = renderVNode(vn, sess.handlers)
-		sess.prevTree = &vn
+		body := renderVNode(vn, sess.handlers)
+		// Route through commitRender (Cycle 3 P40 / Gap C7) so
+		// the rebuilt-handlers branch keeps prevTree +
+		// lastComputedBody coherent — same shape as the
+		// handleEvent rebuild above.
+		sess.commitRender(&vn, body)
 	}
 	msg, ok := sess.handlers[ev.HandlerID]
 	if !ok && ev.Msg != "" && ev.HandlerID == "" {
@@ -2372,22 +2715,48 @@ func (app *liveApp) dispatchBatched(sess *liveSession, ev batchedEvent) {
 	if _, isSkyAdt := msg.(SkyADT); !isSkyAdt {
 		msg = applyMsgArgs(msg, ev.Args, ev.Value)
 	}
+	// Capture lastShippedBody BEFORE dispatch so we can suppress a
+	// byte-identical view (symmetric with runPerformBody + the
+	// Time.every SSE producer — v0.15.14 / v0.15.17). Comparing
+	// against lastShippedBody (not lastComputedBody) means the
+	// suppression contract is about the wire, not about dispatch's
+	// internal post-render write. Without this gate a beacon-driven
+	// tab-unload dispatch that produces no view change still ships
+	// a redundant SSE frame to other observers of the session.
+	prevShipped := sess.lastShippedBody
 	body2 := app.dispatch(sess, msg)
 	// Bump outSeq once per batched entry so any SSE frame pushed as a
 	// side effect carries a unique seq. Each dispatch that mutates the
 	// view is its own observable event.
-	var frame string
-	if body2 != "" {
-		frame = encodeSSEFrame(sess, body2)
+	//
+	// Cycle 3 P41 / Gap C6: snapshot the wire metadata (seq +
+	// ackInputs + body) under sess.mu, then release the lock BEFORE
+	// the JSON marshal. The marshal is CPU-bound and was previously
+	// blocking every other dispatcher on this session for the entire
+	// encode. Advancing lastShippedBody stays under the lock so the
+	// suppression decision is atomic with the seq bump — two
+	// concurrent dispatches can never both decide "ship" on the same
+	// prior-shipped body.
+	var snap frameSnapshot
+	var haveFrame bool
+	if body2 != "" && body2 != prevShipped {
+		snap = sess.prepareFrameSnapshot(body2)
+		sess.lastShippedBody = body2
+		haveFrame = true
 	}
 	sess.mu.Unlock()
 	// Push to other subscribers (other tabs, SSE listeners). The
 	// originating tab has already unloaded so the frame is for anyone
-	// else observing the session.
-	if frame != "" {
+	// else observing the session. Marshal happens here, outside the
+	// lock — see frameSnapshot doc above for the rationale.
+	if haveFrame {
+		frame := encodeSSEFrameFromSnapshot(snap)
 		select {
 		case sess.sseCh <- frame:
 		default:
+			// Cycle 3 P42 / Gap C14: buffer full; drop + count.
+			// Buffer capacity is SKY_LIVE_SSE_BUFFER (default 16).
+			recordSseDrop(sess.sid)
 		}
 	}
 }
@@ -2434,6 +2803,27 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 
 	var dispatchErr error
 	var finalCmd any
+	// Snapshot the pre-dispatch view invariants so a panic anywhere in
+	// the body (update, view-render, runCmd, setupSubscriptions) can
+	// roll them back. Without this, a panic AFTER `sess.prevTree = &vn`
+	// (line ~2594) but BEFORE `sess.lastComputedBody = body` (line
+	// ~2618) leaves the two fields desynced: prevTree pointing at the
+	// new (possibly partial) render and lastComputedBody still on the
+	// prior-good body. The next dispatch's diff baseline would then
+	// use a stale tree — typically harmless, but the asymmetry is
+	// fragile and the audit (Cycle 3 P35 residual c) flagged it as
+	// obscuring the intent of the recovery path. We restore both
+	// fields so the failed dispatch is observably a no-op for the
+	// suppression + diff layers.
+	//
+	// lastShippedBody is NOT snapshotted here because dispatch never
+	// writes it — its contract is "last thing sent to the wire",
+	// owned by the SSE producer callers (dispatchBatched,
+	// runPerformBody, the tick goroutine). A panic mid-dispatch has
+	// definitionally not shipped anything, so lastShippedBody stays
+	// at whatever the last successful SSE emission set it to.
+	prevTreeOnEntry := sess.prevTree
+	prevComputedOnEntry := sess.lastComputedBody
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr,
@@ -2441,6 +2831,13 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 				r, debug.Stack())
 			body = ""
 			dispatchErr = fmt.Errorf("dispatch panic: %v", r)
+			// Roll back the view invariants. The current dispatch has
+			// failed; the prior valid prevTree / lastComputedBody must
+			// remain the source of truth for the next dispatch's
+			// suppression and diff baseline. Route through commitRender
+			// (Cycle 3 P40 / Gap C7) so the rollback path follows the
+			// same atomic-pair contract as every other write site.
+			sess.commitRender(prevTreeOnEntry, prevComputedOnEntry)
 		}
 		ObserveMsgLog(msgLogCtx, sess.model, finalCmd, dispatchErr)
 	}()
@@ -2486,31 +2883,65 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 	vn := HtmlToVNode(sky_call(app.view, sess.model))
 	assignSkyIDs(&vn, "r")
 	body = renderVNode(vn, sess.handlers)
-	sess.prevTree = &vn
+	// Commit prevTree + lastComputedBody as one atomic step (Cycle 3
+	// P40 / Gap C7). Previously this was two separate writes — prevTree
+	// here, lastComputedBody after runCmd + setupSubscriptions — which
+	// left a window where the two fields could be observed desynced
+	// (handled by the panic-rollback snapshot above, but fragile).
+	//
+	// runCmd + setupSubscriptions don't read prevTree or
+	// lastComputedBody synchronously (they spawn goroutines that
+	// acquire sess.mu later), so consolidating the write here is
+	// behaviourally equivalent to the prior split and tightens the
+	// invariant window.
+	//
+	// No-op suppression: previously we short-circuited on
+	// `body == sess.prevBody` (byte-equality) so a Time.every tick
+	// without view-reachable state changes wouldn't push a redundant
+	// HTML frame. That was load-bearing on map iteration order being
+	// random — once renderVNode's attr/event loops were sorted
+	// (v0.15.x deterministic-HTML fix) the byte-check started firing
+	// for cases where the diff path's input-authority alignment
+	// expected to see a patch flow, freezing live keypress dispatch.
+	//
+	// The HTTP /_sky/event path uses the diff result (diffTrees, with
+	// I5 client-state alignment) to decide whether to ship patches at
+	// all — a true no-op produces an empty patch list, which already
+	// routes through writeEventJSON without an SSE frame. The Time.every
+	// SSE producer at setupSubscriptions checks `body != ""` to skip
+	// pushing a frame, so we keep that contract: returning the body
+	// unconditionally here means the SSE callsite continues to ship
+	// frames per tick, but the client's __skyHandleResponse uses the
+	// seq guard + focus-preserving splice so a redundant frame is a
+	// bandwidth cost (~150 bytes/tick), not a correctness break.
+	//
+	// lastShippedBody is intentionally NOT written here — that's the
+	// SSE producer's job (post-P39 / Gap C2). Suppression callers
+	// compare against the last value the client actually received,
+	// not against this just-computed value.
+	sess.commitRender(&vn, body)
 	// Process Cmds (may spawn goroutines)
 	app.runCmd(sess, cmd)
 	// Re-evaluate subscriptions based on new model
 	app.setupSubscriptions(sess)
-	// No-op suppression: if the rendered body is byte-identical to
-	// the last one we pushed, return "" so producer goroutines can
-	// skip the SSE write. A Time.every subscription that ticks
-	// without mutating any view-reachable state produces the same
-	// HTML twice; there's no reason to ship a patch.
-	if body == sess.prevBody {
-		return ""
-	}
-	sess.prevBody = body
 	return body
 }
 
 // renderView: re-render from current session model without updating
 // the model (used by dispatch when guard short-circuits).
+//
+// Routes through commitRender (Cycle 3 P40 / Gap C7) so the guard-
+// rejected path keeps prevTree + lastComputedBody coherent.
+// Previously this wrote ONLY prevTree, leaving lastComputedBody
+// pointing at the prior dispatch's body even though the just-
+// rendered tree had just replaced prevTree — a silent contract
+// break the audit explicitly flagged.
 func (app *liveApp) renderView(sess *liveSession) string {
 	sess.handlers = map[string]any{}
 	vn := HtmlToVNode(sky_call(app.view, sess.model))
 	assignSkyIDs(&vn, "r")
 	body := renderVNode(vn, sess.handlers)
-	sess.prevTree = &vn
+	sess.commitRender(&vn, body)
 	return body
 }
 
@@ -2589,19 +3020,40 @@ func (app *liveApp) runPerformBody(sess *liveSession, task any, toMsg any) {
 	// the same lock as dispatch means the seq reflects the actual
 	// mutation order even when other goroutines dispatch concurrently.
 	sess.mu.Lock()
+	// Compare against lastShippedBody — the last body the client
+	// actually received — so a perform whose dispatch byte-equals
+	// what the client already has doesn't push a redundant frame.
+	prevShipped := sess.lastShippedBody
 	body := app.dispatch(sess, msg)
-	var frame string
-	if body != "" {
-		frame = encodeSSEFrame(sess, body)
+	// Cycle 3 P41 / Gap C6: capture (seq, body, ackInputs) under
+	// sess.mu via prepareFrameSnapshot, then release the lock and
+	// run JSON marshal outside. The previous shape held the mutex
+	// across encodeSSEFrame's marshal (~200µs for a 50 KB body on
+	// M1), stalling every other dispatcher on the session for the
+	// full encode. lastShippedBody is advanced under the lock so
+	// concurrent producers (Tick goroutine, dispatchBatched) see a
+	// coherent prior-shipped value when they take their snapshot.
+	var snap frameSnapshot
+	var haveFrame bool
+	if body != "" && body != prevShipped {
+		snap = sess.prepareFrameSnapshot(body)
+		sess.lastShippedBody = body
+		haveFrame = true
 	}
 	sess.mu.Unlock()
-	if frame == "" {
+	if !haveFrame {
 		return
 	}
+	// Marshal outside the lock. Wire envelope is bit-identical to the
+	// legacy lock-held encodeSSEFrame because both routes use
+	// encodeSSEFrameFromSnapshot under the hood.
+	frame := encodeSSEFrameFromSnapshot(snap)
 	select {
 	case sess.sseCh <- frame:
 	default:
-		// channel full, drop
+		// Cycle 3 P42 / Gap C14: channel full; drop + count.
+		// Buffer capacity is SKY_LIVE_SSE_BUFFER (default 16).
+		recordSseDrop(sess.sid)
 	}
 }
 
@@ -2624,6 +3076,15 @@ func (app *liveApp) setupSubscriptions(sess *liveSession) {
 		return
 	}
 	cancel := sess.cancelSub
+	// Cycle 3 P36 / Gap C4: also listen on the session-wide terminal
+	// `done` channel so the Tick goroutine exits when the session is
+	// evicted from its Store. `cancelSub` alone is insufficient
+	// because it's recreated by every setupSubscriptions call — a
+	// session deleted BETWEEN dispatches kept this goroutine alive
+	// pushing to an unread `sseCh` for the lifetime of the process.
+	// A `nil` done (test-constructed sessions that never enter a Store)
+	// is safe: select on a nil channel blocks forever.
+	done := sess.done
 	toMsg := sub.toMsg
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -2632,6 +3093,8 @@ func (app *liveApp) setupSubscriptions(sess *liveSession) {
 			select {
 			case <-cancel:
 				return
+			case <-done:
+				return
 			case t := <-ticker.C:
 				sess.mu.Lock()
 				msg := toMsg
@@ -2639,21 +3102,48 @@ func (app *liveApp) setupSubscriptions(sess *liveSession) {
 				if isFunc(msg) {
 					msg = sky_call(toMsg, t.UnixMilli())
 				}
+				// Capture lastShippedBody BEFORE dispatch so we can
+				// detect a tick whose update produced a view that
+				// byte-equals what the client already has (the
+				// typical Time.every shape — heartbeat polling,
+				// once-per-second refresh, etc.). Suppression lives
+				// at the SSE callsite (not inside dispatch) because
+				// the HTTP /_sky/event response path needs the body
+				// to compute structural patches; only the SSE tick
+				// can safely silence-drop when the view didn't move.
+				prevShipped := sess.lastShippedBody
 				body := app.dispatch(sess, msg)
-				var frame string
-				if body != "" {
-					frame = encodeSSEFrame(sess, body)
+				// Cycle 3 P41 / Gap C6: snapshot under the lock, then
+				// release before the JSON marshal. Time.every ticks
+				// on every session that subscribes — the lock-held
+				// marshal previously serialised through sess.mu at
+				// every interval, amplifying contention on busy
+				// sessions. Advancing lastShippedBody stays under
+				// the lock so the next tick's prevShipped read sees
+				// the up-to-date value.
+				var snap frameSnapshot
+				var haveFrame bool
+				if body != "" && body != prevShipped {
+					snap = sess.prepareFrameSnapshot(body)
+					sess.lastShippedBody = body
+					haveFrame = true
 				}
 				sess.mu.Unlock()
 				// Suppress SSE write when the tick didn't change
 				// the view — prevents Time.every from pushing an
 				// identical HTML frame every interval.
-				if frame == "" {
+				if !haveFrame {
 					continue
 				}
+				frame := encodeSSEFrameFromSnapshot(snap)
 				select {
 				case sess.sseCh <- frame:
 				default:
+					// Cycle 3 P42 / Gap C14: Time.every tick fired
+					// but the SSE consumer is wedged or slow; drop
+					// + count. Next tick's view-equality check (or
+					// the next user dispatch) supersedes anyway.
+					recordSseDrop(sess.sid)
 				}
 			}
 		}
@@ -2758,27 +3248,46 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 	if sess.model != nil {
 		// Recover from any panic in view() so a bad render doesn't tear
 		// down the SSE connection. The recovered SSE just enters its
-		// for-select loop with the legacy prevTree/prevBody untouched.
+		// for-select loop with the legacy prevTree / lastComputedBody /
+		// lastShippedBody untouched.
+		//
+		// Cycle 3 P41 / Gap C6: snapshot under sess.mu, then release
+		// the lock BEFORE the JSON marshal + HTTP write. The previous
+		// shape held the mutex for the full render + marshal + write,
+		// blocking every concurrent dispatcher on this session. The
+		// for-select loop below runs in this same goroutine so there
+		// is no race against sseCh-fed frames during the write; seq
+		// ordering is preserved because nextOutSeq runs inside the
+		// lock-held prepareFrameSnapshot.
+		var snap frameSnapshot
+		var haveSnap bool
 		func() {
 			defer func() { _ = recover() }()
 			vn := HtmlToVNode(sky_call(app.view, sess.model))
 			assignSkyIDs(&vn, "r")
 			sess.handlers = map[string]any{}
 			body := renderVNode(vn, sess.handlers)
-			sess.prevTree = &vn
-			sess.prevBody = body
-			frame := encodeSSEFrame(sess, body)
-			// Encode + write while still under lock to avoid interleaving
-			// with concurrent dispatch frames pushed via sess.sseCh.
+			// Reconnect-resync writes the resync frame DIRECTLY to
+			// the SSE response writer below — so this body is both
+			// just-computed AND just-shipped, and the next tick's
+			// suppression must compare against it.
+			sess.commitRender(&vn, body)
+			sess.lastShippedBody = body
+			snap = sess.prepareFrameSnapshot(body)
+			haveSnap = true
+		}()
+		sess.mu.Unlock()
+		if haveSnap {
+			frame := encodeSSEFrameFromSnapshot(snap)
 			escaped := strings.ReplaceAll(frame, "\n", "\\n")
 			_, _ = fmt.Fprintf(w, "event: patch\ndata: %s\n\n", escaped)
 			if flusher != nil {
 				flusher.Flush()
 			}
-		}()
-		sess.mu.Unlock()
-		// Persist the rebuilt prevTree+prevBody so future events diff
-		// against the new-binary view and don't fall back to full-body.
+		}
+		// Persist the rebuilt prevTree + lastComputedBody +
+		// lastShippedBody so future events diff against the
+		// new-binary view and don't fall back to full-body.
 		app.store.Set(sid, sess)
 	} else {
 		sess.mu.Unlock()
@@ -2834,12 +3343,22 @@ func sessionID(r *http.Request, w http.ResponseWriter, ttl time.Duration) string
 	// destroying the user's Model state even though the sqlite /
 	// redis / postgres backing store still had it.  MaxAge matches
 	// the store TTL so a server-side expiry and the cookie expiry
-	// converge to the same time-of-death.  HttpOnly stays on; SameSite
-	// defaults to Lax (browser default) which is right for top-level
-	// nav + form posts.
+	// converge to the same time-of-death.
 	maxAge := int(ttl.Seconds())
 	if maxAge <= 0 {
 		maxAge = 30 * 60 // 30 min sane default
+	}
+	// SameSite: when SKY_LIVE_FRAME_ANCESTORS opts this deploy into
+	// being iframed cross-origin (e.g. a control plane's preview
+	// pane), the browser would silently drop a Lax-default cookie on
+	// every iframe request — Sky.Live's SSE + POST loop would
+	// reconnect-and-reset every few seconds. None+Secure lets the
+	// cookie ride along, and the existing CSRF check still gates
+	// state-mutating POSTs. Outside that mode keep Lax (the right
+	// floor for top-level nav + form posts on a same-origin app).
+	sameSite, secure := http.SameSiteLaxMode, false
+	if crossOriginIframeMode() {
+		sameSite, secure = http.SameSiteNoneMode, true
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "sky_sid",
@@ -2847,8 +3366,21 @@ func sessionID(r *http.Request, w http.ResponseWriter, ttl time.Duration) string
 		Path:     "/",
 		HttpOnly: true,
 		MaxAge:   maxAge,
+		SameSite: sameSite,
+		Secure:   secure,
 	})
 	return sid
+}
+
+// crossOriginIframeMode reports whether SKY_LIVE_FRAME_ANCESTORS is
+// set — i.e. this deploy expects to be embedded by a different origin
+// (typically a control plane's app-preview iframe). When true, the
+// session + CSRF cookies must be SameSite=None; Secure to survive the
+// browser's cross-site cookie policy. The CSP `frame-ancestors`
+// directive set in setSecurityHeaders is the orthogonal gate that
+// scopes WHICH origins may embed.
+func crossOriginIframeMode() bool {
+	return os.Getenv("SKY_LIVE_FRAME_ANCESTORS") != ""
 }
 
 // liveBannerConfig collects the <PREFIX>_LIVE_* env vars that
@@ -2968,6 +3500,88 @@ func parsePositiveInt(s string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// ─── SSE outbound channel buffer (Cycle 3 P42 / Gap C14) ───────────
+//
+// `sess.sseCh` is the buffered chan<-string every SSE-producing site
+// pushes frames onto. Its capacity gates how many in-flight frames
+// can queue between the producer (dispatchBatched / runPerformBody /
+// Time.every tick) and the consumer (handleSSE for-select). When
+// the buffer fills, each writer's `select { default: }` arm DROPS
+// the frame silently — a correctness loss the client never sees
+// (until the next dispatch ships a fresher view that overrides it).
+//
+// Historical default: hardcoded 16, which is generous for steady
+// state but a 5-second burst at 100 ms/tick under a Time.every
+// subscription can fill it. The Cycle 3 audit (Gap C14) called for
+// two changes: (i) make the capacity tunable via env; (ii) export a
+// Prometheus counter so operators can observe drop rate.
+//
+// Env: `SKY_LIVE_SSE_BUFFER` (subject to the [env] prefix override).
+// Default 16; clamp to [1, 1024]. Re-read via the
+// `onEnvPrefixChange` hook so a compiler-generated
+// `rt.SetEnvPrefix(...)` mid-init() picks up a prefixed value the
+// init() block also set.
+//
+// Metric: `sky_live_sse_drops_total{session=<sid>}` increments at
+// each `default:` arm. The per-session label is high-cardinality
+// by construction; telemetry/store.go caps total label combinations
+// at 10k per metric — past that, new sessions silently miss the
+// label. Acceptable: the operator's interest is "are drops
+// happening?" (yes/no answered by any non-zero series) and "are
+// they concentrated on one session?" (answered by per-session
+// labels up to the cap). For deployments expecting >10k sessions
+// over the metric horizon, configure the [env] prefix + a
+// shorter scrape retention.
+const (
+	sseChanBufferDefault = 16
+	sseChanBufferMin     = 1
+	sseChanBufferMax     = 1024
+)
+
+var sseChanBuffer = sseChanBufferDefault
+
+// loadSseChanBuffer reads SKY_LIVE_SSE_BUFFER + clamp + assign.
+// Idempotent; safe to call from init() + onEnvPrefixChange hooks.
+func loadSseChanBuffer() {
+	v := skyGetenv("LIVE_SSE_BUFFER")
+	if v == "" {
+		sseChanBuffer = sseChanBufferDefault
+		return
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		// Malformed or non-positive — fall back to default rather
+		// than refusing to boot. Matches the pattern of
+		// parsePositiveInt callers throughout live.go.
+		sseChanBuffer = sseChanBufferDefault
+		return
+	}
+	if n < sseChanBufferMin {
+		n = sseChanBufferMin
+	}
+	if n > sseChanBufferMax {
+		n = sseChanBufferMax
+	}
+	sseChanBuffer = n
+}
+
+func init() {
+	loadSseChanBuffer()
+	onEnvPrefixChange(loadSseChanBuffer)
+}
+
+// recordSseDrop increments the sky_live_sse_drops_total counter for
+// the given session id. Called from the `default:` arm of every
+// sseCh writer. `sid` MAY be empty (e.g. test-constructed sessions
+// that never enter a Store) — telemetry/store.go handles empty
+// label values fine; downstream dashboards group those under a
+// single empty-string series.
+func recordSseDrop(sid string) {
+	telemetry.Default().Inc("sky_live_sse_drops_total", map[string]string{
+		"session": sid,
+	})
 }
 
 // liveJS keeps the historical signature (used by tests + any external
@@ -3227,8 +3841,39 @@ function __skyReplaceHTMLPreservingFocus(container, newHTML) {
 
   // Parse the new HTML into a detached element so we can splice
   // preserved live nodes into it before committing.
-  var tmp = document.createElement("div");
-  tmp.innerHTML = newHTML;
+  //
+  // Namespace correctness: when the container element is in a foreign-
+  // content namespace (SVG or MathML), parsing the new HTML via a
+  // plain document.createElement("div") + .innerHTML = ... uses the
+  // HTML insertion mode, so element names like <g>, <rect>, <text>
+  // (which the diff emits as direct children when it replaces the
+  // children of an <svg> element) end up in the XHTML namespace
+  // rather than SVG. The elements appear in the DOM but the browser
+  // doesn't lay them out as SVG primitives — the canvas silently goes
+  // blank after a shape add/remove with no JS error to point at.
+  //
+  // Range.createContextualFragment parses HTML using the namespace
+  // context of the range's container, preserving SVG/MathML element
+  // namespaces correctly. The downstream code accepts either an
+  // Element or a DocumentFragment via the same .firstChild /
+  // .querySelectorAll / .parentNode.replaceChild surface, so no
+  // other changes are needed.
+  //
+  // Repro before this fix: any Sky.Live view that emits an HTML
+  // patch at a sky-id pointing at an <svg> element (the diff does
+  // this whenever the SVG's children-count changes, or a child
+  // tag/kind mismatches between renders) leaves the SVG with HTML-
+  // namespaced children. Drawing tools, charts, and apps that swap
+  // inline-SVG icon <path> children are the common victims.
+  var tmp;
+  if (container.namespaceURI && container.namespaceURI !== "http://www.w3.org/1999/xhtml") {
+    var range = document.createRange();
+    range.selectNodeContents(container);
+    tmp = range.createContextualFragment(newHTML);
+  } else {
+    tmp = document.createElement("div");
+    tmp.innerHTML = newHTML;
+  }
 
   // Snapshot focused-state BEFORE any DOM mutation. Selection read
   // throws on some input types, so catch.
@@ -3336,6 +3981,59 @@ function __skyPatch(t) {
   window.scrollTo(scrollX, scrollY);
   __skyBindEvents(document);
   __skyRunEvals(root);
+  __skyRunPaths(root);
+  __skyReviveScripts(root);
+}
+
+// __skyReviveScripts: browsers DO NOT execute <script> tags inserted
+// via innerHTML (or any HTML-string assignment). When Sky.Live
+// swaps the body via __skyReplaceHTMLPreservingFocus (sky-nav, full-
+// body patches) or applies an attribute/HTML patch via
+// __skyApplyPatches, any <script src=...> or inline <script>
+// element in the new content is added to the DOM but never
+// executed. This breaks any app-level JS bundle injected via the
+// Sky-side Ui.html (Html.node "script" [...]) pattern (notably
+// sky-editor's Editor.scriptTag).
+//
+// The fix: walk the new subtree for <script> elements, replace
+// each with a freshly-created one carrying the same attributes
+// and inline content. Freshly-created script nodes execute on
+// insertion.
+//
+// Idempotency: each revived <script> gets a data-sky-script-revived
+// attribute; subsequent calls skip it. This prevents the bundle
+// from re-loading on every patch (which would re-run any
+// DOMContentLoaded handlers and re-fire setInterval-driven
+// bootstraps multiple times).
+//
+// Safety: only matches <script> nodes inside root (the sky-root
+// container). Top-level page <script> tags (in <head> or outside
+// sky-root) are left alone — they ran on initial load and need
+// no revival.
+function __skyReviveScripts(root) {
+  if (!root) return;
+  var scripts = root.querySelectorAll("script:not([data-sky-script-revived])");
+  for (var i = 0; i < scripts.length; i++) {
+    var old = scripts[i];
+    var fresh = document.createElement("script");
+    // Copy all attributes (src, type, async, defer, integrity, ...).
+    for (var j = 0; j < old.attributes.length; j++) {
+      var a = old.attributes[j];
+      try { fresh.setAttribute(a.name, a.value); } catch (_) {}
+    }
+    // Inline body (rare for app bundles but possible).
+    if (old.textContent) {
+      fresh.textContent = old.textContent;
+    }
+    fresh.setAttribute("data-sky-script-revived", "1");
+    // Mark the old one as revived too so the next pass doesn't
+    // double-process if revival fails for some reason.
+    old.setAttribute("data-sky-script-revived", "1");
+    // Replacing the old node with the fresh one triggers script
+    // execution (for src= it fetches + runs; for inline it runs
+    // the body).
+    old.parentNode.replaceChild(fresh, old);
+  }
 }
 
 // ── Loading indicator ────────────────────────────────────────
@@ -3770,6 +4468,16 @@ function __skyApplyPatches(patches) {
   }
   // Any new sky-* attribute in the patched DOM needs a listener.
   __skyBindEvents(document);
+  // After SSE-driven patches the URL also needs reconciling — without
+  // this, programmatic Navigate Msgs would only update the in-memory
+  // model and leave the address bar pointing at the previous page.
+  __skyRunPaths(document);
+  // Any <script> in newly-patched HTML wouldn't execute via innerHTML
+  // — revive them so JS bundles (e.g. sky-editor) bootstrap correctly
+  // when their host element first appears via a patch (not the initial
+  // SSR).  See __skyReviveScripts above for the full rationale.
+  var skyRootForPatches = document.getElementById("sky-root");
+  if (skyRootForPatches) __skyReviveScripts(skyRootForPatches);
 }
 
 function __skyContainsFocusedInput(el) {
@@ -3803,6 +4511,33 @@ function __skyBindEvents(root) {
 function __skyRunEvals(root) {
   var el = (root || document).querySelector("[data-sky-eval]");
   if (el) { try { (new Function(el.getAttribute("data-sky-eval")))(); } catch(e) {} el.remove(); }
+}
+
+// __skyRunPaths: safer, CSP-friendly alternative to data-sky-eval for
+// the specific case of "update the address bar after a render." Looks
+// for [data-sky-path] elements and pushes / replaces history if the
+// value differs from location. No new Function(), no eval; the only
+// DOM APIs touched are getAttribute and history.pushState /
+// replaceState. Works under strict CSP (no 'unsafe-eval') and has no
+// XSS surface (the value is a URL path, never executed).
+//
+// The element is intentionally NOT removed after running — Sky.Live's
+// patches identify elements by sky-id and look them up via
+// querySelector; removing the data-sky-path element would orphan its
+// sky-id, and the next attribute patch (when the path changes) would
+// silently skip. The path-check makes the call idempotent, so leaving
+// the element in place is cheap — at most one comparison per patch.
+function __skyRunPaths(root) {
+  var els = (root || document).querySelectorAll("[data-sky-path]");
+  for (var i = 0; i < els.length; i++) {
+    var p = els[i].getAttribute("data-sky-path");
+    if (!p) continue;
+    if (location.pathname !== p) {
+      try { history.pushState({}, "", p); } catch (_) {}
+    } else if (location.search) {
+      try { history.replaceState({}, "", p); } catch (_) {}
+    }
+  }
 }
 
 function __skyBindOne(root, eventName) {
@@ -3854,11 +4589,38 @@ function __skyExtractArgs(ev) {
       if (t.type === "number" || t.type === "range") return [t.valueAsNumber || 0];
       return [t.value == null ? "" : String(t.value)];
     case "submit":
+      // Form-data assembly. Two non-obvious rules:
+      //
+      // 1. SUBMITTER FILTER. <button type="submit"> and
+      //    <input type="submit"> entries appear in form.elements.
+      //    Spec: only the SUBMITTER (the button that actually
+      //    triggered the submit) contributes its name/value to
+      //    the payload — peer submit buttons MUST NOT. Editors
+      //    routinely use multiple submit buttons sharing one
+      //    name="action" (Save / Format / Check); the naive
+      //    "iterate everything" loop lets later buttons clobber
+      //    earlier ones, so the LAST button name=action wins
+      //    regardless of which the user clicked. Honour
+      //    ev.submitter (modern browsers; falls back to
+      //    document.activeElement for old Safari).
+      //
+      // 2. Disabled fields are excluded by the spec — skip them
+      //    too so a disabled-but-submittable field doesn't leak
+      //    a stale value.
       var data = {};
+      var submitter = ev.submitter ||
+          (document.activeElement && t && t.contains(document.activeElement)
+              ? document.activeElement : null);
       if (t && t.elements) {
         for (var i = 0; i < t.elements.length; i++) {
           var el = t.elements[i];
-          if (!el.name) continue;
+          if (!el.name || el.disabled) continue;
+          if (el.type === "submit" || el.type === "button" ||
+              el.type === "image" || el.type === "reset") {
+            // Only the submitter button contributes its name/value.
+            if (el === submitter) data[el.name] = el.value;
+            continue;
+          }
           if (el.type === "checkbox" || el.type === "radio") {
             if (el.checked) data[el.name] = el.value;
           } else if (el.type === "file") {

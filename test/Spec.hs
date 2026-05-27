@@ -2,6 +2,7 @@ module Main (main) where
 
 import Test.Hspec
 import qualified Sky.Build.CompileSpec
+import qualified Sky.Build.IORefBoundarySpec
 import qualified Sky.Build.DepHmFatalSpec
 import qualified Sky.Build.ExampleSweepSpec
 import qualified Sky.Build.ForeignFatalSpec
@@ -27,8 +28,10 @@ import qualified Sky.Build.UiMultilineTextareaSpec
 import qualified Sky.Build.ExposingTypeCtorsSpec
 import qualified Sky.Build.LetForwardRefSpec
 import qualified Sky.Build.EntryLocalShadowsDepSpec
+import qualified Sky.Build.CaseSubjectNameShadowSpec
 import qualified Sky.Build.FfiKernelAliasSpec
 import qualified Sky.Parse.MultiLineCaseSubjectSpec
+import qualified Sky.Parse.MultiLineSignatureSpec
 import qualified Sky.Format.FormatSpec
 import qualified Sky.Build.GoKeywordCollisionSpec
 import qualified Sky.Build.NestedPatternSpec
@@ -42,8 +45,17 @@ import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
 import qualified Sky.Build.RecordCtorEmptyListSpec
 import qualified Sky.Build.HofTypedMsgSpec
+import qualified Sky.Build.CoerceArgParametricSpec
+import qualified Sky.Build.IsPlainIdentSpec
+import qualified Sky.Build.InferExprTypeBinopSpec
+import qualified Sky.Build.CoerceArgListMapInterplaySpec
+import qualified Sky.Build.LowerCtxCascadeSpec
+import qualified Sky.Build.LetBodyCascadeResumeSpec
+import qualified Sky.Build.SnapshotCallerCtxSpec
+import qualified Sky.Build.SkyshopCompilesSpec
 import qualified Sky.Build.AnonLambdaSpec
 import qualified Sky.Build.AnonRecordSpec
+import qualified Sky.Build.AuthUntypedBoundarySpec
 import qualified Sky.Build.Issue52Spec
 import qualified Sky.Build.ValidatorSpec
 import qualified Sky.Build.GoBuildRefinerSpec
@@ -52,6 +64,7 @@ import qualified Sky.Build.MonoIntegrationSpec
 import qualified Sky.Reporting.DiagnosticSpec
 import qualified Sky.Diagnostics.CoverageSpec
 import qualified Sky.Type.InstanceCaptureSpec
+import qualified Sky.Type.SolvedTypesRegionMapSpec
 import qualified Sky.Build.KernelSigCoverageSpec
 import qualified Sky.Build.HeapBoundedHmSpec
 import qualified Sky.Build.SolverBudgetSpec
@@ -84,6 +97,9 @@ import qualified Sky.Cli.DoctorSpec
 main :: IO ()
 main = hspec $ do
     describe "Sky.Build.Compile"         Sky.Build.CompileSpec.spec
+    -- v0.15.5 PR 2/6 — regression gate for the retired per-scope
+    -- IORef pair (mechanical string match on Compile.hs).
+    describe "Sky.Build.IORefBoundary"   Sky.Build.IORefBoundarySpec.spec
     -- v0.10.0: dep module HM errors must abort the build (used to
     -- silently degrade to `any`-typed bindings, hiding real type
     -- bugs that surfaced as func-pointer-as-string at runtime).
@@ -174,8 +190,10 @@ main = hspec $ do
     describe "Sky.Build.ExposingTypeCtors" Sky.Build.ExposingTypeCtorsSpec.spec
     describe "Sky.Build.LetForwardRef"     Sky.Build.LetForwardRefSpec.spec
     describe "Sky.Build.EntryLocalShadowsDep" Sky.Build.EntryLocalShadowsDepSpec.spec
+    describe "Sky.Build.CaseSubjectNameShadow" Sky.Build.CaseSubjectNameShadowSpec.spec
     describe "Sky.Build.FfiKernelAlias" Sky.Build.FfiKernelAliasSpec.spec
     describe "Sky.Parse.MultiLineCaseSubject" Sky.Parse.MultiLineCaseSubjectSpec.spec
+    describe "Sky.Parse.MultiLineSignature" Sky.Parse.MultiLineSignatureSpec.spec
     -- Closed-record exactness + cross-module externals registration:
     --   1. unifyRecords (Sky.Type.Unify) used to silently merge field-
     --      mismatched closed records under a fresh extension. Now
@@ -253,6 +271,80 @@ main = hspec $ do
     -- the inner-function return as `any`, breaking helpers with typed
     -- (String -> Msg) callbacks. Now routes via typeStrWithAliasesReg.
     describe "Sky.Build.HofTypedMsg"        Sky.Build.HofTypedMsgSpec.spec
+    -- v0.15.x hardening / Gap A1 / Plan Item P1 — coerceArg's
+    -- parametric-alias short-circuit was gated on `goExprGoType e`
+    -- returning Just. For let-bound polymorphic-call results the
+    -- registry has no entry; the arm didn't fire; codegen emitted
+    -- `any(arg).(Cfg_R[any])`, panicking with `interface {} is
+    -- main.Cfg_R[int], not main.Cfg_R[interface {}]`. The
+    -- structural-fallback arm closes this by resolving the
+    -- source's `Can.Expr` through `inferExprType` and matching
+    -- alias bases.
+    describe "Sky.Build.CoerceArgParametric"
+                                            Sky.Build.CoerceArgParametricSpec.spec
+    -- v0.15.x hardening / Gap A4 / Plan Item P3 — `isPlainIdent`
+    -- structural unit table.  Locks the recursion invariants of
+    -- the "plain user-ident chain" classifier used by `coerceArg`
+    -- at the generic-param-bearing target arm.  The legacy
+    -- recursion correctness for kernel-call-rooted selector
+    -- chains is the spec's load-bearing case; companion typed
+    -- gate is exercised by CoerceArgParametricSpec at runtime.
+    describe "Sky.Build.IsPlainIdent"       Sky.Build.IsPlainIdentSpec.spec
+    -- v0.15.x hardening / Gap A5 / Plan Item P4 — typed-primitive
+    -- binop fast-path in HOF arg slots.  Locks the codegen
+    -- invariant that `f (x + 1)` (where `f : Int -> Int` is a
+    -- typed local) lowers Go-native (`f(x + 1)`) instead of the
+    -- legacy `rt.CoerceInt(rt.SkyCall(f, x + 1))` reflect-wrap.
+    -- 8 cases cover arithmetic, logical, list / string concat,
+    -- cons, deeply nested arithmetic, chained typed-HOF, two-arg
+    -- siblings.  Spec runs the real `sky build` end-to-end +
+    -- inspects the emitted main.go AND runs the compiled binary
+    -- to assert no panic.
+    describe "Sky.Build.InferExprTypeBinop"
+                                            Sky.Build.InferExprTypeBinopSpec.spec
+    -- v0.15.x hardening / Cycle 1 P2-followup — LOCK spec for the
+    -- three-way σ/erasure/coerceArg consensus.  See the spec
+    -- module header + `docs/v0.15.x-hardening/arbitrations/HEAD-
+    -- CYCLE-01-P2.md` for the architectural rationale.  Without
+    -- this lock the canonical `List.map fn (List.take 6 xs)`
+    -- pattern regresses under any future Compile.hs edit that
+    -- threads positive `goExprGoType` information into the
+    -- `coerceArg` skip-check vote.
+    describe "Sky.Build.CoerceArgListMapInterplay"
+                                            Sky.Build.CoerceArgListMapInterplaySpec.spec
+    -- v0.15.x hardening / Cycle 1 P6 — LowerCtx cascade Phase 2.
+    -- Promotes `lowerExpr` / `lowerExprExpectGo` from no-op
+    -- delegates into REAL ctx-installing wrappers, and migrates
+    -- four structural-backbone slots (lambda body / record-field
+    -- init / list element / call arg) to route through them.
+    -- Lock fires on the constructor surface + the byte-identical
+    -- compile contract for a four-slot exercise.
+    describe "Sky.Build.LowerCtxCascade"    Sky.Build.LowerCtxCascadeSpec.spec
+    -- v0.15.x hardening / Cycle 3 P37b — LowerCtx cascade Phase 3
+    -- resume.  `letBindingType` is now pure; the three slots P6
+    -- deferred (record-field init / list element / let body) now
+    -- route through the ctx-aware wrapper.  Lock fires on (a) the
+    -- pure signature, (b) `Solve.lookupSolvedRegion` consumption,
+    -- (c) the typed-coerce emission shape on a let-body fixture.
+    describe "Sky.Build.LetBodyCascadeResume"
+                                            Sky.Build.LetBodyCascadeResumeSpec.spec
+    -- v0.15.x hardening / Cycle 3 P38 — audit gap C10 closure.
+    -- The three P37b-resumed cascade slots (record-field init,
+    -- list element, let body) now share a single
+    -- `snapshotCallerCtx` helper that reads scopeStateRef and
+    -- forces the resulting LowerCtx to WHNF before returning it.
+    -- Lock fires on (a) the helper's source-level signature +
+    -- NOINLINE pragma + load-bearing `seq`, (b) exactly three
+    -- call sites, (c) the P37b PR #91 thunk-hazard provenance
+    -- comment, (d) end-to-end build of the three-slot fixture.
+    describe "Sky.Build.SnapshotCallerCtx"
+                                            Sky.Build.SnapshotCallerCtxSpec.spec
+    -- v0.15.x hardening / Cycle 1 P2-followup STANDING lock —
+    -- examples/13-skyshop is the Stripe-SDK-scale benchmark
+    -- (76k FFI symbols) and is the canary that catches
+    -- "looks fine in 26 small examples, breaks at scale"
+    -- regressions in compiler edits.
+    describe "Sky.Build.SkyshopCompiles"    Sky.Build.SkyshopCompilesSpec.spec
     -- v0.13 D-Lambda-Lowerer regression: Sky lambdas at user-
     -- defined HOF slots lower to typed `func(X) Y` shapes via
     -- curryLambdaPatTyped (was only kernel HOFs pre-v0.13).
@@ -262,6 +354,11 @@ main = hspec $ do
     -- `type Anon_R_<hash> = struct{...}` so the typed Go name
     -- resolves. Removed the pre-E `sanitiseTypedDeep` cover-up.
     describe "Sky.Build.AnonRecord"         Sky.Build.AnonRecordSpec.spec
+    -- v0.15.12 P5 / Gap A6 — security-critical Auth kernels gate
+    -- on String typing at the Sky type level; bridging an `any`
+    -- typed binding into Auth.hashPassword / signToken / etc. is
+    -- a compile-time E4006 / Sky.Auth.UntypedBoundary error.
+    describe "Sky.Build.AuthUntypedBoundary" Sky.Build.AuthUntypedBoundarySpec.spec
     -- Issue #52 regression: (1) List.drop with any-typed Int arg
     -- needs rt.AsInt coercion at the typed-kernel boundary, and
     -- (2) record update `{ m | n = X }` must HM-check the new value
@@ -289,6 +386,14 @@ main = hspec $ do
     -- the solver's CForeign instance-recording mechanism that the
     -- monomorphisation pass consumes downstream.
     describe "Sky.Type.InstanceCapture"      Sky.Type.InstanceCaptureSpec.spec
+    -- v0.15.x P37a: SolvedTypes carries the per-region HM type map
+    -- as pure data.  Locks the populate-time contract so the
+    -- IORef-backed `lookupRegionType` reader (still load-bearing in
+    -- Compile.hs) and the pure `Solve.lookupSolvedRegion` query
+    -- key off ONE solver-side write.  P37b consumes the field via
+    -- `letBindingType` and drops the IORef.
+    describe "Sky.Type.SolvedTypesRegionMap"
+                                            Sky.Type.SolvedTypesRegionMapSpec.spec
     -- v0.13 Phase A2: monomorphisation type-level pieces.  Locks
     -- the mangling encoding + substitution semantics that the
     -- downstream emission pass relies on.
