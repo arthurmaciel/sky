@@ -270,6 +270,77 @@ synthetic `to_string`/`from_string` bindings so Sky code can convert to/from
 
 ---
 
+## FFI reach: what auto-FFI can and cannot cover
+
+**The boundary is type-theoretic, not a maturity gap.** Verbatim automatic FFI
+to *arbitrary* Rust crates — especially frameworks — is impossible in principle.
+Only `rustc` can resolve Rust's:
+
+- **generics** — monomorphized: a generic `fn f<T>` has *no callable symbol*
+  until concrete `T`s are chosen (an unbounded space). The inspector drops every
+  generic fn wholesale (`tools/sky-ffi-inspect-rs/src/main.rs:594`).
+- **traits** — open: to *supply* an `impl Trait` argument you must synthesise a
+  conforming type; to *consume* trait-generic APIs you must reproduce trait
+  resolution.
+- **lifetimes** — aliasing constraints with no analogue in a GC language
+  (dropped at `main.rs:678`).
+
+A rustdoc-metadata binding generator is strictly weaker than the compiler, so
+"bind any crate's full API automatically" is unreachable for the
+generic/trait/lifetime-heavy long tail.
+
+**Two universes:**
+
+| Universe | Examples | Auto-FFI |
+|---|---|---|
+| Leaf / data-shaped | hashing, encoding, parsing, math, time, regex, codecs, many client SDKs | Works; genuinely universal over this class |
+| Framework / DSL / async | axum, bevy, diesel, tokio | Core is generic + trait + `Stream`; auto-binds almost nothing usable |
+
+Even some "leaf" crates are partly generic — `hex::encode<T: AsRef<[u8]>>` drops,
+leaving only 1 bound fn — which is exactly why the widening work below matters.
+
+**Three directions (decide on evidence — see the `/ffi-audit` skill):**
+
+- **Alt 1 — widen the leaf universe (zero per-crate glue).** Stop dropping
+  generics wholesale: emit a monomorphic wrapper for each concrete instantiation
+  the Sky program actually uses (Sky's HM solver already knows the types at the
+  call site, exactly as rustc monomorphises). Plus std-type mapping,
+  builder / `&mut self`→take-return, full non-byte slice/array + iterator→`Vec`
+  coercion. Captures most leaf libraries *fully*. Does **not** reach axum.
+- **Alt 2 — compiler-generated idiomatic Rust glue.** For frameworks, emit *real*
+  crate-idiomatic Rust (real `Router`/`get`/`serve`/`Sse`), wiring Sky-compiled
+  closures as `impl Handler` and Sky channels as `Stream`s; `rustc` does the
+  trait/lifetime solving. Generated, not hand-written (no *manual* shims) — but
+  needs a usage model per framework shape. The only route to verbatim-ish axum + SSE.
+- **Alt 3 — Sky-native modules over best-in-class crates (the Sky.Live model).**
+  Don't expose axum at all; build `Sky.Http.Server` / `Sky.Live` on the Rust
+  runtime *using* axum/hyper internally, exposing the Sky-idiomatic surface that
+  already exists on the Go backend. First-party runtime Rust (like today's
+  `sky_runtime/*.rs`), not per-crate shims — the standard way languages ship
+  frameworks.
+
+**Recommended mission framing:** automatic FFI across Rust's leaf-library
+universe (Alt 1) **+** Sky-native modules over its best frameworks (Alt 3).
+"Verbatim FFI to any framework" is a deliberate non-goal; Alt 2 is reserved for
+if that ever becomes a hard requirement.
+
+**Case study — axum 0.8.8.** The inspector kept 56 functions, *all peripheral*
+(Redirect / KeepAlive / Event constructors, ~20 error `body_text`,
+`MatchedPath::as_str`); the entire router / handler / extractor / `Sse` core
+dropped (generic + trait + `Stream`). You cannot register a route or build an
+SSE response through raw auto-FFI — which is the proof, not a bug.
+
+**Measuring it.** The `/ffi-audit` skill
+(`~/.claude/skills/ffi-audit/ffi_audit.py`) runs the inspector across a
+~50-crate sample spanning the classes above and reports kept functions split
+into **free / constructor-like / accessor-only** with a per-crate verdict
+(`leaf-usable` / `partial` / `peripheral` / `empty`). The *shape* is the signal:
+a crate that keeps only accessors (axum) is bindable but not buildable. A precise
+drop-reason histogram (generic / lifetime / trait) would need an inspector
+`--audit` mode tagging each `return None` site.
+
+---
+
 ## FFI codegen type-coercion rules
 
 `Sky.Build.Rust.Ffi` (`emitRustFnSimple`) uses these rules when emitting wrapper bodies.
