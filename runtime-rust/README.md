@@ -332,12 +332,43 @@ SSE response through raw auto-FFI — which is the proof, not a bug.
 
 **Measuring it.** The `/ffi-audit` skill
 (`~/.claude/skills/ffi-audit/ffi_audit.py`) runs the inspector across a
-~50-crate sample spanning the classes above and reports kept functions split
-into **free / constructor-like / accessor-only** with a per-crate verdict
-(`leaf-usable` / `partial` / `peripheral` / `empty`). The *shape* is the signal:
-a crate that keeps only accessors (axum) is bindable but not buildable. A precise
+~50-crate sample and ranks each crate by its **constructable surface**
+(`free + ctor` — functions that let Sky obtain or call something standalone, vs.
+accessors on values it can't construct). Tiers: `rich` ≥10 · `usable` 3–9 ·
+`thin` 1–2 · `peripheral` 0 (accessors only, e.g. axum) · `empty`. A precise
 drop-reason histogram (generic / lifetime / trait) would need an inspector
 `--audit` mode tagging each `return None` site.
+
+### Measured coverage (50-crate sample, default features)
+
+| Tier (free+ctor) | n | Examples |
+|---|---|---|
+| **rich** (≥10) | 13 | chrono 50, uuid 39, actix-web 34, redis 28, time 27, bevy_ecs 26, ron 18, num-bigint 17, reqwest 16, rusqlite/ureq 15, semver/clap 11 |
+| **usable** (3–9) | 7 | blake3, csv, base64, serde_json, tungstenite, url, serde_yaml |
+| **thin** (1–2) | 14 | base32, bytesize, crc32fast, ndarray, arrayvec, toml, regex, nalgebra, sqlx, **axum**, … |
+| **peripheral** (0 ctor, accessors only) | 9 | hex, percent-encoding, **indexmap, smallvec, itertools, ordered-float, bitflags**, quick-xml, tracing |
+| **empty** (0 kept) | 7 | **sha2, md-5** (RustCrypto `Digest` is all-trait), byteorder, num, **diesel, tokio, tower** |
+
+**Headline finding — the dominant blocker is wholesale generic + trait drop.**
+The crates that bind well are *self-typed* (chrono, uuid, semver); the ones that
+bind nothing are *trait-fronted or generic*. `sha2`/`md-5` bind **zero** because
+`Sha256::new()` lives on the `Digest` trait; generic containers
+(`indexmap`/`smallvec`/`itertools`) are peripheral because their value is `<K,V>`
+/ `<[T; N]>`. **This is exactly the Alt-1 recovery set** — monomorphise-on-demand
+at the concrete types a Sky program uses would light up the entire hashing +
+generic-container + `hex::encode<AsRef<[u8]>>` class (the bulk of the bottom two
+tiers).
+
+A `rich` **framework** (actix-web/bevy_ecs/clap) is the trap in this metric: the
+bound constructors are secondary config/error/builder types — the *core*
+abstraction (routing/handler/`Sse`, ECS queries, the derive arg-parser) is
+generic + trait + macro and still drops. So frameworks stay **Alt-3** (Sky-native
+modules over the crate), never verbatim FFI — as the axum case study above shows.
+
+*Caveat:* this pass used **default features only** — `tokio` (no features),
+`diesel` (needs a backend), `sqlx` (needs runtime+driver) undercount. Rerun with
+features to raise them:
+`/ffi-audit run --features "tokio=full;diesel=sqlite" --force`.
 
 ---
 
