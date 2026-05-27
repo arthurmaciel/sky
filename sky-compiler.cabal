@@ -193,6 +193,7 @@ executable sky
     -- Sky infrastructure
     Sky.Sky.ModuleName
     Sky.Sky.Toml
+    Sky.Sky.Toml.Rust
 
     -- CLI helpers
     Sky.Cli.Watch
