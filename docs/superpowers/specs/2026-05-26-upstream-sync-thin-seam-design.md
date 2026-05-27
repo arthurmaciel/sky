@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-26
 **Branch:** `feat/runtime-rust`
-**Status:** design approved, pending spec review
+**Status:** implemented 2026-05-27 (commits `c10ed46a`…`9a4a1bb2`) — see Outcome.
 
 ## Problem
 
@@ -205,3 +205,58 @@ cabal hunk is unchanged (trivial). Abort the scratch merge.
 **Sequencing safety:** extract one file at a time; `cabal build` + Rust
 regression sweep after each; commit per file. Any perturbation to Go or Rust
 output stops the line until fixed. Reversible at each commit.
+
+## Outcome (implemented 2026-05-27)
+
+Implemented in 5 tasks (`docs/superpowers/plans/2026-05-26-upstream-sync-thin-seam.md`),
+4 code commits on `feat/runtime-rust`:
+
+| Commit | What |
+|---|---|
+| `c10ed46a` | T0 — fetch-only `upstream` remote + `docs/runtime-rust/syncing-upstream.md` |
+| `e38d97ae` | T1 — `Sky.Sky.Toml.Rust` (rust-dep parsing) |
+| `2fa8406e` | T2 — `Sky.Generate.Rust.Project` (Compile.hs Rust codegen branch + `generateRust`/`copyRustRuntime`) |
+| `9a4a1bb2` | T3 — `Sky.Build.Rust.Ffi` (all Rust FFI logic) + FfiGen restored to upstream Go-only signatures + call-site dispatch |
+
+### Measured result (dry-run merge of `upstream/main` @ v0.15.18, 68 commits)
+
+| File | Before | After |
+|---|---|---|
+| `FfiGen.hs` | auto-merged, but signature-drift risk | auto-merged + **0 Rust-logic lines vs upstream** (fault line removed) |
+| `Toml.hs` / `Main.hs` | auto-merged | auto-merged |
+| `Compile.hs` | 1 conflict, **228 lines** | 1 conflict, **157 lines** (↓31%) |
+| `sky-compiler.cabal` | 1 trivial hunk | 1 trivial hunk (take-both) |
+
+The `Compile.hs` conflict shrank by exactly the extracted-Rust-body amount
+(~71 lines). It did **not** vanish — as the Goal caveat predicted, the
+`case Toml._target` dispatch must wrap upstream's heavily-churned Go-codegen
+block, and that wrapping/indentation is what collides with upstream's edits.
+Moving the Go block out (to fully eliminate it) was rejected because it would
+make future upstream edits fail to apply — strictly worse.
+
+### Deviation from plan: `Sky.Cli.RustDeps` NOT created
+
+The plan called for moving the `sky add`/`install` Rust handler bodies into a
+new `Sky.Cli.RustDeps` module. This was **not** done. Reason: that module would
+be a *library* module, but the handlers depend on `appendRustDependency` /
+`appendRustGitDep` / the `PkgSpec` type, which live in the *executable*
+(`app/Main.hs`) and can't be imported by a library module. A clean extraction
+would require relocating those helpers into the library — non-trivial `Main.hs`
+churn for **latent-only** benefit (the measurement shows `Main.hs` does not
+conflict today). Instead, `Main.hs` keeps its Rust handlers in place, rewired to
+call `Sky.Build.Rust.Ffi`. If `Main.hs` ever starts conflicting, revisit then.
+
+### Verification caveat
+
+The full `cabal test` suite could **not** be run to completion: it hangs in the
+runtime server-spawning specs (`Sky.Cli.Watch`, `Console`, `Sky.Build.ExampleSweep`),
+which start `sky` servers that don't self-exit in this environment — unrelated
+to this FFI/dispatch refactor. Verified instead via:
+- targeted `cabal test --match "FfiGen" --match "Toml" --match "Kernel"` →
+  **22 examples, 0 failures**, incl. `FfiGen Go kernel.json byte-identity
+  (Cross-backend rule 5)` — the decisive Go-behaviour gate;
+- all 15 `examples/rust/*` build + run; Go `examples/01-hello-world` builds;
+- compiler builds clean; `FfiGen.hs` diff vs `main` shows 0 Rust-logic lines.
+
+Before a release, run the full suite in an environment where the server specs
+terminate (or `--skip` them).
