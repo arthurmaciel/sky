@@ -46,6 +46,7 @@ import qualified Sky.Parse.Module as ParseMod
 import qualified Sky.Format.Format as Format
 import qualified Sky.Lsp.Server as Lsp
 import qualified Sky.Build.FfiGen as FfiGen
+import qualified Sky.Build.Rust.Ffi as RustFfi
 import Sky.Sky.Toml (CompileTarget(..), RustDepSpec(..))
 import qualified Sky.Build.SkyDeps as SkyDeps
 import qualified Sky.Build.Validator as Validator
@@ -810,14 +811,18 @@ addHandler opts = do
                             appendGoDependency pkg
                         TargetRust ->
                             return ()
-                    r <- FfiGen.runInspectorForTarget target pkg features
+                    r <- case target of
+                        TargetGo   -> FfiGen.runInspector pkg
+                        TargetRust -> RustFfi.runRustInspector pkg features
                     case r of
                         Left err -> do
                             putStrLn $ "   " ++ inspName ++ " warning: " ++ err
                             putStrLn "   (You can still write hand-written bindings in ffi/.)"
                             return (Right ())
                         Right info -> do
-                            names <- FfiGen.generateBindings target info
+                            names <- case target of
+                                TargetGo   -> FfiGen.generateBindings info
+                                TargetRust -> RustFfi.generateRustBindings info
                             putStrLn $ "Generated " ++ show (length names) ++ " bindings in .skycache/"
                             mapM_ (\n -> putStrLn $ "   " ++ n) (take 10 names)
                             when (length names > 10) $
@@ -826,7 +831,9 @@ addHandler opts = do
                                 TargetGo -> appendGoDependency pkg
                                 TargetRust ->
                                     appendRustDependency pkg (FfiGen._pkgVersion info) features
-                            let skyModuleName = FfiGen.pkgToModuleName target pkg
+                            let skyModuleName = case target of
+                                    TargetGo   -> FfiGen.pkgToModuleName pkg
+                                    TargetRust -> RustFfi.rustModuleName pkg
                                 shortAlias = reverse (takeWhile (/= '.') (reverse skyModuleName))
                                 slug = FfiGen.slugify (FfiGen._pkgName info)
                                 ffiDir = case target of
@@ -922,7 +929,7 @@ regenMissingBindings target deps = do
             n <- resolveInstallParallelism
             let pkgs   = map fst missing
                 chunks = chunkInto n pkgs
-            chunkResults <- mapConcurrentlyN n (\chunk -> FfiGen.runInspectorMultiForTarget target (map (const []) chunk) chunk) chunks
+            chunkResults <- mapConcurrentlyN n (\chunk -> FfiGen.runInspectorMulti chunk) chunks
             -- Concat back into a per-input results list, preserving
             -- order. Each chunk's results are aligned to its input
             -- subset (runInspectorMulti's contract).
@@ -936,7 +943,7 @@ regenMissingBindings target deps = do
   where
     emit (_, Left _)     = return ()
     emit (_, Right info) = do
-        _ <- FfiGen.generateBindings target info
+        _ <- FfiGen.generateBindings info
         return ()
 
 
@@ -968,12 +975,12 @@ regenMissingRustBindings deps = do
         ) deps
     forM_ missing $ \(name, spec) -> case spec of
         RustVersion ver feats -> do
-            r <- FfiGen.runInspectorForTarget TargetRust name feats
+            r <- RustFfi.runRustInspector name feats
             case r of
                 Left err ->
                     putStrLn $ "   " ++ name ++ ": " ++ err
                 Right info -> do
-                    names <- FfiGen.generateBindings TargetRust info
+                    names <- RustFfi.generateRustBindings info
                     putStrLn $ "   " ++ name ++ ": " ++ show (length names) ++ " bindings"
         RustGitDep{} ->
             putStrLn $ "   " ++ name ++ ": git dep -- run `sky add` manually"

@@ -26,7 +26,7 @@ spec = describe "FfiGen Go kernel.json byte-identity (Cross-backend rule 5)" $ d
                 case A.eitherDecode (BL.fromStrict goldenInput) of
                     Left  e -> expectationFailure ("Failed to decode PkgInfo fixture: " ++ e)
                     Right pkgInfo -> do
-                        _ <- FfiGen.generateBindings TargetGo pkgInfo
+                        _ <- FfiGen.generateBindings pkgInfo
                         -- generateBindings uses slugify (_pkgName pkg), which
                         -- for this fixture is "uuid" → slug "uuid".
                         let jsonPath = ".skycache/ffi/uuid.kernel.json"

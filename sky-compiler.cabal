@@ -177,6 +177,7 @@ executable sky
     Sky.Build.EmbeddedInspectorRust
     Sky.Build.EmbeddedConsole
     Sky.Build.FfiGen
+    Sky.Build.Rust.Ffi
     Sky.Build.FfiRegistry
     Sky.Build.FfiTypeParser
     Sky.Build.FfiTypeResolve
