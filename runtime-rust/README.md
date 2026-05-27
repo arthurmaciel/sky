@@ -28,17 +28,23 @@ implementation strings in the Haskell codegen.
 
 **When working on the Rust backend, only modify files in:**
 
-| Directory | Purpose |
+| Directory / file | Purpose |
 |---|---|
 | `runtime-rust/` | Rust runtime crate (`sky_runtime` modules, property tests) |
-| `src/Sky/Generate/Rust/` | Rust codegen — `Builder.hs` only |
+| `src/Sky/Generate/Rust/Builder.hs` | Rust codegen — expression / type / pattern lowering |
+| `src/Sky/Generate/Rust/Project.hs` | Rust-target project orchestration — emits `main.rs` + `Cargo.toml`, copies the runtime + FFI bindings |
+| `src/Sky/Build/Rust/Ffi.hs` | Rust FFI — inspector invocation, `.skyi` / `.kernel.json` / `_bindings.rs` emission, type coercion |
+| `src/Sky/Sky/Toml/Rust.hs` | Rust dependency-spec parsing (`RustDepSpec`) |
 | `tools/sky-ffi-inspect-rs/` | Rust crate inspector (rustdoc JSON backend) |
 
-**Files outside these directories** (`src/Sky/Build/*.hs`, `app/Main.hs`,
-`src/Sky/Sky/Toml.hs`, `src/Sky/Canonicalise/*.hs`, etc.) may only be touched
-if the changes do not affect the Go backend. Every change to shared compiler
-infrastructure must be gated behind `TargetRust ->` branches so the Go backend
-is byte-identical.
+These Rust-only modules carry **all** the backend's logic. Shared compiler files
+(`src/Sky/Build/Compile.hs`, `FfiGen.hs`, `app/Main.hs`, `src/Sky/Sky/Toml.hs`)
+keep only a minimal **dispatch seam** — a
+`case Toml._target of { TargetRust -> …; TargetGo -> … }` that calls into the
+modules above. Dependencies are one-way (shared → Rust-only, never the reverse),
+so the Go path stays byte-identical and upstream merges stay small. Any change to
+a shared file must be gated behind a `TargetRust ->` branch. See
+`docs/runtime-rust/syncing-upstream.md` for the upstream-tracking workflow.
 
 ---
 
@@ -192,7 +198,7 @@ pub fn task_map<A, B>(f: impl FnOnce(A) -> B + Send + 'static,
    and re-runs rustdoc on it automatically (e.g. `clap` → `clap_builder`).
 5. Maps Rust types → Sky types (`Vec→List`, `Option→Maybe`, `HashMap→Dict`,
    `Result→Result E A`, `SkyResult<E,A>→Result E A`).
-6. Emits JSON matching the `PkgInfo` schema consumed by `FfiGen.hs`.
+6. Emits JSON matching the `PkgInfo` schema (defined in `FfiGen.hs`, parsed by `Sky.Build.Rust.Ffi`).
 7. Writes `.skycache/ffi/rust/<slug>.kernel.json`, `.skycache/ffi/rust/<slug>.skyi`,
    and `.skycache/ffi/rust/<slug>_bindings.rs` (all three Rust artifacts share
    the `.skycache/ffi/rust/` subdirectory).
@@ -266,7 +272,7 @@ synthetic `to_string`/`from_string` bindings so Sky code can convert to/from
 
 ## FFI codegen type-coercion rules
 
-`FfiGen.hs` (`emitRustFnSimple`) uses these rules when emitting wrapper bodies.
+`Sky.Build.Rust.Ffi` (`emitRustFnSimple`) uses these rules when emitting wrapper bodies.
 
 **Parameter type (`resolveRustType`).** A param's wrapper type is the *Sky-mapped*
 type for known Sky types, so the wrapper takes the owned value the call site
