@@ -1,0 +1,34 @@
+module Main exposing (main)
+
+-- hex encode/decode via the `hex` crate — Alt-1 monomorphisation.
+-- `hex::encode<T: AsRef<[u8]>>(T) -> String` monomorphises to `List Int -> Result Error String`.
+-- `hex::decode<T: AsRef<[u8]>>(T) -> Result<Vec<u8>, FromHexError>` monomorphises
+-- to `List Int -> Result FromHexError Vec`.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+import Rust.Hex as Hex
+
+
+main =
+    -- encode bytes "Hi!" -> "486921"   (encode<T: AsRef<[u8]>> monomorphised to List Int)
+    case Hex.encode [ 72, 105, 33 ] of
+        Err _ ->
+            println "FAIL -> encode error"
+
+        Ok encoded ->
+            -- decode the ASCII bytes of "486921" -> Ok <opaque Vec<i64>>
+            --   (decode<T: AsRef<[u8]>> -> Result FromHexError Vec)
+            case Hex.decode [ 52, 56, 54, 57, 50, 49 ] of
+                Err _ ->
+                    println "FAIL -> decode error"
+
+                Ok _ ->
+                    case encoded == "486921" of
+                        True ->
+                            println "OK -> 16-hex: encode + decode via monomorphised hex FFI"
+
+                        False ->
+                            println ("FAIL -> encoded=" ++ encoded)
