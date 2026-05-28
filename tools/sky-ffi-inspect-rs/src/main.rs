@@ -1648,6 +1648,53 @@ fn subst_generic_json(
     }
 }
 
+/// Build the substitution map for a function's generic params, or `None` if the
+/// function should be dropped (a `const` generic, or any type param whose bounds
+/// don't resolve). Lifetime params are ignored. A type param that appears only in
+/// return position with an unmappable bound (e.g. `T: FromStr`) yields `None`,
+/// which is the correct drop. Bounds are gathered from both inline param bounds
+/// and `where_predicates`.
+fn resolve_generics(
+    fn_data: &serde_json::Value,
+) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+    let params = match fn_data["generics"]["params"].as_array() {
+        Some(p) => p,
+        None => return Some(std::collections::HashMap::new()),
+    };
+
+    // where-clause bounds, keyed by generic name
+    let mut where_bounds: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    if let Some(wps) = fn_data["generics"]["where_predicates"].as_array() {
+        for wp in wps {
+            if let Some(bp) = wp.get("bound_predicate") {
+                if let Some(g) = bp.get("type").and_then(|t| t.get("generic")).and_then(|g| g.as_str()) {
+                    if let Some(bs) = bp.get("bounds").and_then(|b| b.as_array()) {
+                        where_bounds.entry(g.to_string()).or_default().extend(bs.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut map = std::collections::HashMap::new();
+    for p in params {
+        let kind = &p["kind"];
+        if kind.get("const").is_some() { return None; }   // const generic -> drop
+        if kind.get("lifetime").is_some() { continue; }   // lifetime param -> ignore
+        let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let mut bounds: Vec<serde_json::Value> = kind.get("type")
+            .and_then(|t| t.get("bounds")).and_then(|b| b.as_array())
+            .cloned().unwrap_or_default();
+        if let Some(extra) = where_bounds.get(name) { bounds.extend(extra.iter().cloned()); }
+        match resolve_param_bounds(&bounds) {
+            Some(concrete) => { map.insert(name.to_string(), concrete); }
+            None => return None, // unresolvable type param -> drop whole fn
+        }
+    }
+    Some(map)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1800,6 +1847,44 @@ mod tests {
         assert_eq!(resolve_param_bounds(&[asref_u8.clone(), foo]), None);
         // two conflicting shape bounds -> None
         assert_eq!(resolve_param_bounds(&[asref_u8, asref_str]), None);
+    }
+
+    fn type_param(name: &str, bounds: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({ "name": name, "kind": { "type": { "bounds": bounds, "default": null, "is_synthetic": false } } })
+    }
+    fn fn_with_generics(params: Vec<serde_json::Value>, wheres: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({ "generics": { "params": params, "where_predicates": wheres } })
+    }
+
+    #[test]
+    fn test_resolve_generics() {
+        let asref_u8 = trait_bound("AsRef", vec![serde_json::json!({ "slice": { "primitive": "u8" } })]);
+        let display = trait_bound("Display", vec![]);
+
+        // no generics -> empty map (Some)
+        assert_eq!(resolve_generics(&fn_with_generics(vec![], vec![])), Some(std::collections::HashMap::new()));
+
+        // <T: AsRef<[u8]>> -> {T: Vec<u8>}
+        let r = resolve_generics(&fn_with_generics(vec![type_param("T", vec![asref_u8.clone()])], vec![])).unwrap();
+        assert_eq!(r.get("T"), Some(&vec_u8_node()));
+
+        // two params both resolve
+        let r2 = resolve_generics(&fn_with_generics(
+            vec![type_param("T", vec![asref_u8.clone()]), type_param("U", vec![display])], vec![])).unwrap();
+        assert_eq!(r2.get("T"), Some(&vec_u8_node()));
+        assert_eq!(r2.get("U"), Some(&string_node()));
+
+        // unresolvable bound -> None (drop whole fn)
+        assert_eq!(resolve_generics(&fn_with_generics(vec![type_param("T", vec![trait_bound("FromStr", vec![])])], vec![])), None);
+
+        // const generic present -> None
+        let const_p = serde_json::json!({ "name": "N", "kind": { "const": { "type": { "primitive": "usize" } } } });
+        assert_eq!(resolve_generics(&fn_with_generics(vec![const_p], vec![])), None);
+
+        // bound supplied via where-predicate instead of inline
+        let wp = serde_json::json!({ "bound_predicate": { "type": { "generic": "T" }, "bounds": [asref_u8] } });
+        let r3 = resolve_generics(&fn_with_generics(vec![type_param("T", vec![])], vec![wp])).unwrap();
+        assert_eq!(r3.get("T"), Some(&vec_u8_node()));
     }
 
     #[test]
