@@ -695,7 +695,7 @@ fn parse_fn_item(
     // position are unaffected (the wrapper takes an owned value and borrows).
     let result_borrows = results.iter().any(|p| {
         let rt = p.rust_type.trim();
-        rt.contains('&') && rt != "&str" && rt != "&String" && !is_byte_seq(rt)
+        rt.contains('&') && rt != "&str" && rt != "&String" && !is_coercible_seq(rt)
     });
     if result_borrows {
         return None;
@@ -708,7 +708,7 @@ fn parse_fn_item(
     let has_bad_array_or_slice = params
         .iter()
         .chain(results.iter())
-        .any(|p| p.rust_type.contains('[') && !is_byte_seq(&p.rust_type));
+        .any(|p| p.rust_type.contains('[') && !is_coercible_seq(&p.rust_type));
     if has_bad_array_or_slice {
         return None;
     }
@@ -2245,5 +2245,57 @@ mod tests {
         // Unknown -> None
         let unknown = serde_json::json!({ "resolved_path": { "name": "SomeWeirdType", "path": "SomeWeirdType", "id": 0, "args": null } });
         assert_eq!(concrete_for_inner_type(&unknown), None);
+    }
+
+    #[test]
+    fn test_parse_fn_item_v2_slice_array() {
+        // fn join(parts: &[String]) -> String  : non-byte slice param survives
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["parts", { "borrowed_ref": { "lifetime": null, "is_mutable": false, "type": { "slice": { "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } } } } }]
+            ], "output": { "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } } }
+        });
+        let f = parse_fn_item("join", &fd, &HashMap::new(), None)
+            .expect("&[String] param should survive the v2 filter");
+        assert_eq!(f.params[0].sky_type, "List String");
+        assert_eq!(f.params[0].rust_type, "&[String]");
+
+        // fn point(p: [f64; 3]) -> f64  : fixed-size non-byte array survives
+        let fd2 = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["p", { "array": { "type": { "primitive": "f64" }, "len": "3" } }]
+            ], "output": { "primitive": "f64" } }
+        });
+        let f2 = parse_fn_item("point", &fd2, &HashMap::new(), None)
+            .expect("[f64; 3] param should survive the v2 filter");
+        assert_eq!(f2.params[0].sky_type, "List Float");
+        assert_eq!(f2.params[0].rust_type, "[f64; 3]");
+
+        // fn fill(buf: &mut [u8])  : &mut [u8] still drops (not in is_coercible_seq)
+        let fd3 = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["buf", { "borrowed_ref": { "lifetime": null, "is_mutable": true, "type": { "slice": { "primitive": "u8" } } } }]
+            ], "output": null }
+        });
+        assert!(parse_fn_item("fill", &fd3, &HashMap::new(), None).is_none());
+
+        // Byte path regression: fn h(b: &[u8]) -> Vec<u8>  byte-identical to v1
+        let fd4 = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["b", { "borrowed_ref": { "lifetime": null, "is_mutable": false, "type": { "slice": { "primitive": "u8" } } } }]
+            ], "output": path_with_args("Vec", vec![primitive("u8")]) }
+        });
+        let f4 = parse_fn_item("h", &fd4, &HashMap::new(), None).unwrap();
+        assert_eq!(f4.params[0].sky_type, "List Int");
+        assert_eq!(f4.params[0].rust_type, "&[u8]");
+        assert_eq!(f4.results[0].sky_type, "List Int");
     }
 }
