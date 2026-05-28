@@ -1625,6 +1625,29 @@ fn resolve_param_bounds(bounds: &[serde_json::Value]) -> Option<serde_json::Valu
     concrete
 }
 
+/// Recursively replace every `{"generic":"NAME"}` node whose NAME is in `map`
+/// with the mapped concrete type node. Other nodes pass through unchanged.
+/// (`impl Trait` nodes are handled separately in Task 6.)
+fn subst_generic_json(
+    val: &serde_json::Value,
+    map: &std::collections::HashMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(g) = val.get("generic").and_then(|g| g.as_str()) {
+        if let Some(concrete) = map.get(g) {
+            return concrete.clone();
+        }
+    }
+    match val {
+        serde_json::Value::Object(obj) => serde_json::Value::Object(
+            obj.iter().map(|(k, v)| (k.clone(), subst_generic_json(v, map))).collect(),
+        ),
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter().map(|v| subst_generic_json(v, map)).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1777,5 +1800,20 @@ mod tests {
         assert_eq!(resolve_param_bounds(&[asref_u8.clone(), foo]), None);
         // two conflicting shape bounds -> None
         assert_eq!(resolve_param_bounds(&[asref_u8, asref_str]), None);
+    }
+
+    #[test]
+    fn test_subst_generic_json() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("T".to_string(), vec_u8_node());
+        // bare {generic:"T"} -> Vec<u8>
+        assert_eq!(subst_generic_json(&serde_json::json!({ "generic": "T" }), &map), vec_u8_node());
+        // nested Option<T> -> Option<Vec<u8>>: the T node deep inside is replaced
+        let opt_t = path_with_args("Option", vec![serde_json::json!({ "generic": "T" })]);
+        let got = subst_generic_json(&opt_t, &map);
+        assert_eq!(sky(&got), "Maybe List Int");
+        // an unrelated generic "U" not in map is left intact
+        assert_eq!(subst_generic_json(&serde_json::json!({ "generic": "U" }), &map),
+                   serde_json::json!({ "generic": "U" }));
     }
 }
