@@ -589,13 +589,11 @@ fn parse_fn_item(
         return None;
     }
 
-    // Skip generic functions — type parameters can't be resolved without
-    // a concrete call site.  This matches the previous syn-based behaviour.
-    if let Some(params) = fn_data["generics"]["params"].as_array() {
-        if !params.is_empty() {
-            return None;
-        }
-    }
+    // Monomorphise-on-demand (Alt-1): resolve each generic param's bound to a
+    // concrete Sky-representable type. `None` => unresolvable => drop the fn,
+    // exactly as the old wholesale skip did, but now only when we genuinely
+    // cannot pick a sound concrete type.
+    let subst_map = resolve_generics(fn_data)?;
 
     let mut params: Vec<Param> = Vec::new();
 
@@ -631,9 +629,9 @@ fn parse_fn_item(
         if param_name == "self" {
             continue;
         }
-        let type_json = &input[1];
-        let sky = rustdoc_type_to_sky(type_json, aliases);
-        let rust = rustdoc_type_to_rust_str(type_json);
+        let type_json = subst_generic_json(&input[1], &subst_map);
+        let sky = rustdoc_type_to_sky(&type_json, aliases);
+        let rust = rustdoc_type_to_rust_str(&type_json);
         // `Self` in a parameter position means "the receiver type" (e.g.
         // `fn signed_duration_since(self, rhs: Self)`, or nested as
         // `Option<Self>`).  `Self` is not valid in a free-function signature,
@@ -652,8 +650,9 @@ fn parse_fn_item(
     // Return type
     let mut results: Vec<Param> = Vec::new();
     if !output.is_null() {
-        let sky = rustdoc_type_to_sky(output, aliases);
-        let rust = rustdoc_type_to_rust_str(output);
+        let out_json = subst_generic_json(output, &subst_map);
+        let sky = rustdoc_type_to_sky(&out_json, aliases);
+        let rust = rustdoc_type_to_rust_str(&out_json);
         // Substitute `Self` (possibly nested, e.g. `Option<Self>`) with the
         // concrete receiver type so the wrapper's return type is valid Rust.
         let (rsky, rrust) = recv.unwrap_or(("", ""));
@@ -1900,5 +1899,50 @@ mod tests {
         // an unrelated generic "U" not in map is left intact
         assert_eq!(subst_generic_json(&serde_json::json!({ "generic": "U" }), &map),
                    serde_json::json!({ "generic": "U" }));
+    }
+
+    // Build a function item shaped like rustdoc's: encode<T: AsRef<[u8]>>(data: T) -> String
+    fn encode_fn_data() -> serde_json::Value {
+        let asref_u8 = trait_bound("AsRef", vec![serde_json::json!({ "slice": { "primitive": "u8" } })]);
+        serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [ type_param("T", vec![asref_u8]) ], "where_predicates": [] },
+            "sig": { "inputs": [ ["data", { "generic": "T" }] ], "output": prim("str") }
+        })
+    }
+
+    #[test]
+    fn test_parse_fn_item_monomorphises() {
+        let f = parse_fn_item("encode", &encode_fn_data(), &HashMap::new(), None)
+            .expect("encode<T:AsRef<[u8]>> should now bind, not drop");
+        assert_eq!(f.name, "encode");
+        assert_eq!(f.params.len(), 1);
+        assert_eq!(f.params[0].sky_type, "List Int");   // T -> Vec<u8> -> List Int
+        assert_eq!(f.params[0].rust_type, "Vec<u8>");
+        assert_eq!(f.results[0].sky_type, "String");    // -> str -> String
+    }
+
+    #[test]
+    fn test_parse_fn_item_drops_unresolvable_generic() {
+        // parse<T: FromStr>() -> T  must still drop
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [ type_param("T", vec![trait_bound("FromStr", vec![])]) ], "where_predicates": [] },
+            "sig": { "inputs": [], "output": { "generic": "T" } }
+        });
+        assert!(parse_fn_item("parse", &fd, &HashMap::new(), None).is_none());
+    }
+
+    #[test]
+    fn test_parse_fn_item_nongeneric_unchanged() {
+        // fn len(s: &str) -> u64  : no generics, behaves exactly as before
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["s", borrowed(prim("str"))] ], "output": prim("u64") }
+        });
+        let f = parse_fn_item("len", &fd, &HashMap::new(), None).unwrap();
+        assert_eq!(f.params[0].sky_type, "String");
+        assert_eq!(f.results[0].sky_type, "Int");
     }
 }
