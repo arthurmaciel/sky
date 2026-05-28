@@ -133,11 +133,13 @@ All 15 build and run from a clean slate (`rm -rf sky-out .skycache && sky add �
 | 13-petname | `petname` | ✅ builds + runs | `petname n sep` → friendly random name |
 | 14-crc32fast | `crc32fast` | ✅ builds + runs | `hash : List Int -> …` (`&[u8]` slice param) → CRC32 |
 | 15-uuid-bytes | `uuid` | ✅ builds + runs | `from_bytes` `[u8;16]` param + `as_bytes` `&[u8;16]` result, via `List Int` |
+| 16-hex | `hex` | ✅ builds + runs | `encode`/`decode` — generic `<T: AsRef<[u8]>>` monomorphised to `List Int` (Alt-1 proof) |
 
 These span the common shapes auto-FFI must handle: free functions, static
 methods (`Type::fn`), instance methods (`arg0.method`), `Display`/`FromStr`
 bridges, `Option`/`Result` returns, byte sequences (`&[u8]`/`[u8; N]` ⇄
-`List Int`), and primitive ⇄ opaque round-tripping.
+`List Int`), generic functions whose bound maps to a Sky type (Alt-1
+monomorphisation-on-demand), and primitive ⇄ opaque round-tripping.
 
 ---
 
