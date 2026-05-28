@@ -1513,6 +1513,80 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
     result
 }
 
+// ── Monomorphisation-on-demand (Alt-1) ─────────────────────────────────
+// A generic param bound maps to a concrete, Sky-representable type that we
+// substitute into the signature so the inspector can emit a normal binding.
+// We use OWNED concretes (Vec<u8>/String): valid for every bound below
+// (Vec<u8>: AsRef<[u8]>+Into<Vec<u8>>+IntoIterator<Item=u8>; String:
+// AsRef<str>+Into<String>+Display+ToString), and the exact raw shapes FfiGen
+// already coerces from Sky List Int / String.
+
+fn vec_u8_node() -> serde_json::Value {
+    serde_json::json!({ "resolved_path": { "name": "Vec", "path": "Vec", "id": 0,
+        "args": { "angle_bracketed": { "args": [{ "type": { "primitive": "u8" } }], "constraints": [] } } } })
+}
+
+fn string_node() -> serde_json::Value {
+    serde_json::json!({ "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } })
+}
+
+/// True if a rustdoc type node is the `u8` slice `[u8]`.
+fn node_is_u8_slice(t: &serde_json::Value) -> bool {
+    t.get("slice").and_then(|s| s.get("primitive")).and_then(|p| p.as_str()) == Some("u8")
+}
+/// True if a rustdoc type node is the primitive `str` (possibly borrowed).
+fn node_is_str(t: &serde_json::Value) -> bool {
+    if t.get("primitive").and_then(|p| p.as_str()) == Some("str") { return true; }
+    let inner = t.get("borrowed_ref").and_then(|b| b.get("type").or_else(|| b.get("type_")));
+    inner.map(node_is_str).unwrap_or(false)
+}
+/// True if a rustdoc type node is `Vec<u8>`.
+fn node_is_vec_u8(t: &serde_json::Value) -> bool {
+    let rp = match t.get("resolved_path") { Some(r) => r, None => return false };
+    let name = rp.get("name").or_else(|| rp.get("path")).and_then(|n| n.as_str()).unwrap_or("");
+    if name.rsplit("::").next().unwrap_or(name) != "Vec" { return false; }
+    rp.get("args").and_then(|a| a.get("angle_bracketed")).and_then(|ab| ab.get("args"))
+        .and_then(|v| v.as_array()).and_then(|a| a.first())
+        .and_then(|a| a.get("type"))
+        .map(|t| t.get("primitive").and_then(|p| p.as_str()) == Some("u8"))
+        .unwrap_or(false)
+}
+/// True if a rustdoc type node is `String`.
+fn node_is_string(t: &serde_json::Value) -> bool {
+    let rp = match t.get("resolved_path") { Some(r) => r, None => return false };
+    let name = rp.get("name").or_else(|| rp.get("path")).and_then(|n| n.as_str()).unwrap_or("");
+    name.rsplit("::").next().unwrap_or(name) == "String"
+}
+
+/// Map a single trait bound to the concrete type-JSON node to substitute, or
+/// `None` if the bound is not in the v1 table.
+fn bound_to_concrete(bound: &serde_json::Value) -> Option<serde_json::Value> {
+    let tr = bound.get("trait_bound")?.get("trait")?;
+    let path = tr.get("path").or_else(|| tr.get("name")).and_then(|p| p.as_str())?;
+    let name = path.rsplit("::").next().unwrap_or(path);
+    let args: Vec<&serde_json::Value> = tr.get("args")
+        .and_then(|a| a.get("angle_bracketed")).and_then(|ab| ab.get("args"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|a| a.get("type")).collect())
+        .unwrap_or_default();
+    match name {
+        "Display" | "ToString" => Some(string_node()),
+        "AsRef" | "Borrow" => {
+            let arg = args.first()?;
+            if node_is_u8_slice(arg) { Some(vec_u8_node()) }
+            else if node_is_str(arg) { Some(string_node()) }
+            else { None }
+        }
+        "Into" => {
+            let arg = args.first()?;
+            if node_is_vec_u8(arg) { Some(vec_u8_node()) }
+            else if node_is_string(arg) { Some(string_node()) }
+            else { None }
+        }
+        _ => None,
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1619,5 +1693,31 @@ mod tests {
         assert!(!is_byte_seq("[f64; 3]"));
         assert!(!is_byte_seq("Vec<i64>"));
         assert!(!is_byte_seq("&str"));
+    }
+
+    fn trait_bound(path: &str, args: Vec<serde_json::Value>) -> serde_json::Value {
+        let type_args: Vec<_> = args.into_iter().map(|t| serde_json::json!({ "type": t })).collect();
+        serde_json::json!({ "trait_bound": { "trait": {
+            "path": path, "name": path, "id": 0,
+            "args": { "angle_bracketed": { "args": type_args, "constraints": [] } }
+        }, "modifier": "none" } })
+    }
+
+    #[test]
+    fn test_bound_to_concrete() {
+        // AsRef<[u8]> / Borrow<[u8]>  -> Vec<u8> (List Int)
+        let asref_u8 = trait_bound("AsRef", vec![serde_json::json!({ "slice": { "primitive": "u8" } })]);
+        assert_eq!(bound_to_concrete(&asref_u8), Some(vec_u8_node()));
+        // AsRef<str> / Borrow<str>    -> String
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("str")])), Some(string_node()));
+        // Display / ToString (no arg) -> String
+        assert_eq!(bound_to_concrete(&trait_bound("Display", vec![])), Some(string_node()));
+        assert_eq!(bound_to_concrete(&trait_bound("ToString", vec![])), Some(string_node()));
+        // Into<Vec<u8>> -> Vec<u8> ; Into<String> -> String
+        assert_eq!(bound_to_concrete(&trait_bound("Into", vec![path_with_args("Vec", vec![prim("u8")])])), Some(vec_u8_node()));
+        assert_eq!(bound_to_concrete(&trait_bound("Into", vec![path("String")])), Some(string_node()));
+        // Unknown / unsupported -> None
+        assert_eq!(bound_to_concrete(&trait_bound("FromStr", vec![])), None);
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("u16")])), None);
     }
 }
