@@ -1546,37 +1546,6 @@ fn usize_node() -> serde_json::Value {
     serde_json::json!({ "primitive": "usize" })
 }
 
-fn node_is_u8_primitive(t: &serde_json::Value) -> bool {
-    t.get("primitive").and_then(|p| p.as_str()) == Some("u8")
-}
-/// True if a rustdoc type node is the `u8` slice `[u8]`.
-fn node_is_u8_slice(t: &serde_json::Value) -> bool {
-    t.get("slice").and_then(|s| s.get("primitive")).and_then(|p| p.as_str()) == Some("u8")
-}
-/// True if a rustdoc type node is the primitive `str` (possibly borrowed).
-fn node_is_str(t: &serde_json::Value) -> bool {
-    if t.get("primitive").and_then(|p| p.as_str()) == Some("str") { return true; }
-    let inner = t.get("borrowed_ref").and_then(|b| b.get("type").or_else(|| b.get("type_")));
-    inner.map(node_is_str).unwrap_or(false)
-}
-/// True if a rustdoc type node is `Vec<u8>`.
-fn node_is_vec_u8(t: &serde_json::Value) -> bool {
-    let rp = match t.get("resolved_path") { Some(r) => r, None => return false };
-    let name = rp.get("name").or_else(|| rp.get("path")).and_then(|n| n.as_str()).unwrap_or("");
-    if name.rsplit("::").next().unwrap_or(name) != "Vec" { return false; }
-    rp.get("args").and_then(|a| a.get("angle_bracketed")).and_then(|ab| ab.get("args"))
-        .and_then(|v| v.as_array()).and_then(|a| a.first())
-        .and_then(|a| a.get("type"))
-        .map(|t| t.get("primitive").and_then(|p| p.as_str()) == Some("u8"))
-        .unwrap_or(false)
-}
-/// True if a rustdoc type node is `String`.
-fn node_is_string(t: &serde_json::Value) -> bool {
-    let rp = match t.get("resolved_path") { Some(r) => r, None => return false };
-    let name = rp.get("name").or_else(|| rp.get("path")).and_then(|n| n.as_str()).unwrap_or("");
-    name.rsplit("::").next().unwrap_or(name) == "String"
-}
-
 /// Map an INNER TYPE NODE (the X in AsRef<X> / Into<X> / IntoIterator<Item=X>)
 /// to its canonical Sky-coercible concrete type-JSON node, or None if X isn't
 /// representable in Sky. Recursive: handles primitives, paths, slices.
@@ -1631,7 +1600,9 @@ fn concrete_for_inner_type(t: &serde_json::Value) -> Option<serde_json::Value> {
 }
 
 /// Map a single trait bound to the concrete type-JSON node to substitute, or
-/// `None` if the bound is not in the v1 table.
+/// `None` if the bound is not recognised. The arms delegate inner-type
+/// resolution to `concrete_for_inner_type`, which makes the table recursive:
+/// `AsRef<X>` works for any X the helper can resolve, etc.
 fn bound_to_concrete(bound: &serde_json::Value) -> Option<serde_json::Value> {
     let tr = bound.get("trait_bound")?.get("trait")?;
     let path = tr.get("path").or_else(|| tr.get("name")).and_then(|p| p.as_str())?;
@@ -1642,33 +1613,31 @@ fn bound_to_concrete(bound: &serde_json::Value) -> Option<serde_json::Value> {
         .map(|arr| arr.iter().filter_map(|a| a.get("type")).collect())
         .unwrap_or_default();
     match name {
+        // No-inner bounds with a known concrete:
         "Display" | "ToString" => Some(string_node()),
-        "AsRef" | "Borrow" => {
+        "Integer" => Some(i64_node()),   // matches num_traits::Integer (last segment)
+        "Float"   => Some(f64_node()),   // matches num_traits::Float
+        // Single-inner bounds — recurse on the inner arg:
+        "AsRef" | "Borrow" | "Into" | "From" => {
             let arg = args.first()?;
-            if node_is_u8_slice(arg) { Some(vec_u8_node()) }
-            else if node_is_str(arg) { Some(string_node()) }
-            else { None }
+            concrete_for_inner_type(arg)
         }
-        "Into" => {
-            let arg = args.first()?;
-            if node_is_vec_u8(arg) { Some(vec_u8_node()) }
-            else if node_is_string(arg) { Some(string_node()) }
-            else { None }
-        }
+        // IntoIterator<Item=X>: Item is an assoc-type CONSTRAINT, not a type arg.
         "IntoIterator" => {
-            // Item is an associated-type constraint: args.angle_bracketed.constraints[]
-            // with name "Item" and an equality binding to the element type.
-            let item_is_u8 = tr.get("args")
+            let item = tr.get("args")
                 .and_then(|a| a.get("angle_bracketed"))
                 .and_then(|ab| ab.get("constraints"))
                 .and_then(|c| c.as_array())
-                .map(|cs| cs.iter().any(|c| {
-                    c.get("name").and_then(|n| n.as_str()) == Some("Item")
-                        && c.get("binding").and_then(|b| b.get("equality")).and_then(|e| e.get("type"))
-                            .map(node_is_u8_primitive).unwrap_or(false)
-                }))
-                .unwrap_or(false);
-            if item_is_u8 { Some(vec_u8_node()) } else { None }
+                .and_then(|cs| cs.iter().find(|c|
+                    c.get("name").and_then(|n| n.as_str()) == Some("Item")))
+                .and_then(|c| c.get("binding"))
+                .and_then(|b| b.get("equality"))
+                .and_then(|e| e.get("type"))?;
+            let elem = concrete_for_inner_type(item)?;
+            Some(serde_json::json!({
+                "resolved_path": { "name": "Vec", "path": "Vec", "id": 0,
+                    "args": { "angle_bracketed": { "args": [{ "type": elem }], "constraints": [] } } }
+            }))
         }
         _ => None,
     }
@@ -1936,7 +1905,10 @@ mod tests {
         assert_eq!(bound_to_concrete(&trait_bound("Into", vec![path("String")])), Some(string_node()));
         // Unknown / unsupported -> None
         assert_eq!(bound_to_concrete(&trait_bound("FromStr", vec![])), None);
-        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("u16")])), None);
+        // AsRef<u16> now resolves via concrete_for_inner_type (u16 -> Int)
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("u16")])), Some(i64_node()));
+        // A truly unsupported inner type still returns None
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![serde_json::json!({ "resolved_path": { "name": "SomeWeirdType", "path": "SomeWeirdType", "id": 0, "args": null } })])), None);
     }
 
     #[test]
@@ -2106,6 +2078,56 @@ mod tests {
 
     fn primitive(name: &str) -> serde_json::Value {
         serde_json::json!({ "primitive": name })
+    }
+
+    #[test]
+    fn test_bound_to_concrete_v2() {
+        // Path / OsStr / PathBuf / OsString -> String  (Linux pragma)
+        let asref_path = trait_bound("AsRef", vec![serde_json::json!({ "resolved_path": { "name": "Path", "path": "Path", "id": 0, "args": null } })]);
+        assert_eq!(bound_to_concrete(&asref_path), Some(string_node()));
+        let asref_osstr = trait_bound("AsRef", vec![serde_json::json!({ "resolved_path": { "name": "OsStr", "path": "OsStr", "id": 0, "args": null } })]);
+        assert_eq!(bound_to_concrete(&asref_osstr), Some(string_node()));
+        let into_pb = trait_bound("Into", vec![serde_json::json!({ "resolved_path": { "name": "PathBuf", "path": "PathBuf", "id": 0, "args": null } })]);
+        assert_eq!(bound_to_concrete(&into_pb), Some(string_node()));
+
+        // Numeric Into family -> Int / Float
+        for name in ["i32", "i64", "u32", "u64", "usize", "isize"] {
+            let b = trait_bound("Into", vec![primitive(name)]);
+            assert_eq!(sky(&bound_to_concrete(&b).unwrap()), "Int", "Into<{}>", name);
+        }
+        for name in ["f32", "f64"] {
+            let b = trait_bound("Into", vec![primitive(name)]);
+            assert_eq!(sky(&bound_to_concrete(&b).unwrap()), "Float", "Into<{}>", name);
+        }
+
+        // num_traits::Integer / Float (qualified path) -> Int / Float
+        let int_b = serde_json::json!({ "trait_bound": { "trait": {
+            "path": "num_traits::Integer", "name": "Integer", "id": 0,
+            "args": { "angle_bracketed": { "args": [], "constraints": [] } }
+        }, "modifier": "none" } });
+        assert_eq!(sky(&bound_to_concrete(&int_b).unwrap()), "Int");
+
+        let float_b = serde_json::json!({ "trait_bound": { "trait": {
+            "path": "num_traits::Float", "name": "Float", "id": 0,
+            "args": { "angle_bracketed": { "args": [], "constraints": [] } }
+        }, "modifier": "none" } });
+        assert_eq!(sky(&bound_to_concrete(&float_b).unwrap()), "Float");
+
+        // Recursive composition: IntoIterator<Item = X> where X resolves
+        let str_ref = serde_json::json!({ "borrowed_ref": { "lifetime": null, "is_mutable": false, "type": primitive("str") } });
+        let into_iter_str = serde_json::json!({ "trait_bound": { "trait": {
+            "path": "IntoIterator", "name": "IntoIterator", "id": 0,
+            "args": { "angle_bracketed": { "args": [], "constraints": [
+                { "name": "Item", "binding": { "equality": { "type": str_ref } } }
+            ] } }
+        }, "modifier": "none" } });
+        let got = bound_to_concrete(&into_iter_str).expect("IntoIterator<Item=&str>");
+        assert_eq!(sky(&got), "List String");
+
+        // v1 paths still work (regression):
+        let asref_u8 = trait_bound("AsRef", vec![serde_json::json!({ "slice": { "primitive": "u8" } })]);
+        assert_eq!(bound_to_concrete(&asref_u8), Some(vec_u8_node()));
+        assert_eq!(bound_to_concrete(&trait_bound("Display", vec![])), Some(string_node()));
     }
 
     #[test]
