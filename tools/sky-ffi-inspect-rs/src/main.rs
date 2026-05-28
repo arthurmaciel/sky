@@ -1577,6 +1577,59 @@ fn node_is_string(t: &serde_json::Value) -> bool {
     name.rsplit("::").next().unwrap_or(name) == "String"
 }
 
+/// Map an INNER TYPE NODE (the X in AsRef<X> / Into<X> / IntoIterator<Item=X>)
+/// to its canonical Sky-coercible concrete type-JSON node, or None if X isn't
+/// representable in Sky. Recursive: handles primitives, paths, slices.
+fn concrete_for_inner_type(t: &serde_json::Value) -> Option<serde_json::Value> {
+    // primitive: u8 slice element, str, integers, floats, bool, char
+    if let Some(p) = t.get("primitive").and_then(|p| p.as_str()) {
+        return match p {
+            "str" => Some(string_node()),
+            "u8" => Some(serde_json::json!({ "primitive": "u8" })),
+            "i8" | "i16" | "i32" | "i64" | "isize"
+            | "u16" | "u32" | "u64" | "usize" => Some(i64_node()),
+            "f32" | "f64" => Some(f64_node()),
+            "bool" => Some(serde_json::json!({ "primitive": "bool" })),
+            "char" => Some(serde_json::json!({ "primitive": "char" })),
+            _ => None,
+        };
+    }
+    // slice: [u8] -> Vec<u8>; [other] -> recurse element (Vec<T'>)
+    if let Some(inner) = t.get("slice") {
+        let elem = concrete_for_inner_type(inner)?;
+        return Some(serde_json::json!({
+            "resolved_path": { "name": "Vec", "path": "Vec", "id": 0,
+                "args": { "angle_bracketed": { "args": [{ "type": elem }], "constraints": [] } } }
+        }));
+    }
+    // borrowed_ref: see through to the inner type (then resolve it)
+    if let Some(br) = t.get("borrowed_ref") {
+        let inner = br.get("type").or_else(|| br.get("type_"))?;
+        return concrete_for_inner_type(inner);
+    }
+    // resolved_path: known std/prelude types map to Sky concretes
+    if let Some(rp) = t.get("resolved_path") {
+        let name = rp.get("name").or_else(|| rp.get("path")).and_then(|n| n.as_str()).unwrap_or("");
+        let leaf = name.rsplit("::").next().unwrap_or(name);
+        return match leaf {
+            "String" | "OsString" | "PathBuf"
+            | "Path" | "OsStr" => Some(string_node()),
+            "Vec" => {
+                let inner = rp.get("args").and_then(|a| a.get("angle_bracketed"))
+                    .and_then(|ab| ab.get("args")).and_then(|v| v.as_array())
+                    .and_then(|a| a.first()).and_then(|a| a.get("type"))?;
+                let elem = concrete_for_inner_type(inner)?;
+                Some(serde_json::json!({
+                    "resolved_path": { "name": "Vec", "path": "Vec", "id": 0,
+                        "args": { "angle_bracketed": { "args": [{ "type": elem }], "constraints": [] } } }
+                }))
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
 /// Map a single trait bound to the concrete type-JSON node to substitute, or
 /// `None` if the bound is not in the v1 table.
 fn bound_to_concrete(bound: &serde_json::Value) -> Option<serde_json::Value> {
@@ -2049,5 +2102,48 @@ mod tests {
         // Owned String concretes for path/osstr-derived bounds; these are the
         // same `string_node()` from v1 — verify they still map cleanly.
         assert_eq!(sky(&string_node()), "String");
+    }
+
+    fn primitive(name: &str) -> serde_json::Value {
+        serde_json::json!({ "primitive": name })
+    }
+
+    #[test]
+    fn test_concrete_for_inner_type() {
+        // The slice [u8] becomes Vec<u8> (List Int)
+        let u8_slice = serde_json::json!({ "slice": { "primitive": "u8" } });
+        assert_eq!(concrete_for_inner_type(&u8_slice), Some(vec_u8_node()));
+
+        // The str primitive becomes String
+        assert_eq!(concrete_for_inner_type(&primitive("str")), Some(string_node()));
+
+        // A borrowed &str becomes String too
+        let str_ref = serde_json::json!({ "borrowed_ref": { "lifetime": null, "is_mutable": false, "type": { "primitive": "str" } } });
+        assert_eq!(concrete_for_inner_type(&str_ref), Some(string_node()));
+
+        // resolved_path "String" / "PathBuf" / "OsString" / "Path" / "OsStr" all become String
+        for name in ["String", "PathBuf", "OsString", "Path", "OsStr"] {
+            let node = serde_json::json!({ "resolved_path": { "name": name, "path": name, "id": 0, "args": null } });
+            assert_eq!(concrete_for_inner_type(&node), Some(string_node()),
+                "expected {} -> String", name);
+        }
+
+        // Numeric primitives -> their owned concrete
+        for name in ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"] {
+            let r = concrete_for_inner_type(&primitive(name)).expect(&format!("missing: {}", name));
+            assert_eq!(sky(&r), "Int", "bad sky for {}", name);
+        }
+        for name in ["f32", "f64"] {
+            let r = concrete_for_inner_type(&primitive(name)).expect(&format!("missing: {}", name));
+            assert_eq!(sky(&r), "Float", "bad sky for {}", name);
+        }
+
+        // Vec<u8> resolves to Vec<u8>
+        let vec_u8 = path_with_args("Vec", vec![primitive("u8")]);
+        assert_eq!(concrete_for_inner_type(&vec_u8), Some(vec_u8_node()));
+
+        // Unknown -> None
+        let unknown = serde_json::json!({ "resolved_path": { "name": "SomeWeirdType", "path": "SomeWeirdType", "id": 0, "args": null } });
+        assert_eq!(concrete_for_inner_type(&unknown), None);
     }
 }
