@@ -985,6 +985,59 @@ fn is_byte_seq(rt: &str) -> bool {
     false
 }
 
+/// True if a rust-type token is a single recognised Sky-coercible element:
+/// a primitive (numeric/bool/char/str), `String`, or an opaque path-like
+/// identifier (no `<`, `&`, `[`, ` `). Nested generics and borrows are
+/// conservatively rejected for v2 (drops are safe; v3 may relax).
+fn is_sky_coercible_elem(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() { return false; }
+    // Reject borrow / mutability / nesting markers.
+    if s.starts_with('&') || s.contains(' ') || s.contains('<') || s.contains('[') || s.contains(',') {
+        return false;
+    }
+    // Primitives:
+    matches!(s,
+        "u8" | "u16" | "u32" | "u64" | "usize"
+      | "i8" | "i16" | "i32" | "i64" | "isize"
+      | "f32" | "f64" | "bool" | "char" | "str"
+      | "String" | "OsString" | "PathBuf"
+    ) || s.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false)
+}
+
+/// True if `rt` is a sequence shape whose element is Sky-coercible:
+/// `&[T]` / `Vec<T>` / `[T; N]` / `&[T; N]` where T passes `is_sky_coercible_elem`.
+fn is_coercible_seq(rt: &str) -> bool {
+    let t = rt.trim();
+    if t.is_empty() { return false; }
+    // Exclude &mut [T] explicitly.
+    if t.starts_with("&mut ") { return false; }
+    let (is_ref, body) = if let Some(b) = t.strip_prefix('&') { (true, b.trim()) } else { (false, t) };
+
+    // Vec<T> (no leading &)
+    if !is_ref {
+        if let Some(rest) = body.strip_prefix("Vec<") {
+            if let Some(elem) = rest.strip_suffix('>') {
+                return is_sky_coercible_elem(elem.trim());
+            }
+        }
+    }
+
+    // [T] (slice, only valid behind &) or [T; N] (array)
+    if let Some(inner) = body.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        if let Some((elem, n_str)) = inner.split_once(';') {
+            let n_str = n_str.trim();
+            if !n_str.is_empty() && n_str.chars().all(|c| c.is_ascii_digit()) {
+                return is_sky_coercible_elem(elem.trim());
+            }
+            return false;
+        }
+        // Pure [T] without ; is only valid as &[T]
+        return is_ref && is_sky_coercible_elem(inner.trim());
+    }
+    false
+}
+
 /// True if a Rust type string contains a lifetime token (`'a`, `'static`,
 /// `'_`).  A `'` in a type string is always a lifetime (char literals never
 /// appear in type positions), so detecting `'` followed by an identifier
@@ -1880,6 +1933,31 @@ mod tests {
         assert!(!is_byte_seq("[f64; 3]"));
         assert!(!is_byte_seq("Vec<i64>"));
         assert!(!is_byte_seq("&str"));
+    }
+
+    #[test]
+    fn test_is_coercible_seq() {
+        // Byte sequences still recognised (regression w.r.t. v1's is_byte_seq):
+        assert!(is_coercible_seq("&[u8]"));
+        assert!(is_coercible_seq("Vec<u8>"));
+        assert!(is_coercible_seq("[u8; 16]"));
+        assert!(is_coercible_seq("&[u8; 32]"));
+
+        // Non-byte coercible elements now accepted:
+        assert!(is_coercible_seq("&[String]"));
+        assert!(is_coercible_seq("Vec<String>"));
+        assert!(is_coercible_seq("[f64; 3]"));
+        assert!(is_coercible_seq("&[i32; 4]"));
+        assert!(is_coercible_seq("&[i64]"));
+        assert!(is_coercible_seq("Vec<bool>"));
+
+        // Not coercible:
+        assert!(!is_coercible_seq("&mut [u8]"));            // mutable ref excluded
+        assert!(!is_coercible_seq("&[Vec<String>]"));       // nested generic elem (conservative drop)
+        assert!(!is_coercible_seq("&[&str]"));              // borrowed elem (lifetime concerns)
+        assert!(!is_coercible_seq("[u8; abc]"));            // non-digit N
+        assert!(!is_coercible_seq("&str"));                 // not a sequence
+        assert!(!is_coercible_seq(""));
     }
 
     fn trait_bound(path: &str, args: Vec<serde_json::Value>) -> serde_json::Value {
