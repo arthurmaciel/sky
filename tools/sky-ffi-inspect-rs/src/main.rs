@@ -1587,6 +1587,44 @@ fn bound_to_concrete(bound: &serde_json::Value) -> Option<serde_json::Value> {
     }
 }
 
+/// Auto/marker traits that don't constrain the Sky-facing type — ignored when
+/// resolving a param's bounds.
+const MARKER_TRAITS: &[&str] = &[
+    "Sized", "Send", "Sync", "Copy", "Clone", "Debug", "Default", "Unpin",
+    "RefUnwindSafe", "UnwindSafe", "Eq", "PartialEq", "Hash", "Ord", "PartialOrd",
+];
+
+/// A bound that contributes no type information: a marker/auto trait, or a
+/// lifetime/outlives bound (no `trait_bound` key).
+fn is_marker_bound(bound: &serde_json::Value) -> bool {
+    let tr = match bound.get("trait_bound").and_then(|tb| tb.get("trait")) {
+        Some(t) => t,
+        None => return true, // outlives/lifetime bound -> ignore
+    };
+    let path = tr.get("path").or_else(|| tr.get("name")).and_then(|p| p.as_str()).unwrap_or("");
+    let name = path.rsplit("::").next().unwrap_or(path);
+    MARKER_TRAITS.contains(&name)
+}
+
+/// Resolve a parameter's full bound list to a single concrete node, or `None`
+/// (drop) if: only markers (no type pinned), an unmappable non-marker bound, or
+/// two disagreeing shape bounds.
+fn resolve_param_bounds(bounds: &[serde_json::Value]) -> Option<serde_json::Value> {
+    let mut concrete: Option<serde_json::Value> = None;
+    for b in bounds {
+        if is_marker_bound(b) { continue; }
+        match bound_to_concrete(b) {
+            Some(c) => match &concrete {
+                Some(prev) if *prev != c => return None, // conflict
+                Some(_) => {}
+                None => concrete = Some(c),
+            },
+            None => return None, // non-marker bound we can't map
+        }
+    }
+    concrete
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1719,5 +1757,25 @@ mod tests {
         // Unknown / unsupported -> None
         assert_eq!(bound_to_concrete(&trait_bound("FromStr", vec![])), None);
         assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("u16")])), None);
+    }
+
+    #[test]
+    fn test_resolve_param_bounds() {
+        let asref_u8 = trait_bound("AsRef", vec![serde_json::json!({ "slice": { "primitive": "u8" } })]);
+        let clone = trait_bound("Clone", vec![]);
+        let send = trait_bound("Send", vec![]);
+        let foo = trait_bound("SomeWeirdTrait", vec![]);
+        let asref_str = trait_bound("AsRef", vec![prim("str")]);
+
+        // shape bound alone -> resolves
+        assert_eq!(resolve_param_bounds(&[asref_u8.clone()]), Some(vec_u8_node()));
+        // shape + marker bounds -> markers ignored, resolves
+        assert_eq!(resolve_param_bounds(&[asref_u8.clone(), clone.clone(), send]), Some(vec_u8_node()));
+        // only markers -> can't pin a type -> None
+        assert_eq!(resolve_param_bounds(&[clone]), None);
+        // an unknown non-marker bound -> None (unsound to guess)
+        assert_eq!(resolve_param_bounds(&[asref_u8.clone(), foo]), None);
+        // two conflicting shape bounds -> None
+        assert_eq!(resolve_param_bounds(&[asref_u8, asref_str]), None);
     }
 }
