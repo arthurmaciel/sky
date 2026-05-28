@@ -595,6 +595,13 @@ fn parse_fn_item(
     // cannot pick a sound concrete type.
     let subst_map = resolve_generics(fn_data)?;
 
+    // Drop if any `impl Trait` arg/return can't be soundly monomorphised.
+    if !sig["inputs"].as_array().map(|ins| ins.iter().all(impl_traits_resolvable)).unwrap_or(true)
+        || !impl_traits_resolvable(output)
+    {
+        return None;
+    }
+
     let mut params: Vec<Param> = Vec::new();
 
     // Determine if this is an instance method by checking whether `self`
@@ -1636,6 +1643,12 @@ fn subst_generic_json(
             return concrete.clone();
         }
     }
+    // impl Trait: replace with the concrete the bounds resolve to (if any).
+    if let Some(bounds) = val.get("impl_trait").and_then(|b| b.as_array()) {
+        if let Some(concrete) = resolve_param_bounds(bounds) {
+            return concrete;
+        }
+    }
     match val {
         serde_json::Value::Object(obj) => serde_json::Value::Object(
             obj.iter().map(|(k, v)| (k.clone(), subst_generic_json(v, map))).collect(),
@@ -1692,6 +1705,23 @@ fn resolve_generics(
         }
     }
     Some(map)
+}
+
+/// True if every `impl Trait` node anywhere in `val` resolves to a concrete
+/// type. An UNresolvable `impl Trait` arg would otherwise fall through to the
+/// `"String"` fallback in `rustdoc_type_to_sky`, which is unsound — so the
+/// caller drops the function instead.
+fn impl_traits_resolvable(val: &serde_json::Value) -> bool {
+    if let Some(bounds) = val.get("impl_trait").and_then(|b| b.as_array()) {
+        if resolve_param_bounds(bounds).is_none() {
+            return false;
+        }
+    }
+    match val {
+        serde_json::Value::Object(obj) => obj.values().all(impl_traits_resolvable),
+        serde_json::Value::Array(arr) => arr.iter().all(impl_traits_resolvable),
+        _ => true,
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -1944,5 +1974,27 @@ mod tests {
         let f = parse_fn_item("len", &fd, &HashMap::new(), None).unwrap();
         assert_eq!(f.params[0].sky_type, "String");
         assert_eq!(f.results[0].sky_type, "Int");
+    }
+
+    #[test]
+    fn test_impl_trait_arg() {
+        // fn write_all(data: impl AsRef<[u8]>) -> ()  : impl-Trait arg -> List Int
+        let asref_u8 = trait_bound("AsRef", vec![serde_json::json!({ "slice": { "primitive": "u8" } })]);
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["data", { "impl_trait": [asref_u8] }] ], "output": null }
+        });
+        let f = parse_fn_item("write_all", &fd, &HashMap::new(), None).unwrap();
+        assert_eq!(f.params[0].sky_type, "List Int");
+        assert_eq!(f.params[0].rust_type, "Vec<u8>");
+
+        // impl Trait with an unmappable bound -> drop
+        let fd2 = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["x", { "impl_trait": [trait_bound("FromStr", vec![])] }] ], "output": null }
+        });
+        assert!(parse_fn_item("f", &fd2, &HashMap::new(), None).is_none());
     }
 }
