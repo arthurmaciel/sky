@@ -1536,6 +1536,16 @@ fn string_node() -> serde_json::Value {
     serde_json::json!({ "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } })
 }
 
+fn i64_node() -> serde_json::Value {
+    serde_json::json!({ "primitive": "i64" })
+}
+fn f64_node() -> serde_json::Value {
+    serde_json::json!({ "primitive": "f64" })
+}
+fn usize_node() -> serde_json::Value {
+    serde_json::json!({ "primitive": "usize" })
+}
+
 fn node_is_u8_primitive(t: &serde_json::Value) -> bool {
     t.get("primitive").and_then(|p| p.as_str()) == Some("u8")
 }
@@ -2027,5 +2037,17 @@ mod tests {
             "sig": { "inputs": [ ["x", { "impl_trait": [trait_bound("FromStr", vec![])] }] ], "output": null }
         });
         assert!(parse_fn_item("f", &fd2, &HashMap::new(), None).is_none());
+    }
+
+    #[test]
+    fn test_v2_concrete_node_builders() {
+        // The new owned-concrete nodes for v2 entries:
+        assert_eq!(sky(&i64_node()), "Int");
+        assert_eq!(sky(&f64_node()), "Float");
+        assert_eq!(sky(&usize_node()), "Int");
+
+        // Owned String concretes for path/osstr-derived bounds; these are the
+        // same `string_node()` from v1 — verify they still map cleanly.
+        assert_eq!(sky(&string_node()), "String");
     }
 }
