@@ -1536,6 +1536,9 @@ fn string_node() -> serde_json::Value {
     serde_json::json!({ "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } })
 }
 
+fn node_is_u8_primitive(t: &serde_json::Value) -> bool {
+    t.get("primitive").and_then(|p| p.as_str()) == Some("u8")
+}
 /// True if a rustdoc type node is the `u8` slice `[u8]`.
 fn node_is_u8_slice(t: &serde_json::Value) -> bool {
     t.get("slice").and_then(|s| s.get("primitive")).and_then(|p| p.as_str()) == Some("u8")
@@ -1588,6 +1591,21 @@ fn bound_to_concrete(bound: &serde_json::Value) -> Option<serde_json::Value> {
             if node_is_vec_u8(arg) { Some(vec_u8_node()) }
             else if node_is_string(arg) { Some(string_node()) }
             else { None }
+        }
+        "IntoIterator" => {
+            // Item is an associated-type constraint: args.angle_bracketed.constraints[]
+            // with name "Item" and an equality binding to the element type.
+            let item_is_u8 = tr.get("args")
+                .and_then(|a| a.get("angle_bracketed"))
+                .and_then(|ab| ab.get("constraints"))
+                .and_then(|c| c.as_array())
+                .map(|cs| cs.iter().any(|c| {
+                    c.get("name").and_then(|n| n.as_str()) == Some("Item")
+                        && c.get("binding").and_then(|b| b.get("equality")).and_then(|e| e.get("type"))
+                            .map(node_is_u8_primitive).unwrap_or(false)
+                }))
+                .unwrap_or(false);
+            if item_is_u8 { Some(vec_u8_node()) } else { None }
         }
         _ => None,
     }
@@ -1974,6 +1992,19 @@ mod tests {
         let f = parse_fn_item("len", &fd, &HashMap::new(), None).unwrap();
         assert_eq!(f.params[0].sky_type, "String");
         assert_eq!(f.results[0].sky_type, "Int");
+    }
+
+    #[test]
+    fn test_into_iterator_u8() {
+        // IntoIterator<Item = u8>  -> Vec<u8> (List Int). Item is an associated-type
+        // constraint, carried in args.angle_bracketed.constraints, not in args.
+        let b = serde_json::json!({ "trait_bound": { "trait": {
+            "path": "IntoIterator", "name": "IntoIterator", "id": 0,
+            "args": { "angle_bracketed": { "args": [], "constraints": [
+                { "name": "Item", "binding": { "equality": { "type": { "primitive": "u8" } } } }
+            ] } }
+        }, "modifier": "none" } });
+        assert_eq!(bound_to_concrete(&b), Some(vec_u8_node()));
     }
 
     #[test]
