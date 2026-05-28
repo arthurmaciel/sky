@@ -344,9 +344,9 @@ drop-reason histogram (generic / lifetime / trait) would need an inspector
 | Tier (free+ctor) | n | Examples |
 |---|---|---|
 | **rich** (≥10) | 13 | chrono 50, uuid 39, actix-web 34, redis 28, time 27, bevy_ecs 26, ron 18, num-bigint 17, reqwest 16, rusqlite/ureq 15, semver/clap 11 |
-| **usable** (3–9) | 7 | blake3, csv, base64, serde_json, tungstenite, url, serde_yaml |
+| **usable** (3–9) | 8 | **hex** (Alt-1), blake3, csv, base64, serde_json, tungstenite, url, serde_yaml |
 | **thin** (1–2) | 14 | base32, bytesize, crc32fast, ndarray, arrayvec, toml, regex, nalgebra, sqlx, **axum**, … |
-| **peripheral** (0 ctor, accessors only) | 9 | hex, percent-encoding, **indexmap, smallvec, itertools, ordered-float, bitflags**, quick-xml, tracing |
+| **peripheral** (0 ctor, accessors only) | 8 | percent-encoding, **indexmap, smallvec, itertools, ordered-float, bitflags**, quick-xml, tracing |
 | **empty** (0 kept) | 7 | **sha2, md-5** (RustCrypto `Digest` is all-trait), byteorder, num, **diesel, tokio, tower** |
 
 **Headline finding — the dominant blocker is wholesale generic + trait drop.**
@@ -369,6 +369,18 @@ modules over the crate), never verbatim FFI — as the axum case study above sho
 `diesel` (needs a backend), `sqlx` (needs runtime+driver) undercount. Rerun with
 features to raise them:
 `/ffi-audit run --features "tokio=full;diesel=sqlite" --force`.
+
+**Alt-1 v1 update (shipped).** Inspector now monomorphises generic fns whose
+bound maps to a Sky type — `AsRef<[u8]>`/`Into<Vec<u8>>`/`IntoIterator<Item=u8>`
+→ `List Int`; `AsRef<str>`/`Into<String>`/`Display`/`ToString` → `String`. Same
+for `impl Trait` args (resolvable bounds get substituted; unresolvable ones drop,
+soundness-gated). Empirical delta on the 50-crate sample after a forced re-run:
+**hex peripheral → usable** (`encode`/`encode_upper`/`decode` now bind — the
+prediction in the headline below). Other generic-fronted crates with unmapped
+bounds (RustCrypto `Digest`, generic containers' element-type `T`, custom
+`Integer`/`Float`/`Element` traits) still drop — they need cross-crate trait
+resolution and a broader v2 table, not just v1's `AsRef`/`Into`/`Display` family.
+End-to-end proof: `examples/rust/16-hex/`.
 
 ---
 
