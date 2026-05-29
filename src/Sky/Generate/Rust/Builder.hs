@@ -1175,6 +1175,12 @@ exprToRustInner ctx e = case e of
                 rustFn = kernelToRust skyMod skyFn
                 args = map (peepholeArg ctx) argExprs
             in rustFn ++ "(" ++ intercalate ", " args ++ ")"
+    -- Standalone Ffi.toAny peephole — outside a matched Ffi.callPure args list,
+    -- Ffi.toAny x collapses to bare x. The value retains its concrete Rust type;
+    -- the toAny call is dropped entirely (kernelToRust's polyfill arm is a safety
+    -- net for indirect references, but most call sites match here).
+    Can.Call (Ann.At _ (Can.VarKernel "Ffi" "toAny")) [inner] ->
+        exprToRustString ctx inner
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             succeedArity = case fn of
