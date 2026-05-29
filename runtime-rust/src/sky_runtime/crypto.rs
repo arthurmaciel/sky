@@ -76,6 +76,58 @@ pub fn crypto_hmac_sha512(key: String, msg: String) -> String {
     mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Sky `rsaSha256Sign : String -> String -> Result Error String`
+/// Sign `msg` with the PKCS#1 v1.5 SHA-256 RSA scheme using `key_pem`
+/// (RSA PRIVATE KEY block). Returns hex-encoded signature on success.
+#[cfg(feature = "crypto")]
+pub fn crypto_rsa_sha256_sign<E: From<String>>(key_pem: String, msg: String) -> SkyResult<E, String> {
+    use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs1v15::SigningKey, signature::{Signer, SignatureEncoding}};
+    use sha2::Sha256;
+
+    let priv_key = match rsa::RsaPrivateKey::from_pkcs1_pem(&key_pem) {
+        Ok(k) => k,
+        Err(e) => return SkyResult::Err(format!("rsaSign: parse: {}", e).into()),
+    };
+    let signing_key = SigningKey::<Sha256>::new(priv_key);
+    let signature = signing_key.sign(msg.as_bytes());
+    let hex_sig: String = signature.to_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+    SkyResult::Ok(hex_sig)
+}
+
+/// Sky `rsaSha256Verify : String -> String -> String -> Bool`
+/// (key_pem, msg, hex_signature). Returns `false` on any failure — never panics.
+#[cfg(feature = "crypto")]
+pub fn crypto_rsa_sha256_verify(key_pem: String, msg: String, sig_hex: String) -> bool {
+    use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs1v15::{Signature, VerifyingKey}, signature::Verifier};
+    use sha2::Sha256;
+
+    let priv_key = match rsa::RsaPrivateKey::from_pkcs1_pem(&key_pem) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+    let verifying_key: VerifyingKey<Sha256> = VerifyingKey::<Sha256>::new(priv_key.to_public_key());
+    let sig_bytes = match hex::decode(&sig_hex) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let signature = match Signature::try_from(sig_bytes.as_slice()) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    verifying_key.verify(msg.as_bytes(), &signature).is_ok()
+}
+
+/// Sky `constantTimeEqual : String -> String -> Bool` — timing-safe byte compare.
+pub fn crypto_constant_time_equal(a: String, b: String) -> bool {
+    use subtle::ConstantTimeEq;
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    if ab.len() != bb.len() {
+        return false;
+    }
+    bool::from(ab.ct_eq(bb))
+}
+
 #[cfg(test)]
 mod tests_more_hashes {
     use super::*;
@@ -116,5 +168,43 @@ mod tests_more_hashes {
         let key: String = (0..20).map(|_| '\u{000b}').collect();
         assert_eq!(crypto_hmac_sha256(key.clone(), "Hi There".to_string()), HMAC_SHA256_RFC1);
         assert_eq!(crypto_hmac_sha512(key, "Hi There".to_string()), HMAC_SHA512_RFC1);
+    }
+
+    const RSA_PRIV_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIIBOgIBAAJBAK1QGnsdSyVv+JT4WDnGIIr3QA75yZTiTsgxkiXH9sjXrPHT1hXn
+2tKCv9MkR8MD1Ndh6jo7inBZUK0YG7H6Jx0CAwEAAQJAX9bpHeXAFW7K5w5CM4il
+nFNIAEAPQh63dCs9Z1kh1kPNGKQYujFQ9KgNuw1keQDKhkzd5jCauNJ6Db/xDpdL
+PQIhANidlZLm430yH5JrNG9hZpFIM80tUn+cf7J5F4KLIF2zAiEAzNL87wCFzVrt
+xE9IhVClKFPemDjO9Mre3Db/V53uH+8CIQC2/BfYatcNcYQeKhW3aS492CJ6Vqj0
+R/3PhF+J1YFX5QIgG9S7a5pNlAa78gW32+2GU4F56IMnk9mRCKksbvJVrd8CIFuA
+y7anow7/QOtvB1/UdyrxegB+sHZoBWA9+SsMl2zn
+-----END RSA PRIVATE KEY-----";
+
+    #[test]
+    fn test_rsa_sign_verify_roundtrip() {
+        let msg = "hello, sky".to_string();
+        let sig: SkyResult<String, String> = crypto_rsa_sha256_sign(
+            RSA_PRIV_PEM.to_string(), msg.clone());
+        let sig_hex = match sig {
+            SkyResult::Ok(s) => s,
+            SkyResult::Err(e) => panic!("sign failed: {}", e),
+        };
+        assert!(crypto_rsa_sha256_verify(
+            RSA_PRIV_PEM.to_string(), msg, sig_hex));
+    }
+
+    #[test]
+    fn test_rsa_verify_wrong_sig() {
+        assert!(!crypto_rsa_sha256_verify(
+            RSA_PRIV_PEM.to_string(),
+            "hello".to_string(),
+            "deadbeef".to_string()));
+    }
+
+    #[test]
+    fn test_constant_time_equal() {
+        assert!(crypto_constant_time_equal("abc".to_string(), "abc".to_string()));
+        assert!(!crypto_constant_time_equal("abc".to_string(), "abd".to_string()));
+        assert!(!crypto_constant_time_equal("abc".to_string(), "ab".to_string()));
     }
 }

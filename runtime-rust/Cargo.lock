@@ -1080,6 +1080,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2",
  "signature",
  "spki",
  "subtle",
@@ -1277,10 +1278,12 @@ dependencies = [
  "percent-encoding",
  "proptest",
  "regex",
+ "rsa",
  "serde_json",
  "sha1",
  "sha2",
  "sqlx",
+ "subtle",
  "tokio",
 ]
 
