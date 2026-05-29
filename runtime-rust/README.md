@@ -139,7 +139,8 @@ These span the common shapes auto-FFI must handle: free functions, static
 methods (`Type::fn`), instance methods (`arg0.method`), `Display`/`FromStr`
 bridges, `Option`/`Result` returns, byte sequences (`&[u8]`/`[u8; N]` ⇄
 `List Int`), generic functions whose bound maps to a Sky type (Alt-1
-monomorphisation-on-demand), and primitive ⇄ opaque round-tripping.
+monomorphisation-on-demand), non-byte slices/arrays whose element is
+Sky-coercible (Alt-1 v2), and primitive ⇄ opaque round-tripping.
 
 ---
 
@@ -345,9 +346,9 @@ drop-reason histogram (generic / lifetime / trait) would need an inspector
 
 | Tier (free+ctor) | n | Examples |
 |---|---|---|
-| **rich** (≥10) | 13 | chrono 50, uuid 39, actix-web 34, redis 28, time 27, bevy_ecs 26, ron 18, num-bigint 17, reqwest 16, rusqlite/ureq 15, semver/clap 11 |
-| **usable** (3–9) | 8 | **hex** (Alt-1), blake3, csv, base64, serde_json, tungstenite, url, serde_yaml |
-| **thin** (1–2) | 14 | base32, bytesize, crc32fast, ndarray, arrayvec, toml, regex, nalgebra, sqlx, **axum**, … |
+| **rich** (≥10) | 14 | chrono 50, uuid 39, actix-web 34, redis 28+, time 27, bevy_ecs 26, reqwest 23+, ron 18, num-bigint 17, rusqlite 14+, ureq 14+, **bytesize 14** (Alt-1 v2), semver/clap 11 |
+| **usable** (3–9) | 9 | **hex** (Alt-1), blake3, csv, base64, serde_json, tungstenite, url, serde_yaml, **ndarray** (Alt-1 v2) |
+| **thin** (1–2) | 12 | base32, crc32fast, arrayvec, toml, regex, nalgebra, sqlx, **axum**, humantime, itoa, ryu, unicode-segmentation |
 | **peripheral** (0 ctor, accessors only) | 8 | percent-encoding, **indexmap, smallvec, itertools, ordered-float, bitflags**, quick-xml, tracing |
 | **empty** (0 kept) | 7 | **sha2, md-5** (RustCrypto `Digest` is all-trait), byteorder, num, **diesel, tokio, tower** |
 
@@ -383,6 +384,35 @@ bounds (RustCrypto `Digest`, generic containers' element-type `T`, custom
 `Integer`/`Float`/`Element` traits) still drop — they need cross-crate trait
 resolution and a broader v2 table, not just v1's `AsRef`/`Into`/`Display` family.
 End-to-end proof: `examples/rust/16-hex/`.
+
+**Alt-1 v2 update (shipped — paired).** Inspector now (a) resolves `AsRef<X>` /
+`Borrow<X>` / `Into<X>` / `IntoIterator<Item=X>` for any X the table can map
+(recursive `concrete_for_inner_type` helper), with new entries for
+`AsRef<Path>`/`<OsStr>`, `Into<PathBuf>`/`<OsString>` → `String`; numeric
+`Into<i64/i32/u32/u64/usize/isize>` → `Int`; `Into<f64/f32>` → `Float`;
+`num_traits::Integer` → `Int`; `num_traits::Float` → `Float`. (b) Lifts the
+unconditional non-byte slice/array drop: `&[T]` / `Vec<T>` / `[T; N]` /
+`&[T; N]` survive whenever T is Sky-coercible. The FFI codegen generalised
+`ByteKind` → `SeqKind {shape, elem}` and a new generic runtime
+`to_array<E, T: Clone, const N>` mirrors `to_u8_array`'s never-panic discipline.
+Empirical delta on the 50-crate sample after a forced re-run: **bytesize
+thin → rich** (+12 free fns from numeric `Into<u64>`-style bounds), **ndarray
+thin → usable** (+4 free fns); plus material function-count gains in already-rich
+crates (`reqwest` +50, `redis` +24 — recursive composition catching wider
+generic surface). Known v2 gaps: (i) `PathBuf`/`Path`/`OsStr`/`OsString` results
+remain opaque — `concrete_for_inner_type` only fires inside *bound* resolution,
+not for general return types, so path crates like `path-clean` (whose primary
+`clean` returns `PathBuf`) still drop. (ii) `Into<u32/u64/usize/...>` substitution
+collapses all integer targets to `i64`, which is technically unsound: `i64:
+Into<u32>` isn't implemented, so the emitted bindings may fail `cargo build` on
+actual use; bytesize's recovery includes some of these. Both gaps are real v3
+follow-ups. The cross-crate `Digest` and generic-container classes remain out
+of scope (still need their own subsystems).
+
+*Note on e2e examples:* `examples/rust/17-paths` and `18-shell-join` from the
+v2 plan were not added — `path-clean::clean` returns `PathBuf` (gap (i) above)
+and `shellwords::join` is absent from the 1.x rustdoc. The empirical 50-crate
+audit re-run is the verification.
 
 ---
 
