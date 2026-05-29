@@ -82,7 +82,9 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    ,"pub mod json;"
                    -- Sub-project A — stdlib kernel modules (sub-A.1, A.2, A.4, A.6)
                    ,"pub mod encoding;","pub mod regex_kernel;","pub mod jwt;"
-                   ,"pub mod decimal;"]
+                   ,"pub mod decimal;"
+                   -- Sub-A codegen completion — Ffi.* runtime polyfills
+                   ,"pub mod ffi_polyfills;"]
         dbMod = if usesDb then ["pub mod db;"] else []
         baseUse = ["pub use config::*;","pub use core::*;"
                   ,"pub use task::*;","pub use log::*;"
@@ -90,7 +92,8 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                   ,"pub use random::*;","pub use file::*;"
                   ,"pub use crypto::*;","pub use json::*;"
                   ,"pub use encoding::*;","pub use regex_kernel::*;"
-                  ,"pub use jwt::*;","pub use decimal::*;"]
+                  ,"pub use jwt::*;","pub use decimal::*;"
+                  ,"pub use ffi_polyfills::*;"]
         dbUse = if usesDb then ["pub use db::*;"] else []
         modCode = unlines (baseMods ++ dbMod ++ baseUse ++ dbUse)
     writeFile modPath modCode
