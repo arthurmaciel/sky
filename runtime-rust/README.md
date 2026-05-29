@@ -346,9 +346,9 @@ drop-reason histogram (generic / lifetime / trait) would need an inspector
 
 | Tier (free+ctor) | n | Examples |
 |---|---|---|
-| **rich** (≥10) | 14 | chrono 50, uuid 39, actix-web 34, redis 28+, time 27, bevy_ecs 26, reqwest 23+, ron 18, num-bigint 17, rusqlite 14+, ureq 14+, **bytesize 14** (Alt-1 v2), semver/clap 11 |
+| **rich** (≥10) | 13 | chrono 50, uuid 39, actix-web 34, redis 28+, time 27, bevy_ecs 26, reqwest 23+, ron 18, num-bigint 17, rusqlite 14+, ureq 14+, semver/clap 11 |
 | **usable** (3–9) | 9 | **hex** (Alt-1), blake3, csv, base64, serde_json, tungstenite, url, serde_yaml, **ndarray** (Alt-1 v2) |
-| **thin** (1–2) | 12 | base32, crc32fast, arrayvec, toml, regex, nalgebra, sqlx, **axum**, humantime, itoa, ryu, unicode-segmentation |
+| **thin** (1–2) | 13 | base32, bytesize, crc32fast, arrayvec, toml, regex, nalgebra, sqlx, **axum**, humantime, itoa, ryu, unicode-segmentation |
 | **peripheral** (0 ctor, accessors only) | 8 | percent-encoding, **indexmap, smallvec, itertools, ordered-float, bitflags**, quick-xml, tracing |
 | **empty** (0 kept) | 7 | **sha2, md-5** (RustCrypto `Digest` is all-trait), byteorder, num, **diesel, tokio, tower** |
 
@@ -395,19 +395,30 @@ unconditional non-byte slice/array drop: `&[T]` / `Vec<T>` / `[T; N]` /
 `&[T; N]` survive whenever T is Sky-coercible. The FFI codegen generalised
 `ByteKind` → `SeqKind {shape, elem}` and a new generic runtime
 `to_array<E, T: Clone, const N>` mirrors `to_u8_array`'s never-panic discipline.
-Empirical delta on the 50-crate sample after a forced re-run: **bytesize
-thin → rich** (+12 free fns from numeric `Into<u64>`-style bounds), **ndarray
-thin → usable** (+4 free fns); plus material function-count gains in already-rich
-crates (`reqwest` +50, `redis` +24 — recursive composition catching wider
-generic surface). Known v2 gaps: (i) `PathBuf`/`Path`/`OsStr`/`OsString` results
-remain opaque — `concrete_for_inner_type` only fires inside *bound* resolution,
-not for general return types, so path crates like `path-clean` (whose primary
-`clean` returns `PathBuf`) still drop. (ii) `Into<u32/u64/usize/...>` substitution
-collapses all integer targets to `i64`, which is technically unsound: `i64:
-Into<u32>` isn't implemented, so the emitted bindings may fail `cargo build` on
-actual use; bytesize's recovery includes some of these. Both gaps are real v3
-follow-ups. The cross-crate `Digest` and generic-container classes remain out
-of scope (still need their own subsystems).
+Empirical delta on the 50-crate sample after a forced re-run: **ndarray thin →
+usable** (+4 free fns from generic-bound recovery); plus material function-count
+gains in already-rich crates (`reqwest` +50, `redis` +24 — recursive composition
+catching wider generic surface). Known v2 gap: `PathBuf`/`Path`/`OsStr`/`OsString`
+results remain opaque — `concrete_for_inner_type` only fires inside *bound*
+resolution, not for general return types, so path crates like `path-clean`
+(whose primary `clean` returns `PathBuf`) still drop. Real v3 follow-up. The
+cross-crate `Digest` and generic-container classes remain out of scope (still
+need their own subsystems).
+
+**Soundness gate (added after `09-bytesize` regression).** v2's initial
+`Into<X>`/`From<X>`/`AsRef<X>`/`Borrow<X>` arms recursed via
+`concrete_for_inner_type` for the inner X, which collapses every integer
+primitive to `i64`. That makes `Into<u32>` substitute T = i64 — but
+`i64: Into<u32>` isn't implemented, so the emitted wrappers don't compile
+(`u64: From<i64>` E0277). After this surfaced on the bytesize example during
+an upstream sync, the arms were restricted: primitive-numeric `Into`/`From`
+only resolve at identity (`Into<i64>` → i64, `Into<f64>` → f64);
+`AsRef<primitive>` only resolves at `AsRef<str>` → `String`. Other primitive
+targets drop (restoring v1 behaviour for those bounds). Non-primitive targets
+(`str`/`Path`/`OsStr`/`String`/`PathBuf`/`Vec<u8>`/slices) keep the v2
+recursive resolution. This is the reason bytesize's earlier "rich" recovery
+reverted to its v1 `thin` verdict — the lost bindings were unsound and
+wouldn't have compiled in real use.
 
 *Note on e2e examples:* `examples/rust/17-paths` and `18-shell-join` from the
 v2 plan were not added — `path-clean::clean` returns `PathBuf` (gap (i) above)

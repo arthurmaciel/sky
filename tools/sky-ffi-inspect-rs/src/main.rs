@@ -1670,10 +1670,29 @@ fn bound_to_concrete(bound: &serde_json::Value) -> Option<serde_json::Value> {
         "Display" | "ToString" => Some(string_node()),
         "Integer" => Some(i64_node()),   // matches num_traits::Integer (last segment)
         "Float"   => Some(f64_node()),   // matches num_traits::Float
-        // Single-inner bounds — recurse on the inner arg:
+        // Single-inner bounds — recurse on the inner arg, BUT with a soundness
+        // gate for primitive targets: substituting T=i64 for T:Into<u32> is
+        // unsound (i64 doesn't impl Into<u32>). Only identity-Into is sound,
+        // so we restrict primitive-numeric Into/From/AsRef/Borrow to the cases
+        // where the substituted type equals the bound's target. Non-primitive
+        // targets (str/Path/OsStr/String/PathBuf/Vec<u8>/slice) keep the v2
+        // recursive resolution.
         "AsRef" | "Borrow" | "Into" | "From" => {
             let arg = args.first()?;
-            concrete_for_inner_type(arg)
+            if let Some(p) = arg.get("primitive").and_then(|p| p.as_str()) {
+                match (name, p) {
+                    // Identity Into/From: substituting i64/f64 is sound (X: Into<X>).
+                    ("Into" | "From", "i64") => Some(i64_node()),
+                    ("Into" | "From", "f64") => Some(f64_node()),
+                    // AsRef<str> -> String stays (String: AsRef<str> via std impl).
+                    ("AsRef" | "Borrow", "str") => Some(string_node()),
+                    // Everything else (Into<u32/u64/.../usize>, AsRef<numeric>) is
+                    // unsound — drop, restoring v1 behaviour for those bounds.
+                    _ => None,
+                }
+            } else {
+                concrete_for_inner_type(arg)
+            }
         }
         // IntoIterator<Item=X>: Item is an assoc-type CONSTRAINT, not a type arg.
         "IntoIterator" => {
@@ -1983,8 +2002,10 @@ mod tests {
         assert_eq!(bound_to_concrete(&trait_bound("Into", vec![path("String")])), Some(string_node()));
         // Unknown / unsupported -> None
         assert_eq!(bound_to_concrete(&trait_bound("FromStr", vec![])), None);
-        // AsRef<u16> now resolves via concrete_for_inner_type (u16 -> Int)
-        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("u16")])), Some(i64_node()));
+        // AsRef<u16> drops — the v2 soundness gate restored after 09-bytesize
+        // showed `i64: AsRef<u16>` doesn't exist. v1's drop behaviour is restored
+        // for AsRef<primitive_non_str>.
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("u16")])), None);
         // A truly unsupported inner type still returns None
         assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![serde_json::json!({ "resolved_path": { "name": "SomeWeirdType", "path": "SomeWeirdType", "id": 0, "args": null } })])), None);
     }
@@ -2168,14 +2189,17 @@ mod tests {
         let into_pb = trait_bound("Into", vec![serde_json::json!({ "resolved_path": { "name": "PathBuf", "path": "PathBuf", "id": 0, "args": null } })]);
         assert_eq!(bound_to_concrete(&into_pb), Some(string_node()));
 
-        // Numeric Into family -> Int / Float
-        for name in ["i32", "i64", "u32", "u64", "usize", "isize"] {
+        // Numeric Into: ONLY identity (i64/f64) resolves — substituting i64
+        // for Into<u32> would emit `i64: Into<u32>` which Rust does not
+        // implement. v2 originally accepted these (unsound); the soundness
+        // gate restored after the 09-bytesize regression drops them.
+        assert_eq!(sky(&bound_to_concrete(&trait_bound("Into", vec![primitive("i64")])).unwrap()), "Int");
+        assert_eq!(sky(&bound_to_concrete(&trait_bound("Into", vec![primitive("f64")])).unwrap()), "Float");
+        // Other numeric Into targets now correctly drop.
+        for name in ["i32", "u32", "u64", "usize", "isize", "f32"] {
             let b = trait_bound("Into", vec![primitive(name)]);
-            assert_eq!(sky(&bound_to_concrete(&b).unwrap()), "Int", "Into<{}>", name);
-        }
-        for name in ["f32", "f64"] {
-            let b = trait_bound("Into", vec![primitive(name)]);
-            assert_eq!(sky(&bound_to_concrete(&b).unwrap()), "Float", "Into<{}>", name);
+            assert_eq!(bound_to_concrete(&b), None,
+                "Into<{}> must drop (i64/f64 unsound substitution)", name);
         }
 
         // num_traits::Integer / Float (qualified path) -> Int / Float
