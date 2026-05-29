@@ -35,3 +35,6 @@ pub use time::*;
 pub use random::*;
 #[cfg(feature = "json")]
 pub use json::*;
+
+pub mod encoding;
+pub use encoding::*;

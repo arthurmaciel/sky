@@ -1270,6 +1270,9 @@ dependencies = [
 name = "sky-runtime-rust"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "hex",
+ "percent-encoding",
  "proptest",
  "regex",
  "serde_json",
