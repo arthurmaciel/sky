@@ -2150,6 +2150,16 @@ kernelToRust mod name = case (mod, name) of
     -- canonicalisation.  Any Ffi.kernel reference that reaches codegen is
     -- a polyfill call site — emit a diagnostic panic.
     ("Ffi", "kernel") -> "ffi_kernel_polyfill"
+    -- Ffi.callPure / callTask / toAny: the peephole rewriter in exprToRustInner
+    -- handles the common case (literal kernel name + literal args list) by
+    -- emitting a direct kernel call. Non-peephole-matched references land
+    -- here and route to runtime polyfills: ffi_to_any_polyfill is compile-
+    -- time identity; ffi_call_pure_polyfill / ffi_call_task_polyfill panic
+    -- with an actionable message. See runtime-rust/src/sky_runtime/ffi_polyfills.rs.
+    ("Ffi", "callPure") -> "ffi_call_pure_polyfill"
+    ("Ffi", "callTask") -> "ffi_call_task_polyfill"
+    ("Ffi", "call")     -> "ffi_call_pure_polyfill"  -- deprecated alias of callPure
+    ("Ffi", "toAny")    -> "ffi_to_any_polyfill"
     -- Rust user-FFI kernel: snake_case the suffix, no panic stub.
     -- The wrapper function lives in a .skycache/ffi/rust/*_bindings.rs file
     -- that gets copied into sky-out/Rust/src/ at codegen time.
