@@ -38,3 +38,6 @@ pub use json::*;
 
 pub mod encoding;
 pub use encoding::*;
+
+pub mod regex_kernel;
+pub use regex_kernel::*;
