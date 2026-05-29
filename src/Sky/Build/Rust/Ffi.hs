@@ -352,12 +352,17 @@ translateRustRet raw0 =
             Arr _    -> "from_u8_slice(&" ++ e ++ ")"
             Slice    -> "from_u8_slice(" ++ e ++ ")"
             RefArr _ -> "from_u8_slice(" ++ e ++ ")" )
-      Just (SeqKind _ (ElemGeneral _ _)) ->
-        -- Reserved for Task 7; until then drop into Nothing-equivalent
-        -- by emitting an identity that won't be reached (inspector Task 5
-        -- now lifts non-byte sequences; the codegen for those is added in
-        -- Task 7).
-        ( "()", \_ -> "()" )
+      Just (SeqKind shape (ElemGeneral elemRust _elemSky)) ->
+        -- General element coercion. Sky `List T` is `Vec<T>` in the runtime,
+        -- so Vec<T> result is identity; &[T] / [T; N] / &[T; N] all clone to
+        -- owned Vec<T> via .to_vec() (T: Clone required and assumed for
+        -- coercible elems).
+        ( "Vec<" ++ elemRust ++ ">"
+        , \e -> case shape of
+            Owned    -> e                       -- Vec<T> identity
+            Slice    -> e ++ ".to_vec()"
+            Arr _    -> e ++ ".to_vec()"
+            RefArr _ -> e ++ ".to_vec()" )
       Nothing -> case stripGeneric1 "Option" raw of
         Just inner ->
           let (dt, co) = translateRustRet inner
@@ -524,7 +529,10 @@ emitRustFile kernelName pkg =
                     Just (SeqKind Owned    ElemU8) -> "to_u8_vec(&" ++ base ++ ")"
                     Just (SeqKind (Arr _)    ElemU8) -> "b" ++ show j        -- prelude local (owned)
                     Just (SeqKind (RefArr _) ElemU8) -> "&b" ++ show j       -- prelude local (by ref)
-                    Just (SeqKind _ (ElemGeneral _ _)) -> base   -- placeholder, replaced in Task 7
+                    Just (SeqKind Slice    (ElemGeneral _ _)) -> base ++ ".as_slice()"
+                    Just (SeqKind Owned    (ElemGeneral _ _)) -> base    -- Vec<T> identity
+                    Just (SeqKind (Arr _)    (ElemGeneral _ _)) -> "b" ++ show j   -- prelude local (owned)
+                    Just (SeqKind (RefArr _) (ElemGeneral _ _)) -> "&b" ++ show j  -- prelude local (by ref)
                     Nothing ->
                         if declTy == "String"
                         then "&" ++ base          -- Sky String → &str
@@ -596,16 +604,23 @@ emitRustFile kernelName pkg =
             -- conversion from Sky `List Int`; bind each to a local `bN` and
             -- early-return Err on a length mismatch (no panic).
             arrPrelude =
-                [ "let b" ++ show j ++ ": [u8; " ++ show n ++ "] = "
-                  ++ "match to_u8_array::<SkyError, " ++ show n
-                  ++ ">(&arg" ++ show j ++ ") { SkyResult::Ok(a) => a, "
-                  ++ "SkyResult::Err(e) => return SkyResult::Err(e), };"
+                [ case se of
+                    ElemU8 ->
+                      "let b" ++ show j ++ ": [u8; " ++ show n ++ "] = "
+                      ++ "match to_u8_array::<SkyError, " ++ show n
+                      ++ ">(&arg" ++ show j ++ ") { SkyResult::Ok(a) => a, "
+                      ++ "SkyResult::Err(e) => return SkyResult::Err(e), };"
+                    ElemGeneral elemRust _ ->
+                      "let b" ++ show j ++ ": [" ++ elemRust ++ "; " ++ show n ++ "] = "
+                      ++ "match to_array::<SkyError, " ++ elemRust ++ ", " ++ show n
+                      ++ ">(&arg" ++ show j ++ ") { SkyResult::Ok(a) => a, "
+                      ++ "SkyResult::Err(e) => return SkyResult::Err(e), };"
                 | j <- [0 .. nParams - 1]
                 , let rawTy = if j < nRawRustParam then rawRustParamTypes !! j else ""
-                , n <- case seqKind rawTy of
-                         Just (SeqKind (Arr m)    ElemU8) -> [m]
-                         Just (SeqKind (RefArr m) ElemU8) -> [m]
-                         _                                -> []
+                , (n, se) <- case seqKind rawTy of
+                         Just (SeqKind (Arr m)    e) -> [(m, e)]
+                         Just (SeqKind (RefArr m) e) -> [(m, e)]
+                         _                           -> []
                 ]
         in if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
            then []
