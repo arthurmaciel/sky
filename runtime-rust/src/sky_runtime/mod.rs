@@ -44,3 +44,6 @@ pub use regex_kernel::*;
 pub mod jwt;
 #[cfg(feature = "json")]
 pub use jwt::*;
+
+pub mod decimal;
+pub use decimal::*;
