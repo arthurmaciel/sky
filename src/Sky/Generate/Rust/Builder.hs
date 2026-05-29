@@ -1970,10 +1970,12 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Encoding", "urlEncode")  -> "url_encode"
     ("Encoding", "urlDecode")           -> "url_decode"
     ("Sky.Core.Encoding", "urlDecode")  -> "url_decode"
-    ("Encoding", "hexEncode")           -> "hex_encode"
-    ("Sky.Core.Encoding", "hexEncode")  -> "hex_encode"
-    ("Encoding", "hexDecode")           -> "hex_decode"
-    ("Sky.Core.Encoding", "hexDecode")  -> "hex_decode"
+    -- Renamed (was hex_encode/hex_decode) to avoid colliding with
+    -- user-FFI bindings to the `hex` crate (examples/rust/16-hex).
+    ("Encoding", "hexEncode")           -> "encoding_hex_encode"
+    ("Sky.Core.Encoding", "hexEncode")  -> "encoding_hex_encode"
+    ("Encoding", "hexDecode")           -> "encoding_hex_decode"
+    ("Sky.Core.Encoding", "hexDecode")  -> "encoding_hex_decode"
     -- Regex (sub-A.2)
     ("Regex", "match")              -> "regex_match"
     ("Sky.Core.Regex", "match")     -> "regex_match"
@@ -2317,10 +2319,23 @@ ffiPlaceholder name = "type " ++ name ++ " = String;"
 -- | Generate Cargo.toml for the Rust project
 emitCargoToml :: UsedKernels -> String -> String -> [(String, Toml.RustDepSpec)] -> String
 emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
+    -- The sky_runtime files copied into sky-out/Rust/src/ carry cfg(feature = "X")
+    -- gates inherited from runtime-rust/Cargo.toml. The generated Cargo.toml
+    -- below declares a [features] section enabling everything by default so the
+    -- gates evaluate as true. We also pull in the matching crates directly
+    -- (rather than via the optional-dep mechanism the runtime crate uses) so
+    -- this project compiles standalone with no `--features` flag.
     [ "[package]"
     , "name = \"sky-app\""
     , "version = \"0.1.0\""
     , "edition = \"2021\""
+    , ""
+    , "[features]"
+    , "default = [\"tokio\", \"crypto\", \"json\", \"db\"]"
+    , "tokio = []"
+    , "crypto = []"
+    , "json = []"
+    , "db = []"
     , ""
     , "[dependencies]"
     , "tokio = { version = \"1\", features = [\"rt\", \"rt-multi-thread\", \"macros\", \"time\"] }"
@@ -2332,11 +2347,37 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     [ "serde_json = \"1\""
     , "sha2 = \"0.10\""
     ] ++
+    -- Sub-project A — stdlib kernel crates. Always pulled in because
+    -- Project.hs declares the corresponding sky_runtime modules in mod.rs
+    -- unconditionally. Mostly small pure-Rust crates; cold-build impact is
+    -- modest. When sub-A modules become demand-loaded these can match.
+    --
+    -- Skip names already declared by the user in [rust.dependencies] — Cargo
+    -- errors on duplicate keys, and a user-declared entry takes precedence.
+    [ name ++ " = " ++ spec
+    | (name, spec) <-
+        [ ("regex",            "\"1\"")
+        , ("base64",           "\"0.22\"")
+        , ("hex",              "\"0.4\"")
+        , ("percent-encoding", "\"2\"")
+        , ("chrono",           "\"0.4\"")
+        , ("chrono-tz",        "\"0.10\"")
+        , ("rust_decimal",     "{ version = \"1\", features = [\"serde\"] }")
+        , ("hmac",             "\"0.12\"")
+        , ("sha1",             "\"0.10\"")
+        , ("md-5",             "\"0.10\"")
+        , ("subtle",           "\"2\"")
+        , ("rsa",              "{ version = \"0.9\", features = [\"sha2\"] }")
+        , ("jsonwebtoken",     "\"9\"")
+        ]
+    , name `notElem` userDepNames
+    ] ++
     [ emitDepLine name spec
     | (name, spec) <- rustDeps
     , not (null name)
     ]
   where
+    userDepNames = [ n | (n, _) <- rustDeps, not (null n) ]
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"

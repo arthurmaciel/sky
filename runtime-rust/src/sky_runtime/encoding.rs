@@ -37,12 +37,12 @@ pub fn url_decode<E: From<String>>(s: String) -> SkyResult<E, String> {
 }
 
 /// Sky `hexEncode : String -> String`
-pub fn hex_encode(s: String) -> String {
+pub fn encoding_hex_encode(s: String) -> String {
     hex::encode(s.as_bytes())
 }
 
 /// Sky `hexDecode : String -> Result Error String`
-pub fn hex_decode<E: From<String>>(s: String) -> SkyResult<E, String> {
+pub fn encoding_hex_decode<E: From<String>>(s: String) -> SkyResult<E, String> {
     match hex::decode(&s) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(out) => SkyResult::Ok(out),
@@ -87,17 +87,17 @@ mod tests {
 
     #[test]
     fn test_hex_roundtrip() {
-        let encoded = hex_encode("Hi!".to_string());
+        let encoded = encoding_hex_encode("Hi!".to_string());
         assert_eq!(encoded, "486921");
-        let decoded: SkyResult<String, String> = hex_decode(encoded);
+        let decoded: SkyResult<String, String> = encoding_hex_decode(encoded);
         assert!(matches!(decoded, SkyResult::Ok(ref s) if s == "Hi!"));
     }
 
     #[test]
-    fn test_hex_decode_invalid() {
-        let bad: SkyResult<String, String> = hex_decode("zz".to_string());
+    fn test_encoding_hex_decode_invalid() {
+        let bad: SkyResult<String, String> = encoding_hex_decode("zz".to_string());
         assert!(matches!(bad, SkyResult::Err(_)));
-        let odd: SkyResult<String, String> = hex_decode("a".to_string());
+        let odd: SkyResult<String, String> = encoding_hex_decode("a".to_string());
         assert!(matches!(odd, SkyResult::Err(_)));
     }
 }
