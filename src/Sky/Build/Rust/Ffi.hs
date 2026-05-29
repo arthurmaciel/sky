@@ -19,7 +19,7 @@ module Sky.Build.Rust.Ffi
 
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BL
-import Data.Char (isAlphaNum, isDigit, isLower, isUpper, toUpper, toLower)
+import Data.Char (isAlpha, isAlphaNum, isDigit, isLower, isUpper, toUpper, toLower)
 import Data.List (intercalate, isPrefixOf, stripPrefix)
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -227,25 +227,100 @@ okTypeOfResult s0 =
           | otherwise            = go d (c:acc) cs
 
 
--- | Classification of a read-only byte-sequence Rust type.
-data ByteKind = BSlice | BVec | BArr Int | BRefArr Int
+-- | Shape of a slice/array Rust type.
+data SeqShape = Slice | Owned | Arr Int | RefArr Int
+  deriving (Show, Eq)
 
--- | Classify a raw Rust type as a byte sequence (mirrors the inspector's
--- is_byte_seq). N is parsed from `[u8; N]` / `&[u8; N]`.
-byteSeqKind :: String -> Maybe ByteKind
-byteSeqKind raw =
-    case trimStr raw of
-        "&[u8]"   -> Just BSlice
-        "Vec<u8>" -> Just BVec
-        s -> case arrN "&[u8; " s of
-               Just n  -> Just (BRefArr n)
-               Nothing -> BArr <$> arrN "[u8; " s
+-- | Element kind. ElemU8 is the byte-sequence fast path (List Int via
+-- to_u8_vec / from_u8_slice / to_u8_array — the existing v1 helpers).
+-- ElemGeneral carries the (rust_type, sky_type) of a non-byte coercible
+-- element (e.g. ("String","String"), ("f64","Float")).
+data SeqElem = ElemU8
+             | ElemGeneral String String   -- (elem rust_type, elem sky_type)
+  deriving (Show, Eq)
+
+data SeqKind = SeqKind SeqShape SeqElem
+  deriving (Show, Eq)
+
+-- | Classify a raw Rust type as a Sky-coercible sequence (mirrors the
+-- inspector's is_coercible_seq). Returns the shape and element kind.
+-- N is parsed from `[T; N]` / `&[T; N]`. Excludes &mut [T] and non-coercible
+-- elements (nested generics, borrowed elements).
+seqKind :: String -> Maybe SeqKind
+seqKind raw =
+    let s = trimStr raw in
+    if "&mut " `isPrefixOf` s then Nothing
+    else case s of
+        "&[u8]"   -> Just (SeqKind Slice ElemU8)
+        "Vec<u8>" -> Just (SeqKind Owned ElemU8)
+        _ -> case stripPrefix "&[u8; " s of
+               Just rest | Just n <- digitsBeforeClose rest ->
+                 Just (SeqKind (RefArr n) ElemU8)
+               _ -> case stripPrefix "[u8; " s of
+                 Just rest | Just n <- digitsBeforeClose rest ->
+                   Just (SeqKind (Arr n) ElemU8)
+                 _ -> seqGeneral s
   where
-    arrN pfx s = do
-        rest <- stripPrefix pfx s
+    digitsBeforeClose rest =
         case span (/= ']') rest of
             (digits, "]") | not (null digits) && all isDigit digits -> Just (read digits)
             _ -> Nothing
+
+    seqGeneral s =
+        let try shape e = if isCoercibleElem e
+                          then Just (SeqKind shape (ElemGeneral e (skyOfElem e)))
+                          else Nothing
+        in case stripPrefix "Vec<" s of
+             Just rest | Just e <- stripSuffix' ">" rest -> try Owned (trimStr e)
+             _ -> case stripPrefix "&[" s of
+               Just rest | Just inner <- stripSuffix' "]" rest ->
+                 case break (== ';') inner of
+                   (e, ';':n) -> case reads (trimStr n) :: [(Int,String)] of
+                                   [(k, "")] -> try (RefArr k) (trimStr e)
+                                   _ -> Nothing
+                   (e, "")    -> try Slice (trimStr e)
+                   _ -> Nothing
+               _ -> case stripPrefix "[" s of
+                 Just rest | Just inner <- stripSuffix' "]" rest ->
+                   case break (== ';') inner of
+                     (e, ';':n) -> case reads (trimStr n) :: [(Int,String)] of
+                                     [(k, "")] -> try (Arr k) (trimStr e)
+                                     _ -> Nothing
+                     _ -> Nothing
+                 _ -> Nothing
+
+    isCoercibleElem e =
+        let t = trimStr e in
+        not (null t)
+        && not ('&' `elem` t || ' ' `elem` t || '<' `elem` t
+                || '[' `elem` t || ',' `elem` t)
+        && (t `elem` knownPrim
+            || (not (null t)
+                && (isAlpha (head t) || head t == '_')))
+      where
+        knownPrim = ["u8","u16","u32","u64","usize"
+                    ,"i8","i16","i32","i64","isize"
+                    ,"f32","f64","bool","char","str"
+                    ,"String","OsString","PathBuf"]
+
+    skyOfElem e
+        | e `elem` intLike   = "Int"
+        | e `elem` floatLike = "Float"
+        | e == "bool"        = "Bool"
+        | e == "char"        = "Char"
+        | e == "str" || e == "String" || e == "OsString" || e == "PathBuf" = "String"
+        | otherwise          = e
+      where
+        intLike   = ["u8","u16","u32","u64","usize"
+                    ,"i8","i16","i32","i64","isize"]
+        floatLike = ["f32","f64"]
+
+    -- Manual suffix-strip; modern Data.List.stripSuffix is also fine if it's imported.
+    stripSuffix' suf xs =
+        let n = length xs - length suf in
+        if n >= 0 && drop n xs == suf
+        then Just (take n xs)
+        else Nothing
 
 
 -- | Translate a raw Rust (Ok-)type into the wrapper's declared inner return
@@ -268,14 +343,21 @@ translateRustRet :: String -> (String, String -> String)
 translateRustRet raw0 =
     let raw = trimStr raw0 in
     if raw == "" || raw == "()" then ("()", id)
-    else case byteSeqKind raw of
-      Just bk ->
+    else case seqKind raw of
+      Just (SeqKind shape ElemU8) ->
+        -- BYTE PATH (byte-identical to v1)
         ( "Vec<i64>"
-        , \e -> case bk of
-            BVec      -> "from_u8_slice(&" ++ e ++ ")"
-            BArr _    -> "from_u8_slice(&" ++ e ++ ")"
-            BSlice    -> "from_u8_slice(" ++ e ++ ")"
-            BRefArr _ -> "from_u8_slice(" ++ e ++ ")" )
+        , \e -> case shape of
+            Owned    -> "from_u8_slice(&" ++ e ++ ")"
+            Arr _    -> "from_u8_slice(&" ++ e ++ ")"
+            Slice    -> "from_u8_slice(" ++ e ++ ")"
+            RefArr _ -> "from_u8_slice(" ++ e ++ ")" )
+      Just (SeqKind _ (ElemGeneral _ _)) ->
+        -- Reserved for Task 7; until then drop into Nothing-equivalent
+        -- by emitting an identity that won't be reached (inspector Task 5
+        -- now lifts non-byte sequences; the codegen for those is added in
+        -- Task 7).
+        ( "()", \_ -> "()" )
       Nothing -> case stripGeneric1 "Option" raw of
         Just inner ->
           let (dt, co) = translateRustRet inner
@@ -437,11 +519,12 @@ emitRustFile kernelName pkg =
                 let rawTy  = if j < nRawRustParam then rawRustParamTypes !! j else ""
                     declTy = paramTypes !! j
                     base   = arg j
-                in case byteSeqKind rawTy of
-                    Just BSlice      -> "&to_u8_vec(&" ++ base ++ ")"
-                    Just BVec        -> "to_u8_vec(&" ++ base ++ ")"
-                    Just (BArr _)    -> "b" ++ show j        -- prelude local (owned)
-                    Just (BRefArr _) -> "&b" ++ show j       -- prelude local (by ref)
+                in case seqKind rawTy of
+                    Just (SeqKind Slice    ElemU8) -> "&to_u8_vec(&" ++ base ++ ")"
+                    Just (SeqKind Owned    ElemU8) -> "to_u8_vec(&" ++ base ++ ")"
+                    Just (SeqKind (Arr _)    ElemU8) -> "b" ++ show j        -- prelude local (owned)
+                    Just (SeqKind (RefArr _) ElemU8) -> "&b" ++ show j       -- prelude local (by ref)
+                    Just (SeqKind _ (ElemGeneral _ _)) -> base   -- placeholder, replaced in Task 7
                     Nothing ->
                         if declTy == "String"
                         then "&" ++ base          -- Sky String → &str
@@ -519,10 +602,10 @@ emitRustFile kernelName pkg =
                   ++ "SkyResult::Err(e) => return SkyResult::Err(e), };"
                 | j <- [0 .. nParams - 1]
                 , let rawTy = if j < nRawRustParam then rawRustParamTypes !! j else ""
-                , n <- case byteSeqKind rawTy of
-                         Just (BArr m)    -> [m]
-                         Just (BRefArr m) -> [m]
-                         _                -> []
+                , n <- case seqKind rawTy of
+                         Just (SeqKind (Arr m)    ElemU8) -> [m]
+                         Just (SeqKind (RefArr m) ElemU8) -> [m]
+                         _                                -> []
                 ]
         in if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
            then []
