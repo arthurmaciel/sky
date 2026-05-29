@@ -1,0 +1,99 @@
+//! JWT kernels for Sky.Core.Jwt — HS256 / RS256 encode + decode.
+
+use super::SkyResult;
+
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde_json::Value as JsonValue;
+
+/// Sky `Jwt_encodeHs256 : String -> String -> Result Error String`
+pub fn jwt_encode_hs256<E: From<String>>(secret: String, claims_json: String) -> SkyResult<E, String> {
+    let claims: JsonValue = match serde_json::from_str(&claims_json) {
+        Ok(v) => v,
+        Err(e) => return SkyResult::Err(format!("jwt-encode: bad claims json: {}", e).into()),
+    };
+    let header = Header::new(Algorithm::HS256);
+    let key = EncodingKey::from_secret(secret.as_bytes());
+    match encode(&header, &claims, &key) {
+        Ok(t) => SkyResult::Ok(t),
+        Err(e) => SkyResult::Err(format!("jwt-encode: {}", e).into()),
+    }
+}
+
+/// Sky `Jwt_decodeHs256 : String -> String -> Result Error String`
+pub fn jwt_decode_hs256<E: From<String>>(secret: String, token: String) -> SkyResult<E, String> {
+    let key = DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;
+    validation.validate_nbf = true;
+    validation.required_spec_claims.clear();
+    match decode::<JsonValue>(&token, &key, &validation) {
+        Ok(data) => match serde_json::to_string(&data.claims) {
+            Ok(s) => SkyResult::Ok(s),
+            Err(e) => SkyResult::Err(format!("jwt-decode: re-encode claims: {}", e).into()),
+        },
+        Err(e) => SkyResult::Err(format!("jwt-decode: {}", e).into()),
+    }
+}
+
+/// Sky `Jwt_encodeRs256 : String -> String -> Result Error String`
+pub fn jwt_encode_rs256<E: From<String>>(key_pem: String, claims_json: String) -> SkyResult<E, String> {
+    let claims: JsonValue = match serde_json::from_str(&claims_json) {
+        Ok(v) => v,
+        Err(e) => return SkyResult::Err(format!("jwt-encode-rs: bad claims: {}", e).into()),
+    };
+    let header = Header::new(Algorithm::RS256);
+    let key = match EncodingKey::from_rsa_pem(key_pem.as_bytes()) {
+        Ok(k) => k,
+        Err(e) => return SkyResult::Err(format!("jwt-encode-rs: key: {}", e).into()),
+    };
+    match encode(&header, &claims, &key) {
+        Ok(t) => SkyResult::Ok(t),
+        Err(e) => SkyResult::Err(format!("jwt-encode-rs: {}", e).into()),
+    }
+}
+
+/// Sky `Jwt_decodeRs256 : String -> String -> Result Error String`
+pub fn jwt_decode_rs256<E: From<String>>(key_pem: String, token: String) -> SkyResult<E, String> {
+    let key = match DecodingKey::from_rsa_pem(key_pem.as_bytes()) {
+        Ok(k) => k,
+        Err(e) => return SkyResult::Err(format!("jwt-decode-rs: key: {}", e).into()),
+    };
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_exp = true;
+    validation.validate_nbf = true;
+    validation.required_spec_claims.clear();
+    match decode::<JsonValue>(&token, &key, &validation) {
+        Ok(data) => match serde_json::to_string(&data.claims) {
+            Ok(s) => SkyResult::Ok(s),
+            Err(e) => SkyResult::Err(format!("jwt-decode-rs: re-encode: {}", e).into()),
+        },
+        Err(e) => SkyResult::Err(format!("jwt-decode-rs: {}", e).into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hs256_roundtrip() {
+        let secret = "my-secret".to_string();
+        let claims = r#"{"sub":"alice","exp":9999999999}"#.to_string();
+        let token: SkyResult<String, String> = jwt_encode_hs256(secret.clone(), claims.clone());
+        let token = match token { SkyResult::Ok(t) => t, SkyResult::Err(e) => panic!("encode: {}", e) };
+        let decoded: SkyResult<String, String> = jwt_decode_hs256(secret, token);
+        let decoded = match decoded { SkyResult::Ok(s) => s, SkyResult::Err(e) => panic!("decode: {}", e) };
+        assert!(decoded.contains("alice"));
+    }
+
+    #[test]
+    fn test_hs256_wrong_secret_fails() {
+        let token: SkyResult<String, String> = jwt_encode_hs256("right".to_string(),
+            r#"{"sub":"x","exp":9999999999}"#.to_string());
+        let token = match token {
+            SkyResult::Ok(t) => t, SkyResult::Err(e) => panic!("encode: {}", e),
+        };
+        let bad: SkyResult<String, String> = jwt_decode_hs256("wrong".to_string(), token);
+        assert!(matches!(bad, SkyResult::Err(_)));
+    }
+}

@@ -41,3 +41,8 @@ pub use encoding::*;
 
 pub mod regex_kernel;
 pub use regex_kernel::*;
+
+#[cfg(feature = "json")]
+pub mod jwt;
+#[cfg(feature = "json")]
+pub use jwt::*;
