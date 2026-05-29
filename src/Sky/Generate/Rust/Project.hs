@@ -79,13 +79,18 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    ,"pub mod config;","pub mod core;","pub mod task;"
                    ,"pub mod log;","pub mod system;","pub mod time;"
                    ,"pub mod random;","pub mod file;","pub mod crypto;"
-                   ,"pub mod json;"]
+                   ,"pub mod json;"
+                   -- Sub-project A — stdlib kernel modules (sub-A.1, A.2, A.4, A.6)
+                   ,"pub mod encoding;","pub mod regex_kernel;","pub mod jwt;"
+                   ,"pub mod decimal;"]
         dbMod = if usesDb then ["pub mod db;"] else []
         baseUse = ["pub use config::*;","pub use core::*;"
                   ,"pub use task::*;","pub use log::*;"
                   ,"pub use system::*;","pub use time::*;"
                   ,"pub use random::*;","pub use file::*;"
-                  ,"pub use crypto::*;","pub use json::*;"]
+                  ,"pub use crypto::*;","pub use json::*;"
+                  ,"pub use encoding::*;","pub use regex_kernel::*;"
+                  ,"pub use jwt::*;","pub use decimal::*;"]
         dbUse = if usesDb then ["pub use db::*;"] else []
         modCode = unlines (baseMods ++ dbMod ++ baseUse ++ dbUse)
     writeFile modPath modCode
