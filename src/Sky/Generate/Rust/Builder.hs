@@ -1090,6 +1090,23 @@ emitPinnedTask ctx solved (Ann.At _ (Can.Call fnExpr taskArgs)) =
     in fnStr ++ "::<_, ()>(" ++ intercalate ", " argStrs ++ ")"
 emitPinnedTask ctx _ other = exprToRustString ctx other  -- fallback: no pin
 
+-- | Split a Sky kernel-name like "Decimal_fromInt" into ("Decimal", "fromInt").
+-- The FIRST underscore is the module/fn boundary; subsequent underscores
+-- stay in the function name ("Decimal_toStringFixed" -> ("Decimal", "toStringFixed")).
+-- Used by the Ffi.callPure peephole to feed kernelToRust.
+splitKernelName :: String -> (String, String)
+splitKernelName s = case break (== '_') s of
+    (m, '_' : f) -> (m, f)
+    (m, "")      -> (m, "")  -- malformed; kernelToRust returns the snake-cased default
+
+-- | Argument emission inside a matched Ffi.callPure peephole.
+-- `Ffi.toAny x` collapses to bare `x` — the value retains its concrete Rust
+-- type. Everything else routes to the standard expression emit.
+peepholeArg :: EmitCtx -> Can.Expr -> String
+peepholeArg ctx (Ann.At _ (Can.Call (Ann.At _ (Can.VarKernel "Ffi" "toAny")) [inner])) =
+    exprToRustString ctx inner
+peepholeArg ctx e = exprToRustString ctx e
+
 exprToRustInner :: EmitCtx -> Can.Expr_ -> String
 exprToRustInner ctx e = case e of
     Can.VarLocal name -> rustSafeIdent name ++ if name `Set.member` ecCloneVars ctx && not (name `Set.member` ecCopyVars ctx) then ".clone()" else ""
@@ -1143,6 +1160,21 @@ exprToRustInner ctx e = case e of
             innerMulti = [ v | (v, c) <- Map.toList counts, c >= 2 ]
             ctx' = ctx { ecCloneVars = Set.fromList innerMulti, ecCopyVars = ecCopyVars ctx }
         in "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ exprToRustString ctx' body ++ " }"
+    -- Ffi.callPure peephole — literal kernel name + literal args list -> direct
+    -- kernel call. Splits "Decimal_fromInt" -> ("Decimal", "fromInt"), looks up
+    -- kernelToRust, emits the resolved kernel name with the args spliced inline.
+    -- Ffi.toAny inside a matched args list collapses to identity (see peepholeArg).
+    -- The deprecated Ffi.call alias gets the same treatment.
+    -- Non-matched shapes (variable kernel name, non-literal args list) fall
+    -- through to the existing Can.Call arm, which routes to the polyfill via
+    -- kernelToRust's "Ffi.callPure" -> "ffi_call_pure_polyfill" arm.
+    Can.Call (Ann.At _ (Can.VarKernel "Ffi" fnName))
+             [Ann.At _ (Can.Str kernelName), Ann.At _ (Can.List argExprs)]
+        | fnName == "callPure" || fnName == "call" ->
+            let (skyMod, skyFn) = splitKernelName kernelName
+                rustFn = kernelToRust skyMod skyFn
+                args = map (peepholeArg ctx) argExprs
+            in rustFn ++ "(" ++ intercalate ", " args ++ ")"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             succeedArity = case fn of
