@@ -10372,6 +10372,37 @@ letBindingType solvedTypes _name body@(A.At r _) =
     -- (B) Type gate: the rendered Go type must be emittable AND
     -- not contain the `any` token anywhere (a `func(P) any` slot
     -- typed routing would strip a sharper source `func(P) T1`).
+    --
+    -- v0.15.x cycle-3 audit gap C13 cross-reference -----------
+    --
+    -- The body-shape whitelist below is a WORKAROUND for the
+    -- string-based `coerceArg` machinery (audit Prior #7 / Gap
+    -- A12 in `docs/v0.15.x-hardening/audits/CYCLE-03-auditor.md`).
+    -- Specific failing path on non-whitelisted shapes:
+    --
+    --   coerceArg → coerceToFieldType → rt.AsListT[T]
+    --
+    -- — string-parsing the type slot from a typed-routed call
+    -- whose underlying value is a `Result`-wrapped FFI return
+    -- (e.g. `Ffi.callPure "Money_allocate"`) emits a list-cast
+    -- that strips the `Ok` wrap and yields `[]`, silently
+    -- breaking downstream `List.map` etc.
+    --
+    -- Locked by the live regression gate in
+    -- `examples/00-standard-libs/src/Main.sky:569` (the
+    -- `Money.allocate 3 (Money.fromMajor USD 100)` assertion).
+    -- Drop the whitelist without P10/P11 and that assertion
+    -- silently returns `[]` instead of three parts.
+    --
+    -- Tracking: cycle-1 P9 ("drop canRouteTyped whitelist") is
+    -- DEFERRED to post-P37b per cycle-3 plan
+    -- (`docs/v0.15.x-hardening/plans/CYCLE-03-planner.md` tag
+    -- allocation table).  The proper structural fix is P10/P11
+    -- (structural `GoType` ADT replaces string-based parsing in
+    -- `coerceArg` / `coerceToFieldType`) — once those land, the
+    -- whitelist becomes droppable and `canRouteTyped` can collapse
+    -- to `True` for every shape.  Until then DO NOT broaden this
+    -- list; broaden it and the Money regression returns silently.
     let canRouteTyped = case body of
             A.At _ (Can.Record _) -> True
             A.At _ (Can.Lambda _ _) -> True
@@ -10743,6 +10774,16 @@ caseToGo mExpectedGo subject branches =
                 GoIr.GoShortDecl subjectName (coerceSubject typeName goSubject)
             Nothing ->
                 GoIr.GoShortDecl subjectName goSubject
+        -- Cycle 4 D2: a case whose only branch is `_ -> ...` (or
+        -- `var -> ...` where `var` is not referenced in the body)
+        -- never reads `__subject`, and Go rejects the unused
+        -- declaration with `declared but not used: __subject`.
+        -- Always emit a blank-identifier discard right after the
+        -- subject declaration — it both pacifies Go for the
+        -- catchall-only shape and matches Sky's `let _ = TaskExpr`
+        -- auto-force convention for "keep evaluated, ignore result".
+        subjectDiscard = GoIr.GoExprStmt
+            (GoIr.GoRaw ("_ = " ++ subjectName))
         branchStmts = concatMap (caseBranchToStmts subjectName) branches
         -- P3: exhaustiveness is verified before codegen, so this arm is
         -- statically unreachable. Audit P0-5: route through
@@ -10755,7 +10796,7 @@ caseToGo mExpectedGo subject branches =
         unreachableStmt = GoIr.GoExprStmt
             (GoIr.GoRaw ("_ = rt.Unreachable(\"case/" ++ subjectName ++ "\")"))
         raw = GoIr.GoBlock
-                (subjectDecl : branchStmts ++ [unreachableStmt])
+                (subjectDecl : subjectDiscard : branchStmts ++ [unreachableStmt])
                 (GoIr.GoRaw "nil")  -- unreachable, branches return
     in case mExpectedGo of
         Just gt -> typeIIFE gt raw
@@ -10864,13 +10905,19 @@ tcoBodyStmts home fnName arity paramNames paramGoTys goRetType = lowerTail
                         | otherwise ->
                             GoIr.GoTypeAssert (anyWrap rawSubjExpr) typeName
                 subjStmt = GoIr.GoShortDecl subjectName subjExpr
+                -- Cycle 4 D2 (TCO path): mirror the non-TCO caseToGo
+                -- discard so a tail-position `case` whose only branch
+                -- is `_ -> ...` doesn't emit an unused-var Go build
+                -- error.
+                subjDiscardStmt = GoIr.GoExprStmt
+                    (GoIr.GoRaw ("_ = " ++ subjectName))
                 branchStmts = concatMap
                     (caseBranchToStmtsWith subjectName tcoLeaf) branches
                 fallthroughStmt = GoIr.GoExprStmt
                     (GoIr.GoCall
                         (GoIr.GoQualified "rt" "Unreachable")
                         [GoIr.GoStringLit "tco/case"])
-            in subjStmt : branchStmts ++ [fallthroughStmt]
+            in subjStmt : subjDiscardStmt : branchStmts ++ [fallthroughStmt]
 
         Can.If branches elseExpr ->
             ifToTcoStmts branches elseExpr

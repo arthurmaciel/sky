@@ -33,6 +33,7 @@ extra-source-files:
     runtime-go/rt/jobs/*.go
     runtime-go/rt/telemetry/*.go
     sky-stdlib/Sky/Core/*.sky
+    sky-stdlib/Sky/Core/Http/*.sky
     sky-stdlib/Sky/Core/Json/*.sky
     sky-stdlib/Sky/Core/Json/Decode/*.sky
     sky-stdlib/Sky/*.sky
@@ -274,6 +275,8 @@ test-suite sky-tests
       Sky.Canonicalise.KernelFallbackSpec
       Sky.Canonicalise.UnboundSpec
       Sky.Canonicalise.QualifiedTypeAliasSpec
+      Sky.Canonicalise.DualImportCollisionSpec
+      Sky.Canonicalise.AliasNameCollisionSpec
       Sky.Type.ExhaustivenessSpec
       Sky.Type.AnyWildcardSpec
       Sky.Type.NumericBinopSpec
@@ -288,8 +291,14 @@ test-suite sky-tests
       Sky.Build.EntryLocalShadowsDepSpec
       Sky.Build.CaseSubjectNameShadowSpec
       Sky.Build.FfiKernelAliasSpec
+      Sky.Build.PubSubPublishTaskSpec
+      Sky.Build.PubSubPublishNoEchoSpec
       Sky.Parse.MultiLineCaseSubjectSpec
+      Sky.Parse.MultiLineCaseKeywordSpec
       Sky.Parse.MultiLineSignatureSpec
+      Sky.Parse.RowPolyRecordAnnotationSpec
+      Sky.Parse.MultilineInterpolationEscapeSpec
+      Sky.Build.CaseCatchallSubjectDiscardSpec
       Sky.Type.InstanceCaptureSpec
       Sky.Type.SolvedTypesRegionMapSpec
       Sky.Format.FormatSpec
@@ -324,6 +333,7 @@ test-suite sky-tests
       Sky.Reporting.DiagnosticSpec
       Sky.Diagnostics.CoverageSpec
       Sky.Build.KernelSigCoverageSpec
+      Sky.Build.KernelStdlibCoverageSpec
       Sky.Build.HeapBoundedHmSpec
       Sky.Build.IORefBoundarySpec
       Sky.Build.SolverBudgetSpec

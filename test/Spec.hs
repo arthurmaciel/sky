@@ -16,6 +16,8 @@ import qualified Sky.Canonicalise.ExposingSpec
 import qualified Sky.Canonicalise.KernelFallbackSpec
 import qualified Sky.Canonicalise.UnboundSpec
 import qualified Sky.Canonicalise.QualifiedTypeAliasSpec
+import qualified Sky.Canonicalise.DualImportCollisionSpec
+import qualified Sky.Canonicalise.AliasNameCollisionSpec
 import qualified Sky.Type.ExhaustivenessSpec
 import qualified Sky.Type.AnyWildcardSpec
 import qualified Sky.Type.NumericBinopSpec
@@ -30,8 +32,14 @@ import qualified Sky.Build.LetForwardRefSpec
 import qualified Sky.Build.EntryLocalShadowsDepSpec
 import qualified Sky.Build.CaseSubjectNameShadowSpec
 import qualified Sky.Build.FfiKernelAliasSpec
+import qualified Sky.Build.PubSubPublishTaskSpec
+import qualified Sky.Build.PubSubPublishNoEchoSpec
 import qualified Sky.Parse.MultiLineCaseSubjectSpec
+import qualified Sky.Parse.MultiLineCaseKeywordSpec
 import qualified Sky.Parse.MultiLineSignatureSpec
+import qualified Sky.Parse.RowPolyRecordAnnotationSpec
+import qualified Sky.Parse.MultilineInterpolationEscapeSpec
+import qualified Sky.Build.CaseCatchallSubjectDiscardSpec
 import qualified Sky.Format.FormatSpec
 import qualified Sky.Build.GoKeywordCollisionSpec
 import qualified Sky.Build.NestedPatternSpec
@@ -66,6 +74,7 @@ import qualified Sky.Diagnostics.CoverageSpec
 import qualified Sky.Type.InstanceCaptureSpec
 import qualified Sky.Type.SolvedTypesRegionMapSpec
 import qualified Sky.Build.KernelSigCoverageSpec
+import qualified Sky.Build.KernelStdlibCoverageSpec
 import qualified Sky.Build.HeapBoundedHmSpec
 import qualified Sky.Build.SolverBudgetSpec
 import qualified Sky.Build.UnreachableGateSpec
@@ -150,6 +159,23 @@ main = hspec $ do
     -- rejected with the cryptic "Color vs Color" message.
     describe "Sky.Canonicalise.QualifiedTypeAlias"
                                          Sky.Canonicalise.QualifiedTypeAliasSpec.spec
+    -- Cycle 4 D5: two imports with the same default qualifier (e.g.
+    -- `import State` + `import App.State` — both last-segment `State`)
+    -- silently miscompiled — the `_importAliases` last-wins vs
+    -- `_qualVars` union mismatch produced the dishonest "Model vs
+    -- Model" type error. Now rejected at canonicalisation time with
+    -- an explicit fix-it suggesting `as Alias`.
+    describe "Sky.Canonicalise.DualImportCollision"
+                                         Sky.Canonicalise.DualImportCollisionSpec.spec
+    -- Cycle 4 #350 / #361 v2: cross-module type-alias NAME collision.
+    -- Two deps each exposing `Model` under disambiguating `as Alias`
+    -- clauses (#350) — closes the dep-alias map collapsing on bare
+    -- name. AND qualified type reference through a re-exporting
+    -- transit module (#361) — the Dashboard regression that reverted
+    -- PR #111. Both close in one shot: (home, name) primary lookup +
+    -- bare-name fallback for unique bodies.
+    describe "Sky.Canonicalise.AliasNameCollision"
+                                         Sky.Canonicalise.AliasNameCollisionSpec.spec
     describe "Sky.Type.Exhaustiveness"   Sky.Type.ExhaustivenessSpec.spec
     -- Cross-branch HM `any` wildcard fix (compiler bug #3). Distinct
     -- occurrences of `any` in source types must NOT share a single
@@ -192,8 +218,30 @@ main = hspec $ do
     describe "Sky.Build.EntryLocalShadowsDep" Sky.Build.EntryLocalShadowsDepSpec.spec
     describe "Sky.Build.CaseSubjectNameShadow" Sky.Build.CaseSubjectNameShadowSpec.spec
     describe "Sky.Build.FfiKernelAlias" Sky.Build.FfiKernelAliasSpec.spec
+    -- Cycle 4 PT: Task-shaped Std.PubSub.publish — callable from any
+    -- context (raw Sky.Http.Server api handlers / post-init goroutines
+    -- / scheduled jobs), complements Cmd.publish which is bound to
+    -- the Sky.Live update-return tuple.
+    describe "Sky.Build.PubSubPublishTask" Sky.Build.PubSubPublishTaskSpec.spec
+    -- Cycle 4 NE / issue #359: Cmd.publishNoEcho + PubSub.publishNoEcho —
+    -- opt-out echo for "instant feedback for publisher" pattern. Saves
+    -- the broker round-trip; in v0.16+ cross-process broker tiers the
+    -- saved hop is 10-100ms+ of latency.
+    describe "Sky.Build.PubSubPublishNoEcho" Sky.Build.PubSubPublishNoEchoSpec.spec
     describe "Sky.Parse.MultiLineCaseSubject" Sky.Parse.MultiLineCaseSubjectSpec.spec
+    describe "Sky.Parse.MultiLineCaseKeyword"
+        Sky.Parse.MultiLineCaseKeywordSpec.spec
     describe "Sky.Parse.MultiLineSignature" Sky.Parse.MultiLineSignatureSpec.spec
+    describe "Sky.Parse.RowPolyRecordAnnotation"
+        Sky.Parse.RowPolyRecordAnnotationSpec.spec
+    -- Cycle 4 D3: `\{{NAME}}` escape for literal `{{NAME}}` placeholders
+    -- in triple-quoted strings (Mustache / Handlebars / shell-script
+    -- templating). Pre-fix the desugarer ate every `{{ident}}` as a Sky
+    -- variable reference; codegen then emitted `undefined: NAME`.
+    describe "Sky.Parse.MultilineInterpolationEscape"
+        Sky.Parse.MultilineInterpolationEscapeSpec.spec
+    describe "Sky.Build.CaseCatchallSubjectDiscard"
+        Sky.Build.CaseCatchallSubjectDiscardSpec.spec
     -- Closed-record exactness + cross-module externals registration:
     --   1. unifyRecords (Sky.Type.Unify) used to silently merge field-
     --      mismatched closed records under a fresh extension. Now
@@ -407,6 +455,10 @@ main = hspec $ do
     -- Without HM sigs, user pattern-matching against the wrapper
     -- silently degrades to `any` and surfaces as runtime panics.
     describe "Sky.Build.KernelSigCoverage" Sky.Build.KernelSigCoverageSpec.spec
+    -- Cycle 4 D1: every Ffi.kernel "Name" declaration in
+    -- sky-stdlib/ must have a matching Kernel.lookup entry. Closes
+    -- the `String.toList undefined` / `Math.abs undefined` class.
+    describe "Sky.Build.KernelStdlibCoverage" Sky.Build.KernelStdlibCoverageSpec.spec
     -- Limitation #17: Std.Ui-cascading HM constraint pathology that
     -- pre-fix OOMed at 4-5 GB. Spec re-runs sky check on the bak
     -- reproducer under a tight heap cap.

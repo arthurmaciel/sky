@@ -508,8 +508,9 @@ Each binding is either:
 | Module | Path | Key functions |
 |---|---|---|
 | `Task` | `Sky.Core.Task` | succeed, fail, map, andThen, perform, sequence, parallel, lazy, run, fromResult, andThenResult, mapError, onError |
-| `Cmd` | `Std.Cmd` | none, batch, perform |
-| `Sub` | `Std.Sub` | none, every |
+| `Cmd` | `Std.Cmd` | none, batch, perform, publish (echo-by-default pub/sub from update return), publishNoEcho (opt-out echo — broker skips publisher's own subscription) |
+| `Sub` | `Std.Sub` | none, every, batch, subscribeTopic (pub/sub receive) |
+| `PubSub` | `Std.PubSub` | publish (Task-shaped — callable from raw `api` handlers / post-init / scheduled jobs; complements `Cmd.publish` which is bound to update-returns), publishNoEcho (Task-shaped no-echo — sets the broker's SkipOrigin bit for v0.16+ cross-process tier propagation) |
 | `Time` | `Sky.Core.Time` | now, sleep, every, unixMillis, format/formatISO8601/formatRFC3339/formatHTTP, addMillis, diffMillis, timeString |
 | `Std.Time` | `Std.Time` | 32 entries. IANA zones, addMonths/Years (month-end CLAMPED), dayOfWeek (ISO Mon=1..Sun=7), weekOfYear (ISO 8601), startOfDay/Week/Month/Year, diffDays/Hours/Minutes/Seconds. |
 | `Random` | `Sky.Core.Random` | int, float |
@@ -1024,6 +1025,12 @@ html = """<div class="card">
 Single `{` is literal. Interpolation expressions can be
 identifiers, field access (`{{record.field}}`), qualified names
 (`{{String.fromInt n}}`), or function calls.
+
+Escape with backslash: `\{{` emits a literal `{{` (no interpolation).
+Use this to ship Mustache / Handlebars / shell-script placeholders to
+downstream tooling without Sky hijacking them. `\\` collapses to a
+single literal backslash; other `\X` sequences are preserved verbatim
+(regex `\d+`, paths `\test`, etc).
 
 ## Active limitations
 

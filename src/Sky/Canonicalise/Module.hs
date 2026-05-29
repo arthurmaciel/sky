@@ -176,6 +176,14 @@ canonicaliseWithDeps deps srcMod =
         -- P2: reject `import M exposing (name)` when M doesn't export name.
         importHidingErrors = checkImportExposingAgainstDep deps (Src._imports srcMod)
 
+        -- D5 (Cycle 4): reject when two imports bind the SAME qualifier
+        -- but resolve to DIFFERENT canonical modules. Without this guard
+        -- the canonicaliser's `_importAliases` (last-wins) and
+        -- `_qualVars` (union) maps disagree on which module a qualified
+        -- TYPE reference belongs to, producing the dishonest
+        -- "Model vs Model" error at the type checker.
+        importAliasCollisions = detectImportAliasCollisions (Src._imports srcMod)
+
         -- Build environment from imports
         env0 = Env.initialEnv modName
         env1 = foldl (processImportWith deps modName) env0 (Src._imports srcMod)
@@ -216,10 +224,11 @@ canonicaliseWithDeps deps srcMod =
         unboundErrs
             | Map.null deps && hasUserImports = []
             | otherwise = collectUnboundNameErrors env4 srcMod
-    in case (importHidingErrors, collisions, unboundErrs) of
-        (err:_, _, _) -> Left err
-        (_, Just err, _) -> Left err
-        (_, _, err:_) -> Left err
+    in case (importAliasCollisions, importHidingErrors, collisions, unboundErrs) of
+        (err:_, _, _, _) -> Left err
+        (_, err:_, _, _) -> Left err
+        (_, _, Just err, _) -> Left err
+        (_, _, _, err:_) -> Left err
         _ -> Right $ expandModuleAliases depAliasMap Can.Module
             { Can._name    = modName
             , Can._exports = exports
@@ -577,6 +586,134 @@ kernelFunctions :: Map.Map String [String]
 kernelFunctions =
     Map.unionWith (++) staticKernelFunctions
         (unsafePerformIO (readIORef Env.ffiKernelFunctionsRef))
+
+
+-- | Cycle 4 — D5. Detect when two imports bind the SAME qualifier but
+-- resolve to DIFFERENT canonical modules. The dangerous shape is:
+--
+--     import State exposing (Model, initial)
+--     import App.State exposing (defaultModel)
+--
+-- Both imports default their qualifier to `State` (the last segment).
+-- `_importAliases` in the canonicalisation env is a last-wins
+-- `Map String ModuleName.Canonical`, while `_qualVars` is a
+-- union-merged `Map String (Map String VarHome)`. The mismatch causes
+-- qualified TYPE references (`useFn : State.Model`) to silently misroute
+-- to whichever module was imported LAST, while qualified VALUE references
+-- of the SAME qualifier reach BOTH modules' bindings via the unioned map.
+--
+-- Two imports collide ONLY when their canonical-module identity differs.
+-- Kernel modules collapse to their kernel name (so
+-- `import Sky.Core.Time` + `import Std.Time` are both `Time` kernel and
+-- DO NOT collide — they route to the same kernel dispatch table). Two
+-- aliased imports of the SAME module (`import Std.Ui as Ui` plus
+-- `import Std.Ui exposing (Element)`) also resolve to the same canonical
+-- module and do not collide. Only the dishonest cross-module case is
+-- rejected.
+--
+-- The user-facing workaround is `import App.State as AppState`, which
+-- gives each import a distinct qualifier and disambiguates the two
+-- modules at every call site.
+detectImportAliasCollisions :: [Src.Import] -> [String]
+detectImportAliasCollisions imps =
+    let -- For each import, derive (qualifier, canonical-source, region, importPath).
+        -- canonical-source folds kernel modules onto their pseudo-module
+        -- name so multiple kernel paths to the same dispatch table don't
+        -- count as a collision.
+        entries :: [(String, String, A.Region, String)]
+        entries =
+            [ (qualifier, src, region, importPath)
+            | imp <- imps
+            , let segs = case Src._importName imp of A.At _ s -> s
+                  region = case Src._importName imp of A.At r _ -> r
+                  importPath = ModuleName.joinWith "." segs
+                  qualifier = case Src._importAlias imp of
+                      Just alias -> alias
+                      Nothing    -> case segs of
+                          [] -> importPath  -- defensive — parser shouldn't allow
+                          _  -> last segs
+                  src = Map.findWithDefault importPath importPath Env.kernelModules
+            ]
+
+        -- Group entries by qualifier. Earliest-region first per group so
+        -- the error message points at the FIRST import (a stable choice
+        -- for fix-it suggestions).
+        byQualifier :: Map.Map String [(String, A.Region, String)]
+        byQualifier = Map.fromListWith (\old new -> new ++ old)
+            [ (q, [(src, region, importPath)])
+            | (q, src, region, importPath) <- entries
+            ]
+
+        -- Keep only qualifiers where ≥2 DISTINCT canonical sources appear.
+        clashes :: [(String, [(String, A.Region, String)])]
+        clashes =
+            [ (q, group)
+            | (q, group) <- Map.toList byQualifier
+            , length (distinctSources group) >= 2
+            ]
+    in map formatClash clashes
+  where
+    distinctSources :: [(String, A.Region, String)] -> [String]
+    distinctSources xs = Map.keys (Map.fromList [(s, ()) | (s, _, _) <- xs])
+
+    formatClash :: (String, [(String, A.Region, String)]) -> String
+    formatClash (qualifier, group) =
+        let -- Sort by source-region so the leader points at the FIRST
+            -- offending import and the fix suggestion is stable.
+            sorted = sortByRegion group
+            (_, firstRegion, _) = head sorted
+            leader = case firstRegion of
+                A.Region (A.Position r c) _ -> show r ++ ":" ++ show c ++ ": "
+            -- Suggest aliasing the LAST imported colliding module (so
+            -- the user's intent — first import "owns" the qualifier —
+            -- is preserved). Pick a unique alias by camelCasing the
+            -- full canonical path.
+            lastPath = case reverse sorted of
+                ((_, _, p):_) -> p
+                _             -> "Other.Mod"
+            suggestedAlias = camelCasePath lastPath
+            suggestion = "Add `as <Alias>` to one of them, e.g. `import "
+                ++ lastPath ++ " as " ++ suggestedAlias ++ "`."
+            body = "Import error: two imports both bind the qualifier `"
+                ++ qualifier ++ "`:\n"
+                ++ concat
+                    [ "  - import " ++ p
+                       ++ posTag region ++ "\n"
+                    | (_, region, p) <- sorted
+                    ]
+                ++ "  " ++ suggestion
+        in leader ++ body
+
+    -- "App.State" → "AppState"; "Lib.Internal.Foo" → "LibInternalFoo".
+    -- Keeps the alias unique against the dangling last-segment qualifier
+    -- so the user can pick it up verbatim from the error message.
+    camelCasePath :: String -> String
+    camelCasePath p =
+        let segs = splitOnDot p
+        in concat segs
+
+    splitOnDot :: String -> [String]
+    splitOnDot s = case break (== '.') s of
+        (a, "") -> [a]
+        (a, _:rest) -> a : splitOnDot rest
+
+    posTag :: A.Region -> String
+    posTag (A.Region (A.Position r c) _) =
+        "  (at " ++ show r ++ ":" ++ show c ++ ")"
+
+    sortByRegion :: [(String, A.Region, String)] -> [(String, A.Region, String)]
+    sortByRegion = sortBy3
+      where
+        sortBy3 = foldr insertByRegion []
+        insertByRegion x@(_, A.Region (A.Position r c) _, _) acc =
+            case acc of
+                [] -> [x]
+                y@(_, A.Region (A.Position r2 c2) _, _) : ys
+                  | (r, c) <= (r2, c2) -> x : acc
+                  | otherwise -> y : insertByRegion x ys
+
+    distinctPaths :: [(String, A.Region, String)] -> [String]
+    distinctPaths xs = Map.keys (Map.fromList [(p, ()) | (_, _, p) <- xs])
 
 
 -- | Map each unqualified name to the list of distinct canonical sources
@@ -1439,11 +1576,107 @@ canonicaliseAliases tmap aliasMap env aliases =
 -- expanded — applying them requires type-var substitution that we
 -- can add later. Treating them as nominal is correct, just
 -- pessimistic for inference.
-expandModuleAliases :: Map.Map String Can.Alias -> Can.Module -> Can.Module
+--
+-- ── Cycle 4 #350 + #361 v2 fix ───────────────────────────────
+--
+-- The alias map is keyed by `(home, name)`. Two dependency modules
+-- can each expose `type alias Model = ...` (e.g. `App.State.Model`
+-- AND `Lib.State.Model`); before this fix `collectDepAliases`
+-- flattened the map using `Map.unions` on the bare name key and ONE
+-- body silently won (#350). Downstream the HM solver then emitted
+-- the dishonest "Model vs Model" type error because both
+-- `Can.TType "App.State" "Model"` and `Can.TType "Lib.State" "Model"`
+-- resolved to the SAME body.
+--
+-- An earlier attempt (PR #111, reverted) keyed by `(home, name)`
+-- exclusively. That broke a legitimate consumer pattern (#361 —
+-- skydeploy/control-plane regression): a qualified type reference
+-- whose qualifier could NOT be resolved through the importer's
+-- own `import M as Q` list. This happens when the type transits
+-- through a re-exporting intermediate module (`import State
+-- exposing (..)`) and the consumer writes `Github.RepoInfo`
+-- without independently `import Github.Api as Github`. The
+-- qualifier resolver falls back to `Canonical "Github"` (literal
+-- short segment), the lookup misses, the alias body never
+-- unfolds, and a downstream `repo.fullName` access surfaces as
+-- the cryptic "RepoInfo vs { fullName : a | ... }" row-poly
+-- mismatch.
+--
+-- The v2 fix uses an `AliasMap` with two indices:
+--   (a) primary `(home, name) → Alias`, so two distinct
+--       same-named aliases coexist (closes #350)
+--   (b) derived bare-name fallback used when (a) misses AND
+--       there is a SINGLE unique body across all entries with
+--       that name (closes #361). The resulting `Can.TAlias`
+--       carries the RESOLVED home (from the fallback entry,
+--       not the typo'd qualifier).
+--
+-- If (a) misses AND (b) finds MULTIPLE distinct bodies under the
+-- same name, the lookup gives up and the type stays nominal — D5
+-- (PR #105) already guards against this shape at the qualifier
+-- collision level so we don't realistically reach this branch
+-- with conflicting bodies in well-formed code.
+data AliasMap = AliasMap
+    { _amByHome :: !(Map.Map (ModuleName.Canonical, String) Can.Alias)
+    , _amByName :: !(Map.Map String [(ModuleName.Canonical, Can.Alias)])
+    }
+
+
+-- | Build an `AliasMap` from a homed map. The bare-name fallback
+-- index dedupes by `Can.Alias` body — bodies that compare equal
+-- collapse into a single entry (same source-of-truth re-exported
+-- via multiple paths), keeping the "unique body" fallback honest.
+buildAliasMap
+    :: Map.Map (ModuleName.Canonical, String) Can.Alias
+    -> AliasMap
+buildAliasMap byHome =
+    let byName = Map.fromListWith (\new old -> dedupByBody (new ++ old))
+            [ (name, [(home, alias)])
+            | ((home, name), alias) <- Map.toList byHome
+            ]
+    in AliasMap byHome byName
+  where
+    -- O(n^2) over a single bare-name's bucket — fine since most
+    -- names map to ≤ 2 entries in practice. `Can.Alias` doesn't
+    -- derive `Eq` (would force a wider AST change) so compare
+    -- structurally via the inner `(vars, body)` pair which both
+    -- carry derived `Eq` instances through `Can.Type`.
+    aliasEq (Can.Alias vs1 b1) (Can.Alias vs2 b2) = vs1 == vs2 && b1 == b2
+    dedupByBody [] = []
+    dedupByBody ((h, a):rest) =
+        (h, a) : dedupByBody [ (h2, a2) | (h2, a2) <- rest, not (aliasEq a2 a) ]
+
+
+-- | Lookup an alias by `(home, name)`, falling back to bare-name
+-- when the home-keyed lookup misses AND the name maps to exactly
+-- ONE unique body. Returns `(resolvedHome, alias)` — the home
+-- carried by the resulting TAlias is the alias's TRUE home, not
+-- the caller's typo'd qualifier. That keeps later identity-based
+-- unification consistent.
+lookupAlias
+    :: AliasMap
+    -> ModuleName.Canonical
+    -> String
+    -> Maybe (ModuleName.Canonical, Can.Alias)
+lookupAlias (AliasMap byHome byName) home name =
+    case Map.lookup (home, name) byHome of
+        Just alias -> Just (home, alias)
+        Nothing -> case Map.lookup name byName of
+            Just [(h, alias)] -> Just (h, alias)
+            _ -> Nothing
+
+
+expandModuleAliases
+    :: Map.Map (ModuleName.Canonical, String) Can.Alias
+    -> Can.Module
+    -> Can.Module
 expandModuleAliases depAliases m =
-    let localAliases = Can._aliases m
-        -- Merge local and dep aliases; local wins on name collision (unlikely).
-        allAliases = Map.union localAliases depAliases
+    let home = Can._name m
+        localAliases = Map.mapKeys (\n -> (home, n)) (Can._aliases m)
+        -- Local entries win on a full-key collision (a dep keyed
+        -- under the current module's home — never happens in
+        -- practice but the left-bias keeps semantics predictable).
+        allAliases = buildAliasMap (Map.union localAliases depAliases)
         expand = expandTypeAliases allAliases Set.empty
     in m
         { Can._decls   = mapDeclsTypes expand (Can._decls m)
@@ -1453,8 +1686,10 @@ expandModuleAliases depAliases m =
 
 
 -- | Expand nominal type refs into TAlias nodes when they match an
--- alias in the alias map. Carries a visited-set so a recursive
--- alias (unusual but possible) can't loop.
+-- alias in the alias map. Carries a visited-set (also keyed by
+-- `(home, name)`) so a recursive alias from one home cannot
+-- accidentally short-circuit a same-named alias from a different
+-- home.
 --
 -- Parametric aliases (`type alias Cfg msg = { onSubmit : Form -> msg
 -- , ... }`) get the same treatment: the body's type vars are
@@ -1467,13 +1702,17 @@ expandModuleAliases depAliases m =
 -- unwrap arm (Unify.hs) never fires because the value isn't a
 -- T.Alias.  Expanding eagerly preserves alias identity (TAlias)
 -- AND unfolds for unification.
-expandTypeAliases :: Map.Map String Can.Alias -> Set.Set String -> Can.Type -> Can.Type
+expandTypeAliases
+    :: AliasMap
+    -> Set.Set (ModuleName.Canonical, String)
+    -> Can.Type
+    -> Can.Type
 expandTypeAliases aliasMap visited ty = case ty of
     Can.TType home name args
-        | not (Set.member name visited)
-        , Just (Can.Alias vars body) <- Map.lookup name aliasMap
+        | Just (resolvedHome, Can.Alias vars body) <- lookupAlias aliasMap home name
+        , not (Set.member (resolvedHome, name) visited)
         , length vars == length args ->
-            let visited' = Set.insert name visited
+            let visited' = Set.insert (resolvedHome, name) visited
                 -- Recur into args first so nested aliases also expand.
                 args' = map (expandTypeAliases aliasMap visited') args
                 -- Substitute vars → args' in the alias body, then
@@ -1481,7 +1720,7 @@ expandTypeAliases aliasMap visited ty = case ty of
                 subst = Map.fromList (zip vars args')
                 substituted = substTypeVars subst body
                 body' = expandTypeAliases aliasMap visited' substituted
-            in Can.TAlias home name (zip vars args') (Can.Filled body')
+            in Can.TAlias resolvedHome name (zip vars args') (Can.Filled body')
     Can.TType home name args ->
         Can.TType home name (map recur args)
     Can.TLambda a b ->
@@ -1633,11 +1872,24 @@ mapAliasBody f (Can.Alias vars body) = Can.Alias vars (f body)
 
 -- | Collect the canonicalised alias bodies from dep modules so a
 -- value annotation can refer to an imported record alias and still
--- have its body expanded for HM unification. Local aliases win on
--- collision (unlikely in practice).
-collectDepAliases :: Map.Map String DepInfo -> Map.Map String Can.Alias
+-- have its body expanded for HM unification.
+--
+-- Each entry is keyed by `(home, alias-name)`. Two deps can each
+-- expose `Model` (e.g. `App.State.Model` + `Lib.State.Model`) without
+-- collapsing — Cycle 4 #350 root cause was the prior `String`-keyed
+-- map silently dropping one body. Lookups in `expandTypeAliases` use
+-- the resolved `home` from `Can.TType` for the primary index, with
+-- a unique-body bare-name fallback for #361 (qualified type
+-- references that transit through a re-exporting intermediate
+-- module). See `AliasMap` / `lookupAlias` for the lookup contract.
+collectDepAliases
+    :: Map.Map String DepInfo
+    -> Map.Map (ModuleName.Canonical, String) Can.Alias
 collectDepAliases deps =
-    Map.unions [ _dep_aliasDefs d | d <- Map.elems deps ]
+    Map.unions
+        [ Map.mapKeys (\n -> (_dep_name d, n)) (_dep_aliasDefs d)
+        | d <- Map.elems deps
+        ]
 
 
 -- ═══════════════════════════════════════════════════════════

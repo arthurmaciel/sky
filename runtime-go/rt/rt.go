@@ -5187,6 +5187,11 @@ func System_cwd(_ any) any {
 	}
 }
 
+// System_getcwd — back-compat alias for System_cwd. The Sky-source
+// stdlib in `sky-stdlib/Sky/Core/System.sky` exposes both names
+// (`cwd` and `getcwd`); both lower to the same Task Error String.
+func System_getcwd(unit any) any { return System_cwd(unit) }
+
 // System_exit: never returns (process terminates) — kept eager and
 // polymorphic per the rationale in lookupKernelType.
 //
@@ -6251,6 +6256,56 @@ func Math_logT(n float64) float64         { return math.Log(n) }
 // Additional String functions
 // ═══════════════════════════════════════════════════════════
 
+// String_toList — String -> List Char
+// Decomposes a string into its Unicode code points. Each Char is
+// boxed as a Go rune so downstream Char_* helpers (firstRune) keep
+// the typed fast path.
+func String_toList(s any) any {
+	str := fmt.Sprintf("%v", s)
+	out := make([]any, 0, runeCount(str))
+	for _, r := range str {
+		out = append(out, r)
+	}
+	return out
+}
+
+// String_fromList — List Char -> String
+// Concatenates a list of Char (rune-typed) into a UTF-8 string.
+// Accepts any-slice or typed slice; AsList unwraps the latter
+// element-wise so Sky-source `[ 'a', 'b' ]` literals round-trip.
+func String_fromList(chars any) any {
+	xs := AsList(chars)
+	var b strings.Builder
+	b.Grow(len(xs))
+	for _, c := range xs {
+		if r, ok := c.(rune); ok {
+			b.WriteRune(r)
+			continue
+		}
+		if i, ok := c.(int); ok {
+			b.WriteRune(rune(i))
+			continue
+		}
+		// Last-resort: stringify and append the first rune.
+		b.WriteRune(firstRune(c))
+	}
+	return b.String()
+}
+
+// String_concat — List String -> String
+// Concatenates a list of strings. Mirrors `Std.Html.text`'s
+// idiomatic "join with empty separator" but at the kernel layer so
+// the typed-codegen path can flow through without `rt.SkyCall` per
+// element.
+func String_concat(parts any) any {
+	xs := AsList(parts)
+	var b strings.Builder
+	for _, p := range xs {
+		b.WriteString(fmt.Sprintf("%v", p))
+	}
+	return b.String()
+}
+
 func String_lines(s any) any {
 	parts := strings.Split(fmt.Sprintf("%v", s), "\n")
 	result := make([]any, len(parts))
@@ -6574,6 +6629,14 @@ type SkyRoute struct {
 	Method  string
 	Path    string
 	Handler any // func(SkyRequest) any (Task that returns SkyResponse)
+
+	// StaticDir — non-empty when the route was created by Server_static.
+	// Server_listen detects it and registers http.FileServer instead of
+	// the Sky-handler dispatch path, so static-file serving gets Go
+	// stdlib's path-traversal protection, Last-Modified handling,
+	// Range requests, and MIME type detection without re-implementing
+	// any of it on the Sky side.
+	StaticDir string
 }
 
 // SkyRequest wraps an HTTP request
@@ -6634,6 +6697,27 @@ func Server_listen(port any, routes any) any {
 		route := r.(SkyRoute)
 		handler := route.Handler
 		pattern := route.Path
+
+		// Static-file routes (registered via Server_static) bypass
+		// the Sky-handler dispatch entirely. http.FileServer +
+		// http.StripPrefix delivers path-traversal protection,
+		// MIME detection, Last-Modified, and Range support — all
+		// the things a hand-rolled static handler in Sky would
+		// have to re-implement.
+		//
+		// Pattern is already prefix-form ("/static/" with trailing
+		// slash) so ServeMux longest-prefix-matches every nested
+		// path. StripPrefix removes the prefix (keeping the
+		// trailing slash) before FileServer maps the rest onto the
+		// directory.
+		if route.StaticDir != "" {
+			stripPattern := pattern
+			if len(stripPattern) > 1 && stripPattern[len(stripPattern)-1] == '/' {
+				stripPattern = stripPattern[:len(stripPattern)-1]
+			}
+			mux.Handle(pattern, http.StripPrefix(stripPattern, http.FileServer(http.Dir(route.StaticDir))))
+			continue
+		}
 
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, req *http.Request) {
 			// Panic recovery — one bad handler mustn't kill the process.
@@ -6740,11 +6824,17 @@ func Server_listen(port any, routes any) any {
 			}
 			if ok && resp.Tag == 0 {
 				skyResp := resp.OkValue.(SkyResponse)
-				for k, v := range skyResp.Headers {
-					w.Header().Set(k, v)
-				}
+				// Apply the response's default ContentType FIRST so the
+				// Headers map (populated by Server.withHeader) can
+				// override it. Otherwise an explicit
+				// `withHeader "Content-Type" "application/javascript"`
+				// applied to a Server.text/json/html response would be
+				// silently clobbered by the default ("text/plain" etc).
 				if skyResp.ContentType != "" {
 					w.Header().Set("Content-Type", skyResp.ContentType)
+				}
+				for k, v := range skyResp.Headers {
+					w.Header().Set(k, v)
 				}
 				// Safe-by-default security headers (callers can override);
 				// honours SKY_LIVE_FRAME_ANCESTORS for embeddable deploys.
@@ -7580,15 +7670,37 @@ func Server_any(path any, handler any) any {
 	return SkyRoute{Method: "*", Path: fmt.Sprintf("%v", path), Handler: handler}
 }
 
-func Server_static(path any, dir any) any {
+// Server_static returns a Route that serves files from `dir` under
+// the URL prefix `urlPrefix`. Implementation defers to
+// http.FileServer + http.StripPrefix at registration time
+// (see Server_listen's StaticDir branch) — so path-traversal
+// protection (http.Dir refuses `..`), MIME detection (via
+// mime.TypeByExtension), Last-Modified, and Range request support
+// all come for free from Go's stdlib.
+//
+//   - urlPrefix is normalised: a missing leading "/" is added, a
+//     missing trailing "/" is added so ServeMux's longest-prefix
+//     match catches every nested path.
+//   - dir is a filesystem path relative to the process cwd (or
+//     absolute). A nonexistent dir yields 404s at request time,
+//     not an error here — the listing-or-deny behaviour is the
+//     stdlib's.
+func Server_static(urlPrefix any, dir any) any {
+	prefix := fmt.Sprintf("%v", urlPrefix)
+	if prefix == "" || prefix[0] != '/' {
+		prefix = "/" + prefix
+	}
+	if prefix[len(prefix)-1] != '/' {
+		prefix = prefix + "/"
+	}
 	return SkyRoute{
-		Method: "GET",
-		Path:   fmt.Sprintf("%v", path),
-		Handler: func(req any) any {
-			return func() any {
-				return Ok[any, any](SkyResponse{Status: 200, Body: "static:" + fmt.Sprintf("%v", dir)})
-			}
-		},
+		Method:    "GET",
+		Path:      prefix,
+		StaticDir: fmt.Sprintf("%v", dir),
+		// Handler stays nil — the dispatch path checks StaticDir
+		// FIRST and never reaches the handler call site for a
+		// static route.
+		Handler: nil,
 	}
 }
 

@@ -427,8 +427,11 @@ update msg model =
 | `Cmd.none` | `Cmd msg` | No-op |
 | `Cmd.perform` | `Task err a -> (Result err a -> msg) -> Cmd msg` | Run task, dispatch result as Msg |
 | `Cmd.batch` | `List (Cmd msg) -> Cmd msg` | Concurrent batch |
+| `Cmd.publish` | `String -> any -> Cmd msg` | Broadcast payload to every Sky.Live session subscribed to topic — see [skylive/pubsub.md](skylive/pubsub.md) |
 | `Sub.none` | `Sub msg` | No subscription |
 | `Sub.every` | `Int -> msg -> Sub msg` | Dispatch `msg` every N ms |
+| `Sub.subscribeTopic` | `String -> (any -> msg) -> Sub msg` | Receive pub/sub broadcasts on topic; decoder turns payload into a Msg |
+| `Sub.batch` | `List (Sub msg) -> Sub msg` | Combine timer + topic + others |
 
 ### `Time` — clock + duration
 
@@ -470,6 +473,26 @@ response =
 `get`, `post`, `request` (custom method/headers). `parseQuery`
 parses a URL query string into a `Dict String String` (pure —
 backed by Go's `net/url`, proper percent-decoding).
+
+For **streaming response bodies** (LLM completions, SSE, large
+downloads), use `Sky.Core.Http.Stream`:
+
+```elm
+import Sky.Core.Http.Stream as HttpStream exposing (StreamId, ChunkEvent(..))
+
+-- Cmd.perform kicks off the request; chunks arrive via Sub.
+( model, Cmd.perform (HttpStream.open req) StreamOpened )
+
+-- subscriptions: attach `chunks` only while a stream is live.
+subscriptions model =
+    case model.activeStream of
+        Just sid -> HttpStream.chunks sid Chunked
+        Nothing  -> Sub.none
+```
+
+See [`docs/skylive/http-streaming.md`](skylive/http-streaming.md)
+for the full design + `examples/28-streaming-chat` for the
+canonical pattern.
 
 ### `File` — filesystem
 

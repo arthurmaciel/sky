@@ -473,6 +473,8 @@ sql =
 
 Single braces `{` are literal — safe for JavaScript, CSS, JSON, SQL. Interpolation expressions support identifiers, field access, qualified names, and function calls.
 
+Escape with backslash: `\{{` emits a literal `{{` (no interpolation). Use this to ship Mustache / Handlebars / shell-script placeholders to downstream tooling without Sky hijacking them. `\\` collapses to a single backslash; other `\X` sequences are preserved (regex `\d+`, paths `\test`, etc).
+
 ### Patterns
 
 Literals, constructors (`Just x`, `Ok v`, `Err e`), tuples `(a, b)`, lists `[]`, `[x]`, `x :: xs`, wildcards `_`, as-patterns `Just x as original`, nested `Ok (Just x)`
@@ -1242,9 +1244,11 @@ Configure at runtime via env vars (or sky.toml `[log]` defaults):
 ```elm
 type Cmd msg = Cmd Foreign
 
-none : Cmd msg
-perform : Task err a -> (Result err a -> msg) -> Cmd msg
-batch : List (Cmd msg) -> Cmd msg
+none           : Cmd msg
+perform        : Task err a -> (Result err a -> msg) -> Cmd msg
+batch          : List (Cmd msg) -> Cmd msg
+publish        : String -> any -> Cmd msg   -- pub/sub broadcast, echo-by-default (Sky.Live only)
+publishNoEcho  : String -> any -> Cmd msg   -- pub/sub broadcast, broker skips publisher's own subscription
 ```
 
 `Cmd.perform` runs a Task in a background goroutine. When it completes, the result is dispatched as a Msg through the full update/view/diff/SSE cycle:
@@ -1275,17 +1279,122 @@ Cmd.batch
 ### Std.Sub
 
 ```elm
-type Sub msg = SubNone | SubTimer Int msg | SubBatch (List (Sub msg))
+type Sub msg = SubNone | SubTimer Int msg | SubBatch (List (Sub msg)) | SubSubscribeTopic String (any -> msg)
 
-none : Sub msg
-batch : List (Sub msg) -> Sub msg
+none           : Sub msg
+batch          : List (Sub msg) -> Sub msg
+every          : Int -> msg -> Sub msg                 -- timer; fires msg every N ms
+subscribeTopic : String -> (any -> msg) -> Sub msg     -- pub/sub receive (Sky.Live only)
 ```
+
+### Std.PubSub
+
+Task-shaped publish for ANY context (raw `Sky.Http.Server` `api` handlers, post-init goroutines, scheduled jobs, webhook callbacks). Complements `Cmd.publish` which only fires from a Sky.Live `update` return — same broker, same subscribers, same in-process semantics.
+
+```elm
+publish        : String -> any -> Task Error Int  -- delivery count; Err Unavailable if no Live.app
+publishNoEcho  : String -> any -> Task Error Int  -- sets broker's SkipOrigin bit (forward-compat with v0.16+ cross-process tiers)
+```
+
+Both `Cmd.publish` and `Std.PubSub.publish` route to the same in-process topic registry — a subscriber's `Sub.subscribeTopic` receives them identically. Use `Cmd.publish` when you're inside an update return; use `Std.PubSub.publish` (with `Task.run` or `Cmd.perform`) from anywhere else.
+
+`publishNoEcho` is the "instant feedback for publisher" variant — the broker skips delivery to subscribers whose ownSid matches the publisher's sid (the publisher updates its own model directly in `update`, and only OTHER sessions receive the broadcast). Saves one broker round-trip per publish; in v0.16+ cross-process broker tiers that's 10-100ms+ of network latency.
 
 ### Std.Time
 
 ```elm
 every : Int -> msg -> Sub msg    -- timer subscription, fires msg every N milliseconds
 ```
+
+### Pub/sub (`Cmd.publish` + `Sub.subscribeTopic`)
+
+Server-side broadcast channel between Sky.Live sessions. Use to push
+real-time updates WITHOUT polling — chatrooms, collaborative editors,
+live dashboards, presence indicators.
+
+**Decision rule.** **DB writes in your own Sky.Live app → pub/sub.**
+**External state changing on another service → `Time.every` poll.**
+
+| Use case | Primitive |
+|---|---|
+| Chat / collab / multi-session UI | `Cmd.publish` + `Sub.subscribeTopic` |
+| Animation tick, clock, watchdog heartbeat | `Sub.every` / `Time.every` |
+| Periodic refresh of state from an external HTTP API that doesn't push | `Time.every` + `Cmd.perform` |
+
+**Mandatory pattern: persist FIRST, publish SECOND.** Notification
+loss is acceptable (process crash, network blip); data loss is not.
+The DB row is the source of truth; the broadcast is the low-latency
+hint. Late joiners load history from the DB; in-flight subscribers
+hear the broadcast.
+
+```elm
+type Msg
+    = SendChat String
+    | ChatReceived any        -- any payload — decoder turns it into your Msg shape
+    | PersistOk (Result Error Int)
+
+
+subscriptions model =
+    case model.page of
+        ChatPage room ->
+            Sub.subscribeTopic ("chat:room-" ++ room) ChatReceived
+
+        _ ->
+            Sub.none
+
+
+update msg model =
+    case msg of
+        SendChat text ->
+            let
+                chatMsg = { author = model.me, text = text, at = nowString () }
+                payload =
+                    Dict.fromList
+                        [ ( "author", chatMsg.author )
+                        , ( "text", chatMsg.text )
+                        , ( "at", chatMsg.at )
+                        ]
+            in
+                ( model
+                , Cmd.batch
+                    [ Cmd.perform (persistChatMessage chatMsg) PersistOk    -- 1. DB write
+                    , Cmd.publish ("chat:room-" ++ model.room) payload      -- 2. broadcast
+                    ]
+                )
+
+        ChatReceived payload ->
+            let
+                chatMsg =
+                    { author = Db.getString "author" payload
+                    , text   = Db.getString "text"   payload
+                    , at     = Db.getString "at"     payload
+                    }
+            in
+                ( { model | history = List.append model.history [chatMsg] }
+                , Cmd.none
+                )
+```
+
+**Echo-by-default.** The publisher's OWN subscription ALSO receives
+the broadcast (matches Redis / NATS / MQTT). Apps can self-skip on
+origin via the broadcast's `Origin` field if needed.
+
+**Topics are exact-match strings.** Build per-room / per-user topics
+by concatenation: `"chat:room-" ++ roomId`, `"presence:" ++ userId`.
+
+**Sub.batch composes everything.** A single session can subscribe to
+multiple topics AND a `Sub.every` tick simultaneously — the runtime
+diff-updates subscriptions on every dispatch, so topics in the
+intersection of old + new sets keep their existing goroutine + broker
+registration (no broadcast loss in the gap).
+
+**v0.15.x is in-process only.** A single Sky.Live instance. v0.16+
+plugs in cross-process broker tiers (Redis, Cloud Pub/Sub, NATS,
+Postgres LISTEN/NOTIFY) via the existing `liveStore.Subscribe`
+interface without app-source changes — pick the broker in `sky.toml`
+`[live.broker]`. See `docs/skylive/pubsub.md` for the user-facing
+tutorial and `docs/skylive/pubsub-design.md` for the architecture
+write-up. The worked example is `examples/27-multi-session-chat`.
 
 ### Sky.Core.Time
 
@@ -1762,6 +1871,35 @@ Http.request { method, url, headers, body }   -- Task Error Response
 
 Http.parseQuery "a=1&b=2"   -- Dict String String (pure; Go net/url)
 ```
+
+### Sky.Core.Http.Stream (Task + Sub) — incremental HTTP bodies
+
+Read HTTP response bodies as bytes arrive — the view re-renders
+progressively (LLM streaming, SSE, long downloads). Drops perceived
+latency 5-10× vs `Http.get`.
+
+```elm
+import Sky.Core.Http.Stream as HttpStream exposing (StreamId, ChunkEvent(..))
+
+HttpStream.open req       -- Task Error StreamId — completes once HEADERS arrive
+HttpStream.chunks sid f   -- Sub msg — `f : ChunkEvent -> msg` per chunk
+HttpStream.close sid      -- Task Error () — idempotent
+
+type ChunkEvent
+    = Chunk String       -- UTF-8 bytes just arrived
+    | Done               -- clean EOF
+    | Errored Error      -- network / protocol fault
+```
+
+**Canonical shape**: subscribe only while a stream is in-flight.
+Store `StreamId` on the model after `StreamOpened (Ok sid)`, clear
+on `Chunked Done` / `Errored`, return `Sub.none` when Nothing.
+See `examples/28-streaming-chat` for the reference; full design
+write-up in `docs/skylive/http-streaming.md`.
+
+Session disconnect (TTL eviction OR Delete) closes every owned
+stream automatically; log: `[sky.stream] cleaned N orphaned
+streams on session close`.
 
 ### Sky.Core.Encoding (pure)
 
