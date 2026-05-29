@@ -414,6 +414,87 @@ v2 plan were not added — `path-clean::clean` returns `PathBuf` (gap (i) above)
 and `shellwords::join` is absent from the 1.x rustdoc. The empirical 50-crate
 audit re-run is the verification.
 
+### Theoretical reach (with full engineering)
+
+A more fundamental question than "what does v2 cover": **even with every
+foreseeable engineering investment short of changing Rust itself — cross-crate
+trait resolution, generic-container instantiation, builder/`&mut self`→take-return,
+iterator materialisation, async-as-Task adapters, closures via Sky lambdas
+compiled to Rust `Fn`s — how much of Rust code is still impossible to FFI?**
+
+Five tiers, with sharply different reasons:
+
+**Tier 1 — Fully auto-bindable** (~50–60% of crates.io): data / leaf libraries
+(parsers, codecs, hashing, math, time, regex, most client SDKs). Reachable
+with v1 + v2 + the deferred sub-features (cross-crate `Digest` family, generic
+containers, full numeric coverage, builder transform, iterator → `Vec`).
+
+**Tier 2 — Bindable only via *per-shape* generated glue** (~25–35%): framework /
+DSL / async crates (`axum`, `bevy`, `diesel`, `tokio`, `actix-web`, `sqlx`).
+The TYPES are visible in rustdoc; what's missing is the **idiomatic usage shape**
+— routing/handlers/extractors, ECS queries, query builders. Each framework's
+"how to use it" is encoded *outside* its types. Generated idiomatic-Rust glue
+can express it (rustc solves the rest), but that's *adapter-per-crate-family*,
+not "automatic." This is the Alt-1 ↔ Alt-2 boundary.
+
+**Tier 3 — Bindable but lossy** (~5–10%): semantics necessarily change.
+- `Iterator<Item = &T>` borrowed-view iterators (`Lines<'a>`, `&str::split`) →
+  materialise to `Vec<T>`, eliminating laziness and breaking streaming/huge inputs.
+- `&mut self` builder chains → take-and-return-owned, doubling allocation traffic.
+- Trait objects in return position (`Box<dyn Trait>`) — concrete type hidden by
+  design; only the bound's methods are callable.
+- Type-state APIs (`Builder<NotConfigured>` → `Builder<Configured>`) → each
+  state gets separate bindings; infinite-state encoding (type-level numerics)
+  can't be fully enumerated.
+
+**Tier 4 — Fundamentally impossible** (~5–10% of *function surface*, ~1–3% of
+*crates* end-to-end): things Rust expresses that no FFI wrapper can express
+without changing Rust's type system or Sky's runtime model.
+
+| Pattern | Why impossible |
+|---|---|
+| `Pin<P>` in user-facing positions (`Stream::poll_next(self: Pin<&mut Self>)`) | Sky's GC moves values; can't construct `Pin<&mut T>` from Sky memory and honour the no-move invariant. Internal pinning (Sky's async runtime pins a Box and never exposes it) works for *implementing* runtimes, not for *exposing* implementor APIs. |
+| Raw pointers (`*const T` / `*mut T`) | Pointer arithmetic semantics; no analogue in Sky's GC value model. |
+| `MaybeUninit<T>` | Uninitialised memory APIs; Sky values are always initialised. |
+| `unsafe fn` / `unsafe impl` | "Type system can't verify safety; caller must." Sky callers can't reason about Rust unsafe contracts; binding requires manual per-fn safety review. |
+| HRTBs (`for<'a> F: Fn(&'a T) -> &'a U`) | Universally-quantified lifetime types don't exist in HM; concrete `Fn(T) -> U` closures work, HRTBs don't. |
+| GATs with lifetime-bearing assoc types (`trait Lender { type Lend<'a>; }`) | The assoc type itself is a lifetime function; can't be inverted to an owned Sky type. |
+| Type-level computation outputs that depend on unsolved generics (`fn foo<T>() -> [u8; T::N]`) | Array size *computed by trait resolution*; resolvable for concrete T, not for an unbound generic position. |
+| Compile-time macro DSLs validated against external state (`sqlx::query!("SELECT …")`, `askama` templates) | The `!` macro processes a string literal at compile time, validates against the database schema, emits typed code. Expansion result depends on inputs the inspector can't see. |
+
+**Tier 5 — Outside FFI's natural scope**: custom allocators, panic handlers,
+no-std targets, inline assembly. These ARE the runtime; even Rust-to-Rust
+interop with them is constrained.
+
+#### Realistic numbers
+
+| Category | Fraction of crates.io |
+|---|---|
+| Fully auto-bindable (Tier 1, given the deferred sub-features) | ~50–60% |
+| Bindable via generated glue (Tier 2) | ~25–35% |
+| Bindable with semantic loss (Tier 3) | ~5–10% |
+| Some functions impossible, rest workable (Tier 4 mixed) | ~5–10% |
+| **Effectively unbindable end-to-end (mostly Tier 4 + 5)** | **~1–3%** |
+
+**The hard ceiling is ~95–97% of crates having at least their core API
+exposable** even under perfect engineering. The unbindable residue is
+overwhelmingly low-level async runtime *internals*, raw-pointer/`MaybeUninit`
+foundational crates (`libc`, allocators, atomics), macro-DSLs with compile-time
+external validation, and `Pin`-exposing implementor traits. Application code
+almost never needs these — they're runtime/foundation Sky would reimplement
+internally anyway.
+
+#### Strategic implication
+
+The "impossibility ceiling" matters less than the **per-crate cost curve**.
+Automatic FFI is genuinely universal over the Tier 1 universe; Tier 2 is where
+engineering cost explodes (each framework needs a *usage model*, and there are
+dozens of shapes). **The realistic Sky-Rust mission stays: automatic Tier 1 +
+Sky-native modules over Tier 2 frameworks** — not because Tier 2 is impossible
+but because per-framework automatic glue costs more than just *being* `Sky.Live`
+(built on hyper/axum internally, exposing a Sky-native surface). The
+fundamentally-impossible 3–5% is runtime/foundation code, not application code.
+
 ---
 
 ## FFI codegen type-coercion rules
