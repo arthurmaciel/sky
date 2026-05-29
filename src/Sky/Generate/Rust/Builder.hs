@@ -717,15 +717,28 @@ needsTaskWrap solved body =
         let inner = taskExprInnerType solved e
         in not (null inner)
 
-unionsToRustTypes :: Map.Map String String -> String -> Map.Map String Can.Union -> [RustTypeDef]
-unionsToRustTypes recordMap modPrefix unions = map (\(name, u) -> unionToRustTypeDef recordMap modPrefix name u) (Map.toList unions)
+-- | `skyModName` is the un-mangled Sky module name (dots preserved, e.g.
+-- "Std.Decimal") used to look up the runtimeOpaqueTypes registry.
+-- `modPrefix` is the mangled form (dots -> underscores) used in the
+-- generated Rust type name.
+unionsToRustTypes :: Map.Map String String -> String -> String -> Map.Map String Can.Union -> [RustTypeDef]
+unionsToRustTypes recordMap skyModName modPrefix unions =
+    map (\(name, u) -> unionToRustTypeDef recordMap skyModName modPrefix name u) (Map.toList unions)
 
-unionToRustTypeDef :: Map.Map String String -> String -> String -> Can.Union -> RustTypeDef
-unionToRustTypeDef recordMap modPrefix typeName (Can.Union _ alts _ _) = 
-    REnumDef (toCamelCase (modPrefix ++ "_" ++ typeName)) (map ctorToRust alts)
+unionToRustTypeDef :: Map.Map String String -> String -> String -> String -> Can.Union -> RustTypeDef
+unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union _ alts _ _) =
+    let codegenName = toCamelCase (modPrefix ++ "_" ++ typeName)
+    in case Map.lookup (skyModName, typeName) runtimeOpaqueTypes of
+        -- Registry hit: emit a `pub use sky_runtime::X as <codegenName>;` alias.
+        -- The runtime newtype IS the canonical representation; the Sky-side
+        -- placeholder constructor (e.g. `Decimal__Internal Float`) is a
+        -- phantom-shape that exists only so the Sky type has a slot.
+        Just rustPath -> RPubUseAlias codegenName rustPath
+        -- No registry entry: emit the regular enum/ADT (one constructor per alt).
+        Nothing       -> REnumDef codegenName (map ctorToRust alts)
   where
-    ctorToRust (Can.Ctor name _idx _arity argTypes) = 
-        (name, if null argTypes then Nothing 
+    ctorToRust (Can.Ctor name _idx _arity argTypes) =
+        (name, if null argTypes then Nothing
                else Just (intercalate ", " (map (typeToRustString recordMap) argTypes)))
 
 aliasesToRustTypes :: Map.Map String String -> String -> Map.Map String Can.Alias -> [RustTypeDef]
@@ -1610,9 +1623,11 @@ buildProgram mods solvedTypes kernelAliases =
         usage = analyzeKernelUsage mods
         zeroArgDefs = collectZeroArgDefs mods
         noCloneVars = Set.empty
-        existingTypes = concatMap (\m -> 
-            let prefix = moduleNameToRust (Can._name m)
-            in unionsToRustTypes recordMap prefix (Can._unions m) ++ aliasesToRustTypes recordMap prefix (Can._aliases m)) mods
+        existingTypes = concatMap (\m ->
+            let skyModName = ModuleName._name (Can._name m)         -- "Std.Decimal" — un-mangled, for runtimeOpaqueTypes lookup
+                prefix     = moduleNameToRust (Can._name m)          -- "Std_Decimal" — mangled, for codegen names
+            in unionsToRustTypes recordMap skyModName prefix (Can._unions m)
+            ++ aliasesToRustTypes recordMap prefix (Can._aliases m)) mods
     in RustBuilder
         { builderModules = map (buildModule ctx) mods
         , builderTypes = existingTypes ++ anonDefs
