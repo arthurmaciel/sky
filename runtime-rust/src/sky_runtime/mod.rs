@@ -10,7 +10,6 @@ pub mod task;
 pub mod log;
 #[cfg(feature = "tokio")]
 pub mod system;
-#[cfg(feature = "tokio")]
 pub mod time;
 pub mod random;
 #[cfg(feature = "crypto")]
@@ -30,7 +29,6 @@ pub use task::*;
 pub use log::*;
 #[cfg(feature = "tokio")]
 pub use system::*;
-#[cfg(feature = "tokio")]
 pub use time::*;
 pub use random::*;
 #[cfg(feature = "json")]

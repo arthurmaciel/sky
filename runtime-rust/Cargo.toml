@@ -19,6 +19,8 @@ regex = "1"
 base64 = "0.22"
 hex = "0.4"
 percent-encoding = "2"
+chrono = "0.4"
+chrono-tz = "0.10"
 
 [features]
 default = []
