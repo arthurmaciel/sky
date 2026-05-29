@@ -1901,6 +1901,17 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Encoding", "hexEncode")  -> "hex_encode"
     ("Encoding", "hexDecode")           -> "hex_decode"
     ("Sky.Core.Encoding", "hexDecode")  -> "hex_decode"
+    -- Regex (sub-A.2)
+    ("Regex", "match")              -> "regex_match"
+    ("Sky.Core.Regex", "match")     -> "regex_match"
+    ("Regex", "find")               -> "regex_find"
+    ("Sky.Core.Regex", "find")      -> "regex_find"
+    ("Regex", "findAll")            -> "regex_find_all"
+    ("Sky.Core.Regex", "findAll")   -> "regex_find_all"
+    ("Regex", "replace")            -> "regex_replace"
+    ("Sky.Core.Regex", "replace")   -> "regex_replace"
+    ("Regex", "split")              -> "regex_split"
+    ("Sky.Core.Regex", "split")     -> "regex_split"
     -- Json.Encode kernel functions: route to runtime implementations
     ("JsonEnc", "string") -> "json_enc_string"
     ("Sky.Core.Json.Encode", "string") -> "json_enc_string"
