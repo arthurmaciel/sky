@@ -50,6 +50,21 @@ pub fn to_u8_array<E: From<String>, const N: usize>(xs: &[i64]) -> SkyResult<E, 
     ok_res(a)
 }
 
+/// Sky `List T` (Rust `&[T]`) -> fixed-size `[T; N]` with length check.
+/// Mirrors `to_u8_array`'s never-panic discipline: returns `SkyResult::Err`
+/// with a clear message on length mismatch. T: Clone is sufficient — the
+/// elements are cloned out into the array.
+pub fn to_array<E: From<String>, T: Clone, const N: usize>(xs: &[T]) -> SkyResult<E, [T; N]> {
+    if xs.len() != N {
+        return SkyResult::Err(format!("expected array of length {}, got {}", N, xs.len()).into());
+    }
+    let v: Vec<T> = xs.to_vec();
+    match v.try_into() {
+        Ok(a) => ok_res(a),
+        Err(_) => SkyResult::Err("array length conversion failed".to_string().into()),
+    }
+}
+
 // ===========================================
 // Maybe
 // ===========================================

@@ -190,4 +190,21 @@ proptest! {
             prop_assert!(r.is_err());
         }
     }
+
+    /// `to_array` succeeds exactly when input length matches N, never panics.
+    #[test]
+    fn to_array_len_checked(xs in proptest::collection::vec(proptest::prelude::any::<i64>(), 0..16usize)) {
+        const N: usize = 8;
+        let result: SkyResult<SkyError, [i64; N]> = to_array::<SkyError, i64, N>(&xs);
+        if xs.len() == N {
+            prop_assert!(matches!(result, SkyResult::Ok(_)));
+            if let SkyResult::Ok(arr) = result {
+                for i in 0..N {
+                    prop_assert_eq!(arr[i], xs[i]);
+                }
+            }
+        } else {
+            prop_assert!(matches!(result, SkyResult::Err(_)));
+        }
+    }
 }
