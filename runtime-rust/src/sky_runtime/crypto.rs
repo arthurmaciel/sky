@@ -54,6 +54,28 @@ pub fn crypto_md5(s: String) -> String {
     h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Sky `hmacSha256 : String -> String -> String` (key, message → hex tag).
+pub fn crypto_hmac_sha256(key: String, msg: String) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key.as_bytes())
+        .expect("Hmac<Sha256> accepts any key length");
+    mac.update(msg.as_bytes());
+    mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Sky `hmacSha512 : String -> String -> String`.
+pub fn crypto_hmac_sha512(key: String, msg: String) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha512;
+    type HmacSha512 = Hmac<Sha512>;
+    let mut mac = HmacSha512::new_from_slice(key.as_bytes())
+        .expect("Hmac<Sha512> accepts any key length");
+    mac.update(msg.as_bytes());
+    mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
 #[cfg(test)]
 mod tests_more_hashes {
     use super::*;
@@ -83,5 +105,16 @@ mod tests_more_hashes {
     #[test]
     fn test_md5_empty() {
         assert_eq!(crypto_md5(String::new()), EMPTY_MD5);
+    }
+
+    // RFC 4231 test case 1: key = 0x0b*20, data = "Hi There"
+    const HMAC_SHA256_RFC1: &str = "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7";
+    const HMAC_SHA512_RFC1: &str = "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854";
+
+    #[test]
+    fn test_hmac_sha256_rfc4231() {
+        let key: String = (0..20).map(|_| '\u{000b}').collect();
+        assert_eq!(crypto_hmac_sha256(key.clone(), "Hi There".to_string()), HMAC_SHA256_RFC1);
+        assert_eq!(crypto_hmac_sha512(key, "Hi There".to_string()), HMAC_SHA512_RFC1);
     }
 }

@@ -8,6 +8,7 @@ description = "Sky language runtime for Rust - primitives, collections, FFI"
 tokio = { version = "1.0", features = ["full"], optional = true }
 serde_json = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
+hmac = "0.12"
 sha1 = "0.10"
 md-5 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"], optional = true }
