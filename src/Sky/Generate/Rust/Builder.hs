@@ -168,6 +168,24 @@ data RustTypeDef
     = REnumDef String [(String, Maybe String)]
     | RStructDef String String [(String, String)]  -- name, generics_decl, fields
     | RAliasDef String String
+    -- | Bridge for Sky opaque types whose representation lives in `sky_runtime`.
+    -- Codegen emits `pub use <rustPath> as <codegenName>;` instead of a
+    -- placeholder enum. Populated via runtimeOpaqueTypes registry hit in
+    -- unionToRustTypeDef. See typeDefToString for the emission shape.
+    | RPubUseAlias String String  -- codegenName, rustPath
+
+-- | Sky opaque types whose Rust representation lives in `sky_runtime`.
+-- Keyed on (Sky module name with dots, Sky type name). When unionToRustTypeDef
+-- would otherwise produce a placeholder enum (e.g.
+-- `pub enum StdDecimalDecimal { Decimal__Internal(f64) }`), this registry hit
+-- redirects the emission to an `RPubUseAlias` — the runtime newtype IS the
+-- canonical representation.
+--
+-- Sub-projects B-F add entries here as their runtime newtypes land.
+runtimeOpaqueTypes :: Map.Map (String, String) String
+runtimeOpaqueTypes = Map.fromList
+    [ (("Std.Decimal", "Decimal"), "sky_runtime::Decimal")
+    ]
 
 -- | Context threaded through expression emission
 data EmitCtx = EmitCtx
@@ -1848,11 +1866,13 @@ entryPointSection uk =
         ])
 
 typeDefToString :: RustTypeDef -> String
-typeDefToString (REnumDef name variants) = 
+typeDefToString (REnumDef name variants) =
     "#[derive(Clone, Debug, PartialEq)]\npub enum " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
 typeDefToString (RStructDef name gens fields) =
     "#[derive(Clone, Debug, PartialEq)]\npub struct " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
 typeDefToString (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
+typeDefToString (RPubUseAlias codegenName rustPath) =
+    "pub use " ++ rustPath ++ " as " ++ codegenName ++ ";"
 
 -- | Extract a module's content as (snake_case_file_stem, source_content).
 -- Used by emitRust to produce per-module .rs files.
@@ -2233,14 +2253,16 @@ itemToRustStrings (RustTypeAlias name ty) = ["type " ++ name ++ " = " ++ ty ++ "
 collectUndefinedTypes :: RustBuilder -> [String]
 collectUndefinedTypes b = 
     let allItems = concatMap modItems (builderModules b)
-        defined = Set.fromList 
-            [ name | RustStruct name _ <- allItems ] 
+        defined = Set.fromList
+            [ name | RustStruct name _ <- allItems ]
             `Set.union` Set.fromList
             [ name | RStructDef name _ _ <- builderTypes b ]
             `Set.union` Set.fromList
             [ name | REnumDef name _ <- builderTypes b ]
             `Set.union` Set.fromList
             [ name | RAliasDef name _ <- builderTypes b ]
+            `Set.union` Set.fromList
+            [ name | RPubUseAlias name _ <- builderTypes b ]
             `Set.union` builderFfiOpaques b  -- types defined by Rust FFI bindings
         -- Collect type names from function parameter types (after ": ")
         referenced = Set.fromList
