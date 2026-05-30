@@ -206,6 +206,19 @@ runtimeOpaqueTypes = Map.fromList
     , (("Sky.Core.Json.Encode", "Value"), "sky_runtime::JsonVal")
     ]
 
+-- | Runtime kernels whose Rust signatures are generic over
+-- `E: From<String>` (for SkyResult). At call sites whose match arms don't
+-- pin E, Rust errors with 'type annotations needed'. Emitting these names
+-- with a `::<SkyError, _>` turbofish pins E to the project's SkyError type
+-- (`From<String>` is provided by `str_err`).
+kernelsNeedingErrorPin :: Set.Set String
+kernelsNeedingErrorPin = Set.fromList
+    [ "base64_decode"
+    , "url_decode"
+    , "encoding_hex_decode"
+    -- Add other runtime decoders here as they surface.
+    ]
+
 -- | Context threaded through expression emission
 data EmitCtx = EmitCtx
     { ecRecordMap :: Map.Map String String  -- field-key -> struct name
@@ -1225,18 +1238,29 @@ exprToRustInner ctx e = case e of
             fnName = toSnakeCase (modPrefix ++ "_" ++ name)
             -- Check kernelToRust first (direct kernel dispatch)
             kernelName = kernelToRust modName name
+            -- sub-A.10 C4: kernels generic over E: From<String> need a
+            -- turbofish to pin E at call sites whose match arms don't
+            -- constrain the error type.
+            pinE n = if Set.member n kernelsNeedingErrorPin
+                     then n ++ "::<SkyError>" else n
         in if fnName /= kernelName && not ("ffi_kernel" `isPrefixOf` kernelName)
-           then kernelName
+           then pinE kernelName
            else -- Check Stage-4 alias table: some VarTopLevel bindings are
                 -- Ffi.kernel aliases that should route through kernel dispatch.
                 case Map.lookup (modName, name) (ecKernelAliases ctx) of
-                    Just (kMod, kFn) -> kernelToRust kMod kFn
+                    Just (kMod, kFn) -> pinE (kernelToRust kMod kFn)
                     Nothing ->
                         if Set.member (modPrefix, name) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
     Can.VarKernel mod name ->
         let fnName = kernelToRust mod name
+            -- sub-A.10 C4: pin the E type for runtime kernels generic over
+            -- `E: From<String>` so Rust can infer the SkyError at call sites
+            -- whose match arms don't constrain the error type.
+            tf = if Set.member fnName kernelsNeedingErrorPin
+                 then "::<SkyError>" else ""
         in if mod == "Basics" && name == "not" then "!"
-           else if Set.member (mod, name) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
+           else if Set.member (mod, name) (ecZeroArgDefs ctx) then fnName ++ "()"
+           else fnName ++ tf
     Can.VarCtor _ modName typeName ctorName _ -> kernelCtorToRust modName typeName ctorName
     Can.Chr [c] -> rustCharLit c
     Can.Chr s -> rustStringLit s
