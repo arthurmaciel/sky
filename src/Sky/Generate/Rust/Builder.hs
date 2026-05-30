@@ -2203,6 +2203,8 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Dict", "remove") -> "dict_remove"
     ("Dict", "member")          -> "dict_member"
     ("Sky.Core.Dict", "member") -> "dict_member"
+    ("Dict", "fromList")        -> "dict_from_list"
+    ("Sky.Core.Dict", "fromList") -> "dict_from_list"
     -- sub-A.8 T6 — Sky.Core.String additions (4 kernels)
     ("String", "replace")           -> "string_replace"
     ("Sky.Core.String", "replace")  -> "string_replace"

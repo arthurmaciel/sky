@@ -50,6 +50,11 @@ pub fn dict_member<T>(k: String, d: SkyDict<T>) -> bool {
     d.contains_key(&k)
 }
 
+/// `Dict.fromList : List (k, v) -> Dict k v`. String keys per Limitation #5.
+pub fn dict_from_list<T>(pairs: Vec<(String, T)>) -> SkyDict<T> {
+    pairs.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
