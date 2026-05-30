@@ -142,9 +142,22 @@ collectZeroArgDefs mods = foldMap walkMod mods `Set.union` zeroArgKernelDefs
     walkDecls prefix (Can.Declare def rest) = walkDef prefix def <> walkDecls prefix rest
     walkDecls prefix (Can.DeclareRec def defs rest) =
         walkDef prefix def <> foldMap (walkDef prefix) defs <> walkDecls prefix rest
-    walkDef prefix (Can.Def (Ann.At _ name) [] _body) = Set.singleton (prefix, name)
-    walkDef prefix (Can.TypedDef (Ann.At _ name) _ [] _body _) = Set.singleton (prefix, name)
+    -- A `Can.Def name [] body` with empty params is zero-arg AT the Sky source
+    -- layer — but if the body is `Ffi.kernel "X"` (a Stage-4 alias declaration),
+    -- the actual kernel `X` may take multiple args. Treating such an alias as
+    -- zero-arg makes callers wrongly emit `string_contains()(args)` (paren-wrap
+    -- + args). Exclude these — Stage-4 rewrite resolves call sites directly.
+    walkDef prefix (Can.Def (Ann.At _ name) [] body)
+        | isFfiKernelAlias body = mempty
+        | otherwise             = Set.singleton (prefix, name)
+    walkDef prefix (Can.TypedDef (Ann.At _ name) _ [] body _)
+        | isFfiKernelAlias body = mempty
+        | otherwise             = Set.singleton (prefix, name)
     walkDef _ _ = mempty
+    -- True if the body is exactly `Ffi.kernel "X"` (zero or N args don't matter —
+    -- the alias is a value-level declaration; the kernel itself may take args).
+    isFfiKernelAlias (Ann.At _ (Can.Call (Ann.At _ (Can.VarKernel "Ffi" "kernel")) _)) = True
+    isFfiKernelAlias _ = False
 
 data RustBuilder = RustBuilder
     { builderModules    :: [RustModule]
