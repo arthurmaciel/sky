@@ -56,3 +56,6 @@ pub use money::*;
 
 pub mod math;
 pub use math::*;
+
+pub mod dict;
+pub use dict::*;
