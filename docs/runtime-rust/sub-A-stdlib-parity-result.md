@@ -1,12 +1,13 @@
 # Sub-project A — stdlib parity status
 
-After three layers of work on `feat/runtime-rust`:
+After four layers of work on `feat/runtime-rust`:
 
 | Layer | Plan | Commits | Status |
 |---|---|---|---|
 | Sub-A.1-A.6 (original runtime work) | `docs/superpowers/plans/2026-05-29-stdlib-kernel-completion.md` | `04ba135c..c899b9d5` | ✅ 7 modules shipped + green |
 | Sub-A codegen-completion | `docs/superpowers/plans/2026-05-29-rust-codegen-ffi-callpure-opaque-types.md` | `7e1302e5..84a5eced` | ✅ Issues 2 + 3 closed |
-| Sub-A.8 runtime-kernel coverage | `docs/superpowers/plans/2026-05-29-sub-A8-runtime-kernel-coverage.md` | `1c5a1596..HEAD` | ✅ 54 kernels shipped + green; headline gate partially-met (error count 116 → ~50) |
+| Sub-A.8 runtime-kernel coverage | `docs/superpowers/plans/2026-05-29-sub-A8-runtime-kernel-coverage.md` | `1c5a1596..9ecb33f1` | ✅ 54 kernels shipped + green |
+| Sub-A.9 codegen-completeness | `docs/superpowers/plans/2026-05-29-sub-A9-codegen-completeness.md` | `7498edf6..HEAD` | ✅ 4 fixes shipped; headline gate error count 70 → 36 (-49%) |
 
 ## What is shipped + green
 
@@ -133,3 +134,52 @@ Every change is Rust-target-gated:
 - `runtime-rust/src/sky_runtime/` (runtime kernels)
 
 Go path: byte-identical throughout. `examples/01-hello-world` on `target=go` builds clean at every commit.
+
+## Sub-A.9 outcome — codegen-completeness fixes
+
+Four root-cause fixes in `src/Sky/Generate/Rust/Builder.hs` dropped the cargo
+error count on `examples/00-standard-libs` target=rust from **70 → 36** (-34
+errors, -49%) across these commits:
+
+| # | Fix | Errors closed |
+|---|---|---|
+| B1 | Remove `("Std.X", ...)` kernelToRust mirror arms — 83 entries across Std.Decimal/Money/Time. User-source references like `Money.format m` now go through the wrapper (which does Currency→String conversion) instead of bypassing to the runtime kernel. | -22 |
+| B3 | PCtor pattern-arg destructure prelude — `amount (Money d _) = d` was emitting `pub fn(_) { d }` (d not in scope). New `patternToRustArg` synthesises `__pN` params and prepends `let <Pat> = __pN else { unreachable!() };`. | -2 |
+| B6 | Type-aware `Can.Binop "++"` — was emitting `format!` regardless of operand type; now branches on `solveArgType` and emits `{ let mut __r = lhs.clone(); __r.extend(rhs); __r }` for Vec, `format!` for String. Closed the Jwt cascade. | -2 |
+| B2 | Exclude Ffi.kernel-alias bindings from `zeroArgDefs` — `contains = Ffi.kernel "String_contains"` was treated as zero-arg, making call sites emit `string_contains()(args)`. Now the body is inspected; `Ffi.kernel` aliases are correctly skipped. | -8 |
+
+(Note: B6 closed Jwt's `++` shape but the downstream cascade of E0308s
+involves multiple wrapper signatures; the headline-gate measurement
+reflects net change after Rust's inference re-runs across all affected
+sites.)
+
+### Remaining 36 errors
+
+| Class | Count | Locus | Path forward |
+|---|---|---|---|
+| `E0308` mismatched types | 24 | `sky_core_jwt.rs` (24 — Json.Encode.Value vs String shape mismatches downstream of withClaim/Issuer/etc.); `sky_core_json_decode.rs` (decoder wrapper signatures) | Sub-A.10: JsonDec/JsonEnc wrapper type-shape fixes |
+| `E0283` type annotations needed | 7 | `sky_core_json_decode.rs` decoder pipeline | Sub-A.10: closure typing in pipeline-style decoders |
+| `E0507`/`E0061` shape | 5 | `main.rs` test combinators, `std_money.rs` clear_rates `()` arg | Surgical — small follow-on patches |
+
+The remaining errors are all **codegen-shape issues localised to JSON
+decoder/encoder wrappers** plus a few isolated shape bugs in test
+combinators. Each is a self-contained fix; no further runtime kernels
+needed. Sub-A.10 sub-plan would close them.
+
+### Cross-target regression — still all green
+
+- 16/16 `examples/rust/*` build clean from a wiped slate.
+- 16/16 binaries run their expected output.
+- `examples/01-hello-world` on `target=go` builds clean.
+- Targeted cabal test (`FfiGen` / `Toml` / `Kernel`): 27/0.
+
+## Sub-A.9 commits
+
+```
+7498edf6  docs(rust): sub-A.9 spec — three codegen-shape fixes for headline gate
+348a2f55  docs(rust): sub-A.9 plan — 7 tasks, codegen-shape fixes
+342a3e54  fix(rust): remove ("Std.X", ...) kernelToRust mirror arms — close wrapper bypass
+06f3a58e  fix(rust): PCtor function-param destructure prelude — close 'cannot find value' bugs
+f68e8c15  fix(rust): type-aware Can.Binop '++' — Vec gets extend, String gets format!
+3cda519f  fix(rust): exclude Ffi.kernel-alias bindings from zeroArgDefs
+```
