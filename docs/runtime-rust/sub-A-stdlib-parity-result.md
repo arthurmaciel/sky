@@ -9,9 +9,10 @@ After five layers of work on `feat/runtime-rust`:
 | Sub-A.8 runtime-kernel coverage | `docs/superpowers/plans/2026-05-29-sub-A8-runtime-kernel-coverage.md` | `1c5a1596..9ecb33f1` | ✅ 54 kernels shipped + green |
 | Sub-A.9 codegen-completeness | `docs/superpowers/plans/2026-05-29-sub-A9-codegen-completeness.md` | `7498edf6..6f5f3d87` | ✅ 4 fixes shipped; error count 70 → 36 (-49%) |
 | Sub-A.10 codegen-shape cleanup | `docs/superpowers/plans/2026-05-30-sub-A10-codegen-shape-cleanup.md` | `4221a1eb..d7b2988f` | ✅ 6 fixes shipped; error count 36 → 17 (-53%) |
-| Sub-A.11 headline-gate close | `docs/superpowers/specs/2026-05-30-sub-A11-headline-gate-close-design.md` | `e814bc90..HEAD` | ✅ Group A + B1-B3 + C1 shipped; error count 17 → 7 (-59%) |
+| Sub-A.11 headline-gate close | `docs/superpowers/specs/2026-05-30-sub-A11-headline-gate-close-design.md` | `e814bc90..398b5c5e` | ✅ Group A + B1-B3 + C1 shipped; error count 17 → 7 (-59%) |
+| Sub-A.12 codegen polymorphism | `docs/superpowers/specs/2026-05-30-sub-A12-codegen-polymorphism-design.md` | `208759b6..HEAD` | ✅ F1 (mapError generic) + F2 (partial-app wrap) shipped; F3 (empty-literal defaulting) deferred (regressed in naive form). Error count 7 → 4 (-43%) |
 
-**Cumulative error reduction:** 232 → 165 → 116 → 70 → 36 → 17 → 7 (-97% from baseline).
+**Cumulative error reduction:** 232 → 165 → 116 → 70 → 36 → 17 → 7 → 4 (-98% from baseline).
 
 ## What is shipped + green
 
@@ -284,4 +285,43 @@ e814bc90  docs(rust): sub-A.11 spec — close the headline gate (17 -> 0 errors)
 dc8af02e  fix(rust): A — kernelsZeroArg + per-kernel turbofish for json_dec_*
 51663fbe  fix(rust): B1+B2+B3 — runtime signatures match Sky source contracts
 281bcd61  fix(rust): C1 — dict_empty + zero-arg-with-turbofish ordering
+```
+
+## Sub-A.12 outcome — codegen polymorphism fixes
+
+Two surgical codegen fixes dropped the cargo error count on
+`examples/00-standard-libs` target=rust from **7 → 4** (-3 errors, -43%):
+
+| # | Fix | Errors closed |
+|---|---|---|
+| F1 | `resultSig "mapError"` made generic over both error types (`<T1, T2>` instead of hardcoded `SkyError -> String`). Sky source `mapError : (e -> e2) -> Result e a -> Result e2 a` is fully polymorphic; the wrapper signature now matches. | -1 (was 2, closed 1; remaining is inference cascade) |
+| F2 | Partial application wrap. Sky's `result_and_then (validateTime now) (...)` — `validateTime` takes 2 args but receives 1 (curried). Codegen now detects via `length args < arity` (via `ecSolvedTypes`) and emits `(move \|__paN\| f(supplied.., __paN..))` closure. | -2 |
+
+### F3 — Empty-literal defaulting (deferred)
+
+Tried both `Vec::<i64>::new()` for empty `Can.List []` and `SkyMaybe::<i64>::Nothing` for the Nothing constructor. Both regressed: ~14-50 new E0308 errors from contexts where the surrounding type didn't match i64. The defaulting needs context-aware emission (look at the call site type signature to choose the right default per-call) — non-trivial codegen surgery. Out of scope for sub-A.12.
+
+### Remaining 4 errors
+
+| Class | Count | Locus | Why deferred |
+|---|---|---|---|
+| `sky_core_list_head(vec![])` E0283 | 1 | main.rs:241 | Empty-Vec defaulting (F3) |
+| `sky_core_maybe_map(closure, Nothing)` E0283 | 2 | main.rs:247 | Maybe-Nothing inference (F3) + closure-arg inference |
+| `sky_core_result_map_error(...)` E0283 | 1 | main.rs:250 | F1 cascade — outer inference still ambiguous after the closure signature fix |
+
+These are all empty-literal / Nothing-pattern inference issues. They require codegen-level context propagation (the codegen needs to know "this empty literal is being passed as an argument to a generic function whose other args don't pin the type, so inject a turbofish"). Substantial change; deferred.
+
+### Cross-target regression — all green
+
+- 16/16 `examples/rust/*` build clean from a wiped slate.
+- 16/16 binaries run their expected output.
+- `examples/01-hello-world` on `target=go` builds clean.
+- Targeted cabal test (`FfiGen` / `Toml` / `Kernel`): 27/0.
+
+## Sub-A.12 commits
+
+```
+208759b6  docs(rust): sub-A.12 spec — codegen polymorphism fixes for the final 7
+54b7fb95  fix(rust): F1 — resultSig 'mapError' generic over both error types
+124b857e  fix(rust): F2 — partial application wrap for under-applied calls
 ```
