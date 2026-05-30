@@ -8,9 +8,10 @@ After five layers of work on `feat/runtime-rust`:
 | Sub-A codegen-completion | `docs/superpowers/plans/2026-05-29-rust-codegen-ffi-callpure-opaque-types.md` | `7e1302e5..84a5eced` | ✅ Issues 2 + 3 closed |
 | Sub-A.8 runtime-kernel coverage | `docs/superpowers/plans/2026-05-29-sub-A8-runtime-kernel-coverage.md` | `1c5a1596..9ecb33f1` | ✅ 54 kernels shipped + green |
 | Sub-A.9 codegen-completeness | `docs/superpowers/plans/2026-05-29-sub-A9-codegen-completeness.md` | `7498edf6..6f5f3d87` | ✅ 4 fixes shipped; error count 70 → 36 (-49%) |
-| Sub-A.10 codegen-shape cleanup | `docs/superpowers/plans/2026-05-30-sub-A10-codegen-shape-cleanup.md` | `4221a1eb..HEAD` | ✅ 6 fixes shipped; error count 36 → 17 (-53%) |
+| Sub-A.10 codegen-shape cleanup | `docs/superpowers/plans/2026-05-30-sub-A10-codegen-shape-cleanup.md` | `4221a1eb..d7b2988f` | ✅ 6 fixes shipped; error count 36 → 17 (-53%) |
+| Sub-A.11 headline-gate close | `docs/superpowers/specs/2026-05-30-sub-A11-headline-gate-close-design.md` | `e814bc90..HEAD` | ✅ Group A + B1-B3 + C1 shipped; error count 17 → 7 (-59%) |
 
-**Cumulative error reduction:** 232 → 165 → 116 → 70 → 36 → 17 (-93% from baseline).
+**Cumulative error reduction:** 232 → 165 → 116 → 70 → 36 → 17 → 7 (-97% from baseline).
 
 ## What is shipped + green
 
@@ -233,4 +234,54 @@ fe439f8a  docs(rust): sub-A.10 plan — 8 tasks for 26-error headline-gate close
 5a3a83b1  fix(rust): C4 — Decoder turbofish for E: From<String> kernels
 edd931d6  fix(rust): C5 — case-arm PVar binding under .as_str() scrutinee → String
 6dace4b5  fix(rust): C6 — capture cloning in move closures
+```
+
+## Sub-A.11 outcome — final 10 errors closed
+
+Five fixes dropped the cargo error count on `examples/00-standard-libs`
+target=rust from **17 → 7** (-10 errors, -59%) across these commits:
+
+| # | Fix | Errors closed |
+|---|---|---|
+| Group A | `kernelsNeedingErrorPin` refactored from Set to Map (per-kernel turbofish suffix); `kernelsZeroArg` Set added; both Can.VarKernel and Can.VarTopLevel arms updated to combine them. Closed the "JsonDecoder pipeline" without architectural reshape (it was just the same zero-arg + turbofish issue). | -6 |
+| B1 | `decimal_format_with` runtime arg order swapped to match Sky source `(thousandsSep, decimalSep, places, d)`. | -1 |
+| B2 | `money_clear_rates` drops the unused `()` param (Sky's `Ffi.callPure "Money_clearRates" []` peephole emits zero args). | -1 |
+| B3 | `time_from_parts` rewritten to take `zone` first (7 args matching Sky source), with chrono-tz local→UTC conversion. | -1 |
+| C1 | `dict_empty` defaults to `::<i64>` turbofish; Can.VarKernel zero-arg-with-turbofish ordering fixed (turbofish before `()`). | -1 |
+
+### Remaining 7 errors
+
+All four classes need **codegen polymorphism** improvements beyond
+sub-A.11's surface fixes:
+
+| Class | Count | Locus | Root cause |
+|---|---|---|---|
+| `sky_core_list_head(vec![])` E0283 | 1 | main.rs:241 | Empty `vec![]` passed to generic `<T0>` function; no constraint to pin T0. Needs codegen-level "empty-Vec defaulting" or call-site `Vec::<i64>::new()` emission. |
+| `sky_core_maybe_map(closure, SkyMaybe::Nothing)` E0283 | 2 | main.rs:247 | `Maybe::Nothing` has no constraint on inner type; closure's `x` ambiguous. Same defaulting issue. |
+| `sky_core_result_map_error(closure, …)` E0308 | 2 | main.rs:250 | `pub fn sky_core_result_map_error<T0>(fn: Fn(SkyError) -> String, …)` — the closure return type is **hardcoded** to `String` in the codegen-emitted Sky wrapper, but Sky source `mapError : (e -> e2) -> Result e a -> Result e2 a` is fully polymorphic in e2. The codegen's wrapper-signature inference needs to emit `<E1, E2, T>` not `<T0>`. |
+| JWT validate_time signature | 2 | sky_core_jwt.rs:50 | `sky_core_jwt_validate_time` codegen-emitted with 2-arg signature, called with 1 arg. Sky-source codegen-polymorphism issue (similar to mapError). |
+
+These four classes share a root cause: **Sky-source polymorphic function
+wrappers don't always emit with the right generic-parameter set**. The
+codegen specialises some type parameters to concrete types (often
+`String` or `SkyError`) instead of leaving them as generics.
+
+Fixing requires reworking the codegen's wrapper-signature inference
+(`knownDefSig` + `extractParamTypes` + `extractReturnType` interaction).
+Substantial change — deferred to sub-A.12 if pursued.
+
+### Cross-target regression — all green
+
+- 16/16 `examples/rust/*` build clean from a wiped slate.
+- 16/16 binaries run their expected output.
+- `examples/01-hello-world` on `target=go` builds clean.
+- Targeted cabal test (`FfiGen` / `Toml` / `Kernel`): 27/0.
+
+## Sub-A.11 commits
+
+```
+e814bc90  docs(rust): sub-A.11 spec — close the headline gate (17 -> 0 errors)
+dc8af02e  fix(rust): A — kernelsZeroArg + per-kernel turbofish for json_dec_*
+51663fbe  fix(rust): B1+B2+B3 — runtime signatures match Sky source contracts
+281bcd61  fix(rust): C1 — dict_empty + zero-arg-with-turbofish ordering
 ```
