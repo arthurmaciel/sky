@@ -127,8 +127,9 @@ pub fn decimal_sub_percent(pct: Decimal, base: Decimal) -> Decimal {
     Decimal(base.0 - (pct.0 * base.0 / RD::from(100)))
 }
 
-// === formatWith — places + decimal sep + group sep (every 3 digits, right-to-left) ===
-pub fn decimal_format_with(places: i64, dec_sep: String, grp_sep: String, d: Decimal) -> String {
+// === formatWith — Sky source: formatWith thousandsSep decimalSep places d ===
+// (group every 3 digits right-to-left)
+pub fn decimal_format_with(grp_sep: String, dec_sep: String, places: i64, d: Decimal) -> String {
     let p = places.max(0) as u32;
     let rounded = if p > 0 {
         d.0.round_dp_with_strategy(p, RoundingStrategy::MidpointNearestEven)
@@ -251,22 +252,22 @@ mod tests {
     fn test_decimal_format_with() {
         // "1050000.5" -> "1,050,000.50" with 2 places, "." dec, "," group
         assert_eq!(
-            decimal_format_with(2, ".".to_string(), ",".to_string(), d("1050000.5")),
+            decimal_format_with(",".to_string(), ".".to_string(), 2, d("1050000.5")),
             "1,050,000.50"
         );
         // Negative + grouping
         assert_eq!(
-            decimal_format_with(2, ".".to_string(), ",".to_string(), d("-1234.5")),
+            decimal_format_with(",".to_string(), ".".to_string(), 2, d("-1234.5")),
             "-1,234.50"
         );
         // Zero places, no grouping
         assert_eq!(
-            decimal_format_with(0, ".".to_string(), "".to_string(), d("12345")),
+            decimal_format_with("".to_string(), ".".to_string(), 0, d("12345")),
             "12345"
         );
         // European convention: ',' decimal, '.' grouping
         assert_eq!(
-            decimal_format_with(2, ",".to_string(), ".".to_string(), d("1234.56")),
+            decimal_format_with(".".to_string(), ",".to_string(), 2, d("1234.56")),
             "1.234,56"
         );
     }

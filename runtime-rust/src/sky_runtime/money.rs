@@ -188,7 +188,10 @@ pub fn money_has_rate(from: String, to: String) -> bool {
 }
 
 /// `clearRates : () -> Result Error ()` — test/admin only.
-pub fn money_clear_rates<E: From<String>>(_: ()) -> SkyResult<E, ()> {
+/// Sky source calls `Ffi.callPure "Money_clearRates" []` — empty args list,
+/// the peephole emits `money_clear_rates()` with no args. The runtime
+/// takes no params accordingly.
+pub fn money_clear_rates<E: From<String>>() -> SkyResult<E, ()> {
     let mut map = rates().lock().expect("money fx rates mutex");
     map.clear();
     SkyResult::Ok(())
@@ -281,7 +284,7 @@ mod tests {
     #[test]
     fn test_money_rates_roundtrip() {
         // Clear any rates from prior tests
-        let _: SkyResult<String, ()> = money_clear_rates(());
+        let _: SkyResult<String, ()> = money_clear_rates();
         // Set USD->EUR = 0.9; auto-registers EUR->USD ≈ 1.111
         let _: SkyResult<String, ()> = money_set_rate("USD".into(), "EUR".into(), d("0.9"));
         assert!(money_has_rate("USD".into(), "EUR".into()));
@@ -301,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_money_set_rate_negative_rejected() {
-        let _: SkyResult<String, ()> = money_clear_rates(());
+        let _: SkyResult<String, ()> = money_clear_rates();
         let r: SkyResult<String, ()> = money_set_rate("USD".into(), "EUR".into(), d("-1"));
         assert!(matches!(r, SkyResult::Err(_)));
         let r: SkyResult<String, ()> = money_set_rate("USD".into(), "EUR".into(), d("0"));

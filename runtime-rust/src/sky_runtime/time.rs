@@ -242,15 +242,26 @@ pub fn time_diff_minutes(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - ea
 pub fn time_diff_hours(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - earlier_ms) / 3_600_000 }
 pub fn time_diff_days(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - earlier_ms) / 86_400_000 }
 
-/// `fromParts y mo d h mi s ms -> Result Error Int` — UTC epoch ms for the
-/// given date parts. Invalid parts (e.g. month 13, day 32) return Err.
-pub fn time_from_parts<E: From<String>>(y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64) -> SkyResult<E, i64> {
-    match NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
-        .and_then(|day| day.and_hms_milli_opt(h as u32, mi as u32, s as u32, ms as u32)) {
-        Some(naive) => SkyResult::Ok(Utc.from_utc_datetime(&naive).timestamp_millis()),
+/// Sky source: `fromParts zone y m d h mins s -> Result Error Int`.
+/// Computes the UTC epoch-ms for the given local date/time in the given IANA
+/// zone. Invalid parts return Err. Unknown timezone returns Err.
+pub fn time_from_parts<E: From<String>>(zone: String, y: i64, m: i64, d: i64, h: i64, mins: i64, s: i64) -> SkyResult<E, i64> {
+    let tz: Tz = match zone.parse() {
+        Ok(t) => t,
+        Err(_) => return SkyResult::Err(format!("Time.fromParts: unknown timezone {:?}", zone).into()),
+    };
+    let naive = match NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
+        .and_then(|day| day.and_hms_opt(h as u32, mins as u32, s as u32)) {
+        Some(n) => n,
+        None => return SkyResult::Err(format!(
+            "Time.fromParts: invalid date parts {}-{:02}-{:02} {:02}:{:02}:{:02}",
+            y, m, d, h, mins, s).into()),
+    };
+    match tz.from_local_datetime(&naive).single() {
+        Some(zoned) => SkyResult::Ok(zoned.with_timezone(&Utc).timestamp_millis()),
         None => SkyResult::Err(format!(
-            "Time.fromParts: invalid date parts {}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-            y, m, d, h, mi, s, ms).into()),
+            "Time.fromParts: ambiguous/non-existent local time {}-{:02}-{:02} {:02}:{:02}:{:02} in {}",
+            y, m, d, h, mins, s, zone).into()),
     }
 }
 
@@ -339,17 +350,19 @@ mod time_advanced_tests {
     }
 
     #[test]
-    fn test_from_parts_epoch() {
-        let r: SkyResult<String, i64> = time_from_parts(1970, 1, 1, 0, 0, 0, 0);
+    fn test_from_parts_epoch_utc() {
+        let r: SkyResult<String, i64> = time_from_parts("UTC".into(), 1970, 1, 1, 0, 0, 0);
         assert!(matches!(r, SkyResult::Ok(0)));
     }
 
     #[test]
     fn test_from_parts_invalid_returns_err() {
-        let r1: SkyResult<String, i64> = time_from_parts(2024, 13, 1, 0, 0, 0, 0);  // month 13
-        let r2: SkyResult<String, i64> = time_from_parts(2024, 2, 30, 0, 0, 0, 0);  // Feb 30
+        let r1: SkyResult<String, i64> = time_from_parts("UTC".into(), 2024, 13, 1, 0, 0, 0);  // month 13
+        let r2: SkyResult<String, i64> = time_from_parts("UTC".into(), 2024, 2, 30, 0, 0, 0);  // Feb 30
+        let r3: SkyResult<String, i64> = time_from_parts("Not/AZone".into(), 2024, 1, 1, 0, 0, 0);
         assert!(matches!(r1, SkyResult::Err(_)));
         assert!(matches!(r2, SkyResult::Err(_)));
+        assert!(matches!(r3, SkyResult::Err(_)));  // unknown timezone
     }
 
     #[test]
