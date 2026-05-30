@@ -524,12 +524,19 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                   && all (not . hasTypeVars) solvedParamTys
                then -- Use solved types (all concrete, no TVars)
                     let rm = ecRecordMap ctx
-                        pStrs = map (\(p, t) -> patternToRustParam p ++ ": " ++ typeToRustString rm t)
-                                    (zip params solvedParamTys)
+                        argTriples = zipWith3
+                            (\i p t -> let (nm, pre) = patternToRustArg i p
+                                       in (nm ++ ": " ++ typeToRustString rm t, pre))
+                            [0..] params solvedParamTys
+                        pStrs = map fst argTriples
                    in (pStrs, "")
                else case knownDefSig modPrefix name n of
                    Just (paramTypes, retType) ->
-                        let safeParams = map (\(p, t) -> patternToRustParam p ++ ": " ++ t) (zip params paramTypes)
+                        let argTriples = zipWith3
+                                (\i p t -> let (nm, pre) = patternToRustArg i p
+                                           in (nm ++ ": " ++ t, pre))
+                                [0..] params paramTypes
+                            safeParams = map fst argTriples
                             tvars = sigTVars paramTypes retType
                             extraBound tv = if name == "member" && tv == "T0" then " + PartialEq" else ""
                             genList = map (\tv -> tv ++ ": Clone" ++ extraBound tv) tvars
@@ -544,7 +551,8 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                            useVec = bodyUsesList body
                            pStrs = map (\(i, p) ->
                                let tn = "T" ++ show i
-                               in patternToRustParam p ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "String")
+                                   (nm, _pre) = patternToRustArg i p
+                               in nm ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "String")
                                ) (zip [0..] params)
                            genList = if anyCloneNeeded
                                      then map (\i -> "T" ++ show i ++ ": Clone") [0..length params - 1]
@@ -596,6 +604,10 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         ctx' = ctx { ecCloneVars = Set.fromList multiVars
                    , ecCopyVars = copyVars }
         bodyStr = exprToRustString ctx' body
+        -- Collect destructure preludes for non-trivial pattern args. The
+        -- prelude is `let <Pattern> = __pN else { unreachable!() };` per
+        -- patternToRustArg. Empty for PVar/PAnything/PTuple params.
+        preludes = concat [ snd (patternToRustArg i p) | (i, p) <- zip [0..] params ]
         -- S6: When the function returns SkyTask<T> but the body tail is a
         -- bare value (not already a Task expression), wrap in task_succeed({...}).
         -- Walk through let chains to find the tail expression, then check
@@ -603,11 +615,16 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         bodyWrapped = if "SkyTask<" `isPrefixOf` retTy && needsTaskWrap (ecSolvedTypes ctx) body
                       then "task_succeed({ " ++ bodyStr ++ " })"
                       else bodyStr
-     in RustFunction rustName genVars paramStrs retTy bodyWrapped
-defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) = 
+     in RustFunction rustName genVars paramStrs retTy (preludes ++ bodyWrapped)
+defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
     let rm = ecRecordMap ctx
         rustName = if name == "main" then "sky_main" else name
-        params = map (\(pat, ty) -> patternToRustParam pat ++ ": " ++ typeToRustString rm ty) pats
+        argTriples = zipWith
+            (\i (pat, ty) -> let (nm, pre) = patternToRustArg i pat
+                             in (nm ++ ": " ++ typeToRustString rm ty, pre))
+            [0..] pats
+        params = map fst argTriples
+        preludes = concatMap snd argTriples
         ret = if name == "main" then "()" else typeToRustString rm retTy
         -- Collect type variable names from annotation types, emit as generic params
         allAnnotTys = map snd pats ++ [retTy | name /= "main"]
@@ -617,7 +634,7 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
         multiBody = collectVarLocalsMulti body
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
         ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx }
-    in RustFunction rustName genDecl params ret (exprToRustString ctx' body)
+    in RustFunction rustName genDecl params ret (preludes ++ exprToRustString ctx' body)
 defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
     let vars = intercalate "_" (patBindingVars pat)
         fnName = if null vars then "__destruct" else "__destruct_" ++ vars
@@ -860,6 +877,48 @@ patternToRustParam (Ann.At _ pat) = case pat of
     Can.PTuple a b rest ->
         "(" ++ intercalate ", " (map patternToRustParam (a:b:rest)) ++ ")"
     _ -> "_"
+
+-- | Emit a Rust pattern syntax that destructures a value of the
+-- corresponding Sky type. Used by `patternToRustArg` when a function
+-- parameter is a non-trivial pattern (e.g. PCtor) and the body needs
+-- the bound variables in scope.
+patternToRustPattern :: Can.Pattern -> String
+patternToRustPattern (Ann.At _ pat) = case pat of
+    Can.PVar n        -> rustSafeIdent n
+    Can.PAnything     -> "_"
+    Can.PTuple a b rest ->
+        "(" ++ intercalate ", " (map patternToRustPattern (a:b:rest)) ++ ")"
+    Can.PCtor{Can._p_home = mod', Can._p_type = ty, Can._p_name = ctor, Can._p_args = args} ->
+        let modName = ModuleName._name mod'
+            modPrefix' = map (\c -> if c == '.' then '_' else c) modName
+            enumName = toCamelCase (modPrefix' ++ "_" ++ ty)
+            argStrs = map (\(Can.PatternCtorArg _ _ p) -> patternToRustPattern p) args
+            argsRendered = if null argStrs then "" else "(" ++ intercalate ", " argStrs ++ ")"
+        in enumName ++ "::" ++ ctor ++ argsRendered
+    _ -> "_"
+
+-- | Decompose a pattern function-argument into:
+--   (rustParamName, prelude)
+-- where `prelude` is a `let-else` statement to be prepended to the
+-- function body, binding the pattern's variables in scope. Trivial
+-- patterns (PVar / PAnything / PTuple) get an empty prelude — the
+-- pattern itself is the rustParamName. Non-trivial patterns (PCtor)
+-- get a synthesised `__pN` parameter and a destructure prelude.
+--
+-- Rust's `let <pattern> = <expr> else { unreachable!() };` accepts both
+-- irrefutable and refutable patterns; the else branch is dead code when
+-- the pattern is irrefutable (single-variant enum), and dead by
+-- exhaustiveness when the pattern is refutable (the Sky type-checker
+-- already proved this on the calling side).
+patternToRustArg :: Int -> Can.Pattern -> (String, String)
+patternToRustArg _ pat@(Ann.At _ (Can.PVar _))       = (patternToRustParam pat, "")
+patternToRustArg _ pat@(Ann.At _ Can.PAnything)      = (patternToRustParam pat, "")
+patternToRustArg _ pat@(Ann.At _ (Can.PTuple _ _ _)) = (patternToRustParam pat, "")
+patternToRustArg idx pat =
+    let paramName = "__p" ++ show idx
+        rustPat = patternToRustPattern pat
+        prelude = "let " ++ rustPat ++ " = " ++ paramName ++ " else { unreachable!() }; "
+    in (paramName, prelude)
 
 -- | Walk an expression and collect VarLocal names, counting occurrences.
 -- Used to decide which variables need .clone() (those used ≥ 2 times).
