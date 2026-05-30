@@ -206,17 +206,45 @@ runtimeOpaqueTypes = Map.fromList
     , (("Sky.Core.Json.Encode", "Value"), "sky_runtime::JsonVal")
     ]
 
--- | Runtime kernels whose Rust signatures are generic over
--- `E: From<String>` (for SkyResult). At call sites whose match arms don't
--- pin E, Rust errors with 'type annotations needed'. Emitting these names
--- with a `::<SkyError, _>` turbofish pins E to the project's SkyError type
--- (`From<String>` is provided by `str_err`).
-kernelsNeedingErrorPin :: Set.Set String
-kernelsNeedingErrorPin = Set.fromList
-    [ "base64_decode"
-    , "url_decode"
-    , "encoding_hex_decode"
-    -- Add other runtime decoders here as they surface.
+-- | Runtime kernels whose Rust signatures are generic and need a turbofish
+-- at call sites whose match arms / surrounding context don't pin the
+-- generic parameters. Maps kernel name to the EXACT turbofish suffix to
+-- inject (depends on the kernel's arity — 1 param = ::<SkyError>, 2 params
+-- = ::<SkyError, _>, etc.). `From<String>` for E is provided by `str_err`.
+kernelsNeedingErrorPin :: Map.Map String String
+kernelsNeedingErrorPin = Map.fromList
+    [ -- Encoding decoders — single E parameter
+      ("base64_decode",          "::<SkyError>")
+    , ("url_decode",             "::<SkyError>")
+    , ("encoding_hex_decode",    "::<SkyError>")
+    -- JsonDecode primitives — single E parameter
+    , ("json_dec_string",        "::<SkyError>")
+    , ("json_dec_int",           "::<SkyError>")
+    , ("json_dec_float",         "::<SkyError>")
+    , ("json_dec_bool",          "::<SkyError>")
+    -- JsonDecode null: <E, A: Default>
+    , ("json_dec_null",          "::<SkyError, _>")
+    -- JsonDecode combinators: <E, T> — pin E, leave T inferred
+    , ("json_dec_field",         "::<SkyError, _>")
+    , ("json_dec_at",            "::<SkyError, _>")
+    , ("json_dec_list",          "::<SkyError, _>")
+    , ("json_dec_decode_string", "::<SkyError, _>")
+    -- JsonDecode mapping: <E, A, B>
+    , ("json_dec_map",           "::<SkyError, _, _>")
+    , ("json_dec_and_then",      "::<SkyError, _, _>")
+    ]
+
+-- | Runtime kernels whose Rust signatures are zero-arg functions returning a
+-- value (e.g. `pub fn dict_empty<T>() -> HashMap<...>`, `json_dec_int<E>() -> Decoder<E, i64>`).
+-- At Can.VarTopLevel call sites the codegen takes the "then" branch and emits
+-- the bare kernel name without `()`, leaving the function pointer where a
+-- value is expected. This set pins the call.
+kernelsZeroArg :: Set.Set String
+kernelsZeroArg = Set.fromList
+    [ "json_dec_string", "json_dec_int", "json_dec_float"
+    , "json_dec_bool", "json_dec_null"
+    , "dict_empty"
+    , "math_pi", "math_e"
     ]
 
 -- | Context threaded through expression emission
@@ -1248,29 +1276,41 @@ exprToRustInner ctx e = case e of
             fnName = toSnakeCase (modPrefix ++ "_" ++ name)
             -- Check kernelToRust first (direct kernel dispatch)
             kernelName = kernelToRust modName name
-            -- sub-A.10 C4: kernels generic over E: From<String> need a
-            -- turbofish to pin E at call sites whose match arms don't
-            -- constrain the error type.
-            pinE n = if Set.member n kernelsNeedingErrorPin
-                     then n ++ "::<SkyError>" else n
+            -- sub-A.10 C4 + sub-A.11: kernels generic over E (and possibly
+            -- T, A, B) need a per-kernel turbofish to pin the generics at
+            -- call sites whose match arms / context don't constrain them.
+            pinE n = case Map.lookup n kernelsNeedingErrorPin of
+                Just suffix -> n ++ suffix
+                Nothing     -> n
+            -- sub-A.11: zero-arg kernels (json_dec_*, dict_empty, math_pi/e)
+            -- returning a value (Decoder, HashMap, f64) reached via the
+            -- "then" branch — append () to call them. Turbofish goes
+            -- BEFORE the (), e.g. json_dec_int::<SkyError>().
+            -- Lookup is on the BARE kernel name (pre-turbofish).
+            emitKernel bare = let pinned = pinE bare
+                              in if Set.member bare kernelsZeroArg
+                                 then pinned ++ "()" else pinned
         in if fnName /= kernelName && not ("ffi_kernel" `isPrefixOf` kernelName)
-           then pinE kernelName
+           then emitKernel kernelName
            else -- Check Stage-4 alias table: some VarTopLevel bindings are
                 -- Ffi.kernel aliases that should route through kernel dispatch.
                 case Map.lookup (modName, name) (ecKernelAliases ctx) of
-                    Just (kMod, kFn) -> pinE (kernelToRust kMod kFn)
+                    Just (kMod, kFn) -> emitKernel (kernelToRust kMod kFn)
                     Nothing ->
                         if Set.member (modPrefix, name) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
     Can.VarKernel mod name ->
         let fnName = kernelToRust mod name
-            -- sub-A.10 C4: pin the E type for runtime kernels generic over
-            -- `E: From<String>` so Rust can infer the SkyError at call sites
-            -- whose match arms don't constrain the error type.
-            tf = if Set.member fnName kernelsNeedingErrorPin
-                 then "::<SkyError>" else ""
+            -- sub-A.10 C4 + sub-A.11: per-kernel turbofish (E pinning + arity).
+            tf = case Map.lookup fnName kernelsNeedingErrorPin of
+                Just suffix -> suffix
+                Nothing     -> ""
+            -- sub-A.11: zero-arg kernels — append () AFTER the turbofish.
+            withParen = if Set.member fnName kernelsZeroArg
+                        then fnName ++ tf ++ "()"
+                        else fnName ++ tf
         in if mod == "Basics" && name == "not" then "!"
            else if Set.member (mod, name) (ecZeroArgDefs ctx) then fnName ++ "()"
-           else fnName ++ tf
+           else withParen
     Can.VarCtor _ modName typeName ctorName _ -> kernelCtorToRust modName typeName ctorName
     Can.Chr [c] -> rustCharLit c
     Can.Chr s -> rustStringLit s
