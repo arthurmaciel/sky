@@ -2212,6 +2212,13 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.String", "endsWith") -> "string_ends_with"
     ("String", "repeat")            -> "string_repeat"
     ("Sky.Core.String", "repeat")   -> "string_repeat"
+    -- sub-A.8 T7 — Sky.Core.Basics + List (3 kernels)
+    ("Basics", "modBy")               -> "basics_mod_by"
+    ("Sky.Core.Basics", "modBy")      -> "basics_mod_by"
+    ("Basics", "errorToString")       -> "basics_error_to_string"
+    ("Sky.Core.Basics", "errorToString") -> "basics_error_to_string"
+    ("List", "filterMap")             -> "list_filter_map"
+    ("Sky.Core.List", "filterMap")    -> "list_filter_map"
     -- Json.Encode kernel functions: route to runtime implementations
     ("JsonEnc", "string") -> "json_enc_string"
     ("Sky.Core.Json.Encode", "string") -> "json_enc_string"
