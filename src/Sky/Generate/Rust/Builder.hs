@@ -1407,8 +1407,13 @@ exprToRustInner ctx e = case e of
             wrapped = if hasCons then "(" ++ scrutStr ++ ").as_slice()"
                       else if hasStr then scrutStr ++ ".as_str()"
                       else scrutStr
+            -- sub-A.10 C5: when the scrutinee was .as_str()-wrapped, wildcard
+            -- PVar bindings are &str. Convert to String at the body's binding
+            -- site so constructor args expecting String work.
+            renderBranch = if hasStr then branchToRustStringStrWrap ctx
+                                     else branchToRustString ctx
         in "match " ++ wrapped ++ " { " ++
-        intercalate ", " (map (branchToRustString ctx) branches) ++ " }"
+        intercalate ", " (map renderBranch branches) ++ " }"
       where
         hasConsP (Ann.At _ p) = case p of
             Can.PCons _ _ -> True
@@ -1651,6 +1656,20 @@ branchToRustString ctx (Can.CaseBranch pat body) =
     in if null prefix && not ("let " `isPrefixOf` bodyExpr) && not ("if " `isPrefixOf` bodyExpr)
        then patStr ++ " => " ++ bodyExpr
        else patStr ++ " => { " ++ prefix ++ bodyExpr ++ " }"
+
+-- | Sub-A.10 C5: case-arm emit for branches under a `.as_str()`-wrapped
+-- scrutinee. PVar bindings are `&str`; convert them to `String` at the body
+-- binding site so downstream uses (e.g. constructor args) get the owned
+-- value. Non-PVar patterns delegate to the normal emit.
+branchToRustStringStrWrap :: EmitCtx -> Can.CaseBranch -> String
+branchToRustStringStrWrap ctx br@(Can.CaseBranch pat body) =
+    case pat of
+        Ann.At _ (Can.PVar n) ->
+            let patStr = rustSafeIdent n
+                bodyStr = exprToRustString ctx body
+                prelude = "let " ++ patStr ++ " = " ++ patStr ++ ".to_string(); "
+            in patStr ++ " => { " ++ prelude ++ bodyStr ++ " }"
+        _ -> branchToRustString ctx br
 
 patternToMatchString :: Map.Map String String -> Can.Pattern -> String
 patternToMatchString _recMap (Ann.At _ pat) = case pat of
