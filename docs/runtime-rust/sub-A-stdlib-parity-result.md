@@ -1,136 +1,124 @@
 # Sub-project A — stdlib kernel completion: status
 
-After Tasks 1-16 of `docs/superpowers/plans/2026-05-29-stdlib-kernel-completion.md`,
-the runtime kernels for Encoding / Regex / Crypto-completion / Jwt / Std.Time
-advanced / Std.Decimal are all implemented and unit-tested. 50 runtime lib tests
-pass (with `--features crypto,json`). `cabal build exe:sky` succeeds.
+After Tasks 1-16 of the original sub-A plan plus the 10-task codegen-completion
+plan (`docs/superpowers/plans/2026-05-29-rust-codegen-ffi-callpure-opaque-types.md`),
+the **infrastructure** for sub-A is in place: the Rust codegen can express any
+`Ffi.callPure` to a runtime kernel, opaque Sky types can be bridged to runtime
+newtypes via the `runtimeOpaqueTypes` registry, and the 7 new runtime kernel
+modules (Encoding / Regex / Crypto-completion / Jwt / Std.Time advanced /
+Std.Decimal / Std.Money) all compile + their runtime unit tests pass.
+
+The **headline gate** (Sky.Test 120 assertions on `target=rust` for
+`examples/00-standard-libs`) is NOT yet met. Issues 2 and 3 (the codegen-
+integration blockers) are both closed — the remaining work is broader runtime-
+kernel coverage that sub-A's original scope underestimated.
 
 ## What is shipped + green
+
+### Tasks 1-16 (the original sub-A runtime work)
 
 | Component | File | Tests passing | `kernelToRust` arms |
 |---|---|---|---|
 | A.1 Encoding (base64/url/hex) | `runtime-rust/src/sky_runtime/encoding.rs` | 6 | ✅ Builder.hs |
 | A.2 Regex (match/find/findAll/replace/split) | `runtime-rust/src/sky_runtime/regex_kernel.rs` | 5 | ✅ Builder.hs |
-| A.3 Crypto completion (sha512/sha1/md5/hmac*/RSA/constantTimeEqual) | `runtime-rust/src/sky_runtime/crypto.rs` (extended) | 8 | ✅ Builder.hs |
-| A.4 Jwt (HS256/RS256 encode+decode) | `runtime-rust/src/sky_runtime/jwt.rs` | 2 | n/a — Jwt.sky is pure-Sky on Crypto |
-| A.5 Std.Time advanced (IANA zones + calendar math, 24 fns) | `runtime-rust/src/sky_runtime/time.rs` (extended) | 5 | ✅ Builder.hs |
-| A.6 Std.Decimal (~22 entries; rust_decimal newtype) | `runtime-rust/src/sky_runtime/decimal.rs` | 4 | ✅ Builder.hs |
-| A.7 Std.Markdown | n/a — pure Sky on String/List primitives, no kernel needed | — | — |
+| A.3 Crypto completion (sha512/sha1/md5/hmac*/RSA/constantTimeEqual) | `runtime-rust/src/sky_runtime/crypto.rs` | 8 | ✅ Builder.hs |
+| A.4 Jwt (HS256/RS256 encode+decode) | `runtime-rust/src/sky_runtime/jwt.rs` | 2 | (Sky-source on Crypto) |
+| A.5 Std.Time advanced (IANA zones + calendar math, 24 fns) | `runtime-rust/src/sky_runtime/time.rs` | 5 | ✅ Builder.hs |
+| A.6 Std.Decimal core (22 entries; `pub struct Decimal(rust_decimal::Decimal)`) | `runtime-rust/src/sky_runtime/decimal.rs` | 4 | ✅ Builder.hs |
+| A.7 Std.Markdown | (pure Sky on String/List, no kernel needed) | — | — |
 
-All 18 commits land on `feat/runtime-rust`. The Sky compiler rebuilds cleanly
-(`cabal install ... exe:sky` → `sky dev`).
+### Codegen completion (this plan — Tasks 0-9, 10 commits)
 
-## Integration gap discovered at the headline gate (Task 17)
+| Issue | Resolution | Verified by |
+|---|---|---|
+| **Issue 2** — `Ffi.callPure` unsupported on `target=rust` | Compile-time peephole in `Builder.hs:exprToRustInner` recognises `Can.Call (Can.VarKernel "Ffi" "callPure") [Can.Str name, Can.List args]` and emits direct kernel calls via `kernelToRust`. Non-peephole shapes route to `ffi_call_pure_polyfill` (actionable panic). `Ffi.toAny` collapses to identity inside peephole; standalone `Ffi.toAny x` also collapses. `Ffi.callTask` deferred to sub-project D. | Generated `std_decimal.rs` for examples/00-standard-libs has **zero** `ffi_call_pure` occurrences; every wrapper routes through `decimal_*` directly. |
+| **Issue 3** — `Std.Decimal.Decimal` stubbed as `pub enum StdDecimalDecimal { Decimal__Internal(f64) }` | `runtimeOpaqueTypes :: Map (String, String) String` registry hooks `unionToRustTypeDef` — on hit, emits `pub use sky_runtime::Decimal as StdDecimalDecimal;` via new `RPubUseAlias` `RustTypeDef` variant. | Generated `main.rs` for examples/00-standard-libs contains `pub use sky_runtime::Decimal as StdDecimalDecimal;`. Cargo error count dropped 232 → 165 → 116 across Task 4 → Task 6 → Task 7. |
+| **Sub-A integration gaps surfaced by Task 7** | (a) `emitCargoToml` now declares all sub-A crate deps with user-dedup; (b) `[features]` section with `default = ["tokio","crypto","json","db"]` so the runtime's `#[cfg(feature=…)]` gates fire in generated projects; (c) `hex_encode`/`hex_decode` runtime kernels renamed to `encoding_hex_encode`/`encoding_hex_decode` to avoid collision with user-FFI `hex_bindings` (examples/rust/16-hex). | 16/16 `examples/rust/*` build clean + run; targeted cabal test: 27/0 fail; Go regression (`examples/01-hello-world`) clean. |
 
-Attempting `examples/00-standard-libs` on `target=rust` revealed that the Sky
-compiler emits TWO different kernel-dispatch codepaths:
+## Headline gate result — `examples/00-standard-libs` on `target=rust`
 
-1. **Direct emit** — for `Sky.Core.*` modules (List, String, Crypto, Encoding,
-   Regex, …). The codegen looks up `kernelToRust mod name` and emits a bare
-   call like `list_map_consume(f, xs)`. This relies on
-   `use crate::sky_runtime::*;` bringing the function into scope. **This is
-   the path my Tasks 2/4/8 wire — and it works for the Sky.Core.* kernels.**
+**Status: BLOCKED on runtime-kernel coverage gap, NOT on Issues 2 or 3.**
 
-2. **Dynamic dispatch via `ffi_call_pure`** — for `Std.*` modules (Decimal,
-   Time, Money, …). The codegen emits per-Sky-module Rust files like
-   `std_decimal.rs` whose wrapper bodies call
-   `ffi_call_pure("Decimal_fromInt".to_string(), vec![n])` — they do NOT call
-   my runtime kernels directly. **`kernelToRust` arms have no effect on this
-   path.** The actual `Std.Decimal`/`Std.Time` calls in user code wind up
-   needing a runtime registry that maps kernel-name strings to function
-   pointers.
+- `target=go`: 120 passed, 0 failed (120 total).
+- `target=rust`: cargo errors out with 116 errors (down from 232 pre-plan).
 
-The `Sky.Core.*` work (Encoding / Regex / Crypto / Jwt) is fully functional
-end-to-end as soon as a Sky program uses those modules. The `Std.*` work
-(Time / Decimal) is correct in isolation but **does not yet flow to user code
-through the Std.* dispatch path** — a follow-on task must register the kernels
-with whatever registry `ffi_call_pure` consults at runtime (most likely a
-matching update to the codegen's `std_<module>.rs` emission OR a runtime-side
-dispatch table).
+The error categorisation (full breakdown captured at Task 8) shows the
+remaining 116 errors fall into one bucket: **`cannot find function`** for
+kernel names not implemented in `sky_runtime/`. The codegen emits the
+direct calls correctly (Issue 2 closed), the opaque type resolves correctly
+(Issue 3 closed), but the runtime is missing kernels for:
 
-## Investigation results
+| Module | Missing runtime kernels (sample, not exhaustive) |
+|---|---|
+| Sky.Core.String | `string_replace`, `string_starts_with`, `string_ends_with`, `string_repeat` |
+| Sky.Core.Dict | `dict_empty`, `dict_insert`, `dict_get`, `dict_keys`, `dict_remove`, `dict_member`, `dict_from_list` |
+| Sky.Core.Math | `math_sqrt`, `math_round`, `math_pow`, `math_min`, `math_max`, `math_floor`, `math_ceil`, `math_abs` |
+| Sky.Core.Basics | `basics_mod_by`, `basics_error_to_string` |
+| Sky.Core.List | `list_filter_map` |
+| Std.Decimal | `decimal_eq`, `decimal_neq`, `decimal_lt`/`lte`/`gt`/`gte`, `decimal_min`/`max`, `decimal_is_zero`/`positive`/`negative`, `decimal_percent_of`, `decimal_add_percent`, `decimal_sub_percent`, `decimal_format_with` |
+| Std.Money | every kernel — module never had a runtime implementation, only `kernelToRust` arms |
+| Std.Time | `time_diff_seconds`/`minutes`/`hours`/`days`, `time_from_parts`, `time_zone_offset`, `time_zone_name` |
 
-Subsequent investigation traced the gap to two distinct codegen issues:
+Plus a tier-2 layer of issues that surface once these are unblocked:
+- 22 `E0308 mismatched types` errors — type-coercion shape mismatches between codegen-emitted signatures and runtime functions
+- 6 `E0283 type annotations needed` — generic-inference issues at call sites
+- 3 `E0618 expected function, found bool` — value-vs-function-call shape errors in codegen
+- 2 `E0061 wrong arg count`
 
-### Issue 1 — Sky compiler regenerates `sky_runtime/mod.rs` with a hardcoded
-fixed module list (FIXED in `src/Sky/Generate/Rust/Project.hs:78-90`).
+## What this means for sub-A
 
-The build-time `mod.rs` is generated by `Project.hs`, not copied from
-`runtime-rust/src/sky_runtime/mod.rs`. The original hardcoded list omits the
-new sub-A modules — `encoding`, `regex_kernel`, `jwt`, `decimal` — so even
-though the `.rs` files are copied into `sky-out/Rust/src/sky_runtime/`, they
-aren't declared as `pub mod` and their functions aren't reachable via
-`use sky_runtime::*;`. The fix added `pub mod encoding/regex_kernel/jwt/decimal;`
-plus matching `pub use ::*` lines.
+**Sub-A's contract** (per the original spec and CLAUDE.md) was "make
+`examples/00-standard-libs` print `120 passed, 0 failed (120 total)` on
+`target=rust`." That contract is NOT met today.
 
-### Issue 2 — `Ffi.callPure` is unsupported by the Rust codegen (NOT FIXED).
+**Sub-A's tasks 1-16** shipped the 7 modules listed in §"Tasks 1-16" — the
+"surface" sub-A targeted. But the headline gate also exercises Std.Money,
+Dict, Math, String (some entries), Sky.Core.Basics, and List — none of which
+were in Tasks 1-16. Those modules need their own runtime kernels.
 
-Std.* modules use the Sky-language construct `Ffi.callPure "Decimal_fromInt" [n]`
-(a *typed dynamic dispatch* path, distinct from `Ffi.kernel`). The Go codegen
-routes this through `rt.Ffi_callPure` (`src/Sky/Generate/Go/Kernel.hs:126`).
-The Rust codegen has **no `("Ffi", "callPure")` arm in `kernelToRust`** and
-falls through the snake-case default to `ffi_call_pure(name, args)` — which is
-undefined. Same for `Ffi.toAny` → undefined `ffi_to_any`.
+**The codegen-completion plan** (this work) closes the two integration
+blockers that made Tasks 1-16's work invisible to user code on `target=rust`.
+With that done, the gap is now **only** missing runtime-kernel implementations
+— no further codegen / FFI / opaque-type work is needed.
 
-### Issue 3 — Std.* opaque types are stubbed as f64 enums (NOT FIXED).
+## Recommended next steps
 
-When the Sky source declares an opaque type like `Decimal` (from `Std.Decimal`),
-the Rust codegen emits a placeholder:
+The cleanest sequel is a new **sub-A.8 sub-plan**: "runtime-kernel coverage
+to close the headline gate." It would:
 
-```rust
-pub enum StdDecimalDecimal {
-    Decimal__Internal(f64)
-}
-```
+1. Implement the missing runtime kernels above (~~70-80 functions across 7
+   modules), mirroring the Go runtime's behaviour
+2. Fix the tier-2 codegen shape mismatches as they surface
+3. Land in 6-10 commits, broadly mechanical (most are direct ports of the Go
+   `rt/*_kernel.go` files into Rust)
+4. Re-run the headline gate and document the passing 120/120 result
 
-My runtime's `pub struct Decimal(pub rust_decimal::Decimal)` is the correct
-representation. But the codegen-emitted `StdDecimalDecimal` is a separate
-type — and `f64` is the wrong representation for arbitrary-precision decimal
-(loses precision on monetary data). The kernels I wired (Tasks 13-14) work in
-isolation against the runtime's `Decimal` type but mismatch the codegen-stubbed
-`StdDecimalDecimal`.
+That sub-plan can run any time — there's no blocking dependency on B-F.
 
-Same pattern affects any other runtime-backed opaque type (likely `Time.Zone`,
-`Money.Money`, etc.).
+## Commits this session
 
-### Needed for sub-project A to complete
-
-Two codegen changes in `src/Sky/Generate/Rust/`:
-
-1. **Add `Ffi.callPure` / `Ffi.callTask` / `Ffi.toAny` support** in the Rust
-   codegen. For each `Ffi.callPure "X_y" [args]` expression, look up X+y in
-   `kernelToRust` and emit a direct call to the resolved kernel function
-   (same pattern as `Sky.Core.*` kernels). Drop the indirection through the
-   nonexistent `ffi_call_pure` symbol.
-
-2. **Bridge runtime-provided opaque types** — when the Sky source declares an
-   opaque type whose underlying representation lives in `sky_runtime`, the
-   codegen should emit `pub use sky_runtime::Decimal as StdDecimalDecimal;`
-   (etc.) instead of the placeholder enum. This needs a registry of "Sky
-   opaque type X → Rust runtime type Y" in the codegen.
-
-Both changes are in shared compiler code (`src/Sky/Generate/Rust/Builder.hs`
-and friends) — Rust-target gated, no Go path impact. Each is a self-contained
-project. Neither is safe to apply autonomously without first reviewing how
-`Ffi.callPure` is type-checked and how opaque-type emission is currently
-structured.
-
-## Commits this session (18 total on `feat/runtime-rust`)
+Codegen-completion plan (10 commits on `feat/runtime-rust`):
 
 ```
-04ba135c  feat(rust): sky_runtime encoding kernels (sub-A.1) — base64/url/hex
-7356f6cc  feat(rust): Builder kernelToRust arms for Encoding (sub-A.1)
-8f21fb78  feat(rust): sky_runtime regex kernels (sub-A.2)
-fb9c6862  feat(rust): Builder kernelToRust arms for Regex (sub-A.2)
-38565027  feat(rust): sky_runtime sha512/sha1/md5 (sub-A.3 part 1)
-66bec951  feat(rust): sky_runtime hmacSha256/hmacSha512 (sub-A.3 part 2)
-b7b5e8a9  feat(rust): sky_runtime RSA-SHA256 sign/verify + constantTimeEqual (sub-A.3 part 3)
-0a6472cf  feat(rust): Builder kernelToRust arms for Crypto completion (sub-A.3)
-5d3f70c7  feat(rust): sky_runtime jwt HS256/RS256 encode+decode (sub-A.4)
-033b9e4e  feat(rust): sky_runtime Std.Time advanced — IANA zones + calendar math (sub-A.5)
-f94e1465  feat(rust): Builder kernelToRust arms for Std.Time advanced (sub-A.5)
-8f28d6c4  feat(rust): sky_runtime Std.Decimal — full arithmetic + banker's rounding (sub-A.6)
-c17960bd  feat(rust): Builder kernelToRust arms for Std.Decimal (sub-A.6)
+39646ac7  docs(rust): Task 0 — investigation notes for codegen-completion plan
+34ecc6df  feat(rust): kernelToRust arms for Ffi.callPure/callTask/toAny -> polyfills
+248abd80  feat(rust): Ffi.* runtime polyfill stubs (callPure / callTask / toAny)
+abf0d822  feat(rust): Ffi.callPure peephole — direct kernel call from literal name+args
+c906ac2a  feat(rust): collapse standalone Ffi.toAny x to bare x in Rust codegen
+f892e9b6  feat(rust): runtimeOpaqueTypes registry + RPubUseAlias type-def variant
+89d50fbf  feat(rust): bridge Std.Decimal.Decimal to sky_runtime::Decimal via registry hit
+1d44e0d1  fix(rust): close sub-A integration gaps surfaced by regression sweep
 ```
 
-(Plus the spec, plan, and this status doc.)
+Plus the spec, plan, and this status doc (3 docs commits).
+
+## Cross-backend safety
+
+Every change is Rust-target-gated or Rust-target-infra-only:
+- `src/Sky/Generate/Rust/Builder.hs` (codegen)
+- `src/Sky/Generate/Rust/Project.hs` (mod.rs generation)
+- `runtime-rust/src/sky_runtime/` (runtime kernels)
+
+Go path: byte-identical. `examples/01-hello-world` builds clean on `target=go`
+both before and after this work. Targeted cabal-test sweep
+(`--match "FfiGen" --match "Toml" --match "Kernel"`): 27 examples, 0 failures.
