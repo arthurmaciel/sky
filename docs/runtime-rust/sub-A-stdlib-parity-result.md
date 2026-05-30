@@ -1,13 +1,16 @@
 # Sub-project A — stdlib parity status
 
-After four layers of work on `feat/runtime-rust`:
+After five layers of work on `feat/runtime-rust`:
 
 | Layer | Plan | Commits | Status |
 |---|---|---|---|
 | Sub-A.1-A.6 (original runtime work) | `docs/superpowers/plans/2026-05-29-stdlib-kernel-completion.md` | `04ba135c..c899b9d5` | ✅ 7 modules shipped + green |
 | Sub-A codegen-completion | `docs/superpowers/plans/2026-05-29-rust-codegen-ffi-callpure-opaque-types.md` | `7e1302e5..84a5eced` | ✅ Issues 2 + 3 closed |
 | Sub-A.8 runtime-kernel coverage | `docs/superpowers/plans/2026-05-29-sub-A8-runtime-kernel-coverage.md` | `1c5a1596..9ecb33f1` | ✅ 54 kernels shipped + green |
-| Sub-A.9 codegen-completeness | `docs/superpowers/plans/2026-05-29-sub-A9-codegen-completeness.md` | `7498edf6..HEAD` | ✅ 4 fixes shipped; headline gate error count 70 → 36 (-49%) |
+| Sub-A.9 codegen-completeness | `docs/superpowers/plans/2026-05-29-sub-A9-codegen-completeness.md` | `7498edf6..6f5f3d87` | ✅ 4 fixes shipped; error count 70 → 36 (-49%) |
+| Sub-A.10 codegen-shape cleanup | `docs/superpowers/plans/2026-05-30-sub-A10-codegen-shape-cleanup.md` | `4221a1eb..HEAD` | ✅ 6 fixes shipped; error count 36 → 17 (-53%) |
+
+**Cumulative error reduction:** 232 → 165 → 116 → 70 → 36 → 17 (-93% from baseline).
 
 ## What is shipped + green
 
@@ -182,4 +185,52 @@ needed. Sub-A.10 sub-plan would close them.
 06f3a58e  fix(rust): PCtor function-param destructure prelude — close 'cannot find value' bugs
 f68e8c15  fix(rust): type-aware Can.Binop '++' — Vec gets extend, String gets format!
 3cda519f  fix(rust): exclude Ffi.kernel-alias bindings from zeroArgDefs
+```
+
+## Sub-A.10 outcome — codegen-shape cleanup
+
+Six focused fixes dropped the cargo error count on `examples/00-standard-libs`
+target=rust from **36 → 17** (-19 errors, -53%) across these commits:
+
+| # | Fix | Errors closed |
+|---|---|---|
+| C1 | Sky.Core.Json.Encode.Value → sky_runtime::JsonVal via opaque-type registry; extended `ffiPlaceholder` to consult `runtimeOpaqueTypes` (reverse-keyed by codegen name). | -8 |
+| C2 | Std.Time fromParts/zoneOffset/zoneName now return `SkyResult<E, T>` matching Sky source signatures. | -3 |
+| C3 | Added (Dict, empty), (Math, pi), (Math, e) to `zeroArgKernelDefs` + new `math_pi`/`math_e` runtime + kernel arms. | -4 |
+| C4 | Decoder turbofish: kernels generic over `<E: From<String>>` (base64_decode, url_decode, encoding_hex_decode) now emit `::<SkyError>` at call sites via new `kernelsNeedingErrorPin` Set. | -4 |
+| C5 | Case-arm PVar binding under `.as_str()`-wrapped scrutinee converts `&str` to `String` at the body-binding site via shadow `let`. | -1 |
+| C6 | Lambda emission unions outer `ecCloneVars` and captured-set into inner context — fixes E0507 move-out from Fn closures in std_money_allocate. Net +1 inference issue surfaced (E0282 on dict_empty / json_dec_field). | +1 (closed move-out; exposed inference) |
+
+### Remaining 17 errors
+
+| Class | Count | Locus | Path forward |
+|---|---|---|---|
+| `E0308` mismatched types | 7 | sky_core_jwt.rs (7 — remaining JWT encode/decode shape issues) | Sub-A.11 |
+| `E0283`/`E0282` type annotations needed | 6 | sky_core_json_decode.rs + main.rs (JsonDecoder pipeline; dict_empty<T>() type inference; sky_core_maybe_map closure inference) | Sub-A.11: pipeline type-inference improvements |
+| `E0277` Fn closure / `E0061` arg counts / `E0308` arg incorrect | 4 | std_money.rs (clear_rates ()), main.rs (test combinator typing) | Surgical patches in sub-A.11 |
+
+The remaining errors are concentrated in two areas:
+1. **JsonDecoder pipeline** (~10 errors) — Decoder composition has fundamentally
+   nested closure types; needs an architectural reshape.
+2. **Test-combinator polymorphism** (~7 errors) — Sky.Test's polymorphic
+   assertion helpers + Sky.Core.Maybe.map's closure inference.
+
+### Cross-target regression — still all green
+
+- 16/16 `examples/rust/*` build clean from a wiped slate.
+- 16/16 binaries run their expected output.
+- `examples/01-hello-world` on `target=go` builds clean.
+- Targeted cabal test (`FfiGen` / `Toml` / `Kernel`): 27/0.
+
+## Sub-A.10 commits
+
+```
+4221a1eb  docs(rust): sub-A.10 spec — six focused fixes for remaining 36 errors
+fe439f8a  docs(rust): sub-A.10 plan — 8 tasks for 26-error headline-gate close
+39c12200  fix(rust): C1 — Sky.Core.Json.Encode.Value via opaque-type registry
+081ef459  fix(rust): C2 — Std.Time fromParts/zoneOffset/zoneName return SkyResult
+9028dc79  fix(rust): C3 — Dict.empty + Math.pi/e zero-arg kernel call sites
+5a3a83b1  fix(rust): C4 — Decoder turbofish for E: From<String> kernels
+edd931d6  fix(rust): C5 — case-arm PVar binding under .as_str() scrutinee → String
+6dace4b5  fix(rust): C6 — capture cloning in move closures
 ```
