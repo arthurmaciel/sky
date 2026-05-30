@@ -1130,7 +1130,17 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
             clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
             innerCounts = collectVarLocalsMulti body
             innerMulti = [ v | (v, c) <- Map.toList innerCounts, c >= 2 ]
-            ctx' = ctx { ecCloneVars = Set.fromList innerMulti, ecCopyVars = ecCopyVars ctx }
+            -- sub-A.10 C6: For move closures, EVERY captured non-Copy variable
+            -- used inside needs to be cloned at use site (the closure is
+            -- Fn-shaped — called multiple times — so each use consumes
+            -- ownership unless cloned). Add every captured var to ecCloneVars
+            -- so internal uses pick up .clone() via the Can.VarLocal arm.
+            capturedSet = Set.fromList captured
+            outerInherited = Set.difference (ecCloneVars ctx) paramNames
+            allCloneVars = Set.unions [ Set.fromList innerMulti
+                                      , outerInherited
+                                      , capturedSet ]
+            ctx' = ctx { ecCloneVars = allCloneVars, ecCopyVars = ecCopyVars ctx }
             annot = case ecPipeInnerType ctx of
                 Just t | length ps == 1 -> ": " ++ t
                 _ -> ""
@@ -1301,10 +1311,18 @@ exprToRustInner ctx e = case e of
                else "format!(\"{}{}\", " ++ aStr ++ ", " ++ bStr ++ ")"
         | otherwise -> 
             "(" ++ exprToRustString ctx a ++ " " ++ binopToRust op ++ " " ++ exprToRustString ctx b ++ ")"
-    Can.Lambda params body -> 
+    Can.Lambda params body ->
         let counts = collectVarLocalsMulti body
             innerMulti = [ v | (v, c) <- Map.toList counts, c >= 2 ]
-            ctx' = ctx { ecCloneVars = Set.fromList innerMulti, ecCopyVars = ecCopyVars ctx }
+            -- sub-A.10 C6: union with outer ecCloneVars so captures from a
+            -- non-Copy outer scope (the typical case: `move |x| f(captured)`)
+            -- get cloned at every internal use. The closure is `Fn`-shaped
+            -- (callable multiple times); each call consumes the captures by
+            -- ownership unless cloned.
+            paramNames = Set.fromList [ pn | Ann.At _ (Can.PVar pn) <- params ]
+            outerInherited = Set.difference (ecCloneVars ctx) paramNames
+            ctx' = ctx { ecCloneVars = Set.union (Set.fromList innerMulti) outerInherited
+                       , ecCopyVars = ecCopyVars ctx }
         in "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ exprToRustString ctx' body ++ " }"
     -- Ffi.callPure peephole — literal kernel name + literal args list -> direct
     -- kernel call. Splits "Decimal_fromInt" -> ("Decimal", "fromInt"), looks up
