@@ -242,39 +242,42 @@ pub fn time_diff_minutes(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - ea
 pub fn time_diff_hours(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - earlier_ms) / 3_600_000 }
 pub fn time_diff_days(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - earlier_ms) / 86_400_000 }
 
-/// `fromParts y mo d h mi s ms -> Int` — UTC epoch ms for the given date parts.
-/// Invalid parts (e.g. month 13, day 32) return 0.
-pub fn time_from_parts(y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64) -> i64 {
-    NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
-        .and_then(|day| day.and_hms_milli_opt(h as u32, mi as u32, s as u32, ms as u32))
-        .map(|naive| Utc.from_utc_datetime(&naive).timestamp_millis())
-        .unwrap_or(0)
-}
-
-/// `zoneOffset zone ms -> Int` — UTC offset in seconds for the instant in the given zone.
-/// Unknown zones return 0.
-pub fn time_zone_offset(zone_name: String, ms: i64) -> i64 {
-    use chrono::Offset;
-    let utc: DateTime<Utc> = match Utc.timestamp_millis_opt(ms).single() {
-        Some(t) => t,
-        None => return 0,
-    };
-    match zone_name.parse::<Tz>() {
-        Ok(tz) => tz.from_utc_datetime(&utc.naive_utc()).offset().fix().local_minus_utc() as i64,
-        Err(_) => 0,
+/// `fromParts y mo d h mi s ms -> Result Error Int` — UTC epoch ms for the
+/// given date parts. Invalid parts (e.g. month 13, day 32) return Err.
+pub fn time_from_parts<E: From<String>>(y: i64, m: i64, d: i64, h: i64, mi: i64, s: i64, ms: i64) -> SkyResult<E, i64> {
+    match NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
+        .and_then(|day| day.and_hms_milli_opt(h as u32, mi as u32, s as u32, ms as u32)) {
+        Some(naive) => SkyResult::Ok(Utc.from_utc_datetime(&naive).timestamp_millis()),
+        None => SkyResult::Err(format!(
+            "Time.fromParts: invalid date parts {}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+            y, m, d, h, mi, s, ms).into()),
     }
 }
 
-/// `zoneName zone ms -> String` — short timezone abbreviation (e.g. "EST", "PDT").
-/// Unknown zones return the input zone string verbatim.
-pub fn time_zone_name(zone_name: String, ms: i64) -> String {
+/// `zoneOffset zone ms -> Result Error Int` — UTC offset in seconds for the
+/// instant in the given zone. Unknown zones return Err.
+pub fn time_zone_offset<E: From<String>>(zone_name: String, ms: i64) -> SkyResult<E, i64> {
+    use chrono::Offset;
     let utc: DateTime<Utc> = match Utc.timestamp_millis_opt(ms).single() {
         Some(t) => t,
-        None => return zone_name.clone(),
+        None => return SkyResult::Err(format!("Time.zoneOffset: invalid epoch ms {}", ms).into()),
     };
     match zone_name.parse::<Tz>() {
-        Ok(tz) => tz.from_utc_datetime(&utc.naive_utc()).format("%Z").to_string(),
-        Err(_) => zone_name,
+        Ok(tz) => SkyResult::Ok(tz.from_utc_datetime(&utc.naive_utc()).offset().fix().local_minus_utc() as i64),
+        Err(_) => SkyResult::Err(format!("Time.zoneOffset: unknown timezone {:?}", zone_name).into()),
+    }
+}
+
+/// `zoneName zone ms -> Result Error String` — short timezone abbreviation
+/// (e.g. "EST", "PDT"). Unknown zones return Err.
+pub fn time_zone_name<E: From<String>>(zone_name: String, ms: i64) -> SkyResult<E, String> {
+    let utc: DateTime<Utc> = match Utc.timestamp_millis_opt(ms).single() {
+        Some(t) => t,
+        None => return SkyResult::Err(format!("Time.zoneName: invalid epoch ms {}", ms).into()),
+    };
+    match zone_name.parse::<Tz>() {
+        Ok(tz) => SkyResult::Ok(tz.from_utc_datetime(&utc.naive_utc()).format("%Z").to_string()),
+        Err(_) => SkyResult::Err(format!("Time.zoneName: unknown timezone {:?}", zone_name).into()),
     }
 }
 
@@ -337,34 +340,43 @@ mod time_advanced_tests {
 
     #[test]
     fn test_from_parts_epoch() {
-        assert_eq!(time_from_parts(1970, 1, 1, 0, 0, 0, 0), 0);
+        let r: SkyResult<String, i64> = time_from_parts(1970, 1, 1, 0, 0, 0, 0);
+        assert!(matches!(r, SkyResult::Ok(0)));
     }
 
     #[test]
-    fn test_from_parts_invalid_returns_zero() {
-        assert_eq!(time_from_parts(2024, 13, 1, 0, 0, 0, 0), 0);  // month 13
-        assert_eq!(time_from_parts(2024, 2, 30, 0, 0, 0, 0), 0);  // Feb 30
+    fn test_from_parts_invalid_returns_err() {
+        let r1: SkyResult<String, i64> = time_from_parts(2024, 13, 1, 0, 0, 0, 0);  // month 13
+        let r2: SkyResult<String, i64> = time_from_parts(2024, 2, 30, 0, 0, 0, 0);  // Feb 30
+        assert!(matches!(r1, SkyResult::Err(_)));
+        assert!(matches!(r2, SkyResult::Err(_)));
     }
 
     #[test]
     fn test_zone_offset_utc() {
-        assert_eq!(time_zone_offset("UTC".into(), 0), 0);
+        let r: SkyResult<String, i64> = time_zone_offset("UTC".into(), 0);
+        assert!(matches!(r, SkyResult::Ok(0)));
     }
 
     #[test]
     fn test_zone_offset_ny_winter() {
         // 1970-01-01 00:00 UTC; America/New_York was EST (-5h) on that day.
-        assert_eq!(time_zone_offset("America/New_York".into(), 0), -5 * 3_600);
+        let r: SkyResult<String, i64> = time_zone_offset("America/New_York".into(), 0);
+        assert!(matches!(r, SkyResult::Ok(v) if v == -5 * 3_600));
     }
 
     #[test]
     fn test_zone_name_utc() {
-        let name = time_zone_name("UTC".into(), 0);
-        assert!(name == "UTC" || name == "Z");  // chrono-tz may render as either
+        let r: SkyResult<String, String> = time_zone_name("UTC".into(), 0);
+        match r {
+            SkyResult::Ok(name) => assert!(name == "UTC" || name == "Z"),
+            SkyResult::Err(_) => panic!("UTC should be a known timezone"),
+        }
     }
 
     #[test]
-    fn test_zone_offset_unknown_returns_zero() {
-        assert_eq!(time_zone_offset("Not/AZone".into(), 0), 0);
+    fn test_zone_offset_unknown_returns_err() {
+        let r: SkyResult<String, i64> = time_zone_offset("Not/AZone".into(), 0);
+        assert!(matches!(r, SkyResult::Err(_)));
     }
 }
