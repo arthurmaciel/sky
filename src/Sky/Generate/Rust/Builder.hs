@@ -232,6 +232,10 @@ kernelsNeedingErrorPin = Map.fromList
     -- JsonDecode mapping: <E, A, B>
     , ("json_dec_map",           "::<SkyError, _, _>")
     , ("json_dec_and_then",      "::<SkyError, _, _>")
+    -- sub-A.11 C1: dict_empty() returns HashMap<String, T>; T defaults to
+    -- i64 when call sites (like dict_keys(dict_empty())) can't pin T.
+    -- The map is just "turbofish injection"; not all entries are error-pins.
+    , ("dict_empty",             "::<i64>")
     ]
 
 -- | Runtime kernels whose Rust signatures are zero-arg functions returning a
@@ -1304,13 +1308,14 @@ exprToRustInner ctx e = case e of
             tf = case Map.lookup fnName kernelsNeedingErrorPin of
                 Just suffix -> suffix
                 Nothing     -> ""
-            -- sub-A.11: zero-arg kernels — append () AFTER the turbofish.
-            withParen = if Set.member fnName kernelsZeroArg
-                        then fnName ++ tf ++ "()"
-                        else fnName ++ tf
         in if mod == "Basics" && name == "not" then "!"
-           else if Set.member (mod, name) (ecZeroArgDefs ctx) then fnName ++ "()"
-           else withParen
+           -- Zero-arg kernels (via ecZeroArgDefs OR kernelsZeroArg) need
+           -- both the turbofish AND () to call. Turbofish goes before ().
+           else if Set.member (mod, name) (ecZeroArgDefs ctx)
+                then fnName ++ tf ++ "()"
+           else if Set.member fnName kernelsZeroArg
+                then fnName ++ tf ++ "()"
+           else fnName ++ tf
     Can.VarCtor _ modName typeName ctorName _ -> kernelCtorToRust modName typeName ctorName
     Can.Chr [c] -> rustCharLit c
     Can.Chr s -> rustStringLit s
