@@ -97,6 +97,70 @@ pub fn decimal_compare(a: Decimal, b: Decimal) -> i64 {
     }
 }
 
+// sub-A.8 T1 — Std.Decimal completion (15 kernels)
+
+// === Bool comparisons ===
+pub fn decimal_eq(a: Decimal, b: Decimal) -> bool { a.0 == b.0 }
+pub fn decimal_neq(a: Decimal, b: Decimal) -> bool { a.0 != b.0 }
+pub fn decimal_lt(a: Decimal, b: Decimal) -> bool { a.0 < b.0 }
+pub fn decimal_lte(a: Decimal, b: Decimal) -> bool { a.0 <= b.0 }
+pub fn decimal_gt(a: Decimal, b: Decimal) -> bool { a.0 > b.0 }
+pub fn decimal_gte(a: Decimal, b: Decimal) -> bool { a.0 >= b.0 }
+
+// === min / max ===
+pub fn decimal_min(a: Decimal, b: Decimal) -> Decimal { if a.0 <= b.0 { a } else { b } }
+pub fn decimal_max(a: Decimal, b: Decimal) -> Decimal { if a.0 >= b.0 { a } else { b } }
+
+// === sign predicates ===
+pub fn decimal_is_zero(d: Decimal)     -> bool { d.0.is_zero() }
+pub fn decimal_is_positive(d: Decimal) -> bool { d.0 > RD::ZERO }
+pub fn decimal_is_negative(d: Decimal) -> bool { d.0 < RD::ZERO }
+
+// === percent ===
+pub fn decimal_percent_of(pct: Decimal, of_: Decimal) -> Decimal {
+    Decimal(pct.0 * of_.0 / RD::from(100))
+}
+pub fn decimal_add_percent(pct: Decimal, base: Decimal) -> Decimal {
+    Decimal(base.0 + (pct.0 * base.0 / RD::from(100)))
+}
+pub fn decimal_sub_percent(pct: Decimal, base: Decimal) -> Decimal {
+    Decimal(base.0 - (pct.0 * base.0 / RD::from(100)))
+}
+
+// === formatWith — places + decimal sep + group sep (every 3 digits, right-to-left) ===
+pub fn decimal_format_with(places: i64, dec_sep: String, grp_sep: String, d: Decimal) -> String {
+    let p = places.max(0) as u32;
+    let rounded = if p > 0 {
+        d.0.round_dp_with_strategy(p, RoundingStrategy::MidpointNearestEven)
+    } else {
+        d.0.round_dp_with_strategy(0, RoundingStrategy::MidpointNearestEven)
+    };
+    // StringFixed-equivalent: pad trailing zeros to `p` places.
+    let fixed = format!("{:.*}", p as usize, rounded);
+    let neg = fixed.starts_with('-');
+    let unsigned: &str = if neg { &fixed[1..] } else { &fixed[..] };
+    let (int_part, frac_part) = match unsigned.find('.') {
+        Some(i) => (&unsigned[..i], &unsigned[i+1..]),
+        None    => (unsigned, ""),
+    };
+    // Group the integer part with grp_sep every 3 digits from the right.
+    let chars: Vec<char> = int_part.chars().rev().collect();
+    let mut grouped_rev = String::new();
+    for (i, c) in chars.iter().enumerate() {
+        if i > 0 && i % 3 == 0 && !grp_sep.is_empty() {
+            grouped_rev.push_str(&grp_sep.chars().rev().collect::<String>());
+        }
+        grouped_rev.push(*c);
+    }
+    let grouped: String = grouped_rev.chars().rev().collect();
+    let sign = if neg { "-" } else { "" };
+    if p == 0 {
+        format!("{}{}", sign, grouped)
+    } else {
+        format!("{}{}{}{}", sign, grouped, dec_sep, frac_part)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +201,73 @@ mod tests {
         assert_eq!(decimal_compare(d("1"), d("2")), -1);
         assert_eq!(decimal_compare(d("2"), d("2")), 0);
         assert_eq!(decimal_compare(d("3"), d("2")), 1);
+    }
+
+    // sub-A.8 T1 — completion tests
+
+    #[test]
+    fn test_decimal_comparisons() {
+        let a = d("3");
+        let b = d("5");
+        assert!(decimal_lt(a.clone(), b.clone()));
+        assert!(decimal_lte(a.clone(), b.clone()));
+        assert!(!decimal_gt(a.clone(), b.clone()));
+        assert!(!decimal_gte(a.clone(), b.clone()));
+        assert!(decimal_eq(a.clone(), a.clone()));
+        assert!(decimal_neq(a.clone(), b.clone()));
+        assert!(decimal_lte(d("5"), d("5")));   // equal
+        assert!(decimal_gte(d("5"), d("5")));   // equal
+    }
+
+    #[test]
+    fn test_decimal_min_max() {
+        assert!(decimal_eq(decimal_min(d("3"), d("5")), d("3")));
+        assert!(decimal_eq(decimal_max(d("3"), d("5")), d("5")));
+        assert!(decimal_eq(decimal_min(d("-2"), d("-5")), d("-5")));
+    }
+
+    #[test]
+    fn test_decimal_sign_predicates() {
+        assert!(decimal_is_zero(decimal_zero()));
+        assert!(!decimal_is_zero(d("1")));
+        assert!(decimal_is_positive(d("1")));
+        assert!(!decimal_is_positive(decimal_zero()));
+        assert!(!decimal_is_positive(d("-1")));
+        assert!(decimal_is_negative(d("-1")));
+        assert!(!decimal_is_negative(decimal_zero()));
+    }
+
+    #[test]
+    fn test_decimal_percent() {
+        // 10% of 100 = 10
+        assert!(decimal_eq(decimal_percent_of(d("10"), d("100")), d("10")));
+        // 100 + 10% = 110
+        assert!(decimal_eq(decimal_add_percent(d("10"), d("100")), d("110")));
+        // 100 - 10% = 90
+        assert!(decimal_eq(decimal_sub_percent(d("10"), d("100")), d("90")));
+    }
+
+    #[test]
+    fn test_decimal_format_with() {
+        // "1050000.5" -> "1,050,000.50" with 2 places, "." dec, "," group
+        assert_eq!(
+            decimal_format_with(2, ".".to_string(), ",".to_string(), d("1050000.5")),
+            "1,050,000.50"
+        );
+        // Negative + grouping
+        assert_eq!(
+            decimal_format_with(2, ".".to_string(), ",".to_string(), d("-1234.5")),
+            "-1,234.50"
+        );
+        // Zero places, no grouping
+        assert_eq!(
+            decimal_format_with(0, ".".to_string(), "".to_string(), d("12345")),
+            "12345"
+        );
+        // European convention: ',' decimal, '.' grouping
+        assert_eq!(
+            decimal_format_with(2, ",".to_string(), ".".to_string(), d("1234.56")),
+            "1.234,56"
+        );
     }
 }
