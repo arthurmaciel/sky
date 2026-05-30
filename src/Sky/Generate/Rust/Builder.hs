@@ -198,6 +198,7 @@ data RustTypeDef
 runtimeOpaqueTypes :: Map.Map (String, String) String
 runtimeOpaqueTypes = Map.fromList
     [ (("Std.Decimal", "Decimal"), "sky_runtime::Decimal")
+    , (("Sky.Core.Json.Encode", "Value"), "sky_runtime::JsonVal")
     ]
 
 -- | Context threaded through expression emission
@@ -2433,8 +2434,24 @@ hasErrorType b = any isErrorTypeName (builderTypes b) || any isUserError (builde
     isErrorItem (RustTypeAlias n _) = n == "Error" || n == "SkyError"
     isErrorItem _ = False
 
+-- | Synthesise a placeholder for any Sky type referenced but not defined in
+-- the program (typically Sky.Core.X opaque tokens with no Sky-source `type`).
+-- The default `type Name = String;` aliases to String, which works for most
+-- ADT-shaped opaques. For Sky types whose runtime representation is a known
+-- newtype in `sky_runtime`, redirect to `pub use sky_runtime::<X> as Name;`
+-- — see runtimeOpaqueTypes registry.
 ffiPlaceholder :: String -> String
-ffiPlaceholder name = "type " ++ name ++ " = String;"
+ffiPlaceholder name =
+    case Map.lookup name reverseRuntimeOpaque of
+        Just rustPath -> "pub use " ++ rustPath ++ " as " ++ name ++ ";"
+        Nothing       -> "type " ++ name ++ " = String;"
+  where
+    reverseRuntimeOpaque :: Map.Map String String
+    reverseRuntimeOpaque = Map.fromList
+        [ (toCamelCase (modPrefix ++ "_" ++ ty), path)
+        | ((mod', ty), path) <- Map.toList runtimeOpaqueTypes
+        , let modPrefix = map (\c -> if c == '.' then '_' else c) mod'
+        ]
 
 -- | Generate Cargo.toml for the Rust project
 emitCargoToml :: UsedKernels -> String -> String -> [(String, Toml.RustDepSpec)] -> String
