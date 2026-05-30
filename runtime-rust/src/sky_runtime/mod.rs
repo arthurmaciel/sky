@@ -50,3 +50,6 @@ pub use decimal::*;
 
 pub mod ffi_polyfills;
 pub use ffi_polyfills::*;
+
+pub mod money;
+pub use money::*;

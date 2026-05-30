@@ -1,0 +1,329 @@
+//! Std.Money kernels — currency table + format / rate registry / allocate.
+//!
+//! Mirrors runtime-go/rt/money_kernel.go. Sub-A.8 T2.
+//!
+//! The Sky-side `Money` ADT carries a typed `Currency` enum + a `Decimal`
+//! amount. At the Ffi boundary, the wrappers in `sky-stdlib/Std/Money.sky`
+//! convert the Currency into its ISO 4217 code (a String) before calling
+//! these kernels — so every function below takes the code as a plain String.
+
+use super::{Decimal, SkyMaybe, SkyResult};
+use rust_decimal::Decimal as RD;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+// ── Currency table ─────────────────────────────────────────────────
+
+/// One row of the ISO 4217 / cryptocurrency lookup table.
+/// (minor_units, symbol, name)
+fn lookup_currency(code: &str) -> (i64, &'static str, &'static str) {
+    let c = code.trim().to_uppercase();
+    match c.as_str() {
+        "USD" => (2, "$", "US Dollar"),
+        "EUR" => (2, "€", "Euro"),
+        "GBP" => (2, "£", "British Pound"),
+        "JPY" => (0, "¥", "Japanese Yen"),
+        "CNY" => (2, "¥", "Chinese Yuan"),
+        "AUD" => (2, "A$", "Australian Dollar"),
+        "CAD" => (2, "C$", "Canadian Dollar"),
+        "CHF" => (2, "Fr.", "Swiss Franc"),
+        "HKD" => (2, "HK$", "Hong Kong Dollar"),
+        "SGD" => (2, "S$", "Singapore Dollar"),
+        "NZD" => (2, "NZ$", "New Zealand Dollar"),
+        "SEK" => (2, "kr", "Swedish Krona"),
+        "NOK" => (2, "kr", "Norwegian Krone"),
+        "DKK" => (2, "kr", "Danish Krone"),
+        "PLN" => (2, "zł", "Polish Złoty"),
+        "CZK" => (2, "Kč", "Czech Koruna"),
+        "HUF" => (2, "Ft", "Hungarian Forint"),
+        "RON" => (2, "lei", "Romanian Leu"),
+        "BGN" => (2, "лв", "Bulgarian Lev"),
+        "TRY" => (2, "₺", "Turkish Lira"),
+        "ZAR" => (2, "R", "South African Rand"),
+        "BRL" => (2, "R$", "Brazilian Real"),
+        "MXN" => (2, "$", "Mexican Peso"),
+        "ARS" => (2, "$", "Argentine Peso"),
+        "CLP" => (0, "$", "Chilean Peso"),
+        "INR" => (2, "₹", "Indian Rupee"),
+        "PKR" => (2, "₨", "Pakistani Rupee"),
+        "BDT" => (2, "৳", "Bangladeshi Taka"),
+        "LKR" => (2, "₨", "Sri Lankan Rupee"),
+        "NPR" => (2, "₨", "Nepalese Rupee"),
+        "KRW" => (0, "₩", "South Korean Won"),
+        "TWD" => (2, "NT$", "Taiwan Dollar"),
+        "THB" => (2, "฿", "Thai Baht"),
+        "VND" => (0, "₫", "Vietnamese Đồng"),
+        "PHP" => (2, "₱", "Philippine Peso"),
+        "IDR" => (2, "Rp", "Indonesian Rupiah"),
+        "MYR" => (2, "RM", "Malaysian Ringgit"),
+        "AED" => (2, "د.إ", "UAE Dirham"),
+        "SAR" => (2, "﷼", "Saudi Riyal"),
+        "QAR" => (2, "﷼", "Qatari Riyal"),
+        "KWD" => (3, "د.ك", "Kuwaiti Dinar"),
+        "BHD" => (3, "ب.د", "Bahraini Dinar"),
+        "OMR" => (3, "﷼", "Omani Rial"),
+        "JOD" => (3, "د.أ", "Jordanian Dinar"),
+        "ILS" => (2, "₪", "Israeli Shekel"),
+        "EGP" => (2, "ج.م", "Egyptian Pound"),
+        "NGN" => (2, "₦", "Nigerian Naira"),
+        "KES" => (2, "Sh", "Kenyan Shilling"),
+        "GHS" => (2, "₵", "Ghanaian Cedi"),
+        "MAD" => (2, "د.م.", "Moroccan Dirham"),
+        "TND" => (3, "د.ت", "Tunisian Dinar"),
+        "DZD" => (2, "د.ج", "Algerian Dinar"),
+        "RUB" => (2, "₽", "Russian Ruble"),
+        "UAH" => (2, "₴", "Ukrainian Hryvnia"),
+        "BTC" => (8, "₿", "Bitcoin"),
+        // Fallback: unknown code → (2, code, code), matching Go's lookupCurrency.
+        // We can't return owned strings from a static match — so for unknowns
+        // we just signal via the Minor field and let callers handle string
+        // fallback (the public-facing kernels below own that logic).
+        _ => (-1, "", ""),
+    }
+}
+
+/// "Is this a known ISO 4217 / crypto code?" — used by `money_is_known_currency`.
+fn is_known(code: &str) -> bool {
+    lookup_currency(code).0 != -1
+}
+
+// ── Property kernels ───────────────────────────────────────────────
+
+pub fn money_minor_units(code: String) -> i64 {
+    let (m, _, _) = lookup_currency(&code);
+    if m < 0 { 2 } else { m }
+}
+
+pub fn money_symbol(code: String) -> String {
+    let upper = code.trim().to_uppercase();
+    let (m, s, _) = lookup_currency(&upper);
+    if m < 0 { upper } else { s.to_string() }
+}
+
+pub fn money_currency_name(code: String) -> String {
+    let upper = code.trim().to_uppercase();
+    let (m, _, n) = lookup_currency(&upper);
+    if m < 0 { upper } else { n.to_string() }
+}
+
+pub fn money_is_known_currency(code: String) -> bool {
+    is_known(&code)
+}
+
+// ── Format kernels ─────────────────────────────────────────────────
+
+/// `format : Code -> Decimal -> String` — "$12.34" / "-$12.34".
+pub fn money_format(code: String, amount: Decimal) -> String {
+    let upper = code.trim().to_uppercase();
+    let (raw_minor, symbol, _) = lookup_currency(&upper);
+    let minor = if raw_minor < 0 { 2 } else { raw_minor } as u32;
+    let symbol = if raw_minor < 0 { upper.as_str() } else { symbol };
+    let neg = amount.0.is_sign_negative();
+    let abs = if neg { -amount.0 } else { amount.0 };
+    let fixed = format!("{:.*}", minor as usize, abs);
+    if neg {
+        format!("-{}{}", symbol, fixed)
+    } else {
+        format!("{}{}", symbol, fixed)
+    }
+}
+
+/// `formatWithCode : Code -> Decimal -> String` — "12.34 USD" for B2B output.
+pub fn money_format_with_code(code: String, amount: Decimal) -> String {
+    let upper = code.trim().to_uppercase();
+    let (raw_minor, _, _) = lookup_currency(&upper);
+    let minor = if raw_minor < 0 { 2 } else { raw_minor } as u32;
+    format!("{:.*} {}", minor as usize, amount.0, upper)
+}
+
+// ── FX rate registry ───────────────────────────────────────────────
+
+fn rates() -> &'static Mutex<HashMap<(String, String), RD>> {
+    static RATES: OnceLock<Mutex<HashMap<(String, String), RD>>> = OnceLock::new();
+    RATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `setRate : Code -> Code -> Decimal -> Result Error ()`.
+/// Negative or zero rate → error. Inverse auto-registered.
+pub fn money_set_rate<E: From<String>>(from: String, to: String, rate: Decimal) -> SkyResult<E, ()> {
+    if rate.0.is_zero() || rate.0.is_sign_negative() {
+        return SkyResult::Err("Money.setRate: rate must be positive".to_string().into());
+    }
+    let from = from.trim().to_uppercase();
+    let to = to.trim().to_uppercase();
+    let mut map = rates().lock().expect("money fx rates mutex");
+    map.insert((from.clone(), to.clone()), rate.0);
+    // Auto-inverse so consumers don't need both directions.
+    if !rate.0.is_zero() {
+        let inv = RD::from(1) / rate.0;
+        map.insert((to, from), inv);
+    }
+    SkyResult::Ok(())
+}
+
+/// `getRate : Code -> Code -> Result Error Decimal`.
+/// from == to returns 1.0; else looks up. Missing → Err.
+pub fn money_get_rate<E: From<String>>(from: String, to: String) -> SkyResult<E, Decimal> {
+    let from = from.trim().to_uppercase();
+    let to = to.trim().to_uppercase();
+    if from == to {
+        return SkyResult::Ok(Decimal(RD::from(1)));
+    }
+    let map = rates().lock().expect("money fx rates mutex");
+    match map.get(&(from.clone(), to.clone())) {
+        Some(r) => SkyResult::Ok(Decimal(*r)),
+        None => SkyResult::Err(
+            format!("Money.getRate: no rate registered for {}→{}", from, to).into()
+        ),
+    }
+}
+
+/// `hasRate : Code -> Code -> Bool`.
+pub fn money_has_rate(from: String, to: String) -> bool {
+    let from = from.trim().to_uppercase();
+    let to = to.trim().to_uppercase();
+    if from == to { return true; }
+    let map = rates().lock().expect("money fx rates mutex");
+    map.contains_key(&(from, to))
+}
+
+/// `clearRates : () -> Result Error ()` — test/admin only.
+pub fn money_clear_rates<E: From<String>>(_: ()) -> SkyResult<E, ()> {
+    let mut map = rates().lock().expect("money fx rates mutex");
+    map.clear();
+    SkyResult::Ok(())
+}
+
+// ── Allocate (fair split with residue distributed early) ───────────
+
+/// `allocate : Int -> Int -> Decimal -> List Decimal`.
+/// Work in minor units (integer) to avoid rounding drift, then shift back.
+/// First `remainder` slots receive (base + 1), the rest receive `base`.
+pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> {
+    if parts <= 0 { return Vec::new(); }
+    let places = places.max(0) as u32;
+    // Shift to minor units (× 10^places), truncate to integer.
+    let scale = RD::from(10_i64.pow(places));
+    let total_minor = (amount.0 * scale).trunc();
+    let parts_dec = RD::from(parts);
+    let base = (total_minor / parts_dec).trunc();
+    let remainder = total_minor - (base * parts_dec);
+    let rem_int = remainder
+        .to_string()
+        .parse::<i64>()
+        .unwrap_or(0)
+        .max(0);
+    let inv_scale = RD::from(10_i64.pow(places));
+    let mut out = Vec::with_capacity(parts as usize);
+    for i in 0..parts {
+        let share = if i < rem_int { base + RD::from(1) } else { base };
+        // Shift back to major units (÷ 10^places).
+        out.push(Decimal(share / inv_scale));
+    }
+    out
+}
+
+// Silence unused-warning on SkyMaybe import (kept for symmetry with sibling kernels).
+#[allow(dead_code)]
+fn _unused_skymaybe<T>() -> SkyMaybe<T> { SkyMaybe::Nothing }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal::Decimal as RD;
+    use std::str::FromStr;
+
+    fn d(s: &str) -> Decimal { Decimal(RD::from_str(s).unwrap()) }
+
+    #[test]
+    fn test_money_minor_units() {
+        assert_eq!(money_minor_units("USD".into()), 2);
+        assert_eq!(money_minor_units("JPY".into()), 0);
+        assert_eq!(money_minor_units("BHD".into()), 3);
+        assert_eq!(money_minor_units("BTC".into()), 8);
+        // Unknown code → fallback to 2
+        assert_eq!(money_minor_units("XYZ".into()), 2);
+    }
+
+    #[test]
+    fn test_money_symbol_and_name() {
+        assert_eq!(money_symbol("USD".into()), "$");
+        assert_eq!(money_symbol("EUR".into()), "€");
+        assert_eq!(money_symbol("xyz".into()), "XYZ");
+        assert_eq!(money_currency_name("USD".into()), "US Dollar");
+        assert_eq!(money_currency_name("XYZ".into()), "XYZ");
+    }
+
+    #[test]
+    fn test_money_is_known() {
+        assert!(money_is_known_currency("USD".into()));
+        assert!(money_is_known_currency("usd".into()));
+        assert!(!money_is_known_currency("XYZ".into()));
+    }
+
+    #[test]
+    fn test_money_format() {
+        assert_eq!(money_format("USD".into(), d("12.34")), "$12.34");
+        assert_eq!(money_format("USD".into(), d("-12.34")), "-$12.34");
+        assert_eq!(money_format("JPY".into(), d("1234")), "¥1234");
+        // Unknown code → fallback to code as symbol
+        assert_eq!(money_format("XYZ".into(), d("100")), "XYZ100.00");
+    }
+
+    #[test]
+    fn test_money_format_with_code() {
+        assert_eq!(money_format_with_code("USD".into(), d("12.34")), "12.34 USD");
+        assert_eq!(money_format_with_code("jpy".into(), d("1234")), "1234 JPY");
+        // BHD has 3 minor units
+        assert_eq!(money_format_with_code("BHD".into(), d("1.234")), "1.234 BHD");
+    }
+
+    #[test]
+    fn test_money_rates_roundtrip() {
+        // Clear any rates from prior tests
+        let _: SkyResult<String, ()> = money_clear_rates(());
+        // Set USD->EUR = 0.9; auto-registers EUR->USD ≈ 1.111
+        let _: SkyResult<String, ()> = money_set_rate("USD".into(), "EUR".into(), d("0.9"));
+        assert!(money_has_rate("USD".into(), "EUR".into()));
+        assert!(money_has_rate("EUR".into(), "USD".into()));
+        let r: SkyResult<String, Decimal> = money_get_rate("USD".into(), "EUR".into());
+        match r {
+            SkyResult::Ok(v) => assert_eq!(v.0.to_string(), "0.9"),
+            SkyResult::Err(_) => panic!("getRate USD->EUR failed"),
+        }
+        // Identity
+        let r2: SkyResult<String, Decimal> = money_get_rate("USD".into(), "USD".into());
+        if let SkyResult::Ok(v) = r2 { assert_eq!(v.0, RD::from(1)); } else { panic!("identity rate failed"); }
+        // Missing
+        let r3: SkyResult<String, Decimal> = money_get_rate("USD".into(), "XYZ".into());
+        assert!(matches!(r3, SkyResult::Err(_)));
+    }
+
+    #[test]
+    fn test_money_set_rate_negative_rejected() {
+        let _: SkyResult<String, ()> = money_clear_rates(());
+        let r: SkyResult<String, ()> = money_set_rate("USD".into(), "EUR".into(), d("-1"));
+        assert!(matches!(r, SkyResult::Err(_)));
+        let r: SkyResult<String, ()> = money_set_rate("USD".into(), "EUR".into(), d("0"));
+        assert!(matches!(r, SkyResult::Err(_)));
+    }
+
+    #[test]
+    fn test_money_allocate_three_ways() {
+        // $100.00 split 1:1:1 → [33.34, 33.33, 33.33], sum = 100.00
+        let parts = money_allocate(2, 3, d("100"));
+        assert_eq!(parts.len(), 3);
+        // Sum must equal input exactly (no drift).
+        let sum: RD = parts.iter().map(|p| p.0).sum();
+        assert_eq!(sum, RD::from_str("100.00").unwrap());
+        // First slot carries the extra cent.
+        assert_eq!(parts[0].0, RD::from_str("33.34").unwrap());
+        assert_eq!(parts[1].0, RD::from_str("33.33").unwrap());
+        assert_eq!(parts[2].0, RD::from_str("33.33").unwrap());
+    }
+
+    #[test]
+    fn test_money_allocate_zero_parts() {
+        assert!(money_allocate(2, 0, d("100")).is_empty());
+    }
+}
