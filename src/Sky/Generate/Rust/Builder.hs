@@ -129,6 +129,11 @@ zeroArgKernelDefs = Set.fromList
     , ("JsonDec", "float")
     , ("JsonDec", "bool")
     , ("JsonDec", "null")
+    -- sub-A.10 C3: zero-arg Sky kernels referenced via Ffi.kernel aliases
+    , ("Dict", "empty")
+    , ("Sky.Core.Dict", "empty")
+    , ("Math", "pi"),  ("Math", "e")
+    , ("Sky.Core.Math", "pi"), ("Sky.Core.Math", "e")
     ]
 
 -- | Collect all zero-argument user-defined definitions across all modules.
@@ -2186,6 +2191,10 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Math", "ceil")   -> "math_ceil"
     ("Math", "round")           -> "math_round"
     ("Sky.Core.Math", "round")  -> "math_round"
+    ("Math", "pi")              -> "math_pi"
+    ("Sky.Core.Math", "pi")     -> "math_pi"
+    ("Math", "e")               -> "math_e"
+    ("Sky.Core.Math", "e")      -> "math_e"
     -- sub-A.8 T4 — Std.Time advanced (7 kernels)
     ("Time", "diffSeconds")     -> "time_diff_seconds"
     ("Time", "diffMinutes")     -> "time_diff_minutes"

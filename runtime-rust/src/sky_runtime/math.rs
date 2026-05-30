@@ -10,6 +10,9 @@
 //!   ceil   : Float -> Int
 //!   round  : Float -> Int
 
+pub fn math_pi() -> f64 { std::f64::consts::PI }
+pub fn math_e()  -> f64 { std::f64::consts::E }
+
 pub fn math_abs(x: i64) -> i64 { x.abs() }
 
 pub fn math_min<T: PartialOrd>(a: T, b: T) -> T { if a <= b { a } else { b } }
