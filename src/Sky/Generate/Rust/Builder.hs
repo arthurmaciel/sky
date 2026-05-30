@@ -1242,7 +1242,20 @@ exprToRustInner ctx e = case e of
             _ ->
                 exprToRustString ctx a ++ "(" ++ exprToRustString ctx b ++ ")"
         | op == "::" -> "sky_list_cons(" ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
-        | op == "++" -> "format!(\"{}{}\", " ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
+        | op == "++" ->
+            -- Sky's ++ is polymorphic: String -> String -> String AND
+            -- List a -> List a -> List a. Dispatch on inferred type via
+            -- solveArgType (which inspects literals + VarLocal lookups +
+            -- nested binops). Vec<T> -> chain-extend block; otherwise
+            -- format! (string concat).
+            let lhsTy = solveArgType (ecSolvedTypes ctx) a
+                rhsTy = solveArgType (ecSolvedTypes ctx) b
+                isList = "Vec<" `isPrefixOf` lhsTy || "Vec<" `isPrefixOf` rhsTy
+                aStr  = exprToRustString ctx a
+                bStr  = exprToRustString ctx b
+            in if isList
+               then "{ let mut __r = " ++ aStr ++ ".clone(); __r.extend(" ++ bStr ++ "); __r }"
+               else "format!(\"{}{}\", " ++ aStr ++ ", " ++ bStr ++ ")"
         | otherwise -> 
             "(" ++ exprToRustString ctx a ++ " " ++ binopToRust op ++ " " ++ exprToRustString ctx b ++ ")"
     Can.Lambda params body -> 
