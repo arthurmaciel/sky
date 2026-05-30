@@ -521,7 +521,11 @@ maybeSig _ _ = Nothing
 resultSig :: String -> Int -> Maybe ([String], String)
 resultSig "map" 2 = Just (["impl Fn(T0) -> T1 + Clone", "SkyResult<SkyError, T0>"], "SkyResult<SkyError, T1>")
 resultSig "andThen" 2 = Just (["impl Fn(T0) -> SkyResult<SkyError, T1> + Clone", "SkyResult<SkyError, T0>"], "SkyResult<SkyError, T1>")
-resultSig "mapError" 2 = Just (["impl Fn(SkyError) -> String + Clone", "SkyResult<SkyError, T0>"], "SkyResult<String, T0>")
+-- sub-A.12 F1: Sky source `mapError : (e -> e2) -> Result e a -> Result e2 a`
+-- is fully polymorphic in BOTH error types. Previously hardcoded as
+-- (SkyError -> String) which mis-typed wrapper calls — the closure may
+-- well return Error not String. Use T1/T2 for the error transform.
+resultSig "mapError" 2 = Just (["impl Fn(T1) -> T2 + Clone", "SkyResult<T1, T0>"], "SkyResult<T2, T0>")
 resultSig "withDefault" 2 = Just (["T0", "SkyResult<SkyError, T0>"], "T0")
 resultSig "map2" 3 = Just (["impl Fn(T0, T1) -> T2 + Clone", "SkyResult<SkyError, T0>", "SkyResult<SkyError, T1>"], "SkyResult<SkyError, T2>")
 resultSig "map3" 4 = Just (["impl Fn(T0, T1, T2) -> T3 + Clone", "SkyResult<SkyError, T0>", "SkyResult<SkyError, T1>", "SkyResult<SkyError, T2>"], "SkyResult<SkyError, T3>")
