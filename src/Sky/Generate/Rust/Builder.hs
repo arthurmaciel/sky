@@ -1396,6 +1396,16 @@ exprToRustInner ctx e = case e of
         exprToRustString ctx inner
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
+            -- sub-A.12 F2: detect partial application (Sky source has currying;
+            -- Rust doesn't). If the callee is a top-level fn with known arity > supplied,
+            -- wrap the residual args in a `move |..| f(supplied.., residual..)` closure.
+            calleeArity = case fn of
+                Ann.At _ (Can.VarTopLevel _ fnName) ->
+                    case Map.lookup fnName (ecSolvedTypes ctx) of
+                        Just ty -> length (extractParamTypes ty)
+                        Nothing -> 0
+                _ -> 0
+            isPartialApp = calleeArity > length args && not (null args)
             succeedArity = case fn of
                 Ann.At _ (Can.VarKernel _ name) | name == "succeed" && not (null args) ->
                     case head args of
@@ -1408,7 +1418,20 @@ exprToRustInner ctx e = case e of
                                     _ -> Nothing
                         _ -> Nothing
                 _ -> Nothing
-        in case succeedArity of
+        in if isPartialApp
+           then
+               -- sub-A.12 F2: partial application -> wrap residual args in
+               -- a `move |..| f(supplied.., residual..)` closure. Sky source
+               -- like `result_and_then (validateTime now) (...)` curries
+               -- `validateTime now` into `String -> Result Error String`.
+               let supplied = length args
+                   missing = calleeArity - supplied
+                   freshParams = ["__pa" ++ show i | i <- [1..missing]]
+                   suppliedStrs = map (exprToRustString ctx) args
+               in "(move |" ++ intercalate ", " freshParams ++ "| " ++
+                  calleeName ++ "(" ++ intercalate ", " (suppliedStrs ++ freshParams) ++ "))"
+           else
+            case succeedArity of
             Just n ->
                 let [arg] = args
                 in case arg of
