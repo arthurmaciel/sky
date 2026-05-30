@@ -2203,6 +2203,15 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Dict", "remove") -> "dict_remove"
     ("Dict", "member")          -> "dict_member"
     ("Sky.Core.Dict", "member") -> "dict_member"
+    -- sub-A.8 T6 — Sky.Core.String additions (4 kernels)
+    ("String", "replace")           -> "string_replace"
+    ("Sky.Core.String", "replace")  -> "string_replace"
+    ("String", "startsWith")        -> "string_starts_with"
+    ("Sky.Core.String", "startsWith") -> "string_starts_with"
+    ("String", "endsWith")          -> "string_ends_with"
+    ("Sky.Core.String", "endsWith") -> "string_ends_with"
+    ("String", "repeat")            -> "string_repeat"
+    ("Sky.Core.String", "repeat")   -> "string_repeat"
     -- Json.Encode kernel functions: route to runtime implementations
     ("JsonEnc", "string") -> "json_enc_string"
     ("Sky.Core.Json.Encode", "string") -> "json_enc_string"
