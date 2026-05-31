@@ -30,10 +30,15 @@ import qualified Sky.Build.UiMultilineTextareaSpec
 import qualified Sky.Build.ExposingTypeCtorsSpec
 import qualified Sky.Build.LetForwardRefSpec
 import qualified Sky.Build.EntryLocalShadowsDepSpec
+import qualified Sky.Build.RtFieldAdtBug342Spec
 import qualified Sky.Build.CaseSubjectNameShadowSpec
 import qualified Sky.Build.FfiKernelAliasSpec
 import qualified Sky.Build.PubSubPublishTaskSpec
 import qualified Sky.Build.PubSubPublishNoEchoSpec
+import qualified Sky.Build.ServerStreamSpec
+import qualified Sky.Build.WebviewAppSpec
+import qualified Sky.Build.WebviewLoopbackAssetsSpec
+import qualified Sky.Build.JsonPipelinePanic372Spec
 import qualified Sky.Parse.MultiLineCaseSubjectSpec
 import qualified Sky.Parse.MultiLineCaseKeywordSpec
 import qualified Sky.Parse.MultiLineSignatureSpec
@@ -62,6 +67,7 @@ import qualified Sky.Build.LetBodyCascadeResumeSpec
 import qualified Sky.Build.SnapshotCallerCtxSpec
 import qualified Sky.Build.SkyshopCompilesSpec
 import qualified Sky.Build.AnonLambdaSpec
+import qualified Sky.Build.CrossModuleLambdaCollisionC_Spec
 import qualified Sky.Build.AnonRecordSpec
 import qualified Sky.Build.AuthUntypedBoundarySpec
 import qualified Sky.Build.Issue52Spec
@@ -216,6 +222,7 @@ main = hspec $ do
     describe "Sky.Build.ExposingTypeCtors" Sky.Build.ExposingTypeCtorsSpec.spec
     describe "Sky.Build.LetForwardRef"     Sky.Build.LetForwardRefSpec.spec
     describe "Sky.Build.EntryLocalShadowsDep" Sky.Build.EntryLocalShadowsDepSpec.spec
+    describe "Sky.Build.RtFieldAdtBug342" Sky.Build.RtFieldAdtBug342Spec.spec
     describe "Sky.Build.CaseSubjectNameShadow" Sky.Build.CaseSubjectNameShadowSpec.spec
     describe "Sky.Build.FfiKernelAlias" Sky.Build.FfiKernelAliasSpec.spec
     -- Cycle 4 PT: Task-shaped Std.PubSub.publish — callable from any
@@ -228,6 +235,27 @@ main = hspec $ do
     -- the broker round-trip; in v0.16+ cross-process broker tiers the
     -- saved hop is 10-100ms+ of latency.
     describe "Sky.Build.PubSubPublishNoEcho" Sky.Build.PubSubPublishNoEchoSpec.spec
+    -- Cycle 4 HS-Server / issue #362: Sky.Http.Server.Stream — server-side
+    -- streaming HTTP response primitive (mirror of Sky.Core.Http.Stream).
+    -- Unblocks LLM token-stream proxying + SSE endpoints without
+    -- hand-rolled chunk plumbing on the Sky side.
+    describe "Sky.Build.ServerStream" Sky.Build.ServerStreamSpec.spec
+    -- Issue #356 / v0.1 MVP: Sky.Webview backend. Pins the
+    -- Std.Webview.app type-checker contract + kernel routing.
+    describe "Sky.Build.WebviewApp" Sky.Build.WebviewAppSpec.spec
+    -- Bug #370: Sky.Webview can't load relative-path assets — the
+    -- runtime now spawns a 127.0.0.1 loopback http server when
+    -- sky.toml `[live].static` is set, and falls through to
+    -- SetHtml (no regression) when unset.
+    describe "Sky.Build.WebviewLoopbackAssets"
+        Sky.Build.WebviewLoopbackAssetsSpec.spec
+    -- Bug #372: user-defined Decoder pipeline (Decode.andThen +
+    -- Decode.map over a curried record ctor) panicked with
+    -- `rt.Coerce: expected func(interface {}) interface {}, got
+    -- Spec_R` at the final stage.  Runtime fix: adaptFuncValue now
+    -- currys instead of zero-pads when target's return is `any`.
+    describe "Sky.Build.JsonPipelinePanic372"
+        Sky.Build.JsonPipelinePanic372Spec.spec
     describe "Sky.Parse.MultiLineCaseSubject" Sky.Parse.MultiLineCaseSubjectSpec.spec
     describe "Sky.Parse.MultiLineCaseKeyword"
         Sky.Parse.MultiLineCaseKeywordSpec.spec
@@ -397,6 +425,8 @@ main = hspec $ do
     -- defined HOF slots lower to typed `func(X) Y` shapes via
     -- curryLambdaPatTyped (was only kernel HOFs pre-v0.13).
     describe "Sky.Build.AnonLambda"         Sky.Build.AnonLambdaSpec.spec
+    -- v0.15.6 #365 — cross-module local lambda collision.
+    describe "Sky.Build.CrossModuleLambdaCollisionC" Sky.Build.CrossModuleLambdaCollisionC_Spec.spec
     -- v0.13 E regression: synthAnonRecordName registers shapes
     -- into globalAnonRecords; generateAnonRecordDecls emits
     -- `type Anon_R_<hash> = struct{...}` so the typed Go name

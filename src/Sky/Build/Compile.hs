@@ -417,6 +417,23 @@ getCgEnv :: Rec.CodegenEnv
 getCgEnv = unsafePerformIO $ readIORef globalCgEnv
 
 
+-- v0.15.6 #365 — module-hint IORef.
+--
+-- A SEPARATE IORef (not on `globalCgEnv`) tracks which dep module
+-- is currently being emitted.  Mutating `globalCgEnv` for the
+-- hint would leak through the `getCgEnv` CAF — the first-evaluated
+-- snapshot becomes shared across all downstream consumers (specs,
+-- inferred-sigs, etc.), breaking emission.  Keeping the hint on
+-- its own IORef + reading at each `lookupSolvedVarScoped` call site
+-- via an explicit `unsafePerformIO . readIORef` (bypassing the
+-- CAF) gives the per-dep hint without polluting unrelated readers.
+--
+-- Default `Nothing` (entry-module emission semantics).
+{-# NOINLINE globalCurrentDepModule #-}
+globalCurrentDepModule :: IORef (Maybe String)
+globalCurrentDepModule = unsafePerformIO $ newIORef Nothing
+
+
 -- | Read ffi/*.kernel.json and write the resulting module/function maps into
 -- Env.ffiKernelModulesRef and Env.ffiKernelFunctionsRef. After this call the
 -- pure kernelModules / kernelFunctions lookups include FFI entries.
@@ -1103,6 +1120,15 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 -- lowering-scope state).
                 depRegionTys = Map.unions
                     [ rt | (_, Right (_, _, rt, _)) <- finalResults ]
+                -- v0.15.6 #365 — preserve EACH dep's region map under
+                -- its own module name so the per-module lookup in
+                -- `letBindingType` / `inferExprType (Can.Lambda)` can
+                -- disambiguate same-position lambdas across modules.
+                -- The flat `depRegionTys` is preserved for fallback;
+                -- the per-module ledger is the primary source under
+                -- `_stCurrentModule`-installed scopes.
+                depRegionTysByModule =
+                    [ (mn, rt) | (mn, Right (_, _, rt, _)) <- finalResults ]
             unless (null depErrors) $ do
                 -- v0.13 Layer 1: route dep-module type errors through the
                 -- structured Diagnostic renderer too.  Pre-fix each was
@@ -1549,7 +1575,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                 -- render as `func(any) any`.
                 let depDecls = concatMap (\(modName, depMod) ->
                         let prefix = map (\c -> if c == '.' then '_' else c) modName
-                        in generateDeclsForDep depMod prefix) validDeps
+                        in generateDeclsForDepScoped modName depMod prefix) validDeps
                 let depAliasPairs = [ (map (\c -> if c == '.' then '_' else c) mn, Can._aliases depMod)
                                     | (mn, depMod) <- validDeps ]
                     -- Conflict-detection merge with TVar normalisation.
@@ -1613,7 +1639,34 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                                  []    -> T.TVar "_unresolved"
                                         _   -> T.TVar "_ambig"
                             mergedEnv = Map.mapWithKey resolveKey keyToTypes
-                        in Solve.SolvedTypes mergedEnv mergedRegionTys
+                            -- v0.15.6 #365 — per-module region ledger
+                            -- carries each dep's own region map under
+                            -- its dotted name, plus the entry module's.
+                            -- Consumers `lookupSolvedRegionScoped`
+                            -- consult this ledger first when a
+                            -- `_stCurrentModule` hint is installed by
+                            -- `generateGoMulti`'s per-dep scope.
+                            entryModName = ModuleName.toString (Can._name canMod)
+                            perModuleRegions = Map.fromList
+                                ( (entryModName, entryRegionTys)
+                                : depRegionTysByModule )
+                            -- v0.15.6 #365 — per-module env ledger.
+                            -- Each dep's _stEnv (carrying its own
+                            -- let-bound locals' types like `encodeOne`)
+                            -- is preserved separately so consumers
+                            -- consulting via `lookupSolvedVarScoped`
+                            -- under a `_stCurrentModule` hint see the
+                            -- right module's let-bound type — without
+                            -- this, the cross-module merge collapsed
+                            -- distinct `encodeOne` types across modules
+                            -- to whichever survived the ambiguity
+                            -- pick.
+                            perModuleEnv = Map.fromList
+                                ( (entryModName, typesEnv)
+                                : depSolved )
+                        in Solve.withPerModuleEnv perModuleEnv
+                            (Solve.withPerModuleRegions perModuleRegions
+                                (Solve.SolvedTypes mergedEnv mergedRegionTys Map.empty Map.empty Nothing))
                     goCodeRaw = generateGoMulti canMod entrySrcMod config typesWithDeps depDecls depRecAliases depUnionNames depEnumNames depArities depParamTypes depRetTypes depUltRetTypes depInferredParams depInferredRets depInferredSigs depAliasPairs
                     -- v0.13 Layer 2: collect Sky-name → source-region
                     -- for every top-level declaration so the post-emit
@@ -1644,7 +1697,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         -- auth-boundary helper (region map empty —
                         -- the gate only consults the env).
                         , let depTypesMap = case lookup modName depSolved of
-                                Just ts -> Solve.SolvedTypes ts Map.empty
+                                Just ts -> Solve.SolvedTypes ts Map.empty Map.empty Map.empty Nothing
                                 Nothing -> Solve.emptySolvedTypes
                         , d <- authBoundaryDiagnostics entryPath depTypesMap depMod
                         ]
@@ -2742,6 +2795,60 @@ locateRuntimeDir = do
 -- ═══════════════════════════════════════════════════════════
 -- GO CODE GENERATION (from Canonical AST)
 -- ═══════════════════════════════════════════════════════════
+
+-- | v0.15.6 #365 — module-scoped variant of `generateDeclsForDep`.
+--
+-- Returns a SINGLE `GoDeclRaw` whose String is a lazy thunk that,
+-- when forced by the renderer, installs `_stCurrentModule = Just
+-- modName` on `_cg_solvedTypes`, calls the plain
+-- `generateDeclsForDep`, renders the result to a String (forces
+-- all nested GoExpr thunks under the scoped env), restores the
+-- previous solvedTypes, and returns the rendered String.
+--
+-- The scope install/restore happens at render time (inside the
+-- `unsafePerformIO`), which is AFTER `generateGoMulti`'s
+-- `imports` thunk has populated `globalCgEnv` with the merged
+-- solvedTypes.  Forcing the rendered String (via `length` in the
+-- `seq`) before the restore closes the lazy-thunk seam that
+-- broke prior IORef-based attempts.
+--
+-- Closes the cross-module same-position lambda collision class:
+-- when `Lib.A` and `Lib.B` both have `let encodeOne x = ...` at
+-- the same `(line, col)`, each dep's emission consults its OWN
+-- region map (via `Solve.lookupSolvedRegionScoped`) so the
+-- callback's typed slot reflects the right module's element
+-- type.
+{-# NOINLINE generateDeclsForDepScoped #-}
+generateDeclsForDepScoped :: String -> Can.Module -> String -> [GoIr.GoDecl]
+generateDeclsForDepScoped modName canMod modPrefix =
+    -- v0.15.6 #365 — Bracket the dep's decls with two sentinel
+    -- `GoDeclRaw` entries whose rendering sets / clears the
+    -- `globalCurrentDepModule` hint at the right moments.  The
+    -- outer renderer processes pkg_decls in order, so the SET
+    -- sentinel runs BEFORE the dep's decls render and the CLEAR
+    -- sentinel runs AFTER.  This way the per-dep `defToStmts`
+    -- lookups (which read the hint via a fresh
+    -- `unsafePerformIO . readIORef`) see the correct module.
+    --
+    -- We CANNOT eagerly render-and-restore here because the lazy
+    -- `getCgEnv` CAF caches its first-evaluated value — if the
+    -- eager render fires before downstream consumers (specDecls,
+    -- inferred-sigs builders) get to read `getCgEnv`, those
+    -- readers receive a stale snapshot and the build breaks.  The
+    -- sentinel approach scopes the hint without touching `cgEnv`.
+    --
+    -- The sentinels emit ZERO Go content (empty strings) so the
+    -- output is byte-identical to the un-scoped path apart from
+    -- the typed-let-bound-name dispatch.
+    setSentinel : (generateDeclsForDep canMod modPrefix ++ [clearSentinel])
+  where
+    setSentinel = GoIr.GoDeclRaw (unsafePerformIO $ do
+        writeIORef globalCurrentDepModule (Just modName)
+        return "")
+    clearSentinel = GoIr.GoDeclRaw (unsafePerformIO $ do
+        writeIORef globalCurrentDepModule Nothing
+        return "")
+
 
 -- | Generate Go declarations for a dependency module's functions
 generateDeclsForDep :: Can.Module -> String -> [GoIr.GoDecl]
@@ -4075,15 +4182,47 @@ isGoIdentChar :: Char -> Bool
 isGoIdentChar c = Char.isAlphaNum c || c == '_'
 
 
+-- | Identifiers that must NOT leak through to emitted Go as-is.
+-- `goSafeName` appends `_` to any Sky identifier in this list
+-- (the user's `init` becomes Go `init_`, etc.). Three risk tiers:
+--
+--   1. `init` — Go runs `func init()` at package load. A user
+--      binding named `init` lowered as `func init()` would silently
+--      execute at startup. Module prefixing alone can't save us:
+--      Sky's TEA convention is `init = …` everywhere.
+--
+--   2. Reserved keywords — `for`, `case`, etc. are syntactic.
+--      A user local named `for` is a syntax error in Go.
+--
+--   3. Predeclared identifiers — Go *allows* shadowing `string` /
+--      `error` / `true` etc., but it breaks user reasoning and any
+--      same-scope code that references the predeclared meaning.
+--      Module prefix saves top-level bindings; this list saves
+--      locals + parameters.
+--
+-- Special-cased OUTSIDE this list:
+--   - `main`     — emitted as Go's program-entry `func main()`.
+--   - `if`/`else`/`nil` — Sky parser rejects them as identifiers
+--     before they ever reach codegen.
 reservedGoNames :: [String]
 reservedGoNames =
     [ "init"      -- Go's package init has special semantics
+    -- Predeclared funcs
     , "new", "make", "len", "cap", "copy", "append", "delete"
     , "panic", "recover", "print", "println"
+    , "clear", "min", "max", "complex", "imag", "real", "close"  -- Go 1.21+ and pre-1.21
+    -- Reserved keywords
     , "type", "func", "var", "const", "interface", "struct"
     , "map", "chan", "go", "defer", "goto", "fallthrough"
     , "range", "return", "for", "switch", "case", "default"
     , "break", "continue", "import", "package", "select"
+    -- Predeclared types (Go tolerates shadowing but reasoning breaks)
+    , "bool", "byte", "rune", "string", "error", "any", "comparable"
+    , "int", "int8", "int16", "int32", "int64"
+    , "uint", "uint8", "uint16", "uint32", "uint64", "uintptr"
+    , "float32", "float64", "complex64", "complex128"
+    -- Predeclared constants / nil
+    , "true", "false", "iota", "nil"
     ]
 
 
@@ -5601,12 +5740,36 @@ betterRetType = betterTypeStr
 -- | v0.13 Stage 1 — per-string picker. Prefers the type carrying
 -- more concrete information.  See `betterParamTypes` for the
 -- ordering rationale.
+--
+-- Bug #342 fix: the previous ordering had a hole — bare TVar `T1`
+-- was beaten by ANY non-TVar string including `"any"`.  But `any`
+-- is the LESS informative type (erasure), not the more
+-- informative one.  Comparing `["T1","T1"]` (HM-inferred,
+-- TVar-preserved) against `["any","any"]` (early collector,
+-- TVar-erased) at a polymorphic Sky function like
+-- `equal : a -> a -> TestResult` would silently pick `["any","any"]`,
+-- collapsing call-site generic-type inference and emitting
+-- `rt.Field(...)` returning `any` at a `T1` slot without the
+-- needed `rt.Coerce[T1]` wrap — Go's call-site inference then
+-- rejected the typed sibling arg with `does not match inferred
+-- type T1`.
+--
+-- The corrected ordering:
+--   1. Concrete type beats both `any` and bare TVar.
+--   2. Bare TVar beats `any` (polymorphism preserved).
+--   3. Tie → keep the left (HM-inferred).
 betterTypeStr :: String -> String -> String
 betterTypeStr l r
-    -- A bare TVar (`T1`) carries the least info — beaten by anything else.
-    | isGenericTypeParam l && not (isGenericTypeParam r) = r
-    | isGenericTypeParam r && not (isGenericTypeParam l) = l
-    -- Both bare TVars (or both not): prefer the one with NO `any`
+    -- Bare TVar (`T1`) beats `"any"` exactly — preserves the
+    -- generic-param connection for call-site σ-recovery.
+    | isGenericTypeParam l && r == "any" = l
+    | isGenericTypeParam r && l == "any" = r
+    -- Concrete type beats both `any` and bare TVar.
+    | isGenericTypeParam l && not (isGenericTypeParam r)
+                          && not (r == "any") = r
+    | isGenericTypeParam r && not (isGenericTypeParam l)
+                          && not (l == "any") = l
+    -- Neither side bare TVar: prefer the one with NO `any` token
     -- (typed-everywhere) over the one that has `any`.
     | hasAnyToken l && not (hasAnyToken r) = r
     | hasAnyToken r && not (hasAnyToken l) = l
@@ -10411,7 +10574,15 @@ letBindingType solvedTypes _name body@(A.At r _) =
             A.At _ (Can.Let _ _) -> True
             A.At _ (Can.LetRec _ _) -> True
             _ -> False
-        viaRegion   = Solve.lookupSolvedRegion r solvedTypes
+        -- v0.15.6 #365 — module-aware region lookup.  When a
+        -- `_stCurrentModule` hint is installed (by the per-dep
+        -- scope wrapper in `generateGoMulti`), the scoped helper
+        -- consults that module's region map first.  Closes the
+        -- cross-module same-position lambda collision (3+ deps
+        -- with `let encodeOne x = ...` at line 10 col 5 used to
+        -- pick the LAST module's type — now each module sees
+        -- its own type).
+        viaRegion   = Solve.lookupSolvedRegionScoped r solvedTypes
         viaInferred = inferExprType solvedTypes body
         containsAny s = goAny 0 s
           where
@@ -10512,8 +10683,29 @@ defToStmts def = case def of
         -- entry. Closes the user-code let-bound helper class of
         -- adapters (e.g. 18-job-queue's `insertRow db ts = …`
         -- inside saveSnapshot).
+        --
+        -- v0.15.6 #365 — `lookupSolvedVarScoped` consults the per-
+        -- module env map first when a `_stCurrentModule` hint is
+        -- installed (by the per-dep wrapper in `generateGoMulti`).
+        -- Closes the cross-module let-bound name collision class
+        -- (3 modules with `let encodeOne x = ...` previously all
+        -- typed against the LAST module's element type because
+        -- the flat `_stEnv`'s `mergedEnv` build kept whichever
+        -- module's `encodeOne` survived the ambiguity collapse).
+        -- v0.15.6 #365 — Read the current dep module hint via an
+        -- explicit IORef read (NOT through `getCgEnv` which is a
+        -- CAF — see `globalCurrentDepModule` comment).  Install
+        -- the hint on the SolvedTypes value passed to
+        -- `lookupSolvedVarScoped` so it consults the per-module
+        -- env map for that module first.  Closes the cross-module
+        -- let-bound name collision class (#365 — 3+ modules with
+        -- same-named local lambdas typing against whichever
+        -- module's version survived the flat _stEnv ambiguity
+        -- collapse).
         let solved = Rec._cg_solvedTypes getCgEnv
-            inferredTy = Solve.lookupSolvedVar name solved
+            curMod = unsafePerformIO (readIORef globalCurrentDepModule)
+            scopedSolved = Solve.withCurrentModule curMod solved
+            inferredTy = Solve.lookupSolvedVarScoped name scopedSolved
             (paramTys, retTy) = case inferredTy of
                 Just ty -> splitTLambda (length params) ty
                 Nothing -> (replicate (length params) Nothing, Nothing)
@@ -12177,7 +12369,10 @@ inferExprType types (A.At r e) = case e of
     -- Nothing universally, leaving `let cb = \x -> …` un-typed and
     -- forcing typed-let routing to fall back to `func() any`.
     Can.Lambda pats body ->
-        case Solve.lookupSolvedRegion r types of
+        -- v0.15.6 #365 — module-aware region lookup; see comment
+        -- on `letBindingType`'s `viaRegion` for the cross-module
+        -- collision class this scoped variant closes.
+        case Solve.lookupSolvedRegionScoped r types of
             Just t  -> Just t
             Nothing ->
                 let paramNames = [n | A.At _ (Can.PVar n) <- pats]

@@ -26,16 +26,20 @@
 | `sky doc` (terminal + HTTP server with type-sig + Markdown + fuzzy search) | ✅ shipped |
 | `sky watch` / `sky doctor` / `sky console` / `sky upgrade-claude` | ✅ shipped |
 | Sky Console + sub-app mount + observability federation | ✅ shipped |
-| 27-example sweep + 120 Sky.Test assertions + 306 cabal specs | ✅ green |
+| Sky.Webview v0.1 (desktop, macOS) — `Webview.app cfg` via `webview_go` | ✅ shipped — `runtime-go/rt/webview.go`, `sky-stdlib/Std/Webview.sky` |
+| 32-example sweep + 120 Sky.Test assertions + 410+ cabal specs | ✅ green |
 
-**Examples (27 total — `examples/00`-`examples/26`).** Each builds clean
+**Examples (32 total — `examples/00`-`examples/31`).** Each builds clean
 from a wiped slate (`rm -rf sky-out .skycache .skydeps && sky build`).
 `examples/00-standard-libs` is the stdlib smoke test (120 assertions).
 `examples/13-skyshop` is the Stripe-SDK-scale benchmark (76k FFI
 symbols). `examples/26-ui-showcase` exercises every Std.Ui layout
-primitive for visual-regression review. Categories: CLI (7),
-Sky.Tui (5), Sky.Live + Sky.Http.Server (11), GUI (1 — Fyne),
-build-only fixtures (2).
+primitive for visual-regression review.
+`examples/30-sse-server-demo` exercises `Sky.Http.Server.Stream`.
+`examples/31-webview-stopwatch-ui` exercises Sky.Webview (macOS).
+Categories: CLI (8), Sky.Tui (5), Sky.Live + Sky.Http.Server (13),
+GUI (2 — Fyne + Sky.Webview), build-only fixtures (2), Sky.Webview
+WebGL2 spike (1).
 
 ## Non-negotiables
 
@@ -88,7 +92,103 @@ pgrep -f mem-guard.sh >/dev/null || (nohup ./scripts/mem-guard.sh > /tmp/mem-gua
 **Prefer the Monitor tool** over `run_in_background` + polling.
 Monitor delivers events without leaving a wait-loop subprocess.
 
-### 3. Core principles
+### 3. Test / build timeout gate — every long-running command MUST be timeout-bounded
+
+A test or build that hangs forever is a silent task waster. We
+have already lost 7 hours waiting on a stuck `Sky.Cli.Watch`
+subprocess. Never again.
+
+Rules:
+- **`cabal test` MUST run under `timeout`**:
+  `timeout 3600 cabal test` (60 min hard ceiling). If 60 min is
+  not enough, that's a flaky test — bisect it, don't widen the
+  ceiling.
+- **Per-spec timeouts.** Hspec specs that exec subprocesses
+  (`sky build` / `sky watch` / `sky test`) MUST wrap the child in
+  `timeout 60` or use Hspec's `Test.Hspec.Wai`-style timeout
+  combinators. A test that doesn't time out cannot be re-run.
+- **Example sweep already enforces this** via
+  `run_with_timeout 10` in `scripts/example-sweep.sh`. Don't
+  remove or widen those calls without a real reason.
+- **Background `run_in_background` shell commands** that wait
+  on a process MUST `kill -KILL` it after a finite wait —
+  default 600 s ceiling. Never `wait $PID` unbounded.
+- **Monitors** in dev-loop tooling (sky watch, sky doctor)
+  watching for state changes MUST have a heartbeat / max-wait
+  so a wedged child doesn't poison the parent.
+
+If you see a process running > 30 min that you can't justify,
+kill it and file a bug. Never wait it out.
+
+### 4. No-deferral principle — every known bug enters the pipeline
+
+If a bug surfaces during dev, sweep, CI, or testing — **whether
+introduced by your current work or pre-existing** — it MUST
+enter the task pipeline immediately and be fixed in the next
+appropriate patch release. The phrases "pre-existing flake",
+"defer to v0.X", "known issue, ignore" are forbidden as
+shipping excuses.
+
+Rules:
+- **Spotted = filed.** Any test failure / sweep failure /
+  runtime panic / log error you observe gets a task created on
+  the spot. No mental "I'll look at it later".
+- **Pipeline groups related fixes.** Bundle related bug fixes
+  into the next patch release (v0.15.x) to reduce notification
+  noise — don't tag per fix.
+- **Closing tasks requires actual fix, not workaround.** A
+  documented workaround in CLAUDE.md is acceptable as a TEMPORARY
+  bridge while the actual fix is in flight, NOT as a permanent
+  resolution.
+- **"Pre-existing" is investigation context, not a verdict.**
+  When a failure pre-dates your work it tells you the bug is
+  older and the fix can ship in its own commit (not bundled
+  with your unrelated work), but it does NOT excuse skipping
+  the fix.
+
+The user has the right to interrupt with "ship this without
+fixing X" — only that explicit override allows shipping with a
+known unfixed issue. Default is fix-first.
+
+### 5. SkyDeploy redeploy follows every Sky release
+
+Every Sky compiler / stdlib release that's been tagged (`vX.Y.Z`)
+MUST be paired with a SkyDeploy redeploy of the matching version:
+
+```bash
+cd ~/works/playground/skydeploy
+# 1. Bump SKY_VERSION in all 5 refs:
+#    - sky-tools/Dockerfile
+#    - deploy/Dockerfile
+#    - agent-service/Dockerfile
+#    - build-image/Dockerfile
+#    - control-plane/deploy/setup-remote.sh
+# 2. Commit + push origin main.
+# 3. Bounded redeploy:
+timeout 1200 bash control-plane/deploy/deploy.sh
+```
+
+**Graceful degradation on auth failure.** If `gcloud` auth has
+expired (token revoked, refresh needed, SSO challenge required)
+or any other deploy-side blocker fires, do NOT retry indefinitely:
+
+1. Detect via the bounded `timeout`'s exit code OR `gcloud auth`
+   complaints in stderr.
+2. **Park the redeploy.** The bump commit on skydeploy `main` is
+   already pushed — that's the durable artifact.
+3. **Warn the user explicitly**: "SkyDeploy redeploy parked due to
+   `<reason>` — please `gcloud auth login` and re-run
+   `control-plane/deploy/deploy.sh` when convenient. Sky compiler
+   work continuing." Include the exact gcloud command they need.
+4. **Continue Sky compiler/stdlib work** without blocking on the
+   deploy.
+
+The deploy is downstream consumption of the release; the release
+itself is the authoritative artifact (tag + GitHub release). Sky's
+flow does not block on operational state outside the compiler
+repo.
+
+### 6. Core principles
 
 1. **If it compiles, it works.** Every known runtime panic class
    has a regression test in `runtime-go/rt/*_test.go` or
@@ -106,7 +206,7 @@ Monitor delivers events without leaving a wait-loop subprocess.
    Each is reviewed for security + scalability — UI/UX/DX/security
    are not afterthoughts.
 
-### 4. Non-regression rules (enforced by `cabal test`)
+### 7. Non-regression rules (enforced by `cabal test`)
 
 - **No `Result String a` / `Task String a`** in public surfaces.
   Use `Result Error a` / `Task Error a`.
@@ -130,7 +230,7 @@ Monitor delivers events without leaving a wait-loop subprocess.
   `refsInExpr` / `collectSemTokens` / `collectReferences`. Don't
   rely on `_ -> []` catchalls.
 
-### 5. Testing rules
+### 8. Testing rules
 
 - **Every new feature / bug becomes a regression test** before the
   fix lands. The failing test is the discovery artefact.
@@ -270,6 +370,56 @@ Any new gate on "is this annotation polymorphic?" MUST check
 would treat wildcard-only sigs as polymorphic, diverge body ↔
 caller UF vars under fresh-per-call-site re-instantiation, and
 silently accept wrong return types.
+
+## Go reserved-name rewriting
+
+Sky compiles to Go but Sky's identifier rules are stricter than
+Go's (Sky banishes keywords at parse time; Go *tolerates* shadowing
+predeclared types like `string` / `error`). To keep emitted Go safe
+and free from accidental-shadow gotchas, every Sky identifier in
+`reservedGoNames` (`src/Sky/Build/Compile.hs:4058`) is rewritten
+at codegen with a trailing `_`.
+
+```
+init → init_       (Go's func init() is auto-called at package load)
+string → string_   (avoid shadowing Go's predeclared type)
+error → error_     (avoid shadowing Go's predeclared interface)
+for → for_         (Go syntactic keyword)
+true → true_       (Go predeclared constant)
+```
+
+The list covers four tiers:
+
+1. `init` — special-cased with a code comment; load-bearing for
+   Sky.Live + Sky.Webview's `init = …` TEA convention.
+2. **Predeclared funcs** — `new`, `make`, `len`, `cap`, `copy`,
+   `append`, `delete`, `panic`, `recover`, `print`, `println`,
+   `clear`, `min`, `max`, `complex`, `imag`, `real`, `close`.
+3. **Reserved keywords** — all 23 Go keywords (`for`, `case`,
+   `type`, `func`, …). `if`/`else`/`nil` not in list because the
+   Sky parser rejects them as identifiers first.
+4. **Predeclared types + constants** — `bool`, `byte`, `rune`,
+   `string`, `error`, `any`, `comparable`, every `int*`/`uint*`/
+   `float*`/`complex*` size, `true`, `false`, `iota`, `nil`.
+
+**Rule for AI-written Sky code.** `init = init` is safe (LHS is a
+record-field key → Go field `Init`; RHS is a binding ref → Go
+identifier `init_`). Same for `view = view`, `update = update`,
+etc. — every TEA app uses this idiom and it lowers correctly.
+
+**Special-cased outside the list.** `main` is the program entry —
+the Sky binding `main` in `module Main exposing (main)` emits as
+Go's `func main()` (the program entry), not as `main_`. A
+user-named binding `main` in any other module would module-prefix
+to `Mod_main` and never collide.
+
+**Module-prefix safety net.** Every top-level Sky binding becomes
+`<Mod>_<name>` in Go (`Main_view`, `Std_Ui_layout`). So the
+reserved list only matters for locals + parameters within
+functions. The audit gate before adding any new entry: grep
+`examples/*/sky-out/main.go` for the bare identifier outside any
+`Mod_…` token — if there are no hits, the patch is purely
+future-proofing.
 
 ## Memory safety + efficiency audit (v0.15.x)
 
@@ -489,7 +639,7 @@ Each binding is either:
 | `Set` | `Sky.Core.Set` (kernel) | empty, insert, remove, member, union, diff, intersect, fromList, toList, size |
 | `Maybe` | `Sky.Core.Maybe` | withDefault, map, andThen, map2-5, andMap, combine, isJust, isNothing |
 | `Result` | `Sky.Core.Result` | withDefault, map, andThen, mapError, map2-5, andMap, combine |
-| `Math` | `Sky.Core.Math` | abs, min, max, sqrt, pow, floor, ceil, round, sin, cos, tan, pi, e, log |
+| `Math` | `Sky.Core.Math` | 36 entries — abs, min, max; sqrt, pow, cbrt, hypot; exp, exp2, log, log2, log10; floor, ceil, round, trunc; sin, cos, tan; asin, acos, atan, atan2; sinh, cosh, tanh, asinh, acosh, atanh; mod, remainder; pi, e, phi, sqrt2, inf, nan |
 | `Regex` | `Sky.Core.Regex` | match, find, findAll, replace, split |
 | `Char` | `Sky.Core.Char` | isAlpha, isDigit, isLower, isUpper, toUpper, toLower |
 | `Path` | `Sky.Core.Path` | base, dir, ext, isAbsolute |
@@ -524,6 +674,7 @@ Each binding is either:
 | `Log` | `Std.Log` | println, debug, info, warn, error, debugWith, infoWith, warnWith, errorWith |
 | `Trace` | `Std.Trace` | span, event, attr — opt-in app-level tracing spans. Tier-1 spans (HTTP/session/Msg/DB/Auth/Http/File) are automatic; see `docs/observability.md` |
 | `Server` | `Sky.Http.Server` | param, queryParam, header, getCookie, static (Layer 3 surface); higher-level `get/post/listen/text/json/html` stay kernel-only |
+| `Stream` | `Sky.Http.Server.Stream` | stream, emit, finish, withContentType — server-side streaming HTTP responses (SSE / LLM token forwarding / chunked downloads). Mirror of `Sky.Core.Http.Stream` (which reads upstream bodies as Sub events). See `docs/skylive/http-streaming.md` §"Server-side" + `examples/30-sse-server-demo`. |
 | `Middleware` | `Sky.Http.Middleware` | withCors, withLogging, withBasicAuth, withRateLimit |
 | `RateLimit` | `Sky.Http.RateLimit` | allow |
 
@@ -989,6 +1140,47 @@ text; `tuiMaxContentH = 50,000` hard cap with 10,000 soft warn;
 String` reads stdin with echo disabled (`golang.org/x/term`'s
 `ReadPassword`). Password never echoes; never lands in scrollback.
 
+## Sky.Webview v0.1 (desktop)
+
+Cross-backend mirror of `Live.app` + `Tui.app` — same TEA shape,
+native desktop window via the system webview (WKWebView on macOS,
+WebView2 on Windows, WebKitGTK on Linux) using `webview_go`. No
+HTTP server, no SSE, no session store — the bridge is in-process
+`Bind` + `Eval`.
+
+```elm
+import Std.Webview as Webview
+
+main =
+    Webview.app
+        { init = init
+        , update = update
+        , view = view                  -- view : Model -> Element msg
+        , subscriptions = subscriptions
+        , window = { title = "Sky App", size = ( 800, 600 ) }
+        }
+        |> Task.run
+```
+
+Reuses Sky.Live's renderer (`HtmlToVNode`, `assignSkyIDs`,
+`renderVNode`, `diffTrees`) — same `view` function paints
+identically across Sky.Live (web), Sky.Tui (terminal),
+Sky.Webview (desktop). XSS hardening parity:
+focus-preserving DOM replacer, `__skyReviveScripts` for
+late-injected `<script>` tags.
+
+`WindowCfg` is closed (`{ title : String, size : (Int, Int) }`)
+in v0.1 for clean missing-field type errors. v0.2 reopens it for
+`alwaysOnTop` / `transparent` / `decorated` and adds tray icons,
+global hotkeys, native file dialogs, and Windows + Linux smoke
+validation. v0.1 ships macOS only.
+
+Sky-stdlib path: `sky-stdlib/Std/Webview.sky`. Runtime: `runtime-go/rt/webview.go` (build tag `cgo && darwin` for v0.1; widens v0.2 with smoke for Linux/Windows). Stub at `webview_stub.go` covers `!cgo || !darwin` so non-macOS builds link cleanly and surface a runtime `Err Error` on call. Example: `examples/31-webview-stopwatch-ui`.
+
+**`sky build` cgo-detect.** Normally `sky build` runs `CGO_ENABLED=0 go build` first (static-binary preference) and only retries with cgo on failure. When the emitted `main.go` contains `rt.Webview_app` (i.e. the project uses Sky.Webview), the build runner flips straight to `CGO_ENABLED=1` on the first attempt — otherwise the stub would compile cleanly and the resulting binary would silently exit at runtime. Look for `(built with cgo — Sky.Webview requires it; …)` in the build log to confirm.
+
+**Std.Ui convention** — your `view` function MUST wrap its output in `Ui.layout [] (...)` to convert `Element` → `Html` before the renderer (`HtmlToVNode`) processes it. A raw `Ui.column [...]` body produces a blank window. Same convention as Sky.Live (see `examples/19-skyforum`, `examples/26-ui-showcase`).
+
 ## Language syntax
 
 ```elm
@@ -1075,9 +1267,17 @@ verified against HEAD.
     on a continuation line) parses cleanly. Continuation INSIDE
     the type body (`T1\n    -> T2`) is not supported — extract a
     `type alias` for the whole arrow type.
-
 ### Closed in v0.15 (kept here for grep)
 
+- ~~Same-named local lambdas across modules pollute the typed
+  lowerer's region snapshot~~ — closed in v0.15.30 via the
+  scoped `LowerCtx` cascade. Per-module env ledger
+  (`Solve.SolvedTypes._stPerModuleEnv`) consulted via
+  `lookupSolvedVarScoped` at each lookup site; sentinel
+  `GoDeclRaw` entries bracket each dep's `[GoDecl]` to switch
+  `globalCurrentDepModule` during render. Multi-modules can now
+  share `let encodeOne x = …` shapes without typed-codegen
+  cross-contamination.
 - ~~Anonymous records in function signatures~~ — closed in v0.13
   (`processReq : Int -> { name : String, age : Int } -> String`
   parses cleanly).

@@ -77,7 +77,8 @@ supported — use a `type alias` for any record you want in a signature.
    AskUserQuestion in Claude Code, structured prompts otherwise):
 
    - **Backend shape**: "Web app (Sky.Live)" / "Terminal UI (Sky.Tui)"
-     / "CLI (Sky.Cli)" / "HTTP API only".
+     / "Desktop app (Sky.Webview — macOS only in v0.1)" / "CLI (Sky.Cli)"
+     / "HTTP API only".
    - **Database**: "SQLite (local file)" / "PostgreSQL (deploy-ready)"
      / "None (pure compute)".
    - **Authentication**: "None" / "Std.Auth (built-in cookies + JWT)"
@@ -306,6 +307,50 @@ apiKey = System.getenv "OPENAI_API_KEY" |> Result.withDefault ""
 **10. Never write FFI code by hand.** `sky add <package>` generates all
 bindings with panic recovery and typed wrappers. Hand-written FFI loses the
 safety net.
+
+**11. Go-keyword names are safe — the compiler rewrites them.** A Sky
+identifier in the reserved set (every Go keyword + predeclared type/func/
+constant) lowers to `<name>_` in emitted Go (`init` → `init_`,
+`string` → `string_`, `error` → `error_`, `for` → `for_`). The TEA idiom
+`init = init`, `view = view`, `update = update` is **safe** — the LHS is a
+record-field key (Go-side `Init` / `View` / `Update`, capitalised) and the
+RHS is an identifier reference (Go-side `init_` / `view_` / `update_`).
+Different namespaces, no collision with Go's special `func init()`.
+
+Tier 1 (special semantics): `init`.
+Tier 2 (predeclared funcs): `new`, `make`, `len`, `cap`, `copy`, `append`,
+`delete`, `panic`, `recover`, `print`, `println`, `clear`, `min`, `max`,
+`complex`, `imag`, `real`, `close`.
+Tier 3 (reserved keywords): all 23 Go keywords (`for`, `case`, `type`, `func`,
+`var`, `const`, `interface`, `struct`, `map`, `chan`, `go`, `defer`, `goto`,
+`fallthrough`, `range`, `return`, `switch`, `default`, `break`, `continue`,
+`import`, `package`, `select`).
+Tier 4 (predeclared types + constants): `bool`, `byte`, `rune`, `string`,
+`error`, `any`, `comparable`, every `int*`/`uint*`/`float*`/`complex*` size,
+`true`, `false`, `iota`, `nil`.
+
+Special-cased outside this set: `main` (program entry → Go's `func main()`).
+The Sky parser rejects `if`/`else`/`nil` as identifiers before they reach
+codegen.
+
+**12. Every long-running command MUST be timeout-bounded.** Tests,
+builds, sweeps, even smoke runs of `sky-out/app`. A hung subprocess
+without a timeout will silently steal hours. `cabal test` runs under
+`timeout 3600` (60 min ceiling); per-spec subprocess calls wrap children
+in `timeout 60`; `scripts/example-sweep.sh` already enforces
+`run_with_timeout 10` per example; never `wait $PID` unbounded — kill
+after a finite ceiling. If a test legitimately needs more than 60 min,
+that's a flaky test — bisect, don't widen.
+
+**13. No "pre-existing" dismissal — every bug enters the pipeline.**
+When you spot a test failure / sweep failure / runtime panic / log
+error during dev or CI — **whether your work introduced it or it's
+older than your branch** — file a task immediately. The phrases
+"pre-existing flake", "defer to v0.X", "known issue, ignore" are
+forbidden as shipping excuses. Workarounds in CLAUDE.md are a
+temporary bridge while the actual fix is in flight, not a permanent
+resolution. Only an explicit user override allows shipping with a
+known unfixed issue.
 
 ---
 
@@ -1838,16 +1883,50 @@ view model =
 ### Sky.Core.Math (pure)
 
 ```elm
-Math.sqrt 16.0        -- 4.0
-Math.pow 2.0 10.0     -- 1024.0
-Math.abs -5            -- 5
-Math.floor 3.7         -- 3
-Math.ceil 3.2          -- 4
-Math.round 3.5         -- 4
-Math.pi                -- 3.14159...
-Math.sin, Math.cos, Math.tan, Math.atan2
-Math.min 3 7           -- 3
-Math.max 3 7           -- 7
+-- Integer helpers
+Math.abs -5             -- 5
+Math.min 3 7            -- 3
+Math.max 3 7            -- 7
+
+-- Roots / powers
+Math.sqrt 16.0          -- 4.0
+Math.pow 2.0 10.0       -- 1024.0
+Math.cbrt 27.0          -- 3.0
+Math.hypot 3.0 4.0      -- 5.0  (sqrt(x² + y²))
+
+-- Exp / log family
+Math.exp 1.0            -- 2.71828...
+Math.exp2 10.0          -- 1024.0
+Math.log Math.e         -- 1.0
+Math.log2 1024.0        -- 10.0
+Math.log10 1000.0       -- 3.0
+
+-- Rounding (Float → Int)
+Math.floor 3.7          -- 3
+Math.ceil 3.2           -- 4
+Math.round 3.5          -- 4
+Math.trunc -3.7         -- -3  (toward zero)
+
+-- Trigonometry (radians)
+Math.sin, Math.cos, Math.tan
+Math.asin, Math.acos, Math.atan
+Math.atan2 1.0 1.0      -- π/4  (y first, x second)
+
+-- Hyperbolic
+Math.sinh, Math.cosh, Math.tanh
+Math.asinh, Math.acosh, Math.atanh
+
+-- Modulo
+Math.mod 7.5 2.0        -- 1.5  (float modulo, sign of dividend)
+Math.remainder 7.5 2.0  -- -0.5 (IEEE 754)
+
+-- Constants
+Math.pi                 -- 3.14159...
+Math.e                  -- 2.71828...
+Math.phi                -- 1.61803... (golden ratio)
+Math.sqrt2              -- 1.41421...
+Math.inf                -- +Inf
+Math.nan                -- NaN  (NaN ≠ NaN by IEEE 754)
 ```
 
 ### Sky.Core.Time (mixed pure + Task)
@@ -1900,6 +1979,52 @@ write-up in `docs/skylive/http-streaming.md`.
 Session disconnect (TTL eviction OR Delete) closes every owned
 stream automatically; log: `[sky.stream] cleaned N orphaned
 streams on session close`.
+
+### Sky.Http.Server.Stream (Task) — incremental HTTP responses
+
+Mirror image of `Sky.Core.Http.Stream`: a `Sky.Http.Server`
+handler emits chunks back to its HTTP client one piece at a time
+instead of buffering the whole body.  Use for SSE, LLM token
+forwarding, chunked downloads.
+
+```elm
+import Sky.Http.Server.Stream as Stream exposing (StreamWriter)
+
+Stream.stream            -- String -> (StreamWriter -> Task Error ()) -> Task Error Response
+Stream.emit              -- String -> StreamWriter -> Task Error ()       (writes + flushes)
+Stream.finish            -- StreamWriter -> Task Error ()                 (idempotent; implicit at handler return)
+Stream.withContentType   -- String -> StreamWriter -> Task Error ()       (best-effort; pre-emit only)
+```
+
+Canonical SSE handler:
+
+```elm
+handleEvents : Request -> Task Error Response
+handleEvents _ =
+    Stream.stream "text/event-stream" (\writer ->
+        Stream.emit "event: hello\ndata: 1\n\n" writer
+            |> Task.andThen (\_ -> Time.sleep 100)
+            |> Task.andThen (\_ -> Stream.emit "event: tick\ndata: 2\n\n" writer)
+            |> Task.andThen (\_ -> Stream.finish writer))
+```
+
+Dispatcher writes headers + flushes BEFORE the handler runs (SSE
+requires `Content-Type: text/event-stream` visible before the
+first event).  Underlying `http.ResponseWriter` must implement
+`http.Flusher` — middleware wrapping that strips it gets a clean
+`503 Service Unavailable` instead of silent buffering.  CSRF
+auto-injection is skipped (streaming bodies aren't form-bearing
+HTML); security headers (X-Content-Type-Options, X-Frame-Options,
+Referrer-Policy) apply identically to buffered responses.
+
+`emit` after `finish` is a no-op.  Client disconnect mid-stream
+returns `Err (ErrNetwork ...)` from the next `emit`.  Single-
+goroutine emit ordering per request (Go's `http.Handler`
+convention) — linearise concurrent emits via `Task.andThen`.
+
+See `examples/30-sse-server-demo` for a runnable demo +
+`docs/skylive/http-streaming.md` §"Server-side" for the design
+write-up.
 
 ### Sky.Core.Encoding (pure)
 
@@ -2457,6 +2582,39 @@ Limits of portability:
 - Where backends share: layout (row/column/grid/wrappedRow), text
   styling, borders, padding/spacing, inputs (text/checkbox/radio/
   slider), `onClick`/`onSubmit`/`onInput` events, focus management.
+
+## Sky.Webview — Native desktop TEA (v0.1 MVP, macOS only)
+
+Cross-backend mirror of `Live.app` + `Tui.app`. Opens a native
+system webview window (WKWebView on macOS) and reuses the
+Sky.Live HTML renderer + VNode diff so the same `view` function
+paints unchanged. Bridge is in-process `Bind` + `Eval` — no HTTP,
+no SSE, no session store.
+
+```elm
+import Std.Webview as Webview
+
+main =
+    Webview.app
+        { init = init
+        , update = update
+        , view = view                      -- view : Model -> Element msg
+        , subscriptions = subscriptions
+        , window = { title = "My App", size = ( 800, 600 ) }
+        }
+        |> Task.run
+```
+
+v0.1 is macOS only. Windows + Linux compile but smoke-validation
+lands in v0.2 (along with tray icons, alwaysOnTop, transparent,
+native file dialogs). Pick Sky.Webview for single-user desktop
+apps that need a packaged binary; Sky.Live for anything
+multi-tenant or with a public URL; Sky.Tui for headless / SSH /
+CI terminals.
+
+`WindowCfg = { title : String, size : (Int, Int) }` is a closed
+record in v0.1 — missing fields surface as clean Sky TYPE ERROR
+diagnostics. v0.2 will reopen the record for optional fields.
 
 ## Application Patterns — When to Use What
 
@@ -3935,8 +4093,9 @@ records the per-version closures if you want history.
 - **Zero-arg `Css.*` constants DO need `()`** — `Css.zero ()`, `Css.auto ()`, `Css.none ()`, `Css.transparent ()`, `Css.inherit ()`, `Css.initial ()`, `Css.borderBox ()`, `Css.systemFont ()`, `Css.monoFont ()`, `Css.userSelectNone ()`. Bare form is now a clean type error (no longer the silent function-pointer leak it used to be), but the `()` is still required. Pattern: any `Css.X` that names a literal CSS keyword takes `()`; value constructors like `px`, `rem`, `em`, `hex`, `rgba` take their arguments directly.
 - **Non-tail-recursive list operations are O(N) on Go stack** — `map`, `filter`, `foldr`, `length`, `concat`, `concatMap`, `take`, `append`, `range`, `zip`, `indexedMap`, `Maybe.combine`, `Result.combine` recurse. Tail-recursive operations (`foldl`, `find`, `any`, `all`, `member`, `drop`) are auto-TCO'd to constant stack. For very large lists (200k+ elements) prefer the tail-recursive accumulator pattern.
 - **Multi-line function signatures with continuation INSIDE the type body** — `name\n    : T` (the `:` on a continuation line) parses cleanly. Continuation INSIDE the type body (`T1\n    -> T2`) is not supported — extract a `type alias` for the whole arrow type.
-
 ### Closed in v0.15 (for grep)
+
+- ~~Same-named local lambdas across modules → `reflect: Call using X as type Y` panic~~ — closed in v0.15.30 via the scoped LowerCtx cascade (per-module env ledger in `Solve.SolvedTypes`, consulted at every reader site).
 
 - ~~Let bindings with parameters after multi-line case~~ — `let mark j = …` after a `case … of` arm now parses cleanly.
 - ~~Zero-arity functions reading env vars memoised at init()~~ — `apiKey = System.getenvOr "K" "def"` now reads the runtime environment.

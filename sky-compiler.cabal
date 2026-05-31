@@ -38,6 +38,7 @@ extra-source-files:
     sky-stdlib/Sky/Core/Json/Decode/*.sky
     sky-stdlib/Sky/*.sky
     sky-stdlib/Sky/Http/*.sky
+    sky-stdlib/Sky/Http/Server/*.sky
     sky-stdlib/Std/*.sky
     sky-stdlib/Std/Ui/*.sky
     sky-stdlib/Std/Html/*.sky
@@ -289,10 +290,15 @@ test-suite sky-tests
       Sky.Build.ExposingTypeCtorsSpec
       Sky.Build.LetForwardRefSpec
       Sky.Build.EntryLocalShadowsDepSpec
+      Sky.Build.RtFieldAdtBug342Spec
       Sky.Build.CaseSubjectNameShadowSpec
       Sky.Build.FfiKernelAliasSpec
       Sky.Build.PubSubPublishTaskSpec
       Sky.Build.PubSubPublishNoEchoSpec
+      Sky.Build.ServerStreamSpec
+      Sky.Build.WebviewAppSpec
+      Sky.Build.WebviewLoopbackAssetsSpec
+      Sky.Build.JsonPipelinePanic372Spec
       Sky.Parse.MultiLineCaseSubjectSpec
       Sky.Parse.MultiLineCaseKeywordSpec
       Sky.Parse.MultiLineSignatureSpec
@@ -323,6 +329,7 @@ test-suite sky-tests
       Sky.Build.SnapshotCallerCtxSpec
       Sky.Build.SkyshopCompilesSpec
       Sky.Build.AnonLambdaSpec
+      Sky.Build.CrossModuleLambdaCollisionC_Spec
       Sky.Build.AnonRecordSpec
       Sky.Build.AuthUntypedBoundarySpec
       Sky.Build.Issue52Spec
