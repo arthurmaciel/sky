@@ -891,6 +891,235 @@ html : any -> Element msg
 html node =
     Raw node
 
+-- ─── Media queries + responsive breakpoints (issue #376) ─────────
+--
+-- Express viewport-conditional styling in pure typed Sky. Layout
+-- reacts via the browser's CSS engine — instant, no JS round-trip,
+-- no model field, no re-render.
+--
+-- `Ui.breakpoint`: typed-constant ADT covering 95 % of cases (mobile
+-- / tablet / desktop / dark-mode / reduced-motion / etc.).
+-- `Ui.mediaQuery`: low-level escape hatch — any raw CSS media-query
+-- string (e.g. "(orientation: portrait)", "(min-resolution: 2dppx)").
+--
+--     -- Stack vertically on mobile, side-by-side on desktop.
+--     Ui.row
+--         [ Ui.spacing 16 ]
+--         [ Ui.breakpoint Ui.mobile
+--             [ Ui.htmlAttribute "style" "flex-direction: column;" ]
+--             sidebar
+--         , main
+--         ]
+--
+-- See docs/skyui/overview.md §"Media queries + breakpoints" for the
+-- full reference + design notes. Composes via nesting:
+-- `breakpoint Mobile [a] (breakpoint DarkMode [b] child)` produces
+-- two scoped <style> blocks; CSS rules independently match.
+type Breakpoint
+    = SmAndUp
+    | MdAndUp
+    | LgAndUp
+    | XlAndUp
+    | Mobile
+    | Tablet
+    | Desktop
+    | DarkMode
+    | LightMode
+    | ReducedMotion
+    | TouchDevice
+    | Portrait
+    | Landscape
+    | Custom Int Int
+
+
+        -- `Custom minPx maxPx`. 0 = unset (no min / no max).
+        -- `Custom 600 0`   → `(min-width: 600px)`
+        -- `Custom 0 800`   → `(max-width: 800px)`
+        -- `Custom 600 800` → `(min-width: 600px) and (max-width: 800px)`
+
+
+-- Typed-constant shortcuts so user code can write `Ui.mobile` /
+-- `Ui.darkMode` without `Ui.Breakpoint.Mobile`. Bare-value pattern
+-- mirrors `Std.Ui.Responsive.mobile`.
+mobile : Breakpoint
+mobile =
+    Mobile
+
+
+tablet : Breakpoint
+tablet =
+    Tablet
+
+
+desktop : Breakpoint
+desktop =
+    Desktop
+
+
+smAndUp : Breakpoint
+smAndUp =
+    SmAndUp
+
+
+mdAndUp : Breakpoint
+mdAndUp =
+    MdAndUp
+
+
+lgAndUp : Breakpoint
+lgAndUp =
+    LgAndUp
+
+
+xlAndUp : Breakpoint
+xlAndUp =
+    XlAndUp
+
+
+darkMode : Breakpoint
+darkMode =
+    DarkMode
+
+
+lightMode : Breakpoint
+lightMode =
+    LightMode
+
+
+reducedMotion : Breakpoint
+reducedMotion =
+    ReducedMotion
+
+
+touchDevice : Breakpoint
+touchDevice =
+    TouchDevice
+
+
+portrait : Breakpoint
+portrait =
+    Portrait
+
+
+landscape : Breakpoint
+landscape =
+    Landscape
+
+
+-- Map a Breakpoint to its CSS media-query expression. Defaults
+-- follow Tailwind-style cuts (sm 640, md 768, lg 1024, xl 1280) so
+-- AI-generated Sky lines up with the most-common web mental model.
+breakpointToQuery : Breakpoint -> String
+breakpointToQuery bp =
+    case bp of
+
+        SmAndUp ->
+            "(min-width: 640px)"
+
+        MdAndUp ->
+            "(min-width: 768px)"
+
+        LgAndUp ->
+            "(min-width: 1024px)"
+
+        XlAndUp ->
+            "(min-width: 1280px)"
+
+        Mobile ->
+            "(max-width: 767px)"
+
+        Tablet ->
+            "(min-width: 768px) and (max-width: 1023px)"
+
+        Desktop ->
+            "(min-width: 1024px)"
+
+        DarkMode ->
+            "(prefers-color-scheme: dark)"
+
+        LightMode ->
+            "(prefers-color-scheme: light)"
+
+        ReducedMotion ->
+            "(prefers-reduced-motion: reduce)"
+
+        TouchDevice ->
+            "(hover: none) and (pointer: coarse)"
+
+        Portrait ->
+            "(orientation: portrait)"
+
+        Landscape ->
+            "(orientation: landscape)"
+
+        Custom minPx maxPx ->
+            customRangeQuery minPx maxPx
+
+
+-- 0 means "unset". Both 0 → fallback `all` matches everything (the
+-- attrs always apply); pick one to control properly.
+customRangeQuery : Int -> Int -> String
+customRangeQuery minPx maxPx =
+    if minPx > 0 && maxPx > 0 then
+        "(min-width: " ++ String.fromInt minPx ++ "px) and (max-width: "
+            ++ String.fromInt maxPx
+            ++ "px)"
+
+    else if minPx > 0 then
+        "(min-width: " ++ String.fromInt minPx ++ "px)"
+
+    else if maxPx > 0 then
+        "(max-width: " ++ String.fromInt maxPx ++ "px)"
+
+    else
+            -- Generic fallback for arbitrary attribute names (sky-key,
+            -- aria-*, custom data-*, etc.).
+        "all"
+
+
+-- `breakpoint bp attrs child` — wrap `child` so the attrs apply only
+-- when the breakpoint matches. Renders to a `<div>` wrapper carrying
+-- `child` plus a sky-id-scoped `<style>` block injected by the
+-- runtime. Sky.Tui silently ignores the `<style>` (terminal renders
+-- the base layer only); Sky.Webview honours media queries identically
+-- to Sky.Live because they share the runtime VNode pipeline.
+breakpoint : Breakpoint -> List (Attribute msg) -> Element msg -> Element msg
+breakpoint bp attrs child =
+    mediaQuery (breakpointToQuery bp) attrs child
+
+
+-- Escape hatch — any raw CSS media-query string. The string is
+-- emitted verbatim inside `@media <q> { ... }`; the caller owns
+-- correctness. Examples: "(orientation: portrait)",
+-- "(min-resolution: 2dppx)", "(min-width: 600px) and (hover: hover)".
+mediaQuery : String -> List (Attribute msg) -> Element msg -> Element msg
+mediaQuery query attrs child =
+    let
+        rulesCss = mediaQueryRulesCss attrs
+        -- Marker attrs carried on the wrapper. The runtime
+        -- (`injectMediaQueryStyles` in runtime-go/rt/live.go) walks
+        -- the tree after assignSkyIDs, finds these data attrs,
+        -- generates a `<style>` block scoped by `[sky-id="<sid>"]`,
+        -- prepends it as a child, and strips the markers from the
+        -- emitted HTML attribute set so the wire stays clean.
+        markerQuery = AttrAttribute "data-sky-mq-q" query
+        markerRules = AttrAttribute "data-sky-mq-rules" rulesCss
+    in
+        Node NoDescription [ markerQuery, markerRules ] [child]
+
+
+-- Lower a media-query attribute list into a CSS-rules string with
+-- the same per-attribute emission as the base inline-style path —
+-- so `Background.color`, `Border.width`, `Font.size`, `padding`,
+-- `spacing`, `width`, `height`, `htmlAttribute "style" "..."` etc.
+-- all work identically inside `Ui.breakpoint` / `Ui.mediaQuery`.
+-- Parent + my context default to AsColumn (the safe layout
+-- assumption for an overridable container); the user can still
+-- override via explicit CSS in a `style` attr if needed.
+mediaQueryRulesCss : List (Attribute msg) -> String
+mediaQueryRulesCss attrs =
+    List.foldl (collectStyle AsColumn AsColumn) "" attrs
+
 
 -- Extract a plain string from a `Text s` element, or "" for any
 -- other shape. Used by Std.Ui.Input.placeholder rendering to pull
@@ -1128,31 +1357,253 @@ tagForDescription defaultTag d =
 -- Render a Node-shaped element under a given parent context with an
 -- explicit HTML tag. Used both for the default <div> path and for
 -- TaggedNode dispatch.
+--
+-- Flex-chain propagation (issue #63). When this node renders as a
+-- flex container whose main axis matches a child's `Ui.{width,
+-- height} Ui.fill`, the container's own box must grow in its
+-- parent — otherwise the child's `flex-grow: 1` has no resolvable
+-- parent dimension and collapses to content. Concrete example
+-- before the fix:
+--
+--   Ui.layout [] (Ui.el [ Ui.height Ui.fill, Ui.padding 16 ]
+--       (Input.multiline [ Ui.height Ui.fill ] cfg))
+--
+-- `Input.multiline` wraps the <textarea> in a `wrapWithLabel`-
+-- introduced `Ui.el` whose own attribute list is empty. Without
+-- propagation, that wrapper has no height set, so the textarea's
+-- `flex-grow: 1` resolves against content (~50 px line height)
+-- instead of the outer 100 vh viewport.
+--
+-- `propagateFillToContainer` looks at the immediate children for
+-- a Fill attribute on the container's main axis. If any child is
+-- a main-axis filler AND the container does not already carry an
+-- explicit size on that axis, the synthetic `AttrHeight (Fill 1)`
+-- (column-direction) / `AttrWidth (Fill 1)` (row-direction) is
+-- injected. The synthetic attribute flows through the same
+-- `widthCssIn` / `heightCssIn` pipeline as user-written ones, so
+-- the propagated CSS (`flex-grow: 1; min-{height,width}: 0` in a
+-- flex parent / `align-self: stretch + 100 %` in the cross-axis
+-- case) matches whatever the grandparent expects.
 renderNodeAs : String -> LayoutContext -> List (Attribute msg) -> List (Attribute msg) -> List (Element msg) -> any
 renderNodeAs tag ctx extraAttrs attrs children =
     let
         allAttrs = extraAttrs ++ attrs
         renderCtx = layoutContextFor allAttrs
-        nearbyChildren = collectNearby allAttrs
+        propagatedAttrs =
+            propagateFillToContainer renderCtx allAttrs children
+        nearbyChildren = collectNearby propagatedAttrs
         positionPrefix =
             if List.isEmpty nearbyChildren then
                 ""
 
             else
-            -- Generic fallback for arbitrary attribute names (sky-key,
-            -- aria-*, custom data-*, etc.).
                 "position: relative; "
         isReplaced = tag == "img" || tag == "input"
         styleStr =
             positionPrefix
-                ++ buildStyleString (not isReplaced) ctx renderCtx allAttrs
-        htmlAttrs = collectHtmlAttrs allAttrs
+                ++ buildStyleString
+                       (not isReplaced)
+                       ctx
+                       renderCtx
+                       propagatedAttrs
+        htmlAttrs = collectHtmlAttrs propagatedAttrs
         renderedMain = List.map (renderElement renderCtx []) children
         renderedNearby = List.map renderNearby nearbyChildren
         renderedChildren = renderedMain ++ renderedNearby
         attrList = Attr.style styleStr :: htmlAttrs
     in
         dispatchTag tag attrList renderedChildren
+
+
+-- ─── Flex-chain propagation (issue #63) ─────────────────────────
+--
+-- Why bottom-up structural inspection? Sky.Ui renders a tree of
+-- pure values — we have full attribute access from the parent.
+-- The alternative (post-render DOM patching, CSS variable hand-
+-- off) requires runtime JS and a second pass; this stays
+-- compile-time / render-time and idempotent.
+--
+-- The propagation is *exactly* one level: each container looks at
+-- its own immediate children and decides whether to set its own
+-- box size. When the wrapping is itself wrapped by another
+-- container that needs to grow, *that* container repeats the same
+-- check at its level. Recursion isn't needed because the bottom
+-- container ultimately propagates a real `AttrHeight (Fill 1)` /
+-- `AttrWidth (Fill 1)` on itself — which then satisfies its own
+-- parent's check on the level above. (E.g.: textarea has fill →
+-- wrapWithLabel Ui.el gets injected fill → user's outer Ui.el
+-- with explicit fill renders normally → top of chain.)
+--
+-- Skips: AsParagraph (paragraphs are `display: block`, not flex;
+-- their height comes from text content + line-box rules, not from
+-- a child's flex-grow). The replaced tags (img/input) suppress
+-- the display attribute via `emitDisplay = False` upstream; they
+-- are leaf elements with no Std.Ui children anyway, so the
+-- "any child has fill" check is always False.
+propagateFillToContainer : LayoutContext -> List (Attribute msg) -> List (Element msg) -> List (Attribute msg)
+propagateFillToContainer renderCtx attrs children =
+    case renderCtx of
+
+        AsParagraph ->
+            attrs
+
+        AsRow ->
+            if anyChildMainAxisFill AsRow children && not (hasExplicitWidth attrs) then
+                AttrWidth (Fill 1) :: attrs
+
+            else
+                attrs
+
+        AsColumn ->
+            if anyChildMainAxisFill AsColumn children
+                && not (hasExplicitHeight attrs) then
+                AttrHeight (Fill 1) :: attrs
+
+            else
+                attrs
+
+        AsEl ->
+            if anyChildMainAxisFill AsEl children && not (hasExplicitHeight attrs) then
+                AttrHeight (Fill 1) :: attrs
+
+            else
+                attrs
+
+        AsTextColumn ->
+            if anyChildMainAxisFill AsTextColumn children
+                && not (hasExplicitHeight attrs) then
+                AttrHeight (Fill 1) :: attrs
+
+            else
+                attrs
+
+
+-- True when the container's flex-direction main axis is the
+-- direction the child is asking to grow along. Rows main-axis =
+-- width; column-shaped containers (AsColumn / AsEl /
+-- AsTextColumn) main-axis = height.
+anyChildMainAxisFill : LayoutContext -> List (Element msg) -> Bool
+anyChildMainAxisFill renderCtx kids =
+    List.any (elementHasMainAxisFill renderCtx) kids
+
+
+elementHasMainAxisFill : LayoutContext -> Element msg -> Bool
+elementHasMainAxisFill renderCtx elem =
+    case elem of
+
+        Empty ->
+            False
+
+        Text _ ->
+            False
+
+        Node _ attrs _ ->
+            attrsHaveMainAxisFill renderCtx attrs
+
+        TaggedNode _ _ attrs _ ->
+            attrsHaveMainAxisFill renderCtx attrs
+
+        Raw _ ->
+            False
+
+
+attrsHaveMainAxisFill : LayoutContext -> List (Attribute msg) -> Bool
+attrsHaveMainAxisFill renderCtx attrs =
+    case renderCtx of
+
+        AsRow ->
+            List.any isWidthFillAttr attrs
+
+        AsColumn ->
+            List.any isHeightFillAttr attrs
+
+        AsEl ->
+            List.any isHeightFillAttr attrs
+
+        AsTextColumn ->
+            List.any isHeightFillAttr attrs
+
+        AsParagraph ->
+            False
+
+
+-- `Fill 0` is treated as "no fill" intentionally (matches the
+-- `widthFillFor` / `heightFillFor` CSS: a zero portion contributes
+-- nothing to the flex split). `Min`/`Max` wrappers around a Fill
+-- still count — the user wrote `minimum N fill` because they
+-- want fill, just with a floor.
+isHeightFillAttr : Attribute msg -> Bool
+isHeightFillAttr a =
+    case a of
+
+        AttrHeight lng ->
+            isFillLength lng
+
+        _ ->
+            False
+
+
+isWidthFillAttr : Attribute msg -> Bool
+isWidthFillAttr a =
+    case a of
+
+        AttrWidth lng ->
+            isFillLength lng
+
+        _ ->
+            False
+
+
+isFillLength : Length -> Bool
+isFillLength lng =
+    case lng of
+
+        Fill n ->
+            n > 0
+
+        Min _ inner ->
+            isFillLength inner
+
+        Max _ inner ->
+            isFillLength inner
+
+        _ ->
+            False
+
+
+-- Explicit-size guards. The user-written attribute wins — if they
+-- chose Px / Content / Vh / Vw on the container, that's their
+-- intent. Only propagate when the container left the axis open.
+hasExplicitWidth : List (Attribute msg) -> Bool
+hasExplicitWidth attrs =
+    List.any isWidthAttr attrs
+
+
+hasExplicitHeight : List (Attribute msg) -> Bool
+hasExplicitHeight attrs =
+    List.any isHeightAttr attrs
+
+
+isWidthAttr : Attribute msg -> Bool
+isWidthAttr a =
+    case a of
+
+        AttrWidth _ ->
+            True
+
+        _ ->
+            False
+
+
+isHeightAttr : Attribute msg -> Bool
+isHeightAttr a =
+    case a of
+
+        AttrHeight _ ->
+            True
+
+        _ ->
+            False
 
 
 -- Pull each (Location, Element) pair out of an AttrNearby attribute
