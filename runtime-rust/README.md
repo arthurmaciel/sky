@@ -103,20 +103,9 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### Core Sky examples (compiled with `--target rust`)
+### `examples/rust/` — 17/17 build + run from a wiped slate
 
-| Example | Status | Notes |
-|---|---|---|
-| 01-hello-world | ✅ builds + runs | |
-| 04-local-pkg | ✅ builds + runs | multi-module |
-| 07-todo-cli | ✅ builds + runs | SQLite CRUD via sqlx |
-| 14-task-demo | ✅ builds + runs | Task combinators |
-
-### Rust FFI examples (`examples/rust/`)
-
-All 15 build and run from a clean slate (`rm -rf sky-out .skycache && sky add … && sky run`).
-
-| Example | Crate | Status | What it shows |
+| Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
 | 01-rand | `rand` | ✅ builds + runs | `Rand.random_bool 0.5` → Heads/Tails |
 | 02-num-cpus | `num_cpus` | ✅ builds + runs | `NumCpus.get ()` → CPU count |
@@ -134,6 +123,15 @@ All 15 build and run from a clean slate (`rm -rf sky-out .skycache && sky add �
 | 14-crc32fast | `crc32fast` | ✅ builds + runs | `hash : List Int -> …` (`&[u8]` slice param) → CRC32 |
 | 15-uuid-bytes | `uuid` | ✅ builds + runs | `from_bytes` `[u8;16]` param + `as_bytes` `&[u8;16]` result, via `List Int` |
 | 16-hex | `hex` | ✅ builds + runs | `encode`/`decode` — generic `<T: AsRef<[u8]>>` monomorphised to `List Int` (Alt-1 proof) |
+| 17-db-todo-cli | `Std.Db` | ✅ builds + runs | Full CRUD via sqlx (insert/get/update/delete/find/transaction) — reuses unmodified `examples/07-todo-cli` Sky source. Builds clean on sqlite **+ mysql + postgres** (cross-backend per `sky.toml`). |
+
+### `examples/00-standard-libs` on `target=rust`
+
+- `target=go`: 120 / 120 assertions pass (the contractual headline gate).
+- `target=rust`: **4 cargo errors** remaining (down from 232 at sub-A start — 98% reduction). The
+  remaining four are codegen-polymorphism edge cases (empty-literal defaulting in test-only
+  positions, the `mapError`/`Maybe.map` inference cascade). See
+  `docs/runtime-rust/sub-A-stdlib-parity-result.md` for the full per-sub-plan timeline.
 
 These span the common shapes auto-FFI must handle: free functions, static
 methods (`Type::fn`), instance methods (`arg0.method`), `Display`/`FromStr`
@@ -148,22 +146,45 @@ Sky-coercible (Alt-1 v2), and primitive ⇄ opaque round-tripping.
 
 ```
 runtime-rust/src/sky_runtime/
-├── config.rs      GENERATED at build time — DbPool, DbRow, SKY_DB_URL
-├── core.rs        SkyResult<E,A>, SkyMaybe<T>, SkyTask<E,A>, ok_res, str_err,
-│                  list/string/float helpers, result_with_default, result_traverse,
-│                  byte FFI coercion: to_u8_vec / from_u8_slice / to_u8_array
-├── task.rs        task_succeed, task_map, task_and_then, task_on_error,
-│                  task_fail, task_perform, task_sequence, task_run, task_parallel
-├── log.rs         log_info, log_debug, log_warn, log_error, *_with variants
-├── system.rs      system_args, system_exit, system_setenv, system_unsetenv
-├── time.rs        time_now, time_sleep, time_unix_millis, time_time_string
-├── random.rs      random_int, random_float (LCG, seeded from system entropy)
-├── file.rs        file_read_file, file_write_file, file_exists, file_delete
-├── crypto.rs      crypto_random_bytes, crypto_random_token, crypto_sha256 (sha2 crate)
-├── json.rs        JSON encode/decode, Decoder<E,T>, curry1–5, pipeline combinators
-├── db.rs          db_connect, db_exec, db_query, db_get_field (sqlx-backed)
-└── mod.rs         re-exports config + core; other modules via sky_runtime::<mod>::<fn>
+├── config.rs         GENERATED at build time per sky.toml driver — DbPool/DbRow/SKY_DB_URL +
+│                     driver-aware helpers (db_last_insert_id, db_format_sql) for cross-backend Db
+├── core.rs           SkyResult<E,A>, SkyMaybe<T>, SkyTask<E,A>, ok_res, str_err,
+│                     list/string/float helpers, result_with_default, result_traverse,
+│                     byte FFI coercion: to_u8_vec / from_u8_slice / to_u8_array
+├── task.rs           task_succeed, task_map, task_and_then, task_on_error,
+│                     task_fail, task_perform, task_sequence, task_run, task_parallel
+├── log.rs            log_info, log_debug, log_warn, log_error, *_with variants
+├── system.rs         system_args, system_exit, system_setenv, system_unsetenv
+├── time.rs           time_now/sleep/unix_millis/time_string + Std.Time advanced
+│                     (IANA zones, calendar math, diff*, fromParts, zoneOffset/Name)
+├── random.rs         random_int, random_float (LCG, seeded from system entropy)
+├── file.rs           file_read_file, file_write_file, file_exists, file_delete
+├── crypto.rs         crypto_random_bytes/_token + sha2 / sha1 / md5 / hmac / RSA / constantTimeEqual
+├── jwt.rs            HS256 / RS256 encode + decode (jsonwebtoken crate)
+├── json.rs           JSON encode/decode, Decoder<E,T>, curry1–5, pipeline combinators
+├── encoding.rs       base64, url-percent, hex (encoding_hex_encode/_decode — prefixed to
+│                     avoid collision with user-FFI hex crate bindings)
+├── regex_kernel.rs   match, find, findAll, replace, split (regex crate)
+├── decimal.rs        Std.Decimal — pub struct Decimal(rust_decimal::Decimal) newtype +
+│                     full arithmetic, comparisons, percent, formatWith
+├── money.rs          Std.Money — 57-currency ISO table, format/symbol/rates/allocate
+├── math.rs           sqrt/pow/round/floor/ceil/abs + polymorphic min/max + pi/e
+├── dict.rs           HashMap<String,T>-backed empty/get/insert/keys/remove/member/fromList
+├── string.rs         replace/startsWith/endsWith/repeat (additions beyond core.rs)
+├── basics.rs         modBy (Elm positive-modulo) + errorToString (Debug-stringify)
+├── list.rs           filterMap (over SkyMaybe)
+├── db.rs             Std.Db — full CRUD over sqlx (insertRow/getById/updateById/deleteById/
+│                     findOneByField/findManyByField/findByConditions/unsafeFindWhere/
+│                     queryDecode/withTransaction/close + raw exec/query/migrate).
+│                     Cross-backend: sqlite / mysql / postgres via config.rs helpers.
+├── ffi_polyfills.rs  Ffi.callPure / callTask / toAny runtime polyfills (panic-with-message
+│                     for non-peephole-resolvable shapes; identity for toAny)
+└── mod.rs            re-exports config + core; other modules via sky_runtime::<mod>::<fn>
 ```
+
+The mod list in this file is the source of truth for standalone-crate testing. In a
+generated project, `Project.hs` writes a parallel `mod.rs` that mirrors this list
+(modulo the `cfg(feature)` gating).
 
 ---
 
@@ -594,46 +615,53 @@ sky install
 
 | Limitation | Description | Workaround |
 |---|---|---|
-| Partial application of kernels | `let f = Task.map myFn` emits an under-applied call | Wrap in explicit closure: `\t -> Task.map myFn t` |
-| JSON pipeline decoder | `Box<dyn FnOnce>` chain from `json_dec_p_required` + `json_dec_succeed` can't satisfy `Clone+Send` | Architecture-level fix needed |
-| Polymorphic ADT returns | Functions returning `Result`/`Maybe` with unresolved type vars may default to `()` | Annotate return type explicitly |
-| Flat main.rs | All Sky modules compile into a single `main.rs`; no `mod` declarations | Planned |
-| `sky install` git deps | git-source Rust deps may need manual `sky add` after `rm -rf .skycache` | Run `sky add <crate> --target rust` for each git dep |
-| `Db.migrateApply` | No transaction wrapping or rollback | Planned |
-| `rustdoc` requires nightly | Inspector runs `cargo +nightly rustdoc`; nightly toolchain must be installed | `rustup install nightly` |
-| Un-nameable bindings dropped | Functions taking/returning generics, NON-byte slices/arrays, borrows, std types, or unsafe fns are skipped (byte sequences are kept — see nameability filter) | Use a wrapper crate exposing owned/primitive signatures, or a crate whose API is self-typed |
+| Empty-literal type defaulting | `List.head []` / `Maybe.map _ Nothing` in test-only positions can't infer the element type. 2-3 such errors remain in `examples/00-standard-libs`. | Sky source can annotate the literal's type. Real-world Sky programs rarely hit this. |
+| `Result.mapError` inference cascade | After F1's polymorphic signature fix the closure infers; outer call-site inference can still ambiguate the SkyResult<E,T> ok-slot. | Wrap in a typed `let` to pin E1/E2 at the call site. |
+| `withTransaction` rollback isolation | `db_with_transaction` uses sqlx's pool API; BEGIN/COMMIT/ROLLBACK run on the pool but body queries may route to other pool connections. Real rollback isolation requires single-connection pools. | Configure `sqlx::Pool::max_connections(1)` in production code that needs guaranteed rollback. Documented inline in `db.rs`. |
+| `Db.insertRow` on postgres | Returns 0 (no auto last-insert-id in postgres). | Use `INSERT … RETURNING id` + `Db.queryDecode` to fetch the new id explicitly. Documented in generated `config.rs` for postgres. |
+| JSON pipeline decoder | `Box<dyn FnOnce>` chain in pipeline combinators may not satisfy `Clone+Send` in some shapes. | Use raw `JsonDec.decodeString` + `JsonDec.field` directly, not the pipeline `|=` style, when this surfaces. |
+| Flat main.rs | All Sky modules compile into a single `main.rs`; no `pub mod <X>;` declarations. | Planned cleanup; doesn't affect correctness. |
+| `sky install` git deps | git-source Rust deps may need manual `sky add` after `rm -rf .skycache`. | Run `sky add <crate> --target rust` for each git dep. |
+| `rustdoc` requires nightly | Inspector runs `cargo +nightly rustdoc`. | `rustup install nightly`. |
+| Un-nameable bindings dropped | Functions taking/returning generics, NON-byte slices/arrays, borrows, std types, or unsafe fns are skipped (byte sequences are kept). | Use a wrapper crate exposing owned/primitive signatures, or pick a crate whose API is self-typed. |
 
 ---
 
 ## Remaining work
 
 ### Short-term
-- **Non-byte slices/arrays** — `&[String]`, `[f64; 3]` still drop; add
-  per-element coercion (byte sequences already bind as `List Int`).
-- **Enum-argument constructors** — many crate fns take a crate enum (e.g.
-  `base32::encode(Alphabet, …)`); expose enum variants so Sky can pass them.
-- **`&mut [u8]` fill params** — in/out byte buffers (e.g. `fastrand::fill`)
-  are still dropped; add write-back coercion.
-- **JSON pipeline decoder** — restructure `Decoder<E, T>` to avoid `FnOnce` trait-bound
-  mismatch in pipeline combinators (`06-json` example).
-- **Separate module files** — emit `pub mod <name>;` declarations instead of flattening
-  all Sky modules into `main.rs`.
-- **`sky install` git deps** — ensure `regenMissingRustBindings` handles `RustGit` specs.
+- **Sub-A.13** — codegen-level type-default propagation for empty literals (`vec![]` /
+  `SkyMaybe::Nothing`) in unconstrained generic-argument positions. Closes the
+  last 4 errors on `examples/00-standard-libs`.
+- **Sub-C — Std.Auth** — `hashPassword`/`verifyPassword` (bcrypt), `signToken`/
+  `verifyToken` (JWT — jwt module already present), `register`/`login` (DB-backed
+  via the now-shipped Std.Db).
+- **`Db.withTransaction` single-connection variant** — runtime helper that takes a
+  reserved `PoolConnection` so rollback isolation is guaranteed without requiring
+  user-side pool configuration.
+- **`sky install` git deps** — `regenMissingRustBindings` should handle `RustGit` specs.
+- **Non-byte slices/arrays** in FFI — `&[String]`, `[f64; 3]` still drop; per-element
+  coercion would extend Alt-1 v2 to wider crate surface.
 
 ### Medium-term
-- **Stdlib completeness** — add `list_foldl`, `list_range`, `list_indexed_map`,
-  `list_concat_map`, `list_zip`, `list_any`, `list_all` to `sky_runtime/core.rs`
-  and wire `kernelToRust` arms in `Builder.hs`.
-- **Eliminate spurious `.clone()` on Copy types** — add `ecCopyVars` tracking for
-  `Int`, `Float`, `Bool`, `Char`.
-- **`Db.migrateApply`** — transaction wrapping and rollback.
-- **Expand proptest coverage** — currently 11 assertions; target: every runtime
-  combinator has at least one property test.
+- **Sub-D — Sky.Http.Server** on Rust runtime (axum/hyper).
+- **Sub-E — Sky.Live** session stores + SSE on Rust runtime (sub-D dependency).
+- **Sub-F — Sky.Tui** terminal backend on Rust runtime.
+- **Enum-argument constructors** for FFI — many crate fns take a crate enum
+  (e.g. `base32::encode(Alphabet, …)`); expose variants so Sky can pass them.
+- **`&mut [u8]` fill params** — in/out byte buffers (e.g. `fastrand::fill`)
+  are still dropped; add write-back coercion.
 
 ### Long-term
-- **Sky.Live / Sky.Tui** — port `runtime-go/rt/live.go` and `tui_*.go` to Rust.
-- **Std.Auth** — `hashPassword`, `signToken`, `verifyToken`, `register`, `login`.
-- **Std.Db complete CRUD** — `insertRow`, `getById`, `updateById`, `deleteById`,
-  `findOneByField`, `withTransaction`.
-- **WASM target** — cross-compile runtime and generated code to `wasm32-unknown-unknown`.
+- **WASM target** — cross-compile runtime and generated code to
+  `wasm32-unknown-unknown` (also needs sub-C onwards to be portable).
 - **`sky watch` for Rust** — rebuild on `runtime-rust/src/` changes.
+- **Separate module files** — emit `pub mod <name>;` declarations instead of
+  flattening all Sky modules into `main.rs`.
+
+### Done in this session (sub-A.11 → sub-B.1)
+- ✅ Headline-gate reduction 232 → 4 errors (-98% from baseline) across sub-A.9 through A.12.
+- ✅ Sub-B — full `Std.Db` runtime (12 kernels + `examples/rust/17-db-todo-cli`).
+- ✅ Sub-B.1 — Std.Db cross-backend (sqlite + mysql + postgres) via per-driver helpers
+  in generated `config.rs`. Driver-aware `db_last_insert_id` + `db_format_sql`
+  rewrite SQL placeholders for postgres.
