@@ -788,12 +788,23 @@ addHandler opts = do
             let target = case mTarget of
                     Just t  -> parseTarget t
                     Nothing -> Toml._target config
-            -- Handle Rust git deps separately (inspector can't resolve URLs)
+            -- Rust git deps: add to sky.toml then ask the inspector to resolve via
+            -- Cargo's git checkout cache (same code path as the build-time regen).
             case (target, pkgSpec) of
                 (TargetRust, GitDep url mr mb mt) -> do
-                    appendRustGitDep (basename url) url mr mb mt
-                    putStrLn "   Git dependency added. Run `sky build src/Main.sky --target rust` to generate bindings."
-                    return (Right ())
+                    let crateName = basename url
+                    appendRustGitDep crateName url mr mb mt
+                    putStrLn "   Resolving via Cargo (git fetch + rustdoc)..."
+                    r <- RustFfi.runRustInspectorGit crateName url mr mb mt features
+                    case r of
+                        Left err -> do
+                            putStrLn $ "   warning: " ++ err
+                            putStrLn "   `sky build src/Main.sky --target rust` will retry."
+                            return (Right ())
+                        Right info -> do
+                            names <- RustFfi.generateRustBindings info
+                            putStrLn $ "   " ++ crateName ++ ": " ++ show (length names) ++ " bindings"
+                            return (Right ())
                 _ -> do
                     let inspName = case target of
                             TargetGo   -> "sky-ffi-inspect"
@@ -964,8 +975,8 @@ chunkInto n xs
 
 
 -- | For each declared Rust dep missing its .skycache/ffi/rust/<slug>.kernel.json,
--- regenerate FFI bindings by running the inspector. Git deps (RustGitDep) are
--- skipped with a warning.
+-- regenerate FFI bindings by running the inspector. Git deps are resolved by
+-- passing the git URL/rev/branch/tag through to the inspector.
 regenMissingRustBindings :: [(String, RustDepSpec)] -> IO ()
 regenMissingRustBindings deps = do
     createDirectoryIfMissing True ".skycache/ffi/rust"
@@ -974,16 +985,19 @@ regenMissingRustBindings deps = do
         not <$> doesFileExist (".skycache/ffi/rust/" ++ slug ++ ".kernel.json")
         ) deps
     forM_ missing $ \(name, spec) -> case spec of
-        RustVersion ver feats -> do
+        RustVersion _ver feats -> do
             r <- RustFfi.runRustInspector name feats
-            case r of
-                Left err ->
-                    putStrLn $ "   " ++ name ++ ": " ++ err
-                Right info -> do
-                    names <- RustFfi.generateRustBindings info
-                    putStrLn $ "   " ++ name ++ ": " ++ show (length names) ++ " bindings"
-        RustGitDep{} ->
-            putStrLn $ "   " ++ name ++ ": git dep -- run `sky add` manually"
+            handleInspectorResult name r
+        RustGitDep url mr mb mt -> do
+            r <- RustFfi.runRustInspectorGit name url mr mb mt []
+            handleInspectorResult name r
+  where
+    handleInspectorResult name result = case result of
+        Left err ->
+            putStrLn $ "   " ++ name ++ ": " ++ err
+        Right info -> do
+            names <- RustFfi.generateRustBindings info
+            putStrLn $ "   " ++ name ++ ": " ++ show (length names) ++ " bindings"
 
 
 -- | Resolve the inspector concurrency cap. Honours
@@ -1164,18 +1178,20 @@ parsePkgSpec pkg mRev mBranch mTag
 -- "https://github.com/user/crate.git"     → "crate"
 basename :: String -> String
 basename url =
-    let cleaned = dropTrailing (== '.') ".git" url
-        afterColon = if "git@" `isPrefixOf` url
+    let afterColon = if "git@" `isPrefixOf` url
                      then reverse (takeWhile (/= ':') (reverse url))
                      else url
         segments = splitOn '/' afterColon
-    in last segments
+        lastSeg = if null segments then "" else last segments
+        -- Strip the trailing `.git` suffix on the LAST segment so callers get
+        -- a real crate name. Previously this strip was applied to the whole
+        -- URL but the segment split happened on the unstripped string, so the
+        -- final basename still carried `.git`.
+    in stripDotGit lastSeg
   where
-    dropTrailing _ _ [] = []
-    dropTrailing p suffix s
-        | suffix `isSuffixOf` s = take (length s - length suffix) s
-        | null s = s
-        | otherwise = s
+    stripDotGit s
+        | ".git" `isSuffixOf` s = take (length s - 4) s
+        | otherwise             = s
     splitOn _ [] = []
     splitOn c s = case break (== c) s of
         (part, _ : rest) -> part : splitOn c rest

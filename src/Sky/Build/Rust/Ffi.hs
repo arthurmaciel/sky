@@ -9,6 +9,7 @@
 module Sky.Build.Rust.Ffi
     ( generateRustBindings   -- :: PkgInfo -> IO [String]
     , runRustInspector       -- :: String -> [String] -> IO (Either String PkgInfo)
+    , runRustInspectorGit    -- :: String -> String -> Maybe String -> Maybe String -> Maybe String -> [String] -> IO (Either String PkgInfo)
     , runRustInspectorMulti  -- :: [String] -> [String] -> IO [Either String PkgInfo]
     , emitRustSkyi           -- :: PkgInfo -> String
     , rustModuleName         -- :: String -> String
@@ -38,19 +39,60 @@ import Sky.Build.FfiGen
 -- | Inspect a single Rust crate (rustdoc-JSON backend). Optional features are
 -- comma-joined and passed as `--features`.
 runRustInspector :: String -> [String] -> IO (Either String PkgInfo)
-runRustInspector pkgPath features = do
+runRustInspector pkgPath features = runRustInspectorWith pkgPath features Nothing
+
+
+-- | Inspect a crate sourced from a git URL. The inspector clones via Cargo's
+-- usual git resolution (`~/.cargo/git/checkouts/...`) and feeds the resolved
+-- path to rustdoc. `mRev` / `mBranch` / `mTag` pin the revision (mutually
+-- exclusive per `Cargo` semantics; the caller is expected to enforce that).
+runRustInspectorGit
+    :: String              -- crate name
+    -> String              -- git URL
+    -> Maybe String        -- rev
+    -> Maybe String        -- branch
+    -> Maybe String        -- tag
+    -> [String]            -- features
+    -> IO (Either String PkgInfo)
+runRustInspectorGit crateName url mRev mBranch mTag features =
+    runRustInspectorWith crateName features (Just (url, mRev, mBranch, mTag))
+
+
+-- | Shared back-end for the two front-doors above.
+runRustInspectorWith
+    :: String
+    -> [String]
+    -> Maybe (String, Maybe String, Maybe String, Maybe String)
+    -> IO (Either String PkgInfo)
+runRustInspectorWith pkgPath features mGit = do
     resolved <- resolveRustInspector
     case resolved of
         Left e    -> return (Left e)
         Right bin -> do
             let featuresArg = if null features then "" else " --features " ++ intercalate "," features
-                cmd' = bin ++ " " ++ pkgPath ++ featuresArg
+                gitArg = case mGit of
+                    Nothing -> ""
+                    Just (url, mr, mb, mt) ->
+                        " --git " ++ quoteShell url
+                            ++ maybe "" (\r -> " --rev "    ++ quoteShell r) mr
+                            ++ maybe "" (\b -> " --branch " ++ quoteShell b) mb
+                            ++ maybe "" (\t -> " --tag "    ++ quoteShell t) mt
+                cmd' = bin ++ " " ++ pkgPath ++ featuresArg ++ gitArg
             (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
             if null out
                 then return (Left $ "sky-ffi-inspect-rs: empty output; stderr: " ++ err)
                 else case A.eitherDecode (BL.fromStrict (TE.encodeUtf8 (T.pack out))) of
                     Left e  -> return (Left $ "sky-ffi-inspect-rs: json: " ++ e)
                     Right p -> return (Right p)
+
+
+-- Conservative shell-quote: wrap in single-quotes and escape embedded single
+-- quotes. Git URLs are unlikely to contain quotes but better safe than sorry.
+quoteShell :: String -> String
+quoteShell s = "'" ++ concatMap esc s ++ "'"
+  where
+    esc '\'' = "'\\''"
+    esc c    = [c]
 
 
 -- | Multi-crate mode: the Rust inspector resolves each crate independently, so

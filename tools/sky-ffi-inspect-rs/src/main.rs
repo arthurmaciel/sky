@@ -80,35 +80,55 @@ fn main() {
 
     let mut features: Vec<String> = Vec::new();
     let mut crate_args: Vec<String> = Vec::new();
+    // Sub-A.short: --git URL [--rev R | --branch B | --tag T] lets the inspector
+    // resolve a crate by git URL instead of crates.io. Single-crate only.
+    let mut git_url: Option<String> = None;
+    let mut git_rev: Option<String> = None;
+    let mut git_branch: Option<String> = None;
+    let mut git_tag: Option<String> = None;
 
     let mut i = 0;
     while i < raw_args.len() {
-        if raw_args[i] == "--features" {
-            i += 1;
-            if i < raw_args.len() {
-                for feat in raw_args[i].split(',') {
-                    let f = feat.trim().to_string();
-                    if !f.is_empty() {
-                        features.push(f);
+        match raw_args[i].as_str() {
+            "--features" => {
+                i += 1;
+                if i < raw_args.len() {
+                    for feat in raw_args[i].split(',') {
+                        let f = feat.trim().to_string();
+                        if !f.is_empty() {
+                            features.push(f);
+                        }
                     }
                 }
             }
-        } else {
-            crate_args.push(raw_args[i].clone());
+            "--git"    => { i += 1; if i < raw_args.len() { git_url    = Some(raw_args[i].clone()); } }
+            "--rev"    => { i += 1; if i < raw_args.len() { git_rev    = Some(raw_args[i].clone()); } }
+            "--branch" => { i += 1; if i < raw_args.len() { git_branch = Some(raw_args[i].clone()); } }
+            "--tag"    => { i += 1; if i < raw_args.len() { git_tag    = Some(raw_args[i].clone()); } }
+            _ => {
+                crate_args.push(raw_args[i].clone());
+            }
         }
         i += 1;
     }
 
     if crate_args.is_empty() {
-        eprintln!("Usage: sky-ffi-inspect-rs [--features f1,f2] <crate-name> [crate-name...]");
+        eprintln!("Usage: sky-ffi-inspect-rs [--features f1,f2] [--git URL [--rev R | --branch B | --tag T]] <crate-name> [crate-name...]");
         eprintln!();
         eprintln!("Requires nightly Rust: rustup toolchain install nightly");
         std::process::exit(1);
     }
 
+    let git = git_url.as_ref().map(|u| GitSource {
+        url:    u.clone(),
+        rev:    git_rev.clone(),
+        branch: git_branch.clone(),
+        tag:    git_tag.clone(),
+    });
+
     let results: Vec<PkgInfo> = crate_args
         .iter()
-        .map(|name| inspect_crate(name, &features))
+        .map(|name| inspect_crate(name, &features, git.as_ref()))
         .collect();
 
     let json = if crate_args.len() == 1 {
@@ -135,8 +155,16 @@ fn main() {
 
 // ── Top-level inspection ───────────────────────────────────────────────
 
-fn inspect_crate(crate_name: &str, features: &[String]) -> PkgInfo {
-    match run_rustdoc(crate_name, features) {
+/// Optional git source for a crate dep. None ⇒ resolve via crates.io.
+struct GitSource {
+    url: String,
+    rev: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
+}
+
+fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>) -> PkgInfo {
+    match run_rustdoc(crate_name, features, git) {
         Ok((json_content, version)) => match serde_json::from_str::<serde_json::Value>(&json_content) {
             Ok(doc) => parse_rustdoc(&doc, crate_name, &version),
             Err(e) => pkg_error(crate_name, &format!("rustdoc JSON parse error: {}", e)),
@@ -152,12 +180,12 @@ fn inspect_crate(crate_name: &str, features: &[String]) -> PkgInfo {
 /// Handles thin re-export facades (e.g. `clap` re-exports `clap_builder`):
 /// if the first rustdoc run produces 0 functions, we scan the JSON for glob
 /// `pub use other_crate::*` re-exports and re-run on the underlying crate.
-fn run_rustdoc(crate_name: &str, features: &[String]) -> Result<(String, String), String> {
+fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -> Result<(String, String), String> {
     let tmp = tempfile::tempdir().map_err(|e| format!("tempdir: {}", e))?;
     let dir = tmp.path();
 
     let safe_name = crate_name.replace('-', "_");
-    let dep_entry = build_dep_entry(crate_name, features);
+    let dep_entry = build_dep_entry(crate_name, features, git);
 
     let toml_content = format!(
         r#"[package]
@@ -349,19 +377,32 @@ fn fetch_dep(manifest_str: &str) -> Result<(), String> {
     }
 }
 
-fn build_dep_entry(crate_name: &str, features: &[String]) -> String {
-    if features.is_empty() {
-        format!("{} = \"*\"", crate_name)
+fn build_dep_entry(crate_name: &str, features: &[String], git: Option<&GitSource>) -> String {
+    // Common fields: features list (rendered as Cargo TOML array).
+    let feats_field = if features.is_empty() {
+        None
     } else {
         let feats = features
             .iter()
             .map(|f| format!("\"{}\"", f))
             .collect::<Vec<_>>()
             .join(", ");
-        format!(
-            "{} = {{ version = \"*\", features = [{}] }}",
-            crate_name, feats
-        )
+        Some(format!("features = [{}]", feats))
+    };
+
+    match git {
+        None => match feats_field {
+            None    => format!("{} = \"*\"", crate_name),
+            Some(f) => format!("{} = {{ version = \"*\", {} }}", crate_name, f),
+        },
+        Some(g) => {
+            let mut fields = vec![format!("git = \"{}\"", g.url)];
+            if let Some(r) = &g.rev    { fields.push(format!("rev = \"{}\"", r)); }
+            if let Some(b) = &g.branch { fields.push(format!("branch = \"{}\"", b)); }
+            if let Some(t) = &g.tag    { fields.push(format!("tag = \"{}\"", t)); }
+            if let Some(f) = feats_field { fields.push(f); }
+            format!("{} = {{ {} }}", crate_name, fields.join(", "))
+        }
     }
 }
 
