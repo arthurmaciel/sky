@@ -492,3 +492,44 @@ upstream. Adding a new Auth surface unilaterally would diverge from upstream
 and violate the cross-backend rule. Defer until upstream lands the surface or
 we land a sub-D-class change with explicit user permission.
 
+
+---
+
+## Sync-upstream attempt — v0.15.40..v0.15.44 (blocked, not merged)
+
+**Date:** 2026-05-31
+**Status:** ⛔ blocked — merge aborted, working tree restored.
+
+Attempted to merge `upstream/main` (v0.15.44 tip) into `feat/runtime-rust`. Conflicts at `app/Main.hs` and `src/Sky/Build/Compile.hs` resolved cleanly with the standard thin-seam pattern. Compiler builds, `examples/01-hello-world` on `target=go` clean, Go FFI byte-identity 1/1.
+
+**Rust sweep result:** 16/18 `examples/rust/*` build clean; **17-db-todo-cli + 18-auth-signup fail** with 3 cargo errors each — same root cause both times.
+
+**Root cause.** Upstream `v0.15.44` shipped `Task.retryWith` + `RetryPolicy` combinators (`5947cf81 feat(task): Task.retryWith + RetryPolicy combinators`). The new `Sky.Core.Task` stdlib source declares:
+
+```elm
+type alias RetryPolicy =
+    { maxAttempts : Int, baseMs : Int, kind : Int, jitter : Bool
+    , shouldRetry : any                              -- ← heterogeneous field
+    }
+retryAlways : any
+retryAlways = Ffi.kernel "Task_retryAlways"
+retryOn predicate policy = { policy | shouldRetry = predicate }   -- ← any-typed setter
+```
+
+`any` on the Go target is `interface{}` (works natively). On Rust target the codegen lowers `any` → `String` by default, so:
+
+1. `task_retry_always` kernel is missing from `runtime-rust/src/sky_runtime/task.rs` → `error[E0425]: cannot find value task_retry_always`.
+2. `retryOn` / `withJitter` body `{ result.shouldRetry = predicate; result }` assigns a closure to a `String` field → `error[E0308]: expected String, found fn pointer`.
+
+DCE strips unused module-level fns but `Sky.Core.Task` is whole-module reachable, so `retryOn` lowers in every project that pulls Task in.
+
+**Adaptation needed (deferred to a focused session):**
+
+1. Add `task_retry_always` to Rust runtime as a typed sentinel value (e.g. `pub const RETRY_ALWAYS: &str = "_retry_always_sentinel";`).
+2. Either widen Rust codegen's `any` → field type from `String` to `Box<dyn Any + Send>` (or a polymorphic Enum), **or** add a Rust-target stdlib override that re-declares `RetryPolicy.shouldRetry` with a concrete callback type.
+3. Implement `task_retry_with` — the retry-loop combinator that consumes `RetryPolicy` + `Task` and runs the loop with the policy's backoff/jitter (mirror of `runtime-go/rt/task_retry.go`).
+
+Adaptation size: ~150-300 LOC across codegen + runtime + a regression example.
+
+**Workaround until adaptation lands:** stay on the pre-v0.15.40 upstream cut by not merging. The current Rust target works without Task.retryWith — users can write retry loops by hand using `Task.onError`.
+
