@@ -1,6 +1,6 @@
-# Sub-project A — stdlib parity status
+# Sub-project A — stdlib parity status (+ sub-B Std.Db opened)
 
-After five layers of work on `feat/runtime-rust`:
+After five layers of sub-A work plus sub-B's Std.Db runtime on `feat/runtime-rust`:
 
 | Layer | Plan | Commits | Status |
 |---|---|---|---|
@@ -10,9 +10,11 @@ After five layers of work on `feat/runtime-rust`:
 | Sub-A.9 codegen-completeness | `docs/superpowers/plans/2026-05-29-sub-A9-codegen-completeness.md` | `7498edf6..6f5f3d87` | ✅ 4 fixes shipped; error count 70 → 36 (-49%) |
 | Sub-A.10 codegen-shape cleanup | `docs/superpowers/plans/2026-05-30-sub-A10-codegen-shape-cleanup.md` | `4221a1eb..d7b2988f` | ✅ 6 fixes shipped; error count 36 → 17 (-53%) |
 | Sub-A.11 headline-gate close | `docs/superpowers/specs/2026-05-30-sub-A11-headline-gate-close-design.md` | `e814bc90..398b5c5e` | ✅ Group A + B1-B3 + C1 shipped; error count 17 → 7 (-59%) |
-| Sub-A.12 codegen polymorphism | `docs/superpowers/specs/2026-05-30-sub-A12-codegen-polymorphism-design.md` | `208759b6..HEAD` | ✅ F1 (mapError generic) + F2 (partial-app wrap) shipped; F3 (empty-literal defaulting) deferred (regressed in naive form). Error count 7 → 4 (-43%) |
+| Sub-A.12 codegen polymorphism | `docs/superpowers/specs/2026-05-30-sub-A12-codegen-polymorphism-design.md` | `208759b6..65c010c6` | ✅ F1 (mapError generic) + F2 (partial-app wrap) shipped; F3 (empty-literal defaulting) deferred (regressed in naive form). Error count 7 → 4 (-43%) |
+| Sub-B Std.Db runtime | `docs/superpowers/specs/2026-05-30-sub-B-stddb-runtime-design.md` | `cbfbd1d7..HEAD` | ✅ 12 missing kernels shipped (close, getBool, insertRow, CRUD, search, queryDecode, withTransaction); 11 sqlite unit tests; new `examples/rust/17-db-todo-cli` exercises all 7 CLI commands end-to-end |
 
-**Cumulative error reduction:** 232 → 165 → 116 → 70 → 36 → 17 → 7 → 4 (-98% from baseline).
+**Cumulative error reduction (sub-A):** 232 → 165 → 116 → 70 → 36 → 17 → 7 → 4 (-98% from baseline).
+**Sub-B status:** 17/17 `examples/rust/*` build + run; Std.Db end-to-end CRUD verified.
 
 ## What is shipped + green
 
@@ -325,3 +327,71 @@ These are all empty-literal / Nothing-pattern inference issues. They require cod
 54b7fb95  fix(rust): F1 — resultSig 'mapError' generic over both error types
 124b857e  fix(rust): F2 — partial application wrap for under-applied calls
 ```
+
+## Sub-B outcome — Std.Db Rust runtime
+
+After sub-A's headline gate hit 98% reduction and upstream v0.15.34 synced, sub-B opened the next stdlib pillar: **Std.Db** on `target=rust`.
+
+### Shipped (12 new kernels)
+
+`runtime-rust/src/sky_runtime/db.rs` (sqlx-backed; sqlite focus):
+
+| Kernel | Sky signature |
+|---|---|
+| `db_close` | `Db -> Task Error ()` (graceful pool close) |
+| `db_get_bool` | parses `'1'/'true'/'TRUE'/'t'/'T'` as truthy |
+| `db_insert_row` | `Db -> table -> Dict -> Task Error Int` (returns lastInsertRowid) |
+| `db_get_by_id` | `Db -> table -> id -> Task Error (Maybe Row)` |
+| `db_update_by_id` | `Db -> table -> id -> Dict -> Task Error Int` (rows affected) |
+| `db_delete_by_id` | `Db -> table -> id -> Task Error Int` |
+| `db_find_one_by_field` | parameterised equality lookup |
+| `db_find_many_by_field` | same, returning a List |
+| `db_find_by_conditions` | AND-joined equality on every key/value |
+| `db_unsafe_find_where` | raw `WHERE` with parameterised args (explicitly unsafe) |
+| `db_query_decode` | typed query with per-row decoder closure |
+| `db_with_transaction` | BEGIN/COMMIT/ROLLBACK lifecycle |
+
+Plus 12 `kernelToRust` arms in `Builder.hs` (both `("Db", X)` and `("Std.Db", X)` since Db uses `Ffi.kernel` aliases like Math/String/Dict).
+
+`safe_ident` guards table/column names against SQL injection; parameter values go through sqlx's `bind` (not string interpolation).
+
+### Known semantic limitation — withTransaction + pool routing
+
+sqlx::Pool dispatches each query to any available connection. For BEGIN/COMMIT/ROLLBACK to be transactional, all statements must run on the same connection. The current `db_with_transaction` issues the control statements on the pool but the body's queries may route elsewhere — full rollback isolation requires `max_connections(1)` in production code.
+
+The runtime test `test_with_transaction_rollback_returns_err` asserts only that `Err` propagates (the common-case guarantee). The doc comment on `db_with_transaction` describes the trade-off in full.
+
+### Integration test — `examples/rust/17-db-todo-cli`
+
+Mirrors `examples/07-todo-cli` (Go target reference) with `target = "rust"` + sqlite driver. **Reuses the unmodified Sky source from 07-todo-cli** — no codegen-shape adaptations needed. All 7 CLI commands verified end-to-end:
+
+```
+$ sky-app add "Buy groceries"     # Db.insertRow
+$ sky-app list                    # Db.findManyByField + Db.unsafeFindWhere
+$ sky-app done 1                  # Db.updateById
+$ sky-app undone 1                # Db.updateById
+$ sky-app remove 1                # Db.deleteById
+$ sky-app clear                   # Db.exec (DELETE WHERE done = 1)
+$ sky-app help                    # no Db
+```
+
+### Verification — all green
+
+- 17/17 `examples/rust/*` build clean from a wiped slate; 17/17 binaries run.
+- `examples/01-hello-world` on `target=go`: clean.
+- Targeted cabal test (`FfiGen` / `Toml` / `Kernel`): 1/1 pass.
+- Runtime tests (`cargo test --features db,async --lib db`): 11/11 pass.
+
+### Sub-B commits
+
+```
+cbfbd1d7  docs(rust): sub-B spec — Std.Db Rust runtime (12 missing kernels)
+9c46621d  feat(rust): sub-B T1-T3 — 12 missing Std.Db kernels (sqlite + sqlx)
+2335dafa  test(rust): 17-db-todo-cli — full CRUD example via Std.Db on target=rust
+```
+
+### Out of scope (sub-B.1+)
+
+- Postgres / MySQL backends.
+- Single-connection-pool transaction isolation (would require Sky-side `Db.Transaction` ADT separate from `Db`).
+- ORM-style schema introspection.
