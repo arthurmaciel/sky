@@ -1,5 +1,6 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE CPP #-}
 module Main where
 
@@ -23,8 +24,11 @@ import qualified System.Posix.Signals as Signals
 import System.FilePath ((</>), takeExtension, takeDirectory, takeFileName, dropExtension, splitDirectories)
 import System.Exit (exitWith)
 import Data.List (intercalate, isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, tails)
+import Data.Maybe (isJust, listToMaybe, catMaybes, fromMaybe)
+import qualified Data.Maybe
+import Control.Exception (catch, SomeException)
 import Data.Char (toLower)
-import System.Process (callProcess, rawSystem)
+import System.Process (callProcess, rawSystem, readProcessWithExitCode)
 import qualified System.Process
 import qualified System.IO.Temp
 import qualified System.Timeout
@@ -716,6 +720,110 @@ appendRustDependency pkg version features = do
                     writeFile "sky.toml" (unlines newLines)
                     putStrLn $ "   Added to sky.toml [rust.dependencies]"
 
+-- | Discover the real Cargo package name from a git source.
+--
+-- The URL's last path segment (`basename`) is only a hint — repos commonly
+-- name their package differently from their directory (`linux-china/roman-rs`
+-- ships package `roman`; `serde-rs/json` ships `serde_json`).  We clone a
+-- shallow copy into a tempdir, parse `[package].name` from its `Cargo.toml`,
+-- and return the discovered name.  Returns Nothing on any failure (network
+-- down, no git in PATH, malformed Cargo.toml) — callers fall back to the
+-- basename heuristic.
+discoverGitPackageName
+    :: String              -- git URL
+    -> Maybe String        -- rev
+    -> Maybe String        -- branch
+    -> Maybe String        -- tag
+    -> IO (Maybe String)
+discoverGitPackageName url mRev mBranch mTag = do
+    -- Probe for `git` in PATH first. `readProcessWithExitCode` throws if the
+    -- binary is missing, so wrap in try.
+    let probeGit = readProcessWithExitCode "git" ["--version"] ""
+    probeResult <-
+        (Right <$> probeGit) `catch` \(e :: SomeException) -> return (Left (show e))
+    case probeResult of
+        Left _ -> return Nothing
+        Right (rc, _, _) | rc /= ExitSuccess -> return Nothing
+        Right _ -> do
+            -- Project-local tmp dir — no new package dep needed.
+            let probeDir = ".skycache" </> ".git-probe-tmp"
+            createDirectoryIfMissing True ".skycache"
+            -- Remove any previous probe and re-clone fresh.
+            _ <- readProcessWithExitCode "rm" ["-rf", probeDir] ""
+            let branchOrTag = case mBranch of
+                    Just b  -> Just b
+                    Nothing -> mTag
+                cloneArgs =
+                    [ "clone"
+                    , "--quiet"
+                    , "--depth", if isJust mRev then "100" else "1"
+                    ] ++ maybe [] (\b -> ["--branch", b]) branchOrTag
+                      ++ [url, probeDir]
+            (cloneRc, _, _) <- readProcessWithExitCode "git" cloneArgs ""
+                `catch` \(_ :: SomeException) -> return (ExitFailure 1, "", "")
+            result <- case cloneRc of
+                ExitFailure _ -> return Nothing
+                ExitSuccess -> do
+                    case mRev of
+                        Just rev -> do
+                            _ <- readProcessWithExitCode "git"
+                                ["-C", probeDir, "checkout", "--quiet", rev] ""
+                                `catch` \(_ :: SomeException) -> return (ExitFailure 1, "", "")
+                            return ()
+                        Nothing -> return ()
+                    parseCargoTomlPackageName (probeDir </> "Cargo.toml")
+            -- Best-effort cleanup; ignore failures.
+            _ <- readProcessWithExitCode "rm" ["-rf", probeDir] ""
+            return result
+
+
+-- | Extract `[package].name = "..."` from a Cargo.toml. Returns Nothing on
+-- any malformed input or virtual-workspace manifests (no [package] section).
+parseCargoTomlPackageName :: FilePath -> IO (Maybe String)
+parseCargoTomlPackageName path = do
+    exists <- doesFileExist path
+    if not exists
+        then return Nothing
+        else do
+            content <- readFile' path
+            return (findInSection "package" "name" content)
+  where
+    findInSection :: String -> String -> String -> Maybe String
+    findInSection sectionName key body =
+        let headerLine l = let t = dropWhile (== ' ') l
+                           in t == "[" ++ sectionName ++ "]"
+            ls = lines body
+            (_, afterHeader) = break headerLine ls
+        in case afterHeader of
+            (_:rest) ->
+                let bodyLines = takeWhile (\l ->
+                        let t = dropWhile (== ' ') l
+                        in not ("[" `isPrefixOf` t)) rest
+                in firstJust (map (parseKey key) bodyLines)
+            _ -> Nothing
+
+    parseKey :: String -> String -> Maybe String
+    parseKey key l =
+        let t = dropWhile (== ' ') l
+        in case stripPrefix (key ++ " ") t of
+            Just rest -> extractTomlString (dropWhile (== ' ') rest)
+            Nothing -> case stripPrefix (key ++ "=") t of
+                Just rest -> extractTomlString (dropWhile (== ' ') rest)
+                Nothing -> Nothing
+
+    extractTomlString :: String -> Maybe String
+    extractTomlString s =
+        -- Strip arbitrary `=` and whitespace prefix in any order.
+        let cleaned = dropWhile (\c -> c == '=' || c == ' ' || c == '\t') s
+        in case cleaned of
+            '"':rest  -> Just (takeWhile (/= '"')  rest)
+            '\'':rest -> Just (takeWhile (/= '\'') rest)
+            _ -> Nothing
+
+    firstJust :: [Maybe a] -> Maybe a
+    firstJust = listToMaybe . catMaybes
+
+
 -- | Append a git-source Rust dependency to sky.toml as an inline table:
 --   crate_name = { git = "url", rev = "...", branch = "...", tag = "..." }
 appendRustGitDep :: String -> String -> Maybe String -> Maybe String -> Maybe String -> IO ()
@@ -788,11 +896,22 @@ addHandler opts = do
             let target = case mTarget of
                     Just t  -> parseTarget t
                     Nothing -> Toml._target config
-            -- Rust git deps: add to sky.toml then ask the inspector to resolve via
-            -- Cargo's git checkout cache (same code path as the build-time regen).
+            -- Rust git deps: discover the actual Cargo package name (the URL
+            -- basename is a hint — repos commonly name their package
+            -- differently from their dir), add to sky.toml, then ask the
+            -- inspector to resolve via Cargo's git checkout cache.
             case (target, pkgSpec) of
                 (TargetRust, GitDep url mr mb mt) -> do
-                    let crateName = basename url
+                    let basenameGuess = basename url
+                    putStrLn "   Probing git source for Cargo package name..."
+                    discovered <- discoverGitPackageName url mr mb mt
+                    let crateName = Data.Maybe.fromMaybe basenameGuess discovered
+                    case discovered of
+                        Just real | real /= basenameGuess ->
+                            putStrLn $ "   (discovered package name '" ++ real
+                                ++ "' — overrides basename guess '" ++ basenameGuess ++ "')"
+                        Just _  -> return ()
+                        Nothing -> putStrLn $ "   (probe failed — using basename '" ++ basenameGuess ++ "')"
                     appendRustGitDep crateName url mr mb mt
                     putStrLn "   Resolving via Cargo (git fetch + rustdoc)..."
                     r <- RustFfi.runRustInspectorGit crateName url mr mb mt features
