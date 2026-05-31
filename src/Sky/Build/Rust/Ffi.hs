@@ -77,7 +77,10 @@ generateRustBindings pkg0 = do
         names = map (\fn -> mname ++ "." ++ lowerFirst (_fnName fn)) (_pkgFns pkg)
     writeFile rsFile (emitRustFile kname pkg)
     writeFile skyiFile (emitRustSkyi pkg)
-    writeFile jsonFile (emitKernelJson mname kname pkg)
+    -- Rust target: methods get `_from_<RecvType>` suffix so users can
+    -- disambiguate `Chrono.now_from_utc` etc. (rustdoc preserves receiver
+    -- info; the Sky source explicitly references suffixed names).
+    writeFile jsonFile (emitKernelJson True mname kname pkg)
     return names
 
 

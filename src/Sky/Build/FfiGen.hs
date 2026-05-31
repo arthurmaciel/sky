@@ -254,7 +254,8 @@ generateBindings pkg = do
         names = map (\fn -> mname ++ "." ++ lowerFirst (_fnName fn)) (_pkgFns pkg)
     writeFile goFile (emitGoFile kname pkg)
     writeFile skyiFile (emitSkyi pkg)
-    writeFile jsonFile (emitKernelJson mname kname pkg)
+    -- Go target: methods callable by bare name (e.g. `Firestore.queryDocuments`).
+    writeFile jsonFile (emitKernelJson False mname kname pkg)
     return names
 
 
@@ -332,14 +333,30 @@ lowerFirst (c:cs) = toLower c : cs
 -- kernel.json emission — consumed by Sky.Build.FfiRegistry at sky build time
 -- ══════════════════════════════════════════════════════════════════════════
 
-emitKernelJson :: String -> String -> PkgInfo -> String
-emitKernelJson moduleName kernelName pkg =
+-- | Emit kernel.json. `disambMethods` controls whether method names get the
+-- `_from_<RecvType>` suffix:
+--
+--   False — Go target (matches upstream pre-Rust convention; user Sky source
+--     calls methods by bare name like `Firestore.queryDocuments`). The Go
+--     wrapper emission uses `dedupByFirst` which already drops collisions,
+--     so the registry is consistent.
+--
+--   True  — Rust target (rustdoc-emitted bindings preserve receiver info;
+--     user Sky source calls methods by `Chrono.now_from_utc`).
+--
+-- This was the divergence behind the CI break — sub-A's auto-FFI work
+-- added the suffix unconditionally, breaking Go targets like 13-skyshop's
+-- Firestore calls.
+emitKernelJson :: Bool -> String -> String -> PkgInfo -> String
+emitKernelJson disambMethods moduleName kernelName pkg =
     let fns = filter (not . shouldSkipFn) (_pkgFns pkg)
         fnEntries = intercalate ",\n" (map emitFnEntry fns)
         emitFnEntry fn =
             let st = wrapperSkyType fn
                 recv = _fnRecvType fn
-                disamb = if null recv then "" else "_from_" ++ lowerFirst recv
+                disamb = if disambMethods && not (null recv)
+                         then "_from_" ++ lowerFirst recv
+                         else ""
                 base = "    {\"name\": " ++ quote (lowerFirst (_fnName fn) ++ disamb) ++
                        ", \"arity\": " ++ show (max 1 (length (_fnParams fn)))
             in if isSkyParseable st
