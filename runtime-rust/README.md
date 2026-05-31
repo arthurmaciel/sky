@@ -620,13 +620,13 @@ sky install
 
 | Limitation | Description | Workaround |
 |---|---|---|
-| Empty-literal type defaulting | `List.head []` / `Maybe.map _ Nothing` in test-only positions can't infer the element type. 2-3 such errors remain in `examples/00-standard-libs`. | Sky source can annotate the literal's type. Real-world Sky programs rarely hit this. |
+| Empty-literal type defaulting | `List.head []` / `Maybe.map _ Nothing` / `Result.mapError _ (Err _)` in test-only positions can't infer the element type — 4 such errors remain in `examples/00-standard-libs` on `target=rust`. | Sky source can annotate the literal's type. Sub-A.13 plan addresses this at the codegen level: `docs/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`. |
 | `Result.mapError` inference cascade | After F1's polymorphic signature fix the closure infers; outer call-site inference can still ambiguate the SkyResult<E,T> ok-slot. | Wrap in a typed `let` to pin E1/E2 at the call site. |
 | `withTransaction` rollback isolation | `db_with_transaction` uses sqlx's pool API; BEGIN/COMMIT/ROLLBACK run on the pool but body queries may route to other pool connections. Real rollback isolation requires single-connection pools. | Configure `sqlx::Pool::max_connections(1)` in production code that needs guaranteed rollback. Documented inline in `db.rs`. |
 | `Db.insertRow` on postgres | Returns 0 (no auto last-insert-id in postgres). | Use `INSERT … RETURNING id` + `Db.queryDecode` to fetch the new id explicitly. Documented in generated `config.rs` for postgres. |
 | JSON pipeline decoder | `Box<dyn FnOnce>` chain in pipeline combinators may not satisfy `Clone+Send` in some shapes. | Use raw `JsonDec.decodeString` + `JsonDec.field` directly, not the pipeline `|=` style, when this surfaces. |
 | Flat main.rs | All Sky modules compile into a single `main.rs`; no `pub mod <X>;` declarations. | Planned cleanup; doesn't affect correctness. |
-| `sky install` git deps | git-source Rust deps may need manual `sky add` after `rm -rf .skycache`. | Run `sky add <crate> --target rust` for each git dep. |
+| `sky install` git deps — virtual-workspace roots | When a git source's root `Cargo.toml` is workspace-only (no `[package]` section), the package-name probe falls back to the URL basename and can land on the wrong dep key. | Add the crate with an explicit URL pointing at the right workspace member, or open the repo and verify the directory matches the package name. |
 | `rustdoc` requires nightly | Inspector runs `cargo +nightly rustdoc`. | `rustup install nightly`. |
 | Un-nameable bindings dropped | Functions taking/returning generics, NON-byte slices/arrays, borrows, std types, or unsafe fns are skipped (byte sequences are kept). | Use a wrapper crate exposing owned/primitive signatures, or pick a crate whose API is self-typed. |
 
@@ -636,17 +636,17 @@ sky install
 
 ### Short-term
 - **Sub-A.13** — codegen-level type-default propagation for empty literals (`vec![]` /
-  `SkyMaybe::Nothing`) in unconstrained generic-argument positions. Closes the
-  last 4 errors on `examples/00-standard-libs`.
-- ~~**Sub-C — Std.Auth**~~ — ✅ shipped (sub-C + sub-C.1). 9 kernels in
-  `runtime-rust/src/sky_runtime/auth.rs`; `examples/rust/18-auth-signup`
-  drives register/setRole on sqlite + mysql + postgres. Standing gaps:
-  postgres `register`/`login` id roundtrip (needs `RETURNING id` — shared
-  with sub-B), `Auth.calibrateCost` (needs upstream Sky-side surface).
+  `SkyMaybe::Nothing` / `SkyResult::Err`) in unconstrained generic-argument
+  positions. Closes the last 4 errors on `examples/00-standard-libs`. Implementation
+  plan written and ready for execution:
+  `docs/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`.
 - **`Db.withTransaction` single-connection variant** — runtime helper that takes a
   reserved `PoolConnection` so rollback isolation is guaranteed without requiring
   user-side pool configuration.
-- **`sky install` git deps** — `regenMissingRustBindings` should handle `RustGit` specs.
+- **`basename` → Cargo `[package].name` for git deps where the URL probe fails on
+  virtual workspaces** — the discovery helper currently bails when the root
+  `Cargo.toml` has no `[package]` section (workspace-only roots). Walk the first
+  workspace member to recover.
 - **Non-byte slices/arrays** in FFI — `&[String]`, `[f64; 3]` still drop; per-element
   coercion would extend Alt-1 v2 to wider crate surface.
 
@@ -666,9 +666,22 @@ sky install
 - **Separate module files** — emit `pub mod <name>;` declarations instead of
   flattening all Sky modules into `main.rs`.
 
-### Done in this session (sub-A.11 → sub-B.1)
-- ✅ Headline-gate reduction 232 → 4 errors (-98% from baseline) across sub-A.9 through A.12.
-- ✅ Sub-B — full `Std.Db` runtime (12 kernels + `examples/rust/17-db-todo-cli`).
-- ✅ Sub-B.1 — Std.Db cross-backend (sqlite + mysql + postgres) via per-driver helpers
-  in generated `config.rs`. Driver-aware `db_last_insert_id` + `db_format_sql`
-  rewrite SQL placeholders for postgres.
+### Recently shipped (this branch, since the v0.15.27 upstream sync)
+- ✅ **Sub-A.9 → A.12** — headline-gate reduction 232 → 4 cargo errors on
+  `examples/00-standard-libs` (-98% from baseline).
+- ✅ **Sub-B** — full `Std.Db` runtime (12 kernels + `examples/rust/17-db-todo-cli`).
+- ✅ **Sub-B.1** — Std.Db cross-backend (sqlite + mysql + postgres) via per-driver
+  helpers in generated `config.rs`. Driver-aware `db_last_insert_id` +
+  `db_format_sql` rewrite SQL placeholders for postgres.
+- ✅ **Sub-C** — `Std.Auth` runtime: 9 kernels (6 pure crypto + 3 Task DB),
+  `examples/rust/18-auth-signup`. bcrypt + jsonwebtoken; sqlx-backed register /
+  login / setRole.
+- ✅ **Sub-C.1** — `Std.Auth` users-table schema portable across sqlite + mysql +
+  postgres via `db_auto_id_column()` in generated `config.rs`.
+- ✅ **`sky install` git deps** — `regenMissingRustBindings` now resolves
+  `RustGitDep` via the inspector's new `--git URL [--rev|--branch|--tag]`
+  selectors. `sky add <git-url> --target rust` works end-to-end.
+- ✅ **Git-dep package-name discovery** — `sky add <git-url> --target rust` clones
+  the source, parses `[package].name` from `Cargo.toml`, and uses the discovered
+  name for the sky.toml entry + artifact filenames. Falls back to the URL
+  basename heuristic on failure.
