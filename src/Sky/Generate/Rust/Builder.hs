@@ -1870,6 +1870,54 @@ dbRowType "postgres" = "sqlx::postgres::PgRow"
 dbRowType "mysql"    = "sqlx::mysql::MySqlRow"
 dbRowType _          = "sqlx::sqlite::SqliteRow"
 
+-- | Driver-specific helper functions emitted into the generated config.rs.
+-- Two helpers:
+--
+--   db_last_insert_id(&QueryResult) -> i64
+--     sqlite: res.last_insert_rowid()
+--     mysql:  res.last_insert_id() as i64
+--     postgres: 0 (postgres has no auto last-insert-id; use INSERT ... RETURNING id)
+--
+--   db_format_sql(String) -> String
+--     sqlite + mysql: identity (both use `?` placeholders)
+--     postgres: rewrites `?` to `$1, $2, …` (postgres's numbered placeholders)
+--
+-- These keep db.rs backend-agnostic — it just calls into config:: helpers
+-- and the right impl is generated based on the sky.toml [database] driver.
+dbBackendHelpers :: String -> [String]
+dbBackendHelpers "postgres" =
+    [ "// Postgres has no auto last-insert-id. Returns 0; use"
+    , "// `INSERT … RETURNING id` + Db.queryDecode to fetch it explicitly."
+    , "pub fn db_last_insert_id(_res: &sqlx::postgres::PgQueryResult) -> i64 { 0 }"
+    , ""
+    , "/// Rewrite sqlx-canonical `?` placeholders to postgres `$1, $2, …`."
+    , "pub fn db_format_sql(sql: String) -> String {"
+    , "    let mut out = String::with_capacity(sql.len() + 4);"
+    , "    let mut n = 0usize;"
+    , "    for c in sql.chars() {"
+    , "        if c == '?' { n += 1; out.push_str(&format!(\"${}\", n)); }"
+    , "        else { out.push(c); }"
+    , "    }"
+    , "    out"
+    , "}"
+    ]
+dbBackendHelpers "mysql" =
+    [ "pub fn db_last_insert_id(res: &sqlx::mysql::MySqlQueryResult) -> i64 {"
+    , "    res.last_insert_id() as i64"
+    , "}"
+    , ""
+    , "/// MySQL uses `?` placeholders, same as sqlite — identity."
+    , "pub fn db_format_sql(sql: String) -> String { sql }"
+    ]
+dbBackendHelpers _ =  -- sqlite default
+    [ "pub fn db_last_insert_id(res: &sqlx::sqlite::SqliteQueryResult) -> i64 {"
+    , "    res.last_insert_rowid()"
+    , "}"
+    , ""
+    , "/// SQLite uses `?` placeholders — identity."
+    , "pub fn db_format_sql(sql: String) -> String { sql }"
+    ]
+
 emitRust :: RustBuilder -> String -> String -> [String] -> (String, [(String, String)])
 emitRust b dbPath dbDriver ffiSlugs =
     let modules = builderModules b

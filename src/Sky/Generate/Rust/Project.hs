@@ -70,7 +70,9 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
               then [ "pub type DbPool = " ++ dbPool ++ ";"
                    , "pub type DbRow = " ++ dbRow ++ ";"
                    , "pub const SKY_DB_URL: &str = " ++ show dbUrl ++ ";"
-                   ]
+                   , ""
+                   -- sub-B.1: driver-specific helpers so db.rs stays backend-agnostic
+                   ] ++ RustBuilder.dbBackendHelpers dbDriver
               else [ "// (no DB)" ]))
     writeFile configPath configCode
     putStrLn $ "   Wrote " ++ configPath

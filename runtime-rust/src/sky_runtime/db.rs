@@ -1,5 +1,6 @@
-// DB kernel functions — generic over E.
-// Uses DbPool, DbRow, SKY_DB_URL from config.rs (generated at build time).
+// DB kernel functions — generic over E and over backend.
+// Uses DbPool, DbRow, SKY_DB_URL, db_last_insert_id, db_format_sql from
+// config.rs (generated at build time per sky.toml [database] driver).
 use super::*;
 use sqlx::{Column, Row};
 use std::collections::HashMap;
@@ -175,16 +176,16 @@ pub fn db_insert_row<E: Send + From<String> + 'static>(
             return SkyResult::Err("db.insertRow: invalid column name".to_string().into());
         }
         let placeholders = vec!["?"; col_names.len()].join(", ");
-        let sql = format!(
+        let sql = db_format_sql(format!(
             "INSERT INTO {} ({}) VALUES ({})",
             qtable, col_names.join(", "), placeholders
-        );
+        ));
         let mut q = sqlx::query(&sql);
         for k in &keys {
             q = q.bind(row.get(*k).cloned().unwrap_or_default());
         }
         match q.execute(&conn).await {
-            Ok(res) => ok_res(res.last_insert_rowid()),
+            Ok(res) => ok_res(db_last_insert_id(&res)),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
     })
@@ -199,7 +200,7 @@ pub fn db_get_by_id<E: Send + From<String> + 'static>(
         if qtable.is_empty() {
             return SkyResult::Err(format!("db.getById: invalid table name {:?}", table).into());
         }
-        let sql = format!("SELECT * FROM {} WHERE id = ? LIMIT 1", qtable);
+        let sql = db_format_sql(format!("SELECT * FROM {} WHERE id = ? LIMIT 1", qtable));
         match sqlx::query(&sql).bind(id).fetch_optional(&conn).await {
             Ok(Some(r)) => ok_res(SkyMaybe::Just(row_to_map(&r))),
             Ok(None) => ok_res(SkyMaybe::Nothing),
@@ -228,7 +229,7 @@ pub fn db_update_by_id<E: Send + From<String> + 'static>(
             return SkyResult::Err("db.updateById: invalid column name".to_string().into());
         }
         let sets: Vec<String> = col_names.iter().map(|c| format!("{} = ?", c)).collect();
-        let sql = format!("UPDATE {} SET {} WHERE id = ?", qtable, sets.join(", "));
+        let sql = db_format_sql(format!("UPDATE {} SET {} WHERE id = ?", qtable, sets.join(", ")));
         let mut q = sqlx::query(&sql);
         for k in &keys {
             q = q.bind(row.get(*k).cloned().unwrap_or_default());
@@ -251,7 +252,7 @@ pub fn db_delete_by_id<E: Send + From<String> + 'static>(
         if qtable.is_empty() {
             return SkyResult::Err(format!("db.deleteById: invalid table name {:?}", table).into());
         }
-        let sql = format!("DELETE FROM {} WHERE id = ?", qtable);
+        let sql = db_format_sql(format!("DELETE FROM {} WHERE id = ?", qtable));
         match sqlx::query(&sql).bind(id).execute(&conn).await {
             Ok(res) => ok_res(res.rows_affected() as i64),
             Err(e) => SkyResult::Err(sky_err(&e)),
@@ -269,7 +270,7 @@ pub fn db_find_one_by_field<E: Send + From<String> + 'static>(
         if qtable.is_empty() || qfield.is_empty() {
             return SkyResult::Err(format!("db.findOneByField: invalid identifier in {:?}.{:?}", table, field).into());
         }
-        let sql = format!("SELECT * FROM {} WHERE {} = ? LIMIT 1", qtable, qfield);
+        let sql = db_format_sql(format!("SELECT * FROM {} WHERE {} = ? LIMIT 1", qtable, qfield));
         match sqlx::query(&sql).bind(value).fetch_optional(&conn).await {
             Ok(Some(r)) => ok_res(SkyMaybe::Just(row_to_map(&r))),
             Ok(None) => ok_res(SkyMaybe::Nothing),
@@ -288,7 +289,7 @@ pub fn db_find_many_by_field<E: Send + From<String> + 'static>(
         if qtable.is_empty() || qfield.is_empty() {
             return SkyResult::Err(format!("db.findManyByField: invalid identifier in {:?}.{:?}", table, field).into());
         }
-        let sql = format!("SELECT * FROM {} WHERE {} = ?", qtable, qfield);
+        let sql = db_format_sql(format!("SELECT * FROM {} WHERE {} = ?", qtable, qfield));
         match sqlx::query(&sql).bind(value).fetch_all(&conn).await {
             Ok(rows) => ok_res(rows.iter().map(row_to_map).collect()),
             Err(e) => SkyResult::Err(sky_err(&e)),
@@ -312,12 +313,12 @@ pub fn db_find_by_conditions<E: Send + From<String> + 'static>(
         if qfields.iter().any(|c| c.is_empty()) {
             return SkyResult::Err("db.findByConditions: invalid column name".to_string().into());
         }
-        let sql = if keys.is_empty() {
+        let sql = db_format_sql(if keys.is_empty() {
             format!("SELECT * FROM {}", qtable)
         } else {
             let wheres: Vec<String> = qfields.iter().map(|c| format!("{} = ?", c)).collect();
             format!("SELECT * FROM {} WHERE {}", qtable, wheres.join(" AND "))
-        };
+        });
         let mut q = sqlx::query(&sql);
         for k in &keys {
             q = q.bind(conditions.get(*k).cloned().unwrap_or_default());
