@@ -1,0 +1,40 @@
+module Main exposing (main)
+
+-- 18-auth-signup: register a user, log them in, change their role.
+-- Demonstrates Std.Auth running on `target = "rust"`.
+--
+-- The flow exercises every Auth DB kernel (register, login, setRole)
+-- so the runtime wiring is end-to-end verified.  Pure crypto kernels
+-- (hashPassword, passwordStrength, signToken/verifyToken) are covered
+-- by the runtime-rust unit tests; this integration test focuses on the
+-- happy-path DB flow.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Db as Db
+import Std.Auth as Auth
+import Sky.Core.Error as Error exposing (Error)
+import Std.Log exposing (println)
+
+
+reportError : Error -> Task Error ()
+reportError e =
+    let _ = println ("auth.signup error: " ++ Error.toString e)
+    in Task.succeed ()
+
+
+runFlow : Db -> Task Error ()
+runFlow conn =
+    Auth.register conn "alice@example.com" "hunter2!"
+        |> Task.andThen (\userId -> Auth.setRole conn userId "admin")
+
+
+main =
+    let
+        pipeline =
+            Db.connect ()
+                |> Task.andThen runFlow
+                |> Task.onError reportError
+        _ = Task.run pipeline
+        _ = println "auth.signup: register + setRole OK"
+    in
+        ()

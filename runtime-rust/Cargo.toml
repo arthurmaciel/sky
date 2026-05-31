@@ -22,13 +22,14 @@ percent-encoding = "2"
 chrono = "0.4"
 chrono-tz = "0.10"
 rust_decimal = { version = "1", features = ["serde"] }
+bcrypt = { version = "0.17", optional = true }
 
 [features]
 default = []
 async = ["tokio"]
 json = ["serde_json", "jsonwebtoken"]
 db = ["sqlx", "tokio"]
-crypto = ["sha2", "rsa"]
+crypto = ["sha2", "rsa", "bcrypt"]
 full = ["async", "json", "db", "crypto"]
 
 [dev-dependencies]
@@ -38,6 +39,7 @@ tokio = { version = "1.0", features = ["full", "test-util", "macros"] }
 serde_json = "1"
 sha2 = "0.10"
 jsonwebtoken = "9"
+bcrypt = "0.17"
 
 [package.metadata.sky]
 runtime_version = "0.13.0"

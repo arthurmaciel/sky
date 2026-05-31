@@ -20,6 +20,8 @@ pub mod file;
 pub mod json;
 #[cfg(feature = "db")]
 pub mod db;
+#[cfg(feature = "db")]
+pub use db::*;
 
 pub use config::*;
 pub use core::*;
@@ -68,3 +70,8 @@ pub use basics::*;
 
 pub mod list;
 pub use list::*;
+
+#[cfg(all(feature = "db", feature = "json"))]
+pub mod auth;
+#[cfg(all(feature = "db", feature = "json"))]
+pub use auth::*;

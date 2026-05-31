@@ -90,7 +90,8 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    -- Sub-A.8 — runtime kernel coverage
                    ,"pub mod money;","pub mod math;","pub mod dict;","pub mod string;"
                    ,"pub mod basics;","pub mod list;"]
-        dbMod = if usesDb then ["pub mod db;"] else []
+        -- sub-C — Std.Auth requires db.rs + jwt; gated together
+        dbMod = if usesDb then ["pub mod db;", "pub mod auth;"] else []
         baseUse = ["pub use config::*;","pub use core::*;"
                   ,"pub use task::*;","pub use log::*;"
                   ,"pub use system::*;","pub use time::*;"
@@ -102,7 +103,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                   ,"pub use money::*;","pub use math::*;"
                   ,"pub use dict::*;","pub use string::*;"
                   ,"pub use basics::*;","pub use list::*;"]
-        dbUse = if usesDb then ["pub use db::*;"] else []
+        dbUse = if usesDb then ["pub use db::*;", "pub use auth::*;"] else []
         modCode = unlines (baseMods ++ dbMod ++ baseUse ++ dbUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath

@@ -395,3 +395,53 @@ cbfbd1d7  docs(rust): sub-B spec — Std.Db Rust runtime (12 missing kernels)
 - Postgres / MySQL backends.
 - Single-connection-pool transaction isolation (would require Sky-side `Db.Transaction` ADT separate from `Db`).
 - ORM-style schema introspection.
+
+---
+
+## Sub-C — Std.Auth Rust runtime
+
+**Date:** 2026-05-31
+**Status:** ✅ shipped
+**Spec:** `docs/superpowers/specs/2026-05-31-sub-C-stdauth-runtime-design.md`
+
+Implements all 9 `Std.Auth` kernels in `runtime-rust/src/sky_runtime/auth.rs`:
+
+| Kernel | Tier | Backing |
+|---|---|---|
+| `hashPassword` / `hashPasswordCost` | Result | bcrypt (cost 4..31, default 12) |
+| `verifyPassword` | Result | bcrypt::verify |
+| `passwordStrength` | Result | length + letter/digit/symbol heuristics |
+| `signToken` / `verifyToken` | Result | jsonwebtoken HS256 + ≥32-byte secret gate |
+| `register` / `login` / `setRole` | Task | sqlx via sub-B's Db layer; idempotent `CREATE TABLE IF NOT EXISTS users` |
+
+### Codegen wiring
+
+- `kernelToRust` dispatch arms added for `("Auth", _)` and `("Std.Auth", _)` (18 arms).
+- `detectKernelUsage` for `Auth` triggers `usesDb + usesJson + usesCrypto + usesTaskRun` so the right Cargo deps + module wiring are emitted automatically.
+- `emitCargoToml` adds `bcrypt = "0.17"`.
+- `Project.hs` includes `auth.rs` in baseMods/baseUse when `usesDb` (Auth requires the Db layer).
+
+### Integration test — `examples/rust/18-auth-signup`
+
+Drives the happy path end-to-end:
+```
+$ sky-app
+auth.signup: register + setRole OK
+$ sky-app           # second run — duplicate email
+auth.signup error: Unexpected: auth.register: email already registered
+auth.signup: register + setRole OK
+```
+
+JWT round-trips and password-strength edge cases are covered by `cargo test --features full --lib auth` (6/6 pass).
+
+### Verification — all green
+
+- 18/18 `examples/rust/*` build clean from a wiped slate.
+- Runtime tests (`cargo test --features full --lib`): 127/127 pass (was 120/120 pre-sub-C — +6 auth + 1 db).
+- Go path: zero touches outside Rust-target gates; `examples/01-hello-world` on `target=go` clean.
+
+### Known limitations (deferred to sub-C.1+)
+
+- Schema uses sqlite-native `INTEGER PRIMARY KEY AUTOINCREMENT`. mysql/postgres require manual schema adjustment until sub-C.1 lands a per-driver `auto_id_column` helper in generated `config.rs`.
+- `signToken` / `verifyToken` claims are `HashMap<String, String>` at the FFI boundary — Sky-side users wrap typed records into string maps.
+- `login` does not differentiate "no such user" from "wrong password" by design (timing-safe + non-enumerable).

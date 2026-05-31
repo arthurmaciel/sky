@@ -1,0 +1,11 @@
+name = "18-auth-signup"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+[source]
+root = "src"
+
+[database]
+driver = "sqlite"
+path = "auth.db"

@@ -100,6 +100,9 @@ analyzeKernelUsage = foldMap analyzeMod
         mconcat
             [ if "Db" `isSuffixOf` modName || modName == "Db"
               then mempty { usesDb = True } else mempty
+            -- Sub-C: Std.Auth needs Db (users table) + Json (JWT serde) + Crypto/bcrypt.
+            , if "Auth" `isSuffixOf` modName || modName == "Auth"
+              then mempty { usesDb = True, usesJson = True, usesCrypto = True, usesTaskRun = True } else mempty
             , if (modName == "Task" || "Sky.Core.Task" `isSuffixOf` modName)
                   && (fnName == "run" || fnName == "sequence" || fnName == "perform")
               then mempty { usesTaskRun = True } else mempty
@@ -2556,6 +2559,25 @@ kernelToRust mod name = case (mod, name) of
     ("Std.Db", "queryDecode")   -> "db_query_decode"
     ("Db", "withTransaction")   -> "db_with_transaction"
     ("Std.Db", "withTransaction") -> "db_with_transaction"
+    -- Sub-C: Std.Auth — 6 pure crypto + 3 DB-touching kernels.
+    ("Auth", "hashPassword")     -> "auth_hash_password"
+    ("Std.Auth", "hashPassword") -> "auth_hash_password"
+    ("Auth", "hashPasswordCost")     -> "auth_hash_password_cost"
+    ("Std.Auth", "hashPasswordCost") -> "auth_hash_password_cost"
+    ("Auth", "verifyPassword")     -> "auth_verify_password"
+    ("Std.Auth", "verifyPassword") -> "auth_verify_password"
+    ("Auth", "passwordStrength")     -> "auth_password_strength"
+    ("Std.Auth", "passwordStrength") -> "auth_password_strength"
+    ("Auth", "signToken")     -> "auth_sign_token"
+    ("Std.Auth", "signToken") -> "auth_sign_token"
+    ("Auth", "verifyToken")     -> "auth_verify_token"
+    ("Std.Auth", "verifyToken") -> "auth_verify_token"
+    ("Auth", "register")     -> "auth_register"
+    ("Std.Auth", "register") -> "auth_register"
+    ("Auth", "login")     -> "auth_login"
+    ("Std.Auth", "login") -> "auth_login"
+    ("Auth", "setRole")     -> "auth_set_role"
+    ("Std.Auth", "setRole") -> "auth_set_role"
     -- Ffi.kernel: the codegen routes every call through the kernel dispatch,
     -- but the Rust target resolves Ffi.kernel calls directly during
     -- canonicalisation.  Any Ffi.kernel reference that reaches codegen is
@@ -2721,6 +2743,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
         , ("subtle",           "\"2\"")
         , ("rsa",              "{ version = \"0.9\", features = [\"sha2\"] }")
         , ("jsonwebtoken",     "\"9\"")
+        , ("bcrypt",           "\"0.17\"")
         ]
     , name `notElem` userDepNames
     ] ++
