@@ -103,7 +103,7 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 17/17 build + run from a wiped slate
+### `examples/rust/` — 18/18 build + run from a wiped slate
 
 | Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
@@ -124,6 +124,7 @@ even for crates that use proc macros or derive macros.
 | 15-uuid-bytes | `uuid` | ✅ builds + runs | `from_bytes` `[u8;16]` param + `as_bytes` `&[u8;16]` result, via `List Int` |
 | 16-hex | `hex` | ✅ builds + runs | `encode`/`decode` — generic `<T: AsRef<[u8]>>` monomorphised to `List Int` (Alt-1 proof) |
 | 17-db-todo-cli | `Std.Db` | ✅ builds + runs | Full CRUD via sqlx (insert/get/update/delete/find/transaction) — reuses unmodified `examples/07-todo-cli` Sky source. Builds clean on sqlite **+ mysql + postgres** (cross-backend per `sky.toml`). |
+| 18-auth-signup | `Std.Auth` | ✅ builds + runs | `register` + `setRole` via bcrypt + sqlx; duplicate-email surfaces the right error. Backend-portable schema (`db_auto_id_column` per driver) — builds clean on sqlite + mysql + postgres. |
 
 ### `examples/00-standard-libs` on `target=rust`
 
@@ -147,7 +148,8 @@ Sky-coercible (Alt-1 v2), and primitive ⇄ opaque round-tripping.
 ```
 runtime-rust/src/sky_runtime/
 ├── config.rs         GENERATED at build time per sky.toml driver — DbPool/DbRow/SKY_DB_URL +
-│                     driver-aware helpers (db_last_insert_id, db_format_sql) for cross-backend Db
+│                     driver-aware helpers (db_last_insert_id, db_format_sql,
+│                     db_auto_id_column) for cross-backend Db + Auth schema
 ├── core.rs           SkyResult<E,A>, SkyMaybe<T>, SkyTask<E,A>, ok_res, str_err,
 │                     list/string/float helpers, result_with_default, result_traverse,
 │                     byte FFI coercion: to_u8_vec / from_u8_slice / to_u8_array
@@ -177,6 +179,9 @@ runtime-rust/src/sky_runtime/
 │                     findOneByField/findManyByField/findByConditions/unsafeFindWhere/
 │                     queryDecode/withTransaction/close + raw exec/query/migrate).
 │                     Cross-backend: sqlite / mysql / postgres via config.rs helpers.
+├── auth.rs           Std.Auth — bcrypt hash/verify/strength + jsonwebtoken HS256
+│                     sign/verify + register/login/setRole over sqlx. Schema is
+│                     backend-portable via db_auto_id_column() in config.rs.
 ├── ffi_polyfills.rs  Ffi.callPure / callTask / toAny runtime polyfills (panic-with-message
 │                     for non-peephole-resolvable shapes; identity for toAny)
 └── mod.rs            re-exports config + core; other modules via sky_runtime::<mod>::<fn>
@@ -633,9 +638,11 @@ sky install
 - **Sub-A.13** — codegen-level type-default propagation for empty literals (`vec![]` /
   `SkyMaybe::Nothing`) in unconstrained generic-argument positions. Closes the
   last 4 errors on `examples/00-standard-libs`.
-- **Sub-C — Std.Auth** — `hashPassword`/`verifyPassword` (bcrypt), `signToken`/
-  `verifyToken` (JWT — jwt module already present), `register`/`login` (DB-backed
-  via the now-shipped Std.Db).
+- ~~**Sub-C — Std.Auth**~~ — ✅ shipped (sub-C + sub-C.1). 9 kernels in
+  `runtime-rust/src/sky_runtime/auth.rs`; `examples/rust/18-auth-signup`
+  drives register/setRole on sqlite + mysql + postgres. Standing gaps:
+  postgres `register`/`login` id roundtrip (needs `RETURNING id` — shared
+  with sub-B), `Auth.calibrateCost` (needs upstream Sky-side surface).
 - **`Db.withTransaction` single-connection variant** — runtime helper that takes a
   reserved `PoolConnection` so rollback isolation is guaranteed without requiring
   user-side pool configuration.
