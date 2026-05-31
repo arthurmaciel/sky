@@ -1903,6 +1903,10 @@ dbBackendHelpers "postgres" =
     , "    }"
     , "    out"
     , "}"
+    , ""
+    , "/// Sub-C.1 — DDL fragment for an auto-incrementing primary key column."
+    , "/// Postgres: BIGSERIAL (auto-id, 64-bit)."
+    , "pub fn db_auto_id_column() -> &'static str { \"id BIGSERIAL PRIMARY KEY\" }"
     ]
 dbBackendHelpers "mysql" =
     [ "pub fn db_last_insert_id(res: &sqlx::mysql::MySqlQueryResult) -> i64 {"
@@ -1911,6 +1915,12 @@ dbBackendHelpers "mysql" =
     , ""
     , "/// MySQL uses `?` placeholders, same as sqlite — identity."
     , "pub fn db_format_sql(sql: String) -> String { sql }"
+    , ""
+    , "/// Sub-C.1 — DDL fragment for an auto-incrementing primary key column."
+    , "/// MySQL: BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY."
+    , "pub fn db_auto_id_column() -> &'static str {"
+    , "    \"id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY\""
+    , "}"
     ]
 dbBackendHelpers _ =  -- sqlite default
     [ "pub fn db_last_insert_id(res: &sqlx::sqlite::SqliteQueryResult) -> i64 {"
@@ -1919,6 +1929,12 @@ dbBackendHelpers _ =  -- sqlite default
     , ""
     , "/// SQLite uses `?` placeholders — identity."
     , "pub fn db_format_sql(sql: String) -> String { sql }"
+    , ""
+    , "/// Sub-C.1 — DDL fragment for an auto-incrementing primary key column."
+    , "/// SQLite: INTEGER PRIMARY KEY AUTOINCREMENT."
+    , "pub fn db_auto_id_column() -> &'static str {"
+    , "    \"id INTEGER PRIMARY KEY AUTOINCREMENT\""
+    , "}"
     ]
 
 emitRust :: RustBuilder -> String -> String -> [String] -> (String, [(String, String)])

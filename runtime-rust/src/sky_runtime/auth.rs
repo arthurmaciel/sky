@@ -144,17 +144,22 @@ pub fn auth_verify_token<E: From<String>>(
 
 /// Idempotent `CREATE TABLE IF NOT EXISTS users (...)`. Runs at the start of
 /// register/login/setRole so the schema is always available without users
-/// having to call a separate migration. sqlite-specific syntax — sub-C.1
-/// would add per-driver auto-id-column for mysql/postgres.
+/// having to call a separate migration. The id-column DDL is per-driver
+/// (sub-C.1) — `db_auto_id_column()` returns the right fragment for sqlite
+/// (`INTEGER PRIMARY KEY AUTOINCREMENT`), mysql (`BIGINT NOT NULL
+/// AUTO_INCREMENT PRIMARY KEY`), or postgres (`BIGSERIAL PRIMARY KEY`).
 async fn ensure_users_schema<E: From<String> + Send>(conn: &Db) -> SkyResult<E, ()> {
-    let schema = "CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'user',
-        created_at INTEGER NOT NULL
-    )";
-    match sqlx::query(schema).execute(conn).await {
+    let schema = format!(
+        "CREATE TABLE IF NOT EXISTS users (
+            {},
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            created_at BIGINT NOT NULL
+        )",
+        db_auto_id_column()
+    );
+    match sqlx::query(&schema).execute(conn).await {
         Ok(_) => SkyResult::Ok(()),
         Err(e) => SkyResult::Err(format!("auth.users schema: {}", e).into()),
     }

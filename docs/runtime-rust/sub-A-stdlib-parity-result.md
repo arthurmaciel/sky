@@ -445,3 +445,50 @@ JWT round-trips and password-strength edge cases are covered by `cargo test --fe
 - Schema uses sqlite-native `INTEGER PRIMARY KEY AUTOINCREMENT`. mysql/postgres require manual schema adjustment until sub-C.1 lands a per-driver `auto_id_column` helper in generated `config.rs`.
 - `signToken` / `verifyToken` claims are `HashMap<String, String>` at the FFI boundary — Sky-side users wrap typed records into string maps.
 - `login` does not differentiate "no such user" from "wrong password" by design (timing-safe + non-enumerable).
+
+---
+
+## Sub-C.1 — Multi-backend auth schema (mysql + postgres)
+
+**Date:** 2026-05-31
+**Status:** ✅ shipped — auth runtime is now backend-agnostic.
+
+Replaced the hard-coded sqlite `INTEGER PRIMARY KEY AUTOINCREMENT` in
+`ensure_users_schema()` with a `db_auto_id_column()` helper generated per
+driver:
+
+| Driver | `db_auto_id_column()` returns |
+|---|---|
+| sqlite | `id INTEGER PRIMARY KEY AUTOINCREMENT` |
+| mysql | `id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY` |
+| postgres | `id BIGSERIAL PRIMARY KEY` |
+
+`created_at` widened to `BIGINT` (uniformly portable; sqlite still accepts it).
+
+### Files
+
+- `src/Sky/Generate/Rust/Builder.hs::dbBackendHelpers` — three new `db_auto_id_column` impls
+- `runtime-rust/src/sky_runtime/config.rs` — standalone shim defaults to sqlite
+- `runtime-rust/src/sky_runtime/auth.rs::ensure_users_schema` — uses the helper
+
+### Verification
+
+- `cargo test --features full --lib auth`: 6/6 still pass (schema change is
+  transparent under sqlite).
+- `examples/rust/18-auth-signup` builds clean under all three drivers
+  (sqlite + mysql + postgres) and the resulting `config.rs` emits the right
+  per-driver `db_auto_id_column()` fragment.
+- Postgres `register` still requires `INSERT … RETURNING id` to surface the
+  new id (`db_last_insert_id` returns 0 on postgres by sqlx contract) — that's
+  a runtime gap shared with sub-B's other DB kernels, tracked separately.
+
+## Sub-C.4 — bcrypt cost calibration
+
+**Status:** ⛔ not shipped — out of scope for this branch.
+
+`auth.calibrateCost` would need a Sky-side declaration in
+`sky-stdlib/Std/Auth.sky`, which is shared between Go and Rust and lives
+upstream. Adding a new Auth surface unilaterally would diverge from upstream
+and violate the cross-backend rule. Defer until upstream lands the surface or
+we land a sub-D-class change with explicit user permission.
+
