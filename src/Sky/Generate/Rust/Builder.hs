@@ -258,6 +258,16 @@ kernelsZeroArg = Set.fromList
 data EmitCtx = EmitCtx
     { ecRecordMap :: Map.Map String String  -- field-key -> struct name
     , ecSolvedTypes :: Map.Map String Can.Type  -- function name -> inferred type
+    , ecRegionTypes :: Map.Map Ann.Region Can.Type
+        -- Sub-A.13: per-region solved type from Sky.Type.Solve._stRegions.
+        -- exprToRustString consults this on entry to set ecExpectedType so
+        -- empty-literal emit sites (Can.List [], SkyMaybe::Nothing,
+        -- SkyResult::Err) can emit turbofish instead of relying on Rust's
+        -- local type inference (which can't see through them).
+    , ecExpectedType :: Maybe Can.Type
+        -- Sub-A.13: type at the current expression's region, looked up from
+        -- ecRegionTypes at the top of exprToRustString. Nothing when no entry
+        -- exists for the region (the emit sites then fall back to a default).
     , ecCloneVars :: Set.Set String  -- vars that need .clone() at every use site
     , ecCopyVars  :: Set.Set String  -- vars whose type is Rust Copy (i64, f64, bool, ...)
     , ecPipeInnerType :: Maybe String  -- inner type of piped Task<A>, set by |>
@@ -1817,8 +1827,8 @@ flattenCons recMap headPat tailPat =
     unwrapPat (Ann.At _ (Can.PAlias inner _)) = inner
     unwrapPat p = p
 
-buildProgram :: [Can.Module] -> Map.Map String Can.Type -> Map.Map (String, String) (String, String) -> RustBuilder
-buildProgram mods solvedTypes kernelAliases = 
+buildProgram :: [Can.Module] -> Map.Map String Can.Type -> Map.Map Ann.Region Can.Type -> Map.Map (String, String) (String, String) -> RustBuilder
+buildProgram mods solvedTypes regionTypes kernelAliases =
     let aliasMap = buildRecordMap mods
         rawAnon = collectAnonRecordTypes mods
         -- Only include anonymous record keys NOT already covered by a type alias
@@ -1846,7 +1856,7 @@ buildProgram mods solvedTypes kernelAliases =
             , (name, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecKernelAliases = kernelAliases }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecKernelAliases = kernelAliases }
         usage = analyzeKernelUsage mods
         zeroArgDefs = collectZeroArgDefs mods
         noCloneVars = Set.empty
