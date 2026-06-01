@@ -620,7 +620,7 @@ sky install
 
 | Limitation | Description | Workaround |
 |---|---|---|
-| Empty-literal type defaulting | `List.head []` / `Maybe.map _ Nothing` / `Result.mapError _ (Err _)` in test-only positions can't infer the element type — 4 such errors remain in `examples/00-standard-libs` on `target=rust`. | Sky source can annotate the literal's type. Sub-A.13 plan addresses this at the codegen level: `docs/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`. |
+| Empty-literal type defaulting | `List.head []` / `Maybe.map _ Nothing` / `Result.mapError _ (Err _)` in test-only positions can't infer the element type — 4 such errors remain in `examples/00-standard-libs` on `target=rust`. | Sky source can annotate the literal's type. Sub-A.13 plan addresses this at the codegen level: `runtime-rust/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`. |
 | `any` in record fields on `target=rust` | The Rust codegen refuses to emit `Box<dyn Any>` for an `any`-typed Sky record field (load-bearing architectural principle — see the section above). Build fails with a structured `error[Rust]: any-typed record field on \`--target rust\`` diagnostic. | Encode the heterogeneous field as an ADT upstream (the path PR #119 took for `RetryPolicy`), or — defence-in-depth — ship a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky` with an HM-pure shape. |
 | `Task.retryWith` on `target=rust` may need a thunk shape | Rust's `SkyTask = Pin<Box<dyn Future>>` is one-shot (not `Clone`); the retry loop needs a fresh Future per attempt. Decision deferred to the sub-D restart against v0.15.51: either the codegen wraps the Task arg in a thunk at the `retryWith` call site, or we redesign `SkyTask` to be cloneable, or upstream adopts a thunk-shaped `retryWith`. | TBD — captured in the new scope table above. |
 | `Result.mapError` inference cascade | After F1's polymorphic signature fix the closure infers; outer call-site inference can still ambiguate the SkyResult<E,T> ok-slot. | Wrap in a typed `let` to pin E1/E2 at the call site. |
@@ -647,7 +647,7 @@ The original sub-D arc against v0.15.44 (WIP sister branch `feat/runtime-rust-su
 | Sub-step | Status | What it ships |
 |---|---|---|
 | Sub-D step 1 — override loader + `any`-rejection diagnostic | ✅ shipped & validated on the retired sister branch; carrying forward to the v0.15.51 restart | TH-embedded `runtime-rust/sky-stdlib-overrides/<Module>.sky` overlay, target-gated; `error[Rust]: any-typed record field on --target rust` diagnostic with actionable note pointing at the override mechanism |
-| Sub-D step 4 — generic-ADT codegen fixes (E0428/E0412/E0107/E0599) | ⏳ spec + 7-task plan retained at `docs/superpowers/specs/2026-06-01-sub-D-step4-generic-adt-codegen-design.md` + `docs/superpowers/plans/2026-06-01-sub-D-step4-generic-adt-codegen.md`. Bugs are version-independent — surface on any generic ADT (upstream's `ShouldRetry e` or user-defined). | `REnumDef` gains a gens slot; shared `rustifyTypeVar` capitalisation helper across the enum + struct paths; legacy `pub type X = String` fallback gated on union/struct registry absence; ctor use-site resolves via union registry rather than the legacy alias |
+| Sub-D step 4 — generic-ADT codegen fixes (E0428/E0412/E0107/E0599) | ⏳ spec + 7-task plan retained at `runtime-rust/superpowers/specs/2026-06-01-sub-D-step4-generic-adt-codegen-design.md` + `runtime-rust/superpowers/plans/2026-06-01-sub-D-step4-generic-adt-codegen.md`. Bugs are version-independent — surface on any generic ADT (upstream's `ShouldRetry e` or user-defined). | `REnumDef` gains a gens slot; shared `rustifyTypeVar` capitalisation helper across the enum + struct paths; legacy `pub type X = String` fallback gated on union/struct registry absence; ctor use-site resolves via union registry rather than the legacy alias |
 | Sub-D Tasks 6-14 — runtime kernels + AEAD + Bytes + HTTP types | ⏳ scope re-derives from v0.15.51's new content (see below). Plan needs rewriting against the v0.15.51 surface, not the v0.15.44-targeted version. | New Sub-D plan v2 (TBD): `task_retry_with` runtime, AEAD kernels (aes-gcm / chacha20poly1305 / PBKDF2), `Sky.Core.Bytes` kernel wiring, HTTP types no-op verification |
 
 ### Lessons retained from the WIP sister branch (now retired)
@@ -701,7 +701,7 @@ The original sub-D plan targeted v0.15.44. Upstream has since shipped a substant
   generic-argument positions. Closes the last 4 errors on
   `examples/00-standard-libs` on `target=rust` (orthogonal to sub-D; lands
   on `feat/runtime-rust` independently).
-  Plan: `docs/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`.
+  Plan: `runtime-rust/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`.
 - **`Db.withTransaction` single-connection variant** — runtime helper that
   takes a reserved `PoolConnection` so rollback isolation is guaranteed
   without requiring user-side pool configuration.
