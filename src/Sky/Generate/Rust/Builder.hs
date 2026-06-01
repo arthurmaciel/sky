@@ -281,6 +281,12 @@ data EmitCtx = EmitCtx
     , ecZeroArgDefs :: Set.Set (String, String)  -- (modPrefix, name) for zero-arg definitions
     , ecNoCloneVars :: Set.Set String  -- vars whose types don't implement Clone (e.g. Decoder)
     , ecCtorArity :: Map.Map String Int  -- alias name -> field count (for succeed curry wrapping)
+    , ecCtorFieldTypes :: Map.Map String [Can.Type]
+        -- Sub-A.13: ADT constructor name -> declared field types (from unions).
+        -- Lets a ctor call propagate a concrete field type into an empty-
+        -- collection argument (e.g. Claims [] where the field is
+        -- List (String, Value)) so the arg pins the right element type instead
+        -- of falling back to the monomorphic i64 default.
     , ecKernelAliases :: Map.Map (String, String) (String, String)
         -- ^ Stage-4 kernel alias map: (canonicalModuleName, fnName) ->
         --   (kernelMod, kernelFn).  Populated during generateRust from
@@ -1261,6 +1267,23 @@ exprToRustString ctx (Ann.At region expr) =
         ctx'     = ctx { ecExpectedType = expected }
     in exprToRustInner ctx' expr
 
+-- | Sub-A.13: emit an expression with an explicitly forced expected type,
+-- bypassing the per-region lookup in exprToRustString. Used to push a
+-- constructor's declared field type into an empty-collection argument so the
+-- arg pins the right element type. Only the empty-literal emit sites read
+-- ecExpectedType, so forcing it on any other shape is a no-op.
+exprToRustStringForced :: EmitCtx -> Can.Type -> Can.Expr -> String
+exprToRustStringForced ctx ty (Ann.At _ e) =
+    exprToRustInner (ctx { ecExpectedType = Just ty }) e
+
+-- | Sub-A.13: does an argument expression benefit from ctor-field-type
+-- propagation? Empty list / Nothing are the empty-collection literals whose
+-- element type Rust can't infer from a bare emission.
+isEmptyishArg :: Can.Expr -> Bool
+isEmptyishArg (Ann.At _ (Can.List [])) = True
+isEmptyishArg (Ann.At _ (Can.VarCtor _ _ "Maybe" "Nothing" _)) = True
+isEmptyishArg _ = False
+
 -- | Does a closure pattern discard its argument (wildcard / `_`-prefixed)?
 isWildcardPat :: Can.Pattern -> Bool
 isWildcardPat (Ann.At _ Can.PAnything) = True
@@ -1486,6 +1509,24 @@ exprToRustInner ctx e = case e of
         , not (ecInGenericFn ctx) ->
             "SkyResult::<SkyError, i64>::" ++ ctorName
                 ++ "(" ++ exprToRustString ctx innerArg ++ ")"  -- default (Task 8: stderr warning)
+    -- Sub-A.13: constructor call where some argument is an empty collection
+    -- and the corresponding declared field type is fully concrete. Propagate
+    -- that field type into the arg so it pins the element type (e.g. Claims []
+    -- with field List (String, Value) -> Vec::<(String, Value)>::new()). This
+    -- arm ONLY fires for such args; every other ctor call (and every empty-ish
+    -- arg whose field type is polymorphic, e.g. Just []) falls through to the
+    -- generic path unchanged. Non-empty args keep the normal clone-aware emit.
+    Can.Call (Ann.At cr vc@(Can.VarCtor _ _ _ ctorName _)) args
+        | Just fieldTys <- Map.lookup ctorName (ecCtorFieldTypes ctx)
+        , length fieldTys == length args
+        , or (zipWith (\ty a -> isEmptyishArg a && not (hasTypeVars ty)) fieldTys args) ->
+            let calleeName = exprToRustString ctx (Ann.At cr vc)
+                argStrs = zipWith
+                    (\ty a -> if isEmptyishArg a && not (hasTypeVars ty)
+                              then exprToRustStringForced ctx ty a
+                              else argToRustString ctx False a)
+                    fieldTys args
+            in calleeName ++ "(" ++ intercalate ", " argStrs ++ ")"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             -- sub-A.12 F2: detect partial application (Sky source has currying;
@@ -1935,7 +1976,16 @@ buildProgram mods solvedTypes regionTypes kernelAliases =
             , (name, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecKernelAliases = kernelAliases }
+        -- Sub-A.13: ctor name -> declared field types, harvested from every
+        -- module's unions (Ctor name tag arity fieldTypes).
+        ctorFieldTypes = Map.fromList
+            [ (ctorName, fieldTys)
+            | mod <- mods
+            , union <- Map.elems (Can._unions mod)
+            , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
+            ]
+
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases }
         usage = analyzeKernelUsage mods
         zeroArgDefs = collectZeroArgDefs mods
         noCloneVars = Set.empty
