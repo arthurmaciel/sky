@@ -616,6 +616,46 @@ sky install
 
 ---
 
+## Disk hygiene
+
+Cargo builds accumulate fast. A full Rust-example sweep can produce 20+ GB of `target/` dirs across the examples. Locations and their sizes after typical sessions:
+
+| Path | Typical size | What | Regen cost |
+|---|---|---|---|
+| `runtime-rust/target/` | up to ~4 GB | runtime crate's own `cargo build`/`test --features full` outputs | ~2-3 min `cargo test --features full --lib` |
+| `runtime-rust/tests/**/sky-out/Rust/target/` | varies | per-test-fixture cargo targets | per-fixture, usually <1 min |
+| `tools/sky-ffi-inspect-rs/target/` | ~600 MB | inspector cargo target (only when iterating on inspector source) | ~30 s |
+| `examples/rust/*/sky-out/Rust/target/` | 1-2 GB each | per-example cargo targets — 18 examples → up to 36 GB if all built without cleanup | ~30-60 s per example |
+| `~/.cache/sky/tools/sky-ffi-inspect-rs/` | ~500 MB | TH-materialized inspector source + its built target binary | ~30 s on next `sky add --target rust` |
+| `dist-newstyle/` (cabal output) | ~200 MB | Sky compiler build artifacts | ~3-5 min full rebuild |
+
+**Per-example sweep idiom** (already used in scripts and `runtime-rust/superpowers/plans/`):
+
+```bash
+for d in examples/rust/*/; do
+    (cd "$d" && rm -rf sky-out .skycache .skydeps
+        && /home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky
+        && rm -rf "$d/sky-out/Rust/target")
+done
+```
+
+The `rm -rf .../sky-out/Rust/target` immediately after each build is what keeps the loop from filling the disk. Without it, the 18-example sweep needs ~36 GB headroom; with it, ~2-3 GB peak.
+
+**Manual reclaim** when disk is tight:
+
+```bash
+rm -rf runtime-rust/target                              # ~4 GB
+rm -rf tools/sky-ffi-inspect-rs/target                  # ~600 MB
+rm -rf ~/.cache/sky                                     # ~500 MB
+find examples/rust -type d -name target -exec rm -rf {} + 2>/dev/null   # whatever's there
+```
+
+`~/.cargo/registry/` and `~/.cargo/git/` are global Cargo state shared across all your Rust projects — leave them alone unless you genuinely need the GB-scale reclaim. They auto-prune on Cargo's schedule and rebuilding them is slow (re-downloads crate metadata).
+
+CLAUDE.md non-negotiable §6 (added upstream v0.15.54) codifies disk hygiene as a contributor rule; the table above is the Rust-specific extension.
+
+---
+
 ## Known limitations
 
 | Limitation | Description | Workaround |
