@@ -268,6 +268,12 @@ data EmitCtx = EmitCtx
         -- Sub-A.13: type at the current expression's region, looked up from
         -- ecRegionTypes at the top of exprToRustString. Nothing when no entry
         -- exists for the region (the emit sites then fall back to a default).
+    , ecInGenericFn :: Bool
+        -- Sub-A.13: True while emitting the body of a function that declares
+        -- Rust generic params. An empty-literal whose type is not fully
+        -- concrete stays BARE inside a generic fn (Rust infers it from the
+        -- signature) but is DEFAULTED in a monomorphic fn (Rust can't infer
+        -- and there's no generic param to bind — the genuine E0283 case).
     , ecCloneVars :: Set.Set String  -- vars that need .clone() at every use site
     , ecCopyVars  :: Set.Set String  -- vars whose type is Rust Copy (i64, f64, bool, ...)
     , ecPipeInnerType :: Maybe String  -- inner type of piped Task<A>, set by |>
@@ -692,7 +698,8 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
             [ n | (n, t) <- zip paramNames paramTys
             , not (hasTypeVars t) && isCanTypeCopy t ]
         ctx' = ctx { ecCloneVars = Set.fromList multiVars
-                   , ecCopyVars = copyVars }
+                   , ecCopyVars = copyVars
+                   , ecInGenericFn = not (null genVars) }  -- Sub-A.13
         bodyStr = exprToRustString ctx' body
         -- Collect destructure preludes for non-trivial pattern args. The
         -- prelude is `let <Pattern> = __pN else { unreachable!() };` per
@@ -723,7 +730,8 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
                   else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug") tvarNames) ++ ">"
         multiBody = collectVarLocalsMulti body
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
-        ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx }
+        ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx
+                   , ecInGenericFn = not (null tvarNames) }  -- Sub-A.13
     in RustFunction rustName genDecl params ret (preludes ++ exprToRustString ctx' body)
 defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
     let vars = intercalate "_" (patBindingVars pat)
@@ -1347,13 +1355,44 @@ exprToRustInner ctx e = case e of
            else if Set.member fnName kernelsZeroArg
                 then fnName ++ tf ++ "()"
            else fnName ++ tf
-    Can.VarCtor _ modName typeName ctorName _ -> kernelCtorToRust modName typeName ctorName
+    Can.VarCtor _ modName typeName ctorName _
+        -- Sub-A.13: the nullary Maybe/Nothing ctor. Three states (see the
+        -- Can.List arm below for the full rationale):
+        --   * concrete Maybe<val> -> SkyMaybe::<val>::Nothing
+        --   * Maybe<val> w/ TVars -> bare (generic context, Rust infers)
+        --   * no region type      -> SkyMaybe::<i64>::Nothing (phantom default)
+        -- kernelCtorToRust doesn't see ctx, so handle Nothing inline here.
+        | typeName == "Maybe", ctorName == "Nothing" -> case ecExpectedType ctx of
+            Just (Can.TType _ "Maybe" [valTy])
+                | Just rustVal <- rustifyExpectedType (ecRecordMap ctx) valTy ->
+                    "SkyMaybe::<" ++ rustVal ++ ">::Nothing"
+            _ | ecInGenericFn ctx -> kernelCtorToRust modName typeName ctorName  -- generic fn: Rust infers
+              | otherwise          -> "SkyMaybe::<i64>::Nothing"  -- monomorphic phantom (Task 8: stderr warning)
+        | otherwise -> kernelCtorToRust modName typeName ctorName
     Can.Chr [c] -> rustCharLit c
     Can.Chr s -> rustStringLit s
     Can.Str s -> rustStringLit s ++ ".to_string()"
     Can.Int i -> show i
     Can.Float f -> show f
-    Can.List es -> "vec![" ++ intercalate ", " (map (exprToRustString ctx) es) ++ "]"
+    Can.List es
+        -- Sub-A.13: an empty list literal gives Rust no element type to infer.
+        -- Three states drive the choice (set in exprToRustString from the
+        -- region's solver type — see ecExpectedType):
+        --   * concrete List<elem>  -> Vec::<elem>::new()  (pin the type)
+        --   * List<elem> w/ TVars  -> bare vec![]         (generic context: the
+        --       element is the fn's own type param, which Rust infers from the
+        --       signature; turbofishing would clobber the generic)
+        --   * no region type       -> Vec::<i64>::new()   (monomorphic phantom:
+        --       Rust can't infer and there's no generic param to bind; any
+        --       concrete type is safe because the list is empty)
+        | null es -> case ecExpectedType ctx of
+            Just (Can.TType _ "List" [elemTy])
+                | Just rustElem <- rustifyExpectedType (ecRecordMap ctx) elemTy ->
+                    "Vec::<" ++ rustElem ++ ">::new()"
+            _ | ecInGenericFn ctx -> "vec![]"            -- generic fn: Rust infers
+              | otherwise          -> "Vec::<i64>::new()" -- monomorphic phantom (Task 8: stderr warning)
+        | otherwise ->
+            "vec![" ++ intercalate ", " (map (exprToRustString ctx) es) ++ "]"
     Can.Negate e -> "-" ++ exprToRustString ctx e
     Can.Binop op _ _ _ a b 
         | op == "|>" -> case b of
@@ -1421,6 +1460,32 @@ exprToRustInner ctx e = case e of
     -- net for indirect references, but most call sites match here).
     Can.Call (Ann.At _ (Can.VarKernel "Ffi" "toAny")) [inner] ->
         exprToRustString ctx inner
+    -- Sub-A.13: Result/Ok and Result/Err constructor calls. The wrapping
+    -- region's type is Result<E, A>; emit SkyResult::<E, A>::Ctor(inner) so
+    -- Rust doesn't have to infer the unused-side type from a discarded value
+    -- (the E0283 'type annotations needed' class). Only fires when BOTH sides
+    -- are fully concrete — a free side means we're in a generic context where
+    -- Rust infers from the signature, and turbofishing would clobber it. When
+    -- the guards fail this arm does not match and control falls through to the
+    -- generic Can.Call path below, preserving today's inference-driven output.
+    -- concrete both sides -> turbofish
+    Can.Call (Ann.At _ (Can.VarCtor _ _ "Result" ctorName _)) [innerArg]
+        | ctorName == "Ok" || ctorName == "Err"
+        , Just (Can.TType _ "Result" [errTy, okTy]) <- ecExpectedType ctx
+        , Just rustErr <- rustifyExpectedType (ecRecordMap ctx) errTy
+        , Just rustOk  <- rustifyExpectedType (ecRecordMap ctx) okTy ->
+            "SkyResult::<" ++ rustErr ++ ", " ++ rustOk ++ ">::"
+                ++ ctorName ++ "(" ++ exprToRustString ctx innerArg ++ ")"
+    -- monomorphic fn, type not fully concrete -> default the unconstrained
+    -- side. Err carries Sky's Error idiom (Cardinal Rule 1); the Ok side is
+    -- phantom so i64 is a safe filler. Inside a GENERIC fn this arm does not
+    -- match, so control falls through to the generic Can.Call path where Rust
+    -- infers from the signature.
+    Can.Call (Ann.At _ (Can.VarCtor _ _ "Result" ctorName _)) [innerArg]
+        | (ctorName == "Ok" || ctorName == "Err")
+        , not (ecInGenericFn ctx) ->
+            "SkyResult::<SkyError, i64>::" ++ ctorName
+                ++ "(" ++ exprToRustString ctx innerArg ++ ")"  -- default (Task 8: stderr warning)
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             -- sub-A.12 F2: detect partial application (Sky source has currying;
@@ -1870,7 +1935,7 @@ buildProgram mods solvedTypes regionTypes kernelAliases =
             , (name, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecKernelAliases = kernelAliases }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecKernelAliases = kernelAliases }
         usage = analyzeKernelUsage mods
         zeroArgDefs = collectZeroArgDefs mods
         noCloneVars = Set.empty
