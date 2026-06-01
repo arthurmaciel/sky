@@ -398,6 +398,15 @@ hasTypeVars (Can.TTuple a b rest) = any hasTypeVars (a:b:rest)
 hasTypeVars (Can.TRecord fields _) = any (hasTypeVars . Can._fieldType) (Map.elems fields)
 hasTypeVars _ = False
 
+-- | Sub-A.13: convert a solver-inferred Can.Type into a Rust type string,
+-- suitable for turbofish at empty-literal emit sites. Returns Nothing when
+-- the type still carries unbound type variables (the caller falls back to
+-- a safe default with a stderr warning).
+rustifyExpectedType :: Map.Map String String -> Can.Type -> Maybe String
+rustifyExpectedType recMap ty
+    | hasTypeVars ty = Nothing
+    | otherwise      = Just (typeToRustString recMap ty)
+
 -- | Collect all type variable names from a type (for generic param declaration).
 collectTVars :: Can.Type -> [String]
 collectTVars (Can.TVar v) = [v]
@@ -1237,7 +1246,12 @@ rustCharLit c
     | otherwise  = "'" ++ [c] ++ "'"
 
 exprToRustString :: EmitCtx -> Can.Expr -> String
-exprToRustString ctx (Ann.At _ expr) = exprToRustInner ctx expr
+exprToRustString ctx (Ann.At region expr) =
+    -- Sub-A.13: look up the wrapping region's solver-inferred type and inject
+    -- it as ecExpectedType so the empty-literal emit sites can turbofish.
+    let expected = Map.lookup region (ecRegionTypes ctx)
+        ctx'     = ctx { ecExpectedType = expected }
+    in exprToRustInner ctx' expr
 
 -- | Does a closure pattern discard its argument (wildcard / `_`-prefixed)?
 isWildcardPat :: Can.Pattern -> Bool
