@@ -475,6 +475,32 @@ params skip `coerceArg` (its `eraseTypeParams` would rewrite
 - **DCE** — whole-program Sky-side dead-code elimination prunes
   unreachable defs + FFI bindings before lowering.
 
+### Synchronous-panic gate (v0.15.43)
+
+Every emitted `func main()` starts with
+`defer rt.LogPanicAndExit()`. The deferred call's `recover()`
+catches whatever escaped the synchronous Sky path (Sky.Cli /
+Sky.Tui / batch jobs — every `main = Task.run …` shape that's
+not a server), classifies the panic (DivisionByZero,
+TypeMismatch, CoerceFailure, ComparisonMismatch, IndexOutOfRange,
+NilDereference, CompilerBug, Unexpected), emits a structured
+Error log line with a 4-byte errId, and exits 1 — instead of
+dumping a Go stack. `SKY_LOG_FORMAT=json` honours the JSON shape.
+
+Reachable-from-Sky panic sites: `rt.IntDiv` / `rt.Rem` / `rt.Div`
+(div-by-zero), `rt.AsInt` / `AsFloat` / `AsBool` (heterogeneous
+slice / untyped FFI return), `rt.cmp`, `rt.Coerce` (3 variants),
+`rt.skyCallDirect`, plus Go-runtime `index out of range` /
+nil-deref. Compiler-bug-contract panic sites: `coerceInner`,
+`Unreachable`, `Ffi.kernel` — surface as `CompilerBug` with a
+"please report" hint. Full site audit:
+`docs/v0.15.x-hardening/audits/CYCLE-06-PC-panic-site-audit.md`.
+
+Sky.Http.Server handlers already have a per-request defer/recover
+(at `rt.go:6863`) — they emit a 500 instead of crashing. The
+Cmd.perform goroutine wraps `rt.SafeGo`. The top-level recover
+closes the remaining synchronous surface.
+
 ## Build & test
 
 ```bash
@@ -633,7 +659,7 @@ Each binding is either:
 | Module | Path | Key functions |
 |---|---|---|
 | `Basics` | `Sky.Core.Basics` (autoloaded via `Sky.Core.Prelude`) | identity, always, not, toString, modBy, clamp, fst, snd, compare, negate, abs, sqrt, min, max |
-| `String` | `Sky.Core.String` | 33 entries — length, reverse, append, split, join, contains, startsWith, endsWith, toInt, fromInt, toFloat, fromFloat, toUpper, toLower, trim/trimStart/trimEnd, replace, slice, isEmpty, fromChar, toList, fromList, repeat, padLeft, padRight, casefold, equalFold, isEmail, isUrl, words, lines, concat |
+| `String` | `Sky.Core.String` | 36 entries — length, reverse, append, split, join, contains/containsIn, startsWith/startsWithIn, endsWith/endsWithIn (haystack-first In-suffixed companions added v0.15.47), toInt, fromInt, toFloat, fromFloat, toUpper, toLower, trim/trimStart/trimEnd, replace, slice, isEmpty, fromChar, toList, fromList, repeat, padLeft, padRight, casefold, equalFold, isEmail, isUrl, words, lines, concat |
 | `List` | `Sky.Core.List` | map, filter, foldl, foldr, length, head, tail, take, drop, append, concat, concatMap, reverse, member, any, all, range, zip, find, isEmpty, indexedMap, cons + reverseHelp/indexedMapHelp |
 | `Dict` | `Sky.Core.Dict` (kernel) | empty, insert, get, remove, member, keys, values, toList, fromList, map, foldl, union |
 | `Set` | `Sky.Core.Set` (kernel) | empty, insert, remove, member, union, diff, intersect, fromList, toList, size |
@@ -643,7 +669,8 @@ Each binding is either:
 | `Regex` | `Sky.Core.Regex` | match, find, findAll, replace, split |
 | `Char` | `Sky.Core.Char` | isAlpha, isDigit, isLower, isUpper, toUpper, toLower |
 | `Path` | `Sky.Core.Path` | base, dir, ext, isAbsolute |
-| `Crypto` | `Sky.Core.Crypto` | sha256, sha512, sha1, md5, hmacSha256, hmacSha512, rsaSha256Sign, rsaSha256Verify, constantTimeEqual (pure); randomBytes, randomToken (Task — entropy) |
+| `Crypto` | `Sky.Core.Crypto` | sha256, sha512, sha1, md5, hmacSha256, hmacSha512, rsaSha256Sign, rsaSha256Verify, constantTimeEqual (pure); aesGcmEncrypt/Decrypt, chacha20Encrypt/Decrypt, aesKeyFromPassword, chachaKeyFromPassword (Result Error String — symmetric encryption, AEAD); randomBytes, randomToken (Task — entropy) |
+| `Bytes` | `Sky.Core.Bytes` | empty, length, isEmpty, fromString/toString (UTF-8 lossy via Maybe), fromHex/toHex, fromBase64/toBase64, append, slice |
 | `Jwt` | `Sky.Core.Jwt` | encode, decode (HS256 + RS256 — signature + `exp`/`nbf` checked); `hs256`/`rs256` algorithms; `claims` builder — issuer/subject/audience/expiresAt/notBefore/issuedAt/jwtId/withClaim |
 | `Encoding` | `Sky.Core.Encoding` | base64Encode/Decode, urlEncode/Decode, hexEncode/Decode |
 | `JsonEnc` | `Sky.Core.Json.Encode` | string, int, float, bool, null, list (Elm-style `(a -> Value) -> List a -> Value`), object, encode |
@@ -657,26 +684,34 @@ Each binding is either:
 
 | Module | Path | Key functions |
 |---|---|---|
-| `Task` | `Sky.Core.Task` | succeed, fail, map, andThen, perform, sequence, parallel, lazy, run, fromResult, andThenResult, mapError, onError |
+| `Task` | `Sky.Core.Task` | succeed, fail, map, andThen, perform, sequence, parallel, lazy, run, fromResult, andThenResult, mapError, onError; **retryWith** + `RetryPolicy e` + `ShouldRetry e` ADT (RetryAlways \| RetryWhen (e -> Bool)). Build via linearBackoff / exponentialBackoff / defaultRetryPolicy; decorate via withJitter / withMaxAttempts / withBaseMs / withKind / withRetryOn (alias for retryOn). v0.15.50+ ShouldRetry is HM-pure (portable to Rust / WASM backends). |
 | `Cmd` | `Std.Cmd` | none, batch, perform, publish (echo-by-default pub/sub from update return), publishNoEcho (opt-out echo — broker skips publisher's own subscription) |
 | `Sub` | `Std.Sub` | none, every, batch, subscribeTopic (pub/sub receive) |
 | `PubSub` | `Std.PubSub` | publish (Task-shaped — callable from raw `api` handlers / post-init / scheduled jobs; complements `Cmd.publish` which is bound to update-returns), publishNoEcho (Task-shaped no-echo — sets the broker's SkipOrigin bit for v0.16+ cross-process tier propagation) |
 | `Time` | `Sky.Core.Time` | now, sleep, every, unixMillis, format/formatISO8601/formatRFC3339/formatHTTP, addMillis, diffMillis, timeString |
-| `Std.Time` | `Std.Time` | 32 entries. IANA zones, addMonths/Years (month-end CLAMPED), dayOfWeek (ISO Mon=1..Sun=7), weekOfYear (ISO 8601), startOfDay/Week/Month/Year, diffDays/Hours/Minutes/Seconds. |
-| `Random` | `Sky.Core.Random` | int, float |
-| `Http` | `Sky.Core.Http` | get, post, request (custom method/headers/body via `HttpRequest`), parseQuery (query string → `Dict String String`) |
+| `Std.Time` | `Std.Time` | 32 entries. IANA zones, addMonths/Years (month-end CLAMPED), dayOfWeek (ISO Mon=1..Sun=7), weekOfYear (ISO 8601), startOfDay/Week/Month/Year, diffDays/Hours/Minutes/Seconds. v0.15.48+ adds `*Utc` infallible companions (`dayOfWeekUtc` / `startOfDayUtc` / `yearUtc` / etc. — `Int -> Int` shape, plug "UTC" at the call site so server-internal callers don't thread `Result.withDefault 0`). |
+| `Random` | `Sky.Core.Random` | int, float, range, choice, shuffle, weighted (entropy-backed); seed, seededInt, seededFloat, seededChoice (deterministic splitmix64) |
+| `Http` | `Sky.Core.Http` | get, post, request (custom method/headers/body/timeout via `HttpRequest`), defaultRequest/withMethod/withHeader/withTimeout/withBody builders, parseQuery; typed `HttpResponse = { status : Int, body : String, headers : Dict String String }` |
 | `File` | `Sky.Core.File` | readFile, readFileLimit, readFileBytes, writeFile, append, exists, remove, mkdirAll, readDir, isDir, tempFile, copy, rename |
 | `Io` | `Sky.Core.Io` | readLine, writeStdout, writeStderr |
 | `System` | `Sky.Core.System` | args, getArg, getenv, getenvOr (bare), getenvInt, getenvBool, setenv, unsetenv, cwd, loadEnv, exit |
 | `Process` | `Sky.Core.Process` | run (subprocess) |
 | `Db` | `Std.Db` | open, connect, close, exec, execRaw, query, insertRow, getById, updateById, deleteById, findOneByField, findManyByField, findByConditions, unsafeFindWhere, queryDecode, withTransaction, migrate (versioned forward-only schema migrations + `_sky_migrations` + checksum guard), getField, getString, getInt, getBool |
-| `Auth` | `Std.Auth` | register, login, setRole (Task) + hashPassword, hashPasswordCost, verifyPassword, passwordStrength, signToken, verifyToken (Result) |
+| `Auth` | `Std.Auth` | register, login, setRole (Task) + hashPassword, hashPasswordCost, verifyPassword, passwordStrength, signToken, verifyToken (Result); v0.15.48+ signTokenWithClaims / verifyTokenWithAlgorithm — typed-builder aliases over Sky.Core.Jwt for fine-grained algorithm + claims control |
 | `Log` | `Std.Log` | println, debug, info, warn, error, debugWith, infoWith, warnWith, errorWith |
 | `Trace` | `Std.Trace` | span, event, attr — opt-in app-level tracing spans. Tier-1 spans (HTTP/session/Msg/DB/Auth/Http/File) are automatic; see `docs/observability.md` |
 | `Server` | `Sky.Http.Server` | param, queryParam, header, getCookie, static (Layer 3 surface); higher-level `get/post/listen/text/json/html` stay kernel-only |
-| `Stream` | `Sky.Http.Server.Stream` | stream, emit, finish, withContentType — server-side streaming HTTP responses (SSE / LLM token forwarding / chunked downloads). Mirror of `Sky.Core.Http.Stream` (which reads upstream bodies as Sub events). See `docs/skylive/http-streaming.md` §"Server-side" + `examples/30-sse-server-demo`. |
+| `Stream` | `Sky.Http.Server.Stream` | stream, emit, finish, withContentType — server-side streaming HTTP responses (SSE / LLM token forwarding / chunked downloads). Mirror of `Sky.Core.Http.Stream` (which reads upstream bodies as Sub events). See `docs/skylive/http-streaming.md` §"Server-side" + `examples/30-sse-server-demo`. Synchronous bridge: `Sky.Core.Http.Stream.forEachChunk hdl body` (v0.15.41+) drains an upstream stream from inside a plain Sky.Http.Server handler goroutine — needed for the relay shape (upstream chunks → `Server.Stream.emit` downstream chunk-for-chunk; no Sky.Live update loop required). See `docs/skylive/http-streaming.md` §"Synchronous relay" + `examples/32-sse-relay`. |
 | `Middleware` | `Sky.Http.Middleware` | withCors, withLogging, withBasicAuth, withRateLimit |
 | `RateLimit` | `Sky.Http.RateLimit` | allow |
+| `WebSocket` | `Sky.Core.WebSocket` (client) + `Sky.Http.Server.WebSocket` (server) | v0.15.46+. Bidirectional sockets — collab editor ops, multiplayer, bidirectional LLM chat, financial feeds. Client: `connect` / `connectWith` / `send` / `sendBinary` / `close` / `closeWithCode` (Task-tier) + `onOpen` / `onMessage` / `onClose` / `onError` (Sub-tier). Server: `upgrade` (returns from a Sky.Http.Server handler) + `sendToClient` / `sendBinaryToClient` / `broadcast` / `closeClient`. Built on `nhooyr.io/websocket`. Default 30 s heartbeat + 1 MiB max message + 64-frame read buffer. Server production gate: empty `originPatterns` returns 403 when `ENV=production`. **Stdlib typed-record convention (v0.15.46+): every typed record ships with a `default*` constructor + `with*` builder per field — always compose via builders so future field additions don't break call sites.** See `examples/33-websocket-echo`. |
+| `Cache` | `Std.Cache` | v0.15.47+. LRU + TTL in-memory cache, `Cache k v` parametric on key and value. `CacheCfg` ships with `defaultCfg` + `withMaxEntries` / `withTTL` / `withMaxBytes` per v0.15.46 convention. `new` / `get` / `put` / `remove` / `clear` / `size` / `stats` (monotone hits/misses/evictions). Backed by `hashicorp/golang-lru/v2`; lazy TTL expiry (no background goroutine). |
+| `Email` | `Std.Email` | v0.15.47+. Resend / SES / SendGrid / SMTP under one `EmailProvider` ADT. `EmailMessage` + `Attachment` typed records ship with `defaultMessage { from, to, subject }` + `with*` builders (`withCc` / `withBcc` / `withTextBody` / `withHtmlBody` / `withAttachment` / `withReplyTo`). `Email.send provider msg : Task Error String` returns the provider message id. `SKY_EMAIL_DRY_RUN=1` short-circuits for tests; `SKY_EMAIL_ENDPOINT_<PROVIDER>` overrides URLs for fixtures. |
+| `Compression` | `Std.Compression` | v0.15.47+. `gzip` / `gunzip` (RFC 1952) + `zstdCompress` / `zstdDecompress` (RFC 8478). Operates on `String` (Bytes alias). Built on `compress/gzip` (stdlib) + `klauspost/compress/zstd`. |
+| `Csv` | `Std.Csv` | v0.15.47+. `parse` / `parseWithDelimiter` (returns `Csv = { header, rows }`), `encode` / `encodeWithDelimiter` (RFC 4180 quoting), `parseStreamFromFile` for buffered large-file reading. Built on `encoding/csv` (stdlib). |
+| `Config` | `Std.Config` | v0.15.47+. Typed TOML / YAML / JSON decoders mirroring `Sky.Core.Json.Decode`'s shape — same `string` / `int` / `float` / `bool` / `nullable` / `field` / `at` / `list` / `succeed` / `fail` / `map` / `andThen` combinators. `decodeToml` / `decodeYaml` / `decodeJson` + `loadFromFile` (extension dispatch). Backends: `BurntSushi/toml` + `gopkg.in/yaml.v3` + stdlib `encoding/json`. |
+| `ToString` | `Sky.Core.ToString` | v0.15.48+. Naming-consistency surface: `fromInt`/`fromFloat`/`fromBool`/`fromTime` route to the canonical kernels — zero overhead, exists for editor / `sky doc` discoverability. AI-written code is encouraged to default to `ToString.fromInt n` rather than memorising the per-type kernel sub-namespace. |
+| `Pure` | `Sky.Core.Pure` | v0.15.50+. Uniform `() -> Task Error a` companion surface for runtime-arity-0 stdlib bindings (`uuidV4` / `uuidV7` / `timeNow` / `timeUnixMillis` / `systemArgs` / `systemCwd` / `systemLoadEnv` / `ioReadLine` / `dbConnect`). Closes Limitation #7 for new code without renaming any existing surface — every `Pure.*` is a tail-call alias to the canonical kernel, typed `SkyTask[Error, T]` end-to-end. Existing names + shapes unchanged. |
 
 ### Diverging
 
@@ -1069,12 +1104,15 @@ Full reference: `docs/skyui/overview.md`.
   browser-side cap, not security), `fileMaxWidth Int`,
   `fileMaxHeight Int`.
 - **Colour**: `rgb`, `rgba`, `white`, `black`, `transparent`.
-- **Sub-modules**: `Background` (color, image, linearGradient),
+- **Sub-modules**: `Background` (color, image, linearGradient,
+  hoverColor/focusColor/focusVisibleColor/activeColor/disabledColor),
   `Border` (color, width, widthEach, rounded, solid/dashed/dotted,
-  shadow, glow, innerShadow), `Font` (color, family, size, weight,
+  shadow, glow, innerShadow, hoverColor/focusColor/activeColor/
+  hoverWidth/hoverRounded), `Font` (color, family, size, weight,
   bold/semiBold/regular/light/extraBold/black, italic, underline,
   noDecoration, letterSpacing, alignLeft/Right/Center/Justify,
-  sansSerif/serif/monospace), `Region` (semantic landmarks routed
+  sansSerif/serif/monospace, hoverColor/focusColor/activeColor/
+  disabledColor/hoverSize), `Region` (semantic landmarks routed
   to `<h1..h6>`, `<main>`, `<nav>`, `<aside>`, `<footer>`, aria-*),
   `Input` (button, text, multiline, email, username, search,
   currentPassword, newPassword, checkbox, radio, radioRow,
@@ -1082,6 +1120,21 @@ Full reference: `docs/skyui/overview.md`.
   `Keyed` (sky-key for diff identity), `Responsive`
   (classifyDevice, adapt — Model-driven branching that needs a
   typed Msg dispatch).
+- **Pseudo-classes** (`:hover` / `:focus-visible` / `:active` /
+  `:disabled`) — per sub-module `on<State>` helpers above + generic
+  `Ui.onPseudo : PseudoClass -> List (Attribute msg) -> Attribute msg`
+  escape hatch for selector combinations no sub-module covers.
+  `PseudoClass`: `Ui.hover`, `Ui.focus`, `Ui.focusVisible`,
+  `Ui.active`, `Ui.disabled`. `focusColor` targets `:focus-visible`
+  (safer default — only fires on keyboard nav, never on click-
+  induced focus rings); use `Ui.onPseudo Ui.focus [...]` for
+  sticky-focus behaviour. `:hover` rules are AUTO-WRAPPED in
+  `@media (hover: hover)` by the runtime so they don't fire as
+  sticky-hover on touch devices (the classic mobile "tap-and-stay-
+  hovered" bug). Renders a sky-id-scoped `<style data-sky-pc=...>`
+  child via the same pattern as media queries. Composes with
+  `Ui.breakpoint` via natural nesting — breakpoint wraps the
+  element, pseudo-rule attaches to the element inside.
 - **Media queries + breakpoints** (`Ui.mediaQuery` / `Ui.breakpoint`
   / `Breakpoint` ADT) — CSS-driven viewport-conditional styling
   with instant CSS-engine reactivity (no JS round-trip, no Model
@@ -1098,6 +1151,57 @@ Full reference: `docs/skyui/overview.md`.
   Sky.Webview honours media queries identically to Sky.Live.
   Pick `Ui.breakpoint` when the layout transition needs no typed
   Msg; pick `Std.Ui.Responsive` when it does.
+- **Transitions + animations** (`Std.Ui.Transition` /
+  `Std.Ui.Animation` / `Std.Ui.Transform`) — typed CSS transitions
+  + keyframe animations declared on a Sky.Ui element. The browser
+  handles frame timing — no JS round-trip, no Model field. Both
+  rules AUTO-WRAPPED in `@media (prefers-reduced-motion: no-preference)`
+  by default for a11y; opt out via `Transition.attributeUnsafe` /
+  `respectReducedMotion = False` on the Animation Spec ONLY when
+  motion is semantically required (loading spinner, progress
+  indicator). `Transition.attribute [property "background-color",
+  duration 200, easing easeOut]` builds the CSS transition shorthand
+  from typed `Step`s; pair with `Background.hoverColor` so the
+  browser animates the change between base + `:hover` states.
+  `Animation.attribute { name, duration, easing, delay, iterations,
+  fillMode, respectReducedMotion, keyframes }` builds a keyframe
+  spec; `keyframes : List (Int, List Transform.Prop)` is
+  `[(percent, [Transform.opacity 0.0, Transform.translateY 10]),
+  ...]`. `Transform.{translateX, translateY, translate, scale,
+  scaleXY, rotate, skewX, skewY, opacity}` are the typed property
+  helpers — `transform`-shaped ones join into ONE `transform:`
+  shorthand per keyframe, `opacity` emits standalone. Two elements
+  naming their animation `"fadeIn"` with different keyframes don't
+  collide globally because the runtime auto-suffixes the
+  @keyframes name with the element's sky-id-derived ident
+  (`fadeIn__r_1_div_0`). Renders a sky-id-scoped
+  `<style data-sky-tr=...>` + `<style data-sky-anim=...>` child via
+  the same pattern as pseudo-classes / media queries.
+- **Aspect ratio + grid tracks** (`Ui.aspectRatio` /
+  `Ui.aspectRatioWH` / `Ui.square` / `Ui.widescreen` / `Ui.fullHd` /
+  `Ui.cinemascope` + `Std.Ui.Grid.tracks` / `Grid.columns` /
+  `Grid.rows`) — typed proportional sizing + explicit CSS-grid
+  track lists. `Ui.aspectRatio 1.777` / `Ui.aspectRatioWH 16 9`
+  lock an element to a width-to-height ratio (pair with
+  `Ui.width Ui.fill` so the unset axis auto-scales). `Std.Ui.Grid`
+  exposes a typed `Track` ADT (`fr`, `px`, `auto`, `minContent`,
+  `maxContent`, `minmax`, `repeat`, `repeatAutoFit`,
+  `repeatAutoFill`) + the attribute entry points; reach for it on
+  sidebar layouts (`[fr 1, px 200, fr 1]`), content-aware columns
+  (`[auto, fr 1]`), or responsive card grids
+  (`[repeatAutoFit (minmax (px 240) (fr 1))]`). The lighter-weight
+  `Ui.gridColumns N` (auto-fill `minmax(Npx, 1fr)`) stays for the
+  common-case product-card grid. Both lower to inline CSS via the
+  existing AttrStyle channel — no runtime injection pass.
+
+| Need | Reach for |
+|---|---|
+| Square avatars, 16:9 video embeds | `Ui.square` / `Ui.widescreen` / `Ui.aspectRatioWH w h` |
+| Custom decimal ratio (e.g. 2.35:1 cinemascope) | `Ui.aspectRatio Float` |
+| Product-card grid (all tracks same min-width) | `Ui.gridColumns N` |
+| Sidebar layout / mixed track types | `Std.Ui.Grid.columns [ fr 1, px 200, fr 1 ]` |
+| Responsive card grid (re-flow on resize) | `Grid.columns [ Grid.repeatAutoFit (Grid.minmax (Grid.px 240) (Grid.fr 1)) ]` |
+| Both axes set explicitly | `Grid.tracks cols rows` |
 
 ```elm
 -- Mobile-first: column on phones, row above 768.
@@ -1269,9 +1373,16 @@ verified against HEAD.
 3. **No custom operators.**
 4. **Negative literal arguments need parens.** `f -1` parses as
    subtraction. Use `f (-1)`.
-5. **`Dict.toList` returns string keys.** `Dict Int v` still
-   yields string keys; arithmetic on them silently produces 0.
-   Workaround: iterate over known key ranges with `Dict.get`.
+5. **`Dict.toList` typed-key inference is inline-only.**
+   `Dict.toList (Dict.fromList [(1, "a")])` chained in the same
+   expression returns real `Int` keys (v0.15.45 closed the soundness
+   hole for that shape). For let-bound intermediates — `let d =
+   Dict.fromList […] in Dict.toList d` — the solver doesn't expose
+   `d`'s typed shape at the use-site's region, so the routing falls
+   back to the legacy String-key path. Workaround: inline the chain
+   directly, or wrap the result in a typed accessor
+   (`d |> Dict.toList`). v0.16+ tracking covers the let-region
+   propagation fix.
 6. **`sky check` does not fully model Go interface satisfaction.**
    Opaque FFI types unify with each other; concrete-satisfies-
    interface checks fall through.
@@ -1285,6 +1396,16 @@ verified against HEAD.
    declared shape. Dict / Set / Maybe / Result stay bare for
    their `empty` / `none` etc. because those have non-function
    types too.
+
+   **v0.15.50 mitigation — `Sky.Core.Pure`.** New code
+   targeting a uniform `() -> Task Error a` shape can import
+   `Sky.Core.Pure as Pure` and call the additive companions —
+   `Pure.uuidV4 ()` / `Pure.uuidV7 ()` / `Pure.timeNow ()` /
+   `Pure.timeUnixMillis ()` / `Pure.systemArgs ()` /
+   `Pure.systemCwd ()` / `Pure.systemLoadEnv ()` /
+   `Pure.ioReadLine ()` / `Pure.dbConnect ()`. Existing names +
+   shapes unchanged. Pure.* lowers to the canonical kernel with
+   typed `SkyTask[Error, T]` shape (no `any` widening).
 8. **Non-tail-recursive list operations are O(N) on Go stack.**
    `map`, `filter`, `foldr`, `length`, `concat`, `take`,
    `append`, `range`, `zip`, `concatMap`, `indexedMap`,
@@ -1340,6 +1461,25 @@ verified against HEAD.
   slot~~ — `view : Model -> any` returning a String against an
   expected `Model -> Html msg` now correctly surfaces as a type
   error (v0.15.1 same-mod CForeign wildcard-gate fix).
+- ~~Unknown qualified name (`NotARealModule.foo`) silently passed
+  canonicaliser~~ — closed in v0.15.42 (audit §3.1). The
+  canonicaliser now flags any qualified ref whose qualifier is
+  neither a kernel module, an import alias, nor present in
+  `_qualVars`/`_qualCtors`, with a Did-you-mean suggestion via
+  Levenshtein distance. Pre-fix Sky printed "Compilation successful"
+  and `go build` then rejected with `undefined: NotARealModule_foo`.
+- ~~"Compilation successful" printed before `go build` ran~~ —
+  closed in v0.15.42 (audit §3.4). Sky lowering prints
+  "Sky lowering succeeded"; "Compilation successful" only fires
+  after Go returns 0. Failure path prints "Sky lowering succeeded
+  but `go build` failed:" before the Go diagnostic.
+- ~~User `type Result a = Just a | Nothing` silently shadows the
+  Prelude-exposed Maybe/Result constructors~~ — closed in v0.15.42
+  (audit §3.2). The canonicaliser now rejects any user-defined ADT
+  whose type name OR constructor name collides with a Prelude-
+  exposed entry (Int/Float/Bool/String/Char/List/Maybe/Result/Task/
+  Error/True/False/Just/Nothing/Ok/Err) with a hard error naming
+  the canonical stdlib origin.
 
 ## Workflow rules
 

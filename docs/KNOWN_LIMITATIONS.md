@@ -116,6 +116,45 @@ record aliases closed a cluster of long-standing limitations:
 - ~~Zero-arity functions reading env vars memoised at init()~~ —
   `apiKey = System.getenvOr "K" "def"` now reads the runtime
   environment.
+- ~~Unknown qualified name silently passes canonicaliser~~ —
+  v0.15.42 (audit §3.1). `NotARealModule.foo` is now flagged at
+  canonicalisation with a Did-you-mean suggestion, not as a
+  cryptic `undefined: NotARealModule_foo` from `go build`.
+- ~~"Compilation successful" prints before `go build` runs~~ —
+  v0.15.42 (audit §3.4). Sky lowering prints "Sky lowering
+  succeeded"; "Compilation successful" only fires after Go
+  returns 0. Failure path is labelled "Sky lowering succeeded
+  but `go build` failed:" so log readers can disambiguate.
+- ~~User ADTs silently shadow Prelude-exposed types and
+  constructors~~ — v0.15.42 (audit §3.2). `type Result a = Just a
+  | Nothing` is now a hard canonicaliser error citing the stdlib
+  origin (e.g. `Sky.Core.Result`), eliminating the refactor
+  regression class where downstream code silently bound to the
+  user's ADT instead of stdlib Maybe / Result.
+- ~~Point-free top-level alias of a polymorphic / N-ary function
+  ships a 0-arity Go thunk wrapper~~ — v0.15.52 (#398). `tickle =
+  String.toUpper` (and any `name = fn` whose RHS has greater arrow
+  arity than its syntactic param count) now eta-expands at the
+  codegen entry point via `etaExpandPointFree` in `Sky.Build.Compile`.
+  The emitted Go is a normal N-ary function with synthetic
+  `_skyEta_pN` parameters, so `tickle "hi"` compiles and runs.
+  Applied at both the entry-module path (`generateDef`) AND the
+  dep-module path (`generateDeclsForDep.mkDef`) — the latter uses
+  the per-module-scoped `Solve.withCurrentModule` lookup so the
+  arity check matches the dep's own HM ledger.
+- ~~Synchronous Sky main crashes with a Go stack dump on `1 // 0`,
+  bad numeric cast, or comparison-type-mismatch~~ — v0.15.43
+  (audit §3.5 + §9). Codegen now injects `defer rt.LogPanicAndExit()`
+  as the first statement of every emitted `func main()`. The
+  recover catches each "reachable from valid Sky" panic site
+  (`rt.IntDiv` / `rt.Rem` / `rt.Div`, `rt.AsInt` / `AsFloat` /
+  `AsBool`, `rt.cmp`, `rt.Coerce`, `rt.skyCallDirect`, plus Go-
+  runtime `index out of range` / nil-deref) and emits a structured
+  `Sky panic: <Kind> (ref <errId>) — <hint>` log line + exit 1
+  instead. Compiler-bug panics (`Unreachable`, `Ffi.kernel`,
+  `coerceInner`) are classified as `CompilerBug` and prompt the
+  user to file a report. Full site-by-site audit at
+  `docs/v0.15.x-hardening/audits/CYCLE-06-PC-panic-site-audit.md`.
 
 ## Deferred (roadmap, not active bugs)
 

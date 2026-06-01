@@ -1021,6 +1021,11 @@ runProject path = do
         Right goPath -> do
             putStrLn "Running go build..."
             runGoBuildWithDiagnostics outDir (Toml._binName config) goPath
+            -- v0.15.42 (audit §3.4): "Compilation successful" prints
+            -- only after `go build` returns 0. Before this fix the
+            -- banner appeared at the end of Sky lowering, misleading
+            -- users when Go subsequently rejected the emitted code.
+            putStrLn "Compilation successful"
             putStrLn "Build complete, running..."
             ec <- rawSystem (outDir ++ "/" ++ Toml._binName config) []
             case ec of
@@ -1633,12 +1638,14 @@ runCommand cmd = case cmd of
         case result of
             Left err -> return (Left err)
             Right _ -> do
-                -- Handle based on target
                 case Toml._target config' of
                     Toml.TargetGo -> do
                         let goPath = outDir </> "main.go"
                         putStrLn "Running go build..."
                         runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
+                        -- v0.15.42 (audit §3.4): Sky lowering succeeded above; we
+                        -- only print the success banner after `go build` returns 0.
+                        putStrLn "Compilation successful"
                         putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config'
                     Toml.TargetRust -> do
                         let rustDir = outDir ++ "/Rust"
@@ -3130,6 +3137,12 @@ runGoBuildWithDiagnostics outDir binName _goPath = do
     case ec of
         System.Exit.ExitSuccess -> return ()
         System.Exit.ExitFailure _ -> do
+            -- v0.15.42 (audit §3.4): Sky's own lowering succeeded
+            -- but Go rejected the emitted code. Distinguish this
+            -- from a successful build so users / CI parsing the
+            -- log can tell the two states apart.
+            hPutStrLn stderr "Sky lowering succeeded but `go build` failed:"
+            hPutStrLn stderr ""
             -- v0.13 Layer 2: when go build fails, parse the Go
             -- error and try to map it back to Sky source via the
             -- SKY-ORIGIN comments in main.go.  If we can resolve,

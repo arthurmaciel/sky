@@ -40,6 +40,7 @@ extra-source-files:
     sky-stdlib/Sky/Http/*.sky
     sky-stdlib/Sky/Http/Server/*.sky
     sky-stdlib/Std/*.sky
+    sky-stdlib/Std/Db/*.sky
     sky-stdlib/Std/Ui/*.sky
     sky-stdlib/Std/Html/*.sky
     tools/sky-ffi-inspect/main.go
@@ -263,6 +264,7 @@ test-suite sky-tests
   other-modules:
       Sky.Build.Validator
       Sky.Build.CompileSpec
+      Sky.Build.MainPanicRecoverSpec
       Sky.Build.DepHmFatalSpec
       Sky.Build.ExampleSweepSpec
       Sky.Build.ForeignFatalSpec
@@ -278,6 +280,7 @@ test-suite sky-tests
       Sky.Canonicalise.QualifiedTypeAliasSpec
       Sky.Canonicalise.DualImportCollisionSpec
       Sky.Canonicalise.AliasNameCollisionSpec
+      Sky.Canonicalise.PipelineIntegritySpec
       Sky.Type.ExhaustivenessSpec
       Sky.Type.AnyWildcardSpec
       Sky.Type.NumericBinopSpec
@@ -286,6 +289,10 @@ test-suite sky-tests
       Sky.Type.UfCycleGuardSpec
       Sky.Type.RecordFieldExactnessSpec
       Sky.Build.UiFillCascadeSpec
+      Sky.Build.UiMediaQuerySpec
+      Sky.Build.UiPseudoClassSpec
+      Sky.Build.UiTransitionAnimationSpec
+      Sky.Build.UiAspectGridSpec
       Sky.Build.UiMultilineTextareaSpec
       Sky.Build.ExposingTypeCtorsSpec
       Sky.Build.LetForwardRefSpec
@@ -293,12 +300,18 @@ test-suite sky-tests
       Sky.Build.RtFieldAdtBug342Spec
       Sky.Build.CaseSubjectNameShadowSpec
       Sky.Build.FfiKernelAliasSpec
+      Sky.Build.HttpTypesSpec
+      Sky.Build.CryptoAeadSpec
       Sky.Build.PubSubPublishTaskSpec
       Sky.Build.PubSubPublishNoEchoSpec
       Sky.Build.ServerStreamSpec
+      Sky.Build.HttpStreamForEachSpec
       Sky.Build.WebviewAppSpec
       Sky.Build.WebviewLoopbackAssetsSpec
       Sky.Build.JsonPipelinePanic372Spec
+      Sky.Build.DictSourceSpec
+      Sky.Build.DbDecoderSpec
+      Sky.Build.WebSocketSpec
       Sky.Parse.MultiLineCaseSubjectSpec
       Sky.Parse.MultiLineCaseKeywordSpec
       Sky.Parse.MultiLineSignatureSpec
@@ -319,6 +332,7 @@ test-suite sky-tests
       Sky.Build.CheckIsBuildSpec
       Sky.Build.RecordFieldOrderSpec
       Sky.Build.RecordCtorEmptyListSpec
+      Sky.Build.PointFreePolyAliasSpec
       Sky.Build.HofTypedMsgSpec
       Sky.Build.CoerceArgParametricSpec
       Sky.Build.IsPlainIdentSpec
@@ -341,6 +355,7 @@ test-suite sky-tests
       Sky.Diagnostics.CoverageSpec
       Sky.Build.KernelSigCoverageSpec
       Sky.Build.KernelStdlibCoverageSpec
+      Sky.Build.PureModuleSpec
       Sky.Build.HeapBoundedHmSpec
       Sky.Build.IORefBoundarySpec
       Sky.Build.SolverBudgetSpec

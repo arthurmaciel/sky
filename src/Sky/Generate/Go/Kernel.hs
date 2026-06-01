@@ -245,6 +245,10 @@ registry = Map.fromList
     , (("Task", "andThenResult"), KernelInfo "rt.Task_andThenResult" 2 False)
     , (("Task", "mapError"),      KernelInfo "rt.Task_mapError" 2 False)
     , (("Task", "onError"),       KernelInfo "rt.Task_onError" 2 False)
+    -- v0.15.44 retry combinator.
+    -- v0.15.50: retryAlways is now pure Sky (`= RetryAlways` ADT ctor),
+    -- no longer a kernel — `retryAlways` only registered on retryWith below.
+    , (("Task", "retryWith"),     KernelInfo "rt.Task_retryWith" 2 False)
 
     -- ═══════════════════════════════════════════════════════
     -- Cmd
@@ -298,7 +302,12 @@ registry = Map.fromList
     , (("Random", "int"),         KernelInfo "rt.Random_int" 2 False)
     , (("Random", "float"),       KernelInfo "rt.Random_float" 2 False)
     , (("Random", "choice"),      KernelInfo "rt.Random_choice" 1 False)
+    , (("Random", "choiceMaybe"), KernelInfo "rt.Random_choiceMaybe" 1 False)
     , (("Random", "shuffle"),     KernelInfo "rt.Random_shuffle" 1 False)
+    , (("Random", "weighted"),    KernelInfo "rt.Random_weighted" 1 False)
+    , (("Random", "seededInt"),   KernelInfo "rt.Random_seededInt" 3 False)
+    , (("Random", "seededFloat"), KernelInfo "rt.Random_seededFloat" 1 False)
+    , (("Random", "seededChoice"), KernelInfo "rt.Random_seededChoice" 2 False)
 
     , (("Process", "run"),        KernelInfo "rt.Process_run" 2 False)
     -- Process.exit / getEnv / getCwd / loadEnv all moved to System
@@ -339,6 +348,19 @@ registry = Map.fromList
     , (("Crypto", "constantTimeEqual"), KernelInfo "rt.Crypto_constantTimeEqual" 2 False)
     , (("Crypto", "randomBytes"), KernelInfo "rt.Crypto_randomBytes" 1 False)
     , (("Crypto", "randomToken"), KernelInfo "rt.Crypto_randomToken" 1 False)
+    -- AES-GCM + ChaCha20-Poly1305 (v0.15.44).
+    , (("Crypto", "aesGcmEncrypt"),       KernelInfo "rt.Crypto_aesGcmEncrypt" 2 False)
+    , (("Crypto", "aesGcmDecrypt"),       KernelInfo "rt.Crypto_aesGcmDecrypt" 2 False)
+    , (("Crypto", "chacha20Encrypt"),     KernelInfo "rt.Crypto_chacha20Encrypt" 2 False)
+    , (("Crypto", "chacha20Decrypt"),     KernelInfo "rt.Crypto_chacha20Decrypt" 2 False)
+    , (("Crypto", "aesKeyFromPassword"),  KernelInfo "rt.Crypto_aesKeyFromPassword" 2 False)
+    , (("Crypto", "chachaKeyFromPassword"), KernelInfo "rt.Crypto_chachaKeyFromPassword" 2 False)
+    -- Sky.Core.Bytes (v0.15.44).
+    , (("Bytes", "toString"),   KernelInfo "rt.Bytes_toString" 1 False)
+    , (("Bytes", "fromHex"),    KernelInfo "rt.Bytes_fromHex" 1 False)
+    , (("Bytes", "toHex"),      KernelInfo "rt.Bytes_toHex" 1 False)
+    , (("Bytes", "fromBase64"), KernelInfo "rt.Bytes_fromBase64" 1 False)
+    , (("Bytes", "toBase64"),   KernelInfo "rt.Bytes_toBase64" 1 False)
 
     , (("Encoding", "base64Encode"), KernelInfo "rt.Encoding_base64Encode" 1 False)
     , (("Encoding", "base64Decode"), KernelInfo "rt.Encoding_base64Decode" 1 False)
@@ -531,6 +553,7 @@ registry = Map.fromList
     -- ═══════════════════════════════════════════════════════
     , (("HttpStream", "open"),    KernelInfo "rt.HttpStream_open" 1 True)
     , (("HttpStream", "close"),   KernelInfo "rt.HttpStream_close" 1 True)
+    , (("HttpStream", "forEachChunk"), KernelInfo "rt.HttpStream_forEachChunk" 2 True)
 
     -- ═══════════════════════════════════════════════════════
     -- Sky.Http.Server.Stream  (Cycle 4 HS-Server — server-side
@@ -540,6 +563,28 @@ registry = Map.fromList
     , (("ServerStream", "emit"),            KernelInfo "rt.ServerStream_emit" 2 True)
     , (("ServerStream", "finish"),          KernelInfo "rt.ServerStream_finish" 1 True)
     , (("ServerStream", "withContentType"), KernelInfo "rt.ServerStream_withContentType" 2 True)
+
+    -- ═══════════════════════════════════════════════════════
+    -- Sky.Core.WebSocket  (v0.15.46 — client-side bidirectional
+    -- WebSocket; incoming frames flow via Sub.subscribeWebSocket)
+    -- ═══════════════════════════════════════════════════════
+    , (("WebSocket", "connect"),       KernelInfo "rt.WebSocket_connect" 1 True)
+    , (("WebSocket", "connectWith"),   KernelInfo "rt.WebSocket_connectWith" 1 True)
+    , (("WebSocket", "send"),          KernelInfo "rt.WebSocket_send" 2 True)
+    , (("WebSocket", "sendBinary"),    KernelInfo "rt.WebSocket_sendBinary" 2 True)
+    , (("WebSocket", "close"),         KernelInfo "rt.WebSocket_close" 1 True)
+    , (("WebSocket", "closeWithCode"), KernelInfo "rt.WebSocket_closeWithCode" 3 True)
+    , (("Sub", "subscribeWebSocket"),  KernelInfo "rt.Sub_subscribeWebSocket" 3 False)
+
+    -- ═══════════════════════════════════════════════════════
+    -- Sky.Http.Server.WebSocket  (v0.15.46 — server-side
+    -- WebSocket upgrade; mirror of WebSocket above)
+    -- ═══════════════════════════════════════════════════════
+    , (("ServerWebSocket", "upgrade"),             KernelInfo "rt.ServerWebSocket_upgrade" 2 True)
+    , (("ServerWebSocket", "sendToClient"),        KernelInfo "rt.ServerWebSocket_sendToClient" 2 True)
+    , (("ServerWebSocket", "sendBinaryToClient"),  KernelInfo "rt.ServerWebSocket_sendBinaryToClient" 2 True)
+    , (("ServerWebSocket", "broadcast"),           KernelInfo "rt.ServerWebSocket_broadcast" 2 True)
+    , (("ServerWebSocket", "closeClient"),         KernelInfo "rt.ServerWebSocket_closeClient" 1 True)
 
     -- ═══════════════════════════════════════════════════════
     -- Std.PubSub  (Cycle 4 PT — Task-shaped publish, callable from
@@ -613,6 +658,7 @@ registry = Map.fromList
     , (("Db", "getBool"),         KernelInfo "rt.Db_getBool" 2 False)
     , (("Db", "query"),           KernelInfo "rt.Db_query" 3 False)
     , (("Db", "queryDecode"),     KernelInfo "rt.Db_queryDecode" 4 False)
+    , (("Db", "getByIdDecode"),   KernelInfo "rt.Db_getByIdDecode" 4 False)
     , (("Db", "insertRow"),       KernelInfo "rt.Db_insertRow" 3 False)
     , (("Db", "getById"),         KernelInfo "rt.Db_getById" 3 False)
     , (("Db", "updateById"),      KernelInfo "rt.Db_updateById" 4 False)
@@ -647,6 +693,26 @@ registry = Map.fromList
     , (("JsonDecP", "requiredAt"), KernelInfo "rt.JsonDecP_requiredAt" 3 False)
 
     -- ═══════════════════════════════════════════════════════
+    -- Std.Db.Decode — typed DB row decoders (v0.15.45 Layer 3)
+    -- ═══════════════════════════════════════════════════════
+    , (("DbDec", "string"),      KernelInfo "rt.DbDec_string" 1 False)
+    , (("DbDec", "int"),         KernelInfo "rt.DbDec_int" 1 False)
+    , (("DbDec", "float"),       KernelInfo "rt.DbDec_float" 1 False)
+    , (("DbDec", "bool"),        KernelInfo "rt.DbDec_bool" 1 False)
+    , (("DbDec", "nullable"),    KernelInfo "rt.DbDec_nullable" 2 False)
+    , (("DbDec", "succeed"),     KernelInfo "rt.DbDec_succeed" 1 False)
+    , (("DbDec", "fail"),        KernelInfo "rt.DbDec_fail" 1 False)
+    , (("DbDec", "map"),         KernelInfo "rt.DbDec_map" 2 False)
+    , (("DbDec", "andThen"),     KernelInfo "rt.DbDec_andThen" 2 False)
+    , (("DbDec", "andMap"),      KernelInfo "rt.DbDec_andMap" 2 False)
+    , (("DbDec", "map2"),        KernelInfo "rt.DbDec_map2" 3 False)
+    , (("DbDec", "map3"),        KernelInfo "rt.DbDec_map3" 4 False)
+    , (("DbDec", "map4"),        KernelInfo "rt.DbDec_map4" 5 False)
+    , (("DbDec", "map5"),        KernelInfo "rt.DbDec_map5" 6 False)
+    , (("DbDec", "required"),    KernelInfo "rt.DbDec_required" 3 False)
+    , (("DbDec", "optional"),    KernelInfo "rt.DbDec_optional" 4 False)
+
+    -- ═══════════════════════════════════════════════════════
     -- Std.Ui.Lazy (v0.12 — runtime memoisation)
     --
     -- Maps the Sky-side passthrough wrappers to Go runtime helpers
@@ -661,4 +727,51 @@ registry = Map.fromList
     , (("Lazy", "lazy3"), KernelInfo "rt.Std_Ui_Lazy_lazy3" 4 False)
     , (("Lazy", "lazy4"), KernelInfo "rt.Std_Ui_Lazy_lazy4" 5 False)
     , (("Lazy", "lazy5"), KernelInfo "rt.Std_Ui_Lazy_lazy5" 6 False)
+
+    -- ═══════════════════════════════════════════════════════
+    -- v0.15.47 stdlib quality-of-life batch
+    -- ═══════════════════════════════════════════════════════
+    --
+    -- Std.Compression — gzip + zstd
+    , (("Compression", "gzip"),            KernelInfo "rt.Compression_gzip" 1 False)
+    , (("Compression", "gunzip"),          KernelInfo "rt.Compression_gunzip" 1 False)
+    , (("Compression", "zstdCompress"),    KernelInfo "rt.Compression_zstdCompress" 1 False)
+    , (("Compression", "zstdDecompress"),  KernelInfo "rt.Compression_zstdDecompress" 1 False)
+
+    -- Std.Csv — encode + decode
+    , (("Csv", "parse"),                   KernelInfo "rt.Csv_parse" 1 False)
+    , (("Csv", "parseWithDelimiter"),      KernelInfo "rt.Csv_parseWithDelimiter" 2 False)
+    , (("Csv", "encode"),                  KernelInfo "rt.Csv_encode" 1 False)
+    , (("Csv", "encodeWithDelimiter"),     KernelInfo "rt.Csv_encodeWithDelimiter" 2 False)
+    , (("Csv", "parseStreamFromFile"),     KernelInfo "rt.Csv_parseStreamFromFile" 1 False)
+
+    -- Std.Cache — LRU + TTL
+    , (("Cache", "newRaw"),                KernelInfo "rt.Cache_new" 1 False)
+    , (("Cache", "get"),                   KernelInfo "rt.Cache_get" 2 False)
+    , (("Cache", "put"),                   KernelInfo "rt.Cache_put" 3 False)
+    , (("Cache", "remove"),                KernelInfo "rt.Cache_remove" 2 False)
+    , (("Cache", "clear"),                 KernelInfo "rt.Cache_clear" 1 False)
+    , (("Cache", "size"),                  KernelInfo "rt.Cache_size" 1 False)
+    , (("Cache", "stats"),                 KernelInfo "rt.Cache_stats" 1 False)
+
+    -- Std.Email — provider-abstract email send
+    , (("Email", "send"),                  KernelInfo "rt.Email_send" 2 False)
+
+    -- Std.Config — typed TOML/YAML/JSON
+    , (("Config", "string"),               KernelInfo "rt.Config_string" 0 False)
+    , (("Config", "int"),                  KernelInfo "rt.Config_int" 0 False)
+    , (("Config", "float"),                KernelInfo "rt.Config_float" 0 False)
+    , (("Config", "bool"),                 KernelInfo "rt.Config_bool" 0 False)
+    , (("Config", "nullable"),             KernelInfo "rt.Config_nullable" 1 False)
+    , (("Config", "field"),                KernelInfo "rt.Config_field" 2 False)
+    , (("Config", "at"),                   KernelInfo "rt.Config_at" 2 False)
+    , (("Config", "list"),                 KernelInfo "rt.Config_list" 1 False)
+    , (("Config", "succeed"),              KernelInfo "rt.Config_succeed" 1 False)
+    , (("Config", "fail"),                 KernelInfo "rt.Config_fail" 1 False)
+    , (("Config", "map"),                  KernelInfo "rt.Config_map" 2 False)
+    , (("Config", "andThen"),              KernelInfo "rt.Config_andThen" 2 False)
+    , (("Config", "decodeToml"),           KernelInfo "rt.Config_decodeToml" 2 False)
+    , (("Config", "decodeYaml"),           KernelInfo "rt.Config_decodeYaml" 2 False)
+    , (("Config", "decodeJson"),           KernelInfo "rt.Config_decodeJson" 2 False)
+    , (("Config", "loadFromFile"),         KernelInfo "rt.Config_loadFromFile" 2 False)
     ]

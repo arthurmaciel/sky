@@ -584,6 +584,423 @@ func injectMediaQueryStyles(n *VNode) {
 	}
 }
 
+// injectPseudoClassStyles walks the tree after assignSkyIDs and
+// rewrites every element that carries a `data-sky-pc-rules` marker
+// (set by `Std.Ui.onPseudo` and its sub-module sugar
+// `Background.hoverColor`, `Font.focusColor`, etc. — issue #377)
+// into a base wrapper with a sky-id-scoped `<style>` child:
+//
+//	<button sky-id="r.0.2#button" ...>
+//	    <style data-sky-pc="r.0.2#button">
+//	        @media (hover: hover) {
+//	            [sky-id="r.0.2#button"]:hover { background-color: …; }
+//	        }
+//	        [sky-id="r.0.2#button"]:focus-visible { border-color: …; }
+//	    </style>
+//	    <!-- original children -->
+//	</button>
+//
+// Per-pseudo rules are emitted in deterministic order (h, f, v, a,
+// d — see `pseudoClassTag` in Std.Ui.sky); `:hover` rules are
+// auto-wrapped in `@media (hover: hover)` so they don't fire as
+// sticky-hover on touch devices.
+//
+// The marker attr is stripped from the wire output (the runtime
+// has fully consumed it). Composition with
+// `injectMediaQueryStyles` is order-independent: nested
+// `Ui.breakpoint` wrappers don't see this marker (it lives on the
+// inner element, not the wrapper), and pseudo-rules attach to
+// their element regardless of which breakpoint wraps it. Since
+// pseudo-rules don't open their own `@media` block they nest
+// naturally under the breakpoint's `@media` block via CSS
+// inheritance.
+//
+// Pre-condition: assignSkyIDs has already stamped n.SkyID on every
+// element. Post-condition: marker attr removed; style child
+// prepended where present.
+func injectPseudoClassStyles(n *VNode) {
+	if n.Kind != "element" {
+		return
+	}
+	encoded, ok := n.Attrs["data-sky-pc-rules"]
+	if ok && n.SkyID != "" && encoded != "" {
+		styleText := buildPseudoClassStyleText(n.SkyID, encoded)
+		if styleText != "" {
+			styleNode := VNode{
+				Kind: "element",
+				Tag:  "style",
+				Attrs: map[string]string{
+					"data-sky-pc": n.SkyID,
+				},
+				Children: []VNode{{Kind: "raw", Text: styleText}},
+			}
+			n.Children = append([]VNode{styleNode}, n.Children...)
+		}
+		// Marker attr stripped regardless — bad/empty input
+		// shouldn't leak as inert data-* either.
+		delete(n.Attrs, "data-sky-pc-rules")
+	}
+	for i := range n.Children {
+		injectPseudoClassStyles(&n.Children[i])
+	}
+}
+
+// buildPseudoClassStyleText parses the `data-sky-pc-rules` marker
+// string and produces a CSS block scoped to the given sky-id.
+//
+// Marker grammar (mirror of `encodePseudoRules` in Std.Ui.sky):
+//
+//	rules    = entry ("||" entry)*
+//	entry    = tag "|" css
+//	tag      = "h" | "f" | "v" | "a" | "d"
+//	css      = arbitrary CSS property string
+//
+// Unknown tags are skipped (forward-compat: a future Sky compiler
+// can emit new pseudo-class tags without breaking older
+// runtimes). `</style` sequences in the css portion are stripped
+// defensively — they'd otherwise terminate the <style> element
+// prematurely.
+func buildPseudoClassStyleText(skyID, encoded string) string {
+	if encoded == "" {
+		return ""
+	}
+	selector := `[sky-id="` + skyID + `"]`
+	var sb strings.Builder
+	for _, entry := range strings.Split(encoded, "||") {
+		sep := strings.IndexByte(entry, '|')
+		if sep < 0 {
+			continue
+		}
+		tag := entry[:sep]
+		css := entry[sep+1:]
+		if css == "" {
+			continue
+		}
+		pseudo, hoverGated, knownTag := pseudoSelectorForTag(tag)
+		if !knownTag {
+			continue
+		}
+		safeCSS := strings.ReplaceAll(css, "</style", "")
+		safeCSS = strings.ReplaceAll(safeCSS, "</STYLE", "")
+		// One rule per pseudo. `:hover` wrapped in `@media (hover:
+		// hover)` to suppress sticky-hover on touch devices.
+		if hoverGated {
+			sb.WriteString("@media (hover: hover) { ")
+			sb.WriteString(selector)
+			sb.WriteString(pseudo)
+			sb.WriteString(" { ")
+			sb.WriteString(safeCSS)
+			sb.WriteString(" } } ")
+		} else {
+			sb.WriteString(selector)
+			sb.WriteString(pseudo)
+			sb.WriteString(" { ")
+			sb.WriteString(safeCSS)
+			sb.WriteString(" } ")
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// pseudoSelectorForTag maps a wire-format pseudo-class tag (single
+// letter) to its CSS pseudo-class selector + whether `:hover`-style
+// `@media (hover: hover)` gating applies. Keep in lock-step with
+// `pseudoClassTag` / `pseudoClassSelector` in Std.Ui.sky.
+func pseudoSelectorForTag(tag string) (selector string, hoverGated bool, known bool) {
+	switch tag {
+	case "h":
+		return ":hover", true, true
+	case "f":
+		return ":focus", false, true
+	case "v":
+		return ":focus-visible", false, true
+	case "a":
+		return ":active", false, true
+	case "d":
+		return ":disabled", false, true
+	}
+	return "", false, false
+}
+
+// applyStyleInjections runs every Std.Ui style-marker rewriter on
+// the rendered tree in a fixed order:
+//  1. injectMediaQueryStyles — `@media`-scoped CSS (issue #376)
+//  2. injectPseudoClassStyles — `:hover`/`:focus` etc. (issue #377)
+//  3. injectTransitionStyles — CSS `transition` shorthand (issue #378)
+//  4. injectAnimationStyles  — CSS `@keyframes` + `animation` shorthand (issue #378)
+//
+// Single funnel so future style-injection passes (container
+// queries, …) add ONE call site here instead of hunting down every
+// render hook. All passes are idempotent on already-processed
+// elements (they strip their marker attrs on first run) so
+// re-invoking is safe.
+//
+// Pre-condition: assignSkyIDs has already stamped n.SkyID.
+func applyStyleInjections(n *VNode) {
+	injectMediaQueryStyles(n)
+	injectPseudoClassStyles(n)
+	injectTransitionStyles(n)
+	injectAnimationStyles(n)
+}
+
+// injectTransitionStyles walks the tree after assignSkyIDs and
+// rewrites every element that carries a `data-sky-tr-rules` marker
+// (set by `Transition.attribute` / `Ui.transitionRaw`, issue #378)
+// into a base wrapper with a sky-id-scoped `<style>` child:
+//
+//   <button sky-id="r.0#button" ...>
+//       <style data-sky-tr="r.0#button">
+//           @media (prefers-reduced-motion: no-preference) {
+//               [sky-id="r.0#button"] {
+//                   transition: background-color 200ms ease-out;
+//               }
+//           }
+//       </style>
+//       <!-- original children -->
+//   </button>
+//
+// `data-sky-tr-respect="0"` opts OUT of the `prefers-reduced-motion`
+// gate — the rule is emitted unwrapped. Default is "1" (respect).
+//
+// The marker attrs are stripped from the wire output (the runtime
+// has fully consumed them). Composes with `injectMediaQueryStyles`
+// + `injectPseudoClassStyles` naturally: the transition CSS lives
+// on the BASE selector while pseudo-class rules target the same
+// selector with `:hover` / `:focus-visible` suffixes — the browser
+// animates the change between the base and pseudo state without
+// further coordination.
+//
+// Pre-condition: assignSkyIDs has already stamped n.SkyID.
+func injectTransitionStyles(n *VNode) {
+	if n.Kind != "element" {
+		return
+	}
+	rules, ok := n.Attrs["data-sky-tr-rules"]
+	respectRaw := n.Attrs["data-sky-tr-respect"]
+	if ok && n.SkyID != "" && rules != "" {
+		respect := respectRaw != "0"
+		// Defensive `</style>` strip — same hardening as the
+		// other style-injection passes.
+		safeRules := strings.ReplaceAll(rules, "</style", "")
+		safeRules = strings.ReplaceAll(safeRules, "</STYLE", "")
+		selector := `[sky-id="` + n.SkyID + `"]`
+		var styleText string
+		if respect {
+			styleText = "@media (prefers-reduced-motion: no-preference) { " +
+				selector + " { transition: " + safeRules + "; } }"
+		} else {
+			styleText = selector + " { transition: " + safeRules + "; }"
+		}
+		styleNode := VNode{
+			Kind: "element",
+			Tag:  "style",
+			Attrs: map[string]string{
+				"data-sky-tr": n.SkyID,
+			},
+			Children: []VNode{{Kind: "raw", Text: styleText}},
+		}
+		delete(n.Attrs, "data-sky-tr-rules")
+		delete(n.Attrs, "data-sky-tr-respect")
+		n.Children = append([]VNode{styleNode}, n.Children...)
+	} else if ok {
+		// Marker present but empty/no sky-id — strip anyway so
+		// it doesn't pollute the wire.
+		delete(n.Attrs, "data-sky-tr-rules")
+		delete(n.Attrs, "data-sky-tr-respect")
+	}
+	for i := range n.Children {
+		injectTransitionStyles(&n.Children[i])
+	}
+}
+
+// injectAnimationStyles walks the tree after assignSkyIDs and
+// rewrites every element that carries a `data-sky-anim-rules`
+// marker (set by `Animation.attribute` / `Ui.animateRaw`, issue
+// #378) into a base wrapper with a sky-id-scoped `<style>` child:
+//
+//   <div sky-id="r.0#div" ...>
+//       <style data-sky-anim="r.0#div">
+//           @keyframes fadeIn__r_0_div { 0% { ... } 100% { ... } }
+//           @media (prefers-reduced-motion: no-preference) {
+//               [sky-id="r.0#div"] {
+//                   animation: fadeIn__r_0_div 300ms ease-out 0ms 1 forwards;
+//               }
+//           }
+//       </style>
+//       <!-- original children -->
+//   </div>
+//
+// Wire format (mirror of `encodeAnimations` in Std.Ui.sky):
+//
+//   rules = entry ("@@" entry)*
+//   entry = name "||" shorthandTail "||" keyframesBody "||" respect
+//
+// `respect` is "1" (default) / "0" (opt out of reduced-motion gate).
+//
+// The @keyframes name is auto-suffixed with a sky-id-derived
+// disambiguator so two elements naming their animation `"fadeIn"`
+// with DIFFERENT keyframes don't collide globally. The sky-id is
+// already structurally unique within a page; we strip the
+// non-CSS-ident chars to produce a safe @keyframes name suffix.
+func injectAnimationStyles(n *VNode) {
+	if n.Kind != "element" {
+		return
+	}
+	encoded, ok := n.Attrs["data-sky-anim-rules"]
+	if ok && n.SkyID != "" && encoded != "" {
+		styleText := buildAnimationStyleText(n.SkyID, encoded)
+		if styleText != "" {
+			styleNode := VNode{
+				Kind: "element",
+				Tag:  "style",
+				Attrs: map[string]string{
+					"data-sky-anim": n.SkyID,
+				},
+				Children: []VNode{{Kind: "raw", Text: styleText}},
+			}
+			n.Children = append([]VNode{styleNode}, n.Children...)
+		}
+		delete(n.Attrs, "data-sky-anim-rules")
+	} else if ok {
+		delete(n.Attrs, "data-sky-anim-rules")
+	}
+	for i := range n.Children {
+		injectAnimationStyles(&n.Children[i])
+	}
+}
+
+// skyIDToCSSIdent rewrites a sky-id (`r.0.2#div`) into a CSS-safe
+// identifier suffix (`r_0_2_div`) for use in @keyframes names.
+// Replaces `.` and `#` (the sky-id structural separators) with `_`;
+// drops anything else outside [A-Za-z0-9_-] defensively.
+func skyIDToCSSIdent(s string) string {
+	var sb strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '-':
+			sb.WriteByte(c)
+		case c == '.' || c == '#':
+			sb.WriteByte('_')
+		default:
+			// Drop unknown chars — keeps the result safe to splice
+			// into @keyframes <name> and into a CSS animation
+			// shorthand.
+		}
+	}
+	return sb.String()
+}
+
+// buildAnimationStyleText parses the `data-sky-anim-rules` marker
+// and produces a CSS block scoped to the given sky-id. Emits ONE
+// @keyframes block per animation entry + ONE animation rule
+// applying them all to the element (CSS `animation: a, b, c`
+// shorthand). The reduced-motion gate wraps the animation rule
+// (NOT the @keyframes — those are inert definitions).
+//
+// Per-entry `respect` flags are honoured: if ANY entry opts out,
+// the entire animation rule is split into a gated portion + an
+// always-on portion. Most elements have a single animation so this
+// rare case is handled correctly without complicating the common
+// path.
+func buildAnimationStyleText(skyID, encoded string) string {
+	if encoded == "" {
+		return ""
+	}
+	ident := skyIDToCSSIdent(skyID)
+	selector := `[sky-id="` + skyID + `"]`
+	var keyframesPart strings.Builder
+	var gatedAnimRefs []string
+	var ungatedAnimRefs []string
+
+	for _, entry := range strings.Split(encoded, "@@") {
+		parts := strings.SplitN(entry, "||", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		name := parts[0]
+		tail := parts[1]
+		body := parts[2]
+		respectRaw := parts[3]
+		if name == "" || body == "" {
+			continue
+		}
+		// Defensive `</style>` strip.
+		safeBody := strings.ReplaceAll(body, "</style", "")
+		safeBody = strings.ReplaceAll(safeBody, "</STYLE", "")
+		safeTail := strings.ReplaceAll(tail, "</style", "")
+		safeTail = strings.ReplaceAll(safeTail, "</STYLE", "")
+		// Strip any chars from the user-supplied name that would
+		// break a CSS @keyframes ident. Keep letters/digits/_/-.
+		safeName := sanitiseAnimationName(name)
+		if safeName == "" {
+			continue
+		}
+		effective := safeName + "__" + ident
+		keyframesPart.WriteString("@keyframes ")
+		keyframesPart.WriteString(effective)
+		keyframesPart.WriteString(" { ")
+		keyframesPart.WriteString(safeBody)
+		keyframesPart.WriteString(" } ")
+		ref := effective + " " + safeTail
+		if respectRaw == "0" {
+			ungatedAnimRefs = append(ungatedAnimRefs, ref)
+		} else {
+			gatedAnimRefs = append(gatedAnimRefs, ref)
+		}
+	}
+
+	if keyframesPart.Len() == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(keyframesPart.String())
+	if len(gatedAnimRefs) > 0 {
+		sb.WriteString("@media (prefers-reduced-motion: no-preference) { ")
+		sb.WriteString(selector)
+		sb.WriteString(" { animation: ")
+		sb.WriteString(strings.Join(gatedAnimRefs, ", "))
+		sb.WriteString("; } } ")
+	}
+	if len(ungatedAnimRefs) > 0 {
+		sb.WriteString(selector)
+		sb.WriteString(" { animation: ")
+		sb.WriteString(strings.Join(ungatedAnimRefs, ", "))
+		sb.WriteString("; } ")
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// sanitiseAnimationName strips chars that would break a CSS
+// @keyframes ident. CSS allows [a-zA-Z0-9_-]+ (Unicode escapes are
+// supported in spec but rare; keep ASCII for simplicity); a leading
+// digit is illegal so we prefix with an underscore in that case.
+func sanitiseAnimationName(s string) string {
+	if s == "" {
+		return ""
+	}
+	var sb strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '_' || c == '-' {
+			sb.WriteByte(c)
+		} else {
+			sb.WriteByte('_')
+		}
+	}
+	out := sb.String()
+	if out == "" {
+		return ""
+	}
+	first := out[0]
+	if first >= '0' && first <= '9' {
+		return "_" + out
+	}
+	return out
+}
+
 // skyIDKey returns a stable disambiguator for `n`, or "" if none applies.
 // Priority: explicit `sky-key` attribute (set by `Html.keyed`) first,
 // then `name` on form-bearing tags. Any matched value is sanitised to
@@ -955,6 +1372,11 @@ type subT struct {
 	topic string
 	// Streaming-HTTP field (kind = "subscribeStream"). Cycle 4 HS.
 	streamID int64
+	// WebSocket fields (kind = "subscribeWebSocket"). v0.15.46.
+	// wsKind selects which event class this subscription receives:
+	// "message" | "open" | "close" | "error".
+	socketID int64
+	wsKind   string
 }
 
 // SkySub is the public type for Sky's Sub msg type.
@@ -1610,6 +2032,24 @@ type liveSession struct {
 	// concern as activeSubsMu).
 	activeStreamSubs   map[int64]*streamSubReg
 	activeStreamSubsMu sync.Mutex
+
+	// sockets — Sky.Core.WebSocket open handles owned by this session
+	// (v0.15.46). WebSocket_connect registers; WebSocket_close
+	// deletes; markDone walks the map and closes every entry so a
+	// session disconnect can't leak an open WebSocket.
+	//
+	// Protected by socketsMu — dedicated mutex (mirrors streamsMu's
+	// rationale).
+	sockets   map[int64]*wsHandle
+	socketsMu sync.Mutex
+
+	// activeWsSubs — Sub.subscribeWebSocket entries currently bound
+	// to this session, keyed by `<socketID>:<kind>` so onMessage +
+	// onOpen + onClose + onError can coexist per socket.
+	//
+	// Protected by activeWsSubsMu (mirrors activeStreamSubsMu).
+	activeWsSubs   map[string]*wsSubReg
+	activeWsSubsMu sync.Mutex
 }
 
 // touchLastSeen — stamp the lastSeen counter with the current wall
@@ -1701,6 +2141,29 @@ func (s *liveSession) markDone() {
 			fmt.Fprintf(os.Stderr,
 				"[sky.stream] cleaned %d orphaned streams on session close (sid=%q)\n",
 				n, s.sid)
+		}
+		// v0.15.46: same sweep for Sky.Core.WebSocket open sockets.
+		// closeAllSockets is idempotent.
+		if n := closeAllSockets(s); n > 0 {
+			fmt.Fprintf(os.Stderr,
+				"[sky.websocket] cleaned %d orphaned sockets on session close (sid=%q)\n",
+				n, s.sid)
+		}
+		// Release ws subscription registrations (drain goroutines)
+		// so they don't linger pushing to dead sessions.
+		s.activeWsSubsMu.Lock()
+		wsRegs := make([]*wsSubReg, 0, len(s.activeWsSubs))
+		for _, r := range s.activeWsSubs {
+			if r != nil {
+				wsRegs = append(wsRegs, r)
+			}
+		}
+		s.activeWsSubs = nil
+		s.activeWsSubsMu.Unlock()
+		for _, reg := range wsRegs {
+			if reg.cancel != nil {
+				reg.cancel()
+			}
 		}
 	})
 }
@@ -2844,7 +3307,7 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 
 	vn := HtmlToVNode(sky_call(app.view, model))
 	assignSkyIDs(&vn, "r")
-	injectMediaQueryStyles(&vn)
+	applyStyleInjections(&vn)
 	body := renderVNode(vn, sess.handlers)
 	// Initial mount writes the full HTML directly into the HTTP
 	// response below — the client receives this body as the page,
@@ -3023,7 +3486,7 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 		sess.handlers = map[string]any{}
 		vn := HtmlToVNode(sky_call(app.view, sess.model))
 		assignSkyIDs(&vn, "r")
-		injectMediaQueryStyles(&vn)
+		applyStyleInjections(&vn)
 		body := renderVNode(vn, sess.handlers)
 		// Route through commitRender (Cycle 3 P40 / Gap C7) so
 		// the rebuilt-handlers branch keeps prevTree +
@@ -3214,7 +3677,7 @@ func (app *liveApp) dispatchBatched(sess *liveSession, ev batchedEvent) {
 		sess.handlers = map[string]any{}
 		vn := HtmlToVNode(sky_call(app.view, sess.model))
 		assignSkyIDs(&vn, "r")
-		injectMediaQueryStyles(&vn)
+		applyStyleInjections(&vn)
 		body := renderVNode(vn, sess.handlers)
 		// Route through commitRender (Cycle 3 P40 / Gap C7) so
 		// the rebuilt-handlers branch keeps prevTree +
@@ -3453,7 +3916,7 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 	sess.handlers = map[string]any{}
 	vn := HtmlToVNode(sky_call(app.view, sess.model))
 	assignSkyIDs(&vn, "r")
-	injectMediaQueryStyles(&vn)
+	applyStyleInjections(&vn)
 	body = renderVNode(vn, sess.handlers)
 	// Commit prevTree + lastComputedBody as one atomic step (Cycle 3
 	// P40 / Gap C7). Previously this was two separate writes — prevTree
@@ -3512,7 +3975,7 @@ func (app *liveApp) renderView(sess *liveSession) string {
 	sess.handlers = map[string]any{}
 	vn := HtmlToVNode(sky_call(app.view, sess.model))
 	assignSkyIDs(&vn, "r")
-	injectMediaQueryStyles(&vn)
+	applyStyleInjections(&vn)
 	body := renderVNode(vn, sess.handlers)
 	sess.commitRender(&vn, body)
 	return body
@@ -3771,6 +4234,10 @@ func (app *liveApp) setupSubscriptions(sess *liveSession) {
 	var everyLeaf *subT
 	desired := map[string]subT{}
 	desiredStreams := map[int64]subT{}
+	// v0.15.46: WebSocket subs keyed by `<socketID>:<wsKind>` so the
+	// four onMessage/onOpen/onClose/onError variants coexist per
+	// socket.
+	desiredWs := map[string]subT{}
 	for i := range leaves {
 		leaf := leaves[i]
 		switch leaf.kind {
@@ -3786,6 +4253,9 @@ func (app *liveApp) setupSubscriptions(sess *liveSession) {
 		case "subscribeStream":
 			// Last-write-wins per streamID — same rationale as topics.
 			desiredStreams[leaf.streamID] = leaf
+		case "subscribeWebSocket":
+			key := fmt.Sprintf("%d:%s", leaf.socketID, leaf.wsKind)
+			desiredWs[key] = leaf
 		}
 	}
 
@@ -3794,6 +4264,7 @@ func (app *liveApp) setupSubscriptions(sess *liveSession) {
 	// once + lands on a coherent activeSubs map.
 	app.applyTopicSubsDiff(sess, desired)
 	app.applyStreamSubsDiff(sess, desiredStreams)
+	app.applyWsSubsDiff(sess, desiredWs)
 
 	// Time.every — keep the existing goroutine shape verbatim.
 	if everyLeaf == nil {
@@ -4454,7 +4925,7 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 			defer func() { _ = recover() }()
 			vn := HtmlToVNode(sky_call(app.view, sess.model))
 			assignSkyIDs(&vn, "r")
-			injectMediaQueryStyles(&vn)
+			applyStyleInjections(&vn)
 			sess.handlers = map[string]any{}
 			body := renderVNode(vn, sess.handlers)
 			// Reconnect-resync writes the resync frame DIRECTLY to

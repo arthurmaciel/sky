@@ -225,6 +225,8 @@ async function measure(page, sel) {
             minWidth: cs.minWidth,
             minHeight: cs.minHeight,
             gridTemplateColumns: cs.gridTemplateColumns,
+            gridTemplateRows: cs.gridTemplateRows,
+            aspectRatio: cs.aspectRatio,
         };
     }, sel);
 }
@@ -358,18 +360,40 @@ try {
             fail("fixed-fill-row", "missing fixed/fill children");
         }
 
-        // ─── 2. Aspect ratio (#379) — manual 16:9 boxes ─────────
+        // ─── 2. Aspect ratio (#379) — typed `Ui.aspectRatio*` ────
         console.log("--- aspect ratio ---");
         const a320 = await measure(page, "aspect-320");
         const a160 = await measure(page, "aspect-160");
+        const aSquare = await measure(page, "aspect-square");
+        const aFillCine = await measure(page, "aspect-fill-cinema");
         if (a320) {
-            approxEq("aspect-320 ratio", a320.width / a320.height, 320 / 180, 0.05);
+            // 320 wide → 16:9 → ~180 high
+            approxEq("aspect-320 width", a320.width, 320, PIXEL_TOLERANCE);
+            approxEq("aspect-320 ratio", a320.width / a320.height, 16 / 9, 0.05);
+            // CSS aspect-ratio property reads as `auto N / M` or `N / M`
+            // depending on the browser — verify it's present and matches 16/9.
+            if (a320.aspectRatio && (a320.aspectRatio.includes("16 / 9") || a320.aspectRatio.includes("auto 16 / 9"))) {
+                ok(`aspect-320 aspect-ratio = ${a320.aspectRatio}`);
+            } else {
+                fail("aspect-320 aspect-ratio", `expected '16 / 9', got '${a320.aspectRatio}'`);
+            }
         }
         if (a160) {
-            approxEq("aspect-160 ratio", a160.width / a160.height, 160 / 90, 0.05);
+            // 160 wide, 1.777 decimal → ~90 high
+            approxEq("aspect-160 width", a160.width, 160, PIXEL_TOLERANCE);
+            approxEq("aspect-160 ratio", a160.width / a160.height, 1.777, 0.05);
+        }
+        if (aSquare) {
+            // 100×100 square via Ui.square
+            approxEq("aspect-square width", aSquare.width, 100, PIXEL_TOLERANCE);
+            approxEq("aspect-square height", aSquare.height, 100, PIXEL_TOLERANCE);
+        }
+        if (aFillCine) {
+            // Cinemascope 2.35:1; width fills the card body
+            approxEq("aspect-fill-cinema ratio", aFillCine.width / aFillCine.height, 2.35, 0.05);
         }
 
-        // ─── 3. Grid (#379) — 3 tracks at desktop width ─────────
+        // ─── 3. Grid (#379) — auto-fill default ─────────────────
         console.log("--- grid ---");
         const grid = await measure(page, "grid-row");
         if (grid) {
@@ -380,6 +404,67 @@ try {
                 fail("grid-row tracks", `expected 3, got ${tracks.length}: ${grid.gridTemplateColumns}`);
             }
         }
+
+        // ─── 3b. Grid tracks (#379) — typed Std.Ui.Grid ─────────
+        console.log("--- grid tracks (typed) ---");
+        const gtSidebar = await measure(page, "grid-tracks-sidebar");
+        const gtAutoFit = await measure(page, "grid-tracks-autofit");
+        const gtAuto = await measure(page, "grid-tracks-auto");
+        if (gtSidebar) {
+            // Sidebar: 1fr 200px 1fr → exactly 3 tracks; middle = 200px.
+            const t = (gtSidebar.gridTemplateColumns || "").trim().split(/\s+/).filter(Boolean);
+            if (t.length === 3 && t[1] === "200px") {
+                ok(`grid-tracks-sidebar = ${gtSidebar.gridTemplateColumns}`);
+            } else {
+                fail("grid-tracks-sidebar layout", `expected 3 tracks middle=200px, got '${gtSidebar.gridTemplateColumns}'`);
+            }
+        }
+        if (gtAutoFit) {
+            // Auto-fit at desktop ≥ 400px → expect 2-3 tracks (depends on card body width).
+            const t = (gtAutoFit.gridTemplateColumns || "").trim().split(/\s+/).filter(Boolean);
+            if (t.length >= 2) {
+                ok(`grid-tracks-autofit produced ${t.length} tracks (${gtAutoFit.gridTemplateColumns})`);
+            } else {
+                fail("grid-tracks-autofit", `expected ≥2 tracks, got ${t.length}: ${gtAutoFit.gridTemplateColumns}`);
+            }
+        }
+        if (gtAuto) {
+            // auto 1fr → 2 tracks, second is fractional (huge px value
+            // when computed). Just confirm 2 tracks emitted.
+            const t = (gtAuto.gridTemplateColumns || "").trim().split(/\s+/).filter(Boolean);
+            if (t.length === 2) {
+                ok(`grid-tracks-auto = ${gtAuto.gridTemplateColumns}`);
+            } else {
+                fail("grid-tracks-auto", `expected 2 tracks (auto + 1fr), got ${t.length}: ${gtAuto.gridTemplateColumns}`);
+            }
+        }
+
+        // ─── 3c. Aspect ratio at multiple widths (#379) ──────────
+        // Resize the page across three widths; the `aspect-fill-cinema`
+        // box has `Ui.width Ui.fill + Ui.cinemascope` so its height MUST
+        // track its width via the browser's `aspect-ratio` solver. This
+        // is the load-bearing regression — the moment the browser stops
+        // honouring `aspect-ratio` (or our CSS-emission drifts), the
+        // height drops to 0 or matches some unrelated content height.
+        console.log("--- aspect ratio @ multi-width ---");
+        for (const w of [400, 800, 1200]) {
+            await page.setViewportSize({ width: w, height: 720 });
+            await page.waitForTimeout(120);
+            const a = await measure(page, "aspect-fill-cinema");
+            if (a && a.width > 0) {
+                const r = a.width / a.height;
+                if (Math.abs(r - 2.35) <= 0.05) {
+                    ok(`aspect-fill-cinema @ viewport=${w} → ${a.width.toFixed(0)}×${a.height.toFixed(0)} (ratio ${r.toFixed(2)})`);
+                } else {
+                    fail(`aspect-fill-cinema @ viewport=${w}`, `ratio ${r.toFixed(2)} ≠ 2.35 (tol 0.05); box ${a.width.toFixed(0)}×${a.height.toFixed(0)}`);
+                }
+            } else {
+                fail(`aspect-fill-cinema @ viewport=${w}`, "missing or zero-size element");
+            }
+        }
+        // Reset to desktop viewport before snapshots.
+        await page.setViewportSize({ width: 1280, height: 720 });
+        await page.waitForTimeout(120);
 
         // ─── Media query / breakpoint (#376) ────────────────────
         // Desktop pass: viewport 1280 ≥ 768, so `Ui.breakpoint Ui.mobile`
@@ -432,7 +517,7 @@ try {
             fail("media-query <style>", `expected ≥2 data-sky-mq blocks, found ${mqStyleCount}`);
         }
 
-        // ─── 4. Pseudo-class stubs (#377) — render only ─────────
+        // ─── 4. Pseudo-class stubs (#377) ────────────────────────
         console.log("--- pseudo-class stubs ---");
         const hover = await measure(page, "hover-button");
         const focus = await measure(page, "focus-input");
@@ -444,12 +529,168 @@ try {
         if (active && active.width > 0) ok("active-link rendered");
         else fail("active-link", "missing or zero-size");
 
-        // ─── 5. Snapshots ───────────────────────────────────────
+        // The runtime injects a `<style data-sky-pc=...>` block as
+        // the first child of any element carrying pseudo-class
+        // rules. Confirm at least one such block exists.
+        const pcStyleCount = await page.evaluate(() =>
+            document.querySelectorAll("style[data-sky-pc]").length,
+        );
+        if (pcStyleCount >= 1) {
+            ok(`pseudo-class <style> blocks present (count=${pcStyleCount})`);
+        } else {
+            fail("pseudo-class <style>", `expected ≥1 data-sky-pc blocks, found ${pcStyleCount}`);
+        }
+
+        // The `:hover` rule MUST be auto-wrapped in `@media (hover:
+        // hover)` so it doesn't fire as sticky-hover on touch
+        // devices. Inspect every emitted pseudo <style> block.
+        const hoverGatePresent = await page.evaluate(() => {
+            const blocks = document.querySelectorAll("style[data-sky-pc]");
+            for (const b of blocks) {
+                if (b.textContent.includes(":hover")
+                    && b.textContent.includes("@media (hover: hover)")) {
+                    return true;
+                }
+            }
+            return false;
+        });
+        if (hoverGatePresent) {
+            ok(":hover wrapped in @media (hover: hover) (touch-safe)");
+        } else {
+            fail(":hover hover-gate", "no @media (hover: hover) wrap found");
+        }
+
+        // Snapshot the hover-button in its hovered state. Playwright's
+        // page.hover() triggers the pointer:over+CSS :hover state.
+        // Need a desktop browser with `(hover: hover)` to fire the
+        // gated rule — which is the default for chromium on a
+        // 1280×720 viewport (mouse pointer, hover-capable).
+        try {
+            await page.hover('[data-test-id="hover-button"]');
+            await page.waitForTimeout(80);
+            await snapshot(
+                page, "hover-button-state", "hover-button", "desktop",
+            );
+        } catch (e) {
+            fail("hover-button :hover snapshot", String(e));
+        }
+
+        // Focus the input via `.focus()` AND `.click()` so
+        // `:focus-visible` fires (in chromium, programmatic focus
+        // doesn't always paint focus-visible; clicking the input
+        // gives a stable visible-ring snapshot baseline).
+        try {
+            await page.focus('[data-test-id="focus-input"]');
+            await page.waitForTimeout(80);
+            await snapshot(
+                page, "focus-input-state", "focus-input-wrap", "desktop",
+            );
+        } catch (e) {
+            fail("focus-input :focus snapshot", String(e));
+        }
+
+        // Static disabled-button snapshot — confirms the disabled
+        // styling renders cleanly. (We don't trigger :disabled at
+        // runtime; the HTML `disabled=true` attribute already does.)
+        try {
+            await snapshot(
+                page, "disabled-button-state", "disabled-wrap", "desktop",
+            );
+        } catch (e) {
+            fail("disabled-button snapshot", String(e));
+        }
+
+        // ─── 5. Transitions + animations (#378) ──────────────────
+        console.log("--- transitions + animations (#378) ---");
+        // The Std.Ui transition / animation injection passes both
+        // wrap their rules in `@media (prefers-reduced-motion:
+        // no-preference)` by default. Inspect every emitted style
+        // block to confirm the gate is present (the snapshot
+        // baseline used `reducedMotion: "reduce"` so the actual
+        // movement is suppressed, but the gated CSS is in the DOM).
+        const trStyleCount = await page.evaluate(() =>
+            document.querySelectorAll("style[data-sky-tr]").length,
+        );
+        if (trStyleCount >= 1) {
+            ok(`transition <style> blocks present (count=${trStyleCount})`);
+        } else {
+            fail("transition <style>", `expected ≥1 data-sky-tr blocks, found ${trStyleCount}`);
+        }
+        const animStyleCount = await page.evaluate(() =>
+            document.querySelectorAll("style[data-sky-anim]").length,
+        );
+        if (animStyleCount >= 2) {
+            ok(`animation <style> blocks present (count=${animStyleCount})`);
+        } else {
+            fail("animation <style>", `expected ≥2 data-sky-anim blocks, found ${animStyleCount}`);
+        }
+        // Reduced-motion gate present on the gated animation
+        // (animatedFadeIn carries respectReducedMotion = True; the
+        // spinner opts out, so we look at the fade-in element).
+        const fadeInGated = await page.evaluate(() => {
+            const el = document.querySelector('[data-test-id="animated-fade-in"]');
+            if (!el) return false;
+            const style = el.querySelector("style[data-sky-anim]");
+            if (!style) return false;
+            return style.textContent.includes(
+                "@media (prefers-reduced-motion: no-preference)",
+            );
+        });
+        if (fadeInGated) {
+            ok("animated-fade-in wrapped in @media (prefers-reduced-motion: no-preference)");
+        } else {
+            fail("fade-in reduced-motion gate", "expected gate missing");
+        }
+        // Spinner opts OUT — its style block MUST NOT have the gate.
+        const spinnerUngated = await page.evaluate(() => {
+            const el = document.querySelector('[data-test-id="animated-spinner"]');
+            if (!el) return false;
+            const style = el.querySelector("style[data-sky-anim]");
+            if (!style) return false;
+            // Animation rule (not just @keyframes) must NOT be gated.
+            return !style.textContent
+                .replace(/@keyframes[^}]*\{[^}]*\}/g, "")
+                .includes("@media (prefers-reduced-motion: no-preference)");
+        });
+        if (spinnerUngated) {
+            ok("animated-spinner correctly opts out of reduced-motion gate");
+        } else {
+            fail("spinner ungated", "spinner rule should bypass reduced-motion gate");
+        }
+        // Transition shorthand should be present on the
+        // transition-button's style block.
+        const trShorthand = await page.evaluate(() => {
+            const el = document.querySelector('[data-test-id="transition-button"]');
+            if (!el) return "";
+            const style = el.querySelector("style[data-sky-tr]");
+            return style ? style.textContent : "";
+        });
+        if (trShorthand.includes("transition: background-color 200ms ease-out")) {
+            ok("transition-button shorthand = `background-color 200ms ease-out`");
+        } else {
+            fail("transition shorthand", `expected 'background-color 200ms ease-out', got: ${trShorthand}`);
+        }
+        // Animation @keyframes effective name MUST be auto-suffixed
+        // with the element's sky-id-derived ident (prevents global
+        // collisions across elements).
+        const fadeInKeyframes = await page.evaluate(() => {
+            const el = document.querySelector('[data-test-id="animated-fade-in"]');
+            if (!el) return "";
+            const style = el.querySelector("style[data-sky-anim]");
+            return style ? style.textContent : "";
+        });
+        if (/@keyframes fadeInUp__\w+/.test(fadeInKeyframes)) {
+            ok("animated-fade-in @keyframes name auto-suffixed with sky-id");
+        } else {
+            fail("fadeInUp suffix", `expected fadeInUp__<sky-id>, got: ${fadeInKeyframes}`);
+        }
+
+        // ─── 6. Snapshots ───────────────────────────────────────
         console.log("--- snapshots (desktop) ---");
         for (const section of [
             "triple-nested", "wrap-label", "portion",
-            "fixed-fill", "aspect", "grid", "pseudo", "viewport",
-            "mediaquery",
+            "fixed-fill", "aspect", "grid", "grid-tracks",
+            "pseudo", "viewport", "mediaquery", "motion",
         ]) {
             await snapshot(page, section, `section-${section}`, "desktop");
         }

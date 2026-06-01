@@ -1601,6 +1601,115 @@ Tz.fromParts zone y m d h min s : Result Error Int
 -- Zone discovery
 Tz.zoneOffset, Tz.zoneName     -- DST-aware for the given moment
 Tz.utc                          -- shorthand "UTC"
+
+-- v0.15.48+ infallible UTC companions
+-- (plug "UTC" at the call site so server-internal callers don't
+--  thread Result.withDefault 0 / "UTC" everywhere)
+Tz.yearUtc, Tz.monthUtc, Tz.dayUtc        : Int -> Int
+Tz.dayOfWeekUtc, Tz.dayOfYearUtc          : Int -> Int
+Tz.weekOfYearUtc                           : Int -> Int
+Tz.isWeekendUtc                            : Int -> Bool
+Tz.startOfDayUtc, Tz.endOfDayUtc          : Int -> Int
+Tz.startOfWeekUtc                          : Int -> Int
+Tz.startOfMonthUtc, Tz.endOfMonthUtc      : Int -> Int
+Tz.startOfYearUtc,  Tz.endOfYearUtc       : Int -> Int
+```
+
+### Sky.Core.ToString — uniform naming surface (v0.15.48+)
+
+When you need "convert this thing to a String" without remembering
+which kernel namespace it lives under, reach for `Sky.Core.ToString`.
+Routes to existing kernels — zero runtime overhead vs the canonical
+form.
+
+```elm
+import Sky.Core.ToString as ToString
+
+ToString.fromInt 42        -- "42"   (→ String.fromInt)
+ToString.fromFloat 3.14    -- "3.14" (→ String.fromFloat)
+ToString.fromBool True     -- "True"
+ToString.fromTime ms       -- canonical timeString (→ Time.timeString)
+```
+
+The canonical sub-namespace functions stay (`String.fromInt`,
+`Time.timeString`) — `Sky.Core.ToString` is purely a discoverability
+surface for editors and `sky doc`.
+
+### Sky.Core.Pure — uniform `() -> Task Error a` arity-0 mirror (v0.15.50+)
+
+Long-standing wart: some arity-0 stdlib bindings take `()`
+(`Time.now ()`), others are bare (`Uuid.v4`). For new code preferring
+a single consistent `Pure.foo ()` shape across every entropy / clock
+/ env / I/O surface, import `Sky.Core.Pure as Pure` — every wrapper
+is a typed `() -> Task Error a` tail-call alias to the canonical
+kernel:
+
+```elm
+import Sky.Core.Pure as Pure
+import Sky.Core.Task as Task
+
+main =
+    Pure.systemCwd ()                                  -- () -> Task Error String
+        |> Task.andThen (\cwd  -> Pure.uuidV4 ())      -- () -> Task Error String
+        |> Task.andThen (\uuid -> Pure.timeNow ())     -- () -> Task Error Int
+        |> Task.andThen (\now  -> println (String.fromInt now))
+```
+
+Current Pure.* surface (9 entries):
+
+```
+Pure.uuidV4          : () -> Task Error String
+Pure.uuidV7          : () -> Task Error String
+Pure.timeNow         : () -> Task Error Int
+Pure.timeUnixMillis  : () -> Task Error Int
+Pure.systemArgs      : () -> Task Error (List String)
+Pure.systemCwd       : () -> Task Error String
+Pure.systemLoadEnv   : () -> Task Error ()
+Pure.ioReadLine      : () -> Task Error String
+Pure.dbConnect       : () -> Task Error Db
+```
+
+Inclusion criterion: a binding belongs to `Sky.Core.Pure` when it
+takes no real Sky-level argument that disambiguates the call AND
+returns a `Task Error a`. Non-zero-arg helpers like `Random.int` /
+`Crypto.randomToken` / `System.exit` / `Process.run` are NOT
+candidates — their argument list carries semantic information.
+
+Existing names + shapes unchanged: `Time.now ()` / `Uuid.v4` /
+`System.cwd ()` / `Db.connect ()` etc. still work exactly as before.
+`Pure.*` is purely additive — pick whichever surface fits the style
+of your codebase.
+
+### Std.Auth — JWT typed-builder (v0.15.48+)
+
+Two equivalent paths for signing JWTs. The arity-3 short form stays
+canonical for the simple case; the *WithClaims variant gives full
+control over the `Sky.Core.Jwt.Algorithm` + `Jwt.Claims` builders:
+
+```elm
+import Std.Auth as Auth
+import Sky.Core.Jwt as Jwt
+import Sky.Core.Time as Time
+
+-- Simple case
+short = Auth.signToken "secret" claimsRecord 86400
+
+-- Typed-builder case (RS256, multi-claim, custom audience, jti)
+typed =
+    Auth.signTokenWithClaims
+        (Jwt.rs256 privateKeyPem)
+        (Jwt.claims
+            |> Jwt.subject "user-42"
+            |> Jwt.audience "https://api.example.app"
+            |> Jwt.expiresAt (now + 86400)
+            |> Jwt.jwtId tokenId
+            |> Jwt.withClaim "scope" "admin"
+        )
+
+-- Verify with explicit algorithm + window-check time
+case Auth.verifyTokenWithAlgorithm (Jwt.hs256 "secret") now token of
+    Ok rawJson -> ...
+    Err e      -> ...
 ```
 
 ### Std.Html
@@ -1839,8 +1948,12 @@ view model =
 | File / image hints | `fileMaxSize Int` (bytes) / `fileMaxWidth Int` / `fileMaxHeight Int` |
 | Colour | `rgb Int Int Int` / `rgba Int Int Int Float` / `white` / `black` / `transparent` |
 | Form / attribute helpers | `htmlAttribute key val` / `name "field"` / `style "css-prop" "value"` / `class "name"` |
-| Sub-modules | `Std.Ui.Background` (color/image/linearGradient/gradient), `Std.Ui.Border` (color/width/widthEach/rounded/solid/dashed/dotted/shadow/glow/innerShadow), `Std.Ui.Font` (color/family/size/weight/bold/semiBold/regular/light/extraBold/black/italic/underline/noDecoration/lineThrough/overline/letterSpacing/wordSpacing/alignLeft/alignRight/alignCenter/center/justify), `Std.Ui.Region` (heading n/mainContent/navigation/footer/aside/label/announce/announceUrgently — renderer dispatches real semantic tags `<h1..h6>`/`<main>`/`<nav>`/`<footer>`/`<aside>` + aria-label/aria-live), `Std.Ui.Input` (button/text/multiline/email/username/search/currentPassword/newPassword/checkbox/radio/radioRow/slider + option + label*/placeholder), `Std.Ui.Lazy` (lazy/lazy2..lazy5 — no-op wrappers today), `Std.Ui.Keyed` (sky-key for diff identity), `Std.Ui.Responsive` (classifyDevice/adapt — Model-driven viewport branching) |
+| Sub-modules | `Std.Ui.Background` (color/image/linearGradient/gradient + hoverColor/focusColor/focusVisibleColor/activeColor/disabledColor), `Std.Ui.Border` (color/width/widthEach/rounded/solid/dashed/dotted/shadow/glow/innerShadow + hoverColor/focusColor/focusVisibleColor/activeColor/hoverWidth/hoverRounded), `Std.Ui.Font` (color/family/size/weight/bold/semiBold/regular/light/extraBold/black/italic/underline/noDecoration/lineThrough/overline/letterSpacing/wordSpacing/alignLeft/alignRight/alignCenter/center/justify + hoverColor/focusColor/focusVisibleColor/activeColor/disabledColor/hoverSize), `Std.Ui.Region` (heading n/mainContent/navigation/footer/aside/label/announce/announceUrgently — renderer dispatches real semantic tags `<h1..h6>`/`<main>`/`<nav>`/`<footer>`/`<aside>` + aria-label/aria-live), `Std.Ui.Input` (button/text/multiline/email/username/search/currentPassword/newPassword/checkbox/radio/radioRow/slider + option + label*/placeholder), `Std.Ui.Lazy` (lazy/lazy2..lazy5 — no-op wrappers today), `Std.Ui.Keyed` (sky-key for diff identity), `Std.Ui.Responsive` (classifyDevice/adapt — Model-driven viewport branching) |
 | Media queries (CSS-driven) | `Ui.mediaQuery query [attrs] child` (raw query string escape hatch) / `Ui.breakpoint bp [attrs] child` (typed `Breakpoint`: `mobile / tablet / desktop / smAndUp / mdAndUp / lgAndUp / xlAndUp / darkMode / lightMode / reducedMotion / touchDevice / portrait / landscape / Custom Int Int`). Instant CSS-engine reactivity — no Model field, no JS round-trip, no re-render when the viewport / colour-scheme crosses the breakpoint. Composes via nesting. Renders as a sky-id-scoped `<style>` child on the wrapper. Sky.Tui silently ignores; Sky.Webview matches Sky.Live. Pick `Ui.breakpoint` when the layout transition needs NO typed Msg; pick `Std.Ui.Responsive` when it does. |
+| Pseudo-classes (CSS-driven) | Per sub-module `on<State>` helpers (above) + generic `Ui.onPseudo : PseudoClass -> List (Attribute msg) -> Attribute msg` escape hatch for selector combos no sub-module covers. `PseudoClass`: `Ui.hover / Ui.focus / Ui.focusVisible / Ui.active / Ui.disabled`. `focusColor` targets `:focus-visible` (safer default — keyboard nav only, never click-induced focus rings); use `Ui.onPseudo Ui.focus [...]` for sticky-focus. `:hover` rules are AUTO-WRAPPED in `@media (hover: hover)` by the runtime so they don't fire as sticky-hover on touch devices (mobile "tap-and-stay-hovered" bug). Renders a sky-id-scoped `<style data-sky-pc=...>` child. Composes with `Ui.breakpoint` via natural nesting — breakpoint wraps the element, pseudo-rule attaches inside. |
+| Transitions + animations (CSS-driven) | `Std.Ui.Transition.attribute [property "background-color", duration 200, easing easeOut]` builds a CSS transition shorthand from typed `Step`s; pair with `Background.hoverColor` to animate the change between base + `:hover`. `Std.Ui.Animation.attribute { name, duration, easing, delay, iterations, fillMode, respectReducedMotion, keyframes }` builds a keyframe spec; `keyframes : List (Int, List Transform.Prop)` from `Std.Ui.Transform` (translateX/Y/scale/rotate/skewX/Y/opacity). BOTH rules AUTO-WRAPPED in `@media (prefers-reduced-motion: no-preference)` by default for a11y — opt OUT via `Transition.attributeUnsafe` / `respectReducedMotion = False` ONLY when motion is semantically required (loading spinner). `@keyframes` names auto-suffixed with sky-id (`fadeIn__r_1_div_0`) so cross-element name collisions can't happen. Renders sky-id-scoped `<style data-sky-tr=...>` + `<style data-sky-anim=...>` children. Sky.Tui silently ignores; Sky.Webview matches Sky.Live. |
+| Aspect ratio (CSS-driven) | `Ui.aspectRatio Float` (`Ui.aspectRatio 1.777`) / `Ui.aspectRatioWH Int Int` (`Ui.aspectRatioWH 16 9`) / convenience aliases `Ui.square` (1:1), `Ui.widescreen` / `Ui.fullHd` (16:9), `Ui.cinemascope` (2.35:1). Compiles to inline `aspect-ratio: <r>` CSS; pair with `Ui.width Ui.fill` so the unset axis auto-scales via the browser's aspect-ratio solver. Indispensable for video embeds, image galleries, hero banners, avatar tiles. Sky.Tui ignores (ANSI cells have no aspect-ratio); Sky.Webview honours via embedded WebKit/Chromium. |
+| Grid tracks (typed CSS-grid) | `Ui.gridColumns N` stays for the common-case product-card grid (lowers to `repeat(auto-fill, minmax(Npx, 1fr))`). For sidebar layouts / content-aware tracks / `repeat(auto-fit, minmax(...))` responsive card grids, reach for `Std.Ui.Grid` — typed `Track` ADT (`fr`, `px`, `auto`, `minContent`, `maxContent`, `minmax`, `repeat`, `repeatAutoFit`, `repeatAutoFill`) + attribute entry points `Grid.tracks cols rows` / `Grid.columns cols` / `Grid.rows rs`. Examples: `Grid.columns [ Grid.fr 1, Grid.px 200, Grid.fr 1 ]` (sidebar); `Grid.columns [ Grid.repeatAutoFit (Grid.minmax (Grid.px 240) (Grid.fr 1)) ]` (responsive cards). Both surfaces lower to inline CSS via the existing AttrStyle channel — no runtime injection. |
 
 **Three idioms when writing Sky.Ui:**
 
@@ -1943,11 +2056,59 @@ Time.sleep 1000        -- Task Error () (sleep 1 second)
 ### Sky.Core.Http (Task)
 
 ```elm
-Http.get "https://api.example.com/data"     -- Task Error Response
-Http.post url body                            -- Task Error Response
-Http.request { method, url, headers, body }   -- Task Error Response
+Http.get "https://api.example.com/data"     -- Task Error HttpResponse
+Http.post url body                          -- Task Error HttpResponse
 
--- Response = { status : Int, body : String, headers : List (String, String) }
+-- HttpResponse = { status : Int, body : String, headers : Dict String String }
+
+-- Build a custom request with the builder API (typed):
+Http.defaultRequest "https://api.example.com/v1/foo"
+    |> Http.withMethod "POST"
+    |> Http.withHeader "Authorization" ("Bearer " ++ token)
+    |> Http.withBody jsonBody
+    |> Http.withTimeout 60000              -- 60 s; 0 disables
+    |> Http.request                         -- Task Error HttpResponse
+
+-- Retry on transient errors (uniform Sky.Core.Task surface):
+--
+--   * `RetryPolicy e` carries the body-Task's error type.
+--   * `ShouldRetry e = RetryAlways | RetryWhen (e -> Bool)` is the
+--     HM-pure predicate ADT (replaces `shouldRetry : any` from
+--     v0.15.44). `RetryAlways` is the default in every fresh
+--     policy; `retryOn` (or its `with*` alias `withRetryOn`)
+--     wraps a typed predicate in `RetryWhen`.
+import Sky.Core.Error as Error
+
+-- Default: retry every Err (RetryAlways).
+policyA = Task.exponentialBackoff 3 500
+
+-- Typed-predicate: only retry transient errors (RetryWhen).
+policyB =
+    Task.exponentialBackoff 3 500
+        |> Task.withJitter
+        |> Task.retryOn Error.isRetryable
+
+-- Builder pattern (mirror of `Http.defaultRequest |> Http.withTimeout`):
+-- Note: `defaultRetryPolicy` returns `RetryPolicy e` polymorphic in
+-- `e`; when threading a typed predicate (`Error -> Bool`) through the
+-- builder chain, start from `exponentialBackoff` / `linearBackoff`
+-- instead — they specialise `e` at the call site.
+policyC =
+    Task.exponentialBackoff 5 250
+        |> Task.withJitter
+        |> Task.withRetryOn Error.isRetryable
+
+-- Pure builder chain (untyped predicate stays generic):
+policyD =
+    Task.defaultRetryPolicy
+        |> Task.withMaxAttempts 5
+        |> Task.withBaseMs 250
+        |> Task.withKind 1
+
+fetchToken : Task Error String
+fetchToken =
+    Task.retryWith policyB
+        (Http.get tokenUrl |> Task.map (\resp -> resp.body))
 
 Http.parseQuery "a=1&b=2"   -- Dict String String (pure; Go net/url)
 ```
@@ -1961,9 +2122,11 @@ latency 5-10× vs `Http.get`.
 ```elm
 import Sky.Core.Http.Stream as HttpStream exposing (StreamId, ChunkEvent(..))
 
-HttpStream.open req       -- Task Error StreamId — completes once HEADERS arrive
-HttpStream.chunks sid f   -- Sub msg — `f : ChunkEvent -> msg` per chunk
-HttpStream.close sid      -- Task Error () — idempotent
+HttpStream.open req              -- Task Error StreamId — completes once HEADERS arrive
+HttpStream.chunks sid f          -- Sub msg — `f : ChunkEvent -> msg` per chunk
+HttpStream.close sid             -- Task Error () — idempotent
+HttpStream.forEachChunk sid body -- Task Error () — synchronous drain
+                                 -- body : String -> Task Error ()
 
 type ChunkEvent
     = Chunk String       -- UTF-8 bytes just arrived
@@ -1971,15 +2134,36 @@ type ChunkEvent
     | Errored Error      -- network / protocol fault
 ```
 
-**Canonical shape**: subscribe only while a stream is in-flight.
-Store `StreamId` on the model after `StreamOpened (Ok sid)`, clear
-on `Chunked Done` / `Errored`, return `Sub.none` when Nothing.
-See `examples/28-streaming-chat` for the reference; full design
-write-up in `docs/skylive/http-streaming.md`.
+**Two ways to consume a stream:**
+
+1. **Sub-based** (`chunks`) — for Sky.Live apps. The runtime
+   dispatches `ChunkEvent` Msgs through the update loop. Subscribe
+   only while in-flight: store `StreamId` on the model after
+   `StreamOpened (Ok sid)`, clear on `Chunked Done` / `Errored`,
+   return `Sub.none` when Nothing. See `examples/28-streaming-chat`.
+
+2. **Synchronous** (`forEachChunk`) — for plain Sky.Http.Server
+   handler goroutines (NO Sub mechanism available). Blocks until
+   upstream EOF / error; calls `body` per chunk. Fail-fast on body
+   `Err`. Always closes the handle on exit. Canonical relay shape:
+
+   ```elm
+   handleRelay req =
+       Server.Stream.stream "text/event-stream" (\writer ->
+           HttpStream.open upstreamReq
+               |> Task.andThen (\hdl ->
+                   HttpStream.forEachChunk hdl
+                       (\chunk -> Server.Stream.emit chunk writer))
+               |> Task.andThen (\_ -> Server.Stream.finish writer))
+   ```
+
+   See `examples/32-sse-relay` for the runnable reference. Full
+   design write-up in `docs/skylive/http-streaming.md`.
 
 Session disconnect (TTL eviction OR Delete) closes every owned
-stream automatically; log: `[sky.stream] cleaned N orphaned
-streams on session close`.
+Sub-registered stream automatically; log: `[sky.stream] cleaned N
+orphaned streams on session close`. forEachChunk-owned streams
+self-close on exit.
 
 ### Sky.Http.Server.Stream (Task) — incremental HTTP responses
 
@@ -2027,6 +2211,78 @@ See `examples/30-sse-server-demo` for a runnable demo +
 `docs/skylive/http-streaming.md` §"Server-side" for the design
 write-up.
 
+### Sky.Core.WebSocket + Sky.Http.Server.WebSocket (v0.15.46+)
+
+Bidirectional WebSocket — collab editors, multiplayer, bidirectional
+LLM chat, financial feeds.  Two mirror modules:
+`Sky.Core.WebSocket` (outbound client) + `Sky.Http.Server.WebSocket`
+(server-side upgrade).
+
+**Client side** — `Sky.Live` shape (Sub-driven receive):
+
+```elm
+import Sky.Core.WebSocket as Ws exposing (WebSocketMessage(..))
+
+-- Open
+( model, Cmd.perform (Ws.connect "wss://api.example.com/feed") Connected )
+
+-- Receive
+subscriptions model =
+    case model.socket of
+        Just sock -> Sub.batch [ Ws.onMessage sock GotFrame, Ws.onClose sock SocketClosed ]
+        Nothing   -> Sub.none
+
+-- Send
+Cmd.perform (Ws.send sock "hello") Sent
+```
+
+`Ws.connect : String -> Task Error WebSocket`,
+`Ws.connectWith : WebSocketCfg -> Task Error WebSocket`,
+`Ws.send` / `Ws.sendBinary` / `Ws.close` /
+`Ws.closeWithCode`, plus the four Sub helpers `Ws.onOpen` /
+`Ws.onMessage` / `Ws.onClose` / `Ws.onError`.  Build the cfg via
+`Ws.defaultCfg url |> Ws.withHeaders [...] |> Ws.withTimeout 5000
+|> Ws.withPingInterval 30000`.
+
+**Server side** — turn any `Sky.Http.Server` route into a
+WebSocket upgrade endpoint by returning `Ws.upgrade req cfg`:
+
+```elm
+import Sky.Http.Server.WebSocket as Ws
+
+handleWs : Request -> Task Error Response
+handleWs req =
+    Ws.upgrade req
+        (Ws.defaultCfg
+            |> Ws.withOnConnect (\sock -> Ws.sendToClient sock "welcome!")
+            |> Ws.withOnMessage (\sock msg -> Ws.sendToClient sock ("echo: " ++ msg))
+            |> Ws.withOnClose   (\_    -> Task.succeed ())
+            |> Ws.withOriginPatterns [ "https://*.example.com" ]
+        )
+```
+
+`Ws.sendToClient` / `Ws.sendBinaryToClient` for individual peers;
+`Ws.broadcast peers text` for fan-out (tolerates partial failure);
+`Ws.closeClient` for explicit disconnect.
+
+| Concern | Default |
+|---|---|
+| Handshake timeout | 30 s |
+| Heartbeat ping | 30 s (`withPingInterval 0` disables) |
+| Max message size | 1 MiB (`withMaxMessageBytes`) |
+| Origin gate | empty `originPatterns` REJECTS in production (403); dev allows all |
+| Read buffer | 64 frames per socket |
+| `send` backpressure | blocks up to 30 s on a slow consumer |
+
+**Stdlib typed-record convention (v0.15.46+).** Every public
+typed record (`WebSocketCfg`, `WebSocketServerCfg`,
+`HttpRequest`, …) ships with a `default*` constructor + at least
+one `with*` builder per field.  Always compose via builders — a
+new optional field in a patch release would break a record
+literal.
+
+See `examples/33-websocket-echo` for the canonical pattern.
+
 ### Sky.Core.Encoding (pure)
 
 ```elm
@@ -2054,7 +2310,32 @@ Crypto.hmacSha256 "key" "msg"       -- hex HMAC (also hmacSha512)
 Crypto.rsaSha256Sign pemKey "msg"   -- Result Error String — RS256 signature
 Crypto.rsaSha256Verify pub "msg" s  -- Bool
 Crypto.constantTimeEqual a b        -- compare secrets safely, never ==
+
+-- Symmetric encryption (AEAD).  Output: base64(nonce || ct || tag).
+key = Crypto.aesKeyFromPassword "password" "salt-must-be-unique"
+Crypto.aesGcmEncrypt key "plaintext"    -- Result Error String
+Crypto.aesGcmDecrypt key ciphertext     -- Result Error String
+Crypto.chacha20Encrypt key plaintext    -- AES alternative on ARM / mobile
+Crypto.chacha20Decrypt key ciphertext
 ```
+
+### Sky.Core.Bytes (pure)
+
+```elm
+import Sky.Core.Bytes as Bytes
+
+Bytes.fromHex "deadbeef"    -- Maybe Bytes
+Bytes.toHex bytes           -- String
+Bytes.fromBase64 "SGVsbG8=" -- Maybe Bytes
+Bytes.toBase64 bytes        -- String
+Bytes.toString bytes        -- Maybe String — Nothing on invalid UTF-8
+Bytes.length bytes          -- byte count
+```
+
+`Bytes` is a `type alias = String` — Go strings are byte sequences, no
+opaque-wrapper round-trip needed.  Use `Bytes` when you want the
+intent (this string holds raw bytes, not text) to read in your type
+signatures.
 
 ### Sky.Core.Jwt (pure)
 
@@ -2084,20 +2365,29 @@ Random.shuffle [1,2,3,4]    -- Task Error (List Int)
 
 ### Sky.Http.Server
 
+Every binding carries an HM signature (v0.15.44+).  `sky doc
+Server.get` returns the real type; LSP hover surfaces `String ->
+(Request -> Task Error Response) -> Route`.
+
 ```elm
-import Sky.Http.Server as Server
+import Sky.Http.Server as Server exposing (Request, Response, Route)
+
+handleHome : Request -> Task Error Response
+handleHome _ =
+    Task.succeed (Server.text "Hello!")
 
 main =
     Server.listen 8000
-        [ Server.get "/" (\_ -> Task.succeed (Server.text "Hello!"))
+        [ Server.get "/" handleHome
         , Server.get "/api/users/:id" getUser
         , Server.post "/api/data" handlePost
         , Server.static "/assets" "./public"
         ]
 
--- Request = { method, path, body, headers, params, query, cookies, ... }
+-- Request  = { method, path, body, headers, params, query, cookies, remoteAddr }
+-- Response = { status, body, headers, contentType }
 -- Response builders: text, json, html, withStatus, withHeader, withCookie, redirect
--- Cookie: Server.cookie "name" "value", Server.secureCookie, Server.sessionCookie
+-- Cookie:   Server.cookie "name" "value" -- pair with Server.withCookie
 ```
 
 ### Sky Console — auto-mounted dev dashboard
@@ -3752,9 +4042,25 @@ Db.exec conn "INSERT INTO t (name) VALUES (?)" ["val"]
 Db.query conn "SELECT * FROM t WHERE x = ?" ["val"]
 Db.execRaw conn "CREATE TABLE IF NOT EXISTS t (...)"
 
--- Typed queries via Json.Decode
-Db.queryDecode conn "SELECT * FROM t" [] myDecoder
-Db.queryOneDecode conn "SELECT * FROM t WHERE id = ?" [id] myDecoder
+-- Typed queries via Std.Db.Decode (v0.15.45 — preferred over the
+-- Dict.get accessor boilerplate). Mirrors Sky.Core.Json.Decode's
+-- shape (string/int/float/bool/nullable/map/map2-5/andMap/required/
+-- optional).
+import Std.Db.Decode as DbDecode
+
+userDecoder : Decoder User
+userDecoder =
+    DbDecode.succeed (\i n e -> { id = i, name = n, email = e })
+        |> DbDecode.andMap (DbDecode.int "id")
+        |> DbDecode.andMap (DbDecode.string "name")
+        |> DbDecode.andMap (DbDecode.string "email")
+
+users : Task Error (List User)
+users = Db.queryDecode db "SELECT id, name, email FROM users" [] userDecoder
+
+userById : Int -> Task Error (Maybe User)
+userById uid =
+    Db.getByIdDecode db "users" uid userDecoder
 
 -- Convenience
 Db.insertRow conn "table" (Dict.fromList [("col", "val")])
@@ -4087,7 +4393,7 @@ records the per-version closures if you want history.
 - **No custom operators** — only built-in (`|>`, `<|`, `++`, `::`, etc.).
 - **No row-polymorphic annotation syntax** — Sky doesn't parse `{ r | field : T }` in annotations. Use a closed record alias for the function's input.
 - **Negative literal arguments need parentheses** — `f (-1)` not `f -1` (`f -1` parses as subtraction).
-- **`Dict.toList` returns string keys** — `Dict` is `map[string]any` at runtime, so `Dict.toList` on `Dict Int v` gives string keys; arithmetic on them silently produces 0. Iterate via `Dict.get` over known ranges.
+- **`Dict.toList` typed-key inference is inline-only** — `Dict.toList (Dict.fromList [(1, "a")])` chained in the same expression returns real `Int` keys (v0.15.45 closed the soundness hole for this shape via the typed-key `rt.Dict_toListIntKey` / `rt.Dict_toListFloatKey` runtime routes). For let-bound intermediates — `let d = Dict.fromList […] in Dict.toList d` — the solver doesn't expose `d`'s typed shape at the use-site, so routing falls back to the legacy String-key path. Workaround: inline the chain directly.
 - **`sky check` doesn't fully model Go interfaces** — concrete types can't unify with Go interfaces (`Fyne.CanvasObject`), but the code compiles and runs fine.
 - **Zero-arg calls follow the binding's declared type** — bare `Uuid.v4` works because its stdlib sig is `v4 : String`; `Time.now ()` / `Time.unixMillis ()` / `FyneApp.new ()` are *all* needed because their sigs are `() -> Task Error a`. Calling a `: String` binding with `()` triggers a known codegen bug for arity-0 kernels — stick to the declared shape.
 - **FFI setters in pipelines need an explicit lambda** — `|> Result.andThen (OpenAi.chatCompletionMessageSetRole m.role)` emits a call to the non-existent non-T variant and fails codegen. Wrap: `|> Result.andThen (\msg -> OpenAi.chatCompletionMessageSetRole m.role msg)`.
@@ -4555,3 +4861,32 @@ auto-generated binding.
 
 All FFI calls go through `defer/recover`: any Go panic becomes a Sky `Err`,
 never a process crash.
+
+### v0.15.47+ Stdlib Additions (Std.Cache / Std.Email / Std.Compression / Std.Csv / Std.Config)
+
+Five new modules — every Sky app stops reinventing them.
+
+- `Std.Cache` — typed LRU + TTL in-memory. `CacheCfg` ships with `defaultCfg` + `withMaxEntries`/`withTTL`/`withMaxBytes` builders per the v0.15.46 typed-record convention. API: `new` / `get` / `put` / `remove` / `clear` / `size` / `stats`. Backed by `hashicorp/golang-lru/v2`.
+- `Std.Email` — Resend / SES / SendGrid / SMTP under one `EmailProvider` ADT. Typed `EmailMessage` + `Attachment` with `defaultMessage { from, to, subject }` + `with*` builders. `Email.send : EmailProvider -> EmailMessage -> Task Error String` returns the provider message id. `SKY_EMAIL_DRY_RUN=1` short-circuits for tests.
+- `Std.Compression` — `gzip` / `gunzip` (RFC 1952) + `zstdCompress` / `zstdDecompress` (RFC 8478). Operates on `Bytes` (String alias).
+- `Std.Csv` — `parse` / `parseWithDelimiter`, `encode` / `encodeWithDelimiter` (RFC 4180), `parseStreamFromFile` for large files. Returns typed `Csv = { header, rows }`.
+- `Std.Config` — typed TOML / YAML / JSON decoders mirroring `Sky.Core.Json.Decode`'s shape. `decodeToml` / `decodeYaml` / `decodeJson` + `loadFromFile` (extension-detected).
+
+### v0.15.47+ Additions to Existing Modules
+
+- `String.containsIn / startsWithIn / endsWithIn` — **haystack-first** companions. The existing `String.contains needle haystack` was needle-first and broke `|>` chains. Now: `"hello world" |> String.containsIn "world"` reads naturally.
+- `Sky.Core.Random` — `range`, `choice`, `shuffle`, `weighted` (entropy-backed Task) + `seed`, `seededInt`, `seededFloat`, `seededChoice` (deterministic splitmix64).
+
+### Stdlib typed-record convention (v0.15.46+)
+
+**Every typed record in Std.* ships with a `default<Name>` constructor + `with<Field>` builder helpers per field.** This makes adding fields non-breaking (downstream callers using builders auto-pick up new defaults). Always compose typed records via builders, not raw record literals:
+
+```elm
+-- Preferred (won't break when fields are added):
+defaultCacheCfg
+    |> withMaxEntries 1000
+    |> withTTL 60000
+
+-- Fragile (breaks the moment a field is added to CacheCfg):
+{ maxEntries = 1000, ttlMs = 60000, maxBytes = 0 }
+```

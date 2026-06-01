@@ -2,6 +2,7 @@ module Main (main) where
 
 import Test.Hspec
 import qualified Sky.Build.CompileSpec
+import qualified Sky.Build.MainPanicRecoverSpec
 import qualified Sky.Build.IORefBoundarySpec
 import qualified Sky.Build.DepHmFatalSpec
 import qualified Sky.Build.ExampleSweepSpec
@@ -18,6 +19,7 @@ import qualified Sky.Canonicalise.UnboundSpec
 import qualified Sky.Canonicalise.QualifiedTypeAliasSpec
 import qualified Sky.Canonicalise.DualImportCollisionSpec
 import qualified Sky.Canonicalise.AliasNameCollisionSpec
+import qualified Sky.Canonicalise.PipelineIntegritySpec
 import qualified Sky.Type.ExhaustivenessSpec
 import qualified Sky.Type.AnyWildcardSpec
 import qualified Sky.Type.NumericBinopSpec
@@ -27,6 +29,9 @@ import qualified Sky.Type.UfCycleGuardSpec
 import qualified Sky.Type.RecordFieldExactnessSpec
 import qualified Sky.Build.UiFillCascadeSpec
 import qualified Sky.Build.UiMediaQuerySpec
+import qualified Sky.Build.UiPseudoClassSpec
+import qualified Sky.Build.UiTransitionAnimationSpec
+import qualified Sky.Build.UiAspectGridSpec
 import qualified Sky.Build.UiMultilineTextareaSpec
 import qualified Sky.Build.ExposingTypeCtorsSpec
 import qualified Sky.Build.LetForwardRefSpec
@@ -34,12 +39,18 @@ import qualified Sky.Build.EntryLocalShadowsDepSpec
 import qualified Sky.Build.RtFieldAdtBug342Spec
 import qualified Sky.Build.CaseSubjectNameShadowSpec
 import qualified Sky.Build.FfiKernelAliasSpec
+import qualified Sky.Build.HttpTypesSpec
+import qualified Sky.Build.CryptoAeadSpec
 import qualified Sky.Build.PubSubPublishTaskSpec
 import qualified Sky.Build.PubSubPublishNoEchoSpec
 import qualified Sky.Build.ServerStreamSpec
+import qualified Sky.Build.HttpStreamForEachSpec
 import qualified Sky.Build.WebviewAppSpec
 import qualified Sky.Build.WebviewLoopbackAssetsSpec
 import qualified Sky.Build.JsonPipelinePanic372Spec
+import qualified Sky.Build.DictSourceSpec
+import qualified Sky.Build.DbDecoderSpec
+import qualified Sky.Build.WebSocketSpec
 import qualified Sky.Parse.MultiLineCaseSubjectSpec
 import qualified Sky.Parse.MultiLineCaseKeywordSpec
 import qualified Sky.Parse.MultiLineSignatureSpec
@@ -58,6 +69,7 @@ import qualified Sky.Build.TaskResultBridgesSpec
 import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
 import qualified Sky.Build.RecordCtorEmptyListSpec
+import qualified Sky.Build.PointFreePolyAliasSpec
 import qualified Sky.Build.HofTypedMsgSpec
 import qualified Sky.Build.CoerceArgParametricSpec
 import qualified Sky.Build.IsPlainIdentSpec
@@ -82,6 +94,7 @@ import qualified Sky.Type.InstanceCaptureSpec
 import qualified Sky.Type.SolvedTypesRegionMapSpec
 import qualified Sky.Build.KernelSigCoverageSpec
 import qualified Sky.Build.KernelStdlibCoverageSpec
+import qualified Sky.Build.PureModuleSpec
 import qualified Sky.Build.HeapBoundedHmSpec
 import qualified Sky.Build.SolverBudgetSpec
 import qualified Sky.Build.UnreachableGateSpec
@@ -113,6 +126,10 @@ import qualified Sky.Cli.DoctorSpec
 main :: IO ()
 main = hspec $ do
     describe "Sky.Build.Compile"         Sky.Build.CompileSpec.spec
+    -- v0.15.43 Cycle 6 PC — top-level `func main()` MUST start with
+    -- `defer rt.LogPanicAndExit()`. Regression here re-exposes the
+    -- synchronous-panic class (Sky.Cli / Sky.Tui / batch jobs).
+    describe "Sky.Build.MainPanicRecover" Sky.Build.MainPanicRecoverSpec.spec
     -- v0.15.5 PR 2/6 — regression gate for the retired per-scope
     -- IORef pair (mechanical string match on Compile.hs).
     describe "Sky.Build.IORefBoundary"   Sky.Build.IORefBoundarySpec.spec
@@ -183,6 +200,13 @@ main = hspec $ do
     -- bare-name fallback for unique bodies.
     describe "Sky.Canonicalise.AliasNameCollision"
                                          Sky.Canonicalise.AliasNameCollisionSpec.spec
+    -- v0.15.42 Cycle 6: 3 pipeline-integrity bugs called out in the
+    -- v0.15.41 audit (§3.1 unknown qualifier silently passing,
+    -- §3.4 "Compilation successful" banner before go build runs,
+    -- §3.2 Prelude shadowing of stdlib types). One regression spec
+    -- per bug — see PipelineIntegritySpec.hs header for context.
+    describe "Sky.Canonicalise.PipelineIntegrity"
+                                         Sky.Canonicalise.PipelineIntegritySpec.spec
     describe "Sky.Type.Exhaustiveness"   Sky.Type.ExhaustivenessSpec.spec
     -- Cross-branch HM `any` wildcard fix (compiler bug #3). Distinct
     -- occurrences of `any` in source types must NOT share a single
@@ -219,6 +243,31 @@ main = hspec $ do
     -- marker attrs (data-sky-mq-q / data-sky-mq-rules) + the
     -- breakpoint expansion (max-width / prefers-color-scheme).
     describe "Sky.Build.UiMediaQuery"    Sky.Build.UiMediaQuerySpec.spec
+    -- Std.Ui pseudo-class primitive (issue #377). Same shape as
+    -- UiMediaQuerySpec — builds a tiny project + checks the lowered
+    -- Go contains the runtime marker attr (data-sky-pc-rules) +
+    -- per-pseudo wire tags (h|, v|, f|, a|, d|).
+    describe "Sky.Build.UiPseudoClass"    Sky.Build.UiPseudoClassSpec.spec
+    -- Std.Ui transitions + animations DSL (issue #378). Compile-side
+    -- fence — checks the new helper symbols
+    -- (Transition.attribute / Animation.attribute) lower to AttrTransition /
+    -- AttrAnimation ctors + the runtime marker attrs
+    -- (data-sky-tr-rules / data-sky-anim-rules) appear in the
+    -- emitted Go. The runtime injection side
+    -- (injectTransitionStyles / injectAnimationStyles +
+    -- reduced-motion auto-gate) is covered by
+    -- runtime-go/rt/live_transition_animation_test.go.
+    describe "Sky.Build.UiTransitionAnimation"
+                                       Sky.Build.UiTransitionAnimationSpec.spec
+    -- Std.Ui aspect-ratio + content-aware grid tracks (#379) — the
+    -- compile-side regression fence. Checks that the new helper
+    -- symbols (Ui.aspectRatio / Ui.aspectRatioWH / Std.Ui.Grid.tracks
+    -- / Grid.columns / Grid.rows) lower to the expected literal CSS
+    -- strings + marker keys in the emitted Go. The runtime side is
+    -- a pure inline-style emission via the existing AttrStyle channel
+    -- (no new injection pass needed) — verified by the visual gates
+    -- in scripts/verify-ui-showcase.mjs.
+    describe "Sky.Build.UiAspectGrid"  Sky.Build.UiAspectGridSpec.spec
     -- Std.Ui.Input.multiline used to call `inputBase "textarea"` which
     -- built a `Ui.input` element with type="textarea" — invalid HTML
     -- that browsers silently degrade to single-line text input. Fix
@@ -231,6 +280,8 @@ main = hspec $ do
     describe "Sky.Build.RtFieldAdtBug342" Sky.Build.RtFieldAdtBug342Spec.spec
     describe "Sky.Build.CaseSubjectNameShadow" Sky.Build.CaseSubjectNameShadowSpec.spec
     describe "Sky.Build.FfiKernelAlias" Sky.Build.FfiKernelAliasSpec.spec
+    describe "Sky.Build.HttpTypes" Sky.Build.HttpTypesSpec.spec
+    describe "Sky.Build.CryptoAead" Sky.Build.CryptoAeadSpec.spec
     -- Cycle 4 PT: Task-shaped Std.PubSub.publish — callable from any
     -- context (raw Sky.Http.Server api handlers / post-init goroutines
     -- / scheduled jobs), complements Cmd.publish which is bound to
@@ -246,6 +297,12 @@ main = hspec $ do
     -- Unblocks LLM token-stream proxying + SSE endpoints without
     -- hand-rolled chunk plumbing on the Sky side.
     describe "Sky.Build.ServerStream" Sky.Build.ServerStreamSpec.spec
+    -- Issue #373: Sky.Core.Http.Stream.forEachChunk — synchronous
+    -- chunk-iterator that bridges the Sub-based client-side stream
+    -- consumer with Sky.Http.Server.Stream producers inside the
+    -- same handler goroutine (the SkyDeploy /generate/stream
+    -- relay shape).
+    describe "Sky.Build.HttpStreamForEach" Sky.Build.HttpStreamForEachSpec.spec
     -- Issue #356 / v0.1 MVP: Sky.Webview backend. Pins the
     -- Std.Webview.app type-checker contract + kernel routing.
     describe "Sky.Build.WebviewApp" Sky.Build.WebviewAppSpec.spec
@@ -262,6 +319,13 @@ main = hspec $ do
     -- currys instead of zero-pads when target's return is `any`.
     describe "Sky.Build.JsonPipelinePanic372"
         Sky.Build.JsonPipelinePanic372Spec.spec
+    -- v0.15.45 — Dict + Set Layer 3 contract + typed-key routing.
+    describe "Sky.Build.DictSource" Sky.Build.DictSourceSpec.spec
+    -- v0.15.45 — Std.Db.Decode typed row decoder pipeline.
+    describe "Sky.Build.DbDecoder" Sky.Build.DbDecoderSpec.spec
+    -- v0.15.46 — Sky.Core.WebSocket + Sky.Http.Server.WebSocket
+    -- kernel routing + Sky-side type-checking.
+    describe "Sky.Build.WebSocket" Sky.Build.WebSocketSpec.spec
     describe "Sky.Parse.MultiLineCaseSubject" Sky.Parse.MultiLineCaseSubjectSpec.spec
     describe "Sky.Parse.MultiLineCaseKeyword"
         Sky.Parse.MultiLineCaseKeywordSpec.spec
@@ -349,6 +413,10 @@ main = hspec $ do
     -- arg via rt.AsListT[T]. Pre-fix, `Item 1 "first" []` shipped
     -- `Item(1, "first", []any{})` and go build rejected.
     describe "Sky.Build.RecordCtorEmptyList" Sky.Build.RecordCtorEmptyListSpec.spec
+    -- #398: point-free top-level alias of a polymorphic / N-ary
+    -- function. Pre-fix, `tickle = String.toUpper` emitted a
+    -- 0-arity Go thunk wrapper; call sites failed `go build`.
+    describe "Sky.Build.PointFreePolyAlias" Sky.Build.PointFreePolyAliasSpec.spec
     -- Limitation #18 (other half): renderHofParamTy used to hardcode
     -- the inner-function return as `any`, breaking helpers with typed
     -- (String -> Msg) callbacks. Now routes via typeStrWithAliasesReg.
@@ -495,6 +563,9 @@ main = hspec $ do
     -- sky-stdlib/ must have a matching Kernel.lookup entry. Closes
     -- the `String.toList undefined` / `Math.abs undefined` class.
     describe "Sky.Build.KernelStdlibCoverage" Sky.Build.KernelStdlibCoverageSpec.spec
+    -- v0.15.50: Sky.Core.Pure additive `() -> Task Error a` mirror module.
+    -- Spec pins the typed-Go shape (no `any` widening) + kernel reuse.
+    describe "Sky.Build.PureModule"          Sky.Build.PureModuleSpec.spec
     -- Limitation #17: Std.Ui-cascading HM constraint pathology that
     -- pre-fix OOMed at 4-5 GB. Spec re-runs sky check on the bak
     -- reproducer under a tight heap cap.

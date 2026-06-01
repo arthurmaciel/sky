@@ -83,7 +83,7 @@ evens   = List.filter (\n -> modBy 2 n == 0) [ 1, 2, 3, 4 ] -- [2, 4]
 > lists; for million-entry inputs prefer `foldl` with an
 > accumulator. See [Limitation 12](../CLAUDE.md#active-limitations).
 
-### `Dict` — key-value maps (string keys)
+### `Dict` — key-value maps
 
 ```elm
 import Sky.Core.Dict as Dict
@@ -92,9 +92,9 @@ prefs = Dict.fromList [ ("theme", "dark"), ("lang", "en") ]
 theme = Dict.get "theme" prefs   -- Just "dark"
 ```
 
-`empty`, `insert`, `get`, `remove`, `member`, `keys`, `values`, `toList`, `fromList`, `map`, `foldl`, `union`.
+`empty`, `insert`, `get`, `remove`, `member`, `keys`, `values`, `toList`, `fromList`, `map`, `foldl`, `union`, `size`, `isEmpty`.
 
-> `Dict` keys are strings internally. If your keys are numeric, convert at the boundary: `Dict.insert (String.fromInt id) value`.
+> **Key types.** The runtime representation is `map[string]V` regardless of the Sky-level key type — Int / Float keys get stringified on `fromList` and re-parsed on `toList`. v0.15.45's typed-key routing closes the soundness gap for inlined `Dict.toList (Dict.fromList […])` chains (Int / Float keys round-trip faithfully). Let-bound intermediates still fall back to the legacy String-key path — see [Limitation #5](../CLAUDE.md#active-limitations).
 
 ### `Set` — unique-element collections
 
@@ -170,8 +170,35 @@ hmac   = Crypto.hmacSha256 "secret" "message"
 | `Crypto.rsaSha256Sign` | `String -> String -> Result Error String` | RSASSA-PKCS1-v1_5 over SHA-256 ("RS256"); (PEM private key, message) → standard-base64 signature |
 | `Crypto.rsaSha256Verify` | `String -> String -> String -> Bool` | (PEM public key, message, base64 signature) → valid? |
 | `Crypto.constantTimeEqual` | `String -> String -> Bool` | Side-channel safe comparison |
-| `Crypto.randomBytes` | `Int -> Task Error Bytes` | OS entropy → raw bytes |
-| `Crypto.randomToken` | `Int -> Task Error String` | OS entropy → hex string of given byte length |
+| `Crypto.randomBytes` | `Int -> Task Error String` | OS entropy → raw bytes (as a Sky String) |
+| `Crypto.randomToken` | `Int -> Task Error String` | OS entropy → URL-safe-base64 string of given byte length |
+| `Crypto.aesGcmEncrypt` | `String -> String -> Result Error String` | AES-256-GCM AEAD; output is `base64(nonce \|\| ct \|\| tag)`. Pair with `aesKeyFromPassword` |
+| `Crypto.aesGcmDecrypt` | `String -> String -> Result Error String` | Inverse of `aesGcmEncrypt`. Err on tag/key mismatch |
+| `Crypto.chacha20Encrypt` | `String -> String -> Result Error String` | ChaCha20-Poly1305 AEAD — preferred on ARM / mobile (no AES-NI) |
+| `Crypto.chacha20Decrypt` | `String -> String -> Result Error String` | Inverse of `chacha20Encrypt` |
+| `Crypto.aesKeyFromPassword` | `String -> String -> String` | PBKDF2-HMAC-SHA256 100k iter → 32-byte key for `aesGcmEncrypt` |
+| `Crypto.chachaKeyFromPassword` | `String -> String -> String` | Same shape — derive a key for ChaCha |
+
+### `Bytes` — byte-buffer helpers (Sky.Core.Bytes)
+
+`type alias Bytes = String` — Go strings ARE byte sequences;
+`Bytes` is a typed alias for documenting "this string holds raw
+bytes, not text".  Same value at runtime as the underlying
+`String` so passing back and forth costs nothing.
+
+| Function | Type | Notes |
+|---|---|---|
+| `Bytes.empty` | `Bytes` | `""` |
+| `Bytes.length` | `Bytes -> Int` | Byte count (NOT rune count) |
+| `Bytes.isEmpty` | `Bytes -> Bool` |  |
+| `Bytes.fromString` | `String -> Bytes` | No-op (identity) — clarifies intent |
+| `Bytes.toString` | `Bytes -> Maybe String` | `Nothing` on invalid UTF-8 |
+| `Bytes.fromHex` | `String -> Maybe Bytes` | Case-insensitive |
+| `Bytes.toHex` | `Bytes -> String` | Lowercase |
+| `Bytes.fromBase64` | `String -> Maybe Bytes` | Standard base64 |
+| `Bytes.toBase64` | `Bytes -> String` |  |
+| `Bytes.append` | `Bytes -> Bytes -> Bytes` |  |
+| `Bytes.slice` | `Int -> Int -> Bytes -> Bytes` | Byte indices |
 
 ### `Jwt` — JSON Web Tokens
 
@@ -406,6 +433,19 @@ main =
 | `Task.run` | `Task e a -> Result e a` | Force at the boundary |
 | `Task.fromResult` | `Result e a -> Task e a` | Bridge from Result |
 | `Task.andThenResult` | `(a -> Result e b) -> Task e a -> Task e b` | Chain Result step after Task |
+| `Task.RetryPolicy e` | record alias | `{ maxAttempts : Int, baseMs : Int, jitter : Bool, kind : Int, shouldRetry : ShouldRetry e }` — `e` flows from the body Task; build via `linearBackoff` / `exponentialBackoff` / `defaultRetryPolicy` then decorate |
+| `Task.ShouldRetry e` | ADT | `RetryAlways \| RetryWhen (e -> Bool)` — HM-pure predicate (replaces `shouldRetry : any` from v0.15.44); portable to statically-typed backends (Rust / WASM) without runtime boxing |
+| `Task.retryAlways` | `ShouldRetry e` | Pure-Sky `RetryAlways` sentinel — the default in every fresh policy |
+| `Task.linearBackoff` | `Int -> Int -> RetryPolicy e` | (maxAttempts, delayMs) — same delay every retry |
+| `Task.exponentialBackoff` | `Int -> Int -> RetryPolicy e` | (maxAttempts, baseMs) — `baseMs * 2^(n-1)`, capped at 30 s |
+| `Task.defaultRetryPolicy` | `RetryPolicy e` | Sensible default: 3 attempts, 500 ms exponential base, no jitter, `RetryAlways` — start here when building with `with*` helpers |
+| `Task.withMaxAttempts` | `Int -> RetryPolicy e -> RetryPolicy e` | Builder helper — override `maxAttempts` |
+| `Task.withBaseMs` | `Int -> RetryPolicy e -> RetryPolicy e` | Builder helper — override `baseMs` |
+| `Task.withKind` | `Int -> RetryPolicy e -> RetryPolicy e` | Builder helper — override backoff `kind` (`0 = linear, 1 = exponential`) |
+| `Task.withJitter` | `RetryPolicy e -> RetryPolicy e` | Randomise delay in `[0.5×, 1.5×]` to spread retry waves |
+| `Task.withRetryOn` | `(e -> Bool) -> RetryPolicy e -> RetryPolicy e` | Builder alias for `retryOn` — wraps predicate in `RetryWhen` |
+| `Task.retryOn` | `(e -> Bool) -> RetryPolicy e -> RetryPolicy e` | Predicate-gate retry (e.g. transient-vs-validation) — sets `shouldRetry = RetryWhen predicate` |
+| `Task.retryWith` | `RetryPolicy e -> Task e a -> Task e a` | Drive task up to maxAttempts; first Ok wins, last Err otherwise |
 | `Task.map2`...`Task.map5`, `Task.andMap` | combinators | NOT YET IMPLEMENTED — use `Task.parallel [...] \|> Task.map ...` or `Result.map2..5` for the Result counterparts |
 
 ### `Cmd` / `Sub` — Sky.Live commands and subscriptions
@@ -467,12 +507,42 @@ import Sky.Core.Http as Http
 
 response =
     Http.get "https://api.example.com/users"
-        |> Task.andThen (\body -> println body)
+        |> Task.map (\resp -> resp.body)
+        |> Task.andThen println
+
+-- HttpResponse is a typed record (v0.15.44+) — annotate and
+-- destructure directly:
+--   HttpResponse = { status : Int, body : String, headers : Dict String String }
 ```
 
-`get`, `post`, `request` (custom method/headers). `parseQuery`
-parses a URL query string into a `Dict String String` (pure —
-backed by Go's `net/url`, proper percent-decoding).
+`HttpResponse` is a typed record alias.  Annotate handlers as
+`resp : HttpResponse` and read `.status` / `.body` / `.headers`
+directly — no opaque kernel boundary any more.
+
+The builder API on `HttpRequest` covers custom headers, timeout,
+redirect policy:
+
+```elm
+req =
+    Http.defaultRequest "https://api.example.com/v1/foo"
+        |> Http.withMethod "POST"
+        |> Http.withHeader "Authorization" ("Bearer " ++ token)
+        |> Http.withBody jsonBody
+        |> Http.withTimeout 60000              -- 60 s; 0 disables
+```
+
+Pair with `Task.retryWith` for flaky upstreams:
+
+```elm
+fetchData =
+    Task.retryWith
+        (Task.exponentialBackoff 5 500 |> Task.withJitter)
+        (Http.request req)
+```
+
+`get`, `post`, `request` (custom method/headers/timeout).
+`parseQuery` parses a URL query string into a `Dict String String`
+(pure — backed by Go's `net/url`, proper percent-decoding).
 
 For **streaming response bodies** (LLM completions, SSE, large
 downloads), use `Sky.Core.Http.Stream`:
@@ -493,6 +563,98 @@ subscriptions model =
 See [`docs/skylive/http-streaming.md`](skylive/http-streaming.md)
 for the full design + `examples/28-streaming-chat` for the
 canonical pattern.
+
+### `WebSocket` — bidirectional sockets (v0.15.46)
+
+For bidirectional, long-lived connections (collab editor ops,
+multiplayer game state, bidirectional LLM chat, financial feeds),
+use `Sky.Core.WebSocket` (client) + `Sky.Http.Server.WebSocket`
+(server-side upgrade).
+
+**Client side (Sky.Core.WebSocket):**
+
+```elm
+import Sky.Core.WebSocket as Ws exposing (WebSocketMessage(..))
+import Sky.Core.Cmd as Cmd
+import Sky.Core.Sub as Sub
+
+-- Open the connection via Cmd.perform; the runtime returns a
+-- typed `WebSocket` handle.
+( model, Cmd.perform (Ws.connect "wss://api.example.com/feed") Connected )
+
+-- Subscribe to incoming frames while the socket is live.
+subscriptions model =
+    case model.socket of
+        Just sock ->
+            Sub.batch
+                [ Ws.onMessage sock GotFrame
+                , Ws.onClose   sock SocketClosed
+                ]
+
+        Nothing ->
+            Sub.none
+
+-- Send a text frame.  Blocks up to 30 s if the write buffer is full.
+update msg model =
+    case msg of
+        SendPing sock ->
+            ( model, Cmd.perform (Ws.send sock "ping") Sent )
+
+        GotFrame (Text text) ->
+            -- handle incoming text frame
+            ( { model | latest = text }, Cmd.none )
+
+        GotFrame (Binary bytes) ->
+            ( { model | latestBlob = bytes }, Cmd.none )
+```
+
+**Server side (Sky.Http.Server.WebSocket):** turn any
+`Sky.Http.Server` route into a WebSocket upgrade endpoint.
+
+```elm
+import Sky.Http.Server as Server
+import Sky.Http.Server.WebSocket as Ws
+
+handleWs : Request -> Task Error Response
+handleWs req =
+    Ws.upgrade req
+        (Ws.defaultCfg
+            |> Ws.withOnConnect (\sock ->
+                Ws.sendToClient sock "welcome!")
+            |> Ws.withOnMessage (\sock msg ->
+                Ws.sendToClient sock ("echo: " ++ msg))
+            |> Ws.withOriginPatterns
+                [ "https://*.example.com" ]
+        )
+
+main =
+    Server.listen 8000
+        [ Server.get "/ws" handleWs
+        ]
+```
+
+| Concern | Default |
+|---|---|
+| Handshake timeout | 30 s |
+| Heartbeat ping | 30 s (set `pingInterval = 0` to disable) |
+| Max message size | 1 MiB (`withMaxMessageBytes`) |
+| Origin gate | empty `originPatterns` rejects in production; dev-mode allows all |
+| Read buffer | 64 frames per socket (bounded) |
+| `send` backpressure | blocks up to 30 s on a slow consumer |
+
+`broadcast` fans a single text frame across a list of peers and
+tolerates partial failure (one slow / dead peer doesn't poison
+the others — those connections are closed silently).
+
+**Stdlib-typed-record convention (v0.15.46+).** Every public
+typed record (`WebSocketCfg`, `WebSocketServerCfg`,
+`HttpRequest`, …) ships with a `default*` constructor and one
+`with*` builder per field.  Always build via the builders
+(`Ws.defaultCfg "wss://x" |> Ws.withTimeout 5000`) rather than
+record literals — adding a new optional field in a future patch
+release won't break your call sites.
+
+See `examples/33-websocket-echo` for the canonical pattern.
 
 ### `File` — filesystem
 
@@ -563,6 +725,36 @@ These are big enough to deserve their own pages:
 - **[Std.Auth overview](skyauth/overview.md)** — bcrypt, JWT, register / login
 - **[Std.Log](#stdlog)** — see below
 
+### `Std.Db.Decode` — typed DB row decoders (v0.15.45)
+
+Mirror of `Sky.Core.Json.Decode`'s combinator shape but targets SQL
+row maps instead of JSON values. Replaces the `Db.getString "field"
+row` / `Db.getInt "field" row` boilerplate with declarative
+decoders.
+
+```elm
+import Std.Db.Decode as DbDecode
+
+type alias User =
+    { id : Int, name : String, email : String, age : Maybe Int }
+
+userDecoder : Decoder User
+userDecoder =
+    DbDecode.succeed (\i n e a -> { id = i, name = n, email = e, age = a })
+        |> DbDecode.andMap (DbDecode.int "id")
+        |> DbDecode.andMap (DbDecode.string "name")
+        |> DbDecode.andMap (DbDecode.string "email")
+        |> DbDecode.andMap (DbDecode.nullable "age" (DbDecode.int "age"))
+
+users : Db -> Task Error (List User)
+users db = Db.queryDecode db "SELECT id, name, email, age FROM users" [] userDecoder
+
+userById : Db -> Int -> Task Error (Maybe User)
+userById db uid = Db.getByIdDecode db "users" uid userDecoder
+```
+
+Surface: `string` / `int` / `float` / `bool` / `nullable` (per-column primitives), `succeed` / `fail`, `map` / `andThen` / `andMap`, `map2` / `map3` / `map4` / `map5`, `required` / `optional` (pipeline-style). See [`docs/skydb/overview.md`](skydb/overview.md) for the full decoder pipeline pattern.
+
 ### `Log` — structured logging
 
 ```elm
@@ -632,6 +824,271 @@ view model =
 | `Markdown.renderInline` | `String -> Element msg` — single line of inline-only markdown |
 
 Renders straight into Std.Ui Element trees (no HTML round-trip) so the surrounding theme controls colour and typography. Subset is "chat-grade": headings (`#`-`######`), paragraphs, fenced code, bullet / ordered lists, horizontal rules, `**bold**` / `*italic*` / `` `code` `` / `[text](url)` / trailing double-space `<br>`. **Safe with untrusted input** — never emits raw HTML or event handlers; every node routes through typed Std.Ui constructors.
+
+---
+
+## Stdlib quality-of-life batch (v0.15.47)
+
+Seven additions covering the modules every production Sky app
+reinvents today. Each ships under the v0.15.46 typed-record
+convention — every record carries a `default*` constructor +
+`with*` builder helpers so future field additions never break
+downstream record literals.
+
+### `Std.Cache` — LRU + TTL in-memory cache
+
+```elm
+import Std.Cache as Cache
+
+cfg : Cache.CacheCfg
+cfg =
+    Cache.withTTL 60000 (Cache.withMaxEntries 10000 Cache.defaultCfg)
+
+usersCache : Task Error (Cache String User)
+usersCache = Cache.new cfg
+
+-- ...
+Cache.get cache "alice"           -- Task Error (Maybe User)
+Cache.put cache "alice" newUser   -- Task Error ()
+Cache.stats cache                 -- { hits, misses, evictions }
+```
+
+Backed by `hashicorp/golang-lru/v2`. Lazy TTL: expired entries are
+pruned on next access (no background goroutine to leak).
+
+### `Std.Email` — Resend / SES / SendGrid / SMTP under one API
+
+```elm
+import Std.Email as Email
+
+provider = Email.Resend (System.getenvOr "RESEND_API_KEY" "")
+
+msg = Email.defaultMessage
+        { from = "noreply@example.com"
+        , to = [ "alice@example.com" ]
+        , subject = "Hi"
+        }
+        |> Email.withTextBody "Hello, world!"
+
+Email.send provider msg     -- Task Error String (provider message ID)
+```
+
+`SKY_EMAIL_DRY_RUN=1` short-circuits every provider for unit tests.
+`SKY_EMAIL_ENDPOINT_<PROVIDER>` (UPPERCASE) overrides the URL when
+pointing at a local mock.
+
+### `Std.Compression` — gzip + zstd
+
+```elm
+import Std.Compression as Compression
+
+compressed : Task Error String
+compressed = Compression.gzip "large payload"
+
+Compression.zstdCompress payload    -- Task Error String
+Compression.zstdDecompress encoded  -- Task Error String
+```
+
+`compress/gzip` (stdlib) + `klauspost/compress/zstd`.
+
+### `Std.Csv` — RFC 4180 encode/decode + streaming reader
+
+```elm
+import Std.Csv as Csv
+
+case Csv.parse "name,age\nAlice,30\nBob,25\n" of
+
+    Ok csv ->
+        -- csv.header : List String, csv.rows : List (List String)
+        ...
+
+    Err _ ->
+        ...
+
+-- Stream a large file row-by-row:
+Csv.parseStreamFromFile "users.csv"    -- Task Error (List (List String))
+```
+
+### `Sky.Core.Random` — `range`, `weighted`, `shuffle`, seeded\*
+
+```elm
+Random.range 1 100              -- Task Error Int (inclusive both ends)
+Random.weighted [ (0.7, "a"), (0.3, "b") ]
+                                -- Task Error (Maybe a)
+Random.shuffle [1, 2, 3, 4, 5]  -- Task Error (List a)
+
+-- Deterministic, reproducible:
+s0 = Random.seed 42
+( v, s1 ) = Random.seededInt s0 1 100
+( f, s2 ) = Random.seededFloat s1
+```
+
+Seeded variants thread a `Seed` state via splitmix64 — same seed
+produces the same sequence across runs (use for tests and content
+generation).
+
+### `String.containsIn` / `startsWithIn` / `endsWithIn` — pipeline-friendly
+
+Haystack-first companions to the existing needle-first helpers:
+
+```elm
+"hello world" |> String.containsIn "world"      -- True
+"/api/users"  |> String.startsWithIn "/api"     -- True
+"image.png"   |> String.endsWithIn ".png"       -- True
+```
+
+`String.contains` / `startsWith` / `endsWith` stay for backwards
+compatibility.
+
+### `Std.Config` — typed TOML / YAML / JSON decoders
+
+Mirror of `Sky.Core.Json.Decode`'s shape — code that already
+decodes JSON gets a consistent vocabulary for TOML and YAML:
+
+```elm
+import Std.Config as Config
+
+dbDecoder : Decoder DbCfg
+dbDecoder =
+    Config.field "host" Config.string
+        |> Config.andThen (\h ->
+            Config.map (\p -> { host = h, port = p })
+                (Config.field "port" Config.int))
+
+Config.loadFromFile "config/database.toml" dbDecoder
+    -- Task Error DbCfg (extension dispatch: .toml/.yaml/.yml/.json)
+```
+
+TOML via `BurntSushi/toml`, YAML via `gopkg.in/yaml.v3`, JSON via
+the stdlib `encoding/json`.
+
+---
+
+## Naming-consistency surface (v0.15.48)
+
+Three additive batches improving discoverability without disturbing
+any existing public types or function names.
+
+### `Sky.Core.ToString` — uniform `fromX` naming
+
+```elm
+import Sky.Core.ToString as ToString
+
+ToString.fromInt   42      -- "42"   — routes to String.fromInt
+ToString.fromFloat 3.14    -- "3.14" — routes to String.fromFloat
+ToString.fromBool  True    -- "True"
+ToString.fromTime  ms      -- canonical Time.timeString
+```
+
+Zero runtime overhead — the bindings are tail-call aliases to the
+existing kernels. The point is editor + `sky doc` discoverability:
+AI-written code is encouraged to default to `ToString.fromInt n`
+rather than memorising which sub-namespace each type lives under.
+The canonical kernel-direct call (`String.fromInt`, `Time.timeString`)
+stays available for code that prefers the explicit shape.
+
+### `Std.Auth.signTokenWithClaims` / `verifyTokenWithAlgorithm`
+
+The arity-3 `Auth.signToken : String -> a -> Int -> Result Error String`
+shape stays canonical for the simple secret + claims + expiry case.
+For richer JWT shapes, reach for the typed-builder companion:
+
+```elm
+import Std.Auth as Auth
+import Sky.Core.Jwt as Jwt
+
+token : Result Error String
+token =
+    Auth.signTokenWithClaims
+        (Jwt.rs256 privateKeyPem)
+        (Jwt.claims
+            |> Jwt.subject "user-42"
+            |> Jwt.audience "https://api.example.app"
+            |> Jwt.expiresAt (now + 86400)
+            |> Jwt.jwtId tokenId
+            |> Jwt.withClaim "scope" "admin"
+        )
+
+verified : Result Error String   -- raw JSON claims string
+verified = Auth.verifyTokenWithAlgorithm (Jwt.hs256 "secret") now token
+```
+
+### `Std.Time` `*Utc` infallible companions
+
+Every zone-aware `String -> Int -> Result Error _` ships a `Int -> _`
+UTC variant for server-internal timestamp work that doesn't need
+TZ-awareness:
+
+| Zone-aware (`String -> Int -> Result Error _`) | UTC infallible (`Int -> _`) |
+|---|---|
+| `year` / `month` / `day` | `yearUtc` / `monthUtc` / `dayUtc` |
+| `dayOfWeek` / `dayOfYear` / `weekOfYear` | `dayOfWeekUtc` / `dayOfYearUtc` / `weekOfYearUtc` |
+| `isWeekend` | `isWeekendUtc : Int -> Bool` |
+| `startOfDay` / `endOfDay` | `startOfDayUtc` / `endOfDayUtc` |
+| `startOfWeek` / `startOfMonth` / `endOfMonth` | `startOfWeekUtc` / `startOfMonthUtc` / `endOfMonthUtc` |
+| `startOfYear` / `endOfYear` | `startOfYearUtc` / `endOfYearUtc` |
+
+The UTC variants plug `"UTC"` (always-valid IANA zone) at the call
+site, so the `Result Error _` wrap collapses to the bare value.
+Reach for them in logs / audit rows / server-internal timestamp
+arithmetic. For user-facing UI, keep using the zone-aware form.
+
+---
+
+## Arity-0 consistency surface (v0.15.50)
+
+Pre-v0.15.50 the stdlib was inconsistent about whether
+arity-0 helpers took `()`:
+
+| Convention | Examples |
+|---|---|
+| Takes `()` | `Time.now ()`, `Time.unixMillis ()`, `System.cwd ()`, `System.args ()`, `Io.readLine ()`, `Db.connect ()` |
+| Bare | `Uuid.v4`, `Uuid.v7` |
+
+For new code preferring a uniform `Pure.foo ()` shape, reach for
+`Sky.Core.Pure`. Every entry is a typed `() -> Task Error a`
+companion that re-routes to the canonical kernel — same runtime
+performance, but one consistent call shape:
+
+```elm
+import Sky.Core.Pure as Pure
+import Sky.Core.Task as Task
+import Std.Log exposing (println)
+
+main =
+    Pure.systemCwd ()
+        |> Task.andThen (\cwd  -> Pure.uuidV4 ())
+        |> Task.andThen (\uuid -> Pure.timeNow ())
+        |> Task.andThen (\now  -> println (String.fromInt now))
+```
+
+Full Pure.* surface (9 entries):
+
+```
+Pure.uuidV4         : () -> Task Error String
+Pure.uuidV7         : () -> Task Error String
+Pure.timeNow        : () -> Task Error Int
+Pure.timeUnixMillis : () -> Task Error Int
+Pure.systemArgs     : () -> Task Error (List String)
+Pure.systemCwd      : () -> Task Error String
+Pure.systemLoadEnv  : () -> Task Error ()
+Pure.ioReadLine     : () -> Task Error String
+Pure.dbConnect      : () -> Task Error Db
+```
+
+Inclusion criterion: a stdlib binding belongs to `Sky.Core.Pure`
+when (a) it takes no real Sky-level argument that disambiguates
+the call AND (b) it returns a `Task Error a` — i.e. entropy /
+clock / env / I/O / database-connection surfaces where the
+inconsistency bit users most often. Non-zero-arg helpers like
+`Random.int`, `Crypto.randomToken`, `System.exit`, `Process.run`
+are NOT candidates — their argument list carries semantic
+information.
+
+Existing names + shapes are **unchanged** (per the v0.15.44
+backwards-compat lesson). `Pure.*` is purely additive — call
+sites preferring the legacy convention keep working exactly as
+before.
 
 ---
 

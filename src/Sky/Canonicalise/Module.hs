@@ -184,6 +184,21 @@ canonicaliseWithDeps deps srcMod =
         -- "Model vs Model" error at the type checker.
         importAliasCollisions = detectImportAliasCollisions (Src._imports srcMod)
 
+        -- v0.15.42 audit §3.2 — Prelude-shadow gate. Reject any user-
+        -- defined ADT whose type name OR any constructor name collides
+        -- with a Prelude-exposed type / constructor. The resulting
+        -- program is silently wrong: `type Result a = Just a | Nothing`
+        -- makes `Just`/`Nothing` resolve to the USER's constructors
+        -- everywhere downstream, even in modules expecting the stdlib
+        -- Maybe. Hard error (not warning) per audit's "soundness
+        -- regression" classification — refactor regression class.
+        --
+        -- Carve-out: the protected name's own canonical home module is
+        -- allowed to define it (that's WHERE the protected name lives).
+        -- E.g. `Sky.Core.Error.Error` is the canonical Error; Sky.Core.
+        -- Maybe defines `Maybe(Just, Nothing)` etc.
+        preludeShadowErrors = detectPreludeShadowing modName (Src._unions srcMod)
+
         -- Build environment from imports
         env0 = Env.initialEnv modName
         env1 = foldl (processImportWith deps modName) env0 (Src._imports srcMod)
@@ -224,11 +239,12 @@ canonicaliseWithDeps deps srcMod =
         unboundErrs
             | Map.null deps && hasUserImports = []
             | otherwise = collectUnboundNameErrors env4 srcMod
-    in case (importAliasCollisions, importHidingErrors, collisions, unboundErrs) of
-        (err:_, _, _, _) -> Left err
-        (_, err:_, _, _) -> Left err
-        (_, _, Just err, _) -> Left err
-        (_, _, _, err:_) -> Left err
+    in case (importAliasCollisions, importHidingErrors, preludeShadowErrors, collisions, unboundErrs) of
+        (err:_, _, _, _, _) -> Left err
+        (_, err:_, _, _, _) -> Left err
+        (_, _, err:_, _, _) -> Left err
+        (_, _, _, Just err, _) -> Left err
+        (_, _, _, _, err:_) -> Left err
         _ -> Right $ expandModuleAliases depAliasMap Can.Module
             { Can._name    = modName
             , Can._exports = exports
@@ -614,6 +630,96 @@ kernelFunctions =
 -- The user-facing workaround is `import App.State as AppState`, which
 -- gives each import a distinct qualifier and disambiguates the two
 -- modules at every call site.
+-- | v0.15.42 audit §3.2. Reject any user-defined union whose type
+-- name OR any constructor name collides with a Prelude-exposed
+-- type / constructor. Hard error: the resulting program is silently
+-- wrong — references to the shadowed name resolve to the user's
+-- ADT instead of the stdlib version, with no visible cue.
+--
+-- Protected names match `Env.builtinTypes` (Int, Float, Bool,
+-- String, Char, List, Maybe, Result, Task, Error) and
+-- `Env.builtinCtors` (True, False, Just, Nothing, Ok, Err).
+--
+-- This is type/ctor shadowing only; user-defined VALUES (functions
+-- named `map`, `filter`, etc.) are allowed since they're qualified
+-- away by module prefixing. Type-name collision is the regression
+-- class because Sky has no value-level distinction between "stdlib
+-- Maybe.Just" and "MyType.Just" — both lower to the same Go ctor
+-- and pattern-match identically.
+detectPreludeShadowing :: ModuleName.Canonical -> [A.Located Src.Union] -> [String]
+detectPreludeShadowing (ModuleName.Canonical home) unions =
+    concatMap checkUnion unions
+  where
+    -- Match Env.builtinTypes / Env.builtinCtors. Kept inline to avoid
+    -- pulling builtin tables through several layers — both lists are
+    -- tiny and rarely change.
+    --
+    -- Map each protected name to its canonical home module so we can
+    -- carve that module out (it's allowed to DEFINE its own protected
+    -- name).
+    protectedTypeHomes :: Map.Map String String
+    protectedTypeHomes = Map.fromList
+        [ ("Int",    "Sky.Core.Basics")
+        , ("Float",  "Sky.Core.Basics")
+        , ("Bool",   "Sky.Core.Basics")
+        , ("String", "Sky.Core.Basics")
+        , ("Char",   "Sky.Core.Basics")
+        , ("List",   "Sky.Core.List")
+        , ("Maybe",  "Sky.Core.Maybe")
+        , ("Result", "Sky.Core.Result")
+        , ("Task",   "Sky.Core.Task")
+        , ("Error",  "Sky.Core.Error")
+        ]
+
+    protectedCtorHomes :: Map.Map String (String, String)
+    protectedCtorHomes = Map.fromList
+        [ ("True",    ("Sky.Core.Basics", "Bool"))
+        , ("False",   ("Sky.Core.Basics", "Bool"))
+        , ("Just",    ("Sky.Core.Maybe", "Maybe"))
+        , ("Nothing", ("Sky.Core.Maybe", "Maybe"))
+        , ("Ok",      ("Sky.Core.Result", "Result"))
+        , ("Err",     ("Sky.Core.Result", "Result"))
+        ]
+
+    checkUnion (A.At _ u) =
+        let A.At nameReg typeName = Src._unionName u
+            ctors = Src._unionCtors u
+
+            typeErrors = case Map.lookup typeName protectedTypeHomes of
+                Just origin | origin /= home ->
+                    let A.Region (A.Position r c) _ = nameReg
+                    in [show r ++ ":" ++ show c
+                       ++ ": Prelude shadowing: `type " ++ typeName
+                       ++ "` collides with the built-in type `" ++ typeName
+                       ++ "` from " ++ origin ++ "."
+                       ++ "\n    Sky's Prelude auto-exposes `" ++ typeName
+                       ++ "`. A user-defined ADT with the same name silently"
+                       ++ " shadows the stdlib version at every downstream use"
+                       ++ " site, with no warning — refactor regression class."
+                       ++ "\n    Rename your type (e.g. `My" ++ typeName ++ "`)"
+                       ++ " or drop the shadowing definition."]
+                _ -> []
+
+            ctorErrors = concatMap checkCtor ctors
+
+        in typeErrors ++ ctorErrors
+
+    checkCtor (A.At ctorReg (ctorName, _args)) =
+        case Map.lookup ctorName protectedCtorHomes of
+            Just (origin, parent) | origin /= home ->
+                let A.Region (A.Position r c) _ = ctorReg
+                in [show r ++ ":" ++ show c
+                   ++ ": Prelude shadowing: constructor `" ++ ctorName
+                   ++ "` collides with the built-in constructor `" ++ ctorName
+                   ++ "` from " ++ origin ++ " (" ++ parent ++ ")."
+                   ++ "\n    A user-defined ADT constructor with the same name"
+                   ++ " silently shadows the stdlib version at every downstream"
+                   ++ " use site, with no warning."
+                   ++ "\n    Rename your constructor (e.g. `My" ++ ctorName ++ "`)."
+                   ]
+            _ -> []
+
+
 detectImportAliasCollisions :: [Src.Import] -> [String]
 detectImportAliasCollisions imps =
     let -- For each import, derive (qualifier, canonical-source, region, importPath).
@@ -934,9 +1040,39 @@ collectUnboundNameErrors env srcMod =
                 ++ ": Undefined name: " ++ q ++ "." ++ n
                 ++ "\n    Module `" ++ q ++ "` is imported but does not export `" ++ n ++ "`."
                 ++ "\n    Check the module's `exposing (...)` list, or check for a typo."
+
+        -- v0.15.42 audit §3.1 — UNKNOWN QUALIFIER pass. A reference
+        -- like `NotARealModule.foo` where `NotARealModule` is neither
+        -- a kernel module, an import alias, NOR present in the qualVars
+        -- / qualCtors maps used to fall through `resolveQualVar`'s
+        -- final clause to `VarTopLevel (Canonical qualifier) name`,
+        -- emitting bogus Go that `go build` later rejected. Catch
+        -- here so the user sees a Sky-shape error citing the missing
+        -- module, not a cryptic `undefined: NotARealModule_foo`.
+        knownQualifiers =
+            Set.unions
+                [ Set.fromList (Map.keys Env.kernelModules)
+                , Set.fromList (Map.keys (Env._qualVars env))
+                , Set.fromList (Map.keys (Env._qualCtors env))
+                , Set.fromList (Map.keys (Env._importAliases env))
+                ]
+        unknownQual =
+            [ (q, n, reg)
+            | (q, n, reg) <- allQualRefs
+            , not (Set.member q knownQualifiers)
+            ]
+        formatUnknownQual (q, n, A.Region (A.Position r c) _) =
+            show r ++ ":" ++ show c
+                ++ ": Undefined name: " ++ q ++ "." ++ n
+                ++ "\n    Module `" ++ q ++ "` is not imported and is"
+                ++ " not a known kernel module."
+                ++ "\n    Did you forget `import " ++ q ++ "`? Or check"
+                ++ " for a typo in the module qualifier."
+                ++ suggestQualifier q knownQualifiers
     in
         map formatOne (dedupeByNameTop unbound)
         ++ map formatQual unboundQual
+        ++ map formatUnknownQual unknownQual
 
 
 -- | v0.13 Layer 1 migration: collect unbound-name errors as
@@ -1011,9 +1147,35 @@ collectUnboundDiagnostics path env srcMod =
                           ++ " does not export `" ++ n ++ "`. Check"
                           ++ " the module's exposing list, or check"
                           ++ " for a typo.")
+
+        -- v0.15.42 audit §3.1 — unknown-qualifier diagnostics. Mirror
+        -- of the rendered-string detector above; see notes there.
+        knownQualifiers =
+            Set.unions
+                [ Set.fromList (Map.keys Env.kernelModules)
+                , Set.fromList (Map.keys (Env._qualVars env))
+                , Set.fromList (Map.keys (Env._qualCtors env))
+                , Set.fromList (Map.keys (Env._importAliases env))
+                ]
+        unknownQual =
+            [ (q, n, reg)
+            | (q, n, reg) <- allQualRefs
+            , not (Set.member q knownQualifiers)
+            ]
+        mkUnknownQualDiag (q, n, reg) =
+            let suggestion = suggestQualifier q knownQualifiers
+                base = "Module `" ++ q ++ "` is not imported and is"
+                    ++ " not a known kernel module."
+                    ++ " Did you forget `import " ++ q ++ "`? Or check"
+                    ++ " for a typo in the module qualifier."
+                full = if null suggestion then base else base ++ suggestion
+            in Diag.mkError path reg Diag.CatCanonical Diag.canonE_UndefinedName
+                    ("Undefined name: " ++ q ++ "." ++ n)
+                & Diag.withHint full
     in
         map mkDiag (dedupeByNameTop unbound)
         ++ map mkQualDiag unboundQual
+        ++ map mkUnknownQualDiag unknownQual
 
 
 -- | Walk the AST collecting every `Src.VarQual qualifier name`
@@ -1074,6 +1236,49 @@ defBodyQualifiedRefs shadowed (A.At _ d) = case d of
 -- emit-time absence.
 qualifiedExistsInKernel :: String -> String -> Bool
 qualifiedExistsInKernel _ _ = True
+
+
+-- | v0.15.42 audit §3.1. When a user writes `NotARealModule.foo` and
+-- the canonicaliser flags `NotARealModule` as unknown, suggest the
+-- closest known qualifier from the env (kernel modules + import
+-- aliases + qualVars/qualCtors keys). Returns "" when no candidate
+-- is within edit-distance 2 of the typo — silence beats a misleading
+-- hint.
+suggestQualifier :: String -> Set.Set String -> String
+suggestQualifier typo knowns =
+    let candidates =
+            [ (d, k)
+            | k <- Set.toList knowns
+            , let d = levenshtein typo k
+            , d > 0
+            , d <= 2
+            ]
+    in case candidates of
+        [] -> ""
+        _  -> let (_, best) = minimum candidates
+              in "\n    Did you mean `" ++ best ++ "`?"
+
+
+-- | Iterative Levenshtein edit distance. ASCII Sky identifiers stay
+-- under 32 chars in practice, so the O(N*M) table is cheap.
+levenshtein :: String -> String -> Int
+levenshtein s t =
+    let n = length s
+        m = length t
+        sa = zip [1..] s
+        ta = zip [1..] t
+        -- Build the DP row-by-row.
+        initRow = [0..m]
+        step prev (i, ci) =
+            let go _ acc [] = reverse acc
+                go (left, upDiag) acc ((j, cj):rest) =
+                    let up = prev !! j
+                        cost = if ci == cj then 0 else 1
+                        cell = minimum [up + 1, left + 1, upDiag + cost]
+                    in go (cell, up) (cell:acc) rest
+            in i : go (i, head prev) [] ta
+        finalRow = foldl step initRow sa
+    in finalRow !! m
 
 
 -- | Reverse-application operator (`&`), used by the new Diagnostic-

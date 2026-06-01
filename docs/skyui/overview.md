@@ -158,6 +158,111 @@ totally-broken single-column fallback when the attribute is forgotten).
 `Ui.spacing N` works as the gap (CSS Grid honours the `gap` property
 natively, same as flexbox).
 
+### `Std.Ui.Grid` — typed track lists (sidebars, content-aware columns)
+
+`Ui.gridColumns` is great for product-card grids where every track
+has the same minimum width. For **sidebar layouts** (`1fr 200px 1fr`),
+**content-aware columns** (`auto 1fr`), or **`repeat(auto-fit,
+minmax(<px>, 1fr))` card grids that re-flow on resize**, reach for
+`Std.Ui.Grid`. The typed `Track` ADT spells out the exact CSS Grid
+track-list, then `Grid.columns` / `Grid.rows` / `Grid.tracks` attach
+it to a `Ui.grid` container.
+
+```elm
+import Std.Ui as Ui
+import Std.Ui.Grid as Grid
+
+Ui.grid
+    [ Ui.width Ui.fill
+    , Grid.columns
+        [ Grid.repeatAutoFit (Grid.minmax (Grid.px 240) (Grid.fr 1)) ]
+    , Ui.spacing 16
+    ]
+    (List.map productCard products)
+
+-- Sidebar layout:
+Ui.grid
+    [ Ui.width Ui.fill
+    , Grid.columns [ Grid.fr 1, Grid.px 200, Grid.fr 1 ]
+    ]
+    [ leftPane, mainPane, rightPane ]
+
+-- Header + body + footer rows:
+Ui.grid
+    [ Ui.width Ui.fill
+    , Grid.tracks
+        [ Grid.auto, Grid.fr 1 ]
+        [ Grid.px 60, Grid.fr 1, Grid.px 40 ]
+    ]
+    [ header, body, footer ]
+```
+
+**Track constructors** (every variant lowers to its idiomatic CSS):
+
+| Sky | CSS | Use case |
+|---|---|---|
+| `Grid.fr N` | `Nfr` | Flexible track, proportional to other `fr` |
+| `Grid.px N` | `Npx` | Fixed-width pixel track |
+| `Grid.auto` | `auto` | Track hugs its content |
+| `Grid.minContent` | `min-content` | Track shrinks to smallest non-overflowing size |
+| `Grid.maxContent` | `max-content` | Track grows to content's preferred width |
+| `Grid.minmax lo hi` | `minmax(lo, hi)` | Bounded — e.g. `minmax (px 240) (fr 1)` |
+| `Grid.repeat N t` | `repeat(N, t)` | Repeat a track N times |
+| `Grid.repeatAutoFit t` | `repeat(auto-fit, t)` | Re-flowing card grid (empty tracks collapse) |
+| `Grid.repeatAutoFill t` | `repeat(auto-fill, t)` | Re-flowing grid that keeps ghost slots |
+
+**`gridColumns` vs `Grid.columns` — when to pick which**
+
+| Need | Reach for |
+|---|---|
+| Product-card grid (all tracks same min-width) | `Ui.gridColumns N` (lighter, default) |
+| Sidebar shells, header rows, mixed track types | `Grid.tracks` / `Grid.columns` |
+| Content-aware tracks (`auto` / `min-content`) | `Grid.columns` |
+| Both column + row axes set explicitly | `Grid.tracks cols rows` |
+| Responsive card grids that must `auto-fit minmax` | `Grid.columns [ Grid.repeatAutoFit … ]` |
+
+Both compile to inline `grid-template-*` declarations — no runtime
+injection pass, no model state. Sky.Tui falls back to column stacking
+(it can't draw a 2-D grid in ANSI cells); Sky.Webview honours the
+grid identically to Sky.Live.
+
+### `Ui.aspectRatio` — proportional sizing (16:9, 1:1, 2.35:1)
+
+Lock an element to a fixed width-to-height ratio. Pair with
+`Ui.width Ui.fill` (or a fixed pixel width) — the browser's
+`aspect-ratio` solver fills in the unset axis. Indispensable for
+video embeds, image galleries, hero banners, avatar tiles, square
+product images.
+
+```elm
+import Std.Ui as Ui
+
+-- Decimal form — `aspect-ratio: 1.777`
+Ui.el [ Ui.width Ui.fill, Ui.aspectRatio 1.777 ] videoPlaceholder
+
+-- Integer-pair form — `aspect-ratio: 16 / 9` (more readable)
+Ui.el [ Ui.width Ui.fill, Ui.aspectRatioWH 16 9 ] videoPlaceholder
+
+-- Convenience aliases for common ratios:
+Ui.el [ Ui.width (Ui.px 100), Ui.square ] avatar           -- 1:1
+Ui.el [ Ui.width Ui.fill, Ui.widescreen ] heroBanner       -- 16:9
+Ui.el [ Ui.width Ui.fill, Ui.fullHd ] heroBanner           -- 16:9 (alias)
+Ui.el [ Ui.width Ui.fill, Ui.cinemascope ] cinemaBanner    -- 2.35:1
+```
+
+| Helper | CSS emitted | Common case |
+|---|---|---|
+| `Ui.aspectRatio Float` | `aspect-ratio: <r>` | Custom decimal ratio |
+| `Ui.aspectRatioWH Int Int` | `aspect-ratio: <w> / <h>` | Standard ratios (4:3, 16:9, 2:3, …) |
+| `Ui.square` | `aspect-ratio: 1 / 1` | Avatars, product tiles |
+| `Ui.widescreen` / `Ui.fullHd` | `aspect-ratio: 16 / 9` | Video embeds, HDTV |
+| `Ui.cinemascope` | `aspect-ratio: 2.35` | Hero banners, cinema |
+
+The browser resizes the unset axis on every viewport change — no
+re-render needed, no observer to wire up. Sky.Tui ignores the
+property (ANSI cells don't have an aspect-ratio concept); Sky.Webview
+honours it via the embedded WebKit/Chromium engine.
+
 ## Length
 
 ```elm
@@ -494,6 +599,270 @@ The selector keys off the wrapper's runtime-assigned `sky-id` — so two breakpo
 | Layout-transition fires a typed Msg (close tray on mobile, refit canvas, re-fetch tile grid) | `Std.Ui.Responsive` (Model-driven via `Sub.windowSize`) |
 | Both — visual override + Msg | Combine: `Ui.breakpoint` for the styling, `Sub.windowSize` for the Msg |
 
+## Pseudo-classes (hover, focus, active, disabled)
+
+`Background.hoverColor` / `Font.focusColor` / `Border.activeColor` (and friends) attach `:hover` / `:focus-visible` / `:active` / `:disabled` styling directly on an element — no `onMouseOver` Msg, no Model field, no re-render. The CSS engine handles the state transition natively.
+
+```elm
+import Std.Ui as Ui
+import Std.Ui.Background as Background
+import Std.Ui.Border as Border
+import Std.Ui.Font as Font
+
+view : Model -> Element Msg
+view _ =
+    Ui.layout []
+        (Ui.button
+            [ Ui.padding 12
+            , Background.color (Ui.rgb 0 122 255)
+            , Background.hoverColor (Ui.rgb 0 92 215)     -- pointer over
+            , Background.activeColor (Ui.rgb 0 62 175)    -- click down
+            , Border.rounded 6
+            , Border.hoverRounded 12                       -- morph corners on hover
+            , Font.color Ui.white
+            ]
+            { onPress = Just Save, label = Ui.text "Save" })
+```
+
+### Per-sub-module helpers
+
+| Module | Helpers |
+|---|---|
+| `Std.Ui.Background` | `hoverColor`, `focusColor`, `focusVisibleColor`, `activeColor`, `disabledColor` |
+| `Std.Ui.Border` | `hoverColor`, `focusColor`, `focusVisibleColor`, `activeColor`, `hoverWidth`, `hoverRounded` |
+| `Std.Ui.Font` | `hoverColor`, `focusColor`, `focusVisibleColor`, `activeColor`, `disabledColor`, `hoverSize` |
+
+### Generic escape hatch — `Ui.onPseudo`
+
+For selector combinations no sub-module helper covers:
+
+```elm
+Ui.button
+    [ Ui.onPseudo Ui.hover [ Background.color red, Font.size 18 ]
+    , Ui.onPseudo Ui.focusVisible [ Border.color blue, Border.width 2 ]
+    ]
+    { onPress = Just Save, label = Ui.text "Save" }
+```
+
+`Ui.PseudoClass` constructors: `Ui.hover`, `Ui.focus`, `Ui.focusVisible`, `Ui.active`, `Ui.disabled`.
+
+### `:focus-visible` vs `:focus` — the safer default
+
+`focusColor` in every sub-module targets **`:focus-visible`** (not `:focus`). Why: `:focus` fires on every click as well as keyboard nav, so click-induced focus rings paint on every interaction — visual noise users perceive as "broken". `:focus-visible` only fires when the browser thinks the user is navigating via keyboard, so the ring appears for accessibility users + disappears for pointer users.
+
+Explicit alternatives:
+
+* `Background.focusVisibleColor c` — spelled-out form (same behaviour as `focusColor`).
+* `Ui.onPseudo Ui.focus [...]` — opt into the sticky-focus variant when you explicitly want click-induced rings (rare).
+
+### Touch-device safety — `@media (hover: hover)` auto-gating
+
+`:hover` rules are automatically wrapped in `@media (hover: hover)` by the runtime so they don't fire as sticky-hover on touch devices (the classic mobile bug where a tap leaves a button stuck in the hover colour until the next tap elsewhere). User code never needs to think about this — the runtime handles it.
+
+```css
+/* What the runtime emits for Background.hoverColor: */
+@media (hover: hover) {
+    [sky-id="r.0.2#button"]:hover { background-color: rgba(0, 92, 215, 1); }
+}
+
+/* But :focus-visible / :active / :disabled are NOT gated — they apply on every device: */
+[sky-id="r.0.2#button"]:focus-visible { border-color: rgba(0, 122, 255, 1); }
+[sky-id="r.0.2#button"]:active { background-color: rgba(0, 62, 175, 1); }
+```
+
+### Composition with `Ui.breakpoint`
+
+`Background.hoverColor` inside `Ui.breakpoint Ui.mobile [...]` works as expected — the breakpoint wraps the element and the pseudo-rule attaches to the element itself; both layers stack via CSS inheritance. Each layer gets its own scoped `<style>` block, so neither cross-contaminates.
+
+```elm
+Ui.breakpoint Ui.mobile
+    [ Ui.padding 24 ]
+    (Ui.button
+        [ Background.color (Ui.rgb 0 122 255)
+        , Background.hoverColor (Ui.rgb 0 92 215)
+        ]
+        { onPress = Just Save, label = Ui.text "Save" })
+```
+
+### What renders on the wire
+
+`Background.hoverColor` attaches a `data-sky-pc-rules` marker to the element. The runtime injects a sky-id-scoped `<style>` child:
+
+```html
+<button sky-id="r.0.2#button" style="...base styles...">
+    <style data-sky-pc="r.0.2#button">
+        @media (hover: hover) {
+            [sky-id="r.0.2#button"]:hover { background-color: rgba(0, 92, 215, 1); }
+        }
+        [sky-id="r.0.2#button"]:active { background-color: rgba(0, 62, 175, 1); }
+    </style>
+    Save
+</button>
+```
+
+The selector keys off the runtime-assigned `sky-id`, so multiple pseudo-rules on the same page cannot cross-contaminate. Sky.Tui silently ignores the injected `<style>` (terminal renders the base layer only); Sky.Webview honours pseudo-classes identically to Sky.Live because they share the runtime VNode pipeline.
+
+## Transitions + animations
+
+`Transition.attribute` + `Animation.attribute` (in `Std.Ui.Transition` / `Std.Ui.Animation`) declare CSS transitions and keyframe animations on a Sky.Ui element. Both are CSS-driven — the browser handles the frame timing, no JS round-trip, no model field, no re-render.
+
+**`prefers-reduced-motion` is respected by default.** Every transition + animation rule is auto-wrapped in `@media (prefers-reduced-motion: no-preference) { ... }` by the runtime, so users who've opted out of motion in their OS get a static UI. This is non-negotiable for a11y. Opt OUT explicitly via `Transition.attributeUnsafe` or `respectReducedMotion = False` on an `Animation.Spec` ONLY when motion is semantically required (loading spinner, progress indicator).
+
+### Transitions
+
+```elm
+import Std.Ui as Ui
+import Std.Ui.Background as Background
+import Std.Ui.Transition as Transition
+
+view : Model -> Element Msg
+view _ =
+    Ui.layout []
+        (Ui.button
+            [ Background.color (Ui.rgb 0 122 255)
+            , Background.hoverColor (Ui.rgb 0 92 215)
+            , Transition.attribute
+                  [ Transition.property "background-color"
+                  , Transition.duration 200
+                  , Transition.easing Transition.easeOut
+                  ]
+            ]
+            { onPress = Just Save, label = Ui.text "Save" })
+```
+
+Build the transition by composing typed `Step`s. The renderer joins them into the CSS `transition: <prop> <dur>ms <easing> <delay>ms` shorthand.
+
+| Step | Type | Default | Notes |
+|---|---|---|---|
+| `property` | `String -> Step` | `"all"` | CSS property name. Common: `"background-color"`, `"color"`, `"transform"`, `"opacity"`. Pass `"all"` to transition every animatable property. |
+| `duration` | `Int -> Step` | `200` | Milliseconds. |
+| `delay` | `Int -> Step` | `0` | Milliseconds. Only emitted in the shorthand when non-zero. |
+| `easing` | `Easing -> Step` | `easeOut` | One of `Transition.linear`, `easeIn`, `easeOut`, `easeInOut`, `cubicBezier x1 y1 x2 y2`. |
+
+### Animations (keyframes)
+
+```elm
+import Std.Ui.Animation as Animation
+import Std.Ui.Transform as Transform
+
+fadeInUp : Ui.Attribute msg
+fadeInUp =
+    Animation.attribute
+        { name = "fadeInUp"
+        , duration = 300
+        , easing = Animation.easeOut
+        , delay = 0
+        , iterations = Animation.once
+        , fillMode = Animation.forwards
+        , respectReducedMotion = True
+        , keyframes =
+            [ ( 0, [ Transform.opacity 0.0, Transform.translateY 10 ] )
+            , ( 100, [ Transform.opacity 1.0, Transform.translateY 0 ] )
+            ]
+        }
+```
+
+`Animation.Spec` fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | `String` | User-visible name. **Auto-suffixed with the element's sky-id by the runtime** — two `name = "fadeIn"` elements with different keyframes don't collide. |
+| `duration` | `Int` | Milliseconds. |
+| `easing` | `Easing` | Same constants as `Transition`. |
+| `delay` | `Int` | Milliseconds. |
+| `iterations` | `Iterations` | `Animation.once` / `Animation.infinite` / `Animation.times N`. |
+| `fillMode` | `FillMode` | `Animation.none` / `Animation.forwards` / `Animation.backwards` / `Animation.both`. `forwards` is the most common — hold the final keyframe after the animation ends. |
+| `respectReducedMotion` | `Bool` | `True` wraps the animation in `@media (prefers-reduced-motion: no-preference)` (default + recommended). `False` ignores the user's preference. |
+| `keyframes` | `List (Int, List Transform.Prop)` | `(percent, props)` pairs. Percent in `[0, 100]`. Order doesn't matter; renderer sorts. |
+
+### Transform / opacity properties (for keyframes)
+
+`Std.Ui.Transform` exposes the typed keyframe properties:
+
+| Helper | CSS |
+|---|---|
+| `Transform.translateX n` / `translateY n` / `translate x y` | `transform: translateX(Npx)` etc. |
+| `Transform.scale s` / `scaleXY sx sy` | `transform: scale(s)` |
+| `Transform.rotate deg` | `transform: rotate(<deg>deg)` |
+| `Transform.skewX deg` / `skewY deg` | `transform: skew*(deg)` |
+| `Transform.opacity a` | `opacity: a` (NOT a transform — emitted as standalone) |
+
+Multiple `transform`-typed props on the same keyframe join into a single `transform:` shorthand (`transform: translateY(10px) scale(0.95)`). Mixed `transform` + `opacity` props emit two rules.
+
+### Composition
+
+- **Pseudo-class + transition.** `Background.hoverColor` defines the target state; `Transition.attribute` declares how to interpolate the change. Most natural way to build interactive buttons / cards / nav links.
+- **Breakpoint + animation.** `Ui.breakpoint Ui.mobile [ ... ] child` wraps the element; the animation attaches to `child`. Both layers stack via CSS — the `@keyframes` lives in the inner scoped `<style>` while the `@media` wrapper from the breakpoint applies to the wrapper layout.
+- **Multiple animations.** Stacking two `Animation.attribute` calls joins them in the `animation:` shorthand with commas.
+
+### Reduced-motion sample
+
+A loading spinner uses `respectReducedMotion = False` because a static circle defeats the purpose of "indicate the page is busy":
+
+```elm
+spinner : Element msg
+spinner =
+    Ui.el
+        [ Ui.width (Ui.px 24)
+        , Ui.height (Ui.px 24)
+        , Background.color (Ui.rgb 60 120 200)
+        , Border.rounded 12
+        , Animation.attribute
+              { name = "spin"
+              , duration = 1000
+              , easing = Animation.linear
+              , delay = 0
+              , iterations = Animation.infinite
+              , fillMode = Animation.none
+              , respectReducedMotion = False
+              , keyframes =
+                    [ ( 0, [Transform.rotate 0.0] )
+                    , ( 100, [Transform.rotate 360.0] )
+                    ]
+              }
+        ]
+        Ui.none
+```
+
+For every other case — hover/focus transitions, page-load fades, slide-in panels — keep `respectReducedMotion = True` (the default).
+
+### What renders on the wire
+
+```html
+<button sky-id="r.0#button" style="...base styles...">
+    <style data-sky-tr="r.0#button">
+        @media (prefers-reduced-motion: no-preference) {
+            [sky-id="r.0#button"] { transition: background-color 200ms ease-out; }
+        }
+    </style>
+    <style data-sky-pc="r.0#button">
+        @media (hover: hover) {
+            [sky-id="r.0#button"]:hover { background-color: rgba(0, 92, 215, 1); }
+        }
+    </style>
+    Save
+</button>
+```
+
+For an animated element:
+
+```html
+<div sky-id="r.1#div" style="...base styles...">
+    <style data-sky-anim="r.1#div">
+        @keyframes fadeInUp__r_1_div {
+            0% { transform: translateY(10px); opacity: 0; }
+            100% { transform: translateY(0px); opacity: 1; }
+        }
+        @media (prefers-reduced-motion: no-preference) {
+            [sky-id="r.1#div"] { animation: fadeInUp__r_1_div 300ms ease-out 0ms 1 forwards; }
+        }
+    </style>
+    ...content...
+</div>
+```
+
+The `@keyframes` name is auto-suffixed with `__<sky-id>` (CSS-sanitised) so two unrelated elements declaring `name = "fadeInUp"` with different keyframes never collide globally.
+
 ## Putting it all together — a non-trivial example
 
 `examples/19-skyforum` is the canonical Sky.Ui demo: a Reddit/HackerNews-style forum split across 8 modules. Highlights:
@@ -541,6 +910,10 @@ The 8-module split (`State.sky` / `Update.sky` / `View/{Common,Posts,Detail,Comp
 | **Misc**: `transparent` / `htmlAttribute` / `style` / `class` / `name` | ✅ | |
 | Misc: `classifyDevice` | ✅ | Via `Std.Ui.Responsive` (Model-driven) |
 | **Media queries**: `mediaQuery / breakpoint / Breakpoint` | ✅ | CSS-driven viewport-conditional styling — instant, no JS round-trip. Typed `Mobile / Tablet / Desktop / SmAndUp / MdAndUp / LgAndUp / XlAndUp / DarkMode / LightMode / ReducedMotion / TouchDevice / Portrait / Landscape / Custom`. See §"Media queries + breakpoints". |
+| **Pseudo-classes**: `Background.hoverColor / Font.focusColor / Border.activeColor / ... / Ui.onPseudo` | ✅ | `:hover` / `:focus-visible` / `:focus` / `:active` / `:disabled` typed helpers on every sub-module + generic escape hatch. `:hover` auto-gated behind `@media (hover: hover)` for touch-device safety. See §"Pseudo-classes (hover, focus, active, disabled)". |
+| **Transitions + animations**: `Transition.attribute / Animation.attribute / Std.Ui.Transform` | ✅ | Typed CSS transition Steps + typed keyframe Spec with Iterations + FillMode. Auto-wrapped in `@media (prefers-reduced-motion: no-preference)` by default; opt out via `attributeUnsafe` / `respectReducedMotion = False`. `@keyframes` names auto-suffixed with sky-id. See §"Transitions + animations". |
+| **Aspect ratio**: `Ui.aspectRatio / Ui.aspectRatioWH / Ui.square / Ui.widescreen / Ui.fullHd / Ui.cinemascope` | ✅ | Inline `aspect-ratio:` CSS; pairs with `Ui.width Ui.fill` so the unset axis auto-scales via the browser's aspect-ratio solver. See §"`Ui.aspectRatio` — proportional sizing". |
+| **Grid tracks**: `Std.Ui.Grid.{tracks,columns,rows}` + `Track` ADT (`fr / px / auto / minContent / maxContent / minmax / repeat / repeatAutoFit / repeatAutoFill`) | ✅ | Typed CSS-grid track-list — sidebar layouts (`1fr 200px 1fr`), content-aware tracks (`auto 1fr`), responsive card grids (`repeat(auto-fit, minmax(240px, 1fr))`). Lighter `Ui.gridColumns N` (auto-fill default) stays for the common-case product-card grid. See §"`Std.Ui.Grid` — typed track lists". |
 | **Render target** | — | Server-side Sky.Live + ~2 KB browser JS |
 | **Style emission** | — | Inline styles per element |
 

@@ -14,6 +14,7 @@ import Sky.Core.Maybe as Maybe
 import Sky.Core.Result as Result
 import Sky.Core.Math as Math
 import Sky.Core.Crypto as Crypto
+import Sky.Core.Task as Task
 import Sky.Core.Jwt as Jwt
 import Sky.Core.Encoding as Encoding
 import Sky.Core.Json.Encode as JsonEnc
@@ -43,7 +44,63 @@ tests =
     , decimalSuite
     , moneySuite
     , timeSuite
+    , taskRetrySuite
     ]
+
+
+-- ─── Task.retryWith ───────────────────────────────────────────────
+
+
+taskRetrySuite : Test
+taskRetrySuite =
+    Test.suite "Task.retryWith"
+        [ Test.test "Ok body runs once" (\_ ->
+            case Task.perform (Task.retryWith (Task.linearBackoff 5 1) (Task.succeed 42)) of
+                Ok v -> Test.equal 42 v
+                Err _ -> Test.isFalse True)
+        , Test.test "Err body retries to maxAttempts" (\_ ->
+            case Task.perform (Task.retryWith (Task.linearBackoff 2 1) (Task.fail (Error.io "transient"))) of
+                Err _ -> Test.isTrue True
+                Ok _ -> Test.isFalse True)
+        , Test.test "Exponential policy survives" (\_ ->
+            case Task.perform (Task.retryWith (Task.exponentialBackoff 1 1) (Task.succeed "ok")) of
+                Ok v -> Test.equal "ok" v
+                Err _ -> Test.isFalse True)
+        , Test.test "withJitter composes" (\_ ->
+            let
+                policy = Task.exponentialBackoff 1 1 |> Task.withJitter
+            in
+                case Task.perform (Task.retryWith policy (Task.succeed "j")) of
+                    Ok v -> Test.equal "j" v
+                    Err _ -> Test.isFalse True)
+        , Test.test "retryOn predicate short-circuits" (\_ ->
+            -- v0.15.50: ShouldRetry e ADT. retryOn wraps the predicate in
+            -- RetryWhen; when it returns False, retryWith stops the loop
+            -- after the first failure rather than honouring maxAttempts.
+            let
+                policy =
+                    Task.linearBackoff 5 1
+                        |> Task.retryOn (\_ -> False)
+            in
+                case Task.perform (Task.retryWith policy (Task.fail (Error.io "no-retry"))) of
+                    Err _ -> Test.isTrue True
+                    Ok _ -> Test.isFalse True)
+        , Test.test "defaultRetryPolicy builder chain" (\_ ->
+            -- v0.15.51: defaultRetryPolicy + with* helpers mirror
+            -- Http.defaultRequest's builder convention. withRetryOn is
+            -- the clearer alias for retryOn — same RetryWhen wrap.
+            let
+                policy =
+                    Task.defaultRetryPolicy
+                        |> Task.withMaxAttempts 5
+                        |> Task.withBaseMs 1
+                        |> Task.withKind 0
+                        |> Task.withRetryOn (\_ -> True)
+            in
+                case Task.perform (Task.retryWith policy (Task.succeed "built")) of
+                    Ok v -> Test.equal "built" v
+                    Err _ -> Test.isFalse True)
+        ]
 
 
 -- ─── String ────────────────────────────────────────────────────────
@@ -328,6 +385,45 @@ cryptoSuite =
                 (Crypto.sha1 "hello"))
         , Test.test "hmacSha512 produces 128 hex chars" (\_ ->
             Test.equal 128 (String.length (Crypto.hmacSha512 "secret" "msg")))
+        , Test.test "aesKeyFromPassword derivation succeeds round-trip" (\_ ->
+            let
+                key = Crypto.aesKeyFromPassword "p" "salt"
+            in
+                case Crypto.aesGcmEncrypt key "x" of
+                    Ok _ -> Test.isTrue True
+                    Err _ -> Test.isFalse True)
+        , Test.test "aesGcm round-trip" (\_ ->
+            let
+                key = Crypto.aesKeyFromPassword "hunter2" "salt"
+            in
+                case Crypto.aesGcmEncrypt key "hello world" of
+                    Ok ct ->
+                        case Crypto.aesGcmDecrypt key ct of
+                            Ok pt -> Test.equal "hello world" pt
+                            Err _ -> Test.isFalse True
+                    Err _ -> Test.isFalse True)
+        , Test.test "aesGcm tamper detection" (\_ ->
+            let
+                key = Crypto.aesKeyFromPassword "hunter2" "salt"
+                tampered = "AAAAAAAAAAAAAAAAAAAAAAAAA"
+            in
+                case Crypto.aesGcmDecrypt key tampered of
+                    Ok _ -> Test.isFalse True
+                    Err _ -> Test.isTrue True)
+        , Test.test "chacha20 round-trip" (\_ ->
+            let
+                key = Crypto.chachaKeyFromPassword "pw" "saltsalt"
+            in
+                case Crypto.chacha20Encrypt key "another payload" of
+                    Ok ct ->
+                        case Crypto.chacha20Decrypt key ct of
+                            Ok pt -> Test.equal "another payload" pt
+                            Err _ -> Test.isFalse True
+                    Err _ -> Test.isFalse True)
+        , Test.test "aesGcm short-key rejected" (\_ ->
+            case Crypto.aesGcmEncrypt "short" "x" of
+                Err _ -> Test.isTrue True
+                Ok _ -> Test.isFalse True)
         ]
 
 

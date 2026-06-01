@@ -1768,7 +1768,12 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                   let cacheDir = ".skycache"
                                   createDirectoryIfMissing True cacheDir
                                   writeFile (cacheDir </> "source.hash") srcHash
-                                  putStrLn "Compilation successful"
+                                  -- v0.15.42 (audit §3.4): Sky lowering succeeded, but
+                                  -- `go build` hasn't run yet. The CLI prints
+                                  -- "Compilation successful" only after Go returns 0,
+                                  -- so users never see a "successful" banner followed
+                                  -- by a go-build failure.
+                                  putStrLn "Sky lowering succeeded"
                                   return (Right mainGoPath)
 
 
@@ -1836,7 +1841,8 @@ parseSingle config entryPath outDir = do
                         , "go 1.21"
                         ]
 
-                    putStrLn "Compilation successful"
+                    -- v0.15.42 (audit §3.4): see comment above.
+                    putStrLn "Sky lowering succeeded"
                     return (Right mainGoPath)
 
 
@@ -2879,11 +2885,24 @@ generateDeclsForDep canMod modPrefix =
     go keepName (Can.DeclareRec def defs rest) =
         mkDef keepName def ++ concatMap (mkDef keepName) defs ++ go keepName rest
 
-    mkDef keepName def = case def of
+    mkDef keepName def0 = case def0 of
         Can.DestructDef _ _ -> []
-        _ | not (keepName (defName def)) -> []
+        _ | not (keepName (defName def0)) -> []
         _ ->
-          let -- For TypedDef, the 5th field is the RETURN type only;
+          let -- v0.15.52 #398 — Eta-expand point-free aliases at the
+              -- dep-emission entry point too.  Without this, a dep
+              -- module's `tickle = String.toUpper` produced a 0-arity
+              -- Go thunk that callers couldn't apply.  Mirrors the
+              -- same rewrite in `generateDef` (entry-module path).
+              -- Use the per-module-scoped solved view so the eta
+              -- arity lookup matches the dep's own HM ledger (the
+              -- `_stPerModuleEnv` path that closes #365's cross-
+              -- module collisions).
+              depSolved = Solve.withCurrentModule
+                              (Just (ModuleName.toString (Can._name canMod)))
+                              (Rec._cg_solvedTypes getCgEnv)
+              def = etaExpandPointFreeScoped depSolved def0
+              -- For TypedDef, the 5th field is the RETURN type only;
               -- per-pattern arg types live in `typedPats :: [(Pat, Type)]`.
               (name, params, body, mAnnotArgs, _mAnnotRet) = case def of
                 Can.Def (A.At _ n) pats expr ->
@@ -3987,6 +4006,97 @@ generateDefMaybe home reachable dceEnabled def solvedTypes = case def of
             else []
 
 
+-- | v0.15.52 #398 — Point-free top-level alias eta-expansion.
+--
+-- Detects `name = expr` (or annotated `name : a -> b -> c; name =
+-- expr`) where `expr` syntactically has type `T1 -> ... -> Tn -> Tr`
+-- with n ≥ 1 but the binding's syntactic param count is < n. Returns
+-- an eta-expanded equivalent with synthetic PVar patterns + a body
+-- of the form `Call expr [VarLocal p_0, ..., VarLocal p_{n-1}]`.
+--
+-- Without this rewrite, the lowerer infers arity from the syntactic
+-- param count and emits a 0-arity Go thunk wrapper around an N-arity
+-- value, so every call site fails `go build` with `too many arguments
+-- in call to <name>`.
+--
+-- For TypedDef the annotation supplies arrow arity; for Can.Def the
+-- HM-solved type does. Only expand when the type genuinely has
+-- arrows beyond the syntactic params — otherwise we'd break value
+-- bindings that happen to have function-typed return slots (e.g.
+-- `init : Cmd Msg` produces a Cmd value, not a function).
+etaExpandPointFree :: Solve.SolvedTypes -> Can.Def -> Can.Def
+etaExpandPointFree = etaExpandWith Solve.lookupSolvedVar
+
+
+-- | Module-scoped variant — used from `generateDeclsForDep` so the
+-- arity lookup consults the dep's own per-module env first (closes
+-- the cross-module same-name collision class — same shape as #365).
+etaExpandPointFreeScoped :: Solve.SolvedTypes -> Can.Def -> Can.Def
+etaExpandPointFreeScoped = etaExpandWith Solve.lookupSolvedVarScoped
+
+
+etaExpandWith
+    :: (String -> Solve.SolvedTypes -> Maybe T.Type)
+    -> Solve.SolvedTypes
+    -> Can.Def
+    -> Can.Def
+etaExpandWith lookupFn solved def = case def of
+    Can.Def lname@(A.At _ n) [] body ->
+        case lookupFn n solved of
+            Just ty
+              | arrowArity ty > 0
+              , canEtaBody body ->
+                let arity = arrowArity ty
+                    fresh = etaParamNames arity
+                    region = A.toRegion body
+                    pats = [ A.At region (Can.PVar p) | p <- fresh ]
+                    args = [ A.At region (Can.VarLocal p) | p <- fresh ]
+                    body' = A.At region (Can.Call body args)
+                in Can.Def lname pats body'
+            _ -> def
+    Can.TypedDef lname@(A.At _ _n) freeVars [] body retTy ->
+        let arity = arrowArity retTy
+        in if arity > 0 && canEtaBody body
+            then
+                let (paramTys, deepRet) = peelArrows arity retTy
+                    fresh = etaParamNames arity
+                    region = A.toRegion body
+                    pats = [ A.At region (Can.PVar p) | p <- fresh ]
+                    args = [ A.At region (Can.VarLocal p) | p <- fresh ]
+                    typedPats = zip pats paramTys
+                    body' = A.At region (Can.Call body args)
+                in Can.TypedDef lname freeVars typedPats body' deepRet
+            else def
+    _ -> def
+  where
+    arrowArity (Can.TLambda _ to) = 1 + arrowArity to
+    arrowArity _ = 0
+
+    peelArrows 0 t = ([], t)
+    peelArrows k (Can.TLambda from to) =
+        let (rest, r) = peelArrows (k - 1) to
+        in (from : rest, r)
+    peelArrows _ t = ([], t)
+
+    etaParamNames k = [ "_skyEta_p" ++ show i | i <- [0 .. k - 1] ]
+
+    -- Only eta-expand bodies that REFER to a value (a top-level /
+    -- kernel binding, a local, or a constructor). Avoid wrapping
+    -- already-effectful expressions whose return type happens to
+    -- be a function (`foo : Int -> Int` resulting from a `let` /
+    -- partial-app pipeline) because their evaluation may have
+    -- effects that must not run per call. The reference cases here
+    -- are the safe subset where the body is itself a pure name
+    -- pointing at a function value.
+    canEtaBody (A.At _ inner) = case inner of
+        Can.VarTopLevel _ _   -> True
+        Can.VarKernel _ _     -> True
+        Can.VarLocal _        -> True
+        Can.VarCtor{}         -> True
+        Can.Accessor _        -> True
+        _                     -> False
+
+
 -- | Read SKY_DCE env var once. Default: enabled.
 lookupDceFlag :: IO String
 lookupDceFlag = do
@@ -3996,8 +4106,19 @@ lookupDceFlag = do
 
 -- | Generate Go for a single definition, using solved types for signatures
 generateDef :: ModuleName.Canonical -> Can.Def -> Solve.SolvedTypes -> [GoIr.GoDecl]
-generateDef home def solvedTypes =
-    let (name, params, body) = case def of
+generateDef home def0 solvedTypes =
+    -- v0.15.52 #398 — Point-free top-level alias of a polymorphic /
+    -- N-ary function (e.g. `tickle = String.toUpper` where
+    -- `String.toUpper : String -> String`) syntactically has 0
+    -- parameters but its sig has arrow arity ≥ 1. Pre-fix, the
+    -- lowerer trusted the syntactic param count and emitted a
+    -- nullary thunk wrapper (`func tickle() func(string) string`);
+    -- call sites then hit `too many arguments in call to tickle`.
+    -- Eta-expand at the codegen entry point: synthesize fresh PVar
+    -- patterns for every leftover arrow + wrap the body as a Call
+    -- so the rest of `generateDef` sees a normal N-ary function.
+    let def = etaExpandPointFree solvedTypes def0
+        (name, params, body) = case def of
             Can.Def (A.At _ n) pats expr -> (n, pats, expr)
             Can.TypedDef (A.At _ n) _ typedPats expr _ ->
                 (n, map fst typedPats, expr)
@@ -11842,7 +11963,9 @@ generateMainFunc canMod srcMod solvedTypes =
                 , GoIr._gf_typeParams = []
                 , GoIr._gf_params = []
                 , GoIr._gf_returnType = ""
-                , GoIr._gf_body = [GoIr.GoExprStmt (GoIr.GoCall (GoIr.GoQualified "rt" "Log_println") [GoIr.GoStringLit "No main function"])]
+                , GoIr._gf_body =
+                    panicRecoverDeferStmt :
+                    [GoIr.GoExprStmt (GoIr.GoCall (GoIr.GoQualified "rt" "Log_println") [GoIr.GoStringLit "No main function"])]
                 }
             ]
         Just def ->
@@ -11858,9 +11981,31 @@ generateMainFunc canMod srcMod solvedTypes =
                 , GoIr._gf_typeParams = []
                 , GoIr._gf_params = []
                 , GoIr._gf_returnType = ""
-                , GoIr._gf_body = wrappedStmts
+                , GoIr._gf_body = panicRecoverDeferStmt : wrappedStmts
                 }
             ]
+
+
+-- | Cycle 6 PC (v0.15.43) — top-level panic→Err recovery.
+--
+-- Sky's `main = …` emits Go's `func main()` calling the user's task
+-- directly. Without a recover, any Go panic that escapes the
+-- synchronous path crashes the process with a Go stack dump —
+-- breaks the "if it compiles, it works" contract for Sky.Cli +
+-- Sky.Tui + batch jobs (the non-server synchronous surface).
+--
+-- This injects `defer rt.LogPanicAndExit()` as the FIRST statement
+-- of main(). The recover catches whatever escaped, classifies the
+-- panic (div-by-zero, type mismatch, nil deref, …), emits a
+-- structured log line with a 4-byte errId, and exits 1 — instead
+-- of dumping the Go stack to stderr.
+--
+-- The compiler-bug panics in `rt.go` (coerceInner, Unreachable,
+-- Ffi.kernel) are routed through the same gate but classified as
+-- `CompilerBug` so users know it's not their code.
+panicRecoverDeferStmt :: GoIr.GoStmt
+panicRecoverDeferStmt =
+    GoIr.GoExprStmt (GoIr.GoRaw "defer rt.LogPanicAndExit()")
 
 
 -- | Find the main definition
@@ -12252,8 +12397,30 @@ inferExprType types (A.At r e) = case e of
                     case inferExprType types (args !! listArgIdx) of
                         Just listTy@(T.TType _ "List" _) -> Just listTy
                         _ -> defaultCallResult
+            -- v0.15.45 — `Dict.fromList list : List (K, V) -> Dict K V`.
+            -- The kernel's annotation is universally quantified (k, v
+            -- are TVars), so `splitFuncType` leaves them as the
+            -- placeholder `_ambig` TVars.  To recover the concrete K/V
+            -- for the typed-key `Dict.toList` routing (closes
+            -- Limitation #10), unify directly with the list arg's
+            -- element tuple types.
+            --
+            -- Note: matches both the Stage-4 routed `Can.VarKernel
+            -- "Dict" "fromList"` shape AND the pre-rewrite
+            -- `Can.VarTopLevel "Sky.Core.Dict" "fromList"` shape (the
+            -- Layer 3 stdlib's Sky-source declaration carries the
+            -- top-level reference; the kernel-alias rewrite happens
+            -- LATER than this `inferExprType` walk).
+            A.At _ (Can.VarKernel "Dict" "fromList")
+                | [listArg] <- args -> dictFromListType listArg
+            A.At _ (Can.VarTopLevel (ModuleName.Canonical "Sky.Core.Dict") "fromList")
+                | [listArg] <- args -> dictFromListType listArg
             _ -> defaultCallResult
       where
+        dictFromListType listArg = case inferExprType types listArg of
+            Just (T.TType _ "List" [T.TTuple kTy vTy _]) ->
+                Just (T.TType ModuleName.dict "Dict" [kTy, vTy])
+            _ -> defaultCallResult
         defaultCallResult = case inferExprType types func of
             Just ft -> Just (snd (splitFuncType (length args) ft))
             Nothing -> Nothing
@@ -13079,6 +13246,29 @@ inferDictValueGoType types e = case inferExprType types e of
     _ -> "any"
 
 
+-- | Extract the KEY type of a Dict-typed expression as a Go type
+-- string. Returns "any" on non-Dict / unresolved / unsupported-key
+-- shapes. v0.15.45 — used by `Dict.toList` typed-key routing to
+-- close the Limitation #10 soundness hole (a `Dict Int v` was
+-- previously returning `(String, v)` tuples from `toList`, breaking
+-- arithmetic on the keys silently).
+--
+-- Currently recognises String/Int/Float/Bool key types; opaque TVars
+-- or container-typed keys fall back to "any" (which routes through
+-- the legacy String-key path — safe regression behaviour because the
+-- runtime map is `map[string]V` regardless).
+inferDictKeyGoType :: Solve.SolvedTypes -> Can.Expr -> String
+inferDictKeyGoType types e = case inferExprType types e of
+    Just (T.TType _ "Dict" [keyTy, _]) ->
+        case solvedTypeToGo keyTy of
+            "string"  -> "string"
+            "int"     -> "int"
+            "float64" -> "float64"
+            "bool"    -> "bool"
+            _         -> "any"
+    _ -> "any"
+
+
 -- | Extract the inner type of a Maybe-typed expression. e.g.
 -- `Maybe Int` → "int". Returns "any" when the expression isn't a
 -- Maybe or when the inner type isn't statically derivable.
@@ -13523,6 +13713,31 @@ kernelTypedCall types modName funcName args goArgs =
                else Just (GoIr.GoCall
                     (GoIr.GoIdent ("rt.Dict_fromListT[" ++ valGo ++ "]"))
                     [wrapAsList "any" goList])
+
+        -- Dict.toList dict : Dict K V -> List (K, V) — v0.15.45.
+        -- Closes Limitation #10 (Dict.toList on Dict Int v was returning
+        -- (String, v) tuples, silently breaking arithmetic on the keys).
+        -- The runtime map is map[string]V regardless; the typed-key
+        -- variants re-parse the string keys through strconv before
+        -- building the result tuple list. Only routes when the key is
+        -- a recognised concrete type — String keys keep using the
+        -- legacy Dict_toList path (no work needed); Int keys route
+        -- through Dict_toListIntKey; Float keys through
+        -- Dict_toListFloatKey. Opaque/TVar keys fall back to the legacy
+        -- path (returns String keys — same behaviour as before; the
+        -- TVar arises in fully-polymorphic Dict-handling code where the
+        -- caller treats the keys opaquely).
+        ("Dict", "toList", [dictArg], [goDict]) ->
+            case inferDictKeyGoType types dictArg of
+                "int" ->
+                    Just (GoIr.GoCall
+                        (GoIr.GoIdent "rt.Dict_toListIntKey")
+                        [goDict])
+                "float64" ->
+                    Just (GoIr.GoCall
+                        (GoIr.GoIdent "rt.Dict_toListFloatKey")
+                        [goDict])
+                _ -> Nothing
 
         -- Dict.map fn dict : (String -> V -> W) -> Dict String V -> Dict String W
         -- Sky's Dict.map is 2-arg curried (K -> V -> W). The single-arg
@@ -14657,6 +14872,35 @@ runtimeGoSource = unlines
     , "\tm := dict.(map[string]any)"
     , "\tresult := make([]any, 0, len(m))"
     , "\tfor k, v := range m { result = append(result, SkyTuple2{V0: k, V1: v}) }"
+    , "\treturn result"
+    , "}"
+    , ""
+    , "// v0.15.45 — typed-key Dict.toList variants closing Limitation #10."
+    , "func Dict_toListIntKey(dict any) any {"
+    , "\tm := dict.(map[string]any)"
+    , "\tresult := make([]any, 0, len(m))"
+    , "\tfor k, v := range m {"
+    , "\t\tif n, err := strconv.Atoi(k); err == nil {"
+    , "\t\t\tresult = append(result, SkyTuple2{V0: n, V1: v})"
+    , "\t\t} else if f, err := strconv.ParseFloat(k, 64); err == nil {"
+    , "\t\t\tresult = append(result, SkyTuple2{V0: int(f), V1: v})"
+    , "\t\t} else {"
+    , "\t\t\tresult = append(result, SkyTuple2{V0: 0, V1: v})"
+    , "\t\t}"
+    , "\t}"
+    , "\treturn result"
+    , "}"
+    , ""
+    , "func Dict_toListFloatKey(dict any) any {"
+    , "\tm := dict.(map[string]any)"
+    , "\tresult := make([]any, 0, len(m))"
+    , "\tfor k, v := range m {"
+    , "\t\tif f, err := strconv.ParseFloat(k, 64); err == nil {"
+    , "\t\t\tresult = append(result, SkyTuple2{V0: f, V1: v})"
+    , "\t\t} else {"
+    , "\t\t\tresult = append(result, SkyTuple2{V0: 0.0, V1: v})"
+    , "\t\t}"
+    , "\t}"
     , "\treturn result"
     , "}"
     , ""
