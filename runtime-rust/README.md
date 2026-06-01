@@ -621,6 +621,8 @@ sky install
 | Limitation | Description | Workaround |
 |---|---|---|
 | Empty-literal type defaulting | `List.head []` / `Maybe.map _ Nothing` / `Result.mapError _ (Err _)` in test-only positions can't infer the element type — 4 such errors remain in `examples/00-standard-libs` on `target=rust`. | Sky source can annotate the literal's type. Sub-A.13 plan addresses this at the codegen level: `docs/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`. |
+| `any` in record fields on `target=rust` | The Rust codegen refuses to emit `Box<dyn Any>` for an `any`-typed Sky record field (doing so re-implements Go's `interface{}` and defeats the static-type purpose of the Rust backend). Build fails with a structured `error[Rust]: any-typed record field on \`--target rust\`` diagnostic. | Encode the heterogeneous field as an ADT (the canonical example is upstream's `RetryPolicy.shouldRetry : any` → Rust-target override at `runtime-rust/sky-stdlib-overrides/Sky/Core/Task.sky` with `type ShouldRetry e = RetryAlways \| RetryWhen (e -> Bool)`). |
+| `Task.retryWith` signature on `target=rust` | Takes a task *producer* (`() -> Task e a`) instead of upstream's `Task e a`. Rust's `SkyTask = Pin<Box<dyn Future>>` is one-shot — a fresh Future is needed per retry attempt. | User code: `Task.retryWith policy (\_ -> myTask)` on `target=rust` vs `Task.retryWith policy myTask` on `target=go`. Upstream issue draft proposing the thunk shape as a portable API: `docs/runtime-rust/upstream-issues/2026-05-31-shouldretry-adt.md`. |
 | `Result.mapError` inference cascade | After F1's polymorphic signature fix the closure infers; outer call-site inference can still ambiguate the SkyResult<E,T> ok-slot. | Wrap in a typed `let` to pin E1/E2 at the call site. |
 | `withTransaction` rollback isolation | `db_with_transaction` uses sqlx's pool API; BEGIN/COMMIT/ROLLBACK run on the pool but body queries may route to other pool connections. Real rollback isolation requires single-connection pools. | Configure `sqlx::Pool::max_connections(1)` in production code that needs guaranteed rollback. Documented inline in `db.rs`. |
 | `Db.insertRow` on postgres | Returns 0 (no auto last-insert-id in postgres). | Use `INSERT … RETURNING id` + `Db.queryDecode` to fetch the new id explicitly. Documented in generated `config.rs` for postgres. |
@@ -634,25 +636,59 @@ sky install
 
 ## Remaining work
 
-### Short-term
-- **Sub-A.13** — codegen-level type-default propagation for empty literals (`vec![]` /
-  `SkyMaybe::Nothing` / `SkyResult::Err`) in unconstrained generic-argument
-  positions. Closes the last 4 errors on `examples/00-standard-libs`. Implementation
-  plan written and ready for execution:
-  `docs/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`.
-- **`Db.withTransaction` single-connection variant** — runtime helper that takes a
-  reserved `PoolConnection` so rollback isolation is guaranteed without requiring
-  user-side pool configuration.
-- **`basename` → Cargo `[package].name` for git deps where the URL probe fails on
-  virtual workspaces** — the discovery helper currently bails when the root
-  `Cargo.toml` has no `[package]` section (workspace-only roots). Walk the first
-  workspace member to recover.
-- **Non-byte slices/arrays** in FFI — `&[String]`, `[f64; 3]` still drop; per-element
-  coercion would extend Alt-1 v2 to wider crate surface.
+### Active — sub-D arc (v0.15.40..v0.15.44 sync + Rust adaptations)
+
+Work in progress on the WIP sister branch `feat/runtime-rust-subd-v0.15.44`
+(`origin/feat/runtime-rust-subd-v0.15.44`, not merged back yet). This branch
+carries the upstream merge through v0.15.44 plus the adaptations needed for
+the new Task / crypto / HTTP surfaces to land on the Rust target without
+introducing `Box<dyn Any>` lowering for `any`-typed Sky fields.
+
+Sub-D's guiding principle: **the Rust backend uses Rust's static type
+system**. Lowering Sky's `any` to `Box<dyn Any>` would re-implement Go's
+`interface{}` in Rust syntax and defeat that. Instead the codegen refuses
+`any` in record-field positions with an actionable diagnostic, and the Sky
+stdlib's `any`-shaped surfaces (currently just `Sky.Core.Task.RetryPolicy`)
+get a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky`
+that re-declares the surface with an HM-pure ADT.
+
+| Sub-step | Status | What landed |
+|---|---|---|
+| Sub-D step 1 (merge + override loader) | ✅ on sister branch | `f72ba746`, `883b61da`, `c122df25`, `131ecfa3` — merge resolution, TH-embedded override loader, codegen rejection of `any` in record fields, negative regression test. |
+| Sub-D step 3 (Sky.Core.Task ADT override) | ✅ on sister branch | `52c4d56b` — `runtime-rust/sky-stdlib-overrides/Sky/Core/Task.sky` with `type ShouldRetry e = RetryAlways \| RetryWhen (e -> Bool)`. Loaded end-to-end through `cabal install`. |
+| Sub-D step 4 (generic-ADT codegen fixes) | ⏳ spec + plan ready | `c8415315` — 4 cargo error classes (E0428, E0412, E0107, E0599) the override surfaces. Spec at `docs/superpowers/specs/2026-06-01-sub-D-step4-generic-adt-codegen-design.md`; 7-task plan at `docs/superpowers/plans/2026-06-01-sub-D-step4-generic-adt-codegen.md`. |
+| Sub-D steps 6-14 (runtime kernels, AEAD, Bytes, docs) | ⏳ blocked on step 4 | Original plan at `docs/superpowers/plans/2026-05-31-sub-D-v0.15.44-sync-no-any.md` — resumes after step 4 lands. |
+
+The sister branch is honestly tagged WIP: 16/18 `examples/rust/*` build
+clean on it; `17-db-todo-cli` and `18-auth-signup` fail at the codegen
+issues sub-D step 4 closes. Once step 4 lands, the original sub-D plan
+resumes through `task_retry_with`, AES-GCM, `Sky.Core.Bytes`, and the
+final headline regression sweep.
+
+### Short-term (orthogonal to sub-D)
+
+- **Sub-A.13** — codegen-level type-default propagation for empty literals
+  (`vec![]` / `SkyMaybe::Nothing` / `SkyResult::Err`) in unconstrained
+  generic-argument positions. Closes the last 4 errors on
+  `examples/00-standard-libs` on `target=rust` (orthogonal to sub-D; lands
+  on `feat/runtime-rust` independently).
+  Plan: `docs/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`.
+- **`Db.withTransaction` single-connection variant** — runtime helper that
+  takes a reserved `PoolConnection` so rollback isolation is guaranteed
+  without requiring user-side pool configuration.
+- **`basename` → Cargo `[package].name` for git deps where the URL probe
+  fails on virtual workspaces** — the discovery helper currently bails when
+  the root `Cargo.toml` has no `[package]` section (workspace-only roots).
+  Walk the first workspace member to recover.
+- **Non-byte slices/arrays** in FFI — `&[String]`, `[f64; 3]` still drop;
+  per-element coercion would extend Alt-1 v2 to wider crate surface.
 
 ### Medium-term
-- **Sub-D — Sky.Http.Server** on Rust runtime (axum/hyper).
-- **Sub-E — Sky.Live** session stores + SSE on Rust runtime (sub-D dependency).
+- **Sub-D.1 — Sky.Http.Server on Rust runtime (axum/hyper)** — after the
+  v0.15.44 sync lands. Currently zero `examples/rust/*` import
+  `Sky.Core.Http`/`Sky.Http.Server`, so the v0.15.44 typed-`HttpResponse`
+  addition is no-op for the Rust target until this lands.
+- **Sub-E — Sky.Live** session stores + SSE on Rust runtime (sub-D.1 dependency).
 - **Sub-F — Sky.Tui** terminal backend on Rust runtime.
 - **Enum-argument constructors** for FFI — many crate fns take a crate enum
   (e.g. `base32::encode(Alphabet, …)`); expose variants so Sky can pass them.
