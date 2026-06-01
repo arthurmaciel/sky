@@ -1,0 +1,12 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Result as Result
+import Sky.Core.Error as Error exposing (Error)
+import Std.Log exposing (println)
+
+main =
+    let wrapped = Result.mapError (\_ -> Error.unexpected "wrapped") (Err (Error.unexpected "inner"))
+    in case wrapped of
+        Ok _  -> println "fail"
+        Err _ -> println "ok: mapError on Err"

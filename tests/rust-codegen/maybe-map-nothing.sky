@@ -1,0 +1,9 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Maybe as Maybe
+import Std.Log exposing (println)
+
+main =
+    let doubled = Maybe.withDefault 0 (Maybe.map (\x -> x * 2) Nothing)
+    in println ("ok: " ++ String.fromInt doubled)
