@@ -621,8 +621,8 @@ sky install
 | Limitation | Description | Workaround |
 |---|---|---|
 | Empty-literal type defaulting | `List.head []` / `Maybe.map _ Nothing` / `Result.mapError _ (Err _)` in test-only positions can't infer the element type — 4 such errors remain in `examples/00-standard-libs` on `target=rust`. | Sky source can annotate the literal's type. Sub-A.13 plan addresses this at the codegen level: `docs/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`. |
-| `any` in record fields on `target=rust` | The Rust codegen refuses to emit `Box<dyn Any>` for an `any`-typed Sky record field (doing so re-implements Go's `interface{}` and defeats the static-type purpose of the Rust backend). Build fails with a structured `error[Rust]: any-typed record field on \`--target rust\`` diagnostic. | Encode the heterogeneous field as an ADT (the canonical example is upstream's `RetryPolicy.shouldRetry : any` → Rust-target override at `runtime-rust/sky-stdlib-overrides/Sky/Core/Task.sky` with `type ShouldRetry e = RetryAlways \| RetryWhen (e -> Bool)`). |
-| `Task.retryWith` signature on `target=rust` | Takes a task *producer* (`() -> Task e a`) instead of upstream's `Task e a`. Rust's `SkyTask = Pin<Box<dyn Future>>` is one-shot — a fresh Future is needed per retry attempt. | User code: `Task.retryWith policy (\_ -> myTask)` on `target=rust` vs `Task.retryWith policy myTask` on `target=go`. Upstream issue draft proposing the thunk shape as a portable API: `docs/runtime-rust/upstream-issues/2026-05-31-shouldretry-adt.md`. |
+| `any` in record fields on `target=rust` | The Rust codegen refuses to emit `Box<dyn Any>` for an `any`-typed Sky record field (load-bearing architectural principle — see the section above). Build fails with a structured `error[Rust]: any-typed record field on \`--target rust\`` diagnostic. | Encode the heterogeneous field as an ADT upstream (the path PR #119 took for `RetryPolicy`), or — defence-in-depth — ship a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky` with an HM-pure shape. |
+| `Task.retryWith` on `target=rust` may need a thunk shape | Rust's `SkyTask = Pin<Box<dyn Future>>` is one-shot (not `Clone`); the retry loop needs a fresh Future per attempt. Decision deferred to the sub-D restart against v0.15.51: either the codegen wraps the Task arg in a thunk at the `retryWith` call site, or we redesign `SkyTask` to be cloneable, or upstream adopts a thunk-shaped `retryWith`. | TBD — captured in the new scope table above. |
 | `Result.mapError` inference cascade | After F1's polymorphic signature fix the closure infers; outer call-site inference can still ambiguate the SkyResult<E,T> ok-slot. | Wrap in a typed `let` to pin E1/E2 at the call site. |
 | `withTransaction` rollback isolation | `db_with_transaction` uses sqlx's pool API; BEGIN/COMMIT/ROLLBACK run on the pool but body queries may route to other pool connections. Real rollback isolation requires single-connection pools. | Configure `sqlx::Pool::max_connections(1)` in production code that needs guaranteed rollback. Documented inline in `db.rs`. |
 | `Db.insertRow` on postgres | Returns 0 (no auto last-insert-id in postgres). | Use `INSERT … RETURNING id` + `Db.queryDecode` to fetch the new id explicitly. Documented in generated `config.rs` for postgres. |
@@ -636,34 +636,63 @@ sky install
 
 ## Remaining work
 
-### Active — sub-D arc (v0.15.40..v0.15.44 sync + Rust adaptations)
+### Architectural principle (load-bearing for every future arc)
 
-Work in progress on the WIP sister branch `feat/runtime-rust-subd-v0.15.44`
-(`origin/feat/runtime-rust-subd-v0.15.44`, not merged back yet). This branch
-carries the upstream merge through v0.15.44 plus the adaptations needed for
-the new Task / crypto / HTTP surfaces to land on the Rust target without
-introducing `Box<dyn Any>` lowering for `any`-typed Sky fields.
+**The Rust backend uses Rust's static type system. Sky's `any` is never lowered to `Box<dyn Any>` / `Arc<dyn Any>` on `target=rust`.** Doing so re-implements Go's `interface{}` in Rust syntax and defeats the entire reason to have a Rust backend (static dispatch, no runtime type erasure, cargo catches shape mismatches at compile time). The codegen refuses `any` in record-field positions with an actionable diagnostic; any Sky stdlib surface upstream ships with such a field needs either an upstream ADT redesign (preferred) or a Rust-target stdlib override at `runtime-rust/sky-stdlib-overrides/<Module>.sky` (defence-in-depth fallback).
 
-Sub-D's guiding principle: **the Rust backend uses Rust's static type
-system**. Lowering Sky's `any` to `Box<dyn Any>` would re-implement Go's
-`interface{}` in Rust syntax and defeat that. Instead the codegen refuses
-`any` in record-field positions with an actionable diagnostic, and the Sky
-stdlib's `any`-shaped surfaces (currently just `Sky.Core.Task.RetryPolicy`)
-get a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky`
-that re-declares the surface with an HM-pure ADT.
+### Active — sub-D arc (v0.15.51 sync + Rust adaptations)
 
-| Sub-step | Status | What landed |
+The original sub-D arc against v0.15.44 (WIP sister branch `feat/runtime-rust-subd-v0.15.44`) is retired. Its core blocker was upstream's `RetryPolicy.shouldRetry : any` field; that surface was redesigned upstream as `type ShouldRetry e = RetryAlways | RetryWhen (e -> Bool)` and merged at `anzellai/sky` PR #119 (v0.15.50). The Sky.Core.Task override the WIP branch shipped is no longer needed — upstream now declares the ADT directly. The override **infrastructure** is retained on the new branch as forward defence for any future `any`-in-record-field surface upstream may introduce.
+
+| Sub-step | Status | What it ships |
 |---|---|---|
-| Sub-D step 1 (merge + override loader) | ✅ on sister branch | `f72ba746`, `883b61da`, `c122df25`, `131ecfa3` — merge resolution, TH-embedded override loader, codegen rejection of `any` in record fields, negative regression test. |
-| Sub-D step 3 (Sky.Core.Task ADT override) | ✅ on sister branch | `52c4d56b` — `runtime-rust/sky-stdlib-overrides/Sky/Core/Task.sky` with `type ShouldRetry e = RetryAlways \| RetryWhen (e -> Bool)`. Loaded end-to-end through `cabal install`. |
-| Sub-D step 4 (generic-ADT codegen fixes) | ⏳ spec + plan ready | `c8415315` — 4 cargo error classes (E0428, E0412, E0107, E0599) the override surfaces. Spec at `docs/superpowers/specs/2026-06-01-sub-D-step4-generic-adt-codegen-design.md`; 7-task plan at `docs/superpowers/plans/2026-06-01-sub-D-step4-generic-adt-codegen.md`. |
-| Sub-D steps 6-14 (runtime kernels, AEAD, Bytes, docs) | ⏳ blocked on step 4 | Original plan at `docs/superpowers/plans/2026-05-31-sub-D-v0.15.44-sync-no-any.md` — resumes after step 4 lands. |
+| Sub-D step 1 — override loader + `any`-rejection diagnostic | ✅ shipped & validated on the retired sister branch; carrying forward to the v0.15.51 restart | TH-embedded `runtime-rust/sky-stdlib-overrides/<Module>.sky` overlay, target-gated; `error[Rust]: any-typed record field on --target rust` diagnostic with actionable note pointing at the override mechanism |
+| Sub-D step 4 — generic-ADT codegen fixes (E0428/E0412/E0107/E0599) | ⏳ spec + 7-task plan retained at `docs/superpowers/specs/2026-06-01-sub-D-step4-generic-adt-codegen-design.md` + `docs/superpowers/plans/2026-06-01-sub-D-step4-generic-adt-codegen.md`. Bugs are version-independent — surface on any generic ADT (upstream's `ShouldRetry e` or user-defined). | `REnumDef` gains a gens slot; shared `rustifyTypeVar` capitalisation helper across the enum + struct paths; legacy `pub type X = String` fallback gated on union/struct registry absence; ctor use-site resolves via union registry rather than the legacy alias |
+| Sub-D Tasks 6-14 — runtime kernels + AEAD + Bytes + HTTP types | ⏳ scope re-derives from v0.15.51's new content (see below). Plan needs rewriting against the v0.15.51 surface, not the v0.15.44-targeted version. | New Sub-D plan v2 (TBD): `task_retry_with` runtime, AEAD kernels (aes-gcm / chacha20poly1305 / PBKDF2), `Sky.Core.Bytes` kernel wiring, HTTP types no-op verification |
 
-The sister branch is honestly tagged WIP: 16/18 `examples/rust/*` build
-clean on it; `17-db-todo-cli` and `18-auth-signup` fail at the codegen
-issues sub-D step 4 closes. Once step 4 lands, the original sub-D plan
-resumes through `task_retry_with`, AES-GCM, `Sky.Core.Bytes`, and the
-final headline regression sweep.
+### Lessons retained from the WIP sister branch (now retired)
+
+These knowledge bits cost real iteration to discover; capturing them here so a fresh branch doesn't re-pay the lesson cost:
+
+| Lesson | Concrete artifact |
+|---|---|
+| `cabal install`'s sdist phase silently drops directories not in `extra-source-files`, even when `cabal build` from a working tree was happy. | `sky-compiler.cabal` listing of `runtime-rust/sky-stdlib-overrides/Sky/Core/*.sky` (mirror of the existing `sky-stdlib/...` pattern — same Issue #58 class as the original `runtime-go/rt/jobs/` drop). |
+| TH `qAddDependentFile` doesn't fire for files added under an empty directory after the first TH run — cabal's mtime tracking misses them. | `embedDirRecursiveIfExists` in `src/Sky/Build/EmbedDirTH.hs` + the `re-embed marker:` bump-line convention in `EmbeddedRuntime.hs` to force a re-splice when on-disk content changes. |
+| Sky's `any` type variable is HM-pure at the type-checker level (each occurrence gets a fresh fresh-flex var, see `src/Sky/Type/Instantiate.hs:33-66`). But usage patterns that store heterogeneous values in a single record field rely on `interface{}` runtime polymorphism — codegen targets without that escape hatch must reject. | The `rejectAnyInRecordFields` pass in `Sky.Generate.Rust.Project` runs before `buildProgram`, walks every record alias in the module's lowered AST, emits the diagnostic on offence. |
+| Rust's `SkyTask<E, A> = Pin<Box<dyn Future<Output = SkyResult<E, A>> + Send + 'static>>` is one-shot (not `Clone`). Any retry-loop kernel needs a task **producer** (`() -> Task e a`) not a task. | The v0.15.44 override's `retryWith : RetryPolicy e -> (() -> Task e a) -> Task e a` shape. Upstream sync work needs to confirm whether v0.15.51's `retryWith` is now thunk-shaped or still task-shaped; if still task-shaped, the codegen needs to wrap the Task arg in a thunk at the `retryWith` call site, OR we need to lift the constraint via a `Clone`-bearing SkyTask redesign. |
+| Upstream PRs are outward-facing — opening a follow-up PR to fix comments on a freshly-merged PR is bad collaboration optics. | Branch + diff is staged on `origin` then handed to the user; user opens upstream PR after manual review. (Encoded in the `upstream-pr-autonomy` memory.) |
+
+### Standing Rust codegen gaps (independent of any specific upstream version)
+
+These surface whenever a generic ADT is lowered to Rust; they need fixing regardless of the sub-D arc's progress:
+
+| Bug | Symptom | Plan |
+|---|---|---|
+| `REnumDef` carries no generic-params slot | `pub enum X { ... }` emitted for `type X a = ...` instead of `pub enum X<T1> { ... }` | sub-D step 4 spec/plan (link above) |
+| Lowercase Sky type vars not capitalised in Rust generic positions | `<e>` appears in emitted code where Rust convention is `<E>` | sub-D step 4 |
+| Legacy `pub type X = String` fallback fires alongside the real enum | `E0428: name defined multiple times` for any user-declared generic ADT | sub-D step 4 |
+| Ctor use site resolves through the legacy alias | `String::RetryAlways` instead of `MyADT::RetryAlways` (`E0599`) | sub-D step 4 (likely falls out from the alias gate) |
+
+### New scope from v0.15.45-51 (out of original sub-D plan)
+
+The original sub-D plan targeted v0.15.44. Upstream has since shipped a substantial stdlib expansion. Each entry below is its own sub-project sizing similar to sub-B (Std.Db) or sub-C (Std.Auth) — the v0.15.51 sub-D restart needs to scope them:
+
+| Surface | Adaptation shape | Approximate sizing |
+|---|---|---|
+| **Std.Cache** (LRU + TTL in-memory cache) | New `sky_runtime` module + crate dep | ~200 LOC |
+| **Std.Email** (Resend / SES / SendGrid / SMTP) | New `sky_runtime` module + 4+ crate deps + integration tests | sub-project-sized |
+| **Std.Config** (typed TOML / YAML / JSON decoders) | New `sky_runtime` module + crate deps | ~250 LOC |
+| **Std.Csv** | New `sky_runtime` module + `csv` crate | ~150 LOC |
+| **Std.Compression** | New `sky_runtime` module + gzip/zstd crate deps | ~200 LOC |
+| **Sky.Core.Pure** (v0.15.50 — uniform `() -> Task Error a` mirror) | Pure Sky, likely no Rust runtime work | trivial to verify |
+| **v0.15.48 naming-consistency additive surface** | Per-kernel verification that registry entries match | per-kernel |
+| **v0.15.51 RetryPolicy builders** (`defaultRetryPolicy`, `withMaxAttempts`, `withBaseMs`, `withKind`, `withRetryOn`) | Pure Sky on the ADT-shaped RetryPolicy — should work after sub-D step 4 + `task_retry_with` runtime kernel | trivial after step 4 |
+| **v0.15.47 kernel registry + runtime narrowers** | Likely needs Rust analogues for the new narrowing paths | needs investigation |
+| **WebSocket client + server** (v0.15.46) | New `sky_runtime` modules + websocket crate dep (or `tokio-tungstenite`) | sub-project-sized |
+| **HTTP types** (v0.15.44 typed `HttpResponse` + builders) | Mostly no-op until Sky.Http.Server runtime lands; type-bridge work when it does | sub-D.1 dependency |
+| **Symmetric crypto** (v0.15.44 AES-256-GCM / ChaCha20-Poly1305) | New AEAD kernels in `crypto.rs` + crate deps + PBKDF2 helper | ~250 LOC |
+| **`Sky.Core.Bytes`** (v0.15.44 — `type alias Bytes = String`) | Kernel arms delegating to existing String + Encoding kernels | ~20 LOC |
+| **Task.retryWith runtime** (v0.15.44) | `task_retry_always` + `task_retry_with` runtime; ADT-tag-match on `ShouldRetry e` (no `Any`); thunk-vs-task design decision for the one-shot SkyTask constraint | ~150 LOC + design call |
 
 ### Short-term (orthogonal to sub-D)
 
@@ -685,9 +714,7 @@ final headline regression sweep.
 
 ### Medium-term
 - **Sub-D.1 — Sky.Http.Server on Rust runtime (axum/hyper)** — after the
-  v0.15.44 sync lands. Currently zero `examples/rust/*` import
-  `Sky.Core.Http`/`Sky.Http.Server`, so the v0.15.44 typed-`HttpResponse`
-  addition is no-op for the Rust target until this lands.
+  v0.15.51 sync lands.
 - **Sub-E — Sky.Live** session stores + SSE on Rust runtime (sub-D.1 dependency).
 - **Sub-F — Sky.Tui** terminal backend on Rust runtime.
 - **Enum-argument constructors** for FFI — many crate fns take a crate enum
@@ -721,3 +748,8 @@ final headline regression sweep.
   the source, parses `[package].name` from `Cargo.toml`, and uses the discovered
   name for the sky.toml entry + artifact filenames. Falls back to the URL
   basename heuristic on failure.
+
+### Upstream contributions during this arc
+
+- ✅ **`anzellai/sky` PR #119** (merged at v0.15.50) — `ShouldRetry e` ADT replaces `RetryPolicy.shouldRetry : any`. The Rust-target Sky.Core.Task override that surfaced this is no longer needed; upstream's stdlib ships exactly the ADT shape the override declared. Go-side win: `callShouldRetry` becomes a constructor-tag switch instead of a reflect-backed callable detection; the `Task_retryAlways` kernel registry entry deletes (retryAlways becomes pure Sky).
+- ⏳ **`anzellai/sky` PR #120** (open) — comment trim follow-up to #119; Sky stdlib + Go runtime references stop speculating about non-Go targets, refocused on the v0.15.x type-directed-lowering refactor's "drop `any` wherever a real ADT or parametric type expresses the same intent" framing.
