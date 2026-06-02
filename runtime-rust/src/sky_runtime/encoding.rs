@@ -23,14 +23,19 @@ pub fn base64_decode<E: From<String>>(s: String) -> SkyResult<E, String> {
     }
 }
 
-/// Sky `urlEncode : String -> String` — percent-encodes every non-alphanumeric byte.
+/// Sky `urlEncode : String -> String` — Go url.QueryEscape semantics: space
+/// becomes `+` (not %20), other non-alphanumerics percent-encoded.
 pub fn url_encode(s: String) -> String {
-    utf8_percent_encode(&s, NON_ALPHANUMERIC).to_string()
+    // NON_ALPHANUMERIC encodes space as %20; QueryEscape uses '+'. Encode '+'
+    // itself as %2B first so the swap is unambiguous on decode.
+    utf8_percent_encode(&s, NON_ALPHANUMERIC).to_string().replace("%20", "+")
 }
 
-/// Sky `urlDecode : String -> Result Error String`
+/// Sky `urlDecode : String -> Result Error String` — QueryUnescape: `+` -> space,
+/// then percent-decode (so a literal `%2B` round-trips back to `+`).
 pub fn url_decode<E: From<String>>(s: String) -> SkyResult<E, String> {
-    match percent_decode_str(&s).decode_utf8() {
+    let spaced = s.replace('+', " ");
+    match percent_decode_str(&spaced).decode_utf8() {
         Ok(cow) => SkyResult::Ok(cow.into_owned()),
         Err(e) => SkyResult::Err(format!("urlDecode: {}", e).into()),
     }

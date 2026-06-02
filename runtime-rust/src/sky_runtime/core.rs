@@ -160,7 +160,9 @@ pub fn string_reverse(s: String) -> String { s.chars().rev().collect() }
 pub fn string_to_upper(s: String) -> String { s.to_uppercase() }
 pub fn string_to_lower(s: String) -> String { s.to_lowercase() }
 pub fn string_trim(s: String) -> String { s.trim().to_string() }
-pub fn string_contains(haystack: String, needle: String) -> bool { haystack.contains(&needle) }
+// Sky `contains : String -> String -> Bool  -- contains sub str` (str contains
+// sub). Args arrive as (sub, str), so test the SECOND against the first.
+pub fn string_contains(sub: String, s: String) -> bool { s.contains(&sub) }
 pub fn string_to_int(s: String) -> SkyMaybe<i64> {
     match s.parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
 }
@@ -178,7 +180,8 @@ pub fn list_foldr<T0: Clone, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, lis
     for item in list.into_iter().rev() { acc = f(item.clone(), acc); }
     acc
 }
-pub fn list_range(lo: i64, hi: i64) -> Vec<i64> { (lo..hi).collect() }
+// Sky `List.range` is INCLUSIVE: range 1 3 = [1, 2, 3].
+pub fn list_range(lo: i64, hi: i64) -> Vec<i64> { (lo..=hi).collect() }
 pub fn list_indexed_map<T0, T1>(f: impl Fn(i64, T0) -> T1 + Clone, list: Vec<T0>) -> Vec<T1> {
     list.into_iter().enumerate().map(|(i, x)| f(i as i64, x)).collect()
 }
