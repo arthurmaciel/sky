@@ -602,3 +602,30 @@ Bytes-on-Rust representation (`Sky.Core.Bytes = String`): the pure-Sky signature
 path `base64UrlEncode (hexDecode (hmacSha256 …))` can't round-trip raw HMAC bytes
 through a UTF-8 Rust `String`. Fix is a byte-true Bytes representation or a
 Rust-target Jwt override onto the `jwt.rs` jsonwebtoken kernels.
+
+---
+
+## Bytes-on-Rust — Jwt closed, standard-libs 131/131 on target=rust 🎉
+
+**Status:** `examples/00-standard-libs` on `target=rust` now passes **131 / 131**
+— full runtime parity with the Go backend.
+
+The last 4 failures were all `Sky.Core.Jwt` HS256, blocked by `Bytes = String`:
+the pure-Sky signature path `base64Encode (hexDecode (hmacSha256 …))` couldn't
+round-trip raw HMAC bytes through a UTF-8 Rust `String` (`hexDecode` returned
+`Err` on non-UTF-8).
+
+**Fix — Latin-1 byte convention** in the Encoding kernels (`encoding.rs`): a
+"bytes" String holds one char per byte (U+0000..U+00FF, always valid UTF-8).
+`base64Encode`/`hexEncode` read input char-as-byte (`sky_bytes`);
+`base64Decode`/`hexDecode` emit decoded bytes byte-as-char (`bytes_to_sky`). The
+byte pipeline is lossless and self-consistent, so the JWT signature round-trips
+(and the verify/forged/expired tests, which are self-consistent, pass).
+
+**Why not `Vec<u8>`:** the Encoding fns are typed `String -> String` (the `Bytes`
+alias never appears in their signatures), so the codegen has no type-level signal
+to map a distinct byte type. The Latin-1 convention is the reachable fix.
+
+**Tradeoff:** for non-ASCII *text*, char-as-byte ≠ UTF-8 bytes, so a base64/hex
+string of non-ASCII text compared against a Go-/externally-computed value
+diverges. ASCII is byte-identical to Go; encode/decode round-trip within Rust.

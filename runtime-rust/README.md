@@ -129,17 +129,13 @@ even for crates that use proc macros or derive macros.
 ### `examples/00-standard-libs` on `target=rust`
 
 - `target=go`: 131 / 131 assertions pass (the suite grew past the historical 120).
-- `target=rust`: **compiles end-to-end** (0 cargo errors — sub-A.13 + sub-D
-  closed the empty-literal, generic-ADT, AEAD-crypto, `task_retry_with`, and
-  RetryPolicy-phantom classes) and runs **127 / 131 assertions**. The 4 remaining
-  failures are all `Sky.Core.Jwt` (HS256), blocked by the Bytes-on-Rust
-  representation: the pure-Sky signature path is
-  `base64UrlEncode (hexDecode (hmacSha256 …))`, and raw HMAC bytes can't
-  round-trip through a UTF-8 Rust `String` (`hexDecode` rejects non-UTF-8). This
-  is the `Sky.Core.Bytes` sub-D item — the fix is a byte-true Bytes
-  representation (or a Rust-target Jwt override onto the `jwt.rs` jsonwebtoken
-  kernels). See `docs/runtime-rust/sub-A-stdlib-parity-result.md` for the
-  timeline.
+- `target=rust`: **131 / 131 assertions pass — full parity with Go.** sub-A.13 +
+  sub-D closed every class: empty-literal type resolution, generic-ADT + parametric
+  record codegen, AEAD crypto, `task_retry_with`, the RetryPolicy phantom, stdlib
+  parity (range/contains/url/Decimal), and the Bytes-on-Rust representation (the
+  Latin-1 byte convention in the Encoding kernels — see "Known limitations" — which
+  closed the last 4 `Sky.Core.Jwt` HS256 assertions). See
+  `docs/runtime-rust/sub-A-stdlib-parity-result.md` for the timeline.
 
 These span the common shapes auto-FFI must handle: free functions, static
 methods (`Type::fn`), instance methods (`arg0.method`), `Display`/`FromStr`
@@ -678,7 +674,7 @@ CLAUDE.md non-negotiable §6 (added upstream v0.15.54) codifies disk hygiene as 
 | `sky install` git deps — virtual-workspace roots | When a git source's root `Cargo.toml` is workspace-only (no `[package]` section), the package-name probe falls back to the URL basename and can land on the wrong dep key. | Add the crate with an explicit URL pointing at the right workspace member, or open the repo and verify the directory matches the package name. |
 | `rustdoc` requires nightly | Inspector runs `cargo +nightly rustdoc`. | `rustup install nightly`. |
 | Un-nameable bindings dropped | Functions taking/returning generics, NON-byte slices/arrays, borrows, std types, or unsafe fns are skipped (byte sequences are kept). | Use a wrapper crate exposing owned/primitive signatures, or pick a crate whose API is self-typed. |
-| Bytes-on-Rust (`Sky.Core.Bytes = String`) | Sky models bytes as `String`, but a Rust `String` must be valid UTF-8, so raw bytes (HMAC digests, PBKDF2 keys, `hexDecode` output) can't round-trip losslessly. `Crypto.hexDecode` of non-UTF-8 bytes returns `Err`; `Sky.Core.Jwt` HS256 (which signs via `base64UrlEncode (hexDecode (hmacSha256 …))`) fails for this reason — the 4 residual `examples/00-standard-libs` failures. AEAD keys sidestep this by being base64-encoded (backend-local, opaque). | Pending a byte-true Bytes representation (`Vec<u8>`) on the Rust target, or a Rust-target `Sky.Core.Jwt` override onto the `jwt.rs` jsonwebtoken kernels. |
+| Bytes-on-Rust (`Sky.Core.Bytes = String`) — non-ASCII text base64/hex | Sky models bytes as `String`; a Rust `String` must be valid UTF-8. The Encoding kernels use a **Latin-1 byte convention** (one char per byte) so raw bytes round-trip losslessly — `hexDecode`/`base64Decode` emit byte-as-char, `hexEncode`/`base64Encode` read char-as-byte. This fixes the byte pipeline (incl. `Sky.Core.Jwt` HS256). **Tradeoff:** for NON-ASCII *text*, char-as-byte ≠ UTF-8 bytes, so a base64/hex string of non-ASCII text compared against a Go-/externally-computed value diverges (ASCII is byte-identical; encode/decode still round-trip within Rust). A true `Vec<u8>` Bytes type is unreachable — the Encoding fns are typed `String`, not `Bytes`. | For Go-identical non-ASCII text encoding, pre-`String.toBytes` then encode, or compare decoded values rather than encoded strings. |
 | `Task.retryWith` run-once | The policy's retry loop is not executed on `target=rust` — the task runs exactly once (one-shot `Future` + no reflection over the generated `RetryPolicy` struct). Correct for deterministic tasks; a transient-failure task is not retried. | Faithful retry needs a thunk-shaped `retryWith` or policy-field-passing codegen. |
 
 ---
@@ -697,7 +693,7 @@ The original sub-D arc against v0.15.44 (WIP sister branch `feat/runtime-rust-su
 |---|---|---|
 | Sub-D step 1 — override loader + `any`-rejection diagnostic | ✅ shipped & validated on the retired sister branch; carrying forward to the v0.15.51 restart | TH-embedded `runtime-rust/sky-stdlib-overrides/<Module>.sky` overlay, target-gated; `error[Rust]: any-typed record field on --target rust` diagnostic with actionable note pointing at the override mechanism |
 | Sub-D step 4 — generic-ADT codegen fixes (E0428/E0412/E0107/E0599/E0091) | ✅ **shipped** (`fdb8393d`). `REnumDef` gained a generics slot (computed from `_u_vars`); `collectUndefinedTypes` compares/emits the base type name so `ShouldRetry<e>` no longer triggers a colliding `type … = String` placeholder. Record-alias side: `aliasToRustTypeDef` emits struct generics from the alias `_vars`, `typeToRustString` carries `TAlias` args, `collectTVars`/`hasTypeVars` recurse into them, and the synthesized record constructor declares the vars + returns the generic struct. Type vars kept verbatim (lowercase) — correctness, not the cosmetic `e`→`E` rename. Verified: `examples/rust` 18/18 build (17 & 18 restored); `tests/rust-codegen/generic-adt.sky` builds + runs. |
-| Sub-D Tasks 6-14 — runtime kernels + AEAD + Bytes + HTTP types | 🟡 **mostly shipped**. ✅ AEAD kernels (aes-gcm / chacha20poly1305 / PBKDF2 `*_key_from_password`), ✅ `task_retry_with` (run-once — see task.rs), ✅ `Task.perform`→`task_run` fix, ✅ Decimal.fromMinor + stdlib parity (range/contains/url-encode), ✅ case-scrutinee clone analysis. ⏳ remaining: **`Sky.Core.Bytes`** byte-true representation (blocks the 4 Jwt assertions — raw bytes can't live in a UTF-8 Rust String) and HTTP types verification. |
+| Sub-D Tasks 6-14 — runtime kernels + AEAD + Bytes + HTTP types | ✅ **shipped** (standard-libs 131/131 on target=rust). AEAD kernels (aes-gcm / chacha20poly1305 / PBKDF2), `task_retry_with` (run-once), `Task.perform`→`task_run`, Decimal.fromMinor + stdlib parity (range/contains/url), case-scrutinee clone analysis, and the **Bytes-on-Rust Latin-1 byte convention** (closes Sky.Core.Jwt HS256). ⏳ only HTTP-types verification remains (no-op until Sky.Http.Server lands on Rust — sub-D.1). |
 
 ### Lessons retained from the WIP sister branch (now retired)
 
