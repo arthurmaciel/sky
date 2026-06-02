@@ -50,6 +50,11 @@ pub use jwt::*;
 pub mod decimal;
 pub use decimal::*;
 
+#[cfg(feature = "compression")]
+pub mod compression;
+#[cfg(feature = "compression")]
+pub use compression::*;
+
 pub mod ffi_polyfills;
 pub use ffi_polyfills::*;
 

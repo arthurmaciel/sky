@@ -1,0 +1,27 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Compression as Z
+import Std.Log exposing (println)
+
+
+-- Sub-D (v0.15.47): Std.Compression gzip + zstd over the Bytes convention.
+roundtrip : (String -> Task Error String) -> (String -> Task Error String) -> String -> String
+roundtrip enc dec payload =
+    enc payload
+        |> Task.andThen dec
+        |> Task.run
+        |> Result.withDefault "FAIL"
+
+
+main =
+    let payload = "compress me compress me compress me 12345 12345"
+        gz = roundtrip Z.gzip Z.gunzip payload
+        zs = roundtrip Z.zstdCompress Z.zstdDecompress payload
+        result =
+            if gz == payload && zs == payload then
+                "ok: gzip + zstd round-trip"
+            else
+                "fail: gz=" ++ gz ++ " zs=" ++ zs
+    in println result

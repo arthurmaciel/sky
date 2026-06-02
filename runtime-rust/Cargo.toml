@@ -13,6 +13,8 @@ rsa = { version = "0.9", features = ["sha2"], optional = true }
 aes-gcm = { version = "0.10", optional = true }
 chacha20poly1305 = { version = "0.10", optional = true }
 pbkdf2 = { version = "0.12", optional = true }
+flate2 = { version = "1", optional = true }
+zstd = { version = "0.13", optional = true }
 subtle = "2"
 hmac = "0.12"
 sha1 = "0.10"
@@ -33,7 +35,8 @@ async = ["tokio"]
 json = ["serde_json", "jsonwebtoken"]
 db = ["sqlx", "tokio"]
 crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
-full = ["async", "json", "db", "crypto"]
+compression = ["flate2", "zstd", "tokio"]
+full = ["async", "json", "db", "crypto", "compression"]
 
 [dev-dependencies]
 regex = "1"

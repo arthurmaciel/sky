@@ -24,12 +24,13 @@ use percent_encoding::{utf8_percent_encode, percent_decode_str, NON_ALPHANUMERIC
 // against an externally-/Go-computed value diverges. ASCII is identical to Go.
 
 /// Interpret a (Latin-1) Sky byte-string as raw bytes: one char -> one byte.
-fn sky_bytes(s: &str) -> Vec<u8> {
+/// Shared with other byte-handling kernels (compression, …).
+pub(crate) fn sky_bytes(s: &str) -> Vec<u8> {
     s.chars().map(|c| c as u8).collect()
 }
 
 /// Wrap raw bytes as a (Latin-1) Sky byte-string: one byte -> one char.
-fn bytes_to_sky(bytes: &[u8]) -> String {
+pub(crate) fn bytes_to_sky(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }
 

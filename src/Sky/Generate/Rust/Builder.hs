@@ -3112,6 +3112,8 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
         , ("aes-gcm",          "\"0.10\"")
         , ("chacha20poly1305", "\"0.10\"")
         , ("pbkdf2",           "\"0.12\"")
+        , ("flate2",           "\"1\"")
+        , ("zstd",             "\"0.13\"")
         , ("jsonwebtoken",     "\"9\"")
         , ("bcrypt",           "\"0.17\"")
         ]
