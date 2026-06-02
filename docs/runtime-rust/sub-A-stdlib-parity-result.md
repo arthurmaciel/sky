@@ -578,3 +578,27 @@ like `db_query [] : Vec<String>`; the call-site approach does not.
 `examples/00-standard-libs` on `target=rust` is now blocked by **sub-D** (the
 generic-ADT codegen bugs + missing AEAD/retry kernels, ~46 errors), not by
 empty-literals. The 120/120 Rust gate closes once sub-D lands.
+
+---
+
+## Sub-D — kernels, crypto, retry + stdlib parity (standard-libs links + runs)
+
+**Status:** `examples/00-standard-libs` on `target=rust` now **compiles
+end-to-end** (53 cargo errors → 0) and runs **127 / 131 assertions**. Shipped:
+
+| Area | What |
+|---|---|
+| Generic-ADT codegen (step 4) | `REnumDef` generics slot; parametric record alias (`RetryPolicy e`) struct/ctor/`TAlias` generics; `collectUndefinedTypes` base-name match. Restored `examples/rust` 17 & 18. |
+| AEAD crypto | `crypto_aes_gcm_*`, `crypto_chacha20_*`, `crypto_*_key_from_password` (aes-gcm + chacha20poly1305 + pbkdf2). Keys base64-encoded (backend-local; raw bytes can't live in a Rust String). |
+| `task_retry_with` | Run-once (one-shot Future + no reflection over the policy struct). `emitDefaultCall` drops the policy arg. |
+| `Task.perform` | Was mapped to `task_perform` (`-> SkyTask<E,()>`, drops the value); now `task_run` (`-> SkyResult<E,A>`). |
+| Phantom-type pins | `task_run` `::<SkyError,_>`, `task_fail` `::<_,i64>`, RetryPolicy constructors `::<SkyError>` (monomorphic-context-gated). |
+| Clone analysis | `collectVarLocalsMulti` now counts the `case` SCRUTINEE — a var used in a scrutinee + elsewhere is cloned (was E0382). |
+| Decimal | `fromMinor` arg order (was `RD::new(places, minor)` → panic on scale; now `RD::new(minor, places)`). |
+| Stdlib parity | `List.range` inclusive; `String.contains sub str`; `urlEncode`/`urlDecode` QueryEscape `+`-for-space. |
+
+**Remaining 4 failures — all `Sky.Core.Jwt` HS256.** Blocked by the
+Bytes-on-Rust representation (`Sky.Core.Bytes = String`): the pure-Sky signature
+path `base64UrlEncode (hexDecode (hmacSha256 …))` can't round-trip raw HMAC bytes
+through a UTF-8 Rust `String`. Fix is a byte-true Bytes representation or a
+Rust-target Jwt override onto the `jwt.rs` jsonwebtoken kernels.
