@@ -214,6 +214,19 @@ runtimeOpaqueTypes = Map.fromList
 -- generic parameters. Maps kernel name to the EXACT turbofish suffix to
 -- inject (depends on the kernel's arity — 1 param = ::<SkyError>, 2 params
 -- = ::<SkyError, _>, etc.). `From<String>` for E is provided by `str_err`.
+-- | Sub-D: non-kernel stdlib (VarTopLevel) functions that construct a value
+-- whose only type variable is the error type — always SkyError in Sky (Cardinal
+-- Rule 1) but phantom here (e.g. `RetryPolicy e` / `ShouldRetry e` from a policy
+-- builder never tied to a concrete error). Pin e=SkyError at the call site so it
+-- infers and propagates through builder chains. Keyed on (canonical module, fn).
+topLevelErrorPin :: Map.Map (String, String) String
+topLevelErrorPin = Map.fromList
+    [ (("Sky.Core.Task", "linearBackoff"),       "::<SkyError>")
+    , (("Sky.Core.Task", "exponentialBackoff"),  "::<SkyError>")
+    , (("Sky.Core.Task", "defaultRetryPolicy"),  "::<SkyError>")
+    , (("Sky.Core.Task", "retryAlways"),         "::<SkyError>")
+    ]
+
 kernelsNeedingErrorPin :: Map.Map String String
 kernelsNeedingErrorPin = Map.fromList
     [ -- Task.run / Task.perform — <E, A>; pin E (always SkyError), infer A from
@@ -1530,7 +1543,17 @@ exprToRustInner ctx e = case e of
                 case Map.lookup (modName, name) (ecKernelAliases ctx) of
                     Just (kMod, kFn) -> emitKernel (kernelToRust kMod kFn)
                     Nothing ->
-                        if Set.member (modPrefix, name) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
+                        -- Sub-D: RetryPolicy/ShouldRetry constructors return a
+                        -- type whose only var is the (always-SkyError) error
+                        -- type, which is phantom when the policy isn't tied to a
+                        -- concrete error. Pin it so e infers and propagates
+                        -- through builder chains (E0283 otherwise). ONLY in a
+                        -- monomorphic context — inside a generic fn (e.g.
+                        -- linearBackoff<e>'s body using retryAlways) the var is
+                        -- the fn's own param, which the pin must not override.
+                        let pin = if ecInGenericFn ctx then ""
+                                  else Map.findWithDefault "" (modName, name) topLevelErrorPin
+                        in if Set.member (modPrefix, name) (ecZeroArgDefs ctx) then fnName ++ pin ++ "()" else fnName ++ pin
     Can.VarKernel mod name ->
         let fnName = kernelToRust mod name
             -- sub-A.10 C4 + sub-A.11: per-kernel turbofish (E pinning + arity).
