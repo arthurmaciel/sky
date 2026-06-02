@@ -107,7 +107,12 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                   ,"pub use basics::*;","pub use list::*;"
                   ,"pub use compression::*;","pub use csv::*;"]
         dbUse = if usesDb then ["pub use db::*;", "pub use auth::*;"] else []
-        modCode = unlines (baseMods ++ dbMod ++ baseUse ++ dbUse)
+        -- uuid_kernel only when Sky.Core.Uuid is used — it needs the uuid crate
+        -- with v4+v7; including it unconditionally clashes with projects that
+        -- FFI the uuid crate themselves with different features (e.g. 04-uuid).
+        uuidMod = if RustBuilder.usesUuid usage then ["pub mod uuid_kernel;"] else []
+        uuidUse = if RustBuilder.usesUuid usage then ["pub use uuid_kernel::*;"] else []
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ baseUse ++ dbUse ++ uuidUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode

@@ -23,6 +23,7 @@ md-5 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"], optional = true }
 regex = "1"
 base64 = "0.22"
+uuid = { version = "1", features = ["v4", "v7"] }
 hex = "0.4"
 percent-encoding = "2"
 chrono = "0.4"

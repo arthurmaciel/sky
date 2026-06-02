@@ -1,0 +1,23 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Uuid as Uuid
+import Std.Log exposing (println)
+
+
+-- Sub-D: Sky.Core.Uuid String surface (v4 / v7 / parse) via the uuid crate.
+main =
+    let id4 = Uuid.v4
+        id7 = Uuid.v7
+        result =
+            case Uuid.parse id4 of
+                Just _ ->
+                    case Uuid.parse id7 of
+                        Just _ ->
+                            if String.length id4 == 36 && Uuid.parse "nope" == Nothing then
+                                "ok: uuid v4 + v7 + parse"
+                            else
+                                "fail: shape"
+                        Nothing -> "fail: v7 parse"
+                Nothing -> "fail: v4 parse"
+    in println result

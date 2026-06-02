@@ -43,6 +43,7 @@ data UsedKernels = UsedKernels
     , usesTime :: Bool            -- Time.* imported
     , usesRandom :: Bool          -- Random.* imported
     , usesFile :: Bool            -- File.* imported
+    , usesUuid :: Bool            -- Sky.Core.Uuid.* used → uuid_kernel + uuid crate (v4+v7)
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -55,9 +56,10 @@ instance Semigroup UsedKernels where
         , usesTime = usesTime a || usesTime b
         , usesRandom = usesRandom a || usesRandom b
         , usesFile = usesFile a || usesFile b
+        , usesUuid = usesUuid a || usesUuid b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False
 
 -- | Walk all expressions across all modules to detect kernel usage.
 -- Ensures we only emit the runtime stubs and Cargo deps that are actually needed.
@@ -114,6 +116,8 @@ analyzeKernelUsage = foldMap analyzeMod
               then mempty { usesJson = True } else mempty
             , if "Crypto" `isPrefixOf` modName || "Sky.Core.Crypto" `isPrefixOf` modName
               then mempty { usesCrypto = True } else mempty
+            , if modName == "Uuid" || "Sky.Core.Uuid" `isSuffixOf` modName
+              then mempty { usesUuid = True } else mempty
             , if "Time" `isPrefixOf` modName || "Sky.Core.Time" `isPrefixOf` modName
               then mempty { usesTime = True } <> (if fnName == "sleep" then mempty { usesTaskRun = True } else mempty)
               else mempty
@@ -287,6 +291,7 @@ kernelsZeroArg = Set.fromList
     , "json_dec_bool", "json_dec_null"
     , "dict_empty"
     , "math_pi", "math_e"
+    , "uuid_v4", "uuid_v7"
     ]
 
 -- | Context threaded through expression emission
@@ -2685,6 +2690,13 @@ kernelToRust mod name = case (mod, name) of
     ("Crypto", "constantTimeEqual")            -> "crypto_constant_time_equal"
     ("Sky.Core.Crypto", "constantTimeEqual")   -> "crypto_constant_time_equal"
     -- v0.15.44 symmetric AEAD (sub-D)
+    -- Sky.Core.Uuid (String surface; v0.15.x)
+    ("Uuid", "v4")                             -> "uuid_v4"
+    ("Sky.Core.Uuid", "v4")                    -> "uuid_v4"
+    ("Uuid", "v7")                             -> "uuid_v7"
+    ("Sky.Core.Uuid", "v7")                    -> "uuid_v7"
+    ("Uuid", "parse")                          -> "uuid_parse"
+    ("Sky.Core.Uuid", "parse")                 -> "uuid_parse"
     ("Crypto", "aesGcmEncrypt")                -> "crypto_aes_gcm_encrypt"
     ("Sky.Core.Crypto", "aesGcmEncrypt")       -> "crypto_aes_gcm_encrypt"
     ("Crypto", "aesGcmDecrypt")                -> "crypto_aes_gcm_decrypt"
@@ -3179,6 +3191,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
         ]
     , name `notElem` userDepNames
     ] ++
+    -- uuid is conditional: only when Sky.Core.Uuid is used (uuid_kernel needs
+    -- v4+v7). Skipped if the user declared uuid themselves (e.g. FFI'ing the
+    -- crate with different features) to avoid a duplicate-key / feature clash.
+    [ "uuid = { version = \"1\", features = [\"v4\", \"v7\"] }"
+    | usesUuid uk, "uuid" `notElem` userDepNames ] ++
     [ emitDepLine name spec
     | (name, spec) <- rustDeps
     , not (null name)
