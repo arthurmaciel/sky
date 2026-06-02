@@ -723,26 +723,36 @@ Type vars are kept verbatim (lowercase `e`) — Rust accepts lowercase generic
 params (a style lint, not an error), matching the existing function emission.
 The cosmetic `e`→`E` rename was deliberately *not* done (no correctness gain).
 
-### New scope from v0.15.45-51 (out of original sub-D plan)
+### New scope from v0.15.45-51 — audited 2026-06-02
 
-The original sub-D plan targeted v0.15.44. Upstream has since shipped a substantial stdlib expansion. Each entry below is its own sub-project sizing similar to sub-B (Std.Db) or sub-C (Std.Auth) — the v0.15.51 sub-D restart needs to scope them:
+Upstream shipped a substantial stdlib expansion (each module exists in
+`sky-stdlib/`). **Audit method:** grep each module's `Ffi.kernel "X"` deps,
+cross-reference `kernelToRust` + `runtime-rust`, then build a user on
+`target=rust`. **Key finding:** the codegen already emits a snake_case name for
+any unmapped kernel (`Csv_parse` → `csv_parse`), so Sky→Rust *compiles*; the gap
+is purely the **runtime implementation + Cargo deps** (a clean `E0425: cannot
+find function` at cargo-link until implemented). No codegen changes needed.
 
-| Surface | Adaptation shape | Approximate sizing |
+| Surface | Status on `target=rust` | Shape / sizing |
 |---|---|---|
-| **Std.Cache** (LRU + TTL in-memory cache) | New `sky_runtime` module + crate dep | ~200 LOC |
-| **Std.Email** (Resend / SES / SendGrid / SMTP) | New `sky_runtime` module + 4+ crate deps + integration tests | sub-project-sized |
-| **Std.Config** (typed TOML / YAML / JSON decoders) | New `sky_runtime` module + crate deps | ~250 LOC |
-| **Std.Csv** | New `sky_runtime` module + `csv` crate | ~150 LOC |
-| **Std.Compression** | New `sky_runtime` module + gzip/zstd crate deps | ~200 LOC |
-| **Sky.Core.Pure** (v0.15.50 — uniform `() -> Task Error a` mirror) | Pure Sky, likely no Rust runtime work | trivial to verify |
-| **v0.15.48 naming-consistency additive surface** | Per-kernel verification that registry entries match | per-kernel |
-| **v0.15.51 RetryPolicy builders** (`defaultRetryPolicy`, `withMaxAttempts`, `withBaseMs`, `withKind`, `withRetryOn`) | Pure Sky on the ADT-shaped RetryPolicy — should work after sub-D step 4 + `task_retry_with` runtime kernel | trivial after step 4 |
-| **v0.15.47 kernel registry + runtime narrowers** | Likely needs Rust analogues for the new narrowing paths | needs investigation |
-| **WebSocket client + server** (v0.15.46) | New `sky_runtime` modules + websocket crate dep (or `tokio-tungstenite`) | sub-project-sized |
-| **HTTP types** (v0.15.44 typed `HttpResponse` + builders) | Mostly no-op until Sky.Http.Server runtime lands; type-bridge work when it does | sub-D.1 dependency |
-| **Symmetric crypto** (v0.15.44 AES-256-GCM / ChaCha20-Poly1305) | New AEAD kernels in `crypto.rs` + crate deps + PBKDF2 helper | ~250 LOC |
-| **`Sky.Core.Bytes`** (v0.15.44 — `type alias Bytes = String`) | Kernel arms delegating to existing String + Encoding kernels | ~20 LOC |
-| **Task.retryWith runtime** (v0.15.44) | `task_retry_always` + `task_retry_with` runtime; ADT-tag-match on `ShouldRetry e` (no `Any`); thunk-vs-task design decision for the one-shot SkyTask constraint | ~150 LOC + design call |
+| **Symmetric crypto** (AES-GCM / ChaCha20) | ✅ shipped | `crypto.rs` AEAD kernels + aes-gcm/chacha20poly1305/pbkdf2 |
+| **`Sky.Core.Bytes`** | ✅ shipped | Latin-1 byte convention in the Encoding kernels |
+| **Task.retryWith** | ✅ shipped (run-once) | `task_retry_with` + policy-arg drop |
+| **v0.15.51 RetryPolicy builders** | ✅ shipped | constructor error-pins; exercised by standard-libs |
+| **Sky.Core.Pure** | ⏳ depends on Uuid kernel | uses `Uuid_v4`/`Uuid_v7` — **`uuid_v4`/`uuid_v7` runtime kernels not implemented** (the `uuid` crate is only reachable via auto-FFI today, not the `Sky.Core.Uuid` stdlib path). ~30 LOC (uuid crate). |
+| **Std.Csv** | ⏳ missing runtime | 5 kernels (`csv_parse`/`encode`/`parseWithDelimiter`/…) — verified `E0425`. `csv` crate. ~150 LOC |
+| **Std.Cache** (LRU + TTL) | ⏳ missing runtime | 7 kernels (`cache_new_raw`/`get`/`put`/…). Hand-rolled or `lru` crate. ~200 LOC |
+| **Std.Config** (TOML/YAML/JSON decoders) | ⏳ missing runtime | 16 kernels (decoders + combinators). toml/serde_yaml/serde_json. ~250 LOC. ⚠️ runtime module name `config.rs` clashes with the generated DB config — name it `config_decode.rs` |
+| **Std.Compression** (gzip/zstd) | ⏳ missing runtime | 4 kernels. flate2 + zstd crates. ~200 LOC |
+| **Std.Email** (Resend/SES/SMTP) | ⏳ missing runtime | 1 kernel (`email_send`) but provider-shaped — network + integration tests. sub-project-sized |
+| **WebSocket client + server** (v0.15.46) | ⏳ blocked by Sub-D.1 | 5 `ServerWebSocket_*` kernels — depend on the Sky.Http.Server runtime (not yet on Rust). tokio-tungstenite. |
+| **HTTP types** (typed `HttpResponse`) | ⏳ Sub-D.1 dependency | no-op until Sky.Http.Server runtime lands |
+| **v0.15.47 kernel registry + narrowers / v0.15.48 naming** | ⏳ needs investigation | per-kernel; not surfaced by standard-libs (131/131 already green) |
+
+**Quick wins (independent, no codegen work):** Csv, Compression, Cache, the
+Uuid kernel — each is a self-contained `runtime-rust` module + Cargo dep + a
+small `examples/rust/` demo. Config needs the `config.rs` name-clash dodge.
+Email and WebSocket are larger / dependency-gated.
 
 ### Short-term (orthogonal to sub-D)
 
