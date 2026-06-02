@@ -186,7 +186,7 @@ data RustItem
     | RustTypeAlias String String
 
 data RustTypeDef
-    = REnumDef String [(String, Maybe String)]
+    = REnumDef String String [(String, Maybe String)]  -- name, generics_decl, variants
     | RStructDef String String [(String, String)]  -- name, generics_decl, fields
     | RAliasDef String String
     -- | Bridge for Sky opaque types whose representation lives in `sky_runtime`.
@@ -358,16 +358,22 @@ buildModule ctx mod =
                     [ f | f@(RustFunction _ _ _ _ _) <- items ]
         existingNames = Set.fromList prefixed
         -- Synthesize record alias constructors
-        synCtorItems = concat [synCtor aliasName fields | (aliasName, Can.Alias _ (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)]
-        synCtor aliasName fields =
+        synCtorItems = concat [synCtor aliasName vars fields | (aliasName, Can.Alias vars (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)]
+        synCtor aliasName vars fields =
             let rm = ecRecordMap ctx
                 ctorName = toSnakeCase (modPrefix ++ "_" ++ aliasName)
                 structName = toCamelCase (modPrefix ++ "_" ++ aliasName)
                 sortedFields = sortFieldsByIndex (Map.toList fields)
                 rustFlds = [(n, typeToRustString rm ft) | (n, Can.FieldType _ ft) <- sortedFields]
                 body = structName ++ " { " ++ intercalate ", " (map (\(n, _) -> n ++ ": " ++ n) sortedFields) ++ " }"
+                -- Sub-D step 4: a parametric record alias's constructor must
+                -- declare the type vars (its field params reference them, e.g.
+                -- shouldRetry : ShouldRetry e) and return the generic struct.
+                gens = if null vars then ""
+                       else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug") vars) ++ ">"
+                retTy = structName ++ (if null vars then "" else "<" ++ intercalate ", " vars ++ ">")
             in if Set.member ctorName existingNames then []
-               else [RustFunction ctorName "" (map (\(n, t) -> n ++ ": " ++ t) rustFlds) structName body]
+               else [RustFunction ctorName gens (map (\(n, t) -> n ++ ": " ++ t) rustFlds) retTy body]
         prefixItem (RustFunction n g p r b)
             | n == "sky_main" || n == "main" = RustFunction n g p r b
             | otherwise = RustFunction (toSnakeCase (modPrefix ++ "_" ++ n)) g p r b
@@ -408,6 +414,7 @@ hasTypeVars (Can.TLambda a b) = hasTypeVars a || hasTypeVars b
 hasTypeVars (Can.TType _ _ args) = any hasTypeVars args
 hasTypeVars (Can.TTuple a b rest) = any hasTypeVars (a:b:rest)
 hasTypeVars (Can.TRecord fields _) = any (hasTypeVars . Can._fieldType) (Map.elems fields)
+hasTypeVars (Can.TAlias _ _ pairs _) = any (hasTypeVars . snd) pairs  -- Sub-D step 4
 hasTypeVars _ = False
 
 -- | Sub-A.13: convert a solver-inferred Can.Type into a Rust type string,
@@ -426,6 +433,7 @@ collectTVars (Can.TLambda a b) = collectTVars a ++ collectTVars b
 collectTVars (Can.TType _ _ args) = concatMap collectTVars args
 collectTVars (Can.TTuple a b rest) = concatMap collectTVars (a:b:rest)
 collectTVars (Can.TRecord fields _) = concatMap (collectTVars . Can._fieldType) (Map.elems fields)
+collectTVars (Can.TAlias _ _ pairs _) = concatMap (collectTVars . snd) pairs  -- Sub-D step 4
 collectTVars _ = []
 
 -- | Simple check: does the body match a parameter with list patterns (cons, list)?
@@ -847,8 +855,15 @@ unionsToRustTypes recordMap skyModName modPrefix unions =
     map (\(name, u) -> unionToRustTypeDef recordMap skyModName modPrefix name u) (Map.toList unions)
 
 unionToRustTypeDef :: Map.Map String String -> String -> String -> String -> Can.Union -> RustTypeDef
-unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union _ alts _ _) =
+unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts _ _) =
     let codegenName = toCamelCase (modPrefix ++ "_" ++ typeName)
+        -- Sub-D step 4: a generic ADT (`type Retry e = ...`) lowers to a generic
+        -- enum (`pub enum MainRetry<e> { ... }`). Without this the enum body
+        -- references `e` undeclared (E0107/E0091/E0412). Type vars are kept
+        -- verbatim (lowercase) to match typeToRustString's TVar rendering and
+        -- the generic params already emitted on functions.
+        gens = if null uvars then ""
+               else "<" ++ intercalate ", " uvars ++ ">"
     in case Map.lookup (skyModName, typeName) runtimeOpaqueTypes of
         -- Registry hit: emit a `pub use sky_runtime::X as <codegenName>;` alias.
         -- The runtime newtype IS the canonical representation; the Sky-side
@@ -856,7 +871,7 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union _ alts _ _
         -- phantom-shape that exists only so the Sky type has a slot.
         Just rustPath -> RPubUseAlias codegenName rustPath
         -- No registry entry: emit the regular enum/ADT (one constructor per alt).
-        Nothing       -> REnumDef codegenName (map ctorToRust alts)
+        Nothing       -> REnumDef codegenName gens (map ctorToRust alts)
   where
     ctorToRust (Can.Ctor name _idx _arity argTypes) =
         (name, if null argTypes then Nothing
@@ -870,11 +885,16 @@ sortFieldsByIndex :: [(String, Can.FieldType)] -> [(String, Can.FieldType)]
 sortFieldsByIndex = sortBy (\(_, Can.FieldType i _) (_, Can.FieldType j _) -> compare i j)
 
 aliasToRustTypeDef :: Map.Map String String -> String -> String -> Can.Alias -> [RustTypeDef]
-aliasToRustTypeDef recordMap modPrefix name (Can.Alias _vars ty) = case ty of
-    Can.TRecord fields _ -> 
+aliasToRustTypeDef recordMap modPrefix name (Can.Alias vars ty) = case ty of
+    Can.TRecord fields _ ->
         let sortedFields = sortFieldsByIndex (Map.toList fields)
-        in [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) "" (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString recordMap ft)) sortedFields)]
-    _ -> 
+            -- Sub-D step 4: a parametric record alias (`RetryPolicy e = { ...,
+            -- shouldRetry : ShouldRetry e }`) must emit a generic struct so its
+            -- fields can reference the var. Type vars kept verbatim to match
+            -- typeToRustString's TVar/TAlias-arg rendering.
+            gens = if null vars then "" else "<" ++ intercalate ", " vars ++ ">"
+        in [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) gens (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString recordMap ft)) sortedFields)]
+    _ ->
         [RAliasDef (toCamelCase (modPrefix ++ "_" ++ name)) (typeToRustString recordMap ty)]
 
 typeToRustString :: Map.Map String String -> Can.Type -> String
@@ -930,10 +950,17 @@ typeToRustString recordMap t = case t of
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
         in toCamelCase (modPrefix ++ name) ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
     Can.TLambda a b -> "fn(" ++ typeToRustString recordMap a ++ ") -> " ++ typeToRustString recordMap b
-    Can.TAlias modName name _pairs _inner ->
+    Can.TAlias modName name pairs _inner ->
+        -- Sub-D step 4: carry the alias's type args so a parametric record alias
+        -- (`RetryPolicy e`) renders as SkyCoreTaskRetryPolicy<e>, matching the
+        -- generic struct emitted by aliasToRustTypeDef. Non-generic aliases
+        -- (empty pairs) render bare as before.
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-        in toCamelCase (modPrefix ++ name)
+            base = toCamelCase (modPrefix ++ name)
+            args = map snd pairs
+        in if null args then base
+           else base ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
     _ -> "String"
 
 rustSafeIdent :: String -> String
@@ -2427,8 +2454,8 @@ entryPointSection uk =
         ])
 
 typeDefToString :: RustTypeDef -> String
-typeDefToString (REnumDef name variants) =
-    "#[derive(Clone, Debug, PartialEq)]\npub enum " ++ name ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
+typeDefToString (REnumDef name gens variants) =
+    "#[derive(Clone, Debug, PartialEq)]\npub enum " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
 typeDefToString (RStructDef name gens fields) =
     "#[derive(Clone, Debug, PartialEq)]\npub struct " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
 typeDefToString (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
@@ -2904,15 +2931,19 @@ collectUndefinedTypes b =
             `Set.union` Set.fromList
             [ name | RStructDef name _ _ <- builderTypes b ]
             `Set.union` Set.fromList
-            [ name | REnumDef name _ <- builderTypes b ]
+            [ name | REnumDef name _ _ <- builderTypes b ]
             `Set.union` Set.fromList
             [ name | RAliasDef name _ <- builderTypes b ]
             `Set.union` Set.fromList
             [ name | RPubUseAlias name _ <- builderTypes b ]
             `Set.union` builderFfiOpaques b  -- types defined by Rust FFI bindings
         -- Collect type names from function parameter types (after ": ")
+        -- Sub-D step 4: compare/emit the BASE type name (generic args stripped).
+        -- A generic ADT param like `MainRetry<e>` is "defined" by the bare
+        -- `MainRetry` enum, so it must not be treated as undefined (which would
+        -- emit a colliding `type MainRetry<e> = String;` placeholder — E0428).
         referenced = Set.fromList
-            [ t | RustFunction _ _ params _ _ <- allItems
+            [ takeWhile (/= '<') t | RustFunction _ _ params _ _ <- allItems
                 , p <- params
                 , let (_, ':':ty) = break (== ':') p
                 , let t = dropWhile (== ' ') ty
@@ -2936,7 +2967,7 @@ collectUndefinedTypes b =
 hasErrorType :: RustBuilder -> Bool
 hasErrorType b = any isErrorTypeName (builderTypes b) || any isUserError (builderModules b)
   where
-    isErrorTypeName (REnumDef n _) = n == toCamelCase "Sky_Core_Error_Error"
+    isErrorTypeName (REnumDef n _ _) = n == toCamelCase "Sky_Core_Error_Error"
     isErrorTypeName _ = False
     isUserError m = any isErrorItem (modItems m)
     isErrorItem (RustTypeAlias n _) = n == "Error" || n == "SkyError"

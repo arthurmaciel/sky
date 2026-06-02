@@ -5,7 +5,7 @@
 set -u
 cd "$(dirname "$0")"
 fail=0
-for f in empty-list-head.sky maybe-map-nothing.sky result-err.sky; do
+for f in empty-list-head.sky maybe-map-nothing.sky result-err.sky generic-adt.sky; do
     cp "$f" Main.sky
     rm -rf sky-out .skycache .skydeps
     out=$(../../sky-out/sky build Main.sky 2>&1)

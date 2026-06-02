@@ -1,0 +1,26 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.String as String
+import Std.Log exposing (println)
+
+
+-- Sub-D step 4: a generic ADT must lower to a generic Rust enum
+-- (`pub enum MainRetry<e> { ... }`), with the type var declared, no colliding
+-- `type X = String` placeholder, and ctor use-sites resolving to the enum.
+type Retry e
+    = RetryAlways
+    | RetryWhen (e -> Bool)
+
+
+shouldRetry : Retry e -> e -> Bool
+shouldRetry policy err =
+    case policy of
+        RetryAlways -> True
+        RetryWhen f -> f err
+
+
+main =
+    let cond = RetryWhen (\n -> n > 3)
+        msg = if shouldRetry cond 5 then "ok: generic adt" else "fail"
+    in println msg
