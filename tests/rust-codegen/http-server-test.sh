@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 SKY=../../sky-out/sky
 PORT=8231
 work=$(mktemp -d)
-trap 'pkill -f "$work/sky-out/Rust/target/debug/sky-app" 2>/dev/null; rm -rf "$work"' EXIT
+trap 'pkill -f "sky-out/Rust/target/debug/sky-app" 2>/dev/null; rm -rf "$work"' EXIT
 fail=0
 
 mkdir -p "$work/src" "$work/public"
@@ -61,6 +61,7 @@ if [ ! -x "$work/sky-out/Rust/target/debug/sky-app" ]; then
 fi
 
 ( cd "$work" && setsid ./sky-out/Rust/target/debug/sky-app >/tmp/httpd-test-run.log 2>&1 < /dev/null & )
+srv_pid=$!
 sleep 1.5
 
 check() { # name expected actual
@@ -74,4 +75,9 @@ check "404 unknown"      "404"               "$(curl -s -o /dev/null -w '%{http_
 check "content-type html" "text/html"        "$(curl -s -D - -o /dev/null http://127.0.0.1:$PORT/ | grep -i '^content-type' | tr -d '\r' | sed 's/.*: *//')"
 
 if [ "$fail" -eq 0 ]; then echo "PASS http-server: all routes answered"; else echo "FAIL http-server"; fi
-exit $fail
+# Kill the server explicitly and reap it so the trap's later pkill (and the
+# job-control teardown) can't reflect a signal into this script's exit code.
+kill "$srv_pid" 2>/dev/null
+pkill -f "sky-out/Rust/target/debug/sky-app" 2>/dev/null
+wait "$srv_pid" 2>/dev/null
+exit "$fail"

@@ -285,6 +285,9 @@ pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<Se
                 app = app.route(&r.path, method_router(&r.method, h));
             }
         }
+        // Sky doctrine: a panicking handler returns 500, never crashes the
+        // process (mirrors the Go runtime's per-handler recover()).
+        let app = app.layer(tower_http::catch_panic::CatchPanicLayer::new());
         let addr = format!("0.0.0.0:{}", port);
         let listener = match tokio::net::TcpListener::bind(&addr).await {
             Ok(l) => l,

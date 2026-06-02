@@ -17,7 +17,7 @@ flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 csv = { version = "1", optional = true }
 axum = { version = "0.7", optional = true }
-tower-http = { version = "0.5", features = ["fs"], optional = true }
+tower-http = { version = "0.5", features = ["fs", "catch-panic"], optional = true }
 subtle = "2"
 hmac = "0.12"
 sha1 = "0.10"

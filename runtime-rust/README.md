@@ -137,6 +137,14 @@ even for crates that use proc macros or derive macros.
   closed the last 4 `Sky.Core.Jwt` HS256 assertions). See
   `docs/runtime-rust/sub-A-stdlib-parity-result.md` for the timeline.
 
+### `Sky.Http.Server` on `target=rust` (Sub-D.1)
+
+- `tests/rust-codegen/http-server-test.sh` builds a Sky.Http.Server app on
+  `target=rust`, starts it, and asserts every route over real HTTP: `GET /`,
+  `GET /greet/:name` (path param → JSON), `POST /echo` (request body),
+  static file serving (`/assets/*`), a 404, and the `content-type` header.
+  Serves via the axum/tokio runtime (`server.rs`).
+
 These span the common shapes auto-FFI must handle: free functions, static
 methods (`Type::fn`), instance methods (`arg0.method`), `Display`/`FromStr`
 bridges, `Option`/`Result` returns, byte sequences (`&[u8]`/`[u8; N]` ⇄
@@ -693,7 +701,7 @@ The original sub-D arc against v0.15.44 (WIP sister branch `feat/runtime-rust-su
 |---|---|---|
 | Sub-D step 1 — override loader + `any`-rejection diagnostic | ✅ shipped & validated on the retired sister branch; carrying forward to the v0.15.51 restart | TH-embedded `runtime-rust/sky-stdlib-overrides/<Module>.sky` overlay, target-gated; `error[Rust]: any-typed record field on --target rust` diagnostic with actionable note pointing at the override mechanism |
 | Sub-D step 4 — generic-ADT codegen fixes (E0428/E0412/E0107/E0599/E0091) | ✅ **shipped** (`fdb8393d`). `REnumDef` gained a generics slot (computed from `_u_vars`); `collectUndefinedTypes` compares/emits the base type name so `ShouldRetry<e>` no longer triggers a colliding `type … = String` placeholder. Record-alias side: `aliasToRustTypeDef` emits struct generics from the alias `_vars`, `typeToRustString` carries `TAlias` args, `collectTVars`/`hasTypeVars` recurse into them, and the synthesized record constructor declares the vars + returns the generic struct. Type vars kept verbatim (lowercase) — correctness, not the cosmetic `e`→`E` rename. Verified: `examples/rust` 18/18 build (17 & 18 restored); `tests/rust-codegen/generic-adt.sky` builds + runs. |
-| Sub-D Tasks 6-14 — runtime kernels + AEAD + Bytes + HTTP types | ✅ **shipped** (standard-libs 131/131 on target=rust). AEAD kernels (aes-gcm / chacha20poly1305 / PBKDF2), `task_retry_with` (run-once), `Task.perform`→`task_run`, Decimal.fromMinor + stdlib parity (range/contains/url), case-scrutinee clone analysis, and the **Bytes-on-Rust Latin-1 byte convention** (closes Sky.Core.Jwt HS256). ⏳ only HTTP-types verification remains (no-op until Sky.Http.Server lands on Rust — sub-D.1). |
+| Sub-D Tasks 6-14 — runtime kernels + AEAD + Bytes + HTTP types | ✅ **shipped** (standard-libs 131/131 on target=rust). AEAD kernels (aes-gcm / chacha20poly1305 / PBKDF2), `task_retry_with` (run-once), `Task.perform`→`task_run`, Decimal.fromMinor + stdlib parity (range/contains/url), case-scrutinee clone analysis, and the **Bytes-on-Rust Latin-1 byte convention** (closes Sky.Core.Jwt HS256). HTTP types: the Sky.Http.Server runtime now lands on Rust (sub-D.1 below). |
 
 ### Lessons retained from the WIP sister branch (now retired)
 
@@ -745,8 +753,8 @@ find function` at cargo-link until implemented). No codegen changes needed.
 | **Std.Cache** (LRU + TTL) | ⛔ blocked by the no-`any` principle | `type Cache k v` is polymorphic over the value; `Cache_put : Int -> k -> v -> Task Error ()` stores arbitrary `v` in a global registry → requires `Box<dyn Any>` type erasure, which the Rust backend forbids. Feasible only via per-`(k,v)` monomorphized cache instances (major redesign), not the global-registry shape. |
 | **Std.Config** (TOML/YAML/JSON decoders) | ⏳ missing runtime | 16 kernels (decoders + combinators). toml/serde_yaml/serde_json. ⚠️ name the module `config_decode.rs` (the DB `config.rs` clashes). Polymorphic decoder values may hit the same record/`any` issues as Csv/Cache. |
 | **Std.Email** (Resend/SES/SMTP) | ⏳ missing runtime | 1 kernel (`email_send`) but provider-shaped — network + integration tests. sub-project-sized |
-| **WebSocket client + server** (v0.15.46) | ⏳ blocked by Sub-D.1 | 5 `ServerWebSocket_*` kernels — depend on the Sky.Http.Server runtime (not yet on Rust). tokio-tungstenite. |
-| **HTTP types** (typed `HttpResponse`) | ⏳ Sub-D.1 dependency | no-op until Sky.Http.Server runtime lands |
+| **WebSocket client + server** (v0.15.46) | ⏳ unblocked (Sub-D.1 shipped) | 5 `ServerWebSocket_*` kernels — extend the now-landed Sky.Http.Server axum runtime with `axum::extract::ws` (no tokio-tungstenite needed; axum bundles it). |
+| **HTTP types** (typed `HttpResponse`) | ⏳ unblocked (Sub-D.1 shipped) | the Sky.Http.Server runtime now exists on Rust; typed-response surface can build on `ServerResponse` |
 | **v0.15.47 kernel registry + narrowers / v0.15.48 naming** | ⏳ needs investigation | per-kernel; not surfaced by standard-libs (131/131 already green) |
 
 **Status (2026-06-02):** **Compression, Csv, and Sky.Core.Uuid (String) are
@@ -787,13 +795,20 @@ types**.
   per-element coercion would extend Alt-1 v2 to wider crate surface.
 
 ### Medium-term
-- **Sub-D.1 — Sky.Http.Server on Rust runtime (axum/hyper)** — 🟡 **designed +
-  scoped** (`runtime-rust/superpowers/specs/2026-06-02-sub-D1-http-server-design.md`).
-  ~25 kernels; Request/Response/Route/Cookie reuse the Csv kernel-record-return
-  bridge; handlers are boxed Sky closures wired as axum handlers; `listen` serves
-  via tokio. 7-step plan in the spec. The crux/risk is the closure
-  `Send+Sync+'static` bound for axum (validate at step 1). Unblocks Sub-E + the
-  WebSocket + HTTP-types items.
+- **Sub-D.1 — Sky.Http.Server on Rust runtime (axum/hyper)** — ✅ **shipped**
+  (`0161a5ca` foundation, `67771f8d` serve loop). Request/Response/Route/Cookie
+  reuse the Csv kernel-record-return bridge; handlers are boxed Sky closures
+  (`server_get<E,H>` erases the project error type into a non-generic
+  `ServerRoute`); `server_listen` builds an axum `Router` and serves via tokio.
+  Path params (`RawPathParams`), query (form-decoded), headers, cookies, and
+  body all adapted into `ServerRequest`; static dirs via tower-http `ServeDir`;
+  panic→500 via tower-http `CatchPanicLayer`. Deps (axum 0.7 + tower-http +
+  tokio `net`) and `main` block-on are gated on `usesHttpServer`. The crux risk
+  (closure `Send+Sync+'static` for axum) was validated at step 1.
+  Verified end-to-end (`tests/rust-codegen/http-server-test.sh`): GET +
+  path-param, POST body, static, 404, content-type. Spec:
+  `runtime-rust/superpowers/specs/2026-06-02-sub-D1-http-server-design.md`.
+  Unblocks Sub-E + the WebSocket + HTTP-types items.
 - **Sub-E — Sky.Live** session stores + SSE on Rust runtime (sub-D.1 dependency).
 - **Sub-F — Sky.Tui** terminal backend on Rust runtime.
 - **Enum-argument constructors** for FFI — many crate fns take a crate enum

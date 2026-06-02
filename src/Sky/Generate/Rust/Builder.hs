@@ -3225,7 +3225,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     | usesHttpServer uk
     , (name, spec) <-
         [ ("axum",       "\"0.7\"")
-        , ("tower-http", "{ version = \"0.5\", features = [\"fs\"] }")
+        , ("tower-http", "{ version = \"0.5\", features = [\"fs\", \"catch-panic\"] }")
         ]
     , name `notElem` userDepNames ] ++
     [ emitDepLine name spec
