@@ -129,14 +129,15 @@ even for crates that use proc macros or derive macros.
 ### `examples/00-standard-libs` on `target=rust`
 
 - `target=go`: 120 / 120 assertions pass (the contractual headline gate).
-- `target=rust`: the four empty-literal `E0283` errors are **fixed** by sub-A.13
-  (call-site param-type propagation — see "Remaining work"). The gate does **not**
-  yet reach 120/120 on Rust: the v0.15.45-51 upstream sync added Sky.Core.Task's
-  `ShouldRetry e` generic ADT plus AEAD/`retryWith` kernels, so the build now
-  surfaces **~46 Sub-D errors** (generic-ADT codegen bugs `E0599`/`E0412`/`E0107`/
-  `E0428`/`E0091` + missing crypto/retry kernels `E0425`). These are tracked under
-  the sub-D arc, not sub-A. Once sub-D step 4 + the kernel work land, this gate
-  closes. See `docs/runtime-rust/sub-A-stdlib-parity-result.md` for the timeline.
+- `target=rust`: **31 cargo errors** remaining, ALL from missing runtime kernels —
+  no codegen bugs left. The four empty-literal `E0283` errors are fixed (sub-A.13,
+  call-site param-type propagation) and the generic-ADT codegen class is fixed
+  (sub-D step 4 — `ShouldRetry e` / `RetryPolicy e`). The residual 31 are: 17×
+  `E0425` (missing `crypto_aes_gcm_encrypt`/`_decrypt`, `crypto_aes_key_from_password`,
+  `crypto_chacha20_encrypt`/`_decrypt`, `crypto_chacha_key_from_password`,
+  `task_retry_with`) + 12 `E0308` / 2 `E0282` cascading from those undefined
+  symbols. Implementing the AEAD crypto + `task_retry_with` kernels closes this
+  gate. See `docs/runtime-rust/sub-A-stdlib-parity-result.md` for the timeline.
 
 These span the common shapes auto-FFI must handle: free functions, static
 methods (`Type::fn`), instance methods (`arg0.method`), `Display`/`FromStr`
@@ -691,8 +692,8 @@ The original sub-D arc against v0.15.44 (WIP sister branch `feat/runtime-rust-su
 | Sub-step | Status | What it ships |
 |---|---|---|
 | Sub-D step 1 — override loader + `any`-rejection diagnostic | ✅ shipped & validated on the retired sister branch; carrying forward to the v0.15.51 restart | TH-embedded `runtime-rust/sky-stdlib-overrides/<Module>.sky` overlay, target-gated; `error[Rust]: any-typed record field on --target rust` diagnostic with actionable note pointing at the override mechanism |
-| Sub-D step 4 — generic-ADT codegen fixes (E0428/E0412/E0107/E0599) | ⏳ spec + 7-task plan retained at `runtime-rust/superpowers/specs/2026-06-01-sub-D-step4-generic-adt-codegen-design.md` + `runtime-rust/superpowers/plans/2026-06-01-sub-D-step4-generic-adt-codegen.md`. Bugs are version-independent — surface on any generic ADT (upstream's `ShouldRetry e` or user-defined). | `REnumDef` gains a gens slot; shared `rustifyTypeVar` capitalisation helper across the enum + struct paths; legacy `pub type X = String` fallback gated on union/struct registry absence; ctor use-site resolves via union registry rather than the legacy alias |
-| Sub-D Tasks 6-14 — runtime kernels + AEAD + Bytes + HTTP types | ⏳ scope re-derives from v0.15.51's new content (see below). Plan needs rewriting against the v0.15.51 surface, not the v0.15.44-targeted version. | New Sub-D plan v2 (TBD): `task_retry_with` runtime, AEAD kernels (aes-gcm / chacha20poly1305 / PBKDF2), `Sky.Core.Bytes` kernel wiring, HTTP types no-op verification |
+| Sub-D step 4 — generic-ADT codegen fixes (E0428/E0412/E0107/E0599/E0091) | ✅ **shipped** (`fdb8393d`). `REnumDef` gained a generics slot (computed from `_u_vars`); `collectUndefinedTypes` compares/emits the base type name so `ShouldRetry<e>` no longer triggers a colliding `type … = String` placeholder. Record-alias side: `aliasToRustTypeDef` emits struct generics from the alias `_vars`, `typeToRustString` carries `TAlias` args, `collectTVars`/`hasTypeVars` recurse into them, and the synthesized record constructor declares the vars + returns the generic struct. Type vars kept verbatim (lowercase) — correctness, not the cosmetic `e`→`E` rename. Verified: `examples/rust` 18/18 build (17 & 18 restored); `tests/rust-codegen/generic-adt.sky` builds + runs. |
+| Sub-D Tasks 6-14 — runtime kernels + AEAD + Bytes + HTTP types | ⏳ **next** — the only remaining blocker for the standard-libs Rust gate (31 errors, all `E0425` missing-symbol + cascade). Scope: `task_retry_with` runtime, AEAD kernels (aes-gcm / chacha20poly1305 / PBKDF2 `*_key_from_password`), `Sky.Core.Bytes` kernel wiring, HTTP types verification. |
 
 ### Lessons retained from the WIP sister branch (now retired)
 
@@ -706,16 +707,21 @@ These knowledge bits cost real iteration to discover; capturing them here so a f
 | Rust's `SkyTask<E, A> = Pin<Box<dyn Future<Output = SkyResult<E, A>> + Send + 'static>>` is one-shot (not `Clone`). Any retry-loop kernel needs a task **producer** (`() -> Task e a`) not a task. | The v0.15.44 override's `retryWith : RetryPolicy e -> (() -> Task e a) -> Task e a` shape. Upstream sync work needs to confirm whether v0.15.51's `retryWith` is now thunk-shaped or still task-shaped; if still task-shaped, the codegen needs to wrap the Task arg in a thunk at the `retryWith` call site, OR we need to lift the constraint via a `Clone`-bearing SkyTask redesign. |
 | Upstream PRs are outward-facing — opening a follow-up PR to fix comments on a freshly-merged PR is bad collaboration optics. | Branch + diff is staged on `origin` then handed to the user; user opens upstream PR after manual review. (Encoded in the `upstream-pr-autonomy` memory.) |
 
-### Standing Rust codegen gaps (independent of any specific upstream version)
+### Standing Rust codegen gaps — ✅ closed by sub-D step 4 (`fdb8393d`)
 
-These surface whenever a generic ADT is lowered to Rust; they need fixing regardless of the sub-D arc's progress:
+The generic-ADT lowering bugs below are fixed. Kept here for grep:
 
-| Bug | Symptom | Plan |
+| Bug (now fixed) | Symptom | Fix |
 |---|---|---|
-| `REnumDef` carries no generic-params slot | `pub enum X { ... }` emitted for `type X a = ...` instead of `pub enum X<T1> { ... }` | sub-D step 4 spec/plan (link above) |
-| Lowercase Sky type vars not capitalised in Rust generic positions | `<e>` appears in emitted code where Rust convention is `<E>` | sub-D step 4 |
-| Legacy `pub type X = String` fallback fires alongside the real enum | `E0428: name defined multiple times` for any user-declared generic ADT | sub-D step 4 |
-| Ctor use site resolves through the legacy alias | `String::RetryAlways` instead of `MyADT::RetryAlways` (`E0599`) | sub-D step 4 (likely falls out from the alias gate) |
+| ~~`REnumDef` carries no generic-params slot~~ | `pub enum X { ... }` for `type X a = ...` | generics slot from `_u_vars` → `pub enum X<a> { ... }` |
+| ~~Type var undeclared in the enum body~~ | `cannot find type e` (E0412/E0091) | the `<a>` declaration now scopes the body var |
+| ~~Legacy `pub type X = String` fires alongside the enum~~ | `E0428: name defined multiple times` | `collectUndefinedTypes` matches on the base name, so `X<a>` isn't seen as undefined |
+| ~~Ctor use-site resolves through the legacy alias~~ | `String::RetryAlways` (E0599) | falls out from removing the colliding alias |
+| ~~Parametric record alias ignores its type vars~~ | `RetryPolicy e` struct/ctor/fns missing `<e>` | `aliasToRustTypeDef` + `synCtor` + `TAlias` in `typeToRustString`/`collectTVars`/`hasTypeVars` |
+
+Type vars are kept verbatim (lowercase `e`) — Rust accepts lowercase generic
+params (a style lint, not an error), matching the existing function emission.
+The cosmetic `e`→`E` rename was deliberately *not* done (no correctness gain).
 
 ### New scope from v0.15.45-51 (out of original sub-D plan)
 
