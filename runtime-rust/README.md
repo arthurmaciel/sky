@@ -740,22 +740,23 @@ find function` at cargo-link until implemented). No codegen changes needed.
 | **Task.retryWith** | ✅ shipped (run-once) | `task_retry_with` + policy-arg drop |
 | **v0.15.51 RetryPolicy builders** | ✅ shipped | constructor error-pins; exercised by standard-libs |
 | **Std.Compression** (gzip/zstd) | ✅ **shipped** | `compression.rs`, flate2 + zstd, over the bytes convention |
-| **Std.Csv** | ⏳ needs kernel-record-return bridge | `parse : String -> Result Error Csv` returns the `Csv` **record** — but no kernel returns a typed Sky record today (Auth.register→Int, Db.query→HashMap); the runtime can't name the generated `StdCsvCsv`. Needs a codegen wrapper: runtime returns the fields (tuple), call site constructs the record. `csv` crate. |
+| **Std.Csv** | ✅ **shipped** | `csv.rs` + the **kernel-record-return bridge**: the `Csv` record maps to a runtime `CsvDoc` via runtimeOpaqueTypes (`StdCsvCsv` is a `pub use` alias), so kernels return/take it directly. Also fixed a clone-prelude bug for case-pattern vars. `csv` crate. |
+| **Sky.Core.Uuid** (String surface) | ✅ **shipped** | `uuid_kernel.rs` (v4/v7/parse), conditionally included (usesUuid) so it doesn't clash with FFI-uuid projects. `Sky.Core.Pure`'s Task-typed `uuidV*Kernel` remains unsupported (dual-typed kernel). |
 | **Std.Cache** (LRU + TTL) | ⛔ blocked by the no-`any` principle | `type Cache k v` is polymorphic over the value; `Cache_put : Int -> k -> v -> Task Error ()` stores arbitrary `v` in a global registry → requires `Box<dyn Any>` type erasure, which the Rust backend forbids. Feasible only via per-`(k,v)` monomorphized cache instances (major redesign), not the global-registry shape. |
-| **Sky.Core.Uuid / Pure** | ⏳ dual-typed kernel | `Uuid_v4` is used at TWO Rust types — `Sky.Core.Uuid.v4 : String` and `Sky.Core.Pure.uuidV4Kernel : Task Error String` — which can't be one runtime fn. The `uuid` crate already works via auto-FFI (`examples/rust/04-uuid`), so the stdlib path is low-value. Needs a per-call-site shape decision or a Task-only canonicalisation. |
 | **Std.Config** (TOML/YAML/JSON decoders) | ⏳ missing runtime | 16 kernels (decoders + combinators). toml/serde_yaml/serde_json. ⚠️ name the module `config_decode.rs` (the DB `config.rs` clashes). Polymorphic decoder values may hit the same record/`any` issues as Csv/Cache. |
 | **Std.Email** (Resend/SES/SMTP) | ⏳ missing runtime | 1 kernel (`email_send`) but provider-shaped — network + integration tests. sub-project-sized |
 | **WebSocket client + server** (v0.15.46) | ⏳ blocked by Sub-D.1 | 5 `ServerWebSocket_*` kernels — depend on the Sky.Http.Server runtime (not yet on Rust). tokio-tungstenite. |
 | **HTTP types** (typed `HttpResponse`) | ⏳ Sub-D.1 dependency | no-op until Sky.Http.Server runtime lands |
 | **v0.15.47 kernel registry + narrowers / v0.15.48 naming** | ⏳ needs investigation | per-kernel; not surfaced by standard-libs (131/131 already green) |
 
-**Audit verdict (2026-06-02):** of the candidate "quick wins", only
-**Compression** was clean (✅ shipped). **Cache** is blocked by the no-`any`
-principle (polymorphic value storage). **Csv** needs a kernel-record-return
-bridge (a small reusable codegen feature; also helps Config). **Uuid** is
-dual-typed and already covered via auto-FFI. So the genuine remaining work is
-the **record-return bridge** (unlocks Csv + Config-ish), then the larger
-modules (Email) and the Sub-D.1-gated ones (WebSocket, HTTP types).
+**Status (2026-06-02):** **Compression, Csv, and Sky.Core.Uuid (String) are
+shipped.** The Csv work added a reusable **kernel-record-return bridge**
+(runtimeOpaqueTypes mapping for record aliases) that also unblocks future
+record-returning kernels (e.g. parts of Config). **Cache** is blocked by the
+no-`any` principle (polymorphic value storage). Remaining: **Std.Config**
+(decoders; reuse the record bridge + dodge the `config.rs` name clash),
+**Std.Email** (provider/network), and the Sub-D.1-gated **WebSocket** + **HTTP
+types**.
 
 ### Short-term (orthogonal to sub-D)
 
