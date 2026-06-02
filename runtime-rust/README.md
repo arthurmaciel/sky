@@ -787,8 +787,13 @@ types**.
   per-element coercion would extend Alt-1 v2 to wider crate surface.
 
 ### Medium-term
-- **Sub-D.1 — Sky.Http.Server on Rust runtime (axum/hyper)** — after the
-  v0.15.51 sync lands.
+- **Sub-D.1 — Sky.Http.Server on Rust runtime (axum/hyper)** — 🟡 **designed +
+  scoped** (`runtime-rust/superpowers/specs/2026-06-02-sub-D1-http-server-design.md`).
+  ~25 kernels; Request/Response/Route/Cookie reuse the Csv kernel-record-return
+  bridge; handlers are boxed Sky closures wired as axum handlers; `listen` serves
+  via tokio. 7-step plan in the spec. The crux/risk is the closure
+  `Send+Sync+'static` bound for axum (validate at step 1). Unblocks Sub-E + the
+  WebSocket + HTTP-types items.
 - **Sub-E — Sky.Live** session stores + SSE on Rust runtime (sub-D.1 dependency).
 - **Sub-F — Sky.Tui** terminal backend on Rust runtime.
 - **Enum-argument constructors** for FFI — many crate fns take a crate enum
