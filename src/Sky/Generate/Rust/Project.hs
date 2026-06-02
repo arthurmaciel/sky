@@ -112,7 +112,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- FFI the uuid crate themselves with different features (e.g. 04-uuid).
         uuidMod = if RustBuilder.usesUuid usage then ["pub mod uuid_kernel;"] else []
         uuidUse = if RustBuilder.usesUuid usage then ["pub use uuid_kernel::*;"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ baseUse ++ dbUse ++ uuidUse)
+        -- Sub-D.1: Sky.Http.Server only when used (pulls axum at step 4).
+        srvMod = if RustBuilder.usesHttpServer usage then ["pub mod server;"] else []
+        srvUse = if RustBuilder.usesHttpServer usage then ["pub use server::*;"] else []
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode

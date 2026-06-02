@@ -39,7 +39,8 @@ db = ["sqlx", "tokio"]
 crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
-full = ["async", "json", "db", "crypto", "compression", "csv_kernel"]
+server = ["tokio"]
+full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "server"]
 
 [dev-dependencies]
 regex = "1"

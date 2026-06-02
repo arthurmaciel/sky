@@ -44,6 +44,7 @@ data UsedKernels = UsedKernels
     , usesRandom :: Bool          -- Random.* imported
     , usesFile :: Bool            -- File.* imported
     , usesUuid :: Bool            -- Sky.Core.Uuid.* used → uuid_kernel + uuid crate (v4+v7)
+    , usesHttpServer :: Bool      -- Sky.Http.Server.* used → server module + axum
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -57,9 +58,10 @@ instance Semigroup UsedKernels where
         , usesRandom = usesRandom a || usesRandom b
         , usesFile = usesFile a || usesFile b
         , usesUuid = usesUuid a || usesUuid b
+        , usesHttpServer = usesHttpServer a || usesHttpServer b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False False
 
 -- | Walk all expressions across all modules to detect kernel usage.
 -- Ensures we only emit the runtime stubs and Cargo deps that are actually needed.
@@ -118,6 +120,8 @@ analyzeKernelUsage = foldMap analyzeMod
               then mempty { usesCrypto = True } else mempty
             , if modName == "Uuid" || "Sky.Core.Uuid" `isSuffixOf` modName
               then mempty { usesUuid = True } else mempty
+            , if modName == "Server" || "Sky.Http.Server" `isSuffixOf` modName
+              then mempty { usesHttpServer = True, usesTaskRun = True } else mempty
             , if "Time" `isPrefixOf` modName || "Sky.Core.Time" `isPrefixOf` modName
               then mempty { usesTime = True } <> (if fnName == "sleep" then mempty { usesTaskRun = True } else mempty)
               else mempty
@@ -216,6 +220,14 @@ runtimeOpaqueTypes = Map.fromList
     -- can name a generated per-project struct. Field access + the synthesized
     -- record constructor resolve onto CsvDoc's pub fields.
     , (("Std.Csv", "Csv"), "sky_runtime::CsvDoc")
+    -- Sub-D.1: Sky.Http.Server records (Request/Response) + opaque ADTs
+    -- (Route/Cookie) map to runtime structs so the server kernels return/take
+    -- them directly. The handler closure is erased into a non-generic
+    -- ServerRoute (see server.rs), so no type-arg threading is needed.
+    , (("Sky.Http.Server", "Request"), "sky_runtime::ServerRequest")
+    , (("Sky.Http.Server", "Response"), "sky_runtime::ServerResponse")
+    , (("Sky.Http.Server", "Route"), "sky_runtime::ServerRoute")
+    , (("Sky.Http.Server", "Cookie"), "sky_runtime::ServerCookie")
     ]
 
 -- | Runtime kernels whose Rust signatures are generic and need a turbofish
@@ -250,6 +262,14 @@ kernelsNeedingErrorPin = Map.fromList
     -- Csv parse — single E parameter (returns SkyResult<E, CsvDoc>)
     , ("csv_parse",                "::<SkyError>")
     , ("csv_parse_with_delimiter", "::<SkyError>")
+    -- Sub-D.1: Http server route ctors — <E, H>; pin E (the handler's phantom
+    -- error type), leave H inferred. server_listen — <E> for its Task<()>.
+    , ("server_get",               "::<SkyError, _>")
+    , ("server_post",              "::<SkyError, _>")
+    , ("server_put",               "::<SkyError, _>")
+    , ("server_delete",            "::<SkyError, _>")
+    , ("server_any",               "::<SkyError, _>")
+    , ("server_listen",            "::<SkyError>")
     -- AEAD encrypt/decrypt — single E parameter (sub-D)
     , ("crypto_aes_gcm_encrypt",   "::<SkyError>")
     , ("crypto_aes_gcm_decrypt",   "::<SkyError>")
