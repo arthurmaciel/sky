@@ -55,6 +55,11 @@ pub mod compression;
 #[cfg(feature = "compression")]
 pub use compression::*;
 
+#[cfg(feature = "csv")]
+pub mod csv;
+#[cfg(feature = "csv")]
+pub use csv::*;
+
 pub mod ffi_polyfills;
 pub use ffi_polyfills::*;
 

@@ -207,6 +207,11 @@ runtimeOpaqueTypes :: Map.Map (String, String) String
 runtimeOpaqueTypes = Map.fromList
     [ (("Std.Decimal", "Decimal"), "sky_runtime::Decimal")
     , (("Sky.Core.Json.Encode", "Value"), "sky_runtime::JsonVal")
+    -- Sub-D: Std.Csv.Csv record maps to the runtime CsvDoc struct (matching
+    -- field names/types) so the Csv kernels return/take it directly — no kernel
+    -- can name a generated per-project struct. Field access + the synthesized
+    -- record constructor resolve onto CsvDoc's pub fields.
+    , (("Std.Csv", "Csv"), "sky_runtime::CsvDoc")
     ]
 
 -- | Runtime kernels whose Rust signatures are generic and need a turbofish
@@ -238,6 +243,9 @@ kernelsNeedingErrorPin = Map.fromList
     -- `Ok _`) `a` is unconstrained -> E0283; default it to i64. A determining
     -- context that needs a different `a` surfaces a loud E0308 (annotate then).
     , ("task_fail",                "::<_, i64>")
+    -- Csv parse — single E parameter (returns SkyResult<E, CsvDoc>)
+    , ("csv_parse",                "::<SkyError>")
+    , ("csv_parse_with_delimiter", "::<SkyError>")
     -- AEAD encrypt/decrypt — single E parameter (sub-D)
     , ("crypto_aes_gcm_encrypt",   "::<SkyError>")
     , ("crypto_aes_gcm_decrypt",   "::<SkyError>")
@@ -904,15 +912,21 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
         (name, if null argTypes then Nothing
                else Just (intercalate ", " (map (typeToRustString recordMap) argTypes)))
 
-aliasesToRustTypes :: Map.Map String String -> String -> Map.Map String Can.Alias -> [RustTypeDef]
-aliasesToRustTypes recordMap modPrefix aliases = concatMap (\(name, alias) -> aliasToRustTypeDef recordMap modPrefix name alias) (Map.toList aliases)
+aliasesToRustTypes :: Map.Map String String -> String -> String -> Map.Map String Can.Alias -> [RustTypeDef]
+aliasesToRustTypes recordMap skyModName modPrefix aliases = concatMap (\(name, alias) -> aliasToRustTypeDef recordMap skyModName modPrefix name alias) (Map.toList aliases)
 
 -- | Sort record fields by their declaration index (_fieldIndex)
 sortFieldsByIndex :: [(String, Can.FieldType)] -> [(String, Can.FieldType)]
 sortFieldsByIndex = sortBy (\(_, Can.FieldType i _) (_, Can.FieldType j _) -> compare i j)
 
-aliasToRustTypeDef :: Map.Map String String -> String -> String -> Can.Alias -> [RustTypeDef]
-aliasToRustTypeDef recordMap modPrefix name (Can.Alias vars ty) = case ty of
+aliasToRustTypeDef :: Map.Map String String -> String -> String -> String -> Can.Alias -> [RustTypeDef]
+-- Sub-D: a record alias registered in runtimeOpaqueTypes (e.g. Std.Csv.Csv)
+-- emits a `pub use <runtime type> as <codegenName>;` alias instead of a fresh
+-- struct, so the runtime kernels can return/take the record by its real type.
+aliasToRustTypeDef _recordMap skyModName modPrefix name (Can.Alias _ (Can.TRecord _ _))
+    | Just rustPath <- Map.lookup (skyModName, name) runtimeOpaqueTypes =
+        [RPubUseAlias (toCamelCase (modPrefix ++ "_" ++ name)) rustPath]
+aliasToRustTypeDef recordMap _skyModName modPrefix name (Can.Alias vars ty) = case ty of
     Can.TRecord fields _ ->
         let sortedFields = sortFieldsByIndex (Map.toList fields)
             -- Sub-D step 4: a parametric record alias (`RetryPolicy e = { ...,
@@ -1201,6 +1215,48 @@ collectVarLocalsMulti = go Set.empty
         Can.Int _ -> Map.empty
         Can.Float _ -> Map.empty
         Can.Unit -> Map.empty
+
+-- | Like collectVarLocalsMulti but counts ONLY variables that are FREE in the
+-- expression — every binder (case patterns, let names, lambda params, destructs)
+-- is added to `bound`, so inner-bound vars are excluded. Used by the clone
+-- PRELUDE in defToRustString, which must clone only outer-captured vars; a
+-- case-pattern var like `Ok parsed -> …parsed…parsed…` is bound inside the body,
+-- so it must NOT get a `let parsed = parsed.clone();` prelude (it isn't in scope
+-- there — E0425). Use-site cloning of such vars is handled separately via
+-- ecCloneVars (which intentionally still counts them).
+collectFreeVarLocalsMulti :: Can.Expr -> Map.Map String Int
+collectFreeVarLocalsMulti = go Set.empty
+  where
+    go bound (Ann.At _ expr) = case expr of
+        Can.VarLocal n | n `Set.notMember` bound -> Map.singleton n 1
+        Can.VarLocal _ -> Map.empty
+        Can.Call fn args -> Map.unionsWith (+) (go bound fn : map (go bound) args)
+        Can.Lambda params body ->
+            let bound' = foldl (\s p -> foldr Set.insert s (patBindingVars p)) bound params
+            in go bound' body
+        Can.Let (Can.Def (Ann.At _ n) _ defBody) body ->
+            Map.unionWith (+) (go bound defBody) (go (Set.insert n bound) body)
+        Can.LetRec defs body ->
+            let names = [ n | Can.Def (Ann.At _ n) _ _ <- defs ]
+                bound' = foldr Set.insert bound names
+                goDefs = foldl (\a (Can.Def _ _ d) -> Map.unionWith (+) a (go bound' d)) Map.empty defs
+            in Map.unionWith (+) (go bound' body) goDefs
+        Can.LetDestruct pat e0 body ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Map.unionWith (+) (go bound e0) (go bound' body)
+        Can.Case scrut branches -> foldl (\a (Can.CaseBranch pat b) ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Map.unionWith (+) a (go bound' b)) (go bound scrut) branches
+        Can.If branches elseBranch ->
+            foldl (\a (c, t) -> Map.unionWith (+) a (Map.unionWith (+) (go bound c) (go bound t))) (go bound elseBranch) branches
+        Can.Binop _ _ _ _ a b -> Map.unionWith (+) (go bound a) (go bound b)
+        Can.Access r _ -> go bound r
+        Can.Update _ r updates -> Map.unionWith (+) (go bound r) (foldl (\a (_, Can.FieldUpdate _ e) -> Map.unionWith (+) a (go bound e)) Map.empty (Map.toList updates))
+        Can.Record fields -> foldl (\a (_, v) -> Map.unionWith (+) a (go bound v)) Map.empty (Map.toList fields)
+        Can.List es -> foldl (\a e -> Map.unionWith (+) a (go bound e)) Map.empty es
+        Can.Tuple a b rest -> foldl (\acc e -> Map.unionWith (+) acc (go bound e)) Map.empty (a:b:rest)
+        Can.Negate e -> go bound e
+        _ -> Map.empty
 
 -- | Walk an expression and collect VarLocal names that refer to variables
 -- from ENCLOSING scopes (not bound within the expression itself).
@@ -2032,7 +2088,10 @@ defToRustString :: EmitCtx -> Can.Def -> String
 -- Zero-arg Def: inject .clone() for captured locals that are used ≥ 2 times,
 -- so multiple uses of the same variable (f(x); g(x) pattern) compile.
 defToRustString ctx (Can.Def (Ann.At _ name) [] body) =
-    let counts = collectVarLocalsMulti body
+    -- Only outer-captured multi-use vars get a clone prelude — collectFree…
+    -- excludes vars bound inside `body` (e.g. case-pattern vars), which aren't
+    -- in scope at the prelude. Their use-site clones come from ecCloneVars.
+    let counts = collectFreeVarLocalsMulti body
         multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
         clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") multi
     in case body of
@@ -2184,7 +2243,7 @@ buildProgram mods solvedTypes regionTypes kernelAliases =
             let skyModName = ModuleName._name (Can._name m)         -- "Std.Decimal" — un-mangled, for runtimeOpaqueTypes lookup
                 prefix     = moduleNameToRust (Can._name m)          -- "Std_Decimal" — mangled, for codegen names
             in unionsToRustTypes recordMap skyModName prefix (Can._unions m)
-            ++ aliasesToRustTypes recordMap prefix (Can._aliases m)) mods
+            ++ aliasesToRustTypes recordMap skyModName prefix (Can._aliases m)) mods
     in RustBuilder
         { builderModules = map (buildModule ctx) mods
         , builderTypes = existingTypes ++ anonDefs
@@ -3114,6 +3173,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
         , ("pbkdf2",           "\"0.12\"")
         , ("flate2",           "\"1\"")
         , ("zstd",             "\"0.13\"")
+        , ("csv",              "\"1\"")
         , ("jsonwebtoken",     "\"9\"")
         , ("bcrypt",           "\"0.17\"")
         ]

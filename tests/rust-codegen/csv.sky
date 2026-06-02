@@ -1,0 +1,25 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.List as List
+import Std.Csv as Csv
+import Std.Log exposing (println)
+
+
+-- Sub-D (v0.15.47): Std.Csv via the kernel-record-return bridge. parse returns
+-- the Csv record (mapped to runtime CsvDoc), field access + encode round-trip.
+main =
+    let result =
+            case Csv.parse "name,age\nAda,36\nGrace,40" of
+                Ok parsed ->
+                    let cols = List.length parsed.header
+                        nrows = List.length parsed.rows
+                        re = Csv.encode parsed
+                        reLen = String.length re
+                    in
+                    if cols == 2 && nrows == 2 && reLen > 0 then
+                        "ok: csv parse + field + encode"
+                    else
+                        "fail: cols=" ++ String.fromInt cols ++ " rows=" ++ String.fromInt nrows
+                Err _ -> "err: parse failed"
+    in println result
