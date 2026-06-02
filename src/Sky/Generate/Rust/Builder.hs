@@ -1,6 +1,6 @@
 module Sky.Generate.Rust.Builder where
 
-import Data.List (isSuffixOf, isPrefixOf, stripPrefix, sortBy, nub)
+import Data.List (isSuffixOf, isPrefixOf, isInfixOf, stripPrefix, sortBy, nub)
 import Data.Maybe (fromMaybe)
 import qualified Sky.Sky.Toml as Toml (RustDepSpec(..))
 import qualified Data.Map.Strict as Map
@@ -8,7 +8,7 @@ import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Reporting.Annotation as Ann
-import Data.Char (toLower, toUpper, isUpper)
+import Data.Char (toLower, toUpper, isUpper, isDigit, isLower)
 import Numeric (showHex)
 
 -- | Convert Sky module-prefixed names to Rust conventions:
@@ -1267,22 +1267,144 @@ exprToRustString ctx (Ann.At region expr) =
         ctx'     = ctx { ecExpectedType = expected }
     in exprToRustInner ctx' expr
 
--- | Sub-A.13: emit an expression with an explicitly forced expected type,
--- bypassing the per-region lookup in exprToRustString. Used to push a
--- constructor's declared field type into an empty-collection argument so the
--- arg pins the right element type. Only the empty-literal emit sites read
--- ecExpectedType, so forcing it on any other shape is a no-op.
-exprToRustStringForced :: EmitCtx -> Can.Type -> Can.Expr -> String
-exprToRustStringForced ctx ty (Ann.At _ e) =
-    exprToRustInner (ctx { ecExpectedType = Just ty }) e
+-- | Sub-A.13: an empty-collection literal whose element type Rust cannot infer
+-- from a bare emission. These are the args resolved by call-site param-type
+-- propagation in emitDefaultCall.
+data EmptyKind = EKList | EKNothing
 
--- | Sub-A.13: does an argument expression benefit from ctor-field-type
--- propagation? Empty list / Nothing are the empty-collection literals whose
--- element type Rust can't infer from a bare emission.
+emptyArgKind :: Can.Expr -> Maybe EmptyKind
+emptyArgKind (Ann.At _ (Can.List [])) = Just EKList
+emptyArgKind (Ann.At _ (Can.VarCtor _ _ "Maybe" "Nothing" _)) = Just EKNothing
+emptyArgKind _ = Nothing
+
 isEmptyishArg :: Can.Expr -> Bool
-isEmptyishArg (Ann.At _ (Can.List [])) = True
-isEmptyishArg (Ann.At _ (Can.VarCtor _ _ "Maybe" "Nothing" _)) = True
-isEmptyishArg _ = False
+isEmptyishArg e = case emptyArgKind e of
+    Just _  -> True
+    Nothing -> False
+
+-- | Where a callee's parameter-type strings came from. SrcKnownSig means
+-- knownDefSig — a "T0" param there reliably indicates a GENERIC Rust signature,
+-- so an unpinned empty arg must be defaulted (Rust can't infer). SrcInferred
+-- (solved types / ctor fields) may be Sky-polymorphic even though the generated
+-- Rust signature is concrete (e.g. Std.Db.query : List any -> ... compiles to a
+-- Vec<String> param), so an unpinned empty arg stays bare and lets Rust infer.
+data ParamSrc = SrcKnownSig | SrcInferred deriving (Eq)
+
+-- | Sub-A.13: the Rust parameter-type strings for a call's callee, plus their
+-- source. Nothing when the callee is unknown — the caller emits empty args bare.
+calleeParamStrings :: EmitCtx -> Can.Expr -> Int -> Maybe (ParamSrc, [String])
+calleeParamStrings ctx fn arity = case fn of
+    Ann.At _ (Can.VarCtor _ _ _ ctorName _) ->
+        case Map.lookup ctorName (ecCtorFieldTypes ctx) of
+            Just tys -> Just (SrcInferred, map (typeToRustString (ecRecordMap ctx)) tys)
+            Nothing  -> Nothing
+    Ann.At _ (Can.VarKernel modName name) ->
+        (\(ps, _) -> (SrcKnownSig, ps)) <$> knownDefSig (kernelSigPrefix modName) name arity
+    Ann.At _ (Can.VarTopLevel modName name) ->
+        -- Stdlib source modules (Sky.Core.Maybe/List/Result/...) compile to
+        -- VarTopLevel, not VarKernel, so consult knownDefSig FIRST (it carries
+        -- the type-var-bearing param strings). Fall back to the solved type for
+        -- genuine user functions / Std kernels not in knownDefSig.
+        case knownDefSig (kernelSigPrefix (ModuleName._name modName)) name arity of
+            Just (ps, _) -> Just (SrcKnownSig, ps)
+            Nothing ->
+                case Map.lookup name (ecSolvedTypes ctx) of
+                    Just ty -> let ps = extractParamTypes ty
+                               in if null ps then Nothing
+                                  else Just (SrcInferred, map (typeToRustString (ecRecordMap ctx)) ps)
+                    Nothing -> Nothing
+    _ -> Nothing
+
+-- | Normalise a kernel module name to the underscore prefix knownDefSig keys
+-- on. Short names ("List") get the "Sky_Core_" prefix; dotted names
+-- ("Sky.Core.List") just swap dots for underscores.
+kernelSigPrefix :: String -> String
+kernelSigPrefix m
+    | '.' `elem` m = map (\c -> if c == '.' then '_' else c) m
+    | otherwise    = "Sky_Core_" ++ m
+
+-- | Tokenise a Rust type string into bare identifier tokens.
+rustTypeTokens :: String -> [String]
+rustTypeTokens = words . map (\c -> if c `elem` ("<>,()+&[]:;" :: String) then ' ' else c)
+
+-- | Is a token a Rust type variable as produced by our type sources?
+-- knownDefSig uses T0, T1, ...; typeToRustString renders Can.TVar verbatim,
+-- which can be a user var (a, b, e) OR an internal solver var
+-- (_consElem214, _a_inst51, carg48, number7). Classification:
+--   * T<digits>           -> var (knownDefSig)
+--   * starts uppercase    -> concrete (String, Vec, SkyMaybe, SkyCoreJwtClaims)
+--   * a known primitive / keyword -> concrete (i64, bool, impl, dyn, ...)
+--   * anything else (lowercase/underscore ident) -> var
+isRustTypeVarTok :: String -> Bool
+isRustTypeVarTok t = case t of
+    [] -> False
+    (c : _)
+        | head t == 'T' && length t >= 2 && all isDigit (tail t) -> True
+        | isUpper c -> False
+        | t `elem` rustConcreteLowerToks -> False
+        | otherwise -> True
+
+-- | Is a Rust parameter-type string a closure parameter (impl Fn(..))? Such a
+-- param does not pin its type vars, so it doesn't count toward sibling pinning.
+isClosureParamStr :: String -> Bool
+isClosureParamStr p = "impl Fn" `isInfixOf` p || "Fn(" `isInfixOf` p
+
+-- | Lowercase Rust tokens that are concrete types or type-level keywords, not
+-- type variables. Everything else lowercase/underscore is treated as a var.
+rustConcreteLowerToks :: [String]
+rustConcreteLowerToks =
+    [ "i8", "i16", "i32", "i64", "i128", "isize"
+    , "u8", "u16", "u32", "u64", "u128", "usize"
+    , "f32", "f64", "bool", "char", "str"
+    , "impl", "dyn", "fn" ]
+
+-- | Sub-A.13: decide how to emit an empty-collection argument at position i of
+-- a call, given the callee's known parameter-type strings.
+--   * param concrete                  -> turbofish the exact type
+--   * param has a var shared w/ sibling -> bare (Rust infers from the sibling)
+--   * param var appears only here      -> default filler (i64)
+--   * callee unknown / shape unexpected -> bare (Rust infers from the sig)
+emitEmptyArg :: EmitCtx -> Maybe (ParamSrc, [String]) -> Int -> Can.Expr -> String
+emitEmptyArg _ mps i arg =
+    let kind = case emptyArgKind arg of
+            Just k  -> k
+            Nothing -> EKList  -- unreachable: only called on empty-ish args
+        bare = case kind of
+            EKList    -> "vec![]"
+            EKNothing -> "SkyMaybe::Nothing"
+        defaultFiller = case kind of
+            EKList    -> "Vec::<i64>::new()"
+            EKNothing -> "SkyMaybe::<i64>::Nothing"
+        -- Insert the turbofish "::" before the first '<' of a concrete param.
+        turbofish pt = case break (== '<') pt of
+            (h, rest@('<' : _)) -> Just $ case kind of
+                EKList    | "Vec" == h        -> h ++ "::" ++ rest ++ "::new()"
+                EKNothing | "SkyMaybe" == h   -> h ++ "::" ++ rest ++ "::Nothing"
+                _ -> "" -- param shape doesn't match the arg kind
+            _ -> Nothing
+    in case mps of
+        Just (src, ps) | i < length ps ->
+            let pt   = ps !! i
+                vars = filter isRustTypeVarTok (rustTypeTokens pt)
+                -- A var is "pinned" only by a DATA sibling param. A closure
+                -- param (impl Fn(..)) that mentions the var does NOT pin it —
+                -- the closure's own param/return may be just as unconstrained
+                -- (e.g. `map (\x -> x * 2) Nothing`: T0 is the closure arg,
+                -- itself ambiguous). withDefault's value param DOES pin it.
+                dataSiblingToks = concatMap rustTypeTokens
+                    [ ps !! j | j <- [0 .. length ps - 1]
+                              , j /= i, not (isClosureParamStr (ps !! j)) ]
+                pinnedBySibling = any (`elem` dataSiblingToks) vars
+            in if null vars
+               then case turbofish pt of
+                   Just s | not (null s) -> s
+                   _ -> bare
+               else if pinnedBySibling then bare
+                    -- Unpinned var: default only when the sig is known-generic
+                    -- (knownDefSig). For inferred sigs the generated Rust param
+                    -- may be concrete, so stay bare and let Rust infer.
+                    else if src == SrcKnownSig then defaultFiller else bare
+        _ -> bare
 
 -- | Does a closure pattern discard its argument (wildcard / `_`-prefixed)?
 isWildcardPat :: Can.Pattern -> Bool
@@ -1385,12 +1507,14 @@ exprToRustInner ctx e = case e of
         --   * Maybe<val> w/ TVars -> bare (generic context, Rust infers)
         --   * no region type      -> SkyMaybe::<i64>::Nothing (phantom default)
         -- kernelCtorToRust doesn't see ctx, so handle Nothing inline here.
-        | typeName == "Maybe", ctorName == "Nothing" -> case ecExpectedType ctx of
-            Just (Can.TType _ "Maybe" [valTy])
-                | Just rustVal <- rustifyExpectedType (ecRecordMap ctx) valTy ->
-                    "SkyMaybe::<" ++ rustVal ++ ">::Nothing"
-            _ | ecInGenericFn ctx -> kernelCtorToRust modName typeName ctorName  -- generic fn: Rust infers
-              | otherwise          -> "SkyMaybe::<i64>::Nothing"  -- monomorphic phantom (Task 8: stderr warning)
+        -- Concrete region type -> turbofish. Otherwise BARE: a call-arg
+        -- Nothing is resolved precisely at the call site (emitDefaultCall);
+        -- a non-call-arg Nothing keeps Rust's own inference (the pre-fix
+        -- behaviour).
+        | typeName == "Maybe", ctorName == "Nothing"
+        , Just (Can.TType _ "Maybe" [valTy]) <- ecExpectedType ctx
+        , Just rustVal <- rustifyExpectedType (ecRecordMap ctx) valTy ->
+            "SkyMaybe::<" ++ rustVal ++ ">::Nothing"
         | otherwise -> kernelCtorToRust modName typeName ctorName
     Can.Chr [c] -> rustCharLit c
     Can.Chr s -> rustStringLit s
@@ -1408,12 +1532,13 @@ exprToRustInner ctx e = case e of
         --   * no region type       -> Vec::<i64>::new()   (monomorphic phantom:
         --       Rust can't infer and there's no generic param to bind; any
         --       concrete type is safe because the list is empty)
-        | null es -> case ecExpectedType ctx of
-            Just (Can.TType _ "List" [elemTy])
-                | Just rustElem <- rustifyExpectedType (ecRecordMap ctx) elemTy ->
-                    "Vec::<" ++ rustElem ++ ">::new()"
-            _ | ecInGenericFn ctx -> "vec![]"            -- generic fn: Rust infers
-              | otherwise          -> "Vec::<i64>::new()" -- monomorphic phantom (Task 8: stderr warning)
+        -- Concrete region type -> turbofish. Otherwise BARE: a call-arg []
+        -- is resolved precisely at the call site (emitDefaultCall); a
+        -- non-call-arg [] keeps Rust's own inference (the pre-fix behaviour).
+        | null es
+        , Just (Can.TType _ "List" [elemTy]) <- ecExpectedType ctx
+        , Just rustElem <- rustifyExpectedType (ecRecordMap ctx) elemTy ->
+            "Vec::<" ++ rustElem ++ ">::new()"
         | otherwise ->
             "vec![" ++ intercalate ", " (map (exprToRustString ctx) es) ++ "]"
     Can.Negate e -> "-" ++ exprToRustString ctx e
@@ -1509,24 +1634,6 @@ exprToRustInner ctx e = case e of
         , not (ecInGenericFn ctx) ->
             "SkyResult::<SkyError, i64>::" ++ ctorName
                 ++ "(" ++ exprToRustString ctx innerArg ++ ")"  -- default (Task 8: stderr warning)
-    -- Sub-A.13: constructor call where some argument is an empty collection
-    -- and the corresponding declared field type is fully concrete. Propagate
-    -- that field type into the arg so it pins the element type (e.g. Claims []
-    -- with field List (String, Value) -> Vec::<(String, Value)>::new()). This
-    -- arm ONLY fires for such args; every other ctor call (and every empty-ish
-    -- arg whose field type is polymorphic, e.g. Just []) falls through to the
-    -- generic path unchanged. Non-empty args keep the normal clone-aware emit.
-    Can.Call (Ann.At cr vc@(Can.VarCtor _ _ _ ctorName _)) args
-        | Just fieldTys <- Map.lookup ctorName (ecCtorFieldTypes ctx)
-        , length fieldTys == length args
-        , or (zipWith (\ty a -> isEmptyishArg a && not (hasTypeVars ty)) fieldTys args) ->
-            let calleeName = exprToRustString ctx (Ann.At cr vc)
-                argStrs = zipWith
-                    (\ty a -> if isEmptyishArg a && not (hasTypeVars ty)
-                              then exprToRustStringForced ctx ty a
-                              else argToRustString ctx False a)
-                    fieldTys args
-            in calleeName ++ "(" ++ intercalate ", " argStrs ++ ")"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             -- sub-A.12 F2: detect partial application (Sky source has currying;
@@ -1775,9 +1882,18 @@ emitDefaultCall ctx fn calleeName args =
             Ann.At _ (Can.VarKernel _ n) -> n == "run"
             _ -> False
         isListDec = "json_dec_list" `isSuffixOf` calleeName
+        -- Sub-A.13: empty-collection args (`[]`, `Nothing`) carry no element
+        -- type for Rust to infer. Resolve each from the callee's param types:
+        -- concrete -> turbofish, var-shared-with-sibling -> bare, var-only-here
+        -- -> default filler, unknown callee -> bare. Non-empty args keep the
+        -- normal clone-aware emit.
+        paramStrs = calleeParamStrings ctx fn (length args)
+        emitArg i a
+            | isEmptyishArg a = emitEmptyArg ctx paramStrs i a
+            | otherwise       = argToRustString ctx noCloneFn a
         argsStrs = if isListDec && not (null args)
                    then ("|| " ++ argToRustString ctx noCloneFn (head args)) : map (argToRustString ctx noCloneFn) (tail args)
-                   else map (argToRustString ctx noCloneFn) args
+                   else zipWith emitArg [0..] args
         isZeroArgFn = case fn of
             Ann.At _ (Can.VarKernel modName name) ->
                 let fnName = kernelToRust modName name
