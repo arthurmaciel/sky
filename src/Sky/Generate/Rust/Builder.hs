@@ -2791,8 +2791,11 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Task", "mapError") -> "task_map_error"
     ("Task", "onError") -> "task_on_error"
     ("Sky.Core.Task", "onError") -> "task_on_error"
-    ("Task", "perform") -> "task_perform"
-    ("Sky.Core.Task", "perform") -> "task_perform"
+    -- Task.perform : Task e a -> Result e a (runs synchronously, keeps the
+    -- value). That is task_run, not task_perform (which returns a Task<()> and
+    -- drops the value). sub-D fix — surfaced by the retryWith test.
+    ("Task", "perform") -> "task_run"
+    ("Sky.Core.Task", "perform") -> "task_run"
     ("Task", "sequence") -> "task_sequence"
     ("Sky.Core.Task", "sequence") -> "task_sequence"
     ("Task", "run") -> "task_run"
@@ -2800,6 +2803,7 @@ kernelToRust mod name = case (mod, name) of
     ("Task", "parallel") -> "task_parallel"
     ("Sky.Core.Task", "parallel") -> "task_parallel"
     ("Task", "lazy") -> "task_lazy"
+    ("Task", "retryWith") -> "task_retry_with"  -- sub-D: run-once (see task.rs)
     ("Sky.Core.Task", "lazy") -> "task_lazy"
     ("Task", "fail") -> "task_fail"
     ("Sky.Core.Task", "fail") -> "task_fail"

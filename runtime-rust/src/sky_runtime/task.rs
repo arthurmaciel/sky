@@ -112,3 +112,23 @@ pub fn task_parallel<E: From<String> + Send + 'static, A: Send + 'static>(tasks:
         ok_res(out)
     })
 }
+
+// Task.retryWith : RetryPolicy e -> Task e a -> Task e a
+//
+// LIMITATION (run-once on target=rust). A faithful retry loop needs two things
+// Rust can't give here: (1) re-running the task — a `SkyTask` is `Pin<Box<dyn
+// Future>>`, a one-shot value consumed when awaited, not a re-runnable thunk;
+// (2) reading the policy's `maxAttempts` / `shouldRetry` / delay fields — the
+// `RetryPolicy` struct is generated per-project and opaque to this runtime
+// crate, and Rust has no reflection (the Go backend reads it reflectively).
+// So we run the task exactly once and return its result. This is correct for
+// the common deterministic cases (a task that always succeeds → Ok on the first
+// try; a task that always fails → the same Err every attempt would produce) and
+// is what `examples/00-standard-libs` exercises. A transient-failure task will
+// NOT be re-tried. A faithful implementation requires either a thunk-shaped
+// `retryWith : RetryPolicy e -> (() -> Task e a) -> Task e a` (upstream) or
+// codegen that passes the policy fields as primitives + wraps the task arg in a
+// closure. Tracked in runtime-rust/README.md "Known limitations".
+pub fn task_retry_with<P, E, A>(_policy: P, task: SkyTask<E, A>) -> SkyTask<E, A> {
+    task
+}
