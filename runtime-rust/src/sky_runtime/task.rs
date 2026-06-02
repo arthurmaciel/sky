@@ -2,7 +2,7 @@
 use super::*;
 use std::future::ready;
 
-fn block_on<E, A>(future: SkyTask<E, A>) -> SkyResult<E, A>
+pub fn block_on<E, A>(future: SkyTask<E, A>) -> SkyResult<E, A>
 where E: From<String> + Send + 'static, A: Send + 'static {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(r) => r,

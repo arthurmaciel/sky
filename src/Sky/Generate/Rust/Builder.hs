@@ -121,7 +121,11 @@ analyzeKernelUsage = foldMap analyzeMod
             , if modName == "Uuid" || "Sky.Core.Uuid" `isSuffixOf` modName
               then mempty { usesUuid = True } else mempty
             , if modName == "Server" || "Sky.Http.Server" `isSuffixOf` modName
-              then mempty { usesHttpServer = True, usesTaskRun = True } else mempty
+              -- usesHttpServer alone pulls tokio (via hasTokio) and the server
+              -- module; do NOT set usesTaskRun — `main = Server.listen …` returns
+              -- a Task, so main must stay task-shaped (block_on'd), which the
+              -- usesTaskRun=True path would defeat (mainIsTask -> False).
+              then mempty { usesHttpServer = True } else mempty
             , if "Time" `isPrefixOf` modName || "Sky.Core.Time" `isPrefixOf` modName
               then mempty { usesTime = True } <> (if fnName == "sleep" then mempty { usesTaskRun = True } else mempty)
               else mempty
@@ -2556,7 +2560,7 @@ ffiPlaceholderSection b =
 -- | Entry point
 entryPointSection :: UsedKernels -> [String]
 entryPointSection uk =
-    let hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk
+    let hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk || usesHttpServer uk
         mainIsTask = not (usesTaskRun uk)  -- if user uses Task.run, main returns ()
     in
     [ ""
@@ -3170,7 +3174,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     , "db = []"
     , ""
     , "[dependencies]"
-    , "tokio = { version = \"1\", features = [\"rt\", \"rt-multi-thread\", \"macros\", \"time\"] }"
+    , "tokio = { version = \"1\", features = [" ++ intercalate ", " (map show tokioFeats) ++ "] }"
     ] ++
     (if usesDb uk
      then let sqlxTlsFeature = if sqlxTls == "native-tls" then "runtime-tokio-native-tls" else "runtime-tokio-rustls"
@@ -3216,12 +3220,23 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     -- crate with different features) to avoid a duplicate-key / feature clash.
     [ "uuid = { version = \"1\", features = [\"v4\", \"v7\"] }"
     | usesUuid uk, "uuid" `notElem` userDepNames ] ++
+    -- Sub-D.1: axum + tower-http only when Sky.Http.Server is used.
+    [ name ++ " = " ++ spec
+    | usesHttpServer uk
+    , (name, spec) <-
+        [ ("axum",       "\"0.7\"")
+        , ("tower-http", "{ version = \"0.5\", features = [\"fs\"] }")
+        ]
+    , name `notElem` userDepNames ] ++
     [ emitDepLine name spec
     | (name, spec) <- rustDeps
     , not (null name)
     ]
   where
     userDepNames = [ n | (n, _) <- rustDeps, not (null n) ]
+    -- Sky.Http.Server's axum serve loop needs tokio's net (TcpListener).
+    tokioFeats = ["rt", "rt-multi-thread", "macros", "time"]
+                 ++ ["net" | usesHttpServer uk]
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"

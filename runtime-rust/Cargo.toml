@@ -16,6 +16,8 @@ pbkdf2 = { version = "0.12", optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 csv = { version = "1", optional = true }
+axum = { version = "0.7", optional = true }
+tower-http = { version = "0.5", features = ["fs"], optional = true }
 subtle = "2"
 hmac = "0.12"
 sha1 = "0.10"
@@ -39,7 +41,7 @@ db = ["sqlx", "tokio"]
 crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
-server = ["tokio"]
+server = ["tokio", "axum", "tower-http"]
 full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "server"]
 
 [dev-dependencies]

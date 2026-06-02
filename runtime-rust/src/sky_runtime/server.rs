@@ -1,8 +1,10 @@
 //! Sky.Http.Server runtime (Sub-D.1) — axum/hyper under a Sky-native surface.
 //!
-//! STEP 1 (this file currently): the type bridge + route construction + the
-//! crux validation that a Sky handler closure boxes cleanly. `server_listen` is
-//! a stub here; step 4 wires the axum Router + request adapter + serve loop.
+//! Handlers are Sky closures `Fn(Request) -> Task Error Response`. server_get
+//! ERASES the project-defined error type E into a non-generic ServerRoute
+//! (awaiting the task, mapping Err -> 500) so routes are uniform yet handlers
+//! stay Send+Sync+'static for axum. server_listen builds an axum Router and
+//! serves via tokio.
 //!
 //! Records map to these structs via runtimeOpaqueTypes (like Csv's CsvDoc), so
 //! the generated `SkyHttpServerRequest`/`Response` are `pub use` aliases and Sky
@@ -13,7 +15,7 @@ use super::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::pin::Pin;
-use std::future::{Future, ready};
+use std::future::Future;
 
 /// Sky.Http.Server.Request — field names/types match the Sky record alias.
 #[derive(Clone, Debug)]
@@ -158,25 +160,148 @@ pub fn server_with_cookie(c: ServerCookie, mut r: ServerResponse) -> ServerRespo
     r
 }
 
-// ─── listen (STEP 1 STUB — step 4 replaces with axum serve) ───────────────
+// ─── listen + axum adapter (step 4) ───────────────────────────────────────
 
-/// Server.listen : Int -> List Route -> Task Error ()
-/// STEP 1 STUB: the type pipeline (routes built, handler closures erased, Task
-/// shape) is validated, but serving is not yet wired — that's step 4 (axum
-/// Router + request adapter + serve loop). Prints a loud notice so it can't be
-/// mistaken for a running server, then resolves Ok so Task chains don't break.
-pub fn server_listen<E: Send + 'static>(port: i64, routes: Vec<ServerRoute>) -> SkyTask<E, ()> {
-    eprintln!(
-        "[sky.http.server] target=rust: serving not yet implemented (Sub-D.1 step 4). \
-         Configured {} route(s) for port {} — NOT listening.",
-        routes.len(), port
-    );
-    Box::pin(ready(ok_res(())))
+const MAX_BODY: usize = 32 * 1024 * 1024; // 32 MiB
+
+fn parse_query(q: Option<&str>) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    if let Some(q) = q {
+        for pair in q.split('&') {
+            if pair.is_empty() { continue; }
+            let mut it = pair.splitn(2, '=');
+            let k = it.next().unwrap_or("");
+            let v = it.next().unwrap_or("");
+            out.insert(urldecode(k), urldecode(v));
+        }
+    }
+    out
+}
+
+fn urldecode(s: &str) -> String {
+    // form-style: '+' -> space, %XX -> byte. Best-effort.
+    let s = s.replace('+', " ");
+    let mut out = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(byte); i += 3; continue;
+            }
+        }
+        out.push(b[i]); i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn parse_cookies(header: &str, out: &mut HashMap<String, String>) {
+    for c in header.split(';') {
+        let c = c.trim();
+        if let Some((k, v)) = c.split_once('=') {
+            out.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+}
+
+async fn build_request(req: axum::extract::Request) -> ServerRequest {
+    use axum::extract::{RawPathParams, FromRequestParts};
+    let method = req.method().as_str().to_string();
+    let uri = req.uri().clone();
+    let path = uri.path().to_string();
+    let query = parse_query(uri.query());
+    let mut headers = HashMap::new();
+    let mut cookies = HashMap::new();
+    for (k, v) in req.headers() {
+        if let Ok(s) = v.to_str() {
+            if k.as_str().eq_ignore_ascii_case("cookie") { parse_cookies(s, &mut cookies); }
+            headers.insert(k.as_str().to_string(), s.to_string());
+        }
+    }
+    let (mut parts, body) = req.into_parts();
+    let params = match RawPathParams::from_request_parts(&mut parts, &()).await {
+        Ok(rpp) => rpp.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        Err(_) => HashMap::new(),
+    };
+    let body = axum::body::to_bytes(body, MAX_BODY).await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    ServerRequest { method, path, body, headers, params, query, cookies, remoteAddr: String::new() }
+}
+
+fn to_axum_response(r: ServerResponse) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let status = axum::http::StatusCode::from_u16(r.status as u16)
+        .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let mut builder = axum::http::Response::builder().status(status);
+    if !r.contentType.is_empty() {
+        builder = builder.header("content-type", r.contentType.clone());
+    }
+    for (k, v) in &r.headers {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
+    match builder.body(axum::body::Body::from(r.body)) {
+        Ok(resp) => resp,
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn method_router(method: &str, h: ErasedHandler) -> axum::routing::MethodRouter {
+    use axum::routing::{get, post, put, delete, any};
+    use axum::response::IntoResponse;
+    let svc = move |req: axum::extract::Request| {
+        let h = h.clone();
+        async move {
+            let sky_req = build_request(req).await;
+            match h(sky_req).await {
+                Ok(resp) => to_axum_response(resp),
+                Err(_) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
+            }
+        }
+    };
+    match method.to_uppercase().as_str() {
+        "GET" => get(svc),
+        "POST" => post(svc),
+        "PUT" => put(svc),
+        "DELETE" => delete(svc),
+        _ => any(svc),
+    }
+}
+
+fn strip_trailing_slash(p: &str) -> String {
+    if p.len() > 1 && p.ends_with('/') { p[..p.len() - 1].to_string() } else { p.to_string() }
+}
+
+/// Server.listen : Int -> List Route -> Task Error ()  — serves via axum/tokio.
+pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<ServerRoute>) -> SkyTask<E, ()> {
+    Box::pin(async move {
+        let mut app: axum::Router = axum::Router::new();
+        for r in routes {
+            if let Some(dir) = r.static_dir {
+                app = app.nest_service(&strip_trailing_slash(&r.path), tower_http::services::ServeDir::new(dir));
+                continue;
+            }
+            if let Some(h) = r.handler {
+                app = app.route(&r.path, method_router(&r.method, h));
+            }
+        }
+        let addr = format!("0.0.0.0:{}", port);
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => return SkyResult::Err(format!("Server.listen: bind {}: {}", addr, e).into()),
+        };
+        eprintln!("[sky.http.server] listening on http://{}", addr);
+        match axum::serve(listener, app).await {
+            Ok(()) => ok_res(()),
+            Err(e) => SkyResult::Err(format!("Server.listen: serve: {}", e).into()),
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::ready;
 
     #[test]
     fn build_routes_and_response() {
