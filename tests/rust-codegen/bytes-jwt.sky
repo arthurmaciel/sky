@@ -1,0 +1,41 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Encoding as Encoding
+import Sky.Core.Crypto as Crypto
+import Sky.Core.Jwt as Jwt
+import Sky.Core.Result as Result
+import Std.Log exposing (println)
+
+
+-- Sub-D: Bytes-on-Rust. hexDecode produces raw bytes (Latin-1 byte-string) and
+-- base64Encode reads them back, so base64(hexDecode(hmac)) — the JWT signature
+-- path — round-trips. JWT HS256 encode then decode with the same key holds.
+check : String -> String
+check _ =
+    let
+        -- raw-byte pipeline: hex -> bytes -> hex (round-trip through Bytes)
+        hexRT =
+            Result.withDefault "DECFAIL" (Encoding.hexDecode (Encoding.hexEncode "abc"))
+        -- a digest's raw bytes survive hexDecode (the old code errored here)
+        sigOk =
+            case Encoding.hexDecode (Crypto.hmacSha256 "k" "msg") of
+                Ok _ -> "sig-bytes-ok"
+                Err _ -> "SIGFAIL"
+        -- JWT HS256 encode -> decode round-trip with the same key
+        jwtOk =
+            case Jwt.encode (Jwt.hs256 "secret") (Jwt.claims |> Jwt.subject "u1") of
+                Ok token ->
+                    case Jwt.decode (Jwt.hs256 "secret") 0 token of
+                        Ok _ -> "jwt-ok"
+                        Err _ -> "JWTVERIFY"
+                Err _ -> "JWTENC"
+    in
+    if hexRT == "abc" && sigOk == "sig-bytes-ok" && jwtOk == "jwt-ok" then
+        "ok: bytes round-trip + jwt hs256"
+    else
+        "fail: hexRT=" ++ hexRT ++ " " ++ sigOk ++ " " ++ jwtOk
+
+
+main =
+    println (check "")
