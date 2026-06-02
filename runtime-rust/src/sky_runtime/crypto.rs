@@ -128,6 +128,114 @@ pub fn crypto_constant_time_equal(a: String, b: String) -> bool {
     bool::from(ab.ct_eq(bb))
 }
 
+// ═══════════════════════════════════════════════════════════
+// v0.15.44 symmetric AEAD — AES-256-GCM + ChaCha20-Poly1305
+// ═══════════════════════════════════════════════════════════
+//
+// Output format mirrors the Go backend: base64( nonce[12] || ciphertext ||
+// tag[16] ) — a single opaque UTF-8 string. The 32-byte KEY, however, is
+// base64-encoded here (the Go backend passes raw bytes). Keys are opaque and
+// never cross the backend boundary, so this backend-local encoding is sound and
+// is what lets a PBKDF2-derived key (arbitrary bytes) live in a Rust `String`
+// (which must be valid UTF-8). aesKeyFromPassword emits the base64 form; the
+// AEAD fns base64-decode it back to 32 raw bytes.
+
+const AEAD_KEY_BYTES: usize = 32;
+const PBKDF2_ITERS: u32 = 100_000;
+
+// Decode a base64 key string to exactly 32 bytes, or an error message.
+fn aead_read_key(name: &str, key: &str) -> Result<Vec<u8>, String> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let k = STANDARD.decode(key.as_bytes())
+        .map_err(|_| format!("{}: key must be a 32-byte key from Crypto.aesKeyFromPassword", name))?;
+    if k.len() != AEAD_KEY_BYTES {
+        return Err(format!("{}: key must be {} bytes, got {} (derive via Crypto.aesKeyFromPassword)", name, AEAD_KEY_BYTES, k.len()));
+    }
+    Ok(k)
+}
+
+// Crypto.aesGcmEncrypt : String -> String -> Result Error String
+pub fn crypto_aes_gcm_encrypt<E: From<String>>(key: String, plaintext: String) -> SkyResult<E, String> {
+    use aes_gcm::{Aes256Gcm, Nonce, KeyInit, aead::{Aead, OsRng, rand_core::RngCore}};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let k = match aead_read_key("Crypto.aesGcmEncrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
+    let cipher = Aes256Gcm::new_from_slice(&k).unwrap();
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    match cipher.encrypt(nonce, plaintext.as_bytes()) {
+        Ok(ct) => {
+            let mut out = nonce_bytes.to_vec();
+            out.extend_from_slice(&ct);
+            SkyResult::Ok(STANDARD.encode(out))
+        }
+        Err(e) => SkyResult::Err(format!("Crypto.aesGcmEncrypt: {}", e).into()),
+    }
+}
+
+// Crypto.aesGcmDecrypt : String -> String -> Result Error String
+pub fn crypto_aes_gcm_decrypt<E: From<String>>(key: String, encoded: String) -> SkyResult<E, String> {
+    use aes_gcm::{Aes256Gcm, Nonce, KeyInit, aead::Aead};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let k = match aead_read_key("Crypto.aesGcmDecrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
+    let buf = match STANDARD.decode(encoded.as_bytes()) { Ok(b) => b, Err(e) => return SkyResult::Err(format!("Crypto.aesGcmDecrypt: invalid base64: {}", e).into()) };
+    if buf.len() < 12 { return SkyResult::Err("Crypto.aesGcmDecrypt: ciphertext too short".to_string().into()); }
+    let (nonce_bytes, ct) = buf.split_at(12);
+    let cipher = Aes256Gcm::new_from_slice(&k).unwrap();
+    match cipher.decrypt(Nonce::from_slice(nonce_bytes), ct) {
+        Ok(pt) => SkyResult::Ok(String::from_utf8_lossy(&pt).into_owned()),
+        Err(e) => SkyResult::Err(format!("Crypto.aesGcmDecrypt: {}", e).into()),
+    }
+}
+
+// Crypto.chacha20Encrypt : String -> String -> Result Error String
+pub fn crypto_chacha20_encrypt<E: From<String>>(key: String, plaintext: String) -> SkyResult<E, String> {
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce, KeyInit, aead::{Aead, OsRng, rand_core::RngCore}};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let k = match aead_read_key("Crypto.chacha20Encrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
+    let cipher = ChaCha20Poly1305::new_from_slice(&k).unwrap();
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    match cipher.encrypt(nonce, plaintext.as_bytes()) {
+        Ok(ct) => {
+            let mut out = nonce_bytes.to_vec();
+            out.extend_from_slice(&ct);
+            SkyResult::Ok(STANDARD.encode(out))
+        }
+        Err(e) => SkyResult::Err(format!("Crypto.chacha20Encrypt: {}", e).into()),
+    }
+}
+
+// Crypto.chacha20Decrypt : String -> String -> Result Error String
+pub fn crypto_chacha20_decrypt<E: From<String>>(key: String, encoded: String) -> SkyResult<E, String> {
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce, KeyInit, aead::Aead};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let k = match aead_read_key("Crypto.chacha20Decrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
+    let buf = match STANDARD.decode(encoded.as_bytes()) { Ok(b) => b, Err(e) => return SkyResult::Err(format!("Crypto.chacha20Decrypt: invalid base64: {}", e).into()) };
+    if buf.len() < 12 { return SkyResult::Err("Crypto.chacha20Decrypt: ciphertext too short".to_string().into()); }
+    let (nonce_bytes, ct) = buf.split_at(12);
+    let cipher = ChaCha20Poly1305::new_from_slice(&k).unwrap();
+    match cipher.decrypt(Nonce::from_slice(nonce_bytes), ct) {
+        Ok(pt) => SkyResult::Ok(String::from_utf8_lossy(&pt).into_owned()),
+        Err(e) => SkyResult::Err(format!("Crypto.chacha20Decrypt: {}", e).into()),
+    }
+}
+
+// Crypto.aesKeyFromPassword : String -> String -> String
+// PBKDF2-HMAC-SHA256, 100k iters, 32-byte key, returned base64-encoded.
+pub fn crypto_aes_key_from_password(password: String, salt: String) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut key = [0u8; AEAD_KEY_BYTES];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), salt.as_bytes(), PBKDF2_ITERS, &mut key);
+    STANDARD.encode(key)
+}
+
+// Crypto.chachaKeyFromPassword : String -> String -> String  (same derivation)
+pub fn crypto_chacha_key_from_password(password: String, salt: String) -> String {
+    crypto_aes_key_from_password(password, salt)
+}
+
 #[cfg(test)]
 mod tests_more_hashes {
     use super::*;

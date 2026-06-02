@@ -1,0 +1,37 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Crypto as Crypto
+import Sky.Core.Result as Result
+import Std.Log exposing (println)
+
+
+-- Sub-D: AES-256-GCM + ChaCha20-Poly1305 AEAD kernels. Round-trip + tamper.
+roundtrip : String -> String
+roundtrip _ =
+    let key = Crypto.aesKeyFromPassword "hunter2" "salt16bytes_here"
+        ck = Crypto.chachaKeyFromPassword "pw" "saltsalt00000000"
+        aesPt =
+            Crypto.aesGcmEncrypt key "hello world"
+                |> Result.andThen (\ct -> Crypto.aesGcmDecrypt key ct)
+                |> Result.withDefault "AESFAIL"
+        ccPt =
+            Crypto.chacha20Encrypt ck "cc payload"
+                |> Result.andThen (\ct -> Crypto.chacha20Decrypt ck ct)
+                |> Result.withDefault "CCFAIL"
+        tamper =
+            case Crypto.aesGcmEncrypt key "secret" of
+                Ok ct ->
+                    case Crypto.aesGcmDecrypt key (ct ++ "x") of
+                        Ok _ -> "TAMPER-MISS"
+                        Err _ -> "tamper-ok"
+                Err _ -> "ENCFAIL"
+    in
+    if aesPt == "hello world" && ccPt == "cc payload" && tamper == "tamper-ok" then
+        "ok: aead round-trip + tamper detection"
+    else
+        "fail: aes=" ++ aesPt ++ " chacha=" ++ ccPt ++ " " ++ tamper
+
+
+main =
+    println (roundtrip "")

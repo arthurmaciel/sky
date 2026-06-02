@@ -10,6 +10,9 @@ serde_json = { version = "1", optional = true }
 jsonwebtoken = { version = "9", optional = true }
 sha2 = { version = "0.10", optional = true }
 rsa = { version = "0.9", features = ["sha2"], optional = true }
+aes-gcm = { version = "0.10", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+pbkdf2 = { version = "0.12", optional = true }
 subtle = "2"
 hmac = "0.12"
 sha1 = "0.10"
@@ -29,7 +32,7 @@ default = []
 async = ["tokio"]
 json = ["serde_json", "jsonwebtoken"]
 db = ["sqlx", "tokio"]
-crypto = ["sha2", "rsa", "bcrypt"]
+crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 full = ["async", "json", "db", "crypto"]
 
 [dev-dependencies]
@@ -40,6 +43,9 @@ serde_json = "1"
 sha2 = "0.10"
 jsonwebtoken = "9"
 bcrypt = "0.17"
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+pbkdf2 = "0.12"
 
 [package.metadata.sky]
 runtime_version = "0.13.0"

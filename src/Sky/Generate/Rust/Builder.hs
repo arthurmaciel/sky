@@ -216,8 +216,13 @@ runtimeOpaqueTypes = Map.fromList
 -- = ::<SkyError, _>, etc.). `From<String>` for E is provided by `str_err`.
 kernelsNeedingErrorPin :: Map.Map String String
 kernelsNeedingErrorPin = Map.fromList
-    [ -- Encoding decoders — single E parameter
-      ("base64_decode",          "::<SkyError>")
+    [ -- AEAD encrypt/decrypt — single E parameter (sub-D)
+      ("crypto_aes_gcm_encrypt",   "::<SkyError>")
+    , ("crypto_aes_gcm_decrypt",   "::<SkyError>")
+    , ("crypto_chacha20_encrypt",  "::<SkyError>")
+    , ("crypto_chacha20_decrypt",  "::<SkyError>")
+    -- Encoding decoders — single E parameter
+    , ("base64_decode",          "::<SkyError>")
     , ("url_decode",             "::<SkyError>")
     , ("encoding_hex_decode",    "::<SkyError>")
     -- JsonDecode primitives — single E parameter
@@ -2577,6 +2582,19 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Crypto", "rsaSha256Verify")     -> "crypto_rsa_sha256_verify"
     ("Crypto", "constantTimeEqual")            -> "crypto_constant_time_equal"
     ("Sky.Core.Crypto", "constantTimeEqual")   -> "crypto_constant_time_equal"
+    -- v0.15.44 symmetric AEAD (sub-D)
+    ("Crypto", "aesGcmEncrypt")                -> "crypto_aes_gcm_encrypt"
+    ("Sky.Core.Crypto", "aesGcmEncrypt")       -> "crypto_aes_gcm_encrypt"
+    ("Crypto", "aesGcmDecrypt")                -> "crypto_aes_gcm_decrypt"
+    ("Sky.Core.Crypto", "aesGcmDecrypt")       -> "crypto_aes_gcm_decrypt"
+    ("Crypto", "chacha20Encrypt")              -> "crypto_chacha20_encrypt"
+    ("Sky.Core.Crypto", "chacha20Encrypt")     -> "crypto_chacha20_encrypt"
+    ("Crypto", "chacha20Decrypt")              -> "crypto_chacha20_decrypt"
+    ("Sky.Core.Crypto", "chacha20Decrypt")     -> "crypto_chacha20_decrypt"
+    ("Crypto", "aesKeyFromPassword")           -> "crypto_aes_key_from_password"
+    ("Sky.Core.Crypto", "aesKeyFromPassword")  -> "crypto_aes_key_from_password"
+    ("Crypto", "chachaKeyFromPassword")        -> "crypto_chacha_key_from_password"
+    ("Sky.Core.Crypto", "chachaKeyFromPassword") -> "crypto_chacha_key_from_password"
     -- Std.Time advanced (sub-A.5)
     ("Time", "inZone")            -> "time_in_zone"
     ("Time", "formatInZone")      -> "time_format_in_zone"
@@ -3044,6 +3062,9 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
         , ("md-5",             "\"0.10\"")
         , ("subtle",           "\"2\"")
         , ("rsa",              "{ version = \"0.9\", features = [\"sha2\"] }")
+        , ("aes-gcm",          "\"0.10\"")
+        , ("chacha20poly1305", "\"0.10\"")
+        , ("pbkdf2",           "\"0.12\"")
         , ("jsonwebtoken",     "\"9\"")
         , ("bcrypt",           "\"0.17\"")
         ]
