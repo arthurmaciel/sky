@@ -78,7 +78,8 @@ mod tests {
     #[test]
     fn test_url_roundtrip() {
         let encoded = url_encode("hello world/foo?bar=baz&q=á".to_string());
-        assert!(encoded.contains("%20")); // space
+        assert!(encoded.contains('+'));    // space -> '+' (Go QueryEscape)
+        assert!(!encoded.contains("%20"));
         assert!(encoded.contains("%2F")); // slash
         let decoded: SkyResult<String, String> = url_decode(encoded);
         assert!(matches!(decoded, SkyResult::Ok(ref s) if s == "hello world/foo?bar=baz&q=á"));
