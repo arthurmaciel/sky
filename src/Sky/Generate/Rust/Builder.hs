@@ -216,8 +216,17 @@ runtimeOpaqueTypes = Map.fromList
 -- = ::<SkyError, _>, etc.). `From<String>` for E is provided by `str_err`.
 kernelsNeedingErrorPin :: Map.Map String String
 kernelsNeedingErrorPin = Map.fromList
-    [ -- AEAD encrypt/decrypt — single E parameter (sub-D)
-      ("crypto_aes_gcm_encrypt",   "::<SkyError>")
+    [ -- Task.run / Task.perform — <E, A>; pin E (always SkyError), infer A from
+      -- context. Without this a phantom error type (a task that never errs, e.g.
+      -- Task.perform (retryWith p (Task.succeed v))) is unconstrained -> E0283.
+      ("task_run",                 "::<SkyError, _>")
+    -- Task.fail : err -> Task err a — the success type `a` is phantom (a failing
+    -- task never yields a value). When the value is discarded (e.g. matched with
+    -- `Ok _`) `a` is unconstrained -> E0283; default it to i64. A determining
+    -- context that needs a different `a` surfaces a loud E0308 (annotate then).
+    , ("task_fail",                "::<_, i64>")
+    -- AEAD encrypt/decrypt — single E parameter (sub-D)
+    , ("crypto_aes_gcm_encrypt",   "::<SkyError>")
     , ("crypto_aes_gcm_decrypt",   "::<SkyError>")
     , ("crypto_chacha20_encrypt",  "::<SkyError>")
     , ("crypto_chacha20_decrypt",  "::<SkyError>")
@@ -1155,8 +1164,12 @@ collectVarLocalsMulti = go Set.empty
             in Map.unionWith (+) (go bound body) goDefs
         Can.LetDestruct pat expr body ->
             Map.unionWith (+) (go bound expr) (go bound body)
-        Can.Case _ branches -> foldl (\a (Can.CaseBranch _ b) ->
-            Map.unionWith (+) a (go bound b)) Map.empty branches
+        -- Sub-D: count the scrutinee too. A var used in a case scrutinee
+        -- (e.g. `case f key of …`) AND again elsewhere must be marked multi-use
+        -- so it gets cloned at the first use — otherwise it's moved and the
+        -- second use fails (E0382). The scrutinee was previously ignored.
+        Can.Case scrut branches -> foldl (\a (Can.CaseBranch _ b) ->
+            Map.unionWith (+) a (go bound b)) (go bound scrut) branches
         Can.If branches elseBranch ->
             foldl (\a (c, t) -> Map.unionWith (+) a (Map.unionWith (+) (go bound c) (go bound t))) (go bound elseBranch) branches
         Can.Binop _ _ _ _ a b -> Map.unionWith (+) (go bound a) (go bound b)
@@ -1909,6 +1922,13 @@ taskExprInnerTypeCall _ _ _ = ""
 -- Handles `isZeroArgFn` wrapping (Ffi.kernel stubs) and `isListDec`
 -- factory closures.
 emitDefaultCall :: EmitCtx -> Can.Expr -> String -> [Can.Expr] -> String
+-- Sub-D: Task.retryWith policy task — run-once on target=rust (see task.rs).
+-- Drop the policy arg: it's unused, and emitting the policy builder
+-- (`linearBackoff … : RetryPolicy e`) introduces a phantom error-type var `e`
+-- Rust can't infer (E0283). task_retry_with takes only the task. retryWith is a
+-- VarTopLevel kernel-alias, so it lands here rather than the VarKernel peephole.
+emitDefaultCall ctx _fn "task_retry_with" [_policy, task] =
+    "task_retry_with(" ++ exprToRustString ctx task ++ ")"
 emitDefaultCall ctx fn calleeName args =
     let noCloneFn = case fn of
             Ann.At _ (Can.VarKernel _ n) -> n == "run"

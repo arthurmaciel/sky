@@ -129,6 +129,10 @@ pub fn task_parallel<E: From<String> + Send + 'static, A: Send + 'static>(tasks:
 // `retryWith : RetryPolicy e -> (() -> Task e a) -> Task e a` (upstream) or
 // codegen that passes the policy fields as primitives + wraps the task arg in a
 // closure. Tracked in runtime-rust/README.md "Known limitations".
-pub fn task_retry_with<P, E, A>(_policy: P, task: SkyTask<E, A>) -> SkyTask<E, A> {
+// Takes ONLY the task — the codegen peephole for `retryWith` drops the policy
+// argument (see Builder.hs). Run-once ignores the policy entirely, and dropping
+// it at the call site avoids emitting the policy builder's phantom error-type
+// var (`RetryPolicy e` with `e` never used), which Rust can't infer (E0283).
+pub fn task_retry_with<E, A>(task: SkyTask<E, A>) -> SkyTask<E, A> {
     task
 }
