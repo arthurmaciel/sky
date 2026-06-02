@@ -299,6 +299,35 @@ Ui.column
     ]
 ```
 
+### `Ui.fill` — how it lowers (v0.15.55+)
+
+`Ui.fill` lowers asymmetrically per the parent's flex direction:
+
+| Position | Emitted CSS |
+|---|---|
+| Main-axis fill (e.g. `Ui.width Ui.fill` on a `Ui.row` child, `Ui.height Ui.fill` on a `Ui.column` child) | `flex-grow: N; min-{w,h}: 0;` |
+| Cross-axis HEIGHT fill (`Ui.height Ui.fill` on a `Ui.row` child) | `align-self: stretch;` — no explicit `height: 100%` |
+| Cross-axis WIDTH fill (`Ui.width Ui.fill` on a `Ui.column` / `Ui.el` / `Ui.textColumn` child) | `align-self: stretch; width: 100%;` |
+
+The asymmetry isn't sloppy — it closes a real bug class. CSS
+Flexbox §9.8 resolves `%` lengths against a parent's USED size
+only when that size is "definite"; a flex-grow-derived size is
+indefinite for the purpose of `%` resolution on cross-axis
+children. Row parents commonly have indefinite heights (no
+`Ui.height` attr or a grown-via-flex parent), so emitting
+`height: 100%` on the cross-axis previously collapsed every
+fill-height child to text-content height (issue #63 — three-pane
+app shell, Input.multiline). Stripping it lets `align-self:
+stretch` do its job — stretching to the row's actual flex-
+derived height.
+
+The width axis keeps its explicit `100%` because column-parent
+widths are typically definite (block elements inherit width from
+`<body>` / viewport), AND `width: 100%` survives the `centerX`
+cascade (`align-self: center` defeats `align-self: stretch`,
+but `width: 100%` stays put so `[Ui.width fill, Ui.centerX]`
+still fills width before centring).
+
 ## Alignment + spacing + padding
 
 ```elm
@@ -902,6 +931,7 @@ The 8-module split (`State.sky` / `Update.sky` / `View/{Common,Posts,Detail,Comp
 | Input: `radio / radioRow / slider` | ✅ | `RadioOption` uses string values (Sky-side trade-off vs elm-ui's polymorphic option type to sidestep deeply-nested-polymorphic-record HM friction) |
 | Input: `placeholder` | ✅ | Renders as the HTML `placeholder=` attribute on the input |
 | Input: `labelAbove/Below/Left/Right/Hidden` | ✅ | LabelHidden emits `aria-label` on the wrapper |
+| Input: attrs split between wrapper + control | ✅ | v0.15.55+. Layout / size / alignment attrs on `Input.*` (`Ui.width`/`Ui.height`/`Ui.padding`/`Ui.spacing`/`Ui.alignX`/`Ui.alignY`/`Ui.nearby`/`Ui.pointer`/`Ui.overflow`) hoist to the outer wrapper so the flex chain stays intact; form / event / visual attrs (`Ui.htmlAttribute`, `Ui.onInput`, `Background.color`, `Font.color`, …) stay on the inner `<input>` / `<textarea>`. The inner control gains implicit `Ui.width Ui.fill + Ui.height Ui.fill` when ≥1 layout attr was hoisted (no implicit fill when zero layout attrs → defaults stay intrinsic). |
 | **Lazy**: `lazy / lazy2..lazy5` | ✅ | LRU-cached subtree, keyed on `(function-pointer, args fingerprint)`. Default cap 1024 entries; override via `SKY_UI_LAZY_CAP=N`. |
 | **Keyed**: `keyed` | ✅ | `sky-key` attribute |
 | **Nearby**: `above / below / onLeft / onRight / inFront / behind` | ✅ | Renderer wraps the parent with `position: relative` and the nearby Element with `position: absolute` + matching offsets |

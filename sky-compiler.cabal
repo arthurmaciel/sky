@@ -289,11 +289,13 @@ test-suite sky-tests
       Sky.Type.UfCycleGuardSpec
       Sky.Type.RecordFieldExactnessSpec
       Sky.Build.UiFillCascadeSpec
+      Sky.Build.UiFillCssSpec
       Sky.Build.UiMediaQuerySpec
       Sky.Build.UiPseudoClassSpec
       Sky.Build.UiTransitionAnimationSpec
       Sky.Build.UiAspectGridSpec
       Sky.Build.UiMultilineTextareaSpec
+      Sky.Build.InputAttrsSplitSpec
       Sky.Build.ExposingTypeCtorsSpec
       Sky.Build.LetForwardRefSpec
       Sky.Build.EntryLocalShadowsDepSpec

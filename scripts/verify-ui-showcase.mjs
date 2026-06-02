@@ -309,6 +309,53 @@ try {
             ok(`triple-inner flex-grow = 1`);
         }
 
+        // Input.multiline fill (#403 / v0.15.55 — the #63 follow-up).
+        // The outer column is fixed-height 120; Input.multiline carries
+        // `Ui.height fill` so the textarea should fill the column.
+        // Pre-fix the wrapWithLabel-emitted wrapper carried no layout
+        // attrs at all, so the textarea collapsed at content-line
+        // height (~22 px) even though the user supplied fill.
+        const inputTa = await page.evaluate(() => {
+            const ta = document.querySelector('[data-test-id="input-multiline-textarea"]');
+            if (!ta) return null;
+            const r = ta.getBoundingClientRect();
+            return { width: r.width, height: r.height };
+        });
+        if (inputTa) {
+            // Outer is 120px tall; textarea should fill it within tolerance.
+            approxEq("input-multiline-textarea height", inputTa.height, 120, PIXEL_TOLERANCE);
+        } else {
+            fail("input-multiline-textarea", "missing textarea[data-test-id=input-multiline-textarea]");
+        }
+
+        // F1 contract (v0.15.55) — the inner control's implicit
+        // `Ui.height Ui.fill` (injected by `implicitFillIfHoisted`
+        // when ≥1 layout attr was hoisted to the wrapper) must lower
+        // through `heightFillFor` per its parent context. In a column
+        // wrapper (LabelHidden = Ui.el = column parent) the inner
+        // textarea's height-fill is MAIN axis → `flex-grow: 1; min-
+        // height: 0;`. We assert the inline-style does NOT contain
+        // the harmful `height: 100%;` substring on the cross-axis
+        // child element. Pre-v0.15.55 had `align-self: stretch;
+        // height: 100%;` on row-cross-axis children which collapsed
+        // under indefinite parents.
+        const taInline = await page.evaluate(() => {
+            const ta = document.querySelector('[data-test-id="input-multiline-textarea"]');
+            if (!ta) return null;
+            return { style: ta.getAttribute("style") || "" };
+        });
+        if (taInline) {
+            // Stylesheet shouldn't carry the legacy `height: 100%;`
+            // signature in any cross-axis context. (Main-axis is
+            // flex-grow + min-height: 0; no `100%` involvement.)
+            if (taInline.style.includes("height: 100%;")) {
+                fail("F1 input-multiline-textarea cross-axis",
+                    `inline style still emits the pre-F1 height: 100%: ${taInline.style}`);
+            } else {
+                ok(`F1 input-multiline-textarea: no legacy height: 100% (style="${taInline.style.slice(0, 80)}...")`);
+            }
+        }
+
         // wrapWithLabel shape (AsRow propagation, the canonical
         // issue #63 reproducer for the horizontal axis).
         const wrapMid = await measure(page, "wrap-mid");

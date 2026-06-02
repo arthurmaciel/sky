@@ -28,11 +28,13 @@ import qualified Sky.Type.UiOnSubmitTypedRecordSpec
 import qualified Sky.Type.UfCycleGuardSpec
 import qualified Sky.Type.RecordFieldExactnessSpec
 import qualified Sky.Build.UiFillCascadeSpec
+import qualified Sky.Build.UiFillCssSpec
 import qualified Sky.Build.UiMediaQuerySpec
 import qualified Sky.Build.UiPseudoClassSpec
 import qualified Sky.Build.UiTransitionAnimationSpec
 import qualified Sky.Build.UiAspectGridSpec
 import qualified Sky.Build.UiMultilineTextareaSpec
+import qualified Sky.Build.InputAttrsSplitSpec
 import qualified Sky.Build.ExposingTypeCtorsSpec
 import qualified Sky.Build.LetForwardRefSpec
 import qualified Sky.Build.EntryLocalShadowsDepSpec
@@ -239,6 +241,12 @@ main = hspec $ do
     -- child marked `width: fill` then competed for vertical space,
     -- breaking the typical header/main/footer layout.
     describe "Sky.Build.UiFillCascade"   Sky.Build.UiFillCascadeSpec.spec
+    -- v0.15.55 F1: cross-axis fill emits ONLY `align-self: stretch;`
+    -- (was `align-self: stretch; width|height: 100%;`). The `100%`
+    -- was harmful when the parent's cross-axis was flex-grow-derived
+    -- (indefinite per CSS Flexbox §9.8), collapsing children that
+    -- asked for `Ui.height Ui.fill` to text-content height.
+    describe "Sky.Build.UiFillCss"       Sky.Build.UiFillCssSpec.spec
     -- Std.Ui.mediaQuery / Ui.breakpoint — issue #376. Compiles a
     -- tiny project + checks the lowered Go contains the runtime
     -- marker attrs (data-sky-mq-q / data-sky-mq-rules) + the
@@ -275,6 +283,13 @@ main = hspec $ do
     -- routes through a real <textarea> element with the value-attr
     -- → text-content splice the Live runtime already supports.
     describe "Sky.Build.UiMultilineTextarea" Sky.Build.UiMultilineTextareaSpec.spec
+    -- Input.* attrs partition between wrapper + inner control —
+    -- GitHub issue #63 follow-up: layout/size/alignment attrs
+    -- hoist to the wrapWithLabel wrapper so the layout chain
+    -- propagates; form / event / visual attrs stay on the inner
+    -- control. Pre-fix: textarea-fill-height inside a row
+    -- collapsed because the wrapper carried no layout attrs.
+    describe "Sky.Build.InputAttrsSplit" Sky.Build.InputAttrsSplitSpec.spec
     describe "Sky.Build.ExposingTypeCtors" Sky.Build.ExposingTypeCtorsSpec.spec
     describe "Sky.Build.LetForwardRef"     Sky.Build.LetForwardRefSpec.spec
     describe "Sky.Build.EntryLocalShadowsDep" Sky.Build.EntryLocalShadowsDepSpec.spec

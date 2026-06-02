@@ -1139,6 +1139,40 @@ view model =
    `Main.sky` dispatcher. See `examples/19-skyforum`'s 8-module
    form for the working shape.
 
+4. **`Input.*` size / layout attrs apply to the wrapper, form
+   attrs stay on the inner control.** Every `Std.Ui.Input.*` call
+   (text / multiline / email / username / search / currentPassword
+   / newPassword / slider / checkbox / radio / radioRow) routes
+   layout attrs (`Ui.width`/`Ui.height`/`Ui.padding`/`Ui.spacing`/
+   `Ui.alignX`/`Ui.alignY`/`Ui.nearby`/`Ui.pointer`/`Ui.overflow`)
+   to the outer wrapper `wrapWithLabel` emits, while form / event /
+   visual attrs stay on the inner `<input>` / `<textarea>`. So
+   `Input.multiline [Ui.height Ui.fill] {...}` inside a column-fill
+   parent fills the parent; `Background.color (Ui.rgb 240 240 240)`
+   colours the textarea itself, not the wrapper.
+
+### `Ui.fill` emission (v0.15.55+)
+
+`Ui.fill` lowers asymmetrically per the parent's flex direction:
+
+| Position | CSS emitted |
+|---|---|
+| Main-axis fill | `flex-grow: N; min-{w,h}: 0;` |
+| Cross-axis HEIGHT fill (row child) | bare `align-self: stretch;` — no `height: 100%` |
+| Cross-axis WIDTH fill (column / el / textColumn child) | `align-self: stretch; width: 100%;` |
+
+The asymmetry closes a real bug class. CSS Flexbox §9.8 resolves
+`%` against a parent's USED size only when "definite"; a flex-
+grow-derived height is indefinite. Row parents commonly have
+indefinite heights → the pre-v0.15.55 `height: 100%` on cross-
+axis fill collapsed every child to text-content height (issue
+#63 — three-pane app shell, Input.multiline → 22/51 px). Width
+keeps `100%` because column-parent widths are typically definite
+AND it survives the `[Ui.width fill, Ui.centerX]` cascade
+(`align-self: center` defeats `align-self: stretch` for
+positioning, but `width: 100%` stays put so the column still
+fills before centring).
+
 ### Surface highlights
 
 Full reference: `docs/skyui/overview.md`.
