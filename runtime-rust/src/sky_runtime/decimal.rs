@@ -25,9 +25,12 @@ pub fn decimal_from_int(n: i64) -> Decimal { Decimal(RD::from(n)) }
 pub fn decimal_from_float(f: f64) -> Decimal {
     Decimal(RD::from_f64(f).unwrap_or(RD::ZERO))
 }
-pub fn decimal_from_minor(units: i64, scale: i64) -> Decimal {
-    let scale = scale.max(0) as u32;
-    Decimal(RD::new(units, scale))
+// Std.Decimal.fromMinor places minor  (e.g. fromMinor 2 12345 -> 123.45).
+// Arg order is (places, minor): places is the scale, minor is the integer
+// value in minor units. Mantissa = minor, scale = places.
+pub fn decimal_from_minor(places: i64, minor: i64) -> Decimal {
+    let scale = places.max(0) as u32;
+    Decimal(RD::new(minor, scale))
 }
 pub fn decimal_zero() -> Decimal { Decimal(RD::ZERO) }
 pub fn decimal_one() -> Decimal { Decimal(RD::ONE) }
