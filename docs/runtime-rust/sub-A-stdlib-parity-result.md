@@ -533,3 +533,48 @@ Adaptation size: ~150-300 LOC across codegen + runtime + a regression example.
 
 **Workaround until adaptation lands:** stay on the pre-v0.15.40 upstream cut by not merging. The current Rust target works without Task.retryWith — users can write retry loops by hand using `Task.onError`.
 
+
+---
+
+## Sub-A.13 — Empty-literal type resolution (call-site param-type propagation)
+
+**Status:** ✅ shipped on `feat/runtime-rust`. Fixes the 4 empty-literal `E0283`
+errors in `examples/00-standard-libs` on `target=rust` with zero regressions.
+
+**Plan premise was false.** The plan (`.../2026-05-31-sub-A.13-type-default-propagation.md`)
+assumed `Solve._stRegions` holds concrete types at every region. Empirically it
+holds *unresolved* type vars (`TVar "_carg48"`) even for concretely-typed code,
+and the user's empty-literal nodes carry degenerate `(1,1)` regions absent from
+the map. So region-lookup alone fixes nothing here.
+
+**What shipped instead.** Resolution moved to the call site (`emitDefaultCall`),
+where the callee's parameter types are available. For each empty-collection arg
+(`[]` / `Nothing`):
+
+| Situation | Emission |
+|---|---|
+| Param fully concrete (`Vec<(String, Value)>`) | turbofish: `Vec::<(String, Value)>::new()` |
+| Var shared with a non-closure (data) sibling param | bare — Rust infers from the sibling (`withDefault [] xs`) |
+| Var unpinned, sig from `knownDefSig` (known-generic) | `i64` filler (`List.head []` → `Vec::<i64>::new()`) — safe, the collection is empty |
+| Var unpinned, sig inferred/ctor or callee unknown | bare — generated Rust sig may be concrete (`Std.Db.query`) |
+
+Closure params are excluded from sibling-pinning because a closure's own param
+may be unconstrained (`map (\x -> x*2) Nothing` — `T0` is the ambiguous closure
+arg, so default it to `i64`). Param sources are tagged (`SrcKnownSig` vs
+`SrcInferred`) so only known-generic sigs trigger the default.
+
+This resolves the **Sub-A.12 "F3"** deferral ("empty-literal defaulting
+regressed in naive form") — the naive monomorphic default regressed call args
+like `db_query [] : Vec<String>`; the call-site approach does not.
+
+### Verification
+- `tests/rust-codegen/{empty-list-head, maybe-map-nothing, result-err}.sky` — PASS.
+- `examples/00-standard-libs` (`target=rust`): zero empty-literal misfires.
+- `examples/rust/*`: 16/18 build; 17 & 18 fail **only** on sub-D (`ShouldRetry`
+  generic ADT) — no empty-literal regression.
+- `examples/01-hello-world` (`target=go`): clean (no Go-side touch).
+
+### Headline-gate note
+`examples/00-standard-libs` on `target=rust` is now blocked by **sub-D** (the
+generic-ADT codegen bugs + missing AEAD/retry kernels, ~46 errors), not by
+empty-literals. The 120/120 Rust gate closes once sub-D lands.

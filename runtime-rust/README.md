@@ -129,10 +129,14 @@ even for crates that use proc macros or derive macros.
 ### `examples/00-standard-libs` on `target=rust`
 
 - `target=go`: 120 / 120 assertions pass (the contractual headline gate).
-- `target=rust`: **4 cargo errors** remaining (down from 232 at sub-A start — 98% reduction). The
-  remaining four are codegen-polymorphism edge cases (empty-literal defaulting in test-only
-  positions, the `mapError`/`Maybe.map` inference cascade). See
-  `docs/runtime-rust/sub-A-stdlib-parity-result.md` for the full per-sub-plan timeline.
+- `target=rust`: the four empty-literal `E0283` errors are **fixed** by sub-A.13
+  (call-site param-type propagation — see "Remaining work"). The gate does **not**
+  yet reach 120/120 on Rust: the v0.15.45-51 upstream sync added Sky.Core.Task's
+  `ShouldRetry e` generic ADT plus AEAD/`retryWith` kernels, so the build now
+  surfaces **~46 Sub-D errors** (generic-ADT codegen bugs `E0599`/`E0412`/`E0107`/
+  `E0428`/`E0091` + missing crypto/retry kernels `E0425`). These are tracked under
+  the sub-D arc, not sub-A. Once sub-D step 4 + the kernel work land, this gate
+  closes. See `docs/runtime-rust/sub-A-stdlib-parity-result.md` for the timeline.
 
 These span the common shapes auto-FFI must handle: free functions, static
 methods (`Type::fn`), instance methods (`arg0.method`), `Display`/`FromStr`
@@ -660,7 +664,7 @@ CLAUDE.md non-negotiable §6 (added upstream v0.15.54) codifies disk hygiene as 
 
 | Limitation | Description | Workaround |
 |---|---|---|
-| Empty-literal type defaulting | `List.head []` / `Maybe.map _ Nothing` / `Result.mapError _ (Err _)` in test-only positions can't infer the element type — 4 such errors remain in `examples/00-standard-libs` on `target=rust`. | Sky source can annotate the literal's type. Sub-A.13 plan addresses this at the codegen level: `runtime-rust/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`. |
+| Empty-literal type resolution | ✅ fixed by sub-A.13 (call-site param-type propagation in `emitDefaultCall`). Residual edge: an empty list passed to a known-generic stdlib fn whose only type-pinning argument is a *closure with a body-determined param type* (e.g. `List.map (\s -> String.length s) []` in a discarded position) defaults the element to `i64` instead of inferring from the closure body. Not hit by the test suite; the closure-exclusion is what makes `map (\x -> x*2) Nothing` resolve. | Annotate the source, or bind the list to a typed `let`. |
 | `any` in record fields on `target=rust` | The Rust codegen refuses to emit `Box<dyn Any>` for an `any`-typed Sky record field (load-bearing architectural principle — see the section above). Build fails with a structured `error[Rust]: any-typed record field on \`--target rust\`` diagnostic. | Encode the heterogeneous field as an ADT upstream (the path PR #119 took for `RetryPolicy`), or — defence-in-depth — ship a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky` with an HM-pure shape. |
 | `Task.retryWith` on `target=rust` may need a thunk shape | Rust's `SkyTask = Pin<Box<dyn Future>>` is one-shot (not `Clone`); the retry loop needs a fresh Future per attempt. Decision deferred to the sub-D restart against v0.15.51: either the codegen wraps the Task arg in a thunk at the `retryWith` call site, or we redesign `SkyTask` to be cloneable, or upstream adopts a thunk-shaped `retryWith`. | TBD — captured in the new scope table above. |
 | `Result.mapError` inference cascade | After F1's polymorphic signature fix the closure infers; outer call-site inference can still ambiguate the SkyResult<E,T> ok-slot. | Wrap in a typed `let` to pin E1/E2 at the call site. |
@@ -736,12 +740,22 @@ The original sub-D plan targeted v0.15.44. Upstream has since shipped a substant
 
 ### Short-term (orthogonal to sub-D)
 
-- **Sub-A.13** — codegen-level type-default propagation for empty literals
-  (`vec![]` / `SkyMaybe::Nothing` / `SkyResult::Err`) in unconstrained
-  generic-argument positions. Closes the last 4 errors on
-  `examples/00-standard-libs` on `target=rust` (orthogonal to sub-D; lands
-  on `feat/runtime-rust` independently).
-  Plan: `runtime-rust/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`.
+- ~~**Sub-A.13**~~ — ✅ shipped. Empty-literal type resolution for `[]` /
+  `Nothing` / `Err`-`Ok`. Done via **call-site parameter-type propagation**
+  (in `emitDefaultCall`), not the region-type lookup the original plan assumed
+  — `Solve._stRegions` turned out to carry unresolved type vars at exactly
+  these nodes (user empties also get degenerate `(1,1)` regions), so the plan's
+  premise was false. Per empty-collection call arg: concrete param → turbofish;
+  var shared with a non-closure sibling → bare (Rust infers); unpinned var on a
+  known-generic sig → `i64` filler (safe, the collection is empty); inferred/
+  unknown sig → bare. This resolves the prior Sub-A.12 "F3" deferral (the naive
+  monomorphic default regressed function-call args like `db_query []`). The 4
+  empty-literal `E0283` errors in `examples/00-standard-libs` are fixed with
+  zero regressions across the 18 `examples/rust/*` + 3 `tests/rust-codegen/`
+  repros. NOTE: standard-libs still can't reach 120/120 on `target=rust` — it's
+  now blocked by the **sub-D** generic-ADT codegen bugs + missing crypto/retry
+  kernels (~46 errors), not by empty-literals.
+  Plan (premise superseded): `runtime-rust/superpowers/plans/2026-05-31-sub-A.13-type-default-propagation.md`.
 - **`Db.withTransaction` single-connection variant** — runtime helper that
   takes a reserved `PoolConnection` so rollback isolation is guaranteed
   without requiring user-side pool configuration.
