@@ -122,11 +122,12 @@ analyzeKernelUsage = foldMap analyzeMod
               then mempty { usesCrypto = True } else mempty
             , if modName == "Uuid" || "Sky.Core.Uuid" `isSuffixOf` modName
               then mempty { usesUuid = True } else mempty
-            , if modName == "Server" || "Sky.Http.Server" `isSuffixOf` modName
-              -- usesHttpServer alone pulls tokio (via hasTokio) and the server
-              -- module; do NOT set usesTaskRun — `main = Server.listen …` returns
-              -- a Task, so main must stay task-shaped (block_on'd), which the
-              -- usesTaskRun=True path would defeat (mainIsTask -> False).
+            , if modName == "Server" || "Sky.Http.Server" `isInfixOf` modName
+              -- isInfixOf so the submodules (Sky.Http.Server.WebSocket / .Stream)
+              -- also flip the flag. usesHttpServer alone pulls tokio (via
+              -- hasTokio) + the server module; do NOT set usesTaskRun — `main =
+              -- Server.listen …` returns a Task, so main must stay task-shaped
+              -- (block_on'd), which the usesTaskRun=True path would defeat.
               then mempty { usesHttpServer = True } else mempty
             -- Sky.Core.Http client (distinct from Sky.Http.Server above; the
             -- suffix check can't collide — Server is "Sky.Http.Server").
@@ -243,6 +244,16 @@ runtimeOpaqueTypes = Map.fromList
     -- Sky (defaultRequest + with* updates) so its struct fields must be pub.
     , (("Sky.Core.Http", "HttpResponse"), "sky_runtime::HttpResponse")
     , (("Sky.Core.Http", "HttpRequest"), "sky_runtime::HttpRequest")
+    -- Sub-D.2: Sky.Http.Server.WebSocket. WebSocketServer is the opaque per-peer
+    -- handle the stdlib pattern-matches (-> WsHandle enum, variant name matches
+    -- the Sky ctor). WebSocketServerCfg -> WsServerCfg (fn-pointer callbacks),
+    -- so `defaultCfg |> withOnX` record updates compile.
+    , (("Sky.Http.Server.WebSocket", "WebSocketServer"), "sky_runtime::WsHandle")
+    -- WsServerCfg is generic over the error E (the project's concrete error is
+    -- unnameable from the runtime). The value bakes in <SkyError>; the parametric
+    -- bridge (aliasToRustTypeDef) emits a generic alias that absorbs the phantom
+    -- `msg`: `pub type …Cfg<msg> = sky_runtime::WsServerCfg<SkyError>;`.
+    , (("Sky.Http.Server.WebSocket", "WebSocketServerCfg"), "sky_runtime::WsServerCfg<SkyError>")
     ]
 
 -- | Runtime kernels whose Rust signatures are generic and need a turbofish
@@ -289,6 +300,12 @@ kernelsNeedingErrorPin = Map.fromList
     , ("http_get",                 "::<SkyError>")
     , ("http_post",                "::<SkyError>")
     , ("http_request",             "::<SkyError>")
+    -- Sub-D.2: Sky.Http.Server.WebSocket kernels — each returns SkyTask<E, _>.
+    , ("server_web_socket_upgrade",              "::<SkyError>")
+    , ("server_web_socket_send_to_client",       "::<SkyError>")
+    , ("server_web_socket_send_binary_to_client","::<SkyError>")
+    , ("server_web_socket_broadcast",            "::<SkyError>")
+    , ("server_web_socket_close_client",         "::<SkyError>")
     -- AEAD encrypt/decrypt — single E parameter (sub-D)
     , ("crypto_aes_gcm_encrypt",   "::<SkyError>")
     , ("crypto_aes_gcm_decrypt",   "::<SkyError>")
@@ -967,9 +984,18 @@ aliasToRustTypeDef :: Map.Map String String -> String -> String -> String -> Can
 -- Sub-D: a record alias registered in runtimeOpaqueTypes (e.g. Std.Csv.Csv)
 -- emits a `pub use <runtime type> as <codegenName>;` alias instead of a fresh
 -- struct, so the runtime kernels can return/take the record by its real type.
-aliasToRustTypeDef _recordMap skyModName modPrefix name (Can.Alias _ (Can.TRecord _ _))
+aliasToRustTypeDef _recordMap skyModName modPrefix name (Can.Alias vars (Can.TRecord _ _))
     | Just rustPath <- Map.lookup (skyModName, name) runtimeOpaqueTypes =
-        [RPubUseAlias (toCamelCase (modPrefix ++ "_" ++ name)) rustPath]
+        let codegenName = toCamelCase (modPrefix ++ "_" ++ name)
+        in if null vars
+           -- Non-parametric (Csv, HttpResponse): plain re-export.
+           then [RPubUseAlias codegenName rustPath]
+           -- Parametric (WebSocketServerCfg msg): the runtime type's generics are
+           -- already pinned in rustPath (…<SkyError>), and the Sky var (`msg`) is
+           -- phantom. Emit a NON-generic alias and render usages without args
+           -- (see typeToRustString) — Rust forbids unused type-alias params, so
+           -- we drop `msg` entirely. `pub type Cfg = WsServerCfg<SkyError>;`.
+           else [RAliasDef codegenName rustPath]
 aliasToRustTypeDef recordMap _skyModName modPrefix name (Can.Alias vars ty) = case ty of
     Can.TRecord fields _ ->
         let sortedFields = sortFieldsByIndex (Map.toList fields)
@@ -1033,7 +1059,12 @@ typeToRustString recordMap t = case t of
     Can.TType modName name args ->
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-        in toCamelCase (modPrefix ++ name) ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
+        -- A registered runtimeOpaque type renders to its non-generic codegen
+        -- alias (its generics are pinned in the registry value, e.g.
+        -- WsServerCfg<SkyError>); drop the Sky args.
+        in if Map.member (modStr, name) runtimeOpaqueTypes
+           then toCamelCase (modPrefix ++ name)
+           else toCamelCase (modPrefix ++ name) ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
     Can.TLambda a b -> "fn(" ++ typeToRustString recordMap a ++ ") -> " ++ typeToRustString recordMap b
     Can.TAlias modName name pairs _inner ->
         -- Sub-D step 4: carry the alias's type args so a parametric record alias
@@ -1044,7 +1075,9 @@ typeToRustString recordMap t = case t of
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
             base = toCamelCase (modPrefix ++ name)
             args = map snd pairs
-        in if null args then base
+        -- runtimeOpaque alias: non-generic (generics pinned in its def); drop args.
+        in if Map.member (modStr, name) runtimeOpaqueTypes then base
+           else if null args then base
            else base ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
     _ -> "String"
 
@@ -3101,16 +3134,21 @@ itemToRustStrings (RustTypeAlias name ty) = ["type " ++ name ++ " = " ++ ty ++ "
 collectUndefinedTypes :: RustBuilder -> [String]
 collectUndefinedTypes b = 
     let allItems = concatMap modItems (builderModules b)
+        -- BASE name (generics stripped) so a parametric def like
+        -- `pub type Cfg<msg> = …;` registers as defining `Cfg`, matching the
+        -- base-name `referenced` set below (else ffiPlaceholder double-emits an
+        -- invalid generic `pub use …<…> as Cfg;`).
+        defName = takeWhile (/= '<')
         defined = Set.fromList
-            [ name | RustStruct name _ <- allItems ]
+            [ defName name | RustStruct name _ <- allItems ]
             `Set.union` Set.fromList
-            [ name | RStructDef name _ _ <- builderTypes b ]
+            [ defName name | RStructDef name _ _ <- builderTypes b ]
             `Set.union` Set.fromList
-            [ name | REnumDef name _ _ <- builderTypes b ]
+            [ defName name | REnumDef name _ _ <- builderTypes b ]
             `Set.union` Set.fromList
-            [ name | RAliasDef name _ <- builderTypes b ]
+            [ defName name | RAliasDef name _ <- builderTypes b ]
             `Set.union` Set.fromList
-            [ name | RPubUseAlias name _ <- builderTypes b ]
+            [ defName name | RPubUseAlias name _ <- builderTypes b ]
             `Set.union` builderFfiOpaques b  -- types defined by Rust FFI bindings
         -- Collect type names from function parameter types (after ": ")
         -- Sub-D step 4: compare/emit the BASE type name (generic args stripped).
@@ -3244,7 +3282,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     [ name ++ " = " ++ spec
     | usesHttpServer uk
     , (name, spec) <-
-        [ ("axum",       "\"0.7\"")
+        [ ("axum",       "{ version = \"0.7\", features = [\"ws\"] }")
         , ("tower-http", "{ version = \"0.5\", features = [\"fs\", \"catch-panic\"] }")
         ]
     , name `notElem` userDepNames ] ++

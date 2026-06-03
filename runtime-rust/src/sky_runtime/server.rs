@@ -204,7 +204,7 @@ fn parse_cookies(header: &str, out: &mut HashMap<String, String>) {
     }
 }
 
-async fn build_request(req: axum::extract::Request) -> ServerRequest {
+async fn build_request(req: axum::extract::Request) -> (ServerRequest, Option<axum::extract::ws::WebSocketUpgrade>) {
     use axum::extract::{RawPathParams, FromRequestParts};
     let method = req.method().as_str().to_string();
     let uri = req.uri().clone();
@@ -223,10 +223,15 @@ async fn build_request(req: axum::extract::Request) -> ServerRequest {
         Ok(rpp) => rpp.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         Err(_) => HashMap::new(),
     };
+    // Sub-D.2: extract the WebSocket upgrader if this is an upgrade request
+    // (succeeds only when the Connection/Upgrade/Sec-WebSocket-* headers are
+    // present). Stashed via task-local so server_web_socket_upgrade can reach it.
+    let upgrader = axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &())
+        .await.ok();
     let body = axum::body::to_bytes(body, MAX_BODY).await
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
-    ServerRequest { method, path, body, headers, params, query, cookies, remoteAddr: String::new() }
+    (ServerRequest { method, path, body, headers, params, query, cookies, remoteAddr: String::new() }, upgrader)
 }
 
 fn to_axum_response(r: ServerResponse) -> axum::response::Response {
@@ -252,11 +257,22 @@ fn method_router(method: &str, h: ErasedHandler) -> axum::routing::MethodRouter 
     let svc = move |req: axum::extract::Request| {
         let h = h.clone();
         async move {
-            let sky_req = build_request(req).await;
-            match h(sky_req).await {
-                Ok(resp) => to_axum_response(resp),
-                Err(_) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
-            }
+            let (sky_req, upgrader) = build_request(req).await;
+            // Run the handler with the WS upgrader + a response slot in scope.
+            // If the handler called server_web_socket_upgrade, it stashed the
+            // real 101 response in WS_RESPONSE — prefer it over the sentinel.
+            WS_UPGRADER.scope(std::cell::Cell::new(upgrader), async move {
+                WS_RESPONSE.scope(std::cell::Cell::new(None), async move {
+                    let result = h(sky_req).await;
+                    if let Some(ws_resp) = WS_RESPONSE.with(|c| c.take()) {
+                        return ws_resp;
+                    }
+                    match result {
+                        Ok(resp) => to_axum_response(resp),
+                        Err(_) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
+                    }
+                }).await
+            }).await
         }
     };
     match method.to_uppercase().as_str() {
@@ -299,6 +315,174 @@ pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<Se
             Err(e) => SkyResult::Err(format!("Server.listen: serve: {}", e).into()),
         }
     })
+}
+
+// ─── Sub-D.2: Sky.Http.Server.WebSocket ───────────────────────────────────
+//
+// Bridged types (runtimeOpaqueTypes): WebSocketServer -> WsHandle (the opaque
+// per-peer handle the stdlib pattern-matches as `WebSocketServer raw`);
+// WebSocketServerCfg -> WsServerCfg (fn-pointer callbacks so the stdlib's
+// `defaultCfg |> withOnX` record updates compile — see the design doc on why
+// non-capturing handlers are the first-cut limit).
+
+use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// Sky.Http.Server.WebSocket.WebSocketServer — opaque per-peer handle. The
+/// variant name matches the Sky constructor so `case sock of WebSocketServer
+/// raw` lowers onto it.
+#[derive(Clone, Copy, Debug)]
+pub enum WsHandle {
+    WebSocketServer(i64),
+}
+
+/// Sky.Http.Server.WebSocket.WebSocketServerCfg — fn-pointer callbacks (cannot
+/// capture; capturing handlers need Arc<dyn Fn> erasure, a follow-up).
+///
+/// Generic over the error type E because the project's concrete error
+/// (SkyCoreErrorError) is unnameable from the runtime crate. The Sky-side
+/// bridge pins `E = SkyError` (and drops the phantom `msg`) via a generic type
+/// alias — see aliasToRustTypeDef. fn pointers don't store E, so WsServerCfg<E>
+/// is Send/Copy-of-fields regardless of E.
+#[allow(non_snake_case)]
+#[derive(Clone)]
+pub struct WsServerCfg<E> {
+    // Uncurried fn-pointer fields, matching how the codegen lowers multi-arg
+    // lambda VALUES (`\sock msg ->` → `|sock, msg|`). NOTE: this does not yet
+    // compile end-to-end — the codegen renders function TYPES curried
+    // (`A -> B -> C` → fn(A)->fn(B)->C), so `withOnMessage`'s callback param
+    // (curried) disagrees with both these fields and the uncurried lambda
+    // values. The fix is a general codegen change: render TLambda arrow-chains
+    // uncurried. See the Sub-D.2 design doc. Until then, server WebSocket is a
+    // compiling runtime foundation only.
+    pub onConnect: fn(WsHandle) -> SkyTask<E, ()>,
+    pub onMessage: fn(WsHandle, String) -> SkyTask<E, ()>,
+    pub onClose: fn(WsHandle) -> SkyTask<E, ()>,
+    pub onError: fn(WsHandle, E) -> SkyTask<E, ()>,
+    pub maxMessageBytes: i64,
+    pub originPatterns: Vec<String>,
+}
+
+enum WsOut { Text(String), Binary(Vec<u8>), Close }
+
+fn ws_registry() -> &'static Mutex<HashMap<i64, tokio::sync::mpsc::UnboundedSender<WsOut>>> {
+    static R: OnceLock<Mutex<HashMap<i64, tokio::sync::mpsc::UnboundedSender<WsOut>>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+static WS_NEXT_ID: AtomicI64 = AtomicI64::new(1);
+
+tokio::task_local! {
+    // The axum upgrader for the in-flight request (Some only on a WS upgrade).
+    static WS_UPGRADER: std::cell::Cell<Option<axum::extract::ws::WebSocketUpgrade>>;
+    // The 101 response server_web_socket_upgrade produced (preferred by method_router).
+    static WS_RESPONSE: std::cell::Cell<Option<axum::response::Response>>;
+}
+
+async fn ws_loop<E: From<String> + Send + 'static>(mut socket: axum::extract::ws::WebSocket, cfg: WsServerCfg<E>, id: i64) {
+    use axum::extract::ws::Message;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsOut>();
+    ws_registry().lock().unwrap().insert(id, tx);
+    let _ = (cfg.onConnect)(WsHandle::WebSocketServer(id)).await;
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Text(t))) => { let _ = (cfg.onMessage)(WsHandle::WebSocketServer(id), t).await; }
+                Some(Ok(Message::Binary(b))) => {
+                    let s = bytes_to_sky(&b);
+                    let _ = (cfg.onMessage)(WsHandle::WebSocketServer(id), s).await;
+                }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => {} // Ping/Pong auto-handled by axum
+                Some(Err(e)) => {
+                    let _ = (cfg.onError)(WsHandle::WebSocketServer(id), format!("ws read error: {}", e).into()).await;
+                    break;
+                }
+            },
+            outgoing = rx.recv() => match outgoing {
+                Some(WsOut::Text(s)) => { if socket.send(Message::Text(s)).await.is_err() { break; } }
+                Some(WsOut::Binary(b)) => { if socket.send(Message::Binary(b)).await.is_err() { break; } }
+                Some(WsOut::Close) => { let _ = socket.send(Message::Close(None)).await; break; }
+                None => break,
+            },
+        }
+    }
+    let _ = (cfg.onClose)(WsHandle::WebSocketServer(id)).await;
+    ws_registry().lock().unwrap().remove(&id);
+}
+
+fn ws_production() -> bool {
+    let v = std::env::var("ENV").or_else(|_| std::env::var("SKY_ENV")).unwrap_or_default();
+    !matches!(v.as_str(), "" | "dev" | "development" | "local")
+}
+
+fn ws_resp(status: i64, body: &str) -> ServerResponse {
+    ServerResponse { status, body: body.to_string(), headers: HashMap::new(), contentType: "text/plain".to_string() }
+}
+
+/// ServerWebSocket_upgrade : Request -> WebSocketServerCfg -> Task Error Response
+pub fn server_web_socket_upgrade<E: From<String> + Send + 'static>(_req: ServerRequest, cfg: WsServerCfg<E>) -> SkyTask<E, ServerResponse> {
+    Box::pin(async move {
+        if ws_production() && cfg.originPatterns.is_empty() {
+            return ok_res(ws_resp(403, "websocket: origin allowlist required in production"));
+        }
+        let upgrader = WS_UPGRADER.try_with(|c| c.take()).ok().flatten();
+        match upgrader {
+            Some(up) => {
+                let id = WS_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let resp = up.on_upgrade(move |socket| ws_loop(socket, cfg, id));
+                let _ = WS_RESPONSE.try_with(|c| c.set(Some(resp)));
+                // Sentinel — method_router returns WS_RESPONSE instead of this.
+                ok_res(ServerResponse { status: 101, body: String::new(), headers: HashMap::new(), contentType: String::new() })
+            }
+            None => ok_res(ws_resp(400, "websocket: expected an Upgrade request")),
+        }
+    })
+}
+
+fn ws_send_raw(id: i64, out: WsOut) -> bool {
+    match ws_registry().lock().unwrap().get(&id) {
+        Some(tx) => tx.send(out).is_ok(),
+        None => false,
+    }
+}
+
+/// ServerWebSocket_sendToClient : Int -> String -> Task Error ()
+pub fn server_web_socket_send_to_client<E: From<String> + Send + 'static>(id: i64, msg: String) -> SkyTask<E, ()> {
+    Box::pin(async move {
+        if ws_send_raw(id, WsOut::Text(msg)) { ok_res(()) }
+        else { SkyResult::Err(format!("ws: no client {}", id).into()) }
+    })
+}
+
+/// ServerWebSocket_sendBinaryToClient : Int -> String -> Task Error ()
+pub fn server_web_socket_send_binary_to_client<E: From<String> + Send + 'static>(id: i64, msg: String) -> SkyTask<E, ()> {
+    Box::pin(async move {
+        if ws_send_raw(id, WsOut::Binary(sky_bytes(&msg))) { ok_res(()) }
+        else { SkyResult::Err(format!("ws: no client {}", id).into()) }
+    })
+}
+
+/// ServerWebSocket_broadcast : List Int -> String -> Task Error ()
+pub fn server_web_socket_broadcast<E: From<String> + Send + 'static>(ids: Vec<i64>, msg: String) -> SkyTask<E, ()> {
+    Box::pin(async move {
+        let mut any_ok = false;
+        {
+            let reg = ws_registry().lock().unwrap();
+            for id in &ids {
+                if let Some(tx) = reg.get(id) {
+                    if tx.send(WsOut::Text(msg.clone())).is_ok() { any_ok = true; }
+                }
+            }
+        }
+        if ids.is_empty() || any_ok { ok_res(()) }
+        else { SkyResult::Err("ws broadcast: every send failed".to_string().into()) }
+    })
+}
+
+/// ServerWebSocket_closeClient : Int -> Task Error () (idempotent)
+pub fn server_web_socket_close_client<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E, ()> {
+    Box::pin(async move { let _ = ws_send_raw(id, WsOut::Close); ok_res(()) })
 }
 
 #[cfg(test)]
