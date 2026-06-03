@@ -73,6 +73,11 @@ pub mod http_client;
 #[cfg(feature = "http_client")]
 pub use http_client::*;
 
+#[cfg(feature = "tokio")]
+pub mod tea;
+#[cfg(feature = "tokio")]
+pub use tea::*;
+
 pub mod ffi_polyfills;
 pub use ffi_polyfills::*;
 

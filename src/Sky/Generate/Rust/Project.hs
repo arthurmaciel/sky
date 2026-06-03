@@ -118,7 +118,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- Sky.Core.Http client only when used (pulls reqwest).
         httpMod = if RustBuilder.usesHttp usage then ["pub mod http_client;"] else []
         httpUse = if RustBuilder.usesHttp usage then ["pub use http_client::*;"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse)
+        -- Sub-E: TEA (Cmd/Sub/Cli.program) only when used.
+        teaMod = if RustBuilder.usesTea usage then ["pub mod tea;"] else []
+        teaUse = if RustBuilder.usesTea usage then ["pub use tea::*;"] else []
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ teaMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ teaUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode

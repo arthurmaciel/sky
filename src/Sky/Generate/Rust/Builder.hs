@@ -46,6 +46,7 @@ data UsedKernels = UsedKernels
     , usesUuid :: Bool            -- Sky.Core.Uuid.* used → uuid_kernel + uuid crate (v4+v7)
     , usesHttpServer :: Bool      -- Sky.Http.Server.* used → server module + axum
     , usesHttp :: Bool            -- Sky.Core.Http.* used → http client module + reqwest
+    , usesTea :: Bool             -- Cmd/Sub/Cli.program used → tea module (tokio)
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -61,9 +62,10 @@ instance Semigroup UsedKernels where
         , usesUuid = usesUuid a || usesUuid b
         , usesHttpServer = usesHttpServer a || usesHttpServer b
         , usesHttp = usesHttp a || usesHttp b
+        , usesTea = usesTea a || usesTea b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False False False False
 
 -- | Walk all expressions across all modules to detect kernel usage.
 -- Ensures we only emit the runtime stubs and Cargo deps that are actually needed.
@@ -133,6 +135,12 @@ analyzeKernelUsage = foldMap analyzeMod
             -- suffix check can't collide — Server is "Sky.Http.Server").
             , if modName == "Http" || "Sky.Core.Http" `isSuffixOf` modName
               then mempty { usesHttp = True } else mempty
+            -- Sub-E: TEA — Cmd / Sub / Cli.program → tea module (tokio). Cli's
+            -- program returns a Task, so it also needs the tokio runtime.
+            , if modName `elem` ["Cmd", "Sub", "Cli"]
+                 || "Std.Cmd" `isSuffixOf` modName || "Std.Sub" `isSuffixOf` modName
+                 || "Std.Cli" `isSuffixOf` modName || "Sky.Cli" `isSuffixOf` modName
+              then mempty { usesTea = True } else mempty
             , if "Time" `isPrefixOf` modName || "Sky.Core.Time" `isPrefixOf` modName
               then mempty { usesTime = True } <> (if fnName == "sleep" then mempty { usesTaskRun = True } else mempty)
               else mempty
@@ -156,6 +164,10 @@ zeroArgKernelDefs = Set.fromList
     , ("Sky.Core.Dict", "empty")
     , ("Math", "pi"),  ("Math", "e")
     , ("Sky.Core.Math", "pi"), ("Sky.Core.Math", "e")
+    -- Sub-E: Cmd.none / Sub.none are zero-arg values (Cmd msg / Sub msg) but
+    -- lower to `cmd_none()` / `sub_none()` (generic fns) on Rust.
+    , ("Cmd", "none"), ("Std.Cmd", "none")
+    , ("Sub", "none"), ("Std.Sub", "none")
     ]
 
 -- | Collect all zero-argument user-defined definitions across all modules.
@@ -348,6 +360,9 @@ kernelsZeroArg = Set.fromList
     , "dict_empty"
     , "math_pi", "math_e"
     , "uuid_v4", "uuid_v7"
+    -- Sub-E: Cmd.none / Sub.none are zero-arg values (Cmd msg / Sub msg) reached
+    -- via the Ffi.kernel alias path -> emitKernel checks this bare-name set.
+    , "cmd_none", "sub_none"
     ]
 
 -- | Context threaded through expression emission
@@ -1052,6 +1067,9 @@ typeToRustString recordMap t = case t of
     Can.TType _ "Char" [] -> "char"
     Can.TType _ "String" [] -> "String"
     Can.TType _ "Task" [_, a] -> "SkyTask<" ++ typeToRustString recordMap a ++ ">"
+    -- Sub-E: TEA Cmd/Sub are generic over the message type.
+    Can.TType _ "Cmd" [m] -> "SkyCmd<" ++ typeToRustString recordMap m ++ ">"
+    Can.TType _ "Sub" [m] -> "SkySub<" ++ typeToRustString recordMap m ++ ">"
     Can.TUnit -> "()"
     Can.TType _ "List" [a] -> "Vec<" ++ typeToRustString recordMap a ++ ">"
     Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString recordMap a ++ ">"
@@ -1878,6 +1896,15 @@ exprToRustInner ctx e = case e of
         , not (ecInGenericFn ctx) ->
             "SkyResult::<SkyError, i64>::" ++ ctorName
                 ++ "(" ++ exprToRustString ctx innerArg ++ ")"  -- default (Task 8: stderr warning)
+    -- Sub-E: Cli.program { init, update, view, subscriptions, onLine } — the cfg
+    -- is an anonymous record the runtime can't name, so splice its fields into
+    -- the generic cli_program(init, update, view, subs, onLine) directly.
+    Can.Call (Ann.At _ (Can.VarKernel "Cli" "program")) [Ann.At _ (Can.Record fields)] ->
+        let fld n = case Map.lookup n fields of
+                Just e  -> exprToRustString ctx e
+                Nothing -> "/* Cli.program: missing field " ++ n ++ " */"
+        in "cli_program(" ++ intercalate ", "
+               (map fld ["init", "update", "view", "subscriptions", "onLine"]) ++ ")"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             -- sub-A.12 F2: detect partial application (Sky source has currying;
