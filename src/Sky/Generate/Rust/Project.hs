@@ -115,7 +115,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- Sub-D.1: Sky.Http.Server only when used (pulls axum at step 4).
         srvMod = if RustBuilder.usesHttpServer usage then ["pub mod server;"] else []
         srvUse = if RustBuilder.usesHttpServer usage then ["pub use server::*;"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse)
+        -- Sky.Core.Http client only when used (pulls reqwest).
+        httpMod = if RustBuilder.usesHttp usage then ["pub mod http_client;"] else []
+        httpUse = if RustBuilder.usesHttp usage then ["pub use http_client::*;"] else []
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode

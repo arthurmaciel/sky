@@ -18,6 +18,7 @@ zstd = { version = "0.13", optional = true }
 csv = { version = "1", optional = true }
 axum = { version = "0.7", optional = true }
 tower-http = { version = "0.5", features = ["fs", "catch-panic"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"], optional = true }
 subtle = "2"
 hmac = "0.12"
 sha1 = "0.10"
@@ -42,7 +43,8 @@ crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
 server = ["tokio", "axum", "tower-http"]
-full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "server"]
+http_client = ["tokio", "reqwest"]
+full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "server", "http_client"]
 
 [dev-dependencies]
 regex = "1"

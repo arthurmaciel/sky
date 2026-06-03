@@ -45,6 +45,7 @@ data UsedKernels = UsedKernels
     , usesFile :: Bool            -- File.* imported
     , usesUuid :: Bool            -- Sky.Core.Uuid.* used → uuid_kernel + uuid crate (v4+v7)
     , usesHttpServer :: Bool      -- Sky.Http.Server.* used → server module + axum
+    , usesHttp :: Bool            -- Sky.Core.Http.* used → http client module + reqwest
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -59,9 +60,10 @@ instance Semigroup UsedKernels where
         , usesFile = usesFile a || usesFile b
         , usesUuid = usesUuid a || usesUuid b
         , usesHttpServer = usesHttpServer a || usesHttpServer b
+        , usesHttp = usesHttp a || usesHttp b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False False False
 
 -- | Walk all expressions across all modules to detect kernel usage.
 -- Ensures we only emit the runtime stubs and Cargo deps that are actually needed.
@@ -126,6 +128,10 @@ analyzeKernelUsage = foldMap analyzeMod
               -- a Task, so main must stay task-shaped (block_on'd), which the
               -- usesTaskRun=True path would defeat (mainIsTask -> False).
               then mempty { usesHttpServer = True } else mempty
+            -- Sky.Core.Http client (distinct from Sky.Http.Server above; the
+            -- suffix check can't collide — Server is "Sky.Http.Server").
+            , if modName == "Http" || "Sky.Core.Http" `isSuffixOf` modName
+              then mempty { usesHttp = True } else mempty
             , if "Time" `isPrefixOf` modName || "Sky.Core.Time" `isPrefixOf` modName
               then mempty { usesTime = True } <> (if fnName == "sleep" then mempty { usesTaskRun = True } else mempty)
               else mempty
@@ -232,6 +238,11 @@ runtimeOpaqueTypes = Map.fromList
     , (("Sky.Http.Server", "Response"), "sky_runtime::ServerResponse")
     , (("Sky.Http.Server", "Route"), "sky_runtime::ServerRoute")
     , (("Sky.Http.Server", "Cookie"), "sky_runtime::ServerCookie")
+    -- Sky.Core.Http client: the response record + the request record map to
+    -- runtime structs. HttpResponse is kernel-returned; HttpRequest is built in
+    -- Sky (defaultRequest + with* updates) so its struct fields must be pub.
+    , (("Sky.Core.Http", "HttpResponse"), "sky_runtime::HttpResponse")
+    , (("Sky.Core.Http", "HttpRequest"), "sky_runtime::HttpRequest")
     ]
 
 -- | Runtime kernels whose Rust signatures are generic and need a turbofish
@@ -274,6 +285,10 @@ kernelsNeedingErrorPin = Map.fromList
     , ("server_delete",            "::<SkyError, _>")
     , ("server_any",               "::<SkyError, _>")
     , ("server_listen",            "::<SkyError>")
+    -- Sky.Core.Http client — each returns SkyTask<E, HttpResponse>; pin E.
+    , ("http_get",                 "::<SkyError>")
+    , ("http_post",                "::<SkyError>")
+    , ("http_request",             "::<SkyError>")
     -- AEAD encrypt/decrypt — single E parameter (sub-D)
     , ("crypto_aes_gcm_encrypt",   "::<SkyError>")
     , ("crypto_aes_gcm_decrypt",   "::<SkyError>")
@@ -3117,6 +3132,11 @@ collectUndefinedTypes b =
                 , not ("Result" `isPrefixOf` t)
                 , not ("SkyMaybe" `isPrefixOf` t)
                 , not ("SkyResult" `isPrefixOf` t)
+                -- SkyTask<A> as a param type (a Task-typed function arg) must be
+                -- excluded too — the bare "SkyTask" is in the exact-match list
+                -- but the generic form slips past it, emitting a colliding
+                -- `type SkyTask = String;` placeholder (E0428 vs the real alias).
+                , not ("SkyTask" `isPrefixOf` t)
                 , not ("Box<" `isPrefixOf` t)
                 , not ("fn(" `isPrefixOf` t)
             ]
@@ -3228,15 +3248,18 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
         , ("tower-http", "{ version = \"0.5\", features = [\"fs\", \"catch-panic\"] }")
         ]
     , name `notElem` userDepNames ] ++
+    -- Sky.Core.Http client: reqwest only when used. rustls (no system OpenSSL).
+    [ "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"gzip\"] }"
+    | usesHttp uk, "reqwest" `notElem` userDepNames ] ++
     [ emitDepLine name spec
     | (name, spec) <- rustDeps
     , not (null name)
     ]
   where
     userDepNames = [ n | (n, _) <- rustDeps, not (null n) ]
-    -- Sky.Http.Server's axum serve loop needs tokio's net (TcpListener).
+    -- Sky.Http.Server's axum serve loop + the reqwest client both need tokio net.
     tokioFeats = ["rt", "rt-multi-thread", "macros", "time"]
-                 ++ ["net" | usesHttpServer uk]
+                 ++ ["net" | usesHttpServer uk || usesHttp uk]
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"

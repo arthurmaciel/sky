@@ -68,6 +68,11 @@ pub mod server;
 #[cfg(feature = "server")]
 pub use server::*;
 
+#[cfg(feature = "http_client")]
+pub mod http_client;
+#[cfg(feature = "http_client")]
+pub use http_client::*;
+
 pub mod ffi_polyfills;
 pub use ffi_polyfills::*;
 
