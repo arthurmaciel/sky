@@ -66,9 +66,12 @@ the rendering subsystem. Reference: `runtime-go/rt/cli.go` (~210 lines) +
    `Cmd.perform` for **non-diverging** tasks — verified `Cmd.perform
    (Task.succeed 42) Loaded` delivers `Loaded(Ok 42)` through the channel.
    Needs tokio `sync` feature (added to emitCargoToml when usesTea).
-3. **Cmd.perform — diverging-task inference** — the stock `examples/20-cli-counter`
-   uses `Cmd.perform (System.exit 0)` (a `!`-returning task → free `A`, E0283).
-   Default the phantom A/E at the diverging call site so the stock example builds.
+3. ✅ **Cmd.perform — diverging-task inference** (DONE) — `Cmd.perform
+   (System.exit 0) …` left the task's success/error types free (E0283).
+   A targeted Call arm pins `cmd_perform::<SkyError, i64, _, _>` when the task
+   arg renders as `system_exit…` (the value is never produced — the process
+   exits first). The stock `examples/20-cli-counter` now builds + runs:
+   `count=0 1 2`, then `q` exits 0. Test: `tests/rust-codegen/cli-quit-test.sh`.
 4. **WS client Sub source** — `Sub_subscribeWebSocket` feeds the msgCh; the
    Task-tier WS client (connect/send/close via tokio-tungstenite) + onMessage
    subscription → completes the Rust WebSocket client.

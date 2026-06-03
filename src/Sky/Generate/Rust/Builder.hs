@@ -1905,6 +1905,14 @@ exprToRustInner ctx e = case e of
                 Nothing -> "/* Cli.program: missing field " ++ n ++ " */"
         in "cli_program(" ++ intercalate ", "
                (map fld ["init", "update", "view", "subscriptions", "onLine"]) ++ ")"
+    -- Sub-E step 3: Cmd.perform with a DIVERGING task (System.exit -> `!`) leaves
+    -- the task's success/error types free (E0283). Pin them — the value is never
+    -- produced (the process exits first), so A is a phantom i64 filler.
+    Can.Call cmdPerformFn (task0 : rest)
+        | "cmd_perform" == exprToRustString ctx cmdPerformFn
+        , "system_exit" `isPrefixOf` exprToRustString ctx task0 ->
+            "cmd_perform::<SkyError, i64, _, _>("
+                ++ intercalate ", " (map (exprToRustString ctx) (task0 : rest)) ++ ")"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             -- sub-A.12 F2: detect partial application (Sky source has currying;
