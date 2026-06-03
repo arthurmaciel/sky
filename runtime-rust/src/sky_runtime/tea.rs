@@ -52,25 +52,105 @@ pub fn sub_batch<M>(list: Vec<SkySub<M>>) -> SkySub<M> { SkySub::Batch(list) }
 /// Sub.every : Int -> msg -> Sub msg — dispatch `msg` every `ms` milliseconds.
 pub fn sub_every<M>(ms: i64, msg: M) -> SkySub<M> { SkySub::Every { ms, msg } }
 
+// ─── TEA event loop plumbing (Sub.every tickers + Cmd firing) ───────────────
+
+/// Internal loop event: a raw stdin line, an already-built Msg (from a ticker or
+/// a Cmd.perform result), or EOF.
+enum CliEvent<M> {
+    Line(String),
+    Msg(M),
+    Eof,
+}
+
+/// Tracks the goroutine-equivalent ticker tasks spawned for the active
+/// `Sub.every` subscriptions. `update` stops all + respawns from the new Sub
+/// (mirrors tea_subs.go: one program, one model, re-evaluated each tick).
+struct SubManager<M> {
+    tx: tokio::sync::mpsc::UnboundedSender<CliEvent<M>>,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl<M: Clone + Send + 'static> SubManager<M> {
+    fn new(tx: tokio::sync::mpsc::UnboundedSender<CliEvent<M>>) -> Self {
+        SubManager { tx, handles: Vec::new() }
+    }
+    fn stop_all(&mut self) {
+        for h in self.handles.drain(..) {
+            h.abort();
+        }
+    }
+    fn update(&mut self, sub: SkySub<M>) {
+        self.stop_all();
+        self.spawn(sub);
+    }
+    fn spawn(&mut self, sub: SkySub<M>) {
+        match sub {
+            SkySub::None => {}
+            SkySub::Batch(items) => {
+                for it in items {
+                    self.spawn(it);
+                }
+            }
+            SkySub::Every { ms, msg } => {
+                if ms <= 0 {
+                    return;
+                }
+                let tx = self.tx.clone();
+                let dur = std::time::Duration::from_millis(ms as u64);
+                // First tick after `ms` (sleep-loop, matching Go's time.After).
+                let h = tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(dur).await;
+                        if tx.send(CliEvent::Msg(msg.clone())).is_err() {
+                            break;
+                        }
+                    }
+                });
+                self.handles.push(h);
+            }
+        }
+    }
+}
+
+/// Fire a Cmd: None/Batch recurse; Perform spawns the composed task→toMsg thunk
+/// and pushes the resulting Msg back into the loop channel.
+fn cli_run_cmd<M: Send + 'static>(cmd: SkyCmd<M>, tx: &tokio::sync::mpsc::UnboundedSender<CliEvent<M>>) {
+    match cmd {
+        SkyCmd::None => {}
+        SkyCmd::Batch(items) => {
+            for c in items {
+                cli_run_cmd(c, tx);
+            }
+        }
+        SkyCmd::Perform(thunk) => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let msg = thunk().await;
+                let _ = tx.send(CliEvent::Msg(msg));
+            });
+        }
+    }
+}
+
 // ─── Sky.Cli — line-oriented TEA loop ──────────────────────────────────────
 
 /// Cli.program { init, update, view, subscriptions, onLine } : Task Error ().
 ///
-/// STEP 1: init -> view, then read stdin lines, dispatch onLine through update,
-/// re-render view, until EOF. The returned Cmd/Sub are accepted but not yet
-/// fired (Cmd.perform / Sub.every land in steps 2-3 once the msg channel +
-/// subManager + tokio::select loop are in place).
+/// init -> fire cmd -> subs -> view; then fold each event (stdin line via
+/// onLine, ticker/Cmd.perform Msg) through update -> re-fire cmd -> re-subs ->
+/// view, until stdin EOF. Stdin is read on a blocking task; tickers + perform
+/// results merge into the same single-threaded update sequence via one channel.
 pub fn cli_program<Model, Msg, E, FInit, FUpdate, FView, FSubs, FOnLine>(
     init: FInit,
     update: FUpdate,
     view: FView,
-    _subscriptions: FSubs,
+    subscriptions: FSubs,
     on_line: FOnLine,
 ) -> SkyTask<E, ()>
 where
     E: Send + 'static,
     Model: Clone + Send + 'static,
-    Msg: Send + 'static,
+    Msg: Clone + Send + 'static,
     FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + 'static,
     FView: Fn(Model) -> String + Send + 'static,
@@ -78,22 +158,46 @@ where
     FOnLine: Fn(String) -> Msg + Send + 'static,
 {
     Box::pin(async move {
-        use std::io::{self, BufRead, Write};
-        let (mut model, _cmd) = init(());
+        use std::io::Write;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CliEvent<Msg>>();
+
+        // Blocking stdin reader → raw Line events, then Eof. onLine is applied in
+        // the main task (keeps it off the blocking thread / out of Send bounds).
+        let line_tx = tx.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                match line {
+                    Ok(l) => { if line_tx.send(CliEvent::Line(l)).is_err() { return; } }
+                    Err(_) => break,
+                }
+            }
+            let _ = line_tx.send(CliEvent::Eof);
+        });
+
+        let (mut model, cmd0) = init(());
+        cli_run_cmd(cmd0, &tx);
+        let mut submgr = SubManager::new(tx.clone());
+        submgr.update(subscriptions(model.clone()));
+        // Inline render (a closure borrowing `view` would make the future non-Send).
         print!("{}", view(model.clone()));
-        let _ = io::stdout().flush();
-        let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
+        let _ = std::io::stdout().flush();
+
+        while let Some(ev) = rx.recv().await {
+            let msg = match ev {
+                CliEvent::Line(l) => on_line(l),
+                CliEvent::Msg(m) => m,
+                CliEvent::Eof => break,
             };
-            let msg = on_line(line);
-            let (next, _cmd) = update(msg, model);
+            let (next, cmd) = update(msg, model);
             model = next;
+            cli_run_cmd(cmd, &tx);
+            submgr.update(subscriptions(model.clone()));
             print!("{}", view(model.clone()));
-            let _ = io::stdout().flush();
+            let _ = std::io::stdout().flush();
         }
+        submgr.stop_all();
         println!();
         ok_res(())
     })

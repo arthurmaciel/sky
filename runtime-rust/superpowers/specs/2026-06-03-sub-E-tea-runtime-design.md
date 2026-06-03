@@ -58,10 +58,17 @@ the rendering subsystem. Reference: `runtime-go/rt/cli.go` (~210 lines) +
    doesn't fire and `Sub.every` doesn't tick; those are steps 2-3. The stock
    `examples/20-cli-counter` uses `Cmd.perform (System.exit 0)` (a diverging task
    → free `A`, E0283) — that inference case lands with step 3.
-2. **Sub.every tickers** — subManager spawns tokio tickers; validate a ticking
-   clock.
-3. **Cmd.perform async** — compose task→toMsg(Result) into the msgCh; validate
-   the counter's `q` (System.exit via perform) + an async-fetch counter.
+2. ✅ **Sub.every tickers + async loop** (DONE) — rewrote `cli_program` as a
+   fully-async loop: an mpsc `CliEvent` channel, a blocking stdin-reader thread
+   (raw Line events), a `SubManager` that spawns/aborts tokio tickers per
+   `subscriptions(model)`, and `cli_run_cmd` firing. Validated a ticking counter
+   (`tests/rust-codegen/cli-ticker-test.sh`). This step also wired async
+   `Cmd.perform` for **non-diverging** tasks — verified `Cmd.perform
+   (Task.succeed 42) Loaded` delivers `Loaded(Ok 42)` through the channel.
+   Needs tokio `sync` feature (added to emitCargoToml when usesTea).
+3. **Cmd.perform — diverging-task inference** — the stock `examples/20-cli-counter`
+   uses `Cmd.perform (System.exit 0)` (a `!`-returning task → free `A`, E0283).
+   Default the phantom A/E at the diverging call site so the stock example builds.
 4. **WS client Sub source** — `Sub_subscribeWebSocket` feeds the msgCh; the
    Task-tier WS client (connect/send/close via tokio-tungstenite) + onMessage
    subscription → completes the Rust WebSocket client.

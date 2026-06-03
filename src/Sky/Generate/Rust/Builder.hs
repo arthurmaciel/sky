@@ -3366,8 +3366,12 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
   where
     userDepNames = [ n | (n, _) <- rustDeps, not (null n) ]
     -- Sky.Http.Server's axum serve loop + the reqwest client both need tokio net.
+    -- The TEA loop (tea.rs) uses tokio::sync::mpsc + tokio::time + tokio::spawn;
+    -- axum pulls `sync` transitively for the server case, but a plain Sky.Cli
+    -- program has no axum, so request it explicitly.
     tokioFeats = ["rt", "rt-multi-thread", "macros", "time"]
                  ++ ["net" | usesHttpServer uk || usesHttp uk]
+                 ++ ["sync" | usesTea uk]
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"
