@@ -1,36 +1,35 @@
 # Sub-D.2 — Sky.Http.Server.WebSocket on the Rust runtime (axum ws)
 
-Status: **runtime foundation built + compiling; Sky→Rust path BLOCKED on a
-general codegen curry/uncurry inconsistency** (see "Blocker" below). Builds on
-Sub-D.1 (the axum server runtime). Target example: `examples/33-websocket-echo`.
+Status: ✅ **shipped (non-capturing handlers).** Echo server builds, upgrades,
+and round-trips on `target=rust`. Builds on Sub-D.1 (the axum server runtime).
+Regression test: `tests/rust-codegen/websocket-test.sh`.
 
-## Blocker (2026-06-03) — curry/uncurry inconsistency in the Rust codegen
+## Resolved blocker — curry/uncurry inconsistency in the Rust codegen
 
-The 5 kernels + the upgrade/registry/ws_loop machinery + the WsHandle/WsServerCfg
-bridges are implemented and the runtime crate compiles. The echo example does
-NOT yet compile, blocked on a *general* Rust-backend bug surfaced by WS's
-multi-arg callbacks:
+The runtime (5 kernels + upgrade/registry/ws_loop + WsHandle/WsServerCfg
+bridges) was held up by a *general* Rust-backend bug surfaced by WS's multi-arg
+callbacks:
 
-- Function **types/signatures** lower **curried**: Sky `A -> B -> C` →
-  `fn(A) -> fn(B) -> C`. So `withOnMessage`'s callback param is curried.
-- Multi-arg lambda/closure **values** lower **uncurried**: `\sock msg ->` and
-  `defaultCfg`'s `\_ _ ->` → `|sock, msg|` / `|_, _|`.
+- Function **types** lowered **curried**: `A -> B -> C` → `fn(A) -> fn(B) -> C`.
+- Multi-arg lambda/call **values** lowered **uncurried**: `\a b ->` → `|a, b|`,
+  `f a b` → `f(a, b)`.
 
-These disagree with each other, so no fixed `WsServerCfg` field shape compiles
-all three sites (defaultCfg record literal · withX body `result.onX = cb` ·
-user call `withOnMessage (\sock msg -> …)`). Errors: E0308 + E0593.
+So no `WsServerCfg` field shape compiled all of defaultCfg / withX / the user
+handler (E0308 + E0593).
 
-**Fix (separate sub-project, regression risk):** render `TLambda` arrow-chains
-uncurried in `typeToRustString` — `A -> B -> C` → `fn(A, B) -> C` — to match the
-uncurried value lowering. This touches every higher-order function's param type
-across the Rust backend, so it needs its own careful sweep + regression pass
-(List.map / foldl / every HOF). The WS runtime fields are already set to the
-uncurried target so they'll line up once that lands.
+**Fix (landed):** `typeToRustString` now renders `TLambda` arrow-chains
+**uncurried** (`fn(A, B) -> C`) via `flattenArrowType`, matching the uncurried
+value/call convention. The curried rendering was latent-broken for *any*
+multi-arg function-typed param/field — WS was just the first to hit it; no
+regression (standard-libs 131/131, repros 9/9). Two follow-on phantom-`msg`
+fixes: `collectRenderedTVars` (function generics skip vars that live only inside
+a runtimeOpaque type's dropped args) + `synCtor` drops vars for runtimeOpaque
+aliases — so the generated `upgrade`/`withX`/cfg-ctor stop being generic over the
+unused `msg` (was E0107 + E0283).
 
-The committed Builder.hs changes (collectUndefinedTypes base-name matching;
+Also general + regression-safe: collectUndefinedTypes base-name matching;
 typeToRustString dropping Sky args for runtimeOpaque types; the parametric
-runtimeOpaque alias branch) are general improvements that stand on their own and
-are regression-checked.
+runtimeOpaque alias branch.
 
 ## Surface (5 kernels + 2 types)
 

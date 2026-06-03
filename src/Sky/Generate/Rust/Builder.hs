@@ -455,10 +455,16 @@ buildModule ctx mod =
         existingNames = Set.fromList prefixed
         -- Synthesize record alias constructors
         synCtorItems = concat [synCtor aliasName vars fields | (aliasName, Can.Alias vars (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)]
-        synCtor aliasName vars fields =
+        synCtor aliasName vars0 fields =
             let rm = ecRecordMap ctx
                 ctorName = toSnakeCase (modPrefix ++ "_" ++ aliasName)
                 structName = toCamelCase (modPrefix ++ "_" ++ aliasName)
+                -- A runtimeOpaque alias renders non-generic (its generics are
+                -- pinned in the registry value, e.g. WsServerCfg<SkyError>), so
+                -- its constructor must not declare the Sky vars or return
+                -- `Struct<vars>` (E0107 / unused param).
+                vars = if Map.member (ModuleName._name (Can._name mod), aliasName) runtimeOpaqueTypes
+                       then [] else vars0
                 sortedFields = sortFieldsByIndex (Map.toList fields)
                 rustFlds = [(n, typeToRustString rm ft) | (n, Can.FieldType _ ft) <- sortedFields]
                 body = structName ++ " { " ++ intercalate ", " (map (\(n, _) -> n ++ ": " ++ n) sortedFields) ++ " }"
@@ -531,6 +537,25 @@ collectTVars (Can.TTuple a b rest) = concatMap collectTVars (a:b:rest)
 collectTVars (Can.TRecord fields _) = concatMap (collectTVars . Can._fieldType) (Map.elems fields)
 collectTVars (Can.TAlias _ _ pairs _) = concatMap (collectTVars . snd) pairs  -- Sub-D step 4
 collectTVars _ = []
+
+-- | Like collectTVars but mirrors typeToRustString's rendering: a runtimeOpaque
+-- type/alias drops its Sky args (its generics are pinned in the registry value,
+-- e.g. WsServerCfg<SkyError>), so vars appearing ONLY inside those dropped args
+-- must not become function generics — they'd be unused in the Rust sig
+-- (E0107/E0283). Used where a function's generic-param list is computed.
+collectRenderedTVars :: Can.Type -> [String]
+collectRenderedTVars t = case t of
+    Can.TVar v -> [v]
+    Can.TLambda a b -> collectRenderedTVars a ++ collectRenderedTVars b
+    Can.TType modName name args
+        | Map.member (ModuleName._name modName, name) runtimeOpaqueTypes -> []
+        | otherwise -> concatMap collectRenderedTVars args
+    Can.TTuple a b rest -> concatMap collectRenderedTVars (a:b:rest)
+    Can.TRecord fields _ -> concatMap (collectRenderedTVars . Can._fieldType) (Map.elems fields)
+    Can.TAlias modName name pairs _
+        | Map.member (ModuleName._name modName, name) runtimeOpaqueTypes -> []
+        | otherwise -> concatMap (collectRenderedTVars . snd) pairs
+    _ -> []
 
 -- | Simple check: does the body match a parameter with list patterns (cons, list)?
 bodyUsesList :: Can.Expr -> Bool
@@ -835,7 +860,11 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
         ret = if name == "main" then "()" else typeToRustString rm retTy
         -- Collect type variable names from annotation types, emit as generic params
         allAnnotTys = map snd pats ++ [retTy | name /= "main"]
-        tvarNames = nub [ v | t <- allAnnotTys, v <- collectTVars t ]
+        -- collectRenderedTVars (not collectTVars): a var that appears only inside
+        -- a runtimeOpaque type's dropped args (e.g. `msg` in WebSocketServerCfg
+        -- msg) must NOT become a function generic — it'd be unused in the Rust
+        -- sig (E0107 on the return type / E0283 at call sites).
+        tvarNames = nub [ v | t <- allAnnotTys, v <- collectRenderedTVars t ]
         genDecl = if null tvarNames then ""
                   else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug") tvarNames) ++ ">"
         multiBody = collectVarLocalsMulti body
@@ -1008,6 +1037,13 @@ aliasToRustTypeDef recordMap _skyModName modPrefix name (Can.Alias vars ty) = ca
     _ ->
         [RAliasDef (toCamelCase (modPrefix ++ "_" ++ name)) (typeToRustString recordMap ty)]
 
+-- | Flatten a curried arrow type `A -> B -> C` into ([A, B], C) so it renders
+-- as an uncurried Rust fn pointer. Mirrors the codegen's uncurried lambda/call
+-- convention.
+flattenArrowType :: Can.Type -> ([Can.Type], Can.Type)
+flattenArrowType (Can.TLambda a b) = let (ps, r) = flattenArrowType b in (a : ps, r)
+flattenArrowType ty = ([], ty)
+
 typeToRustString :: Map.Map String String -> Can.Type -> String
 typeToRustString recordMap t = case t of
     Can.TType modName "Int" [] -> "i64"
@@ -1065,7 +1101,14 @@ typeToRustString recordMap t = case t of
         in if Map.member (modStr, name) runtimeOpaqueTypes
            then toCamelCase (modPrefix ++ name)
            else toCamelCase (modPrefix ++ name) ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
-    Can.TLambda a b -> "fn(" ++ typeToRustString recordMap a ++ ") -> " ++ typeToRustString recordMap b
+    -- A curried Sky arrow chain (A -> B -> C) renders as an UNCURRIED Rust fn
+    -- pointer fn(A, B) -> C, matching how the codegen lowers multi-arg lambda
+    -- VALUES (`\a b ->` -> |a, b|) and multi-arg CALLS (`f a b` -> f(a, b)).
+    -- Rendering it curried (fn(A) -> fn(B) -> C) was latent-broken: any
+    -- multi-arg function-typed param/field mismatched its uncurried value.
+    Can.TLambda _ _ ->
+        let (ps, ret) = flattenArrowType t
+        in "fn(" ++ intercalate ", " (map (typeToRustString recordMap) ps) ++ ") -> " ++ typeToRustString recordMap ret
     Can.TAlias modName name pairs _inner ->
         -- Sub-D step 4: carry the alias's type args so a parametric record alias
         -- (`RetryPolicy e`) renders as SkyCoreTaskRetryPolicy<e>, matching the
