@@ -83,11 +83,22 @@ the rendering subsystem. Reference: `runtime-go/rt/cli.go` (~210 lines) +
    for cmd_none/sub_none resolves to the kernel call (fixes the nested zero-arg
    wrapper). VERIFIED end-to-end: a Sky WS client connects to a Sky WS server,
    sends "ping", and receives "echo: ping" via onMessage — two Sky-on-Rust
-   programs in a full bidirectional round trip. Limitation: onOpen/onClose/
-   onError are no-ops (heterogeneous toMsg through one `any` kernel needs a
-   rust-target stdlib override splitting it into typed kernels).
-5. **Sky.Tui** (later) — reuse the core, add the Std.Ui→ANSI renderer.
-6. **Sky.Live** (later, large) — per-session managers, SSE, stores, VNode diff.
+   programs in a full bidirectional round trip. (onOpen/onClose/onError landed in
+   step 5.)
+5. ✅ **All four WS client event kinds** (DONE) — resolves the onOpen/onClose/
+   onError limitation WITHOUT a stdlib override. The kind-literal peephole already
+   routes the four wrappers to separate codegen targets, so each gets its own
+   TYPED kernel (sub_subscribe_ws_{message,open,close,error}) with the right toMsg
+   bound — the codegen performs the split a stdlib override would. A per-socket
+   WsEvent broadcast (Message|Closed|Error) feeds them; CloseCode is bridged to
+   WsCloseCode for onClose. WS subs are set up ONCE per (socket, kind) with
+   detached tasks — the SubManager's abort+respawn-every-update would otherwise
+   drop in-flight broadcast frames (matches Go's "re-subscribes are no-ops").
+   Verified: a client batching onOpen + onMessage + onClose + onError connects and
+   `status=opened last=echo: ping` — both fire. The override infrastructure turned
+   out NOT to be needed here.
+6. **Sky.Tui** (later) — reuse the core, add the Std.Ui→ANSI renderer.
+7. **Sky.Live** (later, large) — per-session managers, SSE, stores, VNode diff.
 
 ## Notes
 

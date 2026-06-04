@@ -272,6 +272,9 @@ runtimeOpaqueTypes = Map.fromList
     -- WebSocket handle stays a generated enum (kernels take the raw Int).
     , (("Sky.Core.WebSocket", "WebSocketMessage"), "sky_runtime::WsClientMessage")
     , (("Sky.Core.WebSocket", "WebSocketCfg"), "sky_runtime::WsClientCfg")
+    -- CloseCode: bridged so onClose's toMsg receives a runtime-built code, and so
+    -- closeWithCode's `case code of Normal -> …` matches the runtime variants.
+    , (("Sky.Core.WebSocket", "CloseCode"), "sky_runtime::WsCloseCode")
     , (("Sky.Http.Server.WebSocket", "WebSocketServer"), "sky_runtime::WsHandle")
     -- WsServerCfg is generic over the error E (the project's concrete error is
     -- unnameable from the runtime). The value bakes in <SkyError>; the parametric
@@ -1949,15 +1952,20 @@ exprToRustInner ctx e = case e of
         , "system_exit" `isPrefixOf` exprToRustString ctx task0 ->
             "cmd_perform::<SkyError, i64, _, _>("
                 ++ intercalate ", " (map (exprToRustString ctx) (task0 : rest)) ++ ")"
-    -- Sub-E step 4: Sub_subscribeWebSocket raw KIND toMsg. The four wrappers
-    -- (onOpen/onMessage/onClose/onError) feed heterogeneous toMsg through this one
+    -- Sub-E step 4/5: Sub_subscribeWebSocket raw KIND toMsg. The four wrappers
+    -- (onOpen/onMessage/onClose/onError) feed heterogeneous toMsg (bare msg /
+    -- WebSocketMessage->msg / CloseCode->msg / Error->msg) through this one
     -- `any`-typed kernel, which can't share a single bounded Rust fn. Route by the
-    -- compile-time literal kind: "message" → the real bounded receive kernel;
-    -- the rest → a no-op (unbounded toMsg, returns Sub.None) so they compile.
+    -- compile-time literal kind to a per-kind TYPED kernel — the codegen does the
+    -- split a stdlib override would otherwise do.
     Can.Call subFn [rawArg, Ann.At _ (Can.Str kind), toMsgArg]
         | "sub_subscribe_web_socket" == exprToRustString ctx subFn ->
-            let fn = if kind == "message" then "sub_subscribe_ws_message"
-                     else "sub_subscribe_ws_unsupported"
+            let fn = case kind of
+                    "message" -> "sub_subscribe_ws_message"
+                    "open"    -> "sub_subscribe_ws_open"
+                    "close"   -> "sub_subscribe_ws_close"
+                    "error"   -> "sub_subscribe_ws_error"
+                    _         -> "sub_subscribe_ws_message"
             in fn ++ "(" ++ exprToRustString ctx rawArg ++ ", " ++ exprToRustString ctx toMsgArg ++ ")"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
