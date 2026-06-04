@@ -22,7 +22,7 @@ import Control.Exception (evaluate)
 import qualified System.IO
 import qualified System.Environment
 import Data.List (isSuffixOf)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, copyFile, listDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, copyFile, listDirectory, removeFile, removeDirectoryRecursive)
 import System.IO (hFlush, stdout, readFile', stderr, hPutStrLn)
 import System.IO.Unsafe (unsafePerformIO)
 import System.FilePath (takeDirectory, takeExtension, (</>))
@@ -2468,6 +2468,59 @@ listDirectoryHs :: FilePath -> IO [FilePath]
 listDirectoryHs = listDirectory
 
 
+-- | A short, deterministic content-fingerprint of the runtime that
+-- this sky binary will materialise via copyRuntime. Two binaries with
+-- the same embedded runtime tree produce the same fingerprint; any
+-- file added / removed / resized changes it.
+--
+-- v0.16.2 (#460): used by `copyRuntime` to detect runtime drift across
+-- `sky build` invocations so stale files (e.g. PR10-G's deleted
+-- console_loop.go / subapp.go in v0.16.1) get wiped from a downstream
+-- app's sky-out/rt/ before the new runtime is laid down. Closes the
+-- duplicate-declaration `go build` failure class that bit SkyDeploy's
+-- 0.15.59 → 0.16.1 bump.
+--
+-- Why a fingerprint of (path, size) rather than full content hash:
+-- the field surfaces every case we need to catch (deleted file → path
+-- gone; modified file → size change in nearly every real edit; added
+-- file → new path) and is essentially free to compute (no hash kernel
+-- on a 100+ MB embedded blob each build).
+runtimeFingerprint :: String
+runtimeFingerprint =
+    let entries = List.sortBy (\a b -> compare (fst a) (fst b)) embeddedRuntime
+        body =
+            unlines
+                [ path ++ "\t" ++ show (BS.length bs)
+                | (path, bs) <- entries
+                ]
+    in  "sky-runtime-fingerprint-v1\n"
+            ++ show (length entries) ++ " entries\n"
+            ++ "----\n"
+            ++ body
+
+
+-- | Path to the runtime-fingerprint sentinel inside sky-out/rt/.
+runtimeFingerprintPath :: FilePath -> FilePath
+runtimeFingerprintPath outDir = outDir </> "rt" </> ".sky-runtime-fingerprint"
+
+
+-- | True iff the runtime fingerprint stored under sky-out/rt/ differs
+-- from this binary's `runtimeFingerprint`. Returns True on bootstrap
+-- (no fingerprint file → no way to know if the rt/ tree is clean →
+-- safest to wipe). Read errors fall back to True for the same reason.
+runtimeChanged :: FilePath -> IO Bool
+runtimeChanged outDir = do
+    let fp = runtimeFingerprintPath outDir
+    exists <- doesFileExist fp
+    if not exists
+        then return True
+        else do
+            stored <- E.try (readFile' fp) :: IO (Either E.SomeException String)
+            case stored of
+                Left _ -> return True
+                Right s -> return (s /= runtimeFingerprint)
+
+
 -- | Copy the Go runtime package into the output directory.
 -- Locates runtime-go/ via (in order):
 --   1. SKY_RUNTIME_DIR env var (explicit override)
@@ -2480,16 +2533,27 @@ listDirectoryHs = listDirectory
 copyRuntime :: FilePath -> IO ()
 copyRuntime outDir = do
     let rtDir = outDir </> "rt"
-    -- v0.16.1 PR14 (reverted): tried `removeDirectoryRecursive rtDir`
-    -- here before re-materialising so deletions in runtime-go/ would
-    -- propagate without leaving stale files. The wipe broke cabal
-    -- test wall-time (100+ test builds × wipe-and-recopy + Go cache
-    -- thrash → timeout past 75 min). Recipe for users / contributors
-    -- who upgrade across a runtime refactor (e.g. PR10-G's
-    -- console_loop.go deletion): `rm -rf sky-out/rt/` once after the
-    -- upgrade, then continue. `sky build` will re-materialise from
-    -- scratch on the next invocation. This trades automation for
-    -- speed; revisit with a fingerprint-based wipe in a future PR.
+    -- v0.16.2 (#460): wipe stale rt/*.go when the embedded runtime
+    -- has drifted since the last `sky build`. Caught only files
+    -- under rt/ — user FFI (./ffi/*.go) gets re-copied in below by
+    -- `copyFfiDir` so it's safe to nuke rtDir wholesale here.
+    --
+    -- The fingerprint sentinel (.sky-runtime-fingerprint) is written
+    -- AT THE END of this function so a mid-build crash leaves stale
+    -- state visibly stale (no sentinel ⇒ next build re-wipes) rather
+    -- than partially up to date.
+    --
+    -- Performance: the fingerprint matches on the steady-state hot
+    -- path (developer iterating on the same sky binary), so this is
+    -- a single small-file read per build. Only the FIRST build after
+    -- a `sky upgrade` (or fresh project) pays the wipe-and-rebuild
+    -- cost. PR14 reverted a blanket wipe-on-every-build for exactly
+    -- this reason; the fingerprint gate restores correctness without
+    -- the cabal-test wall-time hit.
+    changed <- runtimeChanged outDir
+    when changed $ do
+        existed <- doesDirectoryExist rtDir
+        when existed (removeDirectoryRecursive rtDir)
     createDirectoryIfMissing True rtDir
     mRuntime <- locateRuntimeDir
     case mRuntime of
@@ -2522,6 +2586,11 @@ copyRuntime outDir = do
             if hasSum then copyFile srcSum (outDir </> "go.sum") else return ()
     -- User FFI: copy ./ffi/*.go into sky-out/rt/ regardless of runtime-go location.
     copyFfiDir outDir
+    -- Record the runtime fingerprint AFTER everything has been laid
+    -- down so a mid-build crash leaves the sentinel absent (forcing a
+    -- re-wipe on next run) rather than pointing at incomplete state.
+    -- See #460 for the regression class this guards against.
+    writeFile (runtimeFingerprintPath outDir) runtimeFingerprint
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -7427,6 +7496,37 @@ exprToGo (A.At _ expr) = case expr of
                 , Just expr <- typedCall ->
                     expr
 
+            -- v0.16.3 (#463 + #465) — partial application of a kernel.
+            -- When the kernel's declared arity exceeds the supplied
+            -- args, emit a closure capturing the supplied args and
+            -- taking the remaining as `any`-typed lambda params. The
+            -- closure body calls the DYNAMIC (any-typed) kernel form
+            -- so every position accepts `any` without further
+            -- coercion.
+            --
+            -- Pre-fix: the literal-args arm (typedKernelLiterals)
+            -- would route under-arity calls like `Regex.replace "-"
+            -- "_"` to `rt.Regex_replaceT("-", "_")` — the typed
+            -- companion is `func(string, string, string) string`,
+            -- which Go rejects at `go build` with "not enough
+            -- arguments". The lookupKernelType arm had the same
+            -- pathology for `JsonDec.decodeString decoder`: its
+            -- arity gate `length kernelParamGoTys == length args`
+            -- only took the first `length args` slots from the type
+            -- chain, so partial-app silently matched.
+            --
+            -- This arm fires BEFORE the literal-args + typed-coerce
+            -- + lookupKernelType arms, so under-arity calls reach
+            -- the closure path uniformly. The `Just arity` gate
+            -- limits us to kernels we actually know — anything we
+            -- can't get an arity for falls through to the existing
+            -- path (no behaviour change for unknown kernels).
+            Can.VarKernel modName funcName
+                | Just kernelArity <- kernelArityOf modName funcName
+                , length args < kernelArity ->
+                    emitPartialKernelCall modName funcName args
+                        (kernelArity - length args)
+
             -- P7 step 5: generalise the zero-arg FFI migration. Any
             -- Sky `KernelMod.fn ()` where (a) the kernel module name
             -- starts with "Go_" (i.e. it's a user-added FFI package,
@@ -10303,6 +10403,84 @@ emitPartialUserCall func suppliedArgs missing =
                      ultRetType
                      innerParamTys
     in wrappedExpr
+
+
+-- | Total arity of a kernel — total `->` count in its HM signature.
+-- Combines two oracles:
+--   1. `Kernel.lookup` registry — authoritative for built-in kernels.
+--   2. `ConstrainExpr.lookupKernelType` — fallback via TLambda chain.
+-- Returns Nothing when neither knows the kernel (caller-side decides
+-- whether to fall through to the generic dispatch path).
+kernelArityOf :: String -> String -> Maybe Int
+kernelArityOf modName funcName =
+    case Kernel.lookup modName funcName of
+        Just ki -> Just (Kernel._ki_arity ki)
+        Nothing ->
+            case ConstrainExpr.lookupKernelType modName funcName of
+                Just (T.Forall _ ty) -> Just (kernelArrowCount ty)
+                Nothing              -> Nothing
+  where
+    kernelArrowCount (T.TLambda _ r) = 1 + kernelArrowCount r
+    kernelArrowCount _ = 0
+
+
+-- | #463 / #465 partial-app fix. When a kernel-headed Can.Call has FEWER
+-- args than the kernel's declared arity, emit a closure that captures
+-- the supplied args and takes the remaining as fresh `any` params, then
+-- calls the dynamic (any-typed) kernel form (`rt.<Mod>_<func>(all...)`).
+-- The closure's outer shape is `func(any) any` chained per missing arg
+-- so it satisfies any-typed HOF slots (e.g. List.map's first param
+-- routes through Coerce[func(any) any]).
+--
+-- Why route through the DYNAMIC kernel (no `T` suffix) and not the
+-- typed one: the remaining args land as `any`-typed closure params; the
+-- supplied args may also be `any` after Sky's any-erased dispatch. The
+-- typed variant expects concrete Go primitives (string/int/...); routing
+-- through it would require coercing each `any` to its concrete shape AND
+-- the closure's return type would have to match the typed kernel's
+-- return. The dynamic kernel accepts `any` for every position and
+-- returns `any` — zero impedance mismatch with the wrapping HOF.
+emitPartialKernelCall
+    :: String          -- ^ kernel module name (e.g. "Regex")
+    -> String          -- ^ kernel function name (e.g. "replace")
+    -> [Can.Expr]      -- ^ supplied args at the call site
+    -> Int             -- ^ missing args = arity - length supplied
+    -> GoIr.GoExpr
+emitPartialKernelCall modName funcName suppliedArgs missing =
+    let -- Resolve the kernel's dynamic (any-typed) Go name. Prefer the
+        -- registry entry — it carries the canonical `rt.<Mod>_<fn>`
+        -- string and would otherwise diverge from `_<func>` naming
+        -- (e.g. `Log.println` → `rt.Log_println`, no transform needed
+        -- but the registry is the source of truth).
+        kernelGoName = case Kernel.lookup modName funcName of
+            Just ki  -> Kernel._ki_goName ki
+            Nothing  -> "rt." ++ modName ++ "_" ++ funcName
+        -- Closure param names for the missing args, plus their
+        -- supplied counterparts (already-evaluated Sky exprs).
+        suppliedGo = map exprToGo suppliedArgs
+        extraNames = [ "__pk" ++ show i | i <- [0 .. missing - 1] ]
+        extraIdents = map GoIr.GoIdent extraNames
+        -- Build the final kernel invocation: all supplied + all
+        -- remaining args, in declaration order. The dynamic kernel
+        -- accepts every position as `any`, so no coercion is needed
+        -- on the supplied side (they're already lowered through
+        -- exprToGo into any-compatible Go values).
+        finalCall = GoIr.GoCall (GoIr.GoIdent kernelGoName)
+                                (suppliedGo ++ extraIdents)
+        -- Wrap each closure layer outer-most-last. Each missing arg
+        -- becomes one curried lambda: func(__pkN any) <inner-ret>.
+        -- Inner return types nest: deepest is `any`, each outer
+        -- wraps with `func(any) <prev>`.
+        wrapperReturnType 0 = "any"
+        wrapperReturnType n = "func(any) " ++ wrapperReturnType (n - 1)
+        buildWrapper :: (Int, String) -> GoIr.GoExpr -> GoIr.GoExpr
+        buildWrapper (i, name) inner =
+            let retTy = wrapperReturnType (missing - 1 - i)
+            in GoIr.GoFuncLit
+                 [GoIr.GoParam name "any"]
+                 retTy
+                 [GoIr.GoReturn inner]
+    in foldr buildWrapper finalCall (zip [0..] extraNames)
 
 
 ctorToGo :: Can.CtorOpts -> ModuleName.Canonical -> String -> String -> Can.Annotation -> GoIr.GoExpr

@@ -733,6 +733,16 @@ func narrowReflectValue(src reflect.Value, target reflect.Type) reflect.Value {
 			return narrowed
 		}
 	}
+	// #461 — SkySet (struct) → map[any]V (Sky's typed Go form for
+	// `Set a`). Reached when a Set flows through a nested narrowing
+	// path: record field of type `Set a`, slice element of type
+	// `Set a`, etc. Top-level Coerce[map[any]V] also delegates to
+	// skySetToMap explicitly; this branch covers everything else.
+	if src.Kind() == reflect.Struct && target.Kind() == reflect.Map {
+		if narrowed, ok := skySetToMap(src.Interface(), target); ok {
+			return narrowed
+		}
+	}
 	if target.Kind() == reflect.String {
 		return reflect.ValueOf(fmt.Sprintf("%v", src.Interface()))
 	}
@@ -4897,6 +4907,35 @@ func Coerce[T any](v any) T {
 			rv.Type().Key().Kind() == reflect.String {
 			return narrowMapToStruct(rv, targetTy).Interface().(T)
 		}
+		// v0.16.3 #467 — struct→struct cross-shape narrowing for the
+		// user-facing Coerce[T] surface. Mirrors coerceInner's branch
+		// at line 539: a runtime FFI struct (rt.SkyResponse,
+		// rt.SkyRequest, rt.HttpResponse, …) flowing into a user-declared
+		// `type alias`-emitted Go struct (Sky_Http_Server_Response_R,
+		// _Request_R, etc.) needs a field-by-field rebuild.  Pre-fix,
+		// the documented `Server.json body |> Server.withStatus 201`
+		// idiom panicked: Server.withStatus returns rt.SkyResponse, but
+		// the typed-codegen wrap is `Coerce[Sky_Http_Server_Response_R]`.
+		// narrowStructToStruct already exists and is gated against ADT
+		// + tuple shapes, so this is a safe minimal-blast-radius fix.
+		if rv.Kind() == reflect.Struct && targetTy.Kind() == reflect.Struct {
+			if narrowed, ok := narrowStructToStruct(rv, targetTy); ok {
+				return narrowed.Interface().(T)
+			}
+		}
+		// v0.16.3 #461 — SkySet → map[any]V narrowing. Sky's typed Go
+		// form for `Set a` is `map[any]bool`, but the rt.Set_* kernels
+		// hash by `fmt.Sprintf("%v", v)` and return an opaque SkySet
+		// struct ({items: map[string]any}). At a same-module inline
+		// call the result feeds the next any-typed kernel directly;
+		// at a cross-module boundary the typed-codegen wrapper emits
+		// `rt.Coerce[map[any]bool](...)` and panics without this
+		// branch. Walk SkySet.items's VALUES (the originals) and
+		// build the typed map. Mirrors `asSkyResponse` for the
+		// rt.SkyResponse → typed-alias-struct case.
+		if narrowed, ok := skySetToMap(v, targetTy); ok {
+			return narrowed.Interface().(T)
+		}
 	}
 	// REACHABLE-FROM-SKY in two shapes:
 	// (1) `rt.Coerce[T](anyValueFromFfi)` — the FFI returned a value
@@ -6786,9 +6825,28 @@ func runeCount(s string) int {
 	return n
 }
 
+// padChar renders a Sky Char as its single-character string form.
+// Sky Char is a unicode codepoint; the lowering boxes it as a rune
+// (or an int after Char.toCode) inside an `any`. Earlier kernels
+// formatted via fmt.Sprintf("%v", ch) which spells "32" for ' '
+// (decimal codepoint) — see #462. This helper produces " " for ' '.
+func padChar(ch any) string {
+	// rune is an alias for int32 — one case covers both.
+	switch v := ch.(type) {
+	case rune:
+		return string(v)
+	case int:
+		return string(rune(v))
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%v", ch)
+	}
+}
+
 func String_padLeft(n any, ch any, s any) any {
 	str := fmt.Sprintf("%v", s)
-	pad := fmt.Sprintf("%v", ch)
+	pad := padChar(ch)
 	target := AsInt(n)
 	for runeCount(str) < target {
 		str = pad + str
@@ -6798,7 +6856,7 @@ func String_padLeft(n any, ch any, s any) any {
 
 func String_padRight(n any, ch any, s any) any {
 	str := fmt.Sprintf("%v", s)
-	pad := fmt.Sprintf("%v", ch)
+	pad := padChar(ch)
 	target := AsInt(n)
 	for runeCount(str) < target {
 		str = str + pad
@@ -7406,6 +7464,26 @@ func Server_listen(port any, routes any) any {
 	routeList := AsList(routes)
 	mux := http.NewServeMux()
 
+	// v0.16.3 #466 follow-up: count paths so we know when to apply
+	// method-aware registration. Method-aware patterns ("GET /api/x")
+	// disambiguate two routes on the SAME path with DIFFERENT methods,
+	// but they CONFLICT with wildcard-method routes registered on
+	// MORE SPECIFIC paths (Go's mux gates this case — neither pattern
+	// strictly more specific). The MountEmbeddedConsole subapp
+	// registers `/_sky/console/_sky/event` wildcard-method, so a
+	// blanket `GET /` from a user handler trips that gate. Fix:
+	// use the method prefix ONLY when 2+ routes share the path —
+	// otherwise stay path-only (which Go's mux happily treats as
+	// "any method on this path"). Preserves the same-path-different-
+	// method coexistence that #466 unlocked without breaking the
+	// console mount.
+	pathRouteCount := make(map[string]int, len(routeList))
+	for _, r := range routeList {
+		if rt, ok := r.(SkyRoute); ok && rt.StaticDir == "" {
+			pathRouteCount[rt.Path]++
+		}
+	}
+
 	for _, r := range routeList {
 		route := r.(SkyRoute)
 		handler := route.Handler
@@ -7432,7 +7510,18 @@ func Server_listen(port any, routes any) any {
 			continue
 		}
 
-		mux.HandleFunc(pattern, func(w http.ResponseWriter, req *http.Request) {
+		// v0.16.3 fix(#466) + refinement: register with Go 1.22+
+		// method-aware mux pattern ONLY when 2+ routes share this
+		// path (i.e. same-path-different-method case that #466 was
+		// originally about). For unique paths, stay path-only — that
+		// keeps Go's "wildcard-method on more-specific path" conflict
+		// rule from tripping on the console mount (#466 follow-up,
+		// caught 2026-06-04 by VerifyScenarioSpec via 15-http-server).
+		muxPattern := pattern
+		if pathRouteCount[pattern] > 1 && route.Method != "" && route.Method != "*" {
+			muxPattern = route.Method + " " + pattern
+		}
+		mux.HandleFunc(muxPattern, func(w http.ResponseWriter, req *http.Request) {
 			// Panic recovery — one bad handler mustn't kill the process.
 			// Audit P1-5: prod-mode logs omit the Go stack trace from
 			// stderr (to avoid leaking internal paths + memory
@@ -8053,6 +8142,14 @@ func Middleware_withLogging(handler any) any {
 			start := time.Now()
 			task := SkyCall(handler, req)
 			res := any(anyTaskInvoke(task))
+			// v0.16.3 #469 — asSkyResponse below consumes the
+			// pending-stream-handler registry as part of restoring
+			// the StreamHandler closure from the body sentinel. Pre-fix
+			// withLogging discarded the resulting `resp` and returned
+			// the original `res`, so the next asSkyResponse call (in
+			// the listener) found an empty registry and wrote the
+			// literal `__sky_stream:N` to the wire. Symmetric with
+			// withCors: wrap the resolved `resp` in Ok and return that.
 			status := 0
 			if sr, ok := res.(SkyResult[any, any]); ok && sr.Tag == 0 {
 				if resp, ok := asSkyResponse(sr.OkValue); ok {
@@ -8060,6 +8157,15 @@ func Middleware_withLogging(handler any) any {
 					if status == 0 {
 						status = 200
 					}
+					dur := time.Since(start).Milliseconds()
+					ctx := map[string]any{
+						"method": r.Method,
+						"path":   r.Path,
+						"status": status,
+						"ms":     dur,
+					}
+					logEmit(logLevelInfo, "info", "http request", ctx)
+					return Ok[any, any](resp)
 				}
 			}
 			dur := time.Since(start).Milliseconds()
@@ -8108,8 +8214,11 @@ func Middleware_withBasicAuth(expectedUser any, expectedPass any, handler any) a
 			if !(userOk && passOk) {
 				return Ok[any, any](SkyResponse{Status: 401, Body: "bad credentials"})
 			}
+			// v0.16.3 #468 — anyTaskInvoke handles typed SkyTask[E, A]
+			// via reflect-fallback; raw `task.(func() any)()` panicked
+			// on typed handlers.
 			task := SkyCall(handler, req)
-			return task.(func() any)()
+			return any(anyTaskInvoke(task))
 		}
 	}
 }
@@ -8146,8 +8255,11 @@ func Middleware_withRateLimit(name any, capacity any, refillPerSec any, handler 
 					Headers: map[string]string{"Retry-After": "1"},
 				})
 			}
+			// v0.16.3 #468 — anyTaskInvoke handles typed SkyTask[E, A]
+			// via reflect-fallback; raw `task.(func() any)()` panicked
+			// on typed handlers.
 			task := SkyCall(handler, req)
-			return task.(func() any)()
+			return any(anyTaskInvoke(task))
 		}
 	}
 }

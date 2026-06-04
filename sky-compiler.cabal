@@ -38,6 +38,12 @@ extra-source-files:
     -- user app `sky-out/` (no chicken-and-egg "sky must build the
     -- console at user-install time" problem).
     runtime-go/rt/console_app/*.go
+    -- v0.16.4 Chunk 2+3: hub daemon receiver + SQLite store +
+    -- standalone driver. Materialised by runConsoleServe so the
+    -- `sky console-serve` subcommand can `go build ./cmd/sky-hub`
+    -- against a freshly-extracted tree.
+    runtime-go/rt/hub/*.go
+    runtime-go/cmd/sky-hub/*.go
     -- sky-stdlib subdirs MUST be listed explicitly per directory.
     -- Same Issue #58 cause as the runtime-go subdirs above: cabal sdist
     -- does NOT recurse into subdirectories of an extra-source-files
@@ -330,12 +336,12 @@ test-suite sky-tests
       Sky.Build.FfiKernelAliasSpec
       Sky.Build.HttpTypesSpec
       Sky.Build.CryptoAeadSpec
-      Sky.Build.PubSubPublishTaskSpec
       Sky.Build.PubSubPublishNoEchoSpec
       Sky.Build.SkyLiveHeadSpec
       Sky.Build.SkyLiveConsoleAuthSpec
       Sky.Build.StdUiChartSpec
       Sky.Build.ServerStreamSpec
+      Sky.Build.ServerWithStatusSpec
       Sky.Build.HttpStreamForEachSpec
       Sky.Build.WebviewAppSpec
       Sky.Build.WebviewLoopbackAssetsSpec
@@ -364,12 +370,15 @@ test-suite sky-tests
       Sky.Build.CheckIsBuildSpec
       Sky.Build.RecordFieldOrderSpec
       Sky.Build.RecordCtorEmptyListSpec
+      Sky.Build.RuntimeFingerprintSpec
       Sky.Build.PointFreePolyAliasSpec
+      Sky.Build.PartialKernelAppSpec
       Sky.Build.HofTypedMsgSpec
       Sky.Build.CoerceArgParametricSpec
       Sky.Build.IsPlainIdentSpec
       Sky.Build.InferExprTypeBinopSpec
       Sky.Build.CoerceArgListMapInterplaySpec
+      Sky.Build.CrossModuleSetSpec
       Sky.Build.LowerCtxCascadeSpec
       Sky.Build.LetBodyCascadeResumeSpec
       Sky.Build.SnapshotCallerCtxSpec
@@ -417,3 +426,4 @@ test-suite sky-tests
     , Sky.Cli.UpgradeClaudeSpec
     , Sky.Cli.WatchSpec
     , Sky.Cli.DoctorSpec
+    , Sky.Build.HubConsoleServeSpec

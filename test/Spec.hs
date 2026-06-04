@@ -44,12 +44,12 @@ import qualified Sky.Build.CaseSubjectNameShadowSpec
 import qualified Sky.Build.FfiKernelAliasSpec
 import qualified Sky.Build.HttpTypesSpec
 import qualified Sky.Build.CryptoAeadSpec
-import qualified Sky.Build.PubSubPublishTaskSpec
 import qualified Sky.Build.PubSubPublishNoEchoSpec
 import qualified Sky.Build.SkyLiveHeadSpec
 import qualified Sky.Build.SkyLiveConsoleAuthSpec
 import qualified Sky.Build.StdUiChartSpec
 import qualified Sky.Build.ServerStreamSpec
+import qualified Sky.Build.ServerWithStatusSpec
 import qualified Sky.Build.HttpStreamForEachSpec
 import qualified Sky.Build.WebviewAppSpec
 import qualified Sky.Build.WebviewLoopbackAssetsSpec
@@ -76,12 +76,15 @@ import qualified Sky.Build.TaskResultBridgesSpec
 import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
 import qualified Sky.Build.RecordCtorEmptyListSpec
+import qualified Sky.Build.RuntimeFingerprintSpec
 import qualified Sky.Build.PointFreePolyAliasSpec
+import qualified Sky.Build.PartialKernelAppSpec
 import qualified Sky.Build.HofTypedMsgSpec
 import qualified Sky.Build.CoerceArgParametricSpec
 import qualified Sky.Build.IsPlainIdentSpec
 import qualified Sky.Build.InferExprTypeBinopSpec
 import qualified Sky.Build.CoerceArgListMapInterplaySpec
+import qualified Sky.Build.CrossModuleSetSpec
 import qualified Sky.Build.LowerCtxCascadeSpec
 import qualified Sky.Build.LetBodyCascadeResumeSpec
 import qualified Sky.Build.SnapshotCallerCtxSpec
@@ -129,6 +132,7 @@ import qualified Sky.Cli.TestSpec
 import qualified Sky.Cli.UpgradeClaudeSpec
 import qualified Sky.Cli.WatchSpec
 import qualified Sky.Cli.DoctorSpec
+import qualified Sky.Build.HubConsoleServeSpec
 
 main :: IO ()
 main = hspec $ do
@@ -313,11 +317,6 @@ main = hspec $ do
     describe "Sky.Build.FfiKernelAlias" Sky.Build.FfiKernelAliasSpec.spec
     describe "Sky.Build.HttpTypes" Sky.Build.HttpTypesSpec.spec
     describe "Sky.Build.CryptoAead" Sky.Build.CryptoAeadSpec.spec
-    -- Cycle 4 PT: Task-shaped Std.PubSub.publish — callable from any
-    -- context (raw Sky.Http.Server api handlers / post-init goroutines
-    -- / scheduled jobs), complements Cmd.publish which is bound to
-    -- the Sky.Live update-return tuple.
-    describe "Sky.Build.PubSubPublishTask" Sky.Build.PubSubPublishTaskSpec.spec
     -- Cycle 4 NE / issue #359: Cmd.publishNoEcho + PubSub.publishNoEcho —
     -- opt-out echo for "instant feedback for publisher" pattern. Saves
     -- the broker round-trip; in v0.16+ cross-process broker tiers the
@@ -341,6 +340,12 @@ main = hspec $ do
     -- Unblocks LLM token-stream proxying + SSE endpoints without
     -- hand-rolled chunk plumbing on the Sky side.
     describe "Sky.Build.ServerStream" Sky.Build.ServerStreamSpec.spec
+    -- v0.16.3 #467: `Server.json body |> Server.withStatus 201` —
+    -- the documented idiom panicked at runtime because rt.Coerce
+    -- (user-facing) lacked the struct→struct narrow branch that
+    -- coerceInner (internal) already had.  Mirror the branch so
+    -- the canonical chain works end-to-end.
+    describe "Sky.Build.ServerWithStatus" Sky.Build.ServerWithStatusSpec.spec
     -- Issue #373: Sky.Core.Http.Stream.forEachChunk — synchronous
     -- chunk-iterator that bridges the Sub-based client-side stream
     -- consumer with Sky.Http.Server.Stream producers inside the
@@ -462,10 +467,22 @@ main = hspec $ do
     -- arg via rt.AsListT[T]. Pre-fix, `Item 1 "first" []` shipped
     -- `Item(1, "first", []any{})` and go build rejected.
     describe "Sky.Build.RecordCtorEmptyList" Sky.Build.RecordCtorEmptyListSpec.spec
+    -- #460: copyRuntime wipes stale sky-out/rt/*.go when the embedded
+    -- runtime fingerprint has drifted. Pre-fix, PR10-G's deleted
+    -- console_loop.go / subapp.go lingered in downstream apps and
+    -- broke `go build` with duplicate-declaration errors.
+    describe "Sky.Build.RuntimeFingerprint" Sky.Build.RuntimeFingerprintSpec.spec
     -- #398: point-free top-level alias of a polymorphic / N-ary
     -- function. Pre-fix, `tickle = String.toUpper` emitted a
     -- 0-arity Go thunk wrapper; call sites failed `go build`.
     describe "Sky.Build.PointFreePolyAlias" Sky.Build.PointFreePolyAliasSpec.spec
+    -- #463 + #465: partial application of a typed FFI kernel used to
+    -- route the under-arity call to the typed companion (e.g.
+    -- `rt.Regex_replaceT("-", "_")` with 2 args against a 3-arg
+    -- kernel) — `go build` rejected with "not enough arguments". Now
+    -- emits a closure that captures the supplied args + takes the
+    -- remaining as `any`-typed params, calling the DYNAMIC kernel.
+    describe "Sky.Build.PartialKernelApp" Sky.Build.PartialKernelAppSpec.spec
     -- Limitation #18 (other half): renderHofParamTy used to hardcode
     -- the inner-function return as `any`, breaking helpers with typed
     -- (String -> Msg) callbacks. Now routes via typeStrWithAliasesReg.
@@ -511,6 +528,13 @@ main = hspec $ do
     -- `coerceArg` skip-check vote.
     describe "Sky.Build.CoerceArgListMapInterplay"
                                             Sky.Build.CoerceArgListMapInterplaySpec.spec
+    -- v0.16.3 #461 — cross-module Set returns must not panic.
+    -- SkySet (runtime kernel struct) → map[any]bool (Sky's typed Go
+    -- form for `Set a`) bridge in rt.Coerce + narrowReflectValue +
+    -- toSkySet. Locks the 4-shape fixture (cross-call, cross-cross
+    -- passthrough, insert chain on a cross-module value, inline
+    -- same-module annotated).
+    describe "Sky.Build.CrossModuleSet"     Sky.Build.CrossModuleSetSpec.spec
     -- v0.15.x hardening / Cycle 1 P6 — LowerCtx cascade Phase 2.
     -- Promotes `lowerExpr` / `lowerExprExpectGo` from no-op
     -- delegates into REAL ctx-installing wrappers, and migrates
@@ -675,3 +699,7 @@ main = hspec $ do
     -- running (the most user-visible policy).
     describe "Sky.Cli.Watch"               Sky.Cli.WatchSpec.spec
     describe "Sky.Cli.Doctor"              Sky.Cli.DoctorSpec.spec
+    -- v0.16.4 Chunks 2+3: `sky console-serve` hub daemon. Asserts
+    -- the materialise + go build ./cmd/sky-hub + exec path lands on
+    -- a daemon that accepts OTLP/JSON and persists to SQLite.
+    describe "Sky.Build.HubConsoleServe"   Sky.Build.HubConsoleServeSpec.spec
