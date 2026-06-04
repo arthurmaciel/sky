@@ -47,6 +47,7 @@ data UsedKernels = UsedKernels
     , usesHttpServer :: Bool      -- Sky.Http.Server.* used → server module + axum
     , usesHttp :: Bool            -- Sky.Core.Http.* used → http client module + reqwest
     , usesTea :: Bool             -- Cmd/Sub/Cli.program used → tea module (tokio)
+    , usesWsClient :: Bool        -- Sky.Core.WebSocket used → ws_client + tokio-tungstenite
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -63,9 +64,10 @@ instance Semigroup UsedKernels where
         , usesHttpServer = usesHttpServer a || usesHttpServer b
         , usesHttp = usesHttp a || usesHttp b
         , usesTea = usesTea a || usesTea b
+        , usesWsClient = usesWsClient a || usesWsClient b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False False False False False
 
 -- | Walk all expressions across all modules to detect kernel usage.
 -- Ensures we only emit the runtime stubs and Cargo deps that are actually needed.
@@ -141,6 +143,11 @@ analyzeKernelUsage = foldMap analyzeMod
                  || "Std.Cmd" `isSuffixOf` modName || "Std.Sub" `isSuffixOf` modName
                  || "Std.Cli" `isSuffixOf` modName || "Sky.Cli" `isSuffixOf` modName
               then mempty { usesTea = True } else mempty
+            -- Sky.Core.WebSocket client (distinct from Sky.Http.Server.WebSocket;
+            -- the suffix can't collide). Pulls ws_client + tokio-tungstenite. Its
+            -- onMessage Sub also needs the TEA loop.
+            , if "Sky.Core.WebSocket" `isSuffixOf` modName
+              then mempty { usesWsClient = True, usesTea = True } else mempty
             , if "Time" `isPrefixOf` modName || "Sky.Core.Time" `isPrefixOf` modName
               then mempty { usesTime = True } <> (if fnName == "sleep" then mempty { usesTaskRun = True } else mempty)
               else mempty
@@ -260,6 +267,11 @@ runtimeOpaqueTypes = Map.fromList
     -- handle the stdlib pattern-matches (-> WsHandle enum, variant name matches
     -- the Sky ctor). WebSocketServerCfg -> WsServerCfg (fn-pointer callbacks),
     -- so `defaultCfg |> withOnX` record updates compile.
+    -- Sky.Core.WebSocket client: WebSocketMessage is bridged so the runtime can
+    -- construct frames for the user's toMsg; WebSocketCfg is built in Sky. The
+    -- WebSocket handle stays a generated enum (kernels take the raw Int).
+    , (("Sky.Core.WebSocket", "WebSocketMessage"), "sky_runtime::WsClientMessage")
+    , (("Sky.Core.WebSocket", "WebSocketCfg"), "sky_runtime::WsClientCfg")
     , (("Sky.Http.Server.WebSocket", "WebSocketServer"), "sky_runtime::WsHandle")
     -- WsServerCfg is generic over the error E (the project's concrete error is
     -- unnameable from the runtime). The value bakes in <SkyError>; the parametric
@@ -312,6 +324,13 @@ kernelsNeedingErrorPin = Map.fromList
     , ("http_get",                 "::<SkyError>")
     , ("http_post",                "::<SkyError>")
     , ("http_request",             "::<SkyError>")
+    -- Sky.Core.WebSocket client — Task-tier kernels; pin E.
+    , ("web_socket_connect",          "::<SkyError>")
+    , ("web_socket_connect_with",     "::<SkyError>")
+    , ("web_socket_send",             "::<SkyError>")
+    , ("web_socket_send_binary",      "::<SkyError>")
+    , ("web_socket_close",            "::<SkyError>")
+    , ("web_socket_close_with_code",  "::<SkyError>")
     -- Sub-D.2: Sky.Http.Server.WebSocket kernels — each returns SkyTask<E, _>.
     , ("server_web_socket_upgrade",              "::<SkyError>")
     , ("server_web_socket_send_to_client",       "::<SkyError>")
@@ -487,7 +506,7 @@ buildModule ctx mod =
                 -- declare the type vars (its field params reference them, e.g.
                 -- shouldRetry : ShouldRetry e) and return the generic struct.
                 gens = if null vars then ""
-                       else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug") vars) ++ ">"
+                       else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug + Send + 'static") vars) ++ ">"
                 retTy = structName ++ (if null vars then "" else "<" ++ intercalate ", " vars ++ ">")
             in if Set.member ctorName existingNames then []
                else [RustFunction ctorName gens (map (\(n, t) -> n ++ ": " ++ t) rustFlds) retTy body]
@@ -881,7 +900,7 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
         -- sig (E0107 on the return type / E0283 at call sites).
         tvarNames = nub [ v | t <- allAnnotTys, v <- collectRenderedTVars t ]
         genDecl = if null tvarNames then ""
-                  else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug") tvarNames) ++ ">"
+                  else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug + Send + 'static") tvarNames) ++ ">"
         multiBody = collectVarLocalsMulti body
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
         ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx
@@ -1870,6 +1889,23 @@ exprToRustInner ctx e = case e of
     -- net for indirect references, but most call sites match here).
     Can.Call (Ann.At _ (Can.VarKernel "Ffi" "toAny")) [inner] ->
         exprToRustString ctx inner
+    -- A bare `Ffi.kernel "X"` body for a ZERO-ARG kernel (e.g. stdlib `none =
+    -- Ffi.kernel "Sub_none"`) must resolve to the real kernel call, not the
+    -- ffi_kernel_polyfill panic — a zero-arg value alias (Sub.none) reached in a
+    -- nested position calls the generated wrapper, so its body has to work.
+    -- Restricted to zero-arg kernels; multi-arg function aliases fall through
+    -- (their wrappers are bypassed by direct call sites, so the polyfill there
+    -- is dead, and emitting a bare kernel fn would mistype their return).
+    Can.Call (Ann.At _ (Can.VarKernel "Ffi" "kernel")) [Ann.At _ (Can.Str kernelName)]
+        | (skyMod, skyFn) <- splitKernelName kernelName
+        , let rustFn = kernelToRust skyMod skyFn
+          -- Restricted to TEA value kernels whose generic runtime return
+          -- (SkyCmd<M> / SkySub<M>) matches the generic wrapper. Other zero-arg
+          -- kernels (e.g. dict_empty : HashMap<String,T>) would mistype the
+          -- generic wrapper (HashMap<k,v>), so they keep the dead-but-typesafe
+          -- ffi_kernel_polyfill body.
+        , rustFn `elem` ["cmd_none", "sub_none"] ->
+            rustFn ++ "()"
     -- Sub-A.13: Result/Ok and Result/Err constructor calls. The wrapping
     -- region's type is Result<E, A>; emit SkyResult::<E, A>::Ctor(inner) so
     -- Rust doesn't have to infer the unused-side type from a discarded value
@@ -1913,6 +1949,16 @@ exprToRustInner ctx e = case e of
         , "system_exit" `isPrefixOf` exprToRustString ctx task0 ->
             "cmd_perform::<SkyError, i64, _, _>("
                 ++ intercalate ", " (map (exprToRustString ctx) (task0 : rest)) ++ ")"
+    -- Sub-E step 4: Sub_subscribeWebSocket raw KIND toMsg. The four wrappers
+    -- (onOpen/onMessage/onClose/onError) feed heterogeneous toMsg through this one
+    -- `any`-typed kernel, which can't share a single bounded Rust fn. Route by the
+    -- compile-time literal kind: "message" → the real bounded receive kernel;
+    -- the rest → a no-op (unbounded toMsg, returns Sub.None) so they compile.
+    Can.Call subFn [rawArg, Ann.At _ (Can.Str kind), toMsgArg]
+        | "sub_subscribe_web_socket" == exprToRustString ctx subFn ->
+            let fn = if kind == "message" then "sub_subscribe_ws_message"
+                     else "sub_subscribe_ws_unsupported"
+            in fn ++ "(" ++ exprToRustString ctx rawArg ++ ", " ++ exprToRustString ctx toMsgArg ++ ")"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             -- sub-A.12 F2: detect partial application (Sky source has currying;
@@ -3166,6 +3212,23 @@ kernelToRust mod name = case (mod, name) of
     -- but the Rust target resolves Ffi.kernel calls directly during
     -- canonicalisation.  Any Ffi.kernel reference that reaches codegen is
     -- a polyfill call site — emit a diagnostic panic.
+    -- Sub-E: TEA Cmd/Sub/Cli — map directly to the tea.rs kernels (don't rely on
+    -- the Ffi.kernel-alias table, which mis-resolves in nested expr positions and
+    -- would call the generated stdlib wrapper -> Ffi.kernel polyfill panic).
+    ("Cmd", "none")     -> "cmd_none"
+    ("Std.Cmd", "none") -> "cmd_none"
+    ("Cmd", "batch")     -> "cmd_batch"
+    ("Std.Cmd", "batch") -> "cmd_batch"
+    ("Cmd", "perform")     -> "cmd_perform"
+    ("Std.Cmd", "perform") -> "cmd_perform"
+    ("Sub", "none")     -> "sub_none"
+    ("Std.Sub", "none") -> "sub_none"
+    ("Sub", "batch")     -> "sub_batch"
+    ("Std.Sub", "batch") -> "sub_batch"
+    ("Sub", "every")     -> "sub_every"
+    ("Std.Sub", "every") -> "sub_every"
+    ("Cli", "program")     -> "cli_program"
+    ("Std.Cli", "program") -> "cli_program"
     ("Ffi", "kernel") -> "ffi_kernel_polyfill"
     -- Ffi.callPure / callTask / toAny: the peephole rewriter in exprToRustInner
     -- handles the common case (literal kernel name + literal args list) by
@@ -3367,6 +3430,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     -- Sky.Core.Http client: reqwest only when used. rustls (no system OpenSSL).
     [ "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"gzip\"] }"
     | usesHttp uk, "reqwest" `notElem` userDepNames ] ++
+    -- Sky.Core.WebSocket client: tokio-tungstenite + futures-util.
+    [ name ++ " = " ++ spec
+    | usesWsClient uk
+    , (name, spec) <- [ ("tokio-tungstenite", "\"0.24\""), ("futures-util", "\"0.3\"") ]
+    , name `notElem` userDepNames ] ++
     [ emitDepLine name spec
     | (name, spec) <- rustDeps
     , not (null name)
@@ -3378,8 +3446,8 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     -- axum pulls `sync` transitively for the server case, but a plain Sky.Cli
     -- program has no axum, so request it explicitly.
     tokioFeats = ["rt", "rt-multi-thread", "macros", "time"]
-                 ++ ["net" | usesHttpServer uk || usesHttp uk]
-                 ++ ["sync" | usesTea uk]
+                 ++ ["net" | usesHttpServer uk || usesHttp uk || usesWsClient uk]
+                 ++ ["sync" | usesTea uk || usesWsClient uk]
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"

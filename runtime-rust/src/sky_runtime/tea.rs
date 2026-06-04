@@ -19,11 +19,19 @@ pub enum SkyCmd<M> {
     Perform(Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = M> + Send>> + Send>),
 }
 
+/// A custom subscription event source: given an `emit` callback, spawn a task
+/// that pushes messages into the loop, returning its JoinHandle (aborted on
+/// re-subscribe). Keeps SkySub decoupled from source-specific runtimes (e.g. the
+/// WebSocket client builds one of these for `onMessage`).
+pub type SubSpawn<M> =
+    Box<dyn FnOnce(std::sync::Arc<dyn Fn(M) + Send + Sync>) -> tokio::task::JoinHandle<()> + Send>;
+
 /// Sky `Sub msg`.
 pub enum SkySub<M> {
     None,
     Batch(Vec<SkySub<M>>),
     Every { ms: i64, msg: M },
+    Source(SubSpawn<M>),
 }
 
 // ─── Cmd kernels ──────────────────────────────────────────────────────────
@@ -107,6 +115,13 @@ impl<M: Clone + Send + 'static> SubManager<M> {
                     }
                 });
                 self.handles.push(h);
+            }
+            SkySub::Source(spawn) => {
+                // Hand the source an emit callback that funnels Msgs into the loop.
+                let tx = self.tx.clone();
+                let emit: std::sync::Arc<dyn Fn(M) + Send + Sync> =
+                    std::sync::Arc::new(move |m| { let _ = tx.send(CliEvent::Msg(m)); });
+                self.handles.push(spawn(emit));
             }
         }
     }

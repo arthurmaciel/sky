@@ -121,7 +121,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- Sub-E: TEA (Cmd/Sub/Cli.program) only when used.
         teaMod = if RustBuilder.usesTea usage then ["pub mod tea;"] else []
         teaUse = if RustBuilder.usesTea usage then ["pub use tea::*;"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ teaMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ teaUse)
+        -- Sky.Core.WebSocket client only when used (pulls tokio-tungstenite).
+        wscMod = if RustBuilder.usesWsClient usage then ["pub mod ws_client;"] else []
+        wscUse = if RustBuilder.usesWsClient usage then ["pub use ws_client::*;"] else []
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ teaMod ++ wscMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ teaUse ++ wscUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode

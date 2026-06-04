@@ -72,9 +72,20 @@ the rendering subsystem. Reference: `runtime-go/rt/cli.go` (~210 lines) +
    arg renders as `system_exit…` (the value is never produced — the process
    exits first). The stock `examples/20-cli-counter` now builds + runs:
    `count=0 1 2`, then `q` exits 0. Test: `tests/rust-codegen/cli-quit-test.sh`.
-4. **WS client Sub source** — `Sub_subscribeWebSocket` feeds the msgCh; the
-   Task-tier WS client (connect/send/close via tokio-tungstenite) + onMessage
-   subscription → completes the Rust WebSocket client.
+4. ✅ **WS client (Task-tier + onMessage receive)** (DONE) — `ws_client.rs`:
+   connect/connectWith/send/sendBinary/close/closeWithCode via tokio-tungstenite
+   + a per-socket registry (write mpsc + frames broadcast). `onMessage` →
+   `Sub_subscribeWebSocket` → `SkySub::Source` draining the broadcast → emits into
+   the TEA loop. WebSocketMessage bridged so the runtime builds frames; a Builder
+   peephole routes the four wrappers by the literal kind ("message" → real
+   kernel; open/close/error → no-op pending override). Generic fns gained
+   `Send + 'static` bounds (Sky values are owned). A bare `Ffi.kernel "X"` body
+   for cmd_none/sub_none resolves to the kernel call (fixes the nested zero-arg
+   wrapper). VERIFIED end-to-end: a Sky WS client connects to a Sky WS server,
+   sends "ping", and receives "echo: ping" via onMessage — two Sky-on-Rust
+   programs in a full bidirectional round trip. Limitation: onOpen/onClose/
+   onError are no-ops (heterogeneous toMsg through one `any` kernel needs a
+   rust-target stdlib override splitting it into typed kernels).
 5. **Sky.Tui** (later) — reuse the core, add the Std.Ui→ANSI renderer.
 6. **Sky.Live** (later, large) — per-session managers, SSE, stores, VNode diff.
 

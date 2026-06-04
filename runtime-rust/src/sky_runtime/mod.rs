@@ -78,6 +78,11 @@ pub mod tea;
 #[cfg(feature = "tokio")]
 pub use tea::*;
 
+#[cfg(feature = "websocket_client")]
+pub mod ws_client;
+#[cfg(feature = "websocket_client")]
+pub use ws_client::*;
+
 pub mod ffi_polyfills;
 pub use ffi_polyfills::*;
 

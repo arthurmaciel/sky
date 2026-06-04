@@ -19,6 +19,8 @@ csv = { version = "1", optional = true }
 axum = { version = "0.7", features = ["ws"], optional = true }
 tower-http = { version = "0.5", features = ["fs", "catch-panic"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"], optional = true }
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = { version = "0.3", optional = true }
 subtle = "2"
 hmac = "0.12"
 sha1 = "0.10"
@@ -44,7 +46,8 @@ compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
 server = ["tokio", "axum", "tower-http"]
 http_client = ["tokio", "reqwest"]
-full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "server", "http_client"]
+websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
+full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "server", "http_client", "websocket_client"]
 
 [dev-dependencies]
 regex = "1"
