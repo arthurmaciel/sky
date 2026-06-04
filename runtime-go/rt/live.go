@@ -208,6 +208,44 @@ func HtmlRender(node any) string {
 	return renderVNode(HtmlToVNode(node), map[string]any{})
 }
 
+// HtmlRenderWithHandlers serialises a Sky `Html` ADT to an HTML string
+// AND returns the per-hid typed-Msg lookup table populated by the
+// internal renderer. Caller-owned alternative to HtmlRender for paths
+// that need to dispatch hid-keyed events (e.g. the inline Sky Console
+// mount in console_app/mount.go).
+//
+// idPrefix is the stable namespace anchor for assignSkyIDs. Use "r"
+// to match the host Sky.Live convention; the console plane MAY pick
+// a different prefix ("console") so its sky-ids never collide with
+// the host's when both surfaces run in the same page (the console
+// scopes click capture to [data-sky-console] so this only matters
+// for diagnostic clarity).
+//
+// The function ALSO runs the Std.Ui style-marker rewriters
+// (applyStyleInjections — media-query / pseudo-class / transition /
+// animation hoisting) so the emitted HTML matches what Sky.Live's
+// commitRender path emits. Without this, dynamic styles wouldn't
+// hydrate on the inline mount's first paint.
+//
+// Wire shape for the returned map:
+//
+//	"<sky-id>.<event>" → typed Msg (Sky-side Msg constructor value)
+//
+// matches the host's `data-sky-hid="<id>"` attribute the client JS
+// reads. dispatchConsoleMsg's hid-keyed lookup consumes this map to
+// resolve a Msg without re-deriving it from the wire payload.
+func HtmlRenderWithHandlers(node any, idPrefix string) (string, map[string]any) {
+	if idPrefix == "" {
+		idPrefix = "r"
+	}
+	handlers := map[string]any{}
+	vn := HtmlToVNode(node)
+	assignSkyIDs(&vn, idPrefix)
+	applyStyleInjections(&vn)
+	body := renderVNode(vn, handlers)
+	return body, handlers
+}
+
 func init() {
 	RegisterPure("htmlRender", func(args []any) any {
 		if len(args) < 1 {
@@ -538,50 +576,25 @@ func assignSkyIDs(n *VNode, path string) {
 // element. Post-condition: marker attrs removed; style child
 // prepended where present.
 func injectMediaQueryStyles(n *VNode) {
-	if n.Kind != "element" {
-		return
-	}
-	query, hasQuery := n.Attrs["data-sky-mq-q"]
-	rules, hasRules := n.Attrs["data-sky-mq-rules"]
-	if hasQuery && hasRules && n.SkyID != "" {
-		// Build the scoped style content.
-		// Selector: `[sky-id="..."]` — exact-match attribute
-		// selector keys directly off the sky-id we already emit
-		// for diff-patch addressing. Same string is escaped by
-		// html.EscapeString during render so no quote-injection
-		// surface.
-		selector := `[sky-id="` + n.SkyID + `"]`
-		// CSS-escape inside the style element: the `rules` string
-		// must NOT contain a closing `</style>` sequence (browsers
-		// terminate <style> on that literal regardless of context).
-		// Strip defensively.
-		safeRules := strings.ReplaceAll(rules, "</style", "")
-		safeRules = strings.ReplaceAll(safeRules, "</STYLE", "")
-		safeQuery := strings.ReplaceAll(query, "</style", "")
-		safeQuery = strings.ReplaceAll(safeQuery, "</STYLE", "")
-		styleText := "@media " + safeQuery + " { " + selector +
-			" { " + safeRules + " } }"
-		styleNode := VNode{
-			Kind: "element",
-			Tag:  "style",
-			Attrs: map[string]string{
-				"data-sky-mq": n.SkyID,
-			},
-			Children: []VNode{{Kind: "raw", Text: styleText}},
-		}
-		// Strip marker attrs from the wire output — they served
-		// their purpose and shouldn't leak as inert data-* on the
-		// rendered HTML.
-		delete(n.Attrs, "data-sky-mq-q")
-		delete(n.Attrs, "data-sky-mq-rules")
-		// Prepend style as the first child so it parses before any
-		// rendered content (matches the convention used by the
-		// outer Ui.layout wrapper's body-reset style block).
-		n.Children = append([]VNode{styleNode}, n.Children...)
-	}
-	for i := range n.Children {
-		injectMediaQueryStyles(&n.Children[i])
-	}
+	injectStyleMarker(n, styleMarkerSpec{
+		markerAttrs: []string{"data-sky-mq-q", "data-sky-mq-rules"},
+		styleAttr:   "data-sky-mq",
+		build: func(skyID string, attrs map[string]string) string {
+			query := attrs["data-sky-mq-q"]
+			rules := attrs["data-sky-mq-rules"]
+			if query == "" || rules == "" {
+				return ""
+			}
+			selector := `[sky-id="` + skyID + `"]`
+			safeRules := strings.ReplaceAll(rules, "</style", "")
+			safeRules = strings.ReplaceAll(safeRules, "</STYLE", "")
+			safeQuery := strings.ReplaceAll(query, "</style", "")
+			safeQuery = strings.ReplaceAll(safeQuery, "</STYLE", "")
+			return "@media " + safeQuery + " { " + selector +
+				" { " + safeRules + " } }"
+		},
+		recurse: injectMediaQueryStyles,
+	})
 }
 
 // injectPseudoClassStyles walks the tree after assignSkyIDs and
@@ -619,30 +632,151 @@ func injectMediaQueryStyles(n *VNode) {
 // element. Post-condition: marker attr removed; style child
 // prepended where present.
 func injectPseudoClassStyles(n *VNode) {
+	injectStyleMarker(n, styleMarkerSpec{
+		markerAttrs: []string{"data-sky-pc-rules"},
+		styleAttr:   "data-sky-pc",
+		build: func(skyID string, attrs map[string]string) string {
+			return buildPseudoClassStyleText(skyID, attrs["data-sky-pc-rules"])
+		},
+		recurse: injectPseudoClassStyles,
+	})
+}
+
+
+// styleMarkerSpec describes one style-injection pass. All four passes
+// (media-query / pseudo-class / transition / animation) share the
+// same shape: locate a marker attr on an element with a sky-id, build
+// a CSS block scoped to that id, drop the marker, attach a <style>
+// element carrying the CSS block.
+//
+// v0.15.57 #409 — the canonical "attach as first child" path silently
+// drops the <style> when the element is a VOID HTML element (<input>,
+// <img>, <br>, …) because renderVNode skips children for void tags.
+// The shared injector hoists the <style> to a sibling slot in that
+// case (handled by the parent's child-loop pass).
+type styleMarkerSpec struct {
+	// markerAttrs is the list of data-* attrs the pass consumes (all
+	// stripped from the wire output after processing, even on
+	// no-match — so an empty marker doesn't leak as inert data-*).
+	markerAttrs []string
+	// styleAttr is the data-* attr stamped on the emitted <style>
+	// element (e.g. "data-sky-pc" / "data-sky-mq" / "data-sky-tr" /
+	// "data-sky-anim"), keyed to the element's sky-id.
+	styleAttr string
+	// build builds the CSS body. Returns "" if there's nothing to
+	// emit (the marker was empty / malformed).
+	build func(skyID string, attrs map[string]string) string
+	// recurse is the entry point used to recursively walk children
+	// (passed in so each pass keeps its own identity for tracing).
+	recurse func(*VNode)
+}
+
+
+// injectStyleMarker applies a single style-injection spec to a VNode
+// + its descendants. Handles both the non-void case (attach style as
+// first child) and the void case (hoist to sibling after).
+func injectStyleMarker(n *VNode, spec styleMarkerSpec) {
 	if n.Kind != "element" {
 		return
 	}
-	encoded, ok := n.Attrs["data-sky-pc-rules"]
-	if ok && n.SkyID != "" && encoded != "" {
-		styleText := buildPseudoClassStyleText(n.SkyID, encoded)
-		if styleText != "" {
-			styleNode := VNode{
-				Kind: "element",
-				Tag:  "style",
-				Attrs: map[string]string{
-					"data-sky-pc": n.SkyID,
-				},
-				Children: []VNode{{Kind: "raw", Text: styleText}},
-			}
-			n.Children = append([]VNode{styleNode}, n.Children...)
+	if !isVoidTag(n.Tag) {
+		// Non-void self: prepend style child if marker present.
+		applyMarkerAsFirstChild(n, spec)
+	}
+	// Walk children, splicing sibling style blocks after any void
+	// child that still carries a marker (because the self-handler
+	// above bailed for void).
+	n.Children = walkChildrenWithVoidSiblingHoist(n.Children, spec)
+}
+
+
+// applyMarkerAsFirstChild handles the canonical case: build the
+// style body, prepend as first child, strip marker(s). Caller must
+// already have decided n is non-void.
+func applyMarkerAsFirstChild(n *VNode, spec styleMarkerSpec) {
+	if n.SkyID == "" {
+		// No id → no scope. Strip markers anyway so they don't leak.
+		for _, ma := range spec.markerAttrs {
+			delete(n.Attrs, ma)
 		}
-		// Marker attr stripped regardless — bad/empty input
-		// shouldn't leak as inert data-* either.
-		delete(n.Attrs, "data-sky-pc-rules")
+		return
 	}
-	for i := range n.Children {
-		injectPseudoClassStyles(&n.Children[i])
+	hasAny := false
+	for _, ma := range spec.markerAttrs {
+		if v, ok := n.Attrs[ma]; ok && v != "" {
+			hasAny = true
+			break
+		}
 	}
+	if !hasAny {
+		// Strip empty markers regardless.
+		for _, ma := range spec.markerAttrs {
+			delete(n.Attrs, ma)
+		}
+		return
+	}
+	styleText := spec.build(n.SkyID, n.Attrs)
+	for _, ma := range spec.markerAttrs {
+		delete(n.Attrs, ma)
+	}
+	if styleText == "" {
+		return
+	}
+	styleNode := VNode{
+		Kind: "element",
+		Tag:  "style",
+		Attrs: map[string]string{
+			spec.styleAttr: n.SkyID,
+		},
+		Children: []VNode{{Kind: "raw", Text: styleText}},
+	}
+	n.Children = append([]VNode{styleNode}, n.Children...)
+}
+
+
+// walkChildrenWithVoidSiblingHoist recurses into each child + splices
+// a sibling <style> immediately after any VOID child whose marker
+// survived the self-handler's bail. See #409.
+func walkChildrenWithVoidSiblingHoist(children []VNode, spec styleMarkerSpec) []VNode {
+	out := make([]VNode, 0, len(children))
+	for i := range children {
+		child := &children[i]
+		spec.recurse(child)
+		// Capture the void-child's marker BEFORE we append (the recurse
+		// call may have stripped non-void markers from deep descendants
+		// but a void child's marker still sits on the child).
+		var hoist *VNode
+		if child.Kind == "element" && isVoidTag(child.Tag) && child.SkyID != "" {
+			hasAny := false
+			for _, ma := range spec.markerAttrs {
+				if v, ok := child.Attrs[ma]; ok && v != "" {
+					hasAny = true
+					break
+				}
+			}
+			if hasAny {
+				styleText := spec.build(child.SkyID, child.Attrs)
+				if styleText != "" {
+					hoist = &VNode{
+						Kind: "element",
+						Tag:  "style",
+						Attrs: map[string]string{
+							spec.styleAttr: child.SkyID,
+						},
+						Children: []VNode{{Kind: "raw", Text: styleText}},
+					}
+				}
+				for _, ma := range spec.markerAttrs {
+					delete(child.Attrs, ma)
+				}
+			}
+		}
+		out = append(out, *child)
+		if hoist != nil {
+			out = append(out, *hoist)
+		}
+	}
+	return out
 }
 
 // buildPseudoClassStyleText parses the `data-sky-pc-rules` marker
@@ -772,45 +906,27 @@ func applyStyleInjections(n *VNode) {
 //
 // Pre-condition: assignSkyIDs has already stamped n.SkyID.
 func injectTransitionStyles(n *VNode) {
-	if n.Kind != "element" {
-		return
-	}
-	rules, ok := n.Attrs["data-sky-tr-rules"]
-	respectRaw := n.Attrs["data-sky-tr-respect"]
-	if ok && n.SkyID != "" && rules != "" {
-		respect := respectRaw != "0"
-		// Defensive `</style>` strip — same hardening as the
-		// other style-injection passes.
-		safeRules := strings.ReplaceAll(rules, "</style", "")
-		safeRules = strings.ReplaceAll(safeRules, "</STYLE", "")
-		selector := `[sky-id="` + n.SkyID + `"]`
-		var styleText string
-		if respect {
-			styleText = "@media (prefers-reduced-motion: no-preference) { " +
-				selector + " { transition: " + safeRules + "; } }"
-		} else {
-			styleText = selector + " { transition: " + safeRules + "; }"
-		}
-		styleNode := VNode{
-			Kind: "element",
-			Tag:  "style",
-			Attrs: map[string]string{
-				"data-sky-tr": n.SkyID,
-			},
-			Children: []VNode{{Kind: "raw", Text: styleText}},
-		}
-		delete(n.Attrs, "data-sky-tr-rules")
-		delete(n.Attrs, "data-sky-tr-respect")
-		n.Children = append([]VNode{styleNode}, n.Children...)
-	} else if ok {
-		// Marker present but empty/no sky-id — strip anyway so
-		// it doesn't pollute the wire.
-		delete(n.Attrs, "data-sky-tr-rules")
-		delete(n.Attrs, "data-sky-tr-respect")
-	}
-	for i := range n.Children {
-		injectTransitionStyles(&n.Children[i])
-	}
+	injectStyleMarker(n, styleMarkerSpec{
+		markerAttrs: []string{"data-sky-tr-rules", "data-sky-tr-respect"},
+		styleAttr:   "data-sky-tr",
+		build: func(skyID string, attrs map[string]string) string {
+			rules := attrs["data-sky-tr-rules"]
+			respectRaw := attrs["data-sky-tr-respect"]
+			if rules == "" {
+				return ""
+			}
+			respect := respectRaw != "0"
+			safeRules := strings.ReplaceAll(rules, "</style", "")
+			safeRules = strings.ReplaceAll(safeRules, "</STYLE", "")
+			selector := `[sky-id="` + skyID + `"]`
+			if respect {
+				return "@media (prefers-reduced-motion: no-preference) { " +
+					selector + " { transition: " + safeRules + "; } }"
+			}
+			return selector + " { transition: " + safeRules + "; }"
+		},
+		recurse: injectTransitionStyles,
+	})
 }
 
 // injectAnimationStyles walks the tree after assignSkyIDs and
@@ -843,30 +959,14 @@ func injectTransitionStyles(n *VNode) {
 // already structurally unique within a page; we strip the
 // non-CSS-ident chars to produce a safe @keyframes name suffix.
 func injectAnimationStyles(n *VNode) {
-	if n.Kind != "element" {
-		return
-	}
-	encoded, ok := n.Attrs["data-sky-anim-rules"]
-	if ok && n.SkyID != "" && encoded != "" {
-		styleText := buildAnimationStyleText(n.SkyID, encoded)
-		if styleText != "" {
-			styleNode := VNode{
-				Kind: "element",
-				Tag:  "style",
-				Attrs: map[string]string{
-					"data-sky-anim": n.SkyID,
-				},
-				Children: []VNode{{Kind: "raw", Text: styleText}},
-			}
-			n.Children = append([]VNode{styleNode}, n.Children...)
-		}
-		delete(n.Attrs, "data-sky-anim-rules")
-	} else if ok {
-		delete(n.Attrs, "data-sky-anim-rules")
-	}
-	for i := range n.Children {
-		injectAnimationStyles(&n.Children[i])
-	}
+	injectStyleMarker(n, styleMarkerSpec{
+		markerAttrs: []string{"data-sky-anim-rules"},
+		styleAttr:   "data-sky-anim",
+		build: func(skyID string, attrs map[string]string) string {
+			return buildAnimationStyleText(skyID, attrs["data-sky-anim-rules"])
+		},
+		recurse: injectAnimationStyles,
+	})
 }
 
 // skyIDToCSSIdent rewrites a sky-id (`r.0.2#div`) into a CSS-safe
@@ -2515,6 +2615,34 @@ type liveApp struct {
 	routes        []liveRoute
 	notFound      any
 	guard         any          // Maybe (Msg -> Model -> Result String ()) — nil = no guard
+	// head : Model -> List (Html msg) — optional. When set, the
+	// returned list is rendered to HTML and spliced into <head> on
+	// the initial full-page response, after the baseline meta tags
+	// and before <style>. Use for per-page <title>, SEO meta tags,
+	// canonical URLs, Open Graph, Twitter Card, JSON-LD structured
+	// data, theme-color, RSS, favicons, etc. nil → no extra head
+	// content (default). Helpers live in Std.Live.Head.
+	//
+	// Only the initial GET (`handleInitial`) honours this — SSE
+	// patches scope to <body>, so a head change does NOT re-emit
+	// until a full reload. That matches the typical case (head is
+	// derived from page identity, which changes via in-app
+	// navigation that already triggers a sky-nav fetch +
+	// full-body patch + history push).
+	head          any
+	// consoleAuth : Request -> Task Error (Maybe Identity) — optional.
+	// When the embedded console mounts in `app`-mode (env
+	// SKY_CONSOLE_AUTH=app), the framework calls this callback BEFORE
+	// every /_sky/console request. `Nothing` → 403 + structured
+	// `console.auth.denied` audit log. `Just identity` → the request
+	// proceeds; the identity is attached to a __Host-sky_console
+	// session cookie for the duration of consoleAuthSessionTTL.
+	//
+	// nil → no callback; mode falls back to token-mode (or off in
+	// production when SKY_CONSOLE_AUTH is unset, per the production
+	// gate in evaluateConsoleAuth). Same row-poly pattern as v0.15.58
+	// `head` field — apps that omit `consoleAuth` build byte-identical.
+	consoleAuth   any
 	api           []apiRoute   // REST-style custom handlers alongside Live pages
 	staticDir     string       // Serves files from this directory under /static/…
 	staticURL     string       // URL mount prefix (default "/static")
@@ -2533,6 +2661,18 @@ type liveApp struct {
 	// correctly — without this, a sub-app's wire calls would hit
 	// the PARENT mux instead of the sub-app's.
 	basePath string
+	// cookieName: the session cookie name. Defaults to "sky_sid" for
+	// root-mounted apps. Sub-apps mounted via MountLiveSubAppInProcess
+	// MUST use a distinct name (e.g. "sky_console_sid") so the
+	// parent's session cookie and the sub-app's session cookie don't
+	// collide on the same browser origin. v0.16.1 PR10.
+	cookieName string
+	// skyIDPrefix: the prefix prepended to every assignSkyIDs walk.
+	// Defaults to "r" for root-mounted apps. Sub-apps use a distinct
+	// prefix (e.g. "sky-console") so logs / diffs / handler lookups
+	// stay unambiguous when both parent + sub-app render into the
+	// same browser tab. v0.16.1 PR10.
+	skyIDPrefix string
 	// topics — pub/sub registry (Cycle 3 P46). Same pointer the
 	// app.store.Broker() returns; cached here so subscribe / publish
 	// call sites don't have to indirect through the store on every
@@ -2580,6 +2720,29 @@ type liveApp struct {
 // Cycle 3 P47 / pub/sub prereq 2 — docs/skylive/pubsub-design.md §3.2.
 func (a *liveApp) nextGlobalSeq() int64 {
 	return a.globalSeq.Add(1)
+}
+
+// skyIDPrefixOrDefault returns the per-app sky-id namespace prefix,
+// falling back to "r" for app instances that pre-date the v0.16.1
+// PR10 field. Centralising the default here keeps the historic
+// behaviour for any *liveApp constructed outside liveAppRun (e.g.
+// test fixtures that field-init the struct directly).
+func (a *liveApp) skyIDPrefixOrDefault() string {
+	if a == nil || a.skyIDPrefix == "" {
+		return "r"
+	}
+	return a.skyIDPrefix
+}
+
+// cookieNameOrDefault returns the per-app session cookie name,
+// falling back to "sky_sid" for app instances that pre-date the
+// v0.16.1 PR10 field. Used by sessionIDNamed-aware call sites that
+// otherwise would have hard-coded the legacy name.
+func (a *liveApp) cookieNameOrDefault() string {
+	if a == nil || a.cookieName == "" {
+		return "sky_sid"
+	}
+	return a.cookieName
 }
 
 // Publish is the app-level fan-out entry point that all broadcast
@@ -2662,7 +2825,28 @@ func Live_api(spec any, handler any) any {
 // dispatchRoot routes a request to:
 //  1. a matching apiRoute (REST handler), OR
 //  2. handleInitial (Live page render).
+//
+// Framework namespace guard: /_sky/* is reserved for the Sky runtime
+// (event POST, SSE, console, metrics, healthz, readyz, buildinfo, etc).
+// Specific /_sky/* endpoints are registered EXACT-match on the mux and
+// never reach dispatchRoot. Anything that DOES reach here under /_sky/*
+// is an unmounted framework path — we must return a plain 404 rather
+// than fall through to the user's notFound page (which would leak the
+// app's UI for typoed/probed framework URLs like /_sky/conslole).
+//
+// v0.16.1 PR10-F: when this *liveApp is itself a sub-app mounted under
+// `/_sky/*` (e.g. the inline console at `/_sky/console`), the guard
+// must NOT 404 on requests whose path matches the sub-app's own
+// basePath — that prefix IS the sub-app's home. We only reject paths
+// that fall under /_sky/ AND OUTSIDE the sub-app's basePath; or for
+// root-mounted apps (basePath == "") any /_sky/ path.
 func (app *liveApp) dispatchRoot(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/_sky/") {
+		if app.basePath == "" || !pathInBasePath(r.URL.Path, app.basePath) {
+			http.NotFound(w, r)
+			return
+		}
+	}
 	for _, ar := range app.api {
 		if ar.method != "" && !strings.EqualFold(ar.method, r.Method) {
 			continue
@@ -2782,6 +2966,14 @@ func unpackResponse(v any) (int, map[string]string, string) {
 // paths still 404 (browser noise like /favicon.ico shouldn't render
 // the SPA), so handler-state protection survives.
 func matchAnyRoute(app *liveApp, urlPath string) ([]string, bool) {
+	// v0.16.1 PR10-F — sub-apps see urlPath that still includes the
+	// basePath prefix (because the parent's mux dispatches the full
+	// path through). For route matching we compare against the
+	// "logical" path INSIDE the sub-app, which is whatever sits after
+	// basePath. So /_sky/console/about routes against /about inside
+	// the sub-app; /_sky/console (bare) and /_sky/console/ both route
+	// against /.
+	urlPath = trimBasePathPrefix(urlPath, app.basePath)
 	for _, rt := range app.routes {
 		if params, ok := matchRoute(rt.path, urlPath); ok {
 			return params, true
@@ -2794,6 +2986,11 @@ func matchAnyRoute(app *liveApp, urlPath string) ([]string, bool) {
 }
 
 func applyRoute(app *liveApp, model any, urlPath string) any {
+	// v0.16.1 PR10-F — strip the sub-app's basePath so route patterns
+	// stay basePath-agnostic. Sub-apps declare routes like "/" or
+	// "/about" inside their own world; the parent's mux passes the
+	// full URL through. See matchAnyRoute for the parallel comment.
+	urlPath = trimBasePathPrefix(urlPath, app.basePath)
 	for _, rt := range app.routes {
 		if params, ok := matchRoute(rt.path, urlPath); ok {
 			page := fillRoutePage(rt.page, params)
@@ -2872,10 +3069,14 @@ func liveAppRun(cfg any) any {
 		subscriptions: Field(cfg, "Subscriptions"),
 		notFound:      Field(cfg, "NotFound"),
 		guard:         Field(cfg, "Guard"),
+		head:          Field(cfg, "Head"),
+		consoleAuth:   Field(cfg, "ConsoleAuth"),
 		locker:        newSessionLocker(),
 		msgTags:       make(map[string]int),
 		bannerCfg:     resolveBannerStrings(loadLiveBannerConfig(), cfg),
 		basePath:      normaliseBasePath(skyGetenv("LIVE_BASE_PATH")),
+		cookieName:    "sky_sid",
+		skyIDPrefix:   "r",
 	}
 	for _, r := range asList(Field(cfg, "Routes")) {
 		if lr, ok := r.(liveRoute); ok {
@@ -2944,10 +3145,11 @@ func liveAppRun(cfg any) any {
 	// *liveApp without an update-tuple context.
 	registerProcessBroker(app)
 
-	// Resolve listen port early so sub-app spawn helpers
-	// (maybeAutoMountConsole below) can pass it to children via
-	// SKY_PARENT_URL — that's how the observability push exporter
-	// finds us. cfg.Port wins over env; both fall back to 8080.
+	// Resolve listen port early. cfg.Port wins over env; both fall
+	// back to 8080. (Pre-v0.16.0 this was needed to seed
+	// SKY_PARENT_URL on subprocess-spawned console children; the
+	// inline console doesn't run as a child process so the port is
+	// just for the listener.)
 	port := 8080
 	if p := Field(cfg, "Port"); p != nil {
 		port = AsInt(p)
@@ -2957,22 +3159,46 @@ func liveAppRun(cfg any) any {
 			port = n
 		}
 	}
+	_ = port // referenced again below; keep the name in scope
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/_sky/event", app.handleEvent)
 	mux.HandleFunc("/_sky/sse", app.handleSSE)
 	mux.HandleFunc("/_sky/config", app.handleConfig)
-	// Auto-mount Sky Console sub-app FIRST so MountObservability
-	// Endpoints' legacy /_sky/console fallback can see the flag
-	// and skip its own registration. Dev mode only; no-op in
-	// production / sub-app contexts. Skipped entirely when running
-	// AS a sub-app (basePath != "") — sub-apps don't host their own
-	// sub-consoles.
-	parentPortForChildren := port
-	if app.basePath != "" {
-		parentPortForChildren = 0 // we're a sub-app; no sub-children
+	// v0.16.0: in-process inline Sky Console mount. Replaces the
+	// v0.15.x subprocess + reverse-proxy mount. The function
+	// internally gates on production-mode + sub-app context, so we
+	// can call it unconditionally. Must run BEFORE
+	// MountObservabilityEndpoints so the legacy HTML shell inside
+	// the latter doesn't collide on /_sky/console (safeMount's
+	// dedup catches that case anyway, but the explicit order
+	// documents intent).
+	//
+	// PR 3 (v0.16.0): the app's optional `consoleAuth` field rides
+	// in as an opaque `any` — `MountEmbeddedConsole` interprets it
+	// inside the `app`-mode gate. nil → token-mode / production-mode
+	// fallback per evaluateConsoleAuth.
+	SetConsoleAuthCallback(app.consoleAuth)
+	// v0.16.1 PR7 — seed SKY_PARENT_URL so the inline console_app's
+	// init_ reads OUR OWN listener's loopback when it builds the
+	// initial Model. The /_sky/console/api/* endpoints serve real
+	// telemetry via MountConsoleEndpoints (mounted later as part of
+	// MountObservabilityEndpoints). Without this, init_ falls back to
+	// `State_mockOverview()` + `State_mockLogs()` and the deployed
+	// console UI renders "Standalone mode — no parent URL configured"
+	// with all-zero stats.
+	//
+	// SAFE: StartPushExporter gates on BOTH SKY_PARENT_URL +
+	// SKY_LIVE_NAMESPACE being set. We only seed SKY_PARENT_URL, so
+	// the push-exporter stays a no-op for the parent app (only
+	// MountSubApp children set both).
+	//
+	// Only seed when UNSET — never overwrite a user-supplied value
+	// (legacy v0.15 subprocess apps may still set this in env).
+	if os.Getenv("SKY_PARENT_URL") == "" {
+		os.Setenv("SKY_PARENT_URL", fmt.Sprintf("http://127.0.0.1:%d", port))
 	}
-	maybeAutoMountConsole(mux, app.basePath, parentPortForChildren)
+	MountEmbeddedConsole(mux)
 	// If THIS process is a sub-app (env vars from MountSubApp set),
 	// kick the push exporter — Log.* / counter / span writes flow
 	// to the parent. No-op for standalone (parent) runs.
@@ -2990,6 +3216,14 @@ func liveAppRun(cfg any) any {
 	if app.basePath == "" {
 		MountObservabilityEndpoints(mux)
 	}
+	// v0.16.1 PR 2 — boot-time mount-precedence invariant. When the
+	// user EXPLICITLY asked for a console (SKY_CONSOLE_AUTH=token|app,
+	// not a sub-app, SKY_CONSOLE_EMBED not off) but neither the
+	// inline nor the legacy mount actually claimed /_sky/console,
+	// this prints a FATAL stderr line + os.Exit(1). Catches the
+	// hand-edited main.go that lost the console_app blank import.
+	// No-op when shouldHaveConsole is false (off / unset / sub-app).
+	AssertConsoleInvariantOrExit()
 	// Static assets (if configured) mounted first so api/page routing
 	// doesn't shadow them.
 	if app.staticDir != "" {
@@ -3134,19 +3368,20 @@ func liveAppRun(cfg any) any {
 		// finish + the goroutine exits cleanly. Idempotent —
 		// safe to call when no worker was ever spawned.
 		JobsShutdown()
-		// Close the parent HTTP server BEFORE killing sub-apps.
-		// Order matters: if a `/_sky/console/*` request is being
-		// reverse-proxied when Ctrl-C lands, killing the console
-		// child first leaves the proxy mid-body-copy with a dead
-		// upstream — "ReverseProxy read error during body copy:
-		// unexpected EOF". Closing the parent first ends those
-		// in-flight proxied requests; only then tear the children
-		// down.
+		// v0.16.1: drain the in-process HubExporter (and any other
+		// registered shutdown hook) BEFORE srv.Close. 8 s budget
+		// leaves 2 s safety within Cloud Run's 10 s grace window.
+		// LIFO order — HubExporter (registered last, during boot)
+		// runs first; future v0.17+ hooks fan out from here. No-op
+		// when no exporter / no hooks are registered.
+		RunShutdownHooks(8 * time.Second)
+		// v0.16.0: the inline console runs in-process, so there's
+		// no child to tear down. Pre-v0.16.0 this section closed
+		// srv.Close() FIRST (to drain in-flight reverse-proxy
+		// requests) then ShutdownSubApps() to signal the console
+		// child. Now the console handler runs on the same mux, so
+		// closing the server is sufficient.
 		_ = srv.Close()
-		// Tear down any sub-apps spawned via MountSubApp (the dev
-		// console + any user-mounted billing/admin/etc. processes).
-		// Idempotent + bounded (2s SIGTERM grace then SIGKILL).
-		ShutdownSubApps()
 		// If srv.Close completes the listener teardown, ListenAndServe
 		// returns and the function exits naturally. If something hangs,
 		// a second Ctrl-C escapes via os.Exit. Without this watchdog,
@@ -3248,7 +3483,7 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	// would otherwise wipe sess.handlers and break the very next event
 	// POST with "handler not found". Per-session lock prevents
 	// concurrent re-renders racing each other's handlers.
-	sid := sessionID(r, w, app.sessionTTL)
+	sid := sessionIDNamed(r, w, app.sessionTTL, app.cookieName)
 	app.locker.Lock(sid)
 	defer app.locker.Unlock(sid)
 
@@ -3306,7 +3541,7 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	app.setupSubscriptions(sess)
 
 	vn := HtmlToVNode(sky_call(app.view, model))
-	assignSkyIDs(&vn, "r")
+	assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 	applyStyleInjections(&vn)
 	body := renderVNode(vn, sess.handlers)
 	// Initial mount writes the full HTML directly into the HTTP
@@ -3353,7 +3588,53 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	// content for root-mounted apps — the JS treats "" as "no
 	// prefix" (the historical default).
 	baseMeta := fmt.Sprintf(`<meta name="sky-base" content=%q>`, app.basePath)
-	fmt.Fprintf(w, "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">%s<style>%s</style></head><body><div id=\"sky-root\">%s</div>%s<script>%s</script></body></html>", baseMeta, liveBaseCSS, body, devBanner, liveJSWithCfgAndCsrfWithBase(sid, app.bannerCfg, csrfToken, app.basePath))
+	// App-supplied head content (Live.app cfg.head : Model -> List
+	// (Html msg)). Sits AFTER baseMeta + the runtime's required
+	// charset / viewport tags, BEFORE the inline <style> reset, so
+	// app overrides (custom favicon, canonical URL, JSON-LD,
+	// per-page title) win against the defaults and the runtime's
+	// own reset still wins against any clashing inline-style
+	// override in the app's head. Empty string when app didn't
+	// supply `head` — byte-identical to pre-v0.15.58 output.
+	headExtra := renderAppHead(app.head, model)
+	fmt.Fprintf(w, "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">%s%s<style>%s</style></head><body><div id=\"sky-root\">%s</div>%s<script>%s</script></body></html>", baseMeta, headExtra, liveBaseCSS, body, devBanner, liveJSWithCfgAndCsrfWithBase(sid, app.bannerCfg, csrfToken, app.basePath))
+}
+
+// renderAppHead invokes the optional `head : Model -> List (Html
+// msg)` callback and serialises the returned list to a single HTML
+// string ready to splice into <head>. Returns "" when `head` is
+// nil (the optional-field default), when the callback returns
+// nil, when the result isn't a list, or when the list is empty —
+// matching the pre-feature output byte-for-byte.
+//
+// Each element is rendered via the same renderVNode pipeline the
+// body uses, with a discarded handlers map (head nodes never have
+// event bindings — `onClick`-style attrs on a <title>/<meta>/
+// <link>/<script> would be a user bug, but we don't enforce it
+// here; the renderer emits the sky-event attr and the JS driver
+// simply never finds the element in the body).
+func renderAppHead(head any, model any) string {
+	if head == nil {
+		return ""
+	}
+	result := sky_call(head, model)
+	if result == nil {
+		return ""
+	}
+	nodes := asList(result)
+	if len(nodes) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	// Discardable handlers map — head elements should not produce
+	// wire-event bindings (no JS driver to listen on them), and
+	// each <head> serialisation is one-shot per full GET.
+	handlers := map[string]any{}
+	for _, n := range nodes {
+		vn := HtmlToVNode(n)
+		sb.WriteString(renderVNode(vn, handlers))
+	}
+	return sb.String()
 }
 
 // liveBaseCSS is the minimal reset injected into every Sky.Live page.
@@ -3485,7 +3766,7 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 	if len(sess.handlers) == 0 && sess.model != nil {
 		sess.handlers = map[string]any{}
 		vn := HtmlToVNode(sky_call(app.view, sess.model))
-		assignSkyIDs(&vn, "r")
+		assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 		applyStyleInjections(&vn)
 		body := renderVNode(vn, sess.handlers)
 		// Route through commitRender (Cycle 3 P40 / Gap C7) so
@@ -3676,7 +3957,7 @@ func (app *liveApp) dispatchBatched(sess *liveSession, ev batchedEvent) {
 	if len(sess.handlers) == 0 && sess.model != nil {
 		sess.handlers = map[string]any{}
 		vn := HtmlToVNode(sky_call(app.view, sess.model))
-		assignSkyIDs(&vn, "r")
+		assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 		applyStyleInjections(&vn)
 		body := renderVNode(vn, sess.handlers)
 		// Route through commitRender (Cycle 3 P40 / Gap C7) so
@@ -3915,7 +4196,7 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 	finalCmd = cmd
 	sess.handlers = map[string]any{}
 	vn := HtmlToVNode(sky_call(app.view, sess.model))
-	assignSkyIDs(&vn, "r")
+	assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 	applyStyleInjections(&vn)
 	body = renderVNode(vn, sess.handlers)
 	// Commit prevTree + lastComputedBody as one atomic step (Cycle 3
@@ -3974,7 +4255,7 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 func (app *liveApp) renderView(sess *liveSession) string {
 	sess.handlers = map[string]any{}
 	vn := HtmlToVNode(sky_call(app.view, sess.model))
-	assignSkyIDs(&vn, "r")
+	assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 	applyStyleInjections(&vn)
 	body := renderVNode(vn, sess.handlers)
 	sess.commitRender(&vn, body)
@@ -4831,7 +5112,11 @@ func (app *liveApp) runStreamSubscriberDispatch(sess *liveSession, toMsg any, ev
 //     interval.
 func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 	sid := ""
-	if c, err := r.Cookie("sky_sid"); err == nil {
+	cookieName := app.cookieName
+	if cookieName == "" {
+		cookieName = "sky_sid"
+	}
+	if c, err := r.Cookie(cookieName); err == nil {
 		sid = c.Value
 	}
 	if sid == "" {
@@ -4924,7 +5209,7 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 		func() {
 			defer func() { _ = recover() }()
 			vn := HtmlToVNode(sky_call(app.view, sess.model))
-			assignSkyIDs(&vn, "r")
+			assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 			applyStyleInjections(&vn)
 			sess.handlers = map[string]any{}
 			body := renderVNode(vn, sess.handlers)
@@ -4999,7 +5284,19 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func sessionID(r *http.Request, w http.ResponseWriter, ttl time.Duration) string {
-	if c, err := r.Cookie("sky_sid"); err == nil {
+	return sessionIDNamed(r, w, ttl, "sky_sid")
+}
+
+// sessionIDNamed is the per-app cookie-name-aware session ID resolver.
+// Reads / writes the named cookie instead of the hard-coded "sky_sid".
+// v0.16.1 PR10: sub-apps mounted via MountLiveSubAppInProcess use a
+// distinct name so their cookie doesn't collide with the parent app's
+// on the same origin.
+func sessionIDNamed(r *http.Request, w http.ResponseWriter, ttl time.Duration, cookieName string) string {
+	if cookieName == "" {
+		cookieName = "sky_sid"
+	}
+	if c, err := r.Cookie(cookieName); err == nil {
 		return c.Value
 	}
 	b := make([]byte, 16)
@@ -5033,7 +5330,7 @@ func sessionID(r *http.Request, w http.ResponseWriter, ttl time.Duration) string
 		sameSite, secure = http.SameSiteNoneMode, true
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     "sky_sid",
+		Name:     cookieName,
 		Value:    sid,
 		Path:     "/",
 		HttpOnly: true,
@@ -5303,6 +5600,58 @@ func normaliseBasePath(s string) string {
 		s = "/" + s
 	}
 	return s
+}
+
+// pathInBasePath reports whether `path` falls under `basePath`. Both
+// inputs already normalised (basePath via normaliseBasePath, path is
+// whatever the browser sent). Matches:
+//
+//   - `path == basePath`                            ← exact (e.g. /_sky/console)
+//   - `strings.HasPrefix(path, basePath + "/")`     ← inside subtree
+//
+// Excluded (so /_sky/consoleX doesn't match /_sky/console):
+//
+//   - bare-prefix-no-slash like "/_sky/consoleX".
+//
+// Empty basePath returns false (root-mounted apps don't claim any
+// /_sky/ prefix — they're called from the OTHER dispatchRoot branch).
+func pathInBasePath(path, basePath string) bool {
+	if basePath == "" {
+		return false
+	}
+	if path == basePath {
+		return true
+	}
+	return strings.HasPrefix(path, basePath+"/")
+}
+
+// trimBasePathPrefix returns the "logical" path inside a sub-app's
+// world by stripping its basePath prefix. Examples (basePath
+// `/_sky/console`):
+//
+//	"/_sky/console"          → "/"
+//	"/_sky/console/"         → "/"
+//	"/_sky/console/about"    → "/about"
+//	"/_sky/console/users/42" → "/users/42"
+//	"/other"                 → "/other"   (unchanged when not in subtree)
+//
+// Empty basePath is the identity. Used by matchAnyRoute + applyRoute
+// so sub-app routes stay basePath-agnostic.
+func trimBasePathPrefix(path, basePath string) string {
+	if basePath == "" {
+		return path
+	}
+	if path == basePath {
+		return "/"
+	}
+	if strings.HasPrefix(path, basePath+"/") {
+		out := strings.TrimPrefix(path, basePath)
+		if out == "" {
+			return "/"
+		}
+		return out
+	}
+	return path
 }
 
 func liveJSWithCfgAndCsrf(sid string, cfg liveBannerConfig, csrfToken string) string {

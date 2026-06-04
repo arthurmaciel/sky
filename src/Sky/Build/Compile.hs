@@ -28,6 +28,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.FilePath (takeDirectory, takeExtension, (</>))
 
 import qualified Data.ByteString as BS
+import Sky.Build.EmbedDirTH (isEmbeddableRuntimeFile, isEmbeddableRuntimeDir)
 import Sky.Build.EmbeddedRuntime (embeddedRuntime, embeddedSkyStdlib)
 import qualified Sky.Build.TailCallOpt as TCO
 import qualified Sky.Build.LowerCtx as LC
@@ -83,6 +84,28 @@ globalCgEnv = unsafePerformIO $ newIORef (Rec.CodegenEnv Solve.emptySolvedTypes 
 {-# NOINLINE globalUnionNames #-}
 globalUnionNames :: IORef (Set.Set String)
 globalUnionNames = unsafePerformIO $ newIORef Set.empty
+
+
+-- | v0.16.0 binary-size hardening: tracks whether the user program
+-- imports any module that triggers a runtime console mount
+-- (Sky.Live `Std.Live*` or Sky.Http.Server `Sky.Http.Server*`).
+-- When False, `collectGoImports` omits the blank
+-- `_ "sky-app/rt/console_app"` import so Go's linker tree-shakes the
+-- entire console UI + Std.Db + Std.Auth + session-store driver chain
+-- out of the binary. A trivial Sky.Cli `hello-world` linked 241 MB
+-- pre-fix; ~12 MB after, because the console_app subpackage
+-- transitively imports Sky.Live's HTTP + DB + auth stack and only the
+-- side-effect init() registration was making it appear "used".
+--
+-- Set lazily in the parse phase by `noteImportsForConsoleHint`
+-- (called from `continueCompile` after `parseModule` succeeds for the
+-- entry module + every dep) — every Src.Module's import list is
+-- scanned. Reset to False at the start of every compile so successive
+-- `sky build` invocations within one process (LSP, watch mode) see a
+-- fresh accumulator.
+{-# NOINLINE globalConsoleNeeded #-}
+globalConsoleNeeded :: IORef Bool
+globalConsoleNeeded = unsafePerformIO $ newIORef False
 
 
 -- | v0.13 Phase A5: entry-module source path, set once per
@@ -685,6 +708,12 @@ collectIncrementalHashInputs = do
 
 continueCompile :: Toml.SkyConfig -> FilePath -> FilePath -> [Graph.ModuleInfo] -> String -> IO (Either String FilePath)
 continueCompile config entryPath outDir moduleOrder srcHash = do
+    -- v0.16.0 binary-size hardening: reset the console-needed flag at
+    -- the start of every compile so successive sky-build / LSP /
+    -- sky-watch invocations in one process see a fresh accumulator.
+    -- The flag is OR'd True later in this function as each parsed
+    -- Src.Module's imports are scanned by `noteImportsForConsoleHint`.
+    writeIORef globalConsoleNeeded False
 
     -- Phase 2: Parse all modules in parallel — parsing is pure text→AST
     -- with no cross-module dependencies, so it parallelises trivially.
@@ -696,7 +725,12 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
         case Parse.parseModule src of
             Left err ->
                 return (modInfo, Left err)
-            Right srcMod ->
+            Right srcMod -> do
+                -- v0.16.0 binary-size hardening: scan this module's
+                -- imports for Std.Live* / Sky.Http.Server* so
+                -- `collectGoImports` can conditionally emit the
+                -- blank `_ "sky-app/rt/console_app"` import.
+                noteImportsForConsoleHint srcMod
                 return (modInfo, Right srcMod)
     let formatted = flip map parseResults $ \(modInfo, r) -> case r of
             Left err ->
@@ -2446,6 +2480,16 @@ listDirectoryHs = listDirectory
 copyRuntime :: FilePath -> IO ()
 copyRuntime outDir = do
     let rtDir = outDir </> "rt"
+    -- v0.16.1 PR14 (reverted): tried `removeDirectoryRecursive rtDir`
+    -- here before re-materialising so deletions in runtime-go/ would
+    -- propagate without leaving stale files. The wipe broke cabal
+    -- test wall-time (100+ test builds × wipe-and-recopy + Go cache
+    -- thrash → timeout past 75 min). Recipe for users / contributors
+    -- who upgrade across a runtime refactor (e.g. PR10-G's
+    -- console_loop.go deletion): `rm -rf sky-out/rt/` once after the
+    -- upgrade, then continue. `sky build` will re-materialise from
+    -- scratch on the next invocation. This trades automation for
+    -- speed; revisit with a fingerprint-based wipe in a future PR.
     createDirectoryIfMissing True rtDir
     mRuntime <- locateRuntimeDir
     case mRuntime of
@@ -2572,9 +2616,14 @@ typecheckWorkspace config entryPath = do
     let moduleOrder = Graph.compilationOrder modules
 
     -- Parse all
+    writeIORef globalConsoleNeeded False
     parsed <- Async.forConcurrently moduleOrder $ \modInfo -> do
         src <- TIO.readFile (Graph._mi_path modInfo)
-        return (modInfo, src, Parse.parseModule src)
+        let parseRes = Parse.parseModule src
+        case parseRes of
+            Right srcMod -> noteImportsForConsoleHint srcMod
+            Left _       -> return ()
+        return (modInfo, src, parseRes)
     let okParsed =
             [ (Graph._mi_name mi, Graph._mi_path mi, src, m)
             | (mi, src, Right m) <- parsed
@@ -2709,25 +2758,44 @@ writeEmbeddedSkyStdlib outDir = do
 -- already-handled `rt.go` at the top level (copied verbatim above
 -- from the canonical source).
 --
--- Why filter to .go only: the runtime source tree may contain
--- ancillary files (README.md, _test.go regression artefacts the dev
--- wants to keep local-only, etc.) that the released binary shouldn't
--- need. The embedded path (writeEmbeddedRuntime) doesn't have this
--- problem because embedDir already filters to what TH bundled at
--- compile time.
+-- Why we filter:
+--
+--   * `.go` only — non-Go files (README.md, etc.) don't belong in
+--     a user's build tree.
+--   * Test files (`*_test.go`) — Go's `go build` already filters
+--     them from the binary, but they bloat the materialised `rt/`
+--     tree by ~1+ MB and would otherwise leak the runtime's own
+--     test suite into every user project's source.
+--   * Test fixtures (`testdata/`) — Go convention for fixture data
+--     that ships with tests; same reasoning.
+--   * Editor / OS junk (`.bak`, `.DS_Store`, etc.).
+--
+-- Single source of truth lives in `Sky.Build.EmbedDirTH`
+-- (`isEmbeddableRuntimeFile` / `isEmbeddableRuntimeDir`) so both
+-- the TH-embed path AND this on-disk copy path apply identical
+-- rules — a file kept in the binary but excluded here (or vice
+-- versa) would be an invisible behaviour split between `sky`-
+-- shipped vs `SKY_RUNTIME_DIR`-overridden builds.
 copyRuntimeRecursive :: FilePath -> FilePath -> IO ()
-copyRuntimeRecursive src dst = do
-    createDirectoryIfMissing True dst
-    entries <- System.Directory.listDirectory src
-    mapM_ (copyOne src dst) entries
+copyRuntimeRecursive src dst = go ""
   where
-    copyOne s d name = do
-        let srcPath = s </> name
-        let dstPath = d </> name
+    go subRel = do
+        let srcDir = if null subRel then src else src </> subRel
+            dstDir = if null subRel then dst else dst </> subRel
+        createDirectoryIfMissing True dstDir
+        entries <- System.Directory.listDirectory srcDir
+        mapM_ (copyOne subRel) entries
+
+    copyOne subRel name = do
+        let rel = if null subRel then name else subRel </> name
+            srcPath = src </> rel
+            dstPath = dst </> rel
         isDir <- doesDirectoryExist srcPath
         if isDir
-            then copyRuntimeRecursive srcPath dstPath
-            else when (isGoSource name && name /= "rt.go") $
+            then when (isEmbeddableRuntimeDir name) $ go rel
+            else when (isGoSource name
+                        && name /= "rt.go"
+                        && isEmbeddableRuntimeFile rel) $
                 copyFile srcPath dstPath
 
     isGoSource name =
@@ -3707,8 +3775,43 @@ collectGoImports _canMod srcMod =
     -- adding a blank import alongside the aliased one.
     -- Simpler: emit `_ = rt.Log_println` in a blank var at top.
     [ GoIr.GoImport "sky-app/rt" (Just "rt") ]
+    -- v0.16.0 binary-size hardening: the inline console subpackage's
+    -- init() registers rt.MountInlineConsole's hook. Pre-v0.16.0 we
+    -- emitted the blank import UNCONDITIONALLY, which meant every Sky
+    -- binary (including Sky.Cli batch jobs / Sky.Tui apps that NEVER
+    -- call MountEmbeddedConsole) linked the entire Sky.Live HTTP +
+    -- Std.Db + Std.Auth + session-store stack via the console_app
+    -- subpackage's transitive imports — a hello-world CLI ballooned
+    -- to 241 MB on linux/amd64.
+    --
+    -- The detection is consumer-side: `MountEmbeddedConsole` is only
+    -- called from `Live.app` (live.go) and `Server.listen` (rt.go).
+    -- An app that doesn't import `Std.Live*` or `Sky.Http.Server*`
+    -- never reaches either call site, so the console_app side effects
+    -- are pure dead weight.
+    --
+    -- `globalConsoleNeeded` is populated in the parse phase by
+    -- `noteImportsForConsoleHint` walking every parsed Src.Module
+    -- (entry + deps). True → emit blank import (current behaviour).
+    -- False → skip; Go's linker tree-shakes the console UI +
+    -- Sky.Live + Std.Db + Std.Auth + sqlite/postgres/redis drivers
+    -- away. console_app itself imports `sky-app/rt`, so the reverse
+    -- dependency is fine (Go links the side-effect import without
+    -- triggering the cycle — see runtime-go/rt/console_inline.go for
+    -- the registration shim).
+    ++ ( if unsafePerformIO (readIORef globalConsoleNeeded)
+            || entryUsesConsole
+         then [ GoIr.GoImport "sky-app/rt/console_app" (Just "_") ]
+         else [] )
     ++ sideEffectImports (Src._imports srcMod)
   where
+    entryUsesConsole = any importTriggersConsoleLocal (Src._imports srcMod)
+    importTriggersConsoleLocal imp =
+        let A.At _ segs = Src._importName imp
+        in case segs of
+            ("Std":"Live":_)         -> True
+            ("Sky":"Http":"Server":_) -> True
+            _                         -> False
     sideEffectImports imps =
         [ GoIr.GoImport (skyModToGoPath segs) (Just "_")
         | imp <- imps
@@ -3726,6 +3829,27 @@ collectGoImports _canMod srcMod =
             in case rest of
                 [] -> firstTwo
                 _  -> firstTwo ++ "/" ++ List.intercalate "/" rest
+
+
+-- | v0.16.0 binary-size hardening: scan a parsed Src.Module's imports
+-- and OR the console-needed flag into the global accumulator. Called
+-- once per parsed module during the parse phase. Triggers on any
+-- import whose dotted path begins with `Std.Live` or
+-- `Sky.Http.Server` — both runtimes call `MountEmbeddedConsole` which
+-- requires the inline-console subpackage's init() registration.
+-- Module name prefixes are matched at SEGMENT boundaries so a future
+-- `Std.LiveExt`-shaped name doesn't accidentally trigger.
+noteImportsForConsoleHint :: Src.Module -> IO ()
+noteImportsForConsoleHint srcMod =
+    let needed = any importTriggersConsole (Src._imports srcMod)
+    in when needed (writeIORef globalConsoleNeeded True)
+  where
+    importTriggersConsole imp =
+        let A.At _ segs = Src._importName imp
+        in case segs of
+            ("Std":"Live":_)         -> True
+            ("Sky":"Http":"Server":_) -> True
+            _                         -> False
 
 
 -- | Check if module imports Task

@@ -15,11 +15,26 @@ import Test.Hspec
 import qualified Data.ByteString as BS
 import System.Directory (getCurrentDirectory, doesFileExist, createDirectoryIfMissing,
                          listDirectory, doesDirectoryExist)
+import System.Environment (getEnvironment)
 import System.FilePath ((</>), takeFileName)
 import System.IO.Temp (withSystemTempDirectory)
 import System.Process (readCreateProcessWithExitCode, proc, CreateProcess(..))
 import System.Exit (ExitCode(..))
 import Data.List (sort)
+
+
+-- | Strip SKY_RUNTIME_DIR from a process env so the test's `sky build`
+-- doesn't get hijacked by a parent-repo runtime-go pinned by a nix
+-- shellHook (`export SKY_RUNTIME_DIR="$PWD/runtime-go"` from the
+-- parent repo's .envrc). v0.15.57 #409 verification surfaced this:
+-- when an agent runs in a worktree, the shellHook still points
+-- SKY_RUNTIME_DIR at the parent repo's runtime-go, so `sky build`
+-- inside the spec's tempdir copies the WRONG runtime-go from the
+-- parent — making the disk-tree comparison spuriously fail.
+scrubRuntimeEnv :: IO [(String, String)]
+scrubRuntimeEnv = do
+    env <- getEnvironment
+    return [ (k, v) | (k, v) <- env, k /= "SKY_RUNTIME_DIR" ]
 
 
 findSky :: IO FilePath
@@ -58,9 +73,18 @@ spec = do
             -- Restrict comparison to top-level .go files which is
             -- what the embedded runtime tracks.
             diskEntries <- listDirectory diskRtDir
+            -- v0.16.0 PR 2d added embedDirRecursive filtering so
+            -- _test.go files don't ship in user binaries (saves
+            -- ~1 MB per binary). The disk-vs-materialised compare
+            -- must mirror that filter or we get a phantom diff.
+            -- Also skip directories (subpackages like console_app/,
+            -- telemetry/) since the embed comparison is flat-top-level.
             let diskFiles =
                     [ diskRtDir </> e
-                    | e <- diskEntries, ".go" `suffixOf` e ]
+                    | e <- diskEntries
+                    , ".go" `suffixOf` e
+                    , not ("_test.go" `suffixOf` e)
+                    ]
             withSystemTempDirectory "sky-p3-3" $ \dir -> do
                 createDirectoryIfMissing True (dir </> "src")
                 writeFile (dir </> "sky.toml")
@@ -70,9 +94,10 @@ spec = do
                     , "import Std.Log exposing (println)"
                     , "main = println \"hi\""
                     ]
+                env <- scrubRuntimeEnv
                 (ec, _out, _err) <- readCreateProcessWithExitCode
                     (proc sky ["build", "src/Main.sky"])
-                        { cwd = Just dir } ""
+                        { cwd = Just dir, env = Just env } ""
                 ec `shouldBe` ExitSuccess
                 let matRtDir = dir </> "sky-out" </> "rt"
                 matEntries <- listDirectory matRtDir
@@ -116,9 +141,10 @@ spec = do
                     , "import Std.Log exposing (println)"
                     , "main = println \"hi\""
                     ]
+                env <- scrubRuntimeEnv
                 (ec, _out, _err) <- readCreateProcessWithExitCode
                     (proc sky ["build", "src/Main.sky"])
-                        { cwd = Just dir } ""
+                        { cwd = Just dir, env = Just env } ""
                 ec `shouldBe` ExitSuccess
                 let jobsFile  = dir </> "sky-out" </> "rt" </> "jobs" </> "jobs.go"
                     telemFile = dir </> "sky-out" </> "rt" </> "telemetry"

@@ -234,9 +234,15 @@ NOT to do without explicit user ask:
 - Wiping `.skycache/ffi/` in `examples/13-skyshop/` — 15+ min of
   Stripe SDK introspection on next sweep.
 
-Periodic hygiene (set a Calendar reminder if you run sweeps
-daily): `go clean -cache` weekly. Worktree dir cleanup after EVERY
-agent cherry-pick.
+**Automatic hygiene** (added 2026-06-03 PR13). `scripts/build.sh` AND
+`scripts/example-sweep.sh` end with a 5-GB-threshold check on
+`~/Library/Caches/go-build`; over-threshold triggers `go clean -cache`
+automatically. So after any compiler rebuild or example sweep the
+cache caps at ~5 GB before the next operation can re-bloat it. Periodic
+manual hygiene is no longer required for normal workflows. The recipe
+in `## Disk hygiene` above is still the right escape hatch when you
+need to reclaim aggressively (e.g., before spawning many agents).
+Worktree dir cleanup after EVERY agent cherry-pick remains manual.
 
 When the host shows < 5 GB free, ABORT the next agent spawn until
 cleanup completes — an agent that runs into ENOSPC mid-build leaves
@@ -669,6 +675,24 @@ SKY_SUBAPP_VERBOSE=0        # 1 forwards spawned-child stdout/stderr to parent t
 SKY_BIN=…                   # override `sky` binary path for SpawnSkyConsole
 SKY_ADMIN_TOKEN=…           # /_sky/metrics + /_sky/console require Bearer in production
                             # (legacy: SKY_METRICS_TOKEN / SKY_CONSOLE_TOKEN_SECRET still honoured)
+SKY_CONSOLE_AUTH=token      # v0.16.0+ three-mode console auth gate:
+                            #   token → __Host-sky_console cookie + login POST form
+                            #           (HKDF-derived signing key from SKY_CONSOLE_TOKEN)
+                            #   app   → row-poly consoleAuth callback on Live.app cfg
+                            #           (Request -> Task Error (Maybe Identity))
+                            #   off   → console doesn't mount at all
+                            # Production (ENV != dev/development/local) AND unset →
+                            # mount declines + emits `console.disabled reason=auth-unset`
+                            # warn log. Dev mode + unset → preserves v0.15.x open-in-dev
+                            # behaviour.
+SKY_CONSOLE_TOKEN=…         # v0.16.0+ secret used to derive the __Host- cookie HMAC key
+                            # via HKDF-SHA256(secret, build-commit, "sky-console-cookie").
+                            # Token-mode login form accepts THIS value verbatim.
+SKY_CONSOLE_EMBED_ORIGIN=…  # v0.16.0+ opt-in for the URL handshake (?token=<JWT> →
+                            # session cookie). Must be set to the EXACT origin of the
+                            # embedding iframe (SkyDeploy control-plane). Unset → the
+                            # URL handshake is disabled entirely. Closes the cookie/
+                            # JWT confusion attack surface from the security review.
 SKY_CONSOLE_DB_PATH=…       # when set, telemetry dual-writes every
                             # log/metric/span to the SQLite file at this
                             # path (WAL mode, 24h log/span retention,
@@ -677,6 +701,17 @@ SKY_CONSOLE_DB_PATH=…       # when set, telemetry dual-writes every
                             # bundled console mini-app can render
                             # history beyond the 10k-line / 1k-span
                             # in-RAM caps. Unset → pure in-RAM (default).
+
+# v0.16.1+ — HubExporter (in-process OTLP push to a remote console hub)
+SKY_CONSOLE_HUB=…           # https://… OTLP endpoint. Unset → exporter off.
+SKY_CONSOLE_HUB_TOKEN=…     # ≥32-byte bearer. Refuses to start if shorter.
+SKY_CONSOLE_BATCH_INTERVAL_MS=2000  # 2 s on VMs; 200 ms in serverless.
+SKY_CONSOLE_SPOOL_MODE=auto # auto | file | memory. Auto-detects via
+                            # K_SERVICE / AWS_LAMBDA_FUNCTION_NAME → memory.
+SKY_CONSOLE_SPOOL_PATH=…    # file mode. Default: /var/lib/sky/console-spool.db
+                            # (linux) / ~/Library/Application Support/sky/…
+SKY_CONSOLE_SPOOL_RETENTION=168h    # delete rows older than this
+SKY_CONSOLE_SPOOL_MAX_BYTES=104857600  # 100 MB hard cap; oldest evicted
 ```
 
 The production gate is `ENV` then `SKY_ENV` fallback. Unset OR
@@ -766,6 +801,8 @@ Each binding is either:
 | `Server` | `Sky.Http.Server` | param, queryParam, header, getCookie, static (Layer 3 surface); higher-level `get/post/listen/text/json/html` stay kernel-only |
 | `Stream` | `Sky.Http.Server.Stream` | stream, emit, finish, withContentType — server-side streaming HTTP responses (SSE / LLM token forwarding / chunked downloads). Mirror of `Sky.Core.Http.Stream` (which reads upstream bodies as Sub events). See `docs/skylive/http-streaming.md` §"Server-side" + `examples/30-sse-server-demo`. Synchronous bridge: `Sky.Core.Http.Stream.forEachChunk hdl body` (v0.15.41+) drains an upstream stream from inside a plain Sky.Http.Server handler goroutine — needed for the relay shape (upstream chunks → `Server.Stream.emit` downstream chunk-for-chunk; no Sky.Live update loop required). See `docs/skylive/http-streaming.md` §"Synchronous relay" + `examples/32-sse-relay`. |
 | `Middleware` | `Sky.Http.Middleware` | withCors, withLogging, withBasicAuth, withRateLimit |
+| `Head` | `Std.Live.Head` | v0.15.58+. Per-page `<head>` injection — `title` / `meta name content` / `metaProperty property content` (OG) / `link [(k, v)...]` / `canonical href` / `jsonLd body` / `themeColor color` / `rss href title`. Opt in via optional `head : Model -> List (Html msg)` field on `Live.app` cfg; runtime splices the rendered list into `<head>` after baseline meta + before inline `<style>`. Absent field → byte-identical to pre-v0.15.58 output. |
+| `Console` | `Std.Live.Console` | v0.16.0+. `Identity` type alias (`{ subject, email, claims : Dict String String }`) for the optional row-poly `consoleAuth : Request -> Task Error (Maybe Identity)` field on `Live.app` cfg. Framework calls the callback before mounting `/_sky/console` when `SKY_CONSOLE_AUTH=app`. `Nothing` → 403 + `console.auth.denied` audit log; `Just identity` → set `__Host-sky_console` cookie + allow. Same row-open pattern as v0.15.58 `head` — absent field → byte-identical to pre-v0.16.0 output. |
 | `RateLimit` | `Sky.Http.RateLimit` | allow |
 | `WebSocket` | `Sky.Core.WebSocket` (client) + `Sky.Http.Server.WebSocket` (server) | v0.15.46+. Bidirectional sockets — collab editor ops, multiplayer, bidirectional LLM chat, financial feeds. Client: `connect` / `connectWith` / `send` / `sendBinary` / `close` / `closeWithCode` (Task-tier) + `onOpen` / `onMessage` / `onClose` / `onError` (Sub-tier). Server: `upgrade` (returns from a Sky.Http.Server handler) + `sendToClient` / `sendBinaryToClient` / `broadcast` / `closeClient`. Built on `nhooyr.io/websocket`. Default 30 s heartbeat + 1 MiB max message + 64-frame read buffer. Server production gate: empty `originPatterns` returns 403 when `ENV=production`. **Stdlib typed-record convention (v0.15.46+): every typed record ships with a `default*` constructor + `with*` builder per field — always compose via builders so future field additions don't break call sites.** See `examples/33-websocket-echo`. |
 | `Cache` | `Std.Cache` | v0.15.47+. LRU + TTL in-memory cache, `Cache k v` parametric on key and value. `CacheCfg` ships with `defaultCfg` + `withMaxEntries` / `withTTL` / `withMaxBytes` per v0.15.46 convention. `new` / `get` / `put` / `remove` / `clear` / `size` / `stats` (monotone hits/misses/evictions). Backed by `hashicorp/golang-lru/v2`; lazy TTL expiry (no background goroutine). |
@@ -801,6 +838,67 @@ main =
 HTTP-first (full HTML on load, patches on events), SSE
 subscriptions, session stores (memory / sqlite / redis / postgres /
 firestore), type-safe events, VNode diffing.
+
+### Per-page `<head>` injection (v0.15.58+)
+
+Add an optional `head : Model -> List (Html msg)` field on the
+`Live.app` cfg. The runtime calls it once per full GET (initial
+page load + sky-nav navigation) and splices the returned list
+into `<head>` AFTER the runtime's required `<meta charset>` /
+`<meta viewport>` / `<meta sky-base>` tags and BEFORE the inline
+`<style>` reset. The HM signature is row-open (`appExt` row var),
+so existing apps that omit the field type-check + build unchanged
+— the output is byte-identical to the pre-v0.15.58 wrap.
+
+```elm
+import Std.Live.Head as Head
+
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ route "/" HomePage, route "/blog/:slug" BlogPostPage ]
+        , notFound = HomePage
+        , head = headFor
+        }
+
+
+headFor : Model -> List (Html Msg)
+headFor model =
+    [ Head.title (titleFor model.page)
+    , Head.meta "description" (descriptionFor model.page)
+    , Head.canonical (canonicalFor model.page)
+    , Head.metaProperty "og:title" (titleFor model.page)
+    , Head.metaProperty "og:image" "https://example.com/og.png"
+    , Head.themeColor "#1a1a2e"
+    , Head.rss "/rss.xml" "Site Blog"
+    , Head.jsonLd (jsonLdFor model.page)  -- raw JSON string body
+    ]
+```
+
+`Std.Live.Head` helpers (all return `Html msg` so they compose
+into the same list):
+
+| Helper | Emits |
+|---|---|
+| `title : String -> Html msg` | `<title>…</title>` |
+| `meta : String -> String -> Html msg` | `<meta name="…" content="…">` |
+| `metaProperty : String -> String -> Html msg` | `<meta property="…" content="…">` (Open Graph, Facebook) |
+| `link : List (String, String) -> Html msg` | `<link …>` with arbitrary attr pairs |
+| `canonical : String -> Html msg` | `<link rel="canonical" href="…">` |
+| `jsonLd : String -> Html msg` | `<script type="application/ld+json">…</script>` (raw JSON body) |
+| `themeColor : String -> Html msg` | `<meta name="theme-color" content="…">` |
+| `rss : String -> String -> Html msg` | `<link rel="alternate" type="application/rss+xml" …>` |
+
+Pair with `Std.Html.node "link" […] []` for cases the helpers
+don't cover (preload hints, custom favicon shapes, …).
+
+**SSE patches scope to `<body>`** — head updates require a full
+reload. That matches the typical case (head is derived from page
+identity; in-app navigation already triggers a sky-nav fetch +
+full-body patch + history push). For a UI that swaps `<head>`
+contents on every Msg, drop the `head` field and emit a
+`<title>`/`<meta>` inside `view` via `Html.node` — the diff layer
+patches normal DOM nodes regardless of position.
 
 ### URL routing + history
 
@@ -1151,15 +1249,15 @@ view model =
    parent fills the parent; `Background.color (Ui.rgb 240 240 240)`
    colours the textarea itself, not the wrapper.
 
-### `Ui.fill` emission (v0.15.55+)
+### `Ui.fill` emission (v0.15.55+, refined v0.15.56)
 
 `Ui.fill` lowers asymmetrically per the parent's flex direction:
 
 | Position | CSS emitted |
 |---|---|
 | Main-axis fill | `flex-grow: N; min-{w,h}: 0;` |
-| Cross-axis HEIGHT fill (row child) | bare `align-self: stretch;` — no `height: 100%` |
-| Cross-axis WIDTH fill (column / el / textColumn child) | `align-self: stretch; width: 100%;` |
+| Cross-axis HEIGHT fill (row child) | nothing — relies on flex default `align-items: stretch` |
+| Cross-axis WIDTH fill (column / el / textColumn child) | `width: 100%;` |
 
 The asymmetry closes a real bug class. CSS Flexbox §9.8 resolves
 `%` against a parent's USED size only when "definite"; a flex-
@@ -1168,15 +1266,79 @@ indefinite heights → the pre-v0.15.55 `height: 100%` on cross-
 axis fill collapsed every child to text-content height (issue
 #63 — three-pane app shell, Input.multiline → 22/51 px). Width
 keeps `100%` because column-parent widths are typically definite
-AND it survives the `[Ui.width fill, Ui.centerX]` cascade
-(`align-self: center` defeats `align-self: stretch` for
-positioning, but `width: 100%` stays put so the column still
-fills before centring).
+AND it survives the `[Ui.width fill, Ui.centerX]` cascade — the
+canonical centred-page-content shape.
+
+**v0.15.56 F4 `align-self` single-emission contract.** The
+cross-axis fill emitters dropped their redundant `align-self:
+stretch` declaration — `stretch` is the default `align-items`
+value, so it was a no-op AND created a cascade conflict with
+explicit alignment attrs (`Ui.centerX/Y`, `alignLeft/Right/Top/
+Bottom`). Post-F4 invariant: at most ONE `align-self`
+declaration per element, sourced from `alignSelfX/Y` only.
+User-visible rendering identical to v0.15.55; code is
+order-independent.
+
+### Void-element pseudo-class / animation / transition / media-
+### query style hoist (v0.15.57+ — #409)
+
+Pseudo-class rules (`Background.activeColor` / `hoverColor` /
+`focusColor`), CSS transitions (`Std.Ui.Transition.attribute`),
+keyframe animations (`Std.Ui.Animation.attribute`), and breakpoint
+media queries (`Ui.breakpoint Ui.mobile [...]`) all emit a
+sky-id-scoped `<style>` element to apply the rule. Pre-v0.15.57
+the runtime prepended that `<style>` as the FIRST CHILD of the
+carrying element — fine for `<div>` / `<button>` / etc., but
+silently DROPPED on void HTML elements (`<input>`, `<img>`,
+`<br>`, `<hr>`, …) because `renderVNode` skips children for
+void tags (the self-closing `/>` ends the element).
+
+Post-v0.15.57: the style block is hoisted to a SIBLING slot
+immediately after the void element. CSS selector still keys off
+the void element's sky-id, so the rule applies correctly. This
+means:
+
+```elm
+Input.text
+    [ Background.color (Ui.rgb 240 240 240)
+    , Background.activeColor (Ui.rgb 200 100 50)   -- now works on <input>
+    , Background.hoverColor  (Ui.rgb 50 50 200)    -- @media (hover: hover) gate
+    ]
+    cfg
+```
+
+The `<input>` inside `Input.text`'s wrapper renders with a
+sibling `<style data-sky-pc="<input-sky-id>">` carrying the
+`:active` + `:hover` rules. No call-site change needed for
+existing code — the runtime fix is transparent.
+
+### `Ui.layoutWith` — wrapper customisation (v0.15.56)
+
+```elm
+Ui.layoutWith { wrapperAttrs : [Attr msg], rootAttrs : [Attr msg] } -> Element msg -> Html
+```
+
+Additive entry point. `wrapperAttrs` reach the outer 100 vh
+`<div>` page wrapper (Background.color for page-wide dark mode,
+Font.color / Font.family for document-wide typography, Border /
+class / aria-* / data-* for analytics / a11y landmark routing).
+`rootAttrs` apply to the root element (same as `Ui.layout`'s
+argument).
+
+`Ui.layout attrs el` is now `Ui.layoutWith { wrapperAttrs = [],
+rootAttrs = attrs } el` — byte-identical for existing call
+sites. Reach for `layoutWith` when you need the wrapper to take
+visual styles (dark page, custom font cascade, page background
+image).
 
 ### Surface highlights
 
 Full reference: `docs/skyui/overview.md`.
 
+- **Entry points**: `layout : List Attr -> Element -> Html` +
+  `layoutWith : { wrapperAttrs : List Attr, rootAttrs : List Attr } -> Element -> Html`
+  (v0.15.56 — reach the page wrapper for dark mode / Font cascade /
+  flex-direction override).
 - **Layout**: `el`, `row`, `column`, `wrappedRow`, `grid` +
   `gridColumns N` (CSS-Grid auto-fit), `paragraph`, `textColumn`,
   `text`, `none`, `html`.

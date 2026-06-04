@@ -1955,7 +1955,7 @@ view model =
 | Aspect ratio (CSS-driven) | `Ui.aspectRatio Float` (`Ui.aspectRatio 1.777`) / `Ui.aspectRatioWH Int Int` (`Ui.aspectRatioWH 16 9`) / convenience aliases `Ui.square` (1:1), `Ui.widescreen` / `Ui.fullHd` (16:9), `Ui.cinemascope` (2.35:1). Compiles to inline `aspect-ratio: <r>` CSS; pair with `Ui.width Ui.fill` so the unset axis auto-scales via the browser's aspect-ratio solver. Indispensable for video embeds, image galleries, hero banners, avatar tiles. Sky.Tui ignores (ANSI cells have no aspect-ratio); Sky.Webview honours via embedded WebKit/Chromium. |
 | Grid tracks (typed CSS-grid) | `Ui.gridColumns N` stays for the common-case product-card grid (lowers to `repeat(auto-fill, minmax(Npx, 1fr))`). For sidebar layouts / content-aware tracks / `repeat(auto-fit, minmax(...))` responsive card grids, reach for `Std.Ui.Grid` — typed `Track` ADT (`fr`, `px`, `auto`, `minContent`, `maxContent`, `minmax`, `repeat`, `repeatAutoFit`, `repeatAutoFill`) + attribute entry points `Grid.tracks cols rows` / `Grid.columns cols` / `Grid.rows rs`. Examples: `Grid.columns [ Grid.fr 1, Grid.px 200, Grid.fr 1 ]` (sidebar); `Grid.columns [ Grid.repeatAutoFit (Grid.minmax (Grid.px 240) (Grid.fr 1)) ]` (responsive cards). Both surfaces lower to inline CSS via the existing AttrStyle channel — no runtime injection. |
 
-**Three idioms when writing Sky.Ui:**
+**Idioms when writing Sky.Ui:**
 
 1. **Forms with sensitive inputs use `Ui.form` + `Ui.onSubmit DoSignIn`, NOT `onInput` per keystroke on the password field.** The wire driver decodes formData `{"username":"...","password":"..."}` into a typed `LoginForm` record via case-insensitive `json.Unmarshal`. Three wins: password manager extensions stop seeing DOM mutations on every render, the secret never enters Model so never serialises into Redis/Postgres/Firestore session stores, race-free submit reads live DOM not a debounced keystroke. The username MAY round-trip via `value` + `onInput`; the password MUST NOT.
 
@@ -1965,7 +1965,13 @@ view model =
 
 4. **`Input.*` size / layout attrs apply to the wrapper, form attrs stay on the inner control.** Every `Std.Ui.Input.*` (text / multiline / email / username / search / currentPassword / newPassword / slider / checkbox / radio / radioRow) routes layout attrs (`Ui.width`/`Ui.height`/`Ui.padding`/`Ui.spacing`/`Ui.alignX`/`Ui.alignY`/`Ui.nearby`/`Ui.pointer`/`Ui.overflow`) to the outer wrapper `wrapWithLabel` emits, while form / event / visual attrs stay on the inner `<input>` / `<textarea>`. So `Input.multiline [Ui.height Ui.fill] {...}` inside a column-fill parent fills the parent; `Background.color (Ui.rgb 240 240 240)` colours the textarea itself, not the wrapper.
 
-5. **`Ui.fill` lowers asymmetrically (v0.15.55+).** Main-axis fill emits `flex-grow: N; min-{w,h}: 0;`. Cross-axis HEIGHT fill (row child) emits BARE `align-self: stretch;` — no `height: 100%`. Cross-axis WIDTH fill (column / el / textColumn child) keeps `align-self: stretch; width: 100%;`. The asymmetry closes the cross-axis collapse class (issue #63 — Input.multiline + three-pane app shell), where the pre-v0.15.55 `height: 100%` resolved against an indefinite flex-grow-derived parent height and collapsed children to text-content height. Width keeps `100%` because column-parent widths are typically definite AND it protects `[Ui.width fill, Ui.centerX]` from `align-self: center` defeating the stretch.
+5. **`Ui.fill` lowers asymmetrically (v0.15.55+, refined v0.15.56 F4).** Main-axis fill emits `flex-grow: N; min-{w,h}: 0;`. Cross-axis HEIGHT fill (row child) emits NOTHING — relies on flex default `align-items: stretch`. Cross-axis WIDTH fill (column / el / textColumn child) emits `width: 100%;` (no `align-self`). The asymmetry closes the cross-axis collapse class (issue #63 — Input.multiline + three-pane app shell), where the pre-v0.15.55 `height: 100%` resolved against an indefinite flex-grow-derived parent height and collapsed children to text-content height. Width keeps `100%` because column-parent widths are typically definite AND it protects `[Ui.width fill, Ui.centerX]` (showcase outer column shape) from collapsing when `align-self: center` overrides the implicit stretch. **F4 single-emission contract**: cross-axis fill no longer emits redundant `align-self: stretch` — at most one `align-self` declaration per element, sourced from `alignSelfX/Y` only.
+
+6. **`Ui.layoutWith { wrapperAttrs, rootAttrs }` reaches the page wrapper (v0.15.56).** `Ui.layout attrs el` puts `attrs` on the root child; the outer 100 vh wrapper is hardcoded. `Ui.layoutWith` is the additive entry point that lets `wrapperAttrs` reach the wrapper itself (page-wide `Background.color` for dark mode, `Font.color` / `Font.family` cascading to every descendant, `Border` / class / aria-* / data-* attrs that need to sit on the page wrapper for analytics or a11y landmark routing). `Ui.layout attrs el` is exactly `Ui.layoutWith { wrapperAttrs = [], rootAttrs = attrs } el` — byte-identical for existing call sites.
+
+7. **Pseudo-class / animation / transition rules on void elements work (v0.15.57+ — #409).** `Background.activeColor` / `hoverColor` / `focusColor` (and the equivalent on `Std.Ui.Animation` / `Std.Ui.Transition` / `Ui.breakpoint`) all emit a sky-id-scoped `<style>` element to apply the rule. For non-void elements (`<div>`, `<button>`, etc.) the runtime prepends that `<style>` as a first child. For VOID elements (`<input>`, `<img>`, `<br>`, `<hr>`, …) the runtime hoists it to a SIBLING slot immediately AFTER the void element — same CSS selector, applies correctly. So `Input.text [Background.activeColor (Ui.rgb 200 100 50)] cfg` now styles the inner `<input>` on `:active`, where pre-v0.15.57 the rule was silently dropped. No call-site change needed — the runtime fix is transparent.
+
+8. **`Ui.html` is the raw escape hatch — no Sky.Ui wrapper, no inline-style injection.** `Ui.html (Html.node "canvas" [...] [])` wraps an arbitrary `Std.Html` node as an Element. The wrapped node renders verbatim in the parent's flex layout: no inline-style wrapper, no `data-sky-*` attrs added, no children manipulation. The user is responsible for whatever sizing / styling / event handling they want on the wrapped node. Useful for `<video>`, `<canvas>`, third-party widgets, or any tag Sky.Ui doesn't model directly. Note: a raw `<div>` inside a `Ui.row` participates as a flex item alongside typed siblings (x-ordering correct, sizing preserved). DON'T use `Ui.html` for layout — use `Ui.el` / `Ui.row` / `Ui.column` so Sky.Ui's flex pipeline can manage the geometry.
 
 **File / image upload pattern:**
 ```elm
@@ -2532,6 +2538,44 @@ main =
 
 **Navigation**: `a [ href "/about", attribute "sky-nav" "" ] [ text "About" ]`
 **Styling**: Use `Std.Css` with `stylesheet`/`rule` — not inline style strings.
+
+### Per-page `<head>` injection (Sky.Live)
+
+Add an optional `head : Model -> List (Html msg)` field to the
+`app` cfg to inject per-page `<title>`, SEO meta tags, canonical
+URLs, Open Graph, Twitter Card, JSON-LD, theme-color, favicons,
+etc. Helpers live in `Std.Live.Head`. The field is row-open on
+the HM signature — apps that omit it build unchanged.
+
+```elm
+import Std.Live.Head as Head
+
+headFor model =
+    [ Head.title (titleFor model.page)
+    , Head.meta "description" (descriptionFor model.page)
+    , Head.canonical (canonicalFor model.page)
+    , Head.metaProperty "og:title" (titleFor model.page)
+    , Head.metaProperty "og:image" "https://example.com/og.png"
+    , Head.themeColor "#1a1a2e"
+    , Head.jsonLd (jsonLdFor model.page)   -- raw JSON string
+    ]
+
+main =
+    app
+        { init = init, update = update, view = view
+        , subscriptions = subscriptions
+        , routes = [ ... ], notFound = HomePage
+        , head = headFor
+        }
+```
+
+`Std.Live.Head` helpers: `title` / `meta name content` /
+`metaProperty property content` / `link [(k, v)...]` (arbitrary
+attrs) / `canonical href` / `jsonLd body` / `themeColor color` /
+`rss href feedTitle`. SSE patches scope to `<body>`, so head
+updates require a full reload — fine for the typical "head
+depends on page identity" case (in-app navigation already does a
+full-body sky-nav fetch + history push).
 
 ### URL routing + history (Sky.Live)
 
@@ -4195,7 +4239,29 @@ SKY_CONSOLE_DB_PATH=…           # write-through telemetry to a SQLite file
                                 # (WAL; 24h log/span TTL, 7d metric TTL).
                                 # SkyDeploy injects /data/console.db on
                                 # Pro+ tenants. Unset → pure in-RAM.
-# OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318  # optional OTel export
+
+# v0.16.0 — console auth gate (BREAKING in production):
+SKY_CONSOLE_AUTH=token          # token | app | off (default unset)
+                                # PRODUCTION: unset = FATAL EXIT at boot.
+                                # Set to 'off' to intentionally decline console.
+SKY_CONSOLE_TOKEN=…             # 32-byte hex; HKDF-derives the __Host- cookie key
+                                # Required when SKY_CONSOLE_AUTH=token
+
+# v0.16.1+ — HubExporter (in-process OTLP push to a remote console hub)
+# Unset → exporter off. When set, ships logs/metrics/spans every batch interval.
+SKY_CONSOLE_HUB=…               # https://… OTLP HTTP+protobuf endpoint
+SKY_CONSOLE_HUB_TOKEN=…         # ≥32-byte bearer; refuses to start if shorter
+SKY_CONSOLE_BATCH_INTERVAL_MS=2000  # 2 s on VMs; 200 ms in serverless
+SKY_CONSOLE_SPOOL_MODE=auto     # auto | file | memory
+                                # auto-detects via K_SERVICE / AWS_LAMBDA_FUNCTION_NAME → memory
+SKY_CONSOLE_SPOOL_PATH=…        # file mode; default platform-specific
+SKY_CONSOLE_SPOOL_RETENTION=168h    # delete rows older than this
+SKY_CONSOLE_SPOOL_MAX_BYTES=104857600  # 100 MB hard cap; oldest evicted
+
+# v0.16.1+ — OTel export is HTTP/protobuf ONLY (no gRPC dep; keeps binary small)
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318  # USE THE HTTP PORT (4318)
+# OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf               # 'grpc' triggers startup warning + disables export
+                                                          # (prevents CPU-burning HTTP/1 → gRPC retry storm)
 
 # ─── secrets ───────────────────────────────────────────────────────
 SKY_AUTH_TOKEN_SECRET=…         # ≥32 bytes; Sky errors at startup if shorter

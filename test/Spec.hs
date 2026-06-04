@@ -29,6 +29,7 @@ import qualified Sky.Type.UfCycleGuardSpec
 import qualified Sky.Type.RecordFieldExactnessSpec
 import qualified Sky.Build.UiFillCascadeSpec
 import qualified Sky.Build.UiFillCssSpec
+import qualified Sky.Build.UiAlignSelfSpec
 import qualified Sky.Build.UiMediaQuerySpec
 import qualified Sky.Build.UiPseudoClassSpec
 import qualified Sky.Build.UiTransitionAnimationSpec
@@ -45,6 +46,9 @@ import qualified Sky.Build.HttpTypesSpec
 import qualified Sky.Build.CryptoAeadSpec
 import qualified Sky.Build.PubSubPublishTaskSpec
 import qualified Sky.Build.PubSubPublishNoEchoSpec
+import qualified Sky.Build.SkyLiveHeadSpec
+import qualified Sky.Build.SkyLiveConsoleAuthSpec
+import qualified Sky.Build.StdUiChartSpec
 import qualified Sky.Build.ServerStreamSpec
 import qualified Sky.Build.HttpStreamForEachSpec
 import qualified Sky.Build.WebviewAppSpec
@@ -241,12 +245,23 @@ main = hspec $ do
     -- child marked `width: fill` then competed for vertical space,
     -- breaking the typical header/main/footer layout.
     describe "Sky.Build.UiFillCascade"   Sky.Build.UiFillCascadeSpec.spec
-    -- v0.15.55 F1: cross-axis fill emits ONLY `align-self: stretch;`
-    -- (was `align-self: stretch; width|height: 100%;`). The `100%`
-    -- was harmful when the parent's cross-axis was flex-grow-derived
-    -- (indefinite per CSS Flexbox §9.8), collapsing children that
-    -- asked for `Ui.height Ui.fill` to text-content height.
+    -- v0.15.55 F1 + v0.15.56 F4: cross-axis fill CSS emission.
+    -- F1 (v0.15.55) — drop `height: 100%` from cross-axis HEIGHT fill
+    -- (was actively harmful under flex-grow-derived parents per CSS
+    -- Flexbox §9.8). F4 (v0.15.56) — drop redundant `align-self:
+    -- stretch` from cross-axis fill emitters; `stretch` is the
+    -- default `align-items` value, so emitting it explicitly was a
+    -- no-op AND collided with `Ui.centerX/Y` / `alignLeft/Right/
+    -- Top/Bottom` which emit their own `align-self`. Width-axis
+    -- keeps `width: 100%` (showcase outer column needs it to
+    -- survive the alignment cascade).
     describe "Sky.Build.UiFillCss"       Sky.Build.UiFillCssSpec.spec
+    -- v0.15.56 F4 single-emission contract: at most one `align-self`
+    -- declaration per element after F4 strips the redundant
+    -- `align-self: stretch` from fill emitters. `alignSelfX/Y`
+    -- becomes the sole source of `align-self` (for explicit
+    -- `centerX/Y` / `alignLeft/Right/Top/Bottom` attrs).
+    describe "Sky.Build.UiAlignSelf"     Sky.Build.UiAlignSelfSpec.spec
     -- Std.Ui.mediaQuery / Ui.breakpoint — issue #376. Compiles a
     -- tiny project + checks the lowered Go contains the runtime
     -- marker attrs (data-sky-mq-q / data-sky-mq-rules) + the
@@ -308,6 +323,19 @@ main = hspec $ do
     -- the broker round-trip; in v0.16+ cross-process broker tiers the
     -- saved hop is 10-100ms+ of latency.
     describe "Sky.Build.PubSubPublishNoEcho" Sky.Build.PubSubPublishNoEchoSpec.spec
+    -- v0.15.58: Sky.Live per-page <head> injection — optional
+    -- `head : Model -> List (Html msg)` field on Live.app cfg.
+    -- Runtime invokes per full GET, splices result into <head>
+    -- after the baseline meta tags. Absent field → byte-identical
+    -- pre-feature output. Helpers in Std.Live.Head.
+    describe "Sky.Build.SkyLiveHead" Sky.Build.SkyLiveHeadSpec.spec
+    -- v0.16.0 PR 3: Sky.Live optional `consoleAuth` field — same
+    -- row-poly pattern as v0.15.58 `head`. Three-mode auth gate via
+    -- SKY_CONSOLE_AUTH=token|app|off + production decline when unset.
+    describe "Sky.Build.SkyLiveConsoleAuth" Sky.Build.SkyLiveConsoleAuthSpec.spec
+    -- v0.16.0 PR 4: Std.Ui.Chart primitives — line / area / bar /
+    -- sparkline / heatmap. Server-rendered SVG, no JS.
+    describe "Sky.Build.StdUiChart" Sky.Build.StdUiChartSpec.spec
     -- Cycle 4 HS-Server / issue #362: Sky.Http.Server.Stream — server-side
     -- streaming HTTP response primitive (mirror of Sky.Core.Http.Stream).
     -- Unblocks LLM token-stream proxying + SSE endpoints without
