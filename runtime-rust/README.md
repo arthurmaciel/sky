@@ -24,6 +24,97 @@ implementation strings in the Haskell codegen.
 
 ---
 
+## Safety audit — zero `Any`, zero `unsafe` (maintained invariant)
+
+The Rust backend uses Rust's static type system end-to-end. As of the v0.16.1
+sync, an audit across the whole backend (5.4k lines of `sky_runtime/`, the
+codegen in `src/Sky/Generate/Rust/*`, the Rust FFI generator in
+`src/Sky/Build/Rust/*`, AND the generated output — `main.rs` + `*_bindings.rs` +
+the copied runtime) found:
+
+- **No `Any`-type erasure.** Zero `dyn Any` / `Box<dyn Any>` / `Arc<dyn Any>` /
+  `downcast` / `type_id` / `std::any::*`. Sky's `any` is NEVER lowered to
+  `Box<dyn Any>` (that would re-implement Go's `interface{}` and is the bug
+  class this backend exists to avoid). The codegen emits none of these either.
+- **No `unsafe`.** Zero `unsafe` blocks/fns, `transmute`, raw pointers
+  (`*const`/`*mut`), `from_raw`/`into_raw`, or `static mut`. 100% safe Rust,
+  including the FFI path (Sky→Rust FFI calls are safe Rust-crate calls, not
+  `extern "C"`, so no `unsafe` is needed). The single textual `unsafe` match is
+  the word inside a test's error string for the `unsafeFindWhere` stdlib fn —
+  not a Rust `unsafe`.
+
+How heterogeneity is handled WITHOUT `Any` (so future work preserves this):
+
+| Need | Technique (not `Any`) |
+|---|---|
+| HTTP/WS handlers of project-defined error `E` | erase E into a non-generic route by awaiting the task + mapping `Err -> 500/marker` (`server_get<E,H>`), handlers stay `Send + Sync + 'static` closures |
+| `Cmd msg` / `Sub msg` carrying varied payloads | generic over the concrete `M`; the intermediate `a` in `Cmd.perform` is erased *inside* a boxed `Future<Output = M>` — `M` stays concrete |
+| Custom event sources (WS `onMessage`) | `SkySub::Source(Box<dyn FnOnce(emit) -> JoinHandle>)` — a boxed closure over a concrete `M`, not `dyn Any` |
+| Records the runtime must name (Request/Response/Csv/HttpResponse/WebSocketMessage/CloseCode/…) | `runtimeOpaqueTypes` bridge to concrete runtime structs/enums (`pub use … as …`), not erased values |
+| Polymorphic value storage (e.g. `Std.Cache k v`) | refused — would need `Box<dyn Any>`; flagged as blocked rather than erased (see Known limitations) |
+
+**Audit method (repeatable):**
+```bash
+grep -rEn "dyn Any|std::any|downcast|type_id" runtime-rust/src/ src/Sky/Generate/Rust/ src/Sky/Build/Rust/
+grep -rEn "\bunsafe\b|transmute|from_raw|into_raw|static mut|\*const |\*mut " runtime-rust/src/
+```
+Both must stay empty. Re-run after any runtime change; a hit is a regression to
+fix at the design level (bridge / generic / ADT), never to paper over with `Any`
+or `unsafe`.
+
+---
+
+## API surface vs the Go backend (`target=rust` coverage, v0.16.1)
+
+The Go backend is the reference (full surface — 54 kernel modules). Rust
+coverage, by confidence:
+
+**✅ Covered & verified** (standard-libs 131/131 + the 18 `examples/rust/*` +
+the HTTP/WS/Cli regression tests):
+- Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
+  Regex, Bytes (Latin-1), Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal,
+  Money.
+- Effects: Task, Time, Random, File, System (incl. env), Crypto, Compression,
+  Csv, Uuid, Log, Db (sqlite/mysql/postgres), Auth.
+- Network: Sky.Core.Http (client), Sky.Http.Server, Sky.Core.WebSocket (client —
+  all four events), Sky.Http.Server.WebSocket.
+- Runtime/TEA: Cmd, Sub, Sky.Cli (line-oriented TEA backend).
+- Ffi (Rust-crate auto-FFI).
+
+**⏳ Missing — bounded & additive** (no architectural blocker; the natural next
+targets):
+- `Sky.Http.Middleware` (withCors / withLogging / withBasicAuth / withRateLimit)
+  + `Sky.Http.RateLimit`.
+- `Sky.Http.Server.Stream` (SSE / chunked) + `Sky.Core.Http.Stream` (client
+  streaming).
+- `Std.Config` (TOML/YAML/JSON decoders), `Std.Email` (providers), `Std.Trace`
+  (spans).
+- PubSub (`Cmd.publish` / `publishNoEcho`, `Sub.subscribeTopic`) — couples to
+  Sky.Live's broker.
+- `Io` (writeStdout/readLine beyond Log), `Process.run`, `Debug`, `Fmt` — small;
+  partially present, not example-verified on rust.
+
+**🟡 Deferred — large arcs:**
+- **Sky.Live** — Live.app + URL routing + SSE + session stores
+  (memory/sqlite/redis/postgres/firestore) + VNode diffing (the web framework).
+- **Sky.Tui** — `Std.Ui` → ANSI renderer (~2k lines); TEA core already done, the
+  renderer is the open decision (Sky-side vs runtime port).
+- **Sky.Webview** — desktop (macOS-only even on Go).
+- **`Std.Ui` rendering** (the `Element` layout engine) + `Lazy` — prerequisite
+  for Live / Tui / Webview.
+
+**⛔ Blocked by the no-`any` principle:** `Std.Cache` (polymorphic value storage
+would require `Box<dyn Any>`).
+
+**N/A** (compiler CLI / server-internal, not an app-runtime API): `Doc` (the
+`sky doc` subcommand), `Context`.
+
+> A definitive per-kernel parity sweep would run the full 32-example Go suite on
+> `target=rust`; the table above is at the module-surface level, anchored to what
+> the existing rust tests actually exercise.
+
+---
+
 ## Modification boundaries
 
 **When working on the Rust backend, only modify files in:**
