@@ -162,7 +162,17 @@ pub fn server_with_cookie(c: ServerCookie, mut r: ServerResponse) -> ServerRespo
 
 // ─── listen + axum adapter (step 4) ───────────────────────────────────────
 
-const MAX_BODY: usize = 32 * 1024 * 1024; // 32 MiB
+const DEFAULT_MAX_BODY: usize = 32 * 1024 * 1024; // 32 MiB
+
+/// Request-body cap. Overridable via SKY_LIVE_MAX_BODY_BYTES (same env var as the
+/// Go runtime's `[live] maxBodyBytes`); falls back to 32 MiB.
+fn max_body() -> usize {
+    std::env::var("SKY_LIVE_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_BODY)
+}
 
 fn parse_query(q: Option<&str>) -> HashMap<String, String> {
     let mut out = HashMap::new();
@@ -172,28 +182,15 @@ fn parse_query(q: Option<&str>) -> HashMap<String, String> {
             let mut it = pair.splitn(2, '=');
             let k = it.next().unwrap_or("");
             let v = it.next().unwrap_or("");
-            out.insert(urldecode(k), urldecode(v));
+            // Repeated keys keep the FIRST value — consistent with
+            // http_client::http_parse_query and the Go runtime's parseQuery.
+            out.entry(urldecode(k)).or_insert_with(|| urldecode(v));
         }
     }
     out
 }
 
-fn urldecode(s: &str) -> String {
-    // form-style: '+' -> space, %XX -> byte. Best-effort.
-    let s = s.replace('+', " ");
-    let mut out = Vec::new();
-    let b = s.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(byte); i += 3; continue;
-            }
-        }
-        out.push(b[i]); i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+fn urldecode(s: &str) -> String { form_url_decode(s) }
 
 fn parse_cookies(header: &str, out: &mut HashMap<String, String>) {
     for c in header.split(';') {
@@ -228,7 +225,7 @@ async fn build_request(req: axum::extract::Request) -> (ServerRequest, Option<ax
     // present). Stashed via task-local so server_web_socket_upgrade can reach it.
     let upgrader = axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &())
         .await.ok();
-    let body = axum::body::to_bytes(body, MAX_BODY).await
+    let body = axum::body::to_bytes(body, max_body()).await
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
     (ServerRequest { method, path, body, headers, params, query, cookies, remoteAddr: String::new() }, upgrader)
@@ -420,11 +417,47 @@ fn ws_resp(status: i64, body: &str) -> ServerResponse {
     ServerResponse { status, body: body.to_string(), headers: HashMap::new(), contentType: "text/plain".to_string() }
 }
 
+/// Glob match with `*` wildcards (e.g. "https://*.example.com"). `*` matches any
+/// run of characters; all other chars are literal. Used for WS origin allowlists.
+fn ws_origin_matches(pattern: &str, origin: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == origin; // no wildcard → exact
+    }
+    let mut rest = origin;
+    // First segment must be a prefix (unless pattern starts with '*').
+    if let Some(first) = parts.first() {
+        if !rest.starts_with(first) { return false; }
+        rest = &rest[first.len()..];
+    }
+    // Middle segments must appear in order.
+    for seg in &parts[1..parts.len() - 1] {
+        if seg.is_empty() { continue; }
+        match rest.find(seg) {
+            Some(i) => rest = &rest[i + seg.len()..],
+            None => return false,
+        }
+    }
+    // Last segment must be a suffix (unless pattern ends with '*').
+    rest.ends_with(parts[parts.len() - 1])
+}
+
 /// ServerWebSocket_upgrade : Request -> WebSocketServerCfg -> Task Error Response
-pub fn server_web_socket_upgrade<E: From<String> + Send + 'static>(_req: ServerRequest, cfg: WsServerCfg<E>) -> SkyTask<E, ServerResponse> {
+pub fn server_web_socket_upgrade<E: From<String> + Send + 'static>(req: ServerRequest, cfg: WsServerCfg<E>) -> SkyTask<E, ServerResponse> {
     Box::pin(async move {
+        // Origin allowlist. Production with no patterns → reject (matches Go). With
+        // patterns set (any mode), the request's Origin must match one of them.
         if ws_production() && cfg.originPatterns.is_empty() {
             return ok_res(ws_resp(403, "websocket: origin allowlist required in production"));
+        }
+        if !cfg.originPatterns.is_empty() {
+            let origin = req.headers.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("origin"))
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
+            if !cfg.originPatterns.iter().any(|p| ws_origin_matches(p, origin)) {
+                return ok_res(ws_resp(403, "websocket: origin not allowed"));
+            }
         }
         let upgrader = WS_UPGRADER.try_with(|c| c.take()).ok().flatten();
         match upgrader {
@@ -500,5 +533,43 @@ mod tests {
         assert!(r.handler.is_some());
         let resp = server_with_status(404, server_text("nope".to_string()));
         assert_eq!(resp.status, 404);
+    }
+
+    #[test]
+    fn origin_glob_matching() {
+        assert!(ws_origin_matches("https://app.example.com", "https://app.example.com"));
+        assert!(!ws_origin_matches("https://app.example.com", "https://evil.com"));
+        assert!(ws_origin_matches("https://*.example.com", "https://app.example.com"));
+        assert!(ws_origin_matches("https://*.example.com", "https://a.b.example.com"));
+        assert!(!ws_origin_matches("https://*.example.com", "https://example.com"));
+        assert!(!ws_origin_matches("https://*.example.com", "http://app.example.com"));
+        assert!(ws_origin_matches("*", "anything://x"));
+        assert!(ws_origin_matches("*.local", "x.local"));
+        assert!(!ws_origin_matches("*.local", "x.remote"));
+    }
+
+    #[test]
+    fn query_and_cookies() {
+        let q = parse_query(Some("a=1&b=two%20words&a=ignored&flag"));
+        assert_eq!(q.get("a").map(String::as_str), Some("1")); // first value wins
+        assert_eq!(q.get("b").map(String::as_str), Some("two words"));
+        assert_eq!(q.get("flag").map(String::as_str), Some(""));
+        assert!(parse_query(None).is_empty());
+
+        let mut c = std::collections::HashMap::new();
+        parse_cookies("sid=abc; theme=dark", &mut c);
+        assert_eq!(c.get("sid").map(String::as_str), Some("abc"));
+        assert_eq!(c.get("theme").map(String::as_str), Some("dark"));
+    }
+
+    #[test]
+    fn max_body_env_override() {
+        std::env::remove_var("SKY_LIVE_MAX_BODY_BYTES");
+        assert_eq!(max_body(), DEFAULT_MAX_BODY);
+        std::env::set_var("SKY_LIVE_MAX_BODY_BYTES", "1024");
+        assert_eq!(max_body(), 1024);
+        std::env::set_var("SKY_LIVE_MAX_BODY_BYTES", "0"); // invalid → default
+        assert_eq!(max_body(), DEFAULT_MAX_BODY);
+        std::env::remove_var("SKY_LIVE_MAX_BODY_BYTES");
     }
 }

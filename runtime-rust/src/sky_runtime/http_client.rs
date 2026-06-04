@@ -95,28 +95,30 @@ pub fn http_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyTa
 
 /// Http.parseQuery : String -> Dict String String (pure; first value wins).
 pub fn http_parse_query(raw: String) -> HashMap<String, String> {
-    fn dec(s: &str) -> String {
-        let s = s.replace('+', " ");
-        let b = s.as_bytes();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < b.len() {
-            if b[i] == b'%' && i + 2 < b.len() {
-                if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    out.push(byte); i += 3; continue;
-                }
-            }
-            out.push(b[i]); i += 1;
-        }
-        String::from_utf8_lossy(&out).into_owned()
-    }
     let mut out = HashMap::new();
     for pair in raw.trim_start_matches('?').split('&') {
         if pair.is_empty() { continue; }
         let mut it = pair.splitn(2, '=');
-        let k = dec(it.next().unwrap_or(""));
-        let v = dec(it.next().unwrap_or(""));
+        let k = form_url_decode(it.next().unwrap_or(""));
+        let v = form_url_decode(it.next().unwrap_or(""));
         out.entry(k).or_insert(v); // repeated keys keep the first value
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_query_decode_and_first_wins() {
+        let q = http_parse_query("a=1&b=two%20words&a=ignored&c".to_string());
+        assert_eq!(q.get("a").map(String::as_str), Some("1")); // first value wins
+        assert_eq!(q.get("b").map(String::as_str), Some("two words"));
+        assert_eq!(q.get("c").map(String::as_str), Some(""));
+        // Leading '?' tolerated; empty pairs skipped.
+        let q2 = http_parse_query("?x=9&".to_string());
+        assert_eq!(q2.get("x").map(String::as_str), Some("9"));
+        assert_eq!(q2.len(), 1);
+    }
 }

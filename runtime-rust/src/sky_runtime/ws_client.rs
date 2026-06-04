@@ -5,11 +5,11 @@
 //! `Sub_subscribeWebSocket` builds a SkySub::Source that drains the frames
 //! broadcast and emits messages into the TEA loop — completing `onMessage`.
 //!
-//! WebSocketMessage is bridged to WsClientMessage so the runtime can construct
-//! frames to hand to the user's toMsg. onOpen/onClose/onError (heterogeneous
-//! bare/typed toMsg through the single `any` subscribeWebSocketRaw) need a
-//! rust-target stdlib override to split into typed kernels — a follow-up; only
-//! kind = "message" is wired here.
+//! WebSocketMessage/CloseCode are bridged to runtime enums so the runtime can
+//! construct frames/codes for the user's toMsg. All four event kinds
+//! (onOpen/onMessage/onClose/onError) are wired: the codegen's kind-literal
+//! peephole routes each to its own typed kernel below, so the heterogeneous
+//! toMsg shapes never share one bounded fn (no stdlib override needed).
 
 use super::*;
 use std::collections::HashMap;
@@ -83,12 +83,45 @@ fn registry() -> &'static Mutex<HashMap<i64, ClientEntry>> {
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Remove a socket from the registry and drop its subscribe-once markers so the
+/// associated tasks wind down and the maps don't grow across reconnects.
+fn deregister(id: i64) {
+    registry().lock().unwrap().remove(&id);
+    ws_subscribed().lock().unwrap().retain(|&(sid, _)| sid != id);
+}
+
 static WS_CLIENT_NEXT_ID: AtomicI64 = AtomicI64::new(1);
 
-async fn do_connect<E: From<String> + Send + 'static>(url: String) -> SkyResult<E, i64> {
-    let (stream, _resp) = match tokio_tungstenite::connect_async(&url).await {
-        Ok(ok) => ok,
-        Err(e) => return SkyResult::Err(format!("WebSocket.connect {}: {}", url, e).into()),
+async fn do_connect<E: From<String> + Send + 'static>(
+    url: String,
+    headers: Vec<(String, String)>,
+    timeout_ms: i64,
+) -> SkyResult<E, i64> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
+    // Build the handshake request so custom headers (e.g. Authorization) are
+    // sent — connectWith's cfg.headers were previously dropped.
+    let mut req = match url.as_str().into_client_request() {
+        Ok(r) => r,
+        Err(e) => return SkyResult::Err(format!("WebSocket.connect {}: bad url: {}", url, e).into()),
+    };
+    for (k, v) in &headers {
+        if let (Ok(name), Ok(val)) = (k.parse::<HeaderName>(), HeaderValue::from_str(v)) {
+            req.headers_mut().insert(name, val);
+        }
+    }
+    let connect_fut = tokio_tungstenite::connect_async(req);
+    let (stream, _resp) = if timeout_ms > 0 {
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms as u64), connect_fut).await {
+            Ok(Ok(ok)) => ok,
+            Ok(Err(e)) => return SkyResult::Err(format!("WebSocket.connect {}: {}", url, e).into()),
+            Err(_) => return SkyResult::Err(format!("WebSocket.connect {}: handshake timed out after {}ms", url, timeout_ms).into()),
+        }
+    } else {
+        match connect_fut.await {
+            Ok(ok) => ok,
+            Err(e) => return SkyResult::Err(format!("WebSocket.connect {}: {}", url, e).into()),
+        }
     };
     let id = WS_CLIENT_NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (mut write, mut read) = stream.split();
@@ -120,7 +153,10 @@ async fn do_connect<E: From<String> + Send + 'static>(url: String) -> SkyResult<
         }
     });
 
-    // Reader task: ws frames → frames broadcast (subscriptions drain it).
+    // Reader task: ws frames → frames broadcast (subscriptions drain it). On
+    // close/error it deregisters the socket so the writer + subscription tasks
+    // wind down (dropping the last frames_tx makes their recv() error) — no leak
+    // on server-initiated close / reconnect.
     let frames = frames_tx.clone();
     tokio::spawn(async move {
         while let Some(item) = read.next().await {
@@ -136,6 +172,7 @@ async fn do_connect<E: From<String> + Send + 'static>(url: String) -> SkyResult<
                 _ => {} // Ping/Pong handled by tungstenite
             }
         }
+        deregister(id);
     });
 
     registry().lock().unwrap().insert(id, ClientEntry { cmd_tx, frames_tx });
@@ -144,12 +181,14 @@ async fn do_connect<E: From<String> + Send + 'static>(url: String) -> SkyResult<
 
 /// WebSocket.connect : String -> Task Error Int (raw id; Sky wraps in WebSocket)
 pub fn web_socket_connect<E: From<String> + Send + 'static>(url: String) -> SkyTask<E, i64> {
-    Box::pin(do_connect(url))
+    Box::pin(do_connect(url, Vec::new(), 30000))
 }
 
-/// WebSocket.connectWith : WebSocketCfg -> Task Error Int
+/// WebSocket.connectWith : WebSocketCfg -> Task Error Int. Applies the cfg's
+/// custom headers + handshake timeout. (pingInterval is not yet wired —
+/// tungstenite auto-pongs; periodic client pings are a follow-up.)
 pub fn web_socket_connect_with<E: From<String> + Send + 'static>(cfg: WsClientCfg) -> SkyTask<E, i64> {
-    Box::pin(do_connect(cfg.url))
+    Box::pin(do_connect(cfg.url, cfg.headers, cfg.timeout))
 }
 
 fn send_cmd(id: i64, cmd: WsCmd) -> bool {
@@ -179,7 +218,7 @@ pub fn web_socket_send_binary<E: From<String> + Send + 'static>(id: i64, msg: St
 pub fn web_socket_close<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
         let _ = send_cmd(id, WsCmd::Close);
-        registry().lock().unwrap().remove(&id);
+        deregister(id);
         ok_res(())
     })
 }
@@ -188,7 +227,7 @@ pub fn web_socket_close<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E,
 pub fn web_socket_close_with_code<E: From<String> + Send + 'static>(code: i64, reason: String, id: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
         let _ = send_cmd(id, WsCmd::CloseWithCode(code as u16, reason));
-        registry().lock().unwrap().remove(&id);
+        deregister(id);
         ok_res(())
     })
 }
@@ -275,4 +314,18 @@ where E: From<String> + Send + 'static, M: Send + 'static, F: Fn(E) -> M + Send 
         }
         tokio::spawn(async {})
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_code_mapping() {
+        assert_eq!(ws_close_code(1000), WsCloseCode::Normal);
+        assert_eq!(ws_close_code(1001), WsCloseCode::GoingAway);
+        assert_eq!(ws_close_code(1003), WsCloseCode::UnsupportedData);
+        assert_eq!(ws_close_code(1011), WsCloseCode::InternalError);
+        assert_eq!(ws_close_code(4000), WsCloseCode::Custom(4000));
+    }
 }

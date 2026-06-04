@@ -34,6 +34,28 @@ pub(crate) fn bytes_to_sky(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }
 
+/// Decode an application/x-www-form-urlencoded component: `+` -> space, `%XX` ->
+/// byte (best-effort). Shared by the HTTP server's query parser and the HTTP
+/// client's parseQuery so they stay consistent.
+pub(crate) fn form_url_decode(s: &str) -> String {
+    let s = s.replace('+', " ");
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Sky `base64Encode : String -> String`
 pub fn base64_encode(s: String) -> String {
     B64.encode(sky_bytes(&s))
