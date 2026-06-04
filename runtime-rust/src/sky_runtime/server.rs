@@ -220,6 +220,15 @@ async fn build_request(req: axum::extract::Request) -> (ServerRequest, Option<ax
         Ok(rpp) => rpp.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         Err(_) => HashMap::new(),
     };
+    // Peer address from the connect-info extension (see server_listen). A
+    // proxy's X-Forwarded-For / X-Real-IP wins when present (the real client).
+    let remote_addr = headers.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-for"))
+        .map(|(_, v)| v.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-real-ip")).map(|(_, v)| v.clone()))
+        .or_else(|| parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|ci| ci.0.ip().to_string()))
+        .unwrap_or_default();
     // Sub-D.2: extract the WebSocket upgrader if this is an upgrade request
     // (succeeds only when the Connection/Upgrade/Sec-WebSocket-* headers are
     // present). Stashed via task-local so server_web_socket_upgrade can reach it.
@@ -228,7 +237,7 @@ async fn build_request(req: axum::extract::Request) -> (ServerRequest, Option<ax
     let body = axum::body::to_bytes(body, max_body()).await
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
-    (ServerRequest { method, path, body, headers, params, query, cookies, remoteAddr: String::new() }, upgrader)
+    (ServerRequest { method, path, body, headers, params, query, cookies, remoteAddr: remote_addr }, upgrader)
 }
 
 fn to_axum_response(r: ServerResponse) -> axum::response::Response {
@@ -307,7 +316,10 @@ pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<Se
             Err(e) => return SkyResult::Err(format!("Server.listen: bind {}: {}", addr, e).into()),
         };
         eprintln!("[sky.http.server] listening on http://{}", addr);
-        match axum::serve(listener, app).await {
+        // with_connect_info so each request carries the peer SocketAddr —
+        // populates ServerRequest.remoteAddr (also used by per-IP rate limiting).
+        let svc = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        match axum::serve(listener, svc).await {
             Ok(()) => ok_res(()),
             Err(e) => SkyResult::Err(format!("Server.listen: serve: {}", e).into()),
         }
@@ -516,6 +528,148 @@ pub fn server_web_socket_broadcast<E: From<String> + Send + 'static>(ids: Vec<i6
 /// ServerWebSocket_closeClient : Int -> Task Error () (idempotent)
 pub fn server_web_socket_close_client<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E, ()> {
     Box::pin(async move { let _ = ws_send_raw(id, WsOut::Close); ok_res(()) })
+}
+
+// ─── Sky.Http.Middleware + Sky.Http.RateLimit ─────────────────────────────
+//
+// A Handler is `Fn(ServerRequest) -> SkyTask<E, ServerResponse>`. Each `with*`
+// wraps a handler and returns a new one; they chain generically (each output is
+// the next's input H), so no concrete `Handler` type is named.
+
+fn header_ci<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
+    headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+}
+
+fn plain_resp(status: i64, body: &str, extra: &[(&str, &str)]) -> ServerResponse {
+    let mut headers = HashMap::new();
+    for (k, v) in extra { headers.insert(k.to_string(), v.to_string()); }
+    ServerResponse { status, body: body.to_string(), headers, contentType: "text/plain".to_string() }
+}
+
+/// Middleware.withCors : List String -> Handler -> Handler. Echoes an allowed
+/// Origin (or `*`), answers preflight OPTIONS with 204, and tags responses.
+pub fn middleware_with_cors<E, H>(origins: Vec<String>, h: H) -> impl Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where
+    E: Send + 'static,
+    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+{
+    move |req| {
+        let req_origin = header_ci(&req.headers, "origin").unwrap_or("").to_string();
+        let allow = if origins.iter().any(|o| o == "*") {
+            Some("*".to_string())
+        } else if origins.iter().any(|o| o == &req_origin) && !req_origin.is_empty() {
+            Some(req_origin)
+        } else {
+            None
+        };
+        if req.method.eq_ignore_ascii_case("OPTIONS") {
+            let mut resp = plain_resp(204, "", &[
+                ("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS"),
+                ("access-control-allow-headers", "Content-Type, Authorization"),
+            ]);
+            if let Some(a) = allow { resp.headers.insert("access-control-allow-origin".to_string(), a); }
+            return Box::pin(async move { ok_res(resp) });
+        }
+        let task = h(req);
+        Box::pin(async move {
+            match task.await {
+                SkyResult::Ok(mut resp) => {
+                    if let Some(a) = allow { resp.headers.insert("access-control-allow-origin".to_string(), a); }
+                    ok_res(resp)
+                }
+                other => other,
+            }
+        })
+    }
+}
+
+/// Middleware.withLogging : Handler -> Handler. Logs `method path status Nms`.
+pub fn middleware_with_logging<E, H>(h: H) -> impl Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where
+    E: Send + 'static,
+    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+{
+    move |req| {
+        let method = req.method.clone();
+        let path = req.path.clone();
+        let start = std::time::Instant::now();
+        let task = h(req);
+        Box::pin(async move {
+            let result = task.await;
+            let status = match &result { SkyResult::Ok(r) => r.status, SkyResult::Err(_) => 500 };
+            eprintln!("[sky.http] {} {} {} {}ms", method, path, status, start.elapsed().as_millis());
+            result
+        })
+    }
+}
+
+/// Middleware.withBasicAuth : String -> String -> Handler -> Handler. Requires
+/// HTTP Basic auth; constant-time credential comparison; 401 otherwise.
+pub fn middleware_with_basic_auth<E, H>(user: String, pass: String, h: H) -> impl Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where
+    E: Send + 'static,
+    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+{
+    move |req| {
+        use subtle::ConstantTimeEq;
+        let expected = format!("Basic {}", base64_encode(format!("{}:{}", user, pass)));
+        let got = header_ci(&req.headers, "authorization").unwrap_or("");
+        let ok: bool = got.as_bytes().ct_eq(expected.as_bytes()).into();
+        if ok {
+            h(req)
+        } else {
+            Box::pin(async move {
+                ok_res(plain_resp(401, "Unauthorized", &[("www-authenticate", "Basic realm=\"Sky\"")]))
+            })
+        }
+    }
+}
+
+/// Middleware.withRateLimit : String -> Int -> Int -> Handler -> Handler.
+/// Per-(key, client-IP) fixed window; 429 when exceeded.
+pub fn middleware_with_rate_limit<E, H>(key: String, limit: i64, window_secs: i64, h: H) -> impl Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where
+    E: Send + 'static,
+    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+{
+    move |req| {
+        if fixed_window_allow(&key, &req.remoteAddr, limit, window_secs) {
+            h(req)
+        } else {
+            Box::pin(async move { ok_res(plain_resp(429, "Too Many Requests", &[])) })
+        }
+    }
+}
+
+fn unix_secs_f64() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+struct WindowEntry { start: f64, count: i64 }
+
+fn fixed_window_allow(key: &str, client: &str, limit: i64, window_secs: i64) -> bool {
+    static W: OnceLock<Mutex<HashMap<(String, String), WindowEntry>>> = OnceLock::new();
+    let now = unix_secs_f64();
+    let mut m = W.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let e = m.entry((key.to_string(), client.to_string())).or_insert(WindowEntry { start: now, count: 0 });
+    if now - e.start >= window_secs.max(1) as f64 { e.start = now; e.count = 0; }
+    if e.count < limit.max(0) { e.count += 1; true } else { false }
+}
+
+struct Bucket { tokens: f64, last: f64 }
+
+/// RateLimit.allow : String -> String -> Int -> Int -> Bool — token bucket per
+/// (name, key); capacity tokens, refilled `refill_per_sec`. True if a token was
+/// consumed.
+pub fn rate_limit_allow(name: String, key: String, capacity: i64, refill_per_sec: i64) -> bool {
+    static B: OnceLock<Mutex<HashMap<(String, String), Bucket>>> = OnceLock::new();
+    let cap = capacity.max(0) as f64;
+    let now = unix_secs_f64();
+    let mut m = B.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let b = m.entry((name, key)).or_insert(Bucket { tokens: cap, last: now });
+    b.tokens = (b.tokens + (now - b.last) * refill_per_sec.max(0) as f64).min(cap);
+    b.last = now;
+    if b.tokens >= 1.0 { b.tokens -= 1.0; true } else { false }
 }
 
 #[cfg(test)]

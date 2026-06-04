@@ -127,6 +127,11 @@ analyzeKernelUsage = foldMap analyzeMod
             , if modName == "Uuid" || "Sky.Core.Uuid" `isSuffixOf` modName
               then mempty { usesUuid = True } else mempty
             , if modName == "Server" || "Sky.Http.Server" `isInfixOf` modName
+                 -- Middleware / RateLimit live in server.rs (need ServerRequest/
+                 -- Response + axum), so they pull the server module too.
+                 || modName `elem` ["Middleware", "RateLimit"]
+                 || "Sky.Http.Middleware" `isSuffixOf` modName
+                 || "Sky.Http.RateLimit" `isSuffixOf` modName
               -- isInfixOf so the submodules (Sky.Http.Server.WebSocket / .Stream)
               -- also flip the flag. usesHttpServer alone pulls tokio (via
               -- hasTokio) + the server module; do NOT set usesTaskRun — `main =
@@ -3239,6 +3244,19 @@ kernelToRust mod name = case (mod, name) of
     ("Std.Sub", "every") -> "sub_every"
     ("Cli", "program")     -> "cli_program"
     ("Std.Cli", "program") -> "cli_program"
+    -- Sky.Http.Middleware + Sky.Http.RateLimit — map both the short kernel-module
+    -- form and the fully-qualified Sky module to the runtime fns (robust against
+    -- the alias-table resolution path).
+    ("Middleware", "withCors")              -> "middleware_with_cors"
+    ("Sky.Http.Middleware", "withCors")     -> "middleware_with_cors"
+    ("Middleware", "withLogging")           -> "middleware_with_logging"
+    ("Sky.Http.Middleware", "withLogging")  -> "middleware_with_logging"
+    ("Middleware", "withBasicAuth")             -> "middleware_with_basic_auth"
+    ("Sky.Http.Middleware", "withBasicAuth")    -> "middleware_with_basic_auth"
+    ("Middleware", "withRateLimit")             -> "middleware_with_rate_limit"
+    ("Sky.Http.Middleware", "withRateLimit")    -> "middleware_with_rate_limit"
+    ("RateLimit", "allow")            -> "rate_limit_allow"
+    ("Sky.Http.RateLimit", "allow")   -> "rate_limit_allow"
     ("Ffi", "kernel") -> "ffi_kernel_polyfill"
     -- Ffi.callPure / callTask / toAny: the peephole rewriter in exprToRustInner
     -- handles the common case (literal kernel name + literal args list) by
