@@ -1949,7 +1949,9 @@ exprToRustInner ctx e = case e of
     -- produced (the process exits first), so A is a phantom i64 filler.
     Can.Call cmdPerformFn (task0 : rest)
         | "cmd_perform" == exprToRustString ctx cmdPerformFn
-        , "system_exit" `isPrefixOf` exprToRustString ctx task0 ->
+          -- require the call form `system_exit(...)`, not just a "system_exit"
+          -- prefix, so a future kernel/fn named system_exit_* can't false-match.
+        , "system_exit(" `isPrefixOf` exprToRustString ctx task0 ->
             "cmd_perform::<SkyError, i64, _, _>("
                 ++ intercalate ", " (map (exprToRustString ctx) (task0 : rest)) ++ ")"
     -- Sub-E step 4/5: Sub_subscribeWebSocket raw KIND toMsg. The four wrappers
