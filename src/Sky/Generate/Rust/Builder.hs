@@ -87,8 +87,12 @@ analyzeKernelUsage = foldMap analyzeMod
     walkExpr (Ann.At _ expr) = case expr of
         Can.VarKernel modName fnName ->
             detectKernelUsage modName fnName
-        Can.VarTopLevel modName _ ->
-            detectKernelUsage (ModuleName._name modName) ""
+        Can.VarTopLevel modName topName ->
+            -- Pass the binding name (not ""): Ffi.kernel-aliased stdlib funcs
+            -- (e.g. `Task.andThen = Ffi.kernel "Task_andThen"`) reach the usage
+            -- walker as VarTopLevel, so fnName-specific arms (Task compose →
+            -- executor) need it. Module-only arms are unaffected.
+            detectKernelUsage (ModuleName._name modName) topName
         Can.Call fn args -> walkExpr fn <> foldMap walkExpr args
         Can.Lambda _ body -> walkExpr body
         Can.Let def body -> walkDef def <> walkExpr body
@@ -117,6 +121,17 @@ analyzeKernelUsage = foldMap analyzeMod
                   && (fnName == "run" || fnName == "sequence" || fnName == "perform")
               then mempty { usesTaskRun = True } else mempty
             , if (modName == "Task" || "Sky.Core.Task" `isSuffixOf` modName) && fnName == "parallel"
+              then mempty { usesTaskParallel = True } else mempty
+            -- Task composition combinators build async futures whose
+            -- continuations only run when the task is awaited. A `main` shaped
+            -- as `t |> Task.andThen …` (no explicit Task.run) must therefore be
+            -- block_on'd — the eager-fire "call and drop" entry path would
+            -- silently skip every continuation (only the first, eagerly
+            -- constructed, side effect leaks). Flag pulls tokio + the block_on
+            -- entry while leaving mainIsTask=True. (run/perform/sequence already
+            -- set usesTaskRun.)
+            , if (modName == "Task" || "Sky.Core.Task" `isSuffixOf` modName)
+                  && fnName `elem` ["andThen", "map", "onError", "mapError", "andThenResult"]
               then mempty { usesTaskParallel = True } else mempty
             , if "System" `isSuffixOf` modName || modName == "System"
               then mempty { usesTaskRun = True } else mempty
@@ -899,7 +914,13 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
             [0..] pats
         params = map fst argTriples
         preludes = concatMap snd argTriples
-        ret = if name == "main" then "()" else typeToRustString rm retTy
+        -- `main : Task Error ()` lowers to `sky_main() -> SkyTask<()>` so the
+        -- entry can `block_on` it. Only when the program calls `Task.run` itself
+        -- (main returns ()) does sky_main return unit. Hardcoding "()" here
+        -- dropped the task — composed (`andThen`) mains never ran.
+        ret = if name == "main"
+              then if ecUsesTaskRun ctx then "()" else typeToRustString rm retTy
+              else typeToRustString rm retTy
         -- Collect type variable names from annotation types, emit as generic params
         allAnnotTys = map snd pats ++ [retTy | name /= "main"]
         -- collectRenderedTVars (not collectTVars): a var that appears only inside
@@ -2251,7 +2272,13 @@ emitDefaultCall ctx fn calleeName args =
     let noCloneFn = case fn of
             Ann.At _ (Can.VarKernel _ n) -> n == "run"
             _ -> False
-        isListDec = "json_dec_list" `isSuffixOf` calleeName
+        -- isPrefixOf (not isSuffixOf): the callee carries a turbofish
+        -- (`json_dec_list::<SkyError, _>`), so the bare name is a prefix, not a
+        -- suffix. `list` takes `impl Fn() -> Decoder`, so its decoder arg is
+        -- wrapped in a `||` factory closure below. (Suffix-matching silently
+        -- skipped the wrap once the turbofish was added — list never re-runs its
+        -- element decoder otherwise.)
+        isListDec = "json_dec_list" `isPrefixOf` calleeName
         -- Sub-A.13: empty-collection args (`[]`, `Nothing`) carry no element
         -- type for Rust to infer. Resolve each from the callee's param types:
         -- concrete -> turbofish, var-shared-with-sibling -> bare, var-only-here

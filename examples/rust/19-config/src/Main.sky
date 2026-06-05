@@ -1,0 +1,110 @@
+module Main exposing (main)
+
+-- 19-config: Std.Config typed TOML / YAML / JSON decoders on target = rust.
+--
+-- Exercises the full decoder surface — field / andThen / map / list /
+-- nullable + decodeToml / decodeYaml / decodeJson + loadFromFile — over a
+-- 5-field record. All three formats parse into one serde_json::Value and run
+-- the same Decoder (config_decode.rs). The `andThen` chain is the record-build
+-- path that the decoder-first codegen swap unblocked.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error exposing (Error)
+import Std.Config as Config
+import Std.Log exposing (println)
+
+
+type alias ServerCfg =
+    { host : String
+    , port : Int
+    , tls : Bool
+    , tags : List String
+    , note : Maybe String
+    }
+
+
+cfgDecoder : Config.Decoder ServerCfg
+cfgDecoder =
+    Config.field "host" Config.string
+        |> Config.andThen
+            (\host ->
+                Config.field "port" Config.int
+                    |> Config.andThen
+                        (\port ->
+                            Config.field "tls" Config.bool
+                                |> Config.andThen
+                                    (\tls ->
+                                        Config.field "tags" (Config.list Config.string)
+                                            |> Config.andThen
+                                                (\tags ->
+                                                    Config.field "note" (Config.nullable Config.string)
+                                                        |> Config.map
+                                                            (\note ->
+                                                                { host = host
+                                                                , port = port
+                                                                , tls = tls
+                                                                , tags = tags
+                                                                , note = note
+                                                                }
+                                                            )
+                                                )
+                                    )
+                        )
+            )
+
+
+tomlSrc : String
+tomlSrc =
+    "host = \"toml-host\"\nport = 5432\ntls = true\ntags = [\"x\", \"y\"]\nnote = \"hi\""
+
+
+yamlSrc : String
+yamlSrc =
+    "host: yaml-host\nport: 9000\ntls: false\ntags:\n  - p\n  - q\n  - r\nnote: null"
+
+
+jsonSrc : String
+jsonSrc =
+    "{\"host\":\"json-host\",\"port\":3000,\"tls\":true,\"tags\":[],\"note\":null}"
+
+
+render : ServerCfg -> String
+render cfg =
+    cfg.host
+        ++ " :"
+        ++ String.fromInt cfg.port
+        ++ " tls="
+        ++ (if cfg.tls then "on" else "off")
+        ++ " tags=["
+        ++ String.join "," cfg.tags
+        ++ "] note="
+        ++ Maybe.withDefault "<none>" cfg.note
+
+
+report : String -> Result Error ServerCfg -> Task Error ()
+report label result =
+    case result of
+        Ok cfg ->
+            println ("OK -> 19-config " ++ label ++ ": " ++ render cfg)
+
+        Err e ->
+            println ("FAIL " ++ label ++ ": " ++ Error.toString e)
+
+
+loadReport : Task Error ()
+loadReport =
+    Config.loadFromFile "config.toml" cfgDecoder
+        |> Task.andThen (\cfg -> println ("OK -> 19-config file: " ++ render cfg))
+        |> Task.onError
+            (\e -> println ("FAIL file: " ++ Error.toString e))
+
+
+main : Task Error ()
+main =
+    report "toml" (Config.decodeToml tomlSrc cfgDecoder)
+        |> Task.andThen (\_ -> report "yaml" (Config.decodeYaml yamlSrc cfgDecoder))
+        |> Task.andThen (\_ -> report "json" (Config.decodeJson jsonSrc cfgDecoder))
+        |> Task.andThen (\_ -> loadReport)

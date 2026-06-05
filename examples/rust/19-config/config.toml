@@ -1,0 +1,5 @@
+host = "file-host"
+port = 8443
+tls = true
+tags = ["a", "b", "c"]
+note = "loaded from disk"

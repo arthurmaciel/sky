@@ -230,6 +230,7 @@ even for crates that use proc macros or derive macros.
 | 16-hex | `hex` | ✅ builds + runs | `encode`/`decode` — generic `<T: AsRef<[u8]>>` monomorphised to `List Int` (Alt-1 proof) |
 | 17-db-todo-cli | `Std.Db` | ✅ builds + runs | Full CRUD via sqlx (insert/get/update/delete/find/transaction) — reuses unmodified `examples/07-todo-cli` Sky source. Builds clean on sqlite **+ mysql + postgres** (cross-backend per `sky.toml`). |
 | 18-auth-signup | `Std.Auth` | ✅ builds + runs | `register` + `setRole` via bcrypt + sqlx; duplicate-email surfaces the right error. Backend-portable schema (`db_auto_id_column` per driver) — builds clean on sqlite + mysql + postgres. |
+| 19-config | `Std.Config` | ✅ builds + runs | Decodes a 5-field record from TOML, YAML, JSON (string sources) + `loadFromFile` config.toml. Exercises `field`/`andThen`/`map`/`list`/`nullable`. Regression for the decoder-first `andThen` swap + the composed-Task `block_on` entry fix. |
 
 ### `examples/00-standard-libs` on `target=rust`
 

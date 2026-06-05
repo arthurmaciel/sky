@@ -14,13 +14,15 @@ use super::json::{Decoder, JsonVal};
 use std::future::ready;
 
 // Config.nullable : Decoder a -> Decoder (Maybe a)
+// Returns Sky's SkyMaybe (not Rust Option) so the decoded value matches the
+// `Maybe a` the Sky annotation lowers to.
 pub fn config_nullable<E: From<String> + 'static, T: 'static + Send>(
     decoder: Decoder<E, T>,
-) -> Decoder<E, Option<T>> {
+) -> Decoder<E, SkyMaybe<T>> {
     Box::new(move |v| match v {
-        JsonVal::Null => SkyResult::Ok(None),
+        JsonVal::Null => SkyResult::Ok(SkyMaybe::Nothing),
         _ => match decoder(v) {
-            SkyResult::Ok(t) => SkyResult::Ok(Some(t)),
+            SkyResult::Ok(t) => SkyResult::Ok(SkyMaybe::Just(t)),
             SkyResult::Err(e) => SkyResult::Err(e),
         },
     })
