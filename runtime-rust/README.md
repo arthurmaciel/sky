@@ -78,26 +78,17 @@ the HTTP/WS/Cli regression tests):
   Csv, Uuid, Log, Db (sqlite/mysql/postgres), Auth.
 - Network: Sky.Core.Http (client), Sky.Http.Server, Sky.Core.WebSocket (client —
   all four events), Sky.Http.Server.WebSocket.
+- `Sky.Http.Middleware` (withCors / withLogging / withBasicAuth / withRateLimit) +
+  `Sky.Http.RateLimit` (allow). server.rs `middleware_with_*` return
+  `impl Fn(ServerRequest) -> SkyTask<E, Response>` that chain generically;
+  `rate_limit_allow` token bucket; per-IP fixed window via the populated
+  `remoteAddr` (axum `ConnectInfo` + `X-Forwarded-For`/`X-Real-IP`). Verified
+  end-to-end on `--target rust` (CORS `*`, basic-auth 401→200, rate-limit) — the
+  composition `Server.get "/" (h |> Mw.withCors […] |> Mw.withLogging)`
+  type-checks now that upstream v0.16.3 exposed the `Handler` alias (#464) and
+  fixed the typed-`SkyTask` middleware handler path (#468).
 - Runtime/TEA: Cmd, Sub, Sky.Cli (line-oriented TEA backend).
 - Ffi (Rust-crate auto-FFI).
-
-**🟠 Runtime done, blocked on an UPSTREAM type-system bug:**
-- `Sky.Http.Middleware` (withCors / withLogging / withBasicAuth / withRateLimit)
-  + `Sky.Http.RateLimit` (allow). The Rust runtime is implemented (server.rs:
-  `middleware_with_*` returning `impl Fn(ServerRequest) -> SkyTask<E, Response>`
-  that chain generically; `rate_limit_allow` token bucket; per-IP fixed window
-  via the now-populated `remoteAddr`). **Blocked: the Sky type-checker treats
-  `Handler` as an opaque builtin (`Constrain/Expression.hs:3211`) that does NOT
-  unify with `Server.get`'s structural param `(Request -> Task Error Response)`,
-  so `Server.get "/" (handler |> Mw.withLogging)` is a TYPE ERROR — on BOTH
-  backends (verified on `target=go` too; no example/test exercises middleware, so
-  this latent stdlib bug shipped).** Fix is a shared type-checker change (make
-  `Handler` unify with the structural handler type) — an UPSTREAM concern
-  (`anzellai/sky`), not made on this Rust branch (changes here stay
-  target-gated). The Rust runtime is ready the moment that lands.
-  - Independent win shipped along the way: `ServerRequest.remoteAddr` is now
-    populated (axum `ConnectInfo` + `X-Forwarded-For`/`X-Real-IP`) — it was always
-    `""` before.
 
 **⏳ Missing — bounded & additive** (no architectural blocker; the natural next
 targets):
