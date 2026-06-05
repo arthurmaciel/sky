@@ -1019,7 +1019,14 @@ needsTaskWrap solved body =
 -- generated Rust type name.
 unionsToRustTypes :: Map.Map String String -> String -> String -> Map.Map String Can.Union -> [RustTypeDef]
 unionsToRustTypes recordMap skyModName modPrefix unions =
-    map (\(name, u) -> unionToRustTypeDef recordMap skyModName modPrefix name u) (Map.toList unions)
+    -- The opaque `Decoder a` from Sky.Core.Json.Decode AND Std.Config is the
+    -- runtime json::Decoder (rendered via the global `Decoder<T>` alias by
+    -- typeToRustString). Its Sky def is a phantom (`type Decoder a` with a unit
+    -- placeholder), so emitting it as a Rust enum yields `pub enum Decoder<a> {
+    -- Decoder }` — an unused type param a (E0392). Skip it; the alias covers all
+    -- references and the combinators route to json_dec_* / config_* kernels.
+    map (\(name, u) -> unionToRustTypeDef recordMap skyModName modPrefix name u)
+        (filter (\(name, _) -> name /= "Decoder") (Map.toList unions))
 
 unionToRustTypeDef :: Map.Map String String -> String -> String -> String -> Can.Union -> RustTypeDef
 unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts _ _) =
@@ -1097,6 +1104,13 @@ typeToRustString recordMap t = case t of
     -- Sub-E: TEA Cmd/Sub are generic over the message type.
     Can.TType _ "Cmd" [m] -> "SkyCmd<" ++ typeToRustString recordMap m ++ ">"
     Can.TType _ "Sub" [m] -> "SkySub<" ++ typeToRustString recordMap m ++ ">"
+    -- Json.Decode / Std.Config share one runtime decoder representation. Both
+    -- expose an opaque `Decoder a`; render it as the global `Decoder<T>` alias
+    -- (= sky_runtime::json::Decoder<SkyError, T>) so an annotated decoder
+    -- (`cfgDecoder : Config.Decoder DbCfg`) matches the json_dec_* / config_*
+    -- kernels its call sites route to. The placeholder enum is skipped at the
+    -- def site (see the Decoder guard in the union emitter).
+    Can.TType _ "Decoder" [a] -> "Decoder<" ++ typeToRustString recordMap a ++ ">"
     Can.TUnit -> "()"
     Can.TType _ "List" [a] -> "Vec<" ++ typeToRustString recordMap a ++ ">"
     Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString recordMap a ++ ">"
@@ -2030,6 +2044,15 @@ exprToRustInner ctx e = case e of
                     case pinTaskCall ctx cname args (ecSolvedTypes ctx) of
                         Just pinned -> pinned
                         Nothing -> emitDefaultCall ctx fn calleeName args
+                cname | "json_dec_and_then" `isPrefixOf` cname, [contArg, decArg] <- args ->
+                    -- Sky's `andThen : (a -> Decoder b) -> Decoder a -> Decoder b`
+                    -- puts the continuation FIRST, but the runtime kernel is
+                    -- `json_dec_and_then(decoder, f)`. Emit decoder-first so Rust
+                    -- unifies the decoder's value type `a` BEFORE type-checking the
+                    -- continuation closure — a closure-first arg leaves `a`
+                    -- un-inferred (E0282). Closes the Json.Decode/Std.Config
+                    -- `andThen` record-decode path.
+                    emitDefaultCall ctx fn calleeName [decArg, contArg]
                 _ -> emitDefaultCall ctx fn calleeName args
     Can.If [] elseBranch ->
         exprToRustString ctx elseBranch
@@ -3105,6 +3128,43 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Json.Decode", "decodeString") -> "json_dec_decode_string"
     ("JsonDec", "oneOf") -> "json_dec_one_of"
     ("Sky.Core.Json.Decode", "oneOf") -> "json_dec_one_of"
+    -- Std.Config — typed TOML/YAML/JSON decoders. The `Decoder a` is the same
+    -- runtime representation as Json.Decode's (Decoder<E,T> over a serde_json
+    -- Value), so the pure combinators route straight to the json_dec_* kernels
+    -- (which already carry their turbofish entries). Only nullable + the format
+    -- front-ends (String-first arg order) + loadFromFile live in config_decode.rs.
+    ("Config", "string")  -> "json_dec_string"
+    ("Std.Config", "string")  -> "json_dec_string"
+    ("Config", "int")     -> "json_dec_int"
+    ("Std.Config", "int")     -> "json_dec_int"
+    ("Config", "float")   -> "json_dec_float"
+    ("Std.Config", "float")   -> "json_dec_float"
+    ("Config", "bool")    -> "json_dec_bool"
+    ("Std.Config", "bool")    -> "json_dec_bool"
+    ("Config", "field")   -> "json_dec_field"
+    ("Std.Config", "field")   -> "json_dec_field"
+    ("Config", "at")      -> "json_dec_at"
+    ("Std.Config", "at")      -> "json_dec_at"
+    ("Config", "list")    -> "json_dec_list"
+    ("Std.Config", "list")    -> "json_dec_list"
+    ("Config", "map")     -> "json_dec_map"
+    ("Std.Config", "map")     -> "json_dec_map"
+    ("Config", "andThen") -> "json_dec_and_then"
+    ("Std.Config", "andThen") -> "json_dec_and_then"
+    ("Config", "succeed") -> "json_dec_succeed"
+    ("Std.Config", "succeed") -> "json_dec_succeed"
+    ("Config", "fail")    -> "json_dec_fail"
+    ("Std.Config", "fail")    -> "json_dec_fail"
+    ("Config", "nullable")     -> "config_nullable"
+    ("Std.Config", "nullable")     -> "config_nullable"
+    ("Config", "decodeJson")   -> "config_decode_json"
+    ("Std.Config", "decodeJson")   -> "config_decode_json"
+    ("Config", "decodeToml")   -> "config_decode_toml"
+    ("Std.Config", "decodeToml")   -> "config_decode_toml"
+    ("Config", "decodeYaml")   -> "config_decode_yaml"
+    ("Std.Config", "decodeYaml")   -> "config_decode_yaml"
+    ("Config", "loadFromFile") -> "config_load_from_file"
+    ("Std.Config", "loadFromFile") -> "config_load_from_file"
     -- Task kernel functions: route to runtime implementations
     ("Task", "succeed") -> "task_succeed"
     ("Sky.Core.Task", "succeed") -> "task_succeed"
@@ -3439,6 +3499,10 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
         , ("csv",              "\"1\"")
         , ("jsonwebtoken",     "\"9\"")
         , ("bcrypt",           "\"0.17\"")
+        -- Std.Config front-ends: TOML + YAML parsed into serde_json::Value,
+        -- then the shared json Decoder runs (config_decode.rs).
+        , ("toml",             "\"0.8\"")
+        , ("serde_yaml",       "\"0.9\"")
         ]
     , name `notElem` userDepNames
     ] ++

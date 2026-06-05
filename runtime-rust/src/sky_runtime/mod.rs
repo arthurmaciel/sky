@@ -2,6 +2,8 @@
 // In generated projects, this file is overridden by the compiler.
 
 pub mod config;
+#[cfg(feature = "config")]
+pub mod config_decode;
 pub mod core;
 
 #[cfg(feature = "tokio")]
@@ -24,6 +26,8 @@ pub mod db;
 pub use db::*;
 
 pub use config::*;
+#[cfg(feature = "config")]
+pub use config_decode::*;
 pub use core::*;
 #[cfg(feature = "tokio")]
 pub use task::*;

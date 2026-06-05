@@ -16,6 +16,8 @@ pbkdf2 = { version = "0.12", optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 csv = { version = "1", optional = true }
+toml = { version = "0.8", optional = true }
+serde_yaml = { version = "0.9", optional = true }
 axum = { version = "0.7", features = ["ws"], optional = true }
 tower-http = { version = "0.5", features = ["fs", "catch-panic"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"], optional = true }
@@ -44,10 +46,11 @@ db = ["sqlx", "tokio"]
 crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
+config = ["json", "toml", "serde_yaml"]
 server = ["tokio", "axum", "tower-http"]
 http_client = ["tokio", "reqwest"]
 websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
-full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "server", "http_client", "websocket_client"]
+full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "config", "server", "http_client", "websocket_client"]
 
 [dev-dependencies]
 regex = "1"
