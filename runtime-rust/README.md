@@ -88,14 +88,21 @@ the HTTP/WS/Cli regression tests):
   type-checks now that upstream v0.16.3 exposed the `Handler` alias (#464) and
   fixed the typed-`SkyTask` middleware handler path (#468).
 - Runtime/TEA: Cmd, Sub, Sky.Cli (line-oriented TEA backend).
+- `Std.Config` (TOML/YAML/JSON decoders). Reuses the JSON Decoder over a
+  serde_json::Value — TOML/YAML parse into the same Value (`toml` / `serde_yaml`)
+  then the shared decoder runs (config_decode.rs). Full combinator set
+  (string/int/float/bool/field/at/list/map/andThen/succeed/fail/nullable) +
+  decodeToml/decodeYaml/decodeJson + loadFromFile. Verified end-to-end on
+  `--target rust`: a 3-field record decoded from TOML + JSON via field/andThen/map.
+  The `andThen` decoder-first codegen swap also fixed Json.Decode's `andThen`
+  record-decode path.
 - Ffi (Rust-crate auto-FFI).
 
 **⏳ Missing — bounded & additive** (no architectural blocker; the natural next
 targets):
 - `Sky.Http.Server.Stream` (SSE / chunked) + `Sky.Core.Http.Stream` (client
   streaming).
-- `Std.Config` (TOML/YAML/JSON decoders), `Std.Email` (providers), `Std.Trace`
-  (spans).
+- `Std.Email` (providers), `Std.Trace` (spans).
 - PubSub (`Cmd.publish` / `publishNoEcho`, `Sub.subscribeTopic`) — couples to
   Sky.Live's broker.
 - `Io` (writeStdout/readLine beyond Log), `Process.run`, `Debug`, `Fmt` — small;
