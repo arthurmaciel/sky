@@ -69,7 +69,7 @@ or `unsafe`.
 The Go backend is the reference (full surface — 54 kernel modules). Rust
 coverage, by confidence:
 
-**✅ Covered & verified** (standard-libs 131/131 + the 20 `examples/rust/*` +
+**✅ Covered & verified** (standard-libs 131/131 + the 22 `examples/rust/*` +
 the HTTP/WS/Cli regression tests):
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
   Regex, Bytes (Latin-1), Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal,
@@ -108,12 +108,26 @@ the HTTP/WS/Cli regression tests):
   `Resend "k"` / `Ses cfg` lower directly. SMTP returns an explicit
   not-yet-ported `Err` (needs a transport crate). Verified end-to-end on
   `--target rust` (all four provider variants under dry-run).
+- `Sky.Http.Server.Stream` (server-side SSE / chunked) — `stream` / `emit` /
+  `finish` / `withContentType`. The handler is stashed via a body sentinel
+  (`__sky_stream:<token>`) the ServerResponse bridge carries; `to_axum_response`
+  detects it and serves a `Body::from_stream` over a bounded mpsc channel
+  (`emit` = bounded send → backpressure). StreamWriter is bridged. Verified
+  e2e: chunks flush ~200ms apart, not buffered (server_stream.rs,
+  `examples/rust/21-sse-server`).
+- `Sky.Core.Http.Stream` (client-side) — `open` / `forEachChunk` / `close`.
+  `open` parks the reqwest response; `forEachChunk` drains `bytes_stream()`
+  synchronously (the relay shape — usable in a plain Sky.Http.Server handler,
+  no TEA loop). The Sub-tier `chunks` is a no-op stub (its consumer is Sky.Live,
+  a deferred arc). Verified e2e via the relay (http_stream.rs,
+  `examples/rust/22-sse-relay`: `/relay` proxies `/upstream` chunk-for-chunk).
 - Ffi (Rust-crate auto-FFI).
 
 **⏳ Missing — bounded & additive** (no architectural blocker; the natural next
 targets):
-- `Sky.Http.Server.Stream` (SSE / chunked) + `Sky.Core.Http.Stream` (client
-  streaming).
+- `Sky.Core.Http.Stream.chunks` (Sub-tier chunk dispatch into a TEA update
+  loop) — no-op stub on Rust; its consumer is Sky.Live (a deferred arc).
+  `forEachChunk` is the supported synchronous path.
 - PubSub (`Cmd.publish` / `publishNoEcho`, `Sub.subscribeTopic`) — couples to
   Sky.Live's broker.
 - `Io` (writeStdout/readLine beyond Log), `Process.run`, `Debug`, `Fmt` — small;
@@ -219,7 +233,7 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 20/20 build + run from a wiped slate
+### `examples/rust/` — 22/22 build + run from a wiped slate
 
 | Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
@@ -243,6 +257,8 @@ even for crates that use proc macros or derive macros.
 | 18-auth-signup | `Std.Auth` | ✅ builds + runs | `register` + `setRole` via bcrypt + sqlx; duplicate-email surfaces the right error. Backend-portable schema (`db_auto_id_column` per driver) — builds clean on sqlite + mysql + postgres. |
 | 19-config | `Std.Config` | ✅ builds + runs | Decodes a 5-field record from TOML, YAML, JSON (string sources) + `loadFromFile` config.toml. Exercises `field`/`andThen`/`map`/`list`/`nullable`. Regression for the decoder-first `andThen` swap + the composed-Task `block_on` entry fix. |
 | 20-email | `Std.Email` | ✅ builds + runs | `defaultMessage` + `with*` builder chain (incl. `withAttachment`) and all four provider variants (`Resend`/`SendGrid`/`Ses`/`Smtp`) sent under `SKY_EMAIL_DRY_RUN`. Regression for the `++`-on-bridged-List-field and the anon-record-param field-typing codegen fixes. |
+| 21-sse-server | `Sky.Http.Server.Stream` | ✅ builds + runs | `/events` SSE endpoint — `stream`/`emit`/`finish` flush five `tick` events ~200ms apart then `done` (curl `--no-buffer` confirms progressive delivery, not buffered). |
+| 22-sse-relay | `Sky.Core.Http.Stream` + `Sky.Http.Server.Stream` | ✅ builds + runs | `/relay` proxies `/upstream` chunk-for-chunk via `Http.Stream.open` + `forEachChunk` re-emitting through `Server.Stream.emit`, inside a plain handler goroutine (no TEA loop). The per-token relay shape; exercises the `impl Fn` capturing-closure param fix. |
 
 ### `examples/00-standard-libs` on `target=rust`
 
@@ -754,7 +770,7 @@ Cargo builds accumulate fast. A full Rust-example sweep can produce 20+ GB of `t
 | `runtime-rust/target/` | up to ~4 GB | runtime crate's own `cargo build`/`test --features full` outputs | ~2-3 min `cargo test --features full --lib` |
 | `runtime-rust/tests/**/sky-out/Rust/target/` | varies | per-test-fixture cargo targets | per-fixture, usually <1 min |
 | `tools/sky-ffi-inspect-rs/target/` | ~600 MB | inspector cargo target (only when iterating on inspector source) | ~30 s |
-| `examples/rust/*/sky-out/Rust/target/` | 1-2 GB each | per-example cargo targets — 20 examples → up to 40 GB if all built without cleanup | ~30-60 s per example |
+| `examples/rust/*/sky-out/Rust/target/` | 1-2 GB each | per-example cargo targets — 22 examples → up to 44 GB if all built without cleanup | ~30-60 s per example |
 | `~/.cache/sky/tools/sky-ffi-inspect-rs/` | ~500 MB | TH-materialized inspector source + its built target binary | ~30 s on next `sky add --target rust` |
 | `dist-newstyle/` (cabal output) | ~200 MB | Sky compiler build artifacts | ~3-5 min full rebuild |
 
@@ -898,7 +914,7 @@ types**.
   unknown sig → bare. This resolves the prior Sub-A.12 "F3" deferral (the naive
   monomorphic default regressed function-call args like `db_query []`). The 4
   empty-literal `E0283` errors in `examples/00-standard-libs` are fixed with
-  zero regressions across the 20 `examples/rust/*` + 3 `tests/rust-codegen/`
+  zero regressions across the 22 `examples/rust/*` + 3 `tests/rust-codegen/`
   repros. NOTE: standard-libs still can't reach 120/120 on `target=rust` — it's
   now blocked by the **sub-D** generic-ADT codegen bugs + missing crypto/retry
   kernels (~46 errors), not by empty-literals.
