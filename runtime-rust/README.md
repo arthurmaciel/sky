@@ -69,7 +69,7 @@ or `unsafe`.
 The Go backend is the reference (full surface — 54 kernel modules). Rust
 coverage, by confidence:
 
-**✅ Covered & verified** (standard-libs 131/131 + the 18 `examples/rust/*` +
+**✅ Covered & verified** (standard-libs 131/131 + the 20 `examples/rust/*` +
 the HTTP/WS/Cli regression tests):
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
   Regex, Bytes (Latin-1), Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal,
@@ -100,13 +100,20 @@ the HTTP/WS/Cli regression tests):
   task's result unchanged plus a span; output is opt-in via `SKY_TRACE` (off →
   zero noise) so spans never change behaviour. `event` marks a point, `attr`
   annotates with `sky.trace.`-namespaced keys (trace.rs).
+- `Std.Email` (Resend / SendGrid / SES). `email_send` over reqwest with a
+  dry-run short-circuit (`SKY_EMAIL_DRY_RUN`) and per-provider endpoint
+  overrides; SES uses an in-module SigV4 (hmac + sha2). EmailMessage /
+  Attachment / SesConfig / SmtpConfig + the EmailProvider ADT bridge to runtime
+  types (email.rs) so the stdlib `defaultMessage` / `with*` builders and
+  `Resend "k"` / `Ses cfg` lower directly. SMTP returns an explicit
+  not-yet-ported `Err` (needs a transport crate). Verified end-to-end on
+  `--target rust` (all four provider variants under dry-run).
 - Ffi (Rust-crate auto-FFI).
 
 **⏳ Missing — bounded & additive** (no architectural blocker; the natural next
 targets):
 - `Sky.Http.Server.Stream` (SSE / chunked) + `Sky.Core.Http.Stream` (client
   streaming).
-- `Std.Email` (providers).
 - PubSub (`Cmd.publish` / `publishNoEcho`, `Sub.subscribeTopic`) — couples to
   Sky.Live's broker.
 - `Io` (writeStdout/readLine beyond Log), `Process.run`, `Debug`, `Fmt` — small;
@@ -212,7 +219,7 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 18/18 build + run from a wiped slate
+### `examples/rust/` — 20/20 build + run from a wiped slate
 
 | Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
@@ -235,6 +242,7 @@ even for crates that use proc macros or derive macros.
 | 17-db-todo-cli | `Std.Db` | ✅ builds + runs | Full CRUD via sqlx (insert/get/update/delete/find/transaction) — reuses unmodified `examples/07-todo-cli` Sky source. Builds clean on sqlite **+ mysql + postgres** (cross-backend per `sky.toml`). |
 | 18-auth-signup | `Std.Auth` | ✅ builds + runs | `register` + `setRole` via bcrypt + sqlx; duplicate-email surfaces the right error. Backend-portable schema (`db_auto_id_column` per driver) — builds clean on sqlite + mysql + postgres. |
 | 19-config | `Std.Config` | ✅ builds + runs | Decodes a 5-field record from TOML, YAML, JSON (string sources) + `loadFromFile` config.toml. Exercises `field`/`andThen`/`map`/`list`/`nullable`. Regression for the decoder-first `andThen` swap + the composed-Task `block_on` entry fix. |
+| 20-email | `Std.Email` | ✅ builds + runs | `defaultMessage` + `with*` builder chain (incl. `withAttachment`) and all four provider variants (`Resend`/`SendGrid`/`Ses`/`Smtp`) sent under `SKY_EMAIL_DRY_RUN`. Regression for the `++`-on-bridged-List-field and the anon-record-param field-typing codegen fixes. |
 
 ### `examples/00-standard-libs` on `target=rust`
 
@@ -746,7 +754,7 @@ Cargo builds accumulate fast. A full Rust-example sweep can produce 20+ GB of `t
 | `runtime-rust/target/` | up to ~4 GB | runtime crate's own `cargo build`/`test --features full` outputs | ~2-3 min `cargo test --features full --lib` |
 | `runtime-rust/tests/**/sky-out/Rust/target/` | varies | per-test-fixture cargo targets | per-fixture, usually <1 min |
 | `tools/sky-ffi-inspect-rs/target/` | ~600 MB | inspector cargo target (only when iterating on inspector source) | ~30 s |
-| `examples/rust/*/sky-out/Rust/target/` | 1-2 GB each | per-example cargo targets — 18 examples → up to 36 GB if all built without cleanup | ~30-60 s per example |
+| `examples/rust/*/sky-out/Rust/target/` | 1-2 GB each | per-example cargo targets — 20 examples → up to 40 GB if all built without cleanup | ~30-60 s per example |
 | `~/.cache/sky/tools/sky-ffi-inspect-rs/` | ~500 MB | TH-materialized inspector source + its built target binary | ~30 s on next `sky add --target rust` |
 | `dist-newstyle/` (cabal output) | ~200 MB | Sky compiler build artifacts | ~3-5 min full rebuild |
 
@@ -890,7 +898,7 @@ types**.
   unknown sig → bare. This resolves the prior Sub-A.12 "F3" deferral (the naive
   monomorphic default regressed function-call args like `db_query []`). The 4
   empty-literal `E0283` errors in `examples/00-standard-libs` are fixed with
-  zero regressions across the 18 `examples/rust/*` + 3 `tests/rust-codegen/`
+  zero regressions across the 20 `examples/rust/*` + 3 `tests/rust-codegen/`
   repros. NOTE: standard-libs still can't reach 120/120 on `target=rust` — it's
   now blocked by the **sub-D** generic-ADT codegen bugs + missing crypto/retry
   kernels (~46 errors), not by empty-literals.
