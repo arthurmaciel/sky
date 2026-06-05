@@ -11,6 +11,8 @@ pub mod task;
 #[cfg(feature = "tokio")]
 pub mod log;
 #[cfg(feature = "tokio")]
+pub mod trace;
+#[cfg(feature = "tokio")]
 pub mod system;
 pub mod time;
 pub mod random;
@@ -33,6 +35,8 @@ pub use core::*;
 pub use task::*;
 #[cfg(feature = "tokio")]
 pub use log::*;
+#[cfg(feature = "tokio")]
+pub use trace::*;
 #[cfg(feature = "tokio")]
 pub use system::*;
 pub use time::*;

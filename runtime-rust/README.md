@@ -96,13 +96,17 @@ the HTTP/WS/Cli regression tests):
   `--target rust`: a 3-field record decoded from TOML + JSON via field/andThen/map.
   The `andThen` decoder-first codegen swap also fixed Json.Decode's `andThen`
   record-decode path.
+- `Std.Trace` (span / event / attr). `span name task` runs + returns the wrapped
+  task's result unchanged plus a span; output is opt-in via `SKY_TRACE` (off →
+  zero noise) so spans never change behaviour. `event` marks a point, `attr`
+  annotates with `sky.trace.`-namespaced keys (trace.rs).
 - Ffi (Rust-crate auto-FFI).
 
 **⏳ Missing — bounded & additive** (no architectural blocker; the natural next
 targets):
 - `Sky.Http.Server.Stream` (SSE / chunked) + `Sky.Core.Http.Stream` (client
   streaming).
-- `Std.Email` (providers), `Std.Trace` (spans).
+- `Std.Email` (providers).
 - PubSub (`Cmd.publish` / `publishNoEcho`, `Sub.subscribeTopic`) — couples to
   Sky.Live's broker.
 - `Io` (writeStdout/readLine beyond Log), `Process.run`, `Debug`, `Fmt` — small;

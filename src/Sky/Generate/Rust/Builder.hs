@@ -133,6 +133,11 @@ analyzeKernelUsage = foldMap analyzeMod
             , if (modName == "Task" || "Sky.Core.Task" `isSuffixOf` modName)
                   && fnName `elem` ["andThen", "map", "onError", "mapError", "andThenResult"]
               then mempty { usesTaskParallel = True } else mempty
+            -- Std.Trace span/event/attr return Tasks (span wraps + awaits the
+            -- inner task); a composed main using them needs the block_on entry.
+            , if (modName == "Trace" || "Std.Trace" `isSuffixOf` modName)
+                  && fnName `elem` ["span", "event", "attr"]
+              then mempty { usesTaskParallel = True } else mempty
             , if "System" `isSuffixOf` modName || modName == "System"
               then mempty { usesTaskRun = True } else mempty
             , if "Json" `isPrefixOf` modName || "Sky.Core.Json" `isPrefixOf` modName
@@ -2219,6 +2224,15 @@ taskExprInnerTypeCall solved (Ann.At _ (Can.VarKernel modName fnName)) args
                 [_, task] -> taskExprInnerType solved task  -- same success type A
                 _ -> "String"
             _ -> ""
+        | "Trace" `isSuffixOf` modName || modName == "Trace" = case fnName of
+            -- span : String -> Task e a -> Task e a — inner type is the wrapped
+            -- task's. event / attr are Task Error () — inner is ().
+            "span" -> case args of
+                [_, task] -> taskExprInnerType solved task
+                _ -> ""
+            "event" -> "()"
+            "attr"  -> "()"
+            _ -> ""
         | "Db" `isSuffixOf` modName || modName == "Db" = case fnName of
             "query"    -> "Vec<HashMap<String, String>>"
             "exec"     -> "()"
@@ -3192,6 +3206,14 @@ kernelToRust mod name = case (mod, name) of
     ("Std.Config", "decodeYaml")   -> "config_decode_yaml"
     ("Config", "loadFromFile") -> "config_load_from_file"
     ("Std.Config", "loadFromFile") -> "config_load_from_file"
+    -- Std.Trace — opt-in spans / events / attrs (output gated on SKY_TRACE).
+    -- span runs + returns the wrapped task's result unchanged.
+    ("Trace", "span") -> "trace_span"
+    ("Std.Trace", "span") -> "trace_span"
+    ("Trace", "event") -> "trace_event"
+    ("Std.Trace", "event") -> "trace_event"
+    ("Trace", "attr") -> "trace_attr"
+    ("Std.Trace", "attr") -> "trace_attr"
     -- Task kernel functions: route to runtime implementations
     ("Task", "succeed") -> "task_succeed"
     ("Sky.Core.Task", "succeed") -> "task_succeed"
