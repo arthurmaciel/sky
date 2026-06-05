@@ -242,6 +242,12 @@ async fn build_request(req: axum::extract::Request) -> (ServerRequest, Option<ax
 
 fn to_axum_response(r: ServerResponse) -> axum::response::Response {
     use axum::response::IntoResponse;
+    // Sky.Http.Server.Stream: a streaming response carries a sentinel body the
+    // handler stashed via ServerStream.stream. Detect it + serve the chunked
+    // body before the buffered path runs.
+    if let Some(streamed) = serve_streaming_sentinel(&r) {
+        return streamed;
+    }
     let status = axum::http::StatusCode::from_u16(r.status as u16)
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = axum::http::Response::builder().status(status);

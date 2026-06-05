@@ -1,0 +1,98 @@
+module Main exposing (main)
+
+-- 22-sse-relay: the synchronous-relay shape on target = rust.
+--
+-- `/relay` proxies `/upstream` chunk-for-chunk using
+-- `Sky.Core.Http.Stream.forEachChunk` inside a plain Sky.Http.Server
+-- handler (no Sky.Live update loop needed). The relay handler:
+--   * opens an upstream streaming request (Http.Stream.open)
+--   * drains it synchronously (forEachChunk), re-emitting every chunk
+--     downstream via Server.Stream.emit
+-- This is the per-token LLM-forwarding shape (client read → server write).
+--
+-- Run + verify:
+--   sky run src/Main.sky --target rust
+--   curl --no-buffer http://localhost:8001/relay
+-- Expected: five `tick` lines + `done` appear progressively over ~1s.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Sky.Core.Time as Time
+import Sky.Core.Http exposing (HttpRequest)
+import Sky.Core.Http.Stream as HttpStream
+import Sky.Http.Server as Server
+import Sky.Http.Server exposing (Request, Response)
+import Sky.Http.Server.Stream as ServerStream
+import Sky.Core.Error exposing (Error)
+
+
+main : Task Error ()
+main =
+    Server.listen
+        8001
+        [ Server.get "/" handleHome
+        , Server.get "/upstream" handleUpstream
+        , Server.get "/relay" handleRelay
+        ]
+
+
+handleHome : Request -> Task Error Response
+handleHome _ =
+    Task.succeed
+        (Server.html
+            """<h1>SSE relay demo (rust)</h1>
+<pre>curl --no-buffer http://localhost:8001/relay</pre>""")
+
+
+-- Upstream: 5 SSE ticks + done, 200ms apart. Stands in for an LLM
+-- streaming endpoint.
+handleUpstream : Request -> Task Error Response
+handleUpstream _ =
+    ServerStream.stream
+        "text/event-stream"
+        (\writer ->
+            emitTick writer 1
+                |> Task.andThen (\_ -> emitTick writer 2)
+                |> Task.andThen (\_ -> emitTick writer 3)
+                |> Task.andThen (\_ -> emitTick writer 4)
+                |> Task.andThen (\_ -> emitTick writer 5)
+                |> Task.andThen
+                    (\_ ->
+                        ServerStream.emit "event: done\ndata: bye\n\n" writer)
+                |> Task.andThen (\_ -> ServerStream.finish writer))
+
+
+emitTick : ServerStream.StreamWriter -> Int -> Task Error ()
+emitTick writer n =
+    ServerStream.emit
+        ("event: tick\ndata: " ++ String.fromInt n ++ "\n\n")
+        writer
+        |> Task.andThen (\_ -> Time.sleep 200)
+
+
+-- Relay: drain the upstream chunk-for-chunk back to our own client.
+handleRelay : Request -> Task Error Response
+handleRelay _ =
+    ServerStream.stream
+        "text/event-stream"
+        (\writer ->
+            HttpStream.open upstreamRequest
+                |> Task.andThen
+                    (\hdl ->
+                        HttpStream.forEachChunk
+                            hdl
+                            (\chunk -> ServerStream.emit chunk writer))
+                |> Task.andThen (\_ -> ServerStream.finish writer))
+
+
+upstreamRequest : HttpRequest
+upstreamRequest =
+    { method = "GET"
+    , url = "http://127.0.0.1:8001/upstream"
+    , body = ""
+    , headers = []
+    , timeout = 30000
+    , followRedirects = True
+    , maxRedirects = 10
+    }

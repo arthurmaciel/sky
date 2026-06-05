@@ -161,9 +161,18 @@ analyzeKernelUsage = foldMap analyzeMod
               -- (block_on'd), which the usesTaskRun=True path would defeat.
               then mempty { usesHttpServer = True } else mempty
             -- Sky.Core.Http client (distinct from Sky.Http.Server above; the
-            -- suffix check can't collide — Server is "Sky.Http.Server").
-            , if modName == "Http" || "Sky.Core.Http" `isSuffixOf` modName
+            -- infix check can't collide — Server is "Sky.Http.Server"). isInfixOf
+            -- so the submodule "Sky.Core.Http.Stream" also flips usesHttp — its
+            -- kernels live in http_stream.rs (gated with http_client) and it
+            -- reuses the bridged HttpRequest struct from http_client.rs.
+            , if modName == "Http" || "Sky.Core.Http" `isInfixOf` modName
               then mempty { usesHttp = True } else mempty
+            -- Sky.Core.Http.Stream's `chunks` returns `Sub msg` (emitted
+            -- wholesale with the module) → needs SkySub from tea.rs. The
+            -- Sub-tier itself is a no-op stub on Rust (forEachChunk is the
+            -- supported path), but the type must resolve.
+            , if "Sky.Core.Http.Stream" `isSuffixOf` modName
+              then mempty { usesTea = True } else mempty
             -- Sub-E: TEA — Cmd / Sub / Cli.program → tea module (tokio). Cli's
             -- program returns a Task, so it also needs the tokio runtime.
             , if modName `elem` ["Cmd", "Sub", "Cli"]
@@ -176,7 +185,16 @@ analyzeKernelUsage = foldMap analyzeMod
             , if "Sky.Core.WebSocket" `isSuffixOf` modName
               then mempty { usesWsClient = True, usesTea = True } else mempty
             , if "Time" `isPrefixOf` modName || "Sky.Core.Time" `isPrefixOf` modName
-              then mempty { usesTime = True } <> (if fnName == "sleep" then mempty { usesTaskRun = True } else mempty)
+              -- usesTea: the Sky.Core.Time module is emitted wholesale, and
+              -- `Time.every : Int -> msg -> Sub msg` references SkySub (tea.rs).
+              -- Any Time user therefore needs the TEA module present.
+              -- Time.sleep needs the async runtime — pull tokio via
+              -- usesTaskParallel (NOT usesTaskRun). usesTaskRun would flip
+              -- mainIsTask off, breaking a Task-typed main that awaits sleep but
+              -- never calls Task.run (e.g. `main = Server.listen …` with a
+              -- streaming handler that sleeps between chunks — it must stay
+              -- block_on'd). Same reasoning as the Task-compose combinators.
+              then mempty { usesTime = True, usesTea = True } <> (if fnName == "sleep" then mempty { usesTaskParallel = True } else mempty)
               else mempty
             , if "Random" `isPrefixOf` modName || "Sky.Core.Random" `isPrefixOf` modName
               then mempty { usesRandom = True } else mempty
@@ -312,6 +330,12 @@ runtimeOpaqueTypes = Map.fromList
     -- bridge (aliasToRustTypeDef) emits a generic alias that absorbs the phantom
     -- `msg`: `pub type …Cfg<msg> = sky_runtime::WsServerCfg<SkyError>;`.
     , (("Sky.Http.Server.WebSocket", "WebSocketServerCfg"), "sky_runtime::WsServerCfg<SkyError>")
+    -- Sky.Http.Server.Stream: StreamWriter is the opaque writer handle the
+    -- runtime constructs to pass to the user's handler; the stdlib's
+    -- `case w of StreamWriter raw` lowers onto the bridged enum's variant.
+    -- (StreamId on the client side stays a generated Sky enum — its kernels
+    -- only ever see the unwrapped Int.)
+    , (("Sky.Http.Server.Stream", "StreamWriter"), "sky_runtime::StreamWriter")
     -- Std.Email: the message + attachment + config records map to runtime
     -- structs (pub fields, camelCase verbatim) so `defaultMessage`/`with*`
     -- record literals + updates resolve onto them; EmailProvider maps to the
@@ -369,6 +393,16 @@ kernelsNeedingErrorPin = Map.fromList
     , ("http_request",             "::<SkyError>")
     -- Std.Email — email_send returns SkyTask<E, String>; pin E.
     , ("email_send",               "::<SkyError>")
+    -- Sky.Core.Http.Stream (client) — open/close have no E-determining arg.
+    , ("http_stream_open",         "::<SkyError>")
+    , ("http_stream_close",        "::<SkyError>")
+    -- Sky.Http.Server.Stream (server) — stream/emit/finish/withContentType.
+    -- stream is <E, H> (H inferred); the rest are <E>. forEachChunk's body
+    -- closure determines E, so it's deliberately NOT pinned.
+    , ("server_stream_stream",            "::<SkyError, _>")
+    , ("server_stream_emit",              "::<SkyError>")
+    , ("server_stream_finish",            "::<SkyError>")
+    , ("server_stream_with_content_type", "::<SkyError>")
     -- Sky.Core.WebSocket client — Task-tier kernels; pin E.
     , ("web_socket_connect",          "::<SkyError>")
     , ("web_socket_connect_with",     "::<SkyError>")
@@ -836,7 +870,7 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                     let rm = ecRecordMap ctx
                         argTriples = zipWith3
                             (\i p t -> let (nm, pre) = patternToRustArg i p
-                                       in (nm ++ ": " ++ typeToRustString rm t, pre))
+                                       in (nm ++ ": " ++ paramTypeToRust rm t, pre))
                             [0..] params solvedParamTys
                         pStrs = map fst argTriples
                    in (pStrs, "")
@@ -932,7 +966,7 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
         rustName = if name == "main" then "sky_main" else name
         argTriples = zipWith
             (\i (pat, ty) -> let (nm, pre) = patternToRustArg i pat
-                             in (nm ++ ": " ++ typeToRustString rm ty, pre))
+                             in (nm ++ ": " ++ paramTypeToRust rm ty, pre))
             [0..] pats
         params = map fst argTriples
         preludes = concatMap snd argTriples
@@ -1135,6 +1169,32 @@ aliasToRustTypeDef recordMap _skyModName modPrefix name (Can.Alias vars ty) = ca
 flattenArrowType :: Can.Type -> ([Can.Type], Can.Type)
 flattenArrowType (Can.TLambda a b) = let (ps, r) = flattenArrowType b in (a : ps, r)
 flattenArrowType ty = ([], ty)
+
+-- | Render a FUNCTION PARAMETER's type. An EFFECTFUL function-typed parameter
+-- (one whose result is a `Task`) renders as `impl Fn(args) -> ret + Send + Sync
+-- + 'static` (argument-position impl Trait) rather than the fn-pointer
+-- typeToRustString would produce. fn pointers reject closures that capture
+-- environment — e.g. Sky.Core.Http.Stream.forEachChunk's `\chunk -> emit chunk
+-- writer` captures `writer`; `impl Fn` accepts capturing (move) closures, plain
+-- closures, AND fn items, so it's a strict widening of what the slot holds.
+--
+-- The Task-result gate is deliberate: a pure callback (`e -> bool`, `a -> b`) is
+-- frequently STORED in an ADT variant or record field — which render as fn
+-- pointers (e.g. ShouldRetry's `RetryWhen (fn(e) -> bool)`) — and an `impl Fn`
+-- type parameter can't be assigned into a fn-pointer slot. Effectful callbacks
+-- are instead passed through to kernels (the impl-Fn HOF surface), which is
+-- exactly where capturing closures need to flow. Non-function params render
+-- normally. The arrow chain flattens uncurried (`\a b ->` → `|a, b|`).
+paramTypeToRust :: Map.Map String String -> Can.Type -> String
+paramTypeToRust rm t = case t of
+    Can.TLambda _ _ | resultIsTask (snd (flattenArrowType t)) ->
+        let (ps, ret) = flattenArrowType t
+        in "impl Fn(" ++ intercalate ", " (map (typeToRustString rm) ps) ++ ") -> "
+           ++ typeToRustString rm ret ++ " + Send + Sync + 'static"
+    _ -> typeToRustString rm t
+  where
+    resultIsTask (Can.TType _ "Task" _) = True
+    resultIsTask _ = False
 
 typeToRustString :: Map.Map String String -> Can.Type -> String
 typeToRustString recordMap t = case t of
@@ -3596,14 +3656,17 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
         ]
     , name `notElem` userDepNames ] ++
     -- Sky.Core.Http client + Std.Email: reqwest only when used. rustls (no
-    -- system OpenSSL). Either flag pulls it; emit once.
-    [ "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"gzip\"] }"
+    -- system OpenSSL). `stream` feature for Http.Stream's bytes_stream(). Either
+    -- flag pulls it; emit once.
+    [ "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"gzip\", \"stream\"] }"
     | usesHttp uk || usesEmail uk, "reqwest" `notElem` userDepNames ] ++
-    -- Sky.Core.WebSocket client: tokio-tungstenite + futures-util.
-    [ name ++ " = " ++ spec
-    | usesWsClient uk
-    , (name, spec) <- [ ("tokio-tungstenite", "\"0.24\""), ("futures-util", "\"0.3\"") ]
-    , name `notElem` userDepNames ] ++
+    -- futures-util: WebSocket client, plus the streaming paths — http_stream.rs
+    -- (StreamExt::next) and server_stream.rs (stream::unfold for the body).
+    [ "futures-util = \"0.3\""
+    | usesWsClient uk || usesHttp uk || usesHttpServer uk, "futures-util" `notElem` userDepNames ] ++
+    -- Sky.Core.WebSocket client: tokio-tungstenite (futures-util above).
+    [ "tokio-tungstenite = \"0.24\""
+    | usesWsClient uk, "tokio-tungstenite" `notElem` userDepNames ] ++
     [ emitDepLine name spec
     | (name, spec) <- rustDeps
     , not (null name)

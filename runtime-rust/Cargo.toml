@@ -20,7 +20,7 @@ toml = { version = "0.8", optional = true }
 serde_yaml = { version = "0.9", optional = true }
 axum = { version = "0.7", features = ["ws"], optional = true }
 tower-http = { version = "0.5", features = ["fs", "catch-panic"], optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "stream"], optional = true }
 tokio-tungstenite = { version = "0.24", optional = true }
 futures-util = { version = "0.3", optional = true }
 subtle = "2"
@@ -47,8 +47,8 @@ crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
 config = ["json", "toml", "serde_yaml"]
-server = ["tokio", "axum", "tower-http"]
-http_client = ["tokio", "reqwest"]
+server = ["tokio", "axum", "tower-http", "futures-util"]
+http_client = ["tokio", "reqwest", "futures-util"]
 email = ["tokio", "reqwest", "serde_json", "sha2"]
 websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
 full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "config", "server", "http_client", "email", "websocket_client"]

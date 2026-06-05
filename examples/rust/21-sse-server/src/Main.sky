@@ -1,0 +1,58 @@
+module Main exposing (main)
+
+-- 21-sse-server: Sky.Http.Server.Stream on target = rust.
+--
+-- A canonical Server-Sent Events endpoint. `/events` streams a `tick`
+-- event every 200ms for five ticks, then a final `done` event, then
+-- closes. Chunks flush progressively (axum Body::from_stream over a
+-- bounded mpsc channel) — NOT buffered to the end.
+--
+-- Run + verify:
+--   sky run src/Main.sky --target rust
+--   curl --no-buffer http://localhost:8000/events
+-- Expected: five `tick` lines appear ~200ms apart, then `done`.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Sky.Core.Time as Time
+import Sky.Http.Server as Server
+import Sky.Http.Server exposing (Request, Response)
+import Sky.Http.Server.Stream as Stream
+import Sky.Core.Error exposing (Error)
+
+
+main : Task Error ()
+main =
+    Server.listen
+        8000
+        [ Server.get "/" handleHome, Server.get "/events" handleEvents ]
+
+
+handleHome : Request -> Task Error Response
+handleHome _ =
+    Task.succeed
+        (Server.html
+            """<h1>SSE server demo (rust)</h1>
+<pre>curl --no-buffer http://localhost:8000/events</pre>""")
+
+
+handleEvents : Request -> Task Error Response
+handleEvents _ =
+    Stream.stream
+        "text/event-stream"
+        (\writer ->
+            emitTick writer 1
+                |> Task.andThen (\_ -> emitTick writer 2)
+                |> Task.andThen (\_ -> emitTick writer 3)
+                |> Task.andThen (\_ -> emitTick writer 4)
+                |> Task.andThen (\_ -> emitTick writer 5)
+                |> Task.andThen
+                    (\_ -> Stream.emit "event: done\ndata: bye\n\n" writer)
+                |> Task.andThen (\_ -> Stream.finish writer))
+
+
+emitTick : Stream.StreamWriter -> Int -> Task Error ()
+emitTick writer n =
+    Stream.emit ("event: tick\ndata: " ++ String.fromInt n ++ "\n\n") writer
+        |> Task.andThen (\_ -> Time.sleep 200)

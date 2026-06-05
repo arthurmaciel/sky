@@ -75,11 +75,19 @@ pub use uuid_kernel::*;
 pub mod server;
 #[cfg(feature = "server")]
 pub use server::*;
+#[cfg(feature = "server")]
+pub mod server_stream;
+#[cfg(feature = "server")]
+pub use server_stream::*;
 
 #[cfg(feature = "http_client")]
 pub mod http_client;
 #[cfg(feature = "http_client")]
 pub use http_client::*;
+#[cfg(feature = "http_client")]
+pub mod http_stream;
+#[cfg(feature = "http_client")]
+pub use http_stream::*;
 
 #[cfg(feature = "email")]
 pub mod email;

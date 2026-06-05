@@ -114,11 +114,12 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         uuidMod = if RustBuilder.usesUuid usage then ["pub mod uuid_kernel;"] else []
         uuidUse = if RustBuilder.usesUuid usage then ["pub use uuid_kernel::*;"] else []
         -- Sub-D.1: Sky.Http.Server only when used (pulls axum at step 4).
-        srvMod = if RustBuilder.usesHttpServer usage then ["pub mod server;"] else []
-        srvUse = if RustBuilder.usesHttpServer usage then ["pub use server::*;"] else []
-        -- Sky.Core.Http client only when used (pulls reqwest).
-        httpMod = if RustBuilder.usesHttp usage then ["pub mod http_client;"] else []
-        httpUse = if RustBuilder.usesHttp usage then ["pub use http_client::*;"] else []
+        srvMod = if RustBuilder.usesHttpServer usage then ["pub mod server;", "pub mod server_stream;"] else []
+        srvUse = if RustBuilder.usesHttpServer usage then ["pub use server::*;", "pub use server_stream::*;"] else []
+        -- Sky.Core.Http client only when used (pulls reqwest). http_stream rides
+        -- along — it shares the reqwest dep + the HttpRequest bridge struct.
+        httpMod = if RustBuilder.usesHttp usage then ["pub mod http_client;", "pub mod http_stream;"] else []
+        httpUse = if RustBuilder.usesHttp usage then ["pub use http_client::*;", "pub use http_stream::*;"] else []
         -- Std.Email only when used (pulls reqwest; mirrors http_client).
         emailMod = if RustBuilder.usesEmail usage then ["pub mod email;"] else []
         emailUse = if RustBuilder.usesEmail usage then ["pub use email::*;"] else []
