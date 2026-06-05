@@ -81,6 +81,11 @@ pub mod http_client;
 #[cfg(feature = "http_client")]
 pub use http_client::*;
 
+#[cfg(feature = "email")]
+pub mod email;
+#[cfg(feature = "email")]
+pub use email::*;
+
 #[cfg(feature = "tokio")]
 pub mod tea;
 #[cfg(feature = "tokio")]

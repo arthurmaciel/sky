@@ -49,8 +49,9 @@ csv_kernel = ["csv", "tokio"]
 config = ["json", "toml", "serde_yaml"]
 server = ["tokio", "axum", "tower-http"]
 http_client = ["tokio", "reqwest"]
+email = ["tokio", "reqwest", "serde_json", "sha2"]
 websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
-full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "config", "server", "http_client", "websocket_client"]
+full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "config", "server", "http_client", "email", "websocket_client"]
 
 [dev-dependencies]
 regex = "1"

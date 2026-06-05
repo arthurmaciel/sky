@@ -48,6 +48,7 @@ data UsedKernels = UsedKernels
     , usesHttp :: Bool            -- Sky.Core.Http.* used → http client module + reqwest
     , usesTea :: Bool             -- Cmd/Sub/Cli.program used → tea module (tokio)
     , usesWsClient :: Bool        -- Sky.Core.WebSocket used → ws_client + tokio-tungstenite
+    , usesEmail :: Bool           -- Std.Email used → email module + reqwest
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -65,9 +66,10 @@ instance Semigroup UsedKernels where
         , usesHttp = usesHttp a || usesHttp b
         , usesTea = usesTea a || usesTea b
         , usesWsClient = usesWsClient a || usesWsClient b
+        , usesEmail = usesEmail a || usesEmail b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False False False False False False
 
 -- | Walk all expressions across all modules to detect kernel usage.
 -- Ensures we only emit the runtime stubs and Cargo deps that are actually needed.
@@ -180,6 +182,10 @@ analyzeKernelUsage = foldMap analyzeMod
               then mempty { usesRandom = True } else mempty
             , if "File" `isPrefixOf` modName || "Sky.Core.File" `isPrefixOf` modName
               then mempty { usesFile = True } else mempty
+            -- Std.Email — provider-abstract send. Pulls reqwest (Resend/SendGrid/
+            -- SES over HTTPS) + tokio (async) + serde_json (request bodies).
+            , if modName == "Email" || "Std.Email" `isSuffixOf` modName
+              then mempty { usesEmail = True } else mempty
             ]
 
 -- | Known zero-argument kernel stubs that must be called with () when referenced.
@@ -306,6 +312,15 @@ runtimeOpaqueTypes = Map.fromList
     -- bridge (aliasToRustTypeDef) emits a generic alias that absorbs the phantom
     -- `msg`: `pub type …Cfg<msg> = sky_runtime::WsServerCfg<SkyError>;`.
     , (("Sky.Http.Server.WebSocket", "WebSocketServerCfg"), "sky_runtime::WsServerCfg<SkyError>")
+    -- Std.Email: the message + attachment + config records map to runtime
+    -- structs (pub fields, camelCase verbatim) so `defaultMessage`/`with*`
+    -- record literals + updates resolve onto them; EmailProvider maps to the
+    -- runtime enum so `Resend "k"` / `Ses cfg` construct its variants directly.
+    , (("Std.Email", "EmailMessage"), "sky_runtime::EmailMessage")
+    , (("Std.Email", "Attachment"), "sky_runtime::EmailAttachment")
+    , (("Std.Email", "SesConfig"), "sky_runtime::SesConfig")
+    , (("Std.Email", "SmtpConfig"), "sky_runtime::SmtpConfig")
+    , (("Std.Email", "EmailProvider"), "sky_runtime::EmailProvider")
     ]
 
 -- | Runtime kernels whose Rust signatures are generic and need a turbofish
@@ -352,6 +367,8 @@ kernelsNeedingErrorPin = Map.fromList
     , ("http_get",                 "::<SkyError>")
     , ("http_post",                "::<SkyError>")
     , ("http_request",             "::<SkyError>")
+    -- Std.Email — email_send returns SkyTask<E, String>; pin E.
+    , ("email_send",               "::<SkyError>")
     -- Sky.Core.WebSocket client — Task-tier kernels; pin E.
     , ("web_socket_connect",          "::<SkyError>")
     , ("web_socket_connect_with",     "::<SkyError>")
@@ -1165,10 +1182,15 @@ typeToRustString recordMap t = case t of
                 Nothing -> "String"
             -- Anonymous record structs have generic type params (T0..Tn).
             -- Fill them from the TRecord's actual field types so references
-            -- like `AnonXxx<String, i64, bool>` compile correctly.
+            -- like `AnonXxx<String, i64, bool>` compile correctly. The struct
+            -- DEFINITION assigns T0..Tn to fields in `Map.toList` (alphabetical
+            -- key) order — see the anonDefs builder in buildProgram — so the
+            -- type args here MUST be ordered the same way. Using declaration
+            -- index (sortFieldsByIndex) here transposed the params whenever the
+            -- alphabetical and declared orders differed (e.g. `{ from, to,
+            -- subject }` → subject/to swapped), mis-typing every field.
             gens = if "Anon" `isPrefixOf` structName
-                   then let sorted = sortFieldsByIndex (Map.toList fields)
-                        in "<" ++ intercalate ", " [typeToRustString recordMap (Can._fieldType ft) | (_, ft) <- sorted] ++ ">"
+                   then "<" ++ intercalate ", " [typeToRustString recordMap (Can._fieldType ft) | (_, ft) <- Map.toList fields] ++ ">"
                    else ""
         in structName ++ gens
     Can.TTuple a b rest -> "(" ++ intercalate ", " (map (typeToRustString recordMap) (a:b:rest)) ++ ")"
@@ -2331,6 +2353,11 @@ solveArgType solvedMap arg = case arg of
     Ann.At _ (Can.Float _) -> "f64"
     Ann.At _ (Can.Str _)   -> "String"
     Ann.At _ (Can.Chr _)   -> "char"
+    -- A list literal is unambiguously a Vec — drives `++` to Vec-concat even
+    -- when the other operand is an opaque field access (e.g. the stdlib's
+    -- `msg.attachments ++ [ att ]` on a bridged-struct List field, where the
+    -- access side resolves to "String" and would otherwise pick format!).
+    Ann.At _ (Can.List _)  -> "Vec<_>"
     Ann.At _ (Can.VarLocal name) ->
         case Map.lookup name solvedMap of
             Just ty -> typeToRustString Map.empty ty
@@ -2811,7 +2838,7 @@ ffiPlaceholderSection b =
 -- | Entry point
 entryPointSection :: UsedKernels -> [String]
 entryPointSection uk =
-    let hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk || usesHttpServer uk
+    let hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk || usesHttpServer uk || usesEmail uk
         mainIsTask = not (usesTaskRun uk)  -- if user uses Task.run, main returns ()
     in
     [ ""
@@ -3568,9 +3595,10 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
         , ("tower-http", "{ version = \"0.5\", features = [\"fs\", \"catch-panic\"] }")
         ]
     , name `notElem` userDepNames ] ++
-    -- Sky.Core.Http client: reqwest only when used. rustls (no system OpenSSL).
+    -- Sky.Core.Http client + Std.Email: reqwest only when used. rustls (no
+    -- system OpenSSL). Either flag pulls it; emit once.
     [ "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"gzip\"] }"
-    | usesHttp uk, "reqwest" `notElem` userDepNames ] ++
+    | usesHttp uk || usesEmail uk, "reqwest" `notElem` userDepNames ] ++
     -- Sky.Core.WebSocket client: tokio-tungstenite + futures-util.
     [ name ++ " = " ++ spec
     | usesWsClient uk
@@ -3587,7 +3615,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     -- axum pulls `sync` transitively for the server case, but a plain Sky.Cli
     -- program has no axum, so request it explicitly.
     tokioFeats = ["rt", "rt-multi-thread", "macros", "time"]
-                 ++ ["net" | usesHttpServer uk || usesHttp uk || usesWsClient uk]
+                 ++ ["net" | usesHttpServer uk || usesHttp uk || usesWsClient uk || usesEmail uk]
                  ++ ["sync" | usesTea uk || usesWsClient uk]
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"

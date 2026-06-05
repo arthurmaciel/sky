@@ -1,0 +1,84 @@
+module Main exposing (main)
+
+-- 20-email: Std.Email provider-abstract send on target = rust.
+--
+-- Exercises the full builder surface + every provider variant:
+--   * defaultMessage { from, to, subject }  — anonymous-record param
+--   * withCc / withReplyTo / withTextBody / withHtmlBody  — record updates
+--   * withAttachment  — `++` on the bridged-struct `attachments` List field
+--   * Resend / SendGrid / Ses SesConfig / Smtp SmtpConfig  — the ADT variants
+--     (Ses/Smtp construct the bridged config records)
+--
+-- Runs under SKY_EMAIL_DRY_RUN=1 so no network is touched — send short-circuits
+-- to a synthetic `dry-run-<id>` for every provider.
+--
+-- Run:  SKY_EMAIL_DRY_RUN=1 sky run src/Main.sky --target rust
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error exposing (Error)
+import Std.Email as Email exposing (EmailProvider(..))
+import Std.Log exposing (println)
+
+
+-- A message exercising the builder chain incl. the attachment append.
+message : Email.EmailMessage
+message =
+    Email.defaultMessage
+        { from = "noreply@example.com"
+        , to = [ "alice@example.com", "bob@example.com" ]
+        , subject = "Hello from Sky/Rust"
+        }
+        |> Email.withCc [ "carol@example.com" ]
+        |> Email.withReplyTo "support@example.com"
+        |> Email.withTextBody "Plain-text body."
+        |> Email.withHtmlBody "<p>HTML body.</p>"
+        |> Email.withAttachment
+            { filename = "note.txt"
+            , mimeType = "text/plain"
+            , content = "attachment one"
+            }
+        |> Email.withAttachment
+            { filename = "note2.txt"
+            , mimeType = "text/plain"
+            , content = "attachment two"
+            }
+
+
+-- The four provider variants. Ses + Smtp construct the bridged config records.
+resendP : EmailProvider
+resendP =
+    Resend "re_dummy_key"
+
+
+sendgridP : EmailProvider
+sendgridP =
+    SendGrid "sg_dummy_key"
+
+
+sesP : EmailProvider
+sesP =
+    Ses { region = "us-east-1", key = "AKIA_DUMMY", secret = "shh" }
+
+
+smtpP : EmailProvider
+smtpP =
+    Smtp { host = "smtp.example.com", port = 587, user = "u", pass = "p" }
+
+
+sendOne : String -> EmailProvider -> Task Error ()
+sendOne label provider =
+    Email.send provider message
+        |> Task.andThen
+            (\id -> println ("OK -> 20-email " ++ label ++ ": " ++ id))
+        |> Task.onError
+            (\e -> println ("FAIL " ++ label ++ ": " ++ Error.toString e))
+
+
+main : Task Error ()
+main =
+    sendOne "resend" resendP
+        |> Task.andThen (\_ -> sendOne "sendgrid" sendgridP)
+        |> Task.andThen (\_ -> sendOne "ses" sesP)
+        |> Task.andThen (\_ -> sendOne "smtp" smtpP)
+        |> Task.andThen (\_ -> println "OK -> 20-email all providers sent (dry-run)")
