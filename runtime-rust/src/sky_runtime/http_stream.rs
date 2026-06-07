@@ -13,19 +13,35 @@
 //!     Sky.Http.Server handler, no TEA loop required).
 //!   * `close : StreamId -> Task Error ()` — drop the stream / release the conn.
 //!
-//! The Sub-tier `chunks` (dispatching ChunkEvent Msgs into a TEA update loop)
-//! is intentionally NOT ported here — its only consumer is Sky.Live, which is a
-//! deferred arc on the Rust backend. `open`/`forEachChunk`/`close` cover the
-//! self-contained relay use case end-to-end.
+//! The Sub-tier `chunks` (dispatching `ChunkEvent` Msgs into a TEA update loop)
+//! is ported via `sub_subscribe_stream` + the bridged `ChunkEvent` enum below —
+//! it drives a `Cli.program` (or any `cli_program`-hosted) TEA loop, the same
+//! way `ws_client`'s `onMessage` does. (The Sky.Live *web* SSE driver remains a
+//! separate deferred arc; this is the in-process Sub path.)
 //!
 //! `StreamId` stays a generated Sky enum (`StreamId Int`); these kernels only
 //! ever deal with the raw `i64` (the stdlib wraps/unwraps at the boundary).
 
 use super::*;
 use futures_util::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+/// `Sky.Core.Http.Stream.ChunkEvent` — one incremental event on a stream.
+/// Bridged (via `runtimeOpaqueTypes`) so the runtime can CONSTRUCT it to hand to
+/// the user's `toMsg : ChunkEvent -> msg` callback; user code only ever
+/// pattern-matches it. Generic over the Sky error type `E` (always `SkyError`
+/// in practice — pinned at the call site) because `Errored` carries an `Error`.
+/// Variant names match the Sky constructors verbatim so codegen's match arms
+/// (`ChunkEvent::Chunk(s)` / `::Done` / `::Errored(e)`) resolve through the
+/// `pub type` alias the bridge emits.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChunkEvent<E> {
+    Chunk(String),
+    Done,
+    Errored(E),
+}
 
 // The open response is parked here between `open` and `forEachChunk`/`close`.
 // Storing the `reqwest::Response` (rather than its byte stream) avoids naming
@@ -143,6 +159,69 @@ where
 pub fn http_stream_close<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
         client_streams().lock().unwrap().remove(&id);
+        chunk_subscribed().lock().unwrap().remove(&id);
         SkyResult::Ok(())
     })
+}
+
+// ─── Sub-tier: chunks → ChunkEvent Msgs ─────────────────────────────────────
+
+// Dedup guard: `subscriptions` is re-evaluated on every TEA `update`, so a naive
+// implementation would spawn a fresh drain per update and race over the parked
+// response. We spawn the real drain ONCE per id (the first subscribe), as a
+// DETACHED task — the SubManager's abort-on-respawn only ever hits the dummy
+// handle, never the drain. Same shape as `ws_client`'s `ws_mark_subscribed`.
+fn chunk_subscribed() -> &'static Mutex<HashSet<i64>> {
+    static R: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Sky.Core.Http.Stream.chunks → `Sub_subscribeStream`.
+///
+/// Returns a `SkySub::Source` that, on first subscribe for `id`, spawns a
+/// detached task draining the parked response and dispatching a `ChunkEvent`
+/// Msg per chunk: `Chunk s` per UTF-8 byte chunk, `Done` on clean EOF,
+/// `Errored e` on a read fault. Subscribing to an unknown / already-drained id
+/// is a no-op (matches the stdlib contract). `E` is pinned to `SkyError` at the
+/// call site; `Errored` builds it via `From<String>`.
+pub fn sub_subscribe_stream<E, M, F>(id: i64, to_msg: F) -> SkySub<M>
+where
+    E: From<String> + Send + 'static,
+    M: Send + 'static,
+    F: Fn(ChunkEvent<E>) -> M + Send + Sync + 'static,
+{
+    SkySub::Source(Box::new(move |emit| {
+        if chunk_subscribed().lock().unwrap().insert(id) {
+            tokio::spawn(async move {
+                let resp = match client_streams().lock().unwrap().remove(&id) {
+                    Some(r) => r,
+                    None => {
+                        chunk_subscribed().lock().unwrap().remove(&id);
+                        return;
+                    }
+                };
+                let mut stream = resp.bytes_stream();
+                loop {
+                    match stream.next().await {
+                        Some(Ok(bytes)) => {
+                            let chunk = String::from_utf8_lossy(&bytes).into_owned();
+                            emit(to_msg(ChunkEvent::Chunk(chunk)));
+                        }
+                        Some(Err(e)) => {
+                            emit(to_msg(ChunkEvent::Errored(
+                                format!("http.stream read: {}", e).into(),
+                            )));
+                            break;
+                        }
+                        None => {
+                            emit(to_msg(ChunkEvent::Done));
+                            break;
+                        }
+                    }
+                }
+                chunk_subscribed().lock().unwrap().remove(&id);
+            });
+        }
+        tokio::spawn(async {}) // dummy handle for the SubManager to abort harmlessly
+    }))
 }

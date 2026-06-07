@@ -312,6 +312,12 @@ runtimeOpaqueTypes = Map.fromList
     -- Sky (defaultRequest + with* updates) so its struct fields must be pub.
     , (("Sky.Core.Http", "HttpResponse"), "sky_runtime::HttpResponse")
     , (("Sky.Core.Http", "HttpRequest"), "sky_runtime::HttpRequest")
+    -- Sky.Core.Http.Stream.ChunkEvent — bridged so the runtime can CONSTRUCT it
+    -- (in sub_subscribe_stream's drain) to hand to the user's `toMsg`. Generic
+    -- (`Errored` carries Error), so the bridge emits a `pub type … =
+    -- sky_runtime::ChunkEvent<SkyError>;` alias (see unionToRustTypeDef's generic
+    -- arm); the Sky `e` var is phantom and dropped, like WsServerCfg msg.
+    , (("Sky.Core.Http.Stream", "ChunkEvent"), "sky_runtime::ChunkEvent<SkyError>")
     -- Sub-D.2: Sky.Http.Server.WebSocket. WebSocketServer is the opaque per-peer
     -- handle the stdlib pattern-matches (-> WsHandle enum, variant name matches
     -- the Sky ctor). WebSocketServerCfg -> WsServerCfg (fn-pointer callbacks),
@@ -387,6 +393,9 @@ kernelsNeedingErrorPin = Map.fromList
     , ("server_delete",            "::<SkyError, _>")
     , ("server_any",               "::<SkyError, _>")
     , ("server_api",               "::<SkyError, _>")
+    -- chunks → sub_subscribe_stream<E, M, F>: pin E=SkyError (the ChunkEvent
+    -- error slot is phantom from the call site), infer M + F.
+    , ("sub_subscribe_stream",     "::<SkyError, _, _>")
     , ("server_listen",            "::<SkyError>")
     -- Sky.Core.Http client — each returns SkyTask<E, HttpResponse>; pin E.
     , ("http_get",                 "::<SkyError>")
@@ -1117,11 +1126,22 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
         gens = if null uvars then ""
                else "<" ++ intercalate ", " uvars ++ ">"
     in case Map.lookup (skyModName, typeName) runtimeOpaqueTypes of
-        -- Registry hit: emit a `pub use sky_runtime::X as <codegenName>;` alias.
-        -- The runtime newtype IS the canonical representation; the Sky-side
-        -- placeholder constructor (e.g. `Decimal__Internal Float`) is a
-        -- phantom-shape that exists only so the Sky type has a slot.
-        Just rustPath -> RPubUseAlias codegenName rustPath
+        -- Registry hit, PLAIN path (`sky_runtime::EmailProvider`):
+        -- `pub use sky_runtime::X as <codegenName>;`. The runtime newtype IS the
+        -- canonical representation; the Sky-side placeholder constructor (e.g.
+        -- `Decimal__Internal Float`) is a phantom-shape that only reserves a slot.
+        Just rustPath
+          | '<' `notElem` rustPath -> RPubUseAlias codegenName rustPath
+        -- Registry hit, INSTANTIATED-generic path (`sky_runtime::ChunkEvent<SkyError>`):
+        -- `pub use` can't carry an instantiation, so emit a non-generic type alias
+        -- (`pub type SkyCoreHttpStreamChunkEvent = sky_runtime::ChunkEvent<SkyError>;`).
+        -- The runtime enum is generic over the error slot; the bridge pins it to
+        -- the project's SkyError so a matched `Errored e` binds the real Error.
+        -- Variant access (`<alias>::Chunk`) resolves through the alias. Mirrors
+        -- the parametric-record-alias arm in aliasToRustTypeDef. (Independent of
+        -- the Sky-side `uvars` — ChunkEvent is non-generic in Sky yet bridges to
+        -- an instantiated runtime generic.)
+          | otherwise              -> RAliasDef codegenName rustPath
         -- No registry entry: emit the regular enum/ADT (one constructor per alt).
         Nothing       -> REnumDef codegenName gens (map ctorToRust alts)
   where

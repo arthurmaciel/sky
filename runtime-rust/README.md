@@ -69,7 +69,7 @@ or `unsafe`.
 The Go backend is the reference (full surface — 54 kernel modules). Rust
 coverage, by confidence:
 
-**✅ Covered & verified** (standard-libs 131/131 + the 25 `examples/rust/*` +
+**✅ Covered & verified** (standard-libs 131/131 + the 26 `examples/rust/*` +
 the HTTP/WS/Cli regression tests):
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
   Regex, Bytes (Latin-1), Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal,
@@ -115,19 +115,24 @@ the HTTP/WS/Cli regression tests):
   (`emit` = bounded send → backpressure). StreamWriter is bridged. Verified
   e2e: chunks flush ~200ms apart, not buffered (server_stream.rs,
   `examples/rust/21-sse-server`).
-- `Sky.Core.Http.Stream` (client-side) — `open` / `forEachChunk` / `close`.
-  `open` parks the reqwest response; `forEachChunk` drains `bytes_stream()`
-  synchronously (the relay shape — usable in a plain Sky.Http.Server handler,
-  no TEA loop). The Sub-tier `chunks` is a no-op stub (its consumer is Sky.Live,
-  a deferred arc). Verified e2e via the relay (http_stream.rs,
-  `examples/rust/22-sse-relay`: `/relay` proxies `/upstream` chunk-for-chunk).
+- `Sky.Core.Http.Stream` (client-side) — `open` / `chunks` / `forEachChunk` /
+  `close`. `open` parks the reqwest response; `forEachChunk` drains
+  `bytes_stream()` synchronously (the relay shape — usable in a plain
+  Sky.Http.Server handler, no TEA loop). The **Sub-tier `chunks`** dispatches
+  `ChunkEvent` Msgs into a `Cli.program` TEA update loop: `sub_subscribe_stream`
+  returns a `SkySub::Source` that spawns ONE detached drain per id (dedup-guarded
+  so the SubManager's per-update abort-respawn only hits a dummy handle — same
+  shape as the WebSocket client's `onMessage`). `ChunkEvent` is bridged to a
+  generic `sky_runtime::ChunkEvent<SkyError>` (the first bridged *instantiated*
+  generic union — `unionToRustTypeDef` emits a `pub type` alias rather than
+  `pub use` when the registry path carries `<…>`). Verified e2e via the relay
+  (http_stream.rs, `examples/rust/22-sse-relay`) AND the Sub path
+  (`examples/rust/26-stream-cli`: `chunks=0→6` renders prove incremental,
+  non-buffered dispatch through the update loop).
 - Ffi (Rust-crate auto-FFI).
 
 **⏳ Missing — bounded & additive** (no architectural blocker; the natural next
 targets):
-- `Sky.Core.Http.Stream.chunks` (Sub-tier chunk dispatch into a TEA update
-  loop) — no-op stub on Rust; its consumer is Sky.Live (a deferred arc).
-  `forEachChunk` is the supported synchronous path.
 - PubSub (`Cmd.publish` / `publishNoEcho`, `Sub.subscribeTopic`) — couples to
   Sky.Live's broker.
 - `Io` (writeStdout/readLine beyond Log), `Process.run`, `Debug`, `Fmt` — small;
@@ -233,7 +238,7 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 25/25 build + run from a wiped slate
+### `examples/rust/` — 26/26 build + run from a wiped slate
 
 | Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
@@ -262,6 +267,7 @@ even for crates that use proc macros or derive macros.
 | 23-char | `Sky.Core.Char` | ✅ builds + runs | All 8 Char kernels — `isAlpha`/`isDigit`/`isLower`/`isUpper`, `toLower`/`toUpper` (single-rune String), and v0.16.7 #419 `toCode`/`fromCode` with out-of-range → U+FFFD. Mirrors Go's `unicode.*`. |
 | 24-http-api | `Sky.Http.Server` (`api` + `Handler` + Middleware) | ✅ builds (curl-verified) | v0.16.x #393(d) surface — `Server.api "GET /api/ping"` route, the relocated `Handler` type alias, and `Mw.withLogging`. `curl` confirms `GET /` (HTML) + `GET /api/ping` → `{"ok":true,"msg":"pong"}` 200, middleware access-logged. |
 | 25-retry | `Sky.Core.Task` (`retryWith` + `RetryPolicy`) | ✅ builds + runs | `defaultRetryPolicy |> withMaxAttempts |> withBaseMs` then `Task.retryWith policy work` → 42. Confirms the RetryPolicy<e> codegen fix at runtime; `retryWith` is run-once on Rust (SkyTask is one-shot — codegen drops the policy arg). |
+| 26-stream-cli | `Sky.Core.Http.Stream` Sub-tier (`chunks`) | ✅ builds (e2e-verified) | A `Cli.program` TEA app streaming an HTTP body into its update loop as `ChunkEvent` Msgs. `chunks=0→6` view renders prove incremental, non-buffered dispatch (vs 22-relay's synchronous `forEachChunk`). Exercises `sub_subscribe_stream` (detached dedup-guarded drain) + the bridged generic `ChunkEvent<SkyError>` enum. Run against `21-sse-server`. |
 
 ### `examples/00-standard-libs` on `target=rust`
 
@@ -773,7 +779,7 @@ Cargo builds accumulate fast. A full Rust-example sweep can produce 20+ GB of `t
 | `runtime-rust/target/` | up to ~4 GB | runtime crate's own `cargo build`/`test --features full` outputs | ~2-3 min `cargo test --features full --lib` |
 | `runtime-rust/tests/**/sky-out/Rust/target/` | varies | per-test-fixture cargo targets | per-fixture, usually <1 min |
 | `tools/sky-ffi-inspect-rs/target/` | ~600 MB | inspector cargo target (only when iterating on inspector source) | ~30 s |
-| `examples/rust/*/sky-out/Rust/target/` | 1-2 GB each | per-example cargo targets — 25 examples → up to 50 GB if all built without cleanup | ~30-60 s per example |
+| `examples/rust/*/sky-out/Rust/target/` | 1-2 GB each | per-example cargo targets — 26 examples → up to 52 GB if all built without cleanup | ~30-60 s per example |
 | `~/.cache/sky/tools/sky-ffi-inspect-rs/` | ~500 MB | TH-materialized inspector source + its built target binary | ~30 s on next `sky add --target rust` |
 | `dist-newstyle/` (cabal output) | ~200 MB | Sky compiler build artifacts | ~3-5 min full rebuild |
 

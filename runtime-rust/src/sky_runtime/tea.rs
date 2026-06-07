@@ -60,19 +60,9 @@ pub fn sub_batch<M>(list: Vec<SkySub<M>>) -> SkySub<M> { SkySub::Batch(list) }
 /// Sub.every : Int -> msg -> Sub msg — dispatch `msg` every `ms` milliseconds.
 pub fn sub_every<M>(ms: i64, msg: M) -> SkySub<M> { SkySub::Every { ms, msg } }
 
-/// Sky.Core.Http.Stream.chunks → `Sub_subscribeStream`. The Sub-tier chunk
-/// driver dispatches `ChunkEvent` Msgs into a TEA update loop — its real home is
-/// Sky.Live, which is not yet ported to the Rust backend. This stub returns an
-/// empty Sub so the module surface compiles; the synchronous
-/// `Sky.Core.Http.Stream.forEachChunk` covers the self-contained relay use case
-/// (see http_stream.rs). `C` is the ChunkEvent type (a generated Sky enum the
-/// runtime can't name); it's inferred from `to_msg` and never constructed here.
-pub fn sub_subscribe_stream<C, M, F>(_id: i64, _to_msg: F) -> SkySub<M>
-where
-    F: Fn(C) -> M,
-{
-    SkySub::None
-}
+// `Sky.Core.Http.Stream.chunks` → `Sub_subscribeStream` lives in `http_stream.rs`
+// now (alongside the stream registry it drains + the bridged `ChunkEvent` enum).
+// It returns a `SkySub::Source` driven by this module's SubManager.
 
 // ─── TEA event loop plumbing (Sub.every tickers + Cmd firing) ───────────────
 

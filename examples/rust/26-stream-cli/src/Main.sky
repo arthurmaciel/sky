@@ -1,0 +1,128 @@
+module Main exposing (main)
+
+-- 26-stream-cli: the Sub-tier `Sky.Core.Http.Stream.chunks` on target = rust.
+--
+-- A Sky.Cli TEA app that streams an HTTP response body into its update loop as
+-- `ChunkEvent` Msgs — the in-process Sub path (no Sky.Live web runtime needed).
+--   * init      → Cmd.perform (Stream.open req) Opened
+--   * subscriptions → Stream.chunks sid Chunked  (once the id is known)
+--   * update    → fold each ChunkEvent: Chunk s (count it), Done (report + exit),
+--                 Errored e (exit 1).
+--
+-- The runtime's sub_subscribe_stream spawns ONE detached drain per id (dedup
+-- guarded), surviving the SubManager's per-update abort-respawn — same shape as
+-- the WebSocket client's onMessage.
+--
+-- Verify (needs 21-sse-server running on :8000):
+--   (cd ../21-sse-server && sky run src/Main.sky --target rust) &
+--   (sleep 3) | sky run src/Main.sky --target rust
+-- Expected: OK -> 26-stream-cli: received 6 chunks then Done
+-- (5 `tick` events + 1 `done` event = 6 chunks before clean EOF.)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.String as String
+import Sky.Core.System as System
+import Sky.Core.Task as Task
+import Sky.Core.Http exposing (HttpRequest)
+import Sky.Core.Http.Stream as Stream exposing (ChunkEvent(..))
+import Std.Cli as Cli
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+import Std.Log exposing (println)
+
+
+type Msg
+    = Opened (Result Error Stream.StreamId)
+    | Chunked Stream.ChunkEvent
+    | NoOp
+
+
+type alias Model =
+    { stream : Maybe Stream.StreamId
+    , chunks : Int
+    , done : Bool
+    }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { stream = Nothing, chunks = 0, done = False }
+    , Cmd.perform (Stream.open upstreamRequest) Opened
+    )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Opened (Ok sid) ->
+            ( { model | stream = Just sid }, Cmd.none )
+
+        Opened (Err _) ->
+            ( model, Cmd.perform (System.exit 1) (\_ -> NoOp) )
+
+        Chunked event ->
+            case event of
+                Chunk _ ->
+                    ( { model | chunks = model.chunks + 1 }, Cmd.none )
+
+                Done ->
+                    let
+                        _ =
+                            println
+                                ("OK -> 26-stream-cli: received "
+                                    ++ String.fromInt model.chunks
+                                    ++ " chunks then Done"
+                                )
+                    in
+                    ( { model | done = True }
+                    , Cmd.perform (System.exit 0) (\_ -> NoOp)
+                    )
+
+                Errored _ ->
+                    ( model, Cmd.perform (System.exit 1) (\_ -> NoOp) )
+
+        NoOp ->
+            ( model, Cmd.none )
+
+
+view : Model -> String
+view model =
+    "chunks=" ++ String.fromInt model.chunks ++ "\n"
+
+
+subscriptions : Model -> Sub Msg
+subscriptions model =
+    case model.stream of
+        Just sid ->
+            Stream.chunks sid Chunked
+
+        Nothing ->
+            Sub.none
+
+
+onLine : String -> Msg
+onLine _ =
+    NoOp
+
+
+upstreamRequest : HttpRequest
+upstreamRequest =
+    { method = "GET"
+    , url = "http://127.0.0.1:8000/events"
+    , body = ""
+    , headers = []
+    , timeout = 30000
+    , followRedirects = True
+    , maxRedirects = 10
+    }
+
+
+main =
+    Cli.program
+        { init = init
+        , update = update
+        , view = view
+        , subscriptions = subscriptions
+        , onLine = onLine
+        }
+        |> Task.run
