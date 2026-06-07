@@ -7,6 +7,7 @@ pub type FormData = HashMap<String, String>;
 pub enum Html<M> {
     Element(String, Vec<Attribute<M>>, Vec<Html<M>>),
     Text(String),
+    /// Raw, un-escaped HTML — trusted pre-rendered content only; caller sanitises.
     Raw(String),
 }
 
@@ -15,6 +16,7 @@ pub enum Attribute<M> {
     Attr(String, String),
     BoolAttr(String, bool),
     Event(Event<M>),
+    /// Sentinel for a conditionally-absent attribute; skipped during render.
     NoAttr,
 }
 
@@ -44,12 +46,19 @@ impl<M> std::fmt::Debug for Attribute<M> {
         match self {
             Attribute::Attr(k, v) => write!(f, "Attr({k:?},{v:?})"),
             Attribute::BoolAttr(k, v) => write!(f, "BoolAttr({k:?},{v})"),
-            Attribute::Event(e) => write!(f, "Event({})", e.name()),
+            Attribute::Event(e) => write!(f, "{e:?}"),
             Attribute::NoAttr => write!(f, "NoAttr"),
         }
     }
 }
 
+// Structural equality only: (variant kind, event name). The message payload /
+// closure is deliberately ignored. Sky.Live's diff is structure-only — it just
+// decides whether a DOM node carries a listener of a given event name. The
+// actual handler lives server-side in the per-session handler_index, which is
+// REBUILT from the fresh view on every commit, so the diff never needs to
+// compare handlers. Comparing payloads here would cause spurious re-renders
+// (e.g. OnMsg("click", Inc) vs OnMsg("click", Dec) are equal for diff purposes).
 impl<M> PartialEq for Event<M> {
     fn eq(&self, o: &Self) -> bool {
         self.kind_name() == o.kind_name()
@@ -74,11 +83,20 @@ impl<M> Event<M> {
             Event::OnForm(n, _) => (3, n),
         }
     }
+
+    fn kind_tag(&self) -> &'static str {
+        match self {
+            Event::OnMsg(..) => "OnMsg",
+            Event::OnString(..) => "OnString",
+            Event::OnBool(..) => "OnBool",
+            Event::OnForm(..) => "OnForm",
+        }
+    }
 }
 
 impl<M> std::fmt::Debug for Event<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Event::{}({})", self.kind_name().0, self.name())
+        write!(f, "Event::{}({})", self.kind_tag(), self.name())
     }
 }
 
@@ -105,5 +123,12 @@ mod tests {
             }
             _ => panic!("expected element"),
         }
+
+        // Clone + PartialEq round-trip on an attribute holding a closure.
+        let attr: Attribute<Msg> = Attribute::Event(Event::OnMsg("click".into(), Msg::Inc));
+        assert_eq!(attr, attr.clone());
+        // Debug prints the variant name + event name, not a numeric discriminant.
+        let dbg = format!("{:?}", attr);
+        assert!(dbg.contains("OnMsg") && dbg.contains("click"), "debug was: {dbg}");
     }
 }
