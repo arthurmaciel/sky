@@ -100,12 +100,67 @@ impl<M> std::fmt::Debug for Event<M> {
     }
 }
 
+/// Stamp every Element (not Text/Raw) with a stable `sky-id` attribute derived
+/// from its path. Idempotent: an existing sky-id is overwritten with the same
+/// value. Text/Raw nodes are unaddressable (Go parity).
+pub fn assign_sky_ids<M>(node: &mut Html<M>, path: &str) {
+    if let Html::Element(_tag, attrs, kids) = node {
+        set_attr(attrs, "sky-id", path);
+        let mut idx = 0usize;
+        for child in kids.iter_mut() {
+            if let Html::Element(ctag, _, _) = child {
+                let seg = format!("{path}_{idx}_{ctag}");
+                idx += 1;
+                assign_sky_ids(child, &seg);
+            }
+        }
+    }
+}
+
+fn set_attr<M>(attrs: &mut Vec<Attribute<M>>, key: &str, val: &str) {
+    for a in attrs.iter_mut() {
+        if let Attribute::Attr(k, v) = a {
+            if k == key {
+                *v = val.to_string();
+                return;
+            }
+        }
+    }
+    attrs.push(Attribute::Attr(key.to_string(), val.to_string()));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[derive(Clone, Debug, PartialEq)]
     enum Msg {
         Inc,
+    }
+
+    #[test]
+    fn sky_ids_are_stable_and_pathed() {
+        let mut t: Html<()> = Html::Element("div".into(), vec![], vec![
+            Html::Element("span".into(), vec![], vec![Html::Text("a".into())]),
+            Html::Element("span".into(), vec![], vec![]),
+        ]);
+        assign_sky_ids(&mut t, "r");
+        let ids = collect_ids(&t);
+        assert_eq!(ids, vec!["r", "r_0_span", "r_1_span"]);
+        let mut t2 = t.clone();
+        assign_sky_ids(&mut t2, "r");
+        assert_eq!(collect_ids(&t2), ids);
+    }
+
+    fn collect_ids<M>(n: &Html<M>) -> Vec<String> {
+        let mut out = vec![];
+        fn go<M>(n: &Html<M>, out: &mut Vec<String>) {
+            if let Html::Element(_, attrs, kids) = n {
+                for a in attrs { if let Attribute::Attr(k, v) = a { if k == "sky-id" { out.push(v.clone()); } } }
+                for c in kids { go(c, out); }
+            }
+        }
+        go(n, &mut out);
+        out
     }
 
     #[test]
