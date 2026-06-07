@@ -100,6 +100,75 @@ impl<M> std::fmt::Debug for Event<M> {
     }
 }
 
+const VOID: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+];
+
+/// Render an `Html` tree to an HTML string. Text is HTML-escaped; Raw is
+/// emitted verbatim; void elements self-close with no children; event
+/// handlers emit a `data-sky-on="<space-separated event names>"` marker
+/// attribute that the browser client reads to bind listeners. Mirrors Go
+/// `renderVNode`.
+pub fn render_html<M>(node: &Html<M>) -> String {
+    let mut s = String::new();
+    render_into(node, &mut s);
+    s
+}
+
+fn render_into<M>(node: &Html<M>, s: &mut String) {
+    match node {
+        Html::Text(t) => s.push_str(&escape_text(t)),
+        Html::Raw(r) => s.push_str(r),
+        Html::Element(tag, attrs, kids) => {
+            s.push('<');
+            s.push_str(tag);
+            let mut events: Vec<&str> = vec![];
+            for a in attrs {
+                match a {
+                    Attribute::Attr(k, v) => {
+                        s.push(' ');
+                        s.push_str(k);
+                        s.push_str("=\"");
+                        s.push_str(&escape_attr(v));
+                        s.push('"');
+                    }
+                    Attribute::BoolAttr(k, true) => {
+                        s.push(' ');
+                        s.push_str(k);
+                    }
+                    Attribute::BoolAttr(_, false) | Attribute::NoAttr => {}
+                    Attribute::Event(e) => events.push(e.name()),
+                }
+            }
+            if !events.is_empty() {
+                s.push_str(" data-sky-on=\"");
+                s.push_str(&events.join(" "));
+                s.push('"');
+            }
+            if VOID.contains(&tag.as_str()) {
+                s.push('>');
+                return;
+            }
+            s.push('>');
+            for c in kids {
+                render_into(c, s);
+            }
+            s.push_str("</");
+            s.push_str(tag);
+            s.push('>');
+        }
+    }
+}
+
+fn escape_text(t: &str) -> String {
+    t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+fn escape_attr(t: &str) -> String {
+    escape_text(t).replace('"', "&quot;")
+}
+
 /// Stamp every Element (not Text/Raw) with a stable `sky-id` attribute derived
 /// from its path. Idempotent: an existing sky-id is overwritten with the same
 /// value. Text/Raw nodes are unaddressable (Go parity).
@@ -135,6 +204,35 @@ mod tests {
     #[derive(Clone, Debug, PartialEq)]
     enum Msg {
         Inc,
+    }
+
+    #[test]
+    fn render_escapes_and_emits_attrs_events_void() {
+        let t: Html<()> = Html::Element("div".into(),
+            vec![Attribute::Attr("class".into(), "x".into())],
+            vec![
+                Html::Element("input".into(),
+                    vec![Attribute::Attr("value".into(), "a<b".into()), Attribute::BoolAttr("disabled".into(), true)],
+                    vec![]),
+                Html::Text("1 < 2".into()),
+                Html::Raw("<b>ok</b>".into()),
+            ]);
+        let mut t = t; assign_sky_ids(&mut t, "r");
+        let s = render_html(&t);
+        assert!(s.contains(r#"<div class="x" sky-id="r">"#), "{s}");
+        assert!(s.contains(r#"<input value="a&lt;b" disabled sky-id="r_0_input">"#), "{s}");
+        assert!(s.contains("1 &lt; 2"));
+        assert!(s.contains("<b>ok</b>"));
+        assert!(s.contains("</div>"));
+    }
+
+    #[test]
+    fn render_emits_data_event_attr() {
+        let t: Html<()> = Html::Element("button".into(),
+            vec![Attribute::Event(Event::OnMsg("click".into(), ()))], vec![]);
+        let mut t = t; assign_sky_ids(&mut t, "r");
+        let s = render_html(&t);
+        assert!(s.contains(r#"data-sky-on="click""#), "{s}");
     }
 
     #[test]
