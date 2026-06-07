@@ -1,0 +1,46 @@
+module Main exposing (main)
+
+-- 24-http-api: the v0.16.x #393(d) Http.Server surface on target = rust.
+--
+-- Exercises the surface the upstream sync introduced / reshaped:
+--   * `Server.api "METHOD /path"` — REST/machine route (v0.16.x), with the
+--     "GET "-prefixed spec parsed into method + path by the runtime.
+--   * the `Handler` type alias, whose canonical home moved to
+--     Sky.Http.Server (v0.16.4 #393(d)) — `handlePing : Handler`.
+--   * `Sky.Http.Middleware.withLogging : Handler -> Handler`, imported with
+--     `Handler` from its new home.
+--
+-- Run + verify:
+--   sky run src/Main.sky --target rust
+--   curl -s http://localhost:8002/          -> the HTML home page
+--   curl -s http://localhost:8002/api/ping  -> {"ok":true,"msg":"pong"}
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Http.Server as Server
+import Sky.Http.Server exposing (Request, Response, Handler)
+import Sky.Http.Middleware as Mw
+import Sky.Core.Error exposing (Error)
+
+
+main : Task Error ()
+main =
+    Server.listen
+        8002
+        [ Server.get "/" handleHome
+        , Server.api "GET /api/ping" (Mw.withLogging handlePing)
+        ]
+
+
+handleHome : Request -> Task Error Response
+handleHome _ =
+    Task.succeed
+        (Server.html
+            """<h1>http-api demo (rust)</h1>
+<pre>curl -s http://localhost:8002/api/ping</pre>""")
+
+
+-- Handler-typed: the alias now lives in Sky.Http.Server (#393(d)).
+handlePing : Handler
+handlePing _ =
+    Task.succeed (Server.json """{"ok":true,"msg":"pong"}""")

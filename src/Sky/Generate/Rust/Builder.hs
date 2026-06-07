@@ -386,6 +386,7 @@ kernelsNeedingErrorPin = Map.fromList
     , ("server_put",               "::<SkyError, _>")
     , ("server_delete",            "::<SkyError, _>")
     , ("server_any",               "::<SkyError, _>")
+    , ("server_api",               "::<SkyError, _>")
     , ("server_listen",            "::<SkyError>")
     -- Sky.Core.Http client — each returns SkyTask<E, HttpResponse>; pin E.
     , ("http_get",                 "::<SkyError>")
@@ -3163,6 +3164,24 @@ kernelToRust mod name = case (mod, name) of
     ("Money", "hasRate")              -> "money_has_rate"
     ("Money", "clearRates")           -> "money_clear_rates"
     ("Money", "allocate")             -> "money_allocate"
+    -- Sky.Core.Char (8 kernels). toLower/toUpper return a single-rune String
+    -- (kernel shape Char -> String); toCode/fromCode are v0.16.7 #419.
+    ("Char", "isAlpha")          -> "char_is_alpha"
+    ("Sky.Core.Char", "isAlpha") -> "char_is_alpha"
+    ("Char", "isDigit")          -> "char_is_digit"
+    ("Sky.Core.Char", "isDigit") -> "char_is_digit"
+    ("Char", "isLower")          -> "char_is_lower"
+    ("Sky.Core.Char", "isLower") -> "char_is_lower"
+    ("Char", "isUpper")          -> "char_is_upper"
+    ("Sky.Core.Char", "isUpper") -> "char_is_upper"
+    ("Char", "toLower")          -> "char_to_lower"
+    ("Sky.Core.Char", "toLower") -> "char_to_lower"
+    ("Char", "toUpper")          -> "char_to_upper"
+    ("Sky.Core.Char", "toUpper") -> "char_to_upper"
+    ("Char", "toCode")           -> "char_to_code"
+    ("Sky.Core.Char", "toCode")  -> "char_to_code"
+    ("Char", "fromCode")         -> "char_from_code"
+    ("Sky.Core.Char", "fromCode") -> "char_from_code"
     -- sub-A.8 T3 — Sky.Core.Math (8 kernels)
     ("Math", "abs")             -> "math_abs"
     ("Sky.Core.Math", "abs")    -> "math_abs"

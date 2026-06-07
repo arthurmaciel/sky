@@ -122,6 +122,9 @@ pub use string::*;
 pub mod basics;
 pub use basics::*;
 
+pub mod char_kernel;
+pub use char_kernel::*;
+
 pub mod list;
 pub use list::*;
 

@@ -1,0 +1,44 @@
+module Main exposing (main)
+
+-- 25-retry: Task.retryWith + the RetryPolicy builder chain on target = rust.
+--
+-- Exercises the surface today's RetryPolicy<e> codegen fix unblocked:
+--   * `Task.defaultRetryPolicy` — the zero-arg parametric-record-alias builder
+--     (`: RetryPolicy e`) whose return type now correctly emits
+--     `SkyCoreTaskRetryPolicy<e>` instead of the bare name (rustc E0107).
+--   * the `with*` decorator chain (withMaxAttempts / withBaseMs), each
+--     `RetryPolicy e -> RetryPolicy e`.
+--   * `Task.retryWith : RetryPolicy e -> Task e a -> Task e a`. On the Rust
+--     backend SkyTask is one-shot (not Clone), so retryWith is run-once: the
+--     codegen drops the policy arg and threads the task through. This confirms
+--     it COMPILES and RUNS (the value flows back), not just type-checks.
+--
+-- Run:  sky run src/Main.sky --target rust
+-- Expected: OK -> 25-retry: ...
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Std.Log exposing (println)
+import Sky.Core.Error exposing (Error)
+
+
+main : Task Error ()
+main =
+    let
+        policy =
+            Task.defaultRetryPolicy
+                |> Task.withMaxAttempts 3
+                |> Task.withBaseMs 10
+
+        work =
+            Task.succeed 42
+    in
+    Task.retryWith policy work
+        |> Task.andThen
+            (\n ->
+                if n == 42 then
+                    println "OK -> 25-retry: retryWith ran the task (run-once), got 42"
+
+                else
+                    println ("FAIL -> 25-retry: got " ++ String.fromInt n))

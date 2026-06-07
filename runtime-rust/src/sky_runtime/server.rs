@@ -112,6 +112,23 @@ pub fn server_any<E, H>(path: String, h: H) -> ServerRoute
 where E: Send + 'static, H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
 { route("ANY", path, h) }
 
+/// Server.api : String -> (Request -> Task Error Response) -> Route
+///
+/// `spec` is "METHOD /path" (e.g. "POST /v1/generate"); an omitted method
+/// matches any verb. Mirrors Go's `Server_api`. The CSRF-exemption Go performs
+/// (`WithoutCsrf`) is a browser-session / double-submit concern from Sky.Live
+/// with no analogue on the Rust HTTP server, so it has no effect here.
+pub fn server_api<E, H>(spec: String, h: H) -> ServerRoute
+where E: Send + 'static, H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+{
+    let (method, path) = match spec.find(' ') {
+        Some(idx) if idx > 0 =>
+            (spec[..idx].trim().to_uppercase(), spec[idx + 1..].trim().to_string()),
+        _ => ("ANY".to_string(), spec.trim().to_string()),
+    };
+    route(&method, path, h)
+}
+
 /// Server.static : String -> String -> Route  (urlPrefix, dir)
 pub fn server_static(path: String, dir: String) -> ServerRoute {
     ServerRoute { method: "GET".to_string(), path, handler: None, static_dir: Some(dir) }

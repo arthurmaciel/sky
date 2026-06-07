@@ -1,0 +1,43 @@
+module Main exposing (main)
+
+-- 23-char: the full Sky.Core.Char kernel surface on target = rust.
+--
+-- Exercises all 8 kernels: isAlpha / isDigit / isLower / isUpper (Char -> Bool),
+-- toLower / toUpper (Char -> String, single-rune), and the v0.16.7 #419
+-- toCode / fromCode (Char <-> Int) round-trip with the out-of-range ->
+-- replacement-char contract (U+FFFD = 65533).
+--
+-- Run:  sky run src/Main.sky --target rust
+-- Expected: OK -> 23-char: ...
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Char as Char
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    let
+        allOk =
+            (Char.toCode 'A' == 65)
+                && (Char.fromCode 65 == 'A')
+                && (Char.fromCode 97 == 'a')
+                && Char.isAlpha 'A'
+                && not (Char.isAlpha '1')
+                && Char.isDigit '7'
+                && not (Char.isDigit 'A')
+                && Char.isLower 'a'
+                && not (Char.isLower 'A')
+                && Char.isUpper 'Z'
+                && not (Char.isUpper 'z')
+                && (Char.toLower 'A' == "a")
+                && (Char.toUpper 'a' == "A")
+                -- out-of-range fromCode yields U+FFFD (65533)
+                && (Char.toCode (Char.fromCode (-1)) == 65533)
+                && (Char.toCode (Char.fromCode 1114112) == 65533)
+    in
+    if allOk then
+        println "OK -> 23-char: toCode/fromCode + predicates + case (8 Char kernels)"
+
+    else
+        println "FAIL -> 23-char: a Char kernel returned the wrong value"
