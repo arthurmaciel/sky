@@ -381,6 +381,8 @@ registry = Map.fromList
     , (("Char", "isAlpha"),       KernelInfo "rt.Char_isAlpha" 1 False)
     , (("Char", "toUpper"),       KernelInfo "rt.Char_toUpper" 1 False)
     , (("Char", "toLower"),       KernelInfo "rt.Char_toLower" 1 False)
+    , (("Char", "toCode"),        KernelInfo "rt.Char_toCode" 1 False)
+    , (("Char", "fromCode"),      KernelInfo "rt.Char_fromCode" 1 False)
 
     , (("Math", "sqrt"),          KernelInfo "rt.Math_sqrt" 1 False)
     , (("Math", "pow"),           KernelInfo "rt.Math_pow" 2 False)
@@ -774,4 +776,43 @@ registry = Map.fromList
     , (("Config", "decodeYaml"),           KernelInfo "rt.Config_decodeYaml" 2 False)
     , (("Config", "decodeJson"),           KernelInfo "rt.Config_decodeJson" 2 False)
     , (("Config", "loadFromFile"),         KernelInfo "rt.Config_loadFromFile" 2 False)
+
+    -- ═══════════════════════════════════════════════════════
+    -- Hub (v0.16.4 Option B B4) — bundled console's SQLite-backed
+    -- Store. Used when the console runs IN-PROCESS with the
+    -- `sky console-serve` hub daemon. Same Sky-side shape as the
+    -- embedded console's httpStore (Main.sky) — drop-in factory.
+    --
+    -- Runtime: runtime-go/rt/hub_bridge.go declares the
+    -- HubStoreReader interface + the Hub_* kernels; the hub-side
+    -- impl lives in runtime-go/rt/hub/bridge.go and registers via
+    -- rt.SetHubStore at hub.Run startup.
+    -- ═══════════════════════════════════════════════════════
+    , (("Hub", "readOverview"),     KernelInfo "rt.Hub_readOverview" 1 False)
+    , (("Hub", "readLogs"),         KernelInfo "rt.Hub_readLogs" 2 False)
+    , (("Hub", "readMetrics"),      KernelInfo "rt.Hub_readMetrics" 1 False)
+    , (("Hub", "readTraces"),       KernelInfo "rt.Hub_readTraces" 1 False)
+    , (("Hub", "readErrors"),       KernelInfo "rt.Hub_readErrors" 1 False)
+    , (("Hub", "listServices"),     KernelInfo "rt.Hub_listServices" 1 False)
+    -- v0.16.4 B5: per-service rollup (req/s, p95, error rate +
+    -- sparkline windows). One row per distinct service_name in the
+    -- hub's hot store.  Returns List ServiceStat — narrows through
+    -- the same rt.Coerce → narrowMapToStruct path as the other
+    -- Hub_* readers.
+    , (("Hub", "readServiceStats"), KernelInfo "rt.Hub_readServiceStats" 1 False)
+    -- v0.16.4 B6: per-service drill-down kernels. Each takes the
+    -- service name as a leading String arg; an empty name means
+    -- "no filter" (all services). Used by the drill-down tab pages
+    -- (LogsTab.sky / MetricsTab.sky / TracesTab.sky / ErrorsTab.sky)
+    -- when the user picks a service from the multi-service Overview.
+    , (("Hub", "readFilteredLogs"),    KernelInfo "rt.Hub_readFilteredLogs" 3 False)
+    , (("Hub", "readFilteredMetrics"), KernelInfo "rt.Hub_readFilteredMetrics" 2 False)
+    , (("Hub", "readFilteredTraces"),  KernelInfo "rt.Hub_readFilteredTraces" 2 False)
+    , (("Hub", "readFilteredErrors"),  KernelInfo "rt.Hub_readFilteredErrors" 2 False)
+    -- v0.16.5 #493: identity-aware kernel.  Returns the currently
+    -- signed-in Std.Live.Console.Identity from the live session
+    -- (populated at session-mint time by dispatchRoot from r.Context
+    -- written by the auth gate).  Sky-side callers use this to read
+    -- `claims.tenant` and pre-filter their queries.
+    , (("Hub", "currentIdentity"),     KernelInfo "rt.Hub_currentIdentity" 1 False)
     ]

@@ -4647,7 +4647,42 @@ func Field(record any, field string) any {
 		}
 	}
 	if m, ok := record.(map[string]any); ok {
-		return m[field]
+		// v0.16.9 — restore case-insensitive map lookup so typed
+		// codegen's `rt.Field(req, "Path")` finds runtime maps keyed
+		// lowercase ("path") AND so user code via `Dict.get "path"`
+		// keeps working on capitalized maps.  The Sky.Live runtime
+		// req-map keys are lowercase for historical compatibility
+		// with apps that read via lowercase string literals (e.g.
+		// `Dict.get "path" req`); v0.16.7 #417 + v0.16.8 #423
+		// briefly broke that by capitalizing the keys.  Capitalize-
+		// only would break SkyDeploy + every existing app reading
+		// req fields via Sky's Dict.get; lowercase-only breaks
+		// typed-codegen `req.path` access.  Case-insensitive
+		// fallback closes both.
+		if v, ok := m[field]; ok {
+			return v
+		}
+		// Fast-path: try the swapped-case first char (handles the
+		// dominant "Path" ↔ "path" pair without scanning).
+		if len(field) > 0 {
+			lc := byte(0)
+			uc := byte(0)
+			if field[0] >= 'A' && field[0] <= 'Z' {
+				lc = field[0] + ('a' - 'A')
+			} else if field[0] >= 'a' && field[0] <= 'z' {
+				uc = field[0] - ('a' - 'A')
+			}
+			if lc != 0 {
+				if v, ok := m[string(lc)+field[1:]]; ok {
+					return v
+				}
+			}
+			if uc != 0 {
+				if v, ok := m[string(uc)+field[1:]]; ok {
+					return v
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -6644,6 +6679,22 @@ func Char_isAlpha(c any) any { return unicode.IsLetter(firstRune(c)) }
 func Char_toUpper(c any) any { return string(unicode.ToUpper(firstRune(c))) }
 func Char_toLower(c any) any { return string(unicode.ToLower(firstRune(c))) }
 
+// v0.16.7 #419 — Unicode code-point conversion.  toCode returns the
+// rune as an Int (Sky's only integer type); fromCode wraps an Int
+// back into a Char, clamping to the Unicode replacement character
+// when the input is out of range.
+func Char_toCode(c any) any {
+	return int(firstRune(c))
+}
+
+func Char_fromCode(n any) any {
+	r := rune(AsInt(n))
+	if r < 0 || r > 0x10FFFF {
+		return '�'
+	}
+	return r
+}
+
 // Typed companions — direct rune→bool/string, no any boxing.
 func Char_isUpperT(c rune) bool   { return unicode.IsUpper(c) }
 func Char_isLowerT(c rune) bool   { return unicode.IsLower(c) }
@@ -6651,6 +6702,14 @@ func Char_isDigitT(c rune) bool   { return unicode.IsDigit(c) }
 func Char_isAlphaT(c rune) bool   { return unicode.IsLetter(c) }
 func Char_toUpperT(c rune) string { return string(unicode.ToUpper(c)) }
 func Char_toLowerT(c rune) string { return string(unicode.ToLower(c)) }
+func Char_toCodeT(c rune) int     { return int(c) }
+func Char_fromCodeT(n int) rune {
+	r := rune(n)
+	if r < 0 || r > 0x10FFFF {
+		return '�'
+	}
+	return r
+}
 
 // ═══════════════════════════════════════════════════════════
 // Math (extended)

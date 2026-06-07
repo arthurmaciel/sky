@@ -1249,9 +1249,22 @@ typeToRustString recordMap t = case t of
             -- index (sortFieldsByIndex) here transposed the params whenever the
             -- alphabetical and declared orders differed (e.g. `{ from, to,
             -- subject }` → subject/to swapped), mis-typing every field.
-            gens = if "Anon" `isPrefixOf` structName
-                   then "<" ++ intercalate ", " [typeToRustString recordMap (Can._fieldType ft) | (_, ft) <- Map.toList fields] ++ ">"
-                   else ""
+            gens
+              | "Anon" `isPrefixOf` structName =
+                  "<" ++ intercalate ", " [typeToRustString recordMap (Can._fieldType ft) | (_, ft) <- Map.toList fields] ++ ">"
+              | structName /= "String" =
+                  -- A named record-alias struct that reached us as its EXPANDED
+                  -- TRecord form (the `TAlias` wrapper was stripped during lowering
+                  -- — happens for a zero-arg def whose annotation is a parametric
+                  -- record alias, e.g. `defaultRetryPolicy : RetryPolicy e`). The
+                  -- generic struct is `SkyCoreTaskRetryPolicy<e>`; recover its type
+                  -- args from the free type vars in the field types (e.g. `e` inside
+                  -- `shouldRetry : ShouldRetry e`). Bare name → E0107 "missing
+                  -- generics". Non-generic structs have no free TVars → bare, as before.
+                  case nub (concatMap (collectRenderedTVars . Can._fieldType . snd) (Map.toList fields)) of
+                      []  -> ""
+                      tvs -> "<" ++ intercalate ", " tvs ++ ">"
+              | otherwise = ""
         in structName ++ gens
     Can.TTuple a b rest -> "(" ++ intercalate ", " (map (typeToRustString recordMap) (a:b:rest)) ++ ")"
     Can.TVar v -> v

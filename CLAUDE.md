@@ -1,33 +1,140 @@
 # CLAUDE.md
 
-> **Quick orientation.** Sky is an Elm-family functional language compiling to
-> typed Go via a Haskell compiler (GHC 9.4.8). The current branch ships
-> v0.15.x: type-directed lowering throughout (lambdas, record-field inits,
-> list elements, call args all lower with the slot's typed Go form
-> propagated), Go generics on parametric record aliases
-> (`type Cfg_R[T1 any] struct{...}`), same-module polymorphic call
-> re-instantiation, and the wildcard-`any` soundness fix. Layer-3 stdlib
-> migration, `Ffi.kernel`, auto-TCO, `sky doc` all carry forward from
-> v0.14. The Phase B verification sweep
-> (27 examples + 120 Sky.Test assertions + 306 cabal specs) is the source
-> of truth — green-everywhere is a hard release gate.
+> **Quick orientation.** Sky is an Elm-family functional language
+> compiling to typed Go via a Haskell compiler (GHC 9.4.8). Current
+> branch is **v0.16.6 release candidate**: bundled console reads
+> `Hub_currentIdentity`, runtime tenant-prefix SQL enforcement
+> closes the multi-tenant defense-in-depth loop, two-app hub demo
+> ships at `examples/39-hub-demo`. v0.15 type-directed lowering,
+> Go generics on parametric record aliases, same-module polymorphic
+> re-instantiation, and the wildcard-`any` soundness gate all carry
+> forward as baseline. The verification sweep (39 examples +
+> Sky.Test assertions + 410+ cabal specs) is the source of truth —
+> green-everywhere is a hard release gate.
 
-## Current state
+## Current state (v0.16.6)
 
 | Surface | Status |
 |---|---|
-| **v0.15 type-directed lowering** (Stages A → F) | ✅ shipped — `Compile.hs` `globalRegionTypes` + `LowerCtx` |
-| **v0.15 Go generics on parametric record aliases** | ✅ shipped — `Cfg_R[T1 any]` + per-instance type args |
-| **v0.15 same-module polymorphic re-instantiation** | ✅ shipped — sibling refs to polymorphic annotated TypedDefs alpha-rename per call site |
-| **v0.15 wildcard-`any` soundness gate** | ✅ shipped — same-mod CForeign now gates on non-`any` freeVar |
-| Layer 3 stdlib (Sky source for every kernel module) | ✅ shipped — `sky-stdlib/{Sky/Core,Std,Sky/Http}/*.sky` |
-| `Ffi.kernel` mechanism (Sky-source bindings route to typed kernel dispatch) | ✅ shipped |
-| Auto-TCO for tail-recursive Sky functions | ✅ shipped |
-| `sky doc` (terminal + HTTP server with type-sig + Markdown + fuzzy search) | ✅ shipped |
-| `sky watch` / `sky doctor` / `sky console` / `sky upgrade-claude` | ✅ shipped |
-| Sky Console + sub-app mount + observability federation | ✅ shipped |
-| Sky.Webview v0.1 (desktop, macOS) — `Webview.app cfg` via `webview_go` | ✅ shipped — `runtime-go/rt/webview.go`, `sky-stdlib/Std/Webview.sky` |
-| 32-example sweep + 120 Sky.Test assertions + 410+ cabal specs | ✅ green |
+| Type-directed lowering + Go generics on parametric record aliases | ✅ shipped baseline (v0.15) — `Compile.hs` `globalRegionTypes` + `LowerCtx` |
+| Same-module polymorphic re-instantiation + wildcard-`any` soundness gate | ✅ shipped baseline (v0.15) |
+| Layer 3 stdlib (every kernel module surfaced as Sky source) | ✅ shipped — `sky-stdlib/{Sky/Core,Std,Sky/Http}/*.sky` |
+| `Ffi.kernel` mechanism + auto-TCO | ✅ shipped |
+| `sky doc` (terminal + HTTP server) / `sky watch` / `sky doctor` / `sky console` | ✅ shipped |
+| Sky Console embedded mode + sub-app mount + observability federation | ✅ shipped — v0.16.0 inline; v0.16.1 isolated SSE + HubExporter |
+| `sky console serve` hub (OTLP receivers + SQLite hot store) | ✅ shipped — v0.16.4 |
+| Hub UI — multi-service dashboard, drill-down tabs, SSE updates | ✅ shipped — v0.16.4-5 (`runtime-go/rt/console_app/main.go` regenerated from `sky-bundled/console/src/`) |
+| `Hub_currentIdentity` kernel + Sky.Live session identity persistence (gob round-trip) | ✅ shipped — v0.16.5 |
+| Runtime tenant-prefix SQL enforcement (`HubStoreReaderWithTenant`) | ✅ shipped — v0.16.6 |
+| Sky.Webview v0.1 (desktop, macOS) | ✅ shipped — `runtime-go/rt/webview.go`, `sky-stdlib/Std/Webview.sky` |
+| 39-example sweep + 410+ cabal specs | ✅ green |
+
+## When users ask for an app — the architecture decision matrix
+
+**You (Claude) are the front line for any user who asks "build me X
+in Sky".** Before writing more than a one-file proof of concept,
+reach alignment with the user on the six decisions below.
+Production-grade code does not survive guesswork.
+
+### The six decisions to confirm
+
+1. **App shape** — match the matrix.  Sky.Live for web UI, Sky.Http.Server
+   for headless API, Sky.Cli for one-shot / cron, Sky.Tui for terminal
+   UI, Sky.Webview for desktop.
+2. **Persistence** — SQLite (single-file, embeds) / PostgreSQL
+   (Cloud SQL) / Firestore / Redis / none.
+3. **Auth** — none / `Std.Auth` (cookies + JWT, you own users) /
+   OAuth (Google/GitHub via Go SDK) / external (Auth0 / Clerk /
+   Cognito).
+4. **Sky.Live session store** — memory (dev only) / sqlite / redis /
+   postgres / firestore. Required even when the user picks a
+   different primary DB.
+5. **Deployment target** — local binary / Docker / Cloud Run via
+   SkyDeploy / Kubernetes / VM under systemd.
+6. **Observability scope** — local logs only / per-app embedded
+   console / push to central `sky console serve` hub / OTel
+   collector (Honeycomb / Tempo / Datadog).
+
+### App shape matrix
+
+| User wants…                              | Use                | Entry point shape                  | Notes |
+|------------------------------------------|--------------------|------------------------------------|-------|
+| Web app (forms, real-time, UI state)     | **Sky.Live**       | `Std.Live.app cfg`                 | HTTP-first; SSE patches; sessions + cookies + routing built in. |
+| HTTP / JSON API (no browser UI)          | **Sky.Http.Server**| `Server.listen 8000 [...]`         | Routes + middleware (CORS / rate-limit / logging / basic-auth). |
+| Multi-tenant SaaS / dashboard            | **Sky.Live + auth-app gate** | `Live.app { consoleAuth = … }` | Pair with `sky console serve` hub for shared telemetry; tenant scope enforced at SQL layer (v0.16.6). |
+| Background job / cron worker             | **Sky.Cli**        | `main = Task.run scheduledWork`    | No UI loop; `Task.parallel` for fan-out. |
+| Terminal UI (TUI)                        | **Sky.Tui**        | `Std.Tui.app cfg`                  | Same view code as Sky.Live. |
+| One-shot CLI tool                        | **Sky.Cli**        | `main = Task.run cliCmd`           | Argparse via `System.args`. |
+| Desktop app                              | **Sky.Webview**    | `Std.Webview.app cfg`              | macOS in v0.1; Linux / Windows in v0.2. |
+| WebSocket-driven feed                    | **Sky.Http.Server.WebSocket** | `Server.upgrade req` | Bidirectional; `nhooyr.io/websocket`. |
+| Server-sent stream (LLM tokens, SSE)     | **Sky.Http.Server.Stream** | `Server.Stream.emit` | Mirror of `Sky.Core.Http.Stream`. |
+
+### Pinned defaults (always apply unless the user overrules)
+
+| Concern              | Default                                                          |
+|----------------------|------------------------------------------------------------------|
+| View layer           | `Std.Ui` (typed no-CSS DSL).  `Std.Html` only for wrapping raw markup. |
+| Auth                 | `Std.Auth` — bcrypt + HS256 JWT cookies.  Never `fmt.Sprintf("%v", secret)`. |
+| Forms with passwords | `Ui.form [Ui.onSubmit DoSignIn]` with typed record arg.  Never per-keystroke `onInput` on password. |
+| DB                   | `Std.Db` + SQLite for prototypes; PostgreSQL for multi-instance deploys. |
+| Money / decimals     | `Std.Money` on `Std.Decimal`.  Never raw `Float` for currency. |
+| Concurrency          | `Cmd.batch` / `Task.parallel`.  In-process pub/sub via `Cmd.publish` + `Sub.subscribeTopic`. |
+| Observability        | `Std.Log` structured logs; `/_sky/console` auto-mounted; `OTEL_EXPORTER_OTLP_ENDPOINT` for external collector. |
+| Errors               | `Result Error a` / `Task Error a`.  Never `String` as error type. |
+| No raw HTML / JS     | `Std.Ui` HTML-escapes everything.  `data-sky-eval` forbidden. |
+
+### `sky.toml` shape per decision
+
+```toml
+name = "<project>"
+version = "0.1.0"
+entry = "src/Main.sky"
+
+[live]                          # Sky.Live apps only
+port = 8000
+store = "sqlite"                # memory / sqlite / redis / postgres / firestore
+storePath = "sessions.db"
+ttl = "30m"
+
+[database]                      # persistence != none
+driver = "sqlite"               # sqlite / postgres
+url = "DATABASE_URL"
+
+[auth]                          # auth != none
+cookie = "sky_sid"
+ttl = "24h"
+# secret comes from SKY_AUTH_TOKEN_SECRET — never commit it
+
+[log]
+format = "json"
+level  = "info"
+```
+
+### Production gate — surface to the user
+
+Sky locks down the dev console + banner + metrics endpoint when
+`ENV` is anything other than unset / `dev` / `development` /
+`local`.  When the user mentions "deploy" / "production" / "Cloud
+Run" / "Kubernetes":
+
+* Confirm `ENV=production` will be set on the runtime.
+* Confirm `SKY_AUTH_TOKEN_SECRET` is at least 32 bytes.
+* Confirm `SKY_CONSOLE_AUTH` is set (`token` or `app`).  Production
+  with `SKY_CONSOLE_AUTH` unset emits a warn log and refuses to
+  mount `/_sky/console`.
+* Confirm session store is NOT memory when there is more than one
+  replica.
+
+### When in doubt — one focused question
+
+If the request is ambiguous, ask one focused question per
+ambiguity rather than heroically guessing.  Production-grade means
+the app survives a restart, scales horizontally without losing
+state, refuses cross-tenant reads (v0.16.6 SQL-WHERE gate),
+doesn't paint a permanent error banner on transient failures, and
+emits structured logs every operator can trace.  All of that is
+achievable with the stdlib defaults — but only if you asked the
+right six questions first.
 
 **Examples (32 total — `examples/00`-`examples/31`).** Each builds clean
 from a wiped slate (`rm -rf sky-out .skycache .skydeps && sky build`).
@@ -839,6 +946,32 @@ HTTP-first (full HTML on load, patches on events), SSE
 subscriptions, session stores (memory / sqlite / redis / postgres /
 firestore), type-safe events, VNode diffing.
 
+### init's `req` shape (v0.16.7 #417 + v0.16.8 #423)
+
+`init` receives a `req` value that carries the full request
+context:
+
+| Field | Type | Source |
+|---|---|---|
+| `req.path` | `String` | URL path |
+| `req.query` | `String` | raw `?...` (no parser yet — parse via `Sky.Core.Http.parseQuery` if needed) |
+| `req.params` | `Dict String String` | matched-route `:name` segments (#417) |
+| `req.method` | `String` | request method (#423) |
+| `req.headers` | `Dict String String` | request headers, canonical case (#423) |
+| `req.cookies` | `Dict String String` | parsed cookies (#423) |
+
+Session bootstrap in init is now a one-line read:
+
+```elm
+init req =
+    let sid = Maybe.withDefault "" (Dict.get "sky_sid" req.cookies) in
+    ( { session = lookupSession sid }, Cmd.none )
+```
+
+No `Cmd.perform /api/whoami` round-trip needed for first render.
+Apps that ignore `req` build byte-identical to the pre-v0.16.7
+shape (row-poly extension).
+
 ### Per-page `<head>` injection (v0.15.58+)
 
 Add an optional `head : Model -> List (Html msg)` field on the
@@ -1138,6 +1271,25 @@ Routes: `get/post/put/delete/any` | groups with prefix | cookies
 (HttpOnly, Secure, SameSite) | extractors: `param`, `queryParam`,
 `header`, `getCookie` | responses: `text`, `json`, `html`,
 `withStatus`, `redirect` | middleware: `Handler -> Handler`.
+
+**Handler annotation (v0.16.4+).** Named handlers ascribe at
+head position with the `Handler` alias:
+
+```elm
+import Sky.Http.Server exposing (Handler)
+
+getUser : Handler
+getUser req = ...
+```
+
+`Handler` is a transparent alias for
+`Request -> Task Error Response`, exported from
+`Sky.Http.Server`. The long-form `: Request -> Task Error Response`
+still works — pick whichever reads better at the call site. Same
+pattern works for any function-typed alias:
+`view : Renderer Msg`, `decodeUser : Decoder User`, etc. This is
+canonical Elm shape; head-position alias unfolding was closed by
+contributor PR #123.
 
 ## Sky Console + sub-app mount + observability
 
@@ -1683,6 +1835,23 @@ verified against HEAD.
     `type alias` for the whole arrow type.
 ### Closed in v0.15 (kept here for grep)
 
+- ~~Head-position type alias of a function signature dropped
+  parameters at canonicalisation~~ — closed in v0.16.4 via
+  contributor PR #123 (arthurmaciel). `arrowArgs` / `arrowResultN`
+  used to peel only `TLambda`, so `view : Renderer Msg` over
+  `type alias Renderer msg = Model -> Element msg` (canonical Elm
+  syntax) failed because the alias-reference is a nominal `TType`
+  at that point. New `unfoldHeadAlias` in
+  `Sky.Canonicalise.Module` peels a `TAlias` at the head of the
+  annotation before the split, with a visited-set guarding mutual
+  recursion. Head-only: argument / return leaf types keep their
+  nominal form, so existing typed lowering of ordinary
+  `f : Rec -> String` signatures is byte-identical.
+  `Sky.Http.Server.Handler` moved here as its canonical home
+  (was in `Sky.Http.Middleware` per v0.16.3 #464); Middleware
+  imports it from Server. AI-written code can now write
+  `myHandler : Handler` directly. Regression:
+  `Sky.Canonicalise.HeadAliasFunctionSig` (5 cases).
 - ~~Cons-pattern length-guard shared between arms (#402)~~ —
   closed in v0.15.54. The codegen previously emitted only
   `len(subj) >= 1` per cons step, so `a :: b :: c :: _` and

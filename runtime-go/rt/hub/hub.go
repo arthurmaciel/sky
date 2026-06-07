@@ -36,6 +36,15 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	rt "sky-app/rt"
+
+	// v0.16.4 Option B B7: blank import wires console_app's package
+	// init() — RegisterInlineConsoleCfgProvider — so InlineConsoleCfg()
+	// returns the bundled console's Sky.Live cfg shape. Without this
+	// import, the hub would link clean but the console mount below
+	// would silently fall through to nil cfg.
+	_ "sky-app/rt/console_app"
 )
 
 // HubConfig carries the resolved CLI + env config. Constructed by Run
@@ -131,9 +140,15 @@ func (c *HubConfig) Validate() error {
 		// permitted — operator deliberately disables auth (local
 		// dev / behind a trusted reverse proxy).
 	case "app":
-		return fmt.Errorf("hub: auth=app not implemented until Chunk 7")
+		// v0.16.4 B8: console UI gated by a Go-side callback
+		// (RegisterAppAuthCallback). OTLP receivers continue to
+		// require the bearer token — machine-to-machine push is
+		// not the surface app-auth is designed for.
+		if c.Token == "" {
+			return fmt.Errorf("hub: auth=app requires SKY_CONSOLE_HUB_TOKEN for OTLP receivers (app-mode covers the UI; receivers stay bearer)")
+		}
 	default:
-		return fmt.Errorf("hub: unknown auth mode %q (want token|off)", c.AuthMode)
+		return fmt.Errorf("hub: unknown auth mode %q (want token|off|app)", c.AuthMode)
 	}
 	if c.TLSCert != "" && c.TLSKey == "" {
 		return fmt.Errorf("hub: --tls-cert set but --tls-key missing")
@@ -148,6 +163,59 @@ func (c *HubConfig) Validate() error {
 		c.PruneInterval = DefaultPruneInterval
 	}
 	return nil
+}
+
+// buildMux constructs the hub's ServeMux: OTLP receiver routes,
+// healthz/readyz, and (when console_app's cfg provider is
+// registered) the bundled Sky.Live console at /console/ plus a
+// `/` → `/console/` redirect.
+//
+// Factored out of Run for testability — mount/redirect/route
+// regressions can exercise the mux via httptest.NewServer without
+// needing to bind a port or signal-shutdown.
+//
+// v0.16.4 Option B B7: mounts the bundled Sky.Live console as a
+// sub-app at /console/. The OTLP receiver's specific paths
+// (/v1/logs, /v1/metrics, /v1/traces) and health probes
+// (/_hub/healthz, /_hub/readyz) win Go's longest-prefix-match, so
+// the catch-all under /console/ never shadows them.
+//
+// When console_app's cfg provider isn't registered (a hand-built
+// hub without the blank import above), InlineConsoleCfg returns
+// nil — skip the mount + redirect with a stderr breadcrumb so the
+// OTLP ingest side still works headlessly.
+func buildMux(cfg HubConfig, store *Store) *http.ServeMux {
+	recv := newReceiver(cfg, store)
+	mux := http.NewServeMux()
+	recv.attach(mux)
+
+	if consoleCfg := rt.InlineConsoleCfg(); consoleCfg != nil {
+		switch cfg.AuthMode {
+		case "app":
+			// v0.16.4 B8: console gated by registered Go-side callback.
+			// Operators (SkyDeploy hub-host, etc.) wire the callback via
+			// RegisterAppAuthCallback before Run(). consoleGateApp
+			// returns 503 if no callback is registered (fail closed).
+			rt.MountLiveSubAppInProcessWithGate(mux, "/console", consoleCfg, consoleGateApp)
+		default:
+			// "off" and "token" modes mount the console open. Operators
+			// running "token" mode are expected to gate the UI behind a
+			// reverse proxy or VPN — token-mode covers OTLP only.
+			rt.MountLiveSubAppInProcess(mux, "/console", consoleCfg)
+		}
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/" {
+				http.Redirect(w, r, "/console/", http.StatusSeeOther)
+				return
+			}
+			http.NotFound(w, r)
+		})
+	} else if os.Getenv("SKY_CONSOLE_HUB_QUIET") == "" {
+		fmt.Fprintln(os.Stderr,
+			"[sky.hub] console_app cfg provider not registered — UI surface disabled; OTLP ingest remains active")
+	}
+
+	return mux
 }
 
 // Run starts the hub. Blocks until SIGINT/SIGTERM or a fatal listen
@@ -176,9 +244,15 @@ func Run(cfg HubConfig) error {
 		return fmt.Errorf("hub: open store: %w", err)
 	}
 
-	recv := newReceiver(cfg, store)
-	mux := http.NewServeMux()
-	recv.attach(mux)
+	// v0.16.4 Option B B4: register the store as the Sky-callable
+	// hub-store reader. Once registered, the bundled console's
+	// Hub_* kernels (`runtime-go/rt/hub_bridge.go`) read from THIS
+	// store instead of issuing HTTP fetches against /_sky/console.
+	// Safe to call before HTTP starts — the kernels degrade to
+	// empty payloads if no reader is registered yet.
+	rt.SetHubStore(store.AsReader())
+
+	mux := buildMux(cfg, store)
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
 	if err != nil {

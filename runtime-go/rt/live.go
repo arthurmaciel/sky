@@ -1968,9 +1968,26 @@ type liveSession struct {
 	// the dispatch path can include it in observability logs
 	// without having to thread sid through every helper signature.
 	// Populated when the session is loaded/created via getOrInit.
-	sid      string
-	model    any
-	handlers map[string]any
+	sid string
+	// identity / identityValid — v0.16.5 #493 session-identity bridge.
+	// At mint time dispatchRoot reads IdentityFromContext(r.Context())
+	// and, if a gate populated it, stashes the result here.  Kernels
+	// downstream (notably the hub's Hub_currentIdentity) read it back
+	// via SessionIdentity(sess) and use the claims to filter queries.
+	//
+	// `identityValid` is a separate bool because the zero
+	// ConsoleIdentity is ambiguous — "no gate ran" and "gate allowed
+	// an anonymous identity with empty claims" look the same on the
+	// wire. The bool disambiguates without forcing every Sky.Live app
+	// to know about Identity types.
+	//
+	// Persistence: both fields are included in storableSession so
+	// DB-backed session stores round-trip identity across restarts
+	// and replicas (sqlite / postgres / redis / firestore).
+	identity      ConsoleIdentity
+	identityValid bool
+	model         any
+	handlers      map[string]any
 	prevTree *VNode // Last rendered tree; used by the diff protocol.
 	// View-body bookkeeping for the SSE no-op suppression contract
 	// (Cycle 3 P39 / Gap C2 — split out from the historical single
@@ -2643,6 +2660,20 @@ type liveApp struct {
 	// gate in evaluateConsoleAuth). Same row-poly pattern as v0.15.58
 	// `head` field — apps that omit `consoleAuth` build byte-identical.
 	consoleAuth   any
+	// v0.16.7 #418 — onNavigate : Page -> msg — optional callback.
+	// When set, the framework dispatches the resulting Msg through
+	// `update` AFTER every URL-driven `applyRoute` call (initial
+	// mount, sky-nav click, popstate Back/Forward).  The Msg lets
+	// the app react to a route change uniformly — typically to fire
+	// a Cmd that fetches data for the new page — without having to
+	// duplicate the logic between `init` (first-load) and an
+	// explicit `Navigate` Msg arm (client-driven).
+	//
+	// nil → no Msg dispatched after route updates (the pre-v0.16.7
+	// behaviour).  Same row-poly extension pattern as `head` /
+	// `consoleAuth` — apps that omit `onNavigate` build
+	// byte-identical.
+	onNavigate    any
 	api           []apiRoute   // REST-style custom handlers alongside Live pages
 	staticDir     string       // Serves files from this directory under /static/…
 	staticURL     string       // URL mount prefix (default "/static")
@@ -2986,21 +3017,114 @@ func matchAnyRoute(app *liveApp, urlPath string) ([]string, bool) {
 }
 
 func applyRoute(app *liveApp, model any, urlPath string) any {
-	// v0.16.1 PR10-F — strip the sub-app's basePath so route patterns
-	// stay basePath-agnostic. Sub-apps declare routes like "/" or
-	// "/about" inside their own world; the parent's mux passes the
-	// full URL through. See matchAnyRoute for the parallel comment.
+	model, _ = applyRouteWithParams(app, model, urlPath)
+	return model
+}
+
+// v0.16.7 #417 — applyRouteWithParams is the params-returning variant
+// used by dispatchRoot to extend the init `req` map with a Sky-shaped
+// `params : Dict String String` keyed by the route pattern's `:name`
+// segments.  The legacy `applyRoute` thin-wrapper keeps the pre-v0.16.7
+// call-sites byte-identical for tests + sub-app re-entry paths.
+//
+// Returns the new model + the param Dict (Sky_Dict) that matched the
+// route, or `nil` when no route matched.
+func applyRouteWithParams(app *liveApp, model any, urlPath string) (any, any) {
 	urlPath = trimBasePathPrefix(urlPath, app.basePath)
 	for _, rt := range app.routes {
 		if params, ok := matchRoute(rt.path, urlPath); ok {
 			page := fillRoutePage(rt.page, params)
-			return RecordUpdate(model, map[string]any{"Page": page})
+			model := RecordUpdate(model, map[string]any{"Page": page})
+			return model, buildRouteParamsDict(rt.path, params)
 		}
 	}
 	if app.notFound != nil {
-		return RecordUpdate(model, map[string]any{"Page": app.notFound})
+		return RecordUpdate(model, map[string]any{"Page": app.notFound}),
+			buildRouteParamsDict("", nil)
 	}
-	return model
+	return model, buildRouteParamsDict("", nil)
+}
+
+// buildRouteParamsDict pairs each `:name` segment in the pattern with
+// the captured value at the same position.  Returns an empty Dict when
+// the pattern has no `:name` segments (notFound routing, exact-match
+// routes).  The Dict is the runtime representation of `Dict String
+// String` — same shape as `init`'s pre-existing `req.query` field.
+func buildRouteParamsDict(pattern string, values []string) any {
+	d := Dict_empty()
+	if pattern == "" || len(values) == 0 {
+		return d
+	}
+	names := []string{}
+	for _, seg := range splitPath(pattern) {
+		if strings.HasPrefix(seg, ":") {
+			names = append(names, strings.TrimPrefix(seg, ":"))
+		}
+	}
+	for i := range names {
+		if i >= len(values) {
+			break
+		}
+		d = Dict_insert(names[i], values[i], d)
+	}
+	return d
+}
+
+// v0.16.8 #423 — headersToDict folds an http.Header (case-canonicalised
+// by Go's net/http stack already) into a Sky `Dict String String`.  We
+// take the first value for each key — Sky-side iteration over multi-
+// valued headers is exotic enough that callers who need it can hit
+// `Live.api` or look at raw request shape from Sky.Http.Server.
+// Empty Header → empty Dict.
+func headersToDict(h http.Header) any {
+	d := Dict_empty()
+	for k, vs := range h {
+		if len(vs) == 0 {
+			continue
+		}
+		d = Dict_insert(k, vs[0], d)
+	}
+	return d
+}
+
+// v0.16.8 #423 — cookiesToDict folds a request's parsed cookies into a
+// Sky `Dict String String`.  Duplicate names take the last value to
+// match Go's net/http.Request.Cookie() lookup order.
+func cookiesToDict(cs []*http.Cookie) any {
+	d := Dict_empty()
+	for _, c := range cs {
+		if c == nil {
+			continue
+		}
+		d = Dict_insert(c.Name, c.Value, d)
+	}
+	return d
+}
+
+// v0.16.7 #418 — dispatchOnNavigate fires the optional `onNavigate :
+// Page -> msg` callback after every URL-driven `applyRoute` call.
+// Returns the new model + any cmd the resulting Msg's update produces;
+// caller batches that cmd with whatever else it has in hand.  When
+// `app.onNavigate` is nil (the default), this is a no-op pass-through.
+func dispatchOnNavigate(app *liveApp, model any) (any, any) {
+	if app.onNavigate == nil || app.update == nil {
+		return model, nil
+	}
+	page := Field(model, "Page")
+	if page == nil {
+		return model, nil
+	}
+	msg := sky_call(app.onNavigate, page)
+	if msg == nil {
+		return model, nil
+	}
+	// Sky.Live invokes update as a 2-arg function (Msg -> Model ->
+	// (Model, Cmd)).  sky_call2 mirrors the normal Msg dispatch
+	// site at line ~4322 — sky_call(sky_call(...)) panics here
+	// because the typed-codegen path packs both params into a
+	// single reflect.Call.
+	res := sky_call2(app.update, msg, model)
+	return tupleFirst(res), tupleSecond(res)
 }
 
 // matchRoute compares a pattern like `/product/:id` against an incoming
@@ -3071,6 +3195,7 @@ func liveAppRun(cfg any) any {
 		guard:         Field(cfg, "Guard"),
 		head:          Field(cfg, "Head"),
 		consoleAuth:   Field(cfg, "ConsoleAuth"),
+		onNavigate:    Field(cfg, "OnNavigate"),
 		locker:        newSessionLocker(),
 		msgTags:       make(map[string]int),
 		bannerCfg:     resolveBannerStrings(loadLiveBannerConfig(), cfg),
@@ -3248,7 +3373,20 @@ func liveAppRun(cfg any) any {
 	//      dynamically-typed map entries).
 	func() {
 		defer func() { recover() }()
-		req := map[string]any{"path": "/", "query": ""}
+		// v0.16.9 — keys are LOWERCASE for backward-compat with apps
+		// that read fields via Sky's `Dict.get "path" req` (literal
+		// lowercase strings — matched case-sensitively by Dict_get).
+		// Typed-codegen `req.path` access still works because
+		// rt.Field falls back to case-insensitive map lookup.  See
+		// the comment in Field for the full rationale.
+		req := map[string]any{
+			"path":    "/",
+			"query":   "",
+			"params":  Dict_empty(),
+			"method":  "GET",
+			"headers": Dict_empty(),
+			"cookies": Dict_empty(),
+		}
 		res := sky_call(app.init, req)
 		model := tupleFirst(res)
 		GobRegisterTypeGraph(reflect.TypeOf(model))
@@ -3502,7 +3640,33 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	if existing && sess != nil && sess.model != nil {
 		model = sess.model
 	} else {
-		req := map[string]any{"path": r.URL.Path, "query": r.URL.RawQuery}
+		// v0.16.7 #417 — extend init's `req` with `params : Dict
+		// String String`, keyed by the route pattern's `:name`
+		// segments.  No-arg page constructors can now read URL
+		// params directly from `req.params`; function-typed page
+		// constructors continue to receive them positionally via
+		// fillRoutePage.  Routes with no `:name` segments get an
+		// empty Dict (same shape as pre-v0.16.7's missing field
+		// when accessed via `Dict.get` — Maybe-typed read path).
+		_, initParams := applyRouteWithParams(app, model, r.URL.Path)
+		// v0.16.9 — keys lowercase for backward-compat with apps
+		// doing `Dict.get "path" req` (case-sensitive Dict_get
+		// kernel).  rt.Field's case-insensitive map fallback keeps
+		// typed `req.path` access working.
+		//
+		// v0.16.8 #423 — init's `req` carries `Method` + `Headers` +
+		// `Cookies` alongside #417's `Params`.  Apps bootstrap their
+		// model from a session cookie at first render via
+		// `Dict.get "sky_sid" req.cookies` — no Cmd.perform
+		// round-trip needed.
+		req := map[string]any{
+			"path":    r.URL.Path,
+			"query":   r.URL.RawQuery,
+			"params":  initParams,
+			"method":  r.Method,
+			"headers": headersToDict(r.Header),
+			"cookies": cookiesToDict(r.Cookies()),
+		}
 		res := sky_call(app.init, req)
 		model = tupleFirst(res)
 		cmd = tupleSecond(res)
@@ -3513,6 +3677,17 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 			sseCh:     make(chan sseFrame, sseChanBuffer),
 			cancelSub: make(chan struct{}),
 			done:      make(chan struct{}),
+		}
+		// v0.16.5 #493 — session-identity bridge. If the gate that
+		// preceded this handler (MountLiveSubAppInProcessWithGate's
+		// `gate` callback, e.g. hub.consoleGateApp) wrote an Identity
+		// to r.Context(), stash it on the fresh session so downstream
+		// kernels can read it via SessionIdentity / currentLiveSession.
+		// Survives encode/decode round-trips for DB-backed stores —
+		// see storableSession in live_store.go.
+		if id, ok := IdentityFromContext(r.Context()); ok {
+			sess.identity = id
+			sess.identityValid = true
 		}
 	}
 	// Always set sid — both on fresh sessions AND on resumes from
@@ -3532,6 +3707,19 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	// splice it into model.Page via RecordUpdate. Always run so the
 	// returning visitor lands on the URL they requested.
 	model = applyRoute(app, model, r.URL.Path)
+	// v0.16.7 #418 — onNavigate Msg dispatch after every URL-driven
+	// route update.  No-op when cfg.onNavigate is nil (the default).
+	// Fires on initial mount, sky-nav fetches, and popstate
+	// Back/Forward — every code path that calls applyRoute reaches
+	// here, so the app sees a uniform Msg on every route change.
+	model, navCmd := dispatchOnNavigate(app, model)
+	if navCmd != nil {
+		if cmd == nil {
+			cmd = navCmd
+		} else {
+			cmd = Cmd_batch([]any{cmd, navCmd})
+		}
+	}
 	sess.model = model
 	sess.handlers = map[string]any{}
 

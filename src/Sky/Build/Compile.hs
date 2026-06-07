@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 -- | Single-module compilation pipeline.
 -- Source → Parse → Canonicalise → (TODO: Type Check) → Generate Go
 module Sky.Build.Compile where
@@ -108,6 +109,24 @@ globalConsoleNeeded :: IORef Bool
 globalConsoleNeeded = unsafePerformIO $ newIORef False
 
 
+-- | v0.16.4 — gate for "the current `sky build` IS itself producing
+-- the inline-console source file." When True,
+-- `collectGoImports` MUST suppress the
+-- `_ "sky-app/rt/console_app"` self-import — otherwise the emitted
+-- `package main` imports its own future-package incarnation and
+-- `go build` reports an import cycle.
+--
+-- Set by reading `SKY_BUILD_IS_INLINE_CONSOLE=1` at the start of
+-- every compile (same reset cycle as `globalConsoleNeeded`). The
+-- `scripts/regenerate-console.sh` pipeline exports this env var
+-- before invoking `sky build` on `sky-bundled/console/src/Main.sky`.
+-- User-app builds never set it, so behaviour for normal Sky.Live +
+-- Sky.Http.Server projects is unchanged.
+{-# NOINLINE globalIsInlineConsoleBuild #-}
+globalIsInlineConsoleBuild :: IORef Bool
+globalIsInlineConsoleBuild = unsafePerformIO $ newIORef False
+
+
 -- | v0.13 Phase A5: entry-module source path, set once per
 -- compilation, read at call-site codegen to key into
 -- `_cg_callSiteInstances` by (path, line, col).  Set in
@@ -181,6 +200,45 @@ globalDceDisabled = unsafePerformIO $ newIORef False
 {-# NOINLINE globalAnonRecords #-}
 globalAnonRecords :: IORef (Map.Map String (Map.Map String T.FieldType))
 globalAnonRecords = unsafePerformIO $ newIORef Map.empty
+
+
+-- | v0.16.5 #492 residual — CSE-resistant IORef read for pure
+-- contexts.
+--
+-- Several pure functions in this module need to read a process-
+-- global IORef from a `let`-binding inside the function body
+-- (whole-program DCE checks against `globalReachableProgram`,
+-- per-compile flags against `globalDceDisabled`, etc.). The
+-- naïve idiom is
+--
+--     reached = unsafePerformIO (readIORef globalReachableProgram)
+--
+-- which works in a single-compile process but breaks under
+-- in-process multi-compile testing: GHC sees the same
+-- `unsafePerformIO (readIORef ...)` expression at distinct call
+-- sites + distinct invocations of the enclosing function, then
+-- floats it out and caches the result via CSE. The IORef gets
+-- written to by `continueCompile` at the start of each compile;
+-- the CSE cache means later compiles read the FIRST compile's
+-- value.
+--
+-- This helper makes the read opaque to GHC's optimiser. The
+-- {-# NOINLINE #-} pragma forbids inlining; the strict bang
+-- pattern on `ref` ensures GHC can't move evaluation; the
+-- function-call surface is no longer a sub-expression GHC can
+-- CSE across call sites.
+--
+-- Use this at every let-binding site in pure functions that
+-- reads a compile-scoped global. Replaces the residual sites
+-- documented in #492:
+--   - generateAliasForDep (globalReachableProgram, globalDceDisabled)
+--   - goPreambleParts (globalIsInlineConsoleBuild, globalConsoleNeeded)
+--   - generateUnionForDep (globalUnionNames)
+--   - record-field codegen (globalAllFieldIdx)
+--   - dep-module dispatch (globalCurrentDepModule)
+{-# NOINLINE readIORefNoCse #-}
+readIORefNoCse :: IORef a -> a
+readIORefNoCse !ref = unsafePerformIO (readIORef ref)
 
 
 -- | v0.15 Stage B — per-region HM type map for the current module.
@@ -714,6 +772,13 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
     -- The flag is OR'd True later in this function as each parsed
     -- Src.Module's imports are scanned by `noteImportsForConsoleHint`.
     writeIORef globalConsoleNeeded False
+
+    -- v0.16.4 — read the "this build IS the inline console source"
+    -- gate. The regenerate-console.sh pipeline sets
+    -- SKY_BUILD_IS_INLINE_CONSOLE=1 before invoking sky build so
+    -- collectGoImports skips the self-import.
+    inlineConsoleEnv <- System.Environment.lookupEnv "SKY_BUILD_IS_INLINE_CONSOLE"
+    writeIORef globalIsInlineConsoleBuild (inlineConsoleEnv == Just "1")
 
     -- Phase 2: Parse all modules in parallel — parsing is pure text→AST
     -- with no cross-module dependencies, so it parallelises trivially.
@@ -3002,8 +3067,8 @@ generateDeclsForDep canMod modPrefix =
         -- `main`. Empty reached set → keep everything (DCE off via
         -- `SKY_DCE=0` or pre-canon-fixpoint code path).
         canonicalModName = ModuleName.toString (Can._name canMod)
-        reached = unsafePerformIO (readIORef globalReachableProgram)
-        dceOff  = unsafePerformIO (readIORef globalDceDisabled)
+        reached = readIORefNoCse globalReachableProgram
+        dceOff  = readIORefNoCse globalDceDisabled
         keepName n =
             dceOff
             || Set.null reached
@@ -3868,10 +3933,17 @@ collectGoImports _canMod srcMod =
     -- dependency is fine (Go links the side-effect import without
     -- triggering the cycle — see runtime-go/rt/console_inline.go for
     -- the registration shim).
-    ++ ( if unsafePerformIO (readIORef globalConsoleNeeded)
-            || entryUsesConsole
-         then [ GoIr.GoImport "sky-app/rt/console_app" (Just "_") ]
-         else [] )
+    ++ ( if readIORefNoCse globalIsInlineConsoleBuild
+         then
+            -- v0.16.4 — the current build IS the inline console
+            -- source. Suppress the self-referential import; otherwise
+            -- the post-transform `package console_app` would import
+            -- itself and `go build` rejects the cycle.
+            []
+         else if readIORefNoCse globalConsoleNeeded
+                 || entryUsesConsole
+              then [ GoIr.GoImport "sky-app/rt/console_app" (Just "_") ]
+              else [] )
     ++ sideEffectImports (Src._imports srcMod)
   where
     entryUsesConsole = any importTriggersConsoleLocal (Src._imports srcMod)
@@ -6679,7 +6751,7 @@ typeStrWithAliasesReg recAliases fieldIdx tvarMap ty = case ty of
             unionRecovery
               | not (null modStr) = Nothing
               | otherwise =
-                  let allUnions = unsafePerformIO (readIORef globalUnionNames)
+                  let allUnions = readIORefNoCse globalUnionNames
                   in if Set.null allUnions
                        then Nothing
                        else if Set.member name allUnions
@@ -6874,7 +6946,7 @@ tvarsInEmitted ty = case ty of
                 (\(T.FieldType _ ft) -> tvarsInEmitted ft)
                 (Map.elems fields)
             fieldNames = Map.keys fields
-            fieldIdx = unsafePerformIO (readIORef globalAllFieldIdx)
+            fieldIdx = readIORefNoCse globalAllFieldIdx
             aliasMatch = Rec.lookupRecordAlias fieldIdx fieldNames
             syntheticForRec = case aliasMatch of
                 Just aliasName ->
@@ -7541,7 +7613,7 @@ exprToGo (A.At _ expr) = case expr of
                 | take 3 modName == "Go_"
                 , all isUnitArg args
                 , let typedName = modName ++ "_" ++ funcName ++ "T"
-                , Set.member typedName typedFfiWrapperSet ->
+                , Set.member typedName (typedFfiWrapperSet ()) ->
                     GoIr.GoCall (GoIr.GoQualified "rt" typedName) []
 
             -- P7 step 5b: migrate N-arg FFI by coercing each arg to the
@@ -7556,8 +7628,8 @@ exprToGo (A.At _ expr) = case expr of
                 , not (null args)
                 , not (all isUnitArg args)
                 , let typedName = modName ++ "_" ++ funcName ++ "T"
-                , Set.member typedName typedFfiWrapperSet
-                , Just paramTys <- Map.lookup typedName typedFfiWrapperParams
+                , Set.member typedName (typedFfiWrapperSet ())
+                , Just paramTys <- Map.lookup typedName (typedFfiWrapperParams ())
                 , length paramTys == length args ->
                     let anyWrapperName = modName ++ "_" ++ funcName
                     in GoIr.GoCall (GoIr.GoQualified "rt" typedName)
@@ -8590,19 +8662,28 @@ typedKernelLiterals = Set.fromList
     ]
 
 
--- | Snapshot of Env.ffiTypedWrapperNamesRef taken at every lookup. The
--- unsafePerformIO is fine here: the set is populated once at compile
--- start (before canonicalisation runs) and never mutated afterwards.
+-- | Snapshot of Env.ffiTypedWrapperNamesRef taken at every lookup.
+--
+-- Bug #492: this was previously a top-level CAF
+-- (`typedFfiWrapperSet :: Set.Set String`).  GHC memoised the first
+-- IORef read for the lifetime of the process; multi-compile-per-
+-- process consumers (`sky watch`, `sky lsp`, Tier 1 test infra)
+-- saw the first compile's FFI snapshot forever.  Adding the unit
+-- argument turns this into a function (GHC does NOT memoise
+-- function results across calls), and the NOINLINE pragma blocks
+-- CSE from collapsing repeated `typedFfiWrapperSet ()` calls into
+-- a shared expression.
 {-# NOINLINE typedFfiWrapperSet #-}
-typedFfiWrapperSet :: Set.Set String
-typedFfiWrapperSet = unsafePerformIO (readIORef Env.ffiTypedWrapperNamesRef)
+typedFfiWrapperSet :: () -> Set.Set String
+typedFfiWrapperSet () = unsafePerformIO (readIORef Env.ffiTypedWrapperNamesRef)
 
 
 -- | Companion snapshot of typed-wrapper param Go types, keyed by the
--- T-suffix wrapper name. See typedFfiWrapperSet for the invariant.
+-- T-suffix wrapper name.  Bug #492 fix applied: unit-arg + NOINLINE
+-- so multi-compile-per-process consumers re-read the IORef each call.
 {-# NOINLINE typedFfiWrapperParams #-}
-typedFfiWrapperParams :: Map.Map String [String]
-typedFfiWrapperParams = unsafePerformIO (readIORef Env.ffiTypedWrapperParamsRef)
+typedFfiWrapperParams :: () -> Map.Map String [String]
+typedFfiWrapperParams () = unsafePerformIO (readIORef Env.ffiTypedWrapperParamsRef)
 
 
 -- | Typed-wrapper param types that the sky-out/main.go call site can
@@ -11126,7 +11207,25 @@ defToStmts def = case def of
         -- module's version survived the flat _stEnv ambiguity
         -- collapse).
         let solved = Rec._cg_solvedTypes getCgEnv
-            curMod = unsafePerformIO (readIORef globalCurrentDepModule)
+            -- v0.16.6 #492 + v0.16.7 PR #124 (arthurmaciel) —
+            -- derive the defining module from the def's body region,
+            -- falling back to the render-order IORef hint only when
+            -- the region has no per-module ledger entry (synthetic /
+            -- monomorphised regions).  Regions are file-unique, so
+            -- region-based lookup is deterministic regardless of
+            -- thunk-forcing order.  The IORef hint is brittle on
+            -- its own: it sticks on the FIRST dep, so a later dep's
+            -- `let encodeOne x = …` reads the first dep's ambiguous
+            -- per-module entry and degrades to `func(x any)`.
+            -- Scoped to dep-rendering context (`iorefMod = Just _`)
+            -- so entry-module decls keep the existing flat-lookup
+            -- path.
+            iorefMod = unsafePerformIO (readIORef globalCurrentDepModule)
+            curMod = case iorefMod of
+                Just im -> case Solve.moduleForRegion (A.toRegion body) solved of
+                    Just rm -> Just rm
+                    Nothing -> Just im
+                Nothing -> Nothing
             scopedSolved = Solve.withCurrentModule curMod solved
             inferredTy = Solve.lookupSolvedVarScoped name scopedSolved
             (paramTys, retTy) = case inferredTy of
@@ -11319,7 +11418,7 @@ caseToGo mExpectedGo subject branches =
                 | take 3 fnName == "Go_"
                 , not (null fnName)
                 , last fnName == 'T'
-                , Set.member fnName typedFfiWrapperSet
+                , Set.member fnName (typedFfiWrapperSet ())
                 -> True
             GoIr.GoCall (GoIr.GoIdent qualName) _
                 | Just retTy <- Map.lookup qualName funcRetTypeMap

@@ -212,14 +212,22 @@ canonicaliseWithDeps deps srcMod =
         -- Register type aliases
         env4 = registerAliases tmap aliasMap env3 (Src._aliases srcMod)
 
+        -- Canonicalise aliases
+        aliases = canonicaliseAliases tmap aliasMap env4 (Src._aliases srcMod)
+
+        -- Local ∪ dependency alias bodies, keyed by (home, name).  Used to
+        -- expand an alias-typed annotation into its function shape BEFORE the
+        -- param/return split in `canonicaliseValue` (see the comment there).
+        bodyAliases = buildAliasMap
+            (Map.union
+                (Map.mapKeys (\n -> (modName, n)) aliases)
+                depAliasMap)
+
         -- Canonicalise declarations
-        decls = canonicaliseDecls tmap aliasMap env4 (Src._values srcMod)
+        decls = canonicaliseDecls bodyAliases tmap aliasMap env4 (Src._values srcMod)
 
         -- Canonicalise unions
         unions = canonicaliseUnions tmap aliasMap env4 (Src._unions srcMod)
-
-        -- Canonicalise aliases
-        aliases = canonicaliseAliases tmap aliasMap env4 (Src._aliases srcMod)
 
         -- Exports
         exports = canonicaliseExports (Src._exports srcMod)
@@ -331,7 +339,7 @@ checkImportExposingAgainstDep deps imps = concatMap check imps
         A.At _ (Src.ExposingList xs) ->
             let A.At _ segs = Src._importName imp
                 path = ModuleName.joinWith "." segs
-                isKernel = Map.member path Env.kernelModules
+                isKernel = Map.member path (Env.kernelModules ())
             in if isKernel
                 then []  -- kernel surface is defined by the registry, skip
                 else case fmap filterDepByExports (Map.lookup path deps) of
@@ -414,8 +422,8 @@ processImportWith deps _home env imp =
                      || not (null (_dep_unions dep))
             Nothing  -> False
 
-        isKernel = Map.member importPath Env.kernelModules
-        kernelName = Map.findWithDefault "" importPath Env.kernelModules
+        isKernel = Map.member importPath (Env.kernelModules ())
+        kernelName = Map.findWithDefault "" importPath (Env.kernelModules ())
 
         -- Effective binding source: FFI/dep if it exists, else kernel
         -- (if registered), else nothing. This collapses the prior
@@ -583,7 +591,7 @@ resolveExposedCtor _isKernel _kernelName (A.At _ exposed) = case exposed of
 -- | Get kernel vars for a stdlib module
 kernelVarsFor :: String -> [(String, Env.VarHome)]
 kernelVarsFor modName =
-    case Map.lookup modName kernelFunctions of
+    case Map.lookup modName (kernelFunctions ()) of
         Just funcs -> map (\f -> (f, Env.VarKernel modName f)) funcs
         Nothing -> []
 
@@ -598,8 +606,8 @@ kernelCtorsFor _ = []
 -- Merged with FFI registry entries populated by Sky.Build.Compile
 -- before canonicalisation — see Env.ffiKernelFunctionsRef.
 {-# NOINLINE kernelFunctions #-}
-kernelFunctions :: Map.Map String [String]
-kernelFunctions =
+kernelFunctions :: () -> Map.Map String [String]
+kernelFunctions () =
     Map.unionWith (++) staticKernelFunctions
         (unsafePerformIO (readIORef Env.ffiKernelFunctionsRef))
 
@@ -738,7 +746,7 @@ detectImportAliasCollisions imps =
                       Nothing    -> case segs of
                           [] -> importPath  -- defensive — parser shouldn't allow
                           _  -> last segs
-                  src = Map.findWithDefault importPath importPath Env.kernelModules
+                  src = Map.findWithDefault importPath importPath (Env.kernelModules ())
             ]
 
         -- Group entries by qualifier. Earliest-region first per group so
@@ -841,7 +849,7 @@ detectExposingCollisions deps imps =
     in Map.filter (\srcs -> length (distinct srcs) > 1)
        $ Map.map distinct byName
   where
-    canonicalSource path = Map.findWithDefault path path Env.kernelModules
+    canonicalSource path = Map.findWithDefault path path (Env.kernelModules ())
 
     contributionsFor :: Src.Import -> [(String, String)]
     contributionsFor imp =
@@ -860,8 +868,8 @@ detectExposingCollisions deps imps =
         Src.ExposedOperator _ -> []
 
     allExposedNames path =
-        let kernelName = Map.findWithDefault "" path Env.kernelModules
-            kernelFns  = Map.findWithDefault [] kernelName kernelFunctions
+        let kernelName = Map.findWithDefault "" path (Env.kernelModules ())
+            kernelFns  = Map.findWithDefault [] kernelName (kernelFunctions ())
             depFns = case fmap filterDepByExports (Map.lookup path deps) of
                 Just d  -> _dep_aliases d ++ _dep_values d
                             ++ map (\(un, _, _) -> un) (_dep_unions d)
@@ -1021,7 +1029,7 @@ collectUnboundNameErrors env srcMod =
             -- _qualVars; they're resolved via `kernelToGo`'s default
             -- `Mod_Fn` fallback. Missing kernel runtime functions
             -- get caught by the codegen validator (E4005) instead.
-            , not (Map.member q Env.kernelModules)
+            , not (Map.member q (Env.kernelModules ()))
             -- Only check qualifiers that ARE known (imported via
             -- alias / present in the _qualVars or _qualCtors map).
             -- Unknown qualifiers are handled by the canonicaliser
@@ -1051,7 +1059,7 @@ collectUnboundNameErrors env srcMod =
         -- module, not a cryptic `undefined: NotARealModule_foo`.
         knownQualifiers =
             Set.unions
-                [ Set.fromList (Map.keys Env.kernelModules)
+                [ Set.fromList (Map.keys (Env.kernelModules ()))
                 , Set.fromList (Map.keys (Env._qualVars env))
                 , Set.fromList (Map.keys (Env._qualCtors env))
                 , Set.fromList (Map.keys (Env._importAliases env))
@@ -1124,7 +1132,7 @@ collectUnboundDiagnostics path env srcMod =
             in collectQualifiedRefs shadowed body
         allQualRefs = concatMap collectQual (Src._values srcMod)
         isKnownQualifier q =
-               Map.member q Env.kernelModules
+               Map.member q (Env.kernelModules ())
             || isJust (Env.lookupImportAlias q env)
         -- Flag a qualified ref iff the qualifier IS known (so we know
         -- the user MEANS this module) BUT the qualified lookup fails.
@@ -1137,7 +1145,7 @@ collectUnboundDiagnostics path env srcMod =
                 Nothing ->
                     -- Also check the kernel module fallback the
                     -- canonicaliser uses (e.g. `Crypto.sha256`).
-                    not (Map.member q Env.kernelModules &&
+                    not (Map.member q (Env.kernelModules ()) &&
                          qualifiedExistsInKernel q n)
             ]
         mkQualDiag (q, n, reg) =
@@ -1152,7 +1160,7 @@ collectUnboundDiagnostics path env srcMod =
         -- of the rendered-string detector above; see notes there.
         knownQualifiers =
             Set.unions
-                [ Set.fromList (Map.keys Env.kernelModules)
+                [ Set.fromList (Map.keys (Env.kernelModules ()))
                 , Set.fromList (Map.keys (Env._qualVars env))
                 , Set.fromList (Map.keys (Env._qualCtors env))
                 , Set.fromList (Map.keys (Env._importAliases env))
@@ -1439,7 +1447,7 @@ isKernelImport :: Src.Import -> Bool
 isKernelImport imp =
     let segs = case Src._importName imp of A.At _ s -> s
         path = ModuleName.joinWith "." segs
-    in Map.member path Env.kernelModules
+    in Map.member path (Env.kernelModules ())
 
 
 staticKernelFunctions :: Map.Map String [String]
@@ -1640,19 +1648,21 @@ registerAliases tmap aliasMap env aliases =
 
 -- | Canonicalise all value declarations
 canonicaliseDecls
-    :: Map.Map String ModuleName.Canonical
+    :: AliasMap
+    -> Map.Map String ModuleName.Canonical
     -> Map.Map String ModuleName.Canonical
     -> Env.Env -> [A.Located Src.Value] -> Can.Decls
-canonicaliseDecls tmap aliasMap env values =
-    foldr (\v rest -> Can.Declare (canonicaliseValue tmap aliasMap env v) rest) Can.SaveTheEnvironment values
+canonicaliseDecls bodyAliases tmap aliasMap env values =
+    foldr (\v rest -> Can.Declare (canonicaliseValue bodyAliases tmap aliasMap env v) rest) Can.SaveTheEnvironment values
 
 
 -- | Canonicalise a single value declaration
 canonicaliseValue
-    :: Map.Map String ModuleName.Canonical
+    :: AliasMap
+    -> Map.Map String ModuleName.Canonical
     -> Map.Map String ModuleName.Canonical
     -> Env.Env -> A.Located Src.Value -> Can.Def
-canonicaliseValue tmap aliasMap env (A.At _ val) =
+canonicaliseValue bodyAliases tmap aliasMap env (A.At _ val) =
     let
         name = Src._valueName val
         params = Src._valuePatterns val
@@ -1674,7 +1684,20 @@ canonicaliseValue tmap aliasMap env (A.At _ val) =
         Just (A.At _ srcType) ->
             let
                 home = Env._home env
-                canType = CanType.canonicaliseTypeAnnotationWithAliases tmap aliasMap home srcType
+                canTypeRaw = CanType.canonicaliseTypeAnnotationWithAliases tmap aliasMap home srcType
+                -- Unfold an alias at the HEAD of the annotation before
+                -- splitting params from the return type.  When the whole
+                -- annotation is a type alias whose body is a function
+                -- (`f : Handler` where `type alias Handler = Request ->
+                -- Task Error Response`), the raw canonical form is a nominal
+                -- `TType` that `arrowArgs` cannot peel — so without this the
+                -- def's parameters would be dropped and the body checked
+                -- against the unpeeled alias.  Only the head is unfolded:
+                -- argument / return leaf types keep their nominal form (the
+                -- later module-level alias-expansion pass handles those), so
+                -- the typed lowering of ordinary `f : Rec -> String`
+                -- signatures is byte-for-byte unchanged.
+                canType = unfoldHeadAlias bodyAliases canTypeRaw
                 freeVars = CanType.freeTypeVars srcType
                 nPats = length canPatterns
                 typedPatterns = zip canPatterns (take nPats (arrowArgs canType))
@@ -1691,10 +1714,37 @@ canonicaliseValue tmap aliasMap env (A.At _ val) =
             Can.TypedDef name freeVars typedPatterns canBody resultType
 
 
--- | Extract argument types from a function type
+-- | Extract argument types from a function type.  Unwraps a `TAlias`
+-- head so an alias whose body is a function (`type alias Handler =
+-- Request -> Task Error Response`) contributes its parameters.
 arrowArgs :: Can.Type -> [Can.Type]
 arrowArgs (Can.TLambda from to) = from : arrowArgs to
+arrowArgs (Can.TAlias _ _ _ aliasInner) = arrowArgs (aliasBodyType aliasInner)
 arrowArgs _ = []
+
+
+-- | The underlying type carried by a `TAlias`'s filled/hoisted body.
+aliasBodyType :: Can.AliasType -> Can.Type
+aliasBodyType (Can.Filled t)  = t
+aliasBodyType (Can.Hoisted t) = t
+
+
+-- | Replace a type alias that appears AT THE HEAD of an annotation with
+-- its (substituted) body, so a function-typed alias contributes its
+-- parameters when the def is split.  Only the head is touched —
+-- argument and return leaf types are left as-is.  The visited set keys
+-- on `(home, name)` so a mutually-recursive alias chain can't loop.
+unfoldHeadAlias :: AliasMap -> Can.Type -> Can.Type
+unfoldHeadAlias amap = go Set.empty
+  where
+    go visited ty = case ty of
+        Can.TType home name args
+            | Just (rHome, Can.Alias vars body) <- lookupAlias amap home name
+            , not (Set.member (rHome, name) visited)
+            , length vars == length args ->
+                let subst = Map.fromList (zip vars args)
+                in go (Set.insert (rHome, name) visited) (substTypeVars subst body)
+        _ -> ty
 
 
 -- | Extract the result type from a function type, stripping exactly N
@@ -1703,6 +1753,7 @@ arrowArgs _ = []
 arrowResultN :: Int -> Can.Type -> Can.Type
 arrowResultN n t | n <= 0 = t
 arrowResultN n (Can.TLambda _ to) = arrowResultN (n - 1) to
+arrowResultN n (Can.TAlias _ _ _ aliasInner) = arrowResultN n (aliasBodyType aliasInner)
 arrowResultN _ t = t
 
 

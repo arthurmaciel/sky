@@ -14,267 +14,7 @@ import rt "sky-app/rt"
 
 var _ = rt.AsInt
 
-// SKY-ORIGIN: src/Main.sky:152:1
-
-func Sky_Core_String_fromInt() func(int) string {
-	return rt.Coerce[func(int) string](rt.Ffi_kernel("String_fromInt"))
-}
-
-func Sky_Core_String_fromFloat() func(float64) string {
-	return rt.Coerce[func(float64) string](rt.Ffi_kernel("String_fromFloat"))
-}
-
-func Sky_Core_String_length() func(string) int {
-	return rt.Coerce[func(string) int](rt.Ffi_kernel("String_length"))
-}
-
-func Sky_Core_String_isEmpty() func(string) bool {
-	return rt.Coerce[func(string) bool](rt.Ffi_kernel("String_isEmpty"))
-}
-
-func Sky_Core_String_contains() func(string) func(string) bool {
-	return rt.Coerce[func(string) func(string) bool](rt.Ffi_kernel("String_contains"))
-}
-
-func Sky_Core_String_toUpper() func(string) string {
-	return rt.Coerce[func(string) string](rt.Ffi_kernel("String_toUpper"))
-}
-
-func Sky_Core_String_toLower() func(string) string {
-	return rt.Coerce[func(string) string](rt.Ffi_kernel("String_toLower"))
-}
-
-func Sky_Core_String_trim() func(string) string {
-	return rt.Coerce[func(string) string](rt.Ffi_kernel("String_trim"))
-}
-
-func Sky_Core_String_join() func(string) func([]string) string {
-	return rt.Coerce[func(string) func([]string) string](rt.Ffi_kernel("String_join"))
-}
-
-func Sky_Core_String_split() func(string) func(string) []string {
-	return rt.Coerce[func(string) func(string) []string](rt.Ffi_kernel("String_split"))
-}
-
-func Sky_Core_String_slice() func(int) func(int) func(string) string {
-	return rt.Coerce[func(int) func(int) func(string) string](rt.Ffi_kernel("String_slice"))
-}
-
-type Sky_Core_Error_Error = rt.SkyADT
-
-func Sky_Core_Error_Error_Error(v0 Sky_Core_Error_ErrorKind, v1 Sky_Core_Error_ErrorInfo_R) Sky_Core_Error_Error {
-	return Sky_Core_Error_Error{Tag: 0, SkyName: "Error", Fields: []any{v0, v1}}
-}
-
-// SKY-ORIGIN: src/Main.sky:152:1
-type Sky_Core_Error_ErrorDetails = rt.SkyADT
-
-func Sky_Core_Error_ErrorDetails_FfiPanic(v0 Sky_Core_Error_PanicInfo_R) Sky_Core_Error_ErrorDetails {
-	return Sky_Core_Error_ErrorDetails{Tag: 0, SkyName: "FfiPanic", Fields: []any{v0}}
-}
-
-func Sky_Core_Error_ErrorDetails_TypeMismatch(v0 Sky_Core_Error_TypeInfo_R) Sky_Core_Error_ErrorDetails {
-	return Sky_Core_Error_ErrorDetails{Tag: 1, SkyName: "TypeMismatch", Fields: []any{v0}}
-}
-
-func Sky_Core_Error_ErrorDetails_HttpStatus(v0 int) Sky_Core_Error_ErrorDetails {
-	return Sky_Core_Error_ErrorDetails{Tag: 2, SkyName: "HttpStatus", Fields: []any{v0}}
-}
-
-func Sky_Core_Error_ErrorDetails_JsonDecode(v0 string) Sky_Core_Error_ErrorDetails {
-	return Sky_Core_Error_ErrorDetails{Tag: 3, SkyName: "JsonDecode", Fields: []any{v0}}
-}
-
-func Sky_Core_Error_ErrorDetails_Custom(v0 string) Sky_Core_Error_ErrorDetails {
-	return Sky_Core_Error_ErrorDetails{Tag: 4, SkyName: "Custom", Fields: []any{v0}}
-}
-
-// SKY-ORIGIN: src/Main.sky:152:1
-type Sky_Core_Error_ErrorKind = int
-
-const (
-	Sky_Core_Error_ErrorKind_Io Sky_Core_Error_ErrorKind = iota
-	Sky_Core_Error_ErrorKind_Network
-	Sky_Core_Error_ErrorKind_Ffi
-	Sky_Core_Error_ErrorKind_Decode
-	Sky_Core_Error_ErrorKind_Timeout
-	Sky_Core_Error_ErrorKind_NotFound
-	Sky_Core_Error_ErrorKind_PermissionDenied
-	Sky_Core_Error_ErrorKind_InvalidInput
-	Sky_Core_Error_ErrorKind_Conflict
-	Sky_Core_Error_ErrorKind_Unavailable
-	Sky_Core_Error_ErrorKind_Unexpected
-)
-
-type Sky_Core_Error_ErrorInfo_R struct {
-	Message string
-	Details rt.SkyMaybe[Sky_Core_Error_ErrorDetails]
-}
-
-// SKY-ORIGIN: src/Main.sky:152:1
-func init() { rt.RegisterGobType(Sky_Core_Error_ErrorInfo_R{}) }
-
-func Sky_Core_Error_ErrorInfo(p0 string, p1 rt.SkyMaybe[Sky_Core_Error_ErrorDetails]) Sky_Core_Error_ErrorInfo_R {
-	return Sky_Core_Error_ErrorInfo_R{Message: p0, Details: p1}
-}
-
-type Sky_Core_Error_PanicInfo_R struct {
-	Message string
-	Stack   []string
-}
-
-// SKY-ORIGIN: src/Main.sky:152:1
-func init() { rt.RegisterGobType(Sky_Core_Error_PanicInfo_R{}) }
-
-func Sky_Core_Error_PanicInfo(p0 string, p1 []string) Sky_Core_Error_PanicInfo_R {
-	return Sky_Core_Error_PanicInfo_R{Message: p0, Stack: p1}
-}
-
-type Sky_Core_Error_TypeInfo_R struct {
-	Expected string
-	Actual   string
-}
-
-// SKY-ORIGIN: src/Main.sky:152:1
-func init() { rt.RegisterGobType(Sky_Core_Error_TypeInfo_R{}) }
-
-func Sky_Core_Error_TypeInfo(p0 string, p1 string) Sky_Core_Error_TypeInfo_R {
-	return Sky_Core_Error_TypeInfo_R{Expected: p0, Actual: p1}
-}
-
-func Sky_Core_System_getenvOr() func(string) func(string) string {
-	return rt.Coerce[func(string) func(string) string](rt.Ffi_kernel("System_getenvOr"))
-}
-
-type Sky_Core_Http_HttpRequest_R struct {
-	Method          string
-	Url             string
-	Body            string
-	Headers         []rt.SkyTuple2
-	Timeout         int
-	FollowRedirects bool
-	MaxRedirects    int
-}
-
-// SKY-ORIGIN: src/Main.sky:152:1
-func init() { rt.RegisterGobType(Sky_Core_Http_HttpRequest_R{}) }
-
-func Sky_Core_Http_HttpRequest(p0 string, p1 string, p2 string, p3 []rt.SkyTuple2, p4 int, p5 bool, p6 int) Sky_Core_Http_HttpRequest_R {
-	return Sky_Core_Http_HttpRequest_R{Method: p0, Url: p1, Body: p2, Headers: p3, Timeout: p4, FollowRedirects: p5, MaxRedirects: p6}
-}
-
-type Sky_Core_Http_HttpResponse_R struct {
-	Status  int
-	Body    string
-	Headers map[string]string
-}
-
-// SKY-ORIGIN: src/Main.sky:152:1
-func init() { rt.RegisterGobType(Sky_Core_Http_HttpResponse_R{}) }
-
-func Sky_Core_Http_HttpResponse(p0 int, p1 string, p2 map[string]string) Sky_Core_Http_HttpResponse_R {
-	return Sky_Core_Http_HttpResponse_R{Status: p0, Body: p1, Headers: p2}
-}
-
-func Sky_Core_Http_get() func(string) rt.SkyTask[Sky_Core_Error_Error, Sky_Core_Http_HttpResponse_R] {
-	return rt.Coerce[func(string) rt.SkyTask[Sky_Core_Error_Error, Sky_Core_Http_HttpResponse_R]](rt.Ffi_kernel("Http_get"))
-}
-
-func Sky_Core_Json_Decode_string_() rt.SkyDecoder {
-	return rt.Coerce[rt.SkyDecoder](rt.Ffi_kernel("JsonDec_string"))
-}
-
-func Sky_Core_Json_Decode_int_() rt.SkyDecoder {
-	return rt.Coerce[rt.SkyDecoder](rt.Ffi_kernel("JsonDec_int"))
-}
-
-func Sky_Core_Json_Decode_float() rt.SkyDecoder {
-	return rt.Coerce[rt.SkyDecoder](rt.Ffi_kernel("JsonDec_float"))
-}
-
-func Sky_Core_Json_Decode_bool_() rt.SkyDecoder {
-	return rt.Coerce[rt.SkyDecoder](rt.Ffi_kernel("JsonDec_bool"))
-}
-
-func Sky_Core_Json_Decode_decodeString() func(rt.SkyDecoder) func(string) rt.SkyResult[Sky_Core_Error_Error, any] {
-	return rt.Coerce[func(rt.SkyDecoder) func(string) rt.SkyResult[Sky_Core_Error_Error, any]](rt.Ffi_kernel("JsonDec_decodeString"))
-}
-
-func Sky_Core_Json_Decode_at() func([]string) func(rt.SkyDecoder) rt.SkyDecoder {
-	return rt.Coerce[func([]string) func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_at"))
-}
-
-func Sky_Core_Json_Decode_list() func(rt.SkyDecoder) rt.SkyDecoder {
-	return rt.Coerce[func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_list"))
-}
-
-func Sky_Core_Json_Decode_map_() func(func(any) any) func(rt.SkyDecoder) rt.SkyDecoder {
-	return rt.Coerce[func(func(any) any) func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_map"))
-}
-
-func Sky_Core_Json_Decode_succeed() func(any) rt.SkyDecoder {
-	return rt.Coerce[func(any) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_succeed"))
-}
-
-func Sky_Core_Json_Decode_oneOf() func([]rt.SkyDecoder) rt.SkyDecoder {
-	return rt.Coerce[func([]rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_oneOf"))
-}
-
-func Sky_Core_Json_Decode_Pipeline_optional() func(string) func(rt.SkyDecoder) func(any) func(rt.SkyDecoder) rt.SkyDecoder {
-	return rt.Coerce[func(string) func(rt.SkyDecoder) func(any) func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDecP_optional"))
-}
-
-func Sky_Core_Json_Decode_Pipeline_custom() func(rt.SkyDecoder) func(rt.SkyDecoder) rt.SkyDecoder {
-	return rt.Coerce[func(rt.SkyDecoder) func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDecP_custom"))
-}
-
-type Sky_Core_Task_ShouldRetry = rt.SkyADT
-
-var Sky_Core_Task_ShouldRetry_RetryAlways Sky_Core_Task_ShouldRetry = Sky_Core_Task_ShouldRetry{Tag: 0, SkyName: "RetryAlways"}
-
-func Sky_Core_Task_ShouldRetry_RetryWhen(v0 any) Sky_Core_Task_ShouldRetry {
-	return Sky_Core_Task_ShouldRetry{Tag: 1, SkyName: "RetryWhen", Fields: []any{v0}}
-}
-
-// SKY-ORIGIN: src/Main.sky:152:1
-type Sky_Core_Task_RetryPolicy_R[T1 any] struct {
-	MaxAttempts int
-	BaseMs      int
-	Jitter      bool
-	Kind        int
-	ShouldRetry Sky_Core_Task_ShouldRetry
-}
-
-// SKY-ORIGIN: src/Main.sky:152:1
-func init() { rt.RegisterGobType(Sky_Core_Task_RetryPolicy_R[any]{}) }
-
-func Sky_Core_Task_RetryPolicy[T1 any](p0 int, p1 int, p2 bool, p3 int, p4 Sky_Core_Task_ShouldRetry) Sky_Core_Task_RetryPolicy_R[T1] {
-	return Sky_Core_Task_RetryPolicy_R[T1]{MaxAttempts: p0, BaseMs: p1, Jitter: p2, Kind: p3, ShouldRetry: p4}
-}
-
-func Sky_Core_Task_andThenResult() func(func(any) rt.SkyResult[Sky_Core_Error_Error, rt.SkyValue]) func(rt.SkyTask[Sky_Core_Error_Error, any]) rt.SkyTask[Sky_Core_Error_Error, rt.SkyValue] {
-	return rt.Coerce[func(func(any) rt.SkyResult[Sky_Core_Error_Error, rt.SkyValue]) func(rt.SkyTask[Sky_Core_Error_Error, any]) rt.SkyTask[Sky_Core_Error_Error, rt.SkyValue]](rt.Ffi_kernel("Task_andThenResult"))
-}
-
-func Std_Cmd_none() rt.SkyCmd {
-	return rt.Coerce[rt.SkyCmd](rt.Ffi_kernel("Cmd_none"))
-}
-
-func Std_Cmd_batch() func([]rt.SkyCmd) rt.SkyCmd {
-	return rt.Coerce[func([]rt.SkyCmd) rt.SkyCmd](rt.Ffi_kernel("Cmd_batch"))
-}
-
-func Std_Cmd_perform() func(rt.SkyTask[Sky_Core_Error_Error, rt.SkyValue]) func(func(rt.SkyResult[Sky_Core_Error_Error, rt.SkyValue]) any) rt.SkyCmd {
-	return rt.Coerce[func(rt.SkyTask[Sky_Core_Error_Error, rt.SkyValue]) func(func(rt.SkyResult[Sky_Core_Error_Error, rt.SkyValue]) any) rt.SkyCmd](rt.Ffi_kernel("Cmd_perform"))
-}
-
-func Std_Sub_none() rt.SkySub {
-	return rt.Coerce[rt.SkySub](rt.Ffi_kernel("Sub_none"))
-}
-
-func Std_Sub_every() func(int) func(any) rt.SkySub {
-	return rt.Coerce[func(int) func(any) rt.SkySub](rt.Ffi_kernel("Sub_every"))
-}
+// SKY-ORIGIN: src/Main.sky:191:1
 
 func Sky_Core_List_map_[T1 any, T2 any](fn func(T1) T2, list []T1) []T2 {
 	return func() []T2 {
@@ -397,6 +137,48 @@ func Sky_Core_List_foldl[T1 any, T2 any](fn func(T1) func(T2) T2, acc T2, list [
 	}
 }
 
+func Sky_Core_List_concatMap[T1 any, T2 any](fn func(T1) []T2, list []T1) []T2 {
+	return func() []T2 {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.AsListT[T2]([]any{})
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			x := rt.AsList(__subject)[0]
+			_ = x
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.AsListT[T2](Sky_Core_List_append_(rt.AsListAny(rt.SkyCall(fn, x)), rt.AsListAny(Sky_Core_List_concatMap(fn, rt.AsListT[T1](rest)))))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return nil
+	}()
+}
+
+func Sky_Core_List_indexedMap[T1 any, T2 any](fn func(int) func(T1) T2, list []T1) []T2 {
+	return rt.AsListT[T2](Sky_Core_List_indexedMapHelp(fn, 0, rt.AsListT[T1](list)))
+}
+
+func Sky_Core_List_indexedMapHelp[T1 any, T2 any](fn func(int) func(T1) T2, i int, list []T1) []T2 {
+	return func() []T2 {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.AsListT[T2]([]any{})
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			x := rt.AsList(__subject)[0]
+			_ = x
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.AsListT[T2](rt.List_cons(rt.SkyCall(fn, i, x), Sky_Core_List_indexedMapHelp(fn, rt.CoerceInt(rt.Add(i, 1)), rt.AsListT[T1](rest))))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return nil
+	}()
+}
+
 func Sky_Core_List_isEmpty[T1 any](list []T1) bool {
 	return func() bool {
 		__subject := list
@@ -446,6 +228,25 @@ func Sky_Core_List_head[T1 any](list []T1) rt.SkyMaybe[T1] {
 	}()
 }
 
+func Sky_Core_List_append_[T1 any](xs []T1, ys []T1) []T1 {
+	return func() []T1 {
+		__subject := xs
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.AsListT[T1](ys)
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			x := rt.AsList(__subject)[0]
+			_ = x
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.AsListT[T1](rt.List_cons(x, Sky_Core_List_append_(rt.AsListAny(rest), rt.AsListAny(ys))))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return nil
+	}()
+}
+
 func Sky_Core_List_member[T1 any](x T1, list []T1) bool {
 	for {
 		__tco_subject := list
@@ -472,6 +273,62 @@ func Sky_Core_List_member[T1 any](x T1, list []T1) bool {
 	}
 }
 
+func Sky_Core_String_fromInt() func(int) string {
+	return rt.Coerce[func(int) string](rt.Ffi_kernel("String_fromInt"))
+}
+
+func Sky_Core_String_fromFloat() func(float64) string {
+	return rt.Coerce[func(float64) string](rt.Ffi_kernel("String_fromFloat"))
+}
+
+func Sky_Core_String_length() func(string) int {
+	return rt.Coerce[func(string) int](rt.Ffi_kernel("String_length"))
+}
+
+func Sky_Core_String_isEmpty() func(string) bool {
+	return rt.Coerce[func(string) bool](rt.Ffi_kernel("String_isEmpty"))
+}
+
+func Sky_Core_String_contains() func(string) func(string) bool {
+	return rt.Coerce[func(string) func(string) bool](rt.Ffi_kernel("String_contains"))
+}
+
+func Sky_Core_String_toFloat() func(string) rt.SkyMaybe[float64] {
+	return rt.Coerce[func(string) rt.SkyMaybe[float64]](rt.Ffi_kernel("String_toFloat"))
+}
+
+func Sky_Core_String_toUpper() func(string) string {
+	return rt.Coerce[func(string) string](rt.Ffi_kernel("String_toUpper"))
+}
+
+func Sky_Core_String_toLower() func(string) string {
+	return rt.Coerce[func(string) string](rt.Ffi_kernel("String_toLower"))
+}
+
+func Sky_Core_String_trim() func(string) string {
+	return rt.Coerce[func(string) string](rt.Ffi_kernel("String_trim"))
+}
+
+func Sky_Core_String_join() func(string) func([]string) string {
+	return rt.Coerce[func(string) func([]string) string](rt.Ffi_kernel("String_join"))
+}
+
+func Sky_Core_String_split() func(string) func(string) []string {
+	return rt.Coerce[func(string) func(string) []string](rt.Ffi_kernel("String_split"))
+}
+
+func Sky_Core_String_slice() func(int) func(int) func(string) string {
+	return rt.Coerce[func(int) func(int) func(string) string](rt.Ffi_kernel("String_slice"))
+}
+
+func Sky_Core_Math_min_() func(any) func(any) any {
+	return rt.Coerce[func(any) func(any) any](rt.Ffi_kernel("Math_min"))
+}
+
+func Sky_Core_Math_max_() func(any) func(any) any {
+	return rt.Coerce[func(any) func(any) any](rt.Ffi_kernel("Math_max"))
+}
+
 type Std_Html_Attributes_Attribute = rt.SkyADT
 
 func Std_Html_Attributes_Attribute_Attr(v0 string, v1 string) Std_Html_Attributes_Attribute {
@@ -488,7 +345,7 @@ func Std_Html_Attributes_Attribute_EventAttr(v0 Std_Html_Attributes_Event) Std_H
 
 var Std_Html_Attributes_Attribute_NoAttr Std_Html_Attributes_Attribute = Std_Html_Attributes_Attribute{Tag: 3, SkyName: "NoAttr"}
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 type Std_Html_Attributes_Event = rt.SkyADT
 
 func Std_Html_Attributes_Event_OnMsg(v0 string, v1 any) Std_Html_Attributes_Event {
@@ -507,7 +364,7 @@ func Std_Html_Attributes_Event_OnRaw(v0 string, v1 any) Std_Html_Attributes_Even
 	return Std_Html_Attributes_Event{Tag: 3, SkyName: "OnRaw", Fields: []any{v0, v1}}
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 func Std_Html_Attributes_class(v string) rt.SkyAttribute {
 	return rt.Coerce[rt.SkyAttribute](Std_Html_Attributes_Attribute_Attr("class", v))
 }
@@ -590,7 +447,7 @@ func Std_Html_Html_HRaw(v0 string) Std_Html_Html {
 	return Std_Html_Html{Tag: 2, SkyName: "HRaw", Fields: []any{v0}}
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 func Std_Html_text(s string) Std_Html_Html {
 	return rt.Coerce[Std_Html_Html](Std_Html_Html_HText(s))
 }
@@ -697,7 +554,7 @@ func Std_Ui_AnimationEntry_AnimationEntry(v0 string, v1 string, v2 string, v3 bo
 	return Std_Ui_AnimationEntry{Tag: 0, SkyName: "AnimationEntry", Fields: []any{v0, v1, v2, v3}}
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 type Std_Ui_Attribute = rt.SkyADT
 
 var Std_Ui_Attribute_NoAttribute Std_Ui_Attribute = Std_Ui_Attribute{Tag: 0, SkyName: "NoAttribute"}
@@ -844,7 +701,7 @@ func Std_Ui_Attribute_AttrAnimation(v0 string, v1 string, v2 string, v3 bool) St
 	return Std_Ui_Attribute{Tag: 37, SkyName: "AttrAnimation", Fields: []any{v0, v1, v2, v3}}
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 type Std_Ui_Breakpoint = rt.SkyADT
 
 var Std_Ui_Breakpoint_SmAndUp Std_Ui_Breakpoint = Std_Ui_Breakpoint{Tag: 0, SkyName: "SmAndUp"}
@@ -877,14 +734,14 @@ func Std_Ui_Breakpoint_Custom(v0 int, v1 int) Std_Ui_Breakpoint {
 	return Std_Ui_Breakpoint{Tag: 13, SkyName: "Custom", Fields: []any{v0, v1}}
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 type Std_Ui_Color = rt.SkyADT
 
 func Std_Ui_Color_Rgba(v0 int, v1 int, v2 int, v3 float64) Std_Ui_Color {
 	return Std_Ui_Color{Tag: 0, SkyName: "Rgba", Fields: []any{v0, v1, v2, v3}}
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 type Std_Ui_Description = rt.SkyADT
 
 var Std_Ui_Description_NoDescription Std_Ui_Description = Std_Ui_Description{Tag: 0, SkyName: "NoDescription"}
@@ -913,7 +770,7 @@ var Std_Ui_Description_DescButton Std_Ui_Description = Std_Ui_Description{Tag: 9
 
 var Std_Ui_Description_DescParagraph Std_Ui_Description = Std_Ui_Description{Tag: 10, SkyName: "DescParagraph"}
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 type Std_Ui_Element = rt.SkyADT
 
 var Std_Ui_Element_Empty Std_Ui_Element = Std_Ui_Element{Tag: 0, SkyName: "Empty"}
@@ -934,7 +791,7 @@ func Std_Ui_Element_Raw(v0 any) Std_Ui_Element {
 	return Std_Ui_Element{Tag: 4, SkyName: "Raw", Fields: []any{v0}}
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 type Std_Ui_HAlign = int
 
 const (
@@ -981,7 +838,7 @@ func Std_Ui_Length_Vw(v0 int) Std_Ui_Length {
 	return Std_Ui_Length{Tag: 6, SkyName: "Vw", Fields: []any{v0}}
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 type Std_Ui_Location = int
 
 const (
@@ -1083,6 +940,10 @@ func Std_Ui_centerX() rt.SkyAttribute {
 	return rt.Coerce[rt.SkyAttribute](Std_Ui_Attribute_AttrAlignX(any(Std_Ui_HAlign_CenterX).(Std_Ui_HAlign)))
 }
 
+func Std_Ui_alignTop() rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_Attribute_AttrAlignY(any(Std_Ui_VAlign_AlignTop).(Std_Ui_VAlign)))
+}
+
 func Std_Ui_htmlAttribute(k string, v string) rt.SkyAttribute {
 	return rt.Coerce[rt.SkyAttribute](Std_Ui_Attribute_AttrAttribute(k, v))
 }
@@ -1145,6 +1006,10 @@ func Std_Ui_onInput[T1 any](cb func(string) T1) rt.SkyAttribute {
 
 func Std_Ui_input(attrs []rt.SkyAttribute) Std_Ui_Element {
 	return rt.Coerce[Std_Ui_Element](Std_Ui_Element_TaggedNode("input", any(Std_Ui_Description_NoDescription).(Std_Ui_Description), rt.AsListT[Std_Ui_Attribute](attrs), rt.AsListT[Std_Ui_Element]([]any{})))
+}
+
+func Std_Ui_html[T1 any](node T1) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_Element_Raw(node))
 }
 
 func Std_Ui_pseudoClassTag(pc Std_Ui_PseudoClass) string {
@@ -3005,6 +2870,54 @@ func Std_Ui_alignSelfY(parentCtx Std_Ui_LayoutContext, v Std_Ui_VAlign) string {
 	}()
 }
 
+func Std_Ui_Background_color(c Std_Ui_Color) rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_bgColor(any(c).(Std_Ui_Color)))
+}
+
+func Std_Ui_Border_color(c Std_Ui_Color) rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_borderColor(any(c).(Std_Ui_Color)))
+}
+
+func Std_Ui_Border_width(n int) rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_borderWidth(n))
+}
+
+func Std_Ui_Border_widthEach(r any) rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_borderWidthEach(rt.CoerceInt(rt.Field(r, "Top")), rt.CoerceInt(rt.Field(r, "Right")), rt.CoerceInt(rt.Field(r, "Bottom")), rt.CoerceInt(rt.Field(r, "Left"))))
+}
+
+func Std_Ui_Border_rounded(n int) rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_borderRounded(n))
+}
+
+func Std_Ui_Font_color(c Std_Ui_Color) rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontColor(any(c).(Std_Ui_Color)))
+}
+
+func Std_Ui_Font_size(n int) rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontSize(n))
+}
+
+func Std_Ui_Font_family(joined string) rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontFamily(joined))
+}
+
+func Std_Ui_Font_bold() rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontWeight(700))
+}
+
+func Std_Ui_Font_italic() rt.SkyAttribute {
+	return Std_Ui_fontItalic()
+}
+
+func Std_Ui_Font_letterSpacing(em float64) rt.SkyAttribute {
+	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontLetterSpacing(em))
+}
+
+func Sky_Core_Dict_get() func(any) func(map[string]any) rt.SkyMaybe[any] {
+	return rt.Coerce[func(any) func(map[string]any) rt.SkyMaybe[any]](rt.Ffi_kernel("Dict_get"))
+}
+
 type State_Msg = rt.SkyADT
 
 func State_Msg_SelectTab(v0 State_Tab) State_Msg {
@@ -3055,7 +2968,19 @@ func State_Msg_PivotToTrace(v0 string) State_Msg {
 	return State_Msg{Tag: 12, SkyName: "PivotToTrace", Fields: []any{v0}}
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+func State_Msg_SelectService(v0 string) State_Msg {
+	return State_Msg{Tag: 13, SkyName: "SelectService", Fields: []any{v0}}
+}
+
+func State_Msg_GotServiceStats(v0 rt.SkyResult[Sky_Core_Error_Error, []State_ServiceStat_R]) State_Msg {
+	return State_Msg{Tag: 14, SkyName: "GotServiceStats", Fields: []any{v0}}
+}
+
+func State_Msg_GotIdentity(v0 rt.SkyResult[Sky_Core_Error_Error, State_Identity_R]) State_Msg {
+	return State_Msg{Tag: 15, SkyName: "GotIdentity", Fields: []any{v0}}
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
 type State_Tab = int
 
 const (
@@ -3071,11 +2996,24 @@ type State_ErrorRow_R struct {
 	Message string
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 func init() { rt.RegisterGobType(State_ErrorRow_R{}) }
 
 func State_ErrorRow(p0 int, p1 string) State_ErrorRow_R {
 	return State_ErrorRow_R{Count: p0, Message: p1}
+}
+
+type State_Identity_R struct {
+	Subject string
+	Email   string
+	Claims  map[string]string
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(State_Identity_R{}) }
+
+func State_Identity(p0 string, p1 string, p2 map[string]string) State_Identity_R {
+	return State_Identity_R{Subject: p0, Email: p1, Claims: p2}
 }
 
 type State_LogEntry_R struct {
@@ -3091,7 +3029,7 @@ type State_LogEntry_R struct {
 	LatencyMs float64
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 func init() { rt.RegisterGobType(State_LogEntry_R{}) }
 
 func State_LogEntry(p0 string, p1 string, p2 string, p3 string, p4 string, p5 string, p6 string, p7 string, p8 float64, p9 float64) State_LogEntry_R {
@@ -3107,7 +3045,7 @@ type State_LogFilter_R struct {
 	ShowError bool
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 func init() { rt.RegisterGobType(State_LogFilter_R{}) }
 
 func State_LogFilter(p0 string, p1 string, p2 bool, p3 bool, p4 bool, p5 bool) State_LogFilter_R {
@@ -3123,7 +3061,7 @@ type State_MetricRow_R struct {
 	Count  float64
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 func init() { rt.RegisterGobType(State_MetricRow_R{}) }
 
 func State_MetricRow(p0 string, p1 string, p2 string, p3 float64, p4 float64, p5 float64) State_MetricRow_R {
@@ -3131,23 +3069,29 @@ func State_MetricRow(p0 string, p1 string, p2 string, p3 float64, p4 float64, p5
 }
 
 type State_Model_R struct {
-	Tab        State_Tab
-	ParentUrl  string
-	Overview   State_Overview_R
-	Logs       []State_LogEntry_R
-	Metrics    []State_MetricRow_R
-	Traces     []State_TraceRow_R
-	Errors     []State_ErrorRow_R
-	LastError  string
-	LogFilter  State_LogFilter_R
-	TraceQuery string
+	Tab             State_Tab
+	ParentUrl       string
+	HubDbPath       string
+	Store           State_Store_R
+	Overview        State_Overview_R
+	Logs            []State_LogEntry_R
+	Metrics         []State_MetricRow_R
+	Traces          []State_TraceRow_R
+	Errors          []State_ErrorRow_R
+	LastError       string
+	LogFilter       State_LogFilter_R
+	TraceQuery      string
+	SelectedService string
+	ServiceStats    []State_ServiceStat_R
+	Identity        rt.SkyMaybe[State_Identity_R]
+	TenantPrefix    string
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 func init() { rt.RegisterGobType(State_Model_R{}) }
 
-func State_Model(p0 State_Tab, p1 string, p2 State_Overview_R, p3 []State_LogEntry_R, p4 []State_MetricRow_R, p5 []State_TraceRow_R, p6 []State_ErrorRow_R, p7 string, p8 State_LogFilter_R, p9 string) State_Model_R {
-	return State_Model_R{Tab: p0, ParentUrl: p1, Overview: p2, Logs: p3, Metrics: p4, Traces: p5, Errors: p6, LastError: p7, LogFilter: p8, TraceQuery: p9}
+func State_Model(p0 State_Tab, p1 string, p2 string, p3 State_Store_R, p4 State_Overview_R, p5 []State_LogEntry_R, p6 []State_MetricRow_R, p7 []State_TraceRow_R, p8 []State_ErrorRow_R, p9 string, p10 State_LogFilter_R, p11 string, p12 string, p13 []State_ServiceStat_R, p14 rt.SkyMaybe[State_Identity_R], p15 string) State_Model_R {
+	return State_Model_R{Tab: p0, ParentUrl: p1, HubDbPath: p2, Store: p3, Overview: p4, Logs: p5, Metrics: p6, Traces: p7, Errors: p8, LastError: p9, LogFilter: p10, TraceQuery: p11, SelectedService: p12, ServiceStats: p13, Identity: p14, TenantPrefix: p15}
 }
 
 type State_Overview_R struct {
@@ -3162,11 +3106,49 @@ type State_Overview_R struct {
 	ProductionMode  bool
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 func init() { rt.RegisterGobType(State_Overview_R{}) }
 
 func State_Overview(p0 string, p1 string, p2 string, p3 int, p4 int, p5 float64, p6 int, p7 int, p8 bool) State_Overview_R {
 	return State_Overview_R{SkyVersion: p0, Commit: p1, BuiltAt: p2, UptimeSeconds: p3, RequestsTotal: p4, ErrorRate5xx: p5, BufferLogUsed: p6, BufferTraceUsed: p7, ProductionMode: p8}
+}
+
+type State_ServiceStat_R struct {
+	Name       string
+	Status     string
+	ReqsPerSec float64
+	P95Ms      float64
+	ErrorRate  float64
+	SparkRps   []float64
+	SparkP95   []float64
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(State_ServiceStat_R{}) }
+
+func State_ServiceStat(p0 string, p1 string, p2 float64, p3 float64, p4 float64, p5 []float64, p6 []float64) State_ServiceStat_R {
+	return State_ServiceStat_R{Name: p0, Status: p1, ReqsPerSec: p2, P95Ms: p3, ErrorRate: p4, SparkRps: p5, SparkP95: p6}
+}
+
+type State_Store_R struct {
+	ReadOverview        func(struct{}) rt.SkyTask[Sky_Core_Error_Error, State_Overview_R]
+	ReadLogs            func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R]
+	ReadMetrics         func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R]
+	ReadTraces          func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R]
+	ReadErrors          func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R]
+	ListServices        func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []string]
+	ReadServiceStats    func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_ServiceStat_R]
+	ReadFilteredLogs    func(string) func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R]
+	ReadFilteredMetrics func(string) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R]
+	ReadFilteredTraces  func(string) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R]
+	ReadFilteredErrors  func(string) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R]
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(State_Store_R{}) }
+
+func State_Store(p0 func(struct{}) rt.SkyTask[Sky_Core_Error_Error, State_Overview_R], p1 func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R], p2 func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R], p3 func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R], p4 func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R], p5 func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []string], p6 func(struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_ServiceStat_R], p7 func(string) func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R], p8 func(string) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R], p9 func(string) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R], p10 func(string) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R]) State_Store_R {
+	return State_Store_R{ReadOverview: p0, ReadLogs: p1, ReadMetrics: p2, ReadTraces: p3, ReadErrors: p4, ListServices: p5, ReadServiceStats: p6, ReadFilteredLogs: p7, ReadFilteredMetrics: p8, ReadFilteredTraces: p9, ReadFilteredErrors: p10}
 }
 
 type State_TraceRow_R struct {
@@ -3180,7 +3162,7 @@ type State_TraceRow_R struct {
 	Status     string
 }
 
-// SKY-ORIGIN: src/Main.sky:152:1
+// SKY-ORIGIN: src/Main.sky:191:1
 func init() { rt.RegisterGobType(State_TraceRow_R{}) }
 
 func State_TraceRow(p0 string, p1 string, p2 string, p3 string, p4 string, p5 string, p6 float64, p7 string) State_TraceRow_R {
@@ -3227,48 +3209,2442 @@ func State_mockLogs() []State_LogEntry_R {
 	return []State_LogEntry_R{State_LogEntry_R{LatencyMs: 0.0, Level: "info", Message: "Standalone mode — no parent URL configured.", ReqId: "", Route: "", SessionId: "", Status: 0.0, Subapp: "", Time: "—", UserLabel: ""}, State_LogEntry_R{LatencyMs: 0.0, Level: "info", Message: "Run from a host app to see live telemetry.", ReqId: "", Route: "", SessionId: "", Status: 0.0, Subapp: "", Time: "—", UserLabel: ""}}
 }
 
-func Std_Ui_Background_color(c Std_Ui_Color) rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_bgColor(any(c).(Std_Ui_Color)))
+func ErrorsTab_bgPage() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
 }
 
-func Std_Ui_Border_color(c Std_Ui_Color) rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_borderColor(any(c).(Std_Ui_Color)))
+func ErrorsTab_bgRaised() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
 }
 
-func Std_Ui_Border_width(n int) rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_borderWidth(n))
+func ErrorsTab_bgCode() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(44, 50, 60))
 }
 
-func Std_Ui_Border_widthEach(r any) rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_borderWidthEach(rt.CoerceInt(rt.Field(r, "Top")), rt.CoerceInt(rt.Field(r, "Right")), rt.CoerceInt(rt.Field(r, "Bottom")), rt.CoerceInt(rt.Field(r, "Left"))))
+func ErrorsTab_border_() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(53, 59, 70))
 }
 
-func Std_Ui_Border_rounded(n int) rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_borderRounded(n))
+func ErrorsTab_borderSoft() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(42, 47, 56))
 }
 
-func Std_Ui_Font_color(c Std_Ui_Color) rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontColor(any(c).(Std_Ui_Color)))
+func ErrorsTab_textPrimary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(240, 243, 247))
 }
 
-func Std_Ui_Font_size(n int) rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontSize(n))
+func ErrorsTab_textSecondary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(197, 203, 212))
 }
 
-func Std_Ui_Font_family(joined string) rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontFamily(joined))
+func ErrorsTab_textMuted() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(141, 150, 163))
 }
 
-func Std_Ui_Font_bold() rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontWeight(700))
+func ErrorsTab_accent() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(126, 182, 255))
 }
 
-func Std_Ui_Font_italic() rt.SkyAttribute {
-	return Std_Ui_fontItalic()
+func ErrorsTab_err() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(255, 117, 117))
 }
 
-func Std_Ui_Font_letterSpacing(em float64) rt.SkyAttribute {
-	return rt.Coerce[rt.SkyAttribute](Std_Ui_fontLetterSpacing(em))
+func ErrorsTab_viewErrorsTab(model State_Model_R) []Std_Ui_Element {
+	return []Std_Ui_Element{rt.Coerce[Std_Ui_Element](ErrorsTab_scopeBanner(rt.CoerceString(rt.Field(model, "SelectedService")))), rt.Coerce[Std_Ui_Element](ErrorsTab_errorsPanel(rt.AsListT[State_ErrorRow_R](rt.Field(model, "Errors"))))}
+}
+
+func ErrorsTab_scopeBanner(selected string) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		label := func() string {
+			if rt.AsBool(rt.Eq(selected, "")) {
+				return "All services"
+			} else {
+				return selected
+			}
+			return ""
+		}()
+		_ = label
+		return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(10), Std_Ui_Background_color(ErrorsTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(ErrorsTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_paddingXY(14, 10)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(11), Std_Ui_Font_color(ErrorsTab_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text("SCOPE")).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(14), Std_Ui_Font_bold(), Std_Ui_Font_color(ErrorsTab_textPrimary())}), any(Std_Ui_text(rt.CoerceString(label))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill())}), any(Std_Ui_text("")).(Std_Ui_Element)), ErrorsTab_allServicesChip(rt.CoerceBool(rt.Eq(selected, "")))}))))
+	}()
+}
+
+func ErrorsTab_allServicesChip(isActive bool) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		bg := func() Std_Ui_Color {
+			if rt.AsBool(isActive) {
+				return ErrorsTab_accent()
+			} else {
+				return ErrorsTab_bgCode()
+			}
+			return Std_Ui_Color{}
+		}()
+		_ = bg
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			fg := func() Std_Ui_Color {
+				if rt.AsBool(isActive) {
+					return ErrorsTab_bgPage()
+				} else {
+					return ErrorsTab_textSecondary()
+				}
+				return Std_Ui_Color{}
+			}()
+			_ = fg
+			return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_paddingXY(10, 6), Std_Ui_Background_color(any(bg).(Std_Ui_Color)), Std_Ui_Border_rounded(4), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_SelectService(""))), Std_Ui_Font_color(any(fg).(Std_Ui_Color)), Std_Ui_Font_size(12), Std_Ui_Font_bold()}), any(Std_Ui_text("All services")).(Std_Ui_Element))))
+		}())
+	}()
+}
+
+func ErrorsTab_errorsPanel(rows []State_ErrorRow_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](ErrorsTab_panel("Top errors by frequency", rt.AsListT[Std_Ui_Element](func() any {
+		if rt.AsBool(Sky_Core_List_isEmpty__ErrorRow(rt.AsListT[State_ErrorRow_R](rows))) {
+			return []any{ErrorsTab_emptyState("No errors for this service — nice work.")}
+		} else {
+			return Sky_Core_List_map_(ErrorsTab_errorRowView, rt.AsListT[State_ErrorRow_R](rows))
+		}
+		return nil
+	}())))
+}
+
+func ErrorsTab_errorRowView(r State_ErrorRow_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_paddingXY(0, 6), Std_Ui_spacing(12), Std_Ui_Border_widthEach(struct {
+		Bottom any
+		Left   any
+		Right  any
+		Top    any
+	}{Bottom: 1, Left: 0, Right: 0, Top: 0}), Std_Ui_Border_color(ErrorsTab_borderSoft())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(60)).(Std_Ui_Length)), Std_Ui_Font_color(ErrorsTab_err()), Std_Ui_Font_bold(), Std_Ui_Font_size(13), Std_Ui_Font_family("ui-monospace, Menlo, monospace")}), any(Std_Ui_text(rt.CoerceString(rt.Concat("×", rt.String_fromIntT(rt.AsInt(r.Count)))))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(13), Std_Ui_Font_color(ErrorsTab_textPrimary())}), any(Std_Ui_text(rt.CoerceString(r.Message))).(Std_Ui_Element))})))
+}
+
+func ErrorsTab_panel(title string, children []Std_Ui_Element) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(ErrorsTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(ErrorsTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(14), Std_Ui_spacing(6), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element](rt.List_cons(Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(12), Std_Ui_Font_bold(), Std_Ui_Font_color(ErrorsTab_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2), Std_Ui_paddingXY(0, 4)}), any(Std_Ui_text(rt.CoerceString(rt.String_toUpperT(rt.AsString(title))))).(Std_Ui_Element)), children))))
+}
+
+func ErrorsTab_emptyState(message string) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_padding(20), Std_Ui_centerX(), Std_Ui_Font_color(ErrorsTab_textMuted()), Std_Ui_Font_italic()}), any(Std_Ui_text(message)).(Std_Ui_Element)))
+}
+
+func HubStore_hubStore(dbPath string) State_Store_R {
+	return State_Store_R{ListServices: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []string] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []string](rt.Hub_listServices(dbPath))
+	}, ReadErrors: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_ErrorRow_R](rt.Hub_readErrors(dbPath))
+	}, ReadFilteredErrors: func(svc string) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_ErrorRow_R](rt.Hub_readFilteredErrors(dbPath, svc))
+	}, ReadFilteredLogs: rt.Coerce[func(string) func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R]](func(svc any) any { return func(filter any) any { return rt.Hub_readFilteredLogs(dbPath, svc, filter) } }), ReadFilteredMetrics: func(svc string) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_MetricRow_R](rt.Hub_readFilteredMetrics(dbPath, svc))
+	}, ReadFilteredTraces: func(svc string) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](rt.Hub_readFilteredTraces(dbPath, svc))
+	}, ReadLogs: func(filter State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_LogEntry_R](rt.Hub_readLogs(dbPath, filter))
+	}, ReadMetrics: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_MetricRow_R](rt.Hub_readMetrics(dbPath))
+	}, ReadOverview: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, State_Overview_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, State_Overview_R](rt.Hub_readOverview(dbPath))
+	}, ReadServiceStats: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_ServiceStat_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_ServiceStat_R](rt.Hub_readServiceStats(dbPath))
+	}, ReadTraces: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](rt.Hub_readTraces(dbPath))
+	}}
+}
+
+func HubStore_hubReadOverview() func(string) rt.SkyTask[Sky_Core_Error_Error, State_Overview_R] {
+	return rt.Coerce[func(string) rt.SkyTask[Sky_Core_Error_Error, State_Overview_R]](rt.Ffi_kernel("Hub_readOverview"))
+}
+
+func HubStore_hubReadLogs() func(string) func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R] {
+	return rt.Coerce[func(string) func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R]](rt.Ffi_kernel("Hub_readLogs"))
+}
+
+func HubStore_hubReadMetrics() func(string) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R] {
+	return rt.Coerce[func(string) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R]](rt.Ffi_kernel("Hub_readMetrics"))
+}
+
+func HubStore_hubReadTraces() func(string) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R] {
+	return rt.Coerce[func(string) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R]](rt.Ffi_kernel("Hub_readTraces"))
+}
+
+func HubStore_hubReadErrors() func(string) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R] {
+	return rt.Coerce[func(string) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R]](rt.Ffi_kernel("Hub_readErrors"))
+}
+
+func HubStore_hubListServices() func(string) rt.SkyTask[Sky_Core_Error_Error, []string] {
+	return rt.Coerce[func(string) rt.SkyTask[Sky_Core_Error_Error, []string]](rt.Ffi_kernel("Hub_listServices"))
+}
+
+func HubStore_hubReadServiceStats() func(string) rt.SkyTask[Sky_Core_Error_Error, []State_ServiceStat_R] {
+	return rt.Coerce[func(string) rt.SkyTask[Sky_Core_Error_Error, []State_ServiceStat_R]](rt.Ffi_kernel("Hub_readServiceStats"))
+}
+
+func HubStore_hubReadFilteredLogs() func(string) func(string) func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R] {
+	return rt.Coerce[func(string) func(string) func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R]](rt.Ffi_kernel("Hub_readFilteredLogs"))
+}
+
+func HubStore_hubReadFilteredMetrics() func(string) func(string) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R] {
+	return rt.Coerce[func(string) func(string) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R]](rt.Ffi_kernel("Hub_readFilteredMetrics"))
+}
+
+func HubStore_hubReadFilteredTraces() func(string) func(string) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R] {
+	return rt.Coerce[func(string) func(string) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R]](rt.Ffi_kernel("Hub_readFilteredTraces"))
+}
+
+func HubStore_hubReadFilteredErrors() func(string) func(string) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R] {
+	return rt.Coerce[func(string) func(string) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R]](rt.Ffi_kernel("Hub_readFilteredErrors"))
+}
+
+func HubStore_hubCurrentIdentity() func(string) rt.SkyTask[Sky_Core_Error_Error, State_Identity_R] {
+	return rt.Coerce[func(string) rt.SkyTask[Sky_Core_Error_Error, State_Identity_R]](rt.Ffi_kernel("Hub_currentIdentity"))
+}
+
+func LogsTab_bgPage() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
+}
+
+func LogsTab_bgSurface() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(28, 32, 39))
+}
+
+func LogsTab_bgRaised() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
+}
+
+func LogsTab_bgCode() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(44, 50, 60))
+}
+
+func LogsTab_border_() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(53, 59, 70))
+}
+
+func LogsTab_borderSoft() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(42, 47, 56))
+}
+
+func LogsTab_textPrimary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(240, 243, 247))
+}
+
+func LogsTab_textSecondary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(197, 203, 212))
+}
+
+func LogsTab_textMuted() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(141, 150, 163))
+}
+
+func LogsTab_accent() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(126, 182, 255))
+}
+
+func LogsTab_warn() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(255, 178, 77))
+}
+
+func LogsTab_err() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(255, 117, 117))
+}
+
+func LogsTab_viewLogsTab(model State_Model_R) []Std_Ui_Element {
+	return []Std_Ui_Element{rt.Coerce[Std_Ui_Element](LogsTab_scopeBanner(rt.CoerceString(rt.Field(model, "SelectedService")))), rt.Coerce[Std_Ui_Element](LogsTab_filterPanel(rt.Coerce[State_LogFilter_R](rt.Field(model, "LogFilter")))), rt.Coerce[Std_Ui_Element](LogsTab_logsPanel(rt.AsListT[State_LogEntry_R](rt.Field(model, "Logs"))))}
+}
+
+func LogsTab_scopeBanner(selected string) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		label := func() string {
+			if rt.AsBool(rt.Eq(selected, "")) {
+				return "All services"
+			} else {
+				return selected
+			}
+			return ""
+		}()
+		_ = label
+		return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(10), Std_Ui_Background_color(LogsTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(LogsTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_paddingXY(14, 10)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(11), Std_Ui_Font_color(LogsTab_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text("SCOPE")).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(14), Std_Ui_Font_bold(), Std_Ui_Font_color(LogsTab_textPrimary())}), any(Std_Ui_text(rt.CoerceString(label))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill())}), any(Std_Ui_text("")).(Std_Ui_Element)), LogsTab_allServicesChip(rt.CoerceBool(rt.Eq(selected, "")))}))))
+	}()
+}
+
+func LogsTab_allServicesChip(isActive bool) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		bg := func() Std_Ui_Color {
+			if rt.AsBool(isActive) {
+				return LogsTab_accent()
+			} else {
+				return LogsTab_bgCode()
+			}
+			return Std_Ui_Color{}
+		}()
+		_ = bg
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			fg := func() Std_Ui_Color {
+				if rt.AsBool(isActive) {
+					return LogsTab_bgPage()
+				} else {
+					return LogsTab_textSecondary()
+				}
+				return Std_Ui_Color{}
+			}()
+			_ = fg
+			return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_paddingXY(10, 6), Std_Ui_Background_color(any(bg).(Std_Ui_Color)), Std_Ui_Border_rounded(4), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_SelectService(""))), Std_Ui_Font_color(any(fg).(Std_Ui_Color)), Std_Ui_Font_size(12), Std_Ui_Font_bold()}), any(Std_Ui_text("All services")).(Std_Ui_Element))))
+		}())
+	}()
+}
+
+func LogsTab_filterPanel(f State_LogFilter_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(LogsTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(LogsTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(12), Std_Ui_spacing(8), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(8)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_input(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_htmlAttribute("type", "search"), Std_Ui_htmlAttribute("placeholder", "Search message / route / subapp…"), Std_Ui_htmlAttribute("value", rt.CoerceString(f.Query)), Std_Ui_onInput(State_Msg_LogFilterQuery), Std_Ui_width(Std_Ui_fill()), Std_Ui_Background_color(LogsTab_bgCode()), Std_Ui_Border_width(1), Std_Ui_Border_color(LogsTab_border_()), Std_Ui_Border_rounded(4), Std_Ui_paddingXY(8, 6), Std_Ui_Font_color(LogsTab_textPrimary()), Std_Ui_Font_size(12), Std_Ui_Font_family("ui-monospace, Menlo, monospace")})), LogsTab_levelToggle("debug", rt.CoerceBool(f.ShowDebug)), LogsTab_levelToggle("info", rt.CoerceBool(f.ShowInfo)), LogsTab_levelToggle("warn", rt.CoerceBool(f.ShowWarn)), LogsTab_levelToggle("error", rt.CoerceBool(f.ShowError)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_paddingXY(8, 6), Std_Ui_Background_color(LogsTab_bgCode()), Std_Ui_Border_rounded(4), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_LogFilterClear)), Std_Ui_Font_color(LogsTab_textSecondary()), Std_Ui_Font_size(11)}), any(Std_Ui_text("clear")).(Std_Ui_Element))})), func() any {
+		if rt.AsBool(rt.Eq(f.Session, "")) {
+			return Std_Ui_text("")
+		} else {
+			return Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_spacing(6), Std_Ui_Font_size(11), Std_Ui_Font_color(LogsTab_textMuted())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_text("Filtering by session: "), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_color(LogsTab_accent())}), any(Std_Ui_text(rt.CoerceString(f.Session))).(Std_Ui_Element))}))
+		}
+		return nil
+	}()})))
+}
+
+func LogsTab_levelToggle(lvl string, on bool) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		bg := func() Std_Ui_Color {
+			if rt.AsBool(on) {
+				return LogsTab_bgCode()
+			} else {
+				return LogsTab_bgSurface()
+			}
+			return Std_Ui_Color{}
+		}()
+		_ = bg
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			fg := func() Std_Ui_Color {
+				if rt.AsBool(on) {
+					return rt.Coerce[Std_Ui_Color](LogsTab_levelColor(rt.CoerceString(lvl)))
+				} else {
+					return LogsTab_textMuted()
+				}
+				return Std_Ui_Color{}
+			}()
+			_ = fg
+			return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(any(bg).(Std_Ui_Color)), Std_Ui_Border_width(1), Std_Ui_Border_color(LogsTab_border_()), Std_Ui_Border_rounded(4), Std_Ui_paddingXY(8, 6), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_LogFilterToggleLevel(rt.CoerceString(lvl)))), Std_Ui_Font_color(any(fg).(Std_Ui_Color)), Std_Ui_Font_bold(), Std_Ui_Font_size(11)}), any(Std_Ui_text(rt.CoerceString(rt.String_toUpperT(rt.AsString(lvl))))).(Std_Ui_Element))))
+		}())
+	}()
+}
+
+func LogsTab_logsPanel(entries []State_LogEntry_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](LogsTab_panel("Recent log entries", rt.AsListT[Std_Ui_Element](func() any {
+		if rt.AsBool(Sky_Core_List_isEmpty__LogEntry(rt.AsListT[State_LogEntry_R](entries))) {
+			return []any{LogsTab_emptyState("No log entries for this service yet — the SSE tail will fill this in.")}
+		} else {
+			return Sky_Core_List_map_(LogsTab_logRow, rt.AsListT[State_LogEntry_R](entries))
+		}
+		return nil
+	}())))
+}
+
+func LogsTab_logRow(e State_LogEntry_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_paddingXY(0, 6), Std_Ui_spacing(12), Std_Ui_Border_widthEach(struct {
+		Bottom any
+		Left   any
+		Right  any
+		Top    any
+	}{Bottom: 1, Left: 0, Right: 0, Top: 0}), Std_Ui_Border_color(LogsTab_borderSoft())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(80)).(Std_Ui_Length)), Std_Ui_Font_color(LogsTab_textMuted()), Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(12)}), any(Std_Ui_text(rt.CoerceString(LogsTab_compactTime(rt.CoerceString(e.Time))))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(50)).(Std_Ui_Length)), Std_Ui_Font_color(any(LogsTab_levelColor(rt.CoerceString(e.Level))).(Std_Ui_Color)), Std_Ui_Font_bold(), Std_Ui_Font_size(12)}), any(Std_Ui_text(rt.CoerceString(rt.String_toUpperT(rt.AsString(e.Level))))).(Std_Ui_Element)), LogsTab_subappBadge(rt.CoerceString(e.Subapp)), LogsTab_sessionBadge(rt.CoerceString(e.SessionId)), LogsTab_traceBadge(rt.CoerceString(e.ReqId)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_Font_color(any(LogsTab_levelTextColor(rt.CoerceString(e.Level))).(Std_Ui_Color)), Std_Ui_Font_size(13)}), any(Std_Ui_text(rt.CoerceString(e.Message))).(Std_Ui_Element))})))
+}
+
+func LogsTab_sessionBadge(sid string) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		if rt.AsBool(sid == "") {
+			return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(80)).(Std_Ui_Length))}), any(Std_Ui_text("")).(Std_Ui_Element)))
+		} else {
+			return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(80)).(Std_Ui_Length)), Std_Ui_Background_color(LogsTab_bgCode()), Std_Ui_Border_rounded(3), Std_Ui_paddingXY(6, 2), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_LogFilterPickSession(sid))), Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(11), Std_Ui_Font_color(LogsTab_accent())}), any(Std_Ui_text(rt.CoerceString(rt.String_left(8, sid)))).(Std_Ui_Element)))
+		}
+		return Std_Ui_Element{}
+	}()
+}
+
+func LogsTab_traceBadge(tid string) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		if rt.AsBool(tid == "") {
+			return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(92)).(Std_Ui_Length))}), any(Std_Ui_text("")).(Std_Ui_Element)))
+		} else {
+			return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(92)).(Std_Ui_Length)), Std_Ui_Background_color(LogsTab_bgCode()), Std_Ui_Border_rounded(3), Std_Ui_paddingXY(6, 2), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_PivotToTrace(tid))), Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(11), Std_Ui_Font_color(LogsTab_textSecondary())}), any(Std_Ui_text(rt.CoerceString(rt.Concat("trace ", rt.String_left(8, tid))))).(Std_Ui_Element)))
+		}
+		return Std_Ui_Element{}
+	}()
+}
+
+func LogsTab_subappBadge(sub string) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		if rt.AsBool(sub == "") {
+			return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(70)).(Std_Ui_Length))}), any(Std_Ui_text("")).(Std_Ui_Element)))
+		} else {
+			return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(70)).(Std_Ui_Length)), Std_Ui_Background_color(LogsTab_bgCode()), Std_Ui_Border_rounded(3), Std_Ui_paddingXY(6, 2), Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(11), Std_Ui_Font_color(LogsTab_textSecondary())}), any(Std_Ui_text(sub)).(Std_Ui_Element)))
+		}
+		return Std_Ui_Element{}
+	}()
+}
+
+func LogsTab_compactTime(ts string) string {
+	return func() string {
+		__subject := rt.String_splitT("T", rt.AsString(ts))
+		_ = __subject
+		if len(rt.AsList(__subject)) == 2 {
+			_ = rt.AsList(__subject)[0]
+			rest := rt.AsList(__subject)[1]
+			_ = rest
+			return rt.CoerceString(rt.String_left(8, rest))
+		}
+		return ts
+		_ = rt.Unreachable("case/__subject")
+		return ""
+	}()
+}
+
+func LogsTab_levelColor(level string) Std_Ui_Color {
+	return func() Std_Ui_Color {
+		__subject := level
+		_ = __subject
+		if __subject == "warn" {
+			return LogsTab_warn()
+		}
+		if __subject == "error" {
+			return LogsTab_err()
+		}
+		return LogsTab_textMuted()
+		_ = rt.Unreachable("case/__subject")
+		return Std_Ui_Color{}
+	}()
+}
+
+func LogsTab_levelTextColor(level string) Std_Ui_Color {
+	return func() Std_Ui_Color {
+		__subject := level
+		_ = __subject
+		if __subject == "warn" {
+			return LogsTab_warn()
+		}
+		if __subject == "error" {
+			return LogsTab_err()
+		}
+		return LogsTab_textPrimary()
+		_ = rt.Unreachable("case/__subject")
+		return Std_Ui_Color{}
+	}()
+}
+
+func LogsTab_panel(title string, children []Std_Ui_Element) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(LogsTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(LogsTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(14), Std_Ui_spacing(6), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element](rt.List_cons(Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(12), Std_Ui_Font_bold(), Std_Ui_Font_color(LogsTab_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2), Std_Ui_paddingXY(0, 4)}), any(Std_Ui_text(rt.CoerceString(rt.String_toUpperT(rt.AsString(title))))).(Std_Ui_Element)), children))))
+}
+
+func LogsTab_emptyState(message string) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_padding(20), Std_Ui_centerX(), Std_Ui_Font_color(LogsTab_textMuted()), Std_Ui_Font_italic()}), any(Std_Ui_text(message)).(Std_Ui_Element)))
+}
+
+func Sky_Core_Maybe_withDefault[T1 any](def T1, m rt.SkyMaybe[T1]) T1 {
+	return func() T1 {
+		__subject := rt.MaybeCoerce[any](m)
+		_ = __subject
+		if __subject.Tag == 0 {
+			x := rt.MaybeJust(any(__subject))
+			_ = x
+			return rt.Coerce[T1](x)
+		}
+		if __subject.Tag == 1 {
+			return rt.Coerce[T1](def)
+		}
+		_ = rt.Unreachable("case/__subject")
+		return *new(T1)
+	}()
+}
+
+type Sky_Core_Error_Error = rt.SkyADT
+
+func Sky_Core_Error_Error_Error(v0 Sky_Core_Error_ErrorKind, v1 Sky_Core_Error_ErrorInfo_R) Sky_Core_Error_Error {
+	return Sky_Core_Error_Error{Tag: 0, SkyName: "Error", Fields: []any{v0, v1}}
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+type Sky_Core_Error_ErrorDetails = rt.SkyADT
+
+func Sky_Core_Error_ErrorDetails_FfiPanic(v0 Sky_Core_Error_PanicInfo_R) Sky_Core_Error_ErrorDetails {
+	return Sky_Core_Error_ErrorDetails{Tag: 0, SkyName: "FfiPanic", Fields: []any{v0}}
+}
+
+func Sky_Core_Error_ErrorDetails_TypeMismatch(v0 Sky_Core_Error_TypeInfo_R) Sky_Core_Error_ErrorDetails {
+	return Sky_Core_Error_ErrorDetails{Tag: 1, SkyName: "TypeMismatch", Fields: []any{v0}}
+}
+
+func Sky_Core_Error_ErrorDetails_HttpStatus(v0 int) Sky_Core_Error_ErrorDetails {
+	return Sky_Core_Error_ErrorDetails{Tag: 2, SkyName: "HttpStatus", Fields: []any{v0}}
+}
+
+func Sky_Core_Error_ErrorDetails_JsonDecode(v0 string) Sky_Core_Error_ErrorDetails {
+	return Sky_Core_Error_ErrorDetails{Tag: 3, SkyName: "JsonDecode", Fields: []any{v0}}
+}
+
+func Sky_Core_Error_ErrorDetails_Custom(v0 string) Sky_Core_Error_ErrorDetails {
+	return Sky_Core_Error_ErrorDetails{Tag: 4, SkyName: "Custom", Fields: []any{v0}}
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+type Sky_Core_Error_ErrorKind = int
+
+const (
+	Sky_Core_Error_ErrorKind_Io Sky_Core_Error_ErrorKind = iota
+	Sky_Core_Error_ErrorKind_Network
+	Sky_Core_Error_ErrorKind_Ffi
+	Sky_Core_Error_ErrorKind_Decode
+	Sky_Core_Error_ErrorKind_Timeout
+	Sky_Core_Error_ErrorKind_NotFound
+	Sky_Core_Error_ErrorKind_PermissionDenied
+	Sky_Core_Error_ErrorKind_InvalidInput
+	Sky_Core_Error_ErrorKind_Conflict
+	Sky_Core_Error_ErrorKind_Unavailable
+	Sky_Core_Error_ErrorKind_Unexpected
+)
+
+type Sky_Core_Error_ErrorInfo_R struct {
+	Message string
+	Details rt.SkyMaybe[Sky_Core_Error_ErrorDetails]
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(Sky_Core_Error_ErrorInfo_R{}) }
+
+func Sky_Core_Error_ErrorInfo(p0 string, p1 rt.SkyMaybe[Sky_Core_Error_ErrorDetails]) Sky_Core_Error_ErrorInfo_R {
+	return Sky_Core_Error_ErrorInfo_R{Message: p0, Details: p1}
+}
+
+type Sky_Core_Error_PanicInfo_R struct {
+	Message string
+	Stack   []string
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(Sky_Core_Error_PanicInfo_R{}) }
+
+func Sky_Core_Error_PanicInfo(p0 string, p1 []string) Sky_Core_Error_PanicInfo_R {
+	return Sky_Core_Error_PanicInfo_R{Message: p0, Stack: p1}
+}
+
+type Sky_Core_Error_TypeInfo_R struct {
+	Expected string
+	Actual   string
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(Sky_Core_Error_TypeInfo_R{}) }
+
+func Sky_Core_Error_TypeInfo(p0 string, p1 string) Sky_Core_Error_TypeInfo_R {
+	return Sky_Core_Error_TypeInfo_R{Expected: p0, Actual: p1}
+}
+
+func Sky_Core_System_getenvOr() func(string) func(string) string {
+	return rt.Coerce[func(string) func(string) string](rt.Ffi_kernel("System_getenvOr"))
+}
+
+type Sky_Core_Http_HttpRequest_R struct {
+	Method          string
+	Url             string
+	Body            string
+	Headers         []rt.SkyTuple2
+	Timeout         int
+	FollowRedirects bool
+	MaxRedirects    int
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(Sky_Core_Http_HttpRequest_R{}) }
+
+func Sky_Core_Http_HttpRequest(p0 string, p1 string, p2 string, p3 []rt.SkyTuple2, p4 int, p5 bool, p6 int) Sky_Core_Http_HttpRequest_R {
+	return Sky_Core_Http_HttpRequest_R{Method: p0, Url: p1, Body: p2, Headers: p3, Timeout: p4, FollowRedirects: p5, MaxRedirects: p6}
+}
+
+type Sky_Core_Http_HttpResponse_R struct {
+	Status  int
+	Body    string
+	Headers map[string]string
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(Sky_Core_Http_HttpResponse_R{}) }
+
+func Sky_Core_Http_HttpResponse(p0 int, p1 string, p2 map[string]string) Sky_Core_Http_HttpResponse_R {
+	return Sky_Core_Http_HttpResponse_R{Status: p0, Body: p1, Headers: p2}
+}
+
+func Sky_Core_Http_get() func(string) rt.SkyTask[Sky_Core_Error_Error, Sky_Core_Http_HttpResponse_R] {
+	return rt.Coerce[func(string) rt.SkyTask[Sky_Core_Error_Error, Sky_Core_Http_HttpResponse_R]](rt.Ffi_kernel("Http_get"))
+}
+
+func Sky_Core_Json_Decode_string_() rt.SkyDecoder {
+	return rt.Coerce[rt.SkyDecoder](rt.Ffi_kernel("JsonDec_string"))
+}
+
+func Sky_Core_Json_Decode_int_() rt.SkyDecoder {
+	return rt.Coerce[rt.SkyDecoder](rt.Ffi_kernel("JsonDec_int"))
+}
+
+func Sky_Core_Json_Decode_float() rt.SkyDecoder {
+	return rt.Coerce[rt.SkyDecoder](rt.Ffi_kernel("JsonDec_float"))
+}
+
+func Sky_Core_Json_Decode_bool_() rt.SkyDecoder {
+	return rt.Coerce[rt.SkyDecoder](rt.Ffi_kernel("JsonDec_bool"))
+}
+
+func Sky_Core_Json_Decode_decodeString() func(rt.SkyDecoder) func(string) rt.SkyResult[Sky_Core_Error_Error, any] {
+	return rt.Coerce[func(rt.SkyDecoder) func(string) rt.SkyResult[Sky_Core_Error_Error, any]](rt.Ffi_kernel("JsonDec_decodeString"))
+}
+
+func Sky_Core_Json_Decode_at() func([]string) func(rt.SkyDecoder) rt.SkyDecoder {
+	return rt.Coerce[func([]string) func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_at"))
+}
+
+func Sky_Core_Json_Decode_list() func(rt.SkyDecoder) rt.SkyDecoder {
+	return rt.Coerce[func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_list"))
+}
+
+func Sky_Core_Json_Decode_map_() func(func(any) any) func(rt.SkyDecoder) rt.SkyDecoder {
+	return rt.Coerce[func(func(any) any) func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_map"))
+}
+
+func Sky_Core_Json_Decode_succeed() func(any) rt.SkyDecoder {
+	return rt.Coerce[func(any) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_succeed"))
+}
+
+func Sky_Core_Json_Decode_oneOf() func([]rt.SkyDecoder) rt.SkyDecoder {
+	return rt.Coerce[func([]rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDec_oneOf"))
+}
+
+func Sky_Core_Json_Decode_Pipeline_optional() func(string) func(rt.SkyDecoder) func(any) func(rt.SkyDecoder) rt.SkyDecoder {
+	return rt.Coerce[func(string) func(rt.SkyDecoder) func(any) func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDecP_optional"))
+}
+
+func Sky_Core_Json_Decode_Pipeline_custom() func(rt.SkyDecoder) func(rt.SkyDecoder) rt.SkyDecoder {
+	return rt.Coerce[func(rt.SkyDecoder) func(rt.SkyDecoder) rt.SkyDecoder](rt.Ffi_kernel("JsonDecP_custom"))
+}
+
+type Sky_Core_Task_ShouldRetry = rt.SkyADT
+
+var Sky_Core_Task_ShouldRetry_RetryAlways Sky_Core_Task_ShouldRetry = Sky_Core_Task_ShouldRetry{Tag: 0, SkyName: "RetryAlways"}
+
+func Sky_Core_Task_ShouldRetry_RetryWhen(v0 any) Sky_Core_Task_ShouldRetry {
+	return Sky_Core_Task_ShouldRetry{Tag: 1, SkyName: "RetryWhen", Fields: []any{v0}}
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+type Sky_Core_Task_RetryPolicy_R[T1 any] struct {
+	MaxAttempts int
+	BaseMs      int
+	Jitter      bool
+	Kind        int
+	ShouldRetry Sky_Core_Task_ShouldRetry
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(Sky_Core_Task_RetryPolicy_R[any]{}) }
+
+func Sky_Core_Task_RetryPolicy[T1 any](p0 int, p1 int, p2 bool, p3 int, p4 Sky_Core_Task_ShouldRetry) Sky_Core_Task_RetryPolicy_R[T1] {
+	return Sky_Core_Task_RetryPolicy_R[T1]{MaxAttempts: p0, BaseMs: p1, Jitter: p2, Kind: p3, ShouldRetry: p4}
+}
+
+func Sky_Core_Task_succeed() func(any) rt.SkyTask[Sky_Core_Error_Error, any] {
+	return rt.Coerce[func(any) rt.SkyTask[Sky_Core_Error_Error, any]](rt.Ffi_kernel("Task_succeed"))
+}
+
+func Sky_Core_Task_andThenResult() func(func(any) rt.SkyResult[Sky_Core_Error_Error, rt.SkyValue]) func(rt.SkyTask[Sky_Core_Error_Error, any]) rt.SkyTask[Sky_Core_Error_Error, rt.SkyValue] {
+	return rt.Coerce[func(func(any) rt.SkyResult[Sky_Core_Error_Error, rt.SkyValue]) func(rt.SkyTask[Sky_Core_Error_Error, any]) rt.SkyTask[Sky_Core_Error_Error, rt.SkyValue]](rt.Ffi_kernel("Task_andThenResult"))
+}
+
+func Std_Cmd_none() rt.SkyCmd {
+	return rt.Coerce[rt.SkyCmd](rt.Ffi_kernel("Cmd_none"))
+}
+
+func Std_Cmd_batch() func([]rt.SkyCmd) rt.SkyCmd {
+	return rt.Coerce[func([]rt.SkyCmd) rt.SkyCmd](rt.Ffi_kernel("Cmd_batch"))
+}
+
+func Std_Cmd_perform() func(rt.SkyTask[Sky_Core_Error_Error, rt.SkyValue]) func(func(rt.SkyResult[Sky_Core_Error_Error, rt.SkyValue]) any) rt.SkyCmd {
+	return rt.Coerce[func(rt.SkyTask[Sky_Core_Error_Error, rt.SkyValue]) func(func(rt.SkyResult[Sky_Core_Error_Error, rt.SkyValue]) any) rt.SkyCmd](rt.Ffi_kernel("Cmd_perform"))
+}
+
+func Std_Sub_none() rt.SkySub {
+	return rt.Coerce[rt.SkySub](rt.Ffi_kernel("Sub_none"))
+}
+
+func Std_Sub_every() func(int) func(any) rt.SkySub {
+	return rt.Coerce[func(int) func(any) rt.SkySub](rt.Ffi_kernel("Sub_every"))
+}
+
+type Std_Ui_Chart_Cfg_R struct {
+	Width     int
+	Height    int
+	Color     Std_Ui_Color
+	Title     rt.SkyMaybe[string]
+	YRange    rt.SkyMaybe[rt.SkyTuple2]
+	GridLines bool
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(Std_Ui_Chart_Cfg_R{}) }
+
+func Std_Ui_Chart_Cfg(p0 int, p1 int, p2 Std_Ui_Color, p3 rt.SkyMaybe[string], p4 rt.SkyMaybe[rt.SkyTuple2], p5 bool) Std_Ui_Chart_Cfg_R {
+	return Std_Ui_Chart_Cfg_R{Width: p0, Height: p1, Color: p2, Title: p3, YRange: p4, GridLines: p5}
+}
+
+type Std_Ui_Chart_Point = any
+
+type Std_Ui_Chart_Series_R struct {
+	Points []rt.SkyTuple2
+	Label  rt.SkyMaybe[string]
+	Color  rt.SkyMaybe[Std_Ui_Color]
+}
+
+// SKY-ORIGIN: src/Main.sky:191:1
+func init() { rt.RegisterGobType(Std_Ui_Chart_Series_R{}) }
+
+func Std_Ui_Chart_Series(p0 []rt.SkyTuple2, p1 rt.SkyMaybe[string], p2 rt.SkyMaybe[Std_Ui_Color]) Std_Ui_Chart_Series_R {
+	return Std_Ui_Chart_Series_R{Points: p0, Label: p1, Color: p2}
+}
+
+func Std_Ui_Chart_defaultCfg() Std_Ui_Chart_Cfg_R {
+	return Std_Ui_Chart_Cfg_R{Color: rt.Coerce[Std_Ui_Color](Std_Ui_rgb(64, 128, 224)), GridLines: true, Height: 200, Title: rt.MaybeCoerce[string](rt.Nothing[any]()), Width: 480, YRange: rt.MaybeCoerce[rt.SkyTuple2](rt.Nothing[any]())}
+}
+
+func Std_Ui_Chart_withWidth(w int, cfg Std_Ui_Chart_Cfg_R) Std_Ui_Chart_Cfg_R {
+	return rt.Coerce[Std_Ui_Chart_Cfg_R](rt.RecordUpdate(cfg, map[string]any{"Width": w}))
+}
+
+func Std_Ui_Chart_withHeight(h int, cfg Std_Ui_Chart_Cfg_R) Std_Ui_Chart_Cfg_R {
+	return rt.Coerce[Std_Ui_Chart_Cfg_R](rt.RecordUpdate(cfg, map[string]any{"Height": h}))
+}
+
+func Std_Ui_Chart_withColor(c Std_Ui_Color, cfg Std_Ui_Chart_Cfg_R) Std_Ui_Chart_Cfg_R {
+	return rt.Coerce[Std_Ui_Chart_Cfg_R](rt.RecordUpdate(cfg, map[string]any{"Color": c}))
+}
+
+func Std_Ui_Chart_withGridLines(b bool, cfg Std_Ui_Chart_Cfg_R) Std_Ui_Chart_Cfg_R {
+	return rt.Coerce[Std_Ui_Chart_Cfg_R](rt.RecordUpdate(cfg, map[string]any{"GridLines": b}))
+}
+
+func Std_Ui_Chart_series(pts []rt.SkyTuple2) Std_Ui_Chart_Series_R {
+	return Std_Ui_Chart_Series_R{Color: rt.MaybeCoerce[Std_Ui_Color](rt.Nothing[any]()), Label: rt.MaybeCoerce[string](rt.Nothing[any]()), Points: rt.AsListT[rt.SkyTuple2](pts)}
+}
+
+func Std_Ui_Chart_withSeriesColor(c Std_Ui_Color, s Std_Ui_Chart_Series_R) Std_Ui_Chart_Series_R {
+	return rt.Coerce[Std_Ui_Chart_Series_R](rt.RecordUpdate(s, map[string]any{"Color": rt.Just[any](c)}))
+}
+
+func Std_Ui_Chart_withSeriesLabel(l string, s Std_Ui_Chart_Series_R) Std_Ui_Chart_Series_R {
+	return rt.Coerce[Std_Ui_Chart_Series_R](rt.RecordUpdate(s, map[string]any{"Label": rt.Just[any](l)}))
+}
+
+func Std_Ui_Chart_plotInset() any {
+	return struct {
+		Bottom any
+		Left   any
+		Right  any
+		Top    any
+	}{Bottom: 24, Left: 32, Right: 8, Top: 24}
+}
+
+func Std_Ui_Chart_xRange(pts []rt.SkyTuple2) rt.SkyTuple2 {
+	return func() rt.SkyTuple2 {
+		__subject := pts
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.SkyTuple2{V0: 0.0, V1: 1.0}
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			__sky_h___subject := rt.AsList(__subject)[0]
+			_ = __sky_h___subject
+			px := rt.AsTuple2(__sky_h___subject).V0
+			_ = px
+			_ = rt.AsTuple2(__sky_h___subject).V1
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.Coerce[rt.SkyTuple2](Std_Ui_Chart_xRangeHelp(rt.CoerceFloat(px), rt.CoerceFloat(px), rt.AsListT[rt.SkyTuple2](rest)))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return rt.SkyTuple2{}
+	}()
+}
+
+func Std_Ui_Chart_xRangeHelp(lo float64, hi float64, pts []rt.SkyTuple2) rt.SkyTuple2 {
+	for {
+		__tco_subject := pts
+		_ = __tco_subject
+		if len(rt.AsList(__tco_subject)) == 0 {
+			return rt.SkyTuple2{V0: lo, V1: hi}
+		}
+		if len(rt.AsList(__tco_subject)) >= 1 {
+			__sky_h___tco_subject := rt.AsList(__tco_subject)[0]
+			_ = __sky_h___tco_subject
+			x := rt.AsTuple2(__sky_h___tco_subject).V0
+			_ = x
+			_ = rt.AsTuple2(__sky_h___tco_subject).V1
+			rest := any(rt.AsList(__tco_subject)[1:])
+			_ = rest
+			__tco_t0 := rt.Math_minT(rt.AsInt(lo), rt.AsInt(x))
+			__tco_t1 := rt.Math_maxT(rt.AsInt(hi), rt.AsInt(x))
+			__tco_t2 := rest
+			lo = rt.CoerceFloat(__tco_t0)
+			hi = rt.CoerceFloat(__tco_t1)
+			pts = rt.AsListT[rt.SkyTuple2](__tco_t2)
+			continue
+		}
+		rt.Unreachable("tco/case")
+	}
+}
+
+func Std_Ui_Chart_yRange(pts []rt.SkyTuple2) rt.SkyTuple2 {
+	return func() rt.SkyTuple2 {
+		__subject := pts
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.SkyTuple2{V0: 0.0, V1: 1.0}
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			__sky_h___subject := rt.AsList(__subject)[0]
+			_ = __sky_h___subject
+			_ = rt.AsTuple2(__sky_h___subject).V0
+			py := rt.AsTuple2(__sky_h___subject).V1
+			_ = py
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.Coerce[rt.SkyTuple2](Std_Ui_Chart_yRangeHelp(rt.CoerceFloat(py), rt.CoerceFloat(py), rt.AsListT[rt.SkyTuple2](rest)))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return rt.SkyTuple2{}
+	}()
+}
+
+func Std_Ui_Chart_yRangeHelp(lo float64, hi float64, pts []rt.SkyTuple2) rt.SkyTuple2 {
+	for {
+		__tco_subject := pts
+		_ = __tco_subject
+		if len(rt.AsList(__tco_subject)) == 0 {
+			return rt.SkyTuple2{V0: lo, V1: hi}
+		}
+		if len(rt.AsList(__tco_subject)) >= 1 {
+			__sky_h___tco_subject := rt.AsList(__tco_subject)[0]
+			_ = __sky_h___tco_subject
+			_ = rt.AsTuple2(__sky_h___tco_subject).V0
+			y := rt.AsTuple2(__sky_h___tco_subject).V1
+			_ = y
+			rest := any(rt.AsList(__tco_subject)[1:])
+			_ = rest
+			__tco_t0 := rt.Math_minT(rt.AsInt(lo), rt.AsInt(y))
+			__tco_t1 := rt.Math_maxT(rt.AsInt(hi), rt.AsInt(y))
+			__tco_t2 := rest
+			lo = rt.CoerceFloat(__tco_t0)
+			hi = rt.CoerceFloat(__tco_t1)
+			pts = rt.AsListT[rt.SkyTuple2](__tco_t2)
+			continue
+		}
+		rt.Unreachable("tco/case")
+	}
+}
+
+func Std_Ui_Chart_xRangeAll(seriesList []Std_Ui_Chart_Series_R) rt.SkyTuple2 {
+	return func() rt.SkyTuple2 {
+		__subject := seriesList
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.SkyTuple2{V0: 0.0, V1: 1.0}
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			s := rt.AsList(__subject)[0]
+			_ = s
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.Coerce[rt.SkyTuple2](Std_Ui_Chart_xRangeAllHelp(any(Std_Ui_Chart_xRange(rt.AsListT[rt.SkyTuple2](rt.Field(s, "Points")))).(rt.SkyTuple2), rt.AsListT[Std_Ui_Chart_Series_R](rest)))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return rt.SkyTuple2{}
+	}()
+}
+
+func Std_Ui_Chart_xRangeAllHelp(acc rt.SkyTuple2, seriesList []Std_Ui_Chart_Series_R) rt.SkyTuple2 {
+	for {
+		__tco_subject := seriesList
+		_ = __tco_subject
+		if len(rt.AsList(__tco_subject)) == 0 {
+			return rt.Coerce[rt.SkyTuple2](acc)
+		}
+		if len(rt.AsList(__tco_subject)) >= 1 {
+			s := rt.AsList(__tco_subject)[0]
+			_ = s
+			rest := any(rt.AsList(__tco_subject)[1:])
+			_ = rest
+			return func() rt.SkyTuple2 {
+				__destruct__ := acc
+				_ = __destruct__
+				alo := rt.AsTuple2(__destruct__).V0
+				_ = alo
+				ahi := rt.AsTuple2(__destruct__).V1
+				_ = ahi
+				return rt.Coerce[rt.SkyTuple2](func() any {
+					__destruct__ := Std_Ui_Chart_xRange(rt.AsListT[rt.SkyTuple2](rt.Field(s, "Points")))
+					_ = __destruct__
+					blo := rt.AsTuple2(__destruct__).V0
+					_ = blo
+					bhi := rt.AsTuple2(__destruct__).V1
+					_ = bhi
+					return Std_Ui_Chart_xRangeAllHelp(rt.SkyTuple2{V0: rt.Math_minT(rt.AsInt(alo), rt.AsInt(blo)), V1: rt.Math_maxT(rt.AsInt(ahi), rt.AsInt(bhi))}, rt.AsListT[Std_Ui_Chart_Series_R](rest))
+				}())
+			}()
+		}
+		rt.Unreachable("tco/case")
+	}
+}
+
+func Std_Ui_Chart_yRangeAll(seriesList []Std_Ui_Chart_Series_R) rt.SkyTuple2 {
+	return func() rt.SkyTuple2 {
+		__subject := seriesList
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.SkyTuple2{V0: 0.0, V1: 1.0}
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			s := rt.AsList(__subject)[0]
+			_ = s
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.Coerce[rt.SkyTuple2](Std_Ui_Chart_yRangeAllHelp(any(Std_Ui_Chart_yRange(rt.AsListT[rt.SkyTuple2](rt.Field(s, "Points")))).(rt.SkyTuple2), rt.AsListT[Std_Ui_Chart_Series_R](rest)))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return rt.SkyTuple2{}
+	}()
+}
+
+func Std_Ui_Chart_yRangeAllHelp(acc rt.SkyTuple2, seriesList []Std_Ui_Chart_Series_R) rt.SkyTuple2 {
+	for {
+		__tco_subject := seriesList
+		_ = __tco_subject
+		if len(rt.AsList(__tco_subject)) == 0 {
+			return rt.Coerce[rt.SkyTuple2](acc)
+		}
+		if len(rt.AsList(__tco_subject)) >= 1 {
+			s := rt.AsList(__tco_subject)[0]
+			_ = s
+			rest := any(rt.AsList(__tco_subject)[1:])
+			_ = rest
+			return func() rt.SkyTuple2 {
+				__destruct__ := acc
+				_ = __destruct__
+				alo := rt.AsTuple2(__destruct__).V0
+				_ = alo
+				ahi := rt.AsTuple2(__destruct__).V1
+				_ = ahi
+				return rt.Coerce[rt.SkyTuple2](func() any {
+					__destruct__ := Std_Ui_Chart_yRange(rt.AsListT[rt.SkyTuple2](rt.Field(s, "Points")))
+					_ = __destruct__
+					blo := rt.AsTuple2(__destruct__).V0
+					_ = blo
+					bhi := rt.AsTuple2(__destruct__).V1
+					_ = bhi
+					return Std_Ui_Chart_yRangeAllHelp(rt.SkyTuple2{V0: rt.Math_minT(rt.AsInt(alo), rt.AsInt(blo)), V1: rt.Math_maxT(rt.AsInt(ahi), rt.AsInt(bhi))}, rt.AsListT[Std_Ui_Chart_Series_R](rest))
+				}())
+			}()
+		}
+		rt.Unreachable("tco/case")
+	}
+}
+
+func Std_Ui_Chart_seriesColor(cfg Std_Ui_Chart_Cfg_R, s Std_Ui_Chart_Series_R) Std_Ui_Color {
+	return func() Std_Ui_Color {
+		__subject := rt.MaybeCoerce[any](s.Color)
+		_ = __subject
+		if __subject.Tag == 0 {
+			c := rt.MaybeJust(any(__subject))
+			_ = c
+			return rt.Coerce[Std_Ui_Color](c)
+		}
+		if __subject.Tag == 1 {
+			return rt.Coerce[Std_Ui_Color](cfg.Color)
+		}
+		_ = rt.Unreachable("case/__subject")
+		return Std_Ui_Color{}
+	}()
+}
+
+func Std_Ui_Chart_effectiveYRange(cfg Std_Ui_Chart_Cfg_R, seriesList []Std_Ui_Chart_Series_R) rt.SkyTuple2 {
+	return func() rt.SkyTuple2 {
+		__subject_tFfi := rt.MaybeCoerce[rt.SkyTuple2](cfg.YRange)
+		_ = __subject_tFfi
+		if __subject_tFfi.Tag == 0 {
+			r := any(__subject_tFfi.JustValue)
+			_ = r
+			return rt.Coerce[rt.SkyTuple2](r)
+		}
+		if __subject_tFfi.Tag == 1 {
+			return func() rt.SkyTuple2 {
+				__destruct__ := Std_Ui_Chart_yRangeAll(rt.AsListT[Std_Ui_Chart_Series_R](seriesList))
+				_ = __destruct__
+				lo := rt.AsTuple2(__destruct__).V0
+				_ = lo
+				hi := rt.AsTuple2(__destruct__).V1
+				_ = hi
+				return rt.Coerce[rt.SkyTuple2](func() any {
+					lo2 := rt.Math_minT(rt.AsInt(lo), 0.0)
+					_ = lo2
+					return func() any {
+						pad := rt.Mul(rt.Sub(hi, lo2), 5.0e-2)
+						_ = pad
+						return func() any {
+							hi2 := rt.Add(hi, pad)
+							_ = hi2
+							return func() any {
+								if rt.AsBool(rt.Lte(hi2, lo2)) {
+									return rt.SkyTuple2{V0: lo2, V1: rt.Add(lo2, 1.0)}
+								} else {
+									return rt.SkyTuple2{V0: lo2, V1: hi2}
+								}
+								return nil
+							}()
+						}()
+					}()
+				}())
+			}()
+		}
+		_ = rt.Unreachable("case/__subject_tFfi")
+		return rt.SkyTuple2{}
+	}()
+}
+
+func Std_Ui_Chart_projectPoint(w int, h int, xR rt.SkyTuple2, yR rt.SkyTuple2, pt rt.SkyTuple2) rt.SkyTuple2 {
+	return func() rt.SkyTuple2 {
+		__destruct__ := pt
+		_ = __destruct__
+		x := rt.AsTuple2(__destruct__).V0
+		_ = x
+		y := rt.AsTuple2(__destruct__).V1
+		_ = y
+		return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+			__destruct__ := xR
+			_ = __destruct__
+			xMin := rt.AsTuple2(__destruct__).V0
+			_ = xMin
+			xMax := rt.AsTuple2(__destruct__).V1
+			_ = xMax
+			return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+				__destruct__ := yR
+				_ = __destruct__
+				yMin := rt.AsTuple2(__destruct__).V0
+				_ = yMin
+				yMax := rt.AsTuple2(__destruct__).V1
+				_ = yMax
+				return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+					xSpan := rt.Sub(xMax, xMin)
+					_ = xSpan
+					return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+						ySpan := rt.Sub(yMax, yMin)
+						_ = ySpan
+						return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+							plotW := rt.Sub(rt.Sub(w, rt.Field(Std_Ui_Chart_plotInset(), "Left")), rt.Field(Std_Ui_Chart_plotInset(), "Right"))
+							_ = plotW
+							return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+								plotH := rt.Sub(rt.Sub(h, rt.Field(Std_Ui_Chart_plotInset(), "Top")), rt.Field(Std_Ui_Chart_plotInset(), "Bottom"))
+								_ = plotH
+								return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+									plotWf := Std_Ui_Chart_intToFloat(rt.CoerceInt(plotW))
+									_ = plotWf
+									return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+										plotHf := Std_Ui_Chart_intToFloat(rt.CoerceInt(plotH))
+										_ = plotHf
+										return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+											leftF := Std_Ui_Chart_intToFloat(rt.CoerceInt(rt.Field(Std_Ui_Chart_plotInset(), "Left")))
+											_ = leftF
+											return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+												topF := Std_Ui_Chart_intToFloat(rt.CoerceInt(rt.Field(Std_Ui_Chart_plotInset(), "Top")))
+												_ = topF
+												return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+													nx := func() float64 {
+														if rt.AsBool(rt.Eq(xSpan, 0.0)) {
+															return 0.5
+														} else {
+															return rt.CoerceFloat(rt.Div(rt.Sub(x, xMin), xSpan))
+														}
+														return 0.0
+													}()
+													_ = nx
+													return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+														ny := func() float64 {
+															if rt.AsBool(rt.Eq(ySpan, 0.0)) {
+																return 0.5
+															} else {
+																return rt.CoerceFloat(rt.Div(rt.Sub(y, yMin), ySpan))
+															}
+															return 0.0
+														}()
+														_ = ny
+														return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+															px := rt.Add(leftF, rt.Mul(nx, plotWf))
+															_ = px
+															return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+																py := rt.Add(topF, rt.Mul(rt.Sub(1.0, ny), plotHf))
+																_ = py
+																return rt.Coerce[rt.SkyTuple2](rt.SkyTuple2{V0: px, V1: py})
+															}())
+														}())
+													}())
+												}())
+											}())
+										}())
+									}())
+								}())
+							}())
+						}())
+					}())
+				}())
+			}())
+		}())
+	}()
+}
+
+func Std_Ui_Chart_intToFloat(n int) float64 {
+	return func() float64 {
+		__subject_tFfi := rt.MaybeCoerce[float64](rt.String_toFloat(rt.String_fromIntT(rt.AsInt(n))))
+		_ = __subject_tFfi
+		if __subject_tFfi.Tag == 0 {
+			f := any(__subject_tFfi.JustValue)
+			_ = f
+			return rt.CoerceFloat(f)
+		}
+		if __subject_tFfi.Tag == 1 {
+			return 0.0
+		}
+		_ = rt.Unreachable("case/__subject_tFfi")
+		return 0.0
+	}()
+}
+
+func Std_Ui_Chart_svgRootAttrs(cfg Std_Ui_Chart_Cfg_R) []rt.SkyAttribute {
+	return []rt.SkyAttribute{Std_Html_Attributes_attribute("viewBox", rt.CoerceString(rt.Concat("0 0 ", rt.Concat(rt.String_fromIntT(rt.AsInt(rt.Field(cfg, "Width"))), rt.Concat(" ", rt.String_fromIntT(rt.AsInt(rt.Field(cfg, "Height")))))))), Std_Html_Attributes_attribute("xmlns", "http://www.w3.org/2000/svg"), Std_Html_Attributes_attribute("role", "img"), Std_Html_Attributes_attribute("preserveAspectRatio", "xMidYMid meet"), Std_Html_Attributes_style("max-width: 100%; height: auto; display: block; font-family: system-ui, -apple-system, Segoe UI, sans-serif;")}
+}
+
+func Std_Ui_Chart_titleNode(cfg Std_Ui_Chart_Cfg_R) rt.SkyMaybe[Std_Html_Html] {
+	return func() rt.SkyMaybe[Std_Html_Html] {
+		__subject_tFfi := rt.MaybeCoerce[string](cfg.Title)
+		_ = __subject_tFfi
+		if __subject_tFfi.Tag == 1 {
+			return rt.MaybeCoerce[Std_Html_Html](rt.Nothing[any]())
+		}
+		if __subject_tFfi.Tag == 0 {
+			t := any(__subject_tFfi.JustValue)
+			_ = t
+			return rt.MaybeCoerce[Std_Html_Html](rt.Just[any](Std_Html_node("text", rt.AsListT[rt.SkyAttribute]([]any{Std_Html_Attributes_attribute("x", rt.CoerceString(rt.String_fromIntT(rt.AsInt(cfg.Width/2)))), Std_Html_Attributes_attribute("y", "14"), Std_Html_Attributes_attribute("text-anchor", "middle"), Std_Html_Attributes_attribute("fill", "#1a1a2e"), Std_Html_Attributes_attribute("font-size", "12"), Std_Html_Attributes_attribute("font-weight", "600")}), rt.AsListT[Std_Html_Html]([]any{Std_Html_text(rt.CoerceString(t))}))))
+		}
+		_ = rt.Unreachable("case/__subject_tFfi")
+		return rt.SkyMaybe[Std_Html_Html]{}
+	}()
+}
+
+func Std_Ui_Chart_gridLines(cfg Std_Ui_Chart_Cfg_R) []Std_Html_Html {
+	return func() []Std_Html_Html {
+		if rt.AsBool(cfg.GridLines) {
+			return func() []Std_Html_Html {
+				plotH := rt.Sub(rt.Sub(cfg.Height, rt.Field(Std_Ui_Chart_plotInset(), "Top")), rt.Field(Std_Ui_Chart_plotInset(), "Bottom"))
+				_ = plotH
+				return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+					plotW := rt.Sub(rt.Sub(rt.Field(cfg, "Width"), rt.Field(Std_Ui_Chart_plotInset(), "Left")), rt.Field(Std_Ui_Chart_plotInset(), "Right"))
+					_ = plotW
+					return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+						x1 := rt.String_fromIntT(rt.AsInt(rt.Field(Std_Ui_Chart_plotInset(), "Left")))
+						_ = x1
+						return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+							x2 := rt.String_fromIntT(rt.AsInt(rt.Add(rt.Field(Std_Ui_Chart_plotInset(), "Left"), plotW)))
+							_ = x2
+							return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+								ys := []any{0, 1, 2, 3, 4}
+								_ = ys
+								return rt.AsListT[Std_Html_Html](rt.AsListT[Std_Html_Html](Sky_Core_List_map_(func(i any) Std_Html_Html {
+									return rt.Coerce[Std_Html_Html](Std_Ui_Chart_gridLine(rt.CoerceString(x1), rt.CoerceString(x2), rt.CoerceInt(rt.Field(cfg, "Height")), rt.CoerceInt(plotH), rt.CoerceInt(i)))
+								}, rt.AsListAny(ys))))
+							}())
+						}())
+					}())
+				}())
+			}()
+		} else {
+			return []Std_Html_Html{}
+		}
+		return nil
+	}()
+}
+
+func Std_Ui_Chart_gridLine(x1 string, x2 string, _ int, plotH int, idx int) Std_Html_Html {
+	return func() Std_Html_Html {
+		plotHf := Std_Ui_Chart_intToFloat(plotH)
+		_ = plotHf
+		return rt.Coerce[Std_Html_Html](func() Std_Html_Html {
+			idxf := Std_Ui_Chart_intToFloat(rt.CoerceInt(idx))
+			_ = idxf
+			return rt.Coerce[Std_Html_Html](func() Std_Html_Html {
+				yPx := rt.Add(Std_Ui_Chart_intToFloat(rt.CoerceInt(rt.Field(Std_Ui_Chart_plotInset(), "Top"))), rt.Mul(rt.Div(idxf, 4.0), plotHf))
+				_ = yPx
+				return rt.Coerce[Std_Html_Html](func() Std_Html_Html {
+					yStr := rt.String_fromFloatT(rt.AsFloat(yPx))
+					_ = yStr
+					return rt.Coerce[Std_Html_Html](rt.Coerce[Std_Html_Html](Std_Html_node("line", rt.AsListT[rt.SkyAttribute]([]any{Std_Html_Attributes_attribute("x1", rt.CoerceString(x1)), Std_Html_Attributes_attribute("y1", rt.CoerceString(yStr)), Std_Html_Attributes_attribute("x2", rt.CoerceString(x2)), Std_Html_Attributes_attribute("y2", rt.CoerceString(yStr)), Std_Html_Attributes_attribute("stroke", "#e6e8ec"), Std_Html_Attributes_attribute("stroke-width", "1")}), rt.AsListT[Std_Html_Html]([]any{}))))
+				}())
+			}())
+		}())
+	}()
+}
+
+func Std_Ui_Chart_buildPathD(coords []rt.SkyTuple2) string {
+	return func() string {
+		__subject := coords
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return ""
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			__sky_h___subject := rt.AsList(__subject)[0]
+			_ = __sky_h___subject
+			x0 := rt.AsTuple2(__sky_h___subject).V0
+			_ = x0
+			y0 := rt.AsTuple2(__sky_h___subject).V1
+			_ = y0
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.CoerceString(rt.Concat("M ", rt.Concat(rt.String_fromFloatT(rt.AsFloat(x0)), rt.Concat(",", rt.Concat(rt.String_fromFloatT(rt.AsFloat(y0)), Sky_Core_List_foldl__Tup2Of_Float_Float_String(func(__c0 rt.SkyTuple2) func(string) string {
+				return func(__c1 string) string { return Std_Ui_Chart_appendLineSeg(__c0, __c1) }
+			}, "", rt.AsListT[rt.SkyTuple2](rest)))))))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return ""
+	}()
+}
+
+func Std_Ui_Chart_appendLineSeg(pt rt.SkyTuple2, acc string) string {
+	return func() string {
+		__destruct__ := pt
+		_ = __destruct__
+		x := rt.AsTuple2(__destruct__).V0
+		_ = x
+		y := rt.AsTuple2(__destruct__).V1
+		_ = y
+		return rt.CoerceString(rt.CoerceString(rt.Concat(acc, rt.Concat(" L ", rt.Concat(rt.String_fromFloatT(rt.AsFloat(x)), rt.Concat(",", rt.String_fromFloatT(rt.AsFloat(y))))))))
+	}()
+}
+
+func Std_Ui_Chart_labelTitle(lbl rt.SkyMaybe[string]) []Std_Html_Html {
+	return func() []Std_Html_Html {
+		__subject_tFfi := lbl
+		_ = __subject_tFfi
+		if __subject_tFfi.Tag == 1 {
+			return rt.AsListT[Std_Html_Html]([]any{})
+		}
+		if __subject_tFfi.Tag == 0 {
+			s := any(__subject_tFfi.JustValue)
+			_ = s
+			return rt.AsListT[Std_Html_Html]([]any{Std_Html_node("title", rt.AsListT[rt.SkyAttribute]([]any{}), rt.AsListT[Std_Html_Html]([]any{Std_Html_text(rt.CoerceString(s))}))})
+		}
+		_ = rt.Unreachable("case/__subject_tFfi")
+		return nil
+	}()
+}
+
+func Std_Ui_Chart_maybeCons(m rt.SkyMaybe[Std_Html_Html], rest []Std_Html_Html) []Std_Html_Html {
+	return func() []Std_Html_Html {
+		__subject_tFfi := m
+		_ = __subject_tFfi
+		if __subject_tFfi.Tag == 1 {
+			return rt.AsListT[Std_Html_Html](rest)
+		}
+		if __subject_tFfi.Tag == 0 {
+			h := any(__subject_tFfi.JustValue)
+			_ = h
+			return rt.AsListT[Std_Html_Html](rt.List_cons(h, rest))
+		}
+		_ = rt.Unreachable("case/__subject_tFfi")
+		return nil
+	}()
+}
+
+func Std_Ui_Chart_line(cfg Std_Ui_Chart_Cfg_R, seriesList []Std_Ui_Chart_Series_R) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		xR := Std_Ui_Chart_xRangeAll(rt.AsListT[Std_Ui_Chart_Series_R](seriesList))
+		_ = xR
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			yR := Std_Ui_Chart_effectiveYRange(rt.Coerce[Std_Ui_Chart_Cfg_R](cfg), rt.AsListT[Std_Ui_Chart_Series_R](seriesList))
+			_ = yR
+			return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+				seriesPaths := Sky_Core_List_concatMap__Series_HtmlOf_TV_any(func(__pp0 Std_Ui_Chart_Series_R) []Std_Html_Html {
+					return Std_Ui_Chart_lineOne(rt.Coerce[Std_Ui_Chart_Cfg_R](cfg), any(xR).(rt.SkyTuple2), any(yR).(rt.SkyTuple2), rt.Coerce[Std_Ui_Chart_Series_R](__pp0))
+				}, rt.AsListT[Std_Ui_Chart_Series_R](seriesList))
+				_ = seriesPaths
+				return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+					baseChildren := rt.Concat(Std_Ui_Chart_gridLines(rt.Coerce[Std_Ui_Chart_Cfg_R](cfg)), rt.Concat(Std_Ui_Chart_axesNodes(rt.Coerce[Std_Ui_Chart_Cfg_R](cfg)), seriesPaths))
+					_ = baseChildren
+					return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+						children := Std_Ui_Chart_maybeCons(rt.MaybeCoerce[Std_Html_Html](Std_Ui_Chart_titleNode(rt.Coerce[Std_Ui_Chart_Cfg_R](cfg))), rt.AsListT[Std_Html_Html](baseChildren))
+						_ = children
+						return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_html(any(Std_Html_node("svg", rt.AsListT[rt.SkyAttribute](Std_Ui_Chart_svgRootAttrs(rt.Coerce[Std_Ui_Chart_Cfg_R](cfg))), rt.AsListT[Std_Html_Html](children))))))
+					}())
+				}())
+			}())
+		}())
+	}()
+}
+
+func Std_Ui_Chart_lineOne(cfg Std_Ui_Chart_Cfg_R, xR rt.SkyTuple2, yR rt.SkyTuple2, s Std_Ui_Chart_Series_R) []Std_Html_Html {
+	return func() []Std_Html_Html {
+		col := Std_Ui_colorCss(any(Std_Ui_Chart_seriesColor(rt.Coerce[Std_Ui_Chart_Cfg_R](cfg), rt.Coerce[Std_Ui_Chart_Series_R](s))).(Std_Ui_Color))
+		_ = col
+		return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+			projected := Sky_Core_List_map_(func(__pp0 rt.SkyTuple2) rt.SkyTuple2 {
+				return Std_Ui_Chart_projectPoint(rt.CoerceInt(rt.Field(cfg, "Width")), rt.CoerceInt(rt.Field(cfg, "Height")), any(xR).(rt.SkyTuple2), any(yR).(rt.SkyTuple2), any(__pp0).(rt.SkyTuple2))
+			}, rt.AsListT[rt.SkyTuple2](rt.Field(s, "Points")))
+			_ = projected
+			return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+				pathD := Std_Ui_Chart_buildPathD(rt.AsListT[rt.SkyTuple2](projected))
+				_ = pathD
+				return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+					pathNode := Std_Html_node("path", rt.AsListT[rt.SkyAttribute]([]any{Std_Html_Attributes_attribute("d", rt.CoerceString(pathD)), Std_Html_Attributes_attribute("fill", "none"), Std_Html_Attributes_attribute("stroke", rt.CoerceString(col)), Std_Html_Attributes_attribute("stroke-width", "2"), Std_Html_Attributes_attribute("stroke-linejoin", "round"), Std_Html_Attributes_attribute("stroke-linecap", "round")}), rt.AsListT[Std_Html_Html](Std_Ui_Chart_labelTitle(rt.MaybeCoerce[string](rt.Field(s, "Label")))))
+					_ = pathNode
+					return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+						__subject := projected
+						_ = __subject
+						if len(rt.AsList(__subject)) == 0 {
+							return rt.AsListT[Std_Html_Html]([]any{})
+						}
+						if len(rt.AsList(__subject)) == 1 {
+							single := rt.AsList(__subject)[0]
+							_ = single
+							return rt.AsListT[Std_Html_Html]([]any{Std_Ui_Chart_singlePointCircle(rt.CoerceString(col), any(single).(rt.SkyTuple2), rt.AsListT[Std_Html_Html](Std_Ui_Chart_labelTitle(rt.MaybeCoerce[string](rt.Field(s, "Label")))))})
+						}
+						return rt.AsListT[Std_Html_Html]([]any{pathNode})
+						_ = rt.Unreachable("case/__subject")
+						return nil
+					}())
+				}())
+			}())
+		}())
+	}()
+}
+
+func Std_Ui_Chart_singlePointCircle(col string, pt rt.SkyTuple2, extras []Std_Html_Html) Std_Html_Html {
+	return func() Std_Html_Html {
+		__destruct__ := pt
+		_ = __destruct__
+		x := rt.AsTuple2(__destruct__).V0
+		_ = x
+		y := rt.AsTuple2(__destruct__).V1
+		_ = y
+		return rt.Coerce[Std_Html_Html](rt.Coerce[Std_Html_Html](Std_Html_node("circle", rt.AsListT[rt.SkyAttribute]([]any{Std_Html_Attributes_attribute("cx", rt.CoerceString(rt.String_fromFloatT(rt.AsFloat(x)))), Std_Html_Attributes_attribute("cy", rt.CoerceString(rt.String_fromFloatT(rt.AsFloat(y)))), Std_Html_Attributes_attribute("r", "3"), Std_Html_Attributes_attribute("fill", rt.CoerceString(col))}), rt.AsListT[Std_Html_Html](extras))))
+	}()
+}
+
+func Std_Ui_Chart_axesNodes(cfg Std_Ui_Chart_Cfg_R) []Std_Html_Html {
+	return func() []Std_Html_Html {
+		plotW := rt.Sub(rt.Sub(cfg.Width, rt.Field(Std_Ui_Chart_plotInset(), "Left")), rt.Field(Std_Ui_Chart_plotInset(), "Right"))
+		_ = plotW
+		return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+			plotH := rt.Sub(rt.Sub(rt.Field(cfg, "Height"), rt.Field(Std_Ui_Chart_plotInset(), "Top")), rt.Field(Std_Ui_Chart_plotInset(), "Bottom"))
+			_ = plotH
+			return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+				leftStr := rt.String_fromIntT(rt.AsInt(rt.Field(Std_Ui_Chart_plotInset(), "Left")))
+				_ = leftStr
+				return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+					rightStr := rt.String_fromIntT(rt.AsInt(rt.Add(rt.Field(Std_Ui_Chart_plotInset(), "Left"), plotW)))
+					_ = rightStr
+					return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+						topStr := rt.String_fromIntT(rt.AsInt(rt.Field(Std_Ui_Chart_plotInset(), "Top")))
+						_ = topStr
+						return rt.AsListT[Std_Html_Html](func() []Std_Html_Html {
+							bottomStr := rt.String_fromIntT(rt.AsInt(rt.Add(rt.Field(Std_Ui_Chart_plotInset(), "Top"), plotH)))
+							_ = bottomStr
+							return rt.AsListT[Std_Html_Html]([]Std_Html_Html{rt.Coerce[Std_Html_Html](Std_Html_node("line", rt.AsListT[rt.SkyAttribute]([]any{Std_Html_Attributes_attribute("x1", rt.CoerceString(leftStr)), Std_Html_Attributes_attribute("y1", rt.CoerceString(bottomStr)), Std_Html_Attributes_attribute("x2", rt.CoerceString(rightStr)), Std_Html_Attributes_attribute("y2", rt.CoerceString(bottomStr)), Std_Html_Attributes_attribute("stroke", "#9ca3af"), Std_Html_Attributes_attribute("stroke-width", "1")}), rt.AsListT[Std_Html_Html]([]any{}))), rt.Coerce[Std_Html_Html](Std_Html_node("line", rt.AsListT[rt.SkyAttribute]([]any{Std_Html_Attributes_attribute("x1", rt.CoerceString(leftStr)), Std_Html_Attributes_attribute("y1", rt.CoerceString(topStr)), Std_Html_Attributes_attribute("x2", rt.CoerceString(leftStr)), Std_Html_Attributes_attribute("y2", rt.CoerceString(bottomStr)), Std_Html_Attributes_attribute("stroke", "#9ca3af"), Std_Html_Attributes_attribute("stroke-width", "1")}), rt.AsListT[Std_Html_Html]([]any{})))})
+						}())
+					}())
+				}())
+			}())
+		}())
+	}()
+}
+
+func Std_Ui_Chart_sparkline(cfg Std_Ui_Chart_Cfg_R, values []float64) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		n := Sky_Core_List_length__Float(rt.AsListT[float64](values))
+		_ = n
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			col := Std_Ui_colorCss(any(rt.Field(cfg, "Color")).(Std_Ui_Color))
+			_ = col
+			return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+				wf := Std_Ui_Chart_intToFloat(rt.CoerceInt(rt.Field(cfg, "Width")))
+				_ = wf
+				return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+					hf := Std_Ui_Chart_intToFloat(rt.CoerceInt(rt.Field(cfg, "Height")))
+					_ = hf
+					return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+						ys := func() rt.SkyTuple2 {
+							__subject_tFfi := rt.MaybeCoerce[rt.SkyTuple2](rt.Field(cfg, "YRange"))
+							_ = __subject_tFfi
+							if __subject_tFfi.Tag == 0 {
+								r := any(__subject_tFfi.JustValue)
+								_ = r
+								return rt.Coerce[rt.SkyTuple2](r)
+							}
+							if __subject_tFfi.Tag == 1 {
+								return func() rt.SkyTuple2 {
+									__destruct__ := Std_Ui_Chart_yRangeOfFloats(rt.AsListT[float64](values))
+									_ = __destruct__
+									lo := rt.AsTuple2(__destruct__).V0
+									_ = lo
+									hi := rt.AsTuple2(__destruct__).V1
+									_ = hi
+									return rt.Coerce[rt.SkyTuple2](func() any {
+										pad := rt.Mul(rt.Sub(hi, lo), 0.1)
+										_ = pad
+										return func() any {
+											if rt.AsBool(rt.Lte(hi, lo)) {
+												return rt.SkyTuple2{V0: rt.Sub(lo, 0.5), V1: rt.Add(lo, 0.5)}
+											} else {
+												return rt.SkyTuple2{V0: rt.Sub(lo, pad), V1: rt.Add(hi, pad)}
+											}
+											return nil
+										}()
+									}())
+								}()
+							}
+							_ = rt.Unreachable("case/__subject_tFfi")
+							return rt.SkyTuple2{}
+						}()
+						_ = ys
+						return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+							__destruct__ := ys
+							_ = __destruct__
+							yMin := rt.AsTuple2(__destruct__).V0
+							_ = yMin
+							yMax := rt.AsTuple2(__destruct__).V1
+							_ = yMax
+							return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+								ySpan := rt.Sub(yMax, yMin)
+								_ = ySpan
+								return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+									nF := Std_Ui_Chart_intToFloat(rt.CoerceInt(rt.Math_maxT(1, rt.AsInt(rt.Sub(n, 1)))))
+									_ = nF
+									return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+										projected := Sky_Core_List_indexedMap__Float_Tup2Of_Float_Float(func(_lp_i int) func(float64) rt.SkyTuple2 {
+											i := _lp_i
+											_ = i
+											return func(_lp_v float64) rt.SkyTuple2 {
+												v := _lp_v
+												_ = v
+												return func() rt.SkyTuple2 {
+													iF := Std_Ui_Chart_intToFloat(i)
+													_ = iF
+													return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+														x := rt.Mul(rt.Div(iF, nF), wf)
+														_ = x
+														return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+															ny := func() float64 {
+																if rt.AsBool(rt.Eq(ySpan, 0.0)) {
+																	return 0.5
+																} else {
+																	return rt.CoerceFloat(rt.Div(rt.Sub(v, yMin), ySpan))
+																}
+																return 0.0
+															}()
+															_ = ny
+															return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+																y := rt.Mul(rt.Sub(1.0, ny), hf)
+																_ = y
+																return rt.Coerce[rt.SkyTuple2](rt.SkyTuple2{V0: x, V1: y})
+															}())
+														}())
+													}())
+												}()
+											}
+										}, rt.AsListT[float64](values))
+										_ = projected
+										return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+											pathD := Std_Ui_Chart_buildPathD(rt.AsListT[rt.SkyTuple2](projected))
+											_ = pathD
+											return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_html(any(Std_Html_node("svg", rt.AsListT[rt.SkyAttribute]([]any{Std_Html_Attributes_attribute("viewBox", rt.CoerceString(rt.Concat("0 0 ", rt.Concat(rt.String_fromIntT(rt.AsInt(rt.Field(cfg, "Width"))), rt.Concat(" ", rt.String_fromIntT(rt.AsInt(rt.Field(cfg, "Height")))))))), Std_Html_Attributes_attribute("xmlns", "http://www.w3.org/2000/svg"), Std_Html_Attributes_attribute("role", "img"), Std_Html_Attributes_attribute("preserveAspectRatio", "none"), Std_Html_Attributes_style("display: block; width: 100%; height: 100%;")}), rt.AsListT[Std_Html_Html]([]any{Std_Html_node("path", rt.AsListT[rt.SkyAttribute]([]any{Std_Html_Attributes_attribute("d", rt.CoerceString(pathD)), Std_Html_Attributes_attribute("fill", "none"), Std_Html_Attributes_attribute("stroke", rt.CoerceString(col)), Std_Html_Attributes_attribute("stroke-width", "1.5"), Std_Html_Attributes_attribute("stroke-linejoin", "round"), Std_Html_Attributes_attribute("stroke-linecap", "round")}), rt.AsListT[Std_Html_Html]([]any{}))}))))))
+										}())
+									}())
+								}())
+							}())
+						}())
+					}())
+				}())
+			}())
+		}())
+	}()
+}
+
+func Std_Ui_Chart_yRangeOfFloats(vals []float64) rt.SkyTuple2 {
+	return func() rt.SkyTuple2 {
+		__subject := vals
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.SkyTuple2{V0: 0.0, V1: 1.0}
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			v := rt.AsList(__subject)[0]
+			_ = v
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.Coerce[rt.SkyTuple2](Std_Ui_Chart_yRangeOfFloatsHelp(rt.CoerceFloat(v), rt.CoerceFloat(v), rt.AsListT[float64](rest)))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return rt.SkyTuple2{}
+	}()
+}
+
+func Std_Ui_Chart_yRangeOfFloatsHelp(lo float64, hi float64, vals []float64) rt.SkyTuple2 {
+	for {
+		__tco_subject := vals
+		_ = __tco_subject
+		if len(rt.AsList(__tco_subject)) == 0 {
+			return rt.SkyTuple2{V0: lo, V1: hi}
+		}
+		if len(rt.AsList(__tco_subject)) >= 1 {
+			v := rt.AsList(__tco_subject)[0]
+			_ = v
+			rest := any(rt.AsList(__tco_subject)[1:])
+			_ = rest
+			__tco_t0 := rt.Math_minT(rt.AsInt(lo), rt.AsInt(v))
+			__tco_t1 := rt.Math_maxT(rt.AsInt(hi), rt.AsInt(v))
+			__tco_t2 := rest
+			lo = rt.CoerceFloat(__tco_t0)
+			hi = rt.CoerceFloat(__tco_t1)
+			vals = rt.AsListT[float64](__tco_t2)
+			continue
+		}
+		rt.Unreachable("tco/case")
+	}
+}
+
+func Overview_bgPage() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
+}
+
+func Overview_bgRaised() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
+}
+
+func Overview_bgCode() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(44, 50, 60))
+}
+
+func Overview_border_() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(53, 59, 70))
+}
+
+func Overview_borderSoft() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(42, 47, 56))
+}
+
+func Overview_textPrimary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(240, 243, 247))
+}
+
+func Overview_textSecondary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(197, 203, 212))
+}
+
+func Overview_textMuted() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(141, 150, 163))
+}
+
+func Overview_accent() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(126, 182, 255))
+}
+
+func Overview_pillOk() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(88, 199, 116))
+}
+
+func Overview_pillWarn() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(255, 178, 77))
+}
+
+func Overview_pillErr() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(255, 117, 117))
+}
+
+func Overview_viewOverview(model State_Model_R) []Std_Ui_Element {
+	return []Std_Ui_Element{rt.Coerce[Std_Ui_Element](Overview_selectorHeader(rt.Coerce[State_Model_R](model))), rt.Coerce[Std_Ui_Element](Overview_twoPaneLayout(rt.Coerce[State_Model_R](model)))}
+}
+
+func Overview_selectorHeader(model State_Model_R) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		scoped := func() string {
+			if rt.AsBool(rt.Eq(model.SelectedService, "")) {
+				return "All services"
+			} else {
+				return rt.CoerceString(model.SelectedService)
+			}
+			return ""
+		}()
+		_ = scoped
+		return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(10), Std_Ui_Background_color(Overview_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(Overview_border_()), Std_Ui_Border_rounded(6), Std_Ui_paddingXY(14, 10)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(11), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text("SCOPE")).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(14), Std_Ui_Font_bold(), Std_Ui_Font_color(Overview_textPrimary())}), any(Std_Ui_text(rt.CoerceString(scoped))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill())}), any(Std_Ui_text("")).(Std_Ui_Element)), Overview_allServicesChip(rt.CoerceBool(rt.Eq(rt.Field(model, "SelectedService"), "")))}))))
+	}()
+}
+
+func Overview_allServicesChip(isActive bool) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		bg := func() Std_Ui_Color {
+			if rt.AsBool(isActive) {
+				return Overview_accent()
+			} else {
+				return Overview_bgCode()
+			}
+			return Std_Ui_Color{}
+		}()
+		_ = bg
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			fg := func() Std_Ui_Color {
+				if rt.AsBool(isActive) {
+					return Overview_bgPage()
+				} else {
+					return Overview_textSecondary()
+				}
+				return Std_Ui_Color{}
+			}()
+			_ = fg
+			return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_paddingXY(10, 6), Std_Ui_Background_color(any(bg).(Std_Ui_Color)), Std_Ui_Border_rounded(4), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_SelectService(""))), Std_Ui_Font_color(any(fg).(Std_Ui_Color)), Std_Ui_Font_size(12), Std_Ui_Font_bold()}), any(Std_Ui_text("All services")).(Std_Ui_Element))))
+		}())
+	}()
+}
+
+func Overview_twoPaneLayout(model State_Model_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(16), Std_Ui_alignTop()}), rt.AsListT[Std_Ui_Element]([]any{Overview_serviceCardScroller(rt.Coerce[State_Model_R](model)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill())}), any(Overview_rightPane(rt.Coerce[State_Model_R](model))).(Std_Ui_Element))})))
+}
+
+func Overview_serviceCardScroller(model State_Model_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(320)).(Std_Ui_Length)), Std_Ui_spacing(8), Std_Ui_alignTop()}), rt.AsListT[Std_Ui_Element](func() any {
+		if rt.AsBool(Sky_Core_List_isEmpty__ServiceStat(rt.AsListT[State_ServiceStat_R](model.ServiceStats))) {
+			return []any{Overview_emptyCard()}
+		} else {
+			return Sky_Core_List_map_(func(__pp0 State_ServiceStat_R) Std_Ui_Element {
+				return Overview_serviceCard(rt.CoerceString(model.SelectedService), rt.Coerce[State_ServiceStat_R](__pp0))
+			}, rt.AsListT[State_ServiceStat_R](model.ServiceStats))
+		}
+		return nil
+	}())))
+}
+
+func Overview_emptyCard() Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(Overview_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(Overview_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(14), Std_Ui_spacing(6), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(11), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text("NO SERVICES YET")).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(13), Std_Ui_Font_color(Overview_textSecondary())}), any(Std_Ui_text("Push telemetry to the hub via OTLP HTTP or the Sky exporter.")).(Std_Ui_Element))})))
+}
+
+func Overview_serviceCard(selected string, stat State_ServiceStat_R) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		isSelected := rt.Eq(selected, stat.Name)
+		_ = isSelected
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			borderColor := func() Std_Ui_Color {
+				if rt.AsBool(isSelected) {
+					return Overview_accent()
+				} else {
+					return Overview_border_()
+				}
+				return Std_Ui_Color{}
+			}()
+			_ = borderColor
+			return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(Overview_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(any(borderColor).(Std_Ui_Color)), Std_Ui_Border_rounded(6), Std_Ui_padding(12), Std_Ui_spacing(8), Std_Ui_width(Std_Ui_fill()), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_SelectService(rt.CoerceString(rt.Field(stat, "Name")))))}), rt.AsListT[Std_Ui_Element]([]any{Overview_cardHeader(rt.Coerce[State_ServiceStat_R](stat)), Overview_cardMetricsRow(rt.Coerce[State_ServiceStat_R](stat)), Overview_cardSparklines(rt.Coerce[State_ServiceStat_R](stat))}))))
+		}())
+	}()
+}
+
+func Overview_cardHeader(stat State_ServiceStat_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(8)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_Font_size(14), Std_Ui_Font_bold(), Std_Ui_Font_color(Overview_textPrimary())}), any(Std_Ui_text(rt.CoerceString(stat.Name))).(Std_Ui_Element)), Overview_statusPill(rt.CoerceString(stat.Status))})))
+}
+
+func Overview_statusPill(status string) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		color := Overview_statusColor(status)
+		_ = color
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			label := rt.String_toUpperT(rt.AsString(status))
+			_ = label
+			return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(any(color).(Std_Ui_Color)), Std_Ui_Border_rounded(3), Std_Ui_paddingXY(6, 2), Std_Ui_Font_color(Overview_bgPage()), Std_Ui_Font_size(10), Std_Ui_Font_bold()}), any(Std_Ui_text(rt.CoerceString(label))).(Std_Ui_Element))))
+		}())
+	}()
+}
+
+func Overview_statusColor(status string) Std_Ui_Color {
+	return func() Std_Ui_Color {
+		__subject := status
+		_ = __subject
+		if __subject == "ok" {
+			return Overview_pillOk()
+		}
+		if __subject == "warn" {
+			return Overview_pillWarn()
+		}
+		if __subject == "err" {
+			return Overview_pillErr()
+		}
+		return Overview_textMuted()
+		_ = rt.Unreachable("case/__subject")
+		return Std_Ui_Color{}
+	}()
+}
+
+func Overview_cardMetricsRow(stat State_ServiceStat_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(14)}), rt.AsListT[Std_Ui_Element]([]any{Overview_statBlock("REQS/S", rt.CoerceString(Overview_formatFloat(rt.CoerceFloat(stat.ReqsPerSec)))), Overview_statBlock("P95 MS", rt.CoerceString(Overview_formatFloat(rt.CoerceFloat(stat.P95Ms)))), Overview_statBlock("ERR %", rt.CoerceString(Overview_formatPercent(rt.CoerceFloat(stat.ErrorRate))))})))
+}
+
+func Overview_statBlock(label string, value string) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_spacing(2), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(9), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text(label)).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(13), Std_Ui_Font_bold(), Std_Ui_Font_color(Overview_textPrimary()), Std_Ui_Font_family("ui-monospace, Menlo, monospace")}), any(Std_Ui_text(value)).(Std_Ui_Element))})))
+}
+
+func Overview_cardSparklines(stat State_ServiceStat_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(8)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(2)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(9), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text("REQ/S")).(Std_Ui_Element)), Overview_sparkOrPlaceholder(rt.AsListT[float64](stat.SparkRps), Overview_accent())})), Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(2)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(9), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text("P95")).(Std_Ui_Element)), Overview_sparkOrPlaceholder(rt.AsListT[float64](stat.SparkP95), Overview_pillWarn())}))})))
+}
+
+func Overview_sparkOrPlaceholder(values []float64, color Std_Ui_Color) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		cfg := Std_Ui_Chart_withGridLines(false, rt.Coerce[Std_Ui_Chart_Cfg_R](Std_Ui_Chart_withColor(any(color).(Std_Ui_Color), rt.Coerce[Std_Ui_Chart_Cfg_R](Std_Ui_Chart_withHeight(28, rt.Coerce[Std_Ui_Chart_Cfg_R](Std_Ui_Chart_withWidth(120, Std_Ui_Chart_defaultCfg())))))))
+		_ = cfg
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			if rt.AsBool(Sky_Core_List_isEmpty__Float(rt.AsListT[float64](values))) {
+				return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_Background_color(Overview_bgCode()), Std_Ui_Border_rounded(3), Std_Ui_paddingXY(6, 6), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_size(10)}), any(Std_Ui_text("no data")).(Std_Ui_Element)))
+			} else {
+				return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_Background_color(Overview_bgCode()), Std_Ui_Border_rounded(3), Std_Ui_padding(2)}), any(Std_Ui_Chart_sparkline(rt.Coerce[Std_Ui_Chart_Cfg_R](cfg), rt.AsListT[float64](values))).(Std_Ui_Element)))
+			}
+			return Std_Ui_Element{}
+		}())
+	}()
+}
+
+func Overview_rightPane(model State_Model_R) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		if rt.AsBool(rt.Eq(model.SelectedService, "")) {
+			return rt.Coerce[Std_Ui_Element](Overview_aggregatePane(rt.AsListT[State_ServiceStat_R](model.ServiceStats)))
+		} else {
+			return rt.Coerce[Std_Ui_Element](Overview_focusedPane(rt.Coerce[State_Model_R](model)))
+		}
+		return Std_Ui_Element{}
+	}()
+}
+
+func Overview_aggregatePane(stats []State_ServiceStat_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(12)}), rt.AsListT[Std_Ui_Element]([]any{Overview_aggregateChartPanel("Requests / second (per service)", rt.AsListT[Std_Ui_Chart_Series_R](Overview_aggregateRpsSeries(rt.AsListT[State_ServiceStat_R](stats)))), Overview_aggregateChartPanel("p95 latency (ms, per service)", rt.AsListT[Std_Ui_Chart_Series_R](Overview_aggregateP95Series(rt.AsListT[State_ServiceStat_R](stats)))), Overview_errorRatePanel(rt.AsListT[State_ServiceStat_R](stats))})))
+}
+
+func Overview_aggregateChartPanel(title string, seriesList []Std_Ui_Chart_Series_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(Overview_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(Overview_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(14), Std_Ui_spacing(10), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(11), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_bold(), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text(rt.CoerceString(rt.String_toUpperT(rt.AsString(title))))).(Std_Ui_Element)), Overview_chartOrEmpty(rt.AsListT[Std_Ui_Chart_Series_R](seriesList))})))
+}
+
+func Overview_chartOrEmpty(seriesList []Std_Ui_Chart_Series_R) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		if rt.AsBool(Sky_Core_List_isEmpty__Series(rt.AsListT[Std_Ui_Chart_Series_R](seriesList))) {
+			return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_padding(16), Std_Ui_centerX(), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_italic(), Std_Ui_Font_size(12)}), any(Std_Ui_text("Waiting for samples…")).(Std_Ui_Element)))
+		} else {
+			return func() Std_Ui_Element {
+				cfg := Std_Ui_Chart_withColor(Overview_accent(), rt.Coerce[Std_Ui_Chart_Cfg_R](Std_Ui_Chart_withHeight(160, rt.Coerce[Std_Ui_Chart_Cfg_R](Std_Ui_Chart_withWidth(600, Std_Ui_Chart_defaultCfg())))))
+				_ = cfg
+				return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_Chart_line(rt.Coerce[Std_Ui_Chart_Cfg_R](cfg), rt.AsListT[Std_Ui_Chart_Series_R](seriesList))))
+			}()
+		}
+		return Std_Ui_Element{}
+	}()
+}
+
+func Overview_aggregateRpsSeries(stats []State_ServiceStat_R) []Std_Ui_Chart_Series_R {
+	return rt.AsListT[Std_Ui_Chart_Series_R](Sky_Core_List_filter__RecOf_color_label_points__ab2a018f(func(_lp_s Std_Ui_Chart_Series_R) bool {
+		s := _lp_s
+		_ = s
+		return rt.CoerceBool(rt.Basics_notT(rt.AsBool(Sky_Core_List_isEmpty__Point(rt.AsListT[rt.SkyTuple2](rt.Field(s, "Points"))))))
+	}, rt.AsListT[Std_Ui_Chart_Series_R](Sky_Core_List_map_(func(stat any) Std_Ui_Chart_Series_R {
+		return rt.Coerce[Std_Ui_Chart_Series_R](Overview_seriesFromValues(rt.CoerceString(rt.Field(stat, "Name")), rt.AsListT[float64](rt.Field(stat, "SparkRps"))))
+	}, rt.AsListAny(stats)))))
+}
+
+func Overview_aggregateP95Series(stats []State_ServiceStat_R) []Std_Ui_Chart_Series_R {
+	return rt.AsListT[Std_Ui_Chart_Series_R](Sky_Core_List_filter__RecOf_color_label_points__ab2a018f(func(_lp_s Std_Ui_Chart_Series_R) bool {
+		s := _lp_s
+		_ = s
+		return rt.CoerceBool(rt.Basics_notT(rt.AsBool(Sky_Core_List_isEmpty__Point(rt.AsListT[rt.SkyTuple2](rt.Field(s, "Points"))))))
+	}, rt.AsListT[Std_Ui_Chart_Series_R](Sky_Core_List_map_(func(stat any) Std_Ui_Chart_Series_R {
+		return rt.Coerce[Std_Ui_Chart_Series_R](Overview_seriesFromValues(rt.CoerceString(rt.Field(stat, "Name")), rt.AsListT[float64](rt.Field(stat, "SparkP95"))))
+	}, rt.AsListAny(stats)))))
+}
+
+func Overview_seriesFromValues(label string, values []float64) Std_Ui_Chart_Series_R {
+	return func() Std_Ui_Chart_Series_R {
+		points := Sky_Core_List_indexedMap__Float_Point(func(__c0 int) func(float64) rt.SkyTuple2 {
+			return func(__c1 float64) rt.SkyTuple2 { return Overview_pairIndex(__c0, __c1) }
+		}, rt.AsListT[float64](values))
+		_ = points
+		return rt.Coerce[Std_Ui_Chart_Series_R](rt.Coerce[Std_Ui_Chart_Series_R](Std_Ui_Chart_withSeriesLabel(rt.CoerceString(label), rt.Coerce[Std_Ui_Chart_Series_R](Std_Ui_Chart_series(rt.AsListT[rt.SkyTuple2](points))))))
+	}()
+}
+
+func Overview_pairIndex(i int, v float64) rt.SkyTuple2 {
+	return rt.SkyTuple2{V0: Overview_intToFloat(i), V1: v}
+}
+
+func Overview_intToFloat(n int) float64 {
+	return func() float64 {
+		__subject_tFfi := rt.MaybeCoerce[float64](rt.String_toFloat(rt.String_fromIntT(rt.AsInt(n))))
+		_ = __subject_tFfi
+		if __subject_tFfi.Tag == 0 {
+			f := any(__subject_tFfi.JustValue)
+			_ = f
+			return rt.CoerceFloat(f)
+		}
+		if __subject_tFfi.Tag == 1 {
+			return 0.0
+		}
+		_ = rt.Unreachable("case/__subject_tFfi")
+		return 0.0
+	}()
+}
+
+func Overview_errorRatePanel(stats []State_ServiceStat_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(Overview_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(Overview_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(14), Std_Ui_spacing(8), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(11), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_bold(), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text("ERROR RATE (5xx) BY SERVICE")).(Std_Ui_Element)), func() any {
+		if rt.AsBool(Sky_Core_List_isEmpty__ServiceStat(rt.AsListT[State_ServiceStat_R](stats))) {
+			return Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_padding(16), Std_Ui_centerX(), Std_Ui_Font_color(Overview_textMuted()), Std_Ui_Font_italic(), Std_Ui_Font_size(12)}), any(Std_Ui_text("Waiting for samples…")).(Std_Ui_Element))
+		} else {
+			return Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(6)}), rt.AsListT[Std_Ui_Element](Sky_Core_List_map_(Overview_errorRateRow, rt.AsListT[State_ServiceStat_R](stats))))
+		}
+		return nil
+	}()})))
+}
+
+func Overview_errorRateRow(stat State_ServiceStat_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_paddingXY(0, 4), Std_Ui_spacing(10), Std_Ui_Border_widthEach(struct {
+		Bottom any
+		Left   any
+		Right  any
+		Top    any
+	}{Bottom: 1, Left: 0, Right: 0, Top: 0}), Std_Ui_Border_color(Overview_borderSoft())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(180)).(Std_Ui_Length)), Std_Ui_Font_size(12), Std_Ui_Font_color(Overview_textPrimary()), Std_Ui_Font_family("ui-monospace, Menlo, monospace")}), any(Std_Ui_text(rt.CoerceString(stat.Name))).(Std_Ui_Element)), Overview_statusPill(rt.CoerceString(stat.Status)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_Font_size(12), Std_Ui_Font_color(Overview_textSecondary()), Std_Ui_Font_family("ui-monospace, Menlo, monospace")}), any(Std_Ui_text(rt.CoerceString(Overview_formatPercent(rt.CoerceFloat(stat.ErrorRate))))).(Std_Ui_Element))})))
+}
+
+func Overview_focusedPane(model State_Model_R) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		maybeStat := Overview_findStat(rt.CoerceString(model.SelectedService), rt.AsListT[State_ServiceStat_R](model.ServiceStats))
+		_ = maybeStat
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			__subject := rt.MaybeCoerce[any](maybeStat)
+			_ = __subject
+			if __subject.Tag == 1 {
+				return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(Overview_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(Overview_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(14), Std_Ui_spacing(10), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(13), Std_Ui_Font_color(Overview_textSecondary()), Std_Ui_Font_italic()}), any(Std_Ui_text(rt.CoerceString(rt.Concat("Service \"", rt.Concat(rt.Field(model, "SelectedService"), "\" has no recent samples yet — "+"click All services to return to aggregate."))))).(Std_Ui_Element))})))
+			}
+			if __subject.Tag == 0 {
+				stat := rt.MaybeJust(any(__subject))
+				_ = stat
+				return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(12)}), rt.AsListT[Std_Ui_Element]([]any{Overview_focusedHeader(rt.Coerce[State_ServiceStat_R](stat)), Overview_focusedCharts(rt.Coerce[State_ServiceStat_R](stat)), Overview_focusedHint()})))
+			}
+			_ = rt.Unreachable("case/__subject")
+			return Std_Ui_Element{}
+		}())
+	}()
+}
+
+func Overview_focusedHeader(stat State_ServiceStat_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(Overview_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(Overview_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(14), Std_Ui_spacing(8), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(10)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_Font_size(16), Std_Ui_Font_bold(), Std_Ui_Font_color(Overview_textPrimary())}), any(Std_Ui_text(rt.CoerceString(stat.Name))).(Std_Ui_Element)), Overview_statusPill(rt.CoerceString(stat.Status))})), Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(20)}), rt.AsListT[Std_Ui_Element]([]any{Overview_statBlock("REQS/S", rt.CoerceString(Overview_formatFloat(rt.CoerceFloat(stat.ReqsPerSec)))), Overview_statBlock("P95 MS", rt.CoerceString(Overview_formatFloat(rt.CoerceFloat(stat.P95Ms)))), Overview_statBlock("ERR %", rt.CoerceString(Overview_formatPercent(rt.CoerceFloat(stat.ErrorRate))))}))})))
+}
+
+func Overview_focusedCharts(stat State_ServiceStat_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(12)}), rt.AsListT[Std_Ui_Element]([]any{Overview_aggregateChartPanel("Requests / second", rt.AsListT[Std_Ui_Chart_Series_R](Overview_singleSeries(rt.CoerceString(stat.Name), rt.AsListT[float64](stat.SparkRps), Overview_accent()))), Overview_aggregateChartPanel("p95 latency (ms)", rt.AsListT[Std_Ui_Chart_Series_R](Overview_singleSeries(rt.CoerceString(stat.Name), rt.AsListT[float64](stat.SparkP95), Overview_pillWarn())))})))
+}
+
+func Overview_singleSeries(label string, values []float64, color Std_Ui_Color) []Std_Ui_Chart_Series_R {
+	return func() []Std_Ui_Chart_Series_R {
+		if rt.AsBool(Sky_Core_List_isEmpty__Float(rt.AsListT[float64](values))) {
+			return []Std_Ui_Chart_Series_R{}
+		} else {
+			return []Std_Ui_Chart_Series_R{rt.Coerce[Std_Ui_Chart_Series_R](Std_Ui_Chart_withSeriesColor(any(color).(Std_Ui_Color), rt.Coerce[Std_Ui_Chart_Series_R](Std_Ui_Chart_withSeriesLabel(rt.CoerceString(label), rt.Coerce[Std_Ui_Chart_Series_R](Std_Ui_Chart_series(rt.AsListT[rt.SkyTuple2](Sky_Core_List_indexedMap__Float_Tup2Of_Float_Float(func(__c0 int) func(float64) rt.SkyTuple2 {
+				return func(__c1 float64) rt.SkyTuple2 { return Overview_pairIndex(__c0, __c1) }
+			}, rt.AsListT[float64](values)))))))))}
+		}
+		return nil
+	}()
+}
+
+func Overview_focusedHint() Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(Overview_bgCode()), Std_Ui_Border_rounded(4), Std_Ui_padding(10), Std_Ui_width(Std_Ui_fill()), Std_Ui_Font_size(12), Std_Ui_Font_color(Overview_textSecondary())}), any(Std_Ui_text("Drill into Logs / Traces / Errors tabs above — they'll "+"auto-filter to the selected service once B6 ships.")).(Std_Ui_Element)))
+}
+
+func Overview_findStat(name string, stats []State_ServiceStat_R) rt.SkyMaybe[State_ServiceStat_R] {
+	return rt.MaybeCoerce[State_ServiceStat_R](Sky_Core_List_find__RecOf_errorRate_name_p95Ms_reqsPerSec_sparkP95_sparkRps_status__865105ba(func(_lp_s State_ServiceStat_R) bool {
+		s := _lp_s
+		_ = s
+		return rt.CoerceBool(rt.Eq(rt.Field(s, "Name"), name))
+	}, rt.AsListT[State_ServiceStat_R](stats)))
+}
+
+func Overview_formatFloat(f float64) string {
+	return func() string {
+		scaled := rt.Math_roundT(rt.AsFloat(rt.Mul(f, 100.0)))
+		_ = scaled
+		return rt.CoerceString(func() string {
+			whole := rt.IntDiv(scaled, 100)
+			_ = whole
+			return rt.CoerceString(func() string {
+				frac := rt.Basics_modByT(100, rt.AsInt(scaled))
+				_ = frac
+				return rt.CoerceString(func() string {
+					fracS := func() string {
+						if rt.AsBool(rt.Lt(frac, 10)) {
+							return rt.CoerceString(rt.Concat("0", rt.String_fromIntT(rt.AsInt(frac))))
+						} else {
+							return rt.CoerceString(rt.String_fromIntT(rt.AsInt(frac)))
+						}
+						return ""
+					}()
+					_ = fracS
+					return rt.CoerceString(func() string {
+						if rt.AsBool(rt.Eq(frac, 0)) {
+							return rt.CoerceString(rt.String_fromIntT(rt.AsInt(whole)))
+						} else {
+							return rt.CoerceString(rt.Concat(rt.String_fromIntT(rt.AsInt(whole)), rt.Concat(".", fracS)))
+						}
+						return ""
+					}())
+				}())
+			}())
+		}())
+	}()
+}
+
+func Overview_formatPercent(f float64) string {
+	return func() string {
+		scaled := rt.Math_roundT(rt.AsFloat(rt.Mul(f, 10000.0)))
+		_ = scaled
+		return rt.CoerceString(func() string {
+			whole := rt.IntDiv(scaled, 100)
+			_ = whole
+			return rt.CoerceString(func() string {
+				frac := rt.Basics_modByT(100, rt.AsInt(scaled))
+				_ = frac
+				return rt.CoerceString(func() string {
+					fracStr := func() string {
+						if rt.AsBool(rt.Lt(frac, 10)) {
+							return rt.CoerceString(rt.Concat("0", rt.String_fromIntT(rt.AsInt(frac))))
+						} else {
+							return rt.CoerceString(rt.String_fromIntT(rt.AsInt(frac)))
+						}
+						return ""
+					}()
+					_ = fracStr
+					return rt.CoerceString(rt.CoerceString(rt.Concat(rt.String_fromIntT(rt.AsInt(whole)), rt.Concat(".", rt.Concat(fracStr, "%")))))
+				}())
+			}())
+		}())
+	}()
+}
+
+func MetricsTab_bgPage() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
+}
+
+func MetricsTab_bgRaised() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
+}
+
+func MetricsTab_bgCode() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(44, 50, 60))
+}
+
+func MetricsTab_border_() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(53, 59, 70))
+}
+
+func MetricsTab_borderSoft() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(42, 47, 56))
+}
+
+func MetricsTab_textPrimary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(240, 243, 247))
+}
+
+func MetricsTab_textSecondary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(197, 203, 212))
+}
+
+func MetricsTab_textMuted() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(141, 150, 163))
+}
+
+func MetricsTab_accent() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(126, 182, 255))
+}
+
+func MetricsTab_viewMetricsTab(model State_Model_R) []Std_Ui_Element {
+	return []Std_Ui_Element{rt.Coerce[Std_Ui_Element](MetricsTab_scopeBanner(rt.CoerceString(rt.Field(model, "SelectedService")))), rt.Coerce[Std_Ui_Element](MetricsTab_metricsPanel(rt.AsListT[State_MetricRow_R](rt.Field(model, "Metrics"))))}
+}
+
+func MetricsTab_scopeBanner(selected string) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		label := func() string {
+			if rt.AsBool(rt.Eq(selected, "")) {
+				return "All services"
+			} else {
+				return selected
+			}
+			return ""
+		}()
+		_ = label
+		return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(10), Std_Ui_Background_color(MetricsTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(MetricsTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_paddingXY(14, 10)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(11), Std_Ui_Font_color(MetricsTab_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text("SCOPE")).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(14), Std_Ui_Font_bold(), Std_Ui_Font_color(MetricsTab_textPrimary())}), any(Std_Ui_text(rt.CoerceString(label))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill())}), any(Std_Ui_text("")).(Std_Ui_Element)), MetricsTab_allServicesChip(rt.CoerceBool(rt.Eq(selected, "")))}))))
+	}()
+}
+
+func MetricsTab_allServicesChip(isActive bool) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		bg := func() Std_Ui_Color {
+			if rt.AsBool(isActive) {
+				return MetricsTab_accent()
+			} else {
+				return MetricsTab_bgCode()
+			}
+			return Std_Ui_Color{}
+		}()
+		_ = bg
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			fg := func() Std_Ui_Color {
+				if rt.AsBool(isActive) {
+					return MetricsTab_bgPage()
+				} else {
+					return MetricsTab_textSecondary()
+				}
+				return Std_Ui_Color{}
+			}()
+			_ = fg
+			return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_paddingXY(10, 6), Std_Ui_Background_color(any(bg).(Std_Ui_Color)), Std_Ui_Border_rounded(4), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_SelectService(""))), Std_Ui_Font_color(any(fg).(Std_Ui_Color)), Std_Ui_Font_size(12), Std_Ui_Font_bold()}), any(Std_Ui_text("All services")).(Std_Ui_Element))))
+		}())
+	}()
+}
+
+func MetricsTab_metricsPanel(rows []State_MetricRow_R) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](MetricsTab_panel("Metrics snapshot", rt.AsListT[Std_Ui_Element](func() any {
+		if rt.AsBool(Sky_Core_List_isEmpty__MetricRow(rt.AsListT[State_MetricRow_R](rows))) {
+			return []any{MetricsTab_emptyState("No metrics for this service yet — exporters typically push every 2 s.")}
+		} else {
+			return Sky_Core_List_map_(MetricsTab_metricRowView, rt.AsListT[State_MetricRow_R](rows))
+		}
+		return nil
+	}())))
+}
+
+func MetricsTab_metricRowView(r State_MetricRow_R) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		valueStr := func() string {
+			__subject := r.Typ
+			_ = __subject
+			if __subject == "histogram" {
+				return rt.CoerceString(rt.Concat("n=", rt.Concat(MetricsTab_formatFloat(rt.CoerceFloat(r.Count)), rt.Concat(" avg=", MetricsTab_formatAvg(rt.CoerceFloat(r.Sum), rt.CoerceFloat(r.Count))))))
+			}
+			return rt.CoerceString(MetricsTab_formatFloat(rt.CoerceFloat(r.Value)))
+			_ = rt.Unreachable("case/__subject")
+			return ""
+		}()
+		_ = valueStr
+		return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_paddingXY(0, 6), Std_Ui_spacing(12), Std_Ui_Border_widthEach(struct {
+			Bottom any
+			Left   any
+			Right  any
+			Top    any
+		}{Bottom: 1, Left: 0, Right: 0, Top: 0}), Std_Ui_Border_color(MetricsTab_borderSoft())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(60)).(Std_Ui_Length)), Std_Ui_Font_size(10), Std_Ui_Font_color(MetricsTab_textMuted()), Std_Ui_Font_family("ui-monospace, Menlo, monospace")}), any(Std_Ui_text(rt.CoerceString(rt.String_toUpperT(rt.AsString(rt.Field(r, "Typ")))))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(260)).(Std_Ui_Length)), Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(12), Std_Ui_Font_color(MetricsTab_textPrimary())}), any(Std_Ui_text(rt.CoerceString(rt.Field(r, "Name")))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(180)).(Std_Ui_Length)), Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(11), Std_Ui_Font_color(MetricsTab_textMuted())}), any(Std_Ui_text(rt.CoerceString(rt.Field(r, "Labels")))).(Std_Ui_Element)), MetricsTab_codeBadge(rt.CoerceString(valueStr))}))))
+	}()
+}
+
+func MetricsTab_formatFloat(f float64) string {
+	return func() string {
+		scaled := rt.Math_roundT(rt.AsFloat(rt.Mul(f, 100.0)))
+		_ = scaled
+		return rt.CoerceString(func() string {
+			whole := rt.IntDiv(scaled, 100)
+			_ = whole
+			return rt.CoerceString(func() string {
+				frac := rt.Basics_modByT(100, rt.AsInt(scaled))
+				_ = frac
+				return rt.CoerceString(func() string {
+					fracS := func() string {
+						if rt.AsBool(rt.Lt(frac, 10)) {
+							return rt.CoerceString(rt.Concat("0", rt.String_fromIntT(rt.AsInt(frac))))
+						} else {
+							return rt.CoerceString(rt.String_fromIntT(rt.AsInt(frac)))
+						}
+						return ""
+					}()
+					_ = fracS
+					return rt.CoerceString(func() string {
+						if rt.AsBool(rt.Eq(frac, 0)) {
+							return rt.CoerceString(rt.String_fromIntT(rt.AsInt(whole)))
+						} else {
+							return rt.CoerceString(rt.Concat(rt.String_fromIntT(rt.AsInt(whole)), rt.Concat(".", fracS)))
+						}
+						return ""
+					}())
+				}())
+			}())
+		}())
+	}()
+}
+
+func MetricsTab_formatAvg(sum float64, count float64) string {
+	return func() string {
+		if rt.AsBool(count == 0.0) {
+			return "—"
+		} else {
+			return rt.CoerceString(MetricsTab_formatFloat(sum / count))
+		}
+		return ""
+	}()
+}
+
+func MetricsTab_panel(title string, children []Std_Ui_Element) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(MetricsTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(MetricsTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(14), Std_Ui_spacing(6), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element](rt.List_cons(Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(12), Std_Ui_Font_bold(), Std_Ui_Font_color(MetricsTab_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2), Std_Ui_paddingXY(0, 4)}), any(Std_Ui_text(rt.CoerceString(rt.String_toUpperT(rt.AsString(title))))).(Std_Ui_Element)), children))))
+}
+
+func MetricsTab_codeBadge(value string) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(MetricsTab_bgCode()), Std_Ui_Border_rounded(3), Std_Ui_paddingXY(6, 2), Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(12), Std_Ui_Font_color(MetricsTab_textPrimary())}), any(Std_Ui_text(value)).(Std_Ui_Element)))
+}
+
+func MetricsTab_emptyState(message string) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_padding(20), Std_Ui_centerX(), Std_Ui_Font_color(MetricsTab_textMuted()), Std_Ui_Font_italic()}), any(Std_Ui_text(message)).(Std_Ui_Element)))
+}
+
+func TracesTab_bgPage() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
+}
+
+func TracesTab_bgRaised() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(20, 23, 28))
+}
+
+func TracesTab_bgCode() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(44, 50, 60))
+}
+
+func TracesTab_border_() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(53, 59, 70))
+}
+
+func TracesTab_borderSoft() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(42, 47, 56))
+}
+
+func TracesTab_textPrimary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(240, 243, 247))
+}
+
+func TracesTab_textSecondary() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(197, 203, 212))
+}
+
+func TracesTab_textMuted() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(141, 150, 163))
+}
+
+func TracesTab_accent() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(126, 182, 255))
+}
+
+func TracesTab_err() Std_Ui_Color {
+	return rt.Coerce[Std_Ui_Color](Std_Ui_rgb(255, 117, 117))
+}
+
+func TracesTab_viewTracesTab(model State_Model_R) []Std_Ui_Element {
+	return []Std_Ui_Element{rt.Coerce[Std_Ui_Element](TracesTab_scopeBanner(rt.CoerceString(rt.Field(model, "SelectedService")))), rt.Coerce[Std_Ui_Element](TracesTab_tracesFilterPanel(rt.CoerceString(rt.Field(model, "TraceQuery")))), rt.Coerce[Std_Ui_Element](TracesTab_tracesPanel(rt.CoerceString(rt.Field(model, "TraceQuery")), rt.AsListT[State_TraceRow_R](rt.Field(model, "Traces"))))}
+}
+
+func TracesTab_scopeBanner(selected string) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		label := func() string {
+			if rt.AsBool(rt.Eq(selected, "")) {
+				return "All services"
+			} else {
+				return selected
+			}
+			return ""
+		}()
+		_ = label
+		return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_spacing(10), Std_Ui_Background_color(TracesTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(TracesTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_paddingXY(14, 10)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(11), Std_Ui_Font_color(TracesTab_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2)}), any(Std_Ui_text("SCOPE")).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(14), Std_Ui_Font_bold(), Std_Ui_Font_color(TracesTab_textPrimary())}), any(Std_Ui_text(rt.CoerceString(label))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill())}), any(Std_Ui_text("")).(Std_Ui_Element)), TracesTab_allServicesChip(rt.CoerceBool(rt.Eq(selected, "")))}))))
+	}()
+}
+
+func TracesTab_allServicesChip(isActive bool) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		bg := func() Std_Ui_Color {
+			if rt.AsBool(isActive) {
+				return TracesTab_accent()
+			} else {
+				return TracesTab_bgCode()
+			}
+			return Std_Ui_Color{}
+		}()
+		_ = bg
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			fg := func() Std_Ui_Color {
+				if rt.AsBool(isActive) {
+					return TracesTab_bgPage()
+				} else {
+					return TracesTab_textSecondary()
+				}
+				return Std_Ui_Color{}
+			}()
+			_ = fg
+			return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_paddingXY(10, 6), Std_Ui_Background_color(any(bg).(Std_Ui_Color)), Std_Ui_Border_rounded(4), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_SelectService(""))), Std_Ui_Font_color(any(fg).(Std_Ui_Color)), Std_Ui_Font_size(12), Std_Ui_Font_bold()}), any(Std_Ui_text("All services")).(Std_Ui_Element))))
+		}())
+	}()
+}
+
+func TracesTab_tracesFilterPanel(query string) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(TracesTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(TracesTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(12), Std_Ui_spacing(8), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_input(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_htmlAttribute("type", "search"), Std_Ui_htmlAttribute("placeholder", "Filter traces by span name or trace id…"), Std_Ui_htmlAttribute("value", query), Std_Ui_onInput(State_Msg_TraceFilterQuery), Std_Ui_width(Std_Ui_fill()), Std_Ui_Background_color(TracesTab_bgCode()), Std_Ui_Border_width(1), Std_Ui_Border_color(TracesTab_border_()), Std_Ui_Border_rounded(4), Std_Ui_paddingXY(8, 6), Std_Ui_Font_color(TracesTab_textPrimary()), Std_Ui_Font_size(12), Std_Ui_Font_family("ui-monospace, Menlo, monospace")})), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_paddingXY(8, 6), Std_Ui_Background_color(TracesTab_bgCode()), Std_Ui_Border_rounded(4), Std_Ui_pointer(), Std_Ui_onClick(any(State_Msg_TraceFilterQuery(""))), Std_Ui_Font_color(TracesTab_textSecondary()), Std_Ui_Font_size(11)}), any(Std_Ui_text("clear")).(Std_Ui_Element))})))
+}
+
+func TracesTab_tracesPanel(query string, rows []State_TraceRow_R) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		lq := rt.String_toLowerT(rt.AsString(rt.String_trimT(rt.AsString(query))))
+		_ = lq
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			matches := func(r State_TraceRow_R) bool {
+				return rt.CoerceBool(rt.Or(rt.String_containsT(rt.AsString(lq), rt.AsString(rt.String_toLowerT(rt.AsString(rt.Field(r, "Name"))))), rt.String_containsT(rt.AsString(lq), rt.AsString(rt.String_toLowerT(rt.AsString(rt.Field(r, "TraceId")))))))
+			}
+			_ = matches
+			return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+				keepTrace := func(tid string) bool {
+					return rt.CoerceBool(Sky_Core_List_any_(func(r any) bool {
+						return rt.CoerceBool(rt.And(rt.Eq(rt.Field(r, "TraceId"), tid), rt.SkyCall(matches, r)))
+					}, rt.AsListAny(rows)))
+				}
+				_ = keepTrace
+				return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+					visibleIds := func() []string {
+						if rt.AsBool(rt.Eq(lq, "")) {
+							return rt.AsListT[string](TracesTab_distinctTraceIds(rt.AsListT[State_TraceRow_R](rows)))
+						} else {
+							return rt.AsListT[string](Sky_Core_List_filter__String(rt.Coerce[func(string) bool](keepTrace), rt.AsListT[string](TracesTab_distinctTraceIds(rt.AsListT[State_TraceRow_R](rows)))))
+						}
+						return nil
+					}()
+					_ = visibleIds
+					return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](TracesTab_panel("Recent traces", rt.AsListT[Std_Ui_Element](func() any {
+						if rt.AsBool(Sky_Core_List_isEmpty__TraceRow(rt.AsListT[State_TraceRow_R](rows))) {
+							return []any{TracesTab_emptyState("No traces captured for this service yet.")}
+						} else {
+							if rt.AsBool(Sky_Core_List_isEmpty__String(rt.AsListT[string](visibleIds))) {
+								return []any{TracesTab_emptyState("No traces match the filter.")}
+							} else {
+								return Sky_Core_List_map_(func(__pp0 string) Std_Ui_Element {
+									return TracesTab_traceGroupView(rt.AsListT[State_TraceRow_R](rows), rt.CoerceString(__pp0))
+								}, rt.AsListT[string](visibleIds))
+							}
+						}
+						return nil
+					}()))))
+				}())
+			}())
+		}())
+	}()
+}
+
+func TracesTab_distinctTraceIds(rows []State_TraceRow_R) []string {
+	return rt.AsListT[string](Sky_Core_List_foldl__RecOf_durationMs_kind_name_parentId_spanId_startTime_status_traceId__682b23bf_ListOf_String(func(_lp_r State_TraceRow_R) func([]string) []string {
+		r := _lp_r
+		_ = r
+		return func(_lp_acc []string) []string {
+			acc := _lp_acc
+			_ = acc
+			return func() []string {
+				if rt.AsBool(rt.Or(rt.Eq(rt.Field(r, "TraceId"), ""), Sky_Core_List_member__String(rt.CoerceString(rt.Field(r, "TraceId")), rt.AsListT[string](acc)))) {
+					return rt.AsListT[string](acc)
+				} else {
+					return rt.AsListT[string](rt.Concat(acc, []any{rt.Field(r, "TraceId")}))
+				}
+				return nil
+			}()
+		}
+	}, rt.AsListT[string]([]any{}), rt.AsListT[State_TraceRow_R](rows)))
+}
+
+func TracesTab_spanDepth(rows []State_TraceRow_R, fuel int, parentId string) int {
+	return func() int {
+		if rt.AsBool(rt.Or(fuel <= 0, parentId == "")) {
+			return 0
+		} else {
+			return func() int {
+				__subject := rt.MaybeCoerce[any](Sky_Core_List_find__RecOf_durationMs_kind_name_parentId_spanId_startTime_status_traceId__682b23bf(func(_lp_r State_TraceRow_R) bool {
+					r := _lp_r
+					_ = r
+					return rt.CoerceBool(rt.Eq(rt.Field(r, "SpanId"), parentId))
+				}, rt.AsListT[State_TraceRow_R](rows)))
+				_ = __subject
+				if __subject.Tag == 0 {
+					parent := rt.MaybeJust(any(__subject))
+					_ = parent
+					return rt.CoerceInt(rt.Add(1, TracesTab_spanDepth(rt.AsListT[State_TraceRow_R](rows), fuel-1, rt.CoerceString(rt.Field(parent, "ParentId")))))
+				}
+				if __subject.Tag == 1 {
+					return 0
+				}
+				_ = rt.Unreachable("case/__subject")
+				return 0
+			}()
+		}
+		return 0
+	}()
+}
+
+func TracesTab_traceGroupView(allRows []State_TraceRow_R, tid string) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		spans := Sky_Core_List_filter__RecOf_durationMs_kind_name_parentId_spanId_startTime_status_traceId__682b23bf(func(_lp_r State_TraceRow_R) bool {
+			r := _lp_r
+			_ = r
+			return rt.CoerceBool(rt.Eq(rt.Field(r, "TraceId"), tid))
+		}, rt.AsListT[State_TraceRow_R](allRows))
+		_ = spans
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			shortId := func() string {
+				if rt.AsBool(rt.Gte(rt.String_lengthT(rt.AsString(tid)), 8)) {
+					return rt.CoerceString(rt.String_sliceT(0, 8, rt.AsString(tid)))
+				} else {
+					return rt.CoerceString(tid)
+				}
+				return ""
+			}()
+			_ = shortId
+			return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+				rootName := func() string {
+					__subject := rt.MaybeCoerce[any](Sky_Core_List_find__RecOf_durationMs_kind_name_parentId_spanId_startTime_status_traceId__682b23bf(func(_lp_r State_TraceRow_R) bool {
+						r := _lp_r
+						_ = r
+						return rt.CoerceBool(rt.Eq(rt.Field(r, "ParentId"), ""))
+					}, rt.AsListT[State_TraceRow_R](spans)))
+					_ = __subject
+					if __subject.Tag == 0 {
+						root := rt.MaybeJust(any(__subject))
+						_ = root
+						return rt.CoerceString(rt.Field(root, "Name"))
+					}
+					if __subject.Tag == 1 {
+						return func() string {
+							__subject := rt.MaybeCoerce[any](Sky_Core_List_head__RecOf_durationMs_kind_name_parentId_spanId_startTime_status_traceId__682b23bf(rt.AsListT[State_TraceRow_R](spans)))
+							_ = __subject
+							if __subject.Tag == 0 {
+								s := rt.MaybeJust(any(__subject))
+								_ = s
+								return rt.CoerceString(rt.Field(s, "Name"))
+							}
+							if __subject.Tag == 1 {
+								return "(trace)"
+							}
+							_ = rt.Unreachable("case/__subject")
+							return ""
+						}()
+					}
+					_ = rt.Unreachable("case/__subject")
+					return ""
+				}()
+				_ = rootName
+				return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_paddingXY(0, 8), Std_Ui_spacing(2), Std_Ui_Border_widthEach(struct {
+					Bottom any
+					Left   any
+					Right  any
+					Top    any
+				}{Bottom: 1, Left: 0, Right: 0, Top: 0}), Std_Ui_Border_color(TracesTab_borderSoft())}), rt.AsListT[Std_Ui_Element](rt.List_cons(Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_spacing(8), Std_Ui_paddingXY(0, 2)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(11), Std_Ui_Font_color(TracesTab_accent()), Std_Ui_Background_color(TracesTab_bgCode()), Std_Ui_paddingXY(6, 2), Std_Ui_Border_rounded(3)}), any(Std_Ui_text(rt.CoerceString(rt.Concat("trace ", shortId)))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(12), Std_Ui_Font_color(TracesTab_textSecondary())}), any(Std_Ui_text(rt.CoerceString(rt.Concat(rootName, rt.Concat(" · ", rt.Concat(rt.String_fromIntT(rt.AsInt(Sky_Core_List_length__RecOf_durationMs_kind_name_parentId_spanId_startTime_status_traceId__682b23bf(rt.AsListT[State_TraceRow_R](spans)))), " spans")))))).(Std_Ui_Element))})), Sky_Core_List_map_(func(__pp0 State_TraceRow_R) Std_Ui_Element {
+					return TracesTab_spanRowView(rt.AsListT[State_TraceRow_R](allRows), rt.Coerce[State_TraceRow_R](__pp0))
+				}, rt.AsListT[State_TraceRow_R](spans)))))))
+			}())
+		}())
+	}()
+}
+
+func TracesTab_spanRowView(allRows []State_TraceRow_R, r State_TraceRow_R) Std_Ui_Element {
+	return func() Std_Ui_Element {
+		statusErr := rt.Eq(r.Status, "error")
+		_ = statusErr
+		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+			depth := TracesTab_spanDepth(rt.AsListT[State_TraceRow_R](allRows), 32, rt.CoerceString(rt.Field(r, "ParentId")))
+			_ = depth
+			return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
+				indent := rt.Mul(depth, 18)
+				_ = indent
+				return rt.Coerce[Std_Ui_Element](rt.Coerce[Std_Ui_Element](Std_Ui_row(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_paddingEach(struct {
+					Bottom any
+					Left   any
+					Right  any
+					Top    any
+				}{Bottom: 3, Left: indent, Right: 0, Top: 3}), Std_Ui_spacing(10)}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(76)).(Std_Ui_Length)), Std_Ui_Font_color(TracesTab_textMuted()), Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(11)}), any(Std_Ui_text(rt.CoerceString(TracesTab_compactTime(rt.CoerceString(rt.Field(r, "StartTime")))))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(40)).(Std_Ui_Length)), Std_Ui_Font_color(any(func() any {
+					if rt.AsBool(statusErr) {
+						return TracesTab_err()
+					} else {
+						return TracesTab_textMuted()
+					}
+					return nil
+				}()).(Std_Ui_Color)), Std_Ui_Font_bold(), Std_Ui_Font_size(10)}), any(Std_Ui_text(rt.CoerceString(func() any {
+					if rt.AsBool(statusErr) {
+						return "ERR"
+					} else {
+						return "OK"
+					}
+					return nil
+				}()))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(Std_Ui_fill()), Std_Ui_Font_size(13), Std_Ui_Font_color(TracesTab_textPrimary()), Std_Ui_Font_family("ui-monospace, Menlo, monospace")}), any(Std_Ui_text(rt.CoerceString(rt.Concat(func() any {
+					if rt.AsBool(rt.Gt(depth, 0)) {
+						return "└ "
+					} else {
+						return ""
+					}
+					return nil
+				}(), rt.Field(r, "Name"))))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_color(TracesTab_textSecondary()), Std_Ui_Font_family("ui-monospace, Menlo, monospace"), Std_Ui_Font_size(12)}), any(Std_Ui_text(rt.CoerceString(rt.Concat(TracesTab_formatFloat(rt.CoerceFloat(rt.Field(r, "DurationMs"))), "ms")))).(Std_Ui_Element))}))))
+			}())
+		}())
+	}()
+}
+
+func TracesTab_compactTime(ts string) string {
+	return func() string {
+		__subject := rt.String_splitT("T", rt.AsString(ts))
+		_ = __subject
+		if len(rt.AsList(__subject)) == 2 {
+			_ = rt.AsList(__subject)[0]
+			rest := rt.AsList(__subject)[1]
+			_ = rest
+			return rt.CoerceString(rt.String_left(8, rest))
+		}
+		return ts
+		_ = rt.Unreachable("case/__subject")
+		return ""
+	}()
+}
+
+func TracesTab_formatFloat(f float64) string {
+	return func() string {
+		scaled := rt.Math_roundT(rt.AsFloat(rt.Mul(f, 100.0)))
+		_ = scaled
+		return rt.CoerceString(func() string {
+			whole := rt.IntDiv(scaled, 100)
+			_ = whole
+			return rt.CoerceString(func() string {
+				frac := rt.Basics_modByT(100, rt.AsInt(scaled))
+				_ = frac
+				return rt.CoerceString(func() string {
+					fracS := func() string {
+						if rt.AsBool(rt.Lt(frac, 10)) {
+							return rt.CoerceString(rt.Concat("0", rt.String_fromIntT(rt.AsInt(frac))))
+						} else {
+							return rt.CoerceString(rt.String_fromIntT(rt.AsInt(frac)))
+						}
+						return ""
+					}()
+					_ = fracS
+					return rt.CoerceString(func() string {
+						if rt.AsBool(rt.Eq(frac, 0)) {
+							return rt.CoerceString(rt.String_fromIntT(rt.AsInt(whole)))
+						} else {
+							return rt.CoerceString(rt.Concat(rt.String_fromIntT(rt.AsInt(whole)), rt.Concat(".", fracS)))
+						}
+						return ""
+					}())
+				}())
+			}())
+		}())
+	}()
+}
+
+func TracesTab_panel(title string, children []Std_Ui_Element) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_column(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Background_color(TracesTab_bgRaised()), Std_Ui_Border_width(1), Std_Ui_Border_color(TracesTab_border_()), Std_Ui_Border_rounded(6), Std_Ui_padding(14), Std_Ui_spacing(6), Std_Ui_width(Std_Ui_fill())}), rt.AsListT[Std_Ui_Element](rt.List_cons(Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(12), Std_Ui_Font_bold(), Std_Ui_Font_color(TracesTab_textMuted()), Std_Ui_Font_letterSpacing(5.0e-2), Std_Ui_paddingXY(0, 4)}), any(Std_Ui_text(rt.CoerceString(rt.String_toUpperT(rt.AsString(title))))).(Std_Ui_Element)), children))))
+}
+
+func TracesTab_emptyState(message string) Std_Ui_Element {
+	return rt.Coerce[Std_Ui_Element](Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_padding(20), Std_Ui_centerX(), Std_Ui_Font_color(TracesTab_textMuted()), Std_Ui_Font_italic()}), any(Std_Ui_text(message)).(Std_Ui_Element)))
 }
 
 func View_bgPage() Std_Ui_Color {
@@ -3413,19 +5789,54 @@ func View_content(model State_Model_R) Std_Ui_Element {
 		__subject := model.Tab
 		_ = __subject
 		if rt.EnumTagIs(__subject, 0) {
-			return View_overviewView(rt.Coerce[State_Overview_R](model.Overview))
+			return func() any {
+				if rt.AsBool(rt.NotEq(model.HubDbPath, "")) {
+					return Overview_viewOverview(rt.Coerce[State_Model_R](model))
+				} else {
+					return View_overviewView(rt.Coerce[State_Overview_R](model.Overview))
+				}
+				return nil
+			}()
 		}
 		if rt.EnumTagIs(__subject, 1) {
-			return View_metricsView(rt.AsListT[State_MetricRow_R](model.Metrics))
+			return func() any {
+				if rt.AsBool(rt.NotEq(model.HubDbPath, "")) {
+					return MetricsTab_viewMetricsTab(rt.Coerce[State_Model_R](model))
+				} else {
+					return View_metricsView(rt.AsListT[State_MetricRow_R](model.Metrics))
+				}
+				return nil
+			}()
 		}
 		if rt.EnumTagIs(__subject, 2) {
-			return View_logsView(rt.Coerce[State_Model_R](model))
+			return func() any {
+				if rt.AsBool(rt.NotEq(model.HubDbPath, "")) {
+					return LogsTab_viewLogsTab(rt.Coerce[State_Model_R](model))
+				} else {
+					return View_logsView(rt.Coerce[State_Model_R](model))
+				}
+				return nil
+			}()
 		}
 		if rt.EnumTagIs(__subject, 3) {
-			return View_tracesView(rt.CoerceString(model.TraceQuery), rt.AsListT[State_TraceRow_R](model.Traces))
+			return func() any {
+				if rt.AsBool(rt.NotEq(model.HubDbPath, "")) {
+					return TracesTab_viewTracesTab(rt.Coerce[State_Model_R](model))
+				} else {
+					return View_tracesView(rt.CoerceString(model.TraceQuery), rt.AsListT[State_TraceRow_R](model.Traces))
+				}
+				return nil
+			}()
 		}
 		if rt.EnumTagIs(__subject, 4) {
-			return View_errorsView(rt.AsListT[State_ErrorRow_R](model.Errors))
+			return func() any {
+				if rt.AsBool(rt.NotEq(model.HubDbPath, "")) {
+					return ErrorsTab_viewErrorsTab(rt.Coerce[State_Model_R](model))
+				} else {
+					return View_errorsView(rt.AsListT[State_ErrorRow_R](model.Errors))
+				}
+				return nil
+			}()
 		}
 		_ = rt.Unreachable("case/__subject")
 		return nil
@@ -3656,12 +6067,12 @@ func View_metricsView(rows []State_MetricRow_R) []Std_Ui_Element {
 func View_metricRowView(r State_MetricRow_R) Std_Ui_Element {
 	return func() Std_Ui_Element {
 		valueStr := func() string {
-			__subject := rt.Field(r, "Typ")
+			__subject := r.Typ
 			_ = __subject
 			if __subject == "histogram" {
-				return rt.CoerceString(rt.Concat("n=", rt.Concat(View_formatFloat(rt.CoerceFloat(rt.Field(r, "Count"))), rt.Concat(" avg=", View_formatAvg(rt.CoerceFloat(rt.Field(r, "Sum")), rt.CoerceFloat(rt.Field(r, "Count")))))))
+				return rt.CoerceString(rt.Concat("n=", rt.Concat(View_formatFloat(rt.CoerceFloat(r.Count)), rt.Concat(" avg=", View_formatAvg(rt.CoerceFloat(r.Sum), rt.CoerceFloat(r.Count))))))
 			}
-			return rt.CoerceString(View_formatFloat(rt.CoerceFloat(rt.Field(r, "Value"))))
+			return rt.CoerceString(View_formatFloat(rt.CoerceFloat(r.Value)))
 			_ = rt.Unreachable("case/__subject")
 			return ""
 		}()
@@ -3732,7 +6143,7 @@ func View_tracesView(query string, rows []State_TraceRow_R) []Std_Ui_Element {
 			return rt.AsListT[Std_Ui_Element](func() []Std_Ui_Element {
 				keepTrace := func(tid string) bool {
 					return rt.CoerceBool(Sky_Core_List_any_(func(r any) bool {
-						return rt.CoerceBool(rt.And(rt.Eq(rt.Field(r, "TraceId"), tid), matches(rt.Coerce[State_TraceRow_R](r))))
+						return rt.CoerceBool(rt.And(rt.Eq(rt.Field(r, "TraceId"), tid), rt.SkyCall(matches, r)))
 					}, rt.AsListAny(rows)))
 				}
 				_ = keepTrace
@@ -3883,7 +6294,7 @@ func View_traceGroupView(allRows []State_TraceRow_R, tid string) Std_Ui_Element 
 
 func View_spanRowView(allRows []State_TraceRow_R, r State_TraceRow_R) Std_Ui_Element {
 	return func() Std_Ui_Element {
-		statusErr := rt.Eq(rt.Field(r, "Status"), "error")
+		statusErr := rt.Eq(r.Status, "error")
 		_ = statusErr
 		return rt.Coerce[Std_Ui_Element](func() Std_Ui_Element {
 			depth := View_spanDepth(rt.AsListT[State_TraceRow_R](allRows), 32, rt.CoerceString(rt.Field(r, "ParentId")))
@@ -3940,7 +6351,7 @@ func View_errorRowView(r State_ErrorRow_R) Std_Ui_Element {
 		Left   any
 		Right  any
 		Top    any
-	}{Bottom: 1, Left: 0, Right: 0, Top: 0}), Std_Ui_Border_color(View_borderSoft())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(60)).(Std_Ui_Length)), Std_Ui_Font_color(View_err()), Std_Ui_Font_bold(), Std_Ui_Font_size(13), Std_Ui_Font_family("ui-monospace, Menlo, monospace")}), any(Std_Ui_text(rt.CoerceString(rt.Concat("×", rt.String_fromIntT(rt.AsInt(rt.Field(r, "Count"))))))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(13), Std_Ui_Font_color(View_textPrimary())}), any(Std_Ui_text(rt.CoerceString(rt.Field(r, "Message")))).(Std_Ui_Element))})))
+	}{Bottom: 1, Left: 0, Right: 0, Top: 0}), Std_Ui_Border_color(View_borderSoft())}), rt.AsListT[Std_Ui_Element]([]any{Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_width(any(Std_Ui_px(60)).(Std_Ui_Length)), Std_Ui_Font_color(View_err()), Std_Ui_Font_bold(), Std_Ui_Font_size(13), Std_Ui_Font_family("ui-monospace, Menlo, monospace")}), any(Std_Ui_text(rt.CoerceString(rt.Concat("×", rt.String_fromIntT(rt.AsInt(r.Count)))))).(Std_Ui_Element)), Std_Ui_el(rt.AsListT[rt.SkyAttribute]([]any{Std_Ui_Font_size(13), Std_Ui_Font_color(View_textPrimary())}), any(Std_Ui_text(rt.CoerceString(r.Message))).(Std_Ui_Element))})))
 }
 
 func View_panel(title string, children []Std_Ui_Element) Std_Ui_Element {
@@ -3982,59 +6393,86 @@ func View_formatPercent(f float64) string {
 	}()
 }
 
-// SKY-ORIGIN: src/Main.sky:36:1
+// SKY-ORIGIN: src/Main.sky:39:1
 func overviewDecoder() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDecP_optional("productionMode", any(rt.JsonDec_bool()).(rt.SkyDecoder), false, any(rt.JsonDecP_optional("bufferTraceUsed", intFromFloat(), 0, any(rt.JsonDecP_optional("bufferLogUsed", intFromFloat(), 0, any(rt.JsonDecP_optional("errorRate5xx", any(rt.JsonDec_float()).(rt.SkyDecoder), 0.0, any(rt.JsonDecP_optional("requestsTotal", intFromFloat(), 0, any(rt.JsonDecP_optional("uptimeSeconds", intFromFloat(), 0, any(rt.JsonDecP_optional("builtAt", any(rt.JsonDec_string()).(rt.SkyDecoder), "—", any(rt.JsonDecP_optional("commit", any(rt.JsonDec_string()).(rt.SkyDecoder), "—", any(rt.JsonDecP_optional("skyVersion", any(rt.JsonDec_string()).(rt.SkyDecoder), "—", any(rt.JsonDec_succeed(State_Overview)).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder)))
 }
 
-// SKY-ORIGIN: src/Main.sky:55:1
+// SKY-ORIGIN: src/Main.sky:58:1
 func intFromFloat() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDec_map(func(f any) int { return rt.CoerceInt(rt.Math_roundT(rt.AsFloat(f))) }, any(rt.JsonDec_float()).(rt.SkyDecoder)))
 }
 
-// SKY-ORIGIN: src/Main.sky:60:1
+// SKY-ORIGIN: src/Main.sky:63:1
 func logsDecoder() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDec_list(logEntryDecoder()))
 }
 
-// SKY-ORIGIN: src/Main.sky:69:1
+// SKY-ORIGIN: src/Main.sky:72:1
 func logEntryDecoder() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDecP_optional("LatencyMS", any(rt.JsonDec_float()).(rt.SkyDecoder), 0.0, any(rt.JsonDecP_optional("Status", any(rt.JsonDec_float()).(rt.SkyDecoder), 0.0, any(rt.JsonDecP_optional("Route", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_custom(fieldFromFields("user_label"), rt.JsonDecP_custom(fieldFromFields("session_id"), rt.JsonDecP_optional("ReqID", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("Subapp", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("Message", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("Level", any(rt.JsonDec_string()).(rt.SkyDecoder), "info", any(rt.JsonDecP_optional("TS", any(rt.JsonDec_string()).(rt.SkyDecoder), "—", any(rt.JsonDec_succeed(State_LogEntry)).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder)))
 }
 
-// SKY-ORIGIN: src/Main.sky:89:1
+// SKY-ORIGIN: src/Main.sky:92:1
 func fieldFromFields(name string) rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDec_oneOf([]any{rt.JsonDec_at([]any{"Fields", name}, rt.JsonDec_string()), rt.JsonDec_succeed("")}))
 }
 
-// SKY-ORIGIN: src/Main.sky:99:1
+// SKY-ORIGIN: src/Main.sky:102:1
 func metricsDecoder() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDec_list(metricRowDecoder()))
 }
 
-// SKY-ORIGIN: src/Main.sky:104:1
+// SKY-ORIGIN: src/Main.sky:107:1
 func metricRowDecoder() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDecP_optional("count", any(rt.JsonDec_float()).(rt.SkyDecoder), 0.0, any(rt.JsonDecP_optional("sum", any(rt.JsonDec_float()).(rt.SkyDecoder), 0.0, any(rt.JsonDecP_optional("value", any(rt.JsonDec_float()).(rt.SkyDecoder), 0.0, any(rt.JsonDecP_optional("labels", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("type", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("name", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDec_succeed(State_MetricRow)).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder)))
 }
 
-// SKY-ORIGIN: src/Main.sky:120:1
+// SKY-ORIGIN: src/Main.sky:123:1
 func tracesDecoder() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDec_list(traceRowDecoder()))
 }
 
-// SKY-ORIGIN: src/Main.sky:125:1
+// SKY-ORIGIN: src/Main.sky:128:1
 func traceRowDecoder() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDecP_optional("status", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("durationMs", any(rt.JsonDec_float()).(rt.SkyDecoder), 0.0, any(rt.JsonDecP_optional("startTime", any(rt.JsonDec_string()).(rt.SkyDecoder), "—", any(rt.JsonDecP_optional("kind", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("name", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("parentId", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("spanId", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("traceId", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDec_succeed(State_TraceRow)).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder))).(rt.SkyDecoder)))
 }
 
-// SKY-ORIGIN: src/Main.sky:138:1
+// SKY-ORIGIN: src/Main.sky:141:1
 func errorsDecoder() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDec_list(errorRowDecoder()))
 }
 
-// SKY-ORIGIN: src/Main.sky:143:1
+// SKY-ORIGIN: src/Main.sky:146:1
 func errorRowDecoder() rt.SkyDecoder {
 	return rt.Coerce[rt.SkyDecoder](rt.JsonDecP_optional("message", any(rt.JsonDec_string()).(rt.SkyDecoder), "", any(rt.JsonDecP_optional("count", any(rt.JsonDec_int()).(rt.SkyDecoder), 0, any(rt.JsonDec_succeed(State_ErrorRow)).(rt.SkyDecoder))).(rt.SkyDecoder)))
+}
+
+// SKY-ORIGIN: src/Main.sky:161:1
+func httpStore(parent string) State_Store_R {
+	return State_Store_R{ListServices: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []string] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []string](rt.AnyTaskSucceed([]any{""}))
+	}, ReadErrors: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_ErrorRow_R](fetchErrors(rt.CoerceString(parent)))
+	}, ReadFilteredErrors: func(_svc string) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_ErrorRow_R](fetchErrors(rt.CoerceString(parent)))
+	}, ReadFilteredLogs: rt.Coerce[func(string) func(State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R]](func(_svc any) any {
+		return func(filter any) any { return fetchLogs(parent, rt.Coerce[State_LogFilter_R](filter)) }
+	}), ReadFilteredMetrics: func(_svc string) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_MetricRow_R](fetchMetrics(rt.CoerceString(parent)))
+	}, ReadFilteredTraces: func(_svc string) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](fetchTraces(rt.CoerceString(parent)))
+	}, ReadLogs: func(filter State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_LogEntry_R](fetchLogs(rt.CoerceString(parent), rt.Coerce[State_LogFilter_R](filter)))
+	}, ReadMetrics: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_MetricRow_R](fetchMetrics(rt.CoerceString(parent)))
+	}, ReadOverview: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, State_Overview_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, State_Overview_R](fetchOverview(rt.CoerceString(parent)))
+	}, ReadServiceStats: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_ServiceStat_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_ServiceStat_R](rt.AnyTaskSucceed([]any{}))
+	}, ReadTraces: func(_ struct{}) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R] {
+		return rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](fetchTraces(rt.CoerceString(parent)))
+	}}
 }
 
 func init_[T1 any](_req T1) rt.SkyTuple2 {
@@ -4042,28 +6480,58 @@ func init_[T1 any](_req T1) rt.SkyTuple2 {
 		parent := rt.System_getenvOr("SKY_PARENT_URL", "")
 		_ = parent
 		return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
-			startModel := State_Model_R{Errors: []State_ErrorRow_R{}, LastError: "", LogFilter: State_emptyLogFilter(), Logs: func() []State_LogEntry_R {
-				if rt.AsBool(rt.Eq(parent, "")) {
-					return State_mockLogs()
-				} else {
-					return []State_LogEntry_R{}
-				}
-				return nil
-			}(), Metrics: []State_MetricRow_R{}, Overview: func() State_Overview_R {
-				if rt.AsBool(rt.Eq(parent, "")) {
-					return State_mockOverview()
-				} else {
-					return State_emptyOverview()
-				}
-				return State_Overview_R{}
-			}(), ParentUrl: rt.CoerceString(parent), Tab: rt.Coerce[State_Tab](State_Tab_OverviewTab), TraceQuery: "", Traces: []State_TraceRow_R{}}
-			_ = startModel
-			return rt.Coerce[rt.SkyTuple2](rt.SkyTuple2{V0: startModel, V1: fetchForTab(rt.CoerceString(parent), any(rt.Field(startModel, "Tab")).(State_Tab), rt.Coerce[State_LogFilter_R](rt.Field(startModel, "LogFilter")))})
+			hubDbPath := rt.System_getenvOr("SKY_CONSOLE_HUB_DB", "")
+			_ = hubDbPath
+			return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+				chosenStore := func() State_Store_R {
+					if rt.AsBool(rt.NotEq(hubDbPath, "")) {
+						return rt.Coerce[State_Store_R](HubStore_hubStore(rt.CoerceString(hubDbPath)))
+					} else {
+						return rt.Coerce[State_Store_R](httpStore(rt.CoerceString(parent)))
+					}
+					return State_Store_R{}
+				}()
+				_ = chosenStore
+				return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+					isStandalone := rt.And(rt.Eq(parent, ""), rt.Eq(hubDbPath, ""))
+					_ = isStandalone
+					return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+						startModel := State_Model_R{Errors: []State_ErrorRow_R{}, HubDbPath: rt.CoerceString(hubDbPath), Identity: rt.MaybeCoerce[State_Identity_R](rt.Nothing[any]()), LastError: "", LogFilter: State_emptyLogFilter(), Logs: func() []State_LogEntry_R {
+							if rt.AsBool(isStandalone) {
+								return State_mockLogs()
+							} else {
+								return []State_LogEntry_R{}
+							}
+							return nil
+						}(), Metrics: []State_MetricRow_R{}, Overview: func() State_Overview_R {
+							if rt.AsBool(isStandalone) {
+								return State_mockOverview()
+							} else {
+								return State_emptyOverview()
+							}
+							return State_Overview_R{}
+						}(), ParentUrl: rt.CoerceString(parent), SelectedService: "", ServiceStats: []State_ServiceStat_R{}, Store: rt.Coerce[State_Store_R](chosenStore), Tab: rt.Coerce[State_Tab](State_Tab_OverviewTab), TenantPrefix: "", TraceQuery: "", Traces: []State_TraceRow_R{}}
+						_ = startModel
+						return rt.Coerce[rt.SkyTuple2](func() rt.SkyTuple2 {
+							identityCmd := func() rt.SkyCmd {
+								if rt.AsBool(rt.NotEq(hubDbPath, "")) {
+									return rt.Coerce[rt.SkyCmd](rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, State_Identity_R](rt.Hub_currentIdentity(hubDbPath)), State_Msg_GotIdentity))
+								} else {
+									return rt.Coerce[rt.SkyCmd](rt.Cmd_none())
+								}
+								return rt.SkyCmd{}
+							}()
+							_ = identityCmd
+							return rt.Coerce[rt.SkyTuple2](rt.SkyTuple2{V0: startModel, V1: rt.Cmd_batch([]any{fetchForTab(rt.Coerce[State_Model_R](startModel), any(rt.Field(startModel, "Tab")).(State_Tab), rt.Coerce[State_LogFilter_R](rt.Field(startModel, "LogFilter"))), identityCmd})})
+						}())
+					}())
+				}())
+			}())
 		}())
 	}()
 }
 
-// SKY-ORIGIN: src/Main.sky:174:1
+// SKY-ORIGIN: src/Main.sky:274:1
 func update(msg State_Msg, model State_Model_R) rt.SkyTuple2 {
 	return func() rt.SkyTuple2 {
 		__subject_tAdt := any(msg).(State_Msg)
@@ -4071,10 +6539,10 @@ func update(msg State_Msg, model State_Model_R) rt.SkyTuple2 {
 		if __subject_tAdt.Tag == 0 {
 			tab := __subject_tAdt.Fields[0]
 			_ = tab
-			return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"Tab": tab}), V1: fetchForTab(rt.CoerceString(model.ParentUrl), any(tab).(State_Tab), rt.Coerce[State_LogFilter_R](model.LogFilter))}
+			return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"Tab": tab}), V1: fetchForTab(rt.Coerce[State_Model_R](model), any(tab).(State_Tab), rt.Coerce[State_LogFilter_R](model.LogFilter))}
 		}
 		if __subject_tAdt.Tag == 1 {
-			return rt.SkyTuple2{V0: model, V1: fetchForTab(rt.CoerceString(model.ParentUrl), any(model.Tab).(State_Tab), rt.Coerce[State_LogFilter_R](model.LogFilter))}
+			return rt.SkyTuple2{V0: model, V1: fetchForTab(rt.Coerce[State_Model_R](model), any(model.Tab).(State_Tab), rt.Coerce[State_LogFilter_R](model.LogFilter))}
 		}
 		if __subject_tAdt.Tag == 2 && rt.ResultTag(any(__subject_tAdt.Fields[0])) == 0 {
 			__sky_cf_0___subject_tAdt := __subject_tAdt.Fields[0]
@@ -4155,7 +6623,7 @@ func update(msg State_Msg, model State_Model_R) rt.SkyTuple2 {
 				return rt.Coerce[rt.SkyTuple2](func() any {
 					f2 := rt.RecordUpdate(f, map[string]any{"Query": q})
 					_ = f2
-					return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LogFilter": f2}), V1: fetchLogsOnly(rt.CoerceString(rt.Field(model, "ParentUrl")), rt.Coerce[State_LogFilter_R](f2))}
+					return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LogFilter": f2}), V1: fetchLogsOnly(rt.Coerce[State_Model_R](model), rt.Coerce[State_LogFilter_R](f2))}
 				}())
 			}()
 		}
@@ -4186,7 +6654,7 @@ func update(msg State_Msg, model State_Model_R) rt.SkyTuple2 {
 						return State_LogFilter_R{}
 					}()
 					_ = f2
-					return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LogFilter": f2}), V1: fetchLogsOnly(rt.CoerceString(rt.Field(model, "ParentUrl")), rt.Coerce[State_LogFilter_R](f2))}
+					return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LogFilter": f2}), V1: fetchLogsOnly(rt.Coerce[State_Model_R](model), rt.Coerce[State_LogFilter_R](f2))}
 				}())
 			}()
 		}
@@ -4199,12 +6667,12 @@ func update(msg State_Msg, model State_Model_R) rt.SkyTuple2 {
 				return rt.Coerce[rt.SkyTuple2](func() any {
 					f2 := rt.RecordUpdate(f, map[string]any{"Session": sid})
 					_ = f2
-					return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LogFilter": f2, "Tab": State_Tab_LogsTab}), V1: fetchLogsOnly(rt.CoerceString(rt.Field(model, "ParentUrl")), rt.Coerce[State_LogFilter_R](f2))}
+					return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LogFilter": f2, "Tab": State_Tab_LogsTab}), V1: fetchLogsOnly(rt.Coerce[State_Model_R](model), rt.Coerce[State_LogFilter_R](f2))}
 				}())
 			}()
 		}
 		if __subject_tAdt.Tag == 10 {
-			return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LogFilter": State_emptyLogFilter()}), V1: fetchLogsOnly(rt.CoerceString(model.ParentUrl), State_emptyLogFilter())}
+			return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LogFilter": State_emptyLogFilter()}), V1: fetchLogsOnly(rt.Coerce[State_Model_R](model), State_emptyLogFilter())}
 		}
 		if __subject_tAdt.Tag == 11 {
 			q := __subject_tAdt.Fields[0]
@@ -4214,77 +6682,152 @@ func update(msg State_Msg, model State_Model_R) rt.SkyTuple2 {
 		if __subject_tAdt.Tag == 12 {
 			tid := __subject_tAdt.Fields[0]
 			_ = tid
-			return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"Tab": State_Tab_TracesTab, "TraceQuery": tid}), V1: rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](fetchTraces(rt.CoerceString(model.ParentUrl))), State_Msg_GotTraces)}
+			return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"Tab": State_Tab_TracesTab, "TraceQuery": tid}), V1: rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](rt.SkyCall(rt.Field(model.Store, "ReadTraces"), struct{}{})), State_Msg_GotTraces)}
+		}
+		if __subject_tAdt.Tag == 13 {
+			name := __subject_tAdt.Fields[0]
+			_ = name
+			return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"SelectedService": name}), V1: rt.Cmd_none()}
+		}
+		if __subject_tAdt.Tag == 14 && rt.ResultTag(any(__subject_tAdt.Fields[0])) == 0 {
+			__sky_cf_0___subject_tAdt := __subject_tAdt.Fields[0]
+			_ = __sky_cf_0___subject_tAdt
+			stats := rt.ResultOk(any(__sky_cf_0___subject_tAdt))
+			_ = stats
+			return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LastError": "", "ServiceStats": stats}), V1: rt.Cmd_none()}
+		}
+		if __subject_tAdt.Tag == 14 && rt.ResultTag(any(__subject_tAdt.Fields[0])) == 1 {
+			__sky_cf_0___subject_tAdt := __subject_tAdt.Fields[0]
+			_ = __sky_cf_0___subject_tAdt
+			e := rt.ResultErr(any(__sky_cf_0___subject_tAdt))
+			_ = e
+			return rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"LastError": rt.Basics_errorToStringT(any(e))}), V1: rt.Cmd_none()}
+		}
+		if __subject_tAdt.Tag == 15 && rt.ResultTag(any(__subject_tAdt.Fields[0])) == 0 {
+			__sky_cf_0___subject_tAdt := __subject_tAdt.Fields[0]
+			_ = __sky_cf_0___subject_tAdt
+			identity := rt.ResultOk(any(__sky_cf_0___subject_tAdt))
+			_ = identity
+			return func() rt.SkyTuple2 {
+				tenant := Sky_Core_Maybe_withDefault__String("", rt.MaybeCoerce[string](rt.Dict_getT[string](rt.AsString("tenant"), rt.AsMapT[string](rt.Field(identity, "Claims")))))
+				_ = tenant
+				return rt.Coerce[rt.SkyTuple2](rt.SkyTuple2{V0: rt.RecordUpdate(model, map[string]any{"Identity": rt.Just[any](identity), "TenantPrefix": tenant}), V1: rt.Cmd_none()})
+			}()
+		}
+		if __subject_tAdt.Tag == 15 && rt.ResultTag(any(__subject_tAdt.Fields[0])) == 1 {
+			__sky_cf_0___subject_tAdt := __subject_tAdt.Fields[0]
+			_ = __sky_cf_0___subject_tAdt
+			_ = rt.ResultErr(any(__sky_cf_0___subject_tAdt))
+			return rt.SkyTuple2{V0: model, V1: rt.Cmd_none()}
 		}
 		_ = rt.Unreachable("case/__subject_tAdt")
 		return rt.SkyTuple2{}
 	}()
 }
 
-// SKY-ORIGIN: src/Main.sky:274:1
-func fetchLogsOnly(parent string, filter State_LogFilter_R) rt.SkyCmd {
+// SKY-ORIGIN: src/Main.sky:413:1
+func fetchLogsOnly(model State_Model_R, filter State_LogFilter_R) rt.SkyCmd {
 	return func() rt.SkyCmd {
-		if rt.AsBool(rt.Eq(parent, "")) {
-			return rt.Coerce[rt.SkyCmd](rt.Cmd_none())
+		if rt.AsBool(hasStoreSource(rt.Coerce[State_Model_R](model))) {
+			return func() rt.SkyCmd {
+				if rt.AsBool(rt.NotEq(model.HubDbPath, "")) {
+					return rt.Coerce[rt.SkyCmd](rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_LogEntry_R](rt.SkyCall(rt.Field(model.Store, "ReadFilteredLogs"), model.SelectedService, filter)), State_Msg_GotLogs))
+				} else {
+					return rt.Coerce[rt.SkyCmd](rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_LogEntry_R](rt.SkyCall(rt.Field(model.Store, "ReadLogs"), filter)), State_Msg_GotLogs))
+				}
+				return rt.SkyCmd{}
+			}()
 		} else {
-			return rt.Coerce[rt.SkyCmd](rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_LogEntry_R](fetchLogs(parent, rt.Coerce[State_LogFilter_R](filter))), State_Msg_GotLogs))
+			return rt.Coerce[rt.SkyCmd](rt.Cmd_none())
 		}
 		return rt.SkyCmd{}
 	}()
 }
 
-// SKY-ORIGIN: src/Main.sky:294:1
-func fetchForTab(parent string, tab State_Tab, filter State_LogFilter_R) rt.SkyCmd {
+// SKY-ORIGIN: src/Main.sky:436:1
+func hasStoreSource(model State_Model_R) bool {
+	return rt.CoerceBool(rt.Or(rt.NotEq(model.ParentUrl, ""), rt.NotEq(model.HubDbPath, "")))
+}
+
+// SKY-ORIGIN: src/Main.sky:453:1
+func fetchForTab(model State_Model_R, tab State_Tab, filter State_LogFilter_R) rt.SkyCmd {
 	return func() rt.SkyCmd {
-		if rt.AsBool(rt.Eq(parent, "")) {
-			return rt.Coerce[rt.SkyCmd](rt.Cmd_none())
+		if rt.AsBool(hasStoreSource(rt.Coerce[State_Model_R](model))) {
+			return rt.Coerce[rt.SkyCmd](rt.Cmd_batch(rt.List_cons(rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, State_Overview_R](rt.SkyCall(rt.Field(model.Store, "ReadOverview"), struct{}{})), State_Msg_GotOverview), tabFetches(rt.Coerce[State_Model_R](model), any(tab).(State_Tab), rt.Coerce[State_LogFilter_R](filter)))))
 		} else {
-			return rt.Coerce[rt.SkyCmd](rt.Cmd_batch(rt.List_cons(rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, State_Overview_R](fetchOverview(parent)), State_Msg_GotOverview), tabFetches(parent, any(tab).(State_Tab), rt.Coerce[State_LogFilter_R](filter)))))
+			return rt.Coerce[rt.SkyCmd](rt.Cmd_none())
 		}
 		return rt.SkyCmd{}
 	}()
 }
 
-// SKY-ORIGIN: src/Main.sky:304:1
-func tabFetches(parent string, tab State_Tab, filter State_LogFilter_R) []rt.SkyCmd {
+// SKY-ORIGIN: src/Main.sky:463:1
+func tabFetches(model State_Model_R, tab State_Tab, filter State_LogFilter_R) []rt.SkyCmd {
 	return func() []rt.SkyCmd {
-		__subject := tab
-		_ = __subject
-		if rt.EnumTagIs(__subject, 0) {
-			return rt.AsListT[rt.SkyCmd]([]any{})
+		if rt.AsBool(rt.NotEq(model.HubDbPath, "")) {
+			return func() []rt.SkyCmd {
+				__subject := tab
+				_ = __subject
+				if rt.EnumTagIs(__subject, 0) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_ServiceStat_R](rt.SkyCall(rt.Field(model.Store, "ReadServiceStats"), struct{}{})), State_Msg_GotServiceStats)})
+				}
+				if rt.EnumTagIs(__subject, 2) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_LogEntry_R](rt.SkyCall(rt.Field(model.Store, "ReadFilteredLogs"), model.SelectedService, filter)), State_Msg_GotLogs)})
+				}
+				if rt.EnumTagIs(__subject, 1) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_MetricRow_R](rt.SkyCall(rt.Field(model.Store, "ReadFilteredMetrics"), model.SelectedService)), State_Msg_GotMetrics)})
+				}
+				if rt.EnumTagIs(__subject, 3) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](rt.SkyCall(rt.Field(model.Store, "ReadFilteredTraces"), model.SelectedService)), State_Msg_GotTraces)})
+				}
+				if rt.EnumTagIs(__subject, 4) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_ErrorRow_R](rt.SkyCall(rt.Field(model.Store, "ReadFilteredErrors"), model.SelectedService)), State_Msg_GotErrors)})
+				}
+				_ = rt.Unreachable("case/__subject")
+				return nil
+			}()
+		} else {
+			return func() []rt.SkyCmd {
+				__subject := tab
+				_ = __subject
+				if rt.EnumTagIs(__subject, 0) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_ServiceStat_R](rt.SkyCall(rt.Field(model.Store, "ReadServiceStats"), struct{}{})), State_Msg_GotServiceStats)})
+				}
+				if rt.EnumTagIs(__subject, 2) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_LogEntry_R](rt.SkyCall(rt.Field(model.Store, "ReadLogs"), filter)), State_Msg_GotLogs)})
+				}
+				if rt.EnumTagIs(__subject, 1) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_MetricRow_R](rt.SkyCall(rt.Field(model.Store, "ReadMetrics"), struct{}{})), State_Msg_GotMetrics)})
+				}
+				if rt.EnumTagIs(__subject, 3) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](rt.SkyCall(rt.Field(model.Store, "ReadTraces"), struct{}{})), State_Msg_GotTraces)})
+				}
+				if rt.EnumTagIs(__subject, 4) {
+					return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_ErrorRow_R](rt.SkyCall(rt.Field(model.Store, "ReadErrors"), struct{}{})), State_Msg_GotErrors)})
+				}
+				_ = rt.Unreachable("case/__subject")
+				return nil
+			}()
 		}
-		if rt.EnumTagIs(__subject, 2) {
-			return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_LogEntry_R](fetchLogs(parent, rt.Coerce[State_LogFilter_R](filter))), State_Msg_GotLogs)})
-		}
-		if rt.EnumTagIs(__subject, 1) {
-			return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_MetricRow_R](fetchMetrics(parent)), State_Msg_GotMetrics)})
-		}
-		if rt.EnumTagIs(__subject, 3) {
-			return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](fetchTraces(parent)), State_Msg_GotTraces)})
-		}
-		if rt.EnumTagIs(__subject, 4) {
-			return rt.AsListT[rt.SkyCmd]([]any{rt.Cmd_perform(rt.TaskCoerceT[Sky_Core_Error_Error, []State_ErrorRow_R](fetchErrors(parent)), State_Msg_GotErrors)})
-		}
-		_ = rt.Unreachable("case/__subject")
 		return nil
 	}()
 }
 
-// SKY-ORIGIN: src/Main.sky:314:1
+// SKY-ORIGIN: src/Main.sky:523:1
 func fetchOverview(parent string) rt.SkyTask[Sky_Core_Error_Error, State_Overview_R] {
 	return rt.TaskCoerceT[Sky_Core_Error_Error, State_Overview_R](rt.Task_andThenResult(func(resp any) rt.SkyResult[any, any] {
 		return rt.ResultCoerce[any, any](rt.JsonDec_decodeString(overviewDecoder(), rt.Field(resp, "Body")))
 	}, rt.TaskCoerceT[any, any](rt.Http_get(rt.Concat(parent, "/_sky/console/api/overview")))))
 }
 
-// SKY-ORIGIN: src/Main.sky:320:1
+// SKY-ORIGIN: src/Main.sky:529:1
 func fetchLogs(parent string, filter State_LogFilter_R) rt.SkyTask[Sky_Core_Error_Error, []State_LogEntry_R] {
 	return rt.TaskCoerceT[Sky_Core_Error_Error, []State_LogEntry_R](rt.Task_andThenResult(func(resp any) rt.SkyResult[any, any] {
 		return rt.ResultCoerce[any, any](rt.JsonDec_decodeString(logsDecoder(), rt.Field(resp, "Body")))
 	}, rt.TaskCoerceT[any, any](rt.Http_get(rt.Concat(parent, rt.Concat("/_sky/console/api/logs?limit=200", buildLogQuery(rt.Coerce[State_LogFilter_R](filter))))))))
 }
 
-// SKY-ORIGIN: src/Main.sky:329:1
+// SKY-ORIGIN: src/Main.sky:538:1
 func buildLogQuery(f State_LogFilter_R) string {
 	return func() string {
 		levels := rt.Concat(func() any {
@@ -4328,42 +6871,78 @@ func buildLogQuery(f State_LogFilter_R) string {
 	}()
 }
 
-// SKY-ORIGIN: src/Main.sky:346:1
+// SKY-ORIGIN: src/Main.sky:555:1
 func fetchMetrics(parent string) rt.SkyTask[Sky_Core_Error_Error, []State_MetricRow_R] {
 	return rt.TaskCoerceT[Sky_Core_Error_Error, []State_MetricRow_R](rt.Task_andThenResult(func(resp any) rt.SkyResult[any, any] {
 		return rt.ResultCoerce[any, any](rt.JsonDec_decodeString(metricsDecoder(), rt.Field(resp, "Body")))
 	}, rt.TaskCoerceT[any, any](rt.Http_get(rt.Concat(parent, "/_sky/console/api/metrics-summary")))))
 }
 
-// SKY-ORIGIN: src/Main.sky:352:1
+// SKY-ORIGIN: src/Main.sky:561:1
 func fetchTraces(parent string) rt.SkyTask[Sky_Core_Error_Error, []State_TraceRow_R] {
 	return rt.TaskCoerceT[Sky_Core_Error_Error, []State_TraceRow_R](rt.Task_andThenResult(func(resp any) rt.SkyResult[any, any] {
 		return rt.ResultCoerce[any, any](rt.JsonDec_decodeString(tracesDecoder(), rt.Field(resp, "Body")))
 	}, rt.TaskCoerceT[any, any](rt.Http_get(rt.Concat(parent, "/_sky/console/api/traces?limit=100")))))
 }
 
-// SKY-ORIGIN: src/Main.sky:358:1
+// SKY-ORIGIN: src/Main.sky:567:1
 func fetchErrors(parent string) rt.SkyTask[Sky_Core_Error_Error, []State_ErrorRow_R] {
 	return rt.TaskCoerceT[Sky_Core_Error_Error, []State_ErrorRow_R](rt.Task_andThenResult(func(resp any) rt.SkyResult[any, any] {
 		return rt.ResultCoerce[any, any](rt.JsonDec_decodeString(errorsDecoder(), rt.Field(resp, "Body")))
 	}, rt.TaskCoerceT[any, any](rt.Http_get(rt.Concat(parent, "/_sky/console/api/errors")))))
 }
 
-// SKY-ORIGIN: src/Main.sky:364:1
+// SKY-ORIGIN: src/Main.sky:573:1
 func subscriptions(model State_Model_R) rt.SkySub {
 	return func() rt.SkySub {
-		if rt.AsBool(rt.Eq(model.ParentUrl, "")) {
-			return rt.Coerce[rt.SkySub](rt.Sub_none())
+		if rt.AsBool(hasStoreSource(rt.Coerce[State_Model_R](model))) {
+			return rt.Coerce[rt.SkySub](rt.Sub_every(rt.CoerceInt(tickIntervalMs(any(model.Tab).(State_Tab))), State_Msg_Tick))
 		} else {
-			return rt.Coerce[rt.SkySub](rt.Sub_every(3000, State_Msg_Tick))
+			return rt.Coerce[rt.SkySub](rt.Sub_none())
 		}
 		return rt.SkySub{}
 	}()
 }
 
-// SKY-ORIGIN: src/Main.sky:378:1
+// SKY-ORIGIN: src/Main.sky:599:1
+func tickIntervalMs(tab State_Tab) int {
+	return func() int {
+		__subject := tab
+		_ = __subject
+		if rt.EnumTagIs(__subject, 2) {
+			return 1500
+		}
+		if rt.EnumTagIs(__subject, 4) {
+			return 5000
+		}
+		return 3000
+		_ = rt.Unreachable("case/__subject")
+		return 0
+	}()
+}
+
+// SKY-ORIGIN: src/Main.sky:613:1
 func viewWrapped(model State_Model_R) rt.SkyValue {
 	return rt.Coerce[rt.SkyValue](Std_Ui_layout(rt.AsListT[rt.SkyAttribute]([]any{}), any(View_view(rt.Coerce[State_Model_R](model))).(Std_Ui_Element)))
+}
+
+func Sky_Core_List_concatMap__Series_HtmlOf_TV_any(fn func(Std_Ui_Chart_Series_R) []Std_Html_Html, list []Std_Ui_Chart_Series_R) []Std_Html_Html {
+	return func() []Std_Html_Html {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.AsListT[Std_Html_Html]([]any{})
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			x := rt.AsList(__subject)[0]
+			_ = x
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.AsListT[Std_Html_Html](Sky_Core_List_append_(rt.AsListAny(rt.SkyCall(fn, x)), rt.AsListAny(Sky_Core_List_concatMap(fn, rt.AsListT[Std_Ui_Chart_Series_R](rest)))))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return nil
+	}()
 }
 
 func Sky_Core_List_filter__LogEntry(pred func(State_LogEntry_R) bool, list []State_LogEntry_R) []State_LogEntry_R {
@@ -4383,6 +6962,32 @@ func Sky_Core_List_filter__LogEntry(pred func(State_LogEntry_R) bool, list []Sta
 					return rt.AsListT[State_LogEntry_R](rt.List_cons(x, Sky_Core_List_filter(pred, rt.AsListT[State_LogEntry_R](rest))))
 				} else {
 					return rt.AsListT[State_LogEntry_R](Sky_Core_List_filter(pred, rt.AsListT[State_LogEntry_R](rest)))
+				}
+				return nil
+			}()
+		}
+		_ = rt.Unreachable("case/__subject")
+		return nil
+	}()
+}
+
+func Sky_Core_List_filter__RecOf_color_label_points__ab2a018f(pred func(Std_Ui_Chart_Series_R) bool, list []Std_Ui_Chart_Series_R) []Std_Ui_Chart_Series_R {
+	return func() []Std_Ui_Chart_Series_R {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return rt.AsListT[Std_Ui_Chart_Series_R]([]any{})
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			x := rt.AsList(__subject)[0]
+			_ = x
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return func() []Std_Ui_Chart_Series_R {
+				if rt.AsBool(rt.SkyCall(pred, x)) {
+					return rt.AsListT[Std_Ui_Chart_Series_R](rt.List_cons(x, Sky_Core_List_filter(pred, rt.AsListT[Std_Ui_Chart_Series_R](rest))))
+				} else {
+					return rt.AsListT[Std_Ui_Chart_Series_R](Sky_Core_List_filter(pred, rt.AsListT[Std_Ui_Chart_Series_R](rest)))
 				}
 				return nil
 			}()
@@ -4470,6 +7075,32 @@ func Sky_Core_List_find__RecOf_durationMs_kind_name_parentId_spanId_startTime_st
 	}
 }
 
+func Sky_Core_List_find__RecOf_errorRate_name_p95Ms_reqsPerSec_sparkP95_sparkRps_status__865105ba(pred func(State_ServiceStat_R) bool, list []State_ServiceStat_R) rt.SkyMaybe[State_ServiceStat_R] {
+	for {
+		__tco_subject := list
+		_ = __tco_subject
+		if len(rt.AsList(__tco_subject)) == 0 {
+			return rt.MaybeCoerce[State_ServiceStat_R](rt.Nothing[any]())
+		}
+		if len(rt.AsList(__tco_subject)) >= 1 {
+			x := rt.AsList(__tco_subject)[0]
+			_ = x
+			rest := any(rt.AsList(__tco_subject)[1:])
+			_ = rest
+			if rt.AsBool(rt.SkyCall(pred, x)) {
+				return rt.MaybeCoerce[State_ServiceStat_R](rt.Just[any](x))
+			} else {
+				__tco_t0 := pred
+				__tco_t1 := rest
+				pred = __tco_t0
+				list = rt.AsListT[State_ServiceStat_R](__tco_t1)
+				continue
+			}
+		}
+		rt.Unreachable("tco/case")
+	}
+}
+
 func Sky_Core_List_foldl__AttributeOf_TV_any_String(fn func(rt.SkyAttribute) func(string) string, acc string, list []rt.SkyAttribute) string {
 	for {
 		__tco_subject := list
@@ -4518,6 +7149,30 @@ func Sky_Core_List_foldl__RecOf_durationMs_kind_name_parentId_spanId_startTime_s
 	}
 }
 
+func Sky_Core_List_foldl__Tup2Of_Float_Float_String(fn func(rt.SkyTuple2) func(string) string, acc string, list []rt.SkyTuple2) string {
+	for {
+		__tco_subject := list
+		_ = __tco_subject
+		if len(rt.AsList(__tco_subject)) == 0 {
+			return rt.Coerce[string](acc)
+		}
+		if len(rt.AsList(__tco_subject)) >= 1 {
+			x := rt.AsList(__tco_subject)[0]
+			_ = x
+			rest := any(rt.AsList(__tco_subject)[1:])
+			_ = rest
+			__tco_t0 := fn
+			__tco_t1 := rt.SkyCall(fn, x, acc)
+			__tco_t2 := rest
+			fn = __tco_t0
+			acc = rt.Coerce[string](__tco_t1)
+			list = rt.AsListT[rt.SkyTuple2](__tco_t2)
+			continue
+		}
+		rt.Unreachable("tco/case")
+	}
+}
+
 func Sky_Core_List_head__RecOf_durationMs_kind_name_parentId_spanId_startTime_status_traceId__682b23bf(list []State_TraceRow_R) rt.SkyMaybe[State_TraceRow_R] {
 	return func() rt.SkyMaybe[State_TraceRow_R] {
 		__subject := list
@@ -4534,6 +7189,14 @@ func Sky_Core_List_head__RecOf_durationMs_kind_name_parentId_spanId_startTime_st
 		_ = rt.Unreachable("case/__subject")
 		return rt.SkyMaybe[State_TraceRow_R]{}
 	}()
+}
+
+func Sky_Core_List_indexedMap__Float_Point(fn func(int) func(float64) rt.SkyTuple2, list []float64) []rt.SkyTuple2 {
+	return rt.AsListT[rt.SkyTuple2](Sky_Core_List_indexedMapHelp(fn, 0, rt.AsListT[float64](list)))
+}
+
+func Sky_Core_List_indexedMap__Float_Tup2Of_Float_Float(fn func(int) func(float64) rt.SkyTuple2, list []float64) []rt.SkyTuple2 {
+	return rt.AsListT[rt.SkyTuple2](Sky_Core_List_indexedMapHelp(fn, 0, rt.AsListT[float64](list)))
 }
 
 func Sky_Core_List_isEmpty__AnimationEntry(list []Std_Ui_AnimationEntry) bool {
@@ -4562,6 +7225,19 @@ func Sky_Core_List_isEmpty__ErrorRow(list []State_ErrorRow_R) bool {
 	}()
 }
 
+func Sky_Core_List_isEmpty__Float(list []float64) bool {
+	return func() bool {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return true
+		}
+		return false
+		_ = rt.Unreachable("case/__subject")
+		return false
+	}()
+}
+
 func Sky_Core_List_isEmpty__LogEntry(list []State_LogEntry_R) bool {
 	return func() bool {
 		__subject := list
@@ -4576,6 +7252,58 @@ func Sky_Core_List_isEmpty__LogEntry(list []State_LogEntry_R) bool {
 }
 
 func Sky_Core_List_isEmpty__MetricRow(list []State_MetricRow_R) bool {
+	return func() bool {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return true
+		}
+		return false
+		_ = rt.Unreachable("case/__subject")
+		return false
+	}()
+}
+
+func Sky_Core_List_isEmpty__MetricRow_TV_any(list []State_MetricRow_R) bool {
+	return func() bool {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return true
+		}
+		return false
+		_ = rt.Unreachable("case/__subject")
+		return false
+	}()
+}
+
+func Sky_Core_List_isEmpty__Point(list []rt.SkyTuple2) bool {
+	return func() bool {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return true
+		}
+		return false
+		_ = rt.Unreachable("case/__subject")
+		return false
+	}()
+}
+
+func Sky_Core_List_isEmpty__Series(list []Std_Ui_Chart_Series_R) bool {
+	return func() bool {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return true
+		}
+		return false
+		_ = rt.Unreachable("case/__subject")
+		return false
+	}()
+}
+
+func Sky_Core_List_isEmpty__ServiceStat(list []State_ServiceStat_R) bool {
 	return func() bool {
 		__subject := list
 		_ = __subject
@@ -4640,6 +7368,24 @@ func Sky_Core_List_isEmpty__Tup2Of_String_String(list []rt.SkyTuple2) bool {
 	}()
 }
 
+func Sky_Core_List_length__Float(list []float64) int {
+	return func() int {
+		__subject := list
+		_ = __subject
+		if len(rt.AsList(__subject)) == 0 {
+			return 0
+		}
+		if len(rt.AsList(__subject)) >= 1 {
+			_ = rt.AsList(__subject)[0]
+			rest := any(rt.AsList(__subject)[1:])
+			_ = rest
+			return rt.CoerceInt(rt.Add(1, Sky_Core_List_length(rt.AsListAny(rest))))
+		}
+		_ = rt.Unreachable("case/__subject")
+		return 0
+	}()
+}
+
 func Sky_Core_List_length__RecOf_durationMs_kind_name_parentId_spanId_startTime_status_traceId__682b23bf(list []State_TraceRow_R) int {
 	return func() int {
 		__subject := list
@@ -4682,4 +7428,21 @@ func Sky_Core_List_member__String(x string, list []string) bool {
 		}
 		rt.Unreachable("tco/case")
 	}
+}
+
+func Sky_Core_Maybe_withDefault__String(def string, m rt.SkyMaybe[string]) string {
+	return func() string {
+		__subject := rt.MaybeCoerce[any](m)
+		_ = __subject
+		if __subject.Tag == 0 {
+			x := rt.MaybeJust(any(__subject))
+			_ = x
+			return rt.Coerce[string](x)
+		}
+		if __subject.Tag == 1 {
+			return rt.Coerce[string](def)
+		}
+		_ = rt.Unreachable("case/__subject")
+		return *new(string)
+	}()
 }
