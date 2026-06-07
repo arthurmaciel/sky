@@ -124,3 +124,6 @@ runtime-rust/target/
 # next to the app for stable URLs across rebuilds. Per-machine,
 # never source.
 .sky/
+
+# graphify knowledge-graph outputs (generated; HTML + JSON + report).
+graphify-out/
