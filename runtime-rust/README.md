@@ -69,7 +69,7 @@ or `unsafe`.
 The Go backend is the reference (full surface — 54 kernel modules). Rust
 coverage, by confidence:
 
-**✅ Covered & verified** (standard-libs 131/131 + the 22 `examples/rust/*` +
+**✅ Covered & verified** (standard-libs 131/131 + the 25 `examples/rust/*` +
 the HTTP/WS/Cli regression tests):
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
   Regex, Bytes (Latin-1), Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal,
@@ -233,7 +233,7 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 22/22 build + run from a wiped slate
+### `examples/rust/` — 25/25 build + run from a wiped slate
 
 | Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
@@ -259,6 +259,9 @@ even for crates that use proc macros or derive macros.
 | 20-email | `Std.Email` | ✅ builds + runs | `defaultMessage` + `with*` builder chain (incl. `withAttachment`) and all four provider variants (`Resend`/`SendGrid`/`Ses`/`Smtp`) sent under `SKY_EMAIL_DRY_RUN`. Regression for the `++`-on-bridged-List-field and the anon-record-param field-typing codegen fixes. |
 | 21-sse-server | `Sky.Http.Server.Stream` | ✅ builds + runs | `/events` SSE endpoint — `stream`/`emit`/`finish` flush five `tick` events ~200ms apart then `done` (curl `--no-buffer` confirms progressive delivery, not buffered). |
 | 22-sse-relay | `Sky.Core.Http.Stream` + `Sky.Http.Server.Stream` | ✅ builds + runs | `/relay` proxies `/upstream` chunk-for-chunk via `Http.Stream.open` + `forEachChunk` re-emitting through `Server.Stream.emit`, inside a plain handler goroutine (no TEA loop). The per-token relay shape; exercises the `impl Fn` capturing-closure param fix. |
+| 23-char | `Sky.Core.Char` | ✅ builds + runs | All 8 Char kernels — `isAlpha`/`isDigit`/`isLower`/`isUpper`, `toLower`/`toUpper` (single-rune String), and v0.16.7 #419 `toCode`/`fromCode` with out-of-range → U+FFFD. Mirrors Go's `unicode.*`. |
+| 24-http-api | `Sky.Http.Server` (`api` + `Handler` + Middleware) | ✅ builds (curl-verified) | v0.16.x #393(d) surface — `Server.api "GET /api/ping"` route, the relocated `Handler` type alias, and `Mw.withLogging`. `curl` confirms `GET /` (HTML) + `GET /api/ping` → `{"ok":true,"msg":"pong"}` 200, middleware access-logged. |
+| 25-retry | `Sky.Core.Task` (`retryWith` + `RetryPolicy`) | ✅ builds + runs | `defaultRetryPolicy |> withMaxAttempts |> withBaseMs` then `Task.retryWith policy work` → 42. Confirms the RetryPolicy<e> codegen fix at runtime; `retryWith` is run-once on Rust (SkyTask is one-shot — codegen drops the policy arg). |
 
 ### `examples/00-standard-libs` on `target=rust`
 
@@ -770,7 +773,7 @@ Cargo builds accumulate fast. A full Rust-example sweep can produce 20+ GB of `t
 | `runtime-rust/target/` | up to ~4 GB | runtime crate's own `cargo build`/`test --features full` outputs | ~2-3 min `cargo test --features full --lib` |
 | `runtime-rust/tests/**/sky-out/Rust/target/` | varies | per-test-fixture cargo targets | per-fixture, usually <1 min |
 | `tools/sky-ffi-inspect-rs/target/` | ~600 MB | inspector cargo target (only when iterating on inspector source) | ~30 s |
-| `examples/rust/*/sky-out/Rust/target/` | 1-2 GB each | per-example cargo targets — 22 examples → up to 44 GB if all built without cleanup | ~30-60 s per example |
+| `examples/rust/*/sky-out/Rust/target/` | 1-2 GB each | per-example cargo targets — 25 examples → up to 50 GB if all built without cleanup | ~30-60 s per example |
 | `~/.cache/sky/tools/sky-ffi-inspect-rs/` | ~500 MB | TH-materialized inspector source + its built target binary | ~30 s on next `sky add --target rust` |
 | `dist-newstyle/` (cabal output) | ~200 MB | Sky compiler build artifacts | ~3-5 min full rebuild |
 
@@ -807,7 +810,7 @@ CLAUDE.md non-negotiable §6 (added upstream v0.15.54) codifies disk hygiene as 
 |---|---|---|
 | Empty-literal type resolution | ✅ fixed by sub-A.13 (call-site param-type propagation in `emitDefaultCall`). Residual edge: an empty list passed to a known-generic stdlib fn whose only type-pinning argument is a *closure with a body-determined param type* (e.g. `List.map (\s -> String.length s) []` in a discarded position) defaults the element to `i64` instead of inferring from the closure body. Not hit by the test suite; the closure-exclusion is what makes `map (\x -> x*2) Nothing` resolve. | Annotate the source, or bind the list to a typed `let`. |
 | `any` in record fields on `target=rust` | The Rust codegen refuses to emit `Box<dyn Any>` for an `any`-typed Sky record field (load-bearing architectural principle — see the section above). Build fails with a structured `error[Rust]: any-typed record field on \`--target rust\`` diagnostic. | Encode the heterogeneous field as an ADT upstream (the path PR #119 took for `RetryPolicy`), or — defence-in-depth — ship a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky` with an HM-pure shape. |
-| `Task.retryWith` on `target=rust` may need a thunk shape | Rust's `SkyTask = Pin<Box<dyn Future>>` is one-shot (not `Clone`); the retry loop needs a fresh Future per attempt. Decision deferred to the sub-D restart against v0.15.51: either the codegen wraps the Task arg in a thunk at the `retryWith` call site, or we redesign `SkyTask` to be cloneable, or upstream adopts a thunk-shaped `retryWith`. | TBD — captured in the new scope table above. |
+| `Task.retryWith` is run-once on `target=rust` | ✅ resolved (v0.16.10 sync). Upstream's `retryWith : RetryPolicy e -> Task e a -> Task e a` is task-shaped, and Rust's `SkyTask = Pin<Box<dyn Future>>` is one-shot (not `Clone`), so a true retry loop would need a fresh Future per attempt. The codegen ships **run-once** semantics: `emitDefaultCall` drops the policy arg and threads the task through (`task_retry_with(task)`). The policy still type-checks + constructs (the RetryPolicy<e> codegen fix), the task runs once, the value flows back. Confirmed by `examples/rust/25-retry`. A real multi-attempt loop is a future arc needing a thunk-shaped `retryWith` (`() -> Task e a`) upstream, or a cloneable SkyTask. | For multi-attempt retry today, drive the loop in Sky (recurse on the `Result`). |
 | `Result.mapError` inference cascade | After F1's polymorphic signature fix the closure infers; outer call-site inference can still ambiguate the SkyResult<E,T> ok-slot. | Wrap in a typed `let` to pin E1/E2 at the call site. |
 | `withTransaction` rollback isolation | `db_with_transaction` uses sqlx's pool API; BEGIN/COMMIT/ROLLBACK run on the pool but body queries may route to other pool connections. Real rollback isolation requires single-connection pools. | Configure `sqlx::Pool::max_connections(1)` in production code that needs guaranteed rollback. Documented inline in `db.rs`. |
 | `Db.insertRow` on postgres | Returns 0 (no auto last-insert-id in postgres). | Use `INSERT … RETURNING id` + `Db.queryDecode` to fetch the new id explicitly. Documented in generated `config.rs` for postgres. |
