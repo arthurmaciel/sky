@@ -281,6 +281,7 @@ data RustTypeDef
     -- placeholder enum. Populated via runtimeOpaqueTypes registry hit in
     -- unionToRustTypeDef. See typeDefToString for the emission shape.
     | RPubUseAlias String String  -- codegenName, rustPath
+    | RAliasDefGen String String String  -- codegenName, "<M>" gens, rustPathWithVar
 
 -- | Sky opaque types whose Rust representation lives in `sky_runtime`.
 -- Keyed on (Sky module name with dots, Sky type name). When unionToRustTypeDef
@@ -351,6 +352,12 @@ runtimeOpaqueTypes = Map.fromList
     , (("Std.Email", "SesConfig"), "sky_runtime::SesConfig")
     , (("Std.Email", "SmtpConfig"), "sky_runtime::SmtpConfig")
     , (("Std.Email", "EmailProvider"), "sky_runtime::EmailProvider")
+    -- Sky.Live: Html/Attribute/Event bridge to runtime generic enums, carrying
+    -- the app's `msg` var through ({M} = the union's own type var, substituted in
+    -- unionToRustTypeDef). render/diff are msg-agnostic; only dispatch uses M.
+    , (("Std.Html", "Html"),                 "sky_runtime::Html<{M}>")
+    , (("Std.Html.Attributes", "Attribute"), "sky_runtime::Attribute<{M}>")
+    , (("Std.Html.Attributes", "Event"),     "sky_runtime::Event<{M}>")
     ]
 
 -- | Runtime kernels whose Rust signatures are generic and need a turbofish
@@ -1131,6 +1138,14 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
         -- canonical representation; the Sky-side placeholder constructor (e.g.
         -- `Decimal__Internal Float`) is a phantom-shape that only reserves a slot.
         Just rustPath
+          | '{' `elem` rustPath ->
+              -- Generic alias carrying the union's own type vars (Html msg ->
+              -- pub type StdHtmlHtml<msg> = sky_runtime::Html<msg>;). Substitute
+              -- the single Sky uvar for the {M} placeholder; the alias IS generic.
+              let m = case uvars of (v:_) -> v; [] -> "M"
+                  path = substPlaceholder "{M}" m rustPath
+                  aliasGens = if null uvars then "" else "<" ++ intercalate ", " uvars ++ ">"
+              in RAliasDefGen codegenName aliasGens path
           | '<' `notElem` rustPath -> RPubUseAlias codegenName rustPath
         -- Registry hit, INSTANTIATED-generic path (`sky_runtime::ChunkEvent<SkyError>`):
         -- `pub use` can't carry an instantiation, so emit a non-generic type alias
@@ -1148,6 +1163,16 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
     ctorToRust (Can.Ctor name _idx _arity argTypes) =
         (name, if null argTypes then Nothing
                else Just (intercalate ", " (map (typeToRustString recordMap) argTypes)))
+
+-- | Substitute all occurrences of `needle` with `replacement` in `haystack`.
+-- Used to expand {M} placeholders in runtimeOpaqueTypes registry values.
+substPlaceholder :: String -> String -> String -> String
+substPlaceholder needle replacement haystack = go haystack
+  where
+    go [] = []
+    go s@(c:cs) = case stripPrefix needle s of
+        Just rest -> replacement ++ go rest
+        Nothing   -> c : go cs
 
 aliasesToRustTypes :: Map.Map String String -> String -> String -> Map.Map String Can.Alias -> [RustTypeDef]
 aliasesToRustTypes recordMap skyModName modPrefix aliases = concatMap (\(name, alias) -> aliasToRustTypeDef recordMap skyModName modPrefix name alias) (Map.toList aliases)
@@ -2969,6 +2994,8 @@ typeDefToString (RStructDef name gens fields) =
 typeDefToString (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
 typeDefToString (RPubUseAlias codegenName rustPath) =
     "pub use " ++ rustPath ++ " as " ++ codegenName ++ ";"
+typeDefToString (RAliasDefGen name gens path) =
+    "pub type " ++ name ++ gens ++ " = " ++ path ++ ";"
 
 -- | Extract a module's content as (snake_case_file_stem, source_content).
 -- Used by emitRust to produce per-module .rs files.
