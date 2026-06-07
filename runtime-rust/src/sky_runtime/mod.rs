@@ -104,6 +104,11 @@ pub mod ws_client;
 #[cfg(feature = "websocket_client")]
 pub use ws_client::*;
 
+#[cfg(feature = "live")]
+pub mod live;
+#[cfg(feature = "live")]
+pub use live::*;
+
 pub mod ffi_polyfills;
 pub use ffi_polyfills::*;
 
