@@ -41,7 +41,9 @@ pub enum Event<M> {
     OnBool(String, fn(bool) -> M),
     OnRaw(String, std::sync::Arc<dyn std::any::Any + Send + Sync>),
     /// Server-constructed form handler (not produced by the Sky stdlib bridge).
-    OnForm(String, std::sync::Arc<dyn Fn(FormData) -> M + Send + Sync>),
+    /// Returns `Option<M>`: a malformed/incomplete form (decode failure) yields
+    /// `None` so the live loop dispatches no Msg (see `decode_form`).
+    OnForm(String, std::sync::Arc<dyn Fn(FormData) -> Option<M> + Send + Sync>),
 }
 
 impl<M: PartialEq> PartialEq for Attribute<M> {

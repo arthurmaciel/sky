@@ -37,7 +37,7 @@ impl<M: Clone> HandlerIndex<M> {
     /// positional `args` slice.
     pub fn resolve_form(&self, sky_id: &str, event: &str, fd: FormData) -> Option<M> {
         match self.map.get(&(sky_id.to_string(), event.to_string()))? {
-            Event::OnForm(_, f) => Some(f(fd)),
+            Event::OnForm(_, f) => f(fd),   // f already returns Option<M> (None on decode failure)
             _ => None,
         }
     }
@@ -152,7 +152,7 @@ mod tests {
             vec![Attribute::EventAttr(Event::OnForm(
                 "submit".into(),
                 std::sync::Arc::new(|fd: FormData| {
-                    Msg::Typed(fd.get("name").cloned().unwrap_or_default())
+                    Some(Msg::Typed(fd.get("name").cloned().unwrap_or_default()))
                 }),
             ))],
             vec![],
