@@ -281,7 +281,15 @@ data RustTypeDef
     -- placeholder enum. Populated via runtimeOpaqueTypes registry hit in
     -- unionToRustTypeDef. See typeDefToString for the emission shape.
     | RPubUseAlias String String  -- codegenName, rustPath
-    | RAliasDefGen String String String  -- codegenName, "<M>" gens, rustPathWithVar
+    -- | Bridge for Sky parametric types whose representation lives in
+    -- `sky_runtime` AND whose bridge is itself generic (the Sky type carries a
+    -- type variable, e.g. `Html msg`). Selected by unionToRustTypeDef when
+    -- runtimeOpaqueTypes contains a `{M}` placeholder in the path. Codegen
+    -- emits `pub type <name><vars> = <rustPathWithVarSubstituted>;` — a
+    -- GENERIC type alias (vs RAliasDef's non-generic form and RPubUseAlias's
+    -- `pub use` form). The `{M}` mechanism currently binds only the FIRST Sky
+    -- type var (single-placeholder). See typeDefToString for the emission shape.
+    | RAliasDefGen String String String  -- codegenName, generics_decl (e.g. "<msg>"), rustPathWithVar
 
 -- | Sky opaque types whose Rust representation lives in `sky_runtime`.
 -- Keyed on (Sky module name with dots, Sky type name). When unionToRustTypeDef
@@ -355,6 +363,7 @@ runtimeOpaqueTypes = Map.fromList
     -- Sky.Live: Html/Attribute/Event bridge to runtime generic enums, carrying
     -- the app's `msg` var through ({M} = the union's own type var, substituted in
     -- unionToRustTypeDef). render/diff are msg-agnostic; only dispatch uses M.
+    -- The {M} mechanism currently binds only the FIRST Sky type var (single-placeholder).
     , (("Std.Html", "Html"),                 "sky_runtime::Html<{M}>")
     , (("Std.Html.Attributes", "Attribute"), "sky_runtime::Attribute<{M}>")
     , (("Std.Html.Attributes", "Event"),     "sky_runtime::Event<{M}>")
@@ -1142,10 +1151,10 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
               -- Generic alias carrying the union's own type vars (Html msg ->
               -- pub type StdHtmlHtml<msg> = sky_runtime::Html<msg>;). Substitute
               -- the single Sky uvar for the {M} placeholder; the alias IS generic.
+              -- [] is dead in practice: a {M} registry entry only pairs with a parametric Sky type.
               let m = case uvars of (v:_) -> v; [] -> "M"
                   path = substPlaceholder "{M}" m rustPath
-                  aliasGens = if null uvars then "" else "<" ++ intercalate ", " uvars ++ ">"
-              in RAliasDefGen codegenName aliasGens path
+              in RAliasDefGen codegenName gens path
           | '<' `notElem` rustPath -> RPubUseAlias codegenName rustPath
         -- Registry hit, INSTANTIATED-generic path (`sky_runtime::ChunkEvent<SkyError>`):
         -- `pub use` can't carry an instantiation, so emit a non-generic type alias
@@ -3591,6 +3600,8 @@ collectUndefinedTypes b =
             [ defName name | REnumDef name _ _ <- builderTypes b ]
             `Set.union` Set.fromList
             [ defName name | RAliasDef name _ <- builderTypes b ]
+            `Set.union` Set.fromList
+            [ defName name | RAliasDefGen name _ _ <- builderTypes b ]
             `Set.union` Set.fromList
             [ defName name | RPubUseAlias name _ <- builderTypes b ]
             `Set.union` builderFfiOpaques b  -- types defined by Rust FFI bindings
