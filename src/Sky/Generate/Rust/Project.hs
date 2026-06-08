@@ -215,24 +215,29 @@ copyRustRuntime outDir = do
                 Nothing -> putStrLn "  [warn] could not locate runtime-rust/src/sky_runtime/"
         Just srcDir -> copyRuntimeDir srcDir targetDir
 
--- | Copy all .rs files from srcDir to targetDir, and recursively copy
--- any subdirectories (e.g. live/) that contain .rs files.
+-- | Copy all .rs files from srcDir to targetDir, plus the .rs files in any
+-- immediate subdirectory (e.g. live/). One level deep only — sufficient for
+-- the current runtime layout; add real recursion if a deeper tree appears.
 copyRuntimeDir :: FilePath -> FilePath -> IO ()
 copyRuntimeDir srcDir targetDir = do
     files <- listDirectory srcDir
     let rsFiles = filter (\f -> takeExtension f == ".rs") files
     mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) rsFiles
-    -- Copy subdirectories (live/, etc.) that contain Rust source files
-    let subDirs = filter (\f -> takeExtension f == "") files  -- dirs have no extension
-    mapM_ (\sub -> do
+    -- Candidate subdirs: entries with no extension. doesDirectoryExist below is
+    -- the real discriminant (a plain extensionless file is probed then skipped).
+    let subDirs = filter (\f -> takeExtension f == "") files
+    subCounts <- mapM (\sub -> do
         let srcSub = srcDir </> sub
             tgtSub = targetDir </> sub
         isDir <- doesDirectoryExist srcSub
-        when isDir $ do
-            createDirectoryIfMissing True tgtSub
-            subFiles <- listDirectory srcSub
-            let subRs = filter (\f -> takeExtension f == ".rs") subFiles
-            mapM_ (\name -> copyFile (srcSub </> name) (tgtSub </> name)) subRs
+        if isDir
+            then do
+                createDirectoryIfMissing True tgtSub
+                subFiles <- listDirectory srcSub
+                let subRs = filter (\f -> takeExtension f == ".rs") subFiles
+                mapM_ (\name -> copyFile (srcSub </> name) (tgtSub </> name)) subRs
+                pure (length subRs)
+            else pure 0
         ) subDirs
-    let totalFiles = length rsFiles + sum [] -- subdirs counted separately
-    putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " top-level files + subdirs)"
+    let totalFiles = length rsFiles + sum subCounts
+    putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show totalFiles ++ " files)"
