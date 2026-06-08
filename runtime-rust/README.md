@@ -69,7 +69,7 @@ or `unsafe`.
 The Go backend is the reference (full surface — 54 kernel modules). Rust
 coverage, by confidence:
 
-**✅ Covered & verified** (standard-libs 131/131 + the 28 `examples/rust/*` +
+**✅ Covered & verified** (standard-libs 131/131 + the 29 `examples/rust/*` +
 the HTTP/WS/Cli regression tests):
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
   Regex, Bytes (Latin-1), Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal,
@@ -156,9 +156,17 @@ targets):
   Handler resolution by sky-id (live/dispatch.rs); in-memory session store
   (live/session.rs). Gate: `examples/rust/28-live-counter` — clicking `+`/`-`
   increments the rendered span live over SSE (verified end-to-end).
-- **Ahead (P2–P6):** `OnForm`/form-decode, URL routing (`routes`/`notFound`),
-  Cmd/Sub depth, session-store backends (sqlite/redis/postgres/firestore) + TTL,
-  keyed/faithful VNode diff, per-GET session reuse.
+- **P2 — typed form submit.** `Ev.onSubmit DoSignIn` where `DoSignIn : T -> Msg`
+  lowers (call-site peephole) to `Event::OnForm("submit", …decode_form::<T>…)`;
+  the form-target record `T` gains `#[derive(serde::Deserialize)]` (only form
+  targets). The submit POST's form-data object is decoded into `T` and dispatched;
+  a malformed/incomplete form decodes to `None` → no Msg (no panic). `render_html`
+  now encodes the event name in the `sky-<event>` marker so the server tells
+  submit from click. Gate: `examples/rust/29-live-form`. All-String form records
+  for P2 (numeric/bool fields, multi-value, file inputs are P-later).
+- **Ahead (P3–P6):** URL routing (`routes`/`notFound`), Cmd/Sub depth,
+  session-store backends (sqlite/redis/postgres/firestore) + TTL, keyed/faithful
+  VNode diff, per-GET session reuse, decode-failure `warn` log.
 
 **🟡 Deferred — large arcs:**
 - **Sky.Tui** — `Std.Ui` → ANSI renderer (~2k lines); TEA core already done, the
@@ -258,7 +266,7 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 28/28 build + run from a wiped slate
+### `examples/rust/` — 29/29 build + run from a wiped slate
 
 | Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
@@ -290,6 +298,7 @@ even for crates that use proc macros or derive macros.
 | 26-stream-cli | `Sky.Core.Http.Stream` Sub-tier (`chunks`) | ✅ builds (e2e-verified) | A `Cli.program` TEA app streaming an HTTP body into its update loop as `ChunkEvent` Msgs. `chunks=0→6` view renders prove incremental, non-buffered dispatch (vs 22-relay's synchronous `forEachChunk`). Exercises `sub_subscribe_stream` (detached dedup-guarded drain) + the bridged generic `ChunkEvent<SkyError>` enum. Run against `21-sse-server`. |
 | 27-live-static | `Std.Live` (P0) + `Std.Html` | ✅ builds + runs | `Live.renderStatic view 7` prints byte-correct full HTML through the bridged `Html<M>` family. Gate for the `{M}` generic-alias bridge (`StdHtmlHtml<msg> = sky_runtime::Html<msg>`), `assign_sky_ids`, and `render_html` (escaping + void + `data-sky-on`). |
 | 28-live-counter | `Std.Live` (P1) — `Live.app` over axum + SSE | ✅ builds (e2e-verified) | The TEA-over-HTTP loop: GET renders the counter (sky-ids + `data-sky-on=click` + `sky_sid` cookie + embedded ported client JS); `/_sky/sse` streams `hello` then, after `POST /_sky/event {handlerId}`, an `event: patches` frame `{globalSeq, patches:[{id,text}]}` — the span increments live. Exercises `live_app`, the `Live.app{…}` record-splice peephole, per-session driver, diff, and `HandlerIndex`. |
+| 29-live-form | `Std.Live` (P2) — typed form submit | ✅ builds (e2e-verified) | `Html.form [ Ev.onSubmit SignIn ]` where `SignIn : Creds -> Msg`. The `onSubmit` call-site peephole emits `Event::OnForm("submit", \|fd\| decode_form::<Creds>(fd).ok().map(SignIn))`; `Creds` gains `#[derive(serde::Deserialize)]` (form targets only). Submit POST `args=[{email,password}]` decodes into `Creds`, dispatches `SignIn` → SSE patch sets `last: a@b.c`. A malformed form (missing field) decodes to `None` → no Msg, no panic. |
 
 ### `examples/00-standard-libs` on `target=rust`
 
