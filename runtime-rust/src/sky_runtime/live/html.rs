@@ -167,12 +167,12 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                 }
             }
             // Browser-client wire markers (live/client.js): the delegated
-            // binder scans for `[sky-<event>]` and reads `data-sky-hid` to
-            // route the POST. We resolve handlers server-side by the
-            // element's sky-id, so `data-sky-hid` carries the sky-id and
-            // each `sky-<event>` value is a non-empty marker ("1"). The
-            // legacy `data-sky-on` list is kept for any pre-existing tooling
-            // / parity with Go's render.
+            // binder scans for `[sky-<event>]`, reads `data-sky-hid` for the
+            // sky-id, and posts the `sky-<event>` value as `msg`. We make that
+            // value the EVENT NAME so the server can tell click from submit
+            // (the client doesn't send the event type otherwise) — the handler
+            // resolves by (sky-id, event). `data-sky-on` is kept for parity
+            // with Go's render.
             if !events.is_empty() {
                 s.push_str(" data-sky-on=\"");
                 s.push_str(&events.join(" "));
@@ -185,7 +185,9 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                 for ev in &events {
                     s.push_str(" sky-");
                     s.push_str(ev);
-                    s.push_str("=\"1\"");
+                    s.push_str("=\"");
+                    s.push_str(ev);
+                    s.push('"');
                 }
             }
             if VOID.contains(&tag.as_str()) {

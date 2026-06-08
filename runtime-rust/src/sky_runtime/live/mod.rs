@@ -144,13 +144,27 @@ struct EventBody {
     /// Some senders use `id` instead of `handlerId`; accept both.
     #[serde(default)]
     id: String,
-    /// Event name (`click` / `input` / `submit` / …). The default client does
-    /// not send it explicitly; for P1 the counter has a single click handler,
-    /// so we default to "click" when absent.
+    /// Event name. The client posts the `sky-<event>` marker value as `msg`;
+    /// `render_html` makes that value the event name (click / input / submit / …),
+    /// so `msg` is the authoritative event. `event` is an explicit-override slot
+    /// for future senders. Resolution: `event` ?: `msg` ?: "click".
     #[serde(default)]
     event: String,
     #[serde(default)]
-    args: Vec<String>,
+    msg: String,
+    /// Event args. For click/input/keydown `args[0]` is a string; for `submit`
+    /// `args[0]` is the form-data object `{name: value, …}`. Parsed as JSON
+    /// values so both shapes decode.
+    #[serde(default)]
+    args: Vec<serde_json::Value>,
+}
+
+/// Coerce a wire arg `Value` to the string the click/input/keydown path expects.
+fn value_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 type SessionMap<Model, Msg> = Arc<Mutex<HashMap<String, Arc<Mutex<SessionEntry<Model, Msg>>>>>>;
@@ -502,11 +516,31 @@ where
             };
 
             let hid = if !parsed.handler_id.is_empty() { parsed.handler_id } else { parsed.id };
-            let event = if parsed.event.is_empty() { "click".to_string() } else { parsed.event };
+            // Event name: explicit `event` override, else the `msg` marker
+            // (render_html sets it to the event name), else default to click.
+            let event = if !parsed.event.is_empty() {
+                parsed.event
+            } else if !parsed.msg.is_empty() {
+                parsed.msg
+            } else {
+                "click".to_string()
+            };
 
             let (msg, seq) = {
                 let e = entry.lock().unwrap();
-                (e.index.resolve(&hid, &event, &parsed.args), e.seq)
+                if event == "submit" {
+                    // args[0] is the form-data object {name: value, …}.
+                    let fd: FormData = parsed
+                        .args
+                        .first()
+                        .and_then(|v| v.as_object())
+                        .map(|o| o.iter().map(|(k, v)| (k.clone(), value_to_string(v))).collect())
+                        .unwrap_or_default();
+                    (e.index.resolve_form(&hid, &event, fd), e.seq)
+                } else {
+                    let args: Vec<String> = parsed.args.iter().map(value_to_string).collect();
+                    (e.index.resolve(&hid, &event, &args), e.seq)
+                }
             };
             if let Some(m) = msg {
                 let tx = { entry.lock().unwrap().msg_tx.clone() };
