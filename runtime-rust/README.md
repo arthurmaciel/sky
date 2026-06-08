@@ -360,6 +360,14 @@ runtime-rust/src/sky_runtime/
 │                     backend-portable via db_auto_id_column() in config.rs.
 ├── ffi_polyfills.rs  Ffi.callPure / callTask / toAny runtime polyfills (panic-with-message
 │                     for non-peephole-resolvable shapes; identity for toAny)
+├── live/             Sky.Live (P0+P1) — feature-gated `live`; copied as a subdir
+│   ├── html.rs       Html<M>/Attribute<M>/Event<M> enums (bridge target) + assign_sky_ids + render_html
+│   ├── diff.rs       Patch (Go wire schema) + minimal text/attr/inner-html diff
+│   ├── dispatch.rs   HandlerIndex<M> + resolve(sky-id, event, args) / resolve_form
+│   ├── session.rs    LiveSession<Model,Msg> + in-memory MemStore<T>
+│   ├── sse.rs        SsePatch / SseTx / channel / frame (text/event-stream framing)
+│   ├── client.js     browser client, ported verbatim from Go's live.go (include_str!'d)
+│   └── mod.rs        live_render_static (P0) + live_app (P1: axum + per-session TEA driver) + render_page_full
 └── mod.rs            re-exports config + core; other modules via sky_runtime::<mod>::<fn>
 ```
 
