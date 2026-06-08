@@ -1,0 +1,194 @@
+use crate::sky_runtime::live::html::*;
+use std::collections::HashMap;
+
+/// Per-session handler index: maps `(sky-id, event-name)` to the cloneable
+/// `Event` that owns the handler closure (via `Arc`).
+///
+/// Built once per `view` commit via [`build_index`]; thrown away and rebuilt
+/// on every update cycle (the view function is the single source of truth).
+pub struct HandlerIndex<M> {
+    map: HashMap<(String, String), Event<M>>,
+}
+
+impl<M: Clone> HandlerIndex<M> {
+    /// Resolve a wire event from the browser.
+    ///
+    /// - `OnMsg`   — returns the message directly (args ignored).
+    /// - `OnString`— calls the closure with `args[0]` (or `""` if absent).
+    /// - `OnBool`  — calls the closure with `args[0] == "true"` (or `false`).
+    /// - `OnForm`  — dispatched via [`Self::resolve_form`]; returns `None` here.
+    ///
+    /// Returns `None` when the sky-id is unknown or the event name doesn't
+    /// match any registered handler.
+    pub fn resolve(&self, sky_id: &str, event: &str, args: &[String]) -> Option<M> {
+        match self.map.get(&(sky_id.to_string(), event.to_string()))? {
+            Event::OnMsg(_, m) => Some(m.clone()),
+            Event::OnString(_, f) => Some(f(args.first().cloned().unwrap_or_default())),
+            Event::OnBool(_, f) => {
+                Some(f(args.first().map(|s| s == "true").unwrap_or(false)))
+            }
+            Event::OnForm(_, _) => None, // dispatched via resolve_form
+        }
+    }
+
+    /// Resolve a form-submit event. Distinct from [`Self::resolve`] because
+    /// the `FormData` map arrives via the form-submission wire path, not the
+    /// positional `args` slice.
+    pub fn resolve_form(&self, sky_id: &str, event: &str, fd: FormData) -> Option<M> {
+        match self.map.get(&(sky_id.to_string(), event.to_string()))? {
+            Event::OnForm(_, f) => Some(f(fd)),
+            _ => None,
+        }
+    }
+}
+
+/// Build a [`HandlerIndex`] by walking `root` and collecting every
+/// `Attribute::Event` keyed by its element's `sky-id` + event name.
+///
+/// Precondition: `assign_sky_ids` must have been called on `root` first.
+/// Elements without a `sky-id` attribute (shouldn't happen after assignment)
+/// are indexed under the empty-string key, which is harmless — no browser
+/// event will carry an empty sky-id.
+pub fn build_index<M: Clone>(root: &Html<M>) -> HandlerIndex<M> {
+    let mut map = HashMap::new();
+    walk(root, &mut map);
+    HandlerIndex { map }
+}
+
+fn walk<M: Clone>(n: &Html<M>, map: &mut HashMap<(String, String), Event<M>>) {
+    if let Html::HElement(_, attrs, kids) = n {
+        let id = attrs
+            .iter()
+            .find_map(|a| match a {
+                Attribute::Attr(k, v) if k == "sky-id" => Some(v.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        for a in attrs {
+            if let Attribute::Event(e) = a {
+                map.insert((id.clone(), e.name().to_string()), e.clone());
+            }
+        }
+
+        for c in kids {
+            walk(c, map);
+        }
+    }
+}
+
+// ─── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Msg {
+        Inc,
+        Typed(String),
+    }
+
+    fn tree() -> Html<Msg> {
+        let mut t = Html::HElement(
+            "div".into(),
+            vec![],
+            vec![
+                Html::HElement(
+                    "button".into(),
+                    vec![Attribute::Event(Event::OnMsg("click".into(), Msg::Inc))],
+                    vec![],
+                ),
+                Html::HElement(
+                    "input".into(),
+                    vec![Attribute::Event(Event::OnString(
+                        "input".into(),
+                        std::sync::Arc::new(|s| Msg::Typed(s)),
+                    ))],
+                    vec![],
+                ),
+            ],
+        );
+        assign_sky_ids(&mut t, "r");
+        t
+    }
+
+    #[test]
+    fn resolves_onmsg_and_onstring() {
+        let idx = build_index(&tree());
+        assert_eq!(
+            idx.resolve("r_0_button", "click", &[]),
+            Some(Msg::Inc)
+        );
+        assert_eq!(
+            idx.resolve("r_1_input", "input", &["hi".into()]),
+            Some(Msg::Typed("hi".into()))
+        );
+        assert_eq!(idx.resolve("r_0_button", "input", &[]), None); // wrong event
+        assert_eq!(idx.resolve("nope", "click", &[]), None); // unknown id
+    }
+
+    #[test]
+    fn resolves_onbool() {
+        let mut t = Html::HElement(
+            "input".into(),
+            vec![Attribute::Event(Event::OnBool(
+                "change".into(),
+                std::sync::Arc::new(|b| if b { Msg::Inc } else { Msg::Typed("off".into()) }),
+            ))],
+            vec![],
+        );
+        assign_sky_ids(&mut t, "r");
+        let idx = build_index(&t);
+        assert_eq!(idx.resolve("r", "change", &["true".into()]), Some(Msg::Inc));
+        assert_eq!(
+            idx.resolve("r", "change", &["false".into()]),
+            Some(Msg::Typed("off".into()))
+        );
+    }
+
+    #[test]
+    fn resolves_onform() {
+        let mut t = Html::HElement(
+            "form".into(),
+            vec![Attribute::Event(Event::OnForm(
+                "submit".into(),
+                std::sync::Arc::new(|fd: FormData| {
+                    Msg::Typed(fd.get("name").cloned().unwrap_or_default())
+                }),
+            ))],
+            vec![],
+        );
+        assign_sky_ids(&mut t, "r");
+        let idx = build_index(&t);
+
+        // resolve() returns None for OnForm; resolve_form() dispatches it.
+        assert_eq!(idx.resolve("r", "submit", &[]), None);
+
+        let mut fd = FormData::new();
+        fd.insert("name".into(), "alice".into());
+        assert_eq!(
+            idx.resolve_form("r", "submit", fd),
+            Some(Msg::Typed("alice".into()))
+        );
+    }
+
+    #[test]
+    fn onstring_empty_args_gives_default() {
+        let mut t = Html::HElement(
+            "input".into(),
+            vec![Attribute::Event(Event::OnString(
+                "input".into(),
+                std::sync::Arc::new(|s| Msg::Typed(s)),
+            ))],
+            vec![],
+        );
+        assign_sky_ids(&mut t, "r");
+        let idx = build_index(&t);
+        // No args → closure receives ""
+        assert_eq!(
+            idx.resolve("r", "input", &[]),
+            Some(Msg::Typed(String::new()))
+        );
+    }
+}

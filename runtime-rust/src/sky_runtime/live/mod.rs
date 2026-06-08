@@ -4,6 +4,8 @@ pub mod html;
 pub use html::*;
 pub mod diff;
 pub use diff::*;
+pub mod dispatch;
+pub use dispatch::*;
 
 use super::*;
 
