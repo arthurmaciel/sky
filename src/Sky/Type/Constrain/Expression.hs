@@ -2231,6 +2231,17 @@ lookupKernelType modName funcName = case (modName, funcName) of
     ("Live", "lifecycle") ->
         Just $ T.Forall ["msg"]
             (T.TLambda (T.TVar "msg") (T.TVar "msg"))
+    -- Live.renderStatic : (model -> Html msg) -> model -> Task Error ()
+    --   P0 scaffold kernel: renders view(model) to a full HTML page and
+    --   prints it. Rust-backend only (Task 5 of the Sky.Live P0 plan).
+    --   The msg TVar is phantom (it only appears in the view arg).
+    ("Live", "renderStatic") ->
+        Just $ T.Forall ["model", "msg"]
+            (T.TLambda
+                (T.TLambda (T.TVar "model") htmlType)
+                (T.TLambda
+                    (T.TVar "model")
+                    (T.TType ModuleName.task "Task" [errorType, T.TUnit])))
 
     -- ─── Phase 1.3 — Std.Jobs ──────────────────────────────────
     -- See docs/v1-roadmap.md Phase 1.3, runtime-go/rt/jobs_kernel.go.

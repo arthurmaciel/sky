@@ -129,7 +129,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- Sky.Core.WebSocket client only when used (pulls tokio-tungstenite).
         wscMod = if RustBuilder.usesWsClient usage then ["pub mod ws_client;"] else []
         wscUse = if RustBuilder.usesWsClient usage then ["pub use ws_client::*;"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse)
+        -- Std.Live only when used — live submodule (html.rs + mod.rs live_render_static).
+        liveMod = if RustBuilder.usesLive usage then ["pub mod live;"] else []
+        liveUse = if RustBuilder.usesLive usage then ["pub use live::*;"] else []
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ liveMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ liveUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode
@@ -208,13 +211,28 @@ copyRustRuntime outDir = do
             mCwdSrc <- walkUpFromCwd cwd
             case mCwdSrc of
                 Just srcDir -> do
-                    files <- listDirectory srcDir
-                    let rsFiles = filter (\f -> takeExtension f == ".rs") files
-                    mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) rsFiles
-                    putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " files)"
+                    copyRuntimeDir srcDir targetDir
                 Nothing -> putStrLn "  [warn] could not locate runtime-rust/src/sky_runtime/"
-        Just srcDir -> do
-            files <- listDirectory srcDir
-            let rsFiles = filter (\f -> takeExtension f == ".rs") files
-            mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) rsFiles
-            putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " files)"
+        Just srcDir -> copyRuntimeDir srcDir targetDir
+
+-- | Copy all .rs files from srcDir to targetDir, and recursively copy
+-- any subdirectories (e.g. live/) that contain .rs files.
+copyRuntimeDir :: FilePath -> FilePath -> IO ()
+copyRuntimeDir srcDir targetDir = do
+    files <- listDirectory srcDir
+    let rsFiles = filter (\f -> takeExtension f == ".rs") files
+    mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) rsFiles
+    -- Copy subdirectories (live/, etc.) that contain Rust source files
+    let subDirs = filter (\f -> takeExtension f == "") files  -- dirs have no extension
+    mapM_ (\sub -> do
+        let srcSub = srcDir </> sub
+            tgtSub = targetDir </> sub
+        isDir <- doesDirectoryExist srcSub
+        when isDir $ do
+            createDirectoryIfMissing True tgtSub
+            subFiles <- listDirectory srcSub
+            let subRs = filter (\f -> takeExtension f == ".rs") subFiles
+            mapM_ (\name -> copyFile (srcSub </> name) (tgtSub </> name)) subRs
+        ) subDirs
+    let totalFiles = length rsFiles + sum [] -- subdirs counted separately
+    putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show (length rsFiles) ++ " top-level files + subdirs)"

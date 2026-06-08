@@ -5,10 +5,13 @@ pub type FormData = HashMap<String, String>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Html<M> {
-    Element(String, Vec<Attribute<M>>, Vec<Html<M>>),
-    Text(String),
+    /// Normal element node — matches Sky's `HElement tag attrs children`.
+    HElement(String, Vec<Attribute<M>>, Vec<Html<M>>),
+    /// Text node (HTML-escaped on render) — matches Sky's `HText s`.
+    HText(String),
     /// Raw, un-escaped HTML — trusted pre-rendered content only; caller sanitises.
-    Raw(String),
+    /// Matches Sky's `HRaw s`.
+    HRaw(String),
 }
 
 #[derive(Clone)]
@@ -118,9 +121,9 @@ pub fn render_html<M>(node: &Html<M>) -> String {
 
 fn render_into<M>(node: &Html<M>, s: &mut String) {
     match node {
-        Html::Text(t) => s.push_str(&escape_text(t)),
-        Html::Raw(r) => s.push_str(r),
-        Html::Element(tag, attrs, kids) => {
+        Html::HText(t) => s.push_str(&escape_text(t)),
+        Html::HRaw(r) => s.push_str(r),
+        Html::HElement(tag, attrs, kids) => {
             s.push('<');
             s.push_str(tag);
             let mut events: Vec<&str> = vec![];
@@ -169,15 +172,15 @@ fn escape_attr(t: &str) -> String {
     escape_text(t).replace('"', "&quot;")
 }
 
-/// Stamp every Element (not Text/Raw) with a stable `sky-id` attribute derived
+/// Stamp every HElement (not HText/HRaw) with a stable `sky-id` attribute derived
 /// from its path. Idempotent: an existing sky-id is overwritten with the same
-/// value. Text/Raw nodes are unaddressable (Go parity).
+/// value. HText/HRaw nodes are unaddressable (Go parity).
 pub fn assign_sky_ids<M>(node: &mut Html<M>, path: &str) {
-    if let Html::Element(_tag, attrs, kids) = node {
+    if let Html::HElement(_tag, attrs, kids) = node {
         set_attr(attrs, "sky-id", path);
         let mut idx = 0usize;
         for child in kids.iter_mut() {
-            if let Html::Element(ctag, _, _) = child {
+            if let Html::HElement(ctag, _, _) = child {
                 let seg = format!("{path}_{idx}_{ctag}");
                 idx += 1;
                 assign_sky_ids(child, &seg);
@@ -208,14 +211,14 @@ mod tests {
 
     #[test]
     fn render_escapes_and_emits_attrs_events_void() {
-        let t: Html<()> = Html::Element("div".into(),
+        let t: Html<()> = Html::HElement("div".into(),
             vec![Attribute::Attr("class".into(), "x".into())],
             vec![
-                Html::Element("input".into(),
+                Html::HElement("input".into(),
                     vec![Attribute::Attr("value".into(), "a<b".into()), Attribute::BoolAttr("disabled".into(), true)],
                     vec![]),
-                Html::Text("1 < 2".into()),
-                Html::Raw("<b>ok</b>".into()),
+                Html::HText("1 < 2".into()),
+                Html::HRaw("<b>ok</b>".into()),
             ]);
         let mut t = t; assign_sky_ids(&mut t, "r");
         let s = render_html(&t);
@@ -228,7 +231,7 @@ mod tests {
 
     #[test]
     fn render_emits_data_event_attr() {
-        let t: Html<()> = Html::Element("button".into(),
+        let t: Html<()> = Html::HElement("button".into(),
             vec![Attribute::Event(Event::OnMsg("click".into(), ()))], vec![]);
         let mut t = t; assign_sky_ids(&mut t, "r");
         let s = render_html(&t);
@@ -237,9 +240,9 @@ mod tests {
 
     #[test]
     fn sky_ids_are_stable_and_pathed() {
-        let mut t: Html<()> = Html::Element("div".into(), vec![], vec![
-            Html::Element("span".into(), vec![], vec![Html::Text("a".into())]),
-            Html::Element("span".into(), vec![], vec![]),
+        let mut t: Html<()> = Html::HElement("div".into(), vec![], vec![
+            Html::HElement("span".into(), vec![], vec![Html::HText("a".into())]),
+            Html::HElement("span".into(), vec![], vec![]),
         ]);
         assign_sky_ids(&mut t, "r");
         let ids = collect_ids(&t);
@@ -252,7 +255,7 @@ mod tests {
     fn collect_ids<M>(n: &Html<M>) -> Vec<String> {
         let mut out = vec![];
         fn go<M>(n: &Html<M>, out: &mut Vec<String>) {
-            if let Html::Element(_, attrs, kids) = n {
+            if let Html::HElement(_, attrs, kids) = n {
                 for a in attrs { if let Attribute::Attr(k, v) = a { if k == "sky-id" { out.push(v.clone()); } } }
                 for c in kids { go(c, out); }
             }
@@ -263,13 +266,13 @@ mod tests {
 
     #[test]
     fn html_tree_constructs() {
-        let t: Html<Msg> = Html::Element(
+        let t: Html<Msg> = Html::HElement(
             "button".into(),
             vec![Attribute::Event(Event::OnMsg("click".into(), Msg::Inc))],
-            vec![Html::Text("+".into())],
+            vec![Html::HText("+".into())],
         );
         match t {
-            Html::Element(tag, attrs, kids) => {
+            Html::HElement(tag, attrs, kids) => {
                 assert_eq!(tag, "button");
                 assert_eq!(attrs.len(), 1);
                 assert_eq!(kids.len(), 1);

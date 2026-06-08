@@ -49,6 +49,7 @@ data UsedKernels = UsedKernels
     , usesTea :: Bool             -- Cmd/Sub/Cli.program used → tea module (tokio)
     , usesWsClient :: Bool        -- Sky.Core.WebSocket used → ws_client + tokio-tungstenite
     , usesEmail :: Bool           -- Std.Email used → email module + reqwest
+    , usesLive :: Bool            -- Std.Live used → live module (Html bridge)
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -67,9 +68,10 @@ instance Semigroup UsedKernels where
         , usesTea = usesTea a || usesTea b
         , usesWsClient = usesWsClient a || usesWsClient b
         , usesEmail = usesEmail a || usesEmail b
+        , usesLive = usesLive a || usesLive b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False False False False False False False
 
 -- | Walk all expressions across all modules to detect kernel usage.
 -- Ensures we only emit the runtime stubs and Cargo deps that are actually needed.
@@ -204,6 +206,10 @@ analyzeKernelUsage = foldMap analyzeMod
             -- SES over HTTPS) + tokio (async) + serde_json (request bodies).
             , if modName == "Email" || "Std.Email" `isSuffixOf` modName
               then mempty { usesEmail = True } else mempty
+            -- Std.Live / Live — Html bridge + live_render_static (P0) / live_app
+            -- (P1). Pulls tokio (async Task) + the live submodule (html.rs).
+            , if modName == "Live" || "Std.Live" `isInfixOf` modName
+              then mempty { usesLive = True } else mempty
             ]
 
 -- | Known zero-argument kernel stubs that must be called with () when referenced.
@@ -419,6 +425,9 @@ kernelsNeedingErrorPin = Map.fromList
     , ("http_request",             "::<SkyError>")
     -- Std.Email — email_send returns SkyTask<E, String>; pin E.
     , ("email_send",               "::<SkyError>")
+    -- Std.Live P0 scaffold — live_render_static<E, Model, Msg, FView>; pin E,
+    -- leave Model/Msg/FView inferred from the view function and model arg.
+    , ("live_render_static",       "::<SkyError, _, _, _>")
     -- Sky.Core.Http.Stream (client) — open/close have no E-determining arg.
     , ("http_stream_open",         "::<SkyError>")
     , ("http_stream_close",        "::<SkyError>")
@@ -681,19 +690,25 @@ collectTVars _ = []
 -- type/alias drops its Sky args (its generics are pinned in the registry value,
 -- e.g. WsServerCfg<SkyError>), so vars appearing ONLY inside those dropped args
 -- must not become function generics — they'd be unused in the Rust sig
--- (E0107/E0283). Used where a function's generic-param list is computed.
+-- (E0107/E0283). Exception: {M}-entries (Html, Attribute, Event) ARE generic in
+-- the emitted alias, so their Sky args DO appear in the rendered type and must
+-- be collected.
 collectRenderedTVars :: Can.Type -> [String]
 collectRenderedTVars t = case t of
     Can.TVar v -> [v]
     Can.TLambda a b -> collectRenderedTVars a ++ collectRenderedTVars b
-    Can.TType modName name args
-        | Map.member (ModuleName._name modName, name) runtimeOpaqueTypes -> []
-        | otherwise -> concatMap collectRenderedTVars args
+    Can.TType modName name args ->
+        case Map.lookup (ModuleName._name modName, name) runtimeOpaqueTypes of
+            Just rp | '{' `elem` rp -> concatMap collectRenderedTVars args  -- generic alias
+            Just _  -> []                                                    -- non-generic opaque; drop args
+            Nothing -> concatMap collectRenderedTVars args
     Can.TTuple a b rest -> concatMap collectRenderedTVars (a:b:rest)
     Can.TRecord fields _ -> concatMap (collectRenderedTVars . Can._fieldType) (Map.elems fields)
-    Can.TAlias modName name pairs _
-        | Map.member (ModuleName._name modName, name) runtimeOpaqueTypes -> []
-        | otherwise -> concatMap (collectRenderedTVars . snd) pairs
+    Can.TAlias modName name pairs _ ->
+        case Map.lookup (ModuleName._name modName, name) runtimeOpaqueTypes of
+            Just rp | '{' `elem` rp -> concatMap (collectRenderedTVars . snd) pairs  -- generic alias
+            Just _  -> []                                                              -- non-generic opaque
+            Nothing -> concatMap (collectRenderedTVars . snd) pairs
     _ -> []
 
 -- | Simple check: does the body match a parameter with list patterns (cons, list)?
@@ -1330,12 +1345,22 @@ typeToRustString recordMap t = case t of
     Can.TType modName name args ->
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-        -- A registered runtimeOpaque type renders to its non-generic codegen
-        -- alias (its generics are pinned in the registry value, e.g.
-        -- WsServerCfg<SkyError>); drop the Sky args.
-        in if Map.member (modStr, name) runtimeOpaqueTypes
-           then toCamelCase (modPrefix ++ name)
-           else toCamelCase (modPrefix ++ name) ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
+            baseName = toCamelCase (modPrefix ++ name)
+        -- A registered runtimeOpaque type: if the registry value carries {M}
+        -- the Sky-side type alias IS generic (e.g. StdHtmlHtml<msg>) — preserve
+        -- the Sky type args so `StdHtmlHtml<Msg>` compiles. Non-{M} entries
+        -- (plain path like `sky_runtime::EmailProvider`) are non-generic; drop args.
+        in case Map.lookup (modStr, name) runtimeOpaqueTypes of
+           Just rp | '{' `elem` rp ->
+               -- Generic alias: preserve Sky type args
+               if null args then baseName
+               else baseName ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
+           Just _ ->
+               -- Non-generic opaque (EmailProvider, ServerRequest, etc.): drop args
+               baseName
+           Nothing ->
+               if null args then baseName
+               else baseName ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
     -- A curried Sky arrow chain (A -> B -> C) renders as an UNCURRIED Rust fn
     -- pointer fn(A, B) -> C, matching how the codegen lowers multi-arg lambda
     -- VALUES (`\a b ->` -> |a, b|) and multi-arg CALLS (`f a b` -> f(a, b)).
@@ -1353,10 +1378,17 @@ typeToRustString recordMap t = case t of
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
             base = toCamelCase (modPrefix ++ name)
             args = map snd pairs
-        -- runtimeOpaque alias: non-generic (generics pinned in its def); drop args.
-        in if Map.member (modStr, name) runtimeOpaqueTypes then base
-           else if null args then base
-           else base ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
+        -- runtimeOpaque alias: if the registry value carries {M} the alias IS
+        -- generic — preserve Sky args (e.g. StdHtmlHtml<Msg>). Non-{M} entries
+        -- are non-generic (generics pinned in the registry value); drop args.
+        in case Map.lookup (modStr, name) runtimeOpaqueTypes of
+           Just rp | '{' `elem` rp ->
+               if null args then base
+               else base ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
+           Just _ -> base  -- non-generic opaque; drop args
+           Nothing ->
+               if null args then base
+               else base ++ "<" ++ intercalate ", " (map (typeToRustString recordMap) args) ++ ">"
     _ -> "String"
 
 rustSafeIdent :: String -> String
@@ -2966,7 +2998,7 @@ ffiPlaceholderSection b =
 -- | Entry point
 entryPointSection :: UsedKernels -> [String]
 entryPointSection uk =
-    let hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk || usesHttpServer uk || usesEmail uk
+    let hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk || usesHttpServer uk || usesEmail uk || usesLive uk
         mainIsTask = not (usesTaskRun uk)  -- if user uses Task.run, main returns ()
     in
     [ ""
@@ -3541,6 +3573,9 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Http.Middleware", "withRateLimit")    -> "middleware_with_rate_limit"
     ("RateLimit", "allow")            -> "rate_limit_allow"
     ("Sky.Http.RateLimit", "allow")   -> "rate_limit_allow"
+    -- Std.Live — P0 scaffold kernel (bridge + render path gate).
+    ("Live", "renderStatic")     -> "live_render_static"
+    ("Std.Live", "renderStatic") -> "live_render_static"
     ("Ffi", "kernel") -> "ffi_kernel_polyfill"
     -- Ffi.callPure / callTask / toAny: the peephole rewriter in exprToRustInner
     -- handles the common case (literal kernel name + literal args list) by
@@ -3685,7 +3720,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     , "crypto = []"
     , "json = []"
     , "db = []"
-    , ""
+    ] ++
+    -- Std.Live: declare the live feature so #[cfg(feature = "live")] in the
+    -- copied runtime files evaluates to true when the project uses Sky.Live.
+    [ "live = []" | usesLive uk ] ++
+    [ ""
     , "[dependencies]"
     , "tokio = { version = \"1\", features = [" ++ intercalate ", " (map show tokioFeats) ++ "] }"
     ] ++

@@ -1,0 +1,24 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Html as Html
+import Std.Html.Attributes as Attr
+import Std.Live as Live
+import Sky.Core.Error exposing (Error)
+
+
+type Msg = NoOp
+
+
+view : Int -> Html.Html Msg
+view n =
+    Html.div [ Attr.class "card" ]
+        [ Html.h1 [] [ Html.text "Sky.Live (rust)" ]
+        , Html.p [] [ Html.text ("count = " ++ String.fromInt n) ]
+        ]
+
+
+main : Task Error ()
+main =
+    Live.renderStatic view 7
