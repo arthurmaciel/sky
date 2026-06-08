@@ -265,6 +265,12 @@ data RustBuilder = RustBuilder
     , builderTypes      :: [RustTypeDef]
     , builderKernels    :: UsedKernels
     , builderFfiOpaques :: Set.Set String  -- types defined by Rust FFI bindings, skip placeholders
+    , builderFormTargets :: Set.Set String
+        -- P2-T5: Rust type names of records targeted by an `Ev.onSubmit handler`
+        -- (handler : T -> Msg). Only THESE structs gain `serde::Deserialize` in
+        -- typeDefToString — deriving it on every struct would force serde bounds
+        -- on function-typed fields (E0277). Computed by collectFormTargets, which
+        -- shares the handler-arg-type -> rustT logic with the onSubmit peephole.
     }
 
 data RustModule = RustModule
@@ -596,6 +602,50 @@ collectAnonRecordTypes = foldMap walkMod
             Can.Negate e0 -> walkExpr e0
             _ -> mempty  -- literals, variables: no sub-expressions
 
+-- | P2-T5 pre-pass. Walk every expression in every module; for each
+-- `Std.Html.Events.onSubmit handler` call, derive the form-target record's Rust
+-- type name (via the SAME formTargetRustType helper the call-site peephole uses,
+-- so both agree on the rendered name) and collect it. The resulting set drives
+-- the serde::Deserialize stamp in typeDefToString.
+collectFormTargets :: Map.Map String String -> Map.Map Ann.Region Can.Type -> [Can.Module] -> Set.Set String
+collectFormTargets recordMap regionTypes = foldMap walkMod
+  where
+    walkMod m = walkDecls (Can._decls m)
+
+    walkDecls Can.SaveTheEnvironment = Set.empty
+    walkDecls (Can.Declare def rest) = walkDef def <> walkDecls rest
+    walkDecls (Can.DeclareRec def defs rest) = walkDef def <> foldMap walkDef defs <> walkDecls rest
+
+    walkDef (Can.Def _ _ body) = walkExpr body
+    walkDef (Can.TypedDef _ _ _ body _) = walkExpr body
+    walkDef (Can.DestructDef _ expr) = walkExpr expr
+
+    walkExpr (Ann.At _ expr) = case expr of
+        Can.Call (Ann.At _ (Can.VarTopLevel mdl "onSubmit")) [Ann.At hregion _]
+            | ModuleName._name mdl == "Std.Html.Events" ->
+                let mTy = Map.lookup hregion regionTypes
+                in case formTargetRustType recordMap mTy of
+                    Just rustT -> Set.singleton rustT <> walkSubExprs expr
+                    Nothing    -> walkSubExprs expr
+        _ -> walkSubExprs expr
+      where
+        walkSubExprs e = case e of
+            Can.Call fn args -> walkExpr fn <> foldMap walkExpr args
+            Can.Lambda _ body -> walkExpr body
+            Can.Let def body -> walkDef def <> walkExpr body
+            Can.LetRec defs body -> foldMap walkDef defs <> walkExpr body
+            Can.LetDestruct _ e0 body -> walkExpr e0 <> walkExpr body
+            Can.Case scrut branches -> walkExpr scrut <> foldMap (\(Can.CaseBranch _ b) -> walkExpr b) branches
+            Can.If branches elseBranch -> foldMap (\(c, t) -> walkExpr c <> walkExpr t) branches <> walkExpr elseBranch
+            Can.Binop _ _ _ _ a b -> walkExpr a <> walkExpr b
+            Can.Access r _ -> walkExpr r
+            Can.Update _ r updates -> walkExpr r <> foldMap (\(_, Can.FieldUpdate _ e0) -> walkExpr e0) (Map.toList updates)
+            Can.Record fields -> foldMap (\(_, e0) -> walkExpr e0) (Map.toList fields)
+            Can.List es -> foldMap walkExpr es
+            Can.Tuple a b rest -> foldMap walkExpr (a:b:rest)
+            Can.Negate e0 -> walkExpr e0
+            _ -> Set.empty  -- literals, variables: no sub-expressions
+
 buildModule :: EmitCtx -> Can.Module -> RustModule
 buildModule ctx mod = 
     let modPrefix = moduleNameToRust (Can._name mod)
@@ -659,6 +709,25 @@ extractReturnType ty = ty
 extractParamTypes :: Can.Type -> [Can.Type]
 extractParamTypes (Can.TLambda paramTy restTy) = paramTy : extractParamTypes restTy
 extractParamTypes _ = []
+
+-- | P2-T4/T5 shared helper. Given the `onSubmit` handler argument's
+-- solver-inferred type (looked up from ecRegionTypes at the handler arg's
+-- region), determine the form-target record's Rust type string `T`.
+--
+-- The handler is either:
+--   * a `(Creds -> Msg)` function — the FIRST param is the form record `T`;
+--     we return `Just (typeToRustString recordMap T)` (the record-handler case).
+--   * a bare `Msg` value (`onSubmit SomeMsg`) — non-function type; `Nothing`
+--     (the bare-Msg case, no decode).
+--
+-- Both the call-site peephole (Part A) and the collectFormTargets pre-pass
+-- (Part B) route through THIS function so they agree on the rendered name.
+formTargetRustType :: Map.Map String String -> Maybe Can.Type -> Maybe String
+formTargetRustType recordMap mHandlerTy = case mHandlerTy of
+    Just ty -> case extractParamTypes ty of
+        (t : _) -> Just (typeToRustString recordMap t)
+        []      -> Nothing
+    Nothing -> Nothing
 
 -- | Check if a type contains unresolved type variables (should not be emitted)
 hasTypeVars :: Can.Type -> Bool
@@ -2221,6 +2290,32 @@ exprToRustInner ctx e = case e of
     Can.Call ctorFn@(Ann.At _ (Can.VarCtor _ _ "Event" "OnRaw" _)) [nameArg, handlerArg] ->
         exprToRustString ctx ctorFn ++ "(" ++ exprToRustString ctx nameArg
             ++ ", std::sync::Arc::new(" ++ exprToRustString ctx handlerArg ++ "))"
+    -- P2-T4: `Ev.onSubmit handler` call-site peephole. `Std.Html.Events.onSubmit`
+    -- is a .sky stdlib fn `onSubmit handler = EventAttr (OnRaw "submit" handler)`
+    -- whose body type-erases the handler to `any` — so the concrete form-record
+    -- type `T` is invisible at the OnRaw arm above. `T` is ONLY known HERE, at the
+    -- call site. So we INLINE the call straight to `Event::OnForm("submit", ...)`,
+    -- bypassing the stdlib fn + the OnRaw path entirely. The OnForm closure decodes
+    -- the wire FormData into `T` via decode_form::<T> and dispatches the Msg; a
+    -- malformed/incomplete form decodes to Err -> `.ok()` -> None -> no Msg.
+    Can.Call (Ann.At _ (Can.VarTopLevel mdl "onSubmit")) [handlerArg@(Ann.At hregion _)]
+        | ModuleName._name mdl == "Std.Html.Events" ->
+            let handlerStr = exprToRustString ctx handlerArg
+                mHandlerTy = Map.lookup hregion (ecRegionTypes ctx)
+            in case formTargetRustType (ecRecordMap ctx) mHandlerTy of
+                Just rustT ->
+                    -- record-handler case: `onSubmit DoSignIn` where
+                    -- `DoSignIn : Creds -> Msg`. Decode wire form -> Creds -> Msg.
+                    "Attribute::EventAttr(Event::OnForm(\"submit\".to_string(), "
+                        ++ "std::sync::Arc::new({ let __h = " ++ handlerStr ++ "; "
+                        ++ "move |fd| sky_runtime::decode_form::<" ++ rustT
+                        ++ ">(fd).ok().map(|t| __h(t)) })))"
+                Nothing ->
+                    -- bare-Msg case: `onSubmit SomeMsg`. Ignore the form payload;
+                    -- always dispatch the (Clone) Msg.
+                    "Attribute::EventAttr(Event::OnForm(\"submit\".to_string(), "
+                        ++ "std::sync::Arc::new({ let __m = " ++ handlerStr ++ "; "
+                        ++ "move |_fd| Some(__m.clone()) })))"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             -- sub-A.12 F2: detect partial application (Sky source has currying;
@@ -2741,6 +2836,7 @@ buildProgram mods solvedTypes regionTypes kernelAliases =
         , builderTypes = existingTypes ++ anonDefs
         , builderKernels = usage
         , builderFfiOpaques = Set.empty  -- populated by generateRust via passed FFI types
+        , builderFormTargets = collectFormTargets recordMap regionTypes mods
         }
 
 -- | Backend-specific sqlx types
@@ -2984,7 +3080,7 @@ userTypeSection b =
     , "// USER TYPES"
     , "// ==========================================="
     , ""
-    ] ++ map typeDefToString (builderTypes b)
+    ] ++ map (typeDefToString (builderFormTargets b)) (builderTypes b)
 
 -- | SkyError type alias + str_err helper — conditional on Error module presence.
 -- Must be emitted AFTER userTypeSection (SkyCoreErrorError ADT) and BEFORE
@@ -3052,15 +3148,27 @@ entryPointSection uk =
         , "}"
         ])
 
-typeDefToString :: RustTypeDef -> String
-typeDefToString (REnumDef name gens variants) =
+-- | Render a Rust type def. The form-target set (P2-T5) gates the
+-- `serde::Deserialize` derive: ONLY structs whose name is an `Ev.onSubmit`
+-- target gain it. Deriving serde on every struct would force serde bounds on
+-- function-typed fields (e.g. closures in a config record) and reject with
+-- E0277, so the stamp is opt-in per form target.
+typeDefToString :: Set.Set String -> RustTypeDef -> String
+typeDefToString _ (REnumDef name gens variants) =
     "#[derive(Clone, Debug, PartialEq)]\npub enum " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
-typeDefToString (RStructDef name gens fields) =
-    "#[derive(Clone, Debug, PartialEq)]\npub struct " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
-typeDefToString (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
-typeDefToString (RPubUseAlias codegenName rustPath) =
+typeDefToString formTargets (RStructDef name gens fields) =
+    -- Sky record field names are camelCase and match the form `name=` attrs
+    -- 1:1, so no #[serde(rename)] is needed. A form-target struct carrying a
+    -- non-serde field will (correctly) fail to compile with E0277 — a
+    -- friendlier Sky-side diagnostic is a P-later item.
+    let derives = if name `Set.member` formTargets
+                  then "#[derive(Clone, Debug, PartialEq, serde::Deserialize)]"
+                  else "#[derive(Clone, Debug, PartialEq)]"
+    in derives ++ "\npub struct " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
+typeDefToString _ (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
+typeDefToString _ (RPubUseAlias codegenName rustPath) =
     "pub use " ++ rustPath ++ " as " ++ codegenName ++ ";"
-typeDefToString (RAliasDefGen name gens path) =
+typeDefToString _ (RAliasDefGen name gens path) =
     "pub type " ++ name ++ gens ++ " = " ++ path ++ ";"
 
 -- | Extract a module's content as (snake_case_file_stem, source_content).
