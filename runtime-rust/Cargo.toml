@@ -52,7 +52,7 @@ server = ["tokio", "axum", "tower-http", "futures-util"]
 http_client = ["tokio", "reqwest", "futures-util"]
 email = ["tokio", "reqwest", "serde_json", "sha2"]
 websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
-live = ["server", "http_client", "serde"]
+live = ["server", "http_client", "serde", "serde_json"]
 full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "config", "server", "http_client", "email", "websocket_client", "live"]
 
 [dev-dependencies]

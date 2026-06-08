@@ -14,20 +14,33 @@ pub enum Html<M> {
     HRaw(String),
 }
 
+/// Variant names mirror the Sky stdlib `Std.Html.Attributes.Attribute` ADT
+/// (`Attr | BoolAttr | EventAttr (Event msg) | NoAttr`) so the Rust codegen's
+/// bridge (`StdHtmlAttributesAttribute<msg> = sky_runtime::Attribute<msg>`)
+/// constructs the right variants by name.
 #[derive(Clone)]
 pub enum Attribute<M> {
     Attr(String, String),
     BoolAttr(String, bool),
-    Event(Event<M>),
+    EventAttr(Event<M>),
     /// Sentinel for a conditionally-absent attribute; skipped during render.
     NoAttr,
 }
 
+/// Variant names mirror the Sky stdlib `Std.Html.Attributes.Event` ADT
+/// (`OnMsg | OnString | OnBool | OnRaw String any`). `OnString`/`OnBool` carry
+/// fn pointers (the codegen renders the Sky `(String -> msg)` handler as
+/// `fn(String) -> msg`). `OnRaw` is the heterogeneous-payload escape hatch
+/// (`on` / `onSubmit`); its payload is type-erased — not dispatchable in P1,
+/// but kept so the bridge compiles. The `submit` wire path resolves via
+/// `OnForm` instead (constructed server-side, never from Sky stdlib).
 #[derive(Clone)]
 pub enum Event<M> {
     OnMsg(String, M),
-    OnString(String, std::sync::Arc<dyn Fn(String) -> M + Send + Sync>),
-    OnBool(String, std::sync::Arc<dyn Fn(bool) -> M + Send + Sync>),
+    OnString(String, fn(String) -> M),
+    OnBool(String, fn(bool) -> M),
+    OnRaw(String, std::sync::Arc<dyn std::any::Any + Send + Sync>),
+    /// Server-constructed form handler (not produced by the Sky stdlib bridge).
     OnForm(String, std::sync::Arc<dyn Fn(FormData) -> M + Send + Sync>),
 }
 
@@ -37,7 +50,7 @@ impl<M: PartialEq> PartialEq for Attribute<M> {
         match (self, o) {
             (Attr(a, b), Attr(c, d)) => a == c && b == d,
             (BoolAttr(a, b), BoolAttr(c, d)) => a == c && b == d,
-            (Event(a), Event(b)) => a == b,
+            (EventAttr(a), EventAttr(b)) => a == b,
             (NoAttr, NoAttr) => true,
             _ => false,
         }
@@ -49,7 +62,7 @@ impl<M> std::fmt::Debug for Attribute<M> {
         match self {
             Attribute::Attr(k, v) => write!(f, "Attr({k:?},{v:?})"),
             Attribute::BoolAttr(k, v) => write!(f, "BoolAttr({k:?},{v})"),
-            Attribute::Event(e) => write!(f, "{e:?}"),
+            Attribute::EventAttr(e) => write!(f, "{e:?}"),
             Attribute::NoAttr => write!(f, "NoAttr"),
         }
     }
@@ -74,6 +87,7 @@ impl<M> Event<M> {
             Event::OnMsg(n, _)
             | Event::OnString(n, _)
             | Event::OnBool(n, _)
+            | Event::OnRaw(n, _)
             | Event::OnForm(n, _) => n,
         }
     }
@@ -83,6 +97,7 @@ impl<M> Event<M> {
             Event::OnMsg(n, _) => (0, n),
             Event::OnString(n, _) => (1, n),
             Event::OnBool(n, _) => (2, n),
+            Event::OnRaw(n, _) => (4, n),
             Event::OnForm(n, _) => (3, n),
         }
     }
@@ -92,6 +107,7 @@ impl<M> Event<M> {
             Event::OnMsg(..) => "OnMsg",
             Event::OnString(..) => "OnString",
             Event::OnBool(..) => "OnBool",
+            Event::OnRaw(..) => "OnRaw",
             Event::OnForm(..) => "OnForm",
         }
     }
@@ -127,9 +143,13 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
             s.push('<');
             s.push_str(tag);
             let mut events: Vec<&str> = vec![];
+            let mut sky_id: Option<&str> = None;
             for a in attrs {
                 match a {
                     Attribute::Attr(k, v) => {
+                        if k == "sky-id" {
+                            sky_id = Some(v);
+                        }
                         s.push(' ');
                         s.push_str(k);
                         s.push_str("=\"");
@@ -141,13 +161,30 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                         s.push_str(k);
                     }
                     Attribute::BoolAttr(_, false) | Attribute::NoAttr => {}
-                    Attribute::Event(e) => events.push(e.name()),
+                    Attribute::EventAttr(e) => events.push(e.name()),
                 }
             }
+            // Browser-client wire markers (live/client.js): the delegated
+            // binder scans for `[sky-<event>]` and reads `data-sky-hid` to
+            // route the POST. We resolve handlers server-side by the
+            // element's sky-id, so `data-sky-hid` carries the sky-id and
+            // each `sky-<event>` value is a non-empty marker ("1"). The
+            // legacy `data-sky-on` list is kept for any pre-existing tooling
+            // / parity with Go's render.
             if !events.is_empty() {
                 s.push_str(" data-sky-on=\"");
                 s.push_str(&events.join(" "));
                 s.push('"');
+                if let Some(id) = sky_id {
+                    s.push_str(" data-sky-hid=\"");
+                    s.push_str(&escape_attr(id));
+                    s.push('"');
+                }
+                for ev in &events {
+                    s.push_str(" sky-");
+                    s.push_str(ev);
+                    s.push_str("=\"1\"");
+                }
             }
             if VOID.contains(&tag.as_str()) {
                 s.push('>');
@@ -232,7 +269,7 @@ mod tests {
     #[test]
     fn render_emits_data_event_attr() {
         let t: Html<()> = Html::HElement("button".into(),
-            vec![Attribute::Event(Event::OnMsg("click".into(), ()))], vec![]);
+            vec![Attribute::EventAttr(Event::OnMsg("click".into(), ()))], vec![]);
         let mut t = t; assign_sky_ids(&mut t, "r");
         let s = render_html(&t);
         assert!(s.contains(r#"data-sky-on="click""#), "{s}");
@@ -268,7 +305,7 @@ mod tests {
     fn html_tree_constructs() {
         let t: Html<Msg> = Html::HElement(
             "button".into(),
-            vec![Attribute::Event(Event::OnMsg("click".into(), Msg::Inc))],
+            vec![Attribute::EventAttr(Event::OnMsg("click".into(), Msg::Inc))],
             vec![Html::HText("+".into())],
         );
         match t {
@@ -281,7 +318,7 @@ mod tests {
         }
 
         // Clone + PartialEq round-trip on an attribute holding a closure.
-        let attr: Attribute<Msg> = Attribute::Event(Event::OnMsg("click".into(), Msg::Inc));
+        let attr: Attribute<Msg> = Attribute::EventAttr(Event::OnMsg("click".into(), Msg::Inc));
         assert_eq!(attr, attr.clone());
         // Debug prints the variant name + event name, not a numeric discriminant.
         let dbg = format!("{:?}", attr);

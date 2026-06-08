@@ -428,6 +428,9 @@ kernelsNeedingErrorPin = Map.fromList
     -- Std.Live P0 scaffold — live_render_static<E, Model, Msg, FView>; pin E,
     -- leave Model/Msg/FView inferred from the view function and model arg.
     , ("live_render_static",       "::<SkyError, _, _, _>")
+    -- Std.Live live_app — <E, Model, Msg, FInit, FUpdate, FView, FSubs>; pin E
+    -- (no error-determining arg), infer the rest from the four spliced callbacks.
+    , ("live_app",                 "::<SkyError, _, _, _, _, _, _>")
     -- Sky.Core.Http.Stream (client) — open/close have no E-determining arg.
     , ("http_stream_open",         "::<SkyError>")
     , ("http_stream_close",        "::<SkyError>")
@@ -1025,8 +1028,12 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
         -- msg) must NOT become a function generic — it'd be unused in the Rust
         -- sig (E0107 on the return type / E0283 at call sites).
         tvarNames = nub [ v | t <- allAnnotTys, v <- collectRenderedTVars t ]
+        -- `+ Sync`: generic values flow across the multi-threaded tokio TEA
+        -- boundary (Cmd.perform goroutines, SSE driver tasks). Sky values are
+        -- immutable, so Sync is sound; it's also required for the Std.Live
+        -- Event::OnRaw type-erased payload (Arc<dyn Any + Send + Sync>).
         genDecl = if null tvarNames then ""
-                  else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug + Send + 'static") tvarNames) ++ ">"
+                  else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static") tvarNames) ++ ">"
         multiBody = collectVarLocalsMulti body
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
         ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx
@@ -2171,6 +2178,16 @@ exprToRustInner ctx e = case e of
                 Nothing -> "/* Cli.program: missing field " ++ n ++ " */"
         in "cli_program(" ++ intercalate ", "
                (map fld ["init", "update", "view", "subscriptions", "onLine"]) ++ ")"
+    -- Task 10: Live.app { init, update, view, subscriptions, routes, notFound } —
+    -- same record-splice as Cli.program. routes/notFound are dropped for P1
+    -- (single-page counter); live_app takes the four TEA callbacks.
+    Can.Call (Ann.At _ (Can.VarKernel "Live" "app")) [Ann.At _ (Can.Record fields)] ->
+        let fld n = case Map.lookup n fields of
+                Just e  -> exprToRustString ctx e
+                Nothing -> "/* Live.app: missing field " ++ n ++ " */"
+        -- Pin E=SkyError (no error-determining arg); infer Model/Msg/closures.
+        in "live_app::<SkyError, _, _, _, _, _, _>(" ++ intercalate ", "
+               (map fld ["init", "update", "view", "subscriptions"]) ++ ")"
     -- Sub-E step 3: Cmd.perform with a DIVERGING task (System.exit -> `!`) leaves
     -- the task's success/error types free (E0283). Pin them — the value is never
     -- produced (the process exits first), so A is a phantom i64 filler.
@@ -2196,6 +2213,14 @@ exprToRustInner ctx e = case e of
                     "error"   -> "sub_subscribe_ws_error"
                     _         -> "sub_subscribe_ws_message"
             in fn ++ "(" ++ exprToRustString ctx rawArg ++ ", " ++ exprToRustString ctx toMsgArg ++ ")"
+    -- Sky.Live: `EventAttr (Event msg)` and `OnRaw String any` bridge to the
+    -- runtime html::Attribute / html::Event enums. OnRaw's payload is the
+    -- heterogeneous `any` handler (from `on` / `onSubmit`); the runtime field is
+    -- `Arc<dyn Any + Send + Sync>`, so type-erase the generated handler arg with
+    -- Arc::new(...). OnMsg/OnString/OnBool need no wrap (value / fn-pointer).
+    Can.Call ctorFn@(Ann.At _ (Can.VarCtor _ _ "Event" "OnRaw" _)) [nameArg, handlerArg] ->
+        exprToRustString ctx ctorFn ++ "(" ++ exprToRustString ctx nameArg
+            ++ ", std::sync::Arc::new(" ++ exprToRustString ctx handlerArg ++ "))"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             -- sub-A.12 F2: detect partial application (Sky source has currying;
@@ -3576,6 +3601,8 @@ kernelToRust mod name = case (mod, name) of
     -- Std.Live — P0 scaffold kernel (bridge + render path gate).
     ("Live", "renderStatic")     -> "live_render_static"
     ("Std.Live", "renderStatic") -> "live_render_static"
+    ("Live", "app")              -> "live_app"
+    ("Std.Live", "app")          -> "live_app"
     ("Ffi", "kernel") -> "ffi_kernel_polyfill"
     -- Ffi.callPure / callTask / toAny: the peephole rewriter in exprToRustInner
     -- handles the common case (literal kernel name + literal args list) by
@@ -3781,9 +3808,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     -- crate with different features) to avoid a duplicate-key / feature clash.
     [ "uuid = { version = \"1\", features = [\"v4\", \"v7\"] }"
     | usesUuid uk, "uuid" `notElem` userDepNames ] ++
-    -- Sub-D.1: axum + tower-http only when Sky.Http.Server is used.
+    -- Sub-D.1: axum + tower-http when Sky.Http.Server OR Std.Live is used.
+    -- live_app mounts its own axum Router (self-contained — no `server` module),
+    -- so it needs axum even when Sky.Http.Server isn't.
     [ name ++ " = " ++ spec
-    | usesHttpServer uk
+    | usesHttpServer uk || usesLive uk
     , (name, spec) <-
         [ ("axum",       "{ version = \"0.7\", features = [\"ws\"] }")
         , ("tower-http", "{ version = \"0.5\", features = [\"fs\", \"catch-panic\"] }")
@@ -3797,7 +3826,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     -- futures-util: WebSocket client, plus the streaming paths — http_stream.rs
     -- (StreamExt::next) and server_stream.rs (stream::unfold for the body).
     [ "futures-util = \"0.3\""
-    | usesWsClient uk || usesHttp uk || usesHttpServer uk, "futures-util" `notElem` userDepNames ] ++
+    | usesWsClient uk || usesHttp uk || usesHttpServer uk || usesLive uk, "futures-util" `notElem` userDepNames ] ++
     -- Sky.Core.WebSocket client: tokio-tungstenite (futures-util above).
     [ "tokio-tungstenite = \"0.24\""
     | usesWsClient uk, "tokio-tungstenite" `notElem` userDepNames ] ++
@@ -3812,7 +3841,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     -- axum pulls `sync` transitively for the server case, but a plain Sky.Cli
     -- program has no axum, so request it explicitly.
     tokioFeats = ["rt", "rt-multi-thread", "macros", "time"]
-                 ++ ["net" | usesHttpServer uk || usesHttp uk || usesWsClient uk || usesEmail uk]
+                 ++ ["net" | usesHttpServer uk || usesHttp uk || usesWsClient uk || usesEmail uk || usesLive uk]
                  -- Std.Live: live/session.rs + live/sse.rs use tokio::sync::mpsc.
                  ++ ["sync" | usesTea uk || usesWsClient uk || usesLive uk]
     dbFeature "postgres" = "postgres"

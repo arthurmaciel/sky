@@ -28,6 +28,7 @@ impl<M: Clone> HandlerIndex<M> {
                 Some(f(args.first().map(|s| s == "true").unwrap_or(false)))
             }
             Event::OnForm(_, _) => None, // dispatched via resolve_form
+            Event::OnRaw(_, _) => None,  // heterogeneous payload — not dispatchable in P1
         }
     }
 
@@ -66,7 +67,7 @@ fn walk<M: Clone>(n: &Html<M>, map: &mut HashMap<(String, String), Event<M>>) {
             .unwrap_or_default();
 
         for a in attrs {
-            if let Attribute::Event(e) = a {
+            if let Attribute::EventAttr(e) = a {
                 map.insert((id.clone(), e.name().to_string()), e.clone());
             }
         }
@@ -96,15 +97,12 @@ mod tests {
             vec![
                 Html::HElement(
                     "button".into(),
-                    vec![Attribute::Event(Event::OnMsg("click".into(), Msg::Inc))],
+                    vec![Attribute::EventAttr(Event::OnMsg("click".into(), Msg::Inc))],
                     vec![],
                 ),
                 Html::HElement(
                     "input".into(),
-                    vec![Attribute::Event(Event::OnString(
-                        "input".into(),
-                        std::sync::Arc::new(|s| Msg::Typed(s)),
-                    ))],
+                    vec![Attribute::EventAttr(Event::OnString("input".into(), |s| Msg::Typed(s)))],
                     vec![],
                 ),
             ],
@@ -132,9 +130,9 @@ mod tests {
     fn resolves_onbool() {
         let mut t = Html::HElement(
             "input".into(),
-            vec![Attribute::Event(Event::OnBool(
+            vec![Attribute::EventAttr(Event::OnBool(
                 "change".into(),
-                std::sync::Arc::new(|b| if b { Msg::Inc } else { Msg::Typed("off".into()) }),
+                |b| if b { Msg::Inc } else { Msg::Typed("off".into()) },
             ))],
             vec![],
         );
@@ -151,7 +149,7 @@ mod tests {
     fn resolves_onform() {
         let mut t = Html::HElement(
             "form".into(),
-            vec![Attribute::Event(Event::OnForm(
+            vec![Attribute::EventAttr(Event::OnForm(
                 "submit".into(),
                 std::sync::Arc::new(|fd: FormData| {
                     Msg::Typed(fd.get("name").cloned().unwrap_or_default())
@@ -177,10 +175,7 @@ mod tests {
     fn onstring_empty_args_gives_default() {
         let mut t = Html::HElement(
             "input".into(),
-            vec![Attribute::Event(Event::OnString(
-                "input".into(),
-                std::sync::Arc::new(|s| Msg::Typed(s)),
-            ))],
+            vec![Attribute::EventAttr(Event::OnString("input".into(), |s| Msg::Typed(s)))],
             vec![],
         );
         assign_sky_ids(&mut t, "r");

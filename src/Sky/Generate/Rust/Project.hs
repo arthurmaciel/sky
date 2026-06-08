@@ -123,9 +123,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- Std.Email only when used (pulls reqwest; mirrors http_client).
         emailMod = if RustBuilder.usesEmail usage then ["pub mod email;"] else []
         emailUse = if RustBuilder.usesEmail usage then ["pub use email::*;"] else []
-        -- Sub-E: TEA (Cmd/Sub/Cli.program) only when used.
-        teaMod = if RustBuilder.usesTea usage then ["pub mod tea;"] else []
-        teaUse = if RustBuilder.usesTea usage then ["pub use tea::*;"] else []
+        -- Sub-E: TEA (Cmd/Sub/Cli.program) only when used. Std.Live's live/mod.rs
+        -- imports SkyCmd/SkySub from tea, so usesLive pulls tea too.
+        teaMod = if RustBuilder.usesTea usage || RustBuilder.usesLive usage then ["pub mod tea;"] else []
+        teaUse = if RustBuilder.usesTea usage || RustBuilder.usesLive usage then ["pub use tea::*;"] else []
         -- Sky.Core.WebSocket client only when used (pulls tokio-tungstenite).
         wscMod = if RustBuilder.usesWsClient usage then ["pub mod ws_client;"] else []
         wscUse = if RustBuilder.usesWsClient usage then ["pub use ws_client::*;"] else []
