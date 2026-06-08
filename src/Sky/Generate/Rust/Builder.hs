@@ -2247,16 +2247,54 @@ exprToRustInner ctx e = case e of
                 Nothing -> "/* Cli.program: missing field " ++ n ++ " */"
         in "cli_program(" ++ intercalate ", "
                (map fld ["init", "update", "view", "subscriptions", "onLine"]) ++ ")"
-    -- Task 10: Live.app { init, update, view, subscriptions, routes, notFound } —
-    -- same record-splice as Cli.program. routes/notFound are dropped for P1
-    -- (single-page counter); live_app takes the four TEA callbacks.
+    -- Live.app { init, update, view, subscriptions, routes, notFound } —
+    -- record-splice like Cli.program. P3: branch on whether the Model record
+    -- carries a `page` field.
+    --   * No `page` field (counter / form — single-page): emit `live_app` with
+    --     the four TEA callbacks; routes/notFound dropped. Byte-identical to P1.
+    --   * Has `page` field: emit `live_app_routed` with the route table, the
+    --     notFound page, and a generated `set_page` closure that writes the
+    --     matched Page into `model.page`. The runtime route_resolver does the
+    --     match-and-inject on every GET (Go parity).
     Can.Call (Ann.At _ (Can.VarKernel "Live" "app")) [Ann.At _ (Can.Record fields)] ->
         let fld n = case Map.lookup n fields of
                 Just e  -> exprToRustString ctx e
                 Nothing -> "/* Live.app: missing field " ++ n ++ " */"
-        -- Pin E=SkyError (no error-determining arg); infer Model/Msg/closures.
-        in "live_app::<SkyError, _, _, _, _, _, _>(" ++ intercalate ", "
-               (map fld ["init", "update", "view", "subscriptions"]) ++ ")"
+            rm = ecRecordMap ctx
+            -- Recover Model from view's solver type: `view : Model -> Html Msg`.
+            mModelTy = case Map.lookup "view" (ecSolvedTypes ctx) of
+                Just ty -> case extractParamTypes ty of
+                    (m : _) -> Just m
+                    []      -> Nothing
+                Nothing -> Nothing
+            -- Resolve a type to its record-field map (peel the alias wrapper).
+            recordFieldsOf ty = case ty of
+                Can.TRecord fs _        -> Just fs
+                Can.TAlias _ _ _ (Can.Hoisted inner) -> recordFieldsOf inner
+                Can.TAlias _ _ _ (Can.Filled inner)  -> recordFieldsOf inner
+                _                       -> Nothing
+            mModelFields = mModelTy >>= recordFieldsOf
+            mPageFieldTy = mModelFields >>= Map.lookup "page"
+        in case (mModelTy, mPageFieldTy) of
+            (Just modelTy, Just (Can.FieldType _ pageTy)) ->
+                -- Routing mode.
+                let modelRustTy = typeToRustString rm modelTy
+                    pageRustTy = typeToRustString rm pageTy
+                    routesStr = case Map.lookup "routes" fields of
+                        Just (Ann.At _ (Can.List elems)) ->
+                            "vec![" ++ intercalate ", " (map (exprToRustString ctx) elems) ++ "]"
+                        Just other -> exprToRustString ctx other
+                        Nothing    -> "vec![]"
+                    notFoundStr = fld "notFound"
+                    setPage = "move |__page: " ++ pageRustTy ++ ", __model: " ++ modelRustTy
+                                ++ "| " ++ modelRustTy ++ " { page: __page, ..__model }"
+                in "live_app_routed::<SkyError, _, _, _, _, _, _, _, _>(" ++ intercalate ", "
+                       ([fld "init", fld "update", fld "view", fld "subscriptions",
+                         routesStr, notFoundStr, setPage]) ++ ")"
+            _ ->
+                -- Single-page mode (no page field): four TEA callbacks; pin E.
+                "live_app::<SkyError, _, _, _, _, _, _>(" ++ intercalate ", "
+                    (map fld ["init", "update", "view", "subscriptions"]) ++ ")"
     -- Sub-E step 3: Cmd.perform with a DIVERGING task (System.exit -> `!`) leaves
     -- the task's success/error types free (E0283). Pin them — the value is never
     -- produced (the process exits first), so A is a phantom i64 filler.
