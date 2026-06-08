@@ -1,0 +1,48 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Html as Html
+import Std.Html.Attributes as Attr
+import Std.Live as Live
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+import Sky.Core.Error exposing (Error)
+
+
+type Page = Home | AppDetail String | NotFound
+
+
+type alias Model = { page : Page }
+
+
+type Msg = NoOp
+
+
+init : () -> ( Model, Cmd Msg )
+init _ = ( { page = Home }, Cmd.none )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update _ model = ( model, Cmd.none )
+
+
+view : Model -> Html.Html Msg
+view model =
+    case model.page of
+        Home -> Html.div [] [ Html.h1 [] [ Html.text "Home" ] ]
+        AppDetail slug -> Html.div [] [ Html.h1 [] [ Html.text ("App: " ++ slug) ] ]
+        NotFound -> Html.div [] [ Html.h1 [] [ Html.text "404" ] ]
+
+
+subscriptions : Model -> Sub Msg
+subscriptions _ = Sub.none
+
+
+main : Task Error ()
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ Live.route "/" Home, Live.route "/apps/:slug" AppDetail ]
+        , notFound = NotFound
+        }
