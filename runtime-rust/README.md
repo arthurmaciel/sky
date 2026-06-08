@@ -69,7 +69,7 @@ or `unsafe`.
 The Go backend is the reference (full surface — 54 kernel modules). Rust
 coverage, by confidence:
 
-**✅ Covered & verified** (standard-libs 131/131 + the 26 `examples/rust/*` +
+**✅ Covered & verified** (standard-libs 131/131 + the 28 `examples/rust/*` +
 the HTTP/WS/Cli regression tests):
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
   Regex, Bytes (Latin-1), Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal,
@@ -138,9 +138,29 @@ targets):
 - `Io` (writeStdout/readLine beyond Log), `Process.run`, `Debug`, `Fmt` — small;
   partially present, not example-verified on rust.
 
+**🚧 In progress — Sky.Live (P0 + P1 landed):**
+- **P0 — bridge + static render.** `Std.Html`'s `Html`/`Attribute`/`Event` ADTs
+  bridge to runtime-generic `sky_runtime::Html<M>` etc. (the `{M}` generic-alias
+  codegen case — `StdHtmlHtml<msg> = sky_runtime::Html<msg>`). `assign_sky_ids`
+  (stable per-element ids) + `render_html` (escaping + void + `data-sky-on`
+  marker) + a full page wrap. Gate: `examples/rust/27-live-static` —
+  `Live.renderStatic view 7` prints byte-correct full HTML (live/html.rs,
+  live/mod.rs).
+- **P1 — live TEA over HTTP+SSE.** `Live.app { init, update, view, subscriptions }`
+  serves an axum router: GET renders the full page with the verbatim-ported Go
+  browser client (live/client.js) + a `sky_sid` cookie, opens a per-session TEA
+  driver, and serves `/_sky/sse` (hello + 15s heartbeat) + `POST /_sky/event`.
+  The driver diffs view-over-view (live/diff.rs — `Patch` in Go's wire schema,
+  text/attr/inner-html-replace; keyed reorder is P6) and pushes `event: patches`
+  frames (`{globalSeq, patches:[{id,text|html|attrs|remove}]}`) over SSE.
+  Handler resolution by sky-id (live/dispatch.rs); in-memory session store
+  (live/session.rs). Gate: `examples/rust/28-live-counter` — clicking `+`/`-`
+  increments the rendered span live over SSE (verified end-to-end).
+- **Ahead (P2–P6):** `OnForm`/form-decode, URL routing (`routes`/`notFound`),
+  Cmd/Sub depth, session-store backends (sqlite/redis/postgres/firestore) + TTL,
+  keyed/faithful VNode diff, per-GET session reuse.
+
 **🟡 Deferred — large arcs:**
-- **Sky.Live** — Live.app + URL routing + SSE + session stores
-  (memory/sqlite/redis/postgres/firestore) + VNode diffing (the web framework).
 - **Sky.Tui** — `Std.Ui` → ANSI renderer (~2k lines); TEA core already done, the
   renderer is the open decision (Sky-side vs runtime port).
 - **Sky.Webview** — desktop (macOS-only even on Go).
@@ -238,7 +258,7 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 26/26 build + run from a wiped slate
+### `examples/rust/` — 28/28 build + run from a wiped slate
 
 | Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
@@ -268,6 +288,8 @@ even for crates that use proc macros or derive macros.
 | 24-http-api | `Sky.Http.Server` (`api` + `Handler` + Middleware) | ✅ builds (curl-verified) | v0.16.x #393(d) surface — `Server.api "GET /api/ping"` route, the relocated `Handler` type alias, and `Mw.withLogging`. `curl` confirms `GET /` (HTML) + `GET /api/ping` → `{"ok":true,"msg":"pong"}` 200, middleware access-logged. |
 | 25-retry | `Sky.Core.Task` (`retryWith` + `RetryPolicy`) | ✅ builds + runs | `defaultRetryPolicy |> withMaxAttempts |> withBaseMs` then `Task.retryWith policy work` → 42. Confirms the RetryPolicy<e> codegen fix at runtime; `retryWith` is run-once on Rust (SkyTask is one-shot — codegen drops the policy arg). |
 | 26-stream-cli | `Sky.Core.Http.Stream` Sub-tier (`chunks`) | ✅ builds (e2e-verified) | A `Cli.program` TEA app streaming an HTTP body into its update loop as `ChunkEvent` Msgs. `chunks=0→6` view renders prove incremental, non-buffered dispatch (vs 22-relay's synchronous `forEachChunk`). Exercises `sub_subscribe_stream` (detached dedup-guarded drain) + the bridged generic `ChunkEvent<SkyError>` enum. Run against `21-sse-server`. |
+| 27-live-static | `Std.Live` (P0) + `Std.Html` | ✅ builds + runs | `Live.renderStatic view 7` prints byte-correct full HTML through the bridged `Html<M>` family. Gate for the `{M}` generic-alias bridge (`StdHtmlHtml<msg> = sky_runtime::Html<msg>`), `assign_sky_ids`, and `render_html` (escaping + void + `data-sky-on`). |
+| 28-live-counter | `Std.Live` (P1) — `Live.app` over axum + SSE | ✅ builds (e2e-verified) | The TEA-over-HTTP loop: GET renders the counter (sky-ids + `data-sky-on=click` + `sky_sid` cookie + embedded ported client JS); `/_sky/sse` streams `hello` then, after `POST /_sky/event {handlerId}`, an `event: patches` frame `{globalSeq, patches:[{id,text}]}` — the span increments live. Exercises `live_app`, the `Live.app{…}` record-splice peephole, per-session driver, diff, and `HandlerIndex`. |
 
 ### `examples/00-standard-libs` on `target=rust`
 
