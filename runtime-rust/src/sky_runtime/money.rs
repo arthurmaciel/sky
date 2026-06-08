@@ -238,6 +238,16 @@ mod tests {
 
     fn d(s: &str) -> Decimal { Decimal(RD::from_str(s).unwrap()) }
 
+    // Serialise tests that mutate the process-global fx-rate registry
+    // (`rates()`). cargo runs tests in parallel, so without this guard one
+    // test's clear/set lands mid-assertion in another and the round-trip
+    // flakes. Poison-tolerant: a panic in one rate test must not wedge the
+    // next via an unwrap on a poisoned lock.
+    fn rate_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn test_money_minor_units() {
         assert_eq!(money_minor_units("USD".into()), 2);
@@ -283,6 +293,7 @@ mod tests {
 
     #[test]
     fn test_money_rates_roundtrip() {
+        let _guard = rate_test_lock();
         // Clear any rates from prior tests
         let _: SkyResult<String, ()> = money_clear_rates();
         // Set USD->EUR = 0.9; auto-registers EUR->USD ≈ 1.111
@@ -304,6 +315,7 @@ mod tests {
 
     #[test]
     fn test_money_set_rate_negative_rejected() {
+        let _guard = rate_test_lock();
         let _: SkyResult<String, ()> = money_clear_rates();
         let r: SkyResult<String, ()> = money_set_rate("USD".into(), "EUR".into(), d("-1"));
         assert!(matches!(r, SkyResult::Err(_)));
