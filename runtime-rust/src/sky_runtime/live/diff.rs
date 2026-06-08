@@ -12,10 +12,10 @@ pub struct Patch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
     /// Attribute delta: present key with non-empty value → set; empty value → remove.
-    /// Go convention: `""` means remove.
-    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    /// Go convention: `""` means remove; `BoolAttr(k,true)` encodes as `{k:k}`.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub attrs: HashMap<String, String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub remove: bool,
 }
 
@@ -74,13 +74,15 @@ fn diff_node<M>(old: &Html<M>, new: &Html<M>, out: &mut Vec<Patch>) {
             diff_attrs(oa, na, &mut p);
 
             if same_child_shape(ok, nk) {
-                // Recurse into matched children.
-                if !p.is_noop() {
+                // Recurse into matched children; only emit a patch if id is non-empty
+                // (Go parity: `if old.SkyID != ""`).
+                if !id.is_empty() && !p.is_noop() {
                     out.push(p);
                 }
                 // Handle a sole text-child change via SetText (cheaper than html replace).
                 diff_text_children(&id, ok, nk, out);
-                // Recurse into element children.
+                // Recurse into element children (even when id is empty — addressed
+                // descendants inside an unaddressed wrapper still need patching).
                 for (c_old, c_new) in ok.iter().zip(nk.iter()) {
                     if matches!(c_old, Html::HElement(..)) {
                         diff_node(c_old, c_new, out);
@@ -88,8 +90,11 @@ fn diff_node<M>(old: &Html<M>, new: &Html<M>, out: &mut Vec<Patch>) {
                 }
             } else {
                 // Structural mismatch — replace the whole inner HTML.
-                p.html = Some(render_children(nk));
-                out.push(p);
+                // Only emit if id is non-empty (Go parity).
+                if !id.is_empty() {
+                    p.html = Some(render_children(nk));
+                    out.push(p);
+                }
             }
         }
         // Text ↔ text handled by the parent's diff_text_children; nothing to do here.
@@ -99,7 +104,11 @@ fn diff_node<M>(old: &Html<M>, new: &Html<M>, out: &mut Vec<Patch>) {
 }
 
 /// Emit a `SetText` patch when the sole child is a text node that changed.
+// FIXME(P2): multi-child mixed text/element changes aren't diffed here; Go emits a parent html-replace. Single-text-child (the P1 counter shape) is covered.
 fn diff_text_children<M>(id: &str, ok: &[Html<M>], nk: &[Html<M>], out: &mut Vec<Patch>) {
+    if id.is_empty() {
+        return;
+    }
     if let ([Html::HText(o)], [Html::HText(n)]) = (ok, nk) {
         if o != n {
             let mut p = Patch::for_id(id);
@@ -133,7 +142,9 @@ fn diff_attrs<M>(old: &[Attribute<M>], new: &[Attribute<M>], p: &mut Patch) {
                     m.insert(k.clone(), v.clone());
                 }
                 Attribute::BoolAttr(k, true) => {
-                    m.insert(k.clone(), String::new());
+                    // Go parity: live.go line 190 `vn.Attrs[k] = k`.
+                    // Key-as-value encodes a present boolean attr; "" is the remove sentinel only.
+                    m.insert(k.clone(), k.clone());
                 }
                 _ => {}
             }
@@ -167,7 +178,6 @@ fn render_children<M>(kids: &[Html<M>]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sky_runtime::live::html::*;
 
     fn ids(h: &mut Html<()>) {
         assign_sky_ids(h, "r");
@@ -219,5 +229,37 @@ mod tests {
         ids(&mut a);
         ids(&mut b);
         assert!(diff(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn diff_bool_attr_add_uses_key_as_value() {
+        let mut a: Html<()> = Html::HElement("button".into(), vec![], vec![]);
+        let mut b: Html<()> = Html::HElement(
+            "button".into(),
+            vec![Attribute::BoolAttr("disabled".into(), true)],
+            vec![],
+        );
+        ids(&mut a);
+        ids(&mut b);
+        let p = diff(&a, &b);
+        assert_eq!(p.len(), 1);
+        // Go parity: present BoolAttr encodes as {k: k}, NOT {k: ""}.
+        assert_eq!(p[0].attrs.get("disabled").map(String::as_str), Some("disabled"));
+    }
+
+    #[test]
+    fn diff_bool_attr_remove_uses_empty_string() {
+        let mut a: Html<()> = Html::HElement(
+            "button".into(),
+            vec![Attribute::BoolAttr("disabled".into(), true)],
+            vec![],
+        );
+        let mut b: Html<()> = Html::HElement("button".into(), vec![], vec![]);
+        ids(&mut a);
+        ids(&mut b);
+        let p = diff(&a, &b);
+        assert_eq!(p.len(), 1);
+        // Removal sentinel: empty string (Go convention).
+        assert_eq!(p[0].attrs.get("disabled").map(String::as_str), Some(""));
     }
 }
