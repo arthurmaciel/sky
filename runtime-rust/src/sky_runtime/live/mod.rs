@@ -2,6 +2,8 @@
 //! Generic over the app's (Model, Msg); no `any`, static dispatch only.
 pub mod html;
 pub use html::*;
+pub mod diff;
+pub use diff::*;
 
 use super::*;
 
