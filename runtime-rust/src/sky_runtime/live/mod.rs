@@ -178,6 +178,12 @@ struct LiveState<Model, Msg, FInit, FUpdate, FView, FSubs> {
     update: Arc<FUpdate>,
     view: Arc<FView>,
     subs: Arc<FSubs>,
+    /// Maps the freshly-`init`'d model + GET path to the model whose `page`
+    /// field reflects the matched route. `live_app` passes identity (no
+    /// routing); `live_app_routed` captures the route table + page-setter.
+    /// `Page`/`set_page` are erased into this boxed closure, so `LiveState`
+    /// keeps its original 6 type params.
+    route_resolver: Arc<dyn Fn(Model, &str) -> Model + Send + Sync>,
 }
 
 // Manual Clone — derive would demand Clone on the closures (they're behind Arc).
@@ -191,6 +197,7 @@ impl<Model, Msg, FInit, FUpdate, FView, FSubs> Clone
             update: self.update.clone(),
             view: self.view.clone(),
             subs: self.subs.clone(),
+            route_resolver: self.route_resolver.clone(),
         }
     }
 }
@@ -367,6 +374,78 @@ where
     FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
     FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
 {
+    let state = LiveState {
+        sessions: Arc::new(Mutex::new(HashMap::new())),
+        init: Arc::new(init),
+        update: Arc::new(update),
+        view: Arc::new(view),
+        subs: Arc::new(subscriptions),
+        // No routing: GET serves the freshly-init'd model unchanged.
+        route_resolver: Arc::new(|m, _path| m),
+    };
+    serve_live(state)
+}
+
+/// `Std.Live.app { …, routes, notFound }` with URL routing — serve via axum.
+///
+/// Identical to `live_app` except a `route_resolver` is built from the route
+/// table + page-setter: on each GET it matches the path to a `Page` value
+/// (param strings applied via the route closures) and writes it into the
+/// freshly-`init`'d model's `page` field via `set_page`. `Page`/`FSetPage`
+/// are erased into the boxed resolver, so `serve_live`/`LiveState` keep the
+/// original 6 type params.
+#[allow(clippy::too_many_arguments)]
+pub fn live_app_routed<E, Model, Msg, Page, FInit, FUpdate, FView, FSubs, FSetPage>(
+    init: FInit,
+    update: FUpdate,
+    view: FView,
+    subscriptions: FSubs,
+    routes: Vec<route::Route<Page>>,
+    not_found: Page,
+    set_page: FSetPage,
+) -> SkyTask<E, ()>
+where
+    E: From<String> + Send + 'static,
+    Model: Clone + Send + 'static,
+    Msg: Clone + Send + 'static,
+    Page: Clone + Send + Sync + 'static,
+    FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
+    FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
+    FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
+    FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
+    FSetPage: Fn(Page, Model) -> Model + Send + Sync + 'static,
+{
+    let routes = Arc::new(routes);
+    let not_found = Arc::new(not_found);
+    let set_page = Arc::new(set_page);
+    let resolver: Arc<dyn Fn(Model, &str) -> Model + Send + Sync> =
+        Arc::new(move |m, path| (set_page)(route::match_routes(&routes, &not_found, path), m));
+    let state = LiveState {
+        sessions: Arc::new(Mutex::new(HashMap::new())),
+        init: Arc::new(init),
+        update: Arc::new(update),
+        view: Arc::new(view),
+        subs: Arc::new(subscriptions),
+        route_resolver: resolver,
+    };
+    serve_live(state)
+}
+
+/// Shared server setup for `live_app` / `live_app_routed`: nested HTTP
+/// handlers (`page` / `sse_handler` / `event_handler`), router + bind/serve.
+/// The only per-entry difference (the `route_resolver`) lives on `state`.
+fn serve_live<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
+    state: LiveState<Model, Msg, FInit, FUpdate, FView, FSubs>,
+) -> SkyTask<E, ()>
+where
+    E: From<String> + Send + 'static,
+    Model: Clone + Send + 'static,
+    Msg: Clone + Send + 'static,
+    FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
+    FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
+    FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
+    FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
+{
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
@@ -374,17 +453,10 @@ where
     use axum::Router;
 
     Box::pin(async move {
-        let state = LiveState {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            init: Arc::new(init),
-            update: Arc::new(update),
-            view: Arc::new(view),
-            subs: Arc::new(subscriptions),
-        };
-
         // ── GET page (root + any path) ────────────────────────────────────
         async fn page<Model, Msg, FInit, FUpdate, FView, FSubs>(
             State(st): State<LiveState<Model, Msg, FInit, FUpdate, FView, FSubs>>,
+            uri: axum::http::Uri,
         ) -> Response
         where
             Model: Clone + Send + 'static,
@@ -396,6 +468,7 @@ where
         {
             let sid = new_sid();
             let (model, cmd0) = (st.init)(());
+            let model = (st.route_resolver)(model, uri.path());
             let mut tree = (st.view)(model.clone());
             assign_sky_ids(&mut tree, "r");
             let index = build_index(&tree);
