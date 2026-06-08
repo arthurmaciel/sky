@@ -415,7 +415,19 @@ mod tests {
     use super::*;
 
     async fn fresh_db() -> Db {
-        let pool = DbPool::connect("sqlite::memory:").await.expect("connect in-memory sqlite");
+        // A SINGLE persistent connection per test. `sqlite::memory:` gives each
+        // pool connection its OWN in-memory database, so a default multi-conn
+        // pool routes BEGIN / INSERT / COMMIT / SELECT to different (empty) DBs
+        // — the source of the parallel-run flake (#27): under load the pool
+        // opens extra connections and ops miss the table / committed row.
+        // min=max=1 pins one connection (one DB, table + transactions always
+        // visible); each test still gets its own isolated pool.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .min_connections(1)
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
         sqlx::query("CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0)")
             .execute(&pool).await.expect("create table");
         pool
