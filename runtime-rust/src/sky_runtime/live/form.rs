@@ -24,6 +24,21 @@ pub fn decode_form<T: serde::de::DeserializeOwned>(fd: FormData) -> Result<T, St
     serde_json::from_value(serde_json::Value::Object(map)).map_err(|e| e.to_string())
 }
 
+/// `decode_form` + a warn on failure. The `OnForm` closure is synchronous and
+/// returns `Option<M>`, so a decode failure must surface here (not via the
+/// async logger) — we `eprintln!` a warn line (same plain style as the runtime
+/// logger's error path) and return `None` so the live loop dispatches no Msg.
+/// The codegen-emitted `onSubmit` closure calls this.
+pub fn decode_form_or_warn<T: serde::de::DeserializeOwned>(fd: FormData) -> Option<T> {
+    match decode_form::<T>(fd) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            eprintln!("[sky.live] form decode failed, dispatching no Msg: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32,6 +47,19 @@ mod tests {
     struct Creds {
         email: String,
         password: String,
+    }
+
+    #[test]
+    fn decode_form_or_warn_some_and_none() {
+        let mut fd = FormData::new();
+        fd.insert("email".to_string(), "a@b.c".to_string());
+        fd.insert("password".to_string(), "pw".to_string());
+        let r: Option<Creds> = decode_form_or_warn(fd);
+        assert_eq!(r, Some(Creds { email: "a@b.c".into(), password: "pw".into() }));
+
+        let bad = FormData::new(); // missing both fields
+        let r2: Option<Creds> = decode_form_or_warn(bad);
+        assert_eq!(r2, None);
     }
 
     #[test]

@@ -2366,8 +2366,8 @@ exprToRustInner ctx e = case e of
                     -- `DoSignIn : Creds -> Msg`. Decode wire form -> Creds -> Msg.
                     "Attribute::EventAttr(Event::OnForm(\"submit\".to_string(), "
                         ++ "std::sync::Arc::new({ let __h = " ++ handlerStr ++ "; "
-                        ++ "move |fd| sky_runtime::decode_form::<" ++ rustT
-                        ++ ">(fd).ok().map(|t| __h(t)) })))"
+                        ++ "move |fd| sky_runtime::decode_form_or_warn::<" ++ rustT
+                        ++ ">(fd).map(|t| __h(t)) })))"
                 Nothing ->
                     -- bare-Msg case: `onSubmit SomeMsg`. Ignore the form payload;
                     -- always dispatch the (Clone) Msg.
