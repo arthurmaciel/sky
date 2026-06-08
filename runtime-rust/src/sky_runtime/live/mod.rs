@@ -13,6 +13,30 @@ pub use session::*;
 
 use super::*;
 
+// ─── Client assets ────────────────────────────────────────────────────────────
+
+/// The browser-side Sky.Live client, extracted verbatim from Go's
+/// `liveJSWithCfgAndCsrfWithBase` template (runtime-go/rt/live.go:5853-7490).
+/// The 12 header `%`-verb lines are replaced with P1 static literals;
+/// the two `%%` CSS escapes are un-escaped to `%`.
+const CLIENT_JS: &str = include_str!("client.js");
+
+/// Minimal CSS reset injected into every Sky.Live page.
+/// Ported verbatim from Go's `liveBaseCSS` (runtime-go/rt/live.go:3847-3858).
+const BASE_CSS: &str = concat!(
+    "*,*::before,*::after{box-sizing:border-box}",
+    "html,body{margin:0;padding:0;min-height:100%}",
+    "body{min-height:100vh;display:flex;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,\"Helvetica Neue\",Arial,sans-serif;line-height:1.4}",
+    "#sky-root{display:flex;flex-direction:column;flex:1 0 auto;min-height:0}",
+    "h1,h2,h3,h4,h5,h6,p,ul,ol,li,figure,blockquote,pre,dl,dd{margin:0;padding:0;font-weight:inherit;font-size:inherit}",
+    "button,input,select,textarea{font:inherit;color:inherit}",
+    "button{background:none;border:0;padding:0;cursor:pointer;text-align:inherit}",
+    "a{color:inherit;text-decoration:none}",
+    "img,video,canvas,svg{display:block;max-width:100%}",
+);
+
+// ─── Page renders ─────────────────────────────────────────────────────────────
+
 /// P0 scaffold: render `view(model)` to a full HTML page and print it.
 /// Replaced by `live_app` in P1 (Task 10); exists so the bridge + render
 /// path is gate-testable now.
@@ -34,10 +58,40 @@ where
     })
 }
 
-/// Minimal page wrap (P0). The full client-bearing wrap lands in Task 9/10.
+/// Minimal page wrap (P0). Kept byte-identical so example 27-live-static
+/// continues to pass. The full client-bearing wrap is `render_page_full`.
 pub fn render_page(body: &str) -> String {
     format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body><div id=\"sky-root\">{body}</div></body></html>"
+    )
+}
+
+/// Full page wrap with the live client embedded.
+/// Mirrors Go's live page render (runtime-go/rt/live.go:3788).
+///
+/// `sid`  — session id (injected into the JS via `window.__SKY_SID`).
+/// `base` — sub-app base path, e.g. "" for root-mounted apps.
+/// `body` — pre-rendered HTML body (from `render_html`).
+///
+/// The JS client reads `window.__SKY_SID` / `window.__SKY_BASE` from the
+/// page rather than receiving them as Sprintf args — the 12 header vars in
+/// `client.js` are static P1 literals that reference those window globals.
+pub fn render_page_full(sid: &str, base: &str, body: &str) -> String {
+    // sid_js / base_js: Rust Debug ("{:?}") of a &str yields a
+    // double-quoted, properly-escaped JS string literal for plain ASCII
+    // session ids and base paths.
+    let sid_js = format!("{sid:?}");
+    let base_js = format!("{base:?}");
+    format!(
+        "<!DOCTYPE html><html><head>\
+         <meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <meta name=\"sky-base\" content=\"{base}\">\
+         <style>{BASE_CSS}</style>\
+         </head>\
+         <body><div id=\"sky-root\">{body}</div>\
+         <script>window.__SKY_SID={sid_js};window.__SKY_BASE={base_js};\n{CLIENT_JS}</script>\
+         </body></html>"
     )
 }
 
