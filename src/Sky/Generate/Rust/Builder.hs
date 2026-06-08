@@ -2298,6 +2298,26 @@ exprToRustInner ctx e = case e of
     -- bypassing the stdlib fn + the OnRaw path entirely. The OnForm closure decodes
     -- the wire FormData into `T` via decode_form::<T> and dispatches the Msg; a
     -- malformed/incomplete form decodes to Err -> `.ok()` -> None -> no Msg.
+    -- P3-T3: `Live.route pattern ctor` lowers to a `route::Route::new`. The
+    -- ctor is a Page constructor; the captured `:param` strings (in pattern
+    -- order) are applied to it in the build closure. The ctor arity N is read
+    -- from the ctor arg's solver type (looked up in ecRegionTypes): N==0 is a
+    -- nullary page value (captured + cloned per build); N>=1 applies the
+    -- params positionally. `Route::new` takes `&str`, so the pattern (a Sky
+    -- string literal → `"…".to_string()`) is borrowed with `&(…)`.
+    Can.Call (Ann.At _ (Can.VarKernel "Live" "route")) [patternArg, ctorArg@(Ann.At hregion _)] ->
+        let patternStr = exprToRustString ctx patternArg
+            ctorStr = exprToRustString ctx ctorArg
+            ctorArity = case Map.lookup hregion (ecRegionTypes ctx) of
+                Just ty -> length (extractParamTypes ty)
+                Nothing -> 0
+            closure =
+                if ctorArity == 0
+                    then "{ let __c = " ++ ctorStr ++ "; move |_p: Vec<String>| __c.clone() }"
+                    else "move |__p: Vec<String>| " ++ ctorStr ++ "("
+                            ++ intercalate ", " ["__p[" ++ show i ++ "].clone()" | i <- [0 .. ctorArity - 1]]
+                            ++ ")"
+        in "route::Route::new(&(" ++ patternStr ++ "), " ++ closure ++ ")"
     Can.Call (Ann.At _ (Can.VarTopLevel mdl "onSubmit")) [handlerArg@(Ann.At hregion _)]
         | ModuleName._name mdl == "Std.Html.Events" ->
             let handlerStr = exprToRustString ctx handlerArg
