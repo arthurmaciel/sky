@@ -234,9 +234,11 @@ copyRuntimeDir srcDir targetDir = do
             then do
                 createDirectoryIfMissing True tgtSub
                 subFiles <- listDirectory srcSub
-                let subRs = filter (\f -> takeExtension f == ".rs") subFiles
-                mapM_ (\name -> copyFile (srcSub </> name) (tgtSub </> name)) subRs
-                pure (length subRs)
+                -- Copy .rs sources plus non-Rust assets the runtime include_str!'s
+                -- (e.g. live/client.js embedded by render_page_full).
+                let subAssets = filter (\f -> takeExtension f `elem` [".rs", ".js"]) subFiles
+                mapM_ (\name -> copyFile (srcSub </> name) (tgtSub </> name)) subAssets
+                pure (length subAssets)
             else pure 0
         ) subDirs
     let totalFiles = length rsFiles + sum subCounts

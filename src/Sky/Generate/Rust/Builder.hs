@@ -3735,6 +3735,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     [ "serde_json = \"1\""
     , "sha2 = \"0.10\""
     ] ++
+    -- Std.Live: live/diff.rs derives serde::Serialize for the Patch wire type;
+    -- the live submodules are compiled unconditionally once mod.rs declares them,
+    -- so the generated project must depend on serde directly.
+    [ "serde = { version = \"1\", features = [\"derive\"] }"
+    | usesLive uk, "serde" `notElem` userDepNames ] ++
     -- Sub-project A — stdlib kernel crates. Always pulled in because
     -- Project.hs declares the corresponding sky_runtime modules in mod.rs
     -- unconditionally. Mostly small pure-Rust crates; cold-build impact is
@@ -3808,7 +3813,8 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     -- program has no axum, so request it explicitly.
     tokioFeats = ["rt", "rt-multi-thread", "macros", "time"]
                  ++ ["net" | usesHttpServer uk || usesHttp uk || usesWsClient uk || usesEmail uk]
-                 ++ ["sync" | usesTea uk || usesWsClient uk]
+                 -- Std.Live: live/session.rs + live/sse.rs use tokio::sync::mpsc.
+                 ++ ["sync" | usesTea uk || usesWsClient uk || usesLive uk]
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"
