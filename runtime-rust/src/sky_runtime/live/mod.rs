@@ -328,7 +328,7 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
         // Write-through: checkpoint the committed model to the store (a touch
         // for memory; a re-serialize for persistent backends — Go store.Set on
         // every commit).
-        store.set(&sid, entry.clone());
+        store.set(&sid, entry.clone()).await;
 
         run_cmd(cmd, &msg_tx);
         spawn_subs(subs(next.clone()), &msg_tx, &mut sub_handles);
@@ -520,7 +520,10 @@ where
             //                 hydrate a fresh driver seeded with it (no init).
             //   * miss      → init a new session.
             let cookie_sid = sid_from_cookie(&headers);
-            let hit = cookie_sid.as_ref().and_then(|s| st.store.get(s));
+            let hit = match cookie_sid.as_ref() {
+                Some(s) => st.store.get(s).await,
+                None => None,
+            };
 
             let (sid, model, cmd0) = match hit {
                 Some(store::StoreHit::Live(handle)) => {
@@ -534,7 +537,7 @@ where
                         e.last_view = tree.clone();
                         render_html(&tree)
                     };
-                    st.store.set(&s, handle); // touch last-seen
+                    st.store.set(&s, handle).await; // touch last-seen
                     return page_response(&s, &body);
                 }
                 Some(store::StoreHit::Cold(m)) => {
@@ -567,7 +570,7 @@ where
                 sse_tx: None,
                 msg_tx: msg_tx.clone(),
             }));
-            st.store.set(&sid, entry.clone());
+            st.store.set(&sid, entry.clone()).await;
 
             // Spawn the per-session driver (write-through to the store on commit).
             tokio::spawn(drive_session(
@@ -600,10 +603,13 @@ where
             FSubs: Send + Sync + 'static,
         {
             let sid = sid_from_cookie(&headers);
-            let entry = sid.and_then(|s| match st.store.get(&s) {
-                Some(store::StoreHit::Live(h)) => Some(h),
-                _ => None,
-            });
+            let entry = match sid {
+                Some(s) => match st.store.get(&s).await {
+                    Some(store::StoreHit::Live(h)) => Some(h),
+                    _ => None,
+                },
+                None => None,
+            };
             let entry = match entry {
                 Some(e) => e,
                 None => return (StatusCode::NOT_FOUND, "no session").into_response(),
@@ -663,7 +669,7 @@ where
             };
             // Prefer the cookie sid; fall back to the body's sessionId.
             let sid = sid_from_cookie(&headers).unwrap_or(parsed.session_id);
-            let entry = match st.store.get(&sid) {
+            let entry = match st.store.get(&sid).await {
                 Some(store::StoreHit::Live(h)) => Some(h),
                 _ => None,
             };
@@ -721,7 +727,7 @@ where
                 let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
                 loop {
                     tick.tick().await;
-                    store.sweep();
+                    store.sweep().await;
                 }
             });
         }

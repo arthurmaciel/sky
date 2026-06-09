@@ -38,6 +38,7 @@ chrono = "0.4"
 chrono-tz = "0.10"
 rust_decimal = { version = "1", features = ["serde"] }
 bcrypt = { version = "0.17", optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [features]
 default = []
@@ -52,7 +53,7 @@ server = ["tokio", "axum", "tower-http", "futures-util"]
 http_client = ["tokio", "reqwest", "futures-util"]
 email = ["tokio", "reqwest", "serde_json", "sha2"]
 websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
-live = ["server", "http_client", "serde", "serde_json"]
+live = ["server", "http_client", "serde", "serde_json", "async-trait"]
 full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "config", "server", "http_client", "email", "websocket_client", "live"]
 
 [dev-dependencies]
