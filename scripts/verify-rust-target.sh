@@ -16,7 +16,9 @@ echo "=== 1. Cargo check ==="
 
 echo ""
 echo "=== 2. Cargo clippy (-D warnings) ==="
-(cd runtime-rust && cargo clippy --all-targets --all-features -- -D warnings 2>&1 | tail -3)
+# Real exit must propagate — do NOT pipe to tail (that masks the failure).
+(cd runtime-rust && cargo clippy --all-targets --all-features -- -D warnings) \
+    || { echo "  ❌ clippy failed"; exit 1; }
 
 echo ""
 echo "=== 3. Cargo test ==="
@@ -39,6 +41,13 @@ for ex in 01-hello-world; do
     done
 done
 echo "  ✅ No Go artifacts detected"
+
+echo ""
+echo "=== 6. All-example --target rust sweep (scoreboard) ==="
+scripts/rust-sweep.sh | tee /tmp/rust-sweep.txt
+if grep -vE 'out-of-scope' /tmp/rust-sweep.txt | grep -qE 'sky-CRASH|cargo-fails|sky-build-fails'; then
+    echo "  ⚠ sweep shows in-scope failures — see /tmp/rust-sweep.txt"
+fi
 
 echo ""
 echo "=== All checks passed ==="

@@ -127,3 +127,5 @@ runtime-rust/target/
 
 # graphify knowledge-graph outputs (generated; HTML + JSON + report).
 graphify-out/
+opencode.json
+/.equiv/
