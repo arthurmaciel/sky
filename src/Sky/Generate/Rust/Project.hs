@@ -52,7 +52,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    | dep <- Toml._rustDeps config ]
         ffiSlugs = depSlugs
         kernelAliases = Map.mapKeys (\(cn, fn) -> (ModuleName._name cn, fn)) rawAliases
-        (rustCode, moduleFiles, usage) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases
+        (rustCode, moduleFiles, usage) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases (Toml._liveStore config) (Toml._liveStorePath config)
         rustDir = outDir </> "Rust"
     createDirectoryIfMissing True rustDir
     let srcDir = rustDir </> "src"
@@ -145,7 +145,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         ) moduleFiles
     let sqlxTls = Toml._sqlxTls config
         rustDeps = Toml._rustDeps config
-    writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDeps)
+    writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDeps (Toml._liveStore config))
     putStrLn $ "   Wrote " ++ cargoTomlPath
     -- Copy Rust FFI binding files into sky-out/Rust/src/
     -- Slugs must match what generateBindings writes (via slugify).
@@ -170,14 +170,17 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
 generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes
     -> String -> String -> [String]
     -> Map.Map (String, String) (String, String)  -- kernel alias map (keys as strings)
+    -> String -> String                            -- [live] store kind + store path
     -> (String, [(String, String)], RustBuilder.UsedKernels)
-generateRust canMods _srcMod solvedTypes dbPath dbDriver ffiSlugs kernelAliases =
+generateRust canMods _srcMod solvedTypes dbPath dbDriver ffiSlugs kernelAliases liveStore liveStorePath =
     -- v0.15: Solve.SolvedTypes became a record; the Rust codegen (RustBuilder)
     -- consumes the bare env map, so project the `_stEnv` field out.
     let builder = RustBuilder.buildProgram canMods
                                             (Solve._stEnv solvedTypes)
                                             (Solve._stRegions solvedTypes)
                                             kernelAliases
+                                            liveStore
+                                            liveStorePath
         (code, moduleFiles) = RustBuilder.emitRust builder dbPath dbDriver ffiSlugs
         usage = RustBuilder.builderKernels builder
     in (code, moduleFiles, usage)

@@ -275,6 +275,13 @@ data RustBuilder = RustBuilder
         -- P4-T3: Sky binding names of `Live.app` init functions whose `init`
         -- field is a top-level reference. defToRustItem overrides param 0 of
         -- each to `sky_runtime::LiveReq`. Computed by collectLiveInitFns.
+    , builderLiveSerdeTypes :: Set.Set String
+        -- P5-T4b: Rust type names in the Sky.Live model's transitive type
+        -- closure. ONLY these gain serde::Serialize + serde::Deserialize in
+        -- typeDefToString — the runtime's `Model: Serialize + DeserializeOwned`
+        -- bound (for session persistence) demands it, but deriving serde on
+        -- every struct/enum would force serde bounds on function-typed fields
+        -- (E0277). Computed by collectLiveSerdeTypes (precise BFS).
     }
 
 data RustModule = RustModule
@@ -553,6 +560,11 @@ data EmitCtx = EmitCtx
         --   defToRustItem forces param 0 of these to `sky_runtime::LiveReq` so
         --   the generated init fn satisfies the runtime's
         --   `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound.
+    , ecLiveStore :: (String, String)
+        -- ^ P5-T4b: (storeKind, storePath) from `[live] store` / `storePath`.
+        --   The Live.app peephole emits these as the trailing two string args of
+        --   the `live_app` / `live_app_routed` call; the runtime's choose_store
+        --   builds the backend (empty kind -> memory). Default ("", "").
     }
 
 -- | Build a map from field-name-signature to struct name
@@ -705,6 +717,143 @@ collectLiveInitFns = foldMap walkMod
             Can.Tuple a b rest -> foldMap walkExpr (a:b:rest)
             Can.Negate e0 -> walkExpr e0
             _ -> Set.empty  -- literals, variables: no sub-expressions
+
+-- | P5-T4b pre-pass. The Rust runtime's `live_app` / `live_app_routed` require
+-- `Model: serde::Serialize + serde::de::DeserializeOwned` (it serialises the
+-- model to JSON for the SQLite session store). So every user-defined type in the
+-- model's TRANSITIVE type closure must derive serde. This pre-pass computes that
+-- closure PRECISELY — only types reachable from the model — so we don't over-
+-- derive serde on unrelated structs/enums (which would force serde bounds onto
+-- function-typed fields and fail with E0277).
+--
+-- Returns the set of RUST type names (toCamelCase of the mangled module + name)
+-- that typeDefToString must stamp with serde::Serialize + serde::Deserialize.
+collectLiveSerdeTypes :: [Can.Module] -> Map.Map String Can.Type -> Set.Set String
+collectLiveSerdeTypes mods solvedTypes =
+    case modelType of
+        Nothing -> Set.empty
+        Just ty -> bfs Set.empty ty
+  where
+    -- Step 1: find the model type. Walk all modules for the first
+    -- `Live.app { ... }` call; recover the model from view's solver type
+    -- (`view : Model -> Html Msg`) — head of its param types. Fallback:
+    -- init's return-tuple first element.
+    modelType :: Maybe Can.Type
+    modelType =
+        case firstLiveAppFields of
+            Nothing -> Nothing
+            Just fields ->
+                let fromView = case Map.lookup "view" fields of
+                        Just (Ann.At _ (Can.VarTopLevel _ vname)) ->
+                            case Map.lookup vname solvedTypes of
+                                Just t -> case extractParamTypes t of
+                                    (m : _) -> Just m
+                                    []      -> Nothing
+                                Nothing -> Nothing
+                        _ -> Nothing
+                    fromInit = case Map.lookup "init" fields of
+                        Just (Ann.At _ (Can.VarTopLevel _ iname)) ->
+                            case Map.lookup iname solvedTypes of
+                                Just t -> case extractReturnType t of
+                                    Can.TTuple a _ _ -> Just a
+                                    _                -> Nothing
+                                Nothing -> Nothing
+                        _ -> Nothing
+                in case fromView of
+                    Just m  -> Just m
+                    Nothing -> fromInit
+
+    firstLiveAppFields :: Maybe (Map.Map String Can.Expr)
+    firstLiveAppFields = foldr (\m acc -> case acc of
+        Just _  -> acc
+        Nothing -> walkDeclsForApp (Can._decls m)) Nothing mods
+
+    walkDeclsForApp Can.SaveTheEnvironment = Nothing
+    walkDeclsForApp (Can.Declare def rest) =
+        firstJust (walkDefForApp def) (walkDeclsForApp rest)
+    walkDeclsForApp (Can.DeclareRec def defs rest) =
+        firstJust (foldr (\d a -> firstJust (walkDefForApp d) a) Nothing (def : defs))
+                  (walkDeclsForApp rest)
+
+    walkDefForApp (Can.Def _ _ body) = walkExprForApp body
+    walkDefForApp (Can.TypedDef _ _ _ body _) = walkExprForApp body
+    walkDefForApp (Can.DestructDef _ expr) = walkExprForApp expr
+
+    walkExprForApp (Ann.At _ expr) = case expr of
+        Can.Call (Ann.At _ (Can.VarKernel "Live" "app")) [Ann.At _ (Can.Record fields)] ->
+            Just fields
+        Can.Call fn args -> firstJust (walkExprForApp fn) (foldr (\a acc -> firstJust (walkExprForApp a) acc) Nothing args)
+        Can.Lambda _ body -> walkExprForApp body
+        Can.Let def body -> firstJust (walkDefForApp def) (walkExprForApp body)
+        Can.LetRec defs body -> firstJust (foldr (\d a -> firstJust (walkDefForApp d) a) Nothing defs) (walkExprForApp body)
+        Can.LetDestruct _ e0 body -> firstJust (walkExprForApp e0) (walkExprForApp body)
+        Can.Case scrut branches -> firstJust (walkExprForApp scrut) (foldr (\(Can.CaseBranch _ b) a -> firstJust (walkExprForApp b) a) Nothing branches)
+        Can.If branches elseBranch -> firstJust (foldr (\(c, t) a -> firstJust (walkExprForApp c) (firstJust (walkExprForApp t) a)) Nothing branches) (walkExprForApp elseBranch)
+        Can.Binop _ _ _ _ a b -> firstJust (walkExprForApp a) (walkExprForApp b)
+        Can.Access r _ -> walkExprForApp r
+        Can.Update _ r updates -> firstJust (walkExprForApp r) (foldr (\(_, Can.FieldUpdate _ e0) a -> firstJust (walkExprForApp e0) a) Nothing (Map.toList updates))
+        Can.Record flds -> foldr (\(_, e0) a -> firstJust (walkExprForApp e0) a) Nothing (Map.toList flds)
+        Can.List es -> foldr (\e0 a -> firstJust (walkExprForApp e0) a) Nothing es
+        Can.Tuple a b rest -> foldr (\e0 acc -> firstJust (walkExprForApp e0) acc) Nothing (a:b:rest)
+        Can.Negate e0 -> walkExprForApp e0
+        _ -> Nothing
+
+    firstJust (Just x) _ = Just x
+    firstJust Nothing  y = y
+
+    -- Step 2: name -> def maps from ALL modules (bare type names as keys).
+    unions  = Map.unions (map Can._unions mods)
+    aliases = Map.unions (map Can._aliases mods)
+
+    -- Rust codegen name for a (modName, name) pair — matches typeDefToString's
+    -- naming (toCamelCase of the mangled module prefix + the type name).
+    rustName modName name = toCamelCase (moduleNameToRust modName ++ "_" ++ name)
+
+    -- Is this type one we register as a runtime-opaque bridge (e.g.
+    -- Std.Html.Html -> sky_runtime::Html)? Those are NOT our structs/enums, so
+    -- we must NOT try to derive serde on them.
+    isOpaque modName name =
+        Map.member (ModuleName._name modName, name) runtimeOpaqueTypes
+
+    -- Step 3: BFS the closure from the model type. The accumulating Set is the
+    -- visited set (it holds rust names of types whose closure is already in
+    -- progress / done), terminating recursion on cycles (recursive ADTs).
+    bfs :: Set.Set String -> Can.Type -> Set.Set String
+    bfs acc ty = case ty of
+        Can.TType modName name args ->
+            let rn = rustName modName name
+                -- Recurse into type args regardless (e.g. List Foo, Maybe Bar).
+                accArgs = foldl bfs acc args
+            in if isOpaque modName name
+                  then accArgs
+                  else if Map.member name unions && not (Set.member rn accArgs)
+                       then let acc' = Set.insert rn accArgs
+                                ctorFts = concatMap (\(Can.Ctor _ _ _ fts) -> fts)
+                                                    (Can._u_alts (unions Map.! name))
+                            in foldl bfs acc' ctorFts
+                  else if Map.member name aliases && not (Set.member rn accArgs)
+                       then let acc' = Set.insert rn accArgs
+                                Can.Alias _ body = aliases Map.! name
+                            in bfs acc' body
+                  else accArgs  -- builtin (Int/String/List/...) or already visited
+        Can.TAlias modName name pairs aliasType ->
+            let rn = rustName modName name
+            in if isOpaque modName name
+                  then foldl bfs acc (map snd pairs ++ [aliasInner aliasType])
+                  else if Set.member rn acc
+                       then foldl bfs acc (map snd pairs ++ [aliasInner aliasType])
+                  else let acc' = Set.insert rn acc
+                           acc'' = bfs acc' (aliasInner aliasType)
+                       in foldl bfs acc'' (map snd pairs)
+        Can.TRecord fields _ ->
+            foldl (\a (Can.FieldType _ ft) -> bfs a ft) acc (Map.elems fields)
+        Can.TTuple a b rest -> foldl bfs acc (a : b : rest)
+        Can.TLambda a b -> bfs (bfs acc a) b
+        Can.TVar _ -> acc
+        Can.TUnit -> acc
+
+    aliasInner (Can.Hoisted t) = t
+    aliasInner (Can.Filled t)  = t
 
 buildModule :: EmitCtx -> Can.Module -> RustModule
 buildModule ctx mod =
@@ -2356,6 +2505,13 @@ exprToRustInner ctx e = case e of
                 _                       -> Nothing
             mModelFields = mModelTy >>= recordFieldsOf
             mPageFieldTy = mModelFields >>= Map.lookup "page"
+            -- P5-T4b: the runtime's live_app / live_app_routed take two trailing
+            -- store-config string args (kind, path) — choose_store builds the
+            -- backend (empty kind -> memory). Drawn from `[live] store` /
+            -- `storePath`; `show` quotes/escapes them into Rust string literals.
+            (storeKind0, storePath0) = ecLiveStore ctx
+            storeKindLit = show storeKind0 ++ ".to_string()"
+            storePathLit = show storePath0 ++ ".to_string()"
         in case (mModelTy, mPageFieldTy) of
             (Just modelTy, Just (Can.FieldType _ pageTy)) ->
                 -- Routing mode.
@@ -2371,11 +2527,11 @@ exprToRustInner ctx e = case e of
                                 ++ "| " ++ modelRustTy ++ " { page: __page, ..__model }"
                 in "live_app_routed::<SkyError, _, _, _, _, _, _, _, _>(" ++ intercalate ", "
                        ([fld "init", fld "update", fld "view", fld "subscriptions",
-                         routesStr, notFoundStr, setPage]) ++ ")"
+                         routesStr, notFoundStr, setPage, storeKindLit, storePathLit]) ++ ")"
             _ ->
                 -- Single-page mode (no page field): four TEA callbacks; pin E.
                 "live_app::<SkyError, _, _, _, _, _, _>(" ++ intercalate ", "
-                    (map fld ["init", "update", "view", "subscriptions"]) ++ ")"
+                    (map fld ["init", "update", "view", "subscriptions"] ++ [storeKindLit, storePathLit]) ++ ")"
     -- Sub-E step 3: Cmd.perform with a DIVERGING task (System.exit -> `!`) leaves
     -- the task's success/error types free (E0283). Pin them — the value is never
     -- produced (the process exits first), so A is a phantom i64 filler.
@@ -2923,8 +3079,8 @@ flattenCons recMap headPat tailPat =
     unwrapPat (Ann.At _ (Can.PAlias inner _)) = inner
     unwrapPat p = p
 
-buildProgram :: [Can.Module] -> Map.Map String Can.Type -> Map.Map Ann.Region Can.Type -> Map.Map (String, String) (String, String) -> RustBuilder
-buildProgram mods solvedTypes regionTypes kernelAliases =
+buildProgram :: [Can.Module] -> Map.Map String Can.Type -> Map.Map Ann.Region Can.Type -> Map.Map (String, String) (String, String) -> String -> String -> RustBuilder
+buildProgram mods solvedTypes regionTypes kernelAliases liveStore liveStorePath =
     let aliasMap = buildRecordMap mods
         rawAnon = collectAnonRecordTypes mods
         -- Only include anonymous record keys NOT already covered by a type alias
@@ -2961,7 +3117,7 @@ buildProgram mods solvedTypes regionTypes kernelAliases =
             , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath) }
         liveInitFns = collectLiveInitFns mods
         usage = analyzeKernelUsage mods
         zeroArgDefs = collectZeroArgDefs mods
@@ -2978,6 +3134,7 @@ buildProgram mods solvedTypes regionTypes kernelAliases =
         , builderFfiOpaques = Set.empty  -- populated by generateRust via passed FFI types
         , builderFormTargets = collectFormTargets recordMap regionTypes mods
         , builderLiveInitFns = liveInitFns
+        , builderLiveSerdeTypes = collectLiveSerdeTypes mods solvedTypes
         }
 
 -- | Backend-specific sqlx types
@@ -3221,7 +3378,7 @@ userTypeSection b =
     , "// USER TYPES"
     , "// ==========================================="
     , ""
-    ] ++ map (typeDefToString (builderFormTargets b)) (builderTypes b)
+    ] ++ map (typeDefToString (builderFormTargets b) (builderLiveSerdeTypes b)) (builderTypes b)
 
 -- | SkyError type alias + str_err helper — conditional on Error module presence.
 -- Must be emitted AFTER userTypeSection (SkyCoreErrorError ADT) and BEFORE
@@ -3294,22 +3451,31 @@ entryPointSection uk =
 -- target gain it. Deriving serde on every struct would force serde bounds on
 -- function-typed fields (e.g. closures in a config record) and reject with
 -- E0277, so the stamp is opt-in per form target.
-typeDefToString :: Set.Set String -> RustTypeDef -> String
-typeDefToString _ (REnumDef name gens variants) =
-    "#[derive(Clone, Debug, PartialEq)]\npub enum " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
-typeDefToString formTargets (RStructDef name gens fields) =
+-- | First Set: form-target structs (serde::Deserialize). Second Set: Sky.Live
+-- model-closure types (serde::Serialize + serde::Deserialize). serdeTypes is a
+-- superset of the Deserialize need, so a type in both gets the full pair once.
+typeDefToString :: Set.Set String -> Set.Set String -> RustTypeDef -> String
+typeDefToString _ serdeTypes (REnumDef name gens variants) =
+    let derive = if name `Set.member` serdeTypes
+                 then "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"
+                 else "#[derive(Clone, Debug, PartialEq)]"
+    in derive ++ "\npub enum " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
+typeDefToString formTargets serdeTypes (RStructDef name gens fields) =
     -- Sky record field names are camelCase and match the form `name=` attrs
     -- 1:1, so no #[serde(rename)] is needed. A form-target struct carrying a
     -- non-serde field will (correctly) fail to compile with E0277 — a
     -- friendlier Sky-side diagnostic is a P-later item.
-    let derives = if name `Set.member` formTargets
-                  then "#[derive(Clone, Debug, PartialEq, serde::Deserialize)]"
-                  else "#[derive(Clone, Debug, PartialEq)]"
+    -- P5-T4b: a model-closure struct needs Serialize+Deserialize (session
+    -- persistence). That implies Deserialize, so it subsumes the form-target case.
+    let derives
+            | name `Set.member` serdeTypes = "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"
+            | name `Set.member` formTargets = "#[derive(Clone, Debug, PartialEq, serde::Deserialize)]"
+            | otherwise = "#[derive(Clone, Debug, PartialEq)]"
     in derives ++ "\npub struct " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
-typeDefToString _ (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
-typeDefToString _ (RPubUseAlias codegenName rustPath) =
+typeDefToString _ _ (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
+typeDefToString _ _ (RPubUseAlias codegenName rustPath) =
     "pub use " ++ rustPath ++ " as " ++ codegenName ++ ";"
-typeDefToString _ (RAliasDefGen name gens path) =
+typeDefToString _ _ (RAliasDefGen name gens path) =
     "pub type " ++ name ++ gens ++ " = " ++ path ++ ";"
 
 -- | Extract a module's content as (snake_case_file_stem, source_content).
@@ -3982,8 +4148,8 @@ ffiPlaceholder name =
         ]
 
 -- | Generate Cargo.toml for the Rust project
-emitCargoToml :: UsedKernels -> String -> String -> [(String, Toml.RustDepSpec)] -> String
-emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
+emitCargoToml :: UsedKernels -> String -> String -> [(String, Toml.RustDepSpec)] -> String -> String
+emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- The sky_runtime files copied into sky-out/Rust/src/ carry cfg(feature = "X")
     -- gates inherited from runtime-rust/Cargo.toml. The generated Cargo.toml
     -- below declares a [features] section enabling everything by default so the
@@ -3996,7 +4162,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     , "edition = \"2021\""
     , ""
     , "[features]"
-    , "default = [\"tokio\", \"crypto\", \"json\", \"db\"]"
+    -- `db` (which gates the copied `#[cfg(feature=\"db\")] SqliteStore` in the
+    -- always-compiled live/store.rs) is on ONLY when the app actually needs
+    -- sqlx: a Std.Db app, or a Sky.Live app with `[live] store = \"sqlite\"`.
+    -- A memory-store Live app must NOT enable `db` (no sqlx dep → would fail).
+    , "default = [" ++ intercalate ", " (map show (["tokio", "crypto", "json"] ++ ["db" | usesDb uk || (usesLive uk && liveStore == "sqlite")])) ++ "]"
     , "tokio = []"
     , "crypto = []"
     , "json = []"
@@ -4012,7 +4182,15 @@ emitCargoToml uk dbDriver sqlxTls rustDeps = unlines $
     (if usesDb uk
      then let sqlxTlsFeature = if sqlxTls == "native-tls" then "runtime-tokio-native-tls" else "runtime-tokio-rustls"
           in [ "sqlx = { version = \"0.8\", features = [\"" ++ sqlxTlsFeature ++ "\", \"" ++ dbFeature dbDriver ++ "\"] }" ]
+     -- P5-T4b: a Sky.Live app with `[live] store = "sqlite"` needs sqlx for the
+     -- copied `#[cfg(feature="db")] SqliteStore` even when the app never imports
+     -- Std.Db. Only when usesDb DIDN'T already emit the line (avoid duplicate key).
+     else if usesLive uk && liveStore == "sqlite"
+     then [ "sqlx = { version = \"0.8\", features = [\"runtime-tokio-rustls\", \"sqlite\"] }" ]
      else []) ++
+    -- P5-T4b: the live SessionStore trait is `#[async_trait]` — pull the crate
+    -- whenever the project uses Sky.Live.
+    [ "async-trait = \"0.1\"" | usesLive uk, "async-trait" `notElem` userDepNames ] ++
     [ "serde_json = \"1\""
     , "sha2 = \"0.10\""
     ] ++
