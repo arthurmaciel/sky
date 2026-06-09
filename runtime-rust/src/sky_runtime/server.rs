@@ -18,6 +18,9 @@ use std::pin::Pin;
 use std::future::Future;
 
 /// Sky.Http.Server.Request — field names/types match the Sky record alias.
+// camelCase is required: Sky field access (`req.remoteAddr`) resolves onto
+// these pub fields, so they must mirror the Sky record's names verbatim.
+#[allow(non_snake_case)]
 #[derive(Clone, Debug)]
 pub struct ServerRequest {
     pub method: String,
@@ -31,6 +34,9 @@ pub struct ServerRequest {
 }
 
 /// Sky.Http.Server.Response.
+// camelCase is required: Sky field access (`resp.contentType`) resolves onto
+// these pub fields, so they must mirror the Sky record's names verbatim.
+#[allow(non_snake_case)]
 #[derive(Clone, Debug)]
 pub struct ServerResponse {
     pub status: i64,
