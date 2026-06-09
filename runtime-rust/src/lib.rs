@@ -88,40 +88,39 @@ mod tests {
         assert_eq!(chained.with_default(0), 10);
     }
 
-    // List tests
+    // List tests — the live, codegen-emitted kernels (list.rs)
     #[test]
-    fn list_is_empty() {
-        assert!(sky_list_is_empty(&Vec::<i64>::new()));
-        assert!(!sky_list_is_empty(&vec![1]));
+    fn list_filter_keeps_matching() {
+        assert_eq!(list_filter(|x: i64| x % 2 == 0, vec![1, 2, 3, 4]), vec![2, 4]);
     }
 
     #[test]
-    fn list_head() {
-        assert_eq!(sky_list_head(&vec![1, 2, 3]).with_default(0), 1);
-        assert!(matches!(sky_list_head::<i64>(&vec![]), SkyMaybe::Nothing));
+    fn list_foldl_sums() {
+        assert_eq!(list_foldl(|x, acc| acc + x, 0, vec![1, 2, 3]), 6);
     }
 
     #[test]
-    fn list_map() {
-        assert_eq!(sky_list_map(|x| x * 2, &vec![1, 2, 3]), vec![2, 4, 6]);
+    fn list_range_inclusive() {
+        assert_eq!(list_range(1, 3), vec![1, 2, 3]);
     }
 
     #[test]
-    fn list_filter() {
-        assert_eq!(sky_list_filter(|x| *x % 2 == 0, &vec![1, 2, 3, 4]), vec![2, 4]);
+    fn list_member_finds() {
+        assert!(list_member(2, vec![1, 2, 3]));
+        assert!(!list_member(9, vec![1, 2, 3]));
     }
 
     #[test]
-    fn list_fold() {
-        assert_eq!(sky_list_fold(|acc, x| acc + x, 0, &vec![1, 2, 3]), 6);
+    fn list_cons_prepends() {
+        assert_eq!(sky_list_cons(0, vec![1, 2]), vec![0, 1, 2]);
     }
 
-    // String tests
+    // String tests — the live kernels (string.rs)
     #[test]
     fn string_ops() {
-        assert_eq!(sky_string_append("a".into(), "b".into()), "ab");
+        assert_eq!(string_append("a".into(), "b".into()), "ab");
         assert_eq!(string_length("hello".into()), 5);
-        assert!(sky_string_is_empty(""));
+        assert!(string_is_empty("".into()));
     }
 
     #[test]

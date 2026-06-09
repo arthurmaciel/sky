@@ -1,6 +1,4 @@
-//! Sky.Core.List additions beyond what core.rs already provides.
-//!
-//! Sub-A.8 T7.
+//! Sky.Core.List kernel — the single home for the List runtime surface.
 
 use super::SkyMaybe;
 
@@ -13,6 +11,47 @@ pub fn list_filter_map<A, B>(f: impl Fn(A) -> SkyMaybe<B>, xs: Vec<A>) -> Vec<B>
             SkyMaybe::Nothing  => None,
         })
         .collect()
+}
+
+// ── Core List kernels (relocated from core.rs so the List surface has one home) ──
+
+/// Sky `::` cons — emitted by codegen for the cons operator.
+pub fn sky_list_cons<T: Clone>(x: T, xs: Vec<T>) -> Vec<T> {
+    std::iter::once(x).chain(xs).collect()
+}
+
+pub fn list_foldl<T0, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
+    let mut acc = init;
+    for item in list { acc = f(item, acc); }
+    acc
+}
+pub fn list_foldr<T0: Clone, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
+    let mut acc = init;
+    for item in list.into_iter().rev() { acc = f(item.clone(), acc); }
+    acc
+}
+// Sky `List.range` is INCLUSIVE: range 1 3 = [1, 2, 3].
+pub fn list_range(lo: i64, hi: i64) -> Vec<i64> { (lo..=hi).collect() }
+pub fn list_indexed_map<T0, T1>(f: impl Fn(i64, T0) -> T1 + Clone, list: Vec<T0>) -> Vec<T1> {
+    list.into_iter().enumerate().map(|(i, x)| f(i as i64, x)).collect()
+}
+pub fn list_concat_map<T0, T1>(f: impl Fn(T0) -> Vec<T1> + Clone, list: Vec<T0>) -> Vec<T1> {
+    list.into_iter().flat_map(f).collect()
+}
+pub fn list_zip<T0, T1>(a: Vec<T0>, b: Vec<T1>) -> Vec<(T0, T1)> {
+    a.into_iter().zip(b).collect()
+}
+pub fn list_filter<T0: Clone>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> Vec<T0> {
+    list.into_iter().filter(|x| f(x.clone())).collect()
+}
+pub fn list_member<T0: PartialEq>(x: T0, list: Vec<T0>) -> bool {
+    list.contains(&x)
+}
+pub fn list_any<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
+    list.into_iter().any(f)
+}
+pub fn list_all<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
+    list.into_iter().all(f)
 }
 
 #[cfg(test)]

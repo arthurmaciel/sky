@@ -2,6 +2,11 @@
 // Sky Runtime — Core types (always included)
 // Generic over E (error type).  Builder.hs emits `use sky_runtime::*;`
 // and thin wrappers that instantiate E = SkyError.
+//
+// This module is the home for the core TYPES (SkyMaybe / SkyResult / SkyTask)
+// and their combinators, plus the byte-sequence FFI coercion. The String and
+// List kernels live in their named Sky-module homes — `string.rs` and
+// `list.rs` — re-exported through `mod.rs`'s glob so call sites are unaffected.
 
 use std::pin::Pin;
 use std::future::Future;
@@ -116,94 +121,8 @@ pub fn sky_result_and_then<E, A, B>(r: SkyResult<E, A>, f: impl FnOnce(A) -> Sky
 }
 
 // ===========================================
-// List helpers
+// Maybe / Result default + traverse helpers
 // ===========================================
-pub fn sky_list_is_empty<T>(v: &Vec<T>) -> bool { v.is_empty() }
-
-pub fn sky_list_head<T: Clone>(v: &Vec<T>) -> SkyMaybe<T> {
-    v.first().map(|x| SkyMaybe::Just(x.clone())).unwrap_or(SkyMaybe::Nothing)
-}
-
-pub fn sky_list_map<T: Clone, U>(f: impl Fn(T) -> U, v: &Vec<T>) -> Vec<U> {
-    v.iter().map(|x| f(x.clone())).collect()
-}
-
-pub fn sky_list_filter<T: Clone>(f: impl Fn(&T) -> bool, v: &Vec<T>) -> Vec<T> {
-    v.iter().filter(|x| f(*x)).cloned().collect()
-}
-
-pub fn sky_list_fold<T: Clone, B>(f: impl Fn(B, T) -> B, init: B, v: &Vec<T>) -> B {
-    v.iter().fold(init, |acc, x| f(acc, x.clone()))
-}
-
-pub fn sky_list_cons<T: Clone>(x: T, xs: Vec<T>) -> Vec<T> {
-    std::iter::once(x).chain(xs).collect()
-}
-
-// ===========================================
-// String helpers
-// ===========================================
-pub fn sky_string_append(a: String, b: String) -> String { a + &b }
-pub fn sky_string_len(s: &str) -> usize { s.len() }
-pub fn sky_string_is_empty(s: &str) -> bool { s.is_empty() }
-
-// ===========================================
-// Int / Float helpers
-// Misc helpers
-// ===========================================
-pub fn string_from_int(i: i64) -> String { format!("{}", i) }
-pub fn string_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }
-pub fn string_append(a: String, b: String) -> String { a + &b }
-pub fn string_length(s: String) -> i64 { s.len() as i64 }
-pub fn string_is_empty(s: String) -> bool { s.is_empty() }
-pub fn string_reverse(s: String) -> String { s.chars().rev().collect() }
-pub fn string_to_upper(s: String) -> String { s.to_uppercase() }
-pub fn string_to_lower(s: String) -> String { s.to_lowercase() }
-pub fn string_trim(s: String) -> String { s.trim().to_string() }
-// Sky `contains : String -> String -> Bool  -- contains sub str` (str contains
-// sub). Args arrive as (sub, str), so test the SECOND against the first.
-pub fn string_contains(sub: String, s: String) -> bool { s.contains(&sub) }
-pub fn string_to_int(s: String) -> SkyMaybe<i64> {
-    match s.parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
-}
-pub fn string_from_float(f: f64) -> String { format!("{}", f) }
-pub fn string_split(sep: String, s: String) -> Vec<String> { s.split(&sep).map(|x| x.to_string()).collect() }
-
-// List operations (Q3)
-pub fn list_foldl<T0, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
-    let mut acc = init;
-    for item in list { acc = f(item, acc); }
-    acc
-}
-pub fn list_foldr<T0: Clone, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
-    let mut acc = init;
-    for item in list.into_iter().rev() { acc = f(item.clone(), acc); }
-    acc
-}
-// Sky `List.range` is INCLUSIVE: range 1 3 = [1, 2, 3].
-pub fn list_range(lo: i64, hi: i64) -> Vec<i64> { (lo..=hi).collect() }
-pub fn list_indexed_map<T0, T1>(f: impl Fn(i64, T0) -> T1 + Clone, list: Vec<T0>) -> Vec<T1> {
-    list.into_iter().enumerate().map(|(i, x)| f(i as i64, x)).collect()
-}
-pub fn list_concat_map<T0, T1>(f: impl Fn(T0) -> Vec<T1> + Clone, list: Vec<T0>) -> Vec<T1> {
-    list.into_iter().flat_map(f).collect()
-}
-pub fn list_zip<T0, T1>(a: Vec<T0>, b: Vec<T1>) -> Vec<(T0, T1)> {
-    a.into_iter().zip(b).collect()
-}
-pub fn list_filter<T0: Clone>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> Vec<T0> {
-    list.into_iter().filter(|x| f(x.clone())).collect()
-}
-pub fn list_member<T0: PartialEq>(x: T0, list: Vec<T0>) -> bool {
-    list.contains(&x)
-}
-pub fn list_any<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
-    list.into_iter().any(f)
-}
-pub fn list_all<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
-    list.into_iter().all(f)
-}
-
 pub fn result_with_default<E, A>(def: A, r: SkyResult<E, A>) -> A {
     match r { SkyResult::Ok(v) => v, SkyResult::Err(_) => def }
 }

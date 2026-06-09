@@ -1,7 +1,31 @@
-//! Sky.Core.String additions beyond what core.rs already provides.
+//! Sky.Core.String kernel — the single home for the String runtime surface.
 //!
-//! Sub-A.8 T6. Argument order matches the Go runtime's typed kernels
+//! Argument order matches the Go runtime's typed kernels
 //! (runtime-go/rt/rt.go: String_replace / String_startsWith / etc.).
+
+use super::SkyMaybe;
+
+// ── Core String kernels (relocated from core.rs so the String surface has one home) ──
+
+pub fn string_from_int(i: i64) -> String { format!("{}", i) }
+pub fn string_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }
+pub fn string_append(a: String, b: String) -> String { a + &b }
+pub fn string_length(s: String) -> i64 { s.len() as i64 }
+pub fn string_is_empty(s: String) -> bool { s.is_empty() }
+pub fn string_reverse(s: String) -> String { s.chars().rev().collect() }
+pub fn string_to_upper(s: String) -> String { s.to_uppercase() }
+pub fn string_to_lower(s: String) -> String { s.to_lowercase() }
+pub fn string_trim(s: String) -> String { s.trim().to_string() }
+// Sky `contains : String -> String -> Bool  -- contains sub str` (str contains
+// sub). Args arrive as (sub, str), so test the SECOND against the first.
+pub fn string_contains(sub: String, s: String) -> bool { s.contains(&sub) }
+pub fn string_to_int(s: String) -> SkyMaybe<i64> {
+    match s.parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
+}
+pub fn string_from_float(f: f64) -> String { format!("{}", f) }
+pub fn string_split(sep: String, s: String) -> Vec<String> { s.split(&sep).map(|x| x.to_string()).collect() }
+
+// ── String kernels with Go-typed argument order ──
 
 /// Sky `replace : String -> String -> String -> String`.
 /// Replaces all occurrences of `old` with `new_` in `s`.
