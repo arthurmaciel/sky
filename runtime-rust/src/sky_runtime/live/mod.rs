@@ -288,6 +288,8 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     update: Arc<FUpdate>,
     view: Arc<FView>,
     subs: Arc<FSubs>,
+    store: Arc<dyn store::SessionStore<Model, Msg>>,
+    sid: String,
 ) where
     Model: Clone + Send + 'static,
     Msg: Clone + Send + 'static,
@@ -323,6 +325,11 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
             }
         }
 
+        // Write-through: checkpoint the committed model to the store (a touch
+        // for memory; a re-serialize for persistent backends — Go store.Set on
+        // every commit).
+        store.set(&sid, entry.clone());
+
         run_cmd(cmd, &msg_tx);
         spawn_subs(subs(next.clone()), &msg_tx, &mut sub_handles);
     }
@@ -355,6 +362,23 @@ fn new_sid() -> String {
     let hi = mix(nanos ^ (c.rotate_left(17)));
     let lo = mix(c ^ nanos.rotate_left(40));
     format!("{hi:016x}{lo:016x}")
+}
+
+/// Build the full-page HTTP response for a GET (initial render or reuse): the
+/// client-bearing HTML wrap + the `sky_sid` cookie.
+fn page_response(sid: &str, body: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let html = render_page_full(sid, "", body);
+    let cookie = format!("sky_sid={sid}; Path=/; HttpOnly; SameSite=Lax");
+    (
+        axum::http::StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+            (axum::http::header::SET_COOKIE, cookie),
+        ],
+        html,
+    )
+        .into_response()
 }
 
 /// Session idle-TTL: `SKY_LIVE_TTL` seconds, default 1800 (30 min) — matches the
@@ -489,15 +513,46 @@ where
             FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
             FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
         {
-            let sid = new_sid();
-            // Build the request context (params from routing — empty when
-            // unrouted), pass it to init, THEN inject the matched page. The
-            // param_resolver is model-independent, breaking the
-            // init↔routing dependency cycle.
-            let params = (st.param_resolver)(uri.path());
-            let req = req::live_req(&method, &uri, &headers, params);
-            let (model, cmd0) = (st.init)(req);
-            let model = (st.route_resolver)(model, uri.path());
+            // Cookie-based session lifecycle (Go store.Get on every GET):
+            //   * Live hit  → reuse the in-process session; re-apply routing for
+            //                 this GET's path + re-render (no new driver).
+            //   * Cold hit  → a persisted model (post-restart / different replica);
+            //                 hydrate a fresh driver seeded with it (no init).
+            //   * miss      → init a new session.
+            let cookie_sid = sid_from_cookie(&headers);
+            let hit = cookie_sid.as_ref().and_then(|s| st.store.get(s));
+
+            let (sid, model, cmd0) = match hit {
+                Some(store::StoreHit::Live(handle)) => {
+                    let s = cookie_sid.expect("live hit implies a cookie sid");
+                    let body = {
+                        let mut e = handle.lock().unwrap();
+                        e.model = (st.route_resolver)(e.model.clone(), uri.path());
+                        let mut tree = (st.view)(e.model.clone());
+                        assign_sky_ids(&mut tree, "r");
+                        e.index = build_index(&tree);
+                        e.last_view = tree.clone();
+                        render_html(&tree)
+                    };
+                    st.store.set(&s, handle); // touch last-seen
+                    return page_response(&s, &body);
+                }
+                Some(store::StoreHit::Cold(m)) => {
+                    let s = cookie_sid.expect("cold hit implies a cookie sid");
+                    (s, (st.route_resolver)(m, uri.path()), SkyCmd::None)
+                }
+                None => {
+                    // Build the request context (params from routing — empty when
+                    // unrouted) and init a fresh model. The param_resolver is
+                    // model-independent, breaking the init↔routing cycle.
+                    let params = (st.param_resolver)(uri.path());
+                    let req = req::live_req(&method, &uri, &headers, params);
+                    let (m, c) = (st.init)(req);
+                    let s = cookie_sid.unwrap_or_else(new_sid);
+                    (s, (st.route_resolver)(m, uri.path()), c)
+                }
+            };
+
             let mut tree = (st.view)(model.clone());
             assign_sky_ids(&mut tree, "r");
             let index = build_index(&tree);
@@ -514,7 +569,7 @@ where
             }));
             st.store.set(&sid, entry.clone());
 
-            // Spawn the per-session driver.
+            // Spawn the per-session driver (write-through to the store on commit).
             tokio::spawn(drive_session(
                 entry,
                 msg_rx,
@@ -522,21 +577,13 @@ where
                 st.update.clone(),
                 st.view.clone(),
                 st.subs.clone(),
+                st.store.clone(),
+                sid.clone(),
             ));
-            // Fire init's Cmd into the loop.
+            // Fire init's Cmd into the loop (None for a cold-restored session).
             run_cmd(cmd0, &msg_tx);
 
-            let html = render_page_full(&sid, "", &body);
-            let cookie = format!("sky_sid={sid}; Path=/; HttpOnly; SameSite=Lax");
-            (
-                StatusCode::OK,
-                [
-                    (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
-                    (axum::http::header::SET_COOKIE, cookie),
-                ],
-                html,
-            )
-                .into_response()
+            page_response(&sid, &body)
         }
 
         // ── GET /_sky/sse ─────────────────────────────────────────────────
