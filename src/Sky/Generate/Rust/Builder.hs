@@ -271,6 +271,10 @@ data RustBuilder = RustBuilder
         -- typeDefToString — deriving it on every struct would force serde bounds
         -- on function-typed fields (E0277). Computed by collectFormTargets, which
         -- shares the handler-arg-type -> rustT logic with the onSubmit peephole.
+    , builderLiveInitFns :: Set.Set String
+        -- P4-T3: Sky binding names of `Live.app` init functions whose `init`
+        -- field is a top-level reference. defToRustItem overrides param 0 of
+        -- each to `sky_runtime::LiveReq`. Computed by collectLiveInitFns.
     }
 
 data RustModule = RustModule
@@ -544,6 +548,11 @@ data EmitCtx = EmitCtx
         -- ^ Stage-4 kernel alias map: (canonicalModuleName, fnName) ->
         --   (kernelMod, kernelFn).  Populated during generateRust from
         --   the same Ffi.kernel dispatch table the Go codegen uses.
+    , ecLiveInitFns :: Set.Set String
+        -- ^ P4-T3: Sky binding names of `Live.app` top-level-ref init functions.
+        --   defToRustItem forces param 0 of these to `sky_runtime::LiveReq` so
+        --   the generated init fn satisfies the runtime's
+        --   `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound.
     }
 
 -- | Build a map from field-name-signature to struct name
@@ -646,8 +655,59 @@ collectFormTargets recordMap regionTypes = foldMap walkMod
             Can.Negate e0 -> walkExpr e0
             _ -> Set.empty  -- literals, variables: no sub-expressions
 
+-- | P4-T3 pre-pass. Walk every expression in every module; for each
+-- `Live.app { init = <top-level-ref>, ... }` call (the same record-splice form
+-- the Live.app call-site peephole matches), collect the Sky BINDING NAME of the
+-- init function when the `init` field is a top-level reference (e.g. `init`).
+-- Lambda / inline init fields are out of P4 scope and skipped.
+--
+-- The resulting set drives the param-0 type override in defToRustItem: the
+-- runtime now requires `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)`, but the
+-- shared HM type checker leaves the init arg a free `req` TVar (must stay free —
+-- changing it breaks the Go skyshop example). So the Rust codegen alone pins the
+-- init fn's first param to `sky_runtime::LiveReq`.
+--
+-- Keyed on the Sky binding name (`fname`) to match defToRustItem's `name`.
+collectLiveInitFns :: [Can.Module] -> Set.Set String
+collectLiveInitFns = foldMap walkMod
+  where
+    walkMod m = walkDecls (Can._decls m)
+
+    walkDecls Can.SaveTheEnvironment = Set.empty
+    walkDecls (Can.Declare def rest) = walkDef def <> walkDecls rest
+    walkDecls (Can.DeclareRec def defs rest) = walkDef def <> foldMap walkDef defs <> walkDecls rest
+
+    walkDef (Can.Def _ _ body) = walkExpr body
+    walkDef (Can.TypedDef _ _ _ body _) = walkExpr body
+    walkDef (Can.DestructDef _ expr) = walkExpr expr
+
+    walkExpr (Ann.At _ expr) = case expr of
+        Can.Call (Ann.At _ (Can.VarKernel "Live" "app")) [Ann.At _ (Can.Record fields)] ->
+            let initRef = case Map.lookup "init" fields of
+                    Just (Ann.At _ (Can.VarTopLevel _ fname)) -> Set.singleton fname
+                    _ -> Set.empty
+            in initRef <> walkSubExprs expr
+        _ -> walkSubExprs expr
+      where
+        walkSubExprs e = case e of
+            Can.Call fn args -> walkExpr fn <> foldMap walkExpr args
+            Can.Lambda _ body -> walkExpr body
+            Can.Let def body -> walkDef def <> walkExpr body
+            Can.LetRec defs body -> foldMap walkDef defs <> walkExpr body
+            Can.LetDestruct _ e0 body -> walkExpr e0 <> walkExpr body
+            Can.Case scrut branches -> walkExpr scrut <> foldMap (\(Can.CaseBranch _ b) -> walkExpr b) branches
+            Can.If branches elseBranch -> foldMap (\(c, t) -> walkExpr c <> walkExpr t) branches <> walkExpr elseBranch
+            Can.Binop _ _ _ _ a b -> walkExpr a <> walkExpr b
+            Can.Access r _ -> walkExpr r
+            Can.Update _ r updates -> walkExpr r <> foldMap (\(_, Can.FieldUpdate _ e0) -> walkExpr e0) (Map.toList updates)
+            Can.Record fields -> foldMap (\(_, e0) -> walkExpr e0) (Map.toList fields)
+            Can.List es -> foldMap walkExpr es
+            Can.Tuple a b rest -> foldMap walkExpr (a:b:rest)
+            Can.Negate e0 -> walkExpr e0
+            _ -> Set.empty  -- literals, variables: no sub-expressions
+
 buildModule :: EmitCtx -> Can.Module -> RustModule
-buildModule ctx mod = 
+buildModule ctx mod =
     let modPrefix = moduleNameToRust (Can._name mod)
         items = declsToRustItems ctx modPrefix (Can._decls mod)
         -- Existing function names after prefixing (to avoid double-emit)
@@ -1016,6 +1076,17 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                                      else []
                            gs = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
                        in (pStrs, gs)
+        -- P4-T3: a `Live.app` top-level-ref init fn's first param is pinned to
+        -- `sky_runtime::LiveReq` so it satisfies the runtime's
+        -- `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound. The shared HM
+        -- checker leaves the init arg a free `req` TVar (left free on purpose —
+        -- changing it breaks the Go skyshop example), so the override lives only
+        -- in the Rust codegen. The param NAME is taken from patternToRustArg so
+        -- `init req` -> `req: ...` and `init _` -> `_: ...` both round-trip.
+        paramStrs' = case (Set.member name (ecLiveInitFns ctx), params, paramStrs) of
+            (True, (p0 : _), (_ : rest)) ->
+                (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
+            _ -> paramStrs
         retTy = case Map.lookup name (ecSolvedTypes ctx) of
                     Just ty ->
                         let ret = extractReturnType ty
@@ -1073,7 +1144,7 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         bodyWrapped = if "SkyTask<" `isPrefixOf` retTy && needsTaskWrap (ecSolvedTypes ctx) body
                       then "task_succeed({ " ++ bodyStr ++ " })"
                       else bodyStr
-     in RustFunction rustName genVars paramStrs retTy (preludes ++ bodyWrapped)
+     in RustFunction rustName genVars paramStrs' retTy (preludes ++ bodyWrapped)
 defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
     let rm = ecRecordMap ctx
         rustName = if name == "main" then "sky_main" else name
@@ -1081,7 +1152,17 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
             (\i (pat, ty) -> let (nm, pre) = patternToRustArg i pat
                              in (nm ++ ": " ++ paramTypeToRust rm ty, pre))
             [0..] pats
-        params = map fst argTriples
+        params0 = map fst argTriples
+        -- P4-T3: an ANNOTATED `Live.app` top-level-ref init (e.g.
+        -- `init : () -> ( Model, Cmd Msg )`) lowers here as a TypedDef; its
+        -- declared first param (`()`) must still be pinned to
+        -- `sky_runtime::LiveReq` so it satisfies the runtime's
+        -- `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound. Param NAME comes
+        -- from patternToRustArg so `init _` -> `_: sky_runtime::LiveReq`.
+        params = case (Set.member name (ecLiveInitFns ctx), pats, params0) of
+            (True, ((p0, _) : _), (_ : rest)) ->
+                (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
+            _ -> params0
         preludes = concatMap snd argTriples
         -- `main : Task Error ()` lowers to `sky_main() -> SkyTask<()>` so the
         -- entry can `block_on` it. Only when the program calls `Task.run` itself
@@ -2880,7 +2961,8 @@ buildProgram mods solvedTypes regionTypes kernelAliases =
             , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns }
+        liveInitFns = collectLiveInitFns mods
         usage = analyzeKernelUsage mods
         zeroArgDefs = collectZeroArgDefs mods
         noCloneVars = Set.empty
@@ -2895,6 +2977,7 @@ buildProgram mods solvedTypes regionTypes kernelAliases =
         , builderKernels = usage
         , builderFfiOpaques = Set.empty  -- populated by generateRust via passed FFI types
         , builderFormTargets = collectFormTargets recordMap regionTypes mods
+        , builderLiveInitFns = liveInitFns
         }
 
 -- | Backend-specific sqlx types
@@ -3860,6 +3943,11 @@ collectUndefinedTypes b =
                 , not ("SkyTask" `isPrefixOf` t)
                 , not ("Box<" `isPrefixOf` t)
                 , not ("fn(" `isPrefixOf` t)
+                -- P4-T3: a fully-qualified `sky_runtime::…` path (e.g. the
+                -- `sky_runtime::LiveReq` init param type) is a real runtime
+                -- type — never synthesise a (syntactically invalid)
+                -- `type sky_runtime::LiveReq = String;` placeholder for it.
+                , not ("sky_runtime::" `isPrefixOf` t)
             ]
     in Set.toList (Set.difference referenced defined)
 
