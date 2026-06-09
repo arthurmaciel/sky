@@ -24,7 +24,11 @@ build_target() { # $1=example dir  $2=go|rust  -> echoes the release binary path
   ( cd "$d" && rm -rf sky-out .skycache .skydeps ) >/dev/null 2>&1
   if [ "$t" = go ]; then
     ( cd "$d" && timeout 300 "$SKY" build src/Main.sky ) >/tmp/perf-build-go.log 2>&1 || return 1
-    echo "$d/sky-out/app"
+    # Both backends share $d/sky-out; the rust build's `rm -rf sky-out` would
+    # wipe this binary. Copy it out so it survives the rust build.
+    local dst="/tmp/perf-$(basename "$d")-go.bin"
+    cp "$d/sky-out/app" "$dst" || return 1
+    echo "$dst"
   else
     ( cd "$d" && timeout 300 "$SKY" build src/Main.sky --target rust ) >/tmp/perf-build-rust-gen.log 2>&1 || return 1
     ( cd "$d" && timeout 900 cargo build --release --manifest-path sky-out/Rust/Cargo.toml ) >/tmp/perf-build-rust.log 2>&1 || return 1
@@ -97,7 +101,7 @@ collect_metrics() { # $1=binary $2=shape -> "metric value" lines
 }
 
 is_higher_better() { case "$1" in throughput|event_throughput) return 0;; *) return 1;; esac; }
-thr_for() { local key="$1"; awk -F'= *' -v k="$key" '$1~("^"k"$"){print $2}' "$THRESH"; }
+thr_for() { local key="$1"; [ -f "$THRESH" ] || return 0; awk -F' *= *' -v k="$key" '$1~("^"k"$"){print $2}' "$THRESH"; }
 
 is_borderline() { # $1=shape $2=metric $3=go $4=rust
   local ratio; ratio=$(pyf "0 if $3==0 else $4/$3")
