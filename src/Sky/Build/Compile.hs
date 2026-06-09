@@ -65,7 +65,6 @@ import qualified Sky.Build.FfiTypeResolve as FfiTy
 import qualified Sky.Build.SkyDeps as SkyDeps
 import qualified Sky.Canonicalise.Environment as Env
 import qualified System.Environment
-import qualified Debug.Trace
 
 
 -- | Global codegen environment (set once per compilation, read during codegen)
@@ -483,6 +482,38 @@ lookupLambdaGoStr :: String -> Maybe String
 lookupLambdaGoStr k = unsafePerformIO $ do
     ctx <- readIORef scopeStateRef
     return (LC.lookupLambdaGoStr ctx k)
+
+
+-- | Push a set of generic type-parameter names (e.g. `["T1", "T2"]`)
+-- into the enclosing-Go-function scope around a `GoExpr` render.
+-- Mirrors `withScopedLambdaTypes` / `withScopedLambdaGoStrings`'s
+-- write/render/restore discipline so the scope is live during the
+-- body's tree construction AND its rendering.  The push runs BEFORE
+-- substituteOnly's `eraseTypeParams` decision fires (which happens
+-- at GoExpr construction time), so a callee call inside this body
+-- whose param type is `Cfg_R[T2]` sees `T2` as pinned-in-scope and
+-- skips the erase.  This is the structural fix for the
+-- parametric-record-alias generic-instantiation panic class
+-- (Issue #521 + the #261/#262/#263/#461/#463/#465/#467 family).
+withScopedEnclosingTypeParams :: [String] -> GoIr.GoExpr -> GoIr.GoExpr
+withScopedEnclosingTypeParams tps x = unsafePerformIO $ do
+    prev <- readIORef scopeStateRef
+    writeIORef scopeStateRef (LC.withEnclosingTypeParams tps prev)
+    let rendered = GoBuilder.renderExpr x
+        forced = length rendered
+    forced `seq` writeIORef scopeStateRef prev
+    return (GoIr.GoRaw rendered)
+
+
+-- | Membership test: is `t` a generic type parameter declared on
+-- the enclosing Go function?  Used by the arg-coercion paths to
+-- decide whether to erase a TVar (out-of-scope → erase to `any`)
+-- or preserve it (in-scope → pin as-is, let monomorphise rewrite).
+enclosingTypeParamInScope :: String -> Bool
+enclosingTypeParamInScope t = unsafePerformIO $ do
+    ctx <- readIORef scopeStateRef
+    return (LC.lookupEnclosingTypeParam ctx t)
+{-# NOINLINE enclosingTypeParamInScope #-}
 
 
 -- | Read the global codegen env (for use in pure codegen functions).
@@ -3327,9 +3358,18 @@ generateDeclsForDep canMod modPrefix =
               bodyExpr1 = if Map.null goStringBindings
                   then typedBody
                   else withScopedLambdaGoStrings goStringBindings typedBody
-              bodyExpr = if Map.null paramTypeBindings
+              bodyExpr0 = if Map.null paramTypeBindings
                   then bodyExpr1
                   else withScopedLambdaTypes paramTypeBindings bodyExpr1
+              -- Issue #521: push the dep function's declared generic
+              -- type params (e.g. ["T2"]) into scope BEFORE the body
+              -- renders so substituteOnly's `eraseTypeParams` guard
+              -- pins in-scope TVars instead of widening them to `any`.
+              -- Outermost wrapper: scope must be live when the inner
+              -- scopes' render-forcing fires.
+              bodyExpr = if null depTypeParams
+                  then bodyExpr0
+                  else withScopedEnclosingTypeParams depTypeParams bodyExpr0
               -- v0.14.x TCO: same shape as the entry-module emission.
               -- Tail-recursive dep functions (Sky.Core.List.foldl,
               -- find, any, all, …) emit as a `for {}` loop with
@@ -4470,9 +4510,20 @@ generateDef home def0 solvedTypes =
             -- `func() <goRetType>` IIFE.  Idempotent on an already-
             -- typed `GoTypedBlock` (no redundant re-wrap).
             typedBody = typeIIFE goRetType (lowerFnBody body)
-            bodyExpr = if Map.null paramTypeBindings
+            bodyExpr0 = if Map.null paramTypeBindings
                 then typedBody
                 else withScopedLambdaTypes paramTypeBindings typedBody
+            -- Issue #521: symmetrical with the dep-emit path — push
+            -- the entry function's declared generic type params into
+            -- scope BEFORE the body renders so substituteOnly's
+            -- `eraseTypeParams` guard pins in-scope TVars instead of
+            -- widening them to `any`.  The unannotated polymorphic
+            -- `view cfg = ...` shape (the exact #521 repro) lives
+            -- in entry modules; without this push the dep-side fix
+            -- is symmetric-half-empty.
+            bodyExpr = if null entryTypeParams
+                then bodyExpr0
+                else withScopedEnclosingTypeParams entryTypeParams bodyExpr0
             (goParams', destructStmts) = destructureParams params
             -- Replace each param's Go type with the typed form (from
             -- annotation or HM inference). destructureParams gave us
@@ -7723,16 +7774,28 @@ exprToGo (A.At _ expr) = case expr of
                             , cgo /= "any"
                             ]
                         recovered = Map.union bareRecovered structuralRecovered
+                        -- Issue #521 — partition unbound TVars by
+                        -- whether they're declared on the enclosing
+                        -- Go function; pin in-scope ones, erase only
+                        -- the out-of-scope ones.  Mirrors the
+                        -- VarLocal/VarTopLevel arm below.
                         substituteOnly pty =
                             let subbed = substTVarsInGoType recovered pty
                                 unboundTVars =
                                     [ t | t <- tvarsInGoTypeStr subbed
                                         , not (Map.member t recovered) ]
+                                outOfScope =
+                                    [ t | t <- unboundTVars
+                                        , not (enclosingTypeParamInScope t) ]
                             in if null unboundTVars
                                  then subbed
-                                 else if containsGenericTypeParam subbed
-                                        then eraseTypeParams subbed
-                                        else subbed
+                                 else if null outOfScope
+                                        then subbed
+                                        else if containsGenericTypeParam subbed
+                                               then eraseTypeParamsExceptScope
+                                                        enclosingTypeParamInScope
+                                                        subbed
+                                               else subbed
                         substitutedParams = map substituteOnly kernelParamGoTys
                         -- Route each arg through the typed-aware
                         -- fallback (handles Can.Lambda → typed
@@ -8905,16 +8968,28 @@ coerceCallArgs qualName args =
                      , cgo /= "any"
                      ]
                  recovered = Map.union bareRecovered structuralRecovered
+                 -- Issue #521 — partition unbound TVars by whether
+                 -- they're declared on the enclosing Go function;
+                 -- preserve in-scope TVars (Monomorphise will pin
+                 -- them per call site).  Mirrors the
+                 -- VarLocal/VarTopLevel + VarKernel arms.
                  substituteOnly pty =
                      let subbed = substTVarsInGoType recovered pty
                          unboundTVars =
                              [ t | t <- tvarsInGoTypeStr subbed
                                  , not (Map.member t recovered) ]
+                         outOfScope =
+                             [ t | t <- unboundTVars
+                                 , not (enclosingTypeParamInScope t) ]
                      in if null unboundTVars
                           then subbed
-                          else if containsGenericTypeParam subbed
-                                 then eraseTypeParams subbed
-                                 else subbed
+                          else if null outOfScope
+                                 then subbed
+                                 else if containsGenericTypeParam subbed
+                                        then eraseTypeParamsExceptScope
+                                                 enclosingTypeParamInScope
+                                                 subbed
+                                        else subbed
                  substituted = map substituteOnly paramTypes
              -- v0.15.2: typed-target call args via `zipWithDefaultExpect`.
              in zipWithDefaultExpect substituted args
@@ -9230,22 +9305,64 @@ coerceCallArgsAt region qualName args =
                     , Just cgo <- [goExprGoType Nothing ga]
                     , cgo /= "any"
                     ]
-                recovered = Map.union bareRecovered structuralRecovered
+                -- v0.16.13 #530 — HM-based identity recovery for
+                -- parametric-record-alias args.  When the source's
+                -- HM type is a record alias matching the param's
+                -- record-alias base, pin every TVar in the param to
+                -- itself (identity mapping).  This tells substituteOnly
+                -- "the call site's T1 stays as T1 — Monomorphise will
+                -- rewrite it per-instantiation".  Without this,
+                -- substituteOnly would erase the TVar to `any` at the
+                -- call site, breaking SIBLING args at the same call:
+                -- a typed `T1` arg slot then gets `any(arg)` wrapped,
+                -- which Go's call-site inference can't reconcile with
+                -- the now-T1-pinned (via path-b shortcircuit on the
+                -- alias arg) function signature.
+                --
+                -- This mirrors the kernel arm's σ-recovery (line 7741)
+                -- but routes through HM (`aliasBaseFromCanExpr`)
+                -- instead of static-shape matching — so it works for
+                -- `VarLocal` refs where `goExprGoType` returns Nothing.
+                identityRecovered = Map.fromList
+                    [ (tv, tv)
+                    | (pty, arg) <- zip paramTypes args
+                    , Just paramBase <- [parametricAliasBase pty]
+                    , Just srcAlias <- [aliasBaseFromCanExpr arg]
+                    , srcAlias ++ "_R" == paramBase
+                    , tv <- tvarsInGoTypeStr pty
+                    , not (Map.member tv bareRecovered)
+                    , not (Map.member tv structuralRecovered)
+                    ]
+                recovered = Map.unions
+                    [bareRecovered, structuralRecovered, identityRecovered]
                 -- v0.13 Stage 1 — when σ pins EVERY TVar in a paramType,
                 -- skip the `eraseTypeParams` widening. Identity
                 -- mappings (T1 → T1) count as "pinned" because the
                 -- substituted type already uses the right TVar names
                 -- (visible in the enclosing generic function scope).
+                -- Issue #521 — when σ leaves TVars unbound, partition
+                -- them by whether they're declared on the enclosing
+                -- Go function.  In-scope TVars stay pinned-as-themselves
+                -- (Monomorphise's `substTypeParamsInString` rewrites
+                -- them to the call site's concrete type at specialise
+                -- time); out-of-scope TVars erase to `any` as before.
                 substituteOnly pty =
                     let subbed = substTVarsInGoType recovered pty
                         unboundTVars =
                             [ t | t <- tvarsInGoTypeStr subbed
                                 , not (Map.member t recovered) ]
+                        outOfScope =
+                            [ t | t <- unboundTVars
+                                , not (enclosingTypeParamInScope t) ]
                     in if null unboundTVars
                          then subbed
-                         else if containsGenericTypeParam subbed
-                                then eraseTypeParams subbed
-                                else subbed
+                         else if null outOfScope
+                                then subbed
+                                else if containsGenericTypeParam subbed
+                                       then eraseTypeParamsExceptScope
+                                                enclosingTypeParamInScope
+                                                subbed
+                                       else subbed
                 substituted = map substituteOnly paramTypes
                 -- v0.13 D-Lambda-Lowerer: when an arg is a literal
                 -- `Can.Lambda` at a func-typed param slot, route
@@ -10292,6 +10409,34 @@ eraseTypeParams = go Nothing
         , not (null digits)
         , null after || not (isIdChar (head after))
         = "any" ++ go (Just 'y') after  -- 'y' from "any"
+    go _ (c:cs) = c : go (Just c) cs
+    isIdChar c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+              || (c >= '0' && c <= '9') || c == '_' || c == '.'
+
+
+-- | Like `eraseTypeParams`, but only erases TVar tokens NOT in the
+-- given scope set.  Used by the arg-coercion paths
+-- (`substituteOnly` at 9219/7706 + sibling sites) so a body emitted
+-- inside `func Widget_view[T2 any](...)` preserves `T2` literally
+-- while still widening any other unbound TVar to `any`.  When the
+-- preserved `T2` reaches Monomorphise's token-level
+-- `substTypeParamsInString`, it gets rewritten to the call site's
+-- σ-pinned concrete type (e.g. `Msg`).  Pre-fix the erase happened
+-- at codegen time, baking `Cfg_R[any]` into a `GoTypeAssert` node
+-- that Monomorphise could no longer recover.
+eraseTypeParamsExceptScope :: (String -> Bool) -> String -> String
+eraseTypeParamsExceptScope inScope = go Nothing
+  where
+    go _ [] = []
+    go prev ('T':rest)
+        | not (maybe False isIdChar prev)
+        , (digits, after) <- span (\c -> c >= '0' && c <= '9') rest
+        , not (null digits)
+        , null after || not (isIdChar (head after))
+        , let tvar = 'T' : digits
+        = if inScope tvar
+            then tvar ++ go (Just (last digits)) after
+            else "any" ++ go (Just 'y') after
     go _ (c:cs) = c : go (Just c) cs
     isIdChar c = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
               || (c >= '0' && c <= '9') || c == '_' || c == '.'
@@ -12815,9 +12960,27 @@ inferExprType types (A.At r e) = case e of
     Can.Str _    -> Just ConstrainExpr.stringType
     Can.Chr _    -> Just ConstrainExpr.charType
     Can.Unit     -> Just T.TUnit
-    Can.VarLocal name    -> case Solve.lookupSolvedVar name types of
-        Just t  -> Just t
-        Nothing -> lookupLambdaType name
+    Can.VarLocal name    ->
+        -- v0.16.13 #530 — when `_stEnv` returns a sentinel TVar (the
+        -- solver merge sets `_unresolved` / `_unbound` / `_ambig`
+        -- for names that didn't resolve across modules), treat it
+        -- as a miss and fall through to the per-region map and the
+        -- IORef-backed lambda-types ledger.  Function-LOCAL names
+        -- (parameters, let-bindings) are the usual case here — the
+        -- _stEnv carries them as sentinels because they have no
+        -- module-wide type.  Their real types live in the region
+        -- map or the scope-pushed lambda-types ledger.
+        let isSentinelTVar t = case t of
+                T.TVar n -> n `elem` ["_unresolved", "_unbound", "_ambig"]
+                _ -> False
+            envHit = case Solve.lookupSolvedVar name types of
+                Just t | not (isSentinelTVar t) -> Just t
+                _ -> Nothing
+        in case envHit of
+            Just t -> Just t
+            Nothing -> case Solve.lookupSolvedRegion r types of
+                Just t | not (isSentinelTVar t) -> Just t
+                _ -> lookupLambdaType name
     Can.VarTopLevel _ n  -> Solve.lookupSolvedVar n types
     -- VarKernel: instantiate the kernel's HM annotation. Strips the
     -- Forall wrapper (kernel sigs are universally quantified) so the

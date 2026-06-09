@@ -229,6 +229,22 @@ kill it and file a bug. Never wait it out.
 
 ### 4. No-deferral principle — every known bug enters the pipeline
 
+> **Reinforced 2026-06-07** — Sky Lang aspires to be the industrial
+> best-in-class language + toolchain for fullstack pure-functional
+> development (UI/UX/DX/security/scalability + extensive stdlib).
+> SkyDeploy is the leading moat — the AI-era platform on which
+> startups and businesses build. Both reputations compound. A
+> "known broken edge case" today is a tomorrow's compounding
+> problem. The session's value is architectural progress, not the
+> tag — when the correct fix takes multi-session/days/weeks, that
+> is a reason to start, not a reason to defer. **Default response
+> to a hard problem: analyse root cause → research the
+> architecturally correct approach (existing roadmap docs / RFCs
+> / improvement plans) → execute, even when it requires multiple
+> sessions.** The tempting tactical workaround is forbidden
+> unless the user explicitly accepts the trade-off after hearing
+> it.
+
 If a bug surfaces during dev, sweep, CI, or testing — **whether
 introduced by your current work or pre-existing** — it MUST
 enter the task pipeline immediately and be fixed in the next
@@ -945,6 +961,15 @@ main =
 HTTP-first (full HTML on load, patches on events), SSE
 subscriptions, session stores (memory / sqlite / redis / postgres /
 firestore), type-safe events, VNode diffing.
+
+**`init` is per-session, not per-page-reload.** First request from a
+browser with no `sky_sid` cookie fires `init`. Browser reload while
+the session is alive RESTORES Model from the session store — `init`
+does NOT run. To force a fresh `init` (demo reset / e2e bootstrap):
+`Cmd.perform (Cookie.expire "sky_sid")` then reload. If the goal is
+"my other tab missed an update", reach for `Cmd.publish` instead —
+reload-as-resync is a missing broadcast, not a feature gap. Details
+in `docs/skylive/overview.md` §"Session lifecycle — when `init` runs".
 
 ### init's `req` shape (v0.16.7 #417 + v0.16.8 #423)
 
@@ -1833,6 +1858,22 @@ verified against HEAD.
     on a continuation line) parses cleanly. Continuation INSIDE
     the type body (`T1\n    -> T2`) is not supported — extract a
     `type alias` for the whole arrow type.
+### Closed in v0.16 (kept here for grep)
+
+- ~~Unannotated cross-module `view : Cfg msg -> Element msg`
+  miscompiles to `any(cfg).(Cfg_R[any])` casts that panic at
+  runtime~~ — closed by Issue #521.  The lowerer now pushes the
+  enclosing Go function's typeParams into `LowerCtx` via
+  `withScopedEnclosingTypeParams` (Compile.hs) BEFORE the body's
+  GoExpr tree is constructed.  `substituteOnly`'s erase-fallback
+  consults the scope via `enclosingTypeParamInScope`; in-scope
+  TVars are preserved through `eraseTypeParamsExceptScope` so the
+  monomorphiser's token-level `substTypeParamsInString` can
+  rewrite them per call-site instantiation.  Same fix closes the
+  broader `Foo_R[any]`-cast-panic class for parametric record
+  aliases (sibling family: #261/#262/#263/#461/#463/#465/#467).
+  Regression: `Sky.Build.UnannotatedParametricCfgViewSpec`.
+
 ### Closed in v0.15 (kept here for grep)
 
 - ~~Head-position type alias of a function signature dropped

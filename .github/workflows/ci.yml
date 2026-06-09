@@ -74,6 +74,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-ffi-${{ hashFiles('runtime-go/rt/**.go', 'sky-stdlib/**.sky') }}-
 
+      # v0.16.13 #530-CI: cache Go modules + build cache. The
+      # HubConsoleServeSpec runs `sky console-serve` which materialises
+      # the embedded runtime-go tree then runs `go build` to produce
+      # the hub binary — uncached this downloads OTLP/protobuf/sqlite
+      # modules and cold-compiles them, exceeding the 120s wait.
+      # actions/setup-go@v5's `cache: true` only keys off go.sum in
+      # cwd; Sky's go.sum sits under runtime-go/ so we cache explicitly.
+      - name: Cache Go modules + build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('runtime-go/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
       # Single-command local/CI parity: scripts/build.sh does everything
       # the manual steps below used to — compile sky, build sky-ffi-inspect,
       # install to sky-out/ + bin/. Adds self-test + example sweep when flagged.
@@ -87,6 +105,22 @@ jobs:
         run: sky --version
 
       # v0.16.0 drift gate: runtime-go/rt/console_app/main.go is the
+      # macOS GitHub runners don't ship GNU coreutils — bare `timeout`
+      # (used by example-sweep.sh + the cabal test step below + the
+      # drift-check script's inner `timeout` call) is missing, causing
+      # exit 127 ("command not found"). Install coreutils + symlink
+      # `gtimeout` → `timeout` for the rest of the job. example-sweep.sh
+      # has its own shim but the bare `timeout 3600 cabal test` line on
+      # the next step doesn't, and neither does regenerate-console.sh.
+      # MUST run BEFORE the drift check below.
+      - name: Install GNU coreutils (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install coreutils
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$(brew --prefix coreutils)/libexec/gnubin/timeout" "$HOME/.local/bin/timeout"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       # Sky.Live console UI translated to Go and committed to the
       # tree. PR 1 introduced the drift check; PR 2 removed the
       # in-tree Sky source (sky-bundled/console/), so this step
@@ -119,19 +153,93 @@ jobs:
             exit 1
           }
 
-      # macOS GitHub runners don't ship GNU coreutils — bare `timeout`
-      # (used by example-sweep.sh + the cabal test step below) is
-      # missing, causing exit 127 ("command not found"). Install
-      # coreutils + symlink `gtimeout` → `timeout` for the rest of
-      # the job. example-sweep.sh has its own shim but the bare
-      # `timeout 3600 cabal test` line on the next step doesn't.
-      - name: Install GNU coreutils (macOS)
+      # Linux GitHub runners ship ~14GB free disk after checkout.
+      # That's not enough for cabal build + cabal test + hub pre-warm
+      # + 26-example sweep (each with .skycache + sky-out + Go build
+      # artifacts ~100MB). v0.16.13 deaf8c31 CI failed 10/26 examples
+      # mid-sweep with `mapping output file failed: no space left on
+      # device` from the Go linker. Reclaim ~30-40GB by nuking
+      # preinstalled toolchains we don't use (.NET / Android SDK /
+      # Swift / CodeQL / swap). Keep /opt/ghc + /opt/hostedtoolcache/go
+      # — cabal + go are load-bearing for Sky.
+      - name: Free disk space (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          df -h /
+          echo "---before cleanup---"
+          sudo rm -rf /usr/share/dotnet            || true
+          sudo rm -rf /usr/local/lib/android       || true
+          sudo rm -rf /usr/share/swift             || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL  || true
+          sudo rm -rf /opt/microsoft               || true
+          sudo rm -rf /opt/google/chrome           || true
+          sudo rm -rf /opt/az                      || true
+          # Drop swap (8 GB) — CI runners don't page enough for it
+          # to matter; we'd rather have the disk.
+          sudo swapoff -a                          || true
+          sudo rm -f /swapfile /mnt/swapfile       || true
+          # Trim apt + docker caches — small but adds up.
+          sudo apt-get clean                       || true
+          docker image prune --all --force 2>/dev/null || true
+          df -h /
+          echo "---after cleanup---"
+
+      # macOS GitHub runners (M-series, 3-core, 4GB free) have only
+      # ~14GB free disk after `actions/checkout` + `cabal build` —
+      # NOT enough for the example sweep's 26 fresh .skycache dirs +
+      # Go build caches. Without this cleanup, `cabal test` hits
+      # `No space left on device` halfway through the sweep spec
+      # and ALL examples fail (cascade). Free disk by deleting older
+      # Xcode versions + Homebrew bottle caches + chruby cache.
+      - name: Free disk space (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          brew install coreutils
-          mkdir -p "$HOME/.local/bin"
-          ln -sf "$(brew --prefix coreutils)/libexec/gnubin/timeout" "$HOME/.local/bin/timeout"
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          df -h /
+          echo "---before cleanup---"
+          # Keep current Xcode (named with -current-version); delete older
+          ls -1 /Applications/ | grep -E '^Xcode_' | head -5 || true
+          sudo rm -rf /Applications/Xcode_*.app || true
+          # Brew autoremove cleans orphan dependencies + clears the cache
+          brew autoremove --quiet 2>/dev/null || true
+          brew cleanup --quiet --prune=all 2>/dev/null || true
+          rm -rf "$HOME/Library/Caches/Homebrew" 2>/dev/null || true
+          # chruby + rbenv unused on Sky's CI; nuke
+          sudo rm -rf /Users/runner/.rbenv /Users/runner/hostedtoolcache/Ruby || true
+          df -h /
+          echo "---after cleanup---"
+
+      # v0.16.13 #530-CI: pre-warm the sky-hub binary so the
+      # HubConsoleServeSpec doesn't burn its waitForReady window on a
+      # cold `go build`. The hub binary is built on first invocation
+      # of `sky console-serve` and cached at
+      # `~/.cache/sky/hub-<version>/sky-hub` — we trigger one
+      # boot+kill cycle here so the binary lands in cache before
+      # the spec's 120s wait starts. Cold-cache go build of the hub
+      # was the root cause of 3 consecutive Linux CI failures at
+      # `waitForReady port 120 → False`.
+      - name: Pre-warm sky-hub binary
+        run: |
+          # Boot the daemon in the background with a free port, give
+          # it a moment to materialise the runtime + go build, then
+          # kill. The first invocation does ALL the cold work; the
+          # spec's invocation reuses the cached binary in <1s.
+          PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null || echo 18099)
+          DATA_DIR=$(mktemp -d)
+          SKY_CONSOLE_HUB_QUIET=1 ./sky-out/sky console-serve \
+              --port "$PORT" --data-dir "$DATA_DIR" --auth off &
+          HUB_PID=$!
+          # Up to 5 min for go build + boot + port bind.
+          for i in $(seq 1 60); do
+              if curl -s --max-time 1 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+                  echo "hub pre-warm: ready in ${i}*5s"
+                  break
+              fi
+              sleep 5
+          done
+          kill "$HUB_PID" 2>/dev/null || true
+          wait "$HUB_PID" 2>/dev/null || true
+          rm -rf "$DATA_DIR"
+          echo "hub pre-warm: done"
 
       - name: Run cabal test suite
         # Skip Sky.Build.VerifyAll: that spec wraps `sky verify`
@@ -145,7 +253,54 @@ jobs:
         # timeout-bounded. 60 min ceiling here so a stuck spec
         # (e.g. Sky.Cli.Watch's spawnWatch child) can't burn the
         # whole CI budget waiting unbounded.
-        run: timeout 3600 cabal test --test-show-details=direct --test-options='--skip=Sky.Build.VerifyAll'
+        #
+        # v0.16.13 #530-CI: SKY_SKIP_SWEEP=1 prevents
+        # Sky.Build.ExampleSweepSpec from re-running the same
+        # 25-example clean build the dedicated `Example sweep` step
+        # below already runs. Removes ~10-15 min of duplicated work
+        # AND eliminates a /tmp pressure source that caused
+        # `No space left on device` cascades on the constrained
+        # macOS runner (3-core, ~14GB free disk).
+        env:
+          # v0.16.14 Sky-tests fast mode: skip 5 integration specs
+          # (HubConsoleServe / CheckIsBuild / VerifyScenario /
+          # HeapBoundedHm / VerifyAll) that shell out to sky + go build.
+          # Same code paths are exercised end-to-end by the dedicated
+          # Example sweep + verify-all-web + verify-cli workflow steps
+          # below. Set SKY_TESTS_FAST='' (empty) on a nightly schedule
+          # to opt back into the full integration sweep.
+          SKY_TESTS_FAST: '1'
+          # Sky.Build.ExampleSweepSpec self-gates on this — see
+          # task #531 commit message.
+          SKY_SKIP_SWEEP: '1'
+        run: timeout 3600 cabal test --test-show-details=direct
+
+      # v0.16.13 #530-CI: cabal test + hub pre-warm + go module cache
+      # together write 4-6 GB of artefacts to disk between the first
+      # cleanup (before cabal) and the example sweep. macOS runner
+      # only has ~14 GB free after first cleanup; cabal test alone
+      # can consume 5 GB. Re-clean before the sweep: nuke ~/go cache
+      # + cabal dist-newstyle test artefacts + /tmp clutter to give
+      # the 26-example sweep a fresh 8-10 GB working budget.
+      - name: Free disk space before sweep
+        run: |
+          df -h /
+          echo "---before pre-sweep cleanup---"
+          # Go build cache: holds cabal test's spec build artefacts.
+          # Safe — sweep re-builds from scratch anyway.
+          go clean -cache 2>/dev/null || true
+          # /tmp leftovers from cabal test (logs, sky-cib-sweep dirs, …)
+          sudo rm -rf /tmp/sky-* /tmp/sky-cib-* /tmp/sky-hub-spec-* 2>/dev/null || true
+          # Pruned hub cache (we already built + tested it; sweep doesn't
+          # need to re-exec sky-hub).
+          rm -rf "$HOME/.cache/sky/hub-dev" 2>/dev/null || true
+          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            # Extra macOS sources we haven't touched yet.
+            sudo rm -rf /Library/Developer/CoreSimulator 2>/dev/null || true
+            sudo rm -rf "$HOME/.android" 2>/dev/null || true
+          fi
+          df -h /
+          echo "---after pre-sweep cleanup---"
 
       # Example sweep — clean-build every example, then either run
       # to completion (cli, with `timeout 10`) or probe HTTP 200

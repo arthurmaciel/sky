@@ -19,10 +19,29 @@ import Control.Exception (try, SomeException)
 import qualified Data.List as List
 import qualified System.Directory as Dir
 import System.FilePath ((</>))
+import System.Environment (lookupEnv)
+import System.IO (hGetContents)
 import System.IO.Temp (withSystemTempDirectory)
 import qualified System.Process as Proc
 import System.Exit (ExitCode(..))
 import qualified Data.Time.Clock.POSIX as POSIX
+
+
+-- | Inherit the parent process's PATH so subprocess `sky` invocations
+-- can find `go` (which `sky console-serve` shells out to for building
+-- the hub daemon binary). The CI runner places Go under
+-- `/opt/hostedtoolcache/go/<v>/x64/bin` on Linux +
+-- `/Users/runner/hostedtoolcache/go/<v>/arm64/bin` on macOS via
+-- `actions/setup-go@v5`; neither path is in the fallback. v0.16.13:
+-- the prior `/usr/bin:/bin:/usr/local/bin` hardcode silently passed
+-- on Linux (Ubuntu image leaves go in /usr/local/bin) but failed on
+-- macOS with `sky: go: createProcess: exec: does not exist`.
+inheritedPath :: IO String
+inheritedPath = do
+    mp <- lookupEnv "PATH"
+    case mp of
+        Just p | not (null p) -> pure p
+        _                     -> pure "/usr/bin:/bin:/usr/local/bin"
 
 -- | Locate the built `sky` binary at the repo's `sky-out/sky`.
 -- Mirrors @Sky.Cli.DoctorSpec@'s pattern.
@@ -90,6 +109,7 @@ spec = describe "Sky.Build.HubConsoleServe" $ do
         -- mode without a token. We don't care that go build runs —
         -- the validation fires inside the child once it's exec'd.
         sky <- findSky
+        path <- inheritedPath
         withSystemTempDirectory "sky-hub-spec" $ \tmp -> do
             port <- freePort
             (ec, _, _) <- Proc.readCreateProcessWithExitCode
@@ -98,7 +118,7 @@ spec = describe "Sky.Build.HubConsoleServe" $ do
                     , "--port", show port
                     , "--data-dir", tmp </> "data"
                     , "--auth", "token"
-                    ]) { Proc.env = Just [("PATH", "/usr/bin:/bin:/usr/local/bin")] })
+                    ]) { Proc.env = Just [("PATH", path)] })
                 ""
             case ec of
                 ExitFailure _ -> pure ()
@@ -111,29 +131,51 @@ spec = describe "Sky.Build.HubConsoleServe" $ do
     -- daemon can't wedge the cabal test run.
     it "console-serve daemon accepts an OTLP/JSON push and persists to SQLite" $ do
         sky <- findSky
+        path <- inheritedPath
         withSystemTempDirectory "sky-hub-spec" $ \tmp -> do
             let dataDir = tmp </> "data"
                 dbFile = dataDir </> "console-hot.db"
             port <- freePort
             -- Spawn daemon under `timeout` so a wedged child gets
-            -- SIGKILL'd at 90 s — cabal test can't hang on this
-            -- subprocess (CLAUDE.md §3).
+            -- SIGKILL'd at 180 s — cabal test can't hang on this
+            -- subprocess (CLAUDE.md §3). Must exceed `waitForReady`
+            -- below (120 s) so the daemon isn't killed mid-boot
+            -- under Linux CI's cold-cache go-build delay (v0.16.13:
+            -- prior 90 s ceiling killed the daemon before the
+            -- 120 s wait could observe it ready).
             let bp = (Proc.proc "timeout"
-                        [ "90"
+                        [ "180"
                         , sky, "console-serve"
                         , "--port", show port
                         , "--data-dir", dataDir
                         , "--auth", "off"
                         ])
-                        { Proc.env = Just [("PATH", "/usr/bin:/bin:/usr/local/bin"), ("SKY_CONSOLE_HUB_QUIET", "1")]
+                        { Proc.env = Just [("PATH", path), ("SKY_CONSOLE_HUB_QUIET", "1")]
                         , Proc.std_out = Proc.CreatePipe
                         , Proc.std_err = Proc.CreatePipe
                         }
-            (_, _, _, ph) <- Proc.createProcess bp
-            -- Wait up to 60 s for daemon ready. First boot includes
-            -- the go build step; warm runs are <1 s.
-            ready <- waitForReady port 60
-            ready `shouldBe` True
+            (_, mStdout, mStderr, ph) <- Proc.createProcess bp
+            -- Wait up to 120 s for daemon ready. First boot includes
+            -- the go build step; warm runs are <1 s. Linux CI's
+            -- cold-cache go build of the console daemon can exceed
+            -- 60 s under load (v0.16.13: observed timeouts on
+            -- ubuntu-latest at 60 s); 120 s gives generous headroom.
+            ready <- waitForReady port 120
+            -- v0.16.13 #530-CI: on failure, drain captured stdout +
+            -- stderr from the daemon so the real error surfaces in
+            -- CI output instead of the bare `expected True got
+            -- False`. Without this the test failed silently on
+            -- Linux CI for 3 consecutive runs with no diagnostic.
+            if ready
+                then return ()
+                else do
+                    out <- maybe (return "") hGetContents mStdout
+                    err <- maybe (return "") hGetContents mStderr
+                    expectationFailure $
+                        "console-serve daemon never bound port " ++ show port
+                        ++ " within 120s.\n"
+                        ++ "--- daemon stdout ---\n" ++ out
+                        ++ "--- daemon stderr ---\n" ++ err
 
             -- Push a Sky-shaped JSON log batch.
             let payload =
