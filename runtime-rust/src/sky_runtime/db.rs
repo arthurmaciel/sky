@@ -11,22 +11,6 @@ fn sky_err<E: From<String> + Send>(e: &sqlx::Error) -> E {
     str_err(&format!("{}", e))
 }
 
-fn build_sql(sql: &str, params: &[String]) -> String {
-    let mut result = String::new();
-    let mut remaining = sql;
-    for p in params {
-        if let Some(pos) = remaining.find('?') {
-            result.push_str(&remaining[..pos]);
-            result.push('\'');
-            result.push_str(&p.replace('\'', "''"));
-            result.push('\'');
-            remaining = &remaining[pos + 1..];
-        }
-    }
-    result.push_str(remaining);
-    result
-}
-
 #[allow(clippy::needless_range_loop)]
 fn row_to_map(row: &DbRow) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -79,8 +63,13 @@ pub fn db_exec_raw<E: Send + From<String> + 'static>(conn: Db, sql: String) -> S
 
 pub fn db_exec<E: Send + From<String> + 'static>(conn: Db, sql: String, params: Vec<String>) -> SkyTask<E, ()> {
     Box::pin(async move {
-        let final_sql = build_sql(&sql, &params);
-        match sqlx::query(&final_sql).execute(&conn).await {
+        // Same path as the structured kernels: `db_format_sql` adapts `?`
+        // placeholders per backend, then bind positionally. sqlx owns the
+        // escaping; a placeholder/param count mismatch surfaces as Err.
+        let final_sql = db_format_sql(sql);
+        let mut q = sqlx::query(&final_sql);
+        for p in params { q = q.bind(p); }
+        match q.execute(&conn).await {
             Ok(_) => ok_res(()),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
@@ -89,12 +78,11 @@ pub fn db_exec<E: Send + From<String> + 'static>(conn: Db, sql: String, params: 
 
 pub fn db_query<E: Send + From<String> + 'static>(conn: Db, sql: String, params: Vec<String>) -> SkyTask<E, Vec<HashMap<String, String>>> {
     Box::pin(async move {
-        let final_sql = build_sql(&sql, &params);
-        match sqlx::query(&final_sql).fetch_all(&conn).await {
-            Ok(rows) => {
-                let result: Vec<HashMap<String, String>> = rows.iter().map(row_to_map).collect();
-                ok_res(result)
-            },
+        let final_sql = db_format_sql(sql);
+        let mut q = sqlx::query(&final_sql);
+        for p in params { q = q.bind(p); }
+        match q.fetch_all(&conn).await {
+            Ok(rows) => ok_res(rows.iter().map(row_to_map).collect()),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
     })
@@ -591,5 +579,75 @@ mod tests {
         let found: SkyResult<String, Vec<HashMap<String, String>>> =
             db_unsafe_find_where(db, "todos".into(), "title = ?".into(), vec!["alpha".to_string()]).await;
         match found { SkyResult::Ok(v) => assert_eq!(v.len(), 1), _ => panic!("unsafe find") }
+    }
+
+    // ─── db_exec / db_query parameter-binding characterization (candidate B) ──────
+    // These pin the param-carrying behavior of the raw exec/query kernels — the
+    // two functions that route through the placeholder path. They lock the
+    // contract across the build_sql → db_format_sql+bind deepening: same
+    // round-trip values, same injection-safety, no behavior drift.
+
+    /// A parameterised INSERT via db_exec then a parameterised SELECT via
+    /// db_query round-trips the bound values.
+    #[tokio::test]
+    async fn test_exec_and_query_with_params() {
+        let db = fresh_db().await;
+        let ins: SkyResult<String, ()> = db_exec(
+            db.clone(),
+            "INSERT INTO todos (title, done) VALUES (?, ?)".into(),
+            vec!["buy milk".to_string(), "0".to_string()],
+        ).await;
+        assert!(matches!(ins, SkyResult::Ok(())));
+
+        let rows: SkyResult<String, Vec<HashMap<String, String>>> = db_query(
+            db,
+            "SELECT title, done FROM todos WHERE title = ?".into(),
+            vec!["buy milk".to_string()],
+        ).await;
+        match rows {
+            SkyResult::Ok(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].get("title").unwrap(), "buy milk");
+                assert_eq!(v[0].get("done").unwrap(), "0");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    /// The load-bearing safety property: a value carrying single quotes and SQL
+    /// metacharacters is bound, not spliced — stored and returned VERBATIM, and
+    /// the surrounding table is untouched (no injection executes).
+    #[tokio::test]
+    async fn test_query_param_with_quotes_and_metachars_roundtrips_safely() {
+        let db = fresh_db().await;
+        let nasty = "x'); DROP TABLE todos;-- O'Brien".to_string();
+        let ins: SkyResult<String, ()> = db_exec(
+            db.clone(),
+            "INSERT INTO todos (title, done) VALUES (?, ?)".into(),
+            vec![nasty.clone(), "0".to_string()],
+        ).await;
+        assert!(matches!(ins, SkyResult::Ok(())));
+
+        // The value comes back byte-for-byte (proves it was bound, not splice-escaped-into-SQL).
+        let rows: SkyResult<String, Vec<HashMap<String, String>>> = db_query(
+            db.clone(),
+            "SELECT title FROM todos WHERE title = ?".into(),
+            vec![nasty.clone()],
+        ).await;
+        match rows {
+            SkyResult::Ok(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].get("title").unwrap(), &nasty);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+
+        // The table still exists with exactly the one row — the DROP never ran.
+        let all: SkyResult<String, Vec<HashMap<String, String>>> =
+            db_query(db, "SELECT title FROM todos".into(), vec![]).await;
+        match all {
+            SkyResult::Ok(v) => assert_eq!(v.len(), 1, "injection must not have dropped the table"),
+            other => panic!("table gone or errored: {:?}", other),
+        }
     }
 }
