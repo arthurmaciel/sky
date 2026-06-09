@@ -1,7 +1,7 @@
 //! Regex kernels for Sky.Core.Regex. Invalid patterns NEVER panic — they
 //! return identity / false / empty / Nothing per the Sky stdlib contract.
 
-use super::{SkyMaybe, SkyResult};
+use super::SkyMaybe;
 use regex::Regex;
 
 /// Sky `match : String -> String -> Bool`. Pattern first, then haystack.
@@ -96,6 +96,4 @@ mod tests {
         let bad = regex_split(r"[unclosed".to_string(), "abc".to_string());
         assert_eq!(bad, vec!["abc".to_string()]);
     }
-
-    fn _unused(_: SkyResult<String, String>) {}
 }

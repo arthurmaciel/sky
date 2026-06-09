@@ -36,7 +36,9 @@ pub(crate) fn bytes_to_sky(bytes: &[u8]) -> String {
 
 /// Decode an application/x-www-form-urlencoded component: `+` -> space, `%XX` ->
 /// byte (best-effort). Shared by the HTTP server's query parser and the HTTP
-/// client's parseQuery so they stay consistent.
+/// client's parseQuery so they stay consistent — hence gated to exactly those
+/// features (encoding.rs is always compiled; its only callers are not).
+#[cfg(any(feature = "server", feature = "http_client"))]
 pub(crate) fn form_url_decode(s: &str) -> String {
     let s = s.replace('+', " ");
     let b = s.as_bytes();
