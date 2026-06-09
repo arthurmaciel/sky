@@ -61,6 +61,26 @@ pub fn match_routes<Page: Clone>(routes: &[Route<Page>], not_found: &Page, path:
     not_found.clone()
 }
 
+/// Name→value params for the first route matching `path` — for `req.params`.
+/// Zips the matched pattern's `:name` segments with the captured values.
+pub fn match_params<Page>(routes: &[Route<Page>], path: &str) -> crate::sky_runtime::dict::SkyDict<String> {
+    use crate::sky_runtime::dict::SkyDict;
+    for rt in routes {
+        if let Some(values) = match_route(&rt.pattern, path) {
+            let names = split_path(&rt.pattern)
+                .into_iter()
+                .filter(|s| s.starts_with(':'))
+                .map(|s| s[1..].to_string());
+            let mut d: SkyDict<String> = SkyDict::new();
+            for (n, v) in names.zip(values) {
+                d.insert(n, v);
+            }
+            return d;
+        }
+    }
+    SkyDict::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

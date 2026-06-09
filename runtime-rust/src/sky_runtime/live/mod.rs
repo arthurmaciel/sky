@@ -186,6 +186,11 @@ struct LiveState<Model, Msg, FInit, FUpdate, FView, FSubs> {
     /// `Page`/`set_page` are erased into this boxed closure, so `LiveState`
     /// keeps its original 6 type params.
     route_resolver: Arc<dyn Fn(Model, &str) -> Model + Send + Sync>,
+    /// Maps a GET path to the matched route's `:name`→value params (for
+    /// `req.params`). Model-independent so the page handler can build `req`
+    /// BEFORE calling `init`. `live_app` returns empty; `live_app_routed`
+    /// captures the route table.
+    param_resolver: Arc<dyn Fn(&str) -> crate::sky_runtime::dict::SkyDict<String> + Send + Sync>,
 }
 
 // Manual Clone — derive would demand Clone on the closures (they're behind Arc).
@@ -200,6 +205,7 @@ impl<Model, Msg, FInit, FUpdate, FView, FSubs> Clone
             view: self.view.clone(),
             subs: self.subs.clone(),
             route_resolver: self.route_resolver.clone(),
+            param_resolver: self.param_resolver.clone(),
         }
     }
 }
@@ -371,7 +377,7 @@ where
     E: From<String> + Send + 'static,
     Model: Clone + Send + 'static,
     Msg: Clone + Send + 'static,
-    FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
+    FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
     FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
@@ -382,8 +388,9 @@ where
         update: Arc::new(update),
         view: Arc::new(view),
         subs: Arc::new(subscriptions),
-        // No routing: GET serves the freshly-init'd model unchanged.
+        // No routing: GET serves the freshly-init'd model unchanged; no params.
         route_resolver: Arc::new(|m, _path| m),
+        param_resolver: Arc::new(|_path| crate::sky_runtime::dict::dict_empty()),
     };
     serve_live(state)
 }
@@ -411,7 +418,7 @@ where
     Model: Clone + Send + 'static,
     Msg: Clone + Send + 'static,
     Page: Clone + Send + Sync + 'static,
-    FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
+    FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
     FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
@@ -420,8 +427,11 @@ where
     let routes = Arc::new(routes);
     let not_found = Arc::new(not_found);
     let set_page = Arc::new(set_page);
+    let routes_for_params = routes.clone();
     let resolver: Arc<dyn Fn(Model, &str) -> Model + Send + Sync> =
         Arc::new(move |m, path| (set_page)(route::match_routes(&routes, &not_found, path), m));
+    let param_resolver: Arc<dyn Fn(&str) -> crate::sky_runtime::dict::SkyDict<String> + Send + Sync> =
+        Arc::new(move |path| route::match_params(&routes_for_params, path));
     let state = LiveState {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         init: Arc::new(init),
@@ -429,6 +439,7 @@ where
         view: Arc::new(view),
         subs: Arc::new(subscriptions),
         route_resolver: resolver,
+        param_resolver,
     };
     serve_live(state)
 }
@@ -443,7 +454,7 @@ where
     E: From<String> + Send + 'static,
     Model: Clone + Send + 'static,
     Msg: Clone + Send + 'static,
-    FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
+    FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
     FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
@@ -458,18 +469,26 @@ where
         // ── GET page (root + any path) ────────────────────────────────────
         async fn page<Model, Msg, FInit, FUpdate, FView, FSubs>(
             State(st): State<LiveState<Model, Msg, FInit, FUpdate, FView, FSubs>>,
+            method: axum::http::Method,
             uri: axum::http::Uri,
+            headers: axum::http::HeaderMap,
         ) -> Response
         where
             Model: Clone + Send + 'static,
             Msg: Clone + Send + 'static,
-            FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
+            FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
             FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
             FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
             FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
         {
             let sid = new_sid();
-            let (model, cmd0) = (st.init)(());
+            // Build the request context (params from routing — empty when
+            // unrouted), pass it to init, THEN inject the matched page. The
+            // param_resolver is model-independent, breaking the
+            // init↔routing dependency cycle.
+            let params = (st.param_resolver)(uri.path());
+            let req = req::live_req(&method, &uri, &headers, params);
+            let (model, cmd0) = (st.init)(req);
             let model = (st.route_resolver)(model, uri.path());
             let mut tree = (st.view)(model.clone());
             assign_sky_ids(&mut tree, "r");
