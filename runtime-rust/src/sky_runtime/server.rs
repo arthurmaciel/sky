@@ -152,8 +152,11 @@ pub fn server_html(body: String) -> ServerResponse { resp(200, body, "text/html"
 
 pub fn server_with_status(status: i64, mut r: ServerResponse) -> ServerResponse { r.status = status; r }
 pub fn server_with_header(k: String, v: String, mut r: ServerResponse) -> ServerResponse { r.headers.insert(k, v); r }
-pub fn server_redirect(location: String, status: i64) -> ServerResponse {
-    let mut r = resp(status, String::new(), "text/plain");
+/// Sky `redirect : String -> Response` — a 302 to `location`. Matches the Sky
+/// kernel's one-arg contract and Go's `Server_redirectT` (status is hardcoded,
+/// not a parameter; use `withStatus` to override).
+pub fn server_redirect(location: String) -> ServerResponse {
+    let mut r = resp(302, String::new(), "text/plain");
     r.headers.insert("Location".to_string(), location);
     r
 }
