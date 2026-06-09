@@ -8,8 +8,7 @@
 pub fn basics_mod_by(divisor: i64, n: i64) -> i64 {
     if divisor == 0 { return 0; }
     let r = n % divisor;
-    if r < 0 && divisor > 0 { r + divisor }
-    else if r > 0 && divisor < 0 { r + divisor }
+    if (r < 0 && divisor > 0) || (r > 0 && divisor < 0) { r + divisor }
     else { r }
 }
 

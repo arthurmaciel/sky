@@ -213,12 +213,12 @@ mod tests {
     fn test_decimal_comparisons() {
         let a = d("3");
         let b = d("5");
-        assert!(decimal_lt(a.clone(), b.clone()));
-        assert!(decimal_lte(a.clone(), b.clone()));
-        assert!(!decimal_gt(a.clone(), b.clone()));
-        assert!(!decimal_gte(a.clone(), b.clone()));
-        assert!(decimal_eq(a.clone(), a.clone()));
-        assert!(decimal_neq(a.clone(), b.clone()));
+        assert!(decimal_lt(a, b));
+        assert!(decimal_lte(a, b));
+        assert!(!decimal_gt(a, b));
+        assert!(!decimal_gte(a, b));
+        assert!(decimal_eq(a, a));
+        assert!(decimal_neq(a, b));
         assert!(decimal_lte(d("5"), d("5")));   // equal
         assert!(decimal_gte(d("5"), d("5")));   // equal
     }

@@ -6,13 +6,13 @@
 //!
 //! * `isAlpha` ← `unicode.IsLetter`  (Rust `char::is_alphabetic`)
 //! * `isDigit` ← `unicode.IsDigit`   (Rust `char::is_numeric` — closest std
-//!    match for the Nd category; diverges only on superscript/No code points,
-//!    which no stdlib caller exercises)
+//!   match for the Nd category; diverges only on superscript/No code points,
+//!   which no stdlib caller exercises)
 //! * `toLower`/`toUpper` return a single-rune **String** (the kernel registry
-//!    shape is `Char -> String`), matching Go's `string(unicode.ToLower(r))`.
+//!   shape is `Char -> String`), matching Go's `string(unicode.ToLower(r))`.
 //! * `fromCode` out of the valid scalar range (negative, > 0x10FFFF, or a
-//!    surrogate D800–DFFF that `char` cannot hold) yields the Unicode
-//!    replacement character `'\u{FFFD}'` — same contract as Go.
+//!   surrogate D800–DFFF that `char` cannot hold) yields the Unicode
+//!   replacement character `'\u{FFFD}'` — same contract as Go.
 
 pub fn char_is_alpha(c: char) -> bool { c.is_alphabetic() }
 pub fn char_is_digit(c: char) -> bool { c.is_numeric() }
@@ -27,7 +27,7 @@ pub fn char_to_code(c: char) -> i64 { c as u32 as i64 }
 
 /// `fromCode 65 -> 'A'`. Out-of-range / surrogate -> U+FFFD (matches Go).
 pub fn char_from_code(n: i64) -> char {
-    if n < 0 || n > 0x10FFFF {
+    if !(0..=0x10FFFF).contains(&n) {
         return '\u{FFFD}';
     }
     char::from_u32(n as u32).unwrap_or('\u{FFFD}')

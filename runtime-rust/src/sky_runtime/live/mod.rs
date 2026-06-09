@@ -171,6 +171,12 @@ fn value_to_string(v: &serde_json::Value) -> String {
 }
 
 
+/// Boxed route resolver: a freshly-`init`'d model + GET path → the model whose
+/// `page` field reflects the matched route.
+type RouteResolver<Model> = Arc<dyn Fn(Model, &str) -> Model + Send + Sync>;
+/// Boxed param resolver: a GET path → the matched route's `:name`→value params.
+type ParamResolver = Arc<dyn Fn(&str) -> crate::sky_runtime::dict::SkyDict<String> + Send + Sync>;
+
 /// Shared axum state: the session store + Arc'd TEA callbacks.
 struct LiveState<Model, Msg, FInit, FUpdate, FView, FSubs> {
     store: Arc<dyn store::SessionStore<Model, Msg>>,
@@ -183,12 +189,12 @@ struct LiveState<Model, Msg, FInit, FUpdate, FView, FSubs> {
     /// routing); `live_app_routed` captures the route table + page-setter.
     /// `Page`/`set_page` are erased into this boxed closure, so `LiveState`
     /// keeps its original 6 type params.
-    route_resolver: Arc<dyn Fn(Model, &str) -> Model + Send + Sync>,
+    route_resolver: RouteResolver<Model>,
     /// Maps a GET path to the matched route's `:name`→value params (for
     /// `req.params`). Model-independent so the page handler can build `req`
     /// BEFORE calling `init`. `live_app` returns empty; `live_app_routed`
     /// captures the route table.
-    param_resolver: Arc<dyn Fn(&str) -> crate::sky_runtime::dict::SkyDict<String> + Send + Sync>,
+    param_resolver: ParamResolver,
 }
 
 // Manual Clone — derive would demand Clone on the closures (they're behind Arc).
@@ -281,6 +287,10 @@ fn spawn_subs<Msg: Clone + Send + 'static>(
 /// The per-session driver: folds each Msg through `update`, diffs the new view
 /// against the last, pushes patches over SSE (if attached), runs the resulting
 /// Cmd, and re-evaluates subscriptions.
+// Eight distinct per-session runtime handles (entry, both channel ends, the three
+// Arc'd TEA callbacks, the store, the sid) — bundling them into a struct purely to
+// satisfy the 7-arg heuristic would add indirection without clarifying anything.
+#[allow(clippy::too_many_arguments)]
 async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     entry: Arc<Mutex<SessionEntry<Model, Msg>>>,
     mut msg_rx: UnboundedReceiver<Msg>,
@@ -469,9 +479,9 @@ where
         let not_found = Arc::new(not_found);
         let set_page = Arc::new(set_page);
         let routes_for_params = routes.clone();
-        let resolver: Arc<dyn Fn(Model, &str) -> Model + Send + Sync> =
+        let resolver: RouteResolver<Model> =
             Arc::new(move |m, path| (set_page)(route::match_routes(&routes, &not_found, path), m));
-        let param_resolver: Arc<dyn Fn(&str) -> crate::sky_runtime::dict::SkyDict<String> + Send + Sync> =
+        let param_resolver: ParamResolver =
             Arc::new(move |path| route::match_params(&routes_for_params, path));
         let store = store::choose_store::<Model, Msg>(&store_kind, &store_path, live_ttl()).await;
         let state = LiveState {

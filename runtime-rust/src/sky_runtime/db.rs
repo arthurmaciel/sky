@@ -128,10 +128,10 @@ pub fn db_close<E: Send + From<String> + 'static>(db: Db) -> SkyTask<E, ()> {
 /// `getBool : String -> Dict String String -> Bool` — parses common
 /// truthy values (`"1"`, `"true"`, `"TRUE"`, `"t"`, `"T"`).
 pub fn db_get_bool(field: String, row: HashMap<String, String>) -> bool {
-    match row.get(&field).map(|s| s.as_str()) {
-        Some("1") | Some("true") | Some("TRUE") | Some("t") | Some("T") => true,
-        _ => false,
-    }
+    matches!(
+        row.get(&field).map(|s| s.as_str()),
+        Some("1") | Some("true") | Some("TRUE") | Some("t") | Some("T")
+    )
 }
 
 /// Quote an identifier (table/column name) for safe SQL inclusion.

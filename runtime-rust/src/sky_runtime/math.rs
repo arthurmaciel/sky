@@ -45,8 +45,8 @@ mod tests {
 
     #[test]
     fn test_math_min_max_f64() {
-        assert_eq!(math_min::<f64>(3.14, 2.71), 2.71);
-        assert_eq!(math_max::<f64>(3.14, 2.71), 3.14);
+        assert_eq!(math_min::<f64>(3.5, 2.25), 2.25);
+        assert_eq!(math_max::<f64>(3.5, 2.25), 3.5);
     }
 
     #[test] fn test_math_sqrt() { assert_eq!(math_sqrt(9.0), 3.0); }

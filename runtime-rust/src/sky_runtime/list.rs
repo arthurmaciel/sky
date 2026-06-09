@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn test_filter_map_empty() {
         let xs: Vec<i64> = vec![];
-        let result = list_filter_map(|x| SkyMaybe::Just(x), xs);
+        let result = list_filter_map(SkyMaybe::Just, xs);
         assert!(result.is_empty());
     }
 }

@@ -49,10 +49,10 @@ pub fn auth_verify_password<E: From<String>>(pw: String, hash: String) -> SkyRes
 /// and character variety; returns a strength rating on Ok.
 ///   <8 chars  → Err "too short"
 ///   >72 bytes → Err "too long" (bcrypt limit)
-///   all-letters or all-digits → Err "needs both letters and digits"
-///   ≥12 chars + letter + digit + symbol → "strong"
-///   ≥10 chars + letter + digit          → "medium"
-///   otherwise (passes letter+digit check) → "weak"
+/// > all-letters or all-digits → Err "needs both letters and digits"
+/// > ≥12 chars + letter + digit + symbol → "strong"
+/// > ≥10 chars + letter + digit          → "medium"
+/// > otherwise (passes letter+digit check) → "weak"
 pub fn auth_password_strength<E: From<String>>(pw: String) -> SkyResult<E, String> {
     if pw.len() < 8 {
         return SkyResult::Err("password must be at least 8 characters".to_string().into());

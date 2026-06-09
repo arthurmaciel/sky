@@ -26,7 +26,7 @@ pub fn time_unix_millis<E: Send + 'static>(_: ()) -> SkyTask<E, i64> { time_now(
 
 pub fn time_time_string(ms: i64) -> String { format!("timestamp:{}", ms) }
 
-//// === Std.Time advanced — IANA zones + calendar math ===
+/// === Std.Time advanced — IANA zones + calendar math ===
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
 
@@ -170,7 +170,7 @@ fn local_midnight_in_zone<E: From<String>>(
         SkyResult::Ok(d) => d,
         SkyResult::Err(e) => return SkyResult::Err(e),
     };
-    let date = target_date(dt.clone());
+    let date = target_date(dt);
     let local = match date.and_hms_milli_opt(h, mi, se, mi_lli) {
         Some(l) => l,
         None => return SkyResult::Err("Std.Time: invalid date components".to_string().into()),
@@ -297,7 +297,7 @@ mod time_advanced_tests {
     use super::*;
 
     // 2026-05-29 12:00:00 UTC is a Friday
-    const T1: i64 = 1780_400_400_000;
+    const T1: i64 = 1_780_400_400_000;
 
     #[test]
     fn test_in_zone_utc() {
@@ -314,7 +314,7 @@ mod time_advanced_tests {
     #[test]
     fn test_day_of_week_friday() {
         let r: SkyResult<String, i64> = time_day_of_week("UTC".to_string(), T1);
-        assert!(matches!(r, SkyResult::Ok(d) if d >= 1 && d <= 7), "got {:?}", r);
+        assert!(matches!(r, SkyResult::Ok(d) if (1..=7).contains(&d)), "got {:?}", r);
     }
 
     #[test]

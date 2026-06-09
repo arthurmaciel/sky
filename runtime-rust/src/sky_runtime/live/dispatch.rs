@@ -102,7 +102,7 @@ mod tests {
                 ),
                 Html::HElement(
                     "input".into(),
-                    vec![Attribute::EventAttr(Event::OnString("input".into(), |s| Msg::Typed(s)))],
+                    vec![Attribute::EventAttr(Event::OnString("input".into(), Msg::Typed))],
                     vec![],
                 ),
             ],
@@ -175,7 +175,7 @@ mod tests {
     fn onstring_empty_args_gives_default() {
         let mut t = Html::HElement(
             "input".into(),
-            vec![Attribute::EventAttr(Event::OnString("input".into(), |s| Msg::Typed(s)))],
+            vec![Attribute::EventAttr(Event::OnString("input".into(), Msg::Typed))],
             vec![],
         );
         assign_sky_ids(&mut t, "r");

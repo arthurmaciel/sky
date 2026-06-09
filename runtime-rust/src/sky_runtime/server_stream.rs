@@ -180,8 +180,5 @@ pub fn serve_streaming_sentinel(r: &ServerResponse) -> Option<axum::response::Re
     for (k, v) in &r.headers {
         builder = builder.header(k.as_str(), v.as_str());
     }
-    match builder.body(axum::body::Body::from_stream(body_stream)) {
-        Ok(resp) => Some(resp),
-        Err(_) => None,
-    }
+    builder.body(axum::body::Body::from_stream(body_stream)).ok()
 }

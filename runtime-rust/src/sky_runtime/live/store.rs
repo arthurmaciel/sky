@@ -45,8 +45,11 @@ pub trait SessionStore<Model, Msg>: Send + Sync {
 
 /// In-process store with idle-TTL eviction. `get` touches the entry's last-seen
 /// so active sessions don't expire.
+/// In-process session table: sid → (live handle, last-seen instant).
+type SessionMap<Model, Msg> = HashMap<String, (SessionHandle<Model, Msg>, Instant)>;
+
 pub struct MemoryStore<Model, Msg> {
-    sessions: RwLock<HashMap<String, (SessionHandle<Model, Msg>, Instant)>>,
+    sessions: RwLock<SessionMap<Model, Msg>>,
     ttl: Duration,
 }
 
