@@ -69,7 +69,7 @@ or `unsafe`.
 The Go backend is the reference (full surface — 54 kernel modules). Rust
 coverage, by confidence:
 
-**✅ Covered & verified** (standard-libs 131/131 + the 30 `examples/rust/*` +
+**✅ Covered & verified** (standard-libs 131/131 + the 31 `examples/rust/*` +
 the HTTP/WS/Cli regression tests):
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
   Regex, Bytes (Latin-1), Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal,
@@ -173,10 +173,19 @@ targets):
   (declaration order, `matchRoute` parity) → builds the `Page` → injects it into
   `model.page` before `view`. Gate: `examples/rust/30-live-routing`. Params reach
   the app via the Page ctor (`AppDetail slug`), so no request-record bridging yet.
-- **Ahead (P4–P6):** rich `req` to `init` (path/query/params/method/headers/
-  cookies) + query parsing, Cmd/Sub depth, session-store backends
+- **P4 — typed request to `init`.** `init req` receives a `sky_runtime::LiveReq
+  { path, query, method : String; params, headers, cookies : Dict String String }`
+  built from the axum request (+ route `:params`). A Rust-codegen pre-pass types
+  Live.app init params as `LiveReq` (no shared kernel-type change → Go example 13
+  keeps compiling). Apps use the modern record form — `req.path`,
+  `Dict.get "sky_sid" req.cookies`. Go's older heterogeneous-Dict req
+  (`Dict.get "path" req` over `map[string]any`) does NOT port to Rust's no-`any`
+  runtime, so the typed-record form is the Rust convention. Gate:
+  `examples/rust/31-live-req`. `req.query` is the raw string (parse via
+  `Sky.Core.Http.parseQuery`); req reaches `init` only (not update/handlers yet).
+- **Ahead (P5–P6):** Cmd/Sub depth, session-store backends
   (sqlite/redis/postgres/firestore) + TTL, keyed/faithful VNode diff, per-GET
-  session reuse on navigation, decode-failure `warn` log.
+  session reuse on navigation, req query-string parsing, lambda-`init` support.
 
 **🟡 Deferred — large arcs:**
 - **Sky.Tui** — `Std.Ui` → ANSI renderer (~2k lines); TEA core already done, the
@@ -276,7 +285,7 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 30/30 build + run from a wiped slate
+### `examples/rust/` — 31/31 build + run from a wiped slate
 
 | Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
@@ -310,6 +319,7 @@ even for crates that use proc macros or derive macros.
 | 28-live-counter | `Std.Live` (P1) — `Live.app` over axum + SSE | ✅ builds (e2e-verified) | The TEA-over-HTTP loop: GET renders the counter (sky-ids + `data-sky-on=click` + `sky_sid` cookie + embedded ported client JS); `/_sky/sse` streams `hello` then, after `POST /_sky/event {handlerId}`, an `event: patches` frame `{globalSeq, patches:[{id,text}]}` — the span increments live. Exercises `live_app`, the `Live.app{…}` record-splice peephole, per-session driver, diff, and `HandlerIndex`. |
 | 29-live-form | `Std.Live` (P2) — typed form submit | ✅ builds (e2e-verified) | `Html.form [ Ev.onSubmit SignIn ]` where `SignIn : Creds -> Msg`. The `onSubmit` call-site peephole emits `Event::OnForm("submit", \|fd\| decode_form::<Creds>(fd).ok().map(SignIn))`; `Creds` gains `#[derive(serde::Deserialize)]` (form targets only). Submit POST `args=[{email,password}]` decodes into `Creds`, dispatches `SignIn` → SSE patch sets `last: a@b.c`. A malformed form (missing field) decodes to `None` → no Msg, no panic. |
 | 30-live-routing | `Std.Live` (P3) — URL routing | ✅ builds (e2e-verified) | `routes = [ Live.route "/" Home, Live.route "/apps/:slug" AppDetail ]`, `notFound = NotFound`. `Live.route` lowers to `Route::new(pattern, \|params\| ctor(params…))`; the `Live.app` peephole detects the Model's `page` field and emits `live_app_routed(… , vec![routes], NotFound, \|page, model\| Model { page, ..model })` — the generated setter is the reflection-equivalent of Go's `RecordUpdate(model, {Page})`. `GET /` → Home, `/apps/sky` → `App: sky` (`:slug` captured into `AppDetail`), `/nope` → 404. Apps with no `page` field stay on `live_app` (single page). |
+| 31-live-req | `Std.Live` (P4) — typed request to init | ✅ builds (e2e-verified) | `init req` reads `req.path` / `req.method` (String) + `Dict.get "sky_sid" req.cookies` (Dict). A Rust-codegen pre-pass types Live.app init params as `sky_runtime::LiveReq { path, query, method, params, headers, cookies }` (no shared-type change → Go-safe); the page handler builds the req from the axum request (+ route `:params`) before `init`. `GET /hello` w/ `Cookie: sky_sid=abc123` → `path:/hello`, `sid:abc123`, `method:GET`. The typed-record form (modern v0.16.7+ Go convention); Go's heterogeneous-Dict req doesn't port to no-`any` Rust. |
 
 ### `examples/00-standard-libs` on `target=rust`
 
