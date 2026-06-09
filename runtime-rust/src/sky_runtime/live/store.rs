@@ -170,6 +170,158 @@ where
     }
 }
 
+// ─── Postgres store — multi-instance deployments (Go postgresStore) ──────────
+
+/// Same shape as `SqliteStore` (mem-cache of live handles + a `sky_sessions`
+/// blob table + idle-TTL sweep) but over a `PgPool`, for horizontally-scaled
+/// deployments (Cloud Run / ECS / k8s) where a returning request can land on a
+/// different replica than the one that created the session. `connStr` is a
+/// `postgres://user:pass@host/db` URL. Mirrors Go's `postgresStore`.
+#[cfg(feature = "db")]
+pub struct PostgresStore<Model, Msg> {
+    pool: sqlx::PgPool,
+    mem_cache: RwLock<HashMap<String, SessionHandle<Model, Msg>>>,
+    ttl: Duration,
+}
+
+#[cfg(feature = "db")]
+impl<Model, Msg> PostgresStore<Model, Msg> {
+    pub async fn new(conn_str: &str, ttl: Duration) -> Result<Self, sqlx::Error> {
+        let pool = sqlx::PgPool::connect(conn_str).await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sky_sessions (\
+             sid TEXT PRIMARY KEY, blob TEXT NOT NULL, last_seen BIGINT NOT NULL)",
+        )
+        .execute(&pool)
+        .await?;
+        Ok(PostgresStore { pool, mem_cache: RwLock::new(HashMap::new()), ttl })
+    }
+}
+
+#[cfg(feature = "db")]
+#[async_trait]
+impl<Model, Msg> SessionStore<Model, Msg> for PostgresStore<Model, Msg>
+where
+    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+    Msg: Send + Sync + 'static,
+{
+    async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
+        let cached = self.mem_cache.read().unwrap().get(sid).cloned();
+        if let Some(h) = cached {
+            let _ = sqlx::query("UPDATE sky_sessions SET last_seen = $1 WHERE sid = $2")
+                .bind(now_secs()).bind(sid).execute(&self.pool).await;
+            return Some(StoreHit::Live(h));
+        }
+        let row: Option<(String,)> = sqlx::query_as("SELECT blob FROM sky_sessions WHERE sid = $1")
+            .bind(sid).fetch_optional(&self.pool).await.ok().flatten();
+        let blob = row?.0;
+        let model: Model = serde_json::from_str(&blob).ok()?;
+        let _ = sqlx::query("UPDATE sky_sessions SET last_seen = $1 WHERE sid = $2")
+            .bind(now_secs()).bind(sid).execute(&self.pool).await;
+        Some(StoreHit::Cold(model))
+    }
+    async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
+        let model = handle.lock().unwrap().model.clone();
+        self.mem_cache.write().unwrap().insert(sid.to_string(), handle);
+        if let Ok(blob) = serde_json::to_string(&model) {
+            let _ = sqlx::query(
+                "INSERT INTO sky_sessions (sid, blob, last_seen) VALUES ($1, $2, $3) \
+                 ON CONFLICT (sid) DO UPDATE SET blob = EXCLUDED.blob, last_seen = EXCLUDED.last_seen",
+            )
+            .bind(sid).bind(blob).bind(now_secs()).execute(&self.pool).await;
+        }
+    }
+    async fn delete(&self, sid: &str) {
+        self.mem_cache.write().unwrap().remove(sid);
+        let _ = sqlx::query("DELETE FROM sky_sessions WHERE sid = $1")
+            .bind(sid).execute(&self.pool).await;
+    }
+    async fn sweep(&self) {
+        let cutoff = now_secs() - self.ttl.as_secs() as i64;
+        let _ = sqlx::query("DELETE FROM sky_sessions WHERE last_seen < $1")
+            .bind(cutoff).execute(&self.pool).await;
+    }
+}
+
+// ─── Redis store — multi-instance, native TTL, no sweep (Go redisStore) ───────
+
+/// Namespace session ids under a fixed prefix (Go `redisKey`).
+#[cfg(feature = "redis_store")]
+fn redis_key(sid: &str) -> String {
+    format!("sky:sess:{sid}")
+}
+
+/// Cross-instance store backed by Redis. Sessions live under `sky:sess:<sid>` as
+/// a serde-JSON blob with a native Redis TTL, so expiry is the server's job and
+/// there's no sweep loop. A `mem_cache` keeps the same-process live handle (owns
+/// the driver) so a hit on the originating replica reuses it. `addr` is a full
+/// `redis://[:pass@]host:port/db` URL or a bare `host:port`. Mirrors Go's
+/// `redisStore`.
+#[cfg(feature = "redis_store")]
+pub struct RedisStore<Model, Msg> {
+    conn: redis::aio::MultiplexedConnection,
+    mem_cache: RwLock<HashMap<String, SessionHandle<Model, Msg>>>,
+    ttl_secs: u64,
+}
+
+#[cfg(feature = "redis_store")]
+impl<Model, Msg> RedisStore<Model, Msg> {
+    pub async fn new(addr: &str, ttl: Duration) -> Result<Self, redis::RedisError> {
+        let client = if addr.contains("://") {
+            redis::Client::open(addr)?
+        } else {
+            redis::Client::open(format!("redis://{addr}"))?
+        };
+        let mut conn = client.get_multiplexed_async_connection().await?;
+        // Ping so a misconfigured URL fails at startup, not on first write.
+        redis::cmd("PING").query_async::<()>(&mut conn).await?;
+        Ok(RedisStore {
+            conn,
+            mem_cache: RwLock::new(HashMap::new()),
+            ttl_secs: ttl.as_secs().max(1),
+        })
+    }
+}
+
+#[cfg(feature = "redis_store")]
+#[async_trait]
+impl<Model, Msg> SessionStore<Model, Msg> for RedisStore<Model, Msg>
+where
+    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+    Msg: Send + Sync + 'static,
+{
+    async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
+        use redis::AsyncCommands;
+        let cached = self.mem_cache.read().unwrap().get(sid).cloned();
+        let mut conn = self.conn.clone();
+        if let Some(h) = cached {
+            // Touch native TTL so an active session doesn't expire mid-conversation.
+            let _: Result<(), _> = conn.expire(redis_key(sid), self.ttl_secs as i64).await;
+            return Some(StoreHit::Live(h));
+        }
+        let blob: Option<String> = conn.get(redis_key(sid)).await.ok();
+        let model: Model = serde_json::from_str(&blob?).ok()?;
+        let _: Result<(), _> = conn.expire(redis_key(sid), self.ttl_secs as i64).await;
+        Some(StoreHit::Cold(model))
+    }
+    async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
+        use redis::AsyncCommands;
+        let model = handle.lock().unwrap().model.clone();
+        self.mem_cache.write().unwrap().insert(sid.to_string(), handle);
+        if let Ok(blob) = serde_json::to_string(&model) {
+            let mut conn = self.conn.clone();
+            let _: Result<(), _> = conn.set_ex(redis_key(sid), blob, self.ttl_secs).await;
+        }
+    }
+    async fn delete(&self, sid: &str) {
+        use redis::AsyncCommands;
+        self.mem_cache.write().unwrap().remove(sid);
+        let mut conn = self.conn.clone();
+        let _: Result<(), _> = conn.del(redis_key(sid)).await;
+    }
+    // No sweep: Redis evicts expired keys natively.
+}
+
 /// Select a backend from `[live] store` (Go `chooseStore`), falling back to
 /// memory on any error — never crash. The `Model: Serialize` bound is for the
 /// persistent backends; memory needs none, but a single signature keeps the
@@ -187,6 +339,26 @@ where
                 return Arc::new(s);
             }
             Err(e) => eprintln!("[sky.live] sqlite store unavailable ({e}); falling back to memory"),
+        }
+    }
+    #[cfg(feature = "db")]
+    if kind == "postgres" {
+        match PostgresStore::new(path, ttl).await {
+            Ok(s) => {
+                eprintln!("[sky.live] session store: postgres");
+                return Arc::new(s);
+            }
+            Err(e) => eprintln!("[sky.live] postgres store unavailable ({e}); falling back to memory"),
+        }
+    }
+    #[cfg(feature = "redis_store")]
+    if kind == "redis" {
+        match RedisStore::new(path, ttl).await {
+            Ok(s) => {
+                eprintln!("[sky.live] session store: redis");
+                return Arc::new(s);
+            }
+            Err(e) => eprintln!("[sky.live] redis store unavailable ({e}); falling back to memory"),
         }
     }
     let _ = (kind, path);
@@ -224,8 +396,8 @@ mod tests {
         assert!(s.get("a").await.is_none());
     }
 
-    // A SessionEntry<i32, ()> with a given model, for the sqlite checkpoint test.
-    #[cfg(feature = "db")]
+    // A SessionEntry<i32, ()> with a given model, for the checkpoint tests.
+    #[cfg(any(feature = "db", feature = "redis_store"))]
     fn handle_i32(model: i32) -> SessionHandle<i32, ()> {
         let (tx, _rx) = unbounded_channel::<()>();
         let tree: Html<()> = Html::HText(String::new());
@@ -256,6 +428,58 @@ mod tests {
             }
         }
         let _ = std::fs::remove_file(p);
+    }
+
+    #[cfg(feature = "redis_store")]
+    #[test]
+    fn redis_key_is_namespaced() {
+        assert_eq!(redis_key("abc"), "sky:sess:abc");
+    }
+
+    /// Postgres restart survival — gated on `SKY_TEST_PG_URL` (a reachable
+    /// `postgres://…` URL). Skipped when unset so CI without a PG server stays
+    /// green; run locally with the env var to exercise the real round-trip.
+    #[cfg(feature = "db")]
+    #[tokio::test]
+    async fn postgres_store_checkpoint_survives_restart() {
+        let Ok(url) = std::env::var("SKY_TEST_PG_URL") else { return };
+        let sid = format!("pgtest_{}", std::process::id());
+        {
+            let s: PostgresStore<i32, ()> = PostgresStore::new(&url, Duration::from_secs(60)).await.unwrap();
+            s.delete(&sid).await;
+            s.set(&sid, handle_i32(7)).await;
+            assert!(matches!(s.get(&sid).await, Some(StoreHit::Live(_))));
+        }
+        {
+            let s: PostgresStore<i32, ()> = PostgresStore::new(&url, Duration::from_secs(60)).await.unwrap();
+            match s.get(&sid).await {
+                Some(StoreHit::Cold(m)) => assert_eq!(m, 7),
+                _ => panic!("expected Cold(7) after restart"),
+            }
+            s.delete(&sid).await;
+        }
+    }
+
+    /// Redis restart survival — gated on `SKY_TEST_REDIS_URL`. Skipped when unset.
+    #[cfg(feature = "redis_store")]
+    #[tokio::test]
+    async fn redis_store_checkpoint_survives_restart() {
+        let Ok(url) = std::env::var("SKY_TEST_REDIS_URL") else { return };
+        let sid = format!("redistest_{}", std::process::id());
+        {
+            let s: RedisStore<i32, ()> = RedisStore::new(&url, Duration::from_secs(60)).await.unwrap();
+            s.delete(&sid).await;
+            s.set(&sid, handle_i32(9)).await;
+            assert!(matches!(s.get(&sid).await, Some(StoreHit::Live(_))));
+        }
+        {
+            let s: RedisStore<i32, ()> = RedisStore::new(&url, Duration::from_secs(60)).await.unwrap();
+            match s.get(&sid).await {
+                Some(StoreHit::Cold(m)) => assert_eq!(m, 9),
+                _ => panic!("expected Cold(9) after restart"),
+            }
+            s.delete(&sid).await;
+        }
     }
 
     #[tokio::test]

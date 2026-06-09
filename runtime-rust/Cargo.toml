@@ -28,7 +28,8 @@ subtle = "2"
 hmac = "0.12"
 sha1 = "0.10"
 md-5 = "0.10"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"], optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres"], optional = true }
+redis = { version = "0.27", features = ["tokio-comp"], optional = true }
 regex = "1"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4", "v7"] }
@@ -45,6 +46,7 @@ default = []
 async = ["tokio"]
 json = ["serde_json", "jsonwebtoken"]
 db = ["sqlx", "tokio"]
+redis_store = ["redis", "tokio", "serde", "serde_json", "async-trait"]
 crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
@@ -54,7 +56,7 @@ http_client = ["tokio", "reqwest", "futures-util"]
 email = ["tokio", "reqwest", "serde_json", "sha2"]
 websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
 live = ["server", "http_client", "serde", "serde_json", "async-trait"]
-full = ["async", "json", "db", "crypto", "compression", "csv_kernel", "config", "server", "http_client", "email", "websocket_client", "live"]
+full = ["async", "json", "db", "redis_store", "crypto", "compression", "csv_kernel", "config", "server", "http_client", "email", "websocket_client", "live"]
 
 [dev-dependencies]
 regex = "1"

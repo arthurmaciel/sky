@@ -4166,12 +4166,15 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- always-compiled live/store.rs) is on ONLY when the app actually needs
     -- sqlx: a Std.Db app, or a Sky.Live app with `[live] store = \"sqlite\"`.
     -- A memory-store Live app must NOT enable `db` (no sqlx dep → would fail).
-    , "default = [" ++ intercalate ", " (map show (["tokio", "crypto", "json"] ++ ["db" | usesDb uk || (usesLive uk && liveStore == "sqlite")])) ++ "]"
+    , "default = [" ++ intercalate ", " (map show (["tokio", "crypto", "json"] ++ ["db" | needsDb] ++ ["redis_store" | needsRedis])) ++ "]"
     , "tokio = []"
     , "crypto = []"
     , "json = []"
     , "db = []"
     ] ++
+    -- Std.Live with `[live] store = "redis"`: gates the copied
+    -- `#[cfg(feature="redis_store")] RedisStore`.
+    [ "redis_store = []" | needsRedis ] ++
     -- Std.Live: declare the live feature so #[cfg(feature = "live")] in the
     -- copied runtime files evaluates to true when the project uses Sky.Live.
     [ "live = []" | usesLive uk ] ++
@@ -4179,15 +4182,15 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     , "[dependencies]"
     , "tokio = { version = \"1\", features = [" ++ intercalate ", " (map show tokioFeats) ++ "] }"
     ] ++
-    (if usesDb uk
-     then let sqlxTlsFeature = if sqlxTls == "native-tls" then "runtime-tokio-native-tls" else "runtime-tokio-rustls"
-          in [ "sqlx = { version = \"0.8\", features = [\"" ++ sqlxTlsFeature ++ "\", \"" ++ dbFeature dbDriver ++ "\"] }" ]
-     -- P5-T4b: a Sky.Live app with `[live] store = "sqlite"` needs sqlx for the
-     -- copied `#[cfg(feature="db")] SqliteStore` even when the app never imports
-     -- Std.Db. Only when usesDb DIDN'T already emit the line (avoid duplicate key).
-     else if usesLive uk && liveStore == "sqlite"
-     then [ "sqlx = { version = \"0.8\", features = [\"runtime-tokio-rustls\", \"sqlite\"] }" ]
-     else []) ++
+    -- sqlx: a Std.Db app, OR a Sky.Live app whose `[live] store` is a sqlx
+    -- backend (sqlite/postgres). The feature list is the UNION of the Std.Db
+    -- driver and the live-store driver, so an app using e.g. Std.Db(sqlite) +
+    -- `[live] store = "postgres"` links both. (Memory/redis live apps don't
+    -- emit sqlx — that would fail to compile with no sqlx dep.)
+    [ "sqlx = { version = \"0.8\", features = [" ++ intercalate ", " (map show sqlxFeats) ++ "] }" | needsDb ] ++
+    -- P5 follow-on: `[live] store = "redis"` needs the redis crate for the
+    -- copied `#[cfg(feature="redis_store")] RedisStore`.
+    [ "redis = { version = \"0.27\", features = [\"tokio-comp\"] }" | needsRedis, "redis" `notElem` userDepNames ] ++
     -- P5-T4b: the live SessionStore trait is `#[async_trait]` — pull the crate
     -- whenever the project uses Sky.Live.
     [ "async-trait = \"0.1\"" | usesLive uk, "async-trait" `notElem` userDepNames ] ++
@@ -4268,6 +4271,19 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     ]
   where
     userDepNames = [ n | (n, _) <- rustDeps, not (null n) ]
+    -- A sqlx backend is needed for Std.Db OR a sqlx-backed live store.
+    needsDb = usesDb uk || (usesLive uk && liveStore `elem` ["sqlite", "postgres"])
+    -- The redis crate is needed only for a redis live store.
+    needsRedis = usesLive uk && liveStore == "redis"
+    -- Union of sqlx driver features: TLS + Std.Db driver + live-store drivers.
+    -- When the live store module compiles with `db` on, store.rs builds BOTH
+    -- SqliteStore and PostgresStore (each `#[cfg(feature="db")]`), so both sqlx
+    -- drivers must be present regardless of which one `[live] store` selects. A
+    -- non-live Std.Db app keeps just its own single driver (no bloat).
+    sqlxTlsFeature = if sqlxTls == "native-tls" then "runtime-tokio-native-tls" else "runtime-tokio-rustls"
+    sqlxFeats = sqlxTlsFeature : Set.toList (Set.fromList (
+        [ dbFeature dbDriver | usesDb uk ]
+        ++ (if usesLive uk && needsDb then ["sqlite", "postgres"] else [])))
     -- Sky.Http.Server's axum serve loop + the reqwest client both need tokio net.
     -- The TEA loop (tea.rs) uses tokio::sync::mpsc + tokio::time + tokio::spawn;
     -- axum pulls `sync` transitively for the server case, but a plain Sky.Cli
