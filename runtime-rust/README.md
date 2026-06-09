@@ -69,7 +69,7 @@ or `unsafe`.
 The Go backend is the reference (full surface — 54 kernel modules). Rust
 coverage, by confidence:
 
-**✅ Covered & verified** (standard-libs 131/131 + the 31 `examples/rust/*` +
+**✅ Covered & verified** (standard-libs 131/131 + the 32 `examples/rust/*` +
 the HTTP/WS/Cli regression tests):
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
   Regex, Bytes (Latin-1), Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal,
@@ -183,9 +183,21 @@ targets):
   runtime, so the typed-record form is the Rust convention. Gate:
   `examples/rust/31-live-req`. `req.query` is the raw string (parse via
   `Sky.Core.Http.parseQuery`); req reaches `init` only (not update/handlers yet).
-- **Ahead (P5–P6):** Cmd/Sub depth, session-store backends
-  (sqlite/redis/postgres/firestore) + TTL, keyed/faithful VNode diff, per-GET
-  session reuse on navigation, req query-string parsing, lambda-`init` support.
+- **P5 — session stores.** A `SessionStore` async trait (Go `live_store.go`
+  parity): `MemoryStore` (idle-TTL eviction) + `SqliteStore` (a `mem_cache` of
+  live handles + a `sky_sessions(sid, blob, last_seen)` serde-JSON model
+  checkpoint), `choose_store(kind, path, ttl)` selecting from `[live] store` and
+  falling back to memory on error. Cookie-based session reuse (a returning
+  `sky_sid` re-renders its live session) + write-through on every commit fix the
+  per-GET-session leak and give continuity. Persistent backends survive a
+  restart: a Cold `get` decodes the checkpoint and the page handler hydrates a
+  fresh driver seeded with it. Go's runtime `validateSessionValue` becomes a
+  compile-time requirement — the codegen derives `serde::{Serialize,Deserialize}`
+  on the model's PRECISE transitive type closure; a non-serde model is a clean
+  compile error. Gate: `examples/rust/32-live-sessions`.
+- **Ahead (P6+):** redis/postgres/firestore backends (same `SessionStore`
+  trait), Cmd/Sub depth, keyed/faithful VNode diff, req query-string parsing,
+  lambda-`init` support, the store's pub/sub `Broker`.
 
 **🟡 Deferred — large arcs:**
 - **Sky.Tui** — `Std.Ui` → ANSI renderer (~2k lines); TEA core already done, the
@@ -285,7 +297,7 @@ even for crates that use proc macros or derive macros.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 31/31 build + run from a wiped slate
+### `examples/rust/` — 32/32 build + run from a wiped slate
 
 | Example | Crate / surface | Status | What it shows |
 |---|---|---|---|
@@ -320,6 +332,7 @@ even for crates that use proc macros or derive macros.
 | 29-live-form | `Std.Live` (P2) — typed form submit | ✅ builds (e2e-verified) | `Html.form [ Ev.onSubmit SignIn ]` where `SignIn : Creds -> Msg`. The `onSubmit` call-site peephole emits `Event::OnForm("submit", \|fd\| decode_form::<Creds>(fd).ok().map(SignIn))`; `Creds` gains `#[derive(serde::Deserialize)]` (form targets only). Submit POST `args=[{email,password}]` decodes into `Creds`, dispatches `SignIn` → SSE patch sets `last: a@b.c`. A malformed form (missing field) decodes to `None` → no Msg, no panic. |
 | 30-live-routing | `Std.Live` (P3) — URL routing | ✅ builds (e2e-verified) | `routes = [ Live.route "/" Home, Live.route "/apps/:slug" AppDetail ]`, `notFound = NotFound`. `Live.route` lowers to `Route::new(pattern, \|params\| ctor(params…))`; the `Live.app` peephole detects the Model's `page` field and emits `live_app_routed(… , vec![routes], NotFound, \|page, model\| Model { page, ..model })` — the generated setter is the reflection-equivalent of Go's `RecordUpdate(model, {Page})`. `GET /` → Home, `/apps/sky` → `App: sky` (`:slug` captured into `AppDetail`), `/nope` → 404. Apps with no `page` field stay on `live_app` (single page). |
 | 31-live-req | `Std.Live` (P4) — typed request to init | ✅ builds (e2e-verified) | `init req` reads `req.path` / `req.method` (String) + `Dict.get "sky_sid" req.cookies` (Dict). A Rust-codegen pre-pass types Live.app init params as `sky_runtime::LiveReq { path, query, method, params, headers, cookies }` (no shared-type change → Go-safe); the page handler builds the req from the axum request (+ route `:params`) before `init`. `GET /hello` w/ `Cookie: sky_sid=abc123` → `path:/hello`, `sid:abc123`, `method:GET`. The typed-record form (modern v0.16.7+ Go convention); Go's heterogeneous-Dict req doesn't port to no-`any` Rust. |
+| 32-live-sessions | `Std.Live` (P5) — session stores | ✅ builds (e2e-verified) | `[live] store = "sqlite"`. The `SessionStore` async trait (Go `live_store.go` parity) with `MemoryStore` (TTL) + `SqliteStore` (mem-cache live handle + serde-JSON model checkpoint), `choose_store` (memory fallback). Cookie-based reuse + write-through on every commit. Codegen derives serde on the model's PRECISE type closure + emits the store args + gates `db`/`sqlx` to store==sqlite. Verified: 3 clicks → count 3 (write-through); kill+restart over the same `sessions.db` + cookie → count restored to 3 (Cold hydration); fresh cookie → 0. |
 
 ### `examples/00-standard-libs` on `target=rust`
 
