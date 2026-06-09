@@ -84,3 +84,14 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 - Type Checker: `/home/arthur/Documentos/comp/sky/src/Sky/Type/**/*.hs`
 - Canonicaliser: `/home/arthur/Documentos/comp/sky/src/Sky/Canonicalise/*.hs`
 - Go Codegen: `/home/arthur/Documentos/comp/sky/src/Sky/Generate/Go/*.hs` — reference for Rust codegen structure
+
+## Agent skills
+
+### Domain docs
+
+Single-context — `CONTEXT.md` + `docs/adr/` at `runtime-rust/` root.
+
+Skills enabled:
+- `/grill-me` — stress-test plans and designs
+- `/grill-with-docs` — challenge plans against domain glossary + ADRs
+- `/improve-codebase-architecture` — find deepening opportunities
