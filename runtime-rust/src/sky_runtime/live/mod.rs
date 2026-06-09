@@ -8,14 +8,14 @@ pub mod dispatch;
 pub use dispatch::*;
 pub mod sse;
 pub use sse::*;
-pub mod session;
-pub use session::*;
 pub mod form;
 pub use form::*;
 pub mod route;
 pub use route::*;
 pub mod req;
 pub use req::*;
+pub mod store;
+pub use store::*;
 
 use super::*;
 
@@ -104,20 +104,19 @@ pub fn render_page_full(sid: &str, base: &str, body: &str) -> String {
 // ─── live_app: axum mount + per-session TEA driver over SSE (Task 10) ───────
 
 use crate::sky_runtime::tea::{SkyCmd, SkySub};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
 
 /// Per-session live state behind an `Arc<Mutex<…>>`. `index` / `last_view` are
 /// re-derived on every commit; `sse_tx` is filled when the browser attaches the
 /// SSE channel; `msg_tx` feeds the per-session driver loop.
-struct SessionEntry<Model, Msg> {
-    model: Model,
-    last_view: Html<Msg>,
-    index: HandlerIndex<Msg>,
-    seq: u64,
-    sse_tx: Option<SseTx>,
-    msg_tx: UnboundedSender<Msg>,
+pub struct SessionEntry<Model, Msg> {
+    pub model: Model,
+    pub last_view: Html<Msg>,
+    pub index: HandlerIndex<Msg>,
+    pub seq: u64,
+    pub sse_tx: Option<SseTx>,
+    pub msg_tx: UnboundedSender<Msg>,
 }
 
 /// SSE patches envelope. The browser client (`live/client.js`) consumes the
@@ -171,11 +170,10 @@ fn value_to_string(v: &serde_json::Value) -> String {
     }
 }
 
-type SessionMap<Model, Msg> = Arc<Mutex<HashMap<String, Arc<Mutex<SessionEntry<Model, Msg>>>>>>;
 
-/// Shared axum state: the session map + Arc'd TEA callbacks.
+/// Shared axum state: the session store + Arc'd TEA callbacks.
 struct LiveState<Model, Msg, FInit, FUpdate, FView, FSubs> {
-    sessions: SessionMap<Model, Msg>,
+    store: Arc<dyn store::SessionStore<Model, Msg>>,
     init: Arc<FInit>,
     update: Arc<FUpdate>,
     view: Arc<FView>,
@@ -199,7 +197,7 @@ impl<Model, Msg, FInit, FUpdate, FView, FSubs> Clone
 {
     fn clone(&self) -> Self {
         LiveState {
-            sessions: self.sessions.clone(),
+            store: self.store.clone(),
             init: self.init.clone(),
             update: self.update.clone(),
             view: self.view.clone(),
@@ -359,6 +357,16 @@ fn new_sid() -> String {
     format!("{hi:016x}{lo:016x}")
 }
 
+/// Session idle-TTL: `SKY_LIVE_TTL` seconds, default 1800 (30 min) — matches the
+/// Go `[live] ttl` default.
+fn live_ttl() -> std::time::Duration {
+    let secs = std::env::var("SKY_LIVE_TTL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1800u64);
+    std::time::Duration::from_secs(secs)
+}
+
 /// `Std.Live.app { init, update, view, subscriptions }` — serve via axum.
 ///
 /// HTTP-first: a GET renders the full page with the embedded client, opens a
@@ -383,7 +391,7 @@ where
     FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
 {
     let state = LiveState {
-        sessions: Arc::new(Mutex::new(HashMap::new())),
+        store: Arc::new(store::MemoryStore::new(live_ttl())),
         init: Arc::new(init),
         update: Arc::new(update),
         view: Arc::new(view),
@@ -433,7 +441,7 @@ where
     let param_resolver: Arc<dyn Fn(&str) -> crate::sky_runtime::dict::SkyDict<String> + Send + Sync> =
         Arc::new(move |path| route::match_params(&routes_for_params, path));
     let state = LiveState {
-        sessions: Arc::new(Mutex::new(HashMap::new())),
+        store: Arc::new(store::MemoryStore::new(live_ttl())),
         init: Arc::new(init),
         update: Arc::new(update),
         view: Arc::new(view),
@@ -504,7 +512,7 @@ where
                 sse_tx: None,
                 msg_tx: msg_tx.clone(),
             }));
-            st.sessions.lock().unwrap().insert(sid.clone(), entry.clone());
+            st.store.set(&sid, entry.clone());
 
             // Spawn the per-session driver.
             tokio::spawn(drive_session(
@@ -545,7 +553,10 @@ where
             FSubs: Send + Sync + 'static,
         {
             let sid = sid_from_cookie(&headers);
-            let entry = sid.and_then(|s| st.sessions.lock().unwrap().get(&s).cloned());
+            let entry = sid.and_then(|s| match st.store.get(&s) {
+                Some(store::StoreHit::Live(h)) => Some(h),
+                _ => None,
+            });
             let entry = match entry {
                 Some(e) => e,
                 None => return (StatusCode::NOT_FOUND, "no session").into_response(),
@@ -605,7 +616,10 @@ where
             };
             // Prefer the cookie sid; fall back to the body's sessionId.
             let sid = sid_from_cookie(&headers).unwrap_or(parsed.session_id);
-            let entry = st.sessions.lock().unwrap().get(&sid).cloned();
+            let entry = match st.store.get(&sid) {
+                Some(store::StoreHit::Live(h)) => Some(h),
+                _ => None,
+            };
             let entry = match entry {
                 Some(e) => e,
                 None => return (StatusCode::NOT_FOUND, "no session").into_response(),
@@ -649,6 +663,20 @@ where
                 format!("{{\"seq\":{seq},\"patches\":[]}}"),
             )
                 .into_response()
+        }
+
+        // Background TTL eviction (Go memoryStore.cleanupLoop parity): sweep
+        // idle-expired sessions every 60 s. Persistent backends also prune their
+        // checkpoint table in `sweep`.
+        {
+            let store = state.store.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tick.tick().await;
+                    store.sweep();
+                }
+            });
         }
 
         let app: Router = Router::new()
