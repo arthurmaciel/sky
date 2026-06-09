@@ -216,18 +216,74 @@ fn escape_attr(t: &str) -> String {
 /// Stamp every HElement (not HText/HRaw) with a stable `sky-id` attribute derived
 /// from its path. Idempotent: an existing sky-id is overwritten with the same
 /// value. HText/HRaw nodes are unaddressable (Go parity).
+///
+/// Each non-root segment is `{path}_{idx}_{tag}[:{key}]` — the embedded tag means
+/// two structurally different subtrees never share an id at the same positional
+/// depth, and the optional `:{key}` disambiguator (from an explicit `sky-key`
+/// attribute, or implicit from `name` on form-bearing tags) lets keyed list items
+/// and named form fields keep identity across reorder. Mirrors Go `assignSkyIDs`
+/// / `skyIDKey` (`runtime-go/rt/live.go`).
 pub fn assign_sky_ids<M>(node: &mut Html<M>, path: &str) {
     if let Html::HElement(_tag, attrs, kids) = node {
         set_attr(attrs, "sky-id", path);
         let mut idx = 0usize;
         for child in kids.iter_mut() {
-            if let Html::HElement(ctag, _, _) = child {
-                let seg = format!("{path}_{idx}_{ctag}");
+            if let Html::HElement(ctag, cattrs, _) = child {
+                let mut seg = format!("{path}_{idx}_{ctag}");
+                if let Some(key) = sky_id_key(ctag, cattrs) {
+                    seg.push(':');
+                    seg.push_str(&key);
+                }
                 idx += 1;
                 assign_sky_ids(child, &seg);
             }
         }
     }
+}
+
+/// Stable disambiguator for an element, or `None`. Priority: an explicit
+/// `sky-key` attribute (set by `Html.keyed`), then `name` on form-bearing tags.
+/// Any matched value is sanitised so it can't corrupt the sky-id grammar.
+/// Mirrors Go `skyIDKey`.
+fn sky_id_key<M>(tag: &str, attrs: &[Attribute<M>]) -> Option<String> {
+    if let Some(k) = attr_value(attrs, "sky-key") {
+        if !k.is_empty() {
+            return Some(sanitise_sky_id_key(k));
+        }
+    }
+    if matches!(
+        tag,
+        "input" | "textarea" | "select" | "form" | "button" | "fieldset"
+    ) {
+        if let Some(k) = attr_value(attrs, "name") {
+            if !k.is_empty() {
+                return Some(sanitise_sky_id_key(k));
+            }
+        }
+    }
+    None
+}
+
+fn attr_value<'a, M>(attrs: &'a [Attribute<M>], key: &str) -> Option<&'a str> {
+    attrs.iter().find_map(|a| match a {
+        Attribute::Attr(k, v) if k == key => Some(v.as_str()),
+        _ => None,
+    })
+}
+
+/// Replace anything outside `[A-Za-z0-9_-]` with `_`. Prevents the key from
+/// breaking sky-id parsing, CSS selector escaping, or HTML attribute quoting.
+/// Mirrors Go `sanitiseSkyIDKey`.
+fn sanitise_sky_id_key(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn set_attr<M>(attrs: &mut Vec<Attribute<M>>, key: &str, val: &str) {
@@ -303,6 +359,53 @@ mod tests {
         }
         go(n, &mut out);
         out
+    }
+
+    #[test]
+    fn keyed_items_keep_id_across_reorder() {
+        // Two keyed <li> swapped: each keeps its `:{key}` id so the diff can
+        // target the moved element instead of replacing the whole list.
+        let li = |k: &str| -> Html<()> {
+            Html::HElement(
+                "li".into(),
+                vec![Attribute::Attr("sky-key".into(), k.into())],
+                vec![Html::HText(k.into())],
+            )
+        };
+        let mut a: Html<()> =
+            Html::HElement("ul".into(), vec![], vec![li("alpha"), li("beta")]);
+        let mut b: Html<()> =
+            Html::HElement("ul".into(), vec![], vec![li("beta"), li("alpha")]);
+        assign_sky_ids(&mut a, "r");
+        assign_sky_ids(&mut b, "r");
+        let ids_a = collect_ids(&a);
+        let ids_b = collect_ids(&b);
+        // alpha keeps the same id in both renders even though its position moved.
+        assert!(ids_a.contains(&"r_0_li:alpha".to_string()), "{ids_a:?}");
+        assert!(ids_b.contains(&"r_1_li:alpha".to_string()), "{ids_b:?}");
+        // The key disambiguator is present, sanitised.
+        assert!(ids_a.iter().all(|s| s.contains(":alpha") || s.contains(":beta") || s == "r"));
+    }
+
+    #[test]
+    fn name_on_form_tag_becomes_implicit_key() {
+        let mut t: Html<()> = Html::HElement(
+            "form".into(),
+            vec![],
+            vec![Html::HElement(
+                "input".into(),
+                vec![Attribute::Attr("name".into(), "email".into())],
+                vec![],
+            )],
+        );
+        assign_sky_ids(&mut t, "r");
+        assert!(collect_ids(&t).contains(&"r_0_input:email".to_string()));
+    }
+
+    #[test]
+    fn sky_key_value_is_sanitised() {
+        assert_eq!(sanitise_sky_id_key("a/b c.d"), "a_b_c_d");
+        assert_eq!(sanitise_sky_id_key("keep-_OK9"), "keep-_OK9");
     }
 
     #[test]

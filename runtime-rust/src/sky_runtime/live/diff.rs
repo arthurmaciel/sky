@@ -29,22 +29,19 @@ impl Patch {
             remove: false,
         }
     }
-
-    fn is_noop(&self) -> bool {
-        self.text.is_none() && self.html.is_none() && self.attrs.is_empty() && !self.remove
-    }
 }
 
 /// Structural diff between two `Html` trees that have already had `assign_sky_ids`
 /// applied. Returns the minimal list of `Patch` operations needed to update the
-/// DOM from `old` to `new`.
-///
-/// Strategy (P1 — sufficient for the counter gate):
-/// - Matched-tag element pair: diff attributes + children recursively.
-/// - Structural mismatch (different tag or different node kind): emit a whole-subtree
-///   `html` replace.
-/// - Single text child change: `SetText` via `p.text`.
-/// - Keyed reorder is deferred to P6.
+/// DOM from `old` to `new`. Faithful port of Go `diffNodes`
+/// (`runtime-go/rt/live.go`):
+/// - Matched-tag element pair: diff attributes + events, then children.
+/// - Tag/kind mismatch, child-count change, or any mixed-child text change:
+///   whole-subtree `html` replace at the parent.
+/// - Sole text-child change: `SetText` via `p.text` (fast path).
+/// - Event handlers toggled on/off: `sky-<event>` attr set/remove + `data-sky-hid`.
+/// - Keyed identity is carried by `assign_sky_ids` (the `:{key}` segment) so a
+///   reordered keyed item keeps its sky-id and only its moved attrs patch.
 pub fn diff<M>(old: &Html<M>, new: &Html<M>) -> Vec<Patch> {
     let mut out = vec![];
     diff_node(old, new, &mut out);
@@ -66,71 +63,83 @@ fn sky_id<M>(n: &Html<M>) -> Option<&str> {
     None
 }
 
-fn diff_node<M>(old: &Html<M>, new: &Html<M>, out: &mut Vec<Patch>) {
-    match (old, new) {
-        (Html::HElement(ot, oa, ok), Html::HElement(nt, na, nk)) if ot == nt => {
-            let id = sky_id(new).unwrap_or("").to_string();
-            let mut p = Patch::for_id(&id);
-            diff_attrs(oa, na, &mut p);
-
-            if same_child_shape(ok, nk) {
-                // Recurse into matched children; only emit a patch if id is non-empty
-                // (Go parity: `if old.SkyID != ""`).
-                if !id.is_empty() && !p.is_noop() {
-                    out.push(p);
-                }
-                // Handle a sole text-child change via SetText (cheaper than html replace).
-                diff_text_children(&id, ok, nk, out);
-                // Recurse into element children (even when id is empty — addressed
-                // descendants inside an unaddressed wrapper still need patching).
-                for (c_old, c_new) in ok.iter().zip(nk.iter()) {
-                    if matches!(c_old, Html::HElement(..)) {
-                        diff_node(c_old, c_new, out);
-                    }
-                }
-            } else {
-                // Structural mismatch — replace the whole inner HTML.
-                // Only emit if id is non-empty (Go parity).
-                if !id.is_empty() {
-                    p.html = Some(render_children(nk));
-                    out.push(p);
-                }
-            }
-        }
-        // Text ↔ text handled by the parent's diff_text_children; nothing to do here.
-        // Any other mismatch is handled at the parent level via html replace.
-        _ => {}
-    }
-}
-
-/// Emit a `SetText` patch when the sole child is a text node that changed.
-// FIXME(P2): multi-child mixed text/element changes aren't diffed here; Go emits a parent html-replace. Single-text-child (the P1 counter shape) is covered.
-fn diff_text_children<M>(id: &str, ok: &[Html<M>], nk: &[Html<M>], out: &mut Vec<Patch>) {
+/// Emit a whole-subtree innerHTML replace at `id` (Go: `Patch{ID, HTML}`).
+fn push_html_replace<M>(id: &str, new_kids: &[Html<M>], out: &mut Vec<Patch>) {
     if id.is_empty() {
         return;
     }
-    if let ([Html::HText(o)], [Html::HText(n)]) = (ok, nk) {
-        if o != n {
-            let mut p = Patch::for_id(id);
-            p.text = Some(n.clone());
-            out.push(p);
+    let mut p = Patch::for_id(id);
+    p.html = Some(render_children(new_kids));
+    out.push(p);
+}
+
+fn diff_node<M>(old: &Html<M>, new: &Html<M>, out: &mut Vec<Patch>) {
+    let (ot, oa, ok, _nt, na, nk) = match (old, new) {
+        (Html::HElement(ot, oa, ok), Html::HElement(nt, na, nk)) if ot == nt => {
+            (ot, oa, ok, nt, na, nk)
+        }
+        // Tag/kind mismatch is handled by the parent (mixed-child / count branch).
+        // A top-level mismatch has no parent to address, so nothing to emit.
+        _ => return,
+    };
+    let _ = ot;
+    // Patch id targets the element currently in the DOM — the OLD tree's id
+    // (Go parity: `old.SkyID`).
+    let id = sky_id(old).unwrap_or("").to_string();
+
+    // Attribute + event delta.
+    let mut p = Patch::for_id(&id);
+    diff_attrs(oa, na, &mut p);
+    if !id.is_empty() && !p.attrs.is_empty() {
+        out.push(p);
+    }
+
+    // Sole text-child fast path (common for buttons / spans).
+    if ok.len() == 1 && nk.len() == 1 {
+        if let (Html::HText(o), Html::HText(n)) = (&ok[0], &nk[0]) {
+            if o != n && !id.is_empty() {
+                let mut tp = Patch::for_id(&id);
+                tp.text = Some(n.clone());
+                out.push(tp);
+            }
+            return;
+        }
+    }
+
+    // Child-count change → replace the whole subtree.
+    if ok.len() != nk.len() {
+        push_html_replace(&id, nk, out);
+        return;
+    }
+
+    // Per-position structural diff.
+    for (oc, nc) in ok.iter().zip(nk.iter()) {
+        match (oc, nc) {
+            (Html::HText(o), Html::HText(n)) => {
+                // Mixed-child text change → replace the whole subtree at the parent
+                // (Go parity: single-text is the fast path above; anything else is a
+                // parent html-replace).
+                if o != n {
+                    push_html_replace(&id, nk, out);
+                    return;
+                }
+            }
+            // Raw-vs-raw: Go recurses (a no-op) — changed raw content is not
+            // patched. Match that quirk rather than emitting a spurious replace.
+            (Html::HRaw(_), Html::HRaw(_)) => {}
+            (Html::HElement(t1, _, _), Html::HElement(t2, _, _)) if t1 == t2 => {
+                diff_node(oc, nc, out);
+            }
+            // Tag / kind mismatch → replace the subtree at the parent.
+            _ => {
+                push_html_replace(&id, nk, out);
+                return;
+            }
         }
     }
 }
 
-/// True when both child lists have the same length and the same per-position
-/// node kinds (element vs text vs raw) with matching tag names on elements.
-fn same_child_shape<M>(a: &[Html<M>], b: &[Html<M>]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b).all(|(x, y)| match (x, y) {
-            (Html::HElement(t1, _, _), Html::HElement(t2, _, _)) => t1 == t2,
-            (Html::HText(_), Html::HText(_)) => true,
-            (Html::HRaw(_), Html::HRaw(_)) => true,
-            _ => false,
-        })
-}
-
-/// Compute the attribute delta between `old` and `new` attribute lists.
+/// Compute the attribute + event delta between `old` and `new`.
 /// Keys changed or added → new value. Keys removed → empty string (Go convention).
 /// `sky-id` is excluded (never patched as an attribute).
 fn diff_attrs<M>(old: &[Attribute<M>], new: &[Attribute<M>], p: &mut Patch) {
@@ -161,6 +170,40 @@ fn diff_attrs<M>(old: &[Attribute<M>], new: &[Attribute<M>], p: &mut Patch) {
         if !nm.contains_key(k) {
             // Signal removal with empty string (Go convention).
             p.attrs.insert(k.clone(), String::new());
+        }
+    }
+    diff_events(old, new, p);
+}
+
+/// Event-handler delta. Mirrors Go `diffNodes`' Events block: an element gaining
+/// a handler emits `sky-<event>` = `<event>` (the value the client posts back as
+/// `msg`, matching `render_html`) plus a fresh `data-sky-hid`; an element losing a
+/// handler emits `sky-<event>` = `""` (remove), and clears `data-sky-hid` once the
+/// last handler is gone. Without this, toggling a handler leaves a stale listener
+/// marker and the user's gesture is silently dropped.
+fn diff_events<M>(old: &[Attribute<M>], new: &[Attribute<M>], p: &mut Patch) {
+    let names = |xs: &[Attribute<M>]| -> Vec<String> {
+        xs.iter()
+            .filter_map(|a| match a {
+                Attribute::EventAttr(e) => Some(e.name().to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let (on, nn) = (names(old), names(new));
+    let id = p.id.clone();
+    for ev in &nn {
+        if !on.contains(ev) {
+            p.attrs.insert(format!("sky-{ev}"), ev.clone());
+            p.attrs.insert("data-sky-hid".into(), id.clone());
+        }
+    }
+    for ev in &on {
+        if !nn.contains(ev) {
+            p.attrs.insert(format!("sky-{ev}"), String::new());
+            if nn.is_empty() {
+                p.attrs.insert("data-sky-hid".into(), String::new());
+            }
         }
     }
 }
@@ -245,6 +288,87 @@ mod tests {
         assert_eq!(p.len(), 1);
         // Go parity: present BoolAttr encodes as {k: k}, NOT {k: ""}.
         assert_eq!(p[0].attrs.get("disabled").map(String::as_str), Some("disabled"));
+    }
+
+    #[test]
+    fn diff_event_added_emits_marker_and_hid() {
+        // <button> gains an onClick: client needs sky-click + data-sky-hid to bind.
+        let mut a: Html<()> = Html::HElement("button".into(), vec![], vec![]);
+        let mut b: Html<()> = Html::HElement(
+            "button".into(),
+            vec![Attribute::EventAttr(Event::OnMsg("click".into(), ()))],
+            vec![],
+        );
+        ids(&mut a);
+        ids(&mut b);
+        let p = diff(&a, &b);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].attrs.get("sky-click").map(String::as_str), Some("click"));
+        assert_eq!(p[0].attrs.get("data-sky-hid").map(String::as_str), Some("r"));
+    }
+
+    #[test]
+    fn diff_event_removed_clears_marker_and_hid() {
+        let mut a: Html<()> = Html::HElement(
+            "button".into(),
+            vec![Attribute::EventAttr(Event::OnMsg("click".into(), ()))],
+            vec![],
+        );
+        let mut b: Html<()> = Html::HElement("button".into(), vec![], vec![]);
+        ids(&mut a);
+        ids(&mut b);
+        let p = diff(&a, &b);
+        assert_eq!(p.len(), 1);
+        // Removal sentinel: empty string for both the marker and the (now-stale) hid.
+        assert_eq!(p[0].attrs.get("sky-click").map(String::as_str), Some(""));
+        assert_eq!(p[0].attrs.get("data-sky-hid").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn diff_mixed_child_text_change_replaces_parent() {
+        // Parent with [<span>, text]; the text child changes → Go emits a parent
+        // html-replace (the sole-text fast path doesn't apply to mixed children).
+        let mk = |t: &str| -> Html<()> {
+            Html::HElement(
+                "div".into(),
+                vec![],
+                vec![
+                    Html::HElement("span".into(), vec![], vec![]),
+                    Html::HText(t.into()),
+                ],
+            )
+        };
+        let mut a = mk("x");
+        let mut b = mk("y");
+        ids(&mut a);
+        ids(&mut b);
+        let p = diff(&a, &b);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].id, "r");
+        assert!(p[0].html.is_some(), "expected html replace, got {:?}", p[0]);
+        assert!(p[0].text.is_none());
+    }
+
+    #[test]
+    fn diff_child_count_change_replaces_parent() {
+        let mut a: Html<()> = Html::HElement(
+            "ul".into(),
+            vec![],
+            vec![Html::HElement("li".into(), vec![], vec![])],
+        );
+        let mut b: Html<()> = Html::HElement(
+            "ul".into(),
+            vec![],
+            vec![
+                Html::HElement("li".into(), vec![], vec![]),
+                Html::HElement("li".into(), vec![], vec![]),
+            ],
+        );
+        ids(&mut a);
+        ids(&mut b);
+        let p = diff(&a, &b);
+        assert_eq!(p.len(), 1);
+        assert!(p[0].html.is_some());
     }
 
     #[test]
