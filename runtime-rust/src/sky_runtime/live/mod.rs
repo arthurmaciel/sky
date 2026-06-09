@@ -399,32 +399,38 @@ fn live_ttl() -> std::time::Duration {
 ///
 /// `init` ignores its `req` arg for P1; the generated `main_init` is monomorphic
 /// over a unit-shaped arg, so we call `init(())`.
+#[allow(clippy::too_many_arguments)]
 pub fn live_app<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
     init: FInit,
     update: FUpdate,
     view: FView,
     subscriptions: FSubs,
+    store_kind: String,
+    store_path: String,
 ) -> SkyTask<E, ()>
 where
     E: From<String> + Send + 'static,
-    Model: Clone + Send + 'static,
-    Msg: Clone + Send + 'static,
+    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+    Msg: Clone + Send + Sync + 'static,
     FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
     FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
 {
-    let state = LiveState {
-        store: Arc::new(store::MemoryStore::new(live_ttl())),
-        init: Arc::new(init),
-        update: Arc::new(update),
-        view: Arc::new(view),
-        subs: Arc::new(subscriptions),
-        // No routing: GET serves the freshly-init'd model unchanged; no params.
-        route_resolver: Arc::new(|m, _path| m),
-        param_resolver: Arc::new(|_path| crate::sky_runtime::dict::dict_empty()),
-    };
-    serve_live(state)
+    Box::pin(async move {
+        let store = store::choose_store::<Model, Msg>(&store_kind, &store_path, live_ttl()).await;
+        let state = LiveState {
+            store,
+            init: Arc::new(init),
+            update: Arc::new(update),
+            view: Arc::new(view),
+            subs: Arc::new(subscriptions),
+            // No routing: GET serves the freshly-init'd model unchanged; no params.
+            route_resolver: Arc::new(|m, _path| m),
+            param_resolver: Arc::new(|_path| crate::sky_runtime::dict::dict_empty()),
+        };
+        serve_live(state).await
+    })
 }
 
 /// `Std.Live.app { …, routes, notFound }` with URL routing — serve via axum.
@@ -444,11 +450,13 @@ pub fn live_app_routed<E, Model, Msg, Page, FInit, FUpdate, FView, FSubs, FSetPa
     routes: Vec<route::Route<Page>>,
     not_found: Page,
     set_page: FSetPage,
+    store_kind: String,
+    store_path: String,
 ) -> SkyTask<E, ()>
 where
     E: From<String> + Send + 'static,
-    Model: Clone + Send + 'static,
-    Msg: Clone + Send + 'static,
+    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+    Msg: Clone + Send + Sync + 'static,
     Page: Clone + Send + Sync + 'static,
     FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
@@ -456,32 +464,35 @@ where
     FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
     FSetPage: Fn(Page, Model) -> Model + Send + Sync + 'static,
 {
-    let routes = Arc::new(routes);
-    let not_found = Arc::new(not_found);
-    let set_page = Arc::new(set_page);
-    let routes_for_params = routes.clone();
-    let resolver: Arc<dyn Fn(Model, &str) -> Model + Send + Sync> =
-        Arc::new(move |m, path| (set_page)(route::match_routes(&routes, &not_found, path), m));
-    let param_resolver: Arc<dyn Fn(&str) -> crate::sky_runtime::dict::SkyDict<String> + Send + Sync> =
-        Arc::new(move |path| route::match_params(&routes_for_params, path));
-    let state = LiveState {
-        store: Arc::new(store::MemoryStore::new(live_ttl())),
-        init: Arc::new(init),
-        update: Arc::new(update),
-        view: Arc::new(view),
-        subs: Arc::new(subscriptions),
-        route_resolver: resolver,
-        param_resolver,
-    };
-    serve_live(state)
+    Box::pin(async move {
+        let routes = Arc::new(routes);
+        let not_found = Arc::new(not_found);
+        let set_page = Arc::new(set_page);
+        let routes_for_params = routes.clone();
+        let resolver: Arc<dyn Fn(Model, &str) -> Model + Send + Sync> =
+            Arc::new(move |m, path| (set_page)(route::match_routes(&routes, &not_found, path), m));
+        let param_resolver: Arc<dyn Fn(&str) -> crate::sky_runtime::dict::SkyDict<String> + Send + Sync> =
+            Arc::new(move |path| route::match_params(&routes_for_params, path));
+        let store = store::choose_store::<Model, Msg>(&store_kind, &store_path, live_ttl()).await;
+        let state = LiveState {
+            store,
+            init: Arc::new(init),
+            update: Arc::new(update),
+            view: Arc::new(view),
+            subs: Arc::new(subscriptions),
+            route_resolver: resolver,
+            param_resolver,
+        };
+        serve_live(state).await
+    })
 }
 
 /// Shared server setup for `live_app` / `live_app_routed`: nested HTTP
 /// handlers (`page` / `sse_handler` / `event_handler`), router + bind/serve.
 /// The only per-entry difference (the `route_resolver`) lives on `state`.
-fn serve_live<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
+async fn serve_live<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
     state: LiveState<Model, Msg, FInit, FUpdate, FView, FSubs>,
-) -> SkyTask<E, ()>
+) -> SkyResult<E, ()>
 where
     E: From<String> + Send + 'static,
     Model: Clone + Send + 'static,
@@ -497,7 +508,7 @@ where
     use axum::routing::{get, post};
     use axum::Router;
 
-    Box::pin(async move {
+    {
         // ── GET page (root + any path) ────────────────────────────────────
         async fn page<Model, Msg, FInit, FUpdate, FView, FSubs>(
             State(st): State<LiveState<Model, Msg, FInit, FUpdate, FView, FSubs>>,
@@ -753,7 +764,7 @@ where
             Ok(()) => ok_res(()),
             Err(e) => SkyResult::Err(format!("Live.app: serve: {e}").into()),
         }
-    })
+    }
 }
 
 /// Read the `sky_sid` cookie from request headers.
