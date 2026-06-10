@@ -18,6 +18,41 @@ pub(crate) fn lcg_next() -> u64 {
     next
 }
 
+// ── Deterministic seeded PRNG (splitmix64) — byte-for-byte parity with Go's
+//    seedStep / Random_seededInt/Float/Choice (runtime-go/rt/rt.go). Pure. ──
+
+fn seed_step(z_in: i64) -> i64 {
+    let mut z = (z_in as u64).wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z = z ^ (z >> 31);
+    z as i64
+}
+
+/// `Random.seededIntRaw : Int -> Int -> Int -> (Int, Int)` → (value, newSeed).
+pub fn random_seeded_int(s: i64, lo: i64, hi: i64) -> (i64, i64) {
+    let next = seed_step(s);
+    if hi <= lo { return (lo, next); }
+    let width = (hi - lo + 1) as u64;
+    let v = lo + ((next as u64 >> 33) % width) as i64;
+    (if v < lo { lo } else { v }, next)
+}
+
+/// `Random.seededFloatRaw : Int -> (Float, Int)` → (value in [0,1), newSeed).
+pub fn random_seeded_float(s: i64) -> (f64, i64) {
+    let next = seed_step(s);
+    let f = (next as u64 >> 11) as f64 / (1u64 << 53) as f64;
+    (f, next)
+}
+
+/// `Random.seededChoiceRaw : Int -> List a -> (Maybe a, Int)`.
+pub fn random_seeded_choice<T: Clone>(s: i64, items: Vec<T>) -> (SkyMaybe<T>, i64) {
+    let next = seed_step(s);
+    if items.is_empty() { return (SkyMaybe::Nothing, next); }
+    let idx = (next as u64 >> 33) as usize % items.len();
+    (SkyMaybe::Just(items[idx].clone()), next)
+}
+
 pub fn random_int<E: Send + 'static>(lo: i64, hi: i64) -> SkyTask<E, i64> {
     lcg_init();
     let range = (hi - lo).abs() + 1;
