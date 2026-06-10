@@ -20,6 +20,14 @@ pub fn basics_error_to_string<T: std::fmt::Debug>(v: T) -> String {
     format!("{:?}", v)
 }
 
+/// Sky `Debug.toString` — the `{{expr}}` string-interpolation stringifier.
+/// Display-based, NOT Debug: a `String` interpolates as itself (no surrounding
+/// quotes) and scalars format like Go's `%v`. Mirrors Go's `Debug_toString`
+/// (`String → s`, else `Sprintf("%v", …)`).
+pub fn debug_to_string<T: std::fmt::Display>(v: T) -> String {
+    format!("{}", v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

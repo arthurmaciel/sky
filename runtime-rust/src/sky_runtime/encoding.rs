@@ -36,9 +36,13 @@ pub(crate) fn bytes_to_sky(bytes: &[u8]) -> String {
 
 /// Decode an application/x-www-form-urlencoded component: `+` -> space, `%XX` ->
 /// byte (best-effort). Shared by the HTTP server's query parser and the HTTP
-/// client's parseQuery so they stay consistent — hence gated to exactly those
-/// features (encoding.rs is always compiled; its only callers are not).
-#[cfg(any(feature = "server", feature = "http_client"))]
+/// client's parseQuery so they stay consistent.
+//
+// NOT cfg-gated: generated projects compile the runtime WITHOUT cargo features
+// (their server.rs is always included), so a `#[cfg(feature=…)]` gate would drop
+// this from generated server builds and break them. In the standalone crate it
+// only looks dead under a feature subset, hence `allow(dead_code)`.
+#[allow(dead_code)]
 pub(crate) fn form_url_decode(s: &str) -> String {
     let s = s.replace('+', " ");
     let b = s.as_bytes();

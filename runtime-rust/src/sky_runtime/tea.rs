@@ -60,6 +60,11 @@ pub fn sub_batch<M>(list: Vec<SkySub<M>>) -> SkySub<M> { SkySub::Batch(list) }
 /// Sub.every : Int -> msg -> Sub msg — dispatch `msg` every `ms` milliseconds.
 pub fn sub_every<M>(ms: i64, msg: M) -> SkySub<M> { SkySub::Every { ms, msg } }
 
+/// Time.every : Int -> msg -> Sub msg — alias of `Sub.every` (matches Go's
+/// `Time_every`, which delegates to `Sub_every`). The `Time_every` kernel name
+/// lowers to this.
+pub fn time_every<M>(ms: i64, msg: M) -> SkySub<M> { sub_every(ms, msg) }
+
 // `Sky.Core.Http.Stream.chunks` → `Sub_subscribeStream` lives in `http_stream.rs`
 // now (alongside the stream registry it drains + the bridged `ChunkEvent` enum).
 // It returns a `SkySub::Source` driven by this module's SubManager.
