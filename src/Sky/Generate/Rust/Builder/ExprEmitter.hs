@@ -1279,7 +1279,13 @@ taskFailPin ctx
     | otherwise = case ecExpectedType ctx of
         Just (Can.TType _ "Task" [_, a]) | not (hasTypeVars a) ->
             "::<_, " ++ typeToRustString (ecRecordMap ctx) a ++ ">"
-        _ -> "::<_, i64>"
+        -- No concrete expected type: fall back to the enclosing function's
+        -- own Task return element (sleepThenFail : Task Error a, where the
+        -- helper's sig stays polymorphic but the call-site resolved a=String
+        -- onto the rendered SkyTask<String> signature). Beats the i64 default.
+        _ -> case ecReturnElem ctx of
+            Just elemTy | elemTy /= "i64" -> "::<_, " ++ elemTy ++ ">"
+            _ -> "::<_, i64>"
 
 -- | The emitted Rust name of a call's callee, for GENERATED stdlib functions
 -- (which aren't kernels, so calleeKernelName returns Nothing). A VarTopLevel

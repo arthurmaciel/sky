@@ -400,6 +400,18 @@ data EmitCtx = EmitCtx
         --   `ecSolvedTypes` wholesale — doing so shadowed cross-module calls to
         --   same-named functions (Std.Money.fromString hiding Std.Decimal's →
         --   wrong arity/currying). Body lowering keeps using the flat map.
+    , ecReturnElem :: Maybe String
+        -- ^ The Rust element-type string of the ENCLOSING function's
+        --   `SkyTask<T>` return (the `T`), seeded when emitting a def body.
+        --   Fallback for `taskFailPin`: a `Task.fail` in the function's tail
+        --   Task chain (`Time.sleep ms |> Task.andThen (\\_ -> Task.fail …)`)
+        --   has element type = the function's return element, but the solver
+        --   leaves the helper's own sig polymorphic (`Task Error a`), so
+        --   `ecExpectedType` carries a TVar. Without this, the turbofish
+        --   defaults to `i64` and mismatches the resolved `SkyTask<String>`
+        --   signature (18-job-queue's sleepThenFail E0308). Priority is below
+        --   a concrete `ecExpectedType`; only fires as the last resort before
+        --   the `i64` default.
     }
 
 intercalate :: String -> [String] -> String

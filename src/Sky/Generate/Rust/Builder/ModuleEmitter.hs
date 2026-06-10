@@ -365,7 +365,8 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         ctx' = ctx { ecCloneVars = Set.fromList multiVars
                    , ecCopyVars = copyVars
                    , ecInGenericFn = not (null genVars')  -- Sub-A.13
-                   , ecClosureDefs = collectClosureDefs body }
+                   , ecClosureDefs = collectClosureDefs body
+                   , ecReturnElem = taskElemOf retTyFinal }
         bodyStr = exprToRustString ctx' body
         -- Collect destructure preludes for non-trivial pattern args. The
         -- prelude is `let <Pattern> = __pN else { unreachable!() };` per
@@ -427,12 +428,23 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
         ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx
                    , ecInGenericFn = not (null tvarNames)  -- Sub-A.13
-                   , ecClosureDefs = collectClosureDefs body }
+                   , ecClosureDefs = collectClosureDefs body
+                   , ecReturnElem = taskElemOf ret }
     in RustFunction rustName genDecl params ret (preludes ++ exprToRustString ctx' body)
 defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
     let vars = intercalate "_" (patBindingVars pat)
         fnName = if null vars then "__destruct" else "__destruct_" ++ vars
     in RustFunction fnName "" [patternToRustParam pat] "()" (exprToRustString ctx expr)
+
+-- | Extract the element-type string `T` from a rendered `SkyTask<T>` return
+-- type. Returns Nothing for non-Task or unparenthesised shapes. Used to seed
+-- `ecReturnElem` so a polymorphic-helper `Task.fail` in the function's tail
+-- chain pins the turbofish to the resolved element (not the i64 default).
+taskElemOf :: String -> Maybe String
+taskElemOf s
+    | "SkyTask<" `isPrefixOf` s && not (null s) && last s == '>' =
+        Just (drop (length ("SkyTask<" :: String)) (init s))
+    | otherwise = Nothing
 
 -- ============================================================
 -- returnTypeWithGenerics (lines 1346-1370 of Builder.hs)
@@ -577,7 +589,7 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
             , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing }
         -- Multi-module signature scoping. The flat `ecSolvedTypes` (`_stEnv`)
         -- collides on bare names across modules, so a DEP module's function
         -- (e.g. `Lib.Db.exec : String -> List String -> Task Error ()`) whose
