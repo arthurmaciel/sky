@@ -119,7 +119,17 @@ local-closure params (E0282) + serde + arg-count, a different class).
    (`Db`), `ts` into the SQL-params `Vec<String>` element (`String`). Reuse the
    `inferParamRustType` body-scan (add `db_exec`/`db_query` arg0=`Db` to
    `kernelArgRustType`, and a "Vec<String> element → String" case), rendering
-   `|db: Db, ts: String|`. `18` is a multi-fix conquest like `12` was: also
+   `|db: Db, ts: String|`. ATTEMPTED + REVERTED (2026-06-10): annotating
+   closure params from `ecRegionTypes` does NOT work — the solver records types
+   for EXPRESSION regions, not PATTERN (param) regions, so the lookup always
+   misses (closures stayed bare, no regression but no effect). The working
+   approach must be body-driven: `db` flows into `db_exec` arg0 (add
+   `db_exec`/`db_query` arg0→`Db` to `kernelArgRustType`, reuse
+   `inferParamRustType`), but `ts` is a Vec ELEMENT (`vec![…, ts]` → `db_exec`
+   arg2 `Vec<String>`), NOT a direct call arg — so `inferParamRustType` needs a
+   new "param is an element of a Vec-typed kernel arg → element type" case.
+   That's the focused-session shape. `18` is a multi-fix conquest like `12` was:
+   also
    needs serde model-detection (E0277 — its `MainModel` isn't stamped; likely
    the E0282 leaves `view`/`init` types polymorphic so detection fails),
    arg-count (E0061), and missing kernels (E0425). Tackle as one focused,
