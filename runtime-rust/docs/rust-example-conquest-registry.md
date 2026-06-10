@@ -40,19 +40,54 @@ turbofish, Live entry-main, Live init generics, canDefBody) + runtime kernels
 
 ## Root-cause classes (leverage order)
 
-1. **serde-derive on Live models (E0277)** — `10, 18, 28` (+ contributes to `12`).
-   Root cause: `Walker.collectLiveSerdeTypes` model-type detection is too narrow
-   (single-module `view`/`init` VarTopLevel). Fix: robust detection across
-   multi-module apps + component composition. *Defying — plan it.*
-2. **mass E0308 type-mismatch** — `08, 12` (100+ each), `33` (4). Almost certainly
-   one systematic lowering bug per example. Root-cause the dominant mismatch
-   first; one fix likely clears the bulk.
+1. **serde-derive on Live models (E0277)** — splits into TWO sub-classes:
+   - **1a. multi-module model-detection collision** — `10` (+ `17`). Root cause
+     FOUND + FIXED: `Walker.collectLiveSerdeTypes` looked up `view`/`init` by
+     BARE name in the flat `_stEnv`, which collides across modules. A component
+     module (Counter) that also defines `view`/`init` shadowed Main's, so the
+     model resolved to Counter's `view : (Msg -> parentMsg) -> Counter -> ...`
+     (param 0 is a function, not the model) → empty closure → MainModel never
+     got serde. Fix: module-scoped lookup via `_stPerModuleEnv` keyed by the
+     `VarTopLevel` home module (Walker/ModuleEmitter/Project threaded).
+   - **1b. single-module closure-miss** — `18, 28` (both single-module Main.sky,
+     so NOT the collision). Model IS detected; some type in its transitive
+     closure either can't derive serde (function-typed field / opaque) or the
+     BFS misses it. *Distinct diagnosis pending — regenerate + inspect which
+     struct lacks the derive.*
+2. **mass E0308 type-mismatch** — `12` (146), `08` (111), `17` (97). ROOT CAUSE
+   FOUND + FIXED (keystone): multi-module FUNCTION-SIGNATURE type resolution.
+   `defToRustItem` looked up each function's param/return types by BARE name in
+   the flat `ecSolvedTypes` (`_stEnv`); a DEP module's function (e.g.
+   `Lib.Db.exec : String -> List String -> Task Error ()`, unannotated) missed
+   the lookup → fell back to body-analysis defaults (`args: String`, return
+   `()`) instead of `Vec<String>` / `SkyTask`. Every call site then mismatched
+   (E0308 ×100+). Fix: `scopeCtxToModule` layers each module's own
+   `_stPerModuleEnv[M]` over the flat map in `buildProgram` so dep-module
+   signatures resolve authoritatively. Same family as the serde 1a fix.
+   NOTE: `08`/`17` ALSO carry Go-FFI deps (class 3 below), so the E0308 fix
+   advances but may not fully clear them; `12` is pure-Sky so it's the
+   keystone verifier.
 3. **missing kernels (E0425)** — `08` (21), `10` (1). Per-kernel runtime adds
    (the `time_every`/`debug_to_string` pattern). Tractable, enumerable.
 4. **parse / malformed Rust** — `16, 17, 35`. Codegen emitting invalid syntax;
    each a distinct emitter bug. `17` (brace imbalance) checked first.
 5. **type-inference (E0282) / missing method (E0599)** — `18, 28`.
-6. **unknown** — `03, 05, 13`. Re-diagnose (logs were lost).
+6. **Go-FFI on the Rust target (DEFYING — needs Rust-native FFI)** — `03, 05,
+   13` (fail early: `.skycache/go/_bindings.go: resource busy` in the FFI gen,
+   no Rust emitted) + `08, 16, 17` (emit Rust, but Go-package calls become
+   E0425 missing-fns / E0308 / parse junk). These import Go packages
+   (`github.com/google/uuid`, `gorilla/mux`, firestore/firebase, …). The Rust
+   backend has no bindings for arbitrary Go packages — `examples/rust/` is its
+   separate Rust-native FFI set. Conquering these needs the Rust-native FFI
+   capability (a roadmap slice), not a codegen patch. The file-lock in `03/05/
+   13` is a secondary bug (Rust path mis-reuses the Go FFI pipeline + double-
+   opens `_bindings.go`); worth a defensive fix so they emit a clean
+   "FFI-unsupported" instead of a lock crash, but the real unblock is native FFI.
+
+7. **codegen emits invalid type-alias LHS** — `35` (`type (String, i64) =
+   String;` — an `RAliasDef` whose NAME is a tuple type). A tuple/composite
+   type-alias is emitted with the tuple as the alias identifier. Tractable
+   emitter fix (suppress / mangle the alias when its key is a structural type).
 
 ## Next actions (tractable-first)
 

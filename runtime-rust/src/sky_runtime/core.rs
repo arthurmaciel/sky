@@ -73,7 +73,11 @@ pub fn to_array<E: From<String>, T: Clone, const N: usize>(xs: &[T]) -> SkyResul
 // ===========================================
 // Maybe
 // ===========================================
-#[derive(Clone, Debug, PartialEq)]
+// serde derives are CONDITIONAL (the macro emits `impl<T: Serialize> … for
+// SkyMaybe<T>`), so a `SkyMaybe<NonSerde>` is unaffected — but a Sky.Live model
+// carrying a `Maybe X` field (X serde-able) now serialises for the session
+// store. Without this, any model with a `Maybe`/`Result` field failed E0277.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SkyMaybe<T> {
     Nothing,
     Just(T),
@@ -98,7 +102,7 @@ pub fn sky_maybe_and_then<T, U>(m: SkyMaybe<T>, f: impl FnOnce(T) -> SkyMaybe<U>
 // ===========================================
 // Result (generic over error type E)
 // ===========================================
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SkyResult<E, A> {
     Ok(A),
     Err(E),
