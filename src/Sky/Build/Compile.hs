@@ -56,7 +56,6 @@ import qualified Sky.Type.Type as T
 import qualified Sky.Generate.Go.Type as GoType
 import qualified Sky.Generate.Go.Record as Rec
 import qualified Sky.Build.FfiGen as FfiGen
-import qualified Sky.Generate.Rust.Builder as RustBuilder
 import qualified Sky.Generate.Rust.Project as RustProject
 import qualified Sky.Build.ModuleGraph as Graph
 import qualified Sky.Build.Dce as Dce

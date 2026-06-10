@@ -1,0 +1,1733 @@
+module Sky.Generate.Rust.Builder.ExprEmitter
+    ( substVar
+    , collectVarLocalsMulti
+    , collectFreeVarLocalsMulti
+    , collectVarLocals
+    , argToRustString
+    , rustStringLit
+    , rustCharLit
+    , exprToRustString
+    , EmptyKind(..)
+    , emptyArgKind
+    , isEmptyishArg
+    , ParamSrc(..)
+    , calleeParamStrings
+    , rustTypeTokens
+    , isRustTypeVarTok
+    , isClosureParamStr
+    , rustConcreteLowerToks
+    , emitEmptyArg
+    , isWildcardPat
+    , isWildcardClosure
+    , pinTaskCall
+    , emitPinnedTask
+    , peepholeArg
+    , splitKernelName
+    , exprToRustInner
+    , taskExprInnerType
+    , inferParamRustType
+    , collectClosureDefs
+    , canDefBody
+    , taskInnerTypeStr
+    , taskExprInnerTypeCall
+    , emitDefaultCall
+    , solveArgType
+    , binopToRust
+    , defToRustString
+    , branchToRustString
+    , branchToRustStringStrWrap
+    , patternToMatchString
+    , ctorArgToPattern
+    , flattenCons
+    ) where
+
+import Data.List (intercalate, isSuffixOf, isPrefixOf, isInfixOf, sortBy, stripPrefix)
+import Data.Char (isUpper, isDigit)
+import Numeric (showHex)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
+import qualified Sky.AST.Canonical as Can
+import qualified Sky.Sky.ModuleName as ModuleName
+import qualified Sky.Reporting.Annotation as Ann
+import Sky.Generate.Rust.Builder.Types
+    ( EmitCtx(..)
+    , kernelsNeedingErrorPin
+    , kernelsZeroArg
+    , topLevelErrorPin
+    )
+import Sky.Generate.Rust.Builder.SigRegistry
+    ( knownDefSig
+    )
+import Sky.Generate.Rust.Builder.TypeRenderer
+    ( typeToRustString
+    , rustifyExpectedType
+    , formTargetRustType
+    , extractParamTypes
+    , extractReturnType
+    , hasTypeVars
+    )
+import Sky.Generate.Rust.Builder.Kernel
+    ( kernelToRust
+    , kernelSigPrefix
+    , splitKernelName
+    )
+import Sky.Generate.Rust.Builder.Naming
+    ( rustSafeIdent
+    , kernelCtorToRust
+    , toSnakeCase
+    )
+import Sky.Generate.Rust.Builder.Pattern
+    ( patternToRustParam
+    , patBindingVars
+    , hasStrPat
+    , isWildcard
+    )
+
+-- | Walk an expression and collect VarLocal names, counting occurrences.
+-- Used to decide which variables need .clone() (those used ≥ 2 times).
+-- | Substitute every VarLocal matching a name with an inline string
+-- (e.g. `vec![...]`).  Handles common expression forms.  The println
+-- special case (Log.println → log_info) is mirrored from exprToRustInner.
+substVar :: EmitCtx -> String -> String -> Can.Expr -> String
+substVar ctx name inline = go
+  where
+    go e@(Ann.At _ expr) = case expr of
+        Can.VarLocal n | n == name -> inline
+        Can.VarLocal n -> rustSafeIdent n ++ if n `Set.member` ecCloneVars ctx && not (n `Set.member` ecCopyVars ctx) then ".clone()" else ""
+        Can.VarTopLevel mod n ->
+            let modName = ModuleName._name mod
+                modPrefix = map (\c -> if c == '.' then '_' else c) modName
+                fnName = toSnakeCase (modPrefix ++ "_" ++ n)
+                -- Check kernel aliases so VarTopLevel routes through kernel dispatch
+                kernelName = kernelToRust modName n
+            in if fnName /= kernelName && not ("ffi_kernel" `isPrefixOf` kernelName)
+               then kernelName
+               else case Map.lookup (modName, n) (ecKernelAliases ctx) of
+                    Just (kMod, kFn) -> kernelToRust kMod kFn
+                    Nothing -> if Set.member (modPrefix, n) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
+        Can.VarKernel mod n ->
+            let fnName = kernelToRust mod n
+            in if Set.member (mod, n) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
+        Can.VarCtor _ mn tn cn _ -> kernelCtorToRust mn tn cn
+        Can.Chr [c] -> rustCharLit c
+        Can.Chr s -> rustStringLit s  -- multi-char or empty: fall back to string
+        Can.Str s -> rustStringLit s ++ ".to_string()"
+        Can.Int i -> show i
+        Can.Float f -> show f
+        Can.Unit -> "()"
+        Can.List es -> "vec![" ++ intercalate ", " (map go es) ++ "]"
+        Can.Negate e -> "-" ++ go e
+        Can.Lambda params body ->
+            "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ go body ++ " }"
+        Can.Call fn args ->
+            let fs = go fn
+                isPrintln = "println" `isSuffixOf` fs
+            in if isPrintln
+               then "log_info(" ++ intercalate " ++ \" \" ++ " (map go args) ++ ")"
+               else let noClone = case fn of
+                            Ann.At _ (Can.VarKernel _ n2) -> n2 == "run" || n2 == "sequence" || n2 == "parallel"
+                            _ -> False
+                        as = map (\a -> case a of
+                             Ann.At _ (Can.VarLocal n2) | n2 == name -> inline
+                             Ann.At _ (Can.VarLocal n2) | noClone -> rustSafeIdent n2
+                             Ann.At _ (Can.VarLocal n2) ->
+                                 (let needClone = Set.member n2 (ecCloneVars ctx) && not (Set.member n2 (ecCopyVars ctx))
+                                  in if needClone then rustSafeIdent n2 ++ ".clone()" else rustSafeIdent n2)
+                             _ -> go a) args
+                    in fs ++ "(" ++ intercalate ", " as ++ ")"
+        Can.Let def body -> goDef def ++ go body
+          where
+            goDef (Can.Def (Ann.At _ n) [] dBody) = "let " ++ n ++ " = " ++ go dBody ++ "; "
+            goDef (Can.Def (Ann.At _ n) ps dBody) = "let " ++ n ++ " = |" ++ intercalate ", " (map patternToRustParam ps) ++ "| { " ++ go dBody ++ " }; "
+            goDef _ = error "Builder.Rust.substVar.goDef: unsupported Can.Def variant"
+        Can.LetRec defs body ->
+            let strs = map (\(Can.Def (Ann.At _ n) ps d) -> n ++ " = |" ++ intercalate ", " (map patternToRustParam ps) ++ "| { " ++ go d ++ " }") defs
+            in "let mut " ++ intercalate "; let mut " strs ++ "; " ++ go body
+        Can.LetDestruct pat e0 body ->
+            "let " ++ patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ go e0 ++ "; " ++ go body
+        Can.Case scrut branches ->
+            "match " ++ go scrut ++ " { " ++ intercalate ", " (map (\(Can.CaseBranch p b) -> patternToMatchString (ecRecordMap ctx) p ++ " => " ++ go b) branches) ++ " }"
+        Can.If [] elseExpr -> go elseExpr
+        Can.If ((c,t):rest) elseExpr ->
+            "if " ++ go c ++ " { " ++ go t ++ " }"
+            ++ concatMap (\(c2,t2) -> " else if " ++ go c2 ++ " { " ++ go t2 ++ " }") rest
+            ++ " else { " ++ go elseExpr ++ " }"
+        Can.Binop op _ _ _ a b
+            | op == "|>" -> go b ++ "(" ++ go a ++ ")"
+            | op == "<|" -> go a ++ "(" ++ go b ++ ")"
+            | op == "::" -> "sky_list_cons(" ++ go a ++ ", " ++ go b ++ ")"
+            | op == "++" -> "format!(\"{}{}\", " ++ go a ++ ", " ++ go b ++ ")"
+            | otherwise -> "(" ++ go a ++ " " ++ binopToRust op ++ " " ++ go b ++ ")"
+        -- Uncommon expression forms — fall back to normal emission
+        Can.Record _ -> exprToRustString ctx e
+        Can.Tuple _ _ _ -> exprToRustString ctx e
+        Can.Access _ _ -> exprToRustString ctx e
+        Can.Accessor _ -> exprToRustString ctx e
+        Can.Update _ _ _ -> exprToRustString ctx e
+
+-- | The RHS body expression of a let-binding, across all Def variants — plain
+-- (`let x = …`), type-annotated (`let x : T = …`, a TypedDef), and
+-- destructuring (`let (a, b) = …`, a DestructDef). The var-counting traversals
+-- only need the binding's RHS, so this unifies the three shapes and stops the
+-- non-exhaustive crash on annotated/destructuring lets (e.g. 10-live-component).
+canDefBody :: Can.Def -> Can.Expr
+canDefBody (Can.Def _ _ b)          = b
+canDefBody (Can.TypedDef _ _ _ b _) = b
+canDefBody (Can.DestructDef _ e)    = e
+
+collectVarLocalsMulti :: Can.Expr -> Map.Map String Int
+collectVarLocalsMulti = go Set.empty
+  where
+    go bound (Ann.At _ expr) = case expr of
+        Can.VarLocal n | n `Set.notMember` bound -> Map.singleton n 1
+        Can.VarLocal _ -> Map.empty
+        Can.Call fn args -> Map.unionsWith (+) (go bound fn : map (go bound) args)
+        Can.Lambda params body ->
+            let bound' = foldl (\s p -> foldr Set.insert s (patBindingVars p)) bound params
+            in go bound' body
+        Can.Let def body ->
+            Map.unionWith (+) (go bound (canDefBody def)) (go bound body)
+        Can.LetRec defs body ->
+            let goDefs = foldl (\a d -> Map.unionWith (+) a (go bound (canDefBody d))) Map.empty defs
+            in Map.unionWith (+) (go bound body) goDefs
+        Can.LetDestruct pat expr body ->
+            Map.unionWith (+) (go bound expr) (go bound body)
+        -- Sub-D: count the scrutinee too. A var used in a case scrutinee
+        -- (e.g. `case f key of …`) AND again elsewhere must be marked multi-use
+        -- so it gets cloned at the first use — otherwise it's moved and the
+        -- second use fails (E0382). The scrutinee was previously ignored.
+        -- Case ARMS are mutually exclusive: only one runs, so a var used once
+        -- per arm is consumed at most once — take the MAX across arms, not the
+        -- sum. (Summing over-counted and inserted spurious `.clone()`s, fatal
+        -- for move-only types like SkyCmd/SkySub which aren't Clone → E0599.)
+        -- The scrutinee is evaluated unconditionally, so it still SUMS with the
+        -- per-arm max; a var used in the scrutinee AND an arm correctly counts 2
+        -- (clone), and a var reused after the case is caught by the outer sum.
+        Can.Case scrut branches ->
+            let branchMax = foldl (\a (Can.CaseBranch _ b) ->
+                                Map.unionWith max a (go bound b)) Map.empty branches
+            in Map.unionWith (+) (go bound scrut) branchMax
+        -- If/then/else: conditions evaluate unconditionally (sum, conservative —
+        -- over-count is safe), bodies are exclusive (max).
+        Can.If branches elseBranch ->
+            let condSum  = foldl (\a (c, _) -> Map.unionWith (+) a (go bound c)) Map.empty branches
+                bodyMax  = foldl (\a (_, t) -> Map.unionWith max a (go bound t)) (go bound elseBranch) branches
+            in Map.unionWith (+) condSum bodyMax
+        Can.Binop _ _ _ _ a b -> Map.unionWith (+) (go bound a) (go bound b)
+        Can.Access r _ -> go bound r
+        Can.Update _ r updates -> Map.unionWith (+) (go bound r) (foldl (\a (_, Can.FieldUpdate _ e) -> Map.unionWith (+) a (go bound e)) Map.empty (Map.toList updates))
+        Can.Record fields -> foldl (\a (_, v) -> Map.unionWith (+) a (go bound v)) Map.empty (Map.toList fields)
+        Can.List es -> foldl (\a e -> Map.unionWith (+) a (go bound e)) Map.empty es
+        Can.Tuple a b rest -> foldl (\a e -> Map.unionWith (+) a (go bound e)) Map.empty (a:b:rest)
+        Can.Negate e -> go bound e
+        Can.Accessor _ -> Map.empty
+        Can.VarTopLevel _ _ -> Map.empty
+        Can.VarKernel _ _ -> Map.empty
+        Can.VarCtor _ _ _ _ _ -> Map.empty
+        Can.Chr _ -> Map.empty
+        Can.Str _ -> Map.empty
+        Can.Int _ -> Map.empty
+        Can.Float _ -> Map.empty
+        Can.Unit -> Map.empty
+
+-- | Like collectVarLocalsMulti but counts ONLY variables that are FREE in the
+-- expression — every binder (case patterns, let names, lambda params, destructs)
+-- is added to `bound`, so inner-bound vars are excluded. Used by the clone
+-- PRELUDE in defToRustString, which must clone only outer-captured vars; a
+-- case-pattern var like `Ok parsed -> …parsed…parsed…` is bound inside the body,
+-- so it must NOT get a `let parsed = parsed.clone();` prelude (it isn't in scope
+-- there — E0425). Use-site cloning of such vars is handled separately via
+-- ecCloneVars (which intentionally still counts them).
+collectFreeVarLocalsMulti :: Can.Expr -> Map.Map String Int
+collectFreeVarLocalsMulti = go Set.empty
+  where
+    go bound (Ann.At _ expr) = case expr of
+        Can.VarLocal n | n `Set.notMember` bound -> Map.singleton n 1
+        Can.VarLocal _ -> Map.empty
+        Can.Call fn args -> Map.unionsWith (+) (go bound fn : map (go bound) args)
+        Can.Lambda params body ->
+            let bound' = foldl (\s p -> foldr Set.insert s (patBindingVars p)) bound params
+            in go bound' body
+        Can.Let (Can.Def (Ann.At _ n) _ defBody) body ->
+            Map.unionWith (+) (go bound defBody) (go (Set.insert n bound) body)
+        Can.LetRec defs body ->
+            let names = [ n | Can.Def (Ann.At _ n) _ _ <- defs ]
+                bound' = foldr Set.insert bound names
+                goDefs = foldl (\a (Can.Def _ _ d) -> Map.unionWith (+) a (go bound' d)) Map.empty defs
+            in Map.unionWith (+) (go bound' body) goDefs
+        Can.LetDestruct pat e0 body ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Map.unionWith (+) (go bound e0) (go bound' body)
+        Can.Case scrut branches -> foldl (\a (Can.CaseBranch pat b) ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Map.unionWith (+) a (go bound' b)) (go bound scrut) branches
+        Can.If branches elseBranch ->
+            foldl (\a (c, t) -> Map.unionWith (+) a (Map.unionWith (+) (go bound c) (go bound t))) (go bound elseBranch) branches
+        Can.Binop _ _ _ _ a b -> Map.unionWith (+) (go bound a) (go bound b)
+        Can.Access r _ -> go bound r
+        Can.Update _ r updates -> Map.unionWith (+) (go bound r) (foldl (\a (_, Can.FieldUpdate _ e) -> Map.unionWith (+) a (go bound e)) Map.empty (Map.toList updates))
+        Can.Record fields -> foldl (\a (_, v) -> Map.unionWith (+) a (go bound v)) Map.empty (Map.toList fields)
+        Can.List es -> foldl (\a e -> Map.unionWith (+) a (go bound e)) Map.empty es
+        Can.Tuple a b rest -> foldl (\acc e -> Map.unionWith (+) acc (go bound e)) Map.empty (a:b:rest)
+        Can.Negate e -> go bound e
+        _ -> Map.empty
+
+-- | Walk an expression and collect VarLocal names that refer to variables
+-- from ENCLOSING scopes (not bound within the expression itself).
+-- Used to insert .clone() calls for ownership-safe closure capture.
+collectVarLocals :: Can.Expr -> Set.Set String
+collectVarLocals = go Set.empty
+  where
+    go :: Set.Set String -> Can.Expr -> Set.Set String
+    go bound (Ann.At _ expr) = case expr of
+        Can.VarLocal n | n `Set.notMember` bound -> Set.singleton n
+        Can.VarLocal _ -> Set.empty
+        Can.Call fn args -> foldl (\a e -> Set.union a (go bound e)) (go bound fn) args
+        Can.Lambda params body ->
+            let bound' = foldl (\s p -> foldr Set.insert s (patBindingVars p)) bound params
+            in go bound' body
+        Can.Let (Can.Def (Ann.At _ name) _ defBody) body ->
+            let bound' = Set.insert name bound
+            in Set.union (go bound' defBody) (go bound' body)
+        Can.LetRec defs body ->
+            let bound' = foldl (\s (Can.Def (Ann.At _ n) _ _) -> Set.insert n s) bound defs
+                goDefs = foldl (\a (Can.Def _ _ d) -> Set.union a (go bound' d)) Set.empty defs
+            in Set.union (go bound' body) goDefs
+        Can.LetDestruct pat expr body ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Set.union (go bound expr) (go bound' body)
+        Can.Case _ branches -> foldl (\a (Can.CaseBranch pat b) ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Set.union a (go bound' b)) Set.empty branches
+        Can.If branches elseBranch ->
+            foldl (\a (c, t) -> Set.union a (Set.union (go bound c) (go bound t))) (go bound elseBranch) branches
+        Can.Binop _ _ _ _ a b -> Set.union (go bound a) (go bound b)
+        Can.Access r _ -> go bound r
+        Can.Update _ r updates -> Set.union (go bound r) (foldl (\a (_, Can.FieldUpdate _ e) -> Set.union a (go bound e)) Set.empty (Map.toList updates))
+        Can.Record fields -> foldl (\a (_, v) -> Set.union a (go bound v)) Set.empty (Map.toList fields)
+        Can.List es -> foldl (\a e -> Set.union a (go bound e)) Set.empty es
+        Can.Tuple a b rest -> foldl (\a e -> Set.union a (go bound e)) Set.empty (a:b:rest)
+        Can.Negate e -> go bound e
+        Can.Accessor _ -> Set.empty
+        Can.VarTopLevel _ _ -> Set.empty
+        Can.VarKernel _ _ -> Set.empty
+        Can.VarCtor _ _ _ _ _ -> Set.empty
+        Can.Chr _ -> Set.empty
+        Can.Str _ -> Set.empty
+        Can.Int _ -> Set.empty
+        Can.Float _ -> Set.empty
+        Can.Unit -> Set.empty
+
+-- | Helper: render a single function-call argument string, handling
+-- lambda capture cloning and VarLocal ownership.
+-- Clones every VarLocal argument by default (most Sky types implement Clone).
+-- Exceptions: Task.run (Pin<Box<dyn Future>> which is not Clone).
+argToRustString :: EmitCtx -> Bool -> Can.Expr -> String
+argToRustString ctx noCloneFn (Ann.At _ a) = case a of
+    Can.Lambda ps body ->
+        let paramNames = Set.fromList (concatMap patBindingVars ps)
+            captured = Set.toList (Set.difference (collectVarLocals body) paramNames)
+            clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+            innerCounts = collectVarLocalsMulti body
+            innerMulti = [ v | (v, c) <- Map.toList innerCounts, c >= 2 ]
+            -- sub-A.10 C6: For move closures, EVERY captured non-Copy variable
+            -- used inside needs to be cloned at use site (the closure is
+            -- Fn-shaped — called multiple times — so each use consumes
+            -- ownership unless cloned). Add every captured var to ecCloneVars
+            -- so internal uses pick up .clone() via the Can.VarLocal arm.
+            capturedSet = Set.fromList captured
+            outerInherited = Set.difference (ecCloneVars ctx) paramNames
+            allCloneVars = Set.unions [ Set.fromList innerMulti
+                                      , outerInherited
+                                      , capturedSet ]
+            ctx' = ctx { ecCloneVars = allCloneVars, ecCopyVars = ecCopyVars ctx }
+            annot = case ecPipeInnerType ctx of
+                Just t | length ps == 1 -> ": " ++ t
+                _ -> ""
+            -- A HOF closure record param (`List.map (\j -> j.id …) jobs`) often
+            -- can't be inferred by Rust from the sibling list arg → E0282.
+            -- Resolve it to its struct via field-access usage when the pipe
+            -- annotation doesn't already cover it.
+            annotPs p@(Ann.At _ (Can.PVar pn))
+                | not (null annot) = patternToRustParam p ++ annot
+                | Just s <- inferRecordClosureParam ctx pn body = patternToRustParam p ++ ": " ++ s
+            annotPs p = patternToRustParam p ++ annot
+            psStr = intercalate ", " (map annotPs ps)
+            retAnnot = case ecPipeInnerType ctx of
+                Just t -> " -> SkyTask<" ++ t ++ ">"
+                Nothing -> ""
+            hasTaskRet = case ecPipeInnerType ctx of
+                Just _ -> True
+                Nothing -> False
+            closure = "move |" ++ psStr ++ "|" ++ retAnnot ++ " { " ++ exprToRustString ctx' body ++ " }"
+        in if not hasTaskRet && null captured
+           then "move |" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " }"
+           else if null captured
+                then closure
+                else "{ " ++ clones ++ closure ++ " }"
+    Can.VarLocal n ->
+        let needsClone = (not noCloneFn) && (n `Set.member` ecCloneVars ctx)
+                         && not (n `Set.member` ecCopyVars ctx)
+        in if needsClone then rustSafeIdent n ++ ".clone()" else rustSafeIdent n
+    _ -> exprToRustString ctx (Ann.At Ann.one a)
+
+-- | Emit a Rust string literal from a Haskell string.
+-- Handles non-ASCII characters via \\u{NNNN} escapes (Rust uses hex, not
+-- Haskell's decimal \\NNN).  Inline UTF-8 for ASCII-safe chars.
+rustStringLit :: String -> String
+rustStringLit s = "\"" ++ concatMap escapeChar s ++ "\""
+  where
+    escapeChar '\"' = "\\\""
+    escapeChar '\\' = "\\\\"
+    escapeChar '\n' = "\\n"
+    escapeChar '\t' = "\\t"
+    escapeChar '\r' = "\\r"
+    escapeChar c
+        | c < ' ' || c == '\x7f' = "\\u{" ++ showHex (fromEnum c) "}"
+        | c > '\x7f'             = "\\u{" ++ showHex (fromEnum c) "}"
+        | otherwise              = [c]
+
+-- | Emit a Rust char literal, using \\u{NNNN} for non-ASCII.
+rustCharLit :: Char -> String
+rustCharLit c
+    | c > '\x7f' = "'\\u{" ++ showHex (fromEnum c) "}'"
+    | c == '\''  = "'\\''"
+    | c == '\\'  = "'\\\\'"
+    | otherwise  = "'" ++ [c] ++ "'"
+
+exprToRustString :: EmitCtx -> Can.Expr -> String
+exprToRustString ctx (Ann.At region expr) =
+    -- Sub-A.13: look up the wrapping region's solver-inferred type and inject
+    -- it as ecExpectedType so the empty-literal emit sites can turbofish.
+    let expected = Map.lookup region (ecRegionTypes ctx)
+        ctx'     = ctx { ecExpectedType = expected }
+    in exprToRustInner ctx' expr
+
+-- | Sub-A.13: an empty-collection literal whose element type Rust cannot infer
+-- from a bare emission. These are the args resolved by call-site param-type
+-- propagation in emitDefaultCall.
+data EmptyKind = EKList | EKNothing
+
+emptyArgKind :: Can.Expr -> Maybe EmptyKind
+emptyArgKind (Ann.At _ (Can.List [])) = Just EKList
+emptyArgKind (Ann.At _ (Can.VarCtor _ _ "Maybe" "Nothing" _)) = Just EKNothing
+emptyArgKind _ = Nothing
+
+isEmptyishArg :: Can.Expr -> Bool
+isEmptyishArg e = case emptyArgKind e of
+    Just _  -> True
+    Nothing -> False
+
+-- | Where a callee's parameter-type strings came from. SrcKnownSig means
+-- knownDefSig — a "T0" param there reliably indicates a GENERIC Rust signature,
+-- so an unpinned empty arg must be defaulted (Rust can't infer). SrcInferred
+-- (solved types / ctor fields) may be Sky-polymorphic even though the generated
+-- Rust signature is concrete (e.g. Std.Db.query : List any -> ... compiles to a
+-- Vec<String> param), so an unpinned empty arg stays bare and lets Rust infer.
+data ParamSrc = SrcKnownSig | SrcInferred deriving (Eq)
+
+-- | Sub-A.13: the Rust parameter-type strings for a call's callee, plus their
+-- source. Nothing when the callee is unknown — the caller emits empty args bare.
+calleeParamStrings :: EmitCtx -> Can.Expr -> Int -> Maybe (ParamSrc, [String])
+calleeParamStrings ctx fn arity = case fn of
+    Ann.At _ (Can.VarCtor _ _ _ ctorName _) ->
+        case Map.lookup ctorName (ecCtorFieldTypes ctx) of
+            Just tys -> Just (SrcInferred, map (typeToRustString (ecRecordMap ctx)) tys)
+            Nothing  -> Nothing
+    Ann.At _ (Can.VarKernel modName name) ->
+        (\(ps, _) -> (SrcKnownSig, ps)) <$> knownDefSig (kernelSigPrefix modName) name arity
+    Ann.At _ (Can.VarTopLevel modName name) ->
+        -- Stdlib source modules (Sky.Core.Maybe/List/Result/...) compile to
+        -- VarTopLevel, not VarKernel, so consult knownDefSig FIRST (it carries
+        -- the type-var-bearing param strings). Fall back to the solved type for
+        -- genuine user functions / Std kernels not in knownDefSig.
+        case knownDefSig (kernelSigPrefix (ModuleName._name modName)) name arity of
+            Just (ps, _) -> Just (SrcKnownSig, ps)
+            Nothing ->
+                case Map.lookup name (ecSolvedTypes ctx) of
+                    Just ty -> let ps = extractParamTypes ty
+                               in if null ps then Nothing
+                                  else Just (SrcInferred, map (typeToRustString (ecRecordMap ctx)) ps)
+                    Nothing -> Nothing
+    _ -> Nothing
+
+-- | Tokenise a Rust type string into bare identifier tokens.
+rustTypeTokens :: String -> [String]
+rustTypeTokens = words . map (\c -> if c `elem` ("<>,()+&[]:;" :: String) then ' ' else c)
+
+-- | Is a token a Rust type variable as produced by our type sources?
+-- knownDefSig uses T0, T1, ...; typeToRustString renders Can.TVar verbatim,
+-- which can be a user var (a, b, e) OR an internal solver var
+-- (_consElem214, _a_inst51, carg48, number7). Classification:
+--   * T<digits>           -> var (knownDefSig)
+--   * starts uppercase    -> concrete (String, Vec, SkyMaybe, SkyCoreJwtClaims)
+--   * a known primitive / keyword -> concrete (i64, bool, impl, dyn, ...)
+--   * anything else (lowercase/underscore ident) -> var
+isRustTypeVarTok :: String -> Bool
+isRustTypeVarTok t = case t of
+    [] -> False
+    (c : _)
+        | head t == 'T' && length t >= 2 && all isDigit (tail t) -> True
+        | isUpper c -> False
+        | t `elem` rustConcreteLowerToks -> False
+        | otherwise -> True
+
+-- | Is a Rust parameter-type string a closure parameter (impl Fn(..))? Such a
+-- param does not pin its type vars, so it doesn't count toward sibling pinning.
+isClosureParamStr :: String -> Bool
+isClosureParamStr p = "impl Fn" `isInfixOf` p || "Fn(" `isInfixOf` p
+
+-- | Lowercase Rust tokens that are concrete types or type-level keywords, not
+-- type variables. Everything else lowercase/underscore is treated as a var.
+rustConcreteLowerToks :: [String]
+rustConcreteLowerToks =
+    [ "i8", "i16", "i32", "i64", "i128", "isize"
+    , "u8", "u16", "u32", "u64", "u128", "usize"
+    , "f32", "f64", "bool", "char", "str"
+    , "impl", "dyn", "fn" ]
+
+-- | Sub-A.13: decide how to emit an empty-collection argument at position i of
+-- a call, given the callee's known parameter-type strings.
+--   * param concrete                  -> turbofish the exact type
+--   * param has a var shared w/ sibling -> bare (Rust infers from the sibling)
+--   * param var appears only here      -> default filler (i64)
+--   * callee unknown / shape unexpected -> bare (Rust infers from the sig)
+emitEmptyArg :: EmitCtx -> Maybe (ParamSrc, [String]) -> Int -> Can.Expr -> String
+emitEmptyArg _ mps i arg =
+    let kind = case emptyArgKind arg of
+            Just k  -> k
+            Nothing -> EKList  -- unreachable: only called on empty-ish args
+        bare = case kind of
+            EKList    -> "vec![]"
+            EKNothing -> "SkyMaybe::Nothing"
+        defaultFiller = case kind of
+            EKList    -> "Vec::<i64>::new()"
+            EKNothing -> "SkyMaybe::<i64>::Nothing"
+        -- Insert the turbofish "::" before the first '<' of a concrete param.
+        turbofish pt = case break (== '<') pt of
+            (h, rest@('<' : _)) -> Just $ case kind of
+                EKList    | "Vec" == h        -> h ++ "::" ++ rest ++ "::new()"
+                EKNothing | "SkyMaybe" == h   -> h ++ "::" ++ rest ++ "::Nothing"
+                _ -> "" -- param shape doesn't match the arg kind
+            _ -> Nothing
+    in case mps of
+        Just (src, ps) | i < length ps ->
+            let pt   = ps !! i
+                vars = filter isRustTypeVarTok (rustTypeTokens pt)
+                -- A var is "pinned" only by a DATA sibling param. A closure
+                -- param (impl Fn(..)) that mentions the var does NOT pin it —
+                -- the closure's own param/return may be just as unconstrained
+                -- (e.g. `map (\x -> x * 2) Nothing`: T0 is the closure arg,
+                -- itself ambiguous). withDefault's value param DOES pin it.
+                dataSiblingToks = concatMap rustTypeTokens
+                    [ ps !! j | j <- [0 .. length ps - 1]
+                              , j /= i, not (isClosureParamStr (ps !! j)) ]
+                pinnedBySibling = any (`elem` dataSiblingToks) vars
+            in if null vars
+               then case turbofish pt of
+                   Just s | not (null s) -> s
+                   _ -> bare
+               else if pinnedBySibling then bare
+                    -- Unpinned var: default only when the sig is known-generic
+                    -- (knownDefSig). For inferred sigs the generated Rust param
+                    -- may be concrete, so stay bare and let Rust infer.
+                    else if src == SrcKnownSig then defaultFiller else bare
+        _ -> bare
+
+-- | Does a closure pattern discard its argument (wildcard / `_`-prefixed)?
+isWildcardPat :: Can.Pattern -> Bool
+isWildcardPat (Ann.At _ Can.PAnything) = True
+isWildcardPat (Ann.At _ (Can.PVar n)) | "_" `isPrefixOf` n = True
+isWildcardPat _ = False
+
+-- | Does a closure argument discard its argument entirely?
+isWildcardClosure :: Can.Expr -> Bool
+isWildcardClosure (Ann.At _ (Can.Lambda [pat] _)) = isWildcardPat pat
+isWildcardClosure _ = False
+
+-- | When a Task combinator's closure argument is a wildcard and the task
+-- argument has an unconstrained success type, emit the task call with a
+-- `::<_, ()>` turbofish so Rust can infer the success type.
+pinTaskCall :: EmitCtx -> String -> [Can.Expr] -> Map.Map String Can.Type -> Maybe String
+pinTaskCall ctx nameStr (closeExpr : taskExpr : rest) solved
+    | isWildcardClosure closeExpr
+    , null (taskExprInnerType solved taskExpr) =
+        let closeStr = exprToRustString ctx closeExpr
+            taskStr  = emitPinnedTask ctx solved taskExpr
+            restStrs = map (exprToRustString ctx) rest
+        in Just $ nameStr ++ "(" ++ intercalate ", " (closeStr : taskStr : restStrs) ++ ")"
+    | otherwise = Nothing
+pinTaskCall _ _ _ _ = Nothing
+
+emitPinnedTask :: EmitCtx -> Map.Map String Can.Type -> Can.Expr -> String
+emitPinnedTask ctx solved (Ann.At _ (Can.Call fnExpr taskArgs)) =
+    let fnStr0 = exprToRustString ctx fnExpr
+        -- exprToRustString may already append a static turbofish (e.g.
+        -- task_fail's `::<_, i64>` from the turbofish map). Strip it so the
+        -- `::<_, ()>` pin below doesn't emit a double turbofish
+        -- (`task_fail::<_, i64>::<_, ()>`); the `()` success type is the
+        -- context-specific one (the wildcard closure ignores the value).
+        fnStr = dropTurbofish fnStr0
+        argStrs = map (exprToRustString ctx) taskArgs
+    in fnStr ++ "::<_, ()>(" ++ intercalate ", " argStrs ++ ")"
+emitPinnedTask ctx _ other = exprToRustString ctx other  -- fallback: no pin
+
+-- | Truncate a callee string at its first `::<` turbofish (qualified paths use
+-- `::` but never `::<`, so this only strips a turbofish, not a path segment).
+dropTurbofish :: String -> String
+dropTurbofish (a:b:c:rest) | [a,b,c] == "::<" = []           -- stop at turbofish
+                           | otherwise        = a : dropTurbofish (b:c:rest)
+dropTurbofish s = s
+
+-- | Argument emission inside a matched Ffi.callPure peephole.
+-- `Ffi.toAny x` collapses to bare `x` — the value retains its concrete Rust
+-- type. Everything else routes to the standard expression emit.
+peepholeArg :: EmitCtx -> Can.Expr -> String
+peepholeArg ctx (Ann.At _ (Can.Call (Ann.At _ (Can.VarKernel "Ffi" "toAny")) [inner])) =
+    exprToRustString ctx inner
+peepholeArg ctx e = exprToRustString ctx e
+
+exprToRustInner :: EmitCtx -> Can.Expr_ -> String
+exprToRustInner ctx e = case e of
+    Can.VarLocal name -> rustSafeIdent name ++ if name `Set.member` ecCloneVars ctx && not (name `Set.member` ecCopyVars ctx) then ".clone()" else ""
+    Can.VarTopLevel mod name ->
+        let modName = ModuleName._name mod
+            modPrefix = map (\c -> if c == '.' then '_' else c) modName
+            fnName = toSnakeCase (modPrefix ++ "_" ++ name)
+            -- Check kernelToRust first (direct kernel dispatch)
+            kernelName = kernelToRust modName name
+            -- sub-A.10 C4 + sub-A.11: kernels generic over E (and possibly
+            -- T, A, B) need a per-kernel turbofish to pin the generics at
+            -- call sites whose match arms / context don't constrain them.
+            pinE n
+                | n == "task_fail" = n ++ taskFailPin ctx
+                | otherwise = case Map.lookup n kernelsNeedingErrorPin of
+                    Just suffix -> n ++ suffix
+                    Nothing     -> n
+            -- sub-A.11: zero-arg kernels (json_dec_*, dict_empty, math_pi/e)
+            -- returning a value (Decoder, HashMap, f64) reached via the
+            -- "then" branch — append () to call them. Turbofish goes
+            -- BEFORE the (), e.g. json_dec_int::<SkyError>().
+            -- Lookup is on the BARE kernel name (pre-turbofish).
+            emitKernel bare = let pinned = pinE bare
+                              in if Set.member bare kernelsZeroArg
+                                 then pinned ++ "()" else pinned
+        in if fnName /= kernelName && not ("ffi_kernel" `isPrefixOf` kernelName)
+           then emitKernel kernelName
+           else -- Check Stage-4 alias table: some VarTopLevel bindings are
+                -- Ffi.kernel aliases that should route through kernel dispatch.
+                case Map.lookup (modName, name) (ecKernelAliases ctx) of
+                    Just (kMod, kFn) -> emitKernel (kernelToRust kMod kFn)
+                    Nothing ->
+                        -- Sub-D: RetryPolicy/ShouldRetry constructors return a
+                        -- type whose only var is the (always-SkyError) error
+                        -- type, which is phantom when the policy isn't tied to a
+                        -- concrete error. Pin it so e infers and propagates
+                        -- through builder chains (E0283 otherwise). ONLY in a
+                        -- monomorphic context — inside a generic fn (e.g.
+                        -- linearBackoff<e>'s body using retryAlways) the var is
+                        -- the fn's own param, which the pin must not override.
+                        let pin = if ecInGenericFn ctx then ""
+                                  else Map.findWithDefault "" (modName, name) topLevelErrorPin
+                        in if Set.member (modPrefix, name) (ecZeroArgDefs ctx) then fnName ++ pin ++ "()" else fnName ++ pin
+    Can.VarKernel mod name ->
+        let fnName = kernelToRust mod name
+            -- sub-A.10 C4 + sub-A.11: per-kernel turbofish (E pinning + arity).
+            tf = case Map.lookup fnName kernelsNeedingErrorPin of
+                Just _ | fnName == "task_fail" -> taskFailPin ctx
+                Just suffix -> suffix
+                Nothing     -> ""
+        in if mod == "Basics" && name == "not" then "!"
+           -- Zero-arg kernels (via ecZeroArgDefs OR kernelsZeroArg) need
+           -- both the turbofish AND () to call. Turbofish goes before ().
+           else if Set.member (mod, name) (ecZeroArgDefs ctx)
+                then fnName ++ tf ++ "()"
+           else if Set.member fnName kernelsZeroArg
+                then fnName ++ tf ++ "()"
+           else fnName ++ tf
+    Can.VarCtor _ modName typeName ctorName _
+        -- Sub-A.13: the nullary Maybe/Nothing ctor. Three states (see the
+        -- Can.List arm below for the full rationale):
+        --   * concrete Maybe<val> -> SkyMaybe::<val>::Nothing
+        --   * Maybe<val> w/ TVars -> bare (generic context, Rust infers)
+        --   * no region type      -> SkyMaybe::<i64>::Nothing (phantom default)
+        -- kernelCtorToRust doesn't see ctx, so handle Nothing inline here.
+        -- Concrete region type -> turbofish. Otherwise BARE: a call-arg
+        -- Nothing is resolved precisely at the call site (emitDefaultCall);
+        -- a non-call-arg Nothing keeps Rust's own inference (the pre-fix
+        -- behaviour).
+        | typeName == "Maybe", ctorName == "Nothing"
+        , Just (Can.TType _ "Maybe" [valTy]) <- ecExpectedType ctx
+        , Just rustVal <- rustifyExpectedType (ecRecordMap ctx) valTy ->
+            "SkyMaybe::<" ++ rustVal ++ ">::Nothing"
+        | otherwise -> kernelCtorToRust modName typeName ctorName
+    Can.Chr [c] -> rustCharLit c
+    Can.Chr s -> rustStringLit s
+    Can.Str s -> rustStringLit s ++ ".to_string()"
+    -- An Int literal whose region the solver typed as Float (Sky's numeric-
+    -- literal polymorphism: `Css.pct 100` where `pct : Float -> Length`) must
+    -- emit as f64 — Rust does NOT coerce an i64 literal to f64 (E0308). Gate on
+    -- the region's expected type so ordinary Int literals stay i64.
+    Can.Int i
+        | Just (Can.TType _ "Float" []) <- ecExpectedType ctx -> show i ++ "_f64"
+        | otherwise -> show i
+    Can.Float f -> show f
+    Can.List es
+        -- Sub-A.13: an empty list literal gives Rust no element type to infer.
+        -- Three states drive the choice (set in exprToRustString from the
+        -- region's solver type — see ecExpectedType):
+        --   * concrete List<elem>  -> Vec::<elem>::new()  (pin the type)
+        --   * List<elem> w/ TVars  -> bare vec![]         (generic context: the
+        --       element is the fn's own type param, which Rust infers from the
+        --       signature; turbofishing would clobber the generic)
+        --   * no region type       -> Vec::<i64>::new()   (monomorphic phantom:
+        --       Rust can't infer and there's no generic param to bind; any
+        --       concrete type is safe because the list is empty)
+        -- Concrete region type -> turbofish. Otherwise BARE: a call-arg []
+        -- is resolved precisely at the call site (emitDefaultCall); a
+        -- non-call-arg [] keeps Rust's own inference (the pre-fix behaviour).
+        | null es
+        , Just (Can.TType _ "List" [elemTy]) <- ecExpectedType ctx
+        , Just rustElem <- rustifyExpectedType (ecRecordMap ctx) elemTy ->
+            "Vec::<" ++ rustElem ++ ">::new()"
+        | otherwise ->
+            "vec![" ++ intercalate ", " (map (exprToRustString ctx) es) ++ "]"
+    Can.Negate e -> "-" ++ exprToRustString ctx e
+    Can.Binop op _ _ _ a b 
+        | op == "|>" -> case b of
+            Ann.At _ (Can.Call fn callArgs) ->
+                let dummySpan = Ann.Region (Ann.Position 1 1) (Ann.Position 1 1)
+                in exprToRustString ctx (Ann.At dummySpan (Can.Call fn (callArgs ++ [a])))
+            _ ->
+                let inner = taskExprInnerType (ecSolvedTypes ctx) a
+                    ctx' = ctx { ecPipeInnerType = if null inner then Nothing else Just inner }
+                in exprToRustString ctx' b ++ "(" ++ exprToRustString ctx' a ++ ")"
+        | op == "<|" -> case a of
+            Ann.At _ (Can.Call fn callArgs) ->
+                let dummySpan = Ann.Region (Ann.Position 1 1) (Ann.Position 1 1)
+                in exprToRustString ctx (Ann.At dummySpan (Can.Call fn (callArgs ++ [b])))
+            _ ->
+                exprToRustString ctx a ++ "(" ++ exprToRustString ctx b ++ ")"
+        | op == "::" -> "sky_list_cons(" ++ exprToRustString ctx a ++ ", " ++ exprToRustString ctx b ++ ")"
+        | op == "++" ->
+            -- Sky's ++ is polymorphic: String -> String -> String AND
+            -- List a -> List a -> List a. Dispatch on inferred type via
+            -- solveArgType (which inspects literals + VarLocal lookups +
+            -- nested binops). Vec<T> -> chain-extend block; otherwise
+            -- format! (string concat).
+            let lhsTy = solveArgType (ecSolvedTypes ctx) a
+                rhsTy = solveArgType (ecSolvedTypes ctx) b
+                isList = "Vec<" `isPrefixOf` lhsTy || "Vec<" `isPrefixOf` rhsTy
+                aStr  = exprToRustString ctx a
+                bStr  = exprToRustString ctx b
+            in if isList
+               then "{ let mut __r = " ++ aStr ++ ".clone(); __r.extend(" ++ bStr ++ "); __r }"
+               else "format!(\"{}{}\", " ++ aStr ++ ", " ++ bStr ++ ")"
+        | otherwise -> 
+            "(" ++ exprToRustString ctx a ++ " " ++ binopToRust op ++ " " ++ exprToRustString ctx b ++ ")"
+    Can.Lambda params body ->
+        let counts = collectVarLocalsMulti body
+            innerMulti = [ v | (v, c) <- Map.toList counts, c >= 2 ]
+            -- sub-A.10 C6: union with outer ecCloneVars so captures from a
+            -- non-Copy outer scope (the typical case: `move |x| f(captured)`)
+            -- get cloned at every internal use. The closure is `Fn`-shaped
+            -- (callable multiple times); each call consumes the captures by
+            -- ownership unless cloned.
+            paramNames = Set.fromList [ pn | Ann.At _ (Can.PVar pn) <- params ]
+            outerInherited = Set.difference (ecCloneVars ctx) paramNames
+            ctx' = ctx { ecCloneVars = Set.union (Set.fromList innerMulti) outerInherited
+                       , ecCopyVars = ecCopyVars ctx }
+        in "|" ++ intercalate ", " (map (annotClosureParam ctx body) params) ++ "| { " ++ exprToRustString ctx' body ++ " }"
+    -- Ffi.callPure peephole — literal kernel name + literal args list -> direct
+    -- kernel call. Splits "Decimal_fromInt" -> ("Decimal", "fromInt"), looks up
+    -- kernelToRust, emits the resolved kernel name with the args spliced inline.
+    -- Ffi.toAny inside a matched args list collapses to identity (see peepholeArg).
+    -- The deprecated Ffi.call alias gets the same treatment.
+    -- Non-matched shapes (variable kernel name, non-literal args list) fall
+    -- through to the existing Can.Call arm, which routes to the polyfill via
+    -- kernelToRust's "Ffi.callPure" -> "ffi_call_pure_polyfill" arm.
+    Can.Call (Ann.At _ (Can.VarKernel "Ffi" fnName))
+             [Ann.At _ (Can.Str kernelName), Ann.At _ (Can.List argExprs)]
+        | fnName == "callPure" || fnName == "call" ->
+            let (skyMod, skyFn) = splitKernelName kernelName
+                rustFn = kernelToRust skyMod skyFn
+                args = map (peepholeArg ctx) argExprs
+            in rustFn ++ "(" ++ intercalate ", " args ++ ")"
+    -- Standalone Ffi.toAny peephole — outside a matched Ffi.callPure args list,
+    -- Ffi.toAny x collapses to bare x. The value retains its concrete Rust type;
+    -- the toAny call is dropped entirely (kernelToRust's polyfill arm is a safety
+    -- net for indirect references, but most call sites match here).
+    Can.Call (Ann.At _ (Can.VarKernel "Ffi" "toAny")) [inner] ->
+        exprToRustString ctx inner
+    -- A bare `Ffi.kernel "X"` body for a ZERO-ARG kernel (e.g. stdlib `none =
+    -- Ffi.kernel "Sub_none"`) must resolve to the real kernel call, not the
+    -- ffi_kernel_polyfill panic — a zero-arg value alias (Sub.none) reached in a
+    -- nested position calls the generated wrapper, so its body has to work.
+    -- Restricted to zero-arg kernels; multi-arg function aliases fall through
+    -- (their wrappers are bypassed by direct call sites, so the polyfill there
+    -- is dead, and emitting a bare kernel fn would mistype their return).
+    Can.Call (Ann.At _ (Can.VarKernel "Ffi" "kernel")) [Ann.At _ (Can.Str kernelName)]
+        | (skyMod, skyFn) <- splitKernelName kernelName
+        , let rustFn = kernelToRust skyMod skyFn
+          -- Restricted to TEA value kernels whose generic runtime return
+          -- (SkyCmd<M> / SkySub<M>) matches the generic wrapper. Other zero-arg
+          -- kernels (e.g. dict_empty : HashMap<String,T>) would mistype the
+          -- generic wrapper (HashMap<k,v>), so they keep the dead-but-typesafe
+          -- ffi_kernel_polyfill body.
+        , rustFn `elem` ["cmd_none", "sub_none"] ->
+            rustFn ++ "()"
+    -- Sub-A.13: Result/Ok and Result/Err constructor calls. The wrapping
+    -- region's type is Result<E, A>; emit SkyResult::<E, A>::Ctor(inner) so
+    -- Rust doesn't have to infer the unused-side type from a discarded value
+    -- (the E0283 'type annotations needed' class). Only fires when BOTH sides
+    -- are fully concrete — a free side means we're in a generic context where
+    -- Rust infers from the signature, and turbofishing would clobber it. When
+    -- the guards fail this arm does not match and control falls through to the
+    -- generic Can.Call path below, preserving today's inference-driven output.
+    -- concrete both sides -> turbofish
+    Can.Call (Ann.At _ (Can.VarCtor _ _ "Result" ctorName _)) [innerArg]
+        | ctorName == "Ok" || ctorName == "Err"
+        , Just (Can.TType _ "Result" [errTy, okTy]) <- ecExpectedType ctx
+        , Just rustErr <- rustifyExpectedType (ecRecordMap ctx) errTy
+        , Just rustOk  <- rustifyExpectedType (ecRecordMap ctx) okTy ->
+            "SkyResult::<" ++ rustErr ++ ", " ++ rustOk ++ ">::"
+                ++ ctorName ++ "(" ++ exprToRustString ctx innerArg ++ ")"
+    -- monomorphic fn, type not fully concrete -> default the unconstrained
+    -- side. Err carries Sky's Error idiom (Cardinal Rule 1); the Ok side is
+    -- phantom so i64 is a safe filler. Inside a GENERIC fn this arm does not
+    -- match, so control falls through to the generic Can.Call path where Rust
+    -- infers from the signature.
+    Can.Call (Ann.At _ (Can.VarCtor _ _ "Result" ctorName _)) [innerArg]
+        | (ctorName == "Ok" || ctorName == "Err")
+        , not (ecInGenericFn ctx) ->
+            "SkyResult::<SkyError, i64>::" ++ ctorName
+                ++ "(" ++ exprToRustString ctx innerArg ++ ")"  -- default (Task 8: stderr warning)
+    -- Partially-applied CONSTRUCTOR used as a function value (the canonical TEA
+    -- `Cmd.perform task (JobDone jid)` where `JobDone : Int -> Result Error
+    -- String -> Msg` — `JobDone jid` is the `Result -> Msg` toMsg). The codegen
+    -- otherwise emits `MainMsg::JobDone(jid)` — 1 arg to a 2-arg variant → E0061.
+    -- Synthesise a move closure capturing the supplied args and taking the rest.
+    Can.Call (Ann.At _ (Can.VarCtor _ mn tn cn _)) args
+        | Just fieldTys <- Map.lookup cn (ecCtorFieldTypes ctx)
+        , length args < length fieldTys ->
+            let ctorName  = kernelCtorToRust mn tn cn
+                provided  = map (argToRustString ctx False) args
+                nMissing  = length fieldTys - length args
+                extras    = [ "__pa" ++ show k | k <- [1 .. nMissing] ]
+            in "(move |" ++ intercalate ", " extras ++ "| " ++ ctorName
+               ++ "(" ++ intercalate ", " (provided ++ extras) ++ "))"
+    -- Sub-E: Cli.program { init, update, view, subscriptions, onLine } — the cfg
+    -- is an anonymous record the runtime can't name, so splice its fields into
+    -- the generic cli_program(init, update, view, subs, onLine) directly.
+    Can.Call (Ann.At _ (Can.VarKernel "Cli" "program")) [Ann.At _ (Can.Record fields)] ->
+        let fld n = case Map.lookup n fields of
+                Just e  -> exprToRustString ctx e
+                Nothing -> "/* Cli.program: missing field " ++ n ++ " */"
+        in "cli_program(" ++ intercalate ", "
+               (map fld ["init", "update", "view", "subscriptions", "onLine"]) ++ ")"
+    -- Live.app { init, update, view, subscriptions, routes, notFound } —
+    -- record-splice like Cli.program. P3: branch on whether the Model record
+    -- carries a `page` field.
+    --   * No `page` field (counter / form — single-page): emit `live_app` with
+    --     the four TEA callbacks; routes/notFound dropped. Byte-identical to P1.
+    --   * Has `page` field: emit `live_app_routed` with the route table, the
+    --     notFound page, and a generated `set_page` closure that writes the
+    --     matched Page into `model.page`. The runtime route_resolver does the
+    --     match-and-inject on every GET (Go parity).
+    Can.Call (Ann.At _ (Can.VarKernel "Live" "app")) [Ann.At _ (Can.Record fields)] ->
+        let fld n = case Map.lookup n fields of
+                Just e  -> exprToRustString ctx e
+                Nothing -> "/* Live.app: missing field " ++ n ++ " */"
+            rm = ecRecordMap ctx
+            -- Recover Model from view's solver type: `view : Model -> Html Msg`.
+            mModelTy = case Map.lookup "view" (ecSolvedTypes ctx) of
+                Just ty -> case extractParamTypes ty of
+                    (m : _) -> Just m
+                    []      -> Nothing
+                Nothing -> Nothing
+            -- Resolve a type to its record-field map (peel the alias wrapper).
+            recordFieldsOf ty = case ty of
+                Can.TRecord fs _        -> Just fs
+                Can.TAlias _ _ _ (Can.Hoisted inner) -> recordFieldsOf inner
+                Can.TAlias _ _ _ (Can.Filled inner)  -> recordFieldsOf inner
+                _                       -> Nothing
+            mModelFields = mModelTy >>= recordFieldsOf
+            mPageFieldTy = mModelFields >>= Map.lookup "page"
+            -- P5-T4b: the runtime's live_app / live_app_routed take two trailing
+            -- store-config string args (kind, path) — choose_store builds the
+            -- backend (empty kind -> memory). Drawn from `[live] store` /
+            -- `storePath`; `show` quotes/escapes them into Rust string literals.
+            (storeKind0, storePath0) = ecLiveStore ctx
+            storeKindLit = show storeKind0 ++ ".to_string()"
+            storePathLit = show storePath0 ++ ".to_string()"
+        in case (mModelTy, mPageFieldTy) of
+            (Just modelTy, Just (Can.FieldType _ pageTy)) ->
+                -- Routing mode.
+                let modelRustTy = typeToRustString rm modelTy
+                    pageRustTy = typeToRustString rm pageTy
+                    routesStr = case Map.lookup "routes" fields of
+                        Just (Ann.At _ (Can.List elems)) ->
+                            "vec![" ++ intercalate ", " (map (exprToRustString ctx) elems) ++ "]"
+                        Just other -> exprToRustString ctx other
+                        Nothing    -> "vec![]"
+                    notFoundStr = fld "notFound"
+                    setPage = "move |__page: " ++ pageRustTy ++ ", __model: " ++ modelRustTy
+                                ++ "| " ++ modelRustTy ++ " { page: __page, ..__model }"
+                in "live_app_routed::<SkyError, _, _, _, _, _, _, _, _>(" ++ intercalate ", "
+                       ([fld "init", fld "update", fld "view", fld "subscriptions",
+                         routesStr, notFoundStr, setPage, storeKindLit, storePathLit]) ++ ")"
+            _ ->
+                -- Single-page mode (no page field): four TEA callbacks; pin E.
+                "live_app::<SkyError, _, _, _, _, _, _>(" ++ intercalate ", "
+                    (map fld ["init", "update", "view", "subscriptions"] ++ [storeKindLit, storePathLit]) ++ ")"
+    -- Sub-E step 3: Cmd.perform with a DIVERGING task (System.exit -> `!`) leaves
+    -- the task's success/error types free (E0283). Pin them — the value is never
+    -- produced (the process exits first), so A is a phantom i64 filler.
+    Can.Call cmdPerformFn (task0 : rest)
+        | "cmd_perform" == exprToRustString ctx cmdPerformFn
+          -- require the call form `system_exit(...)`, not just a "system_exit"
+          -- prefix, so a future kernel/fn named system_exit_* can't false-match.
+        , "system_exit(" `isPrefixOf` exprToRustString ctx task0 ->
+            "cmd_perform::<SkyError, i64, _, _>("
+                ++ intercalate ", " (map (exprToRustString ctx) (task0 : rest)) ++ ")"
+    -- Sub-E step 4/5: Sub_subscribeWebSocket raw KIND toMsg. The four wrappers
+    -- (onOpen/onMessage/onClose/onError) feed heterogeneous toMsg (bare msg /
+    -- WebSocketMessage->msg / CloseCode->msg / Error->msg) through this one
+    -- `any`-typed kernel, which can't share a single bounded Rust fn. Route by the
+    -- compile-time literal kind to a per-kind TYPED kernel — the codegen does the
+    -- split a stdlib override would otherwise do.
+    Can.Call subFn [rawArg, Ann.At _ (Can.Str kind), toMsgArg]
+        | "sub_subscribe_web_socket" == exprToRustString ctx subFn ->
+            let fn = case kind of
+                    "message" -> "sub_subscribe_ws_message"
+                    "open"    -> "sub_subscribe_ws_open"
+                    "close"   -> "sub_subscribe_ws_close"
+                    "error"   -> "sub_subscribe_ws_error"
+                    _         -> "sub_subscribe_ws_message"
+            in fn ++ "(" ++ exprToRustString ctx rawArg ++ ", " ++ exprToRustString ctx toMsgArg ++ ")"
+    -- Sky.Live: `EventAttr (Event msg)` and `OnRaw String any` bridge to the
+    -- runtime html::Attribute / html::Event enums. OnRaw's payload is the
+    -- heterogeneous `any` handler (from `on` / `onSubmit`); the runtime field is
+    -- `Arc<dyn Any + Send + Sync>`, so type-erase the generated handler arg with
+    -- Arc::new(...). OnMsg/OnString/OnBool need no wrap (value / fn-pointer).
+    Can.Call ctorFn@(Ann.At _ (Can.VarCtor _ _ "Event" "OnRaw" _)) [nameArg, handlerArg] ->
+        exprToRustString ctx ctorFn ++ "(" ++ exprToRustString ctx nameArg
+            ++ ", std::sync::Arc::new(" ++ exprToRustString ctx handlerArg ++ "))"
+    -- P2-T4: `Ev.onSubmit handler` call-site peephole. `Std.Html.Events.onSubmit`
+    -- is a .sky stdlib fn `onSubmit handler = EventAttr (OnRaw "submit" handler)`
+    -- whose body type-erases the handler to `any` — so the concrete form-record
+    -- type `T` is invisible at the OnRaw arm above. `T` is ONLY known HERE, at the
+    -- call site. So we INLINE the call straight to `Event::OnForm("submit", ...)`,
+    -- bypassing the stdlib fn + the OnRaw path entirely. The OnForm closure decodes
+    -- the wire FormData into `T` via decode_form::<T> and dispatches the Msg; a
+    -- malformed/incomplete form decodes to Err -> `.ok()` -> None -> no Msg.
+    -- P3-T3: `Live.route pattern ctor` lowers to a `route::Route::new`. The
+    -- ctor is a Page constructor; the captured `:param` strings (in pattern
+    -- order) are applied to it in the build closure. The ctor arity N is read
+    -- from the ctor arg's solver type (looked up in ecRegionTypes): N==0 is a
+    -- nullary page value (captured + cloned per build); N>=1 applies the
+    -- params positionally. `Route::new` takes `&str`, so the pattern (a Sky
+    -- string literal → `"…".to_string()`) is borrowed with `&(…)`.
+    Can.Call (Ann.At _ (Can.VarKernel "Live" "route")) [patternArg, ctorArg@(Ann.At hregion _)] ->
+        let patternStr = exprToRustString ctx patternArg
+            ctorStr = exprToRustString ctx ctorArg
+            ctorArity = case Map.lookup hregion (ecRegionTypes ctx) of
+                Just ty -> length (extractParamTypes ty)
+                Nothing -> 0
+            closure =
+                if ctorArity == 0
+                    then "{ let __c = " ++ ctorStr ++ "; move |_p: Vec<String>| __c.clone() }"
+                    else "move |__p: Vec<String>| " ++ ctorStr ++ "("
+                            ++ intercalate ", " ["__p[" ++ show i ++ "].clone()" | i <- [0 .. ctorArity - 1]]
+                            ++ ")"
+        in "route::Route::new(&(" ++ patternStr ++ "), " ++ closure ++ ")"
+    Can.Call (Ann.At _ (Can.VarTopLevel mdl "onSubmit")) [handlerArg@(Ann.At hregion _)]
+        | ModuleName._name mdl == "Std.Html.Events" ->
+            let handlerStr = exprToRustString ctx handlerArg
+                mHandlerTy = Map.lookup hregion (ecRegionTypes ctx)
+            in case formTargetRustType (ecRecordMap ctx) mHandlerTy of
+                Just rustT ->
+                    -- record-handler case: `onSubmit DoSignIn` where
+                    -- `DoSignIn : Creds -> Msg`. Decode wire form -> Creds -> Msg.
+                    "Attribute::EventAttr(Event::OnForm(\"submit\".to_string(), "
+                        ++ "std::sync::Arc::new({ let __h = " ++ handlerStr ++ "; "
+                        ++ "move |fd| sky_runtime::decode_form_or_warn::<" ++ rustT
+                        ++ ">(fd).map(|t| __h(t)) })))"
+                Nothing ->
+                    -- bare-Msg case: `onSubmit SomeMsg`. Ignore the form payload;
+                    -- always dispatch the (Clone) Msg.
+                    "Attribute::EventAttr(Event::OnForm(\"submit\".to_string(), "
+                        ++ "std::sync::Arc::new({ let __m = " ++ handlerStr ++ "; "
+                        ++ "move |_fd| Some(__m.clone()) })))"
+    Can.Call fn args ->
+        let calleeName = exprToRustString ctx fn
+            -- sub-A.12 F2: detect partial application (Sky source has currying;
+            -- Rust doesn't). If the callee is a top-level fn with known arity > supplied,
+            -- wrap the residual args in a `move |..| f(supplied.., residual..)` closure.
+            calleeArity = case fn of
+                Ann.At _ (Can.VarTopLevel _ fnName) ->
+                    case Map.lookup fnName (ecSolvedTypes ctx) of
+                        Just ty -> length (extractParamTypes ty)
+                        Nothing -> 0
+                _ -> 0
+            isPartialApp = calleeArity > length args && not (null args)
+            succeedArity = case fn of
+                Ann.At _ (Can.VarKernel _ name) | name == "succeed" && not (null args) ->
+                    case head args of
+                        Ann.At _ (Can.Lambda ps _) | length ps > 1 -> Just (length ps)
+                        Ann.At _ (Can.VarTopLevel _ fnName) ->
+                            case Map.lookup fnName (ecSolvedTypes ctx) of
+                                Just ty | let n = length (extractParamTypes ty), n > 1 -> Just n
+                                _ -> case Map.lookup fnName (ecCtorArity ctx) of
+                                    Just n | n > 1 -> Just n
+                                    _ -> Nothing
+                        _ -> Nothing
+                _ -> Nothing
+        in if isPartialApp
+           then
+               -- sub-A.12 F2: partial application -> wrap residual args in
+               -- a `move |..| f(supplied.., residual..)` closure. Sky source
+               -- like `result_and_then (validateTime now) (...)` curries
+               -- `validateTime now` into `String -> Result Error String`.
+               let supplied = length args
+                   missing = calleeArity - supplied
+                   freshParams = ["__pa" ++ show i | i <- [1..missing]]
+                   suppliedStrs = map (exprToRustString ctx) args
+               in "(move |" ++ intercalate ", " freshParams ++ "| " ++
+                  calleeName ++ "(" ++ intercalate ", " (suppliedStrs ++ freshParams) ++ "))"
+           else
+            case succeedArity of
+            Just n ->
+                let [arg] = args
+                in case arg of
+                    Ann.At _ (Can.Lambda params body) ->
+                        let counts = collectVarLocalsMulti body
+                            innerMulti = [v | (v, c) <- Map.toList counts, c >= 2]
+                            ctx' = ctx { ecCloneVars = Set.fromList innerMulti, ecCopyVars = ecCopyVars ctx }
+                            psStr = intercalate ", " (map patternToRustParam params)
+                        in calleeName ++ "(curry" ++ show n ++ "(|" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " }))"
+                    _ ->
+                        calleeName ++ "(curry" ++ show n ++ "(" ++ exprToRustString ctx arg ++ "))"
+            Nothing -> case calleeName of
+                fn | "println" `isSuffixOf` fn ->
+                    "log_info(" ++ intercalate " ++ \" \" ++ " (map (\a -> exprToRustString ctx a) args) ++ ")"
+                cname | cname `elem` ["task_and_then", "task_on_error", "task_map_error"] ->
+                    case pinTaskCall ctx cname args (ecSolvedTypes ctx) of
+                        Just pinned -> pinned
+                        Nothing -> emitDefaultCall ctx fn calleeName args
+                cname | "json_dec_and_then" `isPrefixOf` cname, [contArg, decArg] <- args ->
+                    -- Sky's `andThen : (a -> Decoder b) -> Decoder a -> Decoder b`
+                    -- puts the continuation FIRST, but the runtime kernel is
+                    -- `json_dec_and_then(decoder, f)`. Emit decoder-first so Rust
+                    -- unifies the decoder's value type `a` BEFORE type-checking the
+                    -- continuation closure — a closure-first arg leaves `a`
+                    -- un-inferred (E0282). Closes the Json.Decode/Std.Config
+                    -- `andThen` record-decode path.
+                    emitDefaultCall ctx fn calleeName [decArg, contArg]
+                _ -> emitDefaultCall ctx fn calleeName args
+    Can.If [] elseBranch ->
+        exprToRustString ctx elseBranch
+    Can.If ((firstCond, firstBody):rest) elseBranch ->
+        "if " ++ exprToRustString ctx firstCond ++ " { " ++ exprToRustString ctx firstBody ++ " }"
+        ++ concatMap (\(c, t) -> " else if " ++ exprToRustString ctx c ++ " { " ++ exprToRustString ctx t ++ " }") rest
+        ++ " else { " ++ exprToRustString ctx elseBranch ++ " }"
+    Can.Let def body ->
+        case def of
+            Can.Def (Ann.At _ name) [] (Ann.At _ (Can.List items))
+                | Just n <- Map.lookup name (collectVarLocalsMulti body), n >= 2 ->
+                    let inline = "vec![" ++ intercalate ", " (map (exprToRustString ctx) items) ++ "]"
+                    in substVar ctx name inline body
+            -- Block-wrap: a `let` is a statement, invalid in expression
+            -- position (e.g. a call arg `f(let x = …; body)`). `{ … }` is a
+            -- valid expression everywhere, so wrapping is universally safe.
+            _ -> "{ let " ++ defToRustString ctx def ++ "; " ++ exprToRustString ctx body ++ " }"
+    Can.LetRec defs body ->
+        "{ let mut " ++ intercalate "; let mut " (map (defToRustString ctx) defs) ++ "; " ++ exprToRustString ctx body ++ " }"
+    Can.LetDestruct pat expr body ->
+        -- Clone captured locals used ≥ 2 times so each use gets its own copy.
+        let counts = collectVarLocalsMulti expr
+            multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
+            clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") multi
+            hasClone = not (null multi)
+            exprStr = case expr of
+                Ann.At _ (Can.Lambda ps lambdaBody)
+                    | null ps || all isWildcard ps ->
+                        let inner = "(move || { " ++ exprToRustString ctx lambdaBody ++ " })()"
+                        in if not hasClone then inner else "{ " ++ clones ++ inner ++ " }"
+                Ann.At _ (Can.Lambda ps lambdaBody) ->
+                    let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
+                        innerCapt = Set.toList (Set.difference (collectVarLocals lambdaBody) paramNames)
+                        innerClones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") innerCapt
+                        psStr = intercalate ", " (map patternToRustParam ps)
+                        inner = "move |" ++ psStr ++ "| { " ++ exprToRustString ctx lambdaBody ++ " }"
+                    in if null innerCapt && not hasClone then inner
+                       else "{ " ++ clones ++ innerClones ++ inner ++ " }"
+                _ -> if not hasClone then exprToRustString ctx expr
+                     else "{ " ++ clones ++ exprToRustString ctx expr ++ " }"
+        in "let " ++ patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
+    Can.Case scrut branches ->
+        let scrutStr = exprToRustString ctx scrut
+            -- Detect slice patterns → wrap with .as_slice()
+            hasCons = any (\(Can.CaseBranch pat _) -> hasConsP pat) branches
+            -- Detect string literal patterns → wrap with .as_str() so &str patterns compile
+            hasStr  = any (\(Can.CaseBranch pat _) -> hasStrPat pat) branches
+            wrapped = if hasCons then "(" ++ scrutStr ++ ").as_slice()"
+                      else if hasStr then scrutStr ++ ".as_str()"
+                      else scrutStr
+            -- sub-A.10 C5: when the scrutinee was .as_str()-wrapped, wildcard
+            -- PVar bindings are &str. Convert to String at the body's binding
+            -- site so constructor args expecting String work.
+            renderBranch = if hasStr then branchToRustStringStrWrap ctx
+                                     else branchToRustString ctx
+        in "match " ++ wrapped ++ " { " ++
+        intercalate ", " (map renderBranch branches) ++ " }"
+      where
+        hasConsP (Ann.At _ p) = case p of
+            Can.PCons _ _ -> True
+            Can.PList _ -> True
+            Can.PAlias pat _ -> hasConsP pat
+            _ -> False
+    Can.Accessor field -> "|_record| _record." ++ field
+    Can.Access record (Ann.At _ field) -> 
+        exprToRustString ctx record ++ "." ++ field
+    Can.Update (Ann.At _ _field) record updates ->
+        let sorted = sortBy (\(_, Can.FieldUpdate r1 _) (_, Can.FieldUpdate r2 _) -> compare (Ann._line (Ann._start r1)) (Ann._line (Ann._start r2))) (Map.toList updates)
+        in "{ let mut result = " ++ exprToRustString ctx record ++ "; " ++
+        intercalate "; " (map (\(f, Can.FieldUpdate _ expr) -> "result." ++ f ++ " = " ++ exprToRustString ctx expr) sorted) ++
+        "; result }"
+    Can.Record fields -> 
+        let key = intercalate "," (Map.keys fields)
+        in case Map.lookup key (ecRecordMap ctx) of
+            Just structName -> 
+                structName ++ " { " ++ intercalate ", " (map (\(k, v) -> 
+                    k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)) ++ " }"
+            Nothing -> 
+                "{ " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)) ++ " }"
+    Can.Unit -> "()"
+    Can.Tuple a b rest -> 
+        "(" ++ intercalate ", " (map (exprToRustString ctx) (a:b:rest)) ++ ")"
+
+-- | Given a Task-typed expression (like Db_query(…)), return the Rust type
+-- string of the SkyTask's inner success type A (i.e.  SkyTask<A> → A).
+-- Returns "" when the type can't be determined.
+-- Takes a solvedTypes map so Task.succeed(arg) can look up arg's type.
+taskExprInnerType :: Map.Map String Can.Type -> Can.Expr -> String
+taskExprInnerType solved (Ann.At _ expr) = case expr of
+    Can.VarLocal name -> case Map.lookup name solved of
+        Just ty -> taskInnerTypeStr (extractReturnType ty)
+        Nothing -> ""
+    -- Check kernel calls (VarKernel or VarTopLevel with kernel alias)
+    Can.Call callee args -> taskExprInnerTypeCall solved callee args
+    -- Pipeline: extract type from left side (the task being piped)
+    Can.Binop "|>" _ _ _ a _ ->
+        let t = taskExprInnerType solved a
+        in if null t then "String" else t
+    Can.Case _ branches ->
+        -- If ALL case branches are Task expressions, propagate the inner type
+        let innerTypes = [ taskExprInnerType solved b | Can.CaseBranch _ b <- branches ]
+        in if not (null innerTypes) && all (not . null) innerTypes
+           then head innerTypes  -- same inner type for all branches
+           else ""
+    Can.VarTopLevel mod name ->
+        -- Look up the solved type of this VarTopLevel and extract Task inner type
+        case Map.lookup name solved of
+            Just ty -> let ret = extractReturnType ty in taskInnerTypeStr ret
+            Nothing -> ""
+    _ -> ""
+
+-- | Extract the inner type string from a Sky type (task or not).
+-- If the type is Task e a, return the Rust string of a.
+-- Otherwise return "" (not a Task expression).
+taskInnerTypeStr :: Can.Type -> String
+taskInnerTypeStr (Can.TType _ "Task" [_, a]) = typeToRustString Map.empty a
+taskInnerTypeStr _                           = ""
+
+-- | Body-driven param monomorphisation. A user wrapper over a polymorphic
+-- stdlib kernel (e.g. `Lib.Db.exec queryStr args = … Db.exec conn queryStr args`)
+-- inherits a TVAR param (`args : List a`, `row`) because the kernel's Sky sig is
+-- polymorphic (`Db.exec : … List a …`, `Db.getField : String -> row -> String`).
+-- The concrete-only param gate then rejects the whole sig and the body-analysis
+-- fallback emits `String`, but the runtime kernel is MONOMORPHIC (db_exec wants
+-- `Vec<String>`, dict_get wants `HashMap<String,String>`) → E0308 at every call.
+-- This recovers the concrete type by finding the first call in the body where
+-- the param is a direct argument and reading the callee kernel's known Rust type
+-- at that position. Symmetric to taskExprInnerType (return inference).
+inferParamRustType :: EmitCtx -> String -> Can.Expr -> Maybe String
+inferParamRustType ctx pname = go
+  where
+    go (Ann.At _ e) = case e of
+      Can.Call callee args ->
+        let mkn = calleeKernelName ctx callee
+            -- param is a DIRECT arg → callee's arg type at that position
+            direct = case mkn of
+              Just kn -> firstJustL [ kernelArgRustType kn i
+                                    | (i, Ann.At _ (Can.VarLocal v)) <- zip [0 :: Int ..] args
+                                    , v == pname ]
+              Nothing -> Nothing
+            -- DIRECT arg of a generated stdlib fn (not a kernel) with a known
+            -- arg type — e.g. `sky_core_error_to_string(e)` → `e : SkyError`.
+            genDirect = case emittedCalleeName callee of
+              Just en -> firstJustL [ genFnArgType en i
+                                    | (i, Ann.At _ (Can.VarLocal v)) <- zip [0 :: Int ..] args
+                                    , v == pname ]
+              Nothing -> Nothing
+            -- param is an ELEMENT of a `vec![…]` arg to a kernel taking a
+            -- known Vec type (`db_exec(db, sql, vec![…, ts])`, `log_*_with`).
+            -- Infer from the ELEMENT's own solver region type — NOT the kernel's
+            -- `Vec<String>`: db params are heterogeneous and get `format!`'d to
+            -- String at the call site, so `ts`'s actual type is `Int` (from
+            -- Time.now), and annotating it `String` mismatched the caller
+            -- (E0308). The element region carries the unified Sky element type
+            -- (i64 for the int list, String for the token list).
+            vecElem = case mkn of
+              Just kn -> firstJustL
+                [ Just (typeToRustString (ecRecordMap ctx) t)
+                | (i, Ann.At _ (Can.List elems)) <- zip [0 :: Int ..] args
+                , Just _ <- [kernelArgRustType kn i]
+                , Ann.At eregion (Can.VarLocal v) <- elems, v == pname
+                , Just t <- [Map.lookup eregion (ecRegionTypes ctx)]
+                , not (hasTypeVars t) ]
+              Nothing -> Nothing
+            -- param flows into a USER closure call (`writeAll db = … insertRow
+            -- db …`): recursively infer the target closure's param at that
+            -- position. Delete the target from the def map first to break cycles.
+            userClosure = case callee of
+              Ann.At _ (Can.VarLocal lname) ->
+                case Map.lookup lname (ecClosureDefs ctx) of
+                  Just (cparams, cbody) -> firstJustL
+                    [ inferParamRustType (ctx { ecClosureDefs = Map.delete lname (ecClosureDefs ctx) }) cpn cbody
+                    | (j, Ann.At _ (Can.VarLocal v)) <- zip [0 :: Int ..] args, v == pname
+                    , j < length cparams, Ann.At _ (Can.PVar cpn) <- [cparams !! j] ]
+                  Nothing -> Nothing
+              _ -> Nothing
+        in direct `orElseM` genDirect `orElseM` vecElem `orElseM` userClosure `orElseM` firstJustL (map go (callee : args))
+      Can.Lambda _ b              -> go b
+      Can.Let d b                 -> go (canDefBody d) `orElseM` go b
+      Can.LetRec ds b             -> firstJustL (map (go . canDefBody) ds) `orElseM` go b
+      Can.LetDestruct _ x b       -> go x `orElseM` go b
+      Can.Case s bs               -> go s `orElseM` firstJustL [ go b | Can.CaseBranch _ b <- bs ]
+      Can.If brs el               -> firstJustL ([ go c `orElseM` go t | (c, t) <- brs ] ++ [go el])
+      Can.Binop _ _ _ _ a b       -> go a `orElseM` go b
+      Can.Access r _              -> go r
+      Can.Update _ r ups          -> go r `orElseM` firstJustL [ go x | (_, Can.FieldUpdate _ x) <- Map.toList ups ]
+      Can.Record fs               -> firstJustL [ go x | (_, x) <- Map.toList fs ]
+      Can.List xs                 -> firstJustL (map go xs)
+      Can.Tuple a b rest          -> firstJustL (map go (a : b : rest))
+      Can.Negate x                -> go x
+      _                           -> Nothing
+    orElseM (Just x) _ = Just x
+    orElseM Nothing  y = y
+    firstJustL = foldr orElseM Nothing
+
+-- | Resolve a call's callee expression to its runtime kernel snake_case name
+-- (the same resolution exprToRustString does for VarTopLevel / VarKernel).
+calleeKernelName :: EmitCtx -> Can.Expr -> Maybe String
+calleeKernelName ctx (Ann.At _ e) = case e of
+    Can.VarTopLevel mod name ->
+        let modName = ModuleName._name mod
+            fnName  = toSnakeCase (map (\c -> if c == '.' then '_' else c) modName ++ "_" ++ name)
+            kName   = kernelToRust modName name
+        in if fnName /= kName && not ("ffi_kernel" `isPrefixOf` kName)
+           then Just kName
+           else case Map.lookup (modName, name) (ecKernelAliases ctx) of
+                    Just (kMod, kFn) -> Just (kernelToRust kMod kFn)
+                    Nothing          -> Nothing
+    Can.VarKernel mod name -> Just (kernelToRust mod name)
+    _ -> Nothing
+
+-- | The CONCRETE Rust type a monomorphic runtime kernel expects at arg `i`,
+-- for the kernels that user wrappers commonly call with a Sky-polymorphic
+-- (`List a` / `row`) param. Keep narrow: only positions whose runtime type is
+-- fixed regardless of Sky's loose sig. db_exec/db_query bind params positionally
+-- as Vec<String>; the dict_* kernels key on String and (for getField's row use)
+-- carry String values.
+kernelArgRustType :: String -> Int -> Maybe String
+kernelArgRustType "db_exec"     0 = Just "Db"
+kernelArgRustType "db_query"    0 = Just "Db"
+kernelArgRustType "db_exec_raw" 0 = Just "Db"
+kernelArgRustType "db_exec"     2 = Just "Vec<String>"
+kernelArgRustType "db_query"    2 = Just "Vec<String>"
+-- Log.*With : String -> List String -> Task — the attrs list is Vec<String>
+-- (so a closure param used as an attr element infers String).
+kernelArgRustType n 1
+    | n `elem` [ "log_info_with", "log_error_with", "log_warn_with", "log_debug_with" ]
+        = Just "Vec<String>"
+kernelArgRustType "dict_get"    1 = Just "HashMap<String, String>"
+kernelArgRustType "dict_member" 1 = Just "HashMap<String, String>"
+kernelArgRustType "dict_remove" 1 = Just "HashMap<String, String>"
+kernelArgRustType "dict_keys"   0 = Just "HashMap<String, String>"
+kernelArgRustType "dict_values" 0 = Just "HashMap<String, String>"
+-- Std.Css length/number constructors take f64 (Sky `Float`). An Int literal arg
+-- (`Css.pct 100`) must coerce — see emitArg's f64 branch.
+kernelArgRustType n 0
+    | n `elem` [ "std_css_pct", "std_css_em", "std_css_rem", "std_css_ch"
+               , "std_css_num", "std_css_opacity", "std_css_scale", "std_css_deg"
+               , "std_css_sec" ] = Just "f64"
+kernelArgRustType _             _ = Nothing
+
+-- | The turbofish for `task_fail : err -> Task err a`. Its success type `a` is
+-- phantom (a failing task yields no value), so it's unconstrained when the
+-- result is discarded → E0283, hence the `i64` default. But when `a` IS
+-- constrained — a GENERIC fn's own param (`Task Error a`), or a monomorphic fn
+-- whose return type is known (`Task Error String`) — pinning `i64` MISMATCHES
+-- it (E0271/E0308). Resolve `a` from the expected return type: drop the pin in
+-- a generic fn (let Rust infer the param), pin the concrete success type when
+-- the region's expected type is a known `Task _ a`, else default `i64`.
+taskFailPin :: EmitCtx -> String
+taskFailPin ctx
+    | ecInGenericFn ctx = ""
+    | otherwise = case ecExpectedType ctx of
+        Just (Can.TType _ "Task" [_, a]) | not (hasTypeVars a) ->
+            "::<_, " ++ typeToRustString (ecRecordMap ctx) a ++ ">"
+        _ -> "::<_, i64>"
+
+-- | The emitted Rust name of a call's callee, for GENERATED stdlib functions
+-- (which aren't kernels, so calleeKernelName returns Nothing). A VarTopLevel
+-- emits as `toSnakeCase(mod_name)` — e.g. Sky.Core.Error.toString →
+-- "sky_core_error_to_string".
+emittedCalleeName :: Can.Expr -> Maybe String
+emittedCalleeName (Ann.At _ (Can.VarTopLevel mod nm)) =
+    Just (toSnakeCase (map (\c -> if c == '.' then '_' else c) (ModuleName._name mod) ++ "_" ++ nm))
+emittedCalleeName _ = Nothing
+
+-- | Arg type of a generated stdlib function with a fixed monomorphic param,
+-- for closure-param inference (`sky_core_error_to_string(e)` → `e : SkyError`).
+genFnArgType :: String -> Int -> Maybe String
+genFnArgType "sky_core_error_to_string" 0 = Just "SkyError"
+genFnArgType _ _ = Nothing
+
+-- | Inner helper for taskExprInnerType: try to determine the Task inner
+-- type from a call expression.  Handles both VarKernel and VarTopLevel
+-- callees that route through kernelToRust.
+taskExprInnerTypeCall :: Map.Map String Can.Type -> Can.Expr -> [Can.Expr] -> String
+taskExprInnerTypeCall solved (Ann.At _ (Can.VarTopLevel mod name)) args =
+    let rawMod = ModuleName._name mod
+        snakeName = toSnakeCase (map (\c -> if c == '.' then '_' else c) rawMod ++ "_" ++ name)
+        kName = kernelToRust rawMod name
+        fakeSpan = Ann.Region (Ann.Position 0 0) (Ann.Position 0 0)
+    in if snakeName /= kName
+       then taskExprInnerTypeCall solved (Ann.At fakeSpan (Can.VarKernel rawMod name)) args
+       else -- Not a kernel: check solved types for the function name
+            case Map.lookup name solved of
+                Just ty -> let ret = extractReturnType ty in taskInnerTypeStr ret
+                Nothing -> ""
+taskExprInnerTypeCall solved (Ann.At _ (Can.VarKernel modName fnName)) args
+        | "Task" `isSuffixOf` modName || modName == "Task" = case fnName of
+            "succeed"  -> case args of
+                [arg] -> solveArgType solved arg
+                _ -> "String"
+            "fail"     -> ""  -- polymorphic success type A — empty signals unconstrained
+            "map"      -> "String"  -- result type is B (fn's return), not derivable statically
+            "andThen"  -> "String"  -- same
+            "onError"  -> case args of
+                [_, task] -> taskExprInnerType solved task
+                _ -> "String"
+            "mapError" -> case args of
+                [_, task] -> taskExprInnerType solved task  -- same success type A
+                _ -> "String"
+            _ -> ""
+        | "Trace" `isSuffixOf` modName || modName == "Trace" = case fnName of
+            -- span : String -> Task e a -> Task e a — inner type is the wrapped
+            -- task's. event / attr are Task Error () — inner is ().
+            "span" -> case args of
+                [_, task] -> taskExprInnerType solved task
+                _ -> ""
+            "event" -> "()"
+            "attr"  -> "()"
+            _ -> ""
+        | "Db" `isSuffixOf` modName || modName == "Db" = case fnName of
+            "query"    -> "Vec<HashMap<String, String>>"
+            "exec"     -> "()"
+            "execRaw"  -> "()"
+            "connect"  -> "Db"
+            "getField" -> "String"
+            "getString" -> "String"
+            "getInt"   -> "i64"
+            _ -> ""
+        | "System" `isSuffixOf` modName || modName == "System" = case fnName of
+            "args"        -> "Vec<String>"
+            "exit"        -> "()"
+            "setenv"      -> "()"
+            "unsetenv"    -> "()"
+            _ -> ""
+        | "Log" `isSuffixOf` modName || modName == "Log" = "()"
+        | "Time" `isSuffixOf` modName || modName == "Time" = case fnName of
+            "now"       -> "i64"
+            "sleep"     -> "()"
+            "unixMillis" -> "i64"
+            _ -> ""
+        | "Random" `isSuffixOf` modName || modName == "Random" = case fnName of
+            "int"    -> "i64"
+            "float"  -> "f64"
+            "choice" -> "String"
+            _ -> ""
+        | "Crypto" `isSuffixOf` modName || modName == "Crypto" = case fnName of
+            "randomBytes"  -> "Vec<i64>"
+            "randomToken"  -> "String"
+            _ -> ""
+        | "File" `isSuffixOf` modName || modName == "File" = case fnName of
+            "readFile"  -> "String"
+            "writeFile" -> "()"
+            "exists"    -> "bool"
+            _ -> ""
+        | otherwise = ""
+taskExprInnerTypeCall _ _ _ = ""
+
+-- | Default call emission for non-special-cased function calls.
+-- Handles `isZeroArgFn` wrapping (Ffi.kernel stubs) and `isListDec`
+-- factory closures.
+emitDefaultCall :: EmitCtx -> Can.Expr -> String -> [Can.Expr] -> String
+-- Sub-D: Task.retryWith policy task — run-once on target=rust (see task.rs).
+-- Drop the policy arg: it's unused, and emitting the policy builder
+-- (`linearBackoff … : RetryPolicy e`) introduces a phantom error-type var `e`
+-- Rust can't infer (E0283). task_retry_with takes only the task. retryWith is a
+-- VarTopLevel kernel-alias, so it lands here rather than the VarKernel peephole.
+emitDefaultCall ctx _fn "task_retry_with" [_policy, task] =
+    "task_retry_with(" ++ exprToRustString ctx task ++ ")"
+emitDefaultCall ctx fn calleeName args =
+    let noCloneFn = case fn of
+            Ann.At _ (Can.VarKernel _ n) -> n == "run"
+            _ -> False
+        -- isPrefixOf (not isSuffixOf): the callee carries a turbofish
+        -- (`json_dec_list::<SkyError, _>`), so the bare name is a prefix, not a
+        -- suffix. `list` takes `impl Fn() -> Decoder`, so its decoder arg is
+        -- wrapped in a `||` factory closure below. (Suffix-matching silently
+        -- skipped the wrap once the turbofish was added — list never re-runs its
+        -- element decoder otherwise.)
+        isListDec = "json_dec_list" `isPrefixOf` calleeName
+        -- Sub-A.13: empty-collection args (`[]`, `Nothing`) carry no element
+        -- type for Rust to infer. Resolve each from the callee's param types:
+        -- concrete -> turbofish, var-shared-with-sibling -> bare, var-only-here
+        -- -> default filler, unknown callee -> bare. Non-empty args keep the
+        -- normal clone-aware emit.
+        paramStrs = calleeParamStrings ctx fn (length args)
+        emitArg i a
+            | isEmptyishArg a = emitEmptyArg ctx paramStrs i a
+            -- An Int literal passed where the callee wants f64 (Sky's numeric-
+            -- literal coercion: `Css.pct 100` → `std_css_pct(n: f64)`) must emit
+            -- as f64 — Rust does NOT coerce an i64 literal (E0308).
+            | Ann.At _ (Can.Int n) <- a
+            , kernelArgRustType (takeWhile (/= ':') calleeName) i == Just "f64"
+                              = show n ++ "_f64"
+            -- A `vec![…]` passed where the callee wants `Vec<String>` (e.g.
+            -- `Db.exec … [ok, failed, total, ts]` → db_exec arg2) must coerce
+            -- each non-String element — Sky's `List a` DB params allow Ints, but
+            -- the runtime kernel is monomorphic `Vec<String>` (E0308 otherwise).
+            | Ann.At _ (Can.List elems) <- a
+            , kernelArgRustType (takeWhile (/= ':') calleeName) i == Just "Vec<String>"
+                              = "vec![" ++ intercalate ", " (map coerceElemToString elems) ++ "]"
+            | otherwise       = argToRustString ctx noCloneFn a
+        -- Coerce a db-param list element to String uniformly via `format!`.
+        -- Sky's `List a` DB params are heterogeneous (Int/String/Bool — the Go
+        -- runtime boxes as `any`), and a List ELEMENT's region carries the
+        -- UNIFIED element type, not the element's own, so a per-type wrap
+        -- mis-fires (wrapped a String `ts` in string_from_int). `format!("{}",
+        -- x)` is Display-based: identity for String, decimal for Int/Float,
+        -- "true"/"false" for Bool — correct for every scalar db param.
+        coerceElemToString e =
+            "format!(\"{}\", " ++ argToRustString ctx noCloneFn e ++ ")"
+        argsStrs = if isListDec && not (null args)
+                   then ("|| " ++ argToRustString ctx noCloneFn (head args)) : map (argToRustString ctx noCloneFn) (tail args)
+                   else zipWith emitArg [0..] args
+        isZeroArgFn = case fn of
+            Ann.At _ (Can.VarKernel modName name) ->
+                let fnName = kernelToRust modName name
+                    defaultName = toSnakeCase (map (\c -> if c == '.' then '_' else c) modName ++ "_" ++ name)
+                in Set.member (modName, name) (ecZeroArgDefs ctx)
+                   && fnName == defaultName
+            Ann.At _ (Can.VarTopLevel modName name) ->
+                let modPrefix = map (\c -> if c == '.' then '_' else c) (ModuleName._name modName)
+                    fnName = toSnakeCase (modPrefix ++ "_" ++ name)
+                    kernelName = kernelToRust (ModuleName._name modName) name
+                in Set.member (modPrefix, name) (ecZeroArgDefs ctx)
+                   && (fnName == kernelName || kernelName == "ffi_kernel")
+            _ -> False
+        callee = exprToRustString ctx fn
+    in if isZeroArgFn && not (null args)
+       then callee ++ "()(" ++ intercalate ", " argsStrs ++ ")"
+       else callee ++ "(" ++ intercalate ", " argsStrs ++ ")"
+
+-- | Try to extract the Rust type string from a single argument expression
+-- by looking up its type in solvedTypes.
+solveArgType :: Map.Map String Can.Type -> Can.Expr -> String
+solveArgType solvedMap arg = case arg of
+    Ann.At _ (Can.Int _)   -> "i64"
+    Ann.At _ (Can.Float _) -> "f64"
+    Ann.At _ (Can.Str _)   -> "String"
+    Ann.At _ (Can.Chr _)   -> "char"
+    -- A list literal is unambiguously a Vec — drives `++` to Vec-concat even
+    -- when the other operand is an opaque field access (e.g. the stdlib's
+    -- `msg.attachments ++ [ att ]` on a bridged-struct List field, where the
+    -- access side resolves to "String" and would otherwise pick format!).
+    Ann.At _ (Can.List _)  -> "Vec<_>"
+    Ann.At _ (Can.VarLocal name) ->
+        case Map.lookup name solvedMap of
+            Just ty -> typeToRustString Map.empty ty
+            Nothing -> "String"
+    Ann.At _ (Can.Binop op _ _ _ a _) ->
+        case op of
+            "+" -> "i64"; "-" -> "i64"; "*" -> "i64"
+            "/" -> "i64"; "//" -> "i64"; "%" -> "i64"
+            "++" -> "String"
+            "&&" -> "bool"; "||" -> "bool"
+            "==" -> "bool"; "/=" -> "bool"
+            _ -> solveArgType solvedMap a
+    _ -> "String"
+
+-- | Collect every let-bound closure DEFINITION (a Def with >=1 param) anywhere
+-- in a function body, as `name -> (params, body)`. Feeds ecClosureDefs so
+-- inferParamRustType can resolve a param flowing into a local closure.
+collectClosureDefs :: Can.Expr -> Map.Map String ([Can.Pattern], Can.Expr)
+collectClosureDefs top = Map.fromList (go top)
+  where
+    ent (Can.Def (Ann.At _ n) ps b) | not (null ps) = [(n, (ps, b))]
+    ent _ = []
+    go (Ann.At _ e) = case e of
+      Can.Let def rest        -> ent def ++ go (canDefBody def) ++ go rest
+      Can.LetRec defs rest    -> concatMap ent defs ++ concatMap (go . canDefBody) defs ++ go rest
+      Can.LetDestruct _ x b   -> go x ++ go b
+      Can.Lambda _ b          -> go b
+      Can.Call f as           -> go f ++ concatMap go as
+      Can.Case s bs           -> go s ++ concatMap (\(Can.CaseBranch _ b) -> go b) bs
+      Can.If brs el           -> concatMap (\(c, t) -> go c ++ go t) brs ++ go el
+      Can.Binop _ _ _ _ a b   -> go a ++ go b
+      Can.Access r _          -> go r
+      Can.Update _ r ups      -> go r ++ concatMap (\(_, Can.FieldUpdate _ x) -> go x) (Map.toList ups)
+      Can.Record fs           -> concatMap (go . snd) (Map.toList fs)
+      Can.List xs             -> concatMap go xs
+      Can.Tuple a b rest      -> concatMap go (a : b : rest)
+      Can.Negate x            -> go x
+      _                       -> []
+
+-- | Collect field names accessed (`j.f`) or record-updated (`{ j | f = … }`) on
+-- a closure param, to resolve a HOF-closure record param to its struct (Rust
+-- can't always infer a closure param from a sibling list arg → E0282).
+closureParamFields :: String -> Can.Expr -> Set.Set String
+closureParamFields pname = go
+  where
+    goU (Can.FieldUpdate _ x) = go x
+    go (Ann.At _ e) = case e of
+      Can.Access (Ann.At _ (Can.VarLocal v)) f | v == pname -> Set.singleton (Ann.toValue f)
+      Can.Access r _            -> go r
+      Can.Update _ (Ann.At _ (Can.VarLocal v)) ups | v == pname ->
+          Set.union (Set.fromList (Map.keys ups)) (Set.unions (map (goU . snd) (Map.toList ups)))
+      Can.Update _ r ups        -> Set.union (go r) (Set.unions (map (goU . snd) (Map.toList ups)))
+      Can.Call f as             -> Set.unions (go f : map go as)
+      Can.Lambda _ b            -> go b
+      Can.Let d b               -> Set.union (go (canDefBody d)) (go b)
+      Can.LetRec ds b           -> Set.unions (go b : map (go . canDefBody) ds)
+      Can.LetDestruct _ x b     -> Set.union (go x) (go b)
+      Can.Case s bs             -> Set.unions (go s : [ go b | Can.CaseBranch _ b <- bs ])
+      Can.If brs el             -> Set.unions (go el : concat [ [go c, go t] | (c, t) <- brs ])
+      Can.Binop _ _ _ _ a b     -> Set.union (go a) (go b)
+      Can.Record fs             -> Set.unions (map (go . snd) (Map.toList fs))
+      Can.List xs               -> Set.unions (map go xs)
+      Can.Tuple a b rest        -> Set.unions (map go (a : b : rest))
+      Can.Negate x              -> go x
+      _                         -> Set.empty
+
+-- | Resolve a closure record param to its struct via field-name superset match.
+inferRecordClosureParam :: EmitCtx -> String -> Can.Expr -> Maybe String
+inferRecordClosureParam ctx pname body =
+    let fields = closureParamFields pname body
+    in if Set.null fields then Nothing else matchStructByFieldsE (ecRecordMap ctx) fields
+
+-- | Struct (recordMap value) with the FEWEST extra fields whose set is a
+-- SUPERSET of `fieldSet`. (Duplicate of ModuleEmitter.matchStructByFields, kept
+-- here to avoid a cross-module dependency.)
+matchStructByFieldsE :: Map.Map String String -> Set.Set String -> Maybe String
+matchStructByFieldsE recordMap fieldSet
+    | Set.null fieldSet = Nothing
+    | otherwise =
+        let best = foldr (\(k, nm) acc ->
+                     let kSet   = Set.fromList (words (map (\c -> if c == ',' then ' ' else c) k))
+                         extras = Set.size kSet - Set.size fieldSet
+                     in if fieldSet `Set.isSubsetOf` kSet && extras >= 0
+                        then case acc of
+                               Nothing                  -> Just (extras, nm)
+                               Just (e, _) | extras < e -> Just (extras, nm)
+                               _                        -> acc
+                        else acc) Nothing (Map.toList recordMap)
+        in case best of
+             Just (_, nm) | not ("Anon" `isPrefixOf` nm) -> Just nm
+             _ -> Nothing
+
+-- | Annotate a closure PVar param from BODY-DRIVEN inference (inferParamRustType
+-- scans the body for the kernel the param flows into). Closes E0282 for
+-- let-bound closures Rust can't infer (`let insertRow = \db ts -> db_exec(db,
+-- sql, vec![…, ts])` → `|db: Db, ts: String|`). The region-type approach failed
+-- (solver records expression, not pattern, regions). HOF args route through
+-- argToRustString, so List.map/filter closures don't reach here and stay bare.
+annotClosureParam :: EmitCtx -> Can.Expr -> Can.Pattern -> String
+annotClosureParam ctx body p@(Ann.At _ (Can.PVar pn)) =
+    case inferParamRustType ctx pn body of
+        Just t  -> patternToRustParam p ++ ": " ++ t
+        Nothing -> patternToRustParam p
+annotClosureParam _ _ p = patternToRustParam p
+
+binopToRust :: String -> String
+binopToRust op = case op of
+    "+" -> "+"
+    "-" -> "-"
+    "*" -> "*"
+    "/" -> "/"
+    -- Sky's integer-division operator `//`. Emitting it verbatim is a
+    -- catastrophe: `//` starts a Rust line comment, silently commenting out
+    -- the rest of the (single-line) function body — every trailing `}` closer
+    -- vanishes and rustc reports an unclosed delimiter. Rust `/` on i64
+    -- operands IS integer division (truncates toward zero), matching Sky `//`
+    -- and Go's int `/`.
+    "//" -> "/"
+    "%" -> "%"
+    "==" -> "=="
+    "/=" -> "!="
+    "<" -> "<"
+    ">" -> ">"
+    "<=" -> "<="
+    ">=" -> ">="
+    "&&" -> "&&"
+    "||" -> "||"
+    "::" -> "::"  -- cons
+    "++" -> "++"
+    _ -> op
+
+defToRustString :: EmitCtx -> Can.Def -> String
+-- Zero-arg Def: inject .clone() for captured locals that are used ≥ 2 times,
+-- so multiple uses of the same variable (f(x); g(x) pattern) compile.
+defToRustString ctx (Can.Def (Ann.At _ name) [] body) =
+    -- Only outer-captured multi-use vars get a clone prelude — collectFree…
+    -- excludes vars bound inside `body` (e.g. case-pattern vars), which aren't
+    -- in scope at the prelude. Their use-site clones come from ecCloneVars.
+    let counts = collectFreeVarLocalsMulti body
+        multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
+        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") multi
+    in case body of
+        Ann.At _ (Can.Lambda [] lambdaBody) ->
+            let inner = "|| { " ++ exprToRustString ctx lambdaBody ++ " }"
+            in name ++ " = " ++ if null multi then inner else "{ " ++ clones ++ inner ++ " }"
+        _ ->
+            let inner = exprToRustString ctx body
+            in name ++ " = " ++ if null multi then inner else "{ " ++ clones ++ inner ++ " }"
+-- Multi-arg Def: closure binding. Params body-driven-annotated (a let-bound
+-- closure gives Rust no way to infer them → E0282). Emitted as a `move` closure
+-- with captured outer vars cloned first — a let-bound closure that ESCAPES
+-- (passed into a Task pipeline, e.g. `readAll` capturing `selectRecent`) must
+-- own its captures or Rust rejects it (E0373). Mirrors argToRustString's
+-- proven move+clone pattern. No captures → plain (non-move) is fine.
+defToRustString ctx (Can.Def (Ann.At _ name) params body) =
+    let paramNames = Set.fromList (concatMap patBindingVars params)
+        captured   = Set.toList (Set.difference (collectVarLocals body) paramNames)
+        clones     = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+        innerMulti = [ v | (v, c) <- Map.toList (collectVarLocalsMulti body), c >= 2 ]
+        ctx'       = ctx { ecCloneVars = Set.unions
+                             [ Set.fromList innerMulti
+                             , Set.difference (ecCloneVars ctx) paramNames
+                             , Set.fromList captured ] }
+        psStr      = intercalate ", " (map (annotClosureParam ctx body) params)
+        closure    = "move |" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " }"
+    in name ++ " = " ++ if null captured then closure else "{ " ++ clones ++ closure ++ " }"
+-- Destructuring binding: `let (a, b) = expr` / `let { f } = expr`. When a
+-- destructuring let reaches the Can.Let path (rather than Can.LetDestruct), its
+-- DestructDef lands here. Render the pattern via patternToMatchString and mirror
+-- LetDestruct's clone-prelude so the caller emits `let (a, b) = expr;`. Without
+-- this arm the catchall stubbed `_ = unimplemented()` and dropped the bindings —
+-- every `let (a, _) = f x` then referenced the unbound names (E0425/E0423).
+defToRustString ctx (Can.DestructDef pat expr) =
+    let counts = collectVarLocalsMulti expr
+        multi  = [ v | (v, c) <- Map.toList counts, c >= 2 ]
+        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") multi
+        exprStr = if null multi then exprToRustString ctx expr
+                  else "{ " ++ clones ++ exprToRustString ctx expr ++ " }"
+    in patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ exprStr
+defToRustString _ctx _ = "_ = unimplemented()"
+
+branchToRustString :: EmitCtx -> Can.CaseBranch -> String
+branchToRustString ctx (Can.CaseBranch pat body) =
+    let patStr  = patternToMatchString (ecRecordMap ctx) pat
+        -- Zero-arg top-level functions used as case values must be called.
+        bodyExpr = case body of
+            Ann.At _ (Can.VarTopLevel mod name) ->
+                let modStr = ModuleName._name mod
+                    rawName = (if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_") ++ name
+                in toSnakeCase rawName ++ "()"
+            _ -> exprToRustString ctx body
+        -- Slice patterns bind references (&T for head, &[T] for tail).
+        -- Inject .clone() / .to_vec() so the body sees owned values.
+        prefix = case pat of
+            Ann.At _ (Can.PCons headPat tailPat) ->
+                let hc = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") (patBindingVars headPat)
+                    tv = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".to_vec(); ") (patBindingVars tailPat)
+                in hc ++ tv
+            Ann.At _ (Can.PList items) ->
+                concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") (concatMap patBindingVars items)
+            _ -> ""
+    in if null prefix && not ("let " `isPrefixOf` bodyExpr) && not ("if " `isPrefixOf` bodyExpr)
+       then patStr ++ " => " ++ bodyExpr
+       else patStr ++ " => { " ++ prefix ++ bodyExpr ++ " }"
+
+-- | Sub-A.10 C5: case-arm emit for branches under a `.as_str()`-wrapped
+-- scrutinee. PVar bindings are `&str`; convert them to `String` at the body
+-- binding site so downstream uses (e.g. constructor args) get the owned
+-- value. Non-PVar patterns delegate to the normal emit.
+branchToRustStringStrWrap :: EmitCtx -> Can.CaseBranch -> String
+branchToRustStringStrWrap ctx br@(Can.CaseBranch pat body) =
+    case pat of
+        Ann.At _ (Can.PVar n) ->
+            let patStr = rustSafeIdent n
+                bodyStr = exprToRustString ctx body
+                prelude = "let " ++ patStr ++ " = " ++ patStr ++ ".to_string(); "
+            in patStr ++ " => { " ++ prelude ++ bodyStr ++ " }"
+        _ -> branchToRustString ctx br
+
+patternToMatchString :: Map.Map String String -> Can.Pattern -> String
+patternToMatchString _recMap (Ann.At _ pat) = case pat of
+    Can.PVar n -> rustSafeIdent n
+    Can.PAnything -> "_"
+    Can.PInt i -> show i
+    Can.PBool b -> if b then "true" else "false"
+    Can.PChr c -> "'" ++ c ++ "'"
+    Can.PStr s -> show s
+    Can.PUnit -> "()"
+    Can.PCtor{Can._p_home = home, Can._p_type = typeName, Can._p_name = name, Can._p_args = args} ->
+        let subPats = map (\(Can.PatternCtorArg _ _ p) -> patternToMatchString _recMap p) args
+            fullName = kernelCtorToRust home typeName name
+        in fullName ++ if null subPats then "" else "(" ++ intercalate ", " subPats ++ ")"
+    Can.PTuple a b rest -> 
+        "(" ++ intercalate ", " (map (patternToMatchString _recMap) (a:b:rest)) ++ ")"
+    Can.PRecord fields ->
+        let key = intercalate "," fields
+        in case Map.lookup key _recMap of
+            Just structName -> structName ++ " { " ++ intercalate ", " fields ++ " }"
+            Nothing -> "{ " ++ intercalate ", " fields ++ " }"
+    Can.PCons a b ->
+        let (heads, tailPat) = flattenCons _recMap a b
+            allParts = heads ++ if tailPat == "_" then [".."] else [tailPat ++ " @ .."]
+        in "[" ++ intercalate ", " allParts ++ "]"
+    Can.PList items -> "[" ++ intercalate ", " (map (patternToMatchString _recMap) items) ++ "]"
+    Can.PAlias pat _ -> patternToMatchString _recMap pat
+    _ -> "_"
+
+ctorArgToPattern :: Can.PatternCtorArg -> String
+ctorArgToPattern (Can.PatternCtorArg _ _ pat) = patternToMatchString Map.empty pat
+
+-- | Flatten nested cons patterns into a head-list and tail.
+-- e.g. x::y::rest → (["x", "y"], "rest")  → emits [x, y, rest @ ..]
+flattenCons :: Map.Map String String -> Can.Pattern -> Can.Pattern -> ([String], String)
+flattenCons recMap headPat tailPat =
+    let h = patternToMatchString recMap headPat
+    in case tailPat of
+        Ann.At _ (Can.PCons h2 t2) ->
+            let (moreHeads, tail) = flattenCons recMap h2 t2
+            in (h : moreHeads, tail)
+        Ann.At _ (Can.PList items) ->
+            let itemStrs = map (patternToMatchString recMap) items
+            in (h : itemStrs, "_")
+        Ann.At _ (Can.PVar v) ->
+            ([h], v)
+        Ann.At _ Can.PAnything ->
+            ([h], "_")
+        _ ->
+            ([h], "_")
+    where
+    unwrapPat (Ann.At _ (Can.PAlias inner _)) = inner
+    unwrapPat p = p

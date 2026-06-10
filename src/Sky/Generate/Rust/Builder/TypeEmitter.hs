@@ -1,0 +1,141 @@
+module Sky.Generate.Rust.Builder.TypeEmitter
+  ( unionsToRustTypes
+  , unionToRustTypeDef
+  , substPlaceholder
+  , aliasesToRustTypes
+  , sortFieldsByIndex
+  , aliasToRustTypeDef
+  , paramTypeToRust
+  ) where
+
+import Data.List (intercalate, sortBy, stripPrefix)
+import qualified Data.Map.Strict as Map
+import qualified Sky.AST.Canonical as Can
+import Sky.Generate.Rust.Builder.Types (RustTypeDef(..), runtimeOpaqueTypes)
+import Sky.Generate.Rust.Builder.Naming (toCamelCase)
+import Sky.Generate.Rust.Builder.TypeRenderer (typeToRustString, flattenArrowType)
+
+unionsToRustTypes :: Map.Map String String -> String -> String -> Map.Map String Can.Union -> [RustTypeDef]
+unionsToRustTypes recordMap skyModName modPrefix unions =
+    -- The opaque `Decoder a` from Sky.Core.Json.Decode AND Std.Config is the
+    -- runtime json::Decoder (rendered via the global `Decoder<T>` alias by
+    -- typeToRustString). Its Sky def is a phantom (`type Decoder a` with a unit
+    -- placeholder), so emitting it as a Rust enum yields `pub enum Decoder<a> {
+    -- Decoder }` — an unused type param a (E0392). Skip it; the alias covers all
+    -- references and the combinators route to json_dec_* / config_* kernels.
+    map (\(name, u) -> unionToRustTypeDef recordMap skyModName modPrefix name u)
+        (filter (\(name, _) -> name /= "Decoder") (Map.toList unions))
+
+unionToRustTypeDef :: Map.Map String String -> String -> String -> String -> Can.Union -> RustTypeDef
+unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts _ _) =
+    let codegenName = toCamelCase (modPrefix ++ "_" ++ typeName)
+        -- Sub-D step 4: a generic ADT (`type Retry e = ...`) lowers to a generic
+        -- enum (`pub enum MainRetry<e> { ... }`). Without this the enum body
+        -- references `e` undeclared (E0107/E0091/E0412). Type vars are kept
+        -- verbatim (lowercase) to match typeToRustString's TVar rendering and
+        -- the generic params already emitted on functions.
+        gens = if null uvars then ""
+               else "<" ++ intercalate ", " uvars ++ ">"
+    in case Map.lookup (skyModName, typeName) runtimeOpaqueTypes of
+        -- Registry hit, PLAIN path (`sky_runtime::EmailProvider`):
+        -- `pub use sky_runtime::X as <codegenName>;`. The runtime newtype IS the
+        -- canonical representation; the Sky-side placeholder constructor (e.g.
+        -- `Decimal__Internal Float`) is a phantom-shape that only reserves a slot.
+        Just rustPath
+          | '{' `elem` rustPath ->
+              -- Generic alias carrying the union's own type vars (Html msg ->
+              -- pub type StdHtmlHtml<msg> = sky_runtime::Html<msg>;). Substitute
+              -- the single Sky uvar for the {M} placeholder; the alias IS generic.
+              -- [] is dead in practice: a {M} registry entry only pairs with a parametric Sky type.
+              let m = case uvars of (v:_) -> v; [] -> "M"
+                  path = substPlaceholder "{M}" m rustPath
+              in RAliasDefGen codegenName gens path
+          | '<' `notElem` rustPath -> RPubUseAlias codegenName rustPath
+        -- Registry hit, INSTANTIATED-generic path (`sky_runtime::ChunkEvent<SkyError>`):
+        -- `pub use` can't carry an instantiation, so emit a non-generic type alias
+        -- (`pub type SkyCoreHttpStreamChunkEvent = sky_runtime::ChunkEvent<SkyError>;`).
+        -- The runtime enum is generic over the error slot; the bridge pins it to
+        -- the project's SkyError so a matched `Errored e` binds the real Error.
+        -- Variant access (`<alias>::Chunk`) resolves through the alias. Mirrors
+        -- the parametric-record-alias arm in aliasToRustTypeDef. (Independent of
+        -- the Sky-side `uvars` — ChunkEvent is non-generic in Sky yet bridges to
+        -- an instantiated runtime generic.)
+          | otherwise              -> RAliasDef codegenName rustPath
+        -- No registry entry: emit the regular enum/ADT (one constructor per alt).
+        Nothing       -> REnumDef codegenName gens (map ctorToRust alts)
+  where
+    ctorToRust (Can.Ctor name _idx _arity argTypes) =
+        (name, if null argTypes then Nothing
+               else Just (intercalate ", " (map (typeToRustString recordMap) argTypes)))
+
+-- | Substitute all occurrences of `needle` with `replacement` in `haystack`.
+-- Used to expand {M} placeholders in runtimeOpaqueTypes registry values.
+substPlaceholder :: String -> String -> String -> String
+substPlaceholder needle replacement haystack = go haystack
+  where
+    go [] = []
+    go s@(c:cs) = case stripPrefix needle s of
+        Just rest -> replacement ++ go rest
+        Nothing   -> c : go cs
+
+aliasesToRustTypes :: Map.Map String String -> String -> String -> Map.Map String Can.Alias -> [RustTypeDef]
+aliasesToRustTypes recordMap skyModName modPrefix aliases = concatMap (\(name, alias) -> aliasToRustTypeDef recordMap skyModName modPrefix name alias) (Map.toList aliases)
+
+-- | Sort record fields by their declaration index (_fieldIndex)
+sortFieldsByIndex :: [(String, Can.FieldType)] -> [(String, Can.FieldType)]
+sortFieldsByIndex = sortBy (\(_, Can.FieldType i _) (_, Can.FieldType j _) -> compare i j)
+
+aliasToRustTypeDef :: Map.Map String String -> String -> String -> String -> Can.Alias -> [RustTypeDef]
+-- Sub-D: a record alias registered in runtimeOpaqueTypes (e.g. Std.Csv.Csv)
+-- emits a `pub use <runtime type> as <codegenName>;` alias instead of a fresh
+-- struct, so the runtime kernels can return/take the record by its real type.
+aliasToRustTypeDef _recordMap skyModName modPrefix name (Can.Alias vars (Can.TRecord _ _))
+    | Just rustPath <- Map.lookup (skyModName, name) runtimeOpaqueTypes =
+        let codegenName = toCamelCase (modPrefix ++ "_" ++ name)
+        in if null vars
+           -- Non-parametric (Csv, HttpResponse): plain re-export.
+           then [RPubUseAlias codegenName rustPath]
+           -- Parametric (WebSocketServerCfg msg): the runtime type's generics are
+           -- already pinned in rustPath (…<SkyError>), and the Sky var (`msg`) is
+           -- phantom. Emit a NON-generic alias and render usages without args
+           -- (see typeToRustString) — Rust forbids unused type-alias params, so
+           -- we drop `msg` entirely. `pub type Cfg = WsServerCfg<SkyError>;`.
+           else [RAliasDef codegenName rustPath]
+aliasToRustTypeDef recordMap _skyModName modPrefix name (Can.Alias vars ty) = case ty of
+    Can.TRecord fields _ ->
+        let sortedFields = sortFieldsByIndex (Map.toList fields)
+            -- Sub-D step 4: a parametric record alias (`RetryPolicy e = { ...,
+            -- shouldRetry : ShouldRetry e }`) must emit a generic struct so its
+            -- fields can reference the var. Type vars kept verbatim to match
+            -- typeToRustString's TVar/TAlias-arg rendering.
+            gens = if null vars then "" else "<" ++ intercalate ", " vars ++ ">"
+        in [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) gens (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString recordMap ft)) sortedFields)]
+    _ ->
+        [RAliasDef (toCamelCase (modPrefix ++ "_" ++ name)) (typeToRustString recordMap ty)]
+
+
+-- | Render a FUNCTION PARAMETER's type. An EFFECTFUL function-typed parameter
+-- (one whose result is a `Task`) renders as `impl Fn(args) -> ret + Send + Sync
+-- + 'static` (argument-position impl Trait) rather than the fn-pointer
+-- typeToRustString would produce. fn pointers reject closures that capture
+-- environment — e.g. Sky.Core.Http.Stream.forEachChunk's `\chunk -> emit chunk
+-- writer` captures `writer`; `impl Fn` accepts capturing (move) closures, plain
+-- closures, AND fn items, so it's a strict widening of what the slot holds.
+--
+-- The Task-result gate is deliberate: a pure callback (`e -> bool`, `a -> b`) is
+-- frequently STORED in an ADT variant or record field — which render as fn
+-- pointers (e.g. ShouldRetry's `RetryWhen (fn(e) -> bool)`) — and an `impl Fn`
+-- type parameter can't be assigned into a fn-pointer slot. Effectful callbacks
+-- are instead passed through to kernels (the impl-Fn HOF surface), which is
+-- exactly where capturing closures need to flow. Non-function params render
+-- normally. The arrow chain flattens uncurried (`\a b ->` → `|a, b|`).
+paramTypeToRust :: Map.Map String String -> Can.Type -> String
+paramTypeToRust rm t = case t of
+    Can.TLambda _ _ | resultIsTask (snd (flattenArrowType t)) ->
+        let (ps, ret) = flattenArrowType t
+        in "impl Fn(" ++ intercalate ", " (map (typeToRustString rm) ps) ++ ") -> "
+           ++ typeToRustString rm ret ++ " + Send + Sync + 'static"
+    _ -> typeToRustString rm t
+  where
+    resultIsTask (Can.TType _ "Task" _) = True
+    resultIsTask _ = False

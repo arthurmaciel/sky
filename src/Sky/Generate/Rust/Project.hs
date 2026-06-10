@@ -177,6 +177,7 @@ generateRust canMods _srcMod solvedTypes dbPath dbDriver ffiSlugs kernelAliases 
     -- consumes the bare env map, so project the `_stEnv` field out.
     let builder = RustBuilder.buildProgram canMods
                                             (Solve._stEnv solvedTypes)
+                                            (Solve._stPerModuleEnv solvedTypes)
                                             (Solve._stRegions solvedTypes)
                                             kernelAliases
                                             liveStore

@@ -129,3 +129,6 @@ runtime-rust/target/
 graphify-out/
 opencode.json
 /.equiv/
+
+# stray rust-analyzer / cargo artifacts at repo root
+/target/

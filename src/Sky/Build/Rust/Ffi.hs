@@ -20,7 +20,7 @@ module Sky.Build.Rust.Ffi
 
 import qualified Data.Aeson as A
 import qualified Data.ByteString.Lazy as BL
-import Data.Char (isAlpha, isAlphaNum, isDigit, isLower, isUpper, toUpper, toLower)
+import Data.Char (isAlpha, isAlphaNum, isDigit, isLower, isUpper, toUpper)
 import Data.List (intercalate, isPrefixOf, stripPrefix)
 import qualified Data.Set as Set
 import qualified Data.Text as T
@@ -34,6 +34,7 @@ import Sky.Build.FfiGen
     ( PkgInfo(..), FnInfo(..)
     , slugify, lowerFirst, capitaliseFirst, splitOnChar, emitKernelJson, wrapperSkyType
     )
+import Sky.Generate.Rust.Builder.Naming (toSnakeCase)
 
 
 -- | Inspect a single Rust crate (rustdoc-JSON backend). Optional features are
@@ -212,22 +213,6 @@ skyTypeToRust s
     | Just rest <- stripPrefix "Dict String " s = "HashMap<String, " ++ skyTypeToRust rest ++ ">"
     | Just rest <- stripPrefix "Task SkyError " s = "SkyTask<SkyError, " ++ skyTypeToRust rest ++ ">"
     | otherwise = "String"  -- fallback for unrecognised types
-
-
--- | Snake-case a Rust identifier EXACTLY as Sky.Generate.Rust.Builder.toSnakeCase
--- does.  The Rust codegen snake-cases the kernel call site
--- (`chrono_to_string_from_date_time`); the binding's `pub fn` name must match
--- byte-for-byte or the call fails to resolve.  Both camelCase boundaries and
--- existing underscores map to `_<lower>`.
-rustSnakeCase :: String -> String
-rustSnakeCase []     = []
-rustSnakeCase (c:cs) = toLower c : go cs
-  where
-    go [] = []
-    go (x:xs)
-      | x == '_' && not (null xs) = '_' : toLower (head xs) : go (tail xs)
-      | isUpper x                 = '_' : toLower x : go xs
-      | otherwise                 = x : go xs
 
 
 -- | True when the given Rust type string is a primitive numeric type.
@@ -501,7 +486,7 @@ emitRustFile kernelName pkg =
             wrapper   = kernelName ++ "_" ++ skyName ++ disambSfx
             -- Must match Builder.kernelToRustFn for the Rust_ case:
             -- toSnakeCase (drop 5 mod ++ "_" ++ name).
-            rustName  = rustSnakeCase (drop 5 kernelName ++ "_" ++ skyName ++ disambSfx)
+            rustName  = toSnakeCase (drop 5 kernelName ++ "_" ++ skyName ++ disambSfx)
             params    = _fnParams fn
             results   = _fnResults fn
             paramSkyTypes = _fnParamSkyTypes fn ++ repeat ""
