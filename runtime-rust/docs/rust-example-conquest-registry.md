@@ -14,12 +14,38 @@ proper fix rather than force a band-aid.
 
 ## Accurate scoreboard (disk-safe sweep)
 
-**Builds (12 in-scope):** `00, 01, 04, 07, 09, 14, 15, 20, 30, 32, simple, test_pkg`
-— doubled from the gated-6 this session via codegen fixes (let-wrap, task_fail
-turbofish, Live entry-main, Live init generics, canDefBody) + runtime kernels
-(server_redirect, time_every, debug_to_string).
+**Builds (15 in-scope):** `00, 01, 04, 07, 09, 10, 12, 14, 15, 20, 28, 30, 32,
+simple, test_pkg` — up from 12 at session start. CONQUERED this session:
+`10-live-component` (serde multi-module + DestructDef), `28-streaming-chat`
+(SkyMaybe serde + branch-aware clone), and `12-skyvote` (168 errors → 0, via the
+full TEA-Msg keystone chain — see class 1 below).
 
-**In-scope crashes: none** (canDefBody cleared them).
+**In-scope crashes: none.**
+
+### 12-skyvote — CONQUERED (the keystone proof, 168→0)
+
+Driven to zero through a chain of regression-gated fixes, each verified against
+all building examples:
+1. multi-module signature scoping (`ecModuleEnv`/`lookupOwnSig`) — dep-module
+   sigs (Lib.Db) resolved authoritatively (168→81).
+2. body-driven param monomorphization (`inferParamRustType`) — `List a`→
+   `Vec<String>`, `row`→`HashMap` from kernel flow (81→24/23).
+3. row-poly param resolution (`resolveOpenRecordParam`) — TEA `model` params →
+   concrete struct by field-name superset.
+4. **TEA-Msg keystone** (`detectAppMsg`/`detectAppModel` + `teaReturnSubst`) —
+   substitute the app's CONCRETE Msg/Model into TEA returns (`(Model, Cmd msg)`/
+   `Html msg`) that collapsed to `()`. CONCRETE (no uninferrable generics — the
+   blanket-generic version regressed 4 examples and was reverted). Precise to
+   the exact TEA shapes + msg/model slots (an over-broad version corrupted
+   stdlib generics → reverted that too).
+5. record-update param inference (`inferRecordParamFromUpdate`) — bare-TVar
+   `model` params resolved from `{ model | … }` update fields (handleSignOut).
+6. auth turbofish (`auth_hash_password`/etc → `::<SkyError>`), f64 literal
+   coercion (`Css.pct 100` → `100_f64` via `kernelArgRustType` + `calleeName`).
+
+This keystone is the capability the TEA-heavy examples need; it specifically
+conquered 12. `18-job-queue` is NOT helped (its blockers are untyped
+local-closure params (E0282) + serde + arg-count, a different class).
 
 ## Failing in-scope examples (12) — by root-cause class
 
