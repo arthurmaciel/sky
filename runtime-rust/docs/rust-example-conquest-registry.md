@@ -176,8 +176,24 @@ local-closure params (E0282) + serde + arg-count, a different class).
    resolution, but ecRecordMap keys on the FULL field-set so a 1-field access
    can't match; same limitation as resolveOpenRecordParam); 1 E0271 (a Task
    associated-type mismatch newly exposed by report's e resolving); serde (2,
-   cascades once E0282 clears); 2 E0308. `18` is a multi-fix conquest like
-   `12` was: also
+   cascades once E0282 clears); 2 E0308. UPDATE3 (2026-06-10): driven 24→2
+   (ONE real error from building), every step regression-gated. Cleared this
+   stretch: E0271 + monomorphic-String E0308 via `taskFailPin` (task_fail's
+   success-type turbofish from the expected return type — generic→infer,
+   monomorphic→concrete, else i64); `ts` E0308 via element-region inference (a
+   db-param list element's type is its OWN region type, not the kernel's
+   Vec<String> — db params get `format!`'d); `j` E0282 via HOF-closure
+   record-param annotation (`inferRecordClosureParam` resolves a closure record
+   param to its struct by field-access usage); db-param Int→String via uniform
+   `format!`; serde 2×E0277 via OPEN-RECORD-MODEL resolution (`serdeMatchStruct`
+   — an unannotated `view model = …` yields an open record, not a named type,
+   so the BFS never stamped MainModel). FINAL BLOCKER (the last error): a
+   `Task Error a` LET-POLYMORPHIC phantom return (`sleepThenFail` → `SkyTask<
+   i64>` while all callers pin a=String via `Cmd.perform task JobDone`). Sound
+   fix = PER-CALL-SITE MONOMORPHIZATION; the generic-return alternative
+   (`SkyTask<A>`) regresses the phantom-DISCARD case (E0283), proven twice this
+   session. 18 is 1 error from building, isolated to that capability. `18` is a
+   multi-fix conquest like `12` was: also
    needs serde model-detection (E0277 — its `MainModel` isn't stamped; likely
    the E0282 leaves `view`/`init` types polymorphic so detection fails),
    arg-count (E0061), and missing kernels (E0425). Tackle as one focused,
