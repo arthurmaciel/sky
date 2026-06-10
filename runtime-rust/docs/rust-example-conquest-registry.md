@@ -145,9 +145,41 @@ Each remaining failure is a designed capability, not a quick patch:
      model stays String). KEY FINDING: 12's error count stayed 23 because the
      errors CASCADE — fixing the param layer exposes the next interdependent
      layer (handler bodies, call sites). 12 is a deeply-interdependent
-     multi-fix conquest: it needs the WHOLE chain (sign_out let-edge +
-     polymorphic-Html-return-as-generic + f64 coercion + E0283) before any
-     single fix moves the count. Do it as one focused, sweep-gated pass.
+     multi-fix conquest: it needs the WHOLE chain before any single fix moves
+     the count. Do it as one focused, sweep-gated pass.
+   - **KEYSTONE: TEA msg-polymorphism via Rust generics** (THE root of 12's
+     cascade — found by tracing the post-row-poly errors). With `model:
+     StateModel` now correct, the 5 fixed handlers fail `expected (), found
+     (StateModel, SkyCmd<_>)`: their RETURN type emits `()`. Cause — a handler
+     returns `(Model, Cmd msg)` where `msg` is a FREE TVar (`Cmd.none : Cmd
+     msg` never pins it), so return-inference (defToRustItem ~line 178) hits
+     `hasTypeVars` and falls through to `()`. The polymorphic-`Html msg` view
+     return (`ui_components_empty_state`→`()`) and the handler-call mismatches
+     in main.rs are the SAME bug. FIX (deep, cross-cutting): emit TEA functions
+     GENERIC over their free msg TVar — add the return/param TVars to the
+     function's generic list and render the return type with the TVar
+     preserved (`fn handle_sign_in<M: Clone>(model: StateModel) -> (StateModel,
+     SkyCmd<M>)`); callers (`main_update`) instantiate `M = StateMsg`. This is
+     the keystone capability for ALL TEA-heavy examples (12, 18, the
+     component/composite set) — nearly every handler/view/update is
+     msg-polymorphic. High blast radius (touches core sig + generics
+     emission); needs a dedicated session with the full sweep as the gate.
+     ATTEMPTED + REVERTED (2026-06-10): the naive version — when return-
+     inference gives `()` but the solved return has free TVars, render the
+     return preserving the TVar and declare it generic — REGRESSED. 12 went
+     23→68 and 00-standard-libs broke. Lessons for the redesign: (a) blanket
+     genericization over-fires (stdlib/helper fns whose `()` return is
+     legitimate or whose TVar is phantom got spuriously generic); (b) a fn
+     made `<msg>`-generic becomes uninferrable at call sites that don't pin
+     msg (E0283), so the generic must be introduced ONLY when EVERY call site
+     can infer it — i.e. this needs call-graph awareness or monomorphisation
+     at the `Live.app` boundary (pin msg = the app's concrete Msg), NOT a
+     blanket per-fn generic. The Go backend sidesteps via `any`; the Rust
+     port likely needs to thread the concrete app-Msg type down from
+     `live_app_routed`'s known `Model`/`Msg` into these fns.
+     Remaining 12 tail AFTER this: f64-literal coercion (`Css.pct 100` →
+     `100.0`), E0283 turbofish on `auth_hash_password`/nested `std_html_div`,
+     and the `handleSignOut` let-wrapper lookupOwnSig miss.
    - **view-returns-`()`** (~2: `expected Html<Msg>, found ()`) — return
      inference defaulting a view branch to unit.
    - **f64 numeric literals** (~2) — Int literal where f64 expected.
