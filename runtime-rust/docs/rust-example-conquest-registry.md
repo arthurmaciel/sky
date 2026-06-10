@@ -111,7 +111,20 @@ local-closure params (E0282) + serde + arg-count, a different class).
    (the `time_every`/`debug_to_string` pattern). Tractable, enumerable.
 4. **parse / malformed Rust** — `16, 17, 35`. Codegen emitting invalid syntax;
    each a distinct emitter bug. `17` (brace imbalance) checked first.
-5. **type-inference (E0282) / missing method (E0599)** — `18, 28`.
+5. **untyped local-closure params (E0282)** — `18` (8, dominant). A let-bound
+   lambda `let insertRow = |db, ts| { db_exec(db.clone(), …) }` emits with
+   UNANNOTATED params; Rust can't infer `db`/`ts` (used via `.clone()` before
+   any type-determining call, inside a generic context) → E0282. FIX: annotate
+   closure params from inferred types — `db` flows into `db_exec` arg 0
+   (`Db`), `ts` into the SQL-params `Vec<String>` element (`String`). Reuse the
+   `inferParamRustType` body-scan (add `db_exec`/`db_query` arg0=`Db` to
+   `kernelArgRustType`, and a "Vec<String> element → String" case), rendering
+   `|db: Db, ts: String|`. `18` is a multi-fix conquest like `12` was: also
+   needs serde model-detection (E0277 — its `MainModel` isn't stamped; likely
+   the E0282 leaves `view`/`init` types polymorphic so detection fails),
+   arg-count (E0061), and missing kernels (E0425). Tackle as one focused,
+   sweep-gated pass using the methodology proven on `12`. (`28`'s E0599 was
+   already fixed via branch-aware clone counting — `28` builds.)
 6. **Go-FFI on the Rust target (DEFYING — needs Rust-native FFI)** — `03, 05,
    13` (fail early: `.skycache/go/_bindings.go: resource busy` in the FFI gen,
    no Rust emitted) + `08, 16, 17` (emit Rust, but Go-package calls become
