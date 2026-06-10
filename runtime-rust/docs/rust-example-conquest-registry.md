@@ -134,12 +134,20 @@ Each remaining failure is a designed capability, not a quick patch:
    — they must move arity together. Result: `12-skyvote` 75→23. Verified no
    regression across 00/04/07/10/28/30/32.
    12's RESIDUAL 23 (diverse tail, each a distinct root cause):
-   - **row-polymorphic model params** (~13: E0609 ×4 + related E0308) —
-     record-update handlers (`signOut model = { model | currentUser = … }`)
-     get an OPEN-record type `{ r | … }` carrying a row-var → concrete-gate
-     fails → body-analysis → `String`. Needs row-poly→concrete-struct
-     resolution (the Go backend's `_skysynth` subset-record path); ecRecordMap
-     keys on the full field-set, so single-field lookup won't do it.
+   - **row-polymorphic model params** — PARTIALLY IMPLEMENTED (regression-free).
+     `resolveOpenRecordParam` (ModuleEmitter.hs) matches an open record's field
+     NAMES against the recordMap (fewest-extras superset) and emits the bare
+     concrete struct, bypassing the spurious field-TVar that `Nothing` injects
+     (`currentUser : Maybe a`). Wired into BOTH the concrete-gate and the
+     body-analysis renderP. Result: 5/6 of 12's auth handlers now resolve
+     `model: StateModel` correctly. NOT yet resolved: `handleSignOut`
+     (`let _ = println … in (…)` wrapper appears to defeat lookupOwnSig →
+     model stays String). KEY FINDING: 12's error count stayed 23 because the
+     errors CASCADE — fixing the param layer exposes the next interdependent
+     layer (handler bodies, call sites). 12 is a deeply-interdependent
+     multi-fix conquest: it needs the WHOLE chain (sign_out let-edge +
+     polymorphic-Html-return-as-generic + f64 coercion + E0283) before any
+     single fix moves the count. Do it as one focused, sweep-gated pass.
    - **view-returns-`()`** (~2: `expected Html<Msg>, found ()`) — return
      inference defaulting a view branch to unit.
    - **f64 numeric literals** (~2) — Int literal where f64 expected.
