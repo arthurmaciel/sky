@@ -27,7 +27,10 @@ examples importing Go packages are OUT OF SCOPE. By `sky.toml` deps: `03`
 `13` (stripe-go + sky-tailwind) → **out of scope, ignored**. The sweep's
 `OUT_OF_SCOPE` list now includes them.
 
-**In-scope failing (3):** `16-skychess`, `17-skymon`, `35-composite-generics` —
+**In-scope failing (3):** `16-skychess` (77 + malformed-emission),
+`17-skymon` (**110 → 25** this session — db-getter row arg type +
+sibling-fn param inference; remaining are heterogeneous: Dict value-type,
+cross-module `Msg`, ADT-generic), `35-composite-generics` (36 → 26) —
 all pure-stdlib (no external deps), genuine codegen targets. `35` reduced 36→26
 (all missing kernels + dup-placeholder closed this session; remaining is the
 Dict-typed-key E0308 + composite-generics class). Clean full sweep `2026-06-10`:
