@@ -128,8 +128,22 @@ local-closure params (E0282) + serde + arg-count, a different class).
    `inferParamRustType`), but `ts` is a Vec ELEMENT (`vec![…, ts]` → `db_exec`
    arg2 `Vec<String>`), NOT a direct call arg — so `inferParamRustType` needs a
    new "param is an element of a Vec-typed kernel arg → element type" case.
-   That's the focused-session shape. `18` is a multi-fix conquest like `12` was:
-   also
+   That's the focused-session shape. UPDATE (2026-06-10): the body-driven
+   approach is now IMPLEMENTED + regression-free (gated across all 15 builds).
+   `annotClosureParam` runs `inferParamRustType` on the closure body and
+   annotates each PVar param. inferParamRustType now resolves: (a) DIRECT
+   kernel arg (`db`→`db_exec` arg0=`Db`); (b) Vec ELEMENT of a kernel arg
+   (`ts`→`db_exec` arg2 `Vec<String>` element=`String`; `errId`→`log_*_with`
+   arg1 element); (c) DIRECT arg of a GENERATED stdlib fn via `emittedCalleeName`
+   + `genFnArgType` (`e`→`sky_core_error_to_string`=`SkyError`). `18` went
+   24→10 (E0282 8→4). REMAINING (the deep last mile): the surviving 4 E0282 are
+   USER-CLOSURE-FLOW (`writeAll`'s `db`→the let-bound `insertRow` closure;
+   `report`'s `e`→`logAndFail`) — needs a closure-signature pre-pass (collect
+   each let-bound closure's inferred param types in definition order, thread a
+   `name→[type]` map into ctx, resolve a param flowing into a local closure via
+   that map). Plus 18's serde (2 E0277 — likely cascades once E0282 clears and
+   model-detection sees concrete view/init types) + 3 E0308. `18` is a
+   multi-fix conquest like `12` was: also
    needs serde model-detection (E0277 — its `MainModel` isn't stamped; likely
    the E0282 leaves `view`/`init` types polymorphic so detection fails),
    arg-count (E0061), and missing kernels (E0425). Tackle as one focused,
