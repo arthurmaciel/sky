@@ -150,7 +150,21 @@ local-closure params (E0282) + serde + arg-count, a different class).
    when a non-String value lands in a `Vec<String>` kernel arg). 18's full
    conquest is a 12-scale interlinked chain (closure-sig pre-pass → E0282
    clears → serde model-detection succeeds → Int→String db-param coercion →
-   builds). `18` is a multi-fix conquest like `12` was: also
+   builds). UPDATE (2026-06-10): driven 24→8, all regression-gated. The
+   closure inference now also resolves: `db_exec_raw` arg0=`Db` (clears
+   writeAll/readAll's db); USER-CLOSURE-FLOW recursion (`ecClosureDefs` +
+   `collectClosureDefs`: a param flowing into a local closure recursively
+   infers the target closure's param, cycle-broken via `Map.delete`); and
+   db-param-list Int→String via uniform `format!("{}", x)` (heterogeneous
+   lists — a List element's region carries the UNIFIED type, so per-type wrap
+   mis-fires; Display-based format! is identity for String + decimal for Int).
+   REMAINING 8 (the deep cascade — each fix exposes the next, like 12):
+   E0373 (a let-bound closure that escapes into a Task pipeline — readAll
+   capturing `selectRecent` — needs `move`, with clone-interaction for
+   multi-use captures); `report`'s `e` (closure-flow not yet resolved — flows
+   into logAndFail but through deeper nesting); serde (2 — should cascade once
+   E0282 fully clears); 2 E0308. `18` is a multi-fix conquest like `12` was:
+   also
    needs serde model-detection (E0277 — its `MainModel` isn't stamped; likely
    the E0282 leaves `view`/`init` types polymorphic so detection fails),
    arg-count (E0061), and missing kernels (E0425). Tackle as one focused,
