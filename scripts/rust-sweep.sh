@@ -7,6 +7,17 @@ cd "$(dirname "$0")/.."
 SKY="${SKY_BIN:-$PWD/sky-out/sky}"
 [ -x "$SKY" ] || { echo "ERROR: sky binary not at $SKY (build: cabal install … exe:sky)"; exit 1; }
 
+# Shared cargo target dir + sccache (mandatory, per user 2026-06-10): every
+# example is cargo package "sky-app", so a shared CARGO_TARGET_DIR *outside*
+# each sky-out/ lets the heavy deps (axum/tokio/serde/…) compile ONCE and
+# persist across the per-example `rm -rf sky-out`. sccache (RUSTC_WRAPPER)
+# additionally caches each rustc invocation by content hash, so even sky-app
+# recompiles hit cache. The sweep is sequential, so no target-dir lock
+# contention. Override CARGO_TARGET_DIR to relocate the cache.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/sky-rust-target}"
+command -v sccache >/dev/null 2>&1 && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
+mkdir -p "$CARGO_TARGET_DIR"
+
 # Out-of-scope on the Rust backend, recorded but not a build target:
 #  - no Rust monolith reference: 02 06 11 19 21 22 23 24 25 26 27 29 31 34 36 37 38
 #  - Go-package→Rust-native FFI examples (per user 2026-06-10, NOT a goal —
