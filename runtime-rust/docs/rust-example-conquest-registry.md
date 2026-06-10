@@ -17,10 +17,41 @@ proper fix rather than force a band-aid.
 **Builds (15 in-scope):** `00, 01, 04, 07, 09, 10, 12, 14, 15, 20, 28, 30, 32,
 simple, test_pkg` — up from 12 at session start. CONQUERED this session:
 `10-live-component` (serde multi-module + DestructDef), `28-streaming-chat`
-(SkyMaybe serde + branch-aware clone), and `12-skyvote` (168 errors → 0, via the
-full TEA-Msg keystone chain — see class 1 below).
+(SkyMaybe serde + branch-aware clone), `12-skyvote` (168 errors → 0, via the
+full TEA-Msg keystone chain — see class 1 below), and `18-job-queue` (24 → 0 —
+see below).
+
+**In-scope failing (8):** `03, 05, 08, 13, 16, 17` (Go-package→Rust-native FFI
+subsystem — major, multi-session), `33` (stored-effectful-callback Arc), `35`
+(composite-generics). Full sweep `2026-06-10`: ZERO regressions; every
+previously-building example still builds.
 
 **In-scope crashes: none.**
+
+### 18-job-queue — CONQUERED (24→0)
+
+Builds-correction note: the older scoreboard claimed `18` was a different class
+"NOT helped" by the keystone; in fact a chain of closure-flow + Task-return
+fixes drove it to zero. Each fix regression-gated against all building examples:
+1. seeded `Random` kernels (`seededInt`/`Float`/`Choice`, splitmix64 = Go) +
+   partial-ctor application (24→13).
+2. body-driven closure-param inference (`inferParamRustType`: `direct` /
+   `genDirect` / `vecElem` element-region / `userClosure` recursion via
+   `ecClosureDefs`) — untyped local-closure params (E0282 cluster).
+3. record-closure param inference (`closureParamFields` + superset struct match)
+   for `Cmd.perform`-style HOF args (13→10→8).
+4. escaping multi-arg closures emit `move` + captured-var clones; `ecClosureDefs`
+   threaded through BOTH Def and TypedDef branches (8→7).
+5. `kernelArgRustType` table (db_exec/db_query/db_exec_raw, log_*_with
+   Vec<String>) + Int→String db-param `format!` coercion + serde open-record
+   resolution (7→2).
+6. **`taskFailPin` enclosing-return-elem fallback** (`ecReturnElem`) — the final
+   E0308. `sleepThenFail : Task Error a` stays inferred-polymorphic, but the call
+   site resolves `a=String` onto the rendered `SkyTask<String>` sig. The body's
+   `task_fail` turbofish had no concrete `ecExpectedType` at the andThen-closure
+   tail → defaulted `::<_, i64>`. Now seeds the enclosing fn's `SkyTask<T>`
+   element (`taskElemOf`) as last-resort pin: below a concrete expected type,
+   above the i64 default (2→0).
 
 ### 12-skyvote — CONQUERED (the keystone proof, 168→0)
 
@@ -54,7 +85,7 @@ local-closure params (E0282) + serde + arg-count, a different class).
 | 10 | live-component | serde (E0277) | `collectLiveSerdeTypes` model-detection fails on **multi-module** apps (Main + Counter component); `MainModel` not stamped with serde derive. `view : Model -> Html Msg` is a clean VarTopLevel, so the failure is the cross-module solved-type lookup, not the field shape. | **REGISTER** — needs robust multi-module model-type detection. |
 | 12 | skyvote | E0308 ×142 + serde | mass type-mismatch (likely one systematic lowering bug emitting a wrong type pervasively) + serde. The E0308 volume must be root-caused first (one fix likely clears most). | **REGISTER** — diagnose the mass-E0308 source. |
 | 08 | notes-app | E0308 ×111 + E0425 ×21 | mass type-mismatch + 21 missing functions/kernels. | **REGISTER** — split: enumerate the missing kernels; root-cause the mass E0308. |
-| 18 | job-queue | E0282 ×8 + E0277 ×6 | type-inference (annotation-needed) + serde. | needs diagnosis |
+| ~~18~~ | ~~job-queue~~ | ~~E0282 ×8 + E0277 ×6~~ | closure-flow inference + serde + Task-return-elem turbofish. | **CONQUERED** 24→0 (see above) |
 | 28 | streaming-chat | E0277 ×4 + E0599 ×2 | serde + a missing method (E0599). | needs diagnosis |
 | 33 | websocket-echo | E0308 ×4 (stored-effectful-callback) | NOT a simple mismatch. `paramTypeToRust`'s Task-result gate (TypeEmitter.hs:132) renders effectful callbacks as `impl Fn` (for kernel-HOF flow, e.g. ex-32 `forEachChunk`), but the stdlib `withOnX` setters STORE the effectful callback into a `fn`-pointer record field (`WsServerCfg.onConnect: fn(...)`, runtime server.rs:399). `impl Fn` ≠ `fn` ptr. Naive global flip regresses ex-32. | **REGISTER** — needs unified `Arc<dyn Fn + Send + Sync>` representation for STORED function values (record fields + ADT variants) + `Arc::new` wrap at construction sites. Cross-cutting codegen change. |
 | 16 | skychess | parse: `found '.'` / `found keyword move` | codegen emits malformed Rust (a closure/method-chain shape). | needs diagnosis |
