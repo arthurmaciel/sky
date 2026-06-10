@@ -14,17 +14,40 @@ proper fix rather than force a band-aid.
 
 ## Accurate scoreboard (disk-safe sweep)
 
-**Builds (15 in-scope):** `00, 01, 04, 07, 09, 10, 12, 14, 15, 20, 28, 30, 32,
-simple, test_pkg` — up from 12 at session start. CONQUERED this session:
+**Builds (17 in-scope):** `00, 01, 04, 07, 09, 10, 12, 14, 15, 18, 20, 28, 30,
+32, 33, simple, test_pkg` — up from 12 at session start. CONQUERED this session:
 `10-live-component` (serde multi-module + DestructDef), `28-streaming-chat`
 (SkyMaybe serde + branch-aware clone), `12-skyvote` (168 errors → 0, via the
-full TEA-Msg keystone chain — see class 1 below), and `18-job-queue` (24 → 0 —
-see below).
+full TEA-Msg keystone chain — see class 1 below), `18-job-queue` (24 → 0 — see
+below), and `33-websocket-echo` (Arc<dyn Fn> stored-callback repr — see below).
 
-**In-scope failing (8):** `03, 05, 08, 13, 16, 17` (Go-package→Rust-native FFI
-subsystem — major, multi-session), `33` (stored-effectful-callback Arc), `35`
-(composite-generics). Full sweep `2026-06-10`: ZERO regressions; every
-previously-building example still builds.
+**In-scope failing (7):** `03, 05, 13` (Go-package→Rust-native FFI subsystem —
+major, multi-session), `08, 16, 17` (multi-class codegen — missing kernels +
+mass E0308), `35` (additive missing kernels + Dict-key E0308). Clean full sweep
+`2026-06-10`: ZERO regressions; every previously-building example still builds
+(32-sse-relay's impl-Fn forEachChunk path intact).
+
+### 33-websocket-echo — CONQUERED (Arc<dyn Fn> stored-callback repr)
+
+The 4× E0308 were the `withOnX` setters storing an `impl Fn` callback into
+`WsServerCfg`'s `fn`-pointer fields. A STORED callback may capture app state
+(ex-32's SSE-relay forEachChunk handler captures `writer` — capturing closures
+are first-class), and a captured closure is NOT a `fn` pointer. Sound repr =
+`Arc<dyn Fn(..) -> .. + Send + Sync>` for a stored function VALUE, vs `impl Fn`
+for a PASSED param. Fix (all gated — function-typed record fields are the only
+affected shape; no building example has one but the WS cfg):
+1. `TypeEmitter.fieldTypeToRust` — function-typed record field → `std::sync::Arc
+   <dyn Fn(..) -> .. + Send + Sync>` (struct defs + synCtor ctor params).
+2. `ExprEmitter.wrapStoredFn` — function-typed field VALUE (lambda, or
+   region-type TLambda) wrapped in `std::sync::Arc::new(..)` at record-literal +
+   field-update sites.
+3. `ModuleEmitter.synCtor` — ctor params via fieldTypeToRust so `Struct {
+   onConnect: onConnect }` assigns Arc-param into Arc-field.
+4. `Emitter.collectUndefinedTypes` — skip `::`-qualified paths so `std::sync::Arc
+   <..>` doesn't synthesise an invalid `type std::sync::Arc = String;` placeholder.
+5. Runtime `WsServerCfg<E>` fields fn-ptr → Arc<dyn Fn + Send + Sync>; consume
+   sites unchanged; Arc is Clone so #[derive(Clone)] holds. The
+   currying-foundation-only comment was STALE (output already uncurried) — removed.
 
 **In-scope crashes: none.**
 
@@ -87,7 +110,7 @@ local-closure params (E0282) + serde + arg-count, a different class).
 | 08 | notes-app | **47** (E0308 ×18, E0425 ×21, E0061 ×3, E0412 ×3, E0433 ×2) | **Re-triaged 2026-06-10** (new binary; was 111+21). Missing kernels: `server_form_value` ×10, `server_method` ×5, `uuid_new_string`, `string_left`, + 4 `html_*_` helpers (trailing-`_` naming-rewrite artifact). After additive kernels, ~26 E0308/E0061 type-mismatches remain (deeper). | **REGISTER** — add `server_form_value`/`server_method` runtime kernels (additive); then root-cause the residual E0308. |
 | ~~18~~ | ~~job-queue~~ | ~~E0282 ×8 + E0277 ×6~~ | closure-flow inference + serde + Task-return-elem turbofish. | **CONQUERED** 24→0 (see above) |
 | 28 | streaming-chat | E0277 ×4 + E0599 ×2 | serde + a missing method (E0599). | needs diagnosis |
-| 33 | websocket-echo | E0308 ×4 (stored-effectful-callback) | **Sharpened 2026-06-10.** All 4 identical: `with_on_X(cb: impl Fn(..) -> SkyTask<()>)` stores `cb` into `WsServerCfg.onConnect: fn(WsHandle) -> SkyTask<E,()>` (runtime server.rs:399). `impl Fn` ≠ `fn` ptr. **Currying is NOT the issue** — output is already uncurried; the server.rs:393-398 comment is STALE. Runtime only CONSUMES the fields (`(cfg.onConnect)(h).await`), so `Arc<dyn Fn>` is drop-in callable. **Blocker:** `typeToRustString` renders `TLambda` context-free as `fn(..)` (TypeRenderer.hs:216) — distinguishing a STORED field (→`Arc<dyn Fn + Send + Sync>` + `Arc::new` wrap at literals/updates/setter) from a PASSED param (→`impl Fn`, e.g. ex-32 `forEachChunk`) needs field-context threaded through the renderer, OR a uniform function-value repr (Sub-D.2 design doc). **Regression surface is small** — verified building examples pass functions as separate `live_app_routed` args, none store functions in record fields. | **REGISTER** — thread stored-vs-passed context into the function-type renderer; runtime struct fields → Arc<dyn Fn>; codegen wraps Arc::new at construction. |
+| ~~33~~ | ~~websocket-echo~~ | ~~E0308 ×4 (stored-effectful-callback)~~ | **CONQUERED 2026-06-10** (see above) — Arc<dyn Fn> stored-callback repr. Original diagnosis kept for the record: All 4 identical: `with_on_X(cb: impl Fn(..) -> SkyTask<()>)` stores `cb` into `WsServerCfg.onConnect: fn(WsHandle) -> SkyTask<E,()>` (runtime server.rs:399). `impl Fn` ≠ `fn` ptr. **Currying is NOT the issue** — output is already uncurried; the server.rs:393-398 comment is STALE. Runtime only CONSUMES the fields (`(cfg.onConnect)(h).await`), so `Arc<dyn Fn>` is drop-in callable. **Blocker:** `typeToRustString` renders `TLambda` context-free as `fn(..)` (TypeRenderer.hs:216) — distinguishing a STORED field (→`Arc<dyn Fn + Send + Sync>` + `Arc::new` wrap at literals/updates/setter) from a PASSED param (→`impl Fn`, e.g. ex-32 `forEachChunk`) needs field-context threaded through the renderer, OR a uniform function-value repr (Sub-D.2 design doc). **Regression surface is small** — verified building examples pass functions as separate `live_app_routed` args, none store functions in record fields. | **REGISTER** — thread stored-vs-passed context into the function-type renderer; runtime struct fields → Arc<dyn Fn>; codegen wraps Arc::new at construction. |
 | 16 | skychess | **77 + 6 codegen-CRASH** (E0308 ×58, E0412 ×13, E0282 ×6; malformed-Rust "found keyword `move`") | **Re-triaged 2026-06-10** (reaches cargo, not a Sky parse fail). 6 sites emit invalid Rust (a closure/`move` shape). Multi-class: mass E0308 + missing types + codegen-crash. | **REGISTER** — root-cause the 6 malformed-emission sites first, then the E0308 cluster. |
 | 17 | skymon | **110** (E0061, E0277, E0308, E0412, E0507, E0631) | **Re-triaged 2026-06-10** (reaches cargo; the old "brace bug" diagnosis is STALE). High volume across 6 error classes incl. E0631 (closure-sig) + E0507 (move-out-of-borrow). Likely one or two systematic lowering bugs. | **REGISTER** — bucket the 110 by class; find the systematic source (cf. 12-skyvote's single-bug cascade). |
 | 35 | composite-generics | **36** (E0425 ×11, E0308 ×14, E0061 ×6, E0412 ×3, E0609, E0631) | **Re-triaged 2026-06-10** (old "parse error" STALE). Two clean sub-classes: (a) ~13 ADDITIVE missing kernels — `dict_to_list`, `math_sin/cos/log`, `string_lines`, `io_read_line`, `system_cwd`, `system_load_env`, type `SkyCoreJsonEncodeValue` (genuinely missing); `uuid_v4`/`uuid_v7` EXIST in uuid_kernel.rs but aren't reachable (re-export / feature-gate visibility — runtime compiled WITHOUT features). (b) Dict typed-key E0308: `HashMap<String,_>` vs `HashMap<i64,_>` (limitation #5 inline-only key inference). | **REGISTER** — add missing kernels + fix uuid re-export (additive); then the Dict-key inference class. |
