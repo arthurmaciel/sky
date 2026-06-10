@@ -21,11 +21,32 @@ proper fix rather than force a band-aid.
 full TEA-Msg keystone chain — see class 1 below), `18-job-queue` (24 → 0 — see
 below), and `33-websocket-echo` (Arc<dyn Fn> stored-callback repr — see below).
 
-**In-scope failing (7):** `03, 05, 13` (Go-package→Rust-native FFI subsystem —
-major, multi-session), `08, 16, 17` (multi-class codegen — missing kernels +
-mass E0308), `35` (additive missing kernels + Dict-key E0308). Clean full sweep
-`2026-06-10`: ZERO regressions; every previously-building example still builds
-(32-sse-relay's impl-Fn forEachChunk path intact).
+**Scope update (user, 2026-06-10):** Go-package→Rust-native FFI is NOT a goal —
+examples importing Go packages are OUT OF SCOPE. By `sky.toml` deps: `03`
+(google/uuid + godotenv), `05` (gorilla/mux), `08` (gorilla/mux + google/uuid),
+`13` (stripe-go + sky-tailwind) → **out of scope, ignored**. The sweep's
+`OUT_OF_SCOPE` list now includes them.
+
+**In-scope failing (3):** `16-skychess`, `17-skymon`, `35-composite-generics` —
+all pure-stdlib (no external deps), genuine codegen targets. `35` reduced 36→26
+(all missing kernels + dup-placeholder closed this session; remaining is the
+Dict-typed-key E0308 + composite-generics class). Clean full sweep `2026-06-10`:
+ZERO regressions across all 17 building examples (an intermediate return-type
+placeholder change regressed E0107 on generic returns — caught by the sweep and
+fixed by restricting the scan to non-generic returns before shipping).
+
+### Stdlib kernel additions (this session — additive, zero-regression)
+
+Added the runtime kernels that pure-stdlib programs reference but the Rust
+runtime lacked, plus two codegen gaps they exposed:
+- `math` trig/exp/log family, `string_lines`/`words`, `dict_to_list`,
+  `system_cwd`/`load_env`, NEW `io` module (read_line / write_stdout/stderr).
+- `Project.hs`: `io` wired into generated `mod.rs`; `usesUuid` now also fires
+  when the emitted code references `uuid_v4`/`uuid_v7` (an app importing
+  `Sky.Core.Pure` emits dead uuid bindings the module-name scan missed).
+- `Emitter.collectUndefinedTypes`: scans NON-GENERIC return types so a
+  runtimeOpaque used only in return position (`-> SkyCoreJsonEncodeValue`) gets
+  its `pub use … as …;` alias; preamble aliases added to `defined` (no E0428).
 
 ### 33-websocket-echo — CONQUERED (Arc<dyn Fn> stored-callback repr)
 

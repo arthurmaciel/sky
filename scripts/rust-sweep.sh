@@ -7,8 +7,12 @@ cd "$(dirname "$0")/.."
 SKY="${SKY_BIN:-$PWD/sky-out/sky}"
 [ -x "$SKY" ] || { echo "ERROR: sky binary not at $SKY (build: cabal install … exe:sky)"; exit 1; }
 
-# Examples with no Rust monolith reference — recorded, not equivalence-checked.
-OUT_OF_SCOPE=" 02 06 11 19 21 22 23 24 25 26 27 29 31 34 36 37 38 "
+# Out-of-scope on the Rust backend, recorded but not a build target:
+#  - no Rust monolith reference: 02 06 11 19 21 22 23 24 25 26 27 29 31 34 36 37 38
+#  - Go-package→Rust-native FFI examples (per user 2026-06-10, NOT a goal —
+#    they import Go packages like gorilla/mux, stripe-go, google/uuid,
+#    godotenv): 03 05 08 13
+OUT_OF_SCOPE=" 02 03 05 06 08 11 13 19 21 22 23 24 25 26 27 29 31 34 36 37 38 "
 
 printf "%-26s %s\n" "EXAMPLE" "RESULT"
 printf "%-26s %s\n" "-------" "------"
