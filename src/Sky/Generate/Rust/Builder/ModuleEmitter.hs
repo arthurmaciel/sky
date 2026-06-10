@@ -46,6 +46,7 @@ import Sky.Generate.Rust.Builder.TypeRenderer
     )
 import Sky.Generate.Rust.Builder.TypeEmitter
     ( unionsToRustTypes, aliasesToRustTypes, sortFieldsByIndex, paramTypeToRust
+    , fieldTypeToRust
     )
 import Sky.Generate.Rust.Builder.Walker
     ( analyzeKernelUsage, collectZeroArgDefs, collectAnonRecordTypes
@@ -78,7 +79,12 @@ buildModule ctx mod =
                 vars = if Map.member (ModuleName._name (Can._name mod), aliasName) runtimeOpaqueTypes
                        then [] else vars0
                 sortedFields = sortFieldsByIndex (Map.toList fields)
-                rustFlds = [(n, typeToRustString rm ft) | (n, Can.FieldType _ ft) <- sortedFields]
+                -- A function-typed field is a STORED callback → Arc<dyn Fn..>
+                -- (see fieldTypeToRust + the struct field renderer). The
+                -- constructor's matching param must be Arc-typed too, so its
+                -- body `Struct { onConnect: onConnect }` assigns Arc-param into
+                -- the Arc-field without a mismatch (33-websocket-echo ctor).
+                rustFlds = [(n, fieldTypeToRust rm ft) | (n, Can.FieldType _ ft) <- sortedFields]
                 body = structName ++ " { " ++ intercalate ", " (map (\(n, _) -> n ++ ": " ++ n) sortedFields) ++ " }"
                 -- Sub-D step 4: a parametric record alias's constructor must
                 -- declare the type vars (its field params reference them, e.g.

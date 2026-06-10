@@ -5,6 +5,7 @@ module Sky.Generate.Rust.Builder.TypeEmitter
   , aliasesToRustTypes
   , sortFieldsByIndex
   , aliasToRustTypeDef
+  , fieldTypeToRust
   , paramTypeToRust
   ) where
 
@@ -85,6 +86,20 @@ aliasesToRustTypes recordMap skyModName modPrefix aliases = concatMap (\(name, a
 sortFieldsByIndex :: [(String, Can.FieldType)] -> [(String, Can.FieldType)]
 sortFieldsByIndex = sortBy (\(_, Can.FieldType i _) (_, Can.FieldType j _) -> compare i j)
 
+-- | Render a RECORD FIELD's type. A function-typed field (`onConnect :
+-- WebSocketServer -> Task Error ()`) holds a STORED effectful callback that may
+-- capture app state, so it renders as `Arc<dyn Fn(..) -> .. + Send + Sync>` —
+-- NOT a bare `fn` pointer (which forbids captures). The record literal / update
+-- emitters wrap the assigned value in `Arc::new(..)` to match. Non-function
+-- fields delegate to typeToRustString unchanged.
+fieldTypeToRust :: Map.Map String String -> Can.Type -> String
+fieldTypeToRust recordMap ft = case ft of
+    Can.TLambda _ _ ->
+        let (ps, ret) = flattenArrowType ft
+        in "std::sync::Arc<dyn Fn(" ++ intercalate ", " (map (typeToRustString recordMap) ps)
+           ++ ") -> " ++ typeToRustString recordMap ret ++ " + Send + Sync>"
+    _ -> typeToRustString recordMap ft
+
 aliasToRustTypeDef :: Map.Map String String -> String -> String -> String -> Can.Alias -> [RustTypeDef]
 -- Sub-D: a record alias registered in runtimeOpaqueTypes (e.g. Std.Csv.Csv)
 -- emits a `pub use <runtime type> as <codegenName>;` alias instead of a fresh
@@ -109,7 +124,7 @@ aliasToRustTypeDef recordMap _skyModName modPrefix name (Can.Alias vars ty) = ca
             -- fields can reference the var. Type vars kept verbatim to match
             -- typeToRustString's TVar/TAlias-arg rendering.
             gens = if null vars then "" else "<" ++ intercalate ", " vars ++ ">"
-        in [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) gens (map (\(n, Can.FieldType _ ft) -> (n, typeToRustString recordMap ft)) sortedFields)]
+        in [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) gens (map (\(n, Can.FieldType _ ft) -> (n, fieldTypeToRust recordMap ft)) sortedFields)]
     _ ->
         [RAliasDef (toCamelCase (modPrefix ++ "_" ++ name)) (typeToRustString recordMap ty)]
 

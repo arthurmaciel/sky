@@ -1093,16 +1093,16 @@ exprToRustInner ctx e = case e of
     Can.Update (Ann.At _ _field) record updates ->
         let sorted = sortBy (\(_, Can.FieldUpdate r1 _) (_, Can.FieldUpdate r2 _) -> compare (Ann._line (Ann._start r1)) (Ann._line (Ann._start r2))) (Map.toList updates)
         in "{ let mut result = " ++ exprToRustString ctx record ++ "; " ++
-        intercalate "; " (map (\(f, Can.FieldUpdate _ expr) -> "result." ++ f ++ " = " ++ exprToRustString ctx expr) sorted) ++
+        intercalate "; " (map (\(f, Can.FieldUpdate _ expr) -> "result." ++ f ++ " = " ++ wrapStoredFn ctx expr (exprToRustString ctx expr)) sorted) ++
         "; result }"
-    Can.Record fields -> 
+    Can.Record fields ->
         let key = intercalate "," (Map.keys fields)
         in case Map.lookup key (ecRecordMap ctx) of
-            Just structName -> 
-                structName ++ " { " ++ intercalate ", " (map (\(k, v) -> 
-                    k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)) ++ " }"
-            Nothing -> 
-                "{ " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ exprToRustString ctx v) (Map.toList fields)) ++ " }"
+            Just structName ->
+                structName ++ " { " ++ intercalate ", " (map (\(k, v) ->
+                    k ++ ": " ++ wrapStoredFn ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
+            Nothing ->
+                "{ " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ wrapStoredFn ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
     Can.Unit -> "()"
     Can.Tuple a b rest -> 
         "(" ++ intercalate ", " (map (exprToRustString ctx) (a:b:rest)) ++ ")"
@@ -1273,6 +1273,28 @@ kernelArgRustType _             _ = Nothing
 -- it (E0271/E0308). Resolve `a` from the expected return type: drop the pin in
 -- a generic fn (let Rust infer the param), pin the concrete success type when
 -- the region's expected type is a known `Task _ a`, else default `i64`.
+-- | Wrap a record-field VALUE in `std::sync::Arc::new(..)` when it is a
+-- function-typed value — a lambda literal, or a value whose solver region type
+-- is a function type (a `cb` param / top-level fn ref). Mirrors
+-- `fieldTypeToRust`: a stored-callback field renders as
+-- `Arc<dyn Fn(..) -> .. + Send + Sync>`, so the assigned closure / fn-pointer /
+-- param must be Arc-wrapped to match (closes 33-websocket-echo's 4× E0308 where
+-- `withOnX` stored an `impl Fn` into a callback field). A bare `fn` pointer
+-- coerces into `Arc::new` fine; a capturing `impl Fn` boxes into the trait
+-- object. Non-function values pass through unchanged, so non-callback fields
+-- (and every building example, none of which store functions in records) are
+-- byte-identical.
+wrapStoredFn :: EmitCtx -> Can.Expr -> String -> String
+wrapStoredFn ctx (Ann.At region e) rendered
+    | isFn      = "std::sync::Arc::new(" ++ rendered ++ ")"
+    | otherwise = rendered
+  where
+    isFn = case e of
+        Can.Lambda _ _ -> True
+        _ -> case Map.lookup region (ecRegionTypes ctx) of
+                 Just (Can.TLambda _ _) -> True
+                 _                      -> False
+
 taskFailPin :: EmitCtx -> String
 taskFailPin ctx
     | ecInGenericFn ctx = ""

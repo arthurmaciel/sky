@@ -388,18 +388,18 @@ pub enum WsHandle {
 #[allow(non_snake_case)]
 #[derive(Clone)]
 pub struct WsServerCfg<E> {
-    // Uncurried fn-pointer fields, matching how the codegen lowers multi-arg
-    // lambda VALUES (`\sock msg ->` → `|sock, msg|`). NOTE: this does not yet
-    // compile end-to-end — the codegen renders function TYPES curried
-    // (`A -> B -> C` → fn(A)->fn(B)->C), so `withOnMessage`'s callback param
-    // (curried) disagrees with both these fields and the uncurried lambda
-    // values. The fix is a general codegen change: render TLambda arrow-chains
-    // uncurried. See the Sub-D.2 design doc. Until then, server WebSocket is a
-    // compiling runtime foundation only.
-    pub onConnect: fn(WsHandle) -> SkyTask<E, ()>,
-    pub onMessage: fn(WsHandle, String) -> SkyTask<E, ()>,
-    pub onClose: fn(WsHandle) -> SkyTask<E, ()>,
-    pub onError: fn(WsHandle, E) -> SkyTask<E, ()>,
+    // Stored effectful callbacks. These are `Arc<dyn Fn + Send + Sync>`, NOT
+    // bare `fn` pointers: a real handler captures app state (the SSE-relay shape
+    // proves capturing closures are first-class — see ex-32), and a captured
+    // closure is not a `fn` pointer. The codegen renders function-typed record
+    // fields as `Arc<dyn Fn(..) -> .. + Send + Sync>` and wraps the assigned
+    // value in `Arc::new(..)` at every record literal / field-update site, so
+    // the `withOnX` setters (param `impl Fn`) and `defaultCfg` (lambda literals)
+    // both store cleanly. Arc is Clone, so the `#[derive(Clone)]` above holds.
+    pub onConnect: Arc<dyn Fn(WsHandle) -> SkyTask<E, ()> + Send + Sync>,
+    pub onMessage: Arc<dyn Fn(WsHandle, String) -> SkyTask<E, ()> + Send + Sync>,
+    pub onClose: Arc<dyn Fn(WsHandle) -> SkyTask<E, ()> + Send + Sync>,
+    pub onError: Arc<dyn Fn(WsHandle, E) -> SkyTask<E, ()> + Send + Sync>,
     pub maxMessageBytes: i64,
     pub originPatterns: Vec<String>,
 }

@@ -20,7 +20,7 @@ module Sky.Generate.Rust.Builder.Emitter
   , ffiPlaceholder
   ) where
 
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Sky.Sky.Toml as Toml (RustDepSpec(..))
@@ -464,6 +464,12 @@ collectUndefinedTypes b =
                 -- type — never synthesise a (syntactically invalid)
                 -- `type sky_runtime::LiveReq = String;` placeholder for it.
                 , not ("sky_runtime::" `isPrefixOf` t)
+                -- ANY fully-qualified Rust path (`std::sync::Arc<…>`, emitted by
+                -- fieldTypeToRust for a STORED callback field) is a real type —
+                -- its base name still carries `::`, so `takeWhile (/= '<')` would
+                -- yield `std::sync::Arc` and synthesise an invalid
+                -- `type std::sync::Arc = String;`. Skip anything containing `::`.
+                , not ("::" `isInfixOf` t)
                 -- A TUPLE type (`(String, i64)`) is already valid Rust — it must
                 -- never become a placeholder `type (String, i64) = String;`
                 -- (invalid alias LHS, `expected identifier, found '('`). The
