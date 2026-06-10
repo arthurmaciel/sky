@@ -22,6 +22,24 @@ pub fn string_contains(sub: String, s: String) -> bool { s.contains(&sub) }
 pub fn string_to_int(s: String) -> SkyMaybe<i64> {
     match s.parse::<i64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
 }
+/// `String.toFloat : String -> Maybe Float`. Mirrors string_to_int.
+pub fn string_to_float(s: String) -> SkyMaybe<f64> {
+    match s.parse::<f64>() { Ok(v) => SkyMaybe::Just(v), Err(_) => SkyMaybe::Nothing }
+}
+/// `String.fromChar : Char -> String`.
+pub fn string_from_char(c: char) -> String { c.to_string() }
+/// `String.slice : Int -> Int -> String -> String`. Char(rune)-indexed with
+/// negative-index-from-end + clamping — parity with Go's `String_sliceT`.
+pub fn string_slice(start: i64, end: i64, s: String) -> String {
+    let runes: Vec<char> = s.chars().collect();
+    let total = runes.len() as i64;
+    let mut start = if start < 0 { start + total } else { start };
+    let mut end = if end < 0 { end + total } else { end };
+    if start < 0 { start = 0; }
+    if end > total { end = total; }
+    if start > end { return String::new(); }
+    runes[start as usize..end as usize].iter().collect()
+}
 pub fn string_from_float(f: f64) -> String { format!("{}", f) }
 pub fn string_split(sep: String, s: String) -> Vec<String> { s.split(&sep).map(|x| x.to_string()).collect() }
 

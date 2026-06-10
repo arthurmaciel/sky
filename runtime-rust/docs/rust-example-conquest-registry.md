@@ -30,7 +30,7 @@ turbofish, Live entry-main, Live init generics, canDefBody) + runtime kernels
 | 08 | notes-app | E0308 ×111 + E0425 ×21 | mass type-mismatch + 21 missing functions/kernels. | **REGISTER** — split: enumerate the missing kernels; root-cause the mass E0308. |
 | 18 | job-queue | E0282 ×8 + E0277 ×6 | type-inference (annotation-needed) + serde. | needs diagnosis |
 | 28 | streaming-chat | E0277 ×4 + E0599 ×2 | serde + a missing method (E0599). | needs diagnosis |
-| 33 | websocket-echo | E0308 ×4 | small type-mismatch set — likely tractable. | **TRY NEXT** |
+| 33 | websocket-echo | E0308 ×4 (stored-effectful-callback) | NOT a simple mismatch. `paramTypeToRust`'s Task-result gate (TypeEmitter.hs:132) renders effectful callbacks as `impl Fn` (for kernel-HOF flow, e.g. ex-32 `forEachChunk`), but the stdlib `withOnX` setters STORE the effectful callback into a `fn`-pointer record field (`WsServerCfg.onConnect: fn(...)`, runtime server.rs:399). `impl Fn` ≠ `fn` ptr. Naive global flip regresses ex-32. | **REGISTER** — needs unified `Arc<dyn Fn + Send + Sync>` representation for STORED function values (record fields + ADT variants) + `Arc::new` wrap at construction sites. Cross-cutting codegen change. |
 | 16 | skychess | parse: `found '.'` / `found keyword move` | codegen emits malformed Rust (a closure/method-chain shape). | needs diagnosis |
 | 17 | skymon | parse: unclosed/mismatched `}` delimiter | codegen brace imbalance — verify it's not a let-wrap interaction (matrix passed, but check). | **TRY NEXT** (brace bug) |
 | 35 | composite-generics | parse: `expected identifier, found '('` | malformed Rust from a generics/composite shape. | needs diagnosis |

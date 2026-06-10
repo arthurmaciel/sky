@@ -12,6 +12,12 @@ pub fn basics_mod_by(divisor: i64, n: i64) -> i64 {
     else { r }
 }
 
+/// Sky `fst : (a, b) -> a` / `snd : (a, b) -> b`. Pure in stdlib, but the
+/// Prelude re-export lowers as a `VarKernel "Basics" "fst"`, so the Rust
+/// backend routes it to a runtime kernel. Tuples lower to Rust tuples.
+pub fn basics_fst<A, B>(t: (A, B)) -> A { t.0 }
+pub fn basics_snd<A, B>(t: (A, B)) -> B { t.1 }
+
 /// Sky `errorToString : a -> String` — universal Sky stringifier.
 /// Used by Sky.Test.debugShow and friends to render any Sky value into
 /// a diagnostic string. Backed by Rust's `Debug` since every codegen-emitted
