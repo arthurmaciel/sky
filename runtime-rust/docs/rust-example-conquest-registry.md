@@ -163,8 +163,21 @@ local-closure params (E0282) + serde + arg-count, a different class).
    capturing `selectRecent` — needs `move`, with clone-interaction for
    multi-use captures); `report`'s `e` (closure-flow not yet resolved — flows
    into logAndFail but through deeper nesting); serde (2 — should cascade once
-   E0282 fully clears); 2 E0308. `18` is a multi-fix conquest like `12` was:
-   also
+   E0282 fully clears); 2 E0308. UPDATE2 (2026-06-10): driven 24→7, all
+   regression-gated (wide gate: all 11 builds green). Added: ESCAPING-CLOSURE
+   `move` — let-bound closures (defToRustString multi-arg) now emit as `move`
+   with capture-clones, mirroring argToRustString's proven pattern (a closure
+   captured into a Task pipeline, e.g. `readAll` capturing `selectRecent`, must
+   OWN its captures → E0373 otherwise); and `ecClosureDefs` is now set in the
+   TypedDef branch too (annotated fns like `withErrorReporting` were missed),
+   resolving `report`'s `e` via the closure-flow. REMAINING 7 (cascade keeps
+   revealing layers, exactly like 12): 1 E0282 = a RECORD closure param
+   (`move |j| { if j.id == jid … }` — needs single-field-access→struct
+   resolution, but ecRecordMap keys on the FULL field-set so a 1-field access
+   can't match; same limitation as resolveOpenRecordParam); 1 E0271 (a Task
+   associated-type mismatch newly exposed by report's e resolving); serde (2,
+   cascades once E0282 clears); 2 E0308. `18` is a multi-fix conquest like
+   `12` was: also
    needs serde model-detection (E0277 — its `MainModel` isn't stamped; likely
    the E0282 leaves `view`/`init` types polymorphic so detection fails),
    arg-count (E0061), and missing kernels (E0425). Tackle as one focused,
