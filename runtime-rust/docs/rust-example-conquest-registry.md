@@ -142,8 +142,15 @@ local-closure params (E0282) + serde + arg-count, a different class).
    each let-bound closure's inferred param types in definition order, thread a
    `name→[type]` map into ctx, resolve a param flowing into a local closure via
    that map). Plus 18's serde (2 E0277 — likely cascades once E0282 clears and
-   model-detection sees concrete view/init types) + 3 E0308. `18` is a
-   multi-fix conquest like `12` was: also
+   model-detection sees concrete view/init types) + 3 E0308 (two are
+   `expected String found i64`: Int VALUES — `snapshot.ok` etc — passed in
+   `Db.exec … [ok, failed, total, ts]` where the runtime `db_exec` wants
+   `Vec<String>`; needs an Int→String coercion at db-param-vec elements,
+   reusable + analogous to the f64 coercion, e.g. emit `string_from_int(ok)`
+   when a non-String value lands in a `Vec<String>` kernel arg). 18's full
+   conquest is a 12-scale interlinked chain (closure-sig pre-pass → E0282
+   clears → serde model-detection succeeds → Int→String db-param coercion →
+   builds). `18` is a multi-fix conquest like `12` was: also
    needs serde model-detection (E0277 — its `MainModel` isn't stamped; likely
    the E0282 leaves `view`/`init` types polymorphic so detection fails),
    arg-count (E0061), and missing kernels (E0425). Tackle as one focused,
