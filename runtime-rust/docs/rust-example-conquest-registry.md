@@ -61,12 +61,26 @@ turbofish, Live entry-main, Live init generics, canDefBody) + runtime kernels
    `Lib.Db.exec : String -> List String -> Task Error ()`, unannotated) missed
    the lookup → fell back to body-analysis defaults (`args: String`, return
    `()`) instead of `Vec<String>` / `SkyTask`. Every call site then mismatched
-   (E0308 ×100+). Fix: `scopeCtxToModule` layers each module's own
-   `_stPerModuleEnv[M]` over the flat map in `buildProgram` so dep-module
-   signatures resolve authoritatively. Same family as the serde 1a fix.
+   (E0308 ×100+). Fix: a NEW `ecModuleEnv` ctx field carries the current
+   module's `_stPerModuleEnv[M]`; `lookupOwnSig` consults it FIRST (then flat)
+   for the DEFINED function's own param/return types ONLY. (v1 layered the
+   module env over `ecSolvedTypes` WHOLESALE and regressed 00-standard-libs:
+   it shadowed cross-module CALLS to same-named functions — `Std.Money.
+   fromString`/2 hiding `Std.Decimal.fromString`/1 → wrong currying. The
+   surgical version scopes only the signature, leaving body call-resolution
+   on the flat map.) Result: 12 went 168→81 (returns + concrete-param sigs
+   fixed; residual 66 E0308 are the polymorphic-param gap below).
    NOTE: `08`/`17` ALSO carry Go-FFI deps (class 3 below), so the E0308 fix
    advances but may not fully clear them; `12` is pure-Sky so it's the
    keystone verifier.
+   POLYMORPHIC-PARAM MONOMORPHIZATION (defying, blocks 12 fully): the stdlib
+   DB kernels are polymorphic (`Db.exec : … List a …`, `Db.getField : String
+   -> row -> String`), so user wrappers (`Lib.Db.exec/query/getField`,
+   unannotated) inherit TVAR params. The concrete-only param gate rejects them
+   → body-analysis `String`, but the runtime kernels demand `Vec<String>` /
+   `HashMap`. Needs body-driven param monomorphization (infer the param's
+   concrete type from the kernel it flows into) — symmetric to the existing
+   `taskExprInnerType` return inference.
 3. **missing kernels (E0425)** — `08` (21), `10` (1). Per-kernel runtime adds
    (the `time_every`/`debug_to_string` pattern). Tractable, enumerable.
 4. **parse / malformed Rust** — `16, 17, 35`. Codegen emitting invalid syntax;
@@ -89,10 +103,50 @@ turbofish, Live entry-main, Live init generics, canDefBody) + runtime kernels
    type-alias is emitted with the tuple as the alias identifier. Tractable
    emitter fix (suppress / mangle the alias when its key is a structural type).
 
-## Next actions (tractable-first)
+## Session outcome (2026-06-10)
 
-- **TRY:** `33-websocket-echo` (4 E0308), `17-skymon` (brace bug — confirm not
-  let-wrap), then the E0425 missing-kernel enumeration for `08`.
-- **PLAN:** the serde multi-module model-detection (class 1) and the mass-E0308
-  root cause (class 2) — these are the defying ones; design before coding.
-- **RE-DIAGNOSE:** `03, 05, 13` (capture fresh errors).
+CONQUERED this session (now build clean on `--target rust`):
+`10-live-component` (multi-module Sky.Live + component) and
+`28-streaming-chat` (Sky.Live SSE). Plus broad advances: `12-skyvote`
+168→75 errors. Scoreboard: gated-6 → 15 building (in-scope 13). NO
+regressions (two self-introduced regressions — unconditional-serde-dep and
+signature-scoping shadowing — caught by baseline re-verification and fixed).
+
+Root-cause fixes landed (codegen in the Builder blob; runtime committed):
+`//`→`/`, +6 stdlib kernels, serde multi-module scoped lookup, DestructDef
+tuple-let, multi-module signature scoping (`ecModuleEnv`/`lookupOwnSig`),
+tuple-type placeholder guard, SkyMaybe/SkyResult serde + unconditional dep,
+branch-aware clone counting.
+
+## Remaining defying classes — implementation plans
+
+Each remaining failure is a designed capability, not a quick patch:
+
+1. **Polymorphic-param monomorphization** (blocks `12`; 49/66 of its E0308).
+   Plan: add `inferParamRustType :: EmitCtx -> String -> Can.Expr -> Maybe
+   String`, symmetric to `taskExprInnerType` (ExprEmitter.hs:1079). For each
+   param whose solved type carries a TVar, scan the body for the first
+   `Can.Call` where the param is an argument, resolve the callee's Rust param
+   type at that position (kernel sig table for `db_exec`/`db_query`→
+   `Vec<String>`, `dict_get`→`HashMap<String,String>`; user fns via
+   `lookupOwnSig`), and emit that instead of the all-or-nothing `String`
+   fallback. Render per-param (concrete keeps its type; `List <TVar>` →
+   `Vec<String>`; bare TVar → body-inferred). HIGH regression risk — do in a
+   focused session with a full sweep gate.
+
+2. **Go-FFI → Rust-native FFI** (blocks `03/05/08/13/16/17`). Major roadmap
+   slice: generate Rust bindings for imported Go packages, or a Sky-side
+   capability map. Secondary: fix the Rust path's `_bindings.go` double-open
+   lock so `03/05/13` emit a clean "FFI unsupported" diagnostic instead of a
+   `resource busy` crash.
+
+3. **Stored-effectful-callback representation** (blocks `33`). Unified
+   `Arc<dyn Fn + Send + Sync>` for STORED function values (record fields + ADT
+   variants) with `Arc::new` wrap at construction; relax `paramTypeToRust`'s
+   Task-gate for stored (vs kernel-passed) callbacks.
+
+4. **Local-closure param annotation** (blocks `18`). Let-bound lambdas emit
+   `|db, ts| …` with no param types → E0282. Annotate from `_stRegions`
+   (per-region solved types) at the lambda's param patterns.
+
+5. **Composite-generics tail** (`35`) — deep; re-triage after class 1.
