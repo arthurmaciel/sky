@@ -30,4 +30,7 @@ for d in $(ls -d examples/[0-9]*/ examples/simple/ examples/test_pkg/ 2>/dev/nul
   fi
   case "$OUT_OF_SCOPE" in *" $num "*) r="$r (out-of-scope)";; esac
   printf "%-26s %s\n" "$n" "$r"
+  # Reclaim disk immediately — 41× cargo target/ dirs (~1.5 GB each) otherwise
+  # fill the filesystem mid-sweep (the result is already recorded above).
+  ( cd "$d" && rm -rf sky-out .skycache .skydeps )
 done
