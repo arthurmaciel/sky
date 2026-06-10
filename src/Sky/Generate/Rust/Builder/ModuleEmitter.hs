@@ -59,8 +59,12 @@ import Sky.Generate.Rust.Builder.Walker
 -- ============================================================
 
 buildModule :: EmitCtx -> Can.Module -> RustModule
-buildModule ctx mod =
+buildModule ctx0 mod =
     let modPrefix = moduleNameToRust (Can._name mod)
+        -- Seed sibling top-level fn defs so inferParamRustType can resolve a
+        -- param flowing into a sibling call (17-skymon's exec/query wrappers).
+        ctx = ctx0 { ecSiblingFns = collectSiblingFns (Can._decls mod)
+                   , ecCurrentModule = ModuleName._name (Can._name mod) }
         items = declsToRustItems ctx modPrefix (Can._decls mod)
         -- Existing function names after prefixing (to avoid double-emit)
         prefixed = map (\(RustFunction n g p r b) -> toSnakeCase (modPrefix ++ "_" ++ n)) 
@@ -109,6 +113,19 @@ buildModule ctx mod =
 -- ============================================================
 -- declsToRustItems (lines 905-909 of Builder.hs)
 -- ============================================================
+
+-- | Collect a module's top-level function definitions as bare-name ->
+-- (params, body), for sibling-call param inference (ecSiblingFns). Both Def and
+-- TypedDef arms; TypedDef's params are the pattern halves of its annotated pairs.
+collectSiblingFns :: Can.Decls -> Map.Map String ([Can.Pattern], Can.Expr)
+collectSiblingFns = go
+  where
+    go (Can.Declare def rest)        = ins def (go rest)
+    go (Can.DeclareRec def defs rest) = foldr ins (go rest) (def : defs)
+    go Can.SaveTheEnvironment        = Map.empty
+    ins (Can.Def (Ann.At _ name) params body) m  = Map.insert name (params, body) m
+    ins (Can.TypedDef (Ann.At _ name) _ pats body _) m = Map.insert name (map fst pats, body) m
+    ins _ m = m
 
 declsToRustItems :: EmitCtx -> String -> Can.Decls -> [RustItem]
 declsToRustItems _ctx _mod Can.SaveTheEnvironment = []
@@ -595,7 +612,7 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
             , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "" }
         -- Multi-module signature scoping. The flat `ecSolvedTypes` (`_stEnv`)
         -- collides on bare names across modules, so a DEP module's function
         -- (e.g. `Lib.Db.exec : String -> List String -> Task Error ()`) whose

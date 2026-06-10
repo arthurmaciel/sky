@@ -1200,7 +1200,28 @@ inferParamRustType ctx pname = go
                     , j < length cparams, Ann.At _ (Can.PVar cpn) <- [cparams !! j] ]
                   Nothing -> Nothing
               _ -> Nothing
-        in direct `orElseM` genDirect `orElseM` vecElem `orElseM` userClosure `orElseM` firstJustL (map go (callee : args))
+            -- param flows into a SIBLING top-level fn call (`execOrLog … = exec q
+            -- args`): recursively infer that fn's param at the same position.
+            -- Guard with `mkn == Nothing` (callee is NOT a kernel): the collision
+            -- to avoid is a QUALIFIED cross-module call to a kernel-mapped fn of
+            -- the same bare name (`Db.exec` from Lib.Db, whose own `exec` is a
+            -- sibling — db_exec is a kernel so mkn=Just, excluded → 12-skyvote
+            -- stays correct). A genuine sibling user-fn call is never a kernel.
+            -- The candidate must also be in ecSiblingFns (this module's defs).
+            -- Cycle-broken via Map.delete.
+            siblingName = case (mkn, callee) of
+              (Nothing, Ann.At _ (Can.VarTopLevel _ sname)) -> Just sname
+              (Nothing, Ann.At _ (Can.VarLocal sname))      -> Just sname
+              _                                             -> Nothing
+            siblingFn = case siblingName of
+              Just sname -> case Map.lookup sname (ecSiblingFns ctx) of
+                  Just (sparams, sbody) -> firstJustL
+                    [ inferParamRustType (ctx { ecSiblingFns = Map.delete sname (ecSiblingFns ctx) }) spn sbody
+                    | (j, Ann.At _ (Can.VarLocal v)) <- zip [0 :: Int ..] args, v == pname
+                    , j < length sparams, Ann.At _ (Can.PVar spn) <- [sparams !! j] ]
+                  Nothing -> Nothing
+              Nothing -> Nothing
+        in direct `orElseM` genDirect `orElseM` vecElem `orElseM` userClosure `orElseM` siblingFn `orElseM` firstJustL (map go (callee : args))
       Can.Lambda _ b              -> go b
       Can.Let d b                 -> go (canDefBody d) `orElseM` go b
       Can.LetRec ds b             -> firstJustL (map (go . canDefBody) ds) `orElseM` go b
@@ -1255,6 +1276,15 @@ kernelArgRustType n 1
 kernelArgRustType "dict_get"    1 = Just "HashMap<String, String>"
 kernelArgRustType "dict_member" 1 = Just "HashMap<String, String>"
 kernelArgRustType "dict_remove" 1 = Just "HashMap<String, String>"
+-- Db.getField/getString/getInt/getBool : String -> row -> a, where the runtime
+-- `row` is a HashMap<String, String> (a query result row). A thin Lib.Database
+-- wrapper (`getField f row = Db.getField f row`) inherits a polymorphic `row`
+-- param that defaults to String without this; the kernel call then mismatches
+-- (17-skymon's mass E0308). Arg index 1 is the row in every getter.
+kernelArgRustType "db_get_field"  1 = Just "HashMap<String, String>"
+kernelArgRustType "db_get_string" 1 = Just "HashMap<String, String>"
+kernelArgRustType "db_get_int"    1 = Just "HashMap<String, String>"
+kernelArgRustType "db_get_bool"   1 = Just "HashMap<String, String>"
 kernelArgRustType "dict_keys"   0 = Just "HashMap<String, String>"
 kernelArgRustType "dict_values" 0 = Just "HashMap<String, String>"
 -- Std.Css length/number constructors take f64 (Sky `Float`). An Int literal arg

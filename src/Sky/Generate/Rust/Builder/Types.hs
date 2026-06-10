@@ -400,6 +400,22 @@ data EmitCtx = EmitCtx
         --   `ecSolvedTypes` wholesale — doing so shadowed cross-module calls to
         --   same-named functions (Std.Money.fromString hiding Std.Decimal's →
         --   wrong arity/currying). Body lowering keeps using the flat map.
+    , ecCurrentModule :: String
+        -- ^ The current module's canonical name (e.g. "Lib.Database"), so a
+        --   sibling-fn lookup can verify a VarTopLevel callee belongs to THIS
+        --   module before resolving it against ecSiblingFns. Without the check,
+        --   a qualified cross-module call to a same-named fn (`Db.exec` from
+        --   Lib.Db, whose own `exec` is a sibling) collides on the bare name and
+        --   mis-infers (12-skyvote regression).
+    , ecSiblingFns :: Map.Map String ([Can.Pattern], Can.Expr)
+        -- ^ The current module's TOP-LEVEL function definitions (bare name ->
+        --   (params, body)), for body-driven param inference across sibling
+        --   calls. A wrapper `execOrLog l q args = … exec q args …` whose `args`
+        --   flows into the sibling `exec` (itself `Db.exec … args` → kernel
+        --   db_exec arg2 = Vec<String>) resolves by recursively inferring exec's
+        --   param at that position — the VarTopLevel analogue of ecClosureDefs'
+        --   local-closure recursion. Closes 17-skymon's exec/query wrapper
+        --   cluster (cycle-broken via Map.delete on recursion).
     , ecReturnElem :: Maybe String
         -- ^ The Rust element-type string of the ENCLOSING function's
         --   `SkyTask<T>` return (the `T`), seeded when emitting a def body.
