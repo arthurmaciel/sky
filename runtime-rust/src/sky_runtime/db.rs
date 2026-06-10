@@ -43,7 +43,25 @@ pub fn db_connect<E: Send + From<String> + 'static>(_unit: ()) -> SkyTask<E, Db>
     })
 }
 
-pub fn db_open<E: Send + From<String> + 'static>(_unit: ()) -> SkyTask<E, Db> { db_connect(_unit) }
+/// `Db.open : String -> String -> Task Error Db` (driver, path). The compiled
+/// `DbPool` type is already fixed by the sky.toml driver, so `driver` is
+/// informational; we connect using `path`. For sqlite a bare file path needs a
+/// `sqlite://…?mode=rwc` URL (create-if-missing); other drivers pass `path`
+/// through as the connection string. (Was wrongly `(_unit: ())` → ignored both
+/// args → E0061 at every `Db.open "sqlite" "x.db"` call site.)
+pub fn db_open<E: Send + From<String> + 'static>(driver: String, path: String) -> SkyTask<E, Db> {
+    let url = if driver == "sqlite" && !path.contains(':') {
+        format!("sqlite://{}?mode=rwc", path)
+    } else {
+        path
+    };
+    Box::pin(async move {
+        match DbPool::connect(&url).await {
+            Ok(pool) => ok_res(pool),
+            Err(e) => SkyResult::Err(sky_err(&e)),
+        }
+    })
+}
 
 pub fn db_open_with_path<E: Send + From<String> + 'static>(path: String) -> SkyTask<E, Db> {
     Box::pin(async move { match DbPool::connect(&path).await {

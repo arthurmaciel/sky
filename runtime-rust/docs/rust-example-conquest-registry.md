@@ -122,17 +122,29 @@ branch-aware clone counting.
 
 Each remaining failure is a designed capability, not a quick patch:
 
-1. **Polymorphic-param monomorphization** (blocks `12`; 49/66 of its E0308).
-   Plan: add `inferParamRustType :: EmitCtx -> String -> Can.Expr -> Maybe
-   String`, symmetric to `taskExprInnerType` (ExprEmitter.hs:1079). For each
-   param whose solved type carries a TVar, scan the body for the first
-   `Can.Call` where the param is an argument, resolve the callee's Rust param
-   type at that position (kernel sig table for `db_exec`/`db_query`→
-   `Vec<String>`, `dict_get`→`HashMap<String,String>`; user fns via
-   `lookupOwnSig`), and emit that instead of the all-or-nothing `String`
-   fallback. Render per-param (concrete keeps its type; `List <TVar>` →
-   `Vec<String>`; bare TVar → body-inferred). HIGH regression risk — do in a
-   focused session with a full sweep gate.
+1. **Polymorphic-param monomorphization** — IMPLEMENTED (regression-free).
+   `inferParamRustType` (ExprEmitter.hs) scans the body for the first
+   `Can.Call` where a TVar param is a direct arg and reads the callee kernel's
+   concrete Rust type at that position (`kernelArgRustType`: db_exec/db_query
+   arg2→`Vec<String>`, dict_get/member/remove arg1 + dict_keys/values arg0→
+   `HashMap<String,String>`). Wired into defToRustItem's body-analysis
+   fallback per-param; inferred params drop out of the generics list. Also
+   fixed `db_open` (runtime took `()`, ignoring `Db.open`'s `(driver,path)`)
+   in BOTH the runtime (db.rs) AND its codegen forwarding wrapper (Emitter.hs)
+   — they must move arity together. Result: `12-skyvote` 75→23. Verified no
+   regression across 00/04/07/10/28/30/32.
+   12's RESIDUAL 23 (diverse tail, each a distinct root cause):
+   - **row-polymorphic model params** (~13: E0609 ×4 + related E0308) —
+     record-update handlers (`signOut model = { model | currentUser = … }`)
+     get an OPEN-record type `{ r | … }` carrying a row-var → concrete-gate
+     fails → body-analysis → `String`. Needs row-poly→concrete-struct
+     resolution (the Go backend's `_skysynth` subset-record path); ecRecordMap
+     keys on the full field-set, so single-field lookup won't do it.
+   - **view-returns-`()`** (~2: `expected Html<Msg>, found ()`) — return
+     inference defaulting a view branch to unit.
+   - **f64 numeric literals** (~2) — Int literal where f64 expected.
+   - **E0283 inference ambiguity** (~3) — `auth_hash_password` / nested
+     `std_html_div` need turbofish/annotation.
 
 2. **Go-FFI → Rust-native FFI** (blocks `03/05/08/13/16/17`). Major roadmap
    slice: generate Rust bindings for imported Go packages, or a Sky-side
