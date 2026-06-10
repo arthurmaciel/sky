@@ -27,6 +27,33 @@ pub fn math_ceil(x: f64) -> i64 { x.ceil() as i64 }
 /// Sky `round : Float -> Int` — half-away-from-zero (Go's `math.Round` semantics
 /// match this). Rust's `f64::round` also goes half-away-from-zero, so we just cast.
 pub fn math_round(x: f64) -> i64 { x.round() as i64 }
+pub fn math_trunc(x: f64) -> i64 { x.trunc() as i64 }
+
+// Exponential / logarithmic (Sky.Core.Math: exp, exp2, log [natural], log2, log10).
+pub fn math_exp(x: f64) -> f64 { x.exp() }
+pub fn math_exp2(x: f64) -> f64 { x.exp2() }
+pub fn math_log(x: f64) -> f64 { x.ln() }
+pub fn math_log2(x: f64) -> f64 { x.log2() }
+pub fn math_log10(x: f64) -> f64 { x.log10() }
+pub fn math_cbrt(x: f64) -> f64 { x.cbrt() }
+pub fn math_hypot(a: f64, b: f64) -> f64 { a.hypot(b) }
+
+// Trigonometric.
+pub fn math_sin(x: f64) -> f64 { x.sin() }
+pub fn math_cos(x: f64) -> f64 { x.cos() }
+pub fn math_tan(x: f64) -> f64 { x.tan() }
+pub fn math_asin(x: f64) -> f64 { x.asin() }
+pub fn math_acos(x: f64) -> f64 { x.acos() }
+pub fn math_atan(x: f64) -> f64 { x.atan() }
+pub fn math_atan2(y: f64, x: f64) -> f64 { y.atan2(x) }
+
+// Hyperbolic.
+pub fn math_sinh(x: f64) -> f64 { x.sinh() }
+pub fn math_cosh(x: f64) -> f64 { x.cosh() }
+pub fn math_tanh(x: f64) -> f64 { x.tanh() }
+pub fn math_asinh(x: f64) -> f64 { x.asinh() }
+pub fn math_acosh(x: f64) -> f64 { x.acosh() }
+pub fn math_atanh(x: f64) -> f64 { x.atanh() }
 
 #[cfg(test)]
 mod tests {

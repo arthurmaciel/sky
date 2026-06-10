@@ -12,6 +12,7 @@ module Sky.Generate.Rust.Project
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Char as Char
+import Data.List (isInfixOf)
 import Control.Monad (when)
 import System.Directory
     ( createDirectoryIfMissing, doesFileExist, doesDirectoryExist
@@ -52,7 +53,19 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    | dep <- Toml._rustDeps config ]
         ffiSlugs = depSlugs
         kernelAliases = Map.mapKeys (\(cn, fn) -> (ModuleName._name cn, fn)) rawAliases
-        (rustCode, moduleFiles, usage) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases (Toml._liveStore config) (Toml._liveStorePath config)
+        (rustCode, moduleFiles, usage0) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases (Toml._liveStore config) (Toml._liveStorePath config)
+        -- usesUuid is detected from Sky-module usage (Uuid.*), but a transitive
+        -- reference can slip past it: importing Sky.Core.Pure emits its whole
+        -- module incl. uuidV4/uuidV7 bindings that call the uuid_v4/uuid_v7
+        -- kernels, even when the app only used Pure.systemArgs. The emitted Rust
+        -- then references the kernel while usesUuid stays false → undefined
+        -- (35-composite-generics). Scan the final emitted code for the kernel
+        -- references and force the gate (pulls uuid_kernel + the uuid crate).
+        -- An app that FFIs the uuid crate itself never emits the bare
+        -- `uuid_v4`/`uuid_v7` kernel name, so this can't false-trigger it.
+        allEmitted = rustCode ++ concatMap snd moduleFiles
+        uuidReferenced = "uuid_v4" `isInfixOf` allEmitted || "uuid_v7" `isInfixOf` allEmitted
+        usage = usage0 { RustBuilder.usesUuid = RustBuilder.usesUuid usage0 || uuidReferenced }
         rustDir = outDir </> "Rust"
     createDirectoryIfMissing True rustDir
     let srcDir = rustDir </> "src"
@@ -89,7 +102,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    ,"pub mod ffi_polyfills;"
                    -- Sub-A.8 — runtime kernel coverage
                    ,"pub mod money;","pub mod math;","pub mod dict;","pub mod string;"
-                   ,"pub mod basics;","pub mod char_kernel;","pub mod list;"
+                   ,"pub mod basics;","pub mod char_kernel;","pub mod list;","pub mod io;"
                    -- v0.15.47 stdlib modules
                    ,"pub mod compression;","pub mod csv;","pub mod config_decode;"]
         -- sub-C — Std.Auth requires db.rs + jwt; gated together
@@ -105,6 +118,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                   ,"pub use money::*;","pub use math::*;"
                   ,"pub use dict::*;","pub use string::*;"
                   ,"pub use basics::*;","pub use char_kernel::*;","pub use list::*;"
+                  ,"pub use io::*;"
                   ,"pub use compression::*;","pub use csv::*;"
                   ,"pub use config_decode::*;"]
         dbUse = if usesDb then ["pub use db::*;", "pub use auth::*;"] else []

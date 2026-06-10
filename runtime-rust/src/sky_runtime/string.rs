@@ -42,6 +42,9 @@ pub fn string_slice(start: i64, end: i64, s: String) -> String {
 }
 pub fn string_from_float(f: f64) -> String { format!("{}", f) }
 pub fn string_split(sep: String, s: String) -> Vec<String> { s.split(&sep).map(|x| x.to_string()).collect() }
+// Sky.Core.String.lines / .words — split on line breaks / runs of whitespace.
+pub fn string_lines(s: String) -> Vec<String> { s.lines().map(|x| x.to_string()).collect() }
+pub fn string_words(s: String) -> Vec<String> { s.split_whitespace().map(|x| x.to_string()).collect() }
 
 // ── String kernels with Go-typed argument order ──
 

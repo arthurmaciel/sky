@@ -17,3 +17,31 @@ pub fn system_unsetenv<E: Send + 'static>(key: String) -> SkyTask<E, ()> {
     std::env::remove_var(&key);
     Box::pin(async move { ok_res(()) })
 }
+
+/// `System.cwd : () -> Task Error String`.
+pub fn system_cwd<E: Send + From<String> + 'static>(_: ()) -> SkyTask<E, String> {
+    match std::env::current_dir() {
+        Ok(p) => Box::pin(ready(ok_res(p.to_string_lossy().into_owned()))),
+        Err(e) => Box::pin(ready(SkyResult::Err(str_err(&format!("{}", e))))),
+    }
+}
+
+/// `System.loadEnv : () -> Task Error ()`. Parses a `.env` file in the CWD
+/// (KEY=VALUE per line, `#` comments, optional surrounding quotes) and sets
+/// each var WITHOUT overriding one already present in the process environment
+/// (process env wins, matching Sky's precedence). A missing `.env` is a no-op
+/// success.
+pub fn system_load_env<E: Send + 'static>(_: ()) -> SkyTask<E, ()> {
+    if let Ok(contents) = std::fs::read_to_string(".env") {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            if let Some((k, v)) = line.split_once('=') {
+                let k = k.trim();
+                let v = v.trim().trim_matches('"').trim_matches('\'');
+                if std::env::var(k).is_err() { std::env::set_var(k, v); }
+            }
+        }
+    }
+    Box::pin(async move { ok_res(()) })
+}

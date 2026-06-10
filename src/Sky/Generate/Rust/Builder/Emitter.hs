@@ -432,50 +432,56 @@ collectUndefinedTypes b =
             `Set.union` Set.fromList
             [ defName name | RPubUseAlias name _ <- builderTypes b ]
             `Set.union` builderFfiOpaques b  -- types defined by Rust FFI bindings
+            -- Hardcoded preamble aliases (wrapperFns + the SkyBool/SkyString/
+            -- Value header) aren't in builderTypes; without them, the
+            -- return-type scan re-synthesises duplicate placeholders (E0428 on
+            -- `Value`/`Decoder` for a JSON-heavy program — 35-composite-generics).
+            `Set.union` Set.fromList ["SkyTask", "Decoder", "SkyBool", "SkyString", "Value"]
         -- Collect type names from function parameter types (after ": ")
         -- Sub-D step 4: compare/emit the BASE type name (generic args stripped).
         -- A generic ADT param like `MainRetry<e>` is "defined" by the bare
         -- `MainRetry` enum, so it must not be treated as undefined (which would
         -- emit a colliding `type MainRetry<e> = String;` placeholder — E0428).
+        -- A type string is a placeholder candidate if it's an undefined Sky
+        -- opaque (not a primitive / generic builtin / qualified path / tuple).
+        -- The base name (generics stripped) is what becomes the alias LHS.
+        isCandidate t =
+            not (null t)
+            && not (elem t ["String", "i64", "f64", "bool", "char", "()", "Db", "SkyTask", "SkyError", "HashMap"])
+            && not ("impl " `isPrefixOf` t)
+            && not ("&" `isPrefixOf` t)
+            && not ("Vec<" `isPrefixOf` t)
+            && not ("HashMap" `isPrefixOf` t)
+            && not ("Option" `isPrefixOf` t)
+            && not ("Result" `isPrefixOf` t)
+            && not ("SkyMaybe" `isPrefixOf` t)
+            && not ("SkyResult" `isPrefixOf` t)
+            -- SkyTask<A> (generic form slips past the exact-match list above) —
+            -- excluding it avoids a colliding `type SkyTask = String;` (E0428).
+            && not ("SkyTask" `isPrefixOf` t)
+            && not ("Box<" `isPrefixOf` t)
+            && not ("fn(" `isPrefixOf` t)
+            -- ANY fully-qualified Rust path (`sky_runtime::LiveReq`,
+            -- `std::sync::Arc<…>`) is a real type; its base name carries `::`,
+            -- which would synthesise an invalid `type std::sync::Arc = String;`.
+            && not ("::" `isInfixOf` t)
+            -- A TUPLE type (`(String, i64)`) is already valid Rust — never a
+            -- placeholder `type (String, i64) = String;` (invalid alias LHS).
+            && not ("(" `isPrefixOf` t)
+        -- Param types: the substring after the `name: ` prefix.
+        paramTypes = [ dropWhile (== ' ') ty
+                     | RustFunction _ _ params _ _ <- allItems, p <- params
+                     , let (_, rest) = break (== ':') p, (':':ty) <- [rest] ]
+        -- Return types too: a runtimeOpaque used ONLY in return position (e.g.
+        -- `report_encode_* -> SkyCoreJsonEncodeValue`) must still get its
+        -- `pub use sky_runtime::JsonVal as …;` alias, else it's undefined.
+        -- ONLY non-generic return types: a `type X = String;` placeholder drops
+        -- type args, so synthesising one for a generic return (`SkyCmd<Msg>`,
+        -- `SkyMaybe<T>`) yields E0107 (0 args supplied vs 1). The undefined
+        -- opaque we actually need to catch (SkyCoreJsonEncodeValue) is bare.
+        returnTypes = [ r | RustFunction _ _ _ r _ <- allItems, '<' `notElem` r ]
         referenced = Set.fromList
-            [ takeWhile (/= '<') t | RustFunction _ _ params _ _ <- allItems
-                , p <- params
-                , let (_, ':':ty) = break (== ':') p
-                , let t = dropWhile (== ' ') ty
-                , not (null t)
-                , not (elem t ["String", "i64", "f64", "bool", "char", "()", "Db", "SkyTask", "SkyError", "HashMap"])
-                , not ("impl " `isPrefixOf` t)
-                , not ("&" `isPrefixOf` t)
-                , not ("Vec<" `isPrefixOf` t)
-                , not ("HashMap" `isPrefixOf` t)
-                , not ("Option" `isPrefixOf` t)
-                , not ("Result" `isPrefixOf` t)
-                , not ("SkyMaybe" `isPrefixOf` t)
-                , not ("SkyResult" `isPrefixOf` t)
-                -- SkyTask<A> as a param type (a Task-typed function arg) must be
-                -- excluded too — the bare "SkyTask" is in the exact-match list
-                -- but the generic form slips past it, emitting a colliding
-                -- `type SkyTask = String;` placeholder (E0428 vs the real alias).
-                , not ("SkyTask" `isPrefixOf` t)
-                , not ("Box<" `isPrefixOf` t)
-                , not ("fn(" `isPrefixOf` t)
-                -- P4-T3: a fully-qualified `sky_runtime::…` path (e.g. the
-                -- `sky_runtime::LiveReq` init param type) is a real runtime
-                -- type — never synthesise a (syntactically invalid)
-                -- `type sky_runtime::LiveReq = String;` placeholder for it.
-                , not ("sky_runtime::" `isPrefixOf` t)
-                -- ANY fully-qualified Rust path (`std::sync::Arc<…>`, emitted by
-                -- fieldTypeToRust for a STORED callback field) is a real type —
-                -- its base name still carries `::`, so `takeWhile (/= '<')` would
-                -- yield `std::sync::Arc` and synthesise an invalid
-                -- `type std::sync::Arc = String;`. Skip anything containing `::`.
-                , not ("::" `isInfixOf` t)
-                -- A TUPLE type (`(String, i64)`) is already valid Rust — it must
-                -- never become a placeholder `type (String, i64) = String;`
-                -- (invalid alias LHS, `expected identifier, found '('`). The
-                -- existing `()` exact-match excludes unit but not n-tuples.
-                , not ("(" `isPrefixOf` t)
-            ]
+            [ takeWhile (/= '<') t | t <- paramTypes ++ returnTypes, isCandidate t ]
     in Set.toList (Set.difference referenced defined)
 
 -- | Check if the generated output contains the Sky.Core.Error.Error ADT.

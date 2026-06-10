@@ -46,6 +46,14 @@ pub fn dict_values<T: Clone>(d: SkyDict<T>) -> Vec<T> {
     pairs.into_iter().map(|(_, v)| v).collect()
 }
 
+/// `Dict.toList : Dict k v -> List (k, v)`. Key-sorted for determinism,
+/// matching `dict_keys` / `dict_values` (Sky Dicts iterate in sorted-key order).
+pub fn dict_to_list<T: Clone>(d: SkyDict<T>) -> Vec<(String, T)> {
+    let mut pairs: Vec<(String, T)> = d.into_iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs
+}
+
 /// `Dict.remove : k -> Dict k v -> Dict k v`.
 pub fn dict_remove<T: Clone>(k: String, d: SkyDict<T>) -> SkyDict<T> {
     let mut d = d;

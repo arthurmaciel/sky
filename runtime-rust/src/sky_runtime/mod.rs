@@ -133,6 +133,9 @@ pub use char_kernel::*;
 pub mod list;
 pub use list::*;
 
+pub mod io;
+pub use io::*;
+
 #[cfg(all(feature = "db", feature = "json"))]
 pub mod auth;
 #[cfg(all(feature = "db", feature = "json"))]
