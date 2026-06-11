@@ -23,7 +23,8 @@ mkdir -p "$CARGO_TARGET_DIR"
 #  - Go-package→Rust-native FFI examples (per user 2026-06-10, NOT a goal —
 #    they import Go packages like gorilla/mux, stripe-go, google/uuid,
 #    godotenv): 03 05 08 13
-OUT_OF_SCOPE=" 02 03 05 06 08 11 13 19 21 22 23 24 25 26 27 29 31 34 36 37 38 "
+# 19-skyforum + 26-ui-showcase now build on Rust (Std.Ui parity work) — in scope.
+OUT_OF_SCOPE=" 02 03 05 06 08 11 13 21 22 23 24 25 27 29 31 34 36 37 38 "
 
 printf "%-26s %s\n" "EXAMPLE" "RESULT"
 printf "%-26s %s\n" "-------" "------"

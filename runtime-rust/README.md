@@ -76,8 +76,17 @@ HTTP/WS/Cli regression tests):
 - PubSub (`Cmd.publish` / `Sub.subscribeTopic`) — couples to Sky.Live's broker.
 - `Process.run`, `Io` beyond Log — small, not example-verified on rust.
 
-**🟡 Deferred — large arcs:** Sky.Tui, Sky.Webview, `Std.Ui` layout engine
-(prerequisite for Tui/Webview).
+**✅ `Std.Ui` (HTML render path) — byte-identical to Go.** The typed no-CSS
+layout DSL (`layout`/`row`/`column`/`el`, `Background`/`Border`/`Font`/`Region`/
+`Input` sub-modules, nearby overlays, aspect-ratio, grid) renders byte-for-byte
+against Go's `renderVNode`, verified by the `scripts/ui-parity.sh` render-diff
+harness (corpus `tests/ui-parity/` T0–T5, 6/6). The two integration apps
+`26-ui-showcase` (every primitive) and `19-skyforum` (forms + `onSubmit`) build
+clean on `--target rust`. See "Std.Ui parity" below.
+
+**🟡 Deferred — large arcs:** Sky.Tui, Sky.Webview (the `Std.Ui` *render* path is
+done; these need the terminal/native-window backends + the layout engine for
+non-HTML targets).
 
 **⛔ Blocked by no-`any`:** `Std.Cache` (polymorphic value storage).
 
@@ -104,6 +113,46 @@ client (`live/client.js`) and wire/patch schema are reused verbatim.
 
 **Ahead:** firestore backend (same trait), Cmd/Sub depth, req query-string
 parsing, lambda-`init`, the store's pub/sub `Broker`.
+
+---
+
+## Std.Ui parity (byte-identical render)
+
+`Std.Ui` is pure Sky source that builds a `Std.Html` ADT, serialised by
+`html.rs` `render_html` — so parity is a **codegen-lowering + serializer**
+problem, not a renderer port. Verified by `scripts/ui-parity.sh`: each corpus
+fixture runs `main = Io.writeStdout (Html.toString (Ui.layout [] view))` and the
+stdout is byte-diffed Go-vs-Rust (Go is the golden).
+
+| Tier | Covers | Status |
+|---|---|---|
+| T0 text | `layout` + `text` | ✅ byte-identical |
+| T1 layout | `row`/`column`/`spacing`/`padding`/`align` | ✅ |
+| T2 styling | `Background`/`Border`/`Font` | ✅ |
+| T3 sized | `button`/`link`/`image` (static) | ✅ |
+| T4 advanced | nearby overlays / aspect-ratio / grid | ✅ |
+| T5 semantic | `Region` tag + aria mapping | ✅ |
+
+The load-bearing fixes (all Rust-target only, Go untouched):
+
+- **`any`-carrier resolution** — Std.Ui's wildcard `any` slots (and a user
+  `view : Model -> any`) resolve to the concrete `Html<msg>` / `Attribute<msg>`
+  carrier; no `dyn Any`.
+- **Whole-program DCE** — dep modules prune to the reachable-from-`main` set
+  (mirrors Go's `generateDeclsForDep`), so a one-line render emits 60 Std.Ui fns
+  not 205, and unreachable-helper bugs don't block the build.
+- **Injective fn-name mangling** — `Std.Ui.borderRounded` vs
+  `Std.Ui.Border.rounded` no longer collide under `toSnakeCase`.
+- **Serializer alignment** — `render_html` sorts attrs, renders `BoolAttr` as
+  `k="true"`, and self-closes void elements with ` />`, matching Go
+  `renderVNode`.
+- **`onSubmit` form-event peephole** — `Ui.onSubmit DoSignIn` inlines to a typed
+  `decode_form::<T>` dispatch (Go's static-render of events isn't the path).
+
+Event *dispatch* (onPress/onSubmit) and the style-injection features
+(pseudo-class / media-query / transition / animation) render through Sky.Live's
+VNode path, covered by the integration apps `26-ui-showcase` + `19-skyforum`
+rather than the static corpus.
 
 ---
 
@@ -218,20 +267,21 @@ cargo-build-verified.
 Conquest of the main example set (tracked in
 `docs/rust-example-conquest-registry.md`). Build-level via `scripts/rust-sweep.sh`.
 
-**18 in-scope build:** `00, 01, 04, 07, 09, 10, 12, 14, 15, 17, 18, 20, 28, 30,
-32, 33, simple, test_pkg` — up from a 6-example baseline. Driven by general,
-regression-gated codegen wins: TEA-Msg monomorphisation, multi-module serde,
-body-driven param inference (`ecSiblingFns` sibling-call + db-getter row + list
-HOF element types), `Arc<dyn Fn>` stored callbacks, cross-module ADT-name
-resolution, empty-collection turbofish from struct-field/expected types, and
-partial-application capture-clone.
-
-**2 in-scope still fail** (both pure-stdlib, no FFI): `16-skychess` (malformed
-closure emission + mass E0308), `35-composite-generics` (JSON-pipeline-decode
-curry rearchitecture + `SkyDict` `Int`-key parameterisation — both architectural).
+**22 in-scope build:** `00, 01, 04, 07, 09, 10, 12, 14, 15, 16, 17, 18, 19, 20,
+26, 28, 30, 32, 33, 35, simple, test_pkg` — up from a 6-example baseline.
+`19-skyforum` and `26-ui-showcase` joined via the Std.Ui parity work. Driven by
+general, regression-gated codegen wins: TEA-Msg monomorphisation, multi-module
+serde, body-driven param inference, `Arc<dyn Fn>` stored callbacks, cross-module
+ADT-name resolution, whole-program DCE (matching Go's dep-decl prune), injective
+fn-name mangling, the Std.Ui `any`-carrier resolution, `solveArgType` list/call
+type resolution, `indexedMap` index-param typing, and the `onSubmit` form-event
+peephole.
 
 **Out of scope (per user):** Go-package→Rust-native FFI examples `03, 05, 08, 13`
-(import gorilla/mux, stripe-go, google/uuid, godotenv) are not a goal.
+(import gorilla/mux, stripe-go, google/uuid, godotenv) are not a goal. The
+composite multi-app examples `37, 38` surface non-Std.Ui feature gaps (Live
+pub/sub kernels — `Cmd.publish`/`Sub.subscribeTopic` — not yet emitted, plus
+anon-struct field-method access) and remain out of scope pending that work.
 
 ---
 
