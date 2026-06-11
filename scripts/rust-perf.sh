@@ -122,9 +122,15 @@ probe_rss_server() { # $1=binary -> peak RSS KB under load
 }
 
 probe_live_sse() { # $1=binary -> "p95_ms eps"
+  # DEFERRED (Bug 2): sse-bench connects to /_sky/sse WITHOUT a sky_sid cookie,
+  # so the Go server replies 400 "no session" and sse-bench's frame reader loops
+  # forever waiting for "\n\n". Hard-bound the call with `timeout` so a wedged
+  # driver can never hang the harness; the live shape currently relies on the
+  # non-SSE metrics (coldstart/throughput/rss/binsize), so this probe is not on
+  # the default path until the session-cookie handshake lands.
   local pp; pp=$(start_server "$1") || { echo "0 0"; return; }
   local pid=${pp% *} port=${pp#* } out
-  out=$("$SSE_BIN" --url "http://127.0.0.1:$port" --events "$SSE_EVENTS" --concurrency "$SSE_CONC" 2>/dev/null)
+  out=$(timeout "${SSE_TIMEOUT_S:-15}" "$SSE_BIN" --url "http://127.0.0.1:$port" --events "$SSE_EVENTS" --concurrency "$SSE_CONC" 2>/dev/null)
   kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   echo "$(echo "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["patch_p95"],d["events_per_sec"])' 2>/dev/null || echo "0 0")"
 }
@@ -136,8 +142,12 @@ collect_metrics() { # $1=binary $2=shape -> "metric value" lines
     cli) echo "coldstart $(probe_coldstart_cli "$b")"; echo "rss $(probe_rss_cli "$b")" ;;
     server) echo "coldstart $(probe_coldstart_server "$b")"; echo "throughput $(probe_throughput "$b")"; echo "rss $(probe_rss_server "$b")" ;;
     live)
-      echo "coldstart $(probe_coldstart_server "$b")"; echo "throughput $(probe_throughput "$b")"; echo "rss $(probe_rss_server "$b")"
-      read -r p95 eps < <(probe_live_sse "$b"); echo "patch_p95 $p95"; echo "event_throughput $eps" ;;
+      # Live shape gates on the same four metrics as server (the Rust Live entry
+      # now block_on's its live_app future — it binds a port and serves). The
+      # SSE-specific patch_p95 / event_throughput pair is DEFERRED (Bug 2:
+      # sse-bench needs a session-cookie handshake); re-add the probe_live_sse
+      # line below once that lands.
+      echo "coldstart $(probe_coldstart_server "$b")"; echo "throughput $(probe_throughput "$b")"; echo "rss $(probe_rss_server "$b")" ;;
   esac
 }
 
