@@ -72,12 +72,29 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
     -- are NOT boxed. Construction wraps the arg in Box::new and matches deref it
     -- (ecBoxedCtorFields, consumed by the expr + pattern emitters).
     selfRustName = toCamelCase (modPrefix ++ "_" ++ typeName)
+    firstUVar = case uvars of (v:_) -> v; [] -> "M"
+    -- An `any`-typed ADT variant field is Sky's source-level type-erasure escape
+    -- hatch, but in these Std.Ui carriers the value is ALWAYS a concrete type
+    -- (every construction wraps it). The Rust backend forbids type erasure
+    -- (no `dyn Any` in generated code), so render the field as that concrete
+    -- type — `AttrEvent any` always carries `Std.Html.Attributes.Attribute msg`,
+    -- `Raw any` always an `Std.Html.Html msg`. (`Event.OnRaw`'s `any` is in the
+    -- runtime's opaque Event enum — the one sanctioned Arc<dyn Any> seam — and
+    -- is not codegen-emitted, so it's not here.) Rust-only; the shared .sky keeps
+    -- `any` (load-bearing for onSubmit's permissive `a -> Attribute b`).
+    anyCarrierField ctorName = case (skyModName, typeName, ctorName) of
+        ("Std.Ui", "Attribute", "AttrEvent") -> Just ("StdHtmlAttributesAttribute<" ++ firstUVar ++ ">")
+        ("Std.Ui", "Element",   "Raw")       -> Just ("StdHtmlHtml<" ++ firstUVar ++ ">")
+        _                                    -> Nothing
     boxIfRecursive t =
         let r = typeToRustString recordMap t
         in if r == selfRustName then "Box<" ++ r ++ ">" else r
+    renderField ctorName t = case t of
+        Can.TVar "any" | Just concrete <- anyCarrierField ctorName -> concrete
+        _                                                          -> boxIfRecursive t
     ctorToRust (Can.Ctor name _idx _arity argTypes) =
         (name, if null argTypes then Nothing
-               else Just (intercalate ", " (map boxIfRecursive argTypes)))
+               else Just (intercalate ", " (map (renderField name) argTypes)))
 
 -- | Substitute all occurrences of `needle` with `replacement` in `haystack`.
 -- Used to expand {M} placeholders in runtimeOpaqueTypes registry values.
