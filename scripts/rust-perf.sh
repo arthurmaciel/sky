@@ -15,7 +15,18 @@ REPO_ROOT="${_script_dir%/scripts}"
 cd "$REPO_ROOT"
 SKY="${SKY_BIN:-$REPO_ROOT/sky-out/sky}"
 THRESH="$REPO_ROOT/scripts/rust-perf.thresholds"
-AB_N=10000; AB_C=50; SSE_EVENTS=2000; SSE_CONC=16; COLD_RUNS=20
+# Load knobs are env-overridable so a fast CI / smoke run can dial them down
+# (the gate ratios are CV-padded, so a lighter AB_N only widens throughput's
+# noise band, not its verdict). AB_TIMEOUT_S hard-bounds every `ab` invocation:
+# a slow backend under -c concurrency (the Sky.Live Go server tops out ~300
+# req/s vs Rust's ~6000) can otherwise wedge `ab` indefinitely — an unbounded
+# load probe is exactly the hang the CLAUDE.md timeout rule forbids.
+AB_N="${AB_N:-10000}"; AB_C="${AB_C:-50}"; AB_TIMEOUT_S="${AB_TIMEOUT_S:-60}"
+SSE_EVENTS="${SSE_EVENTS:-2000}"; SSE_CONC="${SSE_CONC:-16}"; COLD_RUNS="${COLD_RUNS:-20}"
+# `ab` flags: -r (don't exit on a socket receive error — a slow server resets
+# some keep-alive conns under load) keeps the run going to a real throughput
+# number instead of aborting at request 1.
+AB_FLAGS="-r"
 SSE_BIN="$REPO_ROOT/tools/sse-bench/target/release/sse-bench"
 
 pyf() { python3 -c "import sys; print($1)"; }   # float expr → stdout
@@ -107,7 +118,7 @@ start_server() { # $1=binary -> echoes "pid port"
 probe_throughput() { # $1=binary -> req/s
   local pp; pp=$(start_server "$1") || { echo 0; return; }
   local pid=${pp% *} port=${pp#* } rps
-  rps=$(ab -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$port/" 2>/dev/null | awk '/Requests per second/{print $4}')
+  rps=$(timeout "$AB_TIMEOUT_S" ab $AB_FLAGS -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$port/" 2>/dev/null | awk '/Requests per second/{print $4}')
   kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
 }
 
@@ -116,7 +127,7 @@ probe_rss_cli() { /usr/bin/time -v "$1" 2>/tmp/perf-time.txt >/dev/null; awk '/M
 probe_rss_server() { # $1=binary -> peak RSS KB under load
   local pp; pp=$(start_server "$1") || { echo 0; return; }
   local pid=${pp% *} port=${pp#* } hwm
-  ab -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$port/" >/dev/null 2>&1
+  timeout "$AB_TIMEOUT_S" ab $AB_FLAGS -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$port/" >/dev/null 2>&1
   hwm=$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null)
   kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${hwm:-0}"
 }
@@ -221,19 +232,42 @@ baseline() {
       while read -r k v; do GO[$k]=$v; done   < <(collect_metrics "$gobin" "$shape")
       while read -r k v; do RUST[$k]=$v; done < <(collect_metrics "$rustbin" "$shape")
       for m in "${!GO[@]}"; do
-        ratios[$m]="${ratios[$m]:-} $(pyf "0 if ${GO[$m]}==0 else ${RUST[$m]:-0}/${GO[$m]}")"
+        local g="${GO[$m]}" r="${RUST[$m]:-0}"
+        # Drop failed-probe samples: a 0 means the probe returned nothing (ab
+        # produced no "Requests per second" line under contention, or a server
+        # never answered). Recording it as ratio 0 would poison the envelope
+        # with a non-measurement — e.g. one failed Go ab dragged
+        # server.throughput_ratio_min to 0.0 (a non-gate). Keep only paired
+        # real measurements.
+        pytrue "$g>0 and $r>0" || continue
+        ratios[$m]="${ratios[$m]:-} $(pyf "$r/$g")"
       done
     done
     for m in "${!ratios[@]}"; do
+      # A metric whose every sample was dropped (all probes failed) has no
+      # envelope to commit — skip it rather than feed an empty set to mean().
+      [ -n "${ratios[$m]// }" ] || { echo "# ${shape}.${m}: no valid samples — skipped" >> "$THRESH"; continue; }
+      # CV is clamped to 0.45 so the 2*CV padding factor stays in [0.1, 1.9]:
+      # an unclamped high-variance metric (the Go Sky.Live server's throughput
+      # is noisy under load) drove `mean*(1-2*cv)` NEGATIVE — a meaningless
+      # `throughput_ratio_min` that no measurement could fail. The clamp keeps
+      # every padded threshold positive and proportional; stable low-CV metrics
+      # (rss/coldstart/binsize) are unaffected.
       read -r mean cv < <(echo "${ratios[$m]}" | python3 -c '
 import sys,statistics as st
 xs=[float(x) for x in sys.stdin.read().split()]
 m=st.mean(xs); sd=st.pstdev(xs) if len(xs)>1 else 0.0
-print(m, (sd/m if m else 0.0))')
+print(m, min(sd/m if m else 0.0, 0.45))')
+      # Directional rounding to 2 decimals: a `_ratio_max` rounds UP, a
+      # `_ratio_min` rounds DOWN, so the committed threshold always CONTAINS the
+      # measurement it was derived from. Nearest-rounding broke this for small
+      # ratios — binsize's measured 0.0144 rounded to 0.01, BELOW itself, so the
+      # baseline failed its own gate. `//` is float floor-division; ceil(x) is
+      # -(-x//1).
       if is_higher_better "$m"; then
-        echo "${shape}.${m}_ratio_min = $(pyf "round($mean*(1-2*$cv),2)")" >> "$THRESH"
+        echo "${shape}.${m}_ratio_min = $(pyf "($mean*(1-2*$cv)*100//1)/100")" >> "$THRESH"
       else
-        echo "${shape}.${m}_ratio_max = $(pyf "round($mean*(1+2*$cv),2)")" >> "$THRESH"
+        echo "${shape}.${m}_ratio_max = $(pyf "(-(-$mean*(1+2*$cv)*100//1))/100")" >> "$THRESH"
       fi
     done
   done

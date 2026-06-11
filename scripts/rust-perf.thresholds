@@ -1,0 +1,12 @@
+# generated 2026-06-11T20:42:30Z — rust/go ratio envelopes, CV-padded
+cli.rss_ratio_max = 0.15
+cli.coldstart_ratio_max = 0.2
+cli.binsize_ratio_max = 0.02
+server.rss_ratio_max = 0.17
+server.coldstart_ratio_max = 1.1
+server.binsize_ratio_max = 0.02
+server.throughput_ratio_min = 0.88
+live.rss_ratio_max = 0.19
+live.coldstart_ratio_max = 1.34
+live.binsize_ratio_max = 0.02
+live.throughput_ratio_min = 0.88
