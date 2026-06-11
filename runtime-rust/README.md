@@ -362,6 +362,46 @@ sky install                                  # regen FFI after rm -rf .skycache
 
 ---
 
+## Fast dev iteration (MANDATORY for this branch)
+
+Minutes-long compiler rebuilds + example sweeps kill the dev cycle. These are
+required for all dev-loop work on `feat/runtime-rust` (release/CI still use the
+default `-O1` + a real `cabal install`):
+
+**Haskell compiler side**
+- **`cabal.project.local` with `optimization: 0` + `profiling: False`** (gitignored,
+  local-only). `-O0` cut a full 89-module rebuild from minutes to **~180s**, and a
+  one-module incremental link to **~32s**. Never commit this file — it would slow
+  the shipped binary.
+- **Don't wipe `dist-newstyle/`** between iterations — incremental compilation is
+  the whole point.
+- **Skip `cabal install`**: symlink the binary once —
+  `ln -sf "$(cabal list-bin exe:sky)" sky-out/sky` — so `cabal build` updates the
+  target in place and `sky-out/sky` always points at the freshly built binary. No
+  per-iteration copy.
+
+**Rust / example side**
+- **Shared `CARGO_TARGET_DIR` + sccache** (see the
+  `[[rust-shared-cargo-target-sccache]]` memory): every example is package
+  `sky-app`, so a shared target outside each `sky-out/` compiles the heavy deps
+  (axum/tokio/serde/sqlx) once; sccache caches each `rustc` call by content hash.
+  ```sh
+  export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target"
+  export RUSTC_WRAPPER=sccache
+  ```
+- **Generated `Cargo.toml` `[profile.dev]`** drops debuginfo (`debug = 0`) and keeps
+  `incremental = true` — the heaviest part of per-example dev linking. Emitted
+  automatically by `emitCargoToml`.
+- **Sweep with one build per example**:
+  `SKY_BIN=$(cabal list-bin exe:sky) ./scripts/rust-sweep.sh` (the script also
+  exports the shared target + sccache). A full ~40-example sweep dropped from
+  ~1000s+ to **~570s**, and faster on warm sccache.
+
+Re-export `CARGO_TARGET_DIR`/`RUSTC_WRAPPER` in every shell that builds — shell
+state does not persist between tool calls.
+
+---
+
 ## Disk hygiene
 
 Cargo `target/` dirs accumulate fast — a full example sweep can exceed 20 GB.

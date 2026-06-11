@@ -132,3 +132,5 @@ opencode.json
 
 # stray rust-analyzer / cargo artifacts at repo root
 /target/
+
+cabal.project.local
