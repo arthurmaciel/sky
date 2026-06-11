@@ -65,9 +65,19 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
         -- No registry entry: emit the regular enum/ADT (one constructor per alt).
         Nothing       -> REnumDef codegenName gens (map ctorToRust alts)
   where
+    -- A constructor field whose type IS the enum being defined (direct
+    -- self-recursion, e.g. `Length = … | Minimum Int Length`) makes the Rust
+    -- enum infinite-sized (E0072). Box that back-edge. `Vec<Self>` / `SkyMaybe<Self>`
+    -- fields render to a different head and are already heap/finite, so they
+    -- are NOT boxed. Construction wraps the arg in Box::new and matches deref it
+    -- (ecBoxedCtorFields, consumed by the expr + pattern emitters).
+    selfRustName = toCamelCase (modPrefix ++ "_" ++ typeName)
+    boxIfRecursive t =
+        let r = typeToRustString recordMap t
+        in if r == selfRustName then "Box<" ++ r ++ ">" else r
     ctorToRust (Can.Ctor name _idx _arity argTypes) =
         (name, if null argTypes then Nothing
-               else Just (intercalate ", " (map (typeToRustString recordMap) argTypes)))
+               else Just (intercalate ", " (map boxIfRecursive argTypes)))
 
 -- | Substitute all occurrences of `needle` with `replacement` in `haystack`.
 -- Used to expand {M} placeholders in runtimeOpaqueTypes registry values.

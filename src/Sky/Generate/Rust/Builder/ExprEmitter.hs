@@ -1628,7 +1628,21 @@ emitDefaultCall ctx fn calleeName args =
         -- -> default filler, unknown callee -> bare. Non-empty args keep the
         -- normal clone-aware emit.
         paramStrs = calleeParamStrings ctx fn (length args)
+        -- Constructor arg positions whose field type IS the enum being
+        -- constructed (direct self-recursion → boxed in the enum def, see
+        -- TypeEmitter.boxIfRecursive). Those args must be wrapped in Box::new.
+        -- Same predicate as the type side: the field renders to the enum's own
+        -- Rust name (the `kernelCtorToRust`-produced `Type::Variant` head).
+        ctorBoxedPositions = case fn of
+            Ann.At _ (Can.VarCtor _ _ _ cn _)
+                | Just fieldTys <- Map.lookup cn (ecCtorFieldTypes ctx) ->
+                    let typeRust = takeWhile (/= ':') calleeName
+                    in [ i | (i, t) <- zip [0 :: Int ..] fieldTys
+                           , typeToRustString (ecRecordMap ctx) t == typeRust ]
+            _ -> []
         emitArg i a
+            | i `elem` ctorBoxedPositions
+                              = "Box::new(" ++ argToRustString ctx noCloneFn a ++ ")"
             -- foldl/foldr INIT (arg 1) is the accumulator `b`, whose type is the
             -- fold FUNCTION's 2nd parameter type (`f : a -> b -> b`). An empty
             -- `Dict.empty` / `[]` accumulator can't infer `b` from the generic
@@ -1925,7 +1939,24 @@ branchToRustString ctx (Can.CaseBranch pat body) =
                 in hc ++ tv
             Ann.At _ (Can.PList items) ->
                 concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") (concatMap patBindingVars items)
+            -- A constructor field that is self-recursive is boxed in the enum
+            -- (TypeEmitter.boxIfRecursive); the match binds it as Box<Self>, so a
+            -- deref `let inner = *inner;` moves the owned value out for the body
+            -- (which uses it as Self, e.g. `std_ui_is_fill_length(inner)`).
+            Ann.At _ (Can.PCtor{Can._p_name = _ctor, Can._p_args = ctorArgs})
+                | let pTypeRust = takeWhile (/= ':') patStr
+                , let fieldTys = ctorPatFieldTypes
+                , boxedVars <- [ v | (i, Can.PatternCtorArg _ _ argPat) <- zip [0 :: Int ..] ctorArgs
+                                   , i < length fieldTys
+                                   , typeToRustString (ecRecordMap ctx) (fieldTys !! i) == pTypeRust
+                                   , not (null pTypeRust)
+                                   , v <- patBindingVars argPat ]
+                , not (null boxedVars) ->
+                    concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = *" ++ v' ++ "; ") boxedVars
             _ -> ""
+        ctorPatFieldTypes = case pat of
+            Ann.At _ (Can.PCtor{Can._p_name = c}) -> Map.findWithDefault [] c (ecCtorFieldTypes ctx)
+            _ -> []
     in if null prefix && not ("let " `isPrefixOf` bodyExpr) && not ("if " `isPrefixOf` bodyExpr)
        then patStr ++ " => " ++ bodyExpr
        else patStr ++ " => { " ++ prefix ++ bodyExpr ++ " }"
