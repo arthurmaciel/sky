@@ -1216,7 +1216,7 @@ exprToRustInner ctx e = case e of
                 -- update VALUE (`{ model | gameStatus = result }`) would be
                 -- shadowed by the temp and read back the half-built record
                 -- (16-skychess `result.gameStatus = result.clone()`).
-                in "__rec." ++ f ++ " = " ++ wrapStoredFn ctxF expr (exprToRustString ctxF expr)
+                in "__rec." ++ f ++ " = " ++ wrapStoredFn True ctxF expr (exprToRustString ctxF expr)
         in "{ let mut __rec = " ++ exprToRustString ctx record ++ "; " ++
         intercalate "; " (map emitUpd sorted) ++
         "; __rec }"
@@ -1224,10 +1224,15 @@ exprToRustInner ctx e = case e of
         let key = intercalate "," (Map.keys fields)
         in case Map.lookup key (ecRecordMap ctx) of
             Just structName ->
-                structName ++ " { " ++ intercalate ", " (map (\(k, v) ->
-                    k ++ ": " ++ wrapStoredFn ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
+                -- An Anon struct gives each field a generic type param the
+                -- consumer pins (often a plain `fn(..)` pointer), so a non-lambda
+                -- fn ref must NOT be Arc-wrapped; a named-alias struct's callback
+                -- fields are `Arc<dyn Fn>`, so it must.
+                let wrapNL = not ("Anon" `isPrefixOf` structName)
+                in structName ++ " { " ++ intercalate ", " (map (\(k, v) ->
+                    k ++ ": " ++ wrapStoredFn wrapNL ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
             Nothing ->
-                "{ " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ wrapStoredFn ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
+                "{ " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ wrapStoredFn False ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
     Can.Unit -> "()"
     Can.Tuple a b rest -> 
         "(" ++ intercalate ", " (map (exprToRustString ctx) (a:b:rest)) ++ ")"
@@ -1439,16 +1444,25 @@ kernelArgRustType _             _ = Nothing
 -- object. Non-function values pass through unchanged, so non-callback fields
 -- (and every building example, none of which store functions in records) are
 -- byte-identical.
-wrapStoredFn :: EmitCtx -> Can.Expr -> String -> String
-wrapStoredFn ctx (Ann.At region e) rendered
+-- The Bool is `wrapNonLambda`: a record UPDATE always targets the original
+-- struct's field type, which for a callback field is `Arc<dyn Fn>` — so even a
+-- non-lambda fn ref (`withOnConnect onConnect`, a named top-level fn) must be
+-- Arc-wrapped (33-websocket-echo). A record LITERAL of an ANON struct, by
+-- contrast, has generic per-field type params that the consumer pins — when
+-- that pin is a plain `fn(..)` pointer (Std.Ui.Input's onChange), Arc-wrapping a
+-- fn-pointer param mismatches (26-ui-showcase). A capturing LAMBDA always needs
+-- the Arc<dyn Fn> box regardless of position, so it is wrapped either way.
+wrapStoredFn :: Bool -> EmitCtx -> Can.Expr -> String -> String
+wrapStoredFn wrapNonLambda ctx (Ann.At region e) rendered
     | isFn      = "std::sync::Arc::new(" ++ rendered ++ ")"
     | otherwise = rendered
   where
     isFn = case e of
         Can.Lambda _ _ -> True
-        _ -> case Map.lookup region (ecRegionTypes ctx) of
+        _ | wrapNonLambda -> case Map.lookup region (ecRegionTypes ctx) of
                  Just (Can.TLambda _ _) -> True
                  _                      -> False
+        _ -> False
 
 -- | The Rust element type of a list expression, from its solved region type
 -- (`List a` -> typeToRustString a). Used to type a list-HOF closure's param
@@ -1809,7 +1823,24 @@ solveArgType solvedMap arg = case arg of
             "&&" -> "bool"; "||" -> "bool"
             "==" -> "bool"; "/=" -> "bool"
             _ -> solveArgType solvedMap a
+    -- A call's type is the callee's return type. Resolve it from the env
+    -- (`_stEnv` carries top-level fn types by name), peeling exactly as many
+    -- arrows as args supplied. Lets `++` see that a Vec-returning helper call
+    -- (`implicitFillIfHoisted layoutAttrs : List (Attribute msg)`) is a list,
+    -- not the "String" default → Vec-append instead of format!.
+    Ann.At _ (Can.Call (Ann.At _ callee) callArgs) ->
+        case calleeNm callee >>= \n -> Map.lookup n solvedMap of
+            Just ty -> typeToRustString Map.empty (peelArrows (length callArgs) ty)
+            Nothing -> "String"
     _ -> "String"
+  where
+    calleeNm (Can.VarTopLevel _ n) = Just n
+    calleeNm (Can.VarLocal n)      = Just n
+    calleeNm _                     = Nothing
+    peelArrows :: Int -> Can.Type -> Can.Type
+    peelArrows 0 t                      = t
+    peelArrows k (Can.TLambda _ r)      = peelArrows (k - 1) r
+    peelArrows _ t                      = t
 
 -- | Collect every let-bound closure DEFINITION (a Def with >=1 param) anywhere
 -- in a function body, as `name -> (params, body)`. Feeds ecClosureDefs so

@@ -466,9 +466,22 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- `msg` flows into the generic list automatically (collectRenderedTVars
         -- recurses into the carrier's args). Mirrors the ctor-field carrier
         -- table in TypeEmitter.hs (anyCarrierField).
+        -- Fallback for a user-written `-> any` (e.g. `view : Model -> any` in a
+        -- Sky.Live app): when the body's tail is a Call to an Html-returning
+        -- Std.Ui entry (layout / render* — i.e. stdUiAnyCarrier resolves the
+        -- CALLEE to Html) and the app's Msg type is known, the function returns
+        -- `Html appMsg`. Closes the E0308 where `view<any>` returns Html<Msg>.
+        bodyAnyCarrier = case tailExpr body of
+            Ann.At _ (Can.Call (Ann.At _ (Can.VarTopLevel m n)) _)
+                | Just (Can.TType _ "Html" _) <- stdUiAnyCarrier (moduleNameToRust m) n
+                , Just msgTy <- ecAppMsg ctx
+                -> Just (Can.TType (ModuleName.Canonical "Std.Html") "Html" [msgTy])
+            _ -> Nothing
         applyAny ty = case stdUiAnyCarrier _modPrefix name of
                           Just c  -> substTVarAny c ty
-                          Nothing -> ty
+                          Nothing -> case bodyAnyCarrier of
+                                         Just c  -> substTVarAny c ty
+                                         Nothing -> ty
         pats  = map (\(p, t) -> (p, applyAny t)) pats0
         retTy = applyAny retTy0
         argTriples = zipWith
