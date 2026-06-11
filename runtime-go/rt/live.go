@@ -3728,7 +3728,7 @@ func (app *liveApp) handleInitial(w http.ResponseWriter, r *http.Request) {
 	}
 	app.setupSubscriptions(sess)
 
-	vn := HtmlToVNode(sky_call(app.view, model))
+	vn, _ := app.safeViewCall(model)
 	assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 	applyStyleInjections(&vn)
 	body := renderVNode(vn, sess.handlers)
@@ -3953,7 +3953,7 @@ func (app *liveApp) handleEvent(w http.ResponseWriter, r *http.Request) {
 	// Handler IDs are <sky-id>.<event>, stable per model state.
 	if len(sess.handlers) == 0 && sess.model != nil {
 		sess.handlers = map[string]any{}
-		vn := HtmlToVNode(sky_call(app.view, sess.model))
+		vn, _ := app.safeViewCall(sess.model)
 		assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 		applyStyleInjections(&vn)
 		body := renderVNode(vn, sess.handlers)
@@ -4144,7 +4144,7 @@ func (app *liveApp) dispatchBatched(sess *liveSession, ev batchedEvent) {
 	sess.mu.Lock()
 	if len(sess.handlers) == 0 && sess.model != nil {
 		sess.handlers = map[string]any{}
-		vn := HtmlToVNode(sky_call(app.view, sess.model))
+		vn, _ := app.safeViewCall(sess.model)
 		assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 		applyStyleInjections(&vn)
 		body := renderVNode(vn, sess.handlers)
@@ -4383,7 +4383,7 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 	cmd := tupleSecond(result)
 	finalCmd = cmd
 	sess.handlers = map[string]any{}
-	vn := HtmlToVNode(sky_call(app.view, sess.model))
+	vn, _ := app.safeViewCall(sess.model)
 	assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 	applyStyleInjections(&vn)
 	body = renderVNode(vn, sess.handlers)
@@ -4442,12 +4442,132 @@ func (app *liveApp) dispatch(sess *liveSession, msg any) (body string) {
 // break the audit explicitly flagged.
 func (app *liveApp) renderView(sess *liveSession) string {
 	sess.handlers = map[string]any{}
-	vn := HtmlToVNode(sky_call(app.view, sess.model))
+	vn, _ := app.safeViewCall(sess.model)
 	assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 	applyStyleInjections(&vn)
 	body := renderVNode(vn, sess.handlers)
 	sess.commitRender(&vn, body)
 	return body
+}
+
+// safeViewCall wraps the user's `view` function with a defer/recover
+// so a single panic (e.g. rt.Coerce mismatch on a record-update
+// result, missing field on a polymorphic any, divide-by-zero in a
+// view-time computation) doesn't drop the whole Sky.Live session.
+//
+// Hardens the navigation/view path: panics in user code are caught,
+// logged structurally, and the session continues with a degraded
+// "render error" notice. The user's next dispatch (re-click, browser
+// reload) runs view again from a clean state.
+//
+// Before this defer/recover, a single bad Coerce in a typed-record
+// codegen site (e.g. RecordUpdate-then-Coerce[T]) would crash the
+// dispatch goroutine — Sky.Live's session was effectively destroyed
+// until full page reload AND the user had no diagnostic. With this
+// wrapper the panic becomes a structured log + a visible-but-
+// recoverable error notice on the page.
+//
+// Returns the rendered VNode and `panicked=true` when the wrapper
+// caught a panic. Callers don't need to special-case the panicked
+// path — the fallback VNode renders cleanly through the same
+// assignSkyIDs / applyStyleInjections / renderVNode pipeline.
+//
+// See memory/sky_navigation_panic_class.md for the structural
+// root cause (Sky's reflect-based Coerce sites grow per-render +
+// any one panicking takes down the whole session).
+func (app *liveApp) safeViewCall(model any) (VNode, bool) {
+	var vn VNode
+	var panicked bool
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				reason := fmt.Sprintf("%v", r)
+				stack := string(debug.Stack())
+				// Structured log for ops dashboards (Sky Console, OTel).
+				// Stack is included so the panic site is grep-able from
+				// the journalctl / Cloud Logging stream. logEmit fires
+				// immediately (no Task wrap) since we're already inside
+				// the deferred recover.
+				logEmit(logLevelError, "error", "sky.live.view.panic",
+					[]any{
+						"reason", reason,
+						"stack_head", firstLines(stack, 8),
+					},
+				)
+				vn = renderViewPanicFallback(reason)
+			}
+		}()
+		vn = HtmlToVNode(sky_call(app.view, model))
+	}()
+	return vn, panicked
+}
+
+// renderViewPanicFallback produces a self-contained VNode that
+// renders a small "Render error" banner inline with the page chrome.
+// The fallback CANNOT call any user code — it only emits literal
+// VNode values built from Go strings. The recovery is local to ONE
+// dispatch; the next dispatch re-runs view normally.
+//
+// Visible to the user as a dark-mode-aware error notice with the
+// panic reason embedded (truncated to 200 chars to keep the UI
+// readable when the reason is a long stack frame).
+func renderViewPanicFallback(reason string) VNode {
+	short := reason
+	if len(short) > 200 {
+		short = short[:200] + "…"
+	}
+	style := "background:#3a1f24;color:#ffb3b3;" +
+		"border:1px solid #6b3438;border-radius:6px;" +
+		"padding:14px 18px;margin:16px;" +
+		"font:13px/1.5 ui-monospace,Menlo,monospace;"
+	return VNode{
+		Kind: "element",
+		Tag:  "div",
+		Attrs: map[string]string{
+			"style": style,
+			"role":  "alert",
+		},
+		Children: []VNode{
+			{
+				Kind: "element",
+				Tag:  "strong",
+				Attrs: map[string]string{
+					"style": "color:#ff7a7a;",
+				},
+				Children: []VNode{vtext("Render error")},
+			},
+			vtext("  "),
+			vtext(short),
+			{
+				Kind: "element",
+				Tag:  "div",
+				Attrs: map[string]string{
+					"style": "margin-top:8px;color:#a0a0aa;font-size:11px;",
+				},
+				Children: []VNode{
+					vtext("This dispatch's view panicked — the session " +
+						"survived. Refresh the page or trigger a new " +
+						"action to retry."),
+				},
+			},
+		},
+	}
+}
+
+// firstLines returns the first N lines of s — used to keep log
+// stack-head fields compact in the structured log.
+func firstLines(s string, n int) string {
+	count := 0
+	for i, c := range s {
+		if c == '\n' {
+			count++
+			if count >= n {
+				return s[:i]
+			}
+		}
+	}
+	return s
 }
 
 // isErrResult: True when v is a SkyResult with Tag == 1 (Err).
@@ -5395,8 +5515,12 @@ func (app *liveApp) handleSSE(w http.ResponseWriter, r *http.Request) {
 		var snap frameSnapshot
 		var haveSnap bool
 		func() {
-			defer func() { _ = recover() }()
-			vn := HtmlToVNode(sky_call(app.view, sess.model))
+			// v0.16.21: defer/recover absorbed into safeViewCall.
+			// Previously this was a bare `defer func() { _ = recover() }()`
+			// that silently swallowed panics with no log — admins couldn't
+			// see why frames started looking wrong. safeViewCall emits
+			// structured logs + renders a recoverable error notice.
+			vn, _ := app.safeViewCall(sess.model)
 			assignSkyIDs(&vn, app.skyIDPrefixOrDefault())
 			applyStyleInjections(&vn)
 			sess.handlers = map[string]any{}
@@ -6159,6 +6283,52 @@ function __skyReplaceHTMLPreservingFocus(container, newHTML) {
     if (isFocused) preservedFocus = live;
   }
 
+  // Splice IFRAMES across the swap (#568 second loop).  Without
+  // this, an HTML-replace patch that touches the iframe's parent
+  // subtree (sibling sky-id reorder, structural reorganisation)
+  // destroys the live iframe via removeChild and creates a fresh
+  // one from the placeholder markup.  The fresh iframe's src
+  // triggers a navigation regardless of whether the value matches
+  // the live one — every reload re-fires the embedded console's
+  // handshake form, opens a new SSE, and pegs the tenant Cloud
+  // Run instance.
+  //
+  // Same splice pattern as inputs.  The iframe's src is treated
+  // as USER STATE AUTHORITY (the live document, internal SSE,
+  // navigation history, scroll position are owned by the iframe).
+  // Placeholder contributes non-authority attrs only — class,
+  // style, sandbox, referrerpolicy — via the existing helper
+  // (whose authority filter covers value/checked/selected; src
+  // isn't in that list, so we strip it from the placeholder
+  // before mirroring to avoid the same setAttribute-triggered
+  // navigation the patch path's guard prevents).
+  var liveFrames = container.querySelectorAll("iframe");
+  for (var fi = 0; fi < liveFrames.length; fi++) {
+    var liveFr = liveFrames[fi];
+    var phFr = __skyFindPlaceholder(tmp, liveFr);
+    if (!phFr) continue;
+    // SRC-EQUALITY GATE.  sky-id is purely structural (tag +
+    // position + form-name) and does NOT encode src.  So two
+    // renders that emit <iframe src=A> then <iframe src=B> at
+    // the same structural position share a sky-id, and naive
+    // splicing would freeze the iframe at src=A forever — every
+    // legitimate URL change would silently no-op.  Only splice
+    // (preserve the live iframe) when the SERVER's intended src
+    // matches the live src.  When they differ, fall through to
+    // the default innerHTML path so the live iframe gets
+    // destroyed and a fresh one navigates to the new URL.
+    var liveSrc = liveFr.getAttribute("src") || "";
+    var phSrc = phFr.getAttribute("src") || "";
+    if (liveSrc !== phSrc) continue;
+    // Strip src from placeholder so __skyCopyAttrsExceptAuthority
+    // doesn't write it onto the live iframe (which would navigate
+    // it even when the strings already match — assigning src
+    // unconditionally re-fetches in some browsers).
+    if (phFr.hasAttribute("src")) phFr.removeAttribute("src");
+    __skyCopyAttrsExceptAuthority(phFr, liveFr);
+    phFr.parentNode.replaceChild(liveFr, phFr);
+  }
+
   // Commit: throw away container's current children (those we didn't
   // splice are stale; spliced ones already moved into tmp), then
   // attach tmp's children. Done.
@@ -6742,7 +6912,20 @@ function __skyApplyPatches(patches) {
         }
         if (v === "") { el.removeAttribute(k); }
         else {
-          el.setAttribute(k, v);
+          // Idempotent setAttribute (#568): some elements re-fetch or
+          // re-navigate on ANY assignment to certain attributes, even
+          // when the new value is identical to the existing one. The
+          // poster child is the iframe src attribute — calling
+          // setAttribute with the same value causes the browser to
+          // re-navigate the iframe, dropping any SSE / cookie /
+          // scroll state inside. Same class: img src refetches,
+          // link href rebuilds the stylesheet, script src re-executes
+          // (browsers vary). Skipping the no-op write costs one
+          // getAttribute compare per attr and rules out a whole bug
+          // class. Mirrors the guard in __skyCopyAttrsExceptAuthority.
+          if (el.getAttribute(k) !== v) {
+            el.setAttribute(k, v);
+          }
           // Sync DOM properties that don't reflect from attrs.
           if (k === "value" && ("value" in el)) {
             el.value = v;
@@ -6840,6 +7023,20 @@ function __skyRunPaths(root) {
     } else if (location.search) {
       try { history.replaceState({}, "", p); } catch (_) {}
     }
+  }
+  // v0.16.18 #558-PR4 — sibling that manages the query string.
+  // The value is the raw query (no leading '?'); empty value means
+  // "no params, strip any existing query string". Always
+  // replaceState (never push) — filter changes shouldn't grow the
+  // back-button history. The path is preserved, so this composes
+  // with data-sky-path: paths push, queries replace.
+  var qels = (root || document).querySelectorAll("[data-sky-query]");
+  for (var j = 0; j < qels.length; j++) {
+    var q = qels[j].getAttribute("data-sky-query") || "";
+    var current = (location.search || "").replace(/^\?/, "");
+    if (q === current) continue;
+    var target = location.pathname + (q ? "?" + q : "");
+    try { history.replaceState({}, "", target); } catch (_) {}
   }
 }
 
@@ -7029,17 +7226,35 @@ document.addEventListener("click", function(ev) {
   } catch (e) { return; }
   ev.preventDefault();
   fetch(href, { headers: { "X-Sky-Nav": "1" }, credentials: "same-origin" })
-    .then(function(r) { return r.text(); })
-    .then(function(t) {
-      __skyPatch(t);
-      window.history.pushState({}, "", href);
+    .then(function(r) {
+      // r.ok check is load-bearing. Without it, a 404 body like
+      // "session not found" (server lost our session_id store
+      // entry — TTL expiry, store-restart, store-config change,
+      // cross-deploy cookie collision) would be passed verbatim
+      // to __skyPatch and become the whole page body.
+      // Non-OK → full-page reload, which triggers the runtime's
+      // initial-page handler: creates a fresh session_id and
+      // re-runs the app's init. Apps gate on session presence
+      // (Maybe Session in Model) so the reload lands cleanly on
+      // whatever surface their init is configured to render.
+      if (!r.ok) { window.location.href = href; return; }
+      return r.text().then(function(t) {
+        __skyPatch(t);
+        window.history.pushState({}, "", href);
+      });
     })
     .catch(function() { window.location.href = href; });
 });
 window.addEventListener("popstate", function() {
   fetch(window.location.href, { headers: { "X-Sky-Nav": "1" }, credentials: "same-origin" })
-    .then(function(r) { return r.text(); })
-    .then(__skyPatch);
+    .then(function(r) {
+      // Same r.ok gate as the sky-nav click path. Without it,
+      // Back/Forward to a URL after the server lost our session
+      // renders the 404 body as the whole page.
+      if (!r.ok) { window.location.href = window.location.href; return; }
+      return r.text().then(__skyPatch);
+    })
+    .catch(function() { /* Back/Forward fetch failed; leave URL alone. */ });
 });
 // ── Status banner (connection state) ─────────────────────────
 // Single bottom-pinned element rendered by the runtime (NOT by the

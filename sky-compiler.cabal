@@ -369,6 +369,8 @@ test-suite sky-tests
       Sky.Parse.MultilineInterpolationEscapeSpec
       Sky.Build.CaseCatchallSubjectDiscardSpec
       Sky.Build.CharToCodeSpec
+      Sky.Build.CharPredicateAsRuneSpec
+      Sky.Sky.TomlTtlSpec
       Sky.Build.LiveNavigationSpec
       Sky.Build.LiveInitRequestSpec
       Sky.Build.LiveInitRuntimeSpec
@@ -378,6 +380,7 @@ test-suite sky-tests
       Sky.Format.FormatSpec
       Sky.Build.GoKeywordCollisionSpec
       Sky.Build.NestedPatternSpec
+      Sky.Build.NestedCasePatternFieldAccessSpec
       Sky.Build.ConsCtorPatternSpec
       Sky.Build.ConsPatternLengthSpec
       Sky.Build.CtorConsPatternSpec
@@ -395,6 +398,7 @@ test-suite sky-tests
       Sky.Build.CoerceArgParametricSpec
       Sky.Build.UnannotatedParametricCfgViewSpec
       Sky.Build.UnannotatedParametricCfgUserHelperSpec
+      Sky.Build.LiveApiHandlerShapeSpec
       Sky.Build.IsPlainIdentSpec
       Sky.Build.InferExprTypeBinopSpec
       Sky.Build.CoerceArgListMapInterplaySpec

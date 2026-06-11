@@ -238,6 +238,59 @@ func Db_close(db any) any {
 	}
 }
 
+// dbBindArg unwraps a Sky-Maybe-shaped arg for database/sql binding
+// (#574 / task #574). The Go sql package's argument converter
+// rejects `rt.SkyMaybe[T]` because it sees a struct it doesn't
+// recognise — leaving Sky users unable to write any nullable
+// column. We pre-marshal each arg here:
+//
+//	Nothing (Tag=1)            → nil   (binds as SQL NULL)
+//	Just v  (Tag=0)            → v     (unwrapped, recurses once)
+//	anything else              → as-is
+//
+// Reflect-based because SkyMaybe[T] is a generic struct and the
+// concrete T varies per call site (mirrors MaybeCoerce's approach
+// at rt.go:359). Costs one reflect.ValueOf per arg per call;
+// negligible vs the round-trip latency of the underlying SQL
+// driver. The recursive unwrap covers `Just (Just v)` cases that
+// arise from nested decoders, and stops at the first non-Maybe
+// value so non-nullable args pass through unchanged.
+func dbBindArg(a any) any {
+	if a == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(a)
+	// Reach inside *T when a is a pointer to a struct (rare for Sky
+	// values but cheap to handle).
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return nil
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return a
+	}
+	tagField := rv.FieldByName("Tag")
+	justField := rv.FieldByName("JustValue")
+	// Both fields must be present AND Tag must be an Int — that's
+	// the SkyMaybe[T] shape and nothing else (Sky's ADT codegen for
+	// user types uses different field names; Result has OkValue /
+	// ErrValue, not JustValue).
+	if !tagField.IsValid() || !justField.IsValid() || tagField.Kind() != reflect.Int {
+		return a
+	}
+	switch int(tagField.Int()) {
+	case 0: // Just
+		return dbBindArg(justField.Interface())
+	case 1: // Nothing
+		return nil
+	default:
+		return a
+	}
+}
+
+
 // Db.exec : Db -> String -> List any -> Task Error Int
 // Runs a statement that doesn't return rows. Returns rows affected.
 // Returns a Task thunk so the actual write defers to the
@@ -252,7 +305,7 @@ func Db_exec(db any, query any, args any) any {
 			argList := asList(args)
 			goArgs := make([]any, len(argList))
 			for i, a := range argList {
-				goArgs[i] = a
+				goArgs[i] = dbBindArg(a)
 			}
 			q, errRes := mustStringTyped(query, "db.exec")
 			if errRes != nil {
@@ -302,7 +355,7 @@ func Db_query(db any, query any, args any) any {
 			argList := asList(args)
 			goArgs := make([]any, len(argList))
 			for i, a := range argList {
-				goArgs[i] = a
+				goArgs[i] = dbBindArg(a)
 			}
 			q, errRes := mustStringTyped(query, "db.query")
 			if errRes != nil {
@@ -1088,8 +1141,18 @@ func Auth_signToken(secret any, claims any, expirySeconds any) any {
 	if errRes != nil {
 		return errRes
 	}
+	// Typed codegen represents `Dict String String` as Go
+	// map[string]string (and Dict String V as map[string]V); the
+	// untyped Dict rep is map[string]any. Use the same normaliser
+	// the Db.* kernels already use so callers can pass either shape.
+	// Pre-2026-06-10 fix: a bare `claims.(map[string]any)` silently
+	// dropped every claim when the caller passed a typed Dict —
+	// the JWT shipped with only `exp` / `iat` and downstream
+	// claim-based gates (e.g. SkyDeploy's #552 console handshake's
+	// `slug` claim) saw empty strings, breaking signature-valid
+	// tokens at the application layer.
 	m := map[string]any{}
-	if c, ok := claims.(map[string]any); ok {
+	if c, ok := dbAnyToStringMap(claims); ok {
 		for k, v := range c {
 			m[k] = v
 		}
@@ -1351,6 +1414,37 @@ func Db_getInt(fname any, row any) int {
 		}
 	}
 	return 0
+}
+
+// Sky type: Db.getFloat : String -> row -> Float
+// Returns 0.0 when the field is missing or not numeric. Mirrors
+// Db_getInt's shape — strconv on string-map values, AsFloatOrZero
+// on any-map values.
+func Db_getFloat(fname any, row any) float64 {
+	key := fmt.Sprintf("%v", fname)
+	if m, ok := row.(map[string]string); ok {
+		if v, exists := m[key]; exists {
+			f, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return 0.0
+			}
+			return f
+		}
+		return 0.0
+	}
+	if m, ok := row.(map[string]any); ok {
+		if v, exists := m[key]; exists {
+			if s, isStr := v.(string); isStr {
+				f, err := strconv.ParseFloat(s, 64)
+				if err != nil {
+					return 0.0
+				}
+				return f
+			}
+			return AsFloatOrZero(v)
+		}
+	}
+	return 0.0
 }
 
 // Sky type: Db.getBool : String -> row -> Bool

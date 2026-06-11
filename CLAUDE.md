@@ -22,7 +22,7 @@
 | `Ffi.kernel` mechanism + auto-TCO | ✅ shipped |
 | `sky doc` (terminal + HTTP server) / `sky watch` / `sky doctor` / `sky console` | ✅ shipped |
 | Sky Console embedded mode + sub-app mount + observability federation | ✅ shipped — v0.16.0 inline; v0.16.1 isolated SSE + HubExporter |
-| `sky console serve` hub (OTLP receivers + SQLite hot store) | ✅ shipped — v0.16.4 |
+| `sky console-serve` hub (OTLP receivers + SQLite hot store) | ✅ shipped — v0.16.4 |
 | Hub UI — multi-service dashboard, drill-down tabs, SSE updates | ✅ shipped — v0.16.4-5 (`runtime-go/rt/console_app/main.go` regenerated from `sky-bundled/console/src/`) |
 | `Hub_currentIdentity` kernel + Sky.Live session identity persistence (gob round-trip) | ✅ shipped — v0.16.5 |
 | Runtime tenant-prefix SQL enforcement (`HubStoreReaderWithTenant`) | ✅ shipped — v0.16.6 |
@@ -52,7 +52,7 @@ Production-grade code does not survive guesswork.
 5. **Deployment target** — local binary / Docker / Cloud Run via
    SkyDeploy / Kubernetes / VM under systemd.
 6. **Observability scope** — local logs only / per-app embedded
-   console / push to central `sky console serve` hub / OTel
+   console / push to central `sky console-serve` hub / OTel
    collector (Honeycomb / Tempo / Datadog).
 
 ### App shape matrix
@@ -61,7 +61,7 @@ Production-grade code does not survive guesswork.
 |------------------------------------------|--------------------|------------------------------------|-------|
 | Web app (forms, real-time, UI state)     | **Sky.Live**       | `Std.Live.app cfg`                 | HTTP-first; SSE patches; sessions + cookies + routing built in. |
 | HTTP / JSON API (no browser UI)          | **Sky.Http.Server**| `Server.listen 8000 [...]`         | Routes + middleware (CORS / rate-limit / logging / basic-auth). |
-| Multi-tenant SaaS / dashboard            | **Sky.Live + auth-app gate** | `Live.app { consoleAuth = … }` | Pair with `sky console serve` hub for shared telemetry; tenant scope enforced at SQL layer (v0.16.6). |
+| Multi-tenant SaaS / dashboard            | **Sky.Live + auth-app gate** | `Live.app { consoleAuth = … }` | Pair with `sky console-serve` hub for shared telemetry; tenant scope enforced at SQL layer (v0.16.6). |
 | Background job / cron worker             | **Sky.Cli**        | `main = Task.run scheduledWork`    | No UI loop; `Task.parallel` for fan-out. |
 | Terminal UI (TUI)                        | **Sky.Tui**        | `Std.Tui.app cfg`                  | Same view code as Sky.Live. |
 | One-shot CLI tool                        | **Sky.Cli**        | `main = Task.run cliCmd`           | Argparse via `System.args`. |
@@ -1859,6 +1859,28 @@ verified against HEAD.
     the type body (`T1\n    -> T2`) is not supported — extract a
     `type alias` for the whole arrow type.
 ### Closed in v0.16 (kept here for grep)
+
+- ~~Sky.Live runtime: sky-nav click + popstate (Back/Forward)
+  handlers don't check `r.ok` before passing the fetch body to
+  `__skyPatch`. A 404 "session not found" body (server lost our
+  session_id store entry — TTL expiry, store-restart, store-
+  config change, cross-deploy cookie collision) gets passed
+  verbatim to `__skyPatch` and replaces the entire `<body>` with
+  plain text — user sees "session not found" as the whole page
+  in a serif font, indistinguishable from a generic crash~~ —
+  closed in v0.16.16. Both .then chains in `liveJSWithCfg…`
+  gate on `r.ok` before invoking `__skyPatch`; on non-OK the
+  click path navigates to the link URL (`window.location.href =
+  href`) and the popstate path reloads the current URL — both
+  trigger the runtime's initial-page handler which always
+  succeeds (GET / creates a fresh session when the cookie is
+  invalid). Regression: `TestSkyNavFetchChecksOk` verifies the
+  embedded JS contains ≥2 `if (!r.ok)` occurrences. The recovery
+  behaviour stays reload (universal sane default — works for
+  apps with no auth, with auth, with stateful cart/cookie state).
+  Apps that need richer behaviour can opt-in to a configurable
+  `onSessionLost` cfg field — design tracked but not shipped in
+  v0.16.x; reload is the floor.
 
 - ~~Unannotated cross-module `view : Cfg msg -> Element msg`
   miscompiles to `any(cfg).(Cfg_R[any])` casts that panic at

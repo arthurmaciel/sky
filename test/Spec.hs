@@ -69,6 +69,8 @@ import qualified Sky.Parse.RowPolyRecordAnnotationSpec
 import qualified Sky.Parse.MultilineInterpolationEscapeSpec
 import qualified Sky.Build.CaseCatchallSubjectDiscardSpec
 import qualified Sky.Build.CharToCodeSpec
+import qualified Sky.Build.CharPredicateAsRuneSpec
+import qualified Sky.Sky.TomlTtlSpec
 import qualified Sky.Build.LiveNavigationSpec
 import qualified Sky.Build.LiveInitRequestSpec
 import qualified Sky.Build.LiveInitRuntimeSpec
@@ -76,6 +78,7 @@ import qualified Sky.Stdlib.RecordAliasBuilderConventionSpec
 import qualified Sky.Format.FormatSpec
 import qualified Sky.Build.GoKeywordCollisionSpec
 import qualified Sky.Build.NestedPatternSpec
+import qualified Sky.Build.NestedCasePatternFieldAccessSpec
 import qualified Sky.Build.ConsCtorPatternSpec
 import qualified Sky.Build.ConsPatternLengthSpec
 import qualified Sky.Build.CtorConsPatternSpec
@@ -92,6 +95,7 @@ import qualified Sky.Build.PartialKernelAppSpec
 import qualified Sky.Build.HofTypedMsgSpec
 import qualified Sky.Build.CoerceArgParametricSpec
 import qualified Sky.Build.UnannotatedParametricCfgViewSpec
+import qualified Sky.Build.LiveApiHandlerShapeSpec
 import qualified Sky.Build.UnannotatedParametricCfgUserHelperSpec
 import qualified Sky.Build.IsPlainIdentSpec
 import qualified Sky.Build.InferExprTypeBinopSpec
@@ -425,6 +429,13 @@ allSpecs fastMode = do
         Sky.Build.CaseCatchallSubjectDiscardSpec.spec
     -- v0.16.7 #419 — Sky.Core.Char.toCode / fromCode round-trip.
     describeT "Sky.Build.CharToCode" Sky.Build.CharToCodeSpec.spec
+    -- v0.16.17 follow-up — Char.is*/Char.to* typed kernels coerce
+    -- their rune arg via rt.AsRune, not rt.AsInt.
+    describeT "Sky.Build.CharPredicateAsRune"
+        Sky.Build.CharPredicateAsRuneSpec.spec
+    -- v0.16.19 — sky.toml `[live] ttl = "24h"` parses as 86400 s
+    -- (was silently truncated to 24 s by safeReadInt's reads).
+    describeT "Sky.Sky.TomlTtl" Sky.Sky.TomlTtlSpec.spec
     -- v0.16.7 #417 + #418 — Sky.Live navigation contract widening
     -- (req.params Dict + onNavigate cfg field).
     describeT "Sky.Build.LiveNavigation" Sky.Build.LiveNavigationSpec.spec
@@ -464,6 +475,15 @@ allSpecs fastMode = do
     describeT "Sky.Build.GoKeywordCollision"
                                          Sky.Build.GoKeywordCollisionSpec.spec
     describeT "Sky.Build.NestedPattern"   Sky.Build.NestedPatternSpec.spec
+    -- Typed record field access through a nested case pattern
+    -- (v0.16.17 #549). `case ... of Ok (Ok b) -> b.field` was
+    -- silently reading Go zero-values (Int 0, String "", etc.)
+    -- because the lowerer erased `b`'s typed shape through the
+    -- nested destructure. SOUNDNESS BUG — no panic; just junk.
+    -- Real impact: SkyDeploy's MCP server's list_apps queried
+    -- WHERE owner_id=0 returning empty for every user.
+    describeT "Sky.Build.NestedCasePatternFieldAccess"
+        Sky.Build.NestedCasePatternFieldAccessSpec.spec
     -- Cons-with-constructor pattern fix (compiler bug #2). The
     -- lowerer now emits a head-discriminator check on `(Ctor x) :: rest`
     -- so the body only fires when the head's actual ctor matches.
@@ -559,6 +579,13 @@ allSpecs fastMode = do
     -- path in src/Sky/Build/Compile.hs.
     describeT "Sky.Build.UnannotatedParametricCfgView"
                                             Sky.Build.UnannotatedParametricCfgViewSpec.spec
+    -- Task #545 — Sky.Live.api now has a strongly-typed kernel sig
+    -- (`String -> (Dict String any -> Response) -> Route`).  This
+    -- spec exercises both shapes: Dict-shaped passes, Task-shaped
+    -- gets a clear HM mismatch instead of the pre-fix silent
+    -- runtime `%v`-pointer leak.
+    describeT "Sky.Build.LiveApiHandlerShape"
+                                            Sky.Build.LiveApiHandlerShapeSpec.spec
     -- #521 corner-case sibling — same enclosing-scope guard, but
     -- the call shape is a user-defined helper taking (cfg, msg)
     -- with the 2nd arg supplied as `cfg.<field>`.  This routes

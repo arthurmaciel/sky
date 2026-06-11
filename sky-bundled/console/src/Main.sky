@@ -24,6 +24,8 @@ import Sky.Core.Json.Decode.Pipeline as Pipeline
 import Sky.Core.Task as Task
 import Sky.Core.Maybe as Maybe
 import Sky.Core.Dict as Dict
+import Sky.Core.Time as Time
+import Sky.Core.Encoding as Encoding
 import Std.Cmd as Cmd
 import Std.Sub as Sub
 import Std.Live exposing (app, route)
@@ -193,6 +195,17 @@ init _req =
         parent = System.getenvOr "SKY_PARENT_URL" ""
         hubDbPath = System.getenvOr "SKY_CONSOLE_HUB_DB" ""
 
+        -- v0.16.18 #558-PR4: URL-encode the filter state on the
+        -- WRITE side (View.urlSync emits data-sky-query). The
+        -- READ side (parse req.query → seed Model) trips Sky HM's
+        -- req-shape over-specialisation when init's kernel
+        -- contract demands a polymorphic param. Tracked as a
+        -- follow-up alongside #422; until then bookmarks copy
+        -- the URL out but a fresh page-load boots with defaults.
+        initialRange = Last24h
+        initialQuery = ""
+        initialService = ""
+
         -- v0.16.4 Option B B4: when SKY_CONSOLE_HUB_DB is set the
         -- console is running IN-PROCESS with the hub daemon and
         -- reads telemetry via direct SQLite kernels (HubStore.sky)
@@ -235,7 +248,7 @@ init _req =
             , lastError = ""
             , logFilter = emptyLogFilter
             , traceQuery = ""
-            , selectedService = ""
+            , selectedService = initialService
             , serviceStats = []
             -- v0.16.6 #493 part 2c: identity is fetched async from
             -- the hub via Hub_currentIdentity; until the response
@@ -244,6 +257,15 @@ init _req =
             -- let in.
             , identity = Nothing
             , tenantPrefix = ""
+            -- v0.16.18 #558-PR1: global time-range filter. Last24h
+            -- is the typical "what's been happening today" default;
+            -- users can flip to 15m / 1h / 7d / All via the chip
+            -- row at the top of every tab. nowMs is populated on
+            -- the first Tick (defaults to 0 = no filter applies).
+            , range = initialRange
+            , nowMs = 0
+            -- v0.16.18 #558-PR3: empty = no filter.
+            , globalQuery = initialQuery
             }
 
         -- Fetch the signed-in identity on boot. Only meaningful
@@ -266,6 +288,11 @@ init _req =
     , Cmd.batch
         [ fetchForTab startModel startModel.tab startModel.logFilter
         , identityCmd
+        -- v0.16.18 #558-PR1: prime nowMs so the very first render
+        -- after init has a real threshold (the default range is
+        -- Last24h — without this Cmd, the first render sees
+        -- nowMs=0 and falls through to "no filter").
+        , Cmd.perform (Time.unixMillis ()) GotNowMs
         ]
     )
 
@@ -286,7 +313,16 @@ update msg model =
             )
 
         Tick ->
-            ( model, fetchForTab model model.tab model.logFilter )
+            ( model
+            , Cmd.batch
+                [ fetchForTab model model.tab model.logFilter
+                -- v0.16.18 #558-PR1: refresh nowMs so the time-range
+                -- filter's ISO-8601 threshold tracks wall-clock. We
+                -- only need this when range != RangeAll (the only
+                -- case it's actually consulted in the view path).
+                , Cmd.perform (Time.unixMillis ()) GotNowMs
+                ]
+            )
 
         GotOverview (Ok ov) ->
             ( { model | overview = ov, lastError = "" }, Cmd.none )
@@ -376,7 +412,17 @@ update msg model =
         -- shareable link still drops everyone on the same
         -- aggregate landing.
         SelectService name ->
-            ( { model | selectedService = name }, Cmd.none )
+            -- v0.16.18 #558-PR2: trigger an immediate refetch with the
+            -- new service scope so the user sees the narrowed dataset
+            -- without waiting 3s for the next Tick. Without this the
+            -- global service-chip felt unresponsive (the highlight
+            -- flipped instantly but rows stayed stale until tick).
+            let
+                newModel = { model | selectedService = name }
+            in
+            ( newModel
+            , fetchForTab newModel newModel.tab newModel.logFilter
+            )
 
         GotServiceStats (Ok stats) ->
             ( { model | serviceStats = stats, lastError = "" }, Cmd.none )
@@ -407,6 +453,24 @@ update msg model =
 
         GotIdentity (Err _) ->
             ( model, Cmd.none )
+
+        -- v0.16.18 #558-PR1: global time-range filter.
+        SelectRange r ->
+            ( { model | range = r }, Cmd.none )
+
+        GotNowMs (Ok n) ->
+            ( { model | nowMs = n }, Cmd.none )
+
+        GotNowMs (Err _) ->
+            -- Time.unixMillis is infallible at the runtime layer
+            -- (System.NowMs equivalent), but the Result e a shape
+            -- still requires the Err arm. Keep nowMs untouched on
+            -- the unreachable failure case.
+            ( model, Cmd.none )
+
+        -- v0.16.18 #558-PR3: global free-text filter input event.
+        GlobalQuery q ->
+            ( { model | globalQuery = q }, Cmd.none )
 
 
 fetchLogsOnly : Model -> LogFilter -> Cmd Msg

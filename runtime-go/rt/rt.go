@@ -445,13 +445,45 @@ func coerceInner[T any](v any) T {
 					out.FieldByName("Tag").SetInt(tagField.Int())
 					if tagField.Int() == 0 {
 						inner := out.FieldByName("OkValue")
-						if inner.IsValid() && inner.Type().Kind() == reflect.Interface {
-							inner.Set(reflect.ValueOf(okField.Interface()))
+						if inner.IsValid() {
+							innerVal := okField.Interface()
+							if inner.Type().Kind() == reflect.Interface {
+								inner.Set(reflect.ValueOf(innerVal))
+							} else if reflect.TypeOf(innerVal) != nil && reflect.TypeOf(innerVal).AssignableTo(inner.Type()) {
+								inner.Set(reflect.ValueOf(innerVal))
+							} else if innerVal != nil {
+								// v0.16.17 — symmetrise with the SkyMaybe
+								// branch above.  Closes the
+								// `Result a (Result a Box)` soundness bug
+								// where the inner OkValue is a concrete
+								// `Box_R` struct (non-interface) inside a
+								// `SkyResult[any, any]` source — pre-fix
+								// the assignment was silently skipped and
+								// the output kept its zero-value Box_R.
+								narrowed := narrowReflectValue(
+									reflect.ValueOf(innerVal),
+									inner.Type())
+								if narrowed.IsValid() {
+									inner.Set(narrowed)
+								}
+							}
 						}
 					} else {
 						inner := out.FieldByName("ErrValue")
-						if inner.IsValid() && inner.Type().Kind() == reflect.Interface {
-							inner.Set(reflect.ValueOf(errField.Interface()))
+						if inner.IsValid() {
+							innerVal := errField.Interface()
+							if inner.Type().Kind() == reflect.Interface {
+								inner.Set(reflect.ValueOf(innerVal))
+							} else if reflect.TypeOf(innerVal) != nil && reflect.TypeOf(innerVal).AssignableTo(inner.Type()) {
+								inner.Set(reflect.ValueOf(innerVal))
+							} else if innerVal != nil {
+								narrowed := narrowReflectValue(
+									reflect.ValueOf(innerVal),
+									inner.Type())
+								if narrowed.IsValid() {
+									inner.Set(narrowed)
+								}
+							}
 						}
 					}
 					return out.Interface().(T)
@@ -2236,6 +2268,43 @@ func AsFloatOrZero(v any) float64 {
 		return float64(n)
 	case int32:
 		return float64(n)
+	}
+	return 0
+}
+
+// AsRune coerces to a Go rune. Sky's Char type lowers to `rune`
+// in the typed path but flows through `any` in untyped contexts —
+// e.g. a lambda parameter binding a `Char` peeled out of
+// `String.toList` arrives as `any` at the typed-kernel call site.
+// AsRune is the analogue of AsInt for the rune-typed kernel slot
+// (Char_isAlphaT, Char_isDigitT, …) so the typed-codegen path can
+// emit `rt.AsRune(c)` without falling back to AsInt (which would
+// produce a Go `int`, mismatching the `rune` parameter).
+func AsRune(v any) rune {
+	if r, ok := v.(rune); ok {
+		return r
+	}
+	switch n := v.(type) {
+	case int:
+		return rune(n)
+	case int64:
+		return rune(n)
+	case int32:
+		return rune(n)
+	case int16:
+		return rune(n)
+	case int8:
+		return rune(n)
+	case string:
+		for _, r := range n {
+			return r
+		}
+		return 0
+	}
+	if isSkyContainer(v) {
+		if u := unwrapAny(v); u != nil {
+			return AsRune(u)
+		}
 	}
 	return 0
 }
