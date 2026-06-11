@@ -32,7 +32,8 @@ build_target() { # $1=example dir  $2=go|rust  -> echoes the release binary path
   else
     ( cd "$d" && timeout 300 "$SKY" build src/Main.sky --target rust ) >/tmp/perf-build-rust-gen.log 2>&1 || return 1
     ( cd "$d" && timeout 900 cargo build --release --manifest-path sky-out/Rust/Cargo.toml ) >/tmp/perf-build-rust.log 2>&1 || return 1
-    find "$d/sky-out/Rust/target/release" -maxdepth 1 -type f -executable | head -1
+    local rel="${CARGO_TARGET_DIR:-$d/sky-out/Rust/target}/release"
+    find "$rel" -maxdepth 1 -type f -executable -name 'sky-app' 2>/dev/null | head -1
   fi
 }
 
