@@ -104,6 +104,13 @@ pub mod ws_client;
 #[cfg(feature = "websocket_client")]
 pub use ws_client::*;
 
+// Std.Html / Std.Ui render surface — the Html/Attribute/Event ADTs + renderer +
+// htmlXxx kernel wrappers. Pure (std only), so always available; a non-Live
+// Std.Ui app renders via Html.toString without the `live` server module. The
+// live module re-exports from here.
+pub mod html;
+pub use html::*;
+
 #[cfg(feature = "live")]
 pub mod live;
 #[cfg(feature = "live")]

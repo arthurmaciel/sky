@@ -298,6 +298,38 @@ fn set_attr<M>(attrs: &mut Vec<Attribute<M>>, key: &str, val: &str) {
     attrs.push(Attribute::Attr(key.to_string(), val.to_string()));
 }
 
+// --- Std.Html kernel wrappers (`Ffi.callPure "htmlXxx"`) ---
+// These match the kernel names used in sky-stdlib Std.Html.sky — the Sky-side
+// helpers (render, escapeHtml, escapeAttr, attrToString) route here on the Rust
+// backend. The codegen converts "htmlRender" → `html_render_()`, etc. Kept in
+// this standalone module (not under live/) so a non-Live Std.Html / Std.Ui app
+// renders via Html.toString without pulling the Sky.Live server machinery.
+
+/// `Ffi.callPure "htmlRender"` — render an Html tree to an HTML string.
+pub fn html_render_<M>(node: Html<M>) -> String {
+    render_html(&node)
+}
+
+/// `Ffi.callPure "htmlEscapeText"` — HTML-escape a string for text content.
+pub fn html_escape_text_(s: String) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// `Ffi.callPure "htmlEscapeAttr"` — escape a string for use in a double-quoted attribute.
+pub fn html_escape_attr_(s: String) -> String {
+    html_escape_text_(s).replace('"', "&quot;")
+}
+
+/// `Ffi.callPure "htmlAttrToString"` — serialise a single Attribute to its key="value" form.
+pub fn html_attr_to_string_<M>(attr: Attribute<M>) -> String {
+    match attr {
+        Attribute::Attr(k, v) => format!("{}=\"{}\"", k, html_escape_attr_(v)),
+        Attribute::BoolAttr(k, true) => k,
+        Attribute::BoolAttr(_, false) | Attribute::NoAttr => String::new(),
+        Attribute::EventAttr(e) => format!("data-sky-on=\"{}\"", e.name()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

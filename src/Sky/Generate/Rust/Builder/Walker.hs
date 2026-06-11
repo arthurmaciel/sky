@@ -159,6 +159,12 @@ analyzeKernelUsage = foldMap analyzeMod
             -- (P1). Pulls tokio (async Task) + the live submodule (html.rs).
             , if modName == "Live" || "Std.Live" `isInfixOf` modName
               then mempty { usesLive = True } else mempty
+            -- Std.Html / Std.Ui — render to an Html ADT via Html.toString /
+            -- Ui.layout. The Html/Attribute/Event types + html_render_ live in the
+            -- live submodule, so a NON-Live (CLI / Tui) app that only renders HTML
+            -- must still pull that module in (gated below as usesLive || usesHtml).
+            , if "Html" `isInfixOf` modName || "Std.Ui" `isInfixOf` modName || modName == "Ui"
+              then mempty { usesHtml = True } else mempty
             ]
 
 -- | Known zero-argument kernel stubs that must be called with () when referenced.

@@ -37,6 +37,9 @@ data UsedKernels = UsedKernels
     , usesWsClient :: Bool        -- Sky.Core.WebSocket used → ws_client + tokio-tungstenite
     , usesEmail :: Bool           -- Std.Email used → email module + reqwest
     , usesLive :: Bool            -- Std.Live used → live module (Html bridge)
+    , usesHtml :: Bool            -- Std.Html / Std.Ui used → needs the live module's
+                                  -- Html/Attribute/Event ADTs + html_render_ kernel,
+                                  -- even for a non-Live (CLI/Tui) render via Html.toString
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -56,9 +59,10 @@ instance Semigroup UsedKernels where
         , usesWsClient = usesWsClient a || usesWsClient b
         , usesEmail = usesEmail a || usesEmail b
         , usesLive = usesLive a || usesLive b
+        , usesHtml = usesHtml a || usesHtml b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False False False False False False False False
 
 data RustBuilder = RustBuilder
     { builderModules    :: [RustModule]

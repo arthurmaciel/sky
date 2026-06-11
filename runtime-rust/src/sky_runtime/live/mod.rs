@@ -1,7 +1,5 @@
 //! Sky.Live on the Rust backend — HTTP-first render + SSE patch loop.
 //! Generic over the app's (Model, Msg); no `any`, static dispatch only.
-pub mod html;
-pub use html::*;
 pub mod diff;
 pub use diff::*;
 pub mod dispatch;
@@ -16,6 +14,11 @@ pub mod req;
 pub use req::*;
 pub mod store;
 pub use store::*;
+
+// Html ADTs + renderer now live in the standalone top-level `html` module;
+// re-export them so live submodules (diff.rs, store.rs, …) that `use super::*`
+// still see Html / Attribute / Event / render_html / html_render_.
+pub use crate::sky_runtime::html::*;
 
 use super::*;
 
@@ -791,34 +794,8 @@ fn sid_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
     None
 }
 
-// ─── Go-parity kernel stubs ────────────────────────────────────────────────
-// These match the `Ffi.callPure "htmlXxx"` kernel names used in sky-stdlib
-// Std.Html.sky — the Sky-side helpers (render, escapeHtml, escapeAttr,
-// attrToString) route here on the Rust backend.  The codegen converts
-// "htmlRender" → `html_render_()`, "htmlEscapeText" → `html_escape_text_()`,
-// etc., so we export the matching snake-case names with trailing `_`.
-
-/// `Ffi.callPure "htmlRender"` — render an Html tree to an HTML string.
-pub fn html_render_<M>(node: Html<M>) -> String {
-    render_html(&node)
-}
-
-/// `Ffi.callPure "htmlEscapeText"` — HTML-escape a string for text content.
-pub fn html_escape_text_(s: String) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-}
-
-/// `Ffi.callPure "htmlEscapeAttr"` — escape a string for use in a double-quoted attribute.
-pub fn html_escape_attr_(s: String) -> String {
-    html_escape_text_(s).replace('"', "&quot;")
-}
-
-/// `Ffi.callPure "htmlAttrToString"` — serialise a single Attribute to its key="value" form.
-pub fn html_attr_to_string_<M>(attr: Attribute<M>) -> String {
-    match attr {
-        Attribute::Attr(k, v) => format!("{}=\"{}\"", k, html_escape_attr_(v)),
-        Attribute::BoolAttr(k, true) => k,
-        Attribute::BoolAttr(_, false) | Attribute::NoAttr => String::new(),
-        Attribute::EventAttr(e) => format!("data-sky-on=\"{}\"", e.name()),
-    }
-}
+// The Std.Html `Ffi.callPure "htmlXxx"` kernel wrappers (html_render_,
+// html_escape_text_, html_escape_attr_, html_attr_to_string_) now live in the
+// standalone top-level `sky_runtime::html` module (re-exported here via
+// `use super::*`), so a non-Live Std.Html / Std.Ui render doesn't pull this
+// server module in.

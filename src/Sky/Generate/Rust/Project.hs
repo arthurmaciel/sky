@@ -144,10 +144,17 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- Sky.Core.WebSocket client only when used (pulls tokio-tungstenite).
         wscMod = if RustBuilder.usesWsClient usage then ["pub mod ws_client;"] else []
         wscUse = if RustBuilder.usesWsClient usage then ["pub use ws_client::*;"] else []
-        -- Std.Live only when used — live submodule (html.rs + mod.rs live_render_static).
+        -- Std.Html / Std.Ui render surface — the standalone, PURE `html` module
+        -- (Html/Attribute/Event ADTs + render_html + htmlXxx kernels). A non-Live
+        -- CLI/Tui app that renders via Html.toString needs ONLY this, no server,
+        -- no tea, no tokio. The live module (below) re-exports from it, so Live
+        -- apps pull it too. Declared before live so live's re-export resolves.
+        htmlMod = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage then ["pub mod html;"] else []
+        htmlUse = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage then ["pub use html::*;"] else []
+        -- Std.Live only when used — live submodule (the Sky.Live server).
         liveMod = if RustBuilder.usesLive usage then ["pub mod live;"] else []
         liveUse = if RustBuilder.usesLive usage then ["pub use live::*;"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ liveMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ liveUse)
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ liveMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode
