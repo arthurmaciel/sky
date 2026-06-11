@@ -1393,6 +1393,28 @@ wrapStoredFn ctx (Ann.At region e) rendered
 -- (`List a` -> typeToRustString a). Used to type a list-HOF closure's param
 -- (`List.filter (\m -> …) xs` -> m : <elem of xs>). Nothing when the region
 -- type is absent or not a concrete List.
+-- | The accumulator type `b` of a fold function `f : a -> b -> b` — its 2nd
+-- parameter type, used to type a foldl/foldr empty INIT. Named fold fns only
+-- (sig from solvedTypes — same lookup calleeArity/succeedArity use); a lambda
+-- fold fn returns Nothing so the init keeps emitEmptyArg's default.
+foldAccTypeOf :: EmitCtx -> Can.Expr -> Maybe Can.Type
+foldAccTypeOf ctx fn = case fn of
+    Ann.At _ (Can.VarTopLevel _ nm) -> accOf nm
+    Ann.At _ (Can.VarLocal nm)      -> accOf nm
+    _                               -> Nothing
+  where
+    -- ecModuleEnv (the CURRENT module's sigs) FIRST — a same-module fold helper
+    -- (insertByBucketName) is often absent from the flat solvedTypes; this also
+    -- avoids the bare-name cross-module collision the flat map has. Falls back
+    -- to the flat map for an imported fold fn.
+    accOf nm = case Map.lookup nm (ecModuleEnv ctx) of
+        Just ty -> fromSig ty
+        Nothing -> case Map.lookup nm (ecSolvedTypes ctx) of
+            Just ty -> fromSig ty
+            Nothing -> Nothing
+    fromSig ty = let ps = extractParamTypes ty
+                 in if length ps >= 2 then Just (ps !! 1) else Nothing
+
 listElemRustType :: EmitCtx -> Can.Expr -> Maybe String
 listElemRustType ctx (Ann.At region inner) =
     case Map.lookup region (ecRegionTypes ctx) of
@@ -1586,6 +1608,18 @@ emitDefaultCall ctx fn calleeName args =
         -- normal clone-aware emit.
         paramStrs = calleeParamStrings ctx fn (length args)
         emitArg i a
+            -- foldl/foldr INIT (arg 1) is the accumulator `b`, whose type is the
+            -- fold FUNCTION's 2nd parameter type (`f : a -> b -> b`). An empty
+            -- `Dict.empty` / `[]` accumulator can't infer `b` from the generic
+            -- foldl param (emitEmptyArg then defaults it wrongly —
+            -- HashMap<String,i64> for a `Dict Int (List Row)` grouping). Seed `b`
+            -- — read off the fold fn's signature, always available unlike the
+            -- call-site expected type — at the init's region so dictEmptyPin /
+            -- the empty-literal turbofish read it. 35-composite-generics.
+            | i == 1, bareCallee `elem` ["list_foldl", "list_foldr"]
+            , Just accTy <- foldAccTypeOf ctx (head args), not (hasTypeVars accTy)
+            , Ann.At ar _ <- a
+                              = exprToRustString (ctx { ecRegionTypes = Map.insert ar accTy (ecRegionTypes ctx) }) a
             | isEmptyishArg a = emitEmptyArg ctx paramStrs i a
             -- An Int literal passed where the callee wants f64 (Sky's numeric-
             -- literal coercion: `Css.pct 100` → `std_css_pct(n: f64)`) must emit
