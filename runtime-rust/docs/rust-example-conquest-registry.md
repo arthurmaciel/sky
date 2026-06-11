@@ -14,16 +14,21 @@ proper fix rather than force a band-aid.
 
 ## Accurate scoreboard (disk-safe sweep)
 
-**Builds (18 in-scope):** `00, 01, 04, 07, 09, 10, 12, 14, 15, 17, 18, 20, 28,
-30, 32, 33, simple, test_pkg` — up from 12 at session start. CONQUERED this
-session: `10-live-component` (serde multi-module + DestructDef),
-`28-streaming-chat` (SkyMaybe serde + branch-aware clone), `12-skyvote` (168 → 0,
-TEA-Msg keystone chain), `18-job-queue` (24 → 0), `33-websocket-echo` (Arc<dyn
-Fn> stored-callback repr), and **`17-skymon` (110 → 0** — db-getter row arg
-type + sibling-fn param inference + cross-module ADT-name resolution + dict_empty
-value pin + record-update field-type propagation + list-HOF closure typing +
-partial-app capture-clone + calleeArity sibling fallback; 7 broadly-useful
-codegen wins, each regression-gated).
+**Builds (19 in-scope):** `00, 01, 04, 07, 09, 10, 12, 14, 15, 16, 17, 18, 20,
+28, 30, 32, 33, simple, test_pkg` — up from 12 at session start. CONQUERED this
+session: `10-live-component`, `28-streaming-chat`, `12-skyvote` (168 → 0,
+TEA-Msg keystone), `18-job-queue` (24 → 0), `33-websocket-echo` (Arc<dyn Fn>
+stored callbacks), **`17-skymon` (110 → 0** — db-getter row arg + sibling-fn +
+cross-module ADT-name resolution + dict_empty pin + record-update field-type +
+list-HOF closure typing + partial-app capture-clone + calleeArity sibling
+fallback), and **`16-skychess` (62 → 0** — generic-key SkyDict + collectVarLocals
+scrutinee + foldl element typing + record-update `__rec` rename + Rust-keyword
+escape in clone rebinds + ignored-wildcard-param-generic). All regression-gated.
+
+**Architectural wins shared across examples this session:** SkyDict made generic
+over the key type (`HashMap<K,V>`, was hardcoded `HashMap<String,T>`) — unblocked
+every Dict-`Int`-keyed example; JSON-Decode-Pipeline uncurried + curry6-8 +
+succeed-alias match — closes the FnOnce/curry blocker flagged for 06-json.
 
 **Scope update (user, 2026-06-10):** Go-package→Rust-native FFI is NOT a goal —
 examples importing Go packages are OUT OF SCOPE. By `sky.toml` deps: `03`
@@ -31,7 +36,15 @@ examples importing Go packages are OUT OF SCOPE. By `sky.toml` deps: `03`
 `13` (stripe-go + sky-tailwind) → **out of scope, ignored**. The sweep's
 `OUT_OF_SCOPE` list now includes them.
 
-**In-scope failing (2):** `16-skychess` (77 + malformed-emission) and
+**In-scope failing (1):** `35-composite-generics` (36 → **11** this session —
+JSON-pipeline arity + missing kernels + Dict-key all cleared; remaining 11 E0308
+are scattered deep-inference: empty `Dict.empty` accumulator in a `foldl`
+grouping defaults its turbofish without an expected type [`HashMap<i64,Vec<…>>`
+vs `HashMap<String,i64>`], a `Json.Encode` value passed as a fn item not called,
+and a `Task`-list / `Pin<Box>` mismatch). Each needs distinct expected-type
+propagation; no single systematic cause left.
+
+**(historical) In-scope failing (2):** `16-skychess` (77 + malformed-emission) and
 `35-composite-generics` (36 → 26 — all missing kernels + dup-placeholder closed;
 remaining is the Dict-typed-key E0308 + JSON-pipeline-decode curry class) — both
 pure-stdlib, genuine codegen targets. Clean full sweep `2026-06-10`:
