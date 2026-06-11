@@ -54,21 +54,7 @@ probe_coldstart_cli() { # $1=binary -> median ms
   python3 -c 'import json;d=json.load(open("/tmp/perf-hf.json"));print(d["results"][0]["median"]*1000)'
 }
 
-# Bounded readiness wait — poll `curl` up to READY_TIMEOUT_S (default 10s) with a
-# 0.1s sleep, never a busy-spin. Returns 0 when the server answers, 1 if it dies
-# or the deadline passes. A server that binds a port the probe can't reach (an
-# example hardcoding 8000, a crash-on-boot) must NOT hang the harness — the
-# original unbounded `until curl; do kill -0 || break; done` busy-looped forever
-# while the process stayed alive (stalled --baseline on the server shape).
 READY_TIMEOUT_S="${READY_TIMEOUT_S:-10}"
-wait_ready() { # $1=pid $2=port -> 0 ready / 1 not
-  local tries=0 max=$(( ${READY_TIMEOUT_S%.*} * 10 ))
-  until curl -s -o /dev/null "http://127.0.0.1:$2/"; do
-    kill -0 "$1" 2>/dev/null || return 1
-    tries=$((tries+1)); [ "$tries" -ge "$max" ] && return 1
-    sleep 0.1
-  done
-}
 
 # Discover a spawned server's main HTTP listener. The harness passes
 # SKY_LIVE_PORT/PORT so apps that honour it (Sky.Live) bind a free port, but
@@ -89,6 +75,7 @@ discover_port() { # $1=pid $2=env-hint-port -> echoes port / returns 1
     done
     for p in "$hint" $(printf '%s\n' $ports | grep -E '^[0-9]+$' | sort -un); do
       [ -n "$p" ] || continue
+      now=$(date +%s); [ "$now" -lt "$deadline" ] || break
       curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$p/" && { echo "$p"; return 0; }
     done
     sleep 0.1
