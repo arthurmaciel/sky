@@ -615,6 +615,17 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
             mods
         recordMap = Map.unions [aliasMap, anonKeyMap, adtNameMap]
 
+        -- structName -> (field -> declared type), over every record alias, for
+        -- record-UPDATE field-value expected-type seeding (see ecStructFields).
+        structFields = Map.fromList $ concatMap
+            (\m ->
+                let modStr = ModuleName._name (Can._name m)
+                    mangled = map (\c -> if c == '.' then '_' else c) modStr
+                in [ ( toCamelCase (mangled ++ "_" ++ nm)
+                     , Map.fromList [ (fn, ft) | (fn, Can.FieldType _ ft) <- Map.toList flds ] )
+                   | (nm, Can.Alias _ (Can.TRecord flds _)) <- Map.toList (Can._aliases m) ])
+            mods
+
         ctorArity = Map.fromList
             [ (name, Map.size fields)
             | mod <- mods
@@ -630,7 +641,7 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
             , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "" }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "", ecStructFields = structFields }
         -- Multi-module signature scoping. The flat `ecSolvedTypes` (`_stEnv`)
         -- collides on bare names across modules, so a DEP module's function
         -- (e.g. `Lib.Db.exec : String -> List String -> Task Error ()`) whose

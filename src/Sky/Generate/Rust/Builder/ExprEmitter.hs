@@ -41,7 +41,7 @@ module Sky.Generate.Rust.Builder.ExprEmitter
     , flattenCons
     ) where
 
-import Data.List (intercalate, isSuffixOf, isPrefixOf, isInfixOf, sortBy, stripPrefix)
+import Data.List (intercalate, isSuffixOf, isPrefixOf, isInfixOf, sortBy, stripPrefix, minimumBy)
 import Data.Char (isUpper, isDigit)
 import Numeric (showHex)
 import qualified Data.Map.Strict as Map
@@ -75,6 +75,7 @@ import Sky.Generate.Rust.Builder.Naming
     ( rustSafeIdent
     , kernelCtorToRust
     , toSnakeCase
+    , toCamelCase
     )
 import Sky.Generate.Rust.Builder.Pattern
     ( patternToRustParam
@@ -1094,8 +1095,19 @@ exprToRustInner ctx e = case e of
         exprToRustString ctx record ++ "." ++ field
     Can.Update (Ann.At _ _field) record updates ->
         let sorted = sortBy (\(_, Can.FieldUpdate r1 _) (_, Can.FieldUpdate r2 _) -> compare (Ann._line (Ann._start r1)) (Ann._line (Ann._start r2))) (Map.toList updates)
+            -- Resolve the updated record's struct so each field VALUE can be
+            -- emitted with its declared type as the expected type (seeded by
+            -- inserting it at the value's region — exprToRustString reads
+            -- ecRegionTypes). Lets an empty collection / literal in an update
+            -- (`{ model | configInput = Dict.empty }`) turbofish correctly.
+            recFields = updateRecordFields ctx (map fst sorted)
+            emitUpd (f, Can.FieldUpdate _ expr@(Ann.At vr _)) =
+                let ctxF = case Map.lookup f recFields of
+                        Just ft -> ctx { ecRegionTypes = Map.insert vr ft (ecRegionTypes ctx) }
+                        Nothing -> ctx
+                in "result." ++ f ++ " = " ++ wrapStoredFn ctxF expr (exprToRustString ctxF expr)
         in "{ let mut result = " ++ exprToRustString ctx record ++ "; " ++
-        intercalate "; " (map (\(f, Can.FieldUpdate _ expr) -> "result." ++ f ++ " = " ++ wrapStoredFn ctx expr (exprToRustString ctx expr)) sorted) ++
+        intercalate "; " (map emitUpd sorted) ++
         "; result }"
     Can.Record fields ->
         let key = intercalate "," (Map.keys fields)
@@ -1326,6 +1338,26 @@ wrapStoredFn ctx (Ann.At region e) rendered
         _ -> case Map.lookup region (ecRegionTypes ctx) of
                  Just (Can.TLambda _ _) -> True
                  _                      -> False
+
+-- | Resolve the field-name -> declared-type map for the struct an update
+-- targets (`{ record | f = … }`). The record subexpr's solved region type is
+-- often absent for a bare param ref (`model`), so instead find the struct in
+-- ecStructFields whose field set is a SUPERSET of the updated field names —
+-- preferring the tightest fit (fewest extra fields). Mirrors the record
+-- bestMatch in TypeRenderer. Returns empty when nothing matches (the update
+-- then keeps today's no-expected-type emission).
+updateRecordFields :: EmitCtx -> [String] -> Map.Map String Can.Type
+updateRecordFields ctx updFieldNames
+    | null updFieldNames = Map.empty
+    | otherwise =
+        let want = Set.fromList updFieldNames
+            candidates =
+                [ (Map.size fm - Set.size want, fm)
+                | (_, fm) <- Map.toList (ecStructFields ctx)
+                , want `Set.isSubsetOf` Map.keysSet fm ]
+        in case candidates of
+            [] -> Map.empty
+            _  -> snd (minimumBy (\(a,_) (b,_) -> compare a b) candidates)
 
 -- | Value-type turbofish for `dict_empty` (`Dict.empty : Dict k v ->
 -- HashMap<String, V>`). The default `::<i64>` (Types.kernelsNeedingErrorPin)

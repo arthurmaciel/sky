@@ -400,6 +400,14 @@ data EmitCtx = EmitCtx
         --   `ecSolvedTypes` wholesale — doing so shadowed cross-module calls to
         --   same-named functions (Std.Money.fromString hiding Std.Decimal's →
         --   wrong arity/currying). Body lowering keeps using the flat map.
+    , ecStructFields :: Map.Map String (Map.Map String Can.Type)
+        -- ^ Rust struct name -> (field name -> field type), over every record
+        --   alias in the program. Lets a record-UPDATE arm
+        --   (`{ model | configInput = Dict.empty }`) seed ecExpectedType for each
+        --   updated field's VALUE from the field's declared type, so an empty
+        --   collection / literal turbofishes correctly (dict_empty::<String>
+        --   not ::<i64>). Record LITERALS already get this via region types;
+        --   updates don't, hence the explicit map. 17-skymon update sites.
     , ecCurrentModule :: String
         -- ^ The current module's canonical name (e.g. "Lib.Database"), so a
         --   sibling-fn lookup can verify a VarTopLevel callee belongs to THIS
