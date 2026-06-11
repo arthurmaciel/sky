@@ -639,6 +639,16 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     [ emitDepLine name spec
     | (name, spec) <- rustDeps
     , not (null name)
+    ] ++
+    -- Dev-profile tuning for fast iteration (per user 2026-06-10): drop debuginfo
+    -- (debug=0) — the heaviest part of dev linking — and keep incremental on so
+    -- only changed codegen units recompile. sccache + a shared CARGO_TARGET_DIR
+    -- cover cross-example dep reuse; this cuts the per-example link step. No
+    -- effect on release builds (`--release` uses [profile.release]).
+    [ ""
+    , "[profile.dev]"
+    , "debug = 0"
+    , "incremental = true"
     ]
   where
     userDepNames = [ n | (n, _) <- rustDeps, not (null n) ]

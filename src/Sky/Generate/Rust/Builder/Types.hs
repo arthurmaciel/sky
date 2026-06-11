@@ -400,6 +400,14 @@ data EmitCtx = EmitCtx
         --   `ecSolvedTypes` wholesale — doing so shadowed cross-module calls to
         --   same-named functions (Std.Money.fromString hiding Std.Decimal's →
         --   wrong arity/currying). Body lowering keeps using the flat map.
+    , ecForcedClosureParam :: Maybe String
+        -- ^ When set, a closure ARG's single param is annotated with this Rust
+        --   type (highest priority, before the ambiguous field-match
+        --   inferRecordClosureParam). Set by emitDefaultCall for a list HOF
+        --   (`List.filter (\m -> m.id == …) model.monitors`): the closure's
+        --   element type is the list arg's element type (StateMonitor), NOT the
+        --   field-match guess (StateAlertRule — 3 structs share `id`). Closes
+        --   17-skymon's filter/map ADT-mismatch.
     , ecStructFields :: Map.Map String (Map.Map String Can.Type)
         -- ^ Rust struct name -> (field name -> field type), over every record
         --   alias in the program. Lets a record-UPDATE arm

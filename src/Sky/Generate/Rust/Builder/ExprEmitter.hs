@@ -41,7 +41,7 @@ module Sky.Generate.Rust.Builder.ExprEmitter
     , flattenCons
     ) where
 
-import Data.List (intercalate, isSuffixOf, isPrefixOf, isInfixOf, sortBy, stripPrefix, minimumBy)
+import Data.List (intercalate, isSuffixOf, isPrefixOf, isInfixOf, sortBy, stripPrefix, minimumBy, nub)
 import Data.Char (isUpper, isDigit)
 import Numeric (showHex)
 import qualified Data.Map.Strict as Map
@@ -341,7 +341,10 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
             allCloneVars = Set.unions [ Set.fromList innerMulti
                                       , outerInherited
                                       , capturedSet ]
-            ctx' = ctx { ecCloneVars = allCloneVars, ecCopyVars = ecCopyVars ctx }
+            -- Clear ecForcedClosureParam for the BODY: it types only THIS
+            -- closure's own param, not any nested closure inside the body.
+            ctx' = ctx { ecCloneVars = allCloneVars, ecCopyVars = ecCopyVars ctx
+                       , ecForcedClosureParam = Nothing }
             annot = case ecPipeInnerType ctx of
                 Just t | length ps == 1 -> ": " ++ t
                 _ -> ""
@@ -350,6 +353,7 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
             -- Resolve it to its struct via field-access usage when the pipe
             -- annotation doesn't already cover it.
             annotPs p@(Ann.At _ (Can.PVar pn))
+                | Just s <- ecForcedClosureParam ctx, length ps == 1 = patternToRustParam p ++ ": " ++ s
                 | not (null annot) = patternToRustParam p ++ annot
                 | Just s <- inferRecordClosureParam ctx pn body = patternToRustParam p ++ ": " ++ s
             annotPs p = patternToRustParam p ++ annot
@@ -967,11 +971,25 @@ exprToRustInner ctx e = case e of
             -- sub-A.12 F2: detect partial application (Sky source has currying;
             -- Rust doesn't). If the callee is a top-level fn with known arity > supplied,
             -- wrap the residual args in a `move |..| f(supplied.., residual..)` closure.
+            -- Arity from the solved sig; falls back to the sibling def's param
+            -- count (ecSiblingFns) when the flat solvedTypes map misses it — a
+            -- same-module partial app `viewAlertRow model` whose 2-arity isn't
+            -- in solvedTypes was otherwise emitted as a direct 1-arg call
+            -- (E0061 + "expected Fn closure, found Html"; 17-skymon).
+            siblingArity nm = maybe 0 (length . fst) (Map.lookup nm (ecSiblingFns ctx))
             calleeArity = case fn of
-                Ann.At _ (Can.VarTopLevel _ fnName) ->
+                -- The siblingArity fallback is keyed on the BARE name, so it must
+                -- only fire for a TRUE same-module sibling — a QUALIFIED
+                -- cross-module call (`Decimal.fromString` from Std.Money, whose
+                -- own `fromString` has a different arity) would otherwise collide
+                -- and wrongly partial-apply (00-standard-libs regression). Require
+                -- the VarTopLevel's module == the current module.
+                Ann.At _ (Can.VarTopLevel m fnName) ->
                     case Map.lookup fnName (ecSolvedTypes ctx) of
-                        Just ty -> length (extractParamTypes ty)
-                        Nothing -> 0
+                        Just ty | n <- length (extractParamTypes ty), n > 0 -> n
+                        _ | ModuleName._name m == ecCurrentModule ctx -> siblingArity fnName
+                        _ -> 0
+                Ann.At _ (Can.VarLocal fnName) -> siblingArity fnName
                 _ -> 0
             isPartialApp = calleeArity > length args && not (null args)
             succeedArity = case fn of
@@ -995,9 +1013,25 @@ exprToRustInner ctx e = case e of
                let supplied = length args
                    missing = calleeArity - supplied
                    freshParams = ["__pa" ++ show i | i <- [1..missing]]
-                   suppliedStrs = map (exprToRustString ctx) args
-               in "(move |" ++ intercalate ", " freshParams ++ "| " ++
-                  calleeName ++ "(" ++ intercalate ", " (suppliedStrs ++ freshParams) ++ "))"
+                   -- The supplied args are CAPTURED into a `move` Fn closure
+                   -- (list HOFs call it per element), so each non-Copy captured
+                   -- var must clone at use or the first call moves it out (E0507
+                   -- on `canViewMonitor session` partial-applied into a filter).
+                   capturedSupplied = Set.unions (map collectVarLocals args)
+                   ctxS = ctx { ecCloneVars = Set.union (ecCloneVars ctx) capturedSupplied }
+                   suppliedStrs = map (exprToRustString ctxS) args
+                   -- The closure `move`-captures those vars, so the OUTER value
+                   -- would be moved away and unusable afterwards (E0382 on
+                   -- `List.map (viewAlertRow model) …` where model is used again
+                   -- for the list arg). Capture CLONES via a `{ let v = v.clone();
+                   -- … }` prelude so the original survives; uses inside still
+                   -- clone (ecCloneVars) since the Fn closure runs per element.
+                   capturedList = Set.toList capturedSupplied
+                   clonePrelude = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") capturedList
+                   theClosure = "(move |" ++ intercalate ", " freshParams ++ "| "
+                                ++ calleeName ++ "(" ++ intercalate ", " (suppliedStrs ++ freshParams) ++ "))"
+               in if null capturedList then theClosure
+                  else "{ " ++ clonePrelude ++ theClosure ++ " }"
            else
             case succeedArity of
             Just n ->
@@ -1339,6 +1373,30 @@ wrapStoredFn ctx (Ann.At region e) rendered
                  Just (Can.TLambda _ _) -> True
                  _                      -> False
 
+-- | The Rust element type of a list expression, from its solved region type
+-- (`List a` -> typeToRustString a). Used to type a list-HOF closure's param
+-- (`List.filter (\m -> …) xs` -> m : <elem of xs>). Nothing when the region
+-- type is absent or not a concrete List.
+listElemRustType :: EmitCtx -> Can.Expr -> Maybe String
+listElemRustType ctx (Ann.At region inner) =
+    case Map.lookup region (ecRegionTypes ctx) of
+        Just (Can.TType _ "List" [elemTy]) | not (hasTypeVars elemTy) ->
+            Just (typeToRustString (ecRecordMap ctx) elemTy)
+        -- The region type is often absent for a `record.field` list arg. Resolve
+        -- it from ecStructFields: across every struct, find fields named `field`
+        -- whose type is `List e`; if they all agree on `e`, use it.
+        _ -> case inner of
+            Can.Access _ (Ann.At _ field) ->
+                let elems = nub
+                        [ typeToRustString (ecRecordMap ctx) e
+                        | fm <- Map.elems (ecStructFields ctx)
+                        , Just (Can.TType _ "List" [e]) <- [Map.lookup field fm]
+                        , not (hasTypeVars e) ]
+                in case elems of
+                    [single] -> Just single
+                    _        -> Nothing
+            _ -> Nothing
+
 -- | Resolve the field-name -> declared-type map for the struct an update
 -- targets (`{ record | f = … }`). The record subexpr's solved region type is
 -- often absent for a bare param ref (`model`), so instead find the struct in
@@ -1521,7 +1579,24 @@ emitDefaultCall ctx fn calleeName args =
             | Ann.At _ (Can.List elems) <- a
             , kernelArgRustType (takeWhile (/= ':') calleeName) i == Just "Vec<String>"
                               = "vec![" ++ intercalate ", " (map coerceElemToString elems) ++ "]"
+            -- A closure ARG of a list HOF (`List.filter (\m -> m.id == …) xs`)
+            -- gets its single param typed from the LIST arg's element type, not
+            -- the ambiguous field-match (3 structs share `id` → wrong ADT).
+            | i == 0, isListHofClosurePos
+            , Ann.At _ (Can.Lambda _ _) <- a
+            , Just et <- listElemRustType ctx (last args)
+                              = argToRustString (ctx { ecForcedClosureParam = Just et }) noCloneFn a
             | otherwise       = argToRustString ctx noCloneFn a
+        bareCallee = takeWhile (/= ':') calleeName
+        -- list HOFs whose FIRST arg is the element-consuming closure and whose
+        -- LAST arg is the list (map/filter/find/any/all/concatMap/indexedMap/
+        -- partition). foldl/foldr put the list last too but their closure is
+        -- 2-arg (acc, elem) — excluded (the single-param guard skips them anyway).
+        isListHofClosurePos = bareCallee `elem`
+            [ "list_map", "list_filter", "list_find", "list_any", "list_all"
+            , "list_concat_map", "list_indexed_map", "list_partition"
+            , "list_map_consume", "list_take_while", "list_drop_while" ]
+            && not (null args)
         -- Coerce a db-param list element to String uniformly via `format!`.
         -- Sky's `List a` DB params are heterogeneous (Int/String/Bool — the Go
         -- runtime boxes as `any`), and a List ELEMENT's region carries the
