@@ -328,7 +328,7 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
     Can.Lambda ps body ->
         let paramNames = Set.fromList (concatMap patBindingVars ps)
             captured = Set.toList (Set.difference (collectVarLocals body) paramNames)
-            clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+            clones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") captured
             innerCounts = collectVarLocalsMulti body
             innerMulti = [ v | (v, c) <- Map.toList innerCounts, c >= 2 ]
             -- sub-A.10 C6: For move closures, EVERY captured non-Copy variable
@@ -1027,7 +1027,7 @@ exprToRustInner ctx e = case e of
                    -- … }` prelude so the original survives; uses inside still
                    -- clone (ecCloneVars) since the Fn closure runs per element.
                    capturedList = Set.toList capturedSupplied
-                   clonePrelude = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") capturedList
+                   clonePrelude = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") capturedList
                    theClosure = "(move |" ++ intercalate ", " freshParams ++ "| "
                                 ++ calleeName ++ "(" ++ intercalate ", " (suppliedStrs ++ freshParams) ++ "))"
                in if null capturedList then theClosure
@@ -1084,7 +1084,7 @@ exprToRustInner ctx e = case e of
         -- Clone captured locals used ≥ 2 times so each use gets its own copy.
         let counts = collectVarLocalsMulti expr
             multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
-            clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") multi
+            clones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") multi
             hasClone = not (null multi)
             exprStr = case expr of
                 Ann.At _ (Can.Lambda ps lambdaBody)
@@ -1094,7 +1094,7 @@ exprToRustInner ctx e = case e of
                 Ann.At _ (Can.Lambda ps lambdaBody) ->
                     let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
                         innerCapt = Set.toList (Set.difference (collectVarLocals lambdaBody) paramNames)
-                        innerClones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") innerCapt
+                        innerClones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") innerCapt
                         psStr = intercalate ", " (map patternToRustParam ps)
                         inner = "move |" ++ psStr ++ "| { " ++ exprToRustString ctx lambdaBody ++ " }"
                     in if null innerCapt && not hasClone then inner
@@ -1780,7 +1780,7 @@ defToRustString ctx (Can.Def (Ann.At _ name) [] body) =
     -- in scope at the prelude. Their use-site clones come from ecCloneVars.
     let counts = collectFreeVarLocalsMulti body
         multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
-        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") multi
+        clones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") multi
     in case body of
         Ann.At _ (Can.Lambda [] lambdaBody) ->
             let inner = "|| { " ++ exprToRustString ctx lambdaBody ++ " }"
@@ -1797,7 +1797,7 @@ defToRustString ctx (Can.Def (Ann.At _ name) [] body) =
 defToRustString ctx (Can.Def (Ann.At _ name) params body) =
     let paramNames = Set.fromList (concatMap patBindingVars params)
         captured   = Set.toList (Set.difference (collectVarLocals body) paramNames)
-        clones     = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") captured
+        clones     = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") captured
         innerMulti = [ v | (v, c) <- Map.toList (collectVarLocalsMulti body), c >= 2 ]
         ctx'       = ctx { ecCloneVars = Set.unions
                              [ Set.fromList innerMulti
@@ -1815,7 +1815,7 @@ defToRustString ctx (Can.Def (Ann.At _ name) params body) =
 defToRustString ctx (Can.DestructDef pat expr) =
     let counts = collectVarLocalsMulti expr
         multi  = [ v | (v, c) <- Map.toList counts, c >= 2 ]
-        clones = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") multi
+        clones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") multi
         exprStr = if null multi then exprToRustString ctx expr
                   else "{ " ++ clones ++ exprToRustString ctx expr ++ " }"
     in patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ exprStr
@@ -1835,11 +1835,11 @@ branchToRustString ctx (Can.CaseBranch pat body) =
         -- Inject .clone() / .to_vec() so the body sees owned values.
         prefix = case pat of
             Ann.At _ (Can.PCons headPat tailPat) ->
-                let hc = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") (patBindingVars headPat)
-                    tv = concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".to_vec(); ") (patBindingVars tailPat)
+                let hc = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") (patBindingVars headPat)
+                    tv = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".to_vec(); ") (patBindingVars tailPat)
                 in hc ++ tv
             Ann.At _ (Can.PList items) ->
-                concatMap (\v -> "let " ++ v ++ " = " ++ v ++ ".clone(); ") (concatMap patBindingVars items)
+                concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") (concatMap patBindingVars items)
             _ -> ""
     in if null prefix && not ("let " `isPrefixOf` bodyExpr) && not ("if " `isPrefixOf` bodyExpr)
        then patStr ++ " => " ++ bodyExpr
