@@ -601,6 +601,7 @@ exprToRustInner ctx e = case e of
             -- call sites whose match arms / context don't constrain them.
             pinE n
                 | n == "task_fail" = n ++ taskFailPin ctx
+                | n == "dict_empty" = n ++ dictEmptyPin ctx
                 | otherwise = case Map.lookup n kernelsNeedingErrorPin of
                     Just suffix -> n ++ suffix
                     Nothing     -> n
@@ -634,7 +635,8 @@ exprToRustInner ctx e = case e of
         let fnName = kernelToRust mod name
             -- sub-A.10 C4 + sub-A.11: per-kernel turbofish (E pinning + arity).
             tf = case Map.lookup fnName kernelsNeedingErrorPin of
-                Just _ | fnName == "task_fail" -> taskFailPin ctx
+                Just _ | fnName == "task_fail"  -> taskFailPin ctx
+                Just _ | fnName == "dict_empty" -> dictEmptyPin ctx
                 Just suffix -> suffix
                 Nothing     -> ""
         in if mod == "Basics" && name == "not" then "!"
@@ -1324,6 +1326,19 @@ wrapStoredFn ctx (Ann.At region e) rendered
         _ -> case Map.lookup region (ecRegionTypes ctx) of
                  Just (Can.TLambda _ _) -> True
                  _                      -> False
+
+-- | Value-type turbofish for `dict_empty` (`Dict.empty : Dict k v ->
+-- HashMap<String, V>`). The default `::<i64>` (Types.kernelsNeedingErrorPin)
+-- mistypes an empty dict whose VALUE is anything else — e.g. a record field
+-- `configInput : Dict String String` initialised to `Dict.empty` rendered as
+-- `dict_empty::<i64>()` => HashMap<String,i64> ≠ HashMap<String,String>
+-- (17-skymon). When the wrapping region's solved type is a concrete
+-- `Dict _ v`, pin V; otherwise keep the i64 default.
+dictEmptyPin :: EmitCtx -> String
+dictEmptyPin ctx = case ecExpectedType ctx of
+    Just (Can.TType _ "Dict" [_, v]) | not (hasTypeVars v) ->
+        "::<" ++ typeToRustString (ecRecordMap ctx) v ++ ">"
+    _ -> "::<i64>"
 
 taskFailPin :: EmitCtx -> String
 taskFailPin ctx

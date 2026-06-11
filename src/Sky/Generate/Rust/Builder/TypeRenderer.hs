@@ -188,7 +188,16 @@ typeToRustString recordMap t = case t of
     Can.TType modName name [] ->
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-        in toCamelCase (modPrefix ++ name)
+        -- Empty modName = an unresolved cross-module ADT ref (`Html Msg` in a
+        -- module that doesn't import the type's home). Resolve via the global
+        -- @adt@ map (built in buildProgram) so `Msg` -> `StateMsg` rather than a
+        -- bare, undefined `Msg` (17-skymon). Same-module refs carry modName and
+        -- skip this. Unknown names fall back to the bare camelCase as before.
+        in if null modStr
+           then case Map.lookup ("@adt@" ++ name) recordMap of
+                    Just rn -> rn
+                    Nothing -> toCamelCase name
+           else toCamelCase (modPrefix ++ name)
     Can.TType modName name args ->
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"

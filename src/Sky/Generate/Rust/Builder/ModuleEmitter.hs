@@ -595,7 +595,25 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
                    else (RStructDef name gens rustFlds : defs, Map.insert key name km)
                 ) ([], Map.empty) (Map.toList anonEntries)
         
-        recordMap = Map.union aliasMap anonKeyMap
+        -- Cross-module ADT name resolution. A reusable module can reference a
+        -- type defined elsewhere WITHOUT importing it (`Ui.Charts` sig
+        -- `… -> Html Msg` where `Msg` lives in `State`), so the canonicaliser
+        -- leaves that TType's modName EMPTY and the renderer would emit a bare,
+        -- undefined `Msg` instead of `StateMsg` (17-skymon E0412). Build a
+        -- bareName -> Rust-type-name map over EVERY module's unions + aliases,
+        -- keyed by a `@adt@` sentinel so it can't collide with the record
+        -- field-key entries above; typeToRustString consults it for empty-modName
+        -- TTypes. Same-module refs already carry their modName, so this only
+        -- fires on the genuinely-unresolved cross-module case.
+        adtNameMap = Map.fromList $ concatMap
+            (\m ->
+                let modStr = ModuleName._name (Can._name m)
+                    mangled = map (\c -> if c == '.' then '_' else c) modStr
+                    rustName nm = toCamelCase (mangled ++ "_" ++ nm)
+                in [ ("@adt@" ++ nm, rustName nm)
+                   | nm <- Map.keys (Can._unions m) ++ Map.keys (Can._aliases m) ])
+            mods
+        recordMap = Map.unions [aliasMap, anonKeyMap, adtNameMap]
 
         ctorArity = Map.fromList
             [ (name, Map.size fields)
