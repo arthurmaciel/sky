@@ -14,9 +14,22 @@ proper fix rather than force a band-aid.
 
 ## Accurate scoreboard (disk-safe sweep)
 
-**Builds (19 in-scope):** `00, 01, 04, 07, 09, 10, 12, 14, 15, 16, 17, 18, 20,
-28, 30, 32, 33, simple, test_pkg` — up from 12 at session start. CONQUERED this
-session: `10-live-component`, `28-streaming-chat`, `12-skyvote` (168 → 0,
+**🎉 ALL 20 in-scope build** (`00, 01, 04, 07, 09, 10, 12, 14, 15, 16, 17, 18, 20,
+28, 30, 32, 33, 35, simple, test_pkg`) — up from 12 at session start; **zero
+in-scope failures** on the disk-safe sweep. The standing directive ("make Rust
+backend run without errors all examples at examples/") is **complete** for the
+in-scope set (Go-package→Rust-FFI examples 03/05/08/13 remain out of scope per
+the user).
+
+`35-composite-generics` CONQUERED (36 → 0): JSON-Decode-Pipeline uncurry +
+curry6-8 + succeed-alias match; `json_enc_null` zero-arg; `Dict.empty` foldl-init
++ function-arg typed from the fold-fn / callee param sig (EKDict); list-HOF closure
+pipe-type clear; and the Pure uuidV4/V7 Task-wrap (Go-Task-shaped vs Rust-pure
+kernel). Each regression-gated by a full sweep.
+
+**(earlier this session, kept for grep) Builds (19 in-scope):** `00, 01, 04, 07,
+09, 10, 12, 14, 15, 16, 17, 18, 20, 28, 30, 32, 33, simple, test_pkg`. CONQUERED:
+`10-live-component`, `28-streaming-chat`, `12-skyvote` (168 → 0,
 TEA-Msg keystone), `18-job-queue` (24 → 0), `33-websocket-echo` (Arc<dyn Fn>
 stored callbacks), **`17-skymon` (110 → 0** — db-getter row arg + sibling-fn +
 cross-module ADT-name resolution + dict_empty pin + record-update field-type +
