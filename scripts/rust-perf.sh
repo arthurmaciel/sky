@@ -44,22 +44,39 @@ probe_coldstart_cli() { # $1=binary -> median ms
   python3 -c 'import json;d=json.load(open("/tmp/perf-hf.json"));print(d["results"][0]["median"]*1000)'
 }
 
+# Bounded readiness wait — poll `curl` up to READY_TIMEOUT_S (default 10s) with a
+# 0.1s sleep, never a busy-spin. Returns 0 when the server answers, 1 if it dies
+# or the deadline passes. A server that binds a port the probe can't reach (an
+# example hardcoding 8000, a crash-on-boot) must NOT hang the harness — the
+# original unbounded `until curl; do kill -0 || break; done` busy-looped forever
+# while the process stayed alive (stalled --baseline on the server shape).
+READY_TIMEOUT_S="${READY_TIMEOUT_S:-10}"
+wait_ready() { # $1=pid $2=port -> 0 ready / 1 not
+  local tries=0 max=$(( ${READY_TIMEOUT_S%.*} * 10 ))
+  until curl -s -o /dev/null "http://127.0.0.1:$2/"; do
+    kill -0 "$1" 2>/dev/null || return 1
+    tries=$((tries+1)); [ "$tries" -ge "$max" ] && return 1
+    sleep 0.1
+  done
+}
+
 probe_coldstart_server() { # $1=binary -> median ms (exec→first 200)
   local samples=() i port pid t0 t1
   for i in $(seq 1 "$COLD_RUNS"); do
     port=$(free_port); t0=$(date +%s.%N)
     SKY_LIVE_PORT="$port" PORT="$port" "$1" >/dev/null 2>&1 & pid=$!
-    until curl -s -o /dev/null "http://127.0.0.1:$port/"; do kill -0 "$pid" 2>/dev/null || break; done
+    wait_ready "$pid" "$port" || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; continue; }
     t1=$(date +%s.%N); kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     samples+=("$(pyf "($t1-$t0)*1000")")
   done
+  [ ${#samples[@]} -eq 0 ] && { echo 0; return; }
   printf '%s\n' "${samples[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int(NR/2)+1]}'
 }
 
 start_server() { # $1=binary -> echoes "pid port"
   local port; port=$(free_port)
   SKY_LIVE_PORT="$port" PORT="$port" "$1" >/dev/null 2>&1 & local pid=$!
-  until curl -s -o /dev/null "http://127.0.0.1:$port/"; do kill -0 "$pid" 2>/dev/null || return 1; done
+  wait_ready "$pid" "$port" || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 1; }
   echo "$pid $port"
 }
 
