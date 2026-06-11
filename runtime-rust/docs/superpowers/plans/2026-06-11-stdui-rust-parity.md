@@ -150,62 +150,84 @@ git commit -m "test(rust): Std.Ui render-diff harness + T0-text fixture (capture
 
 ---
 
-## Task 2: T0 smoke — fix the `collectVarLocals` non-exhaustive crash
+## Task 2: T0 smoke — foundational Std.Ui codegen (REVISED per Task-1 discovery)
+
+> **Plan correction (2026-06-11):** the original premise (a `collectVarLocals`
+> non-exhaustive crash at `ExprEmitter.hs:283-320`) was **stale** — measured on
+> 26-ui-showcase before a compiler rebuild. With the current binary the trivial
+> `T0-text` fixture (`Ui.text "hello"`) lowers fine and the crash does NOT fire;
+> instead `cargo build` reports **~140 Rust errors** dominated by three
+> *systematic, foundational* codegen gaps (each likely one root-cause fix, not N
+> individual ones). This task closes them so `T0-text` byte-matches Go. The
+> `collectVarLocals` arm fix may still be needed later (a richer fixture can
+> trigger it); add it then, with the fixture that surfaces it.
 
 **Files:**
-- Modify: `src/Sky/Generate/Rust/Builder/ExprEmitter.hs:290` (the `Can.Let` arm of `collectVarLocals`)
+- Modify: `src/Sky/Generate/Rust/Builder/*` (ADT/type emitter + constructor emitter)
+- Modify: `runtime-rust/src/sky_runtime/live/*` (provide `Attribute`/`Event`/`Html` types + `html_render_` if missing)
 - Create: `tests/ui-parity/corpus/T0-el.sky`, `tests/ui-parity/corpus/T0-empty.sky`
 
-- [ ] **Step 1: Confirm the crash cause**
+The three foundational gaps (from `/tmp/uip-build.log` + a fresh `cargo build` of
+the `T0-text` harness output `tests/ui-parity/harness/sky-out/Rust/`):
 
-`collectVarLocals`'s `go` (line 283) matches `Can.Let (Can.Def …)` only (line 290), but `Can.Let !Def !Expr` has `Def = Def | TypedDef | DestructDef` (`src/Sky/AST/Canonical.hs:49-55`). An annotated `let x : T = …` (a `TypedDef`) or destructuring `let (a,b) = …` (a `DestructDef`) matches no arm → non-exhaustive. Std.Ui's `renderElement`/`layout` use annotated `let`s pervasively.
+- [ ] **Step 1 — Recursive ADT boxing (E0072 ×1, E0391 cycle ×2).** `StdUiLength`
+  (`Length = … | Minimum Int Length | Maximum Int Length`) emits as
+  `enum StdUiLength { …, Min(i64, StdUiLength), … }` — infinite size. The Rust ADT
+  emitter must `Box<…>` the *recursive back-edges* (fields whose type is the enum
+  being defined, directly or via a cycle). Find the union/ADT emitter in
+  `src/Sky/Generate/Rust/Builder/TypeEmitter.hs` (or wherever `pub enum` is
+  emitted); detect self/mutually-recursive field types and wrap them
+  `Box<T>` at the field, with matching `Box::new(...)` at construction and `*`/
+  deref at the match sites. Rebuild `cabal build exe:sky`, regen the harness,
+  confirm E0072/E0391 are gone.
 
-- [ ] **Step 2: Add the missing `Can.Let` arms (the fix)**
+- [ ] **Step 2 — Polymorphic ADT-constructor type-param inference (E0282 ×73,
+  E0283 ×34 — the dominant cluster).** Constructors of a phantom-polymorphic ADT
+  emit bare: `StdUiElement::Empty` / `StdUiElement::Text(s)` where Rust cannot
+  infer `msg` (rustc's own hint is the turbofish `StdUiElement::<msg>::Empty`).
+  Root cause: a nullary/`msg`-free constructor of `Element msg` / `Html msg` /
+  `Attribute msg` is emitted without propagating the enclosing function's generic
+  `msg`. Fix in the constructor emitter so a phantom-typed constructor either (a)
+  carries the enclosing fn's type param (`::<MsgParam>`) when one is in scope, or
+  (b) emits an explicit turbofish from the expected type. This is the same
+  type-param-scoping machinery used for parametric record aliases (`LowerCtx`
+  enclosing-typeParams, the #521 family) — extend it to ADT constructors. One
+  systematic fix should clear most of the 107.
 
-Replace the single `Can.Let (Can.Def …)` arm at `ExprEmitter.hs:290-292` with all three `Def` shapes:
-```haskell
-        Can.Let (Can.Def (Ann.At _ name) _ defBody) body ->
-            let bound' = Set.insert name bound
-            in Set.union (go bound' defBody) (go bound' body)
-        Can.Let (Can.TypedDef (Ann.At _ name) _ _ defBody _) body ->
-            let bound' = Set.insert name bound
-            in Set.union (go bound' defBody) (go bound' body)
-        Can.Let (Can.DestructDef pat defBody) body ->
-            let bound' = foldr Set.insert bound (patBindingVars pat)
-            in Set.union (go bound defBody) (go bound' body)
-```
-(`TypedDef`'s extra fields are `FreeVars`, `[TypedPattern]`, and the result `Type` — all irrelevant to free-var capture, so they are `_`. `DestructDef` binds the pattern's vars in the body, mirroring the existing `LetDestruct` arm at line 297.)
+- [ ] **Step 3 — Missing types + render kernel (E0412 ×3, E0425 ×5, E0433 ×2,
+  E0790/E0609).** `cannot find type Attribute/Event/Html in sky_runtime` and
+  `cannot find function html_render_`. Determine whether the Std.Html/Std.Ui
+  ADTs (`Html msg`, `Attribute msg`, `Event msg`) should be emitted as user types
+  (preferred — they're pure-Sky stdlib ADTs) or provided by `sky_runtime`, and
+  make the reference site agree with the definition site. Provide / wire
+  `html_render_` (the `htmlRender` kernel — `live/mod.rs:798` already maps the
+  name; ensure the function exists and is in scope for generated code). The
+  E0609 `no field` + E0308 mismatches are likely downstream of Steps 1-2; re-check
+  after them.
 
-- [ ] **Step 3: Rebuild + verify the crash is gone, T0-text builds**
+- [ ] **Step 4 — Iterate `T0-text` to a clean cargo build, then byte-match.**
+  After Steps 1-3, `SKY_BIN=$(cabal list-bin exe:sky) scripts/ui-parity.sh T0-text`
+  should reach `PASS` or `DIFF`. Drive any `DIFF` to `PASS`: Layer-1 (structure)
+  → `src/Sky/Generate/Rust/Builder/*`; Layer-2 (style/attr/escaping bytes) →
+  `runtime-rust/src/sky_runtime/live/html.rs` to match Go's `HtmlRender`. The Go
+  golden is `<div style="min-height: 100vh; display: flex; flex-direction: column;"><style>html,body{min-height:100%;margin:0;padding:0}</style>hello</div>`.
 
-Run:
-```bash
-export PATH="$HOME/.ghcup/bin:$PATH"; cabal build exe:sky 2>&1 | grep -iE "error:|Linking"
-SKY_BIN=$(cabal list-bin exe:sky) scripts/ui-parity.sh T0-text
-```
-Expected: either `PASS T0-text`, or `DIFF T0-text` (no longer a build crash). A DIFF means the *next* gap (a serializer or lowering diff) — keep going to Step 4; do NOT stop at a build-crash.
+- [ ] **Step 5 — Add the rest of T0 + goldens.** `tests/ui-parity/corpus/T0-el.sky`
+  (`view = Ui.el [] (Ui.text "x")`) and `T0-empty.sky` (`view = Ui.none`). Capture
+  goldens (`--update-golden`), drive both to `PASS`.
 
-- [ ] **Step 4: Drive T0-text to PASS**
-
-If Step 3 showed `DIFF`, inspect the `diff` output. A Layer-1 diff (wrong/missing HTML structure) → fix `src/Sky/Generate/Rust/Builder/*`. A Layer-2 diff (style/attr/escaping bytes) → fix `runtime-rust/src/sky_runtime/live/html.rs` to match Go's `runtime-go/rt/live.go` `HtmlRender`. Re-run until `PASS T0-text`.
-
-- [ ] **Step 5: Add the rest of T0 + capture goldens**
-
-`tests/ui-parity/corpus/T0-el.sky` (same scaffold as T0-text, `view = Ui.el [] (Ui.text "x")`) and `tests/ui-parity/corpus/T0-empty.sky` (`view = Ui.none`). Then:
-```bash
-SKY_BIN=$(cabal list-bin exe:sky) scripts/ui-parity.sh --update-golden T0-el
-SKY_BIN=$(cabal list-bin exe:sky) scripts/ui-parity.sh --update-golden T0-empty
-SKY_BIN=$(cabal list-bin exe:sky) scripts/ui-parity.sh   # all T0 PASS
-```
-Expected: `3 pass / 0 fail` for the T0 fixtures. Drive any DIFF to PASS as in Step 4.
-
-- [ ] **Step 6: Regression gate + commit**
-
+- [ ] **Step 6 — Regression gate + commit.**
 ```bash
 SKY_BIN=$(cabal list-bin exe:sky) bash scripts/rust-sweep.sh   # MUST be 20 in-scope, 0 failing
-git add src/Sky/Generate/Rust/Builder/ExprEmitter.hs tests/ui-parity/corpus/T0-*.sky tests/ui-parity/golden/T0-*.html
-git commit -m "fix(rust): collectVarLocals handles Let TypedDef/DestructDef — Std.Ui T0 renders byte-identical"
+git add src/Sky/Generate/Rust/Builder runtime-rust/src/sky_runtime/live tests/ui-parity/corpus/T0-*.sky tests/ui-parity/golden/T0-*.html
+git commit -m "feat(rust): foundational Std.Ui codegen (recursive-box + poly-ctor msg + Html types/kernel) — T0 byte-identical"
 ```
+
+> **Note for the implementer:** Steps 1-3 are interdependent foundational
+> codegen — approach with a capable model and verify each against a fresh
+> `cargo build` of the regenerated harness. If Step 2 (the 107-error cluster)
+> proves to be more than one root cause, report `DONE_WITH_CONCERNS` after
+> clearing what one systematic fix covers, and the controller will sub-slice it.
 
 ---
 
