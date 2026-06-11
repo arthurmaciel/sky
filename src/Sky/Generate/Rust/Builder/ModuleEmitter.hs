@@ -547,9 +547,15 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
                 | Just (kMod, kFn) <- Map.lookup (ModuleName._name m, kn) (ecKernelAliases ctx)
                   -> kernelToRust kMod kFn `elem` ["uuid_v4", "uuid_v7"]
             _ -> False
-        tdWrapped = if "SkyTask<" `isPrefixOf` ret && isRustPureGoTaskKernel
-                    then "task_succeed({ " ++ tdBody ++ " })"
-                    else tdBody
+        -- Std.Ui.onSubmit's `a -> Attribute b` body (a constant-`a` closure into
+        -- a `b` form slot) is not expressible in Rust's static types — but every
+        -- applied call site is peepholed to an inline form-decode, so the body is
+        -- dead. Emit `unreachable!()`; the signature stays for any value-use.
+        tdWrapped
+            | ecCurrentModule ctx == "Std.Ui" && name == "onSubmit" = "unreachable!()"
+            | "SkyTask<" `isPrefixOf` ret && isRustPureGoTaskKernel
+                    = "task_succeed({ " ++ tdBody ++ " })"
+            | otherwise = tdBody
     in RustFunction rustName genDecl params ret (preludes ++ tdWrapped)
 defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
     let vars = intercalate "_" (patBindingVars pat)

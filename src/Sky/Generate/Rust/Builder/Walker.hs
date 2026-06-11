@@ -278,7 +278,10 @@ collectFormTargets :: Map.Map String String -> Map.Map Ann.Region Can.Type -> [C
 collectFormTargets recordMap regionTypes = walkExprs onExpr
   where
     onExpr (Ann.At _ (Can.Call (Ann.At _ (Can.VarTopLevel mdl "onSubmit")) [Ann.At hregion _]))
-        | ModuleName._name mdl == "Std.Html.Events" =
+        -- Both Std.Html.Events.onSubmit AND Std.Ui.onSubmit (which wraps it) are
+        -- inlined to a form-decode at their call site, so the handler's form
+        -- record type needs `#[derive(Deserialize)]`.
+        | ModuleName._name mdl `elem` ["Std.Html.Events", "Std.Ui"] =
             let mTy = Map.lookup hregion regionTypes
             in case formTargetRustType recordMap mTy of
                 Just rustT -> Set.singleton rustT

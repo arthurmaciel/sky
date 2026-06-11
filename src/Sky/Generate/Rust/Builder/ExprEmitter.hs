@@ -1030,6 +1030,28 @@ exprToRustInner ctx e = case e of
                     "Attribute::EventAttr(Event::OnForm(\"submit\".to_string(), "
                         ++ "std::sync::Arc::new({ let __m = " ++ handlerStr ++ "; "
                         ++ "move |_fd| Some(__m.clone()) })))"
+    -- `Std.Ui.onSubmit handler` (= `AttrEvent (Event.onSubmit handler)`). Same
+    -- call-site inline as Events.onSubmit, but the form type `T` is known HERE
+    -- (`Ui.onSubmit DoSignIn`) not inside Ui.onSubmit's `a -> Attribute b` body
+    -- where the handler is a generic param — so the OnRaw/`any` path emits a
+    -- broken `Some(a)` against the OnForm `Option<b>` slot, and the generic
+    -- bound on `a` (PartialEq/Debug) rejects a fn item. Inline + wrap in the
+    -- Std.Ui Attribute's AttrEvent; the generic Ui.onSubmit body then DCEs out.
+    Can.Call (Ann.At _ (Can.VarTopLevel mdl "onSubmit")) [handlerArg@(Ann.At hregion _)]
+        | ModuleName._name mdl == "Std.Ui" ->
+            let handlerStr = exprToRustString ctx handlerArg
+                mHandlerTy = Map.lookup hregion (ecRegionTypes ctx)
+                inner = case formTargetRustType (ecRecordMap ctx) mHandlerTy of
+                    Just rustT ->
+                        "Attribute::EventAttr(Event::OnForm(\"submit\".to_string(), "
+                            ++ "std::sync::Arc::new({ let __h = " ++ handlerStr ++ "; "
+                            ++ "move |fd| sky_runtime::decode_form_or_warn::<" ++ rustT
+                            ++ ">(fd).map(|t| __h(t)) })))"
+                    Nothing ->
+                        "Attribute::EventAttr(Event::OnForm(\"submit\".to_string(), "
+                            ++ "std::sync::Arc::new({ let __m = " ++ handlerStr ++ "; "
+                            ++ "move |_fd| Some(__m.clone()) })))"
+            in "StdUiAttribute::AttrEvent(" ++ inner ++ ")"
     Can.Call fn args ->
         let calleeName = exprToRustString ctx fn
             -- sub-A.12 F2: detect partial application (Sky source has currying;
