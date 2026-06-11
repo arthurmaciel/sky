@@ -297,9 +297,9 @@ collectVarLocals = go Set.empty
         Can.LetDestruct pat expr body ->
             let bound' = foldr Set.insert bound (patBindingVars pat)
             in Set.union (go bound expr) (go bound' body)
-        Can.Case _ branches -> foldl (\a (Can.CaseBranch pat b) ->
+        Can.Case scrut branches -> foldl (\a (Can.CaseBranch pat b) ->
             let bound' = foldr Set.insert bound (patBindingVars pat)
-            in Set.union a (go bound' b)) Set.empty branches
+            in Set.union a (go bound' b)) (go bound scrut) branches
         Can.If branches elseBranch ->
             foldl (\a (c, t) -> Set.union a (Set.union (go bound c) (go bound t))) (go bound elseBranch) branches
         Can.Binop _ _ _ _ a b -> Set.union (go bound a) (go bound b)
@@ -352,12 +352,15 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
             -- can't be inferred by Rust from the sibling list arg → E0282.
             -- Resolve it to its struct via field-access usage when the pipe
             -- annotation doesn't already cover it.
-            annotPs p@(Ann.At _ (Can.PVar pn))
-                | Just s <- ecForcedClosureParam ctx, length ps == 1 = patternToRustParam p ++ ": " ++ s
+            -- ecForcedClosureParam types the ELEMENT param, which is param 0 for
+            -- every list HOF (filter/map: the only param; foldl/foldr: the
+            -- element comes before the accumulator). Annotate index 0 only.
+            annotPsIx i p@(Ann.At _ (Can.PVar pn))
+                | i == (0 :: Int), Just s <- ecForcedClosureParam ctx = patternToRustParam p ++ ": " ++ s
                 | not (null annot) = patternToRustParam p ++ annot
                 | Just s <- inferRecordClosureParam ctx pn body = patternToRustParam p ++ ": " ++ s
-            annotPs p = patternToRustParam p ++ annot
-            psStr = intercalate ", " (map annotPs ps)
+            annotPsIx _ p = patternToRustParam p ++ annot
+            psStr = intercalate ", " (zipWith annotPsIx [0..] ps)
             retAnnot = case ecPipeInnerType ctx of
                 Just t -> " -> SkyTask<" ++ t ++ ">"
                 Nothing -> ""
@@ -1139,10 +1142,14 @@ exprToRustInner ctx e = case e of
                 let ctxF = case Map.lookup f recFields of
                         Just ft -> ctx { ecRegionTypes = Map.insert vr ft (ecRegionTypes ctx) }
                         Nothing -> ctx
-                in "result." ++ f ++ " = " ++ wrapStoredFn ctxF expr (exprToRustString ctxF expr)
-        in "{ let mut result = " ++ exprToRustString ctx record ++ "; " ++
+                -- `__rec`, not `result`: a user binding named `result` in the
+                -- update VALUE (`{ model | gameStatus = result }`) would be
+                -- shadowed by the temp and read back the half-built record
+                -- (16-skychess `result.gameStatus = result.clone()`).
+                in "__rec." ++ f ++ " = " ++ wrapStoredFn ctxF expr (exprToRustString ctxF expr)
+        in "{ let mut __rec = " ++ exprToRustString ctx record ++ "; " ++
         intercalate "; " (map emitUpd sorted) ++
-        "; result }"
+        "; __rec }"
     Can.Record fields ->
         let key = intercalate "," (Map.keys fields)
         in case Map.lookup key (ecRecordMap ctx) of
@@ -1600,7 +1607,10 @@ emitDefaultCall ctx fn calleeName args =
         isListHofClosurePos = bareCallee `elem`
             [ "list_map", "list_filter", "list_find", "list_any", "list_all"
             , "list_concat_map", "list_indexed_map", "list_partition"
-            , "list_map_consume", "list_take_while", "list_drop_while" ]
+            , "list_map_consume", "list_take_while", "list_drop_while"
+            -- foldl/foldr: 2-param closure (element, acc); param 0 is the element
+            -- (annotPsIx types only index 0), element type from the list (last arg).
+            , "list_foldl", "list_foldr" ]
             && not (null args)
         -- Coerce a db-param list element to String uniformly via `format!`.
         -- Sky's `List a` DB params are heterogeneous (Int/String/Bool — the Go
