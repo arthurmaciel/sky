@@ -5,10 +5,23 @@ module Sky.Generate.Rust.Builder.Naming
   , moduleNameToRust
   , rustSafeIdent
   , kernelCtorToRust
+  , rustFnName
   ) where
 
 import Data.Char (toLower, toUpper, isUpper)
+import qualified Data.Map.Strict as Map
 import qualified Sky.Sky.ModuleName as ModuleName
+
+-- | The emitted Rust name for a Sky top-level function, consulting the
+-- collision-rename map. `toSnakeCase (modPrefix ++ "_" ++ name)` is NOT
+-- injective — `Std.Ui.borderRounded` and `Std.Ui.Border.rounded` both produce
+-- `std_ui_border_rounded` (Go keeps them apart via preserved CamelCase). The
+-- map (built in buildProgram) holds the de-collided name for exactly those
+-- colliders; every other name uses the default snake_case form. Both def and
+-- call sites route through here so the renamed names stay consistent.
+rustFnName :: Map.Map (String, String) String -> String -> String -> String
+rustFnName renames modPrefix name =
+    Map.findWithDefault (toSnakeCase (modPrefix ++ "_" ++ name)) (modPrefix, name) renames
 
 -- | Convert Sky module-prefixed names to Rust conventions:
 --   Types:     Sky_Core_Error_Error  →  SkyCoreErrorError     (CamelCase)

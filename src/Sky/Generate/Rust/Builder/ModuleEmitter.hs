@@ -27,7 +27,7 @@ import Sky.Generate.Rust.Builder.Types
     )
 import Sky.Generate.Rust.Builder.Naming
     ( toCamelCase, toSnakeCase, moduleNameToRust, rustSafeIdent, kernelCtorToRust
-    , anonStructName
+    , anonStructName, rustFnName
     )
 import Sky.Generate.Rust.Builder.Kernel (kernelToRust, kernelSigPrefix, splitKernelName)
 import Sky.Generate.Rust.Builder.Pattern
@@ -67,7 +67,7 @@ buildModule ctx0 mod =
                    , ecCurrentModule = ModuleName._name (Can._name mod) }
         items = declsToRustItems ctx modPrefix (Can._decls mod)
         -- Existing function names after prefixing (to avoid double-emit)
-        prefixed = map (\(RustFunction n g p r b) -> toSnakeCase (modPrefix ++ "_" ++ n)) 
+        prefixed = map (\(RustFunction n g p r b) -> rustFnName (ecNameRenames ctx) modPrefix n)
                     [ f | f@(RustFunction _ _ _ _ _) <- items ]
         existingNames = Set.fromList prefixed
         -- Synthesize record alias constructors
@@ -104,7 +104,7 @@ buildModule ctx0 mod =
             -- the `<main>` builder) module-prefixes like any other def so its
             -- call site `Html.main` → `std_html_main` resolves.
             | n == "sky_main" = RustFunction n g p r b
-            | otherwise = RustFunction (toSnakeCase (modPrefix ++ "_" ++ n)) g p r b
+            | otherwise = RustFunction (rustFnName (ecNameRenames ctx) modPrefix n) g p r b
         prefixItem (RustStruct n f) = RustStruct (toCamelCase (modPrefix ++ "_" ++ n)) f
         prefixItem (RustEnum n v) = RustEnum (toCamelCase (modPrefix ++ "_" ++ n)) v
         prefixItem (RustTypeAlias n t) = RustTypeAlias (toCamelCase (modPrefix ++ "_" ++ n)) t
@@ -121,6 +121,18 @@ buildModule ctx0 mod =
 -- | Collect a module's top-level function definitions as bare-name ->
 -- (params, body), for sibling-call param inference (ecSiblingFns). Both Def and
 -- TypedDef arms; TypedDef's params are the pattern halves of its annotated pairs.
+-- | Bare names of every top-level Def / TypedDef in a module's decls (used to
+-- build the collision-rename map). DestructDef has no single name → skipped.
+topLevelDefNames :: Can.Decls -> [String]
+topLevelDefNames = go
+  where
+    go (Can.Declare def rest)         = nameOf def ++ go rest
+    go (Can.DeclareRec def defs rest) = concatMap nameOf (def : defs) ++ go rest
+    go Can.SaveTheEnvironment         = []
+    nameOf (Can.Def (Ann.At _ n) _ _)          = [n]
+    nameOf (Can.TypedDef (Ann.At _ n) _ _ _ _) = [n]
+    nameOf _                                    = []
+
 collectSiblingFns :: Can.Decls -> Map.Map String ([Can.Pattern], Can.Expr)
 collectSiblingFns = go
   where
@@ -743,7 +755,7 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
             , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "", ecStructFields = structFields, ecForcedClosureParam = Nothing, ecEnclosingRet = Nothing, ecGenParams = [] }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "", ecStructFields = structFields, ecForcedClosureParam = Nothing, ecEnclosingRet = Nothing, ecGenParams = [], ecNameRenames = nameRenames }
         -- Multi-module signature scoping. The flat `ecSolvedTypes` (`_stEnv`)
         -- collides on bare names across modules, so a DEP module's function
         -- (e.g. `Lib.Db.exec : String -> List String -> Task Error ()`) whose
@@ -764,6 +776,22 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
         usage = analyzeKernelUsage mods
         zeroArgDefs = collectZeroArgDefs mods
         noCloneVars = Set.empty
+        -- Collision-rename map for non-injective name mangling. Two distinct
+        -- Sky functions can snake_case to the same Rust name (e.g.
+        -- `Std.Ui.borderRounded` and `Std.Ui.Border.rounded` → both
+        -- `std_ui_border_rounded`). For every default name produced by >1
+        -- distinct (modPrefix, bareName), rename each member to
+        -- `toSnakeCase modPrefix ++ "_" ++ bareName` (bareName verbatim, so the
+        -- preserved camelCase keeps them apart, mirroring the Go backend).
+        allDefNames = nub
+            [ (moduleNameToRust (Can._name m), dn)
+            | m <- mods, dn <- topLevelDefNames (Can._decls m), not (null dn) ]
+        nameRenames =
+            let grouped = Map.fromListWith (++)
+                    [ (toSnakeCase (mp ++ "_" ++ n), [(mp, n)]) | (mp, n) <- allDefNames ]
+                collisions = [ ks | ks <- Map.elems grouped, length ks >= 2 ]
+            in Map.fromList
+                [ ((mp, n), toSnakeCase mp ++ "_" ++ n) | ks <- collisions, (mp, n) <- ks ]
         existingTypes = concatMap (\m ->
             let skyModName = ModuleName._name (Can._name m)         -- "Std.Decimal" — un-mangled, for runtimeOpaqueTypes lookup
                 prefix     = moduleNameToRust (Can._name m)          -- "Std_Decimal" — mangled, for codegen names

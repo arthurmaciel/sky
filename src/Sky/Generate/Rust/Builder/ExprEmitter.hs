@@ -74,6 +74,7 @@ import Sky.Generate.Rust.Builder.Kernel
 import Sky.Generate.Rust.Builder.Naming
     ( rustSafeIdent
     , kernelCtorToRust
+    , rustFnName
     , toSnakeCase
     , toCamelCase
     )
@@ -105,7 +106,8 @@ substVar ctx name inline = go
                then kernelName
                else case Map.lookup (modName, n) (ecKernelAliases ctx) of
                     Just (kMod, kFn) -> kernelToRust kMod kFn
-                    Nothing -> if Set.member (modPrefix, n) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
+                    Nothing -> let emitName = rustFnName (ecNameRenames ctx) modPrefix n
+                               in if Set.member (modPrefix, n) (ecZeroArgDefs ctx) then emitName ++ "()" else emitName
         Can.VarKernel mod n ->
             let fnName = kernelToRust mod n
             in if Set.member (mod, n) (ecZeroArgDefs ctx) then fnName ++ "()" else fnName
@@ -651,7 +653,11 @@ exprToRustInner ctx e = case e of
                         -- the fn's own param, which the pin must not override.
                         let pin = if ecInGenericFn ctx then ""
                                   else Map.findWithDefault "" (modName, name) topLevelErrorPin
-                        in if Set.member (modPrefix, name) (ecZeroArgDefs ctx) then fnName ++ pin ++ "()" else fnName ++ pin
+                            -- Use the collision-renamed name for the actual
+                            -- emission (kernel discrimination above stays on the
+                            -- default `fnName`).
+                            emitName = rustFnName (ecNameRenames ctx) modPrefix name
+                        in if Set.member (modPrefix, name) (ecZeroArgDefs ctx) then emitName ++ pin ++ "()" else emitName ++ pin
     Can.VarKernel mod name ->
         let fnName = kernelToRust mod name
             -- sub-A.10 C4 + sub-A.11: per-kernel turbofish (E pinning + arity).
@@ -1997,8 +2003,8 @@ branchToRustString ctx (Can.CaseBranch pat body) =
         bodyExpr = case body of
             Ann.At _ (Can.VarTopLevel mod name) ->
                 let modStr = ModuleName._name mod
-                    rawName = (if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_") ++ name
-                in toSnakeCase rawName ++ "()"
+                    modPfx = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr
+                in rustFnName (ecNameRenames ctx) modPfx name ++ "()"
             _ -> exprToRustString ctx body
         -- Slice patterns bind references (&T for head, &[T] for tail).
         -- Inject .clone() / .to_vec() so the body sees owned values.

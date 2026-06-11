@@ -1,0 +1,28 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Io as Io
+import Std.Ui as Ui
+import Std.Ui.Background as Background
+import Std.Ui.Border as Border
+import Std.Ui.Font as Font
+import Std.Html as Html
+
+
+main =
+    Io.writeStdout (Html.toString (Ui.layout [] view))
+
+
+view : Ui.Element ()
+view =
+    Ui.column
+        [ Ui.spacing 12
+        , Ui.padding 16
+        , Background.color (Ui.rgb 255 102 0)
+        , Border.rounded 4
+        , Border.width 2
+        , Border.color (Ui.rgb 0 0 0)
+        ]
+        [ Ui.el [ Font.size 24, Font.bold, Font.color (Ui.rgb 255 255 255) ] (Ui.text "title")
+        , Ui.el [ Font.size 14, Font.italic ] (Ui.text "subtitle")
+        ]

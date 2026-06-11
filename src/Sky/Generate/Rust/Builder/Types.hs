@@ -466,6 +466,15 @@ data EmitCtx = EmitCtx
         --   monomorphised `a`, a synthesised `_a_inst171`) is NOT in scope and a
         --   turbofish over it is E0412 (cannot find type). Concrete returns skip
         --   the turbofish entirely (Rust infers the param).
+    , ecNameRenames :: Map.Map (String, String) String
+        -- ^ Disambiguation map for non-injective name mangling. Keyed by
+        --   (modPrefix, bareName); value is the de-collided Rust fn name. Two
+        --   distinct Sky functions can mangle to the same snake_case name —
+        --   `Std.Ui.borderRounded` and `Std.Ui.Border.rounded` both become
+        --   `std_ui_border_rounded` (Go keeps them apart via CamelCase). Only
+        --   colliding names appear here; everything else uses the default
+        --   `toSnakeCase (modPrefix ++ "_" ++ name)`. Consulted at every def +
+        --   user-fn call mangle site (see rustFnName).
     }
 
 intercalate :: String -> [String] -> String
