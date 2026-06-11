@@ -1,0 +1,15 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Io as Io
+import Std.Ui as Ui
+import Std.Html as Html
+
+
+main =
+    Io.writeStdout (Html.toString (Ui.layout [] view))
+
+
+view : Ui.Element msg
+view =
+    Ui.text "hello"
