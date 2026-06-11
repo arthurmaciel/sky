@@ -21,7 +21,7 @@ pub fn json_enc_string(s: String) -> JsonVal { JsonVal::String(s) }
 pub fn json_enc_int(i: i64) -> JsonVal { JsonVal::Number(i.into()) }
 pub fn json_enc_float(f: f64) -> JsonVal { JsonVal::from(f) }
 pub fn json_enc_bool(b: bool) -> JsonVal { JsonVal::Bool(b) }
-pub fn json_enc_null(_: ()) -> JsonVal { JsonVal::Null }
+pub fn json_enc_null() -> JsonVal { JsonVal::Null }
 pub fn json_enc_list<A>(f: impl Fn(A) -> JsonVal, items: Vec<A>) -> JsonVal {
     JsonVal::Array(items.into_iter().map(f).collect())
 }

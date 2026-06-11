@@ -317,6 +317,10 @@ kernelsZeroArg :: Set.Set String
 kernelsZeroArg = Set.fromList
     [ "json_dec_string", "json_dec_int", "json_dec_float"
     , "json_dec_bool", "json_dec_null"
+    -- JsonEnc.null : Value is a zero-arg constant (`Ffi.kernel "JsonEnc_null"`);
+    -- used as a value (`("x", JsonEnc.null)`) it must be CALLED, not left a bare
+    -- fn item (35-composite-generics). Runtime json_enc_null() is zero-arg.
+    , "json_enc_null"
     , "dict_empty"
     , "math_pi", "math_e"
     , "uuid_v4", "uuid_v7"

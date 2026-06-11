@@ -414,11 +414,17 @@ exprToRustString ctx (Ann.At region expr) =
 -- | Sub-A.13: an empty-collection literal whose element type Rust cannot infer
 -- from a bare emission. These are the args resolved by call-site param-type
 -- propagation in emitDefaultCall.
-data EmptyKind = EKList | EKNothing
+data EmptyKind = EKList | EKNothing | EKDict
 
 emptyArgKind :: Can.Expr -> Maybe EmptyKind
 emptyArgKind (Ann.At _ (Can.List [])) = Just EKList
 emptyArgKind (Ann.At _ (Can.VarCtor _ _ "Maybe" "Nothing" _)) = Just EKNothing
+-- `Dict.empty` as an ARG resolves its `HashMap<K,V>` from the callee's param
+-- type (like `[]` / `Nothing` do), so a `Dict String ()` param pins
+-- `::<String,()>` not the i64 default (35-composite-generics uniqueKeepingFirst).
+emptyArgKind (Ann.At _ (Can.VarKernel m "empty")) | m == "Dict" || m == "Sky.Core.Dict" = Just EKDict
+emptyArgKind (Ann.At _ (Can.VarTopLevel m "empty"))
+    | let n = ModuleName._name m in n == "Dict" || "Sky.Core.Dict" `isSuffixOf` n = Just EKDict
 emptyArgKind _ = Nothing
 
 isEmptyishArg :: Can.Expr -> Bool
@@ -508,14 +514,21 @@ emitEmptyArg _ mps i arg =
         bare = case kind of
             EKList    -> "vec![]"
             EKNothing -> "SkyMaybe::Nothing"
+            -- NOT a bare `dict_empty()`: with two type params and no constraint
+            -- (e.g. `Dict.keys Dict.empty`, dict_keys<K,V> generic) Rust can't
+            -- infer K (E0282). Fall back to the String/i64 default — the
+            -- historical behaviour before EKDict (00-standard-libs).
+            EKDict    -> "dict_empty::<String, i64>()"
         defaultFiller = case kind of
             EKList    -> "Vec::<i64>::new()"
             EKNothing -> "SkyMaybe::<i64>::Nothing"
+            EKDict    -> "dict_empty::<String, i64>()"
         -- Insert the turbofish "::" before the first '<' of a concrete param.
         turbofish pt = case break (== '<') pt of
             (h, rest@('<' : _)) -> Just $ case kind of
                 EKList    | "Vec" == h        -> h ++ "::" ++ rest ++ "::new()"
                 EKNothing | "SkyMaybe" == h   -> h ++ "::" ++ rest ++ "::Nothing"
+                EKDict    | "HashMap" == h     -> "dict_empty::" ++ rest ++ "()"
                 _ -> "" -- param shape doesn't match the arg kind
             _ -> Nothing
     in case mps of
