@@ -4,23 +4,32 @@
 #   rust-perf.sh --baseline                                 # (re)derive thresholds
 # Exit: 0 all metrics pass · 1 gate fail · 3 a backend can't build it.
 set -uo pipefail
-cd "$(dirname "$0")/.."
-SKY="${SKY_BIN:-$PWD/sky-out/sky}"
-THRESH="$PWD/scripts/rust-perf.thresholds"
+# REPO_ROOT: resolve to the repo root whether this file is executed directly
+# (BASH_SOURCE[0] is the script path) or sourced for unit-testing via process
+# substitution (BASH_SOURCE[0] is /proc/self/fd/N — cd fails gracefully and we
+# fall back to $PWD, so the caller must `cd <repo-root>` before sourcing).
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P || echo "$PWD")"
+REPO_ROOT="${_script_dir%/scripts}"
+[ "$REPO_ROOT" = "$_script_dir" ] && REPO_ROOT="$PWD"   # fallback: no /scripts suffix stripped
+# cd to repo root so direct invocations work with relative paths.
+cd "$REPO_ROOT"
+SKY="${SKY_BIN:-$REPO_ROOT/sky-out/sky}"
+THRESH="$REPO_ROOT/scripts/rust-perf.thresholds"
 AB_N=10000; AB_C=50; SSE_EVENTS=2000; SSE_CONC=16; COLD_RUNS=20
-SSE_BIN="$PWD/tools/sse-bench/target/release/sse-bench"
+SSE_BIN="$REPO_ROOT/tools/sse-bench/target/release/sse-bench"
 
 pyf() { python3 -c "import sys; print($1)"; }   # float expr → stdout
 pytrue() { python3 -c "import sys; sys.exit(0 if ($1) else 1)"; }  # bool expr → exit
 
-detect_shape() { # $1=example dir
-  if grep -rqE "Std\.Live|Live\.app" "$1/src" 2>/dev/null; then echo live
-  elif grep -rqE "Server\.listen|Sky\.Http\.Server" "$1/src" 2>/dev/null; then echo server
+detect_shape() { # $1=example dir (relative to REPO_ROOT or absolute)
+  local d; [[ "$1" = /* ]] && d="$1" || d="$REPO_ROOT/$1"
+  if grep -rqE "Std\.Live|Live\.app" "$d/src" 2>/dev/null; then echo live
+  elif grep -rqE "Server\.listen|Sky\.Http\.Server" "$d/src" 2>/dev/null; then echo server
   else echo cli; fi
 }
 
 build_target() { # $1=example dir  $2=go|rust  -> echoes the release binary path
-  local d="$1" t="$2"
+  local d="$REPO_ROOT/$1" t="$2"
   ( cd "$d" && rm -rf sky-out .skycache .skydeps ) >/dev/null 2>&1
   if [ "$t" = go ]; then
     ( cd "$d" && timeout 300 "$SKY" build src/Main.sky ) >/tmp/perf-build-go.log 2>&1 || return 1
@@ -61,12 +70,38 @@ wait_ready() { # $1=pid $2=port -> 0 ready / 1 not
   done
 }
 
+# Discover a spawned server's main HTTP listener. The harness passes
+# SKY_LIVE_PORT/PORT so apps that honour it (Sky.Live) bind a free port, but
+# Server.listen ignores the env and binds its hard-coded port — so read the
+# actually-bound port from the process (and its direct children: a Sky.Live app
+# mounts its console as a spawned child on a second port). Among all listeners,
+# pick the one whose `/` answers — that is the application's main listener.
+# Bounded by READY_TIMEOUT_S; returns 1 (and prints nothing) if nothing answers.
+discover_port() { # $1=pid $2=env-hint-port -> echoes port / returns 1
+  local pid=$1 hint=$2 deadline now pp p ports
+  deadline=$(( $(date +%s) + ${READY_TIMEOUT_S%.*} ))
+  while now=$(date +%s); [ "$now" -lt "$deadline" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    ports=""
+    for pp in "$pid" $(pgrep -P "$pid" 2>/dev/null); do
+      ports="$ports $(ss -ltnpH 2>/dev/null | awk -v k="pid=$pp," '$0 ~ k {print $4}' | sed 's/.*://')"
+      ports="$ports $(lsof -nP -p "$pp" -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR>1{print $9}' | sed 's/.*://')"
+    done
+    for p in "$hint" $(printf '%s\n' $ports | grep -E '^[0-9]+$' | sort -un); do
+      [ -n "$p" ] || continue
+      curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$p/" && { echo "$p"; return 0; }
+    done
+    sleep 0.1
+  done
+  return 1
+}
+
 probe_coldstart_server() { # $1=binary -> median ms (exec→first 200)
-  local samples=() i port pid t0 t1
+  local samples=() i port pid t0 t1 actual
   for i in $(seq 1 "$COLD_RUNS"); do
     port=$(free_port); t0=$(date +%s.%N)
     SKY_LIVE_PORT="$port" PORT="$port" "$1" >/dev/null 2>&1 & pid=$!
-    wait_ready "$pid" "$port" || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; continue; }
+    actual=$(discover_port "$pid" "$port") || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; continue; }
     t1=$(date +%s.%N); kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     samples+=("$(pyf "($t1-$t0)*1000")")
   done
@@ -77,8 +112,9 @@ probe_coldstart_server() { # $1=binary -> median ms (exec→first 200)
 start_server() { # $1=binary -> echoes "pid port"
   local port; port=$(free_port)
   SKY_LIVE_PORT="$port" PORT="$port" "$1" >/dev/null 2>&1 & local pid=$!
-  wait_ready "$pid" "$port" || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 1; }
-  echo "$pid $port"
+  local actual; actual=$(discover_port "$pid" "$port") \
+    || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 1; }
+  echo "$pid $actual"
 }
 
 probe_throughput() { # $1=binary -> req/s
