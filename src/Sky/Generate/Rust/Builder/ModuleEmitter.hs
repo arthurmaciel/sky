@@ -289,6 +289,8 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                            pnOf p = case p of Ann.At _ (Can.PVar v) -> v; _ -> ""
                            -- (rendered "name: type", was-inferred?)
                            solvedAt i = if i < length solvedParamTys then Just (solvedParamTys !! i) else Nothing
+                           isWild p = case p of Ann.At _ Can.PAnything -> True; _ -> False
+                           -- (rendered "name: type", was-inferred?, Maybe generic-decl)
                            renderP i p =
                                let tn = "T" ++ show i
                                    (nm, _pre) = patternToRustArg i p
@@ -302,17 +304,25 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                                    inferred = if null pn then Nothing
                                               else inferParamRustType ctx pn body
                                in case (openRec, recUpd, inferred) of
-                                    (Just s, _, _) -> (nm ++ ": " ++ s, True)
-                                    (_, Just s, _) -> (nm ++ ": " ++ s, True)
-                                    (_, _, Just t) -> (nm ++ ": " ++ t, True)
-                                    _ -> (nm ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "String"), False)
+                                    (Just s, _, _) -> (nm ++ ": " ++ s, True, Nothing)
+                                    (_, Just s, _) -> (nm ++ ": " ++ s, True, Nothing)
+                                    (_, _, Just t) -> (nm ++ ": " ++ t, True, Nothing)
+                                    -- An IGNORED wildcard (`_`) param with no
+                                    -- inferable type renders GENERIC, so a call
+                                    -- passing any type (e.g. `()` for a `() -> X`
+                                    -- thunk like `getConn _ = dbConn`) type-checks
+                                    -- — the String default mismatched a unit call
+                                    -- (16-skychess). Safe: the value is discarded.
+                                    _ | isWild p -> (nm ++ ": " ++ tn, True, Just (tn ++ ": Clone"))
+                                    _ -> (nm ++ ": " ++ (if useVec then "Vec<" ++ tn ++ ">" else "String"), False, Nothing)
                            rendered = zipWith renderP [0..] params
-                           pStrs = map fst rendered
-                           inferredIdx = [ i | (i, (_, True)) <- zip [0..] rendered ]
-                           genList = if anyCloneNeeded
-                                     then [ "T" ++ show i ++ ": Clone"
-                                          | i <- [0..length params - 1], i `notElem` inferredIdx ]
-                                     else []
+                           pStrs = [ s | (s, _, _) <- rendered ]
+                           inferredIdx = [ i | (i, (_, True, _)) <- zip [0..] rendered ]
+                           wildGens = [ g | (_, _, Just g) <- rendered ]
+                           genList = (if anyCloneNeeded
+                                      then [ "T" ++ show i ++ ": Clone"
+                                           | i <- [0..length params - 1], i `notElem` inferredIdx ]
+                                      else []) ++ wildGens
                            gs = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
                        in (pStrs, gs)
         -- P4-T3: a `Live.app` top-level-ref init fn's first param is pinned to
