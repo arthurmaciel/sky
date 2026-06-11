@@ -463,7 +463,24 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
                    , ecInGenericFn = not (null tvarNames)  -- Sub-A.13
                    , ecClosureDefs = collectClosureDefs body
                    , ecReturnElem = taskElemOf ret }
-    in RustFunction rustName genDecl params ret (preludes ++ exprToRustString ctx' body)
+        -- NARROW task-wrap: an annotated `() -> Task Error X` whose body resolves
+        -- to a kernel that is STRING-shaped in the Rust runtime but Task-shaped in
+        -- Go. Per Sky.Core.Pure's note, `uuidV4Kernel : Task = Ffi.kernel "Uuid_v4"`
+        -- (Go's Uuid_v4 is a Task closure; Rust's uuid_v4 is pure String —
+        -- Uuid.v4 : String), so the pure body needs a task_succeed wrap. Restricted
+        -- to those two kernels ONLY — the general needsTaskWrap mis-classifies
+        -- genuinely-Task kernel calls (System.args, Db.*) as pure here, so it
+        -- can't be reused on the broad annotated-fn surface. 35-composite-generics.
+        tdBody = exprToRustString ctx' body
+        isRustPureGoTaskKernel = case tailExpr body of
+            Ann.At _ (Can.VarTopLevel m kn)
+                | Just (kMod, kFn) <- Map.lookup (ModuleName._name m, kn) (ecKernelAliases ctx)
+                  -> kernelToRust kMod kFn `elem` ["uuid_v4", "uuid_v7"]
+            _ -> False
+        tdWrapped = if "SkyTask<" `isPrefixOf` ret && isRustPureGoTaskKernel
+                    then "task_succeed({ " ++ tdBody ++ " })"
+                    else tdBody
+    in RustFunction rustName genDecl params ret (preludes ++ tdWrapped)
 defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
     let vars = intercalate "_" (patBindingVars pat)
         fnName = if null vars then "__destruct" else "__destruct_" ++ vars
