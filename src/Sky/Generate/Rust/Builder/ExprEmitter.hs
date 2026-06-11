@@ -251,12 +251,15 @@ collectFreeVarLocalsMulti = go Set.empty
         Can.Lambda params body ->
             let bound' = foldl (\s p -> foldr Set.insert s (patBindingVars p)) bound params
             in go bound' body
-        Can.Let (Can.Def (Ann.At _ n) _ defBody) body ->
-            Map.unionWith (+) (go bound defBody) (go (Set.insert n bound) body)
+        Can.Let def body ->
+            -- Def bodies are counted in `bound` (the def's own name not yet in
+            -- scope — matches the original non-recursive treatment); the let
+            -- body sees the bound name(s).
+            let bound' = foldr Set.insert bound (defLocalNames def)
+            in Map.unionsWith (+) (go bound' body : map (go bound) (defLocalBodies def))
         Can.LetRec defs body ->
-            let names = [ n | Can.Def (Ann.At _ n) _ _ <- defs ]
-                bound' = foldr Set.insert bound names
-                goDefs = foldl (\a (Can.Def _ _ d) -> Map.unionWith (+) a (go bound' d)) Map.empty defs
+            let bound' = foldl (\s d -> foldr Set.insert s (defLocalNames d)) bound defs
+                goDefs = foldl (\a d -> Map.unionsWith (+) (a : map (go bound') (defLocalBodies d))) Map.empty defs
             in Map.unionWith (+) (go bound' body) goDefs
         Can.LetDestruct pat e0 body ->
             let bound' = foldr Set.insert bound (patBindingVars pat)
@@ -289,12 +292,17 @@ collectVarLocals = go Set.empty
         Can.Lambda params body ->
             let bound' = foldl (\s p -> foldr Set.insert s (patBindingVars p)) bound params
             in go bound' body
-        Can.Let (Can.Def (Ann.At _ name) _ defBody) body ->
-            let bound' = Set.insert name bound
-            in Set.union (go bound' defBody) (go bound' body)
+        -- A `let` binds a Def, which can be Def / TypedDef / DestructDef.
+        -- Handle all three (TypedDef = `let x : T = …`, DestructDef =
+        -- `let (a, b) = …`) — the original arm only matched plain Def and
+        -- crashed non-exhaustively on the others (26-ui-showcase).
+        Can.Let def body ->
+            let bound' = foldr Set.insert bound (defLocalNames def)
+            in Set.union (go bound' body)
+                         (foldl (\a d -> Set.union a (go bound' d)) Set.empty (defLocalBodies def))
         Can.LetRec defs body ->
-            let bound' = foldl (\s (Can.Def (Ann.At _ n) _ _) -> Set.insert n s) bound defs
-                goDefs = foldl (\a (Can.Def _ _ d) -> Set.union a (go bound' d)) Set.empty defs
+            let bound' = foldl (\s d -> foldr Set.insert s (defLocalNames d)) bound defs
+                goDefs = foldl (\a d -> foldl (\a2 e -> Set.union a2 (go bound' e)) a (defLocalBodies d)) Set.empty defs
             in Set.union (go bound' body) goDefs
         Can.LetDestruct pat expr body ->
             let bound' = foldr Set.insert bound (patBindingVars pat)
@@ -321,6 +329,20 @@ collectVarLocals = go Set.empty
         Can.Float _ -> Set.empty
         Can.Unit -> Set.empty
 
+-- | The names a `let`-bound Def introduces into scope (across all three Def
+-- shapes). Used by the free-variable / multi-use walkers so a `let x : T = …`
+-- or `let (a, b) = …` is handled the same as a plain `let x = …`.
+defLocalNames :: Can.Def -> [String]
+defLocalNames (Can.Def (Ann.At _ n) _ _)          = [n]
+defLocalNames (Can.TypedDef (Ann.At _ n) _ _ _ _) = [n]
+defLocalNames (Can.DestructDef pat _)             = patBindingVars pat
+
+-- | The body expression(s) of a `let`-bound Def (one per shape).
+defLocalBodies :: Can.Def -> [Can.Expr]
+defLocalBodies (Can.Def _ _ b)          = [b]
+defLocalBodies (Can.TypedDef _ _ _ b _) = [b]
+defLocalBodies (Can.DestructDef _ b)    = [b]
+
 -- | Helper: render a single function-call argument string, handling
 -- lambda capture cloning and VarLocal ownership.
 -- Clones every VarLocal argument by default (most Sky types implement Clone).
@@ -346,7 +368,7 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
             -- Clear ecForcedClosureParam for the BODY: it types only THIS
             -- closure's own param, not any nested closure inside the body.
             ctx' = ctx { ecCloneVars = allCloneVars, ecCopyVars = ecCopyVars ctx
-                       , ecForcedClosureParam = Nothing }
+                       , ecForcedClosureParam = Nothing, ecIndexedHofClosure = False }
             annot = case ecPipeInnerType ctx of
                 Just t | length ps == 1 -> ": " ++ t
                 _ -> ""
@@ -358,6 +380,9 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
             -- every list HOF (filter/map: the only param; foldl/foldr: the
             -- element comes before the accumulator). Annotate index 0 only.
             annotPsIx i p@(Ann.At _ (Can.PVar pn))
+                -- indexedMap's closure is Fn(i64, elem): index param first.
+                | ecIndexedHofClosure ctx, i == (0 :: Int) = patternToRustParam p ++ ": i64"
+                | ecIndexedHofClosure ctx, i == (1 :: Int), Just s <- ecForcedClosureParam ctx = patternToRustParam p ++ ": " ++ s
                 | i == (0 :: Int), Just s <- ecForcedClosureParam ctx = patternToRustParam p ++ ": " ++ s
                 | not (null annot) = patternToRustParam p ++ annot
                 | Just s <- inferRecordClosureParam ctx pn body = patternToRustParam p ++ ": " ++ s
@@ -1704,7 +1729,8 @@ emitDefaultCall ctx fn calleeName args =
                               -- Task type must not leak in as a `-> SkyTask<…>`
                               -- return annotation on a plain-value closure
                               -- (report.rs `r.tx.account : String` annotated Task).
-                              = argToRustString (ctx { ecForcedClosureParam = Just et, ecPipeInnerType = Nothing }) noCloneFn a
+                              = argToRustString (ctx { ecForcedClosureParam = Just et, ecPipeInnerType = Nothing
+                                                     , ecIndexedHofClosure = bareCallee == "list_indexed_map" }) noCloneFn a
             | otherwise       = argToRustString ctx noCloneFn a
         bareCallee = takeWhile (/= ':') calleeName
         -- list HOFs whose FIRST arg is the element-consuming closure and whose
@@ -1766,11 +1792,20 @@ solveArgType solvedMap arg = case arg of
         case Map.lookup name solvedMap of
             Just ty -> typeToRustString Map.empty ty
             Nothing -> "String"
-    Ann.At _ (Can.Binop op _ _ _ a _) ->
+    Ann.At _ (Can.Binop op _ _ _ a b) ->
         case op of
             "+" -> "i64"; "-" -> "i64"; "*" -> "i64"
             "/" -> "i64"; "//" -> "i64"; "%" -> "i64"
-            "++" -> "String"
+            -- `++` is polymorphic (String OR List). Recurse into both operands
+            -- so a nested list-append chain (`xs ++ ys ++ zs`) stays a Vec even
+            -- when an intermediate operand is itself a `++` — the previous
+            -- hardcoded "String" made the outer `++` fall back to format!
+            -- (Std.Ui.Chart's gridLines ++ axesNodes ++ seriesPaths).
+            "++" -> let ta = solveArgType solvedMap a
+                        tb = solveArgType solvedMap b
+                    in if "Vec<" `isPrefixOf` ta then ta
+                       else if "Vec<" `isPrefixOf` tb then tb
+                       else "String"
             "&&" -> "bool"; "||" -> "bool"
             "==" -> "bool"; "/=" -> "bool"
             _ -> solveArgType solvedMap a

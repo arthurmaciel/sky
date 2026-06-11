@@ -416,6 +416,11 @@ data EmitCtx = EmitCtx
         --   element type is the list arg's element type (StateMonitor), NOT the
         --   field-match guess (StateAlertRule — 3 structs share `id`). Closes
         --   17-skymon's filter/map ADT-mismatch.
+    , ecIndexedHofClosure :: Bool
+        -- ^ Set when the forced-closure HOF is `indexedMap`, whose closure is
+        --   `Fn(i64, elem)` — param 0 is the INDEX (i64), param 1 the element
+        --   (ecForcedClosureParam). Without this the element type leaks onto the
+        --   index param (E0631 — Std.Ui.Chart's bar series indexedMap).
     , ecStructFields :: Map.Map String (Map.Map String Can.Type)
         -- ^ Rust struct name -> (field name -> field type), over every record
         --   alias in the program. Lets a record-UPDATE arm
