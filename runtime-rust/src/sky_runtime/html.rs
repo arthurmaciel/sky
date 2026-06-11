@@ -144,6 +144,12 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
         Html::HElement(tag, attrs, kids) => {
             s.push('<');
             s.push_str(tag);
+            // Collect regular + bool attrs into (key, value) pairs, then sort
+            // by key — Go's renderVNode emits from a map under sort.Strings, so
+            // matching byte-for-byte requires the same alphabetical order. A
+            // BoolAttr renders as `k="true"` (Go stores it as the string "true"
+            // in n.Attrs), NOT a bare `k`.
+            let mut pairs: Vec<(&str, String)> = vec![];
             let mut events: Vec<&str> = vec![];
             let mut sky_id: Option<&str> = None;
             for a in attrs {
@@ -152,19 +158,22 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                         if k == "sky-id" {
                             sky_id = Some(v);
                         }
-                        s.push(' ');
-                        s.push_str(k);
-                        s.push_str("=\"");
-                        s.push_str(&escape_attr(v));
-                        s.push('"');
+                        pairs.push((k.as_str(), v.clone()));
                     }
                     Attribute::BoolAttr(k, true) => {
-                        s.push(' ');
-                        s.push_str(k);
+                        pairs.push((k.as_str(), "true".to_string()));
                     }
                     Attribute::BoolAttr(_, false) | Attribute::NoAttr => {}
                     Attribute::EventAttr(e) => events.push(e.name()),
                 }
+            }
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in &pairs {
+                s.push(' ');
+                s.push_str(k);
+                s.push_str("=\"");
+                s.push_str(&escape_attr(v));
+                s.push('"');
             }
             // Browser-client wire markers (live/client.js): the delegated
             // binder scans for `[sky-<event>]`, reads `data-sky-hid` for the
@@ -191,7 +200,7 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                 }
             }
             if VOID.contains(&tag.as_str()) {
-                s.push('>');
+                s.push_str(" />");
                 return;
             }
             s.push('>');
@@ -352,7 +361,9 @@ mod tests {
         let mut t = t; assign_sky_ids(&mut t, "r");
         let s = render_html(&t);
         assert!(s.contains(r#"<div class="x" sky-id="r">"#), "{s}");
-        assert!(s.contains(r#"<input value="a&lt;b" disabled sky-id="r_0_input">"#), "{s}");
+        // Attrs are sorted alphabetically; BoolAttr renders as `k="true"`; void
+        // elements self-close — all to match Go renderVNode.
+        assert!(s.contains(r#"<input disabled="true" sky-id="r_0_input" value="a&lt;b" />"#), "{s}");
         assert!(s.contains("1 &lt; 2"));
         assert!(s.contains("<b>ok</b>"));
         assert!(s.contains("</div>"));

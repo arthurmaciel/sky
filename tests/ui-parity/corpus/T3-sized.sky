@@ -1,0 +1,22 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Io as Io
+import Std.Ui as Ui
+import Std.Html as Html
+
+
+-- Static-render corpus: element shapes only. Event DISPATCH (onPress = Just …)
+-- renders through Sky.Live's VNode path and is covered by the integration
+-- examples, not the static Html.toString harness.
+main =
+    Io.writeStdout (Html.toString (Ui.layout [] view))
+
+
+view : Ui.Element ()
+view =
+    Ui.column [ Ui.spacing 8, Ui.padding 12 ]
+        [ Ui.button [] { onPress = Nothing, label = Ui.text "click" }
+        , Ui.link [] { url = "/about", label = Ui.text "about" }
+        , Ui.image [] { src = "/logo.png", description = "logo" }
+        ]
