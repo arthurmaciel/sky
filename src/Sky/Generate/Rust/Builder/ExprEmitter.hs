@@ -1401,6 +1401,14 @@ foldAccTypeOf :: EmitCtx -> Can.Expr -> Maybe Can.Type
 foldAccTypeOf ctx fn = case fn of
     Ann.At _ (Can.VarTopLevel _ nm) -> accOf nm
     Ann.At _ (Can.VarLocal nm)      -> accOf nm
+    -- An inline fold fn `\elem acc -> body`: `body` returns `b` (foldl is
+    -- `b -> b`), so the body's solved region type IS the accumulator type — e.g.
+    -- `\r acc -> Dict.insert k () acc` gives `Dict String ()` so the empty init
+    -- pins `::<String, ()>` not the `::<String, i64>` default.
+    Ann.At _ (Can.Lambda _ (Ann.At br _)) ->
+        case Map.lookup br (ecRegionTypes ctx) of
+            Just t | not (hasTypeVars t) -> Just t
+            _                            -> Nothing
     _                               -> Nothing
   where
     -- ecModuleEnv (the CURRENT module's sigs) FIRST — a same-module fold helper
@@ -1640,7 +1648,13 @@ emitDefaultCall ctx fn calleeName args =
             | i == 0, isListHofClosurePos
             , Ann.At _ (Can.Lambda _ _) <- a
             , Just et <- listElemRustType ctx (last args)
-                              = argToRustString (ctx { ecForcedClosureParam = Just et }) noCloneFn a
+                              -- Also clear ecPipeInnerType: a list-HOF element
+                              -- closure (`List.map (\r -> r.tx.account) rows`)
+                              -- is NOT a Task-pipe closure, so the outer pipe's
+                              -- Task type must not leak in as a `-> SkyTask<…>`
+                              -- return annotation on a plain-value closure
+                              -- (report.rs `r.tx.account : String` annotated Task).
+                              = argToRustString (ctx { ecForcedClosureParam = Just et, ecPipeInnerType = Nothing }) noCloneFn a
             | otherwise       = argToRustString ctx noCloneFn a
         bareCallee = takeWhile (/= ':') calleeName
         -- list HOFs whose FIRST arg is the element-consuming closure and whose
