@@ -1,29 +1,32 @@
-//! Sky.Core.Dict kernels backed by `std::collections::HashMap<String, T>`.
+//! Sky.Core.Dict kernels backed by `std::collections::HashMap<K, V>`.
 //!
-//! Per CLAUDE.md Limitation #5, Sky's Dict is *runtime-keyed by String*
-//! even when the type system says `Dict k v` for arbitrary `k`. The Go
-//! runtime coerces keys to String via `fmt.Sprintf("%v", k)`. The Rust
-//! port specializes to `String`-keyed (codegen will only emit calls with
-//! String args anyway). This matches the runtime contract.
+//! Generic over the KEY type so a `Dict Int v` (chess board keyed by square
+//! index, histogram counts, …) maps to `HashMap<i64, V>` and a `Dict String v`
+//! to `HashMap<String, V>`. Keys are `Ord` for the deterministic sorted
+//! iteration Sky guarantees; `Hash + Eq` for the map ops. Codegen emits the
+//! key type from the `Dict k v` annotation (TypeRenderer renders `HashMap<k,v>`;
+//! empty-dict turbofish pins both K and V from the expected type). The
+//! `SkyDict<T>` alias stays for the String-keyed runtime structs (db rows).
 
 use super::SkyMaybe;
 use std::collections::HashMap;
+use std::hash::Hash;
 
 pub type SkyDict<T> = HashMap<String, T>;
 
 /// `Dict.empty : Dict k v`.
-pub fn dict_empty<T>() -> SkyDict<T> { HashMap::new() }
+pub fn dict_empty<K, V>() -> HashMap<K, V> { HashMap::new() }
 
 /// `Dict.insert : k -> v -> Dict k v -> Dict k v`.
 /// Functional update — the input dict is consumed and the modified copy returned.
-pub fn dict_insert<T: Clone>(k: String, v: T, d: SkyDict<T>) -> SkyDict<T> {
+pub fn dict_insert<K: Hash + Eq, V>(k: K, v: V, d: HashMap<K, V>) -> HashMap<K, V> {
     let mut d = d;
     d.insert(k, v);
     d
 }
 
 /// `Dict.get : k -> Dict k v -> Maybe v`.
-pub fn dict_get<T: Clone>(k: String, d: SkyDict<T>) -> SkyMaybe<T> {
+pub fn dict_get<K: Hash + Eq, V: Clone>(k: K, d: HashMap<K, V>) -> SkyMaybe<V> {
     match d.get(&k) {
         Some(v) => SkyMaybe::Just(v.clone()),
         None    => SkyMaybe::Nothing,
@@ -32,42 +35,42 @@ pub fn dict_get<T: Clone>(k: String, d: SkyDict<T>) -> SkyMaybe<T> {
 
 /// `Dict.keys : Dict k v -> List k`. Returns keys in sorted order so
 /// iteration is deterministic (matches Sky's _fieldIndex emission contract).
-pub fn dict_keys<T>(d: SkyDict<T>) -> Vec<String> {
-    let mut keys: Vec<String> = d.into_keys().collect();
+pub fn dict_keys<K: Ord, V>(d: HashMap<K, V>) -> Vec<K> {
+    let mut keys: Vec<K> = d.into_keys().collect();
     keys.sort();
     keys
 }
 
 /// `Dict.values : Dict k v -> List v`. Key-sorted for determinism, matching
 /// `dict_keys` (Sky Dicts iterate in sorted-key order).
-pub fn dict_values<T: Clone>(d: SkyDict<T>) -> Vec<T> {
-    let mut pairs: Vec<(String, T)> = d.into_iter().collect();
+pub fn dict_values<K: Ord, V: Clone>(d: HashMap<K, V>) -> Vec<V> {
+    let mut pairs: Vec<(K, V)> = d.into_iter().collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs.into_iter().map(|(_, v)| v).collect()
 }
 
 /// `Dict.toList : Dict k v -> List (k, v)`. Key-sorted for determinism,
 /// matching `dict_keys` / `dict_values` (Sky Dicts iterate in sorted-key order).
-pub fn dict_to_list<T: Clone>(d: SkyDict<T>) -> Vec<(String, T)> {
-    let mut pairs: Vec<(String, T)> = d.into_iter().collect();
+pub fn dict_to_list<K: Ord, V: Clone>(d: HashMap<K, V>) -> Vec<(K, V)> {
+    let mut pairs: Vec<(K, V)> = d.into_iter().collect();
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     pairs
 }
 
 /// `Dict.remove : k -> Dict k v -> Dict k v`.
-pub fn dict_remove<T: Clone>(k: String, d: SkyDict<T>) -> SkyDict<T> {
+pub fn dict_remove<K: Hash + Eq, V>(k: K, d: HashMap<K, V>) -> HashMap<K, V> {
     let mut d = d;
     d.remove(&k);
     d
 }
 
 /// `Dict.member : k -> Dict k v -> Bool`.
-pub fn dict_member<T>(k: String, d: SkyDict<T>) -> bool {
+pub fn dict_member<K: Hash + Eq, V>(k: K, d: HashMap<K, V>) -> bool {
     d.contains_key(&k)
 }
 
-/// `Dict.fromList : List (k, v) -> Dict k v`. String keys per Limitation #5.
-pub fn dict_from_list<T>(pairs: Vec<(String, T)>) -> SkyDict<T> {
+/// `Dict.fromList : List (k, v) -> Dict k v`.
+pub fn dict_from_list<K: Hash + Eq, V>(pairs: Vec<(K, V)>) -> HashMap<K, V> {
     pairs.into_iter().collect()
 }
 

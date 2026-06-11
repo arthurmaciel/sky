@@ -1426,9 +1426,14 @@ updateRecordFields ctx updFieldNames
 -- `Dict _ v`, pin V; otherwise keep the i64 default.
 dictEmptyPin :: EmitCtx -> String
 dictEmptyPin ctx = case ecExpectedType ctx of
-    Just (Can.TType _ "Dict" [_, v]) | not (hasTypeVars v) ->
-        "::<" ++ typeToRustString (ecRecordMap ctx) v ++ ">"
-    _ -> "::<i64>"
+    -- dict_empty is now generic over BOTH key and value (HashMap<K, V>), so
+    -- pin both from a concrete `Dict k v` expected type. Default to a
+    -- String-keyed i64-valued dict (the historical String-key shape) when the
+    -- context is absent — an empty dict in a typed slot almost always carries
+    -- its region type, so the default rarely fires.
+    Just (Can.TType _ "Dict" [k, v]) | not (hasTypeVars k), not (hasTypeVars v) ->
+        "::<" ++ typeToRustString (ecRecordMap ctx) k ++ ", " ++ typeToRustString (ecRecordMap ctx) v ++ ">"
+    _ -> "::<String, i64>"
 
 taskFailPin :: EmitCtx -> String
 taskFailPin ctx
