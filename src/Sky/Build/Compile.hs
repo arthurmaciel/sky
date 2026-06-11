@@ -1840,7 +1840,26 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         -- branch upstream-shaped). We read the global kernel
                         -- alias IORef here and pass its contents in.
                         rawAliases <- readIORef globalKernelAlias
-                        RustProject.generateRustProject config (canMod : map snd validDeps)
+                        -- Whole-program DCE for the Rust backend, mirroring the
+                        -- Go path's `generateDeclsForDep` per-decl skip. Without
+                        -- this every dep module emits ALL its top-level fns
+                        -- (e.g. all 205 Std.Ui helpers for a one-line render),
+                        -- so latent codegen bugs in unreachable helpers block
+                        -- the build. Prune dep modules to the transitively-
+                        -- reachable-from-`main` set; keep the entry module whole
+                        -- (its live defs are reachable by definition). Empty set
+                        -- / `SKY_DCE=0` → keep everything (same fallback as Go).
+                        reached <- readIORef globalReachableProgram
+                        dceOff  <- readIORef globalDceDisabled
+                        let keepRustDecl mn d = case d of
+                                Can.DestructDef _ _ -> True
+                                _ -> let dn = rustDeclName d
+                                     in dceOff || Set.null reached
+                                        || Set.member (Dce.TopRef (ModuleName.toString mn) dn) reached
+                            prunedDeps = [ depMod { Can._decls =
+                                                      filterRustDecls (keepRustDecl (Can._name depMod)) (Can._decls depMod) }
+                                         | depMod <- map snd validDeps ]
+                        RustProject.generateRustProject config (canMod : prunedDeps)
                             entrySrcMod typesWithDeps rawAliases outDir srcHash
 
                     Toml.TargetGo ->
@@ -3087,6 +3106,28 @@ generateDeclsForDepScoped modName canMod modPrefix =
         writeIORef globalCurrentDepModule Nothing
         return "")
 
+
+-- | The bound name of a top-level decl (Def / TypedDef). DestructDef has no
+-- single name; callers handle it separately. Used by the Rust-backend DCE
+-- prune in the TargetRust dispatch.
+rustDeclName :: Can.Def -> String
+rustDeclName (Can.Def (A.At _ n) _ _)          = n
+rustDeclName (Can.TypedDef (A.At _ n) _ _ _ _) = n
+rustDeclName (Can.DestructDef _ _)             = ""
+
+-- | Filter a module's decls to those a predicate keeps, flattening rec groups
+-- into individual `Declare`s (Rust top-level fns are mutually visible without
+-- the grouping, and both decl consumers — declsToRustItems / collectSiblingFns
+-- — treat Declare and DeclareRec identically). Preserves source order and the
+-- SaveTheEnvironment terminator.
+filterRustDecls :: (Can.Def -> Bool) -> Can.Decls -> Can.Decls
+filterRustDecls keep = rebuild . filter keep . flatten
+  where
+    flatten (Can.Declare d rest)         = d : flatten rest
+    flatten (Can.DeclareRec d ds rest)   = (d : ds) ++ flatten rest
+    flatten Can.SaveTheEnvironment       = []
+    rebuild []       = Can.SaveTheEnvironment
+    rebuild (d : ds) = Can.Declare d (rebuild ds)
 
 -- | Generate Go declarations for a dependency module's functions
 generateDeclsForDep :: Can.Module -> String -> [GoIr.GoDecl]

@@ -99,7 +99,11 @@ buildModule ctx0 mod =
             in if Set.member ctorName existingNames then []
                else [RustFunction ctorName gens (map (\(n, t) -> n ++ ": " ++ t) rustFlds) retTy body]
         prefixItem (RustFunction n g p r b)
-            | n == "sky_main" || n == "main" = RustFunction n g p r b
+            -- Only the entry module's main is the unprefixed program entry
+            -- (`sky_main`). A non-entry module's `main` (e.g. Std.Html.main,
+            -- the `<main>` builder) module-prefixes like any other def so its
+            -- call site `Html.main` → `std_html_main` resolves.
+            | n == "sky_main" = RustFunction n g p r b
             | otherwise = RustFunction (toSnakeCase (modPrefix ++ "_" ++ n)) g p r b
         prefixItem (RustStruct n f) = RustStruct (toCamelCase (modPrefix ++ "_" ++ n)) f
         prefixItem (RustEnum n v) = RustEnum (toCamelCase (modPrefix ++ "_" ++ n)) v
@@ -254,7 +258,7 @@ inferRecordParamFromUpdate recordMap pname = go
 
 defToRustItem :: EmitCtx -> String -> Can.Def -> RustItem
 defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
-    let rustName = if name == "main" then "sky_main" else name
+    let rustName = if name == "main" && ecCurrentModule ctx == "Main" then "sky_main" else name
         n = length params
         (paramStrs, genVars) =
             -- Try solvedTypes FIRST (HM-inferred types, most accurate).
@@ -437,9 +441,24 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                       then "task_succeed({ " ++ bodyStr ++ " })"
                       else bodyStr
      in RustFunction rustName genVars' paramStrs' retTyFinal (preludes ++ bodyWrapped)
-defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
+defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) =
     let rm = ecRecordMap ctx
-        rustName = if name == "main" then "sky_main" else name
+        rustName = if name == "main" && ecCurrentModule ctx == "Main" then "sky_main" else name
+        -- Std.Ui `any`-carrier resolution. Several Std.Ui helpers are declared
+        -- `-> any` / `any ->` where `any` is a wildcard the Go backend renders
+        -- as interface{}. In Rust the slot carries one concrete type — `Html
+        -- msg` (layout / layoutWith / render* / html) or `Attribute msg`
+        -- (kernelAttr / collectHtmlAttrs / toAttrAttribute / ariaForDescription)
+        -- — so resolve `any` to that carrier. Otherwise the fn is generic over
+        -- an unbound `any` whose body returns a concrete carrier (E0308), and
+        -- `msg` flows into the generic list automatically (collectRenderedTVars
+        -- recurses into the carrier's args). Mirrors the ctor-field carrier
+        -- table in TypeEmitter.hs (anyCarrierField).
+        applyAny ty = case stdUiAnyCarrier _modPrefix name of
+                          Just c  -> substTVarAny c ty
+                          Nothing -> ty
+        pats  = map (\(p, t) -> (p, applyAny t)) pats0
+        retTy = applyAny retTy0
         argTriples = zipWith
             (\i (pat, ty) -> let (nm, pre) = patternToRustArg i pat
                              in (nm ++ ": " ++ paramTypeToRust rm ty, pre))
@@ -511,6 +530,36 @@ defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
     let vars = intercalate "_" (patBindingVars pat)
         fnName = if null vars then "__destruct" else "__destruct_" ++ vars
     in RustFunction fnName "" [patternToRustParam pat] "()" (exprToRustString ctx expr)
+
+-- | The concrete carrier type a Std.Ui helper's wildcard `any` resolves to.
+-- `any` in these signatures is a Sky wildcard (Go = interface{}); in Rust it
+-- always carries exactly one concrete type. See the call site in the TypedDef
+-- branch of defToRustItem for the rationale.
+stdUiAnyCarrier :: String -> String -> Maybe Can.Type
+stdUiAnyCarrier modPrefix fnName
+    | modPrefix /= "Std_Ui" = Nothing
+    | fnName `elem` [ "html", "layout", "layoutWith"
+                    , "renderElement", "renderNodeAs", "renderNearby" ]
+        = Just (Can.TType (ModuleName.Canonical "Std.Html") "Html" [Can.TVar "msg"])
+    | fnName `elem` [ "kernelAttr", "collectHtmlAttrs"
+                    , "toAttrAttribute", "ariaForDescription" ]
+        = Just (Can.TType (ModuleName.Canonical "Std.Html.Attributes") "Attribute" [Can.TVar "msg"])
+    | otherwise = Nothing
+
+-- | Substitute the wildcard `TVar "any"` with a concrete carrier type
+-- everywhere it appears in a type (including inside List/Maybe/Tuple wrappers).
+substTVarAny :: Can.Type -> Can.Type -> Can.Type
+substTVarAny carrier = go
+  where
+    go t = case t of
+        Can.TVar "any"          -> carrier
+        Can.TVar _              -> t
+        Can.TType m n args      -> Can.TType m n (map go args)
+        Can.TLambda a b         -> Can.TLambda (go a) (go b)
+        Can.TTuple a b rest     -> Can.TTuple (go a) (go b) (map go rest)
+        Can.TRecord fs ext      -> Can.TRecord (Map.map (\f -> f { Can._fieldType = go (Can._fieldType f) }) fs) ext
+        Can.TAlias m n ps inner -> Can.TAlias m n (map (\(k, v) -> (k, go v)) ps) inner
+        Can.TUnit               -> Can.TUnit
 
 -- | Extract the element-type string `T` from a rendered `SkyTask<T>` return
 -- type. Returns Nothing for non-Task or unparenthesised shapes. Used to seed

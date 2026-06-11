@@ -14,15 +14,25 @@ mkdir -p "$GOLD"
 UPDATE=0; FILTER=""
 for a in "$@"; do case "$a" in --update-golden) UPDATE=1;; *) FILTER="$a";; esac; done
 
+# Strip sandbox/CI output markers (e.g. __TS_MARK_<hex>_<n>) that some shells
+# append to captured command stdout. Not part of Sky program output.
+sanitize() { sed -E 's/__TS_MARK_[0-9a-f]+_[0-9]+//g'; }
+
 build_run() { # $1=go|rust -> stdout (or empty on failure); writes nothing else
   ( cd "$H" && rm -rf sky-out .skycache .skydeps ) >/dev/null 2>&1
   if [ "$1" = go ]; then
     ( cd "$H" && timeout 300 "$SKY" build src/Main.sky ) >/tmp/uip-build.log 2>&1 || return 1
-    ( cd "$H" && ./sky-out/app ) 2>/dev/null
+    ( cd "$H" && ./sky-out/app ) 2>/dev/null | sanitize
   else
     ( cd "$H" && timeout 300 "$SKY" build src/Main.sky --target rust ) >/tmp/uip-build.log 2>&1 || return 1
     ( cd "$H" && cargo build --release --manifest-path sky-out/Rust/Cargo.toml ) >/tmp/uip-cargo.log 2>&1 || return 1
-    find "$H/sky-out/Rust/target/release" -maxdepth 1 -type f -executable | head -1 | xargs -r -I{} {} 2>/dev/null
+    # Honour CARGO_TARGET_DIR (shared target dir / sccache); fall back to the
+    # project-local target when it is unset.
+    local rel="${CARGO_TARGET_DIR:-$H/sky-out/Rust/target}/release"
+    local bin
+    bin=$(find "$rel" -maxdepth 1 -type f -executable -name 'sky-app' 2>/dev/null | head -1)
+    [ -n "$bin" ] || return 1
+    "$bin" 2>/dev/null | sanitize
   fi
 }
 

@@ -20,6 +20,7 @@ module Sky.Generate.Rust.Builder.Emitter
   , ffiPlaceholder
   ) where
 
+import Data.Char (isAlphaNum)
 import Data.List (isPrefixOf, isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -480,8 +481,29 @@ collectUndefinedTypes b =
         -- `SkyMaybe<T>`) yields E0107 (0 args supplied vs 1). The undefined
         -- opaque we actually need to catch (SkyCoreJsonEncodeValue) is bare.
         returnTypes = [ r | RustFunction _ _ _ r _ <- allItems, '<' `notElem` r ]
+        -- A runtime-opaque type can be referenced ONLY by a surviving union/
+        -- struct/alias FIELD (not by any function) — e.g. `Jwt.Claims` carries
+        -- `Vec<(String, SkyCoreJsonEncodeValue)>` after whole-program DCE prunes
+        -- every Jwt function that took a `Value` arg. The function-signature
+        -- scan above misses it, leaving its `pub use sky_runtime::JsonVal as …;`
+        -- alias unsynthesised (E0412). Scan field-type strings too, keeping only
+        -- names in the runtimeOpaque registry so we never synthesise a bogus
+        -- `type Vec = String;` from a container ident.
+        opaqueNames = Set.fromList
+            [ toCamelCase (modPrefix ++ "_" ++ ty)
+            | ((mod', ty), _) <- Map.toList runtimeOpaqueTypes
+            , let modPrefix = map (\c -> if c == '.' then '_' else c) mod' ]
+        typeIdents s = words (map (\c -> if isAlphaNum c || c == '_' then c else ' ') s)
+        fieldTypeStrs =
+            [ ft | REnumDef _ _ variants <- builderTypes b, (_, Just ft) <- variants ]
+            ++ [ ft | RStructDef _ _ fields <- builderTypes b, (_, ft) <- fields ]
+            ++ [ ft | RAliasDef _ ft <- builderTypes b ]
+            ++ [ ft | RAliasDefGen _ _ ft <- builderTypes b ]
+        fieldOpaqueRefs = [ idn | ft <- fieldTypeStrs, idn <- typeIdents ft
+                                , Set.member idn opaqueNames ]
         referenced = Set.fromList
-            [ takeWhile (/= '<') t | t <- paramTypes ++ returnTypes, isCandidate t ]
+            ([ takeWhile (/= '<') t | t <- paramTypes ++ returnTypes, isCandidate t ]
+             ++ fieldOpaqueRefs)
     in Set.toList (Set.difference referenced defined)
 
 -- | Check if the generated output contains the Sky.Core.Error.Error ADT.

@@ -10,6 +10,6 @@ main =
     Io.writeStdout (Html.toString (Ui.layout [] view))
 
 
-view : Ui.Element msg
+view : Ui.Element ()
 view =
     Ui.text "hello"

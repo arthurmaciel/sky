@@ -1937,9 +1937,62 @@ defToRustString ctx (Can.DestructDef pat expr) =
     in patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ exprStr
 defToRustString _ctx _ = "_ = unimplemented()"
 
+-- | Does a pattern contain a string-literal sub-pattern anywhere?
+hasStrAnywhere :: Can.Pattern -> Bool
+hasStrAnywhere (Ann.At _ p) = case p of
+    Can.PStr _            -> True
+    Can.PTuple a b rest   -> any hasStrAnywhere (a : b : rest)
+    Can.PCtor{Can._p_args = args} -> any (\(Can.PatternCtorArg _ _ pp) -> hasStrAnywhere pp) args
+    Can.PCons a b         -> hasStrAnywhere a || hasStrAnywhere b
+    Can.PList items       -> any hasStrAnywhere items
+    Can.PAlias inner _    -> hasStrAnywhere inner
+    _                     -> False
+
+-- | Render a match pattern, replacing every string-literal leaf with a fresh
+-- binder and returning `binder.as_str() == literal` guards. Rust can't match a
+-- `String` value against a `&str` literal pattern; when the literal is NESTED
+-- inside a tuple/ctor the scrutinee-level `.as_str()` wrap (top-level PStr
+-- path) can't apply, so we bind + guard instead. The Int threads a counter for
+-- unique binder names.
+renderPatGuarded :: Map.Map String String -> Int -> Can.Pattern -> (String, [String], Int)
+renderPatGuarded recMap n0 (Ann.At _ pat) = case pat of
+    Can.PStr s ->
+        let v = "__sg" ++ show n0
+        in (v, [v ++ ".as_str() == " ++ show s], n0 + 1)
+    Can.PVar nm    -> (rustSafeIdent nm, [], n0)
+    Can.PAnything  -> ("_", [], n0)
+    Can.PInt i     -> (show i, [], n0)
+    Can.PBool b    -> (if b then "true" else "false", [], n0)
+    Can.PChr c     -> ("'" ++ c ++ "'", [], n0)
+    Can.PUnit      -> ("()", [], n0)
+    Can.PTuple a b rest ->
+        let (n', parts, gss) = goSubs n0 (a : b : rest)
+        in ("(" ++ intercalate ", " parts ++ ")", gss, n')
+    Can.PCtor{Can._p_home = home, Can._p_type = ty, Can._p_name = name, Can._p_args = args} ->
+        let (n', parts, gss) = goSubs n0 [ p | Can.PatternCtorArg _ _ p <- args ]
+            fullName = kernelCtorToRust home ty name
+        in (fullName ++ (if null parts then "" else "(" ++ intercalate ", " parts ++ ")"), gss, n')
+    _ -> (patternToMatchString recMap (Ann.At (error "renderPatGuarded: region unused") pat), [], n0)
+  where
+    goSubs k []       = (k, [], [])
+    goSubs k (p : ps) =
+        let (s, gs, k')      = renderPatGuarded recMap k p
+            (k'', ss, gsRest) = goSubs k' ps
+        in (k'', s : ss, gs ++ gsRest)
+
 branchToRustString :: EmitCtx -> Can.CaseBranch -> String
 branchToRustString ctx (Can.CaseBranch pat body) =
-    let patStr  = patternToMatchString (ecRecordMap ctx) pat
+    let -- Nested string-literal patterns (inside a tuple/ctor) can't use the
+        -- scrutinee `.as_str()` wrap; render them as binder + guard. A bare
+        -- top-level PStr is handled by the as_str path, so skip it here.
+        nestedStr = case pat of
+            Ann.At _ (Can.PStr _) -> False
+            _                     -> hasStrAnywhere pat
+        (patStr, guardSuffix)
+            | nestedStr =
+                let (s, gs, _) = renderPatGuarded (ecRecordMap ctx) 0 pat
+                in (s, if null gs then "" else " if " ++ intercalate " && " gs)
+            | otherwise = (patternToMatchString (ecRecordMap ctx) pat, "")
         -- Zero-arg top-level functions used as case values must be called.
         bodyExpr = case body of
             Ann.At _ (Can.VarTopLevel mod name) ->
@@ -1974,9 +2027,10 @@ branchToRustString ctx (Can.CaseBranch pat body) =
         ctorPatFieldTypes = case pat of
             Ann.At _ (Can.PCtor{Can._p_name = c}) -> Map.findWithDefault [] c (ecCtorFieldTypes ctx)
             _ -> []
+        armHead = patStr ++ guardSuffix
     in if null prefix && not ("let " `isPrefixOf` bodyExpr) && not ("if " `isPrefixOf` bodyExpr)
-       then patStr ++ " => " ++ bodyExpr
-       else patStr ++ " => { " ++ prefix ++ bodyExpr ++ " }"
+       then armHead ++ " => " ++ bodyExpr
+       else armHead ++ " => { " ++ prefix ++ bodyExpr ++ " }"
 
 -- | Sub-A.10 C5: case-arm emit for branches under a `.as_str()`-wrapped
 -- scrutinee. PVar bindings are `&str`; convert them to `String` at the body
