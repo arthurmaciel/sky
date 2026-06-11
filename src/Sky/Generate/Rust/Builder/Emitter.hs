@@ -312,11 +312,14 @@ ffiPlaceholderSection b =
 entryPointSection :: UsedKernels -> [String]
 entryPointSection uk =
     let hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk || usesHttpServer uk || usesEmail uk || usesLive uk
-        -- main returns () (call sky_main() directly, no block_on) when the user
-        -- uses Task.run OR it's a Sky.Live app: `live_app`/`live_app_routed`
-        -- return () and run the axum server synchronously, so block_on(()) would
-        -- be a type error. Server.listen, by contrast, returns a block_on'd Task.
-        mainIsTask = not (usesTaskRun uk) && not (usesLive uk)
+        -- sky_main returns SkyTask<()> (needs block_on) UNLESS the user calls
+        -- Task.run itself, in which case sky_main returns () and runs the task
+        -- inline. Sky.Live is NOT an exception: `live_app`/`live_app_routed`
+        -- return SkyTask<()> (a `Box::pin(async move { serve_live(...).await })`
+        -- future), so the entry MUST block_on it — dropping it exits the process
+        -- before axum binds a port (the binary appeared to "run" but served
+        -- nothing). Server.listen is the same shape (returns a block_on'd Task).
+        mainIsTask = not (usesTaskRun uk)
     in
     [ ""
     , "// ==========================================="

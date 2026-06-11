@@ -425,10 +425,22 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         -- render concretely. Only fires when return-inference already gave `()`
         -- AND the solved return carries TVars AND this is a Live app (ecAppMsg
         -- = Just), so non-Live programs and concrete-return fns are untouched.
-        retTyFinal = case (retTy == "()", ecAppMsg ctx, extractReturnType <$> lookupOwnSig ctx name) of
-            (True, Just msgT, Just ret)
-                | Just sub <- teaReturnSubst msgT (ecAppModel ctx) ret -> typeToRustString (ecRecordMap ctx) sub
-            _ -> retTy
+        -- The Sky.Live entry `main = Live.app {…}` lowers its body to a
+        -- `live_app`/`live_app_routed` call, which returns `SkyTask<E, ()>`
+        -- (a `Box::pin(async move { serve_live(…).await })` future). Return
+        -- inference otherwise lands this on `()` (Live.app's solved type is
+        -- unit-shaped), so sky_main would emit the call as a discarded
+        -- statement and the future would be dropped — the binary exits before
+        -- axum binds a port. Force the Task return so the printer returns the
+        -- future as the tail expression and `block_on(sky_main())` awaits it.
+        isLiveEntryMain = name == "main" && ecCurrentModule ctx == "Main"
+                          && not (Set.null (ecLiveInitFns ctx))
+        retTyFinal
+            | isLiveEntryMain = "SkyTask<()>"
+            | otherwise = case (retTy == "()", ecAppMsg ctx, extractReturnType <$> lookupOwnSig ctx name) of
+                (True, Just msgT, Just ret)
+                    | Just sub <- teaReturnSubst msgT (ecAppModel ctx) ret -> typeToRustString (ecRecordMap ctx) sub
+                _ -> retTy
         ctx' = ctx { ecCloneVars = Set.fromList multiVars
                    , ecCopyVars = copyVars
                    , ecInGenericFn = not (null genVars')  -- Sub-A.13
