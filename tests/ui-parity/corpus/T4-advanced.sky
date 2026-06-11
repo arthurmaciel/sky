@@ -1,0 +1,23 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Io as Io
+import Std.Ui as Ui
+import Std.Html as Html
+
+
+-- Static-renderable advanced layout: nearby overlays, aspect ratio, grid.
+-- Style-injection features (pseudo-class / media-query / transition /
+-- animation) emit sky-id-scoped <style> blocks that depend on Sky.Live's
+-- assignSkyIDs pass — covered by the integration examples.
+main =
+    Io.writeStdout (Html.toString (Ui.layout [] view))
+
+
+view : Ui.Element ()
+view =
+    Ui.column [ Ui.spacing 8 ]
+        [ Ui.el [ Ui.inFront (Ui.el [] (Ui.text "badge")) ] (Ui.text "base")
+        , Ui.el [ Ui.aspectRatioWH 16 9, Ui.width Ui.fill ] (Ui.text "video")
+        , Ui.column [ Ui.gridColumns 3 ] [ Ui.text "a", Ui.text "b", Ui.text "c" ]
+        ]

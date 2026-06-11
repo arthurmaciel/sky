@@ -1,0 +1,22 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Io as Io
+import Std.Ui as Ui
+import Std.Ui.Region as Region
+import Std.Ui.Font as Font
+import Std.Html as Html
+
+
+main =
+    Io.writeStdout (Html.toString (Ui.layout [] view))
+
+
+view : Ui.Element ()
+view =
+    Ui.column [ Ui.spacing 8 ]
+        [ Ui.el [ Region.heading 1, Font.size 28 ] (Ui.text "Title")
+        , Ui.el [ Region.heading 2 ] (Ui.text "Section")
+        , Ui.row [ Region.navigation ] [ Ui.text "home", Ui.text "about" ]
+        , Ui.el [ Region.mainContent ] (Ui.text "body")
+        ]
