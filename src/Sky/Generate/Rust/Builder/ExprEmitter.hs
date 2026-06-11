@@ -995,17 +995,26 @@ exprToRustInner ctx e = case e of
                 Ann.At _ (Can.VarLocal fnName) -> siblingArity fnName
                 _ -> 0
             isPartialApp = calleeArity > length args && not (null args)
+            -- arity of the constructor/function handed to `succeed` (multi-arg
+            -- lambda, or a top-level ctor/fn ref) so it can be curried into the
+            -- single-arg-per-field pipeline chain. Lazy: only forced when args ≠ [].
+            succeedArgArity = case head args of
+                Ann.At _ (Can.Lambda ps _) | length ps > 1 -> Just (length ps)
+                Ann.At _ (Can.VarTopLevel _ fnName) ->
+                    case Map.lookup fnName (ecSolvedTypes ctx) of
+                        Just ty | let n = length (extractParamTypes ty), n > 1 -> Just n
+                        _ -> case Map.lookup fnName (ecCtorArity ctx) of
+                            Just n | n > 1 -> Just n
+                            _ -> Nothing
+                _ -> Nothing
             succeedArity = case fn of
-                Ann.At _ (Can.VarKernel _ name) | name == "succeed" && not (null args) ->
-                    case head args of
-                        Ann.At _ (Can.Lambda ps _) | length ps > 1 -> Just (length ps)
-                        Ann.At _ (Can.VarTopLevel _ fnName) ->
-                            case Map.lookup fnName (ecSolvedTypes ctx) of
-                                Just ty | let n = length (extractParamTypes ty), n > 1 -> Just n
-                                _ -> case Map.lookup fnName (ecCtorArity ctx) of
-                                    Just n | n > 1 -> Just n
-                                    _ -> Nothing
-                        _ -> Nothing
+                Ann.At _ (Can.VarKernel _ name) | name == "succeed", not (null args) -> succeedArgArity
+                -- Json.Decode.Pipeline base `succeed f` lowers as a VarTopLevel
+                -- kernel alias (json_dec_succeed), not a VarKernel, so match it
+                -- too — otherwise a multi-field record ctor stays a raw N-ary
+                -- closure the single-arg pipeline can't apply (35-composite).
+                Ann.At _ (Can.VarTopLevel m name)
+                    | name == "succeed", "Json.Decode" `isInfixOf` ModuleName._name m, not (null args) -> succeedArgArity
                 _ -> Nothing
         in if isPartialApp
            then

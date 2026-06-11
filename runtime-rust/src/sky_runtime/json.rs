@@ -122,27 +122,43 @@ pub fn curry5<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: 's
 ) -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> Box<dyn FnOnce(A4) -> Box<dyn FnOnce(A5) -> R + Send> + Send> + Send> + Send> + Send> {
     Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| Box::new(move |a4| Box::new(move |a5| f(a1, a2, a3, a4, a5))))))
 }
+pub fn curry6<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: 'static + Send, A5: 'static + Send, A6: 'static + Send, R: 'static, F: FnOnce(A1, A2, A3, A4, A5, A6) -> R + Send + 'static>(
+    f: F,
+) -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> Box<dyn FnOnce(A4) -> Box<dyn FnOnce(A5) -> Box<dyn FnOnce(A6) -> R + Send> + Send> + Send> + Send> + Send> + Send> {
+    Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| Box::new(move |a4| Box::new(move |a5| Box::new(move |a6| f(a1, a2, a3, a4, a5, a6)))))))
+}
+pub fn curry7<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: 'static + Send, A5: 'static + Send, A6: 'static + Send, A7: 'static + Send, R: 'static, F: FnOnce(A1, A2, A3, A4, A5, A6, A7) -> R + Send + 'static>(
+    f: F,
+) -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> Box<dyn FnOnce(A4) -> Box<dyn FnOnce(A5) -> Box<dyn FnOnce(A6) -> Box<dyn FnOnce(A7) -> R + Send> + Send> + Send> + Send> + Send> + Send> + Send> {
+    Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| Box::new(move |a4| Box::new(move |a5| Box::new(move |a6| Box::new(move |a7| f(a1, a2, a3, a4, a5, a6, a7))))))))
+}
+pub fn curry8<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: 'static + Send, A5: 'static + Send, A6: 'static + Send, A7: 'static + Send, A8: 'static + Send, R: 'static, F: FnOnce(A1, A2, A3, A4, A5, A6, A7, A8) -> R + Send + 'static>(
+    f: F,
+) -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> Box<dyn FnOnce(A4) -> Box<dyn FnOnce(A5) -> Box<dyn FnOnce(A6) -> Box<dyn FnOnce(A7) -> Box<dyn FnOnce(A8) -> R + Send> + Send> + Send> + Send> + Send> + Send> + Send> + Send> {
+    Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| Box::new(move |a4| Box::new(move |a5| Box::new(move |a6| Box::new(move |a7| Box::new(move |a8| f(a1, a2, a3, a4, a5, a6, a7, a8)))))))))
+}
 
 // --- Pipeline (curried decoder combinators) ---
 // Curried by design — see README section A0. Pipeline-decoder helpers
 // thread Box<dyn FnOnce> chains that Rust's static trait system can't
 // express in tupled form. These are the ONLY functions in the runtime
 // that intentionally return impl FnOnce.
-pub fn json_dec_p_required<E: From<String> + 'static, T: 'static, F: 'static>(name: String, decoder: Decoder<E, T>) -> impl FnOnce(Decoder<E, Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<E, F> {
-    move |next_decoder| {
-        let n = name; let d = decoder; let nd = next_decoder;
-        Box::new(move |v| {
-            let field_val = match v.get(&n) { Some(f) => match d(f) { SkyResult::Ok(t) => t, _ => return json_dec_err_str("required decode error".into()) }, None => return json_dec_err_str(format!("missing required: {}", n)) };
-            match nd(v) { SkyResult::Ok(f) => ok_res(f(field_val)), _ => json_dec_err_str("next decode error".into()) }
-        })
-    }
+// UNCURRIED: the codegen lowers `decode |> Pipeline.required "x" dec` to a
+// direct 3-arg call `json_dec_p_required("x", dec, decode)` (the accumulator
+// decoder is the pipe's left side, threaded as the last arg). Taking
+// next_decoder as a normal parameter — rather than returning a closure over it
+// — matches that shape (35-composite-generics; was a 2-arg curried fn → E0061).
+pub fn json_dec_p_required<E: From<String> + 'static, T: 'static, F: 'static>(name: String, decoder: Decoder<E, T>, next_decoder: Decoder<E, Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<E, F> {
+    let n = name; let d = decoder; let nd = next_decoder;
+    Box::new(move |v| {
+        let field_val = match v.get(&n) { Some(f) => match d(f) { SkyResult::Ok(t) => t, _ => return json_dec_err_str("required decode error".into()) }, None => return json_dec_err_str(format!("missing required: {}", n)) };
+        match nd(v) { SkyResult::Ok(f) => ok_res(f(field_val)), _ => json_dec_err_str("next decode error".into()) }
+    })
 }
-pub fn json_dec_p_optional<E: From<String> + 'static, T: Clone + 'static + Send, F: 'static>(name: String, decoder: Decoder<E, T>, default: T) -> impl FnOnce(Decoder<E, Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<E, F> {
-    move |next_decoder| {
-        let n = name; let d = decoder; let nd = next_decoder; let def = default;
-        Box::new(move |v| {
-            let field_val = match v.get(&n) { Some(val) => match d(val) { SkyResult::Ok(t) => t, _ => def.clone() }, None => def.clone() };
-            match nd(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), _ => json_dec_err_str("opt next error".into()) }
-        })
-    }
+pub fn json_dec_p_optional<E: From<String> + 'static, T: Clone + 'static + Send, F: 'static>(name: String, decoder: Decoder<E, T>, default: T, next_decoder: Decoder<E, Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<E, F> {
+    let n = name; let d = decoder; let nd = next_decoder; let def = default;
+    Box::new(move |v| {
+        let field_val = match v.get(&n) { Some(val) => match d(val) { SkyResult::Ok(t) => t, _ => def.clone() }, None => def.clone() };
+        match nd(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), _ => json_dec_err_str("opt next error".into()) }
+    })
 }
