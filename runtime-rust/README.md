@@ -213,6 +213,26 @@ cargo-build-verified.
 - `cargo test --features "live db redis_store"` — 154 runtime tests incl. diff,
   dispatch, form, store (memory/sqlite + env-gated pg/redis restart-survival).
 
+### Top-level `examples/[0-9]*` on `--target rust`
+
+Conquest of the main example set (tracked in
+`docs/rust-example-conquest-registry.md`). Build-level via `scripts/rust-sweep.sh`.
+
+**18 in-scope build:** `00, 01, 04, 07, 09, 10, 12, 14, 15, 17, 18, 20, 28, 30,
+32, 33, simple, test_pkg` — up from a 6-example baseline. Driven by general,
+regression-gated codegen wins: TEA-Msg monomorphisation, multi-module serde,
+body-driven param inference (`ecSiblingFns` sibling-call + db-getter row + list
+HOF element types), `Arc<dyn Fn>` stored callbacks, cross-module ADT-name
+resolution, empty-collection turbofish from struct-field/expected types, and
+partial-application capture-clone.
+
+**2 in-scope still fail** (both pure-stdlib, no FFI): `16-skychess` (malformed
+closure emission + mass E0308), `35-composite-generics` (JSON-pipeline-decode
+curry rearchitecture + `SkyDict` `Int`-key parameterisation — both architectural).
+
+**Out of scope (per user):** Go-package→Rust-native FFI examples `03, 05, 08, 13`
+(import gorilla/mux, stripe-go, google/uuid, godotenv) are not a goal.
+
 ---
 
 ## Module structure
