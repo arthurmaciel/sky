@@ -683,6 +683,23 @@ exprToRustInner ctx e = case e of
         , Just (Can.TType _ "Maybe" [valTy]) <- ecExpectedType ctx
         , Just rustVal <- rustifyExpectedType (ecRecordMap ctx) valTy ->
             "SkyMaybe::<" ++ rustVal ++ ">::Nothing"
+        -- A phantom-polymorphic ADT nullary ctor (StdUiElement::Empty) can't
+        -- infer its type param (E0282); turbofish it from the enclosing fn's
+        -- return type when that type's head matches this ctor's type
+        -- (`none : Element msg` body `Empty` -> `StdUiElement::<msg>::Empty`).
+        -- typeToRustString renders TVars verbatim (`msg`), which the enclosing
+        -- fn declares as a generic, so the name is in scope.
+        | Just (Can.TType _ tyN tyArgs) <- ecEnclosingRet ctx
+        , tyN == typeName, not (null tyArgs)
+        , let rustArgs = map (typeToRustString (ecRecordMap ctx)) tyArgs
+        -- ONLY when every arg is a DECLARED generic of the enclosing fn. A
+        -- return-type TVar that isn't declared — a monomorphised `a`, a
+        -- synthesised `_a_inst171` (subset-record machinery) — is not in scope,
+        -- and `::<a>` is then E0412. A concrete tyArg likewise isn't a declared
+        -- generic, so it's skipped — Rust infers the param from the return type.
+        , not (null rustArgs), all (`elem` ecGenParams ctx) rustArgs
+        , (tPart, _:_:vPart) <- break (== ':') (kernelCtorToRust modName typeName ctorName) ->
+            tPart ++ "::<" ++ intercalate ", " rustArgs ++ ">::" ++ vPart
         | otherwise -> kernelCtorToRust modName typeName ctorName
     Can.Chr [c] -> rustCharLit c
     Can.Chr s -> rustStringLit s

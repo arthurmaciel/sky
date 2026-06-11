@@ -127,6 +127,24 @@ collectSiblingFns = go
     ins (Can.TypedDef (Ann.At _ name) _ pats body _) m = Map.insert name (map fst pats, body) m
     ins _ m = m
 
+-- | Extract the generic param NAMES from a rendered Rust `<…>` decl string
+-- (`<msg: Clone + …, a: Clone + …>` -> ["msg","a"]). The name is the leading
+-- identifier of each comma-separated segment. The codegen's param bounds carry
+-- no `>` or top-level `,` (just `Clone + PartialEq + … + 'static`), so the
+-- simple split is exact here. Used to guard the ctor-turbofish to declared
+-- generics only.
+extractGenDeclNames :: String -> [String]
+extractGenDeclNames s = case dropWhile (/= '<') s of
+    ('<':rest) -> [ nm | seg <- splitOnComma (takeWhile (/= '>') rest)
+                       , let nm = takeWhile isIdent (dropWhile (not . isIdent) seg)
+                       , not (null nm) ]
+    _ -> []
+  where
+    isIdent c = isUpper c || isLower c || isDigit c || c == '_'
+    splitOnComma str = case break (== ',') str of
+        (a, ',':b) -> a : splitOnComma b
+        (a, _)     -> [a]
+
 declsToRustItems :: EmitCtx -> String -> Can.Decls -> [RustItem]
 declsToRustItems _ctx _mod Can.SaveTheEnvironment = []
 declsToRustItems ctx modPrefix (Can.Declare def rest) = defToRustItem ctx modPrefix def : declsToRustItems ctx modPrefix rest
@@ -399,7 +417,13 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                    , ecCopyVars = copyVars
                    , ecInGenericFn = not (null genVars')  -- Sub-A.13
                    , ecClosureDefs = collectClosureDefs body
-                   , ecReturnElem = taskElemOf retTyFinal }
+                   , ecReturnElem = taskElemOf retTyFinal
+                   , ecEnclosingRet = extractReturnType <$> lookupOwnSig ctx name
+                   -- The DECL names from the rendered `<…>` (genVars' may rename
+                   -- to T0/T1 via knownDefSig); the ctor turbofish guards on
+                   -- these exact names so `::<msg>` is only emitted when `msg` is
+                   -- actually declared. Mismatched names just skip the turbofish.
+                   , ecGenParams = extractGenDeclNames genVars' }
         bodyStr = exprToRustString ctx' body
         -- Collect destructure preludes for non-trivial pattern args. The
         -- prelude is `let <Pattern> = __pN else { unreachable!() };` per
@@ -462,7 +486,9 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats body retTy) =
         ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx
                    , ecInGenericFn = not (null tvarNames)  -- Sub-A.13
                    , ecClosureDefs = collectClosureDefs body
-                   , ecReturnElem = taskElemOf ret }
+                   , ecReturnElem = taskElemOf ret
+                   , ecEnclosingRet = Just retTy
+                   , ecGenParams = tvarNames }
         -- NARROW task-wrap: an annotated `() -> Task Error X` whose body resolves
         -- to a kernel that is STRING-shaped in the Rust runtime but Task-shaped in
         -- Go. Per Sky.Core.Pure's note, `uuidV4Kernel : Task = Ffi.kernel "Uuid_v4"`
@@ -668,7 +694,7 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
             , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "", ecStructFields = structFields, ecForcedClosureParam = Nothing }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "", ecStructFields = structFields, ecForcedClosureParam = Nothing, ecEnclosingRet = Nothing, ecGenParams = [] }
         -- Multi-module signature scoping. The flat `ecSolvedTypes` (`_stEnv`)
         -- collides on bare names across modules, so a DEP module's function
         -- (e.g. `Lib.Db.exec : String -> List String -> Task Error ()`) whose

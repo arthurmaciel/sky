@@ -452,6 +452,20 @@ data EmitCtx = EmitCtx
         --   signature (18-job-queue's sleepThenFail E0308). Priority is below
         --   a concrete `ecExpectedType`; only fires as the last resort before
         --   the `i64` default.
+    , ecEnclosingRet :: Maybe Can.Type
+        -- ^ The ENCLOSING function's full return type (Can.Type), seeded when
+        --   emitting a def body. Sources the turbofish for a phantom-polymorphic
+        --   ADT constructor in the body tail (`none : Element msg` body
+        --   `StdUiElement::Empty` -> `StdUiElement::<msg>::Empty`); the phantom
+        --   `msg` is otherwise un-inferrable (E0282). The enclosing fn declares
+        --   the matching generic, so the return type's args name what's in scope.
+    , ecGenParams :: [String]
+        -- ^ The ENCLOSING function's DECLARED generic param names (its
+        --   `<msg, …>` decl). The ctor turbofish only fires when every type arg
+        --   is one of these — a return-type TVar that ISN'T declared (a
+        --   monomorphised `a`, a synthesised `_a_inst171`) is NOT in scope and a
+        --   turbofish over it is E0412 (cannot find type). Concrete returns skip
+        --   the turbofish entirely (Rust infers the param).
     }
 
 intercalate :: String -> [String] -> String
