@@ -17,6 +17,11 @@ pub enum SkyCmd<M> {
     None,
     Batch(Vec<SkyCmd<M>>),
     Perform(Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = M> + Send>> + Send>),
+    /// pub/sub broadcast. The thunk receives the publishing session's sid (the
+    /// origin), injected by the Live dispatch loop, and returns the subscriber
+    /// count. Not generic over the payload type T — T is captured inside the
+    /// thunk (the same erasure-free pattern as `Perform`'s boxed future).
+    Publish(Box<dyn FnOnce(&str) -> i64 + Send>),
 }
 
 /// A custom subscription event source: given an `emit` callback, spawn a task
@@ -152,6 +157,11 @@ fn cli_run_cmd<M: Send + 'static>(cmd: SkyCmd<M>, tx: &tokio::sync::mpsc::Unboun
                 let msg = thunk().await;
                 let _ = tx.send(CliEvent::Msg(msg));
             });
+        }
+        SkyCmd::Publish(thunk) => {
+            // No Live session in a Cli program; publish with an empty origin
+            // (no subscriber's owner_sid matches "" → echo-default no-op).
+            let _ = thunk("");
         }
     }
 }

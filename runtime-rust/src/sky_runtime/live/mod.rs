@@ -221,12 +221,12 @@ impl<Model, Msg, FInit, FUpdate, FView, FSubs> Clone
 
 /// Fire a `Cmd`: None/Batch recurse; Perform spawns the composed task→Msg thunk
 /// and pushes the result back into the per-session loop.
-fn run_cmd<Msg: Send + 'static>(cmd: SkyCmd<Msg>, tx: &UnboundedSender<Msg>) {
+fn run_cmd<Msg: Send + 'static>(cmd: SkyCmd<Msg>, tx: &UnboundedSender<Msg>, sid: &str) {
     match cmd {
         SkyCmd::None => {}
         SkyCmd::Batch(items) => {
             for c in items {
-                run_cmd(c, tx);
+                run_cmd(c, tx, sid);
             }
         }
         SkyCmd::Perform(thunk) => {
@@ -235,6 +235,11 @@ fn run_cmd<Msg: Send + 'static>(cmd: SkyCmd<Msg>, tx: &UnboundedSender<Msg>) {
                 let m = thunk().await;
                 let _ = tx.send(m);
             });
+        }
+        SkyCmd::Publish(thunk) => {
+            // Inject this session's sid as the broadcast origin (Go parity:
+            // liveApp.Publish sets Origin = session.sid). Fire-and-forget.
+            let _ = thunk(sid);
         }
     }
 }
@@ -345,7 +350,7 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
         // every commit).
         store.set(&sid, entry.clone()).await;
 
-        run_cmd(cmd, &msg_tx);
+        run_cmd(cmd, &msg_tx, &sid);
         spawn_subs(subs(next.clone()), &msg_tx, &mut sub_handles);
     }
     for h in sub_handles.drain(..) {
@@ -610,7 +615,7 @@ where
                 sid.clone(),
             ));
             // Fire init's Cmd into the loop (None for a cold-restored session).
-            run_cmd(cmd0, &msg_tx);
+            run_cmd(cmd0, &msg_tx, &sid);
 
             page_response(&sid, &body)
         }

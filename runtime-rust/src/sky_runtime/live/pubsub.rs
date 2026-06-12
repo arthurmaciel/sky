@@ -122,6 +122,26 @@ fn live_running() -> bool {
     LIVE_RUNNING.load(Ordering::Acquire)
 }
 
+use crate::sky_runtime::tea::SkyCmd;
+
+/// `Cmd.publish topic payload` — echo-by-default broadcast. The payload `T` is
+/// captured in the thunk; the dispatch loop supplies the origin sid.
+pub fn cmd_publish<T, M>(topic: String, payload: T) -> SkyCmd<M>
+where
+    T: Clone + Send + 'static,
+{
+    SkyCmd::Publish(Box::new(move |origin| broker::<T>().publish(&topic, payload, origin, false)))
+}
+
+/// `Cmd.publishNoEcho topic payload` — sets the SkipOrigin bit; the publisher's
+/// own subscription is suppressed receiver-side.
+pub fn cmd_publish_no_echo<T, M>(topic: String, payload: T) -> SkyCmd<M>
+where
+    T: Clone + Send + 'static,
+{
+    SkyCmd::Publish(Box::new(move |origin| broker::<T>().publish(&topic, payload, origin, true)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
