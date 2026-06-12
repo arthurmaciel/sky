@@ -302,6 +302,9 @@ fn hex_sha256(b: &[u8]) -> String {
 }
 
 fn hmac_bytes(key: &[u8], msg: &[u8]) -> Vec<u8> {
+    // INFALLIBLE: HMAC accepts any key length (never Err); internal SES-signing
+    // helper with no Result channel — a fallback MAC would be a wrong signature.
+    #[allow(clippy::expect_used)]
     let mut mac = HmacSha256::new_from_slice(key).expect("hmac key");
     mac.update(msg);
     mac.finalize().into_bytes().to_vec()

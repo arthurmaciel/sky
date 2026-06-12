@@ -59,6 +59,10 @@ pub fn crypto_hmac_sha256(key: String, msg: String) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
+    // INFALLIBLE: HMAC accepts any key length (new_from_slice never returns Err);
+    // the kernel is a pure `String -> String -> String` Sky surface with no Result
+    // channel, and a fallback MAC would be a silently-wrong hash (a security defect).
+    #[allow(clippy::expect_used)]
     let mut mac = HmacSha256::new_from_slice(key.as_bytes())
         .expect("Hmac<Sha256> accepts any key length");
     mac.update(msg.as_bytes());
@@ -70,6 +74,10 @@ pub fn crypto_hmac_sha512(key: String, msg: String) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha512;
     type HmacSha512 = Hmac<Sha512>;
+    // INFALLIBLE: HMAC accepts any key length (new_from_slice never returns Err);
+    // the kernel is a pure `String -> String -> String` Sky surface with no Result
+    // channel, and a fallback MAC would be a silently-wrong hash (a security defect).
+    #[allow(clippy::expect_used)]
     let mut mac = HmacSha512::new_from_slice(key.as_bytes())
         .expect("Hmac<Sha512> accepts any key length");
     mac.update(msg.as_bytes());
@@ -159,7 +167,12 @@ pub fn crypto_aes_gcm_encrypt<E: From<String>>(key: String, plaintext: String) -
     use aes_gcm::{Aes256Gcm, Nonce, KeyInit, aead::{Aead, OsRng, rand_core::RngCore}};
     use base64::{Engine, engine::general_purpose::STANDARD};
     let k = match aead_read_key("Crypto.aesGcmEncrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
-    let cipher = Aes256Gcm::new_from_slice(&k).unwrap();
+    // aead_read_key validated len == 32 just above, so the Err is structurally
+    // unreachable — but propagate into the existing SkyResult channel rather than panic.
+    let cipher = match Aes256Gcm::new_from_slice(&k) {
+        Ok(c) => c,
+        Err(e) => return SkyResult::Err(format!("Crypto.aesGcmEncrypt: {}", e).into()),
+    };
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -181,7 +194,10 @@ pub fn crypto_aes_gcm_decrypt<E: From<String>>(key: String, encoded: String) -> 
     let buf = match STANDARD.decode(encoded.as_bytes()) { Ok(b) => b, Err(e) => return SkyResult::Err(format!("Crypto.aesGcmDecrypt: invalid base64: {}", e).into()) };
     if buf.len() < 12 { return SkyResult::Err("Crypto.aesGcmDecrypt: ciphertext too short".to_string().into()); }
     let (nonce_bytes, ct) = buf.split_at(12);
-    let cipher = Aes256Gcm::new_from_slice(&k).unwrap();
+    let cipher = match Aes256Gcm::new_from_slice(&k) {
+        Ok(c) => c,
+        Err(e) => return SkyResult::Err(format!("Crypto.aesGcmDecrypt: {}", e).into()),
+    };
     match cipher.decrypt(Nonce::from_slice(nonce_bytes), ct) {
         Ok(pt) => SkyResult::Ok(String::from_utf8_lossy(&pt).into_owned()),
         Err(e) => SkyResult::Err(format!("Crypto.aesGcmDecrypt: {}", e).into()),
@@ -193,7 +209,10 @@ pub fn crypto_chacha20_encrypt<E: From<String>>(key: String, plaintext: String) 
     use chacha20poly1305::{ChaCha20Poly1305, Nonce, KeyInit, aead::{Aead, OsRng, rand_core::RngCore}};
     use base64::{Engine, engine::general_purpose::STANDARD};
     let k = match aead_read_key("Crypto.chacha20Encrypt", &key) { Ok(k) => k, Err(e) => return SkyResult::Err(e.into()) };
-    let cipher = ChaCha20Poly1305::new_from_slice(&k).unwrap();
+    let cipher = match ChaCha20Poly1305::new_from_slice(&k) {
+        Ok(c) => c,
+        Err(e) => return SkyResult::Err(format!("Crypto.chacha20Encrypt: {}", e).into()),
+    };
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
@@ -215,7 +234,10 @@ pub fn crypto_chacha20_decrypt<E: From<String>>(key: String, encoded: String) ->
     let buf = match STANDARD.decode(encoded.as_bytes()) { Ok(b) => b, Err(e) => return SkyResult::Err(format!("Crypto.chacha20Decrypt: invalid base64: {}", e).into()) };
     if buf.len() < 12 { return SkyResult::Err("Crypto.chacha20Decrypt: ciphertext too short".to_string().into()); }
     let (nonce_bytes, ct) = buf.split_at(12);
-    let cipher = ChaCha20Poly1305::new_from_slice(&k).unwrap();
+    let cipher = match ChaCha20Poly1305::new_from_slice(&k) {
+        Ok(c) => c,
+        Err(e) => return SkyResult::Err(format!("Crypto.chacha20Decrypt: {}", e).into()),
+    };
     match cipher.decrypt(Nonce::from_slice(nonce_bytes), ct) {
         Ok(pt) => SkyResult::Ok(String::from_utf8_lossy(&pt).into_owned()),
         Err(e) => SkyResult::Err(format!("Crypto.chacha20Decrypt: {}", e).into()),
