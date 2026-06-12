@@ -1,18 +1,20 @@
 //! Integration test: assert that no unintended curried helpers are added
-//! to the runtime. Under the tupled calling convention (README section A0) a
-//! multi-arg Sky function lowers to ONE tupled Rust fn `f(a, b)`, never a
-//! curried `f(a)(b)`. Two legitimate shapes return `impl Fn…`:
+//! to the runtime. Under the tupled calling convention a multi-arg Sky function
+//! lowers to ONE tupled Rust fn `f(a, b)`, never a curried `f(a)(b)`.
 //!
-//!   1. Pipeline-decoder builders (`json_dec_p_required` / `_optional`) — they
-//!      return `impl FnOnce(Decoder<…>) -> Decoder<…>`; the deferred arg is a
-//!      Sky-domain `Decoder`, so this IS the curried exception (allowlisted).
-//!   2. Handler producers (the `middleware_with_*` family) — they take all
-//!      their Sky args tupled and return a **Handler**, which is the runtime
-//!      type `Fn(ServerRequest) -> SkyTask<E, Response>`. The returned closure
-//!      takes a runtime `ServerRequest`, NOT a deferred Sky arg, so this is not
-//!      currying — it's a function that returns a function-typed value. These
-//!      are recognised structurally (return-Fn arg == `ServerRequest`) so new
-//!      middleware don't need allowlisting.
+//! As of the JSON-pipeline uncurry refactor (commit 710f35f5), the runtime has
+//! NO curried helpers — even the `Json.Decode.Pipeline` builders
+//! (`json_dec_p_required` / `_optional`) are now tupled: they take their
+//! `next_decoder` as a `Box<dyn FnOnce(T) -> F>` argument and return a plain
+//! `Decoder<E, F>`, not an `impl Fn…`. So the expected set is empty.
+//!
+//! The one shape that still returns `impl Fn…` is a Handler producer (the
+//! `middleware_with_*` family): it takes all its Sky args tupled and returns a
+//! **Handler**, the runtime type `Fn(ServerRequest) -> SkyTask<E, Response>`.
+//! The returned closure takes a runtime `ServerRequest`, NOT a deferred Sky arg,
+//! so this is not currying — it's a function that returns a function-typed
+//! value. These are recognised structurally (return-Fn arg == `ServerRequest`)
+//! so new middleware don't need allowlisting.
 
 use std::path::PathBuf;
 
@@ -51,9 +53,12 @@ fn no_unintended_curried_helpers() {
     curried.sort();
     assert_eq!(
         curried,
-        vec!["json_dec_p_optional", "json_dec_p_required"],
-        "Unexpected curried helper(s) found — see README section A0 (tupled convention). \
-         Only Json.Decode.Pipeline decoders should be curried; middleware that return \
-         a Handler (Fn(ServerRequest) -> …) are recognised structurally and exempt."
+        Vec::<String>::new(),
+        "Unexpected curried helper(s) found — the runtime uses the tupled calling \
+         convention (a multi-arg Sky fn lowers to f(a, b), never f(a)(b)). Pipeline \
+         decoders (json_dec_p_*) are tupled (next_decoder passed as a Box<dyn FnOnce> \
+         arg), and middleware that return a Handler (Fn(ServerRequest) -> …) are \
+         recognised structurally and exempt. A new name here means a multi-arg helper \
+         leaked a curried `-> impl Fn(<Sky type>)` shape — make it tupled instead."
     );
 }
