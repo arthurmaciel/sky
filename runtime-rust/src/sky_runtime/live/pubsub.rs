@@ -23,7 +23,7 @@ const TOPIC_CAP: usize = 256;
 /// One broadcast envelope. `origin` is the publishing session's sid;
 /// `skip_origin` requests receiver-side echo-suppression (publishNoEcho).
 #[derive(Clone)]
-pub struct Event<T> {
+pub(crate) struct Event<T> {
     pub payload: T,
     pub origin: String,
     pub skip_origin: bool,
@@ -33,7 +33,7 @@ pub struct Event<T> {
 /// channel shared by all of that topic's subscribers; SkipOrigin is filtered
 /// receiver-side (see `sub_subscribe_topic`), so the broker stays a plain
 /// `topic -> Sender` map.
-pub struct Broker<T> {
+pub(crate) struct Broker<T> {
     topics: Mutex<HashMap<String, broadcast::Sender<Event<T>>>>,
 }
 
@@ -49,7 +49,7 @@ impl<T: Clone + Send + 'static> Broker<T> {
     }
 
     /// Register a subscriber on `topic`, creating the channel if needed.
-    pub fn subscribe(&self, topic: &str) -> broadcast::Receiver<Event<T>> {
+    pub(crate) fn subscribe(&self, topic: &str) -> broadcast::Receiver<Event<T>> {
         let mut g = self.lock();
         let tx = g
             .entry(topic.to_string())
@@ -62,7 +62,7 @@ impl<T: Clone + Send + 'static> Broker<T> {
     /// drop concurrently; pub/sub is fire-and-forget). A topic whose subscribers
     /// have all dropped is lazily pruned and returns 0. Fire-and-forget — `send`
     /// failing (no receivers) is not an error.
-    pub fn publish(&self, topic: &str, payload: T, origin: &str, skip_origin: bool) -> i64 {
+    pub(crate) fn publish(&self, topic: &str, payload: T, origin: &str, skip_origin: bool) -> i64 {
         let mut g = self.lock();
         match g.get(topic) {
             Some(tx) => {
@@ -88,7 +88,7 @@ fn registry() -> &'static Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>> {
 }
 
 /// Get (or lazily create) the broker for payload type `T`.
-pub fn broker<T: Clone + Send + 'static>() -> Arc<Broker<T>> {
+pub(crate) fn broker<T: Clone + Send + 'static>() -> Arc<Broker<T>> {
     let mut g = registry().lock().unwrap_or_else(|e| e.into_inner());
     let entry = g
         .entry(TypeId::of::<T>())

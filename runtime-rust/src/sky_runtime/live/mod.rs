@@ -15,7 +15,17 @@ pub use req::*;
 pub mod store;
 pub use store::*;
 pub mod pubsub;
-pub use pubsub::*;
+// Explicit re-export of ONLY the codegen-referenced kernel functions. A glob
+// (`pub use pubsub::*`) leaked the broker's `Event<T>` into this namespace,
+// colliding with the HTML `Event` enum re-exported below (`pub use …html::*`)
+// and surfacing as `error: `Event` is ambiguous` in generated code that names
+// `sky_runtime::Event`. The broker internals (`Event`, `Broker`, `broker`,
+// `subscribe`, `publish`) are `pub(crate)` in pubsub.rs — they never leave the
+// crate, so they don't need re-exporting here.
+pub use pubsub::{
+    cmd_publish, cmd_publish_no_echo, pubsub_publish, pubsub_publish_no_echo,
+    sub_subscribe_topic,
+};
 
 // Html ADTs + renderer now live in the standalone top-level `html` module;
 // re-export them so live submodules (diff.rs, store.rs, …) that `use super::*`
