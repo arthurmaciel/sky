@@ -582,7 +582,10 @@ where
 
             let (sid, model, cmd0) = match hit {
                 Some(store::StoreHit::Live(handle)) => {
-                    let s = cookie_sid.expect("live hit implies a cookie sid");
+                    // cookie_sid is structurally Some on a store hit (the hit was looked
+                    // up from it); the impossible None degrades to a fresh session rather
+                    // than panicking.
+                    let s = cookie_sid.unwrap_or_else(new_sid);
                     let body = {
                         let mut e = handle.lock().unwrap_or_else(|e| e.into_inner());
                         e.model = (st.route_resolver)(e.model.clone(), uri.path());
@@ -596,7 +599,7 @@ where
                     return page_response(&s, &body);
                 }
                 Some(store::StoreHit::Cold(m)) => {
-                    let s = cookie_sid.expect("cold hit implies a cookie sid");
+                    let s = cookie_sid.unwrap_or_else(new_sid);
                     (s, (st.route_resolver)(m, uri.path()), SkyCmd::None)
                 }
                 None => {
@@ -694,14 +697,18 @@ where
                     .await
                     .map(|SsePatch(s)| (Ok::<_, std::io::Error>(axum::body::Bytes::from(s)), rx))
             });
-            Response::builder()
+            match Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
                 .header(axum::http::header::CACHE_CONTROL, "no-cache")
                 .header("x-accel-buffering", "no")
                 .body(axum::body::Body::from_stream(body_stream))
-                .unwrap()
-                .into_response()
+            {
+                Ok(r) => r.into_response(),
+                // Headers/status are all literals, so this never fails; total
+                // fallback per the no-runtime-errors rule.
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
         }
 
         // ── POST /_sky/event ──────────────────────────────────────────────
