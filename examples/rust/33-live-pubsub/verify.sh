@@ -22,8 +22,9 @@ SRV_PID=""
 SSE_PID=""
 
 cleanup() {
-    [ -n "$SSE_PID" ] && kill -9 "$SSE_PID" 2>/dev/null
-    [ -n "$SRV_PID" ] && kill -9 "$SRV_PID" 2>/dev/null
+    [ -n "${SSE_PID:-}" ] && kill -9 "$SSE_PID" 2>/dev/null
+    [ -n "${SSEA_PID:-}" ] && kill -9 "$SSEA_PID" 2>/dev/null
+    [ -n "${SRV_PID:-}" ] && kill -9 "$SRV_PID" 2>/dev/null
     rm -rf "$TMP"
 }
 trap cleanup EXIT
