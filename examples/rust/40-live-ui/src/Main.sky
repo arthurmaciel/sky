@@ -1,0 +1,78 @@
+module Main exposing (main)
+
+-- 40-live-ui — Sky.Live with a Std.Ui Element view, on the Rust backend.
+-- Regression fixture for the "Element as a shared runtime type" redesign: the
+-- pure-Sky Std.Ui render chain (renderElement → Html, via Ui.layout) must still
+-- emit correct inline-CSS HTML when Element/Attribute/Color/Length map to the
+-- runtime types. Distinct structured attributes (padding, spacing, colours,
+-- border radius, font size) let us eyeball the CSS for variant-order fidelity.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.String as String
+import Std.Html as Html
+import Std.Live as Live
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+import Std.Ui as Ui
+import Std.Ui.Background as Background
+import Std.Ui.Border as Border
+import Std.Ui.Font as Font
+
+
+type Msg = Increment | Decrement
+
+
+type alias Model = { count : Int }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ = ( { count = 0 }, Cmd.none )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Increment -> ( { model | count = model.count + 1 }, Cmd.none )
+        Decrement -> ( { model | count = model.count - 1 }, Cmd.none )
+
+
+view : Model -> Html.Html Msg
+view model =
+    Ui.layout []
+        (Ui.column
+            [ Ui.padding 24
+            , Ui.spacing 16
+            , Background.color (Ui.rgb 24 28 48)
+            , Font.color (Ui.rgb 220 220 230)
+            ]
+            [ Ui.el [ Font.size 28, Font.color (Ui.rgb 142 200 168) ]
+                (Ui.text ("Count: " ++ String.fromInt model.count))
+            , Ui.row [ Ui.spacing 12 ]
+                [ Ui.el
+                    [ Ui.padding 8
+                    , Background.color (Ui.rgb 60 90 70)
+                    , Border.rounded 6
+                    ]
+                    (Ui.text "minus")
+                , Ui.el
+                    [ Ui.padding 8
+                    , Background.color (Ui.rgb 90 60 60)
+                    , Border.rounded 6
+                    ]
+                    (Ui.text "plus")
+                ]
+            ]
+        )
+
+
+subscriptions : Model -> Sub Msg
+subscriptions _ = Sub.none
+
+
+main : Task Error ()
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ Live.route "/" () ]
+        , notFound = ()
+        }

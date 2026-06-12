@@ -160,6 +160,24 @@ runtimeOpaqueTypes = Map.fromList
     -- Debug/PartialEq or resolve `any`.
     , (("Std.Webview", "WindowCfg"), "sky_runtime::WebviewWindowCfg")
     , (("Std.Webview", "AppCfg"), "sky_runtime::WebviewAppCfg")
+    -- Std.Ui shared element tree — the general UI abstraction. Mapping these to
+    -- runtime types (mirror of the `Std.Html.Html` bridge) lets every backend
+    -- (Live → HTML, Tui → ANSI cells, Webview → webview) render the SAME
+    -- structured `Element` tree, instead of the Tui backend re-parsing CSS out of
+    -- Live's Html. Element/Attribute carry `msg` → `{M}` generic alias; the rest
+    -- are non-generic. The runtime defs (sky_runtime::ui::*) mirror
+    -- Std.Ui.sky:39-190 variant-for-variant; the pure-Sky render chain
+    -- (renderElement → Html) keeps constructing + matching them.
+    , (("Std.Ui", "Element"),       "sky_runtime::ui::Element<{M}>")
+    , (("Std.Ui", "Attribute"),     "sky_runtime::ui::Attribute<{M}>")
+    , (("Std.Ui", "Length"),        "sky_runtime::ui::Length")
+    , (("Std.Ui", "Color"),         "sky_runtime::ui::Color")
+    , (("Std.Ui", "Description"),    "sky_runtime::ui::Description")
+    , (("Std.Ui", "HAlign"),        "sky_runtime::ui::HAlign")
+    , (("Std.Ui", "VAlign"),        "sky_runtime::ui::VAlign")
+    , (("Std.Ui", "Location"),      "sky_runtime::ui::Location")
+    , (("Std.Ui", "PseudoClass"),   "sky_runtime::ui::PseudoClass")
+    , (("Std.Ui", "LayoutContext"), "sky_runtime::ui::LayoutContext")
     -- Sub-D.1: Sky.Http.Server records (Request/Response) + opaque ADTs
     -- (Route/Cookie) map to runtime structs so the server kernels return/take
     -- them directly. The handler closure is erased into a non-generic

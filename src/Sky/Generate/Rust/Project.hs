@@ -156,6 +156,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- Tui app that uses no Std.Ui itself.
         htmlMod = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage || RustBuilder.usesTui usage then ["pub mod html;"] else []
         htmlUse = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage || RustBuilder.usesTui usage then ["pub use html::*;"] else []
+        -- Std.Ui shared element tree. Declared (not glob-re-exported; generated
+        -- code uses the qualified `sky_runtime::ui::*` path) whenever Std.Ui /
+        -- Html UI is in play. The Tui Element renderer also needs it.
+        uiMod = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage || RustBuilder.usesTui usage then ["pub mod ui;"] else []
         -- Std.Live only when used — live submodule (the Sky.Live server).
         liveMod = if RustBuilder.usesLive usage then ["pub mod live;"] else []
         liveUse = if RustBuilder.usesLive usage then ["pub use live::*;"] else []
@@ -164,7 +168,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         tuiUse = if RustBuilder.usesTui usage then ["pub use tui::{tui_app, tui_app_ui};"] else []
         webviewMod = if RustBuilder.usesWebview usage then ["pub mod webview;"] else []
         webviewUse = if RustBuilder.usesWebview usage then ["pub use webview::{webview_app, WebviewAppCfg, WebviewWindowCfg};"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ liveMod ++ tuiMod ++ webviewMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse ++ tuiUse ++ webviewUse)
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ uiMod ++ liveMod ++ tuiMod ++ webviewMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse ++ tuiUse ++ webviewUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode

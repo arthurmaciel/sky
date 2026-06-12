@@ -124,6 +124,12 @@ pub use ws_client::*;
 pub mod html;
 pub use html::*;
 
+// Std.Ui shared element tree — the general UI abstraction (Element/Attribute/
+// Length/Color/...). Backends (Live/Tui/Webview) each render it to their target.
+// Referenced by qualified path (`sky_runtime::ui::*`) from generated code; NOT
+// glob-re-exported (its `Attribute` would collide with html's).
+pub mod ui;
+
 // Sky.Webview — native desktop window backend (a TEA app, so gated on the async
 // runtime like `tea`). The cross-platform floor (a stub returning a graceful Err)
 // keeps `import Std.Webview` linking everywhere; the real wry/tao window backend
