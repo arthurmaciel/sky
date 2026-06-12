@@ -1,0 +1,79 @@
+module Main exposing (main)
+
+-- #52 acceptance — the upstream pub/sub idiom on the Rust backend:
+-- an `any`-typed, Dict-shaped payload (the documented portable choice),
+-- broadcast over the per-type Broker, decoded on the subscriber side via
+-- `Db.getString` (a Dict accessor). Proves the Rust codegen lowers
+-- `Received any` + `decode : any -> _` reading fields with `Db.getString`
+-- WITHOUT erasure: the payload travels as its real `Dict String String`
+-- type, so `Broker<Dict>` connects publisher and subscriber.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Html as Html
+import Std.Html.Attributes as Attr
+import Std.Html.Events as Ev
+import Std.Live as Live
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+import Std.Db as Db
+import Sky.Core.Dict as Dict
+import Sky.Core.Error exposing (Error)
+
+
+type Msg
+    = Broadcast
+    | Received any
+
+
+type alias Model =
+    { received : List String }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { received = [] }, Cmd.none )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Broadcast ->
+            -- publish a concrete Dict payload (upstream's portable choice)
+            ( model
+            , Cmd.publish "room" (Dict.fromList [ ( "text", "ping" ) ])
+            )
+
+        Received payload ->
+            ( { model | received = decodePayload payload :: model.received }
+            , Cmd.none
+            )
+
+
+-- the `any` payload is read back field-by-field via Db.getString (a Dict
+-- accessor in disguise) — the exact upstream idiom.
+decodePayload : any -> String
+decodePayload payload =
+    Db.getString "text" payload
+
+
+view : Model -> Html.Html Msg
+view model =
+    Html.div []
+        [ Html.button [ Attr.id "broadcast", Ev.onClick Broadcast ] [ Html.text "Broadcast" ]
+        , Html.ul [ Attr.id "feed" ] (List.map (\m -> Html.li [] [ Html.text m ]) model.received)
+        ]
+
+
+subscriptions : Model -> Sub Msg
+subscriptions _ =
+    Sub.subscribeTopic "room" Received
+
+
+main : Task Error ()
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ Live.route "/" () ]
+        , notFound = ()
+        }
