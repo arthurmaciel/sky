@@ -396,7 +396,12 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                          in if null bodyInner
                             then case knownDefSig modPrefix name n of
                                 Just (_, knownRetType) -> knownRetType
-                                Nothing -> if name == "main"
+                                -- `name == "main"` alone is not enough: only the
+                                -- entry module's `main` is the program entry. A
+                                -- stdlib `<main>` element helper (`Std.Html.main`)
+                                -- also lands here and must keep its real return
+                                -- type, not the entry-point unit convention.
+                                Nothing -> if name == "main" && ecCurrentModule ctx == "Main"
                                            then if ecUsesTaskRun ctx then "()" else "SkyTask<()>"
                                            else "()"
                             else "SkyTask<" ++ bodyInner ++ ">"
@@ -520,7 +525,7 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- return even when it ALSO uses Task.run — its serve future is the real
         -- entry and must be block_on'd (mirrors `mainIsTask` in Emitter.hs).
         -- Without this the `live_app(...)` future is discarded and never binds.
-        ret = if name == "main"
+        ret = if name == "main" && ecCurrentModule ctx == "Main"
               then if ecUsesTaskRun ctx && Set.null (ecLiveInitFns ctx)
                    then "()"
                    else typeToRustString rm retTy
@@ -531,7 +536,7 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- `init : a -> …`) is orphaned — exclude the first param's types or the
         -- live_app call site can't infer the unused generic (E0283).
         annotPatTys = if Set.member name (ecLiveInitFns ctx) then map snd (drop 1 pats) else map snd pats
-        allAnnotTys = annotPatTys ++ [retTy | name /= "main"]
+        allAnnotTys = annotPatTys ++ [retTy | not (name == "main" && ecCurrentModule ctx == "Main")]
         -- collectRenderedTVars (not collectTVars): a var that appears only inside
         -- a runtimeOpaque type's dropped args (e.g. `msg` in WebSocketServerCfg
         -- msg) must NOT become a function generic — it'd be unused in the Rust
