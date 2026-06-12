@@ -6,7 +6,9 @@
 //! `cell` (grid + sanitisation) lands first; `render` / `diff` / `key` and the
 //! `tui_app` loop follow.
 
+pub mod app;
 pub mod cell;
 pub mod diff; // accessed qualified (tui::diff::diff) — `diff` collides with live's
 pub mod key;
+pub use app::tui_app;
 pub use cell::*;

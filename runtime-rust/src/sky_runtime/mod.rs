@@ -76,8 +76,9 @@ pub use cache::*;
 #[cfg(feature = "tui")]
 pub mod tui;
 // NB: no `pub use tui::*` — its `diff` module name collides with live's `diff`.
-// Tui internals are self-contained (`super::cell`); the `tui_app` kernel gets an
-// explicit re-export when it lands.
+// Re-export only the `tui_app` kernel (generated code calls it unqualified).
+#[cfg(feature = "tui")]
+pub use tui::tui_app;
 
 pub mod uuid_kernel;
 pub use uuid_kernel::*;
