@@ -60,9 +60,47 @@ pub struct Focusable<M> {
     /// The element's `value` attribute (initial buffer / checkbox-radio state).
     pub value: String,
     pub placeholder: String,
-    /// Top row of the element in the full (pre-scroll) frame — for scroll-into-view.
+    /// Top-left of the element in the full (pre-scroll) frame — `line` drives
+    /// scroll-into-view; `col`/`width`/`height` drive mouse hit-testing.
     pub line: usize,
+    pub col: usize,
+    pub width: usize,
     pub height: usize,
+}
+
+/// Parse an SGR mouse payload `"btn;col;row:M|m"` (1-based col/row) into
+/// `(button, col, row, is_press)`.
+pub fn parse_mouse(body: &str) -> Option<(i64, usize, usize, bool)> {
+    let (coords, tag) = body.rsplit_once(':')?;
+    let mut it = coords.split(';');
+    let btn: i64 = it.next()?.trim().parse().ok()?;
+    let col: usize = it.next()?.trim().parse().ok()?;
+    let row: usize = it.next()?.trim().parse().ok()?;
+    Some((btn, col, row, tag == "M"))
+}
+
+/// Topmost focusable whose rect contains the 0-based screen cell `(col0, row0)`,
+/// accounting for the current `scroll_y` (focusable positions are pre-scroll).
+pub fn hit_test<M>(
+    focusables: &[Focusable<M>],
+    col0: usize,
+    row0: usize,
+    scroll_y: usize,
+) -> Option<usize> {
+    for (i, f) in focusables.iter().enumerate().rev() {
+        if f.line < scroll_y {
+            continue;
+        }
+        let vis_top = f.line - scroll_y;
+        if row0 >= vis_top
+            && row0 < vis_top + f.height
+            && col0 >= f.col
+            && col0 < f.col + f.width.max(1)
+        {
+            return Some(i);
+        }
+    }
+    None
 }
 
 impl<M> Focusable<M> {
@@ -293,5 +331,35 @@ mod tests {
         }
         let events: Vec<Event<M>> = vec![Event::OnMsg("click".into(), M::Clicked)];
         assert_eq!(extract_click_msg(&events), Some(M::Clicked));
+    }
+
+    #[test]
+    fn parse_mouse_decodes_sgr() {
+        assert_eq!(parse_mouse("0;5;3:M"), Some((0, 5, 3, true)));
+        assert_eq!(parse_mouse("64;1;1:M"), Some((64, 1, 1, true)));
+        assert_eq!(parse_mouse("0;5;3:m"), Some((0, 5, 3, false)));
+        assert_eq!(parse_mouse("garbage"), None);
+    }
+
+    #[test]
+    fn hit_test_finds_rect_and_respects_scroll() {
+        let f = |line: usize, col: usize, w: usize| Focusable::<()> {
+            events: vec![],
+            is_input: false,
+            input_type: String::new(),
+            value: String::new(),
+            placeholder: String::new(),
+            line,
+            col,
+            width: w,
+            height: 1,
+        };
+        let fs = vec![f(2, 4, 6), f(10, 0, 3)];
+        // (col 5, row 2) hits focusable 0.
+        assert_eq!(hit_test(&fs, 5, 2, 0), Some(0));
+        // outside any rect.
+        assert_eq!(hit_test(&fs, 0, 0, 0), None);
+        // with scroll_y=8, focusable 1 (abs line 10) is at visible row 2.
+        assert_eq!(hit_test(&fs, 1, 2, 8), Some(1));
     }
 }

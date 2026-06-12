@@ -116,12 +116,12 @@ impl Block {
     }
 }
 
-/// A rendered subtree plus the focusables it produced (with their line offset
-/// relative to this block's top — composition shifts it to an absolute row).
+/// A rendered subtree plus the focusables it produced, each as
+/// `(focusable index, line, col, width, height)` relative to this block's
+/// top-left — composition shifts line/col to absolute frame coordinates.
 struct Rendered {
     block: Block,
-    // (focusable index in the collector, line within `block`, height)
-    hits: Vec<(usize, usize, usize)>,
+    hits: Vec<(usize, usize, usize, usize, usize)>,
 }
 
 /// Render-time context threaded through the walk.
@@ -185,8 +185,8 @@ fn vstack(children: Vec<Rendered>, gap: usize) -> Rendered {
             }
             line0 += gap;
         }
-        for (idx, l, h) in r.hits {
-            hits.push((idx, line0 + l, h));
+        for (idx, l, c, w, h) in r.hits {
+            hits.push((idx, line0 + l, c, w, h)); // stacked vertically — col unchanged
         }
         let h = r.block.lines.len();
         block.lines.extend(r.block.lines);
@@ -199,11 +199,16 @@ fn hstack(children: Vec<Rendered>, gap: usize) -> Rendered {
     let height = children.iter().map(|r| r.block.height()).max().unwrap_or(0);
     let mut block = Block { lines: vec![Vec::new(); height] };
     let mut hits = Vec::new();
+    let mut col0 = 0usize;
     for (bi, r) in children.iter().enumerate() {
         let bw = r.block.width();
-        for (idx, l, h) in &r.hits {
-            hits.push((*idx, *l, *h)); // same row band — line unchanged
+        if bi > 0 {
+            col0 += gap;
         }
+        for (idx, l, c, w, h) in &r.hits {
+            hits.push((*idx, *l, col0 + *c, *w, *h)); // side by side — shift col
+        }
+        col0 += bw;
         for row in 0..height {
             if let Some(target) = block.lines.get_mut(row) {
                 if bi > 0 && gap > 0 {
@@ -260,7 +265,7 @@ fn apply_padding(inner: Rendered, w: &Walked, canvas: Canvas, self_style: Style)
     for _ in 0..bottom {
         block.lines.push(vec![pad_run(total_w)]);
     }
-    let hits = inner.hits.into_iter().map(|(idx, l, h)| (idx, l + top, h)).collect();
+    let hits = inner.hits.into_iter().map(|(idx, l, c, w, h)| (idx, l + top, c + left, w, h)).collect();
     Rendered { block, hits }
 }
 
@@ -290,8 +295,27 @@ fn render_input<M: Clone>(
             Run { text: g.to_string(), style: Style { reverse: focused, ..style } }
         }
         "range" => {
-            // Track with a centred thumb (precise value is a follow-on).
-            Run { text: "├──●──┤".to_string(), style: Style { reverse: focused, ..style } }
+            // Track with the thumb positioned at value within [min, max].
+            let min: f64 = attr_str(attrs, "min").and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
+            let max: f64 = attr_str(attrs, "max").and_then(|s| s.trim().parse().ok()).unwrap_or(100.0);
+            let val: f64 = value.trim().parse().unwrap_or(min);
+            let width = 12usize;
+            let frac = if max > min { ((val - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 };
+            let thumb = ((frac * (width - 1) as f64).round() as usize).min(width - 1);
+            let track: String = (0..width)
+                .map(|i| {
+                    if i == 0 {
+                        '├'
+                    } else if i == width - 1 {
+                        '┤'
+                    } else if i == thumb {
+                        '●'
+                    } else {
+                        '─'
+                    }
+                })
+                .collect();
+            Run { text: track, style: Style { reverse: focused, ..style } }
         }
         _ => {
             // Text-like input: keep the edit buffer in sync with the model's
@@ -315,6 +339,7 @@ fn render_input<M: Clone>(
     };
 
     let block = Block { lines: vec![vec![cell]] };
+    let width = block.width();
     ctx.focusables.push(Focusable {
         events,
         is_input: true,
@@ -322,9 +347,11 @@ fn render_input<M: Clone>(
         value,
         placeholder,
         line: 0,
+        col: 0,
+        width,
         height: 1,
     });
-    Rendered { block, hits: vec![(idx, 0, 1)] }
+    Rendered { block, hits: vec![(idx, 0, 0, width, 1)] }
 }
 
 /// Render one Element node, cascading text style + collecting focusables.
@@ -352,6 +379,8 @@ fn render_node<M: Clone>(node: &Element<M>, inherited: Style, ctx: &mut Ctx<M>) 
                 value: String::new(),
                 placeholder: String::new(),
                 line: 0,
+                col: 0,
+                width: 0,
                 height: 1,
             });
             let w = walk_attrs(attrs, inherited);
@@ -372,8 +401,9 @@ fn render_node<M: Clone>(node: &Element<M>, inherited: Style, ctx: &mut Ctx<M>) 
                 }
             }
             let h = padded.block.height().max(1);
-            // Record this button's hit (line resolved by the caller's compose).
-            padded.hits.insert(0, (idx, 0, h));
+            let bw = padded.block.width();
+            // Record this button's hit (line/col resolved by the caller's compose).
+            padded.hits.insert(0, (idx, 0, 0, bw, h));
             padded
         }
         Element::Node(_d, attrs, kids) | Element::TaggedNode(_, _d, attrs, kids) => {
@@ -470,10 +500,12 @@ pub fn render_with_focus<M: Clone>(
     let mut ctx = Ctx { canvas, focus_idx, focusables: Vec::new(), inputs };
     let rendered = render_node(view, Style::default(), &mut ctx);
     let content_h = rendered.block.height();
-    // Write back absolute line positions onto the focusables.
-    for (idx, line, h) in rendered.hits {
+    // Write back absolute positions onto the focusables (for scroll + hit-test).
+    for (idx, line, col, width, h) in rendered.hits {
         if let Some(f) = ctx.focusables.get_mut(idx) {
             f.line = line;
+            f.col = col;
+            f.width = width;
             f.height = h;
         }
     }

@@ -14,8 +14,8 @@ use super::super::core::{ok_res, SkyResult, SkyTask};
 use super::super::tea::{cli_run_cmd, CliEvent, SkyCmd, SkySub, SubManager};
 use super::super::ui::Element;
 use super::focus::{
-    clamp_focus, edit_input, ensure_focus_visible, extract_click_msg, extract_input_msg, Focusable,
-    InputRegistry,
+    clamp_focus, edit_input, ensure_focus_visible, extract_click_msg, extract_input_msg, hit_test,
+    parse_mouse, Focusable, InputRegistry,
 };
 use super::key::decode_key;
 use super::layout::render_with_focus;
@@ -26,25 +26,47 @@ const ALT_SCREEN_OFF: &str = "\x1b[?1049l";
 const CLEAR_HOME: &str = "\x1b[2J\x1b[H";
 const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
+// Click tracking (1000) + SGR extended coords (1006) — wheel reports as buttons
+// 64/65, clicks as button 0. Only the Element backend (`tui_app_ui`) enables it.
+const MOUSE_ON: &str = "\x1b[?1000;1006h";
+const MOUSE_OFF: &str = "\x1b[?1000;1006l";
 
-/// RAII terminal-state guard — restores cooked mode + cursor + main screen on
-/// Drop (normal exit or panic unwind). Best-effort, never panics.
-struct TuiGuard;
+/// RAII terminal-state guard — restores cooked mode + cursor + main screen (and
+/// mouse reporting, when enabled) on Drop (normal exit or panic unwind).
+/// Best-effort, never panics.
+struct TuiGuard {
+    mouse: bool,
+}
 
 impl TuiGuard {
+    /// String-view driver (`tui_app` / `Tui.program`) — no mouse reporting.
     fn enter() -> Result<Self, String> {
+        Self::enter_with(false)
+    }
+    /// Element-view driver (`tui_app_ui` / `Tui.app`) — enables mouse reporting
+    /// for focus-click + wheel scroll.
+    fn enter_mouse() -> Result<Self, String> {
+        Self::enter_with(true)
+    }
+    fn enter_with(mouse: bool) -> Result<Self, String> {
         crossterm::terminal::enable_raw_mode().map_err(|e| format!("Tui: enable raw mode: {e}"))?;
         let mut out = std::io::stdout();
         let _ = out.write_all(ALT_SCREEN_ON.as_bytes());
         let _ = out.write_all(HIDE_CURSOR.as_bytes());
+        if mouse {
+            let _ = out.write_all(MOUSE_ON.as_bytes());
+        }
         let _ = out.flush();
-        Ok(TuiGuard)
+        Ok(TuiGuard { mouse })
     }
 }
 
 impl Drop for TuiGuard {
     fn drop(&mut self) {
         let mut out = std::io::stdout();
+        if self.mouse {
+            let _ = out.write_all(MOUSE_OFF.as_bytes());
+        }
         let _ = out.write_all(SHOW_CURSOR.as_bytes());
         let _ = out.write_all(ALT_SCREEN_OFF.as_bytes());
         let _ = out.flush();
@@ -235,7 +257,7 @@ where
         if std::env::var("TERM").as_deref() == Ok("dumb") {
             return SkyResult::Err("Tui: TERM=dumb is not an interactive terminal".to_string().into());
         }
-        let _guard = match TuiGuard::enter() {
+        let _guard = match TuiGuard::enter_mouse() {
             Ok(g) => g,
             Err(e) => return SkyResult::Err(e.into()),
         };
@@ -283,6 +305,62 @@ where
                 CliEvent::Eof => break,
                 CliEvent::Line(_) => continue,
                 CliEvent::Key(kind, value) => {
+                    // Mouse: wheel scrolls the viewport; a left-press focuses the
+                    // hit element and activates it (if not an input).
+                    if kind == "mouse" {
+                        if let Some((btn, mcol, mrow, press)) = parse_mouse(&value) {
+                            if press && (btn == 64 || btn == 65) {
+                                let (cols, rows) = term_size();
+                                let (_f, _fs, content_h) = render_with_focus(
+                                    &view(model.clone()), cols, rows, focus_idx, &mut inputs, scroll_y,
+                                );
+                                let max_scroll = content_h.saturating_sub(rows);
+                                scroll_y = if btn == 64 {
+                                    scroll_y.saturating_sub(3)
+                                } else {
+                                    (scroll_y + 3).min(max_scroll)
+                                };
+                                let (frame, fs, _) = render_with_focus(
+                                    &view(model.clone()), cols, rows, focus_idx, &mut inputs, scroll_y,
+                                );
+                                paint(&frame);
+                                focusables = fs;
+                                continue;
+                            }
+                            if press && btn == 0 {
+                                if let Some(hit) = hit_test(
+                                    &focusables,
+                                    mcol.saturating_sub(1),
+                                    mrow.saturating_sub(1),
+                                    scroll_y,
+                                ) {
+                                    focus_idx = hit;
+                                    let is_input =
+                                        focusables.get(hit).map(|f| f.is_input).unwrap_or(false);
+                                    if !is_input {
+                                        produced = focusables
+                                            .get(hit)
+                                            .and_then(|f| extract_click_msg(&f.events));
+                                    }
+                                    if produced.is_none() {
+                                        focusables = render_and_paint(
+                                            &view, &model, &mut inputs, &mut focus_idx, &mut scroll_y,
+                                        );
+                                        continue;
+                                    }
+                                    // else fall through to dispatch `produced`.
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                        // A left-press that produced a click Msg skips the key
+                        // logic below (the `else`) and dispatches `produced`.
+                    } else {
                     let n = focusables.len();
                     let focused_input =
                         focusables.get(focus_idx).map(|f| f.is_input).unwrap_or(false);
@@ -353,6 +431,7 @@ where
                     } else {
                         produced = Some(on_key(kind, value));
                     }
+                    } // end key-logic else (non-mouse)
                 }
             }
 
