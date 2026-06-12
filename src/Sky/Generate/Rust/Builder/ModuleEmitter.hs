@@ -535,8 +535,19 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- boundary (Cmd.perform goroutines, SSE driver tasks). Sky values are
         -- immutable, so Sync is sound; it's also required for the Std.Live
         -- Event::OnRaw type-erased payload (Arc<dyn Any + Send + Sync>).
+        -- #52 Part B: a wildcard `any` generic that flows into a `Db.get*`
+        -- accessor (e.g. a pub/sub decoder `decode : any -> _` reading fields
+        -- with `Db.getString`) gains the `SkyRow` bound, so the generic body
+        -- type-checks and monomorphises per call site (the payload's real
+        -- `Dict String String`). `db_get_*` is generic over `SkyRow` in the
+        -- runtime; the bound is added ONLY to the `any` var and ONLY when the
+        -- body actually calls a `db_get_*` (no blast radius on other generics).
+        -- `SkyRow` is in scope via the generated module's `pub use sky_runtime::*`.
+        bodyHasDbGet = "db_get_" `isInfixOf` tdBody
+        genBound v = v ++ ": Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static"
+                       ++ (if v == "any" && bodyHasDbGet then " + SkyRow" else "")
         genDecl = if null tvarNames then ""
-                  else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static") tvarNames) ++ ">"
+                  else "<" ++ intercalate ", " (map genBound tvarNames) ++ ">"
         multiBody = collectVarLocalsMulti body
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
         ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx

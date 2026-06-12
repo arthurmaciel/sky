@@ -85,7 +85,18 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
     anyCarrierField ctorName = case (skyModName, typeName, ctorName) of
         ("Std.Ui", "Attribute", "AttrEvent") -> Just ("StdHtmlAttributesAttribute<" ++ firstUVar ++ ">")
         ("Std.Ui", "Element",   "Raw")       -> Just ("StdHtmlHtml<" ++ firstUVar ++ ">")
-        _                                    -> Nothing
+        -- A bare `any` constructor field on a non-generic ADT (the union has no
+        -- declared type vars to carry it) is a pub/sub payload carrier. The
+        -- upstream pub/sub guidance names `Dict String String` as the portable
+        -- payload, so resolve it to that concrete carrier (= HashMap<String,
+        -- String>). This keeps the ADT (e.g. a TEA `Msg`) monomorphic so the
+        -- per-type Broker keyed on `TypeId` connects publisher and subscriber.
+        -- (A concrete-typed payload field — e.g. `Received String` — never
+        -- reaches here; only a bare `TVar "any"` field does.) Resolving rather
+        -- than emitting a verbatim `any` also fixes the pre-existing E0412 a
+        -- bare `any` field produced on a non-generic enum.
+        _ | null uvars                       -> Just "HashMap<String, String>"
+          | otherwise                        -> Nothing
     boxIfRecursive t =
         let r = typeToRustString recordMap t
         in if r == selfRustName then "Box<" ++ r ++ ">" else r
