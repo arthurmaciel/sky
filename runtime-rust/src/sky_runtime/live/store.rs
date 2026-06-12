@@ -62,7 +62,7 @@ impl<Model, Msg> MemoryStore<Model, Msg> {
 #[async_trait]
 impl<Model: Send + 'static, Msg: Send + 'static> SessionStore<Model, Msg> for MemoryStore<Model, Msg> {
     async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
-        let mut w = self.sessions.write().unwrap();
+        let mut w = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         w.get_mut(sid).map(|(h, seen)| {
             *seen = Instant::now(); // touch — keep active sessions alive
             StoreHit::Live(h.clone())
@@ -75,7 +75,7 @@ impl<Model: Send + 'static, Msg: Send + 'static> SessionStore<Model, Msg> for Me
             .insert(sid.to_string(), (handle, Instant::now()));
     }
     async fn delete(&self, sid: &str) {
-        self.sessions.write().unwrap().remove(sid);
+        self.sessions.write().unwrap_or_else(|e| e.into_inner()).remove(sid);
     }
     async fn sweep(&self) {
         let now = Instant::now();
@@ -133,7 +133,7 @@ where
 {
     async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
         // Same-process live handle wins (owns the running driver).
-        let cached = self.mem_cache.read().unwrap().get(sid).cloned();
+        let cached = self.mem_cache.read().unwrap_or_else(|e| e.into_inner()).get(sid).cloned();
         if let Some(h) = cached {
             let _ = sqlx::query("UPDATE sky_sessions SET last_seen = ? WHERE sid = ?")
                 .bind(now_secs()).bind(sid).execute(&self.pool).await;
@@ -149,8 +149,8 @@ where
         Some(StoreHit::Cold(model))
     }
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
-        let model = handle.lock().unwrap().model.clone();
-        self.mem_cache.write().unwrap().insert(sid.to_string(), handle);
+        let model = handle.lock().unwrap_or_else(|e| e.into_inner()).model.clone();
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), handle);
         if let Ok(blob) = serde_json::to_string(&model) {
             let _ = sqlx::query(
                 "INSERT INTO sky_sessions (sid, blob, last_seen) VALUES (?, ?, ?) \
@@ -160,7 +160,7 @@ where
         }
     }
     async fn delete(&self, sid: &str) {
-        self.mem_cache.write().unwrap().remove(sid);
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).remove(sid);
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE sid = ?")
             .bind(sid).execute(&self.pool).await;
     }
@@ -209,7 +209,7 @@ where
     Msg: Send + Sync + 'static,
 {
     async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
-        let cached = self.mem_cache.read().unwrap().get(sid).cloned();
+        let cached = self.mem_cache.read().unwrap_or_else(|e| e.into_inner()).get(sid).cloned();
         if let Some(h) = cached {
             let _ = sqlx::query("UPDATE sky_sessions SET last_seen = $1 WHERE sid = $2")
                 .bind(now_secs()).bind(sid).execute(&self.pool).await;
@@ -224,8 +224,8 @@ where
         Some(StoreHit::Cold(model))
     }
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
-        let model = handle.lock().unwrap().model.clone();
-        self.mem_cache.write().unwrap().insert(sid.to_string(), handle);
+        let model = handle.lock().unwrap_or_else(|e| e.into_inner()).model.clone();
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), handle);
         if let Ok(blob) = serde_json::to_string(&model) {
             let _ = sqlx::query(
                 "INSERT INTO sky_sessions (sid, blob, last_seen) VALUES ($1, $2, $3) \
@@ -235,7 +235,7 @@ where
         }
     }
     async fn delete(&self, sid: &str) {
-        self.mem_cache.write().unwrap().remove(sid);
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).remove(sid);
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE sid = $1")
             .bind(sid).execute(&self.pool).await;
     }
@@ -295,7 +295,7 @@ where
 {
     async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
         use redis::AsyncCommands;
-        let cached = self.mem_cache.read().unwrap().get(sid).cloned();
+        let cached = self.mem_cache.read().unwrap_or_else(|e| e.into_inner()).get(sid).cloned();
         let mut conn = self.conn.clone();
         if let Some(h) = cached {
             // Touch native TTL so an active session doesn't expire mid-conversation.
@@ -309,8 +309,8 @@ where
     }
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
         use redis::AsyncCommands;
-        let model = handle.lock().unwrap().model.clone();
-        self.mem_cache.write().unwrap().insert(sid.to_string(), handle);
+        let model = handle.lock().unwrap_or_else(|e| e.into_inner()).model.clone();
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), handle);
         if let Ok(blob) = serde_json::to_string(&model) {
             let mut conn = self.conn.clone();
             let _: Result<(), _> = conn.set_ex(redis_key(sid), blob, self.ttl_secs).await;
@@ -318,7 +318,7 @@ where
     }
     async fn delete(&self, sid: &str) {
         use redis::AsyncCommands;
-        self.mem_cache.write().unwrap().remove(sid);
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).remove(sid);
         let mut conn = self.conn.clone();
         let _: Result<(), _> = conn.del(redis_key(sid)).await;
     }

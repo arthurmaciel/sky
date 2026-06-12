@@ -342,14 +342,14 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     }
     while let Some(msg) = msg_rx.recv().await {
         // Clone the model under a short lock, release before update.
-        let model = { entry.lock().unwrap().model.clone() };
+        let model = { entry.lock().unwrap_or_else(|e| e.into_inner()).model.clone() };
         let (next, cmd) = update(msg, model);
 
         let mut tree = view(next.clone());
         assign_sky_ids(&mut tree, "r");
 
         let (patches, seq, sse) = {
-            let mut e = entry.lock().unwrap();
+            let mut e = entry.lock().unwrap_or_else(|e| e.into_inner());
             let patches = diff(&e.last_view, &tree);
             e.last_view = tree.clone();
             e.index = build_index(&tree);
@@ -584,7 +584,7 @@ where
                 Some(store::StoreHit::Live(handle)) => {
                     let s = cookie_sid.expect("live hit implies a cookie sid");
                     let body = {
-                        let mut e = handle.lock().unwrap();
+                        let mut e = handle.lock().unwrap_or_else(|e| e.into_inner());
                         e.model = (st.route_resolver)(e.model.clone(), uri.path());
                         let mut tree = (st.view)(e.model.clone());
                         assign_sky_ids(&mut tree, "r");
@@ -671,7 +671,7 @@ where
             };
 
             let (tx, rx) = sse::channel();
-            { entry.lock().unwrap().sse_tx = Some(tx.clone()); }
+            { entry.lock().unwrap_or_else(|e| e.into_inner()).sse_tx = Some(tx.clone()); }
 
             // Immediate hello + ~2KB proxy-buffer padding comment, then a 15s
             // heartbeat keepalive (Go parity: live.go SSE handshake).
@@ -745,7 +745,7 @@ where
             };
 
             let (msg, seq) = {
-                let e = entry.lock().unwrap();
+                let e = entry.lock().unwrap_or_else(|e| e.into_inner());
                 if event == "submit" {
                     // args[0] is the form-data object {name: value, …}.
                     let fd: FormData = parsed
@@ -761,7 +761,7 @@ where
                 }
             };
             if let Some(m) = msg {
-                let tx = { entry.lock().unwrap().msg_tx.clone() };
+                let tx = { entry.lock().unwrap_or_else(|e| e.into_inner()).msg_tx.clone() };
                 let _ = tx.send(m);
             }
             // Real patches flow over SSE from the driver; ack with an empty list.
