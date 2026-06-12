@@ -279,7 +279,15 @@ where
                         break;
                     }
                     i += consumed;
-                    if key_tx.send(CliEvent::Key(k.kind, k.value)).is_err() {
+                    // The (kind, value) channel is flat, so fold the ctrl modifier
+                    // on Left/Right into the kind (`ctrlleft`/`ctrlright`) for the
+                    // input editor's word-jumps.
+                    let kind = if k.ctrl && (k.kind == "left" || k.kind == "right") {
+                        format!("ctrl{}", k.kind)
+                    } else {
+                        k.kind
+                    };
+                    if key_tx.send(CliEvent::Key(kind, k.value)).is_err() {
                         return;
                     }
                 }

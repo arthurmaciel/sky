@@ -258,8 +258,38 @@ pub fn edit_input(st: &mut InputState, kind: &str, value: &str) -> bool {
             st.cursor = n;
             moved
         }
+        // Ctrl-Left / Ctrl-Right — jump by word (the key reader encodes the ctrl
+        // modifier into the kind, since the (kind,value) channel is flat).
+        "ctrlleft" => {
+            let mut c = st.cursor;
+            while c > 0 && is_space(runes.get(c - 1)) {
+                c -= 1;
+            }
+            while c > 0 && !is_space(runes.get(c - 1)) {
+                c -= 1;
+            }
+            let moved = c != st.cursor;
+            st.cursor = c;
+            moved
+        }
+        "ctrlright" => {
+            let mut c = st.cursor;
+            while c < n && !is_space(runes.get(c)) {
+                c += 1;
+            }
+            while c < n && is_space(runes.get(c)) {
+                c += 1;
+            }
+            let moved = c != st.cursor;
+            st.cursor = c;
+            moved
+        }
         _ => false,
     }
+}
+
+fn is_space(c: Option<&char>) -> bool {
+    c.map(|c| c.is_whitespace() || matches!(c, '.' | ',' | ';' | ':' | '/' | '-' | '_')).unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -291,6 +321,17 @@ mod tests {
         assert!(edit_input(&mut s, "backspace", ""));
         assert_eq!(s.buffer, "a");
         assert_eq!(s.cursor, 1);
+    }
+
+    #[test]
+    fn word_jumps_move_by_word() {
+        let mut s = st("hello world foo", 15);
+        assert!(edit_input(&mut s, "ctrlleft", ""));
+        assert_eq!(s.cursor, 12); // start of "foo"
+        assert!(edit_input(&mut s, "ctrlleft", ""));
+        assert_eq!(s.cursor, 6); // start of "world"
+        assert!(edit_input(&mut s, "ctrlright", ""));
+        assert_eq!(s.cursor, 12); // past "world " to "foo"
     }
 
     #[test]
