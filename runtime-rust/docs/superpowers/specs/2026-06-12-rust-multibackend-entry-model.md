@@ -65,19 +65,36 @@ from "run `task_run` inline, `main : ()`" to "drop + `main : SkyTask` + entry
 `block_on`" — **behaviour-identical** (`task_run` ≡ `block_on`). All examples
 re-verified.
 
-**Tenet 4 — init signature per-call-site (decision: adapt at the non-Live seam).**
-The global LiveReq pin stays (every Live example byte-identical). When a
-LiveReq-pinned init (`name ∈ ecLiveInitFns`) feeds a *non-Live* backend
-(`Tui.app` / `Tui.program` / `Cli.program`), the peephole wraps it:
-`{ let __i = main_init; move |()| __i(sky_runtime::LiveReq::default()) }`. The
-default `LiveReq` is harmless: a shared init across Live+Tui is necessarily
-unit-shaped (Tui has no request), so it ignores the value. `LiveReq` gains
-`#[derive(Default)]` (all fields `String` / `SkyDict` are `Default`).
+**Tenet 4 — init signature derived from its Sky type, adapted per call site
+(DECISION: Option A, the fuller-principled model — chosen 2026-06-12).**
+Remove the global LiveReq pin. `init`'s generated-Rust param-0 follows its Sky
+type:
 
-> Alternative (fuller-principled, deferred): remove the global pin entirely and
-> derive init's param from its Sky type, with `Live.app` wrapping a unit-init
-> `move |_:LiveReq| init(())` at the call site. Broader blast radius (re-pins
-> every Live example); tracked, not in this spec.
+- **unit-init** (`init () = …`, Sky param `()`) → Rust `fn main_init(arg0: ())`.
+- **req-init** (`init req = … req.cookies …`, Sky param the request record) →
+  Rust `fn main_init(arg0: sky_runtime::LiveReq)` (the req record maps to
+  `LiveReq` via `runtimeOpaqueTypes`, unchanged).
+
+Each backend peephole then adapts to its driver's init bound:
+
+| Backend | Driver init bound | unit-init | req-init |
+|---|---|---|---|
+| `Live.app` | `Fn(LiveReq) -> …` | wrap `move \|_r: sky_runtime::LiveReq\| main_init(())` | pass directly |
+| `Tui.app` / `Tui.program` / `Webview.app` / `Cli.program` | `Fn(()) -> …` | pass directly | (n/a — a non-Live backend never has a req-init) |
+
+For `24` the shared init is unit-shaped (Tui has no request), so Tui passes it
+directly and Live wraps it. Detection of unit-vs-req: the init binding's param-0
+Sky type (`()` vs the request record), read from the same source the pin used to
+consult (`ecLiveInitFns` + the init's param type). `LiveReq` gains
+`#[derive(Default)]` only if a wrapper ever needs to *construct* one — under
+Option A the Live wrapper *discards* the req (`|_r| init(())`), so no default is
+required; the derive is added only if the Tui/Cli adapter path needs it.
+
+**Blast radius:** every unit-init Live example's generated Rust changes (param
+flips `LiveReq` → `()`, a wrapper appears at `Live.app`). req-init Live examples
+are unchanged. No `.sky` source changes. The full Live sweep re-verifies
+(byte-diff harness confirms runtime behaviour identical; the HTML output is
+unaffected because init's *body* is unchanged).
 
 ## Components touched (all in-boundary)
 
