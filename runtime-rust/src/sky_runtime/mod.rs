@@ -73,6 +73,11 @@ pub mod cache;
 #[cfg(feature = "cache_kernel")]
 pub use cache::*;
 
+#[cfg(feature = "tui")]
+pub mod tui;
+#[cfg(feature = "tui")]
+pub use tui::*;
+
 pub mod uuid_kernel;
 pub use uuid_kernel::*;
 

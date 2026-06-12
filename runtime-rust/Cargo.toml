@@ -40,6 +40,7 @@ chrono-tz = "0.10"
 rust_decimal = { version = "1", features = ["serde"] }
 bcrypt = { version = "0.17", optional = true }
 async-trait = { version = "0.1", optional = true }
+unicode-width = { version = "0.1", optional = true }
 
 [features]
 default = []
@@ -51,13 +52,14 @@ crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
 cache_kernel = ["tokio"]
+tui = ["unicode-width"]
 config = ["json", "toml", "serde_yaml"]
 server = ["tokio", "axum", "tower-http", "futures-util"]
 http_client = ["tokio", "reqwest", "futures-util"]
 email = ["tokio", "reqwest", "serde_json", "sha2"]
 websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
 live = ["server", "http_client", "serde", "serde_json", "async-trait"]
-full = ["async", "json", "db", "redis_store", "crypto", "compression", "csv_kernel", "cache_kernel", "config", "server", "http_client", "email", "websocket_client", "live"]
+full = ["async", "json", "db", "redis_store", "crypto", "compression", "csv_kernel", "cache_kernel", "tui", "config", "server", "http_client", "email", "websocket_client", "live"]
 
 [dev-dependencies]
 regex = "1"
