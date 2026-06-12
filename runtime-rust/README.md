@@ -259,8 +259,24 @@ cargo-build-verified.
 
 - `tests/rust-codegen/http-server-test.sh` asserts every route over real HTTP
   (GET, path param → JSON, POST body, static, 404, content-type).
-- `cargo test --features "live db redis_store"` — 154 runtime tests incl. diff,
-  dispatch, form, store (memory/sqlite + env-gated pg/redis restart-survival).
+- `cargo test --features "live db redis_store"` — 164 runtime tests incl. diff,
+  dispatch, form, store (memory/sqlite + env-gated pg/redis restart-survival),
+  and the pub/sub broker (fan-out, echo, SkipOrigin, per-type isolation).
+
+### PubSub / Broker (S6) — zero payload erasure
+
+`Cmd.publish` / `Cmd.publishNoEcho`, `Sub.subscribeTopic`, and the Task-shaped
+`PubSub.publish` / `PubSub.publishNoEcho` run on Rust via an in-process broker in
+`live/pubsub.rs`. The broker is **per-payload-type** (`Broker<T>` keyed by
+`TypeId`): the payload travels as its real Rust type `T` end-to-end and is never
+erased or downcast — a statically-typed broker, not Go's reflect registry. Echo
+is default; `publishNoEcho` suppresses the origin receiver-side; the publishing
+session's sid is injected at dispatch time. Cross-session broadcast is proven
+end-to-end by `examples/rust/33-live-pubsub` (`verify.sh` — a watch-only session
+receives another session's broadcast over SSE). Subscriptions materialise at
+session init (Go parity), so a watch-only session is subscribed from load.
+`27-multi-session-chat` stays blocked only on the unrelated `Db.getString`-on-
+`any`/Dict-row codegen gap, not on pub/sub.
 
 ### Rust-vs-Go perf gate (`scripts/rust-perf.sh`)
 

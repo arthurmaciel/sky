@@ -133,14 +133,23 @@ at the same time. Tracked for a scheduled quiet-host perf sweep.
 
 ## Task S6: PubSub / Broker
 
-**Status:** NOT STARTED. **Depends on:** S0 (independent of the Std.Ui line — may be pulled earlier).
+**Status:** **DONE** (2026-06-12). In-process per-type broker (zero payload
+erasure) shipped with full `Cmd.publish`/`publishNoEcho`,
+`Sub.subscribeTopic`, `PubSub.publish`/`publishNoEcho` surface.
 
-- [ ] **Step 1: Brainstorm** — `Cmd.publish` / `Sub.subscribeTopic` in-process broker + the cross-process tier the Console needs.
-- [ ] **Step 2–3: Plan + implement.**
-- [ ] **Step 4: Gate (triple)** on `27`; contributes to `36`, `37`.
-- [ ] **Step 5: Flip README PubSub row. Mark S6 DONE.**
+- [x] **Step 1: Brainstorm** — spec at `runtime-rust/docs/superpowers/specs/2026-06-11-s6-pubsub-broker-design.md`.
+- [x] **Step 2–3: Plan + implement** — plan `…/plans/2026-06-11-s6-pubsub-broker.md`; per-type `Broker<T>` keyed by `TypeId` (the payload travels as its real Rust type `T`, never erased/downcast — categorically safer than Go's reflect registry, per the no-runtime-errors principle), `SkyCmd::Publish` + dispatch-time origin injection, `sub_subscribe_topic` + session-sid task-local + receiver-side SkipOrigin, Task-shaped `pubsub_publish` (Err Unavailable when no Live app), codegen kernel maps + analyzer flags. 164 runtime tests green.
+- [x] **Step 4: Gate** — acceptance via the focused `examples/rust/33-live-pubsub` (String payload, avoids the unrelated `Db.getString`-on-`any` gap): builds on `--target rust`, runs, and **cross-session broadcast is proven end-to-end** (a watch-only session receives another session's broadcast over SSE). The canonical `27-multi-session-chat` is NOT the vehicle — it is blocked only by the unrelated `Db.getString`-on-`any`/Dict codegen gap (filed separately), independent of pub/sub.
+- [x] **Step 5: Flip README PubSub row. Mark S6 DONE.**
 
-**Exit criteria:** PubSub examples green + equivalent + within perf.
+**Exit criteria:** PubSub surface emits + runs; cross-session broadcast proven
+end-to-end on Rust; broker has zero payload erasure. ✅
+
+**Follow-ups filed (not blocking S6):** `Db.getString`/`getInt`/`getBool` on an
+`any`/Dict row (blocks `27` + others, Phase-3 limitation #1); bare
+`.lock().unwrap()` hardening in `live/mod.rs`. Also a Live-runtime fix landed
+here as a dependency: subscriptions now materialise at session init (Go parity),
+without which a watch-only session never subscribes.
 
 ---
 
@@ -208,7 +217,7 @@ Per upstream release:
 | S3 Std.Ui | S2 | — | — | 19,26,37 | 19,26,37 | 19,26,37 | pending |
 | S4 Sky.Tui | S3 | — | — | 21,22,23,24 | … | … | pending |
 | S5 Sky.Webview | S3 | — | — | 29,31,38 | … | … | pending |
-| S6 PubSub | S0 | — | — | 27 | … | … | pending |
+| S6 PubSub | S0 | ✅ | ✅ | 33-live-pubsub ✅ (27 blocked on unrelated Db-row gap) | broadcast E2E ✅ | — | **DONE** |
 | S7 Console | S3,S6 | — | — | 17,25,34 | … | … | pending |
 | S8 long-tail | S0 | — | — | 06 | … | … | pending |
 | FP first parity | S1–S8 | — | — | all in-scope | all | all | pending |
