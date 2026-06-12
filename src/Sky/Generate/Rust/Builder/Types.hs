@@ -139,6 +139,13 @@ runtimeOpaqueTypes = Map.fromList
     -- maxEntries/ttlMs/maxBytes) so `defaultCfg` + the `with*` updates + the
     -- `Cache_newRaw` kernel construct/consume it directly.
     , (("Std.Cache", "CacheCfg"), "sky_runtime::CacheCfg")
+    -- The opaque `Cache k v` maps to the NON-generic runtime enum
+    -- `SkyCacheHandle { Cache(i64) }` — the handle carries no type args (k/v live
+    -- only on the kernel calls), which drops the phantom k,v that would otherwise
+    -- give an `enum StdCacheCache<k,v> { Cache(i64) }` with unused params (E0392).
+    -- The `Cache` variant name matches the Sky constructor so `Cache.Cache raw`
+    -- → `SkyCacheHandle::Cache(raw)` and `case c of Cache raw` → a match.
+    , (("Std.Cache", "Cache"), "sky_runtime::SkyCacheHandle")
     -- Sub-D.1: Sky.Http.Server records (Request/Response) + opaque ADTs
     -- (Route/Cookie) map to runtime structs so the server kernels return/take
     -- them directly. The handler closure is erased into a non-generic

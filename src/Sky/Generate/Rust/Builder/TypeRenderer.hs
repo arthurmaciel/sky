@@ -156,7 +156,15 @@ typeToRustString recordMap t = case t of
                 ) Nothing (Map.toList recordMap)
             structName = case bestMatch of
                 Just (_, n) -> n
-                Nothing -> "String"
+                -- Std.Cache's `stats` returns an ANONYMOUS record `{ hits,
+                -- misses, evictions }` with no project alias to match — map it to
+                -- the runtime `CacheStats` struct (field names match) so the
+                -- `Cache_stats` kernel's return type lines up and `st.hits`
+                -- resolves. Without this an unmatched anon record falls back to
+                -- `String` (E0308 + no fields).
+                Nothing
+                    | fieldSet == Set.fromList ["hits", "misses", "evictions"] -> "sky_runtime::CacheStats"
+                    | otherwise -> "String"
             -- Anonymous record structs have generic type params (T0..Tn).
             -- Fill them from the TRecord's actual field types so references
             -- like `AnonXxx<String, i64, bool>` compile correctly. The struct

@@ -1,30 +1,40 @@
 //! Std.Cache — a bounded LRU cache with optional TTL + running stats.
 //!
-//! Handle-based: `cache_new_raw` returns an `i64` handle; the other kernels take
-//! it. The Sky kernel signatures don't all carry the value type — `removeRaw :
-//! Int -> k`, `sizeRaw : Int`, `clearRaw : Int` have no `v` — so a fully
-//! `(K, V)`-typed store can't serve them. Instead each handle holds a
-//! `K`-typed store (`KeyStore<K>`) whose entries hold a value-erased
-//! `Box<dyn Any + Send>`, downcast to `V` only on `get` (where the Sky
-//! `getRaw : Int -> k -> Task Error (Maybe v)` return makes `V` available).
+//! Handle-based: `cache_new_raw` returns an `i64` handle wrapped in the opaque
+//! `SkyCacheHandle` (the Sky `Cache k v` lowers to this non-generic enum — the
+//! handle carries no type args; `k`/`v` live only on the kernel calls). The
+//! other kernels take the unwrapped `i64`.
 //!
-//! Both casts are **correct by construction**: every access to a given handle
-//! uses the same `(K, V)`, enforced by Sky's opaque `Cache k v` type, so neither
-//! the `KeyStore<K>` downcast nor the value `V` downcast can ever fail. A
-//! mismatch / missing handle degrades to a miss / no-op — never a panic. This is
-//! the same sanctioned-seam discipline as the S6 pub/sub broker registry, and is
-//! strictly safer than the Go backend's reflect-based cache (the cast cannot
-//! fail). Recorded in the README "Soundness attention points" `dyn Any` register.
+//! Each handle holds a `K`-typed `Vec<CacheEntry<K>>` whose entries carry a
+//! value-erased `Box<dyn Any + Send>`, downcast to `V` only on `get` (where the
+//! Sky `getRaw : … -> Task Error (Maybe v)` return makes `V` available). Keys
+//! are matched by `PartialEq` (already in the codegen's standard generic bounds)
+//! via a linear scan — no `Eq`/`Hash` needed, so the generic stdlib wrappers
+//! type-check without any bound-threading. O(n) per op, fine for the small caches
+//! Sky uses; a future codegen `Eq+Hash` bound would allow an O(1) `HashMap`.
+//!
+//! Both the `Vec<CacheEntry<K>>` downcast (by `K`) and the value downcast (by
+//! `V`) are **correct by construction** — every op on a handle uses the same
+//! `(K, V)`, enforced by Sky's opaque `Cache k v` — so neither can fail; a
+//! mismatch / missing handle degrades to a miss / no-op, never a panic. The same
+//! sanctioned-seam discipline as the S6 broker; strictly safer than Go's reflect
+//! cache (the cast cannot fail). See the README `dyn Any` register.
 
 use super::*;
 use std::any::Any;
-use std::collections::HashMap;
-use std::hash::Hash;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Mirrors Sky's `CacheCfg` record (field names match so the codegen maps
-/// `Std.Cache.CacheCfg` → this struct, EmailMessage-style).
+/// The opaque Sky `Cache k v` — a non-generic handle wrapper. The variant name
+/// `Cache` matches the Sky constructor so the codegen lowers `Cache.Cache raw`
+/// to `SkyCacheHandle::Cache(raw)` and `case c of Cache raw -> …` to a match.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SkyCacheHandle {
+    Cache(i64),
+}
+
+/// Mirrors Sky's `CacheCfg` record (field names match → the codegen maps
+/// `Std.Cache.CacheCfg` to this struct, EmailMessage-style).
 #[allow(non_snake_case)]
 #[derive(Clone)]
 pub struct CacheCfg {
@@ -42,14 +52,11 @@ pub struct CacheStats {
     pub evictions: i64,
 }
 
-struct EntryErased {
+struct CacheEntry<K> {
+    key: K,
     value: Box<dyn Any + Send>, // the cache value `V`, downcast on get
     expires_at: Option<Instant>,
     last_seq: u64, // for LRU eviction
-}
-
-struct KeyStore<K> {
-    map: HashMap<K, EntryErased>,
 }
 
 struct Slot {
@@ -59,33 +66,36 @@ struct Slot {
     evictions: i64,
     entries: i64, // tracked here so sizeRaw needs neither K nor V
     seq: u64,     // monotonic access counter
-    store: Option<Box<dyn Any + Send>>, // KeyStore<K>, created lazily on first K-bearing op
+    store: Option<Box<dyn Any + Send>>, // Vec<CacheEntry<K>>, created lazily on first K-bearing op
 }
 
 #[allow(clippy::type_complexity)]
-fn registry() -> &'static Mutex<(i64, HashMap<i64, Slot>)> {
-    static R: OnceLock<Mutex<(i64, HashMap<i64, Slot>)>> = OnceLock::new();
-    R.get_or_init(|| Mutex::new((0, HashMap::new())))
+fn registry() -> &'static Mutex<(i64, Vec<(i64, Slot)>)> {
+    static R: OnceLock<Mutex<(i64, Vec<(i64, Slot)>)>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new((0, Vec::new())))
 }
 
-fn with_reg<R>(f: impl FnOnce(&mut i64, &mut HashMap<i64, Slot>) -> R) -> R {
+fn with_slot<R>(handle: i64, default: R, f: impl FnOnce(&mut Slot) -> R) -> R {
     let mut g = registry().lock().unwrap_or_else(|e| e.into_inner());
-    let (next, slots) = &mut *g;
-    f(next, slots)
+    match g.1.iter_mut().find(|(h, _)| *h == handle) {
+        Some((_, slot)) => f(slot),
+        None => default,
+    }
 }
 
 /// `Cache.newRaw : CacheCfg -> Task Error Int` — allocate a cache, return its handle.
 pub fn cache_new_raw<E: Send + From<String> + 'static>(cfg: CacheCfg) -> SkyTask<E, i64> {
     Box::pin(async move {
-        let h = with_reg(|next, slots| {
-            *next += 1;
-            let h = *next;
-            slots.insert(
+        let h = {
+            let mut g = registry().lock().unwrap_or_else(|e| e.into_inner());
+            g.0 += 1;
+            let h = g.0;
+            g.1.push((
                 h,
                 Slot { cfg, hits: 0, misses: 0, evictions: 0, entries: 0, seq: 0, store: None },
-            );
+            ));
             h
-        });
+        };
         ok_res(h)
     })
 }
@@ -94,15 +104,11 @@ pub fn cache_new_raw<E: Send + From<String> + 'static>(cfg: CacheCfg) -> SkyTask
 pub fn cache_put<E, K, V>(handle: i64, key: K, value: V) -> SkyTask<E, ()>
 where
     E: Send + From<String> + 'static,
-    K: Eq + Hash + Clone + Send + 'static,
+    K: PartialEq + Send + 'static,
     V: Send + 'static,
 {
     Box::pin(async move {
-        with_reg(|_, slots| {
-            let slot = match slots.get_mut(&handle) {
-                Some(s) => s,
-                None => return,
-            };
+        with_slot(handle, (), |slot| {
             slot.seq += 1;
             let seq = slot.seq;
             let max = slot.cfg.maxEntries;
@@ -115,19 +121,31 @@ where
             let (added, evicted) = {
                 let store = slot
                     .store
-                    .get_or_insert_with(|| Box::new(KeyStore::<K> { map: HashMap::new() }));
-                match store.downcast_mut::<KeyStore<K>>() {
-                    // Impossible per Sky's per-handle (K,V) consistency; no-op, never panic.
-                    None => (0i64, 0i64),
-                    Some(ks) => {
-                        let entry = EntryErased { value: Box::new(value), expires_at, last_seq: seq };
-                        let added = i64::from(ks.map.insert(key, entry).is_none());
+                    .get_or_insert_with(|| Box::new(Vec::<CacheEntry<K>>::new()));
+                match store.downcast_mut::<Vec<CacheEntry<K>>>() {
+                    None => (0i64, 0i64), // impossible per per-handle (K,V) consistency
+                    Some(vec) => {
+                        let mut added = 1i64;
+                        if let Some(e) = vec.iter_mut().find(|e| e.key == key) {
+                            e.value = Box::new(value);
+                            e.expires_at = expires_at;
+                            e.last_seq = seq;
+                            added = 0;
+                        } else {
+                            vec.push(CacheEntry {
+                                key,
+                                value: Box::new(value),
+                                expires_at,
+                                last_seq: seq,
+                            });
+                        }
                         let mut evicted = 0i64;
-                        if max > 0 && ks.map.len() as i64 > max {
-                            if let Some(lru) =
-                                ks.map.iter().min_by_key(|(_, e)| e.last_seq).map(|(k, _)| k.clone())
+                        if max > 0 && vec.len() as i64 > max {
+                            // evict the least-recently-used (smallest last_seq)
+                            if let Some((idx, _)) =
+                                vec.iter().enumerate().min_by_key(|(_, e)| e.last_seq)
                             {
-                                ks.map.remove(&lru);
+                                vec.remove(idx);
                                 evicted = 1;
                             }
                         }
@@ -146,15 +164,11 @@ where
 pub fn cache_get<E, K, V>(handle: i64, key: K) -> SkyTask<E, SkyMaybe<V>>
 where
     E: Send + From<String> + 'static,
-    K: Eq + Hash + Send + 'static,
+    K: PartialEq + Send + 'static,
     V: Clone + Send + 'static,
 {
     Box::pin(async move {
-        let out = with_reg(|_, slots| {
-            let slot = match slots.get_mut(&handle) {
-                Some(s) => s,
-                None => return SkyMaybe::Nothing,
-            };
+        let out = with_slot(handle, SkyMaybe::Nothing, |slot| {
             slot.seq += 1;
             let seq = slot.seq;
             let now = Instant::now();
@@ -163,23 +177,26 @@ where
                 Expired,
                 Miss,
             }
-            let outcome = match slot.store.as_mut().and_then(|s| s.downcast_mut::<KeyStore<K>>()) {
+            let outcome = match slot.store.as_mut().and_then(|s| s.downcast_mut::<Vec<CacheEntry<K>>>()) {
                 None => Outcome::Miss,
-                Some(ks) => match ks.map.get(&key) {
+                Some(vec) => match vec.iter().position(|e| e.key == key) {
                     None => Outcome::Miss,
-                    Some(entry) => {
-                        if entry.expires_at.is_some_and(|x| now >= x) {
-                            ks.map.remove(&key);
+                    Some(idx) => {
+                        // index is in-bounds (just found); guard with .get anyway
+                        let expired = vec.get(idx).is_some_and(|e| e.expires_at.is_some_and(|x| now >= x));
+                        if expired {
+                            vec.remove(idx);
                             Outcome::Expired
                         } else {
-                            // value downcast — V is correct by construction (handle's V)
-                            let v = entry.value.downcast_ref::<V>().cloned();
-                            if let Some(e) = ks.map.get_mut(&key) {
-                                e.last_seq = seq; // LRU touch
-                            }
-                            match v {
-                                Some(v) => Outcome::Hit(v),
-                                None => Outcome::Miss, // impossible; total fallback
+                            match vec.get_mut(idx) {
+                                Some(e) => {
+                                    e.last_seq = seq; // LRU touch
+                                    match e.value.downcast_ref::<V>().cloned() {
+                                        Some(v) => Outcome::Hit(v),
+                                        None => Outcome::Miss, // impossible; total fallback
+                                    }
+                                }
+                                None => Outcome::Miss,
                             }
                         }
                     }
@@ -205,24 +222,23 @@ where
     })
 }
 
-/// `Cache.removeRaw : Int -> k -> Task Error ()`. No `v` in the signature — the
-/// `K`-typed store + erased values is exactly what lets this work.
+/// `Cache.removeRaw : Int -> k -> Task Error ()`.
 pub fn cache_remove<E, K>(handle: i64, key: K) -> SkyTask<E, ()>
 where
     E: Send + From<String> + 'static,
-    K: Eq + Hash + Send + 'static,
+    K: PartialEq + Send + 'static,
 {
     Box::pin(async move {
-        with_reg(|_, slots| {
-            if let Some(slot) = slots.get_mut(&handle) {
-                let removed = slot
-                    .store
-                    .as_mut()
-                    .and_then(|s| s.downcast_mut::<KeyStore<K>>())
-                    .is_some_and(|ks| ks.map.remove(&key).is_some());
-                if removed {
-                    slot.entries -= 1;
-                }
+        with_slot(handle, (), |slot| {
+            let before = slot
+                .store
+                .as_ref()
+                .and_then(|s| s.downcast_ref::<Vec<CacheEntry<K>>>())
+                .map_or(0, |v| v.len());
+            if let Some(vec) = slot.store.as_mut().and_then(|s| s.downcast_mut::<Vec<CacheEntry<K>>>()) {
+                vec.retain(|e| e.key != key);
+                let removed = (before - vec.len()) as i64;
+                slot.entries -= removed;
             }
         });
         ok_res(())
@@ -232,11 +248,9 @@ where
 /// `Cache.clearRaw : Int -> Task Error ()`.
 pub fn cache_clear<E: Send + From<String> + 'static>(handle: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
-        with_reg(|_, slots| {
-            if let Some(slot) = slots.get_mut(&handle) {
-                slot.store = None;
-                slot.entries = 0;
-            }
+        with_slot(handle, (), |slot| {
+            slot.store = None;
+            slot.entries = 0;
         });
         ok_res(())
     })
@@ -244,21 +258,17 @@ pub fn cache_clear<E: Send + From<String> + 'static>(handle: i64) -> SkyTask<E, 
 
 /// `Cache.sizeRaw : Int -> Task Error Int`.
 pub fn cache_size<E: Send + From<String> + 'static>(handle: i64) -> SkyTask<E, i64> {
-    Box::pin(async move {
-        let n = with_reg(|_, slots| slots.get(&handle).map(|s| s.entries).unwrap_or(0));
-        ok_res(n)
-    })
+    Box::pin(async move { ok_res(with_slot(handle, 0, |slot| slot.entries)) })
 }
 
 /// `Cache.statsRaw : Int -> Task Error { hits, misses, evictions }`.
 pub fn cache_stats<E: Send + From<String> + 'static>(handle: i64) -> SkyTask<E, CacheStats> {
     Box::pin(async move {
-        let s = with_reg(|_, slots| {
-            slots.get(&handle).map_or(
-                CacheStats { hits: 0, misses: 0, evictions: 0 },
-                |s| CacheStats { hits: s.hits, misses: s.misses, evictions: s.evictions },
-            )
-        });
+        let s = with_slot(
+            handle,
+            CacheStats { hits: 0, misses: 0, evictions: 0 },
+            |slot| CacheStats { hits: slot.hits, misses: slot.misses, evictions: slot.evictions },
+        );
         ok_res(s)
     })
 }
@@ -286,8 +296,8 @@ mod tests {
         assert_eq!(run(cache_get::<SkyError, String, String>(h, "a".into())), SkyMaybe::Nothing);
         assert_eq!(run(cache_size::<SkyError>(h)), 1);
         let st = run(cache_stats::<SkyError>(h));
-        assert_eq!(st.hits, 1); // the "a" hit
-        assert_eq!(st.misses, 2); // "z" + "a"-after-remove
+        assert_eq!(st.hits, 1);
+        assert_eq!(st.misses, 2);
     }
 
     #[test]

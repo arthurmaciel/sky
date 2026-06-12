@@ -1,0 +1,32 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Cache as Cache
+import Std.Log exposing (println)
+import Sky.Core.Error exposing (Error)
+
+
+main : Task Error ()
+main =
+    Cache.new (Cache.defaultCfg |> Cache.withMaxEntries 8)
+        |> Task.andThen
+            (\cache ->
+                Cache.put cache "name" "Alice"
+                    |> Task.andThen (\_ -> Cache.get cache "name")
+                    |> Task.andThen
+                        (\hit ->
+                            let _ = println ("get name -> " ++ Maybe.withDefault "MISS" hit)
+                            in Cache.size cache
+                        )
+                    |> Task.andThen
+                        (\n ->
+                            let _ = println ("size -> " ++ String.fromInt n)
+                            in Cache.stats cache
+                        )
+                    |> Task.andThen
+                        (\st ->
+                            let _ = println ("hits=" ++ String.fromInt st.hits ++ " misses=" ++ String.fromInt st.misses)
+                            in Task.succeed ()
+                        )
+            )
