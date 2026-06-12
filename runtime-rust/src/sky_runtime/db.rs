@@ -106,16 +106,56 @@ pub fn db_query<E: Send + From<String> + 'static>(conn: Db, sql: String, params:
     })
 }
 
-pub fn db_get_field(field: String, row: HashMap<String, String>) -> String {
-    row.get(&field).cloned().unwrap_or_default()
+/// A value a Sky `Db.get*` accessor can read string-keyed fields from.
+///
+/// Sky's `getString : String -> row -> String` is polymorphic in `row`; the
+/// row can be a query result (`Dict String String`), a pub/sub `Dict` payload,
+/// or the typed `LiveReq` an `init` handler receives. `SkyRow` is the seam that
+/// lets the Rust accessors stay generic and monomorphise per row type — no
+/// `dyn Any`, no panic (an absent field reads as `""`).
+pub trait SkyRow {
+    fn sky_get(&self, field: &str) -> String;
 }
 
-pub fn db_get_string(field: String, row: HashMap<String, String>) -> String {
-    row.get(&field).cloned().unwrap_or_default()
+// `SkyDict<String>` is a transparent alias for `HashMap<String, String>`, so this
+// is the impl for every Dict-shaped row (query rows + pub/sub Dict payloads).
+// Named via the alias for intent; a genuine newtype is tracked as a future task.
+impl SkyRow for SkyDict<String> {
+    fn sky_get(&self, field: &str) -> String {
+        self.get(field).cloned().unwrap_or_default()
+    }
 }
 
-pub fn db_get_int(field: String, row: HashMap<String, String>) -> i64 {
-    row.get(&field).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
+// The typed request an `init` handler receives. `Db.getString "path" req` reads
+// the named field; `params`/`headers`/`cookies` are searched for any other key.
+#[cfg(feature = "live")]
+impl SkyRow for super::LiveReq {
+    fn sky_get(&self, field: &str) -> String {
+        match field {
+            "path" => self.path.clone(),
+            "query" => self.query.clone(),
+            "method" => self.method.clone(),
+            _ => self
+                .params
+                .get(field)
+                .or_else(|| self.headers.get(field))
+                .or_else(|| self.cookies.get(field))
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+}
+
+pub fn db_get_field<R: SkyRow>(field: String, row: R) -> String {
+    row.sky_get(&field)
+}
+
+pub fn db_get_string<R: SkyRow>(field: String, row: R) -> String {
+    row.sky_get(&field)
+}
+
+pub fn db_get_int<R: SkyRow>(field: String, row: R) -> i64 {
+    row.sky_get(&field).parse::<i64>().unwrap_or(0)
 }
 
 pub fn db_migrate_apply<E: Send + From<String> + 'static>(db: Db, migrations: Vec<(String, String)>) -> SkyTask<E, Vec<String>> {
@@ -145,10 +185,10 @@ pub fn db_close<E: Send + From<String> + 'static>(db: Db) -> SkyTask<E, ()> {
 
 /// `getBool : String -> Dict String String -> Bool` — parses common
 /// truthy values (`"1"`, `"true"`, `"TRUE"`, `"t"`, `"T"`).
-pub fn db_get_bool(field: String, row: HashMap<String, String>) -> bool {
+pub fn db_get_bool<R: SkyRow>(field: String, row: R) -> bool {
     matches!(
-        row.get(&field).map(|s| s.as_str()),
-        Some("1") | Some("true") | Some("TRUE") | Some("t") | Some("T")
+        row.sky_get(&field).as_str(),
+        "1" | "true" | "TRUE" | "t" | "T"
     )
 }
 
