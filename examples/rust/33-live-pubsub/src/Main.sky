@@ -1,0 +1,57 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Html as Html
+import Std.Html.Attributes as Attr
+import Std.Html.Events as Ev
+import Std.Live as Live
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+import Sky.Core.Error exposing (Error)
+
+
+type Msg
+    = Broadcast
+    | Received String
+
+
+type alias Model =
+    { received : List String }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { received = [] }, Cmd.none )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Broadcast ->
+            ( model, Cmd.publish "room" "ping" )
+
+        Received text ->
+            ( { model | received = text :: model.received }, Cmd.none )
+
+
+view : Model -> Html.Html Msg
+view model =
+    Html.div []
+        [ Html.button [ Attr.id "broadcast", Ev.onClick Broadcast ] [ Html.text "Broadcast" ]
+        , Html.ul [ Attr.id "feed" ] (List.map (\m -> Html.li [] [ Html.text m ]) model.received)
+        ]
+
+
+subscriptions : Model -> Sub Msg
+subscriptions _ =
+    Sub.subscribeTopic "room" Received
+
+
+main : Task Error ()
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ Live.route "/" () ]
+        , notFound = ()
+        }
