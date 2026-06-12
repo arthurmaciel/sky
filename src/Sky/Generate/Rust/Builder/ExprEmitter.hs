@@ -896,6 +896,25 @@ exprToRustInner ctx e = case e of
                 Nothing -> "/* Cli.program: missing field " ++ n ++ " */"
         in "cli_program(" ++ intercalate ", "
                (map fld ["init", "update", "view", "subscriptions", "onLine"]) ++ ")"
+    -- Sky.Tui — Tui.program { init, update, view, subscriptions, onKey } — like
+    -- Cli.program, but the runtime `tui_app` takes onKey as Fn(String, String) ->
+    -- Msg (raw key kind+value), so wrap the user's `onKey : KeyEvent -> Msg` in a
+    -- closure that builds the `KeyEvent { kind, value }` record (its Rust struct
+    -- name comes from onKey's solved param type). view returns a String here.
+    Can.Call (Ann.At _ (Can.VarKernel "Tui" "program")) [Ann.At _ (Can.Record fields)] ->
+        let fld n = case Map.lookup n fields of
+                Just e  -> exprToRustString ctx e
+                Nothing -> "/* Tui.program: missing field " ++ n ++ " */"
+            keyEventTy = case Map.lookup "onKey" (ecSolvedTypes ctx) of
+                Just ty -> case extractParamTypes ty of
+                    (k : _) -> typeToRustString (ecRecordMap ctx) k
+                    []      -> "/* Tui.program: onKey param type */"
+                Nothing -> "/* Tui.program: onKey type */"
+            onKeyWrapper = "{ let __ok = " ++ fld "onKey"
+                ++ "; move |kind: String, value: String| __ok(" ++ keyEventTy
+                ++ " { kind, value }) }"
+        in "tui_app(" ++ intercalate ", "
+               [fld "init", fld "update", fld "view", fld "subscriptions", onKeyWrapper] ++ ")"
     -- Live.app { init, update, view, subscriptions, routes, notFound } —
     -- record-splice like Cli.program. P3: branch on whether the Model record
     -- carries a `page` field.

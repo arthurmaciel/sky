@@ -40,6 +40,7 @@ data UsedKernels = UsedKernels
     , usesHtml :: Bool            -- Std.Html / Std.Ui used → needs the live module's
                                   -- Html/Attribute/Event ADTs + html_render_ kernel,
                                   -- even for a non-Live (CLI/Tui) render via Html.toString
+    , usesTui :: Bool             -- Std.Tui used → tui module + crossterm + unicode-width
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -60,9 +61,10 @@ instance Semigroup UsedKernels where
         , usesEmail = usesEmail a || usesEmail b
         , usesLive = usesLive a || usesLive b
         , usesHtml = usesHtml a || usesHtml b
+        , usesTui = usesTui a || usesTui b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False False False False False False False False False
 
 data RustBuilder = RustBuilder
     { builderModules    :: [RustModule]

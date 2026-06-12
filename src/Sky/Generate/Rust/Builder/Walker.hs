@@ -167,6 +167,11 @@ analyzeKernelUsage = foldMap analyzeMod
             -- (P1). Pulls tokio (async Task) + the live submodule (html.rs).
             , if modName == "Live" || "Std.Live" `isInfixOf` modName
               then mempty { usesLive = True } else mempty
+            -- Std.Tui — terminal TEA backend (tui_app). Pulls the tui module
+            -- (cell/diff/key/app) + crossterm (raw mode) + unicode-width + the
+            -- tea module (the loop reuses CliEvent/SubManager/cli_run_cmd).
+            , if modName == "Tui" || "Std.Tui" `isSuffixOf` modName
+              then mempty { usesTui = True, usesTea = True } else mempty
             -- Std.Html / Std.Ui — render to an Html ADT via Html.toString /
             -- Ui.layout. The Html/Attribute/Event types + html_render_ live in the
             -- live submodule, so a NON-Live (CLI / Tui) app that only renders HTML

@@ -671,6 +671,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- Sky.Core.WebSocket client: tokio-tungstenite (futures-util above).
     [ "tokio-tungstenite = \"0.24\""
     | usesWsClient uk, "tokio-tungstenite" `notElem` userDepNames ] ++
+    -- Std.Tui: crossterm (raw mode) + unicode-width (display width).
+    [ "crossterm = \"0.28\""
+    | usesTui uk, "crossterm" `notElem` userDepNames ] ++
+    [ "unicode-width = \"0.1\""
+    | usesTui uk, "unicode-width" `notElem` userDepNames ] ++
     [ emitDepLine name spec
     | (name, spec) <- rustDeps
     , not (null name)

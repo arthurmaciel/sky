@@ -156,7 +156,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- Std.Live only when used — live submodule (the Sky.Live server).
         liveMod = if RustBuilder.usesLive usage then ["pub mod live;"] else []
         liveUse = if RustBuilder.usesLive usage then ["pub use live::*;"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ liveMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse)
+        -- Std.Tui — terminal backend (pulls crossterm). Only when used.
+        tuiMod = if RustBuilder.usesTui usage then ["pub mod tui;"] else []
+        tuiUse = if RustBuilder.usesTui usage then ["pub use tui::tui_app;"] else []
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ liveMod ++ tuiMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse ++ tuiUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode
