@@ -563,7 +563,12 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- always-compiled live/store.rs) is on ONLY when the app actually needs
     -- sqlx: a Std.Db app, or a Sky.Live app with `[live] store = \"sqlite\"`.
     -- A memory-store Live app must NOT enable `db` (no sqlx dep → would fail).
-    , "default = [" ++ intercalate ", " (map show (["tokio", "crypto", "json"] ++ ["db" | needsDb] ++ ["redis_store" | needsRedis])) ++ "]"
+    -- `live` is enabled when the app uses Sky.Live so live-gated code inside the
+    -- always-compiled modules activates — e.g. `#[cfg(feature="live")] impl SkyRow
+    -- for LiveReq` in db.rs, which lets `Db.getString "path" req` read an init
+    -- handler's typed request (#52). Without it the impl is excluded and the
+    -- generated project fails with `LiveReq: SkyRow not satisfied`.
+    , "default = [" ++ intercalate ", " (map show (["tokio", "crypto", "json"] ++ ["db" | needsDb] ++ ["redis_store" | needsRedis] ++ ["live" | usesLive uk])) ++ "]"
     , "tokio = []"
     , "crypto = []"
     , "json = []"
