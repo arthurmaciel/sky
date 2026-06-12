@@ -8,4 +8,5 @@
 
 pub mod cell;
 pub mod diff; // accessed qualified (tui::diff::diff) — `diff` collides with live's
+pub mod key;
 pub use cell::*;
