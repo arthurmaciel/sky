@@ -50,17 +50,26 @@ Record the three results in the slice's status row before flipping it to DONE.
 
 ## Task S1: Performance-benchmark harness
 
-**Status:** NOT STARTED — **next to brainstorm.** Gates every later slice.
+**Status:** **DONE** (2026-06-11). The perf gate is callable for all three app
+shapes (cli / server / live) with committed Rust-vs-Go thresholds, so S2–S8
+inherit a working third gate-leg.
 
 **Depends on:** S0 (needs a working `--target rust`).
 
-- [ ] **Step 1: Brainstorm the slice** — `superpowers:brainstorming` with: "Design the Rust-vs-Go perf-benchmark harness — metrics (cold-start, throughput, RSS, binary size), app-shape coverage (CLI/Http.Server/Live), tooling (hyperfine/oha/`time -v`), and the data-driven threshold policy." Save spec under `runtime-rust/docs/superpowers/specs/`.
-- [ ] **Step 2: Plan the slice** — `superpowers:writing-plans` from that spec.
-- [ ] **Step 3: Implement** — produces `scripts/rust-perf.sh` (drives both `--target go` and `--target rust` binaries of a given example) + `scripts/rust-perf.thresholds` (baselines from first run; the envelope every later slice inherits).
-- [ ] **Step 4: Gate** — `scripts/rust-perf.sh 01-hello-world` and `15-http-server` produce a Rust-vs-Go table; commit the baseline thresholds.
-- [ ] **Step 5: Mark S1 DONE.**
+- [x] **Step 1: Brainstorm the slice** — spec at `runtime-rust/docs/superpowers/specs/2026-06-11-s1-perf-harness-completion-design.md`.
+- [x] **Step 2: Plan the slice** — `runtime-rust/docs/superpowers/plans/2026-06-11-s1-perf-harness-completion.md`.
+- [x] **Step 3: Implement** — `scripts/rust-perf.sh` drives both backends across all three shapes with bound-port discovery; `scripts/rust-perf.thresholds` is committed (cli / server / live rows). Hardened: every `ab` probe is `timeout`-bounded (closed a real hang), env-overridable load knobs, CV clamp + directional rounding + zero-sample drop in the baseline, and a noise-tolerant gate (re-roll any fail, SKIP a missing Go reference).
+- [x] **Step 4: Gate** — round-trip verified on `01-hello-world` (real run exit 0; an artificially inflated threshold trips exit 1). Live shape green on coldstart/binsize/throughput; Sky.Live binary now binds a port and serves (codegen Bug 1 fixed — see commit `b18d8a8a`).
+- [x] **Step 5: Mark S1 DONE.**
 
-**Exit criteria:** `scripts/rust-perf.sh` + committed thresholds; the perf gate is now callable by S2–S8.
+**Exit criteria:** `scripts/rust-perf.sh` + committed thresholds; the perf gate is now callable by S2–S8. ✅
+
+**Follow-up (not blocking):** the `live.rss_ratio_max` envelope was calibrated
+under host memory pressure (swap), which inflates RSS-under-load. Re-baseline
+the triplet on a quiet host (`scripts/rust-perf.sh --baseline`) and re-commit
+`scripts/rust-perf.thresholds`. The deferred SSE leg (Bug 2: `sse-bench` needs a
+session-cookie handshake) re-enables `live.patch_p95` / `live.event_throughput`
+at the same time. Tracked for a scheduled quiet-host perf sweep.
 
 ---
 

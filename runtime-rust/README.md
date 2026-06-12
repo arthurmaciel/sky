@@ -262,6 +262,26 @@ cargo-build-verified.
 - `cargo test --features "live db redis_store"` — 154 runtime tests incl. diff,
   dispatch, form, store (memory/sqlite + env-gated pg/redis restart-survival).
 
+### Rust-vs-Go perf gate (`scripts/rust-perf.sh`)
+
+The S1 perf harness benchmarks both backends of any example across all three
+app shapes — **cli**, **server**, **live** — on cold-start, throughput (`ab`),
+peak RSS under load, and binary size, gating the Rust/Go ratio against the
+committed envelope in `scripts/rust-perf.thresholds`. It discovers the bound
+port from the spawned process (no env dictation), `timeout`-bounds every probe,
+and tolerates measurement noise (re-roll on fail; SKIP a missing reference).
+
+```bash
+scripts/rust-perf.sh 01-hello-world        # gate one example (shape auto-detected)
+scripts/rust-perf.sh --baseline            # re-derive thresholds over the triplet
+```
+
+Representative envelope (Rust as a fraction of Go; lower is better except
+throughput): binary size **~1–2%**, RSS **~15–19%**, CLI cold-start **~16%**.
+The Sky.Live entry binds a port and serves on Rust as of codegen fix
+`b18d8a8a`. The `live.rss` envelope + the SSE patch-latency leg are pending a
+re-baseline on a quiet (non-swapping) host.
+
 ### Top-level `examples/[0-9]*` on `--target rust`
 
 Conquest of the main example set (tracked in
