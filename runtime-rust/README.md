@@ -112,7 +112,69 @@ client (`live/client.js`) and wire/patch schema are reused verbatim.
 | **P5 follow-on** stores | `PostgresStore` (cfg `db`, PgPool) + `RedisStore` (cfg `redis_store`, native TTL) on the same trait; `choose_store` selects `[live] store` with memory fallback | runtime tests (pg/redis gated on `SKY_TEST_*_URL`) |
 
 **Ahead:** firestore backend (same trait), Cmd/Sub depth, req query-string
-parsing, lambda-`init`, the store's pub/sub `Broker`.
+parsing, the store's pub/sub `Broker`.
+
+---
+
+## Multibackend program-entry model (#24)
+
+A `main` may pick its UI backend at runtime and run it, sharing one
+`init`/`update`/`subscriptions` across backends — e.g.
+`examples/24-tui-kitchen-sink`:
+
+```elm
+main =
+    case List.head argsList of
+        Just "live" -> Live.app { …, view = viewLive, routes, notFound } |> Task.run
+        _           -> Tui.app  { …, view, onKey } |> Task.run
+```
+
+The codegen treats *any* backend driver future as the program entry, uniformly.
+Three rules (see `docs/superpowers/specs/2026-06-12-rust-multibackend-entry-model.md`):
+
+1. **`Task.run` on a backend-entry app-future is dropped.** `Live.app {…}` /
+   `Tui.app {…}` / `Tui.program {…}` / `Webview.app {…}` each lower to a
+   `SkyTask<()>` driver future. `App {…} |> Task.run` (or `Task.run (App {…})`)
+   drops the `Task.run` *anywhere* — top-level OR inside a `case` arm — so the
+   future is returned as a `SkyTask` (the entry `block_on`s it / a dispatching
+   `case` unifies as `SkyTask<()>`), never executed inline via `task_run`.
+   Subsumes the older Live-only "#56 keep-the-serve-future" special-case.
+2. **`mainIsTask` derives from `usesBackendApp`** (`usesLive || usesTui ||
+   usesWebview`), not `usesLive` alone. A pure-Tui / pure-Webview `App {…} |>
+   Task.run` main now returns `SkyTask` + is `block_on`'d (was inline
+   `task_run`) — behaviour-identical.
+3. **`init`'s param is derived from its Sky type, adapted per call site.** Only
+   a *req-reading* init (`init req = … req.path …`, detected by
+   `collectLiveReqInitFns`: param 0 binds a var used in the body) pins param 0
+   to `sky_runtime::LiveReq`. A *non-req* init (`init _`) keeps its natural
+   param (`()` / a free generic) and is adapted at the `Live.app` call site via
+   `move |_r: LiveReq| init(())` — so the SAME init can also feed `Tui.app`
+   (bound `Fn(())`). No global pin; no Tui-side change; every Live example's
+   `init` body is byte-identical so the rendered HTML is unchanged.
+
+### Pitfalls (do not re-derive)
+
+- **`Task.run` is an `Ffi.kernel` alias, so it arrives as `VarTopLevel
+  "Sky.Core.Task" "run"` — NOT `VarKernel "Task" "run"`.** Same for
+  `Webview.app` / any `sky-stdlib` binding defined as `name = Ffi.kernel "…"`
+  (vs the *pure* kernels `Live.app` / `Tui.app` / `Cli.program`, which DO arrive
+  as `VarKernel`). A peephole that only matches `VarKernel` silently misses the
+  alias. Match both (see `isTaskRunRef`).
+- **A free-var init (`init : a -> …`, `init _`) renders as a generic param**,
+  which both backends monomorphise (Live→`LiveReq`, Tui→`()`); an explicit
+  `init : () -> …` renders the concrete `()`. The `Live.app` wrapper
+  `move |_r| init(())` forces the param to `()`, which fits *both* shapes — so
+  the adapter is uniform and needs no unit-vs-generic discrimination.
+- **`Cli.program` is intentionally EXCLUDED from the backend-entry set.** It
+  still runs inline via `task_run` (not in `usesBackendApp`), so its `Task.run`
+  is kept. Adding it would require flipping its `mainIsTask` too — out of scope
+  until a `Cli.program` example needs it.
+- **Build/verify gotcha:** with the shared `CARGO_TARGET_DIR`, every example is
+  cargo package `sky-app`, so the target dir holds only the *last-built*
+  binary — rebuild the specific example immediately before running it. And a
+  background `cabal install` that hasn't finished copying leaves a STALE
+  `sky-out/sky`; confirm the binary mtime before building an example against it
+  (a "fix didn't take effect" symptom is almost always this).
 
 ---
 
@@ -303,9 +365,11 @@ re-baseline on a quiet (non-swapping) host.
 Conquest of the main example set (tracked in
 `docs/rust-example-conquest-registry.md`). Build-level via `scripts/rust-sweep.sh`.
 
-**22 in-scope build:** `00, 01, 04, 07, 09, 10, 12, 14, 15, 16, 17, 18, 19, 20,
-26, 28, 30, 32, 33, 35, simple, test_pkg` — up from a 6-example baseline.
-`19-skyforum` and `26-ui-showcase` joined via the Std.Ui parity work. Driven by
+**23 in-scope build:** `00, 01, 04, 07, 09, 10, 12, 14, 15, 16, 17, 18, 19, 20,
+24, 26, 28, 30, 32, 33, 35, simple, test_pkg` — up from a 6-example baseline.
+`19-skyforum` and `26-ui-showcase` joined via the Std.Ui parity work;
+`24-tui-kitchen-sink` (multibackend Live+Tui main) via the #24 entry-model
+refactor. Driven by
 general, regression-gated codegen wins: TEA-Msg monomorphisation, multi-module
 serde, body-driven param inference, `Arc<dyn Fn>` stored callbacks, cross-module
 ADT-name resolution, whole-program DCE (matching Go's dep-decl prune), injective
