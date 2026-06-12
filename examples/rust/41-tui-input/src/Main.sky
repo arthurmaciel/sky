@@ -1,0 +1,125 @@
+module Main exposing (main)
+
+-- 41-tui-input — Sky.Tui input / focus model on the Rust backend.
+-- A bare-Element view with a text input, a checkbox, and a button: Tab moves
+-- focus, typing edits the focused input (dispatching onInput), Space toggles the
+-- checkbox, Enter/Space activates the button, q quits. Exercises the runtime
+-- focus/edit/scroll model (tui::focus + tui::layout).
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.System as System
+import Sky.Core.Task as Task
+import Std.Tui as Tui
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+import Std.Ui as Ui
+import Std.Ui exposing (Element)
+import Std.Ui.Background as Background
+import Std.Ui.Font as Font
+
+
+type alias Model =
+    { name : String
+    , agree : Bool
+    }
+
+
+type alias KeyEvent =
+    { kind : String
+    , value : String
+    }
+
+
+type Msg
+    = UpdateName String
+    | ToggleAgree
+    | Submit
+    | Quit
+    | NoOp
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    ( { name = "", agree = False }, Cmd.none )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        UpdateName s ->
+            ( { model | name = s }, Cmd.none )
+
+        ToggleAgree ->
+            ( { model | agree = not model.agree }, Cmd.none )
+
+        Submit ->
+            ( model, Cmd.none )
+
+        Quit ->
+            ( model, Cmd.perform (System.exit 0) (\_ -> NoOp) )
+
+        NoOp ->
+            ( model, Cmd.none )
+
+
+view : Model -> Element Msg
+view model =
+    Ui.column
+        [ Ui.padding 16
+        , Ui.spacing 8
+        , Background.color (Ui.rgb 20 24 40)
+        , Font.color (Ui.rgb 220 220 230)
+        ]
+        [ Ui.el [ Font.color (Ui.rgb 142 200 168) ]
+            (Ui.text "Sky TUI input demo (Rust)")
+        , Ui.row [ Ui.spacing 4 ]
+            [ Ui.el [] (Ui.text "Name:")
+            , Ui.input
+                [ Ui.htmlAttribute "value" model.name
+                , Ui.htmlAttribute "placeholder" "type your name"
+                , Ui.onInput UpdateName
+                ]
+            ]
+        , Ui.row [ Ui.spacing 4 ]
+            [ Ui.input
+                [ Ui.htmlAttribute "type" "checkbox"
+                , Ui.htmlAttribute "value" (if model.agree then "true" else "false")
+                , Ui.onClick ToggleAgree
+                ]
+            , Ui.el [] (Ui.text "I agree")
+            ]
+        , Ui.button [ Background.color (Ui.rgb 60 90 70) ]
+            { onPress = Just Submit, label = Ui.text "Submit" }
+        , Ui.el [ Font.color (Ui.rgb 150 150 170) ]
+            (Ui.text ("Hello, " ++ model.name))
+        , Ui.el [ Font.color (Ui.rgb 120 120 140) ]
+            (Ui.text "Tab moves focus · type to edit · space toggles · q quits")
+        ]
+
+
+onKey : KeyEvent -> Msg
+onKey k =
+    if k.kind == "char" && k.value == "q" then
+        Quit
+
+    else if k.kind == "ctrl" && k.value == "c" then
+        Quit
+
+    else
+        NoOp
+
+
+subscriptions : Model -> Sub Msg
+subscriptions _ =
+    Sub.none
+
+
+main =
+    Tui.app
+        { init = init
+        , update = update
+        , view = view
+        , subscriptions = subscriptions
+        , onKey = onKey
+        }
+        |> Task.run

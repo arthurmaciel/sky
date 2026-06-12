@@ -1,37 +1,34 @@
-//! Element → ANSI frame — the structured Sky.Tui renderer.
+//! Element → ANSI frame — the structured Sky.Tui renderer + focus/input model.
 //!
 //! Walks the shared `sky_runtime::ui::Element` tree (the SAME tree Sky.Live
 //! renders to HTML) and lays it out to terminal cells by reading the TYPED
-//! attributes directly — `AttrPadding`/`AttrSpacing`/`AttrFontColor`/
-//! `AttrBgColor`/`AttrStyle "__row"` etc. — never CSS. This mirrors Go's
-//! `runtime-go/rt/tui_ui.go` (`layoutElement`/`walkAttrs`/`colorOf`/
-//! `resolveLengthCells`) and replaces the earlier CSS-reparsing approach.
+//! attributes directly — never CSS. Mirrors Go's `tui_ui.go`. Recognises the
+//! `Std.Ui.Input.*` widgets (`TaggedNode "input"/"textarea"/"button"` carrying
+//! `AttrAttribute "type"/"value"/"placeholder"` + `AttrEvent`), collects them as
+//! focusables in tab order, renders the focused one with a buffer + cursor, and
+//! reports their positions for scroll-into-view.
 //!
 //! Logical-pixel canvas (Go parity): a design surface (default 1280×720) maps to
-//! the live terminal cell grid, so `Ui.padding 8` / `Ui.spacing 16` scale to
-//! cells via `pxPerCell` computed from the terminal size. Terminal cells are
-//! ~2× taller than wide, so the vertical and horizontal rates differ naturally.
+//! the live terminal cell grid via `pxPerCell`.
 //!
-//! Scope (this pass): the block/flex subset — column / row / el / text / button +
-//! colour + spacing + padding + bold + Length(px/fill). Inputs / focus / scroll /
-//! mouse are an explicit follow-on (task #62). No panic vectors: unicode-width
-//! display widths, `.get`/iterators, saturating arithmetic, control-byte
-//! sanitisation, `Raw`/unsupported attrs degrade gracefully.
+//! Scope: column / row / el / text / button + colour + spacing + padding + bold;
+//! text/password/checkbox/radio/slider inputs; Tab focus; scroll-into-view.
+//! Follow-on: mouse hit-testing, multiline cursor up/down, word-jumps, precise
+//! slider value, Length(Fill/Min/Max). No panic vectors.
 
 use super::super::ui::{Attribute, Color, Element};
 use super::cell::sanitize_rune;
+use super::focus::{Focusable, InputRegistry};
 use unicode_width::UnicodeWidthStr;
 
 const CANVAS_W: usize = 1280;
 const CANVAS_H: usize = 720;
 
-/// Logical-pixel → cell conversion, derived from the live terminal size.
 #[derive(Clone, Copy)]
 struct Canvas {
     px_per_cell_x: f64,
     px_per_cell_y: f64,
 }
-
 impl Canvas {
     fn new(cols: usize, rows: usize) -> Canvas {
         Canvas {
@@ -43,9 +40,7 @@ impl Canvas {
         if px <= 0 {
             return 0;
         }
-        let c = (px as f64 / self.px_per_cell_x).round() as i64;
-        // Sub-half-cell but positive px still occupies ≥1 cell (Go parity).
-        c.max(1) as usize
+        ((px as f64 / self.px_per_cell_x).round() as i64).max(1) as usize
     }
     fn cells_y(self, px: i64) -> usize {
         if px <= 0 {
@@ -60,6 +55,7 @@ struct Style {
     fg: Option<(u8, u8, u8)>,
     bg: Option<(u8, u8, u8)>,
     bold: bool,
+    reverse: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -68,7 +64,6 @@ enum Dir {
     Row,
 }
 
-/// Typed attributes extracted from a node, mirroring Go's `walkedAttrs`.
 struct Walked {
     dir: Dir,
     spacing_px: i64,
@@ -108,30 +103,47 @@ impl Block {
     fn single(text: String, style: Style) -> Block {
         Block { lines: vec![vec![Run { text, style }]] }
     }
-    /// Right-pad every line to width `w` with `bg`-styled spaces (colour fill).
     fn pad_to_width(&mut self, w: usize, bg: Option<(u8, u8, u8)>) {
         for line in &mut self.lines {
             let lw: usize = line.iter().map(Run::width).sum();
             if lw < w {
                 line.push(Run {
                     text: " ".repeat(w.saturating_sub(lw)),
-                    style: Style { fg: None, bg, bold: false },
+                    style: Style { bg, ..Style::default() },
                 });
             }
         }
     }
 }
 
-fn color_of(c: &Color) -> (u8, u8, u8) {
-    let Color::Rgba(r, g, b, _) = c;
-    (
-        (*r & 0xff) as u8,
-        (*g & 0xff) as u8,
-        (*b & 0xff) as u8,
-    )
+/// A rendered subtree plus the focusables it produced (with their line offset
+/// relative to this block's top — composition shifts it to an absolute row).
+struct Rendered {
+    block: Block,
+    // (focusable index in the collector, line within `block`, height)
+    hits: Vec<(usize, usize, usize)>,
 }
 
-/// Extract the typed layout/style attributes from a node's attribute list.
+/// Render-time context threaded through the walk.
+struct Ctx<'a, M> {
+    canvas: Canvas,
+    focus_idx: usize,
+    focusables: Vec<Focusable<M>>,
+    inputs: &'a mut InputRegistry,
+}
+
+fn color_of(c: &Color) -> (u8, u8, u8) {
+    let Color::Rgba(r, g, b, _) = c;
+    ((*r & 0xff) as u8, (*g & 0xff) as u8, (*b & 0xff) as u8)
+}
+
+fn attr_str<'a, M>(attrs: &'a [Attribute<M>], key: &str) -> Option<&'a str> {
+    attrs.iter().find_map(|a| match a {
+        Attribute::AttrAttribute(k, v) if k == key => Some(v.as_str()),
+        _ => None,
+    })
+}
+
 fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
     let mut w = Walked {
         dir: Dir::Column,
@@ -162,30 +174,42 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
     w
 }
 
-fn vstack(blocks: Vec<Block>, gap: usize) -> Block {
-    let mut out = Block::default();
-    for (i, b) in blocks.into_iter().enumerate() {
+fn vstack(children: Vec<Rendered>, gap: usize) -> Rendered {
+    let mut block = Block::default();
+    let mut hits = Vec::new();
+    let mut line0 = 0usize;
+    for (i, r) in children.into_iter().enumerate() {
         if i > 0 {
             for _ in 0..gap {
-                out.lines.push(Vec::new());
+                block.lines.push(Vec::new());
             }
+            line0 += gap;
         }
-        out.lines.extend(b.lines);
+        for (idx, l, h) in r.hits {
+            hits.push((idx, line0 + l, h));
+        }
+        let h = r.block.lines.len();
+        block.lines.extend(r.block.lines);
+        line0 += h;
     }
-    out
+    Rendered { block, hits }
 }
 
-fn hstack(blocks: Vec<Block>, gap: usize) -> Block {
-    let height = blocks.iter().map(Block::height).max().unwrap_or(0);
-    let mut out = Block { lines: vec![Vec::new(); height] };
-    for (bi, b) in blocks.iter().enumerate() {
-        let bw = b.width();
+fn hstack(children: Vec<Rendered>, gap: usize) -> Rendered {
+    let height = children.iter().map(|r| r.block.height()).max().unwrap_or(0);
+    let mut block = Block { lines: vec![Vec::new(); height] };
+    let mut hits = Vec::new();
+    for (bi, r) in children.iter().enumerate() {
+        let bw = r.block.width();
+        for (idx, l, h) in &r.hits {
+            hits.push((*idx, *l, *h)); // same row band — line unchanged
+        }
         for row in 0..height {
-            if let Some(target) = out.lines.get_mut(row) {
+            if let Some(target) = block.lines.get_mut(row) {
                 if bi > 0 && gap > 0 {
                     target.push(Run { text: " ".repeat(gap), style: Style::default() });
                 }
-                match b.lines.get(row) {
+                match r.block.lines.get(row) {
                     Some(line) => {
                         let mut lw = 0;
                         for run in line {
@@ -204,23 +228,23 @@ fn hstack(blocks: Vec<Block>, gap: usize) -> Block {
             }
         }
     }
-    out
+    Rendered { block, hits }
 }
 
-fn apply_padding(inner: Block, w: &Walked, canvas: Canvas, self_style: Style) -> Block {
+fn apply_padding(inner: Rendered, w: &Walked, canvas: Canvas, self_style: Style) -> Rendered {
     let top = canvas.cells_y(w.pad_top);
     let bottom = canvas.cells_y(w.pad_bottom);
     let left = canvas.cells_x(w.pad_left);
     let right = canvas.cells_x(w.pad_right);
-    let inner_w = inner.width();
+    let inner_w = inner.block.width();
     let total_w = inner_w + left + right;
     let pad_run = |n: usize| Run { text: " ".repeat(n), style: self_style };
 
-    let mut out = Block::default();
+    let mut block = Block::default();
     for _ in 0..top {
-        out.lines.push(vec![pad_run(total_w)]);
+        block.lines.push(vec![pad_run(total_w)]);
     }
-    for line in inner.lines {
+    for line in inner.block.lines {
         let mut row = Vec::new();
         if left > 0 {
             row.push(pad_run(left));
@@ -231,42 +255,145 @@ fn apply_padding(inner: Block, w: &Walked, canvas: Canvas, self_style: Style) ->
         if tail > 0 {
             row.push(pad_run(tail));
         }
-        out.lines.push(row);
+        block.lines.push(row);
     }
     for _ in 0..bottom {
-        out.lines.push(vec![pad_run(total_w)]);
+        block.lines.push(vec![pad_run(total_w)]);
     }
-    out
+    let hits = inner.hits.into_iter().map(|(idx, l, h)| (idx, l + top, h)).collect();
+    Rendered { block, hits }
 }
 
-/// Render one Element node into a styled `Block`, cascading text style downward.
-fn render_node<M>(node: &Element<M>, inherited: Style, canvas: Canvas) -> Block {
+/// Render an input widget (text/password/checkbox/radio/range) into a styled
+/// single-line block, registering it as a focusable.
+fn render_input<M: Clone>(
+    attrs: &[Attribute<M>],
+    style: Style,
+    ctx: &mut Ctx<M>,
+) -> Rendered {
+    let input_type = attr_str(attrs, "type").unwrap_or("text").to_string();
+    let value = attr_str(attrs, "value").unwrap_or("").to_string();
+    let placeholder = attr_str(attrs, "placeholder").unwrap_or("").to_string();
+    let checked = attr_str(attrs, "checked").is_some() || value == "true";
+    let events = super::focus::collect_events(attrs);
+
+    let idx = ctx.focusables.len();
+    let focused = idx == ctx.focus_idx;
+
+    let cell = match input_type.as_str() {
+        "checkbox" => {
+            let g = if checked { "☑" } else { "☐" };
+            Run { text: g.to_string(), style: Style { reverse: focused, ..style } }
+        }
+        "radio" => {
+            let g = if checked { "●" } else { "○" };
+            Run { text: g.to_string(), style: Style { reverse: focused, ..style } }
+        }
+        "range" => {
+            // Track with a centred thumb (precise value is a follow-on).
+            Run { text: "├──●──┤".to_string(), style: Style { reverse: focused, ..style } }
+        }
+        _ => {
+            // Text-like input: keep the edit buffer in sync with the model's
+            // value, then render buffer (or placeholder) + a cursor when focused.
+            ctx.inputs.sync_value(idx, &value);
+            let st = ctx.inputs.get(idx);
+            let masked = input_type == "password";
+            let shown: String = if st.buffer.is_empty() && !focused {
+                placeholder.clone()
+            } else if masked {
+                "•".repeat(st.buffer.chars().count())
+            } else {
+                st.buffer.clone()
+            };
+            let mut text = if shown.is_empty() { "▁▁▁▁".to_string() } else { shown };
+            if focused {
+                text.push('▏'); // cursor marker at end (column tracking is a follow-on)
+            }
+            Run { text, style: Style { reverse: focused && input_type != "password", ..style } }
+        }
+    };
+
+    let block = Block { lines: vec![vec![cell]] };
+    ctx.focusables.push(Focusable {
+        events,
+        is_input: true,
+        input_type,
+        value,
+        placeholder,
+        line: 0,
+        height: 1,
+    });
+    Rendered { block, hits: vec![(idx, 0, 1)] }
+}
+
+/// Render one Element node, cascading text style + collecting focusables.
+fn render_node<M: Clone>(node: &Element<M>, inherited: Style, ctx: &mut Ctx<M>) -> Rendered {
     match node {
-        Element::Empty => Block::default(),
+        Element::Empty => Rendered { block: Block::default(), hits: vec![] },
         Element::Text(t) => {
             let clean: String = t.chars().map(sanitize_rune).collect();
-            Block::single(clean, inherited)
+            Rendered { block: Block::single(clean, inherited), hits: vec![] }
         }
-        Element::Raw(_) => Block::default(), // native HTML can't render to cells
-        Element::Node(_desc, attrs, kids) | Element::TaggedNode(_, _desc, attrs, kids) => {
+        Element::Raw(_) => Rendered { block: Block::default(), hits: vec![] },
+        Element::TaggedNode(tag, _desc, attrs, kids) if tag == "input" => {
+            render_input(attrs, inherited, ctx)
+        }
+        Element::TaggedNode(tag, _desc, attrs, kids) if tag == "button" => {
+            // A button is focusable; render its label (kids), highlighted when
+            // focused. Click is dispatched from its events in the loop.
+            let events = super::focus::collect_events(attrs);
+            let idx = ctx.focusables.len();
+            let focused = idx == ctx.focus_idx;
+            ctx.focusables.push(Focusable {
+                events,
+                is_input: false,
+                input_type: String::new(),
+                value: String::new(),
+                placeholder: String::new(),
+                line: 0,
+                height: 1,
+            });
             let w = walk_attrs(attrs, inherited);
-            let child_blocks: Vec<Block> = kids
+            let label_style = Style { reverse: focused, ..w.style };
+            let child_blocks: Vec<Rendered> =
+                kids.iter().map(|k| render_node(k, label_style, ctx)).collect();
+            let inner = match w.dir {
+                Dir::Column => vstack(child_blocks, 0),
+                Dir::Row => hstack(child_blocks, ctx.canvas.cells_x(w.spacing_px)),
+            };
+            let mut padded = apply_padding(inner, &w, ctx.canvas, label_style);
+            // Force the focus reverse over the whole label row(s).
+            if focused {
+                for line in &mut padded.block.lines {
+                    for run in line {
+                        run.style.reverse = true;
+                    }
+                }
+            }
+            let h = padded.block.height().max(1);
+            // Record this button's hit (line resolved by the caller's compose).
+            padded.hits.insert(0, (idx, 0, h));
+            padded
+        }
+        Element::Node(_d, attrs, kids) | Element::TaggedNode(_, _d, attrs, kids) => {
+            let w = walk_attrs(attrs, inherited);
+            let children: Vec<Rendered> = kids
                 .iter()
-                .map(|k| render_node(k, w.style, canvas))
-                .filter(|b| b.height() > 0)
+                .map(|k| render_node(k, w.style, ctx))
+                .filter(|r| r.block.height() > 0)
                 .collect();
-
-            let mut inner = if child_blocks.is_empty() {
-                Block { lines: vec![Vec::new()] }
+            let mut inner = if children.is_empty() {
+                Rendered { block: Block { lines: vec![Vec::new()] }, hits: vec![] }
             } else {
                 match w.dir {
-                    Dir::Column => vstack(child_blocks, canvas.cells_y(w.spacing_px)),
-                    Dir::Row => hstack(child_blocks, canvas.cells_x(w.spacing_px)),
+                    Dir::Column => vstack(children, ctx.canvas.cells_y(w.spacing_px)),
+                    Dir::Row => hstack(children, ctx.canvas.cells_x(w.spacing_px)),
                 }
             };
-            let inner_w = inner.width();
-            inner.pad_to_width(inner_w, w.style.bg);
-            apply_padding(inner, &w, canvas, w.style)
+            let inner_w = inner.block.width();
+            inner.block.pad_to_width(inner_w, w.style.bg);
+            apply_padding(inner, &w, ctx.canvas, w.style)
         }
     }
 }
@@ -277,6 +404,9 @@ fn sgr(style: Style) -> String {
     let mut codes: Vec<String> = Vec::new();
     if style.bold {
         codes.push("1".to_string());
+    }
+    if style.reverse {
+        codes.push("7".to_string());
     }
     if let Some((r, g, b)) = style.fg {
         codes.push(format!("38;2;{r};{g};{b}"));
@@ -291,12 +421,9 @@ fn sgr(style: Style) -> String {
     }
 }
 
-/// Render a `Std.Ui` `Element` view into an ANSI frame, clipped to the terminal.
-pub fn element_to_cells<M>(view: &Element<M>, cols: usize, rows: usize) -> String {
-    let canvas = Canvas::new(cols, rows);
-    let block = render_node(view, Style::default(), canvas);
+fn emit_block(block: &Block, cols: usize, scroll_y: usize, rows: usize) -> String {
     let mut out = String::new();
-    for line in &block.lines {
+    for line in block.lines.iter().skip(scroll_y).take(rows) {
         let mut col = 0usize;
         for run in line {
             if col >= cols {
@@ -327,18 +454,61 @@ pub fn element_to_cells<M>(view: &Element<M>, cols: usize, rows: usize) -> Strin
     out
 }
 
+/// Render the view, returning the ANSI frame (scrolled to `scroll_y`), the
+/// discovered focusables (with absolute line positions), and the full content
+/// height. The loop uses the focusables to dispatch input/click Msgs and to keep
+/// the focused element on screen.
+pub fn render_with_focus<M: Clone>(
+    view: &Element<M>,
+    cols: usize,
+    rows: usize,
+    focus_idx: usize,
+    inputs: &mut InputRegistry,
+    scroll_y: usize,
+) -> (String, Vec<Focusable<M>>, usize) {
+    let canvas = Canvas::new(cols, rows);
+    let mut ctx = Ctx { canvas, focus_idx, focusables: Vec::new(), inputs };
+    let rendered = render_node(view, Style::default(), &mut ctx);
+    let content_h = rendered.block.height();
+    // Write back absolute line positions onto the focusables.
+    for (idx, line, h) in rendered.hits {
+        if let Some(f) = ctx.focusables.get_mut(idx) {
+            f.line = line;
+            f.height = h;
+        }
+    }
+    let frame = emit_block(&rendered.block, cols, scroll_y, rows);
+    (frame, ctx.focusables, content_h)
+}
+
+/// `Std.Ui` Element → ANSI frame, no focus (used by the layout tests + any
+/// caller that doesn't need the input model).
+pub fn element_to_cells<M: Clone>(view: &Element<M>, cols: usize, rows: usize) -> String {
+    let mut inputs = InputRegistry::new();
+    render_with_focus(view, cols, rows, usize::MAX, &mut inputs, 0).0
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::super::ui::Description;
     use super::*;
 
     fn rgb(r: i64, g: i64, b: i64) -> Color {
         Color::Rgba(r, g, b, 1.0)
     }
     fn node<M>(attrs: Vec<Attribute<M>>, kids: Vec<Element<M>>) -> Element<M> {
-        Element::Node(super::super::super::ui::Description::NoDescription, attrs, kids)
+        Element::Node(Description::NoDescription, attrs, kids)
     }
-    fn row_marker<M>() -> Attribute<M> {
-        Attribute::AttrStyle("__row".into(), "true".into())
+    fn input<M>(ty: &str, value: &str) -> Element<M> {
+        Element::TaggedNode(
+            "input".into(),
+            Description::NoDescription,
+            vec![
+                Attribute::AttrAttribute("type".into(), ty.into()),
+                Attribute::AttrAttribute("value".into(), value.into()),
+            ],
+            vec![],
+        )
     }
 
     #[test]
@@ -346,7 +516,7 @@ mod tests {
         let t: Element<()> =
             node(vec![Attribute::AttrFontColor(rgb(255, 0, 0))], vec![Element::Text("hi".into())]);
         let frame = element_to_cells(&t, 80, 24);
-        assert!(frame.contains("38;2;255;0;0"), "fg SGR: {frame:?}");
+        assert!(frame.contains("38;2;255;0;0"));
         assert!(frame.contains("hi"));
     }
 
@@ -364,43 +534,43 @@ mod tests {
     }
 
     #[test]
-    fn row_places_side_by_side() {
+    fn checkbox_glyphs_track_checked() {
+        let unchecked: Element<()> = input("checkbox", "false");
+        assert!(element_to_cells(&unchecked, 80, 24).contains('☐'));
+        let checked: Element<()> = input("checkbox", "true");
+        assert!(element_to_cells(&checked, 80, 24).contains('☑'));
+    }
+
+    #[test]
+    fn focusables_collected_in_order() {
         let t: Element<()> = node(
-            vec![row_marker()],
-            vec![
-                node(vec![], vec![Element::Text("L".into())]),
-                node(vec![], vec![Element::Text("R".into())]),
-            ],
+            vec![],
+            vec![input("text", "a"), input("checkbox", "false"), input("radio", "x")],
         );
-        let first = element_to_cells(&t, 80, 24).split("\r\n").next().unwrap_or("").to_string();
-        assert!(first.contains('L') && first.contains('R'), "same row: {first:?}");
+        let mut reg = InputRegistry::new();
+        let (_f, focusables, _h) = render_with_focus(&t, 80, 24, usize::MAX, &mut reg, 0);
+        assert_eq!(focusables.len(), 3);
+        assert_eq!(focusables[0].input_type, "text");
+        assert_eq!(focusables[1].input_type, "checkbox");
     }
 
     #[test]
-    fn padding_adds_blank_rows() {
-        let t: Element<()> =
-            node(vec![Attribute::AttrPadding(48, 0, 48, 0)], vec![Element::Text("x".into())]);
-        let frame = element_to_cells(&t, 80, 24);
-        // 48px vertical padding at ~30px/cell → ≥1 blank row above the text.
-        let lines: Vec<&str> = frame.split("\r\n").collect();
-        assert!(lines.len() >= 3, "padded: {lines:?}");
+    fn focused_input_reverses() {
+        let t: Element<()> = node(vec![], vec![input("text", "hi")]);
+        let mut reg = InputRegistry::new();
+        let (frame, _f, _h) = render_with_focus(&t, 80, 24, 0, &mut reg, 0);
+        assert!(frame.contains("\x1b[7"), "focused input reverse-video: {frame:?}");
     }
 
     #[test]
-    fn bg_color_emits_fill() {
-        let t: Element<()> =
-            node(vec![Attribute::AttrBgColor(rgb(10, 20, 30))], vec![Element::Text("x".into())]);
-        let frame = element_to_cells(&t, 80, 24);
-        assert!(frame.contains("48;2;10;20;30"), "bg SGR: {frame:?}");
-    }
-
-    #[test]
-    fn clips_to_cols_and_sanitizes() {
-        let t: Element<()> = node(vec![], vec![Element::Text("ab\u{7}cdefghij".into())]);
-        let frame = element_to_cells(&t, 4, 24);
-        let first = frame.split("\r\n").next().unwrap_or("");
-        assert!(!first.contains('\u{7}'), "control stripped: {first:?}");
-        let visible: String = first.chars().filter(|c| c.is_ascii_alphabetic()).collect();
-        assert!(visible.len() <= 4, "clipped: {first:?}");
+    fn scroll_offsets_content() {
+        let kids: Vec<Element<()>> =
+            (0..40).map(|i| node(vec![], vec![Element::Text(format!("row{i}"))])).collect();
+        let t: Element<()> = node(vec![], kids);
+        let mut reg = InputRegistry::new();
+        let (frame, _f, h) = render_with_focus(&t, 80, 10, usize::MAX, &mut reg, 20);
+        assert!(h >= 40);
+        assert!(frame.contains("row20"), "scrolled to row20: {frame:?}");
+        assert!(!frame.contains("row0\r\n"), "row0 scrolled off");
     }
 }

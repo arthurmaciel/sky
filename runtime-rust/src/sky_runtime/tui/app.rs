@@ -13,8 +13,12 @@
 use super::super::core::{ok_res, SkyResult, SkyTask};
 use super::super::tea::{cli_run_cmd, CliEvent, SkyCmd, SkySub, SubManager};
 use super::super::ui::Element;
+use super::focus::{
+    clamp_focus, edit_input, ensure_focus_visible, extract_click_msg, extract_input_msg, Focusable,
+    InputRegistry,
+};
 use super::key::decode_key;
-use super::layout::element_to_cells;
+use super::layout::render_with_focus;
 use std::io::{Read, Write};
 
 const ALT_SCREEN_ON: &str = "\x1b[?1049h";
@@ -174,12 +178,42 @@ where
     tui_run(init, update, subscriptions, on_key, move |m: &Model| view(m.clone()))
 }
 
+/// Render the Element view (twice: discover focusables, then scroll-correct + the
+/// focus highlight) and paint it. Returns the focusables so the loop can dispatch
+/// their input/click Msgs. Mirrors Go's `renderElementFrameScroll` double pass.
+fn render_and_paint<Model, Msg, FView>(
+    view: &FView,
+    model: &Model,
+    inputs: &mut InputRegistry,
+    focus_idx: &mut usize,
+    scroll_y: &mut usize,
+) -> Vec<Focusable<Msg>>
+where
+    Model: Clone,
+    Msg: Clone,
+    FView: Fn(Model) -> Element<Msg>,
+{
+    let (cols, rows) = term_size();
+    let (_f1, fs1, content_h) =
+        render_with_focus(&view(model.clone()), cols, rows, *focus_idx, inputs, *scroll_y);
+    *focus_idx = clamp_focus(*focus_idx, fs1.len());
+    *scroll_y = ensure_focus_visible(&fs1, *focus_idx, *scroll_y, rows, content_h);
+    let (frame, fs2, _) =
+        render_with_focus(&view(model.clone()), cols, rows, *focus_idx, inputs, *scroll_y);
+    paint(&frame);
+    fs2
+}
+
 /// `Tui.app` — terminal TEA driver for a `view : Model -> Element msg`. The
 /// `Std.Ui` Element is the SAME structured tree Sky.Live renders to HTML; here it
-/// is laid out to an ANSI frame by walking the typed attributes directly
-/// (`element_to_cells`), clipped to the live terminal. Same TEA quartet + key
-/// dispatch as `tui_app`.
-#[allow(clippy::type_complexity)]
+/// is laid out to ANSI cells by walking the typed attributes (`tui::layout`), and
+/// `Std.Ui.Input.*` widgets become focusables: Tab / Shift-Tab (and Up/Down on a
+/// non-input focus) cycle focus; typing edits the focused text input (dispatching
+/// its `onInput`); Enter/Space activates a button or toggles a checkbox/radio;
+/// the view auto-scrolls to keep the focused element on screen. Ctrl-keys and any
+/// unhandled key fall through to the user's `onKey`. Mouse, multiline cursor
+/// movement, and word-jumps are a follow-on.
+#[allow(clippy::type_complexity, clippy::too_many_lines, unused_assignments)]
 pub fn tui_app_ui<Model, Msg, E, FInit, FUpdate, FView, FSubs, FOnKey>(
     init: FInit,
     update: FUpdate,
@@ -197,8 +231,141 @@ where
     FSubs: Fn(Model) -> SkySub<Msg> + Send + 'static,
     FOnKey: Fn(String, String) -> Msg + Send + 'static,
 {
-    tui_run(init, update, subscriptions, on_key, move |m: &Model| {
-        let (cols, rows) = term_size();
-        element_to_cells(&view(m.clone()), cols, rows)
+    Box::pin(async move {
+        if std::env::var("TERM").as_deref() == Ok("dumb") {
+            return SkyResult::Err("Tui: TERM=dumb is not an interactive terminal".to_string().into());
+        }
+        let _guard = match TuiGuard::enter() {
+            Ok(g) => g,
+            Err(e) => return SkyResult::Err(e.into()),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CliEvent<Msg>>();
+        let key_tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let mut stdin = std::io::stdin();
+            loop {
+                let n = match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                let mut i = 0;
+                while i < n {
+                    let (k, consumed) = decode_key(buf.get(i..n).unwrap_or(&[]));
+                    if consumed == 0 {
+                        break;
+                    }
+                    i += consumed;
+                    if key_tx.send(CliEvent::Key(k.kind, k.value)).is_err() {
+                        return;
+                    }
+                }
+            }
+            let _ = key_tx.send(CliEvent::Eof);
+        });
+
+        let (mut model, cmd0) = init(());
+        cli_run_cmd(cmd0, &tx);
+        let mut submgr = SubManager::new(tx.clone());
+        submgr.update(subscriptions(model.clone()));
+
+        let mut inputs = InputRegistry::new();
+        let mut focus_idx = 0usize;
+        let mut scroll_y = 0usize;
+        let mut focusables: Vec<Focusable<Msg>> =
+            render_and_paint(&view, &model, &mut inputs, &mut focus_idx, &mut scroll_y);
+
+        while let Some(ev) = rx.recv().await {
+            let mut produced: Option<Msg> = None;
+            match ev {
+                CliEvent::Msg(m) => produced = Some(m),
+                CliEvent::Eof => break,
+                CliEvent::Line(_) => continue,
+                CliEvent::Key(kind, value) => {
+                    let n = focusables.len();
+                    let focused_input =
+                        focusables.get(focus_idx).map(|f| f.is_input).unwrap_or(false);
+                    let is_shift_tab = kind == "other" && value.contains('Z');
+                    let nav_fwd = kind == "tab" || (kind == "down" && !focused_input);
+                    let nav_back = is_shift_tab || (kind == "up" && !focused_input);
+
+                    if (nav_fwd || nav_back) && n > 0 {
+                        focus_idx = if nav_back {
+                            (focus_idx + n - 1) % n
+                        } else {
+                            (focus_idx + 1) % n
+                        };
+                        focusables =
+                            render_and_paint(&view, &model, &mut inputs, &mut focus_idx, &mut scroll_y);
+                        continue;
+                    }
+
+                    if kind == "ctrl" {
+                        produced = Some(on_key(kind, value));
+                    } else if focused_input {
+                        let is_cbr = focusables
+                            .get(focus_idx)
+                            .map(|f| f.is_checkbox_or_radio())
+                            .unwrap_or(false);
+                        if is_cbr && (kind == "space" || kind == "enter") {
+                            produced = focusables.get(focus_idx).and_then(|f| extract_click_msg(&f.events));
+                            if produced.is_none() {
+                                continue;
+                            }
+                        } else if kind == "enter" {
+                            let buf = inputs.get(focus_idx).buffer.clone();
+                            produced = focusables.get(focus_idx).and_then(|f| {
+                                extract_input_msg(&f.events, "change", &buf)
+                                    .or_else(|| extract_input_msg(&f.events, "input", &buf))
+                            });
+                            if produced.is_none() {
+                                continue;
+                            }
+                        } else {
+                            let changed = edit_input(inputs.get(focus_idx), &kind, &value);
+                            if changed {
+                                let buf = inputs.get(focus_idx).buffer.clone();
+                                inputs.get(focus_idx).last_value = buf.clone();
+                                produced = focusables
+                                    .get(focus_idx)
+                                    .and_then(|f| extract_input_msg(&f.events, "input", &buf));
+                                if produced.is_none() {
+                                    // local echo (no onInput handler) — repaint only.
+                                    focusables = render_and_paint(
+                                        &view, &model, &mut inputs, &mut focus_idx, &mut scroll_y,
+                                    );
+                                    continue;
+                                }
+                            } else {
+                                // cursor move / unhandled edit key — repaint the cursor.
+                                focusables = render_and_paint(
+                                    &view, &model, &mut inputs, &mut focus_idx, &mut scroll_y,
+                                );
+                                continue;
+                            }
+                        }
+                    } else if (kind == "enter" || kind == "space") && focus_idx < n {
+                        produced = focusables.get(focus_idx).and_then(|f| extract_click_msg(&f.events));
+                        if produced.is_none() {
+                            continue;
+                        }
+                    } else {
+                        produced = Some(on_key(kind, value));
+                    }
+                }
+            }
+
+            if let Some(msg) = produced {
+                let (next, cmd) = update(msg, model);
+                model = next;
+                cli_run_cmd(cmd, &tx);
+                submgr.update(subscriptions(model.clone()));
+                focusables =
+                    render_and_paint(&view, &model, &mut inputs, &mut focus_idx, &mut scroll_y);
+            }
+        }
+        submgr.stop_all();
+        ok_res(())
     })
 }
