@@ -10,5 +10,6 @@ pub mod app;
 pub mod cell;
 pub mod diff; // accessed qualified (tui::diff::diff) — `diff` collides with live's
 pub mod key;
-pub use app::tui_app;
+pub mod render;
+pub use app::{tui_app, tui_app_ui};
 pub use cell::*;

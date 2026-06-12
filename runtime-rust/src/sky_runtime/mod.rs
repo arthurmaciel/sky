@@ -76,9 +76,10 @@ pub use cache::*;
 #[cfg(feature = "tui")]
 pub mod tui;
 // NB: no `pub use tui::*` — its `diff` module name collides with live's `diff`.
-// Re-export only the `tui_app` kernel (generated code calls it unqualified).
+// Re-export only the kernels generated code calls unqualified: `tui_app`
+// (String view, `Tui.program`) + `tui_app_ui` (Element view, `Tui.app`).
 #[cfg(feature = "tui")]
-pub use tui::tui_app;
+pub use tui::{tui_app, tui_app_ui};
 
 pub mod uuid_kernel;
 pub use uuid_kernel::*;

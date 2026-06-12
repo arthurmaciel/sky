@@ -11,8 +11,10 @@
 //! terminal wedged. Raw-mode failure returns `Err`; `TERM=dumb` is refused.
 
 use super::super::core::{ok_res, SkyResult, SkyTask};
+use super::super::html::Html;
 use super::super::tea::{cli_run_cmd, CliEvent, SkyCmd, SkySub, SubManager};
 use super::key::decode_key;
+use super::render::render_element;
 use std::io::{Read, Write};
 
 const ALT_SCREEN_ON: &str = "\x1b[?1049h";
@@ -53,20 +55,28 @@ fn paint(frame: &str) {
     let _ = out.flush();
 }
 
-/// `Std.Tui.app` / `Tui.program` — the terminal TEA driver.
-///
-/// `view` returns the rendered frame as a `String`; `on_key` receives the decoded
-/// key's `(kind, value)` and yields a `Msg` (the codegen wraps the user's
-/// `onKey : KeyEvent -> Msg` so the `{ kind, value }` record is built there-side).
-/// `init`/`update` return `(Model, Cmd Msg)` and `subscriptions` a `Sub Msg` —
-/// driven via the shared `SubManager` (Tick) + `cli_run_cmd` (Cmd).
+/// Current terminal size in cells; `(80, 24)` if it can't be queried (e.g. the
+/// stream isn't a TTY). Re-queried each paint so the Element renderer reflows on
+/// resize.
+fn term_size() -> (usize, usize) {
+    match crossterm::terminal::size() {
+        Ok((w, h)) => (w.max(1) as usize, h.max(1) as usize),
+        Err(_) => (80, 24),
+    }
+}
+
+/// Shared terminal TEA driver. `render_frame` turns the current model into the
+/// ANSI frame painted each tick — `tui_app` passes the user's `String` view
+/// straight through; `tui_app_ui` renders the `Std.Ui` Element tree via
+/// `render_element`. Everything else (raw-key reader, `SubManager` ticks,
+/// `cli_run_cmd`, RAII teardown) is identical and lives here once.
 #[allow(clippy::type_complexity)]
-pub fn tui_app<Model, Msg, E, FInit, FUpdate, FView, FSubs, FOnKey>(
+fn tui_run<Model, Msg, E, FInit, FUpdate, FSubs, FOnKey, FRender>(
     init: FInit,
     update: FUpdate,
-    view: FView,
     subscriptions: FSubs,
     on_key: FOnKey,
+    render_frame: FRender,
 ) -> SkyTask<E, ()>
 where
     E: Send + From<String> + 'static,
@@ -74,9 +84,9 @@ where
     Msg: Clone + Send + 'static,
     FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + 'static,
-    FView: Fn(Model) -> String + Send + 'static,
     FSubs: Fn(Model) -> SkySub<Msg> + Send + 'static,
     FOnKey: Fn(String, String) -> Msg + Send + 'static,
+    FRender: Fn(&Model) -> String + Send + 'static,
 {
     Box::pin(async move {
         if std::env::var("TERM").as_deref() == Ok("dumb") {
@@ -119,7 +129,7 @@ where
         cli_run_cmd(cmd0, &tx);
         let mut submgr = SubManager::new(tx.clone());
         submgr.update(subscriptions(model.clone()));
-        paint(&view(model.clone()));
+        paint(&render_frame(&model));
 
         while let Some(ev) = rx.recv().await {
             let msg = match ev {
@@ -132,9 +142,62 @@ where
             model = next;
             cli_run_cmd(cmd, &tx);
             submgr.update(subscriptions(model.clone()));
-            paint(&view(model.clone()));
+            paint(&render_frame(&model));
         }
         submgr.stop_all();
         ok_res(())
+    })
+}
+
+/// `Tui.program` — terminal TEA driver for a `view : Model -> String` (the raw
+/// frame is painted verbatim). `on_key` receives the decoded key's
+/// `(kind, value)` and yields a `Msg` (the codegen wraps the user's
+/// `onKey : KeyEvent -> Msg` so the `{ kind, value }` record is built there).
+#[allow(clippy::type_complexity)]
+pub fn tui_app<Model, Msg, E, FInit, FUpdate, FView, FSubs, FOnKey>(
+    init: FInit,
+    update: FUpdate,
+    view: FView,
+    subscriptions: FSubs,
+    on_key: FOnKey,
+) -> SkyTask<E, ()>
+where
+    E: Send + From<String> + 'static,
+    Model: Clone + Send + 'static,
+    Msg: Clone + Send + 'static,
+    FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + 'static,
+    FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + 'static,
+    FView: Fn(Model) -> String + Send + 'static,
+    FSubs: Fn(Model) -> SkySub<Msg> + Send + 'static,
+    FOnKey: Fn(String, String) -> Msg + Send + 'static,
+{
+    tui_run(init, update, subscriptions, on_key, move |m: &Model| view(m.clone()))
+}
+
+/// `Tui.app` — terminal TEA driver for a `view : Model -> Element msg`. The
+/// `Std.Ui` Element lowers to the same `Html<Msg>` tree Sky.Live renders; here
+/// it is laid out to an ANSI frame via `render_element`, clipped to the live
+/// terminal width. Same TEA quartet + key dispatch as `tui_app`.
+#[allow(clippy::type_complexity)]
+pub fn tui_app_ui<Model, Msg, E, FInit, FUpdate, FView, FSubs, FOnKey>(
+    init: FInit,
+    update: FUpdate,
+    view: FView,
+    subscriptions: FSubs,
+    on_key: FOnKey,
+) -> SkyTask<E, ()>
+where
+    E: Send + From<String> + 'static,
+    Model: Clone + Send + 'static,
+    Msg: Clone + Send + 'static,
+    FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + 'static,
+    FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + 'static,
+    FView: Fn(Model) -> Html<Msg> + Send + 'static,
+    FSubs: Fn(Model) -> SkySub<Msg> + Send + 'static,
+    FOnKey: Fn(String, String) -> Msg + Send + 'static,
+{
+    tui_run(init, update, subscriptions, on_key, move |m: &Model| {
+        let (cols, _rows) = term_size();
+        render_element(&view(m.clone()), cols)
     })
 }

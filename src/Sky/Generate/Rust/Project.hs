@@ -151,14 +151,17 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- CLI/Tui app that renders via Html.toString needs ONLY this, no server,
         -- no tea, no tokio. The live module (below) re-exports from it, so Live
         -- apps pull it too. Declared before live so live's re-export resolves.
-        htmlMod = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage then ["pub mod html;"] else []
-        htmlUse = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage then ["pub use html::*;"] else []
+        -- The Tui Element renderer (`tui::render`) walks the `Html` tree, so the
+        -- html module must be present whenever tui is — even for a String-view
+        -- Tui app that uses no Std.Ui itself.
+        htmlMod = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage || RustBuilder.usesTui usage then ["pub mod html;"] else []
+        htmlUse = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage || RustBuilder.usesTui usage then ["pub use html::*;"] else []
         -- Std.Live only when used — live submodule (the Sky.Live server).
         liveMod = if RustBuilder.usesLive usage then ["pub mod live;"] else []
         liveUse = if RustBuilder.usesLive usage then ["pub use live::*;"] else []
         -- Std.Tui — terminal backend (pulls crossterm). Only when used.
         tuiMod = if RustBuilder.usesTui usage then ["pub mod tui;"] else []
-        tuiUse = if RustBuilder.usesTui usage then ["pub use tui::tui_app;"] else []
+        tuiUse = if RustBuilder.usesTui usage then ["pub use tui::{tui_app, tui_app_ui};"] else []
         modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ liveMod ++ tuiMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse ++ tuiUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath

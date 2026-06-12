@@ -915,6 +915,18 @@ exprToRustInner ctx e = case e of
                 ++ " { kind, value }) }"
         in "tui_app(" ++ intercalate ", "
                [fld "init", fld "update", fld "view", fld "subscriptions", onKeyWrapper] ++ ")"
+    -- Sky.Tui — Tui.app { ... } (Element view) is intentionally NOT wired here
+    -- yet. The runtime support is complete and tested (`tui_app_ui` +
+    -- `tui::render::render_element` lay the Std.Ui Element's Html tree out to
+    -- ANSI cells), and the codegen wrapper is a two-line change
+    -- (`std_ui_layout`-wrap the view → `tui_app_ui`). The blocker is purely
+    -- dead-code elimination: the Std.Ui `Ui.layout` → `renderElement` chain is
+    -- never reached from Sky source in a Tui app, so whole-program DCE prunes it,
+    -- and forcing its transitive closure back in needs a `Dce` seed at a
+    -- non-entry-module ref (`reachableWholeProgram`'s `extraRoots` only seeds the
+    -- entry module). That `Dce.hs` API change is shared compiler infra, outside
+    -- the Rust-codegen boundary — deferred to a user decision. `Tui.program`
+    -- (String view) is fully shipped. See examples/21-tui-stopwatch.
     -- Live.app { init, update, view, subscriptions, routes, notFound } —
     -- record-splice like Cli.program. P3: branch on whether the Model record
     -- carries a `page` field.
