@@ -460,6 +460,48 @@ pub fn db_with_transaction<E: Send + From<String> + 'static, A: Send + 'static>(
 mod tests {
     use super::*;
 
+    // #52: the SkyRow accessor is total over a Dict-shaped row — present field
+    // reads back, absent field is "" (never panics), int/bool parse + default.
+    #[test]
+    fn sky_row_hashmap_total() {
+        let mut m: HashMap<String, String> = HashMap::new();
+        m.insert("text".into(), "ping".into());
+        m.insert("count".into(), "42".into());
+        m.insert("flag".into(), "true".into());
+        assert_eq!(db_get_string("text".into(), m.clone()), "ping");
+        assert_eq!(db_get_string("missing".into(), m.clone()), "");
+        assert_eq!(db_get_int("count".into(), m.clone()), 42);
+        assert_eq!(db_get_int("missing".into(), m.clone()), 0);
+        assert!(db_get_bool("flag".into(), m.clone()));
+        assert!(!db_get_bool("missing".into(), m));
+    }
+
+    // #52 Part 1: `Db.getString "path" req` on an `init` handler's typed
+    // request reads the named struct field; params/headers/cookies back any
+    // other key; absent -> "" (total).
+    #[cfg(feature = "live")]
+    #[test]
+    fn sky_row_livereq_named_fields_and_dicts() {
+        let mut params: HashMap<String, String> = HashMap::new();
+        params.insert("slug".into(), "general".into());
+        let mut cookies: HashMap<String, String> = HashMap::new();
+        cookies.insert("sky_sid".into(), "abc".into());
+        let req = crate::sky_runtime::LiveReq {
+            path: "/chat/general".into(),
+            query: "x=1".into(),
+            method: "GET".into(),
+            params,
+            headers: HashMap::new(),
+            cookies,
+        };
+        assert_eq!(db_get_string("path".into(), req.clone()), "/chat/general");
+        assert_eq!(db_get_string("method".into(), req.clone()), "GET");
+        assert_eq!(db_get_string("query".into(), req.clone()), "x=1");
+        assert_eq!(db_get_string("slug".into(), req.clone()), "general"); // params
+        assert_eq!(db_get_string("sky_sid".into(), req.clone()), "abc"); // cookies
+        assert_eq!(db_get_string("nope".into(), req), ""); // absent -> total ""
+    }
+
     async fn fresh_db() -> Db {
         // A SINGLE persistent connection per test. `sqlite::memory:` gives each
         // pool connection its OWN in-memory database, so a default multi-conn
