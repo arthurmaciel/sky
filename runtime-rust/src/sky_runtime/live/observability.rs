@@ -80,7 +80,10 @@ pub async fn metrics() -> impl IntoResponse {
 /// access-log middleware which wraps the whole mux.
 pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     REQUESTS.fetch_add(1, Ordering::Relaxed);
-    next.run(req).await
+    let resp = next.run(req).await;
+    // Feed the Sky Console telemetry (request count + 5xx error count).
+    super::super::telemetry::record_request(resp.status().as_u16());
+    resp
 }
 
 #[cfg(test)]

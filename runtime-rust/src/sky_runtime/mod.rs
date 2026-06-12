@@ -124,6 +124,10 @@ pub use ws_client::*;
 pub mod html;
 pub use html::*;
 
+// In-process telemetry sink (log/error rings + request counters) — always
+// compiled so `Std.Log.*` can feed it; the Sky.Live `console` module serves it.
+pub mod telemetry;
+
 // Std.Ui shared element tree — the general UI abstraction (Element/Attribute/
 // Length/Color/...). Backends (Live/Tui/Webview) each render it to their target.
 // Referenced by qualified path (`sky_runtime::ui::*`) from generated code; NOT
