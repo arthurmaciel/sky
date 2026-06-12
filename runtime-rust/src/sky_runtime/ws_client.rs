@@ -86,8 +86,8 @@ fn registry() -> &'static Mutex<HashMap<i64, ClientEntry>> {
 /// Remove a socket from the registry and drop its subscribe-once markers so the
 /// associated tasks wind down and the maps don't grow across reconnects.
 fn deregister(id: i64) {
-    registry().lock().unwrap().remove(&id);
-    ws_subscribed().lock().unwrap().retain(|&(sid, _)| sid != id);
+    registry().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    ws_subscribed().lock().unwrap_or_else(|e| e.into_inner()).retain(|&(sid, _)| sid != id);
 }
 
 static WS_CLIENT_NEXT_ID: AtomicI64 = AtomicI64::new(1);
@@ -175,7 +175,7 @@ async fn do_connect<E: From<String> + Send + 'static>(
         deregister(id);
     });
 
-    registry().lock().unwrap().insert(id, ClientEntry { cmd_tx, frames_tx });
+    registry().lock().unwrap_or_else(|e| e.into_inner()).insert(id, ClientEntry { cmd_tx, frames_tx });
     ok_res(id)
 }
 
@@ -192,7 +192,7 @@ pub fn web_socket_connect_with<E: From<String> + Send + 'static>(cfg: WsClientCf
 }
 
 fn send_cmd(id: i64, cmd: WsCmd) -> bool {
-    match registry().lock().unwrap().get(&id) {
+    match registry().lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
         Some(e) => e.cmd_tx.send(cmd).is_ok(),
         None => false,
     }
@@ -239,7 +239,7 @@ pub fn web_socket_close_with_code<E: From<String> + Send + 'static>(code: i64, r
 // filters the events it cares about.
 
 fn subscribe_events(socket_id: i64) -> Option<tokio::sync::broadcast::Receiver<WsEvent>> {
-    registry().lock().unwrap().get(&socket_id).map(|e| e.frames_tx.subscribe())
+    registry().lock().unwrap_or_else(|e| e.into_inner()).get(&socket_id).map(|e| e.frames_tx.subscribe())
 }
 
 // WS subscriptions are set up ONCE per (socket, kind): the SubManager aborts +
@@ -254,7 +254,7 @@ fn ws_subscribed() -> &'static Mutex<std::collections::HashSet<(i64, &'static st
     S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 fn ws_mark_subscribed(socket_id: i64, kind: &'static str) -> bool {
-    ws_subscribed().lock().unwrap().insert((socket_id, kind))
+    ws_subscribed().lock().unwrap_or_else(|e| e.into_inner()).insert((socket_id, kind))
 }
 
 /// onMessage : (WebSocketMessage -> msg) -> Sub msg
@@ -277,7 +277,7 @@ where M: Send + 'static, F: Fn(WsClientMessage) -> M + Send + Sync + 'static {
 pub fn sub_subscribe_ws_open<M>(socket_id: i64, msg: M) -> SkySub<M>
 where M: Send + 'static {
     SkySub::Source(Box::new(move |emit| {
-        if ws_mark_subscribed(socket_id, "open") && registry().lock().unwrap().contains_key(&socket_id) {
+        if ws_mark_subscribed(socket_id, "open") && registry().lock().unwrap_or_else(|e| e.into_inner()).contains_key(&socket_id) {
             emit(msg);
         }
         tokio::spawn(async {})

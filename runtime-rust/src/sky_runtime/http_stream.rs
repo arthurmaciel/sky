@@ -104,7 +104,7 @@ pub fn http_stream_open<E: From<String> + Send + 'static>(req: HttpRequest) -> S
         // carry the error payload the caller wants to read. Mirrors Http.get
         // returning Ok with a 4xx status.
         let id = next_stream_id();
-        client_streams().lock().unwrap().insert(id, resp);
+        client_streams().lock().unwrap_or_else(|e| e.into_inner()).insert(id, resp);
         SkyResult::Ok(id)
     })
 }
@@ -132,7 +132,7 @@ where
     Box::pin(async move {
         // Take ownership of the response — forEachChunk consumes it. An unknown /
         // already-drained id is a no-op (matches close's idempotent contract).
-        let resp = match client_streams().lock().unwrap().remove(&id) {
+        let resp = match client_streams().lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
             Some(r) => r,
             None => return SkyResult::Ok(()),
         };
@@ -158,8 +158,8 @@ where
 /// Idempotent — closing an unknown / already-closed id is a no-op.
 pub fn http_stream_close<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
-        client_streams().lock().unwrap().remove(&id);
-        chunk_subscribed().lock().unwrap().remove(&id);
+        client_streams().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        chunk_subscribed().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         SkyResult::Ok(())
     })
 }
@@ -191,12 +191,12 @@ where
     F: Fn(ChunkEvent<E>) -> M + Send + Sync + 'static,
 {
     SkySub::Source(Box::new(move |emit| {
-        if chunk_subscribed().lock().unwrap().insert(id) {
+        if chunk_subscribed().lock().unwrap_or_else(|e| e.into_inner()).insert(id) {
             tokio::spawn(async move {
-                let resp = match client_streams().lock().unwrap().remove(&id) {
+                let resp = match client_streams().lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
                     Some(r) => r,
                     None => {
-                        chunk_subscribed().lock().unwrap().remove(&id);
+                        chunk_subscribed().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
                         return;
                     }
                 };
@@ -219,7 +219,7 @@ where
                         }
                     }
                 }
-                chunk_subscribed().lock().unwrap().remove(&id);
+                chunk_subscribed().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
             });
         }
         tokio::spawn(async {}) // dummy handle for the SubManager to abort harmlessly

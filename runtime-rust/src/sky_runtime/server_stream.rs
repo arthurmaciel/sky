@@ -84,7 +84,7 @@ where
         content_type
     };
     let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-    pending_handlers().lock().unwrap().insert(token, erased);
+    pending_handlers().lock().unwrap_or_else(|e| e.into_inner()).insert(token, erased);
     Box::pin(async move {
         SkyResult::Ok(ServerResponse {
             status: 200,
@@ -103,7 +103,7 @@ pub fn server_stream_emit<E: From<String> + Send + 'static>(
     id: i64,
 ) -> SkyTask<E, ()> {
     Box::pin(async move {
-        let sender = stream_senders().lock().unwrap().get(&id).cloned();
+        let sender = stream_senders().lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned();
         match sender {
             Some(tx) => match tx.send(chunk).await {
                 Ok(()) => SkyResult::Ok(()),
@@ -121,7 +121,7 @@ pub fn server_stream_emit<E: From<String> + Send + 'static>(
 /// return; explicit when the handler wants to release the connection early.
 pub fn server_stream_finish<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
-        stream_senders().lock().unwrap().remove(&id);
+        stream_senders().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         SkyResult::Ok(())
     })
 }
@@ -142,7 +142,7 @@ pub fn server_stream_with_content_type<E: From<String> + Send + 'static>(
 /// axum response; otherwise None (the caller falls back to the buffered path).
 pub fn serve_streaming_sentinel(r: &ServerResponse) -> Option<axum::response::Response> {
     let token: i64 = r.body.strip_prefix(SENTINEL_PREFIX)?.parse().ok()?;
-    let handler = pending_handlers().lock().unwrap().remove(&token)?;
+    let handler = pending_handlers().lock().unwrap_or_else(|e| e.into_inner()).remove(&token)?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(STREAM_CHAN_BUFFER);
     let id = loop {
@@ -151,13 +151,13 @@ pub fn serve_streaming_sentinel(r: &ServerResponse) -> Option<axum::response::Re
             break n;
         }
     };
-    stream_senders().lock().unwrap().insert(id, tx);
+    stream_senders().lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
 
     // Drive the handler in its own task; on completion drop the sender so the
     // body stream terminates even if the handler forgot to call `finish`.
     tokio::spawn(async move {
         handler(StreamWriter::StreamWriter(id)).await;
-        stream_senders().lock().unwrap().remove(&id);
+        stream_senders().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     });
 
     // Receiver → byte stream. unfold yields each chunk; None ends the body when

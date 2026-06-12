@@ -423,7 +423,7 @@ tokio::task_local! {
 async fn ws_loop<E: From<String> + Send + 'static>(mut socket: axum::extract::ws::WebSocket, cfg: WsServerCfg<E>, id: i64) {
     use axum::extract::ws::Message;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsOut>();
-    ws_registry().lock().unwrap().insert(id, tx);
+    ws_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
     let _ = (cfg.onConnect)(WsHandle::WebSocketServer(id)).await;
     loop {
         tokio::select! {
@@ -449,7 +449,7 @@ async fn ws_loop<E: From<String> + Send + 'static>(mut socket: axum::extract::ws
         }
     }
     let _ = (cfg.onClose)(WsHandle::WebSocketServer(id)).await;
-    ws_registry().lock().unwrap().remove(&id);
+    ws_registry().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
 }
 
 fn ws_production() -> bool {
@@ -518,7 +518,7 @@ pub fn server_web_socket_upgrade<E: From<String> + Send + 'static>(req: ServerRe
 }
 
 fn ws_send_raw(id: i64, out: WsOut) -> bool {
-    match ws_registry().lock().unwrap().get(&id) {
+    match ws_registry().lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
         Some(tx) => tx.send(out).is_ok(),
         None => false,
     }
@@ -545,7 +545,7 @@ pub fn server_web_socket_broadcast<E: From<String> + Send + 'static>(ids: Vec<i6
     Box::pin(async move {
         let mut any_ok = false;
         {
-            let reg = ws_registry().lock().unwrap();
+            let reg = ws_registry().lock().unwrap_or_else(|e| e.into_inner());
             for id in &ids {
                 if let Some(tx) = reg.get(id) {
                     if tx.send(WsOut::Text(msg.clone())).is_ok() { any_ok = true; }
@@ -682,7 +682,7 @@ struct WindowEntry { start: f64, count: i64 }
 fn fixed_window_allow(key: &str, client: &str, limit: i64, window_secs: i64) -> bool {
     static W: OnceLock<Mutex<HashMap<(String, String), WindowEntry>>> = OnceLock::new();
     let now = unix_secs_f64();
-    let mut m = W.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let mut m = W.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
     let e = m.entry((key.to_string(), client.to_string())).or_insert(WindowEntry { start: now, count: 0 });
     if now - e.start >= window_secs.max(1) as f64 { e.start = now; e.count = 0; }
     if e.count < limit.max(0) { e.count += 1; true } else { false }
@@ -697,7 +697,7 @@ pub fn rate_limit_allow(name: String, key: String, capacity: i64, refill_per_sec
     static B: OnceLock<Mutex<HashMap<(String, String), Bucket>>> = OnceLock::new();
     let cap = capacity.max(0) as f64;
     let now = unix_secs_f64();
-    let mut m = B.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    let mut m = B.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
     let b = m.entry((name, key)).or_insert(Bucket { tokens: cap, last: now });
     b.tokens = (b.tokens + (now - b.last) * refill_per_sec.max(0) as f64).min(cap);
     b.last = now;

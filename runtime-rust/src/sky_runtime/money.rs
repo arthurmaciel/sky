@@ -151,7 +151,7 @@ pub fn money_set_rate<E: From<String>>(from: String, to: String, rate: Decimal) 
     }
     let from = from.trim().to_uppercase();
     let to = to.trim().to_uppercase();
-    let mut map = rates().lock().expect("money fx rates mutex");
+    let mut map = rates().lock().unwrap_or_else(|e| e.into_inner());
     map.insert((from.clone(), to.clone()), rate.0);
     // Auto-inverse so consumers don't need both directions.
     if !rate.0.is_zero() {
@@ -169,7 +169,7 @@ pub fn money_get_rate<E: From<String>>(from: String, to: String) -> SkyResult<E,
     if from == to {
         return SkyResult::Ok(Decimal(RD::from(1)));
     }
-    let map = rates().lock().expect("money fx rates mutex");
+    let map = rates().lock().unwrap_or_else(|e| e.into_inner());
     match map.get(&(from.clone(), to.clone())) {
         Some(r) => SkyResult::Ok(Decimal(*r)),
         None => SkyResult::Err(
@@ -183,7 +183,7 @@ pub fn money_has_rate(from: String, to: String) -> bool {
     let from = from.trim().to_uppercase();
     let to = to.trim().to_uppercase();
     if from == to { return true; }
-    let map = rates().lock().expect("money fx rates mutex");
+    let map = rates().lock().unwrap_or_else(|e| e.into_inner());
     map.contains_key(&(from, to))
 }
 
@@ -192,7 +192,7 @@ pub fn money_has_rate(from: String, to: String) -> bool {
 /// the peephole emits `money_clear_rates()` with no args. The runtime
 /// takes no params accordingly.
 pub fn money_clear_rates<E: From<String>>() -> SkyResult<E, ()> {
-    let mut map = rates().lock().expect("money fx rates mutex");
+    let mut map = rates().lock().unwrap_or_else(|e| e.into_inner());
     map.clear();
     SkyResult::Ok(())
 }
