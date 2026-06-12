@@ -42,6 +42,10 @@ bcrypt = { version = "0.17", optional = true }
 async-trait = { version = "0.1", optional = true }
 unicode-width = { version = "0.1", optional = true }
 crossterm = { version = "0.28", optional = true }
+# Sky.Webview native window. wry 0.24 / tao 0.16 target webkit2gtk-4.0 + libsoup-2.4
+# (the stack present on this host); wry 0.28+ moved to libsoup-3.0.
+wry = { version = "0.24", optional = true }
+tao = { version = "0.16", optional = true }
 
 [features]
 default = []
@@ -54,6 +58,11 @@ compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
 cache_kernel = ["tokio"]
 tui = ["unicode-width", "crossterm"]
+# Real native-window Webview backend (opt-in; needs the system webview dev libs).
+# NOT in `full` — default/CI builds compile the cross-platform stub instead.
+# Pulls `live` to reuse its Html renderer + event-dispatch (HandlerIndex) for the
+# in-process IPC bridge.
+webview = ["wry", "tao", "live"]
 config = ["json", "toml", "serde_yaml"]
 server = ["tokio", "axum", "tower-http", "futures-util"]
 http_client = ["tokio", "reqwest", "futures-util"]
