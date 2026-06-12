@@ -136,8 +136,7 @@ analyzeKernelUsage = foldMap analyzeMod
             -- perform + Sub.none/batch/every are unaffected.
             , if (("Std.Cmd" `isSuffixOf` modName || modName == "Cmd") && fnName `elem` ["publish", "publishNoEcho"])
                  || (("Std.Sub" `isSuffixOf` modName || modName == "Sub") && fnName == "subscribeTopic")
-                 || modName `elem` ["PubSub", "Std.PubSub"]
-                 || "Std.PubSub" `isSuffixOf` modName
+                 || modName == "PubSub" || "Std.PubSub" `isSuffixOf` modName
               then mempty { usesTea = True, usesLive = True } else mempty
             -- Sky.Core.WebSocket client (distinct from Sky.Http.Server.WebSocket;
             -- the suffix can't collide). Pulls ws_client + tokio-tungstenite. Its
