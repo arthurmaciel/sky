@@ -80,6 +80,14 @@ pub async fn metrics() -> impl IntoResponse {
 /// access-log middleware which wraps the whole mux.
 pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     REQUESTS.fetch_add(1, Ordering::Relaxed);
+    // Gate the console + metrics surface (off / production-auth) before serving.
+    let path = req.uri().path();
+    if path == "/_sky/metrics" || path.starts_with("/_sky/console") {
+        if let Some(blocked) = super::console::gate_blocked(req.headers()) {
+            super::super::telemetry::record_request(blocked.status().as_u16());
+            return blocked;
+        }
+    }
     let resp = next.run(req).await;
     // Feed the Sky Console telemetry (request count + 5xx error count).
     super::super::telemetry::record_request(resp.status().as_u16());

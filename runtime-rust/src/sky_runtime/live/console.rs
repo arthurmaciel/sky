@@ -69,6 +69,54 @@ pub async fn api_errors() -> impl IntoResponse {
     (StatusCode::OK, [json_ct()], telemetry::entries_json(&telemetry::recent_errors(200)))
 }
 
+/// `GET /_sky/console/api/traces` — recent completed `Std.Trace.span`s.
+pub async fn api_traces() -> impl IntoResponse {
+    (StatusCode::OK, [json_ct()], telemetry::spans_json(200))
+}
+
+/// `GET /_sky/console/api/metrics-summary` — the parsed counter snapshot the
+/// dashboard renders (mirror of Go's parsed Prometheus summary).
+pub async fn api_metrics_summary() -> impl IntoResponse {
+    let body = format!(
+        r#"{{"sky_live_requests_total":{},"sky_live_errors_total":{}}}"#,
+        telemetry::requests_total(),
+        telemetry::errors_total()
+    );
+    (StatusCode::OK, [json_ct()], body)
+}
+
+/// Production auth gate for the console + metrics surface (Go's
+/// `productionFromEnv` + `SKY_CONSOLE_AUTH`). Returns `Some(response)` when the
+/// request must be REFUSED. `SKY_CONSOLE_AUTH=off` → 404 (surface declared absent).
+/// In production (ENV/SKY_ENV non-dev) a `Bearer` admin token is required
+/// (`SKY_ADMIN_TOKEN`, legacy `SKY_CONSOLE_TOKEN`) — 401 otherwise. Dev mode (the
+/// default) is open and returns `None`.
+pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::Response> {
+    if std::env::var("SKY_CONSOLE_AUTH").map(|v| v == "off").unwrap_or(false) {
+        return Some((StatusCode::NOT_FOUND, "console disabled").into_response());
+    }
+    if !telemetry::production_from_env() {
+        return None;
+    }
+    let want = std::env::var("SKY_ADMIN_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("SKY_CONSOLE_TOKEN").ok());
+    let authed = match (want, headers.get(header::AUTHORIZATION)) {
+        (Some(tok), Some(h)) if !tok.is_empty() => {
+            h.to_str().map(|h| h == format!("Bearer {tok}")).unwrap_or(false)
+        }
+        _ => false,
+    };
+    if authed {
+        None
+    } else {
+        Some(
+            (StatusCode::UNAUTHORIZED, "console requires a Bearer admin token in production")
+                .into_response(),
+        )
+    }
+}
+
 /// `POST /_sky/observability/ingest` — federation receiver. Accepts a JSON array
 /// of `{ "level": "...", "message": "..." }` (a sub-app's batched logs) and folds
 /// them into the local rings. Malformed bodies are accepted as 204 (drop) rather

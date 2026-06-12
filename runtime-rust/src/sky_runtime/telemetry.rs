@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOG_CAP: usize = 1000;
 const ERR_CAP: usize = 200;
+const SPAN_CAP: usize = 500;
 
 /// One captured log line.
 #[derive(Clone)]
@@ -25,8 +26,18 @@ pub struct LogEntry {
     pub message: String,
 }
 
+/// One completed trace span (Std.Trace.span).
+#[derive(Clone)]
+pub struct SpanEntry {
+    pub ts_ms: u64,
+    pub name: String,
+    pub dur_us: u64,
+    pub ok: bool,
+}
+
 static LOGS: Mutex<VecDeque<LogEntry>> = Mutex::new(VecDeque::new());
 static ERRORS: Mutex<VecDeque<LogEntry>> = Mutex::new(VecDeque::new());
+static SPANS: Mutex<VecDeque<SpanEntry>> = Mutex::new(VecDeque::new());
 static REQUESTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static ERRORS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
@@ -37,12 +48,54 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn push_bounded(ring: &Mutex<VecDeque<LogEntry>>, cap: usize, e: LogEntry) {
+fn push_bounded<T>(ring: &Mutex<VecDeque<T>>, cap: usize, e: T) {
     let mut g = ring.lock().unwrap_or_else(|p| p.into_inner());
     if g.len() >= cap {
         g.pop_front();
     }
     g.push_back(e);
+}
+
+/// Record a completed trace span (called from `Std.Trace.span`).
+pub fn record_span(name: &str, dur_us: u64, ok: bool) {
+    push_bounded(
+        &SPANS,
+        SPAN_CAP,
+        SpanEntry { ts_ms: now_ms(), name: name.to_string(), dur_us, ok },
+    );
+}
+
+/// Most-recent `limit` spans as a JSON array.
+pub fn spans_json(limit: usize) -> String {
+    let g = SPANS.lock().unwrap_or_else(|p| p.into_inner());
+    let n = g.len();
+    let items: Vec<String> = g
+        .iter()
+        .skip(n.saturating_sub(limit))
+        .map(|s| {
+            format!(
+                r#"{{"ts":{},"name":"{}","durUs":{},"ok":{}}}"#,
+                s.ts_ms,
+                json_escape(&s.name),
+                s.dur_us,
+                s.ok
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+/// Production gate (Go's `productionFromEnv`): `ENV` then `SKY_ENV`; unset OR a
+/// dev marker (`dev`/`development`/`local`) → dev (false); anything else → true.
+pub fn production_from_env() -> bool {
+    let mut e = std::env::var("ENV").unwrap_or_default().to_ascii_lowercase();
+    if e.is_empty() {
+        e = std::env::var("SKY_ENV").unwrap_or_default().to_ascii_lowercase();
+    }
+    if e.is_empty() {
+        return false;
+    }
+    !matches!(e.as_str(), "dev" | "development" | "local")
 }
 
 /// Record a structured log line (called from `Std.Log.*`). Errors also land in
@@ -141,5 +194,15 @@ mod tests {
         record_request(200);
         record_request(500);
         assert!(requests_total() >= before + 2);
+    }
+
+    #[test]
+    fn spans_recorded_as_json() {
+        record_span("db.query", 1234, true);
+        record_span("http.get", 50, false);
+        let j = spans_json(10);
+        assert!(j.contains(r#""name":"db.query""#), "{j}");
+        assert!(j.contains(r#""durUs":1234"#), "{j}");
+        assert!(j.contains(r#""ok":false"#), "{j}");
     }
 }

@@ -23,12 +23,14 @@ pub fn trace_span<E: Send + 'static, A: Send + 'static>(name: String, task: SkyT
             eprintln!("[trace] span start {}", name);
         }
         let result = task.await;
+        let elapsed = start.elapsed();
+        let ok = matches!(result, SkyResult::Ok(_));
+        // Always record the span into the telemetry ring (the Sky Console reads
+        // it); the stderr line stays opt-in via SKY_TRACE.
+        super::telemetry::record_span(&name, elapsed.as_micros() as u64, ok);
         if on {
-            let outcome = match &result {
-                SkyResult::Ok(_) => "ok",
-                SkyResult::Err(_) => "err",
-            };
-            eprintln!("[trace] span end {} ({} ms, {})", name, start.elapsed().as_millis(), outcome);
+            let outcome = if ok { "ok" } else { "err" };
+            eprintln!("[trace] span end {} ({} ms, {})", name, elapsed.as_millis(), outcome);
         }
         result
     })

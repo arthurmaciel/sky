@@ -809,6 +809,8 @@ where
             .route("/_sky/console/api/overview", get(console::api_overview))
             .route("/_sky/console/api/logs", get(console::api_logs))
             .route("/_sky/console/api/errors", get(console::api_errors))
+            .route("/_sky/console/api/traces", get(console::api_traces))
+            .route("/_sky/console/api/metrics-summary", get(console::api_metrics_summary))
             .route("/_sky/observability/ingest", post(console::ingest))
             .route("/", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             .route("/*path", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
