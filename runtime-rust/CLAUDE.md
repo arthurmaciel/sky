@@ -74,6 +74,31 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 
 ## Constraints
 
+- **NO RUNTIME ERRORS — existential.** This is the reason the Rust backend
+  exists. A well-typed Sky program MUST NOT be able to trigger a panic, an
+  `unwrap`/`expect` failure, an unchecked downcast, an out-of-bounds index, or
+  any other runtime abort in the generated Rust or the Rust runtime. "If it
+  compiles, it works" is not aspirational here — it is the product. Where Go's
+  backend leans on reflect + recover (a panic that gets caught and turned into
+  a 500), the Rust backend MUST instead be **statically total**: errors that
+  Sky's own type system models are `Result`/`Task` values; everything else is
+  designed out, not caught.
+  - **Mirroring Go's reflect/`any` risk surface is a defect, not parity.** When
+    a Sky feature is dynamically typed at the *language* level (pub/sub
+    payloads, FFI `any`, JSON `Value`), do not erase-and-downcast-and-hope. Use
+    the concrete types the Sky type-checker already knows at each call site to
+    **monomorphise the dynamism away** (e.g. per-type brokers keyed by
+    `TypeId`, so the payload travels as its real type `T` and is never
+    downcast). Any residual `dyn Any` must be provably-correct by construction
+    (keyed so the one cast can never fail), never payload-dependent.
+  - A genuine type mismatch that Sky's type system cannot catch (e.g. a
+    publisher and subscriber that disagree on a topic's payload type) MUST
+    degrade gracefully — drop + structured warn — NEVER panic.
+  - `.unwrap()` / `.expect()` / `panic!` / `[i]` indexing / unchecked
+    `downcast` in generated code or the runtime's Sky-reachable paths are
+    treated as bugs to fix at the root, exactly like the main project's
+    no-deferral rule. An internal invariant that "can't fail" still uses a
+    total form (`if let` / `match` / `get`) with a structured-error fallback.
 - Rust-native FFI (direct Rust lib calls) — mandatory from day 1 - MUST BE FULLY automatic, secure and sound
 - WASM target priority over embedded
 - All Rust targets: desktop, WASM, CLI, embedded
