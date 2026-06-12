@@ -357,14 +357,18 @@ iterators / a checked total form rather than `[i]`.
 
 ### `dyn Any` register
 
+**Audit complete (2026-06-12, task #44).** A full sweep of `src/sky_runtime/**`
+found **exactly one** `dyn Any` usage — the pub/sub broker registry. There are
+**no reducible `dyn Any` sites**; the single one is irreducible-by-design:
+
 | Site | Shape | Verdict |
 |---|---|---|
-| `live/pubsub.rs` broker registry | `Box<dyn Any>` → `Arc<Broker<T>>`, keyed by `TypeId` | **irreducible-by-design** — correct by construction (only an `Arc<Broker<T>>` is ever stored under `TypeId::of::<T>()`); never payload-dependent. The payload itself is never erased. |
+| `live/pubsub.rs` broker registry | `Box<dyn Any + Send + Sync>` → `Arc<Broker<T>>`, keyed by `TypeId` | **irreducible-by-design** — correct by construction (only an `Arc<Broker<T>>` is ever stored under `TypeId::of::<T>()`); never payload-dependent. The payload travels as its real `T` and is never erased — only the broker *container* is. The single `downcast_ref` is `TypeId`-gated; its structurally-impossible `None` branch degrades gracefully (logs a bug report + returns a fresh broker — never panics). |
 
-*Reserved for the `dyn Any` audit (task #44):* when that audit runs, every
-`dyn Any` in the runtime is catalogued here with a verdict — **reducible**
-(monomorphisable away, with how) or **irreducible** (why) — so future work can
-pick up the reducible ones.
+The codegen itself emits **no** `dyn Any` — all Sky dynamism (`any` payloads,
+`Db.get*` rows, FFI) is monomorphised to concrete types or routed through a
+trait (`SkyRow`), per the no-erasure rule. If a future feature introduces a new
+`dyn Any`, add a row here with its reduction verdict.
 
 ### Panic-vector gate coverage
 
