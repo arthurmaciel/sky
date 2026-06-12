@@ -44,17 +44,27 @@ pub(crate) fn bytes_to_sky(bytes: &[u8]) -> String {
 // only looks dead under a feature subset, hence `allow(dead_code)`.
 #[allow(dead_code)]
 pub(crate) fn form_url_decode(s: &str) -> String {
+    // A percent-escape is "%XX": a '%' marker followed by two hex digits, e.g.
+    // "%20" → 0x20 (space). RFC 3986 §2.1.
+    const PCT: u8 = b'%';
+    const HEX: u32 = 16;
+    const HEX_DIGITS: usize = 2;
+    const ESCAPE_LEN: usize = 1 + HEX_DIGITS; // '%' + two hex digits
+
     let s = s.replace('+', " ");
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while let Some(&c) = b.get(i) {
-        if c == b'%' {
-            // `s.get(range)` is total — None when out of bounds OR not on a char
-            // boundary; falls through to copying the literal '%'.
-            if let Some(byte) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+        if c == PCT {
+            // The two hex digits sit at [i+1, i+1+HEX_DIGITS). `str::get(range)`
+            // is total — None when out of bounds OR not on a char boundary (e.g.
+            // a stray '%' before a multi-byte char) — so we fall through and copy
+            // the literal '%' rather than panicking.
+            let hex = s.get(i + 1..i + 1 + HEX_DIGITS);
+            if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, HEX).ok()) {
                 out.push(byte);
-                i += 3;
+                i += ESCAPE_LEN;
                 continue;
             }
         }
