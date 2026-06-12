@@ -130,6 +130,15 @@ analyzeKernelUsage = foldMap analyzeMod
                  || "Std.Cmd" `isSuffixOf` modName || "Std.Sub" `isSuffixOf` modName
                  || "Std.Cli" `isSuffixOf` modName || "Sky.Cli" `isSuffixOf` modName
               then mempty { usesTea = True } else mempty
+            -- S6: pub/sub kernels live in the broker (live/pubsub.rs), so they
+            -- need the live module pulled (usesLive) in addition to the TEA
+            -- loop (usesTea). Gated on the FUNCTION name so Cmd.none/batch/
+            -- perform + Sub.none/batch/every are unaffected.
+            , if (("Std.Cmd" `isSuffixOf` modName || modName == "Cmd") && fnName `elem` ["publish", "publishNoEcho"])
+                 || (("Std.Sub" `isSuffixOf` modName || modName == "Sub") && fnName == "subscribeTopic")
+                 || modName `elem` ["PubSub", "Std.PubSub"]
+                 || "Std.PubSub" `isSuffixOf` modName
+              then mempty { usesTea = True, usesLive = True } else mempty
             -- Sky.Core.WebSocket client (distinct from Sky.Http.Server.WebSocket;
             -- the suffix can't collide). Pulls ws_client + tokio-tungstenite. Its
             -- onMessage Sub also needs the TEA loop.
