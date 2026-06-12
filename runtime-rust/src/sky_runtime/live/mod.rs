@@ -328,6 +328,18 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
 {
     let mut sub_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // Initial subscriptions — Go parity (setupSubscriptions runs at session
+    // creation, before the first event; live.go:3729). Without this a
+    // watch-only session never subscribes until it dispatches its own Msg, so a
+    // pub/sub broadcast (or a Sub.every ticker) would never reach a freshly
+    // loaded session. Wrapped in the session-sid scope so SkipOrigin filtering
+    // binds the right owner.
+    {
+        let model0 = { entry.lock().unwrap_or_else(|e| e.into_inner()).model.clone() };
+        pubsub::with_session_sid(sid.clone(), || {
+            spawn_subs(subs(model0), &msg_tx, &mut sub_handles)
+        });
+    }
     while let Some(msg) = msg_rx.recv().await {
         // Clone the model under a short lock, release before update.
         let model = { entry.lock().unwrap().model.clone() };
