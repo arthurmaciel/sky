@@ -72,7 +72,18 @@ buildModule ctx0 mod =
         existingNames = Set.fromList prefixed
         -- Synthesize record alias constructors
         synCtorItems = concat [synCtor aliasName vars fields | (aliasName, Can.Alias vars (Can.TRecord fields _)) <- Map.toList (Can._aliases mod)]
-        synCtor aliasName vars0 fields =
+        -- Record aliases that map to a ZERO-FIELD runtime marker because the
+        -- kernel destructures them at the call site (Std.Webview.AppCfg →
+        -- WebviewAppCfg). A synthesized constructor would assign into a fieldless
+        -- struct AND reference the erased `any`/Fn field types, so skip it. This
+        -- is NOT every opaque cfg: WebSocketServerCfg → WsServerCfg maps to a real
+        -- runtime struct WITH its fn-pointer fields, so that constructor stays.
+        markerCfgAliases = Set.fromList [("Std.Webview", "AppCfg")]
+        skipOpaqueCfgCtor aliasName =
+            Set.member (ModuleName._name (Can._name mod), aliasName) markerCfgAliases
+        synCtor aliasName vars0 fields
+            | skipOpaqueCfgCtor aliasName = []
+            | otherwise =
             let rm = ecRecordMap ctx
                 ctorName = toSnakeCase (modPrefix ++ "_" ++ aliasName)
                 structName = toCamelCase (modPrefix ++ "_" ++ aliasName)

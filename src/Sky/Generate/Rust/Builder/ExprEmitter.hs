@@ -940,6 +940,27 @@ exprToRustInner ctx e = case e of
                 ++ " { kind, value }) }"
         in "tui_app_ui(" ++ intercalate ", "
                [fld "init", fld "update", fld "view", fld "subscriptions", onKeyWrapper] ++ ")"
+    -- Sky.Webview — Webview.app { init, update, view, subscriptions, window } —
+    -- native desktop TEA backend. Same `view : Model -> any` shape as Tui.app, so
+    -- the view wraps in `Ui.layout` to yield `Html`. The `window` field is a
+    -- `{ title, size }` record literal, converted to the runtime's
+    -- `WebviewWindowCfg`. Cross-platform: the stub `webview_app` returns a
+    -- graceful Err where the system webview libs are absent (Go-parity with
+    -- webview_stub.go); the real wry/tao backend lives behind the webview feature.
+    Can.Call (Ann.At _ (Can.VarTopLevel wvMod "app")) [Ann.At _ (Can.Record fields)]
+        | ModuleName._name wvMod == "Std.Webview" ->
+        let fld n = case Map.lookup n fields of
+                Just e  -> exprToRustString ctx e
+                Nothing -> "/* Webview.app: missing field " ++ n ++ " */"
+            windowExpr = case Map.lookup "window" fields of
+                Just (Ann.At _ (Can.Record wfields)) ->
+                    let wf n = case Map.lookup n wfields of
+                            Just e  -> exprToRustString ctx e
+                            Nothing -> "/* Webview.app: window missing " ++ n ++ " */"
+                    in "WebviewWindowCfg { title: " ++ wf "title" ++ ", size: " ++ wf "size" ++ " }"
+                _ -> "/* Webview.app: window must be a record literal */"
+        in "webview_app(" ++ intercalate ", "
+               [fld "init", fld "update", fld "view", fld "subscriptions", windowExpr] ++ ")"
     -- Live.app { init, update, view, subscriptions, routes, notFound } —
     -- record-splice like Cli.program. P3: branch on whether the Model record
     -- carries a `page` field.

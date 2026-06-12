@@ -124,6 +124,16 @@ pub use ws_client::*;
 pub mod html;
 pub use html::*;
 
+// Sky.Webview — native desktop window backend (a TEA app, so gated on the async
+// runtime like `tea`). The cross-platform floor (a stub returning a graceful Err)
+// keeps `import Std.Webview` linking everywhere; the real wry/tao window backend
+// needs the system webview dev libs (staged behind the webview design doc).
+// Mirrors Go's webview_stub.go.
+#[cfg(feature = "tokio")]
+pub mod webview;
+#[cfg(feature = "tokio")]
+pub use webview::{webview_app, WebviewAppCfg, WebviewWindowCfg};
+
 #[cfg(feature = "live")]
 pub mod live;
 #[cfg(feature = "live")]

@@ -162,7 +162,9 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- Std.Tui — terminal backend (pulls crossterm). Only when used.
         tuiMod = if RustBuilder.usesTui usage then ["pub mod tui;"] else []
         tuiUse = if RustBuilder.usesTui usage then ["pub use tui::{tui_app, tui_app_ui};"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ liveMod ++ tuiMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse ++ tuiUse)
+        webviewMod = if RustBuilder.usesWebview usage then ["pub mod webview;"] else []
+        webviewUse = if RustBuilder.usesWebview usage then ["pub use webview::{webview_app, WebviewAppCfg, WebviewWindowCfg};"] else []
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ liveMod ++ tuiMod ++ webviewMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse ++ tuiUse ++ webviewUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode

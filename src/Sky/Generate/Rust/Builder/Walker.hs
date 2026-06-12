@@ -172,6 +172,12 @@ analyzeKernelUsage = foldMap analyzeMod
             -- tea module (the loop reuses CliEvent/SubManager/cli_run_cmd).
             , if modName == "Tui" || "Std.Tui" `isSuffixOf` modName
               then mempty { usesTui = True, usesTea = True } else mempty
+            -- Std.Webview — native desktop TEA backend (webview_app). Pulls the
+            -- webview module (window stub floor; real wry/tao behind the feature) +
+            -- the tea module (TEA loop) + the html render surface (the view paints
+            -- to the same Html tree as Sky.Live / Sky.Tui).
+            , if modName == "Webview" || "Std.Webview" `isSuffixOf` modName
+              then mempty { usesWebview = True, usesTea = True, usesHtml = True } else mempty
             -- Std.Html / Std.Ui — render to an Html ADT via Html.toString /
             -- Ui.layout. The Html/Attribute/Event types + html_render_ live in the
             -- live submodule, so a NON-Live (CLI / Tui) app that only renders HTML

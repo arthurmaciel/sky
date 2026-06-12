@@ -41,6 +41,8 @@ data UsedKernels = UsedKernels
                                   -- Html/Attribute/Event ADTs + html_render_ kernel,
                                   -- even for a non-Live (CLI/Tui) render via Html.toString
     , usesTui :: Bool             -- Std.Tui used → tui module + crossterm + unicode-width
+    , usesWebview :: Bool         -- Std.Webview used → webview module (native window stub
+                                  -- floor; real wry/tao backend behind the webview feature)
     } deriving (Show, Eq)
 
 instance Semigroup UsedKernels where
@@ -62,9 +64,10 @@ instance Semigroup UsedKernels where
         , usesLive = usesLive a || usesLive b
         , usesHtml = usesHtml a || usesHtml b
         , usesTui = usesTui a || usesTui b
+        , usesWebview = usesWebview a || usesWebview b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False False False False False False False False False
+    mempty = UsedKernels False False False False False False False False False False False False False False False False False False
 
 data RustBuilder = RustBuilder
     { builderModules    :: [RustModule]
@@ -148,6 +151,15 @@ runtimeOpaqueTypes = Map.fromList
     -- The `Cache` variant name matches the Sky constructor so `Cache.Cache raw`
     -- → `SkyCacheHandle::Cache(raw)` and `case c of Cache raw` → a match.
     , (("Std.Cache", "Cache"), "sky_runtime::SkyCacheHandle")
+    -- Std.Webview cfg records. WindowCfg { title, size } maps to the runtime
+    -- struct (field names match) so the `Webview.app` codegen constructs it
+    -- directly. AppCfg { init, update, view : model -> any, subscriptions,
+    -- window } is destructured field-by-field at the call site, never built in
+    -- Rust, so it maps to the zero-field marker WebviewAppCfg — suppressing a
+    -- generated struct whose Fn fields + `view : model -> any` can't derive
+    -- Debug/PartialEq or resolve `any`.
+    , (("Std.Webview", "WindowCfg"), "sky_runtime::WebviewWindowCfg")
+    , (("Std.Webview", "AppCfg"), "sky_runtime::WebviewAppCfg")
     -- Sub-D.1: Sky.Http.Server records (Request/Response) + opaque ADTs
     -- (Route/Cookie) map to runtime structs so the server kernels return/take
     -- them directly. The handler closure is erased into a non-generic
