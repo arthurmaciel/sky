@@ -916,16 +916,14 @@ exprToRustInner ctx e = case e of
         in "tui_app(" ++ intercalate ", "
                [fld "init", fld "update", fld "view", fld "subscriptions", onKeyWrapper] ++ ")"
     -- Sky.Tui — Tui.app { init, update, view, subscriptions, onKey } — the
-    -- Std.Ui Element backend. `view`'s field type is `model -> any`, so the view
-    -- may return either a bare `Element` (Go applies layout internally) or an
-    -- `Html` tree (the view calls `Ui.layout`, like the Webview convention). The
-    -- Rust driver `tui_app_ui` takes `Html<Msg>` and lays it out to ANSI cells,
-    -- so it expects the latter: a Tui.app view MUST wrap in `Ui.layout` on the
-    -- Rust target (which also keeps the Std.Ui render chain DCE-reachable, since
-    -- it's then called from Sky source). The onKey wrapper is identical to
-    -- Tui.program's. A bare-Element view (no `Ui.layout`) needs internal layout
-    -- application — blocked on a `Dce` cross-module seed; see
-    -- [[rust-tui-s4-status]].
+    -- Std.Ui Element backend. `view : model -> Element msg` returns a BARE Element
+    -- (the shared structured tree, now a runtime type — `sky_runtime::ui::Element`).
+    -- The driver `tui_app_ui` takes `Element<Msg>` directly and walks the typed
+    -- attributes to ANSI cells (`tui::layout::element_to_cells`, Go parity) — NO
+    -- `Ui.layout`, no Html, no CSS. Because the Tui path never touches the Std.Ui
+    -- → Html render chain, there is nothing for whole-program DCE to prune, so the
+    -- earlier `Dce` cross-module-seed concern is gone (the redesign dissolved it).
+    -- The onKey wrapper is identical to Tui.program's.
     Can.Call (Ann.At _ (Can.VarKernel "Tui" "app")) [Ann.At _ (Can.Record fields)] ->
         let fld n = case Map.lookup n fields of
                 Just e  -> exprToRustString ctx e

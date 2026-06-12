@@ -11,10 +11,10 @@
 //! terminal wedged. Raw-mode failure returns `Err`; `TERM=dumb` is refused.
 
 use super::super::core::{ok_res, SkyResult, SkyTask};
-use super::super::html::Html;
 use super::super::tea::{cli_run_cmd, CliEvent, SkyCmd, SkySub, SubManager};
+use super::super::ui::Element;
 use super::key::decode_key;
-use super::render::render_element;
+use super::layout::element_to_cells;
 use std::io::{Read, Write};
 
 const ALT_SCREEN_ON: &str = "\x1b[?1049h";
@@ -175,9 +175,10 @@ where
 }
 
 /// `Tui.app` — terminal TEA driver for a `view : Model -> Element msg`. The
-/// `Std.Ui` Element lowers to the same `Html<Msg>` tree Sky.Live renders; here
-/// it is laid out to an ANSI frame via `render_element`, clipped to the live
-/// terminal width. Same TEA quartet + key dispatch as `tui_app`.
+/// `Std.Ui` Element is the SAME structured tree Sky.Live renders to HTML; here it
+/// is laid out to an ANSI frame by walking the typed attributes directly
+/// (`element_to_cells`), clipped to the live terminal. Same TEA quartet + key
+/// dispatch as `tui_app`.
 #[allow(clippy::type_complexity)]
 pub fn tui_app_ui<Model, Msg, E, FInit, FUpdate, FView, FSubs, FOnKey>(
     init: FInit,
@@ -192,12 +193,12 @@ where
     Msg: Clone + Send + 'static,
     FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + 'static,
-    FView: Fn(Model) -> Html<Msg> + Send + 'static,
+    FView: Fn(Model) -> Element<Msg> + Send + 'static,
     FSubs: Fn(Model) -> SkySub<Msg> + Send + 'static,
     FOnKey: Fn(String, String) -> Msg + Send + 'static,
 {
     tui_run(init, update, subscriptions, on_key, move |m: &Model| {
-        let (cols, _rows) = term_size();
-        render_element(&view(m.clone()), cols)
+        let (cols, rows) = term_size();
+        element_to_cells(&view(m.clone()), cols, rows)
     })
 }
