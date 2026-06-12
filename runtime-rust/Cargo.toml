@@ -70,5 +70,12 @@ aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
 pbkdf2 = "0.12"
 
+[lints.clippy]
+# No-runtime-errors gate: a well-typed Sky program must not hit a panic vector.
+# The only permitted exceptions are the 3 INFALLIBLE-tagged HMAC #[allow] sites
+# (see "Soundness attention points" in README.md).
+unwrap_used = "deny"
+expect_used = "deny"
+
 [package.metadata.sky]
 runtime_version = "0.13.0"

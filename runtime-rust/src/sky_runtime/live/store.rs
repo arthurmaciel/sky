@@ -71,7 +71,7 @@ impl<Model: Send + 'static, Msg: Send + 'static> SessionStore<Model, Msg> for Me
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
         self.sessions
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(sid.to_string(), (handle, Instant::now()));
     }
     async fn delete(&self, sid: &str) {
@@ -82,7 +82,7 @@ impl<Model: Send + 'static, Msg: Send + 'static> SessionStore<Model, Msg> for Me
         let ttl = self.ttl;
         self.sessions
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|_, (_, seen)| now.duration_since(*seen) <= ttl);
     }
 }
