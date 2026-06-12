@@ -915,18 +915,31 @@ exprToRustInner ctx e = case e of
                 ++ " { kind, value }) }"
         in "tui_app(" ++ intercalate ", "
                [fld "init", fld "update", fld "view", fld "subscriptions", onKeyWrapper] ++ ")"
-    -- Sky.Tui — Tui.app { ... } (Element view) is intentionally NOT wired here
-    -- yet. The runtime support is complete and tested (`tui_app_ui` +
-    -- `tui::render::render_element` lay the Std.Ui Element's Html tree out to
-    -- ANSI cells), and the codegen wrapper is a two-line change
-    -- (`std_ui_layout`-wrap the view → `tui_app_ui`). The blocker is purely
-    -- dead-code elimination: the Std.Ui `Ui.layout` → `renderElement` chain is
-    -- never reached from Sky source in a Tui app, so whole-program DCE prunes it,
-    -- and forcing its transitive closure back in needs a `Dce` seed at a
-    -- non-entry-module ref (`reachableWholeProgram`'s `extraRoots` only seeds the
-    -- entry module). That `Dce.hs` API change is shared compiler infra, outside
-    -- the Rust-codegen boundary — deferred to a user decision. `Tui.program`
-    -- (String view) is fully shipped. See examples/21-tui-stopwatch.
+    -- Sky.Tui — Tui.app { init, update, view, subscriptions, onKey } — the
+    -- Std.Ui Element backend. `view`'s field type is `model -> any`, so the view
+    -- may return either a bare `Element` (Go applies layout internally) or an
+    -- `Html` tree (the view calls `Ui.layout`, like the Webview convention). The
+    -- Rust driver `tui_app_ui` takes `Html<Msg>` and lays it out to ANSI cells,
+    -- so it expects the latter: a Tui.app view MUST wrap in `Ui.layout` on the
+    -- Rust target (which also keeps the Std.Ui render chain DCE-reachable, since
+    -- it's then called from Sky source). The onKey wrapper is identical to
+    -- Tui.program's. A bare-Element view (no `Ui.layout`) needs internal layout
+    -- application — blocked on a `Dce` cross-module seed; see
+    -- [[rust-tui-s4-status]].
+    Can.Call (Ann.At _ (Can.VarKernel "Tui" "app")) [Ann.At _ (Can.Record fields)] ->
+        let fld n = case Map.lookup n fields of
+                Just e  -> exprToRustString ctx e
+                Nothing -> "/* Tui.app: missing field " ++ n ++ " */"
+            keyEventTy = case Map.lookup "onKey" (ecSolvedTypes ctx) of
+                Just ty -> case extractParamTypes ty of
+                    (k : _) -> typeToRustString (ecRecordMap ctx) k
+                    []      -> "/* Tui.app: onKey param type */"
+                Nothing -> "/* Tui.app: onKey type */"
+            onKeyWrapper = "{ let __ok = " ++ fld "onKey"
+                ++ "; move |kind: String, value: String| __ok(" ++ keyEventTy
+                ++ " { kind, value }) }"
+        in "tui_app_ui(" ++ intercalate ", "
+               [fld "init", fld "update", fld "view", fld "subscriptions", onKeyWrapper] ++ ")"
     -- Live.app { init, update, view, subscriptions, routes, notFound } —
     -- record-splice like Cli.program. P3: branch on whether the Model record
     -- carries a `page` field.
