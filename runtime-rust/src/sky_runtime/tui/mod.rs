@@ -7,4 +7,5 @@
 //! `tui_app` loop follow.
 
 pub mod cell;
+pub mod diff; // accessed qualified (tui::diff::diff) — `diff` collides with live's
 pub use cell::*;
