@@ -176,7 +176,23 @@ without which a watch-only session never subscribes.
 
 ## Task S8: Long-tail (06-json pipeline, Std.Cache, Process/Io)
 
-**Status:** NOT STARTED. **Depends on:** S0.
+**Status:** IN PROGRESS. **Depends on:** S0.
+
+- **06-json pipeline: ✅ DONE** (2026-06-12). The architectural `Box<dyn FnOnce>`
+  Clone/Send issue was already resolved by the uncurry refactor; the only gap was
+  the missing multi-arg map decoders — added `json_dec_map2/3/4` (total, real
+  error propagation, no erasure). 06-json builds on Rust AND is byte-identical to
+  Go. This is S8's primary gate example.
+- **Std.Cache: pending — needs an S6-style per-type-registry design.** The
+  handle-based `Cache k v` kernels (`Cache_newRaw -> Int`, `Cache_get(Int, k)`)
+  can't erase `(K, V)` (no-`dyn-Any` rule), and `newRaw` doesn't know `(K,V)` at
+  allocation. Mirror the broker: a `TypeId`-keyed registry of handle→`Cache<K,V>`,
+  monomorphised at the `new`/`get`/`put` call sites. Brainstorm first
+  (example 36). 
+- **Process.run / Io-beyond-Log: deferred — YAGNI.** `Io` kernels
+  (`io_read_line`/`write_stdout`/`write_stderr`) already exist. `Process.run` has
+  **no in-scope example** (not in the FP set), so it has no acceptance vehicle;
+  add only when an in-scope example needs it.
 
 - [ ] **Step 1: Brainstorm** — three independent fills: the JSON decode-pipeline `Box<dyn FnOnce>` Clone/Send architectural fix (`06`), an `any`-free `Std.Cache` (`36`'s cache need), and `Process.run`/`Io`-beyond-Log.
 - [ ] **Step 2–3: Plan + implement** (may split into three sub-slices).
@@ -227,7 +243,7 @@ Per upstream release:
 | S5 Sky.Webview | S3 | — | — | 29,31,38 | … | … | pending |
 | S6 PubSub | S0 | ✅ | ✅ | 33,34 ✅; **27 now BUILDS+SERVES unedited** (#52+#56 closed the Db-row gap + Live-entry drop) | broadcast E2E ✅ | — | **DONE** |
 | S7 Console | S3,S6 | — | — | 17,25,34 | … | … | pending |
-| S8 long-tail | S0 | — | — | 06 | … | … | pending |
+| S8 long-tail | S0 | — | — | 06 ✅ build+equiv | 06 byte-identical ✅ | — | **IN PROGRESS** (06-json done; Std.Cache needs S6-style design; Process.run YAGNI/no in-scope example) |
 | FP first parity | S1–S8 | — | — | all in-scope | all | all | pending |
 | P2 mirror | FP | — | — | recurring | recurring | recurring | pending |
 
