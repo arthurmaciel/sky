@@ -76,10 +76,13 @@ pub fn time_every<M>(ms: i64, msg: M) -> SkySub<M> { sub_every(ms, msg) }
 
 // ─── TEA event loop plumbing (Sub.every tickers + Cmd firing) ───────────────
 
-/// Internal loop event: a raw stdin line, an already-built Msg (from a ticker or
-/// a Cmd.perform result), or EOF.
-enum CliEvent<M> {
+/// Internal loop event: a raw stdin line (Cli), a decoded key as (kind, value)
+/// (Tui — Strings keep this free of the feature-gated TuiKey type), an
+/// already-built Msg (from a ticker or a Cmd.perform result), or EOF. Shared by
+/// `cli_program` and `tui_app` so both reuse `SubManager` (Tick) + `cli_run_cmd`.
+pub(crate) enum CliEvent<M> {
     Line(String),
+    Key(String, String),
     Msg(M),
     Eof,
 }
@@ -87,21 +90,21 @@ enum CliEvent<M> {
 /// Tracks the goroutine-equivalent ticker tasks spawned for the active
 /// `Sub.every` subscriptions. `update` stops all + respawns from the new Sub
 /// (mirrors tea_subs.go: one program, one model, re-evaluated each tick).
-struct SubManager<M> {
+pub(crate) struct SubManager<M> {
     tx: tokio::sync::mpsc::UnboundedSender<CliEvent<M>>,
     handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl<M: Clone + Send + 'static> SubManager<M> {
-    fn new(tx: tokio::sync::mpsc::UnboundedSender<CliEvent<M>>) -> Self {
+    pub(crate) fn new(tx: tokio::sync::mpsc::UnboundedSender<CliEvent<M>>) -> Self {
         SubManager { tx, handles: Vec::new() }
     }
-    fn stop_all(&mut self) {
+    pub(crate) fn stop_all(&mut self) {
         for h in self.handles.drain(..) {
             h.abort();
         }
     }
-    fn update(&mut self, sub: SkySub<M>) {
+    pub(crate) fn update(&mut self, sub: SkySub<M>) {
         self.stop_all();
         self.spawn(sub);
     }
@@ -143,7 +146,7 @@ impl<M: Clone + Send + 'static> SubManager<M> {
 
 /// Fire a Cmd: None/Batch recurse; Perform spawns the composed task→toMsg thunk
 /// and pushes the resulting Msg back into the loop channel.
-fn cli_run_cmd<M: Send + 'static>(cmd: SkyCmd<M>, tx: &tokio::sync::mpsc::UnboundedSender<CliEvent<M>>) {
+pub(crate) fn cli_run_cmd<M: Send + 'static>(cmd: SkyCmd<M>, tx: &tokio::sync::mpsc::UnboundedSender<CliEvent<M>>) {
     match cmd {
         SkyCmd::None => {}
         SkyCmd::Batch(items) => {
@@ -221,6 +224,7 @@ where
         while let Some(ev) = rx.recv().await {
             let msg = match ev {
                 CliEvent::Line(l) => on_line(l),
+                CliEvent::Key(_, _) => continue, // Cli has no keys
                 CliEvent::Msg(m) => m,
                 CliEvent::Eof => break,
             };

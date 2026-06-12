@@ -1,17 +1,17 @@
 //! Sky.Tui — the `tui_app` TEA loop.
 //!
-//! Mirrors Go's `tuiProgramRun`: enter raw mode + alternate screen, then loop
-//! { render `view(model)` (a String) cleared + printed; read a key from raw
-//! stdin via `decode_key`; `on_key(kind, value)` → Msg; `update(msg, model)` }.
-//! A Sky.Tui app quits by calling `System.exit` from `update` (the `Quit` Msg) —
-//! so the loop runs until the process exits or stdin hits EOF.
+//! Mirrors `cli_program` (tea.rs) exactly — same `CliEvent` channel, `SubManager`
+//! (so `Sub.every` → Tick works) and `cli_run_cmd` (so `Cmd.perform` works) — but
+//! reads RAW key bytes (raw mode + `decode_key`) instead of stdin lines, and
+//! paints into the alternate screen. A Sky.Tui app quits by calling `System.exit`
+//! from `update` (the `Quit` Msg) or by stdin EOF.
 //!
-//! No panic vectors: a `TuiGuard` restores the TTY (disable raw mode, leave the
-//! alt screen, show the cursor) on Drop — both on the normal exit/EOF path AND
-//! on any panic unwinding through the loop. Raw-mode entry that fails returns an
-//! `Err` rather than panicking; `TERM=dumb` / a non-tty stdin is refused.
+//! No panic vectors: a `TuiGuard` restores the TTY (cooked mode, cursor, main
+//! screen) on Drop — normal exit AND panic unwind — so no path leaves the
+//! terminal wedged. Raw-mode failure returns `Err`; `TERM=dumb` is refused.
 
 use super::super::core::{ok_res, SkyResult, SkyTask};
+use super::super::tea::{cli_run_cmd, CliEvent, SkyCmd, SkySub, SubManager};
 use super::key::decode_key;
 use std::io::{Read, Write};
 
@@ -22,8 +22,7 @@ const HIDE_CURSOR: &str = "\x1b[?25l";
 const SHOW_CURSOR: &str = "\x1b[?25h";
 
 /// RAII terminal-state guard — restores cooked mode + cursor + main screen on
-/// Drop (normal exit or panic unwind). All teardown ignores errors (best-effort,
-/// never panics) since it runs on the way out.
+/// Drop (normal exit or panic unwind). Best-effort, never panics.
 struct TuiGuard;
 
 impl TuiGuard {
@@ -56,25 +55,27 @@ fn paint(frame: &str) {
 
 /// `Std.Tui.app` / `Tui.program` — the terminal TEA driver.
 ///
-/// `view` returns the rendered frame as a `String`; `on_key` receives the
-/// decoded key's `(kind, value)` and yields a `Msg` (the codegen wraps the
-/// user's `onKey : KeyEvent -> Msg` so the `{ kind, value }` record is built
-/// here-side). `update` returns the next model; its `Cmd` is currently driven
-/// only for its model effect (subscriptions/Tick + async Cmd are a follow-up).
+/// `view` returns the rendered frame as a `String`; `on_key` receives the decoded
+/// key's `(kind, value)` and yields a `Msg` (the codegen wraps the user's
+/// `onKey : KeyEvent -> Msg` so the `{ kind, value }` record is built there-side).
+/// `init`/`update` return `(Model, Cmd Msg)` and `subscriptions` a `Sub Msg` —
+/// driven via the shared `SubManager` (Tick) + `cli_run_cmd` (Cmd).
 #[allow(clippy::type_complexity)]
-pub fn tui_app<E, Model, Msg, FInit, FUpdate, FView, FOnKey>(
+pub fn tui_app<Model, Msg, E, FInit, FUpdate, FView, FSubs, FOnKey>(
     init: FInit,
     update: FUpdate,
     view: FView,
+    subscriptions: FSubs,
     on_key: FOnKey,
 ) -> SkyTask<E, ()>
 where
     E: Send + From<String> + 'static,
-    Model: Send + 'static,
-    Msg: Send + 'static,
-    FInit: FnOnce() -> Model + Send + 'static,
-    FUpdate: Fn(Msg, Model) -> Model + Send + 'static,
-    FView: Fn(&Model) -> String + Send + 'static,
+    Model: Clone + Send + 'static,
+    Msg: Clone + Send + 'static,
+    FInit: Fn(()) -> (Model, SkyCmd<Msg>) + Send + 'static,
+    FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + 'static,
+    FView: Fn(Model) -> String + Send + 'static,
+    FSubs: Fn(Model) -> SkySub<Msg> + Send + 'static,
     FOnKey: Fn(String, String) -> Msg + Send + 'static,
 {
     Box::pin(async move {
@@ -86,28 +87,54 @@ where
             Err(e) => return SkyResult::Err(e.into()),
         };
 
-        let mut model = init();
-        let mut buf = [0u8; 64];
-        let mut stdin = std::io::stdin();
-        loop {
-            paint(&view(&model));
-            let n = match stdin.read(&mut buf) {
-                Ok(0) => break,                 // EOF
-                Ok(n) => n,
-                Err(_) => break,                // read error — leave (guard restores TTY)
-            };
-            // Decode every key in the chunk; dispatch each through update.
-            let mut i = 0;
-            while i < n {
-                let (k, consumed) = decode_key(buf.get(i..n).unwrap_or(&[]));
-                if consumed == 0 {
-                    break;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CliEvent<Msg>>();
+
+        // Blocking raw-key reader → Key(kind, value) events, then Eof. on_key is
+        // applied in the main task (keeps it off the blocking thread).
+        let key_tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let mut stdin = std::io::stdin();
+            loop {
+                let n = match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                let mut i = 0;
+                while i < n {
+                    let (k, consumed) = decode_key(buf.get(i..n).unwrap_or(&[]));
+                    if consumed == 0 {
+                        break;
+                    }
+                    i += consumed;
+                    if key_tx.send(CliEvent::Key(k.kind, k.value)).is_err() {
+                        return;
+                    }
                 }
-                i += consumed;
-                let msg = on_key(k.kind, k.value);
-                model = update(msg, model);
             }
+            let _ = key_tx.send(CliEvent::Eof);
+        });
+
+        let (mut model, cmd0) = init(());
+        cli_run_cmd(cmd0, &tx);
+        let mut submgr = SubManager::new(tx.clone());
+        submgr.update(subscriptions(model.clone()));
+        paint(&view(model.clone()));
+
+        while let Some(ev) = rx.recv().await {
+            let msg = match ev {
+                CliEvent::Key(kind, value) => on_key(kind, value),
+                CliEvent::Msg(m) => m,
+                CliEvent::Line(_) => continue, // Tui has no line input
+                CliEvent::Eof => break,
+            };
+            let (next, cmd) = update(msg, model);
+            model = next;
+            cli_run_cmd(cmd, &tx);
+            submgr.update(subscriptions(model.clone()));
+            paint(&view(model.clone()));
         }
+        submgr.stop_all();
         ok_res(())
     })
 }
