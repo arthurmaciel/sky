@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn test_dict_keys_sorted() {
-        let mut d = dict_empty();
+        let mut d: SkyDict<i64> = dict_empty();
         d = dict_insert("c".into(), 3, d);
         d = dict_insert("a".into(), 1, d);
         d = dict_insert("b".into(), 2, d);
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn test_dict_remove_and_member() {
-        let mut d = dict_empty();
+        let mut d: SkyDict<i64> = dict_empty();
         d = dict_insert("x".into(), 10, d);
         assert!(dict_member("x".into(), d.clone()));
         let d = dict_remove("x".into(), d);

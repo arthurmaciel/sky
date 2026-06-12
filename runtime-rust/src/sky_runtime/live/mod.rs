@@ -14,6 +14,8 @@ pub mod req;
 pub use req::*;
 pub mod store;
 pub use store::*;
+pub mod pubsub;
+pub use pubsub::*;
 
 // Html ADTs + renderer now live in the standalone top-level `html` module;
 // re-export them so live submodules (diff.rs, store.rs, …) that `use super::*`
