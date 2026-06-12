@@ -68,7 +68,40 @@ pub fn json_dec_list<E: From<String> + 'static, T: 'static + Send>(decoder: impl
     })
 }
 pub fn json_dec_map<E: From<String> + 'static, A: 'static + Send, B: 'static + Send>(f: impl Fn(A) -> B + Send + 'static, decoder: Decoder<E, A>) -> Decoder<E, B> {
-    Box::new(move |v| match decoder(v) { SkyResult::Ok(a) => json_dec_ok(f(a)), SkyResult::Err(_) => json_dec_err_str("map error".into()) })
+    Box::new(move |v| match decoder(v) { SkyResult::Ok(a) => json_dec_ok(f(a)), SkyResult::Err(e) => SkyResult::Err(e) })
+}
+// `map2`/`map3`/`map4` — combine 2/3/4 decoders over the SAME JSON value with an
+// N-ary function. Each runs against `v`; the first Err short-circuits (real
+// error propagated, not collapsed to a generic string). Total, no panic.
+pub fn json_dec_map2<E: From<String> + 'static, A: 'static + Send, B: 'static + Send, C: 'static + Send>(
+    f: impl Fn(A, B) -> C + Send + 'static, da: Decoder<E, A>, db: Decoder<E, B>,
+) -> Decoder<E, C> {
+    Box::new(move |v| {
+        let a = match da(v) { SkyResult::Ok(a) => a, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let b = match db(v) { SkyResult::Ok(b) => b, SkyResult::Err(e) => return SkyResult::Err(e) };
+        json_dec_ok(f(a, b))
+    })
+}
+pub fn json_dec_map3<E: From<String> + 'static, A: 'static + Send, B: 'static + Send, C: 'static + Send, D: 'static + Send>(
+    f: impl Fn(A, B, C) -> D + Send + 'static, da: Decoder<E, A>, db: Decoder<E, B>, dc: Decoder<E, C>,
+) -> Decoder<E, D> {
+    Box::new(move |v| {
+        let a = match da(v) { SkyResult::Ok(a) => a, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let b = match db(v) { SkyResult::Ok(b) => b, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let c = match dc(v) { SkyResult::Ok(c) => c, SkyResult::Err(e) => return SkyResult::Err(e) };
+        json_dec_ok(f(a, b, c))
+    })
+}
+pub fn json_dec_map4<E: From<String> + 'static, A: 'static + Send, B: 'static + Send, C: 'static + Send, D: 'static + Send, G: 'static + Send>(
+    f: impl Fn(A, B, C, D) -> G + Send + 'static, da: Decoder<E, A>, db: Decoder<E, B>, dc: Decoder<E, C>, dd: Decoder<E, D>,
+) -> Decoder<E, G> {
+    Box::new(move |v| {
+        let a = match da(v) { SkyResult::Ok(a) => a, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let b = match db(v) { SkyResult::Ok(b) => b, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let c = match dc(v) { SkyResult::Ok(c) => c, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let d = match dd(v) { SkyResult::Ok(d) => d, SkyResult::Err(e) => return SkyResult::Err(e) };
+        json_dec_ok(f(a, b, c, d))
+    })
 }
 pub fn json_dec_and_then<E: From<String> + 'static, A: 'static + Send, B: 'static + Send>(
     decoder: Decoder<E, A>, f: impl Fn(A) -> Decoder<E, B> + Send + 'static
