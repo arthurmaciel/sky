@@ -50,7 +50,10 @@ pub fn random_seeded_choice<T: Clone>(s: i64, items: Vec<T>) -> (SkyMaybe<T>, i6
     let next = seed_step(s);
     if items.is_empty() { return (SkyMaybe::Nothing, next); }
     let idx = (next as u64 >> 33) as usize % items.len();
-    (SkyMaybe::Just(items[idx].clone()), next)
+    match items.get(idx) {
+        Some(x) => (SkyMaybe::Just(x.clone()), next),
+        None => (SkyMaybe::Nothing, next), // unreachable (idx < len), but total
+    }
 }
 
 pub fn random_int<E: Send + 'static>(lo: i64, hi: i64) -> SkyTask<E, i64> {

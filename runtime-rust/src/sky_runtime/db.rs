@@ -15,8 +15,8 @@ fn sky_err<E: From<String> + Send>(e: &sqlx::Error) -> E {
 fn row_to_map(row: &DbRow) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let cols = row.columns();
-    for i in 0..cols.len() {
-        let name = cols[i].name().to_string();
+    for (i, col) in cols.iter().enumerate() {
+        let name = col.name().to_string();
         let value: String = match row.try_get::<Option<String>, _>(i) {
             Ok(Some(v)) => v,
             Ok(None) => String::new(),

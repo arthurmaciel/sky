@@ -5,6 +5,25 @@
 //! duplicating these definitions inline.
 //!
 //! This `lib.rs` is for standalone testing (`cargo test`).
+//!
+//! # No-runtime-errors gate (panic vectors)
+//! Beyond the `unwrap_used`/`expect_used` deny in `Cargo.toml [lints.clippy]`,
+//! the panic-prone `indexing_slicing` / `panic` / `unreachable` lints are denied
+//! on NON-test library code via the `cfg_attr(not(test), …)` below. Test code
+//! (lib `#[cfg(test)]` modules — skipped when `cfg(test)` is on — and the
+//! separate `tests/` integration crates, which don't inherit this attribute)
+//! uses these freely. The only `#[allow(clippy::panic)]` in the crate are the 2
+//! `ffi_polyfills` dynamic-dispatch fallbacks (unconstrained generic `T` return
+//! → no total value); see README "Soundness attention points".
+
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unreachable
+    )
+)]
 
 pub mod sky_runtime;
 pub use sky_runtime::*;

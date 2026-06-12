@@ -472,18 +472,19 @@ fn ws_origin_matches(pattern: &str, origin: &str) -> bool {
     // First segment must be a prefix (unless pattern starts with '*').
     if let Some(first) = parts.first() {
         if !rest.starts_with(first) { return false; }
-        rest = &rest[first.len()..];
+        rest = rest.get(first.len()..).unwrap_or("");
     }
-    // Middle segments must appear in order.
-    for seg in &parts[1..parts.len() - 1] {
+    // Middle segments must appear in order. (parts.len() >= 2 here — the
+    // len == 1 case returned early — so the slice is total.)
+    for seg in parts.get(1..parts.len() - 1).unwrap_or(&[]) {
         if seg.is_empty() { continue; }
         match rest.find(seg) {
-            Some(i) => rest = &rest[i + seg.len()..],
+            Some(i) => rest = rest.get(i + seg.len()..).unwrap_or(""),
             None => return false,
         }
     }
     // Last segment must be a suffix (unless pattern ends with '*').
-    rest.ends_with(parts[parts.len() - 1])
+    rest.ends_with(parts.last().copied().unwrap_or(""))
 }
 
 /// ServerWebSocket_upgrade : Request -> WebSocketServerCfg -> Task Error Response

@@ -233,7 +233,7 @@ async fn send_sendgrid<E: From<String>>(api_key: &str, m: &EmailMessage) -> SkyR
         "content": content,
     });
     if !m.replyTo.is_empty() {
-        body["reply_to"] = serde_json::json!({ "email": m.replyTo });
+        json_obj_set(&mut body, "reply_to", serde_json::json!({ "email": m.replyTo }));
     }
     let payload = serde_json::to_vec(&body).unwrap_or_default();
     let endpoint = email_endpoint("sendgrid", "https://api.sendgrid.com/v3/mail/send");
@@ -252,6 +252,15 @@ async fn send_sendgrid<E: From<String>>(api_key: &str, m: &EmailMessage) -> SkyR
     }
 }
 
+/// Total `obj[key] = val` for a serde_json Value (no-op if `v` isn't an object,
+/// which can't happen for the `json!({…})`-built objects here). Avoids the
+/// panic-capable `Value` IndexMut.
+fn json_obj_set(v: &mut serde_json::Value, key: &str, val: serde_json::Value) {
+    if let Some(o) = v.as_object_mut() {
+        o.insert(key.to_string(), val);
+    }
+}
+
 // ──────────────────── SES v2 (SigV4) ────────────────────
 
 async fn send_ses<E: From<String>>(cfg: &SesConfig, m: &EmailMessage) -> SkyResult<E, String> {
@@ -265,14 +274,19 @@ async fn send_ses<E: From<String>>(cfg: &SesConfig, m: &EmailMessage) -> SkyResu
         "Body": { "Text": { "Data": m.textBody, "Charset": "UTF-8" } },
     });
     if !m.htmlBody.is_empty() {
-        simple["Body"]["Html"] = serde_json::json!({ "Data": m.htmlBody, "Charset": "UTF-8" });
+        if let Some(b) = simple.get_mut("Body").and_then(serde_json::Value::as_object_mut) {
+            b.insert(
+                "Html".to_string(),
+                serde_json::json!({ "Data": m.htmlBody, "Charset": "UTF-8" }),
+            );
+        }
     }
     let mut destination = serde_json::json!({ "ToAddresses": m.to });
     if !m.cc.is_empty() {
-        destination["CcAddresses"] = serde_json::json!(m.cc);
+        json_obj_set(&mut destination, "CcAddresses", serde_json::json!(m.cc));
     }
     if !m.bcc.is_empty() {
-        destination["BccAddresses"] = serde_json::json!(m.bcc);
+        json_obj_set(&mut destination, "BccAddresses", serde_json::json!(m.bcc));
     }
     let body = serde_json::json!({
         "FromEmailAddress": m.from,

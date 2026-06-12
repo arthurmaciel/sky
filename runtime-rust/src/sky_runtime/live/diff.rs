@@ -96,7 +96,7 @@ fn diff_node<M>(old: &Html<M>, new: &Html<M>, out: &mut Vec<Patch>) {
 
     // Sole text-child fast path (common for buttons / spans).
     if ok.len() == 1 && nk.len() == 1 {
-        if let (Html::HText(o), Html::HText(n)) = (&ok[0], &nk[0]) {
+        if let (Some(Html::HText(o)), Some(Html::HText(n))) = (ok.first(), nk.first()) {
             if o != n && !id.is_empty() {
                 let mut tp = Patch::for_id(&id);
                 tp.text = Some(n.clone());

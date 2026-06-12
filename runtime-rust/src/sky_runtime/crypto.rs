@@ -15,8 +15,9 @@ pub fn crypto_random_token<E: Send + 'static>(n: i64) -> SkyTask<E, String> {
     let mut out = String::with_capacity((n * 2) as usize);
     for _ in 0..n {
         let b = super::random::lcg_next();
-        out.push(hex.as_bytes()[(b & 0x0f) as usize] as char);
-        out.push(hex.as_bytes()[((b >> 4) & 0x0f) as usize] as char);
+        // `& 0x0f` bounds the index to [0, 15] < 16 (hex.len()); .get keeps it total.
+        out.push(hex.as_bytes().get((b & 0x0f) as usize).copied().unwrap_or(b'0') as char);
+        out.push(hex.as_bytes().get(((b >> 4) & 0x0f) as usize).copied().unwrap_or(b'0') as char);
     }
     Box::pin(ready(ok_res(out)))
 }

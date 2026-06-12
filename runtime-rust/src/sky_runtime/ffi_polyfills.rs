@@ -20,6 +20,10 @@ pub fn ffi_to_any_polyfill<T>(x: T) -> T {
 /// dispatch path is the peephole — refactor the call site to use a string
 /// literal + list literal, or use `Ffi.kernel "<Name>"` for value-level
 /// kernel selection.
+// IRREDUCIBLE: returns an unconstrained generic `T`, so no total value can be
+// synthesised. Statically dead for valid Sky (the peephole resolves the
+// static-dispatch shape); this is the dynamic-dispatch-unsupported fallback.
+#[allow(clippy::panic)]
 pub fn ffi_call_pure_polyfill<T, A>(name: String, _args: Vec<A>) -> T {
     panic!(
         "Ffi.callPure {:?}: dynamic dispatch is not supported on target=rust. \
@@ -32,6 +36,9 @@ pub fn ffi_call_pure_polyfill<T, A>(name: String, _args: Vec<A>) -> T {
 /// Same shape as ffi_call_pure_polyfill but for the Task-returning variant.
 /// `Ffi.callTask` Rust-target support is deferred to sub-project D
 /// (Sky.Http.Server, which needs Task-emitting kernels).
+// IRREDUCIBLE: unconstrained generic `T` return (no total value); a
+// not-yet-supported-feature guard (Ffi.callTask on target=rust, deferred).
+#[allow(clippy::panic)]
 pub fn ffi_call_task_polyfill<T, A>(name: String, _args: Vec<A>) -> T {
     panic!(
         "Ffi.callTask {:?}: not yet supported on target=rust (deferred to \

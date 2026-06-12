@@ -329,23 +329,31 @@ changelog: when a compromise is eliminated, its entry is deleted.
 
 ### Irreducible `#[allow]` / panic vectors
 
-The clippy gate (`Cargo.toml [lints.clippy]` + `clippy.toml`) denies
-`unwrap`/`expect` in non-test library code. The **only** exceptions are 3
-HMAC sites, each `#[allow(clippy::expect_used)]` with an `// INFALLIBLE:`
-rationale:
+The clippy gate denies the panic-prone lint family on **non-test library code**:
 
-| Site | Why unreachable | Why no total alternative |
-|---|---|---|
-| `crypto.rs` `crypto_hmac_sha256` | `Hmac::new_from_slice` never returns `Err` (HMAC accepts any key length) | pure Sky kernel `hmacSha256 : String -> String -> String` — no `Result` channel without breaking Go parity; no infallible HMAC constructor; a fallback MAC would be a silently-wrong hash (security defect) |
-| `crypto.rs` `crypto_hmac_sha512` | same | same |
-| `email.rs` `hmac_bytes` | same | internal SES-signing helper returning `Vec<u8>`; a fallback MAC would be a wrong signature |
+- `unwrap_used` / `expect_used` — `Cargo.toml [lints.clippy]` + `clippy.toml`
+  (`allow-*-in-tests`).
+- `indexing_slicing` / `panic` / `unreachable` — `src/lib.rs`
+  `#![cfg_attr(not(test), deny(…))]` (test code, incl. the separate `tests/`
+  crates, is exempt by construction).
+
+The **only** `#[allow]`d exceptions are 5 irreducible sites:
+
+| Site | Allow | Why unreachable | Why no total alternative |
+|---|---|---|---|
+| `crypto.rs` `crypto_hmac_sha256` | `expect_used` | `Hmac::new_from_slice` never returns `Err` (HMAC accepts any key length) | pure Sky kernel `hmacSha256 : String -> String -> String` — no `Result` channel without breaking Go parity; no infallible HMAC constructor; a fallback MAC would be a silently-wrong hash (security defect) |
+| `crypto.rs` `crypto_hmac_sha512` | `expect_used` | same | same |
+| `email.rs` `hmac_bytes` | `expect_used` | same | internal SES-signing helper returning `Vec<u8>`; a fallback MAC would be a wrong signature |
+| `ffi_polyfills.rs` `ffi_call_pure_polyfill` | `panic` | statically dead for valid Sky (the codegen peephole resolves the static-dispatch shape); this is the dynamic-dispatch fallback | returns an unconstrained generic `T` — no total value can be synthesised |
+| `ffi_polyfills.rs` `ffi_call_task_polyfill` | `panic` | not-yet-supported-feature guard (`Ffi.callTask` on target=rust, deferred) | same unconstrained generic `T` return |
 
 Everything else in the crate is panic-vector-free: lock-family unwraps use
 `unwrap_or_else(|e| e.into_inner())` (poison-tolerant — a panicking session
 can't cascade-abort the others); AES/ChaCha propagate `new_from_slice` errors
 into their existing `SkyResult` channel; the cookie-sid lookup degrades an
 impossible `None` to a fresh session; the SSE response builder falls back to a
-500 rather than `unwrap`.
+500 rather than `unwrap`; every slice/array access uses `.get(...)` /
+iterators / a checked total form rather than `[i]`.
 
 ### `dyn Any` register
 
@@ -358,11 +366,13 @@ impossible `None` to a fresh session; the SSE response builder falls back to a
 (monomorphisable away, with how) or **irreducible** (why) — so future work can
 pick up the reducible ones.
 
-### Out-of-scope panic vectors (future tightening)
+### Panic-vector gate coverage
 
-~40 non-test `panic!`/`unreachable!` sites and `clippy::indexing_slicing` are
-NOT yet gated (too large to bundle with the lock-family pass). Tracked as a
-follow-up.
+`indexing_slicing` / `panic` / `unreachable` are now gated on non-test library
+code (the earlier "~40 non-test sites" estimate was an overcount — all but the 2
+`ffi_polyfills` panics were in `#[cfg(test)]` modules). All non-test slice/array
+indexing was converted to total `.get(...)` / iterator forms. `unwrap`/`expect`
+remain gated separately via `Cargo.toml [lints.clippy]`.
 
 ---
 

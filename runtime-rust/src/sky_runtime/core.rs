@@ -49,8 +49,9 @@ pub fn to_u8_array<E: From<String>, const N: usize>(xs: &[i64]) -> SkyResult<E, 
         return SkyResult::Err(format!("expected {} bytes, got {}", N, xs.len()).into());
     }
     let mut a = [0u8; N];
-    for (i, &x) in xs.iter().enumerate() {
-        a[i] = x as u8;
+    // len == N checked above; zip is total (no indexing).
+    for (slot, &x) in a.iter_mut().zip(xs.iter()) {
+        *slot = x as u8;
     }
     ok_res(a)
 }

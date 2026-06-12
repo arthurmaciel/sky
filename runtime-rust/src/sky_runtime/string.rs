@@ -38,7 +38,12 @@ pub fn string_slice(start: i64, end: i64, s: String) -> String {
     if start < 0 { start = 0; }
     if end > total { end = total; }
     if start > end { return String::new(); }
-    runes[start as usize..end as usize].iter().collect()
+    // start/end are clamped to [0, total] with start <= end, so the slice is
+    // valid; `.get` keeps it total regardless.
+    runes
+        .get(start as usize..end as usize)
+        .map(|r| r.iter().collect())
+        .unwrap_or_default()
 }
 pub fn string_from_float(f: f64) -> String { format!("{}", f) }
 pub fn string_split(sep: String, s: String) -> Vec<String> { s.split(&sep).map(|x| x.to_string()).collect() }
