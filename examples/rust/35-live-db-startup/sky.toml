@@ -1,0 +1,11 @@
+name = "35-live-db-startup"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+[source]
+root = "src"
+
+[database]
+driver = "sqlite"
+path = "startup.db"

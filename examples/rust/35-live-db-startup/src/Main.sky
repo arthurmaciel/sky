@@ -1,0 +1,68 @@
+module Main exposing (main)
+
+-- #56 repro — a top-level `Task.run (Db.connect ())` binding (the exact shape
+-- in upstream examples/27). On the throwaway-runtime block_on, the pool is
+-- orphaned from the dropped runtime; this exercises whether the Live server
+-- still binds + serves and whether the pool survives into a request handler.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Html as Html
+import Std.Html.Attributes as Attr
+import Std.Live as Live
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+import Std.Db as Db
+import Sky.Core.System as System
+import Sky.Core.Error exposing (Error)
+
+
+dbConn =
+    case Task.run (Db.connect ()) of
+        Ok conn ->
+            conn
+
+        Err _ ->
+            System.exit 1
+
+
+type Msg
+    = Noop
+
+
+type alias Model =
+    { note : String }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ =
+    let
+        _ =
+            Task.run
+                (Db.execRaw dbConn "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY)")
+    in
+        ( { note = "ok" }, Cmd.none )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update _ model =
+    ( model, Cmd.none )
+
+
+view : Model -> Html.Html Msg
+view model =
+    Html.div [ Attr.id "note" ] [ Html.text model.note ]
+
+
+subscriptions : Model -> Sub Msg
+subscriptions _ =
+    Sub.none
+
+
+main : Task Error ()
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ Live.route "/" () ]
+        , notFound = ()
+        }
