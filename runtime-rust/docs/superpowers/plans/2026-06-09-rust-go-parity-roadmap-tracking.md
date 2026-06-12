@@ -75,7 +75,11 @@ at the same time. Tracked for a scheduled quiet-host perf sweep.
 
 ## Task S2: Parametric-record generics (the linchpin)
 
-**Status:** NOT STARTED. Likely overlaps the author's in-flight `Builder/` work.
+**Status:** **DONE** (landed with the 2026-06-11 Std.Ui parity work). Parametric
+record aliases lower with real generics (no `SkyValue` collapse); `Element msg` /
+typed-attribute configs carry their types. Acceptance: the Std.Ui examples
+19/26 build + render byte-identical on Rust (S3), which is impossible without
+this. No separate fixture needed.
 
 **Depends on:** S0.
 
@@ -91,7 +95,11 @@ at the same time. Tracked for a scheduled quiet-host perf sweep.
 
 ## Task S3: Std.Ui renderer on Rust
 
-**Status:** NOT STARTED. **Depends on:** S2.
+**Status:** **DONE** (2026-06-11 plan `…/plans/2026-06-11-stdui-rust-parity.md`).
+T0–T5 corpus byte-identical vs Go; integration examples 19-skyforum + 26-ui-showcase
+build + render byte-identical on Rust. Composites 37/38 remain deferred — they
+need the Sky.Tui (S4) + Sky.Webview (S5) backends, not more Std.Ui work.
+**Depends on:** S2.
 
 - [ ] **Step 1: Brainstorm** — Std.Ui's ~25 polymorphic `Element msg` helpers → typed inline-styled HTML on Rust, reusing the Sky.Live renderer (`HtmlToVNode`/`renderVNode`).
 - [ ] **Step 2–3: Plan + implement.**
@@ -211,13 +219,13 @@ Per upstream release:
 
 | Slice | Depends | Spec | Plan | Example gate | Equiv gate | Perf gate | Status |
 |---|---|---|---|---|---|---|---|
-| S0 floor | — | ✅ | ✅ | — | — | — | executing |
-| S1 perf-harness | S0 | — | — | — | — | — | next |
-| S2 generics | S0 | — | — | — | — | — | pending |
-| S3 Std.Ui | S2 | — | — | 19,26,37 | 19,26,37 | 19,26,37 | pending |
+| S0 floor | — | ✅ | ✅ | — | — | — | **DONE** |
+| S1 perf-harness | S0 | ✅ | ✅ | — | — | — | **DONE** |
+| S2 generics | S0 | — | — | (via S3) | — | — | **DONE** (landed with the 2026-06-11 Std.Ui parity work — parametric-record generics lower without SkyValue collapse; 19/26 build) |
+| S3 Std.Ui | S2 | ✅ 2026-06-11 | ✅ 2026-06-11 | 19,26 ✅ (37/38 → S5) | 19,26 byte-identical ✅ | — | **DONE** (T0–T5 + 19/26 byte-identical; composites 37/38 deferred to S4+S5) |
 | S4 Sky.Tui | S3 | — | — | 21,22,23,24 | … | … | pending |
 | S5 Sky.Webview | S3 | — | — | 29,31,38 | … | … | pending |
-| S6 PubSub | S0 | ✅ | ✅ | 33-live-pubsub ✅ (27 blocked on unrelated Db-row gap) | broadcast E2E ✅ | — | **DONE** |
+| S6 PubSub | S0 | ✅ | ✅ | 33,34 ✅; **27 now BUILDS+SERVES unedited** (#52+#56 closed the Db-row gap + Live-entry drop) | broadcast E2E ✅ | — | **DONE** |
 | S7 Console | S3,S6 | — | — | 17,25,34 | … | … | pending |
 | S8 long-tail | S0 | — | — | 06 | … | … | pending |
 | FP first parity | S1–S8 | — | — | all in-scope | all | all | pending |
