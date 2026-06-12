@@ -10,6 +10,7 @@ pub mod form;
 pub use form::*;
 pub mod route;
 pub use route::*;
+pub mod observability;
 pub mod req;
 pub use req::*;
 pub mod store;
@@ -797,8 +798,14 @@ where
         let app: Router = Router::new()
             .route("/_sky/sse", get(sse_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             .route("/_sky/event", post(event_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>))
+            // Observability surface (Go parity — observability.go).
+            .route("/_sky/healthz", get(observability::healthz))
+            .route("/_sky/readyz", get(observability::readyz))
+            .route("/_sky/buildinfo", get(observability::buildinfo))
+            .route("/_sky/metrics", get(observability::metrics))
             .route("/", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             .route("/*path", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
+            .layer(axum::middleware::from_fn(observability::track))
             .with_state(state);
 
         pubsub::mark_live_running();
