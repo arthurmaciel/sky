@@ -64,6 +64,15 @@ enum Dir {
     Row,
 }
 
+/// `Ui.width` directive. `Min`/`Max`/`Vw` collapse to `Auto` (content-sized) for
+/// now — a follow-on.
+#[derive(Clone, Copy, PartialEq)]
+enum WidthSpec {
+    Auto,
+    Px(i64),
+    Fill,
+}
+
 struct Walked {
     dir: Dir,
     spacing_px: i64,
@@ -71,10 +80,18 @@ struct Walked {
     pad_right: i64,
     pad_bottom: i64,
     pad_left: i64,
-    /// Explicit width in logical px (`Ui.width (Ui.px n)`), if set. `Fill` /
-    /// `Min` / `Max` need a flex-distribution pass and are a follow-on.
-    width_px: Option<i64>,
+    width: WidthSpec,
     style: Style,
+}
+
+impl WidthSpec {
+    fn from_attrs<M>(attrs: &[Attribute<M>]) -> WidthSpec {
+        attrs.iter().find_map(|a| match a {
+            Attribute::AttrWidth(Length::Px(n)) => Some(WidthSpec::Px(*n)),
+            Attribute::AttrWidth(Length::Fill(_)) => Some(WidthSpec::Fill),
+            _ => None,
+        }).unwrap_or(WidthSpec::Auto)
+    }
 }
 
 #[derive(Clone)]
@@ -185,14 +202,13 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         pad_right: 0,
         pad_bottom: 0,
         pad_left: 0,
-        width_px: None,
+        width: WidthSpec::from_attrs(attrs),
         style: inherited,
     };
     for a in attrs {
         match a {
             Attribute::AttrStyle(k, _) if k == "__row" => w.dir = Dir::Row,
             Attribute::AttrStyle(k, _) if k == "__col" => w.dir = Dir::Column,
-            Attribute::AttrWidth(Length::Px(n)) => w.width_px = Some(*n),
             Attribute::AttrSpacing(n) => w.spacing_px = *n,
             Attribute::AttrPadding(t, r, b, l) => {
                 w.pad_top = *t;
@@ -310,6 +326,7 @@ fn render_input<M: Clone>(
     attrs: &[Attribute<M>],
     style: Style,
     ctx: &mut Ctx<M>,
+    avail_w: usize,
 ) -> Rendered {
     let input_type = attr_str(attrs, "type").unwrap_or("text").to_string();
     let value = attr_str(attrs, "value").unwrap_or("").to_string();
@@ -374,14 +391,13 @@ fn render_input<M: Clone>(
     };
 
     let mut block = Block { lines: vec![vec![cell]] };
-    // Honour an explicit `Ui.width (Ui.px n)` on a text-like field so it renders
-    // at a fixed width (the field background fills it).
+    // Honour `Ui.width` on a text-like field so it renders at a fixed/fill width
+    // (the field background fills it). `Fill` expands to the parent's allocation.
     if input_type != "range" {
-        if let Some(n) = attrs.iter().find_map(|a| match a {
-            Attribute::AttrWidth(Length::Px(n)) => Some(*n),
-            _ => None,
-        }) {
-            block.set_width(ctx.canvas.cells_x(n).max(1), style.bg);
+        match WidthSpec::from_attrs(attrs) {
+            WidthSpec::Px(n) => block.set_width(ctx.canvas.cells_x(n).max(1), style.bg),
+            WidthSpec::Fill => block.set_width(avail_w.max(1), style.bg),
+            WidthSpec::Auto => {}
         }
     }
     let width = block.width();
@@ -400,7 +416,13 @@ fn render_input<M: Clone>(
 }
 
 /// Render one Element node, cascading text style + collecting focusables.
-fn render_node<M: Clone>(node: &Element<M>, inherited: Style, ctx: &mut Ctx<M>) -> Rendered {
+/// `avail_w` is the cell width the parent allocated to this node (for `Fill`).
+fn render_node<M: Clone>(
+    node: &Element<M>,
+    inherited: Style,
+    ctx: &mut Ctx<M>,
+    avail_w: usize,
+) -> Rendered {
     match node {
         Element::Empty => Rendered { block: Block::default(), hits: vec![] },
         Element::Text(t) => {
@@ -408,8 +430,8 @@ fn render_node<M: Clone>(node: &Element<M>, inherited: Style, ctx: &mut Ctx<M>) 
             Rendered { block: Block::single(clean, inherited), hits: vec![] }
         }
         Element::Raw(_) => Rendered { block: Block::default(), hits: vec![] },
-        Element::TaggedNode(tag, _desc, attrs, kids) if tag == "input" => {
-            render_input(attrs, inherited, ctx)
+        Element::TaggedNode(tag, _desc, attrs, _kids) if tag == "input" || tag == "textarea" => {
+            render_input(attrs, inherited, ctx, avail_w)
         }
         Element::TaggedNode(tag, _desc, attrs, kids) if tag == "button" => {
             // A button is focusable; render its label (kids), highlighted when
@@ -429,13 +451,15 @@ fn render_node<M: Clone>(node: &Element<M>, inherited: Style, ctx: &mut Ctx<M>) 
                 height: 1,
             });
             let w = walk_attrs(attrs, inherited);
+            let content_avail = node_content_avail(avail_w, &w, ctx.canvas);
             let label_style = Style { reverse: focused, ..w.style };
             let child_blocks: Vec<Rendered> =
-                kids.iter().map(|k| render_node(k, label_style, ctx)).collect();
-            let inner = match w.dir {
+                kids.iter().map(|k| render_node(k, label_style, ctx, content_avail)).collect();
+            let mut inner = match w.dir {
                 Dir::Column => vstack(child_blocks, 0),
                 Dir::Row => hstack(child_blocks, ctx.canvas.cells_x(w.spacing_px)),
             };
+            apply_self_width(&mut inner.block, &w, content_avail, ctx.canvas);
             let mut padded = apply_padding(inner, &w, ctx.canvas, label_style);
             // Force the focus reverse over the whole label row(s).
             if focused {
@@ -453,9 +477,10 @@ fn render_node<M: Clone>(node: &Element<M>, inherited: Style, ctx: &mut Ctx<M>) 
         }
         Element::Node(_d, attrs, kids) | Element::TaggedNode(_, _d, attrs, kids) => {
             let w = walk_attrs(attrs, inherited);
+            let content_avail = node_content_avail(avail_w, &w, ctx.canvas);
             let children: Vec<Rendered> = kids
                 .iter()
-                .map(|k| render_node(k, w.style, ctx))
+                .map(|k| render_node(k, w.style, ctx, content_avail))
                 .filter(|r| r.block.height() > 0)
                 .collect();
             let mut inner = if children.is_empty() {
@@ -466,14 +491,36 @@ fn render_node<M: Clone>(node: &Element<M>, inherited: Style, ctx: &mut Ctx<M>) 
                     Dir::Row => hstack(children, ctx.canvas.cells_x(w.spacing_px)),
                 }
             };
-            let target_w = w
-                .width_px
-                .map(|n| ctx.canvas.cells_x(n))
-                .unwrap_or_else(|| inner.block.width());
-            inner.block.set_width(target_w, w.style.bg);
+            apply_self_width(&mut inner.block, &w, content_avail, ctx.canvas);
             apply_padding(inner, &w, ctx.canvas, w.style)
         }
     }
+}
+
+/// Content width available to a node's children = the node's allocation minus its
+/// horizontal padding.
+fn node_content_avail(avail_w: usize, w: &Walked, canvas: Canvas) -> usize {
+    let pad = canvas.cells_x(w.pad_left) + canvas.cells_x(w.pad_right);
+    match w.width {
+        WidthSpec::Px(n) => canvas.cells_x(n).saturating_sub(pad),
+        WidthSpec::Fill => avail_w.saturating_sub(pad),
+        WidthSpec::Auto => avail_w.saturating_sub(pad),
+    }
+}
+
+/// Constrain a node's inner block to its `Ui.width` directive. `Auto` keeps the
+/// natural content width (byte-identical to the pre-Fill behaviour); `Fill`
+/// expands to the content allocation; `Px` sets the exact cell width.
+fn apply_self_width(block: &mut Block, w: &Walked, content_avail: usize, canvas: Canvas) {
+    let target = match w.width {
+        WidthSpec::Auto => block.width(),
+        WidthSpec::Fill => content_avail,
+        WidthSpec::Px(n) => {
+            let pad = canvas.cells_x(w.pad_left) + canvas.cells_x(w.pad_right);
+            canvas.cells_x(n).saturating_sub(pad)
+        }
+    };
+    block.set_width(target, w.style.bg);
 }
 
 const SGR_RESET: &str = "\x1b[0m";
@@ -546,7 +593,7 @@ pub fn render_with_focus<M: Clone>(
 ) -> (String, Vec<Focusable<M>>, usize) {
     let canvas = Canvas::new(cols, rows);
     let mut ctx = Ctx { canvas, focus_idx, focusables: Vec::new(), inputs };
-    let rendered = render_node(view, Style::default(), &mut ctx);
+    let rendered = render_node(view, Style::default(), &mut ctx, cols);
     let content_h = rendered.block.height();
     // Write back absolute positions onto the focusables (for scroll + hit-test).
     for (idx, line, col, width, h) in rendered.hits {
@@ -640,6 +687,18 @@ mod tests {
         let mut reg = InputRegistry::new();
         let (frame, _f, _h) = render_with_focus(&t, 80, 24, 0, &mut reg, 0);
         assert!(frame.contains("\x1b[7"), "focused input reverse-video: {frame:?}");
+    }
+
+    #[test]
+    fn fill_width_expands_to_avail() {
+        let t: Element<()> = node(
+            vec![Attribute::AttrWidth(Length::Fill(1)), Attribute::AttrBgColor(rgb(5, 6, 7))],
+            vec![Element::Text("x".into())],
+        );
+        let frame = element_to_cells(&t, 20, 24);
+        let first = frame.split("\r\n").next().unwrap_or("");
+        let spaces = first.matches(' ').count();
+        assert!(spaces >= 15, "fill expanded toward 20 cols: {first:?} ({spaces} spaces)");
     }
 
     #[test]
