@@ -123,6 +123,7 @@ fn live_running() -> bool {
 }
 
 use crate::sky_runtime::tea::SkyCmd;
+use crate::sky_runtime::tea::SkySub;
 
 /// `Cmd.publish topic payload` — echo-by-default broadcast. The payload `T` is
 /// captured in the thunk; the dispatch loop supplies the origin sid.
@@ -140,6 +141,63 @@ where
     T: Clone + Send + 'static,
 {
     SkyCmd::Publish(Box::new(move |origin| broker::<T>().publish(&topic, payload, origin, true)))
+}
+
+tokio::task_local! {
+    /// The session sid in scope while a session's subscriptions are being
+    /// (re)materialised. Read synchronously inside the SkySub::Source closure
+    /// so the spawned recv loop captures the owning session's sid for
+    /// SkipOrigin filtering. Unset (→ "") outside a session.
+    static SESSION_SID: String;
+}
+
+/// Run `f` with `sid` available to `current_session_sid()`. The Live dispatch
+/// loop wraps subscription (re)materialisation in this scope.
+pub fn with_session_sid<R>(sid: String, f: impl FnOnce() -> R) -> R {
+    SESSION_SID.sync_scope(sid, f)
+}
+
+fn current_session_sid() -> String {
+    SESSION_SID.try_with(|s| s.clone()).unwrap_or_default()
+}
+
+/// `Sub.subscribeTopic topic toMsg` — receive `topic` broadcasts as `Msg`s.
+/// The codegen-facing form carries no sid; the owning session's sid is read
+/// from the materialisation scope. SkipOrigin is filtered here, receiver-side.
+///
+/// IMPORTANT: `current_session_sid()` is called SYNCHRONOUSLY here (at call
+/// time, while `with_session_sid` is in scope), not inside the spawn closure.
+/// The captured `owner_sid` is then moved into the spawn closure so the async
+/// recv loop has the correct sid even after the task-local scope has ended.
+pub fn sub_subscribe_topic<T, M, F>(topic: String, to_msg: F) -> SkySub<M>
+where
+    T: Clone + Send + 'static,
+    M: Send + 'static,
+    F: Fn(T) -> M + Send + Sync + 'static,
+{
+    // Read sid synchronously while with_session_sid's sync_scope is active.
+    let owner_sid = current_session_sid();
+    SkySub::Source(Box::new(move |emit| {
+        let mut rx = broker::<T>().subscribe(&topic);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        // Receiver-side echo-suppression: skip exactly the
+                        // origin's own subscription when the publish asked for it.
+                        if ev.skip_origin && ev.origin == owner_sid {
+                            continue;
+                        }
+                        emit(to_msg(ev.payload));
+                    }
+                    // A slow session dropped `n` messages: drop + keep going.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // All senders gone (broker pruned the topic): end the task.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+    }))
 }
 
 #[cfg(test)]
@@ -184,5 +242,49 @@ mod tests {
         let ev = rx.recv().await.unwrap();
         assert_eq!(ev.origin, "sid-A");
         assert!(ev.skip_origin);
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    // Drive a subscriber the way the Live loop does: inside with_session_sid,
+    // materialise the Source, then collect emitted Msgs.
+    async fn collect_one(
+        owner_sid: &str,
+        topic: &str,
+    ) -> (tokio::task::JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
+        let got = Arc::new(Mutex::new(Vec::<String>::new()));
+        let got2 = got.clone();
+        let emit: Arc<dyn Fn(String) + Send + Sync> =
+            Arc::new(move |m| got2.lock().unwrap().push(m));
+        let sub = with_session_sid(owner_sid.to_string(), || {
+            sub_subscribe_topic::<String, String, _>(topic.to_string(), |p| p)
+        });
+        let handle = match sub {
+            SkySub::Source(spawn) => spawn(emit),
+            _ => unreachable!("subscribeTopic builds a Source"),
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await; // let it subscribe
+        (handle, got)
+    }
+
+    #[tokio::test]
+    async fn echo_default_delivers_to_origin() {
+        let (h, got) = collect_one("sid-A", "echo-topic").await;
+        broker::<String>().publish("echo-topic", "m".to_string(), "sid-A", false);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(*got.lock().unwrap(), vec!["m".to_string()]); // origin RECEIVES (echo)
+        h.abort();
+    }
+
+    #[tokio::test]
+    async fn skip_origin_suppresses_only_origin() {
+        let (ha, got_a) = collect_one("sid-A", "ne-topic").await; // the publisher's own sub
+        let (hb, got_b) = collect_one("sid-B", "ne-topic").await; // a different session
+        broker::<String>().publish("ne-topic", "m".to_string(), "sid-A", true); // publishNoEcho from A
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(got_a.lock().unwrap().is_empty());                 // A suppressed
+        assert_eq!(*got_b.lock().unwrap(), vec!["m".to_string()]); // B receives
+        ha.abort();
+        hb.abort();
     }
 }

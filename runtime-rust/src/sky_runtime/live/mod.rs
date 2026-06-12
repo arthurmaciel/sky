@@ -351,7 +351,9 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
         store.set(&sid, entry.clone()).await;
 
         run_cmd(cmd, &msg_tx, &sid);
-        spawn_subs(subs(next.clone()), &msg_tx, &mut sub_handles);
+        pubsub::with_session_sid(sid.clone(), || {
+            spawn_subs(subs(next.clone()), &msg_tx, &mut sub_handles)
+        });
     }
     for h in sub_handles.drain(..) {
         h.abort();
