@@ -173,7 +173,9 @@ pub fn sub_subscribe_topic<T, M, F>(topic: String, to_msg: F) -> SkySub<M>
 where
     T: Clone + Send + 'static,
     M: Send + 'static,
-    F: Fn(T) -> M + Send + Sync + 'static,
+    // `to_msg` is moved exclusively into the spawned task (never shared across
+    // threads), so `Send` is the minimum contract — `Sync` is not required.
+    F: Fn(T) -> M + Send + 'static,
 {
     // Read sid synchronously while with_session_sid's sync_scope is active.
     let owner_sid = current_session_sid();
@@ -192,7 +194,8 @@ where
                     }
                     // A slow session dropped `n` messages: drop + keep going.
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    // All senders gone (broker pruned the topic): end the task.
+                    // No senders remain (defensive: unreachable while this
+                    // Receiver is alive — the broker only prunes at 0 receivers).
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
