@@ -321,6 +321,51 @@ anon-struct field-method access) and remain out of scope pending that work.
 
 ---
 
+## Soundness attention points
+
+A living register of the runtime's deliberate, currently-live soundness
+compromises — visible and revisitable rather than buried in code. Not a
+changelog: when a compromise is eliminated, its entry is deleted.
+
+### Irreducible `#[allow]` / panic vectors
+
+The clippy gate (`Cargo.toml [lints.clippy]` + `clippy.toml`) denies
+`unwrap`/`expect` in non-test library code. The **only** exceptions are 3
+HMAC sites, each `#[allow(clippy::expect_used)]` with an `// INFALLIBLE:`
+rationale:
+
+| Site | Why unreachable | Why no total alternative |
+|---|---|---|
+| `crypto.rs` `crypto_hmac_sha256` | `Hmac::new_from_slice` never returns `Err` (HMAC accepts any key length) | pure Sky kernel `hmacSha256 : String -> String -> String` — no `Result` channel without breaking Go parity; no infallible HMAC constructor; a fallback MAC would be a silently-wrong hash (security defect) |
+| `crypto.rs` `crypto_hmac_sha512` | same | same |
+| `email.rs` `hmac_bytes` | same | internal SES-signing helper returning `Vec<u8>`; a fallback MAC would be a wrong signature |
+
+Everything else in the crate is panic-vector-free: lock-family unwraps use
+`unwrap_or_else(|e| e.into_inner())` (poison-tolerant — a panicking session
+can't cascade-abort the others); AES/ChaCha propagate `new_from_slice` errors
+into their existing `SkyResult` channel; the cookie-sid lookup degrades an
+impossible `None` to a fresh session; the SSE response builder falls back to a
+500 rather than `unwrap`.
+
+### `dyn Any` register
+
+| Site | Shape | Verdict |
+|---|---|---|
+| `live/pubsub.rs` broker registry | `Box<dyn Any>` → `Arc<Broker<T>>`, keyed by `TypeId` | **irreducible-by-design** — correct by construction (only an `Arc<Broker<T>>` is ever stored under `TypeId::of::<T>()`); never payload-dependent. The payload itself is never erased. |
+
+*Reserved for the `dyn Any` audit (task #44):* when that audit runs, every
+`dyn Any` in the runtime is catalogued here with a verdict — **reducible**
+(monomorphisable away, with how) or **irreducible** (why) — so future work can
+pick up the reducible ones.
+
+### Out-of-scope panic vectors (future tightening)
+
+~40 non-test `panic!`/`unreachable!` sites and `clippy::indexing_slicing` are
+NOT yet gated (too large to bundle with the lock-family pass). Tracked as a
+follow-up.
+
+---
+
 ## Module structure
 
 ```
