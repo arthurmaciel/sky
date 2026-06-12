@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::broadcast;
 
+use crate::sky_runtime::core::{ok_res, SkyResult, SkyTask};
+use crate::sky_runtime::tea::{SkyCmd, SkySub};
+
 /// Per-topic broadcast buffer. A subscriber that lags more than this many
 /// messages gets `RecvError::Lagged` (handled by skipping, never panicking).
 const TOPIC_CAP: usize = 256;
@@ -112,7 +115,10 @@ pub fn broker<T: Clone + Send + 'static>() -> Arc<Broker<T>> {
 
 static LIVE_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Called by `serve_live` once the Live app is bound + serving.
+/// Called by `serve_live` once the router is built, just before the TCP bind.
+/// After this point `PubSub.publish` tasks succeed (the flag is write-once and
+/// never reset). A publish racing startup before this fires gets a single
+/// retry-able `Unavailable` — benign for fire-and-forget pub/sub.
 pub fn mark_live_running() {
     LIVE_RUNNING.store(true, Ordering::Release);
 }
@@ -120,8 +126,6 @@ pub fn mark_live_running() {
 fn live_running() -> bool {
     LIVE_RUNNING.load(Ordering::Acquire)
 }
-
-use crate::sky_runtime::core::{ok_res, SkyResult, SkyTask};
 
 /// `PubSub.publish topic payload : Task Error Int` — callable from any context
 /// (raw handlers, post-init, scheduled jobs). Resolves to the subscriber count,
@@ -157,9 +161,6 @@ where
         ok_res(broker::<T>().publish(&topic, payload, "", true))
     })
 }
-
-use crate::sky_runtime::tea::SkyCmd;
-use crate::sky_runtime::tea::SkySub;
 
 /// `Cmd.publish topic payload` — echo-by-default broadcast. The payload `T` is
 /// captured in the thunk; the dispatch loop supplies the origin sid.
@@ -319,6 +320,15 @@ mod tests {
     async fn pubsub_publish_errs_without_live_app() {
         // LIVE_RUNNING starts false; no serve_live runs in a unit test.
         let t: SkyTask<String, i64> = pubsub_publish::<u8, String>("t".to_string(), 1);
+        match t.await {
+            SkyResult::Err(e) => assert!(e.contains("no Live.app")),
+            SkyResult::Ok(_) => panic!("expected Err Unavailable"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pubsub_publish_no_echo_errs_without_live_app() {
+        let t: SkyTask<String, i64> = pubsub_publish_no_echo::<u8, String>("t".to_string(), 1);
         match t.await {
             SkyResult::Err(e) => assert!(e.contains("no Live.app")),
             SkyResult::Ok(_) => panic!("expected Err Unavailable"),
