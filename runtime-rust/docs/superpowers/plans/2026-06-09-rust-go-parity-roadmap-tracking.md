@@ -183,12 +183,28 @@ without which a watch-only session never subscribes.
   the missing multi-arg map decoders — added `json_dec_map2/3/4` (total, real
   error propagation, no erasure). 06-json builds on Rust AND is byte-identical to
   Go. This is S8's primary gate example.
-- **Std.Cache: pending — needs an S6-style per-type-registry design.** The
-  handle-based `Cache k v` kernels (`Cache_newRaw -> Int`, `Cache_get(Int, k)`)
-  can't erase `(K, V)` (no-`dyn-Any` rule), and `newRaw` doesn't know `(K,V)` at
-  allocation. Mirror the broker: a `TypeId`-keyed registry of handle→`Cache<K,V>`,
-  monomorphised at the `new`/`get`/`put` call sites. Brainstorm first
-  (example 36). 
+- **Std.Cache: runtime DONE; blocked on 3 stdlib-lowering codegen gaps.** The
+  runtime `cache.rs` (LRU+TTL, `K`-typed store + value-erased entries, correct by
+  construction — see the `dyn Any` register) is complete + unit-tested, wired
+  (`Project.hs` always-declares `cache`; `Types.hs` `CacheCfg` map + E-pins).
+  Kernel names auto-map (`Cache_newRaw`→`cache_new_raw`). But compiling the
+  `Std.Cache.sky` **stdlib module** to Rust hits 3 independent codegen gaps that
+  each need their own fix:
+  1. **Phantom opaque-type params** — `type Cache k v` → `enum { Cache(i64) }`
+     leaves `k,v` unused → **E0392**; codegen must emit `PhantomData` for unused
+     ADT type params.
+  2. **`Eq`+`Hash` bound threading** — the generic stdlib wrappers bound `k` with
+     `Clone+PartialEq+Debug+Send+Sync` but not `Eq+Hash` that
+     `cache_get/put/remove` need → **E0277**; codegen must thread `Eq+Hash` onto a
+     key type-var that flows into those kernels (a #52-Part-B-style conditional
+     bound, but propagated through the whole stdlib call chain).
+  3. **Anon-record return** — `statsRaw : Int -> Task Error { hits, misses,
+     evictions }` lowers the anon record to `String` → **E0308**; codegen must
+     lower an anonymous-record kernel return to a struct (or map it to
+     `CacheStats`).
+  Each is a substantial, independent codegen change — flagged for a dedicated
+  cycle. Acceptance once fixed: a fork-local `examples/rust/` cache example
+  (new/put/get/size/remove/stats), NOT the composite example 36.
 - **Process.run / Io-beyond-Log: deferred — YAGNI.** `Io` kernels
   (`io_read_line`/`write_stdout`/`write_stderr`) already exist. `Process.run` has
   **no in-scope example** (not in the FP set), so it has no acceptance vehicle;

@@ -358,12 +358,15 @@ iterators / a checked total form rather than `[i]`.
 ### `dyn Any` register
 
 **Audit complete (2026-06-12, task #44).** A full sweep of `src/sky_runtime/**`
-found **exactly one** `dyn Any` usage — the pub/sub broker registry. There are
-**no reducible `dyn Any` sites**; the single one is irreducible-by-design:
+found the `dyn Any` sites below. There are **no reducible** ones — each is
+irreducible-by-design (forced by a Sky kernel signature that erases a type the
+runtime must round-trip), and each downcast is correct by construction:
 
 | Site | Shape | Verdict |
 |---|---|---|
-| `live/pubsub.rs` broker registry | `Box<dyn Any + Send + Sync>` → `Arc<Broker<T>>`, keyed by `TypeId` | **irreducible-by-design** — correct by construction (only an `Arc<Broker<T>>` is ever stored under `TypeId::of::<T>()`); never payload-dependent. The payload travels as its real `T` and is never erased — only the broker *container* is. The single `downcast_ref` is `TypeId`-gated; its structurally-impossible `None` branch degrades gracefully (logs a bug report + returns a fresh broker — never panics). |
+| `live/pubsub.rs` broker registry | `Box<dyn Any + Send + Sync>` → `Arc<Broker<T>>`, keyed by `TypeId` | **irreducible-by-design** — only an `Arc<Broker<T>>` is ever stored under `TypeId::of::<T>()`; never payload-dependent. The payload travels as its real `T`, never erased — only the broker *container* is. The single `downcast_ref` is `TypeId`-gated; its structurally-impossible `None` degrades gracefully (logs + fresh broker, never panics). |
+| `cache.rs` per-handle store | `Box<dyn Any + Send>` → `KeyStore<K>` | **irreducible-by-design** — the Sky `Cache_size`/`Cache_clear` kernels carry no `V`, so the per-handle store can't be fully `(K,V)`-typed. Downcast by `K` (every op on a handle uses the same `K`, per Sky's `Cache k v`) — can't fail; mismatch → no-op. |
+| `cache.rs` cache value | `Box<dyn Any + Send>` (one per entry) → `V` | **irreducible-by-design** — `Cache_remove` carries no `V`, so values are erased and downcast to `V` only on `get` (where the kernel return makes `V` available). Per-handle `V`-consistency makes the cast total; on the impossible miss it returns `Nothing`, never panics. Strictly safer than Go's reflect cache (the cast cannot fail). |
 
 The codegen itself emits **no** `dyn Any` — all Sky dynamism (`any` payloads,
 `Db.get*` rows, FFI) is monomorphised to concrete types or routed through a
