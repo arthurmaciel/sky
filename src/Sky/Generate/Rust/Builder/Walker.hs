@@ -7,6 +7,7 @@ module Sky.Generate.Rust.Builder.Walker
   , collectAnonRecordTypes
   , collectFormTargets
   , collectLiveInitFns
+  , collectLiveReqInitFns
   , collectLiveSerdeTypes
   , detectAppMsg
   , detectAppModel
@@ -328,6 +329,65 @@ collectLiveInitFns = walkExprs onExpr
             Just (Ann.At _ (Can.VarTopLevel _ fname)) -> Set.singleton fname
             _ -> Set.empty
     onExpr _ = Set.empty
+
+-- | #24 tenet 4 (Option A). The SUBSET of `collectLiveInitFns` whose body
+-- actually READS its request param (`init req = … req.path …`). ONLY these get
+-- param 0 pinned to `sky_runtime::LiveReq` — the field access needs a concrete
+-- record type. A non-req Live init keeps a natural param (`()` or a free
+-- generic) so the SAME init can also feed a non-Live backend (`Tui.app`, bound
+-- `Fn(())`); the `Live.app` call site adapts it via `move |_r| init(())`.
+--
+-- "Reads the param" = param 0 binds a variable that occurs anywhere in the body.
+-- `init _` / `init ()` bind nothing → not req-reading. Conservative in the safe
+-- direction: a real `req.path` always references `req`, so a req-reading init is
+-- never misclassified as non-req (which would emit a generic/unit param the
+-- field access cannot compile against).
+collectLiveReqInitFns :: [Can.Module] -> Set.Set String
+collectLiveReqInitFns mods =
+    let liveInits = collectLiveInitFns mods
+        defs = Map.unions (map (collectDefBodies . Can._decls) mods)
+    in Set.fromList
+         [ nm | nm <- Set.toList liveInits
+              , Just (p0 : _, body) <- [Map.lookup nm defs]
+              , v <- paramVar p0
+              , exprMentions v body ]
+  where
+    paramVar (Ann.At _ (Can.PVar v))      = [v]
+    paramVar (Ann.At _ (Can.PAlias _ v))  = [v]
+    paramVar _                            = []
+
+    collectDefBodies = goD
+      where
+        goD (Can.Declare def rest)         = ins def (goD rest)
+        goD (Can.DeclareRec def defs0 rest) = foldr ins (goD rest) (def : defs0)
+        goD Can.SaveTheEnvironment         = Map.empty
+        ins (Can.Def (Ann.At _ n) ps b) m            = Map.insert n (ps, b) m
+        ins (Can.TypedDef (Ann.At _ n) _ pats b _) m = Map.insert n (map fst pats, b) m
+        ins _ m                                      = m
+
+    exprMentions v = goE
+      where
+        goE (Ann.At _ e) = case e of
+            Can.VarLocal n               -> n == v
+            Can.List es                  -> any goE es
+            Can.Negate a                 -> goE a
+            Can.Binop _ _ _ _ a b        -> goE a || goE b
+            Can.Lambda _ b               -> goE b
+            Can.Call f as                -> goE f || any goE as
+            Can.If brs els               -> any (\(c, t) -> goE c || goE t) brs || goE els
+            Can.Let d b                  -> goDef d || goE b
+            Can.LetRec ds b              -> any goDef ds || goE b
+            Can.LetDestruct _ e0 b       -> goE e0 || goE b
+            Can.Case s brs               -> goE s || any (\(Can.CaseBranch _ b) -> goE b) brs
+            Can.Access a _               -> goE a
+            Can.Update (Ann.At _ n) a fs -> n == v || goE a
+                                              || any (\(Can.FieldUpdate _ fe) -> goE fe) (Map.elems fs)
+            Can.Record fs                -> any goE (Map.elems fs)
+            Can.Tuple a b cs             -> goE a || goE b || any goE cs
+            _                            -> False
+        goDef (Can.Def _ _ b)          = goE b
+        goDef (Can.TypedDef _ _ _ b _) = goE b
+        goDef (Can.DestructDef _ e0)   = goE e0
 
 -- | P5-T4b pre-pass. The Rust runtime's `live_app` / `live_app_routed` require
 -- `Model: serde::Serialize + serde::de::DeserializeOwned` (it serialises the

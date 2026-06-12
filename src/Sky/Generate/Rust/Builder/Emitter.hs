@@ -319,12 +319,14 @@ entryPointSection uk =
         -- future), so the entry MUST block_on it — dropping it exits the process
         -- before axum binds a port (the binary appeared to "run" but served
         -- nothing). Server.listen is the same shape (returns a block_on'd Task).
-        -- #56: a Live program that ALSO uses Task.run (e.g. a top-level
-        -- `dbConn = Task.run (Db.connect ())`) still has the serve future as its
-        -- real entry, so `usesLive` forces the block_on even when usesTaskRun is
-        -- set — otherwise the future is dropped and the server never binds. The
-        -- inline Task.run calls each run on their own throwaway runtime, fine.
-        mainIsTask = usesLive uk || not (usesTaskRun uk)
+        -- #56 / #24 tenet 3: a backend-entry program (Live.app / Tui.app /
+        -- Tui.program / Webview.app) has its driver future as the real entry, so
+        -- ANY backend-app usage forces the block_on even when usesTaskRun is set
+        -- — otherwise the future is dropped and the app never runs. The inline
+        -- Task.run calls each run on their own throwaway runtime, fine. (Was
+        -- usesLive-only; broadened so pure-Tui / pure-Webview mains, whose
+        -- `App {…} |> Task.run` is now dropped by tenet 2, return a SkyTask too.)
+        mainIsTask = usesLive uk || usesTui uk || usesWebview uk || not (usesTaskRun uk)
     in
     [ ""
     , "// ==========================================="

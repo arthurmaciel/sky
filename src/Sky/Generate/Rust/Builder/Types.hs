@@ -82,8 +82,12 @@ data RustBuilder = RustBuilder
         -- shares the handler-arg-type -> rustT logic with the onSubmit peephole.
     , builderLiveInitFns :: Set.Set String
         -- P4-T3: Sky binding names of `Live.app` init functions whose `init`
-        -- field is a top-level reference. defToRustItem overrides param 0 of
-        -- each to `sky_runtime::LiveReq`. Computed by collectLiveInitFns.
+        -- field is a top-level reference. Marks Live-wired inits. Computed by
+        -- collectLiveInitFns.
+    , builderLiveReqInitFns :: Set.Set String
+        -- #24 tenet 4: subset of builderLiveInitFns that READ the request param.
+        -- ONLY these pin param 0 to `sky_runtime::LiveReq`. Computed by
+        -- collectLiveReqInitFns.
     , builderLiveSerdeTypes :: Set.Set String
         -- P5-T4b: Rust type names in the Sky.Live model's transitive type
         -- closure. ONLY these gain serde::Serialize + serde::Deserialize in
@@ -407,6 +411,12 @@ data EmitCtx = EmitCtx
     , ecCopyVars  :: Set.Set String  -- vars whose type is Rust Copy (i64, f64, bool, ...)
     , ecPipeInnerType :: Maybe String  -- inner type of piped Task<A>, set by |>
     , ecUsesTaskRun :: Bool  -- user calls Task.run → main returns ()
+    , ecUsesBackendApp :: Bool
+        -- ^ #24 tenet 3: the program's `main` yields a backend-entry app-future
+        --   (Live.app / Tui.app / Tui.program / Webview.app). Such a `main` is a
+        --   `SkyTask<()>` the entry must `block_on` — so the return-type logic
+        --   must NOT collapse it to `()` even when the program also calls
+        --   `Task.run`. Derived from usesLive || usesTui || usesWebview.
     , ecZeroArgDefs :: Set.Set (String, String)  -- (modPrefix, name) for zero-arg definitions
     , ecNoCloneVars :: Set.Set String  -- vars whose types don't implement Clone (e.g. Decoder)
     , ecCtorArity :: Map.Map String Int  -- alias name -> field count (for succeed curry wrapping)
@@ -422,9 +432,18 @@ data EmitCtx = EmitCtx
         --   the same Ffi.kernel dispatch table the Go codegen uses.
     , ecLiveInitFns :: Set.Set String
         -- ^ P4-T3: Sky binding names of `Live.app` top-level-ref init functions.
-        --   defToRustItem forces param 0 of these to `sky_runtime::LiveReq` so
-        --   the generated init fn satisfies the runtime's
-        --   `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound.
+        --   Marks "this init is wired to a Live.app" — used to detect Live
+        --   programs (a non-empty set ⇒ usesLive) and to gate the Live.app
+        --   init-arg wrapping (#24 tenet 4).
+    , ecLiveReqInitFns :: Set.Set String
+        -- ^ #24 tenet 4 (Option A): the SUBSET of `ecLiveInitFns` whose body
+        --   actually READS the request param (`init req = … req.path …`). ONLY
+        --   these pin param 0 to `sky_runtime::LiveReq` (the field access needs a
+        --   concrete record type). A non-req Live init keeps its natural param
+        --   (`()` or a free generic) and is adapted at the `Live.app` call site
+        --   via `move |_r: LiveReq| init(())` — so the SAME init can also feed a
+        --   non-Live backend (`Tui.app`) whose bound is `Fn(())`. Computed by
+        --   collectLiveReqInitFns.
     , ecLiveStore :: (String, String)
         -- ^ P5-T4b: (storeKind, storePath) from `[live] store` / `storePath`.
         --   The Live.app peephole emits these as the trailing two string args of

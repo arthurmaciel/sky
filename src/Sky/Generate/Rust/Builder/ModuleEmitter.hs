@@ -50,7 +50,7 @@ import Sky.Generate.Rust.Builder.TypeEmitter
     )
 import Sky.Generate.Rust.Builder.Walker
     ( analyzeKernelUsage, collectZeroArgDefs, collectAnonRecordTypes
-    , collectFormTargets, collectLiveInitFns, collectLiveSerdeTypes, buildRecordMap
+    , collectFormTargets, collectLiveInitFns, collectLiveReqInitFns, collectLiveSerdeTypes, buildRecordMap
     , detectAppMsg, detectAppModel
     )
 
@@ -370,14 +370,15 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                                       else []) ++ wildGens
                            gs = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
                        in (pStrs, gs)
-        -- P4-T3: a `Live.app` top-level-ref init fn's first param is pinned to
-        -- `sky_runtime::LiveReq` so it satisfies the runtime's
-        -- `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound. The shared HM
-        -- checker leaves the init arg a free `req` TVar (left free on purpose —
-        -- changing it breaks the Go skyshop example), so the override lives only
-        -- in the Rust codegen. The param NAME is taken from patternToRustArg so
-        -- `init req` -> `req: ...` and `init _` -> `_: ...` both round-trip.
-        paramStrs' = case (Set.member name (ecLiveInitFns ctx), params, paramStrs) of
+        -- P4-T3 / #24 tenet 4: a `Live.app` init fn that READS its request param
+        -- (`init req = … req.path …`, name ∈ ecLiveReqInitFns) pins param 0 to
+        -- `sky_runtime::LiveReq` so the field access compiles and the runtime's
+        -- `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound is met. A NON-req
+        -- Live init (`init _`) is NOT pinned — it keeps its natural param so the
+        -- same init can also feed `Tui.app` (`Fn(())`); the `Live.app` call site
+        -- adapts it via `move |_r| init(())`. The param NAME comes from
+        -- patternToRustArg so `init req` -> `req: ...` round-trips.
+        paramStrs' = case (Set.member name (ecLiveReqInitFns ctx), params, paramStrs) of
             (True, (p0 : _), (_ : rest)) ->
                 (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
             _ -> paramStrs
@@ -428,11 +429,12 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         copyVars = Set.fromList
             [ n | (n, t) <- zip paramNames paramTys
             , not (hasTypeVars t) && isCanTypeCopy t ]
-        -- A Sky.Live init fn pins its first param to LiveReq (P4-T3); the param's
-        -- original type var (`init : a -> …`) is then orphaned. Drop the generics
-        -- so the live_app / live_app_routed call site can resolve the fn — an
-        -- unused type param is uninferrable there (E0283).
-        genVars' = if Set.member name (ecLiveInitFns ctx) then "" else genVars
+        -- A req-reading Sky.Live init pins its first param to LiveReq (P4-T3);
+        -- the param's original type var (`init : a -> …`) is then orphaned, so
+        -- drop the generics (an unused type param is uninferrable at the call
+        -- site — E0283). A NON-req init (#24 tenet 4) keeps its generics: its
+        -- free param var IS the generic both backends monomorphise over.
+        genVars' = if Set.member name (ecLiveReqInitFns ctx) then "" else genVars
         -- TEA msg-monomorphisation (Live.app boundary). A handler/view whose
         -- return is polymorphic in msg (`(Model, Cmd msg)` via `Cmd.none`,
         -- `Html msg`) collapses to a `()` return — then the real body mismatches
@@ -449,10 +451,13 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         -- statement and the future would be dropped — the binary exits before
         -- axum binds a port. Force the Task return so the printer returns the
         -- future as the tail expression and `block_on(sky_main())` awaits it.
-        isLiveEntryMain = name == "main" && ecCurrentModule ctx == "Main"
-                          && not (Set.null (ecLiveInitFns ctx))
+        -- #24 tenet 3: ANY backend-entry main (Live.app / Tui.app / Tui.program /
+        -- Webview.app) yields a `SkyTask<()>` driver future the entry block_on's,
+        -- so force the Task return regardless of which backend (was Live-only).
+        isBackendEntryMain = name == "main" && ecCurrentModule ctx == "Main"
+                          && ecUsesBackendApp ctx
         retTyFinal
-            | isLiveEntryMain = "SkyTask<()>"
+            | isBackendEntryMain = "SkyTask<()>"
             | otherwise = case (retTy == "()", ecAppMsg ctx, extractReturnType <$> lookupOwnSig ctx name) of
                 (True, Just msgT, Just ret)
                     | Just sub <- teaReturnSubst msgT (ecAppModel ctx) ret -> typeToRustString (ecRecordMap ctx) sub
@@ -517,13 +522,13 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
                              in (nm ++ ": " ++ paramTypeToRust rm ty, pre))
             [0..] pats
         params0 = map fst argTriples
-        -- P4-T3: an ANNOTATED `Live.app` top-level-ref init (e.g.
-        -- `init : () -> ( Model, Cmd Msg )`) lowers here as a TypedDef; its
-        -- declared first param (`()`) must still be pinned to
-        -- `sky_runtime::LiveReq` so it satisfies the runtime's
-        -- `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound. Param NAME comes
-        -- from patternToRustArg so `init _` -> `_: sky_runtime::LiveReq`.
-        params = case (Set.member name (ecLiveInitFns ctx), pats, params0) of
+        -- P4-T3 / #24 tenet 4: an ANNOTATED req-reading `Live.app` init
+        -- (`init req = … req.path …`, name ∈ ecLiveReqInitFns) pins its declared
+        -- first param to `sky_runtime::LiveReq` so the field access compiles and
+        -- the `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound is met. A NON-req
+        -- init keeps its declared param (`()` / free var) and is adapted at the
+        -- Live.app call site. Param NAME comes from patternToRustArg.
+        params = case (Set.member name (ecLiveReqInitFns ctx), pats, params0) of
             (True, ((p0, _) : _), (_ : rest)) ->
                 (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
             _ -> params0
@@ -532,12 +537,14 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- entry can `block_on` it. Only when the program calls `Task.run` itself
         -- (main returns ()) does sky_main return unit. Hardcoding "()" here
         -- dropped the task — composed (`andThen`) mains never ran.
-        -- #56: a Live program (ecLiveInitFns non-empty) keeps the SkyTask<()>
-        -- return even when it ALSO uses Task.run — its serve future is the real
-        -- entry and must be block_on'd (mirrors `mainIsTask` in Emitter.hs).
-        -- Without this the `live_app(...)` future is discarded and never binds.
+        -- #56 / #24 tenet 3: a backend-entry program (Live.app / Tui.app /
+        -- Tui.program / Webview.app) keeps the SkyTask<()> return even when it
+        -- ALSO uses Task.run — its driver future is the real entry and must be
+        -- block_on'd (mirrors `mainIsTask` in Emitter.hs). Only a program that
+        -- uses Task.run AND has no backend app collapses main to () (it runs the
+        -- task inline). Without this the app future is discarded and never binds.
         ret = if name == "main" && ecCurrentModule ctx == "Main"
-              then if ecUsesTaskRun ctx && Set.null (ecLiveInitFns ctx)
+              then if ecUsesTaskRun ctx && not (ecUsesBackendApp ctx)
                    then "()"
                    else typeToRustString rm retTy
               else typeToRustString rm retTy
@@ -546,7 +553,7 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- type var that appeared only in its annotation (e.g. `a` in
         -- `init : a -> …`) is orphaned — exclude the first param's types or the
         -- live_app call site can't infer the unused generic (E0283).
-        annotPatTys = if Set.member name (ecLiveInitFns ctx) then map snd (drop 1 pats) else map snd pats
+        annotPatTys = if Set.member name (ecLiveReqInitFns ctx) then map snd (drop 1 pats) else map snd pats
         allAnnotTys = annotPatTys ++ [retTy | not (name == "main" && ecCurrentModule ctx == "Main")]
         -- collectRenderedTVars (not collectTVars): a var that appears only inside
         -- a runtimeOpaque type's dropped args (e.g. `msg` in WebSocketServerCfg
@@ -819,7 +826,7 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
             , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "", ecStructFields = structFields, ecForcedClosureParam = Nothing, ecEnclosingRet = Nothing, ecGenParams = [], ecNameRenames = nameRenames, ecIndexedHofClosure = False }
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveReqInitFns = liveReqInitFns, ecUsesBackendApp = usesBackendApp, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "", ecStructFields = structFields, ecForcedClosureParam = Nothing, ecEnclosingRet = Nothing, ecGenParams = [], ecNameRenames = nameRenames, ecIndexedHofClosure = False }
         -- Multi-module signature scoping. The flat `ecSolvedTypes` (`_stEnv`)
         -- collides on bare names across modules, so a DEP module's function
         -- (e.g. `Lib.Db.exec : String -> List String -> Task Error ()`) whose
@@ -835,6 +842,10 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
                              (ModuleName.toString (Can._name m)) perModuleEnv
             in ctx { ecModuleEnv = modEnv }
         liveInitFns = collectLiveInitFns mods
+        liveReqInitFns = collectLiveReqInitFns mods
+        -- #24 tenet 3: does `main` yield a backend-entry app-future? Any of these
+        -- drivers returns a `SkyTask<()>` the entry must block_on.
+        usesBackendApp = usesLive usage || usesTui usage || usesWebview usage
         appMsg = detectAppMsg mods solvedTypes perModuleEnv
         appModel = detectAppModel mods solvedTypes perModuleEnv
         usage = analyzeKernelUsage mods
@@ -868,6 +879,7 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
         , builderFfiOpaques = Set.empty  -- populated by generateRust via passed FFI types
         , builderFormTargets = collectFormTargets recordMap regionTypes mods
         , builderLiveInitFns = liveInitFns
+        , builderLiveReqInitFns = liveReqInitFns
         , builderLiveSerdeTypes = collectLiveSerdeTypes recordMap mods solvedTypes perModuleEnv
         }
 

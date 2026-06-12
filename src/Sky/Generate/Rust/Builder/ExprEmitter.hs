@@ -430,6 +430,33 @@ rustCharLit c
     | c == '\\'  = "'\\\\'"
     | otherwise  = "'" ++ [c] ++ "'"
 
+-- | #24 tenet 2: is this expression a backend-entry app constructor call
+-- (`Live.app {…}` / `Tui.app {…}` / `Tui.program {…}` / `Webview.app {…}`)?
+-- Each lowers to a `SkyTask<()>` driver future, so a `… |> Task.run` over one of
+-- these has the future itself as the program entry — the Task.run is dropped and
+-- the entry block_on's the future (subsumes the #56 top-level special-case and
+-- makes a backend-dispatching `case` (24) unify as a `SkyTask<()>`). Cli.program
+-- is intentionally EXCLUDED: it still runs inline via task_run (it is not in the
+-- usesBackendApp set that drives `mainIsTask`), so its Task.run stays.
+-- | Is this expression a reference to `Task.run`? It reaches codegen as a
+-- Sky-source `Ffi.kernel "Task_run"` alias — i.e. `VarTopLevel "Sky.Core.Task"
+-- "run"` — NOT a bare `VarKernel` (mirrors how `Webview.app` arrives). Match
+-- both so the #24 tenet-2 drop fires on `App {…} |> Task.run`.
+isTaskRunRef :: Can.Expr -> Bool
+isTaskRunRef (Ann.At _ e) = case e of
+    Can.VarKernel "Task" "run"  -> True
+    Can.VarTopLevel m "run"     -> ModuleName._name m == "Sky.Core.Task"
+    _                           -> False
+
+isBackendEntryApp :: Can.Expr -> Bool
+isBackendEntryApp (Ann.At _ e) = case e of
+    Can.Call (Ann.At _ (Can.VarKernel "Live" "app"))    [Ann.At _ (Can.Record _)] -> True
+    Can.Call (Ann.At _ (Can.VarKernel "Tui" "app"))     [Ann.At _ (Can.Record _)] -> True
+    Can.Call (Ann.At _ (Can.VarKernel "Tui" "program")) [Ann.At _ (Can.Record _)] -> True
+    Can.Call (Ann.At _ (Can.VarTopLevel m "app"))       [Ann.At _ (Can.Record _)]
+        | ModuleName._name m == "Std.Webview" -> True
+    _ -> False
+
 exprToRustString :: EmitCtx -> Can.Expr -> String
 exprToRustString ctx (Ann.At region expr) =
     -- Sub-A.13: look up the wrapping region's solver-inferred type and inject
@@ -765,6 +792,12 @@ exprToRustInner ctx e = case e of
             "vec![" ++ intercalate ", " (map (exprToRustString ctx) es) ++ "]"
     Can.Negate e -> "-" ++ exprToRustString ctx e
     Can.Binop op _ _ _ a b 
+        | op == "|>", isTaskRunRef b, isBackendEntryApp a ->
+            -- #24 tenet 2: `App {…} |> Task.run` — the backend driver future IS
+            -- the program entry. Drop Task.run so the future is returned as a
+            -- SkyTask (block_on'd by the entry / unified across a dispatching
+            -- `case`), not executed inline via task_run.
+            exprToRustString ctx a
         | op == "|>" -> case b of
             Ann.At _ (Can.Call fn callArgs) ->
                 let dummySpan = Ann.Region (Ann.Position 1 1) (Ann.Position 1 1)
@@ -887,6 +920,11 @@ exprToRustInner ctx e = case e of
                 extras    = [ "__pa" ++ show k | k <- [1 .. nMissing] ]
             in "(move |" ++ intercalate ", " extras ++ "| " ++ ctorName
                ++ "(" ++ intercalate ", " (provided ++ extras) ++ "))"
+    -- #24 tenet 2 (prefix form): `Task.run (App {…})` — same as the `|>` arm,
+    -- the backend driver future is the entry; drop Task.run.
+    Can.Call taskRunFn [appArg]
+        | isTaskRunRef taskRunFn, isBackendEntryApp appArg ->
+            exprToRustString ctx appArg
     -- Sub-E: Cli.program { init, update, view, subscriptions, onLine } — the cfg
     -- is an anonymous record the runtime can't name, so splice its fields into
     -- the generic cli_program(init, update, view, subs, onLine) directly.
@@ -972,6 +1010,26 @@ exprToRustInner ctx e = case e of
         let fld n = case Map.lookup n fields of
                 Just e  -> exprToRustString ctx e
                 Nothing -> "/* Live.app: missing field " ++ n ++ " */"
+            -- #24 tenet 4 (Option A): the `init` arg must satisfy live_app's
+            -- `FInit: Fn(LiveReq) -> …` bound. A req-reading init (∈
+            -- ecLiveReqInitFns) already has param 0 pinned to LiveReq, so pass it
+            -- straight through. A NON-req init keeps a natural param (`()` / a
+            -- free generic) so the SAME init can also feed `Tui.app` (`Fn(())`);
+            -- here we adapt it to live_app by discarding the request:
+            -- `move |_r: LiveReq| init(())`. The closure forces the param to `()`,
+            -- which fits both a `()` annotation and a free-generic param.
+            liveInitArg = case Map.lookup "init" fields of
+                Just initE@(Ann.At _ initInner) ->
+                    let iname = case initInner of
+                            Can.VarTopLevel _ n -> n
+                            Can.VarLocal n      -> n
+                            _                   -> ""
+                        base = exprToRustString ctx initE
+                    in if Set.member iname (ecLiveReqInitFns ctx)
+                       then base
+                       else "{ let __sky_init = " ++ base
+                              ++ "; move |_r: sky_runtime::LiveReq| __sky_init(()) }"
+                Nothing -> "/* Live.app: missing field init */"
             rm = ecRecordMap ctx
             -- Recover Model from view's solver type: `view : Model -> Html Msg`.
             mModelTy = case Map.lookup "view" (ecSolvedTypes ctx) of
@@ -1008,12 +1066,12 @@ exprToRustInner ctx e = case e of
                     setPage = "move |__page: " ++ pageRustTy ++ ", __model: " ++ modelRustTy
                                 ++ "| " ++ modelRustTy ++ " { page: __page, ..__model }"
                 in "live_app_routed::<SkyError, _, _, _, _, _, _, _, _>(" ++ intercalate ", "
-                       ([fld "init", fld "update", fld "view", fld "subscriptions",
+                       ([liveInitArg, fld "update", fld "view", fld "subscriptions",
                          routesStr, notFoundStr, setPage, storeKindLit, storePathLit]) ++ ")"
             _ ->
                 -- Single-page mode (no page field): four TEA callbacks; pin E.
                 "live_app::<SkyError, _, _, _, _, _, _>(" ++ intercalate ", "
-                    (map fld ["init", "update", "view", "subscriptions"] ++ [storeKindLit, storePathLit]) ++ ")"
+                    ([liveInitArg] ++ map fld ["update", "view", "subscriptions"] ++ [storeKindLit, storePathLit]) ++ ")"
     -- Sub-E step 3: Cmd.perform with a DIVERGING task (System.exit -> `!`) leaves
     -- the task's success/error types free (E0283). Pin them — the value is never
     -- produced (the process exits first), so A is a phantom i64 filler.
