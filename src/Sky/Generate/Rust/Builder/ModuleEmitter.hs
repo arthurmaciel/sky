@@ -516,8 +516,14 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- entry can `block_on` it. Only when the program calls `Task.run` itself
         -- (main returns ()) does sky_main return unit. Hardcoding "()" here
         -- dropped the task — composed (`andThen`) mains never ran.
+        -- #56: a Live program (ecLiveInitFns non-empty) keeps the SkyTask<()>
+        -- return even when it ALSO uses Task.run — its serve future is the real
+        -- entry and must be block_on'd (mirrors `mainIsTask` in Emitter.hs).
+        -- Without this the `live_app(...)` future is discarded and never binds.
         ret = if name == "main"
-              then if ecUsesTaskRun ctx then "()" else typeToRustString rm retTy
+              then if ecUsesTaskRun ctx && Set.null (ecLiveInitFns ctx)
+                   then "()"
+                   else typeToRustString rm retTy
               else typeToRustString rm retTy
         -- Collect type variable names from annotation types, emit as generic params.
         -- A Sky.Live init fn's first param is pinned to LiveReq (above), so any
