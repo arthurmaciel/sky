@@ -54,10 +54,11 @@ impl<T: Clone + Send + 'static> Broker<T> {
         tx.subscribe()
     }
 
-    /// Broadcast `payload` to every subscriber on `topic`. Returns the live
-    /// subscriber count. A topic whose subscribers have all dropped is lazily
-    /// pruned and returns 0. Fire-and-forget — `send` failing (no receivers) is
-    /// not an error.
+    /// Broadcast `payload` to every subscriber on `topic`. Returns the subscriber
+    /// count **at the time of send** — not a delivery guarantee (subscribers may
+    /// drop concurrently; pub/sub is fire-and-forget). A topic whose subscribers
+    /// have all dropped is lazily pruned and returns 0. Fire-and-forget — `send`
+    /// failing (no receivers) is not an error.
     pub fn publish(&self, topic: &str, payload: T, origin: &str, skip_origin: bool) -> i64 {
         let mut g = self.lock();
         match g.get(topic) {
@@ -92,7 +93,14 @@ pub fn broker<T: Clone + Send + 'static>() -> Arc<Broker<T>> {
     match entry.downcast_ref::<Arc<Broker<T>>>() {
         Some(b) => b.clone(),
         None => {
-            // Structurally impossible (TypeId-keyed); rebuild, never panic.
+            // Unreachable by construction (the registry only ever stores an
+            // Arc<Broker<T>> under TypeId::of::<T>()). If it somehow fired it
+            // would discard live subscribers, so log a bug report rather than
+            // fail silently, then return a fresh broker (never panic).
+            eprintln!(
+                "[sky-runtime BUG] pubsub broker downcast mismatch for {:?} — please report",
+                TypeId::of::<T>()
+            );
             let b = Arc::new(Broker::<T>::new());
             *entry = Box::new(b.clone());
             b
@@ -106,12 +114,12 @@ static LIVE_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Called by `serve_live` once the Live app is bound + serving.
 pub fn mark_live_running() {
-    LIVE_RUNNING.store(true, Ordering::SeqCst);
+    LIVE_RUNNING.store(true, Ordering::Release);
 }
 
 #[allow(dead_code)]
 fn live_running() -> bool {
-    LIVE_RUNNING.load(Ordering::SeqCst)
+    LIVE_RUNNING.load(Ordering::Acquire)
 }
 
 #[cfg(test)]
