@@ -68,6 +68,11 @@ pub mod csv;
 #[cfg(feature = "csv")]
 pub use csv::*;
 
+#[cfg(feature = "cache_kernel")]
+pub mod cache;
+#[cfg(feature = "cache_kernel")]
+pub use cache::*;
+
 pub mod uuid_kernel;
 pub use uuid_kernel::*;
 

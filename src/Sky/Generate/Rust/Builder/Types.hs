@@ -135,6 +135,10 @@ runtimeOpaqueTypes = Map.fromList
     -- can name a generated per-project struct. Field access + the synthesized
     -- record constructor resolve onto CsvDoc's pub fields.
     , (("Std.Csv", "Csv"), "sky_runtime::CsvDoc")
+    -- Std.Cache.CacheCfg maps to the runtime struct (field names match:
+    -- maxEntries/ttlMs/maxBytes) so `defaultCfg` + the `with*` updates + the
+    -- `Cache_newRaw` kernel construct/consume it directly.
+    , (("Std.Cache", "CacheCfg"), "sky_runtime::CacheCfg")
     -- Sub-D.1: Sky.Http.Server records (Request/Response) + opaque ADTs
     -- (Route/Cookie) map to runtime structs so the server kernels return/take
     -- them directly. The handler closure is erased into a non-generic
@@ -228,6 +232,13 @@ kernelsNeedingErrorPin = Map.fromList
     -- Csv parse — single E parameter (returns SkyResult<E, CsvDoc>)
     , ("csv_parse",                "::<SkyError>")
     , ("csv_parse_with_delimiter", "::<SkyError>")
+    -- Std.Cache — the phantom-E kernels (E appears only in the SkyTask return;
+    -- no K/V to anchor it). get/put/remove anchor E + K/V from their args, so
+    -- they don't need a pin.
+    , ("cache_new_raw",            "::<SkyError>")
+    , ("cache_clear",              "::<SkyError>")
+    , ("cache_size",               "::<SkyError>")
+    , ("cache_stats",              "::<SkyError>")
     -- Sub-D.1: Http server route ctors — <E, H>; pin E (the handler's phantom
     -- error type), leave H inferred. server_listen — <E> for its Task<()>.
     , ("server_get",               "::<SkyError, _>")

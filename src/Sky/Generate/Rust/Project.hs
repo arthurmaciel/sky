@@ -104,7 +104,9 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    ,"pub mod money;","pub mod math;","pub mod dict;","pub mod string;"
                    ,"pub mod basics;","pub mod char_kernel;","pub mod list;","pub mod io;"
                    -- v0.15.47 stdlib modules
-                   ,"pub mod compression;","pub mod csv;","pub mod config_decode;"]
+                   ,"pub mod compression;","pub mod csv;","pub mod config_decode;"
+                   -- Std.Cache — pure-std LRU+TTL, no external dep (always declared)
+                   ,"pub mod cache;"]
         -- sub-C — Std.Auth requires db.rs + jwt; gated together
         dbMod = if usesDb then ["pub mod db;", "pub mod auth;"] else []
         baseUse = ["pub use config::*;","pub use core::*;"
@@ -120,7 +122,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                   ,"pub use basics::*;","pub use char_kernel::*;","pub use list::*;"
                   ,"pub use io::*;"
                   ,"pub use compression::*;","pub use csv::*;"
-                  ,"pub use config_decode::*;"]
+                  ,"pub use config_decode::*;","pub use cache::*;"]
         dbUse = if usesDb then ["pub use db::*;", "pub use auth::*;"] else []
         -- uuid_kernel only when Sky.Core.Uuid is used — it needs the uuid crate
         -- with v4+v7; including it unconditionally clashes with projects that
