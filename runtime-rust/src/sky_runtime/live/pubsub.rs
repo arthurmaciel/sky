@@ -117,9 +117,45 @@ pub fn mark_live_running() {
     LIVE_RUNNING.store(true, Ordering::Release);
 }
 
-#[allow(dead_code)]
 fn live_running() -> bool {
     LIVE_RUNNING.load(Ordering::Acquire)
+}
+
+use crate::sky_runtime::core::{ok_res, SkyResult, SkyTask};
+
+/// `PubSub.publish topic payload : Task Error Int` — callable from any context
+/// (raw handlers, post-init, scheduled jobs). Resolves to the subscriber count,
+/// or an error when no Live app is running in this process (Go's `Unavailable`).
+/// Server-side publishes carry an empty origin, so echo-default is a no-op.
+pub fn pubsub_publish<T, E>(topic: String, payload: T) -> SkyTask<E, i64>
+where
+    T: Clone + Send + 'static,
+    E: From<String> + Send + 'static,
+{
+    Box::pin(async move {
+        if !live_running() {
+            return SkyResult::Err(E::from(
+                "PubSub.publish: no Live.app running in this process".to_string(),
+            ));
+        }
+        ok_res(broker::<T>().publish(&topic, payload, "", false))
+    })
+}
+
+/// `PubSub.publishNoEcho` — same, with the SkipOrigin bit set.
+pub fn pubsub_publish_no_echo<T, E>(topic: String, payload: T) -> SkyTask<E, i64>
+where
+    T: Clone + Send + 'static,
+    E: From<String> + Send + 'static,
+{
+    Box::pin(async move {
+        if !live_running() {
+            return SkyResult::Err(E::from(
+                "PubSub.publishNoEcho: no Live.app running in this process".to_string(),
+            ));
+        }
+        ok_res(broker::<T>().publish(&topic, payload, "", true))
+    })
 }
 
 use crate::sky_runtime::tea::SkyCmd;
@@ -277,6 +313,16 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(*got.lock().unwrap(), vec!["m".to_string()]); // origin RECEIVES (echo)
         h.abort();
+    }
+
+    #[tokio::test]
+    async fn pubsub_publish_errs_without_live_app() {
+        // LIVE_RUNNING starts false; no serve_live runs in a unit test.
+        let t: SkyTask<String, i64> = pubsub_publish::<u8, String>("t".to_string(), 1);
+        match t.await {
+            SkyResult::Err(e) => assert!(e.contains("no Live.app")),
+            SkyResult::Ok(_) => panic!("expected Err Unavailable"),
+        }
     }
 
     #[tokio::test]

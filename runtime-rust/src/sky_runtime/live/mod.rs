@@ -772,6 +772,8 @@ where
             .route("/*path", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             .with_state(state);
 
+        pubsub::mark_live_running();
+
         let port: i64 = std::env::var("SKY_LIVE_PORT")
             .ok()
             .and_then(|s| s.parse().ok())
