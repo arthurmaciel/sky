@@ -78,4 +78,4 @@ unwrap_used = "deny"
 expect_used = "deny"
 
 [package.metadata.sky]
-runtime_version = "0.13.0"
+runtime_version = "0.16.24"
