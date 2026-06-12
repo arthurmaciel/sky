@@ -16,7 +16,7 @@
 //! Follow-on: mouse hit-testing, multiline cursor up/down, word-jumps, precise
 //! slider value, Length(Fill/Min/Max). No panic vectors.
 
-use super::super::ui::{Attribute, Color, Element};
+use super::super::ui::{Attribute, Color, Element, Length};
 use super::cell::sanitize_rune;
 use super::focus::{Focusable, InputRegistry};
 use unicode_width::UnicodeWidthStr;
@@ -71,6 +71,9 @@ struct Walked {
     pad_right: i64,
     pad_bottom: i64,
     pad_left: i64,
+    /// Explicit width in logical px (`Ui.width (Ui.px n)`), if set. `Fill` /
+    /// `Min` / `Max` need a flex-distribution pass and are a follow-on.
+    width_px: Option<i64>,
     style: Style,
 }
 
@@ -103,12 +106,42 @@ impl Block {
     fn single(text: String, style: Style) -> Block {
         Block { lines: vec![vec![Run { text, style }]] }
     }
-    fn pad_to_width(&mut self, w: usize, bg: Option<(u8, u8, u8)>) {
+    /// Constrain every line to EXACTLY `w` display cells — pad shorter lines with
+    /// `bg`-styled spaces, clip longer ones. For explicit `Ui.width (Ui.px n)`.
+    fn set_width(&mut self, w: usize, bg: Option<(u8, u8, u8)>) {
         for line in &mut self.lines {
             let lw: usize = line.iter().map(Run::width).sum();
-            if lw < w {
+            if lw > w {
+                // Clip runs to `w` cells.
+                let mut kept: Vec<Run> = Vec::new();
+                let mut used = 0usize;
+                for run in line.iter() {
+                    if used >= w {
+                        break;
+                    }
+                    let rw = run.width();
+                    if used + rw <= w {
+                        kept.push(run.clone());
+                        used += rw;
+                    } else {
+                        let mut text = String::new();
+                        let mut tw = 0usize;
+                        for ch in run.text.chars() {
+                            let cw = UnicodeWidthStr::width(ch.to_string().as_str());
+                            if used + tw + cw > w {
+                                break;
+                            }
+                            text.push(ch);
+                            tw += cw;
+                        }
+                        kept.push(Run { text, style: run.style });
+                        break;
+                    }
+                }
+                *line = kept;
+            } else if lw < w {
                 line.push(Run {
-                    text: " ".repeat(w.saturating_sub(lw)),
+                    text: " ".repeat(w - lw),
                     style: Style { bg, ..Style::default() },
                 });
             }
@@ -152,12 +185,14 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         pad_right: 0,
         pad_bottom: 0,
         pad_left: 0,
+        width_px: None,
         style: inherited,
     };
     for a in attrs {
         match a {
             Attribute::AttrStyle(k, _) if k == "__row" => w.dir = Dir::Row,
             Attribute::AttrStyle(k, _) if k == "__col" => w.dir = Dir::Column,
+            Attribute::AttrWidth(Length::Px(n)) => w.width_px = Some(*n),
             Attribute::AttrSpacing(n) => w.spacing_px = *n,
             Attribute::AttrPadding(t, r, b, l) => {
                 w.pad_top = *t;
@@ -338,7 +373,17 @@ fn render_input<M: Clone>(
         }
     };
 
-    let block = Block { lines: vec![vec![cell]] };
+    let mut block = Block { lines: vec![vec![cell]] };
+    // Honour an explicit `Ui.width (Ui.px n)` on a text-like field so it renders
+    // at a fixed width (the field background fills it).
+    if input_type != "range" {
+        if let Some(n) = attrs.iter().find_map(|a| match a {
+            Attribute::AttrWidth(Length::Px(n)) => Some(*n),
+            _ => None,
+        }) {
+            block.set_width(ctx.canvas.cells_x(n).max(1), style.bg);
+        }
+    }
     let width = block.width();
     ctx.focusables.push(Focusable {
         events,
@@ -421,8 +466,11 @@ fn render_node<M: Clone>(node: &Element<M>, inherited: Style, ctx: &mut Ctx<M>) 
                     Dir::Row => hstack(children, ctx.canvas.cells_x(w.spacing_px)),
                 }
             };
-            let inner_w = inner.block.width();
-            inner.block.pad_to_width(inner_w, w.style.bg);
+            let target_w = w
+                .width_px
+                .map(|n| ctx.canvas.cells_x(n))
+                .unwrap_or_else(|| inner.block.width());
+            inner.block.set_width(target_w, w.style.bg);
             apply_padding(inner, &w, ctx.canvas, w.style)
         }
     }
@@ -592,6 +640,20 @@ mod tests {
         let mut reg = InputRegistry::new();
         let (frame, _f, _h) = render_with_focus(&t, 80, 24, 0, &mut reg, 0);
         assert!(frame.contains("\x1b[7"), "focused input reverse-video: {frame:?}");
+    }
+
+    #[test]
+    fn explicit_px_width_pads_box() {
+        // canvas px_per_cell_x = 1280/80 = 16 → 160px ≈ 10 cells.
+        let t: Element<()> = node(
+            vec![Attribute::AttrWidth(Length::Px(160)), Attribute::AttrBgColor(rgb(1, 2, 3))],
+            vec![Element::Text("hi".into())],
+        );
+        let frame = element_to_cells(&t, 80, 24);
+        let first = frame.split("\r\n").next().unwrap_or("");
+        // The bg fill extends the 2-char text toward ~10 cells.
+        let visible_spaces = first.matches(' ').count();
+        assert!(visible_spaces >= 5, "px width padded with bg: {first:?}");
     }
 
     #[test]
