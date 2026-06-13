@@ -98,6 +98,33 @@ warn + graceful fallback, never `?`-into-500); feature-gated (`db` for spill/hub
 the in-process `console.rs` stays as the fallback until A lands); each sub-project
 independently shippable + green on the example sweep.
 
+## Progress (2026-06-13)
+
+The closure-Model design decision (A+B) was approved by the user: a fn-field
+struct derives only `Clone` + a generated `Default` (`disconnected_fnN` error
+closures); a serde Model with such a field `#[serde(skip)]`s it + drops
+Debug/PartialEq; persisting a closure-Model will be a compile error (B, not yet
+emitted). Investigation #76 (does Go error on closure-Model + persistent store?)
+deferred to post-parity.
+
+**S0 driven: console build errors 128 → 24** (commits 116970b3 … 6eccfa24):
+- ✅ Stdlib kernels: `String.left/right`, `System.getenv/getenvOr`, `List.length`,
+  `Time.formatISO8601` (+ Kernel.hs map fixing the `ISO`→`i_s_o8601` mangle),
+  `JsonDec.Pipeline.custom`; `curry9/10`.
+- ✅ Callback-record codegen (A1–A4): fn-field struct derive-Clone-only + Default
+  via `disconnected_fnN`; serde-skip on Model fields; `(rec.field)(args)` call
+  parens; move-closures with per-field capture clones (`closureCaptures`).
+- ✅ `sky_list_cons` Clone-bound drop (move-only `Cmd.batch`).
+- ⏳ **Remaining S0 (~12): a diverse app-specific tail** — E0282 inference
+  turbofishes (traces_tab/view span rows), E0308 (`++` list-concat emitting
+  `format!`/`String` where `Vec` expected; a wrong metric/servicestat decoder),
+  residual E0277. Each needs individual diagnosis.
+- ⏳ **B compile-guard** (closure-Model + persistent store → compile_error!) not
+  yet emitted.
+
+**Next:** finish the S0 tail, then **S1** (the 12 `hub_*` kernels — the remaining
+12 E0425 — reading the SQLite spill).
+
 ## Risks
 
 - **S1 (Hub kernel) size** — 14 fns + the SQLite read schema + `Hub_currentIdentity`
