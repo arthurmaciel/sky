@@ -69,6 +69,9 @@ struct Slot {
     store: Option<Box<dyn Any + Send>>, // Vec<CacheEntry<K>>, created lazily on first K-bearing op
 }
 
+// type_complexity (accepted, cosmetic): the `(next_handle, Vec<(handle, Slot)>)`
+// tuple is this registry's one-off internal store shape — a type alias would
+// hide it rather than clarify. Not a soundness concern.
 #[allow(clippy::type_complexity)]
 fn registry() -> &'static Mutex<(i64, Vec<(i64, Slot)>)> {
     static R: OnceLock<Mutex<(i64, Vec<(i64, Slot)>)>> = OnceLock::new();

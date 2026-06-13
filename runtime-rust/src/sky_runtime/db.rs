@@ -11,6 +11,9 @@ fn sky_err<E: From<String> + Send>(e: &sqlx::Error) -> E {
     str_err(&format!("{}", e))
 }
 
+// needless_range_loop (accepted, cosmetic): the loop indexes by position to pair
+// column name[i] with value[i] across two parallel slices — an iterator can't
+// thread both. Not a soundness concern.
 #[allow(clippy::needless_range_loop)]
 fn row_to_map(row: &DbRow) -> HashMap<String, String> {
     let mut map = HashMap::new();
