@@ -59,9 +59,15 @@ needed is skipped.
 
 `sync` needs conflict judgement and `perf` needs an interactive close-apps
 reminder — neither belongs in a non-interactive script. So `keep-go-parity.sh`
-is a pure **planner** (snapshot + post-merge delta detection), and this skill
-orchestrates the interactive pieces. The planner is fast and testable; the
+is primarily a **planner** (snapshot + post-merge delta detection), and this
+skill orchestrates the interactive pieces. The planner is fast and testable; the
 sweeps keep their own skill semantics.
+
+**Non-agent shortcut.** `keep-go-parity.sh run` (after you've synced upstream
+yourself) prints the plan AND auto-runs the warranted load-tolerant sweeps
+(build → run → web-if-warranted); perf is surfaced as a recommendation, not run
+(it needs apps closed). The agent flow above is richer (drives the sync + perf
+with their reminders); `run` is for a user without an agent.
 
 ## Baked-in gotchas
 

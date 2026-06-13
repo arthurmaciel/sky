@@ -40,16 +40,8 @@ is_web_live() { # $1 = example dir name → prints "web" if Sky.Live/Http.Server
   grep -rqE "Std\.Live|Live\.app|Server\.listen|Sky\.Http\.Server" "$s" 2>/dev/null && echo web || echo other
 }
 
-cmd="${1:-}"
-case "$cmd" in
-  snapshot)
-    git rev-parse HEAD > "$SHA_F"
-    list_examples > "$LIST_F"
-    echo "keep-go-parity: snapshot @ $(cat "$SHA_F")  ($(wc -l < "$LIST_F" | tr -d ' ') example dirs)"
-    echo "  saved: $SHA_F · $LIST_F"
-    ;;
-
-  plan)
+# Compute the post-merge delta + plan into shell vars (used by `plan` and `run`).
+compute_plan() {
     [ -f "$SHA_F" ] && [ -f "$LIST_F" ] || { echo "ERROR: no snapshot — run 'keep-go-parity.sh snapshot' BEFORE the sync." >&2; exit 3; }
     PRE_SHA="$(cat "$SHA_F")"; NOW_SHA="$(git rev-parse HEAD)"
 
@@ -59,7 +51,7 @@ case "$cmd" in
     for ex in $NEW_EXAMPLES; do [ "$(is_web_live "$ex")" = web ] && NEW_WEB="$NEW_WEB $ex"; done
     NEW_WEB="${NEW_WEB# }"
 
-    # Go backend touched by the merge? (perf-relevant candidate — agent judges.)
+    # Go backend touched by the merge? (perf-relevant candidate — judge vs changelog.)
     GO_FILES=""
     if [ "$PRE_SHA" != "$NOW_SHA" ]; then
       GO_FILES="$(git diff --name-only "$PRE_SHA" "$NOW_SHA" -- runtime-go src/Sky/Generate/Go 2>/dev/null | head -20 | tr '\n' ' ' | sed 's/ *$//')"
@@ -71,7 +63,9 @@ case "$cmd" in
     [ -n "$NEW_WEB" ] && { PLAN_WEB=1; WEB_WHY="new web/live example:$NEW_WEB"; }
     if [ -n "$NEW_EXAMPLES" ]; then PLAN_PERF=1; PERF_WHY="$(echo $NEW_EXAMPLES | wc -w | tr -d ' ') new example(s): $NEW_EXAMPLES"
     elif [ -n "$GO_FILES" ]; then PLAN_PERF=1; PERF_WHY="Go backend changed (confirm perf-relevance vs changelog): $GO_FILES"; fi
+}
 
+print_plan() {
     echo "=== keep-go-parity PLAN  ($PRE_SHA → $NOW_SHA) ==="
     echo "NEW_EXAMPLES: ${NEW_EXAMPLES:-none}"
     echo "NEW_WEB_LIVE: ${NEW_WEB:-none}"
@@ -87,11 +81,54 @@ case "$cmd" in
       echo "      web-sweep will regression-guard the existing live set, but author a scenario"
       echo "      for$NEW_WEB to get true round-trip coverage."
     fi
+}
+
+SCRIPTS="$REPO/runtime-rust/scripts"
+
+cmd="${1:-}"
+case "$cmd" in
+  snapshot)
+    git rev-parse HEAD > "$SHA_F"
+    list_examples > "$LIST_F"
+    echo "keep-go-parity: snapshot @ $(cat "$SHA_F")  ($(wc -l < "$LIST_F" | tr -d ' ') example dirs)"
+    echo "  saved: $SHA_F · $LIST_F"
+    ;;
+
+  plan)
+    compute_plan
+    print_plan
+    ;;
+
+  run)
+    # Non-agent convenience: do the warranted LOAD-TOLERANT sweeps automatically
+    # after the merge (build → run → web-if-warranted). perf is NOT auto-run —
+    # it's machine-load-sensitive (close other apps first), so it's only
+    # surfaced as a recommendation. Run AFTER you've synced upstream yourself.
+    compute_plan
+    print_plan
+    echo ""; echo ">>> build-sweep ..."
+    if ! bash "$SCRIPTS/build-sweep.sh"; then
+      echo "=== keep-go-parity: PARITY BREAK at build — stopping (later phases skipped) ==="; exit 1
+    fi
+    echo ""; echo ">>> run-sweep ..."
+    bash "$SCRIPTS/run-sweep.sh"; RUN_RC=$?
+    WEB_RC=0
+    if [ "$PLAN_WEB" = 1 ]; then echo ""; echo ">>> web-sweep ..."; bash "$SCRIPTS/web-sweep.sh"; WEB_RC=$?; fi
+    echo ""; echo "=== keep-go-parity run complete ==="
+    echo "  build: PASS · run: rc=$RUN_RC$([ "$PLAN_WEB" = 1 ] && echo " · web: rc=$WEB_RC")"
+    if [ "$PLAN_PERF" = 1 ]; then
+      echo "  perf-sweep WARRANTED ($PERF_WHY) — NOT auto-run (close other apps first, then:"
+      echo "    bash $SCRIPTS/perf-sweep.sh )"
+    fi
+    [ "$RUN_RC" = 0 ] && [ "$WEB_RC" = 0 ] && exit 0 || exit 1
     ;;
 
   *)
-    echo "usage: keep-go-parity.sh {snapshot|plan}" >&2
+    echo "usage: keep-go-parity.sh {snapshot|plan|run}" >&2
     echo "  snapshot  record examples/ + HEAD sha BEFORE the upstream sync" >&2
-    echo "  plan      AFTER the sync: emit which sweeps the merge warrants" >&2
+    echo "  plan      AFTER the sync: print which sweeps the merge warrants" >&2
+    echo "  run       AFTER the sync: print the plan AND auto-run the warranted" >&2
+    echo "            load-tolerant sweeps (build → run → web); perf is surfaced," >&2
+    echo "            not run (needs apps closed). For non-agent use." >&2
     exit 2 ;;
 esac

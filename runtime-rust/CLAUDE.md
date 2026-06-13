@@ -112,11 +112,44 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 
 ## Agent skills
 
+### Rust-backend skill suite — the `sky-rust-backend` plugin
+
+The Rust-backend verification + maintenance skills ship **in this repo** as a
+plugin at `runtime-rust/plugins/sky-rust-backend/`, so they version with the
+project and install on any agent that supports the plugin/skill format:
+
+```bash
+claude plugin marketplace add <sky-repo>/runtime-rust/plugins
+claude plugin install sky-rust-backend@sky-rust-backend
+# (local dev auto-loads it: ~/.claude/skills/sky-rust-backend symlinks here →
+#  sky-rust-backend@skills-dir)
+```
+
+Skills are namespaced `sky-rust-backend:<name>`. Each wraps a **standalone
+runner** under `runtime-rust/scripts/` — a user *without* an AI agent runs the
+script directly; the skill is just the agent-facing wrapper + procedure.
+
+| Skill | Runner (`runtime-rust/scripts/`) | Does |
+|---|---|---|
+| `sky-rust-backend:build-sweep` | `build-sweep.sh` | `sky build --target rust` + `cargo build` over the largest example set |
+| `sky-rust-backend:run-sweep` | `run-sweep.sh` | build + RUN each runnable example (cli no-panic; server/live boots + `curl GET / → 200`) |
+| `sky-rust-backend:web-sweep` | `web-sweep.sh` + `web-verify.mjs` | drive live examples through headless chromium; hard-fail "click is a no-op" |
+| `sky-rust-backend:perf-sweep` | `perf-sweep.sh` | Rust-vs-Go cold-start/RSS/binsize/throughput + regression report |
+| `sky-rust-backend:keep-go-parity` | `keep-go-parity.sh` | orchestrate sync → warranted sweeps (planner: `snapshot`/`plan`) |
+| `sky-rust-backend:sync-with-upstream` | — (agent-driven git runbook) | ingest `anzellai/sky` upstream into `feat/runtime-rust` |
+| `sky-rust-backend:update-docs` | — (agent-driven) | commit pending work + refresh `runtime-rust/README.md` |
+| `sky-rust-backend:ffi-audit` | `ffi_audit.py` | measure Sky→Rust auto-FFI coverage across a ~50-crate sample |
+
+The four sweeps are the verification phases (build → run → web → perf);
+`keep-go-parity` chains them after an upstream sync. The runner scripts are the
+canonical procedure — improve the **script** after a run, never improvise the
+steps.
+
 ### Domain docs
 
 Single-context — `CONTEXT.md` + `docs/adr/` at `runtime-rust/` root.
 
-Skills enabled:
+General skills enabled:
 - `/grill-me` — stress-test plans and designs
 - `/grill-with-docs` — challenge plans against domain glossary + ADRs
 - `/improve-codebase-architecture` — find deepening opportunities
