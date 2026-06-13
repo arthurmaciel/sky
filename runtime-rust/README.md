@@ -160,11 +160,18 @@ Three rules (see `docs/superpowers/specs/2026-06-12-rust-multibackend-entry-mode
   (vs the *pure* kernels `Live.app` / `Tui.app` / `Cli.program`, which DO arrive
   as `VarKernel`). A peephole that only matches `VarKernel` silently misses the
   alias. Match both (see `isTaskRunRef`).
-- **A free-var init (`init : a -> …`, `init _`) renders as a generic param**,
-  which both backends monomorphise (Live→`LiveReq`, Tui→`()`); an explicit
-  `init : () -> …` renders the concrete `()`. The `Live.app` wrapper
-  `move |_r| init(())` forces the param to `()`, which fits *both* shapes — so
-  the adapter is uniform and needs no unit-vs-generic discrimination.
+- **Force a non-req Live init's param 0 to `()` — do NOT trust the natural
+  render.** A `Live.app` init's param 0 is the request slot; an ignored slot is
+  written `init _` with annotation `()` / `{}` / a free `a`. The natural render
+  of those is inconsistent and sometimes WRONG: a free `a` renders generic, and
+  an empty-record `{}` annotation resolves to the *model struct* (an existing
+  open-record-param quirk — `26-ui-showcase`'s `init : {} -> (Model, Cmd Msg)`
+  rendered `main_init(_: MainModel)`). The `Live.app` wrapper `move |_r| init(())`
+  then mismatches (E0308 expected `MainModel`, found `()`). So force param 0 to a
+  concrete type uniformly: `LiveReq` for a req-reader, else `()`. The wrapper's
+  `init(())` always type-checks and Tui passes the `Fn(())` init directly. This
+  surfaced ONLY in the full `rust-sweep.sh` (a 14-example targeted regression
+  missed `26`) — run the full sweep, not a hand-picked subset.
 - **`Cli.program` is intentionally EXCLUDED from the backend-entry set.** It
   still runs inline via `task_run` (not in `usesBackendApp`), so its `Task.run`
   is kept. Adding it would require flipping its `mainIsTask` too — out of scope
