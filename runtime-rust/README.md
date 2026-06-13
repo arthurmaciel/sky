@@ -132,6 +132,108 @@ non-HTML targets).
 
 ---
 
+## Rust vs Go backend — divergent implementation strategies
+
+Where the Rust backend deliberately implements something **differently** from Go,
+log it here with the **why**. The Go backend is the reference, but parity is about
+*observable behaviour*, not internal mechanism — and Rust's no-`Any` /
+no-panic-vectors constraints (plus the absence of reflection) sometimes make a
+different mechanism the *correct* one, not a shortcut.
+
+> **MUST DO before scoping any "Go-parity" work:** re-verify what Go *currently*
+> does (read `runtime-go/rt/` + `docs/` + the latest refactor commit). Go evolves;
+> a stale parity premise wastes work. (Cost us the console epic's framing — see
+> the console row below.)
+
+### Console serving — pre-built separate process vs in-process inline
+
+- **Go (current, v0.16.0+):** in-process. `MountEmbeddedConsole` links the bundled
+  console (translated to Go) into the user's binary; one process, no fork.
+- **Go (v0.15.x, abandoned):** subprocess — `MountSubApp` reverse-proxied to a
+  `sky console` child that **`go build`-compiled the console at runtime on first
+  launch**. That recursive build peaked at several hundred MB and **OOM'd e2-micro
+  (1 GB) VMs** (took down sky-lang.org 2026-06-02). Deleted in `175dfbb8`.
+- **Rust (chosen):** **pre-built** separate process + reverse-proxy. The console
+  binary is compiled at the user's `sky build` time (a sibling binary); at runtime
+  the parent just `exec`s it and proxies `/_sky/console/*` — **no runtime build, no
+  toolchain on the VM**, ~5 MB RSS.
+- **Why diverge from current Go:** the *only* reason Go dropped subprocess was the
+  **runtime build** — which a pre-built Rust binary doesn't incur, so the OOM
+  rationale doesn't transfer. Meanwhile Go's chosen path (in-process) is the *hard*
+  one on Rust: two Sky programs in one crate collide on every generated type
+  (`StateModel`/`StateMsg`/…), needing codegen type-namespacing/module-isolation —
+  a major sub-project Rust has no reflection to shortcut. Separate binaries have
+  zero type collision and full fault isolation. So pre-built-subprocess is the
+  pragmatic Rust optimum: it sidesteps Go's abandonment reason *and* Rust's
+  hard-path. (Epic: `docs/superpowers/specs/2026-06-12-rust-separate-process-console-epic.md`.)
+
+### Hub read kernels (console data plane) — generic-over-return-type vs `any` + Coerce
+
+- **Go:** `Hub_read*` return `any` (a JSON-ish map); `rt.Coerce[State_*_R]` narrows
+  to the typed record at the call site (reflect-backed).
+- **Rust:** each `hub_read_*<A: DeserializeOwned>(…) -> SkyTask<E, A>` is **generic
+  over its return type**; it builds a `serde_json::Value` matching the record's
+  camelCase serde shape and `from_value::<A>`s it. The project-generated `State*`
+  records are named only at the **call site**, where `A` is inferred from the
+  concrete `StateStore` field types — no turbofish, no `Any`, no downcast.
+- **Why:** no-`Any` is existential for the Rust backend. The dynamism Go erases
+  with reflect is instead monomorphised away: the value travels as its real type
+  `A`, the one `serde` decode is provably-shaped because the kernel owns both the
+  SELECT and the `Value`. (`live/hub.rs`.)
+
+### Telemetry spill schema — one schema end-to-end vs Go's two
+
+- **Go:** the per-app spill (`telemetry/persist.go`, `SKY_CONSOLE_DB_PATH`) uses a
+  `namespace/created_at` schema; the hub (`hub/store.go`, `SKY_CONSOLE_HUB_DB`)
+  uses a richer `service_name/time/trace_id/…` schema.
+- **Rust:** the embedded console uses **one** schema end-to-end — the hub
+  (`hub/store.go`) one — for both the D writer (`telemetry_spill.rs`) and the S1
+  reader (`live/hub.rs`).
+- **Why:** the spill is an internal D↔S1 contract (not a byte-compatible Go
+  artifact). One schema means the writer and reader share a single source of truth;
+  the hub schema is the richer one the console records actually need.
+
+### Telemetry spill journal mode — WAL + `mode=rw` reader (not `mode=ro`)
+
+- **Rust:** the spill is WAL (concurrent parent-writer + console-reader without
+  livelock), and the console reader opens `mode=rw`, **not** `mode=ro`.
+- **Why:** a `mode=ro` SQLite connection can't attach the `-wal`/`-shm` shared
+  memory, so it never sees frames the writer committed but hasn't checkpointed — it
+  silently reads stale/empty data. A `mode=rw` reader participates in WAL and sees
+  all committed writes; the console only ever `SELECT`s, so rw grants no real write.
+  (Burned ~an hour on this; logged so no one re-derives it.)
+
+### Pub/Sub broker — per-type `Broker<T>` keyed by `TypeId` vs reflection + `any`
+
+- **Go:** a single broker passes payloads as `any`, type-asserted on receive.
+- **Rust:** one `Broker<T>` per payload type, keyed by `TypeId`. The payload travels
+  as its real `T` and is **never downcast**; a publisher/subscriber type mismatch
+  can't construct.
+- **Why:** mirroring Go's reflect/`any` risk surface would be a defect, not parity.
+  The dynamism is monomorphised away. (`live/pubsub.rs`; S6.)
+
+### Sky.Live `init` request — typed-record `LiveReq` vs heterogeneous `Dict`
+
+- **Go:** `req` is a heterogeneous `Dict`/`any` map.
+- **Rust:** a typed-record `LiveReq` (the kernel type stays free so it's Go-safe on
+  the shared seam).
+- **Why:** a typed record keeps the no-`Any` invariant on the request path; the free
+  kernel type avoids clashing with Go's Dict-shaped req. (P4; memory
+  `rust-live-p4-req-blocker`.)
+
+### Closure-holding Model serialization — compile-error guard vs runtime skip
+
+- **Go:** reflection serializes a session Model, skipping func fields at runtime.
+- **Rust:** a Model field that is a callback-record (fn fields lowered to
+  `Arc<dyn Fn>`) derives `Clone` + a generated `Default` (disconnected error
+  closures) and `#[serde(skip)]`s the field; persisting such a Model to a real
+  store is designed to be a **compile error** (the unsound combo can't ship).
+- **Why:** "if it compiles, it works" — an un-restorable closure can't silently
+  round-trip through a session store; the type system rejects it instead of a
+  runtime surprise. (S0 callback-record codegen.)
+
+---
+
 ## Sky.Live on Rust (P0–P6 shipped)
 
 TEA-over-HTTP+SSE on an axum router, no `any`/static dispatch. Same
