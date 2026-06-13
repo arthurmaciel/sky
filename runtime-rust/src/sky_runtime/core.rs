@@ -25,6 +25,45 @@ pub fn ok_res<E, A>(a: A) -> SkyResult<E, A> { SkyResult::Ok(a) }
 pub fn str_err<E: From<String>>(s: &str) -> E { s.to_string().into() }
 
 // ===========================================
+// Disconnected-store placeholders (closure-Model `Default`)
+// ===========================================
+// A Sky.Live Model with function-typed fields (`Arc<dyn Fn(..) -> SkyTask<..>>`,
+// e.g. the console's `store`) can't be serialized, so the codegen serde-skips
+// those fields and reconstructs them via `Default` from these helpers. Each is a
+// closure of the right arity that yields a STRUCTURED `Task` error (never a
+// panic / unwrap) — a closure-Model whose session is restored gets a disconnected
+// store and the app re-fetches. Closure-Models are memory-store-only (the memory
+// store never serialises, so these are never instantiated at runtime there); the
+// codegen makes persisting a closure-Model a hard compile error.
+const DISCONNECTED_MSG: &str =
+    "disconnected store: a closure-Model session was restored — closure-Models require [live] store = memory";
+
+pub fn disconnected_fn0<T: Send + 'static, E: From<String> + Send + 'static>(
+) -> std::sync::Arc<dyn Fn() -> SkyTask<E, T> + Send + Sync> {
+    std::sync::Arc::new(|| -> SkyTask<E, T> {
+        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(DISCONNECTED_MSG))))
+    })
+}
+pub fn disconnected_fn1<A: 'static, T: Send + 'static, E: From<String> + Send + 'static>(
+) -> std::sync::Arc<dyn Fn(A) -> SkyTask<E, T> + Send + Sync> {
+    std::sync::Arc::new(|_a| -> SkyTask<E, T> {
+        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(DISCONNECTED_MSG))))
+    })
+}
+pub fn disconnected_fn2<A1: 'static, A2: 'static, T: Send + 'static, E: From<String> + Send + 'static>(
+) -> std::sync::Arc<dyn Fn(A1, A2) -> SkyTask<E, T> + Send + Sync> {
+    std::sync::Arc::new(|_a1, _a2| -> SkyTask<E, T> {
+        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(DISCONNECTED_MSG))))
+    })
+}
+pub fn disconnected_fn3<A1: 'static, A2: 'static, A3: 'static, T: Send + 'static, E: From<String> + Send + 'static>(
+) -> std::sync::Arc<dyn Fn(A1, A2, A3) -> SkyTask<E, T> + Send + Sync> {
+    std::sync::Arc::new(|_a1, _a2, _a3| -> SkyTask<E, T> {
+        Box::pin(std::future::ready(SkyResult::Err(str_err::<E>(DISCONNECTED_MSG))))
+    })
+}
+
+// ===========================================
 // Byte-sequence FFI coercion (Sky List Int <-> Rust bytes)
 // ===========================================
 
