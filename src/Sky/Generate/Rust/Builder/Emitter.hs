@@ -779,6 +779,10 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
                  ++ ["net" | usesHttpServer uk || usesHttp uk || usesWsClient uk || usesEmail uk || usesLive uk]
                  -- Std.Live: live/session.rs + live/sse.rs use tokio::sync::mpsc.
                  ++ ["sync" | usesTea uk || usesWsClient uk || usesLive uk]
+                 -- Std.Live console proxy (epic A): live/console_proxy.rs spawns
+                 -- the pre-built console child (tokio::process) and kills it on
+                 -- SIGTERM/SIGINT (tokio::signal).
+                 ++ (if usesLive uk then ["process", "signal"] else [])
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"

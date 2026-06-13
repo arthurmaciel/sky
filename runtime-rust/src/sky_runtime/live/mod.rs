@@ -11,6 +11,10 @@ pub use form::*;
 pub mod route;
 pub use route::*;
 pub mod console;
+// Pre-built console child + reverse-proxy (epic A) — spawns the bundled console
+// binary and proxies /_sky/console/*; falls back to in-process `console` when the
+// binary is absent. Spawn/lifecycle in Task 1; proxy handler + wiring in Tasks 2–3.
+pub mod console_proxy;
 pub mod observability;
 // Hub read-side kernels (the bundled console's data plane). Gated on `db` —
 // they read the SQLite telemetry spill via sqlx, so a `live`-only program with
