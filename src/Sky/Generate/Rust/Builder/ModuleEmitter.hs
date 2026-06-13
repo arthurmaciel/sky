@@ -370,17 +370,22 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                                       else []) ++ wildGens
                            gs = if null genList then "" else "<" ++ intercalate ", " genList ++ ">"
                        in (pStrs, gs)
-        -- P4-T3 / #24 tenet 4: a `Live.app` init fn that READS its request param
-        -- (`init req = … req.path …`, name ∈ ecLiveReqInitFns) pins param 0 to
-        -- `sky_runtime::LiveReq` so the field access compiles and the runtime's
-        -- `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound is met. A NON-req
-        -- Live init (`init _`) is NOT pinned — it keeps its natural param so the
-        -- same init can also feed `Tui.app` (`Fn(())`); the `Live.app` call site
-        -- adapts it via `move |_r| init(())`. The param NAME comes from
-        -- patternToRustArg so `init req` -> `req: ...` round-trips.
-        paramStrs' = case (Set.member name (ecLiveReqInitFns ctx), params, paramStrs) of
-            (True, (p0 : _), (_ : rest)) ->
-                (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
+        -- P4-T3 / #24 tenet 4: force param 0 of a `Live.app` init.
+        --   * READS the request (`init req = … req.path …`, ∈ ecLiveReqInitFns)
+        --     → `sky_runtime::LiveReq` (the field access needs a concrete record;
+        --     live_app passes it straight through).
+        --   * otherwise (`init _`, an IGNORED slot — `{}` / `a` / `()` all mean
+        --     the same) → `()`. The natural render is unreliable here (an empty
+        --     `{}` annotation resolves to the MODEL struct; a free `a` renders
+        --     generic), so force `()` and adapt at the call site: `Tui.app` passes
+        --     it directly (`Fn(())`); `Live.app` wraps `move |_r| init(())`.
+        -- Param NAME comes from patternToRustArg so `init req` -> `req: ...`.
+        paramStrs' = case (params, paramStrs) of
+            ((p0 : _), (_ : rest))
+                | Set.member name (ecLiveReqInitFns ctx) ->
+                    (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
+                | Set.member name (ecLiveInitFns ctx) ->
+                    (fst (patternToRustArg 0 p0) ++ ": ()") : rest
             _ -> paramStrs
         retTy = case lookupOwnSig ctx name of
                     Just ty ->
@@ -429,12 +434,11 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         copyVars = Set.fromList
             [ n | (n, t) <- zip paramNames paramTys
             , not (hasTypeVars t) && isCanTypeCopy t ]
-        -- A req-reading Sky.Live init pins its first param to LiveReq (P4-T3);
-        -- the param's original type var (`init : a -> …`) is then orphaned, so
-        -- drop the generics (an unused type param is uninferrable at the call
-        -- site — E0283). A NON-req init (#24 tenet 4) keeps its generics: its
-        -- free param var IS the generic both backends monomorphise over.
-        genVars' = if Set.member name (ecLiveReqInitFns ctx) then "" else genVars
+        -- A Sky.Live init's param 0 is ALWAYS forced to a concrete type (#24
+        -- tenet 4: LiveReq for a req-reader, else `()`), so the param's original
+        -- type var (`init : a -> …`) is orphaned — drop the generics (an unused
+        -- type param is uninferrable at the call site — E0283).
+        genVars' = if Set.member name (ecLiveInitFns ctx) then "" else genVars
         -- TEA msg-monomorphisation (Live.app boundary). A handler/view whose
         -- return is polymorphic in msg (`(Model, Cmd msg)` via `Cmd.none`,
         -- `Html msg`) collapses to a `()` return — then the real body mismatches
@@ -522,15 +526,17 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
                              in (nm ++ ": " ++ paramTypeToRust rm ty, pre))
             [0..] pats
         params0 = map fst argTriples
-        -- P4-T3 / #24 tenet 4: an ANNOTATED req-reading `Live.app` init
-        -- (`init req = … req.path …`, name ∈ ecLiveReqInitFns) pins its declared
-        -- first param to `sky_runtime::LiveReq` so the field access compiles and
-        -- the `FInit: Fn(LiveReq) -> (Model, SkyCmd<Msg>)` bound is met. A NON-req
-        -- init keeps its declared param (`()` / free var) and is adapted at the
-        -- Live.app call site. Param NAME comes from patternToRustArg.
-        params = case (Set.member name (ecLiveReqInitFns ctx), pats, params0) of
-            (True, ((p0, _) : _), (_ : rest)) ->
-                (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
+        -- P4-T3 / #24 tenet 4 (annotated TypedDef path; same rule as the Def
+        -- path above): force param 0 of a `Live.app` init to `sky_runtime::LiveReq`
+        -- when it reads the request (∈ ecLiveReqInitFns), else to `()` (ignored
+        -- slot — declared `()` / `{}` / free var all collapse here). The Live.app
+        -- call site wraps the `()` form via `move |_r| init(())`.
+        params = case (pats, params0) of
+            (((p0, _) : _), (_ : rest))
+                | Set.member name (ecLiveReqInitFns ctx) ->
+                    (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
+                | Set.member name (ecLiveInitFns ctx) ->
+                    (fst (patternToRustArg 0 p0) ++ ": ()") : rest
             _ -> params0
         preludes = concatMap snd argTriples
         -- `main : Task Error ()` lowers to `sky_main() -> SkyTask<()>` so the
@@ -553,7 +559,7 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- type var that appeared only in its annotation (e.g. `a` in
         -- `init : a -> …`) is orphaned — exclude the first param's types or the
         -- live_app call site can't infer the unused generic (E0283).
-        annotPatTys = if Set.member name (ecLiveReqInitFns ctx) then map snd (drop 1 pats) else map snd pats
+        annotPatTys = if Set.member name (ecLiveInitFns ctx) then map snd (drop 1 pats) else map snd pats
         allAnnotTys = annotPatTys ++ [retTy | not (name == "main" && ecCurrentModule ctx == "Main")]
         -- collectRenderedTVars (not collectTVars): a var that appears only inside
         -- a runtimeOpaque type's dropped args (e.g. `msg` in WebSocketServerCfg
