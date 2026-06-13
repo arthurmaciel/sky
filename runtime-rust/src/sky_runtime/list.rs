@@ -2,6 +2,12 @@
 
 use super::SkyMaybe;
 
+/// `Sky.Core.List.length` — element count (kernel-routed call sites; the pure-Sky
+/// `sky_core_list_length` is the recursive stdlib form).
+pub fn list_length<T>(xs: Vec<T>) -> i64 {
+    xs.len() as i64
+}
+
 /// Sky `filterMap : (a -> Maybe b) -> List a -> List b`.
 /// Applies `f` to each element; keeps only `Just` results.
 pub fn list_filter_map<A, B>(f: impl Fn(A) -> SkyMaybe<B>, xs: Vec<A>) -> Vec<B> {

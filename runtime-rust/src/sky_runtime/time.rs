@@ -234,6 +234,16 @@ pub fn time_format_in_zone<E: From<String>>(
     SkyResult::Ok(dt.format(&pattern).to_string())
 }
 
+/// `Sky.Core.Time.formatISO8601 ms` — the UTC instant as an RFC3339 / ISO-8601
+/// string (Go parity: `t.UTC().Format(time.RFC3339)`). Infallible (`""` only on
+/// an out-of-range timestamp).
+pub fn time_format_iso8601(ms: i64) -> String {
+    match Utc.timestamp_millis_opt(ms).single() {
+        Some(dt) => dt.to_rfc3339(),
+        None => String::new(),
+    }
+}
+
 // === sub-A.8 T4 — advanced diff / fromParts / zone kernels ===
 
 /// `diffSeconds later earlier` — integer seconds between two epoch-ms timestamps.

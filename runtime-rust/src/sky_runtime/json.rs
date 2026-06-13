@@ -195,3 +195,14 @@ pub fn json_dec_p_optional<E: From<String> + 'static, T: Clone + 'static + Send,
         match nd(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), _ => json_dec_err_str("opt next error".into()) }
     })
 }
+
+/// `JsonDec.Pipeline.custom decoder next` — like `required`, but the custom
+/// `decoder` runs on the WHOLE value (not a single field) and supplies the next
+/// pipeline argument. A custom decode failure aborts the pipeline.
+pub fn json_dec_p_custom<E: From<String> + 'static, T: 'static, F: 'static>(decoder: Decoder<E, T>, next_decoder: Decoder<E, Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<E, F> {
+    let d = decoder; let nd = next_decoder;
+    Box::new(move |v| {
+        let t = match d(v) { SkyResult::Ok(t) => t, _ => return json_dec_err_str("custom decode error".into()) };
+        match nd(v) { SkyResult::Ok(f) => SkyResult::Ok(f(t)), _ => json_dec_err_str("custom next error".into()) }
+    })
+}

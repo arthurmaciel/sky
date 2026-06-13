@@ -8,6 +8,15 @@ pub fn system_args<E: Send + 'static>(_: ()) -> SkyTask<E, Vec<String>> {
 }
 pub fn system_exit(code: i64) -> ! { std::process::exit(code as i32) }
 
+/// `Sky.Core.System.getenv key` — the env var, or "" when unset.
+pub fn system_getenv(key: String) -> String {
+    std::env::var(&key).unwrap_or_default()
+}
+/// `Sky.Core.System.getenvOr key default` — the env var, or `default` when unset.
+pub fn system_getenv_or(key: String, default: String) -> String {
+    std::env::var(&key).unwrap_or(default)
+}
+
 pub fn system_setenv<E: Send + 'static>(key: String, val: String) -> SkyTask<E, ()> {
     std::env::set_var(&key, &val);
     Box::pin(async move { ok_res(()) })

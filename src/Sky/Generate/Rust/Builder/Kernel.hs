@@ -142,6 +142,10 @@ kernelToRust mod name = case (mod, name) of
     -- Std.Time advanced (sub-A.5)
     ("Time", "inZone")            -> "time_in_zone"
     ("Time", "formatInZone")      -> "time_format_in_zone"
+    -- formatISO8601 must be mapped: the default snake_case mangles the `ISO`
+    -- acronym to `i_s_o8601` (one `_` per capital), which has no runtime fn.
+    ("Time", "formatISO8601")     -> "time_format_iso8601"
+    ("Sky.Core.Time", "formatISO8601") -> "time_format_iso8601"
     ("Time", "addDays")           -> "time_add_days"
     ("Time", "addHours")          -> "time_add_hours"
     ("Time", "addMinutes")        -> "time_add_minutes"
