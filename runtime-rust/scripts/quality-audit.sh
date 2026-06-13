@@ -113,6 +113,15 @@ if [ -z "$UNJUSTIFIED" ]; then say "  ✓ every #[allow] has an adjacent comment
   printf "$UNJUSTIFIED" | sed '/^$/d;s/^/    /' | tee -a "$HIST/audit-$STAMP.log"
 fi
 
+# ── 6b. Settled-decision markers (code-level ledger; reconcile new findings against these) ─
+say ""; say ">>> [SETTLED] SKY-RUST-AUDIT decision markers in src/ (already signed off — skip on reconcile)"
+ACC_N="$(count 'SKY-RUST-AUDIT:ACCEPTED' | wc -l | tr -d ' ')"
+DEF_N="$(count 'SKY-RUST-AUDIT:DEFERRED' | wc -l | tr -d ' ')"
+say "  ACCEPTED: $ACC_N · DEFERRED (known issues awaiting a fix): $DEF_N"
+DEF_SITES="$(count 'SKY-RUST-AUDIT:DEFERRED' || true)"
+[ -n "$DEF_SITES" ] && { say "  deferred backlog:"; printf '%s\n' "$DEF_SITES" | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log"; }
+say "  (grep -rn SKY-RUST-AUDIT for all · …:ACCEPTED accepted compromises · …:DEFERRED known issues)"
+
 # ── 7. Tests (behaviour gate) ────────────────────────────────────────────────
 say ""; say ">>> [TEST] cargo test --all-targets $FEATURES"
 TEST=0

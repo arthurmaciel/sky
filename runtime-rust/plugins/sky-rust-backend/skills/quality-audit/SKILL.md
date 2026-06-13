@@ -36,28 +36,45 @@ decides; you record.
    cosmetic lints are NOT material** — fix the cheap ones, document the rest
    inline at the call site; never drag the developer through them.
 
-4. **Reconcile against the ledger** (idempotency) — read the README
-   "Soundness, correctness and security problems". **Drop** problems already
-   recorded with a current decision that still matches the code. **Keep** NEW
-   problems and previously-**Deferred** ones (deferred always resurface).
+4. **Reconcile against settled decisions** (idempotency, code-level + ledger) —
+   a finding is already settled if its site carries a `SKY-RUST-AUDIT:` marker (see
+   the convention below) OR it has a matching row in the README ledger. **Drop**
+   settled findings whose decision still matches the code; **keep** NEW ones and
+   any `SKY-RUST-AUDIT:DEFERRED` (deferred always resurface). The inline marker is the
+   primary key — a human or the next audit sees the decision *at the code*.
 
 5. **Walk the developer through each remaining problem, one at a time:**
    present **location · why it's a problem · pros & cons (accept-as-is vs fix) ·
-   your recommendation**, then ask **agree or disagree?**
-   - **Agree (accept)** → it's irreducible / the cost-and-risk of fixing exceeds
-     that of accepting. Record `Accepted · <dev> · <date>` + the why in the
-     ledger, AND add the inline `// INFALLIBLE:` / `// reason` + the narrowest
-     `#[allow(...)]` at the site.
+   your recommendation**, then ask **agree or disagree?** Record the decision
+   BOTH inline (greppable marker at the site) AND in the README ledger:
+   - **Agree (accept)** → irreducible / cost-and-risk of fixing exceeds that of
+     accepting. Add `// SKY-RUST-AUDIT:ACCEPTED (<dev>, <date>) — <why> [ledger #N]` at
+     the site (+ the narrowest `#[allow(...)]` if a lint applies); add the ledger row.
    - **Disagree** → ask which: **brainstorm a fix now** (invoke
-     **superpowers:brainstorming** → plan → implement → delete the ledger row once
-     fixed), OR **defer** → record `Deferred · <dev> · <date>` + the why under
-     "Deferred for investigation".
+     **superpowers:brainstorming** → plan → implement; when fixed the marker +
+     ledger row are *deleted* — the code changed), OR **defer** → add
+     `// SKY-RUST-AUDIT:DEFERRED (<dev>, <date>) — <why> [ledger #N]` at the site and a
+     row under "Deferred for investigation".
    - `<dev>` = `git config user.name` (fallback `$USER`); `<date>` = today (UTC).
 
-6. **Record every decision in the README ledger in the same pass** — it is the
-   durable, attributed record *and* the idempotency key the next audit reconciles
-   against. Then report: hard-gate verdict, the decisions taken (accepted /
-   fixed / deferred, each attributed), and the cosmetic-lint count handled in bulk.
+6. **Mirror every decision in the README ledger in the same pass.** The inline
+   markers are the code-level truth; the ledger is the central index. Report:
+   hard-gate verdict, decisions taken (accepted / fixed / deferred, each
+   attributed), and the cosmetic-lint count handled in bulk.
+
+### Marker convention (terminology)
+
+"Agreed/disagreed" is the *act*; the inline tag records the *outcome*, so it's
+greppable as a state:
+
+| Tag | Means | Disposition |
+|---|---|---|
+| `SKY-RUST-AUDIT:ACCEPTED (<dev>, <date>) — <why> [ledger #N]` | developer **agreed** it's an acceptable / irreducible compromise | a known, signed-off limitation |
+| `SKY-RUST-AUDIT:DEFERRED (<dev>, <date>) — <why> [ledger #N]` | developer **disagreed** but deferred a fix for investigation | a known issue awaiting a fix |
+
+`grep -rn 'SKY-RUST-AUDIT'` → every settled decision · `…:ACCEPTED` → accepted
+compromises · `…:DEFERRED` → the known-issues backlog. Fixed problems carry **no**
+marker (the code changed); cosmetic lints get a plain `// reason`, not a marker.
 
 ## Scope + gotchas
 

@@ -618,14 +618,21 @@ unsound `dyn Any`, undocumented `#[allow]`, security/correctness/efficiency
 defects) get a ledger row. Cosmetic lints are triaged in bulk and documented
 inline at the call site.
 
+**Code-level mirror.** Every ledger row is mirrored by an inline
+`// SKY-RUST-AUDIT:ACCEPTED|DEFERRED (<dev>, <date>) — <why> [ledger #N]` marker at
+the exact site, so a decision is visible while *reading the code* and the next
+audit reconciles against it. `grep -rn 'SKY-RUST-AUDIT' runtime-rust/src` lists
+every settled decision; `…:ACCEPTED` the accepted compromises; `…:DEFERRED` the
+known-issues backlog.
+
 ### Decision ledger
 
-| # | Problem (location) | Disposition | Developer · Date | Why |
-|---|---|---|---|---|
-| 1 | `crypto.rs` HMAC `expect_used` (×2) | Accepted | baseline · panic-hardening pass | `Hmac::new_from_slice` is infallible; the pure Sky kernel has no `Result` channel; a fallback MAC would be a silently-wrong hash (security defect) — detail below |
-| 2 | `email.rs` `hmac_bytes` `expect_used` | Accepted | baseline · panic-hardening pass | same — a fallback MAC is a wrong SES signature |
-| 3 | `ffi_polyfills.rs` `panic` (×2) | Accepted | baseline · panic-hardening pass | statically dead for valid Sky; the unconstrained generic `T` return has no total value to synthesise |
-| 4 | `dyn Any` sites (pubsub broker, cache store/value) | Accepted | task #44 · 2026-06-12 | each `TypeId`-/`K`-keyed, correct-by-construction; the payload travels as its real type and is never erased — detail below |
+| # | Problem (location) | Disposition | Developer · Date | Marker | Why |
+|---|---|---|---|---|---|
+| 1 | `crypto.rs` HMAC `expect_used` (×2) | Accepted | baseline · panic-hardening pass | `crypto.rs:66,82` | `Hmac::new_from_slice` is infallible; the pure Sky kernel has no `Result` channel; a fallback MAC would be a silently-wrong hash (security defect) — detail below |
+| 2 | `email.rs` `hmac_bytes` `expect_used` | Accepted | baseline · panic-hardening pass | `email.rs:321` | same — a fallback MAC is a wrong SES signature |
+| 3 | `ffi_polyfills.rs` `panic` (×2) | Accepted | baseline · panic-hardening pass | `ffi_polyfills.rs:26,42` | statically dead for valid Sky; the unconstrained generic `T` return has no total value to synthesise |
+| 4 | `dyn Any` sites (pubsub broker, cache store/value) | Accepted | task #44 · 2026-06-12 | `pubsub.rs:85` · `cache.rs:57,70` | each `TypeId`-/`K`-keyed, correct-by-construction; the payload travels as its real type and is never erased — detail below |
 
 ### Deferred for investigation
 
