@@ -421,12 +421,80 @@ fn new_sid() -> String {
     format!("{hi:016x}{lo:016x}")
 }
 
+/// Normalise a raw `SKY_LIVE_BASE_PATH` value: trim, drop a trailing slash,
+/// ensure a single leading slash. `""` / `"/"` collapse to `""` (root-mounted —
+/// no prefix). Mirrors Go's `normaliseBasePath` (runtime-go/rt/live.go:5901).
+fn normalise_base_path(raw: &str) -> String {
+    let t = raw.trim().trim_end_matches('/');
+    if t.is_empty() {
+        String::new()
+    } else if t.starts_with('/') {
+        t.to_string()
+    } else {
+        format!("/{t}")
+    }
+}
+
+/// The session cookie name for a given (normalised) base path. `sky_sid` at the
+/// root; for a sub-app a base-derived DISTINCT name so this child's session
+/// cookie can never clobber the PARENT app's `sky_sid` (both would otherwise be
+/// `Path=/` and share the browser's cookie jar on the proxied paths). Go gives
+/// each sub-app a distinct `cookieName` for the same reason (live.go:2769).
+fn cookie_name_for(base: &str) -> String {
+    if base.is_empty() {
+        "sky_sid".to_string()
+    } else {
+        let suffix: String = base
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        format!("sky_sid{suffix}")
+    }
+}
+
+/// Cookie `Path` for a given (normalised) base path: the base for a sub-app
+/// (scopes the cookie to `/<base>/*` so it is never sent to the parent's own
+/// routes — protecting the parent session), else `/`.
+fn cookie_path_for(base: &str) -> String {
+    if base.is_empty() {
+        "/".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+/// Normalised sub-app base path, read from `SKY_LIVE_BASE_PATH`. Empty when
+/// unset (root-mounted app → byte-identical to a standalone Live server). When
+/// set (this app runs as a reverse-proxied sub-app — e.g. the bundled console
+/// mounted at `/_sky/console`), the value is threaded into `render_page_full`
+/// so the client JS prefixes `/_sky/event` + `/_sky/sse` with it. The browser
+/// reaches this child only through the parent proxy, which strips the prefix
+/// before forwarding — so the child's own router stays root-relative.
+fn live_base_path() -> String {
+    normalise_base_path(&std::env::var("SKY_LIVE_BASE_PATH").unwrap_or_default())
+}
+
+/// The active session cookie name (read AND write must agree, so both
+/// `page_response` and `sid_from_cookie` route through this).
+fn session_cookie_name() -> String {
+    cookie_name_for(&live_base_path())
+}
+
+/// The active session cookie `Path`.
+fn cookie_path() -> String {
+    cookie_path_for(&live_base_path())
+}
+
 /// Build the full-page HTTP response for a GET (initial render or reuse): the
-/// client-bearing HTML wrap + the `sky_sid` cookie.
+/// client-bearing HTML wrap + the session cookie (name/path base-path-aware).
 fn page_response(sid: &str, body: &str) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let html = render_page_full(sid, "", body);
-    let cookie = format!("sky_sid={sid}; Path=/; HttpOnly; SameSite=Lax");
+    let html = render_page_full(sid, &live_base_path(), body);
+    let cookie = format!(
+        "{}={sid}; Path={}; HttpOnly; SameSite=Lax",
+        session_cookie_name(),
+        cookie_path()
+    );
     (
         axum::http::StatusCode::OK,
         [
@@ -853,13 +921,16 @@ where
     }
 }
 
-/// Read the `sky_sid` cookie from request headers.
+/// Read the session cookie from request headers. Uses the base-path-aware
+/// cookie name (`session_cookie_name`) so a sub-app reads its own scoped cookie,
+/// never the parent's `sky_sid`.
 fn sid_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    let name = session_cookie_name();
     let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
     for c in raw.split(';') {
         let c = c.trim();
         if let Some((k, v)) = c.split_once('=') {
-            if k.trim() == "sky_sid" {
+            if k.trim() == name {
                 return Some(v.trim().to_string());
             }
         }
@@ -872,3 +943,49 @@ fn sid_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
 // standalone top-level `sky_runtime::html` module (re-exported here via
 // `use super::*`), so a non-Live Std.Html / Std.Ui render doesn't pull this
 // server module in.
+
+#[cfg(test)]
+mod base_path_tests {
+    use super::{cookie_name_for, cookie_path_for, normalise_base_path, render_page_full};
+
+    #[test]
+    fn normalise_root_and_empty_collapse() {
+        assert_eq!(normalise_base_path(""), "");
+        assert_eq!(normalise_base_path("/"), "");
+        assert_eq!(normalise_base_path("   "), "");
+    }
+
+    #[test]
+    fn normalise_adds_leading_drops_trailing() {
+        assert_eq!(normalise_base_path("/_sky/console"), "/_sky/console");
+        assert_eq!(normalise_base_path("/_sky/console/"), "/_sky/console");
+        assert_eq!(normalise_base_path("_sky/console"), "/_sky/console");
+        assert_eq!(normalise_base_path("  /billing/  "), "/billing");
+    }
+
+    #[test]
+    fn cookie_name_is_sky_sid_at_root_distinct_under_base() {
+        assert_eq!(cookie_name_for(""), "sky_sid");
+        // Distinct from the parent's `sky_sid` so the proxied child can't clobber it.
+        assert_eq!(cookie_name_for("/_sky/console"), "sky_sid__sky_console");
+        assert_ne!(cookie_name_for("/_sky/console"), "sky_sid");
+    }
+
+    #[test]
+    fn cookie_path_scopes_to_base() {
+        assert_eq!(cookie_path_for(""), "/");
+        // Scoped → the cookie is never sent to the parent's own routes.
+        assert_eq!(cookie_path_for("/_sky/console"), "/_sky/console");
+    }
+
+    #[test]
+    fn render_page_threads_base_into_meta_and_window_global() {
+        let root = render_page_full("sid1", "", "<b>x</b>");
+        assert!(root.contains("<meta name=\"sky-base\" content=\"\">"));
+        assert!(root.contains("window.__SKY_BASE=\"\""));
+
+        let sub = render_page_full("sid1", "/_sky/console", "<b>x</b>");
+        assert!(sub.contains("<meta name=\"sky-base\" content=\"/_sky/console\">"));
+        assert!(sub.contains("window.__SKY_BASE=\"/_sky/console\""));
+    }
+}
