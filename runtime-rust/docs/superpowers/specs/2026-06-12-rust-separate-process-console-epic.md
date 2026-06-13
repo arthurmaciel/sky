@@ -183,6 +183,28 @@ parity" framing — it is NOT current Go parity, but is the right Rust design.**
 **Next: A** then **C** (federation) + **E** (#70 HubExporter). B compile-guard
 still folded in (console store=memory).
 
+## EPIC COMPLETE (2026-06-13)
+
+All stages shipped on `feat/runtime-rust`:
+
+- **S0/S1/D** — console builds 128→0; 12 `hub_*` read kernels; telemetry SQLite spill.
+- **A** — pre-built console child + reverse-proxy. The bundled `Sky.Live` console
+  is built once per sky version at the user's `sky build` time
+  (`Sky.Build.Rust.Console`, fingerprint-validated cache — sound in the dev-only
+  reality where `SKY_VERSION` is always `"dev"`), spawned + reverse-proxied at
+  `/_sky/console/*` (strip convention), child reaped with the parent
+  (`PR_SET_PDEATHSIG` + signal-exit). **Verified in real chromium**: dev console
+  banner present, console connects (SSE), full dashboard renders. Plus the
+  `--target rust` ignores-`[go.dependencies]` fix (no `go` toolchain needed) and
+  reqwest-as-a-Std.Live dep.
+- **C (#75)** — `push_exporter.rs`: `SKY_PARENT_URL`-gated federation push to the
+  parent ingest.
+- **E (#70)** — `hub_exporter.rs`: `SKY_CONSOLE_HUB`-gated OTLP/JSON push +
+  bearer + bounded retry spool.
+
+Divergences from Go logged in `runtime-rust/README.md` §"Rust vs Go". The whole
+observability export surface is env-gated + inert by default, no panic vectors.
+
 ## Risks
 
 - **S1 (Hub kernel) size** — 14 fns + the SQLite read schema + `Hub_currentIdentity`

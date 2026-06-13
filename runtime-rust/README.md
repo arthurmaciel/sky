@@ -187,6 +187,25 @@ different mechanism the *correct* one, not a shortcut.
 - **reqwest is a Std.Live dependency.** Because the live runtime's reverse-proxy
   forwards via reqwest, codegen declares reqwest for **every** Live app
   (`usesHttp || usesEmail || usesLive`), not just `Http.*`/`Email` users.
+- **Console pre-build is fingerprint-validated, not version-keyed.** The Rust
+  backend is dev-only (the runtime is sourced from disk, never embedded), so
+  `SKY_VERSION` is always `"dev"` — a version-only console cache would never
+  invalidate. So `Sky.Build.Rust.Console` validates the cache by a content
+  fingerprint (sha256 of the console source + the runtime `.rs`), rebuilding on
+  any change. Debug profile (fast dev iteration); `--release` is reserved for an
+  eventual shipping path. Go pre-generates its console as committed Go compiled
+  in-process — no per-build console build at all.
+- **`--target rust` ignores `[go.dependencies]`.** Go FFI bindings are inert on
+  the Rust backend (it can't link Go), so `regenMissingBindings` short-circuits
+  on the Rust target — a pure-Rust build needs no `go` toolchain even for a
+  project that declares Go deps.
+- **Observability export is OTLP/JSON, env-gated, inert by default.** Federation
+  push (`SKY_PARENT_URL` → parent ingest, epic C) and the remote HubExporter
+  (`SKY_CONSOLE_HUB` → `/v1/{logs,traces}` OTLP/**JSON** + bearer + bounded retry
+  spool, epic E) mirror Go's `observability_push.go` / `exporter.go`. Go's
+  HubExporter also uses OTLP's JSON encoding, so no protobuf dep. File-spool
+  restart-durability is a noted parity extension (in-memory retry spool covers
+  the transient-outage case).
 
 ### Hub read kernels (console data plane) — generic-over-return-type vs `any` + Coerce
 
