@@ -372,13 +372,14 @@ re-baseline on a quiet (non-swapping) host.
 Conquest of the main example set (tracked in
 `docs/rust-example-conquest-registry.md`). Build-level via `scripts/rust-sweep.sh`.
 
-**26 in-scope build:** `00, 01, 04, 07, 09, 10, 12, 14, 15, 16, 17, 18, 19, 20,
-21, 22, 23, 24, 26, 28, 30, 32, 33, 35, simple, test_pkg` — up from a 6-example
-baseline. `19-skyforum` and `26-ui-showcase` joined via the Std.Ui parity work;
-`24-tui-kitchen-sink` (multibackend Live+Tui main) via the #24 entry-model
-refactor, which ALSO un-gated the pure-Tui `21/22/23` (their `Tui.app |>
-Task.run` main now block_on's). `31-webview-stopwatch-ui` remains out (a Webview
-`view : Model -> any` carrier-resolution gap, not an entry-model issue). Driven by
+**27 in-scope build:** `00, 01, 04, 07, 09, 10, 12, 14, 15, 16, 17, 18, 19, 20,
+21, 22, 23, 24, 26, 28, 30, 31, 32, 33, 35, simple, test_pkg` — up from a
+6-example baseline. `19-skyforum` and `26-ui-showcase` joined via the Std.Ui
+parity work; `24-tui-kitchen-sink` (multibackend Live+Tui main) via the #24
+entry-model refactor, which ALSO un-gated the pure-Tui `21/22/23` (their
+`Tui.app |> Task.run` main now block_on's); `31-webview-stopwatch-ui` via the
+Webview `view : Model -> any` carrier fix (builds + runs the stub backend, which
+returns a graceful `Err` without `--features webview`). Driven by
 general, regression-gated codegen wins: TEA-Msg monomorphisation, multi-module
 serde, body-driven param inference, `Arc<dyn Fn>` stored callbacks, cross-module
 ADT-name resolution, whole-program DCE (matching Go's dep-decl prune), injective

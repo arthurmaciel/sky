@@ -19,15 +19,16 @@ command -v sccache >/dev/null 2>&1 && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-scc
 mkdir -p "$CARGO_TARGET_DIR"
 
 # Out-of-scope on the Rust backend, recorded but not a build target:
-#  - no Rust monolith reference: 02 06 11 19 25 26 27 29 31 34 36 37 38
+#  - no Rust monolith reference: 02 06 11 19 25 26 27 29 34 36 37 38
 #  - Go-package→Rust-native FFI examples (per user 2026-06-10, NOT a goal —
 #    they import Go packages like gorilla/mux, stripe-go, google/uuid,
 #    godotenv): 03 05 08 13
 # 19-skyforum + 26-ui-showcase now build on Rust (Std.Ui parity work) — in scope.
 # 24-tui-kitchen-sink (multibackend Live+Tui main) builds via the #24 entry-model
 # refactor — in scope. 21/22/23 (pure-Tui) un-gated by the same refactor (their
-# `Tui.app |> Task.run` main now block_on's) — in scope.
-OUT_OF_SCOPE=" 02 03 05 06 08 11 13 25 27 29 31 34 36 37 38 "
+# `Tui.app |> Task.run` main now block_on's). 31-webview-stopwatch-ui builds via
+# the Webview view:any carrier fix (stub backend) — in scope.
+OUT_OF_SCOPE=" 02 03 05 06 08 11 13 25 27 29 34 36 37 38 "
 
 printf "%-26s %s\n" "EXAMPLE" "RESULT"
 printf "%-26s %s\n" "-------" "------"
