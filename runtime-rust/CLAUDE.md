@@ -134,6 +134,7 @@ script directly; the skill is just the agent-facing wrapper + procedure.
 | `sky-rust-backend:build-sweep` | `build-sweep.sh` | `sky build --target rust` + `cargo build` over the largest example set |
 | `sky-rust-backend:run-sweep` | `run-sweep.sh` | build + RUN each runnable example (cli no-panic; server/live boots + `curl GET / → 200`) |
 | `sky-rust-backend:web-sweep` | `web-sweep.sh` + `web-verify.mjs` | drive live examples through headless chromium; hard-fail "click is a no-op" |
+| `sky-rust-backend:equiv-sweep` | `equiv-sweep.sh` | build each comparable CLI example on BOTH backends, run both, diff stdout (Go≡Rust output parity) |
 | `sky-rust-backend:perf-sweep` | `perf-sweep.sh` | Rust-vs-Go cold-start/RSS/binsize/throughput + regression report |
 | `sky-rust-backend:keep-go-parity` | `keep-go-parity.sh` | orchestrate sync → warranted sweeps (planner: `snapshot`/`plan`) |
 | `sky-rust-backend:sync-with-upstream` | — (agent-driven git runbook) | ingest `anzellai/sky` upstream into `feat/runtime-rust` |
