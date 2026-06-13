@@ -391,6 +391,7 @@ test-suite sky-tests
       Sky.Build.NestedCasePatternFieldAccessSpec
       Sky.Build.ConsCtorPatternSpec
       Sky.Build.ConsPatternLengthSpec
+      Sky.Build.ListLiteralPatternSpec
       Sky.Build.CtorConsPatternSpec
       Sky.Build.EnvPrefixSpec
       Sky.Build.FfiGenMultiSpec
@@ -402,7 +403,9 @@ test-suite sky-tests
       Sky.Build.RuntimeFingerprintSpec
       Sky.Build.PointFreePolyAliasSpec
       Sky.Build.PartialKernelAppSpec
+      Sky.Build.PartialUserHofSpec
       Sky.Build.HofTypedMsgSpec
+      Sky.Build.CurriedLambdaStageCSpec
       Sky.Build.CoerceArgParametricSpec
       Sky.Build.UnannotatedParametricCfgViewSpec
       Sky.Build.UnannotatedParametricCfgUserHelperSpec

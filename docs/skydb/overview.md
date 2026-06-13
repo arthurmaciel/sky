@@ -51,10 +51,92 @@ Every operation that touches the disk returns `Task Error a` (per the [Task-ever
 
 | Function | Type | Notes |
 |---|---|---|
-| `Db.exec` | `Db -> String -> List a -> Task Error Int` | Parameterised insert / update / delete; returns affected rows |
+| `Db.exec` | `Db -> String -> List a -> Task Error Int` | Parameterised insert / update / delete; returns affected rows. v0.16.26+: passing `List SqlValue` gives per-column type fidelity; v0.16.24+: `Maybe a` binds as SQL NULL / unwrapped value directly. |
 | `Db.execRaw` | `Db -> String -> Task Error Int` | DDL or multi-statement script — **no** parameter binding (vulnerable to injection if `sql` is built from user input). Use for `CREATE TABLE`, `CREATE INDEX`. |
-| `Db.query` | `Db -> String -> List a -> Task Error (List (Dict String String))` | Returns rows as `Dict String String` (every column stringified at the boundary) |
+| `Db.query` | `Db -> String -> List a -> Task Error (List (Dict String String))` | Returns rows as `Dict String String` (every column stringified at the boundary). Same param semantics as `Db.exec`. |
 | `Db.queryDecode` | `Db -> String -> List a -> b -> Task Error (List b)` | Decoder is parametric — typically a `Dict String String -> Result Error a` function; failures abort the whole query |
+| `Db.updateFields` | `Db -> String -> List (String, SqlValue) -> List (String, SqlField) -> Task Error Int` | **v0.16.26+** PATCH-style update with dynamic SQL. `SetField v` includes the column with `?` placeholder; `OmitField` drops it from the SET clause entirely (database keeps existing value). Column-name validation prevents SQL injection via identifiers. |
+| `Db.insertFields` | `Db -> String -> List (String, SqlField) -> Task Error Int` | **v0.16.29+ (#585)** INSERT counterpart of `updateFields`. `SetField v` includes the column with `?` placeholder; `OmitField` drops it from the column list so the database applies its `DEFAULT`. All columns `OmitField` → `INSERT INTO <table> DEFAULT VALUES`. Same identifier validation + `dbBindArg` normalisation as `updateFields`. |
+| `Db.insertFieldsReturning` | `Db -> String -> List (String, SqlField) -> String -> Decoder a -> Task Error (List a)` | **v0.16.30+ (#586)** Decoding counterpart of `insertFields`. Appends `RETURNING <projection>` (caller-controlled — same trust model as `queryDecode`'s SQL), then decodes each returned row through `decoder`. Requires SQLite ≥ 3.35 (Mar 2021) or PostgreSQL. Unblocks emission of `id` / `created_at` autodefaults + sky-sqlgen's `@omit` + RETURNING shapes. |
+
+#### Typed parameter binding via `SqlValue` (v0.16.26+)
+
+Sky's HM keeps `List a` homogeneous, so mixed-type SQL params (e.g. `String + Maybe Int + Bool`) need a tagged variant. The `SqlValue` ADT in `Std.Db` covers SQLite's 5 storage classes plus PostgreSQL's common extensions:
+
+```elm
+type SqlValue
+    = SqlString String       -- TEXT / VARCHAR / CHAR / UUID-as-text / JSON-as-text
+    | SqlInt Int             -- INTEGER / SMALLINT / BIGINT / SERIAL
+    | SqlFloat Float         -- REAL / DOUBLE PRECISION
+    | SqlBool Bool           -- BOOLEAN
+    | SqlBytes String        -- BLOB / BYTEA
+    | SqlDecimal Decimal     -- NUMERIC / DECIMAL
+    | SqlTime Int            -- TIMESTAMP / DATE / TIMETZ (Unix millis)
+    | SqlMoney Money         -- TEXT as "ISO_CODE AMOUNT" (lossless round-trip)
+    | SqlNull SqlValue       -- typed NULL via wrapped type-witness
+```
+
+Maybe-lifting helpers cover the common nullable-column case: `fromMaybeString` / `fromMaybeInt` / `fromMaybeFloat` / `fromMaybeBool` / `fromMaybeBytes` / `fromMaybeDecimal` / `fromMaybeTime` / `fromMaybeMoney`.
+
+```elm
+-- INSERT with mixed types — no stringify, no Ffi.toAny
+Db.exec conn
+    "INSERT INTO orders (id, customer, total, paid_at) VALUES (?, ?, ?, ?)"
+    [ SqlInt orderId
+    , SqlString customerUuid
+    , SqlMoney total                 -- serialises as "USD 1234.56"
+    , fromMaybeTime maybePaidAt      -- nullable column
+    ]
+```
+
+For partial UPDATEs where you want to skip columns entirely (PATCH semantics — set this, clear that, leave the rest alone), `Db.updateFields` takes a `List (String, SqlField)`:
+
+```elm
+type SqlField
+    = SetField SqlValue     -- column = ?, bind value (which may be SqlNull)
+    | OmitField              -- column not in SET clause; database keeps existing value
+
+Db.updateFields conn "orders"
+    [ ("id", SqlInt orderId) ]                                    -- WHERE
+    [ ("status",  SetField (SqlString "refunded"))                -- change
+    , ("paid_at", SetField (SqlNull (SqlTime 0)))                 -- explicit NULL
+    , ("notes",   OmitField)                                      -- leave alone
+    ]
+-- → UPDATE orders SET status = ?, paid_at = ? WHERE id = ?
+```
+
+For INSERTs with DEFAULT-omittable columns (set this, NULL that, let the database fill the rest), `Db.insertFields` is the INSERT counterpart — same `SqlField` three-state model, no WHERE clause:
+
+```elm
+Db.insertFields conn "items"
+    [ ("name",   SetField (SqlString "Widget"))                   -- value
+    , ("status", OmitField)                                       -- → DEFAULT
+    , ("note",   SetField (SqlString "first batch"))              -- value
+    ]
+-- → INSERT INTO items (name, note) VALUES (?, ?)
+--   (status omitted; database applies its DEFAULT)
+```
+
+All columns `OmitField` → `INSERT INTO <table> DEFAULT VALUES` (one all-defaults row).  Returns the affected-row count.
+
+When you need the values the database picked — autoincrement `id`, `DEFAULT created_at`, a generated column — pair with `Db.insertFieldsReturning` instead:
+
+```elm
+Db.insertFieldsReturning conn "items"
+    [ ("name",   SetField (SqlString "Widget"))
+    , ("status", OmitField)                    -- → DEFAULT 'pending'
+    , ("note",   SetField (SqlString "first batch"))
+    ]
+    "id, status"                               -- RETURNING clause
+    rowDecoder
+-- → INSERT INTO items (name, note) VALUES (?, ?)
+--      RETURNING id, status
+-- decoded as List Row (typically one row).
+```
+
+The projection string is a caller-controlled SQL fragment — the same trust model as `queryDecode`'s SQL.  Schema-derived literals (sky-sqlgen) are safe; user input is not.  Requires SQLite ≥ 3.35 (Mar 2021) or PostgreSQL — same as every other `RETURNING` use already in `Std.Db`.
+
+Money round-trips via `Std.Db.Decode.money` on the read side — paired with `SqlMoney` on the write side for lossless single-TEXT-column storage that survives PostgreSQL `NUMERIC + CHAR(3)` if you decompose at the call site instead.
 
 ### Conventional CRUD (auto-generated SQL)
 

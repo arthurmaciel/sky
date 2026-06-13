@@ -666,7 +666,9 @@ readme =
         |> Task.andThen (\content -> println content)
 ```
 
-`readFile`, `readFileLimit`, `readFileBytes`, `writeFile`, `append`, `mkdirAll`, `readDir`, `exists`, `remove`, `isDir`, `tempFile`, `copy`, `rename`.
+`readFile`, `readFileLimit`, `readFileBytes`, `writeFile`, `append`, `mkdirAll`, `readDir`, `exists`, `remove`, `isDir`, `tempFile`, `tempDir`, `copy`, `rename`.
+
+`exists` / `isDir` return `Task Error Bool` (effects — the disk could be unmounted between successive calls).  `tempFile` / `tempDir` create uniquely-named entries in the system temp dir and return the absolute path; caller is responsible for `remove`-ing when done.
 
 ### `Io` — stdin / stdout / stderr
 
@@ -744,7 +746,7 @@ userDecoder =
         |> DbDecode.andMap (DbDecode.int "id")
         |> DbDecode.andMap (DbDecode.string "name")
         |> DbDecode.andMap (DbDecode.string "email")
-        |> DbDecode.andMap (DbDecode.nullable "age" (DbDecode.int "age"))
+        |> DbDecode.andMap (DbDecode.nullable (DbDecode.int "age"))
 
 users : Db -> Task Error (List User)
 users db = Db.queryDecode db "SELECT id, name, email, age FROM users" [] userDecoder
@@ -753,7 +755,42 @@ userById : Db -> Int -> Task Error (Maybe User)
 userById db uid = Db.getByIdDecode db "users" uid userDecoder
 ```
 
-Surface: `string` / `int` / `float` / `bool` / `nullable` (per-column primitives), `succeed` / `fail`, `map` / `andThen` / `andMap`, `map2` / `map3` / `map4` / `map5`, `required` / `optional` (pipeline-style). See [`docs/skydb/overview.md`](skydb/overview.md) for the full decoder pipeline pattern.
+Surface: `string` / `int` / `float` / `bool` / `money` / `nullable` (per-column primitives), `succeed` / `fail`, `map` / `andThen` / `andMap`, `map2` / `map3` / `map4` / `map5`, `required` / `optional` (pipeline-style). See [`docs/skydb/overview.md`](skydb/overview.md) for the full decoder pipeline pattern.
+
+### `Std.Db.SqlValue` — typed SQL parameter binding (v0.16.26)
+
+Mixed-type SQL params (`INSERT … VALUES (?, ?, ?)` with a `String + Maybe Int + Bool` tuple) flow through `Db.exec` / `Db.query` as a homogeneous `List SqlValue` with full per-column type fidelity to the driver. Closes the no-stringify gap — the recursive `SqlNull SqlValue` carries a type-witness so the driver knows what column type to bind NULL as.
+
+```elm
+import Std.Db as Db exposing (SqlValue(..), SqlField(..))
+import Std.Money as Money
+
+-- INSERT with mixed types
+saveOrder : Db -> Int -> String -> Money -> Maybe Int -> Task Error Int
+saveOrder conn orderId customer total maybePaidAt =
+    Db.exec conn
+        "INSERT INTO orders (id, customer, total, paid_at) VALUES (?, ?, ?, ?)"
+        [ SqlInt orderId
+        , SqlString customer
+        , SqlMoney total
+        , Db.fromMaybeTime maybePaidAt   -- nullable column
+        ]
+
+-- PATCH-style partial update — only SetField columns appear in the SQL
+updateOrder : Db -> Int -> Maybe String -> Bool -> Task Error Int
+updateOrder conn orderId maybeStatus refunded =
+    Db.updateFields conn "orders"
+        [ ("id", SqlInt orderId) ]                                       -- WHERE
+        [ ( "status"
+          , case maybeStatus of
+                Just s  -> SetField (SqlString s)
+                Nothing -> OmitField                                     -- leave alone
+          )
+        , ( "refunded", SetField (SqlBool refunded) )
+        ]
+```
+
+Variants (9 total) — `SqlString` / `SqlInt` / `SqlFloat` / `SqlBool` / `SqlBytes` / `SqlDecimal` / `SqlTime` / `SqlMoney` / `SqlNull SqlValue`. Money serialises lossless as `"ISO_CODE AMOUNT"` TEXT; round-trip via `Db.Decode.money`. Maybe-lifting helpers: `fromMaybeString` / `fromMaybeInt` / `fromMaybeFloat` / `fromMaybeBool` / `fromMaybeBytes` / `fromMaybeDecimal` / `fromMaybeTime` / `fromMaybeMoney`. `SqlField` (`SetField SqlValue` | `OmitField`) for partial updates via `Db.updateFields` and DEFAULT-omittable INSERTs via `Db.insertFields` (#585) — `OmitField` columns drop from the SQL so the database applies their `DEFAULT`; all-omit → `INSERT … DEFAULT VALUES`. `Db.insertFieldsReturning table fields projection decoder` (#586) appends `RETURNING <projection>` to the same builder and decodes each returned row via `Std.Db.Decode` — for picking up assigned autoincrement ids / applied DEFAULTs / generated columns at INSERT time (SQLite ≥ 3.35 / PostgreSQL).
 
 ### `Log` — structured logging
 

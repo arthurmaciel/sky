@@ -7312,6 +7312,52 @@ exprToGoExpectGo goRendering e@(A.At _ expr)
             , all (/= "any") paramTys -> do
                 lowerTypedLambda pats paramTys retTy body
 
+        -- #590 — Stage C curried-shape arm.  When the slot type is
+        -- `func(T1) func(T2) ... func(TN) R` (a curried Go function)
+        -- AND the Sky lambda has N patterns, peel the curried shape
+        -- with `splitCurriedFuncTypeStr` and emit each level with its
+        -- typed param via `curryLambdaPatTyped[Pre]`.  Mirrors the
+        -- working `coerceFallback` site at Compile.hs:9364 and
+        -- `kernelCoerceArg` at 10190.  Pre-fix, multi-arg Sky lambdas
+        -- at curried HOF call sites (e.g. `\t acc -> ...` against
+        -- foldl's `(a -> b -> b)`) fell through to the generic
+        -- `coerceReturnExprT` path and emitted `func(any) func(any) R`
+        -- — the `acc` param stayed `any` even when the slot pinned it
+        -- to a concrete type via the surrounding function's generic
+        -- substitution.  Go then rejected the call at type-check time
+        -- when the lambda's emitted return-type (concretely typed via
+        -- the body's leaf expression) conflicted with the unrefined
+        -- `any` param.
+        Can.Lambda pats body
+            | length pats > 1
+            , (inputTypes, finalRet0) <-
+                splitCurriedFuncTypeStr (length pats) goRendering
+            , length inputTypes == length pats
+            , length inputTypes > 0
+            , all (/= "any") inputTypes
+            , all isEmittableGoType inputTypes ->
+                let finalRet =
+                        if finalRet0 == "any"
+                            then case inferGoType
+                                    (Rec._cg_solvedTypes getCgEnv)
+                                    body of
+                                "any" -> "any"
+                                concrete -> concrete
+                            else finalRet0
+                    skyTys = map goTypeStrToSkyType inputTypes
+                    bindings = patVarTypes pats skyTys
+                    bodyPreTyped = isEmittableGoType finalRet
+                    rawBody =
+                        if bodyPreTyped
+                            then exprToGoExpectGo finalRet body
+                            else exprToGo body
+                    body' = withScopedLambdaTypes bindings rawBody
+                in if bodyPreTyped
+                    then curryLambdaPatTypedPre inputTypes finalRet
+                            pats body'
+                    else curryLambdaPatTyped inputTypes finalRet
+                            pats body'
+
         -- v0.15 Stage C.2 — type-directed list literal.
         --
         -- When `goRendering` parses as `[]T`, each list element is
@@ -10607,13 +10653,23 @@ emitPartialUserCall func suppliedArgs missing =
     let -- Resolve callee qualified name so we can look up its typed
         -- param signature and coerce both the supplied args and the
         -- closure-captured extras.
+        --
+        -- #580: route the trailing `name` through `goSafeName` so the
+        -- lookup key matches the registration key. Without this, a
+        -- callee whose Sky name is a Go predeclared identifier (`map`,
+        -- `new`, `len`, …) registers under `Mod_name_` (trailing `_`
+        -- per `goSafeName`) but the lookup misses by using the bare
+        -- `Mod_name`. With paramTypes empty the wrapper falls back to
+        -- `func(any) any` even when typed routing was available — and
+        -- the inner generic instantiation lands with both args
+        -- unwrapped, which `go build` rejects.
         qualName = case A.toValue func of
             Can.VarTopLevel home name ->
                 let modStr = ModuleName.toString home
                 in if null modStr || modStr == "Main"
-                     then name
+                     then goSafeName name
                      else map (\c -> if c == '.' then '_' else c) modStr
-                          ++ "_" ++ name
+                          ++ "_" ++ goSafeName name
             _ -> ""
         env = getCgEnv
         paramTypes = Map.findWithDefault [] qualName
@@ -10625,23 +10681,43 @@ emitPartialUserCall func suppliedArgs missing =
         -- the registry). Length must be exactly `missing` so the
         -- wrapper chain length matches.
         availableExtras = drop (length suppliedArgs) paramTypes
-        -- v0.13 Stage 1 fix — erase any TVar placeholders in the
-        -- extra (missing) param types BEFORE using them as wrapper
-        -- input types. Without this, a partial-app of a generic
-        -- function (e.g. `List.filter pred`) emits a wrapper with
-        -- bare TVars (`func(__pp0 []T1) any`) which Go rejects:
-        -- T1 is only valid inside the kernel's generic body, not
-        -- at the wrapper construction site in user code.
+        -- #580 σ-recovery — when supplied args have concrete Go types,
+        -- pin the callee's TVars from them so the missing-slot wrapper
+        -- params + ultimate return type can carry concrete shapes
+        -- instead of being erased to `any`. Without this a
+        -- `List.map dbl` (with `dbl : Int -> Int`) emitted as
+        -- `func(__pp0 []any) any` even though Sky's HM solver had
+        -- already pinned T1=int, T2=int from `dbl`. The bare-`any`
+        -- wrapper then mismatched against the inner call's
+        -- `Sky_Core_List_map_[any, any]` explicit instantiation when
+        -- `dbl` was passed raw (concrete func into func(any) any slot).
+        -- Mirror of the call-site σ-recovery at the typed-kernel
+        -- path (line ~7740) — same logic, applied to suppliedArgs.
+        suppliedSigma = Map.unions
+            [ recovered
+            | (paramTy, srcArg) <- zip suppliedTypes suppliedArgs
+            , containsGenericTypeParam paramTy
+            , let srcGoExpr = exprToGo srcArg
+            , Just srcGoTy <- [goExprGoType (Just srcArg) srcGoExpr]
+            , srcGoTy /= "any"
+            , not (containsGenericTypeParam srcGoTy)
+            , let recovered = unifyGoTypes paramTy srcGoTy
+            , not (Map.null recovered)
+            ]
+        applySigma t =
+            let subbed = substTVarsInGoType suppliedSigma t
+            in if containsGenericTypeParam subbed
+                 then eraseTypeParams subbed
+                 else subbed
         extraTypes    = take missing
-                          (map eraseTypeParams availableExtras
+                          (map applySigma availableExtras
                               ++ repeat "any")
         -- v0.13 Stage 2 — typed partial-app wrapper. Reads the
         -- callee's ULTIMATE return type (scalar, after every arg
-        -- applies) from `_cg_funcUltimateRetType`. Falls back to
-        -- "any" when unavailable so we never emit a worse shape
-        -- than the historical `func(any) any` default. Erase TVars
-        -- for the same reason as extraTypes.
-        ultRetType = eraseTypeParams
+        -- applies) from `_cg_funcUltimateRetType`. With σ recovered
+        -- the substitution can preserve concrete shape (`[]int` not
+        -- `[]any`); erase any TVars σ didn't pin.
+        ultRetType = applySigma
                         (Map.findWithDefault "any" qualName
                            (Rec._cg_funcUltimateRetType env))
         -- v0.15.2: typed-target call args via `zipWithDefaultExpect`.
@@ -10649,7 +10725,24 @@ emitPartialUserCall func suppliedArgs missing =
         extraNames = [ "__pp" ++ show i | i <- [0 .. missing - 1] ]
         extraIdents = zipWith (\n ty -> coerceArg Nothing (GoIr.GoIdent n) ty)
                               extraNames extraTypes
-        finalCall = GoIr.GoCall (exprToGo func) (suppliedGo ++ extraIdents)
+        -- #580 — when σ-recovery pinned every TVar in the callee's
+        -- param list (no remaining unbound generics), drop the
+        -- explicit `[any, any]` instantiation that `exprToGo func`
+        -- would otherwise inject. Go's call-site type inference can
+        -- then pin the callee's T-vars from the now-typed wrapper
+        -- params + supplied args. This is what makes the inner call
+        -- consistent: a concrete supplied arg (e.g. `dbl :
+        -- func(int) int`) and a typed wrapper param (e.g. `__pp0
+        -- []int`) both pin T1=int, T2=int. Pre-fix the explicit
+        -- `[any, any]` forced T-vars to any while `dbl` stayed
+        -- concrete — `go build` rejected the mismatch.
+        allExtrasConcrete = not (any containsGenericTypeParam extraTypes)
+                              && not (containsGenericTypeParam ultRetType)
+                              && not (null availableExtras)
+        finalCallTarget
+            | allExtrasConcrete = GoIr.GoIdent qualName
+            | otherwise         = exprToGo func
+        finalCall = GoIr.GoCall finalCallTarget (suppliedGo ++ extraIdents)
         -- Build the curried wrapper chain from the inside out.
         -- Innermost wrapper returns `ultRetType`; each outer
         -- wrapper returns `func(P_inner) <inner_ret>`.
@@ -12019,33 +12112,69 @@ patternCondition subject pat = case pat of
                 (GoIr.GoCall (GoIr.GoIdent "len")
                     [ GoIr.GoCall (GoIr.GoIdent "rt.AsList") [GoIr.GoIdent subject] ])
                 (GoIr.GoIntLit minLen)
-            -- Head/tail discriminator narrowing on the OUTER cons. The
-            -- chain-length condition above already covers structural
-            -- length; per-head ADT/literal narrowing still routes
-            -- through consHeadCondition / consTailCondition for the
-            -- top cons (deeper-position head narrowing is left to a
-            -- future patch — the current bug repro never needed it).
-            (A.At _ hPat) = h
-            (A.At _ tPat) = t
-            headCond = consHeadCondition subject hPat
-            -- Skip the tail condition when the tail is itself a PCons
-            -- (length now folded into `lenCond`) or PList (same — the
-            -- exact match is already baked into `lenCond`/`isExact`).
-            tailCond = case tPat of
+            -- #583 soundness fix — walk the cons spine and emit a
+            -- head-discriminator condition at EVERY position, not
+            -- just the outermost.  Pre-fix, only the outer head got
+            -- its tag tested:
+            --     (TWord a) :: (TSym s) :: rest
+            -- emitted `len >= 2 && tag(slice[0]) == 0` and bound
+            -- `s := AdtField(slice[1], 0)` UNCONDITIONALLY — a
+            -- `[TWord, TNum]` payload silently produced
+            -- `s = <int>` bound into a String slot (cross-type
+            -- confusion + cross-constructor leak).  The spine walk
+            -- now emits a discriminator per non-PVar/PAnything
+            -- head at the runtime expression `rt.AsList(subject)[i]`.
+            spineHeads = collectSpineHeads 0 (A.At A.one (Can.PCons h t))
+            headConds =
+                [ c
+                | (i, hPat) <- spineHeads
+                , Just c <- [patternConditionForExpr
+                                ("rt.AsList(" ++ subject ++ ")[" ++ show i ++ "]")
+                                hPat]
+                ]
+            -- Terminator tail condition.  After walking the spine,
+            -- the terminator is whatever non-PCons pattern stopped
+            -- the chain (typically PVar / PAnything → Nothing).
+            -- Length already folded into `lenCond` covers PList and
+            -- PCons chains so we only need a discriminator when the
+            -- terminator is something else (e.g. a literal sub-list
+            -- match, rare).  The terminator slice starts at index
+            -- `length spineHeads`.
+            terminator = consSpineTerminator (A.At A.one (Can.PCons h t))
+            tailCond = case terminator of
                 Can.PCons _ _ -> Nothing
                 Can.PList _   -> Nothing
-                _             -> consTailCondition subject tPat
-            extras = [ c | Just c <- [headCond, tailCond] ]
+                Can.PVar _    -> Nothing
+                Can.PAnything -> Nothing
+                _ ->
+                    let idx = length spineHeads
+                        tailRaw = "any(rt.AsList(" ++ subject
+                                  ++ ")[" ++ show idx ++ ":])"
+                    in patternConditionForExpr tailRaw terminator
+            extras = headConds ++ [ c | Just c <- [tailCond] ]
         in Just $ foldl (GoIr.GoBinary "&&") lenCond extras
 
-    -- Fixed-length list: match exact length; element conditions handled in
-    -- bindings below (codegen over-matches conservatively — strict element
-    -- matching would need nested if-cascades we don't model in a single cond).
+    -- Fixed-length list: exact length AND each element's pattern
+    -- discriminator.  Pre-#587 the codegen only checked length and
+    -- "deferred element conditions to the bindings" — but bindings
+    -- run AFTER the arm gate, so `case xs of [Star Nothing] -> …`
+    -- accepted `[Col "id"]` and `[Star (Just "x")]` too.  Mirrors
+    -- the spine-discriminator emission #583 added to PCons: walk
+    -- the literal elements, AND in any `patternConditionForExpr`
+    -- result against `rt.AsList(subj)[i]`.  Short-circuiting on the
+    -- length check keeps the indexed reads safe at runtime.
     Can.PList xs ->
-        Just $ GoIr.GoBinary "=="
-            (GoIr.GoCall (GoIr.GoIdent "len")
-                [ GoIr.GoCall (GoIr.GoIdent "rt.AsList") [GoIr.GoIdent subject] ])
-            (GoIr.GoIntLit (length xs))
+        let lenCond = GoIr.GoBinary "=="
+                (GoIr.GoCall (GoIr.GoIdent "len")
+                    [ GoIr.GoCall (GoIr.GoIdent "rt.AsList") [GoIr.GoIdent subject] ])
+                (GoIr.GoIntLit (length xs))
+            elemConds =
+                [ c
+                | (i, A.At _ p) <- zip [0 :: Int ..] xs
+                , Just c <- [patternConditionForExpr
+                    ("rt.AsList(" ++ subject ++ ")[" ++ show i ++ "]") p]
+                ]
+        in Just (foldl (GoIr.GoBinary "&&") lenCond elemConds)
 
     -- A tuple's shape is guaranteed by HM, but its components can
     -- carry discriminating sub-patterns (`(Just x, Just y)`) — those
@@ -12210,6 +12339,38 @@ consChainLength (A.At _ p) = case p of
         (0, False)
 
 
+-- | Walk a cons-pattern spine and collect (index, head_pattern) for
+-- every position.  `a :: b :: c :: rest` returns
+-- `[(0, a), (1, b), (2, c)]` — `rest` is the terminator and not
+-- included.  Used by #583's head-discriminator-at-every-position fix:
+-- the OUTER cons's `patternCondition` walks the whole spine and emits
+-- a tag/literal/sub-pattern check at each runtime index instead of
+-- only the outermost head.
+--
+-- PAlias unwraps and continues walking so `((a :: b :: rest) as whole)`
+-- still emits the b-discriminator at index 1.  PList terminates the
+-- walk (its element checks are independent — see consChainLength).
+collectSpineHeads :: Int -> Can.Pattern -> [(Int, Can.Pattern_)]
+collectSpineHeads i (A.At _ p) = case p of
+    Can.PCons h t ->
+        let (A.At _ hPat) = h
+        in (i, hPat) : collectSpineHeads (i + 1) t
+    Can.PAlias inner _ ->
+        collectSpineHeads i inner
+    _ -> []
+
+
+-- | The pattern that terminates a cons-pattern spine — the value at
+-- the deepest tail position (the `rest` in `a :: b :: rest`).  Used
+-- by #583's tail-condition path to know what offset the runtime
+-- terminator slice starts at and what discriminator (if any) to emit.
+consSpineTerminator :: Can.Pattern -> Can.Pattern_
+consSpineTerminator (A.At _ p) = case p of
+    Can.PCons _ t   -> consSpineTerminator t
+    Can.PAlias inner _ -> consSpineTerminator inner
+    other           -> other
+
+
 -- | Discriminator condition for the head pattern of a `(h :: t)` cons.
 -- The cons-pattern itself only checks `len >= 1`; this function adds
 -- the head's narrowing condition so that, e.g., `(AttrDescribe d) ::
@@ -12284,7 +12445,7 @@ patternConditionForExpr subjectRaw pat = case pat of
                 "rune")
             (GoIr.GoRuneLit c)
 
-    Can.PCtor _home typeName union ctorName ctorIdx _args ->
+    Can.PCtor _home typeName union ctorName ctorIdx args ->
         -- Sky's `Bool` lowers to a raw Go `bool`, so a True/False
         -- ctor pattern must compare the value directly — `rt.EnumTagIs`
         -- expects an SkyADT and is always false on a `bool`. The
@@ -12307,14 +12468,33 @@ patternConditionForExpr subjectRaw pat = case pat of
                     , GoIr.GoIntLit ctorIdx
                     ]
             _ ->
-                -- Tagged ADT: read .Tag via the rt.AdtTag helper which
-                -- accepts any-typed inputs and routes through
-                -- reflection if needed (so this works whether the head
-                -- value is Sky-side typed or any-boxed at runtime).
-                Just $ GoIr.GoBinary "=="
-                    (GoIr.GoCall (GoIr.GoQualified "rt" "AdtTag")
-                        [GoIr.GoCall (GoIr.GoIdent "any") [GoIr.GoRaw subjectRaw]])
-                    (GoIr.GoIntLit ctorIdx)
+                -- Tagged ADT: read .Tag via the rt.AdtTag helper AND
+                -- recurse into every ctor arg that carries a non-
+                -- trivial sub-pattern.  #587 surfaced the missing
+                -- recursion via a `[Star Nothing]` list literal —
+                -- without it, `Star (Just "x")` and `Star Nothing`
+                -- both compared equal at the gate, then the body
+                -- bindings ran on a wrong-shaped value.  The
+                -- top-level `patternCondition` PCtor handler already
+                -- mirrors this via `argPatternCondition`; we walk
+                -- the same args here but build accessors as raw Go
+                -- expressions because subjectRaw is an arbitrary
+                -- expression, not a bound name.
+                let outer = GoIr.GoBinary "=="
+                        (GoIr.GoCall (GoIr.GoQualified "rt" "AdtTag")
+                            [GoIr.GoCall (GoIr.GoIdent "any") [GoIr.GoRaw subjectRaw]])
+                        (GoIr.GoIntLit ctorIdx)
+                    argSubjRaw idx = case ctorName of
+                        "Ok"   -> "rt.ResultOk(" ++ subjectRaw ++ ")"
+                        "Err"  -> "rt.ResultErr(" ++ subjectRaw ++ ")"
+                        "Just" -> "rt.MaybeJust(" ++ subjectRaw ++ ")"
+                        _      -> "rt.AdtField(" ++ subjectRaw ++ ", " ++ show idx ++ ")"
+                    inners =
+                        [ c
+                        | Can.PatternCtorArg idx _ (A.At _ argPat) <- args
+                        , Just c <- [patternConditionForExpr (argSubjRaw idx) argPat]
+                        ]
+                in Just (foldl (GoIr.GoBinary "&&") outer inners)
 
     Can.PCons h t ->
         -- Nested cons (e.g. `(_ :: _) :: _`, or the inner cons from a
@@ -12333,11 +12513,20 @@ patternConditionForExpr subjectRaw pat = case pat of
             (GoIr.GoIntLit minLen)
 
     Can.PList xs ->
-        Just $ GoIr.GoBinary "=="
-            (GoIr.GoCall (GoIr.GoIdent "len")
-                [ GoIr.GoCall (GoIr.GoQualified "rt" "AsList")
-                    [GoIr.GoRaw subjectRaw] ])
-            (GoIr.GoIntLit (length xs))
+        -- Nested PList (inside a tuple component / ctor arg / cons
+        -- spine): same #587 fix — length AND per-element discriminator.
+        let lenCond = GoIr.GoBinary "=="
+                (GoIr.GoCall (GoIr.GoIdent "len")
+                    [ GoIr.GoCall (GoIr.GoQualified "rt" "AsList")
+                        [GoIr.GoRaw subjectRaw] ])
+                (GoIr.GoIntLit (length xs))
+            elemConds =
+                [ c
+                | (i, A.At _ p) <- zip [0 :: Int ..] xs
+                , Just c <- [patternConditionForExpr
+                    ("rt.AsList(" ++ subjectRaw ++ ")[" ++ show i ++ "]") p]
+                ]
+        in Just (foldl (GoIr.GoBinary "&&") lenCond elemConds)
 
     Can.PAlias inner _ ->
         let (A.At _ innerPat) = inner

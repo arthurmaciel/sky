@@ -880,7 +880,7 @@ Each binding is either:
 | Module | Path | Key functions |
 |---|---|---|
 | `Basics` | `Sky.Core.Basics` (autoloaded via `Sky.Core.Prelude`) | identity, always, not, toString, modBy, clamp, fst, snd, compare, negate, abs, sqrt, min, max |
-| `String` | `Sky.Core.String` | 36 entries — length, reverse, append, split, join, contains/containsIn, startsWith/startsWithIn, endsWith/endsWithIn (haystack-first In-suffixed companions added v0.15.47), toInt, fromInt, toFloat, fromFloat, toUpper, toLower, trim/trimStart/trimEnd, replace, slice, isEmpty, fromChar, toList, fromList, repeat, padLeft, padRight, casefold, equalFold, isEmail, isUrl, words, lines, concat |
+| `String` | `Sky.Core.String` | 38 entries — length, reverse, append, split, join, contains/containsIn, startsWith/startsWithIn, endsWith/endsWithIn (haystack-first In-suffixed companions added v0.15.47), toInt, fromInt, toFloat, fromFloat, toUpper, toLower, trim/trimStart/trimEnd, replace, slice, dropLeft, dropRight (v0.16.31 — Elm-shaped rune-based), isEmpty, fromChar, toList, fromList, repeat, padLeft, padRight, casefold, equalFold, isEmail, isUrl, words, lines, concat |
 | `List` | `Sky.Core.List` | map, filter, foldl, foldr, length, head, tail, take, drop, append, concat, concatMap, reverse, member, any, all, range, zip, find, isEmpty, indexedMap, cons + reverseHelp/indexedMapHelp |
 | `Dict` | `Sky.Core.Dict` (kernel) | empty, insert, get, remove, member, keys, values, toList, fromList, map, foldl, union |
 | `Set` | `Sky.Core.Set` (kernel) | empty, insert, remove, member, union, diff, intersect, fromList, toList, size |
@@ -913,11 +913,11 @@ Each binding is either:
 | `Std.Time` | `Std.Time` | 32 entries. IANA zones, addMonths/Years (month-end CLAMPED), dayOfWeek (ISO Mon=1..Sun=7), weekOfYear (ISO 8601), startOfDay/Week/Month/Year, diffDays/Hours/Minutes/Seconds. v0.15.48+ adds `*Utc` infallible companions (`dayOfWeekUtc` / `startOfDayUtc` / `yearUtc` / etc. — `Int -> Int` shape, plug "UTC" at the call site so server-internal callers don't thread `Result.withDefault 0`). |
 | `Random` | `Sky.Core.Random` | int, float, range, choice, shuffle, weighted (entropy-backed); seed, seededInt, seededFloat, seededChoice (deterministic splitmix64) |
 | `Http` | `Sky.Core.Http` | get, post, request (custom method/headers/body/timeout via `HttpRequest`), defaultRequest/withMethod/withHeader/withTimeout/withBody builders, parseQuery; typed `HttpResponse = { status : Int, body : String, headers : Dict String String }` |
-| `File` | `Sky.Core.File` | readFile, readFileLimit, readFileBytes, writeFile, append, exists, remove, mkdirAll, readDir, isDir, tempFile, copy, rename |
+| `File` | `Sky.Core.File` | readFile, readFileLimit, readFileBytes, writeFile, append, exists, remove, mkdirAll, readDir, isDir, tempFile, tempDir, copy, rename |
 | `Io` | `Sky.Core.Io` | readLine, writeStdout, writeStderr |
 | `System` | `Sky.Core.System` | args, getArg, getenv, getenvOr (bare), getenvInt, getenvBool, setenv, unsetenv, cwd, loadEnv, exit |
 | `Process` | `Sky.Core.Process` | run (subprocess) |
-| `Db` | `Std.Db` | open, connect, close, exec, execRaw, query, insertRow, getById, updateById, deleteById, findOneByField, findManyByField, findByConditions, unsafeFindWhere, queryDecode, withTransaction, migrate (versioned forward-only schema migrations + `_sky_migrations` + checksum guard), getField, getString, getInt, getBool |
+| `Db` | `Std.Db` | open, connect, close, exec, execRaw, query, insertRow, getById, updateById, deleteById, findOneByField, findManyByField, findByConditions, unsafeFindWhere, queryDecode, withTransaction, migrate (versioned forward-only schema migrations + `_sky_migrations` + checksum guard), getField, getString, getInt, getBool. **v0.16.26+ typed parameter binding**: `SqlValue` ADT (`SqlString` / `SqlInt` / `SqlFloat` / `SqlBool` / `SqlBytes` / `SqlDecimal` / `SqlTime` / `SqlMoney` / `SqlNull SqlValue`) gives mixed-type SQL params as a homogeneous `List SqlValue` — closes the no-workaround gap for `INSERT … VALUES (?, ?, ?)` mixing `String + Maybe Int + Bool`. 8 `fromMaybe*` helpers for nullable columns. `SqlField` (`SetField SqlValue` / `OmitField`) + `Db.updateFields conn table whereCols setFields` for PATCH semantics with column-omit support; `Db.insertFields conn table fields` is the INSERT counterpart — `OmitField` columns drop from the SQL so the database applies DEFAULT (all-omit → `INSERT … DEFAULT VALUES`); `Db.insertFieldsReturning conn table fields projection decoder` (#586) appends `RETURNING <projection>` and decodes returned rows via `Std.Db.Decode` so you can pick up assigned autoincrement ids / applied DEFAULTs at INSERT time (SQLite ≥ 3.35 / PostgreSQL). Money serialises lossless as `"ISO_CODE AMOUNT"` TEXT — paired with `Db.Decode.money` for round-trip. |
 | `Auth` | `Std.Auth` | register, login, setRole (Task) + hashPassword, hashPasswordCost, verifyPassword, passwordStrength, signToken, verifyToken (Result); v0.15.48+ signTokenWithClaims / verifyTokenWithAlgorithm — typed-builder aliases over Sky.Core.Jwt for fine-grained algorithm + claims control |
 | `Log` | `Std.Log` | println, debug, info, warn, error, debugWith, infoWith, warnWith, errorWith |
 | `Trace` | `Std.Trace` | span, event, attr — opt-in app-level tracing spans. Tier-1 spans (HTTP/session/Msg/DB/Auth/Http/File) are automatic; see `docs/observability.md` |
@@ -1859,6 +1859,77 @@ verified against HEAD.
     the type body (`T1\n    -> T2`) is not supported — extract a
     `type alias` for the whole arrow type.
 ### Closed in v0.16 (kept here for grep)
+
+- ~~`Std.Db.exec` / `Std.Db.query` reject mixed-type parameter lists
+  (`[String, Maybe Int, Bool]` fails HM with E2001 because List is
+  homogeneous); no workaround that doesn't violate the no-stringify /
+  no-Ffi.toAny rule~~ — closed in v0.16.26 (#582). New `SqlValue` ADT
+  in `Std.Db`: `SqlString | SqlInt | SqlFloat | SqlBool | SqlBytes |
+  SqlDecimal | SqlTime | SqlMoney | SqlNull SqlValue` (9 variants
+  total, recursive SqlNull carries a type-witness for typed NULL
+  binding). `List SqlValue` flows through `Db.exec` / `Db.query`
+  with full per-column type fidelity to the driver. 8 `fromMaybe*`
+  helpers cover Maybe-lifting without inline case-of. Money
+  round-trips via `"ISO_CODE AMOUNT"` TEXT (paired with
+  `Db.Decode.money` on the read side). Example:
+  ```
+  Db.exec conn
+      "INSERT INTO orders (id, customer, total, paid_at) VALUES (?, ?, ?, ?)"
+      [ SqlInt orderId
+      , SqlString customerUuid
+      , SqlMoney total
+      , fromMaybeTime maybePaidAt
+      ]
+  ```
+
+- ~~Partial-update / PATCH semantics need three states per field
+  (explicit value / explicit NULL / column omitted) but Db.exec only
+  models the first two; the "leave alone" state required generating
+  different SQL strings outside the stdlib~~ — closed in v0.16.26
+  (#582). New `SqlField` ADT (`SetField SqlValue` / `OmitField`) +
+  `Db.updateFields db table whereCols setFields` builder generates
+  dynamic UPDATE that includes only `SetField` columns. Column-name
+  validation rejects identifiers outside `[A-Za-z0-9_.]` so the
+  dynamic SQL can't open an injection vector. All-OmitField
+  short-circuits to 0 rows (no empty SET clause).
+
+- ~~`Std.Db.exec` / `Std.Db.query` reject `Maybe a` params at the
+  database/sql driver layer ("unsupported type rt.SkyMaybe[int],
+  a struct")~~ — closed in v0.16.24 (#574). Runtime `dbBindArg`
+  helper reflect-walks any arg with the SkyMaybe shape and
+  substitutes `nil` for Nothing / the unwrapped value for Just.
+  Applied at both `Db_exec` and `Db_query` binding sites;
+  `Db_queryDecode` inherits via `Db_query`. Now you can write
+  `Db.exec conn "INSERT … VALUES (?, ?)" [ Just "Alice", Nothing ]`
+  and Nothing binds as SQL NULL.
+
+- ~~`import Std.Db.Decode exposing (Decoder, ...)` errors with
+  "module Std.Db.Decode does not expose type Decoder" — but
+  Decoder is globally available as a kernel-implicit Prelude
+  type~~ — closed in v0.16.24 (#576). `Canonicalise.Module`
+  `checkItem` now accepts 15 kernel-implicit Prelude types in
+  `exposing (...)` lists as a no-op when the dep module doesn't
+  declare them: `Decoder`, `Value`, `Attribute`, `Handler`,
+  `Middleware`, `Session`, `Store`, `Route`, `VNode`, `Request`,
+  `Response`, `Cmd`, `Sub`, `Db`, `Error`. The import is
+  redundant (the names are already globally in scope) but no
+  longer rejected. Regression: `ExposingSpec` "#576: kernel-
+  implicit Prelude type re-exposure".
+
+- ~~`Std.Db.Decode.nullable` requires double-naming the column
+  (`nullable "age" (int "age")`); silently mis-gates when the
+  two column names differ~~ — closed in v0.16.24 (#577). **Breaking
+  signature change**: `nullable : Decoder a -> Decoder (Maybe a)`
+  (drops the leading column-name arg). `DbDecoder` gains a `cols`
+  field that primitive decoders populate; combinators (`map`,
+  `andMap`, `map2..5`, `andThen`) propagate via `dbUnionCols`.
+  `nullable` checks all of inner's columns for NULL/absent before
+  delegating — handles both single-column and composed-decoder
+  cases. Migration:
+  ```
+  -- before: Decode.nullable "age" (Decode.int "age")
+  -- after:  Decode.nullable (Decode.int "age")
+  ```
 
 - ~~Sky.Live runtime: sky-nav click + popstate (Back/Forward)
   handlers don't check `r.ok` before passing the fetch body to

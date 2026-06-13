@@ -35,6 +35,7 @@ import qualified System.Timeout
 import qualified System.Exit
 import Control.Monad (unless, when, forM_, forM)
 import Data.FileEmbed (embedStringFile)
+import qualified System.Info
 
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -1825,9 +1826,28 @@ runCommand cmd = case cmd of
             Left err -> return (Left err)
             Right _ -> do
                 putStrLn "Running go build..."
+                -- #569: `sky check` discards the binary, so we don't
+                -- need an optimised build.  `-gcflags=all=-l` disables
+                -- inlining, which is the *only* way to stop Go's
+                -- closure-name composition pathology in the
+                -- Std.Ui.renderElement / renderNodeAs mutual-recursion
+                -- pair — every inlining decision through a `func1`
+                -- closure prepends another `OuterFn.func1.` to the
+                -- nested closure's symbol name, and the static-call
+                -- graph here makes the prefix grow exponentially.
+                -- We measured 20.5 MB symbols on a Std.Ui-importing
+                -- fixture; Apple's ld64 in Sequoia (used by GitHub
+                -- Actions `macos-latest`) tightened the symbol-name
+                -- cap and rejects the object file with the assertion
+                -- `(name.size() <= maxLength)` during input parsing.
+                -- Disabling inlining caps the symbol at ~300 bytes
+                -- and lets the linker complete.  Free on `sky check`
+                -- (throwaway binary); `sky build` keeps full
+                -- optimisation for production.
                 (ec, _, berr) <- System.Process.readCreateProcessWithExitCode
                     (System.Process.shell
-                        ("cd " ++ outDir ++ " && go build -o /dev/null ."))
+                        ("cd " ++ outDir
+                            ++ " && go build -gcflags=all=-l -o /dev/null ."))
                     ""
                 case ec of
                     System.Exit.ExitSuccess -> do
@@ -2828,28 +2848,58 @@ preserveTopLevelComments source formatted =
     --   * when isHeader=False the second field is the previous code
     --     line (preserves the pre-#353 behaviour); the third field
     --     is the next code line for the fallback path
-    collectCommentBlocks t = walk Nothing False [] (T.lines t)
+    collectCommentBlocks t = walk Nothing False False [] (T.lines t)
       where
-        walk _prev _inStr _acc [] = []
-        walk prev inStr acc (l:ls)
+        walk _prev _prevIsBody _inStr _acc [] = []
+        walk prev prevIsBody inStr acc (l:ls)
             -- Inside a `"""` multiline string the line is string
             -- content — never a comment or a declaration. Skipping
             -- it here is what stops a `--`-prefixed string line
             -- from being collected as a comment and re-injected
             -- (duplicated) on every `sky fmt` round-trip.
-            | inStr = walk prev (nextInStr inStr l) acc ls
-            | isCommentOrBlank l = walk prev inStr (acc ++ [l]) ls
+            | inStr = walk prev prevIsBody (nextInStr inStr l) acc ls
+            | isCommentOrBlank l = walk prev prevIsBody inStr (acc ++ [l]) ls
             | isTopLevelDecl l =
                 let trimmed = trimBlanks acc
                     anchorKey = stripTrailingComment (T.strip l)
-                    rest = walk (Just anchorKey) (nextInStr False l) [] ls
+                    rest = walk (Just anchorKey) False (nextInStr False l) [] ls
+                    -- #587-followup / regression fence for the "header
+                    -- comment stays above the definition" spec.  The
+                    -- `prevIsBody` quirk-fix below assumes the comment
+                    -- block is IMMEDIATELY adjacent to its previous-body
+                    -- line.  But when blank lines separate them, the
+                    -- comment is semantically a HEADER for the next
+                    -- top-level decl — not a trailer for the previous
+                    -- body.  Falling through to the body-anchor path
+                    -- under that shape stuck the comment after the
+                    -- prev-body call-site line (e.g. `helper x`) instead
+                    -- of above the `helper y =` definition.
+                    leadingBlanks =
+                        length acc -
+                        length (dropWhile (T.null . T.strip) acc)
                 in if null trimmed
                      then rest
-                     else (trimmed, T.strip l, Nothing, True) : rest
+                     -- Quirk fix: when the comment block's
+                     -- immediately preceding code line was BODY
+                     -- (`prevIsBody`) AND there are NO blank lines
+                     -- between prev-body and the comment block, the
+                     -- comments belong to that body, not to the next
+                     -- decl. The formatter's decl-end blank lines
+                     -- made the walker mis-attribute these to the
+                     -- next decl's header group, which then printed
+                     -- them between the two decls (visually attached
+                     -- to the wrong one). Emit as a body block keyed
+                     -- to prev (body line) with the upcoming decl
+                     -- line as fallback next-anchor.
+                     else case prev of
+                         Just p | prevIsBody, leadingBlanks == 0 ->
+                             (trimmed, p, Just anchorKey, False) : rest
+                         _ ->
+                             (trimmed, T.strip l, Nothing, True) : rest
             | otherwise =
                 let trimmed = trimBlanks acc
                     nextAnchor = stripTrailingComment (T.strip l)
-                    rest = walk (Just nextAnchor) (nextInStr False l) [] ls
+                    rest = walk (Just nextAnchor) True (nextInStr False l) [] ls
                 in case (trimmed, prev) of
                     ([], _) -> rest
                     (_, Just p) -> (trimmed, p, Just nextAnchor, False) : rest
@@ -3043,11 +3093,19 @@ preserveTopLevelComments source formatted =
             _ -> acc
 
     -- Compute a next-anchor key from a candidate line.
-    -- Returns `Just <ident>` ONLY for binding-shaped lines:
+    -- Returns `Just <ident>` for binding-shaped lines:
     --   * `name =`             → `Just "name"`
     --   * `name : Type`        → `Just "name"`
     --   * `name arg1 arg2 =`   → `Just "name"`
-    -- Returns `Nothing` for expression-shaped lines (call sites,
+    -- Returns `Just <full-line-strip>` for list-element continuations
+    --   * `, "FOO"`            → `Just ", \"FOO\""`
+    --   * `, expr ++ x`        → `Just ", expr ++ x"`
+    -- List-element lines are common landing slots for #572-style stranded
+    -- comments (a doc block between two list elements). The leading
+    -- identifier is `,` itself — too generic — so we key on the FULL
+    -- stripped line, which is specific (string literals / field-shaped
+    -- assignments are nearly unique within their enclosing list).
+    -- Returns `Nothing` for OTHER expression-shaped lines (call sites,
     -- `case … of`, operator-led continuations) — those would
     -- mis-match because the identifier is too generic.
     nextAnchorKey :: T.Text -> Maybe T.Text
@@ -3058,11 +3116,16 @@ preserveTopLevelComments source formatted =
                        || (c >= '0' && c <= '9')
                        || c == '_'
             ident = T.takeWhile isIdentCh stripped
-        in if T.null ident
-             then Nothing
-             else if isBindingShape stripped
-                    then Just ident
-                    else Nothing
+            startsWithComma = case T.uncons stripped of
+                Just (',', _) -> True
+                _             -> False
+        in if startsWithComma && T.length stripped > 1
+             then Just (T.strip stripped)
+             else if T.null ident
+                    then Nothing
+                    else if isBindingShape stripped
+                           then Just ident
+                           else Nothing
 
     -- A binding-shape line has a `=` (after the binder) or a `:`
     -- (top-level type annotation) at the top level. Crude but
@@ -3145,14 +3208,19 @@ preserveTopLevelComments source formatted =
                 (prevAnchorRes, bt1, am') = case prevAnchorHit of
                     Just (cs, m, b) -> (Just cs, b, m)
                     Nothing         -> (Nothing, bt, am)
-                -- Next-anchor only fires when prev-anchor didn't and
-                -- when the output line is binding-shaped (see
-                -- `nextAnchorKey`).
-                nextAnchorHit
-                    | prevAnchorRes /= Nothing = Nothing
-                    | otherwise = case nextAnchorKey l of
-                        Just nextK -> popQueue nm nextK bt1
-                        Nothing    -> Nothing
+                -- Next-anchor fires INDEPENDENTLY of prev-anchor.
+                -- The two anchor BLOCKS are different — bodyTable's
+                -- ID-based dedup (Map.delete on consume) prevents
+                -- double-emission if the same block somehow ended
+                -- up keyed to both anchors. The case where two
+                -- DIFFERENT blocks anchor to the same line is real
+                -- and load-bearing (#572): inside a list literal,
+                -- block N's next-anchor and block N+1's prev-anchor
+                -- are the SAME list-element line — without firing
+                -- both we starve one of the two blocks.
+                nextAnchorHit = case nextAnchorKey l of
+                    Just nextK -> popQueue nm nextK bt1
+                    Nothing    -> Nothing
                 (nextAnchorRes, bt2, nm') = case nextAnchorHit of
                     Just (cs, m, b) -> (Just cs, b, m)
                     Nothing         -> (Nothing, bt1, nm)
@@ -3161,18 +3229,20 @@ preserveTopLevelComments source formatted =
                 -- header above, body below. Header comments float
                 -- to column 1 (a top-level decl's leading comment).
                 -- Body comments keep their source indentation.
-                (Just (hcs, hm'), Just acs, _) ->
+                (Just (hcs, hm'), Just acs, Just ncs) ->
+                    hcs ++ ncs ++ [l] ++ acs ++ go hm' am' nm' bt2 ls
+                (Just (hcs, hm'), Just acs, Nothing) ->
                     hcs ++ [l] ++ acs ++ go hm' am' nm' bt2 ls
-                (Just (hcs, hm'), Nothing, _) ->
+                (Just (hcs, hm'), Nothing, Just ncs) ->
+                    hcs ++ ncs ++ [l] ++ go hm' am' nm' bt2 ls
+                (Just (hcs, hm'), Nothing, Nothing) ->
                     hcs ++ [l] ++ go hm' am' nm' bt2 ls
-                -- No header. Prev-anchor wins (we already gated
-                -- next-anchor on prev-anchor above). Body comments
-                -- keep their source-original indentation — re-indenting
-                -- to the prev-line's indent broke idempotency when
-                -- the prev line lived at a deeper indent than the
-                -- comment (a continuation line of a multi-segment
-                -- string concat, vs. the comment at let-binding level).
-                (Nothing, Just acs, _) ->
+                -- No header. Next-anchor block emits BEFORE the
+                -- line; prev-anchor block emits AFTER the line.
+                -- Both can fire simultaneously — see #572.
+                (Nothing, Just acs, Just ncs) ->
+                    ncs ++ l : acs ++ go hm am' nm' bt2 ls
+                (Nothing, Just acs, Nothing) ->
                     l : acs ++ go hm am' nm' bt2 ls
                 (Nothing, Nothing, Just ncs) ->
                     -- Place comments ABOVE the matched line, also
@@ -3230,9 +3300,30 @@ runGoBuildWithDiagnostics outDir binName _goPath = do
     -- to defend against an accidental space without breaking under sh -c.
     let versionLdflag =
             "-ldflags '-X sky-app/rt.skyVersion=" ++ skyBuildVersion ++ "'"
+        -- #569: Apple ld64 in macOS Sequoia (Xcode 16+) tightened
+        -- the symbol-name length cap to ~16 KB.  Go's inliner
+        -- composes nested closure names recursively in mutually-
+        -- recursive functions: the Std.Ui.renderElement /
+        -- renderNodeAs pair produces symbols like
+        -- `…func1.…func1.1.…func1.…`, with each inlining decision
+        -- prepending another prefix.  Measured 20.5 MB symbols on
+        -- a Std.Ui-importing test fixture before ld64 rejected the
+        -- object file (`Assertion failed: name.size() <= maxLength`,
+        -- ObjectFileParser::addAtomsForSection → makeNamedAtom →
+        -- makeSymbolStringInPlace).  Disabling inlining on darwin
+        -- caps the longest symbol at ~300 bytes and unblocks linking.
+        -- Linux's GNU ld doesn't have this cap, so we keep the
+        -- inliner on for production-perf there.  Cost on darwin:
+        -- ~5–10% runtime perf hit from missed inlining — acceptable
+        -- given the alternative is an unlinkable binary.  This is
+        -- a workaround; the principled fix is to teach Go's symbol
+        -- mangler not to compose nested closure names.
+        gcflagsForOs
+            | System.Info.os == "darwin" = " -gcflags=all=-l"
+            | otherwise = ""
         buildCmd cgo =
             "cd " ++ outDir ++ " && CGO_ENABLED=" ++ (if cgo then "1" else "0")
-            ++ " go build " ++ versionLdflag
+            ++ " go build " ++ versionLdflag ++ gcflagsForOs
             ++ " -o " ++ binName ++ " ."
     -- Some kernels exist as a real `cgo && darwin` implementation +
     -- a `!cgo || !darwin` stub that returns Err Error at runtime.

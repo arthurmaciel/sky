@@ -1208,13 +1208,13 @@ readFileLimit : String -> Int -> Task Error String       -- bounded read (defaul
 readFileBytes : String -> Task Error Bytes               -- binary
 writeFile : String -> String -> Task Error ()
 append : String -> String -> Task Error ()               -- creates if missing
-exists : String -> Bool                                  -- pure, no Task wrapping
-isDir : String -> Bool                                   -- pure
+exists : String -> Task Error Bool
+isDir : String -> Task Error Bool
 remove : String -> Task Error ()
 mkdirAll : String -> Task Error ()
 readDir : String -> Task Error (List String)
 tempFile : String -> Task Error String                   -- returns path
-tempDir : String -> Task Error String                    -- returns path
+tempDir : String -> Task Error String                    -- creates uniquely-named dir, returns path
 copy : String -> String -> Task Error ()
 rename : String -> String -> Task Error ()
 ```
@@ -4178,10 +4178,37 @@ Db.exec conn "INSERT INTO t (name) VALUES (?)" ["val"]
 Db.query conn "SELECT * FROM t WHERE x = ?" ["val"]
 Db.execRaw conn "CREATE TABLE IF NOT EXISTS t (...)"
 
+-- v0.16.26: mixed-type SQL params via typed SqlValue ADT.
+-- `[SqlString name, SqlInt age, SqlBool active, fromMaybeInt qty,
+--   SqlMoney price]` is a homogeneous `List SqlValue` that
+-- type-checks cleanly and binds each variant to the right
+-- database/sql type. Avoids the no-Workaround stringify trap.
+-- Variants: SqlString | SqlInt | SqlFloat | SqlBool | SqlBytes |
+-- SqlDecimal | SqlTime | SqlMoney | SqlNull SqlValue (recursive
+-- with type-witness). Maybe-lifting helpers: `fromMaybeString` ..
+-- `fromMaybeMoney`. PATCH-style partial update via Db.updateFields
+-- + DEFAULT-omittable INSERT via Db.insertFields (#585) — both take
+-- SqlField (SetField | OmitField); insertFields all-omit emits
+-- `INSERT … DEFAULT VALUES`. v0.16.30 `Db.insertFieldsReturning`
+-- (#586) appends `RETURNING <projection>` to the same builder and
+-- decodes each returned row via `Std.Db.Decode` — pick up assigned
+-- autoincrement ids / applied DEFAULTs at INSERT time (SQLite ≥
+-- 3.35 / PostgreSQL). Money round-trips via "ISO_CODE AMOUNT" TEXT
+-- — pair with `Db.Decode.money`.
+import Std.Db exposing (SqlValue(..), SqlField(..))
+Db.exec conn
+    "INSERT INTO items (name, qty, price) VALUES (?, ?, ?)"
+    [ SqlString name, fromMaybeInt qty, SqlMoney price ]
+
 -- Typed queries via Std.Db.Decode (v0.15.45 — preferred over the
 -- Dict.get accessor boilerplate). Mirrors Sky.Core.Json.Decode's
--- shape (string/int/float/bool/nullable/map/map2-5/andMap/required/
--- optional).
+-- shape (string/int/float/bool/money/nullable/map/map2-5/andMap/
+-- required/optional). v0.16.24: nullable is single-arg
+-- (`nullable (int "age")`, not `nullable "age" (int "age")`).
+-- v0.16.24: Db.exec/query bind `Maybe a` directly — `Just v`
+-- writes the value, `Nothing` writes SQL NULL. Decoder/Db/Value/
+-- Attribute/Handler/Cmd/Sub/Request/Response/Error are kernel-
+-- implicit Prelude types — always in scope, no import needed.
 import Std.Db.Decode as DbDecode
 
 userDecoder : Decoder User
@@ -4190,6 +4217,9 @@ userDecoder =
         |> DbDecode.andMap (DbDecode.int "id")
         |> DbDecode.andMap (DbDecode.string "name")
         |> DbDecode.andMap (DbDecode.string "email")
+-- For nullable columns: `DbDecode.nullable (DbDecode.int "age")` —
+-- single-arg form (v0.16.24+). Inner is required to be a typed
+-- decoder for the column.
 
 users : Task Error (List User)
 users = Db.queryDecode db "SELECT id, name, email FROM users" [] userDecoder
