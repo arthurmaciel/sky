@@ -107,7 +107,9 @@ Debug/PartialEq; persisting a closure-Model will be a compile error (B, not yet
 emitted). Investigation #76 (does Go error on closure-Model + persistent store?)
 deferred to post-parity.
 
-**S0 driven: console build errors 128 → 24** (commits 116970b3 … 6eccfa24):
+**S0 DONE: console build errors 128 → 12** (commits 116970b3 … 35b1dcca). The
+12 remaining are EXACTLY the S1 `hub_*` kernels (all `E0425` cannot-find-fn);
+every codegen/stdlib/inference gap is closed.
 - ✅ Stdlib kernels: `String.left/right`, `System.getenv/getenvOr`, `List.length`,
   `Time.formatISO8601` (+ Kernel.hs map fixing the `ISO`→`i_s_o8601` mangle),
   `JsonDec.Pipeline.custom`; `curry9/10`.
@@ -115,15 +117,23 @@ deferred to post-parity.
   via `disconnected_fnN`; serde-skip on Model fields; `(rec.field)(args)` call
   parens; move-closures with per-field capture clones (`closureCaptures`).
 - ✅ `sky_list_cons` Clone-bound drop (move-only `Cmd.batch`).
-- ⏳ **Remaining S0 (~12): a diverse app-specific tail** — E0282 inference
-  turbofishes (traces_tab/view span rows), E0308 (`++` list-concat emitting
-  `format!`/`String` where `Vec` expected; a wrong metric/servicestat decoder),
-  residual E0277. Each needs individual diagnosis.
+- ✅ **Closure-param + ++-concat inference tail** (commit 35b1dcca, 24→12) — five
+  app-agnostic fixes: `solveArgType` If/Case arms (Vec-preferring branch type) so
+  `++` over `if c then [x] else []` keeps Vec-concat (E0308); `sky_core_list_*`
+  added to the HOF element-forcing list so an ambiguous-field closure resolves to
+  the list's element type not the field-set guess (E0308); `inferRecordClosureParam`
+  wired as `annotClosureParam`'s fallback for let-bound stored-then-called closures
+  (E0282); `listElemRustType` Call arm (peel a fn-returned `List e`); `inferParamRustType`
+  `==`/`/=` arm (scalar param takes the compared field's type) (E0282).
 - ⏳ **B compile-guard** (closure-Model + persistent store → compile_error!) not
-  yet emitted.
+  yet emitted — folded into S1/A (it only matters once the console actually
+  persists; the console's session store is `memory`, so it is not blocking).
 
-**Next:** finish the S0 tail, then **S1** (the 12 `hub_*` kernels — the remaining
-12 E0425 — reading the SQLite spill).
+**Next: S1** — the 12 `hub_*` kernels (the remaining 12 `E0425`) reading the
+SQLite spill. Design: generic `hub_read_*<A: DeserializeOwned>(db_path) ->
+SkyTask<E, A>` (the `db_query_decode` generic-decode precedent), codegen pins the
+turbofish to the concrete `*_R` return type (known from the Sky sig
+`Task Error Overview`). Depends on D (#69) for the spill table schema.
 
 ## Risks
 
