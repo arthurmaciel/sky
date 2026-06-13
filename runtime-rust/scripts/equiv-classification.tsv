@@ -16,7 +16,7 @@
 04-local-pkg            in   multi-module; deterministic
 06-json                 in   encode/decode; object key order is _fieldIndex-stable on both backends
 14-task-demo            in   sequential Task andThen/fail/run; deterministic
-35-composite-generics   in   generics demo; deterministic
+35-composite-generics   out  non-deterministic: prints a Time.now `Generated at` timestamp AND Dict.toList iteration order differs between backends
 simple                  in   task_sequence/parallel — results collected then printed in order
 test_pkg                in   Result/Maybe combinators; deterministic
 
