@@ -272,7 +272,13 @@ userTypeSection b =
     , "// USER TYPES"
     , "// ==========================================="
     , ""
-    ] ++ map (typeDefToString (builderFormTargets b) (builderLiveSerdeTypes b)) (builderTypes b)
+    ] ++ map (typeDefToString (builderFormTargets b) (builderLiveSerdeTypes b) fnFieldStructs) (builderTypes b)
+  where
+    -- #69/A: structs with a function-typed field (`Arc<dyn Fn>`) — derive only
+    -- Clone + a Default; a serde Model field of such a type is serde-skipped.
+    fnFieldStructs = Set.fromList
+        [ nm | RStructDef nm _ flds <- builderTypes b
+             , any (\(_, t) -> "dyn Fn" `isInfixOf` t) flds ]
 
 -- | SkyError type alias + str_err helper — conditional on Error module presence.
 -- Must be emitted AFTER userTypeSection (SkyCoreErrorError ADT) and BEFORE
@@ -362,29 +368,81 @@ entryPointSection uk =
 -- | First Set: form-target structs (serde::Deserialize). Second Set: Sky.Live
 -- model-closure types (serde::Serialize + serde::Deserialize). serdeTypes is a
 -- superset of the Deserialize need, so a type in both gets the full pair once.
-typeDefToString :: Set.Set String -> Set.Set String -> RustTypeDef -> String
-typeDefToString _ serdeTypes (REnumDef name gens variants) =
+typeDefToString :: Set.Set String -> Set.Set String -> Set.Set String -> RustTypeDef -> String
+typeDefToString _ serdeTypes _ (REnumDef name gens variants) =
     let derive = if name `Set.member` serdeTypes
                  then "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"
                  else "#[derive(Clone, Debug, PartialEq)]"
     in derive ++ "\npub enum " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
-typeDefToString formTargets serdeTypes (RStructDef name gens fields) =
+typeDefToString formTargets serdeTypes fnFieldStructs (RStructDef name gens fields) =
     -- Sky record field names are camelCase and match the form `name=` attrs
-    -- 1:1, so no #[serde(rename)] is needed. A form-target struct carrying a
-    -- non-serde field will (correctly) fail to compile with E0277 — a
-    -- friendlier Sky-side diagnostic is a P-later item.
+    -- 1:1, so no #[serde(rename)] is needed.
     -- P5-T4b: a model-closure struct needs Serialize+Deserialize (session
     -- persistence). That implies Deserialize, so it subsumes the form-target case.
-    let derives
+    -- #69/A: a struct with function-typed fields (`Arc<dyn Fn>`, e.g. the console
+    -- `StateStore`) CANNOT derive Debug/PartialEq/serde — derive only Clone, and
+    -- give it a `Default` (disconnected error-closures) so the Model that holds it
+    -- can `#[serde(skip)]` the field and reconstruct it on deserialize.
+    let hasFnField = any (\(_, t) -> "dyn Fn" `isInfixOf` t) fields
+        derives
+            | hasFnField = "#[derive(Clone)]"
             | name `Set.member` serdeTypes = "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"
             | name `Set.member` formTargets = "#[derive(Clone, Debug, PartialEq, serde::Deserialize)]"
             | otherwise = "#[derive(Clone, Debug, PartialEq)]"
-    in derives ++ "\npub struct " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, t) -> "    " ++ n ++ ": " ++ t) fields) ++ "\n}"
-typeDefToString _ _ (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
-typeDefToString _ _ (RPubUseAlias codegenName rustPath) =
+        isSerde = name `Set.member` serdeTypes
+        -- A serde struct's field whose TYPE is a fn-field struct can't serialize:
+        -- skip it (reconstructed via that struct's Default on deserialize).
+        skipField (_, t) = isSerde && fieldTypeBase t `Set.member` fnFieldStructs
+        renderField fld@(n, t) =
+            (if skipField fld then "    #[serde(skip)]\n" else "") ++ "    " ++ n ++ ": " ++ t
+        structDef = derives ++ "\npub struct " ++ name ++ gens ++ " {\n"
+            ++ intercalate ",\n" (map renderField fields) ++ "\n}"
+        defaultField (n, t) =
+            "            " ++ n ++ ": sky_runtime::core::disconnected_fn" ++ show (fnArgCount t) ++ "()"
+        defaultImpl
+            | hasFnField =
+                "\nimpl Default for " ++ name ++ gens ++ " {\n    fn default() -> Self {\n        "
+                ++ name ++ " {\n" ++ intercalate ",\n" (map defaultField fields) ++ "\n        }\n    }\n}"
+            | otherwise = ""
+    in structDef ++ defaultImpl
+typeDefToString _ _ _ (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
+typeDefToString _ _ _ (RPubUseAlias codegenName rustPath) =
     "pub use " ++ rustPath ++ " as " ++ codegenName ++ ";"
-typeDefToString _ _ (RAliasDefGen name gens path) =
+typeDefToString _ _ _ (RAliasDefGen name gens path) =
     "pub type " ++ name ++ gens ++ " = " ++ path ++ ";"
+
+-- | The base type name of a Rust field type, stripping generics/whitespace
+-- (`Foo<..>` / `Foo ` -> `Foo`). Used to test a Model field's type against the
+-- set of function-typed structs.
+fieldTypeBase :: String -> String
+fieldTypeBase = takeWhile (\c -> c /= '<' && c /= ' ')
+
+-- | Count the argument types in the first `Fn(...)` clause of a Rust type string:
+-- `Fn()` -> 0, `Fn(())` -> 1, `Fn(String, T)` -> 2. Balanced-paren / generic
+-- aware (so `Fn(Vec<(A,B)>)` counts 1). Drives the `disconnected_fnN` arity in a
+-- function-typed struct's generated `Default`.
+fnArgCount :: String -> Int
+fnArgCount s = case extractFnArgs s of
+    Nothing -> 0
+    Just inner -> if all (== ' ') inner then 0 else 1 + topLevelCommas inner
+  where
+    extractFnArgs ('F' : 'n' : '(' : rest) = Just (takeBalanced (0 :: Int) rest)
+    extractFnArgs (_ : cs) = extractFnArgs cs
+    extractFnArgs [] = Nothing
+    takeBalanced _ [] = []
+    takeBalanced d (c : cs)
+        | c == ')' && d == 0 = []
+        | c == ')' = c : takeBalanced (d - 1) cs
+        | c == '(' = c : takeBalanced (d + 1) cs
+        | otherwise = c : takeBalanced d cs
+    topLevelCommas = go (0 :: Int)
+      where
+        go _ [] = 0
+        go d (c : cs)
+            | c == ',' && d == 0 = 1 + go d cs
+            | c `elem` "(<[" = go (d + 1) cs
+            | c `elem` ")>]" = go (d - 1) cs
+            | otherwise = go d cs
 
 -- | Extract a module's content as (snake_case_file_stem, source_content).
 -- Used by emitRust to produce per-module .rs files.
