@@ -69,9 +69,46 @@ sky build (user app, Live)                         runtime (parent app)
 - **Cache path:** `~/.cache/sky/rust-console/<sky-version>/sky-console`
   (override `SKY_CONSOLE_BIN`). Version-keyed so a sky upgrade rebuilds once.
 
+## Progress (2026-06-13)
+
+- **T1 DONE** (9557f914): spawn + gate + lifecycle.
+- **T2-prereq DONE** (d599f1df): `SKY_LIVE_BASE_PATH` threaded through the Live
+  server — `live_base_path()` → `render_page_full` base; **cookie de-collision**
+  (distinct base-derived name + base-scoped Path so the child never clobbers the
+  parent's `sky_sid`). **Proxy convention DECIDED: strip** (child router stays
+  root-relative; only the proxy knows the prefix — see README divergence log).
+- **T2 DONE** (fe86d04e): streaming reverse-proxy `forward()` (strip prefix,
+  hop-by-hop filter, request-body cap, response STREAMED for SSE) + `proxy_entry`
+  + `ensure_console_proxy` / `proxy_routes`.
+- **T3 DONE** (eba51e25): Live boot decides proxy-vs-in-process BEFORE building
+  the router (no collision, both under `track`); binary-absent fast path.
+- **Lifecycle + deps DONE** (48908d73): reqwest is now a dep of EVERY Live app
+  (codegen `usesLive`); signal handler exits parent after reaping child (was
+  unkillable-by-SIGTERM); Linux `PR_SET_PDEATHSIG` (libc) so the child dies even
+  on parent SIGKILL.
+- **E2E PROVEN**: parent (28-live-counter) + real console child on `--target
+  rust` — GET `/_sky/console` returns the real console (`__SKY_BASE`,
+  "Sky Console"); event POST forwards transparently; SIGTERM reaps both, zero
+  orphans; cookies de-collide (`sky_sid` Path=/ vs `sky_sid__sky_console`
+  Path=/_sky/console).
+
+### Task 4 (A1) — REFINED design note
+
+The console `.sky` **source is NOT TH-embedded** today (only `runtime-go`,
+`sky-stdlib`, `sky-bundled/doc` are — `EmbeddedRuntime.hs` / `EmbeddedDocServer.hs`).
+So A1 must FIRST add a `embeddedConsoleApp = $(embedDirRecursive "sky-bundled/console")`
+accessor (mirror `EmbeddedDocServer.embeddedDocServerApp`, excluding `sky-out/`
++ `.skycache/`), THEN materialise it to the version-keyed cache dir and run the
+pipeline. Build via **recursive `sky build --target rust`** (getExecutablePath)
+on the materialised project — reuses the whole pipeline, no front-end re-impl.
+Crate-name caveat: every generated project is `sky-app`, so build the console in
+its OWN target dir (not the shared one) or the binary collides with user apps;
+copy the result to `~/.cache/sky/rust-console/<ver>/sky-console`. Mirror the
+`runDocServe` / `runConsoleServe` materialise-then-build pattern in `app/Main.hs`.
+
 ## Tasks
 
-### Task 1: console_proxy.rs — spawn + lifecycle (no proxy yet)
+### Task 1: console_proxy.rs — spawn + lifecycle (no proxy yet)  ✅ DONE
 
 **Files:** create `live/console_proxy.rs`; modify `live/mod.rs`.
 

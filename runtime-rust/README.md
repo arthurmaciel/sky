@@ -166,6 +166,27 @@ different mechanism the *correct* one, not a shortcut.
   zero type collision and full fault isolation. So pre-built-subprocess is the
   pragmatic Rust optimum: it sidesteps Go's abandonment reason *and* Rust's
   hard-path. (Epic: `docs/superpowers/specs/2026-06-12-rust-separate-process-console-epic.md`.)
+- **Proxy convention — STRIP (vs Go pass-through+child-trim).** The browser
+  reaches the console child only through the parent proxy (the child binds
+  `127.0.0.1`), so the parent **strips** `/_sky/console` before forwarding and the
+  Rust child's router stays byte-identical to a standalone Live app — no per-route
+  basePath-trimming. `SKY_LIVE_BASE_PATH` affects rendered **output** URLs only
+  (via `<meta sky-base>`/`__SKY_BASE`, which `client.js` prefixes onto
+  `/_sky/event` + `/_sky/sse`), never routing. Go uses pass-through + `trimBasePathPrefix`
+  because its in-process sub-app shares the parent mux. The session cookie is
+  de-collided per sub-app — a base-derived **distinct name** (`sky_sid__sky_console`)
+  + base-scoped `Path` — so the proxied child can't clobber the parent's
+  `sky_sid` (Go gives each sub-app a distinct `cookieName` for the same reason).
+- **Child lifecycle — signal-exit + `PR_SET_PDEATHSIG`.** The parent traps
+  SIGTERM/SIGINT, reaps the child, then exits `128+signum` (trapping alone would
+  make the parent unkillable-by-SIGTERM since the trap suppresses the default
+  disposition). On Linux the child additionally gets `PR_SET_PDEATHSIG=SIGTERM`
+  (via `pre_exec` + `libc`) so it dies even when the parent is SIGKILL'd / OOM'd —
+  a path no signal handler can catch. (Go deleted its `ShutdownSubApps` when it
+  went in-process; the separate-process Rust path needs the orphan guard back.)
+- **reqwest is a Std.Live dependency.** Because the live runtime's reverse-proxy
+  forwards via reqwest, codegen declares reqwest for **every** Live app
+  (`usesHttp || usesEmail || usesLive`), not just `Http.*`/`Email` users.
 
 ### Hub read kernels (console data plane) — generic-over-return-type vs `any` + Coerce
 
