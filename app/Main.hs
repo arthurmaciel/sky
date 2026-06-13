@@ -1033,6 +1033,14 @@ runProject path = do
 
 
 regenMissingBindings :: CompileTarget -> [(String, String)] -> IO ()
+-- On the Rust backend `[go.dependencies]` are INERT: the Rust codegen can't link
+-- Go packages, and the FFI registry loads the rust bindings under
+-- `.skycache/ffi/rust`, never the Go kernel.json. Running the Go FFI inspector +
+-- `generateBindings` here would (a) pointlessly require the `go` toolchain on a
+-- pure-Rust build and (b) fail with a misleading "resource busy" lock on the
+-- Go bindings file when `go` is absent. So short-circuit — a `--target rust`
+-- build ignores Go deps entirely. (User-reported 2026-06-13.)
+regenMissingBindings TargetRust _ = return ()
 regenMissingBindings target deps = do
     createDirectoryIfMissing True ".skycache/ffi"
     -- Filter once: only keep deps whose kernel.json is missing.
