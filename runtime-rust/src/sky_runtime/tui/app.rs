@@ -375,6 +375,16 @@ where
                     let is_shift_tab = kind == "other" && value.contains('Z');
                     let nav_fwd = kind == "tab" || (kind == "down" && !focused_input);
                     let nav_back = is_shift_tab || (kind == "up" && !focused_input);
+                    // A focused <textarea>'s Enter inserts a newline (multiline
+                    // edit), not a submit: remap to a char-insert so the generic
+                    // edit path below handles it uniformly.
+                    let is_textarea =
+                        focusables.get(focus_idx).map(|f| f.input_type == "textarea").unwrap_or(false);
+                    let (kind, value) = if focused_input && is_textarea && kind == "enter" {
+                        ("char".to_string(), "\n".to_string())
+                    } else {
+                        (kind, value)
+                    };
 
                     if (nav_fwd || nav_back) && n > 0 {
                         focus_idx = if nav_back {

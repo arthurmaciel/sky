@@ -284,8 +284,46 @@ pub fn edit_input(st: &mut InputState, kind: &str, value: &str) -> bool {
             st.cursor = c;
             moved
         }
+        // Multiline cursor movement: move to the same column on the adjacent
+        // line (clamped to that line's length). No-op on a single-line buffer
+        // (the caller routes single-line up/down to focus navigation instead).
+        "up" | "down" => {
+            let starts = line_starts(&runes);
+            let cur_line = starts.iter().rposition(|&s| s <= st.cursor).unwrap_or(0);
+            let cur_start = starts.get(cur_line).copied().unwrap_or(0);
+            let col = st.cursor.saturating_sub(cur_start);
+            let target = if kind == "up" {
+                cur_line.checked_sub(1)
+            } else if cur_line + 1 < starts.len() {
+                Some(cur_line + 1)
+            } else {
+                None
+            };
+            match target.and_then(|tl| starts.get(tl).map(|s| (tl, *s))) {
+                Some((tl, start)) => {
+                    // Line end = char before the next line's start (the '\n'), or buffer end.
+                    let end = starts.get(tl + 1).map(|s| s.saturating_sub(1)).unwrap_or(n);
+                    let new_cursor = start + col.min(end.saturating_sub(start));
+                    let moved = new_cursor != st.cursor;
+                    st.cursor = new_cursor;
+                    moved
+                }
+                None => false,
+            }
+        }
         _ => false,
     }
+}
+
+/// Char-index of the first char on each `'\n'`-separated line (always starts with 0).
+fn line_starts(runes: &[char]) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (i, c) in runes.iter().enumerate() {
+        if *c == '\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
 }
 
 fn is_space(c: Option<&char>) -> bool {
@@ -298,6 +336,22 @@ mod tests {
 
     fn st(s: &str, cur: usize) -> InputState {
         InputState { buffer: s.into(), cursor: cur, last_value: s.into() }
+    }
+
+    #[test]
+    fn up_down_move_across_lines_preserving_column() {
+        // "abc\ndefg\nhi": line starts at 0, 4, 9.
+        let mut s = st("abc\ndefg\nhi", 2); // line 0, col 2
+        assert!(edit_input(&mut s, "down", ""));
+        assert_eq!(s.cursor, 6, "line 1 col 2");
+        assert!(edit_input(&mut s, "down", ""));
+        assert_eq!(s.cursor, 11, "line 2 col clamped to len 2 (end)");
+        assert!(edit_input(&mut s, "up", ""));
+        assert_eq!(s.cursor, 6, "back to line 1 col 2");
+        // Single-line buffer: up/down are no-ops (caller navigates focus instead).
+        let mut one = st("hello", 3);
+        assert!(!edit_input(&mut one, "up", ""));
+        assert!(!edit_input(&mut one, "down", ""));
     }
 
     #[test]

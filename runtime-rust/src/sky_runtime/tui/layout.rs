@@ -364,8 +364,15 @@ fn render_input<M: Clone>(
     style: Style,
     ctx: &mut Ctx<M>,
     avail_w: usize,
+    is_multiline: bool,
 ) -> Rendered {
-    let input_type = attr_str(attrs, "type").unwrap_or("text").to_string();
+    // A `<textarea>` carries no `type` attr; mark it "textarea" so the cursor
+    // renders multiline and the loop inserts `\n` on Enter (vs submit on input).
+    let input_type = if is_multiline {
+        "textarea".to_string()
+    } else {
+        attr_str(attrs, "type").unwrap_or("text").to_string()
+    };
     let value = attr_str(attrs, "value").unwrap_or("").to_string();
     let placeholder = attr_str(attrs, "placeholder").unwrap_or("").to_string();
     let checked = attr_str(attrs, "checked").is_some() || value == "true";
@@ -374,14 +381,14 @@ fn render_input<M: Clone>(
     let idx = ctx.focusables.len();
     let focused = idx == ctx.focus_idx;
 
-    let cell = match input_type.as_str() {
+    let mut block: Block = match input_type.as_str() {
         "checkbox" => {
             let g = if checked { "☑" } else { "☐" };
-            Run { text: g.to_string(), style: Style { reverse: focused, ..style } }
+            Block::single(g.to_string(), Style { reverse: focused, ..style })
         }
         "radio" => {
             let g = if checked { "●" } else { "○" };
-            Run { text: g.to_string(), style: Style { reverse: focused, ..style } }
+            Block::single(g.to_string(), Style { reverse: focused, ..style })
         }
         "range" => {
             // Track with the thumb positioned at value within [min, max].
@@ -404,30 +411,54 @@ fn render_input<M: Clone>(
                     }
                 })
                 .collect();
-            Run { text: track, style: Style { reverse: focused, ..style } }
+            Block::single(track, Style { reverse: focused, ..style })
         }
         _ => {
-            // Text-like input: keep the edit buffer in sync with the model's
-            // value, then render buffer (or placeholder) + a cursor when focused.
+            // Text-like input (incl. textarea): sync the edit buffer to the
+            // model's value, then render it (or placeholder) with the cursor at
+            // its real (line, col) — multiline when the buffer has newlines.
             ctx.inputs.sync_value(idx, &value);
             let st = ctx.inputs.get(idx);
             let masked = input_type == "password";
-            let shown: String = if st.buffer.is_empty() && !focused {
-                placeholder.clone()
-            } else if masked {
-                "•".repeat(st.buffer.chars().count())
+            let run_style = Style { reverse: focused && !masked, ..style };
+            if masked {
+                // Masked: hide content (and any newlines) on one line; the cursor
+                // sits at the end (per-char column tracking is meaningless hidden).
+                let mut s = "•".repeat(st.buffer.chars().count());
+                if focused {
+                    s.push('▏');
+                }
+                if s.is_empty() {
+                    s = "▁▁▁▁".to_string();
+                }
+                Block::single(s, run_style)
+            } else if st.buffer.is_empty() && !focused {
+                let s = if placeholder.is_empty() { "▁▁▁▁".to_string() } else { placeholder.clone() };
+                Block::single(s, run_style)
             } else {
-                st.buffer.clone()
-            };
-            let mut text = if shown.is_empty() { "▁▁▁▁".to_string() } else { shown };
-            if focused {
-                text.push('▏'); // cursor marker at end (column tracking is a follow-on)
+                // Real buffer: split into visual lines, insert the cursor glyph at
+                // the focused (line, col).
+                let runes: Vec<char> = st.buffer.chars().collect();
+                let cursor = st.cursor.min(runes.len());
+                let (cur_line, cur_col) = cursor_line_col(&runes, cursor);
+                let mut out: Vec<Vec<Run>> = Vec::new();
+                for (li, seg) in split_buffer_lines(&runes).into_iter().enumerate() {
+                    let mut chars = seg;
+                    if focused && li == cur_line {
+                        chars.insert(cur_col.min(chars.len()), '▏');
+                    }
+                    out.push(vec![Run { text: chars.into_iter().collect(), style: run_style }]);
+                }
+                if out.is_empty() {
+                    out.push(vec![Run {
+                        text: if focused { "▏".to_string() } else { "▁▁▁▁".to_string() },
+                        style: run_style,
+                    }]);
+                }
+                Block { lines: out }
             }
-            Run { text, style: Style { reverse: focused && input_type != "password", ..style } }
         }
     };
-
-    let mut block = Block { lines: vec![vec![cell]] };
     // Honour `Ui.width` on a text-like field so it renders at a fixed/fill width
     // (the field background fills it). `Fill` expands to the parent's allocation.
     if input_type != "range" {
@@ -444,6 +475,7 @@ fn render_input<M: Clone>(
         }
     }
     let width = block.width();
+    let height = block.height().max(1);
     ctx.focusables.push(Focusable {
         events,
         is_input: true,
@@ -453,9 +485,37 @@ fn render_input<M: Clone>(
         line: 0,
         col: 0,
         width,
-        height: 1,
+        height,
     });
-    Rendered { block, hits: vec![(idx, 0, 0, width, 1)] }
+    Rendered { block, hits: vec![(idx, 0, 0, width, height)] }
+}
+
+/// Map a flat char-cursor into `(line, col)` over a `'\n'`-separated buffer.
+fn cursor_line_col(runes: &[char], cursor: usize) -> (usize, usize) {
+    let mut line = 0usize;
+    let mut col = 0usize;
+    for c in runes.iter().take(cursor) {
+        if *c == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// Split a char buffer into visual lines on `'\n'` (always ≥ 1 line).
+fn split_buffer_lines(runes: &[char]) -> Vec<Vec<char>> {
+    let mut lines: Vec<Vec<char>> = vec![Vec::new()];
+    for c in runes {
+        if *c == '\n' {
+            lines.push(Vec::new());
+        } else if let Some(last) = lines.last_mut() {
+            last.push(*c);
+        }
+    }
+    lines
 }
 
 /// Render one Element node, cascading text style + collecting focusables.
@@ -474,7 +534,7 @@ fn render_node<M: Clone>(
         }
         Element::Raw(_) => Rendered { block: Block::default(), hits: vec![] },
         Element::TaggedNode(tag, _desc, attrs, _kids) if tag == "input" || tag == "textarea" => {
-            render_input(attrs, inherited, ctx, avail_w)
+            render_input(attrs, inherited, ctx, avail_w, tag == "textarea")
         }
         Element::TaggedNode(tag, _desc, attrs, kids) if tag == "button" => {
             // A button is focusable; render its label (kids), highlighted when
@@ -913,6 +973,23 @@ mod tests {
         // Both fills present; neither claimed the whole row (would overflow pre-fix).
         assert!(first.contains("48;2;10;0;0"), "left fill bg present: {first:?}");
         assert!(first.contains("48;2;0;10;0"), "right fill bg present: {first:?}");
+    }
+
+    #[test]
+    fn textarea_renders_multiline_with_cursor() {
+        let t: Element<()> = Element::TaggedNode(
+            "textarea".into(),
+            Description::NoDescription,
+            vec![Attribute::AttrAttribute("value".into(), "ab\ncd".into())],
+            vec![],
+        );
+        let mut reg = InputRegistry::new();
+        let (frame, _f, _h) = render_with_focus(&t, 80, 24, 0, &mut reg, 0);
+        let a = frame.find("ab");
+        let c = frame.find("cd");
+        assert!(a.is_some() && c.is_some(), "both visual lines render: {frame:?}");
+        assert!(a < c, "first line above second: {frame:?}");
+        assert!(frame.contains('▏'), "cursor glyph present (focused): {frame:?}");
     }
 
     #[test]
