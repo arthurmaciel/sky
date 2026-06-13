@@ -206,6 +206,27 @@ different mechanism the *correct* one, not a shortcut.
   HubExporter also uses OTLP's JSON encoding, so no protobuf dep. File-spool
   restart-durability is a noted parity extension (in-memory retry spool covers
   the transient-outage case).
+- **Console telemetry data flow — push-to-local-collector (vs Go in-process
+  read).** Go compiles the console INTO the user binary, so it reads the app's
+  in-RAM telemetry directly (same process); the SQLite spill is only optional
+  history beyond the in-RAM caps. Rust's console is a SEPARATE process and can't
+  read the app's in-RAM rings, so the data path is the industrial push-to-
+  collector model applied locally:
+    - the app auto-instruments each HTTP request into its in-RAM rings (a span +
+      an access log — `observability::track`, Go-parity automatic telemetry);
+    - a **lean** app (no sqlx) **pushes** that telemetry to the console child —
+      the *local collector* — via the C exporter (`push_exporter::enable_to_console`);
+      the child (which owns sqlx + the store) ingests → writes its SQLite store
+      → reads it back through the S1 hub kernels → serves the UI;
+    - a **db** app instead writes the spill directly and the child only reads it
+      (no push — `parent_spill_active()` selects the path).
+  This keeps EVERY Live app lean (no SQLite embedded just to get a console) while
+  giving a durable, query-able console — the local analog of "app → OTLP →
+  collector → console". A sub-app (the console child, `SKY_LIVE_BASE_PATH` set)
+  does NOT self-instrument: the console shows the PARENT's telemetry, not its own
+  page renders. The Overview's per-service charts are a live 60 s window (they
+  read "Waiting for samples…" when the app is idle — correct, same as Go); Logs
+  and Traces are historical.
 
 ### Hub read kernels (console data plane) — generic-over-return-type vs `any` + Coerce
 
