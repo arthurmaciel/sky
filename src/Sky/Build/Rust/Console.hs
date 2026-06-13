@@ -20,15 +20,20 @@ module Sky.Build.Rust.Console
     ) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, when, filterM)
+import qualified Crypto.Hash.SHA256 as SHA256
+import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Char (toLower)
+import Data.List (sortOn)
+import Numeric (showHex)
 import System.Directory
-    ( createDirectoryIfMissing, doesFileExist, getHomeDirectory
+    ( createDirectoryIfMissing, doesDirectoryExist, doesFileExist
+    , getCurrentDirectory, getHomeDirectory, listDirectory
     , removePathForcibly, renameFile, copyFile )
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode(..))
-import System.FilePath (takeDirectory, (</>))
+import System.FilePath (takeDirectory, takeExtension, (</>))
 import System.IO (hPutStrLn, stderr)
 import System.Process
     ( CreateProcess(..), proc, readCreateProcessWithExitCode )
@@ -76,13 +81,85 @@ buildIfMissing :: String -> IO ()
 buildIfMissing ver = do
     cacheDir <- consoleCacheDir ver
     let cacheBin = cacheDir </> "sky-console"
-    hit <- doesFileExist cacheBin
-    if hit
+        fpFile   = cacheDir </> ".fingerprint"
+    -- Validate the cache by a CONTENT fingerprint, not just existence. The
+    -- version dir keys releases apart, but the Rust backend is currently
+    -- dev-only (SKY_VERSION == "dev" always — the runtime is sourced from disk,
+    -- never embedded), so a version-only key would never invalidate as the
+    -- console/runtime source evolves. The fingerprint (console source + the
+    -- runtime .rs it compiles against) makes the cache rebuild on any change.
+    want <- computeFingerprint
+    binOk <- doesFileExist cacheBin
+    fpOk  <- if binOk
+                then do
+                    r <- try (readFile fpFile) :: IO (Either SomeException String)
+                    return (either (const False) ((== want) . trimNL) r)
+                else return False
+    if binOk && fpOk
         then return ()
-        else buildConsole ver cacheDir cacheBin
+        else buildConsole ver cacheDir cacheBin fpFile want
 
-buildConsole :: String -> FilePath -> FilePath -> IO ()
-buildConsole ver cacheDir cacheBin = do
+-- | Fingerprint of everything that determines the console binary: the embedded
+-- console source + the runtime `.rs` sources it compiles against (when present
+-- on disk — dev). Stable per release (console source pinned), changes on any dev
+-- edit. SHA-256 over sorted (path, bytes), hex-truncated.
+computeFingerprint :: IO String
+computeFingerprint = do
+    runtimeBytes <- runtimeSourceBytes
+    let consoleBytes = [ (p, b) | (p, b) <- embeddedConsoleApp ]
+        allParts = sortOn fst (consoleBytes ++ runtimeBytes)
+        combined = BS.concat (concatMap (\(p, b) -> [ pack p, b ]) allParts)
+        digest   = SHA256.hash combined
+    return (take 16 (concatMap pad2 (BS.unpack digest)))
+  where
+    pad2 w = let s = showHex w "" in if length s == 1 then '0' : s else s
+    pack   = BS.pack . map (fromIntegral . fromEnum)
+
+-- | Read the runtime `.rs` sources (one level deep, matching what
+-- `copyRustRuntime` copies into a generated project) so a runtime edit
+-- invalidates the console cache. `[]` when the dir can't be located (release:
+-- no on-disk runtime — fine, the version key handles release).
+runtimeSourceBytes :: IO [(FilePath, ByteString)]
+runtimeSourceBytes = do
+    mDir <- locateRuntimeSrc
+    case mDir of
+        Nothing  -> return []
+        Just dir -> do
+            top <- readRsIn dir
+            entries <- listDirectory dir
+            subDirs <- filterM (doesDirectoryExist . (dir </>)) entries
+            subs <- concat <$> mapM (\s -> readRsIn (dir </> s)) subDirs
+            return (top ++ subs)
+  where
+    readRsIn d = do
+        present <- doesDirectoryExist d
+        if not present then return [] else do
+            names <- listDirectory d
+            let rs = filter (\f -> takeExtension f `elem` [".rs", ".js"]) names
+            mapM (\n -> do b <- BS.readFile (d </> n); return (d </> n, b)) rs
+
+-- | Locate `runtime-rust/src/sky_runtime` by walking up from the sky exe, then
+-- the cwd — the same resolution `copyRustRuntime` uses, so we fingerprint the
+-- exact tree that gets compiled into the console.
+locateRuntimeSrc :: IO (Maybe FilePath)
+locateRuntimeSrc = do
+    exe <- getExecutablePath
+    cwd <- getCurrentDirectory
+    let walk d = do
+            let cand = d </> "runtime-rust" </> "src" </> "sky_runtime"
+            ok <- doesDirectoryExist cand
+            if ok then return (Just cand)
+            else if takeDirectory d == d then return Nothing else walk (takeDirectory d)
+    fromExe <- walk (takeDirectory exe)
+    case fromExe of
+        Just p  -> return (Just p)
+        Nothing -> walk cwd
+
+trimNL :: String -> String
+trimNL = reverse . dropWhile (`elem` "\r\n ") . reverse
+
+buildConsole :: String -> FilePath -> FilePath -> FilePath -> String -> IO ()
+buildConsole ver cacheDir cacheBin fpFile fingerprint = do
     skyBin <- getExecutablePath
     let buildDir = cacheDir </> "build"
     -- Fresh build dir (a previous partial build may have left a stale tree).
@@ -95,7 +172,14 @@ buildConsole ver cacheDir cacheBin = do
 
     hPutStrLn stderr $
         "[sky] pre-building the bundled console for sky " ++ ver
-        ++ " (one-time per version; set " ++ prebuildOptOutEnv ++ "=off to skip)..."
+        ++ " (rebuilds on console/runtime change; set " ++ prebuildOptOutEnv ++ "=off to skip)..."
+
+    -- Build profile: DEBUG today. The Rust backend is dev-only (no embedded
+    -- runtime), so the cache is fingerprint-invalidated and rebuilt on every
+    -- console/runtime edit — debug keeps that fast, and binary size is moot on a
+    -- dev box. When the Rust backend gains a shipping path (embedded runtime +
+    -- versioned releases), switch to `--release` for the version-keyed,
+    -- build-once console artifact (smaller + faster startup).
 
     -- Isolated env: drop CARGO_TARGET_DIR so the console builds into its own
     -- buildDir/sky-out/Rust/target (every generated crate is "sky-app" — sharing
@@ -128,6 +212,11 @@ buildConsole ver cacheDir cacheBin = do
                     let tmpBin = cacheBin ++ ".tmp"
                     copyFile built tmpBin
                     renameFile tmpBin cacheBin
+                    -- Record the fingerprint so the next build can validate the
+                    -- cache (write AFTER the binary is in place; a crash between
+                    -- the two leaves a stale-but-detectable fingerprint mismatch
+                    -- → safe rebuild, never a false hit).
+                    writeFile fpFile fingerprint
                     -- Reclaim the (large) build tree; the cached binary is all we keep.
                     removePathForcibly buildDir
                     hPutStrLn stderr $ "[sky.console] cached → " ++ cacheBin
