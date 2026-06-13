@@ -170,6 +170,18 @@ pub fn curry8<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: 's
 ) -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> Box<dyn FnOnce(A4) -> Box<dyn FnOnce(A5) -> Box<dyn FnOnce(A6) -> Box<dyn FnOnce(A7) -> Box<dyn FnOnce(A8) -> R + Send> + Send> + Send> + Send> + Send> + Send> + Send> + Send> {
     Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| Box::new(move |a4| Box::new(move |a5| Box::new(move |a6| Box::new(move |a7| Box::new(move |a8| f(a1, a2, a3, a4, a5, a6, a7, a8)))))))))
 }
+#[allow(clippy::type_complexity)]
+pub fn curry9<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: 'static + Send, A5: 'static + Send, A6: 'static + Send, A7: 'static + Send, A8: 'static + Send, A9: 'static + Send, R: 'static, F: FnOnce(A1, A2, A3, A4, A5, A6, A7, A8, A9) -> R + Send + 'static>(
+    f: F,
+) -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> Box<dyn FnOnce(A4) -> Box<dyn FnOnce(A5) -> Box<dyn FnOnce(A6) -> Box<dyn FnOnce(A7) -> Box<dyn FnOnce(A8) -> Box<dyn FnOnce(A9) -> R + Send> + Send> + Send> + Send> + Send> + Send> + Send> + Send> {
+    Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| Box::new(move |a4| Box::new(move |a5| Box::new(move |a6| Box::new(move |a7| Box::new(move |a8| Box::new(move |a9| f(a1, a2, a3, a4, a5, a6, a7, a8, a9))))))))))
+}
+#[allow(clippy::type_complexity)]
+pub fn curry10<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: 'static + Send, A5: 'static + Send, A6: 'static + Send, A7: 'static + Send, A8: 'static + Send, A9: 'static + Send, A10: 'static + Send, R: 'static, F: FnOnce(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10) -> R + Send + 'static>(
+    f: F,
+) -> Box<dyn FnOnce(A1) -> Box<dyn FnOnce(A2) -> Box<dyn FnOnce(A3) -> Box<dyn FnOnce(A4) -> Box<dyn FnOnce(A5) -> Box<dyn FnOnce(A6) -> Box<dyn FnOnce(A7) -> Box<dyn FnOnce(A8) -> Box<dyn FnOnce(A9) -> Box<dyn FnOnce(A10) -> R + Send> + Send> + Send> + Send> + Send> + Send> + Send> + Send> + Send> {
+    Box::new(move |a1| Box::new(move |a2| Box::new(move |a3| Box::new(move |a4| Box::new(move |a5| Box::new(move |a6| Box::new(move |a7| Box::new(move |a8| Box::new(move |a9| Box::new(move |a10| f(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10)))))))))))
+}
 
 // --- Pipeline (curried decoder combinators) ---
 // Curried by design — see README section A0. Pipeline-decoder helpers
