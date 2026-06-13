@@ -23,7 +23,6 @@
 //! Pool-open / schema / write failures degrade to an `eprintln` warn; the in-RAM
 //! sink keeps serving. No `unwrap`/`expect`/indexing in any reachable path.
 
-use serde_json::json;
 use sqlx::SqlitePool;
 use std::sync::OnceLock;
 use tokio::sync::mpsc;
@@ -138,7 +137,10 @@ async fn write_entry(pool: &SqlitePool, svc: &str, entry: SpillEntry) -> Result<
         SpillEntry::Span { ts_ms, name, dur_us, ok } => {
             let start = rfc3339(ts_ms);
             let end = rfc3339(ts_ms + dur_us / 1000);
-            let attrs = json!({ "status": if ok { "ok" } else { "error" } }).to_string();
+            // Hand-built (no serde_json): the `db` feature doesn't pull serde_json,
+            // and a db-without-json program (e.g. a Db CLI) must still compile this
+            // always-`db`-gated module. The status value is a fixed literal.
+            let attrs = format!(r#"{{"status":"{}"}}"#, if ok { "ok" } else { "error" });
             sqlx::query(
                 "INSERT INTO telemetry_span (service_name, time, name, start_time, end_time, attrs) \
                  VALUES (?, ?, ?, ?, ?, ?)",

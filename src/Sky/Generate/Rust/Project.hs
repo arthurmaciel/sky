@@ -111,7 +111,10 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    -- Std.Cache — pure-std LRU+TTL, no external dep (always declared)
                    ,"pub mod cache;"]
         -- sub-C — Std.Auth requires db.rs + jwt; gated together
-        dbMod = if usesDb then ["pub mod db;", "pub mod auth;"] else []
+        -- telemetry_spill (#69 / epic D): the write-through SQLite spill the
+        -- always-compiled telemetry sink dual-writes to. Gated on db (it needs
+        -- sqlx + tokio); telemetry.rs's spill hook is the matching cfg-dispatch.
+        dbMod = if usesDb then ["pub mod db;", "pub mod auth;", "pub mod telemetry_spill;"] else []
         baseUse = ["pub use config::*;","pub use core::*;"
                   ,"pub use task::*;","pub use log::*;","pub use trace::*;"
                   ,"pub use system::*;","pub use time::*;"
