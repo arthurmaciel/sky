@@ -86,6 +86,23 @@ sky build (user app, Live)                         runtime (parent app)
 - [ ] `cargo build --features full`; unit test: gate logic (env permutations).
 - [ ] Commit.
 
+### Task 2 PREREQUISITE (discovered 2026-06-13): wire `SKY_LIVE_BASE_PATH` through the Rust Live server
+
+The proxy pass-through only works if the spawned child prefixes its own URLs under
+`/_sky/console`. The Rust Live server HAS page-level base support
+(`render_page_full(base)` → `<meta sky-base>` + `window.__SKY_BASE`, `live/mod.rs:113`)
+but does NOT currently read `SKY_LIVE_BASE_PATH` into `base` — it's passed `""`
+everywhere. So before/with Task 2:
+- Read `SKY_LIVE_BASE_PATH` at Live boot; thread it into `render_page_full`'s `base`
+  so the child's inlined JS prefixes `/_sky/event` / `/_sky/sse` with the base.
+- Decide the proxy convention: pass-through (`/_sky/console/X` → child `/_sky/console/X`,
+  child serves under the prefix) vs strip (`→ child /X`, child serves at root +
+  base only for generated links). Go uses base-for-links + the child served behind
+  the proxy at the base path. Match whichever the Rust child's router actually does;
+  verify `/_sky/console/_event` + `/_sky/console/_sse` round-trip.
+- This is the intricate piece — do it deliberately, with an e2e (page load + an
+  event POST + an SSE patch all through the proxy), not by guesswork.
+
 ### Task 2: console_proxy.rs — reverse-proxy handler
 
 **Files:** `live/console_proxy.rs`; `live/mod.rs`.
