@@ -75,23 +75,56 @@ pub async fn metrics() -> impl IntoResponse {
     )
 }
 
-/// axum middleware: increment the request counter for every served request, then
-/// pass through. Excludes nothing — `/_sky/metrics` self-counts, matching Go's
-/// access-log middleware which wraps the whole mux.
+/// axum middleware: per-request observability (Go parity — its access-log +
+/// OTel-span middleware wraps the whole mux). Counts every request, and for
+/// user-facing requests auto-records a span + an access log so the console has
+/// data without the app calling `Std.Trace`/`Std.Log` itself.
 pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     REQUESTS.fetch_add(1, Ordering::Relaxed);
     // Gate the console + metrics surface (off / production-auth) before serving.
-    let path = req.uri().path();
+    let path = req.uri().path().to_string();
+    let method = req.method().as_str().to_string();
     if path == "/_sky/metrics" || path.starts_with("/_sky/console") {
         if let Some(blocked) = super::console::gate_blocked(req.headers()) {
             super::super::telemetry::record_request(blocked.status().as_u16());
             return blocked;
         }
     }
+    let start = std::time::Instant::now();
     let resp = next.run(req).await;
+    let status = resp.status().as_u16();
     // Feed the Sky Console telemetry (request count + 5xx error count).
-    super::super::telemetry::record_request(resp.status().as_u16());
+    super::super::telemetry::record_request(status);
+    // Auto request span + access log — but NOT for the internal observability
+    // surface: the SSE long-poll would record a multi-minute span, and the
+    // console proxy / metrics / health endpoints would self-instrument the
+    // console's own polling into noise.
+    if !is_internal_path(&path) {
+        let dur_us = start.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        let ok = status < 500;
+        super::super::telemetry::record_span(&format!("{method} {path}"), dur_us, ok);
+        let level = if status >= 500 { "error" } else { "info" };
+        super::super::telemetry::record_log(
+            level,
+            &format!("{method} {path} -> {status} ({}ms)", dur_us / 1000),
+        );
+    }
     resp
+}
+
+/// Internal observability/transport paths that must NOT be auto-instrumented:
+/// the SSE long-poll (a multi-minute span), the console reverse-proxy + its
+/// events (the console's own traffic), and the health/metrics/build/ingest
+/// endpoints (operator polling noise).
+fn is_internal_path(path: &str) -> bool {
+    path == "/_sky/sse"
+        || path == "/_sky/event"
+        || path == "/_sky/metrics"
+        || path == "/_sky/healthz"
+        || path == "/_sky/readyz"
+        || path == "/_sky/buildinfo"
+        || path == "/_sky/observability/ingest"
+        || path.starts_with("/_sky/console")
 }
 
 #[cfg(test)]
@@ -103,6 +136,20 @@ mod tests {
     async fn body_string(r: axum::response::Response) -> String {
         let bytes = to_bytes(r.into_body(), 64 * 1024).await.unwrap_or_default();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[test]
+    fn internal_paths_are_not_auto_instrumented() {
+        // SSE long-poll, event transport, console proxy, ops endpoints → skipped.
+        assert!(super::is_internal_path("/_sky/sse"));
+        assert!(super::is_internal_path("/_sky/event"));
+        assert!(super::is_internal_path("/_sky/console"));
+        assert!(super::is_internal_path("/_sky/console/_sky/sse"));
+        assert!(super::is_internal_path("/_sky/healthz"));
+        // User-facing routes → instrumented.
+        assert!(!super::is_internal_path("/"));
+        assert!(!super::is_internal_path("/api/users"));
+        assert!(!super::is_internal_path("/dashboard"));
     }
 
     #[tokio::test]
