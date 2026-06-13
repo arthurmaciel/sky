@@ -140,6 +140,7 @@ script directly; the skill is just the agent-facing wrapper + procedure.
 | `sky-rust-backend:sync-with-upstream` | — (agent-driven git runbook) | ingest `anzellai/sky` upstream into `feat/runtime-rust` |
 | `sky-rust-backend:update-docs` | — (agent-driven) | commit pending work + refresh `runtime-rust/README.md` |
 | `sky-rust-backend:ffi-audit` | `ffi_audit.py` | measure Sky→Rust auto-FFI coverage across a ~50-crate sample |
+| `sky-rust-backend:quality-audit` | `quality-audit.sh` | deep soundness/security/efficiency audit — panic vectors, unsafe, dyn Any, footguns, undocumented `#[allow]`, beyond the clippy gate |
 
 The four sweeps are the verification phases (build → run → web → perf);
 `keep-go-parity` chains them after an upstream sync. The runner scripts are the
