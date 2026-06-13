@@ -1174,7 +1174,15 @@ exprToRustInner ctx e = case e of
                             ++ "move |_fd| Some(__m.clone()) })))"
             in "StdUiAttribute::AttrEvent(" ++ inner ++ ")"
     Can.Call fn args ->
-        let calleeName = exprToRustString ctx fn
+        let calleeRendered = exprToRustString ctx fn
+            -- A call whose callee is a record FIELD access (`rec.field args`) is
+            -- calling a function-typed field. Rust parses `rec.field(args)` as a
+            -- method call (E0599 — no such method). Sky records have no methods, so
+            -- the field is a stored closure: parenthesise to a field call,
+            -- `(rec.field)(args)`. (The console's StateStore callback record.)
+            calleeName = case fn of
+                Ann.At _ (Can.Access _ _) -> "(" ++ calleeRendered ++ ")"
+                _ -> calleeRendered
             -- sub-A.12 F2: detect partial application (Sky source has currying;
             -- Rust doesn't). If the callee is a top-level fn with known arity > supplied,
             -- wrap the residual args in a `move |..| f(supplied.., residual..)` closure.
@@ -1927,7 +1935,13 @@ emitDefaultCall ctx fn calleeName args =
                 in Set.member (modPrefix, name) (ecZeroArgDefs ctx)
                    && (fnName == kernelName || kernelName == "ffi_kernel")
             _ -> False
-        callee = exprToRustString ctx fn
+        -- A call whose callee is a record FIELD access (`rec.field`) calls a
+        -- function-typed field; Rust reads `rec.field(args)` as a method call
+        -- (E0599). Sky records have no methods, so parenthesise the field access:
+        -- `(rec.field)(args)`. (The console's StateStore callback record.)
+        callee = case fn of
+            Ann.At _ (Can.Access _ _) -> "(" ++ exprToRustString ctx fn ++ ")"
+            _ -> exprToRustString ctx fn
     in if isZeroArgFn && not (null args)
        then callee ++ "()(" ++ intercalate ", " argsStrs ++ ")"
        else callee ++ "(" ++ intercalate ", " argsStrs ++ ")"
