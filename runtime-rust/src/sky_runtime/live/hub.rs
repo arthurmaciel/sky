@@ -704,9 +704,13 @@ async fn open_spill(db_path: &str) -> Option<SqlitePool> {
     if db_path.is_empty() {
         return None;
     }
-    // `mode=ro` — the console is a pure reader; D (#69) owns writes. A missing
+    // `mode=rw` (NOT ro): the spill is WAL-mode (the parent writer needs
+    // concurrent read+write — see telemetry_spill.rs). A `mode=ro` connection
+    // can't attach the -wal/-shm and so never sees frames the writer committed
+    // but hasn't checkpointed; a `mode=rw` reader participates in WAL and sees
+    // them. The console only ever SELECTs, so rw grants no real write. A missing
     // file fails to connect → None → empty result (no panic, no surfaced error).
-    let url = format!("sqlite:{db_path}?mode=ro");
+    let url = format!("sqlite:{db_path}?mode=rw");
     match SqlitePool::connect(&url).await {
         Ok(pool) => Some(pool),
         Err(e) => {

@@ -826,6 +826,12 @@ where
 
         pubsub::mark_live_running();
 
+        // Enable the telemetry SQLite spill (#69 / epic D) when
+        // SKY_CONSOLE_DB_PATH is set — the console child reads it via the S1
+        // hub kernels. db-gated; a no-op for live-without-db apps.
+        #[cfg(feature = "db")]
+        crate::sky_runtime::telemetry_spill::enable_from_env().await;
+
         let port: i64 = std::env::var("SKY_LIVE_PORT")
             .ok()
             .and_then(|s| s.parse().ok())

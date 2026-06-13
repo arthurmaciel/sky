@@ -56,13 +56,35 @@ fn push_bounded<T>(ring: &Mutex<VecDeque<T>>, cap: usize, e: T) {
     g.push_back(e);
 }
 
+/// Forward a record to the SQLite spill (#69 / epic D) when enabled. A no-op
+/// stub keeps this always-compiled sink tokio/sqlx-free when `db` is off.
+#[cfg(feature = "db")]
+#[inline]
+fn spill_log(ts_ms: u64, level: &str, message: &str) {
+    crate::sky_runtime::telemetry_spill::offer_log(ts_ms, level, message);
+}
+#[cfg(not(feature = "db"))]
+#[inline]
+fn spill_log(_ts_ms: u64, _level: &str, _message: &str) {}
+
+#[cfg(feature = "db")]
+#[inline]
+fn spill_span(ts_ms: u64, name: &str, dur_us: u64, ok: bool) {
+    crate::sky_runtime::telemetry_spill::offer_span(ts_ms, name, dur_us, ok);
+}
+#[cfg(not(feature = "db"))]
+#[inline]
+fn spill_span(_ts_ms: u64, _name: &str, _dur_us: u64, _ok: bool) {}
+
 /// Record a completed trace span (called from `Std.Trace.span`).
 pub fn record_span(name: &str, dur_us: u64, ok: bool) {
+    let ts = now_ms();
     push_bounded(
         &SPANS,
         SPAN_CAP,
-        SpanEntry { ts_ms: now_ms(), name: name.to_string(), dur_us, ok },
+        SpanEntry { ts_ms: ts, name: name.to_string(), dur_us, ok },
     );
+    spill_span(ts, name, dur_us, ok);
 }
 
 /// Most-recent `limit` spans as a JSON array.
@@ -101,12 +123,14 @@ pub fn production_from_env() -> bool {
 /// Record a structured log line (called from `Std.Log.*`). Errors also land in
 /// the error ring + bump the error counter.
 pub fn record_log(level: &str, message: &str) {
-    let e = LogEntry { ts_ms: now_ms(), level: level.to_string(), message: message.to_string() };
+    let ts = now_ms();
+    let e = LogEntry { ts_ms: ts, level: level.to_string(), message: message.to_string() };
     if level.eq_ignore_ascii_case("error") {
         ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
         push_bounded(&ERRORS, ERR_CAP, e.clone());
     }
     push_bounded(&LOGS, LOG_CAP, e);
+    spill_log(ts, level, message);
 }
 
 /// Record one served HTTP request (called from the Live counter middleware).
