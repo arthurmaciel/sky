@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Sky Rust-backend BUILD sweep — `sky build --target rust` + `cargo build` over
 # the largest example set, reporting in-scope failures. Run + perf are separate
-# skills (/rust-run-sweep, /rust-perf-sweep).
+# skills (/run-sweep, /perf-sweep).
 #
-# This script IS the procedure (the /rust-build-sweep skill). Wraps the repo's
+# This script IS the procedure (the /build-sweep skill). Wraps the repo's
 # scripts/rust-sweep.sh (which already bins the largest set: examples/[0-9]* +
 # simple + test_pkg) with the env gotchas + a clean failure report. If a run
 # reveals a better way, IMPROVE THIS SCRIPT (or scripts/rust-sweep.sh).
@@ -30,7 +30,7 @@ export SKY_BIN="$REPO/sky-out/sky"
 export SKY_CONSOLE_PREBUILD=off
 mkdir -p "$CARGO_TARGET_DIR"
 
-HIST="$HOME/.cache/sky/rust-build-sweep"; mkdir -p "$HIST"
+HIST="$HOME/.cache/sky/build-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG="$HIST/sweep-$STAMP.log"
 say() { echo "$@" | tee -a "$HIST/run-$STAMP.log"; }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Rust-backend live/web verification driver — the browser round-trip the
-// /rust-web-sweep skill drives (its curl-only sibling /rust-run-sweep only
+// /web-sweep skill drives (its curl-only sibling /run-sweep only
 // proves the server boots + serves HTML on `/`). This launches a real
 // headless browser, replays the repo's maintained per-example scenario
 // (scripts/verify-scenarios.mjs — same ones the Go backend uses, since the
@@ -8,7 +8,7 @@
 // "click is a no-op" class: a scenario click that never POSTs /_sky/event.
 //
 // Usage:
-//   node rust-web-verify.mjs <example-name> <port> <scenario> <rust-binary>
+//   node web-verify.mjs <example-name> <port> <scenario> <rust-binary>
 //
 // Differences from scripts/verify-live-app.mjs (which we deliberately do NOT
 // edit — it's a shared Go-backend script, out of the Rust boundary):
@@ -37,7 +37,7 @@ const scenarioName = process.argv[4] || 'smoke';
 const binary       = process.argv[5];
 
 if (!exampleName || !binary) {
-    console.error('usage: node rust-web-verify.mjs <example-name> <port> <scenario> <rust-binary>');
+    console.error('usage: node web-verify.mjs <example-name> <port> <scenario> <rust-binary>');
     process.exit(2);
 }
 if (!fs.existsSync(binary)) {

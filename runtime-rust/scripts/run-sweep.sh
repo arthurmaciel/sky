@@ -3,9 +3,9 @@
 # RUN it, checking it actually works (cli: runs without a panic; server/live:
 # boots + serves HTTP). Catches the runtime-regression class the build sweep
 # misses (panics, dead servers, "the click is a no-op"). Build + perf are
-# separate skills (/rust-build-sweep, /rust-perf-sweep).
+# separate skills (/build-sweep, /perf-sweep).
 #
-# This script IS the procedure (the /rust-run-sweep skill). Do not re-decide the
+# This script IS the procedure (the /run-sweep skill). Do not re-decide the
 # steps ad-hoc; if a run reveals a better way (a new gotcha, a port quirk,
 # another shape), IMPROVE THIS SCRIPT so the next run inherits the fix.
 #
@@ -32,7 +32,7 @@ command -v curl >/dev/null 2>&1 || { echo "ERROR: curl required for server/live 
 export SKY_CONSOLE_EMBED=off
 mkdir -p "$CARGO_TARGET_DIR"
 
-HIST="$HOME/.cache/sky/rust-run-sweep"; mkdir -p "$HIST"
+HIST="$HOME/.cache/sky/run-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG="$HIST/run-$STAMP.log"
 say() { echo "$@" | tee -a "$LOG"; }
@@ -48,7 +48,7 @@ PANIC_RE="panicked|CompilerBug|RUST_BACKTRACE|index out of bounds|unwrap\(\) on|
 
 # ── Runnable set (cli one-shot / server / live). EXCLUDED: tui/webview/fyne ──
 # (need a TTY/window), console/multi-tier (25/34 special spawn), Go-FFI 02.
-# Same curated set as /rust-perf-sweep, for consistency.
+# Same curated set as /perf-sweep, for consistency.
 #   RUST_RUN="a b c"  → explicit override.
 RUN_FULL=(
   00-standard-libs 01-hello-world 04-local-pkg 06-json 07-todo-cli 14-task-demo

@@ -3,12 +3,12 @@
 # drive it through a REAL headless browser (system chromium), replaying the
 # repo's maintained per-example scenario and hard-failing the "click is a no-op"
 # class (a scenario click that never POSTs /_sky/event). This is the depth its
-# sibling /rust-run-sweep deliberately skips (that one is a curl GET → 200 boot
+# sibling /run-sweep deliberately skips (that one is a curl GET → 200 boot
 # check). Build / run / perf are the other three phases.
 #
-# This script IS the procedure (the /rust-web-sweep skill). Don't re-decide the
+# This script IS the procedure (the /web-sweep skill). Don't re-decide the
 # steps ad-hoc; if a run reveals a better way (a new scenario, a flake, a
-# launch quirk), IMPROVE THIS SCRIPT (and/or runtime-rust/scripts/rust-web-verify.mjs).
+# launch quirk), IMPROVE THIS SCRIPT (and/or runtime-rust/scripts/web-verify.mjs).
 #
 # Exit: 0 = every example PASS · 1 = a web/build failure · 2 = setup error.
 set -uo pipefail
@@ -37,17 +37,17 @@ command -v node >/dev/null 2>&1 || { echo "ERROR: node not on PATH (looked under
 [ -d "$REPO/node_modules/playwright" ] || { echo "ERROR: playwright not in $REPO/node_modules — npm i." >&2; exit 2; }
 mkdir -p "$CARGO_TARGET_DIR"
 
-DRIVER="$REPO/runtime-rust/scripts/rust-web-verify.mjs"
+DRIVER="$REPO/runtime-rust/scripts/web-verify.mjs"
 [ -f "$DRIVER" ] || { echo "ERROR: driver missing: $DRIVER" >&2; exit 2; }
 
-HIST="$HOME/.cache/sky/rust-web-sweep"; mkdir -p "$HIST"
+HIST="$HOME/.cache/sky/web-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG="$HIST/web-$STAMP.log"
 say() { echo "$@" | tee -a "$LOG"; }
 say "=== Sky Rust WEB sweep @ $STAMP (repo: $REPO · chromium: $SKY_CHROMIUM) ==="
 
 reap() { for p in sky-app app sky-console; do pkill -x "$p" 2>/dev/null; done
-         pkill -f "examples/.*/sky-out/" 2>/dev/null; pkill -f rust-web-verify.mjs 2>/dev/null; }
+         pkill -f "examples/.*/sky-out/" 2>/dev/null; pkill -f web-verify.mjs 2>/dev/null; }
 ps -u "$USER" -o pid,args 2>/dev/null | awk '/\/sky (lsp|doc)/{print $1}' | xargs -r kill 2>/dev/null
 reap; sync; sleep 1
 

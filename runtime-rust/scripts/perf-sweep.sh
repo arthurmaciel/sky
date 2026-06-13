@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Sky Rust-backend PERF sweep — Rust-vs-Go perf over the perf-runnable example
 # set + a regression report vs the previous run. Build + run sweeps are separate
-# skills (/rust-build-sweep, /rust-run-sweep).
+# skills (/build-sweep, /run-sweep).
 #
-# This script IS the procedure (the /rust-perf-sweep skill). Do not re-decide
+# This script IS the procedure (the /perf-sweep skill). Do not re-decide
 # the steps ad-hoc; if a run reveals a better way (a new gotcha, a parse miss, a
 # flaky step, another example shape), IMPROVE THIS SCRIPT so the next run
 # inherits the fix.
@@ -33,7 +33,7 @@ command -v hyperfine >/dev/null 2>&1 || echo "WARN: 'hyperfine' missing — cli 
 command -v python3   >/dev/null 2>&1 || { echo "ERROR: python3 required for the regression diff." >&2; exit 2; }
 mkdir -p "$CARGO_TARGET_DIR"
 
-HIST="$HOME/.cache/sky/rust-perf-sweep"; mkdir -p "$HIST"
+HIST="$HOME/.cache/sky/perf-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PERF_TSV="$HIST/perf-$STAMP.tsv"
 LOG="$HIST/run-$STAMP.log"
