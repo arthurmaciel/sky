@@ -46,37 +46,23 @@ reap() { for p in sky-app app sky-console; do pkill -x "$p" 2>/dev/null; done
 ps -u "$USER" -o pid,args 2>/dev/null | awk '/\/sky (lsp|doc)/{print $1}' | xargs -r kill 2>/dev/null
 reap
 
-# ── Comparable set ─────────────────────────────────────────────────────────
-# Largest set whose stdout is DETERMINISTIC and BACKEND-INDEPENDENT, so a diff
-# means a real bug — never a legitimate Go/Rust difference. To stay comparable an
-# example must be: a CLI one-shot · non-interactive (no stdin) · build on BOTH
-# backends · print nothing that legitimately differs between backends.
-#
-# EXCLUDED (would be FALSE NEGATIVES — legitimate divergence, not bugs):
-#   • server / Sky.Live          — no deterministic stdout to diff; and Live's
-#                                  console is IN-PROCESS on Go vs a CROSS-PROCESS
-#                                  child on Rust, so even side output diverges by
-#                                  design. (08,09,10,12,15,16,17,18,19,25,26,27,
-#                                  28,30,32,33,34,39)
-#   • tui / webview / fyne        — render to a TTY/window, no comparable stdout.
-#                                  (11,21,22,23,24,29,31,38)
-#   • non-deterministic output    — anything printing Time/Random/Uuid/Http/PID/
-#                                  duration/hash-of-random, or Dict/Set iteration
-#                                  order, or concurrent-interleaved prints.
-#   • interactive stdin           — 07-todo-cli (reads commands), 20-cli-counter.
-#   • not both-backend-buildable  — 02 (Go-FFI), 03,05,13,36,37 (rust build fails).
-#   RUST_EQUIV="01-hello-world test_pkg"  → explicit override.
-EQUIV_FULL=(
-  00-standard-libs        # 120 stdlib assertions — pass/fail lines, backend-independent
-  01-hello-world
-  04-local-pkg            # multi-module
-  06-json                 # encode/decode; object key order is _fieldIndex-stable on both
-  14-task-demo            # sequential Task andThen/fail/run
-  35-composite-generics
-  simple                  # task_sequence/parallel — results collected then printed in order
-  test_pkg                # Result/Maybe combinators
-)
-if [ -n "${RUST_EQUIV:-}" ]; then read -r -a EXAMPLES <<< "$RUST_EQUIV"; else EXAMPLES=("${EQUIV_FULL[@]}"); fi
+# ── Comparable set — from the classification manifest (single source of truth) ─
+# equiv-classification.tsv lists EVERY example as `in` (deterministic +
+# backend-independent stdout → a diff is a real bug) or `out` (a diff there would
+# be a legitimate Go/Rust difference). The `in` rows are this sweep's set.
+MANIFEST="$REPO/runtime-rust/scripts/equiv-classification.tsv"
+[ -f "$MANIFEST" ] || { echo "ERROR: classification manifest missing: $MANIFEST" >&2; exit 2; }
+
+# CLASSIFICATION-COVERAGE GATE: every examples/ dir on disk MUST be classified.
+# An unclassified example means the parity claim is incomplete → FAIL (this is
+# the forced-classification rule: "Go parity maintained" requires full coverage).
+classified_all="$(awk '!/^#/ && NF>=2 {print $1}' "$MANIFEST" | sort -u)"
+on_disk="$(find examples -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -u)"
+UNCLASSIFIED="$(comm -13 <(echo "$classified_all") <(echo "$on_disk") | tr '\n' ' ' | sed 's/ *$//')"
+
+# The `in` set (manifest order). RUST_EQUIV="a b c" overrides for a quick subset.
+IN_SET="$(awk '!/^#/ && $2=="in" {print $1}' "$MANIFEST" | tr '\n' ' ' | sed 's/ *$//')"
+if [ -n "${RUST_EQUIV:-}" ]; then read -r -a EXAMPLES <<< "$RUST_EQUIV"; else read -r -a EXAMPLES <<< "$IN_SET"; fi
 
 # Strip blank lines only (cosmetic) — NOT aggressive normalisation, which could
 # mask a real divergence. A surviving diff is a genuine output mismatch.
@@ -116,5 +102,19 @@ done
 reap
 say ""; say "=== EQUIV SWEEP: $PASS match · $FAIL differ/fail · $SKIP skipped ==="
 [ -n "$FAILED" ] && say "  failures:$FAILED"
+
+# ── Classification-coverage gate (full runs only) ──
+# "Go parity maintained" requires EVERY example classified in/out. An unclassified
+# example on disk is a gate failure — classify it in equiv-classification.tsv.
+COVERAGE_FAIL=0
+if [ -z "${RUST_EQUIV:-}" ] && [ -n "$UNCLASSIFIED" ]; then
+  COVERAGE_FAIL=1
+  say "  UNCLASSIFIED (parity claim INCOMPLETE — classify in/out in equiv-classification.tsv):"
+  say "    $UNCLASSIFIED"
+fi
 say "  per-example: $HIST/<ex>.{go,rust}.txt · <ex>.diff.txt · build logs"
-[ "$FAIL" -eq 0 ] && exit 0 || exit 1
+if [ "$FAIL" -eq 0 ] && [ "$COVERAGE_FAIL" -eq 0 ]; then
+  [ -z "${RUST_EQUIV:-}" ] && say "  ✓ all examples classified; in-scope set matches Go"
+  exit 0
+fi
+exit 1

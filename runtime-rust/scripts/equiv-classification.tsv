@@ -1,0 +1,57 @@
+# Go≡Rust equivalence classification — the SINGLE SOURCE OF TRUTH for which
+# examples the equiv-sweep compares. EVERY top-level dir under examples/ MUST
+# appear here exactly once. An example present on disk but absent here is
+# "unclassified" → equiv-sweep FAILS and "Go parity maintained" CANNOT be claimed
+# (sky-rust-backend:keep-go-parity inherits this gate by always running equiv-sweep).
+#
+# Format:  <example>  <in|out>  <reason>
+#   in   = stdout is deterministic AND backend-independent → a diff is a real bug.
+#   out  = a diff there would be a legitimate Go/Rust difference, not a regression.
+#
+# When a new example lands, CLASSIFY IT here (in or out, with a reason) — that is
+# the forced-classification step. Do not leave it unclassified.
+
+00-standard-libs        in   120 stdlib assertions; pass/fail lines are deterministic + backend-independent
+01-hello-world          in   plain deterministic output
+04-local-pkg            in   multi-module; deterministic
+06-json                 in   encode/decode; object key order is _fieldIndex-stable on both backends
+14-task-demo            in   sequential Task andThen/fail/run; deterministic
+35-composite-generics   in   generics demo; deterministic
+simple                  in   task_sequence/parallel — results collected then printed in order
+test_pkg                in   Result/Maybe combinators; deterministic
+
+02-go-stdlib            out  Go-FFI only — does not build on --target rust (nothing to compare)
+03-tea-external         out  does not build on --target rust
+05-mux-server           out  server + does not build on --target rust
+07-todo-cli             out  interactive (reads stdin commands) — not a one-shot
+08-notes-app            out  server (Sky.Http.Server) — no deterministic stdout
+09-live-counter         out  Sky.Live — no stdout; console in-process(Go) vs cross-process child(Rust)
+10-live-component       out  Sky.Live — no stdout
+11-fyne-stopwatch       out  Fyne GUI — no stdout
+12-skyvote              out  Sky.Live — no stdout
+13-skyshop              out  Sky.Live — no stdout; does not build on --target rust
+15-http-server          out  server — no deterministic stdout
+16-skychess             out  Sky.Live — no stdout
+17-skymon               out  Sky.Live — no stdout
+18-job-queue            out  Sky.Live — no stdout
+19-skyforum             out  Sky.Live — no stdout
+20-cli-counter          out  arg/stdin-driven — output depends on input, not a fixed one-shot
+21-tui-stopwatch        out  Sky.Tui — renders to a TTY, no comparable stdout
+22-tui-stopwatch-ui     out  Sky.Tui — TTY
+23-tui-todo             out  Sky.Tui — TTY
+24-tui-kitchen-sink     out  Sky.Tui — TTY
+25-sky-console          out  Sky.Live console — in-process(Go) vs cross-process(Rust) by design
+26-ui-showcase          out  Sky.Live — no stdout
+27-multi-session-chat   out  Sky.Live — no stdout
+28-streaming-chat       out  Sky.Live — no stdout
+29-webview-threejs-spike out  Webview — opens a window, no stdout
+30-sse-server-demo      out  server (SSE stream) — no deterministic stdout
+31-webview-stopwatch-ui out  Webview/Tui — window/TTY, no stdout
+32-sse-relay            out  server (SSE relay) — no deterministic stdout
+33-websocket-echo       out  server (WebSocket) — no deterministic stdout
+34-multi-tier-console   out  Sky.Live multi-tier console — in-process vs cross-process by design
+36-composite-server     out  Sky.Live — no stdout
+37-composite-live-shop  out  Sky.Live — no stdout
+38-composite-ui-multibackend out  Sky.Tui — TTY
+39-hub-demo             out  two-app hub demo — no single src/Main.sky entry point
+rust                    out  fork-local FFI example subtree — its own harness, not a single Sky example

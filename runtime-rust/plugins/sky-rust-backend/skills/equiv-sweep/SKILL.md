@@ -30,29 +30,34 @@ Deterministic, no perf timing → load-tolerant, **no close-the-apps reminder**.
    full diff at `~/.cache/sky/equiv-sweep/<ex>.diff.txt` (with the captured
    `<ex>.go.txt` / `<ex>.rust.txt`).
 
-3. **Improve the script if warranted** — a real divergence to file, OR a set
-   adjustment (a newly-comparable example to add, or a now-divergent one to
-   exclude with a documented reason).
+3. **Improve the manifest/script if warranted** — a real divergence to file, OR a
+   classification change in `equiv-classification.tsv` (a newly-comparable example
+   to flip `in`, a now-divergent one to flip `out` with a reason).
 
-## The comparable set — and why "no false negatives" is curated, not normalised
+## The classification manifest — and the coverage gate
 
-A diff only means a bug if the output is **deterministic and
-backend-independent**. The set is every CLI one-shot that qualifies; the rest are
-**excluded by design** (a diff there would be a legitimate Go/Rust difference,
-not a regression):
+The comparable set is **not hardcoded** — it's read from
+`runtime-rust/scripts/equiv-classification.tsv`, the single source of truth that
+classifies **every** example as `in` or `out`:
 
-| Excluded | Why it would false-negative |
-|---|---|
-| server / Sky.Live | no deterministic stdout; and the console is **in-process on Go vs a cross-process child on Rust**, so side output diverges by design |
-| tui / webview / fyne | render to a TTY/window — no comparable stdout |
-| Time / Random / Uuid / Http / Dict-order / concurrent-interleaved output | output legitimately varies run-to-run and backend-to-backend |
-| interactive stdin (07-todo-cli, 20-cli-counter) | would hang / isn't a one-shot |
-| not both-backend-buildable (02 Go-FFI; 03,05,13,36,37) | nothing to compare |
+- **`in`** — stdout is deterministic AND backend-independent → a diff is a real
+  bug. These are the examples the sweep diffs.
+- **`out`** — a diff there would be a *legitimate* Go/Rust difference, with the
+  reason recorded. Excluded categories: server / Sky.Live (no stdout; the console
+  is **in-process on Go vs a cross-process child on Rust** by design),
+  tui/webview/fyne (TTY/window), Time/Random/Uuid/Http/Dict-order/concurrent
+  output, interactive stdin, and non-both-backend-buildable.
 
-Included (8): `00-standard-libs · 01-hello-world · 04-local-pkg · 06-json ·
-14-task-demo · 35-composite-generics · simple · test_pkg`. The diff strips blank
-lines only — **no aggressive normalisation** (that could mask a real divergence).
-`RUST_EQUIV="01-hello-world test_pkg"` overrides.
+**Coverage gate (the forced-classification rule).** On a full run the sweep
+checks every `examples/` dir against the manifest. **Any unclassified example
+fails the sweep** — "Go parity maintained" cannot be claimed until it's
+classified `in`/`out`. So when an example lands, classifying it in the manifest
+is mandatory, not optional. (`sky-rust-backend:keep-go-parity` inherits this gate
+by always running equiv-sweep.)
+
+The diff strips blank lines only — **no aggressive normalisation** (that could
+mask a real divergence). `RUST_EQUIV="01-hello-world test_pkg"` runs a subset
+(and skips the coverage gate).
 
 ## Baked-in gotchas
 
