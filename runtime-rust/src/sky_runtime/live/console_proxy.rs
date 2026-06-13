@@ -323,34 +323,37 @@ fn pick_free_port() -> Option<u16> {
 }
 
 /// Gate → pick port → spawn the pre-built console child → wait for readiness →
-/// mount the reverse-proxy routes. Returns `(router, mounted)`:
-///   - `(router_with_proxy, true)`  — the proxy took; caller SKIPS the
-///     in-process console.
-///   - `(router_unchanged, false)`  — gate closed / binary absent / spawn
-///     failed / readiness timed out; caller mounts the in-process console
-///     fallback. The router is returned untouched so there's no partial mount.
+/// init the proxy state + shutdown hook. Returns `true` when the reverse proxy
+/// is live (the caller mounts `proxy_routes` instead of the in-process console);
+/// `false` on gate-closed / binary-absent / spawn-fail / readiness-timeout
+/// (caller mounts the in-process console fallback — no side effects left behind).
 ///
-/// `hub_db` is the parent's `SKY_CONSOLE_DB_PATH` (the telemetry spill) — wired
-/// to the child's `SKY_CONSOLE_HUB_DB` so the dashboard reads what D wrote.
-pub async fn maybe_spawn_and_mount(
-    router: axum::Router,
-    hub_db: &str,
-) -> (axum::Router, bool) {
+/// Reads the parent's `SKY_CONSOLE_DB_PATH` (the telemetry spill D writes) and
+/// wires it to the child's `SKY_CONSOLE_HUB_DB` so the dashboard renders what
+/// the parent recorded. Decided BEFORE the router is built so both the proxy and
+/// the in-process fallback sit under the same observability middleware.
+pub async fn ensure_console_proxy() -> bool {
     if !gate_allows() {
-        return (router, false);
+        return false;
     }
+    // Fast path for the common case (binary not pre-built yet): skip the
+    // port-pick + spawn entirely and let the in-process console serve.
+    if console_bin_path().is_none() {
+        return false;
+    }
+    let hub_db = std::env::var("SKY_CONSOLE_DB_PATH").unwrap_or_default();
     let port = match pick_free_port() {
         Some(p) => p,
-        None => return (router, false),
+        None => return false,
     };
-    if spawn_console(port, hub_db).is_none() {
+    if spawn_console(port, &hub_db).is_none() {
         // Binary absent (A1 hasn't run / different sky version) or spawn error.
-        return (router, false);
+        return false;
     }
     if !wait_ready(port, READY_TIMEOUT).await {
         eprintln!("[sky.console] child not ready within {READY_TIMEOUT:?}; falling back to in-process console");
         shutdown_console();
-        return (router, false);
+        return false;
     }
     if PROXY
         .set(ProxyState {
@@ -359,16 +362,27 @@ pub async fn maybe_spawn_and_mount(
         })
         .is_err()
     {
-        // Already mounted once (shouldn't happen — one Live server per process).
+        // Already initialised once (shouldn't happen — one Live server per process).
         eprintln!("[sky.console] proxy already initialised; keeping the first mount");
     }
     install_shutdown_hook();
+    eprintln!("[sky.console] reverse-proxy ready at {CONSOLE_BASE}/* → 127.0.0.1:{port}");
+    true
+}
+
+/// Add the reverse-proxy routes (`/_sky/console` + `/_sky/console/*rest`) to a
+/// router. Generic over the app state `S` because `proxy_entry` is state-free —
+/// so this composes into the main `Router<LiveState<…>>` before `with_state`,
+/// keeping the proxy under the same `track` middleware as every other route.
+/// Call only when `ensure_console_proxy().await` returned `true`.
+pub fn proxy_routes<S>(router: axum::Router<S>) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     use axum::routing::any;
-    let router = router
+    router
         .route(CONSOLE_BASE, any(proxy_entry))
-        .route(&format!("{CONSOLE_BASE}/*rest"), any(proxy_entry));
-    eprintln!("[sky.console] reverse-proxy mounted at {CONSOLE_BASE}/* → 127.0.0.1:{port}");
-    (router, true)
+        .route(&format!("{CONSOLE_BASE}/*rest"), any(proxy_entry))
 }
 
 #[cfg(test)]

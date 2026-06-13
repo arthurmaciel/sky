@@ -875,7 +875,23 @@ where
             });
         }
 
-        let app: Router = Router::new()
+        // Enable the telemetry SQLite spill (#69 / epic D) when
+        // SKY_CONSOLE_DB_PATH is set — the console child reads it via the S1
+        // hub kernels. db-gated; a no-op for live-without-db apps. Enabled
+        // BEFORE the console child spawns so early telemetry lands in the spill
+        // the child will read.
+        #[cfg(feature = "db")]
+        crate::sky_runtime::telemetry_spill::enable_from_env().await;
+
+        // Console precedence (epic A): try the pre-built console child +
+        // reverse-proxy; fall back to the in-process console when the binary is
+        // absent / spawn fails / readiness times out / the gate is closed.
+        // Decided HERE (before the router is built) so both the proxy routes and
+        // the in-process console routes sit under the same `track` middleware,
+        // and the two never collide on `/_sky/console`.
+        let use_console_proxy = console_proxy::ensure_console_proxy().await;
+
+        let mut router = Router::new()
             .route("/_sky/sse", get(sse_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             .route("/_sky/event", post(event_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             // Observability surface (Go parity — observability.go).
@@ -883,26 +899,31 @@ where
             .route("/_sky/readyz", get(observability::readyz))
             .route("/_sky/buildinfo", get(observability::buildinfo))
             .route("/_sky/metrics", get(observability::metrics))
-            // Sky Console — operator dashboard + observability federation.
-            .route("/_sky/console", get(console::console_html))
-            .route("/_sky/console/api/overview", get(console::api_overview))
-            .route("/_sky/console/api/logs", get(console::api_logs))
-            .route("/_sky/console/api/errors", get(console::api_errors))
-            .route("/_sky/console/api/traces", get(console::api_traces))
-            .route("/_sky/console/api/metrics-summary", get(console::api_metrics_summary))
-            .route("/_sky/observability/ingest", post(console::ingest))
+            // Observability federation receiver stays on the parent regardless
+            // of console mode (sub-apps push telemetry here).
+            .route("/_sky/observability/ingest", post(console::ingest));
+
+        router = if use_console_proxy {
+            // Real bundled Sky.Live console, spawned as a child + proxied.
+            console_proxy::proxy_routes(router)
+        } else {
+            // In-process console (plain-HTML shell + JSON APIs).
+            router
+                .route("/_sky/console", get(console::console_html))
+                .route("/_sky/console/api/overview", get(console::api_overview))
+                .route("/_sky/console/api/logs", get(console::api_logs))
+                .route("/_sky/console/api/errors", get(console::api_errors))
+                .route("/_sky/console/api/traces", get(console::api_traces))
+                .route("/_sky/console/api/metrics-summary", get(console::api_metrics_summary))
+        };
+
+        let app: Router = router
             .route("/", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             .route("/*path", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             .layer(axum::middleware::from_fn(observability::track))
             .with_state(state);
 
         pubsub::mark_live_running();
-
-        // Enable the telemetry SQLite spill (#69 / epic D) when
-        // SKY_CONSOLE_DB_PATH is set — the console child reads it via the S1
-        // hub kernels. db-gated; a no-op for live-without-db apps.
-        #[cfg(feature = "db")]
-        crate::sky_runtime::telemetry_spill::enable_from_env().await;
 
         let port: i64 = std::env::var("SKY_LIVE_PORT")
             .ok()
