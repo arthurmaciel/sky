@@ -57,7 +57,12 @@ pub fn console_bin_path() -> Option<std::path::PathBuf> {
             return if pb.is_file() { Some(pb) } else { None };
         }
     }
-    let ver = env!("CARGO_PKG_VERSION");
+    // Key on the SKY compiler version (same source as `/_sky/buildinfo`), NOT
+    // the generated crate's CARGO_PKG_VERSION (always "0.1.0"). The sky build
+    // sets SKY_VERSION when compiling this app, and A1 (Sky.Build.Rust.Console)
+    // caches the console binary under the SAME version — so both agree on the
+    // `~/.cache/sky/rust-console/<ver>/sky-console` path.
+    let ver = option_env!("SKY_VERSION").unwrap_or("dev");
     let home = std::env::var("HOME").ok()?;
     let pb = std::path::Path::new(&home)
         .join(".cache/sky/rust-console")

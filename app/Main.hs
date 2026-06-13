@@ -51,6 +51,7 @@ import qualified Sky.Format.Format as Format
 import qualified Sky.Lsp.Server as Lsp
 import qualified Sky.Build.FfiGen as FfiGen
 import qualified Sky.Build.Rust.Ffi as RustFfi
+import qualified Sky.Build.Rust.Console as RustConsole
 import Sky.Sky.Toml (CompileTarget(..), RustDepSpec(..))
 import qualified Sky.Build.SkyDeps as SkyDeps
 import qualified Sky.Build.Validator as Validator
@@ -1041,7 +1042,7 @@ regenMissingBindings :: CompileTarget -> [(String, String)] -> IO ()
 -- Go bindings file when `go` is absent. So short-circuit — a `--target rust`
 -- build ignores Go deps entirely. (User-reported 2026-06-13.)
 regenMissingBindings TargetRust _ = return ()
-regenMissingBindings target deps = do
+regenMissingBindings _ deps = do  -- always TargetGo (TargetRust short-circuits above)
     createDirectoryIfMissing True ".skycache/ffi"
     -- Filter once: only keep deps whose kernel.json is missing.
     -- Subsequent `sky install` runs see this empty after a successful
@@ -1054,15 +1055,13 @@ regenMissingBindings target deps = do
     case missing of
         [] -> return ()
         _  -> do
-            -- Fetch dependencies: `go get` for Go, no-op for Rust (inspector does it)
-            case target of
-                TargetGo -> do
-                    let pkgList = unwords (map fst missing)
-                    callProcess "sh"
-                        [ "-c"
-                        , "cd sky-out && go get " ++ pkgList ++ " 2>&1 | grep -v '^go:' >&2 || true"
-                        ]
-                TargetRust -> return ()
+            -- `go get` the missing deps. `target` is always TargetGo here (the
+            -- TargetRust equation above short-circuits before this point).
+            let pkgList = unwords (map fst missing)
+            callProcess "sh"
+                [ "-c"
+                , "cd sky-out && go get " ++ pkgList ++ " 2>&1 | grep -v '^go:' >&2 || true"
+                ]
 
             -- Chunked multi-inspector strategy:
             --   * Split missing deps into K chunks (K = parallelism cap).
@@ -1087,6 +1086,22 @@ regenMissingBindings target deps = do
     emit (_, Right info) = do
         _ <- FfiGen.generateBindings info
         return ()
+
+
+-- | Is the just-built Rust project a Sky.Live app? Reads the generated
+-- Cargo.toml and checks the default feature set for the quoted `"live"` — the
+-- codegen emits `default = [..., "live"]` (and `live = []`) ONLY when the app
+-- uses Sky.Live (Emitter.hs). Used to gate the epic-A1 console pre-build to Live
+-- apps. Missing/unreadable Cargo.toml → False (skip the pre-build, never crash).
+isLiveRustProject :: FilePath -> IO Bool
+isLiveRustProject rustDir = do
+    let cargoToml = rustDir </> "Cargo.toml"
+    present <- doesFileExist cargoToml
+    if not present
+        then return False
+        else do
+            content <- readFile' cargoToml   -- strict; handle closed before any later write
+            return ("\"live\"" `isInfixOf` content)
 
 
 -- | Split a list into N roughly-equal chunks. Used by the install
@@ -1708,9 +1723,22 @@ runCommand cmd = case cmd of
                     Toml.TargetRust -> do
                         let rustDir = outDir ++ "/Rust"
                         hFlush stdout
+                        -- Bake the sky version into the binary (compile-time
+                        -- `option_env!("SKY_VERSION")` — drives /_sky/buildinfo
+                        -- AND the console cache key in live/console_proxy.rs, so
+                        -- the runtime looks for the console A1 cached under the
+                        -- same version).
+                        System.Environment.setEnv "SKY_VERSION" skyBuildVersion
                         putStrLn "Running cargo build..."
                         callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
                         putStrLn $ "Build complete: " ++ rustDir ++ "/target/debug/sky-app"
+                        -- Epic A1: for a Sky.Live app, pre-build the bundled
+                        -- console binary into the version-keyed cache so the
+                        -- Live runtime's reverse-proxy can spawn it. One-time
+                        -- per sky version; best-effort (failure → in-process
+                        -- console fallback, never fails this build).
+                        live <- isLiveRustProject rustDir
+                        when live $ RustConsole.ensureConsoleBinary skyBuildVersion
                 return (Right ())
 
     Run path mTarget -> do

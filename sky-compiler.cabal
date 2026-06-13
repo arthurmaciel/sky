@@ -92,6 +92,12 @@ extra-source-files:
     -- runtime-go/rt/console.go MountEmbeddedConsole.
     sky-bundled/doc/sky.toml
     sky-bundled/doc/src/*.sky
+    -- Bundled Sky Console mini-app (sky-bundled/console/) — re-embedded via TH
+    -- (Sky.Build.EmbeddedConsole) for the Rust backend's pre-built console
+    -- child (epic A1). Listed explicitly per-subdir per Issue #58. The Go
+    -- backend instead compiles the console in-process from runtime-go/rt/console_app.
+    sky-bundled/console/sky.toml
+    sky-bundled/console/src/*.sky
     app/VERSION
 
 executable sky
@@ -224,6 +230,7 @@ executable sky
     Sky.Build.EmbeddedInspectorRust
     Sky.Build.FfiGen
     Sky.Build.Rust.Ffi
+    Sky.Build.Rust.Console
     Sky.Build.FfiRegistry
     Sky.Build.FfiTypeParser
     Sky.Build.FfiTypeResolve
@@ -254,6 +261,7 @@ executable sky
     Sky.Build.KernelRegistryEntries
     Sky.Build.KernelRegistryParser
     Sky.Build.EmbeddedDocServer
+    Sky.Build.EmbeddedConsole
 
 
 test-suite sky-tests

@@ -144,6 +144,8 @@ isEmbeddableRuntimeFile rel =
         ]
     excludedDirComponents =
         [ ".skycache"  -- per-project build cache, never embed source's
+        , ".skydeps"   -- per-project resolved-deps cache
+        , "sky-out"    -- per-project build output (generated Go/Rust + binary)
         , "testdata"   -- Go convention for test fixtures
         , ".git"       -- defence in depth (shouldn't be there anyway)
         ]
