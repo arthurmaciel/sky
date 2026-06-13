@@ -149,9 +149,29 @@ every codegen/stdlib/inference gap is closed.
 - ✅ Acceptance: console binary boots, serves on its port, renders `Sky Console` /
   `Overview`. Full data render needs D (#69) to populate the spill.
 
+**D DONE: telemetry SQLite spill (#69)** (commit 3f85c1f6). The parent dual-writes
+every log + span to `SKY_CONSOLE_DB_PATH`; the console reads it via the S1 hub
+kernels — read↔write loop closed.
+- ✅ `runtime-rust/src/sky_runtime/telemetry_spill.rs` (`#[cfg(feature="db")]`):
+  `enable_from_env` (WAL + busy_timeout + the **hub schema** S1 reads), a batcher
+  task draining a bounded (1024) mpsc channel, an hourly 24 h TTL pruner.
+  `offer_log/offer_span` are non-blocking `try_send`s (drop on full — never block/
+  panic the hot path). `write_entry` maps to the hub schema (service_name from
+  `SKY_SERVICE_NAME`, RFC3339 time, span durationMs, ok→attrs.status).
+- ✅ `telemetry.rs` `record_log`/`record_span` call a cfg-dispatched spill hook —
+  a no-op stub when `db` is off, so the always-compiled sink stays tokio/sqlx-free.
+  Boot wires `enable_from_env().await` in the Live entry (db-gated).
+- ✅ **WAL gotcha resolved:** the spill is WAL (concurrent parent-writer + console-
+  reader without livelock); S1 `open_spill` switched `mode=ro`→`mode=rw` because a
+  ro connection can't attach the -wal/-shm and never sees un-checkpointed frames.
+  The console only SELECTs, so rw grants no real write.
+- ✅ Deterministic test: `write_entry_maps_to_hub_schema` (also asserts S1
+  `hub_list_services` reads the same file — the contract). 251/251 lib tests green.
+
 **Next: A** (sub-app mount + reverse-proxy) so the parent spawns the console child
-at `/_sky/console/*` — plus **D (#69)** to dual-write the spill the console reads.
-B compile-guard still folded in (console store=memory).
+at `/_sky/console/*` with `SKY_CONSOLE_HUB_DB` = the parent's `SKY_CONSOLE_DB_PATH`
+— the last piece for the full embedded-console end-to-end. Then **C** (federation)
++ **E** (#70 HubExporter). B compile-guard still folded in (console store=memory).
 
 ## Risks
 
