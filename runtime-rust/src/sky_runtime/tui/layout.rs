@@ -28,12 +28,16 @@ const CANVAS_H: usize = 720;
 struct Canvas {
     px_per_cell_x: f64,
     px_per_cell_y: f64,
+    cols: usize,
+    rows: usize,
 }
 impl Canvas {
     fn new(cols: usize, rows: usize) -> Canvas {
         Canvas {
             px_per_cell_x: (CANVAS_W as f64 / cols.max(1) as f64).max(1.0),
             px_per_cell_y: (CANVAS_H as f64 / rows.max(1) as f64).max(1.0),
+            cols,
+            rows,
         }
     }
     fn cells_x(self, px: i64) -> usize {
@@ -64,15 +68,6 @@ enum Dir {
     Row,
 }
 
-/// `Ui.width` directive. `Min`/`Max`/`Vw` collapse to `Auto` (content-sized) for
-/// now — a follow-on.
-#[derive(Clone, Copy, PartialEq)]
-enum WidthSpec {
-    Auto,
-    Px(i64),
-    Fill,
-}
-
 struct Walked {
     dir: Dir,
     spacing_px: i64,
@@ -80,17 +75,59 @@ struct Walked {
     pad_right: i64,
     pad_bottom: i64,
     pad_left: i64,
-    width: WidthSpec,
+    /// The raw `Ui.width` `Length`, if any. `None` (or `Content`) → content-sized.
+    /// Resolved to cells lazily (avail_w + canvas are only known at render time).
+    width: Option<Length>,
     style: Style,
 }
 
-impl WidthSpec {
-    fn from_attrs<M>(attrs: &[Attribute<M>]) -> WidthSpec {
-        attrs.iter().find_map(|a| match a {
-            Attribute::AttrWidth(Length::Px(n)) => Some(WidthSpec::Px(*n)),
-            Attribute::AttrWidth(Length::Fill(_)) => Some(WidthSpec::Fill),
-            _ => None,
-        }).unwrap_or(WidthSpec::Auto)
+/// The `Ui.width` `Length` on a node, if present.
+fn width_length<M>(attrs: &[Attribute<M>]) -> Option<Length> {
+    attrs.iter().find_map(|a| match a {
+        Attribute::AttrWidth(l) => Some(l.clone()),
+        _ => None,
+    })
+}
+
+/// `(portion, min_cells, max_cells)` for a fill child (see `fill_spec`).
+type FillSpec = (i64, Option<usize>, Option<usize>);
+
+/// Distribution spec for a fill child: `Some((portion, min_cells, max_cells))`
+/// when the length is `Fill` (possibly wrapped in `Min`/`Max`). Such a child is
+/// sized by the parent ROW's fill-distribution pass, not by its own content.
+fn fill_spec(l: &Length, canvas: Canvas) -> Option<FillSpec> {
+    match l {
+        Length::Fill(p) => Some(((*p).max(1), None, None)),
+        Length::Min(n, inner) => fill_spec(inner, canvas)
+            .map(|(p, mn, mx)| (p, Some(mn.unwrap_or(0).max(canvas.cells_x(*n))), mx)),
+        Length::Max(n, inner) => fill_spec(inner, canvas).map(|(p, mn, mx)| {
+            let cap = canvas.cells_x(*n);
+            (p, mn, Some(mx.map_or(cap, |x| x.min(cap))))
+        }),
+        _ => None,
+    }
+}
+
+/// Resolve a NON-fill width `Length` to explicit cells given the available width.
+/// `None` → content-sized (the caller measures children). Mirrors Go's
+/// `resolveLengthCells` on the x-axis, EXCEPT `Min`/`Max` bounds are correctly
+/// converted px→cells (the Go path returns the raw px as cells — a latent bug;
+/// the Tui surface is not byte-gated against Go, so Rust does the right thing).
+fn resolve_fixed_w(l: &Length, available: usize, canvas: Canvas) -> Option<usize> {
+    match l {
+        Length::Px(n) => Some(canvas.cells_x(*n)),
+        Length::Content => None,
+        Length::Fill(_) => Some(available), // a direct ask claims all; the ROW pass overrides
+        Length::Vw(p) => Some(canvas.cols.saturating_mul((*p).max(0) as usize) / 100),
+        Length::Vh(p) => Some(canvas.rows.saturating_mul((*p).max(0) as usize) / 100),
+        Length::Min(n, inner) => {
+            let mn = canvas.cells_x(*n);
+            Some(resolve_fixed_w(inner, available, canvas).map_or(mn, |c| c.max(mn)))
+        }
+        Length::Max(n, inner) => {
+            let mx = canvas.cells_x(*n);
+            Some(resolve_fixed_w(inner, available, canvas).map_or(available.min(mx), |c| c.min(mx)))
+        }
     }
 }
 
@@ -202,7 +239,7 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         pad_right: 0,
         pad_bottom: 0,
         pad_left: 0,
-        width: WidthSpec::from_attrs(attrs),
+        width: width_length(attrs),
         style: inherited,
     };
     for a in attrs {
@@ -394,10 +431,16 @@ fn render_input<M: Clone>(
     // Honour `Ui.width` on a text-like field so it renders at a fixed/fill width
     // (the field background fills it). `Fill` expands to the parent's allocation.
     if input_type != "range" {
-        match WidthSpec::from_attrs(attrs) {
-            WidthSpec::Px(n) => block.set_width(ctx.canvas.cells_x(n).max(1), style.bg),
-            WidthSpec::Fill => block.set_width(avail_w.max(1), style.bg),
-            WidthSpec::Auto => {}
+        if let Some(l) = width_length(attrs) {
+            // Fill → the parent's allocation (avail_w); otherwise resolve to cells.
+            let cells = if fill_spec(&l, ctx.canvas).is_some() {
+                Some(avail_w)
+            } else {
+                resolve_fixed_w(&l, avail_w, ctx.canvas)
+            };
+            if let Some(c) = cells {
+                block.set_width(c.max(1), style.bg);
+            }
         }
     }
     let width = block.width();
@@ -478,11 +521,27 @@ fn render_node<M: Clone>(
         Element::Node(_d, attrs, kids) | Element::TaggedNode(_, _d, attrs, kids) => {
             let w = walk_attrs(attrs, inherited);
             let content_avail = node_content_avail(avail_w, &w, ctx.canvas);
-            let children: Vec<Rendered> = kids
-                .iter()
-                .map(|k| render_node(k, w.style, ctx, content_avail))
-                .filter(|r| r.block.height() > 0)
-                .collect();
+            // Render children IN ORDER (preserves focusable push order = Tab order),
+            // pairing each with its fill spec, then drop empty blocks.
+            let mut specs: Vec<Option<FillSpec>> = Vec::new();
+            let mut children: Vec<Rendered> = Vec::new();
+            for k in kids.iter() {
+                let r = render_node(k, w.style, ctx, content_avail);
+                if r.block.height() > 0 {
+                    specs.push(child_width_length(k).and_then(|l| fill_spec(&l, ctx.canvas)));
+                    children.push(r);
+                }
+            }
+            // In a ROW, fill children share the leftover width (column children
+            // already span the full width). Post-pass: rewrite fill child widths.
+            if w.dir == Dir::Row {
+                distribute_row_fill(
+                    &mut children,
+                    &specs,
+                    content_avail,
+                    ctx.canvas.cells_x(w.spacing_px),
+                );
+            }
             let mut inner = if children.is_empty() {
                 Rendered { block: Block { lines: vec![Vec::new()] }, hits: vec![] }
             } else {
@@ -501,26 +560,105 @@ fn render_node<M: Clone>(
 /// horizontal padding.
 fn node_content_avail(avail_w: usize, w: &Walked, canvas: Canvas) -> usize {
     let pad = canvas.cells_x(w.pad_left) + canvas.cells_x(w.pad_right);
-    match w.width {
-        WidthSpec::Px(n) => canvas.cells_x(n).saturating_sub(pad),
-        WidthSpec::Fill => avail_w.saturating_sub(pad),
-        WidthSpec::Auto => avail_w.saturating_sub(pad),
-    }
+    let base = match &w.width {
+        None => avail_w,
+        Some(l) => {
+            if let Some((_, mn, mx)) = fill_spec(l, canvas) {
+                // fill → the parent-allocated width, clamped to its own min/max
+                // (a ROW parent re-distributes the final width over this).
+                let mut t = avail_w;
+                if let Some(m) = mn {
+                    t = t.max(m);
+                }
+                if let Some(m) = mx {
+                    t = t.min(m);
+                }
+                t
+            } else {
+                // Px / Vw / Min / Max → resolved cells; Content → avail.
+                resolve_fixed_w(l, avail_w, canvas).unwrap_or(avail_w)
+            }
+        }
+    };
+    base.saturating_sub(pad)
 }
 
 /// Constrain a node's inner block to its `Ui.width` directive. `Auto` keeps the
 /// natural content width (byte-identical to the pre-Fill behaviour); `Fill`
 /// expands to the content allocation; `Px` sets the exact cell width.
-fn apply_self_width(block: &mut Block, w: &Walked, content_avail: usize, canvas: Canvas) {
-    let target = match w.width {
-        WidthSpec::Auto => block.width(),
-        WidthSpec::Fill => content_avail,
-        WidthSpec::Px(n) => {
-            let pad = canvas.cells_x(w.pad_left) + canvas.cells_x(w.pad_right);
-            canvas.cells_x(n).saturating_sub(pad)
+fn apply_self_width(block: &mut Block, w: &Walked, content_avail: usize, _canvas: Canvas) {
+    // `content_avail` is already the node's resolved inner width (node_content_avail
+    // applied Px/Vw/Min/Max/Fill). So a sized node takes content_avail; an Auto /
+    // Content node keeps its natural content width. A fill child in a row has its
+    // final width re-set by the parent's distribution pass (which overrides this).
+    let sized = !matches!(w.width, None | Some(Length::Content));
+    if sized {
+        block.set_width(content_avail, w.style.bg);
+    }
+}
+
+/// The `Ui.width` `Length` declared on a child element, if any.
+fn child_width_length<M>(el: &Element<M>) -> Option<Length> {
+    match el {
+        Element::Node(_, attrs, _) | Element::TaggedNode(_, _, attrs, _) => width_length(attrs),
+        _ => None,
+    }
+}
+
+/// Fill-distribution pass for a ROW. `children[i]` aligns with `specs[i]`; a
+/// `Some((portion, min, max))` spec marks a fill child. Non-fill children keep
+/// their already-rendered width; the leftover (`content_avail` − non-fill widths
+/// − gaps) is split among fill children by portion and clamped to each child's
+/// min/max. Children are already rendered (focusables pushed), so this only
+/// resizes the fill blocks — last fill child absorbs the rounding remainder.
+fn distribute_row_fill(
+    children: &mut [Rendered],
+    specs: &[Option<FillSpec>],
+    content_avail: usize,
+    gap: usize,
+) {
+    let total_portion: i64 = specs.iter().filter_map(|s| s.map(|(p, _, _)| p)).sum();
+    if total_portion <= 0 {
+        return;
+    }
+    let n = children.len();
+    let gaps = if n > 1 { (n - 1) * gap } else { 0 };
+    let non_fill: usize = children
+        .iter()
+        .zip(specs)
+        .filter(|(_, s)| s.is_none())
+        .map(|(r, _)| r.block.width())
+        .sum();
+    let remaining = content_avail.saturating_sub(non_fill + gaps);
+    let fill_count = specs.iter().filter(|s| s.is_some()).count();
+    let mut used = 0usize;
+    let mut done = 0usize;
+    for (r, s) in children.iter_mut().zip(specs) {
+        if let Some((p, mn, mx)) = s {
+            done += 1;
+            let share = if done == fill_count {
+                remaining.saturating_sub(used)
+            } else {
+                remaining.saturating_mul(*p as usize) / total_portion as usize
+            };
+            used = used.saturating_add(share);
+            let mut target = share;
+            if let Some(m) = mn {
+                target = target.max(*m);
+            }
+            if let Some(m) = mx {
+                target = target.min(*m);
+            }
+            // Preserve the fill child's own bg when padding out to `target`.
+            let bg = r
+                .block
+                .lines
+                .first()
+                .and_then(|l| l.last())
+                .and_then(|run| run.style.bg);
+            r.block.set_width(target.max(1), bg);
         }
-    };
-    block.set_width(target, w.style.bg);
+    }
 }
 
 const SGR_RESET: &str = "\x1b[0m";
@@ -713,6 +851,68 @@ mod tests {
         // The bg fill extends the 2-char text toward ~10 cells.
         let visible_spaces = first.matches(' ').count();
         assert!(visible_spaces >= 5, "px width padded with bg: {first:?}");
+    }
+
+    #[test]
+    fn vw_width_resolves_to_viewport_fraction() {
+        // Vw(50) on 80 cols → ~40 cells of bg.
+        let t: Element<()> = node(
+            vec![Attribute::AttrWidth(Length::Vw(50)), Attribute::AttrBgColor(rgb(9, 9, 9))],
+            vec![Element::Text("x".into())],
+        );
+        let frame = element_to_cells(&t, 80, 24);
+        let first = frame.split("\r\n").next().unwrap_or("");
+        let spaces = first.matches(' ').count();
+        assert!((30..=45).contains(&spaces), "Vw(50)≈40 cols: {first:?} ({spaces} spaces)");
+    }
+
+    #[test]
+    fn min_width_floors_content() {
+        // Min(160, Content): content "hi" (2 cells) floored to 160px ≈ 10 cells.
+        let t: Element<()> = node(
+            vec![
+                Attribute::AttrWidth(Length::Min(160, Box::new(Length::Content))),
+                Attribute::AttrBgColor(rgb(4, 4, 4)),
+            ],
+            vec![Element::Text("hi".into())],
+        );
+        let frame = element_to_cells(&t, 80, 24);
+        let first = frame.split("\r\n").next().unwrap_or("");
+        assert!(first.matches(' ').count() >= 5, "min floored padding: {first:?}");
+    }
+
+    #[test]
+    fn max_width_caps_fill() {
+        // Max(160, Fill): fill would claim 80 cols, capped to 160px ≈ 10 cells.
+        let t: Element<()> = node(
+            vec![
+                Attribute::AttrWidth(Length::Max(160, Box::new(Length::Fill(1)))),
+                Attribute::AttrBgColor(rgb(2, 2, 2)),
+            ],
+            vec![Element::Text("x".into())],
+        );
+        let frame = element_to_cells(&t, 80, 24);
+        let first = frame.split("\r\n").next().unwrap_or("");
+        let spaces = first.matches(' ').count();
+        assert!((3..=15).contains(&spaces), "Max caps fill at ~10 cols: {first:?} ({spaces})");
+    }
+
+    #[test]
+    fn row_fill_splits_width() {
+        // A row of two equal-portion fill children each take ~half of 20 cols.
+        let child = |c: Color| -> Element<()> {
+            node(vec![Attribute::AttrWidth(Length::Fill(1)), Attribute::AttrBgColor(c)],
+                 vec![Element::Text("x".into())])
+        };
+        let row: Element<()> = node(
+            vec![Attribute::AttrStyle("__row".into(), String::new())],
+            vec![child(rgb(10, 0, 0)), child(rgb(0, 10, 0))],
+        );
+        let frame = element_to_cells(&row, 20, 24);
+        let first = frame.split("\r\n").next().unwrap_or("");
+        // Both fills present; neither claimed the whole row (would overflow pre-fix).
+        assert!(first.contains("48;2;10;0;0"), "left fill bg present: {first:?}");
+        assert!(first.contains("48;2;0;10;0"), "right fill bg present: {first:?}");
     }
 
     #[test]
