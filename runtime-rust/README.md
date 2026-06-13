@@ -6,6 +6,44 @@ copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
 
 ---
 
+## For agents — MUST FOLLOW (read before any build)
+
+These are not suggestions. Violating them wastes minutes per iteration and has
+repeatedly burned past sessions. The detailed rationale is in **Fast dev
+iteration** below; this is the non-negotiable checklist.
+
+1. **NEVER `cabal install --install-method=copy`.** `sky-out/sky` is a **symlink**
+   to the dist-newstyle binary, so a plain `cabal build exe:sky` already updates
+   what it points at — no copy, no install step. If the symlink is missing, set it
+   up ONCE: `ln -sf "$(cabal list-bin exe:sky)" sky-out/sky`. (Copy install pays a
+   39 MB write every rebuild for zero benefit.)
+2. **Only codegen (`.hs`) edits need a `cabal build`.** Edits under
+   `runtime-rust/src/` are copied into the generated project at `sky build` time —
+   **no compiler rebuild needed**, just rebuild the example. Don't `cabal build`
+   after a runtime-only change.
+3. **Set a self-contained PATH in every build shell.** The Bash tool's inherited
+   `$PATH` is **inconsistent across calls** — `timeout` / `cargo` / `basename`
+   randomly vanish, and `sky` then fails to spawn `cargo` (`posix_spawnp: does not
+   exist`), which masquerades as a build failure. Always start a build command
+   with:
+   ```sh
+   export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin"
+   ```
+   (cargo+sccache, system tools, ghcup — self-contained, not appended to the flaky
+   default). Inline `for`-loops compound the drift; prefer one example per command
+   or a committed script file (`scripts/rust-sweep.sh` holds PATH stably).
+4. **Always export the shared Rust target + sccache before any example build:**
+   ```sh
+   export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target" RUSTC_WRAPPER=sccache
+   ```
+   Every example is cargo package `sky-app`, so the shared target dir holds only
+   the **last-built** binary — rebuild the specific example immediately before
+   running it.
+5. **Don't wipe `dist-newstyle/`** between iterations (kills incremental compile),
+   and keep the gitignored `cabal.project.local` (`optimization: 0`).
+
+---
+
 ## Architecture
 
 ```
