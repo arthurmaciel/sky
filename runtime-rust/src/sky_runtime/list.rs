@@ -22,7 +22,9 @@ pub fn list_filter_map<A, B>(f: impl Fn(A) -> SkyMaybe<B>, xs: Vec<A>) -> Vec<B>
 // ── Core List kernels (relocated from core.rs so the List surface has one home) ──
 
 /// Sky `::` cons — emitted by codegen for the cons operator.
-pub fn sky_list_cons<T: Clone>(x: T, xs: Vec<T>) -> Vec<T> {
+// No `T: Clone` bound — `once(x).chain(xs)` only MOVES, so cons works for
+// move-only element types too (e.g. `Cmd.batch [SkyCmd, …]`; SkyCmd isn't Clone).
+pub fn sky_list_cons<T>(x: T, xs: Vec<T>) -> Vec<T> {
     std::iter::once(x).chain(xs).collect()
 }
 
