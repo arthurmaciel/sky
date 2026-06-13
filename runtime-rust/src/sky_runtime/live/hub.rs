@@ -425,6 +425,278 @@ where
     Box::pin(async move { decode_rows(read_errors_value(&db_path, &service).await) })
 }
 
+// ── Overview, ServiceStats, Identity ────────────────────────────────────────
+
+/// `count(*)` for one table; 0 on any failure (total).
+async fn count_table(pool: &SqlitePool, table: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) AS n FROM {table}");
+    match sqlx::query(&sql).fetch_one(pool).await {
+        Ok(row) => row.try_get::<i64, _>("n").unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// `Hub_readOverview : String -> Task Error Overview`. Go `Hub_readOverview`:
+/// a default Overview with the live row counts spliced in.
+pub fn hub_read_overview<E, A>(db_path: String) -> SkyTask<E, A>
+where
+    E: Send + From<String> + 'static,
+    A: DeserializeOwned + Send + 'static,
+{
+    Box::pin(async move {
+        let (logs, metrics, spans) = match open_spill(&db_path).await {
+            Some(pool) => (
+                count_table(&pool, "telemetry_log").await,
+                count_table(&pool, "telemetry_metric").await,
+                count_table(&pool, "telemetry_span").await,
+            ),
+            None => (0, 0, 0),
+        };
+        let ov = json!({
+            "skyVersion": "hub",
+            "commit": "",
+            "builtAt": "",
+            "uptimeSeconds": 0,
+            "requestsTotal": logs + metrics + spans,
+            "errorRate5xx": 0.0,
+            "bufferLogUsed": logs,
+            "bufferTraceUsed": spans,
+            "productionMode": false,
+        });
+        decode_one(ov)
+    })
+}
+
+/// `Hub_currentIdentity : String -> Task Error Identity`. The spill-only console
+/// has no session identity (that's A-territory / live-session plumbing), so
+/// return the empty identity — a graceful default, never an error.
+pub fn hub_current_identity<E, A>(_db_path: String) -> SkyTask<E, A>
+where
+    E: Send + From<String> + 'static,
+    A: DeserializeOwned + Send + 'static,
+{
+    Box::pin(async move {
+        decode_one(json!({ "subject": "", "email": "", "claims": {} }))
+    })
+}
+
+// — ServiceStats aggregation (Go `aggregateServiceStat`) —
+
+const STATS_WINDOW_SECS: i64 = 60;
+const STATS_BUCKET_COUNT: usize = 30;
+const STATS_ROW_CAP: i64 = 10_000;
+
+/// Nearest-rank p-th percentile; 0 for empty input (= "no observations", not
+/// "zero latency"). Mirror of Go `percentile`.
+fn percentile(vals: &[f64], p: f64) -> f64 {
+    if vals.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = vals.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut idx = (p * sorted.len() as f64).ceil() as isize - 1;
+    if idx < 0 {
+        idx = 0;
+    }
+    let idx = (idx as usize).min(sorted.len() - 1);
+    sorted.get(idx).copied().unwrap_or(0.0)
+}
+
+/// 3-state pill from the recent error rate (>5% err, ≥1% warn, else ok).
+fn classify_status(error_rate: f64) -> &'static str {
+    if error_rate > 0.05 {
+        "err"
+    } else if error_rate >= 0.01 {
+        "warn"
+    } else {
+        "ok"
+    }
+}
+
+/// Parse an attr value string ("3.14"/"42") to f64; `None` (skip the
+/// observation) on empty/unparseable. Mirror of Go `parseFloatAttr`.
+fn parse_float_attr(raw: &str) -> Option<f64> {
+    if raw.is_empty() {
+        None
+    } else {
+        raw.trim().parse::<f64>().ok()
+    }
+}
+
+/// Bucket index for `ts` within `[since, since + count*bucket]`; `None` outside.
+fn bucket_index(ts_ms: i64, since_ms: i64, bucket_ms: i64) -> Option<usize> {
+    if bucket_ms <= 0 {
+        return None;
+    }
+    let off = ts_ms - since_ms;
+    if off < 0 {
+        return None;
+    }
+    Some((off / bucket_ms) as usize)
+}
+
+fn parse_ms(rfc: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(rfc)
+        .ok()
+        .map(|d| d.timestamp_millis())
+}
+
+/// Aggregate one service's last-60 s telemetry into the ServiceStat JSON shape.
+/// Go `aggregateServiceStat`. Window-filters in Rust (RFC3339-parse robust
+/// against writer/reader time-format drift); all slice access is checked.
+async fn aggregate_service_stat(pool: &SqlitePool, svc: &str) -> Value {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let since_ms = now_ms - STATS_WINDOW_SECS * 1000;
+    let window_sec = STATS_WINDOW_SECS as f64;
+    let bucket_ms = (STATS_WINDOW_SECS * 1000) / STATS_BUCKET_COUNT as i64;
+
+    // Recent logs for the service.
+    let log_rows = sqlx::query(
+        "SELECT time, level, attrs FROM telemetry_log WHERE service_name = ? \
+         ORDER BY time DESC LIMIT ?",
+    )
+    .bind(svc)
+    .bind(STATS_ROW_CAP)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let span_rows = sqlx::query(
+        "SELECT start_time, end_time FROM telemetry_span WHERE service_name = ? \
+         ORDER BY time DESC LIMIT ?",
+    )
+    .bind(svc)
+    .bind(STATS_ROW_CAP)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let mut log_count = 0usize;
+    let mut error_count = 0usize;
+    let mut latencies: Vec<f64> = Vec::new();
+    let mut req_counts = vec![0i64; STATS_BUCKET_COUNT];
+    let mut lat_buckets: Vec<Vec<f64>> = vec![Vec::new(); STATS_BUCKET_COUNT];
+
+    for r in &log_rows {
+        let t: String = r.try_get("time").unwrap_or_default();
+        let Some(ts) = parse_ms(&t) else { continue };
+        if ts < since_ms || ts > now_ms {
+            continue;
+        }
+        log_count += 1;
+        let level: String = r.try_get("level").unwrap_or_default();
+        if level == "error" {
+            error_count += 1;
+        }
+        let attrs = parse_attrs(&r.try_get::<String, _>("attrs").unwrap_or_default());
+        let lat = attrs.get("latency_ms").and_then(|s| parse_float_attr(s));
+        if let Some(v) = lat {
+            latencies.push(v);
+        }
+        if let Some(idx) = bucket_index(ts, since_ms, bucket_ms) {
+            if let Some(c) = req_counts.get_mut(idx) {
+                *c += 1;
+            }
+            if let Some(v) = lat {
+                if let Some(b) = lat_buckets.get_mut(idx) {
+                    b.push(v);
+                }
+            }
+        }
+    }
+
+    for r in &span_rows {
+        let start: String = r.try_get("start_time").unwrap_or_default();
+        let end: String = r.try_get("end_time").unwrap_or_default();
+        let (Some(s_ms), Some(e_ms)) = (parse_ms(&start), parse_ms(&end)) else {
+            continue;
+        };
+        let ms = (e_ms - s_ms) as f64;
+        if ms <= 0.0 {
+            continue;
+        }
+        latencies.push(ms);
+        if let Some(idx) = bucket_index(s_ms, since_ms, bucket_ms) {
+            if let Some(b) = lat_buckets.get_mut(idx) {
+                b.push(ms);
+            }
+        }
+    }
+
+    let reqs_per_sec = log_count as f64 / window_sec;
+    let error_rate = if log_count > 0 {
+        error_count as f64 / log_count as f64
+    } else {
+        0.0
+    };
+    let bucket_sec = (bucket_ms as f64 / 1000.0).max(1.0);
+    let spark_rps: Vec<f64> = req_counts.iter().map(|c| *c as f64 / bucket_sec).collect();
+    let spark_p95: Vec<f64> = lat_buckets.iter().map(|b| percentile(b, 0.95)).collect();
+
+    json!({
+        "name": svc,
+        "status": classify_status(error_rate),
+        "reqsPerSec": reqs_per_sec,
+        "p95Ms": percentile(&latencies, 0.95),
+        "errorRate": error_rate,
+        "sparkRps": spark_rps,
+        "sparkP95": spark_p95,
+    })
+}
+
+/// `Hub_readServiceStats : String -> Task Error (List ServiceStat)`.
+pub fn hub_read_service_stats<E, A>(db_path: String) -> SkyTask<E, A>
+where
+    E: Send + From<String> + 'static,
+    A: DeserializeOwned + Send + 'static,
+{
+    Box::pin(async move {
+        let Some(pool) = open_spill(&db_path).await else {
+            return decode_rows(Value::Array(vec![]));
+        };
+        // Distinct services (reuse the list query).
+        let services: Vec<String> = match sqlx::query(
+            "SELECT service_name FROM telemetry_log \
+             UNION SELECT service_name FROM telemetry_metric \
+             UNION SELECT service_name FROM telemetry_span ORDER BY service_name",
+        )
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(rows) => rows
+                .iter()
+                .filter_map(|r| r.try_get::<String, _>("service_name").ok())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Err(e) => {
+                eprintln!("[sky.hub] serviceStats services: {e}");
+                return decode_rows(Value::Array(vec![]));
+            }
+        };
+        let mut out = Vec::with_capacity(services.len());
+        for svc in &services {
+            out.push(aggregate_service_stat(&pool, svc).await);
+        }
+        decode_rows(Value::Array(out))
+    })
+}
+
+/// Deserialize a single built object `Value` into the project record `A`. A
+/// decode miss surfaces a typed `Err` (the value system models it; no panic).
+fn decode_one<E, A>(obj: Value) -> SkyResult<E, A>
+where
+    E: From<String>,
+    A: DeserializeOwned,
+{
+    match serde_json::from_value::<A>(obj) {
+        Ok(a) => ok_res(a),
+        Err(e) => {
+            eprintln!("[sky.hub] decode_one: {e}");
+            SkyResult::Err(str_err(&format!("hub.decode: {e}")))
+        }
+    }
+}
+
 /// Open the telemetry spill read-only. `None` (never an error) when the path is
 /// empty or the file can't be opened — callers map that to an empty result so a
 /// fresh/absent DB renders as "no telemetry yet", exactly like the Go bridge.
@@ -727,6 +999,102 @@ mod tests {
                 assert_eq!(rows[0]["count"], 2);
                 assert_eq!(rows[1]["message"], "split");
                 assert_eq!(rows[1]["count"], 1);
+            }
+            SkyResult::Err(_) => panic!("expected Ok"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn percentile_nearest_rank() {
+        assert_eq!(percentile(&[], 0.95), 0.0);
+        assert_eq!(percentile(&[5.0], 0.95), 5.0);
+        // 100 values 1..=100, p95 nearest-rank = ceil(0.95*100)=95th → 95.
+        let v: Vec<f64> = (1..=100).map(|x| x as f64).collect();
+        assert_eq!(percentile(&v, 0.95), 95.0);
+    }
+
+    #[test]
+    fn classify_status_thresholds() {
+        assert_eq!(classify_status(0.0), "ok");
+        assert_eq!(classify_status(0.009), "ok");
+        assert_eq!(classify_status(0.01), "warn");
+        assert_eq!(classify_status(0.05), "warn");
+        assert_eq!(classify_status(0.051), "err");
+    }
+
+    #[test]
+    fn bucket_index_bounds() {
+        assert_eq!(bucket_index(0, 0, 0), None); // zero bucket
+        assert_eq!(bucket_index(-5, 0, 1000), None); // before window
+        assert_eq!(bucket_index(0, 0, 2000), Some(0));
+        assert_eq!(bucket_index(2500, 0, 2000), Some(1));
+    }
+
+    #[tokio::test]
+    async fn overview_splices_counts() {
+        let path = std::env::temp_dir()
+            .join(format!("hub-ov-{}.db", std::process::id()))
+            .to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+        let pool = seed(&path).await;
+        sqlx::query("INSERT INTO telemetry_log (service_name, time) VALUES ('s','t')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO telemetry_span (service_name, time) VALUES ('s','t')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO telemetry_span (service_name, time) VALUES ('s','t')")
+            .execute(&pool).await.unwrap();
+        let res: SkyResult<String, Value> = hub_read_overview(path.clone()).await;
+        match res {
+            SkyResult::Ok(ov) => {
+                assert_eq!(ov["skyVersion"], "hub");
+                assert_eq!(ov["bufferLogUsed"], 1);
+                assert_eq!(ov["bufferTraceUsed"], 2);
+                assert_eq!(ov["requestsTotal"], 3); // 1 log + 0 metric + 2 span
+            }
+            SkyResult::Err(_) => panic!("expected Ok"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn identity_is_empty() {
+        let res: SkyResult<String, Value> = hub_current_identity("anything".to_string()).await;
+        match res {
+            SkyResult::Ok(id) => {
+                assert_eq!(id["subject"], "");
+                assert_eq!(id["email"], "");
+                assert!(id["claims"].is_object());
+            }
+            SkyResult::Err(_) => panic!("expected Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn service_stats_aggregates_recent() {
+        let path = std::env::temp_dir()
+            .join(format!("hub-stats-{}.db", std::process::id()))
+            .to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+        let pool = seed(&path).await;
+        // Two recent logs (one error) for service 'svc' → errorRate 0.5 → "err".
+        let now = chrono::Utc::now().to_rfc3339();
+        for lvl in ["info", "error"] {
+            sqlx::query(
+                "INSERT INTO telemetry_log (service_name, time, level, message, attrs) \
+                 VALUES ('svc', ?, ?, 'm', '{\"latency_ms\":\"10\"}')",
+            )
+            .bind(&now).bind(lvl).execute(&pool).await.unwrap();
+        }
+        let res: SkyResult<String, Vec<Value>> = hub_read_service_stats(path.clone()).await;
+        match res {
+            SkyResult::Ok(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0]["name"], "svc");
+                assert_eq!(rows[0]["status"], "err"); // 50% error rate
+                assert_eq!(rows[0]["errorRate"], 0.5);
+                assert_eq!(rows[0]["p95Ms"], 10.0);
+                assert!(rows[0]["sparkRps"].as_array().unwrap().len() == STATS_BUCKET_COUNT);
             }
             SkyResult::Err(_) => panic!("expected Ok"),
         }
