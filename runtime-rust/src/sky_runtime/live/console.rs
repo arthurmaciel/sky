@@ -132,16 +132,46 @@ pub async fn ingest(headers: axum::http::HeaderMap, body: String) -> axum::respo
     if let Some(resp) = ingest_token_blocked(&headers) {
         return resp;
     }
-    if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&body) {
-        for it in items {
-            let level = it.get("level").and_then(|v| v.as_str()).unwrap_or("info");
-            let message = it.get("message").and_then(|v| v.as_str()).unwrap_or("");
-            if !message.is_empty() {
-                telemetry::record_log(level, message);
+    // Two accepted shapes: a bare array of `{level, message}` (legacy), or the
+    // federation push object `{ "logs": [...], "spans": [...] }` (epic C —
+    // push_exporter::build_payload). Fold both into the local rings.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+        match v {
+            serde_json::Value::Array(items) => {
+                for it in items {
+                    fold_log(&it);
+                }
             }
+            serde_json::Value::Object(_) => {
+                if let Some(serde_json::Value::Array(logs)) = v.get("logs").cloned() {
+                    for it in logs {
+                        fold_log(&it);
+                    }
+                }
+                if let Some(serde_json::Value::Array(spans)) = v.get("spans").cloned() {
+                    for it in spans {
+                        let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                        let dur_us = it.get("durUs").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let ok = it.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
+                        if !name.is_empty() {
+                            telemetry::record_span(name, dur_us, ok);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Fold one ingested log object `{level, message}` into the local rings.
+fn fold_log(it: &serde_json::Value) {
+    let level = it.get("level").and_then(|v| v.as_str()).unwrap_or("info");
+    let message = it.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    if !message.is_empty() {
+        telemetry::record_log(level, message);
+    }
 }
 
 /// `Some(401)` when `SKY_INGEST_TOKEN` is set and the `X-Sky-Ingest-Token` header

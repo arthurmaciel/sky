@@ -16,6 +16,10 @@ pub mod console;
 // binary is absent. Spawn/lifecycle in Task 1; proxy handler + wiring in Tasks 2–3.
 pub mod console_proxy;
 pub mod observability;
+// Observability export pipelines: federation push to a parent ingest (epic C)
+// and remote-hub OTLP push (epic E). Both env-gated + inert by default.
+pub mod push_exporter;
+pub mod hub_exporter;
 // Hub read-side kernels (the bundled console's data plane). Gated on `db` —
 // they read the SQLite telemetry spill via sqlx, so a `live`-only program with
 // no db never compiles them and stays sqlx-free.
@@ -116,6 +120,7 @@ pub fn render_page_full(sid: &str, base: &str, body: &str) -> String {
     // session ids and base paths.
     let sid_js = format!("{sid:?}");
     let base_js = format!("{base:?}");
+    let dev_banner = dev_console_banner(base);
     format!(
         "<!DOCTYPE html><html><head>\
          <meta charset=\"utf-8\">\
@@ -123,10 +128,38 @@ pub fn render_page_full(sid: &str, base: &str, body: &str) -> String {
          <meta name=\"sky-base\" content=\"{base}\">\
          <style>{BASE_CSS}</style>\
          </head>\
-         <body><div id=\"sky-root\">{body}</div>\
+         <body><div id=\"sky-root\">{body}</div>{dev_banner}\
          <script>window.__SKY_SID={sid_js};window.__SKY_BASE={base_js};\n{CLIENT_JS}</script>\
          </body></html>"
     )
+}
+
+/// Floating "🔍 Console" link injected into every dev-mode page (Go parity:
+/// `devBannerHTML`). Suppressed for a sub-app (`base` non-empty — e.g. the
+/// bundled console child itself; a console link inside the console is
+/// recursive), in production (`ENV`/`SKY_ENV` non-dev), and when the console
+/// surface is disabled (`SKY_CONSOLE_EMBED=off` / `SKY_CONSOLE_AUTH=off`).
+/// Rendered as a sibling of `#sky-root` so a body patch never blows it away;
+/// `position:fixed` pins it bottom-right and `pointer-events` stays default so
+/// the link is clickable.
+fn dev_console_banner(base: &str) -> String {
+    if !base.is_empty() || crate::sky_runtime::telemetry::production_from_env() {
+        return String::new();
+    }
+    if matches!(
+        std::env::var("SKY_CONSOLE_EMBED").as_deref(),
+        Ok("off") | Ok("0") | Ok("false")
+    ) || std::env::var("SKY_CONSOLE_AUTH").map(|v| v == "off").unwrap_or(false)
+    {
+        return String::new();
+    }
+    "<a href=\"/_sky/console\" id=\"__sky-console-link\" aria-label=\"Open Sky Console\" \
+     style=\"position:fixed;bottom:16px;right:16px;z-index:2147483646;\
+     background:#1a1a2e;color:#8ec8a8;padding:8px 12px;border-radius:6px;\
+     font:13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;\
+     text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,0.25)\">\
+     🔍 Console</a>"
+        .to_string()
 }
 
 // ─── live_app: axum mount + per-session TEA driver over SSE (Task 10) ───────
@@ -882,6 +915,12 @@ where
         // the child will read.
         #[cfg(feature = "db")]
         crate::sky_runtime::telemetry_spill::enable_from_env().await;
+
+        // Observability export pipelines: federation push to a parent ingest
+        // (epic C — SKY_PARENT_URL) and remote-hub OTLP push (epic E —
+        // SKY_CONSOLE_HUB). Both env-gated + inert by default.
+        push_exporter::enable_from_env().await;
+        hub_exporter::enable_from_env().await;
 
         // Console precedence (epic A): try the pre-built console child +
         // reverse-proxy; fall back to the in-process console when the binary is

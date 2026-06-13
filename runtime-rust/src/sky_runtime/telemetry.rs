@@ -76,6 +76,32 @@ fn spill_span(ts_ms: u64, name: &str, dur_us: u64, ok: bool) {
 #[inline]
 fn spill_span(_ts_ms: u64, _name: &str, _dur_us: u64, _ok: bool) {}
 
+/// Forward a record to the remote exporters — federation push to the parent
+/// ingest (epic C) and the remote hub OTLP push (epic E). `live`-gated; a no-op
+/// stub keeps the always-compiled sink reqwest/tokio-free for non-live programs.
+/// Each exporter is independently env-gated and a non-blocking drop-on-full
+/// offer, so this never blocks or panics the caller.
+#[cfg(feature = "live")]
+#[inline]
+fn export_log(ts_ms: u64, level: &str, message: &str) {
+    crate::sky_runtime::live::push_exporter::offer_log(ts_ms, level, message);
+    crate::sky_runtime::live::hub_exporter::offer_log(ts_ms, level, message);
+}
+#[cfg(not(feature = "live"))]
+#[inline]
+fn export_log(_ts_ms: u64, _level: &str, _message: &str) {}
+
+#[cfg(feature = "live")]
+#[inline]
+fn export_span(ts_ms: u64, name: &str, dur_us: u64, ok: bool) {
+    crate::sky_runtime::live::push_exporter::offer_span(ts_ms, name, dur_us, ok);
+    crate::sky_runtime::live::hub_exporter::offer_span(ts_ms, name, dur_us, ok);
+}
+#[cfg(not(feature = "live"))]
+#[inline]
+fn export_span(_ts_ms: u64, _name: &str, _dur_us: u64, _ok: bool) {}
+// NOTE: hub_exporter (epic E) is wired above; its module lands with E.
+
 /// Record a completed trace span (called from `Std.Trace.span`).
 pub fn record_span(name: &str, dur_us: u64, ok: bool) {
     let ts = now_ms();
@@ -85,6 +111,7 @@ pub fn record_span(name: &str, dur_us: u64, ok: bool) {
         SpanEntry { ts_ms: ts, name: name.to_string(), dur_us, ok },
     );
     spill_span(ts, name, dur_us, ok);
+    export_span(ts, name, dur_us, ok);
 }
 
 /// Most-recent `limit` spans as a JSON array.
@@ -131,6 +158,7 @@ pub fn record_log(level: &str, message: &str) {
     }
     push_bounded(&LOGS, LOG_CAP, e);
     spill_log(ts, level, message);
+    export_log(ts, level, message);
 }
 
 /// Record one served HTTP request (called from the Live counter middleware).
