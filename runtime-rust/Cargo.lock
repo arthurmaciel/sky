@@ -3566,6 +3566,7 @@ dependencies = [
  "hex",
  "hmac",
  "jsonwebtoken",
+ "libc",
  "md-5",
  "pbkdf2",
  "percent-encoding",
