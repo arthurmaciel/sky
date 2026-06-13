@@ -121,7 +121,17 @@ pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::R
 /// of `{ "level": "...", "message": "..." }` (a sub-app's batched logs) and folds
 /// them into the local rings. Malformed bodies are accepted as 204 (drop) rather
 /// than erroring — telemetry must never break the caller.
-pub async fn ingest(body: String) -> impl IntoResponse {
+///
+/// Auth (Go parity): a shared secret in `X-Sky-Ingest-Token`, constant-time
+/// compared against `SKY_INGEST_TOKEN`. The Rust runtime does not yet spawn
+/// sub-apps (no auto-generated token to distribute), so the gate is enforced
+/// ONLY when an operator sets `SKY_INGEST_TOKEN` — unset leaves the endpoint open
+/// (dev / single-process). When federation lands the parent will generate + pass
+/// the token; the check side is already here.
+pub async fn ingest(headers: axum::http::HeaderMap, body: String) -> axum::response::Response {
+    if let Some(resp) = ingest_token_blocked(&headers) {
+        return resp;
+    }
     if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&body) {
         for it in items {
             let level = it.get("level").and_then(|v| v.as_str()).unwrap_or("info");
@@ -131,5 +141,51 @@ pub async fn ingest(body: String) -> impl IntoResponse {
             }
         }
     }
-    StatusCode::NO_CONTENT
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `Some(401)` when `SKY_INGEST_TOKEN` is set and the `X-Sky-Ingest-Token` header
+/// is absent or wrong (constant-time compare). Unset → `None` (open endpoint).
+fn ingest_token_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::Response> {
+    use subtle::ConstantTimeEq;
+    let want = std::env::var("SKY_INGEST_TOKEN").ok().filter(|t| !t.is_empty())?;
+    let got = headers
+        .get("x-sky-ingest-token")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if bool::from(got.as_bytes().ct_eq(want.as_bytes())) {
+        None
+    } else {
+        Some((StatusCode::UNAUTHORIZED, "invalid or missing X-Sky-Ingest-Token").into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // One test (not split) — SKY_INGEST_TOKEN is process-global env, so a split
+    // would race other threads. Sets then clears the var within the test.
+    #[test]
+    fn ingest_token_gate() {
+        std::env::remove_var("SKY_INGEST_TOKEN");
+        // Unset → endpoint open regardless of header.
+        let h = axum::http::HeaderMap::new();
+        assert!(ingest_token_blocked(&h).is_none(), "open when unset");
+
+        std::env::set_var("SKY_INGEST_TOKEN", "secret123");
+        // Missing header → blocked.
+        let h = axum::http::HeaderMap::new();
+        assert!(ingest_token_blocked(&h).is_some(), "missing header blocked");
+        // Wrong token → blocked.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("x-sky-ingest-token", "wrong".parse().unwrap());
+        assert!(ingest_token_blocked(&h).is_some(), "wrong token blocked");
+        // Correct token → allowed.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("x-sky-ingest-token", "secret123".parse().unwrap());
+        assert!(ingest_token_blocked(&h).is_none(), "correct token allowed");
+
+        std::env::remove_var("SKY_INGEST_TOKEN");
+    }
 }
