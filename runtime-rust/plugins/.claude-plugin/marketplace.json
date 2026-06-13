@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "sky-rust-backend",
+  "description": "In-repo marketplace for the Sky Rust-backend skill suite. Install with: claude plugin marketplace add <path-to-sky-repo>/runtime-rust/plugins",
+  "owner": {
+    "name": "Arthur Maciel",
+    "email": "arthurmaciel@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "sky-rust-backend",
+      "description": "Sky Rust-backend verification + maintenance suite: build/run/web/perf sweeps, keep-go-parity orchestrator, upstream sync, README update, FFI audit. Skills are namespaced sky-rust-backend:<name>; the underlying scripts live in runtime-rust/scripts/ and run standalone without an agent.",
+      "category": "development",
+      "source": "./sky-rust-backend"
+    }
+  ]
+}

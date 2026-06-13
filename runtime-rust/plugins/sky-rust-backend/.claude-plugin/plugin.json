@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "sky-rust-backend",
+  "version": "0.1.0",
+  "description": "Sky Rust-backend verification suite: build/run/web/perf sweeps, upstream sync, doc sync, FFI audit, and the keep-go-parity orchestrator.",
+  "author": {
+    "name": "Arthur Maciel",
+    "email": "arthurmaciel@gmail.com"
+  },
+  "skills": [
+    "./"
+  ]
+}
