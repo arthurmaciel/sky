@@ -12,6 +12,13 @@ pub mod route;
 pub use route::*;
 pub mod console;
 pub mod observability;
+// Hub read-side kernels (the bundled console's data plane). Gated on `db` —
+// they read the SQLite telemetry spill via sqlx, so a `live`-only program with
+// no db never compiles them and stays sqlx-free.
+#[cfg(feature = "db")]
+pub mod hub;
+#[cfg(feature = "db")]
+pub use hub::*;
 pub mod req;
 pub use req::*;
 pub mod store;
