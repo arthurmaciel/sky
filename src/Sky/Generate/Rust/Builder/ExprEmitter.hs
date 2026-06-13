@@ -1603,17 +1603,69 @@ kernelArgRustType _             _ = Nothing
 -- that pin is a plain `fn(..)` pointer (Std.Ui.Input's onChange), Arc-wrapping a
 -- fn-pointer param mismatches (26-ui-showcase). A capturing LAMBDA always needs
 -- the Arc<dyn Fn> box regardless of position, so it is wrapped either way.
-wrapStoredFn :: Bool -> EmitCtx -> Can.Expr -> String -> String
-wrapStoredFn wrapNonLambda ctx (Ann.At region e) rendered
-    | isFn      = "std::sync::Arc::new(" ++ rendered ++ ")"
-    | otherwise = rendered
+-- | Names a `Can.Def` binds (for free-var analysis).
+defBindingVars :: Can.Def -> [String]
+defBindingVars (Can.Def (Ann.At _ n) _ _)          = [n]
+defBindingVars (Can.TypedDef (Ann.At _ n) _ _ _ _) = [n]
+defBindingVars (Can.DestructDef pat _)             = patBindingVars pat
+
+-- | Free outer `VarLocal`s referenced in a lambda body — i.e. captures: not the
+-- lambda's own params, nor bound by inner lambdas / lets / case patterns. Used to
+-- pre-clone captures when a capturing closure is stored into an `Arc<dyn Fn +
+-- 'static>` field (each sibling field needs its own owned copy).
+closureCaptures :: [Can.Pattern] -> Can.Expr -> [String]
+closureCaptures params body =
+    Set.toList (go (Set.fromList (concatMap patBindingVars params)) body)
   where
-    isFn = case e of
-        Can.Lambda _ _ -> True
-        _ | wrapNonLambda -> case Map.lookup region (ecRegionTypes ctx) of
-                 Just (Can.TLambda _ _) -> True
-                 _                      -> False
-        _ -> False
+    go bnd (Ann.At _ e) = case e of
+        Can.VarLocal n -> if n `Set.member` bnd then Set.empty else Set.singleton n
+        Can.Lambda ps b -> go (foldr Set.insert bnd (concatMap patBindingVars ps)) b
+        Can.Let def b ->
+            let bnd' = foldr Set.insert bnd (defBindingVars def)
+            in Set.union (go bnd' (canDefBody def)) (go bnd' b)
+        Can.LetRec defs b ->
+            let bnd' = foldr Set.insert bnd (concatMap defBindingVars defs)
+            in Set.union (Set.unions (map (go bnd' . canDefBody) defs)) (go bnd' b)
+        Can.LetDestruct pat e0 b ->
+            let bnd' = foldr Set.insert bnd (patBindingVars pat)
+            in Set.union (go bnd e0) (go bnd' b)
+        Can.Case scrut branches ->
+            Set.union (go bnd scrut)
+                (Set.unions [ go (foldr Set.insert bnd (patBindingVars p)) b
+                            | Can.CaseBranch p b <- branches ])
+        Can.Call f as -> Set.union (go bnd f) (Set.unions (map (go bnd) as))
+        Can.Binop _ _ _ _ a b -> Set.union (go bnd a) (go bnd b)
+        Can.If brs els ->
+            Set.union (go bnd els)
+                (Set.unions [ Set.union (go bnd c) (go bnd t) | (c, t) <- brs ])
+        Can.Access r _ -> go bnd r
+        Can.Negate a -> go bnd a
+        Can.Tuple a b cs -> Set.unions (go bnd a : go bnd b : map (go bnd) cs)
+        Can.List es -> Set.unions (map (go bnd) es)
+        Can.Record fs -> Set.unions (map (go bnd) (Map.elems fs))
+        Can.Update (Ann.At _ n) r fs ->
+            Set.unions ((if n `Set.member` bnd then Set.empty else Set.singleton n)
+                        : go bnd r : [ go bnd fe | Can.FieldUpdate _ fe <- Map.elems fs ])
+        _ -> Set.empty
+
+wrapStoredFn :: Bool -> EmitCtx -> Can.Expr -> String -> String
+wrapStoredFn wrapNonLambda ctx (Ann.At region e) rendered = case e of
+    -- A CAPTURING lambda stored into an `Arc<dyn Fn + 'static>` field must OWN its
+    -- captures (a borrow can't outlive the call). Emit a `move` closure and
+    -- pre-clone each free outer var, so sibling callback fields each get their own
+    -- copy (the console's StateStore: 11 closures all capturing `parent` — E0597).
+    Can.Lambda params body ->
+        let caps = closureCaptures params body
+            preClones = concatMap
+                (\v -> "let " ++ rustSafeIdent v ++ " = " ++ rustSafeIdent v ++ ".clone(); ") caps
+            arc = "std::sync::Arc::new(move " ++ rendered ++ ")"
+        in if null caps then arc else "{ " ++ preClones ++ arc ++ " }"
+    _ | wrapNonLambda, isFnRegion -> "std::sync::Arc::new(" ++ rendered ++ ")"
+    _ -> rendered
+  where
+    isFnRegion = case Map.lookup region (ecRegionTypes ctx) of
+        Just (Can.TLambda _ _) -> True
+        _                      -> False
 
 -- | The Rust element type of a list expression, from its solved region type
 -- (`List a` -> typeToRustString a). Used to type a list-HOF closure's param
