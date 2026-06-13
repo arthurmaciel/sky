@@ -105,29 +105,44 @@ pub fn gate_allows() -> bool {
     true
 }
 
-/// Spawn the pre-built console child on `child_port`, pointing it at the spill
-/// (`hub_db`, the parent's `SKY_CONSOLE_DB_PATH`). Returns `Some(())` on a
-/// successful spawn (the `Child` is tracked in `CHILD`); `None` when the binary
-/// is absent or the spawn fails — the caller falls back to the in-process
-/// console.
+/// Spawn the pre-built console child on `child_port`, pointing it at the data
+/// `store`. Returns `Some(())` on a successful spawn (the `Child` is tracked in
+/// `CHILD`); `None` when the binary is absent or the spawn fails — the caller
+/// falls back to the in-process console.
+///
+/// `store` is the SQLite file the console renders from (`SKY_CONSOLE_HUB_DB` →
+/// hubStore). `child_collects` selects who WRITES it:
+///   - `true`  — push-to-local-collector (epic A): a lean parent has no spill,
+///     so the child is the collector — it also writes `store`
+///     (`SKY_CONSOLE_DB_PATH`) from the parent's pushed telemetry.
+///   - `false` — the parent writes `store` directly (db parent's own spill); the
+///     child reads only, and MUST NOT also write it (double-write).
 ///
 /// No-orphan defence in depth: `kill_on_drop` + `shutdown_console` (signal
 /// handler) cover the graceful paths, and on Linux `PR_SET_PDEATHSIG` makes the
 /// kernel SIGTERM the child if the parent dies by ANY means — including SIGKILL
 /// / OOM / a crash the signal handler can't catch.
-pub fn spawn_console(child_port: u16, hub_db: &str) -> Option<()> {
+pub fn spawn_console(child_port: u16, store: &str, child_collects: bool) -> Option<()> {
     let bin = console_bin_path()?;
     let mut cmd = Command::new(&bin);
     cmd.env("SKY_LIVE_PORT", child_port.to_string())
         .env("SKY_LIVE_BASE_PATH", "/_sky/console")
-        // The console reads its data plane from SKY_CONSOLE_HUB_DB (→ hubStore);
-        // wire it to the parent's spill so D→S1→A is one loop.
-        .env("SKY_CONSOLE_HUB_DB", hub_db)
         // Belt-and-braces: suppress the child's own console auto-mount + banner.
         .env("SKY_CONSOLE_EMBED", "off")
         .kill_on_drop(true);
-    if hub_db.is_empty() {
+    // hubStore read source.
+    if store.is_empty() {
         cmd.env_remove("SKY_CONSOLE_HUB_DB");
+    } else {
+        cmd.env("SKY_CONSOLE_HUB_DB", store);
+    }
+    // Collector write source: only when the child collects (parent pushes).
+    // env_remove otherwise so an inherited SKY_CONSOLE_DB_PATH (the parent's own
+    // spill path) doesn't make the child double-write it.
+    if child_collects && !store.is_empty() {
+        cmd.env("SKY_CONSOLE_DB_PATH", store);
+    } else {
+        cmd.env_remove("SKY_CONSOLE_DB_PATH");
     }
     // Linux: parent-death signal. If the parent process dies for ANY reason
     // (SIGKILL, OOM, panic-abort) the kernel delivers SIGTERM to this child, so
@@ -367,6 +382,35 @@ fn pick_free_port() -> Option<u16> {
 /// wires it to the child's `SKY_CONSOLE_HUB_DB` so the dashboard renders what
 /// the parent recorded. Decided BEFORE the router is built so both the proxy and
 /// the in-process fallback sit under the same observability middleware.
+/// The console child's data store path. The user's `SKY_CONSOLE_DB_PATH` when
+/// set (durable history at their chosen location), else an internal per-process
+/// temp file so the console works zero-config (a lean app gets a live console
+/// without configuring durability).
+fn console_store_path() -> String {
+    match std::env::var("SKY_CONSOLE_DB_PATH") {
+        Ok(p) if !p.is_empty() => p,
+        _ => std::env::temp_dir()
+            .join(format!("sky-console-{}.db", std::process::id()))
+            .to_string_lossy()
+            .into_owned(),
+    }
+}
+
+/// Whether THIS (parent) process writes the telemetry store directly via its own
+/// spill (db app with `SKY_CONSOLE_DB_PATH`). When true the child reads only;
+/// when false the parent pushes to the child collector. Always false without the
+/// `db` feature (a lean live app can't spill).
+fn parent_spill_active() -> bool {
+    #[cfg(feature = "db")]
+    {
+        crate::sky_runtime::telemetry_spill::is_enabled()
+    }
+    #[cfg(not(feature = "db"))]
+    {
+        false
+    }
+}
+
 pub async fn ensure_console_proxy() -> bool {
     if !gate_allows() {
         return false;
@@ -376,12 +420,18 @@ pub async fn ensure_console_proxy() -> bool {
     if console_bin_path().is_none() {
         return false;
     }
-    let hub_db = std::env::var("SKY_CONSOLE_DB_PATH").unwrap_or_default();
+    // Console data store + who writes it (epic A push-to-local-collector):
+    //   - db parent (its own spill is active) → parent writes the store
+    //     directly; the child only reads it. No push.
+    //   - lean/memory parent → the child collects: the parent PUSHES its in-RAM
+    //     telemetry to the child, which writes + reads the store.
+    let store = console_store_path();
+    let parent_writes = parent_spill_active();
     let port = match pick_free_port() {
         Some(p) => p,
         None => return false,
     };
-    if spawn_console(port, &hub_db).is_none() {
+    if spawn_console(port, &store, /* child_collects = */ !parent_writes).is_none() {
         // Binary absent (A1 hasn't run / different sky version) or spawn error.
         return false;
     }
@@ -389,6 +439,11 @@ pub async fn ensure_console_proxy() -> bool {
         eprintln!("[sky.console] child not ready within {READY_TIMEOUT:?}; falling back to in-process console");
         shutdown_console();
         return false;
+    }
+    // Lean parent: start pushing our telemetry to the child collector now that
+    // its ingest is up. (db parent already wrote the store directly.)
+    if !parent_writes {
+        super::push_exporter::enable_to_console(port).await;
     }
     if PROXY
         .set(ProxyState {
@@ -449,7 +504,7 @@ mod tests {
     fn spawn_returns_none_without_binary() {
         // No binary at the override path → None (caller falls back), no panic.
         std::env::set_var(CONSOLE_BIN_ENV, "/nonexistent/sky-console-xyz");
-        assert!(spawn_console(9931, "").is_none());
+        assert!(spawn_console(9931, "", false).is_none());
         std::env::remove_var(CONSOLE_BIN_ENV);
     }
 

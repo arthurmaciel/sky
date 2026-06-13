@@ -38,33 +38,51 @@ enum Entry {
 static SENDER: OnceLock<mpsc::Sender<Entry>> = OnceLock::new();
 
 /// Enable the push exporter from env. No-op unless `SKY_PARENT_URL` is set
-/// (i.e. this process runs as a sub-app). Idempotent. Call once at Live boot.
+/// (i.e. this process runs as a sub-app pushing UP to its parent's ingest —
+/// federation, epic C). Idempotent. Call once at Live boot.
 pub async fn enable_from_env() {
     let parent = match std::env::var(PARENT_ENV) {
         Ok(p) if !p.is_empty() => p,
         _ => return,
     };
-    if SENDER.get().is_some() {
-        return;
-    }
     let interval_ms = std::env::var(INTERVAL_ENV)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_INTERVAL_MS)
-        .max(MIN_INTERVAL_MS);
+        .unwrap_or(DEFAULT_INTERVAL_MS);
+    let ingest_url = format!("{}/_sky/observability/ingest", parent.trim_end_matches('/'));
+    enable("federation", ingest_url, interval_ms);
+}
+
+/// Enable pushing THIS app's telemetry to a LOCAL console-child collector
+/// (epic A "push-to-local-collector"): a lean parent (no SQLite) batches its
+/// in-RAM telemetry and POSTs it to the console child's
+/// `/_sky/observability/ingest`, where the child (which owns sqlx + the store)
+/// records → spills → serves it. Called by the console mount after the child is
+/// ready, when the parent has no spill of its own.
+pub async fn enable_to_console(child_port: u16) {
+    let ingest_url = format!("http://127.0.0.1:{child_port}/_sky/observability/ingest");
+    enable("console-collector", ingest_url, DEFAULT_INTERVAL_MS);
+}
+
+/// Shared activation: bound the interval, claim the SENDER, spawn the batcher.
+/// Idempotent (first caller wins the OnceLock — a sub-app pushes to its parent
+/// OR a top-level app pushes to its console child, never both).
+fn enable(label: &str, ingest_url: String, interval_ms: u64) {
+    if SENDER.get().is_some() {
+        return;
+    }
+    let interval_ms = interval_ms.max(MIN_INTERVAL_MS);
     let cap = std::env::var(BUFFER_ENV)
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&c| c > 0)
         .unwrap_or(DEFAULT_QUEUE_CAP);
     let token = std::env::var(TOKEN_ENV).ok().filter(|t| !t.is_empty());
-    let ingest_url = format!("{}/_sky/observability/ingest", parent.trim_end_matches('/'));
-
     let (tx, rx) = mpsc::channel::<Entry>(cap);
     if SENDER.set(tx).is_err() {
         return; // lost an enable race
     }
-    eprintln!("[sky.push] federation push → {ingest_url} every {interval_ms}ms");
+    eprintln!("[sky.push] {label} push → {ingest_url} every {interval_ms}ms");
     tokio::spawn(batcher(rx, ingest_url, token, interval_ms));
 }
 

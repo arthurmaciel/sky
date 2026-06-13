@@ -62,6 +62,14 @@ enum SpillEntry {
 
 static SENDER: OnceLock<mpsc::Sender<SpillEntry>> = OnceLock::new();
 
+/// Whether the local spill writer is active (db parent with `SKY_CONSOLE_DB_PATH`
+/// set). The console mount uses this to decide between writing the store
+/// directly (db parent) and the push-to-collector path (lean parent pushes to
+/// the console child — epic A).
+pub fn is_enabled() -> bool {
+    SENDER.get().is_some()
+}
+
 fn service_name() -> String {
     match std::env::var(SERVICE_ENV) {
         Ok(s) if !s.is_empty() => s,

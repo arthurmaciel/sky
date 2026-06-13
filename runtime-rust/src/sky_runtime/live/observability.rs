@@ -96,10 +96,12 @@ pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) ->
     // Feed the Sky Console telemetry (request count + 5xx error count).
     super::super::telemetry::record_request(status);
     // Auto request span + access log — but NOT for the internal observability
-    // surface: the SSE long-poll would record a multi-minute span, and the
-    // console proxy / metrics / health endpoints would self-instrument the
-    // console's own polling into noise.
-    if !is_internal_path(&path) {
+    // surface (SSE long-poll → multi-minute span; console proxy / metrics /
+    // health → console's own polling noise) and NOT for a sub-app. A sub-app
+    // (`SKY_LIVE_BASE_PATH` set — e.g. the console child collector) must not
+    // self-instrument into the store it serves; it shows the PARENT's pushed
+    // telemetry, not its own page renders.
+    if !is_internal_path(&path) && !is_sub_app() {
         let dur_us = start.elapsed().as_micros().min(u64::MAX as u128) as u64;
         let ok = status < 500;
         super::super::telemetry::record_span(&format!("{method} {path}"), dur_us, ok);
@@ -116,6 +118,12 @@ pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) ->
 /// the SSE long-poll (a multi-minute span), the console reverse-proxy + its
 /// events (the console's own traffic), and the health/metrics/build/ingest
 /// endpoints (operator polling noise).
+/// True when this process runs as a sub-app (mounted behind a parent's proxy,
+/// `SKY_LIVE_BASE_PATH` non-empty) — e.g. the bundled console child.
+fn is_sub_app() -> bool {
+    std::env::var("SKY_LIVE_BASE_PATH").map(|v| !v.is_empty()).unwrap_or(false)
+}
+
 fn is_internal_path(path: &str) -> bool {
     path == "/_sky/sse"
         || path == "/_sky/event"
