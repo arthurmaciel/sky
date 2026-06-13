@@ -596,13 +596,42 @@ anon-struct field-method access) and remain out of scope pending that work.
 
 ---
 
-## Soundness attention points
+## Soundness, correctness and security problems
 
-A living register of the runtime's deliberate, currently-live soundness
-compromises — visible and revisitable rather than buried in code. Not a
-changelog: when a compromise is eliminated, its entry is deleted.
+A living, **attributed decision ledger**. Every soundness / correctness /
+security finding surfaced by `sky-rust-backend:quality-audit` is recorded here
+with a dated developer decision — *agreed* (consciously accepted) or *disagreed*
+(fixed now, or deferred for investigation). Nothing stays in limbo; nothing is
+buried in code. When a problem is eliminated, its row is deleted.
 
-### Irreducible `#[allow]` / panic vectors
+**How a decision is recorded.** For each material finding the audit presents the
+*why* + *pros/cons* and asks the developer to agree or disagree:
+
+- **Agreed** → `Accepted · <developer> · <date>` + the why (it's irreducible, or
+  the cost/risk of fixing outweighs the cost/risk of accepting).
+- **Disagreed** → a fix is brainstormed + implemented now (then the row is
+  deleted), **or** `Deferred · <developer> · <date>` for investigation —
+  resurfaced on every subsequent audit, never silently dropped.
+
+Only *material* findings (real non-test panic vectors, undocumented `unsafe`,
+unsound `dyn Any`, undocumented `#[allow]`, security/correctness/efficiency
+defects) get a ledger row. Cosmetic lints are triaged in bulk and documented
+inline at the call site.
+
+### Decision ledger
+
+| # | Problem (location) | Disposition | Developer · Date | Why |
+|---|---|---|---|---|
+| 1 | `crypto.rs` HMAC `expect_used` (×2) | Accepted | baseline · panic-hardening pass | `Hmac::new_from_slice` is infallible; the pure Sky kernel has no `Result` channel; a fallback MAC would be a silently-wrong hash (security defect) — detail below |
+| 2 | `email.rs` `hmac_bytes` `expect_used` | Accepted | baseline · panic-hardening pass | same — a fallback MAC is a wrong SES signature |
+| 3 | `ffi_polyfills.rs` `panic` (×2) | Accepted | baseline · panic-hardening pass | statically dead for valid Sky; the unconstrained generic `T` return has no total value to synthesise |
+| 4 | `dyn Any` sites (pubsub broker, cache store/value) | Accepted | task #44 · 2026-06-12 | each `TypeId`-/`K`-keyed, correct-by-construction; the payload travels as its real type and is never erased — detail below |
+
+### Deferred for investigation
+
+_None._
+
+### Detail — accepted `#[allow]` / panic vectors
 
 The clippy gate denies the panic-prone lint family on **non-test library code**:
 
