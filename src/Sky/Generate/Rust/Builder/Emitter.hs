@@ -725,11 +725,14 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
         , ("tower-http", "{ version = \"0.5\", features = [\"fs\", \"catch-panic\"] }")
         ]
     , name `notElem` userDepNames ] ++
-    -- Sky.Core.Http client + Std.Email: reqwest only when used. rustls (no
-    -- system OpenSSL). `stream` feature for Http.Stream's bytes_stream(). Either
-    -- flag pulls it; emit once.
+    -- Sky.Core.Http client + Std.Email: reqwest when used. rustls (no system
+    -- OpenSSL). `stream` feature for Http.Stream's bytes_stream(). Std.Live ALSO
+    -- pulls it: the live runtime's console reverse-proxy (live/console_proxy.rs,
+    -- epic A) forwards to the spawned console child via reqwest + streams the
+    -- response (bytes_stream → axum Body::from_stream) so SSE passes through.
+    -- Any of the three flags pulls it; emit once.
     [ "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"gzip\", \"stream\"] }"
-    | usesHttp uk || usesEmail uk, "reqwest" `notElem` userDepNames ] ++
+    | usesHttp uk || usesEmail uk || usesLive uk, "reqwest" `notElem` userDepNames ] ++
     -- futures-util: WebSocket client, plus the streaming paths — http_stream.rs
     -- (StreamExt::next) and server_stream.rs (stream::unfold for the body).
     [ "futures-util = \"0.3\""
@@ -751,6 +754,16 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- only changed codegen units recompile. sccache + a shared CARGO_TARGET_DIR
     -- cover cross-example dep reuse; this cuts the per-example link step. No
     -- effect on release builds (`--release` uses [profile.release]).
+    -- Std.Live console proxy: libc on unix for PR_SET_PDEATHSIG (Linux) so the
+    -- spawned console child dies with the parent even on SIGKILL. Referenced
+    -- only under cfg(target_os = "linux"); the unix-scoped table keeps it off
+    -- non-unix builds.
+    (if usesLive uk && "libc" `notElem` userDepNames then
+        [ ""
+        , "[target.'cfg(unix)'.dependencies]"
+        , "libc = \"0.2\""
+        ]
+     else []) ++
     [ ""
     , "[profile.dev]"
     , "debug = 0"

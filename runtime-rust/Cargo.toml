@@ -47,6 +47,13 @@ crossterm = { version = "0.28", optional = true }
 wry = { version = "0.24", optional = true }
 tao = { version = "0.16", optional = true }
 
+# Unix-only: the Std.Live console reverse-proxy (live/console_proxy.rs) uses
+# libc::prctl(PR_SET_PDEATHSIG) on Linux so the spawned console child dies with
+# the parent even on SIGKILL. Tiny, ubiquitous; referenced only under
+# cfg(target_os = "linux").
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = []
 async = ["tokio"]

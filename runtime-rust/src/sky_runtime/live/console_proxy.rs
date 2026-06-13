@@ -104,7 +104,12 @@ pub fn gate_allows() -> bool {
 /// (`hub_db`, the parent's `SKY_CONSOLE_DB_PATH`). Returns `Some(())` on a
 /// successful spawn (the `Child` is tracked in `CHILD`); `None` when the binary
 /// is absent or the spawn fails — the caller falls back to the in-process
-/// console. `kill_on_drop` + `shutdown_console` ensure no orphan.
+/// console.
+///
+/// No-orphan defence in depth: `kill_on_drop` + `shutdown_console` (signal
+/// handler) cover the graceful paths, and on Linux `PR_SET_PDEATHSIG` makes the
+/// kernel SIGTERM the child if the parent dies by ANY means — including SIGKILL
+/// / OOM / a crash the signal handler can't catch.
 pub fn spawn_console(child_port: u16, hub_db: &str) -> Option<()> {
     let bin = console_bin_path()?;
     let mut cmd = Command::new(&bin);
@@ -118,6 +123,22 @@ pub fn spawn_console(child_port: u16, hub_db: &str) -> Option<()> {
         .kill_on_drop(true);
     if hub_db.is_empty() {
         cmd.env_remove("SKY_CONSOLE_HUB_DB");
+    }
+    // Linux: parent-death signal. If the parent process dies for ANY reason
+    // (SIGKILL, OOM, panic-abort) the kernel delivers SIGTERM to this child, so
+    // it can never outlive the parent as an orphan. No-op on non-Linux (the
+    // signal handler + kill_on_drop cover those).
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: the closure runs in the forked child between fork and exec. It
+        // only calls prctl (async-signal-safe) — no allocation, no locks, no
+        // Rust runtime re-entry. Failure is non-fatal (best-effort hardening).
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
+                Ok(())
+            });
+        }
     }
     match cmd.spawn() {
         Ok(child) => {
@@ -144,9 +165,16 @@ pub fn shutdown_console() {
     }
 }
 
-/// Install a best-effort signal handler that kills the console child on
-/// SIGINT/SIGTERM, so the child dies with the parent even though the Live server
-/// has no graceful-shutdown hook of its own. Spawned once at mount time.
+/// Install a signal handler that kills the console child on SIGINT/SIGTERM and
+/// THEN terminates the parent, so the child dies with the parent and the parent
+/// still honours the signal.
+///
+/// Subtlety this guards against: installing a tokio signal handler SUPPRESSES
+/// the default disposition (terminate) for that signal. So the handler MUST
+/// re-establish termination itself by exiting — otherwise trapping SIGTERM would
+/// leave the parent running (unkillable except by SIGKILL) after reaping the
+/// child. We exit with the conventional 128+signum code (Go parity:
+/// `exit 128+signum`). Spawned once at mount time.
 pub fn install_shutdown_hook() {
     tokio::spawn(async {
         #[cfg(unix)]
@@ -160,16 +188,18 @@ pub fn install_shutdown_hook() {
                 Ok(s) => s,
                 Err(_) => return,
             };
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = intr.recv() => {}
-            }
+            let code = tokio::select! {
+                _ = term.recv() => 143, // 128 + SIGTERM(15)
+                _ = intr.recv() => 130, // 128 + SIGINT(2)
+            };
             shutdown_console();
+            std::process::exit(code);
         }
         #[cfg(not(unix))]
         {
             let _ = tokio::signal::ctrl_c().await;
             shutdown_console();
+            std::process::exit(130);
         }
     });
 }
