@@ -222,6 +222,209 @@ where
     }
 }
 
+const METRIC_LIMIT: i64 = 200;
+const TRACE_LIMIT: i64 = 100;
+const ERROR_LIMIT: i64 = 500;
+
+/// Build the `MetricRow`-shaped JSON array (Go `QueryMetricsJSON`). `labels` is
+/// the attrs map rendered `k=v, k=v` (keys sorted for stable output); `sum`/
+/// `count` are 0 (the spill doesn't carry histogram aggregates yet).
+async fn read_metrics_value(db_path: &str, service: &str) -> Value {
+    let Some(pool) = open_spill(db_path).await else {
+        return Value::Array(vec![]);
+    };
+    let mut sql = String::from(
+        "SELECT name, type, value, attrs FROM telemetry_metric WHERE 1=1",
+    );
+    if !service.is_empty() {
+        sql.push_str(" AND service_name = ?");
+    }
+    sql.push_str(" ORDER BY time DESC, id DESC LIMIT ?");
+    let mut q = sqlx::query(&sql);
+    if !service.is_empty() {
+        q = q.bind(service);
+    }
+    let rows = match q.bind(METRIC_LIMIT).fetch_all(&pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[sky.hub] readMetrics: {e}");
+            return Value::Array(vec![]);
+        }
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let attrs = parse_attrs(&r.try_get::<String, _>("attrs").unwrap_or_default());
+        let mut keys: Vec<&String> = attrs.keys().collect();
+        keys.sort();
+        let labels = keys
+            .iter()
+            .map(|k| format!("{k}={}", attrs.get(*k).map(String::as_str).unwrap_or("")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push(json!({
+            "name": r.try_get::<String, _>("name").unwrap_or_default(),
+            "typ": r.try_get::<String, _>("type").unwrap_or_default(),
+            "labels": labels,
+            "value": r.try_get::<f64, _>("value").unwrap_or(0.0),
+            "sum": 0.0,
+            "count": 0.0,
+        }));
+    }
+    Value::Array(out)
+}
+
+/// Milliseconds between two RFC3339 timestamps; 0 when either is empty or
+/// unparseable (total — never panics). Mirrors Go's zero-guarded `Sub`.
+fn duration_ms(start: &str, end: &str) -> f64 {
+    if start.is_empty() || end.is_empty() {
+        return 0.0;
+    }
+    match (
+        chrono::DateTime::parse_from_rfc3339(start),
+        chrono::DateTime::parse_from_rfc3339(end),
+    ) {
+        (Ok(s), Ok(e)) => (e - s).num_milliseconds() as f64,
+        _ => 0.0,
+    }
+}
+
+/// Build the `TraceRow`-shaped JSON array (Go `QuerySpansJSON`). `kind`=service,
+/// `durationMs` from start/end, `status` from attrs.
+async fn read_traces_value(db_path: &str, service: &str) -> Value {
+    let Some(pool) = open_spill(db_path).await else {
+        return Value::Array(vec![]);
+    };
+    let mut sql = String::from(
+        "SELECT service_name, name, trace_id, span_id, parent_id, start_time, end_time, attrs \
+         FROM telemetry_span WHERE 1=1",
+    );
+    if !service.is_empty() {
+        sql.push_str(" AND service_name = ?");
+    }
+    sql.push_str(" ORDER BY time DESC, id DESC LIMIT ?");
+    let mut q = sqlx::query(&sql);
+    if !service.is_empty() {
+        q = q.bind(service);
+    }
+    let rows = match q.bind(TRACE_LIMIT).fetch_all(&pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[sky.hub] readTraces: {e}");
+            return Value::Array(vec![]);
+        }
+    };
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let start: String = r.try_get("start_time").unwrap_or_default();
+        let end: String = r.try_get("end_time").unwrap_or_default();
+        let attrs = parse_attrs(&r.try_get::<String, _>("attrs").unwrap_or_default());
+        out.push(json!({
+            "traceId": r.try_get::<String, _>("trace_id").unwrap_or_default(),
+            "spanId": r.try_get::<String, _>("span_id").unwrap_or_default(),
+            "parentId": r.try_get::<String, _>("parent_id").unwrap_or_default(),
+            "name": r.try_get::<String, _>("name").unwrap_or_default(),
+            "kind": r.try_get::<String, _>("service_name").unwrap_or_default(),
+            "startTime": start.clone(),
+            "durationMs": duration_ms(&start, &end),
+            "status": attrs.get("status").cloned().unwrap_or_default(),
+        }));
+    }
+    Value::Array(out)
+}
+
+/// Build the `ErrorRow`-shaped JSON array (Go `QueryErrorsJSON`): error-level
+/// logs grouped by message → `{count, message}`, descending by count for a
+/// stable, useful order.
+async fn read_errors_value(db_path: &str, service: &str) -> Value {
+    let Some(pool) = open_spill(db_path).await else {
+        return Value::Array(vec![]);
+    };
+    let mut sql = String::from(
+        "SELECT message FROM telemetry_log WHERE level = 'error'",
+    );
+    if !service.is_empty() {
+        sql.push_str(" AND service_name = ?");
+    }
+    sql.push_str(" ORDER BY time DESC, id DESC LIMIT ?");
+    let mut q = sqlx::query(&sql);
+    if !service.is_empty() {
+        q = q.bind(service);
+    }
+    let rows = match q.bind(ERROR_LIMIT).fetch_all(&pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[sky.hub] readErrors: {e}");
+            return Value::Array(vec![]);
+        }
+    };
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for r in &rows {
+        let msg: String = r.try_get("message").unwrap_or_default();
+        *counts.entry(msg).or_insert(0) += 1;
+    }
+    let mut pairs: Vec<(String, i64)> = counts.into_iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let out = pairs
+        .into_iter()
+        .map(|(message, count)| json!({ "count": count, "message": message }))
+        .collect();
+    Value::Array(out)
+}
+
+/// `Hub_readMetrics : String -> Task Error (List MetricRow)`.
+pub fn hub_read_metrics<E, A>(db_path: String) -> SkyTask<E, A>
+where
+    E: Send + From<String> + 'static,
+    A: DeserializeOwned + Send + 'static,
+{
+    Box::pin(async move { decode_rows(read_metrics_value(&db_path, "").await) })
+}
+
+/// `Hub_readFilteredMetrics : String -> String -> Task Error (List MetricRow)`.
+pub fn hub_read_filtered_metrics<E, A>(db_path: String, service: String) -> SkyTask<E, A>
+where
+    E: Send + From<String> + 'static,
+    A: DeserializeOwned + Send + 'static,
+{
+    Box::pin(async move { decode_rows(read_metrics_value(&db_path, &service).await) })
+}
+
+/// `Hub_readTraces : String -> Task Error (List TraceRow)`.
+pub fn hub_read_traces<E, A>(db_path: String) -> SkyTask<E, A>
+where
+    E: Send + From<String> + 'static,
+    A: DeserializeOwned + Send + 'static,
+{
+    Box::pin(async move { decode_rows(read_traces_value(&db_path, "").await) })
+}
+
+/// `Hub_readFilteredTraces : String -> String -> Task Error (List TraceRow)`.
+pub fn hub_read_filtered_traces<E, A>(db_path: String, service: String) -> SkyTask<E, A>
+where
+    E: Send + From<String> + 'static,
+    A: DeserializeOwned + Send + 'static,
+{
+    Box::pin(async move { decode_rows(read_traces_value(&db_path, &service).await) })
+}
+
+/// `Hub_readErrors : String -> Task Error (List ErrorRow)`.
+pub fn hub_read_errors<E, A>(db_path: String) -> SkyTask<E, A>
+where
+    E: Send + From<String> + 'static,
+    A: DeserializeOwned + Send + 'static,
+{
+    Box::pin(async move { decode_rows(read_errors_value(&db_path, "").await) })
+}
+
+/// `Hub_readFilteredErrors : String -> String -> Task Error (List ErrorRow)`.
+pub fn hub_read_filtered_errors<E, A>(db_path: String, service: String) -> SkyTask<E, A>
+where
+    E: Send + From<String> + 'static,
+    A: DeserializeOwned + Send + 'static,
+{
+    Box::pin(async move { decode_rows(read_errors_value(&db_path, &service).await) })
+}
+
 /// Open the telemetry spill read-only. `None` (never an error) when the path is
 /// empty or the file can't be opened — callers map that to an empty result so a
 /// fresh/absent DB renders as "no telemetry yet", exactly like the Go bridge.
@@ -429,6 +632,101 @@ mod tests {
             SkyResult::Ok(rows) => {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0]["subapp"], "alpha");
+            }
+            SkyResult::Err(_) => panic!("expected Ok"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn duration_ms_total_and_guarded() {
+        assert_eq!(duration_ms("", "2026-01-01T00:00:01Z"), 0.0);
+        assert_eq!(duration_ms("nonsense", "alsobad"), 0.0);
+        assert_eq!(
+            duration_ms("2026-01-01T00:00:00Z", "2026-01-01T00:00:00.250Z"),
+            250.0
+        );
+    }
+
+    #[tokio::test]
+    async fn read_metrics_joins_sorted_labels() {
+        let path = std::env::temp_dir()
+            .join(format!("hub-met-{}.db", std::process::id()))
+            .to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+        let pool = seed(&path).await;
+        sqlx::query(
+            "INSERT INTO telemetry_metric (service_name, time, name, type, value, attrs) \
+             VALUES ('svc', '2026-01-01T00:00:00Z', 'reqs', 'counter', 5.0, ?)",
+        )
+        .bind(r#"{"zone":"eu","app":"web"}"#)
+        .execute(&pool).await.unwrap();
+        let res: SkyResult<String, Vec<Value>> = hub_read_metrics(path.clone()).await;
+        match res {
+            SkyResult::Ok(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0]["name"], "reqs");
+                assert_eq!(rows[0]["typ"], "counter");
+                assert_eq!(rows[0]["value"], 5.0);
+                assert_eq!(rows[0]["labels"], "app=web, zone=eu"); // sorted keys
+            }
+            SkyResult::Err(_) => panic!("expected Ok"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn read_traces_computes_duration() {
+        let path = std::env::temp_dir()
+            .join(format!("hub-tr-{}.db", std::process::id()))
+            .to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+        let pool = seed(&path).await;
+        sqlx::query(
+            "INSERT INTO telemetry_span (service_name, time, name, trace_id, span_id, \
+             parent_id, start_time, end_time, attrs) VALUES \
+             ('svc', '2026-01-01T00:00:00Z', 'GET /', 't1', 's1', '', \
+              '2026-01-01T00:00:00Z', '2026-01-01T00:00:00.100Z', ?)",
+        )
+        .bind(r#"{"status":"ok"}"#)
+        .execute(&pool).await.unwrap();
+        let res: SkyResult<String, Vec<Value>> = hub_read_traces(path.clone()).await;
+        match res {
+            SkyResult::Ok(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0]["traceId"], "t1");
+                assert_eq!(rows[0]["kind"], "svc");
+                assert_eq!(rows[0]["durationMs"], 100.0);
+                assert_eq!(rows[0]["status"], "ok");
+            }
+            SkyResult::Err(_) => panic!("expected Ok"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn read_errors_groups_by_message() {
+        let path = std::env::temp_dir()
+            .join(format!("hub-err-{}.db", std::process::id()))
+            .to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+        let pool = seed(&path).await;
+        for msg in ["boom", "boom", "split"] {
+            sqlx::query(
+                "INSERT INTO telemetry_log (service_name, time, level, message, attrs) \
+                 VALUES ('svc', '2026-01-01T00:00:00Z', 'error', ?, '{}')",
+            )
+            .bind(msg).execute(&pool).await.unwrap();
+        }
+        let res: SkyResult<String, Vec<Value>> = hub_read_errors(path.clone()).await;
+        match res {
+            SkyResult::Ok(rows) => {
+                assert_eq!(rows.len(), 2);
+                // descending by count → "boom" (2) first.
+                assert_eq!(rows[0]["message"], "boom");
+                assert_eq!(rows[0]["count"], 2);
+                assert_eq!(rows[1]["message"], "split");
+                assert_eq!(rows[1]["count"], 1);
             }
             SkyResult::Err(_) => panic!("expected Ok"),
         }
