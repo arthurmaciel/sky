@@ -1509,6 +1509,14 @@ inferParamRustType ctx pname = go
       Can.LetDestruct _ x b       -> go x `orElseM` go b
       Can.Case s bs               -> go s `orElseM` firstJustL [ go b | Can.CaseBranch _ b <- bs ]
       Can.If brs el               -> firstJustL ([ go c `orElseM` go t | (c, t) <- brs ] ++ [go el])
+      -- `pname` compared (`==`/`/=`) against a record field (`r.traceId ==
+      -- tid`) takes that field's type. The field name resolves structurally
+      -- across ecStructFields; a unique non-typevar type wins. Closes a scalar
+      -- closure param with no field accesses of its own + no HOF flow (the
+      -- console's `keepTrace = \tid -> … r.traceId == tid …`, E0282).
+      Can.Binop op _ _ _ a b
+        | op == "==" || op == "/=" ->
+            fieldCmpType a b `orElseM` fieldCmpType b a `orElseM` (go a `orElseM` go b)
       Can.Binop _ _ _ _ a b       -> go a `orElseM` go b
       Can.Access r _              -> go r
       Can.Update _ r ups          -> go r `orElseM` firstJustL [ go x | (_, Can.FieldUpdate _ x) <- Map.toList ups ]
@@ -1520,6 +1528,16 @@ inferParamRustType ctx pname = go
     orElseM (Just x) _ = Just x
     orElseM Nothing  y = y
     firstJustL = foldr orElseM Nothing
+    -- `lhs` is `VarLocal pname` and `rhs` is a field access `_.field`: resolve
+    -- `field`'s type across every struct; a unique non-typevar type is pname's.
+    fieldCmpType (Ann.At _ (Can.VarLocal v)) (Ann.At _ (Can.Access _ (Ann.At _ field)))
+        | v == pname =
+            case nub [ typeToRustString (ecRecordMap ctx) t
+                     | fm <- Map.elems (ecStructFields ctx)
+                     , Just t <- [Map.lookup field fm], not (hasTypeVars t) ] of
+                [single] -> Just single
+                _        -> Nothing
+    fieldCmpType _ _ = Nothing
 
 -- | Resolve a call's callee expression to its runtime kernel snake_case name
 -- (the same resolution exprToRustString does for VarTopLevel / VarKernel).
@@ -1719,7 +1737,27 @@ listElemRustType ctx (Ann.At region inner) =
                 in case elems of
                     [single] -> Just single
                     _        -> Nothing
+            -- The list arg is a CALL (`distinct_trace_ids(rows) : List String`),
+            -- so its region type is often absent. Resolve the callee's declared
+            -- return type from the env and peel `List e` off it — lets a HOF
+            -- closure over a fn-returned list infer its element param (the
+            -- console's `\tid -> …` filtered over `distinctTraceIds rows`, E0282).
+            Can.Call (Ann.At _ callee) callArgs ->
+                case calleeRetName callee >>= \n -> Map.lookup n (ecSolvedTypes ctx) of
+                    Just ty -> case peelArrowsN (length callArgs) ty of
+                        Can.TType _ "List" [e] | not (hasTypeVars e) ->
+                            Just (typeToRustString (ecRecordMap ctx) e)
+                        _ -> Nothing
+                    Nothing -> Nothing
             _ -> Nothing
+  where
+    calleeRetName (Can.VarTopLevel _ n) = Just n
+    calleeRetName (Can.VarLocal n)      = Just n
+    calleeRetName _                     = Nothing
+    peelArrowsN :: Int -> Can.Type -> Can.Type
+    peelArrowsN 0 t                 = t
+    peelArrowsN k (Can.TLambda _ r) = peelArrowsN (k - 1) r
+    peelArrowsN _ t                 = t
 
 -- | Resolve the field-name -> declared-type map for the struct an update
 -- targets (`{ record | f = … }`). The record subexpr's solved region type is
@@ -1960,7 +1998,17 @@ emitDefaultCall ctx fn calleeName args =
             , "list_map_consume", "list_take_while", "list_drop_while"
             -- foldl/foldr: 2-param closure (element, acc); param 0 is the element
             -- (annotPsIx types only index 0), element type from the list (last arg).
-            , "list_foldl", "list_foldr" ]
+            , "list_foldl", "list_foldr"
+            -- The pure-Sky stdlib forms (`List.find`/`map`/… resolved to the
+            -- recursive `sky_core_list_*` def, not the kernel) share the exact
+            -- (closure, …, list) arg shape. Without these, an ambiguous-field
+            -- closure (`\s -> s.name == name` over a Vec<StateServiceStat>, where
+            -- `name` is also a field of StateMetricRow) mis-resolves via the
+            -- field-set fallback (console Overview, E0308).
+            , "sky_core_list_map", "sky_core_list_filter", "sky_core_list_find"
+            , "sky_core_list_any", "sky_core_list_all", "sky_core_list_concat_map"
+            , "sky_core_list_take_while", "sky_core_list_drop_while"
+            , "sky_core_list_foldl", "sky_core_list_foldr" ]
             && not (null args)
         -- Coerce a db-param list element to String uniformly via `format!`.
         -- Sky's `List a` DB params are heterogeneous (Int/String/Bool — the Go
@@ -2011,6 +2059,21 @@ solveArgType solvedMap arg = case arg of
     -- `msg.attachments ++ [ att ]` on a bridged-struct List field, where the
     -- access side resolves to "String" and would otherwise pick format!).
     Ann.At _ (Can.List _)  -> "Vec<_>"
+    -- An `if`/`case` expression has its branches' type. `++` over a chain of
+    -- `if cond then [x] else []` (the console's LogsTab `levels` filter) must
+    -- see those branches as Vec, else both operands fall to the "String"
+    -- default and the outer `++` mis-emits format! over Vec<String> (E0308).
+    -- Probe every branch; first Vec wins (matches ++'s list preference).
+    Ann.At _ (Can.If brs el) ->
+        let tys = solveArgType solvedMap el : map (solveArgType solvedMap . snd) brs
+        in case filter ("Vec<" `isPrefixOf`) tys of
+             (v:_) -> v
+             []    -> case tys of { (t:_) -> t; [] -> "String" }
+    Ann.At _ (Can.Case _ branches) ->
+        let tys = [ solveArgType solvedMap b | Can.CaseBranch _ b <- branches ]
+        in case filter ("Vec<" `isPrefixOf`) tys of
+             (v:_) -> v
+             []    -> case tys of { (t:_) -> t; [] -> "String" }
     Ann.At _ (Can.VarLocal name) ->
         case Map.lookup name solvedMap of
             Just ty -> typeToRustString Map.empty ty
@@ -2137,9 +2200,15 @@ matchStructByFieldsE recordMap fieldSet
 -- argToRustString, so List.map/filter closures don't reach here and stay bare.
 annotClosureParam :: EmitCtx -> Can.Expr -> Can.Pattern -> String
 annotClosureParam ctx body p@(Ann.At _ (Can.PVar pn)) =
+    -- Body-driven kernel-flow inference first; then the field-set struct match
+    -- (a let-bound closure stored + called later — `let matches = \r -> …r.name…
+    -- r.traceId…` — never flows into a HOF, so only its field accesses identify
+    -- the record: {name,traceId} → StateTraceRow. Console TracesTab, E0282).
     case inferParamRustType ctx pn body of
         Just t  -> patternToRustParam p ++ ": " ++ t
-        Nothing -> patternToRustParam p
+        Nothing -> case inferRecordClosureParam ctx pn body of
+            Just s  -> patternToRustParam p ++ ": " ++ s
+            Nothing -> patternToRustParam p
 annotClosureParam _ _ p = patternToRustParam p
 
 binopToRust :: String -> String
