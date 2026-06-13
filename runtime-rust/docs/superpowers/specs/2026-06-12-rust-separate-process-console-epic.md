@@ -60,7 +60,7 @@ parent app runtime ──dual-write──> SQLite (SKY_CONSOLE_DB_PATH, WAL) <�
 | **S0** | **Stdlib + codegen gaps** | spike #3 (stdlib maps + the `formatISO8601` mangling bug) + spike #2 (callback-record pattern: accessors, move-closures, no-PartialEq-on-Fn-struct, curry9/10). Pure in-boundary codegen; independently useful to ANY app. | — |
 | **S1** | **`Hub` kernel module (read side)** | spike #1: the 14 `hub_*` kernels, reading the SQLite spill. Runtime (`live/hub.rs`, feature `db`) + codegen kernel maps + analyzer flags. | S0, D |
 | **D** | **SQLite spill (#69)** | runtime dual-write + retention (write-only, Go runtime parity). The file S1 reads. | — (write side independent) |
-| **A** | **Sub-app mount + reverse-proxy** | `rt.MountSubApp` parity: spawn the console child binary, reverse-proxy `/_sky/console/*`, `SKY_LIVE_BASE_PATH` awareness, child lifecycle. | S0+S1+D (a console to mount) |
+| **A** | **Pre-built console child + reverse-proxy** | **Build the console binary at the user's `sky build` time** (shared cache, built once per sky version — NEVER at runtime), spawn it as a child, reverse-proxy `/_sky/console/*`, set the child's env (`SKY_LIVE_PORT`, `SKY_CONSOLE_HUB_DB` = parent's `SKY_CONSOLE_DB_PATH`, `SKY_LIVE_BASE_PATH=/_sky/console`), `SKY_LIVE_BASE_PATH` awareness, child lifecycle (kill on parent shutdown). Keep in-process `console.rs` as the no-spawn fallback. | S0+S1+D (a console to mount) |
 | **C** | **Observability federation (PushExporter)** | sub-apps batch + push telemetry to the parent ingest (token gate done, #71). | A |
 | **E** | **HubExporter (#70)** | remote OTLP push + spool (file/memory). | C |
 
@@ -168,10 +168,20 @@ kernels — read↔write loop closed.
 - ✅ Deterministic test: `write_entry_maps_to_hub_schema` (also asserts S1
   `hub_list_services` reads the same file — the contract). 251/251 lib tests green.
 
-**Next: A** (sub-app mount + reverse-proxy) so the parent spawns the console child
-at `/_sky/console/*` with `SKY_CONSOLE_HUB_DB` = the parent's `SKY_CONSOLE_DB_PATH`
-— the last piece for the full embedded-console end-to-end. Then **C** (federation)
-+ **E** (#70 HubExporter). B compile-guard still folded in (console store=memory).
+**A architecture DECIDED (user, 2026-06-13): pre-built separate process + proxy.**
+The console binary is compiled at the user's `sky build` time (a sibling/cached
+binary, built once per sky version); at runtime the parent `exec`s it and reverse-
+proxies `/_sky/console/*` — **never a runtime build**. Rationale (full version in
+`runtime-rust/README.md` §"Rust vs Go — divergent strategies"): Go dropped its
+v0.15.x subprocess console *only* because the child did a **runtime `go build`**
+(OOM'd 1 GB VMs); a pre-built Rust binary doesn't incur that, so the rationale
+doesn't transfer. Go's chosen in-process path is the *hard* one on Rust (two Sky
+programs → generated-type collisions, no reflection to shortcut), so pre-built-
+subprocess is the Rust optimum. **This corrects the epic's original "true Go
+parity" framing — it is NOT current Go parity, but is the right Rust design.**
+
+**Next: A** then **C** (federation) + **E** (#70 HubExporter). B compile-guard
+still folded in (console store=memory).
 
 ## Risks
 
