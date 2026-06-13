@@ -569,8 +569,13 @@ serdeMatchStruct recordMap fieldSet
              Just (_, nm) | not ("Anon" `isPrefixOf` nm) -> Just nm
              _ -> Nothing
 
--- | Find the first `Live.app { ... }` record's fields anywhere in the program.
--- Shared by the Msg/Model detection pre-passes.
+-- | Find the first `Live.app { ... }` OR `Webview.app { ... }` record's fields
+-- anywhere in the program. Shared by the Msg/Model detection pre-passes: both
+-- backends reuse the Html renderer, so a `view : Model -> any` lowering needs
+-- the app's concrete Msg/Model to resolve the `any` carrier to `Html<Msg>` the
+-- same way. (Webview.app is a `Std.Webview` `Ffi.kernel` alias → it arrives as
+-- VarTopLevel, not VarKernel — match that form.) NOT used by the Live-session
+-- serde pre-pass, which stays Live-only (Webview has no session store).
 findLiveAppFields :: [Can.Module] -> Maybe (Map.Map String Can.Expr)
 findLiveAppFields mods = foldr (\m acc -> case acc of
         Just _  -> acc
@@ -587,6 +592,8 @@ findLiveAppFields mods = foldr (\m acc -> case acc of
     walkDef (Can.DestructDef _ e)     = walkExpr e
     walkExpr (Ann.At _ e) = case e of
         Can.Call (Ann.At _ (Can.VarKernel "Live" "app")) [Ann.At _ (Can.Record fields)] -> Just fields
+        Can.Call (Ann.At _ (Can.VarTopLevel m "app")) [Ann.At _ (Can.Record fields)]
+            | ModuleName._name m == "Std.Webview" -> Just fields
         Can.Call fn args -> fj (walkExpr fn) (foldr (\a acc -> fj (walkExpr a) acc) Nothing args)
         Can.Lambda _ b -> walkExpr b
         Can.Let def b -> fj (walkDef def) (walkExpr b)
