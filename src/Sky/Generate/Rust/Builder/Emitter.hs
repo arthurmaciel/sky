@@ -384,12 +384,18 @@ typeDefToString formTargets serdeTypes fnFieldStructs (RStructDef name gens fiel
     -- give it a `Default` (disconnected error-closures) so the Model that holds it
     -- can `#[serde(skip)]` the field and reconstruct it on deserialize.
     let hasFnField = any (\(_, t) -> "dyn Fn" `isInfixOf` t) fields
+        isSerde = name `Set.member` serdeTypes
+        -- A struct (e.g. the Model) that HOLDS a fn-field struct can't derive
+        -- Debug/PartialEq either (the held struct has no Debug/PartialEq) — derive
+        -- only Clone + serde (the held field is serde-skipped below).
+        hasCallbackField = any (\(_, t) -> fieldTypeBase t `Set.member` fnFieldStructs) fields
         derives
             | hasFnField = "#[derive(Clone)]"
-            | name `Set.member` serdeTypes = "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"
+            | hasCallbackField && isSerde = "#[derive(Clone, serde::Serialize, serde::Deserialize)]"
+            | hasCallbackField = "#[derive(Clone)]"
+            | isSerde = "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"
             | name `Set.member` formTargets = "#[derive(Clone, Debug, PartialEq, serde::Deserialize)]"
             | otherwise = "#[derive(Clone, Debug, PartialEq)]"
-        isSerde = name `Set.member` serdeTypes
         -- A serde struct's field whose TYPE is a fn-field struct can't serialize:
         -- skip it (reconstructed via that struct's Default on deserialize).
         skipField (_, t) = isSerde && fieldTypeBase t `Set.member` fnFieldStructs
