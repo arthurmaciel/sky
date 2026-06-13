@@ -41,6 +41,11 @@ analyzeKernelUsage = foldMap analyzeMod
     walkExpr (Ann.At _ expr) = case expr of
         Can.VarKernel modName fnName ->
             detectKernelUsage modName fnName
+        -- The bundled console's HubStore bindings are `Ffi.kernel "Hub_read*"`
+        -- aliases; the kernel-name string literal is the load-bearing signal
+        -- that the program reads the SQLite telemetry spill (the `hub_*` kernels
+        -- live behind the `db` feature). Pull `db` so they compile in.
+        Can.Str s | "Hub_" `isPrefixOf` s -> mempty { usesDb = True }
         Can.VarTopLevel modName topName ->
             -- Pass the binding name (not ""): Ffi.kernel-aliased stdlib funcs
             -- (e.g. `Task.andThen = Ffi.kernel "Task_andThen"`) reach the usage
