@@ -129,11 +129,29 @@ every codegen/stdlib/inference gap is closed.
   yet emitted — folded into S1/A (it only matters once the console actually
   persists; the console's session store is `memory`, so it is not blocking).
 
-**Next: S1** — the 12 `hub_*` kernels (the remaining 12 `E0425`) reading the
-SQLite spill. Design: generic `hub_read_*<A: DeserializeOwned>(db_path) ->
-SkyTask<E, A>` (the `db_query_decode` generic-decode precedent), codegen pins the
-turbofish to the concrete `*_R` return type (known from the Sky sig
-`Task Error Overview`). Depends on D (#69) for the spill table schema.
+**S1 DONE: bundled console 12 → 0 errors — builds + boots + serves on
+`--target rust`** (commits 19e8c9bb … 57768c24; plan
+`runtime-rust/docs/superpowers/plans/2026-06-13-s1-hub-kernel-read-side.md`).
+- ✅ `runtime-rust/src/sky_runtime/live/hub.rs` (`#[cfg(feature="db")]`) — all 12
+  `hub_*` kernels, each **generic over the return type** `A: DeserializeOwned`
+  (the `State*` records are project-generated; the call sites infer `A` from the
+  concrete `StateStore` fields — no turbofish, no `Any`). Reads the SQLite spill
+  read-only via sqlx; builds a `serde_json::Value` matching the record's camelCase
+  serde shape; `from_value::<A>`. Full Go-parity row→record mapping (attrs→reqId,
+  durationMs from RFC3339 start/end, error grouping, 60 s/30-bucket ServiceStat
+  aggregation w/ p95+classifyStatus). Missing/unreadable DB → empty result + warn,
+  never a panic/error (Go `getHubStore()==nil` parity). **15 unit tests green;
+  clippy clean; no `unwrap`/indexing in any Sky-reachable path.**
+- ✅ Codegen: no Kernel.hs map needed (the `Ffi.kernel "Hub_readOverview"` alias
+  default-mangles to `hub_read_overview`). The only wiring is Walker flagging
+  `usesDb=True` on a `"Hub_"`-prefixed kernel-name string → generated Cargo.toml
+  gains the `db` feature → the kernels compile in.
+- ✅ Acceptance: console binary boots, serves on its port, renders `Sky Console` /
+  `Overview`. Full data render needs D (#69) to populate the spill.
+
+**Next: A** (sub-app mount + reverse-proxy) so the parent spawns the console child
+at `/_sky/console/*` — plus **D (#69)** to dual-write the spill the console reads.
+B compile-guard still folded in (console store=memory).
 
 ## Risks
 
