@@ -130,8 +130,16 @@ Runtime behavioral bugs (verified open 2026-06-14):
 - [x] **`live/form.rs` numeric/bool/float form fields** — fixed via
       serde_urlencoded type-directed coercion (was all-String serde_json).
       Regression test + 19-skyforum builds.
-- [ ] **`Email.send` SMTP not ported** — Resend/SES/SendGrid work; SMTP transport
-      missing. Add an SMTP transport crate.
+- [x] **`Email.send` SMTP — DONE (`email.rs`, lettre).** `send_smtp` implemented
+      via `lettre` (async tokio + rustls, matching reqwest's TLS backend):
+      **opportunistic STARTTLS** (TLS if the server advertises it, plaintext else
+      — identical posture to Go's `smtp.SendMail`), PLAIN auth when a user is set,
+      standards-compliant MIME (text/html alternative + attachments). Wired into
+      the generated `Cargo.toml` (Emitter.hs, gated on `usesEmail`). Verified
+      end-to-end: a Sky `Email.send (Smtp cfg)` delivered a message with correct
+      headers + body to a local SMTP catcher; DRY-RUN returns Ok; error paths
+      (empty host / bad address) return a clean `Err`, never a panic. Regression:
+      `tests/proptest.rs::email_smtp_tests::*`.
 - [x] **JSON pipeline decoder** — verified: 06-json + 35-composite-generics both
       build on `--target rust` (build-sweep). The `Box<dyn FnOnce>` curry issue
       is resolved; no `Box<dyn Any>` needed.

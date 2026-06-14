@@ -745,6 +745,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- Any of the three flags pulls it; emit once.
     [ "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"gzip\", \"stream\"] }"
     | usesHttp uk || usesEmail uk || needsLive, "reqwest" `notElem` userDepNames ] ++
+    -- Std.Email SMTP transport: lettre (async tokio + rustls, no system OpenSSL —
+    -- matches reqwest's rustls). Resend/SendGrid/SES go over reqwest above; only
+    -- the Smtp provider needs lettre's SMTP client + MIME builder.
+    [ "lettre = { version = \"0.11\", default-features = false, features = [\"builder\", \"hostname\", \"smtp-transport\", \"pool\", \"tokio1\", \"tokio1-rustls-tls\"] }"
+    | usesEmail uk, "lettre" `notElem` userDepNames ] ++
     -- futures-util: WebSocket client, plus the streaming paths — http_stream.rs
     -- (StreamExt::next) and server_stream.rs (stream::unfold for the body).
     [ "futures-util = \"0.3\""

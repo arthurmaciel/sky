@@ -109,7 +109,7 @@ pub fn email_send<E: From<String> + Send + 'static>(
             EmailProvider::Resend(key) => send_resend(&key, &msg).await,
             EmailProvider::SendGrid(key) => send_sendgrid(&key, &msg).await,
             EmailProvider::Ses(cfg) => send_ses(&cfg, &msg).await,
-            EmailProvider::Smtp(cfg) => send_smtp(&cfg, &msg),
+            EmailProvider::Smtp(cfg) => send_smtp(&cfg, &msg).await,
         }
     })
 }
@@ -407,15 +407,115 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-// ──────────────────── SMTP (not yet ported) ────────────────────
+// ──────────────────── SMTP (lettre) ────────────────────
 
-fn send_smtp<E: From<String>>(_cfg: &SmtpConfig, _m: &EmailMessage) -> SkyResult<E, String> {
-    SkyResult::Err(
-        "email.send/Smtp: SMTP transport is not yet supported on the Rust backend \
-         (use Resend / SendGrid / SES, or the Go backend for SMTP)"
-            .to_string()
-            .into(),
-    )
+/// `Std.Email.send (Smtp cfg) msg` — SMTP transport via `lettre`, matching the Go
+/// backend's `smtp.SendMail` posture: connect to host:port, **opportunistic
+/// STARTTLS** (upgrade to TLS when the server advertises it, plaintext otherwise
+/// — identical security posture to Go's stdlib), PLAIN auth when a user is
+/// configured. lettre's builder assembles standards-compliant MIME (text/html
+/// alternative + attachments); not byte-identical to Go's hand-rolled wire, but
+/// the delivered message (from/to/cc/bcc/reply-to/subject/body/attachments) is
+/// equivalent. A local plaintext catcher (no STARTTLS advertised) is reachable
+/// via the opportunistic fallback, which is how this is verified.
+async fn send_smtp<E: From<String>>(cfg: &SmtpConfig, m: &EmailMessage) -> SkyResult<E, String> {
+    use lettre::message::header::ContentType;
+    use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::transport::smtp::client::{Tls, TlsParameters};
+    use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+    if cfg.host.is_empty() || cfg.port == 0 {
+        return SkyResult::Err("email.send/Smtp: host+port required".to_string().into());
+    }
+
+    let parse_mbox = |s: &str| -> Result<Mailbox, String> {
+        s.parse::<Mailbox>()
+            .map_err(|e| format!("email.send/Smtp: bad address {:?}: {}", s, e))
+    };
+
+    let mut builder = Message::builder();
+    builder = match parse_mbox(&m.from) {
+        Ok(mb) => builder.from(mb),
+        Err(e) => return SkyResult::Err(e.into()),
+    };
+    for to in &m.to {
+        match parse_mbox(to) {
+            Ok(mb) => builder = builder.to(mb),
+            Err(e) => return SkyResult::Err(e.into()),
+        }
+    }
+    for cc in &m.cc {
+        match parse_mbox(cc) {
+            Ok(mb) => builder = builder.cc(mb),
+            Err(e) => return SkyResult::Err(e.into()),
+        }
+    }
+    for bcc in &m.bcc {
+        match parse_mbox(bcc) {
+            Ok(mb) => builder = builder.bcc(mb),
+            Err(e) => return SkyResult::Err(e.into()),
+        }
+    }
+    if !m.replyTo.is_empty() {
+        match parse_mbox(&m.replyTo) {
+            Ok(mb) => builder = builder.reply_to(mb),
+            Err(e) => return SkyResult::Err(e.into()),
+        }
+    }
+    builder = builder.subject(m.subject.clone());
+
+    // Body: text/html alternative when both are set, else a single part. lettre
+    // rejects an empty body, so an all-empty message sends a single space (Go
+    // tolerates an empty body — closest equivalent).
+    let content: MultiPart = match (m.textBody.is_empty(), m.htmlBody.is_empty()) {
+        (false, false) => MultiPart::alternative()
+            .singlepart(SinglePart::plain(m.textBody.clone()))
+            .singlepart(SinglePart::html(m.htmlBody.clone())),
+        (true, false) => MultiPart::related().singlepart(SinglePart::html(m.htmlBody.clone())),
+        (false, true) => MultiPart::related().singlepart(SinglePart::plain(m.textBody.clone())),
+        (true, true) => MultiPart::related().singlepart(SinglePart::plain(" ".to_string())),
+    };
+
+    let built = if m.attachments.is_empty() {
+        builder.multipart(content)
+    } else {
+        let mut mixed = MultiPart::mixed().multipart(content);
+        for att in &m.attachments {
+            let ct = att
+                .mimeType
+                .parse::<ContentType>()
+                .unwrap_or(ContentType::TEXT_PLAIN);
+            mixed = mixed.singlepart(
+                Attachment::new(att.filename.clone())
+                    .body(att.content.clone().into_bytes(), ct),
+            );
+        }
+        builder.multipart(mixed)
+    };
+    let email = match built {
+        Ok(e) => e,
+        Err(e) => return SkyResult::Err(format!("email.send/Smtp: build: {}", e).into()),
+    };
+
+    // Transport: opportunistic STARTTLS (matches Go's smtp.SendMail). PLAIN auth
+    // only when a user is configured (Go does the same).
+    let tls = match TlsParameters::new(cfg.host.clone()) {
+        Ok(t) => t,
+        Err(e) => return SkyResult::Err(format!("email.send/Smtp: tls: {}", e).into()),
+    };
+    let mut tb = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host)
+        .port(cfg.port as u16)
+        .tls(Tls::Opportunistic(tls));
+    if !cfg.user.is_empty() {
+        tb = tb.credentials(Credentials::new(cfg.user.clone(), cfg.pass.clone()));
+    }
+    let transport = tb.build();
+
+    match transport.send(email).await {
+        Ok(_) => SkyResult::Ok(format!("smtp-{}", email_gen_id())),
+        Err(e) => SkyResult::Err(format!("email.send/Smtp: {}", e).into()),
+    }
 }
 
 // ──────────────────── small helpers ────────────────────

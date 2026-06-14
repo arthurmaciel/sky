@@ -262,3 +262,45 @@ proptest! {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Std.Email SMTP transport (require email feature) — deterministic error
+// paths. The positive path (delivery to a local SMTP catcher) is verified
+// out-of-band; here we lock in that the lettre-backed send_smtp is TOTAL:
+// bad config / bad address surface a clean Err, never a panic.
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "email")]
+mod email_smtp_tests {
+    use sky_runtime_rust::*;
+
+    fn msg(from: &str) -> EmailMessage {
+        EmailMessage {
+            from: from.to_string(),
+            to: vec!["rcpt@example.com".to_string()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "s".to_string(),
+            textBody: "b".to_string(),
+            htmlBody: String::new(),
+            attachments: vec![],
+            replyTo: String::new(),
+        }
+    }
+
+    #[test]
+    fn smtp_empty_host_is_err() {
+        let cfg = SmtpConfig { host: String::new(), port: 0, user: String::new(), pass: String::new() };
+        let t = email_send::<SkyError>(EmailProvider::Smtp(cfg), msg("a@b.com"));
+        assert!(task_run(t).is_err());
+    }
+
+    #[test]
+    fn smtp_bad_from_address_is_err() {
+        // non-empty (passes email_send's empty-from guard) but not an RFC-5322
+        // mailbox → send_smtp's parse returns Err, never panics.
+        let cfg = SmtpConfig { host: "127.0.0.1".to_string(), port: 2599, user: String::new(), pass: String::new() };
+        let t = email_send::<SkyError>(EmailProvider::Smtp(cfg), msg("not-an-email"));
+        assert!(task_run(t).is_err());
+    }
+}
