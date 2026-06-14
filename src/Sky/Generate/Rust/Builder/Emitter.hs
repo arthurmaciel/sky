@@ -725,6 +725,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
         , ("tower-http", "{ version = \"0.5\", features = [\"fs\", \"catch-panic\"] }")
         ]
     , name `notElem` userDepNames ] ++
+    -- Std.Live form decode: serde_urlencoded gives TYPE-DIRECTED coercion (a
+    -- numeric/bool record field decodes "42"/"true", a String field keeps the
+    -- raw string) — the all-String serde_json path rejected non-String fields.
+    [ "serde_urlencoded = \"0.7\""
+    | usesLive uk, "serde_urlencoded" `notElem` userDepNames ] ++
     -- Sky.Core.Http client + Std.Email: reqwest when used. rustls (no system
     -- OpenSSL). `stream` feature for Http.Stream's bytes_stream(). Std.Live ALSO
     -- pulls it: the live runtime's console reverse-proxy (live/console_proxy.rs,

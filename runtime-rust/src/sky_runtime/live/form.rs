@@ -13,15 +13,17 @@ use crate::sky_runtime::live::html::FormData;
 /// A missing required field makes serde return an error → the caller dispatches
 /// no Msg (the `OnForm` closure maps `Err` to `None`).
 ///
-// FIXME(P-later): all-String form records only. A `T` with a numeric/bool field
-// would reject `"42"`/`"true"` here; multi-value fields and #[serde(rename)] key
-// normalisation are also out of P2 scope.
+// Type-directed coercion via serde_urlencoded: a numeric/bool record field
+// decodes `"42"`/`"true"` (the deserializer parses by the TARGET type), while a
+// String field keeps the raw string. The old all-String serde_json path rejected
+// any non-String field. We re-encode the `{name: value}` map to an x-www-form-
+// urlencoded string (round-tripped through the same crate so values are escaped),
+// then deserialize into `T`. A missing required field → `Err` → no Msg dispatched
+// (the `OnForm` closure maps `Err` to `None`), unchanged.
 pub fn decode_form<T: serde::de::DeserializeOwned>(fd: FormData) -> Result<T, String> {
-    let map: serde_json::Map<String, serde_json::Value> = fd
-        .into_iter()
-        .map(|(k, v)| (k, serde_json::Value::String(v)))
-        .collect();
-    serde_json::from_value(serde_json::Value::Object(map)).map_err(|e| e.to_string())
+    let pairs: Vec<(String, String)> = fd.into_iter().collect();
+    let encoded = serde_urlencoded::to_string(&pairs).map_err(|e| e.to_string())?;
+    serde_urlencoded::from_str::<T>(&encoded).map_err(|e| e.to_string())
 }
 
 /// `decode_form` + a warn on failure. The `OnForm` closure is synchronous and
@@ -60,6 +62,26 @@ mod tests {
         let bad = FormData::new(); // missing both fields
         let r2: Option<Creds> = decode_form_or_warn(bad);
         assert_eq!(r2, None);
+    }
+
+    #[derive(serde::Deserialize, PartialEq, Debug)]
+    struct Order {
+        item: String,
+        qty: i64,
+        express: bool,
+        price: f64,
+    }
+
+    #[test]
+    fn decode_form_coerces_numeric_and_bool_fields() {
+        // The old all-String serde_json path rejected these non-String fields.
+        let mut fd = FormData::new();
+        fd.insert("item".to_string(), "widget".to_string());
+        fd.insert("qty".to_string(), "42".to_string());
+        fd.insert("express".to_string(), "true".to_string());
+        fd.insert("price".to_string(), "9.99".to_string());
+        let r: Result<Order, String> = decode_form(fd);
+        assert_eq!(r, Ok(Order { item: "widget".into(), qty: 42, express: true, price: 9.99 }));
     }
 
     #[test]

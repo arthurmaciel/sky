@@ -24,6 +24,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio-tungstenite = { version = "0.24", optional = true }
 futures-util = { version = "0.3", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
+serde_urlencoded = { version = "0.7", optional = true }
 subtle = "2"
 hmac = "0.12"
 sha1 = "0.10"
@@ -75,7 +76,7 @@ server = ["tokio", "axum", "tower-http", "futures-util"]
 http_client = ["tokio", "reqwest", "futures-util"]
 email = ["tokio", "reqwest", "serde_json", "sha2"]
 websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
-live = ["server", "http_client", "serde", "serde_json", "async-trait"]
+live = ["server", "http_client", "serde", "serde_json", "serde_urlencoded", "async-trait"]
 full = ["async", "json", "db", "redis_store", "crypto", "compression", "csv_kernel", "cache_kernel", "tui", "config", "server", "http_client", "email", "websocket_client", "live"]
 
 [dev-dependencies]
