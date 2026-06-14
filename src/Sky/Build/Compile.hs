@@ -15204,7 +15204,17 @@ curryLambdaPatTypedW bodyPreTyped paramTypes retType pats body
     -- statements needed to re-bind the param name as `any` inside
     -- the body (so the existing reflect-based dispatch works).
     typedLambdaParam :: String -> Can.Pattern -> (GoIr.GoParam, [GoIr.GoStmt], [GoIr.GoStmt])
-    typedLambdaParam goTy (A.At _ pat) = case pat of
+    typedLambdaParam goTy0 (A.At _ pat) =
+      let
+        -- A lambda parameter whose type is a type VARIABLE not bound as a generic
+        -- in the enclosing scope (e.g. the phantom `e` of `ShouldRetry (e -> Bool)`
+        -- coerced to the callee's `T1` at a NON-generic call site) would emit
+        -- `func(_ T1) …` = `undefined: T1` at `go build`. Erase such out-of-scope
+        -- tyvars to `any`, mirroring `substituteOnly`'s return-type handling.
+        goTy = if any (not . enclosingTypeParamInScope) (tvarsInGoTypeStr goTy0)
+                 then eraseTypeParamsExceptScope enclosingTypeParamInScope goTy0
+                 else goTy0
+      in case pat of
         Can.PVar name ->
             if goTy == "any"
                 then (GoIr.GoParam (goSafeName name) "any", [], [])
