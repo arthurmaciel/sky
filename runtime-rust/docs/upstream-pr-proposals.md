@@ -98,8 +98,29 @@ func initSchema() struct{} { … Db_execRaw("CREATE TABLE …") … return struc
 The intuitive Elm/Haskell-family reading of a top-level `dbConn = …` is a single
 value, not a per-reference re-computation.
 
-**Suggested fix.** Memoise top-level (non-function, zero-parameter) value bindings
-to run-once with a package-level `sync.Once`:
+**Exact implementation spec (scoped 2026-06-14 — ready to execute on approval).**
+- **Site:** `renderFuncDecl` in `src/Sky/Generate/Go/Builder.hs:69`. When the
+  `GoFuncDecl` is nullary (`null _gf_params`), `_gf_name` is not `main`/`init`,
+  the return type is concrete, and the rendered body runs an effect (contains
+  `AnyTaskRun`/`Task_run`), emit a memoised var instead of a plain func:
+  ```go
+  var <name> = sync.OnceValue(func() <RetType> { <body> })   // Go 1.21+
+  ```
+  Call sites already emit `<name>()`, which still calls the `func() RetType` —
+  no call-site change. (Pre-1.21 fallback: package `var <name>__once sync.Once`
+  + `var <name>__val RetType` + an accessor, below.)
+- **Import:** the generated `main.go` must `import "sync"` when any CAF is
+  memoised — wire it into the import-set computation (the same place that decides
+  `"sync"` vs other std imports), gated on "≥1 memoised CAF emitted".
+- **Unit return:** `initSchema : ()` lowers to `struct{}` — emit
+  `sync.OnceValue(func() struct{} { <body>; return struct{}{} })`.
+- **Scope gate:** effect-running CAFs only (mirrors the Rust backend's shipped
+  `maybeMemoiseNullary`, gated on `task_run` in the body) — confirm whether to
+  widen to all value CAFs.
+- **Verify:** 00-standard-libs tests pass; 07-todo-cli CRUD + 27-multi-session-chat
+  run correctly (the CAF runs once); a non-CAF example unaffected; full Go sweep.
+
+**Fallback / package-`sync.Once` form** (if Go < 1.21):
 ```go
 // emitted for a memoised top-level value binding `name = <body> : T`
 var name__once sync.Once
