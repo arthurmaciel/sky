@@ -134,8 +134,15 @@ steps.
 
 ### Domain docs
 
-Single-context — the **Glossary** under "Understanding the project" in
-`runtime-rust/README.md` + `docs/adr/` at `runtime-rust/` root.
+**Of the `.md` files at `runtime-rust/` root, only `CLAUDE.md` and `README.md`
+exist.** Everything that matters for the future — new design decisions, progress
+conclusions that inform later decisions (not archaeology), TODO/checklist items,
+the roadmap and future plan, the soundness/decision ledger, the glossary —
+lives in **`README.md`** (structured per the `prune-archaeology` house style:
+tables / bullets / `[ ]`-todo-lists / schemas over prose). Do NOT create new
+standalone root `.md` files; fold the content into `README.md`. (`docs/` subdir
+files — `docs/adr/`, escalated-decisions, etc. — are exempt; this rule is the
+root only.) The `update-docs` skill enforces this.
 
 General skills enabled:
 - `/grill-me` — stress-test plans and designs

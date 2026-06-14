@@ -27,7 +27,15 @@ Run `git status --short` to see what's dirty.
      (`sky-out/`, `dist-newstyle/`, `.skycache/`, `target/`).
   5. Commit. (No `Co-Authored-By` trailer — the repo convention forbids it.)
 
-### Step 2 — Refresh `runtime-rust/README.md`
+### Step 2 — Consolidate root docs, then refresh `runtime-rust/README.md`
+
+**Enforce the root-`.md` policy first.** At `runtime-rust/` root, ONLY
+`CLAUDE.md` and `README.md` may exist. If any other root `.md` is present (a
+`*_LEDGER.md`, `CONTEXT.md`, an `UPSTREAM-*.md`, a stray notes file), **fold its
+still-relevant content into the right `README.md` section** (decisions →
+soundness/decision ledger; glossary → Understanding-the-project; TODOs/plans →
+roadmap + divergences checklist) and **`git rm` the file** in the same commit.
+Never create a new standalone root `.md`. (`docs/` subdir files are exempt.)
 
 Read the current `runtime-rust/README.md` to understand its structure (do NOT
 skip this — the file may have changed since the skill was written).

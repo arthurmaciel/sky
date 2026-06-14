@@ -791,6 +791,15 @@ The codegen itself emits **no** `dyn Any` — all Sky dynamism (`any` payloads,
 trait (`SkyRow`), per the no-erasure rule. If a future feature introduces a new
 `dyn Any`, add a row here with its reduction verdict.
 
+Worth noting (not a ledger row): `html.rs` `OnRaw(String, Arc<dyn Any + Send +
+Sync>)` is an opaque event payload **only ever passed through**, never
+`downcast` in Rust — no cast, no failure mode.
+
+> **⏳ Future review (after the backend stabilises).** Re-examine every entry for
+> reducibility. In particular `#4` (`dyn Any`): if the codegen ever monomorphises
+> the pub/sub payload type or the cache K/V into generated code, the registries
+> could drop `Any` entirely.
+
 ### Panic-vector gate coverage
 
 `indexing_slicing` / `panic` / `unreachable` are gated on non-test library code;
