@@ -96,6 +96,7 @@ async fn do_connect<E: From<String> + Send + 'static>(
     url: String,
     headers: Vec<(String, String)>,
     timeout_ms: i64,
+    ping_interval_ms: i64,
 ) -> SkyResult<E, i64> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
@@ -128,9 +129,33 @@ async fn do_connect<E: From<String> + Send + 'static>(
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WsCmd>();
     let (frames_tx, _) = tokio::sync::broadcast::channel::<WsEvent>(64);
 
-    // Writer task: drain outbound commands → ws frames.
+    // Writer task: drain outbound commands → ws frames. When pingInterval > 0,
+    // also send a periodic Ping so idle connections survive proxy/server idle
+    // timeouts (tungstenite auto-pongs inbound pings on the read side).
     tokio::spawn(async move {
-        while let Some(cmd) = cmd_rx.recv().await {
+        // `interval` ticks immediately on the first poll; skip that first tick so
+        // we ping after the interval, not at t=0.
+        let mut ping_iv = if ping_interval_ms > 0 {
+            let mut iv = tokio::time::interval(std::time::Duration::from_millis(ping_interval_ms as u64));
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            Some(iv)
+        } else {
+            None
+        };
+        let mut first_tick = true;
+        loop {
+            let cmd = match &mut ping_iv {
+                Some(iv) => tokio::select! {
+                    _ = iv.tick() => {
+                        if first_tick { first_tick = false; continue; }
+                        if write.send(Message::Ping(Vec::new())).await.is_err() { break; }
+                        continue;
+                    }
+                    c = cmd_rx.recv() => c,
+                },
+                None => cmd_rx.recv().await,
+            };
+            let cmd = match cmd { Some(c) => c, None => break };
             let msg = match cmd {
                 WsCmd::Text(s) => Message::Text(s),
                 WsCmd::Binary(b) => Message::Binary(b),
@@ -181,14 +206,15 @@ async fn do_connect<E: From<String> + Send + 'static>(
 
 /// WebSocket.connect : String -> Task Error Int (raw id; Sky wraps in WebSocket)
 pub fn web_socket_connect<E: From<String> + Send + 'static>(url: String) -> SkyTask<E, i64> {
-    Box::pin(do_connect(url, Vec::new(), 30000))
+    Box::pin(do_connect(url, Vec::new(), 30000, 0))
 }
 
 /// WebSocket.connectWith : WebSocketCfg -> Task Error Int. Applies the cfg's
-/// custom headers + handshake timeout. (pingInterval is not yet wired —
-/// tungstenite auto-pongs; periodic client pings are a follow-up.)
+/// custom headers, handshake timeout, and pingInterval (when > 0, the client
+/// sends a periodic Ping frame to keep the connection alive through idle proxies;
+/// tungstenite auto-pongs inbound pings on the read side).
 pub fn web_socket_connect_with<E: From<String> + Send + 'static>(cfg: WsClientCfg) -> SkyTask<E, i64> {
-    Box::pin(do_connect(cfg.url, cfg.headers, cfg.timeout))
+    Box::pin(do_connect(cfg.url, cfg.headers, cfg.timeout, cfg.pingInterval))
 }
 
 fn send_cmd(id: i64, cmd: WsCmd) -> bool {
