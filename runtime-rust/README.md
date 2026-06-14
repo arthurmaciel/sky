@@ -18,54 +18,39 @@ copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
 
 The covered surface is documented in **API surface vs the Go backend**, **Sky.Live
 on Rust**, and **Rust vs Go backend — divergent implementation strategies** below.
-What remains open:
 
-### Open work
+### Open divergences from the Go backend (future-work checklist)
 
-**Correctness / features**
-- **Sky.Live depth:** firestore session store (same `SessionStore` trait),
-  Cmd/Sub depth, `req` query-string parsing, WebSocket client Sub-tier
-  (`onMessage` subscriptions), WebSocket-server capturing handlers (`Arc<dyn Fn>`
-  instead of fn pointers).
-- **`Ffi.callTask` on target=rust** — a deferred-feature panic guards the
-  dynamic-dispatch shape (the static shape is peephole-resolved). Task-emitting
-  FFI kernels would need the dynamic path.
-- **Non-byte slice/array FFI** (`&[String]`, `[f64; 3]`) + enum-argument FFI
-  constructors — partial.
-- **Composite `Basics.toString`** — scalars match Go (`Display` = `%v`); a
-  record/ADT `toString` is a compile error today (no `Display`). A type-directed
-  lowering could route composites to a derived renderer if the case arises.
+A well-typed Sky program behaves differently, or a feature is missing, on Rust.
+Tick a box when it reaches parity.
 
-**Efficiency / cleanup** (no correctness impact)
-- Flat `main.rs` → separate `pub mod` files.
-- `sky watch` for the Rust target.
-- WASM target (`wasm32-unknown-unknown`).
+| | Divergence | Kind | Notes |
+|---|---|---|---|
+| [ ] | `Task.retryWith` runs once | design decision | `SkyTask` is a one-shot `Future`; Go's Task is a re-runnable `func() any` the loop re-calls. Needs a re-runnable `SkyTask` (`Arc<dyn Fn()->Future>`) or a thunk-shaped `retryWith` (upstream). Workaround: recurse on the `Result` in Sky. |
+| [ ] | `Bytes` non-ASCII *text* | design (upstream) | `Sky.Core.Bytes = String` is a shared alias; Rust `String` is UTF-8-only vs Go's arbitrary-byte string. Latin-1 matches Go on ASCII / hex / binary, diverges on non-ASCII text. Needs a nominal `Bytes` type in the shared stdlib. |
+| [ ] | `errorToString` dumps a struct | shared / Go-side | Both backends dump the error record (Rust `Debug`, Go `%v`) — not Rust-specific. |
+| [ ] | composite `Basics.toString` | needs design | Scalars match Go (`Display` = `%v`); a record/ADT `toString` is a compile error (no `Display`). Needs type-directed lowering. |
+| [ ] | `Ffi.callTask` (dynamic dispatch) | unsupported | Static-shape calls are peephole-resolved; the dynamic path is a no-reflection guard (Task-emitting FFI kernels). |
+| [ ] | Sky.Live: firestore session store | future | Same `SessionStore` trait as the other stores. |
+| [ ] | Sky.Live: WebSocket client Sub-tier (`onMessage`) | future | Task-tier client works; the Sub-tier subscription doesn't. |
+| [ ] | Sky.Live: WebSocket-server capturing handlers | future | `Arc<dyn Fn>` instead of fn pointers. |
+| [ ] | Non-byte slice/array FFI + enum-arg ctors | partial | `&[String]`, `[f64; 3]`, crate-enum arguments. |
+| [ ] | WASM target (`wasm32-unknown-unknown`) | future | |
+| [ ] | `sky watch` for the Rust target | future | |
+| [ ] | Flat `main.rs` → separate `pub mod` files | cleanup | No correctness impact. |
+| [ ] | Go-package→Rust FFI (gorilla/mux, stripe-go, …) | out of scope | Needs a Go runtime; byte-parity impossible without one. |
 
-### Blocked on a design decision
+**Intentional divergences — by design, NOT future work.** Rust deliberately
+refuses what Go accepts, to keep the no-`Any` / no-panic guarantees:
 
-- **`Task.retryWith` runs once.** `SkyTask = Pin<Box<dyn Future>>` is consumed on
-  first `.await`, whereas Go's Task is a re-runnable `func() any` the retry loop
-  re-calls. Retrying in Rust needs EITHER (a) an inline loop re-evaluating the
-  task EXPRESSION per attempt — fragile, since move-captured args (`http_get(url)`)
-  can't be re-run without a per-case `.clone()` the peephole can't infer; OR
-  (b) a re-runnable `SkyTask` (`Arc<dyn Fn()->Future>`) — a large runtime change
-  touching every Task site; OR (c) upstream: `retryWith` takes a thunk
-  `() -> Task e a`. No fragile partial fix ships; the workaround is to recurse on
-  the `Result` in Sky. Needs the (b)/(c) call (`docs/escalated-decisions.md`).
-- **`Bytes` non-ASCII text.** `Sky.Core.Bytes = String` is a shared-stdlib alias;
-  the checker treats `Bytes`≡`String`, so a Rust-only `Vec<u8>` newtype is unsound
-  (mismatches `String` at shared call sites). No `String` convention matches Go on
-  both paths: a Rust `String` is UTF-8-only, a Go `string` holds arbitrary bytes.
-  The current Latin-1 convention matches Go on hex/binary and ASCII, diverging
-  only on non-ASCII *text*. True byte-exactness needs `Bytes` as a distinct
-  nominal type in the **shared stdlib** (both backends) — an upstream change
-  outside the Rust boundary. Needs a user/upstream call.
-- **`errorToString`** dumps an internal struct on BOTH backends (Rust via `Debug`,
-  Go via `%v` of the error record) — neither yields a clean message. A shared /
-  Go-side stdlib issue, not Rust-specific.
-- **Go-package→Rust FFI** (examples 03/05/08/13 import gorilla/mux, stripe-go,
-  google/uuid, godotenv) — cannot reach byte-parity without a Go runtime;
-  out of scope unless re-scoped.
+| Divergence | Why |
+|---|---|
+| `any`-typed record fields → compile error (Go uses reflect) | refusing `Box<dyn Any>` is the reason this backend exists |
+| no panic-to-500 fallback; statically total | Go catches a handler panic → 500; Rust designs the panic out |
+
+**Looks divergent, but at parity:** `Db.withTransaction` rollback isolation (Go
+has the identical tx-handle gap) and `Db.insertRow` (returns the id via
+`RETURNING`).
 
 ---
 
