@@ -99,7 +99,10 @@ for ex in "${EXAMPLES[@]}"; do
       code="$(curl -s -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:$port/" 2>/dev/null || true)"
       [ "$code" = 200 ] && { ok=1; break; }
       # some servers bind a port from their source, not SKY_LIVE_PORT — sniff the log.
-      lp="$(grep -oiE "listening on[^0-9]*([0-9]+)" "$rl" | grep -oE "[0-9]+" | tail -1)"
+      # Take the LAST ":port" on the listening line: a "listening on
+      # http://0.0.0.0:8000" log must yield 8000, not the leading 0 of 0.0.0.0
+      # (the old "[^0-9]*([0-9]+)" captured that 0 → curl :0 → false noserve).
+      lp="$(grep -iE "listening on" "$rl" | grep -oE ":[0-9]+" | tail -1 | tr -d ':')"
       if [ -n "$lp" ] && [ "$lp" != "$port" ]; then
         curl -s -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:$lp/" 2>/dev/null | grep -q 200 && { ok=1; port="$lp"; break; }
       fi
