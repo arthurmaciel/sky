@@ -72,8 +72,45 @@ Runtime behavioral bugs (verified open 2026-06-14):
       Ping when `cfg.pingInterval > 0` (writer-task `select!` on an interval;
       tungstenite auto-pongs inbound). Additive (interval 0 = unchanged).
       `cargo check --features full` passes (no ws-client example for e2e run).
-- [ ] **`Pure.*` Task surface unsupported** (`uuid_kernel.rs`) — `Pure.uuidV4 ()`
-      etc. error on target=rust; wire to the kernel.
+- [x] **`Pure.*` Task surface — VERIFIED WORKING (the open item was stale).**
+      `Pure.uuidV4`/`uuidV7`/`timeNow`/`timeUnixMillis`/`systemArgs`/`systemCwd`/
+      `systemLoadEnv`/`ioReadLine`/`dbConnect` all emit correctly-typed
+      `SkyTask<…>` wrappers to the real kernels and build clean on `--target
+      rust`; `uuidV4`/`uuidV7`/`timeUnixMillis` chains run + print real values.
+      (`uuid_kernel.rs`'s "Pure Task surface unsupported" doc-comment is also
+      stale — the codegen emits `task_succeed({ uuid_v4() })` directly.)
+- [x] **Entry drops a `System.*` Task-chain main — FIXED (`Walker.hs`).** Root
+      cause: `System.*` set `usesTaskRun=True`, and `mainIsTask = … || not
+      usesTaskRun` (Emitter.hs) → `mainIsTask=False` → `sky_main()` returned `()`
+      and the entry built-and-DROPPED the task future (every continuation silently
+      skipped, no output, exit 0) for any Task-typed `main` using a `System.*`
+      kernel without calling `Task.run` itself (e.g. `main = … |> Task.andThen
+      (\_ -> Pure.systemCwd ()) |> …`). Fix: `System.*` pulls tokio via
+      `usesTaskParallel` (NOT `usesTaskRun`), exactly the documented Time.sleep
+      pattern — keeps `mainIsTask=True` so the entry `block_on`s it. The explicit
+      `… |> Task.run` shape is preserved (the `run` combinator sets `usesTaskRun`).
+      Verified: the previously-silent chain now runs + matches Go; 6 gated
+      `System.*` examples (07/20/12/16/17/27) still ran-OK. Regression:
+      `tests/sky/31-system-env-chain` + `tests/proptest.rs::system_getenv_*`.
+- [x] **`System.getenv` returned a bare `String` — FIXED (`system.rs`).** It is
+      `String -> Task Error String` in the stdlib but the runtime emitted `-> String`
+      → E0308 in any `Task.andThen`/`Task.run` position. Now returns
+      `SkyTask<E, String>`; an unset var short-circuits with `Err` (mirroring Go's
+      `System_getenv` ErrNotFound), not `Ok("")`. Present/unset both byte-match Go.
+      (`getenvOr` stays bare `String` by design.)
+- [ ] **`System.getenvInt` / `getenvBool` / `getArg` unsupported on `--target
+      rust`** — absent from both the runtime and the codegen kernel map (no
+      `system_getenv_int` / `_bool` / `_get_arg`). Task-typed in the stdlib; need
+      new runtime fns + mapping, mirroring the `getenv` fix.
+- [ ] **`Basics.toString` / `Basics.always` unmapped on `--target rust`** —
+      `basics_to_string` / `basics_always` emit as undefined functions (E0425).
+      Spotted while building the System.* regression fixture; wire to the
+      runtime (toString → per-type Display; always → `move |_| v`).
+- [ ] **`errorToString (Error.unexpected "boom")` dumps an internal struct on
+      BOTH backends** — Rust prints `Error(Unexpected, SkyCoreErrorErrorInfo {…})`,
+      Go prints `{0 Error [10 {boom …}]}`; neither yields a clean `"boom"`. This
+      is a **shared / Go-side** stdlib issue (not Rust-specific), so it is parked
+      under the "no Go work now" direction — filed here so it isn't lost.
 - [x] **`live/form.rs` numeric/bool/float form fields** — fixed via
       serde_urlencoded type-directed coercion (was all-String serde_json).
       Regression test + 19-skyforum builds.
