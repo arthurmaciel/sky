@@ -1,0 +1,59 @@
+module Main exposing (main)
+
+-- Sky.Core.WebSocket CLIENT Sub-tier (`onMessage`) on target=rust: a Sky.Cli TEA
+-- app connects to a WS server and folds each incoming frame into its update loop
+-- as a `GotFrame` Msg, via `WebSocket.onMessage sock GotFrame : Sub Msg`. The Sub
+-- is a `SkySub::Source` driven by the SubManager (Cli/Tui) and `spawn_subs`
+-- (Sky.Live) alike — same mechanism as `Http.Stream.chunks` (26-stream-cli).
+--
+-- Build-level regression here. Runtime e2e is verified manually against a WS
+-- server (stdin must stay open — a stdin-driven Cli app exits on stdin EOF before
+-- the async frames arrive; Sky.Live, a long-running server, has no such EOF):
+--   onMessage frame 1: frame-1 … OK -> ws-client onMessage received 3 frames
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.String as String
+import Sky.Core.System as System
+import Sky.Core.Task as Task
+import Sky.Core.WebSocket as Ws exposing (WebSocketMessage(..))
+import Std.Cli as Cli
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+import Std.Log exposing (println)
+
+type Msg = Connected (Result Error Ws.WebSocket) | GotFrame WebSocketMessage | NoOp
+type alias Model = { sock : Maybe Ws.WebSocket, frames : Int }
+
+init : () -> ( Model, Cmd Msg )
+init _ = ( { sock = Nothing, frames = 0 }, Cmd.perform (Ws.connect "ws://127.0.0.1:8766/") Connected )
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Connected (Ok sock) -> ( { model | sock = Just sock }, Cmd.none )
+        Connected (Err _) -> ( model, Cmd.perform (System.exit 1) (\_ -> NoOp) )
+        GotFrame frame ->
+            let
+                text = case frame of
+                    Text s -> s
+                    Binary _ -> "<binary>"
+                n = model.frames + 1
+                _ = println ("onMessage frame " ++ String.fromInt n ++ ": " ++ text)
+            in
+            if n >= 3 then
+                let _ = println ("OK -> ws-client onMessage received " ++ String.fromInt n ++ " frames") in
+                ( { model | frames = n }, Cmd.perform (System.exit 0) (\_ -> NoOp) )
+            else
+                ( { model | frames = n }, Cmd.none )
+        NoOp -> ( model, Cmd.none )
+
+subscriptions : Model -> Sub Msg
+subscriptions model = case model.sock of
+    Just s -> Ws.onMessage s GotFrame
+    Nothing -> Sub.none
+
+view : Model -> String
+view model = "frames=" ++ String.fromInt model.frames ++ "\n"
+onLine : String -> Msg
+onLine _ = NoOp
+main = Cli.program { init = init, update = update, view = view, subscriptions = subscriptions, onLine = onLine } |> Task.run

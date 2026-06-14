@@ -32,7 +32,6 @@ Tick a box when it reaches parity.
 | [ ] | composite `Basics.toString` | needs design | Scalars match Go (`Display` = `%v`); a record/ADT `toString` is a compile error (no `Display`). Needs type-directed lowering. |
 | [ ] | `Ffi.callTask` (dynamic dispatch) | unsupported | Static-shape calls are peephole-resolved; the dynamic path is a no-reflection guard (Task-emitting FFI kernels). |
 | [ ] | Sky.Live: firestore session store | future | Same `SessionStore` trait as the other stores. |
-| [ ] | Sky.Live: WebSocket client Sub-tier (`onMessage`) | future | Task-tier client works; the Sub-tier subscription doesn't. |
 | [ ] | Sky.Live: WebSocket-server capturing handlers | future | `Arc<dyn Fn>` instead of fn pointers. |
 | [ ] | Non-byte slice/array FFI + enum-arg ctors | partial | `&[String]`, `[f64; 3]`, crate-enum arguments. |
 | [ ] | WASM target (`wasm32-unknown-unknown`) | future | |
