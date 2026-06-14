@@ -162,8 +162,11 @@ Verification-tooling correctness (a false gate hides real regressions):
 > what each upstream/large change entails — are in `docs/escalated-decisions.md`.
 > Two upstream Go-target fixes are in `docs/upstream-pr-proposals.md` (nothing
 > pushed): **PR1** (`T1` build break) is **implemented + verified locally**
-> (commit `5ac3aeb1`); **PR2** (top-level-CAF run-once) stays a proposal pending
-> a maintainer scope decision.
+> (commit `5ac3aeb1`); **PR2** (top-level-CAF run-once) — a render-time attempt
+> was made and **reverted** (it over-fired, memoising stdlib internals + test
+> suites); the doc now carries the corrected **AST-level** spec (gate on the
+> canonical `Can.Def`, mirroring the Rust `maybeMemoiseNullary`), ready to
+> implement carefully with a full Go sweep on your go.
 
 ### Design decisions (resolved 2026-06-14)
 

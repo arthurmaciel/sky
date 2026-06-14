@@ -98,11 +98,28 @@ func initSchema() struct{} { … Db_execRaw("CREATE TABLE …") … return struc
 The intuitive Elm/Haskell-family reading of a top-level `dbConn = …` is a single
 value, not a per-reference re-computation.
 
-**Exact implementation spec (scoped 2026-06-14 — ready to execute on approval).**
-- **Site:** `renderFuncDecl` in `src/Sky/Generate/Go/Builder.hs:69`. When the
-  `GoFuncDecl` is nullary (`null _gf_params`), `_gf_name` is not `main`/`init`,
-  the return type is concrete, and the rendered body runs an effect (contains
-  `AnyTaskRun`/`Task_run`), emit a memoised var instead of a plain func:
+**⚠️ Lesson from a render-time attempt (2026-06-14, reverted).** Gating in
+`renderFuncDecl` by string-scanning the rendered body for `AnyTaskRun` is **too
+coarse and over-fires** — it memoised `Sky_Core_Task_run` (a fn-returning stdlib
+CAF), `showUsage` (a `SkyTask`-returning CAF), and `taskRetrySuite` (whose
+`AnyTaskRun` lives in *nested test closures*, not the CAF's own effect). The
+fn/`SkyTask`-return exclusions are unreliable at render time, and the
+nested-closure false-positive is **undetectable** from a rendered string. All
+examples happened to still build/run (the over-memoised CAFs are pure-enough),
+but memoising stdlib internals + test suites in the reference backend is not
+clean. **Do it at the AST level instead** (below), mirroring how the Rust
+backend's `maybeMemoiseNullary` works on the canonical AST.
+
+**Exact implementation spec (corrected — AST-level).**
+- **Site:** the top-level `Can.Def` → `GoFuncDecl` lowering in
+  `src/Sky/Build/Compile.hs` (~line 4586, where `name`/`params`/`body` are in
+  scope). Gate on the **Can AST**, not rendered strings: nullary
+  (`null params`), `name` not `main`/`init`, the binding's solved return type is
+  a concrete value (NOT a function type and NOT `Task …`), and the body's
+  **own tail expression** runs a Task (a direct `Task.run`/effect at the CAF's
+  top level — NOT inside a nested lambda/closure). This is exactly the Rust
+  `maybeMemoiseNullary` predicate, ported to the Go canonical AST. Then emit a
+  memoised var instead of a plain func:
   ```go
   var <name> = sync.OnceValue(func() <RetType> { <body> })   // Go 1.21+
   ```
