@@ -37,31 +37,15 @@ decides; you record.
    material** — fix the cheap ones, document the rest inline at the call site;
    never drag the developer through them.
 
-   **Naming & API clarity (readability consistency).** Code is read far more than
-   written; an obscure name taxes every future reader. Flag — and prefer the
-   clearer form:
-   - **Obscuring wrappers** — a thin helper whose name says LESS than the
-     expression it replaces. The canonical example: `ok_res(x)` for
-     `SkyResult::Ok(x)`. `SkyResult::Ok` self-documents (a named `Result`-like
-     type and its `Ok` variant); `ok_res` hides both. A one-line `pub fn
-     ok_res<E,A>(a) -> SkyResult<E,A> { SkyResult::Ok(a) }` is a readability
-     regression — the helper should be MORE informative than what it wraps, never
-     less. **Default recommendation: inline it to the self-documenting form** (a
-     mechanical, compile-checked rename). Keep a wrapper ONLY when it genuinely
-     earns its name (real type-inference relief that the variant can't get, a
-     non-trivial body) — and then its name must describe what it does.
-   - **One concept, two spellings** — the same operation named differently across
-     files/modules (`find_clones` + `search_symbols` surface these). Pick the
-     clearest single name and converge.
-   - **Names that mislead or under-describe** — abbreviations a newcomer can't
-     expand, a name whose type/effect isn't evident at the call site.
-
-   Detect: `find_clones` (near-duplicate thin helpers), `search_ast` for
-   single-constructor/variant wrapper bodies, `search_symbols` for the suspected
-   helper + `find_usages` to size the migration. These are **readability**
-   findings (not the existential no-runtime-errors gate), but they get the same
-   one-by-one developer sign-off because a rename touches many call sites and the
-   convention is the developer's to set.
+   **Naming / readability** is a first-class lens here, ranked with the others —
+   run the dedicated **`sky-rust-backend:informative-naming`** skill as part of
+   the sweep. It hunts under-informing names (unjustified abbreviations like
+   `depLine` for `cargoDependencyLine`, structural-not-semantic names, obscuring
+   wrappers like `ok_res` vs `SkyResult::Ok`, one-concept-two-spellings) and
+   converges them on the clearest form. Its findings flow into the same
+   one-by-one developer sign-off below; if a clearer name would hurt
+   security/correctness/soundness/consistency/efficiency, it asks rather than
+   trading silently.
 
 4. **Reconcile against settled decisions** (idempotency, code-level + ledger) —
    a finding is already settled if its site carries a `SKY-RUST-AUDIT:` marker (see

@@ -30,7 +30,7 @@ import Sky.Generate.Rust.Builder.Types
     , RustTypeDef(..), intercalate, runtimeOpaqueTypes
     )
 import Sky.Generate.Rust.Builder.Naming (toCamelCase, toSnakeCase)
-import Sky.Generate.Rust.Builder.CrateSpecs (depLine, depValue, depVersion)
+import Sky.Generate.Rust.Builder.CrateSpecs (cargoDependencyFor, crateVersionFor)
 
 -- | Backend-specific sqlx types
 dbPoolType :: String -> String
@@ -656,22 +656,22 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     [ "webview = []" | usesWebview uk ] ++
     [ ""
     , "[dependencies]"
-    , "tokio = { version = " ++ show (depVersion "tokio") ++ ", features = [" ++ intercalate ", " (map show tokioFeats) ++ "] }"
+    , "tokio = { version = " ++ show (crateVersionFor "tokio") ++ ", features = [" ++ intercalate ", " (map show tokioFeats) ++ "] }"
     ] ++
     -- sqlx: a Std.Db app, OR a Sky.Live app whose `[live] store` is a sqlx
     -- backend (sqlite/postgres). The feature list is the UNION of the Std.Db
     -- driver and the live-store driver, so an app using e.g. Std.Db(sqlite) +
     -- `[live] store = "postgres"` links both. (Memory/redis live apps don't
     -- emit sqlx — that would fail to compile with no sqlx dep.)
-    [ "sqlx = { version = " ++ show (depVersion "sqlx") ++ ", features = [" ++ intercalate ", " (map show sqlxFeats) ++ "] }" | needsDb ] ++
+    [ "sqlx = { version = " ++ show (crateVersionFor "sqlx") ++ ", features = [" ++ intercalate ", " (map show sqlxFeats) ++ "] }" | needsDb ] ++
     -- P5 follow-on: `[live] store = "redis"` needs the redis crate for the
     -- copied `#[cfg(feature="redis_store")] RedisStore`.
-    [ depLine "redis" | needsRedis, "redis" `notElem` userDepNames ] ++
+    [ cargoDependencyFor "redis" | needsRedis, "redis" `notElem` userDepNames ] ++
     -- P5-T4b: the live SessionStore trait is `#[async_trait]` — pull the crate
     -- whenever the project uses Sky.Live.
-    [ depLine "async-trait" | needsLive, "async-trait" `notElem` userDepNames ] ++
-    [ depLine "serde_json"
-    , depLine "sha2"
+    [ cargoDependencyFor "async-trait" | needsLive, "async-trait" `notElem` userDepNames ] ++
+    [ cargoDependencyFor "serde_json"
+    , cargoDependencyFor "sha2"
     ] ++
     -- serde must be UNCONDITIONAL: core.rs's SkyMaybe/SkyResult derive
     -- serde::Serialize/Deserialize (so a Sky.Live model with a `Maybe`/`Result`
@@ -680,7 +680,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- E0433 (unresolved crate `serde`). serde is already a transitive dep via
     -- serde_json (unconditional above), so the only added cost is the derive
     -- macro. Std.Live's live/diff.rs Patch wire type also relies on it.
-    [ depLine "serde"
+    [ cargoDependencyFor "serde"
     | "serde" `notElem` userDepNames ] ++
     -- Sub-project A — stdlib kernel crates. Always pulled in because
     -- Project.hs declares the corresponding sky_runtime modules in mod.rs
@@ -691,7 +691,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- errors on duplicate keys, and a user-declared entry takes precedence.
     -- (Std.Config front-ends `toml`/`serde_yaml` parse into serde_json::Value,
     -- then the shared json Decoder runs — config_decode.rs.)
-    [ depLine name
+    [ cargoDependencyFor name
     | name <-
         [ "regex", "base64", "hex", "percent-encoding", "chrono", "chrono-tz"
         , "rust_decimal", "hmac", "sha1", "md-5", "subtle", "rsa", "aes-gcm"
@@ -703,19 +703,19 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- uuid is conditional: only when Sky.Core.Uuid is used (uuid_kernel needs
     -- v4+v7). Skipped if the user declared uuid themselves (e.g. FFI'ing the
     -- crate with different features) to avoid a duplicate-key / feature clash.
-    [ depLine "uuid"
+    [ cargoDependencyFor "uuid"
     | usesUuid uk, "uuid" `notElem` userDepNames ] ++
     -- Sub-D.1: axum + tower-http when Sky.Http.Server OR Std.Live is used.
     -- live_app mounts its own axum Router (self-contained — no `server` module),
     -- so it needs axum even when Sky.Http.Server isn't.
-    [ depLine name
+    [ cargoDependencyFor name
     | usesHttpServer uk || needsLive
     , name <- ["axum", "tower-http"]
     , name `notElem` userDepNames ] ++
     -- Std.Live form decode: serde_urlencoded gives TYPE-DIRECTED coercion (a
     -- numeric/bool record field decodes "42"/"true", a String field keeps the
     -- raw string) — the all-String serde_json path rejected non-String fields.
-    [ depLine "serde_urlencoded"
+    [ cargoDependencyFor "serde_urlencoded"
     | needsLive, "serde_urlencoded" `notElem` userDepNames ] ++
     -- Sky.Core.Http client + Std.Email: reqwest when used. rustls (no system
     -- OpenSSL). `stream` feature for Http.Stream's bytes_stream(). Std.Live ALSO
@@ -723,29 +723,29 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- epic A) forwards to the spawned console child via reqwest + streams the
     -- response (bytes_stream → axum Body::from_stream) so SSE passes through.
     -- Any of the three flags pulls it; emit once.
-    [ depLine "reqwest"
+    [ cargoDependencyFor "reqwest"
     | usesHttp uk || usesEmail uk || needsLive, "reqwest" `notElem` userDepNames ] ++
     -- Std.Email SMTP transport: lettre (async tokio + rustls, no system OpenSSL —
     -- matches reqwest's rustls). Resend/SendGrid/SES go over reqwest above; only
     -- the Smtp provider needs lettre's SMTP client + MIME builder.
-    [ depLine "lettre"
+    [ cargoDependencyFor "lettre"
     | usesEmail uk, "lettre" `notElem` userDepNames ] ++
     -- futures-util: WebSocket client, plus the streaming paths — http_stream.rs
     -- (StreamExt::next) and server_stream.rs (stream::unfold for the body).
-    [ depLine "futures-util"
+    [ cargoDependencyFor "futures-util"
     | usesWsClient uk || usesHttp uk || usesHttpServer uk || needsLive, "futures-util" `notElem` userDepNames ] ++
     -- Sky.Core.WebSocket client: tokio-tungstenite (futures-util above).
-    [ depLine "tokio-tungstenite"
+    [ cargoDependencyFor "tokio-tungstenite"
     | usesWsClient uk, "tokio-tungstenite" `notElem` userDepNames ] ++
     -- Std.Tui: crossterm (raw mode) + unicode-width (display width).
-    [ depLine "crossterm"
+    [ cargoDependencyFor "crossterm"
     | usesTui uk, "crossterm" `notElem` userDepNames ] ++
-    [ depLine "unicode-width"
+    [ cargoDependencyFor "unicode-width"
     | usesTui uk, "unicode-width" `notElem` userDepNames ] ++
     -- Sky.Webview native window: wry 0.24 / tao 0.16 (webkit2gtk-4.0 + libsoup-2.4
     -- on Linux). Only when Std.Webview is used; the webview feature (default-on
     -- above for these projects) compiles webview.rs's real backend against them.
-    [ depLine name
+    [ cargoDependencyFor name
     | usesWebview uk
     , name <- ["wry", "tao"]
     , name `notElem` userDepNames ] ++
@@ -765,7 +765,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     (if needsLive && "libc" `notElem` userDepNames then
         [ ""
         , "[target.'cfg(unix)'.dependencies]"
-        , depLine "libc"
+        , cargoDependencyFor "libc"
         ]
      else []) ++
     [ ""

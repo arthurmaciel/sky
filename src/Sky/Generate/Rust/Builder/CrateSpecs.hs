@@ -8,7 +8,7 @@
 --
 -- GATING (which crate is pulled for which Sky feature) stays in @Emitter.hs@;
 -- this module only owns the version+feature SPEC. @tokio@/@sqlx@ read their
--- version here via 'depVersion' but build their feature list in the emitter
+-- version here via 'crateVersionFor' but build their feature list in the emitter
 -- (it depends on usage).
 --
 -- Self-contained tiny parser (same convention as @Sky.Sky.Toml.Rust@) — no TOML
@@ -16,9 +16,9 @@
 module Sky.Generate.Rust.Builder.CrateSpecs
     ( CrateSpec(..)
     , crateSpec
-    , depValue
-    , depLine
-    , depVersion
+    , dependencySpecFor
+    , cargoDependencyFor
+    , crateVersionFor
     , crateSpecVersions
     ) where
 
@@ -59,16 +59,16 @@ crateSpec name =
 -- @"version"@ string, or an inline @{ version = …, default-features = false,
 -- features = [...] }@ table. Byte-identical to the strings the emitter used to
 -- hard-code.
-depValue :: String -> String
-depValue = renderSpec . crateSpec
+dependencySpecFor :: String -> String
+dependencySpecFor = renderSpec . crateSpec
 
 -- | A full @name = <value>@ dependency line.
-depLine :: String -> String
-depLine name = name ++ " = " ++ depValue name
+cargoDependencyFor :: String -> String
+cargoDependencyFor name = name ++ " = " ++ dependencySpecFor name
 
 -- | Just the version (for tokio/sqlx, whose features are computed in the emitter).
-depVersion :: String -> String
-depVersion = csVersion . crateSpec
+crateVersionFor :: String -> String
+crateVersionFor = csVersion . crateSpec
 
 renderSpec :: CrateSpec -> String
 renderSpec (CrateSpec ver df feats)
