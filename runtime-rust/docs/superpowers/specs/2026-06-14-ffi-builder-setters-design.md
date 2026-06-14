@@ -56,28 +56,44 @@ preserved: every new path is `match`/move-only, no `unwrap`/`expect`/`Any`.
 
 ### 4.1 Detection (inspector, `parse_fn_item`)
 
-A function is a **self-returning setter** when:
-- `recv` is `Some(..)` and the receiver is `self` or `&mut self` (not `&self`), **and**
-- result type, after stripping a leading `&mut `/`&`, is `Self` or the receiver
-  rust type — **or** the result is `()` **and the receiver is `&mut self`**
-  (in-place setter). A *consuming* `self -> ()` is excluded — synthesizing a
-  receiver return would use the moved value.
+A function is a **self-returning setter** when the receiver is **`&mut self`**
+(not `self`, not `&self`) **and** the result is one of:
+- `&mut Self` / `&mut RecvType` — a *mutable reference back to the receiver*
+  (the unambiguous fluent-setter shape), **or**
+- `()` — an in-place setter.
 
-`&self -> &Self` (borrowed view) and `build()`-style terminals (result ≠
-receiver) are **excluded**. Tag survivors with a new `Function.self_returning:
-bool` field (serialized to the kernel JSON; decoded Haskell-side).
+**Why only `&mut Self`, never a by-value `-> Self`:** a by-value
+`fn split_off(&mut self, at) -> Self` (e.g. `bytes::Bytes`) returns a *new*
+value (the split-off tail) while mutating self — own-threading it would
+silently discard that return. So by-value `-> Self` / `-> RecvType` keeps the
+normal owned-return path; only a `&mut Self` reference (which can only ever be
+the receiver) is safe to own-thread. `&self -> &Self` (borrowed view), a
+consuming `self -> ()`, and `build()` terminals (result ≠ receiver) are all
+excluded.
+
+The inspector **normalizes the result to the owned receiver type** for tagged
+setters, so the Sky signature is `Recv -> args.. -> Recv` (essential for the
+`()` case, which otherwise has no result) and the borrow/lifetime/array filters
+see an ordinary owned type. Tag survivors with a new `Function.self_returning:
+bool` field (serialized to the kernel JSON; decoded Haskell-side as
+`_fnSelfReturning`).
 
 ### 4.2 Codegen body shapes (`Ffi.hs`, `emitRustFnSimple`)
 
 | Rust shape | Generated wrapper body |
 |---|---|
-| `fn s(&mut self, a) -> &mut Self` | `let mut r = arg0; r.s(a); r` |
-| `fn s(self, a) -> Self` (consuming) | `arg0.s(a)` |
-| `fn s(&mut self, a) -> ()` (in-place) | `let mut r = arg0; r.s(a); r` |
+| `fn s(&mut self, a) -> &mut Self` | `ok_res({ arg0.s(a); arg0 })` |
+| `fn s(&mut self, a) -> ()` (in-place) | `ok_res({ arg0.s(a); arg0 })` |
 
-Wrapper signature: `pub fn <name>(arg0: RecvType, args…) -> RecvType`. Effect =
-non-effectful (referentially transparent input→output). The discarded `&mut
-Self` return is intentional; we return the owned local.
+`arg0` is already declared `mut arg0` (every instance receiver is), so calling
+the `&mut self` method auto-borrows it; the borrowed `&mut Self`/`()` return is
+discarded at the `;`, then the owned `arg0` is returned. Wrapper signature:
+`pub fn <name>(arg0: RecvType, args…) -> SkyResult<SkyError, RecvType>` (the
+`retInner` is forced to `head paramTypes` so the return type matches `arg0`
+exactly). Effect = `pure` (`&mut self -> &mut Self`/`()` classify as pure;
+async/fallible can't match). Verified end-to-end with a hermetic builder crate
+(`new |> with_size 42 |> power_on |> size == 42`; in-place `power_on` mutation
+persists through the chain).
 
 ### 4.3 Sky-side shape
 
@@ -117,27 +133,40 @@ None. The normalized `&str`/`&[u8]` flow through existing copy-to-owned paths.
 
 | File | Change |
 |---|---|
-| `tools/sky-ffi-inspect-rs/src/main.rs` | keep `--audit` (committed separately); add `self_returning` detection + tag; add lifetime-elided normalizer |
-| `src/Sky/Build/Rust/Ffi.hs` | owned-threading body emission for `self_returning` fns |
-| Haskell `Function` decode (FFI JSON) | new `self_returning` field |
+| `tools/sky-ffi-inspect-rs/src/main.rs` | `--audit` mode (committed `759a6256`); `self_returning` detection + result normalization + struct field; `strip_elidable_lifetime` normalizer |
+| `src/Sky/Build/Rust/Ffi.hs` | owned-threading body + `retInner = head paramTypes` for `_fnSelfReturning` fns |
+| `src/Sky/Build/FfiGen.hs` | new `_fnSelfReturning :: Bool` on the shared `FnInfo` + decode (Go-neutral; see README Modification-boundaries note) |
 
-## 8. Testing
+## 8. Testing (as performed)
 
-- **Regression crates** under `runtime-rust/tests/sky/`: a fixture that
-  `sky add`s a builder-bearing crate (regex / csv) and chains setters →
-  builds + runs.
-- **`--audit` re-run** on regex/csv/reqwest: confirm setter drops fall, kept
-  count rises; no new `array_slice`/handle resurrection.
-- **build-sweep** (`sky-rust-backend:build-sweep`): no regression on the
-  gated examples.
-- **Soundness spot-check**: alias a non-Clone builder in a fixture → expect a
-  clean *compile* error, never a runtime fault.
+- **End-to-end (hermetic crate):** a local `gadget` builder crate (`&mut self ->
+  &mut Self` setter `with_size`, `&mut self -> ()` setter `power_on`) built +
+  run via `--target rust`: `new |> with_size 42 |> power_on |> size == 42`,
+  `power_on |> is_on == True`. ✅
+- **`--audit` re-run:** csv 41→66 (35 setters recovered, qualified receivers);
+  bytes `split_off`/`split_to` correctly **excluded** (by-value `-> Self`).
+- **No regression:** build-sweep PASS (32/32 examples); 10 FFI test crates
+  (chrono/semver/rand/uuid/bytesize/crc32fast/config/retry/lipsum/titlecase)
+  rebuild clean from a wiped cache.
+- **Soundness:** a non-Clone builder aliased mid-chain → clean *compile* error
+  (`Gadget: Clone` from `Result.andThen`), never a runtime fault. Real builders
+  (csv `ReaderBuilder`, regex `RegexBuilder`) derive `Clone`.
 
-## 9. Risks / edge cases
+## 9. Risks / edge cases — and the gaps this surfaced (feed the next FFI plan)
 
 - In-place `&mut self -> ()` synthesis changes the apparent return (unit→Self).
-  Deliberate; documented. Broadly useful (fluent `push`/`clear`).
-- A method returning `&mut OtherType` (not the receiver) must NOT be detected as
-  a setter — detection keys strictly on *receiver* identity.
-- Normalizer must be allowlist-only; a blanket lifetime-strip would resurrect
+  Deliberate; broadly useful (fluent `push`/`clear`).
+- Detection keys strictly on *receiver* identity (`&mut Self`), so `split_off`
+  and `-> OtherType` are never mis-tagged.
+- Normalizer is allowlist-only; a blanket lifetime-strip would resurrect
   borrowed handles into broken bindings.
+- **Unsized receiver (`bytes::buf::UninitSlice`)**: own-threading takes the
+  receiver by value → `!Sized` → bindings don't compile. Pre-existing class
+  (any by-value method on an unsized type fails the same way); not a *gated*
+  regression. → next-plan candidate: a Sized gate on by-value receivers.
+- **Crate-name collisions** found while testing (next-plan candidates):
+  `csv` (crate name vs `use crate::*` → `csv` ambiguous), `bytes::Bytes` (vs
+  Sky's builtin `Bytes`→`Vec<u8>`), regex `RegexBuilder` (unqualified receiver
+  dropped by nameability), `url` set_* (`Option<&str>` / `Option<u16>` param
+  coercion gap). These block whole-crate usability and are the highest-value
+  follow-on FFI fixes.

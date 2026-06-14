@@ -103,6 +103,13 @@ data FnInfo = FnInfo
         -- from the inspector's recvRustType field. Used by
         -- resolveRustType for static method receiver resolution.
         -- Entry is "" when unknown.
+    , _fnSelfReturning :: Bool
+        -- ^ Rust only. True when the inspector tagged this method as a
+        -- self-returning / in-place setter (receiver is self/&mut self and
+        -- the result is the receiver type, or &mut self -> ()). The Rust
+        -- codegen then emits an owned-threading wrapper (move the receiver,
+        -- mutate, return it) instead of dropping the &mut Self return. The
+        -- JSON field is absent (→ False) for Go and for every non-setter.
     }
     deriving (Show)
 
@@ -138,6 +145,7 @@ instance A.FromJSON FnInfo where
             <*> pure (map (\(_, _, _, r) -> r) params)
             <*> pure (map (\(_, _, _, r) -> r) results)
             <*> o A..:? "recvRustType" A..!= ""
+            <*> o A..:? "selfReturning" A..!= False
       where
         parseParamFull = A.withObject "param" $ \o -> do
             n <- o A..:? "name" A..!= ""

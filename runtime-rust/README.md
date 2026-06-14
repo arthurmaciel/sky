@@ -525,6 +525,17 @@ Shared compiler files keep only a minimal `case Toml._target of { TargetRust ->
 so the Go path stays byte-identical and upstream merges stay small. See
 `docs/runtime-rust/syncing-upstream.md`.
 
+**One shared file carries Rust-only inspector fields: `src/Sky/Build/FfiGen.hs`.**
+The inspector-JSON decode type `FnInfo` (and its single Aeson `FromJSON`) lives
+there and is used by both backends, so a Rust-only field can only be *decoded*
+there — it cannot move to a Rust-only module. Precedent: `_fnRecvRustType`,
+`_fnRustParamTypes`, `_fnRustResultTypes` are all Rust-only fields already on
+`FnInfo`; `_fnSelfReturning` (builder-setter tag) follows them. **Go-neutral by
+construction**: every such field defaults (`""` / `False`), the Go inspector
+never emits it, and no `src/Sky/Generate/Go/` code reads it → Go output
+byte-identical. Adding a Rust-only `FnInfo` field is the one sanctioned
+shared-file touch; new *behaviour* still goes behind `TargetRust ->` seams.
+
 ---
 
 ## Cross-backend rules (load-bearing)
@@ -608,7 +619,7 @@ cargo-build-verified.
 
 ### `Sky.Http.Server` / `Sky.Live` regression tests
 
-- `tests/rust-codegen/http-server-test.sh` asserts every route over real HTTP
+- `runtime-rust/tests/rust-codegen/http-server-test.sh` asserts every route over real HTTP
   (GET, path param → JSON, POST body, static, 404, content-type).
 - `cargo test --features "live db redis_store"` — 164 runtime tests incl. diff,
   dispatch, form, store (memory/sqlite + env-gated pg/redis restart-survival),
@@ -856,7 +867,21 @@ Shipped widenings: **Alt-1** monomorphises generic fns whose bound maps to a Sky
 type (`AsRef<[u8]>`/`Into<Vec<u8>>` → `List Int`; `AsRef<str>`/`Display` →
 `String`); **Alt-1 v2** resolves recursive `AsRef`/`Into`/`IntoIterator` inner
 types + lifts the non-byte slice/array drop when the element is Sky-coercible
-(soundness-gated: primitive-numeric `Into`/`From` resolve at identity only).
+(soundness-gated: primitive-numeric `Into`/`From` resolve at identity only);
+**builder setters** — `&mut self -> &mut Self` and in-place `&mut self -> ()`
+methods are exposed as owned-threading wrappers (`fn(recv, args) -> recv`),
+recovering the *configuration* surface of builder-pattern crates (csv
+`ReaderBuilder` +12, `WriterBuilder` +10, url `set_path`/`set_query`/…); a
+by-value `-> Self` (e.g. `Bytes::split_off`, returns a new value) is left on the
+normal path; **lifetime-elided copies** — `&'a str`/`&'a [u8]`/`&'a OsStr`/
+`&'a Path` are kept as owned copies (the lifetime token is an elision artifact).
+
+Drop-reason measurement: the inspector's **`--audit`** flag tags every
+tail-filter `return None` (lifetime / result_borrow / array_slice) with reason +
+constructable-or-not + offending type, then prints a per-crate histogram to
+stderr (diagnostic only; bindings JSON unchanged). It measured element coercion
+at 1/2552 functions (closed as a sound floor) and redirected effort to the
+builder/handle class.
 
 ---
 

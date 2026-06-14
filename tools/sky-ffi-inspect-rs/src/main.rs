@@ -54,6 +54,13 @@ struct Function {
     is_field_set: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     is_pkg_var: bool,
+    // Owned-threading setter: receiver is `&mut self` and the result is the
+    // receiver type (`&mut Self`/`&mut RecvType`/`&Self`) or `()`. FfiGen emits
+    // a `fn(arg0: Recv, args..) -> Recv { let mut r = arg0; r.m(args); r }`
+    // wrapper instead of dropping the borrowed return. Absent (→ false) for
+    // Go and every non-setter.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    self_returning: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -697,6 +704,28 @@ fn drop_is_valuable(name: &str, recv: Option<(&str, &str)>) -> bool {
         || name.starts_with("try_")
 }
 
+/// Strip an elision-only lifetime from an immutable borrow of a copy-to-owned
+/// base — `&'a str` → `&str`, `&'a [u8]` → `&[u8]` — so the `touches_lifetime`
+/// filter keeps it and the existing `&str`→`String` / `&[u8]`→`Vec<u8>` codegen
+/// applies with no codegen change. Conservative allowlist (str / String / [u8]
+/// / OsStr / Path); `&'a mut _`, generic `&'a [T]`, and `Foo<'a>` handles are
+/// returned unchanged so they still get dropped.
+fn strip_elidable_lifetime(rt: &str) -> String {
+    let t = rt.trim();
+    if let Some(rest) = t.strip_prefix("&'") {
+        // rest = "<lifetime> <base>"; split the lifetime token off the base.
+        if let Some(sp) = rest.find(' ') {
+            let base = rest[sp + 1..].trim();
+            if !base.starts_with("mut ")
+                && matches!(base, "str" | "String" | "OsStr" | "Path" | "[u8]")
+            {
+                return format!("&{base}");
+            }
+        }
+    }
+    rt.to_string()
+}
+
 /// Parse a function item from the rustdoc JSON index.
 ///
 /// `recv` is `Some((sky_type, rust_type))` for methods, `None` for free fns.
@@ -810,6 +839,71 @@ fn parse_fn_item(
         }
     }
 
+    // Piece 2 — lifetime-elided owned copies. Normalize `&'a str`/`&'a [u8]`/…
+    // to `&str`/`&[u8]` (allowlist only) so the lifetime filter keeps them and
+    // the existing copy-to-owned codegen handles them. Applied to params and
+    // results in place before any filter reads `rust_type`.
+    for p in params.iter_mut().chain(results.iter_mut()) {
+        p.rust_type = strip_elidable_lifetime(&p.rust_type);
+    }
+
+    // Piece 1 — owned-threading setter detection. A `&mut self` method whose
+    // result is the receiver type (`&mut Self`/`&mut RecvType`/`&Self`) or `()`
+    // is exposed as `fn(arg0: Recv, args..) -> Recv { let mut r=arg0; r.m(args); r }`.
+    // Tagging it (a) keeps it past the result-borrow drop below and (b) tells
+    // FfiGen to own-thread. Detection keys strictly on *receiver* identity, so
+    // `build()` / `-> OtherType` are never mistaken for setters. Async / future
+    // returns can't match (`&mut Self`/`()` are sync), so no async hazard.
+    let self_returning = {
+        let recv_rust = recv.map(|(_, r)| r).unwrap_or("");
+        let self_is_mut = !is_async
+            && inputs
+                .first()
+                .filter(|i| i[0].as_str() == Some("self"))
+                .map(|i| rustdoc_type_to_rust_str(&i[1]) == "&mut Self")
+                .unwrap_or(false);
+        if self_is_mut && !recv_rust.is_empty() {
+            match results.first() {
+                None => true, // `&mut self -> ()` in-place setter
+                Some(p) => {
+                    // Only a *mutable reference* to the receiver (`&mut Self` /
+                    // `&mut RecvType`) is an unambiguous fluent setter. A by-value
+                    // `-> Self` / `-> RecvType` returns a NEW value (e.g.
+                    // `Bytes::split_off` returns the split-off tail) and must keep
+                    // the normal owned-return path — own-threading would silently
+                    // discard that return. A shared `&Self` is a borrowed view,
+                    // also not a setter.
+                    match p.rust_type.trim().strip_prefix("&mut ") {
+                        Some(inner) => {
+                            let base = inner.trim();
+                            base == recv_rust || base == "Self"
+                        }
+                        None => false,
+                    }
+                }
+            }
+        } else {
+            false
+        }
+    };
+
+    // For a self-returning setter the wrapper returns the receiver by value, so
+    // normalize the result to the OWNED receiver type. This makes the Sky
+    // signature `Recv -> args.. -> Recv` (essential for the `&mut self -> ()`
+    // case, which otherwise has no result) and presents the result side as an
+    // ordinary owned type to the borrow/lifetime/array filters below — they
+    // pass it, no special-casing needed. The original `&mut Self` Rust return
+    // is discarded by the own-threading body FfiGen emits.
+    if self_returning {
+        let (rsky, rrust) = recv.unwrap_or(("", ""));
+        results = vec![Param {
+            name: String::new(),
+            ty: rsky.to_string(),
+            sky_type: rsky.to_string(),
+            rust_type: rrust.to_string(),
+        }];
+    }
+
     // Skip functions whose params or results carry a lifetime parameter
     // (e.g. `Item<'_>`, `StrftimeItems<'a>`, `&'a str`).  Such types are tied
     // to a borrow scope and cannot be expressed in a monomorphic, owned FFI
@@ -893,6 +987,7 @@ fn parse_fn_item(
         is_field: false,
         is_field_set: false,
         is_pkg_var: false,
+        self_returning,
     })
 }
 
@@ -1285,6 +1380,7 @@ fn emit_display_fromstr_bridges(
             is_field: false,
             is_field_set: false,
             is_pkg_var: false,
+            self_returning: false,
         });
     }
 
@@ -1312,6 +1408,7 @@ fn emit_display_fromstr_bridges(
             is_field: false,
             is_field_set: false,
             is_pkg_var: false,
+            self_returning: false,
         });
     }
 }

@@ -527,9 +527,15 @@ emitRustFile kernelName pkg =
             effRawResult = if null rawResultTy
                            then skyTypeToRust skyResultTy
                            else rawResultTy
-            (retInner, retCoerce) = case _fnEffect fn of
-                "fallible" -> translateRustRet (okTypeOfResult effRawResult)
-                _          -> translateRustRet effRawResult
+            -- Owned-threading setter: the wrapper returns the receiver by value
+            -- (`head paramTypes` is arg0's resolved type), no coercion — the
+            -- raw `&mut Self`/`()` Rust return is discarded in the body.
+            (retInner, retCoerce)
+                | _fnSelfReturning fn =
+                    (case paramTypes of (t:_) -> t; [] -> "()", id)
+                | otherwise = case _fnEffect fn of
+                    "fallible" -> translateRustRet (okTypeOfResult effRawResult)
+                    _          -> translateRustRet effRawResult
             retType = case _fnEffect fn of
                 "effectful" -> "SkyTask<SkyError, " ++ retInner ++ ">"
                 _           -> "SkyResult<SkyError, " ++ retInner ++ ">"
@@ -596,13 +602,20 @@ emitRustFile kernelName pkg =
             -- raw Rust value into the declared return type (Option→SkyMaybe,
             -- Vec element map, numeric widening to i64/f64, &T→owned, opaque
             -- → identity).
-            body = case _fnEffect fn of
-                "effectful" ->
-                    "Box::pin(async move { match " ++ callExpr ++ ".await { Ok(v) => ok_res(" ++ retCoerce "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) } })"
-                "fallible" ->
-                    "match " ++ callExpr ++ " { Ok(v) => ok_res(" ++ retCoerce "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
-                _ ->
-                    "ok_res(" ++ retCoerce callExpr ++ ")"
+            -- Owned-threading setter body: call the `&mut self`/`self` method on
+            -- the (already `mut`) receiver, discard its borrowed `&mut Self`/`()`
+            -- return, and return the owned receiver. No lifetime, no Clone.
+            ownThreadArgs = intercalate ", " (map argCall [1 .. nParams - 1])
+            body
+                | _fnSelfReturning fn =
+                    "ok_res({ arg0." ++ fnName ++ "(" ++ ownThreadArgs ++ "); arg0 })"
+                | otherwise = case _fnEffect fn of
+                    "effectful" ->
+                        "Box::pin(async move { match " ++ callExpr ++ ".await { Ok(v) => ok_res(" ++ retCoerce "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) } })"
+                    "fallible" ->
+                        "match " ++ callExpr ++ " { Ok(v) => ok_res(" ++ retCoerce "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
+                    _ ->
+                        "ok_res(" ++ retCoerce callExpr ++ ")"
             -- Skip degenerate method entries: functions with no recvType
             -- but whose first param is named "self".  These originate from
             -- trait-impl methods where the inspector couldn't determine the
