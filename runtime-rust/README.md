@@ -33,7 +33,7 @@ Tick a box when it reaches parity.
 | [ ] | `Ffi.callTask` (dynamic dispatch) | unsupported | Static-shape calls are peephole-resolved; the dynamic path is a no-reflection guard (Task-emitting FFI kernels). |
 | [ ] | Sky.Live: firestore session store | future | Same `SessionStore` trait as the other stores. |
 | [ ] | Sky.Live: WebSocket-server capturing handlers | future | `Arc<dyn Fn>` instead of fn pointers. |
-| [ ] | Non-byte slice/array FFI + enum-arg ctors | partial | `&[String]`, `[f64; 3]`, crate-enum arguments. |
+| [ ] | Non-byte slice/array FFI — nested/tuple elements + enum-arg ctors | mostly done | Common sequences (`&[String]`, `[f64; 3]`, `Vec<T>` of primitives/Strings/opaque) ARE classified + coerced (`seqGeneral`); only nested-generic / tuple / borrowed elements + crate-enum arguments remain. |
 | [ ] | WASM target (`wasm32-unknown-unknown`) | future | |
 | [ ] | `sky watch` for the Rust target | future | |
 | [ ] | Flat `main.rs` → separate `pub mod` files | cleanup | No correctness impact. |
