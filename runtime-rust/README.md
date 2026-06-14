@@ -34,7 +34,6 @@ Tick a box when it reaches parity.
 | [ ] | Sky.Live: firestore session store | future | Same `SessionStore` trait as the other stores. |
 | [ ] | Non-byte slice/array FFI — nested/tuple elements + enum-arg ctors | mostly done | Common sequences (`&[String]`, `[f64; 3]`, `Vec<T>` of primitives/Strings/opaque) ARE classified + coerced (`seqGeneral`); only nested-generic / tuple / borrowed elements + crate-enum arguments remain. |
 | [ ] | WASM target (`wasm32-unknown-unknown`) | future | |
-| [ ] | `sky watch` for the Rust target | future | |
 | [ ] | Go-package→Rust FFI (gorilla/mux, stripe-go, …) | out of scope | Needs a Go runtime; byte-parity impossible without one. |
 
 **Intentional divergences — by design, NOT future work.** Rust deliberately

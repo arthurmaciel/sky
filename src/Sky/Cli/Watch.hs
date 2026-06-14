@@ -38,6 +38,7 @@ import Control.Monad (forM, forM_, unless, when)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (sort)
 import qualified System.Directory as Dir
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory, takeExtension, takeFileName)
 import System.IO (hFlush, hPutStrLn, stderr, stdout)
@@ -264,13 +265,27 @@ runBuildInner WatchOpts{..} = do
     result <- Compile.compile cfg woEntry outDir
     case result of
         Left err  -> pure (Left err)
-        Right _   -> do
-            let binPath = outDir </> Toml._binName cfg
-                cmd = "cd " ++ outDir ++ " && go build -o " ++ Toml._binName cfg ++ " ."
-            (ec, _, gerr) <- P.readCreateProcessWithExitCode (P.shell cmd) ""
-            case ec of
-                ExitSuccess   -> pure (Right binPath)
-                ExitFailure _ -> Left <$> renderGoBuildError outDir gerr
+        Right _   -> case Toml._target cfg of
+            -- Rust target: the codegen wrote `sky-out/Rust/` (NO main.go), so build
+            -- it with cargo — mirroring `sky build --target rust`. Honour a shared
+            -- CARGO_TARGET_DIR if the dev workflow set one; the package is `sky-app`.
+            Toml.TargetRust -> do
+                let rustDir = outDir </> "Rust"
+                    cmd = "cargo build --manifest-path " ++ (rustDir </> "Cargo.toml")
+                (ec, _, cerr) <- P.readCreateProcessWithExitCode (P.shell cmd) ""
+                case ec of
+                    ExitSuccess   -> do
+                        mTargetDir <- lookupEnv "CARGO_TARGET_DIR"
+                        let targetBase = maybe (rustDir </> "target") id mTargetDir
+                        pure (Right (targetBase </> "debug" </> "sky-app"))
+                    ExitFailure _ -> pure (Left ("cargo build failed:\n" ++ cerr))
+            Toml.TargetGo -> do
+                let binPath = outDir </> Toml._binName cfg
+                    cmd = "cd " ++ outDir ++ " && go build -o " ++ Toml._binName cfg ++ " ."
+                (ec, _, gerr) <- P.readCreateProcessWithExitCode (P.shell cmd) ""
+                case ec of
+                    ExitSuccess   -> pure (Right binPath)
+                    ExitFailure _ -> Left <$> renderGoBuildError outDir gerr
 
 
 -- | Render a failed `go build` the way `sky run` does — map the Go
