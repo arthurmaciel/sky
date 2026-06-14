@@ -111,11 +111,17 @@ Runtime behavioral bugs (verified open 2026-06-14):
       `basics_always` were absent → E0425. Added (same convention as `fst`/`snd`);
       build+run matches Go. Regression: `basics::tests::{test_identity,
       test_always_returns_first}`.
-- [ ] **`Basics.toString` (polymorphic) on `--target rust`** — distinct from
-      `errorToString` (which IS mapped, via `Debug`). A fully-polymorphic
-      `toString : a -> String` needs type-directed lowering to the right per-type
-      conversion (Rust has no runtime reflection); larger than the identity/always
-      fix. (`errorToString` itself dumps a struct on BOTH backends — see below.)
+- [x] **`Basics.toString` for scalars — FIXED (`basics.rs`).** Added
+      `basics_to_string<T: Display>` = Go's `fmt.Sprintf("%v")` (Display, NOT
+      Debug → unquoted strings, clean scalars). Int/Float/Bool/String byte-match
+      Go. A `toString` on a composite (record/ADT, no `Display`) is a **compile**
+      error (E0277), never a runtime one — honouring "no runtime errors" (Go
+      reflects at runtime; Rust catches it before a binary exists). Regression:
+      `basics::tests::test_to_string_{int,bool,string_unquoted,float}`.
+      ⏳ Future: a type-directed lowering could route composite `toString` to a
+      derived renderer if that case ever arises in practice (rare).
+      (NB: `errorToString` is separate — it dumps a struct on BOTH backends, a
+      shared/Go issue; see below.)
 - [ ] **`errorToString (Error.unexpected "boom")` dumps an internal struct on
       BOTH backends** — Rust prints `Error(Unexpected, SkyCoreErrorErrorInfo {…})`,
       Go prints `{0 Error [10 {boom …}]}`; neither yields a clean `"boom"`. This

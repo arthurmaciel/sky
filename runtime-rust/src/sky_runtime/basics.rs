@@ -43,6 +43,19 @@ pub fn debug_to_string<T: std::fmt::Display>(v: T) -> String {
     format!("{}", v)
 }
 
+/// Sky `Basics.toString : a -> String` — Go's `fmt.Sprintf("%v", …)`. Display-
+/// based (NOT Debug, so a `String` renders unquoted and scalars format like Go's
+/// `%v`); same semantics as `Debug.toString`. The `Display` bound is deliberate:
+/// `toString` on a scalar (Int/Float/Bool/String) is the overwhelmingly common
+/// case and matches Go exactly, while `toString` on a composite (record/ADT)
+/// — which has no `Display` impl — fails at COMPILE time (E0277), never at
+/// runtime. That honours the "no runtime errors" rule (Go would reflect at
+/// runtime; Rust catches it before a binary exists). A future type-directed
+/// lowering could route composites to a derived renderer if that case arises.
+pub fn basics_to_string<T: std::fmt::Display>(v: T) -> String {
+    format!("{}", v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,4 +77,10 @@ mod tests {
     // `basics_identity`/`basics_always` calls but undefined → E0425).
     #[test] fn test_identity() { assert_eq!(basics_identity(7i64), 7); }
     #[test] fn test_always_returns_first() { assert_eq!(basics_always(7i64, "discarded"), 7); }
+
+    // Basics.toString = Go's %v: Display-based, unquoted strings, clean scalars.
+    #[test] fn test_to_string_int() { assert_eq!(basics_to_string(42i64), "42"); }
+    #[test] fn test_to_string_bool() { assert_eq!(basics_to_string(true), "true"); }
+    #[test] fn test_to_string_string_unquoted() { assert_eq!(basics_to_string("hi".to_string()), "hi"); }
+    #[test] fn test_to_string_float() { assert_eq!(basics_to_string(42.5f64), "42.5"); }
 }
