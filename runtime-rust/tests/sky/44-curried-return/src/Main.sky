@@ -1,0 +1,27 @@
+module Main exposing (main)
+
+-- Regression: a fn TYPED as a full arrow (`String -> String -> Task`) but DEFINED
+-- returning a closure (`f a = \b -> …`) is uncurried by the codegen into a flat
+-- `fn f(a, b)` (eta-equivalence), so it lowers + runs like the equivalent
+-- `f a b = …`. Both full application (`makeGreeter "hi " "world"`) and partial
+-- application (`makeGreeter "hi "` as a value — closure-wrapped by the call site)
+-- work. Before the fix it emitted a 1-arg fn returning an un-assignable
+-- `fn`-pointer closure.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.List as List
+import Sky.Core.Task as Task
+import Std.Log exposing (println)
+
+makeGreeter : String -> String -> String
+makeGreeter prefix =
+    \name -> prefix ++ name
+
+main : Task Error ()
+main =
+    let
+        full = makeGreeter "hi " "world"
+        -- partial application as a value (HOF):
+        greeted = List.map (makeGreeter "hello ") [ "a", "b" ]
+    in
+    Task.succeed (let _ = println (full ++ " | " ++ String.join "," greeted) in ())

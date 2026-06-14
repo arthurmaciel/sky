@@ -322,6 +322,14 @@ maybeMemoiseNullary nParams name rustName gens retTy body
          else "{ " ++ cell ++ got ++ ".clone() }"
     | otherwise = body
 
+-- Peel @n@ leading arrows off a function type, returning the @n@ argument types
+-- and the residual result. Used to uncurry a lambda-bodied def (the absorbed
+-- lambda params take their types from the peeled arrows).
+peelArrows :: Int -> Can.Type -> ([Can.Type], Can.Type)
+peelArrows 0 ty = ([], ty)
+peelArrows n (Can.TLambda src res) = let (ss, r) = peelArrows (n - 1) res in (src : ss, r)
+peelArrows _ ty = ([], ty)
+
 defToRustItem :: EmitCtx -> String -> Can.Def -> RustItem
 defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
     let rustName = if name == "main" && ecCurrentModule ctx == "Main" then "sky_main" else name
@@ -534,6 +542,20 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                       else bodyStr
      in RustFunction rustName genVars' paramStrs' retTyFinal
             (maybeMemoiseNullary n name rustName genVars' retTyFinal (preludes ++ bodyWrapped))
+-- Uncurry a lambda-bodied def: `f a = \b -> e` is eta-equivalent to `f a b = e`,
+-- but the codegen would otherwise render the first as a 1-arg fn RETURNING a
+-- `fn`-pointer closure — which can't hold a capturing closure. Absorb the body
+-- lambda's params into the signature (their types come from peeling the return
+-- type's arrows), so it lowers as a flat N-arg fn. Partial application of the
+-- flattened fn is already closure-wrapped by the call-site emitter, so every use
+-- shape keeps working. Only fires when the return type actually has the arrows.
+defToRustItem ctx _modPrefix (Can.TypedDef nameAt fvs pats0 body retTy0)
+    | Ann.At _ (Can.Lambda lamPats lamBody) <- body
+    , not (null lamPats)
+    , (argTys, residual) <- peelArrows (length lamPats) retTy0
+    , length argTys == length lamPats =
+        defToRustItem ctx _modPrefix
+            (Can.TypedDef nameAt fvs (pats0 ++ zip lamPats argTys) lamBody residual)
 defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) =
     let rm = ecRecordMap ctx
         rustName = if name == "main" && ecCurrentModule ctx == "Main" then "sky_main" else name

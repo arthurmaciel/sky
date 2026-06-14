@@ -32,7 +32,6 @@ Tick a box when it reaches parity.
 | [ ] | composite `Basics.toString` | needs design | Scalars match Go (`Display` = `%v`); a record/ADT `toString` is a compile error (no `Display`). Needs type-directed lowering. |
 | [ ] | `Ffi.callTask` (dynamic dispatch) | unsupported | Static-shape calls are peephole-resolved; the dynamic path is a no-reflection guard (Task-emitting FFI kernels). |
 | [ ] | Sky.Live: firestore session store | future | Same `SessionStore` trait as the other stores. |
-| [ ] | Curried function-valued returns (general, niche) | codegen | A fn **typed** as a full arrow (`A -> B -> Task`) but **defined** returning a closure (`f a = \b -> …`). Diagnosed: 3 coordinated fixes — (1) render the function-typed RETURN as `impl Fn(…)` not `fn(…)`; (2) emit the body lambda as `move`; (3) the **call-site** must split over-application by the callee's DEFINED arity (`f(a)(b)`, not `f(a, b)`) — #3 touches the core application-emission path for every call → broad, sweep-gated. Niche (the uncurried `f a b = …` and inline lambdas both work). **WS-server capturing handlers themselves WORK** (inline capturing lambda → `impl Fn`/`Arc<dyn Fn>`). |
 | [ ] | Non-byte slice/array FFI — nested/tuple elements + enum-arg ctors | mostly done | Common sequences (`&[String]`, `[f64; 3]`, `Vec<T>` of primitives/Strings/opaque) ARE classified + coerced (`seqGeneral`); only nested-generic / tuple / borrowed elements + crate-enum arguments remain. |
 | [ ] | WASM target (`wasm32-unknown-unknown`) | future | |
 | [ ] | `sky watch` for the Rust target | future | |
