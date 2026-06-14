@@ -51,9 +51,16 @@ Runtime behavioral bugs (verified open 2026-06-14):
       tx handle type yet"). So Rust already matches Go. True isolation needs a tx
       handle type threaded into the body in **both** backends (upstream item, not
       a Rust parity gap — fixing Rust alone would be a divergence).
-- [ ] **`Task.retryWith` runs once** — codegen drops the policy arg; the runtime
-      `task_retry_with` takes only the task (a one-shot `SkyTask`, not `Clone`).
-      Drive the retry loop properly (re-create the future per attempt).
+- [D] **`Task.retryWith` runs once — ESCALATED (deep: SkyTask is one-shot).**
+      Root cause: `SkyTask = Pin<Box<dyn Future>>` is consumed on first `.await`,
+      whereas Go's Task is a re-runnable `func() any`, so Go's loop just re-calls
+      it. Retrying in Rust needs EITHER (a) an inline loop re-evaluating the task
+      EXPRESSION each attempt — fragile: move-captured args (`http_get(url)`)
+      can't be re-run without per-case `.clone()` the peephole can't infer; OR
+      (b) make `SkyTask` re-runnable (`Arc<dyn Fn()->Future>`) — a large runtime
+      change touching every Task site; OR (c) upstream: `retryWith` takes a thunk
+      `() -> Task e a` (the CLAUDE.md note). Not shipping a fragile partial fix;
+      needs the (b)/(c) design decision. Workaround stands: recurse on the Result.
 - [ ] **`ws_client` `pingInterval` not wired** — heartbeat config ignored.
 - [ ] **`Pure.*` Task surface unsupported** (`uuid_kernel.rs`) — `Pure.uuidV4 ()`
       etc. error on target=rust; wire to the kernel.
@@ -78,11 +85,14 @@ Runtime behavioral bugs (verified open 2026-06-14):
       decision; ADR 0002 deferred until then.
 
 Missing features for parity:
-- [ ] **`Cmd.publish` / `Sub.subscribeTopic` codegen emission** for the composite
-      examples (34/37/38) — the per-type broker exists (S6); the kernels aren't
-      emitted for these shapes.
-- [D] **Sky.Tui backend (S4)** — examples 21/22/23/24. ANSI-cell renderer + TEA
-      loop + codegen wiring (design doc ready).
+- [x] **`Cmd.publish` / `Sub.subscribeTopic` codegen emission** — works: 27
+      (broadcast measured 545/97 patches/s) + examples/rust/33-live-pubsub +
+      34-live-pubsub-dict build/run. (Main examples/37/38 composite multi-app
+      stay out of scope — anon-struct field-method access, not pub/sub.)
+- [x] **Sky.Tui backend (S4)** — all 4 main Tui examples (21/22/23/24) +
+      examples/rust/38-tui-ui + 41-tui-input build. ANSI-cell renderer + TEA loop
+      shipped; runtime needs a TTY so the sweeps SKIP running them (not a gap).
+      Input/focus refinements tracked as #62.
 - [x] **Sky.Webview real backend (S5)** — the wry/tao native window is auto-wired
       on `Webview.app` detection (implies the `live` stack + wry/tao + tokio
       net/signal/process; `webview` feature on by default). Pre-cargo pkg-config
