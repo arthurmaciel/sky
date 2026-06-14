@@ -17,7 +17,7 @@
 //! `V`) are **correct by construction** — every op on a handle uses the same
 //! `(K, V)`, enforced by Sky's opaque `Cache k v` — so neither can fail; a
 //! mismatch / missing handle degrades to a miss / no-op, never a panic. The same
-//! sanctioned-seam discipline as the S6 broker; strictly safer than Go's reflect
+//! sanctioned-seam discipline as the pub/sub broker; strictly safer than Go's reflect
 //! cache (the cast cannot fail). See the README `dyn Any` register.
 
 use super::*;

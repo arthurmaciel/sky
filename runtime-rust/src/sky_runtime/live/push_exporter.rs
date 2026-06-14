@@ -1,4 +1,4 @@
-//! Observability federation — child→parent telemetry push (epic C).
+//! Observability federation — child→parent telemetry push.
 //!
 //! When a Rust Live app runs as a sub-app under a parent (`SKY_PARENT_URL` set),
 //! this background exporter batches its logs + spans and POSTs them every
@@ -39,7 +39,7 @@ static SENDER: OnceLock<mpsc::Sender<Entry>> = OnceLock::new();
 
 /// Enable the push exporter from env. No-op unless `SKY_PARENT_URL` is set
 /// (i.e. this process runs as a sub-app pushing UP to its parent's ingest —
-/// federation, epic C). Idempotent. Call once at Live boot.
+/// federation). Idempotent. Call once at Live boot.
 pub async fn enable_from_env() {
     let parent = match std::env::var(PARENT_ENV) {
         Ok(p) if !p.is_empty() => p,
@@ -54,7 +54,7 @@ pub async fn enable_from_env() {
 }
 
 /// Enable pushing THIS app's telemetry to a LOCAL console-child collector
-/// (epic A "push-to-local-collector"): a lean parent (no SQLite) batches its
+/// ("push-to-local-collector"): a lean parent (no SQLite) batches its
 /// in-RAM telemetry and POSTs it to the console child's
 /// `/_sky/observability/ingest`, where the child (which owns sqlx + the store)
 /// records → spills → serves it. Called by the console mount after the child is

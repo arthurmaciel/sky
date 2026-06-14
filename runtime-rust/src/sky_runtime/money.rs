@@ -1,6 +1,6 @@
 //! Std.Money kernels — currency table + format / rate registry / allocate.
 //!
-//! Mirrors runtime-go/rt/money_kernel.go. Sub-A.8 T2.
+//! Mirrors runtime-go/rt/money_kernel.go.
 //!
 //! The Sky-side `Money` ADT carries a typed `Currency` enum + a `Decimal`
 //! amount. At the Ffi boundary, the wrappers in `sky-stdlib/Std/Money.sky`

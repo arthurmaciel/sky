@@ -7,7 +7,7 @@ use super::SkyResult;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use percent_encoding::{utf8_percent_encode, percent_decode_str, NON_ALPHANUMERIC};
 
-// ── Bytes-on-Rust convention (sub-D) ──────────────────────────────────────
+// ── Bytes-on-Rust convention ──────────────────────────────────────────────
 //
 // Sky models raw bytes as `String` (`type alias Bytes = String`), relying on
 // Go strings being arbitrary byte sequences. A Rust `String` must be valid

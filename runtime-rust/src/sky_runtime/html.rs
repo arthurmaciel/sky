@@ -31,7 +31,7 @@ pub enum Attribute<M> {
 /// (`OnMsg | OnString | OnBool | OnRaw String any`). `OnString`/`OnBool` carry
 /// fn pointers (the codegen renders the Sky `(String -> msg)` handler as
 /// `fn(String) -> msg`). `OnRaw` is the heterogeneous-payload escape hatch
-/// (`on` / `onSubmit`); its payload is type-erased — not dispatchable in P1,
+/// (`on` / `onSubmit`); its payload is type-erased — not dispatchable,
 /// but kept so the bridge compiles. The `submit` wire path resolves via
 /// `OnForm` instead (constructed server-side, never from Sky stdlib).
 #[derive(Clone)]

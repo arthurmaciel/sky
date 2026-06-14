@@ -28,7 +28,7 @@ impl<M: Clone> HandlerIndex<M> {
                 Some(f(args.first().map(|s| s == "true").unwrap_or(false)))
             }
             Event::OnForm(_, _) => None, // dispatched via resolve_form
-            Event::OnRaw(_, _) => None,  // heterogeneous payload — not dispatchable in P1
+            Event::OnRaw(_, _) => None,  // heterogeneous payload — not dispatchable
         }
     }
 

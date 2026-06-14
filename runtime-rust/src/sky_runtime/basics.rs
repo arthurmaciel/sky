@@ -1,6 +1,6 @@
 //! Sky.Core.Basics kernels: modBy + errorToString.
 //!
-//! Sub-A.8 T7. Mirrors Go's runtime-go/rt/rt.go (Basics_modByT, etc.).
+//! Mirrors Go's runtime-go/rt/rt.go (Basics_modByT, etc.).
 
 /// Sky `modBy : Int -> Int -> Int`. Divisor-first convention (Elm/pipeline order).
 /// Positive-result modulo: if the raw `%` result is negative, add `divisor`.

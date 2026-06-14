@@ -1,11 +1,11 @@
-//! Telemetry spill — write-through persistence to a SQLite file (#69 / epic D).
+//! Telemetry spill — write-through persistence to a SQLite file.
 //!
 //! When `SKY_CONSOLE_DB_PATH` is set, the always-compiled in-RAM sink
 //! (`telemetry.rs`) ALSO dual-writes every log + span to a SQLite file via a
-//! background batcher task. The bundled console child (`A` mount) reads that
-//! same file through the S1 `hub_*` kernels — so this module + `live/hub.rs`
+//! background batcher task. The bundled console child reads that
+//! same file through the `hub_*` kernels — so this module + `live/hub.rs`
 //! are the two halves of one data layer. Schema = the **hub schema**
-//! (`runtime-go/rt/hub/store.go`) the S1 read kernels expect, NOT Go's per-app
+//! (`runtime-go/rt/hub/store.go`) the hub read kernels expect, NOT Go's per-app
 //! `persist.go` schema; the Rust embedded console uses one schema end-to-end.
 //!
 //! ## Tokio-free core (the load-bearing constraint)
@@ -36,7 +36,7 @@ const QUEUE_CAP: usize = 1024;
 /// Retention: logs/spans older than this are pruned hourly (Go: 24 h).
 const RETENTION_HOURS: i64 = 24;
 
-/// Hub schema (the columns S1 `live/hub.rs` reads). Created on enable.
+/// Hub schema (the columns `live/hub.rs` reads). Created on enable.
 const SPILL_SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS telemetry_log (\
     id INTEGER PRIMARY KEY AUTOINCREMENT, service_name TEXT NOT NULL DEFAULT 'unknown', \
@@ -65,7 +65,7 @@ static SENDER: OnceLock<mpsc::Sender<SpillEntry>> = OnceLock::new();
 /// Whether the local spill writer is active (db parent with `SKY_CONSOLE_DB_PATH`
 /// set). The console mount uses this to decide between writing the store
 /// directly (db parent) and the push-to-collector path (lean parent pushes to
-/// the console child — epic A).
+/// the console child).
 pub fn is_enabled() -> bool {
     SENDER.get().is_some()
 }
@@ -263,7 +263,7 @@ mod tests {
             sr.try_get::<String, _>("end_time").unwrap()
         );
 
-        // The S1 reader (open_spill mode=rw) sees the same rows — the read↔write
+        // The reader (open_spill mode=rw) sees the same rows — the read↔write
         // contract end-to-end.
         let n: SkyResult<String, Vec<String>> = super::super::live::hub::hub_list_services(path.clone()).await;
         assert!(matches!(n, SkyResult::Ok(ref v) if v == &vec!["tsvc".to_string()]), "{n:?}");

@@ -133,7 +133,7 @@ pub async fn ingest(headers: axum::http::HeaderMap, body: String) -> axum::respo
         return resp;
     }
     // Two accepted shapes: a bare array of `{level, message}` (legacy), or the
-    // federation push object `{ "logs": [...], "spans": [...] }` (epic C —
+    // federation push object `{ "logs": [...], "spans": [...] }` (from
     // push_exporter::build_payload). Fold both into the local rings.
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
         match v {

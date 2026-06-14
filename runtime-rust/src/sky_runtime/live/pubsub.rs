@@ -1,4 +1,4 @@
-//! S6 — in-process pub/sub broker for the Rust backend.
+//! In-process pub/sub broker for the Rust backend.
 //!
 //! One `Broker<T>` per concrete payload type `T`, held in a global registry
 //! keyed by `TypeId`. The payload travels as its real Rust type `T` end-to-end

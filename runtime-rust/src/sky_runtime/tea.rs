@@ -1,4 +1,4 @@
-//! Sky TEA runtime core (Sub-E) — Cmd/Sub + the Sky.Cli line-oriented loop.
+//! Sky TEA runtime core — Cmd/Sub + the Sky.Cli line-oriented loop.
 //!
 //! Cmd/Sub are generic over the message type M (NOT `any`): the intermediate
 //! value `a` in `Cmd.perform` is erased inside a boxed M-producing future, but M

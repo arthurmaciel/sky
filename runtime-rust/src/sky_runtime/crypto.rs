@@ -140,7 +140,7 @@ pub fn crypto_constant_time_equal(a: String, b: String) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════
-// v0.15.44 symmetric AEAD — AES-256-GCM + ChaCha20-Poly1305
+// Symmetric AEAD — AES-256-GCM + ChaCha20-Poly1305
 // ═══════════════════════════════════════════════════════════
 //
 // Output format mirrors the Go backend: base64( nonce[12] || ciphertext ||

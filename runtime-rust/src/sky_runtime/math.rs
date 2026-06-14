@@ -1,6 +1,6 @@
 //! Sky.Core.Math kernels.
 //!
-//! Sub-A.8 T3. Signatures from src/Sky/Type/Constrain/Expression.hs:
+//! Signatures from src/Sky/Type/Constrain/Expression.hs:
 //!   abs    : Int -> Int                  (integer abs)
 //!   min    : a -> a -> a                 (polymorphic; monomorphised at call site)
 //!   max    : a -> a -> a

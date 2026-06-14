@@ -1,12 +1,12 @@
 //! Std.Auth kernels — authentication helpers.
 //!
-//! Sub-C. Two tiers (matches the Sky-side `Std.Auth` doc):
+//! Two tiers (matches the Sky-side `Std.Auth` doc):
 //!   - Pure crypto (Result Error _): hashPassword/Cost, verifyPassword,
 //!     passwordStrength, signToken, verifyToken.
 //!   - DB flows (Task Error _): register, login, setRole.
 //!
-//! Backed by `bcrypt` for password hashing and `jsonwebtoken` (sub-A.4) for
-//! JWT HS256. DB kernels reuse the sqlx pool from sub-B's `db` module.
+//! Backed by `bcrypt` for password hashing and `jsonwebtoken` for
+//! JWT HS256. DB kernels reuse the sqlx pool from the `db` module.
 
 use super::*;
 use std::collections::HashMap;
@@ -145,7 +145,7 @@ pub fn auth_verify_token<E: From<String>>(
 /// Idempotent `CREATE TABLE IF NOT EXISTS users (...)`. Runs at the start of
 /// register/login/setRole so the schema is always available without users
 /// having to call a separate migration. The id-column DDL is per-driver
-/// (sub-C.1) — `db_auto_id_column()` returns the right fragment for sqlite
+/// — `db_auto_id_column()` returns the right fragment for sqlite
 /// (`INTEGER PRIMARY KEY AUTOINCREMENT`), mysql (`BIGINT NOT NULL
 /// AUTO_INCREMENT PRIMARY KEY`), or postgres (`BIGSERIAL PRIMARY KEY`).
 async fn ensure_users_schema<E: From<String> + Send>(conn: &Db) -> SkyResult<E, ()> {

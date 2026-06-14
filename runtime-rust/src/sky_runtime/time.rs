@@ -244,7 +244,7 @@ pub fn time_format_iso8601(ms: i64) -> String {
     }
 }
 
-// === sub-A.8 T4 — advanced diff / fromParts / zone kernels ===
+// === advanced diff / fromParts / zone kernels ===
 
 /// `diffSeconds later earlier` — integer seconds between two epoch-ms timestamps.
 pub fn time_diff_seconds(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - earlier_ms) / 1_000 }
@@ -344,7 +344,7 @@ mod time_advanced_tests {
         assert!(added > T1);
     }
 
-    // sub-A.8 T4 — advanced kernel tests
+    // advanced kernel tests
 
     #[test]
     fn test_diff_seconds() {

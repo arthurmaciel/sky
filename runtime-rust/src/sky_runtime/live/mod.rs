@@ -11,13 +11,13 @@ pub use form::*;
 pub mod route;
 pub use route::*;
 pub mod console;
-// Pre-built console child + reverse-proxy (epic A) — spawns the bundled console
+// Pre-built console child + reverse-proxy — spawns the bundled console
 // binary and proxies /_sky/console/*; falls back to in-process `console` when the
-// binary is absent. Spawn/lifecycle in Task 1; proxy handler + wiring in Tasks 2–3.
+// binary is absent.
 pub mod console_proxy;
 pub mod observability;
-// Observability export pipelines: federation push to a parent ingest (epic C)
-// and remote-hub OTLP push (epic E). Both env-gated + inert by default.
+// Observability export pipelines: federation push to a parent ingest
+// and remote-hub OTLP push. Both env-gated + inert by default.
 pub mod push_exporter;
 pub mod hub_exporter;
 // Hub read-side kernels (the bundled console's data plane). Gated on `db` —
@@ -55,7 +55,7 @@ use super::*;
 
 /// The browser-side Sky.Live client, extracted verbatim from Go's
 /// `liveJSWithCfgAndCsrfWithBase` template (runtime-go/rt/live.go:5853-7490).
-/// The 12 header `%`-verb lines are replaced with P1 static literals;
+/// The 12 header `%`-verb lines are replaced with static literals;
 /// the two `%%` CSS escapes are un-escaped to `%`.
 const CLIENT_JS: &str = include_str!("client.js");
 
@@ -75,9 +75,8 @@ const BASE_CSS: &str = concat!(
 
 // ─── Page renders ─────────────────────────────────────────────────────────────
 
-/// P0 scaffold: render `view(model)` to a full HTML page and print it.
-/// Replaced by `live_app` in P1 (Task 10); exists so the bridge + render
-/// path is gate-testable now.
+/// Render `view(model)` to a full HTML page and print it — the static
+/// render path (the interactive server is `live_app`).
 pub fn live_render_static<E, Model, Msg, FView>(
     view: FView,
     model: Model,
@@ -96,7 +95,7 @@ where
     })
 }
 
-/// Minimal page wrap (P0). Kept byte-identical so example 27-live-static
+/// Minimal page wrap. Kept byte-identical so example 27-live-static
 /// continues to pass. The full client-bearing wrap is `render_page_full`.
 pub fn render_page(body: &str) -> String {
     format!(
@@ -113,7 +112,7 @@ pub fn render_page(body: &str) -> String {
 ///
 /// The JS client reads `window.__SKY_SID` / `window.__SKY_BASE` from the
 /// page rather than receiving them as Sprintf args — the 12 header vars in
-/// `client.js` are static P1 literals that reference those window globals.
+/// `client.js` are static literals that reference those window globals.
 pub fn render_page_full(sid: &str, base: &str, body: &str) -> String {
     // sid_js / base_js: Rust Debug ("{:?}") of a &str yields a
     // double-quoted, properly-escaped JS string literal for plain ASCII
@@ -162,7 +161,7 @@ fn dev_console_banner(base: &str) -> String {
         .to_string()
 }
 
-// ─── live_app: axum mount + per-session TEA driver over SSE (Task 10) ───────
+// ─── live_app: axum mount + per-session TEA driver over SSE ─────────────────
 
 use crate::sky_runtime::tea::{SkyCmd, SkySub};
 use std::sync::{Arc, Mutex};
@@ -301,8 +300,8 @@ fn run_cmd<Msg: Send + 'static>(cmd: SkyCmd<Msg>, tx: &UnboundedSender<Msg>, sid
 }
 
 /// (Re-)spawn subscription tasks. Aborts the previous handles first (one model,
-/// re-evaluated each commit — Go tea_subs.go parity). For P1 `subscriptions` is
-/// `Sub.none`, so this is exercised mainly by the None arm.
+/// re-evaluated each commit — Go tea_subs.go parity). When `subscriptions` is
+/// `Sub.none`, this is exercised mainly by the None arm.
 fn spawn_subs<Msg: Clone + Send + 'static>(
     sub: SkySub<Msg>,
     tx: &UnboundedSender<Msg>,
@@ -555,7 +554,7 @@ fn live_ttl() -> std::time::Duration {
 /// per-session TEA loop, and serves an SSE patch channel + a POST event
 /// endpoint. The driver diffs view-over-view and pushes patches over SSE.
 ///
-/// `init` ignores its `req` arg for P1; the generated `main_init` is monomorphic
+/// `init` ignores its `req` arg; the generated `main_init` is monomorphic
 /// over a unit-shaped arg, so we call `init(())`.
 #[allow(clippy::too_many_arguments)]
 pub fn live_app<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
@@ -908,8 +907,8 @@ where
             });
         }
 
-        // Enable the telemetry SQLite spill (#69 / epic D) when
-        // SKY_CONSOLE_DB_PATH is set — the console child reads it via the S1
+        // Enable the telemetry SQLite spill when
+        // SKY_CONSOLE_DB_PATH is set — the console child reads it via the
         // hub kernels. db-gated; a no-op for live-without-db apps. Enabled
         // BEFORE the console child spawns so early telemetry lands in the spill
         // the child will read.
@@ -917,12 +916,12 @@ where
         crate::sky_runtime::telemetry_spill::enable_from_env().await;
 
         // Observability export pipelines: federation push to a parent ingest
-        // (epic C — SKY_PARENT_URL) and remote-hub OTLP push (epic E —
-        // SKY_CONSOLE_HUB). Both env-gated + inert by default.
+        // (SKY_PARENT_URL) and remote-hub OTLP push (SKY_CONSOLE_HUB).
+        // Both env-gated + inert by default.
         push_exporter::enable_from_env().await;
         hub_exporter::enable_from_env().await;
 
-        // Console precedence (epic A): try the pre-built console child +
+        // Console precedence: try the pre-built console child +
         // reverse-proxy; fall back to the in-process console when the binary is
         // absent / spawn fails / readiness times out / the gate is closed.
         // Decided HERE (before the router is built) so both the proxy routes and

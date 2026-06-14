@@ -100,7 +100,7 @@ pub fn decimal_compare(a: Decimal, b: Decimal) -> i64 {
     }
 }
 
-// sub-A.8 T1 — Std.Decimal completion (15 kernels)
+// Std.Decimal completion (15 kernels)
 
 // === Bool comparisons ===
 pub fn decimal_eq(a: Decimal, b: Decimal) -> bool { a.0 == b.0 }
@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(decimal_compare(d("3"), d("2")), 1);
     }
 
-    // sub-A.8 T1 — completion tests
+    // completion tests
 
     #[test]
     fn test_decimal_comparisons() {

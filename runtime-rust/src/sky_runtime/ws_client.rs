@@ -100,8 +100,8 @@ async fn do_connect<E: From<String> + Send + 'static>(
 ) -> SkyResult<E, i64> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
-    // Build the handshake request so custom headers (e.g. Authorization) are
-    // sent — connectWith's cfg.headers were previously dropped.
+    // Build the handshake request so custom headers (e.g. Authorization) from
+    // connectWith's cfg.headers are sent.
     let mut req = match url.as_str().into_client_request() {
         Ok(r) => r,
         Err(e) => return SkyResult::Err(format!("WebSocket.connect {}: bad url: {}", url, e).into()),

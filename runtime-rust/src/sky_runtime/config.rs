@@ -16,7 +16,7 @@ pub type DbRow = ();
 #[cfg(not(feature = "db"))]
 pub const SKY_DB_URL: &str = "";
 
-// sub-B.1 backend-portability helpers. In generated projects these are
+// Backend-portability helpers. In generated projects these are
 // REPLACED by Project.hs's per-driver impls (sqlite/mysql/postgres). The
 // standalone runtime crate (used by `cargo test`) defaults to sqlite shapes.
 #[cfg(feature = "db")]
@@ -31,7 +31,7 @@ pub fn db_format_sql(sql: String) -> String { sql }  // sqlite uses `?` placehol
 #[cfg(feature = "db")]
 pub const DB_USES_RETURNING_ID: bool = false;
 
-// Sub-C.1 — DDL fragment for an auto-incrementing primary key column. In
+// DDL fragment for an auto-incrementing primary key column. In
 // generated projects the per-driver impl is emitted; standalone crate
 // defaults to sqlite.
 #[cfg(feature = "db")]

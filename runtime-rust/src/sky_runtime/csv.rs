@@ -1,4 +1,4 @@
-//! Std.Csv — CSV parse / encode via the `csv` crate (v0.15.47).
+//! Std.Csv — CSV parse / encode via the `csv` crate.
 //!
 //! The Sky `Csv` record (`{ header : List String, rows : List (List String) }`)
 //! is mapped to `CsvDoc` below via the runtimeOpaqueTypes registry, so the

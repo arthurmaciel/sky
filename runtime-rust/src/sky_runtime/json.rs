@@ -190,7 +190,7 @@ pub fn curry10<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: '
 }
 
 // --- Pipeline (curried decoder combinators) ---
-// Curried by design — see README section A0. Pipeline-decoder helpers
+// Curried by design. Pipeline-decoder helpers
 // thread Box<dyn FnOnce> chains that Rust's static trait system can't
 // express in tupled form. These are the ONLY functions in the runtime
 // that intentionally return impl FnOnce.

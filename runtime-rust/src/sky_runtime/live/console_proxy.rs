@@ -1,15 +1,14 @@
-//! Pre-built console child + reverse-proxy (epic A).
+//! Pre-built console child + reverse-proxy.
 //!
 //! Replaces the in-process `console.rs` plain-HTML shell with the **real bundled
 //! Sky.Live console**, spawned as a child process and reverse-proxied at
 //! `/_sky/console/*`. The console binary is **pre-built at the user's `sky build`
-//! time** (epic A1) into a shared cache — at runtime this module only `exec`s it,
+//! time** into a shared cache — at runtime this module only `exec`s it,
 //! never builds. See `runtime-rust/README.md` §"Rust vs Go — divergent strategies"
 //! for why Rust takes the separate-process path Go abandoned (Go's subprocess
 //! OOM was a *runtime* `go build`, which a pre-built binary doesn't incur).
 //!
-//! This module (Task 1): gate + spawn + lifecycle. The reverse-proxy handler and
-//! the Live-boot wiring land in Tasks 2–3.
+//! This module: gate + spawn + lifecycle + the reverse-proxy handler.
 //!
 //! No panic vectors: a missing binary / spawn failure / disabled gate returns
 //! `None` so the caller falls back to the in-process console; no `unwrap`.
@@ -19,7 +18,7 @@ use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 
 /// Override for the pre-built console binary path. When unset, the cache path
-/// (`~/.cache/sky/rust-console/<sky-version>/sky-console`, written by A1) is used.
+/// (`~/.cache/sky/rust-console/<sky-version>/sky-console`, written at build time) is used.
 const CONSOLE_BIN_ENV: &str = "SKY_CONSOLE_BIN";
 
 /// The mount prefix. The parent proxies everything under this path to the child
@@ -47,9 +46,9 @@ const READY_TIMEOUT: Duration = Duration::from_secs(8);
 static CHILD: Mutex<Option<Child>> = Mutex::new(None);
 
 /// Resolve the pre-built console binary path: `SKY_CONSOLE_BIN`, else the
-/// version-keyed cache path A1 populates. `None` when neither exists (→ the
-/// caller falls back to the in-process console; first build before A1 lands, or
-/// a build env where the console couldn't be pre-built).
+/// version-keyed cache path the build step populates. `None` when neither
+/// exists (→ the caller falls back to the in-process console; first build
+/// before the console is pre-built, or a build env where it couldn't be).
 pub fn console_bin_path() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var(CONSOLE_BIN_ENV) {
         if !p.is_empty() {
@@ -59,7 +58,7 @@ pub fn console_bin_path() -> Option<std::path::PathBuf> {
     }
     // Key on the SKY compiler version (same source as `/_sky/buildinfo`), NOT
     // the generated crate's CARGO_PKG_VERSION (always "0.1.0"). The sky build
-    // sets SKY_VERSION when compiling this app, and A1 (Sky.Build.Rust.Console)
+    // sets SKY_VERSION when compiling this app, and Sky.Build.Rust.Console
     // caches the console binary under the SAME version — so both agree on the
     // `~/.cache/sky/rust-console/<ver>/sky-console` path.
     let ver = option_env!("SKY_VERSION").unwrap_or("dev");
@@ -112,7 +111,7 @@ pub fn gate_allows() -> bool {
 ///
 /// `store` is the SQLite file the console renders from (`SKY_CONSOLE_HUB_DB` →
 /// hubStore). `child_collects` selects who WRITES it:
-///   - `true`  — push-to-local-collector (epic A): a lean parent has no spill,
+///   - `true`  — push-to-local-collector: a lean parent has no spill,
 ///     so the child is the collector — it also writes `store`
 ///     (`SKY_CONSOLE_DB_PATH`) from the parent's pushed telemetry.
 ///   - `false` — the parent writes `store` directly (db parent's own spill); the
@@ -224,7 +223,7 @@ pub fn install_shutdown_hook() {
     });
 }
 
-// ─── Reverse proxy (Task 2) ─────────────────────────────────────────────────
+// ─── Reverse proxy ──────────────────────────────────────────────────────────
 
 /// Shared proxy state, initialised once when the proxy mounts: the upstream
 /// origin (`http://127.0.0.1:<child_port>`) and a connection-pooling client.
@@ -420,7 +419,7 @@ pub async fn ensure_console_proxy() -> bool {
     if console_bin_path().is_none() {
         return false;
     }
-    // Console data store + who writes it (epic A push-to-local-collector):
+    // Console data store + who writes it (push-to-local-collector):
     //   - db parent (its own spill is active) → parent writes the store
     //     directly; the child only reads it. No push.
     //   - lean/memory parent → the child collects: the parent PUSHES its in-RAM
@@ -432,7 +431,7 @@ pub async fn ensure_console_proxy() -> bool {
         None => return false,
     };
     if spawn_console(port, &store, /* child_collects = */ !parent_writes).is_none() {
-        // Binary absent (A1 hasn't run / different sky version) or spawn error.
+        // Binary absent (not pre-built / different sky version) or spawn error.
         return false;
     }
     if !wait_ready(port, READY_TIMEOUT).await {

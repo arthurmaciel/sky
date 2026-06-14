@@ -247,7 +247,7 @@ pub fn db_migrate_apply<E: Send + From<String> + 'static>(db: Db, migrations: Ve
     })
 }
 
-// ─── sub-B: 12 missing Std.Db kernels ─────────────────────────────────
+// ─── Additional Std.Db kernels ────────────────────────────────────────
 
 /// `close : Db -> Task Error ()` — sqlx::Pool drops on its own; this is
 /// a graceful explicit close (any in-flight queries finish, then the

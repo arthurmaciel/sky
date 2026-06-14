@@ -26,7 +26,7 @@ pub mod json;
 pub mod db;
 #[cfg(feature = "db")]
 pub use db::*;
-// Telemetry spill (#69 / epic D) — write-through SQLite persistence behind the
+// Telemetry spill — write-through SQLite persistence behind the
 // db feature; the always-compiled telemetry sink calls its cfg-stubbed hook.
 #[cfg(feature = "db")]
 pub mod telemetry_spill;

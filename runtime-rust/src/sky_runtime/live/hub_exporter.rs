@@ -1,4 +1,4 @@
-//! Remote hub OTLP push — HubExporter (epic E, #70).
+//! Remote hub OTLP push — HubExporter.
 //!
 //! When `SKY_CONSOLE_HUB` is set, this background exporter batches logs + spans
 //! and pushes them as **OTLP/JSON** to a remote `sky console-serve` hub

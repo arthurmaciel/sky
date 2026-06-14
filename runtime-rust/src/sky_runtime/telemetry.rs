@@ -56,7 +56,7 @@ fn push_bounded<T>(ring: &Mutex<VecDeque<T>>, cap: usize, e: T) {
     g.push_back(e);
 }
 
-/// Forward a record to the SQLite spill (#69 / epic D) when enabled. A no-op
+/// Forward a record to the SQLite spill when enabled. A no-op
 /// stub keeps this always-compiled sink tokio/sqlx-free when `db` is off.
 #[cfg(feature = "db")]
 #[inline]
@@ -77,7 +77,7 @@ fn spill_span(ts_ms: u64, name: &str, dur_us: u64, ok: bool) {
 fn spill_span(_ts_ms: u64, _name: &str, _dur_us: u64, _ok: bool) {}
 
 /// Forward a record to the remote exporters — federation push to the parent
-/// ingest (epic C) and the remote hub OTLP push (epic E). `live`-gated; a no-op
+/// ingest and the remote hub OTLP push. `live`-gated; a no-op
 /// stub keeps the always-compiled sink reqwest/tokio-free for non-live programs.
 /// Each exporter is independently env-gated and a non-blocking drop-on-full
 /// offer, so this never blocks or panics the caller.
@@ -100,7 +100,6 @@ fn export_span(ts_ms: u64, name: &str, dur_us: u64, ok: bool) {
 #[cfg(not(feature = "live"))]
 #[inline]
 fn export_span(_ts_ms: u64, _name: &str, _dur_us: u64, _ok: bool) {}
-// NOTE: hub_exporter (epic E) is wired above; its module lands with E.
 
 /// Record a completed trace span (called from `Std.Trace.span`).
 pub fn record_span(name: &str, dur_us: u64, ok: bool) {

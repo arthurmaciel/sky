@@ -1,4 +1,4 @@
-//! Sky.Http.Server runtime (Sub-D.1) — axum/hyper under a Sky-native surface.
+//! Sky.Http.Server runtime — axum/hyper under a Sky-native surface.
 //!
 //! Handlers are Sky closures `Fn(Request) -> Task Error Response`. server_get
 //! ERASES the project-defined error type E into a non-generic ServerRoute
@@ -255,7 +255,7 @@ async fn build_request(req: axum::extract::Request) -> (ServerRequest, Option<ax
         .or_else(|| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-real-ip")).map(|(_, v)| v.clone()))
         .or_else(|| parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|ci| ci.0.ip().to_string()))
         .unwrap_or_default();
-    // Sub-D.2: extract the WebSocket upgrader if this is an upgrade request
+    // Extract the WebSocket upgrader if this is an upgrade request
     // (succeeds only when the Connection/Upgrade/Sec-WebSocket-* headers are
     // present). Stashed via task-local so server_web_socket_upgrade can reach it.
     let upgrader = axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &())
@@ -358,7 +358,7 @@ pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<Se
     })
 }
 
-// ─── Sub-D.2: Sky.Http.Server.WebSocket ───────────────────────────────────
+// ─── Sky.Http.Server.WebSocket ────────────────────────────────────────────
 //
 // Bridged types (runtimeOpaqueTypes): WebSocketServer -> WsHandle (the opaque
 // per-peer handle the stdlib pattern-matches as `WebSocketServer raw`);

@@ -35,8 +35,8 @@ pub fn ffi_call_pure_polyfill<T, A>(name: String, _args: Vec<A>) -> T {
 }
 
 /// Same shape as ffi_call_pure_polyfill but for the Task-returning variant.
-/// `Ffi.callTask` Rust-target support is deferred to sub-project D
-/// (Sky.Http.Server, which needs Task-emitting kernels).
+/// `Ffi.callTask` Rust-target support is deferred
+/// (needs Task-emitting kernels).
 // IRREDUCIBLE: unconstrained generic `T` return (no total value); a
 // not-yet-supported-feature guard (Ffi.callTask on target=rust, deferred).
 // SKY-RUST-AUDIT:ACCEPTED (Arthur Maciel, 2026-06-13) — Ffi.callTask on target=rust deferred (sub-project D); unconstrained generic T return has no total value [ledger #3]
