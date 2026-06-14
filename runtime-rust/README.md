@@ -141,6 +141,12 @@ Verification-tooling correctness (a false gate hides real regressions):
 - [ ] **Move `examples/rust/` → `runtime-rust/tests/`** — they are Sky→Rust tests,
       not user-facing examples. Re-wire any script/skill that references the path.
 
+> Detailed pros/cons for the escalated items (`Bytes`, `Task.retryWith`) — and
+> what each upstream/large change entails — are in
+> `docs/escalated-decisions.md`. The two upstream Go-target PR drafts (the `T1`
+> build break + top-level-CAF run-once) with suggested code are in
+> `docs/upstream-pr-proposals.md` (not pushed).
+
 ### Design decisions (resolved 2026-06-14)
 
 1. **perf-sweep** → build full core-feature drivers (Live event round-trip + SSE
