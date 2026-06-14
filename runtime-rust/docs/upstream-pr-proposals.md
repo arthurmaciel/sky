@@ -1,5 +1,13 @@
 # Upstream PR proposals (DRAFT — for review, NOT pushed)
 
+> **⏸ PARKED 2026-06-14 — Go-target work deferred by user direction.** Both
+> fixes below were implemented + verified locally, then **reverted** from
+> `feat/runtime-rust` (commit `fdb58349` reverts PR2, `3674aeb9` reverts PR1) —
+> "we are not going to deal with Go code now". The Go files are
+> back at their pre-PR1 baseline. PR2's non-idempotent-CAF behaviour change also
+> needs more analysis before it could ship. This analysis is retained verbatim
+> for if/when Go-target work resumes; **nothing here is active or pushed.**
+
 Two Go-target codegen fixes. Root cause + repro + **suggested code** below.
 Awaiting approval before any implementation lands or is pushed.
 

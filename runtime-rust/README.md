@@ -160,17 +160,14 @@ Verification-tooling correctness (a false gate hides real regressions):
 
 > Detailed pros/cons for the escalated items (`Bytes`, `Task.retryWith`) — and
 > what each upstream/large change entails — are in `docs/escalated-decisions.md`.
-> Two upstream Go-target fixes are in `docs/upstream-pr-proposals.md` (nothing
-> pushed): **PR1** (`T1` build break) is **implemented + verified locally**
-> (commit `5ac3aeb1`); **PR2** (top-level-CAF run-once) is **implemented +
-> verified locally** (commit `8cab994d`, render-time form) — `27` memoises
-> exactly `dbConn`+`initSchema`, `07` memoises nothing (`Task.run` stays a
-> func), `00` passes 131/131. One **genuine design decision** is flagged for
-> your approval: run-once changes behaviour for a *non-idempotent* effectful CAF
-> (the targeted idempotent setup — `connect`/`CREATE TABLE IF NOT EXISTS` — is
-> observably equivalent). The doc also keeps the cleaner **AST-level** variant
-> (gate on the canonical `Can.Def`, mirroring the Rust `maybeMemoiseNullary`) as
-> the recommended merge shape. Nothing pushed — awaiting your go.
+> Two upstream Go-target fixes were drafted in `docs/upstream-pr-proposals.md`
+> (**PR1** `T1` build break, **PR2** top-level-CAF run-once). Both were
+> implemented + verified locally, then **⏸ PARKED + reverted 2026-06-14** by
+> user direction ("not dealing with Go code now"): commit `fdb58349` reverts
+> PR2, `3674aeb9` reverts PR1 — the Go files are back at their pre-PR1 baseline.
+> PR2 also still needs more analysis on its non-idempotent-CAF behaviour change.
+> The analysis is retained in the doc for if/when Go-target work resumes;
+> nothing is active or pushed.
 
 ### Design decisions (resolved 2026-06-14)
 
