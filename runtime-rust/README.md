@@ -30,11 +30,13 @@ copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
       2 test-only (`time.rs`, `html.rs`) + 2 documented-IRREDUCIBLE/ACCEPTED
       (`ffi_polyfills` callPure dead-for-valid-Sky, callTask deferred). No new
       reachable panic. (`live/mod.rs` lock-family already poison-tolerant.)
-- [ ] **Re-audit the ~40 `panic!`/`unreachable!`/indexing-slicing follow-up**
-      (filed in `runtime-panic-vector-hardening-design.md`): classify each as
-      test-only / correct-by-construction / reachable; convert any reachable one
-      to a total form with a structured-error fallback. Add the `clippy::panic`/
-      `indexing_slicing` deny gate over non-test runtime code.
+- [x] **Panic-vector deny gate is comprehensive and clippy-clean** (verified
+      2026-06-14). `lib.rs` `#![cfg_attr(not(test), deny(clippy::indexing_slicing,
+      panic, unreachable))]` + `Cargo.toml [lints.clippy]` `unwrap_used`/
+      `expect_used` deny (tests exempt via `clippy.toml`). `cargo clippy
+      --features full` passes → zero panic vectors in non-test code; the only
+      `#[allow(clippy::panic)]` are the 2 documented-IRREDUCIBLE `ffi_polyfills`
+      sites. The "~40-site follow-up" landed.
 
 ### T1 — Correctness (behavioral Go-parity)
 
@@ -106,14 +108,15 @@ Verification-tooling correctness (a false gate hides real regressions):
 
 ### T2 — Soundness
 
-- [~] **`dyn Any` register (#44 audit)** — 4 runtime-internal sites: per-type
-      broker (TypeId-keyed, correct-by-construction), `Std.Cache` (per-handle K/V,
-      correct-by-construction), `OnRaw` event payload (opaque pass-through, never
-      downcast), FFI unconstrained-generic return (statically dead). None in
-      generated code; all documented `SKY-RUST-AUDIT:ACCEPTED`. Decide: keep as
-      sound-by-construction (documented) or attempt elimination. `[D]`
+- [x] **`dyn Any` register (#44) → `SOUNDNESS_LEDGER.md`.** All accepted soundness
+      exceptions formalised (ledger #1 crypto-HMAC, #2 email-HMAC, #3 ffi
+      generic-T, #4 dyn-Any registries, #5 the one `unsafe`, + OnRaw note), each
+      argued sound-by-construction. ⏳ future-review trigger recorded (re-examine
+      after stabilisation; #4 becomes reducible if codegen ever monomorphises the
+      pub/sub payload / cache K-V). None in generated code (the no-`Any` rule
+      targets generated code, which has zero `Any`).
 - [x] Single `unsafe` block (`console_proxy.rs` fork `pre_exec` → async-signal-safe
-      `prctl`) — justified, SAFETY-commented.
+      `prctl`) — justified, SAFETY-commented (ledger #5).
 
 ### T3 — Efficiency / cleanup (no correctness impact)
 
