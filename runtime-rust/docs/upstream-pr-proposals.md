@@ -7,6 +7,12 @@ Awaiting approval before any implementation lands or is pushed.
 
 ## PR 1 — `fix(go): lambda param with an out-of-scope type var emits `undefined: T1``
 
+> **STATUS: IMPLEMENTED + VERIFIED locally (commit `5ac3aeb1`), NOT pushed.**
+> Fix landed at `typedLambdaParam` (`src/Sky/Build/Compile.hs`) per the suggested
+> approach below. Verified: `00-standard-libs` go-builds; 07/09/12/16/19/26/27
+> (lambda/HOF/Live-heavy) still go-build (no regression); cabal test no failures.
+> Ready to cherry-pick into a clean Go-target PR on your approval.
+
 **Severity:** build-breaking. `examples/00-standard-libs` (the stdlib smoke test)
 fails `go build`.
 
