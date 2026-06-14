@@ -87,9 +87,12 @@ fn main() {
     let mut git_branch: Option<String> = None;
     let mut git_tag: Option<String> = None;
 
+    let mut audit = false;
+
     let mut i = 0;
     while i < raw_args.len() {
         match raw_args[i].as_str() {
+            "--audit" => { audit = true; }
             "--features" => {
                 i += 1;
                 if i < raw_args.len() {
@@ -126,10 +129,18 @@ fn main() {
         tag:    git_tag.clone(),
     });
 
+    if audit {
+        TAIL_AUDIT_ENABLED.with(|c| c.set(true));
+    }
+
     let results: Vec<PkgInfo> = crate_args
         .iter()
         .map(|name| inspect_crate(name, &features, git.as_ref()))
         .collect();
+
+    if audit {
+        emit_tail_audit_report(&crate_args, &results);
+    }
 
     let json = if crate_args.len() == 1 {
         serde_json::to_string_pretty(&results[0])
@@ -150,6 +161,49 @@ fn main() {
             };
             println!("{}", serde_json::to_string_pretty(&err).unwrap());
         }
+    }
+}
+
+/// Print the tail-filter drop histogram to stderr (diagnostic `--audit` only).
+/// Quantifies what the auto-FFI boundary discards: per reason, how many drops
+/// are `valuable` (free fn / ctor — real lost surface) vs accessor-only, plus
+/// the most common offending Rust types. Lines are prefixed `TAIL_AUDIT` so a
+/// sweep can grep them out of stderr.
+fn emit_tail_audit_report(crate_args: &[String], results: &[PkgInfo]) {
+    let kept: usize = results.iter().map(|p| p.functions.len()).sum();
+    let drops: Vec<(String, bool, String)> =
+        TAIL_AUDIT_DROPS.with(|v| v.borrow().clone());
+
+    let crates = crate_args.join(",");
+    eprintln!(
+        "TAIL_AUDIT crates={crates} kept={kept} tail_dropped={}",
+        drops.len()
+    );
+
+    for reason in ["lifetime", "result_borrow", "array_slice"] {
+        let in_reason: Vec<&(String, bool, String)> =
+            drops.iter().filter(|(r, _, _)| r == reason).collect();
+        let valuable = in_reason.iter().filter(|(_, v, _)| *v).count();
+
+        // Top offending types for this reason (descending frequency).
+        let mut freq: HashMap<&str, usize> = HashMap::new();
+        for (_, _, ty) in &in_reason {
+            *freq.entry(ty.as_str()).or_insert(0) += 1;
+        }
+        let mut top: Vec<(&str, usize)> = freq.into_iter().collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        let sample: Vec<String> = top
+            .iter()
+            .take(5)
+            .map(|(ty, n)| format!("{ty}×{n}"))
+            .collect();
+
+        eprintln!(
+            "TAIL_AUDIT reason={reason} total={} valuable={} types=[{}]",
+            in_reason.len(),
+            valuable,
+            sample.join(", ")
+        );
     }
 }
 
@@ -603,6 +657,46 @@ fn is_public(item: &serde_json::Value) -> bool {
     item["visibility"].as_str() == Some("public")
 }
 
+// ── Drop-reason audit (diagnostic; `--audit` only) ─────────────────────
+// When enabled, each tail-filter `return None` records (reason, valuable,
+// offending_type) so a sweep can quantify what the auto-FFI boundary drops
+// — specifically whether any *constructable* surface (free fn / ctor) is lost
+// solely to the lifetime / borrowed-result / array-slice filters, vs only
+// peripheral accessors. Affects ONLY stderr output; the emitted bindings JSON
+// is byte-identical with or without the flag.
+thread_local! {
+    static TAIL_AUDIT_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TAIL_AUDIT_DROPS: std::cell::RefCell<Vec<(String, bool, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn tail_audit_enabled() -> bool {
+    TAIL_AUDIT_ENABLED.with(|c| c.get())
+}
+
+/// Record a tail-filter drop: `reason` ∈ {lifetime, result_borrow, array_slice};
+/// `valuable` ⇒ a free fn or constructor-shaped method (would add real surface);
+/// `offending_type` is the first param/result Rust type that tripped the filter.
+fn record_tail_drop(reason: &str, valuable: bool, offending_type: &str) {
+    if tail_audit_enabled() {
+        TAIL_AUDIT_DROPS.with(|v| {
+            v.borrow_mut()
+                .push((reason.to_string(), valuable, offending_type.to_string()))
+        });
+    }
+}
+
+/// A drop is "valuable" if it would have added constructable surface — a free
+/// function (no receiver) or a constructor-shaped method — rather than just one
+/// more accessor on a value the caller must already hold.
+fn drop_is_valuable(name: &str, recv: Option<(&str, &str)>) -> bool {
+    recv.is_none()
+        || matches!(name, "new" | "default" | "parse" | "build" | "open" | "create")
+        || name.starts_with("from_")
+        || name.starts_with("with_")
+        || name.starts_with("try_")
+}
+
 /// Parse a function item from the rustdoc JSON index.
 ///
 /// `recv` is `Some((sky_type, rust_type))` for methods, `None` for free fns.
@@ -725,6 +819,15 @@ fn parse_fn_item(
     let touches_lifetime = params.iter().any(|p| has_lifetime(&p.rust_type))
         || results.iter().any(|p| has_lifetime(&p.rust_type));
     if touches_lifetime {
+        if tail_audit_enabled() {
+            let offending = params
+                .iter()
+                .chain(results.iter())
+                .find(|p| has_lifetime(&p.rust_type))
+                .map(|p| p.rust_type.clone())
+                .unwrap_or_default();
+            record_tail_drop("lifetime", drop_is_valuable(name, recv), &offending);
+        }
         return None;
     }
 
@@ -734,11 +837,20 @@ fn parse_fn_item(
     // needs a ToOwned impl that may not exist (E0599).  Plain `&str`/`&String`
     // is fine — FfiGen copies it to an owned String.  References in PARAMETER
     // position are unaffected (the wrapper takes an owned value and borrows).
-    let result_borrows = results.iter().any(|p| {
+    let is_result_borrow = |p: &Param| {
         let rt = p.rust_type.trim();
         rt.contains('&') && rt != "&str" && rt != "&String" && !is_coercible_seq(rt)
-    });
+    };
+    let result_borrows = results.iter().any(is_result_borrow);
     if result_borrows {
+        if tail_audit_enabled() {
+            let offending = results
+                .iter()
+                .find(|p| is_result_borrow(p))
+                .map(|p| p.rust_type.clone())
+                .unwrap_or_default();
+            record_tail_drop("result_borrow", drop_is_valuable(name, recv), &offending);
+        }
         return None;
     }
 
@@ -746,11 +858,22 @@ fn parse_fn_item(
     // `Bytes` maps to `Vec<u8>`, which doesn't coerce to a fixed-size array or
     // borrowed slice parameter, and such a result can't be returned by value.
     // (`Vec<u8>` itself has no brackets and is unaffected.)
+    let is_bad_array_or_slice =
+        |p: &Param| p.rust_type.contains('[') && !is_coercible_seq(&p.rust_type);
     let has_bad_array_or_slice = params
         .iter()
         .chain(results.iter())
-        .any(|p| p.rust_type.contains('[') && !is_coercible_seq(&p.rust_type));
+        .any(is_bad_array_or_slice);
     if has_bad_array_or_slice {
+        if tail_audit_enabled() {
+            let offending = params
+                .iter()
+                .chain(results.iter())
+                .find(|p| is_bad_array_or_slice(p))
+                .map(|p| p.rust_type.clone())
+                .unwrap_or_default();
+            record_tail_drop("array_slice", drop_is_valuable(name, recv), &offending);
+        }
         return None;
     }
 
