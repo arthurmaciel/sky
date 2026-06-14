@@ -166,9 +166,12 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         -- code uses the qualified `sky_runtime::ui::*` path) whenever Std.Ui /
         -- Html UI is in play. The Tui Element renderer also needs it.
         uiMod = if RustBuilder.usesHtml usage || RustBuilder.usesLive usage || RustBuilder.usesTui usage then ["pub mod ui;"] else []
-        -- Std.Live only when used — live submodule (the Sky.Live server).
-        liveMod = if RustBuilder.usesLive usage then ["pub mod live;"] else []
-        liveUse = if RustBuilder.usesLive usage then ["pub use live::*;"] else []
+        -- Std.Live when used — live submodule (the Sky.Live server). Sky.Webview
+        -- ALSO needs it: webview.rs reuses live::dispatch::{build_index,
+        -- HandlerIndex} for its in-process IPC event bridge.
+        needsLiveMod = RustBuilder.usesLive usage || RustBuilder.usesWebview usage
+        liveMod = if needsLiveMod then ["pub mod live;"] else []
+        liveUse = if needsLiveMod then ["pub use live::*;"] else []
         -- Std.Tui — terminal backend (pulls crossterm). Only when used.
         tuiMod = if RustBuilder.usesTui usage then ["pub mod tui;"] else []
         tuiUse = if RustBuilder.usesTui usage then ["pub use tui::{tui_app, tui_app_ui};"] else []

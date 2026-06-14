@@ -634,7 +634,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- for LiveReq` in db.rs, which lets `Db.getString "path" req` read an init
     -- handler's typed request (#52). Without it the impl is excluded and the
     -- generated project fails with `LiveReq: SkyRow not satisfied`.
-    , "default = [" ++ intercalate ", " (map show (["tokio", "crypto", "json"] ++ ["db" | needsDb] ++ ["redis_store" | needsRedis] ++ ["live" | usesLive uk])) ++ "]"
+    , "default = [" ++ intercalate ", " (map show (["tokio", "crypto", "json"] ++ ["db" | needsDb] ++ ["redis_store" | needsRedis] ++ ["live" | needsLive] ++ ["webview" | usesWebview uk])) ++ "]"
     , "tokio = []"
     , "crypto = []"
     , "json = []"
@@ -645,7 +645,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     [ "redis_store = []" | needsRedis ] ++
     -- Std.Live: declare the live feature so #[cfg(feature = "live")] in the
     -- copied runtime files evaluates to true when the project uses Sky.Live.
-    [ "live = []" | usesLive uk ] ++
+    [ "live = []" | needsLive ] ++
+    -- Sky.Webview: declare the webview feature so #[cfg(feature="webview")] in the
+    -- copied webview.rs compiles the REAL wry/tao backend (not the Err stub).
+    -- Enabled by default above when usesWebview (detection model, like Live/Tui).
+    [ "webview = []" | usesWebview uk ] ++
     [ ""
     , "[dependencies]"
     , "tokio = { version = \"1\", features = [" ++ intercalate ", " (map show tokioFeats) ++ "] }"
@@ -661,7 +665,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     [ "redis = { version = \"0.27\", features = [\"tokio-comp\"] }" | needsRedis, "redis" `notElem` userDepNames ] ++
     -- P5-T4b: the live SessionStore trait is `#[async_trait]` — pull the crate
     -- whenever the project uses Sky.Live.
-    [ "async-trait = \"0.1\"" | usesLive uk, "async-trait" `notElem` userDepNames ] ++
+    [ "async-trait = \"0.1\"" | needsLive, "async-trait" `notElem` userDepNames ] ++
     [ "serde_json = \"1\""
     , "sha2 = \"0.10\""
     ] ++
@@ -719,7 +723,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- live_app mounts its own axum Router (self-contained — no `server` module),
     -- so it needs axum even when Sky.Http.Server isn't.
     [ name ++ " = " ++ spec
-    | usesHttpServer uk || usesLive uk
+    | usesHttpServer uk || needsLive
     , (name, spec) <-
         [ ("axum",       "{ version = \"0.7\", features = [\"ws\"] }")
         , ("tower-http", "{ version = \"0.5\", features = [\"fs\", \"catch-panic\"] }")
@@ -729,7 +733,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- numeric/bool record field decodes "42"/"true", a String field keeps the
     -- raw string) — the all-String serde_json path rejected non-String fields.
     [ "serde_urlencoded = \"0.7\""
-    | usesLive uk, "serde_urlencoded" `notElem` userDepNames ] ++
+    | needsLive, "serde_urlencoded" `notElem` userDepNames ] ++
     -- Sky.Core.Http client + Std.Email: reqwest when used. rustls (no system
     -- OpenSSL). `stream` feature for Http.Stream's bytes_stream(). Std.Live ALSO
     -- pulls it: the live runtime's console reverse-proxy (live/console_proxy.rs,
@@ -737,11 +741,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- response (bytes_stream → axum Body::from_stream) so SSE passes through.
     -- Any of the three flags pulls it; emit once.
     [ "reqwest = { version = \"0.12\", default-features = false, features = [\"rustls-tls\", \"gzip\", \"stream\"] }"
-    | usesHttp uk || usesEmail uk || usesLive uk, "reqwest" `notElem` userDepNames ] ++
+    | usesHttp uk || usesEmail uk || needsLive, "reqwest" `notElem` userDepNames ] ++
     -- futures-util: WebSocket client, plus the streaming paths — http_stream.rs
     -- (StreamExt::next) and server_stream.rs (stream::unfold for the body).
     [ "futures-util = \"0.3\""
-    | usesWsClient uk || usesHttp uk || usesHttpServer uk || usesLive uk, "futures-util" `notElem` userDepNames ] ++
+    | usesWsClient uk || usesHttp uk || usesHttpServer uk || needsLive, "futures-util" `notElem` userDepNames ] ++
     -- Sky.Core.WebSocket client: tokio-tungstenite (futures-util above).
     [ "tokio-tungstenite = \"0.24\""
     | usesWsClient uk, "tokio-tungstenite" `notElem` userDepNames ] ++
@@ -750,6 +754,13 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     | usesTui uk, "crossterm" `notElem` userDepNames ] ++
     [ "unicode-width = \"0.1\""
     | usesTui uk, "unicode-width" `notElem` userDepNames ] ++
+    -- Sky.Webview native window: wry 0.24 / tao 0.16 (webkit2gtk-4.0 + libsoup-2.4
+    -- on Linux). Only when Std.Webview is used; the webview feature (default-on
+    -- above for these projects) compiles webview.rs's real backend against them.
+    [ name ++ " = " ++ spec
+    | usesWebview uk
+    , (name, spec) <- [ ("wry", "\"0.24\""), ("tao", "\"0.16\"") ]
+    , name `notElem` userDepNames ] ++
     [ emitDepLine name spec
     | (name, spec) <- rustDeps
     , not (null name)
@@ -763,7 +774,7 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- spawned console child dies with the parent even on SIGKILL. Referenced
     -- only under cfg(target_os = "linux"); the unix-scoped table keeps it off
     -- non-unix builds.
-    (if usesLive uk && "libc" `notElem` userDepNames then
+    (if needsLive && "libc" `notElem` userDepNames then
         [ ""
         , "[target.'cfg(unix)'.dependencies]"
         , "libc = \"0.2\""
@@ -776,6 +787,11 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     ]
   where
     userDepNames = [ n | (n, _) <- rustDeps, not (null n) ]
+    -- Sky.Webview reuses Sky.Live's renderer + event dispatch (webview.rs imports
+    -- live::dispatch::{build_index, HandlerIndex}), so a Webview app needs the
+    -- whole `live` stack (module + feature + deps) even though it runs no HTTP
+    -- server. needsLive therefore covers both.
+    needsLive = usesLive uk || usesWebview uk
     -- A sqlx backend is needed for Std.Db OR a sqlx-backed live store.
     needsDb = usesDb uk || (usesLive uk && liveStore `elem` ["sqlite", "postgres"])
     -- The redis crate is needed only for a redis live store.
@@ -794,13 +810,14 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- axum pulls `sync` transitively for the server case, but a plain Sky.Cli
     -- program has no axum, so request it explicitly.
     tokioFeats = ["rt", "rt-multi-thread", "macros", "time"]
-                 ++ ["net" | usesHttpServer uk || usesHttp uk || usesWsClient uk || usesEmail uk || usesLive uk]
+                 ++ ["net" | usesHttpServer uk || usesHttp uk || usesWsClient uk || usesEmail uk || needsLive]
                  -- Std.Live: live/session.rs + live/sse.rs use tokio::sync::mpsc.
-                 ++ ["sync" | usesTea uk || usesWsClient uk || usesLive uk]
+                 ++ ["sync" | usesTea uk || usesWsClient uk || needsLive]
                  -- Std.Live console proxy (epic A): live/console_proxy.rs spawns
                  -- the pre-built console child (tokio::process) and kills it on
-                 -- SIGTERM/SIGINT (tokio::signal).
-                 ++ (if usesLive uk then ["process", "signal"] else [])
+                 -- SIGTERM/SIGINT (tokio::signal). Sky.Webview pulls the live
+                 -- module too (needsLive), so it needs these features as well.
+                 ++ (if needsLive then ["process", "signal"] else [])
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"

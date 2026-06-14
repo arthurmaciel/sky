@@ -1104,6 +1104,35 @@ isLiveRustProject rustDir = do
             content <- readFile' cargoToml   -- strict; handle closed before any later write
             return ("\"live\"" `isInfixOf` content)
 
+-- | Sky.Webview build prerequisite check. The generated Cargo.toml pulls wry/tao
+-- (native window) only when the program uses Std.Webview; those link against the
+-- system webview dev libs. Probe pkg-config BEFORE cargo so a missing lib fails
+-- with an actionable install message instead of a cryptic linker error (mirrors
+-- Go's cgo-detect message). No-op for non-webview projects.
+checkWebviewLibsRust :: FilePath -> IO ()
+checkWebviewLibsRust rustDir = do
+    let cargoToml = rustDir </> "Cargo.toml"
+    present <- doesFileExist cargoToml
+    when present $ do
+        content <- readFile' cargoToml
+        when ("wry =" `isInfixOf` content) $ do
+            results <- mapM (\p -> do
+                        (ec, _, _) <- readProcessWithExitCode "pkg-config" ["--exists", p] ""
+                        return (p, ec == ExitSuccess)) ["webkit2gtk-4.0", "libsoup-2.4"]
+            let missing = [ p | (p, ok) <- results, not ok ]
+            when (not (null missing)) $ do
+                hPutStrLn stderr $ unlines
+                    [ ""
+                    , "error: Sky.Webview needs system webview dev libraries that are missing:"
+                    , "         " ++ intercalate ", " missing
+                    , "  Install them, then re-run `sky build --target rust`:"
+                    , "    Debian/Ubuntu:  sudo apt install libwebkit2gtk-4.0-dev libsoup2.4-dev"
+                    , "    Fedora:         sudo dnf install webkit2gtk4.0-devel libsoup-devel"
+                    , "    Arch:           sudo pacman -S webkit2gtk libsoup"
+                    , "  (wry 0.24 / tao 0.16 target webkit2gtk-4.0 + libsoup-2.4.)"
+                    ]
+                exitFailure
+
 
 -- | Split a list into N roughly-equal chunks. Used by the install
 -- chunked-multi strategy. Filters out empty chunks so callers don't
@@ -1730,6 +1759,7 @@ runCommand cmd = case cmd of
                         -- the runtime looks for the console A1 cached under the
                         -- same version).
                         System.Environment.setEnv "SKY_VERSION" skyBuildVersion
+                        checkWebviewLibsRust rustDir
                         putStrLn "Running cargo build..."
                         callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
                         putStrLn $ "Build complete: " ++ rustDir ++ "/target/debug/sky-app"
@@ -1775,6 +1805,7 @@ runCommand cmd = case cmd of
                     Toml.TargetRust -> do
                         let rustDir = outDir ++ "/Rust"
                         hFlush stdout
+                        checkWebviewLibsRust rustDir
                         putStrLn $ "Running cargo build in " ++ rustDir
                         callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
                         putStrLn $ "Build complete, running..."
