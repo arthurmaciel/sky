@@ -95,23 +95,47 @@ discover_port() { # $1=pid $2=env-hint-port -> echoes port / returns 1
 }
 
 probe_coldstart_server() { # $1=binary -> median ms (exec→first 200)
-  local samples=() i port pid t0 t1 actual
+  # Sniff the app's own "listening on …:PORT" line (authoritative) then time to
+  # its first 200 — never a foreign process on the hint port (see start_server).
+  local samples=() i port pid t0 log deadline lp ok
   for i in $(seq 1 "$COLD_RUNS"); do
-    port=$(free_port); t0=$(date +%s.%N)
-    SKY_LIVE_PORT="$port" PORT="$port" "$1" >/dev/null 2>&1 & pid=$!
-    actual=$(discover_port "$pid" "$port") || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; continue; }
-    t1=$(date +%s.%N); kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-    samples+=("$(pyf "($t1-$t0)*1000")")
+    port=$(free_port); log="$(mktemp)"; t0=$(date +%s.%N)
+    SKY_LIVE_PORT="$port" PORT="$port" "$1" >"$log" 2>&1 & pid=$!
+    ok=""; deadline=$(( $(date +%s) + ${READY_TIMEOUT_S%.*} ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      kill -0 "$pid" 2>/dev/null || break
+      lp="$(grep -iE 'listening on' "$log" 2>/dev/null | grep -oE ':[0-9]+' | tail -1 | tr -d ':')"
+      [ -n "$lp" ] || lp="$port"
+      curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$lp/" && { ok=1; break; }
+      sleep 0.05
+    done
+    [ -n "$ok" ] && samples+=("$(pyf "($(date +%s.%N)-$t0)*1000")")
+    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -f "$log"
   done
   [ ${#samples[@]} -eq 0 ] && { echo 0; return; }
   printf '%s\n' "${samples[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int(NR/2)+1]}'
 }
 
 start_server() { # $1=binary -> echoes "pid port"
+  # Trust the app's OWN "listening on …:PORT" log line as authoritative. The old
+  # path scanned listeners + curled the env hint, which could latch onto a FOREIGN
+  # process on the hint port (e.g. rhythmbox's :3689 answers / with 200 but 404s
+  # the app's routes) → every Server.listen probe measured the wrong server. The
+  # app self-reports its real port; sniff that, fall back to the hint (Sky.Live
+  # honours SKY_LIVE_PORT) only if the app prints nothing.
   local port; port=$(free_port)
-  SKY_LIVE_PORT="$port" PORT="$port" "$1" >/dev/null 2>&1 & local pid=$!
-  local actual; actual=$(discover_port "$pid" "$port") \
-    || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 1; }
+  local log; log="$(mktemp)"
+  SKY_LIVE_PORT="$port" PORT="$port" "$1" >"$log" 2>&1 & local pid=$!
+  local actual="" deadline; deadline=$(( $(date +%s) + ${READY_TIMEOUT_S%.*} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    kill -0 "$pid" 2>/dev/null || { rm -f "$log"; return 1; }
+    local lp; lp="$(grep -iE 'listening on' "$log" 2>/dev/null | grep -oE ':[0-9]+' | tail -1 | tr -d ':')"
+    if [ -n "$lp" ] && curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$lp/"; then actual="$lp"; break; fi
+    if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$port/"; then actual="$port"; break; fi
+    sleep 0.2
+  done
+  rm -f "$log"
+  [ -n "$actual" ] || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 1; }
   echo "$pid $actual"
 }
 
@@ -189,6 +213,131 @@ probe_live_event() { # $1=binary -> req/s
   kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
 }
 
+SSE_WINDOW_S="${SSE_WINDOW_S:-3}"
+
+# Discover an SSE endpoint by probing the example's GET routes for a
+# text/event-stream response (the streaming route, not the "/" landing page).
+sse_endpoint() { # $1=port $2=exampleDir -> "/path" | ""
+  local port="$1" d="$2" r routes hdr
+  routes="$(grep -rhoE 'Server\.(get|any)[[:space:]]+"[^"]+"' "$d/src" 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' | sort -u)"
+  for r in $routes /events /relay /stream /sse; do
+    [ "$r" = "/" ] && continue
+    if curl -sN -m 2 -D - -o /dev/null "http://127.0.0.1:$port$r" 2>/dev/null | grep -qi "text/event-stream"; then
+      echo "$r"; return
+    fi
+  done
+}
+
+# SSE events/sec against an ALREADY-RUNNING server (no start/stop here — the
+# server shape shares one instance across probes; see collect_server_metrics).
+# Opens the stream over SSE_CONC connections and counts `data:`/`event:` frames
+# in a fixed window — the server-side stream emit throughput (the core feature,
+# never `GET /`).
+sse_eps_on() { # $1=port $2=exampleDir -> events/sec
+  local port="$1" ep total=0 c tmp
+  ep="$(sse_endpoint "$port" "$2")"
+  [ -n "$ep" ] || { echo 0; return; }
+  tmp="$(mktemp -d)"
+  for c in $(seq 1 "${SSE_CONC:-16}"); do
+    ( timeout "$SSE_WINDOW_S" curl -sN "http://127.0.0.1:$port$ep" 2>/dev/null | grep -cE '^(data|event):' > "$tmp/$c" 2>/dev/null ) &
+  done
+  wait
+  for c in $(seq 1 "${SSE_CONC:-16}"); do total=$((total + $(cat "$tmp/$c" 2>/dev/null || echo 0))); done
+  rm -rf "$tmp"
+  python3 -c "print(round($total/$SSE_WINDOW_S,2))" 2>/dev/null || echo 0
+}
+
+# WebSocket round-trips/sec: connect to the ws route, send/recv echo frames over
+# a window across SSE_CONC connections. The core feature of a WebSocket app (the
+# bidirectional path — GET / is only the HTML landing page).
+ws_eps_on() { # $1=port $2=exampleDir -> round-trips/sec (server already running)
+  local port="$1" path eps
+  path="$(grep -rhoE 'Server\.(get|any|post)[[:space:]]+"[^"]+"' "$2/src" 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' | grep -iE 'ws|socket' | head -1)"
+  [ -z "$path" ] && path="/ws"
+  # Pure-stdlib raw WebSocket client (RFC 6455). The `websockets` PyPI lib (9.1
+  # here) is broken on Python 3.10+ (removed `loop=` kwarg) → don't depend on it.
+  eps="$(WS_HOST="127.0.0.1" WS_PORT="$port" WS_PATH="$path" WS_CONC="${SSE_CONC:-16}" WS_WINDOW="${SSE_WINDOW_S:-3}" python3 - <<'PY' 2>/dev/null
+import socket, os, struct, base64, time, threading
+host=os.environ["WS_HOST"]; port=int(os.environ["WS_PORT"]); path=os.environ["WS_PATH"]
+conc=int(os.environ["WS_CONC"]); window=float(os.environ["WS_WINDOW"])
+def recvn(s,n):
+    b=b''
+    while len(b)<n:
+        c=s.recv(n-len(b))
+        if not c: return None
+        b+=c
+    return b
+def handshake(s):
+    key=base64.b64encode(os.urandom(16)).decode()
+    s.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+               f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+    resp=b''
+    while b'\r\n\r\n' not in resp:
+        c=s.recv(4096)
+        if not c: break
+        resp+=c
+    return b'101' in resp.split(b'\r\n',1)[0]
+def enc(p):
+    b=p.encode(); n=len(b); m=os.urandom(4); h=bytearray([0x81])
+    if n<126: h.append(0x80|n)
+    elif n<65536: h.append(0x80|126); h+=struct.pack('>H',n)
+    else: h.append(0x80|127); h+=struct.pack('>Q',n)
+    h+=m; return bytes(h)+bytes(b[i]^m[i%4] for i in range(n))
+def dec(s):
+    h=recvn(s,2)
+    if not h: return None
+    ln=h[1]&0x7f; mk=h[1]&0x80
+    if ln==126: ln=struct.unpack('>H',recvn(s,2))[0]
+    elif ln==127: ln=struct.unpack('>Q',recvn(s,8))[0]
+    msk=recvn(s,4) if mk else None
+    p=recvn(s,ln) or b''
+    return p
+counts=[0]*conc
+def worker(i,deadline):
+    try:
+        s=socket.create_connection((host,port),timeout=3); s.settimeout(3)
+        if not handshake(s): return
+        n=0
+        while time.monotonic()<deadline:
+            s.sendall(enc("ping"))
+            if dec(s) is None: break
+            n+=1
+        counts[i]=n; s.close()
+    except Exception:
+        pass
+dl=time.monotonic()+window
+ts=[threading.Thread(target=worker,args=(i,dl)) for i in range(conc)]
+[t.start() for t in ts]; [t.join(window+5) for t in ts]
+print(round(sum(counts)/window,2))
+PY
+)"
+  echo "${eps:-0}"
+}
+
+# Server-shape probes share ONE server instance. Server.listen apps hard-bind a
+# port; a fresh start_server per probe rebinds it, and after `ab` floods the port
+# with TIME_WAIT sockets the next bind fails → false 0 on sse_eps/ws_eps. Start
+# once, run throughput + rss + core-feature against it, kill once.
+collect_server_metrics() { # $1=binary $2=exampleDir -> metric lines
+  local b="$1" ed="$2"
+  echo "coldstart $(probe_coldstart_server "$b")"   # restarts (no flood)
+  local pp; pp=$(start_server "$b") || { echo "throughput 0"; echo "rss 0"; return; }
+  local pid=${pp% *} port=${pp#* } rps hwm
+  # Core-feature probes run FIRST, on the FRESH server — the `ab` flood below
+  # leaves ~AB_N client TIME_WAIT sockets that can starve the streaming probe's
+  # new connections (false 0). SSE/streaming → sse_eps; WebSocket → ws_eps.
+  if [ -n "$ed" ] && grep -rqE 'Stream\.stream|Http\.Stream|text/event-stream' "$ed/src" 2>/dev/null; then
+    echo "sse_eps $(sse_eps_on "$port" "$ed")"
+  fi
+  if [ -n "$ed" ] && grep -rqE 'WebSocket|Server\.upgrade|\bupgrade\b' "$ed/src" 2>/dev/null; then
+    echo "ws_eps $(ws_eps_on "$port" "$ed")"
+  fi
+  rps=$(timeout "$AB_TIMEOUT_S" ab $AB_FLAGS -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$port/" 2>/dev/null | awk '/Requests per second/{print $4}')
+  echo "throughput ${rps:-0}"
+  hwm=$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null); echo "rss ${hwm:-0}"
+  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+}
+
 probe_rss_cli() { /usr/bin/time -v "$1" 2>/tmp/perf-time.txt >/dev/null; awk '/Maximum resident set size/{print $NF}' /tmp/perf-time.txt; }
 
 probe_rss_server() { # $1=binary -> peak RSS KB under load
@@ -213,12 +362,12 @@ probe_live_sse() { # $1=binary -> "p95_ms eps"
   echo "$(echo "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["patch_p95"],d["events_per_sec"])' 2>/dev/null || echo "0 0")"
 }
 
-collect_metrics() { # $1=binary $2=shape -> "metric value" lines
-  local b="$1" s="$2"
+collect_metrics() { # $1=binary $2=shape $3=exampleDir -> "metric value" lines
+  local b="$1" s="$2" ed="${3:-}"
   echo "binsize $(probe_binsize "$b")"
   case "$s" in
     cli) echo "coldstart $(probe_coldstart_cli "$b")"; echo "rss $(probe_rss_cli "$b")" ;;
-    server) echo "coldstart $(probe_coldstart_server "$b")"; echo "throughput $(probe_throughput "$b")"; echo "rss $(probe_rss_server "$b")" ;;
+    server) collect_server_metrics "$b" "$ed" ;;
     live)
       # Live shape gates on the same four metrics as server (the Rust Live entry
       # now block_on's its live_app future — it binds a port and serves). The
@@ -274,8 +423,8 @@ run_one() { # $1=example -> table + exit code
   gobin=$(build_target "$d" go)   || { echo "go build failed for $ex"; return 3; }
   rustbin=$(build_target "$d" rust) || { echo "rust build failed for $ex"; return 1; }
   declare -A GO RUST
-  while read -r k v; do GO[$k]=$v; done   < <(collect_metrics "$gobin" "$shape")
-  while read -r k v; do RUST[$k]=$v; done < <(collect_metrics "$rustbin" "$shape")
+  while read -r k v; do GO[$k]=$v; done   < <(collect_metrics "$gobin" "$shape" "$d")
+  while read -r k v; do RUST[$k]=$v; done < <(collect_metrics "$rustbin" "$shape" "$d")
   echo "== $ex ($shape) =="
   # Re-roll ANY failing metric (not just borderline): server/live perf probes
   # under `ab` load are noisy, so re-measure BOTH backends up to twice and keep
@@ -291,8 +440,8 @@ run_one() { # $1=example -> table + exit code
     [ ${#failed[@]} -gt 0 ] || break
     echo "  (re-roll $roll: ${failed[*]})"
     declare -A GO2 RUST2
-    while read -r k v; do GO2[$k]=$v; done   < <(collect_metrics "$gobin" "$shape")
-    while read -r k v; do RUST2[$k]=$v; done < <(collect_metrics "$rustbin" "$shape")
+    while read -r k v; do GO2[$k]=$v; done   < <(collect_metrics "$gobin" "$shape" "$d")
+    while read -r k v; do RUST2[$k]=$v; done < <(collect_metrics "$rustbin" "$shape" "$d")
     for m in "${failed[@]}"; do
       RUST[$m]=$(better "$m" "${RUST[$m]}" "${RUST2[$m]:-0}")
       GO[$m]=$(better_ref "$m" "${GO[$m]}" "${GO2[$m]:-0}")
@@ -322,8 +471,8 @@ baseline() {
     declare -A ratios
     for i in $(seq 1 "$M"); do
       declare -A GO RUST
-      while read -r k v; do GO[$k]=$v; done   < <(collect_metrics "$gobin" "$shape")
-      while read -r k v; do RUST[$k]=$v; done < <(collect_metrics "$rustbin" "$shape")
+      while read -r k v; do GO[$k]=$v; done   < <(collect_metrics "$gobin" "$shape" "$d")
+      while read -r k v; do RUST[$k]=$v; done < <(collect_metrics "$rustbin" "$shape" "$d")
       for m in "${!GO[@]}"; do
         local g="${GO[$m]}" r="${RUST[$m]:-0}"
         # Drop failed-probe samples: a 0 means the probe returned nothing (ab
