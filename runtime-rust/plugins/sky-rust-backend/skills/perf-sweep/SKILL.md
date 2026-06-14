@@ -46,14 +46,17 @@ reveal a way to improve the script? If yes, edit
   `timeout`-bounded + orphan-reaped.
 - **Core-feature metrics (not just `GET /`).** `ab GET /` measures the cold
   landing page, NOT the example's core feature (ex27 proved this — GET / was
-  LobbyPage, never the broadcast). The live shape now also reports `live_warm`
-  (warm render: GET / WITH a session cookie — realistic steady state, not
-  cookie-less session bootstrap) and `live_event` (event round-trip: POST
-  `/_sky/event` with a real state-changing handler parsed from the page —
-  decode → resolve-by-sky-id → update → VDOM diff → patch). `throughput` (cold
-  GET /) is kept as a SECONDARY signal. SSE/WS/broadcast drivers extend this for
-  the streaming/websocket/pub-sub shapes. New core metrics are informational
-  until `--baseline` commits their threshold envelopes.
+  LobbyPage, never the broadcast). Per-shape core drivers now run:
+  - **live** → `live_warm` (warm render: GET / WITH a session cookie — steady
+    state, not cookie-less bootstrap) + `live_event` (POST `/_sky/event` with a
+    real state-changing handler: decode → resolve-by-sky-id → update → diff →
+    patch) + `broadcast` (pub/sub apps: N subscribers + publisher, count fan-out
+    `event: patch` frames).
+  - **server** → `sse_eps` (text/event-stream apps: count stream frames) +
+    `ws_eps` (WebSocket apps: raw-stdlib RFC-6455 round-trip count).
+  `throughput` (cold GET /) is kept as a SECONDARY signal. Port discovery trusts
+  the app's own `listening on :PORT` log (never a foreign process). New core
+  metrics are informational until `--baseline` commits their threshold envelopes.
 - **Regression report** — diffs this run's per-(example, metric) Rust values vs
   the previous `~/.cache/sky/rust-perf-sweep/perf-*.tsv`: lower-is-better for
   rss/coldstart/binsize, higher for throughput. Flags verdict-flip-to-FAIL or

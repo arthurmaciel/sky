@@ -41,10 +41,14 @@ copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
 Runtime behavioral bugs (verified open 2026-06-14):
 - [ ] **`Db.insertRow` on Postgres returns 0** — `db_last_insert_id` has no
       auto-id on PG. Use `INSERT … RETURNING id` on the PG driver path.
-- [ ] **`Db.withTransaction` rollback isolation** — `db_with_transaction` runs
-      BEGIN/body/COMMIT against `conn.clone()` (a pool handle); sqlx may route
-      body queries to *other* pooled connections, so ROLLBACK is not guaranteed
-      to cover them. Acquire ONE connection and run the whole tx on it.
+- [x] **`Db.withTransaction` rollback isolation — AT PARITY (shared limitation).**
+      Rust runs BEGIN/body/COMMIT on `conn.clone()` (pool); body queries may route
+      to other connections → not truly isolated. BUT the **Go reference has the
+      identical gap** (`db_auth.go`: `tx = d.conn.Begin()` then passes the *pool*
+      `capDb` to the body, never the tx — code comment: "We don't have a separate
+      tx handle type yet"). So Rust already matches Go. True isolation needs a tx
+      handle type threaded into the body in **both** backends (upstream item, not
+      a Rust parity gap — fixing Rust alone would be a divergence).
 - [ ] **`Task.retryWith` runs once** — codegen drops the policy arg; the runtime
       `task_retry_with` takes only the task (a one-shot `SkyTask`, not `Clone`).
       Drive the retry loop properly (re-create the future per attempt).
@@ -58,9 +62,17 @@ Runtime behavioral bugs (verified open 2026-06-14):
 - [ ] **JSON pipeline decoder** (`06-json`, `35`) — verify current state (S8 says
       fixed); if the `Box<dyn FnOnce>` curry still fails, rearchitect WITHOUT
       `Box<dyn Any>` (macro / typed-builder). `[D]`
-- [D] **`Bytes` non-ASCII text divergence** — `Sky.Core.Bytes = String` (Latin-1
-      convention) diverges from Go-computed encodings for non-ASCII *text*.
-      Fixing needs `Bytes` as a real `Vec<u8>` newtype, reversing ADR 0001.
+- [D] **`Bytes` non-ASCII text divergence — ESCALATED (upstream-gated).**
+      `Sky.Core.Bytes = String` is a **shared-stdlib alias**; Sky's checker treats
+      `Bytes`≡`String`, so a Rust-only `Vec<u8>` newtype is unsound (mismatches
+      `String` at shared call sites). And no `String` convention matches Go on
+      both paths: a Rust `String` is valid-UTF-8-only, a Go `string` holds
+      arbitrary bytes. Current **Latin-1** matches Go on hex/binary, diverges on
+      non-ASCII **text**; **UTF-8** (`s.as_bytes()`) matches text, breaks
+      arbitrary bytes. True byte-exactness needs `Bytes` to become a distinct
+      nominal type in the **shared stdlib** (both backends) — an upstream change,
+      outside the Rust boundary + the no-Sky-source rule. Needs user/upstream
+      decision; ADR 0002 deferred until then.
 
 Missing features for parity:
 - [ ] **`Cmd.publish` / `Sub.subscribeTopic` codegen emission** for the composite
@@ -82,14 +94,15 @@ Missing features for parity:
 
 Verification-tooling correctness (a false gate hides real regressions):
 - [x] `run-sweep` port-sniff captured `0` from `0.0.0.0:PORT` → false `noserve`. Fixed.
-- [D] **perf-sweep measures the landing page, not the core feature.** `ab GET /`
-      exercises the core feature for only ~2 of 14 server/live examples; the
-      Sky.Live **event round-trip**, **SSE streaming**, **WebSocket**, and
-      **pub/sub broadcast** paths are never measured (ex27's `GET /` is
-      LobbyPage — the regression that started this). `probe_live_sse` exists but
-      is deferred (sse-bench lacks a session-cookie handshake). Add real
-      core-feature drivers (cookie-handshake warm probe + SSE/WS/event-roundtrip
-      + broadcast fan-out) and re-baseline thresholds.
+- [x] **perf-sweep now measures the core feature, not the landing page.** Added
+      `live_warm` (cookie-handshake warm render), `live_event` (POST /_sky/event
+      round-trip), `sse_eps` (SSE stream), `ws_eps` (raw-stdlib WebSocket
+      round-trip), `broadcast` (pub/sub fan-out — the ex27 gap). Also root-caused
+      a harness bug: port discovery latched onto a FOREIGN process (rhythmbox on
+      :3689 answers / but 404s app routes) → bogus Server.listen coldstart/
+      throughput; now trusts the app's own `listening on :PORT` log. New metrics
+      are informational until `--baseline` commits threshold envelopes (TODO:
+      run `--baseline` on a quiet host).
 
 ### T2 — Soundness
 
@@ -121,8 +134,12 @@ Verification-tooling correctness (a false gate hides real regressions):
    `Std.Cache` K/V, `OnRaw` payload, FFI generic return) and shrink any that have
    become reducible. None are in generated code; the "no-Any" rule targets
    generated code.
-3. **`Bytes`** → make it a real `Vec<u8>` newtype (correctness > efficiency);
-   author ADR 0002 superseding 0001 for the Bytes case.
+3. **`Bytes`** → ESCALATED: byte-exact parity is NOT Rust-only-achievable
+   (`Bytes = String` is a shared-stdlib alias; checker unifies them; Rust
+   `String` is UTF-8-only vs Go's arbitrary-byte string). Needs `Bytes` as a
+   distinct nominal type in the shared stdlib (upstream, both backends). Pending
+   user/upstream decision — see T1 entry. (Original "Rust Vec<u8> newtype" choice
+   superseded by this representational finding.)
 4. **Sky.Webview** → codegen-detection model (mirror Live/TUI): detect
    `Webview.app` → generated `Cargo.toml` auto-enables an internal `webview`
    cargo feature + `wry`/`tao`; pre-`cargo` `pkg-config` probe fails the build
