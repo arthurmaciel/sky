@@ -106,6 +106,27 @@ mod task_tests {
         let t: SkyTask<SkyError, i64> = sky_runtime::task::task_fail::<SkyError, i64>(err);
         assert!(run(t).is_err());
     }
+
+    // `System.getenv : String -> Task Error String`. Regression guard: it MUST
+    // return a `SkyTask` (not a bare `String`), or it fails to type-check in any
+    // `Task.andThen`/`Task.run` position — and an unset var MUST short-circuit
+    // with `Err` (mirroring Go's `System_getenv` ErrNotFound), not `Ok("")`,
+    // so a chained Task fails identically on both backends.
+    #[test]
+    fn system_getenv_present_is_ok() {
+        std::env::set_var("SKY_TEST_GETENV_PRESENT", "hello");
+        let t: SkyTask<SkyError, String> =
+            system_getenv::<SkyError>("SKY_TEST_GETENV_PRESENT".to_string());
+        assert_eq!(run(t), SkyResult::Ok("hello".to_string()));
+    }
+
+    #[test]
+    fn system_getenv_unset_is_err() {
+        std::env::remove_var("SKY_TEST_GETENV_UNSET_XYZ_42");
+        let t: SkyTask<SkyError, String> =
+            system_getenv::<SkyError>("SKY_TEST_GETENV_UNSET_XYZ_42".to_string());
+        assert!(run(t).is_err());
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════

@@ -97,8 +97,18 @@ analyzeKernelUsage = foldMap analyzeMod
             , if (modName == "Trace" || "Std.Trace" `isSuffixOf` modName)
                   && fnName `elem` ["span", "event", "attr"]
               then mempty { usesTaskParallel = True } else mempty
+            -- System.* kernels (setenv/unsetenv/cwd/args/loadEnv as Tasks) need
+            -- the tokio runtime, but pull it via usesTaskParallel (NOT
+            -- usesTaskRun). usesTaskRun would flip mainIsTask off, so a Task-typed
+            -- `main` that uses a System.* kernel but never calls Task.run itself
+            -- (e.g. `main = … |> Task.andThen (\_ -> Pure.systemCwd ()) |> …`)
+            -- would have its task future built-and-dropped by the entry — every
+            -- continuation silently skipped, no output, exit 0. An explicit
+            -- `main = … |> Task.run` keeps usesTaskRun (set by the `run`
+            -- combinator above), so the inline-run shape is preserved. Same
+            -- reasoning as the Time.sleep + Task-compose cases below.
             , if "System" `isSuffixOf` modName || modName == "System"
-              then mempty { usesTaskRun = True } else mempty
+              then mempty { usesTaskParallel = True } else mempty
             , if "Json" `isPrefixOf` modName || "Sky.Core.Json" `isPrefixOf` modName
               then mempty { usesJson = True } else mempty
             , if "Crypto" `isPrefixOf` modName || "Sky.Core.Crypto" `isPrefixOf` modName

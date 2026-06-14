@@ -1,0 +1,27 @@
+module Main exposing (main)
+
+-- Regression: a Task-typed `main` that uses a `System.*` kernel but never calls
+-- `Task.run` itself must be `block_on`'d by the Rust entry, NOT built-and-dropped.
+-- Before the fix, `System.*` set `usesTaskRun=True`, flipping `mainIsTask` off, so
+-- `sky_main()` returned `()` and the whole task chain was constructed and dropped
+-- — every continuation silently skipped, no output, exit 0. `System.*` now pulls
+-- tokio via `usesTaskParallel` (like Time.sleep), keeping `mainIsTask=True`.
+-- Also exercises `System.getenv` returning a `SkyTask` (not a bare `String`):
+-- present var -> Ok value, unset var -> Err short-circuit (parity with Go).
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.System as System
+import Sky.Core.Pure as Pure
+import Std.Log exposing (println)
+
+main : Task Error ()
+main =
+    System.setenv "SKY_ENV_CHAIN_PROBE" "ok"
+        |> Task.andThen (\_ -> System.getenv "SKY_ENV_CHAIN_PROBE")
+        |> Task.andThen (\v -> Task.succeed (let _ = println ("getenv=" ++ v) in ()))
+        |> Task.andThen (\_ -> Pure.systemCwd ())
+        |> Task.andThen (\d -> Task.succeed (let _ = println ("cwd=" ++ d) in ()))
+        |> Task.andThen (\_ -> System.getenv "SKY_DEFINITELY_UNSET_42")
+        |> Task.andThen (\_ -> Task.succeed (let _ = println "UNREACHED-after-unset" in ()))
+        |> Task.onError (\_ -> Task.succeed (let _ = println "unset-getenv->Err (correct)" in ()))

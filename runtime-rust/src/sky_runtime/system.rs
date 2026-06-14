@@ -8,9 +8,24 @@ pub fn system_args<E: Send + 'static>(_: ()) -> SkyTask<E, Vec<String>> {
 }
 pub fn system_exit(code: i64) -> ! { std::process::exit(code as i32) }
 
-/// `Sky.Core.System.getenv key` — the env var, or "" when unset.
-pub fn system_getenv(key: String) -> String {
-    std::env::var(&key).unwrap_or_default()
+/// `Sky.Core.System.getenv key : String -> Task Error String` — the env var as a
+/// Task, or `Err` when unset. Returning a `SkyTask` (not a bare `String`) is
+/// required for parity: `getenv` is Task-typed in the stdlib, so a bare `String`
+/// fails to type-check in any `Task.andThen`/`Task.run` position. Returning `Err`
+/// on unset (rather than `Ok("")`) mirrors Go's `System_getenv` ErrNotFound
+/// short-circuit so a chained Task fails identically on both backends. The
+/// string-based error follows `system_cwd`'s convention — the generic `E` bound
+/// can only build `From<String>`, so the kind is coarser than Go's typed
+/// NotFound (shared limitation with `system_cwd`). NOTE: `getenvOr` stays a bare
+/// `String` (the default plugs the missing case at the call site).
+pub fn system_getenv<E: Send + From<String> + 'static>(key: String) -> SkyTask<E, String> {
+    match std::env::var(&key) {
+        Ok(v) => Box::pin(ready(ok_res(v))),
+        Err(_) => {
+            let msg = format!("environment variable {:?} is not set", key);
+            Box::pin(ready(SkyResult::Err(str_err(&msg))))
+        }
+    }
 }
 /// `Sky.Core.System.getenvOr key default` — the env var, or `default` when unset.
 pub fn system_getenv_or(key: String, default: String) -> String {
