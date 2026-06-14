@@ -57,13 +57,14 @@ Runtime behavioral bugs (verified open 2026-06-14):
 - [ ] **`ws_client` `pingInterval` not wired** — heartbeat config ignored.
 - [ ] **`Pure.*` Task surface unsupported** (`uuid_kernel.rs`) — `Pure.uuidV4 ()`
       etc. error on target=rust; wire to the kernel.
-- [ ] **`live/form.rs` all-String form records** (`FIXME(P-later)`) — typed form
-      records with numeric/bool fields lose precision; coerce per field type.
+- [x] **`live/form.rs` numeric/bool/float form fields** — fixed via
+      serde_urlencoded type-directed coercion (was all-String serde_json).
+      Regression test + 19-skyforum builds.
 - [ ] **`Email.send` SMTP not ported** — Resend/SES/SendGrid work; SMTP transport
       missing. Add an SMTP transport crate.
-- [ ] **JSON pipeline decoder** (`06-json`, `35`) — verify current state (S8 says
-      fixed); if the `Box<dyn FnOnce>` curry still fails, rearchitect WITHOUT
-      `Box<dyn Any>` (macro / typed-builder). `[D]`
+- [x] **JSON pipeline decoder** — verified: 06-json + 35-composite-generics both
+      build on `--target rust` (build-sweep). The `Box<dyn FnOnce>` curry issue
+      is resolved; no `Box<dyn Any>` needed.
 - [D] **`Bytes` non-ASCII text divergence — ESCALATED (upstream-gated).**
       `Sky.Core.Bytes = String` is a **shared-stdlib alias**; Sky's checker treats
       `Bytes`≡`String`, so a Rust-only `Vec<u8>` newtype is unsound (mismatches
@@ -82,8 +83,12 @@ Missing features for parity:
       emitted for these shapes.
 - [D] **Sky.Tui backend (S4)** — examples 21/22/23/24. ANSI-cell renderer + TEA
       loop + codegen wiring (design doc ready).
-- [D] **Sky.Webview real backend (S5)** — examples 29/31/38. `wry`/`tao` window;
-      needs system webview libs (absent in this env → verification constraint).
+- [x] **Sky.Webview real backend (S5)** — the wry/tao native window is auto-wired
+      on `Webview.app` detection (implies the `live` stack + wry/tao + tokio
+      net/signal/process; `webview` feature on by default). Pre-cargo pkg-config
+      probe fails with an install message if webkit2gtk-4.0/libsoup-2.4 missing.
+      `examples/rust/39-webview` builds the REAL backend (links webkit2gtk-4.0).
+      Window-open is a desktop/manual check (headless CI can't drive it).
 - [ ] **Sky.Live depth:** firestore store, Cmd/Sub depth, `req` query-string
       parsing, WebSocket client Sub-tier (`onMessage`), WebSocket-server
       capturing handlers (`Arc<dyn Fn>`).
@@ -143,11 +148,10 @@ Verification-tooling correctness (a false gate hides real regressions):
    distinct nominal type in the shared stdlib (upstream, both backends). Pending
    user/upstream decision — see T1 entry. (Original "Rust Vec<u8> newtype" choice
    superseded by this representational finding.)
-4. **Sky.Webview** → codegen-detection model (mirror Live/TUI): detect
-   `Webview.app` → generated `Cargo.toml` auto-enables an internal `webview`
-   cargo feature + `wry`/`tao`; pre-`cargo` `pkg-config` probe fails the build
-   with a clear install message if libs are absent. (webkit2gtk present in this
-   env → verifiable here.)
+4. **Sky.Webview** → DONE: codegen-detection model (mirror Live/TUI); generated
+   `Cargo.toml` auto-enables the `webview` feature + wry/tao + the `live` stack;
+   pre-`cargo` pkg-config probe with a clear install message. 39-webview builds
+   the real backend.
 5. **Go-package FFI** (03/05/08/13) → permanently out of scope (Rust cannot call
    Go packages without a Go runtime; byte-parity is architecturally impossible).
 
