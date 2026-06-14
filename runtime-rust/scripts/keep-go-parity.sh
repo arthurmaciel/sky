@@ -31,7 +31,7 @@ cd "$REPO"
 STATE="$HOME/.cache/sky/keep-go-parity"; mkdir -p "$STATE"
 SHA_F="$STATE/pre.sha"; LIST_F="$STATE/pre.examples"
 
-# Top-level example dirs that carry a Sky entry point. examples/rust/ (our
+# Top-level example dirs that carry a Sky entry point. runtime-rust/tests/sky/ (our
 # fork-local FFI set) is a single top-level entry, so it never shows as "new".
 list_examples() { find examples -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort; }
 

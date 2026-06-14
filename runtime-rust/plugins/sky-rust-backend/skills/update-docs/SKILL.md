@@ -42,7 +42,7 @@ sections (rewrite each from scratch based on what you observe in the repo):
 4. **`sky.toml` Rust fields** — all active sections: `[project]`, `["rust.dependencies"]`,
    `[rust]`, `[rust.shims]` with annotated examples.
 5. **Verification state** — list every example that builds and runs. Check
-   `examples/rust/` and any Sky examples tested with `--target rust`. Mark each
+   `runtime-rust/tests/sky/` and any Sky examples tested with `--target rust`. Mark each
    ✅ or ❌ with one-line notes. Read `git log --oneline -10` to catch recent additions.
 6. **Module structure** — `runtime-rust/src/sky_runtime/` file map.
 7. **FFI codegen coercion rules** — `argCall` and `coerceRet` tables (from
