@@ -32,6 +32,58 @@ pub fn system_getenv_or(key: String, default: String) -> String {
     std::env::var(&key).unwrap_or(default)
 }
 
+/// `System.getenvInt key : String -> Task Error Int`. Unset → `Err` (Go's
+/// ErrNotFound); set-but-not-an-int → `Err` (Go's ErrFfi). The string-based error
+/// follows the generic-`E` convention (coarser than Go's typed kinds; shared with
+/// `getenv`/`cwd`).
+pub fn system_getenv_int<E: Send + From<String> + 'static>(key: String) -> SkyTask<E, i64> {
+    let r: Result<i64, String> = match std::env::var(&key) {
+        Err(_) => Err(format!("environment variable {:?} is not set", key)),
+        Ok(v) => v
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| format!("env {}: not an int: {}", key, v)),
+    };
+    match r {
+        Ok(n) => Box::pin(ready(ok_res(n))),
+        Err(m) => Box::pin(ready(SkyResult::Err(str_err(&m)))),
+    }
+}
+
+/// `System.getenvBool key : String -> Task Error Bool`. Matches Go's truthy/falsy
+/// table: `true/yes/1/on/y/t` → true; `false/no/0/off/n/f`/empty → false; unset →
+/// `Err` (NotFound); anything else → `Err` (not-a-bool).
+pub fn system_getenv_bool<E: Send + From<String> + 'static>(key: String) -> SkyTask<E, bool> {
+    let r: Result<bool, String> = match std::env::var(&key) {
+        Err(_) => Err(format!("environment variable {:?} is not set", key)),
+        Ok(v) => match v.trim().to_lowercase().as_str() {
+            "true" | "yes" | "1" | "on" | "y" | "t" => Ok(true),
+            "false" | "no" | "0" | "off" | "n" | "f" | "" => Ok(false),
+            _ => Err(format!("env {}: not a bool: {}", key, v)),
+        },
+    };
+    match r {
+        Ok(b) => Box::pin(ready(ok_res(b))),
+        Err(m) => Box::pin(ready(SkyResult::Err(str_err(&m)))),
+    }
+}
+
+/// `System.getArg n : Int -> Task Error (Maybe String)`. Indexes the FULL arg
+/// vector to match Go's `System_getArg` (`os.Args[n]` — index 0 is the program
+/// name, UNLIKE `System.args` which skips it); out-of-range / negative →
+/// `Ok Nothing`. Never `Err` (mirrors Go).
+pub fn system_get_arg<E: Send + 'static>(n: i64) -> SkyTask<E, SkyMaybe<String>> {
+    let out = if n < 0 {
+        SkyMaybe::Nothing
+    } else {
+        match std::env::args().nth(n as usize) {
+            Some(a) => SkyMaybe::Just(a),
+            None => SkyMaybe::Nothing,
+        }
+    };
+    Box::pin(ready(ok_res(out)))
+}
+
 pub fn system_setenv<E: Send + 'static>(key: String, val: String) -> SkyTask<E, ()> {
     std::env::set_var(&key, &val);
     Box::pin(async move { ok_res(()) })

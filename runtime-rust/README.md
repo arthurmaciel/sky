@@ -98,14 +98,24 @@ Runtime behavioral bugs (verified open 2026-06-14):
       `SkyTask<E, String>`; an unset var short-circuits with `Err` (mirroring Go's
       `System_getenv` ErrNotFound), not `Ok("")`. Present/unset both byte-match Go.
       (`getenvOr` stays bare `String` by design.)
-- [ ] **`System.getenvInt` / `getenvBool` / `getArg` unsupported on `--target
-      rust`** — absent from both the runtime and the codegen kernel map (no
-      `system_getenv_int` / `_bool` / `_get_arg`). Task-typed in the stdlib; need
-      new runtime fns + mapping, mirroring the `getenv` fix.
-- [ ] **`Basics.toString` / `Basics.always` unmapped on `--target rust`** —
-      `basics_to_string` / `basics_always` emit as undefined functions (E0425).
-      Spotted while building the System.* regression fixture; wire to the
-      runtime (toString → per-type Display; always → `move |_| v`).
+- [x] **`System.getenvInt` / `getenvBool` / `getArg` — FIXED (`system.rs`).**
+      Added `system_getenv_int` / `system_getenv_bool` / `system_get_arg` (names
+      derive via `toSnakeCase`, so no codegen change). Full Go parity verified:
+      int set→Ok / non-int→Err / unset→Err; bool truthy→true / falsy+empty→false /
+      other→Err / unset→Err; getArg indexes the FULL arg vector (index 0 = program
+      name, matching Go's `os.Args`, UNLIKE `System.args`) and is out-of-range /
+      negative → `Ok Nothing` (never Err). Regression:
+      `tests/proptest.rs::system_{getenv_int_ok_and_errs,getenv_bool_*,get_arg_*}`.
+- [x] **`Basics.identity` / `Basics.always` — FIXED (`basics.rs`).** Both lower as
+      `VarKernel "Basics" …` (Prelude re-export) but `basics_identity` /
+      `basics_always` were absent → E0425. Added (same convention as `fst`/`snd`);
+      build+run matches Go. Regression: `basics::tests::{test_identity,
+      test_always_returns_first}`.
+- [ ] **`Basics.toString` (polymorphic) on `--target rust`** — distinct from
+      `errorToString` (which IS mapped, via `Debug`). A fully-polymorphic
+      `toString : a -> String` needs type-directed lowering to the right per-type
+      conversion (Rust has no runtime reflection); larger than the identity/always
+      fix. (`errorToString` itself dumps a struct on BOTH backends — see below.)
 - [ ] **`errorToString (Error.unexpected "boom")` dumps an internal struct on
       BOTH backends** — Rust prints `Error(Unexpected, SkyCoreErrorErrorInfo {…})`,
       Go prints `{0 Error [10 {boom …}]}`; neither yields a clean `"boom"`. This

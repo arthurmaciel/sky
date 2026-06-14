@@ -127,6 +127,39 @@ mod task_tests {
             system_getenv::<SkyError>("SKY_TEST_GETENV_UNSET_XYZ_42".to_string());
         assert!(run(t).is_err());
     }
+
+    // System.getenvInt / getenvBool / getArg — Go-parity semantics (unset → Err
+    // NotFound; non-int / non-bool → Err Ffi; getArg indexes the FULL arg vector
+    // and is out-of-range → Ok Nothing, never Err).
+    #[test]
+    fn system_getenv_int_ok_and_errs() {
+        std::env::set_var("SKY_TEST_INT_OK", "42");
+        std::env::set_var("SKY_TEST_INT_BAD", "abc");
+        std::env::remove_var("SKY_TEST_INT_UNSET");
+        assert_eq!(run(system_getenv_int::<SkyError>("SKY_TEST_INT_OK".to_string())), SkyResult::Ok(42));
+        assert!(run(system_getenv_int::<SkyError>("SKY_TEST_INT_BAD".to_string())).is_err());
+        assert!(run(system_getenv_int::<SkyError>("SKY_TEST_INT_UNSET".to_string())).is_err());
+    }
+
+    #[test]
+    fn system_getenv_bool_truthy_falsy_unset() {
+        std::env::set_var("SKY_TEST_BOOL_T", "yes");
+        std::env::set_var("SKY_TEST_BOOL_F", "0");
+        std::env::set_var("SKY_TEST_BOOL_BAD", "maybe");
+        std::env::remove_var("SKY_TEST_BOOL_UNSET");
+        assert_eq!(run(system_getenv_bool::<SkyError>("SKY_TEST_BOOL_T".to_string())), SkyResult::Ok(true));
+        assert_eq!(run(system_getenv_bool::<SkyError>("SKY_TEST_BOOL_F".to_string())), SkyResult::Ok(false));
+        assert!(run(system_getenv_bool::<SkyError>("SKY_TEST_BOOL_BAD".to_string())).is_err());
+        assert!(run(system_getenv_bool::<SkyError>("SKY_TEST_BOOL_UNSET".to_string())).is_err());
+    }
+
+    #[test]
+    fn system_get_arg_in_and_out_of_range() {
+        // index 0 is the program name (the test binary) — always present.
+        assert!(matches!(run(system_get_arg::<SkyError>(0)), SkyResult::Ok(SkyMaybe::Just(_))));
+        assert_eq!(run(system_get_arg::<SkyError>(9999)), SkyResult::Ok(SkyMaybe::Nothing));
+        assert_eq!(run(system_get_arg::<SkyError>(-1)), SkyResult::Ok(SkyMaybe::Nothing));
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
