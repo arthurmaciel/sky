@@ -3,7 +3,6 @@
 module Sky.Generate.Go.Builder where
 
 import Sky.Generate.Go.Ir
-import Data.List (isInfixOf)
 
 
 -- ═══════════════════════════════════════════════════════════
@@ -68,46 +67,13 @@ renderDecl decl = case decl of
 
 
 renderFuncDecl :: GoFuncDecl -> [String]
-renderFuncDecl func
-    -- Run-once CAF semantics: a top-level NULLARY VALUE binding whose body runs
-    -- an effect (`dbConn = Task.run (Db.connect ())`, `initSchema = … Db.execRaw
-    -- …`) would otherwise re-run that effect on every reference (each call to the
-    -- emitted nullary func). On a per-request Sky.Live path that means a CREATE
-    -- TABLE per request. Emit it as a `rt.OnceValue`-memoised var: the body runs
-    -- once, later references return the cache. Call sites are unchanged (`name()`
-    -- still calls the resulting `func() T`). Sky is pure, so caching a value (or
-    -- a closure over immutable captures) is observationally identical — only the
-    -- repeated EFFECT is removed. Gated like the Rust `maybeMemoiseNullary`:
-    -- effect-running, monomorphic, NON-entry, and a concrete VALUE return — NOT a
-    -- function-returning CAF (`Task.run`) nor a Task-returning one (a re-runnable
-    -- task builder), both of which must keep their plain shape.
-    | memoisable = memoised
-    | otherwise  = normal
-  where
-    ret = _gf_returnType func
-    memoisable =
-           null (_gf_params func)
-        && null (_gf_typeParams func)
-        && _gf_name func /= "main"
-        && _gf_name func /= "init"
-        && not (null ret) && ret /= "()"
-        && not ("func(" `isInfixOf` ret)
-        && not ("SkyTask" `isInfixOf` ret)
-        && any stmtRunsEffect (_gf_body func)
-    stmtRunsEffect s =
-        let r = concat (renderStmt s)
-        in "AnyTaskRun" `isInfixOf` r || "Task_run" `isInfixOf` r
-    memoised =
-        ("var " ++ _gf_name func ++ " = rt.OnceValue(func() " ++ ret ++ " {")
-        : concatMap (map ("\t\t" ++) . renderStmt) (_gf_body func)
-        ++ ["\t})"]
-    normal =
-        let typeParams = renderTypeParams (_gf_typeParams func)
-            params = renderParams (_gf_params func)
-            retType = if null ret then "" else " " ++ ret
-            header = "func " ++ _gf_name func ++ typeParams ++ "(" ++ params ++ ")" ++ retType ++ " {"
-            body = concatMap (map ("\t" ++) . renderStmt) (_gf_body func)
-        in header : body ++ ["}"]
+renderFuncDecl func =
+    let typeParams = renderTypeParams (_gf_typeParams func)
+        params = renderParams (_gf_params func)
+        retType = if null (_gf_returnType func) then "" else " " ++ _gf_returnType func
+        header = "func " ++ _gf_name func ++ typeParams ++ "(" ++ params ++ ")" ++ retType ++ " {"
+        body = concatMap (map ("\t" ++) . renderStmt) (_gf_body func)
+    in header : body ++ ["}"]
 
 
 renderMethodDecl :: String -> String -> GoFuncDecl -> [String]
