@@ -15,6 +15,24 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 - Add new Rust codegen module to Sky compiler
 - Runtime crate (`sky-runtime-rust`) provides Sky primitives in Rust
 
+## Build rules — read before any build
+
+Non-negotiable for dev-loop work on `feat/runtime-rust` (release/CI use the
+default `-O1` + a real `cabal install`). Violating these wastes minutes per
+iteration and has burned past sessions.
+
+| Rule | Why |
+|---|---|
+| **NEVER `cabal install --install-method=copy`.** `sky-out/sky` is a **symlink** to the dist-newstyle binary; `cabal build exe:sky` updates it in place. Set up once: `ln -sf "$(cabal list-bin exe:sky)" sky-out/sky`. | a copy-install pays a 39 MB write per rebuild for zero benefit |
+| **Only codegen (`.hs`) edits need `cabal build`.** Edits under `runtime-rust/src/` are copied into the generated project at `sky build` time — rebuild only the example. | no compiler rebuild for runtime-only changes |
+| **Self-contained PATH in every build shell:** `export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin"` | the inherited `$PATH` is inconsistent across tool calls — `cargo`/`timeout` vanish, so `sky` fails to spawn `cargo` (looks like a build failure). Inline `for`-loops compound the drift — one example per command, or a committed script |
+| **Export the shared Rust target + sccache before any example build:** `export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target" RUSTC_WRAPPER=sccache` | every example is package `sky-app`; the shared target compiles axum/tokio/serde/sqlx once. It holds only the LAST-built binary — rebuild the specific example right before running it. Re-export every shell (state doesn't persist between tool calls) |
+| **Don't wipe `dist-newstyle/`**; keep the gitignored `cabal.project.local` (`optimization: 0`, `profiling: False`). | incremental compile is the whole point — `-O0` cuts a full rebuild from minutes to ~180s, a one-module link to ~32s. Never commit the file (it would slow the shipped binary) |
+
+Generated `Cargo.toml [profile.dev]` already drops debuginfo (`debug = 0`,
+`incremental = true`), emitted by `emitCargoToml`. Sweep via
+`SKY_BIN=$(cabal list-bin exe:sky) ./scripts/rust-sweep.sh` (~570s on warm sccache).
+
 ## Phase 1 Status: ✅ COMPLETE
 
 - Runtime crate: `sky-runtime-rust` implemented with 54 tests passing
