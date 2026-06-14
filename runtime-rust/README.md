@@ -6,7 +6,7 @@ copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
 
 ---
 
-## Roadmap to full behavioral Go-parity (prioritised)
+## Roadmap to full behavioral Go-parity
 
 > **Goal:** the Rust backend reaches full behavioral parity with the Go
 > reference. **Priority order, applied to every choice: security → correctness
@@ -15,251 +15,57 @@ copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
 > upstream examples, root-cause fixes only (no symptom masking), no deferral.
 > Anything conflicting with the four principles is escalated, not silently
 > traded away.
->
-> Status legend: `[x]` done · `[~]` partial/verify · `[ ]` open · `[D]` blocked
-> on a design decision (see "Open design decisions" below).
->
-> Verified baseline (2026-06-14): build-sweep PASS (32 examples), run-sweep 20
-> OK (the 4 `noserve` were a harness regex bug, now fixed — servers serve 200).
-> The older `docs/.../rust-example-conquest-registry.md` per-example bug list is
-> largely stale; the build/run sweeps are authoritative.
 
-### T0 — Security / availability (panic vectors = DoS)
+The covered surface is documented in **API surface vs the Go backend**, **Sky.Live
+on Rust**, and **Rust vs Go backend — divergent implementation strategies** below.
+What remains open:
 
-- [x] Panic-site audit: the "4 production-reachable panics" flagged by a scan are
-      2 test-only (`time.rs`, `html.rs`) + 2 documented-IRREDUCIBLE/ACCEPTED
-      (`ffi_polyfills` callPure dead-for-valid-Sky, callTask deferred). No new
-      reachable panic. (`live/mod.rs` lock-family already poison-tolerant.)
-- [x] **Panic-vector deny gate is comprehensive and clippy-clean** (verified
-      2026-06-14). `lib.rs` `#![cfg_attr(not(test), deny(clippy::indexing_slicing,
-      panic, unreachable))]` + `Cargo.toml [lints.clippy]` `unwrap_used`/
-      `expect_used` deny (tests exempt via `clippy.toml`). `cargo clippy
-      --features full` passes → zero panic vectors in non-test code; the only
-      `#[allow(clippy::panic)]` are the 2 documented-IRREDUCIBLE `ffi_polyfills`
-      sites. The "~40-site follow-up" landed.
+### Open work
 
-### T1 — Correctness (behavioral Go-parity)
+**Correctness / features**
+- **Sky.Live depth:** firestore session store (same `SessionStore` trait),
+  Cmd/Sub depth, `req` query-string parsing, WebSocket client Sub-tier
+  (`onMessage` subscriptions), WebSocket-server capturing handlers (`Arc<dyn Fn>`
+  instead of fn pointers).
+- **`Ffi.callTask` on target=rust** — a deferred-feature panic guards the
+  dynamic-dispatch shape (the static shape is peephole-resolved). Task-emitting
+  FFI kernels would need the dynamic path.
+- **Non-byte slice/array FFI** (`&[String]`, `[f64; 3]`) + enum-argument FFI
+  constructors — partial.
+- **Composite `Basics.toString`** — scalars match Go (`Display` = `%v`); a
+  record/ADT `toString` is a compile error today (no `Display`). A type-directed
+  lowering could route composites to a derived renderer if the case arises.
 
-Runtime behavioral bugs (verified open 2026-06-14):
-- [x] **`Db.insertRow` on Postgres returns the auto-id** — fixed: generated
-      `DB_USES_RETURNING_ID` (PG=true) drives a `RETURNING id` + fetch_one path
-      (total: i64→i32→0, never panics), mirroring Go's pgx branch. sqlite path
-      unchanged (db tests pass). PG path UNVERIFIED e2e (no PG server here).
-- [x] **`Db.withTransaction` rollback isolation — AT PARITY (shared limitation).**
-      Rust runs BEGIN/body/COMMIT on `conn.clone()` (pool); body queries may route
-      to other connections → not truly isolated. BUT the **Go reference has the
-      identical gap** (`db_auth.go`: `tx = d.conn.Begin()` then passes the *pool*
-      `capDb` to the body, never the tx — code comment: "We don't have a separate
-      tx handle type yet"). So Rust already matches Go. True isolation needs a tx
-      handle type threaded into the body in **both** backends (upstream item, not
-      a Rust parity gap — fixing Rust alone would be a divergence).
-- [~] **`Task.retryWith` runs once — RESOLVED as documented-limitation (safe default).**
-      No fragile partial fix shipped; the workaround (recurse on the `Result` in
-      Sky) stands. The proper fix (re-runnable `SkyTask` or a thunk-shaped
-      `retryWith` API) is a large/upstream change detailed in
-      `escalated-decisions.md`. Full detail below:
-- [D] **`Task.retryWith` (deep upgrade path: SkyTask is one-shot).**
-      Root cause: `SkyTask = Pin<Box<dyn Future>>` is consumed on first `.await`,
-      whereas Go's Task is a re-runnable `func() any`, so Go's loop just re-calls
-      it. Retrying in Rust needs EITHER (a) an inline loop re-evaluating the task
-      EXPRESSION each attempt — fragile: move-captured args (`http_get(url)`)
-      can't be re-run without per-case `.clone()` the peephole can't infer; OR
-      (b) make `SkyTask` re-runnable (`Arc<dyn Fn()->Future>`) — a large runtime
-      change touching every Task site; OR (c) upstream: `retryWith` takes a thunk
-      `() -> Task e a` (the CLAUDE.md note). Not shipping a fragile partial fix;
-      needs the (b)/(c) design decision. Workaround stands: recurse on the Result.
-- [x] **`ws_client` `pingInterval` wired** — `do_connect` now sends a periodic
-      Ping when `cfg.pingInterval > 0` (writer-task `select!` on an interval;
-      tungstenite auto-pongs inbound). Additive (interval 0 = unchanged).
-      `cargo check --features full` passes (no ws-client example for e2e run).
-- [x] **`Pure.*` Task surface — VERIFIED WORKING (the open item was stale).**
-      `Pure.uuidV4`/`uuidV7`/`timeNow`/`timeUnixMillis`/`systemArgs`/`systemCwd`/
-      `systemLoadEnv`/`ioReadLine`/`dbConnect` all emit correctly-typed
-      `SkyTask<…>` wrappers to the real kernels and build clean on `--target
-      rust`; `uuidV4`/`uuidV7`/`timeUnixMillis` chains run + print real values.
-      (`uuid_kernel.rs`'s "Pure Task surface unsupported" doc-comment is also
-      stale — the codegen emits `task_succeed({ uuid_v4() })` directly.)
-- [x] **Entry drops a `System.*` Task-chain main — FIXED (`Walker.hs`).** Root
-      cause: `System.*` set `usesTaskRun=True`, and `mainIsTask = … || not
-      usesTaskRun` (Emitter.hs) → `mainIsTask=False` → `sky_main()` returned `()`
-      and the entry built-and-DROPPED the task future (every continuation silently
-      skipped, no output, exit 0) for any Task-typed `main` using a `System.*`
-      kernel without calling `Task.run` itself (e.g. `main = … |> Task.andThen
-      (\_ -> Pure.systemCwd ()) |> …`). Fix: `System.*` pulls tokio via
-      `usesTaskParallel` (NOT `usesTaskRun`), exactly the documented Time.sleep
-      pattern — keeps `mainIsTask=True` so the entry `block_on`s it. The explicit
-      `… |> Task.run` shape is preserved (the `run` combinator sets `usesTaskRun`).
-      Verified: the previously-silent chain now runs + matches Go; 6 gated
-      `System.*` examples (07/20/12/16/17/27) still ran-OK. Regression:
-      `tests/sky/31-system-env-chain` + `tests/proptest.rs::system_getenv_*`.
-- [x] **`System.getenv` returned a bare `String` — FIXED (`system.rs`).** It is
-      `String -> Task Error String` in the stdlib but the runtime emitted `-> String`
-      → E0308 in any `Task.andThen`/`Task.run` position. Now returns
-      `SkyTask<E, String>`; an unset var short-circuits with `Err` (mirroring Go's
-      `System_getenv` ErrNotFound), not `Ok("")`. Present/unset both byte-match Go.
-      (`getenvOr` stays bare `String` by design.)
-- [x] **`System.getenvInt` / `getenvBool` / `getArg` — FIXED (`system.rs`).**
-      Added `system_getenv_int` / `system_getenv_bool` / `system_get_arg` (names
-      derive via `toSnakeCase`, so no codegen change). Full Go parity verified:
-      int set→Ok / non-int→Err / unset→Err; bool truthy→true / falsy+empty→false /
-      other→Err / unset→Err; getArg indexes the FULL arg vector (index 0 = program
-      name, matching Go's `os.Args`, UNLIKE `System.args`) and is out-of-range /
-      negative → `Ok Nothing` (never Err). Regression:
-      `tests/proptest.rs::system_{getenv_int_ok_and_errs,getenv_bool_*,get_arg_*}`.
-- [x] **`Basics.identity` / `Basics.always` — FIXED (`basics.rs`).** Both lower as
-      `VarKernel "Basics" …` (Prelude re-export) but `basics_identity` /
-      `basics_always` were absent → E0425. Added (same convention as `fst`/`snd`);
-      build+run matches Go. Regression: `basics::tests::{test_identity,
-      test_always_returns_first}`.
-- [x] **`Basics.toString` for scalars — FIXED (`basics.rs`).** Added
-      `basics_to_string<T: Display>` = Go's `fmt.Sprintf("%v")` (Display, NOT
-      Debug → unquoted strings, clean scalars). Int/Float/Bool/String byte-match
-      Go. A `toString` on a composite (record/ADT, no `Display`) is a **compile**
-      error (E0277), never a runtime one — honouring "no runtime errors" (Go
-      reflects at runtime; Rust catches it before a binary exists). Regression:
-      `basics::tests::test_to_string_{int,bool,string_unquoted,float}`.
-      ⏳ Future: a type-directed lowering could route composite `toString` to a
-      derived renderer if that case ever arises in practice (rare).
-      (NB: `errorToString` is separate — it dumps a struct on BOTH backends, a
-      shared/Go issue; see below.)
-- [ ] **`errorToString (Error.unexpected "boom")` dumps an internal struct on
-      BOTH backends** — Rust prints `Error(Unexpected, SkyCoreErrorErrorInfo {…})`,
-      Go prints `{0 Error [10 {boom …}]}`; neither yields a clean `"boom"`. This
-      is a **shared / Go-side** stdlib issue (not Rust-specific), so it is parked
-      under the "no Go work now" direction — filed here so it isn't lost.
-- [x] **`live/form.rs` numeric/bool/float form fields** — fixed via
-      serde_urlencoded type-directed coercion (was all-String serde_json).
-      Regression test + 19-skyforum builds.
-- [x] **`Email.send` SMTP — DONE (`email.rs`, lettre).** `send_smtp` implemented
-      via `lettre` (async tokio + rustls, matching reqwest's TLS backend):
-      **opportunistic STARTTLS** (TLS if the server advertises it, plaintext else
-      — identical posture to Go's `smtp.SendMail`), PLAIN auth when a user is set,
-      standards-compliant MIME (text/html alternative + attachments). Wired into
-      the generated `Cargo.toml` (Emitter.hs, gated on `usesEmail`). Verified
-      end-to-end: a Sky `Email.send (Smtp cfg)` delivered a message with correct
-      headers + body to a local SMTP catcher; DRY-RUN returns Ok; error paths
-      (empty host / bad address) return a clean `Err`, never a panic. Regression:
-      `tests/proptest.rs::email_smtp_tests::*`.
-- [x] **JSON pipeline decoder** — verified: 06-json + 35-composite-generics both
-      build on `--target rust` (build-sweep). The `Box<dyn FnOnce>` curry issue
-      is resolved; no `Box<dyn Any>` needed.
-- [~] **`Bytes` non-ASCII text — RESOLVED as Option B (keep alias, documented).**
-      The conservative default: ASCII (the dominant byte-op domain — hashes,
-      tokens, binary) is byte-identical; only non-ASCII *text* through Bytes
-      encoding diverges, documented as a known limitation. Upgrade path (Option A:
-      `Bytes` as a distinct nominal type in the shared stdlib, both backends) is
-      an upstream change in `escalated-decisions.md` for if/when it's load-bearing.
-      Full detail below:
-- [D] **`Bytes` non-ASCII text divergence — (upstream upgrade path).**
-      `Sky.Core.Bytes = String` is a **shared-stdlib alias**; Sky's checker treats
-      `Bytes`≡`String`, so a Rust-only `Vec<u8>` newtype is unsound (mismatches
-      `String` at shared call sites). And no `String` convention matches Go on
-      both paths: a Rust `String` is valid-UTF-8-only, a Go `string` holds
-      arbitrary bytes. Current **Latin-1** matches Go on hex/binary, diverges on
-      non-ASCII **text**; **UTF-8** (`s.as_bytes()`) matches text, breaks
-      arbitrary bytes. True byte-exactness needs `Bytes` to become a distinct
-      nominal type in the **shared stdlib** (both backends) — an upstream change,
-      outside the Rust boundary + the no-Sky-source rule. Needs user/upstream
-      decision; ADR 0002 deferred until then.
+**Efficiency / cleanup** (no correctness impact)
+- Flat `main.rs` → separate `pub mod` files.
+- `sky watch` for the Rust target.
+- WASM target (`wasm32-unknown-unknown`).
 
-Missing features for parity:
-- [x] **`Cmd.publish` / `Sub.subscribeTopic` codegen emission** — works: 27
-      (broadcast measured 545/97 patches/s) + examples/rust/33-live-pubsub +
-      34-live-pubsub-dict build/run. (Main examples/37/38 composite multi-app
-      stay out of scope — anon-struct field-method access, not pub/sub.)
-- [x] **Sky.Tui backend (S4)** — all 4 main Tui examples (21/22/23/24) +
-      examples/rust/38-tui-ui + 41-tui-input build. ANSI-cell renderer + TEA loop
-      shipped; runtime needs a TTY so the sweeps SKIP running them (not a gap).
-      Input/focus refinements tracked as #62.
-- [x] **Sky.Webview real backend (S5)** — the wry/tao native window is auto-wired
-      on `Webview.app` detection (implies the `live` stack + wry/tao + tokio
-      net/signal/process; `webview` feature on by default). Pre-cargo pkg-config
-      probe fails with an install message if webkit2gtk-4.0/libsoup-2.4 missing.
-      `examples/rust/39-webview` builds the REAL backend (links webkit2gtk-4.0).
-      Window-open is a desktop/manual check (headless CI can't drive it).
-- [ ] **Sky.Live depth:** firestore store, Cmd/Sub depth, `req` query-string
-      parsing, WebSocket client Sub-tier (`onMessage`), WebSocket-server
-      capturing handlers (`Arc<dyn Fn>`).
-- [ ] **`Ffi.callTask` on target=rust** — currently a deferred-feature panic;
-      needed for Task-emitting FFI kernels.
-- [~] **Non-byte slice/array FFI** (`&[String]`, `[f64; 3]`), enum-arg FFI ctors.
-- [D] **Go-package→Rust FFI** (examples 03/05/08/13 import gorilla/mux, stripe-go,
-      google/uuid, godotenv) — cannot reach byte-parity without a Go runtime;
-      architecturally out of scope unless re-scoped.
+### Blocked on a design decision
 
-Verification-tooling correctness (a false gate hides real regressions):
-- [x] `run-sweep` port-sniff captured `0` from `0.0.0.0:PORT` → false `noserve`. Fixed.
-- [x] **perf-sweep now measures the core feature, not the landing page.** Added
-      `live_warm` (cookie-handshake warm render), `live_event` (POST /_sky/event
-      round-trip), `sse_eps` (SSE stream), `ws_eps` (raw-stdlib WebSocket
-      round-trip), `broadcast` (pub/sub fan-out — the ex27 gap). Also root-caused
-      a harness bug: port discovery latched onto a FOREIGN process (rhythmbox on
-      :3689 answers / but 404s app routes) → bogus Server.listen coldstart/
-      throughput; now trusts the app's own `listening on :PORT` log. New metrics
-      are informational until `--baseline` commits threshold envelopes (TODO:
-      run `--baseline` on a quiet host).
-
-### T2 — Soundness
-
-- [x] **`dyn Any` register (#44) → `SOUNDNESS_LEDGER.md`.** All accepted soundness
-      exceptions formalised (ledger #1 crypto-HMAC, #2 email-HMAC, #3 ffi
-      generic-T, #4 dyn-Any registries, #5 the one `unsafe`, + OnRaw note), each
-      argued sound-by-construction. ⏳ future-review trigger recorded (re-examine
-      after stabilisation; #4 becomes reducible if codegen ever monomorphises the
-      pub/sub payload / cache K-V). None in generated code (the no-`Any` rule
-      targets generated code, which has zero `Any`).
-- [x] Single `unsafe` block (`console_proxy.rs` fork `pre_exec` → async-signal-safe
-      `prctl`) — justified, SAFETY-commented (ledger #5).
-
-### T3 — Efficiency / cleanup (no correctness impact)
-
-- [ ] Flat `main.rs` → separate `pub mod` files.
-- [ ] `sky watch` for the Rust target.
-- [ ] WASM target (`wasm32-unknown-unknown`).
-- [ ] **Move `examples/rust/` → `runtime-rust/tests/`** — they are Sky→Rust tests,
-      not user-facing examples. Re-wire any script/skill that references the path.
-
-> Detailed pros/cons for the escalated items (`Bytes`, `Task.retryWith`) — and
-> what each upstream/large change entails — are in `docs/escalated-decisions.md`.
-> Two upstream Go-target fixes were drafted in `docs/upstream-pr-proposals.md`
-> (**PR1** `T1` build break, **PR2** top-level-CAF run-once). Both were
-> implemented + verified locally, then **⏸ PARKED + reverted 2026-06-14** by
-> user direction ("not dealing with Go code now"): commit `fdb58349` reverts
-> PR2, `3674aeb9` reverts PR1 — the Go files are back at their pre-PR1 baseline.
-> PR2 also still needs more analysis on its non-idempotent-CAF behaviour change.
-> The analysis is retained in the doc for if/when Go-target work resumes;
-> nothing is active or pushed.
-
-### Design decisions (resolved 2026-06-14)
-
-1. **perf-sweep** → build full core-feature drivers (Live event round-trip + SSE
-   delivery + WS round-trip + broadcast fan-out), re-baseline thresholds, keep
-   cold `GET /` as a relabeled secondary signal.
-2. **`dyn Any` (#44)** → KEEP the 4 sites as sound-by-construction; formalise in a
-   `SOUNDNESS_LEDGER`. **⏳ FUTURE REVIEW POINT — re-examine after the Rust
-   backend stabilises:** confirm each site is still irreducible (per-type broker,
-   `Std.Cache` K/V, `OnRaw` payload, FFI generic return) and shrink any that have
-   become reducible. None are in generated code; the "no-Any" rule targets
-   generated code.
-3. **`Bytes`** → ESCALATED: byte-exact parity is NOT Rust-only-achievable
-   (`Bytes = String` is a shared-stdlib alias; checker unifies them; Rust
-   `String` is UTF-8-only vs Go's arbitrary-byte string). Needs `Bytes` as a
-   distinct nominal type in the shared stdlib (upstream, both backends). Pending
-   user/upstream decision — see T1 entry. (Original "Rust Vec<u8> newtype" choice
-   superseded by this representational finding.)
-4. **Sky.Webview** → DONE: codegen-detection model (mirror Live/TUI); generated
-   `Cargo.toml` auto-enables the `webview` feature + wry/tao + the `live` stack;
-   pre-`cargo` pkg-config probe with a clear install message. 39-webview builds
-   the real backend.
-5. **Go-package FFI** (03/05/08/13) → permanently out of scope (Rust cannot call
-   Go packages without a Go runtime; byte-parity is architecturally impossible).
-
-### Done this cycle (2026-06-14)
-
-- [x] ex27 throughput regression root-caused + fixed: memoise task-executing
-      nullary CAFs (`OnceLock`) — cookie-less 900→5714 req/s (0.71×→5.0× Go).
-- [x] `Db` pool cache per-URL + WAL + bounded connections (DoS hardening).
-- [x] run-sweep port-sniff false-`noserve` fixed.
+- **`Task.retryWith` runs once.** `SkyTask = Pin<Box<dyn Future>>` is consumed on
+  first `.await`, whereas Go's Task is a re-runnable `func() any` the retry loop
+  re-calls. Retrying in Rust needs EITHER (a) an inline loop re-evaluating the
+  task EXPRESSION per attempt — fragile, since move-captured args (`http_get(url)`)
+  can't be re-run without a per-case `.clone()` the peephole can't infer; OR
+  (b) a re-runnable `SkyTask` (`Arc<dyn Fn()->Future>`) — a large runtime change
+  touching every Task site; OR (c) upstream: `retryWith` takes a thunk
+  `() -> Task e a`. No fragile partial fix ships; the workaround is to recurse on
+  the `Result` in Sky. Needs the (b)/(c) call (`docs/escalated-decisions.md`).
+- **`Bytes` non-ASCII text.** `Sky.Core.Bytes = String` is a shared-stdlib alias;
+  the checker treats `Bytes`≡`String`, so a Rust-only `Vec<u8>` newtype is unsound
+  (mismatches `String` at shared call sites). No `String` convention matches Go on
+  both paths: a Rust `String` is UTF-8-only, a Go `string` holds arbitrary bytes.
+  The current Latin-1 convention matches Go on hex/binary and ASCII, diverging
+  only on non-ASCII *text*. True byte-exactness needs `Bytes` as a distinct
+  nominal type in the **shared stdlib** (both backends) — an upstream change
+  outside the Rust boundary. Needs a user/upstream call.
+- **`errorToString`** dumps an internal struct on BOTH backends (Rust via `Debug`,
+  Go via `%v` of the error record) — neither yields a clean message. A shared /
+  Go-side stdlib issue, not Rust-specific.
+- **Go-package→Rust FFI** (examples 03/05/08/13 import gorilla/mux, stripe-go,
+  google/uuid, godotenv) — cannot reach byte-parity without a Go runtime;
+  out of scope unless re-scoped.
 
 ---
 
@@ -399,17 +205,16 @@ different mechanism the *correct* one, not a shortcut.
 
 > **MUST DO before scoping any "Go-parity" work:** re-verify what Go *currently*
 > does (read `runtime-go/rt/` + `docs/` + the latest refactor commit). Go evolves;
-> a stale parity premise wastes work. (Cost us the console epic's framing — see
-> the console row below.)
+> a stale parity premise wastes work.
 
 ### Console serving — pre-built separate process vs in-process inline
 
 - **Go (current, v0.16.0+):** in-process. `MountEmbeddedConsole` links the bundled
   console (translated to Go) into the user's binary; one process, no fork.
-- **Go (v0.15.x, abandoned):** subprocess — `MountSubApp` reverse-proxied to a
-  `sky console` child that **`go build`-compiled the console at runtime on first
-  launch**. That recursive build peaked at several hundred MB and **OOM'd e2-micro
-  (1 GB) VMs** (took down sky-lang.org 2026-06-02). Deleted in `175dfbb8`.
+- **Go (v0.15.x, abandoned):** subprocess — reverse-proxied to a `sky console`
+  child that **`go build`-compiled the console at runtime on first launch**. That
+  recursive build peaked at several hundred MB and **OOM'd e2-micro (1 GB) VMs**,
+  which is why Go abandoned it.
 - **Rust (chosen):** **pre-built** separate process + reverse-proxy. The console
   binary is compiled at the user's `sky build` time (a sibling binary); at runtime
   the parent just `exec`s it and proxies `/_sky/console/*` — **no runtime build, no
@@ -519,7 +324,6 @@ different mechanism the *correct* one, not a shortcut.
   memory, so it never sees frames the writer committed but hasn't checkpointed — it
   silently reads stale/empty data. A `mode=rw` reader participates in WAL and sees
   all committed writes; the console only ever `SELECT`s, so rw grants no real write.
-  (Burned ~an hour on this; logged so no one re-derives it.)
 
 ### Pub/Sub broker — per-type `Broker<T>` keyed by `TypeId` vs reflection + `any`
 
@@ -821,35 +625,20 @@ scripts/rust-perf.sh --baseline            # re-derive thresholds over the tripl
 
 Representative envelope (Rust as a fraction of Go; lower is better except
 throughput): binary size **~1–2%**, RSS **~15–19%**, CLI cold-start **~16%**.
-The Sky.Live entry binds a port and serves on Rust as of codegen fix
-`b18d8a8a`. The `live.rss` envelope + the SSE patch-latency leg are pending a
-re-baseline on a quiet (non-swapping) host.
+The `live.rss` envelope + the SSE patch-latency leg are pending a re-baseline on a
+quiet (non-swapping) host.
 
 ### Top-level `examples/[0-9]*` on `--target rust`
 
-Conquest of the main example set (tracked in
-`docs/rust-example-conquest-registry.md`). Build-level via `scripts/rust-sweep.sh`.
+Build-level via `scripts/rust-sweep.sh`. **In-scope, building:** `00, 01, 04, 07,
+09, 10, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 31, 32, 33,
+35, simple, test_pkg` — covering CLI, FFI, `Std.Db`/`Auth`/`Config`, Sky.Http.Server,
+Sky.Live (P0–P6), Sky.Tui, Sky.Webview (stub + real backend), and the multibackend
+entry model (`24-tui-kitchen-sink`).
 
-**27 in-scope build:** `00, 01, 04, 07, 09, 10, 12, 14, 15, 16, 17, 18, 19, 20,
-21, 22, 23, 24, 26, 28, 30, 31, 32, 33, 35, simple, test_pkg` — up from a
-6-example baseline. `19-skyforum` and `26-ui-showcase` joined via the Std.Ui
-parity work; `24-tui-kitchen-sink` (multibackend Live+Tui main) via the #24
-entry-model refactor, which ALSO un-gated the pure-Tui `21/22/23` (their
-`Tui.app |> Task.run` main now block_on's); `31-webview-stopwatch-ui` via the
-Webview `view : Model -> any` carrier fix (builds + runs the stub backend, which
-returns a graceful `Err` without `--features webview`). Driven by
-general, regression-gated codegen wins: TEA-Msg monomorphisation, multi-module
-serde, body-driven param inference, `Arc<dyn Fn>` stored callbacks, cross-module
-ADT-name resolution, whole-program DCE (matching Go's dep-decl prune), injective
-fn-name mangling, the Std.Ui `any`-carrier resolution, `solveArgType` list/call
-type resolution, `indexedMap` index-param typing, and the `onSubmit` form-event
-peephole.
-
-**Out of scope (per user):** Go-package→Rust-native FFI examples `03, 05, 08, 13`
-(import gorilla/mux, stripe-go, google/uuid, godotenv) are not a goal. The
-composite multi-app examples `37, 38` surface non-Std.Ui feature gaps (Live
-pub/sub kernels — `Cmd.publish`/`Sub.subscribeTopic` — not yet emitted, plus
-anon-struct field-method access) and remain out of scope pending that work.
+**Out of scope:** Go-package→Rust-native FFI examples `03, 05, 08, 13` (import
+gorilla/mux, stripe-go, google/uuid, godotenv) need a Go runtime. The composite
+multi-app examples `37, 38` need anon-struct field-method access, not yet emitted.
 
 ---
 
@@ -925,10 +714,10 @@ iterators / a checked total form rather than `[i]`.
 
 ### `dyn Any` register
 
-**Audit complete (2026-06-12, task #44).** A full sweep of `src/sky_runtime/**`
-found the `dyn Any` sites below. There are **no reducible** ones — each is
-irreducible-by-design (forced by a Sky kernel signature that erases a type the
-runtime must round-trip), and each downcast is correct by construction:
+A full sweep of `src/sky_runtime/**` found the `dyn Any` sites below. There are
+**no reducible** ones — each is irreducible-by-design (forced by a Sky kernel
+signature that erases a type the runtime must round-trip), and each downcast is
+correct by construction:
 
 | Site | Shape | Verdict |
 |---|---|---|
@@ -943,11 +732,10 @@ trait (`SkyRow`), per the no-erasure rule. If a future feature introduces a new
 
 ### Panic-vector gate coverage
 
-`indexing_slicing` / `panic` / `unreachable` are now gated on non-test library
-code (the earlier "~40 non-test sites" estimate was an overcount — all but the 2
-`ffi_polyfills` panics were in `#[cfg(test)]` modules). All non-test slice/array
-indexing was converted to total `.get(...)` / iterator forms. `unwrap`/`expect`
-remain gated separately via `Cargo.toml [lints.clippy]`.
+`indexing_slicing` / `panic` / `unreachable` are gated on non-test library code;
+the only `#[allow]`d sites are the 2 `ffi_polyfills` panics (above). All non-test
+slice/array indexing uses total `.get(...)` / iterator forms. `unwrap`/`expect`
+are gated separately via `Cargo.toml [lints.clippy]`.
 
 ---
 
@@ -1164,28 +952,9 @@ Leave `~/.cargo/registry` and `~/.cargo/git` alone (global, slow to rebuild).
 | `any` in record fields | Codegen refuses `Box<dyn Any>` — structured `error[Rust]: any-typed record field` diagnostic | Encode as an ADT upstream, or ship a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky` |
 | `Task.retryWith` run-once | `SkyTask` is a one-shot `Future` (not `Clone`); codegen drops the policy arg and runs the task once | Drive the retry loop in Sky (recurse on the `Result`) |
 | `withTransaction` rollback isolation | sqlx pool may route body queries to other connections | `sqlx::Pool::max_connections(1)` for guaranteed rollback |
-| `Db.insertRow` on postgres | Returns 0 (no auto last-insert-id) | `INSERT … RETURNING id` + `Db.queryDecode` |
-| JSON pipeline decoder | `Box<dyn FnOnce>` chain may not satisfy `Clone+Send` in some shapes | Use `JsonDec.field` directly, not the pipeline `|=` style |
 | Flat `main.rs` | All Sky modules compile into one file; no `pub mod` | Planned cleanup; doesn't affect correctness |
 | Bytes non-ASCII text base64/hex | `Sky.Core.Bytes = String` uses a Latin-1 byte convention so raw bytes round-trip; non-ASCII *text* diverges from Go-computed encoded strings (ASCII is byte-identical) | Compare decoded values, or `String.toBytes` first |
 | `rustdoc` needs nightly | Inspector runs `cargo +nightly rustdoc` | `rustup install nightly` |
 | Un-nameable bindings dropped | Generics, non-byte slices/arrays, borrows, std types, unsafe fns skipped | Use a wrapper crate with owned/primitive signatures |
 
----
-
-## Remaining work
-
-**Short-term**
-- Single-connection `Db.withTransaction` variant (guaranteed rollback isolation).
-- Non-byte slice/array FFI (`&[String]`, `[f64; 3]`) — per-element coercion.
-- Enum-argument constructors for FFI (pass crate enum variants from Sky).
-
-**Medium-term**
-- Sky.Live: firestore store, Cmd/Sub depth, pub/sub `Broker`, req query parsing.
-- `Sky.Core.WebSocket` client Sub-tier (onMessage subscriptions).
-- WebSocket-server capturing handlers (`Arc<dyn Fn>` instead of fn pointers).
-
-**Long-term**
-- WASM target (`wasm32-unknown-unknown`).
-- `sky watch` for Rust; separate module files (`pub mod` instead of flat `main.rs`).
-- Sky.Tui / Sky.Webview (need the `Std.Ui` layout engine first).
+Open work is tracked in the **Roadmap** at the top of this file.
