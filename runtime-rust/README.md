@@ -6,6 +6,126 @@ copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
 
 ---
 
+## Roadmap to full behavioral Go-parity (prioritised)
+
+> **Goal:** the Rust backend reaches full behavioral parity with the Go
+> reference. **Priority order, applied to every choice: security → correctness
+> → soundness → efficiency.** Hard rules: no panic vector, no runtime error from
+> well-typed Sky, no `Any` in generated code, no change to Sky/Go source or the
+> upstream examples, root-cause fixes only (no symptom masking), no deferral.
+> Anything conflicting with the four principles is escalated, not silently
+> traded away.
+>
+> Status legend: `[x]` done · `[~]` partial/verify · `[ ]` open · `[D]` blocked
+> on a design decision (see "Open design decisions" below).
+>
+> Verified baseline (2026-06-14): build-sweep PASS (32 examples), run-sweep 20
+> OK (the 4 `noserve` were a harness regex bug, now fixed — servers serve 200).
+> The older `docs/.../rust-example-conquest-registry.md` per-example bug list is
+> largely stale; the build/run sweeps are authoritative.
+
+### T0 — Security / availability (panic vectors = DoS)
+
+- [x] Panic-site audit: the "4 production-reachable panics" flagged by a scan are
+      2 test-only (`time.rs`, `html.rs`) + 2 documented-IRREDUCIBLE/ACCEPTED
+      (`ffi_polyfills` callPure dead-for-valid-Sky, callTask deferred). No new
+      reachable panic. (`live/mod.rs` lock-family already poison-tolerant.)
+- [ ] **Re-audit the ~40 `panic!`/`unreachable!`/indexing-slicing follow-up**
+      (filed in `runtime-panic-vector-hardening-design.md`): classify each as
+      test-only / correct-by-construction / reachable; convert any reachable one
+      to a total form with a structured-error fallback. Add the `clippy::panic`/
+      `indexing_slicing` deny gate over non-test runtime code.
+
+### T1 — Correctness (behavioral Go-parity)
+
+Runtime behavioral bugs (verified open 2026-06-14):
+- [ ] **`Db.insertRow` on Postgres returns 0** — `db_last_insert_id` has no
+      auto-id on PG. Use `INSERT … RETURNING id` on the PG driver path.
+- [ ] **`Db.withTransaction` rollback isolation** — `db_with_transaction` runs
+      BEGIN/body/COMMIT against `conn.clone()` (a pool handle); sqlx may route
+      body queries to *other* pooled connections, so ROLLBACK is not guaranteed
+      to cover them. Acquire ONE connection and run the whole tx on it.
+- [ ] **`Task.retryWith` runs once** — codegen drops the policy arg; the runtime
+      `task_retry_with` takes only the task (a one-shot `SkyTask`, not `Clone`).
+      Drive the retry loop properly (re-create the future per attempt).
+- [ ] **`ws_client` `pingInterval` not wired** — heartbeat config ignored.
+- [ ] **`Pure.*` Task surface unsupported** (`uuid_kernel.rs`) — `Pure.uuidV4 ()`
+      etc. error on target=rust; wire to the kernel.
+- [ ] **`live/form.rs` all-String form records** (`FIXME(P-later)`) — typed form
+      records with numeric/bool fields lose precision; coerce per field type.
+- [ ] **`Email.send` SMTP not ported** — Resend/SES/SendGrid work; SMTP transport
+      missing. Add an SMTP transport crate.
+- [ ] **JSON pipeline decoder** (`06-json`, `35`) — verify current state (S8 says
+      fixed); if the `Box<dyn FnOnce>` curry still fails, rearchitect WITHOUT
+      `Box<dyn Any>` (macro / typed-builder). `[D]`
+- [D] **`Bytes` non-ASCII text divergence** — `Sky.Core.Bytes = String` (Latin-1
+      convention) diverges from Go-computed encodings for non-ASCII *text*.
+      Fixing needs `Bytes` as a real `Vec<u8>` newtype, reversing ADR 0001.
+
+Missing features for parity:
+- [ ] **`Cmd.publish` / `Sub.subscribeTopic` codegen emission** for the composite
+      examples (34/37/38) — the per-type broker exists (S6); the kernels aren't
+      emitted for these shapes.
+- [D] **Sky.Tui backend (S4)** — examples 21/22/23/24. ANSI-cell renderer + TEA
+      loop + codegen wiring (design doc ready).
+- [D] **Sky.Webview real backend (S5)** — examples 29/31/38. `wry`/`tao` window;
+      needs system webview libs (absent in this env → verification constraint).
+- [ ] **Sky.Live depth:** firestore store, Cmd/Sub depth, `req` query-string
+      parsing, WebSocket client Sub-tier (`onMessage`), WebSocket-server
+      capturing handlers (`Arc<dyn Fn>`).
+- [ ] **`Ffi.callTask` on target=rust** — currently a deferred-feature panic;
+      needed for Task-emitting FFI kernels.
+- [~] **Non-byte slice/array FFI** (`&[String]`, `[f64; 3]`), enum-arg FFI ctors.
+- [D] **Go-package→Rust FFI** (examples 03/05/08/13 import gorilla/mux, stripe-go,
+      google/uuid, godotenv) — cannot reach byte-parity without a Go runtime;
+      architecturally out of scope unless re-scoped.
+
+Verification-tooling correctness (a false gate hides real regressions):
+- [x] `run-sweep` port-sniff captured `0` from `0.0.0.0:PORT` → false `noserve`. Fixed.
+- [D] **perf-sweep measures the landing page, not the core feature.** `ab GET /`
+      exercises the core feature for only ~2 of 14 server/live examples; the
+      Sky.Live **event round-trip**, **SSE streaming**, **WebSocket**, and
+      **pub/sub broadcast** paths are never measured (ex27's `GET /` is
+      LobbyPage — the regression that started this). `probe_live_sse` exists but
+      is deferred (sse-bench lacks a session-cookie handshake). Add real
+      core-feature drivers (cookie-handshake warm probe + SSE/WS/event-roundtrip
+      + broadcast fan-out) and re-baseline thresholds.
+
+### T2 — Soundness
+
+- [~] **`dyn Any` register (#44 audit)** — 4 runtime-internal sites: per-type
+      broker (TypeId-keyed, correct-by-construction), `Std.Cache` (per-handle K/V,
+      correct-by-construction), `OnRaw` event payload (opaque pass-through, never
+      downcast), FFI unconstrained-generic return (statically dead). None in
+      generated code; all documented `SKY-RUST-AUDIT:ACCEPTED`. Decide: keep as
+      sound-by-construction (documented) or attempt elimination. `[D]`
+- [x] Single `unsafe` block (`console_proxy.rs` fork `pre_exec` → async-signal-safe
+      `prctl`) — justified, SAFETY-commented.
+
+### T3 — Efficiency / cleanup (no correctness impact)
+
+- [ ] Flat `main.rs` → separate `pub mod` files.
+- [ ] `sky watch` for the Rust target.
+- [ ] WASM target (`wasm32-unknown-unknown`).
+
+### Open design decisions (escalated — see commit history / discussion)
+
+1. **perf-sweep core-feature drivers + threshold re-baseline** (T1 verification).
+2. **`dyn Any` policy** — accept the 4 sound-by-construction sites, or rearchitect.
+3. **`Bytes` newtype** vs ADR 0001 (transparent `String` alias).
+4. **Sky.Webview** real backend in an env without webview libs (build behind a
+   feature flag, unverifiable here, vs defer to a capable env).
+5. **Go-package FFI** scope (03/05/08/13) — permanently out of scope vs invest.
+
+### Done this cycle (2026-06-14)
+
+- [x] ex27 throughput regression root-caused + fixed: memoise task-executing
+      nullary CAFs (`OnceLock`) — cookie-less 900→5714 req/s (0.71×→5.0× Go).
+- [x] `Db` pool cache per-URL + WAL + bounded connections (DoS hardening).
+- [x] run-sweep port-sniff false-`noserve` fixed.
+
+---
+
 ## For agents — MUST FOLLOW (read before any build)
 
 These are not suggestions. Violating them wastes minutes per iteration and has
