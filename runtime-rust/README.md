@@ -32,7 +32,7 @@ Tick a box when it reaches parity.
 | [ ] | composite `Basics.toString` | needs design | Scalars match Go (`Display` = `%v`); a record/ADT `toString` is a compile error (no `Display`). Needs type-directed lowering. |
 | [ ] | `Ffi.callTask` (dynamic dispatch) | unsupported | Static-shape calls are peephole-resolved; the dynamic path is a no-reflection guard (Task-emitting FFI kernels). |
 | [ ] | Sky.Live: firestore session store | future | Same `SessionStore` trait as the other stores. |
-| [ ] | Sky.Live: WebSocket-server capturing handlers | future | `Arc<dyn Fn>` instead of fn pointers. |
+| [ ] | WS-server capturing handlers (function-valued returns) | codegen | A capturing handler (`makeHandler x = \sock msg -> … x …`) fails: the codegen renders a function-VALUED return/slot as a bare `fn` pointer, which can't hold a capturing closure (E0308 "expected fn pointer, found closure"). `WsServerCfg` fields are already `Arc<dyn Fn>`; the fix is the general function-type rendering (capturing function values → `Arc<dyn Fn>`/boxed) — broad HOF blast radius. |
 | [ ] | Non-byte slice/array FFI — nested/tuple elements + enum-arg ctors | mostly done | Common sequences (`&[String]`, `[f64; 3]`, `Vec<T>` of primitives/Strings/opaque) ARE classified + coerced (`seqGeneral`); only nested-generic / tuple / borrowed elements + crate-enum arguments remain. |
 | [ ] | WASM target (`wasm32-unknown-unknown`) | future | |
 | [ ] | `sky watch` for the Rust target | future | |
