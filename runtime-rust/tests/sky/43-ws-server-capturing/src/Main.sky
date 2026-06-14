@@ -1,0 +1,43 @@
+module Main exposing (main)
+
+-- Regression: a Sky.Http.Server.WebSocket handler that is a CAPTURING closure
+-- (an inline lambda capturing an enclosing local) builds on target=rust. The
+-- WsServerCfg callback fields are `Arc<dyn Fn(..) + Send + Sync>` and the `withOnX`
+-- setters take `impl Fn`, so a capturing (move) closure stores cleanly — it is NOT
+-- restricted to fn-pointer (non-capturing) handlers.
+--
+-- (The factory form `f prefix = \sock msg -> …` is a separate, general curried-
+-- function-return limitation, not a WS issue — see the README divergences table.)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error exposing (Error)
+import Sky.Http.Server as Server
+import Sky.Http.Server exposing (Request, Response)
+import Sky.Http.Server.WebSocket as Ws
+import Std.Log as Log
+
+handleRoot : Request -> Task Error Response
+handleRoot _ = Task.succeed (Server.text "ok")
+
+onConnect : Ws.WebSocketServer -> Task Error ()
+onConnect _ = Log.println "[ws] connected"
+
+handleWs : Request -> Task Error Response
+handleWs req =
+    let
+        prefix = "echo: "
+    in
+    Ws.upgrade req
+        (Ws.defaultCfg
+            |> Ws.withOnConnect onConnect
+            |> Ws.withOnMessage (\sock msg -> Ws.sendToClient sock (prefix ++ msg))
+            |> Ws.withOriginPatterns [ "*" ]
+        )
+
+main : Task Error ()
+main =
+    Server.listen 8043
+        [ Server.get "/" handleRoot
+        , Server.get "/ws" handleWs
+        ]
