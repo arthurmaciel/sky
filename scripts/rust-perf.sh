@@ -314,6 +314,41 @@ PY
   echo "${eps:-0}"
 }
 
+# Pub/sub BROADCAST fan-out: N subscribers join a room (each its own Sky.Live
+# session + /_sky/sse stream), a publisher POSTs SendMessage events, and we count
+# the `event: patches` frames delivered across ALL subscribers. THE core feature
+# of a pub/sub app — the broker fan-out that `ab GET /` (LobbyPage, zero subs)
+# never touches. This is exactly the path ex27 proved was unmeasured.
+probe_broadcast() { # $1=binary $2=exampleDir -> patches/sec across subscribers
+  local pp; pp=$(start_server "$1") || { echo 0; return; }
+  local pid=${pp% *} port=${pp#* } room="/chat/perfroom" nsub="${SSE_CONC:-16}"
+  local tmp; tmp="$(mktemp -d)"
+  # publisher session + the SendMessage submit handler id from the room page
+  local pjar="$tmp/pjar" hid pck
+  curl -s -c "$pjar" -o "$tmp/room.html" "http://127.0.0.1:$port$room" 2>/dev/null
+  pck="$(awk -F'\t' '$6=="sky_sid"{print $6"="$7}' "$pjar" 2>/dev/null | tail -1)"
+  hid="$(grep -oP '<[^>]*sky-submit="[^"]*"[^>]*>' "$tmp/room.html" 2>/dev/null | grep -oP 'data-sky-hid="\K[^"]*' | head -1)"
+  if [ -z "$hid" ] || [ -z "$pck" ]; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$tmp"; echo 0; return; fi
+  # N subscribers: own session, then read /_sky/sse counting broadcast patches
+  local c
+  for c in $(seq 1 "$nsub"); do
+    ( curl -s -c "$tmp/sj$c" -o /dev/null "http://127.0.0.1:$port$room" 2>/dev/null
+      local sck; sck="$(awk -F'\t' '$6=="sky_sid"{print $6"="$7}' "$tmp/sj$c" 2>/dev/null | tail -1)"
+      timeout "$SSE_WINDOW_S" curl -sN -H "Cookie: $sck" "http://127.0.0.1:$port/_sky/sse" 2>/dev/null | grep -cE 'event: ?patch' > "$tmp/n$c" 2>/dev/null ) &
+  done
+  sleep 0.6   # let subscriptions register before publishing
+  printf '{"handlerId":"%s","msg":"submit","args":[{"text":"hi"}],"seq":1}' "$hid" > "$tmp/body"
+  ( local end; end=$(( $(date +%s) + ${SSE_WINDOW_S%.*} ))
+    while [ "$(date +%s)" -lt "$end" ]; do
+      curl -s -o /dev/null -H "Cookie: $pck" -H 'Content-Type: application/json' --data-binary @"$tmp/body" "http://127.0.0.1:$port/_sky/event" 2>/dev/null
+    done ) &
+  wait
+  local total=0
+  for c in $(seq 1 "$nsub"); do total=$((total + $(cat "$tmp/n$c" 2>/dev/null || echo 0))); done
+  rm -rf "$tmp"; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  python3 -c "print(round($total/$SSE_WINDOW_S,2))" 2>/dev/null || echo 0
+}
+
 # Server-shape probes share ONE server instance. Server.listen apps hard-bind a
 # port; a fresh start_server per probe rebinds it, and after `ab` floods the port
 # with TIME_WAIT sockets the next bind fails → false 0 on sse_eps/ws_eps. Start
@@ -378,7 +413,11 @@ collect_metrics() { # $1=binary $2=shape $3=exampleDir -> "metric value" lines
       # Core-feature metrics (warm render + event round-trip). `throughput` (cold
       # GET /) stays as a secondary signal; live_warm/live_event measure the
       # feature. No threshold yet → informational until `--baseline` runs.
-      echo "live_warm $(probe_live_warm "$b")"; echo "live_event $(probe_live_event "$b")" ;;
+      echo "live_warm $(probe_live_warm "$b")"; echo "live_event $(probe_live_event "$b")"
+      # Pub/sub apps: measure the broker fan-out (the path ex27 proved unmeasured).
+      if [ -n "$ed" ] && grep -rqE 'Cmd\.publish|subscribeTopic|PubSub\.publish' "$ed/src" 2>/dev/null; then
+        echo "broadcast $(probe_broadcast "$b" "$ed")"
+      fi ;;
   esac
 }
 
