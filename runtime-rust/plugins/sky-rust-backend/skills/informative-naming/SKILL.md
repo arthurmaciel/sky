@@ -11,6 +11,18 @@ that **under-inform** and converges them on the clearest form. It is a
 first-class lens of `sky-rust-backend:quality-audit`, ranked with security,
 correctness, soundness, consistency, and efficiency.
 
+**Scope — the whole Rust backend, both languages:**
+
+| Surface | Paths |
+|---|---|
+| Rust runtime crate | `runtime-rust/src/**` (+ generated-code shapes it emits) |
+| Haskell Rust-codegen | `src/Sky/Generate/Rust/**`, `src/Sky/Build/Rust/**`, `src/Sky/Sky/Toml/Rust.hs` |
+
+**Timing.** Apply **opportunistically** on touched/added symbols every commit
+(via `update-docs` / `quality-audit`). A **full-codebase naming refactor pass**
+is planned once the Rust backend stabilizes — run it then over the whole tree,
+one module at a time, with the developer signing off the conventions.
+
 ## The test
 
 For each name ask: **"Reading this for the first time, does the name tell me what

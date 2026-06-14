@@ -17,20 +17,26 @@ Run `git status --short` to see what's dirty.
 - **If nothing is dirty:** skip to Step 2.
 - **If there are changes:**
   1. Read every modified/untracked file that's not gitignored.
-  2. Write a commit message that accurately describes what changed (follow the
+  2. If the changes added/renamed code symbols, run
+     **`sky-rust-backend:informative-naming`** over them first — fix
+     under-informing names before they land (cheaper now than after).
+  3. Write a commit message that accurately describes what changed (follow the
      project's `<type>(<scope>): <summary>` convention, e.g.
      `fix(rust): …` / `feat(rust): …` / `refactor(rust): …`).
-  3. Stage all relevant files (`git add`) — exclude build artefacts
+  4. Stage all relevant files (`git add`) — exclude build artefacts
      (`sky-out/`, `dist-newstyle/`, `.skycache/`, `target/`).
-  4. Commit with the message. Append:
-     ```
-     Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
-     ```
+  5. Commit. (No `Co-Authored-By` trailer — the repo convention forbids it.)
 
 ### Step 2 — Refresh `runtime-rust/README.md`
 
 Read the current `runtime-rust/README.md` to understand its structure (do NOT
 skip this — the file may have changed since the skill was written).
+
+**Run `sky-rust-backend:prune-archaeology` over the README** as you rewrite — it
+owns the cut-history + structure-over-prose discipline (tables / bullets /
+`[ ]`-todo-lists / ASCII schemas over narration; dates, SHAs, phase-bookkeeping
+out; design rationale kept). This skill sets WHAT the README must contain; that
+skill sets HOW each section is written.
 
 Then update it to reflect **today's actual state**. The README must contain these
 sections (rewrite each from scratch based on what you observe in the repo):
@@ -59,33 +65,17 @@ sections (rewrite each from scratch based on what you observe in the repo):
 - Do not include session notes, V/X/T priority backlogs, or numbered bug lists
   — those belong in commits, not the README.
 
-**Doc house style — structure over prose (load-bearing):**
-
-| Prefer | Over |
-|---|---|
-| **Tables** (status, options, mappings, coverage) | paragraphs comparing things in prose |
-| **Bullet points**, one idea each | multi-clause narrative sentences |
-| **`[ ]` / `[x]` / `[D]` todo-lists** for roadmap/open work | prose "we did X, then Y, now Z" |
-| **ASCII schemas / pipeline diagrams** | describing data flow or layering in words |
-| a stated **design decision + its why** | the chronology of how it was reached |
-
-- **Succinctness is a value — but never at the cost of intelligibility.** Cut
-  words, not understanding. If a sentence of *why* is load-bearing, keep it.
-- **Favour systemic understanding over prosaic history.** A reader should grasp
-  how the system fits together and *why it's shaped this way* — not the sequence
-  of commits that got here. Dates, SHAs, "previously/now" narration, phase/step
-  bookkeeping → out (see the `prune-archaeology` skill).
-- Reach for a diagram or table the moment you're about to write a paragraph that
-  enumerates, compares, maps, or sequences. Prose is the fallback, not the default.
+Write each section per the **`sky-rust-backend:prune-archaeology`** house style
+(tables / bullets / `[ ]`-todo-lists / schemas over prose; structure over
+narration; succinct but always intelligible).
 
 ### Step 3 — Commit the README
 
 ```
 git add runtime-rust/README.md
-git commit -m "docs(rust): sync README — <one-line summary of what changed>
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+git commit -m "docs(rust): sync README — <one-line summary of what changed>"
 ```
+(No `Co-Authored-By` trailer — the repo convention forbids it.)
 
 ### Step 4 — Report
 
