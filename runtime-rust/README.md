@@ -35,7 +35,6 @@ Tick a box when it reaches parity.
 | [ ] | Non-byte slice/array FFI — nested/tuple elements + enum-arg ctors | mostly done | Common sequences (`&[String]`, `[f64; 3]`, `Vec<T>` of primitives/Strings/opaque) ARE classified + coerced (`seqGeneral`); only nested-generic / tuple / borrowed elements + crate-enum arguments remain. |
 | [ ] | WASM target (`wasm32-unknown-unknown`) | future | |
 | [ ] | `sky watch` for the Rust target | future | |
-| [ ] | Flat `main.rs` → separate `pub mod` files | cleanup | No correctness impact. |
 | [ ] | Go-package→Rust FFI (gorilla/mux, stripe-go, …) | out of scope | Needs a Go runtime; byte-parity impossible without one. |
 
 **Intentional divergences — by design, NOT future work.** Rust deliberately
@@ -943,7 +942,6 @@ Leave `~/.cargo/registry` and `~/.cargo/git` alone (global, slow to rebuild).
 | `any` in record fields | Codegen refuses `Box<dyn Any>` — structured `error[Rust]: any-typed record field` diagnostic | Encode as an ADT upstream, or ship a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky` |
 | `Task.retryWith` run-once | `SkyTask` is a one-shot `Future` (not `Clone`); codegen drops the policy arg and runs the task once | Drive the retry loop in Sky (recurse on the `Result`) |
 | `withTransaction` rollback isolation | sqlx pool may route body queries to other connections | `sqlx::Pool::max_connections(1)` for guaranteed rollback |
-| Flat `main.rs` | All Sky modules compile into one file; no `pub mod` | Planned cleanup; doesn't affect correctness |
 | Bytes non-ASCII text base64/hex | `Sky.Core.Bytes = String` uses a Latin-1 byte convention so raw bytes round-trip; non-ASCII *text* diverges from Go-computed encoded strings (ASCII is byte-identical) | Compare decoded values, or `String.toBytes` first |
 | `rustdoc` needs nightly | Inspector runs `cargo +nightly rustdoc` | `rustup install nightly` |
 | Un-nameable bindings dropped | Generics, non-byte slices/arrays, borrows, std types, unsafe fns skipped | Use a wrapper crate with owned/primitive signatures |
