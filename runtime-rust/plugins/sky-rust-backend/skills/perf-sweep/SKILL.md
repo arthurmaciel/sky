@@ -44,6 +44,16 @@ reveal a way to improve the script? If yes, edit
   (need TTY/window), console/multi-tier 25/34, Go-FFI-02. `rust-perf.sh`
   self-skips (exit 3) anything a backend can't build; each call is
   `timeout`-bounded + orphan-reaped.
+- **Core-feature metrics (not just `GET /`).** `ab GET /` measures the cold
+  landing page, NOT the example's core feature (ex27 proved this — GET / was
+  LobbyPage, never the broadcast). The live shape now also reports `live_warm`
+  (warm render: GET / WITH a session cookie — realistic steady state, not
+  cookie-less session bootstrap) and `live_event` (event round-trip: POST
+  `/_sky/event` with a real state-changing handler parsed from the page —
+  decode → resolve-by-sky-id → update → VDOM diff → patch). `throughput` (cold
+  GET /) is kept as a SECONDARY signal. SSE/WS/broadcast drivers extend this for
+  the streaming/websocket/pub-sub shapes. New core metrics are informational
+  until `--baseline` commits their threshold envelopes.
 - **Regression report** — diffs this run's per-(example, metric) Rust values vs
   the previous `~/.cache/sky/rust-perf-sweep/perf-*.tsv`: lower-is-better for
   rss/coldstart/binsize, higher for throughput. Flags verdict-flip-to-FAIL or

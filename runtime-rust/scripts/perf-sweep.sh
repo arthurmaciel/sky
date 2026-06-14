@@ -72,7 +72,7 @@ for ex in "${EXAMPLES[@]}"; do
   OUT="$(SKY_CONSOLE_EMBED=off timeout --kill-after=30 600 bash scripts/rust-perf.sh "$ex" 2>&1)"; rc=$?
   reap
   printf '%s\n' "$OUT" >> "$LOG"
-  N="$(printf '%s\n' "$OUT" | grep -E '^[[:space:]]+(rss|coldstart|binsize|throughput)[[:space:]]' | tee -a "$LOG" | \
+  N="$(printf '%s\n' "$OUT" | grep -E '^[[:space:]]+(rss|coldstart|binsize|throughput|live_warm|live_event|sse_eps|ws_eps|broadcast)[[:space:]]' | tee -a "$LOG" | \
     awk -v ex="$ex" '{
       metric=$1; go=""; rust=""; ratio=""; thr=""; verdict=$NF
       for (i=1;i<=NF;i++){

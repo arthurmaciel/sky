@@ -122,6 +122,73 @@ probe_throughput() { # $1=binary -> req/s
   kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
 }
 
+# ── Core-feature drivers ────────────────────────────────────────────────────
+# `ab GET /` measures the cold landing page, NOT the example's core feature. ex27
+# proved this: GET / for a Sky.Live app is the cookie-less session-bootstrap path
+# (LobbyPage), never the event round-trip / broadcast that IS the feature. These
+# drivers exercise the real feature. The Rust/Go RATIO stays the fair comparison
+# (same methodology both backends), even where the absolute load shape (single
+# session, lock-serialised) isn't aggregate concurrency.
+
+# Session cookie from a GET / handshake (Sky.Live sets sky_sid). curl jar cols:
+# domain flag path secure expiry NAME VALUE → "sky_sid=VALUE" | "".
+session_cookie() { # $1=port -> "sky_sid=VALUE" | ""
+  local jar; jar="$(mktemp)"
+  curl -s -c "$jar" -o /dev/null --max-time 3 "http://127.0.0.1:$1/" 2>/dev/null
+  awk -F'\t' '$6=="sky_sid"{print $6"="$7}' "$jar" 2>/dev/null | tail -1
+  rm -f "$jar"
+}
+
+# Pick a handler whose click/input actually changes state (non-empty patches), so
+# the event probe measures the FULL update→diff→patch path, not a nav no-op.
+# Probes each data-sky-hid once with the cookie; echoes "HID\tEVENT\tARGS"
+# (ARGS is the JSON for the wire body). Falls back to the first handler found.
+active_handler() { # $1=port $2=cookie -> "HID\tEVENT\tARGS" | ""
+  local port="$1" ck="$2" html ev hid first="" body resp args
+  html="$(curl -s -b "$ck;" --max-time 3 "http://127.0.0.1:$port/" 2>/dev/null)"
+  for ev in click input change submit; do
+    args='[]'; { [ "$ev" = input ] || [ "$ev" = change ]; } && args='["x"]'
+    while IFS= read -r hid; do
+      [ -n "$hid" ] || continue
+      [ -z "$first" ] && first="$hid	$ev	$args"
+      body="{\"handlerId\":\"$hid\",\"msg\":\"$ev\",\"args\":$args,\"seq\":1}"
+      resp="$(curl -s -H "Cookie: $ck" -H 'Content-Type: application/json' -d "$body" \
+              --max-time 3 "http://127.0.0.1:$port/_sky/event" 2>/dev/null)"
+      case "$resp" in *'"patches":['?*) printf '%s\t%s\t%s' "$hid" "$ev" "$args"; return;; esac
+    done < <(printf '%s' "$html" | grep -oP "<[^>]*sky-$ev=\"[^\"]*\"[^>]*>" | grep -oP 'data-sky-hid="\K[^"]*')
+  done
+  printf '%s' "$first"
+}
+
+# WARM render throughput: GET / WITH a live session cookie — the live-hit fast
+# path (render + diff), realistic steady state, NOT cold session bootstrap.
+probe_live_warm() { # $1=binary -> req/s
+  local pp; pp=$(start_server "$1") || { echo 0; return; }
+  local pid=${pp% *} port=${pp#* } ck rps
+  ck="$(session_cookie "$port")"
+  [ -n "$ck" ] && rps=$(timeout "$AB_TIMEOUT_S" ab $AB_FLAGS -n "$AB_N" -c "$AB_C" -H "Cookie: $ck" "http://127.0.0.1:$port/" 2>/dev/null | awk '/Requests per second/{print $4}')
+  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
+}
+
+# EVENT round-trip throughput: POST /_sky/event with a real state-changing handler
+# — decode → resolve-by-sky-id → update → VDOM diff → patch. THE core Sky.Live
+# feature (the path GET / never touches). 0 if the app has no driveable handler.
+probe_live_event() { # $1=binary -> req/s
+  local pp; pp=$(start_server "$1") || { echo 0; return; }
+  local pid=${pp% *} port=${pp#* } ck he hid ev args bf rps
+  ck="$(session_cookie "$port")"
+  if [ -n "$ck" ]; then
+    he="$(active_handler "$port" "$ck")"
+    hid="$(printf '%s' "$he" | cut -f1)"; ev="$(printf '%s' "$he" | cut -f2)"; args="$(printf '%s' "$he" | cut -f3)"
+    if [ -n "$hid" ]; then
+      bf="$(mktemp)"; printf '{"handlerId":"%s","msg":"%s","args":%s,"seq":1}' "$hid" "$ev" "${args:-[]}" > "$bf"
+      rps=$(timeout "$AB_TIMEOUT_S" ab $AB_FLAGS -n "$AB_N" -c "$AB_C" -H "Cookie: $ck" -p "$bf" -T application/json "http://127.0.0.1:$port/_sky/event" 2>/dev/null | awk '/Requests per second/{print $4}')
+      rm -f "$bf"
+    fi
+  fi
+  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
+}
+
 probe_rss_cli() { /usr/bin/time -v "$1" 2>/tmp/perf-time.txt >/dev/null; awk '/Maximum resident set size/{print $NF}' /tmp/perf-time.txt; }
 
 probe_rss_server() { # $1=binary -> peak RSS KB under load
@@ -158,11 +225,15 @@ collect_metrics() { # $1=binary $2=shape -> "metric value" lines
       # SSE-specific patch_p95 / event_throughput pair is DEFERRED (Bug 2:
       # sse-bench needs a session-cookie handshake); re-add the probe_live_sse
       # line below once that lands.
-      echo "coldstart $(probe_coldstart_server "$b")"; echo "throughput $(probe_throughput "$b")"; echo "rss $(probe_rss_server "$b")" ;;
+      echo "coldstart $(probe_coldstart_server "$b")"; echo "throughput $(probe_throughput "$b")"; echo "rss $(probe_rss_server "$b")"
+      # Core-feature metrics (warm render + event round-trip). `throughput` (cold
+      # GET /) stays as a secondary signal; live_warm/live_event measure the
+      # feature. No threshold yet → informational until `--baseline` runs.
+      echo "live_warm $(probe_live_warm "$b")"; echo "live_event $(probe_live_event "$b")" ;;
   esac
 }
 
-is_higher_better() { case "$1" in throughput|event_throughput) return 0;; *) return 1;; esac; }
+is_higher_better() { case "$1" in throughput|event_throughput|live_warm|live_event|sse_eps|ws_eps|broadcast) return 0;; *) return 1;; esac; }
 thr_for() { local key="$1"; [ -f "$THRESH" ] || return 0; awk -F' *= *' -v k="$key" '$1~("^"k"$"){print $2}' "$THRESH"; }
 
 better() { if is_higher_better "$1"; then pyf "max($2,$3)"; else pyf "min($2,$3)"; fi; }
