@@ -58,7 +58,25 @@ sections (rewrite each from scratch based on what you observe in the repo):
   you cannot verify.
 - Do not include session notes, V/X/T priority backlogs, or numbered bug lists
   — those belong in commits, not the README.
-- Keep it scannable: one sentence per bullet, tables over prose where structure helps.
+
+**Doc house style — structure over prose (load-bearing):**
+
+| Prefer | Over |
+|---|---|
+| **Tables** (status, options, mappings, coverage) | paragraphs comparing things in prose |
+| **Bullet points**, one idea each | multi-clause narrative sentences |
+| **`[ ]` / `[x]` / `[D]` todo-lists** for roadmap/open work | prose "we did X, then Y, now Z" |
+| **ASCII schemas / pipeline diagrams** | describing data flow or layering in words |
+| a stated **design decision + its why** | the chronology of how it was reached |
+
+- **Succinctness is a value — but never at the cost of intelligibility.** Cut
+  words, not understanding. If a sentence of *why* is load-bearing, keep it.
+- **Favour systemic understanding over prosaic history.** A reader should grasp
+  how the system fits together and *why it's shaped this way* — not the sequence
+  of commits that got here. Dates, SHAs, "previously/now" narration, phase/step
+  bookkeeping → out (see the `prune-archaeology` skill).
+- Reach for a diagram or table the moment you're about to write a paragraph that
+  enumerates, compares, maps, or sequences. Prose is the fallback, not the default.
 
 ### Step 3 — Commit the README
 
