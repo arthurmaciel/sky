@@ -298,17 +298,38 @@ pub fn db_insert_row<E: Send + From<String> + 'static>(
             return SkyResult::Err("db.insertRow: invalid column name".to_string().into());
         }
         let placeholders = vec!["?"; col_names.len()].join(", ");
-        let sql = db_format_sql(format!(
+        let base = format!(
             "INSERT INTO {} ({}) VALUES ({})",
             qtable, col_names.join(", "), placeholders
-        ));
-        let mut q = sqlx::query(&sql);
-        for k in &keys {
-            q = q.bind(row.get(*k).cloned().unwrap_or_default());
-        }
-        match q.execute(&conn).await {
-            Ok(res) => ok_res(db_last_insert_id(&res)),
-            Err(e) => SkyResult::Err(sky_err(&e)),
+        );
+        if DB_USES_RETURNING_ID {
+            // Postgres has no LastInsertId — append `RETURNING id` and read the
+            // generated key (matches the Go backend's pgx path). `id` is
+            // BIGSERIAL (i64) by db_auto_id_column, but a user table may use
+            // SERIAL (i32); try both and degrade to 0 (never panic) on mismatch.
+            let sql = db_format_sql(format!("{} RETURNING id", base));
+            let mut q = sqlx::query(&sql);
+            for k in &keys {
+                q = q.bind(row.get(*k).cloned().unwrap_or_default());
+            }
+            match q.fetch_one(&conn).await {
+                Ok(r) => ok_res(
+                    r.try_get::<i64, _>("id")
+                        .or_else(|_| r.try_get::<i32, _>("id").map(|v| v as i64))
+                        .unwrap_or(0),
+                ),
+                Err(e) => SkyResult::Err(sky_err(&e)),
+            }
+        } else {
+            let sql = db_format_sql(base);
+            let mut q = sqlx::query(&sql);
+            for k in &keys {
+                q = q.bind(row.get(*k).cloned().unwrap_or_default());
+            }
+            match q.execute(&conn).await {
+                Ok(res) => ok_res(db_last_insert_id(&res)),
+                Err(e) => SkyResult::Err(sky_err(&e)),
+            }
         }
     })
 }

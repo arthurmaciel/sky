@@ -26,6 +26,11 @@ pub fn db_last_insert_id(res: &sqlx::sqlite::SqliteQueryResult) -> i64 {
 #[cfg(feature = "db")]
 pub fn db_format_sql(sql: String) -> String { sql }  // sqlite uses `?` placeholders
 
+// Whether INSERT must use `… RETURNING id` to recover the auto-id (Postgres has
+// no LastInsertId). Generated projects override per driver; standalone = sqlite.
+#[cfg(feature = "db")]
+pub const DB_USES_RETURNING_ID: bool = false;
+
 // Sub-C.1 — DDL fragment for an auto-incrementing primary key column. In
 // generated projects the per-driver impl is emitted; standalone crate
 // defaults to sqlite.

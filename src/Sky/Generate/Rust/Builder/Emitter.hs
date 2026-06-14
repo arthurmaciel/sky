@@ -58,9 +58,10 @@ dbRowType _          = "sqlx::sqlite::SqliteRow"
 -- and the right impl is generated based on the sky.toml [database] driver.
 dbBackendHelpers :: String -> [String]
 dbBackendHelpers "postgres" =
-    [ "// Postgres has no auto last-insert-id. Returns 0; use"
-    , "// `INSERT … RETURNING id` + Db.queryDecode to fetch it explicitly."
+    [ "// Postgres has no LastInsertId; db_insert_row appends `RETURNING id`"
+    , "// (see DB_USES_RETURNING_ID) so this execute-result helper stays 0."
     , "pub fn db_last_insert_id(_res: &sqlx::postgres::PgQueryResult) -> i64 { 0 }"
+    , "pub const DB_USES_RETURNING_ID: bool = true;"
     , ""
     , "/// Rewrite sqlx-canonical `?` placeholders to postgres `$1, $2, …`."
     , "pub fn db_format_sql(sql: String) -> String {"
@@ -81,6 +82,7 @@ dbBackendHelpers "mysql" =
     [ "pub fn db_last_insert_id(res: &sqlx::mysql::MySqlQueryResult) -> i64 {"
     , "    res.last_insert_id() as i64"
     , "}"
+    , "pub const DB_USES_RETURNING_ID: bool = false;"
     , ""
     , "/// MySQL uses `?` placeholders, same as sqlite — identity."
     , "pub fn db_format_sql(sql: String) -> String { sql }"
@@ -95,6 +97,7 @@ dbBackendHelpers _ =  -- sqlite default
     [ "pub fn db_last_insert_id(res: &sqlx::sqlite::SqliteQueryResult) -> i64 {"
     , "    res.last_insert_rowid()"
     , "}"
+    , "pub const DB_USES_RETURNING_ID: bool = false;"
     , ""
     , "/// SQLite uses `?` placeholders — identity."
     , "pub fn db_format_sql(sql: String) -> String { sql }"
