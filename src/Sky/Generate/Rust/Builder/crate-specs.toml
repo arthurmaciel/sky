@@ -1,0 +1,71 @@
+# Single source of truth for the crate versions + features the Rust codegen
+# emits into a generated project's Cargo.toml. Edit a version/feature HERE; the
+# code reads it (Sky.Generate.Rust.Builder.CrateSpecs, embedded at compile time)
+# so versions never drift between this file, the emitter, and runtime-rust/Cargo.toml.
+#
+# Syntax is the Cargo `name = <spec>` dependency line: a bare "version" string, or
+# an inline table `{ version = "…", default-features = false, features = […] }`.
+# GATING (which crate is emitted for which Sky feature) stays in Emitter.hs; only
+# the version+feature SPEC lives here. tokio and sqlx draw their VERSION from here
+# but build their feature list dynamically in the emitter (it depends on usage).
+#
+# A drift test (runtime-rust/tests/crate_specs_sync) asserts runtime-rust/Cargo.toml
+# stays consistent with the versions below.
+
+# Async runtime + db (features computed by the emitter; version is authoritative here)
+tokio = "1"
+sqlx = "0.8"
+
+# Session stores / live infra
+redis = { version = "0.27", features = ["tokio-comp"] }
+async-trait = "0.1"
+serde_urlencoded = "0.7"
+
+# Serialisation
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+toml = "0.8"
+
+# Pure stdlib kernel crates (always pulled — mod.rs declares the modules)
+regex = "1"
+base64 = "0.22"
+hex = "0.4"
+percent-encoding = "2"
+chrono = "0.4"
+chrono-tz = "0.10"
+rust_decimal = { version = "1", features = ["serde"] }
+hmac = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+subtle = "2"
+rsa = { version = "0.9", features = ["sha2"] }
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+pbkdf2 = "0.12"
+flate2 = "1"
+zstd = "0.13"
+csv = "1"
+jsonwebtoken = "9"
+bcrypt = "0.17"
+uuid = { version = "1", features = ["v4", "v7"] }
+
+# HTTP server / client + email + websocket
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs", "catch-panic"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "stream"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "pool", "tokio1", "tokio1-rustls-tls"] }
+futures-util = "0.3"
+tokio-tungstenite = "0.24"
+
+# Tui
+crossterm = "0.28"
+unicode-width = "0.1"
+
+# Webview (native window)
+wry = "0.24"
+tao = "0.16"
+
+# Console proxy (unix-only target table in the emitter)
+libc = "0.2"

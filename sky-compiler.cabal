@@ -21,6 +21,9 @@ extra-source-files:
     LICENSE
     NOTICE.md
     templates/CLAUDE.md
+    -- Single source of truth for generated-project crate versions/features,
+    -- TH-embedded by Sky.Generate.Rust.Builder.CrateSpecs.
+    src/Sky/Generate/Rust/Builder/crate-specs.toml
     runtime-go/go.mod
     runtime-go/go.sum
     runtime-go/rt/*.go
@@ -205,6 +208,7 @@ executable sky
     Sky.Generate.Rust.Builder.ExprEmitter
     Sky.Generate.Rust.Builder.ModuleEmitter
     Sky.Generate.Rust.Builder.Walker
+    Sky.Generate.Rust.Builder.CrateSpecs
     Sky.Generate.Rust.Builder.Emitter
     Sky.Generate.Rust.Project
 
