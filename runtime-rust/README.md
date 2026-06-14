@@ -61,7 +61,10 @@ Runtime behavioral bugs (verified open 2026-06-14):
       change touching every Task site; OR (c) upstream: `retryWith` takes a thunk
       `() -> Task e a` (the CLAUDE.md note). Not shipping a fragile partial fix;
       needs the (b)/(c) design decision. Workaround stands: recurse on the Result.
-- [ ] **`ws_client` `pingInterval` not wired** — heartbeat config ignored.
+- [x] **`ws_client` `pingInterval` wired** — `do_connect` now sends a periodic
+      Ping when `cfg.pingInterval > 0` (writer-task `select!` on an interval;
+      tungstenite auto-pongs inbound). Additive (interval 0 = unchanged).
+      `cargo check --features full` passes (no ws-client example for e2e run).
 - [ ] **`Pure.*` Task surface unsupported** (`uuid_kernel.rs`) — `Pure.uuidV4 ()`
       etc. error on target=rust; wire to the kernel.
 - [x] **`live/form.rs` numeric/bool/float form fields** — fixed via
@@ -142,10 +145,11 @@ Verification-tooling correctness (a false gate hides real regressions):
       not user-facing examples. Re-wire any script/skill that references the path.
 
 > Detailed pros/cons for the escalated items (`Bytes`, `Task.retryWith`) — and
-> what each upstream/large change entails — are in
-> `docs/escalated-decisions.md`. The two upstream Go-target PR drafts (the `T1`
-> build break + top-level-CAF run-once) with suggested code are in
-> `docs/upstream-pr-proposals.md` (not pushed).
+> what each upstream/large change entails — are in `docs/escalated-decisions.md`.
+> Two upstream Go-target fixes are in `docs/upstream-pr-proposals.md` (nothing
+> pushed): **PR1** (`T1` build break) is **implemented + verified locally**
+> (commit `5ac3aeb1`); **PR2** (top-level-CAF run-once) stays a proposal pending
+> a maintainer scope decision.
 
 ### Design decisions (resolved 2026-06-14)
 
