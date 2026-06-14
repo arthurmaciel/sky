@@ -41,8 +41,10 @@ copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
 ### T1 — Correctness (behavioral Go-parity)
 
 Runtime behavioral bugs (verified open 2026-06-14):
-- [ ] **`Db.insertRow` on Postgres returns 0** — `db_last_insert_id` has no
-      auto-id on PG. Use `INSERT … RETURNING id` on the PG driver path.
+- [x] **`Db.insertRow` on Postgres returns the auto-id** — fixed: generated
+      `DB_USES_RETURNING_ID` (PG=true) drives a `RETURNING id` + fetch_one path
+      (total: i64→i32→0, never panics), mirroring Go's pgx branch. sqlite path
+      unchanged (db tests pass). PG path UNVERIFIED e2e (no PG server here).
 - [x] **`Db.withTransaction` rollback isolation — AT PARITY (shared limitation).**
       Rust runs BEGIN/body/COMMIT on `conn.clone()` (pool); body queries may route
       to other connections → not truly isolated. BUT the **Go reference has the
@@ -51,7 +53,12 @@ Runtime behavioral bugs (verified open 2026-06-14):
       tx handle type yet"). So Rust already matches Go. True isolation needs a tx
       handle type threaded into the body in **both** backends (upstream item, not
       a Rust parity gap — fixing Rust alone would be a divergence).
-- [D] **`Task.retryWith` runs once — ESCALATED (deep: SkyTask is one-shot).**
+- [~] **`Task.retryWith` runs once — RESOLVED as documented-limitation (safe default).**
+      No fragile partial fix shipped; the workaround (recurse on the `Result` in
+      Sky) stands. The proper fix (re-runnable `SkyTask` or a thunk-shaped
+      `retryWith` API) is a large/upstream change detailed in
+      `escalated-decisions.md`. Full detail below:
+- [D] **`Task.retryWith` (deep upgrade path: SkyTask is one-shot).**
       Root cause: `SkyTask = Pin<Box<dyn Future>>` is consumed on first `.await`,
       whereas Go's Task is a re-runnable `func() any`, so Go's loop just re-calls
       it. Retrying in Rust needs EITHER (a) an inline loop re-evaluating the task
@@ -75,7 +82,14 @@ Runtime behavioral bugs (verified open 2026-06-14):
 - [x] **JSON pipeline decoder** — verified: 06-json + 35-composite-generics both
       build on `--target rust` (build-sweep). The `Box<dyn FnOnce>` curry issue
       is resolved; no `Box<dyn Any>` needed.
-- [D] **`Bytes` non-ASCII text divergence — ESCALATED (upstream-gated).**
+- [~] **`Bytes` non-ASCII text — RESOLVED as Option B (keep alias, documented).**
+      The conservative default: ASCII (the dominant byte-op domain — hashes,
+      tokens, binary) is byte-identical; only non-ASCII *text* through Bytes
+      encoding diverges, documented as a known limitation. Upgrade path (Option A:
+      `Bytes` as a distinct nominal type in the shared stdlib, both backends) is
+      an upstream change in `escalated-decisions.md` for if/when it's load-bearing.
+      Full detail below:
+- [D] **`Bytes` non-ASCII text divergence — (upstream upgrade path).**
       `Sky.Core.Bytes = String` is a **shared-stdlib alias**; Sky's checker treats
       `Bytes`≡`String`, so a Rust-only `Vec<u8>` newtype is unsound (mismatches
       `String` at shared call sites). And no `String` convention matches Go on
