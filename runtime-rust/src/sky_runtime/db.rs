@@ -36,14 +36,95 @@ fn row_to_map(row: &DbRow) -> HashMap<String, String> {
     map
 }
 
-pub fn db_connect<E: Send + From<String> + 'static>(_unit: ()) -> SkyTask<E, Db> {
-    let url = SKY_DB_URL.to_string();
-    Box::pin(async move {
-        match DbPool::connect(&url).await {
-            Ok(pool) => ok_res(pool),
-            Err(e) => SkyResult::Err(sky_err(&e)),
+// ─── Connection-lifecycle hardening ───────────────────────────────────────────
+//
+// `Db` (sqlx `Pool`) is an `Arc`-backed handle DESIGNED to be cloned and shared
+// process-wide. The Sky compiler lowers an idiomatic top-level
+// `dbConn = Task.run (Db.connect ())` binding as a per-call function, so a user
+// who references it per request/session re-enters `db_connect` on every request.
+// sqlx's `Pool::connect` is EAGER (real I/O per call), so without a cache that
+// pattern (a) churns connections and, on Postgres/MySQL, (b) blows straight
+// through the server's `max_connections` cap — a resource-exhaustion / DoS vector
+// driven purely by unpredictable user code. The runtime MUST absorb that
+// (runtime-rust/CLAUDE.md: consistent, secure, sound, efficient under any
+// well-typed Sky program). So `Db.connect <url>` resolves to ONE bounded,
+// shared pool per URL — independent of how often the user calls it.
+
+/// Process-global pool registry keyed by connection URL.
+fn pool_cache() -> &'static std::sync::Mutex<HashMap<String, Db>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Db>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// `:memory:` SQLite URLs must NOT be shared: each connection to `sqlite::memory:`
+/// is a DISTINCT in-memory database, so a shared pool would silently merge what
+/// callers expect to be isolated DBs (soundness). File / network URLs are safe —
+/// and correct — to share.
+fn url_is_cacheable(url: &str) -> bool {
+    !url.contains("memory")
+}
+
+/// Upper bound on pooled connections per database. Bounded by default so that
+/// arbitrary user code calling `Db.connect` can NEVER exhaust the database
+/// server's connection limit; raise via `SKY_DB_MAX_CONNECTIONS` for workloads
+/// that genuinely need more headroom.
+fn max_pool_connections() -> u32 {
+    std::env::var("SKY_DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(16)
+}
+
+/// Build one configured pool. SQLite (file, not `:memory:`) gets WAL — concurrent
+/// readers alongside a single writer — plus a `busy_timeout` so lock contention
+/// WAITS (sound) instead of erroring with `SQLITE_BUSY`. Without WAL a shared pool
+/// serialises every statement on the rollback-journal lock (the contention that a
+/// naive cache-only change regressed). The PRAGMAs are a no-op for other drivers
+/// (guarded by the url scheme).
+async fn build_pool<E: Send + From<String> + 'static>(url: &str) -> SkyResult<E, Db> {
+    let pool: Db = match sqlx::pool::PoolOptions::new()
+        .max_connections(max_pool_connections())
+        .connect(url)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => return SkyResult::Err(sky_err(&e)),
+    };
+    if url.contains("sqlite") && url_is_cacheable(url) {
+        let _ = sqlx::query("PRAGMA journal_mode=WAL;").execute(&pool).await;
+        let _ = sqlx::query("PRAGMA busy_timeout=5000;").execute(&pool).await;
+    }
+    ok_res(pool)
+}
+
+/// Connect to `url`, returning a clone of the cached pool on a hit. On a miss the
+/// pool is built with NO lock held (never block other tasks on connect I/O); a
+/// concurrent miss that built a redundant pool loses the `entry` race and its
+/// extra pool drops (closes) — steady state keeps exactly one pool per URL.
+async fn connect_cached<E: Send + From<String> + 'static>(url: String) -> SkyResult<E, Db> {
+    if url_is_cacheable(&url) {
+        let g = pool_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = g.get(&url) {
+            return ok_res(p.clone());
         }
-    })
+    }
+    match build_pool::<E>(&url).await {
+        SkyResult::Ok(pool) => {
+            if url_is_cacheable(&url) {
+                let mut g = pool_cache().lock().unwrap_or_else(|e| e.into_inner());
+                ok_res(g.entry(url).or_insert(pool).clone())
+            } else {
+                ok_res(pool)
+            }
+        }
+        SkyResult::Err(e) => SkyResult::Err(e),
+    }
+}
+
+pub fn db_connect<E: Send + From<String> + 'static>(_unit: ()) -> SkyTask<E, Db> {
+    Box::pin(connect_cached(SKY_DB_URL.to_string()))
 }
 
 /// `Db.open : String -> String -> Task Error Db` (driver, path). The compiled
@@ -58,19 +139,11 @@ pub fn db_open<E: Send + From<String> + 'static>(driver: String, path: String) -
     } else {
         path
     };
-    Box::pin(async move {
-        match DbPool::connect(&url).await {
-            Ok(pool) => ok_res(pool),
-            Err(e) => SkyResult::Err(sky_err(&e)),
-        }
-    })
+    Box::pin(connect_cached(url))
 }
 
 pub fn db_open_with_path<E: Send + From<String> + 'static>(path: String) -> SkyTask<E, Db> {
-    Box::pin(async move { match DbPool::connect(&path).await {
-        Ok(pool) => ok_res(pool),
-        Err(e) => SkyResult::Err(sky_err(&e)),
-    } })
+    Box::pin(connect_cached(path))
 }
 
 pub fn db_exec_raw<E: Send + From<String> + 'static>(conn: Db, sql: String) -> SkyTask<E, ()> {
