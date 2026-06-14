@@ -1,6 +1,6 @@
 ---
 name: quality-audit
-description: Deep Rust soundness / security / efficiency audit of the runtime-rust crate (or a generated example crate), beyond the per-commit clippy gate. Surfaces every panic vector, unsafe block, dyn Any / downcast, lossy cast, and undocumented #[allow]; then walks the MATERIAL findings with the developer one-by-one (why + pros/cons), forcing an attributed, dated decision — agree (consciously accept) or disagree (brainstorm a fix now, or defer for investigation) — recorded in the README "Soundness, correctness and security problems" ledger. Use when the user asks to audit/harden the Rust runtime, check for panic vectors / unsafe / Any / footguns / unsound or inefficient code, or do a soundness/security pass. Trigger: /sky-rust-backend:quality-audit.
+description: Deep Rust soundness / security / efficiency / readability audit of the runtime-rust crate (or a generated example crate), beyond the per-commit clippy gate. Surfaces every panic vector, unsafe block, dyn Any / downcast, lossy cast, undocumented #[allow], AND naming/clarity inconsistencies (opaque wrappers that obscure a named type, e.g. ok_res(x) vs the self-documenting SkyResult::Ok(x); the same concept spelled two ways across files); then walks the MATERIAL findings with the developer one-by-one (why + pros/cons), forcing an attributed, dated decision — agree (consciously accept) or disagree (brainstorm a fix now, or defer for investigation) — recorded in the README "Soundness, correctness and security problems" ledger. Use when the user asks to audit/harden the Rust runtime, check for panic vectors / unsafe / Any / footguns / unsound or inefficient / inconsistent / hard-to-read code, or do a soundness/security/readability pass. Trigger: /sky-rust-backend:quality-audit.
 ---
 
 # quality-audit
@@ -31,10 +31,37 @@ decides; you record.
 3. **Assemble the MATERIAL problem list** — and ONLY that. Material = real
    non-test panic vectors · undocumented `unsafe` · unsound/payload-dependent
    `dyn Any` · undocumented `#[allow]` · security/correctness defects · material
-   efficiency (hot-path clones/allocs) · logic/footguns found by review (lean on
-   Gortex `search_ast` / `find_clones` / `analyze hotspots`). The **1000s of
-   cosmetic lints are NOT material** — fix the cheap ones, document the rest
-   inline at the call site; never drag the developer through them.
+   efficiency (hot-path clones/allocs) · logic/footguns found by review ·
+   **naming/clarity inconsistencies** (see below) — lean on Gortex `search_ast` /
+   `find_clones` / `analyze hotspots`. The **1000s of cosmetic lints are NOT
+   material** — fix the cheap ones, document the rest inline at the call site;
+   never drag the developer through them.
+
+   **Naming & API clarity (readability consistency).** Code is read far more than
+   written; an obscure name taxes every future reader. Flag — and prefer the
+   clearer form:
+   - **Obscuring wrappers** — a thin helper whose name says LESS than the
+     expression it replaces. The canonical example: `ok_res(x)` for
+     `SkyResult::Ok(x)`. `SkyResult::Ok` self-documents (a named `Result`-like
+     type and its `Ok` variant); `ok_res` hides both. A one-line `pub fn
+     ok_res<E,A>(a) -> SkyResult<E,A> { SkyResult::Ok(a) }` is a readability
+     regression — the helper should be MORE informative than what it wraps, never
+     less. **Default recommendation: inline it to the self-documenting form** (a
+     mechanical, compile-checked rename). Keep a wrapper ONLY when it genuinely
+     earns its name (real type-inference relief that the variant can't get, a
+     non-trivial body) — and then its name must describe what it does.
+   - **One concept, two spellings** — the same operation named differently across
+     files/modules (`find_clones` + `search_symbols` surface these). Pick the
+     clearest single name and converge.
+   - **Names that mislead or under-describe** — abbreviations a newcomer can't
+     expand, a name whose type/effect isn't evident at the call site.
+
+   Detect: `find_clones` (near-duplicate thin helpers), `search_ast` for
+   single-constructor/variant wrapper bodies, `search_symbols` for the suspected
+   helper + `find_usages` to size the migration. These are **readability**
+   findings (not the existential no-runtime-errors gate), but they get the same
+   one-by-one developer sign-off because a rename touches many call sites and the
+   convention is the developer's to set.
 
 4. **Reconcile against settled decisions** (idempotency, code-level + ledger) —
    a finding is already settled if its site carries a `SKY-RUST-AUDIT:` marker (see
