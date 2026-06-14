@@ -91,6 +91,83 @@ iteration** below; this is the non-negotiable checklist.
 
 ---
 
+## Understanding the project
+
+### Glossary
+
+**Sky language**
+
+| Term | Meaning |
+|---|---|
+| **Sky** | Elm-family functional language compiling to typed Go (reference) and Rust (this backend), via a Haskell compiler (GHC 9.6) |
+| **Sky source** | `.sky` files |
+| **stdlib** | `Sky.Core` (pure + kernels), `Std` (effects), `Sky.Http` (server) — shared across both backends |
+| **kernel function** | a built-in runtime primitive dispatched by name; surfaced in Sky as `Ffi.kernel "Name"` |
+| **TEA** | The Elm Architecture — `init` / `update` / `view` / `subscriptions` |
+| **Sky.Live / Sky.Tui / Sky.Webview / Sky.Cli** | the app backends: web (HTTP+SSE), terminal (ANSI cells), desktop (system webview), one-shot/loop CLI |
+
+**Compiler pipeline** (`src/Sky/`)
+
+| Stage | Where |
+|---|---|
+| **Parse** | lexer + layout filter + parser — `Parse/` |
+| **Canonicalise** | name resolution, import validation — `Canonicalise/` |
+| **Type check** | HM inference + exhaustiveness — `Type/` |
+| **Lower** | canonical AST → IR — `Build/Compile.hs` |
+| **Generate** | IR → target language — `Generate/{Go,Rust}/` |
+| **TargetGo / TargetRust** | the compile-target selector (`--target rust`); shared code branches on it at a minimal seam |
+
+**Rust codegen — Haskell side** (`src/Sky/Generate/Rust/`, `src/Sky/Build/Rust/`)
+
+| Term | Meaning |
+|---|---|
+| **Builder.hs / Emitter.hs / ModuleEmitter / ExprEmitter / TypeEmitter** | the Rust code generators (expr / type / pattern / module / `Cargo.toml` emission) |
+| **Walker.hs** | the kernel-usage analyzer — walks the program and produces `UsedKernels` (the `usesX` flags) |
+| **`usesX` flags** | `usesLive` / `usesTui` / `usesWebview` / `usesTaskRun` / `usesTaskParallel` / `usesDb` / `usesHttp` / `usesHttpServer` / `usesWsClient` / `usesEmail` / `usesTea` — gate which runtime modules + crates are emitted |
+| **`mainIsTask`** | entry-mode flag — when true the entry `block_on`s `sky_main()`; a kernel that internally task-runs must NOT set `usesTaskRun` (it flips this off and drops a Task-chain main) |
+| **peephole** | a call-site pattern rewrite in codegen (e.g. `Ev.onSubmit` → typed `decode_form`, `App {…} |> Task.run` → drop the `Task.run`) |
+| **monomorphise** | resolve Sky's `any`/generics to a concrete Rust type at the call site, instead of erasing to `Box<dyn Any>` |
+| **DCE** | whole-program dead-code elimination — dep modules prune to the reachable-from-`main` set |
+| **runtimeOpaqueTypes** | Sky types the runtime must name (Request/Response/LiveReq/Csv…) bridged to concrete Rust structs/enums |
+| **CrateSpecs / `crate-specs.toml`** | single source of truth for generated-project crate versions/features; `cargoDependencyFor name` emits a dependency line from it |
+
+**Rust runtime crate** (`runtime-rust/src/sky_runtime/`)
+
+| Type / fn | Meaning |
+|---|---|
+| **`sky_runtime`** | the runtime crate copied into every generated project |
+| **`SkyResult` / `SkyMaybe`** | Rust forms of `Result Error a` / `Maybe a` |
+| **`SkyString` / `SkyList` / `SkyDict`** | Sky string / list (`Vec`) / dict (`HashMap`) |
+| **`SkyTask` / `SkyCmd` / `SkySub`** | async task (`Pin<Box<dyn Future>>`) / TEA command / TEA subscription |
+| **`SkyError`** | the project error type the generated wrappers fix `E` to (`String`) |
+| **`SkyRow`** | trait a `Db.get*` row is decoded through (no `Any`) |
+| **`SubManager` / `spawn_subs`** | the two Sub drivers (Cli/Tui loop · Sky.Live) — both spawn `SkySub::Source` subscriptions and abort+respawn per model update |
+| **`Broker<T>`** | per-payload-type pub/sub broker keyed by `TypeId` — the payload travels as its real `T`, never downcast |
+| **`SessionStore`** | the Sky.Live session-store trait — `Memory` / `Sqlite` / `Postgres` / `Redis` impls |
+| **`LiveReq`** | the typed `init` request record (`path`/`query`/`method`/`params`/`headers`/`cookies`) |
+
+**FFI** (`src/Sky/Build/Rust/Ffi.hs`, `tools/sky-ffi-inspect-rs/`)
+
+| Term | Meaning |
+|---|---|
+| **FFI binding** | generated Rust wrapping an external crate function |
+| **FFI inspector** | `sky-ffi-inspect-rs` — scans a crate's public API via `cargo +nightly rustdoc --output-format json` |
+| **FFI registry** | cached inspection results at `.skycache/ffi/rust/` |
+| **nameability filter** | drops un-bindable items (generics, borrows, non-byte slices, `unsafe fn`, std/private types) so `_bindings.rs` always compiles |
+| **Alt-1** | the widening that monomorphises generic fns whose bound maps to a Sky type (`AsRef<[u8]>` → `List Int`, `Display` → `String`) |
+| **opaque type** | an FFI type emitted by its fully-qualified path (`chrono::NaiveDate`), passed through without inspection |
+
+**Build artifacts + conventions**
+
+| Term | Meaning |
+|---|---|
+| **`sky-out/` · `sky-out/Rust/`** | compiler output · Rust codegen output (capital `R` by convention) |
+| **`.skycache/` · `.skycache/ffi/rust/`** | build cache (source hashes, lowered IR) · Rust FFI registry |
+| **`SKY-RUST-AUDIT:` marker** | an in-code attributed decision marker (ACCEPTED / DEFERRED) mirroring the README decision ledger |
+| **no-`Any` / no-`unsafe` invariant** | generated code + Sky-reachable runtime paths use the static type system end-to-end — see the safety-invariant section |
+
+---
+
 ## Architecture
 
 ```

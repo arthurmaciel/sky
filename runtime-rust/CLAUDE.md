@@ -24,7 +24,6 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 
 **Rust codegen is implemented in the compiler** (`src/Sky/Generate/Rust/Builder.hs`):
 - Full expression translation (functions, kernel calls, patterns, let bindings, binops, unions)
-- Works for simple examples (hello-world compiles and runs)
 - Triggered via `--target rust` CLI flag
 
 ### Key Implementation Details
@@ -34,19 +33,6 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
 - **Runtime**: Inlined with external deps (tokio, sqlx)
 - **Default target**: Go (when no `--target` flag specified)
 
-### Working Features
-
-| Feature | Status |
-|---------|--------|
-| Hello world | ✅ Compiles and runs ("Hello from Sky!") |
-| Todo-cli (real SQLite) | ✅ All 7 operations work: add, list, done, undone, remove, clear, help |
-| --target rust flag | ✅ Wired into CLI |
-| Expression translation | ✅ Functions, calls, patterns, let, binops |
-| Kernel calls | ✅ Log.println → log_info(), Db→sqlx, Time/Random/File/Crypto stubs |
-| Type mapping | ✅ Basic types, ADTs, records, Tasks |
-| Union/ADT handling | ✅ Pattern matching → match expressions |
-| Db backend (sqlx, backend-specific) | ✅ SqlitePool/PgPool/MySqlPool via sky.toml driver |
-| Rust API naming convention | ✅ Types CamelCase, functions snake_case |
 
 ## Phase 3: Remaining Issues
 
@@ -100,7 +86,6 @@ Sky Source → [Haskell] Parse + Type-Check → AST → [Rust] Codegen → Rust 
     no-deferral rule. An internal invariant that "can't fail" still uses a
     total form (`if let` / `match` / `get`) with a structured-error fallback.
 - Rust-native FFI (direct Rust lib calls) — mandatory from day 1 - MUST BE FULLY automatic, secure and sound
-- WASM target priority over embedded
 - All Rust targets: desktop, WASM, CLI, embedded
 
 ## Relevant Context from Sky Compiler
@@ -149,7 +134,8 @@ steps.
 
 ### Domain docs
 
-Single-context — `CONTEXT.md` + `docs/adr/` at `runtime-rust/` root.
+Single-context — the **Glossary** under "Understanding the project" in
+`runtime-rust/README.md` + `docs/adr/` at `runtime-rust/` root.
 
 General skills enabled:
 - `/grill-me` — stress-test plans and designs
