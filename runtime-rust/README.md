@@ -162,11 +162,15 @@ Verification-tooling correctness (a false gate hides real regressions):
 > what each upstream/large change entails — are in `docs/escalated-decisions.md`.
 > Two upstream Go-target fixes are in `docs/upstream-pr-proposals.md` (nothing
 > pushed): **PR1** (`T1` build break) is **implemented + verified locally**
-> (commit `5ac3aeb1`); **PR2** (top-level-CAF run-once) — a render-time attempt
-> was made and **reverted** (it over-fired, memoising stdlib internals + test
-> suites); the doc now carries the corrected **AST-level** spec (gate on the
-> canonical `Can.Def`, mirroring the Rust `maybeMemoiseNullary`), ready to
-> implement carefully with a full Go sweep on your go.
+> (commit `5ac3aeb1`); **PR2** (top-level-CAF run-once) is **implemented +
+> verified locally** (commit `8cab994d`, render-time form) — `27` memoises
+> exactly `dbConn`+`initSchema`, `07` memoises nothing (`Task.run` stays a
+> func), `00` passes 131/131. One **genuine design decision** is flagged for
+> your approval: run-once changes behaviour for a *non-idempotent* effectful CAF
+> (the targeted idempotent setup — `connect`/`CREATE TABLE IF NOT EXISTS` — is
+> observably equivalent). The doc also keeps the cleaner **AST-level** variant
+> (gate on the canonical `Can.Def`, mirroring the Rust `maybeMemoiseNullary`) as
+> the recommended merge shape. Nothing pushed — awaiting your go.
 
 ### Design decisions (resolved 2026-06-14)
 
