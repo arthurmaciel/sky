@@ -107,15 +107,29 @@ Verification-tooling correctness (a false gate hides real regressions):
 - [ ] Flat `main.rs` → separate `pub mod` files.
 - [ ] `sky watch` for the Rust target.
 - [ ] WASM target (`wasm32-unknown-unknown`).
+- [ ] **Move `examples/rust/` → `runtime-rust/tests/`** — they are Sky→Rust tests,
+      not user-facing examples. Re-wire any script/skill that references the path.
 
-### Open design decisions (escalated — see commit history / discussion)
+### Design decisions (resolved 2026-06-14)
 
-1. **perf-sweep core-feature drivers + threshold re-baseline** (T1 verification).
-2. **`dyn Any` policy** — accept the 4 sound-by-construction sites, or rearchitect.
-3. **`Bytes` newtype** vs ADR 0001 (transparent `String` alias).
-4. **Sky.Webview** real backend in an env without webview libs (build behind a
-   feature flag, unverifiable here, vs defer to a capable env).
-5. **Go-package FFI** scope (03/05/08/13) — permanently out of scope vs invest.
+1. **perf-sweep** → build full core-feature drivers (Live event round-trip + SSE
+   delivery + WS round-trip + broadcast fan-out), re-baseline thresholds, keep
+   cold `GET /` as a relabeled secondary signal.
+2. **`dyn Any` (#44)** → KEEP the 4 sites as sound-by-construction; formalise in a
+   `SOUNDNESS_LEDGER`. **⏳ FUTURE REVIEW POINT — re-examine after the Rust
+   backend stabilises:** confirm each site is still irreducible (per-type broker,
+   `Std.Cache` K/V, `OnRaw` payload, FFI generic return) and shrink any that have
+   become reducible. None are in generated code; the "no-Any" rule targets
+   generated code.
+3. **`Bytes`** → make it a real `Vec<u8>` newtype (correctness > efficiency);
+   author ADR 0002 superseding 0001 for the Bytes case.
+4. **Sky.Webview** → codegen-detection model (mirror Live/TUI): detect
+   `Webview.app` → generated `Cargo.toml` auto-enables an internal `webview`
+   cargo feature + `wry`/`tao`; pre-`cargo` `pkg-config` probe fails the build
+   with a clear install message if libs are absent. (webkit2gtk present in this
+   env → verifiable here.)
+5. **Go-package FFI** (03/05/08/13) → permanently out of scope (Rust cannot call
+   Go packages without a Go runtime; byte-parity is architecturally impossible).
 
 ### Done this cycle (2026-06-14)
 
