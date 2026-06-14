@@ -74,6 +74,31 @@ properly-bound generic lambdas untouched).
 
 ## PR 2 — `feat(go): run-once semantics for top-level effectful value bindings`
 
+> **STATUS: IMPLEMENTED + VERIFIED locally (render-time form), NOT pushed.**
+> Lands at `renderFuncDecl` (`src/Sky/Generate/Go/Builder.hs`) + a tiny
+> `rt.OnceValue` wrapper (`runtime-go/rt/once.go`). Verified (clean rebuilds):
+> `27-multi-session-chat` memoises exactly `dbConn` + `initSchema` (the intended
+> targets) — `GET / → 200`, `chat.db` table created once, no panic;
+> `07-todo-cli` memoises **nothing** (`Task.run` correctly stays a plain func,
+> `showUsage` not memoised) and CRUD works; `00-standard-libs` memoises only the
+> pure `taskRetrySuite` (harmless — see below) and all 131 assertions pass.
+> The earlier "over-fire" concerns are resolved: the `func(`/`SkyTask`-return
+> exclusions are reliable (07 proves both are excluded). **One genuine design
+> decision is flagged below — surface to the maintainer before merge.**
+>
+> **Why render-time turned out fine.** The original lesson (below) feared the
+> exclusions were unreliable and the nested-closure case unsafe. Empirically:
+> (a) the `func(`/`SkyTask` ret-string exclusions DO fire correctly per call
+> site (07's `Task.run`/`showUsage` stay un-memoised); (b) the lone residual
+> false-positive — `taskRetrySuite` in 00, whose `AnyTaskRun` lives in nested
+> test closures — is **provably harmless**: Sky value-construction is pure, so
+> caching the built `Sky_Test_Test` value is observationally identical (the
+> deferred closures still run their effects when invoked). The **AST-level form
+> remains the recommended shape for the actual merge** (it avoids even the
+> cosmetic over-memoisation of pure-value CAFs); the render-time form shipped
+> here is the verification vehicle that proves the run-once semantics + perf win
+> are correct.
+
 **Severity:** performance. A Sky.Live app re-runs schema/connection setup on
 every request.
 
@@ -98,17 +123,17 @@ func initSchema() struct{} { … Db_execRaw("CREATE TABLE …") … return struc
 The intuitive Elm/Haskell-family reading of a top-level `dbConn = …` is a single
 value, not a per-reference re-computation.
 
-**⚠️ Lesson from a render-time attempt (2026-06-14, reverted).** Gating in
-`renderFuncDecl` by string-scanning the rendered body for `AnyTaskRun` is **too
-coarse and over-fires** — it memoised `Sky_Core_Task_run` (a fn-returning stdlib
-CAF), `showUsage` (a `SkyTask`-returning CAF), and `taskRetrySuite` (whose
-`AnyTaskRun` lives in *nested test closures*, not the CAF's own effect). The
-fn/`SkyTask`-return exclusions are unreliable at render time, and the
-nested-closure false-positive is **undetectable** from a rendered string. All
-examples happened to still build/run (the over-memoised CAFs are pure-enough),
-but memoising stdlib internals + test suites in the reference backend is not
-clean. **Do it at the AST level instead** (below), mirroring how the Rust
-backend's `maybeMemoiseNullary` works on the canonical AST.
+**Render-time form shipped here (history kept for the maintainer).** An initial
+naive gate that string-scanned the rendered body for `AnyTaskRun` with NO return
+exclusions over-fired — it memoised `Sky_Core_Task_run` (fn-returning) and
+`showUsage` (`SkyTask`-returning). Adding two ret-string exclusions
+(`not ("func(" isInfixOf ret)`, `not ("SkyTask" isInfixOf ret)`) fixed both
+(verified per the STATUS block). The only residual is `taskRetrySuite` (whose
+`AnyTaskRun` is in nested test closures) — harmless because Sky value
+construction is pure. The cleaner **AST-level** variant below avoids even that
+cosmetic over-memoisation by gating on the CAF's *own tail expression* (mirroring
+the Rust backend's `maybeMemoiseNullary`); it is the recommended final shape and
+the maintainer may prefer to merge that form instead of the render-time one.
 
 **Exact implementation spec (corrected — AST-level).**
 - **Site:** the top-level `Can.Def` → `GoFuncDecl` lowering in
