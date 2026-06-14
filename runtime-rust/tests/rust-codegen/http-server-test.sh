@@ -5,7 +5,7 @@
 # stdout and exit; it has to be started, curled, and killed.
 set -u
 cd "$(dirname "$0")"
-SKY=../../sky-out/sky
+SKY=../../../sky-out/sky
 PORT=8231
 work=$(mktemp -d)
 trap 'pkill -f "sky-out/Rust/target/debug/sky-app" 2>/dev/null; rm -rf "$work"' EXIT

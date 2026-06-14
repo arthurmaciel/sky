@@ -8,7 +8,7 @@ fail=0
 for f in empty-list-head.sky maybe-map-nothing.sky result-err.sky generic-adt.sky crypto-aead.sky bytes-jwt.sky compression.sky csv.sky uuid.sky; do
     cp "$f" Main.sky
     rm -rf sky-out .skycache .skydeps
-    out=$(../../sky-out/sky build Main.sky 2>&1)
+    out=$(../../../sky-out/sky build Main.sky 2>&1)
     errs=$(echo "$out" | grep -cE "^error\[E0")
     if [ "$errs" -ne 0 ]; then
         echo "FAIL $f: $errs cargo error(s)"

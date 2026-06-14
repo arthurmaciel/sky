@@ -4,7 +4,7 @@
 # stdin window and assert periodic ticks fired. Tolerant to ±1 tick (timing).
 set -u
 cd "$(dirname "$0")"
-SKY=../../sky-out/sky
+SKY=../../../sky-out/sky
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 fail=0

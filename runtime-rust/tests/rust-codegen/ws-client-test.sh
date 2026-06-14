@@ -5,7 +5,7 @@
 # Needs python3.
 set -u
 cd "$(dirname "$0")"
-SKY=../../sky-out/sky
+SKY=../../../sky-out/sky
 PORT=9044
 work=$(mktemp -d)
 trap 'pkill -f "ws_srv_$PORT.py" 2>/dev/null; rm -rf "$work"' EXIT

@@ -568,7 +568,7 @@ regressed in naive form") — the naive monomorphic default regressed call args
 like `db_query [] : Vec<String>`; the call-site approach does not.
 
 ### Verification
-- `tests/rust-codegen/{empty-list-head, maybe-map-nothing, result-err}.sky` — PASS.
+- `runtime-rust/tests/rust-codegen/{empty-list-head, maybe-map-nothing, result-err}.sky` — PASS.
 - `examples/00-standard-libs` (`target=rust`): zero empty-literal misfires.
 - `examples/rust/*`: 16/18 build; 17 & 18 fail **only** on sub-D (`ShouldRetry`
   generic ADT) — no empty-literal regression.

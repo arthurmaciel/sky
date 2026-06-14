@@ -5,7 +5,7 @@
 # and the HttpRequest record-construction bridge work. Needs python3.
 set -u
 cd "$(dirname "$0")"
-SKY=../../sky-out/sky
+SKY=../../../sky-out/sky
 PORT=8156
 work=$(mktemp -d)
 pyserver=""

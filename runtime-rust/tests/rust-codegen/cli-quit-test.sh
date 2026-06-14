@@ -5,7 +5,7 @@
 # System.exit fired through Cmd.perform). Pure stdin -> stdout.
 set -u
 cd "$(dirname "$0")"
-SKY=../../sky-out/sky
+SKY=../../../sky-out/sky
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 fail=0

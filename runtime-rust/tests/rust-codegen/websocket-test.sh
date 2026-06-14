@@ -6,7 +6,7 @@
 # sockets) so it doesn't depend on a particular python websockets version.
 set -u
 cd "$(dirname "$0")"
-SKY=../../sky-out/sky
+SKY=../../../sky-out/sky
 PORT=8162
 work=$(mktemp -d)
 trap 'pkill -f "sky-out/Rust/target/debug/sky-app" 2>/dev/null; rm -rf "$work"' EXIT
