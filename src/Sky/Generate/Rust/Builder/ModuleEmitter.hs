@@ -279,6 +279,49 @@ inferRecordParamFromUpdate recordMap pname = go
     fj Nothing  y = y
     firstJustL = foldr fj Nothing
 
+-- | Memoise a top-level NULLARY value binding whose body executes a Task.
+--
+-- A Sky top-level binding like @dbConn = Task.run (Db.connect ())@ or
+-- @initSchema = let _ = Db.execRaw … in ()@ lowers as a per-reference function,
+-- so every call re-runs the effect. On a Sky.Live cookie-less request that meant
+-- a @CREATE TABLE IF NOT EXISTS@ executed per request — the ex27 throughput
+-- regression (Rust paid a 6.6x init penalty vs Go's 1.2x; the per-statement sqlx
+-- DDL cost dominated because Rust's baseline request is ~4x cheaper than Go's).
+--
+-- Fix: run the body ONCE behind a function-local 'OnceLock' and return a clone on
+-- later calls. This is a deliberate Rust-only divergence from Go (which re-runs
+-- per reference) — sound for the idempotent connect / schema-init CAFs it targets,
+-- and the conventional run-once CAF semantics of an Elm/Haskell-family language.
+--
+-- Gated tightly so it cannot regress unrelated code: it fires ONLY for a nullary,
+-- monomorphic, Task-executing binding whose return type is a concrete owned value
+-- (no @SkyTask@ future — not 'Clone'; no @fn@/@dyn@/@impl@/reference types). Every
+-- pure constant stays byte-identical, and no non-@Send + Sync@ type reaches the
+-- @static OnceLock@. The post-@task_run@ return types this targets (@Db@, @()@,
+-- @String@, records) are all @Send + Sync + Clone@.
+maybeMemoiseNullary
+    :: Int     -- ^ arity (param count)
+    -> String  -- ^ source name
+    -> String  -- ^ rust name
+    -> String  -- ^ rendered generics decl ("" when monomorphic)
+    -> String  -- ^ rendered return type
+    -> String  -- ^ rendered body
+    -> String
+maybeMemoiseNullary nParams name rustName gens retTy body
+    | nParams == 0
+    , null gens
+    , rustName /= "sky_main", name /= "main"
+    , not ("SkyTask<" `isPrefixOf` retTy)
+    , not (any (`isInfixOf` retTy) ["fn(", "dyn ", "impl ", "&", "'"])
+    , "task_run" `isInfixOf` body
+    = let cell = "static __SKY_MEMO: ::std::sync::OnceLock<" ++ retTy
+                 ++ "> = ::std::sync::OnceLock::new(); "
+          got  = "__SKY_MEMO.get_or_init(|| { " ++ body ++ " })"
+      in if retTy == "()"
+         then "{ " ++ cell ++ "let _ = " ++ got ++ "; }"
+         else "{ " ++ cell ++ got ++ ".clone() }"
+    | otherwise = body
+
 defToRustItem :: EmitCtx -> String -> Can.Def -> RustItem
 defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
     let rustName = if name == "main" && ecCurrentModule ctx == "Main" then "sky_main" else name
@@ -489,7 +532,8 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         bodyWrapped = if "SkyTask<" `isPrefixOf` retTy && needsTaskWrap (ecSolvedTypes ctx) body
                       then "task_succeed({ " ++ bodyStr ++ " })"
                       else bodyStr
-     in RustFunction rustName genVars' paramStrs' retTyFinal (preludes ++ bodyWrapped)
+     in RustFunction rustName genVars' paramStrs' retTyFinal
+            (maybeMemoiseNullary n name rustName genVars' retTyFinal (preludes ++ bodyWrapped))
 defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) =
     let rm = ecRecordMap ctx
         rustName = if name == "main" && ecCurrentModule ctx == "Main" then "sky_main" else name
@@ -614,7 +658,8 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
             | "SkyTask<" `isPrefixOf` ret && isRustPureGoTaskKernel
                     = "task_succeed({ " ++ tdBody ++ " })"
             | otherwise = tdBody
-    in RustFunction rustName genDecl params ret (preludes ++ tdWrapped)
+    in RustFunction rustName genDecl params ret
+           (maybeMemoiseNullary (length params) name rustName genDecl ret (preludes ++ tdWrapped))
 defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
     let vars = intercalate "_" (patBindingVars pat)
         fnName = if null vars then "__destruct" else "__destruct_" ++ vars
