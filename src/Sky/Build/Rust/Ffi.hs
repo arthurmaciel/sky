@@ -224,6 +224,27 @@ isNumericRust t = t `elem`
     , "isize", "usize", "f32", "f64" ]
 
 
+-- | Make extern-crate references absolute (`csv::X` → `::csv::X`) so they never
+-- collide with a same-named runtime kernel module that `pub use sky_runtime::*`
+-- re-exports at the app crate root. The `uuid`/`regex`/`char` kernels are
+-- `_kernel`-suffixed, but `csv`/`time`/`log`/`json`/`config`/`email`/`html` are
+-- not — so a `csv`/`time`/… crate dep collides (`use crate::*` brings
+-- `crate::csv`, ambiguous with the extern `csv`). A leading `::` resolves from
+-- the extern prelude, never `crate::<name>`. Rewrites `<crate>::` only at a path
+-- start (preceded by a delimiter, not an identifier char or `:`) so nested
+-- generics (`Vec<csv::X>`) and already-absolute paths are handled correctly.
+absolutizeCrate :: String -> String -> String
+absolutizeCrate crate = go ' '
+  where
+    pat = crate ++ "::"
+    isIdentCh ch = isAlphaNum ch || ch == '_'
+    go _ [] = []
+    go prev s@(c:cs)
+      | pat `isPrefixOf` s && not (isIdentCh prev) && prev /= ':' =
+          "::" ++ pat ++ go ':' (drop (length pat) s)
+      | otherwise = c : go c cs
+
+
 -- | Strip leading/trailing spaces.
 trimStr :: String -> String
 trimStr = f . f where f = reverse . dropWhile (== ' ')
@@ -451,7 +472,9 @@ emitRustFile kernelName pkg =
         , "#![allow(unused_imports, unused_mut, dead_code)]"
         , "use crate::*;"
         , "use std::collections::HashMap;"
-        , "use " ++ crateImp ++ "::*;"
+        -- No `use ::<crate>::*;` glob: every crate-type reference is emitted
+        -- absolute (`::<crate>::Type`), and a glob would SHADOW the std prelude
+        -- (e.g. csv's `Result<T>` alias shadowing `std::result::Result`).
         , ""
         ]
         ++ fnLines
@@ -465,10 +488,24 @@ emitRustFile kernelName pkg =
     -- (`String`, not `&str` — argCall borrows internally).  Only genuinely
     -- opaque types (skyTypeToRust falls back to "String") use the inspector's
     -- raw Rust type, which is now fully-qualified (`chrono::NaiveDate`).
-    resolveRustType _crate st rtOverride
+    resolveRustType crate st rtOverride
+        -- `Maybe <opaque>`: skyTypeToRust would collapse the opaque inner to
+        -- "String" (SkyMaybe<String>) — wrong. Take the inner from the raw
+        -- `Option<inner>` override, owned (&T → T), so the decl is
+        -- SkyMaybe<::crate::T> and argCall's Option coercion lines up.
+        | "Maybe " `isPrefixOf` st
+        , not (isKnownSky (trimStr (drop 6 st)))
+        , Just optInner <- stripGeneric1 "Option" rtOverride
+            = "SkyMaybe<" ++ ownedInner crate optInner ++ ">"
         | isKnownSky st                = skyTypeToRust st
-        | not (null rtOverride)        = rtOverride
+        | not (null rtOverride)        = absolutizeCrate crate rtOverride
         | otherwise                    = "String"
+      where
+        ownedInner cr raw =
+            let t  = trimStr raw
+                t1 = dropWhile (\c -> c == '&' || c == ' ') t
+                t2 = maybe t1 id (stripPrefix "mut " t1)
+            in absolutizeCrate cr (trimStr t2)
 
     -- | True when `skyTypeToRust` gives a faithful (non-fallback) mapping —
     -- i.e. the type is a primitive/container Sky understands, not an opaque
@@ -532,10 +569,13 @@ emitRustFile kernelName pkg =
             -- raw `&mut Self`/`()` Rust return is discarded in the body.
             (retInner, retCoerce)
                 | _fnSelfReturning fn =
+                    -- paramTypes already absolutized via resolveRustType.
                     (case paramTypes of (t:_) -> t; [] -> "()", id)
-                | otherwise = case _fnEffect fn of
-                    "fallible" -> translateRustRet (okTypeOfResult effRawResult)
-                    _          -> translateRustRet effRawResult
+                | otherwise =
+                    let (t, co) = case _fnEffect fn of
+                            "fallible" -> translateRustRet (okTypeOfResult effRawResult)
+                            _          -> translateRustRet effRawResult
+                    in (absolutizeCrate crateImport t, co)
             retType = case _fnEffect fn of
                 "effectful" -> "SkyTask<SkyError, " ++ retInner ++ ">"
                 _           -> "SkyResult<SkyError, " ++ retInner ++ ">"
@@ -580,8 +620,9 @@ emitRustFile kernelName pkg =
                             in case inner of
                                  "&str"    -> opt ++ ".as_deref()"
                                  "&String" -> opt ++ ".as_ref()"
-                                 _ | isNumericRust inner -> opt ++ ".map(|x| x as " ++ inner ++ ")"
-                                   | otherwise           -> opt   -- String/bool/owned opaque: identity
+                                 _ | isNumericRust inner       -> opt ++ ".map(|x| x as " ++ inner ++ ")"
+                                   | "&" `isPrefixOf` inner     -> opt ++ ".as_ref()"  -- Option<&T> borrowed opaque
+                                   | otherwise                  -> opt   -- String/bool/owned opaque: identity
                         | declTy == "String" -> "&" ++ base          -- Sky String → &str
                         | null rawTy || rawTy == declTy -> base      -- same type, pass through
                         | isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
@@ -606,8 +647,10 @@ emitRustFile kernelName pkg =
                                 else recvResolved
                     in recv' ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
                 | otherwise =
-                    if null params then crateImport ++ "::" ++ fnName ++ "()"
-                    else crateImport ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
+                    -- Absolute `::<crate>` path: never collide with a same-named
+                    -- runtime kernel module re-exported at the app crate root.
+                    if null params then "::" ++ crateImport ++ "::" ++ fnName ++ "()"
+                    else "::" ++ crateImport ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
             -- Build the function body based on effect.  retCoerce lifts the
             -- raw Rust value into the declared return type (Option→SkyMaybe,
             -- Vec element map, numeric widening to i64/f64, &T→owned, opaque
