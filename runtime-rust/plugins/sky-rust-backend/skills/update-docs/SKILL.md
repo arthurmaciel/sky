@@ -40,6 +40,26 @@ Never create a new standalone root `.md`. (`docs/` subdir files are exempt.)
 Read the current `runtime-rust/README.md` to understand its structure (do NOT
 skip this — the file may have changed since the skill was written).
 
+**WHOLE-FILE COVERAGE IS MANDATORY — this is the #1 failure mode of this skill.**
+Drift accumulates exactly in the sections recent work *didn't* touch, so a
+"reconcile only what I just changed" pass is the bug. Every run:
+
+1. Enumerate **EVERY** top-level `##` section in the current README:
+   `grep -nE '^## ' runtime-rust/README.md`.
+2. Reconcile **EACH ONE** against the codebase + `git log` this run, **top to
+   bottom**. A section MUST NOT be skipped, left in its prior state, or assumed
+   current because the latest work didn't touch it. The default for every
+   section is "re-verify from current state and rewrite", not "leave as-is".
+3. The reconcile-don't-append rules and the stale-detection checklist below
+   apply to **ALL** sections — not just divergences/limitations/roadmap.
+
+**High-drift sections that have gone stale and MUST be rebuilt from current
+state every run** (verified stale in practice — do not trust their prose):
+
+- `## API surface vs the Go backend` — what Rust covers vs Go drifts as kernels land.
+- `## Sky.Live on Rust (P0–P6 shipped)` — the P-tier list silently ages; re-derive shipped tiers from `git log` + the runtime, don't carry the old count/heading.
+- `## Soundness, correctness and security problems` — fixed problems linger as open; re-audit against the current runtime + codegen and delete what's resolved.
+
 **Run `sky-rust-backend:prune-archaeology` over the README** as you rewrite — it
 owns the cut-history + structure-over-prose discipline (tables / bullets /
 `[ ]`-todo-lists / ASCII schemas over narration; dates, SHAs, phase-bookkeeping
@@ -62,6 +82,7 @@ these rules over EVERY section:
 
 **Stale-detection checklist — run before committing. Each "yes" = fix it:**
 
+- [ ] **Coverage gate:** was EVERY `##` section from the `grep -nE '^## '` enumeration reviewed + reconciled this run? Any section still in its prior state by default? → go back and reconcile it; do not commit until all are covered. A section whose claims you cannot verify must have its unverifiable claims **deleted** (per the no-stale-numbers rule), not left as-is.
 - [ ] Any `[ ]` checklist row that is actually done? → flip to `[x]` or delete.
 - [ ] Any limitation/known-issue row describing a bug that's since fixed? → delete it.
 - [ ] Any metric / number (binary size, error count, line count, example count) NOT re-verified this run? → delete it (don't carry stale numbers).
