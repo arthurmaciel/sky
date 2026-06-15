@@ -75,3 +75,13 @@ silently — surface it and ask. Real conflicts:
 - A longer name that pushes a hot, dense expression past readability — weigh it.
 
 Default outside those: favour the clearer name.
+
+## Capture learnings (self-improving loop)
+
+After this skill's work completes, record any **significant, verified,
+generalizable** learning — a non-obvious pitfall, a deeper foundational insight,
+or a secure/correct/sound optimization — to the **`## Agent learnings`** section
+of `runtime-rust/CLAUDE.md`, so future agents improve. Obey that section's rules:
+**only if secure, correct, and sound + verified**; **reconcile (update / dedupe /
+prune), never blind-append**; **skip when nothing significant** — most runs add
+nothing, and manufacturing an entry is worse than none.

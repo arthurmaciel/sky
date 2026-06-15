@@ -68,3 +68,13 @@ mask a real divergence). `RUST_EQUIV="01-hello-world test_pkg"` runs a subset
   interactive example can't hang the sweep.
 - Supersedes the older `scripts/verify-cross-target.sh` (same idea, larger set +
   sweep hygiene). Never edit runtime files mid-run.
+
+## Capture learnings (self-improving loop)
+
+After this skill's work completes, record any **significant, verified,
+generalizable** learning — a non-obvious pitfall, a deeper foundational insight,
+or a secure/correct/sound optimization — to the **`## Agent learnings`** section
+of `runtime-rust/CLAUDE.md`, so future agents improve. Obey that section's rules:
+**only if secure, correct, and sound + verified**; **reconcile (update / dedupe /
+prune), never blind-append**; **skip when nothing significant** — most runs add
+nothing, and manufacturing an entry is worse than none.

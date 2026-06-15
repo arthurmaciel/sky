@@ -88,3 +88,13 @@ with their reminders); `run` is for a user without an agent.
   doesn't always mean a perf delta; the agent confirms before running perf.
 - The full chain can run >1 h (build ~15 min + run ~40 min + optional web/perf).
   Run each sweep in the background and wait.
+
+## Capture learnings (self-improving loop)
+
+After this skill's work completes, record any **significant, verified,
+generalizable** learning — a non-obvious pitfall, a deeper foundational insight,
+or a secure/correct/sound optimization — to the **`## Agent learnings`** section
+of `runtime-rust/CLAUDE.md`, so future agents improve. Obey that section's rules:
+**only if secure, correct, and sound + verified**; **reconcile (update / dedupe /
+prune), never blind-append**; **skip when nothing significant** — most runs add
+nothing, and manufacturing an entry is worse than none.

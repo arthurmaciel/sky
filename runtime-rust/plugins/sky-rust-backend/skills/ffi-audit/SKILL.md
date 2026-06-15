@@ -94,3 +94,13 @@ When asked to record findings, update the "FFI reach" section of
 A full sweep spawns many `cargo`/`rustdoc`/inspector subprocesses. Before
 declaring done, sweep orphans per the project CLAUDE.md (stray `cargo`,
 `rustdoc`, `sky-ffi-inspect-rs`, poll loops) and confirm mem-guard is still alive.
+
+## Capture learnings (self-improving loop)
+
+After this skill's work completes, record any **significant, verified,
+generalizable** learning — a non-obvious pitfall, a deeper foundational insight,
+or a secure/correct/sound optimization — to the **`## Agent learnings`** section
+of `runtime-rust/CLAUDE.md`, so future agents improve. Obey that section's rules:
+**only if secure, correct, and sound + verified**; **reconcile (update / dedupe /
+prune), never blind-append**; **skip when nothing significant** — most runs add
+nothing, and manufacturing an entry is worse than none.

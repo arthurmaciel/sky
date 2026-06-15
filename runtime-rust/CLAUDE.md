@@ -167,3 +167,65 @@ General skills enabled:
 - `/grill-me` — stress-test plans and designs
 - `/grill-with-docs` — challenge plans against domain glossary + ADRs
 - `/improve-codebase-architecture` — find deepening opportunities
+
+## Agent learnings (self-improving loop)
+
+Durable, **verified**, generalizable knowledge future agents should inherit.
+Every `sky-rust-backend:*` skill, at the END of its run, records significant
+conclusions here so behaviour compounds. This is **curated knowledge, not a
+log** — hold it to the same bar as a code review:
+
+| Rule | |
+|---|---|
+| **Only if secure, correct, and sound** | Never record an insecure shortcut, an unverified optimization, or anything that trades away safety. If you can't verify it, don't write it. |
+| **Only if significant + generalizable** | A non-obvious pitfall, a deeper foundational insight, or a real optimization strategy — NOT session play-by-play, one-off facts, or anything the code/specs already state. Most runs add nothing; that is correct. |
+| **Reconcile, don't append** | Update/dedupe/prune existing entries before adding; structure over prose (tables/bullets). A wrong or stale entry teaches the wrong thing — delete it. |
+| **Link, don't duplicate** | Point to the spec/skill/memory holding the detail; keep entries to the distilled, transferable insight. |
+
+### Foundational understanding
+- **A wrapper `fn(..) -> Result<T, String>` binds as a SYNC Sky `Result`, not a
+  `Task`.** So a thin wrapper hiding an async runtime lets Sky call sites stay
+  synchronous (no `Cmd.perform` re-threading). This is what makes async/framework
+  crates reachable.
+- **Wrapper-crate pattern (the way to reach crates auto-FFI can't bind):** a thin
+  fork-local crate over the framework crate, plain `&str`→`Result`/`Dict String
+  String` surface, a **dedicated-thread current-thread tokio runtime** async→sync
+  bridge (NEVER `block_on` an ambient runtime; `.join()` maps panic→`Err`),
+  delivered via a local `file://` **git** dep in `["rust.dependencies]`. Needs NO
+  compiler change (`RustGitDep` + the inspector's `--git` already support it).
+  Proven by `examples/rust/skyshop-rs` (see [[skyshop-rs-port]]).
+- **An FFI `Result<_, String>` error slot is UNUSABLE on the Sky side** — the
+  `.skyi` advertises `String` but codegen emits `SkyError`, so `Err e` can't be
+  read. Encode any status the Sky side inspects in the **Ok** payload
+  (`_status=...`), never in the `Err` slot.
+
+### Pitfalls
+- **Parallel agents race on shared build state:** the one `CARGO_TARGET_DIR`
+  (holds only the last build → clobber), the example's `sky-out`/`.skycache`
+  (`resource busy`), and a shared wrapper git repo (commit race). Guardrail:
+  parallel agents author **disjoint files only, never build, never touch the
+  shared seam**; the orchestrator does the single integration build; stages
+  mutating one shared resource run **sequentially**. (Codified in
+  `sky-rust-backend:autonomous-swarm`.)
+- **Wrapper shim string params must be `&str`** (the FFI generator passes `&arg`);
+  a zero-arg fn binds `() -> Result` (call it `Mod.f ()`).
+- **Verification-skipping emulator/test paths MUST be dev-gated** (`ENV` then
+  `SKY_ENV`; unset/dev/development/local ⇒ dev, else refuse). A leaked
+  `*_EMULATOR_HOST` in production is an auth/data bypass — gate it.
+- **"Green build" ≠ correct.** The example sweep misses code shapes no example
+  exercises (two event-handler Arc holes shipped green). For every codegen-shape
+  fix, add a regression fixture that fails pre-fix.
+- Known unfixed codegen/runtime gaps:
+  `2026-06-15-skyshop-rs-codegen-gaps.md` (unconstrained-`Result`→`i64`;
+  `Dict.union`/`List.sortBy` absences).
+
+### Optimization strategies (secure/correct/sound only)
+- **De-risk the make-or-break spine with a minimal vertical slice BEFORE fanning
+  out** — the single highest-value step; it surfaces the wrinkles every later
+  agent needs.
+- **Stub-first:** build the full app against stub wrappers (no heavy deps) to
+  decouple the large Sky-side port from heavy/risky crate integration; swap in
+  real crates one stage at a time, each ending GREEN.
+- **Checkpoint-commit per stage** (general in-boundary fixes first, for
+  bisectability) and carry a **wrinkles ledger** forward between agents.
+- `go clean -cache` reclaims multi-GB fast; abort agent spawns under ~5 GB free.

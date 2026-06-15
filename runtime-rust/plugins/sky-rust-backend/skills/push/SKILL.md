@@ -62,3 +62,13 @@ The user's fork `arthurmaciel/sky` is the **only** acceptable target.
 - **Never force-pushes.**
 - Pushes the **current branch only** — no branch argument.
 - Non-interactive; exits 0 on success, non-zero on any guard failure or push error.
+
+## Capture learnings (self-improving loop)
+
+After this skill's work completes, record any **significant, verified,
+generalizable** learning — a non-obvious pitfall, a deeper foundational insight,
+or a secure/correct/sound optimization — to the **`## Agent learnings`** section
+of `runtime-rust/CLAUDE.md`, so future agents improve. Obey that section's rules:
+**only if secure, correct, and sound + verified**; **reconcile (update / dedupe /
+prune), never blind-append**; **skip when nothing significant** — most runs add
+nothing, and manufacturing an entry is worse than none.

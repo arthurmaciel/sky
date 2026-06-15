@@ -51,3 +51,13 @@ Curated runnable set (~24: cli/server/live). `RUST_RUN="a b c"` overrides.
 - PATH `/usr/local/go/bin` + `$HOME/.cargo/bin` + `sccache`;
   `CARGO_TARGET_DIR=$HOME/.cache/sky-rust-target`; `SKY_BIN=<repo>/sky-out/sky`;
   `SKY_CONSOLE_EMBED=off`. Never edit runtime files mid-run.
+
+## Capture learnings (self-improving loop)
+
+After this skill's work completes, record any **significant, verified,
+generalizable** learning — a non-obvious pitfall, a deeper foundational insight,
+or a secure/correct/sound optimization — to the **`## Agent learnings`** section
+of `runtime-rust/CLAUDE.md`, so future agents improve. Obey that section's rules:
+**only if secure, correct, and sound + verified**; **reconcile (update / dedupe /
+prune), never blind-append**; **skip when nothing significant** — most runs add
+nothing, and manufacturing an entry is worse than none.

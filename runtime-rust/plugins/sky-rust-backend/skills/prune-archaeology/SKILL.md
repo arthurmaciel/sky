@@ -129,3 +129,13 @@ not a reason to skip it.
   comments to hit a "less text" target. Density of *why* should go UP, not down.
 - Do NOT touch code logic — comments and docs only (unless a separate task).
 - Do NOT remove a roadmap's open items or a real CHANGELOG file.
+
+## Capture learnings (self-improving loop)
+
+After this skill's work completes, record any **significant, verified,
+generalizable** learning — a non-obvious pitfall, a deeper foundational insight,
+or a secure/correct/sound optimization — to the **`## Agent learnings`** section
+of `runtime-rust/CLAUDE.md`, so future agents improve. Obey that section's rules:
+**only if secure, correct, and sound + verified**; **reconcile (update / dedupe /
+prune), never blind-append**; **skip when nothing significant** — most runs add
+nothing, and manufacturing an entry is worse than none.

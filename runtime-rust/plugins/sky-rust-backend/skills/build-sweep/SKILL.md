@@ -45,3 +45,13 @@ Build-level only and machine-load-insensitive → **no close-the-apps reminder**
   `CARGO_TARGET_DIR=$HOME/.cache/sky-rust-target`; `sccache`; `SKY_BIN=<repo>/sky-out/sky`.
 - `--target rust` ignores `[go.dependencies]`, so `go` is NOT required.
 - Never edit runtime files while this runs (concurrent copy → false E0433).
+
+## Capture learnings (self-improving loop)
+
+After this skill's work completes, record any **significant, verified,
+generalizable** learning — a non-obvious pitfall, a deeper foundational insight,
+or a secure/correct/sound optimization — to the **`## Agent learnings`** section
+of `runtime-rust/CLAUDE.md`, so future agents improve. Obey that section's rules:
+**only if secure, correct, and sound + verified**; **reconcile (update / dedupe /
+prune), never blind-append**; **skip when nothing significant** — most runs add
+nothing, and manufacturing an entry is worse than none.
