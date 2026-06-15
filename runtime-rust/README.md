@@ -27,8 +27,8 @@ The authoritative status of every Rust-backend surface. Detailed sections below
 expand each area; this table is the canonical overview and must not contradict
 them. **Status:** ✅ done & verified · 🟡 intentional divergence (by design) ·
 ⛔ blocked (can't fix in-boundary) · 🔜 future (actionable epic, deferred) ·
-🟢 sound floor (measured-negligible boundary). **Go parity:** ✅ matches ·
-➕ exceeds Go's guarantee · ⚠️ partial · ❌ diverges.
+🚫 out of scope (intentional non-goal — will not be done). **Go parity:**
+✅ matches · ➕ exceeds Go's guarantee · ⚠️ partial · ❌ diverges.
 
 ### Codegen & language
 
@@ -54,9 +54,9 @@ them. **Status:** ✅ done & verified · 🟡 intentional divergence (by design)
 | ✅ | FFI Sized gate (unsized receivers) | drop instance methods on DSTs (`bytes::buf::UninitSlice`) | ✅ | -- |
 | ✅ | FFI owned-threading builder setters | `&mut self → &mut Self`/`()` exposed as `fn(recv, args) → recv` | ✅ | -- |
 | ✅ | FFI lifetime-elided copies | `&'a str` / `&'a [u8]` / `&'a OsStr` / `&'a Path` kept as owned | ✅ | -- |
-| 🟢 | FFI non-byte slice element coercion (tail) | borrowed/nested/tuple elements | N/A — measured 1/2552 functions across 50 crates | -- (clean drop is the correct boundary) |
+| 🚫 | FFI non-byte slice element coercion (tail) | borrowed/nested/tuple elements | N/A — measured 1/2552 functions across 50 crates | Out of scope: the clean drop IS the correct boundary, not a gap to close |
 | 🔜 | FFI framework crates (axum/diesel/bevy/tokio) | generic + trait + lifetime-bound core; auto-FFI binds only peripheral surface | ⚠️ partial | Future: generated idiomatic glue / Sky-native modules (the Sky.Live model) — deliberate |
-| ⛔ | Go-package → Rust FFI | gorilla/mux, stripe-go, … | ❌ — needs a Go runtime | Blocked: impossible without a Go runtime (intentional, out of scope) |
+| 🚫 | Go-package → Rust FFI | gorilla/mux, stripe-go, … | ❌ — needs a Go runtime | Out of scope: byte-parity is impossible without a Go runtime; never a goal |
 
 ### Stdlib runtime
 
