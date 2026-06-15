@@ -1,0 +1,62 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Error as Error
+import Sky.Core.String as String
+import Sky.Core.Task as Task
+import Std.Log exposing (println)
+
+
+-- Mirror of `withTempDir` in /tmp/sky-playground/src/Runner.sky:27.
+--
+-- `withThing` captures TWO non-`Clone` values into the closures it builds for
+-- `Task.andThen` / `Task.onError`:
+--   * `action`  — an `impl Fn(String) -> Task Error a` HOF parameter
+--                 (non-`Clone`; the generated capture-prelude tried
+--                 `let action = action.clone();` -> E0599).
+--   * `cleanup` — a `let`-bound `SkyTask` (`Pin<Box<dyn Future>>`, non-`Clone`)
+--                 captured by BOTH the success arm (`Task.andThen`) AND the
+--                 error arm (`Task.onError`) — two sibling consumers.
+--
+-- Pre-fix: 2 x E0599 (`.clone()` on a non-`Clone` capture).
+-- Post-fix: builds + runs (the Arc-wrap makes both captures clonable).
+withThing : String -> (String -> Task Error a) -> Task Error a
+withThing prefix action =
+    Task.succeed prefix
+        |> Task.andThen
+               (\token ->
+                   let
+                       dir = "thing-" ++ token
+                       cleanup =
+                           Task.succeed ()
+                   in
+                       Task.succeed dir
+                           |> Task.andThen (\_ -> action dir)
+                           |> Task.andThen
+                                  (\result ->
+                                      let
+                                          _ = cleanup
+                                      in
+                                          Task.succeed result)
+                           |> Task.onError
+                                  (\err ->
+                                      let
+                                          _ = cleanup
+                                      in
+                                          Task.fail err))
+
+
+run : Task Error String
+run =
+    withThing "demo" (\dir -> Task.succeed ("used " ++ dir))
+
+
+main : Task Error ()
+main =
+    run
+        |> Task.andThen
+               (\msg ->
+                   let
+                       _ = println msg
+                   in
+                       Task.succeed ())

@@ -3,6 +3,7 @@ module Sky.Generate.Rust.Builder.ExprEmitter
     , collectVarLocalsMulti
     , collectFreeVarLocalsMulti
     , collectVarLocals
+    , collectLambdaCapturedVars
     , argToRustString
     , rustStringLit
     , rustCharLit
@@ -291,6 +292,50 @@ collectFreeVarLocalsMulti = go Set.empty
 -- | Walk an expression and collect VarLocal names that refer to variables
 -- from ENCLOSING scopes (not bound within the expression itself).
 -- Used to insert .clone() calls for ownership-safe closure capture.
+-- | Non-Clone capture fix (#52): vars from an enclosing scope that are FREE
+-- INSIDE some `Can.Lambda` nested in the expression — i.e. genuinely CAPTURED
+-- by a closure (and so subject to the per-closure `.clone()` capture-prelude),
+-- as opposed to merely referenced at the top level (e.g. stored into a struct
+-- field / enum payload, which does NOT clone). This is the precise gate for
+-- Arc-wrapping a non-`Clone` `impl Fn` param: a `Std.Html.Events.onInput`
+-- handler that's only STORED in `OnString(.., handler)` is NOT lambda-captured,
+-- so it must keep its bare type (the existing `Arc::new(handler)` storage path).
+collectLambdaCapturedVars :: Can.Expr -> Set.Set String
+collectLambdaCapturedVars = go Set.empty
+  where
+    -- `bound` tracks names bound by ENCLOSING lambdas/lets; once we enter a
+    -- lambda, every free var of its body (minus the lambda's own params and
+    -- inner binders) is a capture.
+    go :: Set.Set String -> Can.Expr -> Set.Set String
+    go bound (Ann.At _ expr) = case expr of
+        Can.Lambda ps lamBody ->
+            let lamParams = Set.fromList (concatMap patBindingVars ps)
+                -- Everything free in the lambda body (minus the lambda's own
+                -- params) is captured from an enclosing scope.
+                lamCaptures = Set.difference (collectVarLocals lamBody) lamParams
+            in Set.union lamCaptures (go (Set.union bound lamParams) lamBody)
+        Can.Call fn args -> foldl (\a e -> Set.union a (go bound e)) (go bound fn) args
+        Can.Let def b ->
+            let bound' = foldr Set.insert bound (defLocalNames def)
+                boundDef = foldr Set.insert bound' (defParamVars def)
+            in Set.union (go bound' b) (foldl (\a d -> Set.union a (go boundDef d)) Set.empty (defLocalBodies def))
+        Can.LetRec defs b ->
+            let bound' = foldl (\s d -> foldr Set.insert s (defLocalNames d)) bound defs
+            in Set.union (go bound' b) (foldl (\a d -> let bD = foldr Set.insert bound' (defParamVars d) in foldl (\a2 e -> Set.union a2 (go bD e)) a (defLocalBodies d)) Set.empty defs)
+        Can.LetDestruct pat e b ->
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Set.union (go bound e) (go bound' b)
+        Can.Case s bs -> foldl (\a (Can.CaseBranch pat b) -> let bnd = foldr Set.insert bound (patBindingVars pat) in Set.union a (go bnd b)) (go bound s) bs
+        Can.If brs el -> foldl (\a (c, t) -> Set.union a (Set.union (go bound c) (go bound t))) (go bound el) brs
+        Can.Binop _ _ _ _ a b -> Set.union (go bound a) (go bound b)
+        Can.Access r _ -> go bound r
+        Can.Update _ r ups -> Set.union (go bound r) (foldl (\a (_, Can.FieldUpdate _ e) -> Set.union a (go bound e)) Set.empty (Map.toList ups))
+        Can.Record fs -> foldl (\a (_, v) -> Set.union a (go bound v)) Set.empty (Map.toList fs)
+        Can.List es -> foldl (\a e -> Set.union a (go bound e)) Set.empty es
+        Can.Tuple a b rest -> foldl (\acc e -> Set.union acc (go bound e)) Set.empty (a:b:rest)
+        Can.Negate e -> go bound e
+        _ -> Set.empty
+
 collectVarLocals :: Can.Expr -> Set.Set String
 collectVarLocals = go Set.empty
   where
@@ -370,6 +415,84 @@ defParamVars :: Can.Def -> [String]
 defParamVars (Can.Def _ ps _)          = concatMap patBindingVars ps
 defParamVars (Can.TypedDef _ _ tps _ _) = concatMap (patBindingVars . fst) tps
 defParamVars (Can.DestructDef _ _)     = []
+
+-- | Is the expression `e` a bare reference to local var `name`?
+isVarLocalRef :: String -> Can.Expr -> Bool
+isVarLocalRef name (Ann.At _ (Can.VarLocal n)) = n == name
+isVarLocalRef _ _                              = False
+
+-- | Non-Clone capture fix (#52). Does the discarded RHS PRODUCE a fresh task
+-- via a CALL (`process_run …`, a `|>` pipeline ending in one, an `if`/`case`
+-- of such)? Only such expressions carry a generic error type the bare `let _ =`
+-- can't pin (E0283). A bare `VarLocal` discard (`let _ = cleanup`) refers to an
+-- already-typed binding (often itself the Arc-wrapped value), so it must NOT be
+-- annotated `SkyTask<…>` — its real Rust type is whatever the binding holds.
+isTaskProducingCall :: Can.Expr -> Bool
+isTaskProducingCall (Ann.At _ e) = case e of
+    Can.Call _ _          -> True
+    Can.Binop "|>" _ _ _ _ r -> isTaskProducingCall r
+    Can.Let _ b           -> isTaskProducingCall b
+    Can.LetRec _ b        -> isTaskProducingCall b
+    Can.LetDestruct _ _ b -> isTaskProducingCall b
+    Can.If brs el         -> all (isTaskProducingCall . snd) brs && isTaskProducingCall el
+    Can.Case _ bs         -> not (null bs) && all (\(Can.CaseBranch _ b) -> isTaskProducingCall b) bs
+    _                     -> False
+
+-- | Non-Clone capture fix (#52, Part B). Does EVERY free use of `name` in `e`
+-- appear ONLY in DISCARD position — i.e. as the RHS of a `let _ = name`
+-- (`Can.DestructDef PAnything (VarLocal name)`) or a `let _ = name`-shaped
+-- ignored Def? A SkyTask (`Pin<Box<dyn Future>>`) is non-`Clone`, so when it's
+-- captured by MULTIPLE sibling closures the per-closure `.clone()` prelude is
+-- E0599. Arc-wrapping the binding makes the clone sound — but ONLY when the
+-- task is merely DROPPED (never `.await`ed / passed positionally to a `task_*`
+-- combinator that needs an owned `SkyTask`). The `let _ = cleanup` discard
+-- pattern (Sky forces a Task value for effect, then throws it away) is exactly
+-- that case. Any non-discard use (returned, andThen'd, etc.) → False, so the
+-- binding is left un-wrapped (the existing move/clone path handles it). Returns
+-- True for ZERO uses too (vacuously discarded — but the caller also gates on
+-- "captured", so a zero-use binding never reaches the wrap).
+allUsesDiscarded :: String -> Can.Expr -> Bool
+allUsesDiscarded name = go
+  where
+    -- Once we descend past a binder that shadows `name`, inner uses belong to
+    -- the shadow, so stop checking them (treat as discarded for our purposes).
+    go (Ann.At _ e) = case e of
+        Can.VarLocal n        -> n /= name   -- a BARE non-discard use of name → bad
+        Can.Let def body
+            -- `let _ = name in …` (DestructDef PAnything) — the discard we allow.
+            | Can.DestructDef (Ann.At _ Can.PAnything) rhs <- def
+            , isVarLocalRef name rhs
+            -> go body
+            -- `let _ = name in …` as a named Def whose name is "_" (ignored).
+            | Can.Def (Ann.At _ "_") [] rhs <- def
+            , isVarLocalRef name rhs
+            -> go body
+            | name `elem` defLocalNames def -> True   -- shadowed: stop
+            | otherwise -> all go (defLocalBodies def) && go body
+        Can.LetRec defs body
+            | name `elem` concatMap defLocalNames defs -> True
+            | otherwise -> all go (concatMap defLocalBodies defs) && go body
+        Can.LetDestruct pat rhs body
+            | isVarLocalRef name rhs, ignoredPat pat -> go body
+            | name `elem` patBindingVars pat -> go rhs   -- shadowed in body
+            | otherwise -> go rhs && go body
+        Can.Lambda ps body
+            | name `elem` concatMap patBindingVars ps -> True
+            | otherwise -> go body
+        Can.Call fn args      -> all go (fn : args)
+        Can.Case s bs         -> go s && and [ b' | Can.CaseBranch p b <- bs
+                                                   , let b' = name `elem` patBindingVars p || go b ]
+        Can.If brs el         -> and [ go c && go t | (c, t) <- brs ] && go el
+        Can.Binop _ _ _ _ a b -> go a && go b
+        Can.Access r _        -> go r
+        Can.Update _ r ups    -> go r && and [ go x | (_, Can.FieldUpdate _ x) <- Map.toList ups ]
+        Can.Record fs         -> and [ go x | (_, x) <- Map.toList fs ]
+        Can.List xs           -> all go xs
+        Can.Tuple a b rest    -> all go (a : b : rest)
+        Can.Negate x          -> go x
+        _                     -> True
+    ignoredPat (Ann.At _ Can.PAnything) = True
+    ignoredPat _                        = False
 
 -- | Helper: render a single function-call argument string, handling
 -- lambda capture cloning and VarLocal ownership.
@@ -1356,6 +1479,44 @@ exprToRustInner ctx e = case e of
                 | Just n <- Map.lookup name (collectVarLocalsMulti body), n >= 2 ->
                     let inline = "vec![" ++ intercalate ", " (map (exprToRustString ctx) items) ++ "]"
                     in substVar ctx name inline body
+            -- Non-Clone capture fix (#52, Part B): a `let`-bound SkyTask
+            -- (`Pin<Box<dyn Future>>`, non-`Clone`) captured by MULTIPLE sibling
+            -- closures (each `.clone()`s its capture for ownership) is E0599.
+            -- When every use is a DISCARD (`let _ = task` — Sky forces a Task
+            -- value for effect then throws it away; the classic `cleanup`
+            -- pattern), Arc-wrap the binding so the prelude's `.clone()` is a
+            -- sound `Arc::clone` and the drop is a ref-count decrement. Gated on
+            -- (a) SkyTask-typed body, (b) used ≥2 times (so it IS multi-consumed
+            -- — a single use moves fine, no wrap needed), (c) all uses discarded
+            -- (so the future is never `.await`ed / passed to a `task_*`
+            -- combinator that needs an owned `SkyTask`). Outside this gate the
+            -- existing move/clone path is byte-identical.
+            Can.Def (Ann.At _ name) [] taskBody
+                | not (null (taskExprInnerType (ecSolvedTypes ctx) taskBody))
+                , Just c <- Map.lookup name (collectVarLocalsMulti body), c >= 2
+                , allUsesDiscarded name body ->
+                    -- Bind the SkyTask UNCHANGED first (so any type inference
+                    -- inside its body — e.g. a discarded `let _ = process_run …`
+                    -- whose error type `E` is pinned only by this `SkyTask<…>`
+                    -- binding context — is preserved), THEN shadow it with an
+                    -- `Arc<Mutex<SkyTask>>`. `Arc<SkyTask>` alone is NOT `Send`
+                    -- (needs inner `Send + Sync`; `SkyTask = Pin<Box<dyn Future
+                    -- + Send>>` is `Send` only). The combinator closures are
+                    -- `Send`, so `Mutex<T>: Sync` (when `T: Send`) lifts the
+                    -- whole `Arc<Mutex<…>>` to `Send + Sync`. The value is never
+                    -- locked/awaited — only dropped — a zero-cost ownership shim.
+                    let n' = rustSafeIdent name
+                        inner = taskExprInnerType (ecSolvedTypes ctx) taskBody
+                        -- Annotate the SkyTask binding with its concrete type so
+                        -- the runtime's `SkyTask<A>` alias pins `E = SkyError`.
+                        -- Without it, a discarded `let _ = process_run …` inside
+                        -- the body has a free `E: From<String>` (many impls →
+                        -- E0283), since the Arc<Mutex> shadow erases the only
+                        -- downstream type constraint.
+                        tyAnnot = ": SkyTask<" ++ inner ++ ">"
+                        bind = "let " ++ n' ++ tyAnnot ++ " = " ++ exprToRustString ctx taskBody ++ "; "
+                        wrap = "let " ++ n' ++ " = std::sync::Arc::new(std::sync::Mutex::new(" ++ n' ++ ")); "
+                    in "{ " ++ bind ++ wrap ++ exprToRustString ctx body ++ " }"
             -- Block-wrap: a `let` is a statement, invalid in expression
             -- position (e.g. a call arg `f(let x = …; body)`). `{ … }` is a
             -- valid expression everywhere, so wrapping is universally safe.
@@ -1383,7 +1544,20 @@ exprToRustInner ctx e = case e of
                        else "{ " ++ clones ++ innerClones ++ inner ++ " }"
                 _ -> if not hasClone then exprToRustString ctx expr
                      else "{ " ++ clones ++ exprToRustString ctx expr ++ " }"
-        in "let " ++ patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
+            -- Discarded task (`let _ = process_run …`) — annotate the wildcard
+            -- with the concrete `SkyTask<inner>` so the kernel's generic `E:
+            -- From<String>` is pinned to `SkyError` (else E0283 when >1
+            -- `From<String>` impl is in scope). Only for a PAnything pattern
+            -- over a task-typed RHS whose inner type is determinable; all other
+            -- LetDestructs keep the bare `let <pat> = …`. See the sibling note
+            -- in the `defToRustString` DestructDef arm.
+            patStr = case pat of
+                Ann.At _ Can.PAnything
+                    | isTaskProducingCall expr
+                    , inner <- taskExprInnerType (ecSolvedTypes ctx) expr
+                    , not (null inner) -> "_: SkyTask<" ++ inner ++ ">"
+                _ -> patternToMatchString (ecRecordMap ctx) pat
+        in "let " ++ patStr ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
     Can.Case scrut branches ->
         let scrutStr = exprToRustString ctx scrut
             -- Detect slice patterns → wrap with .as_slice()
@@ -1481,6 +1655,12 @@ taskExprInnerType solved (Ann.At _ expr) = case expr of
         case Map.lookup name solved of
             Just ty -> let ret = extractReturnType ty in taskInnerTypeStr ret
             Nothing -> ""
+    -- A `let … in <task-tail>` (`let _ = effect in Task.succeed x`) IS a Task —
+    -- its type is the tail's. Peel through let chains so the #52 SkyTask
+    -- Arc-wrap gate (and any Task-return inference) sees the real tail type.
+    Can.Let _ b           -> taskExprInnerType solved b
+    Can.LetRec _ b        -> taskExprInnerType solved b
+    Can.LetDestruct _ _ b -> taskExprInnerType solved b
     _ -> ""
 
 -- | Extract the inner type string from a Sky type (task or not).
@@ -1970,10 +2150,20 @@ taskExprInnerTypeCall solved (Ann.At _ (Can.VarTopLevel mod name)) args =
         fakeSpan = Ann.Region (Ann.Position 0 0) (Ann.Position 0 0)
     in if snakeName /= kName
        then taskExprInnerTypeCall solved (Ann.At fakeSpan (Can.VarKernel rawMod name)) args
-       else -- Not a kernel: check solved types for the function name
-            case Map.lookup name solved of
-                Just ty -> let ret = extractReturnType ty in taskInnerTypeStr ret
-                Nothing -> ""
+       else -- `snakeName == kName` only means kernelToRust used the default
+            -- snake-case mangling — a kernel whose Rust name happens to equal
+            -- the default (e.g. `Process.run` → `sky_core_process_run`) still
+            -- has a known Task inner type. Try the solved type FIRST, then fall
+            -- back to the VarKernel inner-type table (harmless "" if unknown).
+            let fromSolved = case Map.lookup name solved of
+                                 Just ty -> taskInnerTypeStr (extractReturnType ty)
+                                 Nothing -> ""
+                fromKernel = taskExprInnerTypeCall solved (Ann.At fakeSpan (Can.VarKernel rawMod name)) args
+            -- The flat `solved` map keys on the bare fn name, so a cross-module
+            -- `run` collides; its non-Task return extracts to "". Prefer the
+            -- solved type ONLY when it actually yields a Task inner type, else
+            -- fall back to the VarKernel inner-type table.
+            in if not (null fromSolved) then fromSolved else fromKernel
 taskExprInnerTypeCall solved (Ann.At _ (Can.VarKernel modName fnName)) args
         | "Task" `isSuffixOf` modName || modName == "Task" = case fnName of
             "succeed"  -> case args of
@@ -2032,6 +2222,9 @@ taskExprInnerTypeCall solved (Ann.At _ (Can.VarKernel modName fnName)) args
             "readFile"  -> "String"
             "writeFile" -> "()"
             "exists"    -> "bool"
+            _ -> ""
+        | "Process" `isSuffixOf` modName || modName == "Process" = case fnName of
+            "run" -> "String"   -- Process.run : … -> Task Error String
             _ -> ""
         | otherwise = ""
 taskExprInnerTypeCall _ _ _ = ""
@@ -2224,6 +2417,10 @@ solveArgType solvedMap arg = case arg of
     Ann.At _ (Can.Float _) -> "f64"
     Ann.At _ (Can.Str _)   -> "String"
     Ann.At _ (Can.Chr _)   -> "char"
+    -- A unit literal is `()` — e.g. `Task.succeed ()` has inner type `()`. The
+    -- prior `_ -> "String"` default mis-typed it as `String` (a `task_succeed(())`
+    -- annotated `SkyTask<String>` then E0308'd). Narrow + unambiguously correct.
+    Ann.At _ Can.Unit      -> "()"
     -- A list literal is unambiguously a Vec — drives `++` to Vec-concat even
     -- when the other operand is an opaque field access (e.g. the stdlib's
     -- `msg.attachments ++ [ att ]` on a bridged-struct List field, where the
@@ -2487,13 +2684,24 @@ defToRustString ctx (Can.Def (Ann.At _ name) [] body) =
     let counts = collectFreeVarLocalsMulti body
         multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
         clones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") multi
+        -- Discarded task (`let _ = process_run …` lowers to a Def named "_"):
+        -- annotate the wildcard with `: SkyTask<inner>` so the kernel's generic
+        -- `E: From<String>` pins to `SkyError` (else E0283 with >1 impl). Only
+        -- for a literal "_" binder over a task-typed body whose inner type is
+        -- known. See the sibling notes in the LetDestruct / DestructDef arms.
+        discardAnnot
+            | name == "_"
+            , isTaskProducingCall body          -- a CALL, not a var ref
+            , inner <- taskExprInnerType (ecSolvedTypes ctx) body
+            , not (null inner) = ": SkyTask<" ++ inner ++ ">"
+            | otherwise = ""
     in case body of
         Ann.At _ (Can.Lambda [] lambdaBody) ->
             let inner = "|| { " ++ exprToRustString ctx lambdaBody ++ " }"
             in name ++ " = " ++ if null multi then inner else "{ " ++ clones ++ inner ++ " }"
         _ ->
             let inner = exprToRustString ctx body
-            in name ++ " = " ++ if null multi then inner else "{ " ++ clones ++ inner ++ " }"
+            in name ++ discardAnnot ++ " = " ++ if null multi then inner else "{ " ++ clones ++ inner ++ " }"
 -- Multi-arg Def: closure binding. Params body-driven-annotated (a let-bound
 -- closure gives Rust no way to infer them → E0282). Emitted as a `move` closure
 -- with captured outer vars cloned first — a let-bound closure that ESCAPES
@@ -2518,6 +2726,20 @@ defToRustString ctx (Can.Def (Ann.At _ name) params body) =
 -- LetDestruct's clone-prelude so the caller emits `let (a, b) = expr;`. Without
 -- this arm the catchall stubbed `_ = unimplemented()` and dropped the bindings —
 -- every `let (a, _) = f x` then referenced the unbound names (E0425/E0423).
+-- Discarded task (`let _ = process_run …`): a kernel like `process_run` is
+-- generic over its error type (`E: Send + From<String>`), and a bare `_ =`
+-- discard gives Rust no downstream constraint to pin `E` — with >1 `From<String>`
+-- impl in scope this is E0283 ("cannot infer type"). Annotate the wildcard with
+-- the concrete `SkyTask<inner>` (the runtime alias fixes `E = SkyError`) so the
+-- discarded effect type-checks. Only fires when the RHS is task-typed AND its
+-- inner type is determinable; everything else falls through unchanged. (This
+-- also unblocks the #52 cleanup pattern, whose body discards such a task.)
+defToRustString ctx (Can.DestructDef (Ann.At _ Can.PAnything) expr)
+    | isTaskProducingCall expr
+    , inner <- taskExprInnerType (ecSolvedTypes ctx) expr
+    , not (null inner) =
+        -- Caller prepends `let `, so emit only `_: SkyTask<…> = rhs`.
+        "_: SkyTask<" ++ inner ++ "> = " ++ exprToRustString ctx expr
 defToRustString ctx (Can.DestructDef pat expr) =
     let counts = collectVarLocalsMulti expr
         multi  = [ v | (v, c) <- Map.toList counts, c >= 2 ]

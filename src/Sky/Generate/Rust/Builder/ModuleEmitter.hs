@@ -39,6 +39,7 @@ import Sky.Generate.Rust.Builder.SigRegistry
 import Sky.Generate.Rust.Builder.ExprEmitter
     ( exprToRustString, collectVarLocalsMulti, taskExprInnerType, solveArgType
     , inferParamRustType, canDefBody, collectClosureDefs
+    , collectLambdaCapturedVars, isClosureParamStr
     )
 import Sky.Generate.Rust.Builder.TypeRenderer
     ( extractReturnType, extractParamTypes, hasTypeVars, typeToRustString
@@ -540,8 +541,18 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         bodyWrapped = if "SkyTask<" `isPrefixOf` retTy && needsTaskWrap (ecSolvedTypes ctx) body
                       then "task_succeed({ " ++ bodyStr ++ " })"
                       else bodyStr
+        -- Non-Clone capture fix (#52): an `impl Fn(..)` HOF parameter is NOT
+        -- `Clone`, so when it's captured into a closure the per-closure
+        -- `.clone()` capture-prelude (needed so SIBLING closures each own a
+        -- copy) fails E0599. Arc-wrap the param at function entry: `Arc<F>` IS
+        -- `Clone` (cheap ref-count bump), so the existing prelude's `.clone()`
+        -- becomes a sound `Arc::clone`, and a call site `p.clone()(args)` still
+        -- dispatches through `Arc`'s `Deref` to the inner `Fn`. Only fires for
+        -- params that (a) render as `impl Fn` AND (b) are actually captured by a
+        -- closure in the body — a non-captured fn param is left byte-identical.
+        arcFnParamPrelude = arcFnParamPreludeFor ctx body paramStrs' params
      in RustFunction rustName genVars' paramStrs' retTyFinal
-            (maybeMemoiseNullary n name rustName genVars' retTyFinal (preludes ++ bodyWrapped))
+            (maybeMemoiseNullary n name rustName genVars' retTyFinal (arcFnParamPrelude ++ preludes ++ bodyWrapped))
 -- Uncurry a lambda-bodied def: `f a = \b -> e` is eta-equivalent to `f a b = e`,
 -- but the codegen would otherwise render the first as a 1-arg fn RETURNING a
 -- `fn`-pointer closure — which can't hold a capturing closure. Absorb the body
@@ -680,12 +691,46 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
             | "SkyTask<" `isPrefixOf` ret && isRustPureGoTaskKernel
                     = "task_succeed({ " ++ tdBody ++ " })"
             | otherwise = tdBody
+        -- Non-Clone capture fix (#52): Arc-wrap a captured `impl Fn(..)` HOF
+        -- parameter so its per-closure `.clone()` capture-prelude becomes a
+        -- sound `Arc::clone`. See the matching note in the Can.Def arm above.
+        arcFnParamPrelude = arcFnParamPreludeFor ctx body params (map fst pats)
     in RustFunction rustName genDecl params ret
-           (maybeMemoiseNullary (length params) name rustName genDecl ret (preludes ++ tdWrapped))
+           (maybeMemoiseNullary (length params) name rustName genDecl ret (arcFnParamPrelude ++ preludes ++ tdWrapped))
 defToRustItem ctx modPrefix (Can.DestructDef pat expr) =
     let vars = intercalate "_" (patBindingVars pat)
         fnName = if null vars then "__destruct" else "__destruct_" ++ vars
     in RustFunction fnName "" [patternToRustParam pat] "()" (exprToRustString ctx expr)
+
+-- | Non-Clone capture fix (#52): emit `let p = Arc::new(p);` shadowing
+-- preludes for every NON-`Clone` `impl Fn(..)` HOF parameter that is captured
+-- into a closure in the function body. `Arc<F>` IS `Clone` (a ref-count bump),
+-- so the per-closure capture-prelude's `.clone()` becomes a sound `Arc::clone`,
+-- and a call site `p.clone()(args)` still dispatches through `Arc`'s `Deref` to
+-- the inner `Fn`. Three gates keep it surgical:
+--   * `isClosureParamStr pStr` — the param renders as `impl Fn(..)`.
+--   * NOT `+ Clone` in the rendered type — a `Clone`-able fn param (the
+--     stdlib recursion helpers `list_map`/`list_foldl` take `impl Fn + Clone`)
+--     already clones AND is often passed POSITIONALLY to a sibling that wants a
+--     bare `Fn` (an `Arc<Fn>` there would be E0277). Only a genuinely non-Clone
+--     fn param (a user HOF like `withTempDir`'s `action`) needs the wrap, and
+--     such params are CALLED, not passed positionally.
+--   * captured BY A CLOSURE in the body (via `collectLambdaCapturedVars`) — a
+--     param that's only STORED into a struct/enum (a `Std.Html.Events.onInput`
+--     handler → `OnString(.., handler)`) is NOT lambda-captured and must keep
+--     its bare type so the existing `Arc::new(handler)` storage path is intact.
+-- Param names route through `rustSafeIdent` so a Rust-keyword name (`fn`) gets
+-- its raw-ident form on BOTH sides of the `let` (matching the use sites).
+arcFnParamPreludeFor :: EmitCtx -> Can.Expr -> [String] -> [Can.Pattern] -> String
+arcFnParamPreludeFor _ctx body paramStrs pats =
+    let captured = collectLambdaCapturedVars body
+    in concat
+         [ "let " ++ pn' ++ " = std::sync::Arc::new(" ++ pn' ++ "); "
+         | (pStr, Ann.At _ (Can.PVar pn)) <- zip paramStrs pats
+         , isClosureParamStr pStr
+         , not ("Clone" `isInfixOf` pStr)
+         , pn `Set.member` captured
+         , let pn' = rustSafeIdent pn ]
 
 -- | The concrete carrier type a Std.Ui helper's wildcard `any` resolves to.
 -- `any` in these signatures is a Sky wildcard (Go = interface{}); in Rust it
