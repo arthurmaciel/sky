@@ -3,11 +3,27 @@ name = "sky-firebase-auth-shim"
 version = "0.1.0"
 edition = "2021"
 
-# Stage-1 STUB: canned token verification, ZERO heavy deps (no
-# rs-firebase-admin-sdk). Stage 4 swaps for the real SDK D2-bridge.
+# Stage-4 REAL: the full FFI surface backed by `rs-firebase-admin-sdk` 4.3. The
+# `fb_verify_id_token` body drives async Firebase ID-token verification to
+# completion on a dedicated current-thread tokio runtime (see src/lib.rs
+# block_on — same pattern as the Stage-2 firestore / Stage-3 stripe shims).
+# Public signature is byte-identical to the Stage-1 stub so the Sky side
+# (`Lib/Auth.sky`) stays unchanged.
+#
+# `tokens` (the crate's only feature, default-on) pulls in jsonwebtoken +
+# jsonwebtoken-jwks-cache — required for both the emulator validator (claim
+# decode, alg=none) and the live validator (RS256 + JWKS + aud/iss/exp).
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+rs-firebase-admin-sdk = "4.3"
+
+# Test-only: mint an emulator token via the signUp REST endpoint to prove the
+# verify roundtrip. reqwest is already in the dependency tree transitively.
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [lib]
 name = "sky_firebase_auth_shim"
