@@ -244,9 +244,14 @@ log** — hold it to the same bar as a code review:
 - **Verification-skipping emulator/test paths MUST be dev-gated** (`ENV` then
   `SKY_ENV`; unset/dev/development/local ⇒ dev, else refuse). A leaked
   `*_EMULATOR_HOST` in production is an auth/data bypass — gate it.
-- **"Green build" ≠ correct.** The example sweep misses code shapes no example
-  exercises (two event-handler Arc holes shipped green). For every codegen-shape
-  fix, add a regression fixture that fails pre-fix.
+- **"Green build" ≠ correct, and the fixture sweep ≠ enough.** The example sweep
+  misses code shapes no example exercises. For every codegen-shape fix, add a
+  regression fixture that fails pre-fix. The strongest check is **running a real
+  third-party project** as a proof-test: `sky-playground` surfaced 4 missing
+  stdlib kernels (`list_head`/`list_drop`/`file_mkdir_all`/`process_run`), 2
+  closure-codegen gaps (E0282 param-infer, E0599 non-`Clone` capture), and a
+  `sky run` `CARGO_TARGET_DIR` binary-path bug — the entire fixture sweep passed
+  over all of them. Pull a real app and `sky run` it on `--target rust`.
 - Known unfixed codegen/runtime gaps:
   `2026-06-15-skyshop-rs-codegen-gaps.md` (unconstrained-`Result`→`i64`;
   `Dict.union`/`List.sortBy` absences).
