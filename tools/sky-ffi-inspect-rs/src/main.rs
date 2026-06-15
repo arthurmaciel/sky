@@ -1595,39 +1595,59 @@ fn resolve_path_to_sky(rp: &serde_json::Value, aliases: &HashMap<String, String>
         .unwrap_or("");
     let args = extract_angle_type_args(rp.get("args"), aliases);
 
-    match name {
+    // Some rustdoc versions emit container paths fully-qualified (e.g.
+    // `std::collections::HashMap`). Strip the path qualifier so the known-
+    // container arms below match regardless of qualification — otherwise a
+    // qualified `HashMap` would fall through to the `_` arm and lose its
+    // `Dict String _` mapping (and its type args). Vec/Option/Result come
+    // bare from the prelude, so this is a no-op for them.
+    let match_name = name.rsplit_once("::").map(|(_, last)| last).unwrap_or(name);
+
+    // Sky type application is left-associative, so a multi-word generic arg
+    // (`Dict String String`, `Maybe Int`, `List X`) must be parenthesised when
+    // nested inside another container (`List (Dict String String)`), otherwise
+    // `List Dict String String` parses as a 3-arg application.
+    let paren = |s: String| -> String {
+        if s.contains(' ') && !(s.starts_with('(') && s.ends_with(')')) {
+            format!("({})", s)
+        } else {
+            s
+        }
+    };
+
+    match match_name {
         "Vec" => format!(
             "List {}",
-            args.first().cloned().unwrap_or_else(|| "String".into())
+            paren(args.first().cloned().unwrap_or_else(|| "String".into()))
         ),
         "Option" => format!(
             "Maybe {}",
-            args.first().cloned().unwrap_or_else(|| "String".into())
+            paren(args.first().cloned().unwrap_or_else(|| "String".into()))
         ),
         "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "Cell" | "RefCell" => {
-            args.first().cloned().unwrap_or_else(|| name.to_string())
+            args.first().cloned().unwrap_or_else(|| match_name.to_string())
         }
         "String" | "str" | "OsStr" | "OsString" | "PathBuf" | "Path" => "String".to_string(),
         "HashMap" | "BTreeMap" | "IndexMap" | "AHashMap" => {
-            let val = args.get(1).cloned().unwrap_or_else(|| "String".into());
+            let val = paren(args.get(1).cloned().unwrap_or_else(|| "String".into()));
             format!("Dict String {}", val)
         }
         "Result" => {
             // Rust Result<T, E>  →  Sky Result E T
-            let ok = args.first().cloned().unwrap_or_else(|| "()".into());
-            let err = args.get(1).cloned().unwrap_or_else(|| "String".into());
+            let ok = paren(args.first().cloned().unwrap_or_else(|| "()".into()));
+            let err = paren(args.get(1).cloned().unwrap_or_else(|| "String".into()));
             format!("Result {} {}", err, ok)
         }
         "SkyResult" => {
             // SkyResult<E, A>  →  Result E A
-            let err = args.first().cloned().unwrap_or_else(|| "String".into());
-            let ok = args.get(1).cloned().unwrap_or_else(|| "()".into());
+            let err = paren(args.first().cloned().unwrap_or_else(|| "String".into()));
+            let ok = paren(args.get(1).cloned().unwrap_or_else(|| "()".into()));
             format!("Result {} {}", err, ok)
         }
         "SkyError" => "Error".to_string(),
         "SkyTask" => {
-            let err = args.first().cloned().unwrap_or_else(|| "Error".into());
-            let ok = args.get(1).cloned().unwrap_or_else(|| "()".into());
+            let err = paren(args.first().cloned().unwrap_or_else(|| "Error".into()));
+            let ok = paren(args.get(1).cloned().unwrap_or_else(|| "()".into()));
             format!("Task {} {}", err, ok)
         }
         // async / future wrappers
@@ -2318,6 +2338,32 @@ mod tests {
     }
 
     #[test]
+    fn test_path_qualified_and_nested_containers() {
+        // Some rustdoc versions emit `std::collections::HashMap` (qualified);
+        // it must still map to `Dict String _`, not the bare `HashMap`.
+        assert_eq!(
+            sky(&path_with_args(
+                "std::collections::HashMap",
+                vec![path("String"), path("String")]
+            )),
+            "Dict String String"
+        );
+        // Vec<HashMap<String,String>> → List (Dict String String) — the nested
+        // multi-word arg must be parenthesised.
+        let inner = path_with_args("HashMap", vec![path("String"), path("String")]);
+        assert_eq!(
+            sky(&path_with_args("Vec", vec![inner])),
+            "List (Dict String String)"
+        );
+        // Result<HashMap<String,String>, String> → Result String (Dict String String)
+        let ok = path_with_args("HashMap", vec![path("String"), path("String")]);
+        assert_eq!(
+            sky(&path_with_args("Result", vec![ok, path("String")])),
+            "Result String (Dict String String)"
+        );
+    }
+
+    #[test]
     fn test_result_and_sky_result() {
         // Rust Result<String, SkyError>  →  Sky Result Error String
         let r = path_with_args("Result", vec![path("String"), path("SkyError")]);
@@ -2476,7 +2522,9 @@ mod tests {
         // nested Option<T> -> Option<Vec<u8>>: the T node deep inside is replaced
         let opt_t = path_with_args("Option", vec![serde_json::json!({ "generic": "T" })]);
         let got = subst_generic_json(&opt_t, &map);
-        assert_eq!(sky(&got), "Maybe List Int");
+        // Nested multi-word generic arg is parenthesised so Sky's
+        // left-associative type application parses it as one argument.
+        assert_eq!(sky(&got), "Maybe (List Int)");
         // an unrelated generic "U" not in map is left intact
         assert_eq!(subst_generic_json(&serde_json::json!({ "generic": "U" }), &map),
                    serde_json::json!({ "generic": "U" }));
