@@ -83,7 +83,7 @@ has the identical tx-handle gap) and `Db.insertRow` (returns the id via
 |---|---|
 | **Builder.hs / Emitter.hs / ModuleEmitter / ExprEmitter / TypeEmitter** | the Rust code generators (expr / type / pattern / module / `Cargo.toml` emission) |
 | **Walker.hs** | the kernel-usage analyzer — walks the program and produces `UsedKernels` (the `usesX` flags) |
-| **`usesX` flags** | `usesLive` / `usesTui` / `usesWebview` / `usesTaskRun` / `usesTaskParallel` / `usesDb` / `usesHttp` / `usesHttpServer` / `usesWsClient` / `usesEmail` / `usesTea` — gate which runtime modules + crates are emitted |
+| **`usesX` flags** | `usesLive` / `usesTui` / `usesWebview` / `usesBackendApp` / `usesTaskRun` / `usesTaskParallel` / `usesDb` / `usesHttp` / `usesHttpServer` / `usesWsClient` / `usesEmail` / `usesTea` / `usesHtml` — gate which runtime modules + crates are emitted |
 | **`mainIsTask`** | entry-mode flag — when true the entry `block_on`s `sky_main()`; a kernel that internally task-runs must NOT set `usesTaskRun` (it flips this off and drops a Task-chain main) |
 | **peephole** | a call-site pattern rewrite in codegen (e.g. `Ev.onSubmit` → typed `decode_form`, `App {…} |> Task.run` → drop the `Task.run`) |
 | **monomorphise** | resolve Sky's `any`/generics to a concrete Rust type at the call site, instead of erasing to `Box<dyn Any>` |
@@ -146,12 +146,20 @@ implementation strings in the Haskell codegen.
 
 ---
 
-## Safety invariant — zero `Any`, zero `unsafe`
+## Safety invariant — zero `Any`, one documented `unsafe`
 
 The Rust backend uses Rust's static type system end-to-end. Sky's `any` is
 **never** lowered to `Box<dyn Any>` — that would re-implement Go's `interface{}`,
-the exact bug class this backend exists to avoid. There is no `unsafe`, no
-`transmute`, no raw pointers; the Sky→Rust FFI path is safe Rust-crate calls.
+the exact bug class this backend exists to avoid. The generated code and the
+Sky-reachable runtime paths use no `transmute`, no raw pointers; the Sky→Rust FFI
+path is safe Rust-crate calls.
+
+The **only** `unsafe` block in the crate is the console child's
+`PR_SET_PDEATHSIG` orphan-guard (`live/console_proxy.rs`): a `pre_exec` closure
+that calls `prctl` (async-signal-safe) between fork and exec. It is not on any
+Sky value path, is `#[cfg(target_os = "linux")]`-gated, documented with a
+`// SAFETY:` rationale, and best-effort (failure is non-fatal). It is recorded in
+the decision ledger.
 
 Heterogeneity is handled with generics + ADTs + concrete runtime bridges, not
 erasure:
@@ -166,7 +174,9 @@ erasure:
 Audit (must stay empty; a hit is a design-level regression, never papered over):
 
 ```bash
+# dyn Any: only the correct-by-construction broker/cache containers (ledger #4).
 grep -rEn "dyn Any|std::any|downcast|type_id" runtime-rust/src/ src/Sky/Generate/Rust/ src/Sky/Build/Rust/
+# unsafe: only the cfg(linux) PR_SET_PDEATHSIG pre_exec (ledger #5); transmute/raw-ptr must stay empty.
 grep -rEn "\bunsafe\b|transmute|from_raw|into_raw|static mut|\*const |\*mut " runtime-rust/src/
 ```
 
@@ -191,25 +201,27 @@ HTTP/WS/Cli regression tests):
 - `Sky.Http.Middleware` (cors/logging/basicAuth/rateLimit) + `Sky.Http.RateLimit`.
 - `Std.Config` (TOML/YAML/JSON decoders over a shared serde_json::Value).
 - Runtime/TEA: Cmd, Sub, Sky.Cli.
-- **Sky.Live (P0–P6)** — see the dedicated section below.
+- PubSub — `Cmd.publish` / `Cmd.publishNoEcho`, `Sub.subscribeTopic`, and the
+  Task-shaped `PubSub.publish` — via the per-type `Broker<T>` (S6, no payload
+  erasure). See "Verification state".
+- **Sky.Live (P0–P6)** — TEA-over-HTTP+SSE, session stores, faithful diff,
+  pub/sub, separate-process embedded console. Dedicated section below.
+- **Sky.Tui** — TEA-over-ANSI; `Std.Ui` `Element` walked to cells (`tui/`,
+  `ui/`). Fixtures `38-tui-ui` / `41-tui-input`.
+- **Sky.Webview** — cross-platform stub floor + codegen (`webview.rs`); the real
+  wry/tao window is staged behind a feature. Fixture `39-webview`.
 - Ffi (Rust-crate auto-FFI).
+
+**✅ `Std.Ui` is a shared `Element` type, multi-target.** The typed no-CSS layout
+DSL renders byte-for-byte against Go's `renderVNode` on the HTML path (verified by
+`scripts/ui-parity.sh` render-diff, corpus `tests/ui-parity/` T0–T5, 6/6), and the
+same `Element` is walked to ANSI cells by `tui/` and to `Html` by Live/Webview.
+The integration apps `26-ui-showcase` (every primitive) and `19-skyforum` (forms +
+`onSubmit`) build clean on `--target rust`. See "Std.Ui parity" below.
 
 **⏳ Missing — bounded & additive** (no architectural blocker):
 
-- PubSub (`Cmd.publish` / `Sub.subscribeTopic`) — couples to Sky.Live's broker.
 - `Process.run`, `Io` beyond Log — small, not example-verified on rust.
-
-**✅ `Std.Ui` (HTML render path) — byte-identical to Go.** The typed no-CSS
-layout DSL (`layout`/`row`/`column`/`el`, `Background`/`Border`/`Font`/`Region`/
-`Input` sub-modules, nearby overlays, aspect-ratio, grid) renders byte-for-byte
-against Go's `renderVNode`, verified by the `scripts/ui-parity.sh` render-diff
-harness (corpus `tests/ui-parity/` T0–T5, 6/6). The two integration apps
-`26-ui-showcase` (every primitive) and `19-skyforum` (forms + `onSubmit`) build
-clean on `--target rust`. See "Std.Ui parity" below.
-
-**🟡 Deferred — large arcs:** Sky.Tui, Sky.Webview (the `Std.Ui` *render* path is
-done; these need the terminal/native-window backends + the layout engine for
-non-HTML targets).
 
 **⛔ Blocked by no-`any`:** `Std.Cache` (polymorphic value storage).
 
@@ -395,8 +407,10 @@ client (`live/client.js`) and wire/patch schema are reused verbatim.
 | **P6** faithful diff | keyed sky-id (`:{key}` from `sky-key` / form `name`, sanitised), event-handler diff (`sky-<event>` + `data-sky-hid`), mixed-child text → parent html-replace; matches Go `diffNodes` exactly | `live::diff` + `live::html` tests |
 | **P5 follow-on** stores | `PostgresStore` (cfg `db`, PgPool) + `RedisStore` (cfg `redis_store`, native TTL) on the same trait; `choose_store` selects `[live] store` with memory fallback | runtime tests (pg/redis gated on `SKY_TEST_*_URL`) |
 
-**Ahead:** firestore backend (same trait), Cmd/Sub depth, req query-string
-parsing, the store's pub/sub `Broker`.
+The in-process pub/sub `Broker` (S6) and the separate-process embedded console
+(epic) are shipped on top of P0–P6 — see "Verification state" and "Rust vs Go
+backend". **Ahead:** firestore backend (parity-by-absence today — Go has none
+either), deeper Cmd/Sub coverage, req query-string parsing.
 
 ---
 
@@ -516,10 +530,11 @@ Only modify these when working on the Rust backend:
 | Directory / file | Purpose |
 |---|---|
 | `runtime-rust/` | runtime crate (`sky_runtime` modules, tests) |
-| `src/Sky/Generate/Rust/Builder.hs` | Rust codegen — expression / type / pattern lowering |
+| `src/Sky/Generate/Rust/Builder.hs` + `Builder/` | Rust codegen — `Emitter` / `ExprEmitter` / `TypeEmitter` / `Pattern` / `Kernel` / `ModuleEmitter` / `Walker` / `Naming` / `CrateSpecs` (`crate-specs.toml`) |
 | `src/Sky/Generate/Rust/Project.hs` | project orchestration — `main.rs` + `Cargo.toml`, copies runtime + FFI bindings |
 | `src/Sky/Build/Rust/Ffi.hs` | Rust FFI — inspector, `.skyi` / `.kernel.json` / `_bindings.rs`, coercion |
-| `src/Sky/Sky/Toml/Rust.hs` | Rust dependency-spec parsing |
+| `src/Sky/Build/Rust/Console.hs` | separate-process console pre-build (fingerprint-validated) |
+| `src/Sky/Sky/Toml/Rust.hs` | Rust dependency-spec parsing (`["rust.dependencies"]`) |
 | `tools/sky-ffi-inspect-rs/` | Rust crate inspector (rustdoc JSON) |
 
 Shared compiler files keep only a minimal `case Toml._target of { TargetRust ->
@@ -609,11 +624,24 @@ pulls neither. A non-live `Std.Db` app keeps its single driver.
 | 29-live-form | Sky.Live P2 | typed form submit |
 | 30-live-routing | Sky.Live P3 | URL routing → injected `model.page` |
 | 31-live-req | Sky.Live P4 | typed `LiveReq` to `init` |
+| 31-system-env-chain | `Sky.Core.System` | getenv/setenv chain — `usesTaskParallel` entry invariant |
 | 32-live-sessions | Sky.Live P5 | `[live] store="sqlite"` — cookie reuse + restart survival |
-| 45-url-option-setters | FFI reach (P1) | `Option<&str>` param coercion — `set_fragment (Just "section")` |
-| 46-csv-builder | FFI reach (P2-A) | `csv` crate name-collision fixed + in-place `push_field` setter chain |
-| 47-regex-builder | FFI reach (P3 + collision) | recovered `RegexBuilder` setters; **both** `Regex` (String) and `BytesRegex` (`List Int`) variants usable |
-| 48-bytes-collision | FFI reach (P2-B + P4) | `bytes::Bytes` builtin-collision fixed (`BytesBytes`); unsized `UninitSlice` methods gated out |
+| 33-live-pubsub | PubSub (S6) | cross-session broadcast over SSE via the per-type `Broker<T>` |
+| 34-live-pubsub-dict | PubSub | Dict-payload broadcast |
+| 35-live-db-startup | `Std.Db` + Live | schema init at startup |
+| 37-cache-cli | `Std.Cache` | per-handle TypeId/K-keyed store (the no-`any` cache) |
+| 38-tui-ui | Sky.Tui (S4) | `Std.Ui` `Element` walked to ANSI cells |
+| 39-webview | Sky.Webview (S5) | cross-platform stub floor + codegen |
+| 40-live-ui | Sky.Live + Std.Ui | full Ui render through the Live VNode path |
+| 41-tui-input | Sky.Tui | key/focus input model |
+| 42-ws-client-onmessage | `Sky.Core.WebSocket` | client `onMessage` Sub-tier |
+| 43-ws-server-capturing | `Sky.Http.Server.WebSocket` | capturing (inline-lambda) handler |
+| 44-curried-return | codegen | uncurried lambda-bodied function-valued returns |
+| 45-url-option-setters | FFI reach | `Option<&str>` param coercion — `set_fragment (Just "section")` |
+| 46-csv-builder | FFI reach | `csv` crate name-collision fixed + in-place `push_field` setter chain |
+| 47-regex-builder | FFI reach | recovered `RegexBuilder` setters; **both** `Regex` (String) and `BytesRegex` (`List Int`) variants usable |
+| 48-bytes-collision | FFI reach | `bytes::Bytes` builtin-collision fixed (`BytesBytes`); unsized `UninitSlice` methods gated out |
+| 49-bytes-core | `Sky.Core.Bytes` | `toHex`/`toString`/`fromHex`/`toBase64`/`fromBase64`/`length` route to `encoding.rs` (no panic) |
 
 P6 (faithful diff) and the postgres/redis stores are covered by runtime unit
 tests, not separate examples; generated postgres + redis live apps are
@@ -621,7 +649,7 @@ cargo-build-verified.
 
 **Codegen test set** (`runtime-rust/tests/rust-codegen/run.sh`): per-case
 `.sky` builds that must compile + print `ok:` — incl. `task-branch.sky`
-(Task-valued `if`/`case` branch at `main`). **Runtime crate**: 350+ tests pass
+(Task-valued `if`/`case` branch at `main`). **Runtime crate**: 378 tests pass
 (`cargo test --features full`), incl. soundness suites (`core_soundness`,
 `kernel_soundness`, `dict_determinism`) asserting no-panic + sorted-iteration
 invariants under proptest.
@@ -634,9 +662,9 @@ invariants under proptest.
 
 - `runtime-rust/tests/rust-codegen/http-server-test.sh` asserts every route over real HTTP
   (GET, path param → JSON, POST body, static, 404, content-type).
-- `cargo test --features "live db redis_store"` — 164 runtime tests incl. diff,
-  dispatch, form, store (memory/sqlite + env-gated pg/redis restart-survival),
-  and the pub/sub broker (fan-out, echo, SkipOrigin, per-type isolation).
+- `cargo test --features full` — diff, dispatch, form, store (memory/sqlite +
+  env-gated pg/redis restart-survival), and the pub/sub broker (fan-out, echo,
+  SkipOrigin, per-type isolation), among the 378 runtime tests.
 
 ### PubSub / Broker (S6) — zero payload erasure
 
@@ -667,22 +695,28 @@ scripts/rust-perf.sh 01-hello-world        # gate one example (shape auto-detect
 scripts/rust-perf.sh --baseline            # re-derive thresholds over the triplet
 ```
 
-Representative envelope (Rust as a fraction of Go; lower is better except
-throughput): binary size **~1–2%**, RSS **~15–19%**, CLI cold-start **~16%**.
-The `live.rss` envelope + the SSE patch-latency leg are pending a re-baseline on a
-quiet (non-swapping) host.
+Committed envelope (`scripts/rust-perf.thresholds`, Rust as a fraction of Go;
+lower is better except throughput): binary size **≤ 2%**, RSS **≤ 15–19%** by
+shape, CLI cold-start **≤ 20%**, throughput **≥ 88%**. The `live.rss` envelope +
+the SSE patch-latency leg are pending a re-baseline on a quiet (non-swapping) host.
 
 ### Top-level `examples/[0-9]*` on `--target rust`
 
-Build-level via `scripts/rust-sweep.sh`. **In-scope, building:** `00, 01, 04, 07,
-09, 10, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 28, 30, 31, 32, 33,
-35, simple, test_pkg` — covering CLI, FFI, `Std.Db`/`Auth`/`Config`, Sky.Http.Server,
-Sky.Live (P0–P6), Sky.Tui, Sky.Webview (stub + real backend), and the multibackend
-entry model (`24-tui-kitchen-sink`).
+Build-level via `scripts/rust-sweep.sh` (32/32 in-scope examples build) — covering
+CLI, FFI, `Std.Db`/`Auth`/`Config`, Sky.Http.Server, Sky.Live (P0–P6), Sky.Tui,
+Sky.Webview, and the multibackend entry model (`24-tui-kitchen-sink`).
 
-**Out of scope:** Go-package→Rust-native FFI examples `03, 05, 08, 13` (import
-gorilla/mux, stripe-go, google/uuid, godotenv) need a Go runtime. The composite
-multi-app examples `37, 38` need anon-struct field-method access, not yet emitted.
+**Out of scope** (`OUT_OF_SCOPE` in `rust-sweep.sh`): `02 03 05 06 08 11 13 25 27
+29 34 36 37 38`:
+
+- Go-package→Rust-native FFI (`02, 03, 05, 08, 13`): import gorilla/mux,
+  stripe-go, google/uuid, godotenv — need a Go runtime (refused clean at
+  canonicalise; see the intentional-divergence table).
+- `11` Fyne GUI; `06` JSON-pipeline decoder (the `Box<dyn FnOnce>` chain).
+- `27` multi-session-chat — blocked on the `Db.getString`-on-`any`/Dict-row
+  codegen gap, not on pub/sub.
+- composite multi-app `34, 36, 37, 38` — need anon-struct field-method access,
+  not yet emitted; `25/29` are console/spike shapes covered by the epic fixtures.
 
 ---
 
@@ -723,6 +757,7 @@ known-issues backlog.
 | 2 | `email.rs` `hmac_bytes` `expect_used` | Accepted | baseline · panic-hardening pass | `email.rs:321` | same — a fallback MAC is a wrong SES signature |
 | 3 | `ffi_polyfills.rs` `panic` (×2) | Accepted | baseline · panic-hardening pass | `ffi_polyfills.rs:26,42` | statically dead for valid Sky; the unconstrained generic `T` return has no total value to synthesise |
 | 4 | `dyn Any` sites (pubsub broker, cache store/value) | Accepted | task #44 · 2026-06-12 | `pubsub.rs:85` · `cache.rs:57,70` | each `TypeId`-/`K`-keyed, correct-by-construction; the payload travels as its real type and is never erased — detail below |
+| 5 | `unsafe` `pre_exec` (`PR_SET_PDEATHSIG`) | Accepted | console epic | `live/console_proxy.rs:155` | `cfg(linux)` orphan-guard; the closure only calls `prctl` (async-signal-safe) between fork and exec, off any Sky value path; failure non-fatal. No safe stdlib API delivers a parent-death signal — detail below |
 
 ### Deferred for investigation
 
@@ -747,6 +782,15 @@ The **only** `#[allow]`d exceptions are 5 irreducible sites:
 | `email.rs` `hmac_bytes` | `expect_used` | same | internal SES-signing helper returning `Vec<u8>`; a fallback MAC would be a wrong signature |
 | `ffi_polyfills.rs` `ffi_call_pure_polyfill` | `panic` | statically dead for valid Sky (the codegen peephole resolves the static-dispatch shape); this is the dynamic-dispatch fallback | returns an unconstrained generic `T` — no total value can be synthesised |
 | `ffi_polyfills.rs` `ffi_call_task_polyfill` | `panic` | statically dead for valid Sky (the codegen peephole resolves the static-dispatch shape); this is the dynamic-dispatch fallback — same boundary as `ffi_call_pure_polyfill` | returns an unconstrained generic `T` — no total value can be synthesised |
+
+**The one `unsafe` block** (`live/console_proxy.rs`, ledger #5) is the
+`#[cfg(target_os = "linux")]` `Command::pre_exec` that calls
+`prctl(PR_SET_PDEATHSIG, SIGTERM)` so the proxied console child dies when the
+parent is SIGKILL'd / OOM'd (a path no signal handler can catch). The closure
+runs in the forked child before exec, calls only an async-signal-safe libc fn (no
+alloc, no locks, no Rust-runtime re-entry), and its failure is best-effort
+hardening — no Sky value flows through it. No safe std API exposes a
+parent-death signal, so the `unsafe` is irreducible.
 
 Everything else in the crate is panic-vector-free: lock-family unwraps use
 `unwrap_or_else(|e| e.into_inner())` (poison-tolerant — a panicking session
@@ -799,16 +843,25 @@ runtime-rust/src/sky_runtime/
 ├── config.rs         GENERATED per sky.toml driver — DbPool/DbRow/SKY_DB_URL + driver helpers
 ├── core.rs           SkyResult/SkyMaybe/SkyTask, list/string/float helpers, byte FFI coercion
 ├── task.rs           succeed/map/and_then/on_error/fail/perform/sequence/run/parallel
-├── log.rs · system.rs · time.rs · random.rs · file.rs
+├── tea.rs            shared TEA loop (SubManager/spawn_subs) for the Cli/Tui drivers
+├── log.rs · system.rs · time.rs · random.rs · file.rs · io.rs
 ├── crypto.rs         random_bytes/token + sha/hmac/RSA/AEAD (aes-gcm, chacha20, pbkdf2)
 ├── jwt.rs · json.rs · encoding.rs · regex_kernel.rs
-├── decimal.rs · money.rs · math.rs · dict.rs · string.rs · basics.rs · list.rs
+├── decimal.rs · money.rs · math.rs · dict.rs · string.rs · basics.rs · list.rs · char_kernel.rs
 ├── db.rs             Std.Db CRUD over sqlx (sqlite/mysql/postgres)
 ├── auth.rs           Std.Auth — bcrypt + jsonwebtoken + sqlx
 ├── compression.rs · csv.rs · uuid_kernel.rs · config_decode.rs · email.rs · trace.rs
-├── ffi_polyfills.rs  Ffi.callPure/callTask/toAny polyfills
+├── http_client.rs · http_stream.rs   Sky.Core.Http client + Sub-tier/relay stream
+├── server.rs · server_stream.rs      Sky.Http.Server routes + server-side SSE/chunked
+├── ws_client.rs      Sky.Core.WebSocket client
+├── webview.rs        Sky.Webview stub floor (+ feature-staged wry/tao window)
+├── ffi_polyfills.rs  Ffi.callPure/callTask/toAny polyfills (statically-dead dynamic fallback)
+├── cache.rs          Std.Cache — per-handle TypeId/K-keyed store (the dyn Any ledger #4 site)
+├── telemetry.rs · telemetry_spill.rs  in-RAM rings + WAL spill (console data plane)
+├── html.rs           Html/Attribute/Event<M> + assign_sky_ids (keyed) + render_html (shared)
+├── ui/               Std.Ui Element bridge (element.rs) — shared layout type
+├── tui/              Sky.Tui (feature `tui`): app/cell/diff/focus/key/layout — Element → cells
 ├── live/             Sky.Live (feature `live`)
-│   ├── html.rs       Html/Attribute/Event<M> + assign_sky_ids (keyed) + render_html
 │   ├── diff.rs       Patch (Go wire schema) + faithful diff (keyed sky-id, events, mixed-text)
 │   ├── dispatch.rs   HandlerIndex<M> + resolve(sky-id, event, args) / resolve_form
 │   ├── form.rs       decode_form::<T> / decode_form_or_warn
@@ -816,6 +869,10 @@ runtime-rust/src/sky_runtime/
 │   ├── req.rs        LiveReq + builder (canonical headers, cookie parse)
 │   ├── store.rs      SessionStore trait + Memory / Sqlite / Postgres / Redis + choose_store
 │   ├── sse.rs        SsePatch / channel / frame (text/event-stream)
+│   ├── pubsub.rs     per-payload-type Broker<T> keyed by TypeId (S6 — no erasure)
+│   ├── hub.rs        hub read kernels — generic-over-return-type StateStore decode
+│   ├── console.rs · console_proxy.rs   separate-process console + reverse-proxy + orphan-guard
+│   ├── observability.rs · push_exporter.rs · hub_exporter.rs   auto-instrument + OTLP/JSON push
 │   ├── client.js     browser client, ported verbatim from Go (include_str!'d)
 │   └── mod.rs        live_render_static + live_app / live_app_routed + per-session driver
 └── mod.rs            re-exports
