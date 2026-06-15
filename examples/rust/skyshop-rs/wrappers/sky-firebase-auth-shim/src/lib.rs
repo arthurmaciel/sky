@@ -100,27 +100,46 @@ fn get_claim(claims: &HashMap<String, Value>, key: &str) -> String {
 /// is set — emulator tokens are `alg=none`, so the emulator validator decodes
 /// claims without JWKS signature checks. Live mode performs full RS256 + aud/iss
 /// /exp verification against Google's certs.
+/// Dev-mode gate, mirroring Sky's production gate (`ENV` then `SKY_ENV`;
+/// anything other than unset / `dev` / `development` / `local` ⇒ production).
+/// The emulator validator decodes `alg=none` claims WITHOUT signature / `aud` /
+/// `iss` / `exp` checks, so the emulator path MUST be refused outside dev — a
+/// leaked `FIREBASE_AUTH_EMULATOR_HOST` in production would otherwise accept any
+/// attacker-forged token (full auth bypass). Defence-in-depth.
+fn is_dev() -> bool {
+    let env = std::env::var("ENV")
+        .or_else(|_| std::env::var("SKY_ENV"))
+        .unwrap_or_default();
+    matches!(env.as_str(), "" | "dev" | "development" | "local")
+}
+
 async fn validate_claims(token: String) -> Result<HashMap<String, Value>, String> {
     if std::env::var("FIREBASE_AUTH_EMULATOR_HOST").is_ok() {
-        // Emulator: synchronous App construction, infallible verifier.
+        if !is_dev() {
+            return Err("firebase auth: emulator path refused outside dev \
+                        (ENV/SKY_ENV must be unset, dev, development, or local)"
+                .to_string());
+        }
+        // Emulator (dev only): synchronous App construction, infallible verifier.
         let app = App::emulated();
         let verifier = app.id_token_verifier();
+        // Do not echo the error Debug — it may carry token material (F2).
         verifier
             .validate(&token)
             .await
-            .map_err(|e| format!("firebase auth: emulator token verification failed: {e:?}"))
+            .map_err(|_| "firebase auth: emulator token verification failed".to_string())
     } else {
         // Live: ADC-backed App, JWKS-backed verifier (both fallible).
         let app = App::live()
             .await
-            .map_err(|e| format!("firebase auth: live app init failed: {e:?}"))?;
+            .map_err(|_| "firebase auth: live app init failed".to_string())?;
         let verifier = app
             .id_token_verifier()
-            .map_err(|e| format!("firebase auth: live verifier init failed: {e:?}"))?;
+            .map_err(|_| "firebase auth: live verifier init failed".to_string())?;
         verifier
             .validate(&token)
             .await
-            .map_err(|e| format!("firebase auth: token verification failed: {e:?}"))
+            .map_err(|_| "firebase auth: token verification failed".to_string())
     }
 }
 

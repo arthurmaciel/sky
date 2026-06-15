@@ -99,9 +99,27 @@ impl Source for EmulatorTokenSource {
 /// Emulator path (`FIRESTORE_EMULATOR_HOST` set): a no-op `ExternalSource` token
 /// so no ADC is required. The emulator host itself is picked up automatically by
 /// the firestore crate.
+/// Dev-mode gate, mirroring Sky's production gate (`ENV` then `SKY_ENV`;
+/// anything other than unset / `dev` / `development` / `local` ⇒ production).
+/// The emulator path hands the client a constant dummy bearer and talks to an
+/// unauthenticated emulator, so it MUST be refused outside dev — a leaked
+/// `FIRESTORE_EMULATOR_HOST` in production would otherwise silently route all
+/// reads/writes at an emulator with no access control. Defence-in-depth.
+fn is_dev() -> bool {
+    let env = std::env::var("ENV")
+        .or_else(|_| std::env::var("SKY_ENV"))
+        .unwrap_or_default();
+    matches!(env.as_str(), "" | "dev" | "development" | "local")
+}
+
 async fn connect() -> Result<FirestoreDb, String> {
     let options = FirestoreDbOptions::new(project_id());
     let result = if std::env::var("FIRESTORE_EMULATOR_HOST").is_ok() {
+        if !is_dev() {
+            return Err("firestore: emulator path refused outside dev \
+                        (ENV/SKY_ENV must be unset, dev, development, or local)"
+                .to_string());
+        }
         FirestoreDb::with_options_token_source(
             options,
             gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
