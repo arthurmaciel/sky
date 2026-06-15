@@ -7,7 +7,7 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS files   (path TEXT PRIMARY KEY, lang TEXT, role TEXT, size INTEGER, sha TEXT);
 CREATE TABLE IF NOT EXISTS symbols (file TEXT, name TEXT, kind TEXT, line INTEGER);
 CREATE TABLE IF NOT EXISTS edges   (src TEXT, dst TEXT, kind TEXT);
-CREATE TABLE IF NOT EXISTS kernels (name TEXT PRIMARY KEY, sky_decl INTEGER, hs_route TEXT, go_impl TEXT, rust_impl TEXT, parity TEXT);
+CREATE TABLE IF NOT EXISTS kernels (name TEXT PRIMARY KEY, sky_decl INTEGER, hs_route TEXT, go_impl INTEGER, rust_impl INTEGER, parity TEXT);
 CREATE TABLE IF NOT EXISTS meta    (k TEXT PRIMARY KEY, v TEXT);
 CREATE INDEX IF NOT EXISTS i_sym_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS i_edge_src ON edges(src);
