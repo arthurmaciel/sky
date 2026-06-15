@@ -1,0 +1,8 @@
+[project]
+name = "47-regex-builder"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+["rust.dependencies"]
+regex = "1"

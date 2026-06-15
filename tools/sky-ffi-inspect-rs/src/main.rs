@@ -1204,11 +1204,39 @@ fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
             }
             if let Some(u) = it["inner"].get("use") {
                 let tid = u.get("id").map(item_id_to_str);
-                if !u["is_glob"].as_bool().unwrap_or(false) {
-                    if let (Some(n), Some(tids)) = (u["name"].as_str(), tid.as_ref()) {
-                        if index.get(tids).map(item_is_type).unwrap_or(false) {
-                            insert_shorter(&mut out, tids.clone(), format!("{}::{}", mp, n));
+                if u["is_glob"].as_bool().unwrap_or(false) {
+                    // `pub use target::*`: the target module's PUBLIC types become
+                    // accessible at THIS module's path. Record them at
+                    // `<mp>::<typename>` — the target's own path may be private
+                    // (e.g. regex's `builders::string`), so it's absent from
+                    // `paths` and the stack walk would skip it, leaving the type
+                    // unqualified and dropped by the nameability filter. This is
+                    // the usable public path (e.g. `regex::RegexBuilder`).
+                    if let Some(tids) = tid.as_ref() {
+                        if let Some(tmod) =
+                            index.get(tids).and_then(|m| m["inner"].get("module"))
+                        {
+                            if let Some(titems) = tmod["items"].as_array() {
+                                for tchild in titems {
+                                    let tcid = item_id_to_str(tchild);
+                                    if let Some(tit) = index.get(&tcid) {
+                                        if item_is_type(tit) && is_public(tit) {
+                                            if let Some(tn) = tit["name"].as_str() {
+                                                insert_shorter(
+                                                    &mut out,
+                                                    tcid,
+                                                    format!("{}::{}", mp, tn),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
+                    }
+                } else if let (Some(n), Some(tids)) = (u["name"].as_str(), tid.as_ref()) {
+                    if index.get(tids).map(item_is_type).unwrap_or(false) {
+                        insert_shorter(&mut out, tids.clone(), format!("{}::{}", mp, n));
                     }
                 }
                 if let Some(tids) = tid {

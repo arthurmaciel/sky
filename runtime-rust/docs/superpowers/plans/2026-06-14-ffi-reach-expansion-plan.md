@@ -10,7 +10,7 @@ the no-panic / no-`Any` / Go-neutral constraints. Ordered by value × tractabili
 |---|---|---|---|---|---|
 | P1 | `Option<T>` param coercion (`SkyMaybe<T>` → `Option<&str>`/`Option<u16>`/…) | url, many setters/APIs | **high** | medium | ✅ DONE |
 | P2 | Crate-name collision (absolute `::<crate>` paths, no glob) | csv/time/log/json/config/email/html | high | ✅ DONE (A); bytes=future | ✅ |
-| P3 | Unqualified receiver dropped by nameability | regex `RegexBuilder` (+48 setters) | med-high | medium | needs investigation |
+| P3 | Glob-re-export qualification (regex `RegexBuilder` via private `builders::string`) | regex (+48 setters) | med-high | medium | ✅ DONE |
 | P4 | Sized gate on by-value receivers | bytes `UninitSlice` | medium | medium | planned |
 | P5 | `&mut [u8]` output-buffer params | hex, tokio I/O | low-med | medium | deferred |
 

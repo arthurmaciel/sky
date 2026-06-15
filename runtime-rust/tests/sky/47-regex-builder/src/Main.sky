@@ -1,0 +1,27 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+import Rust.Regex as Regex
+
+
+-- P3 regression: build a case-insensitive regex via RegexBuilder's recovered
+-- fluent setters, then match. "a+" case-insensitive should match "AAA".
+matched : Bool
+matched =
+    case Regex.new_from_regexBuilder "a+" of
+        Err _ -> False
+        Ok b0 ->
+            case Regex.case_insensitive_from_regexBuilder b0 True of
+                Err _ -> False
+                Ok b1 ->
+                    case Regex.build_from_regexBuilder b1 of
+                        Err _ -> False
+                        Ok re ->
+                            case Regex.is_match_from_regex re [ 65, 65, 65 ] of
+                                Err _ -> False
+                                Ok m -> m
+
+
+main =
+    println (if matched then "ok: regex RegexBuilder setters (P3)" else "FAIL: no match")
