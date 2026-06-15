@@ -6,6 +6,36 @@ use std::future::ready;
 pub fn system_args<E: Send + 'static>(_: ()) -> SkyTask<E, Vec<String>> {
     Box::pin(ready(ok_res(std::env::args().skip(1).collect())))
 }
+
+/// `Sky.Core.Process.run : String -> List String -> Task Error String` — run a
+/// subprocess, returning its combined stdout+stderr. Mirrors Go's `Process_run`
+/// (`exec.Command` + `CombinedOutput`): a non-zero exit or a spawn failure is
+/// `Err` carrying the captured output + the error; a clean exit is `Ok(output)`.
+/// Total — every failure maps to `Err`, never a panic.
+///
+/// SECURITY: `Process.run` is an intentional Sky stdlib effect (Task-tier,
+/// parity with the Go backend) — no more permissive than Go's. Sandboxing
+/// untrusted Sky source (e.g. blocking the `Process.` module) is the calling
+/// application's responsibility, exactly as on Go.
+pub fn process_run<E: Send + From<String> + 'static>(
+    cmd: String,
+    args: Vec<String>,
+) -> SkyTask<E, String> {
+    match std::process::Command::new(&cmd).args(&args).output() {
+        Ok(out) => {
+            // Go's CombinedOutput: stdout then stderr (callers usually `2>&1`).
+            let mut combined = out.stdout;
+            combined.extend_from_slice(&out.stderr);
+            let text = String::from_utf8_lossy(&combined).into_owned();
+            if out.status.success() {
+                Box::pin(ready(ok_res(text)))
+            } else {
+                Box::pin(ready(SkyResult::Err(str_err(&format!("{}: {}", text, out.status)))))
+            }
+        }
+        Err(e) => Box::pin(ready(SkyResult::Err(str_err(&format!("{}: {}", cmd, e))))),
+    }
+}
 pub fn system_exit(code: i64) -> ! { std::process::exit(code as i32) }
 
 /// `Sky.Core.System.getenv key : String -> Task Error String` — the env var as a

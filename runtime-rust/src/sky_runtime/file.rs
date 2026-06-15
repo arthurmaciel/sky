@@ -26,3 +26,13 @@ pub fn file_delete<E: Send + From<String> + 'static>(path: String) -> SkyTask<E,
         Err(e) => Box::pin(ready(SkyResult::Err(str_err(&format!("{}", e))))),
     }
 }
+
+/// `Sky.Core.File.mkdirAll : String -> Task Error ()` — create the directory
+/// and every missing parent (mkdir -p). Already-exists is `Ok` (matching
+/// `std::fs::create_dir_all`); a real I/O failure is `Err`.
+pub fn file_mkdir_all<E: Send + From<String> + 'static>(path: String) -> SkyTask<E, ()> {
+    match std::fs::create_dir_all(&path) {
+        Ok(_) => Box::pin(ready(ok_res(()))),
+        Err(e) => Box::pin(ready(SkyResult::Err(str_err(&format!("{}", e))))),
+    }
+}

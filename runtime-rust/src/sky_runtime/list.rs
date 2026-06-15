@@ -8,6 +8,25 @@ pub fn list_length<T>(xs: Vec<T>) -> i64 {
     xs.len() as i64
 }
 
+/// `Sky.Core.List.head : List a -> Maybe a` — the first element, or `Nothing`
+/// on the empty list. Total (no indexing panic).
+pub fn list_head<T>(xs: Vec<T>) -> SkyMaybe<T> {
+    match xs.into_iter().next() {
+        Some(x) => SkyMaybe::Just(x),
+        None => SkyMaybe::Nothing,
+    }
+}
+
+/// `Sky.Core.List.drop : Int -> List a -> List a` — drops the first `n`
+/// elements. `n <= 0` keeps the whole list; `n >= len` yields `[]`. Total.
+pub fn list_drop<T>(n: i64, xs: Vec<T>) -> Vec<T> {
+    if n <= 0 {
+        xs
+    } else {
+        xs.into_iter().skip(n as usize).collect()
+    }
+}
+
 /// Sky `filterMap : (a -> Maybe b) -> List a -> List b`.
 /// Applies `f` to each element; keeps only `Just` results.
 pub fn list_filter_map<A, B>(f: impl Fn(A) -> SkyMaybe<B>, xs: Vec<A>) -> Vec<B> {
