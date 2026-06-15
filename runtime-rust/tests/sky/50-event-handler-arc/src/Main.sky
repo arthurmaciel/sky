@@ -1,0 +1,102 @@
+module Main exposing (main)
+
+-- Regression for two codegen bugs in the event-handler Arc change (e72bd036),
+-- both of which type-checked clean under `sky` but failed `cargo build` on the
+-- Rust backend ("if it type-checks, it works" floor).
+--
+-- B#1 — spurious Arc-wrap of a non-event String/Bool-arg field on an ANONYMOUS
+--   record. An anon-record field typed `String -> Int` (concrete result, so it
+--   renders a bare `fn(String) -> i64`, NOT `Arc<dyn Fn>`) assigned a bare fn
+--   item used to emit `Arc::new(fn_item)` into the bare-`fn` slot →
+--   `E0308 expected fn pointer, found Arc<..>`. The arm keyed on arg-type only
+--   (`String`), ignoring whether the target slot is actually an Arc. The field
+--   below (`scorer : String -> Int`) lives on an anonymous record (NO type
+--   alias) and is assigned the bare top-level fn `lengthScore`.
+--
+-- B#2 — a CAPTURING lambda passed DIRECTLY to an event helper was not
+--   Arc-wrapped. `Events.onInput (\s -> Typed (prefix ++ s))` flows into
+--   `Arc<dyn Fn(String) -> Msg + Send + Sync>`; the lambda rendered with
+--   capture-cloning but was never `Arc::new`-wrapped → `E0308 expected Arc<..>,
+--   found closure`. The `prefix` capture makes it a genuine closure, not a fn
+--   item, so the pre-fix bare-fn-item-only path missed it.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.String as String
+import Std.Html as Html
+import Std.Html.Attributes as Attr
+import Std.Html.Events as Events
+import Std.Live as Live
+import Std.Cmd as Cmd
+import Std.Sub as Sub
+
+
+type Msg
+    = Typed String
+    | NoOp
+
+
+type alias Model = { text : String, prefix : String }
+
+
+init : () -> ( Model, Cmd Msg )
+init _ = ( { text = "", prefix = "you typed: " }, Cmd.none )
+
+
+update : Msg -> Model -> ( Model, Cmd Msg )
+update msg model =
+    case msg of
+        Typed s -> ( { model | text = s }, Cmd.none )
+        NoOp -> ( model, Cmd.none )
+
+
+-- B#1: a bare top-level fn item, `String -> Int` — the value assigned to an
+-- anonymous record's `scorer` field below. Its result is concrete `Int`, so the
+-- field renders a bare `fn(String) -> i64`, NOT an `Arc<dyn Fn>`.
+lengthScore : String -> Int
+lengthScore s = String.length s
+
+
+-- B#1: an ANONYMOUS record literal (no type alias) whose `scorer` field is
+-- `String -> Int` — a NON-event handler (concrete `Int` result, so the field is
+-- a bare `fn(String) -> i64` generic slot, NOT an `Arc<dyn Fn>`). It is assigned
+-- the bare fn ITEM `lengthScore`. Pre-fix the `isEventCallbackRegion && isFnItem`
+-- arm keyed on the ARG type alone (`String`), so it Arc-wrapped this fn item
+-- regardless of the slot's real shape → `scorer: std::sync::Arc::new(lengthScore)`.
+-- Post-fix the arm additionally requires the target slot to actually be Arc
+-- (`wrapNonLambda || targetIsArcFn`), which an Anon-struct field is not → the
+-- field is assigned the bare `lengthScore` with NO `Arc::new`. The
+-- build-time guard below greps the generated Rust to assert that.
+scoreText : String -> Int
+scoreText s =
+    let
+        cfg = { scorer = lengthScore, note = "len" }
+    in
+    cfg.scorer s
+
+
+view : Model -> Html.Html Msg
+view model =
+    Html.div []
+        [ -- B#2: a capturing lambda (captures `model.prefix`) straight to onInput.
+          Html.input
+            [ Attr.value model.text
+            , Events.onInput (\s -> Typed (model.prefix ++ s))
+            ]
+        , Html.p []
+            [ Html.text (model.prefix ++ model.text) ]
+        , Html.p []
+            [ Html.text ("score: " ++ String.fromInt (scoreText model.text)) ]
+        ]
+
+
+subscriptions : Model -> Sub Msg
+subscriptions _ = Sub.none
+
+
+main : Task Error ()
+main =
+    Live.app
+        { init = init, update = update, view = view, subscriptions = subscriptions
+        , routes = [ Live.route "/" () ]
+        , notFound = ()
+        }

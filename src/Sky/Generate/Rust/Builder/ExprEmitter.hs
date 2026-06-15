@@ -1117,14 +1117,16 @@ exprToRustInner ctx e = case e of
     -- flow through wrapStoredFn's fallback unchanged when the region isn't a fn.
     Can.Call ctorFn@(Ann.At _ (Can.VarCtor _ _ "Event" ev _)) [nameArg, handlerArg]
         | ev == "OnString" || ev == "OnBool" ->
-            -- `wrapStoredFn False`: Arc-wrap only a CAPTURING lambda (its own arm)
-            -- or a bare fn ITEM (the `isEventCallbackRegion && isFnItem` arm) — NOT
-            -- a `VarLocal` that already holds the Arc-typed callback (the stdlib
+            -- `wrapNonLambda=False, targetIsArcFn=True`: the html::Event field IS
+            -- `Arc<dyn Fn>`, so Arc-wrap a CAPTURING lambda (its own arm) or a bare
+            -- fn ITEM (the event-cb arm, now gated on `targetIsArcFn`) — but NOT a
+            -- `VarLocal` that already holds the Arc-typed callback (the stdlib
             -- chain's `OnString "input" handler`, where `handler : Arc<dyn Fn>`).
-            -- `True` here would also Arc-wrap that VarLocal (the `wrapNonLambda &&
-            -- isFnRegion` path) → `Arc<Arc<dyn Fn>>`.
+            -- `wrapNonLambda=True` here would re-wrap that VarLocal via the
+            -- `wrapNonLambda && isFnRegion` path → `Arc<Arc<dyn Fn>>`; keeping it
+            -- False but `targetIsArcFn=True` wraps only fn ITEMS (never VarLocal).
             exprToRustString ctx ctorFn ++ "(" ++ exprToRustString ctx nameArg
-                ++ ", " ++ wrapStoredFn False ctx handlerArg (exprToRustString ctx handlerArg) ++ ")"
+                ++ ", " ++ wrapStoredFn False True ctx handlerArg (exprToRustString ctx handlerArg) ++ ")"
     -- P2-T4: `Ev.onSubmit handler` call-site peephole. `Std.Html.Events.onSubmit`
     -- is a .sky stdlib fn `onSubmit handler = EventAttr (OnRaw "submit" handler)`
     -- whose body type-erases the handler to `any` — so the concrete form-record
@@ -1387,7 +1389,7 @@ exprToRustInner ctx e = case e of
                 -- update VALUE (`{ model | gameStatus = result }`) would be
                 -- shadowed by the temp and read back the half-built record
                 -- (16-skychess `result.gameStatus = result.clone()`).
-                in "__rec." ++ f ++ " = " ++ wrapStoredFn True ctxF expr (exprToRustString ctxF expr)
+                in "__rec." ++ f ++ " = " ++ wrapStoredFn True False ctxF expr (exprToRustString ctxF expr)
         in "{ let mut __rec = " ++ exprToRustString ctx record ++ "; " ++
         intercalate "; " (map emitUpd sorted) ++
         "; __rec }"
@@ -1401,9 +1403,9 @@ exprToRustInner ctx e = case e of
                 -- fields are `Arc<dyn Fn>`, so it must.
                 let wrapNL = not ("Anon" `isPrefixOf` structName)
                 in structName ++ " { " ++ intercalate ", " (map (\(k, v) ->
-                    k ++ ": " ++ wrapStoredFn wrapNL ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
+                    k ++ ": " ++ wrapStoredFn wrapNL False ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
             Nothing ->
-                "{ " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ wrapStoredFn False ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
+                "{ " ++ intercalate ", " (map (\(k, v) -> k ++ ": " ++ wrapStoredFn False False ctx v (exprToRustString ctx v)) (Map.toList fields)) ++ " }"
     Can.Unit -> "()"
     Can.Tuple a b rest -> 
         "(" ++ intercalate ", " (map (exprToRustString ctx) (a:b:rest)) ++ ")"
@@ -1695,8 +1697,18 @@ closureCaptures params body =
                         : go bnd r : [ go bnd fe | Can.FieldUpdate _ fe <- Map.elems fs ])
         _ -> Set.empty
 
-wrapStoredFn :: Bool -> EmitCtx -> Can.Expr -> String -> String
-wrapStoredFn wrapNonLambda ctx (Ann.At region e) rendered = case e of
+-- | `targetIsArcFn` (2nd Bool) is set ONLY by a call site whose destination
+-- slot is KNOWN to be `Arc<dyn Fn>` regardless of the value's region type — i.e.
+-- the `Event::OnString`/`OnBool` ctor arms, whose html::Event field is a
+-- hard-coded `Arc<dyn Fn>`. It is the target-slot-is-Arc signal the event-cb
+-- arm needs but cannot read from the value region (the value is monomorphic).
+-- A named-alias struct field carries the same guarantee via `wrapNonLambda`
+-- (its function-typed field renders `Arc<dyn Fn>` — fieldTypeToRust). An Anon
+-- struct field passes BOTH False: its field is a pinned generic that may be a
+-- bare `fn` pointer, so a bare fn item must NOT be Arc-wrapped (B#1 — the wrap
+-- into a bare-`fn` slot is an `E0308 expected fn pointer, found Arc<..>`).
+wrapStoredFn :: Bool -> Bool -> EmitCtx -> Can.Expr -> String -> String
+wrapStoredFn wrapNonLambda targetIsArcFn ctx (Ann.At region e) rendered = case e of
     -- A CAPTURING lambda stored into an `Arc<dyn Fn + 'static>` field must OWN its
     -- captures (a borrow can't outlive the call). Emit a `move` closure and
     -- pre-clone each free outer var, so sibling callback fields each get their own
@@ -1717,6 +1729,18 @@ wrapStoredFn wrapNonLambda ctx (Ann.At region e) rendered = case e of
     -- `OnString "input" handler`) must NOT be re-wrapped — that would nest
     -- `Arc<Arc<dyn Fn>>`. So gate on the expr being a fn ITEM (ctor / top-level
     -- ref), which is what coerces from `fn` into `Arc::new`.
+    --
+    -- B#1 gate: an EVENT callback is `(String|Bool) -> <Msg>` where the result
+    -- is the app message type (a user ADT). Its Std.Ui/Std.Html slot —
+    -- a named-alias field, an Anon-cfg field consumed by `std_ui_input_*`
+    -- (`onChange : String -> msg`), or the `Event::On*` ctor — is `Arc<dyn Fn>`,
+    -- so a bare fn item must Arc-wrap. The discriminator is the RESULT type, not
+    -- the wrapper kind: a non-event `(String|Bool) -> <primitive>` field
+    -- (`scorer : String -> Int`) renders a bare `fn` slot (typeToRustString only
+    -- emits Arc when the result is the polymorphic msg var), so wrapping a fn
+    -- item there emits `Arc::new(item)` into a bare-`fn` slot → `E0308` (B#1).
+    -- `targetIsArcFn` is kept as an explicit guarantee for the `Event::On*` ctor
+    -- arm even though its result is already a Msg.
     _ | isEventCallbackRegion, isFnItem -> "std::sync::Arc::new(" ++ rendered ++ ")"
     _ | wrapNonLambda, isFnRegion -> "std::sync::Arc::new(" ++ rendered ++ ")"
     _ -> rendered
@@ -1725,22 +1749,38 @@ wrapStoredFn wrapNonLambda ctx (Ann.At region e) rendered = case e of
         Just (Can.TLambda _ _) -> True
         _                      -> False
     -- The VALUE region is MONOMORPHIC here (`UpdateEditTitle : String ->
-    -- StateMsg`), so unlike the FIELD type (`String -> msg`, TVar result) we
-    -- match on the ARG being concrete `String`/`Bool` regardless of result —
-    -- that's the event-handler signature the Arc-typed field expects. Combined
-    -- with `isFnItem` (only a bare ctor / top-level fn ref, never an already-Arc
-    -- `VarLocal`), this can't over-wrap: a value is only reached here as a
-    -- record/update field, and a String/Bool-arg fn item assigned to such a
-    -- field targets an Arc<dyn Fn> slot.
+    -- StateMsg`), so the FIELD's `String -> msg` TVar result has been pinned to
+    -- the concrete Msg ADT. We gate on arg = `String`/`Bool` AND result NOT a
+    -- concrete PRIMITIVE (Int/Float/Bool/String/Char/() — a non-event handler
+    -- like `scorer : String -> Int` whose slot is a bare `fn`, not `Arc<dyn Fn>`
+    -- — B#1). The remaining shape — concrete-arg, ADT-result — is exactly the
+    -- event handler the Arc-typed field expects. `targetIsArcFn` (set only by the
+    -- `Event::On*` ctor) forces the wrap even if a future Msg type were named
+    -- like a primitive. Combined with `isFnItem` (a bare ctor / top-level fn ref,
+    -- never an already-Arc `VarLocal`), this can't over-wrap.
     isEventCallbackRegion = case Map.lookup region (ecRegionTypes ctx) of
-        Just (Can.TLambda arg _) -> isEventArgType arg
-        _                        -> False
+        Just (Can.TLambda arg res) ->
+            isEventArgType arg && (targetIsArcFn || not (isPrimitiveResultType res))
+        _ -> False
     -- A bare fn ITEM (an enum ctor used as `String -> msg`, or a top-level fn
     -- ref) coerces into `Arc::new`; a `VarLocal` already holds the Arc value.
     isFnItem = case e of
         Can.VarCtor{}     -> True
         Can.VarTopLevel{} -> True
         _                 -> False
+
+-- | A concrete scalar/leaf type a non-event `(String|Bool) -> _` handler can
+-- return (`scorer : String -> Int`). When the result of a concrete-arg function
+-- is one of these, the field is NOT a Std.Ui/Std.Html event-callback slot
+-- (which always returns the polymorphic msg ADT → `Arc<dyn Fn>`); it renders a
+-- bare `fn`, so the value must NOT be Arc-wrapped (B#1). Conservatively scoped:
+-- only the primitive leaves, so an app `Msg` ADT result still counts as an event
+-- callback and gets the Arc wrap (skyshop `onChange : String -> StateMsg`).
+isPrimitiveResultType :: Can.Type -> Bool
+isPrimitiveResultType (Can.TType _ n []) =
+    n `elem` ["Int", "Float", "Bool", "String", "Char"]
+isPrimitiveResultType (Can.TType _ "Unit" []) = True
+isPrimitiveResultType _ = False
 
 -- | The Rust element type of a list expression, from its solved region type
 -- (`List a` -> typeToRustString a). Used to type a list-HOF closure's param
@@ -2027,8 +2067,16 @@ emitDefaultCall ctx fn calleeName args =
         isBareFnItemArg (Ann.At _ (Can.VarCtor{}))     = True
         isBareFnItemArg (Ann.At _ (Can.VarTopLevel{})) = True
         isBareFnItemArg _                              = False
+        -- B#2: a CAPTURING lambda passed DIRECTLY to an event helper
+        -- (`Ev.onInput (\s -> Typed (model.prefix ++ s))`) targets an
+        -- `Arc<dyn Fn(String) -> Msg + Send + Sync>` param. `argToRustString`
+        -- already renders it as a `move |..| {..}` capture-cloning closure, but
+        -- it is NEVER Arc-wrapped → `E0308 expected Arc<..>, found closure`. Wrap
+        -- the rendered closure in `Arc::new` (same target as a bare fn item).
+        isEventCbLambdaArg (Ann.At _ (Can.Lambda{})) = True
+        isEventCbLambdaArg _                         = False
         emitArg i a
-            | isEventCbParam i, isBareFnItemArg a
+            | isEventCbParam i, isBareFnItemArg a || isEventCbLambdaArg a
                               = "std::sync::Arc::new(" ++ argToRustString ctx noCloneFn a ++ ")"
             | i `elem` ctorBoxedPositions
                               = "Box::new(" ++ argToRustString ctx noCloneFn a ++ ")"
