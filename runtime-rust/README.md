@@ -21,13 +21,13 @@ strategies**.
 
 ---
 
-## Project status — single source of truth
+## Project status
 
 The authoritative status of every Rust-backend surface. Detailed sections below
 expand each area; this table is the canonical overview and must not contradict
 them.
 
-- **Status:** ✅ done & verified · 🟡 intentional divergence (by design) · ⛔ blocked (can't fix in-boundary) · 🔜 future (actionable epic, deferred) · 🚫 out of scope (intentional non-goal — will not be done)
+- **Status:** ✅ done & verified · 🟡 intentional divergence (by design) · ⛔ blocked (can't fix in-boundary) · 💤 deferred (actionable epic; not committed — may not ship) · 🚫 out of scope (intentional non-goal — will not be done)
 - **Go parity:** ✅ matches · ➕ exceeds Go's guarantee · ⚠️ partial · ❌ diverges
 
 ### Codegen & language
@@ -45,7 +45,7 @@ them.
 
 | Status | Feature | Description | Go parity | Future work |
 |---|---|---|---|---|
-| ✅ | Leaf/data-crate auto-FFI + Alt-1 monomorphisation | rustdoc-JSON inspector → typed bindings; generic bounds → Sky types | ✅ | -- |
+| ✅ | Leaf/data-crate auto-FFI + generic-bound monomorphisation | rustdoc-JSON inspector → typed bindings; generic bounds → Sky types | ✅ | -- |
 | ✅ | FFI `Option<T>` param coercion | `SkyMaybe<T>` → `Option<&str>` / `<u16>` / `<&T>` | ✅ | -- |
 | ✅ | FFI crate-name collisions (absolute `::<crate>` paths) | csv/time/log/json/config/email/html crate deps unblocked | ✅ | -- |
 | ✅ | FFI builtin-name collision (`bytes::Bytes`) | crate-prefix → Sky `BytesBytes` resolves to the crate type | ✅ | -- |
@@ -66,7 +66,8 @@ them.
 | ✅ | Crypto / Jwt / Encoding / Bytes kernels | incl. `Bytes` `toHex`/`toString`/`fromHex`/`toBase64`/`fromBase64`/`length` routing (removed a `panic!` polyfill) | ✅ | -- |
 | ✅ | Std.Db (sqlx — sqlite / postgres / mysql) | CRUD, migrations, typed `SqlValue` params, decoders; `withTransaction` (same tx-handle gap as Go), `insertRow` via `RETURNING` | ✅ | -- |
 | ✅ | Std.Auth / Email / Config / Csv / Compression / Cache | bcrypt+JWT, providers, TOML/YAML/JSON, RFC 4180, gzip/zstd, LRU+TTL | ✅ | -- |
-| 🔜 | `Process.run` / `Io` beyond `Log` | subprocess + raw stdin/stdout kernels | ⚠️ not yet example-verified on Rust | Future: bounded + additive, no architectural blocker |
+| ✅ | `Io` (`readLine` / `writeStdout` / `writeStderr`) | Task-tier stdin/stdout/stderr kernels (`io.rs`), routed via the default kernel snake-caser | ✅ | -- |
+| 💤 | `Process.run` (subprocess) | no Rust runtime impl yet; calling it fails the `cargo build` (kernel routes to an undefined fn) — never a runtime panic | ❌ — unshipped | Deferred: small (`std::process::Command`) + additive; no architectural blocker |
 | 🟡 | `Task.retryWith` | runs the task once | ⚠️ — Go re-calls a thunk; Rust `SkyTask` is a one-shot `Future`. Run-once is observably correct for Ok-first / last-Err / `RetryWhen`-False | Blocked (by design): a faithful retry needs a thunk-shaped `retryWith` in the shared stdlib (forbidden); workaround: recurse on the `Result` in Sky |
 | ⛔ | `errorToString` String path | retains `Debug` (the only total universal stringifier) | ❌ — Go returns a `string` verbatim (`hi`); Rust `Debug` quotes it (`"hi"`) | Blocked: the `Display` re-bind fails on the generic `Sky.Test.debugShow : a -> String` caller (E0277) — same `SkyShow`-bound epic + no oracle for assertion messages |
 | ⛔ | `Bytes` non-ASCII text | Latin-1 byte convention (one char per byte) | ⚠️ — ASCII / hex / binary byte-identical to Go; non-ASCII *text* diverges from Go-computed encoded strings | Blocked: needs a nominal `Bytes` type in the **shared** stdlib (forbidden to edit) |
@@ -85,7 +86,7 @@ them.
 | ✅ | Sky.Http.Server.WebSocket (+ `Sky.Core.WebSocket` client) | bidirectional sockets on `nhooyr.io/websocket`; broadcast / per-client send | ✅ | -- |
 | ✅ | Sky.Live session stores — memory / sqlite / redis / postgres | `SessionStore` trait; cookie reuse + restart survival | ✅ | -- |
 | ✅ | Sky.Live session store — firestore | parity-by-absence | ✅ — Go's runtime has no firestore arm either (unknown kind → memory); Rust matches | -- |
-| 🔜 | WASM target (`wasm32-unknown-unknown`) | — | N/A | Future: a tokio/threads-free runtime rewrite (epic) |
+| 💤 | WASM target (`wasm32-unknown-unknown`) | — | N/A | Deferred: a tokio/threads-free runtime rewrite (epic) |
 
 ### Observability
 
@@ -94,14 +95,6 @@ them.
 | ✅ | Sky Console (separate process) + `/_sky/metrics`/`healthz`/`buildinfo` | observability endpoints; embedded console mini-app | ✅ | -- |
 | ✅ | PubSub `Broker<T>` (zero payload erasure) | per-type, `TypeId`-keyed; payload travels as its real type | ➕ — avoids Go's reflection + `any` | -- |
 | ✅ | Telemetry spill (SQLite) | one schema end-to-end; WAL reader | ✅ | -- |
-
-### Soundness & principles
-
-| Status | Feature | Description | Go parity | Future work |
-|---|---|---|---|---|
-| ✅ | No `Box<dyn Any>` in generated code | dynamism monomorphised away (per-type brokers, typed `LiveReq`) | ➕ — Go uses `reflect` | -- |
-| ✅ | No runtime panic from well-typed Sky | statically total; fallible cases are `Result`/`Task` | ➕ — Go recovers a handler panic → 500; Rust designs the panic out | -- |
-| ✅ | `unsafe` blocks | exactly one (`PR_SET_PDEATHSIG` `pre_exec`, `cfg(linux)`, documented) | ➕ | -- |
 
 ---
 
@@ -168,7 +161,7 @@ them.
 | **FFI inspector** | `sky-ffi-inspect-rs` — scans a crate's public API via `cargo +nightly rustdoc --output-format json` |
 | **FFI registry** | cached inspection results at `.skycache/ffi/rust/` |
 | **nameability filter** | drops un-bindable items (generics, borrows, non-byte slices, `unsafe fn`, std/private types) so `_bindings.rs` always compiles |
-| **Alt-1** | the widening that monomorphises generic fns whose bound maps to a Sky type (`AsRef<[u8]>` → `List Int`, `Display` → `String`) |
+| **generic-bound monomorphisation** | the widening that monomorphises generic fns whose bound maps to a Sky type (`AsRef<[u8]>` → `List Int`, `Display` → `String`) |
 | **opaque type** | an FFI type emitted by its fully-qualified path (`chrono::NaiveDate`), passed through without inspection |
 
 **Build artifacts + conventions**
@@ -588,7 +581,7 @@ pulls neither. A non-live `Std.Db` app keeps its single driver.
 
 | Example | Surface | What it shows |
 |---|---|---|
-| 01–16 | leaf FFI crates | rand, num_cpus, chrono, uuid, roman, lipsum, deunicode, semver, bytesize, titlecase, fastrand, ulid, petname, crc32fast, uuid-bytes, hex — free fns, static/instance methods, Display/FromStr, Option/Result, byte ⇄ `List Int`, generic-bound monomorphisation (Alt-1) |
+| 01–16 | leaf FFI crates | rand, num_cpus, chrono, uuid, roman, lipsum, deunicode, semver, bytesize, titlecase, fastrand, ulid, petname, crc32fast, uuid-bytes, hex — free fns, static/instance methods, Display/FromStr, Option/Result, byte ⇄ `List Int`, generic-bound monomorphisation |
 | 17-db-todo-cli | `Std.Db` | full CRUD via sqlx; sqlite + mysql + postgres |
 | 18-auth-signup | `Std.Auth` | bcrypt + jsonwebtoken + sqlx; backend-portable schema |
 | 19-config | `Std.Config` | TOML/YAML/JSON record decode + `loadFromFile` |
@@ -914,9 +907,9 @@ axum/hyper internally, exposing a Sky-idiomatic surface). "Verbatim FFI to any
 framework" is a deliberate non-goal. Measure constructable surface per crate with
 the `/ffi-audit` skill (`~/.claude/skills/ffi-audit/ffi_audit.py`).
 
-Shipped widenings: **Alt-1** monomorphises generic fns whose bound maps to a Sky
+Shipped widenings: **generic-bound monomorphisation** monomorphises generic fns whose bound maps to a Sky
 type (`AsRef<[u8]>`/`Into<Vec<u8>>` → `List Int`; `AsRef<str>`/`Display` →
-`String`); **Alt-1 v2** resolves recursive `AsRef`/`Into`/`IntoIterator` inner
+`String`); its **recursive extension** resolves recursive `AsRef`/`Into`/`IntoIterator` inner
 types + lifts the non-byte slice/array drop when the element is Sky-coercible
 (soundness-gated: primitive-numeric `Into`/`From` resolve at identity only);
 **builder setters** — `&mut self -> &mut Self` and in-place `&mut self -> ()`
@@ -1041,5 +1034,5 @@ Leave `~/.cargo/registry` and `~/.cargo/git` alone (global, slow to rebuild).
 | `rustdoc` needs nightly | Inspector runs `cargo +nightly rustdoc` | `rustup install nightly` |
 | Un-nameable bindings dropped | Generics, borrowed-view returns, lifetime-bound handles, std types, unsafe fns skipped (builder setters / `Option<T>` params / glob re-exports are recovered) | Use a wrapper crate with owned/primitive signatures |
 
-Open work is tracked in the **Project status — single source of truth** table at
+Open work is tracked in the **Project status** table at
 the top of this file.
