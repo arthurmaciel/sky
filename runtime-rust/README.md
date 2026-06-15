@@ -63,7 +63,10 @@ them.
 | Status | Feature | Description | Go parity | Future work |
 |---|---|---|---|---|
 | ✅ | Sky.Core kernels (String/List/Dict/Set/Maybe/Result/Math/Char/Regex/Time/…) | pure + fallible-pure surface | ✅ | -- |
-| ✅ | Crypto<br>Jwt<br>Encoding<br>Bytes kernels | incl. `Bytes` `toHex`/`toString`/`fromHex`/`toBase64`/`fromBase64`/`length` routing (removed a `panic!` polyfill) | ✅ | -- |
+| ✅ | Crypto | `sha256`/`sha512`/`sha1`/`md5`, `hmacSha256`/`hmacSha512`, AEAD (`aesGcm`, `chacha20`), `randomBytes`/`randomToken` | ✅ | -- |
+| ✅ | Jwt | `encode`/`decode` — HS256 + RS256 (signature + `exp`/`nbf` checked) | ✅ | -- |
+| ✅ | Encoding | `base64`/`url`/`hex` encode + decode | ✅ | -- |
+| ✅ | Bytes | `toHex`/`toString`/`fromHex`/`toBase64`/`fromBase64`/`length` — routed (removed a `panic!` polyfill) | ✅ | -- |
 | ✅ | Std.Db (sqlx — sqlite<br>postgres<br>mysql) | CRUD, migrations, typed `SqlValue` params, decoders; `withTransaction` (same tx-handle gap as Go), `insertRow` via `RETURNING` | ✅ | -- |
 | ✅ | Std.Auth<br>Email<br>Config<br>Csv<br>Compression<br>Cache | bcrypt+JWT, providers, TOML/YAML/JSON, RFC 4180, gzip/zstd, LRU+TTL | ✅ | -- |
 | ✅ | `Io` (`readLine`<br>`writeStdout`<br>`writeStderr`) | Task-tier stdin/stdout/stderr kernels (`io.rs`), routed via the default kernel snake-caser | ✅ | -- |
@@ -85,7 +88,6 @@ them.
 | ✅ | Sky.Http.Server.Stream | server-side streaming responses (SSE<br>chunked<br>LLM-token relay) | ✅ | -- |
 | ✅ | Sky.Http.Server.WebSocket (+ `Sky.Core.WebSocket` client) | bidirectional sockets on `nhooyr.io/websocket`; broadcast / per-client send | ✅ | -- |
 | ✅ | Sky.Live session stores — memory / sqlite / redis / postgres | `SessionStore` trait; cookie reuse + restart survival | ✅ | -- |
-| ✅ | Sky.Live session store — firestore | parity-by-absence | ✅ — Go's runtime has no firestore arm either (unknown kind → memory); Rust matches | -- |
 | 💤 | WASM target (`wasm32-unknown-unknown`) | — | N/A | Deferred: a tokio/threads-free runtime rewrite (epic) |
 
 ### Observability
