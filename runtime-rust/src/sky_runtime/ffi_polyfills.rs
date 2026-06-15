@@ -34,12 +34,19 @@ pub fn ffi_call_pure_polyfill<T, A>(name: String, _args: Vec<A>) -> T {
     );
 }
 
-/// Same shape as ffi_call_pure_polyfill but for the Task-returning variant.
-/// `Ffi.callTask` Rust-target support is deferred
-/// (needs Task-emitting kernels).
-// IRREDUCIBLE: unconstrained generic `T` return (no total value); a
-// not-yet-supported-feature guard (Ffi.callTask on target=rust, deferred).
-// SKY-RUST-AUDIT:ACCEPTED (Arthur Maciel, 2026-06-13) — Ffi.callTask on target=rust deferred (sub-project D); unconstrained generic T return has no total value [ledger #3]
+/// Same dynamic-dispatch no-reflection guard as `ffi_call_pure_polyfill`, for
+/// the Task-returning variant. Reached only when `Ffi.callTask` is invoked with
+/// a non-literal kernel name or non-literal args list (i.e. dynamic dispatch).
+/// Serving it faithfully would require Go's `%v`-string registry — the
+/// reflection/`any` surface this backend exists to refuse. The static-dispatch
+/// shape is the peephole; no well-typed Sky program reaches this fallback
+/// (effectful kernels reach Rust via `Ffi.kernel` direct dispatch, never via
+/// `Ffi.callTask`).
+// IRREDUCIBLE: returns an unconstrained generic `T`, so no total value can be
+// synthesised. Statically dead for valid Sky (the peephole resolves the
+// static-dispatch shape); this is the dynamic-dispatch-unsupported fallback —
+// the same boundary as ffi_call_pure_polyfill.
+// SKY-RUST-AUDIT:ACCEPTED (Arthur Maciel, 2026-06-13) — statically dead for valid Sky (peephole resolves it); unconstrained generic T return has no total value [ledger #3]
 #[allow(clippy::panic)]
 pub fn ffi_call_task_polyfill<T, A>(name: String, _args: Vec<A>) -> T {
     panic!(

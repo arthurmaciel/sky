@@ -91,6 +91,30 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Encoding", "hexEncode")  -> "encoding_hex_encode"
     ("Encoding", "hexDecode")           -> "encoding_hex_decode"
     ("Sky.Core.Encoding", "hexDecode")  -> "encoding_hex_decode"
+    -- Bytes (Sky.Core.Bytes — `type alias Bytes = String`, Latin-1 byte
+    -- convention shared with encoding.rs). The five Ffi.kernel aliases
+    -- (toHex/toString/fromHex/toBase64/fromBase64) had no routing entry, so
+    -- the Stage-4 alias `toHex = Ffi.kernel "Bytes_toHex"` fell through to the
+    -- snake-cased default `bytes_to_hex` (undefined → E0425) and the def-side
+    -- emitted a `panic!` polyfill. `length` overrides the pure-Sky
+    -- `string_length` delegation: a Latin-1 Bytes value's byte count is its
+    -- char count (`s.chars().count()`), not its UTF-8 storage length
+    -- (`s.len()`), which double-counts high bytes. The fromHex/fromBase64/
+    -- toString decoders return SkyMaybe (monomorphic — no error generic), so
+    -- no turbofish error-pin is needed (unlike encoding_hex_decode, which
+    -- returns SkyResult<_, E>).
+    ("Bytes", "toHex")                  -> "bytes_to_hex"
+    ("Sky.Core.Bytes", "toHex")         -> "bytes_to_hex"
+    ("Bytes", "toString")               -> "bytes_to_string"
+    ("Sky.Core.Bytes", "toString")      -> "bytes_to_string"
+    ("Bytes", "fromHex")                -> "bytes_from_hex"
+    ("Sky.Core.Bytes", "fromHex")       -> "bytes_from_hex"
+    ("Bytes", "toBase64")               -> "bytes_to_base64"
+    ("Sky.Core.Bytes", "toBase64")      -> "bytes_to_base64"
+    ("Bytes", "fromBase64")             -> "bytes_from_base64"
+    ("Sky.Core.Bytes", "fromBase64")    -> "bytes_from_base64"
+    ("Bytes", "length")                 -> "bytes_length"
+    ("Sky.Core.Bytes", "length")        -> "bytes_length"
     -- Regex (sub-A.2)
     ("Regex", "match")              -> "regex_match"
     ("Sky.Core.Regex", "match")     -> "regex_match"

@@ -1,0 +1,95 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Bytes as Bytes
+import Std.Log exposing (println)
+
+
+-- An ASCII payload: every result below is byte-identical to the Go backend.
+ascii : Bytes.Bytes
+ascii =
+    Bytes.fromString "Hi!"
+
+
+-- A binary payload: two high bytes (0x9e 0xfe), built via fromHex so it never
+-- has to be a Sky string literal. Lossless round-trip through hex/base64.
+binary : Bytes.Bytes
+binary =
+    case Bytes.fromHex "9efe" of
+        Just b ->
+            b
+
+        Nothing ->
+            Bytes.empty
+
+
+toStringOr : String -> Bytes.Bytes -> String
+toStringOr fallback b =
+    case Bytes.toString b of
+        Just s ->
+            s
+
+        Nothing ->
+            fallback
+
+
+fromHexOrEmpty : String -> Bytes.Bytes
+fromHexOrEmpty s =
+    case Bytes.fromHex s of
+        Just b ->
+            b
+
+        Nothing ->
+            Bytes.empty
+
+
+fromBase64OrEmpty : String -> Bytes.Bytes
+fromBase64OrEmpty s =
+    case Bytes.fromBase64 s of
+        Just b ->
+            b
+
+        Nothing ->
+            Bytes.empty
+
+
+main =
+    let
+        -- ASCII surface
+        _ =
+            println ("ascii.toHex=" ++ Bytes.toHex ascii)
+
+        _ =
+            println ("ascii.toBase64=" ++ Bytes.toBase64 ascii)
+
+        _ =
+            println ("ascii.length=" ++ String.fromInt (Bytes.length ascii))
+
+        _ =
+            println ("ascii.toString=" ++ toStringOr "<invalid>" ascii)
+
+        _ =
+            println ("ascii.fromHex.toHex=" ++ Bytes.toHex (fromHexOrEmpty "486921"))
+
+        _ =
+            println ("ascii.fromBase64.toString=" ++ toStringOr "<invalid>" (fromBase64OrEmpty "SGkh"))
+
+        -- Binary surface (0x9e 0xfe)
+        _ =
+            println ("binary.toHex=" ++ Bytes.toHex binary)
+
+        _ =
+            println ("binary.toBase64=" ++ Bytes.toBase64 binary)
+
+        _ =
+            println ("binary.length=" ++ String.fromInt (Bytes.length binary))
+
+        -- Invalid UTF-8 -> Nothing -> fallback string
+        _ =
+            println ("binary.toString=" ++ toStringOr "<invalid>" binary)
+
+        -- Round-trip binary through base64 back to hex (lossless)
+        _ =
+            println ("binary.base64.roundtrip.toHex=" ++ Bytes.toHex (fromBase64OrEmpty (Bytes.toBase64 binary)))
+    in
+    println "done"
