@@ -85,3 +85,12 @@ revisit after P1–P4.
 P1 (broad, mechanical) → P2-A (one-line `::` qualify, big csv unlock) → P4 (Sized
 gate, prevents regressions from P1/P3 widenings) → P3 (regex investigation) →
 P2-B / P5. Each ships with a hermetic-crate end-to-end test + a build-sweep guard.
+
+## Codegen gap found while testing (separate from FFI, track it)
+
+`main = println (if cond then taskA else taskB)` lowers fine, but
+`main = case … of _ -> if cond then println a else println b` (a Task-valued
+`if`/`case` branch at `main`) lowers the `println` branches as `()` and fails
+(`expected (), found Pin<Box<Future>>`). The Go backend auto-forces these. Sky
+authors work around it by computing a `String` then a single `println`. Fix:
+extend the Rust lowerer's tail-position Task auto-force to `if`/`case` branches.
