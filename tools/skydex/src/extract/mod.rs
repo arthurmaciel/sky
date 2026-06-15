@@ -20,7 +20,7 @@ pub fn extract_file(store: &Store, path: &str, lang: Lang, src: &str) -> Result<
         Lang::Sky => {
             let r = sky::scan_sky(src);
             for i in r.imports { store.put_edge(path, &i, "import")?; }
-            for b in r.bindings { store.put_symbol(path, &b, "binding", 0)?; }
+            for b in r.bindings { store.put_symbol(path, &b, "binding", 0, 0)?; }
             // kernels handled by parity.rs over the whole repo
         }
         Lang::Haskell => {
@@ -40,7 +40,7 @@ pub fn extract_file(store: &Store, path: &str, lang: Lang, src: &str) -> Result<
             //   RegisterPure("Decimal_add", func(args []any) any { ... })
             // tree-sitter only sees the anonymous closure, never the name.
             for name in treesitter::go_registered_kernels(src) {
-                store.put_symbol(path, &name, "def", 0)?;
+                store.put_symbol(path, &name, "def", 0, 0)?;
             }
         }
         Lang::Rust | Lang::Ts => treesitter::extract(store, path, lang, src)?,

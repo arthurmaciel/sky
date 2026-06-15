@@ -2,7 +2,15 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-pub struct Kernel { pub name: String, pub rust_fn: String, pub go_impl: bool, pub rust_impl: bool, pub parity: String }
+pub struct Kernel {
+    pub name: String,
+    pub rust_fn: String,
+    pub go_impl: bool,
+    pub rust_impl: bool,
+    pub parity: String,
+    /// "path:line" of the routing row in Kernel.hs (if known).
+    pub hs_route_loc: Option<String>,
+}
 
 /// The Rust Builder Kernel.hs routing shape: `("Mod","fn") -> "rust_fn"`.
 fn re_route_rust() -> &'static Regex {
@@ -38,35 +46,80 @@ fn conventional_rust_fn(kernel: &str) -> String {
     out
 }
 
-/// rust_fn -> "Mod.fn", unioning BOTH Kernel.hs shapes:
-///   - Rust Builder Kernel.hs `("Mod","fn") -> "rust_fn"` (explicit rust_fn).
-///   - Go Kernel.hs `(("Mod","fn"), KernelInfo ...)` — for kernels the Rust file
-///     does NOT name, synthesise the conventional rust_fn so `reconcile` finds it
-///     absent from rust_fns = the go-only gap row.
-///
-/// When both files name the same `Mod.fn`, the Rust explicit rust_fn wins.
-pub fn parse_routes(hs: &str) -> HashMap<String, String> {
-    let mut m: HashMap<String, String> = HashMap::new();
-    // Pass 1: Rust explicit routes (authoritative rust_fn names).
+/// Route info for a single kernel: the rust_fn alias and optional source location.
+#[derive(Debug, Clone)]
+pub struct RouteInfo {
+    pub kernel_name: String,
+    /// `"path:line"` of the routing row in Kernel.hs (empty string = unknown).
+    pub hs_loc: String,
+}
+
+/// rust_fn -> RouteInfo, unioning BOTH Kernel.hs shapes.
+/// `hs_src_pairs` is a slice of `(file_path, source_text)` pairs so we can
+/// track per-file line numbers accurately.
+pub fn parse_routes_with_locs(hs_src_pairs: &[(&str, &str)]) -> HashMap<String, RouteInfo> {
+    let mut m: HashMap<String, RouteInfo> = HashMap::new();
     let mut rust_kernels: HashSet<String> = HashSet::new();
-    for c in re_route_rust().captures_iter(hs) {
-        let kernel = format!("{}.{}", &c[1], &c[2]);
-        rust_kernels.insert(kernel.clone());
-        m.insert(c[3].to_string(), kernel);
+
+    // Pass 1: Rust explicit routes (authoritative rust_fn names).
+    for (file, src) in hs_src_pairs {
+        for (lineno, line) in src.lines().enumerate() {
+            if let Some(c) = re_route_rust().captures(line) {
+                let kernel = format!("{}.{}", &c[1], &c[2]);
+                rust_kernels.insert(kernel.clone());
+                let loc = format!("{}:{}", file, lineno + 1);
+                m.insert(c[3].to_string(), RouteInfo { kernel_name: kernel, hs_loc: loc });
+            }
+        }
     }
     // Pass 2: Go KernelInfo routes — only the ones the Rust file didn't name.
-    for c in re_route_go().captures_iter(hs) {
-        let kernel = format!("{}.{}", &c[1], &c[2]);
-        if rust_kernels.contains(&kernel) {
-            continue;
+    for (file, src) in hs_src_pairs {
+        for (lineno, line) in src.lines().enumerate() {
+            if let Some(c) = re_route_go().captures(line) {
+                let kernel = format!("{}.{}", &c[1], &c[2]);
+                if rust_kernels.contains(&kernel) {
+                    continue;
+                }
+                let loc = format!("{}:{}", file, lineno + 1);
+                m.entry(conventional_rust_fn(&kernel)).or_insert(RouteInfo { kernel_name: kernel, hs_loc: loc });
+            }
         }
-        m.entry(conventional_rust_fn(&kernel)).or_insert(kernel);
     }
     m
 }
 
+/// Backward-compat wrapper used by tests that pass a single concatenated string
+/// with no file-path info. Produces the same map shape as v1 (HashMap<String,String>)
+/// for the existing test helpers; the new call sites use `parse_routes_with_locs`.
+pub fn parse_routes(hs: &str) -> HashMap<String, String> {
+    let pairs = vec![("Kernel.hs", hs)];
+    parse_routes_with_locs(&pairs)
+        .into_iter()
+        .map(|(rust_fn, ri)| (rust_fn, ri.kernel_name))
+        .collect()
+}
+
 /// Go impl name convention: `Mod_fn` (PascalCase module). Derive from "Mod.fn".
 fn go_name(kernel: &str) -> String { kernel.replace('.', "_") }
+
+pub fn reconcile_with_locs(
+    routes: &HashMap<String, RouteInfo>,
+    go_fns: &HashSet<String>,
+    rust_fns: &HashSet<String>,
+) -> Vec<Kernel> {
+    routes.iter().map(|(rust_fn, ri)| {
+        let go = go_fns.contains(&go_name(&ri.kernel_name));
+        let rust = rust_fns.contains(rust_fn);
+        let parity = match (go, rust) {
+            (true, true)  => "ok",
+            (true, false) => "go-only",
+            (false, true) => "rust-only",
+            (false, false)=> "orphan-route",
+        }.to_string();
+        let hs_route_loc = if ri.hs_loc.is_empty() { None } else { Some(ri.hs_loc.clone()) };
+        Kernel { name: ri.kernel_name.clone(), rust_fn: rust_fn.clone(), go_impl: go, rust_impl: rust, parity, hs_route_loc }
+    }).collect()
+}
 
 pub fn reconcile(routes: &HashMap<String,String>, go_fns: &HashSet<String>, rust_fns: &HashSet<String>) -> Vec<Kernel> {
     routes.iter().map(|(rust_fn, kernel)| {
@@ -74,11 +127,11 @@ pub fn reconcile(routes: &HashMap<String,String>, go_fns: &HashSet<String>, rust
         let rust = rust_fns.contains(rust_fn);
         let parity = match (go, rust) {
             (true, true)  => "ok",
-            (true, false) => "go-only",   // the gap class that bit us (e.g. Dict.union)
+            (true, false) => "go-only",
             (false, true) => "rust-only",
             (false, false)=> "orphan-route",
         }.to_string();
-        Kernel { name: kernel.clone(), rust_fn: rust_fn.clone(), go_impl: go, rust_impl: rust, parity }
+        Kernel { name: kernel.clone(), rust_fn: rust_fn.clone(), go_impl: go, rust_impl: rust, parity, hs_route_loc: None }
     }).collect()
 }
 
@@ -133,5 +186,18 @@ mod tests {
         assert_eq!(dict.parity, "go-only"); // routed, Go impl present, Rust impl missing
         let head = kernels.iter().find(|k| k.name=="List.head").unwrap();
         assert_eq!(head.parity, "ok");
+    }
+
+    #[test]
+    fn parse_routes_with_locs_captures_line_numbers() {
+        let hs = r#"  ("List", "head") -> "list_head"
+  ("Dict", "union") -> "dict_union""#;
+        let pairs = vec![("src/Sky/Generate/Rust/Kernel.hs", hs)];
+        let routes = parse_routes_with_locs(&pairs);
+        let ri = routes.get("list_head").unwrap();
+        assert_eq!(ri.kernel_name, "List.head");
+        assert!(ri.hs_loc.contains("Kernel.hs:1"), "expected line 1, got: {}", ri.hs_loc);
+        let ri2 = routes.get("dict_union").unwrap();
+        assert!(ri2.hs_loc.contains("Kernel.hs:2"), "expected line 2, got: {}", ri2.hs_loc);
     }
 }
