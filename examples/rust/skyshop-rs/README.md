@@ -148,6 +148,18 @@ curl -s http://127.0.0.1:8000/ | grep -F "Aurora Desk Lamp"      # → the seede
 (The public catalogue path is silent on success by design; `[PRODUCTS] loaded N`
 is the admin-only `Db.queryDocs` path.)
 
+### One-command check
+
+`./verify.sh` runs the whole flow above — preflight → emulator → seed →
+stripe-mock → build → run → `GET /` → assert all 5 products render with zero
+`[DB ERROR]` → tear everything down. Exits **0 on PASS**, **1 on FAIL**, **2 on
+a missing prerequisite**:
+
+```bash
+cd examples/rust/skyshop-rs && ./verify.sh
+# → RESULT: PASS — 5/5 products via the firestore emulator, 0 DB errors
+```
+
 ### Troubleshooting
 
 | Symptom | Cause → fix |
