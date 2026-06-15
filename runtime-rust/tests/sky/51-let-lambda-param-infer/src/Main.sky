@@ -1,0 +1,69 @@
+module Main exposing (main)
+
+-- Regression (E0282): a `let`-bound multi-param lambda whose params are provably
+-- `String` from the solved HM types — but which the Rust backend's body-driven
+-- kernel-flow / record heuristics don't cover (the params flow only into
+-- `String.trim` / `++`, neither of which was in the narrow kernelArgRustType
+-- allowlist). The closure is STORED then CALLED later inside a Task chain
+-- (`buildOut`/`runOut` arrive from `Task.andThen`/`Task.map`), so Rust has no
+-- call-site to infer the param types from at the closure DEFINITION → it emitted
+-- `move |buildOutput, runOutput| { … }` with no annotations → E0282
+-- "type annotations needed".
+--
+-- The fix reads the solver's per-region types (globalRegionTypes) at the param's
+-- USE sites and annotates `move |buildOutput: String, runOutput: String|`.
+-- Mirrors the playground's Runner.formatOutput shape.
+--
+-- Pre-fix: `cargo build` FAILS (E0282). Post-fix: builds + runs, prints OK.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.String as String
+import Sky.Core.Task as Task
+import Std.Log exposing (println)
+
+
+formatOutput : String -> String -> String
+formatOutput buildOutput runOutput =
+    let
+        buildSection =
+            "BUILD:"
+                ++ (if String.isEmpty (String.trim buildOutput) then
+                       "<empty>"
+
+                   else
+                       buildOutput)
+        runSection =
+            "RUN:"
+                ++ (if String.isEmpty (String.trim runOutput) then
+                       "<empty>"
+
+                   else
+                       runOutput)
+    in
+        buildSection ++ "|" ++ runSection
+
+
+-- Mirror the playground: the let-bound `combine` closure is the same shape as
+-- `formatOutput` but bound INSIDE a function body and called through a Task
+-- chain, so the inferring call-site is genuinely absent at the definition.
+runChain : Task Error String
+runChain =
+    let
+        combine buildOutput runOutput = formatOutput buildOutput runOutput
+    in
+        Task.succeed "  build log  "
+            |> Task.andThen
+                   (\buildOut ->
+                       Task.map
+                           (\runOut -> combine buildOut runOut)
+                           (Task.succeed "run log"))
+
+
+main : Task Error ()
+main =
+    runChain
+        |> Task.andThen
+               (\out ->
+                   let
+                       _ = println out
+                   in
+                       Task.succeed ())

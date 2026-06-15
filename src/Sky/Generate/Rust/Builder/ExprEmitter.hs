@@ -190,9 +190,14 @@ collectVarLocalsMulti = go Set.empty
             let bound' = foldl (\s p -> foldr Set.insert s (patBindingVars p)) bound params
             in go bound' body
         Can.Let def body ->
-            Map.unionWith (+) (go bound (canDefBody def)) (go bound body)
+            -- A let-bound fn's params are bound in its own body, so a param use
+            -- isn't an outer-var use (matches collectVarLocals / the free walker).
+            let boundDef = foldr Set.insert bound (defParamVars def)
+            in Map.unionWith (+) (go boundDef (canDefBody def)) (go bound body)
         Can.LetRec defs body ->
-            let goDefs = foldl (\a d -> Map.unionWith (+) a (go bound (canDefBody d))) Map.empty defs
+            let goDefs = foldl (\a d ->
+                            let boundD = foldr Set.insert bound (defParamVars d)
+                            in Map.unionWith (+) a (go boundD (canDefBody d))) Map.empty defs
             in Map.unionWith (+) (go bound body) goDefs
         Can.LetDestruct pat expr body ->
             Map.unionWith (+) (go bound expr) (go bound body)
@@ -255,12 +260,16 @@ collectFreeVarLocalsMulti = go Set.empty
         Can.Let def body ->
             -- Def bodies are counted in `bound` (the def's own name not yet in
             -- scope — matches the original non-recursive treatment); the let
-            -- body sees the bound name(s).
+            -- body sees the bound name(s). A let-bound fn's PARAMS are bound in
+            -- its own body (so `let f a = …a…` doesn't count `a` as free).
             let bound' = foldr Set.insert bound (defLocalNames def)
-            in Map.unionsWith (+) (go bound' body : map (go bound) (defLocalBodies def))
+                boundDef = foldr Set.insert bound (defParamVars def)
+            in Map.unionsWith (+) (go bound' body : map (go boundDef) (defLocalBodies def))
         Can.LetRec defs body ->
             let bound' = foldl (\s d -> foldr Set.insert s (defLocalNames d)) bound defs
-                goDefs = foldl (\a d -> Map.unionsWith (+) (a : map (go bound') (defLocalBodies d))) Map.empty defs
+                goDefs = foldl (\a d ->
+                            let boundD = foldr Set.insert bound' (defParamVars d)
+                            in Map.unionsWith (+) (a : map (go boundD) (defLocalBodies d))) Map.empty defs
             in Map.unionWith (+) (go bound' body) goDefs
         Can.LetDestruct pat e0 body ->
             let bound' = foldr Set.insert bound (patBindingVars pat)
@@ -299,11 +308,17 @@ collectVarLocals = go Set.empty
         -- crashed non-exhaustively on the others (26-ui-showcase).
         Can.Let def body ->
             let bound' = foldr Set.insert bound (defLocalNames def)
+                -- The Def's body sees its OWN params bound (a let-bound fn
+                -- `let f a b = … a …` — a/b aren't captures of the enclosing
+                -- closure). Mirror this in LetRec / the *Multi walkers below.
+                boundDef = foldr Set.insert bound' (defParamVars def)
             in Set.union (go bound' body)
-                         (foldl (\a d -> Set.union a (go bound' d)) Set.empty (defLocalBodies def))
+                         (foldl (\a d -> Set.union a (go boundDef d)) Set.empty (defLocalBodies def))
         Can.LetRec defs body ->
             let bound' = foldl (\s d -> foldr Set.insert s (defLocalNames d)) bound defs
-                goDefs = foldl (\a d -> foldl (\a2 e -> Set.union a2 (go bound' e)) a (defLocalBodies d)) Set.empty defs
+                goDefs = foldl (\a d ->
+                            let boundD = foldr Set.insert bound' (defParamVars d)
+                            in foldl (\a2 e -> Set.union a2 (go boundD e)) a (defLocalBodies d)) Set.empty defs
             in Set.union (go bound' body) goDefs
         Can.LetDestruct pat expr body ->
             let bound' = foldr Set.insert bound (patBindingVars pat)
@@ -343,6 +358,18 @@ defLocalBodies :: Can.Def -> [Can.Expr]
 defLocalBodies (Can.Def _ _ b)          = [b]
 defLocalBodies (Can.TypedDef _ _ _ b _) = [b]
 defLocalBodies (Can.DestructDef _ b)    = [b]
+
+-- | The PARAMETER names a `let`-bound function Def binds in its OWN body
+-- (`let formatOutput buildOutput runOutput = … buildOutput …`). The
+-- free-variable / capture walkers must add these to `bound` before descending
+-- into the Def body — otherwise the params read as free vars of the enclosing
+-- closure and get hoisted into its `.clone()` capture-prelude, producing
+-- `let buildOutput = buildOutput.clone();` at a scope where the name doesn't
+-- exist (E0425). Mirrors `defLocalNames` (which only binds the Def's own name).
+defParamVars :: Can.Def -> [String]
+defParamVars (Can.Def _ ps _)          = concatMap patBindingVars ps
+defParamVars (Can.TypedDef _ _ tps _ _) = concatMap (patBindingVars . fst) tps
+defParamVars (Can.DestructDef _ _)     = []
 
 -- | Helper: render a single function-call argument string, handling
 -- lambda capture cloning and VarLocal ownership.
@@ -387,6 +414,15 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
                 | i == (0 :: Int), Just s <- ecForcedClosureParam ctx = patternToRustParam p ++ ": " ++ s
                 | not (null annot) = patternToRustParam p ++ annot
                 | Just s <- inferRecordClosureParam ctx pn body = patternToRustParam p ++ ": " ++ s
+                -- Last resort: the solver's per-region types at the param's use
+                -- sites (globalRegionTypes). A `\buildOut -> combine buildOut …`
+                -- closure passed to `task_and_then`/`task_map` has its param
+                -- pinned to a concrete Sky type (here `String`) the solver
+                -- already recorded, but no kernel-flow / forced-element / pipe
+                -- annotation covers it → E0282. Concrete-only (no type vars), so
+                -- a still-generic element stays bare for Rust to infer from the
+                -- sibling collection arg (List.map/filter unchanged).
+                | Just s <- inferParamRustTypeFromRegions ctx pn body = patternToRustParam p ++ ": " ++ s
             annotPsIx _ p = patternToRustParam p ++ annot
             psStr = intercalate ", " (zipWith annotPsIx [0..] ps)
             retAnnot = case ecPipeInnerType ctx of
@@ -2342,8 +2378,78 @@ annotClosureParam ctx body p@(Ann.At _ (Can.PVar pn)) =
         Just t  -> patternToRustParam p ++ ": " ++ t
         Nothing -> case inferRecordClosureParam ctx pn body of
             Just s  -> patternToRustParam p ++ ": " ++ s
-            Nothing -> patternToRustParam p
+            -- Last resort: the solver's per-region types. A let-bound closure
+            -- whose param is a plain scalar (`formatOutput buildOutput runOutput
+            -- = … String.trim buildOutput …`) gives Rust no way to infer the
+            -- param when the closure is stored then called later (E0282), and the
+            -- kernel-flow / record heuristics above only cover params that reach
+            -- a known kernel arg or a record field. The HM solver already pinned
+            -- every USE-site expression region to a concrete type; reading the
+            -- param's own use-site regions (NOT its pattern region — the solver
+            -- keys on expression, not pattern, regions) recovers `String`/`i64`/…
+            -- Narrow by construction: only fires when the type is fully concrete
+            -- (no type vars) so we never pin a generic/`impl Fn` param.
+            Nothing -> case inferParamRustTypeFromRegions ctx pn body of
+                Just t  -> patternToRustParam p ++ ": " ++ t
+                Nothing -> patternToRustParam p
 annotClosureParam _ _ p = patternToRustParam p
+
+-- | Recover a closure param's Rust type from the solver's per-region type map by
+-- reading the type pinned at the param's USE sites in the body. The solver
+-- (globalRegionTypes) records types keyed by EXPRESSION region, so the param's
+-- own binding-pattern region has no entry — but every `VarLocal pname` use is an
+-- expression with a region the solver pinned. The first use whose type is fully
+-- concrete (`hasTypeVars` False) yields the annotation. Concrete-only is the
+-- soundness gate: a still-generic param (a bare type var, or an `impl Fn` HOF
+-- callback) carries type vars at its use sites and is correctly left un-annotated
+-- so Rust infers it. This is the general form of the `vecElem` region trick that
+-- already resolves heterogeneous db-param list elements.
+inferParamRustTypeFromRegions :: EmitCtx -> String -> Can.Expr -> Maybe String
+inferParamRustTypeFromRegions ctx pname = firstJust . go
+  where
+    firstJust = foldr (\x acc -> case x of Just _ -> x; Nothing -> acc) Nothing
+    useType region = case Map.lookup region (ecRegionTypes ctx) of
+      Just t | not (hasTypeVars t) -> Just (typeToRustString (ecRecordMap ctx) t)
+      _                            -> Nothing
+    -- Stop descending into any sub-scope that REBINDS `pname` — a shadowed use
+    -- belongs to the inner binding, not this param, so its region type would
+    -- mis-annotate ours. (In well-typed Sky a clash would still pin a concrete
+    -- type rustc validates, but skipping it keeps the inference honest.)
+    shadows names = pname `elem` names
+    go (Ann.At region e) =
+      (case e of
+         Can.VarLocal v | v == pname -> [useType region]
+         _                           -> [])
+      ++ children e
+    children e = case e of
+      Can.Call fn args        -> concatMap go (fn : args)
+      Can.Lambda ps b
+        | shadows (concatMap patBindingVars ps) -> []
+        | otherwise                             -> go b
+      Can.Let d b ->
+        let dBodies = if shadows (defParamVars d) then [] else concatMap go (defLocalBodies d)
+            bRest   = if shadows (defLocalNames d) then [] else go b
+        in dBodies ++ bRest
+      Can.LetRec ds b ->
+        let names   = concatMap defLocalNames ds
+            dBodies = [ x | d <- ds, not (shadows (defParamVars d))
+                          , body <- defLocalBodies d, x <- go body ]
+            bRest   = if shadows names then [] else go b
+        in dBodies ++ bRest
+      Can.LetDestruct pat x b
+        | shadows (patBindingVars pat) -> go x
+        | otherwise                    -> go x ++ go b
+      Can.Case s bs           -> go s ++ concat [ go b | Can.CaseBranch p b <- bs
+                                                       , not (shadows (patBindingVars p)) ]
+      Can.If brs el           -> concat [ go c ++ go t | (c, t) <- brs ] ++ go el
+      Can.Binop _ _ _ _ a b   -> go a ++ go b
+      Can.Access r _          -> go r
+      Can.Update _ r ups      -> go r ++ concat [ go x | (_, Can.FieldUpdate _ x) <- Map.toList ups ]
+      Can.Record fs           -> concat [ go x | (_, x) <- Map.toList fs ]
+      Can.List xs             -> concatMap go xs
+      Can.Tuple a b rest      -> concatMap go (a : b : rest)
+      Can.Negate x            -> go x
+      _                       -> []
 
 binopToRust :: String -> String
 binopToRust op = case op of
