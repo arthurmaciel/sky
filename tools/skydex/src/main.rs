@@ -68,6 +68,20 @@ enum Cmd {
         #[arg(long, default_value = ".skydex/index.db")]
         db: String,
     },
+    /// Find all occurrences of a symbol name across the index.
+    Locate {
+        name: String,
+        #[arg(long, default_value = ".skydex/index.db")]
+        db: String,
+    },
+    /// Reverse dependencies: files/modules that import a given module or path.
+    Rdeps {
+        module: String,
+        #[arg(long, default_value = ".skydex/index.db")]
+        db: String,
+        #[arg(long)]
+        count: bool,
+    },
 }
 
 fn read_capped(repo: &str, rel: &str) -> Option<String> {
@@ -94,7 +108,8 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
     // Bounded: one file's contents at a time; the parity inputs are small name sets.
     let mut go_fns: HashSet<String> = HashSet::new();
     let mut rust_fns: HashSet<String> = HashSet::new();
-    let mut hs_kernel_src = String::new();
+    // Vec of (relative_path, source) for all Kernel.hs files found.
+    let mut kernel_hs_sources: Vec<(String, String)> = Vec::new();
     for f in &files {
         let Some(src) = read_capped(repo, &f.path) else {
             continue;
@@ -104,8 +119,7 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
         pipeline::record_stage(&store, &f.path)?;
         // Parity inputs.
         if f.path.ends_with("Kernel.hs") {
-            hs_kernel_src.push_str(&src);
-            hs_kernel_src.push('\n');
+            kernel_hs_sources.push((f.path.clone(), src.clone()));
         }
         if f.lang == model::Lang::Go {
             for c in extract::treesitter_defs(&src, model::Lang::Go) {
@@ -129,17 +143,38 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
         // `src` and any per-file tree are dropped here before the next file.
     }
     // Parity reconcile over the whole repo's kernel tables + Go/Rust symbol sets.
-    let routes = parity::parse_routes(&hs_kernel_src);
-    for k in parity::reconcile(&routes, &go_fns, &rust_fns) {
+    let pairs: Vec<(&str, &str)> = kernel_hs_sources.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+    let routes = parity::parse_routes_with_locs(&pairs);
+    for k in parity::reconcile_with_locs(&routes, &go_fns, &rust_fns) {
+        // Look up go_impl_loc and rust_impl_loc from the symbols table.
+        let go_impl_loc = lookup_sym_loc(&store, &k.name.replace('.', "_"))?;
+        let rust_impl_loc = lookup_sym_loc(&store, &k.rust_fn)?;
         store.conn.execute(
-            "INSERT OR REPLACE INTO kernels VALUES (?,?,?,?,?,?)",
-            rusqlite::params![k.name, 1, k.rust_fn, k.go_impl as i64, k.rust_impl as i64, k.parity],
+            "INSERT OR REPLACE INTO kernels VALUES (?,?,?,?,?,?,?,?,?)",
+            rusqlite::params![
+                k.name, 1, k.rust_fn,
+                k.hs_route_loc.as_deref(),
+                k.go_impl as i64, k.rust_impl as i64,
+                go_impl_loc, rust_impl_loc,
+                k.parity
+            ],
         )?;
     }
+    // Resolution pass: populate edges.resolved for import edges.
+    query::resolve_edges(&store, repo)?;
     store.set_meta("last_sha", &walk::head_sha(repo)?)?;
     store.commit()?;
     eprintln!("skydex: indexed {} files", files.len());
     Ok(())
+}
+
+/// Look up `"file:line"` for the first `def` symbol matching `name`.
+fn lookup_sym_loc(store: &store::Store, name: &str) -> Result<Option<String>> {
+    let hits = store.symbols_named(name)?;
+    Ok(hits.into_iter()
+        .filter(|(_, line, _)| *line > 0)
+        .map(|(file, line, _)| format!("{file}:{line}"))
+        .next())
 }
 
 /// Cold-fallback entry for `update` when there is no prior index.
@@ -158,5 +193,7 @@ fn main() -> Result<()> {
         Cmd::Pipeline { db } => query::cmd_pipeline(&db),
         Cmd::Covers { kernel, db } => query::cmd_covers(&db, &kernel),
         Cmd::Wakeup { db } => query::cmd_wakeup(&db),
+        Cmd::Locate { name, db } => query::cmd_locate(&db, &name),
+        Cmd::Rdeps { module, db, count } => query::cmd_rdeps(&db, &module, count),
     }
 }
