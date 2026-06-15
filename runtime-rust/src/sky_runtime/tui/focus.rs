@@ -414,7 +414,7 @@ mod tests {
         enum M {
             Got(String),
         }
-        let events = vec![Event::OnString("input".into(), M::Got)];
+        let events = vec![Event::OnString("input".into(), std::sync::Arc::new(M::Got))];
         assert_eq!(extract_input_msg(&events, "input", "hi"), Some(M::Got("hi".into())));
     }
 

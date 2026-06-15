@@ -8,6 +8,7 @@ module Sky.Generate.Rust.Builder.TypeRenderer
   , collectRenderedTVars
   , typeToRustString
   , flattenArrowType
+  , isEventArgType
   ) where
 
 import Data.List (intercalate, nub, isPrefixOf)
@@ -24,6 +25,16 @@ import Sky.Generate.Rust.Builder.Types (runtimeOpaqueTypes)
 flattenArrowType :: Can.Type -> ([Can.Type], Can.Type)
 flattenArrowType (Can.TLambda a b) = let (ps, r) = flattenArrowType b in (a : ps, r)
 flattenArrowType ty = ([], ty)
+
+-- | Is this the ARG type of a Std.Ui/Std.Html event callback — concrete
+-- `String` or `Bool` (the wire payload of `OnString`/`OnBool`)? Used to gate
+-- the `Arc<dyn Fn>` rendering of a `(String -> msg)` / `(Bool -> msg)` handler
+-- so a capturing closure can flow through the event chain. Kept tight (only
+-- these two leaf types) so it can't catch unrelated arrow types.
+isEventArgType :: Can.Type -> Bool
+isEventArgType (Can.TType _ "String" []) = True
+isEventArgType (Can.TType _ "Bool"   []) = True
+isEventArgType _                         = False
 
 
 -- | Walk TLambda chain to extract the innermost (return) type
@@ -230,6 +241,26 @@ typeToRustString recordMap t = case t of
     -- VALUES (`\a b ->` -> |a, b|) and multi-arg CALLS (`f a b` -> f(a, b)).
     -- Rendering it curried (fn(A) -> fn(B) -> C) was latent-broken: any
     -- multi-arg function-typed param/field mismatched its uncurried value.
+    --
+    -- A `(String -> msg)` / `(Bool -> msg)` callback — single concrete-arg
+    -- function returning the polymorphic message var — is exactly the
+    -- Std.Ui/Std.Html EVENT handler shape (`onInput`/`onChange`/`onCheck` →
+    -- `Event::OnString`/`OnBool`). It MUST render `Arc<dyn Fn>`, not a bare `fn`
+    -- pointer, so a CAPTURING closure (`onChange = \s -> toMsg (parse s
+    -- default)` in a faithful Sky.Live app — exactly as Go allows) can be
+    -- stored and passed through the whole chain (anon-cfg field →
+    -- `std_ui_on_input(cb)` → `Event::OnString`). The construction sites Arc-wrap
+    -- (`wrapStoredFn` for record fields/lambdas; the `Event::On*` ctor arms).
+    -- This scope is deliberately narrow: arg is concrete `String`/`Bool`, result
+    -- is a TVar — so it never matches `ShouldRetry e = RetryWhen (e -> Bool)`
+    -- (result is concrete `Bool`) nor a HOF param `f : a -> b` (both TVars),
+    -- both of which broke under a blanket `Arc<dyn Fn>` switch (derive Debug /
+    -- PartialEq on the ADT, bare-fn-item HOF args).
+    Can.TLambda arg (Can.TVar _)
+        | isEventArgType arg ->
+            "std::sync::Arc<dyn Fn(" ++ typeToRustString recordMap arg
+                ++ ") -> " ++ typeToRustString recordMap (case t of Can.TLambda _ r -> r; _ -> t)
+                ++ " + Send + Sync>"
     Can.TLambda _ _ ->
         let (ps, ret) = flattenArrowType t
         in "fn(" ++ intercalate ", " (map (typeToRustString recordMap) ps) ++ ") -> " ++ typeToRustString recordMap ret

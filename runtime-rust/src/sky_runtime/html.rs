@@ -29,16 +29,21 @@ pub enum Attribute<M> {
 
 /// Variant names mirror the Sky stdlib `Std.Html.Attributes.Event` ADT
 /// (`OnMsg | OnString | OnBool | OnRaw String any`). `OnString`/`OnBool` carry
-/// fn pointers (the codegen renders the Sky `(String -> msg)` handler as
-/// `fn(String) -> msg`). `OnRaw` is the heterogeneous-payload escape hatch
-/// (`on` / `onSubmit`); its payload is type-erased — not dispatchable,
-/// but kept so the bridge compiles. The `submit` wire path resolves via
-/// `OnForm` instead (constructed server-side, never from Sky stdlib).
+/// `Arc<dyn Fn(..) -> msg>` (not bare fn pointers) so the handler can be a
+/// CAPTURING closure — exactly as the Go backend allows. A faithful Sky.Live
+/// app's `onChange = \s -> toMsg (parse s default)` captures locals; a bare
+/// fn-pointer field rejected that. Bare ctors / non-capturing fns coerce into
+/// `Arc::new` fine; capturing closures box into the trait object. This follows
+/// the `OnForm` precedent (already `Arc<dyn Fn>`). `OnRaw` is the
+/// heterogeneous-payload escape hatch (`on` / `onSubmit`); its payload is
+/// type-erased — not dispatchable, but kept so the bridge compiles. The
+/// `submit` wire path resolves via `OnForm` instead (constructed server-side,
+/// never from Sky stdlib).
 #[derive(Clone)]
 pub enum Event<M> {
     OnMsg(String, M),
-    OnString(String, fn(String) -> M),
-    OnBool(String, fn(bool) -> M),
+    OnString(String, std::sync::Arc<dyn Fn(String) -> M + Send + Sync>),
+    OnBool(String, std::sync::Arc<dyn Fn(bool) -> M + Send + Sync>),
     OnRaw(String, std::sync::Arc<dyn std::any::Any + Send + Sync>),
     /// Server-constructed form handler (not produced by the Sky stdlib bridge).
     /// Returns `Option<M>`: a malformed/incomplete form (decode failure) yields

@@ -65,6 +65,7 @@ import Sky.Generate.Rust.Builder.TypeRenderer
     , extractParamTypes
     , extractReturnType
     , hasTypeVars
+    , isEventArgType
     )
 import Sky.Generate.Rust.Builder.Kernel
     ( kernelToRust
@@ -1105,6 +1106,25 @@ exprToRustInner ctx e = case e of
     Can.Call ctorFn@(Ann.At _ (Can.VarCtor _ _ "Event" "OnRaw" _)) [nameArg, handlerArg] ->
         exprToRustString ctx ctorFn ++ "(" ++ exprToRustString ctx nameArg
             ++ ", std::sync::Arc::new(" ++ exprToRustString ctx handlerArg ++ "))"
+    -- `Event::OnString`/`OnBool` carry `Arc<dyn Fn(..) -> M + Send + Sync>` (the
+    -- handler may be a CAPTURING closure — `onChange = \s -> toMsg (parse s)` in
+    -- a faithful Sky.Live app, exactly as Go allows). Both a capturing lambda AND
+    -- a bare ctor/fn ref (`onChange = UpdateRemarks`) must Arc-wrap to match the
+    -- field: a lambda boxes into the trait object; a bare fn coerces into
+    -- `Arc::new`. `wrapStoredFn True` handles both (it Arc-wraps a lambda with
+    -- pre-cloned captures, and Arc-wraps a fn-region non-lambda). Non-fn handler
+    -- shapes (a partially-applied `Msg`-returning expr that is itself the fn) also
+    -- flow through wrapStoredFn's fallback unchanged when the region isn't a fn.
+    Can.Call ctorFn@(Ann.At _ (Can.VarCtor _ _ "Event" ev _)) [nameArg, handlerArg]
+        | ev == "OnString" || ev == "OnBool" ->
+            -- `wrapStoredFn False`: Arc-wrap only a CAPTURING lambda (its own arm)
+            -- or a bare fn ITEM (the `isEventCallbackRegion && isFnItem` arm) — NOT
+            -- a `VarLocal` that already holds the Arc-typed callback (the stdlib
+            -- chain's `OnString "input" handler`, where `handler : Arc<dyn Fn>`).
+            -- `True` here would also Arc-wrap that VarLocal (the `wrapNonLambda &&
+            -- isFnRegion` path) → `Arc<Arc<dyn Fn>>`.
+            exprToRustString ctx ctorFn ++ "(" ++ exprToRustString ctx nameArg
+                ++ ", " ++ wrapStoredFn False ctx handlerArg (exprToRustString ctx handlerArg) ++ ")"
     -- P2-T4: `Ev.onSubmit handler` call-site peephole. `Std.Html.Events.onSubmit`
     -- is a .sky stdlib fn `onSubmit handler = EventAttr (OnRaw "submit" handler)`
     -- whose body type-erases the handler to `any` — so the concrete form-record
@@ -1687,12 +1707,40 @@ wrapStoredFn wrapNonLambda ctx (Ann.At region e) rendered = case e of
                 (\v -> "let " ++ rustSafeIdent v ++ " = " ++ rustSafeIdent v ++ ".clone(); ") caps
             arc = "std::sync::Arc::new(move " ++ rendered ++ ")"
         in if null caps then arc else "{ " ++ preClones ++ arc ++ " }"
+    -- An EVENT-callback field (`onChange : String -> msg` / `onCheck : Bool ->
+    -- msg`) is ALWAYS `Arc<dyn Fn>` (typeToRustString renders the arrow that way
+    -- — same shape in a named-alias struct and an Anon struct's pinned generic),
+    -- so a bare ctor / fn ITEM (`onChange = UpdateEditTitle`) must Arc-wrap even
+    -- in an Anon struct where `wrapNonLambda = False`. A capturing lambda is
+    -- already wrapped by the Lambda arm above. CRUCIALLY a `VarLocal` whose value
+    -- is ALREADY the Arc-typed callback (the stdlib chain's `handler` param in
+    -- `OnString "input" handler`) must NOT be re-wrapped — that would nest
+    -- `Arc<Arc<dyn Fn>>`. So gate on the expr being a fn ITEM (ctor / top-level
+    -- ref), which is what coerces from `fn` into `Arc::new`.
+    _ | isEventCallbackRegion, isFnItem -> "std::sync::Arc::new(" ++ rendered ++ ")"
     _ | wrapNonLambda, isFnRegion -> "std::sync::Arc::new(" ++ rendered ++ ")"
     _ -> rendered
   where
     isFnRegion = case Map.lookup region (ecRegionTypes ctx) of
         Just (Can.TLambda _ _) -> True
         _                      -> False
+    -- The VALUE region is MONOMORPHIC here (`UpdateEditTitle : String ->
+    -- StateMsg`), so unlike the FIELD type (`String -> msg`, TVar result) we
+    -- match on the ARG being concrete `String`/`Bool` regardless of result —
+    -- that's the event-handler signature the Arc-typed field expects. Combined
+    -- with `isFnItem` (only a bare ctor / top-level fn ref, never an already-Arc
+    -- `VarLocal`), this can't over-wrap: a value is only reached here as a
+    -- record/update field, and a String/Bool-arg fn item assigned to such a
+    -- field targets an Arc<dyn Fn> slot.
+    isEventCallbackRegion = case Map.lookup region (ecRegionTypes ctx) of
+        Just (Can.TLambda arg _) -> isEventArgType arg
+        _                        -> False
+    -- A bare fn ITEM (an enum ctor used as `String -> msg`, or a top-level fn
+    -- ref) coerces into `Arc::new`; a `VarLocal` already holds the Arc value.
+    isFnItem = case e of
+        Can.VarCtor{}     -> True
+        Can.VarTopLevel{} -> True
+        _                 -> False
 
 -- | The Rust element type of a list expression, from its solved region type
 -- (`List a` -> typeToRustString a). Used to type a list-HOF closure's param
@@ -1952,7 +2000,36 @@ emitDefaultCall ctx fn calleeName args =
                     in [ i | (i, t) <- zip [0 :: Int ..] fieldTys
                            , typeToRustString (ecRecordMap ctx) t == typeRust ]
             _ -> []
+        -- A param typed `Arc<dyn Fn(String) -> ..>` / `Arc<dyn Fn(Bool) -> ..>`
+        -- is an event-callback slot (the `String -> msg` / `Bool -> msg` handler
+        -- shape — see typeToRustString). A bare fn ITEM passed there (`f
+        -- MainMsg::Edit`, a ctor used as the handler) must Arc-wrap — a fn item
+        -- coerces into `Arc::new` but not implicitly into `Arc<dyn Fn>`. A
+        -- lambda / an already-Arc local arg is handled by the normal path.
+        isEventCbParam i = paramTypeIsEventCb i || (i == 0 && calleeIsEventHelper)
+        paramTypeIsEventCb i = case paramStrs of
+            Just (_, ps) -> case drop i ps of
+                (p:_) -> "std::sync::Arc<dyn Fn(String)" `isPrefixOf` p
+                         || "std::sync::Arc<dyn Fn(Bool)" `isPrefixOf` p
+                _     -> False
+            Nothing -> False
+        -- The Std.Ui / Std.Html event-helper functions take a single
+        -- `(String -> msg)` / `(Bool -> msg)` callback (now an `Arc<dyn Fn>`
+        -- param) and build `Event::OnString`/`OnBool`. Their solved sig isn't
+        -- always in `ecSolvedTypes` at the call site (stdlib fns), so name-match
+        -- the lowered callee directly as a backstop to the param-type check.
+        calleeIsEventHelper = takeWhile (/= ':') calleeName `elem`
+            [ "std_ui_on_input", "std_ui_on_change", "std_ui_on_check"
+            , "std_html_events_on_input", "std_html_events_on_change"
+            , "std_html_events_on_check", "std_html_events_on_key_down"
+            , "std_html_events_on_key_up", "std_html_events_on_key_press"
+            , "std_html_events_on_file", "std_html_events_on_image" ]
+        isBareFnItemArg (Ann.At _ (Can.VarCtor{}))     = True
+        isBareFnItemArg (Ann.At _ (Can.VarTopLevel{})) = True
+        isBareFnItemArg _                              = False
         emitArg i a
+            | isEventCbParam i, isBareFnItemArg a
+                              = "std::sync::Arc::new(" ++ argToRustString ctx noCloneFn a ++ ")"
             | i `elem` ctorBoxedPositions
                               = "Box::new(" ++ argToRustString ctx noCloneFn a ++ ")"
             -- foldl/foldr INIT (arg 1) is the accumulator `b`, whose type is the
