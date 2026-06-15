@@ -1,0 +1,28 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+import Rust.Url as Url
+
+
+-- P1 regression: an Option<&str> crate param (set_fragment takes Option<&str>)
+-- reaches the wrapper as SkyMaybe<String>; the FFI Option-coercion bridges it.
+result : String
+result =
+    case Url.parse_from_url "http://example.com/" of
+        Err _ -> "FAIL: parse"
+        Ok u0 ->
+            case Url.set_fragment_from_url u0 (Just "section") of
+                Err _ -> "FAIL: set_fragment"
+                Ok u1 ->
+                    case Url.as_str_from_url u1 of
+                        Err _ -> "FAIL: as_str"
+                        Ok s ->
+                            if s == "http://example.com/#section" then
+                                "ok: url Option<&str> setter (P1)"
+                            else
+                                "FAIL: got " ++ s
+
+
+main =
+    println result

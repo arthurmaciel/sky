@@ -1,0 +1,33 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+import Rust.Csv as Csv
+
+
+-- P2-A regression: the `csv` crate name collides with the unsuffixed `csv`
+-- runtime kernel module; absolute ::csv paths fix it. Also exercises the
+-- in-place `&mut self -> ()` setter `push_field` (owned-threaded).
+fieldCount : Int
+fieldCount =
+    case Csv.new_from_byteRecord () of
+        Err _ -> 0 - 1
+        Ok r0 ->
+            case Csv.push_field_from_byteRecord r0 [ 97, 98 ] of
+                Err _ -> 0 - 2
+                Ok r1 ->
+                    case Csv.push_field_from_byteRecord r1 [ 99, 100 ] of
+                        Err _ -> 0 - 3
+                        Ok r2 ->
+                            case Csv.len_from_byteRecord r2 of
+                                Err _ -> 0 - 4
+                                Ok n -> n
+
+
+main =
+    println
+        (if fieldCount == 2 then
+            "ok: csv crate builder/in-place setter (P2-A)"
+         else
+            "FAIL: count " ++ String.fromInt fieldCount
+        )
