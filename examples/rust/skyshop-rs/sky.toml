@@ -1,0 +1,21 @@
+name = "skyshop-rs"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+[source]
+root = "src"
+
+[live]
+port = 8000
+store = "memory"
+
+# Three STUB wrapper crates delivered as RustGitDeps pointing at the local
+# `file://` git repo (D4). `sky build --target rust` resolves them via Cargo's
+# git checkout, runs the FFI inspector, and binds each fn as a synchronous Sky
+# `Result` (D1). Stage 2-4 swap the stub bodies for real backends — no sky.toml
+# change. branch = master (LITERAL absolute path — no env expansion).
+["rust.dependencies"]
+sky-firestore-shim = { git = "file:///home/arthur/.cache/sky/skyshop-rs-wrappers", branch = "master" }
+sky-stripe-shim = { git = "file:///home/arthur/.cache/sky/skyshop-rs-wrappers", branch = "master" }
+sky-firebase-auth-shim = { git = "file:///home/arthur/.cache/sky/skyshop-rs-wrappers", branch = "master" }

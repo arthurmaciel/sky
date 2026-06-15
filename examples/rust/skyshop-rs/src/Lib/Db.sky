@@ -1,0 +1,237 @@
+module Lib.Db exposing
+    ( getDoc
+    , setDoc
+    , queryDocs
+    , queryWhere
+    , queryWhereOrder
+    , deleteDoc
+    , getField
+    , getInt
+    , getBool
+    , intVal
+    , boolVal
+    , floatVal
+    , initDb
+    , queryWhereOrLog
+    , queryWhereOrderOrLog
+    , queryDocsOrLog
+    , encodeFields
+    )
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Maybe as Maybe
+import Sky.Core.Dict as Dict
+import Sky.Core.List as List
+import Sky.Core.Result as Result
+import Sky.Core.String as String
+import Sky.Core.Json.Encode as JsonEnc
+import Std.Log exposing (println)
+import Sky.Core.Error as Error exposing (Error(..), ErrorKind(..))
+import Rust.Sky_firestore_shim as Firestore
+
+
+-- ══════════════════════════════════════════════════════
+-- FIELD ACCESSORS (unchanged from the original)
+-- ══════════════════════════════════════════════════════
+getField field row =
+    Maybe.withDefault "" (Dict.get field row)
+
+
+getInt field row =
+    let
+        val = getField field row
+    in
+        if val == "" then
+            0
+
+        else
+            val |> String.toInt |> Maybe.withDefault 0
+
+
+getBool field row =
+    let
+        val = getField field row
+    in
+        val == "1" || val == "true"
+
+
+-- Value wrappers for storing native types in a flat row Dict (String values).
+intVal : Int -> String
+intVal n =
+    String.fromInt n
+
+
+boolVal : Bool -> String
+boolVal b =
+    if b then
+        "true"
+
+    else
+        "false"
+
+
+floatVal : Float -> String
+floatVal f =
+    String.fromFloat f
+
+
+-- ══════════════════════════════════════════════════════
+-- ERROR BRIDGE
+-- ══════════════════════════════════════════════════════
+-- The Rust FFI Err payload is unusable (error-slot wrinkle), so we never read
+-- it. A failed shim call becomes a generic boundary error here. The Stage 2+
+-- real firestore shim embeds its Display in the Ok payload's `_status` where
+-- needed; for now the call either returns rows (Ok) or this generic Err.
+boundaryError : String -> Error
+boundaryError op =
+    Error.io ("Firestore shim call failed: " ++ op)
+
+
+-- A flat row tagged `_status=not_found` means "no such doc" (D3 convention) —
+-- the shim encodes absence in the Ok payload, not the Err slot.
+isNotFound : Dict String String -> Bool
+isNotFound row =
+    getField "_status" row == "not_found"
+
+
+-- Strip the internal `_status` marker before handing a row to the app.
+stripStatus : Dict String String -> Dict String String
+stripStatus row =
+    Dict.remove "_status" row
+
+
+-- ══════════════════════════════════════════════════════
+-- FIELD ENCODING (Dict String String → flat JSON object string, D3)
+-- ══════════════════════════════════════════════════════
+encodeFields : Dict String String -> String
+encodeFields data =
+    let
+        pairs = Dict.toList data
+        jsonPairs = List.map (\( k, v ) -> ( k, JsonEnc.string v )) pairs
+    in
+        JsonEnc.encode 0 (JsonEnc.object jsonPairs)
+
+
+-- ══════════════════════════════════════════════════════
+-- INIT
+-- ══════════════════════════════════════════════════════
+initDb _ =
+    let
+        _ = println "[DB] Firestore shim ready (stub)"
+    in
+        ()
+
+
+-- ══════════════════════════════════════════════════════
+-- CORE API (thin wrappers over Rust.Sky_firestore_shim)
+-- ══════════════════════════════════════════════════════
+getDoc : String -> String -> Result Error (Maybe (Dict String String))
+getDoc collection docId =
+    case Firestore.fs_get_doc collection docId of
+
+        Ok row ->
+            if isNotFound row then
+                Ok Nothing
+
+            else
+                Ok (Just (stripStatus row))
+
+        Err _ ->
+            Err (boundaryError ("fs_get_doc " ++ collection ++ "/" ++ docId))
+
+
+setDoc : String -> String -> Dict String String -> Result Error ()
+setDoc collection docId data =
+    case Firestore.fs_set_doc collection docId (encodeFields data) of
+
+        Ok _ ->
+            Ok ()
+
+        Err _ ->
+            Err (boundaryError ("fs_set_doc " ++ collection ++ "/" ++ docId))
+
+
+deleteDoc : String -> String -> Result Error ()
+deleteDoc collection docId =
+    case Firestore.fs_delete_doc collection docId of
+
+        Ok _ ->
+            Ok ()
+
+        Err _ ->
+            Err (boundaryError ("fs_delete_doc " ++ collection ++ "/" ++ docId))
+
+
+queryDocs : String -> Result Error (List (Dict String String))
+queryDocs collection =
+    case Firestore.fs_query collection of
+
+        Ok rows ->
+            Ok (List.map stripStatus rows)
+
+        Err _ ->
+            Err (boundaryError ("fs_query " ++ collection))
+
+
+queryWhere : String -> String -> String -> String -> Result Error (List (Dict String String))
+queryWhere collection field op value =
+    case Firestore.fs_query_where collection field op value of
+
+        Ok rows ->
+            Ok (List.map stripStatus rows)
+
+        Err _ ->
+            Err (boundaryError ("fs_query_where " ++ collection))
+
+
+queryWhereOrder : String -> String -> String -> String -> String -> String -> Result Error (List (Dict String String))
+queryWhereOrder collection field op value orderField dir =
+    case Firestore.fs_query_where_order collection field op value orderField dir of
+
+        Ok rows ->
+            Ok (List.map stripStatus rows)
+
+        Err _ ->
+            Err (boundaryError ("fs_query_where_order " ++ collection))
+
+
+-- ══════════════════════════════════════════════════════
+-- LOGGING HELPERS (Result → list, logging Err instead of swallowing)
+-- ══════════════════════════════════════════════════════
+queryWhereOrLog label collection field op value =
+    case queryWhere collection field op value of
+
+        Ok rows ->
+            rows
+
+        Err e ->
+            let
+                _ = println ("[DB ERROR] " ++ label ++ ": " ++ Error.toString e)
+            in
+                []
+
+
+queryWhereOrderOrLog label collection field op value orderField dir =
+    case queryWhereOrder collection field op value orderField dir of
+
+        Ok rows ->
+            rows
+
+        Err e ->
+            let
+                _ = println ("[DB ERROR] " ++ label ++ ": " ++ Error.toString e)
+            in
+                []
+
+
+queryDocsOrLog label collection =
+    case queryDocs collection of
+
+        Ok rows ->
+            rows
+
+        Err e ->
+            let
+                _ = println ("[DB ERROR] " ++ label ++ ": " ++ Error.toString e)
+            in
+                []

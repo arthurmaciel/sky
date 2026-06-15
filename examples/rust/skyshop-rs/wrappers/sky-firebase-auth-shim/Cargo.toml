@@ -1,0 +1,14 @@
+[package]
+name = "sky-firebase-auth-shim"
+version = "0.1.0"
+edition = "2021"
+
+# Stage-1 STUB: canned token verification, ZERO heavy deps (no
+# rs-firebase-admin-sdk). Stage 4 swaps for the real SDK D2-bridge.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lib]
+name = "sky_firebase_auth_shim"
+path = "src/lib.rs"
