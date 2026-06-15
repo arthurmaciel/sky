@@ -3,12 +3,26 @@ name = "sky-firestore-shim"
 version = "0.1.0"
 edition = "2021"
 
-# Stage-1 STUB: full FFI surface, canned data, ZERO heavy deps (no firestore,
-# no tokio) so the whole skyshop-rs app builds fast on `--target rust`. Stage 2
-# swaps the bodies for the real `firestore` 0.49 D2-bridge implementation.
+# Stage-2 REAL: the full FFI surface backed by `firestore` 0.49. Bodies drive
+# async firestore ops to completion on a dedicated current-thread tokio runtime
+# (see src/lib.rs block_on). Public signatures are byte-identical to the Stage-1
+# stub so the Sky side (`Lib/Db.sky`) stays unchanged.
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+firestore = "0.49"
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+# Emulator auth bypass: firestore 0.49 still constructs a token source even when
+# FIRESTORE_EMULATOR_HOST is set (no anonymous path), so we supply a no-op
+# ExternalSource token. Pinned to firestore's own gcloud-sdk (0.30,
+# google-firestore-v1, no default features) so cargo unifies to one build.
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dependencies.gcloud-sdk]
+version = "0.30"
+features = ["google-firestore-v1"]
+default-features = false
 
 [lib]
 name = "sky_firestore_shim"
