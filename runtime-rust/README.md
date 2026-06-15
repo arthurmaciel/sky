@@ -56,6 +56,7 @@ them.
 | ✅ | FFI lifetime-elided copies | `&'a str` / `&'a [u8]` / `&'a OsStr` / `&'a Path` kept as owned | ✅ | -- |
 | 🚫 | FFI non-byte slice element coercion (tail) | borrowed/nested/tuple elements | N/A — measured 1/2552 functions across 50 crates | Out of scope: the clean drop IS the correct boundary, not a gap to close |
 | 🚫 | FFI framework crates (axum/diesel/bevy/tokio) | generic + trait + lifetime-bound core; auto-FFI binds only peripheral surface | ⚠️ partial | Out of scope — only implementable with generated idiomatic glue, or by converting them to Sky-native modules (the Sky.Live model) |
+| ✅ | Real async crates via the wrapper-crate pattern | `examples/rust/skyshop-rs` (port of `13-skyshop`) binds `firestore` 0.49 + `async-stripe` 1.0-rc.6 + `rs-firebase-admin-sdk` 4.3 — async/gRPC/serde crates auto-FFI can't bind directly — through thin fork-local wrappers (local `file://` git dep) exposing `Dict String String` over a dedicated-thread async→sync bridge; all three run-verified (emulators + stripe-mock) | ✅ — faithful port; Go-FFI Go SDKs ↔ Rust-FFI Rust crates, no hand-written bindings. View re-done in Std.Ui; auth UI uses dev tokens (Std.Ui can't inject the Firebase JS) | Finer typed-record FFI shapes over flat string maps; browser-driven cart/checkout e2e |
 | 🚫 | Go-package → Rust FFI | gorilla/mux, stripe-go, … | ❌ — no Rust equivalent (Go-only ecosystem) | Out of scope — Rust FFI targets **Rust crates** (`[rust.dependencies]`, e.g. `sky add url`), not Go packages |
 
 ### Stdlib runtime
