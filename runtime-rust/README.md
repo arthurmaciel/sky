@@ -55,7 +55,7 @@ them.
 | ✅ | FFI owned-threading builder setters | `&mut self → &mut Self`/`()` exposed as `fn(recv, args) → recv` | ✅ | -- |
 | ✅ | FFI lifetime-elided copies | `&'a str` / `&'a [u8]` / `&'a OsStr` / `&'a Path` kept as owned | ✅ | -- |
 | 🚫 | FFI non-byte slice element coercion (tail) | borrowed/nested/tuple elements | N/A — measured 1/2552 functions across 50 crates | Out of scope: the clean drop IS the correct boundary, not a gap to close |
-| 🔜 | FFI framework crates (axum/diesel/bevy/tokio) | generic + trait + lifetime-bound core; auto-FFI binds only peripheral surface | ⚠️ partial | Future: generated idiomatic glue / Sky-native modules (the Sky.Live model) — deliberate |
+| 🚫 | FFI framework crates (axum/diesel/bevy/tokio) | generic + trait + lifetime-bound core; auto-FFI binds only peripheral surface | ⚠️ partial | Out of scope — only implementable with generated idiomatic glue, or by converting them to Sky-native modules (the Sky.Live model) |
 | 🚫 | Go-package → Rust FFI | gorilla/mux, stripe-go, … | ❌ — no Rust equivalent (Go-only ecosystem) | Out of scope — Rust FFI targets **Rust crates** (`[rust.dependencies]`, e.g. `sky add url`), not Go packages |
 
 ### Stdlib runtime
