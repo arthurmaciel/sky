@@ -174,7 +174,20 @@ Merge-commit message should name the upstream version, the two resolutions, the
 `runtime_version` bump (Step 6b), and any Rust-side adaptation — then the
 `Co-Authored-By` trailer.
 
-### Step 9 — Report
+### Step 9 — Refresh the code index (skydex)
+
+After the merge commits, refresh the bounded Sky index so the cross-language
+parity map reflects the new upstream:
+```bash
+( cd tools/skydex && cargo build --release ) && \
+  tools/skydex/target/release/skydex update --repo .
+```
+`skydex update` only re-scans the merge's diff (git-diff incremental) — fast.
+Then `skydex parity --gaps` surfaces any kernel the upstream added on the Go
+side that the Rust backend hasn't implemented yet (the exact follow-up the sync
+should produce).
+
+### Step 10 — Report
 
 ```
 sync-with-upstream complete

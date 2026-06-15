@@ -99,6 +99,12 @@ them.
 | ✅ | PubSub `Broker<T>` (zero payload erasure) | per-type, `TypeId`-keyed; payload travels as its real type | ➕ — avoids Go's reflection + `any` | -- |
 | ✅ | Telemetry spill (SQLite) | one schema end-to-end; WAL reader | ✅ | -- |
 
+### Tooling
+
+| Status | Feature | Description | Go parity | Future work |
+|---|---|---|---|---|
+| ✅ | skydex code index | bounded-memory Sky-tuned indexer — cross-language kernel parity + deps + roles + coverage; ~64 MB peak on the full repo (Gortex OOM'd at 10 GB+); refreshed on sync via git-diff | N/A | -- |
+
 ---
 
 ## Understanding the project
