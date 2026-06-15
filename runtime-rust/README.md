@@ -571,6 +571,21 @@ storePath = "sessions.db"        # file path / postgres:// URL / redis:// URL
 Rust FFI is fully automatic (`rustdoc --output-format json`) — no hand-written
 glue, even for proc-macro/derive crates. There is no `[rust.shims]` section.
 
+**Reaching async / framework crates** (which auto-FFI can't bind directly — see
+the Project-status 🚫 framework-crates row): wrap the crate in a thin fork-local
+crate exposing plain `&str`→`Result`/`Dict`-shaped fns over a dedicated-thread
+async→sync bridge, then reference it as a local **`file://` git** dep — no
+compiler change (`RustGitDep` + the inspector's `--git` already resolve it):
+
+```toml
+["rust.dependencies"]
+my-shim = { git = "file:///abs/path/to/wrapper-repo", branch = "master" }
+```
+
+`examples/rust/skyshop-rs` is the worked example (firestore / async-stripe /
+rs-firebase-admin-sdk). Use the **literal** absolute path (Cargo does not expand
+`$HOME`); the wrapper must be a real git repo at that URL.
+
 The codegen wires Cargo features from `[live] store`: `sqlite`/`postgres` enable
 `db` (sqlx, both drivers — store.rs compiles `SqliteStore` + `PostgresStore`
 together); `redis` enables a `redis_store` feature + the redis crate; `memory`
@@ -618,10 +633,22 @@ pulls neither. A non-live `Std.Db` app keeps its single driver.
 | 47-regex-builder | FFI reach | recovered `RegexBuilder` setters; **both** `Regex` (String) and `BytesRegex` (`List Int`) variants usable |
 | 48-bytes-collision | FFI reach | `bytes::Bytes` builtin-collision fixed (`BytesBytes`); unsized `UninitSlice` methods gated out |
 | 49-bytes-core | `Sky.Core.Bytes` | `toHex`/`toString`/`fromHex`/`toBase64`/`fromBase64`/`length` route to `encoding.rs` (no panic) |
+| 50-event-handler-arc | codegen | capturing `onChange`/`onInput` lambdas Arc-wrap; a non-event `String → Int` field on an anon struct stays a bare `fn` (the two "type-checks ⇒ builds" holes the event-handler `Arc<dyn Fn>` change closed) |
 
 The faithful view-diff and the postgres/redis stores are covered by runtime unit
 tests, not separate examples; generated postgres + redis live apps are
 cargo-build-verified.
+
+### `examples/rust/skyshop-rs` — full Rust-FFI app (fork-local)
+
+A 1:1 port of `examples/13-skyshop` (Stripe + Firebase + Firestore e-commerce)
+binding three real async crates at once — `firestore` 0.49, `async-stripe`
+1.0-rc.6, `rs-firebase-admin-sdk` 4.3 — via thin fork-local **wrapper crates**
+(a local `file://` git dep) over a coarse `Dict String String` FFI surface + a
+dedicated-thread async→sync bridge; full Std.Ui view. `./examples/rust/skyshop-rs/verify.sh`
+is the committed one-command check: emulator → seed → stripe-mock → build → run
+→ `GET /` asserts 5/5 products render with zero `[DB ERROR]` (exit 0 = PASS).
+See the **Project status** FFI-reach row + `examples/rust/skyshop-rs/README.md`.
 
 **Codegen test set** (`runtime-rust/tests/rust-codegen/run.sh`): per-case
 `.sky` builds that must compile + print `ok:` — incl. `task-branch.sky`
@@ -1007,6 +1034,44 @@ sky install                                  # regen FFI after rm -rf .skycache
 
 ---
 
+## Build performance & DX
+
+Sky→Rust compiles the generated project with `cargo`, so the first build of an
+app with heavy deps (tokio / axum / sqlx / a framework FFI crate) is a real Rust
+compile. These strategies cut the *second* build to seconds — all safe, sound,
+and behaviour-preserving (they change the build *mechanism*, never the output):
+
+| Strategy | What it buys | How · reference |
+|---|---|---|
+| **sccache** | a shared compilation cache — each crate object is cached across projects + rebuilds, so the heavy dep tree compiles once machine-wide | `cargo install sccache`, then `export RUSTC_WRAPPER=sccache` · <https://github.com/mozilla/sccache> |
+| **Shared `CARGO_TARGET_DIR`** | one target dir for every example → tokio/serde/sqlx/axum built once and reused, not recompiled per app | `export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target"` · <https://doc.rust-lang.org/cargo/reference/config.html#buildtarget-dir> |
+| **Lean dev profile** | the generated `Cargo.toml [profile.dev]` already sets `debug = 0` + `incremental = true` (via `emitCargoToml`) — no debuginfo bloat, incremental relink | automatic; nothing to set |
+| **Cached FFI bindings** | `.skycache/ffi/rust/*.{skyi,kernel.json,_bindings.rs}` are generated once; only `sky add` / `sky install` (or a wiped `.skycache`) re-runs the nightly-rustdoc inspector | don't `rm -rf .skycache` unless you must re-introspect |
+| **Compiler dev loop** | only codegen (`.hs`) edits need a `cabal build`; edits under `runtime-rust/src/` are **copied into the generated project** at `sky build` time → rebuild only the example | symlink `sky-out/sky` → the `dist-newstyle` binary (`ln -sf "$(cabal list-bin exe:sky)" sky-out/sky`); never `cabal install --install-method=copy` |
+| **`-O0` compiler dev build** | a gitignored `cabal.project.local` (`optimization: 0`) cuts a full compiler rebuild from minutes to a few, a one-module link to ~30 s | dev-only; release builds use `-O1` |
+
+Recommended dev shell — export **once per shell** (env doesn't persist between
+tool calls / sessions):
+
+```bash
+export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin"
+export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target" RUSTC_WRAPPER=sccache
+```
+
+Caveats + patterns:
+
+- The shared `CARGO_TARGET_DIR` holds crate artifacts for reuse, but every
+  example is package `sky-app`, so the **final binary is overwritten** per build
+  — rebuild the specific example right before running it.
+- **Stub-first** (used by `examples/rust/skyshop-rs`): build the whole app
+  against stub wrapper crates (no heavy deps) for an early green, then swap in
+  the real crates one stage at a time — decouples the Sky-side work from heavy
+  crate compiles.
+- `sccache --show-stats` confirms cache hits; the first cold build of a heavy
+  crate is paid once, then warm.
+
+---
+
 ## Disk hygiene
 
 Cargo `target/` dirs accumulate fast — a full example sweep can exceed 20 GB.
@@ -1036,6 +1101,8 @@ Leave `~/.cargo/registry` and `~/.cargo/git` alone (global, slow to rebuild).
 | Bytes non-ASCII *text* base64/hex | Lossless on ASCII / hex / binary (byte-identical to Go); differs from Go only when a `Bytes` value holds literal non-ASCII *text bytes* compared against a Go-/externally-computed encoded string — a shape the byte-buffer contract discourages | Compare decoded values rather than encoded strings |
 | `rustdoc` needs nightly | Inspector runs `cargo +nightly rustdoc` | `rustup install nightly` |
 | Un-nameable bindings dropped | Generics, borrowed-view returns, lifetime-bound handles, std types, unsafe fns skipped (builder setters / `Option<T>` params / glob re-exports are recovered) | Use a wrapper crate with owned/primitive signatures |
+| Unconstrained `Result` Ok-payload → `i64` | A fn returning `Result Error a` with passthrough arms (`Ok v -> Ok v`) and no signature lowers the Ok payload as `i64` → mismatch (Go infers it) | Add an explicit Sky type signature to the binding |
+| `Dict.union` / `List.sortBy` on Rust | `Dict.union` absent from the Rust runtime; `List.sortBy` absent from the shared `Sky.Core.List` (a stdlib gap, out of the Rust boundary) | Avoid `Dict.union` (build the merged map directly); pure-Sky insertion sort for `sortBy`. Filed: `docs/superpowers/specs/2026-06-15-skyshop-rs-codegen-gaps.md` |
 
 Open work is tracked in the **Project status** table at
 the top of this file.
