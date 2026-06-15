@@ -44,6 +44,24 @@ Cutting history is half the job; the other half is making what remains
 - Whenever you're about to write a paragraph that enumerates, compares, maps, or
   sequences, convert it to a table/list/diagram instead. Prose is the fallback.
 
+## Whole-file scope when pruning `runtime-rust/README.md`
+
+When the target is `runtime-rust/README.md`, the sweep is **the entire file,
+every pass** — not a passed-in snippet and not only the sections touched by
+recent work. Archaeology accumulates *precisely* in the sections nobody edited
+this cycle, so "recent work didn't touch it" is the reason to scrub a section,
+not a reason to skip it.
+
+- **Enumerate every section first:** `grep -nE '^## ' runtime-rust/README.md`.
+  Walk the list top to bottom and apply the one-test + structure-over-prose +
+  no-stale-dates/SHAs/metrics discipline to EACH `##` section. No section is
+  exempt.
+- **Recurring high-drift sections — scrub these by name every pass:**
+  `## API surface vs the Go backend`, `## Sky.Live on Rust`, and
+  `## Soundness, correctness and security problems`. These have repeatedly gone
+  stale and been skipped; treat them as mandatory stops, not optional ones.
+- A pass that left any `##` section unreviewed is incomplete.
+
 ## CUT — pure archaeology
 
 - **Chronology**: "previously…", "originally…", "used to…", "as of <date>",
@@ -85,7 +103,11 @@ Cutting history is half the job; the other half is making what remains
 ## Procedure
 
 1. **Scope the sweep.** List the target files (one doc, or a code tree). For
-   code, prefer one language/dir at a time so judgment stays consistent.
+   code, prefer one language/dir at a time so judgment stays consistent. When
+   the target is `runtime-rust/README.md`, the scope is the WHOLE file — run
+   `grep -nE '^## ' runtime-rust/README.md` and review every `##` section top to
+   bottom (see "Whole-file scope" above), with the three high-drift sections as
+   mandatory stops. Never narrow to "the parts recent work touched".
 2. **Read before cutting.** Never blanket-delete by regex — a `2026-` date can
    sit inside a load-bearing sentence. Edit line-by-line / comment-by-comment.
 3. **Rewrite, don't just delete.** Often the fix is to *compress*: a 6-line
