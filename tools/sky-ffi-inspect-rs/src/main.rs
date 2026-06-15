@@ -607,6 +607,58 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // the receiver type.
     functions.retain(|f| f.method_name == "to_string" || fn_types_nameable(f));
 
+    // Sized gate (P4): drop methods whose RECEIVER type is never produced by
+    // value anywhere in the crate — a strong "unsized / un-constructible" signal
+    // (e.g. `bytes::buf::UninitSlice` = a DST newtype over `[MaybeUninit<u8>]`).
+    // The wrapper takes `arg0: RecvType` by value, which can't compile for a
+    // `!Sized` type. A type returned by value (a ctor) or passed by value as a
+    // non-self arg IS ownable → its methods are kept. A type you can't produce
+    // by value has uncallable by-value-receiver methods anyway, so dropping them
+    // loses nothing usable (sound floor).
+    let owned_producible: HashSet<String> = {
+        let mut s = HashSet::new();
+        let owned = |rt: &str| {
+            let t = rt.trim();
+            !t.is_empty() && !t.contains('&') && !t.contains('[')
+        };
+        for f in &functions {
+            // A self-returning setter's result is SYNTHETICALLY the receiver
+            // (own-threaded), not a genuine producer — counting it would let an
+            // unsized type "produce itself" via its own setters and defeat the
+            // gate. Only genuine producers (ctors, `build()`, …) count.
+            if !f.self_returning {
+                for r in &f.results {
+                    if owned(&r.rust_type) {
+                        s.insert(r.rust_type.trim().to_string());
+                    }
+                }
+            }
+            for p in &f.params {
+                if p.name != "self" && owned(&p.rust_type) {
+                    s.insert(p.rust_type.trim().to_string());
+                }
+            }
+        }
+        s
+    };
+    functions.retain(|f| {
+        let recv = f.recv_rust_type.trim();
+        if recv.is_empty() {
+            return true; // free function
+        }
+        // `to_string` Display bridges take `arg0: impl Display`, not a concrete
+        // by-value receiver — exempt (matches the nameability retain above).
+        if f.method_name == "to_string" {
+            return true;
+        }
+        // The Sized concern is ONLY for INSTANCE methods — the wrapper takes the
+        // receiver by value as `arg0`. A static/associated method (`Utc::now`)
+        // uses the receiver merely as a call namespace (no by-value `arg0`), so
+        // it's exempt even when the type is never produced by value.
+        let is_instance = f.params.first().map(|p| p.name == "self").unwrap_or(false);
+        !is_instance || owned_producible.contains(recv)
+    });
+
     if functions.is_empty() && !errors.is_empty() {
         // surface errors visibly
         errors.insert(0, format!("{}: 0 functions extracted", crate_name));
@@ -715,6 +767,15 @@ fn strip_elidable_lifetime(rt: &str) -> String {
     if let Some(rest) = t.strip_prefix("&'") {
         // rest = "<lifetime> <base>"; split the lifetime token off the base.
         if let Some(sp) = rest.find(' ') {
+            let lifetime = &rest[..sp];
+            // `'static` is NOT an elision artifact — it's a real requirement
+            // (e.g. `Bytes::from_static(&'static [u8])` needs compile-time data
+            // a runtime-coerced temporary can't supply). Leave it intact so the
+            // lifetime filter drops the function instead of producing a binding
+            // that fails to compile (E0716).
+            if lifetime == "static" {
+                return rt.to_string();
+            }
             let base = rest[sp + 1..].trim();
             if !base.starts_with("mut ")
                 && matches!(base, "str" | "String" | "OsStr" | "Path" | "[u8]")
@@ -1609,25 +1670,40 @@ fn resolve_path_to_sky(rp: &serde_json::Value, aliases: &HashMap<String, String>
     }
 }
 
+/// CamelCase a single path segment (`bytes` → `Bytes`).
+fn camel_segment(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// A Sky type name that the codegen's `isKnownSky` resolves to a BUILTIN Rust
+/// type (`skyTypeToRust`), so an opaque crate type with this bare name would be
+/// mis-resolved (`bytes::Bytes` → `Vec<u8>`). Matches `isKnownSky`'s atoms.
+fn collides_with_sky_builtin(n: &str) -> bool {
+    matches!(n, "Bytes" | "String" | "Int" | "Float" | "Bool")
+}
+
 /// Derive a Sky type name from a qualified crate path, CamelCase-joining any
 /// submodule segments so same-named types in different submodules get distinct
 /// Sky names: `regex::Regex` → `Regex`, `regex::bytes::Regex` → `BytesRegex`,
-/// `chrono::format::Parsed` → `FormatParsed`. The crate segment is dropped.
+/// `chrono::format::Parsed` → `FormatParsed`. The crate segment is dropped —
+/// EXCEPT when the result would collide with a Sky builtin (`bytes::Bytes` →
+/// `BytesBytes`, not `Bytes`), which the codegen would otherwise resolve to the
+/// builtin Rust type instead of the crate type.
 fn sky_name_from_path(path: &str) -> String {
     let segs: Vec<&str> = path.split("::").filter(|s| !s.is_empty()).collect();
-    match segs.len() {
+    let joined: String = match segs.len() {
         0 => String::new(),
         1 => segs[0].to_string(), // bare name (no crate prefix to drop)
-        _ => segs[1..]
-            .iter()
-            .map(|s| {
-                let mut c = s.chars();
-                match c.next() {
-                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    None => String::new(),
-                }
-            })
-            .collect(),
+        _ => segs[1..].iter().map(|s| camel_segment(s)).collect(),
+    };
+    if collides_with_sky_builtin(&joined) && !segs.is_empty() {
+        format!("{}{}", camel_segment(segs[0]), joined)
+    } else {
+        joined
     }
 }
 

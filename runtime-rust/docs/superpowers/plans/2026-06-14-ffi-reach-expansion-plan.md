@@ -11,7 +11,7 @@ the no-panic / no-`Any` / Go-neutral constraints. Ordered by value × tractabili
 | P1 | `Option<T>` param coercion (`SkyMaybe<T>` → `Option<&str>`/`Option<u16>`/…) | url, many setters/APIs | **high** | medium | ✅ DONE |
 | P2 | Crate-name collision (absolute `::<crate>` paths, no glob) | csv/time/log/json/config/email/html | high | ✅ DONE (A); bytes=future | ✅ |
 | P3 | Glob-re-export qualification (regex `RegexBuilder` via private `builders::string`) | regex (+48 setters) | med-high | medium | ✅ DONE |
-| P4 | Sized gate on by-value receivers | bytes `UninitSlice` | medium | medium | planned |
+| P4 | Sized gate on by-value receivers (owned-producible heuristic) | bytes `UninitSlice` | medium | medium | ✅ DONE |
 | P5 | `&mut [u8]` output-buffer params | hex, tokio I/O | low-med | medium | deferred |
 
 ## P1 — `Option<T>` parameter coercion  ★ do first

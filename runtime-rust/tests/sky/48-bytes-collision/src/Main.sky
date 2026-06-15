@@ -1,0 +1,15 @@
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+import Rust.Bytes as Bytes
+
+-- P2-B: bytes::Bytes (Sky name BytesBytes) now resolves to ::bytes::Bytes
+byteLen : Int
+byteLen =
+    case Bytes.copy_from_slice_from_bytesBytes [ 104, 105, 33 ] of
+        Err _ -> 0 - 1
+        Ok b -> case Bytes.len_from_bytesBytes b of
+            Err _ -> 0 - 2
+            Ok n -> n
+
+main = println (if byteLen == 3 then "ok: bytes::Bytes usable (P2-B)" else "FAIL: " ++ String.fromInt byteLen)

@@ -1,0 +1,8 @@
+[project]
+name = "48-bytes-collision"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+["rust.dependencies"]
+bytes = "1"
