@@ -32,9 +32,7 @@ Tick a box when it reaches parity.
 | [ ] | composite `Basics.toString` | needs design | Scalars match Go (`Display` = `%v`); a record/ADT `toString` is a compile error (no `Display`). Needs type-directed lowering. |
 | [ ] | `Ffi.callTask` (dynamic dispatch) | unsupported | Static-shape calls are peephole-resolved; the dynamic path is a no-reflection guard (Task-emitting FFI kernels). |
 | [ ] | Sky.Live: firestore session store | future | Same `SessionStore` trait as the other stores. |
-| [x] | FFI builder/handle class | **shipped** | Builder setters, `Option<T>` params (P1), crate-name collisions (P2-A), glob-re-export qualification (P3), submodule name disambiguation — all done + fixture-locked. Unlocked `url` / `csv` / `regex`. |
-| [ ] | FFI: unsized receivers (`bytes::buf::UninitSlice`) | P4, low value | A `&mut self` method on a `!Sized` type → by-value `arg0` doesn't compile. Needs a Sized gate (drop such methods). Rare; only affects exotic crates. |
-| [ ] | FFI: `bytes::Bytes` vs Sky builtin `Bytes` | P2-B | A crate type whose bare name equals a Sky builtin (`Bytes` → `Vec<u8>`) mis-resolves. Needs a Sky-side alias for the crate type. |
+| [x] | FFI builder/handle class | **shipped** | Builder setters, `Option<T>` params (P1), crate-name collisions (P2-A), glob-re-export qualification (P3), submodule + builtin name disambiguation (P2-B), Sized gate for unsized receivers (P4) — all done + fixture-locked. Unlocked `url` / `csv` / `regex` / `bytes`. |
 | [~] | Non-byte slice/array FFI — element coercion | sound floor | Measured 1/2552 functions across 50 crates (`--audit`); the clean drop is the correct boundary. Common sequences already coerce via `seqGeneral`. |
 | [ ] | WASM target (`wasm32-unknown-unknown`) | future | |
 | [ ] | Go-package→Rust FFI (gorilla/mux, stripe-go, …) | out of scope | Needs a Go runtime; byte-parity impossible without one. |
@@ -614,6 +612,7 @@ pulls neither. A non-live `Std.Db` app keeps its single driver.
 | 45-url-option-setters | FFI reach (P1) | `Option<&str>` param coercion — `set_fragment (Just "section")` |
 | 46-csv-builder | FFI reach (P2-A) | `csv` crate name-collision fixed + in-place `push_field` setter chain |
 | 47-regex-builder | FFI reach (P3 + collision) | recovered `RegexBuilder` setters; **both** `Regex` (String) and `BytesRegex` (`List Int`) variants usable |
+| 48-bytes-collision | FFI reach (P2-B + P4) | `bytes::Bytes` builtin-collision fixed (`BytesBytes`); unsized `UninitSlice` methods gated out |
 
 P6 (faithful diff) and the postgres/redis stores are covered by runtime unit
 tests, not separate examples; generated postgres + redis live apps are
@@ -901,7 +900,13 @@ glob-re-exported at the crate root (regex's `RegexBuilder` in private
 `builders::string`) are recorded at the usable public path (regex: 3 → 104 fns,
 +48 setters); **submodule name disambiguation** — same-named types in different
 submodules get distinct Sky names from their qualified path (`regex::Regex` →
-`Regex`, `regex::bytes::Regex` → `BytesRegex`) so neither variant is dedup-dropped.
+`Regex`, `regex::bytes::Regex` → `BytesRegex`) so neither variant is dedup-dropped;
+**builtin name disambiguation (P2-B)** — a crate root type whose bare name equals
+a Sky builtin (`bytes::Bytes` vs the builtin `Bytes` → `Vec<u8>`) is crate-prefixed
+(`BytesBytes`) so it resolves to the crate type, not the builtin; **Sized gate
+(P4)** — an instance method whose receiver type is never produced by value anywhere
+(`bytes::buf::UninitSlice`, a DST) is dropped (its by-value `arg0` can't compile),
+excluding static methods / `to_string` bridges / self-returning setters.
 
 Drop-reason measurement: the inspector's **`--audit`** flag tags every
 tail-filter `return None` (lifetime / result_borrow / array_slice) with reason +
@@ -997,6 +1002,6 @@ Leave `~/.cargo/registry` and `~/.cargo/git` alone (global, slow to rebuild).
 | `rustdoc` needs nightly | Inspector runs `cargo +nightly rustdoc` | `rustup install nightly` |
 | Un-nameable bindings dropped | Generics, borrowed-view returns, lifetime-bound handles, std types, unsafe fns skipped (builder setters / `Option<T>` params / glob re-exports are now recovered) | Use a wrapper crate with owned/primitive signatures |
 
-Open work is tracked in the **Roadmap** at the top of this file; the remaining
-FFI-reach gaps (P4 unsized receivers, P2-B `bytes::Bytes`) are scoped in
+Open work is tracked in the **Roadmap** at the top of this file. The FFI-reach
+expansion (P1–P4 + name-collision classes) is shipped; its history is in
 `runtime-rust/docs/superpowers/plans/2026-06-14-ffi-reach-expansion-plan.md`.
