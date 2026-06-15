@@ -176,7 +176,7 @@ grep -rEn "\bunsafe\b|transmute|from_raw|into_raw|static mut|\*const |\*mut " ru
 
 Go is the reference (full surface). Rust coverage by confidence:
 
-**✅ Covered & verified** (standard-libs 131/131 + the 32 `examples/rust/*` + the
+**✅ Covered & verified** (standard-libs 131/131 + the `runtime-rust/tests/sky/*` set + the
 HTTP/WS/Cli regression tests):
 
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
@@ -588,7 +588,7 @@ pulls neither. A non-live `Std.Db` app keeps its single driver.
 
 ## Verification state (branch `feat/runtime-rust`)
 
-### `examples/rust/` — 32/32 build + run from a wiped slate
+### `runtime-rust/tests/sky/` — FFI + framework examples (build + run from a wiped slate)
 
 | Example | Surface | What it shows |
 |---|---|---|
@@ -646,7 +646,7 @@ invariants under proptest.
 erased or downcast — a statically-typed broker, not Go's reflect registry. Echo
 is default; `publishNoEcho` suppresses the origin receiver-side; the publishing
 session's sid is injected at dispatch time. Cross-session broadcast is proven
-end-to-end by `examples/rust/33-live-pubsub` (`verify.sh` — a watch-only session
+end-to-end by `runtime-rust/tests/sky/33-live-pubsub` (`verify.sh` — a watch-only session
 receives another session's broadcast over SSE). Subscriptions materialise at
 session init (Go parity), so a watch-only session is subscribed from load.
 `27-multi-session-chat` stays blocked only on the unrelated `Db.getString`-on-
@@ -978,7 +978,7 @@ Cargo `target/` dirs accumulate fast — a full example sweep can exceed 20 GB.
 The sweep idiom deletes each example's target right after building:
 
 ```bash
-for d in examples/rust/*/; do
+for d in runtime-rust/tests/sky/*/; do
     (cd "$d" && rm -rf sky-out .skycache .skydeps \
         && /home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky \
         && rm -rf sky-out/Rust/target)
@@ -986,7 +986,7 @@ done
 ```
 
 Manual reclaim: `rm -rf runtime-rust/target tools/sky-ffi-inspect-rs/target
-~/.cache/sky` and `find examples/rust -type d -name target -exec rm -rf {} +`.
+~/.cache/sky` and `find runtime-rust/tests/sky -type d -name target -exec rm -rf {} +`.
 Leave `~/.cargo/registry` and `~/.cargo/git` alone (global, slow to rebuild).
 
 ---
