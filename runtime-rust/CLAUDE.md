@@ -33,6 +33,31 @@ Generated `Cargo.toml [profile.dev]` already drops debuginfo (`debug = 0`,
 `incremental = true`), emitted by `emitCargoToml`. Sweep via
 `SKY_BIN=$(cabal list-bin exe:sky) ./scripts/rust-sweep.sh` (~570s on warm sccache).
 
+## Code navigation — use skydex, NOT Gortex
+
+**Gortex OOMs this machine on this repo** (the global `~/.claude/CLAUDE.md`
+mandates Gortex MCP tools — that mandate does NOT apply here; Gortex ballooned
+past 15 GB and hung the box). Use **`skydex`**, the bounded Sky-tuned index
+(`tools/skydex/`, ~64 MB peak; `tools/skydex/README.md`), or plain Read/Grep.
+
+Build once, then query (binary: `tools/skydex/target/release/skydex`; user alias
+`sx`; run from the repo root):
+
+```bash
+( cd tools/skydex && cargo build --release )         # once
+tools/skydex/target/release/skydex index --repo .    # build .skydex/index.db (~21s)
+tools/skydex/target/release/skydex parity --gaps     # ← the keep-go-parity worklist (go-only = Rust missing it)
+tools/skydex/target/release/skydex deps <module>     # module imports
+tools/skydex/target/release/skydex covers <kernel>   # fixtures/examples exercising a kernel (find its tests)
+tools/skydex/target/release/skydex roles | pipeline | wakeup
+tools/skydex/target/release/skydex update --repo .   # incremental git-diff refresh (after commits / on sync)
+```
+
+**Default reflex:** before a multi-file grep to answer "is the Rust backend
+missing a kernel Go has?" / "what does this module depend on?" / "what tests
+cover this?", run the matching `skydex` query — one focused answer instead of
+pulling many files into context. `sync-with-upstream` Step 9 auto-refreshes it.
+
 ## Phase 1 Status: ✅ COMPLETE
 
 - Runtime crate: `sky-runtime-rust` implemented with 54 tests passing
