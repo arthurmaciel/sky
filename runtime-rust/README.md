@@ -32,7 +32,10 @@ Tick a box when it reaches parity.
 | [ ] | composite `Basics.toString` | needs design | Scalars match Go (`Display` = `%v`); a record/ADT `toString` is a compile error (no `Display`). Needs type-directed lowering. |
 | [ ] | `Ffi.callTask` (dynamic dispatch) | unsupported | Static-shape calls are peephole-resolved; the dynamic path is a no-reflection guard (Task-emitting FFI kernels). |
 | [ ] | Sky.Live: firestore session store | future | Same `SessionStore` trait as the other stores. |
-| [ ] | Non-byte slice/array FFI — nested/tuple elements + enum-arg ctors | mostly done | Common sequences (`&[String]`, `[f64; 3]`, `Vec<T>` of primitives/Strings/opaque) ARE classified + coerced (`seqGeneral`); only nested-generic / tuple / borrowed elements + crate-enum arguments remain. |
+| [x] | FFI builder/handle class | **shipped** | Builder setters, `Option<T>` params (P1), crate-name collisions (P2-A), glob-re-export qualification (P3), submodule name disambiguation — all done + fixture-locked. Unlocked `url` / `csv` / `regex`. |
+| [ ] | FFI: unsized receivers (`bytes::buf::UninitSlice`) | P4, low value | A `&mut self` method on a `!Sized` type → by-value `arg0` doesn't compile. Needs a Sized gate (drop such methods). Rare; only affects exotic crates. |
+| [ ] | FFI: `bytes::Bytes` vs Sky builtin `Bytes` | P2-B | A crate type whose bare name equals a Sky builtin (`Bytes` → `Vec<u8>`) mis-resolves. Needs a Sky-side alias for the crate type. |
+| [~] | Non-byte slice/array FFI — element coercion | sound floor | Measured 1/2552 functions across 50 crates (`--audit`); the clean drop is the correct boundary. Common sequences already coerce via `seqGeneral`. |
 | [ ] | WASM target (`wasm32-unknown-unknown`) | future | |
 | [ ] | Go-package→Rust FFI (gorilla/mux, stripe-go, …) | out of scope | Needs a Go runtime; byte-parity impossible without one. |
 
@@ -608,10 +611,20 @@ pulls neither. A non-live `Std.Db` app keeps its single driver.
 | 30-live-routing | Sky.Live P3 | URL routing → injected `model.page` |
 | 31-live-req | Sky.Live P4 | typed `LiveReq` to `init` |
 | 32-live-sessions | Sky.Live P5 | `[live] store="sqlite"` — cookie reuse + restart survival |
+| 45-url-option-setters | FFI reach (P1) | `Option<&str>` param coercion — `set_fragment (Just "section")` |
+| 46-csv-builder | FFI reach (P2-A) | `csv` crate name-collision fixed + in-place `push_field` setter chain |
+| 47-regex-builder | FFI reach (P3 + collision) | recovered `RegexBuilder` setters; **both** `Regex` (String) and `BytesRegex` (`List Int`) variants usable |
 
 P6 (faithful diff) and the postgres/redis stores are covered by runtime unit
 tests, not separate examples; generated postgres + redis live apps are
 cargo-build-verified.
+
+**Codegen test set** (`runtime-rust/tests/rust-codegen/run.sh`): per-case
+`.sky` builds that must compile + print `ok:` — incl. `task-branch.sky`
+(Task-valued `if`/`case` branch at `main`). **Runtime crate**: 350+ tests pass
+(`cargo test --features full`), incl. soundness suites (`core_soundness`,
+`kernel_soundness`, `dict_determinism`) asserting no-panic + sorted-iteration
+invariants under proptest.
 
 ### `examples/00-standard-libs`
 
@@ -874,7 +887,21 @@ recovering the *configuration* surface of builder-pattern crates (csv
 `ReaderBuilder` +12, `WriterBuilder` +10, url `set_path`/`set_query`/…); a
 by-value `-> Self` (e.g. `Bytes::split_off`, returns a new value) is left on the
 normal path; **lifetime-elided copies** — `&'a str`/`&'a [u8]`/`&'a OsStr`/
-`&'a Path` are kept as owned copies (the lifetime token is an elision artifact).
+`&'a Path` are kept as owned copies (the lifetime token is an elision artifact);
+**`Option<T>` params** — `SkyMaybe<T>` bridges to `Option<&str>` (`.as_deref()`),
+`Option<u16>` (`.map(|x| x as N)`), `Option<&T>` (`.as_ref()`), else identity
+(unlocked the whole `url` crate's `set_*` surface); **absolute `::<crate>`
+paths** — every extern-crate reference is emitted `::csv::…` (no `use crate::*`
+glob shadowing) so a crate named like an unsuffixed kernel module (`csv`/`time`/
+`log`/`json`/`config`/`email`/`html`) no longer collides (`csv`: 116 errors → 0);
+**`Maybe<opaque>` params** — the owned inner type comes from the `Option<&T>`
+override (`SkyMaybe<::crate::T>`, not the lossy `SkyMaybe<String>`);
+**glob-re-export qualification** — types defined in a private submodule and
+glob-re-exported at the crate root (regex's `RegexBuilder` in private
+`builders::string`) are recorded at the usable public path (regex: 3 → 104 fns,
++48 setters); **submodule name disambiguation** — same-named types in different
+submodules get distinct Sky names from their qualified path (`regex::Regex` →
+`Regex`, `regex::bytes::Regex` → `BytesRegex`) so neither variant is dedup-dropped.
 
 Drop-reason measurement: the inspector's **`--audit`** flag tags every
 tail-filter `return None` (lifetime / result_borrow / array_slice) with reason +
@@ -968,6 +995,8 @@ Leave `~/.cargo/registry` and `~/.cargo/git` alone (global, slow to rebuild).
 | `withTransaction` rollback isolation | sqlx pool may route body queries to other connections | `sqlx::Pool::max_connections(1)` for guaranteed rollback |
 | Bytes non-ASCII text base64/hex | `Sky.Core.Bytes = String` uses a Latin-1 byte convention so raw bytes round-trip; non-ASCII *text* diverges from Go-computed encoded strings (ASCII is byte-identical) | Compare decoded values, or `String.toBytes` first |
 | `rustdoc` needs nightly | Inspector runs `cargo +nightly rustdoc` | `rustup install nightly` |
-| Un-nameable bindings dropped | Generics, non-byte slices/arrays, borrows, std types, unsafe fns skipped | Use a wrapper crate with owned/primitive signatures |
+| Un-nameable bindings dropped | Generics, borrowed-view returns, lifetime-bound handles, std types, unsafe fns skipped (builder setters / `Option<T>` params / glob re-exports are now recovered) | Use a wrapper crate with owned/primitive signatures |
 
-Open work is tracked in the **Roadmap** at the top of this file.
+Open work is tracked in the **Roadmap** at the top of this file; the remaining
+FFI-reach gaps (P4 unsized receivers, P2-B `bytes::Bytes`) are scoped in
+`runtime-rust/docs/superpowers/plans/2026-06-14-ffi-reach-expansion-plan.md`.
