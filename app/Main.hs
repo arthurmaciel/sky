@@ -1810,11 +1810,17 @@ runCommand cmd = case cmd of
                         callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
                         putStrLn $ "Build complete, running..."
                         hFlush stdout
-                        let binPath = rustDir ++ "/target/debug/sky-app"
+                        -- Honour a shared CARGO_TARGET_DIR (the recommended DX:
+                        -- one target dir for every example). cargo built into it
+                        -- above, so the binary lives there, NOT under sky-out/
+                        -- (mirrors `sky watch`'s Rust path).
+                        mTargetDir <- System.Environment.lookupEnv "CARGO_TARGET_DIR"
+                        let targetBase = maybe (rustDir ++ "/target") id mTargetDir
+                            binPath = targetBase ++ "/debug/sky-app"
                         hasBin <- doesFileExist binPath
                         if hasBin
                             then callProcess binPath []
-                            else putStrLn "Error: binary not found"
+                            else putStrLn ("Error: binary not found at " ++ binPath)
                 return (Right ())
 
     Db action path -> do
