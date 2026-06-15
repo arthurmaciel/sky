@@ -86,7 +86,7 @@ P1 (broad, mechanical) → P2-A (one-line `::` qualify, big csv unlock) → P4 (
 gate, prevents regressions from P1/P3 widenings) → P3 (regex investigation) →
 P2-B / P5. Each ships with a hermetic-crate end-to-end test + a build-sweep guard.
 
-## Codegen gap found while testing (separate from FFI, track it)
+## Codegen gap found while testing — ✅ FIXED (commit follows)
 
 `main = println (if cond then taskA else taskB)` lowers fine, but
 `main = case … of _ -> if cond then println a else println b` (a Task-valued

@@ -1409,6 +1409,15 @@ taskExprInnerType solved (Ann.At _ expr) = case expr of
         in if not (null innerTypes) && all (not . null) innerTypes
            then head innerTypes  -- same inner type for all branches
            else ""
+    Can.If branches elseExpr ->
+        -- Symmetric to Can.Case: if every branch body AND the else are Task
+        -- expressions, the whole `if` is a Task — so it must NOT be re-wrapped
+        -- in `task_succeed` (which would nest SkyTask<SkyTask<_>>). Closes the
+        -- "Task-valued if/case branch at main fails to lower" codegen gap.
+        let innerTypes = map (taskExprInnerType solved) (map snd branches ++ [elseExpr])
+        in if not (null innerTypes) && all (not . null) innerTypes
+           then head innerTypes
+           else ""
     Can.VarTopLevel mod name ->
         -- Look up the solved type of this VarTopLevel and extract Task inner type
         case Map.lookup name solved of
