@@ -6,48 +6,18 @@ copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
 
 ---
 
-## Roadmap to full behavioral Go-parity
+## Goal
 
-> **Goal:** the Rust backend reaches full behavioral parity with the Go
-> reference. **Priority order, applied to every choice: security → correctness
-> → soundness → efficiency.** Hard rules: no panic vector, no runtime error from
-> well-typed Sky, no `Any` in generated code, no change to Sky/Go source or the
-> upstream examples, root-cause fixes only (no symptom masking), no deferral.
-> Anything conflicting with the four principles is escalated, not silently
-> traded away.
+> The Rust backend reaches full behavioral parity with the Go reference.
+> **Priority order, applied to every choice: security → correctness → soundness
+> → efficiency.** Hard rules: no panic vector, no runtime error from well-typed
+> Sky, no `Any` in generated code, no change to Sky/Go source or the upstream
+> examples, root-cause fixes only (no symptom masking), no deferral. Anything
+> conflicting with the four principles is escalated, not silently traded away.
 
-The covered surface is documented in **API surface vs the Go backend**, **Sky.Live
-on Rust**, and **Rust vs Go backend — divergent implementation strategies** below.
-
-### Open divergences from the Go backend (future-work checklist)
-
-A well-typed Sky program behaves differently, or a feature is missing, on Rust.
-Tick a box when it reaches parity.
-
-| | Divergence | Kind | Notes |
-|---|---|---|---|
-| [—] | `Task.retryWith` runs once | intentional (decided) | Rust `SkyTask` is a one-shot `Future` **by design** — the totality floor that makes "if it compiles, it works" true (no re-runnable `dyn Any` thunk). Go's Task is a universal re-runnable `func() any` thunk the loop re-calls. A faithful fix needs a thunk-shaped `retryWith` in the **shared stdlib** (FORBIDDEN) and is unverifiable in pure Sky (no fail-then-succeed task constructible). Run-once is observably correct for Ok-first, last-Err, and `RetryWhen` short-circuit. Workaround: recurse on the `Result` in Sky. See `docs/superpowers/specs/2026-06-15-task-retrywith-runs-once-design.md`. |
-| [x] | `Bytes` non-ASCII *text* | **shipped** | Triage's "needs a nominal `Bytes` type in the shared stdlib → blocked" premise was false: the alias (`Sky.Core.Bytes = String`) compiles fine — the five `Sky.Core.Bytes` kernels (`toHex` / `toString` / `fromHex` / `toBase64` / `fromBase64`) were simply **unimplemented**, so a call emitted an `E0425 cannot find function` and the def-site a `panic!` polyfill. Fix: implement them in the runtime via the **Latin-1 (one-char-per-byte) convention shared with `encoding.rs`**, so the raw-byte/crypto/binary pipeline is **lossless** and round-trips within Rust. Output is **byte-identical to Go on ASCII / hex / binary**; it differs from Go ONLY when a `Bytes` value carries literal non-ASCII *text bytes* AND its encoded form is compared against an externally-/Go-computed string — a shape the byte-buffer contract discourages (`Bytes` is a byte buffer, not text). The fallible decoders (`fromHex` / `fromBase64` / `toString`) are total `SkyMaybe` — no `unwrap` / `panic` / `Any`. Also fixes `Bytes.length`: it is now the Latin-1 byte count (`chars().count()`), correcting the prior `string_length`/`s.len()` UTF-8 double-count of high bytes. Entirely in-boundary (`runtime-rust/src/sky_runtime/` + `src/Sky/Generate/Rust/Builder/Kernel.hs`; no shared-stdlib / Go edit). Spec: `docs/superpowers/specs/2026-06-15-bytes-nonascii-text-design.md`. |
-| [ ] | `errorToString` String path quotes (`"hi"` vs Go `hi`) | blocked | Go's `Basics_errorToString` returns a `string` verbatim and only `%v`-falls-back for composites; Rust `Debug`-formats unconditionally, so the String path diverges (`"hi"` quoted). The `Debug`→`Display` re-bind does NOT compile: the load-bearing caller `Sky.Test.debugShow : a -> String` (`debugShow v = errorToString v`) lowers to a **generic** Rust `fn debug_show<A>(v: A)`, so `basics_error_to_string(v)` is called on a type **parameter** with no `Display` bound (E0277, sky_test.rs:44 — breaks all 131 standard-libs assertions). A type-directed fix IS possible in principle (route `errorToString` to a `Display` variant when the arg's HM type is a concrete scalar, `Debug` otherwise) but needs the generic `debugShow`/`assert*` chain monomorphised per concrete type so the scalar reaches the call — same `SkyShow`-bound-epic class as composite `Basics.toString` — AND a parity oracle for assertion-failure messages, which the equiv-sweep does not currently provide. `Debug` is retained as the only total universal stringifier. Spec: `docs/superpowers/specs/2026-06-15-error-to-string-go-parity-design.md`. |
-| [ ] | composite `Basics.toString` | blocked | Scalars match Go exactly (`Display` == `%v`). A composite `toString` is a clean compile-time `E0277`, never a runtime panic — more in line with no-runtime-errors than Go's reflection. The ADT shape is **unmatchable**: Go's `%v` renders an ADT as `{tag payload…}` (e.g. `{1 42}`), a leak of Go's flattened struct layout with no Rust sum-type equivalent and no constructor name; a function-field subset prints a non-deterministic `0x<addr>`. No upstream example exercises composite `toString`, so the equiv-sweep has no parity oracle and `examples/` is read-only. Record-only rendering is a future in-boundary IMPLEMENT, promotable when an example demands it. Spec: `docs/superpowers/specs/2026-06-15-composite-tostring-design.md`. |
-| [x] | Sky.Live: firestore session store | at parity (Go has none either) | Go's `chooseStore` (`runtime-go/rt/live_store.go`) has NO firestore arm — `store="firestore"` hits the `default` branch → `newMemoryStore`. Rust's `choose_store` matches: unknown kind → `MemoryStore`, and `emitCargoToml` pulls no crate for `"firestore"` (`needsDb` gates on sqlite/postgres, `needsRedis` on redis). The docs (`docs/skylive/overview.md`, `docs/sky-toml.md`) overpromise relative to Go's own runtime — a shared docs/Go gap, not a Rust divergence. A real firestore store would DIVERGE from Go AND is unverifiable here (no GCP/emulator). Parity-by-absence, locked by a regression test. |
-| [x] | FFI builder/handle class | **shipped** | Builder setters, `Option<T>` params (P1), crate-name collisions (P2-A), glob-re-export qualification (P3), submodule + builtin name disambiguation (P2-B), Sized gate for unsized receivers (P4) — all done + fixture-locked. Unlocked `url` / `csv` / `regex` / `bytes`. |
-| [~] | Non-byte slice/array FFI — element coercion | sound floor | Measured 1/2552 functions across 50 crates (`--audit`); the clean drop is the correct boundary. Common sequences already coerce via `seqGeneral`. |
-| [ ] | WASM target (`wasm32-unknown-unknown`) | blocked epic | Target pinned to `wasm32-unknown-unknown` (browser, wasm-bindgen); WASI is a strictly-easier deferred tier (keeps fs/clock/getrandom), not planned separately. Blocking pieces: (a) `cfg`-gated `SkyTask` `Send` split (`core.rs:17` — browser futures are `!Send`, native needs `Send`; mirrored by a `cfg`-aware `Send`-token emission in `Emitter.hs`); (b) no-tokio entry — `#[wasm_bindgen(start)]` + `spawn_local` replacing `block_on` (`task.rs:5`, `Emitter.hs` entry), `task_parallel` → sequential `join` (`task.rs:99`) — a **documented intentional parity gap** (sound on one thread, correctness > Go-parity); (c) supported kernel subset = pure + JSON + JS-entropy + `fetch`-backed `Http` — server/db/email/file/process/tui/webview/native-ws dropped at **COMPILE time** (build-time refusal reusing `UsedKernels`, NEVER a wasm runtime panic/stub); (d) new `--target rust-wasm` + `crate-type=["cdylib"]` + wasm-bindgen toolchain through `Project.hs`/`Emitter.hs`. Full Go-parity is **non-verifiable** (no Go wasm oracle for the equiv-sweep) — the goal is a sound, panic-free subset, not byte parity. First landable slice: the pure-kernel `cfg`-gate floor (the `Send` split + a tokio-excluded wasm Cargo/entry branch), verifiable **in-boundary** via a `runtime-rust/tests` wasm-build assertion without touching `sky-stdlib/`/`examples/`. Spec: `docs/superpowers/specs/2026-06-15-wasm-target-design.md`. |
-
-**Intentional divergences — by design, NOT future work.** Rust deliberately
-refuses what Go accepts, to keep the no-`Any` / no-panic guarantees:
-
-| Divergence | Why |
-|---|---|
-| `any`-typed record fields → compile error (Go uses reflect) | refusing `Box<dyn Any>` is the reason this backend exists |
-| no panic-to-500 fallback; statically total | Go catches a handler panic → 500; Rust designs the panic out |
-| `Ffi.callTask`/`callPure` dynamic dispatch (non-literal name/args) → refused | mirroring Go's `%v`-string registry / reflect+`any` surface is a defect, not parity; static-shape `callPure` is peephole-resolved, the dynamic path is the no-reflection guard |
-| Go-package→Rust FFI (gorilla/mux, stripe-go, `net/http`, `log/slog`, …) → not linked | **Out of scope by design** — Go-package FFI needs a Go runtime/reflect, the exact thing this backend exists to avoid; faithful parity would require linking a Go runtime or spawning a Go sidecar + IPC, re-introducing the reflect/`any` risk surface and an IPC-failure *runtime error* the no-panic floor forbids. The call site fails **CLEAN at canonicalise** — `E1001` "Undefined name" (`regenMissingBindings TargetRust` short-circuits, `loadRegistry TargetRust` reads only `.skycache/ffi/rust`, so the Go module's kernel is never seeded), exit 1, **no `sky-out/Rust/src/main.rs` emitted** — verified on `examples/05-mux-server`, so the no-runtime-error / no-panic guarantee holds (compile-time refusal, strongest failure mode). The substitute is **crate FFI** via `[rust.dependencies]` (`sky add <crate> --target rust`), which already binds `url` / `csv` / `regex` / `bytes`. Every Go-FFI example (`02`, `03`, `05`, `08`, `13`, `16`, `17`) is classified `out` in `scripts/equiv-classification.tsv` behind the classification-coverage gate, so a re-added Go-FFI example can't produce a false parity failure. The more-precise *"Go-FFI unsupported, use a Rust crate"* build-time warning is a **known diagnostic-imprecision wart owned by the shared CLI seam (`app/Main.hs`)** — out of the Rust boundary — hence documented, not implemented. Spec: `docs/superpowers/specs/2026-06-15-go-package-rust-ffi-design.md`. |
-
-**Looks divergent, but at parity:** `Db.withTransaction` rollback isolation (Go
-has the identical tx-handle gap) and `Db.insertRow` (returns the id via
-`RETURNING`).
+The chosen *mechanisms* (where Rust implements something differently from Go to
+hold those guarantees) are in **Rust vs Go backend — divergent implementation
+strategies**.
 
 ---
 
@@ -124,7 +94,7 @@ has the identical tx-handle gap) and `Db.insertRow` (returns the id via
 | **`sky-out/` · `sky-out/Rust/`** | compiler output · Rust codegen output (capital `R` by convention) |
 | **`.skycache/` · `.skycache/ffi/rust/`** | build cache (source hashes, lowered IR) · Rust FFI registry |
 | **`SKY-RUST-AUDIT:` marker** | an in-code attributed decision marker (ACCEPTED / DEFERRED) mirroring the README decision ledger |
-| **no-`Any` / no-`unsafe` invariant** | generated code + Sky-reachable runtime paths use the static type system end-to-end — see the safety-invariant section |
+| **no-`Any` invariant** | generated code + Sky-reachable runtime paths use the static type system end-to-end; the one `unsafe` is the console orphan-guard — see the safety-invariant section |
 
 ---
 
@@ -184,14 +154,14 @@ grep -rEn "\bunsafe\b|transmute|from_raw|into_raw|static mut|\*const |\*mut " ru
 
 ## API surface vs the Go backend
 
-Go is the reference (full surface). Rust coverage by confidence:
+Go is the reference (full surface). Rust coverage by confidence.
 
 **✅ Covered & verified** (standard-libs 131/131 + the `runtime-rust/tests/sky/*` set + the
 HTTP/WS/Cli regression tests):
 
 - Pure stdlib: Basics, String, List, Dict, Set, Maybe, Result, Char, Math, Path,
   Regex, Bytes (`toHex` / `toString` / `fromHex` / `toBase64` / `fromBase64` /
-  `length` implemented on the Latin-1 byte convention shared with Encoding),
+  `length` on the Latin-1 byte convention shared with Encoding),
   Encoding, Json (Encode/Decode/Pipeline), Jwt, Decimal, Money.
 - Effects: Task, Time, Random, File, System, Crypto, Compression, Csv, Uuid, Log,
   Db (sqlite/mysql/postgres), Auth, Trace, Email (Resend/SendGrid/SES).
@@ -202,19 +172,22 @@ HTTP/WS/Cli regression tests):
 - `Std.Config` (TOML/YAML/JSON decoders over a shared serde_json::Value).
 - Runtime/TEA: Cmd, Sub, Sky.Cli.
 - PubSub — `Cmd.publish` / `Cmd.publishNoEcho`, `Sub.subscribeTopic`, and the
-  Task-shaped `PubSub.publish` — via the per-type `Broker<T>` (S6, no payload
-  erasure). See "Verification state".
-- **Sky.Live (P0–P6)** — TEA-over-HTTP+SSE, session stores, faithful diff,
-  pub/sub, separate-process embedded console. Dedicated section below.
-- **Sky.Tui** — TEA-over-ANSI; `Std.Ui` `Element` walked to cells (`tui/`,
-  `ui/`). Fixtures `38-tui-ui` / `41-tui-input`.
+  Task-shaped `PubSub.publish` — via the per-type `Broker<T>` (no payload
+  erasure).
+- **Sky.Live** — TEA-over-HTTP+SSE on an axum router; per-session driver,
+  `/_sky/sse` (hello + 15 s heartbeat), `POST /_sky/event`, faithful view-diff →
+  patch frames (keyed sky-id, event-handler diff, mixed-text — matches Go
+  `diffNodes`); typed forms (`decode_form::<T>`); URL routing (`routes`/`notFound`);
+  typed `LiveReq` to `init`; session stores (memory/sqlite/postgres/redis on one
+  `SessionStore` trait); in-process pub/sub; separate-process embedded console.
+  The Go browser client (`live/client.js`) and wire/patch schema are reused verbatim.
+- **Sky.Tui** — TEA-over-ANSI; `Std.Ui` `Element` walked to cells (`tui/`, `ui/`).
 - **Sky.Webview** — cross-platform stub floor + codegen (`webview.rs`); the real
-  wry/tao window is staged behind a feature. Fixture `39-webview`.
+  wry/tao window is behind a feature flag.
 - Ffi (Rust-crate auto-FFI).
 
 **✅ `Std.Ui` is a shared `Element` type, multi-target.** The typed no-CSS layout
-DSL renders byte-for-byte against Go's `renderVNode` on the HTML path (verified by
-`scripts/ui-parity.sh` render-diff, corpus `tests/ui-parity/` T0–T5, 6/6), and the
+DSL renders byte-for-byte against Go's `renderVNode` on the HTML path, and the
 same `Element` is walked to ANSI cells by `tui/` and to `Html` by Live/Webview.
 The integration apps `26-ui-showcase` (every primitive) and `19-skyforum` (forms +
 `onSubmit`) build clean on `--target rust`. See "Std.Ui parity" below.
@@ -226,6 +199,36 @@ The integration apps `26-ui-showcase` (every primitive) and `19-skyforum` (forms
 **⛔ Blocked by no-`any`:** `Std.Cache` (polymorphic value storage).
 
 **N/A** (compiler CLI, not an app-runtime API): `Doc`, `Context`.
+
+### Open divergences from the Go backend
+
+A well-typed Sky program behaves differently, or a feature is missing, on Rust.
+Tick a box when it reaches parity.
+
+| | Divergence | Status | Notes |
+|---|---|---|---|
+| [—] | `Task.retryWith` runs once | intentional | Rust `SkyTask` is a one-shot `Future` **by design** — the totality floor that makes "if it compiles, it works" true (no re-runnable `dyn Any` thunk). Go's Task is a universal re-runnable `func() any` thunk the loop re-calls. A faithful fix needs a thunk-shaped `retryWith` in the **shared stdlib** (FORBIDDEN) and is unverifiable in pure Sky (no fail-then-succeed task constructible). Run-once is observably correct for Ok-first, last-Err, and `RetryWhen` short-circuit. Workaround: recurse on the `Result` in Sky. Spec: `docs/superpowers/specs/2026-06-15-task-retrywith-runs-once-design.md`. |
+| [x] | `Bytes` non-ASCII *text* | shipped | The five `Sky.Core.Bytes` kernels (`toHex` / `toString` / `fromHex` / `toBase64` / `fromBase64`) are implemented in the runtime via the **Latin-1 (one-char-per-byte) convention shared with `encoding.rs`**, so the raw-byte/crypto/binary pipeline is **lossless** and round-trips within Rust. Output is **byte-identical to Go on ASCII / hex / binary**; it differs from Go ONLY when a `Bytes` value carries literal non-ASCII *text bytes* AND its encoded form is compared against an externally-/Go-computed string — a shape the byte-buffer contract discourages (`Bytes` is a byte buffer, not text). The fallible decoders are total `SkyMaybe` — no `unwrap` / `panic` / `Any`. `Bytes.length` is the Latin-1 byte count (`chars().count()`). In-boundary (`runtime-rust/src/sky_runtime/` + `src/Sky/Generate/Rust/Builder/Kernel.hs`). Spec: `docs/superpowers/specs/2026-06-15-bytes-nonascii-text-design.md`. |
+| [ ] | `errorToString` String path quotes (`"hi"` vs Go `hi`) | blocked | Go's `Basics_errorToString` returns a `string` verbatim and only `%v`-falls-back for composites; Rust `Debug`-formats unconditionally, so the String path diverges (`"hi"` quoted). The `Debug`→`Display` re-bind does NOT compile: the load-bearing caller `Sky.Test.debugShow : a -> String` lowers to a **generic** `fn debug_show<A>(v: A)`, so `basics_error_to_string(v)` is called on a type parameter with no `Display` bound (E0277 — breaks all 131 standard-libs assertions). A type-directed fix needs the generic `debugShow`/`assert*` chain monomorphised per concrete type (same `SkyShow`-bound class as composite `Basics.toString`) AND a parity oracle for assertion-failure messages the equiv-sweep doesn't provide. `Debug` is retained as the only total universal stringifier. Spec: `docs/superpowers/specs/2026-06-15-error-to-string-go-parity-design.md`. |
+| [ ] | composite `Basics.toString` | blocked | Scalars match Go exactly (`Display` == `%v`). A composite `toString` is a clean compile-time `E0277`, never a runtime panic — more in line with no-runtime-errors than Go's reflection. The ADT shape is **unmatchable**: Go's `%v` renders an ADT as `{tag payload…}`, a leak of Go's flattened struct layout with no Rust sum-type equivalent and no constructor name; a function-field subset prints a non-deterministic `0x<addr>`. No upstream example exercises composite `toString`, so the equiv-sweep has no parity oracle and `examples/` is read-only. Record-only rendering is a future in-boundary implement, promotable when an example demands it. Spec: `docs/superpowers/specs/2026-06-15-composite-tostring-design.md`. |
+| [x] | Sky.Live firestore session store | at parity (Go has none either) | Go's `chooseStore` (`runtime-go/rt/live_store.go`) has NO firestore arm — `store="firestore"` hits `default` → `newMemoryStore`. Rust's `choose_store` matches: unknown kind → `MemoryStore`, and `emitCargoToml` pulls no crate for `"firestore"`. The docs overpromise relative to Go's own runtime — a shared docs/Go gap, not a Rust divergence. A real firestore store would DIVERGE from Go AND is unverifiable here (no GCP/emulator). Parity-by-absence, locked by a regression test. |
+| [x] | FFI builder/handle class | shipped | Builder setters, `Option<T>` params, crate-name collisions, glob-re-export qualification, submodule + builtin name disambiguation, Sized gate for unsized receivers — fixture-locked. Unlocked `url` / `csv` / `regex` / `bytes`. |
+| [~] | Non-byte slice/array FFI — element coercion | sound floor | Measured 1/2552 functions across 50 crates (`--audit`); the clean drop is the correct boundary. Common sequences already coerce via `seqGeneral`. |
+| [ ] | WASM target (`wasm32-unknown-unknown`) | blocked | Target pinned to `wasm32-unknown-unknown` (browser, wasm-bindgen). Blocking pieces: (a) `cfg`-gated `SkyTask` `Send` split (browser futures are `!Send`, native needs `Send`; mirrored by a `cfg`-aware `Send`-token emission in `Emitter.hs`); (b) no-tokio entry — `#[wasm_bindgen(start)]` + `spawn_local` replacing `block_on`, `task_parallel` → sequential `join` (a documented intentional parity gap — sound on one thread, correctness > Go-parity); (c) supported kernel subset = pure + JSON + JS-entropy + `fetch`-backed `Http`; server/db/email/file/process/tui/webview/native-ws dropped at **compile time** (build-time refusal reusing `UsedKernels`, NEVER a wasm runtime panic/stub); (d) new `--target rust-wasm` + `crate-type=["cdylib"]` + wasm-bindgen toolchain. Full Go-parity is non-verifiable (no Go wasm oracle). Spec: `docs/superpowers/specs/2026-06-15-wasm-target-design.md`. |
+
+**Intentional divergences — by design, NOT future work.** Rust deliberately
+refuses what Go accepts, to keep the no-`Any` / no-panic guarantees:
+
+| Divergence | Why |
+|---|---|
+| `any`-typed record fields → compile error (Go uses reflect) | refusing `Box<dyn Any>` is the reason this backend exists |
+| no panic-to-500 fallback; statically total | Go catches a handler panic → 500; Rust designs the panic out |
+| `Ffi.callTask`/`callPure` dynamic dispatch (non-literal name/args) → refused | mirroring Go's `%v`-string registry / reflect+`any` surface is a defect, not parity; static-shape `callPure` is peephole-resolved, the dynamic path is the no-reflection guard |
+| Go-package→Rust FFI (gorilla/mux, stripe-go, `net/http`, `log/slog`, …) → not linked | **Out of scope by design** — Go-package FFI needs a Go runtime/reflect, the exact thing this backend exists to avoid; faithful parity would require linking a Go runtime or spawning a Go sidecar + IPC, re-introducing the reflect/`any` risk surface and an IPC-failure *runtime error* the no-panic floor forbids. The call site fails **CLEAN at canonicalise** — `E1001` "Undefined name" (`regenMissingBindings TargetRust` short-circuits, `loadRegistry TargetRust` reads only `.skycache/ffi/rust`), exit 1, **no `sky-out/Rust/src/main.rs` emitted** — verified on `examples/05-mux-server`, so the no-runtime-error guarantee holds (compile-time refusal). The substitute is **crate FFI** via `[rust.dependencies]` (`sky add <crate> --target rust`), which already binds `url` / `csv` / `regex` / `bytes`. Every Go-FFI example is classified `out` in `scripts/equiv-classification.tsv` behind the classification-coverage gate. The more-precise *"Go-FFI unsupported, use a Rust crate"* build-time warning is a known diagnostic-imprecision wart owned by the shared CLI seam (`app/Main.hs`) — out of the Rust boundary. Spec: `docs/superpowers/specs/2026-06-15-go-package-rust-ffi-design.md`. |
+
+**Looks divergent, but at parity:** `Db.withTransaction` rollback isolation (Go
+has the identical tx-handle gap) and `Db.insertRow` (returns the id via
+`RETURNING`).
 
 ---
 
@@ -258,10 +261,10 @@ different mechanism the *correct* one, not a shortcut.
   rationale doesn't transfer. Meanwhile Go's chosen path (in-process) is the *hard*
   one on Rust: two Sky programs in one crate collide on every generated type
   (`StateModel`/`StateMsg`/…), needing codegen type-namespacing/module-isolation —
-  a major sub-project Rust has no reflection to shortcut. Separate binaries have
+  a major undertaking Rust has no reflection to shortcut. Separate binaries have
   zero type collision and full fault isolation. So pre-built-subprocess is the
   pragmatic Rust optimum: it sidesteps Go's abandonment reason *and* Rust's
-  hard-path. (Epic: `docs/superpowers/specs/2026-06-12-rust-separate-process-console-epic.md`.)
+  hard-path. Spec: `docs/superpowers/specs/2026-06-12-rust-separate-process-console-epic.md`.
 - **Proxy convention — STRIP (vs Go pass-through+child-trim).** The browser
   reaches the console child only through the parent proxy (the child binds
   `127.0.0.1`), so the parent **strips** `/_sky/console` before forwarding and the
@@ -278,8 +281,7 @@ different mechanism the *correct* one, not a shortcut.
   make the parent unkillable-by-SIGTERM since the trap suppresses the default
   disposition). On Linux the child additionally gets `PR_SET_PDEATHSIG=SIGTERM`
   (via `pre_exec` + `libc`) so it dies even when the parent is SIGKILL'd / OOM'd —
-  a path no signal handler can catch. (Go deleted its `ShutdownSubApps` when it
-  went in-process; the separate-process Rust path needs the orphan guard back.)
+  a path no signal handler can catch.
 - **reqwest is a Std.Live dependency.** Because the live runtime's reverse-proxy
   forwards via reqwest, codegen declares reqwest for **every** Live app
   (`usesHttp || usesEmail || usesLive`), not just `Http.*`/`Email` users.
@@ -296,9 +298,9 @@ different mechanism the *correct* one, not a shortcut.
   on the Rust target — a pure-Rust build needs no `go` toolchain even for a
   project that declares Go deps.
 - **Observability export is OTLP/JSON, env-gated, inert by default.** Federation
-  push (`SKY_PARENT_URL` → parent ingest, epic C) and the remote HubExporter
+  push (`SKY_PARENT_URL` → parent ingest) and the remote HubExporter
   (`SKY_CONSOLE_HUB` → `/v1/{logs,traces}` OTLP/**JSON** + bearer + bounded retry
-  spool, epic E) mirror Go's `observability_push.go` / `exporter.go`. Go's
+  spool) mirror Go's `observability_push.go` / `exporter.go`. Go's
   HubExporter also uses OTLP's JSON encoding, so no protobuf dep. File-spool
   restart-durability is a noted parity extension (in-memory retry spool covers
   the transient-outage case).
@@ -311,9 +313,9 @@ different mechanism the *correct* one, not a shortcut.
     - the app auto-instruments each HTTP request into its in-RAM rings (a span +
       an access log — `observability::track`, Go-parity automatic telemetry);
     - a **lean** app (no sqlx) **pushes** that telemetry to the console child —
-      the *local collector* — via the C exporter (`push_exporter::enable_to_console`);
+      the *local collector* — via the exporter (`push_exporter::enable_to_console`);
       the child (which owns sqlx + the store) ingests → writes its SQLite store
-      → reads it back through the S1 hub kernels → serves the UI;
+      → reads it back through the hub read kernels → serves the UI;
     - a **db** app instead writes the spill directly and the child only reads it
       (no push — `parent_spill_active()` selects the path).
   This keeps EVERY Live app lean (no SQLite embedded just to get a console) while
@@ -344,10 +346,10 @@ different mechanism the *correct* one, not a shortcut.
   `namespace/created_at` schema; the hub (`hub/store.go`, `SKY_CONSOLE_HUB_DB`)
   uses a richer `service_name/time/trace_id/…` schema.
 - **Rust:** the embedded console uses **one** schema end-to-end — the hub
-  (`hub/store.go`) one — for both the D writer (`telemetry_spill.rs`) and the S1
+  (`hub/store.go`) one — for both the writer (`telemetry_spill.rs`) and the
   reader (`live/hub.rs`).
-- **Why:** the spill is an internal D↔S1 contract (not a byte-compatible Go
-  artifact). One schema means the writer and reader share a single source of truth;
+- **Why:** the spill is an internal writer↔reader contract (not a byte-compatible
+  Go artifact). One schema means writer and reader share a single source of truth;
   the hub schema is the richer one the console records actually need.
 
 ### Telemetry spill journal mode — WAL + `mode=rw` reader (not `mode=ro`)
@@ -366,7 +368,7 @@ different mechanism the *correct* one, not a shortcut.
   as its real `T` and is **never downcast**; a publisher/subscriber type mismatch
   can't construct.
 - **Why:** mirroring Go's reflect/`any` risk surface would be a defect, not parity.
-  The dynamism is monomorphised away. (`live/pubsub.rs`; S6.)
+  The dynamism is monomorphised away. (`live/pubsub.rs`.)
 
 ### Sky.Live `init` request — typed-record `LiveReq` vs heterogeneous `Dict`
 
@@ -374,8 +376,7 @@ different mechanism the *correct* one, not a shortcut.
 - **Rust:** a typed-record `LiveReq` (the kernel type stays free so it's Go-safe on
   the shared seam).
 - **Why:** a typed record keeps the no-`Any` invariant on the request path; the free
-  kernel type avoids clashing with Go's Dict-shaped req. (P4; memory
-  `rust-live-p4-req-blocker`.)
+  kernel type avoids clashing with Go's Dict-shaped req. (`live/req.rs`.)
 
 ### Closure-holding Model serialization — compile-error guard vs runtime skip
 
@@ -386,31 +387,7 @@ different mechanism the *correct* one, not a shortcut.
   store is designed to be a **compile error** (the unsound combo can't ship).
 - **Why:** "if it compiles, it works" — an un-restorable closure can't silently
   round-trip through a session store; the type system rejects it instead of a
-  runtime surprise. (S0 callback-record codegen.)
-
----
-
-## Sky.Live on Rust (P0–P6 shipped)
-
-TEA-over-HTTP+SSE on an axum router, no `any`/static dispatch. Same
-`init`/`update`/`view`/`subscriptions` shape as the Go backend; the Go browser
-client (`live/client.js`) and wire/patch schema are reused verbatim.
-
-| Phase | What it ships | Gate |
-|---|---|---|
-| **P0** static render | `Html`/`Attribute`/`Event` ADTs bridge to runtime-generic `sky_runtime::Html<M>` (the `{M}` generic-alias codegen case); `assign_sky_ids` + `render_html` + page wrap | `27-live-static` |
-| **P1** live TEA | `Live.app` axum router: per-session TEA driver, `/_sky/sse` (hello + 15s heartbeat), `POST /_sky/event`, view-over-view diff → patch frames | `28-live-counter` |
-| **P2** typed forms | `Ev.onSubmit Ctor` → `Event::OnForm` + `decode_form::<T>`; the form-target record gains `#[derive(Deserialize)]`; malformed form → no Msg, no panic | `29-live-form` |
-| **P3** URL routing | `routes`/`notFound`; `Live.route` → `Route<Page>`; the `Live.app` peephole detects the model's `page` field + emits a codegen page-setter (reflection-equivalent of Go's `RecordUpdate`) | `30-live-routing` |
-| **P4** typed request | `init req` receives `sky_runtime::LiveReq { path, query, method; params, headers, cookies }`; a Rust-only pre-pass types the init param (no shared-type change → Go-safe) | `31-live-req` |
-| **P5** session stores | `SessionStore` async trait + `MemoryStore` (idle-TTL) + `SqliteStore` (mem-cache + serde-JSON checkpoint); cookie reuse + write-through; Cold-hit hydration after restart; model serde is a compile-time requirement | `32-live-sessions` |
-| **P6** faithful diff | keyed sky-id (`:{key}` from `sky-key` / form `name`, sanitised), event-handler diff (`sky-<event>` + `data-sky-hid`), mixed-child text → parent html-replace; matches Go `diffNodes` exactly | `live::diff` + `live::html` tests |
-| **P5 follow-on** stores | `PostgresStore` (cfg `db`, PgPool) + `RedisStore` (cfg `redis_store`, native TTL) on the same trait; `choose_store` selects `[live] store` with memory fallback | runtime tests (pg/redis gated on `SKY_TEST_*_URL`) |
-
-The in-process pub/sub `Broker` (S6) and the separate-process embedded console
-(epic) are shipped on top of P0–P6 — see "Verification state" and "Rust vs Go
-backend". **Ahead:** firestore backend (parity-by-absence today — Go has none
-either), deeper Cmd/Sub coverage, req query-string parsing.
+  runtime surprise.
 
 ---
 
@@ -436,11 +413,9 @@ Three rules (see `docs/superpowers/specs/2026-06-12-rust-multibackend-entry-mode
    drops the `Task.run` *anywhere* — top-level OR inside a `case` arm — so the
    future is returned as a `SkyTask` (the entry `block_on`s it / a dispatching
    `case` unifies as `SkyTask<()>`), never executed inline via `task_run`.
-   Subsumes the older Live-only "#56 keep-the-serve-future" special-case.
 2. **`mainIsTask` derives from `usesBackendApp`** (`usesLive || usesTui ||
-   usesWebview`), not `usesLive` alone. A pure-Tui / pure-Webview `App {…} |>
-   Task.run` main now returns `SkyTask` + is `block_on`'d (was inline
-   `task_run`) — behaviour-identical.
+   usesWebview`), not `usesLive` alone — so a pure-Tui / pure-Webview `App {…} |>
+   Task.run` main returns `SkyTask` and is `block_on`'d.
 3. **`init`'s param is derived from its Sky type, adapted per call site.** Only
    a *req-reading* init (`init req = … req.path …`, detected by
    `collectLiveReqInitFns`: param 0 binds a var used in the body) pins param 0
@@ -489,16 +464,17 @@ Three rules (see `docs/superpowers/specs/2026-06-12-rust-multibackend-entry-mode
 `html.rs` `render_html` — so parity is a **codegen-lowering + serializer**
 problem, not a renderer port. Verified by `scripts/ui-parity.sh`: each corpus
 fixture runs `main = Io.writeStdout (Html.toString (Ui.layout [] view))` and the
-stdout is byte-diffed Go-vs-Rust (Go is the golden).
+stdout is byte-diffed Go-vs-Rust (Go is the golden). All corpus cases are
+byte-identical:
 
-| Tier | Covers | Status |
-|---|---|---|
-| T0 text | `layout` + `text` | ✅ byte-identical |
-| T1 layout | `row`/`column`/`spacing`/`padding`/`align` | ✅ |
-| T2 styling | `Background`/`Border`/`Font` | ✅ |
-| T3 sized | `button`/`link`/`image` (static) | ✅ |
-| T4 advanced | nearby overlays / aspect-ratio / grid | ✅ |
-| T5 semantic | `Region` tag + aria mapping | ✅ |
+| Covers | Primitives |
+|---|---|
+| text | `layout` + `text` |
+| layout | `row`/`column`/`spacing`/`padding`/`align` |
+| styling | `Background`/`Border`/`Font` |
+| sized | `button`/`link`/`image` (static) |
+| advanced | nearby overlays / aspect-ratio / grid |
+| semantic | `Region` tag + aria mapping |
 
 The load-bearing fixes (all Rust-target only, Go untouched):
 
@@ -619,19 +595,19 @@ pulls neither. A non-live `Std.Db` app keeps its single driver.
 | 24-http-api | `Sky.Http.Server` | `Server.api` route + `Handler` alias + `Mw.withLogging` |
 | 25-retry | `Sky.Core.Task` | `retryWith` + `RetryPolicy` (run-once on Rust by design — see `docs/superpowers/specs/2026-06-15-task-retrywith-runs-once-design.md`) |
 | 26-stream-cli | `Sky.Core.Http.Stream` Sub-tier | `chunks` → `ChunkEvent` Msgs into a `Cli.program` update loop |
-| 27-live-static | Sky.Live P0 | `Live.renderStatic` byte-correct full HTML |
-| 28-live-counter | Sky.Live P1 | TEA-over-SSE; span increments live |
-| 29-live-form | Sky.Live P2 | typed form submit |
-| 30-live-routing | Sky.Live P3 | URL routing → injected `model.page` |
-| 31-live-req | Sky.Live P4 | typed `LiveReq` to `init` |
+| 27-live-static | Sky.Live | `Live.renderStatic` byte-correct full HTML |
+| 28-live-counter | Sky.Live | TEA-over-SSE; span increments live |
+| 29-live-form | Sky.Live | typed form submit |
+| 30-live-routing | Sky.Live | URL routing → injected `model.page` |
+| 31-live-req | Sky.Live | typed `LiveReq` to `init` |
 | 31-system-env-chain | `Sky.Core.System` | getenv/setenv chain — `usesTaskParallel` entry invariant |
-| 32-live-sessions | Sky.Live P5 | `[live] store="sqlite"` — cookie reuse + restart survival |
-| 33-live-pubsub | PubSub (S6) | cross-session broadcast over SSE via the per-type `Broker<T>` |
+| 32-live-sessions | Sky.Live | `[live] store="sqlite"` — cookie reuse + restart survival |
+| 33-live-pubsub | PubSub | cross-session broadcast over SSE via the per-type `Broker<T>` |
 | 34-live-pubsub-dict | PubSub | Dict-payload broadcast |
 | 35-live-db-startup | `Std.Db` + Live | schema init at startup |
 | 37-cache-cli | `Std.Cache` | per-handle TypeId/K-keyed store (the no-`any` cache) |
-| 38-tui-ui | Sky.Tui (S4) | `Std.Ui` `Element` walked to ANSI cells |
-| 39-webview | Sky.Webview (S5) | cross-platform stub floor + codegen |
+| 38-tui-ui | Sky.Tui | `Std.Ui` `Element` walked to ANSI cells |
+| 39-webview | Sky.Webview | cross-platform stub floor + codegen |
 | 40-live-ui | Sky.Live + Std.Ui | full Ui render through the Live VNode path |
 | 41-tui-input | Sky.Tui | key/focus input model |
 | 42-ws-client-onmessage | `Sky.Core.WebSocket` | client `onMessage` Sub-tier |
@@ -643,7 +619,7 @@ pulls neither. A non-live `Std.Db` app keeps its single driver.
 | 48-bytes-collision | FFI reach | `bytes::Bytes` builtin-collision fixed (`BytesBytes`); unsized `UninitSlice` methods gated out |
 | 49-bytes-core | `Sky.Core.Bytes` | `toHex`/`toString`/`fromHex`/`toBase64`/`fromBase64`/`length` route to `encoding.rs` (no panic) |
 
-P6 (faithful diff) and the postgres/redis stores are covered by runtime unit
+The faithful view-diff and the postgres/redis stores are covered by runtime unit
 tests, not separate examples; generated postgres + redis live apps are
 cargo-build-verified.
 
@@ -666,7 +642,7 @@ invariants under proptest.
   env-gated pg/redis restart-survival), and the pub/sub broker (fan-out, echo,
   SkipOrigin, per-type isolation), among the 378 runtime tests.
 
-### PubSub / Broker (S6) — zero payload erasure
+### PubSub / Broker — zero payload erasure
 
 `Cmd.publish` / `Cmd.publishNoEcho`, `Sub.subscribeTopic`, and the Task-shaped
 `PubSub.publish` / `PubSub.publishNoEcho` run on Rust via an in-process broker in
@@ -683,7 +659,7 @@ session init (Go parity), so a watch-only session is subscribed from load.
 
 ### Rust-vs-Go perf gate (`scripts/rust-perf.sh`)
 
-The S1 perf harness benchmarks both backends of any example across all three
+The perf harness benchmarks both backends of any example across all three
 app shapes — **cli**, **server**, **live** — on cold-start, throughput (`ab`),
 peak RSS under load, and binary size, gating the Rust/Go ratio against the
 committed envelope in `scripts/rust-perf.thresholds`. It discovers the bound
@@ -703,7 +679,7 @@ the SSE patch-latency leg are pending a re-baseline on a quiet (non-swapping) ho
 ### Top-level `examples/[0-9]*` on `--target rust`
 
 Build-level via `scripts/rust-sweep.sh` (32/32 in-scope examples build) — covering
-CLI, FFI, `Std.Db`/`Auth`/`Config`, Sky.Http.Server, Sky.Live (P0–P6), Sky.Tui,
+CLI, FFI, `Std.Db`/`Auth`/`Config`, Sky.Http.Server, Sky.Live, Sky.Tui,
 Sky.Webview, and the multibackend entry model (`24-tui-kitchen-sink`).
 
 **Out of scope** (`OUT_OF_SCOPE` in `rust-sweep.sh`): `02 03 05 06 08 11 13 25 27
@@ -716,7 +692,8 @@ Sky.Webview, and the multibackend entry model (`24-tui-kitchen-sink`).
 - `27` multi-session-chat — blocked on the `Db.getString`-on-`any`/Dict-row
   codegen gap, not on pub/sub.
 - composite multi-app `34, 36, 37, 38` — need anon-struct field-method access,
-  not yet emitted; `25/29` are console/spike shapes covered by the epic fixtures.
+  not yet emitted; `25/29` are console/spike shapes covered by the dedicated
+  `runtime-rust/tests/sky/` fixtures.
 
 ---
 
@@ -757,7 +734,7 @@ known-issues backlog.
 | 2 | `email.rs` `hmac_bytes` `expect_used` | Accepted | baseline · panic-hardening pass | `email.rs:321` | same — a fallback MAC is a wrong SES signature |
 | 3 | `ffi_polyfills.rs` `panic` (×2) | Accepted | baseline · panic-hardening pass | `ffi_polyfills.rs:26,42` | statically dead for valid Sky; the unconstrained generic `T` return has no total value to synthesise |
 | 4 | `dyn Any` sites (pubsub broker, cache store/value) | Accepted | task #44 · 2026-06-12 | `pubsub.rs:85` · `cache.rs:57,70` | each `TypeId`-/`K`-keyed, correct-by-construction; the payload travels as its real type and is never erased — detail below |
-| 5 | `unsafe` `pre_exec` (`PR_SET_PDEATHSIG`) | Accepted | console epic | `live/console_proxy.rs:155` | `cfg(linux)` orphan-guard; the closure only calls `prctl` (async-signal-safe) between fork and exec, off any Sky value path; failure non-fatal. No safe stdlib API delivers a parent-death signal — detail below |
+| 5 | `unsafe` `pre_exec` (`PR_SET_PDEATHSIG`) | Accepted | Arthur Maciel | `live/console_proxy.rs:155` | `cfg(linux)` orphan-guard; the closure only calls `prctl` (async-signal-safe) between fork and exec, off any Sky value path; failure non-fatal. No safe stdlib API delivers a parent-death signal — detail below |
 
 ### Deferred for investigation
 
@@ -869,7 +846,7 @@ runtime-rust/src/sky_runtime/
 │   ├── req.rs        LiveReq + builder (canonical headers, cookie parse)
 │   ├── store.rs      SessionStore trait + Memory / Sqlite / Postgres / Redis + choose_store
 │   ├── sse.rs        SsePatch / channel / frame (text/event-stream)
-│   ├── pubsub.rs     per-payload-type Broker<T> keyed by TypeId (S6 — no erasure)
+│   ├── pubsub.rs     per-payload-type Broker<T> keyed by TypeId (no erasure)
 │   ├── hub.rs        hub read kernels — generic-over-return-type StateStore decode
 │   ├── console.rs · console_proxy.rs   separate-process console + reverse-proxy + orphan-guard
 │   ├── observability.rs · push_exporter.rs · hub_exporter.rs   auto-instrument + OTLP/JSON push
@@ -959,10 +936,10 @@ glob-re-exported at the crate root (regex's `RegexBuilder` in private
 +48 setters); **submodule name disambiguation** — same-named types in different
 submodules get distinct Sky names from their qualified path (`regex::Regex` →
 `Regex`, `regex::bytes::Regex` → `BytesRegex`) so neither variant is dedup-dropped;
-**builtin name disambiguation (P2-B)** — a crate root type whose bare name equals
+**builtin name disambiguation** — a crate root type whose bare name equals
 a Sky builtin (`bytes::Bytes` vs the builtin `Bytes` → `Vec<u8>`) is crate-prefixed
-(`BytesBytes`) so it resolves to the crate type, not the builtin; **Sized gate
-(P4)** — an instance method whose receiver type is never produced by value anywhere
+(`BytesBytes`) so it resolves to the crate type, not the builtin; **Sized gate**
+— an instance method whose receiver type is never produced by value anywhere
 (`bytes::buf::UninitSlice`, a DST) is dropped (its by-value `arg0` can't compile),
 excluding static methods / `to_string` bridges / self-returning setters.
 
@@ -1056,10 +1033,9 @@ Leave `~/.cargo/registry` and `~/.cargo/git` alone (global, slow to rebuild).
 | `any` in record fields | Codegen refuses `Box<dyn Any>` — structured `error[Rust]: any-typed record field` diagnostic | Encode as an ADT upstream, or ship a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky` |
 | `Task.retryWith` run-once | Rust `SkyTask` is a one-shot `Future` (not `Clone`, consumed on await) **by design** — the totality floor; Go's re-runnable `func() any` thunk is what the loop re-calls. The faithful fix needs a thunk-shaped `retryWith` in the shared stdlib (forbidden) and is unverifiable in pure Sky; run-once is observably correct for Ok-first / last-Err / `RetryWhen` short-circuit | Drive the retry loop in Sky (recurse on the `Result`) |
 | `withTransaction` rollback isolation | sqlx pool may route body queries to other connections | `sqlx::Pool::max_connections(1)` for guaranteed rollback |
-| Bytes non-ASCII text base64/hex | **Resolved** — the `Sky.Core.Bytes` kernels (`toHex` / `toString` / `fromHex` / `toBase64` / `fromBase64` + the corrected `length`) are implemented in the runtime via the Latin-1 (one-char-per-byte) convention shared with `encoding.rs`: raw bytes round-trip losslessly within Rust, and output is byte-identical to Go on ASCII / hex / binary. Differs from Go only when a `Bytes` value holds literal non-ASCII *text bytes* compared against a Go-/externally-computed encoded string (the byte-buffer contract discourages that shape) | For that text-bytes shape, compare decoded values rather than encoded strings |
+| Bytes non-ASCII *text* base64/hex | Lossless on ASCII / hex / binary (byte-identical to Go); differs from Go only when a `Bytes` value holds literal non-ASCII *text bytes* compared against a Go-/externally-computed encoded string — a shape the byte-buffer contract discourages | Compare decoded values rather than encoded strings |
 | `rustdoc` needs nightly | Inspector runs `cargo +nightly rustdoc` | `rustup install nightly` |
-| Un-nameable bindings dropped | Generics, borrowed-view returns, lifetime-bound handles, std types, unsafe fns skipped (builder setters / `Option<T>` params / glob re-exports are now recovered) | Use a wrapper crate with owned/primitive signatures |
+| Un-nameable bindings dropped | Generics, borrowed-view returns, lifetime-bound handles, std types, unsafe fns skipped (builder setters / `Option<T>` params / glob re-exports are recovered) | Use a wrapper crate with owned/primitive signatures |
 
-Open work is tracked in the **Roadmap** at the top of this file. The FFI-reach
-expansion (P1–P4 + name-collision classes) is shipped; its history is in
-`runtime-rust/docs/superpowers/plans/2026-06-14-ffi-reach-expansion-plan.md`.
+Open work is tracked in the **Open divergences** table under
+**API surface vs the Go backend**.
