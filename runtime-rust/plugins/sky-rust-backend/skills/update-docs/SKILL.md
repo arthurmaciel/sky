@@ -46,6 +46,29 @@ owns the cut-history + structure-over-prose discipline (tables / bullets /
 out; design rationale kept). This skill sets WHAT the README must contain; that
 skill sets HOW each section is written.
 
+**PRUNING DISCIPLINE — reconcile, do NOT append.** This is the whole point of
+the skill. Each run makes the README a faithful snapshot of CURRENT state — it
+is not a changelog. The drift comes from ADDING new wins while leaving stale
+content (resolved limitations still listed open, shipped `[ ]` items, dead
+metrics, superseded design notes, sections that contradict each other). Hold
+these rules over EVERY section:
+
+| Rule | Do |
+|---|---|
+| **Reconcile, don't append** | For each section, diff its existing claims against current reality (repo + `git log`) and **DELETE** anything no longer true before writing. Never bolt a new paragraph onto stale text. |
+| **Checklists are the highest drift risk** | Walk EVERY `[ ]` row in divergences / limitations / roadmap. Verify each against `git log` + the codebase. Flip to `[x]` when shipped; **DELETE** the row when it no longer describes a real gap. A `[ ]` that's actually done is a bug. |
+| **No "latest achievements" dump** | FORBIDDEN: appending a "what's new" / "recent work" / changelog blob. History lives in git. If a section reads like a list of recent commits, that's a smell — **rewrite it as the steady-state description**. |
+| **Contradiction sweep** | After rewriting, grep across sections for claims that disagree (a limitation marked fixed in one place but open in another, a metric stated two ways, an example ✅ here and ❌ there). Resolve every conflict to the one true value. |
+
+**Stale-detection checklist — run before committing. Each "yes" = fix it:**
+
+- [ ] Any `[ ]` checklist row that is actually done? → flip to `[x]` or delete.
+- [ ] Any limitation/known-issue row describing a bug that's since fixed? → delete it.
+- [ ] Any metric / number (binary size, error count, line count, example count) NOT re-verified this run? → delete it (don't carry stale numbers).
+- [ ] Any "currently / for now / WIP / TODO(date) / temporary" note whose condition is resolved? → delete it.
+- [ ] Any example marked ✅ that no longer exists, or ❌ that now passes? → correct the mark.
+- [ ] Any section that contradicts another? → reconcile to the true value.
+
 Then update it to reflect **today's actual state**. The README must contain these
 sections (rewrite each from scratch based on what you observe in the repo):
 
@@ -104,4 +127,4 @@ update-docs complete
   `src/Sky/Generate/Go/`, `runtime-go/`, or `.skycache/ffi/*.kernel.json` (root),
   stop and warn the user before committing anything.
 - Commit message body must describe *what* changed and *why* — not just "updated files".
-- Append the `Co-Authored-By` trailer to every commit.
+- Never append a `Co-Authored-By` trailer — the repo convention forbids it.
