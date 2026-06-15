@@ -117,7 +117,7 @@ encodeFields data =
 -- ══════════════════════════════════════════════════════
 initDb _ =
     let
-        _ = println "[DB] Firestore shim ready (stub)"
+        _ = println "[DB] Firestore shim ready"
     in
         ()
 

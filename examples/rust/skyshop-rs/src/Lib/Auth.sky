@@ -103,10 +103,10 @@ findOrCreateUser uid email name =
                                             ++ " (admin: "
                                             ++ adminStr
                                             ++ ")")
-                                -- The stub Db echoes an id-only row for the
-                                -- users collection; the upsert fields are the
-                                -- canonical identity, so return them directly
-                                -- (avoids Dict.union, not yet on Rust runtime).
+                                -- setDoc returns the doc id only (not the stored
+                                -- row), so the upsert fields are the canonical
+                                -- identity — return them directly (also avoids
+                                -- Dict.union, not yet on the Rust runtime).
                             in
                                 Ok upsertData
 
