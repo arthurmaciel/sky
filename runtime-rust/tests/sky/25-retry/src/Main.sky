@@ -13,18 +13,48 @@ module Main exposing (main)
 --     codegen drops the policy arg and threads the task through. This confirms
 --     it COMPILES and RUNS (the value flows back), not just type-checks.
 --
+-- Beyond the Ok-first-try parity case, this also pins the two OTHER subsets
+-- that are at parity with Go and must not regress (see the design doc, Q4
+-- observable-parity table):
+--   * Always-fail: retryWith over an always-failing task returns the SAME last
+--     Err value (run-once returns it once; Go returns the same Err after N).
+--   * RetryWhen short-circuit: a `RetryWhen (\_ -> False)` policy yields the
+--     FIRST Err immediately, identically on both backends.
+-- We deliberately do NOT assert the transient fail-then-succeed case: it is
+-- unverifiable in pure Sky (needs mutable cross-attempt state) and is the one
+-- theoretical divergence the design doc documents as INTENTIONAL.
+--
 -- Run:  sky run src/Main.sky --target rust
--- Expected: OK -> 25-retry: ...
+-- Expected: three OK -> 25-retry: ... lines
 
 import Sky.Core.Prelude exposing (..)
 import Sky.Core.Task as Task
 import Sky.Core.String as String
 import Std.Log exposing (println)
+import Sky.Core.Error as Error
 import Sky.Core.Error exposing (Error)
 
 
-main : Task Error ()
-main =
+-- Marker the always-failing task carries; asserting it round-trips proves the
+-- Err value is preserved verbatim through retryWith (not swallowed / replaced).
+boomMessage : String
+boomMessage =
+    "boom-25-retry"
+
+
+-- A task that always fails, with its success type pinned to `()` so the
+-- monomorphiser has a concrete type (an un-annotated `Task.fail` leaves the
+-- success slot free, which the Rust backend would resolve to `()` anyway —
+-- we just make it explicit). We never reach the success side: the value is
+-- always `Err boom`.
+alwaysFailingTask : Task Error ()
+alwaysFailingTask =
+    Task.fail (Error.unexpected boomMessage)
+
+
+-- Case 1 — Ok on first try. retryWith yields the success value once.
+okFirstTry : Task Error ()
+okFirstTry =
     let
         policy =
             Task.defaultRetryPolicy
@@ -42,3 +72,53 @@ main =
 
                 else
                     println ("FAIL -> 25-retry: got " ++ String.fromInt n))
+
+
+-- Case 2 — always-fail. retryWith over an always-failing task surfaces the SAME
+-- last Err. We recover with onError and assert the message round-trips.
+alwaysFail : Task Error ()
+alwaysFail =
+    let
+        policy =
+            Task.defaultRetryPolicy
+                |> Task.withMaxAttempts 3
+                |> Task.withBaseMs 10
+
+    in
+    Task.retryWith policy alwaysFailingTask
+        |> Task.onError
+            (\err ->
+                if String.contains boomMessage (Error.toString err) then
+                    println "OK -> 25-retry: always-fail returned the same last Err"
+
+                else
+                    println ("FAIL -> 25-retry: always-fail Err changed: " ++ Error.toString err))
+
+
+-- Case 3 — RetryWhen short-circuit. A `RetryWhen (\_ -> False)` policy must NOT
+-- retry, so the FIRST Err surfaces immediately. Same observable on both
+-- backends. We recover and assert the first Err is preserved.
+retryWhenFalse : Task Error ()
+retryWhenFalse =
+    let
+        policy =
+            Task.defaultRetryPolicy
+                |> Task.withMaxAttempts 3
+                |> Task.withBaseMs 10
+                |> Task.withRetryOn (\_ -> False)
+    in
+    Task.retryWith policy alwaysFailingTask
+        |> Task.onError
+            (\err ->
+                if String.contains boomMessage (Error.toString err) then
+                    println "OK -> 25-retry: RetryWhen False short-circuited to the first Err"
+
+                else
+                    println ("FAIL -> 25-retry: short-circuit Err changed: " ++ Error.toString err))
+
+
+main : Task Error ()
+main =
+    okFirstTry
+        |> Task.andThen (\_ -> alwaysFail)
+        |> Task.andThen (\_ -> retryWhenFalse)

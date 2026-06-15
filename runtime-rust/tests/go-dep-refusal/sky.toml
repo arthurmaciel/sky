@@ -1,0 +1,12 @@
+name = "go-dep-refusal"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+# Negative-path fixture: a Go-only package declared under [go.dependencies].
+# The Rust backend has no Go inspector, so the qualified call to this package
+# MUST refuse cleanly at canonicalise (E1001 / "Undefined name") — NOT panic,
+# NOT silently emit main.rs. See runtime-rust/docs/superpowers/specs/
+# 2026-06-15-go-package-rust-ffi-design.md (DOCUMENT_BLOCKED).
+["go.dependencies"]
+"github.com/gorilla/mux" = "latest"

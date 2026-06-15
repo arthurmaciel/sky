@@ -1,0 +1,15 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Github.Com.Gorilla.Mux as Mux
+
+
+-- A qualified call into a Go-only package. On the Rust backend the FFI
+-- registry for `Mux` is empty (no Go inspector runs under --target rust),
+-- so this name MUST fail to resolve at canonicalise with E1001 /
+-- "Undefined name" — before any Rust codegen. No main.rs is emitted.
+main =
+    let
+        _ = Mux.routerHandleFunc Mux.newRouter "/" ()
+    in
+        ()
