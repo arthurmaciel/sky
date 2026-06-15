@@ -46,7 +46,7 @@ them.
 | Status | Feature | Description | Go parity | Future work |
 |---|---|---|---|---|
 | ✅ | Leaf/data-crate auto-FFI + generic-bound monomorphisation | rustdoc-JSON inspector → typed bindings; generic bounds → Sky types | ✅ | -- |
-| ✅ | FFI `Option<T>` param coercion | `SkyMaybe<T>` → `Option<&str>` / `<u16>` / `<&T>` | ✅ | -- |
+| ✅ | FFI `Option<T>` param coercion | `SkyMaybe<T>` → `Option<&str>`<br>`<u16>`<br>`<&T>` | ✅ | -- |
 | ✅ | FFI crate-name collisions (absolute `::<crate>` paths) | csv/time/log/json/config/email/html crate deps unblocked | ✅ | -- |
 | ✅ | FFI builtin-name collision (`bytes::Bytes`) | crate-prefix → Sky `BytesBytes` resolves to the crate type | ✅ | -- |
 | ✅ | FFI glob-re-export qualification | regex's `RegexBuilder` (private `builders::string`) recovered | ✅ | -- |
@@ -63,10 +63,10 @@ them.
 | Status | Feature | Description | Go parity | Future work |
 |---|---|---|---|---|
 | ✅ | Sky.Core kernels (String/List/Dict/Set/Maybe/Result/Math/Char/Regex/Time/…) | pure + fallible-pure surface | ✅ | -- |
-| ✅ | Crypto / Jwt / Encoding / Bytes kernels | incl. `Bytes` `toHex`/`toString`/`fromHex`/`toBase64`/`fromBase64`/`length` routing (removed a `panic!` polyfill) | ✅ | -- |
-| ✅ | Std.Db (sqlx — sqlite / postgres / mysql) | CRUD, migrations, typed `SqlValue` params, decoders; `withTransaction` (same tx-handle gap as Go), `insertRow` via `RETURNING` | ✅ | -- |
-| ✅ | Std.Auth / Email / Config / Csv / Compression / Cache | bcrypt+JWT, providers, TOML/YAML/JSON, RFC 4180, gzip/zstd, LRU+TTL | ✅ | -- |
-| ✅ | `Io` (`readLine` / `writeStdout` / `writeStderr`) | Task-tier stdin/stdout/stderr kernels (`io.rs`), routed via the default kernel snake-caser | ✅ | -- |
+| ✅ | Crypto<br>Jwt<br>Encoding<br>Bytes kernels | incl. `Bytes` `toHex`/`toString`/`fromHex`/`toBase64`/`fromBase64`/`length` routing (removed a `panic!` polyfill) | ✅ | -- |
+| ✅ | Std.Db (sqlx — sqlite<br>postgres<br>mysql) | CRUD, migrations, typed `SqlValue` params, decoders; `withTransaction` (same tx-handle gap as Go), `insertRow` via `RETURNING` | ✅ | -- |
+| ✅ | Std.Auth<br>Email<br>Config<br>Csv<br>Compression<br>Cache | bcrypt+JWT, providers, TOML/YAML/JSON, RFC 4180, gzip/zstd, LRU+TTL | ✅ | -- |
+| ✅ | `Io` (`readLine`<br>`writeStdout`<br>`writeStderr`) | Task-tier stdin/stdout/stderr kernels (`io.rs`), routed via the default kernel snake-caser | ✅ | -- |
 | 💤 | `Process.run` (subprocess) | no Rust runtime impl yet; calling it fails the `cargo build` (kernel routes to an undefined fn) — never a runtime panic | ❌ — unshipped | Deferred: small (`std::process::Command`) + additive; no architectural blocker |
 | 🟡 | `Task.retryWith` | runs the task once | ⚠️ — Go re-calls a thunk; Rust `SkyTask` is a one-shot `Future`. Run-once is observably correct for Ok-first / last-Err / `RetryWhen`-False | Blocked (by design): a faithful retry needs a thunk-shaped `retryWith` in the shared stdlib (forbidden); workaround: recurse on the `Result` in Sky |
 | ⛔ | `errorToString` String path | retains `Debug` (the only total universal stringifier) | ❌ — Go returns a `string` verbatim (`hi`); Rust `Debug` quotes it (`"hi"`) | Blocked: the `Display` re-bind fails on the generic `Sky.Test.debugShow : a -> String` caller (E0277) — same `SkyShow`-bound epic + no oracle for assertion messages |
@@ -82,7 +82,7 @@ them.
 | ✅ | Sky.Webview | native desktop window (macOS); shares the Sky.Live renderer | ✅ | -- |
 | ✅ | Sky.Cli | one-shot / cron tool; `System.args`, no UI loop, `readPassword` | ✅ | -- |
 | ✅ | Sky.Http.Server | headless JSON/HTTP API — routes + middleware (CORS / logging / basic-auth / rate-limit), cookies, extractors | ✅ | -- |
-| ✅ | Sky.Http.Server.Stream | server-side streaming responses (SSE / chunked / LLM-token relay) | ✅ | -- |
+| ✅ | Sky.Http.Server.Stream | server-side streaming responses (SSE<br>chunked<br>LLM-token relay) | ✅ | -- |
 | ✅ | Sky.Http.Server.WebSocket (+ `Sky.Core.WebSocket` client) | bidirectional sockets on `nhooyr.io/websocket`; broadcast / per-client send | ✅ | -- |
 | ✅ | Sky.Live session stores — memory / sqlite / redis / postgres | `SessionStore` trait; cookie reuse + restart survival | ✅ | -- |
 | ✅ | Sky.Live session store — firestore | parity-by-absence | ✅ — Go's runtime has no firestore arm either (unknown kind → memory); Rust matches | -- |
@@ -111,7 +111,7 @@ them.
 | **stdlib** | `Sky.Core` (pure + kernels), `Std` (effects), `Sky.Http` (server) — shared across both backends |
 | **kernel function** | a built-in runtime primitive dispatched by name; surfaced in Sky as `Ffi.kernel "Name"` |
 | **TEA** | The Elm Architecture — `init` / `update` / `view` / `subscriptions` |
-| **Sky.Live / Sky.Tui / Sky.Webview / Sky.Cli** | the app backends: web (HTTP+SSE), terminal (ANSI cells), desktop (system webview), one-shot/loop CLI |
+| **Sky.Live<br>Sky.Tui<br>Sky.Webview<br>Sky.Cli** | the app backends: web (HTTP+SSE), terminal (ANSI cells), desktop (system webview), one-shot/loop CLI |
 
 **Compiler pipeline** (`src/Sky/`)
 
@@ -122,13 +122,13 @@ them.
 | **Type check** | HM inference + exhaustiveness — `Type/` |
 | **Lower** | canonical AST → IR — `Build/Compile.hs` |
 | **Generate** | IR → target language — `Generate/{Go,Rust}/` |
-| **TargetGo / TargetRust** | the compile-target selector (`--target rust`); shared code branches on it at a minimal seam |
+| **TargetGo<br>TargetRust** | the compile-target selector (`--target rust`); shared code branches on it at a minimal seam |
 
 **Rust codegen — Haskell side** (`src/Sky/Generate/Rust/`, `src/Sky/Build/Rust/`)
 
 | Term | Meaning |
 |---|---|
-| **Builder.hs / Emitter.hs / ModuleEmitter / ExprEmitter / TypeEmitter** | the Rust code generators (expr / type / pattern / module / `Cargo.toml` emission) |
+| **Builder.hs<br>Emitter.hs<br>ModuleEmitter<br>ExprEmitter<br>TypeEmitter** | the Rust code generators (expr / type / pattern / module / `Cargo.toml` emission) |
 | **Walker.hs** | the kernel-usage analyzer — walks the program and produces `UsedKernels` (the `usesX` flags) |
 | **`usesX` flags** | `usesLive` / `usesTui` / `usesWebview` / `usesBackendApp` / `usesTaskRun` / `usesTaskParallel` / `usesDb` / `usesHttp` / `usesHttpServer` / `usesWsClient` / `usesEmail` / `usesTea` / `usesHtml` — gate which runtime modules + crates are emitted |
 | **`mainIsTask`** | entry-mode flag — when true the entry `block_on`s `sky_main()`; a kernel that internally task-runs must NOT set `usesTaskRun` (it flips this off and drops a Task-chain main) |
@@ -136,19 +136,19 @@ them.
 | **monomorphise** | resolve Sky's `any`/generics to a concrete Rust type at the call site, instead of erasing to `Box<dyn Any>` |
 | **DCE** | whole-program dead-code elimination — dep modules prune to the reachable-from-`main` set |
 | **runtimeOpaqueTypes** | Sky types the runtime must name (Request/Response/LiveReq/Csv…) bridged to concrete Rust structs/enums |
-| **CrateSpecs / `crate-specs.toml`** | single source of truth for generated-project crate versions/features; `cargoDependencyFor name` emits a dependency line from it |
+| **CrateSpecs<br>`crate-specs.toml`** | single source of truth for generated-project crate versions/features; `cargoDependencyFor name` emits a dependency line from it |
 
 **Rust runtime crate** (`runtime-rust/src/sky_runtime/`)
 
-| Type / fn | Meaning |
+| Type<br>fn | Meaning |
 |---|---|
 | **`sky_runtime`** | the runtime crate copied into every generated project |
-| **`SkyResult` / `SkyMaybe`** | Rust forms of `Result Error a` / `Maybe a` |
-| **`SkyString` / `SkyList` / `SkyDict`** | Sky string / list (`Vec`) / dict (`HashMap`) |
-| **`SkyTask` / `SkyCmd` / `SkySub`** | async task (`Pin<Box<dyn Future>>`) / TEA command / TEA subscription |
+| **`SkyResult`<br>`SkyMaybe`** | Rust forms of `Result Error a` / `Maybe a` |
+| **`SkyString`<br>`SkyList`<br>`SkyDict`** | Sky string<br>list (`Vec`)<br>dict (`HashMap`) |
+| **`SkyTask`<br>`SkyCmd`<br>`SkySub`** | async task (`Pin<Box<dyn Future>>`)<br>TEA command<br>TEA subscription |
 | **`SkyError`** | the project error type the generated wrappers fix `E` to (`String`) |
 | **`SkyRow`** | trait a `Db.get*` row is decoded through (no `Any`) |
-| **`SubManager` / `spawn_subs`** | the two Sub drivers (Cli/Tui loop · Sky.Live) — both spawn `SkySub::Source` subscriptions and abort+respawn per model update |
+| **`SubManager`<br>`spawn_subs`** | the two Sub drivers (Cli/Tui loop · Sky.Live) — both spawn `SkySub::Source` subscriptions and abort+respawn per model update |
 | **`Broker<T>`** | per-payload-type pub/sub broker keyed by `TypeId` — the payload travels as its real `T`, never downcast |
 | **`SessionStore`** | the Sky.Live session-store trait — `Memory` / `Sqlite` / `Postgres` / `Redis` impls |
 | **`LiveReq`** | the typed `init` request record (`path`/`query`/`method`/`params`/`headers`/`cookies`) |
@@ -214,7 +214,7 @@ erasure:
 | Need | Technique (not `Any`) |
 |---|---|
 | HTTP/WS handlers of project error `E` | erase `E` by awaiting the task + mapping `Err -> 500` (`server_get<E,H>`); handlers stay `Send + Sync + 'static` |
-| `Cmd msg` / `Sub msg` payloads | generic over concrete `M`; the intermediate `a` is erased *inside* a boxed `Future<Output = M>` |
+| `Cmd msg`<br>`Sub msg` payloads | generic over concrete `M`; the intermediate `a` is erased *inside* a boxed `Future<Output = M>` |
 | Records the runtime must name (Request/Response/Csv/LiveReq/…) | `runtimeOpaqueTypes` bridge to concrete structs/enums (`pub use … as …`) |
 | Polymorphic value storage (`Std.Cache k v`) | refused — would need `Box<dyn Any>`; flagged as blocked, not erased |
 
@@ -470,7 +470,7 @@ byte-identical:
 | layout | `row`/`column`/`spacing`/`padding`/`align` |
 | styling | `Background`/`Border`/`Font` |
 | sized | `button`/`link`/`image` (static) |
-| advanced | nearby overlays / aspect-ratio / grid |
+| advanced | nearby overlays<br>aspect-ratio<br>grid |
 | semantic | `Region` tag + aria mapping |
 
 The load-bearing fixes (all Rust-target only, Go untouched):
@@ -500,10 +500,10 @@ rather than the static corpus.
 
 Only modify these when working on the Rust backend:
 
-| Directory / file | Purpose |
+| Directory<br>file | Purpose |
 |---|---|
 | `runtime-rust/` | runtime crate (`sky_runtime` modules, tests) |
-| `src/Sky/Generate/Rust/Builder.hs` + `Builder/` | Rust codegen — `Emitter` / `ExprEmitter` / `TypeEmitter` / `Pattern` / `Kernel` / `ModuleEmitter` / `Walker` / `Naming` / `CrateSpecs` (`crate-specs.toml`) |
+| `src/Sky/Generate/Rust/Builder.hs` + `Builder/` | Rust codegen — `Emitter`<br>`ExprEmitter`<br>`TypeEmitter`<br>`Pattern`<br>`Kernel`<br>`ModuleEmitter`<br>`Walker`<br>`Naming`<br>`CrateSpecs` (`crate-specs.toml`) |
 | `src/Sky/Generate/Rust/Project.hs` | project orchestration — `main.rs` + `Cargo.toml`, copies runtime + FFI bindings |
 | `src/Sky/Build/Rust/Ffi.hs` | Rust FFI — inspector, `.skyi` / `.kernel.json` / `_bindings.rs`, coercion |
 | `src/Sky/Build/Rust/Console.hs` | separate-process console pre-build (fingerprint-validated) |
@@ -959,8 +959,8 @@ for opaque:
 | Sky param type | Wrapper param type |
 |---|---|
 | `String` | `String` (borrowed `&argN` internally) |
-| `Int` / `Float` / `Bool` / `Bytes` | `i64` / `f64` / `bool` / `Vec<u8>` |
-| `List a` / `Maybe a` / `Dict String v` | `Vec<…>` / `SkyMaybe<…>` / `HashMap<…>` |
+| `Int`<br>`Float`<br>`Bool`<br>`Bytes` | `i64`<br>`f64`<br>`bool`<br>`Vec<u8>` |
+| `List a`<br>`Maybe a`<br>`Dict String v` | `Vec<…>`<br>`SkyMaybe<…>`<br>`HashMap<…>` |
 | opaque | fully-qualified raw type |
 
 **Param coercion (`argCall`).**
@@ -969,8 +969,8 @@ for opaque:
 |---|---|---|
 | `String` | `&str` | `&argN` |
 | `i64`/`f64` | narrower numeric | `argN as <raw>` |
-| `Vec<i64>` | `&[u8]` / `Vec<u8>` | `&to_u8_vec(&argN)` / `to_u8_vec(&argN)` |
-| `Vec<i64>` | `[u8; N]` / `&[u8; N]` | prelude `let bN = to_u8_array::<_,N>(…)?;` then `bN`/`&bN` |
+| `Vec<i64>` | `&[u8]`<br>`Vec<u8>` | `&to_u8_vec(&argN)`<br>`to_u8_vec(&argN)` |
+| `Vec<i64>` | `[u8; N]`<br>`&[u8; N]` | prelude `let bN = to_u8_array::<_,N>(…)?;` then `bN`/`&bN` |
 | anything | same/absent | `argN` |
 
 `[u8; N]` length mismatch returns `Err`, never panics.
@@ -979,10 +979,10 @@ for opaque:
 
 | Raw return | Wrapper return | Lift |
 |---|---|---|
-| `&[u8]` / `Vec<u8>` / `[u8; N]` | `Vec<i64>` | `from_u8_slice(…)` |
+| `&[u8]`<br>`Vec<u8>`<br>`[u8; N]` | `Vec<i64>` | `from_u8_slice(…)` |
 | `Option<T>` | `SkyMaybe<T'>` | `Some→Just`, `None→Nothing` |
 | `Vec<T>` | `Vec<T'>` | per-element map only if `T` needs coercion |
-| `iN`/`uN` / `f32`/`f64` | `i64` / `f64` | `as i64` / `as f64` |
+| `iN`/`uN`<br>`f32`/`f64` | `i64`<br>`f64` | `as i64`<br>`as f64` |
 | `&str`/`&String` | `String` | `.to_string()` |
 | opaque `T` | `T` (qualified) | identity |
 
