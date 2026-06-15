@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::Connection;
 
 pub struct Store { pub conn: Connection }
@@ -44,7 +44,13 @@ impl Store {
     pub fn get_meta(&self, k:&str) -> Result<Option<String>> {
         Ok(self.conn.query_row("SELECT v FROM meta WHERE k=?", [k], |r| r.get(0)).ok())
     }
-    pub fn count(&self, table:&str) -> Result<i64> {
+    pub fn count(&self, table: &str) -> Result<i64> {
+        // Allowlist guard: table is always a hardcoded literal, but be explicit so
+        // a future caller can't inadvertently pass user-controlled input here.
+        match table {
+            "files" | "symbols" | "edges" | "kernels" | "meta" => {}
+            _ => bail!("store::count: unexpected table name {table:?}"),
+        }
         Ok(self.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?)
     }
     pub fn symbols_named(&self, name:&str) -> Result<Vec<(String,i64)>> {

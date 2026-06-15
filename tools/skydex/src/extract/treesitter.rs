@@ -1,7 +1,31 @@
 use crate::model::Lang;
 use crate::store::Store;
 use anyhow::Result;
+use regex::Regex;
+use std::sync::OnceLock;
 use tree_sitter::{Parser, Query, QueryCursor};
+
+fn re_go_register() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        // Matches: RegisterPure("Mod_fn", ...) or RegisterTask("Mod_fn", ...)
+        // Captures the string literal name (group 1).
+        // tree-sitter misses these because the func arg is anonymous.
+        Regex::new(r#"Register\w*\(\s*"([A-Za-z][A-Za-z0-9]*_[A-Za-z][A-Za-z0-9]*)""#).unwrap()
+    })
+}
+
+/// Go kernels registered via string literals: `RegisterPure("Mod_fn", ...)`,
+/// `RegisterTask("Mod_fn", ...)`, etc.  tree-sitter misses these (the closure
+/// passed as the second arg is anonymous, so the `function_declaration` name
+/// capture never fires for them).  Line-scan them separately and return the
+/// registered kernel names so callers can union them into `go_fns`.
+pub fn go_registered_kernels(src: &str) -> Vec<String> {
+    re_go_register()
+        .captures_iter(src)
+        .map(|c| c[1].to_string())
+        .collect()
+}
 
 fn lang_grammar(path: &str, lang: Lang) -> Option<(tree_sitter::Language, &'static str)> {
     // (grammar, query) — query captures @def (a defined symbol) and @imp (an import target)
@@ -88,6 +112,39 @@ pub fn treesitter_defs(src: &str, lang: Lang) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::store::Store; use crate::model::Lang;
+
+    // ── Finding #1 regression: go_registered_kernels ────────────────────────
+    #[test]
+    fn go_registered_kernels_captures_string_registered_names() {
+        // Mirrors the real pattern in runtime-go/rt/decimal_kernel.go etc.:
+        //   RegisterPure("Decimal_add", func(args []any) any { ... })
+        // tree-sitter sees the anonymous func, never "Decimal_add".
+        let src = "func x(){}\n\tRegisterPure(\"Decimal_add\", func(a []any) any { nil })\n";
+        let names = go_registered_kernels(src);
+        assert_eq!(names, vec!["Decimal_add"]);
+    }
+
+    #[test]
+    fn go_registered_kernels_captures_multiple() {
+        let src = "\tRegisterPure(\"Money_add\", func(a []any) any { nil })\n\
+                   \tRegisterPure(\"Bytes_empty\", func(a []any) any { nil })\n\
+                   // not a kernel: RegisterReadinessProbe(\"db\", ...)\n\
+                   \tRegisterTask(\"Cache_get\", func(a []any) any { nil })\n";
+        let mut names = go_registered_kernels(src);
+        names.sort();
+        assert_eq!(names, vec!["Bytes_empty", "Cache_get", "Money_add"]);
+    }
+
+    #[test]
+    fn go_registered_kernels_ignores_non_kernel_patterns() {
+        // RegisterReadinessProbe("db", ...) — "db" has no underscore, must not match
+        let src = "RegisterReadinessProbe(\"db\", probe)\n\
+                   RegisterReadinessProbe(\"sessions\", probe)\n";
+        let names = go_registered_kernels(src);
+        assert!(names.is_empty(), "Expected empty, got: {names:?}");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     #[test]
     fn extracts_rust_fn_and_use() {
         let s = Store::open(":memory:").unwrap();

@@ -1,6 +1,7 @@
 pub mod sky;
 pub mod treesitter;
 
+pub use treesitter::go_registered_kernels;
 pub use treesitter::treesitter_defs;
 
 use crate::model::Lang;
@@ -33,7 +34,16 @@ pub fn extract_file(store: &Store, path: &str, lang: Lang, src: &str) -> Result<
                 if let Some(c) = re_sh_source().captures(line) { store.put_edge(path, &c[1], "import")?; }
             }
         }
-        Lang::Go | Lang::Rust | Lang::Ts => treesitter::extract(store, path, lang, src)?,
+        Lang::Go => {
+            treesitter::extract(store, path, lang, src)?;
+            // Also capture kernels registered via string literals, e.g.
+            //   RegisterPure("Decimal_add", func(args []any) any { ... })
+            // tree-sitter only sees the anonymous closure, never the name.
+            for name in treesitter::go_registered_kernels(src) {
+                store.put_symbol(path, &name, "def", 0)?;
+            }
+        }
+        Lang::Rust | Lang::Ts => treesitter::extract(store, path, lang, src)?,
         Lang::Other => {}
     }
     Ok(())

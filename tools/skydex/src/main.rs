@@ -111,6 +111,12 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
             for c in extract::treesitter_defs(&src, model::Lang::Go) {
                 go_fns.insert(c);
             }
+            // Kernels registered via string literals (e.g. RegisterPure("Decimal_add", ...))
+            // are invisible to tree-sitter (the closure is anonymous). Line-scan them
+            // separately and union into go_fns so parity reconcile sees them.
+            for c in extract::go_registered_kernels(&src) {
+                go_fns.insert(c);
+            }
         }
         if f.lang == model::Lang::Rust {
             for c in extract::treesitter_defs(&src, model::Lang::Rust) {
