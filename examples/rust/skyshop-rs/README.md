@@ -82,53 +82,86 @@ the source of truth; the cache repo is its committed mirror.
 
 ## Build & run
 
-### Prerequisites
+> Like the original (which needs real Firebase + Stripe credentials), skyshop-rs
+> talks to a Firestore database and the Stripe API. Locally you point it at the
+> **Firestore emulator** + **stripe-mock**. Skipping this is the cause of
+> `[DB ERROR] Products.listProducts: ... fs_query_where products` — with no
+> emulator running the firestore shim falls back to real GCP, finds no
+> credentials, and errors.
 
-- `sky` built with the Rust backend (`feat/runtime-rust`).
-- The wrapper git repo present at `~/.cache/sky/skyshop-rs-wrappers`.
-- Three test backends (for a live run):
-  - Firestore emulator (`gcloud emulators firestore start`)
-  - `stripe-mock` (`go install github.com/stripe/stripe-mock@latest`)
-  - Firebase Auth emulator (`firebase-tools emulators:start --only auth`)
+### Prerequisites & references — install and use the test backends
 
-### Build
+| Backend | Install | Use · docs |
+|---|---|---|
+| **Firestore emulator** | Google Cloud SDK — <https://cloud.google.com/sdk/docs/install> — then `gcloud components install cloud-firestore-emulator` (needs a JRE) | `gcloud emulators firestore start` · emulator guide: <https://firebase.google.com/docs/firestore/security/test-rules-emulator> |
+| **Stripe (mock)** | `go install github.com/stripe/stripe-mock@latest` · <https://github.com/stripe/stripe-mock> | point the shim at it with `STRIPE_API_BASE` · test cards & test-mode reference: <https://docs.stripe.com/terminal/references/testing> |
+| **Firebase Auth emulator** *(optional — sign-in only)* | `firebase-tools` (npm) — **needs Node 18+** — <https://firebase.google.com/docs/emulator-suite> | `firebase emulators:start --only auth` — browsing + checkout work without it |
+
+- `sky` built with the Rust backend (`feat/runtime-rust`); the wrapper git repo present at `~/.cache/sky/skyshop-rs-wrappers`.
+- **Leave `ENV` / `SKY_ENV` unset** (or `dev` / `development` / `local`). The shims **refuse** the verification-skipping emulator paths in production (a deliberate security gate) — set `ENV=production` and you get the same `[DB ERROR]`.
+
+### 1. Build
 
 ```bash
 export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin"
 export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target" RUSTC_WRAPPER=sccache
 cd examples/rust/skyshop-rs
 sky build src/Main.sky --target rust
-# → sky-out/Rust/target/debug/sky-app  (or $CARGO_TARGET_DIR/debug/sky-app)
+# → sky-out/Rust/target/debug/sky-app
 ```
 
-### Run (against the three test backends)
+### 2. Start the Firestore emulator and SEED the catalogue (required)
+
+The catalogue is read from the `products` collection where `published == "true"`.
+A committed seeder writes 5 sample products through the same `fs_set_doc` entry
+the app uses (idempotent — safe to re-run):
 
 ```bash
-# 1. Firestore emulator
-gcloud emulators firestore start --host-port=127.0.0.1:8412 &
+gcloud emulators firestore start --host-port=127.0.0.1:8412 &   # wait for "Dev App Server is now running."
 export FIRESTORE_EMULATOR_HOST=127.0.0.1:8412 FIRESTORE_PROJECT_ID=sky-skyshop-dev
 
-# 2. stripe-mock
-~/go/bin/stripe-mock -http-port 12111 &
-export STRIPE_API_BASE=http://127.0.0.1:12111 STRIPE_API_KEY=sk_test_123
-
-# 3. Firebase auth emulator
-firebase-tools emulators:start --only auth --project sky-skyshop-dev &
-export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099
-
-# 4. boot the app
-SKY_LIVE_PORT=8000 SKY_CONSOLE_EMBED=off "$CARGO_TARGET_DIR/debug/sky-app" &
-curl http://127.0.0.1:8000/        # → the seeded firestore catalogue
+( cd examples/rust/skyshop-rs/wrappers/sky-firestore-shim
+  env -u ENV -u SKY_ENV cargo run --bin seed )                  # → [SEED] done: 5/5 products written
 ```
 
-Seed a couple of products into the firestore emulator first (the catalogue is
-read from the `products` collection, `published == "true"`); any throwaway
-seeder that writes flat string-valued docs through `fs_set_doc` works.
+### 3. Start stripe-mock and run the app
+
+```bash
+~/go/bin/stripe-mock -http-port 12111 &                          # ~1s to start listening
+export STRIPE_API_BASE=http://127.0.0.1:12111 STRIPE_API_KEY=sk_test_123
+
+# (optional) sign-in support — needs Node 18+:
+# firebase emulators:start --only auth --project sky-skyshop-dev &
+# export FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099
+
+pkill -9 -f sky-out/Rust/target/debug/sky-app 2>/dev/null        # kill any stale instance on :8000
+env -u ENV -u SKY_ENV \
+  FIRESTORE_EMULATOR_HOST=127.0.0.1:8412 FIRESTORE_PROJECT_ID=sky-skyshop-dev \
+  STRIPE_API_BASE=http://127.0.0.1:12111 STRIPE_API_KEY=sk_test_123 \
+  SKY_LIVE_PORT=8000 SKY_CONSOLE_EMBED=off \
+  ./sky-out/Rust/target/debug/sky-app &
+
+curl -s http://127.0.0.1:8000/ | grep -F "Aurora Desk Lamp"      # → the seeded catalogue
+```
+
+**Success signal:** the 5 products render and the app log shows **no `[DB ERROR]`**.
+(The public catalogue path is silent on success by design; `[PRODUCTS] loaded N`
+is the admin-only `Db.queryDocs` path.)
+
+### Troubleshooting
+
+| Symptom | Cause → fix |
+|---|---|
+| `[DB ERROR] ... fs_query_where products` | emulator not running / `FIRESTORE_EMULATOR_HOST` unset → start the emulator + export the var (step 2). Or `ENV`/`SKY_ENV=production` → unset it (the dev-gate refuses the emulator path). |
+| Blank catalogue, **no** `[DB ERROR]` | emulator up but not seeded → run the seeder (step 2). |
+| `Address already in use` / stale catalogue served | a previous `sky-app` still holds `:8000` → `pkill -9 -f sky-out/Rust/target/debug/sky-app` (or a fresh `SKY_LIVE_PORT`). |
+| Sign-in does nothing | the Firebase Auth emulator isn't running (needs Node 18+) — optional; browsing + checkout don't need it. |
 
 ### Backend env vars
 
 | Var | Selects | Used by |
 |---|---|---|
+| `ENV` / `SKY_ENV` | unset / `dev` / `development` / `local` ⇒ emulator paths allowed; anything else ⇒ refused | all three shims (security gate) |
 | `FIRESTORE_EMULATOR_HOST` | firestore emulator endpoint | `sky-firestore-shim` |
 | `FIRESTORE_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` | firestore project | `sky-firestore-shim` |
 | `STRIPE_API_BASE` | overrides the Stripe base URL (point at stripe-mock) | `sky-stripe-shim` |
