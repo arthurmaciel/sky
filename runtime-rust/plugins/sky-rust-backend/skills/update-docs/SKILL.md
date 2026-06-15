@@ -20,12 +20,20 @@ Run `git status --short` to see what's dirty.
   2. If the changes added/renamed code symbols, run
      **`sky-rust-backend:informative-naming`** over them first — fix
      under-informing names before they land (cheaper now than after).
-  3. Write a commit message that accurately describes what changed (follow the
+  3. **Pre-final code gate (security · correctness · soundness — above all).**
+     Before staging, ensure the pending code has passed the **`## Pre-final code
+     gate`** in `runtime-rust/CLAUDE.md` — an independent, adversarial
+     security/correctness/soundness inspection that OUTRANKS every other
+     principle. If the authoring step didn't run it, run it now (don't commit
+     ungated code). Clean → continue. A principle hurt → rethink + reimplement;
+     re-review. No adequate in-boundary fix → REVERT, LOG it in
+     `runtime-rust/README.md`, and SIGNAL the user — never commit a violation.
+  4. Write a commit message that accurately describes what changed (follow the
      project's `<type>(<scope>): <summary>` convention, e.g.
      `fix(rust): …` / `feat(rust): …` / `refactor(rust): …`).
-  4. Stage all relevant files (`git add`) — exclude build artefacts
+  5. Stage all relevant files (`git add`) — exclude build artefacts
      (`sky-out/`, `dist-newstyle/`, `.skycache/`, `target/`).
-  5. Commit. (No `Co-Authored-By` trailer — the repo convention forbids it.)
+  6. Commit. (No `Co-Authored-By` trailer — the repo convention forbids it.)
 
 ### Step 2 — Consolidate root docs, then refresh `runtime-rust/README.md`
 

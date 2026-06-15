@@ -97,15 +97,27 @@ Any set of stages that all mutate the SAME resource (one wrapper git repo + one
 example build) is **sequential, not parallel** — concurrent commits + concurrent
 builds race. Run them one at a time; each ends GREEN before the next starts.
 
-### Phase 6 — Adversarial review (do NOT skip — this was the gap)
-The build being green is necessary, not sufficient. Run an adversarial pass over
-the security/soundness-sensitive surface (anything touching auth/secrets/payments,
-TEA dispatch, `unsafe`, generated FFI, panic vectors). Use
+### Phase 6 — Pre-final code gate: adversarial review (do NOT skip — this was the gap)
+The build being green is necessary, not sufficient. This phase IS the
+**`## Pre-final code gate`** in `runtime-rust/CLAUDE.md`, applied to everything
+the swarm produced: an independent, adversarial pass where **security AND
+correctness AND soundness outrank every other principle**. Cover the sensitive
+surface (auth / secrets / payments, TEA dispatch, `unsafe`, generated FFI, panic
+vectors, any "type-checks but `cargo`-fails" shape). Use
 `superpowers:requesting-code-review`, `/security-review`, or
-`sky-rust-backend:quality-audit`. Every gap found is **filed** (a spec/issue +
-the no-deferral rule), never silently worked around. Workarounds the executors
-applied (e.g. a codegen default that needed an explicit signature) get an
-explicit follow-up, not burial.
+`sky-rust-backend:quality-audit`; reviewers are read-only so they fan out safely.
+Per finding:
+- **Clean** → Phase 7.
+- **A principle is hurt** → RETHINK and REIMPLEMENT it adequately in-boundary;
+  re-review. A discovered gap that's real but separable is **filed** (a spec +
+  the no-deferral rule), never buried as a silent workaround.
+- **No adequate in-boundary fix** → REVERT the offending change, LOG it in
+  `runtime-rust/README.md` (attempt · principle violated · what a correct fix
+  needs), and SIGNAL the user. Never ship a security/correctness/soundness
+  violation.
+
+(The skyshop-rs run proved why: this phase, run retroactively, caught a CRITICAL
+emulator auth-bypass + two codegen holes that the green build hid.)
 
 ### Phase 7 — Finalize
 Docs (`update-docs` / README + status row), checkpoint commits split by concern,

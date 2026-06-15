@@ -76,6 +76,17 @@ silently — surface it and ask. Real conflicts:
 
 Default outside those: favour the clearer name.
 
+## Pre-final code gate (security · correctness · soundness)
+
+A rename is a code change, so before the renames land run the **`## Pre-final
+code gate`** in `runtime-rust/CLAUDE.md` — security/correctness/soundness
+**outrank** readability. The rename-specific risk is **correctness**: a name
+that is actually a contract (wire format, serde field, DB column, Go-shared
+seam) must NOT be changed — that breaks the contract silently. Clean → land the
+renames. A principle hurt → revert that rename and keep the contract name. If a
+needed rename cannot be done without breaking a contract, LOG it in
+`runtime-rust/README.md` and SIGNAL the user rather than ship the break.
+
 ## Capture learnings (self-improving loop)
 
 After this skill's work completes, record any **significant, verified,

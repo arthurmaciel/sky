@@ -26,6 +26,10 @@ needed is skipped.
      conflict surface (e.g. `FfiGen.hs`/`Toml.hs`), an upstream shared-type
      reshape with more than one defensible Rust adaptation, or anything that
      would change Go behaviour. Otherwise proceed without stopping.
+   - The sync's **pre-final code gate** (Step 7b — security/correctness/
+     soundness, `## Pre-final code gate` in `runtime-rust/CLAUDE.md`) MUST pass
+     before its merge commit; a resolution that violates one of the three is
+     reverted + logged in `runtime-rust/README.md` + signalled, not committed.
    - Do not push. The merge commit is the durable artifact.
 
 3. **Plan the sweeps** (diffs against the snapshot):

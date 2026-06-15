@@ -168,6 +168,38 @@ General skills enabled:
 - `/grill-with-docs` — challenge plans against domain glossary + ADRs
 - `/improve-codebase-architecture` — find deepening opportunities
 
+## Pre-final code gate (security · correctness · soundness — above all)
+
+Any skill or agent that **writes code** runs this as its **pre-final stage,
+BEFORE the commit / hand-off**. These three principles **outrank every other**
+(efficiency, Go-parity, brevity, even "it builds") — a change that hurts any of
+them is unacceptable, no matter what it buys.
+
+| Principle | What it forbids |
+|---|---|
+| **Security** | auth / secret / payment bypass; injection; a verification-skipping path reachable in production; a secret in a log/error string |
+| **Correctness** | a wrong result from valid input; a broken contract (wire / serde / DB-column / Go-shared name); any shape where `sky` type-checks but `cargo build` fails or the program misbehaves — the "type-checks ⇒ builds ⇒ works" floor MUST hold |
+| **Soundness** | a panic / `unwrap` / `expect` / `Box<dyn Any>` / unchecked downcast / OOB / UB / data race reachable from well-typed Sky; any non-total-by-construction path |
+
+**How.** Run it **adversarially** — assume a flaw exists and hunt for it — with
+**independent** reviewer agent(s) (`superpowers:requesting-code-review`,
+`/security-review`, `sky-rust-backend:quality-audit`), never a self-pat.
+Reviewers are read-only, so they fan out safely over parallel-authored work.
+
+**Outcome.**
+- **Clean** → proceed to commit / hand-off.
+- **A principle is hurt** → RETHINK and REIMPLEMENT it adequately in-boundary; re-review until clean.
+- **No adequate in-boundary implementation exists** → **REVERT** the change,
+  **LOG** it in `runtime-rust/README.md` (what was attempted, which principle it
+  violated, what a correct fix would need), and **SIGNAL the user** explicitly.
+  NEVER ship a security / correctness / soundness violation; NEVER bury it as a
+  silent workaround.
+
+Not optional, not negotiable — it is the reason the Rust backend exists (a
+well-typed Sky program must never fault). The skyshop-rs Phase-6 review — a
+CRITICAL emulator auth-bypass plus two "type-checks but `cargo`-fails" codegen
+holes that a green build hid — is why this gate is mandatory, not advisory.
+
 ## Agent learnings (self-improving loop)
 
 Durable, **verified**, generalizable knowledge future agents should inherit.

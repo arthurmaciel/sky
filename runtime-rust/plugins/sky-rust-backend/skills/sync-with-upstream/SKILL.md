@@ -151,9 +151,21 @@ commit in Step 8.
 > run hangs, kill the orphan `cabal test` / `sky-tests` / `app-live` / `sky console`
 > processes (`pkill -9 -f …`) before retrying.
 
+### Step 7b — Pre-final code gate (security · correctness · soundness)
+
+Before committing the merge, put the conflict resolutions + any Rust-backend
+adaptation (Steps 4–6) through the **`## Pre-final code gate`** in
+`runtime-rust/CLAUDE.md`: an independent, adversarial security/correctness/
+soundness inspection that **outranks every other principle**. A merge that
+silently changes a shared-type contract, reintroduces a panic vector, or papers
+over an upstream behaviour change is exactly what this catches. Clean → Step 8.
+A principle hurt → rethink + reimplement the resolution and re-review. No
+adequate in-boundary resolution → REVERT, LOG it in `runtime-rust/README.md`,
+and SIGNAL the user. Never commit a merge that violates one of the three.
+
 ### Step 8 — Complete the merge commit
 
-Only after Step 7 is green:
+Only after Step 7 is green AND Step 7b's gate passes:
 ```bash
 git add sky-compiler.cabal src/Sky/Build/Compile.hs runtime-rust/Cargo.toml <any Rust files touched in Step 6>
 git commit --no-edit   # or supply a message describing the version + resolutions
