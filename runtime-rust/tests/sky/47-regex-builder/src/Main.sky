@@ -5,10 +5,15 @@ import Std.Log exposing (println)
 import Rust.Regex as Regex
 
 
--- P3 regression: build a case-insensitive regex via RegexBuilder's recovered
--- fluent setters, then match. "a+" case-insensitive should match "AAA".
-matched : Bool
-matched =
+-- P3 + collision-fix regression: regex's `Regex` (string) and `bytes::Regex`
+-- now get DISTINCT Sky names (`Regex` / `BytesRegex`), so BOTH variants' full
+-- builder surfaces are usable. String regex takes a String haystack; bytes
+-- regex takes `List Int`.
+
+
+-- String variant: "a+" case-insensitive matches "AAA".
+strMatch : Bool
+strMatch =
     case Regex.new_from_regexBuilder "a+" of
         Err _ -> False
         Ok b0 ->
@@ -18,10 +23,33 @@ matched =
                     case Regex.build_from_regexBuilder b1 of
                         Err _ -> False
                         Ok re ->
-                            case Regex.is_match_from_regex re [ 65, 65, 65 ] of
+                            case Regex.is_match_from_regex re "AAA" of
+                                Err _ -> False
+                                Ok m -> m
+
+
+-- Bytes variant (distinct Sky type `BytesRegex`): "a+" case-insensitive
+-- matches the bytes [65,65,65] ("AAA").
+bytesMatch : Bool
+bytesMatch =
+    case Regex.new_from_bytesRegexBuilder "a+" of
+        Err _ -> False
+        Ok b0 ->
+            case Regex.case_insensitive_from_bytesRegexBuilder b0 True of
+                Err _ -> False
+                Ok b1 ->
+                    case Regex.build_from_bytesRegexBuilder b1 of
+                        Err _ -> False
+                        Ok re ->
+                            case Regex.is_match_from_bytesRegex re [ 65, 65, 65 ] of
                                 Err _ -> False
                                 Ok m -> m
 
 
 main =
-    println (if matched then "ok: regex RegexBuilder setters (P3)" else "FAIL: no match")
+    println
+        (if strMatch && bytesMatch then
+            "ok: regex string + bytes variants both usable (collision fixed)"
+         else
+            "FAIL"
+        )

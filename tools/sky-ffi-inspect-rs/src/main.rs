@@ -1592,8 +1592,42 @@ fn resolve_path_to_sky(rp: &serde_json::Value, aliases: &HashMap<String, String>
         _ => {
             // Strip module-path qualifier: std::collections::HashMap → HashMap
             let base = name.rsplit_once("::").map(|(_, last)| last).unwrap_or(name);
-            aliases.get(base).cloned().unwrap_or_else(|| base.to_string())
+            if let Some(alias) = aliases.get(base) {
+                return alias.clone();
+            }
+            // Disambiguate same-named types in different submodules by deriving
+            // the Sky name from the type's QUALIFIED public path (the same
+            // reachable-paths lookup rustdoc_type_to_rust_str uses): regex::Regex
+            // → "Regex", regex::bytes::Regex → "BytesRegex". Without this both
+            // collapse to "Regex", the wrapper-name dedup drops one, and one
+            // variant's whole surface is lost.
+            match rp.get("id").and_then(reachable_local_path) {
+                Some(full) => sky_name_from_path(&full),
+                None => base.to_string(),
+            }
         }
+    }
+}
+
+/// Derive a Sky type name from a qualified crate path, CamelCase-joining any
+/// submodule segments so same-named types in different submodules get distinct
+/// Sky names: `regex::Regex` → `Regex`, `regex::bytes::Regex` → `BytesRegex`,
+/// `chrono::format::Parsed` → `FormatParsed`. The crate segment is dropped.
+fn sky_name_from_path(path: &str) -> String {
+    let segs: Vec<&str> = path.split("::").filter(|s| !s.is_empty()).collect();
+    match segs.len() {
+        0 => String::new(),
+        1 => segs[0].to_string(), // bare name (no crate prefix to drop)
+        _ => segs[1..]
+            .iter()
+            .map(|s| {
+                let mut c = s.chars();
+                match c.next() {
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect(),
     }
 }
 
