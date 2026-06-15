@@ -569,14 +569,24 @@ emitRustFile kernelName pkg =
                     Just (SeqKind Owned    (ElemGeneral _ _)) -> base    -- Vec<T> identity
                     Just (SeqKind (Arr _)    (ElemGeneral _ _)) -> "b" ++ show j   -- prelude local (owned)
                     Just (SeqKind (RefArr _) (ElemGeneral _ _)) -> "&b" ++ show j  -- prelude local (by ref)
-                    Nothing ->
-                        if declTy == "String"
-                        then "&" ++ base          -- Sky String → &str
-                        else if null rawTy || rawTy == declTy
-                        then base                 -- same type, pass through
-                        else if isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
-                        then base ++ " as " ++ rawTy   -- narrowing cast (e.g. i64 → u32)
-                        else base                 -- opaque: pass through unchanged
+                    Nothing
+                        -- Option<inner> param: the wrapper takes SkyMaybe<declInner>;
+                        -- convert to Option<declInner> then adapt the inner value to
+                        -- the crate fn's Option<rawInner>. The temp Option<String>
+                        -- lives for the call, so `.as_deref()` borrow is sound.
+                        | Just innerRaw <- stripGeneric1 "Option" rawTy ->
+                            let inner = trimStr innerRaw
+                                opt   = "sky_maybe_to_option(" ++ base ++ ")"
+                            in case inner of
+                                 "&str"    -> opt ++ ".as_deref()"
+                                 "&String" -> opt ++ ".as_ref()"
+                                 _ | isNumericRust inner -> opt ++ ".map(|x| x as " ++ inner ++ ")"
+                                   | otherwise           -> opt   -- String/bool/owned opaque: identity
+                        | declTy == "String" -> "&" ++ base          -- Sky String → &str
+                        | null rawTy || rawTy == declTy -> base      -- same type, pass through
+                        | isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
+                            -> base ++ " as " ++ rawTy               -- narrowing cast (e.g. i64 → u32)
+                        | otherwise -> base                          -- opaque: pass through unchanged
             callArgs = intercalate ", " (map argCall [0..nParams - 1])
             callExpr
                 | isInstance =

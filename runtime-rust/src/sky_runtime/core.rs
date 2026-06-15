@@ -139,6 +139,18 @@ pub fn sky_maybe_and_then<T, U>(m: SkyMaybe<T>, f: impl FnOnce(T) -> SkyMaybe<U>
     match m { SkyMaybe::Just(v) => f(v), SkyMaybe::Nothing => SkyMaybe::Nothing }
 }
 
+/// `SkyMaybe<T>` -> `Option<T>` for FFI parameter coercion: a Sky `Maybe X`
+/// argument reaches the wrapper as `SkyMaybe<X>` but the underlying crate fn
+/// takes `Option<…>`. The generated wrapper calls this then adapts the inner
+/// value (`.as_deref()` for `Option<&str>`, `.map(|x| x as u16)` for narrowed
+/// numerics, identity otherwise). Total: `Just -> Some`, `Nothing -> None`.
+pub fn sky_maybe_to_option<T>(m: SkyMaybe<T>) -> Option<T> {
+    match m {
+        SkyMaybe::Just(v) => Some(v),
+        SkyMaybe::Nothing => None,
+    }
+}
+
 // ===========================================
 // Result (generic over error type E)
 // ===========================================

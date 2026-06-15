@@ -171,6 +171,22 @@ fn result_traverse_empty_is_ok_empty() {
     assert_eq!(r.with_default(vec![99]), Vec::<i64>::new());
 }
 
+// ── sky_maybe_to_option: FFI Option-param bridge (Just->Some, Nothing->None) ─
+
+#[test]
+fn sky_maybe_to_option_both_variants() {
+    assert_eq!(sky_runtime::core::sky_maybe_to_option(SkyMaybe::Just(5i64)), Some(5));
+    assert_eq!(sky_runtime::core::sky_maybe_to_option(SkyMaybe::<i64>::Nothing), None);
+    // The .as_deref() path the codegen uses for Option<&str> is sound.
+    let just = sky_runtime::core::sky_maybe_to_option(SkyMaybe::Just("hi".to_string()));
+    assert_eq!(just.as_deref(), Some("hi"));
+    let none: Option<String> = sky_runtime::core::sky_maybe_to_option(SkyMaybe::Nothing);
+    assert_eq!(none.as_deref(), None);
+    // The numeric-narrowing path (.map(|x| x as u16)).
+    let n = sky_runtime::core::sky_maybe_to_option(SkyMaybe::Just(70000i64)).map(|x| x as u16);
+    assert_eq!(n, Some(70000i64 as u16)); // defined wrapping cast, no panic
+}
+
 // ── property: byte/array coercion never panics for ANY input ───────────────
 
 proptest! {

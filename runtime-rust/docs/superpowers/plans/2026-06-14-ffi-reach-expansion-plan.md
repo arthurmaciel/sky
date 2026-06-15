@@ -8,7 +8,7 @@ the no-panic / no-`Any` / Go-neutral constraints. Ordered by value × tractabili
 
 | # | Blocker | Crates hit | Value | Tractability | Status |
 |---|---|---|---|---|---|
-| P1 | `Option<T>` param coercion (`SkyMaybe<T>` → `Option<&str>`/`Option<u16>`/…) | url, many setters/APIs | **high** | medium | planned |
+| P1 | `Option<T>` param coercion (`SkyMaybe<T>` → `Option<&str>`/`Option<u16>`/…) | url, many setters/APIs | **high** | medium | ✅ DONE |
 | P2 | Crate-name collision vs `use crate::*` / Sky builtins | csv (`csv` ambiguous), bytes (`Bytes`) | high | csv=easy, bytes=hard | planned |
 | P3 | Unqualified receiver dropped by nameability | regex `RegexBuilder` (+48 setters) | med-high | medium | needs investigation |
 | P4 | Sized gate on by-value receivers | bytes `UninitSlice` | medium | medium | planned |
