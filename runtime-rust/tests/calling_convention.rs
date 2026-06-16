@@ -4,7 +4,7 @@
 //!
 //! As of the JSON-pipeline uncurry refactor (commit 710f35f5), the runtime has
 //! NO curried helpers — even the `Json.Decode.Pipeline` builders
-//! (`json_dec_p_required` / `_optional`) are now tupled: they take their
+//! (`decode_pipeline_required` / `_optional`) are now tupled: they take their
 //! `next_decoder` as a `Box<dyn FnOnce(T) -> F>` argument and return a plain
 //! `Decoder<E, F>`, not an `impl Fn…`. So the expected set is empty.
 //!
@@ -56,7 +56,7 @@ fn no_unintended_curried_helpers() {
         Vec::<String>::new(),
         "Unexpected curried helper(s) found — the runtime uses the tupled calling \
          convention (a multi-arg Sky fn lowers to f(a, b), never f(a)(b)). Pipeline \
-         decoders (json_dec_p_*) are tupled (next_decoder passed as a Box<dyn FnOnce> \
+         decoders (decode_pipeline_*) are tupled (next_decoder passed as a Box<dyn FnOnce> \
          arg), and middleware that return a Handler (Fn(ServerRequest) -> …) are \
          recognised structurally and exempt. A new name here means a multi-arg helper \
          leaked a curried `-> impl Fn(<Sky type>)` shape — make it tupled instead."

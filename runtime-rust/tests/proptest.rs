@@ -174,8 +174,8 @@ mod json_tests {
     fn json_int_roundtrip() {
         let json = sky_runtime::json::json_enc_int(42);
         let encoded = sky_runtime::json::json_enc_encode(0, json);
-        let decoder: Decoder<SkyError, i64> = sky_runtime::json::json_dec_int();
-        let decoded = sky_runtime::json::json_dec_decode_string(decoder, encoded);
+        let decoder: Decoder<SkyError, i64> = sky_runtime::json::json_decode_int();
+        let decoded = sky_runtime::json::decode_from_json_string(decoder, encoded);
         assert_eq!(decoded, SkyResult::Ok(42));
     }
 
@@ -183,8 +183,8 @@ mod json_tests {
     fn json_string_roundtrip() {
         let json = sky_runtime::json::json_enc_string("hello".to_string());
         let encoded = sky_runtime::json::json_enc_encode(0, json);
-        let decoder: Decoder<SkyError, String> = sky_runtime::json::json_dec_string();
-        let decoded = sky_runtime::json::json_dec_decode_string(decoder, encoded);
+        let decoder: Decoder<SkyError, String> = sky_runtime::json::json_decode_string();
+        let decoded = sky_runtime::json::decode_from_json_string(decoder, encoded);
         assert_eq!(decoded, SkyResult::Ok("hello".to_string()));
     }
 
@@ -192,8 +192,8 @@ mod json_tests {
     fn json_bool_roundtrip() {
         let json = sky_runtime::json::json_enc_bool(true);
         let encoded = sky_runtime::json::json_enc_encode(0, json);
-        let decoder: Decoder<SkyError, bool> = sky_runtime::json::json_dec_bool();
-        let decoded = sky_runtime::json::json_dec_decode_string(decoder, encoded);
+        let decoder: Decoder<SkyError, bool> = sky_runtime::json::json_decode_bool();
+        let decoded = sky_runtime::json::decode_from_json_string(decoder, encoded);
         assert_eq!(decoded, SkyResult::Ok(true));
     }
 }

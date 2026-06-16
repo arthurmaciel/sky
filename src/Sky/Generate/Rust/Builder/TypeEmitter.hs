@@ -23,7 +23,7 @@ unionsToRustTypes recordMap skyModName modPrefix unions =
     -- typeToRustString). Its Sky def is a phantom (`type Decoder a` with a unit
     -- placeholder), so emitting it as a Rust enum yields `pub enum Decoder<a> {
     -- Decoder }` — an unused type param a (E0392). Skip it; the alias covers all
-    -- references and the combinators route to json_dec_* / config_* kernels.
+    -- references and the combinators route to decode_* / json_decode_* / config_* kernels.
     map (\(name, u) -> unionToRustTypeDef recordMap skyModName modPrefix name u)
         (filter (\(name, _) -> name /= "Decoder") (Map.toList unions))
 

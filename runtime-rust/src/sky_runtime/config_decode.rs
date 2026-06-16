@@ -4,11 +4,11 @@
 // Config reuses the JSON Decoder representation (`Decoder<E, T>` over a
 // `serde_json::Value`): TOML and YAML are parsed into the same `Value`, then the
 // decoder runs unchanged. The combinators (string / int / float / bool / field /
-// at / list / map / andThen / succeed / fail) ARE the `json_dec_*` kernels — the
+// at / list / map / andThen / succeed / fail) ARE the shared `decode_*` kernels — the
 // Sky codegen maps `Config.*` straight onto them. Only the format front-ends,
 // `nullable`, and `loadFromFile` live here, because Config's signatures put the
 // source `String` FIRST (`decodeToml : String -> Decoder a -> Result Error a`),
-// the opposite of `json_dec_decode_string`'s decoder-first argument order.
+// the opposite of `decode_from_json_string`'s decoder-first argument order.
 use super::*;
 use super::json::{Decoder, JsonVal};
 use std::future::ready;

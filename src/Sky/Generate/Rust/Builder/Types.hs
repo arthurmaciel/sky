@@ -346,20 +346,20 @@ kernelsNeedingErrorPin = Map.fromList
     , ("url_decode",             "::<SkyError>")
     , ("encoding_hex_decode",    "::<SkyError>")
     -- JsonDecode primitives — single E parameter
-    , ("json_dec_string",        "::<SkyError>")
-    , ("json_dec_int",           "::<SkyError>")
-    , ("json_dec_float",         "::<SkyError>")
-    , ("json_dec_bool",          "::<SkyError>")
+    , ("json_decode_string",        "::<SkyError>")
+    , ("json_decode_int",           "::<SkyError>")
+    , ("json_decode_float",         "::<SkyError>")
+    , ("json_decode_bool",          "::<SkyError>")
     -- JsonDecode null: <E, A: Default>
-    , ("json_dec_null",          "::<SkyError, _>")
+    , ("json_decode_null",          "::<SkyError, _>")
     -- JsonDecode combinators: <E, T> — pin E, leave T inferred
-    , ("json_dec_field",         "::<SkyError, _>")
-    , ("json_dec_at",            "::<SkyError, _>")
-    , ("json_dec_list",          "::<SkyError, _>")
-    , ("json_dec_decode_string", "::<SkyError, _>")
+    , ("decode_field",         "::<SkyError, _>")
+    , ("decode_at",            "::<SkyError, _>")
+    , ("decode_list",          "::<SkyError, _>")
+    , ("decode_from_json_string", "::<SkyError, _>")
     -- JsonDecode mapping: <E, A, B>
-    , ("json_dec_map",           "::<SkyError, _, _>")
-    , ("json_dec_and_then",      "::<SkyError, _, _>")
+    , ("decode_map",           "::<SkyError, _, _>")
+    , ("decode_and_then",      "::<SkyError, _, _>")
     -- sub-A.11 C1: dict_empty() returns HashMap<String, T>; T defaults to
     -- i64 when call sites (like dict_keys(dict_empty())) can't pin T.
     -- The map is just "turbofish injection"; not all entries are error-pins.
@@ -371,14 +371,14 @@ kernelsNeedingErrorPin = Map.fromList
     ]
 
 -- | Runtime kernels whose Rust signatures are zero-arg functions returning a
--- value (e.g. `pub fn dict_empty<T>() -> HashMap<...>`, `json_dec_int<E>() -> Decoder<E, i64>`).
+-- value (e.g. `pub fn dict_empty<T>() -> HashMap<...>`, `json_decode_int<E>() -> Decoder<E, i64>`).
 -- At Can.VarTopLevel call sites the codegen takes the "then" branch and emits
 -- the bare kernel name without `()`, leaving the function pointer where a
 -- value is expected. This set pins the call.
 kernelsZeroArg :: Set.Set String
 kernelsZeroArg = Set.fromList
-    [ "json_dec_string", "json_dec_int", "json_dec_float"
-    , "json_dec_bool", "json_dec_null"
+    [ "json_decode_string", "json_decode_int", "json_decode_float"
+    , "json_decode_bool", "json_decode_null"
     -- JsonEnc.null : Value is a zero-arg constant (`Ffi.kernel "JsonEnc_null"`);
     -- used as a value (`("x", JsonEnc.null)`) it must be CALLED, not left a bare
     -- fn item (35-composite-generics). Runtime json_enc_null() is zero-arg.

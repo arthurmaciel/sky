@@ -873,10 +873,10 @@ exprToRustInner ctx e = case e of
                 | otherwise = case Map.lookup n kernelsNeedingErrorPin of
                     Just suffix -> n ++ suffix
                     Nothing     -> n
-            -- sub-A.11: zero-arg kernels (json_dec_*, dict_empty, math_pi/e)
+            -- sub-A.11: zero-arg kernels (decode_*/json_decode_*, dict_empty, math_pi/e)
             -- returning a value (Decoder, HashMap, f64) reached via the
             -- "then" branch — append () to call them. Turbofish goes
-            -- BEFORE the (), e.g. json_dec_int::<SkyError>().
+            -- BEFORE the (), e.g. json_decode_int::<SkyError>().
             -- Lookup is on the BARE kernel name (pre-turbofish).
             emitKernel bare = let pinned = pinE bare
                               in if Set.member bare kernelsZeroArg
@@ -1409,7 +1409,7 @@ exprToRustInner ctx e = case e of
     -- Totality: SqlParam is exhaustive; `SqlNull` → SqlParam::Null; no panic.
     --
     -- SqlMoney serialisation matches Go's `sqlMoneyToString`:
-    --   `"ISO_CODE AMOUNT"` TEXT — the inverse of `db_dec_money`.
+    --   `"ISO_CODE AMOUNT"` TEXT — the inverse of `db_decode_money`.
     --   Currency enum variants USD/EUR/… have their Sky name as the code;
     --   CurrencyRaw carries the raw code string.
     -- VarKernel form (accessed directly as a kernel)
@@ -1457,10 +1457,10 @@ exprToRustInner ctx e = case e of
                 ++ sqlFieldsToVec ctx fieldsArg ++ ", "
                 ++ exprToRustString ctx projArg ++ ", "
                 ++ exprToRustString ctx decArg ++ ")"
-    -- DbDec.money col — the runtime `db_dec_money` decodes the "CODE AMOUNT"
+    -- DbDec.money col — the runtime `db_decode_money` decodes the "CODE AMOUNT"
     -- column into a `(Decimal, String)` pair; the GENERATED `Money` ADT can only
     -- be NAMED at the codegen boundary, so wrap the pair into
-    -- `StdMoneyMoney::Money(amount, CurrencyRaw(code))` via the shared json_dec_map.
+    -- `StdMoneyMoney::Money(amount, CurrencyRaw(code))` via the shared decode_map.
     -- CurrencyRaw(code) needs no code→enum table and round-trips (sqlValueMatchArms
     -- reads CurrencyRaw back to the code). Both VarKernel + VarTopLevel forms.
     Can.Call (Ann.At _ (Can.VarKernel mdlMD "money")) [colArg]
@@ -1517,12 +1517,12 @@ exprToRustInner ctx e = case e of
             succeedArity = case fn of
                 Ann.At _ (Can.VarKernel _ name) | name == "succeed", not (null args) -> succeedArgArity
                 -- Json.Decode.Pipeline base `succeed f` lowers as a VarTopLevel
-                -- kernel alias (json_dec_succeed), not a VarKernel, so match it
+                -- kernel alias (decode_succeed), not a VarKernel, so match it
                 -- too — otherwise a multi-field record ctor stays a raw N-ary
                 -- closure the single-arg pipeline can't apply (35-composite).
                 -- Both the JSON pipeline (Sky.Core.Json.Decode.Pipeline) and the
-                -- DB decoder (Std.Db.Decode) lower `succeed Ctor` to json_dec_succeed
-                -- and feed it a `json_dec_p_required` chain that applies one arg at
+                -- DB decoder (Std.Db.Decode) lower `succeed Ctor` to decode_succeed
+                -- and feed it a `decode_pipeline_required` chain that applies one arg at
                 -- a time — so a multi-arg record ctor MUST be curried (curryN) for
                 -- both. Match either decode module's `succeed`.
                 Ann.At _ (Can.VarTopLevel m name)
@@ -1616,10 +1616,10 @@ exprToRustInner ctx e = case e of
                     in case pinTaskCall ctxC cname args (ecSolvedTypes ctxC) of
                         Just pinned -> pinned
                         Nothing -> emitDefaultCall ctxC fn calleeName args
-                cname | "json_dec_and_then" `isPrefixOf` cname, [contArg, decArg] <- args ->
+                cname | "decode_and_then" `isPrefixOf` cname, [contArg, decArg] <- args ->
                     -- Sky's `andThen : (a -> Decoder b) -> Decoder a -> Decoder b`
                     -- puts the continuation FIRST, but the runtime kernel is
-                    -- `json_dec_and_then(decoder, f)`. Emit decoder-first so Rust
+                    -- `decode_and_then(decoder, f)`. Emit decoder-first so Rust
                     -- unifies the decoder's value type `a` BEFORE type-checking the
                     -- continuation closure — a closure-first arg leaves `a`
                     -- un-inferred (E0282). Closes the Json.Decode/Std.Config
@@ -2414,12 +2414,12 @@ emitDefaultCall ctx fn calleeName args =
             Ann.At _ (Can.VarKernel _ n) -> n == "run"
             _ -> False
         -- isPrefixOf (not isSuffixOf): the callee carries a turbofish
-        -- (`json_dec_list::<SkyError, _>`), so the bare name is a prefix, not a
+        -- (`decode_list::<SkyError, _>`), so the bare name is a prefix, not a
         -- suffix. `list` takes `impl Fn() -> Decoder`, so its decoder arg is
         -- wrapped in a `||` factory closure below. (Suffix-matching silently
         -- skipped the wrap once the turbofish was added — list never re-runs its
         -- element decoder otherwise.)
-        isListDec = "json_dec_list" `isPrefixOf` calleeName
+        isListDec = "decode_list" `isPrefixOf` calleeName
         -- Sub-A.13: empty-collection args (`[]`, `Nothing`) carry no element
         -- type for Rust to infer. Resolve each from the callee's param types:
         -- concrete -> turbofish, var-shared-with-sibling -> bare, var-only-here
@@ -3094,7 +3094,7 @@ flattenCons recMap headPat tailPat =
 
 -- | Emit the body of a `match StdDbSqlValue` → SqlParam conversion.
 -- Money is serialised as "ISO_CODE AMOUNT" matching Go's sqlMoneyToString /
--- the inverse of db_dec_money.  Every SqlValue variant is handled — total.
+-- the inverse of db_decode_money.  Every SqlValue variant is handled — total.
 sqlValueMatchArms :: String
 sqlValueMatchArms = unlines
     [ "StdDbSqlValue::SqlString(s) => SqlParam::Text(s),"
@@ -3126,14 +3126,14 @@ sqlValueMatchArms = unlines
 -- `Vec<(String, Option<SqlParam>)>`.
 -- `None` = OmitField (column dropped from SQL).
 -- `Some(SqlParam::…)` = SetField(value).
--- | `DbDec.money col` — wrap the runtime `db_dec_money` decoder (yields a
+-- | `DbDec.money col` — wrap the runtime `db_decode_money` decoder (yields a
 -- `(Decimal, ISO-code)` pair) into a `Decoder<Money>` by mapping the pair into
 -- the GENERATED `StdMoneyMoney::Money(amount, StdMoneyCurrency::CurrencyRaw(code))`
--- via the shared `json_dec_map`. The closure param type is left to Rust to infer
--- from `db_dec_money`'s `Decoder<(Decimal, String)>` return.
+-- via the shared `decode_map`. The closure param type is left to Rust to infer
+-- from `db_decode_money`'s `Decoder<(Decimal, String)>` return.
 dbDecMoneyWrap :: EmitCtx -> Can.Expr -> String
 dbDecMoneyWrap ctx colArg =
-    "json_dec_map(|__m| StdMoneyMoney::Money(__m.0, StdMoneyCurrency::CurrencyRaw(__m.1)), db_dec_money("
+    "decode_map(|__m| StdMoneyMoney::Money(__m.0, StdMoneyCurrency::CurrencyRaw(__m.1)), db_decode_money("
         ++ exprToRustString ctx colArg ++ "))"
 
 sqlFieldsToVec :: EmitCtx -> Can.Expr -> String

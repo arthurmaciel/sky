@@ -138,7 +138,7 @@ typeToRustString recordMap t = case t of
     -- Json.Decode / Std.Config share one runtime decoder representation. Both
     -- expose an opaque `Decoder a`; render it as the global `Decoder<T>` alias
     -- (= sky_runtime::json::Decoder<SkyError, T>) so an annotated decoder
-    -- (`cfgDecoder : Config.Decoder DbCfg`) matches the json_dec_* / config_*
+    -- (`cfgDecoder : Config.Decoder DbCfg`) matches the decode_* / json_decode_* / config_*
     -- kernels its call sites route to. The placeholder enum is skipped at the
     -- def site (see the Decoder guard in the union emitter).
     Can.TType _ "Decoder" [a] -> "Decoder<" ++ typeToRustString recordMap a ++ ">"
