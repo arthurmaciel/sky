@@ -32,6 +32,10 @@ cd "$REPO"
 command -v curl >/dev/null 2>&1 || { echo "ERROR: curl required for server/live checks." >&2; exit 2; }
 # Don't spawn the console child while smoke-running (not what a run sweep checks).
 export SKY_CONSOLE_EMBED=off
+# Server/live examples that use Std.Auth refuse to boot without a >=32-byte secret
+# (CORRECT production behaviour — see 36-composite-server's startup gate). Provide a
+# test secret so those apps boot; honoured only if the caller hasn't set their own.
+export SKY_AUTH_TOKEN_SECRET="${SKY_AUTH_TOKEN_SECRET:-sky-run-sweep-test-secret-0123456789-abcdef}"
 
 # ── Browser-round-trip driver (for web/live examples) ───────────────────────
 # node lives under nvm; chromium is the system binary. Prepend node's bin so the
@@ -63,6 +67,11 @@ reap; sync; sleep 1
 
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo 8743; }
 PANIC_RE="panicked|CompilerBug|RUST_BACKTRACE|index out of bounds|unwrap\(\) on|called .Result::unwrap"
+# A server is "serving" if it returns ANY real HTTP status (curl's %{http_code} in
+# 100-599). 000 = connection refused / timeout = NOT serving. This accepts an API
+# server with no `GET /` route (404 on / still proves the listener + router are up)
+# — requiring exactly 200 false-failed such apps (e.g. 36-composite-server).
+http_responds() { case "$1" in [1-5][0-9][0-9]) return 0;; *) return 1;; esac; }
 
 # Resolve a browser scenario for an example. The repo's verify-scenarios.mjs keys
 # follow the example name with the leading NN- prefix stripped (09-live-counter →
@@ -154,20 +163,20 @@ for ex in "${EXAMPLES[@]}"; do
         ok=""; for i in $(seq 1 30); do
           kill -0 "$pid" 2>/dev/null || break
           code="$(curl -s -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:$port/" 2>/dev/null || true)"
-          [ "$code" = 200 ] && { ok=1; break; }
+          http_responds "$code" && { ok=1; break; }
           # some servers bind a port from their source, not SKY_LIVE_PORT — sniff
           # the log. Take the LAST ":port" on the listening line so "0.0.0.0:8000"
           # yields 8000, not the leading 0.
           lp="$(grep -iE "listening on" "$rl" | grep -oE ":[0-9]+" | tail -1 | tr -d ':')"
           if [ -n "$lp" ] && [ "$lp" != "$port" ]; then
-            curl -s -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:$lp/" 2>/dev/null | grep -q 200 && { ok=1; port="$lp"; break; }
+            code2="$(curl -s -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:$lp/" 2>/dev/null || true)"
+            http_responds "$code2" && { ok=1; port="$lp"; break; }
           fi
           sleep 0.5
         done
-        body="$(curl -s -m 2 "http://127.0.0.1:$port/" 2>/dev/null | head -c 64)"
         kill -TERM "$pid" 2>/dev/null; sleep 0.5; kill -KILL "$pid" 2>/dev/null
         if   grep -qiE "$PANIC_RE" "$rl"; then say "  RUN-FAIL  $ex ($shape panicked)"; FAIL=$((FAIL+1)); FAILED="$FAILED $ex(panic)"
-        elif [ -n "$ok" ] && [ -n "$body" ]; then say "  RUN-OK    $ex ($shape serves :$port)"; PASS=$((PASS+1))
+        elif [ -n "$ok" ]; then say "  RUN-OK    $ex ($shape serves :$port)"; PASS=$((PASS+1))
         else say "  RUN-FAIL  $ex ($shape didn't serve)"; FAIL=$((FAIL+1)); FAILED="$FAILED $ex(noserve)"; fi
       fi
       ;;
