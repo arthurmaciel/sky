@@ -121,6 +121,28 @@ row_to_json(row: &DbRow) -> JsonVal:
 | `Db.insertFields` / `updateFields` | Phase B SQL-gen — NO decoder dependency. Mirror Go `db_auth.go`: dynamic INSERT/UPDATE from `List SqlField` (`SetField`/`OmitField`), identifier-validated `[A-Za-z0-9_.]` (injection gate), all-Omit → 0 rows. | **Most tractable of the 7** — pure runtime + routing, reuse the existing `SqlValue` path. |
 | `Db.insertFieldsReturning` | INSERT … RETURNING + decode → has the same Decoder dependency as queryDecode. | After insertFields: append RETURNING, decode via `row_to_json` + `Decoder`. |
 
+**The remaining 7 cluster into TWO design problems (neither quick — both need
+careful codegen design; do in a focused session, not rushed):**
+
+1. **Decoder redesign** — `nullable`, `required`, `optional`. The opaque
+   `Box<dyn Fn(&JsonVal)>` can't carry which columns it reads (nullable) nor an
+   `FnOnce` accumulator (required/optional). Fix: change `Decoder` to a struct
+   `{ run: Box<dyn Fn>, cols: Vec<String> }` (+ Arc the pipeline accumulator).
+   Shared with the JsonDecP pipeline wall — fixes both at once.
+
+2. **Generated-ADT boundary marshaling** — `money`, `insertFields`,
+   `updateFields`, `insertFieldsReturning`. `SqlValue`/`SqlField`/`Money` are
+   per-project GENERATED Sky ADTs; the runtime can't name or destructure them.
+   `insertFields : … -> List (String, SqlField) -> …` hands the runtime an
+   opaque generated enum. Fix: CODEGEN destructures the ADT at the call site
+   into a runtime-friendly form (e.g. lower `List (String, SqlField)` to a
+   `Vec<(String, Option<SqlScalar>)>` before the kernel call; lower `DbDec.money`
+   to a `json_dec_map` building the Money ctor from `db_dec_money`'s pair).
+   `db_dec_money` runtime is already correct + total — only the codegen wrapper
+   is missing. NOTE: Rust's `Db.exec` currently uses `Vec<String>` params, so the
+   broader SqlValue param path is also unimplemented on Rust — the ADT-marshaling
+   work closes that class too.
+
 **skydex caveat:** `parity --gaps` shows only `required/optional` + the 3 `Db.*` +
 `Sub.subscribeWebSocket` (false-positive, implemented via ExprEmitter peephole).
 It OVER-credits `nullable`/`money` because their runtime fns exist by name even
