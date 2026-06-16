@@ -141,8 +141,15 @@ emitRust b dbPath dbDriver ffiSlugs =
             , "pub fn log_info(msg: String) -> SkyTask<()> { sky_runtime::log::log_info(msg) }"
             , "pub fn log_debug(msg: String) -> SkyTask<()> { sky_runtime::log::log_debug(msg) }"
             , "pub fn log_warn(msg: String) -> SkyTask<()> { sky_runtime::log::log_warn(msg) }"
-            , "pub fn log_info_with(msg: String, attrs: Vec<String>) -> SkyTask<()> { sky_runtime::log::log_info_with(msg, attrs) }"
-            , "pub fn log_error_with(msg: String, attrs: Vec<String>) -> SkyTask<()> { sky_runtime::log::log_error_with(msg, attrs) }"
+            -- Keep the attr-element type GENERIC (`A`): Sky's `infoWith / errorWith
+            -- : String -> List a -> …` is polymorphic in the attr element, and the
+            -- common structured-log shape passes `List (String, String)` tuples
+            -- (`[("errId", id), ("error", msg)]`). Hardcoding `Vec<String>` here
+            -- rejected the tuple form (E0308 — composite-server). The wrapper still
+            -- pins `E = SkyError` via the `SkyTask<()>` return alias (the reason it
+            -- exists — E is otherwise un-inferrable from the args).
+            , "pub fn log_info_with<A>(msg: String, attrs: Vec<A>) -> SkyTask<()> { sky_runtime::log::log_info_with(msg, attrs) }"
+            , "pub fn log_error_with<A>(msg: String, attrs: Vec<A>) -> SkyTask<()> { sky_runtime::log::log_error_with(msg, attrs) }"
             , "pub fn system_args(_: ()) -> SkyTask<Vec<String>> { sky_runtime::system::system_args(()) }"
             , "pub fn system_setenv(key: String, val: String) -> SkyTask<()> { sky_runtime::system::system_setenv(key, val) }"
             , "pub fn system_unsetenv(key: String) -> SkyTask<()> { sky_runtime::system::system_unsetenv(key) }"

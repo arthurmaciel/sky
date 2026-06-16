@@ -14,7 +14,7 @@ import qualified Data.Map.Strict as Map
 import qualified Sky.AST.Canonical as Can
 import Sky.Generate.Rust.Builder.Types (RustTypeDef(..), runtimeOpaqueTypes)
 import Sky.Generate.Rust.Builder.Naming (toCamelCase)
-import Sky.Generate.Rust.Builder.TypeRenderer (typeToRustString, flattenArrowType)
+import Sky.Generate.Rust.Builder.TypeRenderer (typeToRustString, flattenArrowType, resultIsTaskTy)
 
 unionsToRustTypes :: Map.Map String String -> String -> String -> Map.Map String Can.Union -> [RustTypeDef]
 unionsToRustTypes recordMap skyModName modPrefix unions =
@@ -173,22 +173,20 @@ aliasToRustTypeDef recordMap _skyModName modPrefix name (Can.Alias vars ty) = ca
 -- typeToRustString would produce. fn pointers reject closures that capture
 -- environment — e.g. Sky.Core.Http.Stream.forEachChunk's `\chunk -> emit chunk
 -- writer` captures `writer`; `impl Fn` accepts capturing (move) closures, plain
--- closures, AND fn items, so it's a strict widening of what the slot holds.
+-- closures, AND fn items, so it's a strict widening of what the slot holds. An
+-- `Arc<dyn Fn>` (the `Handler` VALUE form) flowing into such a param is wrapped
+-- back to a plain closure at the call site (see the Arc→impl-Fn adapter in
+-- ExprEmitter's supplied-arg renderer) so this stays `impl Fn`.
 --
 -- The Task-result gate is deliberate: a pure callback (`e -> bool`, `a -> b`) is
 -- frequently STORED in an ADT variant or record field — which render as fn
--- pointers (e.g. ShouldRetry's `RetryWhen (fn(e) -> bool)`) — and an `impl Fn`
--- type parameter can't be assigned into a fn-pointer slot. Effectful callbacks
--- are instead passed through to kernels (the impl-Fn HOF surface), which is
--- exactly where capturing closures need to flow. Non-function params render
--- normally. The arrow chain flattens uncurried (`\a b ->` → `|a, b|`).
+-- pointers (e.g. ShouldRetry's `RetryWhen (fn(e) -> bool)`, result concrete
+-- `Bool` not a Task) — so the gate can never catch them. Non-function params
+-- render normally. The arrow chain flattens uncurried (`\a b ->` → `|a, b|`).
 paramTypeToRust :: Map.Map String String -> Can.Type -> String
 paramTypeToRust rm t = case t of
-    Can.TLambda _ _ | resultIsTask (snd (flattenArrowType t)) ->
+    Can.TLambda _ _ | resultIsTaskTy (snd (flattenArrowType t)) ->
         let (ps, ret) = flattenArrowType t
         in "impl Fn(" ++ intercalate ", " (map (typeToRustString rm) ps) ++ ") -> "
            ++ typeToRustString rm ret ++ " + Send + Sync + 'static"
     _ -> typeToRustString rm t
-  where
-    resultIsTask (Can.TType _ "Task" _) = True
-    resultIsTask _ = False

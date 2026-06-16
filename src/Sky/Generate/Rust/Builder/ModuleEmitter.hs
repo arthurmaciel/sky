@@ -39,7 +39,7 @@ import Sky.Generate.Rust.Builder.SigRegistry
 import Sky.Generate.Rust.Builder.ExprEmitter
     ( exprToRustString, collectVarLocalsMulti, taskExprInnerType, solveArgType
     , inferParamRustType, canDefBody, collectClosureDefs
-    , collectLambdaCapturedVars, isClosureParamStr
+    , collectLambdaCapturedVars, isClosureParamStr, isBackendEntryApp
     )
 import Sky.Generate.Rust.Builder.TypeRenderer
     ( extractReturnType, extractParamTypes, hasTypeVars, typeToRustString
@@ -439,6 +439,13 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                 | Set.member name (ecLiveInitFns ctx) ->
                     (fst (patternToRustArg 0 p0) ++ ": ()") : rest
             _ -> paramStrs
+        -- Whether this is the program's entry `main` (used by `entryMainNeedsLift`
+        -- below to reconcile a unit-tailed `main` against its forced `SkyTask<()>`
+        -- signature). The signature itself is left to the normal inference + the
+        -- `retTyFinal` rule — keying the RETURN on `usesTaskRun` is unsound (14's
+        -- `main` calls `Task.run` inline yet its TAIL is still a Task, so it must
+        -- keep `SkyTask<()>`; only the body TAIL's task-ness is a sound signal).
+        isEntryMain = name == "main" && ecCurrentModule ctx == "Main"
         retTy = case lookupOwnSig ctx name of
                     Just ty ->
                         let ret = extractReturnType ty
@@ -537,10 +544,35 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         -- S6: When the function returns SkyTask<T> but the body tail is a
         -- bare value (not already a Task expression), wrap in task_succeed({...}).
         -- Walk through let chains to find the tail expression, then check
-        -- whether the tail is already a Task expression.
-        bodyWrapped = if "SkyTask<" `isPrefixOf` retTy && needsTaskWrap (ecSolvedTypes ctx) body
+        -- whether the tail is already a Task expression. Keyed on `retTy` (NOT
+        -- `retTyFinal`): a backend-entry `main` (Live/Tui/Webview) has
+        -- `retTyFinal` FORCED to `SkyTask<()>` but its body tail IS already a Task
+        -- (`live_app_routed(…)`) that `needsTaskWrap` doesn't recognise — keying
+        -- on `retTyFinal` would double-wrap it (`task_succeed(SkyTask<()>)`,
+        -- E0308). `retTy` (pre-force) already carries `SkyTask<()>` for the unit-
+        -- tail server `main` (`main = let _ = Task.run run in ()`), so the
+        -- composite-server unit-tail lift still fires off `retTy`.
+        bodyStr0 = if "SkyTask<" `isPrefixOf` retTy && needsTaskWrap (ecSolvedTypes ctx) body
+                   then "task_succeed({ " ++ bodyStr ++ " })"
+                   else bodyStr
+        -- Entry-`main` unit-tail lift. A server / Task.run-inline `main` (`main =
+        -- let _ = Task.run run in ()`) has a `()` TAIL but its emitted signature
+        -- stays `SkyTask<()>` (the entry block_on's it — see `entryPointSection`'s
+        -- `mainIsTask`). The normal `bodyWrapped` keys on `retTy`, which here can
+        -- be `()` (when `usesTaskRun` is set) — so it skips the lift and the body
+        -- returns `()` against a `SkyTask<()>` signature (E0308 — composite-
+        -- server). Lift the unit tail to `task_succeed(())` whenever the FINAL
+        -- signature is a Task BUT the body tail is a genuine non-Task value AND
+        -- this is NOT a backend-entry app (those already return their driver Task
+        -- as the tail — wrapping would double-box). The inline `task_run` already
+        -- fired the real effect; the outer succeed is a no-op.
+        entryMainNeedsLift = isEntryMain
+                          && "SkyTask<" `isPrefixOf` retTyFinal
+                          && not (isBackendEntryApp body)
+                          && needsTaskWrap (ecSolvedTypes ctx) body
+        bodyWrapped = if entryMainNeedsLift && not ("task_succeed" `isPrefixOf` bodyStr0)
                       then "task_succeed({ " ++ bodyStr ++ " })"
-                      else bodyStr
+                      else bodyStr0
         -- Non-Clone capture fix (#52): an `impl Fn(..)` HOF parameter is NOT
         -- `Clone`, so when it's captured into a closure the per-closure
         -- `.clone()` capture-prelude (needed so SIBLING closures each own a

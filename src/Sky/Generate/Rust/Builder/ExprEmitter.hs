@@ -40,6 +40,7 @@ module Sky.Generate.Rust.Builder.ExprEmitter
     , patternToMatchString
     , ctorArgToPattern
     , flattenCons
+    , isBackendEntryApp
     ) where
 
 import Data.List (intercalate, isSuffixOf, isPrefixOf, isInfixOf, sortBy, stripPrefix, minimumBy, nub)
@@ -67,6 +68,8 @@ import Sky.Generate.Rust.Builder.TypeRenderer
     , extractReturnType
     , hasTypeVars
     , isEventArgType
+    , flattenArrowType
+    , resultIsTaskTy
     )
 import Sky.Generate.Rust.Builder.Kernel
     ( kernelToRust
@@ -706,6 +709,17 @@ calleeParamStrings ctx fn arity = case fn of
                                in if null ps then Nothing
                                   else Just (SrcInferred, map (typeToRustString (ecRecordMap ctx)) ps)
                     Nothing -> Nothing
+    -- A LOCAL let-bound closure (`guarded` / `wrap` / `cors` middleware wrappers)
+    -- whose solved type is in scope: surface its param strings so a call-arg can
+    -- tell its slot is a `Handler` (`Arc<dyn Fn>`). Only matters for the
+    -- Handler-Arc-wrap; absence (Nothing) is the prior behaviour for every other
+    -- local call.
+    Ann.At _ (Can.VarLocal name) ->
+        case Map.lookup name (ecSolvedTypes ctx) of
+            Just ty -> let ps = extractParamTypes ty
+                       in if null ps then Nothing
+                          else Just (SrcInferred, map (typeToRustString (ecRecordMap ctx)) ps)
+            Nothing -> Nothing
     _ -> Nothing
 
 -- | Tokenise a Rust type string into bare identifier tokens.
@@ -763,6 +777,17 @@ emitEmptyArg _ mps i arg =
             -- historical behaviour before EKDict (00-standard-libs).
             EKDict    -> "dict_empty::<String, i64>()"
             EKSet     -> "set_empty::<i64>()"
+        -- An INFERRABLE empty form (no turbofish): used only when a DATA sibling
+        -- pins the type param, so Rust resolves K/V from the other args of the
+        -- SAME call (e.g. `dict_insert("email", creds.email, dict_empty())` —
+        -- K=String from the key, V=String from the value). The hardcoded
+        -- `<String, i64>` `bare` is WRONG for a `Dict String String`; this lets
+        -- inference pick the real V. Lists/Maybes already infer bare.
+        inferrable = case kind of
+            EKList    -> "vec![]"
+            EKNothing -> "SkyMaybe::Nothing"
+            EKDict    -> "dict_empty()"
+            EKSet     -> "set_empty()"
         defaultFiller = case kind of
             EKList    -> "Vec::<i64>::new()"
             EKNothing -> "SkyMaybe::<i64>::Nothing"
@@ -790,11 +815,20 @@ emitEmptyArg _ mps i arg =
                     [ ps !! j | j <- [0 .. length ps - 1]
                               , j /= i, not (isClosureParamStr (ps !! j)) ]
                 pinnedBySibling = any (`elem` dataSiblingToks) vars
+                -- EVERY type var of the empty collection is pinned by a data
+                -- sibling — only then is the turbofish-free `inferrable` form
+                -- sound (Rust resolves ALL params from the call's other args, e.g.
+                -- `dict_insert("k", v, dict_empty())` pins both K and V). When some
+                -- vars are pinned but others are NOT (`dict_get("k", dict_empty())`
+                -- pins K but leaves V free → E0283), the hardcoded-default `bare`
+                -- is still required so the type is fully concrete.
+                allVarsPinned = not (null vars) && all (`elem` dataSiblingToks) vars
             in if null vars
                then case turbofish pt of
                    Just s | not (null s) -> s
                    _ -> bare
-               else if pinnedBySibling then bare
+               else if allVarsPinned then inferrable
+                    else if pinnedBySibling then bare
                     -- Unpinned var: default only when the sig is known-generic
                     -- (knownDefSig). For inferred sigs the generated Rust param
                     -- may be concrete, so stay bare and let Rust infer.
@@ -819,7 +853,15 @@ pinTaskCall :: EmitCtx -> String -> [Can.Expr] -> Map.Map String Can.Type -> May
 pinTaskCall ctx nameStr (closeExpr : taskExpr : rest) solved
     | isWildcardClosure closeExpr
     , null (taskExprInnerType solved taskExpr) =
-        let closeStr = exprToRustString ctx closeExpr
+        -- Render the discard closure through `argToRustString`, not bare
+        -- `exprToRustString`: the closure is the FIRST arg of a `task_*`
+        -- combinator (an `Fn`-shaped stored value that outlives this scope), so it
+        -- must `move`-capture + clone its environment. The bare Lambda arm emits a
+        -- BORROWING `|_| { … body.clone() … }` which fails E0373 when the body
+        -- references an owned local (`server_json(body)` in rebuildHealth). The
+        -- arg path's move+clone shape is the proven one (mirrors every other
+        -- task-combinator closure arg).
+        let closeStr = argToRustString ctx False closeExpr
             taskStr  = emitPinnedTask ctx solved taskExpr
             restStrs = map (exprToRustString ctx) rest
         in Just $ nameStr ++ "(" ++ intercalate ", " (closeStr : taskStr : restStrs) ++ ")"
@@ -836,7 +878,20 @@ emitPinnedTask ctx solved (Ann.At _ (Can.Call fnExpr taskArgs)) =
         -- context-specific one (the wildcard closure ignores the value).
         fnStr = dropTurbofish fnStr0
         argStrs = map (exprToRustString ctx) taskArgs
-    in fnStr ++ "::<_, ()>(" ++ intercalate ", " argStrs ++ ")"
+        rendered = intercalate ", " argStrs
+        -- The `::<_, ()>` pin is ONLY sound for a callee whose FIRST TWO generic
+        -- params ARE the Task `<E, A>` (error, success) — i.e. the `task_*`
+        -- combinators (`task_fail` / `task_succeed`). A generic kernel that
+        -- merely RETURNS a Task but whose own type params are something else
+        -- (`cache_put<K, V> -> Task<E, ()>`, `db_*<row>`) would have `<_, ()>`
+        -- bind its FIRST params (K=infer, V=()) — wrong (E0308: V is the cache
+        -- VALUE, not the task's success unit). Such kernels already carry a
+        -- concrete success type in their runtime sig, so no pin is needed: emit
+        -- them unchanged and let inference settle the unit success.
+        isTaskCombinator = "task_" `isPrefixOf` fnStr
+    in if isTaskCombinator
+       then fnStr ++ "::<_, ()>(" ++ rendered ++ ")"
+       else fnStr ++ "(" ++ rendered ++ ")"
 emitPinnedTask ctx _ other = exprToRustString ctx other  -- fallback: no pin
 
 -- | Truncate a callee string at its first `::<` turbofish (qualified paths use
@@ -1470,6 +1525,42 @@ exprToRustInner ctx e = case e of
             dbDecMoneyWrap ctx colArg
     Can.Call fn args ->
         let calleeRendered = exprToRustString ctx fn
+            -- Does this call's own region resolve to an effectful arrow
+            -- (`… -> Task …`)? That's the `Handler` shape — a value flowing into
+            -- an `Arc<dyn Fn>` slot (typeToRustString / paramTypeToRust render
+            -- Task-arrows that way). A partial-app residual that lands here must
+            -- be Arc-wrapped to match.
+            -- Arc-wrap when this partial application's RESIDUAL is a `Handler`
+            -- (`… -> Task …`): the callee's fully-applied result is a `Task`, so a
+            -- short application yields a `… -> Task …` value (`handleRegister cfg
+            -- db`, `rateLimit … h`). Such a value flows into an `Arc<dyn Fn>` slot
+            -- — a middleware-wrapping closure's `Arc` param OR (after unsizing) a
+            -- `server_api` arg. The bare `move` closure is wrapped to `Arc::new(…)`
+            -- (an `Arc<{concrete closure}>`); the runtime's `IntoServerHandler` has
+            -- an `Arc<F: Fn>` impl so that form registers, and it unsizes to
+            -- `Arc<dyn Fn>` at a concrete Handler param. The list-HOF partial-app
+            -- shape (`validateTime now : String -> Result …`, non-Task result) is
+            -- never wrapped. The ecExpectedType fallback covers a Handler arg whose
+            -- value is not a partial app (a bare local ref handled elsewhere).
+            calleeResultIsTask = case fn of
+                Ann.At _ (Can.VarTopLevel _ fnName) ->
+                    maybe False (resultIsTaskTy . extractReturnType) (Map.lookup fnName (ecSolvedTypes ctx))
+                Ann.At _ (Can.VarLocal fnName) ->
+                    maybe False (resultIsTaskTy . extractReturnType) (Map.lookup fnName (ecSolvedTypes ctx))
+                _ -> False
+            regionIsTaskArrow = calleeResultIsTask
+                            || case ecExpectedType ctx of
+                                   Just rt@(Can.TLambda _ _) -> resultIsTaskTy (snd (flattenArrowType rt))
+                                   _                         -> False
+            -- Arc-wrap a `move` closure rendered string, pre-cloning its captured
+            -- outer vars so the Arc owns them (`'static`); mirrors wrapStoredFn's
+            -- Lambda arm. `caps` are already cloned at-use inside the closure, so
+            -- the prelude only needs to keep the OUTER value alive.
+            arcWrapClosure caps s =
+                let preClones = concatMap (\v -> "let " ++ rustSafeIdent v ++ " = " ++ rustSafeIdent v ++ ".clone(); ") caps
+                in if null caps
+                   then "std::sync::Arc::new(" ++ s ++ ")"
+                   else "{ " ++ preClones ++ "std::sync::Arc::new(" ++ s ++ ") }"
             -- A call whose callee is a record FIELD access (`rec.field args`) is
             -- calling a function-typed field. Rust parses `rec.field(args)` as a
             -- method call (E0599 — no such method). Sky records have no methods, so
@@ -1546,7 +1637,36 @@ exprToRustInner ctx e = case e of
                    -- on `canViewMonitor session` partial-applied into a filter).
                    capturedSupplied = Set.unions (map collectVarLocals args)
                    ctxS = ctx { ecCloneVars = Set.union (ecCloneVars ctx) capturedSupplied }
-                   suppliedStrs = map (exprToRustString ctxS) args
+                   -- The callee's solved param types, used to detect a supplied
+                   -- arg whose param slot is an effectful `Handler` (`… -> Task …`,
+                   -- rendered `impl Fn` by paramTypeToRust). A supplied VALUE of
+                   -- that param can be an `Arc<dyn Fn>` (it came from a
+                   -- `Handler`-typed binding) — which does NOT satisfy `impl Fn`.
+                   -- Re-dispatch it through a fresh plain closure `{ let __h =
+                   -- v.clone(); move |a| __h(a) }`: that closure satisfies `impl
+                   -- Fn` (and any `IntoServerHandler` / fn-pointer slot too), so the
+                   -- conversion is universally safe. Non-Handler args are emitted
+                   -- byte-identically.
+                   calleeParamTys = case fn of
+                       Ann.At _ (Can.VarTopLevel _ fnName) ->
+                           maybe [] extractParamTypes (Map.lookup fnName (ecSolvedTypes ctx))
+                       Ann.At _ (Can.VarLocal fnName) ->
+                           maybe [] extractParamTypes (Map.lookup fnName (ecSolvedTypes ctx))
+                       _ -> []
+                   paramTyAt i = if i < length calleeParamTys then Just (calleeParamTys !! i) else Nothing
+                   isHandlerParam i = case paramTyAt i of
+                       Just pt@(Can.TLambda _ _) -> resultIsTaskTy (snd (flattenArrowType pt))
+                       _ -> False
+                   redispatch pt rendered =
+                       let (ps, _) = flattenArrowType pt
+                           lamArgs = ["__h" ++ show k | k <- [1 .. length ps]]
+                       in "{ let __hcb = " ++ rendered ++ "; move |" ++ intercalate ", " lamArgs
+                          ++ "| __hcb(" ++ intercalate ", " lamArgs ++ ") }"
+                   suppliedStrs =
+                       [ case (isHandlerParam i, paramTyAt i) of
+                             (True, Just pt) -> redispatch pt (exprToRustString ctxS a)
+                             _               -> exprToRustString ctxS a
+                       | (i, a) <- zip [0..] args ]
                    -- The closure `move`-captures those vars, so the OUTER value
                    -- would be moved away and unusable afterwards (E0382 on
                    -- `List.map (viewAlertRow model) …` where model is used again
@@ -1557,7 +1677,17 @@ exprToRustInner ctx e = case e of
                    clonePrelude = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") capturedList
                    theClosure = "(move |" ++ intercalate ", " freshParams ++ "| "
                                 ++ calleeName ++ "(" ++ intercalate ", " (suppliedStrs ++ freshParams) ++ "))"
-               in if null capturedList then theClosure
+                   -- A partial application whose RESIDUAL type is an effectful
+                   -- arrow (`Request -> Task Error Response` — a `Handler`) flows
+                   -- into a `Handler`-typed slot, which renders as
+                   -- `Arc<dyn Fn>` (typeToRustString / paramTypeToRust). The bare
+                   -- `move` closure is NOT an Arc, so wrap it. Gated on the call's
+                   -- region resolving to a Task-returning arrow, so non-Handler
+                   -- partial apps (the list-HOF `validateTime now` shape, whose
+                   -- residual is `String -> Result …`) are byte-identical.
+                   wrapArc s = if regionIsTaskArrow then arcWrapClosure capturedList s else s
+               in if null capturedList then wrapArc theClosure
+                  else if regionIsTaskArrow then wrapArc theClosure
                   else "{ " ++ clonePrelude ++ theClosure ++ " }"
            else
             case succeedArity of
@@ -1676,6 +1806,16 @@ exprToRustInner ctx e = case e of
                         bind = "let " ++ n' ++ tyAnnot ++ " = " ++ exprToRustString ctx taskBody ++ "; "
                         wrap = "let " ++ n' ++ " = std::sync::Arc::new(std::sync::Mutex::new(" ++ n' ++ ")); "
                     in "{ " ++ bind ++ wrap ++ exprToRustString ctx body ++ " }"
+            -- A `let`-bound LAMBDA whose binding type is an effectful `Handler`
+            -- (`… -> Task …`) is referenced as a value that flows into an
+            -- `Arc<dyn Fn>` slot (e.g. `todosByMethod` passed to a
+            -- middleware-wrapping closure's `Arc` param). A bare `move` closure is
+            -- not an `Arc`, so bind it pre-boxed: `let f = Arc::new(move |…| …)`.
+            -- The `Arc` is `Clone`, so each downstream use (`guarded(f)`,
+            -- `server_api(spec, f)`) still works; `IntoServerHandler`'s Arc impl
+            -- accepts it at the runtime boundary. Gated tightly on the binding's
+            -- solved type being a Task-returning arrow, so ordinary let-bound
+            -- closures (pure callbacks, non-Handler arrows) are byte-identical.
             -- Block-wrap: a `let` is a statement, invalid in expression
             -- position (e.g. a call arg `f(let x = …; body)`). `{ … }` is a
             -- valid expression everywhere, so wrapping is universally safe.
@@ -2497,10 +2637,19 @@ emitDefaultCall ctx fn calleeName args =
         -- coerces into `Arc::new` but not implicitly into `Arc<dyn Fn>`. A
         -- lambda / an already-Arc local arg is handled by the normal path.
         isEventCbParam i = paramTypeIsEventCb i || (i == 0 && calleeIsEventHelper)
+        -- An event callback is `(String|Bool) -> msg` — result is the app MSG
+        -- ADT, NEVER a `SkyTask`. Exclude Task-returning `(String|Bool) -> Task`
+        -- params: those render the same `Arc<dyn Fn(String) -> …>` shape (via
+        -- typeToRustString's Task-arrow arm) but are EFFECTFUL HOF callbacks
+        -- (`forEachChunk`'s `\chunk -> emit chunk writer`) whose runtime slot is
+        -- `impl Fn`, not Arc — Arc-wrapping their lambda arg there is E0277
+        -- (32-sse-relay). The event-cb arm only fires for the genuine msg-result
+        -- shape.
         paramTypeIsEventCb i = case paramStrs of
             Just (_, ps) -> case drop i ps of
-                (p:_) -> "std::sync::Arc<dyn Fn(String)" `isPrefixOf` p
-                         || "std::sync::Arc<dyn Fn(Bool)" `isPrefixOf` p
+                (p:_) -> ("std::sync::Arc<dyn Fn(String)" `isPrefixOf` p
+                          || "std::sync::Arc<dyn Fn(Bool)" `isPrefixOf` p)
+                         && not ("-> SkyTask<" `isInfixOf` p)
                 _     -> False
             Nothing -> False
         -- The Std.Ui / Std.Html event-helper functions take a single
@@ -2517,6 +2666,43 @@ emitDefaultCall ctx fn calleeName args =
         isBareFnItemArg (Ann.At _ (Can.VarCtor{}))     = True
         isBareFnItemArg (Ann.At _ (Can.VarTopLevel{})) = True
         isBareFnItemArg _                              = False
+        -- A param typed `Arc<dyn Fn(..) -> SkyTask<..> ..>` is a `Handler` slot
+        -- (an effectful route handler — see typeToRustString's Task-arrow arm). A
+        -- BARE Handler value passed there (a `let`-bound handler function
+        -- `todosByMethod` flowing into a middleware-wrapper closure `guarded
+        -- todosByMethod`, or a top-level handler ref) is rendered as a plain
+        -- closure / fn item, which does NOT coerce to the `Arc<dyn Fn>` slot.
+        -- Arc-wrap it (the `Arc<concrete>` unsizes to `Arc<dyn Fn>` at the typed
+        -- param). Distinct from the event-cb arm (`Arc<dyn Fn(String|Bool) ->
+        -- msg>`): here the RESULT is a `SkyTask`, never a bare msg.
+        -- ONLY a LOCAL let-bound closure (a middleware-wrapper `guarded` /
+        -- `wrap` / `cors`) genuinely renders its `Handler` param as `Arc<dyn Fn>`.
+        -- A kernel / runtime HOF whose `Handler`-shaped param is `impl Fn` (e.g.
+        -- `task_on_error`'s `e -> Task e2 a`) must NOT trigger the Arc-wrap — its
+        -- `paramStrs` is reconstructed via `typeToRustString` (which renders
+        -- Task-arrows as Arc), so it would falsely match. Gate on the callee being
+        -- a local closure so only the real Arc-param consumers fire.
+        calleeIsLocalClosure = case fn of
+            Ann.At _ (Can.VarLocal cn) -> Map.member cn (ecClosureDefs ctx)
+            _                          -> False
+        isHandlerArcParam i = calleeIsLocalClosure && case paramStrs of
+            Just (_, ps) -> case drop i ps of
+                (p:_) -> "std::sync::Arc<dyn Fn(" `isPrefixOf` p
+                         && "-> SkyTask<" `isInfixOf` p
+                         && not ("std::sync::Arc<dyn Fn(String)" `isPrefixOf` p)
+                         && not ("std::sync::Arc<dyn Fn(Bool)" `isPrefixOf` p)
+                _     -> False
+            Nothing -> False
+        -- A bare Handler VALUE that is NOT already an `Arc<dyn Fn>`: a top-level
+        -- handler fn ref, OR a `let`-bound LOCAL function (in ecClosureDefs —
+        -- `let todosByMethod req = …`, rendered as a plain `move |req| …`). A
+        -- closure PARAMETER named like a handler (`h` in `guarded h = …`) is
+        -- ALREADY `Arc<dyn Fn>` (its slot rendered that way) and must NOT be
+        -- re-wrapped (`Arc<Arc<dyn Fn>>`); it is a VarLocal but NOT in
+        -- ecClosureDefs, so the membership test excludes it.
+        isBareHandlerArg (Ann.At _ (Can.VarTopLevel{}))  = True
+        isBareHandlerArg (Ann.At _ (Can.VarLocal lname)) = Map.member lname (ecClosureDefs ctx)
+        isBareHandlerArg _                               = False
         -- B#2: a CAPTURING lambda passed DIRECTLY to an event helper
         -- (`Ev.onInput (\s -> Typed (model.prefix ++ s))`) targets an
         -- `Arc<dyn Fn(String) -> Msg + Send + Sync>` param. `argToRustString`
@@ -2526,6 +2712,8 @@ emitDefaultCall ctx fn calleeName args =
         isEventCbLambdaArg (Ann.At _ (Can.Lambda{})) = True
         isEventCbLambdaArg _                         = False
         emitArg i a
+            | isHandlerArcParam i, isBareHandlerArg a
+                              = "std::sync::Arc::new(" ++ argToRustString ctx noCloneFn a ++ ")"
             | isEventCbParam i, isBareFnItemArg a || isEventCbLambdaArg a
                               = "std::sync::Arc::new(" ++ argToRustString ctx noCloneFn a ++ ")"
             | i `elem` ctorBoxedPositions

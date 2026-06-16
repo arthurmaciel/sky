@@ -58,6 +58,54 @@ pub struct ServerCookie {
 type ErasedHandler =
     Arc<dyn Fn(ServerRequest) -> Pin<Box<dyn Future<Output = Result<ServerResponse, String>> + Send>> + Send + Sync>;
 
+/// The Sky `Handler` type (`Request -> Task Error Response`) reified as a
+/// shareable, error-typed closure. The Rust codegen renders the `Handler` type
+/// alias (and any `Request -> Task Error Response` arrow — e.g. the `h :
+/// Handler` param of a middleware-wrapping closure `guarded h = …`) as exactly
+/// this `Arc<dyn Fn>`, because a real route handler CAPTURES app state
+/// (`handleRegister cfg db`) and a capturing closure cannot coerce to a bare
+/// `fn` pointer.
+pub type ServerHandler<E> =
+    Arc<dyn Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync>;
+
+/// Accept a route / middleware handler as EITHER a bare closure / fn item OR an
+/// already-boxed `ServerHandler<E>` (the Arc the `Handler` alias renders as),
+/// converging both to `ServerHandler<E>`. The two impls below can never overlap:
+/// `Arc<dyn Fn>` does NOT itself implement `Fn`, so a value is covered by at most
+/// one impl. This is what lets `server_get(path, my_fn)` (15-http-server, a bare
+/// fn item) AND `wrap(guarded(handleDelete cfg db))` (36-composite-server, a
+/// captured Arc handler threaded through middleware) both register without any
+/// call-site wrapping in the generated code — the conversion is total and
+/// allocation-free on the Arc path (it returns the Arc as-is).
+pub trait IntoServerHandler<E> {
+    fn into_server_handler(self) -> ServerHandler<E>;
+}
+
+impl<E, F> IntoServerHandler<E> for F
+where
+    F: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+{
+    fn into_server_handler(self) -> ServerHandler<E> { Arc::new(self) }
+}
+
+impl<E> IntoServerHandler<E> for ServerHandler<E> {
+    fn into_server_handler(self) -> ServerHandler<E> { self }
+}
+
+// The codegen Arc-wraps a partial-applied route handler at its construction site
+// (`Arc::new(move |req| handle_register(cfg, db, req))`), yielding an
+// `Arc<{concrete closure}>` — distinct from both the blanket `F: Fn` impl (an
+// `Arc` is not itself `Fn`) and the `Arc<dyn Fn>` (`ServerHandler<E>`) impl above
+// (`dyn Fn` is `!Sized`, so it can't match this `Sized` `F`). Unsize it to
+// `Arc<dyn Fn>` here so that form registers directly with `server_get` /
+// `server_api`. The three impls cover pairwise-disjoint types.
+impl<E, F> IntoServerHandler<E> for Arc<F>
+where
+    F: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+{
+    fn into_server_handler(self) -> ServerHandler<E> { self }
+}
+
 /// Sky.Http.Server.Route (opaque). Non-generic — see ErasedHandler.
 #[derive(Clone)]
 pub struct ServerRoute {
@@ -69,10 +117,9 @@ pub struct ServerRoute {
 
 // ─── handler erasure ──────────────────────────────────────────────────────
 
-fn erase<E, H>(h: H) -> ErasedHandler
+fn erase<E>(h: ServerHandler<E>) -> ErasedHandler
 where
     E: Send + 'static,
-    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
 {
     Arc::new(move |req: ServerRequest| {
         let task = h(req);
@@ -91,31 +138,31 @@ where
 fn route<E, H>(method: &str, path: String, h: H) -> ServerRoute
 where
     E: Send + 'static,
-    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+    H: IntoServerHandler<E>,
 {
-    ServerRoute { method: method.to_string(), path, handler: Some(erase(h)), static_dir: None }
+    ServerRoute { method: method.to_string(), path, handler: Some(erase(h.into_server_handler())), static_dir: None }
 }
 
 // ─── routing kernels ──────────────────────────────────────────────────────
 
 pub fn server_get<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where E: Send + 'static, H: IntoServerHandler<E>
 { route("GET", path, h) }
 
 pub fn server_post<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where E: Send + 'static, H: IntoServerHandler<E>
 { route("POST", path, h) }
 
 pub fn server_put<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where E: Send + 'static, H: IntoServerHandler<E>
 { route("PUT", path, h) }
 
 pub fn server_delete<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where E: Send + 'static, H: IntoServerHandler<E>
 { route("DELETE", path, h) }
 
 pub fn server_any<E, H>(path: String, h: H) -> ServerRoute
-where E: Send + 'static, H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where E: Send + 'static, H: IntoServerHandler<E>
 { route("ANY", path, h) }
 
 /// Server.api : String -> (Request -> Task Error Response) -> Route
@@ -125,7 +172,7 @@ where E: Send + 'static, H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Se
 /// (`WithoutCsrf`) is a browser-session / double-submit concern from Sky.Live
 /// with no analogue on the Rust HTTP server, so it has no effect here.
 pub fn server_api<E, H>(spec: String, h: H) -> ServerRoute
-where E: Send + 'static, H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+where E: Send + 'static, H: IntoServerHandler<E>
 {
     let (method, path) = match spec.find(' ') {
         Some(idx) if idx > 0 =>
@@ -581,12 +628,13 @@ fn plain_resp(status: i64, body: &str, extra: &[(&str, &str)]) -> ServerResponse
 
 /// Middleware.withCors : List String -> Handler -> Handler. Echoes an allowed
 /// Origin (or `*`), answers preflight OPTIONS with 204, and tags responses.
-pub fn middleware_with_cors<E, H>(origins: Vec<String>, h: H) -> impl Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+pub fn middleware_with_cors<E, H>(origins: Vec<String>, h: H) -> ServerHandler<E>
 where
     E: Send + 'static,
-    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+    H: IntoServerHandler<E>,
 {
-    move |req| {
+    let h = h.into_server_handler();
+    Arc::new(move |req: ServerRequest| {
         let req_origin = header_ci(&req.headers, "origin").unwrap_or("").to_string();
         let allow = if origins.iter().any(|o| o == "*") {
             Some("*".to_string())
@@ -613,16 +661,17 @@ where
                 other => other,
             }
         })
-    }
+    })
 }
 
 /// Middleware.withLogging : Handler -> Handler. Logs `method path status Nms`.
-pub fn middleware_with_logging<E, H>(h: H) -> impl Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+pub fn middleware_with_logging<E, H>(h: H) -> ServerHandler<E>
 where
     E: Send + 'static,
-    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+    H: IntoServerHandler<E>,
 {
-    move |req| {
+    let h = h.into_server_handler();
+    Arc::new(move |req: ServerRequest| {
         let method = req.method.clone();
         let path = req.path.clone();
         let start = std::time::Instant::now();
@@ -633,17 +682,18 @@ where
             eprintln!("[sky.http] {} {} {} {}ms", method, path, status, start.elapsed().as_millis());
             result
         })
-    }
+    })
 }
 
 /// Middleware.withBasicAuth : String -> String -> Handler -> Handler. Requires
 /// HTTP Basic auth; constant-time credential comparison; 401 otherwise.
-pub fn middleware_with_basic_auth<E, H>(user: String, pass: String, h: H) -> impl Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+pub fn middleware_with_basic_auth<E, H>(user: String, pass: String, h: H) -> ServerHandler<E>
 where
     E: Send + 'static,
-    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+    H: IntoServerHandler<E>,
 {
-    move |req| {
+    let h = h.into_server_handler();
+    Arc::new(move |req: ServerRequest| {
         use subtle::ConstantTimeEq;
         let expected = format!("Basic {}", base64_encode(format!("{}:{}", user, pass)));
         let got = header_ci(&req.headers, "authorization").unwrap_or("");
@@ -655,23 +705,24 @@ where
                 ok_res(plain_resp(401, "Unauthorized", &[("www-authenticate", "Basic realm=\"Sky\"")]))
             })
         }
-    }
+    })
 }
 
 /// Middleware.withRateLimit : String -> Int -> Int -> Handler -> Handler.
 /// Per-(key, client-IP) fixed window; 429 when exceeded.
-pub fn middleware_with_rate_limit<E, H>(key: String, limit: i64, window_secs: i64, h: H) -> impl Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static
+pub fn middleware_with_rate_limit<E, H>(key: String, limit: i64, window_secs: i64, h: H) -> ServerHandler<E>
 where
     E: Send + 'static,
-    H: Fn(ServerRequest) -> SkyTask<E, ServerResponse> + Send + Sync + 'static,
+    H: IntoServerHandler<E>,
 {
-    move |req| {
+    let h = h.into_server_handler();
+    Arc::new(move |req: ServerRequest| {
         if fixed_window_allow(&key, &req.remoteAddr, limit, window_secs) {
             h(req)
         } else {
             Box::pin(async move { ok_res(plain_resp(429, "Too Many Requests", &[])) })
         }
-    }
+    })
 }
 
 fn unix_secs_f64() -> f64 {

@@ -8,6 +8,7 @@ module Sky.Generate.Rust.Builder.TypeRenderer
   , collectRenderedTVars
   , typeToRustString
   , flattenArrowType
+  , resultIsTaskTy
   , isEventArgType
   ) where
 
@@ -25,6 +26,15 @@ import Sky.Generate.Rust.Builder.Types (runtimeOpaqueTypes)
 flattenArrowType :: Can.Type -> ([Can.Type], Can.Type)
 flattenArrowType (Can.TLambda a b) = let (ps, r) = flattenArrowType b in (a : ps, r)
 flattenArrowType ty = ([], ty)
+
+-- | Is this type the `Task _ _` shape? The discriminator for an EFFECTFUL
+-- function type (one whose result is a Task) — see the `Can.TLambda` arm of
+-- `typeToRustString` (renders such arrows as `Arc<dyn Fn>` so capturing route /
+-- middleware handlers register) and `paramTypeToRust`'s identical gate. Kept here
+-- so both renderers share one definition.
+resultIsTaskTy :: Can.Type -> Bool
+resultIsTaskTy (Can.TType _ "Task" _) = True
+resultIsTaskTy _                      = False
 
 -- | Is this the ARG type of a Std.Ui/Std.Html event callback — concrete
 -- `String` or `Bool` (the wire payload of `OnString`/`OnBool`)? Used to gate
@@ -262,6 +272,31 @@ typeToRustString recordMap t = case t of
             "std::sync::Arc<dyn Fn(" ++ typeToRustString recordMap arg
                 ++ ") -> " ++ typeToRustString recordMap (case t of Can.TLambda _ r -> r; _ -> t)
                 ++ " + Send + Sync>"
+    -- An EFFECTFUL function type — flattened result is a `Task` — renders as a
+    -- shareable `Arc<dyn Fn(..) -> SkyTask<..> + Send + Sync>` rather than a bare
+    -- `fn` pointer. This is the `Handler` shape (`Request -> Task Error Response`,
+    -- exported by Sky.Http.Server) and any user re-declaration of it (the 36
+    -- example's local `Middleware.Handler` alias, and the inline `h : Handler`
+    -- param of a middleware-wrapping closure like `guarded h = …`). A real route
+    -- handler CAPTURES app state (`handleRegister cfg db` closes over cfg/db), and
+    -- a capturing closure cannot coerce to a bare `fn` pointer — so the slot must
+    -- be `Arc<dyn Fn>` (Clone, Send, Sync — axum-safe) for it to register. This
+    -- matches both `fieldTypeToRust` (which already Arc-wraps Task-returning record
+    -- fields, e.g. WsServerCfg.onMessage) and `paramTypeToRust` (which renders
+    -- Task-returning top-level HOF params as `impl Fn`); the construction sites
+    -- Arc-wrap the assigned closure/fn value (see wrapStoredFn / the partial-app
+    -- and lambda arms in ExprEmitter).
+    --
+    -- The Task-result gate is the SAME discriminator paramTypeToRust uses, so it
+    -- can NEVER catch `ShouldRetry e = RetryWhen (e -> Bool)` (result is concrete
+    -- `Bool`, not a Task) nor a pure HOF param `f : a -> b` (result TVar) — the
+    -- two shapes a blanket Arc switch broke (ADT derive Debug/PartialEq; bare-fn
+    -- HOF args). Effectful callbacks are exactly where capturing closures flow.
+    Can.TLambda _ _
+        | resultIsTaskTy (snd (flattenArrowType t)) ->
+            let (ps, ret) = flattenArrowType t
+            in "std::sync::Arc<dyn Fn(" ++ intercalate ", " (map (typeToRustString recordMap) ps)
+               ++ ") -> " ++ typeToRustString recordMap ret ++ " + Send + Sync>"
     Can.TLambda _ _ ->
         let (ps, ret) = flattenArrowType t
         in "fn(" ++ intercalate ", " (map (typeToRustString recordMap) ps) ++ ") -> " ++ typeToRustString recordMap ret
