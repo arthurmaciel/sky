@@ -1388,6 +1388,86 @@ exprToRustInner ctx e = case e of
                             ++ "std::sync::Arc::new({ let __m = " ++ handlerStr ++ "; "
                             ++ "move |_fd| Some(__m.clone()) })))"
             in "StdUiAttribute::AttrEvent(" ++ inner ++ ")"
+    -- ─── Db.insertFields / Db.updateFields / Db.insertFieldsReturning ─────────
+    --
+    -- These kernels receive `List (String, SqlField)` (and for updateFields,
+    -- `List (String, SqlValue)` for WHERE cols) where `SqlField` / `SqlValue`
+    -- are per-project GENERATED Rust enums (`StdDbSqlField`, `StdDbSqlValue`).
+    -- The runtime functions (`db_insert_fields` etc.) take `Vec<(String, Option<SqlParam>)>`
+    -- where `SqlParam` IS a runtime-nameable enum.  Codegen converts inline.
+    --
+    -- Inline conversion helpers (always emitted as closures to avoid naming
+    -- the generated enums in the runtime):
+    --
+    --   sql_value_to_param  : StdDbSqlValue → SqlParam
+    --   sql_field_to_option : StdDbSqlField → Option<SqlParam>
+    --   fields_to_vec       : List (String, SqlField) → Vec<(String, Option<SqlParam>)>
+    --   where_to_vec        : List (String, SqlValue) → Vec<(String, SqlParam)>
+    --
+    -- Security: table / column name validation is in the RUNTIME (`valid_sql_ident`);
+    -- values are positionally bound, never interpolated — same guarantee as Go.
+    -- Totality: SqlParam is exhaustive; `SqlNull` → SqlParam::Null; no panic.
+    --
+    -- SqlMoney serialisation matches Go's `sqlMoneyToString`:
+    --   `"ISO_CODE AMOUNT"` TEXT — the inverse of `db_dec_money`.
+    --   Currency enum variants USD/EUR/… have their Sky name as the code;
+    --   CurrencyRaw carries the raw code string.
+    -- VarKernel form (accessed directly as a kernel)
+    Can.Call (Ann.At _ (Can.VarKernel modDb "insertFields")) [connArg, tableArg, fieldsArg]
+        | modDb == "Db" || modDb == "Std.Db" ->
+            "db_insert_fields("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx tableArg ++ ", "
+                ++ sqlFieldsToVec ctx fieldsArg ++ ")"
+    Can.Call (Ann.At _ (Can.VarKernel modDb "updateFields")) [connArg, tableArg, whereArg, fieldsArg]
+        | modDb == "Db" || modDb == "Std.Db" ->
+            "db_update_fields("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx tableArg ++ ", "
+                ++ sqlWhereToVec ctx whereArg ++ ", "
+                ++ sqlFieldsToVec ctx fieldsArg ++ ")"
+    Can.Call (Ann.At _ (Can.VarKernel modDb "insertFieldsReturning")) [connArg, tableArg, fieldsArg, projArg, decArg]
+        | modDb == "Db" || modDb == "Std.Db" ->
+            "db_insert_fields_returning("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx tableArg ++ ", "
+                ++ sqlFieldsToVec ctx fieldsArg ++ ", "
+                ++ exprToRustString ctx projArg ++ ", "
+                ++ exprToRustString ctx decArg ++ ")"
+    -- VarTopLevel form (accessed via `import Std.Db as Db` — Ffi.kernel alias
+    -- resolves to VarTopLevel after canonicalisation, not VarKernel)
+    Can.Call (Ann.At _ (Can.VarTopLevel mdlDb "insertFields")) [connArg, tableArg, fieldsArg]
+        | let mn = ModuleName._name mdlDb in mn == "Std.Db" || mn == "Db" ->
+            "db_insert_fields("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx tableArg ++ ", "
+                ++ sqlFieldsToVec ctx fieldsArg ++ ")"
+    Can.Call (Ann.At _ (Can.VarTopLevel mdlDb "updateFields")) [connArg, tableArg, whereArg, fieldsArg]
+        | let mn = ModuleName._name mdlDb in mn == "Std.Db" || mn == "Db" ->
+            "db_update_fields("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx tableArg ++ ", "
+                ++ sqlWhereToVec ctx whereArg ++ ", "
+                ++ sqlFieldsToVec ctx fieldsArg ++ ")"
+    Can.Call (Ann.At _ (Can.VarTopLevel mdlDb "insertFieldsReturning")) [connArg, tableArg, fieldsArg, projArg, decArg]
+        | let mn = ModuleName._name mdlDb in mn == "Std.Db" || mn == "Db" ->
+            "db_insert_fields_returning("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx tableArg ++ ", "
+                ++ sqlFieldsToVec ctx fieldsArg ++ ", "
+                ++ exprToRustString ctx projArg ++ ", "
+                ++ exprToRustString ctx decArg ++ ")"
+    -- DbDec.money col — the runtime `db_dec_money` decodes the "CODE AMOUNT"
+    -- column into a `(Decimal, String)` pair; the GENERATED `Money` ADT can only
+    -- be NAMED at the codegen boundary, so wrap the pair into
+    -- `StdMoneyMoney::Money(amount, CurrencyRaw(code))` via the shared json_dec_map.
+    -- CurrencyRaw(code) needs no code→enum table and round-trips (sqlValueMatchArms
+    -- reads CurrencyRaw back to the code). Both VarKernel + VarTopLevel forms.
+    Can.Call (Ann.At _ (Can.VarKernel mdlMD "money")) [colArg]
+        | mdlMD == "DbDec" || mdlMD == "Std.Db.Decode" -> dbDecMoneyWrap ctx colArg
+    Can.Call (Ann.At _ (Can.VarTopLevel mdlMD "money")) [colArg]
+        | let mn = ModuleName._name mdlMD in mn == "DbDec" || mn == "Std.Db.Decode" ->
+            dbDecMoneyWrap ctx colArg
     Can.Call fn args ->
         let calleeRendered = exprToRustString ctx fn
             -- A call whose callee is a record FIELD access (`rec.field args`) is
@@ -2999,3 +3079,74 @@ flattenCons recMap headPat tailPat =
     where
     unwrapPat (Ann.At _ (Can.PAlias inner _)) = inner
     unwrapPat p = p
+
+-- ─── Sql ADT → SqlParam codegen helpers ──────────────────────────────────────
+--
+-- These emit INLINE Rust closures that convert the per-project GENERATED enums
+-- `StdDbSqlValue` / `StdDbSqlField` into the runtime-nameable `SqlParam`.
+-- All conversion code is emitted at the call site; the runtime has no knowledge
+-- of the generated enum names.
+--
+-- The emitted Rust is:
+--   sqlValueToParam(v): match v { StdDbSqlValue::SqlString(s) => SqlParam::Text(s), … }
+--   sqlFieldsToVec(e) : <e>.into_iter().map(|(col, sf)| (col, match sf { … })).collect()
+--   sqlWhereToVec(e)  : <e>.into_iter().map(|(col, sv)| (col, sql_value_to_param(sv))).collect()
+
+-- | Emit the body of a `match StdDbSqlValue` → SqlParam conversion.
+-- Money is serialised as "ISO_CODE AMOUNT" matching Go's sqlMoneyToString /
+-- the inverse of db_dec_money.  Every SqlValue variant is handled — total.
+sqlValueMatchArms :: String
+sqlValueMatchArms = unlines
+    [ "StdDbSqlValue::SqlString(s) => SqlParam::Text(s),"
+    , "StdDbSqlValue::SqlInt(i) => SqlParam::Int(i),"
+    , "StdDbSqlValue::SqlFloat(f) => SqlParam::Float(f),"
+    , "StdDbSqlValue::SqlBool(b) => SqlParam::Bool(b),"
+    , "StdDbSqlValue::SqlBytes(s) => SqlParam::Bytes(s.into_bytes()),"
+    -- Decimal doesn't impl Display; use the runtime helper `decimal_to_string`.
+    , "StdDbSqlValue::SqlDecimal(d) => SqlParam::Text(decimal_to_string(d)),"
+    , "StdDbSqlValue::SqlTime(ms) => SqlParam::Int(ms),"
+    -- Money: serialise as "ISO_CODE AMOUNT" matching Go's sqlMoneyToString.
+    -- `amount` is a Decimal (no Display); use decimal_to_string.
+    -- Currency enum Debug name = Sky ctor name = ISO code (e.g. "Usd" vs "USD"):
+    -- Go stores the Sky ctor name too, so the round-trip is consistent.
+    , "StdDbSqlValue::SqlMoney(m) => { let money_str = match m {"
+    , "    StdMoneyMoney::Money(amount, currency) => {"
+    , "        let code = match &currency {"
+    , "            StdMoneyCurrency::CurrencyRaw(s) => s.clone(),"
+    , "            c => format!(\"{:?}\", c)"
+    , "        };"
+    , "        format!(\"{} {}\", code, decimal_to_string(amount))"
+    , "    }"
+    , "}; SqlParam::Text(money_str) },"
+    , "StdDbSqlValue::SqlNull(_) => SqlParam::Null,"
+    ]
+
+-- | Emit a Rust expression that converts a Sky `List (String, SqlField)` argument
+-- (the `fields` param of insertFields / updateFields) into
+-- `Vec<(String, Option<SqlParam>)>`.
+-- `None` = OmitField (column dropped from SQL).
+-- `Some(SqlParam::…)` = SetField(value).
+-- | `DbDec.money col` — wrap the runtime `db_dec_money` decoder (yields a
+-- `(Decimal, ISO-code)` pair) into a `Decoder<Money>` by mapping the pair into
+-- the GENERATED `StdMoneyMoney::Money(amount, StdMoneyCurrency::CurrencyRaw(code))`
+-- via the shared `json_dec_map`. The closure param type is left to Rust to infer
+-- from `db_dec_money`'s `Decoder<(Decimal, String)>` return.
+dbDecMoneyWrap :: EmitCtx -> Can.Expr -> String
+dbDecMoneyWrap ctx colArg =
+    "json_dec_map(|__m| StdMoneyMoney::Money(__m.0, StdMoneyCurrency::CurrencyRaw(__m.1)), db_dec_money("
+        ++ exprToRustString ctx colArg ++ "))"
+
+sqlFieldsToVec :: EmitCtx -> Can.Expr -> String
+sqlFieldsToVec ctx e =
+    let inner = exprToRustString ctx e
+        arms = "StdDbSqlField::SetField(v) => Some(match v { " ++ sqlValueMatchArms ++ " }),"
+            ++ "StdDbSqlField::OmitField => None,"
+    in inner ++ ".into_iter().map(|(col, sf)| (col, match sf { " ++ arms ++ " })).collect::<Vec<_>>()"
+
+-- | Emit a Rust expression that converts a Sky `List (String, SqlValue)` argument
+-- (the `whereCols` param of updateFields) into `Vec<(String, SqlParam)>`.
+sqlWhereToVec :: EmitCtx -> Can.Expr -> String
+sqlWhereToVec ctx e =
+    let inner = exprToRustString ctx e
+        arms = sqlValueMatchArms
+    in inner ++ ".into_iter().map(|(col, sv)| (col, match sv { " ++ arms ++ " })).collect::<Vec<_>>()"

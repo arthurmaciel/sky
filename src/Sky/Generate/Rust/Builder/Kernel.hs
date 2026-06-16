@@ -663,6 +663,17 @@ kernelToRust mod name = case (mod, name) of
     ("Std.Db", "getByIdDecode") -> "db_get_by_id_decode"
     ("Db", "withTransaction")   -> "db_with_transaction"
     ("Std.Db", "withTransaction") -> "db_with_transaction"
+    -- Phase B: SQL-gen kernels (insertFields / updateFields / insertFieldsReturning).
+    -- NOTE: these are intercepted FIRST by special-case arms in ExprEmitter.hs
+    -- (`Can.Call (VarKernel "Db" "insertFields") …`) which emit the SqlParam
+    -- conversion inline.  These Kernel.hs entries are here for completeness /
+    -- partial-application fallback and must match the runtime fn names.
+    ("Db", "insertFields")             -> "db_insert_fields"
+    ("Std.Db", "insertFields")         -> "db_insert_fields"
+    ("Db", "updateFields")             -> "db_update_fields"
+    ("Std.Db", "updateFields")         -> "db_update_fields"
+    ("Db", "insertFieldsReturning")    -> "db_insert_fields_returning"
+    ("Std.Db", "insertFieldsReturning") -> "db_insert_fields_returning"
     -- Sub-C: Std.Auth — 6 pure crypto + 3 DB-touching kernels.
     ("Auth", "hashPassword")     -> "auth_hash_password"
     ("Std.Auth", "hashPassword") -> "auth_hash_password"

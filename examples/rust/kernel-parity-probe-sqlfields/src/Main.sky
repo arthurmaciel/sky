@@ -1,0 +1,93 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Std.Log exposing (println)
+import Std.Db as Db
+import Std.Db.Decode as DbDec
+
+-- Exercise: Db.insertFields / Db.updateFields / Db.insertFieldsReturning
+
+type alias Row =
+    { id : Int
+    , name : String
+    , score : Float
+    , active : Bool
+    }
+
+rowDecoder : DbDec.Decoder Row
+rowDecoder =
+    DbDec.succeed Row
+        |> DbDec.required "id" (DbDec.int "id")
+        |> DbDec.required "name" (DbDec.string "name")
+        |> DbDec.required "score" (DbDec.float "score")
+        |> DbDec.required "active" (DbDec.bool "active")
+
+main =
+    let
+        work =
+            Task.andThen
+                (\db ->
+                    -- Create table with a DEFAULT column (notes has default '')
+                    Task.andThen
+                        (\_ ->
+                            -- Insert row using SqlField: mix of SetField + OmitField (notes gets DEFAULT)
+                            let
+                                fields1 =
+                                    [ ( "name",   Db.SetField (Db.SqlString "Alice") )
+                                    , ( "score",  Db.SetField (Db.SqlFloat 9.5) )
+                                    , ( "active", Db.SetField (Db.SqlBool True) )
+                                    , ( "notes",  Db.OmitField )
+                                    ]
+                            in
+                            Task.andThen
+                                (\n ->
+                                    -- insertFieldsReturning: get the assigned id back
+                                    let
+                                        fields2 =
+                                            [ ( "name",   Db.SetField (Db.SqlString "Bob") )
+                                            , ( "score",  Db.SetField (Db.SqlFloat 7.2) )
+                                            , ( "active", Db.SetField (Db.SqlBool False) )
+                                            , ( "notes",  Db.SetField (Db.SqlNull (Db.SqlString "")) )
+                                            ]
+                                    in
+                                    Task.andThen
+                                        (\ids ->
+                                            -- updateFields: set score, OmitField active (leave unchanged)
+                                            let
+                                                whereCols = [ ( "name", Db.SqlString "Alice" ) ]
+                                                setFields =
+                                                    [ ( "score",  Db.SetField (Db.SqlFloat 10.0) )
+                                                    , ( "active", Db.OmitField )
+                                                    ]
+                                            in
+                                            Task.andThen
+                                                (\nUp ->
+                                                    -- Verify: queryDecode the final rows
+                                                    Task.andThen
+                                                        (\rows ->
+                                                            let
+                                                                line1 = "insertFields rows=" ++ String.fromInt n
+                                                                line2 = "insertFieldsReturning ids=" ++ String.fromInt (List.length ids)
+                                                                line3 = "updateFields rows=" ++ String.fromInt nUp
+                                                                line4 = "finalRows=" ++ String.fromInt (List.length rows)
+                                                                _ = println line1
+                                                                _ = println line2
+                                                                _ = println line3
+                                                                _ = println line4
+                                                            in
+                                                            println "SQLFIELDS PROBE OK"
+                                                        )
+                                                        (Db.queryDecode db "SELECT id, name, score, active FROM items ORDER BY id" [] rowDecoder)
+                                                )
+                                                (Db.updateFields db "items" whereCols setFields)
+                                        )
+                                        (Db.insertFieldsReturning db "items" fields2 "id" (DbDec.int "id"))
+                                )
+                                (Db.insertFields db "items" fields1)
+                        )
+                        (Db.execRaw db "CREATE TABLE items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, score REAL NOT NULL DEFAULT 0.0, active INTEGER NOT NULL DEFAULT 1, notes TEXT DEFAULT '')")
+                )
+                (Task.andThen (\db -> Task.andThen (\_ -> Task.succeed db) (Db.execRaw db "DROP TABLE IF EXISTS items")) (Db.connect ()))
+    in
+    Task.run work

@@ -384,6 +384,22 @@ log** — hold it to the same bar as a code review:
   closure-codegen gaps (E0282 param-infer, E0599 non-`Clone` capture), and a
   `sky run` `CARGO_TARGET_DIR` binary-path bug — the entire fixture sweep passed
   over all of them. Pull a real app and `sky run` it on `--target rust`.
+- **ExprEmitter special-case patterns for Ffi.kernel stdlib functions MUST match
+  `VarTopLevel`, not `VarKernel`.** When a Sky source imports `import Std.Db as Db`
+  and calls `Db.insertFields`, the canonicaliser produces
+  `Can.Call (Ann.At _ (Can.VarTopLevel mod "insertFields")) args` — NOT `VarKernel`.
+  `VarKernel` only fires for kernels written as raw `Ffi.kernel "Name"` at the
+  call site. The generic `VarTopLevel` handler routes through `kernelToRust` (giving
+  the right function name via Kernel.hs) but skips any special-case inline-conversion
+  logic. Pattern: add parallel `Can.VarTopLevel mdl "fnName"` arms WITH
+  `ModuleName._name mdl == "Std.Db"` guards alongside every `VarKernel` arm.
+  Symptom when missing: cargo errors like `expected Vec<(String, SqlParam)>, found
+  Vec<(String, StdDbSqlField)>` — the function name is right but the type conversion
+  wrapper was skipped.
+- **Rust `Decimal` (our newtype) does NOT implement `Display`/`ToString`.**
+  Inline match-arm code that calls `.to_string()` on a `Decimal` field fails with
+  E0599. Use the runtime helper `decimal_to_string(d)` everywhere a `Decimal` must
+  become a `String` (SqlDecimal / SqlMoney arms in `sqlValueMatchArms`).
 - Known unfixed codegen/runtime gaps:
   `2026-06-15-skyshop-rs-codegen-gaps.md` (unconstrained-`Result`→`i64`;
   `Dict.union`/`List.sortBy` absences).

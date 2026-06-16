@@ -1,0 +1,47 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Sky.Core.List as List
+import Std.Db as Db
+import Std.Db.Decode as Decode
+import Std.Money as Money
+import Std.Decimal as Decimal
+import Std.Log exposing (println)
+
+
+type alias Order =
+    { id : Int, total : Money }
+
+
+orderDecoder : Decoder Order
+orderDecoder =
+    Decode.map2 Order
+        (Decode.int "id")
+        (Decode.money "total")
+
+
+orderStr : Order -> String
+orderStr o =
+    String.fromInt o.id
+        ++ ":"
+        ++ Money.currencyCode (Money.currency o.total)
+        ++ " "
+        ++ Decimal.toString (Money.amount o.total)
+
+
+main =
+    Db.connect ()
+        |> Task.andThen
+            (\db ->
+                Db.execRaw db "DROP TABLE IF EXISTS orders"
+                    |> Task.andThen (\_ -> Db.execRaw db "CREATE TABLE orders (id INTEGER PRIMARY KEY, total TEXT)")
+                    |> Task.andThen (\_ -> Db.execRaw db "INSERT INTO orders VALUES (1, 'USD 12.34')")
+                    |> Task.andThen (\_ -> Db.execRaw db "INSERT INTO orders VALUES (2, 'EUR 99.50')")
+                    |> Task.andThen (\_ -> Db.queryDecode db "SELECT id, total FROM orders ORDER BY id" [] orderDecoder)
+                    |> Task.andThen (\orders -> println ("orders=" ++ String.join "|" (List.map orderStr orders)))
+            )
+        |> Task.andThen (\_ -> println "MONEY PROBE OK")
+        |> Task.onError (\e -> println ("MONEY ERR: " ++ errorToString e))
+        |> Task.run

@@ -880,6 +880,281 @@ pub fn db_with_transaction<E: Send + From<String> + 'static, A: Send + 'static>(
     })
 }
 
+// ─── SqlParam — runtime-nameable parameter type for db_insert_fields etc. ─────
+//
+// Sky's `SqlField` and `SqlValue` ADTs are per-project GENERATED Rust enums
+// (`StdDbSqlField`, `StdDbSqlValue`).  The runtime can't name or destructure
+// them, but it CAN define `SqlParam` — a parallel enum whose variants match
+// SqlValue 1:1.  The codegen emits a conversion at each `insertFields` /
+// `updateFields` / `insertFieldsReturning` call site:
+//
+//   StdDbSqlField::OmitField      → None           (column dropped from SQL)
+//   StdDbSqlField::SetField(v)    → Some(v.into())  (column bound as param)
+//   StdDbSqlValue::SqlString(s)   → SqlParam::Text(s)
+//   StdDbSqlValue::SqlInt(i)      → SqlParam::Int(i)
+//   StdDbSqlValue::SqlFloat(f)    → SqlParam::Float(f)
+//   StdDbSqlValue::SqlBool(b)     → SqlParam::Bool(b)
+//   StdDbSqlValue::SqlBytes(s)    → SqlParam::Bytes(s.into_bytes())
+//   StdDbSqlValue::SqlDecimal(d)  → SqlParam::Text(d.to_string())  (lossless)
+//   StdDbSqlValue::SqlTime(ms)    → SqlParam::Int(ms)  (Unix millis, matches Go)
+//   StdDbSqlValue::SqlMoney(m)    → SqlParam::Text("ISO_CODE AMOUNT")  (see note)
+//   StdDbSqlValue::SqlNull(_)     → SqlParam::Null
+//
+// Money note: `StdMoneyMoney::Money(amount, currency)` is also generated; codegen
+// serialises it to "CODE AMOUNT" string (same as Go's sqlMoneyToString).  If
+// codegen cannot destructure Money (e.g. future Money redesign), the fallback is
+// SqlParam::Text(money_to_text) where money_to_text is emitted inline.
+//
+// Security: table/column names are validated by `valid_sql_ident` (ASCII
+// alphanumeric + `_` + `.`, rejects empty) before interpolation into SQL.
+// All VALUES are positional-bound (`?`), never interpolated.
+// Totality: no unwrap/panic anywhere in this module section.
+
+/// A runtime-nameable SQL parameter value, matching the Sky `SqlValue` ADT.
+/// See the module-level comment above for the generated-ADT conversion rules.
+#[derive(Clone, Debug)]
+pub enum SqlParam {
+    /// `SqlString s` — binds as TEXT.
+    Text(String),
+    /// `SqlInt i` / `SqlTime ms` — binds as INTEGER.
+    Int(i64),
+    /// `SqlFloat f` — binds as REAL.
+    Float(f64),
+    /// `SqlBool b` — binds as INTEGER (0 / 1), matching SQLite convention.
+    Bool(bool),
+    /// `SqlBytes s` — binds as BLOB.
+    Bytes(Vec<u8>),
+    /// `SqlNull _` — binds as NULL regardless of the witness type.
+    Null,
+}
+
+/// Validate an SQL identifier (table or column name).
+/// Allows ASCII alphanumeric characters, underscore, and dot.
+/// Rejects empty strings and anything outside that character set.
+/// Mirrors Go's `validSqlIdent` function in db_auth.go.
+pub fn valid_sql_ident(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+}
+
+/// Bind a `SqlParam` value onto a sqlx `Query` builder.
+/// Returns `SkyResult::Err` only when the DB pool is absent (no-db build).
+/// Every variant is handled — this function is TOTAL.
+#[cfg(feature = "db")]
+fn bind_sql_param<'q>(
+    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    p: SqlParam,
+) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+    match p {
+        SqlParam::Text(s)  => q.bind(s),
+        SqlParam::Int(i)   => q.bind(i),
+        SqlParam::Float(f) => q.bind(f),
+        SqlParam::Bool(b)  => q.bind(b),
+        SqlParam::Bytes(v) => q.bind(v),
+        SqlParam::Null     => q.bind(Option::<String>::None),
+    }
+}
+
+/// Shared logic for `db_insert_fields` and `db_insert_fields_returning`:
+/// validates the table name and builds the INSERT SQL + bound-arg list.
+///
+/// `fields`: `Vec<(col_name, Option<SqlParam>)>` where `None` = OmitField
+/// (column dropped from SQL; DB applies DEFAULT) and `Some(p)` = SetField(p).
+///
+/// Returns `(sql_without_returning, args)` on success, or
+/// `SkyResult::Err` on invalid table/column name.  All-OmitField → returns
+/// `"INSERT INTO t DEFAULT VALUES"` with an empty arg list (valid on SQLite ≥
+/// 3.35 and PostgreSQL).
+///
+/// Security: table and column names are validated before interpolation.
+/// Values are bound positionally — never interpolated.
+#[cfg(feature = "db")]
+fn build_insert_sql(
+    kernel: &str,
+    table: &str,
+    fields: Vec<(String, Option<SqlParam>)>,
+) -> Result<(String, Vec<SqlParam>), String> {
+    if !valid_sql_ident(table) {
+        return Err(format!("{}: invalid table name {:?}", kernel, table));
+    }
+    let mut cols: Vec<String> = Vec::new();
+    let mut args: Vec<SqlParam> = Vec::new();
+    for (col, opt) in fields {
+        if !valid_sql_ident(&col) {
+            return Err(format!("{}: invalid column name {:?}", kernel, col));
+        }
+        if let Some(p) = opt {
+            cols.push(col);
+            args.push(p);
+        }
+        // None → OmitField: column dropped entirely, DB applies DEFAULT.
+    }
+    let sql = if cols.is_empty() {
+        format!("INSERT INTO {} DEFAULT VALUES", table)
+    } else {
+        let ph = vec!["?"; cols.len()].join(", ");
+        format!("INSERT INTO {} ({}) VALUES ({})", table, cols.join(", "), ph)
+    };
+    Ok((sql, args))
+}
+
+/// `Db.insertFields : Db -> String -> List (String, SqlField) -> Task Error Int`
+///
+/// Builds a dynamic INSERT that includes only the `SetField` columns.
+/// `OmitField` columns are dropped from the column list + VALUES clause so the
+/// database applies their DEFAULT.  When every column is OmitField the runtime
+/// emits `INSERT INTO <table> DEFAULT VALUES`.
+///
+/// Returns the number of rows affected (1 on success for a single-row insert).
+///
+/// Security: table + column names are identifier-validated `[A-Za-z0-9_.]`;
+/// values are bound positionally — never interpolated into SQL.
+/// Totality: every error path returns `SkyResult::Err`; no panic/unwrap.
+#[cfg(feature = "db")]
+pub fn db_insert_fields<E: Send + From<String> + 'static>(
+    conn: Db,
+    table: String,
+    fields: Vec<(String, Option<SqlParam>)>,
+) -> SkyTask<E, i64> {
+    Box::pin(async move {
+        let (base_sql, args) = match build_insert_sql("db.insertFields", &table, fields) {
+            Ok(v)  => v,
+            Err(e) => return SkyResult::Err(e.into()),
+        };
+        let sql = db_format_sql(base_sql);
+        let mut q = sqlx::query(&sql);
+        for p in args { q = bind_sql_param(q, p); }
+        match q.execute(&conn).await {
+            Ok(res) => ok_res(db_last_insert_id(&res)),
+            Err(e)  => SkyResult::Err(sky_err(&e)),
+        }
+    })
+}
+
+/// `Db.updateFields : Db -> String -> List (String, SqlValue) -> List (String, SqlField) -> Task Error Int`
+///
+/// Builds a dynamic UPDATE that includes only the `SetField` columns in the SET
+/// clause.  `OmitField` columns are skipped (DB keeps their existing value).
+/// If every column in `set_fields` is OmitField, returns `Ok(0)` without
+/// executing any SQL (no empty SET clause).
+///
+/// `where_cols` is a list of `(col, SqlValue)` pairs forming the WHERE clause
+/// (AND-joined); an empty list means no WHERE clause (updates every row).
+///
+/// Security: table + column names are identifier-validated `[A-Za-z0-9_.]`;
+/// values are bound positionally — never interpolated into SQL.
+/// Totality: every error path returns `SkyResult::Err`; no panic/unwrap.
+#[cfg(feature = "db")]
+pub fn db_update_fields<E: Send + From<String> + 'static>(
+    conn: Db,
+    table: String,
+    where_cols: Vec<(String, SqlParam)>,
+    set_fields: Vec<(String, Option<SqlParam>)>,
+) -> SkyTask<E, i64> {
+    Box::pin(async move {
+        if !valid_sql_ident(&table) {
+            return SkyResult::Err(
+                format!("db.updateFields: invalid table name {:?}", table).into()
+            );
+        }
+        // Build SET clause.
+        let mut set_clauses: Vec<String> = Vec::new();
+        let mut args: Vec<SqlParam> = Vec::new();
+        for (col, opt) in set_fields {
+            if !valid_sql_ident(&col) {
+                return SkyResult::Err(
+                    format!("db.updateFields: invalid SET column name {:?}", col).into()
+                );
+            }
+            if let Some(p) = opt {
+                set_clauses.push(format!("{} = ?", col));
+                args.push(p);
+            }
+            // None → OmitField: skip column.
+        }
+        if set_clauses.is_empty() {
+            // Every column was OmitField — nothing to update. Go parity: return 0.
+            return ok_res(0i64);
+        }
+        // Build WHERE clause.
+        let mut where_clauses: Vec<String> = Vec::new();
+        for (col, p) in where_cols {
+            if !valid_sql_ident(&col) {
+                return SkyResult::Err(
+                    format!("db.updateFields: invalid WHERE column name {:?}", col).into()
+                );
+            }
+            where_clauses.push(format!("{} = ?", col));
+            args.push(p);
+        }
+        let mut sql = format!("UPDATE {} SET {}", table, set_clauses.join(", "));
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+        let sql = db_format_sql(sql);
+        let mut q = sqlx::query(&sql);
+        for p in args { q = bind_sql_param(q, p); }
+        match q.execute(&conn).await {
+            Ok(res) => ok_res(res.rows_affected() as i64),
+            Err(e)  => SkyResult::Err(sky_err(&e)),
+        }
+    })
+}
+
+/// `Db.insertFieldsReturning : Db -> String -> List (String, SqlField) -> String -> Decoder a -> Task Error (List a)`
+///
+/// Builds the same OmitField-aware INSERT as `db_insert_fields`, appends
+/// `RETURNING <projection>`, runs it through `fetch_all`, and decodes each
+/// returned row via the `Decoder<E,A>` (using `row_to_json` — NULL-preserving).
+///
+/// The `projection` string is caller-controlled (matches Go's trust model):
+/// `"*"`, column lists, SQL expressions, and aliases all work.  An empty
+/// projection is rejected (`Err`).
+///
+/// Requires SQLite ≥ 3.35 (Mar 2021) or PostgreSQL — same requirement as
+/// other RETURNING uses already in Std.Db.
+///
+/// Security: table + column names validated; values bound positionally; only
+/// the RETURNING projection is caller-supplied (and it's not executed as DML,
+/// so the risk class is different — same as `queryDecode`'s SQL string trust model).
+/// Totality: every error path returns `SkyResult::Err`; no panic/unwrap.
+#[cfg(feature = "db")]
+pub fn db_insert_fields_returning<E: Send + From<String> + 'static, A: Send + 'static>(
+    conn: Db,
+    table: String,
+    fields: Vec<(String, Option<SqlParam>)>,
+    projection: String,
+    decoder: Decoder<E, A>,
+) -> SkyTask<E, Vec<A>> {
+    Box::pin(async move {
+        if projection.is_empty() {
+            return SkyResult::Err(
+                "db.insertFieldsReturning: empty RETURNING projection".to_string().into()
+            );
+        }
+        let (base_sql, args) = match build_insert_sql("db.insertFieldsReturning", &table, fields) {
+            Ok(v)  => v,
+            Err(e) => return SkyResult::Err(e.into()),
+        };
+        let sql = db_format_sql(format!("{} RETURNING {}", base_sql, projection));
+        let mut q = sqlx::query(&sql);
+        for p in args { q = bind_sql_param(q, p); }
+        let rows = match q.fetch_all(&conn).await {
+            Ok(r)  => r,
+            Err(e) => return SkyResult::Err(sky_err(&e)),
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let jv = row_to_json(row);
+            match (decoder.run)(&jv) {
+                SkyResult::Ok(a)  => out.push(a),
+                SkyResult::Err(e) => return SkyResult::Err(e),
+            }
+        }
+        ok_res(out)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
