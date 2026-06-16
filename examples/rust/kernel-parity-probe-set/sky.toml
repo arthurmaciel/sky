@@ -1,0 +1,12 @@
+name = "kernel-parity-probe-set"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+# Fork-local regression fixture for the Sky.Core.Set subsystem on --target rust
+# (BTreeSet<A> backing). Exercises all 10 Set kernels so a green sky build +
+# cargo build + run proves the SkySet type rendering (Set a -> BTreeSet<a>), the
+# set_empty turbofish pin, Kernel.hs routing, and the runtime ops end-to-end.
+
+[source]
+root = "src"

@@ -652,7 +652,7 @@ exprToRustString ctx (Ann.At region expr) =
 -- | Sub-A.13: an empty-collection literal whose element type Rust cannot infer
 -- from a bare emission. These are the args resolved by call-site param-type
 -- propagation in emitDefaultCall.
-data EmptyKind = EKList | EKNothing | EKDict
+data EmptyKind = EKList | EKNothing | EKDict | EKSet
 
 emptyArgKind :: Can.Expr -> Maybe EmptyKind
 emptyArgKind (Ann.At _ (Can.List [])) = Just EKList
@@ -663,6 +663,11 @@ emptyArgKind (Ann.At _ (Can.VarCtor _ _ "Maybe" "Nothing" _)) = Just EKNothing
 emptyArgKind (Ann.At _ (Can.VarKernel m "empty")) | m == "Dict" || m == "Sky.Core.Dict" = Just EKDict
 emptyArgKind (Ann.At _ (Can.VarTopLevel m "empty"))
     | let n = ModuleName._name m in n == "Dict" || "Sky.Core.Dict" `isSuffixOf` n = Just EKDict
+-- `Set.empty` mirrors `Dict.empty`: as an ARG its `BTreeSet<A>` resolves from
+-- the callee's param type, so a `Set String` param pins `::<String>`.
+emptyArgKind (Ann.At _ (Can.VarKernel m "empty")) | m == "Set" || m == "Sky.Core.Set" = Just EKSet
+emptyArgKind (Ann.At _ (Can.VarTopLevel m "empty"))
+    | let n = ModuleName._name m in n == "Set" || "Sky.Core.Set" `isSuffixOf` n = Just EKSet
 emptyArgKind _ = Nothing
 
 isEmptyishArg :: Can.Expr -> Bool
@@ -757,16 +762,19 @@ emitEmptyArg _ mps i arg =
             -- infer K (E0282). Fall back to the String/i64 default — the
             -- historical behaviour before EKDict (00-standard-libs).
             EKDict    -> "dict_empty::<String, i64>()"
+            EKSet     -> "set_empty::<i64>()"
         defaultFiller = case kind of
             EKList    -> "Vec::<i64>::new()"
             EKNothing -> "SkyMaybe::<i64>::Nothing"
             EKDict    -> "dict_empty::<String, i64>()"
+            EKSet     -> "set_empty::<i64>()"
         -- Insert the turbofish "::" before the first '<' of a concrete param.
         turbofish pt = case break (== '<') pt of
             (h, rest@('<' : _)) -> Just $ case kind of
                 EKList    | "Vec" == h        -> h ++ "::" ++ rest ++ "::new()"
                 EKNothing | "SkyMaybe" == h   -> h ++ "::" ++ rest ++ "::Nothing"
                 EKDict    | "HashMap" == h     -> "dict_empty::" ++ rest ++ "()"
+                EKSet     | "BTreeSet" == h     -> "set_empty::" ++ rest ++ "()"
                 _ -> "" -- param shape doesn't match the arg kind
             _ -> Nothing
     in case mps of
@@ -861,6 +869,7 @@ exprToRustInner ctx e = case e of
             pinE n
                 | n == "task_fail" = n ++ taskFailPin ctx
                 | n == "dict_empty" = n ++ dictEmptyPin ctx
+                | n == "set_empty" = n ++ setEmptyPin ctx
                 | otherwise = case Map.lookup n kernelsNeedingErrorPin of
                     Just suffix -> n ++ suffix
                     Nothing     -> n
@@ -900,6 +909,7 @@ exprToRustInner ctx e = case e of
             tf = case Map.lookup fnName kernelsNeedingErrorPin of
                 Just _ | fnName == "task_fail"  -> taskFailPin ctx
                 Just _ | fnName == "dict_empty" -> dictEmptyPin ctx
+                Just _ | fnName == "set_empty"  -> setEmptyPin ctx
                 Just suffix -> suffix
                 Nothing     -> ""
         in if mod == "Basics" && name == "not" then "!"
@@ -2164,6 +2174,16 @@ dictEmptyPin ctx = case ecExpectedType ctx of
     Just (Can.TType _ "Dict" [k, v]) | not (hasTypeVars k), not (hasTypeVars v) ->
         "::<" ++ typeToRustString (ecRecordMap ctx) k ++ ", " ++ typeToRustString (ecRecordMap ctx) v ++ ">"
     _ -> "::<String, i64>"
+
+-- | Value-type turbofish for `set_empty` (`Set.empty : Set a -> BTreeSet<A>`).
+-- Pins A from a concrete `Set a` expected type; otherwise the i64 default
+-- (kernelsNeedingErrorPin) — an empty set in a typed slot almost always
+-- carries its region type, so the default rarely fires. Mirrors dictEmptyPin.
+setEmptyPin :: EmitCtx -> String
+setEmptyPin ctx = case ecExpectedType ctx of
+    Just (Can.TType _ "Set" [a]) | not (hasTypeVars a) ->
+        "::<" ++ typeToRustString (ecRecordMap ctx) a ++ ">"
+    _ -> "::<i64>"
 
 taskFailPin :: EmitCtx -> String
 taskFailPin ctx

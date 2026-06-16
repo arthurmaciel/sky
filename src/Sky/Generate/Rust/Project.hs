@@ -106,7 +106,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    -- Sub-A codegen completion — Ffi.* runtime polyfills
                    ,"pub mod ffi_polyfills;"
                    -- Sub-A.8 — runtime kernel coverage
-                   ,"pub mod money;","pub mod math;","pub mod dict;","pub mod string;"
+                   ,"pub mod money;","pub mod math;","pub mod dict;","pub mod set;","pub mod string;"
                    ,"pub mod basics;","pub mod char_kernel;","pub mod list;","pub mod io;"
                    -- v0.15.47 stdlib modules
                    ,"pub mod compression;","pub mod csv;","pub mod config_decode;"
@@ -127,7 +127,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                   ,"pub use jwt::*;","pub use decimal::*;"
                   ,"pub use ffi_polyfills::*;"
                   ,"pub use money::*;","pub use math::*;"
-                  ,"pub use dict::*;","pub use string::*;"
+                  ,"pub use dict::*;","pub use set::*;","pub use string::*;"
                   ,"pub use basics::*;","pub use char_kernel::*;","pub use list::*;"
                   ,"pub use io::*;"
                   ,"pub use compression::*;","pub use csv::*;"

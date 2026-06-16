@@ -216,6 +216,7 @@ headerSection =
 importSection :: UsedKernels -> String -> [String]
 importSection uk dbDriver =
     [ "use std::collections::HashMap;"
+    , "use std::collections::BTreeSet;"
     , "use std::fmt;"
     , "use std::future::Future;"
     , "use std::future::ready;"

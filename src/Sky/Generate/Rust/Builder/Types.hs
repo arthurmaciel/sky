@@ -364,6 +364,10 @@ kernelsNeedingErrorPin = Map.fromList
     -- i64 when call sites (like dict_keys(dict_empty())) can't pin T.
     -- The map is just "turbofish injection"; not all entries are error-pins.
     , ("dict_empty",             "::<i64>")
+    -- set_empty() returns BTreeSet<A>; A defaults to i64 when call sites
+    -- can't pin it (mirrors dict_empty). setEmptyPin overrides from a
+    -- concrete `Set a` expected type.
+    , ("set_empty",              "::<i64>")
     ]
 
 -- | Runtime kernels whose Rust signatures are zero-arg functions returning a
@@ -380,6 +384,7 @@ kernelsZeroArg = Set.fromList
     -- fn item (35-composite-generics). Runtime json_enc_null() is zero-arg.
     , "json_enc_null"
     , "dict_empty"
+    , "set_empty"
     , "math_pi", "math_e"
     -- Math zero-arg constants added in go-parity kernel-gaps sweep.
     -- Without this entry the codegen emits `math_phi` (a bare fn item, not a

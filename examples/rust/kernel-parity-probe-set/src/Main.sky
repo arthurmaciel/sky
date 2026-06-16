@@ -1,0 +1,54 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Set as Set
+import Sky.Core.String as String
+import Sky.Core.List as List
+import Std.Log exposing (println)
+
+
+listStr : List Int -> String
+listStr xs =
+    String.join "," (List.map String.fromInt xs)
+
+
+boolStr : Bool -> String
+boolStr b =
+    if b then
+        "true"
+
+    else
+        "false"
+
+
+main =
+    let
+        a =
+            Set.fromList [ 3, 1, 2, 1, 3 ]
+
+        b =
+            Set.fromList [ 2, 3, 4 ]
+
+        -- String-element set exercises Set String (BTreeSet<String>)
+        words =
+            Set.fromList [ "pear", "apple", "pear", "fig" ]
+
+        result =
+            String.join " "
+                [ "a=" ++ listStr (Set.toList a) -- 1,2,3 (dedup + sorted)
+                , "size_a=" ++ String.fromInt (Set.size a) -- 3
+                , "insert=" ++ listStr (Set.toList (Set.insert 5 a)) -- 1,2,3,5
+                , "remove=" ++ listStr (Set.toList (Set.remove 1 a)) -- 2,3
+                , "member2=" ++ boolStr (Set.member 2 a) -- true
+                , "member9=" ++ boolStr (Set.member 9 a) -- false
+                , "union=" ++ listStr (Set.toList (Set.union a b)) -- 1,2,3,4
+                , "intersect=" ++ listStr (Set.toList (Set.intersect a b)) -- 2,3
+                , "diff=" ++ listStr (Set.toList (Set.diff a b)) -- 1
+                , "emptySize=" ++ String.fromInt (Set.size Set.empty) -- 0
+                , "words=" ++ String.join "," (Set.toList words) -- apple,fig,pear
+                ]
+    in
+    println result
+        |> Task.andThen (\_ -> println "SET PROBE OK")
+        |> Task.run

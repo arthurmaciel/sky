@@ -146,6 +146,7 @@ typeToRustString recordMap t = case t of
     Can.TType _ "List" [a] -> "Vec<" ++ typeToRustString recordMap a ++ ">"
     Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString recordMap a ++ ">"
     Can.TType _ "Dict" [k, v] -> "HashMap<" ++ typeToRustString recordMap k ++ ", " ++ typeToRustString recordMap v ++ ">"
+    Can.TType _ "Set" [a] -> "BTreeSet<" ++ typeToRustString recordMap a ++ ">"
     Can.TType _ "Result" [e, a] -> "SkyResult<" ++ typeToRustString recordMap e ++ ", " ++ typeToRustString recordMap a ++ ">"
     Can.TType _ "Error" [] -> "SkyError"
     Can.TRecord fields _ ->

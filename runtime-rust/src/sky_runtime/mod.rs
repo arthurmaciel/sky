@@ -168,6 +168,8 @@ pub use math::*;
 
 pub mod dict;
 pub use dict::*;
+pub mod set;
+pub use set::*;
 
 pub mod string;
 pub use string::*;
