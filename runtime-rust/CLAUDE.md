@@ -1,5 +1,16 @@
 # SkyRust Project Context
 
+This file holds **directives for agents**, **learnt command optimizations**, and
+**principles** working on the Sky Rust backend. It is NOT a status log — what
+works / what's pending lives in git history + `skydex parity --gaps`, not here.
+
+## Principles
+The six principles and their strict priority order live at the top of
+**`runtime-rust/README.md`** — that file is authoritative; this one defers to it.
+In order: **security > correctness > soundness > efficiency > completeness >
+readability** (a lower one never overrides a higher one). Everything below serves
+them.
+
 ## Goal
 Transpile Sky (Elm-compatible functional language) to Rust with native FFI to Rust libraries.
 
@@ -29,6 +40,26 @@ iteration and has burned past sessions.
 | **Export shared target + sccache + `CARGO_INCREMENTAL=0` before any example build:** `export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target" RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0` | `CARGO_INCREMENTAL=0` is mandatory — sccache silently skips ALL Rust compilation when incremental=true (all 90 requests landed in "non-cacheable: incremental"). With `CARGO_INCREMENTAL=0`: 178/226 cache hits, cold build drops from ~75 s to ~15 s. The shared target compiles axum/tokio/serde/sqlx once; holds only the LAST-built binary. Re-export every shell. |
 | **Don't wipe `dist-newstyle/`**; keep the gitignored `cabal.project.local` (`optimization: 0`, `profiling: False`). | incremental compile is the whole point — `-O0` cuts a full rebuild from minutes to ~180s, a one-module link to ~32s. Never commit the file (it would slow the shipped binary) |
 | **Don't wipe `sky-out .skycache .skydeps` for runtime-only changes.** `sky build` always copies `runtime-rust/src/sky_runtime/` before invoking cargo — incremental is handled automatically. A wipe is only needed when the Sky source changes in a way that confuses the cache (rare) or when debugging cache issues. | verified: touching or editing any `.rs` under `runtime-rust/src/` is picked up correctly by the next `sky build` without a wipe |
+
+### Sweep tooling: single source of truth (no duplication, no drift)
+
+Run verification through the **`sky-rust-backend:*` skills** (build-sweep / run-sweep
+/ web-sweep / perf-sweep / equiv-sweep / keep-go-parity), NEVER the raw runner
+scripts — the skills are the agent-facing interface. The runners live ONLY under
+`runtime-rust/scripts/` (no Rust script at repo-root `scripts/`).
+
+Two shared files under `runtime-rust/scripts/lib/` are the SINGLE SOURCE OF TRUTH
+every runner sources — duplicating either across runners is forbidden:
+- **`env.sh`** — the command env header: `PATH`, `CARGO_TARGET_DIR`, `RUSTC_WRAPPER=sccache`,
+  `CARGO_INCREMENTAL=0` (mandatory — see above), `SKY_BIN`. **Any verified speed
+  improvement is added HERE so every skill inherits it automatically.**
+- **`examples.sh`** — the in-scope example manifest: the build / run / web / perf
+  sets and the rule for what counts as a web (Sky.Live/Server) example. When
+  sync-with-upstream lands new examples — or we add fixtures as Go-parity tests —
+  update ONLY this file; all sweeps follow.
+
+Directive: a new speed optimization → `env.sh`; a new/changed test example →
+`examples.sh`. Never edit a per-runner copy.
 
 ### Fast inner loop (Sky source or runtime `.rs` changed, no `.hs` edit)
 
@@ -75,12 +106,12 @@ useful for HM type-check and Go codegen validation but it does NOT validate
 the Rust codegen path. For Rust type-check validation, use `sky build --target rust`
 or the standalone `cargo check` above.
 
-## Code navigation — use skydex, NOT Gortex
+## Code navigation — use skydex
 
-**Gortex OOMs this machine on this repo** (the global `~/.claude/CLAUDE.md`
-mandates Gortex MCP tools — that mandate does NOT apply here; Gortex ballooned
-past 15 GB and hung the box). Use **`skydex`**, the bounded Sky-tuned index
-(`tools/skydex/`, ~64 MB peak; `tools/skydex/README.md`), or plain Read / `rg`.
+Use **`skydex`**, the bounded Sky-tuned code index (`tools/skydex/`, ~64 MB peak;
+`tools/skydex/README.md`), or plain Read / `rg` for code navigation on this repo.
+Any machine-wide MCP indexer mandated by the global `~/.claude/CLAUDE.md` does NOT
+apply here — skydex is the indexer for this repo.
 
 **For free-text search use `rg` (ripgrep), NEVER `grep`/`Grep` — even on piped stdin (`… | rg`).** skydex answers
 SYMBOL/relationship queries (parity, deps, callers, `locate`); `rg` answers
@@ -134,48 +165,16 @@ pulling many files into context.
 The index is the source of truth for parity/deps/coverage queries — a stale index
 gives wrong answers, so refreshing after writing code is not optional.
 
-## Phase 1 Status: ✅ COMPLETE
+## Codegen entry points (orientation)
 
-- Runtime crate: `sky-runtime-rust` implemented with 54 tests passing
-- Core types: SkyResult, SkyMaybe, SkyString, SkyList, SkyDict, SkyTask
-
-## Phase 2: Codegen Implementation — ✅ DONE
-
-**Rust codegen is implemented in the compiler** (`src/Sky/Generate/Rust/Builder.hs`):
-- Full expression translation (functions, kernel calls, patterns, let bindings, binops, unions)
-- Triggered via `--target rust` CLI flag
-
-### Key Implementation Details
-
-- **Entry point**: `generateRust` in `src/Sky/Build/Compile.hs` (line ~8400)
-- **Output directory**: `sky-out/Rust/` (not `sky-out/rust/`)
-- **Runtime**: Inlined with external deps (tokio, sqlx)
-- **Default target**: Go (when no `--target` flag specified)
-
-
-## Phase 3: Remaining Issues
-
-### Known limitations
-1. **Anonymous records lose type precision** — SkyValue/String fields only.
-2. **JSON pipeline decoder (06-json)** — 11 remaining errors. `Box<dyn FnOnce>` chain from
-   `json_dec_p_required`/`optional` + `json_dec_succeed` can't satisfy `Clone`/`Send`. Fundamental
-   type-system mismatch: Sky's dynamically-typed pipeline pattern (`Decode.succeed f |= required "x" string`)
-   creates deeply nested `FnOnce` types that Rust's static trait system can't express. Needs
-   architecture-level restructuring (e.g. `Box<dyn Any>` or macros).
-3. **Separate module files** — `mod` declarations instead of flat `main.rs`.
-
-### Resolved
-- **Def return type inference**: body-based fallback via `taskExprInnerType` — `main_expensive_task` now correctly returns `SkyTask<i64>`.
-- **`System.setenv`/`System.unsetenv`**: stubs added via `std::env::set_var`/`remove_var`. Analyzer sets `usesTaskRun` for System.*.
-- **`mainSig "formatTodo"` hack**: kept as last-resort (Db.getField polymorphic). solvedTypes takes priority for monomorphic functions.
-
-### Working examples
-- **01-hello-world**: 0 errors, 0 warnings, 0 external deps
-- **04-local-pkg**: 0 errors, 0 warnings, 0 external deps (multi-module)
-- **07-todo-cli**: 0 errors, 0 warnings, SQLite CRUD via sqlx-sqlite + tokio
-- **14-task-demo**: 0 errors, 0 warnings, Task andThen/fail/run with error msgs
-- **simple**: 0 errors, 0 warnings, task_sequence + task_parallel (tokio)
-- **test_pkg**: 0 errors, 0 warnings, imports + Result/Maybe combinators
+- **Entry**: `generateRust` in `src/Sky/Build/Compile.hs`; the Rust codegen lives
+  under `src/Sky/Generate/Rust/Builder/` (Kernel.hs routing, ExprEmitter, Types,
+  TypeRenderer, Emitter, ModuleEmitter, Project).
+- **Output**: `sky-out/Rust/`. **Default target** is Go; Rust via `--target rust`.
+- **Runtime**: `runtime-rust/src/sky_runtime/` is copied into the generated
+  project at `sky build` time (external deps tokio/sqlx/axum/serde pulled per used
+  feature). Current state of parity / what builds: ask `skydex parity --gaps` and
+  run the `sky-rust-backend:build-sweep` skill — never tracked as a list here.
 
 ## Constraints
 
@@ -336,17 +335,17 @@ log** — hold it to the same bar as a code review:
   type param), so codegen renders every `Decoder a` identically and can't pick
   `Decoder<JsonVal,…>` vs `Decoder<Row,…>`. The correct in-boundary design:
   ONE `Decoder<E,T> = Box<dyn Fn(&JsonVal) -> SkyResult<E,T>>`, COMBINATORS shared
-  (DbDec.map → json_dec_map — they're source-agnostic), SOURCE unified on JsonVal
+  (DbDec.map → decode_map — they're source-agnostic), SOURCE unified on JsonVal
   (a DB row is a `JsonVal::Object` of string/Null fields via a NULL-preserving
-  `row_to_json`), PRIMITIVES source-specific + total (db_dec_int parses a string
+  `row_to_json`), PRIMITIVES source-specific + total (db_decode_int parses a string
   field). Correct-by-construction: runner fns fix the source. See
   [[../docs/superpowers/specs/2026-06-16-dbdec-subsystem]].
 - **Generated Sky ADTs can't cross the runtime FFI boundary — the runtime can't
   name or destructure them.** `Money`, `SqlValue`, `SqlField` are per-project
   GENERATED enums; a kernel taking `List (String, SqlField)` receives an opaque
   type the runtime can't match. Either the runtime returns a non-ADT shape and
-  CODEGEN wraps it into the ADT at the call site (e.g. `db_dec_money` returns
-  `(Decimal,String)`; codegen emits a `json_dec_map` building the Money ctor), or
+  CODEGEN wraps it into the ADT at the call site (e.g. `db_decode_money` returns
+  `(Decimal,String)`; codegen emits a `decode_map` building the Money ctor), or
   codegen destructures the ADT into a runtime-friendly form BEFORE the kernel
   call. This is a recurring class (money / Db.insertFields / SqlValue params).
 
@@ -361,7 +360,7 @@ log** — hold it to the same bar as a code review:
   `rg 'pub (mod|use) x' <generated>/sky_runtime/mod.rs`.
 - **skydex `parity` is a PRESENCE index, not a type checker — it OVER-credits.**
   A kernel reads "ok" if a conventionally-named Rust fn exists, even when it's
-  unrouted in Kernel.hs or arity/type-wrong (e.g. `db_dec_nullable` exists but
+  unrouted in Kernel.hs or arity/type-wrong (e.g. `db_decode_nullable` exists but
   takes 2 args vs Sky's 1 → latent cargo-fail if used). The behavioral PROBE is
   the truth; don't trust a `parity` drop without a build+run probe of the kernel.
 - **Parallel agents race on shared build state:** the one `CARGO_TARGET_DIR`
