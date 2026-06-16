@@ -59,11 +59,30 @@ needed is skipped.
      go-ahead. When `PLAN_PERF` fired only on `GO_BACKEND_CHANGED`, confirm the
      change is genuinely perf-relevant (read the changelog) before spending the hour.
 
-5. **Report the consolidated parity verdict** — upstream version + merge commit;
+5. **Kernel-parity backlog (skydex)** — the sweeps above verify *runtime*
+   parity (examples build / run / output-diff); skydex surfaces *structural*
+   parity: kernels the upstream now has on the **Go** side that the **Rust**
+   backend doesn't implement yet (which no example may exercise). The index is
+   already fresh — the sync's Step 9 ran `skydex update`:
+   ```bash
+   ( cd tools/skydex && cargo build --release >/dev/null )   # once, if not built
+   tools/skydex/target/release/skydex parity --gaps | grep '^go-only'
+   ```
+   Each `go-only` row carries its `route=…`/`go=…` locations — a ready-to-act
+   Rust-backend follow-up (implement it where the location points, or file it).
+   This is a tracked **backlog, NOT a hard gate** — the Rust backend is
+   intentionally behind on some kernels, so it does **not** flip the verdict. But
+   any `go-only` kernel **this sync newly introduced** must be reported so it
+   enters the pipeline (no-deferral). Use skydex, not Gortex (it OOMs this repo).
+
+6. **Report the consolidated parity verdict** — upstream version + merge commit;
    then per phase: build PASS/FAIL, run `N ran-OK · M failed`, equiv `N match · M
    differ` + classification coverage, web `N pass · M fail` (if run), perf summary
-   (if run). **"✓ GO PARITY MAINTAINED" only when build+run+equiv(+web if run) are
-   green AND every example is classified.** Otherwise "✗ GO PARITY NOT MAINTAINED".
+   (if run), and the **kernel-parity backlog** from step 5 (`N go-only kernels`,
+   noting any newly introduced by this sync). **"✓ GO PARITY MAINTAINED" only when
+   build+run+equiv(+web if run) are green AND every example is classified** — the
+   skydex backlog is reported but does NOT gate the verdict. Otherwise "✗ GO
+   PARITY NOT MAINTAINED".
 
 > The whole always-run chain (build → run → equiv [→ web]) is also one command
 > for non-agent use: `keep-go-parity.sh run` (perf stays surfaced, not run).
