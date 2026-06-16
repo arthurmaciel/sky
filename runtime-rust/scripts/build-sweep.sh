@@ -36,9 +36,10 @@ sync
 # ── Run the sweep ──────────────────────────────────────────────────────────
 say ""; say ">>> BUILD SWEEP  (SKY_CONSOLE_PREBUILD=off; runtime-rust/scripts/rust-sweep.sh)"
 bash runtime-rust/scripts/rust-sweep.sh > "$LOG" 2>&1
-BUILT="$(grep -c 'builds' "$LOG" 2>/dev/null || echo 0)"
-# In-scope failures = a result line that is NOT 'builds' and NOT '(out-of-scope)'.
-IN_SCOPE_FAILS="$(grep -vE 'out-of-scope|builds$|^EXAMPLE|^---' "$LOG" 2>/dev/null | grep -E 'fails|CRASH' || true)"
+BUILT="$(grep -cE 'builds$' "$LOG" 2>/dev/null || echo 0)"
+# DERIVED set: every example in the scoreboard is in scope (Go-FFI is absent, not
+# tagged). So an in-scope failure is simply any result line ending in fails/CRASH.
+IN_SCOPE_FAILS="$(grep -vE '^EXAMPLE|^---' "$LOG" 2>/dev/null | grep -E 'fails$|CRASH$' || true)"
 say "  examples building: $BUILT   (full scoreboard: $LOG)"
 if [ -n "$IN_SCOPE_FAILS" ]; then
   say "  IN-SCOPE FAILURES:"; printf '%s\n' "$IN_SCOPE_FAILS" | sed 's/^/    /' | tee -a "$HIST/run-$STAMP.log"

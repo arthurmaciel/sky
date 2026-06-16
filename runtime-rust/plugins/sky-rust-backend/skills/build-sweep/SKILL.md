@@ -1,6 +1,6 @@
 ---
 name: build-sweep
-description: Run the Sky Rust-backend BUILD sweep — `sky build --target rust` + `cargo build` over the largest example set, reporting any in-scope build failures. Use when the user asks to run the build sweep, check that the examples still build on `--target rust`, or after a codegen/runtime change that could break builds. Sibling phases: sky-rust-backend:run-sweep (runtime), sky-rust-backend:web-sweep (browser), sky-rust-backend:perf-sweep (performance). Trigger: /sky-rust-backend:build-sweep.
+description: Run the Sky Rust-backend BUILD sweep — `sky build --target rust` + `cargo build` over the largest example set, reporting any in-scope build failures. Use when the user asks to run the build sweep, check that the examples still build on `--target rust`, or after a codegen/runtime change that could break builds. Sibling phases: sky-rust-backend:run-sweep (runtime — also drives the live/web browser round-trip), sky-rust-backend:perf-sweep (performance). Trigger: /sky-rust-backend:build-sweep.
 ---
 
 # build-sweep

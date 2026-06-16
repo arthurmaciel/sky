@@ -1,1 +1,0 @@
-../../../../../scripts/web-verify.mjs

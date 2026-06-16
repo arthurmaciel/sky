@@ -1,6 +1,6 @@
 ---
 name: keep-go-parity
-description: One command to ingest the latest upstream and re-prove the Rust backend stays at Go parity. Runs sky-rust-backend:sync-with-upstream (resolving merge conflicts autonomously, asking only on a real design decision), then the build + run sweeps always, plus the web sweep when new web/live examples land and the perf sweep when any new example or a Go-backend perf change lands. Use when the user asks to keep Go parity, sync upstream and re-verify, or after an upstream release. Trigger: /sky-rust-backend:keep-go-parity.
+description: One command to ingest the latest upstream and re-prove the Rust backend stays at Go parity. Runs sky-rust-backend:sync-with-upstream (resolving merge conflicts autonomously, asking only on a real design decision), then the build + run + equiv sweeps always (run-sweep drives the live/web browser round-trip itself — there is no separate web sweep), plus the perf sweep when any new example or a Go-backend perf change lands. Use when the user asks to keep Go parity, sync upstream and re-verify, or after an upstream release. Trigger: /sky-rust-backend:keep-go-parity.
 ---
 
 # keep-go-parity
@@ -37,23 +37,26 @@ needed is skipped.
    bash runtime-rust/scripts/keep-go-parity.sh plan
    ```
    Read the `PLAN_*` lines: `PLAN_BUILD`/`PLAN_RUN`/`PLAN_EQUIV` are always 1;
-   `PLAN_WEB` is 1 when a new web/live example landed; `PLAN_PERF` is 1 when any
-   new example landed OR the Go backend changed. **`UNCLASSIFIED_EXAMPLES`** must
-   read `none` — any listed example is a hard blocker (see step 4's gate).
+   `PLAN_PERF` is 1 when any new example landed OR the Go backend changed.
+   **`UNCLASSIFIED_EXAMPLES`** must read `none` — any listed example is a hard
+   blocker (see step 4's gate). The browser round-trip for live/web examples is
+   now part of run-sweep (no separate web phase).
 
 4. **Run the sweeps per the plan:**
    - **Always:** **sky-rust-backend:build-sweep** → (only if build passed)
      **sky-rust-backend:run-sweep** → **sky-rust-backend:equiv-sweep**. A build
      failure is a parity break — stop; don't run later phases on a broken build.
+     **run-sweep itself drives the live/web browser round-trip** (it dispatches
+     per shape: cli/server/tui-pty/webview-xvfb/live-browser), so there is no
+     separate web sweep to run.
    - **equiv-sweep is the Go≡Rust output-parity gate AND the classification gate.**
      It runs every example classified `in` (deterministic output) and **fails if
      any example on disk is unclassified** in `equiv-classification.tsv`. So if
      the merge added an example, classify it `in`/`out` (with a reason) FIRST —
      "Go parity maintained" cannot be claimed while anything is unclassified.
-   - **If `PLAN_WEB=1`:** **sky-rust-backend:web-sweep**. (New web/live examples
-     have no `verify-scenarios.mjs` scenario yet — the web sweep regression-guards
-     the existing live set; author a scenario for the new example for true
-     round-trip coverage.)
+   - **New web/live example?** run-sweep covers it automatically (scenario derived
+     from the example name → falls back to `smoke`). Author a richer scenario in
+     `scripts/verify-scenarios.mjs` if the smoke fallback is too thin.
    - **If `PLAN_PERF=1`:** **sky-rust-backend:perf-sweep** — needs the user to
      close apps first, so follow that skill's close-the-apps reminder and wait for
      go-ahead. When `PLAN_PERF` fired only on `GO_BACKEND_CHANGED`, confirm the

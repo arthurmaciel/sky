@@ -15,6 +15,10 @@ set -uo pipefail
 # ── Env + manifest (shared SINGLE SOURCE OF TRUTH under lib/) ───────────────
 source "$(dirname "$0")/lib/env.sh"
 source "$(dirname "$0")/lib/examples.sh"
+# rust-perf.sh's per-metric harness only knows cli/server/live; a tui/webview
+# binary waits for input/a window, so hyperfine cold-start would hang on it and
+# there's no throughput metric. We therefore measure build + cold-start ONLY for
+# those shapes (skip the throughput harness) — see the shape switch below.
 if [ -z "$REPO" ] || [ ! -f "$REPO/runtime-rust/scripts/rust-perf.sh" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi
@@ -38,22 +42,31 @@ reap() { for p in hyperfine ab sse-bench sky-app app sky-console; do pkill -x "$
 reap; sync; sleep 1
 
 # ── Perf set (isolate app perf — no console spawn) ──────────────────────────
-# Every both-backend perf-RUNNABLE example. EXCLUDED: tui/webview/fyne (need a
-# TTY/window → hyperfine would hang), console/multi-tier (25/34 special spawn),
-# Go-FFI-only 02. rust-perf.sh self-skips (exit 3) anything a backend can't
-# build; each call is timeout-bounded + orphan-reaped. The full set is PERF_SET
-# (lib/examples.sh — defaults to RUN_SET so the two can't drift).
+# DERIVED perf_set (lib/examples.sh) = every example minus Go-FFI; nothing
+# excluded by shape. throughput (ab/sse) only makes sense for server/live; cli
+# gets cold-start/RSS/binsize; tui/webview get build + cold-start only (the
+# shape switch below skips the throughput harness so hyperfine can't hang on an
+# input/window-waiting binary). rust-perf.sh self-skips (exit 3) anything a
+# backend can't build; each call is timeout-bounded + orphan-reaped.
 #   RUST_PERF_QUICK=1        → 3-shape representative (fast).
 #   RUST_PERF="a b c"        → explicit override.
 PERF_QUICK=(14-task-demo 15-http-server 09-live-counter)
 if [ -n "${RUST_PERF:-}" ]; then read -r -a EXAMPLES <<< "$RUST_PERF"
 elif [ -n "${RUST_PERF_QUICK:-}" ]; then EXAMPLES=("${PERF_QUICK[@]}")
-else EXAMPLES=("${PERF_SET[@]}"); fi
+else EXAMPLES=(); while IFS= read -r d; do EXAMPLES+=("$(basename "$d")"); done < <(perf_set); fi
 
 say ""; say ">>> PERF SWEEP  (SKY_CONSOLE_EMBED=off; ${#EXAMPLES[@]} examples)"
 : > "$PERF_TSV"; SKIPPED=""
 for ex in "${EXAMPLES[@]}"; do
+  ex="${ex#examples/}"; ex="${ex%/}"
   [ -f "examples/$ex/src/Main.sky" ] || { SKIPPED="$SKIPPED $ex(absent)"; continue; }
+  shape="$(example_shape "examples/$ex")"
+  # tui/webview/fyne: no throughput metric, and hyperfine cold-start would hang on
+  # an input/window-waiting binary. Skip the throughput harness (build is already
+  # exercised by build-sweep; run by run-sweep's pty/xvfb smoke).
+  case "$shape" in
+    tui|webview|fyne) say "  -- $ex ($shape: build/cold-start only — no throughput metric; skipped) --"; SKIPPED="$SKIPPED $ex($shape)"; continue;;
+  esac
   say "  -- $ex --"
   OUT="$(SKY_CONSOLE_EMBED=off timeout --kill-after=30 600 bash runtime-rust/scripts/rust-perf.sh "$ex" 2>&1)"; rc=$?
   reap

@@ -1,13 +1,13 @@
 ---
 name: equiv-sweep
-description: Run the Sky Go≡Rust EQUIVALENCE sweep — build each comparable example on BOTH backends (--target go AND --target rust), run both, and diff their stdout to catch SILENT divergence (a Rust example that builds and runs fine but prints different output than Go). The most direct proof the Rust backend matches Go. Use when the user asks to run the equiv sweep, check Go-vs-Rust output parity, or verify the backends still agree after a runtime/codegen change. Siblings: sky-rust-backend:build-sweep / run-sweep / web-sweep / perf-sweep. Trigger: /sky-rust-backend:equiv-sweep.
+description: Run the Sky Go≡Rust EQUIVALENCE sweep — build each comparable example on BOTH backends (--target go AND --target rust), run both, and diff their stdout to catch SILENT divergence (a Rust example that builds and runs fine but prints different output than Go). The most direct proof the Rust backend matches Go. Use when the user asks to run the equiv sweep, check Go-vs-Rust output parity, or verify the backends still agree after a runtime/codegen change. Siblings: sky-rust-backend:build-sweep / run-sweep / perf-sweep. Trigger: /sky-rust-backend:equiv-sweep.
 ---
 
 # equiv-sweep
 
 The **equivalence** phase — Go≡Rust output parity. Where the other sweeps prove
 the Rust side *builds* (build-sweep), *runs without panicking* (run-sweep), and
-*round-trips in a browser* (web-sweep), this one proves it produces **the same
+*round-trips in a browser* (run-sweep's live-browser dispatch), this one proves it produces **the same
 output as Go** for the same input. One **deterministic** script builds each
 comparable example on both backends, runs both, and diffs stdout. **Do NOT
 re-decide the steps** — if a run reveals a comparable example we're missing, or a

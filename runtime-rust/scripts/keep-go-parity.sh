@@ -11,8 +11,10 @@
 #
 # The PLAN is both human-readable and machine-readable (PLAN_BUILD=… lines) so
 # the skill can branch on it. Rules (from the skill spec):
-#   • build-sweep, run-sweep      → ALWAYS.
-#   • web-sweep                   → if any NEW example is web/live.
+#   • build-sweep, run-sweep      → ALWAYS. The browser ROUND-TRIP for live/web
+#                                   examples is now PART of run-sweep (it dispatches
+#                                   per shape: cli/server/tui/webview/live-browser);
+#                                   there is no separate web-sweep.
 #   • perf-sweep                  → if ANY new example landed, OR the Go backend
 #                                   changed in the merge (perf-relevant — agent
 #                                   confirms against the upstream changelog).
@@ -42,6 +44,8 @@ compute_plan() {
 
     # New top-level example dirs (present now, absent at snapshot).
     NEW_EXAMPLES="$(comm -13 "$LIST_F" <(list_examples) | tr '\n' ' ' | sed 's/ *$//')"
+    # New web/live example(s) — informational (run-sweep already browser-drives
+    # every live/web example, so no separate sweep is gated on this).
     NEW_WEB=""
     for ex in $NEW_EXAMPLES; do is_web_example "examples/$ex" && NEW_WEB="$NEW_WEB $ex"; done
     NEW_WEB="${NEW_WEB# }"
@@ -61,9 +65,7 @@ compute_plan() {
     [ -f "$MANIFEST" ] && UNCLASSIFIED="$(comm -13 <(awk '!/^#/ && NF>=2 {print $1}' "$MANIFEST" | sort -u) <(list_examples) | tr '\n' ' ' | sed 's/ *$//')"
 
     PLAN_BUILD=1; PLAN_RUN=1; PLAN_EQUIV=1   # equiv-sweep is ALWAYS-run (the output-parity gate)
-    PLAN_WEB=0; WEB_WHY="no new web/live example"
     PLAN_PERF=0; PERF_WHY="no new example, Go backend unchanged"
-    [ -n "$NEW_WEB" ] && { PLAN_WEB=1; WEB_WHY="new web/live example:$NEW_WEB"; }
     if [ -n "$NEW_EXAMPLES" ]; then PLAN_PERF=1; PERF_WHY="$(echo $NEW_EXAMPLES | wc -w | tr -d ' ') new example(s): $NEW_EXAMPLES"
     elif [ -n "$GO_FILES" ]; then PLAN_PERF=1; PERF_WHY="Go backend changed (confirm perf-relevance vs changelog): $GO_FILES"; fi
 }
@@ -76,9 +78,8 @@ print_plan() {
     echo "UNCLASSIFIED_EXAMPLES: ${UNCLASSIFIED:-none}"
     echo "---"
     echo "PLAN_BUILD=1   # build-sweep — always"
-    echo "PLAN_RUN=1     # run-sweep   — always"
+    echo "PLAN_RUN=1     # run-sweep   — always (browser round-trip for live/web is part of run-sweep)"
     echo "PLAN_EQUIV=1   # equiv-sweep — always (Go≡Rust output parity + classification gate)"
-    echo "PLAN_WEB=$PLAN_WEB     # web-sweep   — $WEB_WHY"
     echo "PLAN_PERF=$PLAN_PERF    # perf-sweep  — $PERF_WHY"
     if [ -n "$UNCLASSIFIED" ]; then
       echo "---"
@@ -87,9 +88,10 @@ print_plan() {
     fi
     if [ -n "$NEW_WEB" ]; then
       echo "---"
-      echo "NOTE: new web/live example(s) have no scripts/verify-scenarios.mjs scenario yet —"
-      echo "      web-sweep will regression-guard the existing live set, but author a scenario"
-      echo "      for$NEW_WEB to get true round-trip coverage."
+      echo "NOTE: new web/live example(s) get true round-trip coverage automatically via"
+      echo "      run-sweep's live-browser dispatch (scenario derived from the example name,"
+      echo "      falling back to 'smoke'). Author a richer scenario in"
+      echo "      scripts/verify-scenarios.mjs for$NEW_WEB if the smoke fallback is too thin."
     fi
 }
 
@@ -111,7 +113,8 @@ case "$cmd" in
 
   run)
     # Non-agent convenience: do the always-run LOAD-TOLERANT parity sweeps
-    # automatically after the merge (build → run → equiv → web-if-warranted).
+    # automatically after the merge (build → run → equiv). run-sweep itself drives
+    # the browser round-trip for every live/web example (no separate web-sweep).
     # perf is NOT auto-run — it's machine-load-sensitive (close other apps first),
     # so it's only surfaced as a recommendation. Run AFTER you've synced yourself.
     compute_plan
@@ -120,20 +123,18 @@ case "$cmd" in
     if ! bash "$SCRIPTS/build-sweep.sh"; then
       echo "=== keep-go-parity: ✗ GO PARITY NOT MAINTAINED — build broke (later phases skipped) ==="; exit 1
     fi
-    echo ""; echo ">>> run-sweep ..."
+    echo ""; echo ">>> run-sweep (cli/server/tui-pty/webview-xvfb/live-browser) ..."
     bash "$SCRIPTS/run-sweep.sh"; RUN_RC=$?
     echo ""; echo ">>> equiv-sweep (Go≡Rust output parity + classification gate) ..."
     bash "$SCRIPTS/equiv-sweep.sh"; EQUIV_RC=$?
-    WEB_RC=0
-    if [ "$PLAN_WEB" = 1 ]; then echo ""; echo ">>> web-sweep ..."; bash "$SCRIPTS/web-sweep.sh"; WEB_RC=$?; fi
     echo ""; echo "=== keep-go-parity run complete ==="
-    echo "  build: PASS · run: rc=$RUN_RC · equiv: rc=$EQUIV_RC$([ "$PLAN_WEB" = 1 ] && echo " · web: rc=$WEB_RC")"
+    echo "  build: PASS · run: rc=$RUN_RC · equiv: rc=$EQUIV_RC"
     if [ "$PLAN_PERF" = 1 ]; then
       echo "  perf-sweep WARRANTED ($PERF_WHY) — NOT auto-run (close other apps first, then:"
       echo "    bash $SCRIPTS/perf-sweep.sh )"
     fi
-    if [ "$RUN_RC" = 0 ] && [ "$EQUIV_RC" = 0 ] && [ "$WEB_RC" = 0 ]; then
-      echo "  ✓ GO PARITY MAINTAINED — build+run+equiv$([ "$PLAN_WEB" = 1 ] && echo "+web") green; every example classified."
+    if [ "$RUN_RC" = 0 ] && [ "$EQUIV_RC" = 0 ]; then
+      echo "  ✓ GO PARITY MAINTAINED — build+run(+browser round-trip)+equiv green; every example classified."
       [ "$PLAN_PERF" = 1 ] && echo "    (perf still recommended — see above.)"
       exit 0
     fi
@@ -146,7 +147,8 @@ case "$cmd" in
     echo "  snapshot  record examples/ + HEAD sha BEFORE the upstream sync" >&2
     echo "  plan      AFTER the sync: print which sweeps the merge warrants" >&2
     echo "  run       AFTER the sync: print the plan AND auto-run the always-run" >&2
-    echo "            parity sweeps (build → run → equiv → web); perf is surfaced," >&2
+    echo "            parity sweeps (build → run → equiv); run drives the live/web" >&2
+    echo "            browser round-trip itself. perf is surfaced," >&2
     echo "            not run (needs apps closed). For non-agent use." >&2
     exit 2 ;;
 esac

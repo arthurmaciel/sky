@@ -1,84 +1,92 @@
 # shellcheck shell=bash
-# runtime-rust/scripts/lib/examples.sh — SINGLE SOURCE OF TRUTH for the in-scope
-# example manifest. SOURCE this (never execute it).
+# runtime-rust/scripts/lib/examples.sh — SINGLE SOURCE OF TRUTH for the example
+# manifest. SOURCE this (never execute it).
 #
-# Every sweep's example set + the example-shape classifier live ONLY here. When
-# sync-with-upstream lands new examples — or we add fork-local fixtures as
-# Go-parity tests — update ONLY this file; all sweeps follow (CLAUDE.md directive).
+# DERIVED, NOT HARDCODED. There are no static example arrays here: every set is
+# computed at call time from the example dirs on disk + their Sky source. When
+# sync-with-upstream lands new examples they are picked up automatically — the
+# ONLY thing that excludes an example is Go-FFI (a `[go.dependencies]` section in
+# its sky.toml), because the Rust backend does not bind Go packages. Everything
+# else is IN SCOPE: a greenfield example that has never built on Rust SURFACES as
+# a real failure rather than being silently filtered out (user decision).
 #
-# Provides:
-#   BUILD_GLOB       — the dirs the all-example BUILD sweep globs (build-level binning).
-#   OUT_OF_SCOPE     — number/name exclusion list for the build sweep (recorded, not a target).
-#   RUN_SET          — runnable cli/server/live examples (run-sweep).
-#   PERF_SET         — perf-runnable examples; defaults to RUN_SET so they can't drift.
-#   WEB_SET          — "example scenario" pairs the web-sweep drives (live/web).
-#   example_shape <dir>  → tui|webview|fyne|server|live|cli
-#   is_web_example <dir> → exit 0 if Sky.Live / Sky.Http.Server, else 1
+# Provides (all FUNCTIONS — call them, don't read arrays):
+#   all_examples            → every candidate example dir, one per line (no trailing /).
+#   is_out_of_scope <dir>   → exit 0 IFF Go-FFI (sky.toml has [go.dependencies]).
+#   is_web_example  <dir>   → exit 0 IFF Sky.Live / Sky.Http.Server (browser-drivable).
+#   example_shape   <dir>   → tui|webview|fyne|server|live|cli
+#   build_set               → all_examples − Go-FFI (the BUILD sweep set).
+#   run_set                 → == build_set (tui/webview now RUN headless; nothing
+#                             excluded by shape).
+#   perf_set                → == build_set (same set; perf picks sensible metrics
+#                             per shape, no throughput for tui/webview/cli).
 
-# ── BUILD sweep: the largest set (build-level binning, in/out recorded) ──────
-# Glob dirs the all-example build sweep walks. Each must carry src/Main.sky.
-BUILD_GLOB=( examples/[0-9]*/ examples/simple/ examples/test_pkg/ )
+# ── all_examples: every candidate dir on disk, trailing slash stripped ───────
+# examples/[0-9]*/  (numbered)  + examples/simple/ + examples/test_pkg/ +
+# examples/rust/*/  (fork-local real Sky projects). One per line. Only dirs that
+# actually carry a src/Main.sky entry point are emitted.
+all_examples() {
+  local d
+  for d in examples/[0-9]*/ examples/simple/ examples/test_pkg/ examples/rust/*/; do
+    [ -d "$d" ] || continue
+    d="${d%/}"
+    [ -f "$d/src/Main.sky" ] || continue
+    printf '%s\n' "$d"
+  done
+}
 
-# Out-of-scope on the Rust backend, recorded but NOT a build target. The numbers
-# are matched against each example's leading digits. Reasons (preserved verbatim
-# from rust-sweep.sh):
-#  - no Rust monolith reference:                02 06 11 19 25 26 27 29 34 36 37 38
-#  - Go-package→Rust-native FFI examples (per user 2026-06-10, NOT a goal — they
-#    import Go packages like gorilla/mux, stripe-go, google/uuid, godotenv): 03 05 08 13
-# 19-skyforum + 26-ui-showcase now build on Rust (Std.Ui parity work) — in scope.
-# 24-tui-kitchen-sink (multibackend Live+Tui main) builds via the #24 entry-model
-# refactor — in scope. 21/22/23 (pure-Tui) un-gated by the same refactor (their
-# `Tui.app |> Task.run` main now block_on's). 31-webview-stopwatch-ui builds via
-# the Webview view:any carrier fix (stub backend) — in scope.
-OUT_OF_SCOPE=" 02 03 05 06 08 11 13 25 27 29 34 36 37 38 "
+# ── is_out_of_scope <dir>: the ONLY exclusion is Go-FFI ──────────────────────
+# Return 0 (exclude) IFF the example's sky.toml declares a Go-package dependency
+# section. Matches both bare `[go.dependencies]` and quoted `["go.dependencies"]`.
+# Nothing else is excluded — greenfield gaps are real failures, not exclusions.
+is_out_of_scope() {
+  local toml="$1/sky.toml"
+  [ -f "$toml" ] || return 1
+  rg -q '^\["?go\.dependencies' "$toml" 2>/dev/null
+}
 
-# ── RUN sweep: runnable set (cli one-shot / server / live) ───────────────────
-# EXCLUDED by shape at run time: tui/webview/fyne (need a TTY/window),
-# console/multi-tier (25/34 special spawn), Go-FFI 02.
-RUN_SET=(
-  00-standard-libs 01-hello-world 04-local-pkg 06-json 07-todo-cli 14-task-demo
-  20-cli-counter 35-composite-generics simple test_pkg
-  15-http-server 30-sse-server-demo 32-sse-relay 33-websocket-echo
-  09-live-counter 10-live-component 12-skyvote 16-skychess 17-skymon
-  18-job-queue 19-skyforum 26-ui-showcase 27-multi-session-chat 28-streaming-chat
-)
+# ── is_web_example <dir>: Sky.Live OR Sky.Http.Server (browser-drivable) ─────
+# NB: ripgrep recurses by default — do NOT pass `-r` (that is rg's --replace, not
+# recurse). Comment-stripped (via _shape_match) so prose doesn't false-positive.
+is_web_example() {
+  _shape_match "$1/src" 'Std\.Live|Live\.app|Server\.listen|Sky\.Http\.Server'
+}
 
-# ── PERF sweep: defaults to RUN_SET so the two can't drift ───────────────────
-# Override here (a separate array) if the perf set ever needs to diverge from the
-# run set; until then they're the same curated both-backend-runnable examples.
-PERF_SET=( "${RUN_SET[@]}" )
-
-# ── WEB sweep: "example scenario" pairs (live/web round-trip) ────────────────
-# Web RULE: an example is web-drivable iff it is a Sky.Live / Sky.Http.Server app
-# (is_web_example below) AND has a maintained round-trip scenario in
-# scripts/verify-scenarios.mjs. The scenario key matches the Go-backend
-# verify-all-web.sh. One pair per line: "<example-dir> <scenario>".
-WEB_SET=(
-  "09-live-counter live-counter"
-  "10-live-component live-component"
-  "12-skyvote skyvote"
-  "16-skychess skychess"
-  "17-skymon skymon"
-  "18-job-queue job-queue"
-  "19-skyforum skyforum"
-)
-
-# ── Classifier: example shape from its Sky source ────────────────────────────
-# $1 = example dir (e.g. examples/09-live-counter). Order matters: a Live app may
-# also import Server, so Live/Tui/Webview/Fyne are tested before the Server/cli
-# fallthrough. This is the ONE place the shape grep lives.
+# ── example_shape <dir>: tui|webview|fyne|server|live|cli ────────────────────
+# Order matters: a Live app may also import Server, so Tui/Webview/Fyne/Live are
+# tested before the Server/cli fallthrough. This is the ONE place the shape grep
+# lives. (rg recurses by default; `-r` is --replace, never use it here.)
+#
+# `_shape_match <src-dir> <regex>` strips Sky line comments (`--…`) from every
+# matching line before re-testing, so a doc comment like "calls Webview.app
+# instead of Tui.app" doesn't misclassify a webview app as tui
+# (31-webview-stopwatch-ui hit exactly this — its header comment names Tui.app).
+# Matches the real `import <Mod>` / `<Mod>.app` / `<Backend>.listen` code, not prose.
+_shape_match() { # $1=src dir  $2=regex
+  rg --no-filename -e "$2" "$1" 2>/dev/null | sed 's/--.*$//' | rg -q -e "$2" 2>/dev/null
+}
 example_shape() {
   local s="$1/src"
-  if   grep -rqE "Std\.Tui|Tui\.app"                 "$s" 2>/dev/null; then echo tui
-  elif grep -rqE "Std\.Webview|Webview\.app"          "$s" 2>/dev/null; then echo webview
-  elif grep -rqE "Fyne"                               "$s" 2>/dev/null; then echo fyne
-  elif grep -rqE "Std\.Live|Live\.app"                "$s" 2>/dev/null; then echo live
-  elif grep -rqE "Server\.listen|Sky\.Http\.Server"   "$s" 2>/dev/null; then echo server
+  if   _shape_match "$s" 'Std\.Tui|Tui\.app';               then echo tui
+  elif _shape_match "$s" 'Std\.Webview|Webview\.app';        then echo webview
+  elif _shape_match "$s" 'Fyne';                             then echo fyne
+  elif _shape_match "$s" 'Std\.Live|Live\.app';              then echo live
+  elif _shape_match "$s" 'Server\.listen|Sky\.Http\.Server'; then echo server
   else echo cli; fi
 }
 
-# is_web_example <dir> — predicate (exit status) for the web RULE above:
-# a Sky.Live OR Sky.Http.Server app. Used by keep-go-parity to flag NEW web examples.
-is_web_example() {
-  grep -rqE "Std\.Live|Live\.app|Server\.listen|Sky\.Http\.Server" "$1/src" 2>/dev/null
+# ── build_set: all_examples minus Go-FFI ─────────────────────────────────────
+build_set() {
+  local d
+  while IFS= read -r d; do
+    is_out_of_scope "$d" && continue
+    printf '%s\n' "$d"
+  done < <(all_examples)
 }
+
+# ── run_set / perf_set: identical to build_set ───────────────────────────────
+# No shape exclusion — tui (pty) / webview (xvfb) / live (browser round-trip) all
+# RUN headless now. perf_set is the same set; perf-sweep chooses sensible metrics
+# per shape (throughput only for server/live).
+run_set()  { build_set; }
+perf_set() { build_set; }

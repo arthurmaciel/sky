@@ -1,6 +1,6 @@
 ---
 name: perf-sweep
-description: Run the Sky Rust-backend PERF sweep — Rust-vs-Go cold-start / RSS / binary-size / throughput over the perf-runnable example set, plus a regression report vs the previous perf run. Use when the user asks to run the perf sweep, check for perf regressions/improvements vs the last run, or measure Rust-vs-Go performance after runtime/codegen changes. Siblings: sky-rust-backend:build-sweep (compiles), sky-rust-backend:run-sweep (runtime), sky-rust-backend:web-sweep (browser). Trigger: /sky-rust-backend:perf-sweep.
+description: Run the Sky Rust-backend PERF sweep — Rust-vs-Go cold-start / RSS / binary-size / throughput over the perf-runnable example set, plus a regression report vs the previous perf run. Use when the user asks to run the perf sweep, check for perf regressions/improvements vs the last run, or measure Rust-vs-Go performance after runtime/codegen changes. Siblings: sky-rust-backend:build-sweep (compiles), sky-rust-backend:run-sweep (runtime — also drives the live/web browser round-trip). Trigger: /sky-rust-backend:perf-sweep.
 ---
 
 # perf-sweep
