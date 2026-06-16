@@ -12,26 +12,18 @@
 #       2 = setup error.
 set -uo pipefail
 
-# ── Resolve the repo ───────────────────────────────────────────────────────
-REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-perf.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-perf.sh" ] && REPO="$HOME/Documentos/comp/sky"
+# ── Env + manifest (shared SINGLE SOURCE OF TRUTH under lib/) ───────────────
+source "$(dirname "$0")/lib/env.sh"
+source "$(dirname "$0")/lib/examples.sh"
 if [ -z "$REPO" ] || [ ! -f "$REPO/runtime-rust/scripts/rust-perf.sh" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi
 cd "$REPO"
-
-# ── Env (the gotchas, baked in) ────────────────────────────────────────────
-export PATH="$HOME/.ghcup/bin:$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/sky-rust-target}"
-command -v sccache >/dev/null 2>&1 && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
-export SKY_BIN="$REPO/sky-out/sky"
 [ -x "$SKY_BIN" ] || { echo "ERROR: sky binary not at $SKY_BIN — build it (cabal build exe:sky)." >&2; exit 2; }
 command -v go        >/dev/null 2>&1 || echo "WARN: 'go' not on PATH — the perf harness builds the Go backend; ratios may skip." >&2
 command -v ab        >/dev/null 2>&1 || echo "WARN: 'ab' (apache-bench) missing — server/live throughput will skip." >&2
 command -v hyperfine >/dev/null 2>&1 || echo "WARN: 'hyperfine' missing — cli cold-start will read 0." >&2
 command -v python3   >/dev/null 2>&1 || { echo "ERROR: python3 required for the regression diff." >&2; exit 2; }
-mkdir -p "$CARGO_TARGET_DIR"
 
 HIST="$HOME/.cache/sky/perf-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -49,20 +41,14 @@ reap; sync; sleep 1
 # Every both-backend perf-RUNNABLE example. EXCLUDED: tui/webview/fyne (need a
 # TTY/window → hyperfine would hang), console/multi-tier (25/34 special spawn),
 # Go-FFI-only 02. rust-perf.sh self-skips (exit 3) anything a backend can't
-# build; each call is timeout-bounded + orphan-reaped.
+# build; each call is timeout-bounded + orphan-reaped. The full set is PERF_SET
+# (lib/examples.sh — defaults to RUN_SET so the two can't drift).
 #   RUST_PERF_QUICK=1        → 3-shape representative (fast).
 #   RUST_PERF="a b c"        → explicit override.
-PERF_FULL=(
-  00-standard-libs 01-hello-world 04-local-pkg 06-json 07-todo-cli 14-task-demo
-  20-cli-counter 35-composite-generics simple test_pkg
-  15-http-server 30-sse-server-demo 32-sse-relay 33-websocket-echo
-  09-live-counter 10-live-component 12-skyvote 16-skychess 17-skymon
-  18-job-queue 19-skyforum 26-ui-showcase 27-multi-session-chat 28-streaming-chat
-)
 PERF_QUICK=(14-task-demo 15-http-server 09-live-counter)
 if [ -n "${RUST_PERF:-}" ]; then read -r -a EXAMPLES <<< "$RUST_PERF"
 elif [ -n "${RUST_PERF_QUICK:-}" ]; then EXAMPLES=("${PERF_QUICK[@]}")
-else EXAMPLES=("${PERF_FULL[@]}"); fi
+else EXAMPLES=("${PERF_SET[@]}"); fi
 
 say ""; say ">>> PERF SWEEP  (SKY_CONSOLE_EMBED=off; ${#EXAMPLES[@]} examples)"
 : > "$PERF_TSV"; SKIPPED=""

@@ -17,10 +17,10 @@
 # (The advisory findings never flip the exit — they're for triage, not a CI veto.)
 set -uo pipefail
 
-REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+# ── Env (shared SINGLE SOURCE OF TRUTH under lib/) ──────────────────────────
+source "$(dirname "$0")/lib/env.sh"
 [ -n "$REPO" ] && cd "$REPO" || { echo "ERROR: run from the Sky repo (or set SKY_REPO)." >&2; exit 2; }
+command -v cargo >/dev/null 2>&1 || { echo "ERROR: cargo not on PATH." >&2; exit 2; }
 
 CRATE="${1:-runtime-rust}"
 [ -f "$CRATE/Cargo.toml" ] || { echo "ERROR: no Cargo.toml at $CRATE" >&2; exit 2; }
@@ -28,11 +28,6 @@ SRC="$CRATE/src"
 # runtime-rust lints all features (matches the CI gate); a generated example crate
 # usually has none, so don't force --all-features there.
 FEATURES="--all-features"; [ "$CRATE" = "runtime-rust" ] || FEATURES=""
-
-export PATH="$HOME/.ghcup/bin:$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/sky-rust-target}"
-command -v sccache >/dev/null 2>&1 && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
-command -v cargo >/dev/null 2>&1 || { echo "ERROR: cargo not on PATH." >&2; exit 2; }
 
 HIST="$HOME/.cache/sky/quality-audit"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

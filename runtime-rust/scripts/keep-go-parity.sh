@@ -20,9 +20,9 @@
 # Exit: 0 ok · 2 setup error · 3 no snapshot (plan called before snapshot).
 set -uo pipefail
 
-REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+# ── Env + manifest (shared SINGLE SOURCE OF TRUTH under lib/) ───────────────
+source "$(dirname "$0")/lib/env.sh"
+source "$(dirname "$0")/lib/examples.sh"
 if [ -z "$REPO" ] || [ ! -d "$REPO/examples" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi
@@ -35,11 +35,6 @@ SHA_F="$STATE/pre.sha"; LIST_F="$STATE/pre.examples"
 # fork-local FFI set) is a single top-level entry, so it never shows as "new".
 list_examples() { find examples -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort; }
 
-is_web_live() { # $1 = example dir name → prints "web" if Sky.Live/Http.Server
-  local s="examples/$1/src"
-  grep -rqE "Std\.Live|Live\.app|Server\.listen|Sky\.Http\.Server" "$s" 2>/dev/null && echo web || echo other
-}
-
 # Compute the post-merge delta + plan into shell vars (used by `plan` and `run`).
 compute_plan() {
     [ -f "$SHA_F" ] && [ -f "$LIST_F" ] || { echo "ERROR: no snapshot — run 'keep-go-parity.sh snapshot' BEFORE the sync." >&2; exit 3; }
@@ -48,7 +43,7 @@ compute_plan() {
     # New top-level example dirs (present now, absent at snapshot).
     NEW_EXAMPLES="$(comm -13 "$LIST_F" <(list_examples) | tr '\n' ' ' | sed 's/ *$//')"
     NEW_WEB=""
-    for ex in $NEW_EXAMPLES; do [ "$(is_web_live "$ex")" = web ] && NEW_WEB="$NEW_WEB $ex"; done
+    for ex in $NEW_EXAMPLES; do is_web_example "examples/$ex" && NEW_WEB="$NEW_WEB $ex"; done
     NEW_WEB="${NEW_WEB# }"
 
     # Go backend touched by the merge? (perf-relevant candidate — judge vs changelog.)

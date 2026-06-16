@@ -11,24 +11,15 @@
 # Exit: 0 = all in-scope build · 1 = in-scope build failure · 2 = setup error.
 set -uo pipefail
 
-# ── Resolve the repo ───────────────────────────────────────────────────────
-REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+# ── Env (shared SINGLE SOURCE OF TRUTH under lib/) ──────────────────────────
+source "$(dirname "$0")/lib/env.sh"
 if [ -z "$REPO" ] || [ ! -f "$REPO/runtime-rust/scripts/rust-sweep.sh" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi
 cd "$REPO"
-
-# ── Env (the gotchas, baked in) ────────────────────────────────────────────
-export PATH="$HOME/.ghcup/bin:$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/sky-rust-target}"
-command -v sccache >/dev/null 2>&1 && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
-export SKY_BIN="$REPO/sky-out/sky"
 [ -x "$SKY_BIN" ] || { echo "ERROR: sky binary not at $SKY_BIN — build it (cabal build exe:sky)." >&2; exit 2; }
 # Skip the per-example console pre-build (it's not what a build sweep checks).
 export SKY_CONSOLE_PREBUILD=off
-mkdir -p "$CARGO_TARGET_DIR"
 
 HIST="$HOME/.cache/sky/build-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

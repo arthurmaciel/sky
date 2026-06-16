@@ -12,25 +12,17 @@
 # Exit: 0 = every example RUN-OK · 1 = a run/build failure · 2 = setup error.
 set -uo pipefail
 
-# ── Resolve the repo ───────────────────────────────────────────────────────
-REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+# ── Env + manifest (shared SINGLE SOURCE OF TRUTH under lib/) ───────────────
+source "$(dirname "$0")/lib/env.sh"
+source "$(dirname "$0")/lib/examples.sh"
 if [ -z "$REPO" ] || [ ! -d "$REPO/examples" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi
 cd "$REPO"
-
-# ── Env (the gotchas, baked in) ────────────────────────────────────────────
-export PATH="$HOME/.ghcup/bin:$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/sky-rust-target}"  # shared; run right after build
-command -v sccache >/dev/null 2>&1 && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
-export SKY_BIN="$REPO/sky-out/sky"
 [ -x "$SKY_BIN" ] || { echo "ERROR: sky binary not at $SKY_BIN — build it (cabal build exe:sky)." >&2; exit 2; }
 command -v curl >/dev/null 2>&1 || { echo "ERROR: curl required for server/live checks." >&2; exit 2; }
 # Don't spawn the console child while smoke-running (not what a run sweep checks).
 export SKY_CONSOLE_EMBED=off
-mkdir -p "$CARGO_TARGET_DIR"
 
 HIST="$HOME/.cache/sky/run-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -46,33 +38,16 @@ reap; sync; sleep 1
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo 8743; }
 PANIC_RE="panicked|CompilerBug|RUST_BACKTRACE|index out of bounds|unwrap\(\) on|called .Result::unwrap"
 
-# ── Runnable set (cli one-shot / server / live). EXCLUDED: tui/webview/fyne ──
-# (need a TTY/window), console/multi-tier (25/34 special spawn), Go-FFI 02.
-# Same curated set as /perf-sweep, for consistency.
+# ── Runnable set (RUN_SET, from lib/examples.sh). EXCLUDED at run time:
+# tui/webview/fyne (need a TTY/window), console/multi-tier (25/34 special spawn),
+# Go-FFI 02. Same curated set as /perf-sweep, for consistency.
 #   RUST_RUN="a b c"  → explicit override.
-RUN_FULL=(
-  00-standard-libs 01-hello-world 04-local-pkg 06-json 07-todo-cli 14-task-demo
-  20-cli-counter 35-composite-generics simple test_pkg
-  15-http-server 30-sse-server-demo 32-sse-relay 33-websocket-echo
-  09-live-counter 10-live-component 12-skyvote 16-skychess 17-skymon
-  18-job-queue 19-skyforum 26-ui-showcase 27-multi-session-chat 28-streaming-chat
-)
-if [ -n "${RUST_RUN:-}" ]; then read -r -a EXAMPLES <<< "$RUST_RUN"; else EXAMPLES=("${RUN_FULL[@]}"); fi
-
-shape_of() { # $1 = example dir
-  local s="$1/src"
-  if   grep -rqE "Std\.Tui|Tui\.app"        "$s" 2>/dev/null; then echo tui
-  elif grep -rqE "Std\.Webview|Webview\.app" "$s" 2>/dev/null; then echo webview
-  elif grep -rqE "Fyne"                      "$s" 2>/dev/null; then echo fyne
-  elif grep -rqE "Std\.Live|Live\.app"       "$s" 2>/dev/null; then echo live
-  elif grep -rqE "Server\.listen|Sky\.Http\.Server" "$s" 2>/dev/null; then echo server
-  else echo cli; fi
-}
+if [ -n "${RUST_RUN:-}" ]; then read -r -a EXAMPLES <<< "$RUST_RUN"; else EXAMPLES=("${RUN_SET[@]}"); fi
 
 PASS=0; FAIL=0; SKIP=0; FAILED=""
 for ex in "${EXAMPLES[@]}"; do
   d="examples/$ex"; [ -f "$d/src/Main.sky" ] || { say "  SKIP   $ex (absent)"; SKIP=$((SKIP+1)); continue; }
-  shape="$(shape_of "$d")"
+  shape="$(example_shape "$d")"
   case "$shape" in tui|webview|fyne) say "  SKIP   $ex ($shape — needs TTY/window)"; SKIP=$((SKIP+1)); continue;; esac
 
   # Build (run right after, while the shared target binary is this example's).

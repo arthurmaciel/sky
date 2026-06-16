@@ -13,29 +13,24 @@
 # Exit: 0 = every example PASS · 1 = a web/build failure · 2 = setup error.
 set -uo pipefail
 
-# ── Resolve the repo ───────────────────────────────────────────────────────
-REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+# ── Env + manifest (shared SINGLE SOURCE OF TRUTH under lib/) ───────────────
+source "$(dirname "$0")/lib/env.sh"
+source "$(dirname "$0")/lib/examples.sh"
 if [ -z "$REPO" ] || [ ! -d "$REPO/examples" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi
 cd "$REPO"
 
-# ── Env (the gotchas, baked in) ────────────────────────────────────────────
 # node lives under nvm; chromium is the system binary (no bundled Playwright).
+# Prepend node's bin to the shared PATH so `node` resolves.
 NODE_BIN="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)"
-export PATH="${NODE_BIN:+$NODE_BIN:}$HOME/.ghcup/bin:$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/sky-rust-target}"  # shared; run right after build
-command -v sccache >/dev/null 2>&1 && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
-export SKY_BIN="$REPO/sky-out/sky"
+export PATH="${NODE_BIN:+$NODE_BIN:}$PATH"
 export SKY_CHROMIUM="${SKY_CHROMIUM:-/usr/bin/chromium}"
 export SKY_CONSOLE_EMBED=off            # don't spawn the console child while smoke-driving
 [ -x "$SKY_BIN" ]      || { echo "ERROR: sky binary not at $SKY_BIN — build it (cabal build exe:sky)." >&2; exit 2; }
 command -v node >/dev/null 2>&1 || { echo "ERROR: node not on PATH (looked under ~/.nvm)." >&2; exit 2; }
 [ -x "$SKY_CHROMIUM" ] || { echo "ERROR: chromium not at $SKY_CHROMIUM (set SKY_CHROMIUM=…)." >&2; exit 2; }
 [ -d "$REPO/node_modules/playwright" ] || { echo "ERROR: playwright not in $REPO/node_modules — npm i." >&2; exit 2; }
-mkdir -p "$CARGO_TARGET_DIR"
 
 DRIVER="$REPO/runtime-rust/scripts/web-verify.mjs"
 [ -f "$DRIVER" ] || { echo "ERROR: driver missing: $DRIVER" >&2; exit 2; }
@@ -53,24 +48,15 @@ reap; sync; sleep 1
 
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo 8743; }
 
-# ── Live/web set: examples with a maintained round-trip scenario in
-# scripts/verify-scenarios.mjs that ALSO build on --target rust. Each row is
-# "example  scenario". (Port is allocated free per-run; the scenario keys are
-# the same the Go-backend verify-all-web.sh drives.)
+# ── Live/web set: WEB_SET (lib/examples.sh) — examples with a maintained
+# round-trip scenario in scripts/verify-scenarios.mjs that ALSO build on
+# --target rust. Each row is "example  scenario". (Port is allocated free
+# per-run; the scenario keys are the same the Go-backend verify-all-web.sh drives.)
 #   RUST_WEB="09-live-counter:live-counter 12-skyvote:skyvote"  → explicit override.
-WEB_FULL=(
-  "09-live-counter live-counter"
-  "10-live-component live-component"
-  "12-skyvote skyvote"
-  "16-skychess skychess"
-  "17-skymon skymon"
-  "18-job-queue job-queue"
-  "19-skyforum skyforum"
-)
 if [ -n "${RUST_WEB:-}" ]; then
   ENTRIES=(); for tok in $RUST_WEB; do ENTRIES+=("${tok/:/ }"); done
 else
-  ENTRIES=("${WEB_FULL[@]}")
+  ENTRIES=("${WEB_SET[@]}")
 fi
 
 PASS=0; FAIL=0; SKIP=0; FAILED=""

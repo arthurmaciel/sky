@@ -15,25 +15,18 @@
 # Exit: 0 = every example matches · 1 = a divergence/build failure · 2 = setup error.
 set -uo pipefail
 
-# ── Resolve the repo ───────────────────────────────────────────────────────
-REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+# ── Env (shared SINGLE SOURCE OF TRUTH under lib/) ──────────────────────────
+# `go` IS required — this sweep builds the Go backend too (the comparison side).
+# The comparable set is the equiv-classification.tsv manifest (see below) — its
+# own single source of truth, distinct from lib/examples.sh's build/run/web sets.
+source "$(dirname "$0")/lib/env.sh"
 if [ -z "$REPO" ] || [ ! -d "$REPO/examples" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi
 cd "$REPO"
-
-# ── Env (the gotchas, baked in) ────────────────────────────────────────────
-# `go` IS required — this sweep builds the Go backend too (the comparison side).
-export PATH="$HOME/.ghcup/bin:$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/sky-rust-target}"  # shared; Rust run is right after its build
-command -v sccache >/dev/null 2>&1 && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
-export SKY_BIN="$REPO/sky-out/sky"
 export SKY_CONSOLE_EMBED=off            # CLI examples don't mount a console; keep it off regardless
 [ -x "$SKY_BIN" ] || { echo "ERROR: sky binary not at $SKY_BIN — build it (cabal build exe:sky)." >&2; exit 2; }
 command -v go >/dev/null 2>&1 || { echo "ERROR: go required (this sweep builds the Go backend too)." >&2; exit 2; }
-mkdir -p "$CARGO_TARGET_DIR"
 
 HIST="$HOME/.cache/sky/equiv-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
