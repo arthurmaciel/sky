@@ -111,4 +111,51 @@ mod tests {
         assert_eq!(math_round(-3.5), -4);  // half-away-from-zero
         assert_eq!(math_round(2.4), 2);
     }
+
+    // ── go-parity regression tests (2026-06-15) ──────────────────────
+
+    #[test]
+    fn test_math_phi() {
+        // Go: math.Phi = 1.618033988749895
+        let phi = math_phi();
+        assert!((phi - 1.618_033_988_749_895_f64).abs() < 1e-14);
+    }
+
+    #[test]
+    fn test_math_sqrt2() {
+        let s = math_sqrt2();
+        assert!((s - std::f64::consts::SQRT_2).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_math_inf() {
+        assert!(math_inf().is_infinite() && math_inf() > 0.0);
+    }
+
+    #[test]
+    fn test_math_nan() {
+        let n = math_nan();
+        assert!(n.is_nan());
+        // IEEE 754: NaN != NaN
+        #[allow(clippy::eq_op)]
+        { assert!(n != n); }
+    }
+
+    #[test]
+    fn test_math_mod() {
+        // Go: math.Mod(5.5, 2.0) = 1.5  (sign of dividend)
+        assert_eq!(math_mod(5.5, 2.0), 1.5);
+        assert_eq!(math_mod(-5.5, 2.0), -1.5);  // sign of dividend
+        assert_eq!(math_mod(5.5, -2.0), 1.5);
+    }
+
+    #[test]
+    fn test_math_remainder() {
+        // Go: math.Remainder(5.5, 2.0) = -0.5  (IEEE 754 balanced)
+        let r = math_remainder(5.5, 2.0);
+        assert!((r - (-0.5_f64)).abs() < 1e-14, "expected -0.5, got {r}");
+        // round_ties_even: x/y = 2.75 → nearest even integer = 2, so 5.5 - 2*2.0 = 1.5
+        let r2 = math_remainder(5.5, 4.0);
+        assert!((r2 - 1.5_f64).abs() < 1e-14, "expected 1.5, got {r2}");
+    }
 }
