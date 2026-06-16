@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::collections::HashSet;
 
 pub fn cmd_parity(db: &str, gaps: bool) -> Result<()> {
+    use std::io::Write;
     let s = Store::open(db)?;
     let sql = if gaps {
         "SELECT name,parity,go_impl,rust_impl,hs_route_loc,go_impl_loc,rust_impl_loc FROM kernels WHERE parity!='ok' ORDER BY parity,name"
@@ -22,52 +23,61 @@ pub fn cmd_parity(db: &str, gaps: bool) -> Result<()> {
             r.get::<_, Option<String>>(6)?,
         ))
     })?;
+    let stdout = std::io::stdout();
+    let mut locked = stdout.lock();
     for row in rows {
         let (n, p, g, ru, hs_loc, go_loc, rust_loc) = row?;
         let route_str = hs_loc.as_deref().unwrap_or("<no-route>");
         let go_str    = go_loc.as_deref().unwrap_or("<missing>");
         let rust_str  = rust_loc.as_deref().unwrap_or("<missing>");
-        println!("{p:<12} {n:<28} go={g} rust={ru}  route={route_str}  go={go_str}  rust={rust_str}");
+        if let Err(e) = writeln!(locked, "{p:<12} {n:<28} go={g} rust={ru}  route={route_str}  go={go_str}  rust={rust_str}") {
+            if e.kind() == std::io::ErrorKind::BrokenPipe { return Ok(()); }
+            return Err(e.into());
+        }
     }
     Ok(())
 }
 
 pub fn cmd_locate(db: &str, name: &str) -> Result<()> {
+    use std::io::Write;
     let s = Store::open(db)?;
+    let stdout = std::io::stdout();
+    let mut locked = stdout.lock();
+
+    macro_rules! writeln_bp {
+        ($($arg:tt)*) => {
+            if let Err(e) = writeln!(locked, $($arg)*) {
+                if e.kind() == std::io::ErrorKind::BrokenPipe { return Ok(()); }
+                return Err(e.into());
+            }
+        };
+    }
+
     // Look up symbols
-    let mut st = s.conn.prepare(
-        "SELECT file, line, col, kind FROM symbols WHERE name=? ORDER BY file"
-    )?;
-    let rows = st.query_map([name], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, String>(3)?,
-        ))
-    })?;
+    let sym_rows: Vec<(String, i64, i64, String)> = {
+        let mut st = s.conn.prepare(
+            "SELECT file, line, col, kind FROM symbols WHERE name=? ORDER BY file"
+        )?;
+        let x = st.query_map([name], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        x
+    };
     let mut found = false;
-    for row in rows {
-        let (file, line, col, kind) = row?;
-        println!("{file}:{line}:{col}  {kind}");
+    for (file, line, col, kind) in sym_rows {
+        writeln_bp!("{file}:{line}:{col}  {kind}");
         found = true;
     }
     // Also show kernel info if the name matches a kernel
-    let mut kst = s.conn.prepare(
-        "SELECT name, parity, hs_route_loc, go_impl_loc, rust_impl_loc FROM kernels WHERE name LIKE ?1 OR hs_route LIKE ?1"
-    )?;
-    let krows = kst.query_map([format!("%{name}%")], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, Option<String>>(2)?,
-            r.get::<_, Option<String>>(3)?,
-            r.get::<_, Option<String>>(4)?,
-        ))
-    })?;
-    for krow in krows {
-        let (kname, parity, hs_loc, go_loc, rust_loc) = krow?;
-        println!("kernel:{kname}  parity={parity}  route={}  go={}  rust={}",
+    let kern_rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = {
+        let mut kst = s.conn.prepare(
+            "SELECT name, parity, hs_route_loc, go_impl_loc, rust_impl_loc FROM kernels WHERE name LIKE ?1 OR hs_route LIKE ?1"
+        )?;
+        let x = kst.query_map([format!("%{name}%")], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        x
+    };
+    for (kname, parity, hs_loc, go_loc, rust_loc) in kern_rows {
+        writeln_bp!("kernel:{kname}  parity={parity}  route={}  go={}  rust={}",
             hs_loc.as_deref().unwrap_or("<unknown>"),
             go_loc.as_deref().unwrap_or("<missing>"),
             rust_loc.as_deref().unwrap_or("<missing>"),
@@ -75,27 +85,83 @@ pub fn cmd_locate(db: &str, name: &str) -> Result<()> {
         found = true;
     }
     if !found {
-        println!("(no results for {name:?})");
+        writeln_bp!("(no results for {name:?})");
     }
     Ok(())
 }
 
-pub fn cmd_rdeps(db: &str, module: &str, count: bool) -> Result<()> {
+pub fn cmd_rdeps(db: &str, module: &str, count: bool, subtree: bool) -> Result<()> {
+    use std::io::Write;
     let s = Store::open(db)?;
+    // Determine whether the arg looks like a file path (contains '/' or ends with a
+    // file extension) so we can match on `resolved` instead of `dst`.
+    let looks_like_path = module.contains('/') || module.contains('.');
+    // Build the WHERE clause:
+    //   - exact dst match (default): `dst = ?`
+    //   - exact resolved match when arg is path-shaped: `resolved = ?`
+    //   - subtree: additionally `dst LIKE 'module.%'`
+    // We do NOT use unanchored LIKE so `rdeps "List"` can't accidentally
+    // fold in `Data.List`, `container/list`, or `*ListSpec` files.
     if count {
-        let n: i64 = s.conn.query_row(
-            "SELECT COUNT(DISTINCT src) FROM edges WHERE kind='import' AND (resolved=?1 OR dst LIKE ?2)",
-            rusqlite::params![module, format!("%{module}%")],
-            |r| r.get(0),
-        )?;
+        let n: i64 = if subtree {
+            s.conn.query_row(
+                "SELECT COUNT(DISTINCT src) FROM edges \
+                 WHERE kind='import' AND (dst=?1 OR dst LIKE ?2 OR resolved=?1)",
+                rusqlite::params![module, format!("{module}.%")],
+                |r| r.get(0),
+            )?
+        } else if looks_like_path {
+            s.conn.query_row(
+                "SELECT COUNT(DISTINCT src) FROM edges \
+                 WHERE kind='import' AND (dst=?1 OR resolved=?1)",
+                rusqlite::params![module],
+                |r| r.get(0),
+            )?
+        } else {
+            s.conn.query_row(
+                "SELECT COUNT(DISTINCT src) FROM edges \
+                 WHERE kind='import' AND dst=?1",
+                rusqlite::params![module],
+                |r| r.get(0),
+            )?
+        };
         println!("{n}");
     } else {
-        let mut st = s.conn.prepare(
-            "SELECT DISTINCT src FROM edges WHERE kind='import' AND (resolved=?1 OR dst LIKE ?2) ORDER BY src"
-        )?;
-        let rows = st.query_map(rusqlite::params![module, format!("%{module}%")], |r| r.get::<_, String>(0))?;
+        let stdout = std::io::stdout();
+        let sql_and_params: (&str, Vec<String>);
+        let (sql, params) = if subtree {
+            sql_and_params = (
+                "SELECT DISTINCT src FROM edges \
+                 WHERE kind='import' AND (dst=?1 OR dst LIKE ?2 OR resolved=?1) ORDER BY src",
+                vec![module.to_string(), format!("{module}.%")],
+            );
+            (&sql_and_params.0, &sql_and_params.1)
+        } else if looks_like_path {
+            sql_and_params = (
+                "SELECT DISTINCT src FROM edges \
+                 WHERE kind='import' AND (dst=?1 OR resolved=?1) ORDER BY src",
+                vec![module.to_string()],
+            );
+            (&sql_and_params.0, &sql_and_params.1)
+        } else {
+            sql_and_params = (
+                "SELECT DISTINCT src FROM edges \
+                 WHERE kind='import' AND dst=?1 ORDER BY src",
+                vec![module.to_string()],
+            );
+            (&sql_and_params.0, &sql_and_params.1)
+        };
+        let mut st = s.conn.prepare(sql)?;
+        let rows = st.query_map(rusqlite::params_from_iter(params.iter()), |r| r.get::<_, String>(0))?;
+        let mut locked = stdout.lock();
         for r in rows {
-            println!("{}", r?);
+            let src = r?;
+            if let Err(e) = writeln!(locked, "{src}") {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(e.into());
+            }
         }
     }
     Ok(())
@@ -260,8 +326,16 @@ fn reconcile_from_store(s: &Store, repo: &str) -> Result<()> {
     let routes = parity::parse_routes_with_locs(&pairs_ref);
     s.conn.execute("DELETE FROM kernels", [])?;
     for k in parity::reconcile_with_locs(&routes, &go, &rust) {
-        let go_impl_loc = lookup_sym_loc_from_store(s, &k.name.replace('.', "_"))?;
-        let rust_impl_loc = lookup_sym_loc_from_store(s, &k.rust_fn)?;
+        let go_impl_loc = if k.go_impl {
+            lookup_sym_loc_from_store_lang(s, &k.name.replace('.', "_"), "go")?
+        } else {
+            None
+        };
+        let rust_impl_loc = if k.rust_impl {
+            lookup_sym_loc_from_store_lang(s, &k.rust_fn, "rs")?
+        } else {
+            None
+        };
         s.conn.execute(
             "INSERT OR REPLACE INTO kernels VALUES (?,?,?,?,?,?,?,?,?)",
             rusqlite::params![
@@ -276,17 +350,20 @@ fn reconcile_from_store(s: &Store, repo: &str) -> Result<()> {
     Ok(())
 }
 
-fn lookup_sym_loc_from_store(s: &Store, name: &str) -> Result<Option<String>> {
-    let hits = s.symbols_named(name)?;
+/// Look up `"file:line"` for `name` restricted to `lang`, excluding test/example files.
+fn lookup_sym_loc_from_store_lang(s: &Store, name: &str, lang: &str) -> Result<Option<String>> {
+    let hits = s.symbols_named_in_lang(name, lang)?;
     Ok(hits.into_iter()
-        .filter(|(_, line, _)| *line > 0)
         .map(|(file, line, _)| format!("{file}:{line}"))
         .next())
 }
 
 /// Resolution pass: for every import edge, try to resolve `dst` to a canonical
 /// file path within the repo. Updates `edges.resolved` in a single transaction.
-/// Bounded: loads tracked file paths into a HashSet; streams edges one by one.
+/// Bounded: loads tracked file paths into a HashSet (bounded by file count);
+/// buffers unresolved import edges into a Vec (bounded by import-edge count)
+/// to work around the borrow-checker's prohibition on simultaneous read and
+/// write `Connection` statements — the buffer is freed after all UPDATEs commit.
 pub fn resolve_edges(s: &Store, repo: &str) -> Result<()> {
     // Load all known file paths into a set for fast membership test.
     let mut known: HashSet<String> = HashSet::new();
@@ -296,7 +373,9 @@ pub fn resolve_edges(s: &Store, repo: &str) -> Result<()> {
             known.insert(row?);
         }
     }
-    // Collect rows to update (stream to avoid borrow-checker issue with conn).
+    // Collect rows to update (buffered to avoid borrow-checker issue with conn:
+    // rusqlite does not permit a prepared SELECT and an execute() on the same
+    // Connection simultaneously; the buffer is bounded by import-edge count).
     let to_update: Vec<(i64, String, String, String)> = {
         let mut st = s.conn.prepare(
             "SELECT rowid, src, dst, kind FROM edges WHERE kind='import' AND resolved IS NULL"

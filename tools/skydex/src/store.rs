@@ -54,9 +54,29 @@ impl Store {
         }
         Ok(self.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?)
     }
+    // Used in unit tests and by cmd_locate's direct SQL path; suppress dead_code
+    // lint that fires because the integration path uses symbols_named_in_lang.
+    #[allow(dead_code)]
     pub fn symbols_named(&self, name:&str) -> Result<Vec<(String,i64,i64)>> {
         let mut st = self.conn.prepare("SELECT file,line,col FROM symbols WHERE name=? ORDER BY file")?;
         let rows = st.query_map([name], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<std::result::Result<_,_>>()?)
+    }
+
+    /// Like `symbols_named` but restricted to a specific language and excluding test/example paths.
+    /// Returns only `kind='def'` rows with `line > 0`.
+    pub fn symbols_named_in_lang(&self, name: &str, lang: &str) -> Result<Vec<(String, i64, i64)>> {
+        let mut st = self.conn.prepare(
+            "SELECT s.file, s.line, s.col \
+             FROM symbols s JOIN files f ON s.file = f.path \
+             WHERE s.name = ?1 AND f.lang = ?2 AND s.kind = 'def' AND s.line > 0 \
+               AND s.file NOT LIKE '%_test.go' \
+               AND s.file NOT LIKE '%/tests/%' \
+               AND s.file NOT LIKE 'examples/%' \
+               AND s.file NOT LIKE '%tests/sky/%' \
+             ORDER BY s.file"
+        )?;
+        let rows = st.query_map(rusqlite::params![name, lang], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<std::result::Result<_,_>>()?)
     }
 }
@@ -91,5 +111,45 @@ mod tests {
         s.put_edge("a.rs", "b.rs", "import").unwrap();
         s.put_edge("a.rs", "b.rs", "import").unwrap(); // duplicate — should be ignored
         assert_eq!(s.count("edges").unwrap(), 1);
+    }
+
+    #[test]
+    fn symbols_named_in_lang_filters_language() {
+        let s = Store::open(":memory:").unwrap();
+        // same symbol name in both Go and Rust, plus a Go test file
+        s.put_file("runtime-go/rt/fmt.go", "go", "runtime-go", 0, "").unwrap();
+        s.put_file("runtime-go/rt/fmt_test.go", "go", "runtime-go", 0, "").unwrap();
+        s.put_file("runtime-rust/src/fmt.rs", "rs", "runtime-rust", 0, "").unwrap();
+        // Definitions
+        s.conn.execute("INSERT INTO symbols VALUES ('runtime-go/rt/fmt.go','Fmt_sprint','def',10,0)", []).unwrap();
+        s.conn.execute("INSERT INTO symbols VALUES ('runtime-go/rt/fmt_test.go','Fmt_sprint','def',250,0)", []).unwrap();
+        s.conn.execute("INSERT INTO symbols VALUES ('runtime-rust/src/fmt.rs','fmt_sprint','def',5,0)", []).unwrap();
+
+        // Go lookup: should NOT return the _test.go file
+        let go_hits = s.symbols_named_in_lang("Fmt_sprint", "go").unwrap();
+        assert_eq!(go_hits.len(), 1, "expected exactly the non-test Go file");
+        assert_eq!(go_hits[0].0, "runtime-go/rt/fmt.go");
+
+        // Rust lookup: should return the Rust file
+        let rs_hits = s.symbols_named_in_lang("fmt_sprint", "rs").unwrap();
+        assert_eq!(rs_hits.len(), 1);
+        assert_eq!(rs_hits[0].0, "runtime-rust/src/fmt.rs");
+
+        // Wrong lang: Rust name in Go lookup → empty
+        let miss = s.symbols_named_in_lang("fmt_sprint", "go").unwrap();
+        assert!(miss.is_empty());
+    }
+
+    #[test]
+    fn symbols_named_in_lang_excludes_examples() {
+        let s = Store::open(":memory:").unwrap();
+        s.put_file("examples/01-hello/sky-out/main.go", "go", "example", 0, "").unwrap();
+        s.put_file("runtime-go/rt/list.go", "go", "runtime-go", 0, "").unwrap();
+        s.conn.execute("INSERT INTO symbols VALUES ('examples/01-hello/sky-out/main.go','List_head','def',10,0)", []).unwrap();
+        s.conn.execute("INSERT INTO symbols VALUES ('runtime-go/rt/list.go','List_head','def',42,0)", []).unwrap();
+
+        let hits = s.symbols_named_in_lang("List_head", "go").unwrap();
+        assert_eq!(hits.len(), 1, "expected only the runtime file, not the example");
+        assert_eq!(hits[0].0, "runtime-go/rt/list.go");
     }
 }

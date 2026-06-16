@@ -39,8 +39,9 @@ pub fn extract_file(store: &Store, path: &str, lang: Lang, src: &str) -> Result<
             // Also capture kernels registered via string literals, e.g.
             //   RegisterPure("Decimal_add", func(args []any) any { ... })
             // tree-sitter only sees the anonymous closure, never the name.
-            for name in treesitter::go_registered_kernels(src) {
-                store.put_symbol(path, &name, "def", 0, 0)?;
+            // Store with the real line number so loc lookups find them.
+            for (name, line) in treesitter::go_registered_kernels(src) {
+                store.put_symbol(path, &name, "def", line, 0)?;
             }
         }
         Lang::Rust | Lang::Ts => treesitter::extract(store, path, lang, src)?,

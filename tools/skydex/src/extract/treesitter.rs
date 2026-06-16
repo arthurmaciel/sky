@@ -18,13 +18,23 @@ fn re_go_register() -> &'static Regex {
 /// Go kernels registered via string literals: `RegisterPure("Mod_fn", ...)`,
 /// `RegisterTask("Mod_fn", ...)`, etc.  tree-sitter misses these (the closure
 /// passed as the second arg is anonymous, so the `function_declaration` name
-/// capture never fires for them).  Line-scan them separately and return the
-/// registered kernel names so callers can union them into `go_fns`.
-pub fn go_registered_kernels(src: &str) -> Vec<String> {
-    re_go_register()
-        .captures_iter(src)
-        .map(|c| c[1].to_string())
-        .collect()
+/// capture never fires for them).  Line-scan them separately and return
+/// `(name, line)` pairs so callers can store them with real source locations.
+pub fn go_registered_kernels(src: &str) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    for (lineno, line) in src.lines().enumerate() {
+        if let Some(c) = re_go_register().captures(line) {
+            out.push((c[1].to_string(), lineno as i64 + 1));
+        }
+    }
+    out
+}
+
+/// Convenience wrapper returning only names (for parity reconcile which just
+/// needs the name set, not the location). Used in tests.
+#[allow(dead_code)]
+pub fn go_registered_kernel_names(src: &str) -> Vec<String> {
+    go_registered_kernels(src).into_iter().map(|(n, _)| n).collect()
 }
 
 fn lang_grammar(path: &str, lang: Lang) -> Option<(tree_sitter::Language, &'static str)> {
@@ -189,8 +199,11 @@ mod tests {
         //   RegisterPure("Decimal_add", func(args []any) any { ... })
         // tree-sitter sees the anonymous func, never "Decimal_add".
         let src = "func x(){}\n\tRegisterPure(\"Decimal_add\", func(a []any) any { nil })\n";
-        let names = go_registered_kernels(src);
+        let pairs = go_registered_kernels(src);
+        let names: Vec<_> = pairs.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["Decimal_add"]);
+        // Line number should be 2 (1-indexed).
+        assert_eq!(pairs[0].1, 2);
     }
 
     #[test]
@@ -199,9 +212,12 @@ mod tests {
                    \tRegisterPure(\"Bytes_empty\", func(a []any) any { nil })\n\
                    // not a kernel: RegisterReadinessProbe(\"db\", ...)\n\
                    \tRegisterTask(\"Cache_get\", func(a []any) any { nil })\n";
-        let mut names = go_registered_kernels(src);
-        names.sort();
+        let mut pairs = go_registered_kernels(src);
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        let names: Vec<_> = pairs.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["Bytes_empty", "Cache_get", "Money_add"]);
+        // All lines should be > 0.
+        assert!(pairs.iter().all(|(_, l)| *l > 0));
     }
 
     #[test]
@@ -209,8 +225,15 @@ mod tests {
         // RegisterReadinessProbe("db", ...) — "db" has no underscore, must not match
         let src = "RegisterReadinessProbe(\"db\", probe)\n\
                    RegisterReadinessProbe(\"sessions\", probe)\n";
-        let names = go_registered_kernels(src);
-        assert!(names.is_empty(), "Expected empty, got: {names:?}");
+        let pairs = go_registered_kernels(src);
+        assert!(pairs.is_empty(), "Expected empty, got: {pairs:?}");
+    }
+
+    #[test]
+    fn go_registered_kernel_names_returns_just_names() {
+        let src = "\tRegisterPure(\"Decimal_add\", func(a []any) any { nil })\n";
+        let names = go_registered_kernel_names(src);
+        assert_eq!(names, vec!["Decimal_add"]);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

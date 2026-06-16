@@ -81,6 +81,9 @@ enum Cmd {
         db: String,
         #[arg(long)]
         count: bool,
+        /// Also match submodules (e.g. `Sky.Core.List` also matches `Sky.Core.List.Foo`).
+        #[arg(long)]
+        subtree: bool,
     },
 }
 
@@ -128,8 +131,8 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
             // Kernels registered via string literals (e.g. RegisterPure("Decimal_add", ...))
             // are invisible to tree-sitter (the closure is anonymous). Line-scan them
             // separately and union into go_fns so parity reconcile sees them.
-            for c in extract::go_registered_kernels(&src) {
-                go_fns.insert(c);
+            for (name, _line) in extract::go_registered_kernels(&src) {
+                go_fns.insert(name);
             }
         }
         if f.lang == model::Lang::Rust {
@@ -146,9 +149,20 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
     let pairs: Vec<(&str, &str)> = kernel_hs_sources.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
     let routes = parity::parse_routes_with_locs(&pairs);
     for k in parity::reconcile_with_locs(&routes, &go_fns, &rust_fns) {
-        // Look up go_impl_loc and rust_impl_loc from the symbols table.
-        let go_impl_loc = lookup_sym_loc(&store, &k.name.replace('.', "_"))?;
-        let rust_impl_loc = lookup_sym_loc(&store, &k.rust_fn)?;
+        // Look up go_impl_loc and rust_impl_loc from the symbols table, using
+        // language-aware lookup so we never return a Go test file as a Rust loc
+        // or vice versa.  Only emit a loc when the matching impl boolean is true —
+        // a loc for a missing impl would contradict its own parity row.
+        let go_impl_loc = if k.go_impl {
+            lookup_sym_loc_lang(&store, &k.name.replace('.', "_"), "go")?
+        } else {
+            None
+        };
+        let rust_impl_loc = if k.rust_impl {
+            lookup_sym_loc_lang(&store, &k.rust_fn, "rs")?
+        } else {
+            None
+        };
         store.conn.execute(
             "INSERT OR REPLACE INTO kernels VALUES (?,?,?,?,?,?,?,?,?)",
             rusqlite::params![
@@ -168,11 +182,11 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
     Ok(())
 }
 
-/// Look up `"file:line"` for the first `def` symbol matching `name`.
-fn lookup_sym_loc(store: &store::Store, name: &str) -> Result<Option<String>> {
-    let hits = store.symbols_named(name)?;
+/// Look up `"file:line"` for the first `def` symbol matching `name` in `lang`,
+/// excluding test and example files.
+fn lookup_sym_loc_lang(store: &store::Store, name: &str, lang: &str) -> Result<Option<String>> {
+    let hits = store.symbols_named_in_lang(name, lang)?;
     Ok(hits.into_iter()
-        .filter(|(_, line, _)| *line > 0)
         .map(|(file, line, _)| format!("{file}:{line}"))
         .next())
 }
@@ -194,6 +208,6 @@ fn main() -> Result<()> {
         Cmd::Covers { kernel, db } => query::cmd_covers(&db, &kernel),
         Cmd::Wakeup { db } => query::cmd_wakeup(&db),
         Cmd::Locate { name, db } => query::cmd_locate(&db, &name),
-        Cmd::Rdeps { module, db, count } => query::cmd_rdeps(&db, &module, count),
+        Cmd::Rdeps { module, db, count, subtree } => query::cmd_rdeps(&db, &module, count, subtree),
     }
 }

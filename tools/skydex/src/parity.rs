@@ -91,6 +91,7 @@ pub fn parse_routes_with_locs(hs_src_pairs: &[(&str, &str)]) -> HashMap<String, 
 /// Backward-compat wrapper used by tests that pass a single concatenated string
 /// with no file-path info. Produces the same map shape as v1 (HashMap<String,String>)
 /// for the existing test helpers; the new call sites use `parse_routes_with_locs`.
+#[allow(dead_code)]
 pub fn parse_routes(hs: &str) -> HashMap<String, String> {
     let pairs = vec![("Kernel.hs", hs)];
     parse_routes_with_locs(&pairs)
@@ -118,20 +119,6 @@ pub fn reconcile_with_locs(
         }.to_string();
         let hs_route_loc = if ri.hs_loc.is_empty() { None } else { Some(ri.hs_loc.clone()) };
         Kernel { name: ri.kernel_name.clone(), rust_fn: rust_fn.clone(), go_impl: go, rust_impl: rust, parity, hs_route_loc }
-    }).collect()
-}
-
-pub fn reconcile(routes: &HashMap<String,String>, go_fns: &HashSet<String>, rust_fns: &HashSet<String>) -> Vec<Kernel> {
-    routes.iter().map(|(rust_fn, kernel)| {
-        let go = go_fns.contains(&go_name(kernel));
-        let rust = rust_fns.contains(rust_fn);
-        let parity = match (go, rust) {
-            (true, true)  => "ok",
-            (true, false) => "go-only",
-            (false, true) => "rust-only",
-            (false, false)=> "orphan-route",
-        }.to_string();
-        Kernel { name: kernel.clone(), rust_fn: rust_fn.clone(), go_impl: go, rust_impl: rust, parity, hs_route_loc: None }
     }).collect()
 }
 
@@ -178,10 +165,12 @@ mod tests {
         // go has List_head + Dict_union; rust has only list_head
         let go: std::collections::HashSet<String> = ["List_head","Dict_union"].iter().map(|s|s.to_string()).collect();
         let rust: std::collections::HashSet<String> = ["list_head"].iter().map(|s|s.to_string()).collect();
-        let mut routes = std::collections::HashMap::new();
-        routes.insert("list_head".to_string(), "List.head".to_string());
-        routes.insert("dict_union".to_string(), "Dict.union".to_string());
-        let kernels = reconcile(&routes, &go, &rust);
+        // Build routes via parse_routes_with_locs (the only non-dead path).
+        let hs = r#"  ("List", "head") -> "list_head"
+  ("Dict", "union") -> "dict_union""#;
+        let pairs = vec![("Kernel.hs", hs)];
+        let routes = parse_routes_with_locs(&pairs);
+        let kernels = reconcile_with_locs(&routes, &go, &rust);
         let dict = kernels.iter().find(|k| k.name=="Dict.union").unwrap();
         assert_eq!(dict.parity, "go-only"); // routed, Go impl present, Rust impl missing
         let head = kernels.iter().find(|k| k.name=="List.head").unwrap();
