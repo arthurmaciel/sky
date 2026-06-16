@@ -111,6 +111,10 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
     // Bounded: one file's contents at a time; the parity inputs are small name sets.
     let mut go_fns: HashSet<String> = HashSet::new();
     let mut rust_fns: HashSet<String> = HashSet::new();
+    // Ffi.kernel names declared in sky-stdlib (e.g. "Set_insert", "Dict_union").
+    // A kernel in this set is a REAL Rust gap when Go has an impl but Rust does not.
+    // Bounded: ~393 names from sky-stdlib, one short string each.
+    let mut sky_kernel_decls: HashSet<String> = HashSet::new();
     // Vec of (relative_path, source) for all Kernel.hs files found.
     let mut kernel_hs_sources: Vec<(String, String)> = Vec::new();
     for f in &files {
@@ -140,6 +144,15 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
                 rust_fns.insert(c);
             }
         }
+        // Collect Ffi.kernel declarations from sky-stdlib source files.
+        // These are the kernels any Sky program routes at the runtime level —
+        // if Go has an impl but Rust doesn't, it's a REAL gap only for these.
+        if f.role == model::Role::StdlibSky {
+            let scan = extract::sky::scan_sky(&src);
+            for kernel_name in scan.kernels {
+                sky_kernel_decls.insert(kernel_name);
+            }
+        }
         if f.role == model::Role::Fixture || f.role == model::Role::Example {
             coverage::record_coverage(&store, &f.path, &src)?;
         }
@@ -148,7 +161,7 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
     // Parity reconcile over the whole repo's kernel tables + Go/Rust symbol sets.
     let pairs: Vec<(&str, &str)> = kernel_hs_sources.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
     let routes = parity::parse_routes_with_locs(&pairs);
-    for k in parity::reconcile_with_locs(&routes, &go_fns, &rust_fns) {
+    for k in parity::reconcile_with_locs(&routes, &go_fns, &rust_fns, &sky_kernel_decls) {
         // Look up go_impl_loc and rust_impl_loc from the symbols table, using
         // language-aware lookup so we never return a Go test file as a Rust loc
         // or vice versa.  Only emit a loc when the matching impl boolean is true —
@@ -166,7 +179,7 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
         store.conn.execute(
             "INSERT OR REPLACE INTO kernels VALUES (?,?,?,?,?,?,?,?,?)",
             rusqlite::params![
-                k.name, 1, k.rust_fn,
+                k.name, k.sky_decl as i64, k.rust_fn,
                 k.hs_route_loc.as_deref(),
                 k.go_impl as i64, k.rust_impl as i64,
                 go_impl_loc, rust_impl_loc,

@@ -7,6 +7,11 @@ pub struct Kernel {
     pub rust_fn: String,
     pub go_impl: bool,
     pub rust_impl: bool,
+    /// True when this kernel is declared `Ffi.kernel "Name"` in sky-stdlib — meaning
+    /// any Sky program that uses this function routes it as a kernel call that the
+    /// Rust runtime MUST provide.  False means Go has a kernel optimisation for it
+    /// but the stdlib implements it as pure Sky, so the Rust backend needs no kernel.
+    pub sky_decl: bool,
     pub parity: String,
     /// "path:line" of the routing row in Kernel.hs (if known).
     pub hs_route_loc: Option<String>,
@@ -103,22 +108,41 @@ pub fn parse_routes(hs: &str) -> HashMap<String, String> {
 /// Go impl name convention: `Mod_fn` (PascalCase module). Derive from "Mod.fn".
 fn go_name(kernel: &str) -> String { kernel.replace('.', "_") }
 
+/// Classify kernels with stdlib-declaration awareness.
+///
+/// `sky_kernel_decls` is the set of kernel names (e.g. `"Set_insert"`, `"Dict_union"`)
+/// that appear as `Ffi.kernel "Name"` declarations inside `sky-stdlib/`.  A kernel in
+/// this set is a REAL Rust gap when Go has an impl but Rust does not — any Sky program
+/// that calls it routes the call to the runtime.  A kernel absent from this set is
+/// either a Go-internal optimisation or a function the stdlib defines as pure Sky; the
+/// Rust backend handles it without a runtime kernel, so it is NOT a real gap.
+///
+/// Parity values:
+///   - `ok`             — both backends have an impl.
+///   - `go-only`        — Go impl present, Rust absent, sky_decl=true → REAL gap.
+///   - `go-kernel-opt`  — Go impl present, Rust absent, sky_decl=false → NOT a gap
+///                        (Go optimisation / pure-Sky in stdlib; Rust needs no kernel).
+///   - `rust-only`      — Rust impl present, Go absent.
+///   - `orphan-route`   — neither backend has an impl.
 pub fn reconcile_with_locs(
     routes: &HashMap<String, RouteInfo>,
     go_fns: &HashSet<String>,
     rust_fns: &HashSet<String>,
+    sky_kernel_decls: &HashSet<String>,
 ) -> Vec<Kernel> {
     routes.iter().map(|(rust_fn, ri)| {
         let go = go_fns.contains(&go_name(&ri.kernel_name));
         let rust = rust_fns.contains(rust_fn);
+        // The Ffi.kernel name used in sky-stdlib is the Go-convention `Mod_fn` form.
+        let sky_decl = sky_kernel_decls.contains(&ri.kernel_name.replace('.', "_"));
         let parity = match (go, rust) {
-            (true, true)  => "ok",
-            (true, false) => "go-only",
-            (false, true) => "rust-only",
-            (false, false)=> "orphan-route",
+            (true, true)   => "ok",
+            (true, false)  => if sky_decl { "go-only" } else { "go-kernel-opt" },
+            (false, true)  => "rust-only",
+            (false, false) => "orphan-route",
         }.to_string();
         let hs_route_loc = if ri.hs_loc.is_empty() { None } else { Some(ri.hs_loc.clone()) };
-        Kernel { name: ri.kernel_name.clone(), rust_fn: rust_fn.clone(), go_impl: go, rust_impl: rust, parity, hs_route_loc }
+        Kernel { name: ri.kernel_name.clone(), rust_fn: rust_fn.clone(), go_impl: go, rust_impl: rust, sky_decl, parity, hs_route_loc }
     }).collect()
 }
 
@@ -163,18 +187,46 @@ mod tests {
     #[test]
     fn flags_missing_rust_impl() {
         // go has List_head + Dict_union; rust has only list_head
+        // Dict.union is declared Ffi.kernel in stdlib (sky_decl=true) → real go-only gap.
         let go: std::collections::HashSet<String> = ["List_head","Dict_union"].iter().map(|s|s.to_string()).collect();
         let rust: std::collections::HashSet<String> = ["list_head"].iter().map(|s|s.to_string()).collect();
+        let sky: std::collections::HashSet<String> = ["Dict_union"].iter().map(|s|s.to_string()).collect();
         // Build routes via parse_routes_with_locs (the only non-dead path).
         let hs = r#"  ("List", "head") -> "list_head"
   ("Dict", "union") -> "dict_union""#;
         let pairs = vec![("Kernel.hs", hs)];
         let routes = parse_routes_with_locs(&pairs);
-        let kernels = reconcile_with_locs(&routes, &go, &rust);
+        let kernels = reconcile_with_locs(&routes, &go, &rust, &sky);
         let dict = kernels.iter().find(|k| k.name=="Dict.union").unwrap();
-        assert_eq!(dict.parity, "go-only"); // routed, Go impl present, Rust impl missing
+        assert_eq!(dict.parity, "go-only"); // routed, Go impl present, Rust impl missing, sky_decl=true
+        assert!(dict.sky_decl);
         let head = kernels.iter().find(|k| k.name=="List.head").unwrap();
         assert_eq!(head.parity, "ok");
+    }
+
+    #[test]
+    fn go_kernel_opt_for_pure_sky_functions() {
+        // List.map is defined as pure Sky in stdlib (sky_decl=false) even though Go
+        // has a kernel optimisation for it.  It must NOT be flagged as a real Rust gap.
+        let go: std::collections::HashSet<String> = ["List_map", "Set_insert"].iter().map(|s|s.to_string()).collect();
+        let rust: std::collections::HashSet<String> = HashSet::new(); // neither impl in Rust
+        // Only Set.insert is declared Ffi.kernel in sky-stdlib.
+        let sky: std::collections::HashSet<String> = ["Set_insert"].iter().map(|s|s.to_string()).collect();
+        let hs = r#"  ("List", "map") -> "list_map"
+  ("Set", "insert") -> "set_insert""#;
+        let pairs = vec![("Kernel.hs", hs)];
+        let routes = parse_routes_with_locs(&pairs);
+        let kernels = reconcile_with_locs(&routes, &go, &rust, &sky);
+
+        let list_map = kernels.iter().find(|k| k.name == "List.map").unwrap();
+        assert_eq!(list_map.parity, "go-kernel-opt",
+            "List.map is pure-Sky in stdlib — not a real Rust gap");
+        assert!(!list_map.sky_decl);
+
+        let set_insert = kernels.iter().find(|k| k.name == "Set.insert").unwrap();
+        assert_eq!(set_insert.parity, "go-only",
+            "Set.insert is Ffi.kernel in stdlib — real Rust gap");
+        assert!(set_insert.sky_decl);
     }
 
     #[test]

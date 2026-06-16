@@ -6,8 +6,12 @@ use std::collections::HashSet;
 pub fn cmd_parity(db: &str, gaps: bool) -> Result<()> {
     use std::io::Write;
     let s = Store::open(db)?;
+    // `--gaps` shows only REAL gaps: go-only (real missing Rust kernel) + rust-only + orphan-route.
+    // `go-kernel-opt` is excluded from --gaps because those are NOT real Rust deficiencies:
+    // the stdlib implements them as pure Sky, so the Rust backend needs no kernel for them.
     let sql = if gaps {
-        "SELECT name,parity,go_impl,rust_impl,hs_route_loc,go_impl_loc,rust_impl_loc FROM kernels WHERE parity!='ok' ORDER BY parity,name"
+        "SELECT name,parity,go_impl,rust_impl,hs_route_loc,go_impl_loc,rust_impl_loc FROM kernels \
+         WHERE parity!='ok' AND parity!='go-kernel-opt' ORDER BY parity,name"
     } else {
         "SELECT name,parity,go_impl,rust_impl,hs_route_loc,go_impl_loc,rust_impl_loc FROM kernels ORDER BY parity,name"
     };
@@ -227,9 +231,11 @@ pub fn cmd_wakeup(db: &str) -> Result<()> {
         s.count("edges")?,
         s.count("kernels")?
     );
+    // Real gaps exclude `go-kernel-opt` (Go optimisation over pure-Sky stdlib functions;
+    // not a Rust deficiency) and `ok`.
     let gaps: i64 =
         s.conn
-            .query_row("SELECT COUNT(*) FROM kernels WHERE parity!='ok'", [], |r| {
+            .query_row("SELECT COUNT(*) FROM kernels WHERE parity!='ok' AND parity!='go-kernel-opt'", [], |r| {
                 r.get(0)
             })?;
     println!("parity gaps: {gaps}  (run `skydex parity --gaps`)");
@@ -301,6 +307,31 @@ fn reconcile_from_store(s: &Store, repo: &str) -> Result<()> {
             }
         }
     }
+    // Re-derive the Ffi.kernel decl set from the indexed stdlib-sky files on disk.
+    // Bounded: ~393 names, one short string each.
+    let mut sky_kernel_decls: HashSet<String> = HashSet::new();
+    {
+        let mut st = s
+            .conn
+            .prepare("SELECT path FROM files WHERE role='stdlib-sky'")?;
+        let paths: Vec<String> = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        for sp in paths {
+            let full = std::path::Path::new(repo).join(&sp);
+            if let Ok(md) = std::fs::metadata(&full) {
+                if md.len() > walk::MAX_FILE_BYTES {
+                    continue;
+                }
+            }
+            if let Ok(t) = std::fs::read_to_string(&full) {
+                let scan = extract::sky::scan_sky(&t);
+                for kernel_name in scan.kernels {
+                    sky_kernel_decls.insert(kernel_name);
+                }
+            }
+        }
+    }
     // Every indexed Kernel.hs, read off disk under the per-file size cap.
     let mut hs_pairs: Vec<(String, String)> = Vec::new();
     {
@@ -325,7 +356,7 @@ fn reconcile_from_store(s: &Store, repo: &str) -> Result<()> {
     let pairs_ref: Vec<(&str, &str)> = hs_pairs.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
     let routes = parity::parse_routes_with_locs(&pairs_ref);
     s.conn.execute("DELETE FROM kernels", [])?;
-    for k in parity::reconcile_with_locs(&routes, &go, &rust) {
+    for k in parity::reconcile_with_locs(&routes, &go, &rust, &sky_kernel_decls) {
         let go_impl_loc = if k.go_impl {
             lookup_sym_loc_from_store_lang(s, &k.name.replace('.', "_"), "go")?
         } else {
@@ -339,7 +370,7 @@ fn reconcile_from_store(s: &Store, repo: &str) -> Result<()> {
         s.conn.execute(
             "INSERT OR REPLACE INTO kernels VALUES (?,?,?,?,?,?,?,?,?)",
             rusqlite::params![
-                k.name, 1, k.rust_fn,
+                k.name, k.sky_decl as i64, k.rust_fn,
                 k.hs_route_loc.as_deref(),
                 k.go_impl as i64, k.rust_impl as i64,
                 go_impl_loc, rust_impl_loc,
