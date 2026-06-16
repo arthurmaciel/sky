@@ -548,7 +548,31 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
                 | Just s <- inferParamRustTypeFromRegions ctx pn body = patternToRustParam p ++ ": " ++ s
             annotPsIx _ p = patternToRustParam p ++ annot
             psStr = intercalate ", " (zipWith annotPsIx [0..] ps)
-            retAnnot = case ecPipeInnerType ctx of
+            -- Each task-continuation closure's return inner type must come from
+            -- ITS OWN body's task type, not the inherited ecPipeInnerType — that
+            -- holds the OUTER piped chain's inner type (e.g. `()` at the final
+            -- `… |> Task.run`) and propagates unchanged into every nested
+            -- `Task.andThen (\_ -> taskReturningOtherType)`, mis-annotating the
+            -- closure `-> SkyTask<()>` and failing `cargo build` (E0308) the
+            -- moment a continuation's result inner type differs from the chain's.
+            -- The gate below (which closures get the Task treatment) is
+            -- UNCHANGED; only the inner TYPE is corrected, keeping the inherited
+            -- value as the fallback when the body's task inner type can't be read.
+            retInner = case ecPipeInnerType ctx of
+                Just _ ->
+                    let bodyTaskInner = taskExprInnerType (ecSolvedTypes ctx) body
+                    -- Prefer the body's OWN task inner type. When it can't be read
+                    -- — a POLYMORPHIC kernel like `Random.shuffle : List a ->
+                    -- Task e (List a)`, whose inner type is neither in the
+                    -- monomorphic table nor name-keyed in `solved` — OMIT the
+                    -- annotation and let Rust infer it from the concrete
+                    -- kernel-call body (E is already pinned by the enclosing
+                    -- chain). NEVER fall back to the inherited outer-chain type:
+                    -- it is the OUTER piped result (`()` at `… |> Task.run`) and
+                    -- is wrong for any nested continuation returning another type.
+                    in if null bodyTaskInner then Nothing else Just bodyTaskInner
+                Nothing -> Nothing
+            retAnnot = case retInner of
                 Just t -> " -> SkyTask<" ++ t ++ ">"
                 Nothing -> ""
             hasTaskRet = case ecPipeInnerType ctx of
@@ -1453,6 +1477,37 @@ exprToRustInner ctx e = case e of
             Nothing -> case calleeName of
                 fn | "println" `isSuffixOf` fn ->
                     "log_info(" ++ intercalate " ++ \" \" ++ " (map (\a -> exprToRustString ctx a) args) ++ ")"
+                -- A task_and_then continuation's param type is the inner type of
+                -- the TASK arg (its input), not the inherited ecPipeInnerType
+                -- (the outer `… |> Task.run` chain result, constant down the
+                -- whole chain). Reset ecPipeInnerType to the task arg's inner type
+                -- for BOTH the wildcard (pinTaskCall) and non-wildcard
+                -- (emitDefaultCall) paths so the closure's `move |x: T|` param —
+                -- and, via the body-driven retInner, its return — are annotated
+                -- against the right type. When the prior task is POLYMORPHIC
+                -- (inner = "" → Nothing), the param is left bare for Rust to infer
+                -- from the task_and_then signature. Closes the cargo-build hole
+                -- (E0308/E0631) where an andThen chain that changes its inner type
+                -- mis-annotated every continuation as `()`.
+                cname | cname == "task_and_then" ->
+                    -- A task_and_then continuation's param AND return types are
+                    -- inferred by Rust from the task_and_then signature and the
+                    -- (typed) task arg — there is no reliable STATIC way to
+                    -- compute an andThen chain's result inner type here (it is the
+                    -- last continuation's body type; the table hardcodes
+                    -- "andThen" -> "String" and the piped form yields the FIRST
+                    -- task's type). Carrying the inherited ecPipeInnerType (the
+                    -- outer `… |> Task.run` chain result, e.g. `()`) into the
+                    -- continuation mis-annotated `move |x: ()|` whenever the
+                    -- continuation's input type differed from the chain result,
+                    -- breaking cargo build (E0308 / E0631). Clear it so the
+                    -- closure param/return stay bare and Rust infers them.
+                    -- pinTaskCall still pins the wildcard + polymorphic-task
+                    -- phantom success type.
+                    let ctxC = ctx { ecPipeInnerType = Nothing }
+                    in case pinTaskCall ctxC cname args (ecSolvedTypes ctxC) of
+                        Just pinned -> pinned
+                        Nothing -> emitDefaultCall ctxC fn calleeName args
                 cname | cname `elem` ["task_and_then", "task_on_error", "task_map_error"] ->
                     case pinTaskCall ctx cname args (ecSolvedTypes ctx) of
                         Just pinned -> pinned
