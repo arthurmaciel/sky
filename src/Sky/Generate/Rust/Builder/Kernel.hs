@@ -264,7 +264,7 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Char", "toCode")  -> "char_to_code"
     ("Char", "fromCode")         -> "char_from_code"
     ("Sky.Core.Char", "fromCode") -> "char_from_code"
-    -- sub-A.8 T3 — Sky.Core.Math (8 kernels)
+    -- sub-A.8 T3 — Sky.Core.Math (14 kernels; all 36 Math entries)
     ("Math", "abs")             -> "math_abs"
     ("Sky.Core.Math", "abs")    -> "math_abs"
     ("Math", "min")             -> "math_min"
@@ -285,6 +285,22 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Math", "pi")     -> "math_pi"
     ("Math", "e")               -> "math_e"
     ("Sky.Core.Math", "e")      -> "math_e"
+    -- Math zero-arg constants — must be in the route table so codegen
+    -- emits them as fn-calls `math_phi()` rather than bare value refs.
+    ("Math", "phi")             -> "math_phi"
+    ("Sky.Core.Math", "phi")    -> "math_phi"
+    ("Math", "sqrt2")           -> "math_sqrt2"
+    ("Sky.Core.Math", "sqrt2")  -> "math_sqrt2"
+    ("Math", "inf")             -> "math_inf"
+    ("Sky.Core.Math", "inf")    -> "math_inf"
+    ("Math", "nan")             -> "math_nan"
+    ("Sky.Core.Math", "nan")    -> "math_nan"
+    -- Math two-arg functions whose snake_cased default name doesn't exist
+    -- in the runtime (math.rs has math_mod / math_remainder).
+    ("Math", "mod")             -> "math_mod"
+    ("Sky.Core.Math", "mod")    -> "math_mod"
+    ("Math", "remainder")       -> "math_remainder"
+    ("Sky.Core.Math", "remainder") -> "math_remainder"
     -- sub-A.8 T4 — Std.Time advanced (7 kernels)
     ("Time", "diffSeconds")     -> "time_diff_seconds"
     ("Time", "diffMinutes")     -> "time_diff_minutes"

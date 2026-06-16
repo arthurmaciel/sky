@@ -381,6 +381,10 @@ kernelsZeroArg = Set.fromList
     , "json_enc_null"
     , "dict_empty"
     , "math_pi", "math_e"
+    -- Math zero-arg constants added in go-parity kernel-gaps sweep.
+    -- Without this entry the codegen emits `math_phi` (a bare fn item, not a
+    -- call) and Rust infers the wrong type.  Matches math.rs / Kernel.hs.
+    , "math_phi", "math_sqrt2", "math_inf", "math_nan"
     , "uuid_v4", "uuid_v7"
     -- Sub-E: Cmd.none / Sub.none are zero-arg values (Cmd msg / Sub msg) reached
     -- via the Ffi.kernel alias path -> emitKernel checks this bare-name set.

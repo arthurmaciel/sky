@@ -10,8 +10,17 @@
 //!   ceil   : Float -> Int
 //!   round  : Float -> Int
 
-pub fn math_pi() -> f64 { std::f64::consts::PI }
-pub fn math_e()  -> f64 { std::f64::consts::E }
+pub fn math_pi()    -> f64 { std::f64::consts::PI }
+pub fn math_e()     -> f64 { std::f64::consts::E }
+/// Golden ratio φ = (1 + √5) / 2 ≈ 1.6180339887…
+/// (std::f64::consts::PHI is nightly-only; use the literal for stable Rust.)
+pub fn math_phi()   -> f64 { 1.618_033_988_749_895_f64 }
+/// √2 ≈ 1.4142135623…
+pub fn math_sqrt2() -> f64 { std::f64::consts::SQRT_2 }
+/// Positive infinity (IEEE 754).
+pub fn math_inf()   -> f64 { f64::INFINITY }
+/// Not-a-number (IEEE 754). Note: NaN ≠ NaN by IEEE 754.
+pub fn math_nan()   -> f64 { f64::NAN }
 
 pub fn math_abs(x: i64) -> i64 { x.abs() }
 
@@ -54,6 +63,19 @@ pub fn math_tanh(x: f64) -> f64 { x.tanh() }
 pub fn math_asinh(x: f64) -> f64 { x.asinh() }
 pub fn math_acosh(x: f64) -> f64 { x.acosh() }
 pub fn math_atanh(x: f64) -> f64 { x.atanh() }
+
+// Modulo + remainder (parity with Go's math.Mod / math.Remainder).
+/// Float modulo — result has the sign of x (the dividend).
+/// Equivalent to Go's `math.Mod(x, y)` and C's `fmod(x, y)`.
+/// Rust's `x % y` is identical to C fmod for f64.
+pub fn math_mod(x: f64, y: f64) -> f64 { x % y }
+/// IEEE 754 balanced remainder — equivalent to Go's `math.Remainder(x, y)`.
+/// The result satisfies `x = n*y + remainder` where `n` is the nearest integer
+/// to `x/y` (rounded half-to-even), so `|remainder| <= |y|/2`.
+pub fn math_remainder(x: f64, y: f64) -> f64 {
+    // IEEE 754 remainder: x - round(x/y)*y  where round is half-to-even.
+    x - (x / y).round_ties_even() * y
+}
 
 #[cfg(test)]
 mod tests {
