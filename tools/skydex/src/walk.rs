@@ -6,16 +6,47 @@ pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024; // 2 MB cap (anti-OOM)
 
 pub struct Tracked { pub path: String, pub lang: Lang, pub role: Role }
 
+/// Build-output / VCS / generated path segments skydex must NEVER index, even
+/// when `.gitignore` hygiene is imperfect. The `--others` walk only respects
+/// `.gitignore`, so a crate that forgot to ignore its `target/` would otherwise
+/// flood the index with build artifacts (deps/fingerprints/rlibs) — defeating
+/// the bounded-memory guarantee that is skydex's whole reason to exist.
+/// Matched as a WHOLE path segment and case-sensitively, so legitimate source
+/// dirs are never hit (e.g. `src/Sky/Build/` keeps its capital `Build`).
+const SKIP_SEGMENTS: &[&str] = &[
+    "target", "node_modules", "dist-newstyle",
+    "sky-out", ".skycache", ".skydeps", ".skydex", ".git",
+];
+
+fn is_indexable(path: &str) -> bool {
+    !path.split('/').any(|seg| SKIP_SEGMENTS.contains(&seg))
+}
+
 pub fn parse_tracked(ls_output: &str) -> Vec<Tracked> {
     ls_output.lines().filter(|l| !l.is_empty())
+        .filter(|p| is_indexable(p))
         .map(|p| Tracked { path: p.to_string(), lang: lang_of(p), role: role_of(p) })
         .collect()
 }
 
-/// All git-tracked files in `repo` (respects .gitignore — generated dirs excluded).
+/// All git-tracked AND untracked-but-not-ignored files in `repo` (respects
+/// .gitignore via `--exclude-standard`, so generated dirs stay excluded —
+/// bounded, no OOM risk). Including untracked-non-ignored files keeps the index
+/// faithful to the working tree: a newly-added, not-yet-staged source file is
+/// part of the repo's current state, and omitting it produces false "missing"
+/// results — e.g. a fresh Rust kernel impl in a new `*.rs` file read as a
+/// go-only parity gap purely because it hasn't been `git add`ed yet.
+/// `--others` (untracked) is disjoint from the default tracked listing, so the
+/// two outputs concatenate without dedup.
 pub fn tracked(repo: &str) -> Result<Vec<Tracked>> {
-    let out = Command::new("git").arg("-C").arg(repo).args(["ls-files"]).output()?;
-    Ok(parse_tracked(&String::from_utf8_lossy(&out.stdout)))
+    let run = |extra: &[&str]| -> Result<String> {
+        let out = Command::new("git").arg("-C").arg(repo)
+            .arg("ls-files").args(extra).output()?;
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let mut combined = run(&[])?;                                   // tracked
+    combined.push_str(&run(&["--others", "--exclude-standard"])?); // untracked, not ignored
+    Ok(parse_tracked(&combined))
 }
 
 /// Changed/added + deleted paths between `since` sha and HEAD (for incremental update).
@@ -28,7 +59,7 @@ pub fn changed(repo: &str, since: &str) -> Result<(Vec<Tracked>, Vec<String>)> {
     for line in text.lines() {
         let mut it = line.split('\t');
         let (status, path) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
-        if path.is_empty() { continue; }
+        if path.is_empty() || !is_indexable(path) { continue; }
         if status.starts_with('D') { deletes.push(path.to_string()); }
         else { upserts.push(Tracked { path: path.to_string(), lang: lang_of(path), role: role_of(path) }); }
     }
@@ -51,5 +82,25 @@ mod tests {
         assert_eq!(v[0].path, "src/Sky/Parse/Lexer.hs");
         assert_eq!(v[1].lang, crate::model::Lang::Rust);
         assert_eq!(v[2].role, crate::model::Role::StdlibSky);
+    }
+
+    #[test]
+    fn skips_build_output_dirs() {
+        // tracked source survives; untracked build artifacts (target/, deps,
+        // node_modules) are dropped even though they appear in the walk output.
+        let out = "runtime-rust/src/sky_runtime/path.rs\n\
+                   tools/skydex/target/release/deps/foo.rs\n\
+                   tools/skydex/target/debug/build/bar/out/baz.rs\n\
+                   web/node_modules/pkg/index.ts\n\
+                   examples/01/sky-out/main.rs\n\
+                   src/Sky/Build/Compile.hs\n";
+        let v = parse_tracked(out);
+        let paths: Vec<&str> = v.iter().map(|t| t.path.as_str()).collect();
+        assert!(paths.contains(&"runtime-rust/src/sky_runtime/path.rs"));
+        assert!(paths.contains(&"src/Sky/Build/Compile.hs")); // capital Build kept
+        assert!(!paths.iter().any(|p| p.contains("/target/")));
+        assert!(!paths.iter().any(|p| p.contains("node_modules")));
+        assert!(!paths.iter().any(|p| p.contains("sky-out")));
+        assert_eq!(v.len(), 2);
     }
 }
