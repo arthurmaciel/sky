@@ -1440,8 +1440,16 @@ exprToRustInner ctx e = case e of
                 -- kernel alias (json_dec_succeed), not a VarKernel, so match it
                 -- too — otherwise a multi-field record ctor stays a raw N-ary
                 -- closure the single-arg pipeline can't apply (35-composite).
+                -- Both the JSON pipeline (Sky.Core.Json.Decode.Pipeline) and the
+                -- DB decoder (Std.Db.Decode) lower `succeed Ctor` to json_dec_succeed
+                -- and feed it a `json_dec_p_required` chain that applies one arg at
+                -- a time — so a multi-arg record ctor MUST be curried (curryN) for
+                -- both. Match either decode module's `succeed`.
                 Ann.At _ (Can.VarTopLevel m name)
-                    | name == "succeed", "Json.Decode" `isInfixOf` ModuleName._name m, not (null args) -> succeedArgArity
+                    | name == "succeed"
+                    , "Json.Decode" `isInfixOf` ModuleName._name m
+                      || "Db.Decode" `isInfixOf` ModuleName._name m
+                    , not (null args) -> succeedArgArity
                 _ -> Nothing
         in if isPartialApp
            then
@@ -1518,10 +1526,16 @@ exprToRustInner ctx e = case e of
                     in case pinTaskCall ctxC cname args (ecSolvedTypes ctxC) of
                         Just pinned -> pinned
                         Nothing -> emitDefaultCall ctxC fn calleeName args
-                cname | cname `elem` ["task_and_then", "task_on_error", "task_map_error"] ->
-                    case pinTaskCall ctx cname args (ecSolvedTypes ctx) of
+                -- task_on_error / task_map_error: the handler's closure param is
+                -- the ERROR type (inferred from the combinator's signature), NOT
+                -- the inherited ecPipeInnerType (the chain's success inner type,
+                -- e.g. `Db`) — carrying it mis-typed `move |e: Db|`. Clear it so
+                -- Rust infers the error param from the signature.
+                cname | cname `elem` ["task_on_error", "task_map_error"] ->
+                    let ctxC = ctx { ecPipeInnerType = Nothing }
+                    in case pinTaskCall ctxC cname args (ecSolvedTypes ctxC) of
                         Just pinned -> pinned
-                        Nothing -> emitDefaultCall ctx fn calleeName args
+                        Nothing -> emitDefaultCall ctxC fn calleeName args
                 cname | "json_dec_and_then" `isPrefixOf` cname, [contArg, decArg] <- args ->
                     -- Sky's `andThen : (a -> Decoder b) -> Decoder a -> Decoder b`
                     -- puts the continuation FIRST, but the runtime kernel is

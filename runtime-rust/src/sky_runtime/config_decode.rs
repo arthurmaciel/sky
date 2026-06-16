@@ -19,13 +19,17 @@ use std::future::ready;
 pub fn config_nullable<E: From<String> + 'static, T: 'static + Send>(
     decoder: Decoder<E, T>,
 ) -> Decoder<E, SkyMaybe<T>> {
-    Box::new(move |v| match v {
-        JsonVal::Null => SkyResult::Ok(SkyMaybe::Nothing),
-        _ => match decoder(v) {
-            SkyResult::Ok(t) => SkyResult::Ok(SkyMaybe::Just(t)),
-            SkyResult::Err(e) => SkyResult::Err(e),
-        },
-    })
+    let inner_fields = decoder.fields.clone();
+    Decoder::new(
+        Box::new(move |v| match v {
+            JsonVal::Null => SkyResult::Ok(SkyMaybe::Nothing),
+            _ => match (decoder.run)(v) {
+                SkyResult::Ok(t) => SkyResult::Ok(SkyMaybe::Just(t)),
+                SkyResult::Err(e) => SkyResult::Err(e),
+            },
+        }),
+        inner_fields,
+    )
 }
 
 fn run_decoder<E: From<String> + 'static, T>(
@@ -33,7 +37,7 @@ fn run_decoder<E: From<String> + 'static, T>(
     decoder: Decoder<E, T>,
 ) -> SkyResult<E, T> {
     match parsed {
-        Ok(v) => decoder(&v),
+        Ok(v) => (decoder.run)(&v),
         Err(e) => SkyResult::Err(str_err(&e)),
     }
 }

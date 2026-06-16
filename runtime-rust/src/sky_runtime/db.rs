@@ -2,7 +2,7 @@
 // Uses DbPool, DbRow, SKY_DB_URL, db_last_insert_id, db_format_sql from
 // config.rs (generated at build time per sky.toml [database] driver).
 use super::*;
-use super::json::{Decoder, JsonVal, json_dec_field, json_dec_ok, json_dec_err_str};
+use super::json::{Decoder, JsonVal, json_dec_field, json_dec_ok, json_dec_err_str, json_dec_and_map};
 use sqlx::{Column, Row};
 use std::collections::HashMap;
 
@@ -91,11 +91,11 @@ fn row_to_json(row: &DbRow) -> JsonVal {
 /// `DbDec.string col` — read column `col` as a String.
 /// Fails with Err when the column is missing OR its value is NULL.
 pub fn db_dec_string<E: From<String> + 'static>(col: String) -> Decoder<E, String> {
-    json_dec_field(col.clone(), Box::new(move |v| match v {
+    json_dec_field(col.clone(), Decoder::new(Box::new(move |v| match v {
         JsonVal::String(s) => json_dec_ok(s.clone()),
         JsonVal::Null      => json_dec_err_str(format!("column {}: expected String, got NULL", col)),
         _                  => json_dec_err_str(format!("column {}: expected String, got {:?}", col, v.to_string())),
-    }))
+    }), vec![]))
 }
 
 /// `DbDec.int col` — read column `col` as an Int (i64).
@@ -103,7 +103,7 @@ pub fn db_dec_string<E: From<String> + 'static>(col: String) -> Decoder<E, Strin
 /// (e.g. "42", "3.0" → 3). NULL → Err. Parse failure → Err.
 /// Matches Go's DbDec_int truthy table (int/int64/float64/string forms).
 pub fn db_dec_int<E: From<String> + 'static>(col: String) -> Decoder<E, i64> {
-    json_dec_field(col.clone(), Box::new(move |v| match v {
+    json_dec_field(col.clone(), Decoder::new(Box::new(move |v| match v {
         JsonVal::Number(n) => match n.as_i64() {
             Some(i) => json_dec_ok(i),
             None    => match n.as_f64() {
@@ -119,13 +119,13 @@ pub fn db_dec_int<E: From<String> + 'static>(col: String) -> Decoder<E, i64> {
         },
         JsonVal::Null => json_dec_err_str(format!("column {}: expected Int, got NULL", col)),
         _ => json_dec_err_str(format!("column {}: expected Int, got unexpected type", col)),
-    }))
+    }), vec![]))
 }
 
 /// `DbDec.float col` — read column `col` as a Float (f64).
 /// Matches Go's DbDec_float truthy table (float64/int/int64/string forms).
 pub fn db_dec_float<E: From<String> + 'static>(col: String) -> Decoder<E, f64> {
-    json_dec_field(col.clone(), Box::new(move |v| match v {
+    json_dec_field(col.clone(), Decoder::new(Box::new(move |v| match v {
         JsonVal::Number(n) => match n.as_f64() {
             Some(f) => json_dec_ok(f),
             None    => json_dec_err_str(format!("column {}: expected Float, number unrepresentable as f64", col)),
@@ -136,7 +136,7 @@ pub fn db_dec_float<E: From<String> + 'static>(col: String) -> Decoder<E, f64> {
         },
         JsonVal::Null => json_dec_err_str(format!("column {}: expected Float, got NULL", col)),
         _ => json_dec_err_str(format!("column {}: expected Float, got unexpected type", col)),
-    }))
+    }), vec![]))
 }
 
 /// `DbDec.bool col` — read column `col` as a Bool.
@@ -145,7 +145,7 @@ pub fn db_dec_float<E: From<String> + 'static>(col: String) -> Decoder<E, f64> {
 ///   false ← "false"| "FALSE"| "False"| "f" | "F" | "0" | JSON false | int 0  | int64 0
 /// NULL or unrecognised string → Err.
 pub fn db_dec_bool<E: From<String> + 'static>(col: String) -> Decoder<E, bool> {
-    json_dec_field(col.clone(), Box::new(move |v| match v {
+    json_dec_field(col.clone(), Decoder::new(Box::new(move |v| match v {
         JsonVal::Bool(b) => json_dec_ok(*b),
         JsonVal::Number(n) => match n.as_i64() {
             Some(i) => json_dec_ok(i != 0),
@@ -158,7 +158,7 @@ pub fn db_dec_bool<E: From<String> + 'static>(col: String) -> Decoder<E, bool> {
         },
         JsonVal::Null => json_dec_err_str(format!("column {}: expected Bool, got NULL", col)),
         _ => json_dec_err_str(format!("column {}: expected Bool, got unexpected type", col)),
-    }))
+    }), vec![]))
 }
 
 /// `DbDec.money col` — read column `col` as a `(Decimal, String)` pair
@@ -184,7 +184,7 @@ pub fn db_dec_bool<E: From<String> + 'static>(col: String) -> Decoder<E, bool> {
 ///
 /// Totality: missing column, NULL, bad format, unparseable amount → `Err`.
 pub fn db_dec_money<E: From<String> + 'static>(col: String) -> Decoder<E, (Decimal, String)> {
-    json_dec_field(col.clone(), Box::new(move |v| {
+    json_dec_field(col.clone(), Decoder::new(Box::new(move |v| {
         let s = match v {
             JsonVal::String(s) => s.clone(),
             JsonVal::Null      => return json_dec_err_str(format!("column {}: expected Money 'CODE AMOUNT', got NULL", col)),
@@ -211,80 +211,116 @@ pub fn db_dec_money<E: From<String> + 'static>(col: String) -> Decoder<E, (Decim
                 }
             }
         }
-    }))
+    }), vec![]))
 }
 
-/// `DbDec.nullable inner` — wrap a field-level `inner` decoder so it returns
-/// `Nothing` when the named column is NULL (or absent), `Just <decoded>` otherwise.
+/// `DbDec.nullable inner` — ONE-arg form matching Sky's
+/// `nullable : Decoder a -> Decoder (Maybe a)` (#577).
 ///
-/// **Usage**: pass the column name AND a field-level decoder:
-/// ```text
-/// db_dec_nullable("age".to_string(), db_dec_int("age".to_string()))
-/// ```
-/// The col parameter is used to peek at the raw `JsonVal` in the row for the
-/// named column BEFORE running the inner decoder; if it is `JsonVal::Null` (SQL
-/// NULL from `row_to_json`) or absent → `Ok(Nothing)`. Otherwise the inner field
-/// decoder is delegated to, and its result is wrapped in `Just`.
+/// Uses `inner.fields` (the `Decoder` struct metadata added in the
+/// `{run, fields}` redesign) to determine which columns the inner decoder reads.
+/// This is the Rust equivalent of Go's `DbDec_nullable` which gates on
+/// `inner.cols`.
 ///
-/// This matches Go's `DbDec_nullable` v0.16.x single-arg shape (#577): Go
-/// achieves the gate by checking `inner.cols` against the row; we achieve it
-/// by an explicit `col` peek (simpler, equally correct, and avoids storing
-/// cols metadata in the Decoder type).
+/// NULL-gate logic (matches Go):
+/// - If `inner.fields` is non-empty: check each named field in the row
+///   `JsonVal::Object`. If ANY field is `JsonVal::Null` or absent →
+///   `Ok(Nothing)`. Only when all fields are present + non-null do we
+///   delegate to `inner.run`.
+/// - If `inner.fields` is empty (e.g. a `succeed`/`fail` decoder with no
+///   column binding): check the current value directly — `JsonVal::Null`
+///   → `Ok(Nothing)`, else delegate.
 ///
-/// Totality: Null/absent → Ok(Nothing); inner Err → Err (structural mismatch,
-/// not NULL); inner Ok(t) → Ok(Just(t)).
+/// Totality: every path returns a `SkyResult`; no panic/unwrap.
 pub fn db_dec_nullable<E: From<String> + 'static, T: Send + 'static>(
-    col: String,
     inner: Decoder<E, T>,
 ) -> Decoder<E, SkyMaybe<T>> {
-    Box::new(move |v| {
-        // Peek at the raw value for this column in the row object.
-        match v.get(&col) {
-            // Column absent or explicitly NULL → Nothing (SQL NULL).
-            None | Some(JsonVal::Null) => json_dec_ok(SkyMaybe::Nothing),
-            // Column present and non-null → delegate to inner (the full row object is passed
-            // so the inner field decoder can still peel the column name).
-            Some(_) => match inner(v) {
+    let gate_fields = inner.fields.clone();
+    // Clone for use in the Decoder::new second arg (moved into closure above).
+    let fields_for_struct = gate_fields.clone();
+    Decoder::new(
+        Box::new(move |v| {
+            if gate_fields.is_empty() {
+                // Leaf decoder with no named fields — gate on the current value itself.
+                match v {
+                    JsonVal::Null => return json_dec_ok(SkyMaybe::Nothing),
+                    _ => {}
+                }
+            } else {
+                // Gate on every field the inner decoder reads.
+                for col in &gate_fields {
+                    match v.get(col.as_str()) {
+                        None | Some(JsonVal::Null) => return json_dec_ok(SkyMaybe::Nothing),
+                        Some(_) => {}
+                    }
+                }
+            }
+            // All gate fields are present + non-null (or no gate fields and value
+            // is not Null): delegate to inner. Inner Err = structural mismatch.
+            match (inner.run)(v) {
                 SkyResult::Ok(t)  => json_dec_ok(SkyMaybe::Just(t)),
                 SkyResult::Err(e) => SkyResult::Err(e),
-            },
-        }
-    })
+            }
+        }),
+        fields_for_struct,
+    )
 }
 
 /// `DbDec.required col fieldDec ctorDec` — pipeline step for a required column.
 ///
-/// Reads `col` from the row object using `fieldDec`, then applies the partial
-/// constructor stored in `ctorDec`. Mirrors Go's `DbDec_required` which is
-/// `DbDec_andMap(fieldDec, ctorDec)` — the column name is documentation-only
-/// (the field decoder already names its column).
+/// Sky signature: `required : String -> Decoder a -> Decoder (a -> b) -> Decoder b`
 ///
-/// BLOCKED: the `Box<dyn FnOnce(T) -> F + Send>` accumulator in `ctorDec`
-/// requires `FnOnce` (consumed on first call) but `Decoder<E, X>` is
-/// `Box<dyn Fn(&JsonVal) -> SkyResult<E, X> + Send>` — callable multiple
-/// times via `Fn`.  A `Decoder` wrapping a `FnOnce` closure can't satisfy
-/// `Fn`.  Attempting to call it twice would move out of the closure.
+/// Implemented APPLICATIVELY as `json_dec_and_map(json_dec_field(col, fieldDec), ctorDec)`.
+/// This avoids any FnOnce/Clone wall: `json_dec_field` reads the named column from the row
+/// and returns `SkyResult<E, A>`; `ctorDec` returns `SkyResult<E, Box<dyn FnOnce(A)->B>>`;
+/// `json_dec_and_map` calls the FnOnce once per decoder invocation, which is sound because
+/// the decoder is called once per row (not twice for the same row).
 ///
-/// This is the SAME fundamental type-system mismatch documented in
-/// `runtime-rust/CLAUDE.md` Phase-3 limitation #2 ("JSON pipeline decoder —
-/// Box<dyn FnOnce> chain from json_dec_p_required/optional + json_dec_succeed
-/// can't satisfy Clone/Send").  `db_dec_required` / `db_dec_optional` hit the
-/// exact same wall.
+/// The `col` parameter is accepted for API parity with Sky's signature but is
+/// documentation-only here — `fieldDec` already names its column via `json_dec_field`.
 ///
-/// **Status: BLOCKED.** The entries are wired to `json_dec_p_required` /
-/// `json_dec_p_optional` in Kernel.hs (which also maps
-/// `Json.Decode.Pipeline.required/optional`), so Sky code that uses the
-/// `required`/`optional` pipeline style with DbDec follows the same path as
-/// JsonDec pipeline — see the runtime's existing `json_dec_p_required` /
-/// `json_dec_p_optional` in json.rs for the current partial implementation.
+/// Totality: missing column or decode error → Err propagated; no panic/unwrap.
+/// Matches Go's `DbDec_required` which delegates to `DbDec_andMap(fieldDec, ctorDec)`.
+pub fn db_dec_required<E: From<String> + 'static, A: 'static + Send, B: 'static + Send>(
+    _col: String,
+    field_dec: Decoder<E, A>,
+    ctor_dec: Decoder<E, Box<dyn FnOnce(A) -> B + Send>>,
+) -> Decoder<E, B> {
+    json_dec_and_map(field_dec, ctor_dec)
+}
+
+/// `DbDec.optional col fieldDec fallback ctorDec` — pipeline step for an optional column.
 ///
-/// This stub documents the in-boundary decision: DO NOT re-implement as a
-/// separate `db_dec_required`; route to `json_dec_p_required` in Kernel.hs.
-#[allow(dead_code)]
-pub fn db_dec_required_stub() {
-    // BLOCKED — see doc comment above.
-    // Kernel.hs routes ("DbDec","required") → "json_dec_p_required"
-    // and ("DbDec","optional") → "json_dec_p_optional".
+/// Sky signature: `optional : String -> Decoder a -> a -> Decoder (a -> b) -> Decoder b`
+///
+/// Like `required` but a missing or NULL column yields `fallback` instead of failing.
+/// Implemented applicatively: wrap `fieldDec` so that:
+/// - Column absent or `JsonVal::Null` → `Ok(fallback.clone())`
+/// - Column present + non-null → `fieldDec` decode result (Err on type mismatch)
+/// Then `json_dec_and_map` applies the ctor.
+///
+/// Totality: NULL/absent → Ok(fallback); present but bad type → Err; ctor Err → Err.
+/// Matches Go's `DbDec_optional`.
+pub fn db_dec_optional<E: From<String> + 'static, A: Clone + 'static + Send, B: 'static + Send>(
+    col: String,
+    field_dec: Decoder<E, A>,
+    fallback: A,
+    ctor_dec: Decoder<E, Box<dyn FnOnce(A) -> B + Send>>,
+) -> Decoder<E, B> {
+    // Build a nullable-aware wrapper: absent/NULL col → Ok(fallback), else decode.
+    // `field_dec` is a db_dec_* primitive created with json_dec_field(col, inner),
+    // so it expects the FULL row `JsonVal::Object` (not the extracted field value).
+    // We gate on the column presence/NULL status, then pass the full row to field_dec.run.
+    let fallback_run = fallback.clone();
+    let dec_fields = field_dec.fields.clone();
+    let nullable_field = Decoder::new(
+        Box::new(move |v| match v.get(&col) {
+            None | Some(JsonVal::Null) => json_dec_ok(fallback_run.clone()),
+            Some(_) => (field_dec.run)(v),  // pass full row — field_dec peels the column name
+        }),
+        dec_fields,
+    );
+    json_dec_and_map(nullable_field, ctor_dec)
 }
 
 // ─── Connection-lifecycle hardening ───────────────────────────────────────────
@@ -763,7 +799,7 @@ pub fn db_query_decode<E: Send + From<String> + 'static, A: Send + 'static>(
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
             let jv = row_to_json(row);
-            match decoder(&jv) {
+            match (decoder.run)(&jv) {
                 SkyResult::Ok(a)  => out.push(a),
                 SkyResult::Err(e) => return SkyResult::Err(e),
             }
@@ -794,7 +830,7 @@ pub fn db_get_by_id_decode<E: Send + From<String> + 'static, A: Send + 'static>(
             Ok(None)       => ok_res(SkyMaybe::Nothing),
             Ok(Some(row))  => {
                 let jv = row_to_json(&row);
-                match decoder(&jv) {
+                match (decoder.run)(&jv) {
                     SkyResult::Ok(a)  => ok_res(SkyMaybe::Just(a)),
                     SkyResult::Err(e) => SkyResult::Err(e),
                 }
@@ -1102,18 +1138,16 @@ mod tests {
         sqlx::query("INSERT INTO items (id, label) VALUES (2, 'hello')")
             .execute(&pool).await.expect("insert some");
 
-        // db_dec_nullable("label", db_dec_string("label")): NULL → Nothing, "hello" → Just("hello").
-        let decoder: Decoder<String, SkyMaybe<String>> =
-            db_dec_nullable("label".to_string(), db_dec_string("label".to_string()));
+        // db_dec_nullable(db_dec_string("label")): NULL → Nothing, "hello" → Just("hello").
+        // (1-arg form: inner.fields = ["label"] provides the NULL-gate column.)
 
         // Check NULL row → Nothing.
         let r1: SkyResult<String, Vec<SkyMaybe<String>>> = db_query_decode(
             pool.clone(),
             "SELECT label FROM items WHERE id = 1".into(),
             vec![],
-            db_dec_nullable("label".to_string(), db_dec_string("label".to_string())),
+            db_dec_nullable(db_dec_string("label".to_string())),
         ).await;
-        let _ = decoder; // consumed above, need a fresh one
         match r1 {
             SkyResult::Ok(v) => {
                 assert_eq!(v.len(), 1);
@@ -1127,7 +1161,7 @@ mod tests {
             pool,
             "SELECT label FROM items WHERE id = 2".into(),
             vec![],
-            db_dec_nullable("label".to_string(), db_dec_string("label".to_string())),
+            db_dec_nullable(db_dec_string("label".to_string())),
         ).await;
         match r2 {
             SkyResult::Ok(v) => {
@@ -1169,9 +1203,8 @@ mod tests {
         // Verify db_dec_money parses "USD 12.34" → (Decimal(12.34), "USD").
         use rust_decimal::Decimal as RD;
         use std::str::FromStr;
-        let decoder: Decoder<String, (Decimal, String)> = db_dec_money("price".to_string());
         let val = serde_json::json!({ "price": "USD 12.34" });
-        let result = decoder(&val);
+        let result = (db_dec_money::<String>("price".to_string()).run)(&val);
         match result {
             SkyResult::Ok((amount, code)) => {
                 assert_eq!(code, "USD");
@@ -1182,11 +1215,11 @@ mod tests {
 
         // NULL → Err.
         let val_null = serde_json::json!({ "price": null });
-        assert!(matches!(decoder(&val_null), SkyResult::Err(_)));
+        assert!(matches!((db_dec_money::<String>("price".to_string()).run)(&val_null), SkyResult::Err(_)));
 
         // Bad format → Err.
         let val_bad = serde_json::json!({ "price": "NODECIMAL" });
-        assert!(matches!(decoder(&val_bad), SkyResult::Err(_)));
+        assert!(matches!((db_dec_money::<String>("price".to_string()).run)(&val_bad), SkyResult::Err(_)));
     }
 
     #[tokio::test]

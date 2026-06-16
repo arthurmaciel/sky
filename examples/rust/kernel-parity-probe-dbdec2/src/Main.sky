@@ -1,0 +1,54 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Sky.Core.List as List
+import Sky.Core.Maybe as Maybe
+import Std.Db as Db
+import Std.Db.Decode as Decode
+import Std.Log exposing (println)
+
+
+type alias Account =
+    { id : Int, name : String, nickname : Maybe String, role : String }
+
+
+-- Pipeline decoder: required + nullable + optional (fallback on NULL).
+accountDecoder : Decoder Account
+accountDecoder =
+    Decode.succeed Account
+        |> Decode.required "id" (Decode.int "id")
+        |> Decode.required "name" (Decode.string "name")
+        |> Decode.required "nickname" (Decode.nullable (Decode.string "nickname"))
+        |> Decode.optional "role" (Decode.string "role") "guest"
+
+
+accountStr : Account -> String
+accountStr a =
+    String.fromInt a.id
+        ++ ":"
+        ++ a.name
+        ++ ":"
+        ++ Maybe.withDefault "-" a.nickname
+        ++ ":"
+        ++ a.role
+
+
+main =
+    Db.connect ()
+        |> Task.andThen
+            (\db ->
+                Db.execRaw db "DROP TABLE IF EXISTS accounts"
+                    |> Task.andThen (\_ -> Db.execRaw db "CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT, role TEXT)")
+                    |> Task.andThen (\_ -> Db.exec db "INSERT INTO accounts (id, name, nickname, role) VALUES (?, ?, ?, ?)" [ "1", "Alice", "ally", "admin" ])
+                    |> Task.andThen (\_ -> Db.execRaw db "INSERT INTO accounts (id, name, nickname, role) VALUES (2, 'Bob', NULL, NULL)")
+                    |> Task.andThen (\_ -> Db.queryDecode db "SELECT id, name, nickname, role FROM accounts ORDER BY id" [] accountDecoder)
+                    |> Task.andThen
+                        (\accounts ->
+                            println ("accounts=" ++ String.join "|" (List.map accountStr accounts))
+                        )
+            )
+        |> Task.andThen (\_ -> println "DBDEC2 PROBE OK")
+        |> Task.onError (\e -> println ("PROBE ERR: " ++ errorToString e))
+        |> Task.run

@@ -1,0 +1,16 @@
+name = "kernel-parity-probe-dbdec2"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+# Regression fixture for DbDec.nullable / required / optional on --target rust —
+# the {run, fields} Decoder redesign. Pipeline-builds a record decoder with a
+# nullable column (Just/Nothing) + an optional column (fallback on NULL), over
+# real SQLite.
+
+[source]
+root = "src"
+
+[database]
+driver = "sqlite"
+path = "dbdec2-probe.db"

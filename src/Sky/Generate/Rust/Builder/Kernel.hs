@@ -553,12 +553,23 @@ kernelToRust mod name = case (mod, name) of
     ("Std.Db.Decode", "float")    -> "db_dec_float"
     ("DbDec", "bool")             -> "db_dec_bool"
     ("Std.Db.Decode", "bool")     -> "db_dec_bool"
-    -- NOTE: DbDec.nullable / money / required / optional are intentionally
-    -- NOT routed yet — each has a real blocker (nullable needs the Decoder to
-    -- carry column metadata à la Go's d.cols; money needs an ADT codegen
-    -- wrapper; required/optional ride the json_dec_p_* pipeline, pending the
-    -- FnOnce/Clone wall). Left as honest go-only gaps; see
-    -- runtime-rust/docs/superpowers/specs/2026-06-16-dbdec-subsystem.md.
+    -- nullable / required / optional — unblocked by the {run, fields} Decoder
+    -- redesign (the decoder carries the object fields it reads, so nullable can
+    -- NULL-gate them; required/optional are applicative = field + and_map, no
+    -- FnOnce wall). money stays UNROUTED (needs the Money-ADT codegen wrapper).
+    ("DbDec", "nullable")         -> "db_dec_nullable"
+    ("Std.Db.Decode", "nullable") -> "db_dec_nullable"
+    -- required/optional are APPLICATIVE (db_dec_required = and_map(fieldDec,
+    -- accDec)) — NOT the json pipeline. In DbDec the column arg is doc-only (the
+    -- field decoder `int "age"` already reads its column), so json_dec_p_required
+    -- would DOUBLE-EXTRACT the field and break `nullable (string col)` nesting.
+    -- The succeed-ctor currying (curry4) — added to the curry detection for the
+    -- Db.Decode module — lets the uncurried record ctor satisfy and_map's
+    -- one-arg-at-a-time application.
+    ("DbDec", "required")         -> "db_dec_required"
+    ("Std.Db.Decode", "required") -> "db_dec_required"
+    ("DbDec", "optional")         -> "db_dec_optional"
+    ("Std.Db.Decode", "optional") -> "db_dec_optional"
     ("DbDec", "succeed")          -> "json_dec_succeed"
     ("Std.Db.Decode", "succeed")  -> "json_dec_succeed"
     ("DbDec", "fail")             -> "json_dec_fail"
