@@ -1,0 +1,3 @@
+[project]
+name = "usermod-kernel-collision"
+target = "rust"

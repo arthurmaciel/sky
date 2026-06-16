@@ -1,0 +1,25 @@
+module Auth exposing (hashPassword, verifyPassword)
+
+-- A USER module literally named `Auth`. Its `hashPassword` would lower to the
+-- Rust name `auth_hash_password` — IDENTICAL to the `Std.Auth` runtime kernel
+-- of the same name. Before the kernel-collision disambiguation, both reached
+-- the crate root via `pub use sky_runtime::*` + `pub use auth::*` → E0659
+-- ambiguous. This module ALSO calls the real `Std.Auth` kernel, so a correct
+-- fix must keep the user side (`user_auth_*`) AND the kernel side
+-- (`auth_hash_password`) both resolvable.
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Result as Result
+import Sky.Core.Error exposing (Error)
+import Std.Auth as StdAuth
+
+
+-- Wraps the Std.Auth kernel — exercises the colliding name AND the kernel call.
+hashPassword : String -> String
+hashPassword pw =
+    Result.withDefault "hash-failed" (StdAuth.hashPassword pw)
+
+
+verifyPassword : String -> String -> Bool
+verifyPassword pw stored =
+    Result.withDefault False (StdAuth.verifyPassword pw stored)

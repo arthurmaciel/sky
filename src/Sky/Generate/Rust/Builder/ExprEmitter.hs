@@ -2402,6 +2402,21 @@ taskExprInnerTypeCall solved (Ann.At _ (Can.VarKernel modName fnName)) args
             "getField" -> "String"
             "getString" -> "String"
             "getInt"   -> "i64"
+            -- Row-CRUD kernels have FIXED success types (the runtime fns are
+            -- `SkyTask<E, _>` — ONE generic param). Listing them here makes
+            -- taskExprInnerType non-empty so the `::<_, ()>` task-pin (which
+            -- assumes a 2-generic-param `<E, A>` shape) does NOT fire on them
+            -- — a stray `db_insert_row::<_, ()>` is E0107 against `<E>`.
+            "insertRow"       -> "i64"
+            "deleteById"      -> "i64"
+            "updateById"      -> "i64"
+            "insertFields"    -> "i64"
+            "updateFields"    -> "i64"
+            "getById"         -> "SkyMaybe<HashMap<String, String>>"
+            "findOneByField"  -> "SkyMaybe<HashMap<String, String>>"
+            "findManyByField" -> "Vec<HashMap<String, String>>"
+            "findByConditions" -> "Vec<HashMap<String, String>>"
+            "unsafeFindWhere" -> "Vec<HashMap<String, String>>"
             _ -> ""
         | "System" `isSuffixOf` modName || modName == "System" = case fnName of
             "args"        -> "Vec<String>"

@@ -1,0 +1,19 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+import Auth
+
+
+main =
+    let
+        hashed =
+            Auth.hashPassword "hunter2!"
+
+        ok =
+            Auth.verifyPassword "hunter2!" hashed
+    in
+        if ok then
+            println "auth roundtrip ok"
+        else
+            println "auth roundtrip failed"

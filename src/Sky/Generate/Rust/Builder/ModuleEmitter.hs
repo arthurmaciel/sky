@@ -27,7 +27,7 @@ import Sky.Generate.Rust.Builder.Types
     )
 import Sky.Generate.Rust.Builder.Naming
     ( toCamelCase, toSnakeCase, moduleNameToRust, rustSafeIdent, kernelCtorToRust
-    , anonStructName, rustFnName
+    , anonStructName, rustFnName, disambiguateUserFnName
     )
 import Sky.Generate.Rust.Builder.Kernel (kernelToRust, kernelSigPrefix, splitKernelName)
 import Sky.Generate.Rust.Builder.Pattern
@@ -1022,8 +1022,21 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
             let grouped = Map.fromListWith (++)
                     [ (toSnakeCase (mp ++ "_" ++ n), [(mp, n)]) | (mp, n) <- allDefNames ]
                 collisions = [ ks | ks <- Map.elems grouped, length ks >= 2 ]
-            in Map.fromList
-                [ ((mp, n), toSnakeCase mp ++ "_" ++ n) | ks <- collisions, (mp, n) <- ks ]
+                userVsUser = Map.fromList
+                    [ ((mp, n), toSnakeCase mp ++ "_" ++ n) | ks <- collisions, (mp, n) <- ks ]
+                -- A user module whose function lowers to a runtime-kernel name
+                -- (e.g. user `module Auth` → `auth_hash_password`, identical to
+                -- the `Std.Auth` kernel) is ambiguous at the crate root once both
+                -- glob re-exports land. Disambiguate the USER side with a `user_`
+                -- prefix; the kernel name is untouched, so every other example's
+                -- kernel calls stay byte-identical. Takes precedence over the
+                -- user-vs-user rename above (which could itself re-collide with
+                -- the kernel) on the rare double-collision.
+                kernelVsUser = Map.fromList
+                    [ ((mp, n), nn)
+                    | (mp, n) <- allDefNames
+                    , Just nn <- [disambiguateUserFnName mp n] ]
+            in Map.union kernelVsUser userVsUser
         existingTypes = concatMap (\m ->
             let skyModName = ModuleName._name (Can._name m)         -- "Std.Decimal" — un-mangled, for runtimeOpaqueTypes lookup
                 prefix     = moduleNameToRust (Can._name m)          -- "Std_Decimal" — mangled, for codegen names

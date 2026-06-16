@@ -6,10 +6,13 @@ module Sky.Generate.Rust.Builder.Naming
   , rustSafeIdent
   , kernelCtorToRust
   , rustFnName
+  , kernelModulePrefixes
+  , disambiguateUserFnName
   ) where
 
 import Data.Char (toLower, toUpper, isUpper)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Sky.Sky.ModuleName as ModuleName
 
 -- | The emitted Rust name for a Sky top-level function, consulting the
@@ -22,6 +25,48 @@ import qualified Sky.Sky.ModuleName as ModuleName
 rustFnName :: Map.Map (String, String) String -> String -> String -> String
 rustFnName renames modPrefix name =
     Map.findWithDefault (toSnakeCase (modPrefix ++ "_" ++ name)) (modPrefix, name) renames
+
+-- | The first snake-case segment of every runtime kernel function name —
+-- i.e. the short stdlib module names the runtime flattens into the crate
+-- root via `pub use sky_runtime::*`. A USER module that mangles to one of
+-- these prefixes (e.g. a project module literally named `Auth` →
+-- `auth_*`, or `Middleware` → `middleware_*`) collides at the crate root:
+-- the user `pub use <usermod>::*` and the kernel `pub use sky_runtime::*`
+-- both expose `auth_hash_password` → E0659 ambiguous. This is the Rust
+-- analogue of the Go backend's `reservedGoNames` rewriting.
+--
+-- MUST stay in sync with the kernel name-space in `Kernel.kernelToRust`
+-- and the runtime crate's `pub fn` exports: any segment that prefixes a
+-- runtime-exported function belongs here so a same-named user module is
+-- disambiguated. Over-inclusion is safe (it only renames user fns in a
+-- module whose short name matches); under-inclusion re-opens the E0659
+-- collision. Derived from the runtime's `pub fn <seg>_…` surface.
+kernelModulePrefixes :: Set.Set String
+kernelModulePrefixes = Set.fromList
+    [ "auth", "middleware", "list", "string", "dict", "set", "maybe"
+    , "result", "math", "char", "bytes", "regex", "crypto", "encoding"
+    , "json", "jwt", "uuid", "decimal", "money", "task", "cmd", "sub"
+    , "pubsub", "time", "random", "http", "file", "io", "system", "process"
+    , "db", "log", "trace", "server", "rate", "cache", "email", "compression"
+    , "csv", "config", "ffi", "live", "html", "element", "console", "hub"
+    , "api", "basics", "path", "webview", "ws", "websocket", "cli"
+    , "base64", "url", "decode", "encode", "render"
+    ]
+
+-- | Disambiguate a user-module function whose default Rust name would
+-- collide with a runtime kernel name. Returns `Just newName` when the
+-- default lowering's first snake-segment matches a `kernelModulePrefixes`
+-- entry; the new name is `user_` + the default, which can't collide with
+-- any kernel (no kernel starts with `user_`) and stays per-module-unique
+-- because the default already embeds the user module prefix. Returns
+-- `Nothing` for non-colliding user modules so their output is unchanged.
+disambiguateUserFnName :: String -> String -> Maybe String
+disambiguateUserFnName modPrefix name =
+    let def = toSnakeCase (modPrefix ++ "_" ++ name)
+        firstSeg = takeWhile (/= '_') def
+    in if Set.member firstSeg kernelModulePrefixes
+       then Just ("user_" ++ def)
+       else Nothing
 
 -- | Convert Sky module-prefixed names to Rust conventions:
 --   Types:     Sky_Core_Error_Error  →  SkyCoreErrorError     (CamelCase)
