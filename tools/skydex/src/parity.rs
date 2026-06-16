@@ -34,6 +34,21 @@ fn re_route_go() -> &'static Regex {
 /// Conventional Rust kernel-fn name for a `Mod.fn` kernel: snake_case the dotted
 /// name (`Dict.union` -> `dict_union`). Mirrors the Rust Builder Kernel.hs naming
 /// so a Go-only route reconciles as a real gap (absent from rust_fns).
+/// A few kernels are reached via an ExprEmitter PEEPHOLE rewriter, so their
+/// runtime fn name differs from the conventional `mod_fn` snake-case AND isn't in
+/// the Kernel.hs route table. Map those explicitly so parity stays honest — else
+/// they read as a phantom `go-only` gap even though they're fully implemented.
+fn peephole_alias_present(kernel: &str, rust_fns: &HashSet<String>) -> bool {
+    let alias = match kernel {
+        // Sub.subscribeWebSocket lowers via the ExprEmitter.hs peephole, which
+        // splits on the literal kind into ws_client::sub_subscribe_ws_{message,
+        // open,close,error}. Presence of the message variant proves it's wired.
+        "Sub.subscribeWebSocket" => Some("sub_subscribe_ws_message"),
+        _ => None,
+    };
+    alias.is_some_and(|a| rust_fns.contains(a))
+}
+
 fn conventional_rust_fn(kernel: &str) -> String {
     let mut out = String::with_capacity(kernel.len() + 4);
     for ch in kernel.chars() {
@@ -132,7 +147,8 @@ pub fn reconcile_with_locs(
 ) -> Vec<Kernel> {
     routes.iter().map(|(rust_fn, ri)| {
         let go = go_fns.contains(&go_name(&ri.kernel_name));
-        let rust = rust_fns.contains(rust_fn);
+        let rust = rust_fns.contains(rust_fn)
+            || peephole_alias_present(&ri.kernel_name, rust_fns);
         // The Ffi.kernel name used in sky-stdlib is the Go-convention `Mod_fn` form.
         let sky_decl = sky_kernel_decls.contains(&ri.kernel_name.replace('.', "_"));
         let parity = match (go, rust) {
