@@ -44,10 +44,9 @@ echo "  ✅ No Go artifacts detected"
 
 echo ""
 echo "=== 6. All-example --target rust sweep (scoreboard) ==="
-runtime-rust/scripts/rust-sweep.sh | tee /tmp/rust-sweep.txt
-if grep -vE 'out-of-scope' /tmp/rust-sweep.txt | grep -qE 'sky-CRASH|cargo-fails|sky-build-fails'; then
-    echo "  ⚠ sweep shows in-scope failures — see /tmp/rust-sweep.txt"
-fi
+# build-sweep.sh bins every in-scope example (build_set) + prints a PASS/FAIL
+# verdict; a non-zero exit means in-scope build failures (we surface, don't abort).
+runtime-rust/scripts/build-sweep.sh || echo "  ⚠ sweep shows in-scope failures — see the scoreboard path above"
 
 echo ""
 echo "=== All checks passed ==="

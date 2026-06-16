@@ -5,14 +5,23 @@
 # DERIVED, NOT HARDCODED. There are no static example arrays here: every set is
 # computed at call time from the example dirs on disk + their Sky source. When
 # sync-with-upstream lands new examples they are picked up automatically — the
-# ONLY thing that excludes an example is Go-FFI (a `[go.dependencies]` section in
-# its sky.toml), because the Rust backend does not bind Go packages. Everything
-# else is IN SCOPE: a greenfield example that has never built on Rust SURFACES as
-# a real failure rather than being silently filtered out (user decision).
+# ONLY thing that excludes an example is Go-FFI, because the Rust backend does not
+# bind Go packages. Everything else is IN SCOPE: a greenfield example that has
+# never built on Rust SURFACES as a real failure rather than being silently
+# filtered out (user decision).
+#
+# THE GO-FFI SIGNAL IS THE IMPORT, NOT `[go.dependencies]`. A `[go.dependencies]`
+# section over-excludes: examples whose go-deps are STDLIB-TRANSITIVE from a Sky
+# stdlib module (07-todo-cli pulls os/log/slog via Std.Db/Std.Log; 16-skychess /
+# 17-skymon pull crypto/sha256 via Sky.Core.Crypto; 02-go-stdlib pulls
+# net/http+time+crypto/sha256 via Sky.Core.Http/Time/Crypto) BUILD FINE on Rust —
+# `--target rust` ignores `[go.dependencies]` entirely. The real Go-FFI tell is a
+# Sky `import` of a Go-PACKAGE module — one that resolves to neither a Sky stdlib
+# module nor a local project `.sky` file (`Github.Com.…`, `Net.Http`, `Fyne.…`).
 #
 # Provides (all FUNCTIONS — call them, don't read arrays):
 #   all_examples            → every candidate example dir, one per line (no trailing /).
-#   is_out_of_scope <dir>   → exit 0 IFF Go-FFI (sky.toml has [go.dependencies]).
+#   is_out_of_scope <dir>   → exit 0 IFF Go-FFI (imports an unresolvable Go-pkg module).
 #   is_web_example  <dir>   → exit 0 IFF Sky.Live / Sky.Http.Server (browser-drivable).
 #   example_shape   <dir>   → tui|webview|fyne|server|live|cli
 #   build_set               → all_examples − Go-FFI (the BUILD sweep set).
@@ -35,14 +44,46 @@ all_examples() {
   done
 }
 
-# ── is_out_of_scope <dir>: the ONLY exclusion is Go-FFI ──────────────────────
-# Return 0 (exclude) IFF the example's sky.toml declares a Go-package dependency
-# section. Matches both bare `[go.dependencies]` and quoted `["go.dependencies"]`.
-# Nothing else is excluded — greenfield gaps are real failures, not exclusions.
+# ── is_out_of_scope <dir>: the ONLY exclusion is Go-FFI (IMPORT signal) ──────
+# Return 0 (exclude) IFF the example imports a Go-PACKAGE module: a Sky `import`
+# whose module name resolves to NEITHER a Sky stdlib module NOR a local project
+# `.sky` file. `[go.dependencies]` in sky.toml is NOT consulted — it over-excludes
+# (stdlib-transitive deps like os/crypto/sha256 carry a [go.dependencies] but
+# build fine on Rust). The recursive `.sky` walk is load-bearing: 08-notes-app /
+# 13-skyshop hide their `Github.Com.…`/`Net.Http`/`Fyne.…` imports inside Lib.*
+# submodules, not Main.sky.
+#
+# Module-name resolution (every `import X` / `import X as Y` / `import X exposing
+# (..)` — rg captures the dotted name only):
+#   • prefix Sky. / Std.                  → Sky stdlib       → IN scope
+#   • prefix Rust.                         → Rust-FFI wrapper crate (from
+#       [rust.dependencies], e.g. `Rust.Sky_firestore_shim`) → IN scope. This is
+#       the WHOLE POINT of the Rust backend — never a Go package; keeps
+#       examples/rust/skyshop-rs in scope.
+#   • dotted name suffix-matches a sky-stdlib/**/<X>.sky      → IN scope
+#       (bare/partial stdlib imports: `import System` → Sky.Core.System,
+#        `import Server` → Sky.Http.Server, `import Head` → Std.Live.Head)
+#   • dotted name resolves to a `.sky` anywhere under the project → IN (local mod)
+#   • otherwise (`Github.Com.Google.Uuid`, `Net.Http`, `Fyne.…`) → Go-FFI → OUT
+#
+# rg flag care: `--no-filename`/`-I` suppresses filenames (`-h` is rg's --help,
+# NOT no-filename). `-N`/`--no-line-number` + `-o`/`--only-matching` + `-r`/
+# `--replace` capture just the module name. rg recurses by default; we drive the
+# file list via `find … -exec rg … +` so the walk covers every `.sky` under src/.
 is_out_of_scope() {
-  local toml="$1/sky.toml"
-  [ -f "$toml" ] || return 1
-  rg -q '^\["?go\.dependencies' "$toml" 2>/dev/null
+  local dir="$1" m rel
+  while read -r m; do
+    [ -z "$m" ] && continue
+    case "$m" in Sky.*|Std.*|Rust.*) continue ;; esac # Sky stdlib / Rust-FFI wrapper → in scope
+    rel="${m//.//}"
+    # Sky stdlib imported by a bare/partial name (suffix-match in sky-stdlib).
+    if find sky-stdlib -type f -path "*/${rel}.sky" 2>/dev/null | grep -q .; then continue; fi
+    # Local module → a `.sky` for it exists somewhere under the project.
+    if find "$dir" -type f -path "*/${rel}.sky" 2>/dev/null | grep -q .; then continue; fi
+    return 0                                          # unresolvable → Go-package → OUT
+  done < <(find "$dir/src" -type f -name '*.sky' -exec \
+             rg --no-filename -No '^[[:space:]]*import[[:space:]]+([A-Za-z0-9_.]+)' -r '$1' {} + 2>/dev/null)
+  return 1                                            # every import resolved → in scope
 }
 
 # ── is_web_example <dir>: Sky.Live OR Sky.Http.Server (browser-drivable) ─────
@@ -75,7 +116,7 @@ example_shape() {
   else echo cli; fi
 }
 
-# ── build_set: all_examples minus Go-FFI ─────────────────────────────────────
+# ── build_set: all_examples minus Go-FFI (unresolvable-import examples) ──────
 build_set() {
   local d
   while IFS= read -r d; do

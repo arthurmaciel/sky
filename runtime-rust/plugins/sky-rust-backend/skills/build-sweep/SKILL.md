@@ -6,11 +6,12 @@ description: Run the Sky Rust-backend BUILD sweep — `sky build --target rust` 
 # build-sweep
 
 The **build** phase of Rust-backend verification (run / web / perf are sibling
-skills). One **deterministic** script wraps the repo's `runtime-rust/scripts/rust-sweep.sh`
-(largest set: `examples/[0-9]*` + `simple` + `test_pkg`) with the env gotchas
-and a clean in-scope-failure report. **Do NOT re-decide the steps each time** —
-the only judgement call is afterward: if a run reveals a better way, edit
-`runtime-rust/scripts/build-sweep.sh` (or `runtime-rust/scripts/rust-sweep.sh`).
+skills). One **deterministic** script — `runtime-rust/scripts/build-sweep.sh` —
+bins the largest in-scope set (`build_set` from `lib/examples.sh`: every
+candidate example minus Go-FFI) with the env gotchas and a clean
+in-scope-failure report. **Do NOT re-decide the steps each time** — the only
+judgement call is afterward: if a run reveals a better way, edit
+`runtime-rust/scripts/build-sweep.sh`.
 
 Build-level only and machine-load-insensitive → **no close-the-apps reminder**.
 
@@ -32,12 +33,15 @@ Build-level only and machine-load-insensitive → **no close-the-apps reminder**
 
 ## What it does
 
-- `SKY_CONSOLE_PREBUILD=off runtime-rust/scripts/rust-sweep.sh` — every `examples/[0-9]*` +
-  `simple` + `test_pkg` gets `sky build --target rust` then `cargo build`; binned
-  `builds` / `sky-build-fails` / `cargo-fails` / `sky-CRASH`, `(out-of-scope)`
-  appended for documented exclusions.
-- The verdict counts **in-scope** failures only (a fail line NOT tagged
-  `(out-of-scope)`).
+- `SKY_CONSOLE_PREBUILD=off` over `build_set` — every in-scope example (every
+  candidate dir minus Go-FFI) gets `sky build --target rust` then `cargo build`;
+  binned `builds` / `sky-build-fails` / `cargo-fails` / `sky-CRASH`.
+- Go-FFI examples are ABSENT from `build_set` (not tagged), so EVERY scoreboard
+  line is in scope — the verdict fails on any `…fails` / `…CRASH` result.
+- Go-FFI exclusion uses the IMPORT signal (an `import` of an unresolvable
+  Go-package module), NOT `[go.dependencies]` — see `lib/examples.sh`
+  `is_out_of_scope`. So stdlib-transitive go-deps (07-todo-cli, 16/17, 02) stay
+  IN; only true Go-package importers (03/05/08/11/13) are excluded.
 
 ## Baked-in gotchas
 

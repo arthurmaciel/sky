@@ -35,7 +35,7 @@ mkdir -p "$CARGO_TARGET_DIR"
 # Honour an explicit SKY_REPO; else detect via the runner-script anchor (works
 # whether sourced from $PWD or a known checkout). Don't cd — that's the caller's.
 REPO="${SKY_REPO:-${REPO:-}}"
-[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/lib/examples.sh" ] && REPO="$PWD"
+[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/lib/examples.sh" ] && REPO="$HOME/Documentos/comp/sky"
 export REPO
 export SKY_BIN="${SKY_BIN:-$REPO/sky-out/sky}"
