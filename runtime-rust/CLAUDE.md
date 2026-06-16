@@ -66,7 +66,7 @@ Generated `Cargo.toml [profile.dev]` already drops debuginfo (`debug = 0`,
 the generated project is fine for Cargo's own incremental tracker; the
 `CARGO_INCREMENTAL=0` env var overrides it at the process level so sccache
 can cache. Sweep via
-`SKY_BIN=$(cabal list-bin exe:sky) ./scripts/rust-sweep.sh` (~570s on warm sccache).
+`SKY_BIN=$(cabal list-bin exe:sky) ./runtime-rust/scripts/rust-sweep.sh` (~570s on warm sccache).
 
 ### `sky check` does NOT support `--target rust`
 

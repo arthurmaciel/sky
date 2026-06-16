@@ -39,7 +39,7 @@ reveal a way to improve the script? If yes, edit
 
 ## What it does
 
-- `SKY_CONSOLE_EMBED=off scripts/rust-perf.sh` over the both-backend
+- `SKY_CONSOLE_EMBED=off runtime-rust/scripts/rust-perf.sh` over the both-backend
   perf-runnable set (~24 cli/server/live). Excluded: tui/webview/fyne
   (need TTY/window), console/multi-tier 25/34, Go-FFI-02. `rust-perf.sh`
   self-skips (exit 3) anything a backend can't build; each call is
@@ -69,8 +69,8 @@ reveal a way to improve the script? If yes, edit
   `CARGO_TARGET_DIR=$HOME/.cache/sky-rust-target`; `SKY_CONSOLE_EMBED=off`.
 - `RUST_PERF_QUICK=1` → 3-shape representative; `RUST_PERF="a b c"` override.
 - First run records the baseline; the regression report appears from the 2nd run.
-- If `scripts/rust-perf.thresholds` are stale after legitimate runtime growth,
-  surface a deliberate `scripts/rust-perf.sh --baseline` refresh — don't
+- If `runtime-rust/scripts/rust-perf.thresholds` are stale after legitimate runtime growth,
+  surface a deliberate `runtime-rust/scripts/rust-perf.sh --baseline` refresh — don't
   auto-refresh.
 
 ## Capture learnings (self-improving loop)

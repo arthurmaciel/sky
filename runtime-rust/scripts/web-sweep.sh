@@ -15,8 +15,8 @@ set -uo pipefail
 
 # ── Resolve the repo ───────────────────────────────────────────────────────
 REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
+[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
 if [ -z "$REPO" ] || [ ! -d "$REPO/examples" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi

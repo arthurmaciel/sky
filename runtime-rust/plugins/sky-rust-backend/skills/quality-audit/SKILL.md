@@ -6,7 +6,7 @@ description: Deep Rust soundness / security / efficiency / readability audit of 
 # quality-audit
 
 The deep, **interactive, sign-off-driven** soundness/quality pass over the Rust
-runtime — beyond the per-commit clippy gate (`scripts/verify-rust-target.sh`).
+runtime — beyond the per-commit clippy gate (`runtime-rust/scripts/verify-rust-target.sh`).
 The standard is `runtime-rust/CLAUDE.md` **"NO RUNTIME ERRORS — existential"**.
 Every *material* finding ends in an **attributed, dated developer decision** in
 the README **"Soundness, correctness and security problems"** ledger — nothing is

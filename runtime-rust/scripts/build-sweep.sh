@@ -4,18 +4,18 @@
 # skills (/run-sweep, /perf-sweep).
 #
 # This script IS the procedure (the /build-sweep skill). Wraps the repo's
-# scripts/rust-sweep.sh (which already bins the largest set: examples/[0-9]* +
+# runtime-rust/scripts/rust-sweep.sh (which already bins the largest set: examples/[0-9]* +
 # simple + test_pkg) with the env gotchas + a clean failure report. If a run
-# reveals a better way, IMPROVE THIS SCRIPT (or scripts/rust-sweep.sh).
+# reveals a better way, IMPROVE THIS SCRIPT (or runtime-rust/scripts/rust-sweep.sh).
 #
 # Exit: 0 = all in-scope build · 1 = in-scope build failure · 2 = setup error.
 set -uo pipefail
 
 # ── Resolve the repo ───────────────────────────────────────────────────────
 REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
-if [ -z "$REPO" ] || [ ! -f "$REPO/scripts/rust-sweep.sh" ]; then
+[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
+[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+if [ -z "$REPO" ] || [ ! -f "$REPO/runtime-rust/scripts/rust-sweep.sh" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi
 cd "$REPO"
@@ -43,8 +43,8 @@ for p in sky-app app sky-console; do pkill -x "$p" 2>/dev/null; done
 sync
 
 # ── Run the sweep ──────────────────────────────────────────────────────────
-say ""; say ">>> BUILD SWEEP  (SKY_CONSOLE_PREBUILD=off; scripts/rust-sweep.sh)"
-bash scripts/rust-sweep.sh > "$LOG" 2>&1
+say ""; say ">>> BUILD SWEEP  (SKY_CONSOLE_PREBUILD=off; runtime-rust/scripts/rust-sweep.sh)"
+bash runtime-rust/scripts/rust-sweep.sh > "$LOG" 2>&1
 BUILT="$(grep -c 'builds' "$LOG" 2>/dev/null || echo 0)"
 # In-scope failures = a result line that is NOT 'builds' and NOT '(out-of-scope)'.
 IN_SCOPE_FAILS="$(grep -vE 'out-of-scope|builds$|^EXAMPLE|^---' "$LOG" 2>/dev/null | grep -E 'fails|CRASH' || true)"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sky Rust-runtime QUALITY / SOUNDNESS audit — the deterministic harvester behind
 # sky-rust-backend:quality-audit. Goes BEYOND the per-commit clippy gate
-# (scripts/verify-rust-target.sh) to surface, for human/agent triage, every:
+# (runtime-rust/scripts/verify-rust-target.sh) to surface, for human/agent triage, every:
 #   • panic vector (unwrap/expect/panic!/unreachable!/todo!/unimplemented!)
 #   • unsafe block (+ whether it carries a // SAFETY: doc)
 #   • `dyn Any` / downcast / transmute / std::any site (the no-Any policy)
@@ -18,8 +18,8 @@
 set -uo pipefail
 
 REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/scripts/rust-sweep.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
+[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$PWD"
+[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-sweep.sh" ] && REPO="$HOME/Documentos/comp/sky"
 [ -n "$REPO" ] && cd "$REPO" || { echo "ERROR: run from the Sky repo (or set SKY_REPO)." >&2; exit 2; }
 
 CRATE="${1:-runtime-rust}"

@@ -14,9 +14,9 @@ set -uo pipefail
 
 # ── Resolve the repo ───────────────────────────────────────────────────────
 REPO="${SKY_REPO:-}"
-[ -z "$REPO" ] && [ -f "$PWD/scripts/rust-perf.sh" ] && REPO="$PWD"
-[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/scripts/rust-perf.sh" ] && REPO="$HOME/Documentos/comp/sky"
-if [ -z "$REPO" ] || [ ! -f "$REPO/scripts/rust-perf.sh" ]; then
+[ -z "$REPO" ] && [ -f "$PWD/runtime-rust/scripts/rust-perf.sh" ] && REPO="$PWD"
+[ -z "$REPO" ] && [ -f "$HOME/Documentos/comp/sky/runtime-rust/scripts/rust-perf.sh" ] && REPO="$HOME/Documentos/comp/sky"
+if [ -z "$REPO" ] || [ ! -f "$REPO/runtime-rust/scripts/rust-perf.sh" ]; then
   echo "ERROR: can't locate the Sky repo. cd into it, or set SKY_REPO=/path/to/sky." >&2; exit 2
 fi
 cd "$REPO"
@@ -69,7 +69,7 @@ say ""; say ">>> PERF SWEEP  (SKY_CONSOLE_EMBED=off; ${#EXAMPLES[@]} examples)"
 for ex in "${EXAMPLES[@]}"; do
   [ -f "examples/$ex/src/Main.sky" ] || { SKIPPED="$SKIPPED $ex(absent)"; continue; }
   say "  -- $ex --"
-  OUT="$(SKY_CONSOLE_EMBED=off timeout --kill-after=30 600 bash scripts/rust-perf.sh "$ex" 2>&1)"; rc=$?
+  OUT="$(SKY_CONSOLE_EMBED=off timeout --kill-after=30 600 bash runtime-rust/scripts/rust-perf.sh "$ex" 2>&1)"; rc=$?
   reap
   printf '%s\n' "$OUT" >> "$LOG"
   N="$(printf '%s\n' "$OUT" | grep -E '^[[:space:]]+(rss|coldstart|binsize|throughput|live_warm|live_event|sse_eps|ws_eps|broadcast)[[:space:]]' | tee -a "$LOG" | \

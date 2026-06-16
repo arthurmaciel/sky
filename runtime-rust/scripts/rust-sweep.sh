@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # All-example --target rust sweep. Bins every examples/[0-9]* (+ simple,
 # test_pkg) by how far the Rust backend gets. Build-level only; run-level
-# equivalence lives in scripts/rust-equiv.sh.
+# equivalence lives in runtime-rust/scripts/rust-equiv.sh.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 SKY="${SKY_BIN:-$PWD/sky-out/sky}"
 [ -x "$SKY" ] || { echo "ERROR: sky binary not at $SKY (build: cabal install … exe:sky)"; exit 1; }
 

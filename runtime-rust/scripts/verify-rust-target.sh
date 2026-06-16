@@ -3,7 +3,7 @@
 # Runs cargo check, clippy, tests, and the six green examples.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 SKY_BIN="${SKY_BIN:-./sky-out/sky}"
 
 if [ ! -x "$SKY_BIN" ]; then
@@ -44,7 +44,7 @@ echo "  ✅ No Go artifacts detected"
 
 echo ""
 echo "=== 6. All-example --target rust sweep (scoreboard) ==="
-scripts/rust-sweep.sh | tee /tmp/rust-sweep.txt
+runtime-rust/scripts/rust-sweep.sh | tee /tmp/rust-sweep.txt
 if grep -vE 'out-of-scope' /tmp/rust-sweep.txt | grep -qE 'sky-CRASH|cargo-fails|sky-build-fails'; then
     echo "  ⚠ sweep shows in-scope failures — see /tmp/rust-sweep.txt"
 fi

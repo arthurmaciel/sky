@@ -6,11 +6,11 @@ description: Run the Sky Rust-backend BUILD sweep — `sky build --target rust` 
 # build-sweep
 
 The **build** phase of Rust-backend verification (run / web / perf are sibling
-skills). One **deterministic** script wraps the repo's `scripts/rust-sweep.sh`
+skills). One **deterministic** script wraps the repo's `runtime-rust/scripts/rust-sweep.sh`
 (largest set: `examples/[0-9]*` + `simple` + `test_pkg`) with the env gotchas
 and a clean in-scope-failure report. **Do NOT re-decide the steps each time** —
 the only judgement call is afterward: if a run reveals a better way, edit
-`runtime-rust/scripts/build-sweep.sh` (or `scripts/rust-sweep.sh`).
+`runtime-rust/scripts/build-sweep.sh` (or `runtime-rust/scripts/rust-sweep.sh`).
 
 Build-level only and machine-load-insensitive → **no close-the-apps reminder**.
 
@@ -32,7 +32,7 @@ Build-level only and machine-load-insensitive → **no close-the-apps reminder**
 
 ## What it does
 
-- `SKY_CONSOLE_PREBUILD=off scripts/rust-sweep.sh` — every `examples/[0-9]*` +
+- `SKY_CONSOLE_PREBUILD=off runtime-rust/scripts/rust-sweep.sh` — every `examples/[0-9]*` +
   `simple` + `test_pkg` gets `sky build --target rust` then `cargo build`; binned
   `builds` / `sky-build-fails` / `cargo-fails` / `sky-CRASH`, `(out-of-scope)`
   appended for documented exclusions.

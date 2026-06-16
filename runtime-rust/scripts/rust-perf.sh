@@ -9,12 +9,12 @@ set -uo pipefail
 # substitution (BASH_SOURCE[0] is /proc/self/fd/N — cd fails gracefully and we
 # fall back to $PWD, so the caller must `cd <repo-root>` before sourcing).
 _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P || echo "$PWD")"
-REPO_ROOT="${_script_dir%/scripts}"
+REPO_ROOT="${_script_dir%/runtime-rust/scripts}"
 [ "$REPO_ROOT" = "$_script_dir" ] && REPO_ROOT="$PWD"   # fallback: no /scripts suffix stripped
 # cd to repo root so direct invocations work with relative paths.
 cd "$REPO_ROOT"
 SKY="${SKY_BIN:-$REPO_ROOT/sky-out/sky}"
-THRESH="$REPO_ROOT/scripts/rust-perf.thresholds"
+THRESH="$REPO_ROOT/runtime-rust/scripts/rust-perf.thresholds"
 # Load knobs are env-overridable so a fast CI / smoke run can dial them down
 # (the gate ratios are CV-padded, so a lighter AB_N only widens throughput's
 # noise band, not its verdict). AB_TIMEOUT_S hard-bounds every `ab` invocation:

@@ -10,10 +10,10 @@
 #       --target go output. Used by S2+ to prove new-capability equivalence
 #       against the Go production backend.
 #
-# Usage: scripts/rust-equiv.sh <example-name>
+# Usage: runtime-rust/scripts/rust-equiv.sh <example-name>
 # Exit: 0 equivalent · 1 regression · 3 out-of-scope (ref can't build it)
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 EX="$1"
 WIP="${SKY_WIP:-$PWD/sky-out/sky}"
 REF_TARGET="${SKY_REF_TARGET:-monolith}"

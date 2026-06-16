@@ -698,28 +698,28 @@ session init (Go parity), so a watch-only session is subscribed from load.
 `27-multi-session-chat` stays blocked only on the unrelated `Db.getString`-on-
 `any`/Dict-row codegen gap, not on pub/sub.
 
-### Rust-vs-Go perf gate (`scripts/rust-perf.sh`)
+### Rust-vs-Go perf gate (`runtime-rust/scripts/rust-perf.sh`)
 
 The perf harness benchmarks both backends of any example across all three
 app shapes — **cli**, **server**, **live** — on cold-start, throughput (`ab`),
 peak RSS under load, and binary size, gating the Rust/Go ratio against the
-committed envelope in `scripts/rust-perf.thresholds`. It discovers the bound
+committed envelope in `runtime-rust/scripts/rust-perf.thresholds`. It discovers the bound
 port from the spawned process (no env dictation), `timeout`-bounds every probe,
 and tolerates measurement noise (re-roll on fail; SKIP a missing reference).
 
 ```bash
-scripts/rust-perf.sh 01-hello-world        # gate one example (shape auto-detected)
-scripts/rust-perf.sh --baseline            # re-derive thresholds over the triplet
+runtime-rust/scripts/rust-perf.sh 01-hello-world        # gate one example (shape auto-detected)
+runtime-rust/scripts/rust-perf.sh --baseline            # re-derive thresholds over the triplet
 ```
 
-Committed envelope (`scripts/rust-perf.thresholds`, Rust as a fraction of Go;
+Committed envelope (`runtime-rust/scripts/rust-perf.thresholds`, Rust as a fraction of Go;
 lower is better except throughput): binary size **≤ 2%**, RSS **≤ 15–19%** by
 shape, CLI cold-start **≤ 20%**, throughput **≥ 88%**. The `live.rss` envelope +
 the SSE patch-latency leg are pending a re-baseline on a quiet (non-swapping) host.
 
 ### Top-level `examples/[0-9]*` on `--target rust`
 
-Build-level via `scripts/rust-sweep.sh` (32/32 in-scope examples build) — covering
+Build-level via `runtime-rust/scripts/rust-sweep.sh` (32/32 in-scope examples build) — covering
 CLI, FFI, `Std.Db`/`Auth`/`Config`, Sky.Http.Server, Sky.Live, Sky.Tui,
 Sky.Webview, and the multibackend entry model (`24-tui-kitchen-sink`).
 
