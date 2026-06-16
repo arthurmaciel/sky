@@ -590,7 +590,34 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
                 | Just (Can.TType _ "Html" _) <- stdUiAnyCarrier (moduleNameToRust m) n
                 , Just msgTy <- ecAppMsg ctx
                 -> Just (Can.TType (ModuleName.Canonical "Std.Html") "Html" [msgTy])
+            -- Direct `Std.Html` constructor in the tail (`view _ = Html.node …`):
+            -- the callee produces `Html msg` itself (no Std.Ui entry wrapping it),
+            -- so a `-> any` view returning it would compile to a generic `<any>`
+            -- whose body is a concrete `Html<_>` (E0308). Pin `any` → `Html<msg>`
+            -- from the app's known Msg. Covers the Sky.Webview/Live raw-Html view
+            -- shape (example 29). Module-gated to Std.Html so no blast radius.
+            Ann.At region (Can.Call (Ann.At _ (Can.VarTopLevel m n)) _)
+                | ModuleName._name m == "Std.Html"
+                , Just msgTy <- ecAppMsg ctx
+                , htmlResultRegion region n
+                -> Just (Can.TType (ModuleName.Canonical "Std.Html") "Html" [msgTy])
             _ -> Nothing
+        -- The solver pins the body's region to its concrete type. Confirm it's
+        -- actually `Html …` before substituting (a non-Html `Std.Html` helper —
+        -- e.g. `toString : Html msg -> String` — must not be coerced to Html).
+        htmlResultRegion region n = case Map.lookup region (ecRegionTypes ctx) of
+            Just (Can.TType _ "Html" _) -> True
+            -- The solver leaves the call's region a bare TVar when only the
+            -- `Html msg`'s `msg` slot is unresolved (the `c` in `Html c`); that
+            -- is exactly the view-returns-Html shape we want to pin. A concrete
+            -- NON-Html type (e.g. `String` from `Html.toString`) rejects.
+            Just (Can.TVar _)           -> n `notElem` htmlStringHelpers
+            Just _                      -> False
+            -- Region not recorded (cross-module / alias): fall back to the callee
+            -- name — every node-producing Std.Html ctor returns `Html msg`; the
+            -- String-shaped helpers are the only exclusions.
+            Nothing                     -> n `notElem` htmlStringHelpers
+        htmlStringHelpers = ["toString", "toStringIndent"]
         applyAny ty = case stdUiAnyCarrier _modPrefix name of
                           Just c  -> substTVarAny c ty
                           Nothing -> case bodyAnyCarrier of
@@ -662,11 +689,23 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
                   else "<" ++ intercalate ", " (map genBound tvarNames) ++ ">"
         multiBody = collectVarLocalsMulti body
         multiVars = [ v | (v, c) <- Map.toList multiBody, c >= 2 ]
+        -- Seed the body's solved-type env with this function's OWN parameter
+        -- types. `solveArgType` resolves a bare `VarLocal` by env lookup; a
+        -- function parameter is local (never in the flat `_stEnv`), so without
+        -- this it defaulted to "String" — making a polymorphic `++` over two
+        -- `List (Attribute msg)` params (`extraAttrs ++ attrs` in Std.Ui's
+        -- renderNodeAs) mis-emit `format!` (string concat) instead of a Vec
+        -- extend (E0277/E0308). The annotation already gives us each param's
+        -- concrete type; only simple `PVar` binders are mapped (compound
+        -- patterns don't name a single value to type-direct on).
+        paramTypeEnv = Map.fromList
+            [ (pn, ty) | (Ann.At _ (Can.PVar pn), ty) <- pats ]
         ctx' = ctx { ecCloneVars = Set.fromList multiVars, ecCopyVars = ecCopyVars ctx
                    , ecInGenericFn = not (null tvarNames)  -- Sub-A.13
                    , ecClosureDefs = collectClosureDefs body
                    , ecReturnElem = taskElemOf ret
                    , ecEnclosingRet = Just retTy
+                   , ecSolvedTypes = Map.union paramTypeEnv (ecSolvedTypes ctx)
                    , ecGenParams = tvarNames }
         -- NARROW task-wrap: an annotated `() -> Task Error X` whose body resolves
         -- to a kernel that is STRING-shaped in the Rust runtime but Task-shaped in

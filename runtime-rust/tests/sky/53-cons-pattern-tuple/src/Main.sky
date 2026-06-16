@@ -1,0 +1,72 @@
+module Main exposing (main)
+
+-- Regression (E0529 + E0277 + E0308): a `case` over a TUPLE of two lists matched
+-- with cons-patterns in each position:
+--
+--     case ( offsets, flags ) of
+--         ( i :: ix, b :: bs ) -> …
+--         _ -> …
+--
+-- A Rust slice pattern (`[i, ix @ ..]`) only matches a slice (`&[T]`), never an
+-- owned `Vec<T>`. The pre-fix codegen only `.as_slice()`-wrapped a TOP-LEVEL
+-- cons scrutinee and only injected the head/tail owning prelude
+-- (`let i = i.clone(); let ix = ix.to_vec();`) for a top-level `PCons`/`PList`.
+-- A cons pattern NESTED inside a tuple got neither:
+--   * E0529 — the slice pattern matched against the raw `Vec` tuple element.
+--   * E0277/E0308 — once wrapped, the head/tail binders are `&T` / `&[T]`
+--     references; without the owning prelude they leaked into the body
+--     (`acc ++ [(.., b)]` needs an owned `bool`, the recursive call needs an
+--     owned `Vec`).
+--
+-- The fix wraps EACH cons-bearing tuple ELEMENT with `.as_slice()` (never the
+-- whole tuple) and walks the pattern recursively to emit the owning prelude for
+-- every nested head/tail binder. Mirrors examples/38's State.seedHistoryHelp.
+--
+-- Pre-fix: `cargo build` FAILS (E0529/E0277/E0308). Post-fix: builds + runs,
+-- prints the zipped pairs.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Std.Log exposing (println)
+
+
+-- Walk two lists in lockstep via a tuple-of-cons-patterns match, pairing each
+-- head element and accumulating. The `b` head (a Bool) and the `ix` / `bs`
+-- tails (Lists) must all be OWNED in the body (the tuple ctor + recursive call).
+zipHelp : Int -> List Int -> List Bool -> List ( Int, Bool ) -> List ( Int, Bool )
+zipHelp base offsets flags acc =
+    case ( offsets, flags ) of
+
+        ( i :: ix, b :: bs ) ->
+            zipHelp base ix bs (acc ++ [ ( base + i, b ) ])
+
+        _ ->
+            acc
+
+
+seed : List ( Int, Bool )
+seed =
+    zipHelp 100 [ 0, 1, 2 ] [ True, False, True ] []
+
+
+render : List ( Int, Bool ) -> String
+render pairs =
+    case pairs of
+
+        ( n, flag ) :: rest ->
+            String.fromInt n
+                ++ "="
+                ++ (if flag then "T" else "F")
+                ++ " "
+                ++ render rest
+
+        [] ->
+            ""
+
+
+main : Task Error ()
+main =
+    let
+        _ = println (render seed)
+    in
+        Task.succeed ()

@@ -1723,9 +1723,28 @@ exprToRustInner ctx e = case e of
             hasCons = any (\(Can.CaseBranch pat _) -> hasConsP pat) branches
             -- Detect string literal patterns → wrap with .as_str() so &str patterns compile
             hasStr  = any (\(Can.CaseBranch pat _) -> hasStrPat pat) branches
-            wrapped = if hasCons then "(" ++ scrutStr ++ ").as_slice()"
-                      else if hasStr then scrutStr ++ ".as_str()"
-                      else scrutStr
+            -- A cons/list pattern can sit INSIDE a tuple scrutinee
+            -- (`case (offsets, flags) of (i :: ix, b :: bs) -> …`). A slice
+            -- pattern only matches a slice, so each tuple ELEMENT carrying a
+            -- cons pattern in any branch must be `.as_slice()`-wrapped on its
+            -- own — wrapping the whole tuple would be a type error. Top-level
+            -- cons keeps the simple whole-scrutinee wrap above.
+            tupleConsPositions = case scrut of
+                Ann.At _ (Can.Tuple a b rest) ->
+                    let n = 2 + length rest
+                    in [ i | i <- [0 .. n - 1]
+                           , any (\(Can.CaseBranch pat _) -> tupleElemHasCons i pat) branches ]
+                _ -> []
+            wrapped
+                | hasCons, Ann.At _ (Can.Tuple a b rest) <- scrut, not (null tupleConsPositions) =
+                    let elems = a : b : rest
+                        wrapElem i e = let s = exprToRustString ctx e
+                                       in if i `elem` tupleConsPositions
+                                          then "(" ++ s ++ ").as_slice()" else s
+                    in "(" ++ intercalate ", " (zipWith wrapElem [0..] elems) ++ ")"
+                | hasCons   = "(" ++ scrutStr ++ ").as_slice()"
+                | hasStr    = scrutStr ++ ".as_str()"
+                | otherwise = scrutStr
             -- sub-A.10 C5: when the scrutinee was .as_str()-wrapped, wildcard
             -- PVar bindings are &str. Convert to String at the body's binding
             -- site so constructor args expecting String work.
@@ -1738,6 +1757,24 @@ exprToRustInner ctx e = case e of
             Can.PCons _ _ -> True
             Can.PList _ -> True
             Can.PAlias pat _ -> hasConsP pat
+            -- Recurse into tuple elements so a cons/list pattern nested in a
+            -- tuple scrutinee still triggers the slice-wrap path (the element
+            -- wrap is decided per-position by tupleConsPositions).
+            Can.PTuple a b rest -> any hasConsP (a : b : rest)
+            _ -> False
+        -- Does the i-th element of a tuple branch pattern carry a cons/list
+        -- pattern (directly or through an alias)? Non-tuple / out-of-range
+        -- patterns (e.g. the `_` catch-all) answer False.
+        tupleElemHasCons i (Ann.At _ p) = case p of
+            Can.PTuple a b rest ->
+                let elems = a : b : rest
+                in i < length elems && elemIsCons (elems !! i)
+            Can.PAlias pat _ -> tupleElemHasCons i pat
+            _ -> False
+        elemIsCons (Ann.At _ p) = case p of
+            Can.PCons _ _ -> True
+            Can.PList _ -> True
+            Can.PAlias pat _ -> elemIsCons pat
             _ -> False
     Can.Accessor field -> "|_record| _record." ++ field
     Can.Access record (Ann.At _ field) -> 
@@ -1973,11 +2010,11 @@ kernelArgRustType "db_query"    0 = Just "Db"
 kernelArgRustType "db_exec_raw" 0 = Just "Db"
 kernelArgRustType "db_exec"     2 = Just "Vec<String>"
 kernelArgRustType "db_query"    2 = Just "Vec<String>"
--- Log.*With : String -> List String -> Task — the attrs list is Vec<String>
--- (so a closure param used as an attr element infers String).
-kernelArgRustType n 1
-    | n `elem` [ "log_info_with", "log_error_with", "log_warn_with", "log_debug_with" ]
-        = Just "Vec<String>"
+-- Log.*With : String -> List a -> Task is polymorphic in the attr element; the
+-- runtime is generic over it (`Vec<A>`), so the attrs list is emitted with its
+-- own inferred element type — no `Vec<String>` coercion (which mis-`format!`'d
+-- a `List (String, String)` key/value attrs list through a non-Display tuple,
+-- E0277 in routes_auth / routes_todos). Intentionally NOT mapped here.
 kernelArgRustType "dict_get"    1 = Just "HashMap<String, String>"
 kernelArgRustType "dict_member" 1 = Just "HashMap<String, String>"
 kernelArgRustType "dict_remove" 1 = Just "HashMap<String, String>"
@@ -2982,14 +3019,29 @@ branchToRustString ctx (Can.CaseBranch pat body) =
                 in rustFnName (ecNameRenames ctx) modPfx name ++ "()"
             _ -> exprToRustString ctx body
         -- Slice patterns bind references (&T for head, &[T] for tail).
-        -- Inject .clone() / .to_vec() so the body sees owned values.
+        -- Inject .clone() / .to_vec() so the body sees owned values. A cons/list
+        -- pattern can sit at the top level OR nested inside a tuple scrutinee
+        -- (`case (offsets, flags) of (i :: ix, b :: bs) -> …`); each cons-bearing
+        -- tuple element gets `.as_slice()`-wrapped (Can.Case path above), so its
+        -- head/tail binders are references too and need the same owning prelude.
+        -- `consPrefix` walks the pattern (recursing through tuples) emitting a
+        -- `let v = v.clone();` per head binder and `let v = v.to_vec();` per tail
+        -- binder. The PCtor box-deref stays a top-level-only concern.
+        consPrefix = goCons pat
+          where
+            goCons (Ann.At _ p) = case p of
+                Can.PCons headPat tailPat ->
+                    concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") (patBindingVars headPat)
+                    ++ concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".to_vec(); ") (patBindingVars tailPat)
+                Can.PList items ->
+                    concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") (concatMap patBindingVars items)
+                Can.PTuple a b rest -> concatMap goCons (a : b : rest)
+                Can.PAlias inner _  -> goCons inner
+                _ -> ""
         prefix = case pat of
-            Ann.At _ (Can.PCons headPat tailPat) ->
-                let hc = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") (patBindingVars headPat)
-                    tv = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".to_vec(); ") (patBindingVars tailPat)
-                in hc ++ tv
-            Ann.At _ (Can.PList items) ->
-                concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") (concatMap patBindingVars items)
+            Ann.At _ (Can.PCons _ _) -> consPrefix
+            Ann.At _ (Can.PList _)   -> consPrefix
+            Ann.At _ (Can.PTuple _ _ _) -> consPrefix
             -- A constructor field that is self-recursive is boxed in the enum
             -- (TypeEmitter.boxIfRecursive); the match binds it as Box<Self>, so a
             -- deref `let inner = *inner;` moves the owned value out for the body

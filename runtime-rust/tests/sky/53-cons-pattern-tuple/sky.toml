@@ -1,0 +1,5 @@
+[project]
+name = "53-cons-pattern-tuple"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
