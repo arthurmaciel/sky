@@ -1,0 +1,65 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Sky.Core.List as List
+import Sky.Core.Maybe as Maybe
+import Std.Db as Db
+import Std.Db.Decode as Decode
+import Std.Log exposing (println)
+
+
+type alias User =
+    { id : Int, email : String, score : Float, active : Bool }
+
+
+userDecoder : Decoder User
+userDecoder =
+    Decode.map4 User
+        (Decode.int "id")
+        (Decode.string "email")
+        (Decode.float "score")
+        (Decode.bool "active")
+
+
+userStr : User -> String
+userStr u =
+    String.fromInt u.id
+        ++ ":"
+        ++ u.email
+        ++ ":"
+        ++ String.fromFloat u.score
+        ++ ":"
+        ++ (if u.active then
+                "Y"
+
+            else
+                "N"
+           )
+
+
+main =
+    Db.connect ()
+        |> Task.andThen
+            (\db ->
+                Db.execRaw db "DROP TABLE IF EXISTS users"
+                    |> Task.andThen (\_ -> Db.execRaw db "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, score REAL, active INTEGER)")
+                    |> Task.andThen (\_ -> Db.exec db "INSERT INTO users (id, email, score, active) VALUES (?, ?, ?, ?)" [ "1", "a@x.com", "1.5", "1" ])
+                    |> Task.andThen (\_ -> Db.exec db "INSERT INTO users (id, email, score, active) VALUES (?, ?, ?, ?)" [ "2", "b@x.com", "2.5", "0" ])
+                    |> Task.andThen (\_ -> Db.queryDecode db "SELECT id, email, score, active FROM users ORDER BY id" [] userDecoder)
+                    |> Task.andThen
+                        (\users ->
+                            let
+                                _ =
+                                    println ("rows=" ++ String.join "|" (List.map userStr users))
+                            in
+                            Db.getByIdDecode db "users" 1 userDecoder
+                        )
+                    |> Task.andThen
+                        (\maybeUser ->
+                            println ("byId1=" ++ Maybe.withDefault "none" (Maybe.map userStr maybeUser))
+                        )
+            )
+        |> Task.andThen (\_ -> println "DBDEC PROBE OK")
+        |> Task.run

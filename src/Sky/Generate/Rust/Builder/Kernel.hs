@@ -539,6 +539,44 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Json.Decode.Pipeline", "custom") -> "json_dec_p_custom"
     ("JsonDecP", "requiredAt") -> "json_dec_p_required_at"
     ("Sky.Core.Json.Decode.Pipeline", "requiredAt") -> "json_dec_p_required_at"
+    -- Std.Db.Decode (DbDec) — go-parity kernel-gaps sweep 2026-06-16.
+    -- The decoder TYPE + COMBINATORS are SHARED with JsonDec (one global
+    -- `Decoder a`; combinators are source-agnostic) → map/andThen/andMap/
+    -- map2-5/succeed/fail route to the existing json_dec_* runtime. The
+    -- PRIMITIVES read a named DB column (rows arrive as JsonVal::Object of
+    -- string/Null fields via row_to_json) and parse → db_dec_*.
+    ("DbDec", "string")           -> "db_dec_string"
+    ("Std.Db.Decode", "string")   -> "db_dec_string"
+    ("DbDec", "int")              -> "db_dec_int"
+    ("Std.Db.Decode", "int")      -> "db_dec_int"
+    ("DbDec", "float")            -> "db_dec_float"
+    ("Std.Db.Decode", "float")    -> "db_dec_float"
+    ("DbDec", "bool")             -> "db_dec_bool"
+    ("Std.Db.Decode", "bool")     -> "db_dec_bool"
+    -- NOTE: DbDec.nullable / money / required / optional are intentionally
+    -- NOT routed yet — each has a real blocker (nullable needs the Decoder to
+    -- carry column metadata à la Go's d.cols; money needs an ADT codegen
+    -- wrapper; required/optional ride the json_dec_p_* pipeline, pending the
+    -- FnOnce/Clone wall). Left as honest go-only gaps; see
+    -- runtime-rust/docs/superpowers/specs/2026-06-16-dbdec-subsystem.md.
+    ("DbDec", "succeed")          -> "json_dec_succeed"
+    ("Std.Db.Decode", "succeed")  -> "json_dec_succeed"
+    ("DbDec", "fail")             -> "json_dec_fail"
+    ("Std.Db.Decode", "fail")     -> "json_dec_fail"
+    ("DbDec", "map")              -> "json_dec_map"
+    ("Std.Db.Decode", "map")      -> "json_dec_map"
+    ("DbDec", "andThen")          -> "json_dec_and_then"
+    ("Std.Db.Decode", "andThen")  -> "json_dec_and_then"
+    ("DbDec", "andMap")           -> "json_dec_and_map"
+    ("Std.Db.Decode", "andMap")   -> "json_dec_and_map"
+    ("DbDec", "map2")             -> "json_dec_map2"
+    ("Std.Db.Decode", "map2")     -> "json_dec_map2"
+    ("DbDec", "map3")             -> "json_dec_map3"
+    ("Std.Db.Decode", "map3")     -> "json_dec_map3"
+    ("DbDec", "map4")             -> "json_dec_map4"
+    ("Std.Db.Decode", "map4")     -> "json_dec_map4"
+    ("DbDec", "map5")             -> "json_dec_map5"
+    ("Std.Db.Decode", "map5")     -> "json_dec_map5"
     -- JsonDec.index (go-parity kernel-gaps sweep 2026-06-15)
     ("JsonDec", "index") -> "json_dec_index"
     ("Sky.Core.Json.Decode", "index") -> "json_dec_index"
@@ -610,6 +648,8 @@ kernelToRust mod name = case (mod, name) of
     ("Std.Db", "unsafeFindWhere") -> "db_unsafe_find_where"
     ("Db", "queryDecode")       -> "db_query_decode"
     ("Std.Db", "queryDecode")   -> "db_query_decode"
+    ("Db", "getByIdDecode")     -> "db_get_by_id_decode"
+    ("Std.Db", "getByIdDecode") -> "db_get_by_id_decode"
     ("Db", "withTransaction")   -> "db_with_transaction"
     ("Std.Db", "withTransaction") -> "db_with_transaction"
     -- Sub-C: Std.Auth — 6 pure crypto + 3 DB-touching kernels.

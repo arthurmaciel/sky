@@ -6,8 +6,8 @@ use super::*;
 pub type JsonVal = serde_json::Value;
 pub type Decoder<E, T> = Box<dyn Fn(&JsonVal) -> SkyResult<E, T> + Send>;
 
-fn json_dec_ok<E, T>(t: T) -> SkyResult<E, T> { SkyResult::Ok(t) }
-fn json_dec_err_str<E: From<String>, T>(s: String) -> SkyResult<E, T> { SkyResult::Err(str_err(&s)) }
+pub fn json_dec_ok<E, T>(t: T) -> SkyResult<E, T> { SkyResult::Ok(t) }
+pub fn json_dec_err_str<E: From<String>, T>(s: String) -> SkyResult<E, T> { SkyResult::Err(str_err(&s)) }
 
 // --- Encode ---
 pub fn json_enc_encode(indent: i64, val: JsonVal) -> String {
@@ -118,6 +118,38 @@ pub fn json_dec_map4<E: From<String> + 'static, A: 'static + Send, B: 'static + 
         let c = match dc(v) { SkyResult::Ok(c) => c, SkyResult::Err(e) => return SkyResult::Err(e) };
         let d = match dd(v) { SkyResult::Ok(d) => d, SkyResult::Err(e) => return SkyResult::Err(e) };
         json_dec_ok(f(a, b, c, d))
+    })
+}
+// `map5` — combine 5 decoders over the SAME value with a 5-arg function.
+// Mirrors map2/map3/map4 exactly; first Err short-circuits with the real error.
+pub fn json_dec_map5<E: From<String> + 'static, A: 'static + Send, B: 'static + Send, C: 'static + Send, D: 'static + Send, G: 'static + Send, H: 'static + Send>(
+    f: impl Fn(A, B, C, D, G) -> H + Send + 'static,
+    da: Decoder<E, A>, db: Decoder<E, B>, dc: Decoder<E, C>, dd: Decoder<E, D>, de: Decoder<E, G>,
+) -> Decoder<E, H> {
+    Box::new(move |v| {
+        let a = match da(v) { SkyResult::Ok(a) => a, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let b = match db(v) { SkyResult::Ok(b) => b, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let c = match dc(v) { SkyResult::Ok(c) => c, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let d = match dd(v) { SkyResult::Ok(d) => d, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let e = match de(v) { SkyResult::Ok(e) => e, SkyResult::Err(err) => return SkyResult::Err(err) };
+        json_dec_ok(f(a, b, c, d, e))
+    })
+}
+
+/// `andMap : Decoder a -> Decoder (a -> b) -> Decoder b` — applicative apply.
+/// Sky's pipe form: `succeed Ctor |> andMap decA |> andMap decB` chains as
+/// `andMap decB (andMap decA (succeed Ctor))` — the VALUE decoder is the first
+/// arg, the FUNCTION decoder is the second.
+/// Matches Sky's `Std.Db.Decode.sky` line: `andMap : Decoder a -> Decoder (a -> b) -> Decoder b`.
+pub fn json_dec_and_map<E: From<String> + 'static, A: 'static + Send, B: 'static + Send>(
+    dec_val: Decoder<E, A>,
+    dec_fn: Decoder<E, Box<dyn FnOnce(A) -> B + Send>>,
+) -> Decoder<E, B> {
+    Box::new(move |v| {
+        // Evaluate the function decoder first (pipeline accumulator), then the value.
+        let f = match dec_fn(v) { SkyResult::Ok(f) => f, SkyResult::Err(e) => return SkyResult::Err(e) };
+        let a = match dec_val(v) { SkyResult::Ok(a) => a, SkyResult::Err(e) => return SkyResult::Err(e) };
+        json_dec_ok(f(a))
     })
 }
 pub fn json_dec_and_then<E: From<String> + 'static, A: 'static + Send, B: 'static + Send>(

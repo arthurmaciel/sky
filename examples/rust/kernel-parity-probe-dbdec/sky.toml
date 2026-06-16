@@ -1,0 +1,17 @@
+name = "kernel-parity-probe-dbdec"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+# Fork-local regression fixture for the Std.Db.Decode (DbDec) subsystem on
+# --target rust. Exercises the SHARED-Decoder design: DB-specific primitives
+# (int/string/float/bool) + combinators routed to json_dec_* (map3/map2),
+# decoded via Db.queryDecode + Db.getByIdDecode over a real SQLite file.
+# (nullable/money/required/optional are tracked separately — known blockers.)
+
+[source]
+root = "src"
+
+[database]
+driver = "sqlite"
+path = "dbdec-probe.db"
