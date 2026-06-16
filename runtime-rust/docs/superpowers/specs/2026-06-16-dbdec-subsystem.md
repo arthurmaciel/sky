@@ -77,7 +77,7 @@ row_to_json(row: &DbRow) -> JsonVal:
 6. Kernel.hs routing: DbDec.{string,int,float,bool,money,nullable,succeed,fail,
    map,andThen,andMap,map2..5,required,optional} (succeed/fail/map/andThen/andMap/
    map2..5 → json_dec_*; string/int/.../required/optional → db_dec_*); Db.getByIdDecode.
-7. Probe `examples/rust/kernel-parity-probe-dbdec`: SQLite create+insert+queryDecode
+7. Probe `runtime-rust/tests/sky/kernel-parity-probe-dbdec`: SQLite create+insert+queryDecode
    a 2-field record with int+string+nullable; verify decoded values + NULL→Nothing.
 
 ### Phase B — Db SQL-gen kernels (mirror Go db_auth.go; column-name validated)
@@ -104,7 +104,7 @@ row_to_json(row: &DbRow) -> JsonVal:
 
 ## STATUS (2026-06-16) — core shipped + verified, 7 hard kernels remain
 
-**CLOSED + probe-verified** (`examples/rust/kernel-parity-probe-dbdec`, real SQLite —
+**CLOSED + probe-verified** (`runtime-rust/tests/sky/kernel-parity-probe-dbdec`, real SQLite —
 `rows=…|…  byId1=…  DBDEC PROBE OK`): the shared-Decoder design proven end-to-end.
 - Primitives: `db_dec_string/int/float/bool` (read+parse a column; TOTAL).
 - Combinators routed to existing json runtime: `succeed/fail/map/andThen/andMap/

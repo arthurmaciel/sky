@@ -11,6 +11,27 @@ In order: **security > correctness > soundness > efficiency > completeness >
 readability** (a lower one never overrides a higher one). Everything below serves
 them.
 
+## Settled rules — said once, applied always
+
+When the user settles a rule, it is recorded HERE and applied to all future work
+without re-asking — it only changes when the user asks to change it. Adding the
+rule here is mandatory, not optional. Current settled rules:
+
+- **Boundary.** Edit only `runtime-rust/`, `src/Sky/Generate/Rust/`,
+  `src/Sky/Build/Rust/`, `tools/`. NEVER the shared stdlib (`sky-stdlib/`), the Go
+  backend (`runtime-go/`, `src/Sky/Generate/Go/`), or the author's `examples/`
+  (except `examples/rust/`).
+- **Rust tooling lives under `runtime-rust/scripts/`** — no Rust script at
+  repo-root `scripts/`. Runners `source` the single-source `lib/env.sh`
+  (command/env header — new speed opts go here) + `lib/examples.sh` (the build/
+  run/web/perf example manifest — new test examples go here). Never duplicate
+  either across runners.
+- **Verify through the `sky-rust-backend:*` skills**, never the raw runner scripts.
+- **`examples/rust/` holds only real, complete Sky projects** (currently just
+  `skyshop-rs`). Sky projects that exist ONLY as Rust-backend tests/fixtures live
+  under **`runtime-rust/tests/sky/`**, never in `examples/`.
+- **`rg`, never `grep`** — even on piped stdin (`… | rg`).
+
 ## Goal
 Transpile Sky (Elm-compatible functional language) to Rust with native FFI to Rust libraries.
 
