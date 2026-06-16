@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# post-commit — keep skydex in sync with EVERY commit, so the code index always
+# reflects the written code (general guarantee, not just sync-with-upstream's
+# Step 9). Incremental (git-diff since the last indexed sha), backgrounded, and
+# fully defensive: it NEVER blocks or fails a commit.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+#
+# No-ops cleanly when skydex isn't built or hasn't been indexed yet (a teammate
+# without the tool is unaffected).
+
+SKYDEX="tools/skydex/target/release/skydex"
+
+# Only act from the repo root with a built binary and an existing index.
+[ -x "$SKYDEX" ]            || exit 0
+[ -f ".skydex/index.db" ]  || exit 0
+
+# Incremental refresh in the background; swallow all output and never fail.
+( "$SKYDEX" update --repo . >/dev/null 2>&1 || true ) &
+
+exit 0

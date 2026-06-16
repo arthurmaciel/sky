@@ -1,5 +1,13 @@
 # Sky Rust Runtime
 
+> **Principles — applied to every change, in this priority order:**
+> **1. Security · 2. Correctness · 3. Soundness · 4. Efficiency · 5. Completeness · 6. Readability.**
+> A lower principle never justifies compromising a higher one (a readable name
+> that breaks correctness is rejected; an efficient path that opens a soundness
+> hole is rejected). Names are self-contained and uncontracted — richer-but-
+> longer beats terse-but-cryptic, because a non-informative name is pure loss to
+> anyone who doesn't already know the code.
+
 The `sky_runtime` crate is the **single source of truth** for all Rust code
 emitted by the Sky compiler's `--target rust` path. Every generated project
 copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.

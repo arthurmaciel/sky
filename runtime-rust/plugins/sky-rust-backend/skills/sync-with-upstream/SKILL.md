@@ -1,6 +1,6 @@
 ---
 name: sync-with-upstream
-description: "Ingest the latest anzellai/sky upstream release into the feat/runtime-rust branch: fast-forward main, merge, resolve the two expected thin-seam conflicts, adapt the Rust backend to any upstream shared-type changes, verify, commit the merge. Use when the user asks to sync with upstream / pull the latest upstream into the Rust branch. Trigger: /sky-rust-backend:sync-with-upstream."
+description: "Ingest the latest anzellai/sky upstream RELEASE TAG (not main — finished code only) into the feat/runtime-rust branch: fetch tags, merge the highest vX.Y.Z tag, resolve the two expected thin-seam conflicts, adapt the Rust backend to any upstream shared-type changes, verify, commit the merge, refresh skydex. Use when the user asks to sync with upstream / pull the latest upstream into the Rust branch. Trigger: /sky-rust-backend:sync-with-upstream."
 ---
 
 # sync-with-upstream
@@ -18,7 +18,9 @@ Reference runbook in-repo: `docs/runtime-rust/syncing-upstream.md`.
 ## Constraints (read before doing anything)
 
 - `origin` = `arthurmaciel/sky` (our fork). `upstream` = `anzellai/sky`
-  (fetch-only). `main` is a **pristine mirror** of `upstream/main` — never
+  (fetch-only). We sync to the **latest upstream release TAG** (`vX.Y.Z` —
+  finished, coherent code), NEVER to `upstream/main` (ongoing dev that can be
+  parked mid-feature). `main` is at most a convenience mirror of that tag — never
   commit our work to it.
 - **Never break the Go backend.** All our changes are Rust-target-gated. If a
   resolution would alter Go behaviour, it's wrong.
@@ -36,19 +38,29 @@ git branch --show-current   # must be feat/runtime-rust
 git remote -v | grep upstream || git remote add upstream https://github.com/anzellai/sky.git
 ```
 
-### Step 2 — Fetch + fast-forward main
+### Step 2 — Fetch + identify the latest upstream RELEASE TAG
+
+**Sync to the latest upstream release TAG, NOT `upstream/main`.** A tag (`vX.Y.Z`)
+is finished, shipped code; `upstream/main` is ongoing development that may be
+parked mid-feature (a half-landed change that doesn't build/behave coherently).
+We only ever ingest a coherent release.
 
 ```bash
-git fetch upstream --tags
-git checkout main && git merge --ff-only upstream/main
-git checkout feat/runtime-rust
+git fetch upstream --tags --force
+# Highest semver release tag (e.g. v0.16.31). `--sort=-v:refname` orders by
+# version, not commit date, so a back-ported patch tag can't masquerade as latest.
+UPSTREAM_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+echo "latest upstream release tag: $UPSTREAM_TAG"
 ```
-If `--ff-only` fails, `main` has drifted (it shouldn't) — stop and tell the user.
+Hold `$UPSTREAM_TAG` for the rest of the run (re-derive it in any new shell).
+Keep `main` as a convenience mirror of that tag (optional — the branch merges the
+tag directly, not `main`): `git branch -f main "$UPSTREAM_TAG"`.
 
-### Step 3 — Merge main into the branch
+### Step 3 — Merge the release TAG into the branch
 
 ```bash
-git merge --no-edit main
+git checkout feat/runtime-rust
+git merge --no-edit "$UPSTREAM_TAG"
 git diff --name-only --diff-filter=U     # the conflicted files
 ```
 Expected conflicts: `sky-compiler.cabal` and `src/Sky/Build/Compile.hs`. If
@@ -114,14 +126,14 @@ The Rust runtime crate records the Sky version it targets in
 MUST mirror the Sky version this sync ingests, so a Rust crate built from this
 branch advertises the same version as the compiler that emits its code.
 
-The authoritative version is the latest upstream tag, now reachable from `main`
-after Step 2's `--tags` fast-forward (the cabal `version:` field is a `0.0.0`
-placeholder — CI injects the real number — so do NOT read it from there):
+The authoritative version is `$UPSTREAM_TAG` from Step 2 — the release tag this
+sync merged (the cabal `version:` field is a `0.0.0` placeholder — CI injects the
+real number — so do NOT read it from there):
 
 ```bash
-SKY_VER=$(git describe --tags --abbrev=0 main | sed 's/^v//')   # e.g. 0.16.24
+SKY_VER="${UPSTREAM_TAG#v}"   # e.g. 0.16.31  (re-derive UPSTREAM_TAG if a new shell)
 sed -i -E "s/^(runtime_version = )\"[^\"]*\"/\1\"$SKY_VER\"/" runtime-rust/Cargo.toml
-grep -A1 'package.metadata.sky' runtime-rust/Cargo.toml          # confirm new value
+rg -A1 'package.metadata.sky' runtime-rust/Cargo.toml          # confirm new value
 ```
 
 This is a metadata-only field (`[package.metadata.*]` is ignored by Cargo's

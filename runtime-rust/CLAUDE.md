@@ -26,12 +26,54 @@ iteration and has burned past sessions.
 | **NEVER `cabal install --install-method=copy`.** `sky-out/sky` is a **symlink** to the dist-newstyle binary; `cabal build exe:sky` updates it in place. Set up once: `ln -sf "$(cabal list-bin exe:sky)" sky-out/sky`. | a copy-install pays a 39 MB write per rebuild for zero benefit |
 | **Only codegen (`.hs`) edits need `cabal build`.** Edits under `runtime-rust/src/` are copied into the generated project at `sky build` time — rebuild only the example. | no compiler rebuild for runtime-only changes |
 | **Self-contained PATH in every build shell:** `export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin"` | the inherited `$PATH` is inconsistent across tool calls — `cargo`/`timeout` vanish, so `sky` fails to spawn `cargo` (looks like a build failure). Inline `for`-loops compound the drift — one example per command, or a committed script |
-| **Export the shared Rust target + sccache before any example build:** `export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target" RUSTC_WRAPPER=sccache` | every example is package `sky-app`; the shared target compiles axum/tokio/serde/sqlx once. It holds only the LAST-built binary — rebuild the specific example right before running it. Re-export every shell (state doesn't persist between tool calls) |
+| **Export shared target + sccache + `CARGO_INCREMENTAL=0` before any example build:** `export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target" RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0` | `CARGO_INCREMENTAL=0` is mandatory — sccache silently skips ALL Rust compilation when incremental=true (all 90 requests landed in "non-cacheable: incremental"). With `CARGO_INCREMENTAL=0`: 178/226 cache hits, cold build drops from ~75 s to ~15 s. The shared target compiles axum/tokio/serde/sqlx once; holds only the LAST-built binary. Re-export every shell. |
 | **Don't wipe `dist-newstyle/`**; keep the gitignored `cabal.project.local` (`optimization: 0`, `profiling: False`). | incremental compile is the whole point — `-O0` cuts a full rebuild from minutes to ~180s, a one-module link to ~32s. Never commit the file (it would slow the shipped binary) |
+| **Don't wipe `sky-out .skycache .skydeps` for runtime-only changes.** `sky build` always copies `runtime-rust/src/sky_runtime/` before invoking cargo — incremental is handled automatically. A wipe is only needed when the Sky source changes in a way that confuses the cache (rare) or when debugging cache issues. | verified: touching or editing any `.rs` under `runtime-rust/src/` is picked up correctly by the next `sky build` without a wipe |
+
+### Fast inner loop (Sky source or runtime `.rs` changed, no `.hs` edit)
+
+```bash
+# One-time env (re-export every shell — state doesn't persist between tool calls)
+export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin"
+export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target" RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0
+SKY_BIN="$HOME/Documentos/comp/sky/sky-out/sky"
+
+# Canonical inner loop — build + run in one step
+cd examples/01-hello-world        # or whichever example
+"$SKY_BIN" run --target rust src/Main.sky
+# Warm (source unchanged): ~0.3 s  |  First change: ~1-2 s (cargo incremental)
+# sky run honours CARGO_TARGET_DIR for the binary path (commit 0bd3a84e)
+
+# Runtime-only change (no Sky source touch needed, no wipe needed):
+# 1. Edit runtime-rust/src/sky_runtime/foo.rs
+# 2. "$SKY_BIN" run --target rust src/Main.sky   ← re-copies runtime and runs cargo
+```
+
+### Standalone runtime compile-check (fastest correctness gate for `.rs` edits)
+
+```bash
+# Validate runtime-rust/src/ edits WITHOUT a full sky build.
+# cargo check:  ~1.2 s warm  (no codegen, no link)
+# cargo build:  ~2.4 s warm  (codegen + link, produces a usable .rlib)
+cd /path/to/sky-repo
+cargo check --manifest-path runtime-rust/Cargo.toml --features full   # fastest
+cargo build --manifest-path runtime-rust/Cargo.toml --features full   # if you need link errors too
+# Use `check` for "does this compile?" iterations; switch to `build` before sky-level testing.
+```
 
 Generated `Cargo.toml [profile.dev]` already drops debuginfo (`debug = 0`,
-`incremental = true`), emitted by `emitCargoToml`. Sweep via
+`incremental = true`), emitted by `emitCargoToml`. The `incremental = true` in
+the generated project is fine for Cargo's own incremental tracker; the
+`CARGO_INCREMENTAL=0` env var overrides it at the process level so sccache
+can cache. Sweep via
 `SKY_BIN=$(cabal list-bin exe:sky) ./scripts/rust-sweep.sh` (~570s on warm sccache).
+
+### `sky check` does NOT support `--target rust`
+
+`sky check` always runs the Go pipeline (`go build -o /dev/null`). It is
+useful for HM type-check and Go codegen validation but it does NOT validate
+the Rust codegen path. For Rust type-check validation, use `sky build --target rust`
+or the standalone `cargo check` above.
 
 ## Code navigation — use skydex, NOT Gortex
 
@@ -40,11 +82,13 @@ mandates Gortex MCP tools — that mandate does NOT apply here; Gortex ballooned
 past 15 GB and hung the box). Use **`skydex`**, the bounded Sky-tuned index
 (`tools/skydex/`, ~64 MB peak; `tools/skydex/README.md`), or plain Read / `rg`.
 
-**For free-text search use `rg` (ripgrep), NEVER `grep`/`Grep`.** skydex answers
+**For free-text search use `rg` (ripgrep), NEVER `grep`/`Grep` — even on piped stdin (`… | rg`).** skydex answers
 SYMBOL/relationship queries (parity, deps, callers, `locate`); `rg` answers
 free-text code-idiom searches inside file bodies that a symbol index can't
-(`rg -F '-> SkyTask<()>'`, `rg 'pub mod'`). `rg` is installed and far faster than
-grep — recursive by default and respects `.gitignore` (generated dirs skipped).
+(`rg -F '-> SkyTask<()>'`, `rg 'pub mod'`). `rg` is installed, reads stdin,
+and is 320× faster than `grep -r` on this repo: `grep -r` wades through 20+ GB
+of `dist-newstyle/` (105 s); `rg` respects `.gitignore` and finishes in 0.33 s.
+There is no workflow in this repo where `grep` wins.
 Most useful flags:
 
 | Flag | Use |
@@ -73,10 +117,22 @@ tools/skydex/target/release/skydex roles | pipeline | wakeup
 tools/skydex/target/release/skydex update --repo .   # incremental git-diff refresh (after commits / on sync)
 ```
 
-**Default reflex:** before a multi-file grep to answer "is the Rust backend
+**Default reflex:** before a multi-file `rg` to answer "is the Rust backend
 missing a kernel Go has?" / "what does this module depend on?" / "what tests
 cover this?", run the matching `skydex` query — one focused answer instead of
-pulling many files into context. `sync-with-upstream` Step 9 auto-refreshes it.
+pulling many files into context.
+
+**Keep skydex current — ALL written code refreshes the index.** Two layers:
+- **Automatic (general):** a tracked `post-commit` hook (`.githooks/post-commit`)
+  runs `skydex update` (incremental, backgrounded, defensive) after EVERY commit.
+  Enable once per clone: `git config core.hooksPath .githooks`. No-ops cleanly if
+  skydex isn't built / not yet indexed; never blocks a commit.
+- **Explicit:** `sync-with-upstream` Step 9 + any skill that lands code should end
+  with `skydex update --repo .`. After a large change or when in doubt, a full
+  `skydex index --repo .` rebuilds from scratch (the walk includes
+  untracked-non-ignored files, so it reflects the true working tree).
+The index is the source of truth for parity/deps/coverage queries — a stale index
+gives wrong answers, so refreshing after writing code is not optional.
 
 ## Phase 1 Status: ✅ COMPLETE
 
