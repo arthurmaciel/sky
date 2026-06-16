@@ -65,22 +65,31 @@ iteration and has burned past sessions.
 ### Sweep tooling: single source of truth (no duplication, no drift)
 
 Run verification through the **`sky-rust-backend:*` skills** (build-sweep / run-sweep
-/ web-sweep / perf-sweep / equiv-sweep / keep-go-parity), NEVER the raw runner
-scripts — the skills are the agent-facing interface. The runners live ONLY under
-`runtime-rust/scripts/` (no Rust script at repo-root `scripts/`).
+/ perf-sweep / keep-go-parity), NEVER the raw runner scripts — the skills are the
+agent-facing interface. The runners live ONLY under `runtime-rust/scripts/` (no
+Rust script at repo-root `scripts/`). build-sweep carries Go≡Rust EQUIVALENCE
+(the old equiv-sweep, folded in) and run-sweep carries the live/web browser
+round-trip (the old web-sweep, folded in).
 
-Two shared files under `runtime-rust/scripts/lib/` are the SINGLE SOURCE OF TRUTH
-every runner sources — duplicating either across runners is forbidden:
+Three shared files under `runtime-rust/scripts/lib/` are the SINGLE SOURCE OF TRUTH
+every runner sources — duplicating any across runners is forbidden:
 - **`env.sh`** — the command env header: `PATH`, `CARGO_TARGET_DIR`, `RUSTC_WRAPPER=sccache`,
   `CARGO_INCREMENTAL=0` (mandatory — see above), `SKY_BIN`. **Any verified speed
   improvement is added HERE so every skill inherits it automatically.**
-- **`examples.sh`** — the in-scope example manifest: the build / run / web / perf
-  sets and the rule for what counts as a web (Sky.Live/Server) example. When
+- **`examples.sh`** — the in-scope example manifest: the build / run / perf sets
+  and the rule for what counts as a web (Sky.Live/Server) example. When
   sync-with-upstream lands new examples — or we add fixtures as Go-parity tests —
   update ONLY this file; all sweeps follow.
+- **`checks.sh`** — the per-shape "exercise an already-built binary" functions
+  (`exercise_cli` / `exercise_server` / `exercise_live` / `exercise_tui` /
+  `exercise_webview`) + the shared helpers (`http_responds`, `free_port`,
+  `scenario_for`, `reap`, `$PANIC_RE`, the browser-stack probe). run-sweep
+  exercises the RUST binary; build-sweep exercises BOTH backends' binaries to
+  assert equivalence. "Did the binary work?" has ONE definition both consume.
 
 Directive: a new speed optimization → `env.sh`; a new/changed test example →
-`examples.sh`. Never edit a per-runner copy.
+`examples.sh`; a new/changed binary-exercise → `checks.sh`. Never edit a
+per-runner copy.
 
 ### Fast inner loop (Sky source or runtime `.rs` changed, no `.hs` edit)
 
@@ -255,10 +264,8 @@ script directly; the skill is just the agent-facing wrapper + procedure.
 
 | Skill | Runner (`runtime-rust/scripts/`) | Does |
 |---|---|---|
-| `sky-rust-backend:build-sweep` | `build-sweep.sh` | `sky build --target rust` + `cargo build` over the largest example set |
-| `sky-rust-backend:run-sweep` | `run-sweep.sh` | build + RUN each runnable example (cli no-panic; server/live boots + `curl GET / → 200`) |
-| `sky-rust-backend:web-sweep` | `web-sweep.sh` + `web-verify.mjs` | drive live examples through headless chromium; hard-fail "click is a no-op" |
-| `sky-rust-backend:equiv-sweep` | `equiv-sweep.sh` | build each comparable CLI example on BOTH backends, run both, diff stdout (Go≡Rust output parity) |
+| `sky-rust-backend:build-sweep` | `build-sweep.sh` + `lib/checks.sh` | `sky build --target rust` + `cargo build` over the largest example set, AND assert Go≡Rust EQUIVALENCE per the example's equiv mode (stdout-diff cli / both-pass-scenario live / both-serve server / both-no-crash tui). The Go≡Rust output-parity gate folded into build (was the separate equiv-sweep). |
+| `sky-rust-backend:run-sweep` | `run-sweep.sh` + `lib/checks.sh` + `web-verify.mjs` | build + RUN each runnable example (cli no-panic; server/live boots + serves; live drives the browser ROUND-TRIP — hard-fail "click is a no-op", folded the old web-sweep; tui pty; webview xvfb) |
 | `sky-rust-backend:perf-sweep` | `perf-sweep.sh` | Rust-vs-Go cold-start/RSS/binsize/throughput + regression report |
 | `sky-rust-backend:keep-go-parity` | `keep-go-parity.sh` | orchestrate sync → warranted sweeps (planner: `snapshot`/`plan`) |
 | `sky-rust-backend:sync-with-upstream` | — (agent-driven git runbook) | ingest `anzellai/sky` upstream into `feat/runtime-rust` |
@@ -267,7 +274,7 @@ script directly; the skill is just the agent-facing wrapper + procedure.
 | `sky-rust-backend:quality-audit` | `quality-audit.sh` | deep soundness/security/efficiency audit — panic vectors, unsafe, dyn Any, footguns, undocumented `#[allow]`, beyond the clippy gate |
 | `sky-rust-backend:autonomous-swarm` | — (agent-driven orchestration) | drive a large in-boundary task (port / migration / buildout) too big for one context with an autonomous sub-agent team: 1 asker + 3 reasoners that cross-critique → synthesis → de-risk spine → contracts skeleton → parallel executors under a data-race protocol → adversarial review |
 
-The four sweeps are the verification phases (build → run → web → perf);
+The three sweeps are the verification phases (build+equiv → run+web → perf);
 `keep-go-parity` chains them after an upstream sync. The runner scripts are the
 canonical procedure — improve the **script** after a run, never improvise the
 steps.

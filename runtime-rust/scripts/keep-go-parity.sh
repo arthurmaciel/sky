@@ -11,8 +11,11 @@
 #
 # The PLAN is both human-readable and machine-readable (PLAN_BUILD=… lines) so
 # the skill can branch on it. Rules (from the skill spec):
-#   • build-sweep, run-sweep      → ALWAYS. The browser ROUND-TRIP for live/web
-#                                   examples is now PART of run-sweep (it dispatches
+#   • build-sweep                 → ALWAYS. build-sweep now carries Go≡Rust
+#                                   EQUIVALENCE per example (equiv-classification.tsv
+#                                   equiv modes) — there is no separate equiv-sweep.
+#   • run-sweep                   → ALWAYS. The browser ROUND-TRIP for live/web
+#                                   examples is PART of run-sweep (it dispatches
 #                                   per shape: cli/server/tui/webview/live-browser);
 #                                   there is no separate web-sweep.
 #   • perf-sweep                  → if ANY new example landed, OR the Go backend
@@ -56,15 +59,15 @@ compute_plan() {
       GO_FILES="$(git diff --name-only "$PRE_SHA" "$NOW_SHA" -- runtime-go src/Sky/Generate/Go 2>/dev/null | head -20 | tr '\n' ' ' | sed 's/ *$//')"
     fi
 
-    # Forced classification: every example MUST be in/out in the equiv manifest.
+    # Forced classification: every example MUST have an equiv MODE in the manifest.
     # Any example on disk but absent from the manifest is UNCLASSIFIED — until it
-    # is classified, "Go parity maintained" cannot be claimed (equiv-sweep enforces
+    # is classified, "Go parity maintained" cannot be claimed (build-sweep enforces
     # this too; surfaced here so new examples are caught at plan time).
     MANIFEST="$REPO/runtime-rust/scripts/equiv-classification.tsv"
     UNCLASSIFIED=""
     [ -f "$MANIFEST" ] && UNCLASSIFIED="$(comm -13 <(awk '!/^#/ && NF>=2 {print $1}' "$MANIFEST" | sort -u) <(list_examples) | tr '\n' ' ' | sed 's/ *$//')"
 
-    PLAN_BUILD=1; PLAN_RUN=1; PLAN_EQUIV=1   # equiv-sweep is ALWAYS-run (the output-parity gate)
+    PLAN_BUILD=1; PLAN_RUN=1   # build-sweep (build+equiv) and run-sweep are ALWAYS-run
     PLAN_PERF=0; PERF_WHY="no new example, Go backend unchanged"
     if [ -n "$NEW_EXAMPLES" ]; then PLAN_PERF=1; PERF_WHY="$(echo $NEW_EXAMPLES | wc -w | tr -d ' ') new example(s): $NEW_EXAMPLES"
     elif [ -n "$GO_FILES" ]; then PLAN_PERF=1; PERF_WHY="Go backend changed (confirm perf-relevance vs changelog): $GO_FILES"; fi
@@ -77,14 +80,13 @@ print_plan() {
     echo "GO_BACKEND_CHANGED: ${GO_FILES:-no}"
     echo "UNCLASSIFIED_EXAMPLES: ${UNCLASSIFIED:-none}"
     echo "---"
-    echo "PLAN_BUILD=1   # build-sweep — always"
+    echo "PLAN_BUILD=1   # build-sweep — always (build + Go≡Rust equivalence + classification gate)"
     echo "PLAN_RUN=1     # run-sweep   — always (browser round-trip for live/web is part of run-sweep)"
-    echo "PLAN_EQUIV=1   # equiv-sweep — always (Go≡Rust output parity + classification gate)"
     echo "PLAN_PERF=$PLAN_PERF    # perf-sweep  — $PERF_WHY"
     if [ -n "$UNCLASSIFIED" ]; then
       echo "---"
-      echo "BLOCKER: classify these in runtime-rust/scripts/equiv-classification.tsv (in|out) —"
-      echo "         until then equiv-sweep fails and parity CANNOT be claimed: $UNCLASSIFIED"
+      echo "BLOCKER: classify these in runtime-rust/scripts/equiv-classification.tsv (equiv mode) —"
+      echo "         until then build-sweep fails and parity CANNOT be claimed: $UNCLASSIFIED"
     fi
     if [ -n "$NEW_WEB" ]; then
       echo "---"
@@ -113,32 +115,32 @@ case "$cmd" in
 
   run)
     # Non-agent convenience: do the always-run LOAD-TOLERANT parity sweeps
-    # automatically after the merge (build → run → equiv). run-sweep itself drives
-    # the browser round-trip for every live/web example (no separate web-sweep).
+    # automatically after the merge (build(+equiv) → run). build-sweep now carries
+    # the Go≡Rust equivalence + classification gate; run-sweep drives the browser
+    # round-trip for every live/web example (no separate equiv- or web-sweep).
     # perf is NOT auto-run — it's machine-load-sensitive (close other apps first),
     # so it's only surfaced as a recommendation. Run AFTER you've synced yourself.
     compute_plan
     print_plan
-    echo ""; echo ">>> build-sweep ..."
-    if ! bash "$SCRIPTS/build-sweep.sh"; then
-      echo "=== keep-go-parity: ✗ GO PARITY NOT MAINTAINED — build broke (later phases skipped) ==="; exit 1
+    echo ""; echo ">>> build-sweep (build + Go≡Rust equivalence + classification gate) ..."
+    bash "$SCRIPTS/build-sweep.sh"; BUILD_RC=$?
+    if [ "$BUILD_RC" != 0 ]; then
+      echo "=== keep-go-parity: ✗ GO PARITY NOT MAINTAINED — build/equiv/classification broke (run phase skipped) ==="; exit 1
     fi
     echo ""; echo ">>> run-sweep (cli/server/tui-pty/webview-xvfb/live-browser) ..."
     bash "$SCRIPTS/run-sweep.sh"; RUN_RC=$?
-    echo ""; echo ">>> equiv-sweep (Go≡Rust output parity + classification gate) ..."
-    bash "$SCRIPTS/equiv-sweep.sh"; EQUIV_RC=$?
     echo ""; echo "=== keep-go-parity run complete ==="
-    echo "  build: PASS · run: rc=$RUN_RC · equiv: rc=$EQUIV_RC"
+    echo "  build+equiv: PASS · run: rc=$RUN_RC"
     if [ "$PLAN_PERF" = 1 ]; then
       echo "  perf-sweep WARRANTED ($PERF_WHY) — NOT auto-run (close other apps first, then:"
       echo "    bash $SCRIPTS/perf-sweep.sh )"
     fi
-    if [ "$RUN_RC" = 0 ] && [ "$EQUIV_RC" = 0 ]; then
-      echo "  ✓ GO PARITY MAINTAINED — build+run(+browser round-trip)+equiv green; every example classified."
+    if [ "$RUN_RC" = 0 ]; then
+      echo "  ✓ GO PARITY MAINTAINED — build+equiv(+browser round-trip)+run green; every example classified."
       [ "$PLAN_PERF" = 1 ] && echo "    (perf still recommended — see above.)"
       exit 0
     fi
-    echo "  ✗ GO PARITY NOT MAINTAINED — see failures above (equiv rc=$EQUIV_RC covers output divergence AND unclassified examples)."
+    echo "  ✗ GO PARITY NOT MAINTAINED — see failures above."
     exit 1
     ;;
 
@@ -147,8 +149,9 @@ case "$cmd" in
     echo "  snapshot  record examples/ + HEAD sha BEFORE the upstream sync" >&2
     echo "  plan      AFTER the sync: print which sweeps the merge warrants" >&2
     echo "  run       AFTER the sync: print the plan AND auto-run the always-run" >&2
-    echo "            parity sweeps (build → run → equiv); run drives the live/web" >&2
-    echo "            browser round-trip itself. perf is surfaced," >&2
-    echo "            not run (needs apps closed). For non-agent use." >&2
+    echo "            parity sweeps (build(+equiv) → run); build-sweep carries the" >&2
+    echo "            Go≡Rust equivalence + classification gate, run-sweep drives the" >&2
+    echo "            live/web browser round-trip. perf is surfaced, not run (needs" >&2
+    echo "            apps closed). For non-agent use." >&2
     exit 2 ;;
 esac

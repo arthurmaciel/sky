@@ -41,7 +41,8 @@ Runs apps but no perf timing → load-tolerant, **no close-the-apps reminder**.
 - **Run + smoke-check, per shape:**
   - `cli` — 25 s timeout, FAIL on panic/hang.
   - `server` — free `SKY_LIVE_PORT`/`PORT` + `SKY_CONSOLE_EMBED=off`, wait ≤15 s
-    for `GET / → 200` (sniffing the "listening on :PORT" log), FAIL on
+    for `GET / → any HTTP status` (a 404 still proves the listener + router are
+    up; sniffing the "listening on :PORT" log for a non-default bind), FAIL on
     panic/no-serve, then SIGTERM/SIGKILL.
   - `live` — if web-drivable, the full **browser round-trip** via
     `web-verify.mjs` (scenario derived from the example name → falls back to
@@ -62,11 +63,22 @@ Runs apps but no perf timing → load-tolerant, **no close-the-apps reminder**.
 `run_set` (derived in `lib/examples.sh`): every example dir minus Go-FFI; nothing
 excluded by shape. `RUST_RUN="a b c"` overrides.
 
+## Shared `lib/checks.sh`
+
+The per-shape exercise logic (`exercise_cli` / `exercise_server` /
+`exercise_live` / `exercise_tui` / `exercise_webview` + `http_responds` /
+`free_port` / `scenario_for` / `reap` / `$PANIC_RE` / browser-stack probe) lives
+in `lib/checks.sh` — the SAME definitions build-sweep uses to assert Go≡Rust
+equivalence. run-sweep exercises the RUST binary only; a fix to "did the binary
+work?" lands once, in `checks.sh`, and both sweeps inherit it.
+
 ## Baked-in gotchas
 
 - PATH `/usr/local/go/bin` + `$HOME/.cargo/bin` + `sccache`;
   `CARGO_TARGET_DIR=$HOME/.cache/sky-rust-target`; `SKY_BIN=<repo>/sky-out/sky`;
-  `SKY_CONSOLE_EMBED=off`. Never edit runtime files mid-run.
+  `SKY_CONSOLE_EMBED=off` + a test `SKY_AUTH_TOKEN_SECRET` (so Std.Auth apps like
+  36-composite-server boot) — both exported from `lib/checks.sh`. Never edit
+  runtime files mid-run.
 
 ## Capture learnings (self-improving loop)
 

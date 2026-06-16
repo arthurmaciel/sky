@@ -1,1 +1,0 @@
-../../../../../scripts/equiv-sweep.sh

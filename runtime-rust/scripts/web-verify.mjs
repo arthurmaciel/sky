@@ -117,6 +117,21 @@ async function main() {
     page.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
     page.on('pageerror', err => consoleErrors.push(`pageerror: ${err.message}`));
 
+    // Track 4xx/5xx resource URLs so a generic "Failed to load resource"
+    // console error can be classified by WHAT failed. A favicon.ico 404 (every
+    // browser auto-requests it; an app shipping none returns 404) or a
+    // dev-console-plumbing 404 is benign — and crucially it can differ between
+    // the Go backend (injects the /_sky/console link) and the Rust backend
+    // (console federation staged) WITHOUT being an app-behaviour divergence.
+    // The scenario must assert APP behaviour, not console/asset plumbing.
+    const BENIGN_URL_RE = /(favicon\.ico|robots\.txt|apple-touch-icon|manifest\.json|sitemap\.xml|\/_sky\/console)/i;
+    const nonBenignFailedUrls = [];
+    page.on('response', resp => {
+        if (resp.status() >= 400 && !BENIGN_URL_RE.test(resp.url())) {
+            nonBenignFailedUrls.push(`${resp.status()} ${resp.url()}`);
+        }
+    });
+
     // "click is a no-op" probe — watch every /_sky/event POST. The scenario's
     // expectSkyEventAfter() asserts at least one round-trip fired.
     const skyEventPosts = [];
@@ -151,11 +166,24 @@ async function main() {
             detail = 'rendered HTML has <button>/<form> but ZERO sky-event attributes — events stripped at render time';
         }
 
-        const benignRe = /(favicon\.ico|robots\.txt|apple-touch-icon|manifest\.json|sitemap\.xml)/i;
-        const realErrors = consoleErrors.filter(e => !benignRe.test(e));
+        // A console error is benign when its text names a benign asset OR it is
+        // the generic "Failed to load resource" 404 string with NO corresponding
+        // non-benign failed URL (i.e. the only thing that 404'd was a favicon /
+        // console-plumbing asset). This makes the gate robust to the by-design
+        // Go-vs-Rust console/asset divergence while still catching a real broken
+        // app resource (a missing JS/CSS the app actually needs).
+        const benignRe = /(favicon\.ico|robots\.txt|apple-touch-icon|manifest\.json|sitemap\.xml|\/_sky\/console)/i;
+        const genericLoadFailRe = /Failed to load resource/i;
+        const realErrors = consoleErrors.filter(e => {
+            if (benignRe.test(e)) return false;
+            // Generic load-failure with nothing non-benign actually failing → benign.
+            if (genericLoadFailRe.test(e) && nonBenignFailedUrls.length === 0) return false;
+            return true;
+        });
         if (realErrors.length > 0 && outcome === 'PASS') {
             outcome = 'FAIL';
-            detail = `console errors: ${realErrors.slice(0, 5).join('; ')}`;
+            detail = `console errors: ${realErrors.slice(0, 5).join('; ')}`
+                   + (nonBenignFailedUrls.length ? ` | failed: ${nonBenignFailedUrls.slice(0, 3).join(', ')}` : '');
         }
     } catch (err) {
         outcome = 'FAIL';

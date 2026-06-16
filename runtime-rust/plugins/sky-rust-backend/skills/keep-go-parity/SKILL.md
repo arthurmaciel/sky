@@ -1,6 +1,6 @@
 ---
 name: keep-go-parity
-description: One command to ingest the latest upstream and re-prove the Rust backend stays at Go parity. Runs sky-rust-backend:sync-with-upstream (resolving merge conflicts autonomously, asking only on a real design decision), then the build + run + equiv sweeps always (run-sweep drives the live/web browser round-trip itself — there is no separate web sweep), plus the perf sweep when any new example or a Go-backend perf change lands. Use when the user asks to keep Go parity, sync upstream and re-verify, or after an upstream release. Trigger: /sky-rust-backend:keep-go-parity.
+description: One command to ingest the latest upstream and re-prove the Rust backend stays at Go parity. Runs sky-rust-backend:sync-with-upstream (resolving merge conflicts autonomously, asking only on a real design decision), then the build(+equiv) + run sweeps always (build-sweep carries Go≡Rust equivalence; run-sweep drives the live/web browser round-trip — there are no separate equiv or web sweeps), plus the perf sweep when any new example or a Go-backend perf change lands. Use when the user asks to keep Go parity, sync upstream and re-verify, or after an upstream release. Trigger: /sky-rust-backend:keep-go-parity.
 ---
 
 # keep-go-parity
@@ -36,26 +36,30 @@ needed is skipped.
    ```bash
    bash runtime-rust/scripts/keep-go-parity.sh plan
    ```
-   Read the `PLAN_*` lines: `PLAN_BUILD`/`PLAN_RUN`/`PLAN_EQUIV` are always 1;
-   `PLAN_PERF` is 1 when any new example landed OR the Go backend changed.
-   **`UNCLASSIFIED_EXAMPLES`** must read `none` — any listed example is a hard
-   blocker (see step 4's gate). The browser round-trip for live/web examples is
-   now part of run-sweep (no separate web phase).
+   Read the `PLAN_*` lines: `PLAN_BUILD`/`PLAN_RUN` are always 1; `PLAN_PERF` is 1
+   when any new example landed OR the Go backend changed. **`UNCLASSIFIED_EXAMPLES`**
+   must read `none` — any listed example is a hard blocker (see step 4's gate).
+   build-sweep carries Go≡Rust equivalence; the browser round-trip for live/web
+   examples is part of run-sweep (no separate equiv or web phase).
 
 4. **Run the sweeps per the plan:**
-   - **Always:** **sky-rust-backend:build-sweep** → (only if build passed)
-     **sky-rust-backend:run-sweep** → **sky-rust-backend:equiv-sweep**. A build
-     failure is a parity break — stop; don't run later phases on a broken build.
-     **run-sweep itself drives the live/web browser round-trip** (it dispatches
-     per shape: cli/server/tui-pty/webview-xvfb/live-browser), so there is no
-     separate web sweep to run.
-   - **equiv-sweep is the Go≡Rust output-parity gate AND the classification gate.**
-     It runs every example classified `in` (deterministic output) and **fails if
-     any example on disk is unclassified** in `equiv-classification.tsv`. So if
-     the merge added an example, classify it `in`/`out` (with a reason) FIRST —
-     "Go parity maintained" cannot be claimed while anything is unclassified.
+   - **Always:** **sky-rust-backend:build-sweep** → (only if it passed)
+     **sky-rust-backend:run-sweep**. A build/equiv failure is a parity break —
+     stop; don't run the run phase on a broken build. **build-sweep itself asserts
+     Go≡Rust EQUIVALENCE** per the example's equiv mode (stdout-diff cli /
+     both-pass-scenario live / both-serve server / both-no-crash tui), so there is
+     no separate equiv sweep. **run-sweep itself drives the live/web browser
+     round-trip** (it dispatches per shape: cli/server/tui-pty/webview-xvfb/
+     live-browser), so there is no separate web sweep.
+   - **build-sweep is the Go≡Rust equivalence gate AND the classification gate.**
+     It runs each example per its equiv MODE and **fails if any example on disk is
+     unclassified** in `equiv-classification.tsv`. So if the merge added an
+     example, give it an equiv mode (derive from `example_shape`, with a reason)
+     FIRST — "Go parity maintained" cannot be claimed while anything is
+     unclassified.
    - **New web/live example?** run-sweep covers it automatically (scenario derived
-     from the example name → falls back to `smoke`). Author a richer scenario in
+     from the example name → falls back to `smoke`); build-sweep runs the SAME
+     scenario against both backends. Author a richer scenario in
      `scripts/verify-scenarios.mjs` if the smoke fallback is too thin.
    - **If `PLAN_PERF=1`:** **sky-rust-backend:perf-sweep** — needs the user to
      close apps first, so follow that skill's close-the-apps reminder and wait for
@@ -79,16 +83,17 @@ needed is skipped.
    enters the pipeline (no-deferral). Use skydex, not Gortex (it OOMs this repo).
 
 6. **Report the consolidated parity verdict** — upstream version + merge commit;
-   then per phase: build PASS/FAIL, run `N ran-OK · M failed`, equiv `N match · M
-   differ` + classification coverage, web `N pass · M fail` (if run), perf summary
-   (if run), and the **kernel-parity backlog** from step 5 (`N go-only kernels`,
-   noting any newly introduced by this sync). **"✓ GO PARITY MAINTAINED" only when
-   build+run+equiv(+web if run) are green AND every example is classified** — the
-   skydex backlog is reported but does NOT gate the verdict. Otherwise "✗ GO
-   PARITY NOT MAINTAINED".
+   then per phase: build+equiv PASS/FAIL with the per-mode equiv counts
+   (`stdout=N scenario=N serve=N pty=N · build-only=N`) + classification coverage,
+   run `N ran-OK · M failed` (browser round-trip included), perf summary (if run),
+   and the **kernel-parity backlog** from step 5 (`N go-only kernels`, noting any
+   newly introduced by this sync). **"✓ GO PARITY MAINTAINED" only when
+   build+equiv+run are green AND every example is classified** — the skydex
+   backlog is reported but does NOT gate the verdict. Otherwise "✗ GO PARITY NOT
+   MAINTAINED".
 
-> The whole always-run chain (build → run → equiv [→ web]) is also one command
-> for non-agent use: `keep-go-parity.sh run` (perf stays surfaced, not run).
+> The whole always-run chain (build+equiv → run) is also one command for
+> non-agent use: `keep-go-parity.sh run` (perf stays surfaced, not run).
 
 ## Why a planner, not one mega-script
 
@@ -100,9 +105,9 @@ sweeps keep their own skill semantics.
 
 **Non-agent shortcut.** `keep-go-parity.sh run` (after you've synced upstream
 yourself) prints the plan AND auto-runs the warranted load-tolerant sweeps
-(build → run → web-if-warranted); perf is surfaced as a recommendation, not run
-(it needs apps closed). The agent flow above is richer (drives the sync + perf
-with their reminders); `run` is for a user without an agent.
+(build+equiv → run); perf is surfaced as a recommendation, not run (it needs apps
+closed). The agent flow above is richer (drives the sync + perf with their
+reminders); `run` is for a user without an agent.
 
 ## Baked-in gotchas
 
