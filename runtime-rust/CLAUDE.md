@@ -38,7 +38,27 @@ Generated `Cargo.toml [profile.dev]` already drops debuginfo (`debug = 0`,
 **Gortex OOMs this machine on this repo** (the global `~/.claude/CLAUDE.md`
 mandates Gortex MCP tools — that mandate does NOT apply here; Gortex ballooned
 past 15 GB and hung the box). Use **`skydex`**, the bounded Sky-tuned index
-(`tools/skydex/`, ~64 MB peak; `tools/skydex/README.md`), or plain Read/Grep.
+(`tools/skydex/`, ~64 MB peak; `tools/skydex/README.md`), or plain Read / `rg`.
+
+**For free-text search use `rg` (ripgrep), NEVER `grep`/`Grep`.** skydex answers
+SYMBOL/relationship queries (parity, deps, callers, `locate`); `rg` answers
+free-text code-idiom searches inside file bodies that a symbol index can't
+(`rg -F '-> SkyTask<()>'`, `rg 'pub mod'`). `rg` is installed and far faster than
+grep — recursive by default and respects `.gitignore` (generated dirs skipped).
+Most useful flags:
+
+| Flag | Use |
+|---|---|
+| `-n` | line numbers (clickable `file:line`) |
+| `-F` | fixed/literal string — for idioms with regex metachars (`-> SkyTask<()>`, `::<_, ()>`) |
+| `-w` | whole-word match (`rg -w set_empty`) |
+| `-i` / `-S` | case-insensitive / smart-case |
+| `-t hs` `-t rust` `-t go` | restrict to a language (`-t hs 'ecPipeInnerType'`) |
+| `-g '<glob>'` | restrict by path glob (`-g 'src/Sky/Generate/Rust/**'`) |
+| `-A N` `-B N` `-C N` | trailing / leading / surrounding context lines |
+| `-l` / `-c` | files-with-matches only / count per file |
+| `-o` | print only the matched text (extract names) |
+| `--no-ignore` | include gitignored files (rarely needed; defeats the bounded default) |
 
 Build once, then query (binary: `tools/skydex/target/release/skydex`; user alias
 `sx`; run from the repo root):
