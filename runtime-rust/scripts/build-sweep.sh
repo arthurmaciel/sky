@@ -51,7 +51,11 @@ say ""; say ">>> BUILD SWEEP  (SKY_CONSOLE_PREBUILD=off; build_set from lib/exam
     n=$(basename "$d")
     [ -f "${d}/src/Main.sky" ] || continue
     ( cd "$d" && rm -rf sky-out .skycache .skydeps )
-    if ! ( cd "$d" && timeout 180 "$SKY_BIN" build src/Main.sky --target rust >/tmp/sweep-$n.sky.log 2>&1 ); then
+    # examples/rust/* carry heavy Rust wrapper deps (stripe/firebase/firestore →
+    # aws-lc-rs/tokio/rustls); a cold first build needs far more than the 180s
+    # that suffices for the stdlib examples.
+    tmo=180; case "$d" in examples/rust/*) tmo=1800;; esac
+    if ! ( cd "$d" && timeout "$tmo" "$SKY_BIN" build src/Main.sky --target rust >/tmp/sweep-$n.sky.log 2>&1 ); then
       if rg -qE "Non-exhaustive|CallStack \(from HasCallStack\)|Prelude\.[a-z]+: |internal error" /tmp/sweep-$n.sky.log 2>/dev/null; then
         r="sky-CRASH"
       else
