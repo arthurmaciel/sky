@@ -97,6 +97,8 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    ,"pub mod telemetry;"
                    ,"pub mod log;","pub mod trace;","pub mod system;","pub mod time;"
                    ,"pub mod random;","pub mod file;","pub mod crypto;"
+                   -- Sky.Core.Path — pure, dependency-free (go-parity 2026-06-15)
+                   ,"pub mod path;"
                    ,"pub mod json;"
                    -- Sub-project A — stdlib kernel modules (sub-A.1, A.2, A.4, A.6)
                    ,"pub mod encoding;","pub mod regex_kernel;","pub mod jwt;"
@@ -119,6 +121,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                   ,"pub use task::*;","pub use log::*;","pub use trace::*;"
                   ,"pub use system::*;","pub use time::*;"
                   ,"pub use random::*;","pub use file::*;"
+                  ,"pub use path::*;"
                   ,"pub use crypto::*;","pub use json::*;"
                   ,"pub use encoding::*;","pub use regex_kernel::*;"
                   ,"pub use jwt::*;","pub use decimal::*;"

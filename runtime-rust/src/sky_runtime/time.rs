@@ -26,6 +26,69 @@ pub fn time_unix_millis<E: Send + 'static>(_: ()) -> SkyTask<E, i64> { time_now(
 
 pub fn time_time_string(ms: i64) -> String { format!("timestamp:{}", ms) }
 
+/// `Time.addMillis : Int -> Int -> Int` — pure integer addition.
+/// Go: `return AsInt(ms) + AsInt(delta)`. Args order: delta first, ms second
+/// (matches the Sky sig `addMillis : Int -> Int -> Int`, called
+/// `Time.addMillis delta ms`).
+pub fn time_add_millis(delta: i64, ms: i64) -> i64 { ms + delta }
+
+/// `Time.diffMillis : Int -> Int -> Int` — `later - earlier`.
+/// Go: `return AsInt(later) - AsInt(earlier)`. Args: (later, earlier).
+pub fn time_diff_millis(later: i64, earlier: i64) -> i64 { later - earlier }
+
+/// `Time.format : String -> Int -> String` — custom Go-style layout.
+/// Go uses `t.UTC().Format(layout)`. We map the Go reference-time layout to
+/// chrono's strftime format. Sky exposes the Go layout directly
+/// ("2006-01-02 15:04:05"), so we translate the Go reference time tokens.
+/// Fallback to a best-effort strftime for unrecognised tokens (matches the
+/// open-ended nature of Go's `t.Format`).
+pub fn time_format(layout: String, ms: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    let dt = match Utc.timestamp_millis_opt(ms).single() {
+        Some(d) => d,
+        None => return String::new(),
+    };
+    // Translate Go reference-time placeholders to chrono strftime.
+    // Go's reference time: Mon Jan 2 15:04:05 MST 2006 (= 2006-01-02 15:04:05).
+    let strfmt = layout
+        .replace("2006", "%Y")
+        .replace("01", "%m")
+        .replace("02", "%d")
+        .replace("15", "%H")
+        .replace("04", "%M")
+        .replace("05", "%S")
+        .replace("Jan", "%b")
+        .replace("Mon", "%a")
+        .replace("MST", "UTC")
+        .replace(".000", ".%3f")
+        .replace(".000000", ".%6f")
+        .replace("PM", "%p")
+        .replace("pm", "%P");
+    dt.format(&strfmt).to_string()
+}
+
+/// `Time.formatHTTP : Int -> String` — HTTP date header format.
+/// Go: `t.UTC().Format(http.TimeFormat)` → "Mon, 02 Jan 2006 15:04:05 GMT".
+/// chrono's `%a, %d %b %Y %H:%M:%S GMT` produces byte-identical output.
+pub fn time_format_http(ms: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    match Utc.timestamp_millis_opt(ms).single() {
+        Some(dt) => dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+        None => String::new(),
+    }
+}
+
+/// `Time.formatRFC3339 : Int -> String` — RFC 3339 / ISO 8601 with nanoseconds.
+/// Go: `t.UTC().Format(time.RFC3339Nano)` → "2006-01-02T15:04:05.999999999Z".
+/// chrono's `to_rfc3339` produces RFC 3339 with sub-second precision when non-zero.
+pub fn time_format_rfc3339(ms: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    match Utc.timestamp_millis_opt(ms).single() {
+        Some(dt) => dt.to_rfc3339(),
+        None => String::new(),
+    }
+}
+
 /// === Std.Time advanced — IANA zones + calendar math ===
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::Tz;
@@ -401,5 +464,45 @@ mod time_advanced_tests {
     fn test_zone_offset_unknown_returns_err() {
         let r: SkyResult<String, i64> = time_zone_offset("Not/AZone".into(), 0);
         assert!(matches!(r, SkyResult::Err(_)));
+    }
+
+    // ── New kernels (go-parity gaps sweep 2026-06-15) ─────────────────────────
+
+    #[test]
+    fn test_add_millis() {
+        assert_eq!(time_add_millis(1000, 5000), 6000);
+        assert_eq!(time_add_millis(-500, 1000), 500);
+        assert_eq!(time_add_millis(0, 999), 999);
+    }
+
+    #[test]
+    fn test_diff_millis() {
+        assert_eq!(time_diff_millis(5000, 3000), 2000);
+        assert_eq!(time_diff_millis(1000, 3000), -2000);
+        assert_eq!(time_diff_millis(42, 42), 0);
+    }
+
+    #[test]
+    fn test_format_http() {
+        // 1970-01-01 00:00:00 UTC = epoch 0.
+        // Go's http.TimeFormat gives "Thu, 01 Jan 1970 00:00:00 GMT".
+        let s = time_format_http(0);
+        assert!(s.contains("1970"), "HTTP format for epoch 0: {}", s);
+        assert!(s.ends_with("GMT"), "HTTP format must end in GMT: {}", s);
+    }
+
+    #[test]
+    fn test_format_rfc3339() {
+        let s = time_format_rfc3339(0);
+        // chrono's to_rfc3339 produces "1970-01-01T00:00:00+00:00" for epoch 0.
+        assert!(s.starts_with("1970-01-01T"), "RFC3339 for epoch 0: {}", s);
+    }
+
+    #[test]
+    fn test_format_http_out_of_range() {
+        // An invalid timestamp should return "" rather than panic.
+        let s = time_format_http(i64::MAX);
+        // Either empty or some valid string — just must not panic.
+        let _ = s;
     }
 }

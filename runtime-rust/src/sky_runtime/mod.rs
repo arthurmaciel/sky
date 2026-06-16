@@ -19,6 +19,10 @@ pub mod random;
 #[cfg(feature = "crypto")]
 pub mod crypto;
 pub mod file;
+pub use file::*;
+
+pub mod path;
+pub use path::*;
 
 #[cfg(feature = "json")]
 pub mod json;

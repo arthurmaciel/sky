@@ -75,3 +75,77 @@ pub fn random_choice<E: Send + From<String> + 'static>(items: Vec<String>) -> Sk
     let idx = lcg_next() as usize % items.len();
     Box::pin(ready(ok_res(items.get(idx).cloned().unwrap_or_default())))
 }
+
+/// `Random.choice : List a -> Task Error (Maybe a)` (kernel name `Random_choiceMaybe`).
+/// Returns `Ok Nothing` on empty list, `Ok (Just elem)` otherwise — never Err.
+/// Matches Go's `Random_choiceMaybe` which uses `Ok(makeMaybeNothing())` /
+/// `Ok(makeMaybeJust(...))`.
+pub fn random_choice_maybe<E: Send + 'static, T: Clone + Send + 'static>(
+    items: Vec<T>,
+) -> SkyTask<E, SkyMaybe<T>> {
+    lcg_init();
+    let out = if items.is_empty() {
+        SkyMaybe::Nothing
+    } else {
+        let idx = lcg_next() as usize % items.len();
+        // get() is always Some here: idx < items.len()
+        match items.get(idx) {
+            Some(x) => SkyMaybe::Just(x.clone()),
+            None => SkyMaybe::Nothing, // unreachable by construction
+        }
+    };
+    Box::pin(ready(ok_res(out)))
+}
+
+/// `Random.shuffle : List a -> Task Error (List a)` — Fisher-Yates.
+/// Matches Go's `Random_shuffle` which uses `mrand.Shuffle` over a copy of
+/// the list (input not mutated).
+pub fn random_shuffle<E: Send + 'static, T: Clone + Send + 'static>(
+    items: Vec<T>,
+) -> SkyTask<E, Vec<T>> {
+    lcg_init();
+    let mut result = items;
+    let n = result.len();
+    // LCG-based Fisher-Yates (Knuth shuffle): iterate from the last element
+    // backward and swap with a random element at or before it.
+    for i in (1..n).rev() {
+        let j = lcg_next() as usize % (i + 1);
+        result.swap(i, j);
+    }
+    Box::pin(ready(ok_res(result)))
+}
+
+/// `Random.weighted : List (Float, a) -> Task Error (Maybe a)`.
+/// Each tuple is `(weight, value)`; picks proportionally by weight. Non-positive
+/// weights are skipped. Returns `Ok Nothing` when every weight is ≤ 0 or the
+/// list is empty — matches Go's `Random_weighted`.
+pub fn random_weighted<E: Send + 'static, T: Clone + Send + 'static>(
+    items: Vec<(f64, T)>,
+) -> SkyTask<E, SkyMaybe<T>> {
+    lcg_init();
+    // Filter to positive-weight entries and compute total.
+    let positive: Vec<(f64, &T)> = items
+        .iter()
+        .filter(|(w, _)| *w > 0.0)
+        .map(|(w, v)| (*w, v))
+        .collect();
+    if positive.is_empty() {
+        return Box::pin(ready(ok_res(SkyMaybe::Nothing)));
+    }
+    let total: f64 = positive.iter().map(|(w, _)| w).sum();
+    // Map LCG output to [0.0, 1.0) then scale.
+    let r = (lcg_next() >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0) * total;
+    let mut cum = 0.0;
+    for (w, v) in &positive {
+        cum += w;
+        if r < cum {
+            return Box::pin(ready(ok_res(SkyMaybe::Just((*v).clone()))));
+        }
+    }
+    // Floating-point rounding fallthrough — return last (matches Go's fallthrough).
+    let last = positive.last().map(|(_, v)| (*v).clone());
+    Box::pin(ready(ok_res(match last {
+        Some(v) => SkyMaybe::Just(v),
+        None => SkyMaybe::Nothing,
+    })))
+}

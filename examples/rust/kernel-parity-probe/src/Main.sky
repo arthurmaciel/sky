@@ -1,0 +1,110 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Sky.Core.List as List
+import Sky.Core.Dict as Dict
+import Sky.Core.Maybe as Maybe
+import Sky.Core.Path as Path
+import Sky.Core.File as File
+import Sky.Core.Time as Time
+import Sky.Core.Random as Random
+import Std.Log exposing (println)
+
+
+-- Pure kernels exercised inline; effectful ones via the Task chain in `main`.
+purePart : String
+purePart =
+    let
+        -- String (go-parity additions)
+        s1 = String.padLeft 5 '0' "42"               -- "00042"
+        s2 = String.dropLeft 2 "hello"                -- "llo"
+        s3 = String.dropRight 2 "hello"               -- "hel"
+        s4 = String.concat [ "a", "b", "c" ]          -- "abc"
+        s5 = String.casefold "HeLLo"                  -- "hello"
+        s6 = String.fromList (String.toList "xy")     -- "xy"
+        s7 = String.trimStart "   hi"                 -- "hi"
+        s8 = String.trimEnd "bye   "                  -- "bye"
+        eq = String.equalFold "ABC" "abc"             -- True
+
+        -- Path (go-parity additions)
+        p1 = Path.base "/a/b/c.txt"                   -- "c.txt"
+        p2 = Path.dir "/a/b/c.txt"                    -- "/a/b"
+        p3 = Path.ext "/a/b/c.txt"                    -- ".txt"
+        p4 = Path.isAbsolute "/a"                     -- True
+
+        -- Dict (size / isEmpty / union + HOF map / foldl)
+        d0 = Dict.fromList [ ( "a", 1 ), ( "b", 2 ) ]
+        d1 = Dict.fromList [ ( "b", 9 ), ( "c", 3 ) ]
+        dU = Dict.union d0 d1                         -- left-biased a=1 b=2 c=3
+        dSize = Dict.size dU                          -- 3
+        dEmpty = Dict.isEmpty (Dict.remove "a" (Dict.remove "b" d0))  -- True
+        dM = Dict.map (\_ v -> v + 1) d0              -- a=2 b=3
+        dMa = Maybe.withDefault 0 (Dict.get "a" dM)   -- 2
+        dF = Dict.foldl (\_ v acc -> acc + v) 0 d0    -- 3
+
+        -- Time (pure additions)
+        t1 = Time.addMillis 1000 5000                 -- 6000
+        t2 = Time.diffMillis 9000 4000                -- 5000
+        t3 = Time.formatRFC3339 0                     -- 1970-01-01T00:00:00...
+    in
+    String.join " "
+        [ "padLeft=" ++ s1
+        , "dropLeft=" ++ s2
+        , "dropRight=" ++ s3
+        , "concat=" ++ s4
+        , "casefold=" ++ s5
+        , "roundtrip=" ++ s6
+        , "trimStart=" ++ s7
+        , "trimEnd=" ++ s8
+        , "equalFold=" ++ boolStr eq
+        , "base=" ++ p1
+        , "dir=" ++ p2
+        , "ext=" ++ p3
+        , "isAbs=" ++ boolStr p4
+        , "unionSize=" ++ String.fromInt dSize
+        , "isEmpty=" ++ boolStr dEmpty
+        , "mapGetA=" ++ String.fromInt dMa
+        , "foldlSum=" ++ String.fromInt dF
+        , "addMillis=" ++ String.fromInt t1
+        , "diffMillis=" ++ String.fromInt t2
+        , "rfc3339=" ++ t3
+        ]
+
+
+boolStr : Bool -> String
+boolStr b =
+    if b then
+        "true"
+
+    else
+        "false"
+
+
+main =
+    let
+        path =
+            "/tmp/sky-kernel-parity-probe.txt"
+    in
+    File.writeFile path "line1\n"
+        |> Task.andThen (\_ -> File.append path "line2\n")
+        |> Task.andThen (\_ -> File.readFile path)
+        |> Task.andThen
+            (\content ->
+                let
+                    _ =
+                        println ("PURE " ++ purePart)
+
+                    _ =
+                        println ("fileCycleLines=" ++ String.fromInt (List.length (String.lines (String.trimEnd content))))
+                in
+                File.remove path
+            )
+        |> Task.andThen (\_ -> Random.shuffle [ 1, 2, 3, 4, 5 ])
+        |> Task.andThen
+            (\xs ->
+                println ("shuffleLen=" ++ String.fromInt (List.length xs))
+            )
+        |> Task.andThen (\_ -> println "PROBE OK")
+        |> Task.run

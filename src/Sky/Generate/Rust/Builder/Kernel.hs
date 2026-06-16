@@ -170,6 +170,21 @@ kernelToRust mod name = case (mod, name) of
     -- acronym to `i_s_o8601` (one `_` per capital), which has no runtime fn.
     ("Time", "formatISO8601")     -> "time_format_iso8601"
     ("Sky.Core.Time", "formatISO8601") -> "time_format_iso8601"
+    -- Time missing-five (go-parity kernel-gaps sweep 2026-06-15).
+    -- addMillis / diffMillis are pure (no Task wrapper); format*/formatHTTP/
+    -- formatRFC3339 are pure String-returning fns. ALL need explicit routing
+    -- because the default toSnakeCase mangles acronyms: "formatHTTP" →
+    -- "time_format_h_t_t_p", "formatRFC3339" → "time_format_r_f_c3339".
+    ("Time", "addMillis")         -> "time_add_millis"
+    ("Sky.Core.Time", "addMillis") -> "time_add_millis"
+    ("Time", "diffMillis")        -> "time_diff_millis"
+    ("Sky.Core.Time", "diffMillis") -> "time_diff_millis"
+    ("Time", "format")            -> "time_format"
+    ("Sky.Core.Time", "format")   -> "time_format"
+    ("Time", "formatHTTP")        -> "time_format_http"
+    ("Sky.Core.Time", "formatHTTP") -> "time_format_http"
+    ("Time", "formatRFC3339")     -> "time_format_rfc3339"
+    ("Sky.Core.Time", "formatRFC3339") -> "time_format_rfc3339"
     ("Time", "addDays")           -> "time_add_days"
     ("Time", "addHours")          -> "time_add_hours"
     ("Time", "addMinutes")        -> "time_add_minutes"
@@ -324,6 +339,20 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Dict", "member") -> "dict_member"
     ("Dict", "fromList")        -> "dict_from_list"
     ("Sky.Core.Dict", "fromList") -> "dict_from_list"
+    -- Dict missing-five (go-parity kernel-gaps sweep 2026-06-15)
+    -- `size`/`isEmpty` snake-case fine (dict_size, dict_is_empty); `union`,
+    -- `map`, `foldl` also snake-case fine. Listed explicitly for clarity +
+    -- to ensure both the short and fully-qualified aliases are covered.
+    ("Dict", "size")              -> "dict_size"
+    ("Sky.Core.Dict", "size")     -> "dict_size"
+    ("Dict", "isEmpty")           -> "dict_is_empty"
+    ("Sky.Core.Dict", "isEmpty")  -> "dict_is_empty"
+    ("Dict", "union")             -> "dict_union"
+    ("Sky.Core.Dict", "union")    -> "dict_union"
+    ("Dict", "map")               -> "dict_map"
+    ("Sky.Core.Dict", "map")      -> "dict_map"
+    ("Dict", "foldl")             -> "dict_foldl"
+    ("Sky.Core.Dict", "foldl")    -> "dict_foldl"
     -- sub-A.8 T6 — Sky.Core.String additions (4 kernels)
     ("String", "replace")           -> "string_replace"
     ("Sky.Core.String", "replace")  -> "string_replace"
@@ -462,11 +491,43 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Task", "fromResult") -> "task_from_result"
     ("Task", "andThenResult") -> "task_and_then_result"
     ("Sky.Core.Task", "andThenResult") -> "task_and_then_result"
+    -- Random missing-three (go-parity kernel-gaps sweep 2026-06-15).
+    -- `choice` in Sky.Core.Random.sky is `Ffi.kernel "Random_choiceMaybe"`.
+    -- `shuffle` and `weighted` snake-case fine but listed explicitly for
+    -- robustness against future toSnakeCase changes to uppercase runs.
+    ("Random", "choiceMaybe")         -> "random_choice_maybe"
+    ("Sky.Core.Random", "choiceMaybe") -> "random_choice_maybe"
+    -- `choice` in the stdlib calls the kernel `Random_choiceMaybe` directly,
+    -- so we also map the logical name in case any call site uses it.
+    ("Random", "shuffle")             -> "random_shuffle"
+    ("Sky.Core.Random", "shuffle")    -> "random_shuffle"
+    ("Random", "weighted")            -> "random_weighted"
+    ("Sky.Core.Random", "weighted")   -> "random_weighted"
+    -- System.getcwd : () -> Task Error String — backward-compat alias.
+    -- Go: `System_getcwd` delegates to `System_cwd`. toSnakeCase would give
+    -- `sky_core_system_getcwd` (wrong prefix), so we route explicitly.
+    ("System", "getcwd")              -> "system_getcwd"
+    ("Sky.Core.System", "getcwd")     -> "system_getcwd"
     -- Json.Decode.Pipeline
     ("JsonDecP", "required") -> "json_dec_p_required"
     ("Sky.Core.Json.Decode.Pipeline", "required") -> "json_dec_p_required"
     ("JsonDecP", "optional") -> "json_dec_p_optional"
     ("Sky.Core.Json.Decode.Pipeline", "optional") -> "json_dec_p_optional"
+    -- JsonDecP.custom + requiredAt (go-parity kernel-gaps sweep 2026-06-15)
+    ("JsonDecP", "custom") -> "json_dec_p_custom"
+    ("Sky.Core.Json.Decode.Pipeline", "custom") -> "json_dec_p_custom"
+    ("JsonDecP", "requiredAt") -> "json_dec_p_required_at"
+    ("Sky.Core.Json.Decode.Pipeline", "requiredAt") -> "json_dec_p_required_at"
+    -- JsonDec.index (go-parity kernel-gaps sweep 2026-06-15)
+    ("JsonDec", "index") -> "json_dec_index"
+    ("Sky.Core.Json.Decode", "index") -> "json_dec_index"
+    -- JsonDec.map2 / map3 / map4
+    ("JsonDec", "map2") -> "json_dec_map2"
+    ("Sky.Core.Json.Decode", "map2") -> "json_dec_map2"
+    ("JsonDec", "map3") -> "json_dec_map3"
+    ("Sky.Core.Json.Decode", "map3") -> "json_dec_map3"
+    ("JsonDec", "map4") -> "json_dec_map4"
+    ("Sky.Core.Json.Decode", "map4") -> "json_dec_map4"
     -- Log kernel functions: route to runtime implementations
     ("Log", "println") -> "log_info"
     ("Std.Log", "println") -> "log_info"

@@ -50,6 +50,23 @@ pub fn json_dec_null<E: From<String> + 'static, A: Default + Send>() -> Decoder<
 pub fn json_dec_field<E: From<String> + 'static, T: 'static + Send>(name: String, decoder: Decoder<E, T>) -> Decoder<E, T> {
     Box::new(move |v| match v.get(&name) { Some(field) => decoder(field), None => json_dec_err_str(format!("missing field: {}", name)) })
 }
+/// `JsonDec.index : Int -> Decoder a -> Decoder a` — decode the n-th element
+/// of a JSON array. Out-of-bounds or non-array input is `Err`. Matches Go's
+/// `JsonDec_index` which checks `[]any` bounds and prepends `"[N]"` to error
+/// paths (we inline the path prefix in the error message for parity).
+pub fn json_dec_index<E: From<String> + 'static, T: 'static + Send>(n: i64, decoder: Decoder<E, T>) -> Decoder<E, T> {
+    Box::new(move |v| match v.as_array() {
+        None => json_dec_err_str(format!("[{}]: expected array", n)),
+        Some(arr) => {
+            let idx = n as usize;
+            match arr.get(idx) {
+                None => json_dec_err_str(format!("[{}]: index out of range (len={})", n, arr.len())),
+                Some(elem) => decoder(elem),
+            }
+        }
+    })
+}
+
 pub fn json_dec_at<E: From<String> + 'static, T: 'static + Send>(path: Vec<String>, decoder: Decoder<E, T>) -> Decoder<E, T> {
     Box::new(move |v| {
         let mut cur = v;
@@ -211,6 +228,40 @@ pub fn json_dec_p_optional<E: From<String> + 'static, T: Clone + 'static + Send,
     Box::new(move |v| {
         let field_val = match v.get(&n) { Some(val) => match d(val) { SkyResult::Ok(t) => t, _ => def.clone() }, None => def.clone() };
         match nd(v) { SkyResult::Ok(f) => SkyResult::Ok(f(field_val)), _ => json_dec_err_str("opt next error".into()) }
+    })
+}
+
+/// `JsonDecP.requiredAt : List String -> Decoder a -> Decoder (a -> b) -> Decoder b`.
+/// Like `required` but walks a nested path before decoding. Matches Go's
+/// `JsonDecP_requiredAt` which iterates the `List String` path by successive
+/// `.get(key)` calls, hard-erroring on any missing segment or non-object node.
+pub fn json_dec_p_required_at<E: From<String> + 'static, T: 'static, F: 'static>(
+    path: Vec<String>,
+    decoder: Decoder<E, T>,
+    next_decoder: Decoder<E, Box<dyn FnOnce(T) -> F + Send>>,
+) -> Decoder<E, F> {
+    let p = path;
+    let d = decoder;
+    let nd = next_decoder;
+    Box::new(move |v| {
+        // Walk the path into the JSON value.
+        let mut cur: &JsonVal = v;
+        for key in &p {
+            match cur.get(key) {
+                Some(next) => cur = next,
+                None => return json_dec_err_str(format!("requiredAt: missing path segment {:?}", key)),
+            }
+        }
+        // Decode the target value.
+        let field_val = match d(cur) {
+            SkyResult::Ok(t) => t,
+            SkyResult::Err(_) => return json_dec_err_str(format!("requiredAt: decode failed at path {:?}", p)),
+        };
+        // Apply the accumulator function from the pipeline.
+        match nd(v) {
+            SkyResult::Ok(f) => ok_res(f(field_val)),
+            SkyResult::Err(_) => json_dec_err_str("requiredAt: next decode error".into()),
+        }
     })
 }
 

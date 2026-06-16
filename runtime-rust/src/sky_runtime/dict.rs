@@ -74,6 +74,68 @@ pub fn dict_from_list<K: Hash + Eq, V>(pairs: Vec<(K, V)>) -> HashMap<K, V> {
     pairs.into_iter().collect()
 }
 
+/// `Dict.size : Dict k v -> Int`. Returns the number of key/value pairs.
+pub fn dict_size<K, V>(d: HashMap<K, V>) -> i64 {
+    d.len() as i64
+}
+
+/// `Dict.isEmpty : Dict k v -> Bool`.
+pub fn dict_is_empty<K, V>(d: HashMap<K, V>) -> bool {
+    d.is_empty()
+}
+
+/// `Dict.union : Dict k v -> Dict k v -> Dict k v`.
+/// Left-biased: `a`'s bindings win on collision (matches Go's `Dict_union` —
+/// Go inserts `mb` first then `ma` overwrites, so `ma` wins).
+pub fn dict_union<K: Hash + Eq + Clone, V: Clone>(
+    a: HashMap<K, V>,
+    b: HashMap<K, V>,
+) -> HashMap<K, V> {
+    let mut result = b; // b's entries as the base
+    for (k, v) in a {
+        result.insert(k, v); // a's entries overwrite → left-biased
+    }
+    result
+}
+
+/// `Dict.map : (k -> v -> w) -> Dict k v -> Dict k w`.
+/// Applies `f k v` to every entry; returns a new dict with the transformed
+/// values. Iteration order is sorted by key for determinism (matches `dict_keys`
+/// / `dict_values` / `dict_foldl`).
+pub fn dict_map<K: Ord + Hash + Eq + Clone, V: Clone, W, F>(
+    f: F,
+    d: HashMap<K, V>,
+) -> HashMap<K, W>
+where
+    F: Fn(K, V) -> W,
+{
+    // Sort for determinism, then apply.
+    let mut pairs: Vec<(K, V)> = d.into_iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs.into_iter().map(|(k, v)| {
+        let w = f(k.clone(), v);
+        (k, w)
+    }).collect()
+}
+
+/// `Dict.foldl : (k -> v -> a -> a) -> a -> Dict k v -> a`.
+/// Accumulates over every entry in **sorted-key order** (matches Sky's
+/// `_fieldIndex`/sorted-key iteration contract; Go's `Dict_foldl` iterates
+/// map-order but the sorted-key guarantee is a Rust-backend strengthening that
+/// matches `dict_keys` / `dict_values` / `dict_to_list` / `dict_map` here).
+pub fn dict_foldl<K: Ord + Hash + Eq, V, A, F>(
+    f: F,
+    acc: A,
+    d: HashMap<K, V>,
+) -> A
+where
+    F: Fn(K, V, A) -> A,
+{
+    let mut pairs: Vec<(K, V)> = d.into_iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    pairs.into_iter().fold(acc, |a, (k, v)| f(k, v, a))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +181,55 @@ mod tests {
     fn test_dict_empty_keys() {
         let d: SkyDict<i64> = dict_empty();
         assert!(dict_keys(d).is_empty());
+    }
+
+    #[test]
+    fn test_dict_size_and_is_empty() {
+        let d: SkyDict<i64> = dict_empty();
+        assert!(dict_is_empty(d.clone()));
+        assert_eq!(dict_size(d.clone()), 0);
+        let d = dict_insert("x".into(), 42, d);
+        assert!(!dict_is_empty(d.clone()));
+        assert_eq!(dict_size(d), 1);
+    }
+
+    #[test]
+    fn test_dict_union_left_biased() {
+        let a: SkyDict<i64> = dict_from_list(vec![
+            ("x".into(), 1),
+            ("y".into(), 2),
+        ]);
+        let b: SkyDict<i64> = dict_from_list(vec![
+            ("y".into(), 99), // should be overwritten by a's y=2
+            ("z".into(), 3),
+        ]);
+        let merged = dict_union(a, b);
+        // a wins for "y"
+        assert_eq!(merged.get("x"), Some(&1));
+        assert_eq!(merged.get("y"), Some(&2));
+        assert_eq!(merged.get("z"), Some(&3));
+    }
+
+    #[test]
+    fn test_dict_map_sorted() {
+        let d: SkyDict<i64> = dict_from_list(vec![
+            ("b".into(), 2),
+            ("a".into(), 1),
+        ]);
+        let result: HashMap<String, i64> = dict_map(|_k, v| v * 10, d);
+        assert_eq!(result.get("a"), Some(&10));
+        assert_eq!(result.get("b"), Some(&20));
+    }
+
+    #[test]
+    fn test_dict_foldl_sorted_order() {
+        let d: SkyDict<i64> = dict_from_list(vec![
+            ("c".into(), 3),
+            ("a".into(), 1),
+            ("b".into(), 2),
+        ]);
+        // Collect keys in fold order; should be sorted (a, b, c).
+        let keys_seen = dict_foldl(|k, _v, mut acc: Vec<String>| { acc.push(k); acc }, vec![], d);
+        assert_eq!(keys_seen, vec!["a".to_string(), "b".into(), "c".into()]);
     }
 }

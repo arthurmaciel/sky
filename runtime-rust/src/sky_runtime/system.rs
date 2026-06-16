@@ -132,6 +132,12 @@ pub fn system_cwd<E: Send + From<String> + 'static>(_: ()) -> SkyTask<E, String>
     }
 }
 
+/// `System.getcwd : () -> Task Error String` — backward-compat alias for `cwd`.
+/// Go: `func System_getcwd(unit any) any { return System_cwd(unit) }`.
+pub fn system_getcwd<E: Send + From<String> + 'static>(unit: ()) -> SkyTask<E, String> {
+    system_cwd(unit)
+}
+
 /// `System.loadEnv : () -> Task Error ()`. Parses a `.env` file in the CWD
 /// (KEY=VALUE per line, `#` comments, optional surrounding quotes) and sets
 /// each var WITHOUT overriding one already present in the process environment
