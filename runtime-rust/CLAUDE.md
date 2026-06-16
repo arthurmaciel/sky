@@ -275,8 +275,39 @@ log** — hold it to the same bar as a code review:
   `.skyi` advertises `String` but codegen emits `SkyError`, so `Err e` can't be
   read. Encode any status the Sky side inspects in the **Ok** payload
   (`_status=...`), never in the `Err` slot.
+- **Sky's ONE global `Decoder a` forces a SHARED Rust decoder, not per-source
+  specialization.** JsonDec/DbDec/Config all use the same `Decoder a` (no source
+  type param), so codegen renders every `Decoder a` identically and can't pick
+  `Decoder<JsonVal,…>` vs `Decoder<Row,…>`. The correct in-boundary design:
+  ONE `Decoder<E,T> = Box<dyn Fn(&JsonVal) -> SkyResult<E,T>>`, COMBINATORS shared
+  (DbDec.map → json_dec_map — they're source-agnostic), SOURCE unified on JsonVal
+  (a DB row is a `JsonVal::Object` of string/Null fields via a NULL-preserving
+  `row_to_json`), PRIMITIVES source-specific + total (db_dec_int parses a string
+  field). Correct-by-construction: runner fns fix the source. See
+  [[../docs/superpowers/specs/2026-06-16-dbdec-subsystem]].
+- **Generated Sky ADTs can't cross the runtime FFI boundary — the runtime can't
+  name or destructure them.** `Money`, `SqlValue`, `SqlField` are per-project
+  GENERATED enums; a kernel taking `List (String, SqlField)` receives an opaque
+  type the runtime can't match. Either the runtime returns a non-ADT shape and
+  CODEGEN wraps it into the ADT at the call site (e.g. `db_dec_money` returns
+  `(Decimal,String)`; codegen emits a `json_dec_map` building the Money ctor), or
+  codegen destructures the ADT into a runtime-friendly form BEFORE the kernel
+  call. This is a recurring class (money / Db.insertFields / SqlValue params).
 
 ### Pitfalls
+- **A NEW runtime `*.rs` file needs THREE wirings, none auto-discovered:** the
+  source `runtime-rust/src/sky_runtime/mod.rs` (`pub mod x; pub use x::*;` — for
+  the standalone `cargo build --features full`), AND `Project.hs`'s `baseMods`
+  (`"pub mod x;"`) AND `baseUse` (`"pub use x::*;"`) — the GENERATED project's
+  `mod.rs` is a hardcoded codegen list, NOT a directory scan. Miss the Project.hs
+  re-export and the file is copied but its fns are unreachable (`E0425 cannot
+  find function`). Cost a debugging loop on `path.rs`/`set.rs` — verify with
+  `rg 'pub (mod|use) x' <generated>/sky_runtime/mod.rs`.
+- **skydex `parity` is a PRESENCE index, not a type checker — it OVER-credits.**
+  A kernel reads "ok" if a conventionally-named Rust fn exists, even when it's
+  unrouted in Kernel.hs or arity/type-wrong (e.g. `db_dec_nullable` exists but
+  takes 2 args vs Sky's 1 → latent cargo-fail if used). The behavioral PROBE is
+  the truth; don't trust a `parity` drop without a build+run probe of the kernel.
 - **Parallel agents race on shared build state:** the one `CARGO_TARGET_DIR`
   (holds only the last build → clobber), the example's `sky-out`/`.skycache`
   (`resource busy`), and a shared wrapper git repo (commit race). Guardrail:
