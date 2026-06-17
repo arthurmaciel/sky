@@ -17,6 +17,55 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-17 16:00 — Known-limitations triage + fix sweep (8 in-boundary fixes + 1 regression)
+
+Triaged the README "Known limitations" list (4-investigator read-only swarm),
+ranked most-feasible → least, then fixed every in-boundary REAL item top-down.
+Each fix: pre-fix-failing fixture + independent pre-final gate + per-fixture
+validation (NO local sweep — CI verifies). Commits (newest last):
+
+- **List.sort/sortBy/sortWith** (`21a15560`) — were kernel-anchored HM sigs with
+  no Rust kernel → `List.sortBy` type-checked then E0425. Added 3 runtime kernels
+  (stable, total NaN→Equal) + Kernel.hs routes + element-typed comparator closure.
+- **`any` record field** (`8599d376`) — a bare-wildcard `any` field emitted an
+  undefined Rust `any` (E0412 cascade). Now fails LOUD at codegen
+  (`error[Rust]: any-typed record field …`); declared-param `any` still generic.
+  (README's promised diagnostic never existed.)
+- **Ffi.callTask static** (`592d3b74`) — static-shape call hit a panic polyfill;
+  added the peephole arm (resolves to the Task kernel) + honest dynamic-path msg.
+- **Result Ok→i64** (`b8a2e574`) — unannotated `Ok v -> Ok v` defaulted the
+  payload to i64 (E0308); recover E/A from a concrete enclosing return / callee
+  param slot, strictly gated (Task excluded, call-arg vs body separated).
+- **withTransaction isolation** (`4fb186b9`) — BEGIN/body/COMMIT ran on different
+  pool connections → rollback silently failed on a multi-conn pool. Acquire one
+  dedicated connection, route every body DB op through a tokio::task_local!.
+- **errorToString String-quoting** (`a6712e6b`) — Debug quoted strings (`"hi"` vs
+  Go's `hi`). New total `SkyStringify` trait (String unquoted, Go-%v scalars/Vec/
+  map), narrowly-propagated bound, per-type codegen impls. `+regression fix`
+  (`0abe2e60`): co-located SkyStringify impls for Std.Ui/Html runtime types
+  (Color/Element/Attribute/Html/… — the generated sky_show recurses into fields;
+  was E0599 on every Std.Ui project incl. 26-ui-showcase).
+- **Task.retryWith** (`283cae5d`) — see the 15:00 entry (real retry loop).
+- **non-Clone capture** (`15e6258f`) — a single-use bound SkyTask captured into a
+  closure is now MOVED (not cloned → E0599); additive (Clone captures byte-
+  identical); conservative provable-SkyTask predicate.
+- **string_drop_right** (`d9ef16ed`) — total iterator form, clears the deny-level
+  clippy slicing-may-panic (was a bounds-guaranteed false positive).
+
+NO-FIX items (README to relabel via update-docs): Dict.union (STALE — already
+implemented), Bytes non-ASCII (BY-DESIGN — Latin-1 lossless; real fix needs
+out-of-boundary Bytes=Vec<u8>), un-nameable FFI drops (BY-DESIGN soundness
+filter), rustdoc-nightly (EXTERNAL — rustdoc-JSON unstable upstream), WASM
+(REQUIRES-REWRITE — Send-everywhere task model), Ffi.callTask dynamic tail
+(BY-DESIGN no-reflection). Residuals: errorToString ADT %v (Go's flattened-struct
+layout unreproducible by a Rust enum); retryWith bound-value task (one-shot —
+inline-expression form retries).
+
+- **Affected:** `runtime-rust/src/sky_runtime/{list,basics,stringify,task,db,string,ui/element,html}.rs`,
+  `runtime-rust/src/sky_runtime/mod.rs`, `src/Sky/Generate/Rust/Project.hs`,
+  `src/Sky/Generate/Rust/Builder/{Kernel,ExprEmitter,ModuleEmitter,Types,Emitter}.hs`,
+  `runtime-rust/tests/sky/{56,57,58,59,60,61,62}-*`.
+
 ## 2026-06-17 15:00 — Task.retryWith: real retry loop (was run-once)
 
 **Bug.** `task_retry_with` (runtime) was the identity function (dropped the
