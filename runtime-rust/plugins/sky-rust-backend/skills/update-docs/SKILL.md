@@ -8,6 +8,16 @@ description: "Commit pending Rust-backend code changes, then refresh runtime-rus
 Commit all pending work in the Sky compiler repo (`feat/runtime-rust` branch),
 then refresh `runtime-rust/README.md` to reflect current state.
 
+**This skill is the SOLE writer of `runtime-rust/README.md`** (settled rule in
+`runtime-rust/CLAUDE.md`). No other workflow edits the README — advancing work logs
+to `runtime-rust/PROGRESS.md` instead. The README is a *pristine current-state
+snapshot*: **NO history, dates, phases, tiers, SHAs, PR/issue numbers, or
+changelog language** — only what the backend IS right now. Regenerate each section
+from current truth, reading three inputs: **`PROGRESS.md`** (the dated step log),
+**`git log`**, and **the actual current source**. History belongs in PROGRESS.md;
+generalizable learnings/pitfalls in `CLAUDE.md`'s `## Agent learnings` — never in
+the README. (Typically run as a background session when called.)
+
 ## Steps (execute in order, no exceptions)
 
 ### Step 1 — Commit pending code changes
@@ -27,7 +37,7 @@ Run `git status --short` to see what's dirty.
      principle. If the authoring step didn't run it, run it now (don't commit
      ungated code). Clean → continue. A principle hurt → rethink + reimplement;
      re-review. No adequate in-boundary fix → REVERT, LOG it in
-     `runtime-rust/README.md`, and SIGNAL the user — never commit a violation.
+     `runtime-rust/PROGRESS.md`, and SIGNAL the user — never commit a violation.
   4. Write a commit message that accurately describes what changed (follow the
      project's `<type>(<scope>): <summary>` convention, e.g.
      `fix(rust): …` / `feat(rust): …` / `refactor(rust): …`).
@@ -38,12 +48,15 @@ Run `git status --short` to see what's dirty.
 ### Step 2 — Consolidate root docs, then refresh `runtime-rust/README.md`
 
 **Enforce the root-`.md` policy first.** At `runtime-rust/` root, ONLY
-`CLAUDE.md` and `README.md` may exist. If any other root `.md` is present (a
-`*_LEDGER.md`, `CONTEXT.md`, an `UPSTREAM-*.md`, a stray notes file), **fold its
-still-relevant content into the right `README.md` section** (decisions →
-soundness/decision ledger; glossary → Understanding-the-project; TODOs/plans →
-roadmap + divergences checklist) and **`git rm` the file** in the same commit.
-Never create a new standalone root `.md`. (`docs/` subdir files are exempt.)
+`CLAUDE.md`, `README.md`, and `PROGRESS.md` may exist. `PROGRESS.md` is the
+history/archaeology sink — an INPUT to this skill, never folded INTO the README
+(its dated entries stay there; the README distils current state, not history). If
+any OTHER root `.md` is present (a `*_LEDGER.md`, `CONTEXT.md`, an `UPSTREAM-*.md`,
+a stray notes file), **fold its still-relevant *current-state* content into the
+right `README.md` section**, move any **history** into `PROGRESS.md`, move any
+**learning/pitfall** into `CLAUDE.md`, and **`git rm` the file** in the same
+commit. Never create a new standalone root `.md`. (`docs/` subdir files are
+exempt.)
 
 Read the current `runtime-rust/README.md` to understand its structure (do NOT
 skip this — the file may have changed since the skill was written).

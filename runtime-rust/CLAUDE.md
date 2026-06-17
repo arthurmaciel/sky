@@ -31,6 +31,20 @@ rule here is mandatory, not optional. Current settled rules:
   `skyshop-rs`). Sky projects that exist ONLY as Rust-backend tests/fixtures live
   under **`runtime-rust/tests/sky/`**, never in `examples/`.
 - **`rg`, never `grep`** — even on piped stdin (`… | rg`).
+- **`README.md` is written ONLY by `sky-rust-backend:update-docs`.** Never edit it
+  directly when advancing work — it is a *pristine current-state snapshot* with NO
+  history, dates, phases, tiers, SHAs, or changelog language. This is the cure for
+  multiple-sources-of-truth drift: progress is logged elsewhere, the README is
+  *regenerated* from current truth.
+  - **Log every step to `PROGRESS.md`** (the history / archaeology sink): an entry
+    `## YYYY-MM-DD HH:MM — title` + what/why + the **Affected** files (newest at
+    top). This is the ONLY place history/dates/SHAs belong.
+  - **Generalizable learnings & pitfalls** → the `## Agent learnings` section of
+    THIS file (also no history/dates).
+  - `update-docs` mirrors current status into `README.md` from `PROGRESS.md` +
+    `git log` + the actual source (typically a background session when called).
+  - Allowed `runtime-rust/` root `.md` files: **`CLAUDE.md`, `README.md`,
+    `PROGRESS.md`** — nothing else.
 
 ## Goal
 Transpile Sky (Elm-compatible functional language) to Rust with native FFI to Rust libraries.
