@@ -81,6 +81,62 @@ pub fn list_all<T0>(f: impl Fn(T0) -> bool + Clone, list: Vec<T0>) -> bool {
     list.into_iter().all(f)
 }
 
+// ── Sorting (mirrors Go's List_sort / List_sortBy; sortWith added for Rust) ──
+//
+// All three are STABLE (Rust's `Vec::sort_by` / `sort_by_key` are stable, matching
+// Go's `sort.SliceStable`). None can panic on well-typed input: ordering is total
+// (`total_cmp` via `cmp_total`), so a NaN key never trips the `Ord` contract the
+// way a naive `partial_cmp().unwrap()` would.
+
+/// Total ordering for any `PartialOrd` element. `partial_cmp` only returns `None`
+/// for incomparable values (e.g. floating-point NaN); we map that to `Equal` so the
+/// sort comparator stays a valid total order and never panics. For Sky's
+/// `comparable` (Int / Float / Char / String / and tuples/lists thereof) the only
+/// `None` case is NaN, which Sky code can't construct from a literal anyway.
+fn cmp_total<T: PartialOrd>(a: &T, b: &T) -> std::cmp::Ordering {
+    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// `Sky.Core.List.sort : List comparable -> List comparable` — stable ascending
+/// sort by the element's natural order. Total (no panic on NaN).
+pub fn list_sort<T: PartialOrd>(list: Vec<T>) -> Vec<T> {
+    let mut result = list;
+    result.sort_by(cmp_total);
+    result
+}
+
+/// `Sky.Core.List.sortBy : (a -> comparable) -> List a -> List a` — stable sort by
+/// the `keyFn elem` projection. Decorate-sort-undecorate: `keyFn` is applied
+/// exactly once per element (no repeated key recomputation during comparison).
+/// `A: Clone` because the Sky closure ABI takes its element by value — same bound
+/// `list_filter` already carries for its predicate.
+pub fn list_sort_by<A: Clone, B: PartialOrd>(key_fn: impl Fn(A) -> B, list: Vec<A>) -> Vec<A> {
+    // Decorate: compute each key once, pairing it with its element. The key fn
+    // consumes its argument (owned ABI), so clone the element for the key call
+    // and keep the original to emit after the sort.
+    let mut decorated: Vec<(B, A)> =
+        list.into_iter().map(|x| (key_fn(x.clone()), x)).collect();
+    // Stable sort on the key only (so equal keys preserve input order).
+    decorated.sort_by(|a, b| cmp_total(&a.0, &b.0));
+    // Undecorate.
+    decorated.into_iter().map(|(_, x)| x).collect()
+}
+
+/// `Sky.Core.List.sortWith : (a -> a -> Int) -> List a -> List a` — stable sort by
+/// a user comparator returning a Sky `Int` (negative → first arg orders before the
+/// second, zero → equal, positive → after; matching `Basics.compare`'s -1/0/+1).
+/// The comparator takes its two elements by value (the Sky closure ABI), so `a`
+/// must be `Clone`. The `Int` → `Ordering` map is total — every `i64` lands in
+/// exactly one of Less / Equal / Greater.
+pub fn list_sort_with<A: Clone>(cmp: impl Fn(A, A) -> i64, list: Vec<A>) -> Vec<A> {
+    let mut result = list;
+    result.sort_by(|a, b| {
+        let ord = cmp(a.clone(), b.clone());
+        ord.cmp(&0)
+    });
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +170,49 @@ mod tests {
         let xs: Vec<i64> = vec![];
         let result = list_filter_map(SkyMaybe::Just, xs);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_sort_ints() {
+        assert_eq!(list_sort(vec![3i64, 1, 2]), vec![1i64, 2, 3]);
+        assert_eq!(list_sort(Vec::<i64>::new()), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn test_sort_strings() {
+        assert_eq!(
+            list_sort(vec!["banana".to_string(), "apple".into(), "cherry".into()]),
+            vec!["apple".to_string(), "banana".into(), "cherry".into()]
+        );
+    }
+
+    #[test]
+    fn test_sort_floats_with_nan_no_panic() {
+        // NaN must not panic the comparator (total order falls back to Equal).
+        let r = list_sort(vec![3.0f64, f64::NAN, 1.0]);
+        assert_eq!(r.len(), 3);
+    }
+
+    #[test]
+    fn test_sort_by_key_applied_once_and_stable() {
+        // sortBy String.length — stable: equal-length keep input order.
+        let r = list_sort_by(|s: String| s.len() as i64, vec![
+            "ccc".to_string(), "a".into(), "bb".into(), "dd".into(),
+        ]);
+        assert_eq!(r, vec!["a".to_string(), "bb".into(), "dd".into(), "ccc".into()]);
+    }
+
+    #[test]
+    fn test_sort_with_reverse() {
+        // Comparator b - a → descending.
+        let r = list_sort_with(|a: i64, b: i64| b - a, vec![1i64, 3, 2]);
+        assert_eq!(r, vec![3i64, 2, 1]);
+    }
+
+    #[test]
+    fn test_sort_with_stable_on_equal() {
+        // All-equal comparator preserves input order (stable).
+        let r = list_sort_with(|_a: i64, _b: i64| 0, vec![3i64, 1, 2]);
+        assert_eq!(r, vec![3i64, 1, 2]);
     }
 }

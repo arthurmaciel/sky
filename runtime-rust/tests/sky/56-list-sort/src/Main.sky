@@ -1,0 +1,44 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.List as List
+import Sky.Core.String as String
+import Std.Log exposing (println)
+
+
+listIntStr : List Int -> String
+listIntStr xs =
+    String.join "," (List.map String.fromInt xs)
+
+
+main =
+    let
+        -- sort : List comparable -> List comparable
+        sortedInts =
+            List.sort [ 3, 1, 2, 5, 4 ]
+
+        sortedStrings =
+            List.sort [ "banana", "apple", "cherry" ]
+
+        -- sortBy : (a -> comparable) -> List a -> List a
+        -- Key = String.length; "bb" and "dd" share length 2 → stable order kept.
+        sortedByLen =
+            List.sortBy String.length [ "ccc", "a", "bb", "dd" ]
+
+        -- sortWith : (a -> a -> Int) -> List a -> List a
+        -- Descending: comparator returns (b - a).
+        sortedDesc =
+            List.sortWith (\a b -> b - a) [ 1, 4, 2, 5, 3 ]
+
+        result =
+            String.join " | "
+                [ "sort=" ++ listIntStr sortedInts
+                , "sortStr=" ++ String.join "," sortedStrings
+                , "sortByLen=" ++ String.join "," sortedByLen
+                , "sortDesc=" ++ listIntStr sortedDesc
+                ]
+    in
+    println result
+        |> Task.andThen (\_ -> println "LIST SORT PROBE OK")
+        |> Task.run

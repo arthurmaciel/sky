@@ -51,6 +51,12 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.List", "any") -> "list_any"
     ("List", "all") -> "list_all"
     ("Sky.Core.List", "all") -> "list_all"
+    ("List", "sort") -> "list_sort"
+    ("Sky.Core.List", "sort") -> "list_sort"
+    ("List", "sortBy") -> "list_sort_by"
+    ("Sky.Core.List", "sortBy") -> "list_sort_by"
+    ("List", "sortWith") -> "list_sort_with"
+    ("Sky.Core.List", "sortWith") -> "list_sort_with"
     -- String kernel functions: route directly to runtime implementations
     ("String", "fromInt") -> "string_from_int"
     ("Sky.Core.String", "fromInt") -> "string_from_int"

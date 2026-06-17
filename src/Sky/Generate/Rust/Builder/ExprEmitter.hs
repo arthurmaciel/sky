@@ -534,7 +534,8 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
             -- Clear ecForcedClosureParam for the BODY: it types only THIS
             -- closure's own param, not any nested closure inside the body.
             ctx' = ctx { ecCloneVars = allCloneVars, ecCopyVars = ecCopyVars ctx
-                       , ecForcedClosureParam = Nothing, ecIndexedHofClosure = False }
+                       , ecForcedClosureParam = Nothing, ecIndexedHofClosure = False
+                       , ecBinaryHofClosure = False }
             annot = case ecPipeInnerType ctx of
                 Just t | length ps == 1 -> ": " ++ t
                 _ -> ""
@@ -549,6 +550,8 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
                 -- indexedMap's closure is Fn(i64, elem): index param first.
                 | ecIndexedHofClosure ctx, i == (0 :: Int) = patternToRustParam p ++ ": i64"
                 | ecIndexedHofClosure ctx, i == (1 :: Int), Just s <- ecForcedClosureParam ctx = patternToRustParam p ++ ": " ++ s
+                -- sortWith comparator: BOTH params are the element type.
+                | ecBinaryHofClosure ctx, i `elem` [0, 1 :: Int], Just s <- ecForcedClosureParam ctx = patternToRustParam p ++ ": " ++ s
                 | i == (0 :: Int), Just s <- ecForcedClosureParam ctx = patternToRustParam p ++ ": " ++ s
                 | not (null annot) = patternToRustParam p ++ annot
                 | Just s <- inferRecordClosureParam ctx pn body = patternToRustParam p ++ ": " ++ s
@@ -2835,7 +2838,8 @@ emitDefaultCall ctx fn calleeName args =
                               -- return annotation on a plain-value closure
                               -- (report.rs `r.tx.account : String` annotated Task).
                               = argToRustString (ctx { ecForcedClosureParam = Just et, ecPipeInnerType = Nothing
-                                                     , ecIndexedHofClosure = bareCallee == "list_indexed_map" }) noCloneFn a
+                                                     , ecIndexedHofClosure = bareCallee == "list_indexed_map"
+                                                     , ecBinaryHofClosure = bareCallee `elem` ["list_sort_with", "sky_core_list_sort_with"] }) noCloneFn a
             | otherwise       = argToRustString ctx noCloneFn a
         bareCallee = takeWhile (/= ':') calleeName
         -- list HOFs whose FIRST arg is the element-consuming closure and whose
@@ -2846,6 +2850,14 @@ emitDefaultCall ctx fn calleeName args =
             [ "list_map", "list_filter", "list_find", "list_any", "list_all"
             , "list_concat_map", "list_indexed_map", "list_partition"
             , "list_map_consume", "list_take_while", "list_drop_while"
+            -- sortBy: key fn `(a -> comparable)` is 1-param (the element).
+            -- sortWith: comparator `(a -> a -> Int)` is 2-param; BOTH params
+            -- are the ELEMENT type. `ecForcedClosureParam` (set at the
+            -- emit-arg site below) carries that element type; the
+            -- `ecBinaryHofClosure` flag makes annotPsIx apply it to param 0
+            -- AND param 1 (vs the default param-0-only).
+            , "list_sort_by", "sky_core_list_sort_by"
+            , "list_sort_with", "sky_core_list_sort_with"
             -- foldl/foldr: 2-param closure (element, acc); param 0 is the element
             -- (annotPsIx types only index 0), element type from the list (last arg).
             , "list_foldl", "list_foldr"
