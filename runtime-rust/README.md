@@ -46,14 +46,14 @@ under its equivalence mode.
 
 ### Sweep summary (by equivalence mode)
 
-| Mode | N | Proves |
-|---|---|---|
-| `equiv-stdout` | 8 | Go & Rust byte-identical stdout + exit code |
-| `equiv-body` | 4 | byte-identical HTTP response bodies over each comparable GET route |
-| `equiv-scenario` | 13 | same headless-browser round-trip passes on **both** backends (app behaviour, not a DOM diff) |
-| `equiv-pty` | 5 | both drive the Sky.Tui runtime without panic (NOT cell-identical) |
-| `equiv-serve` | 1 | both boot + serve (no comparable GET route to byte-compare) |
-| `n/a` | 6 | no Go comparison possible (webview stub / nondeterministic / Rust-FFI) |
+| Shape | Mode | N | Proves |
+|---|---|---|---|
+| cli | `equiv-stdout` | 8 | Go & Rust byte-identical stdout + exit code |
+| server | `equiv-body` | 4 | byte-identical HTTP response bodies over each comparable GET route |
+| live | `equiv-scenario` | 13 | same headless-browser round-trip passes on **both** backends (app behaviour, not a DOM diff) |
+| tui | `equiv-pty` | 5 | both drive the Sky.Tui runtime without panic (NOT cell-identical) |
+| server | `equiv-serve` | 1 | both boot + serve (no comparable GET route to byte-compare) |
+| webview/cli | `n/a` | 6 | no Go comparison possible (native webview window / nondeterministic / Rust-FFI) |
 
 The sweep is the `sky-rust-backend:examples-sweep` skill — one pass that BUILDS,
 RUNS, and asserts EQUIV per example. `sky-rust-backend:examples-perf-sweep`
@@ -69,45 +69,45 @@ are Rust/Go ratios from the perf sweep: **Thru** (request throughput, **↑** hi
 (cold-start ms, **↓**) · **Bin** (binary size, **↓**). `—` = the shape has no such
 measurement; `n/a` = measured but the probe couldn't compare.
 
-| Build | Run | Example | Shape | Round-trip | Equiv | Notes | Thru ↑ | RSS ↓ | Cold ↓ | Bin ↓ |
-|:-:|:-:|---|---|---|---|---|:-:|:-:|:-:|:-:|
-| ✅ | ✅ | 00-standard-libs | cli | stdout | equiv-stdout | 131/131 assertions; Go ref builds via the fork-local T1 guard (see Cross-backend) | — | 0.21 | 0.59 | 0.054 |
-| ✅ | ✅ | 01-hello-world | cli | stdout | equiv-stdout | | — | 0.14 | 0.13 | 0.015 |
-| ✅ | ✅ | 02-go-stdlib | cli | stdout | n/a | non-deterministic (wall-clock time + live HTTP); Go-stdlib-FFI demo, no stable comparable stdout | — | 0.28 | 0.74 | 0.148 |
-| ✅ | ✅ | 04-local-pkg | cli | stdout | equiv-stdout | multi-module | — | 0.14 | 0.13 | 0.015 |
-| ✅ | ✅ | 06-json | cli | stdout | equiv-stdout | | — | 0.15 | 0.16 | 0.022 |
-| ✅ | ✅ | 07-todo-cli | cli | stdout | n/a | non-deterministic RFC3339Nano banner timestamp (Std.Log format itself matches Go) | — | 0.36 | 0.52 | 0.133 |
-| ✅ | ✅ | 09-live-counter | live | browser (live-counter) | equiv-scenario | | n/a | 0.10 | 1.04 | 0.017 |
-| ✅ | ✅ | 10-live-component | live | browser (live-component) | equiv-scenario | | **3.99×** | 0.30 | 0.96 | 0.017 |
-| ✅ | ✅ | 12-skyvote | live | browser (skyvote) | equiv-scenario | | — | — | — | — |
-| ✅ | ✅ | 14-task-demo | cli | stdout | equiv-stdout | | — | 0.20 | 0.31 | 0.025 |
-| ✅ | ✅ | 15-http-server | server | curl 4 routes | equiv-body 4 | `/` `/redirect` `/api/status` `/cookie-demo` byte-identical | **1.37×** | 0.04 | 0.18 | 0.006 |
-| ✅ | ✅ | 16-skychess | live | browser (skychess) | equiv-scenario | | — | — | — | — |
-| ✅ | ✅ | 17-skymon | live | browser (skymon) | equiv-scenario | | — | — | — | — |
-| ✅ | ✅ | 18-job-queue | live | browser (job-queue) | equiv-scenario | | **3.01×** | 0.61 | 1.02 | 0.029 |
-| ✅ | ✅ | 19-skyforum | live | browser (skyforum) | equiv-scenario | | — | — | — | — |
-| ✅ | ✅ | 20-cli-counter | cli | stdout | equiv-stdout | | — | 0.19 | 0.23 | 0.029 |
-| ✅ | ✅ | 21-tui-stopwatch | tui | pty | equiv-pty | both drive the runtime (not cell-identical) | — | — | — | — |
-| ✅ | ✅ | 22-tui-stopwatch-ui | tui | pty | equiv-pty | | — | — | — | — |
-| ✅ | ✅ | 23-tui-todo | tui | pty | equiv-pty | | — | — | — | — |
-| ✅ | ✅ | 24-tui-kitchen-sink | tui | pty | equiv-pty | | — | — | — | — |
-| ✅ | ✅ | 25-sky-console | live | browser (smoke) | equiv-scenario | | **4.80×** | 0.29 | 0.86 | 0.017 |
-| ✅ | ✅ | 26-ui-showcase | live | browser (smoke) | equiv-scenario | | — | — | — | — |
-| ✅ | ✅ | 27-multi-session-chat | live | browser (smoke) | equiv-scenario | | **4.58×** | 0.52 | 1.14 | 0.029 |
-| ✅ | ✅ | 28-streaming-chat | live | browser (smoke) | equiv-scenario | | **2.88×** | 0.51 | 1.04 | 0.017 |
-| ✅ | ✅ | 29-webview-threejs-spike | webview | xvfb | n/a | webview stub headless — no Go comparison | — | — | — | — |
-| ✅ | ✅ | 30-sse-server-demo | server | curl `/` | equiv-body 1 | SSE route skipped | **1.35×** | 0.05 | 0.21 | 0.006 |
-| ✅ | ✅ | 31-webview-stopwatch-ui | webview | xvfb | n/a | | — | — | — | — |
-| ✅ | ✅ | 32-sse-relay | server | curl `/` | equiv-body 1 | | **1.36×** | 0.10 | 0.20 | 0.015 |
-| ✅ | ✅ | 33-websocket-echo | server | curl `/` | equiv-body 1 | ws route skipped | **1.37×** | 0.04 | 0.21 | 0.007 |
-| ✅ | ✅ | 34-multi-tier-console | live | browser (smoke) | equiv-scenario | | **3.05×** | 0.32 | 0.92 | 0.017 |
-| ✅ | ✅ | 35-composite-generics | cli | stdout | n/a | non-deterministic (Time.now + Dict.toList order) | — | 0.26 | 0.52 | 0.112 |
-| ✅ | ✅ | 36-composite-server | server | curl | equiv-serve | 0 comparable GET routes — both boot | n/a | n/a | n/a | 0.017 |
-| ✅ | ✅ | 37-composite-live-shop | live | browser (smoke) | equiv-scenario | | — | — | — | — |
-| ✅ | ✅ | 38-composite-ui-multibackend | tui | pty | equiv-pty | | — | — | — | — |
-| ✅ | ✅ | simple | cli | stdout | equiv-stdout | | — | 0.20 | 0.29 | 0.027 |
-| ✅ | ✅ | test_pkg | cli | stdout | equiv-stdout | | — | 0.14 | 0.14 | 0.015 |
-| ✅ | ✅ | examples/rust/skyshop-rs | live/FFI | curl | n/a | Rust-FFI app (stripe/firebase/firestore); does not build on Go — Rust-only | — | — | — | — |
+| Build | Run | Example | Shape | Round-trip | Equiv | Thru ↑ | RSS ↓ | Cold ↓ | Bin ↓ |
+|:-:|:-:|---|---|---|---|:-:|:-:|:-:|:-:|
+| ✅ | ✅ | 00-standard-libs | cli | stdout | ✅ | — | 0.21 | 0.59 | 0.054 |
+| ✅ | ✅ | 01-hello-world | cli | stdout | ✅ | — | 0.14 | 0.13 | 0.015 |
+| ✅ | ✅ | 02-go-stdlib | cli | stdout | n/a — non-deterministic (wall-clock time + live HTTP); Go-stdlib-FFI demo, no stable comparable stdout | — | 0.28 | 0.74 | 0.148 |
+| ✅ | ✅ | 04-local-pkg | cli | stdout | ✅ | — | 0.14 | 0.13 | 0.015 |
+| ✅ | ✅ | 06-json | cli | stdout | ✅ | — | 0.15 | 0.16 | 0.022 |
+| ✅ | ✅ | 07-todo-cli | cli | stdout | n/a — non-deterministic RFC3339Nano banner timestamp (Std.Log format itself matches Go) | — | 0.36 | 0.52 | 0.133 |
+| ✅ | ✅ | 09-live-counter | live | browser (live-counter) | ✅ | n/a | 0.10 | 1.04 | 0.017 |
+| ✅ | ✅ | 10-live-component | live | browser (live-component) | ✅ | **3.99×** | 0.30 | 0.96 | 0.017 |
+| ✅ | ✅ | 12-skyvote | live | browser (skyvote) | ✅ | — | — | — | — |
+| ✅ | ✅ | 14-task-demo | cli | stdout | ✅ | — | 0.20 | 0.31 | 0.025 |
+| ✅ | ✅ | 15-http-server | server | curl 4 routes | ✅ | **1.37×** | 0.04 | 0.18 | 0.006 |
+| ✅ | ✅ | 16-skychess | live | browser (skychess) | ✅ | — | — | — | — |
+| ✅ | ✅ | 17-skymon | live | browser (skymon) | ✅ | — | — | — | — |
+| ✅ | ✅ | 18-job-queue | live | browser (job-queue) | ✅ | **3.01×** | 0.61 | 1.02 | 0.029 |
+| ✅ | ✅ | 19-skyforum | live | browser (skyforum) | ✅ | — | — | — | — |
+| ✅ | ✅ | 20-cli-counter | cli | stdout | ✅ | — | 0.19 | 0.23 | 0.029 |
+| ✅ | ✅ | 21-tui-stopwatch | tui | pty | ✅ | — | — | — | — |
+| ✅ | ✅ | 22-tui-stopwatch-ui | tui | pty | ✅ | — | — | — | — |
+| ✅ | ✅ | 23-tui-todo | tui | pty | ✅ | — | — | — | — |
+| ✅ | ✅ | 24-tui-kitchen-sink | tui | pty | ✅ | — | — | — | — |
+| ✅ | ✅ | 25-sky-console | live | browser (smoke) | ✅ | **4.80×** | 0.29 | 0.86 | 0.017 |
+| ✅ | ✅ | 26-ui-showcase | live | browser (smoke) | ✅ | — | — | — | — |
+| ✅ | ✅ | 27-multi-session-chat | live | browser (smoke) | ✅ | **4.58×** | 0.52 | 1.14 | 0.029 |
+| ✅ | ✅ | 28-streaming-chat | live | browser (smoke) | ✅ | **2.88×** | 0.51 | 1.04 | 0.017 |
+| ✅ | ✅ | 29-webview-threejs-spike | webview | xvfb | n/a — native wry window, no comparable output | — | — | — | — |
+| ✅ | ✅ | 30-sse-server-demo | server | curl `/` | ✅ | **1.35×** | 0.05 | 0.21 | 0.006 |
+| ✅ | ✅ | 31-webview-stopwatch-ui | webview | xvfb | n/a | — | — | — | — |
+| ✅ | ✅ | 32-sse-relay | server | curl `/` | ✅ | **1.36×** | 0.10 | 0.20 | 0.015 |
+| ✅ | ✅ | 33-websocket-echo | server | curl `/` | ✅ | **1.37×** | 0.04 | 0.21 | 0.007 |
+| ✅ | ✅ | 34-multi-tier-console | live | browser (smoke) | ✅ | **3.05×** | 0.32 | 0.92 | 0.017 |
+| ✅ | ✅ | 35-composite-generics | cli | stdout | n/a — non-deterministic (Time.now + Dict.toList order) | — | 0.26 | 0.52 | 0.112 |
+| ✅ | ✅ | 36-composite-server | server | curl | ✅ | n/a | n/a | n/a | 0.017 |
+| ✅ | ✅ | 37-composite-live-shop | live | browser (smoke) | ✅ | — | — | — | — |
+| ✅ | ✅ | 38-composite-ui-multibackend | tui | pty | ✅ | — | — | — | — |
+| ✅ | ✅ | simple | cli | stdout | ✅ | — | 0.20 | 0.29 | 0.027 |
+| ✅ | ✅ | test_pkg | cli | stdout | ✅ | — | 0.14 | 0.14 | 0.015 |
+| ✅ | ✅ | examples/rust/skyshop-rs | live/FFI | curl | n/a — Rust-FFI app (stripe/firebase/firestore); does not build on Go — Rust-only | — | — | — | — |
 
 **Equiv modes:** `stdout` = byte-identical stdout + exit · `body N` = N GET-route
 response bodies byte-identical · `scenario` = same headless-browser round-trip
@@ -138,42 +138,6 @@ Sky Source → Haskell Parser → Type-Check → Canonical AST → Rust Codegen 
 All runtime logic lives in `sky_runtime/`; `Builder.hs` emits thin wrappers that
 instantiate `E = SkyError` for the generated project. No inline Rust
 implementation strings in the Haskell codegen.
-
----
-
-## Safety invariant — zero `Any`, one documented `unsafe`
-
-The Rust backend uses Rust's static type system end-to-end. Sky's `any` is
-**never** lowered to `Box<dyn Any>` — that would re-implement Go's `interface{}`,
-the exact bug class this backend exists to avoid. The generated code and the
-Sky-reachable runtime paths use no `transmute`, no raw pointers; the Sky→Rust FFI
-path is safe Rust-crate calls.
-
-The **only** `unsafe` block in the crate is the console child's
-`PR_SET_PDEATHSIG` orphan-guard (`live/console_proxy.rs`): a `pre_exec` closure
-that calls `prctl` (async-signal-safe) between fork and exec. It is not on any
-Sky value path, is `#[cfg(target_os = "linux")]`-gated, documented with a
-`// SAFETY:` rationale, and best-effort (failure is non-fatal).
-
-Heterogeneity is handled with generics + ADTs + concrete runtime bridges, not
-erasure:
-
-| Need | Technique (not `Any`) |
-|---|---|
-| HTTP/WS handlers of project error `E` | erase `E` by awaiting the task + mapping `Err -> 500` (`server_get<E,H>`); handlers stay `Send + Sync + 'static` |
-| `Cmd msg` / `Sub msg` payloads | generic over concrete `M`; the intermediate `a` is erased *inside* a boxed `Future<Output = M>` |
-| Records the runtime must name (Request/Response/Csv/LiveReq/…) | `runtimeOpaqueTypes` bridge to concrete structs/enums (`pub use … as …`) |
-| Polymorphic value storage (`Std.Cache k v`) | a `TypeId`/`K`-keyed container that is correct-by-construction (never payload-dependent) — see the `dyn Any` register |
-
-Audit (must stay empty / minimal; a hit outside the documented sites is a
-design-level regression):
-
-```bash
-# dyn Any: only the correct-by-construction broker/cache containers.
-grep -rEn "dyn Any|std::any|downcast|type_id" runtime-rust/src/ src/Sky/Generate/Rust/ src/Sky/Build/Rust/
-# unsafe: only the cfg(linux) PR_SET_PDEATHSIG pre_exec; transmute/raw-ptr stay empty.
-grep -rEn "\bunsafe\b|transmute|from_raw|into_raw|static mut|\*const |\*mut " runtime-rust/src/
-```
 
 ---
 
@@ -544,68 +508,6 @@ construction:
 
 `html.rs` `OnRaw(String, Arc<dyn Any + Send + Sync>)` is an opaque event payload
 **only ever passed through**, never `downcast` in Rust — no cast, no failure mode.
-
----
-
-## Module structure
-
-`runtime-rust/src/sky_runtime/` — 46 modules. This list is the source of truth for
-standalone-crate testing; `Project.hs` writes a parallel `mod.rs` for the generated
-project (with `cfg(feature)` gating).
-
-**Core + pure kernels**
-
-| Module | What |
-|---|---|
-| `core` | `SkyResult`/`SkyMaybe`/`SkyTask`, list/string/float helpers, byte FFI coercion |
-| `basics` · `string` · `list` · `dict` · `set` · `char_kernel` · `math` | Sky.Core pure surface |
-| `stringify` | `SkyStringify` trait — the total `errorToString`/`debugShow`/`toString` renderer (Go `%v`: String unquoted, scalars Display, `[a b c]` lists, sorted-key maps); per-type impls emitted by codegen |
-| `decimal` · `money` | arbitrary-precision arithmetic + currency-typed Money |
-| `crypto` | `randomBytes`/`token` + sha/hmac/RSA/AEAD (aes-gcm, chacha20, pbkdf2) |
-| `jwt` · `json` · `encoding` · `regex_kernel` · `uuid_kernel` | codecs + crypto-adjacent |
-| `path` | `Sky.Core.Path` |
-
-**Effect kernels (`Task Error a`)**
-
-| Module | What |
-|---|---|
-| `task` | succeed/map/and_then/on_error/fail/perform/sequence/run/parallel |
-| `log` · `system` · `time` · `random` · `file` · `io` | structured logs · env/args · clock · entropy · fs · stdin/stdout/stderr |
-| `db` | `Std.Db` CRUD over sqlx (sqlite/mysql/postgres) |
-| `auth` | `Std.Auth` — bcrypt + jsonwebtoken + sqlx |
-| `compression` · `csv` · `config_decode` · `config` · `email` · `trace` | provider + format + tracing surfaces |
-| `http_client` · `http_stream` | `Sky.Core.Http` client + Sub-tier/relay stream |
-
-**App frameworks**
-
-| Module | What |
-|---|---|
-| `tea` | shared TEA loop (`SubManager`/`spawn_subs`) for the Cli/Tui drivers |
-| `html` | `Html`/`Attribute`/`Event<M>` + `assign_sky_ids` (keyed) + `render_html` (shared serializer) |
-| `ui/` | `Std.Ui` `Element` bridge — shared layout type |
-| `tui/` | Sky.Tui (feature `tui`): app/cell/diff/focus/key/layout — Element → cells |
-| `live/` | Sky.Live (feature `live`) — see below |
-| `server` · `server_stream` | `Sky.Http.Server` routes + server-side SSE/chunked |
-| `ws_client` | `Sky.Core.WebSocket` client |
-| `webview` | `Sky.Webview` stub floor (+ feature-staged wry/tao window) |
-| `telemetry` · `telemetry_spill` | in-RAM rings + WAL spill (console data plane) |
-
-**`live/` submodules:** `diff` (Patch wire schema + faithful keyed diff) · `dispatch`
-(`HandlerIndex<M>` + resolve) · `form` (`decode_form::<T>`) · `route`
-(`match_routes`/`match_params`) · `req` (`LiveReq`) · `store` (`SessionStore` +
-Memory/Sqlite/Postgres/Redis) · `sse` · `pubsub` (per-type `Broker<T>`) · `hub`
-(generic-over-return-type read kernels) · `console`/`console_proxy` (separate-process
-console + orphan-guard) · `observability`/`push_exporter`/`hub_exporter` (auto-instrument
-+ OTLP/JSON push) · `client.js` (browser client, ported verbatim from Go) · `mod`
-(`live_render_static` + `live_app`/`live_app_routed` + per-session driver).
-
-**FFI support**
-
-| Module | What |
-|---|---|
-| `ffi_polyfills` | `Ffi.callPure`/`callTask`/`toAny` polyfills (statically-dead dynamic fallback) |
-| `cache` | `Std.Cache` — per-handle `TypeId`/`K`-keyed store |
-| `config` | GENERATED per `sky.toml` driver — `DbPool`/`DbRow`/`SKY_DB_URL` + driver helpers |
 
 ---
 

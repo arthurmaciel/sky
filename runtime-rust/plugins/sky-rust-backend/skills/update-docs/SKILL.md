@@ -121,25 +121,36 @@ sections (rewrite each from scratch based on what you observe in the repo):
 4. **`sky.toml` Rust fields** — all active sections: `[project]`, `["rust.dependencies"]`,
    `[rust]`, `[rust.shims]` with annotated examples.
 5. **Project status** — the headline + the sweep-summary-by-mode + the **full
-   examples table** (the `examples-sweep` rows, one per example). Canonical column
-   order: **Build · Run · Example · Shape · Round-trip · Equiv · Notes · Thru ↑ ·
-   RSS ↓ · Cold ↓ · Bin ↓**. Build/Run are **per-row** emoji (✅/❌) — check each
-   row from the latest sweep table, never a blanket "all ✅". The four Perf columns
-   are Rust/Go ratios from the latest `examples-perf-sweep` TSV (Thru = throughput
-   ↑better; RSS/Cold/Bin ↓better); `—` = shape unmeasured, `n/a` = measured but the
-   probe couldn't compare. Sources: `~/.cache/sky/examples-sweep/sweep-*.table`
-   (build/run/equiv) + `~/.cache/sky/examples-perf-sweep/perf-*.tsv` (perf ratios)
-   + `PROGRESS.md` + `git log`.
+   examples table** (the `examples-sweep` rows, one per example). The
+   **sweep-summary-by-mode table gets a leading `Shape` column** (the shape/mode
+   each row corresponds to, as the FIRST column). Canonical examples-table column
+   order: **Build · Run · Example · Shape · Round-trip · Equiv · Thru ↑ · RSS ↓ ·
+   Cold ↓ · Bin ↓**. The `Equiv` column is **MERGED** (no separate `Notes`
+   column): a single emoji for the equiv result — **✅** when equiv succeeded (any
+   `equiv-*` value: equiv-stdout / equiv-body / equiv-scenario / equiv-pty /
+   equiv-serve); **❌** when equiv failed (DIFFER); **`n/a`** when not applicable
+   (none / — / go-ref-broken / amber). When the result is ❌ or `n/a`, APPEND the
+   note text after the emoji (e.g. `n/a — non-deterministic cli: prints a
+   wall-clock …`); when ✅, show just ✅ (drop the note). Build/Run are **per-row**
+   emoji (✅/❌) — check each row from the latest sweep table, never a blanket
+   "all ✅". The four Perf columns are Rust/Go ratios from the latest
+   `examples-perf-sweep` TSV (Thru = throughput ↑better; RSS/Cold/Bin ↓better);
+   `—` = shape unmeasured, `n/a` = measured but the probe couldn't compare.
+   Sources: `~/.cache/sky/examples-sweep/sweep-*.table` (build/run/equiv) +
+   `~/.cache/sky/examples-perf-sweep/perf-*.tsv` (perf ratios) + `PROGRESS.md` +
+   `git log`.
 6. **Verification state** — the `runtime-rust/tests/sky/` FFI/framework fixture set
    (a sentence + count) + the runtime unit-test fact (`cargo test --features full`).
    The per-example PARITY table lives under Project status (item 5), not here.
-7. **Module structure** — `runtime-rust/src/sky_runtime/` file map (grouped).
-8. **FFI codegen coercion rules** — `argCall` and `coerceRet` tables (from
+7. **FFI codegen coercion rules** — `argCall` and `coerceRet` tables (from
    `src/Sky/Build/FfiGen.hs emitRustFnSimple`).
-9. **CLI usage** — `sky build/run/check/test/add` with `--target rust`. Place this
+8. **CLI usage** — `sky build/run/check/test/add` with `--target rust`. Place this
    section immediately AFTER `## Goal` (settled README section order).
 9. **Known limitations** — table with Description and Workaround columns.
 10. **Remaining work** — Short / Medium / Long term.
+
+(No "Module structure" section and no "Safety invariant" section — neither is
+mandated nor produced; do not re-add them.)
 
 **Accuracy rules for the README rewrite:**
 - Only mark an example ✅ if you have evidence it builds *and runs* (from git log,
