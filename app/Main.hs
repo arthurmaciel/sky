@@ -1104,34 +1104,40 @@ isLiveRustProject rustDir = do
             content <- readFile' cargoToml   -- strict; handle closed before any later write
             return ("\"live\"" `isInfixOf` content)
 
--- | Sky.Webview build prerequisite check. The generated Cargo.toml pulls wry/tao
--- (native window) only when the program uses Std.Webview; those link against the
--- system webview dev libs. Probe pkg-config BEFORE cargo so a missing lib fails
--- with an actionable install message instead of a cryptic linker error (mirrors
--- Go's cgo-detect message). No-op for non-webview projects.
+-- | Sky.Webview build prerequisite check (Rust target ONLY). The generated
+-- Cargo.toml pulls wry/tao (native window) only when the program uses
+-- Std.Webview; on Linux those link against pkg-config-discovered system webview
+-- dev libs. Probe pkg-config BEFORE cargo so a missing lib fails with an
+-- actionable install message instead of a cryptic linker error (mirrors Go's
+-- cgo-detect message). The probe is gated to Linux: on macOS (WKWebView) and
+-- Windows (the Edge WebView2 runtime) the webview is NOT discovered via
+-- pkg-config, so probing there would false-fail. No-op for non-webview projects.
 checkWebviewLibsRust :: FilePath -> IO ()
-checkWebviewLibsRust rustDir = do
-    let cargoToml = rustDir </> "Cargo.toml"
-    present <- doesFileExist cargoToml
-    when present $ do
-        content <- readFile' cargoToml
-        when ("wry =" `isInfixOf` content) $ do
-            results <- mapM (\p -> do
-                        (ec, _, _) <- readProcessWithExitCode "pkg-config" ["--exists", p] ""
-                        return (p, ec == ExitSuccess)) ["webkit2gtk-4.0", "libsoup-2.4"]
-            let missing = [ p | (p, ok) <- results, not ok ]
-            when (not (null missing)) $ do
-                hPutStrLn stderr $ unlines
-                    [ ""
-                    , "error: Sky.Webview needs system webview dev libraries that are missing:"
-                    , "         " ++ intercalate ", " missing
-                    , "  Install them, then re-run `sky build --target rust`:"
-                    , "    Debian/Ubuntu:  sudo apt install libwebkit2gtk-4.0-dev libsoup2.4-dev"
-                    , "    Fedora:         sudo dnf install webkit2gtk4.0-devel libsoup-devel"
-                    , "    Arch:           sudo pacman -S webkit2gtk libsoup"
-                    , "  (wry 0.24 / tao 0.16 target webkit2gtk-4.0 + libsoup-2.4.)"
-                    ]
-                exitFailure
+checkWebviewLibsRust rustDir
+    | System.Info.os /= "linux" = return ()   -- macOS/Windows: webview isn't pkg-config-found
+    | otherwise = do
+        let cargoToml = rustDir </> "Cargo.toml"
+        present <- doesFileExist cargoToml
+        when present $ do
+            content <- readFile' cargoToml
+            when ("wry =" `isInfixOf` content) $ do
+                -- Modern wry (≥0.25) targets webkit2gtk-4.1 + libsoup-3.0.
+                results <- mapM (\p -> do
+                            (ec, _, _) <- readProcessWithExitCode "pkg-config" ["--exists", p] ""
+                            return (p, ec == ExitSuccess)) ["webkit2gtk-4.1", "libsoup-3.0"]
+                let missing = [ p | (p, ok) <- results, not ok ]
+                when (not (null missing)) $ do
+                    hPutStrLn stderr $ unlines
+                        [ ""
+                        , "error: Sky.Webview needs system webview dev libraries that are missing:"
+                        , "         " ++ intercalate ", " missing
+                        , "  Install them, then re-run `sky build --target rust`:"
+                        , "    Debian/Ubuntu:  sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev"
+                        , "    Fedora:         sudo dnf install webkit2gtk4.1-devel libsoup3-devel"
+                        , "    Arch:           sudo pacman -S webkit2gtk-4.1 libsoup3"
+                        , "  (modern wry/tao target webkit2gtk-4.1 + libsoup-3.0.)"
+                        ]
+                    exitFailure
 
 
 -- | Split a list into N roughly-equal chunks. Used by the install

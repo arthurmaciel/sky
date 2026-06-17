@@ -63,9 +63,10 @@ tokio-tungstenite = "0.24"
 crossterm = "0.28"
 unicode-width = "0.1"
 
-# Webview (native window)
-wry = "0.24"
-tao = "0.16"
+# Webview (native window). Modern wry/tao: objc2 + current windows-rs (builds on
+# macOS-15/Xcode-16 + Windows-2025 MSVC); Linux targets webkit2gtk-4.1 + libsoup-3.0.
+wry = "0.55"
+tao = "0.35"
 
 # Console proxy (unix-only target table in the emitter)
 libc = "0.2"

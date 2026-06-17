@@ -1,12 +1,22 @@
 //! Sky.Webview — native desktop window backend.
 //!
 //! `Webview.app { init, update, view, subscriptions, window }` opens a native
-//! system webview (WebKitGTK on Linux via `wry` + `tao`) and runs the same TEA
-//! loop as Sky.Live, reusing Sky.Live's `Html` renderer + event dispatch
+//! system webview (`wry` ≥0.55 + `tao` ≥0.35: WKWebView on macOS, WebView2 on
+//! Windows, WebKitGTK on Linux — webkit2gtk-4.1 + libsoup-3.0) and runs the same
+//! TEA loop as Sky.Live, reusing Sky.Live's `Html` renderer + event dispatch
 //! (`HandlerIndex`) — the view paints identically across web / terminal /
 //! desktop. The bridge is in-process: `with_html` for the initial paint, an IPC
 //! handler for DOM events, `evaluate_script` for re-renders. No HTTP server, SSE,
 //! or session store.
+//!
+//! Modern wry/tao use objc2 (macOS) + current windows-rs (Windows) and so build
+//! on macOS-15/Xcode-16 + Windows-2025 toolchains — unlike the legacy wry 0.24 /
+//! tao 0.16 stack this replaced. The event loop is per-OS: Linux runs it on the
+//! TEA task thread (off the OS main thread) via `EventLoopBuilderExtUnix::
+//! with_any_thread(true)` (GTK tolerates it for a single-window single-thread
+//! app); macOS/Windows REQUIRE the main thread, so there it is a plain
+//! `EventLoopBuilder::build()`. The webview is built per-OS too: `build(&window)`
+//! (raw-window-handle) off Linux, `build_gtk(window.gtk_window())` on Linux.
 //!
 //! Two builds: the real backend is behind the opt-in `webview` Cargo feature
 //! (needs the system webview dev libraries); otherwise a stub returning a graceful
@@ -162,21 +172,32 @@ mod imp {
         Box::pin(async move {
             use tao::dpi::LogicalSize;
             use tao::event::{Event, WindowEvent};
-            use tao::event_loop::{ControlFlow, EventLoop};
-            use tao::platform::unix::EventLoopExtUnix;
-            use tao::window::{Window, WindowBuilder};
-            use wry::webview::WebViewBuilder;
+            use tao::event_loop::{ControlFlow, EventLoopBuilder};
+            use tao::window::WindowBuilder;
+            use wry::WebViewBuilder;
+            #[cfg(target_os = "linux")]
+            use tao::platform::unix::{EventLoopBuilderExtUnix, WindowExtUnix};
+            #[cfg(target_os = "linux")]
+            use wry::WebViewBuilderExtUnix;
 
             #[derive(Debug)]
             enum UserEvent {
                 Ipc(String),
             }
 
-            // The TEA task is polled off the OS main thread (tokio block_on), so
-            // use the explicit any-thread constructor — tao otherwise panics. Sky
-            // webview programs are single-window single-thread, so the GTK
-            // single-thread caveat is satisfied.
-            let event_loop: EventLoop<UserEvent> = EventLoop::new_any_thread();
+            // Per-OS event loop. On Linux the TEA task is polled off the OS main
+            // thread (tokio block_on), so build with `with_any_thread(true)` —
+            // tao otherwise panics. Sky webview programs are single-window
+            // single-thread, so the GTK single-thread caveat is satisfied. On
+            // macOS/Windows the event loop MUST live on the main thread, so build
+            // it plainly (the TEA task runs on the main thread there).
+            let event_loop = {
+                #[allow(unused_mut)]
+                let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
+                #[cfg(target_os = "linux")]
+                builder.with_any_thread(true);
+                builder.build()
+            };
             let (w, h) = window.size;
             let win = match WindowBuilder::new()
                 .with_title(&window.title)
@@ -194,16 +215,29 @@ mod imp {
             );
 
             let proxy = event_loop.create_proxy();
-            // wry 0.24: `WebViewBuilder::new(window)` takes the window by value and
-            // the WebView owns it; the builder methods are fallible.
-            let built: wry::Result<wry::webview::WebView> = (|| {
-                WebViewBuilder::new(win)?
-                    .with_html(html)?
-                    .with_ipc_handler(move |_w: &Window, req: String| {
-                        let _ = proxy.send_event(UserEvent::Ipc(req));
-                    })
-                    .build()
-            })();
+            // Modern wry: `WebViewBuilder::new()` is no-arg; the window is supplied
+            // at build time. The IPC handler closure receives the message as a
+            // `wry::http::Request<String>`; we forward its body to the TEA loop.
+            let builder = WebViewBuilder::new()
+                .with_html(html)
+                .with_ipc_handler(move |req: wry::http::Request<String>| {
+                    let _ = proxy.send_event(UserEvent::Ipc(req.into_body()));
+                });
+            // Build per-OS: raw-window-handle path off Linux, gtk widget on Linux
+            // (so Wayland + X11 both work). Both return `wry::Result<WebView>`.
+            #[cfg(not(target_os = "linux"))]
+            let built: wry::Result<wry::WebView> = builder.build(&win);
+            #[cfg(target_os = "linux")]
+            // Pack into the window's default vertical `gtk::Box` when present —
+            // a tao `gtk::ApplicationWindow` is a single-child `GtkBin` that
+            // already holds that box, so adding the WebKitWebView to the window
+            // directly is a GTK contract violation (the "can only contain one
+            // widget" warning). The box is the correct container; fall back to
+            // the window only if the default vbox was disabled.
+            let built: wry::Result<wry::WebView> = match win.default_vbox() {
+                Some(vbox) => builder.build_gtk(vbox),
+                None => builder.build_gtk(win.gtk_window()),
+            };
             let webview = match built {
                 Ok(wv) => wv,
                 Err(e) => return SkyResult::Err(format!("Webview.app: webview: {e}").into()),

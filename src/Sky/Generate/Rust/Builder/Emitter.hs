@@ -901,9 +901,10 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     | usesTui uk, "crossterm" `notElem` userDepNames ] ++
     [ cargoDependencyFor "unicode-width"
     | usesTui uk, "unicode-width" `notElem` userDepNames ] ++
-    -- Sky.Webview native window: wry 0.24 / tao 0.16 (webkit2gtk-4.0 + libsoup-2.4
-    -- on Linux). Only when Std.Webview is used; the webview feature (default-on
-    -- above for these projects) compiles webview.rs's real backend against them.
+    -- Sky.Webview native window: modern wry/tao (objc2 + current windows-rs;
+    -- webkit2gtk-4.1 + libsoup-3.0 on Linux). Only when Std.Webview is used; the
+    -- webview feature (default-on above for these projects) compiles webview.rs's
+    -- real backend against them.
     [ cargoDependencyFor name
     | usesWebview uk
     , name <- ["wry", "tao"]

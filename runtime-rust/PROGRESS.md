@@ -17,6 +17,52 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-17 18:30 — Modern wry/tao migration (de-risk the cross-OS webview spine)
+
+Replaced the stale wry 0.24 / tao 0.16 webview stack (legacy `objc 0.2` → breaks
+on Xcode 16; old `webview2-com-sys`/`windows` → breaks on Windows-2025; AND
+unconditional Linux-only `EventLoopExtUnix` → wouldn't even compile on
+macOS/Windows) with **wry 0.55 / tao 0.35 / raw-window-handle 0.6.2** — the modern
+objc2 + current-windows-rs stack that builds on all three OSes. Resolved the triple
+via `cargo add` iteration; built+verified on this Linux box (webkit2gtk-4.1 +
+libsoup-3.0).
+
+API migration in `webview.rs` `webview_app` (real `#[cfg(feature="webview")]` imp):
+- `wry::webview::WebViewBuilder/WebView` → crate-root `wry::WebViewBuilder/WebView`.
+- `WebViewBuilder::new(win)` (by-value) → `WebViewBuilder::new()` (no-arg) +
+  `.with_html(html)` (now infallible) + `.with_ipc_handler` whose closure takes
+  `wry::http::Request<String>` (was `(&Window, String)`) — body via `req.into_body()`.
+- **Per-OS event loop:** `EventLoopBuilder::<UserEvent>::with_user_event()` then
+  `#[cfg(target_os="linux")] builder.with_any_thread(true)` (the old
+  `EventLoopExtUnix::new_any_thread()` is gone in tao 0.35; the builder ext is the
+  replacement) — Linux runs off the OS main thread (tokio block_on); macOS/Windows
+  build plainly on the main thread (required).
+- **Per-OS webview build:** `#[cfg(not(linux))] builder.build(&win)` (raw-window-handle);
+  `#[cfg(linux)] builder.build_gtk(...)`. Packs into `win.default_vbox()` (the
+  `gtk::Box`) when present, falling back to `gtk_window()` — fixes the GTK
+  "can only contain one widget" contract violation (a tao window is a single-child
+  GtkBin already holding that box).
+- Totality preserved: both build paths return `wry::Result<WebView>`; the `Err`
+  arm returns `SkyResult::Err`. Zero unwrap/expect/panic.
+
+`checkWebviewLibsRust` (app/Main.hs, Rust-path-only fn — Go path untouched): gated
+the pkg-config probe to Linux (`System.Info.os /= "linux" → no-op`; macOS WKWebView
+/ Windows WebView2 aren't pkg-config-discovered) and bumped the probed libs to
+**webkit2gtk-4.1 + libsoup-3.0** with matching install hints.
+
+Bumped both pins (`crate-specs.toml` + `runtime-rust/Cargo.toml`); the
+`crate_specs_sync` drift test passes. Cargo.lock re-pinned (wry/tao tree).
+
+Verified on Linux: `cargo build --features webview` clean; `examples/31-webview-
+stopwatch-ui` + `examples/29-webview-threejs-spike` both BUILD + RUN under
+`xvfb-run -a timeout 8` (exit 124 = window stayed open, NO panic, GTK
+widget-conflict warning GONE post-vbox-fix). Drift test green.
+
+**Affected:** `runtime-rust/src/sky_runtime/webview.rs`,
+`src/Sky/Generate/Rust/Builder/crate-specs.toml`,
+`src/Sky/Generate/Rust/Builder/Emitter.hs` (comment), `runtime-rust/Cargo.toml`,
+`runtime-rust/Cargo.lock`, `app/Main.hs` (`checkWebviewLibsRust` only).
+
 ## 2026-06-17 18:00 — CI precision: webview deps + skyshop out-of-scope (the 4 pre-existing reds)
 
 After the limitation fixes, CI's only reds were 4 PRE-EXISTING examples (not
