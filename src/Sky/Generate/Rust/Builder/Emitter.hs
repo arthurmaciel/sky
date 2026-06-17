@@ -210,7 +210,7 @@ emitRust b dbPath dbDriver ffiSlugs =
             , concatMap (concatMap itemToRustStrings . modItems) inlineModules
             , kernelHelperSection
             , ffiPlaceholderSection b
-            , entryPointSection (builderKernels b)
+            , entryPointSection (builderKernels b) (builderMainReturnsTask b)
             ]
     in (mainCode, moduleFiles)
 
@@ -333,9 +333,9 @@ ffiPlaceholderSection b =
     ] ++ map ffiPlaceholder (collectUndefinedTypes b)
 
 -- | Entry point
-entryPointSection :: UsedKernels -> [String]
-entryPointSection uk =
-    let hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk || usesHttpServer uk || usesEmail uk || usesLive uk
+entryPointSection :: UsedKernels -> Bool -> [String]
+entryPointSection uk mainReturnsTask =
+    let _hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk || usesHttpServer uk || usesEmail uk || usesLive uk
         -- sky_main returns SkyTask<()> (needs block_on) UNLESS the user calls
         -- Task.run itself, in which case sky_main returns () and runs the task
         -- inline. Sky.Live is NOT an exception: `live_app`/`live_app_routed`
@@ -343,14 +343,19 @@ entryPointSection uk =
         -- future), so the entry MUST block_on it — dropping it exits the process
         -- before axum binds a port (the binary appeared to "run" but served
         -- nothing). Server.listen is the same shape (returns a block_on'd Task).
-        -- #56 / #24 tenet 3: a backend-entry program (Live.app / Tui.app /
-        -- Tui.program / Webview.app) has its driver future as the real entry, so
-        -- ANY backend-app usage forces the block_on even when usesTaskRun is set
-        -- — otherwise the future is dropped and the app never runs. The inline
-        -- Task.run calls each run on their own throwaway runtime, fine. (Was
-        -- usesLive-only; broadened so pure-Tui / pure-Webview mains, whose
-        -- `App {…} |> Task.run` is now dropped by tenet 2, return a SkyTask too.)
-        mainIsTask = usesLive uk || usesTui uk || usesWebview uk || not (usesTaskRun uk)
+        -- `mainIsTask` ⟺ `sky_main` returns a `SkyTask<…>` (then the entry MUST
+        -- block_on it). The SOUND signal is `builderMainReturnsTask` — the entry
+        -- main body TAIL's task-ness (computed in ModuleEmitter), which also folds
+        -- in backend-entry apps (Live/Tui/Webview drivers return a Task). The old
+        -- `not (usesTaskRun uk)` heuristic was UNSOUND: a main that calls
+        -- `Task.run` inline AND returns a Task tail (14-task-demo:
+        -- `… let _ = Task.run a; printResult "Fail" (Task.run b)`) has
+        -- `usesTaskRun=True` yet `sky_main` keeps `SkyTask<()>`. Pre-deferral the
+        -- mismatch was masked (eager effect kernels fired even on a dropped tail
+        -- future); with deferred effects a dropped tail Task silently loses its
+        -- effect. Mirroring the emitter's `retTy` decision makes the entry and the
+        -- signature agree by construction.
+        mainIsTask = mainReturnsTask
     in
     [ ""
     , "// ==========================================="
@@ -358,19 +363,22 @@ entryPointSection uk =
     , "// ==========================================="
     , ""
     , "fn main() {"
-    ] ++ (if hasTokio && mainIsTask then
-        -- sky_main returns SkyTask<()>, run it via block_on
+    ] ++ (if mainIsTask then
+        -- sky_main returns SkyTask<()> → run it via block_on. The `tokio`
+        -- Cargo feature is ALWAYS in the default set (see emitCargoToml), so
+        -- `block_on` is unconditionally available. This MUST block_on even when
+        -- no "tokio kernel" (db/http/parallel/run) is used: effect kernels are
+        -- DEFERRED (the side effect lives inside the returned future and fires
+        -- only on `.await`), so a `main : Task ()` built from log/io alone would
+        -- silently skip its tail effect if its future were dropped. (`hasTokio`
+        -- is retained for documentation but no longer gates the entry — the
+        -- pre-deferral "no tokio → call and drop" path was only sound while
+        -- effects fired eagerly.)
         [ "    match block_on(sky_main()) {"
         , "        SkyResult::Ok(_) => (),"
         , "        SkyResult::Err(e) => { eprintln!(\"{:?}\", e); std::process::exit(1); }"
         , "    }"
         , "}"
-        ]
-      else if mainIsTask then
-        -- sky_main returns SkyTask<()> but no tokio: side effects fire
-        -- eagerly inside log_info etc.  Call and drop.
-        [ "    sky_main();",
-          "}"
         ]
       else
         -- sky_main returns (), Task.run is used inside

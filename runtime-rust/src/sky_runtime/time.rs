@@ -2,15 +2,14 @@
 use super::*;
 
 #[cfg(feature = "tokio")]
-use std::future::ready;
-
-#[cfg(feature = "tokio")]
 pub fn time_now<E: Send + 'static>(_: ()) -> SkyTask<E, i64> {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
-    Box::pin(ready(ok_res(ms)))
+    Box::pin(async move {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        ok_res(ms)
+    })
 }
 
 #[cfg(feature = "tokio")]

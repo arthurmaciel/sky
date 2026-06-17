@@ -37,7 +37,7 @@ import Sky.Generate.Rust.Builder.SigRegistry
     ( knownDefSig, sigTVars
     )
 import Sky.Generate.Rust.Builder.ExprEmitter
-    ( exprToRustString, collectVarLocalsMulti, taskExprInnerType, solveArgType
+    ( exprToRustString, collectVarLocalsMulti, taskExprInnerType, mainEntryTailReturnsTask, solveArgType
     , inferParamRustType, canDefBody, collectClosureDefs
     , collectLambdaCapturedVars, isClosureParamStr, isBackendEntryApp
     )
@@ -1035,6 +1035,28 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
         -- #24 tenet 3: does `main` yield a backend-entry app-future? Any of these
         -- drivers returns a `SkyTask<()>` the entry must block_on.
         usesBackendApp = usesLive usage || usesTui usage || usesWebview usage
+        -- Does the entry `main`'s emitted `sky_main` RETURN a `SkyTask<…>`? The
+        -- entry must `block_on` it iff so. The SOUND signal is the body TAIL's
+        -- task-ness (see the `retTy` note at `isEntryMain`: keying on
+        -- `usesTaskRun` is unsound — 14-task-demo calls `Task.run` inline yet its
+        -- TAIL is a Task, so `sky_main` keeps `SkyTask<()>` and MUST be
+        -- block_on'd). Pre-deferral this was masked: effect kernels fired eagerly,
+        -- so even a dropped tail future printed. With deferred effects a dropped
+        -- tail Task never runs → the tail effect is silently lost. Mirror the
+        -- emitter's `retTy` decision: backend-entry app OR a Task-typed body tail.
+        mainBodyTailIsTask =
+            usesBackendApp ||
+            (case lookup "main" mainModuleDefs of
+                 Just body -> mainEntryTailReturnsTask solvedTypes body
+                 Nothing   -> False)
+        -- `main`'s body, looked up ONLY in the entry module (`module Main`), so a
+        -- stdlib `<main>` helper (Std.Html.main) never shadows the program entry.
+        mainModuleDefs =
+            [ (n, b)
+            | m <- mods
+            , ModuleName._name (Can._name m) == "Main"
+            , (n, b) <- collectTopDefBodies (Can._decls m)
+            ]
         appMsg = detectAppMsg mods solvedTypes perModuleEnv
         appModel = detectAppModel mods solvedTypes perModuleEnv
         usage = analyzeKernelUsage mods
@@ -1083,5 +1105,19 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
         , builderLiveInitFns = liveInitFns
         , builderLiveReqInitFns = liveReqInitFns
         , builderLiveSerdeTypes = collectLiveSerdeTypes recordMap mods solvedTypes perModuleEnv
+        , builderMainReturnsTask = mainBodyTailIsTask
         }
+
+-- | Top-level def names + bodies of a module's declaration block (entry-`main`
+-- detection). Mirrors `collectLiveReqInitFns`'s local `collectDefBodies` but
+-- keyed name → body (params dropped). Only top-level Declare/DeclareRec defs.
+collectTopDefBodies :: Can.Decls -> [(String, Can.Expr)]
+collectTopDefBodies = goD
+  where
+    goD (Can.Declare def rest)          = ins def ++ goD rest
+    goD (Can.DeclareRec def defs0 rest) = concatMap ins (def : defs0) ++ goD rest
+    goD Can.SaveTheEnvironment          = []
+    ins (Can.Def (Ann.At _ n) _ b)          = [(n, b)]
+    ins (Can.TypedDef (Ann.At _ n) _ _ b _) = [(n, b)]
+    ins _                                   = []
 

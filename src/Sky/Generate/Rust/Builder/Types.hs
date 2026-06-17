@@ -95,6 +95,12 @@ data RustBuilder = RustBuilder
         -- bound (for session persistence) demands it, but deriving serde on
         -- every struct/enum would force serde bounds on function-typed fields
         -- (E0277). Computed by collectLiveSerdeTypes (precise BFS).
+    , builderMainReturnsTask :: Bool
+        -- Does the entry `main`'s emitted `sky_main` return a `SkyTask<…>`? The
+        -- entry point block_on's it iff so. SOUND signal = the main body TAIL's
+        -- task-ness (NOT `usesTaskRun` — a main can call `Task.run` inline AND
+        -- still return a Task tail, e.g. 14-task-demo). Drives `mainIsTask` in
+        -- entryPointSection. Computed by `mainBodyTailIsTask` in ModuleEmitter.
     }
 
 data RustModule = RustModule

@@ -1,25 +1,28 @@
 // Crypto kernel stubs — generic over E where needed.
 use super::*;
-use std::future::ready;
 
 pub fn crypto_random_bytes<E: Send + 'static>(n: i64) -> SkyTask<E, Vec<i64>> {
-    super::random::lcg_init();
-    let mut out = Vec::with_capacity(n as usize);
-    for _ in 0..n { out.push(super::random::lcg_next() as i64); }
-    Box::pin(ready(ok_res(out)))
+    Box::pin(async move {
+        super::random::lcg_init();
+        let mut out = Vec::with_capacity(n as usize);
+        for _ in 0..n { out.push(super::random::lcg_next() as i64); }
+        ok_res(out)
+    })
 }
 
 pub fn crypto_random_token<E: Send + 'static>(n: i64) -> SkyTask<E, String> {
-    super::random::lcg_init();
-    let hex = "0123456789abcdef";
-    let mut out = String::with_capacity((n * 2) as usize);
-    for _ in 0..n {
-        let b = super::random::lcg_next();
-        // `& 0x0f` bounds the index to [0, 15] < 16 (hex.len()); .get keeps it total.
-        out.push(hex.as_bytes().get((b & 0x0f) as usize).copied().unwrap_or(b'0') as char);
-        out.push(hex.as_bytes().get(((b >> 4) & 0x0f) as usize).copied().unwrap_or(b'0') as char);
-    }
-    Box::pin(ready(ok_res(out)))
+    Box::pin(async move {
+        super::random::lcg_init();
+        let hex = "0123456789abcdef";
+        let mut out = String::with_capacity((n * 2) as usize);
+        for _ in 0..n {
+            let b = super::random::lcg_next();
+            // `& 0x0f` bounds the index to [0, 15] < 16 (hex.len()); .get keeps it total.
+            out.push(hex.as_bytes().get((b & 0x0f) as usize).copied().unwrap_or(b'0') as char);
+            out.push(hex.as_bytes().get(((b >> 4) & 0x0f) as usize).copied().unwrap_or(b'0') as char);
+        }
+        ok_res(out)
+    })
 }
 
 pub fn crypto_sha256(s: String) -> String {

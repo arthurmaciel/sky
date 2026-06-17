@@ -38,17 +38,21 @@ pub fn trace_span<E: Send + 'static, A: Send + 'static>(name: String, task: SkyT
 
 // Trace.event : String -> Task Error ()
 pub fn trace_event<E: Send + 'static>(name: String) -> SkyTask<E, ()> {
-    if trace_enabled() {
-        eprintln!("[trace] event {}", name);
-    }
-    Box::pin(async move { ok_res(()) })
+    Box::pin(async move {
+        if trace_enabled() {
+            eprintln!("[trace] event {}", name);
+        }
+        ok_res(())
+    })
 }
 
 // Trace.attr : String -> String -> Task Error ()
 // Keys are namespaced under `sky.trace.` to match the Go runtime.
 pub fn trace_attr<E: Send + 'static>(key: String, value: String) -> SkyTask<E, ()> {
-    if trace_enabled() {
-        eprintln!("[trace] attr sky.trace.{} = {}", key, value);
-    }
-    Box::pin(async move { ok_res(()) })
+    Box::pin(async move {
+        if trace_enabled() {
+            eprintln!("[trace] attr sky.trace.{} = {}", key, value);
+        }
+        ok_res(())
+    })
 }

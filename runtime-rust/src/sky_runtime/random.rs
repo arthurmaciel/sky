@@ -1,6 +1,5 @@
 // Random kernel stubs — generic over E.
 use super::*;
-use std::future::ready;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static LCG_STATE: AtomicU64 = AtomicU64::new(0);
@@ -57,23 +56,29 @@ pub fn random_seeded_choice<T: Clone>(s: i64, items: Vec<T>) -> (SkyMaybe<T>, i6
 }
 
 pub fn random_int<E: Send + 'static>(lo: i64, hi: i64) -> SkyTask<E, i64> {
-    lcg_init();
-    let range = (hi - lo).abs() + 1;
-    let v = lo + (lcg_next() as i64 % range);
-    Box::pin(ready(ok_res(v)))
+    Box::pin(async move {
+        lcg_init();
+        let range = (hi - lo).abs() + 1;
+        let v = lo + (lcg_next() as i64 % range);
+        ok_res(v)
+    })
 }
 
 pub fn random_float<E: Send + 'static>(_: ()) -> SkyTask<E, f64> {
-    lcg_init();
-    let v = (lcg_next() >> 11) as f64 * (1.0 / 9007199254740992.0);
-    Box::pin(ready(ok_res(v)))
+    Box::pin(async move {
+        lcg_init();
+        let v = (lcg_next() >> 11) as f64 * (1.0 / 9007199254740992.0);
+        ok_res(v)
+    })
 }
 
 pub fn random_choice<E: Send + From<String> + 'static>(items: Vec<String>) -> SkyTask<E, String> {
-    lcg_init();
-    if items.is_empty() { return Box::pin(ready(SkyResult::Err(str_err("Random.choice: empty list")))); }
-    let idx = lcg_next() as usize % items.len();
-    Box::pin(ready(ok_res(items.get(idx).cloned().unwrap_or_default())))
+    Box::pin(async move {
+        lcg_init();
+        if items.is_empty() { return SkyResult::Err(str_err("Random.choice: empty list")); }
+        let idx = lcg_next() as usize % items.len();
+        ok_res(items.get(idx).cloned().unwrap_or_default())
+    })
 }
 
 /// `Random.choice : List a -> Task Error (Maybe a)` (kernel name `Random_choiceMaybe`).
@@ -83,18 +88,20 @@ pub fn random_choice<E: Send + From<String> + 'static>(items: Vec<String>) -> Sk
 pub fn random_choice_maybe<E: Send + 'static, T: Clone + Send + 'static>(
     items: Vec<T>,
 ) -> SkyTask<E, SkyMaybe<T>> {
-    lcg_init();
-    let out = if items.is_empty() {
-        SkyMaybe::Nothing
-    } else {
-        let idx = lcg_next() as usize % items.len();
-        // get() is always Some here: idx < items.len()
-        match items.get(idx) {
-            Some(x) => SkyMaybe::Just(x.clone()),
-            None => SkyMaybe::Nothing, // unreachable by construction
-        }
-    };
-    Box::pin(ready(ok_res(out)))
+    Box::pin(async move {
+        lcg_init();
+        let out = if items.is_empty() {
+            SkyMaybe::Nothing
+        } else {
+            let idx = lcg_next() as usize % items.len();
+            // get() is always Some here: idx < items.len()
+            match items.get(idx) {
+                Some(x) => SkyMaybe::Just(x.clone()),
+                None => SkyMaybe::Nothing, // unreachable by construction
+            }
+        };
+        ok_res(out)
+    })
 }
 
 /// `Random.shuffle : List a -> Task Error (List a)` — Fisher-Yates.
@@ -103,16 +110,18 @@ pub fn random_choice_maybe<E: Send + 'static, T: Clone + Send + 'static>(
 pub fn random_shuffle<E: Send + 'static, T: Clone + Send + 'static>(
     items: Vec<T>,
 ) -> SkyTask<E, Vec<T>> {
-    lcg_init();
-    let mut result = items;
-    let n = result.len();
-    // LCG-based Fisher-Yates (Knuth shuffle): iterate from the last element
-    // backward and swap with a random element at or before it.
-    for i in (1..n).rev() {
-        let j = lcg_next() as usize % (i + 1);
-        result.swap(i, j);
-    }
-    Box::pin(ready(ok_res(result)))
+    Box::pin(async move {
+        lcg_init();
+        let mut result = items;
+        let n = result.len();
+        // LCG-based Fisher-Yates (Knuth shuffle): iterate from the last element
+        // backward and swap with a random element at or before it.
+        for i in (1..n).rev() {
+            let j = lcg_next() as usize % (i + 1);
+            result.swap(i, j);
+        }
+        ok_res(result)
+    })
 }
 
 /// `Random.weighted : List (Float, a) -> Task Error (Maybe a)`.
@@ -122,30 +131,32 @@ pub fn random_shuffle<E: Send + 'static, T: Clone + Send + 'static>(
 pub fn random_weighted<E: Send + 'static, T: Clone + Send + 'static>(
     items: Vec<(f64, T)>,
 ) -> SkyTask<E, SkyMaybe<T>> {
-    lcg_init();
-    // Filter to positive-weight entries and compute total.
-    let positive: Vec<(f64, &T)> = items
-        .iter()
-        .filter(|(w, _)| *w > 0.0)
-        .map(|(w, v)| (*w, v))
-        .collect();
-    if positive.is_empty() {
-        return Box::pin(ready(ok_res(SkyMaybe::Nothing)));
-    }
-    let total: f64 = positive.iter().map(|(w, _)| w).sum();
-    // Map LCG output to [0.0, 1.0) then scale.
-    let r = (lcg_next() >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0) * total;
-    let mut cum = 0.0;
-    for (w, v) in &positive {
-        cum += w;
-        if r < cum {
-            return Box::pin(ready(ok_res(SkyMaybe::Just((*v).clone()))));
+    Box::pin(async move {
+        lcg_init();
+        // Filter to positive-weight entries and compute total.
+        let positive: Vec<(f64, &T)> = items
+            .iter()
+            .filter(|(w, _)| *w > 0.0)
+            .map(|(w, v)| (*w, v))
+            .collect();
+        if positive.is_empty() {
+            return ok_res(SkyMaybe::Nothing);
         }
-    }
-    // Floating-point rounding fallthrough — return last (matches Go's fallthrough).
-    let last = positive.last().map(|(_, v)| (*v).clone());
-    Box::pin(ready(ok_res(match last {
-        Some(v) => SkyMaybe::Just(v),
-        None => SkyMaybe::Nothing,
-    })))
+        let total: f64 = positive.iter().map(|(w, _)| w).sum();
+        // Map LCG output to [0.0, 1.0) then scale.
+        let r = (lcg_next() >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0) * total;
+        let mut cum = 0.0;
+        for (w, v) in &positive {
+            cum += w;
+            if r < cum {
+                return ok_res(SkyMaybe::Just((*v).clone()));
+            }
+        }
+        // Floating-point rounding fallthrough — return last (matches Go's fallthrough).
+        let last = positive.last().map(|(_, v)| (*v).clone());
+        match last {
+            Some(v) => ok_res(SkyMaybe::Just(v)),
+            None => ok_res(SkyMaybe::Nothing),
+        }
+    })
 }

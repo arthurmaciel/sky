@@ -26,6 +26,7 @@ module Sky.Generate.Rust.Builder.ExprEmitter
     , splitKernelName
     , exprToRustInner
     , taskExprInnerType
+    , mainEntryTailReturnsTask
     , inferParamRustType
     , collectClosureDefs
     , canDefBody
@@ -145,6 +146,17 @@ substVar ctx name inline = go
                     in fs ++ "(" ++ intercalate ", " as ++ ")"
         Can.Let def body -> goDef def ++ go body
           where
+            -- Deferred-effect Part B, substVar path: a discarded `_ = <task call>`
+            -- must RUN the effect (`task_run`), not bind+drop — with deferred
+            -- effect kernels a bare `let _ = log_println(…)` constructs the future
+            -- and drops it, so the effect never fires (this regressed `simple`'s
+            -- `let _ = println …`, which reaches HERE because `tasks` is inlined by
+            -- substVar). Non-task discards (`_ = List.map …`, `_ = someVar`) keep
+            -- bind/drop. Mirrors the exprToRustInner Def-`"_"` arm.
+            goDef (Can.Def (Ann.At _ "_") [] dBody)
+              | isTaskProducingCall dBody
+              , not (null (taskExprInnerType (ecSolvedTypes ctx) dBody)) =
+                  "task_run::<SkyError, _>(" ++ go dBody ++ "); "
             goDef (Can.Def (Ann.At _ n) [] dBody) = "let " ++ n ++ " = " ++ go dBody ++ "; "
             goDef (Can.Def (Ann.At _ n) ps dBody) = "let " ++ n ++ " = |" ++ intercalate ", " (map patternToRustParam ps) ++ "| { " ++ go dBody ++ " }; "
             goDef _ = error "Builder.Rust.substVar.goDef: unsupported Can.Def variant"
@@ -1768,6 +1780,26 @@ exprToRustInner ctx e = case e of
                 | Just n <- Map.lookup name (collectVarLocalsMulti body), n >= 2 ->
                     let inline = "vec![" ++ intercalate ", " (map (exprToRustString ctx) items) ++ "]"
                     in substVar ctx name inline body
+            -- Discarded Task as a `let _ = TaskExpr` (a DestructDef PAnything OR a
+            -- plain Def whose binder is "_"). Sky auto-forces these — the effect
+            -- MUST fire in program order. With deferred effect kernels the effect
+            -- lives inside the future, so a bind/drop never runs it; RUN it via
+            -- `task_run` (block_on) instead. Gated on a task-PRODUCING-CALL RHS
+            -- with a determinable inner type, so a non-Task discard (`let _ =
+            -- List.map (\… -> println …) …`, whose `taskExprInnerType` is empty)
+            -- stays bind/drop and is NEVER run — the Sky/Test.sky summary-only
+            -- contract (a discarded `List (Task ())` produces no output). Mirrors
+            -- the Can.LetDestruct arm below.
+            Can.DestructDef (Ann.At _ Can.PAnything) expr
+                | isTaskProducingCall expr
+                , not (null (taskExprInnerType (ecSolvedTypes ctx) expr)) ->
+                    "{ task_run::<SkyError, _>(" ++ exprToRustString ctx expr
+                        ++ "); " ++ exprToRustString ctx body ++ " }"
+            Can.Def (Ann.At _ "_") [] taskBody
+                | isTaskProducingCall taskBody
+                , not (null (taskExprInnerType (ecSolvedTypes ctx) taskBody)) ->
+                    "{ task_run::<SkyError, _>(" ++ exprToRustString ctx taskBody
+                        ++ "); " ++ exprToRustString ctx body ++ " }"
             -- Non-Clone capture fix (#52, Part B): a `let`-bound SkyTask
             -- (`Pin<Box<dyn Future>>`, non-`Clone`) captured by MULTIPLE sibling
             -- closures (each `.clone()`s its capture for ownership) is E0599.
@@ -1843,20 +1875,31 @@ exprToRustInner ctx e = case e of
                        else "{ " ++ clones ++ innerClones ++ inner ++ " }"
                 _ -> if not hasClone then exprToRustString ctx expr
                      else "{ " ++ clones ++ exprToRustString ctx expr ++ " }"
-            -- Discarded task (`let _ = process_run …`) — annotate the wildcard
-            -- with the concrete `SkyTask<inner>` so the kernel's generic `E:
-            -- From<String>` is pinned to `SkyError` (else E0283 when >1
-            -- `From<String>` impl is in scope). Only for a PAnything pattern
-            -- over a task-typed RHS whose inner type is determinable; all other
-            -- LetDestructs keep the bare `let <pat> = …`. See the sibling note
-            -- in the `defToRustString` DestructDef arm.
-            patStr = case pat of
-                Ann.At _ Can.PAnything
-                    | isTaskProducingCall expr
-                    , inner <- taskExprInnerType (ecSolvedTypes ctx) expr
-                    , not (null inner) -> "_: SkyTask<" ++ inner ++ ">"
-                _ -> patternToMatchString (ecRecordMap ctx) pat
-        in "let " ++ patStr ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
+            -- Discarded Task (`let _ = println … / process_run …`) — Sky's
+            -- "auto-force `let _ = TaskExpr`" semantics: the side effect MUST
+            -- fire when the binding is reached, in program order (Go runs it via
+            -- `rt.AnyTaskRun`). A bare `let _: SkyTask<…> = …` only CONSTRUCTS the
+            -- future and drops it — with deferred effect kernels (the effect now
+            -- lives inside the future body) that means the effect NEVER fires.
+            -- So RUN it synchronously via `task_run` (`block_on`). The success
+            -- value is discarded; `::<SkyError, _>` pins the error type (the same
+            -- pin the wildcard annotation used to provide) and infers `A`. Gated
+            -- on a PAnything pattern over a task-PRODUCING-CALL whose inner type
+            -- is determinable — a non-Task discard (`let _ = List.map (…)`, where
+            -- `taskExprInnerType` is empty) keeps the bind/drop path so a
+            -- discarded `List (Task ())` is NEVER run (the Sky/Test.sky
+            -- summary-only contract). A bare `VarLocal` discard (`let _ =
+            -- cleanup`, the #52 Arc-wrapped pattern) is not a producing call, so
+            -- it also stays bind/drop.
+            isDiscardTask = case pat of
+                Ann.At _ Can.PAnything ->
+                    isTaskProducingCall expr
+                    && not (null (taskExprInnerType (ecSolvedTypes ctx) expr))
+                _ -> False
+            patStr = patternToMatchString (ecRecordMap ctx) pat
+        in if isDiscardTask
+           then "task_run::<SkyError, _>(" ++ exprStr ++ "); " ++ exprToRustString ctx body
+           else "let " ++ patStr ++ " = " ++ exprStr ++ "; " ++ exprToRustString ctx body
     Can.Case scrut branches ->
         let scrutStr = exprToRustString ctx scrut
             -- Detect slice patterns → wrap with .as_slice()
@@ -1955,6 +1998,41 @@ exprToRustInner ctx e = case e of
     Can.Unit -> "()"
     Can.Tuple a b rest -> 
         "(" ++ intercalate ", " (map (exprToRustString ctx) (a:b:rest)) ++ ")"
+
+-- | Does the entry `main`'s body emit a `sky_main` that RETURNS a `SkyTask<…>`
+-- (vs a `SkyResult`/`()`)? Drives whether the entry must `block_on(sky_main())`.
+--
+-- The body TAIL's task-ness is the sound signal — but a `|> Task.run` (or
+-- `Task.perform` / `Task.sequence`) at the tail CONSUMES the task and returns a
+-- `SkyResult`, so such a tail is NOT a Task even though its left operand is.
+-- `taskExprInnerType` only inspects a pipe's LEFT operand, so it wrongly reports
+-- `Cli.program {} |> Task.run` as a Task (20-cli-counter). This predicate walks
+-- to the tail through let-chains and gates the pipe on its RIGHT operand.
+mainEntryTailReturnsTask :: Map.Map String Can.Type -> Can.Expr -> Bool
+mainEntryTailReturnsTask solved = go
+  where
+    go (Ann.At _ e) = case e of
+        -- Walk to the tail of let-chains / case / if.
+        Can.Let _ b           -> go b
+        Can.LetRec _ b        -> go b
+        Can.LetDestruct _ _ b -> go b
+        -- A pipe whose RIGHT side runs/consumes the task (Task.run / perform /
+        -- sequence) collapses to a Result — NOT a Task tail.
+        Can.Binop "|>" _ _ _ _ r
+            | pipeCollapsesTask r -> False
+            | otherwise           -> not (null (taskExprInnerType solved (Ann.At Ann.one e)))
+        -- Case / if: a Task tail iff EVERY branch is a Task tail.
+        Can.Case _ branches ->
+            not (null branches) && all (\(Can.CaseBranch _ b) -> go b) branches
+        Can.If branches elseB ->
+            all (go . snd) branches && go elseB
+        _ -> not (null (taskExprInnerType solved (Ann.At Ann.one e)))
+    -- Right operand of the FINAL `|>` collapses the task to a Result/unit.
+    pipeCollapsesTask (Ann.At _ r) = case r of
+        Can.VarKernel "Task" fn          -> fn `elem` ["run", "perform", "sequence"]
+        Can.VarTopLevel m fn
+            | ModuleName._name m == "Sky.Core.Task" -> fn `elem` ["run", "perform", "sequence"]
+        _ -> False
 
 -- | Given a Task-typed expression (like Db_query(…)), return the Rust type
 -- string of the SkyTask's inner success type A (i.e.  SkyTask<A> → A).

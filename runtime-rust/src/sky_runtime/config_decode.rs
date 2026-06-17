@@ -11,7 +11,6 @@
 // the opposite of `decode_from_json_string`'s decoder-first argument order.
 use super::*;
 use super::json::{Decoder, JsonVal};
-use std::future::ready;
 
 // Config.nullable : Decoder a -> Decoder (Maybe a)
 // Returns Sky's SkyMaybe (not Rust Option) so the decoded value matches the
@@ -63,17 +62,18 @@ pub fn config_load_from_file<E: From<String> + Send + 'static, T: Send + 'static
     path: String,
     decoder: Decoder<E, T>,
 ) -> SkyTask<E, T> {
-    let contents = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => return Box::pin(ready(SkyResult::Err(str_err(&format!("{}", e))))),
-    };
-    let lower = path.to_ascii_lowercase();
-    let res = if lower.ends_with(".toml") {
-        config_decode_toml(contents, decoder)
-    } else if lower.ends_with(".yaml") || lower.ends_with(".yml") {
-        config_decode_yaml(contents, decoder)
-    } else {
-        config_decode_json(contents, decoder)
-    };
-    Box::pin(ready(res))
+    Box::pin(async move {
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => return SkyResult::Err(str_err(&format!("{}", e))),
+        };
+        let lower = path.to_ascii_lowercase();
+        if lower.ends_with(".toml") {
+            config_decode_toml(contents, decoder)
+        } else if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+            config_decode_yaml(contents, decoder)
+        } else {
+            config_decode_json(contents, decoder)
+        }
+    })
 }

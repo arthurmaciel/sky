@@ -1,0 +1,53 @@
+module Main exposing (main)
+
+-- 54-discard-task-effect: the deferred-effect (Task-everywhere) model on
+-- target = rust, matching Go's `let _ = TaskExpr` auto-force semantics.
+--
+-- Three contracts proven here (all must hold byte-for-byte vs the Go backend):
+--
+--   1. A discarded SINGLE Task (`let _ = println …`) RUNS — the effect fires
+--      in program order. (Part B: a Task-typed discard is `task_run`, not
+--      bind+drop.)
+--
+--   2. A discarded `List (Task ())` (`let _ = List.map (\… -> println …) xs`)
+--      does NOT run — the list is BUILT and dropped, never awaited. With
+--      deferred effect kernels (Part A: `println` constructs a future and
+--      fires only on `.await`) this means NO output. This is exactly the
+--      `Sky/Test.sky` summary-only shape that made `00-standard-libs` diverge
+--      from Go before the fix.
+--
+--   3. Ordering — sequential discards fire in source order.
+--
+-- Expected stdout (4 lines, in order):
+--   step 1
+--   step 2
+--   done
+--   (no "leaked N" lines — the List.map of tasks is discarded, never run)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.List as List
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    let
+        -- (1) + (3): two single discarded Tasks fire in order.
+        _ =
+            println "step 1"
+
+        _ =
+            println "step 2"
+
+        -- (2): a discarded List (Task ()). The `println "leaked …"` Tasks are
+        -- CONSTRUCTED inside the map closures but the resulting list is
+        -- discarded and never awaited, so NONE of them fire. If the effect
+        -- kernel were eager (pre-fix) OR codegen ran this discard, three
+        -- "leaked" lines would appear and break Go parity.
+        _ =
+            List.map
+                (\n -> println ("leaked " ++ String.fromInt n))
+                [ 1, 2, 3 ]
+    in
+    -- (1): a final discarded Task in the body fires last.
+    println "done"

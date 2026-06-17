@@ -102,14 +102,18 @@ fn log_emit(level: i32, level_name: &str, msg: &str) {
 /// `fmt.Println`: NO timestamp, NO level, straight to stdout. Still mirrored into
 /// the telemetry ring at info level so the console surfaces it.
 pub fn log_println<E: Send + 'static>(msg: String) -> SkyTask<E, ()> {
-    super::telemetry::record_log("info", &msg);
-    println!("{msg}");
-    Box::pin(async move { ok_res(()) })
+    Box::pin(async move {
+        super::telemetry::record_log("info", &msg);
+        println!("{msg}");
+        ok_res(())
+    })
 }
 
 pub fn log_info<E: Send + 'static>(msg: String) -> SkyTask<E, ()> {
-    log_emit(LOG_LEVEL_INFO, "info", &msg);
-    Box::pin(async move { ok_res(()) })
+    Box::pin(async move {
+        log_emit(LOG_LEVEL_INFO, "info", &msg);
+        ok_res(())
+    })
 }
 
 // `Log.*With : String -> List a -> Task` is polymorphic in the attr element
@@ -119,33 +123,54 @@ pub fn log_info<E: Send + 'static>(msg: String) -> SkyTask<E, ()> {
 // tuples through a `Display` they don't implement (was the E0277 in
 // routes_auth / routes_todos). The attrs are not yet flattened into the line
 // (no `Display` bound to render them); the level + timestamp prefix matches Go.
-pub fn log_info_with<E: Send + 'static, A>(msg: String, _attrs: Vec<A>) -> SkyTask<E, ()> {
-    log_emit(LOG_LEVEL_INFO, "info", &msg);
-    Box::pin(async move { ok_res(()) })
+pub fn log_info_with<E: Send + 'static, A>(msg: String, attrs: Vec<A>) -> SkyTask<E, ()> {
+    // Drop the (currently unrendered) attrs BEFORE the future is constructed so
+    // the captured set is `Send`-clean without an `A: Send` bound; the effect
+    // (the line write) still fires only on `.await`.
+    drop(attrs);
+    Box::pin(async move {
+        log_emit(LOG_LEVEL_INFO, "info", &msg);
+        ok_res(())
+    })
 }
 
-pub fn log_error_with<E: Send + 'static, A>(msg: String, _attrs: Vec<A>) -> SkyTask<E, ()> {
-    log_emit(LOG_LEVEL_ERROR, "error", &msg);
-    Box::pin(async move { ok_res(()) })
+pub fn log_error_with<E: Send + 'static, A>(msg: String, attrs: Vec<A>) -> SkyTask<E, ()> {
+    drop(attrs);
+    Box::pin(async move {
+        log_emit(LOG_LEVEL_ERROR, "error", &msg);
+        ok_res(())
+    })
 }
 
 pub fn log_debug<E: Send + 'static>(msg: String) -> SkyTask<E, ()> {
-    log_emit(LOG_LEVEL_DEBUG, "debug", &msg);
-    Box::pin(async move { ok_res(()) })
+    Box::pin(async move {
+        log_emit(LOG_LEVEL_DEBUG, "debug", &msg);
+        ok_res(())
+    })
 }
 pub fn log_warn<E: Send + 'static>(msg: String) -> SkyTask<E, ()> {
-    log_emit(LOG_LEVEL_WARN, "warn", &msg);
-    Box::pin(async move { ok_res(()) })
+    Box::pin(async move {
+        log_emit(LOG_LEVEL_WARN, "warn", &msg);
+        ok_res(())
+    })
 }
 pub fn log_error<E: Send + 'static>(msg: String) -> SkyTask<E, ()> {
-    log_emit(LOG_LEVEL_ERROR, "error", &msg);
-    Box::pin(async move { ok_res(()) })
+    Box::pin(async move {
+        log_emit(LOG_LEVEL_ERROR, "error", &msg);
+        ok_res(())
+    })
 }
-pub fn log_debug_with<E: Send + 'static, A>(msg: String, _attrs: Vec<A>) -> SkyTask<E, ()> {
-    log_emit(LOG_LEVEL_DEBUG, "debug", &msg);
-    Box::pin(async move { ok_res(()) })
+pub fn log_debug_with<E: Send + 'static, A>(msg: String, attrs: Vec<A>) -> SkyTask<E, ()> {
+    drop(attrs);
+    Box::pin(async move {
+        log_emit(LOG_LEVEL_DEBUG, "debug", &msg);
+        ok_res(())
+    })
 }
-pub fn log_warn_with<E: Send + 'static, A>(msg: String, _attrs: Vec<A>) -> SkyTask<E, ()> {
-    log_emit(LOG_LEVEL_WARN, "warn", &msg);
-    Box::pin(async move { ok_res(()) })
+pub fn log_warn_with<E: Send + 'static, A>(msg: String, attrs: Vec<A>) -> SkyTask<E, ()> {
+    drop(attrs);
+    Box::pin(async move {
+        log_emit(LOG_LEVEL_WARN, "warn", &msg);
+        ok_res(())
+    })
 }
