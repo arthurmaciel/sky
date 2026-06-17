@@ -282,6 +282,8 @@ jobs:
           path: |
             ~/.cache/sky/examples-sweep/sweep-*.table
             ~/.cache/sky/examples-sweep/run-*.log
+            ~/.cache/sky/examples-sweep/*.rust.sky.log
+            ~/.cache/sky/examples-sweep/*.rust.cargo.log
           if-no-files-found: warn
 
   # ───────────────────────────────────────────────────────────────────────────
