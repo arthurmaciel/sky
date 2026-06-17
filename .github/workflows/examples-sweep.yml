@@ -13,7 +13,7 @@
 #
 # HONEST PER-HOST SCOPE (the sweep records SKIP, not red, for a shape a host can't
 # run — see EXERCISE_SKIP_RC in lib/checks.sh):
-#   ubuntu-22.04   — FULL: cli/server/live(browser round-trip)/tui(pty)/webview(xvfb).
+#   ubuntu-latest  — FULL: cli/server/live(browser round-trip)/tui(pty)/webview(xvfb).
 #                    All toolchains present; the developer-reference host.
 #   macos-latest   — ADAPTED: cli/server/live + tui via BSD `script` + webview via
 #                    the real WKWebView display. Browser round-trip runs if the
@@ -61,11 +61,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux pinned to 22.04 (jammy): the codegen pins wry 0.24 / tao 0.16,
-        # which link webkit2gtk-4.0 — present on 22.04, REMOVED on 24.04
-        # (ubuntu-latest), where only 4.1 ships. 22.04 lets the Sky.Webview
-        # examples actually build + run (matches the local jammy-based dev env).
-        os: [ubuntu-22.04, macos-latest, windows-latest]
+        # ubuntu-latest (24.04) is fine: the modern wry 0.55 / tao 0.35 webview
+        # stack links webkit2gtk-4.1 (present on 24.04) — no 22.04 pin needed.
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     env:
       # Persist the shared cargo target via actions/cache (below). Point it at a
@@ -194,17 +192,17 @@ jobs:
         run: npm ci || npm install
 
       # ── Webview system deps + xvfb (Linux) ──────────────────────────────────
-      # Sky.Webview examples (29/31/38) pin wry 0.24 / tao 0.16, which link
-      # webkit2gtk-4.0 + GTK3 — present on the pinned 22.04 runner. xvfb gives the
-      # headless display the webview app needs to boot. Without these the webview
-      # builds sky-fail (no webkit) — a host-capability gap, not a Rust defect.
+      # Sky.Webview examples use modern wry 0.55 / tao 0.35, which link
+      # webkit2gtk-4.1 + libsoup-3.0 + GTK3 (present on ubuntu-latest/24.04). xvfb
+      # gives the headless display the webview app needs to boot. Without these the
+      # webview builds sky-fail (no webkit) — a host-capability gap, not a defect.
       - name: Install webview deps + xvfb (Linux)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb \
-            libwebkit2gtk-4.0-dev libgtk-3-dev librsvg2-dev libsoup2.4-dev \
-            libjavascriptcoregtk-4.0-dev
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev
 
       # ── GNU coreutils on macOS (the sweep + libs use bare `timeout`) ────────
       # macOS ships no GNU `timeout`; symlink coreutils' so `timeout` resolves.
