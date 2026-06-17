@@ -22,7 +22,7 @@
 # regression), and the sweep auto-reports amber `go-ref-broken` — honestly
 # surfacing the upstream Go bug live, and auto-flipping back to `equiv-stdout` the
 # moment upstream fixes T1 (no manual .tsv edit needed). FINDING #2.
-07-todo-cli        none   FINDING #1: banner emitted via Log.info — Go prints a `TIMESTAMP INFO message` structured line, Rust prints just `message` (Std.Log prefix-parity gap, task #5) AND the timestamp is non-deterministic so the determinism auto-probe would also flag it. Pin `none` + this note so the Log.* gap stays VISIBLE (not silently auto-downgraded). Drop (→ derived stdout) when Rust's Log.* matches Go's structured format.
+07-todo-cli        none   Std.Log format gap CLOSED (task #5): Rust's Log.* now emits Go's exact `TIMESTAMP LEVEL message` plain line + matching JSON shape (plain + json verified byte-identical to Go after timestamp-normalize). Still pinned `none` PURELY because the RFC3339Nano timestamp the banner prints is non-deterministic by nature — the stdout determinism auto-probe would false-DIFFER on it. NOT a Log.* parity gap any more.
 
 # ── Non-deterministic cli — derived `stdout` would false-DIFFER ──────────────
 35-composite-generics   none   non-deterministic cli: prints a Time.now `Generated at` timestamp AND Dict.toList iteration order differs between backends. The stdout determinism auto-probe would catch the timestamp, but pin it here so the intent is explicit.

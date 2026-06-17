@@ -599,8 +599,8 @@ kernelToRust mod name = case (mod, name) of
     ("JsonDec", "map4") -> "decode_map4"
     ("Sky.Core.Json.Decode", "map4") -> "decode_map4"
     -- Log kernel functions: route to runtime implementations
-    ("Log", "println") -> "log_info"
-    ("Std.Log", "println") -> "log_info"
+    ("Log", "println") -> "log_println"
+    ("Std.Log", "println") -> "log_println"
     ("Log", "info") -> "log_info"
     ("Std.Log", "info") -> "log_info"
     ("Log", "debug") -> "log_debug"

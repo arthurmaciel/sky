@@ -131,7 +131,7 @@ substVar ctx name inline = go
             let fs = go fn
                 isPrintln = "println" `isSuffixOf` fs
             in if isPrintln
-               then "log_info(" ++ intercalate " ++ \" \" ++ " (map go args) ++ ")"
+               then "log_println(" ++ intercalate " ++ \" \" ++ " (map go args) ++ ")"
                else let noClone = case fn of
                             Ann.At _ (Can.VarKernel _ n2) -> n2 == "run" || n2 == "sequence" || n2 == "parallel"
                             _ -> False
@@ -1704,7 +1704,7 @@ exprToRustInner ctx e = case e of
                         calleeName ++ "(curry" ++ show n ++ "(" ++ exprToRustString ctx arg ++ "))"
             Nothing -> case calleeName of
                 fn | "println" `isSuffixOf` fn ->
-                    "log_info(" ++ intercalate " ++ \" \" ++ " (map (\a -> exprToRustString ctx a) args) ++ ")"
+                    "log_println(" ++ intercalate " ++ \" \" ++ " (map (\a -> exprToRustString ctx a) args) ++ ")"
                 -- A task_and_then continuation's param type is the inner type of
                 -- the TASK arg (its input), not the inherited ecPipeInnerType
                 -- (the outer `… |> Task.run` chain result, constant down the
