@@ -268,9 +268,10 @@ exercise_live() {
 # OS-AWARE: `script` allocates the pty, but its CLI differs by platform —
 #   linux (util-linux): script -qec "CMD" /dev/null   ← command via -c
 #   macos (BSD):        script -q  /dev/null CMD ARGS  ← command as trailing argv
-# Windows Git Bash ships NO `script` and no pty primitive → tui cannot run; we
-# SKIP (EXERCISE_SKIP_RC), never fail. The Linux branch is the default and is
-# byte-identical to the pre-existing line.
+# Windows Git Bash ships NO `script`, but it DOES ship `winpty` (the pre-ConPTY
+# pty shim bundled with Git for Windows) — that gives the Tui app a real pty so
+# its isatty() check passes. We use it instead of SKIPping. The Linux branch is
+# the default and is byte-identical to the pre-existing line.
 exercise_tui() {
   local bin="$1" log="$2"
   case "$SKY_HOST_OS" in
@@ -283,8 +284,13 @@ exercise_tui() {
       fi
       ;;
     windows)
-      printf 'SKIP (windows Git Bash: no pty/`script` — tui cannot be exercised)\n' >"$log"
-      return "$EXERCISE_SKIP_RC"
+      # `winpty` (bundled with Git for Windows) allocates a pty for the Tui app.
+      # timeout -k 5 escalates to SIGKILL for a tui that ignores SIGTERM.
+      if command -v winpty >/dev/null 2>&1; then
+        timeout -k 5 8 winpty "$bin" >"$log" 2>&1 </dev/null
+      else
+        printf 'SKIP (windows: winpty not found)\n' >"$log"; return "$EXERCISE_SKIP_RC"
+      fi
       ;;
     *)
       # linux (and any util-linux host) — unchanged.

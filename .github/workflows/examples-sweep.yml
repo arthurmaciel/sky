@@ -19,13 +19,13 @@
 #                    the real WKWebView display. Browser round-trip runs if the
 #                    Playwright chromium install succeeds; else live degrades to a
 #                    both-backends boot check (still gates serve-equivalence).
-#   windows-latest — REDUCED (shell: bash = Git Bash / MSYS): build + cli-stdout
-#                    equiv + server-body equiv RUN + webview RUN (WebView2 +
-#                    interactive desktop session — no xvfb needed; gated on
-#                    no-panic). tui (no pty / no `script`) and the live browser
-#                    round-trip (no chromium system deps) SKIP — they are NOT
-#                    faked. The `go`/`cargo`/`sky` toolchains build natively; the
-#                    sweep's bash libs run under Git Bash.
+#   windows-latest — (shell: bash = Git Bash / MSYS): build + cli-stdout equiv +
+#                    server-body equiv RUN + webview RUN (WebView2 + interactive
+#                    desktop session, no xvfb needed) + tui RUN (under `winpty`,
+#                    the pty shim bundled with Git for Windows) — all gated on
+#                    no-panic. Only the live browser round-trip SKIPs (no chromium
+#                    system deps). The `go`/`cargo`/`sky` toolchains build
+#                    natively; the sweep's bash libs run under Git Bash.
 #
 # GATING. Job fails iff the sweep prints `VERDICT: FAIL` (a RED row = build/run/
 # equiv divergence). SKIP rows are green-neutral; amber `go-ref-broken` (an
