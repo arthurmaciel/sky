@@ -344,6 +344,21 @@ pub fn html_attr_to_string_<M>(attr: Attribute<M>) -> String {
     }
 }
 
+// ─── SkyStringify for the Html runtime types ────────────────────────────────
+// Same rationale as the Std.Ui impls in ui/element.rs: a codegen-emitted
+// `sky_show` recurses into every field, so an Html/Attribute/Event a generated
+// type can hold must impl the trait (else E0599). No Go `%v` analogue worth
+// matching; a stable type-tag placeholder is total and never recurses into `M`.
+impl<M> crate::sky_runtime::stringify::SkyStringify for Html<M> {
+    fn sky_show(&self) -> String { "<html>".to_string() }
+}
+impl<M> crate::sky_runtime::stringify::SkyStringify for Attribute<M> {
+    fn sky_show(&self) -> String { "<html-attribute>".to_string() }
+}
+impl<M> crate::sky_runtime::stringify::SkyStringify for Event<M> {
+    fn sky_show(&self) -> String { "<event>".to_string() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
