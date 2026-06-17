@@ -116,7 +116,23 @@ build_rust() {
   # CI raises this (and pre-warms the deps) so the cold first build fits.
   local d="$1" n="$2" tmo="${SKY_SWEEP_BUILD_TIMEOUT:-180}"
   case "$d" in examples/rust/*) tmo="${SKY_SWEEP_BUILD_TIMEOUT_FFI:-1800}";; esac
-  if ! ( cd "$d" && timeout "$tmo" "$SKY_BIN" build src/Main.sky --target rust >"$HIST/$n.rust.sky.log" 2>&1 ); then
+  # Windows shares ONE CARGO_TARGET_DIR holding a single sky-app.exe. A
+  # just-RUN example (webview/tui, killed via `timeout -k`) can still hold its
+  # .exe handle when the next example's `cargo build` tries to overwrite it →
+  # "failed to remove file … Access is denied (os error 5)". That is a transient
+  # OS file-lock, not a build failure — wait for the handle to release + retry.
+  local attempt ok=0
+  for attempt in 1 2 3; do
+    if ( cd "$d" && timeout "$tmo" "$SKY_BIN" build src/Main.sky --target rust >"$HIST/$n.rust.sky.log" 2>&1 ); then
+      ok=1; break
+    fi
+    if [ "${SKY_HOST_OS:-}" = windows ] && [ "$attempt" -lt 3 ] && \
+       grep -qiE 'Access is denied \(os error 5\)|failed to remove file' "$HIST/$n.rust.sky.log"; then
+      sleep 3; continue
+    fi
+    break
+  done
+  if [ "$ok" != 1 ]; then
     BUILD_CELL="sky-fail"; return 1
   fi
   if ( cd "$d" && timeout 600 cargo build --manifest-path sky-out/Rust/Cargo.toml -q >"$HIST/$n.rust.cargo.log" 2>&1 ); then
