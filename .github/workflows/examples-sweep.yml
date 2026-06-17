@@ -155,11 +155,11 @@ jobs:
           cache: true
 
       # ── Rust (the backend under test) ───────────────────────────────────────
+      # No nightly: the in-scope examples (the Sky author's upstream set, minus the
+      # Go-FFI ones that is_out_of_scope filters) never run `sky add`, so the FFI
+      # inspector's `cargo +nightly rustdoc` is never invoked. The only real FFI
+      # example, skyshop-rs, is out-of-scope on CI (verified locally).
       - uses: dtolnay/rust-toolchain@stable
-      # Nightly is needed by the Rust FFI inspector (`cargo +nightly rustdoc
-      # --output-format json`) when an example runs `sky add`. The in-scope sweep
-      # set doesn't add crates, but provision it so a future FFI example builds.
-      - uses: dtolnay/rust-toolchain@nightly
 
       # Cache the shared cargo target + registry (heavy deps compiled once, reused
       # across runs). This is the ONLY Rust cache on CI — sccache's GHA backend is

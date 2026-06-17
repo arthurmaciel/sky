@@ -35,7 +35,12 @@ regressions): 29/31-webview, 38-composite-ui-multibackend, skyshop-rs. Diagnosed
   rustdoc` over firestore/async-stripe WITH network — long/flaky, unfit for the
   per-commit gate. Marked **out-of-scope** in `lib/examples.sh is_out_of_scope`
   (explicit `*/skyshop-rs` guard, documented); verified locally via its verify.sh.
-  Also provisioned `dtolnay/rust-toolchain@nightly` for any future FFI example.
+
+  NB: NO nightly toolchain on CI. The in-scope examples are the Sky author's
+  upstream set (shared Sky code + Go-FFI ones that `is_out_of_scope` filters);
+  none run `sky add`, so the FFI inspector's `cargo +nightly rustdoc` is never
+  invoked. The only real FFI example (skyshop-rs) is out-of-scope, so nightly
+  serves nothing (and inventing trivial FFI fixtures to justify it is pointless).
 
 - **Affected:** `.github/workflows/examples-sweep.yml`, `runtime-rust/scripts/lib/examples.sh`.
 
