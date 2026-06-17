@@ -768,10 +768,13 @@ Regression fixture `tests/sky/54-discard-task-effect` proves all three contracts
 (single discard runs, List-of-tasks discard does not, ordering). Verified: `00` and
 `simple` both `equiv-stdout`; full sweep **37 green**.
 
-> `00`'s Go reference builds (131/131 on `--target go`) via an in-progress fix in
-> the **shared Go codegen** (`src/Sky/Build/Compile.hs`, outside this Rust-backend
-> work, not in these commits); without it `00` is amber `go-ref-broken`, never a
-> Rust red.
+> `00`'s Go reference builds (131/131 on `--target go`) via a **fork-local T1 guard
+> in the Go codegen** (`src/Sky/Build/Compile.hs`, committed `390909c7`): the synced
+> tag `v0.16.29` carries a `undefined: T1` regression (a callee-bound type var leaking
+> into emitted Go); our guard erases the unbound token to `any`. The comprehensive
+> upstream fix lands in `feat/v0.17-fully-typed-codegen` (not yet tagged) — reconcile
+> this surgical guard against that rewrite when v0.17.0 is synced. Without the guard
+> `00` is amber `go-ref-broken`, never a Rust red.
 
 ### Performance — `sky-rust-backend:examples-perf-sweep`
 
