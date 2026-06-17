@@ -7309,7 +7309,16 @@ exprToGoExpectGo goRendering e@(A.At _ expr)
         Can.Lambda pats body
             | Just (paramTys, retTy) <- parseFuncType goRendering
             , length paramTys == length pats
-            , all (/= "any") paramTys -> do
+            , all (/= "any") paramTys
+            -- A slot param type may carry a callee-bound generic token
+            -- (e.g. `T1` from `retryOn`'s `func(T1) bool` signature)
+            -- that is NOT a declared generic param at THIS literal-
+            -- lambda emission site. Emitting `func(_ T1) bool` here
+            -- leaks an undefined identifier into the Go output. Gate
+            -- on `isEmittableGoType` (same guard the curried arm below
+            -- uses) so such slots fall through to the generic path,
+            -- which erases the unbound token to `any`.
+            , all isEmittableGoType paramTys -> do
                 lowerTypedLambda pats paramTys retTy body
 
         -- #590 — Stage C curried-shape arm.  When the slot type is
@@ -9471,6 +9480,13 @@ coerceCallArgsAt region qualName args =
                     case inner of
                         Can.Lambda pats body
                             | all isSimpleVarPattern pats
+                            -- Same generic-token leak guard as
+                            -- `kernelCoerceArg`: a substituted slot
+                            -- still carrying a callee-bound `T1`/`T2`
+                            -- token would emit `func(_ T1) ...`, an
+                            -- undefined identifier. Fall through to
+                            -- `coerceArg` (param erased to `any`).
+                            , not (containsGenericTypeParam subbed)
                             , (inputTypes, finalRet0) <-
                                 splitCurriedFuncTypeStr (length pats) subbed
                             , length inputTypes == length pats
@@ -10298,6 +10314,16 @@ kernelCoerceArg _allSubbed _idx subbed e@(A.At _ inner) =
     case inner of
         Can.Lambda pats body
             | all isSimpleVarPattern pats
+            -- The kernel's substituted slot type may still carry a
+            -- callee-bound generic token (e.g. `func(T1) bool` from
+            -- `retryOn`'s `(e -> Bool)` param, where the kernel sig
+            -- declares `[T1 any]`). That token is NOT in scope at this
+            -- literal-lambda emission site, so emitting `func(_ T1) ...`
+            -- leaks an undefined identifier into the Go output. Gate on
+            -- `not (containsGenericTypeParam subbed)` — the same guard
+            -- the Record arm below uses — so such slots fall through to
+            -- `coerceArg`, which erases the lambda's params to `any`.
+            , not (containsGenericTypeParam subbed)
             , (inputTypes, finalRet0) <-
                 splitCurriedFuncTypeStr (length pats) subbed
             , length inputTypes == length pats
