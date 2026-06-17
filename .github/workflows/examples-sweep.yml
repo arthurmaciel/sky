@@ -20,11 +20,12 @@
 #                    Playwright chromium install succeeds; else live degrades to a
 #                    both-backends boot check (still gates serve-equivalence).
 #   windows-latest — REDUCED (shell: bash = Git Bash / MSYS): build + cli-stdout
-#                    equiv + server-body equiv RUN. tui (no pty / no `script`),
-#                    webview (no headless harness) and the live browser round-trip
-#                    (no chromium system deps) SKIP — they are NOT faked. The
-#                    `go`/`cargo`/`sky` toolchains build natively; the sweep's
-#                    bash libs run under Git Bash.
+#                    equiv + server-body equiv RUN + webview RUN (WebView2 +
+#                    interactive desktop session — no xvfb needed; gated on
+#                    no-panic). tui (no pty / no `script`) and the live browser
+#                    round-trip (no chromium system deps) SKIP — they are NOT
+#                    faked. The `go`/`cargo`/`sky` toolchains build natively; the
+#                    sweep's bash libs run under Git Bash.
 #
 # GATING. Job fails iff the sweep prints `VERDICT: FAIL` (a RED row = build/run/
 # equiv divergence). SKIP rows are green-neutral; amber `go-ref-broken` (an
@@ -282,6 +283,7 @@ jobs:
             ~/.cache/sky/examples-sweep/run-*.log
             ~/.cache/sky/examples-sweep/*.rust.sky.log
             ~/.cache/sky/examples-sweep/*.rust.cargo.log
+            ~/.cache/sky/examples-sweep/*.rust.run.log
           if-no-files-found: warn
 
   # ───────────────────────────────────────────────────────────────────────────

@@ -305,7 +305,12 @@ exercise_tui() {
 #   macos   → a real display is present (WKWebView); run directly. If headless
 #             (no $DISPLAY-equivalent / CI without a session) the window may not
 #             open — we still gate purely on no-panic, same as Linux.
-#   windows → WebView2 + no xvfb + no display contract here → SKIP, never fail.
+#   windows → no xvfb (X11) is needed: the windows-latest runner has an
+#             interactive desktop session + the WebView2 runtime preinstalled, so
+#             a wry/WebView2 app constructs its window. Run directly (like macOS),
+#             with `-k` so a GUI .exe that ignores SIGTERM is SIGKILL'd. Gate on
+#             no-panic. (Was a conservative hard-SKIP; the session + WebView2 make
+#             a real run possible — confirmed by CI.)
 # Returns EXERCISE_SKIP_RC when the host genuinely can't run it (so the caller can
 # record SKIP). The Linux xvfb path is byte-identical to before.
 exercise_webview() {
@@ -315,8 +320,8 @@ exercise_webview() {
       timeout 8 "$bin" >"$log" 2>&1 </dev/null
       ;;
     windows)
-      printf 'SKIP (windows: no headless webview harness)\n' >"$log"
-      return "$EXERCISE_SKIP_RC"
+      # GUI .exe may ignore SIGTERM → `-k 5` escalates to SIGKILL 5s later.
+      timeout -k 5 8 "$bin" >"$log" 2>&1 </dev/null
       ;;
     *)
       # linux — unchanged; caller still owns the xvfb-run-absent SKIP, but guard
