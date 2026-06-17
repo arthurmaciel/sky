@@ -188,8 +188,13 @@ equiv_for() {
       ;;
 
     pty)
-      local rok=1 gok=1
-      exercise_tui "$rbin" "$rsl" || rok=0
+      local rok=1 gok=1 rrc
+      exercise_tui "$rbin" "$rsl"; rrc=$?
+      # On a host with no pty (Windows / macOS-no-script) tui can't be exercised
+      # on EITHER backend → n/a, never a DIFFER. Probe the Rust rc; if it's the
+      # skip rc, the Go probe would skip identically.
+      if [ "$rrc" = "$EXERCISE_SKIP_RC" ]; then printf 'n/a\t%s\n' "$(grep -m1 '^SKIP' "$rsl" | sed 's/^SKIP //')"; return 0; fi
+      [ "$rrc" = 0 ] || rok=0
       build_go "$d" "$n" || { printf 'go-ref-broken\tGo build failed\n'; return 0; }
       exercise_tui "$d/sky-out/app" "$gol" || gok=0
       if [ "$gok" = 0 ]; then printf 'go-ref-broken\tGo TUI panicked\n'
@@ -234,14 +239,22 @@ run_for() {
       else printf 'hang\tcli timed out\n'; fi
       ;;
     tui)
-      if exercise_tui "$bin" "$rl"; then printf 'ok\t\n'
+      exercise_tui "$bin" "$rl"; local rc=$?
+      if   [ "$rc" = 0 ]; then printf 'ok\t\n'
+      elif [ "$rc" = "$EXERCISE_SKIP_RC" ]; then printf 'skip\t%s\n' "$(grep -m1 '^SKIP' "$rl" | sed 's/^SKIP //')"
       elif grep -qiE "not a tty|inappropriate ioctl|TERM environment" "$rl"; then printf 'notty\tno terminal allocated\n'
       else printf 'panic\ttui panicked\n'; fi
       ;;
     webview)
-      if ! command -v xvfb-run >/dev/null 2>&1; then printf 'skip\twebview: install xvfb to run headless\n'
-      elif exercise_webview "$bin" "$rl"; then printf 'ok\t\n'
-      else printf 'panic\twebview panicked\n'; fi
+      # exercise_webview returns EXERCISE_SKIP_RC on a host that can't run it
+      # (Windows; Linux w/o xvfb) — that's a SKIP, never a panic.
+      if ! command -v xvfb-run >/dev/null 2>&1 && [ "$SKY_HOST_OS" = linux ]; then printf 'skip\twebview: install xvfb to run headless\n'
+      else
+        exercise_webview "$bin" "$rl"; local rc=$?
+        if   [ "$rc" = 0 ]; then printf 'ok\t\n'
+        elif [ "$rc" = "$EXERCISE_SKIP_RC" ]; then printf 'skip\t%s\n' "$(grep -m1 '^SKIP' "$rl" | sed 's/^SKIP //')"
+        else printf 'panic\twebview panicked\n'; fi
+      fi
       ;;
     fyne)
       printf 'skip\tfyne: Go-FFI shape — not a Rust target\n'

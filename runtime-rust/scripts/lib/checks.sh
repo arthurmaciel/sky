@@ -42,6 +42,40 @@ export SKY_AUTH_TOKEN_SECRET="${SKY_AUTH_TOKEN_SECRET:-sky-run-sweep-test-secret
 # pattern catches both backends' aborts.
 PANIC_RE="panicked|CompilerBug|RUST_BACKTRACE|index out of bounds|unwrap\(\) on|called .Result::unwrap|goroutine [0-9]+ \[|runtime error:"
 
+# ── Host OS detection (shared) ───────────────────────────────────────────────
+# Some exercise shapes (pty for tui, headless display for webview) are inherently
+# host-specific. `SKY_HOST_OS` is computed ONCE here and consumed by the OS-aware
+# branches below so the SAME checks.sh drives Linux / macOS / Windows-Git-Bash.
+#   linux   → GNU coreutils: `script -qec`, `xvfb-run`, `pkill -x` — TODAY'S code.
+#   macos   → BSD `script -q /dev/null cmd`, a real display (no xvfb), `pkill`.
+#   windows → Git Bash / MSYS: no pty (`script`), no `xvfb-run`, no `pkill -x`.
+# IMPORTANT: on Linux this resolves to `linux` so every OS-branch falls through to
+# the byte-identical pre-existing code path — Linux behaviour is unchanged.
+case "${OSTYPE:-}" in
+  linux*)            SKY_HOST_OS=linux   ;;
+  darwin*)           SKY_HOST_OS=macos   ;;
+  msys*|cygwin*|win*) SKY_HOST_OS=windows ;;
+  *)
+    # $OSTYPE is a bash builtin; fall back to `uname` if it was unset/odd.
+    case "$(uname -s 2>/dev/null)" in
+      Linux)                       SKY_HOST_OS=linux   ;;
+      Darwin)                      SKY_HOST_OS=macos   ;;
+      MINGW*|MSYS*|CYGWIN*|Windows_NT) SKY_HOST_OS=windows ;;
+      *)                           SKY_HOST_OS=linux   ;;  # safe default: today's path
+    esac
+    ;;
+esac
+export SKY_HOST_OS
+
+# ── EXERCISE_SKIP_RC: the rc an exercise_* returns when this HOST can't run the
+# shape at all (no pty / no display) — distinct from 0 (pass) and 1 (fail) so the
+# caller can record SKIP, never a false pass and never a red fail. 125 is unused
+# by the binaries we run (timeout uses 124/125-on-bad-invoke is avoided; we only
+# emit it ourselves). The sweep's run_for/equiv_for SHOULD map this rc to a `skip`
+# cell — see the note in examples-sweep.sh. Callers that don't yet branch on it
+# treat it as a non-zero (fail-safe: a SKIP shown as a fail is loud, not silent).
+EXERCISE_SKIP_RC=125
+
 # ── night_guard <sweep-name>: defer the heavy sweeps to the night window ─────
 # These sweeps build + run the whole example set (cargo + Go + browser) — heavy
 # enough to wedge this slim shared box during the day. Gate them to a low-load
@@ -69,9 +103,15 @@ http_responds() { case "$1" in [1-5][0-9][0-9]) return 0;; *) return 1;; esac; }
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo 8743; }
 
 # ── reap: kill stray app / console / driver / Xvfb processes between examples ─
-reap() { for p in sky-app app sky-console; do pkill -x "$p" 2>/dev/null; done
-         pkill -f "examples/.*/sky-out/" 2>/dev/null; pkill -f web-verify.mjs 2>/dev/null
-         pkill -x Xvfb 2>/dev/null; }
+# `pkill` is absent on Windows Git Bash (no procps). Guard the whole body on its
+# presence so a reap on Windows is a clean no-op rather than a "command not found"
+# per call. On Linux/macOS `pkill` is present → byte-identical behaviour.
+reap() {
+  command -v pkill >/dev/null 2>&1 || return 0
+  for p in sky-app app sky-console; do pkill -x "$p" 2>/dev/null; done
+  pkill -f "examples/.*/sky-out/" 2>/dev/null; pkill -f web-verify.mjs 2>/dev/null
+  pkill -x Xvfb 2>/dev/null
+}
 
 # ── Browser-round-trip stack probe (shared) ─────────────────────────────────
 # node lives under nvm; chromium is the system binary. Prepend node's bin so the
@@ -225,9 +265,32 @@ exercise_live() {
 # DRAIN the caller's stdin. examples-sweep reads the example list into an array
 # first (not a live pipe), so the loop can't be ended early; sealing stdin here is
 # the belt-and-braces second line of defence regardless of how the caller loops.
+# OS-AWARE: `script` allocates the pty, but its CLI differs by platform —
+#   linux (util-linux): script -qec "CMD" /dev/null   ← command via -c
+#   macos (BSD):        script -q  /dev/null CMD ARGS  ← command as trailing argv
+# Windows Git Bash ships NO `script` and no pty primitive → tui cannot run; we
+# SKIP (EXERCISE_SKIP_RC), never fail. The Linux branch is the default and is
+# byte-identical to the pre-existing line.
 exercise_tui() {
   local bin="$1" log="$2"
-  script -qec "timeout 8 '$bin'" /dev/null >"$log" 2>&1 </dev/null
+  case "$SKY_HOST_OS" in
+    macos)
+      # BSD script: command + args follow the typescript file (/dev/null here).
+      if command -v script >/dev/null 2>&1; then
+        script -q /dev/null timeout 8 "$bin" >"$log" 2>&1 </dev/null
+      else
+        printf 'SKIP (macos: no `script` for pty)\n' >"$log"; return "$EXERCISE_SKIP_RC"
+      fi
+      ;;
+    windows)
+      printf 'SKIP (windows Git Bash: no pty/`script` — tui cannot be exercised)\n' >"$log"
+      return "$EXERCISE_SKIP_RC"
+      ;;
+    *)
+      # linux (and any util-linux host) — unchanged.
+      script -qec "timeout 8 '$bin'" /dev/null >"$log" 2>&1 </dev/null
+      ;;
+  esac
   if   grep -qiE "$PANIC_RE" "$log"; then return 1
   elif grep -qiE "not a tty|inappropriate ioctl|TERM environment" "$log"; then return 1
   fi
@@ -235,12 +298,35 @@ exercise_tui() {
 }
 
 # exercise_webview <bin> <logfile>
-# XVFB smoke: a headless X server so the webview window can open. PASS on
-# no-crash within the window. (Caller is responsible for SKIPping when xvfb-run
-# is absent — it's a separately-installed env dep, not a failure.)
+# OS-AWARE headless smoke of a webview window. PASS on no-crash within the window.
+#   linux   → xvfb-run -a (headless X server); SKIP if xvfb-run absent (env dep,
+#             not a failure) — preserves the pre-existing contract where run_for
+#             SKIPs when xvfb-run is missing.
+#   macos   → a real display is present (WKWebView); run directly. If headless
+#             (no $DISPLAY-equivalent / CI without a session) the window may not
+#             open — we still gate purely on no-panic, same as Linux.
+#   windows → WebView2 + no xvfb + no display contract here → SKIP, never fail.
+# Returns EXERCISE_SKIP_RC when the host genuinely can't run it (so the caller can
+# record SKIP). The Linux xvfb path is byte-identical to before.
 exercise_webview() {
   local bin="$1" log="$2"
-  xvfb-run -a timeout 8 "$bin" >"$log" 2>&1 </dev/null
+  case "$SKY_HOST_OS" in
+    macos)
+      timeout 8 "$bin" >"$log" 2>&1 </dev/null
+      ;;
+    windows)
+      printf 'SKIP (windows: no headless webview harness)\n' >"$log"
+      return "$EXERCISE_SKIP_RC"
+      ;;
+    *)
+      # linux — unchanged; caller still owns the xvfb-run-absent SKIP, but guard
+      # here too so a direct call degrades to SKIP instead of "command not found".
+      if ! command -v xvfb-run >/dev/null 2>&1; then
+        printf 'SKIP (linux: xvfb-run not installed)\n' >"$log"; return "$EXERCISE_SKIP_RC"
+      fi
+      xvfb-run -a timeout 8 "$bin" >"$log" 2>&1 </dev/null
+      ;;
+  esac
   grep -qiE "$PANIC_RE" "$log" && return 1
   return 0
 }
