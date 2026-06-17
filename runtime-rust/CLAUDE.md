@@ -421,6 +421,25 @@ log** — hold it to the same bar as a code review:
   call. This is a recurring class (money / Db.insertFields / SqlValue params).
 
 ### Pitfalls
+- **A codegen-emitted trait impl that recurses into ALL fields needs EVERY field
+  type to impl the trait — including runtime opaque types.** The `SkyStringify`
+  derive (errorToString fix) emits `impl SkyStringify for <GeneratedType>` whose
+  body calls `.sky_show()` on every field; a field of a RUNTIME type (`element::
+  Color`, `Element<M>`, `Html<M>`, …) that doesn't impl the trait is an E0599 that
+  type-checks-but-cargo-fails — and it hit EVERY Std.Ui project, not just the one
+  example tested. Two rules: (1) when adding such a recursing trait, impl it for
+  ALL runtime types that can be a generated-struct field (the Std.Ui/Html element
+  types are the common ones); (2) **co-locate the impl with the type's module**
+  (`ui/element.rs`, `html.rs`), NOT in an always-compiled module like
+  `stringify.rs` — those modules are only included in a generated project when
+  used (`Project.hs` gates `ui`/`html` on usesHtml/Live/Tui), so an always-present
+  module referencing them is E0433 on a non-UI build. Validate against a Std.Ui
+  example (`26-ui-showcase`/`19-skyforum`), not just a CLI one.
+- **Feature-gated crate types need `#[cfg(feature=…)]` on their trait impls too.**
+  An `impl SkyStringify for serde_json::Value` in an always-compiled module fails
+  E0433 when the `json` feature is off (generated projects DO enable `json` by
+  default, but the standalone runtime crate and any non-json feature subset don't).
+  Gate the impl to match the type's feature.
 - **sccache's GitHub-Actions cache backend is dead — never use it on CI.**
   `SCCACHE_GHA_ENABLED` drives sccache against GitHub's *v1* Actions-Cache API
   (`artifactcache.actions.githubusercontent.com`), which GitHub retired; sccache
