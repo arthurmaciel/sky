@@ -50,11 +50,15 @@ pub fn ffi_call_pure_polyfill<T, A>(name: String, _args: Vec<A>) -> T {
 #[allow(clippy::panic)]
 pub fn ffi_call_task_polyfill<T, A>(name: String, _args: Vec<A>) -> T {
     panic!(
-        "Ffi.callTask {:?}: not yet supported on target=rust (deferred to \
-         sub-project D — Sky.Http.Server, which needs Task-emitting kernels). \
-         Use target=go for now, or move the Task-returning kernel into a \
-         non-Task Ffi.callPure call.",
-        name
+        "Ffi.callTask {:?}: dynamic dispatch is not supported on target=rust \
+         BY DESIGN. A string -> SkyTask<E, a> registry would need a runtime \
+         reflection / `Box<dyn Any>` surface (Go's `%v`-string registry) to \
+         return an unconstrained generic — exactly the dynamism this backend \
+         exists to refuse, and it cannot be made total. Use a string-literal \
+         kernel name + list-literal args (peephole-resolved to a direct call \
+         on the Task-returning kernel at compile time), or `Ffi.kernel \"{}\"` \
+         for value-level kernel selection.",
+        name, name
     );
 }
 
@@ -82,8 +86,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "sub-project D")]
-    fn call_task_panics_with_sub_d_hint() {
+    #[should_panic(expected = "dynamic dispatch is not supported on target=rust")]
+    fn call_task_panics_with_by_design_hint() {
         let _: i64 = ffi_call_task_polyfill::<i64, i64>("Http_get".to_string(), vec![1]);
     }
 }

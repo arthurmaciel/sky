@@ -1,0 +1,29 @@
+name = "ffi-calltask-static-probe"
+version = "0.1.0"
+entry = "src/Main.sky"
+target = "rust"
+
+# Fork-local regression fixture for STATIC-shape `Ffi.callTask` on --target rust.
+#
+# Pre-fix: a static-shape `Ffi.callTask "Kernel" [args]` had NO peephole arm in
+# src/Sky/Generate/Rust/Builder/ExprEmitter.hs (only callPure/call did), so it
+# fell through to kernelToRust's ("Ffi","callTask") -> "ffi_call_task_polyfill"
+# arm — an unconditional panic! (carrying a STALE "deferred to sub-project D …
+# use target=go" message). A hand-written static callTask therefore hit a
+# runtime panic vector even though the resolved kernel exists and returns a
+# SkyTask.
+#
+# Post-fix: the peephole arm now also matches fnName == "callTask", resolving
+# `Ffi.callTask "File_writeFile" [path, content]` to a direct
+# `file_write_file(path, content)` call — which already returns SkyTask<E,()>,
+# so NO extra Task lift is applied (mirrors the bare callPure arm exactly).
+#
+# Exercises the static-dispatch Task path end to end:
+#   - Ffi.callTask "File_writeFile" [tmp, payload] : Task Error ()
+#   - Ffi.callTask "File_readFile"  [tmp]          : Task Error String
+#   - Ffi.callTask "File_remove"    [tmp]          : Task Error ()
+# A write→read→remove round-trip; the read-back string must equal the payload.
+# Build + run must succeed with NO panic (the polyfill must not be reached).
+
+[source]
+root = "src"

@@ -1106,17 +1106,26 @@ exprToRustInner ctx e = case e of
             ctx' = ctx { ecCloneVars = Set.union (Set.fromList innerMulti) outerInherited
                        , ecCopyVars = ecCopyVars ctx }
         in "|" ++ intercalate ", " (map (annotClosureParam ctx body) params) ++ "| { " ++ exprToRustString ctx' body ++ " }"
-    -- Ffi.callPure peephole — literal kernel name + literal args list -> direct
-    -- kernel call. Splits "Decimal_fromInt" -> ("Decimal", "fromInt"), looks up
-    -- kernelToRust, emits the resolved kernel name with the args spliced inline.
+    -- Ffi.callPure / Ffi.callTask peephole — literal kernel name + literal args
+    -- list -> direct kernel call. Splits "Decimal_fromInt" -> ("Decimal",
+    -- "fromInt"), looks up kernelToRust, emits the resolved kernel name with the
+    -- args spliced inline.
     -- Ffi.toAny inside a matched args list collapses to identity (see peepholeArg).
     -- The deprecated Ffi.call alias gets the same treatment.
+    -- callPure resolves to a pure/sync kernel; callTask resolves to a kernel
+    -- that ALREADY returns a SkyTask (e.g. time_now : (()) -> SkyTask<E,i64>,
+    -- file_write_file : (..) -> SkyTask<E,()>). The emission is identical — the
+    -- resolved kernel's own return type carries the Task-ness, so NO extra
+    -- ok_res/Task lift is applied (and none was applied on the callPure path
+    -- either; the arm is a bare call). Double-wrapping a Task kernel's result
+    -- would mistype the SkyTask, so the shared bare-call shape is exactly right.
     -- Non-matched shapes (variable kernel name, non-literal args list) fall
     -- through to the existing Can.Call arm, which routes to the polyfill via
-    -- kernelToRust's "Ffi.callPure" -> "ffi_call_pure_polyfill" arm.
+    -- kernelToRust's "Ffi.callPure" / "Ffi.callTask" -> *_polyfill arm (the
+    -- genuinely-dynamic no-reflection boundary).
     Can.Call (Ann.At _ (Can.VarKernel "Ffi" fnName))
              [Ann.At _ (Can.Str kernelName), Ann.At _ (Can.List argExprs)]
-        | fnName == "callPure" || fnName == "call" ->
+        | fnName == "callPure" || fnName == "call" || fnName == "callTask" ->
             let (skyMod, skyFn) = splitKernelName kernelName
                 rustFn = kernelToRust skyMod skyFn
                 args = map (peepholeArg ctx) argExprs

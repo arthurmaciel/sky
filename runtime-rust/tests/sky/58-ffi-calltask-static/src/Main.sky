@@ -1,0 +1,53 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Ffi as Ffi
+import Std.Log exposing (println)
+
+
+tmpPath : String
+tmpPath =
+    "/tmp/sky-rust-ffi-calltask-probe.txt"
+
+
+payload : String
+payload =
+    "calltask-static-roundtrip"
+
+
+-- Static-shape Ffi.callTask: literal kernel name + literal args list.
+-- Resolves (post-fix) to a direct `file_write_file(path, content)` call, which
+-- returns SkyTask<E, ()> — no extra Task lift, mirroring the callPure peephole.
+writeIt : Task Error ()
+writeIt =
+    Ffi.callTask "File_writeFile" [ Ffi.toAny tmpPath, Ffi.toAny payload ]
+
+
+readIt : Task Error String
+readIt =
+    Ffi.callTask "File_readFile" [ Ffi.toAny tmpPath ]
+
+
+removeIt : Task Error ()
+removeIt =
+    Ffi.callTask "File_remove" [ Ffi.toAny tmpPath ]
+
+
+main =
+    writeIt
+        |> Task.andThen (\_ -> readIt)
+        |> Task.andThen
+            (\readBack ->
+                let
+                    ok =
+                        if readBack == payload then
+                            "FFI CALLTASK STATIC PROBE OK"
+
+                        else
+                            "FFI CALLTASK STATIC PROBE MISMATCH: " ++ readBack
+                in
+                println ok
+            )
+        |> Task.andThen (\_ -> removeIt)
+        |> Task.run
