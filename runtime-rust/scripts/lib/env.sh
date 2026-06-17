@@ -12,11 +12,15 @@
 # It defines REPO + SKY_BIN; it does NOT cd (callers `cd "$REPO"` themselves so
 # the failure path stays theirs).
 
-# ── PATH: self-contained, deterministic across tool calls ───────────────────
-# cargo + go must resolve from their canonical dirs; .ghcup/bin trails so cargo/go
-# win (sky is always invoked by absolute SKY_BIN, never via PATH). A web runner
-# that needs node prepends its own NODE_BIN BEFORE sourcing — this is the base.
-export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin"
+# ── PATH: prepend the canonical dev dirs, PRESERVE the inherited PATH ────────
+# cargo + go resolve from their canonical local dirs first; .ghcup/bin trails so
+# cargo/go win (sky is always invoked by absolute SKY_BIN, never via PATH). The
+# trailing `$PATH` is LOAD-BEARING on CI: GitHub's setup-go / setup-node and
+# Windows Git Bash put `go` / `node` / `curl` on the runner PATH at non-canonical
+# locations — clobbering PATH (dropping the trailing `$PATH`) hid them and aborted
+# the sweep at its `command -v go` / `curl` preflight on macOS + Windows. A web
+# runner that needs node still prepends its own NODE_BIN BEFORE sourcing.
+export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin:$PATH"
 
 # ── Shared cargo target + sccache + CARGO_INCREMENTAL=0 (all mandatory) ──────
 # A shared CARGO_TARGET_DIR *outside* each example's sky-out/ compiles the heavy

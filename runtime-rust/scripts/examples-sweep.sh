@@ -84,6 +84,12 @@ fi
 if [ "$NO_EQUIV" != 1 ]; then
   command -v go >/dev/null 2>&1 || { echo "ERROR: go required for Go≡Rust EQUIV (set SKY_SWEEP_NO_EQUIV=1 or SKY_SWEEP_BUILD_ONLY=1)." >&2; exit 2; }
 fi
+# rg (ripgrep) is required by `is_out_of_scope` — the build_set Go-FFI filter used
+# in EVERY mode. Without it the import-scan silently returns "in scope" for all, so
+# Go-FFI examples (02/03/05/08/11/13…) leak into build_set and every one fails
+# `--target rust`. Fail LOUDLY (a CI runner must install ripgrep) rather than run a
+# wrong, all-red sweep.
+command -v rg >/dev/null 2>&1 || { echo "ERROR: rg (ripgrep) required for the example-scope filter (is_out_of_scope). Install ripgrep." >&2; exit 2; }
 # Skip the per-example console pre-build (not what this sweep checks).
 export SKY_CONSOLE_PREBUILD=off
 
@@ -104,8 +110,12 @@ reap; sync
 # ── build_rust <dir> <example> → 0=ok; sets BUILD_CELL to the failure word ───
 BUILD_CELL=""
 build_rust() {
-  local d="$1" n="$2" tmo=180
-  case "$d" in examples/rust/*) tmo=1800;; esac
+  # SKY_SWEEP_BUILD_TIMEOUT overrides the per-example ceiling. The 180 s default
+  # assumes a warm sccache (true locally). A COLD CI run cold-compiles the whole
+  # Rust dep tree on the first example and blows past 180 s → every build sky-fails;
+  # CI raises this (and pre-warms the deps) so the cold first build fits.
+  local d="$1" n="$2" tmo="${SKY_SWEEP_BUILD_TIMEOUT:-180}"
+  case "$d" in examples/rust/*) tmo="${SKY_SWEEP_BUILD_TIMEOUT_FFI:-1800}";; esac
   if ! ( cd "$d" && timeout "$tmo" "$SKY_BIN" build src/Main.sky --target rust >"$HIST/$n.rust.sky.log" 2>&1 ); then
     BUILD_CELL="sky-fail"; return 1
   fi

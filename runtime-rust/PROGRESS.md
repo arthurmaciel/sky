@@ -17,6 +17,35 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-17 13:00 — CI: fix the three env failures from the first cross-OS run
+
+First `examples-sweep.yml` run (all 3 OSes) failed on CI-environment issues, NOT
+Rust bugs — diagnosed per OS and fixed at the right layer:
+
+- **macOS + Windows aborted at the `command -v go` / `curl` preflight.** Root cause:
+  `lib/env.sh` *clobbered* `PATH` (no trailing `$PATH`), dropping GitHub's
+  `setup-go` / `setup-node` and Windows Git-Bash tool dirs. Fix: append `:$PATH` so
+  the runner-provided `go`/`node`/`curl` stay reachable. The trailing `$PATH` is now
+  documented as LOAD-BEARING on CI.
+- **Ubuntu reported 0 green · 42 red.** Two compounding causes: (1) `rg` is not
+  preinstalled, so `is_out_of_scope` silently returned "in scope" for all → Go-FFI
+  examples (02/03/05/08/11/13…) leaked into `build_set` and each fails `--target
+  rust`; (2) a cold sccache made the first example cold-compile the whole Rust dep
+  tree and blow past the 180 s ceiling → every build sky-failed. Fixes: a loud `rg`
+  preflight in `examples-sweep.sh` (exit 2 if missing) + an "Install ripgrep" step
+  per-OS in the workflow; `SKY_SWEEP_BUILD_TIMEOUT` / `_FFI` made configurable
+  (raised to 900 / 2400 on CI) plus a "Pre-warm Rust deps" workflow step
+  (`cargo build --features full` under the same shared `CARGO_TARGET_DIR` + sccache)
+  so each example hits the cache instead of cold-building.
+
+Active goal: make CI work fully and precisely (it will be the guide for future
+development). Expect 1–2 more push→run cycles to flush hidden per-OS issues
+(BSD `script`, Windows no-pty/no-chromium, macOS Playwright).
+
+- **Affected:** `.github/workflows/examples-sweep.yml`, `runtime-rust/scripts/examples-sweep.sh`, `runtime-rust/scripts/lib/env.sh`.
+
+---
+
 ## 2026-06-17 12:00 — README examples table: per-row build/run + 4 perf columns; CLI usage after Goal
 
 Made the examples table complete + self-describing under Project status: per-row

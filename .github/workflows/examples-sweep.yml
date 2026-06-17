@@ -78,9 +78,28 @@ jobs:
       # A >=32-byte test secret so Std.Auth server/live examples boot on BOTH
       # backends (the sweep also sets this, but make it explicit for the job env).
       SKY_AUTH_TOKEN_SECRET: sky-ci-sweep-test-secret-0123456789-abcdef
+      # Per-example build ceiling. The local default (180 s) assumes a warm sccache;
+      # a cold CI run (and the first run before the cache is populated) needs more
+      # headroom even after the pre-warm step. The examples/rust/* FFI ceiling is
+      # raised in step too.
+      SKY_SWEEP_BUILD_TIMEOUT: '900'
+      SKY_SWEEP_BUILD_TIMEOUT_FFI: '2400'
 
     steps:
       - uses: actions/checkout@v4
+
+      # ── ripgrep — REQUIRED by the sweep's is_out_of_scope Go-FFI filter ─────
+      # Without it the scope scan silently fails → Go-FFI examples leak into the
+      # set and every one fails `--target rust`. Not preinstalled on the runners.
+      - name: Install ripgrep
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux)   sudo apt-get update && sudo apt-get install -y ripgrep ;;
+            macOS)   brew install ripgrep || true ;;
+            Windows) choco install ripgrep -y || true ;;
+          esac
+          rg --version
 
       # ── Disk headroom (the sweep refuses to start under 5 GB free) ──────────
       # Linux runners ship ~14 GB free after checkout; cabal build + a shared
@@ -192,6 +211,19 @@ jobs:
           BIN="$(cabal list-bin exe:sky)"
           ln -sf "$BIN" sky-out/sky
           ./sky-out/sky --version
+
+      # ── Pre-warm the Rust dependency tree (populate sccache + the cargo cache) ─
+      # The per-example build timeout assumes warm deps. Compile the runtime crate's
+      # full dep tree (axum/tokio/sqlx/serde/…) ONCE here — with the SAME shared
+      # CARGO_TARGET_DIR + sccache the sweep uses — so each example's cargo build
+      # hits sccache instead of cold-compiling the world and timing out. On a
+      # cache-restored run this is a near-instant no-op; on the first run it pays the
+      # cold cost once and persists it via actions/cache + the sccache GHA backend.
+      - name: Pre-warm Rust deps
+        shell: bash
+        run: |
+          ( cd runtime-rust && cargo build --features full )
+          sccache --show-stats || true
 
       # ── The sweep (OS-aware lib/checks.sh drives all three hosts) ───────────
       # shell: bash → Git Bash on Windows so the bash-sourced libs run cleanly.
