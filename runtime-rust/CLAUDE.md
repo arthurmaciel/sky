@@ -339,10 +339,18 @@ General skills enabled:
 - `/grill-with-docs` — challenge plans against domain glossary + ADRs
 - `/improve-codebase-architecture` — find deepening opportunities
 
-## Pre-final code gate (security · correctness · soundness — above all)
+## Pre-final code gate (security · correctness · soundness · Efficiency · Completeness · Readability — above all)
+
+> **Principles — applied to every change, in this strict priority order:**
+> **1. Security · 2. Correctness · 3. Soundness · 4. Efficiency · 5. Completeness · 6. Readability.**
+> A lower principle never justifies compromising a higher one (a readable name
+> that breaks correctness is rejected; an efficient path that opens a soundness
+> hole is rejected). Names are self-contained and uncontracted — richer-but-
+> longer beats terse-but-cryptic, because a non-informative name is pure loss to
+> anyone who doesn't already know the code.
 
 Any skill or agent that **writes code** runs this as its **pre-final stage,
-BEFORE the commit / hand-off**. These three principles **outrank every other**
+BEFORE the commit / hand-off**. These six principles **outrank every other**
 (efficiency, Go-parity, brevity, even "it builds") — a change that hurts any of
 them is unacceptable, no matter what it buys.
 

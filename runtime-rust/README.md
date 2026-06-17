@@ -1,39 +1,75 @@
 # Sky Rust Runtime
 
+I learned about Sky in the middle of April 2026 and quickly started to admire the language 
+project. As I have studied Rust in the last year, I had the idea to implement a new **experimental** 
+backend with it. 
+
+The Sky author shared his initial thought of using Rust as a target language, but choose Go 
+due to Rust type system, that would block 'universal' and automatic FFI.
+
+In fact, that is the case. But when I faced the FFI limits, I decided to pursue the following
+goals:
+
+- Have a Rust backend for real use
+- Test the limits of Sky FFI to Rust (complex lifetimes, generics, traits etc)
+- Learn more about Rust itself
+- Learn more about compilers
+- See the limits of AI tooling on a practical and complex project
+
+
+## Contract
+
+The Rust backend is **experimental**. Don't use it for production yet.
+
+Its principles declaration is:
+
 > **Principles — applied to every change, in this strict priority order:**
 > **1. Security · 2. Correctness · 3. Soundness · 4. Efficiency · 5. Completeness · 6. Readability.**
 > A lower principle never justifies compromising a higher one (a readable name
 > that breaks correctness is rejected; an efficient path that opens a soundness
-> hole is rejected). Names are self-contained and uncontracted — richer-but-
-> longer beats terse-but-cryptic, because a non-informative name is pure loss to
-> anyone who doesn't already know the code.
+> hole is rejected).
 
-The `sky_runtime` crate is the **single source of truth** for all Rust code
-emitted by the Sky compiler's `--target rust` path. Every generated project
-copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
+Code changes must not hurt any of these principles. If at a specific decision those principles conflict, 
+the priority order should guide the choices for human and artificial agents. 
 
----
+The Rust backend must **mirror** Go backend functionality and look for byte-equality results. If not 
+possible, the divergence must be logged here.
+There is no commitment about implementation parity - Rust should be idiomatic.
 
-## Goal
+The backend must have the smallest footprint at Sky project code base as possible, changing
+only necessary files.
 
-The Rust backend reaches full behavioral parity with the Go reference, holding
-four hard rules: no panic vector, no runtime error from well-typed Sky, no `Any`
-in generated code, no change to Sky/Go source or the upstream examples. Fixes are
-root-cause only. Where Rust implements a mechanism differently from Go to hold
+
+### Limitations to the contract
+
+**Expect a one-month parity delay**.
+
+Sky is heavily and quickly developed by its author. It provides industrial-grade source 
+code and utilities ("batteries included" -> I read it as "power plant included"). 
+
+So keeping the Rust backend up-to-date is difficult and demands careful orchestration. 
+
+Anyway, at the moment the backend reaches full behavioral parity with the Go reference, 
+holding four hard rules: no panic vector, no runtime error from well-typed Sky, as few `Any`
+as possible in generated code (fully-typed codegen), no change to Sky/Go source or 
+the upstream examples. 
+
+Fixes are root-cause only. Where Rust implements a mechanism differently from Go to hold
 those guarantees, that *mechanism* divergence is recorded in **Rust vs Go backend
 — divergent implementation strategies**.
+
 
 ---
 
 ## CLI usage
 
 ```bash
-sky build src/Main.sky --target rust
-sky run   src/Main.sky --target rust
-sky check src/Main.sky --target rust    # full emit + cargo build
-sky test  tests/MyTest.sky --target rust
-sky add uuid --features="v4" --target rust   # fully automatic, no shims
-sky install                                  # regen FFI after rm -rf .skycache
+$ sky build src/Main.sky --target rust
+$ sky run   src/Main.sky --target rust
+$ sky check src/Main.sky --target rust    # full emit + cargo build
+$ sky test  tests/MyTest.sky --target rust
+$ sky add uuid --features="v4" --target rust   # fully automatic, no shims
+$ sky install                                  # regen FFI after rm -rf .skycache
 ```
 
 ---
@@ -139,9 +175,13 @@ All runtime logic lives in `sky_runtime/`; `Builder.hs` emits thin wrappers that
 instantiate `E = SkyError` for the generated project. No inline Rust
 implementation strings in the Haskell codegen.
 
+The `sky_runtime` crate is the **single source of truth** for all Rust code
+emitted by the Sky compiler's `--target rust` path. Every generated project
+copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
+
 ---
 
-## Rust vs Go backend — divergent implementation strategies
+### Rust vs Go backend — divergent implementation strategies
 
 Where the Rust backend deliberately implements something **differently** from Go,
 the **why** is recorded here. The Go backend is the reference, but parity is about
@@ -249,9 +289,8 @@ be a **compile error**. (Go reflectively serializes a session Model, skipping fu
 fields at runtime.) An un-restorable closure can't silently round-trip through a
 session store; the type system rejects it instead of a runtime surprise.
 
----
 
-## Multibackend program-entry model
+### Multibackend program-entry model
 
 A `main` may pick its UI backend at runtime and run it, sharing one
 `init`/`update`/`subscriptions` across backends:
@@ -287,9 +326,8 @@ Three rules:
 `Cli.program` is intentionally excluded from the backend-entry set: it runs inline
 via `task_run` (not in `usesBackendApp`), so its `Task.run` is kept.
 
----
 
-## Std.Ui parity (byte-identical render)
+### Std.Ui parity (byte-identical render)
 
 `Std.Ui` is pure Sky source that builds a `Std.Html` ADT, serialised by `html.rs`
 `render_html` — so parity is a **codegen-lowering + serializer** problem, not a
@@ -324,9 +362,7 @@ Event *dispatch* (onPress/onSubmit) and the style-injection features (pseudo-cla
 / media-query / transition / animation) render through Sky.Live's VNode path,
 covered by the integration apps rather than the static corpus.
 
----
-
-## Modification boundaries
+### Modification boundaries
 
 Only modify these when working on the Rust backend:
 
@@ -352,9 +388,8 @@ and no `src/Sky/Generate/Go/` code reads it → Go output byte-identical. Adding
 Rust-only `FnInfo` field is the one sanctioned shared-file touch; new *behaviour*
 still goes behind `TargetRust ->` seams.
 
----
 
-## Cross-backend rules (load-bearing)
+### Cross-backend rules (load-bearing)
 
 Go is the **production backend**; Rust is second-tier.
 
@@ -377,9 +412,8 @@ unbound token to `any`. Without it `00`'s Go reference is broken (an upstream bu
 never a Rust failure. Reconcile the surgical guard against the upstream typed-codegen
 rewrite when that lands.
 
----
 
-## sky.toml Rust fields
+### sky.toml Rust fields
 
 ```toml
 [project]
@@ -464,6 +498,27 @@ are cargo-build-verified.
 
 The per-example Go≡Rust parity table is the **Project status** sweep above.
 
+
+## Error type
+
+All runtime functions are generic over `E`; `Builder.hs` emits thin wrappers that
+fix `E = SkyError`:
+
+```rust
+// sky_runtime/task.rs (generic):
+pub fn task_map<E, A, B>(f: impl FnOnce(A) -> B + Send + 'static, t: SkyTask<E, A>) -> SkyTask<E, B>
+// generated main.rs (wrapper):
+pub fn task_map<A, B>(f: impl FnOnce(A) -> B + Send + 'static, t: SkyTask<A>) -> SkyTask<B> {
+    sky_runtime::task::task_map::<SkyError, _, _>(f, t)
+}
+```
+
+The effect model: every effect kernel defers its I/O into the returned Task body,
+so constructing a Task is pure and the side effect fires only on `.await`. Codegen
+`task_run`s (block_on) a discarded Task-typed `let _ = <task>` in program order; a
+non-Task discard (`_ = List.map …`, `_ = someVar`) keeps bind/drop. So a built-but-
+discarded `List (Task ())` never runs — matching Go's deferred-Task semantics.
+
 ---
 
 ## Soundness, correctness and security
@@ -509,31 +564,8 @@ construction:
 `html.rs` `OnRaw(String, Arc<dyn Any + Send + Sync>)` is an opaque event payload
 **only ever passed through**, never `downcast` in Rust — no cast, no failure mode.
 
----
 
-## Error type
-
-All runtime functions are generic over `E`; `Builder.hs` emits thin wrappers that
-fix `E = SkyError`:
-
-```rust
-// sky_runtime/task.rs (generic):
-pub fn task_map<E, A, B>(f: impl FnOnce(A) -> B + Send + 'static, t: SkyTask<E, A>) -> SkyTask<E, B>
-// generated main.rs (wrapper):
-pub fn task_map<A, B>(f: impl FnOnce(A) -> B + Send + 'static, t: SkyTask<A>) -> SkyTask<B> {
-    sky_runtime::task::task_map::<SkyError, _, _>(f, t)
-}
-```
-
-The effect model: every effect kernel defers its I/O into the returned Task body,
-so constructing a Task is pure and the side effect fires only on `.await`. Codegen
-`task_run`s (block_on) a discarded Task-typed `let _ = <task>` in program order; a
-non-Task discard (`_ = List.map …`, `_ = someVar`) keeps bind/drop. So a built-but-
-discarded `List (Task ())` never runs — matching Go's deferred-Task semantics.
-
----
-
-## Rust FFI
+### Rust FFI
 
 `sky add <crate> --target rust` invokes `sky-ffi-inspect-rs`, which runs
 `cargo +nightly rustdoc --output-format json` (so derive/proc-macro impls are
@@ -599,9 +631,8 @@ Measure constructable surface per crate with the `sky-rust-backend:ffi-audit` sk
 The inspector's `--audit` flag tags every tail-filter drop with reason +
 constructable-or-not for diagnostics.
 
----
 
-## FFI codegen type-coercion rules
+### FFI codegen type-coercion rules
 
 `Sky.Build.Rust.Ffi` (`emitRustFnSimple`).
 
