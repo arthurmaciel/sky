@@ -14,6 +14,42 @@ where E: From<String> + Send + 'static, A: Send + 'static {
     }
 }
 
+// Main-thread driver for the Sky.Webview entry shape.
+//
+// `block_on` (above) drives the entry future on a SPAWNED OS thread (so a
+// panic inside the future can be `.join()`-mapped to an `Err` instead of
+// aborting the process). That spawn is fatal for Sky.Webview: tao/winit's
+// `EventLoop` and Cocoa's `NSApplication` MUST be created and run on the
+// process's TRUE main thread on macOS (a hard Cocoa requirement — there is no
+// any-thread escape hatch), and Windows likewise expects the main thread. The
+// webview `event_loop.run(...)` lives inside the entry Task's future, so the
+// future itself has to be polled on the main thread.
+//
+// This driver runs the future on the CURRENT (main) thread via a
+// `current_thread` tokio runtime — no `std::thread::spawn`, so `event_loop.run`
+// constructs and runs on the main thread on every OS. The current-thread
+// runtime still drives any async work the webview Task chain does BEFORE it
+// hands the thread to `event_loop.run` (pre-webview `andThen` I/O, etc.),
+// because `block_on` on a `current_thread` runtime cooperatively polls the
+// whole future tree on this one thread. `enable_all()` keeps timers + I/O
+// drivers available.
+//
+// TOTALITY: runtime-init failure returns `Err` (no unwrap/expect/panic). There
+// is no spawn here, so there is no `.join()` panic-catch — a panic inside the
+// webview future would propagate (the synchronous-panic gate at the entry
+// boundary classifies it). That is acceptable for the webview shape: the
+// webview path itself is total (window/webview construction failure returns
+// `SkyResult::Err`), so a panic would be a genuine compiler/runtime bug, not a
+// well-typed-Sky-reachable abort.
+pub fn block_on_current_thread<E, A>(future: SkyTask<E, A>) -> SkyResult<E, A>
+where E: From<String> + Send + 'static, A: Send + 'static {
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(r) => r,
+        Err(e) => return SkyResult::Err(format!("tokio runtime init failed: {}", e).into()),
+    };
+    rt.block_on(future)
+}
+
 pub fn task_succeed<E: Send + 'static, A: Send + 'static>(a: A) -> SkyTask<E, A> {
     Box::pin(ready(ok_res::<E, A>(a)))
 }

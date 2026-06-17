@@ -356,6 +356,19 @@ entryPointSection uk mainReturnsTask =
         -- effect. Mirroring the emitter's `retTy` decision makes the entry and the
         -- signature agree by construction.
         mainIsTask = mainReturnsTask
+        -- Sky.Webview MUST drive its entry Task on the process's TRUE main
+        -- thread: tao/winit's `EventLoop` + Cocoa's `NSApplication` require the
+        -- main thread on macOS (hard Cocoa requirement, no any-thread escape),
+        -- and Windows expects it too. `webview_app`'s `event_loop.run(...)`
+        -- lives inside the entry future, so the future has to be polled on the
+        -- main thread. The default `block_on` spawns an OS thread (for
+        -- panic-to-`Err` mapping) → the event loop would build OFF the main
+        -- thread → macOS panic. So a Sky.Webview entry uses
+        -- `block_on_current_thread` (a current-thread tokio runtime, no spawn —
+        -- it still drives any pre-webview async on this one thread). Every other
+        -- backend shape (cli / live / tui / server) keeps the spawning
+        -- `block_on` unchanged.
+        entryDriver = if usesWebview uk then "block_on_current_thread" else "block_on"
     in
     [ ""
     , "// ==========================================="
@@ -374,7 +387,7 @@ entryPointSection uk mainReturnsTask =
         -- is retained for documentation but no longer gates the entry — the
         -- pre-deferral "no tokio → call and drop" path was only sound while
         -- effects fired eagerly.)
-        [ "    match block_on(sky_main()) {"
+        [ "    match " ++ entryDriver ++ "(sky_main()) {"
         , "        SkyResult::Ok(_) => (),"
         , "        SkyResult::Err(e) => { eprintln!(\"{:?}\", e); std::process::exit(1); }"
         , "    }"

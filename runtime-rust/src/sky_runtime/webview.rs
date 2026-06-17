@@ -11,12 +11,16 @@
 //!
 //! Modern wry/tao use objc2 (macOS) + current windows-rs (Windows) and so build
 //! on macOS-15/Xcode-16 + Windows-2025 toolchains — unlike the legacy wry 0.24 /
-//! tao 0.16 stack this replaced. The event loop is per-OS: Linux runs it on the
-//! TEA task thread (off the OS main thread) via `EventLoopBuilderExtUnix::
-//! with_any_thread(true)` (GTK tolerates it for a single-window single-thread
-//! app); macOS/Windows REQUIRE the main thread, so there it is a plain
-//! `EventLoopBuilder::build()`. The webview is built per-OS too: `build(&window)`
-//! (raw-window-handle) off Linux, `build_gtk(window.gtk_window())` on Linux.
+//! tao 0.16 stack this replaced. The event loop is created + run on the
+//! process's TRUE main thread on every OS: the generated Sky.Webview entry
+//! drives this future via `block_on_current_thread` (a current-thread tokio
+//! runtime, no `std::thread::spawn` — see task.rs), so `event_loop.run(...)`
+//! never runs off the main thread. macOS REQUIRES this (tao/winit + Cocoa's
+//! `NSApplication` assert the main thread — a hard requirement with no
+//! any-thread escape); Windows expects it; GTK on Linux is happy on it. So the
+//! loop is built uniformly (`EventLoopBuilder::build()`), with no per-OS
+//! `with_any_thread(true)` branch. The webview itself is built per-OS:
+//! `build(&window)` (raw-window-handle) off Linux, `build_gtk(...)` on Linux.
 //!
 //! Two builds: the real backend is behind the opt-in `webview` Cargo feature
 //! (needs the system webview dev libraries); otherwise a stub returning a graceful
@@ -176,7 +180,7 @@ mod imp {
             use tao::window::WindowBuilder;
             use wry::WebViewBuilder;
             #[cfg(target_os = "linux")]
-            use tao::platform::unix::{EventLoopBuilderExtUnix, WindowExtUnix};
+            use tao::platform::unix::WindowExtUnix;
             #[cfg(target_os = "linux")]
             use wry::WebViewBuilderExtUnix;
 
@@ -185,19 +189,16 @@ mod imp {
                 Ipc(String),
             }
 
-            // Per-OS event loop. On Linux the TEA task is polled off the OS main
-            // thread (tokio block_on), so build with `with_any_thread(true)` —
-            // tao otherwise panics. Sky webview programs are single-window
-            // single-thread, so the GTK single-thread caveat is satisfied. On
-            // macOS/Windows the event loop MUST live on the main thread, so build
-            // it plainly (the TEA task runs on the main thread there).
-            let event_loop = {
-                #[allow(unused_mut)]
-                let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
-                #[cfg(target_os = "linux")]
-                builder.with_any_thread(true);
-                builder.build()
-            };
+            // The entry drives a Sky.Webview app via `block_on_current_thread`
+            // (see task.rs), so this future is polled on the process's TRUE main
+            // thread on EVERY OS. tao/winit's `EventLoop` + Cocoa's
+            // `NSApplication` require the main thread on macOS (hard Cocoa
+            // requirement); Windows expects it too; GTK on Linux is happy on the
+            // main thread. So the event loop is built uniformly on the main
+            // thread — no per-OS `with_any_thread(true)` escape hatch is needed
+            // (that was only required when the loop was constructed OFF the main
+            // thread, which no longer happens).
+            let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
             let (w, h) = window.size;
             let win = match WindowBuilder::new()
                 .with_title(&window.title)
