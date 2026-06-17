@@ -17,6 +17,28 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-17 18:00 — CI precision: webview deps + skyshop out-of-scope (the 4 pre-existing reds)
+
+After the limitation fixes, CI's only reds were 4 PRE-EXISTING examples (not
+regressions): 29/31-webview, 38-composite-ui-multibackend, skyshop-rs. Diagnosed
++ addressed both classes (user-approved):
+
+- **Webview (29/31/38)** — NOT a codegen bug: `31-webview` builds clean LOCALLY
+  (jammy/22.04 base, has webkit2gtk-4.0). The codegen pins wry 0.24 / tao 0.16
+  which link **webkit2gtk-4.0** — present on 22.04, REMOVED on 24.04
+  (`ubuntu-latest`). Fix: pin the Linux runner to **ubuntu-22.04** + install
+  `libwebkit2gtk-4.0-dev libgtk-3-dev librsvg2-dev libsoup2.4-dev
+  libjavascriptcoregtk-4.0-dev` (alongside xvfb). ubuntu conditions made
+  version-agnostic (`startsWith(matrix.os,'ubuntu')`). No codegen/wry bump.
+- **skyshop-rs** — its generated Rust FFI bindings are NOT committed
+  (`.skycache/ffi/rust` gitignored), so a CI build would need `cargo +nightly
+  rustdoc` over firestore/async-stripe WITH network — long/flaky, unfit for the
+  per-commit gate. Marked **out-of-scope** in `lib/examples.sh is_out_of_scope`
+  (explicit `*/skyshop-rs` guard, documented); verified locally via its verify.sh.
+  Also provisioned `dtolnay/rust-toolchain@nightly` for any future FFI example.
+
+- **Affected:** `.github/workflows/examples-sweep.yml`, `runtime-rust/scripts/lib/examples.sh`.
+
 ## 2026-06-17 17:30 — errorToString regression follow-up: total field rendering (autoref)
 
 CI run `27711298427` (the fix-sweep) surfaced `28-streaming-chat` as a NEW red on

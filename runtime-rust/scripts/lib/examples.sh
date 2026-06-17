@@ -72,6 +72,13 @@ all_examples() {
 # file list via `find … -exec rg … +` so the walk covers every `.sky` under src/.
 is_out_of_scope() {
   local dir="$1" m rel
+  # Explicit out-of-scope: skyshop-rs is the heavyweight real-world FFI proof
+  # (firestore + async-stripe via fork-local wrapper crates). Its generated Rust
+  # FFI bindings are NOT committed (`.skycache/ffi/rust` is gitignored), so a CI
+  # build must run `cargo +nightly rustdoc` over those crates WITH network — a
+  # long, flaky introspection unsuited to the per-commit gate. It is verified
+  # locally via `examples/rust/skyshop-rs/verify.sh` instead.
+  case "$dir" in */skyshop-rs) return 0 ;; esac
   while read -r m; do
     [ -z "$m" ] && continue
     case "$m" in Sky.*|Std.*|Rust.*) continue ;; esac # Sky stdlib / Rust-FFI wrapper → in scope
