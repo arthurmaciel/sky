@@ -477,7 +477,11 @@ The FFI / framework fixture set is 50+ Sky projects under
   routing, typed `LiveReq`, sessions, PubSub), Sky.Tui (Element → cells, key/focus
   input), Sky.Webview, Sky.Http.Server + WebSocket.
 - **Codegen shapes** — Task-valued `if`/`case` branches at `main`, discard-Task
-  effect ordering, curried function-valued returns, event-handler `Arc` capture.
+  effect ordering, curried function-valued returns, event-handler `Arc` capture,
+  `List.sort`/`sortBy`/`sortWith`, bare-`any` record-field codegen rejection,
+  static `Ffi.callTask` resolution, unannotated `Result` Ok-payload recovery,
+  `errorToString` String/record parity, `Task.retryWith` transient-retry, and
+  single-use non-`Clone` `SkyTask` capture-move.
 
 `examples/rust/skyshop-rs` is the one real end-to-end Rust-FFI app (a 1:1 port of
 `examples/13-skyshop` binding `firestore` 0.49 + `async-stripe` 1.0-rc.6 +
@@ -545,7 +549,7 @@ construction:
 
 ## Module structure
 
-`runtime-rust/src/sky_runtime/` — 44 modules. This list is the source of truth for
+`runtime-rust/src/sky_runtime/` — 46 modules. This list is the source of truth for
 standalone-crate testing; `Project.hs` writes a parallel `mod.rs` for the generated
 project (with `cfg(feature)` gating).
 
@@ -555,6 +559,7 @@ project (with `cfg(feature)` gating).
 |---|---|
 | `core` | `SkyResult`/`SkyMaybe`/`SkyTask`, list/string/float helpers, byte FFI coercion |
 | `basics` · `string` · `list` · `dict` · `set` · `char_kernel` · `math` | Sky.Core pure surface |
+| `stringify` | `SkyStringify` trait — the total `errorToString`/`debugShow`/`toString` renderer (Go `%v`: String unquoted, scalars Display, `[a b c]` lists, sorted-key maps); per-type impls emitted by codegen |
 | `decimal` · `money` | arbitrary-precision arithmetic + currency-typed Money |
 | `crypto` | `randomBytes`/`token` + sha/hmac/RSA/AEAD (aes-gcm, chacha20, pbkdf2) |
 | `jwt` · `json` · `encoding` · `regex_kernel` · `uuid_kernel` | codecs + crypto-adjacent |
@@ -769,19 +774,16 @@ change. A runtime-only `.rs` edit is re-copied into the generated project on the
 
 | Limitation | Description | Workaround |
 |---|---|---|
-| `any` in record fields | Codegen refuses `Box<dyn Any>` — structured `error[Rust]: any-typed record field` diagnostic | Encode as an ADT upstream, or ship a Rust-target override at `runtime-rust/sky-stdlib-overrides/<Module>.sky` |
-| `Task.retryWith` run-once | Rust `SkyTask` is a one-shot `Future` (not `Clone`, consumed on await) **by design** — the totality floor; Go's re-runnable thunk is what its loop re-calls. Run-once is observably correct for Ok-first / last-Err / `RetryWhen` short-circuit | Drive the retry loop in Sky (recurse on the `Result`) |
-| `withTransaction` rollback isolation | sqlx pool may route body queries to other connections | `sqlx::Pool::max_connections(1)` for guaranteed rollback |
+| `any` in record fields | A bare-wildcard `any` record field is rejected at codegen with a structured `error[Rust]: any-typed record field …` (no heterogeneous `Box<dyn Any>` field, by the no-`Any` floor). A declared alias type-param `any` works as a normal generic | Encode the payload as an ADT upstream, or use a concrete type |
+| composite ADT stringification (`errorToString` / `Basics.toString`) | String, scalars, lists, maps and **records** are Go-`%v`-identical (records via `SkyStringify`, `{f0 f1}` in `_fieldIndex` order). An **ADT** value renders best-effort `Ctor p0 p1`, NOT Go's reflected flattened-struct `{tag payload}` layout (a Rust sum type can't reproduce Go's zero-init inactive fields without fabrication) | Stringify the ADT's fields explicitly when exact Go parity is required |
+| `Task.retryWith` bound-value task | An **inline-expression** task retries per policy (the headline flaky-API case). A task passed as a **bound local** (`let t = … in retryWith p t`) is a one-shot `SkyTask` (`Pin<Box<dyn Future>>`, not re-runnable) → it runs once and ignores the attempt count | Pass the task inline: `retryWith p (Http.get url)` |
+| non-`Clone` capture (multi-use / opaque handle) | A **single-use** bound `SkyTask` captured into a closure is moved (not cloned). A **multi-use** non-`Clone` capture, or a non-`Clone` opaque FFI handle captured into a closure, still hits the clone prelude → `cargo build` fails. The general fix is an ownership-model change (no-clone set from region types) | Restructure to a single use, or inline the value rather than capturing it |
+| `withTransaction` nested scope | BEGIN/body/COMMIT/ROLLBACK now run on one dedicated connection (rollback is real on any pool size). A **nested** `withTransaction` is flattened onto the outer transaction — no per-nesting SAVEPOINT, so an inner `Err` doesn't roll back independently | Use a single transaction scope; split into separate transactions for independent rollback |
 | Bytes non-ASCII *text* base64/hex | Lossless on ASCII / hex / binary (byte-identical to Go); differs from Go only when a `Bytes` value holds literal non-ASCII *text bytes* compared against a Go-/externally-computed encoded string | Compare decoded values rather than encoded strings |
-| `errorToString` String path | Retains `Debug` (the only total universal stringifier), which quotes a `String` (`"hi"` vs Go's `hi`). A `Display` re-bind fails on the generic `Sky.Test.debugShow : a -> String` caller | — |
-| composite `Basics.toString` (record/ADT) | Scalars match Go; a composite is a clean compile-time error (never a panic). Go's `%v` renders an ADT as `{tag payload}`, a layout no Rust sum type reproduces without fabricating memory | Stringify the fields explicitly |
-| `Ffi.callTask` dynamic dispatch | static-shape calls are peephole-resolved; the dynamic path is unsupported (a no-reflection guard preserving no-`Any` / no-runtime-error) | Use static-shape FFI calls |
-| `rustdoc` needs nightly | Inspector runs `cargo +nightly rustdoc` | `rustup install nightly` |
-| Un-nameable bindings dropped | Generics, borrowed-view returns, lifetime-bound handles, std types, unsafe fns skipped (builder setters / `Option<T>` params / glob re-exports are recovered) | Use a wrapper crate with owned/primitive signatures |
-| Unconstrained `Result` Ok-payload → `i64` | A fn returning `Result Error a` with passthrough arms (`Ok v -> Ok v`) and no signature lowers the Ok payload as `i64` → mismatch | Add an explicit Sky type signature to the binding |
-| `Dict.union` / `List.sortBy` on Rust | `Dict.union` absent from the Rust runtime; `List.sortBy` absent from the shared `Sky.Core.List` (a stdlib gap, out of the Rust boundary) | Build the merged map directly; pure-Sky insertion sort for `sortBy` |
-| Non-`Clone` capture cloned in closure prelude | The closure / let-Def capture-prelude clones every captured local with no cloneability filter. A non-`Clone` capture — an `impl Fn(..)` HOF function param, or a `SkyTask` value — fails `cargo build`. The proper fix populates the no-clone set from region types (broad ownership-model change) | Restructure to avoid capturing the `Task` / fn param (inline the cleanup task, or pass the fn in arg-position rather than capture) |
-| WASM target | Not yet supported — needs a tokio/threads-free runtime rewrite | — |
+| `Ffi.callTask` / `Ffi.callPure` dynamic dispatch | static-shape calls (literal kernel name + literal args) are peephole-resolved to the direct kernel call; the genuinely-dynamic path (non-literal name/args) is unsupported by design (no reflection / no `Box<dyn Any>`) | Use a string-literal kernel name + list-literal args, or `Ffi.kernel "<name>"` for value-level selection |
+| `rustdoc` needs nightly | Inspector runs `cargo +nightly rustdoc` — rustdoc-JSON output is unstable upstream | `rustup install nightly` |
+| Un-nameable FFI bindings dropped | Generics, borrowed-view returns, lifetime-bound handles, std types, unsafe fns skipped (builder setters / `Option<T>` params / glob re-exports are recovered) — a soundness filter, not a maturity gap | Use a wrapper crate with owned/primitive signatures |
+| WASM target | Not yet supported — needs a `Send`-free, threads/`tokio`-free runtime rewrite (`SkyTask` is `Send`-everywhere; `block_on` builds a multi-thread runtime + OS thread) | — |
 
 ---
 
