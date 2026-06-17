@@ -25,6 +25,19 @@ those guarantees, that *mechanism* divergence is recorded in **Rust vs Go backen
 
 ---
 
+## CLI usage
+
+```bash
+sky build src/Main.sky --target rust
+sky run   src/Main.sky --target rust
+sky check src/Main.sky --target rust    # full emit + cargo build
+sky test  tests/MyTest.sky --target rust
+sky add uuid --features="v4" --target rust   # fully automatic, no shims
+sky install                                  # regen FFI after rm -rf .skycache
+```
+
+---
+
 ## Project status
 
 **examples-sweep = 37 green · 0 red — full Go≡Rust behavioral parity.** Every
@@ -48,54 +61,65 @@ measures Rust-vs-Go throughput separately (informational, never blocks).
 
 ### Examples
 
-"Round-trip" = how RUN is exercised: `cli` = stdout · `server` = curl boot/serve
-· `live` = headless browser scenario · `tui` = pty smoke · `webview` = xvfb
-smoke. All rows Build ✅ · Run ✅.
+**Build** / **Run** are per-row (✅ pass · ❌ fail). "Round-trip" = how RUN is
+exercised: `cli` = stdout · `server` = curl boot/serve · `live` = headless browser
+scenario · `tui` = pty smoke · `webview` = xvfb smoke. The four **Perf** columns
+are Rust/Go ratios from the perf sweep: **Thru** (request throughput, **↑** higher
+= Rust faster) · **RSS** (resident memory, **↓** lower = Rust leaner) · **Cold**
+(cold-start ms, **↓**) · **Bin** (binary size, **↓**). `—` = the shape has no such
+measurement; `n/a` = measured but the probe couldn't compare.
 
-| Example | Shape | Round-trip | Equiv | Notes |
-|---|---|---|---|---|
-| 00-standard-libs | cli | stdout | equiv-stdout | 131/131 assertions; Go ref builds via the fork-local T1 guard (see Cross-backend) |
-| 01-hello-world | cli | stdout | equiv-stdout | |
-| 02-go-stdlib | cli | stdout | n/a | non-deterministic (wall-clock time + live HTTP); Go-stdlib-FFI demo, no stable comparable stdout |
-| 04-local-pkg | cli | stdout | equiv-stdout | multi-module |
-| 06-json | cli | stdout | equiv-stdout | |
-| 07-todo-cli | cli | stdout | n/a | non-deterministic RFC3339Nano banner timestamp (Std.Log format itself matches Go) |
-| 09-live-counter | live | browser (live-counter) | equiv-scenario | |
-| 10-live-component | live | browser (live-component) | equiv-scenario | |
-| 12-skyvote | live | browser (skyvote) | equiv-scenario | |
-| 14-task-demo | cli | stdout | equiv-stdout | |
-| 15-http-server | server | curl 4 routes | equiv-body 4 | `/` `/redirect` `/api/status` `/cookie-demo` byte-identical |
-| 16-skychess | live | browser (skychess) | equiv-scenario | |
-| 17-skymon | live | browser (skymon) | equiv-scenario | |
-| 18-job-queue | live | browser (job-queue) | equiv-scenario | |
-| 19-skyforum | live | browser (skyforum) | equiv-scenario | |
-| 20-cli-counter | cli | stdout | equiv-stdout | |
-| 21-tui-stopwatch | tui | pty | equiv-pty | both drive the runtime (not cell-identical) |
-| 22-tui-stopwatch-ui | tui | pty | equiv-pty | |
-| 23-tui-todo | tui | pty | equiv-pty | |
-| 24-tui-kitchen-sink | tui | pty | equiv-pty | |
-| 25-sky-console | live | browser (smoke) | equiv-scenario | |
-| 26-ui-showcase | live | browser (smoke) | equiv-scenario | |
-| 27-multi-session-chat | live | browser (smoke) | equiv-scenario | |
-| 28-streaming-chat | live | browser (smoke) | equiv-scenario | |
-| 29-webview-threejs-spike | webview | xvfb | n/a | webview stub headless — no Go comparison |
-| 30-sse-server-demo | server | curl `/` | equiv-body 1 | SSE route skipped |
-| 31-webview-stopwatch-ui | webview | xvfb | n/a | |
-| 32-sse-relay | server | curl `/` | equiv-body 1 | |
-| 33-websocket-echo | server | curl `/` | equiv-body 1 | ws route skipped |
-| 34-multi-tier-console | live | browser (smoke) | equiv-scenario | |
-| 35-composite-generics | cli | stdout | n/a | non-deterministic (Time.now + Dict.toList order) |
-| 36-composite-server | server | curl | equiv-serve | 0 comparable GET routes — both boot |
-| 37-composite-live-shop | live | browser (smoke) | equiv-scenario | |
-| 38-composite-ui-multibackend | tui | pty | equiv-pty | |
-| simple | cli | stdout | equiv-stdout | |
-| test_pkg | cli | stdout | equiv-stdout | |
-| examples/rust/skyshop-rs | live/FFI | curl | n/a | Rust-FFI app (stripe/firebase/firestore); does not build on Go — Rust-only |
+| Build | Run | Example | Shape | Round-trip | Equiv | Notes | Thru ↑ | RSS ↓ | Cold ↓ | Bin ↓ |
+|:-:|:-:|---|---|---|---|---|:-:|:-:|:-:|:-:|
+| ✅ | ✅ | 00-standard-libs | cli | stdout | equiv-stdout | 131/131 assertions; Go ref builds via the fork-local T1 guard (see Cross-backend) | — | 0.21 | 0.59 | 0.054 |
+| ✅ | ✅ | 01-hello-world | cli | stdout | equiv-stdout | | — | 0.14 | 0.13 | 0.015 |
+| ✅ | ✅ | 02-go-stdlib | cli | stdout | n/a | non-deterministic (wall-clock time + live HTTP); Go-stdlib-FFI demo, no stable comparable stdout | — | 0.28 | 0.74 | 0.148 |
+| ✅ | ✅ | 04-local-pkg | cli | stdout | equiv-stdout | multi-module | — | 0.14 | 0.13 | 0.015 |
+| ✅ | ✅ | 06-json | cli | stdout | equiv-stdout | | — | 0.15 | 0.16 | 0.022 |
+| ✅ | ✅ | 07-todo-cli | cli | stdout | n/a | non-deterministic RFC3339Nano banner timestamp (Std.Log format itself matches Go) | — | 0.36 | 0.52 | 0.133 |
+| ✅ | ✅ | 09-live-counter | live | browser (live-counter) | equiv-scenario | | n/a | 0.10 | 1.04 | 0.017 |
+| ✅ | ✅ | 10-live-component | live | browser (live-component) | equiv-scenario | | **3.99×** | 0.30 | 0.96 | 0.017 |
+| ✅ | ✅ | 12-skyvote | live | browser (skyvote) | equiv-scenario | | — | — | — | — |
+| ✅ | ✅ | 14-task-demo | cli | stdout | equiv-stdout | | — | 0.20 | 0.31 | 0.025 |
+| ✅ | ✅ | 15-http-server | server | curl 4 routes | equiv-body 4 | `/` `/redirect` `/api/status` `/cookie-demo` byte-identical | **1.37×** | 0.04 | 0.18 | 0.006 |
+| ✅ | ✅ | 16-skychess | live | browser (skychess) | equiv-scenario | | — | — | — | — |
+| ✅ | ✅ | 17-skymon | live | browser (skymon) | equiv-scenario | | — | — | — | — |
+| ✅ | ✅ | 18-job-queue | live | browser (job-queue) | equiv-scenario | | **3.01×** | 0.61 | 1.02 | 0.029 |
+| ✅ | ✅ | 19-skyforum | live | browser (skyforum) | equiv-scenario | | — | — | — | — |
+| ✅ | ✅ | 20-cli-counter | cli | stdout | equiv-stdout | | — | 0.19 | 0.23 | 0.029 |
+| ✅ | ✅ | 21-tui-stopwatch | tui | pty | equiv-pty | both drive the runtime (not cell-identical) | — | — | — | — |
+| ✅ | ✅ | 22-tui-stopwatch-ui | tui | pty | equiv-pty | | — | — | — | — |
+| ✅ | ✅ | 23-tui-todo | tui | pty | equiv-pty | | — | — | — | — |
+| ✅ | ✅ | 24-tui-kitchen-sink | tui | pty | equiv-pty | | — | — | — | — |
+| ✅ | ✅ | 25-sky-console | live | browser (smoke) | equiv-scenario | | **4.80×** | 0.29 | 0.86 | 0.017 |
+| ✅ | ✅ | 26-ui-showcase | live | browser (smoke) | equiv-scenario | | — | — | — | — |
+| ✅ | ✅ | 27-multi-session-chat | live | browser (smoke) | equiv-scenario | | **4.58×** | 0.52 | 1.14 | 0.029 |
+| ✅ | ✅ | 28-streaming-chat | live | browser (smoke) | equiv-scenario | | **2.88×** | 0.51 | 1.04 | 0.017 |
+| ✅ | ✅ | 29-webview-threejs-spike | webview | xvfb | n/a | webview stub headless — no Go comparison | — | — | — | — |
+| ✅ | ✅ | 30-sse-server-demo | server | curl `/` | equiv-body 1 | SSE route skipped | **1.35×** | 0.05 | 0.21 | 0.006 |
+| ✅ | ✅ | 31-webview-stopwatch-ui | webview | xvfb | n/a | | — | — | — | — |
+| ✅ | ✅ | 32-sse-relay | server | curl `/` | equiv-body 1 | | **1.36×** | 0.10 | 0.20 | 0.015 |
+| ✅ | ✅ | 33-websocket-echo | server | curl `/` | equiv-body 1 | ws route skipped | **1.37×** | 0.04 | 0.21 | 0.007 |
+| ✅ | ✅ | 34-multi-tier-console | live | browser (smoke) | equiv-scenario | | **3.05×** | 0.32 | 0.92 | 0.017 |
+| ✅ | ✅ | 35-composite-generics | cli | stdout | n/a | non-deterministic (Time.now + Dict.toList order) | — | 0.26 | 0.52 | 0.112 |
+| ✅ | ✅ | 36-composite-server | server | curl | equiv-serve | 0 comparable GET routes — both boot | n/a | n/a | n/a | 0.017 |
+| ✅ | ✅ | 37-composite-live-shop | live | browser (smoke) | equiv-scenario | | — | — | — | — |
+| ✅ | ✅ | 38-composite-ui-multibackend | tui | pty | equiv-pty | | — | — | — | — |
+| ✅ | ✅ | simple | cli | stdout | equiv-stdout | | — | 0.20 | 0.29 | 0.027 |
+| ✅ | ✅ | test_pkg | cli | stdout | equiv-stdout | | — | 0.14 | 0.14 | 0.015 |
+| ✅ | ✅ | examples/rust/skyshop-rs | live/FFI | curl | n/a | Rust-FFI app (stripe/firebase/firestore); does not build on Go — Rust-only | — | — | — | — |
 
 **Equiv modes:** `stdout` = byte-identical stdout + exit · `body N` = N GET-route
 response bodies byte-identical · `scenario` = same headless-browser round-trip
 passes on both backends · `pty` = both drive the Tui runtime, no panic · `serve`
 = both boot + serve · `n/a` = no Go comparison possible.
+
+**Perf** ratios are Rust/Go; the arrow marks the good direction (Thru higher,
+RSS/Cold/Bin lower). Headlines: throughput **1.35–4.80×** Go on the serving apps;
+Rust binaries **0.6–15%** of Go's static binaries; RSS **4–61%** of Go's;
+cold-start mostly faster (cli) to par (live). Live-only latency metrics
+(`live_event` ≈ par, `live_warm` 3–6× Go, `sse_eps`/`ws_eps` ≥ par) and the perf
+thresholds live in `examples-perf-sweep`'s output (informational, never blocks).
 
 ---
 
@@ -709,19 +733,6 @@ for opaque:
 
 Effect drives the body: `pure` → `ok_res(lift(call))`; `fallible` → `match` on
 `Result`; `effectful` → the same inside `Box::pin(async move { … })`.
-
----
-
-## CLI usage
-
-```bash
-sky build src/Main.sky --target rust
-sky run   src/Main.sky --target rust
-sky check src/Main.sky --target rust    # full emit + cargo build
-sky test  tests/MyTest.sky --target rust
-sky add uuid --features="v4" --target rust   # fully automatic, no shims
-sky install                                  # regen FFI after rm -rf .skycache
-```
 
 ---
 

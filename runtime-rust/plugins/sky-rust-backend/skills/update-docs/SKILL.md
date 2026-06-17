@@ -120,13 +120,24 @@ sections (rewrite each from scratch based on what you observe in the repo):
    break Go, Go FFI at `.skycache/ffi/` root, Rust in `.skycache/ffi/rust/`, etc.).
 4. **`sky.toml` Rust fields** — all active sections: `[project]`, `["rust.dependencies"]`,
    `[rust]`, `[rust.shims]` with annotated examples.
-5. **Verification state** — list every example that builds and runs. Check
-   `runtime-rust/tests/sky/` and any Sky examples tested with `--target rust`. Mark each
-   ✅ or ❌ with one-line notes. Read `git log --oneline -10` to catch recent additions.
-6. **Module structure** — `runtime-rust/src/sky_runtime/` file map.
-7. **FFI codegen coercion rules** — `argCall` and `coerceRet` tables (from
+5. **Project status** — the headline + the sweep-summary-by-mode + the **full
+   examples table** (the `examples-sweep` rows, one per example). Canonical column
+   order: **Build · Run · Example · Shape · Round-trip · Equiv · Notes · Thru ↑ ·
+   RSS ↓ · Cold ↓ · Bin ↓**. Build/Run are **per-row** emoji (✅/❌) — check each
+   row from the latest sweep table, never a blanket "all ✅". The four Perf columns
+   are Rust/Go ratios from the latest `examples-perf-sweep` TSV (Thru = throughput
+   ↑better; RSS/Cold/Bin ↓better); `—` = shape unmeasured, `n/a` = measured but the
+   probe couldn't compare. Sources: `~/.cache/sky/examples-sweep/sweep-*.table`
+   (build/run/equiv) + `~/.cache/sky/examples-perf-sweep/perf-*.tsv` (perf ratios)
+   + `PROGRESS.md` + `git log`.
+6. **Verification state** — the `runtime-rust/tests/sky/` FFI/framework fixture set
+   (a sentence + count) + the runtime unit-test fact (`cargo test --features full`).
+   The per-example PARITY table lives under Project status (item 5), not here.
+7. **Module structure** — `runtime-rust/src/sky_runtime/` file map (grouped).
+8. **FFI codegen coercion rules** — `argCall` and `coerceRet` tables (from
    `src/Sky/Build/FfiGen.hs emitRustFnSimple`).
-8. **CLI usage** — `sky build/run/check/test/add` with `--target rust`.
+9. **CLI usage** — `sky build/run/check/test/add` with `--target rust`. Place this
+   section immediately AFTER `## Goal` (settled README section order).
 9. **Known limitations** — table with Description and Workaround columns.
 10. **Remaining work** — Short / Medium / Long term.
 

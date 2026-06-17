@@ -17,6 +17,17 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-17 12:00 — README examples table: per-row build/run + 4 perf columns; CLI usage after Goal
+
+Made the examples table complete + self-describing under Project status: per-row
+**Build**/**Run** ✅ columns (checked each of the 37 sweep rows — all green, replacing
+the blanket "all ✅") and four Rust/Go perf-ratio columns — **Thru ↑** (throughput) ·
+**RSS ↓** · **Cold ↓** (cold-start) · **Bin ↓** (binary size) — from the perf TSV.
+Moved `## CLI usage` to immediately after `## Goal`. Encoded this canonical table
+format + section order into the `update-docs` skill so regenerations preserve it.
+
+- **Affected:** `README.md`, `update-docs/SKILL.md`.
+
 ## 2026-06-17 11:45 — Source-of-truth policy: README only via update-docs; add PROGRESS.md
 
 Established the policy that fixes the multiple-sources-of-truth drift: `README.md`
