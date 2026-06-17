@@ -116,19 +116,28 @@ build_rust() {
   # CI raises this (and pre-warms the deps) so the cold first build fits.
   local d="$1" n="$2" tmo="${SKY_SWEEP_BUILD_TIMEOUT:-180}"
   case "$d" in examples/rust/*) tmo="${SKY_SWEEP_BUILD_TIMEOUT_FFI:-1800}";; esac
-  # Windows shares ONE CARGO_TARGET_DIR holding a single sky-app.exe. A
-  # just-RUN example (webview/tui, killed via `timeout -k`) can still hold its
-  # .exe handle when the next example's `cargo build` tries to overwrite it →
-  # "failed to remove file … Access is denied (os error 5)". That is a transient
-  # OS file-lock, not a build failure — wait for the handle to release + retry.
+  # Windows shares ONE CARGO_TARGET_DIR holding a single sky-app.exe. A just-RUN
+  # example (webview/tui) can leave the app / winpty / its console host ALIVE,
+  # holding the .exe handle, so the next example's `cargo build` can't overwrite
+  # it → "failed to remove file … Access is denied (os error 5)". GNU `timeout`'s
+  # signal does NOT reliably kill a Windows GUI/pty process tree, so we must
+  # FORCE-KILL the lingerers (not just wait): `taskkill //F` (// → /F under Git
+  # Bash) before the build, and again on each lock retry.
+  _win_reap_app() {
+    [ "${SKY_HOST_OS:-}" = windows ] || return 0
+    taskkill //F //T //IM sky-app.exe      >/dev/null 2>&1 || true
+    taskkill //F //T //IM winpty.exe       >/dev/null 2>&1 || true
+    taskkill //F //T //IM winpty-agent.exe >/dev/null 2>&1 || true
+  }
+  _win_reap_app; [ "${SKY_HOST_OS:-}" = windows ] && sleep 1
   local attempt ok=0
-  for attempt in 1 2 3; do
+  for attempt in 1 2 3 4; do
     if ( cd "$d" && timeout "$tmo" "$SKY_BIN" build src/Main.sky --target rust >"$HIST/$n.rust.sky.log" 2>&1 ); then
       ok=1; break
     fi
-    if [ "${SKY_HOST_OS:-}" = windows ] && [ "$attempt" -lt 3 ] && \
+    if [ "${SKY_HOST_OS:-}" = windows ] && [ "$attempt" -lt 4 ] && \
        grep -qiE 'Access is denied \(os error 5\)|failed to remove file' "$HIST/$n.rust.sky.log"; then
-      sleep 3; continue
+      _win_reap_app; sleep 3; continue
     fi
     break
   done
