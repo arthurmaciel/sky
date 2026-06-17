@@ -2768,13 +2768,73 @@ taskExprInnerTypeCall _ _ _ = ""
 -- Handles `isZeroArgFn` wrapping (Ffi.kernel stubs) and `isListDec`
 -- factory closures.
 emitDefaultCall :: EmitCtx -> Can.Expr -> String -> [Can.Expr] -> String
--- Sub-D: Task.retryWith policy task — run-once on target=rust (see task.rs).
--- Drop the policy arg: it's unused, and emitting the policy builder
--- (`linearBackoff … : RetryPolicy e`) introduces a phantom error-type var `e`
--- Rust can't infer (E0283). task_retry_with takes only the task. retryWith is a
--- VarTopLevel kernel-alias, so it lands here rather than the VarKernel peephole.
-emitDefaultCall ctx _fn "task_retry_with" [_policy, task] =
-    "task_retry_with(" ++ exprToRustString ctx task ++ ")"
+-- Task.retryWith policy task — a REAL retry loop on target=rust.
+--
+-- The runtime `task_retry_with` (runtime-rust/src/sky_runtime/task.rs) takes
+-- PRIMITIVE policy fields + a `should_retry : Fn(&E)->bool` closure + a
+-- re-runnable `make_task : Fn() -> SkyTask` closure. The generated
+-- `RetryPolicy e` / `ShouldRetry e` ADTs are runtime-unnameable, so codegen
+-- DESTRUCTURES them here (same mechanism as SqlValue/SqlField/Money — see
+-- `sqlFieldsToVec`):
+--   * bind the policy to a temp, read its `maxAttempts`/`baseMs`/`jitter`/
+--     `kind` struct fields directly;
+--   * lower its `shouldRetry` enum into a boxed predicate closure:
+--       RetryAlways  → |_| true
+--       RetryWhen f  → move |e| f(e.clone())     (f : fn(SkyError) -> bool)
+--     boxed in an `Arc<dyn Fn(&SkyError) -> bool + Send + Sync>` so both arms
+--     unify to one type (and the Arc impls `Fn`, so it passes the
+--     `impl Fn(&E)->bool` slot);
+--   * wrap the task expression in a re-runnable `make_task : Fn() -> SkyTask`
+--     closure so each attempt rebuilds a fresh future (re-firing the side
+--     effects). When the task argument is an EXPRESSION (a call / ctor — the
+--     headline `Http.get url |> decode` shape), `move || <expr>` re-evaluates
+--     it per attempt: a genuine retry.
+--
+-- RESIDUAL (bound-value task). When the task argument is a bare LOCAL VARIABLE
+-- bound to an already-built `SkyTask` VALUE (`let work = Task.succeed 42 in
+-- retryWith p work`), that value is a one-shot `Pin<Box<dyn Future>>` — neither
+-- `Clone` nor reproducible (issue #8, non-Clone capture). It can only run ONCE.
+-- We keep this shape COMPILING + CORRECT-FOR-ITS-RESULT by (a) forcing
+-- `max_attempts = 1` so the loop runs exactly once and returns the real task's
+-- Ok/Err verbatim (no sentinel ever observed), and (b) emitting a single-shot
+-- `Fn`+`Send` shim (Mutex<Option<SkyTask>>) so the type-level `impl Fn` bound is
+-- satisfied; its post-first-call branch is structurally dead under the forced
+-- attempts=1. Cost: a bound-value task IGNORES the policy's attempt count
+-- (documented run-once for this shape). The retry-enabled path is the inline
+-- expression form, which covers the headline flaky-upstream-API use case.
+-- The error type is always `SkyError` (Cardinal Rule 1; `type SkyTask<A> =
+-- sky_runtime::SkyTask<SkyError, A>`), so the predicate is `fn(SkyError)->bool`
+-- and the closure binds `&SkyError`.
+emitDefaultCall ctx _fn "task_retry_with" [policy, task] =
+    let polStr  = exprToRustString ctx policy
+        taskStr = exprToRustString ctx task
+        -- A bare local variable bound to a SkyTask value is one-shot (not
+        -- re-runnable). Everything else (call / ctor / kernel application) is an
+        -- expression that `move ||` re-evaluates into a fresh future per attempt.
+        isBareTaskVar = case task of
+            Ann.At _ (Can.VarLocal _) -> True
+            _                         -> False
+        -- attempts: real policy field for re-runnable expressions; literal 1 for
+        -- the one-shot bound-value residual.
+        attemptsExpr = if isBareTaskVar then "1i64" else "__rp.maxAttempts"
+        makeTaskClosure
+            | isBareTaskVar =
+                "{ let __once = std::sync::Mutex::new(Some(" ++ taskStr ++ "));"
+                ++ " move || -> SkyTask<_> {"
+                ++ " match __once.lock() { Ok(mut __g) => match __g.take() {"
+                ++ " Some(__t) => __t,"
+                ++ " None => task_fail(str_err(\"retryWith: bound Task value is one-shot\")) },"
+                ++ " Err(_) => task_fail(str_err(\"retryWith: lock poisoned\")) } } }"
+            | otherwise = "move || " ++ taskStr
+    in "{ let __rp = " ++ polStr ++ ";"
+        ++ " let __sr: std::sync::Arc<dyn Fn(&SkyError) -> bool + Send + Sync> ="
+        ++ " match __rp.shouldRetry {"
+        ++ " SkyCoreTaskShouldRetry::RetryAlways => std::sync::Arc::new(|_e: &SkyError| true),"
+        ++ " SkyCoreTaskShouldRetry::RetryWhen(__p) => std::sync::Arc::new(move |__e: &SkyError| __p(__e.clone())),"
+        ++ " };"
+        ++ " task_retry_with(" ++ attemptsExpr ++ ", __rp.baseMs, __rp.jitter, __rp.kind,"
+        ++ " move |__e: &SkyError| __sr(__e),"
+        ++ " " ++ makeTaskClosure ++ ") }"
 emitDefaultCall ctx fn calleeName args =
     let noCloneFn = case fn of
             Ann.At _ (Can.VarKernel _ n) -> n == "run"

@@ -17,6 +17,54 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-17 15:00 — Task.retryWith: real retry loop (was run-once)
+
+**Bug.** `task_retry_with` (runtime) was the identity function (dropped the
+policy, ran the task once) and the codegen peephole DROPPED the policy arg. A
+transient task that fails-then-succeeds wrongly returned the first `Err` — the
+headline flaky-upstream-API use case was broken.
+
+**Fix (codegen reshape + runtime rewrite — the SqlField/Money "destructure a
+generated ADT in codegen" pattern).**
+- **Runtime** `task.rs`: `task_retry_with` is now a real loop, faithful to
+  `runtime-go/rt/task_retry.go`. New signature takes PRIMITIVE policy fields
+  (`max_attempts`/`base_ms`/`jitter`/`kind`) + a `should_retry: Fn(&E)->bool` +
+  a re-runnable `make_task: Fn()->SkyTask`. Loop: 1..=max_attempts, Ok→return,
+  Err→(last attempt OR !should_retry)→return Err, else sleep
+  `retry_compute_delay` (ported Go's computeDelay: linear/exponential ×2,
+  30 s cap, jitter ∈[0.5,1.5) via the runtime's total `lcg_next` LCG, all
+  saturating/total) and loop. Bounds are `Send`-only (SkyTask is Send, not
+  Sync). 11 `#[cfg(test)]` unit tests (delay math + loop semantics).
+- **Codegen** `ExprEmitter.hs` retryWith peephole: bind the policy to a temp,
+  read its struct fields directly, lower its `shouldRetry` enum into a boxed
+  `Arc<dyn Fn(&SkyError)->bool>` predicate (`RetryAlways`→`|_|true`,
+  `RetryWhen f`→`move|e|f(e.clone())`), and wrap the task EXPRESSION in
+  `move || <expr>` so each attempt rebuilds the future. `Kernel.hs`: added
+  `("Sky.Core.Task","retryWith")` mapping + refreshed the stale "run-once"
+  comments.
+
+**Residual (scoped, documented).** A task passed as a bare LOCAL VARIABLE bound
+to a built `SkyTask` value (`let work = … in retryWith p work`) is a one-shot
+`Pin<Box<dyn Future>>` — not Clone/reproducible (issue #8). That shape forces
+`max_attempts=1` (run-once, returns the real Ok/Err verbatim — no sentinel
+observed) via a single-shot `Mutex<Option<SkyTask>>` `Fn`+`Send` shim. The
+retry-enabled path is the INLINE EXPRESSION form (the headline use case). So a
+bound-value task ignores the policy's attempt count; an inline-expression task
+genuinely retries.
+
+**Evidence.** New fixture `runtime-rust/tests/sky/61-retry-transient/` (file-
+backed cross-attempt counter): pre-fix it returned Err on attempt 1 / ran the
+task once (counter=1); post-fix the transient task succeeds on attempt 3, the
+always-fail case runs exactly maxAttempts(4), the RetryWhen-False case stops at
+1. Existing `25-retry` (bound-value) still green; spot-checks `14-task-demo`
+(run) + `07-todo-cli` (build) green. Pre-existing unrelated clippy error at
+`string.rs:145` (slicing-may-panic) noted, NOT touched.
+
+**Affected.** `runtime-rust/src/sky_runtime/task.rs`,
+`src/Sky/Generate/Rust/Builder/ExprEmitter.hs`,
+`src/Sky/Generate/Rust/Builder/Kernel.hs`,
+`runtime-rust/tests/sky/61-retry-transient/{sky.toml,src/Main.sky}`.
+
 ## 2026-06-17 14:30 — CI: per-OS BUILD·RUN·EQUIV table in the job summary
 
 Added a `Job summary (sweep table)` step (`if: always()`) to the examples-sweep

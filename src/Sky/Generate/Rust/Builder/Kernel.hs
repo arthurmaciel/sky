@@ -510,7 +510,8 @@ kernelToRust mod name = case (mod, name) of
     ("Task", "parallel") -> "task_parallel"
     ("Sky.Core.Task", "parallel") -> "task_parallel"
     ("Task", "lazy") -> "task_lazy"
-    ("Task", "retryWith") -> "task_retry_with"  -- sub-D: run-once (see task.rs)
+    ("Task", "retryWith") -> "task_retry_with"  -- real retry loop; policy destructured at the call site (ExprEmitter)
+    ("Sky.Core.Task", "retryWith") -> "task_retry_with"
     ("Sky.Core.Task", "lazy") -> "task_lazy"
     ("Task", "fail") -> "task_fail"
     ("Sky.Core.Task", "fail") -> "task_fail"

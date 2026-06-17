@@ -1,0 +1,167 @@
+module Main exposing (main)
+
+-- 61-retry-transient: PROVE Task.retryWith actually re-runs the task on the
+-- Rust backend (regression for the run-once bug).
+--
+-- The transient task is made deterministic via a FILE-BACKED counter: each
+-- attempt reads the counter, increments it, and FAILS while the count is below
+-- a threshold, SUCCEEDS once the threshold is reached. A correct retry loop
+-- re-fires the task — so the counter advances across attempts and the task
+-- eventually succeeds. A run-once implementation fires the task exactly once,
+-- so the counter reaches only 1 and the task returns the first Err.
+--
+-- Three cases:
+--   1. Transient success: fails attempts 1-2, succeeds attempt 3, policy
+--      maxAttempts = 5. Correct => Ok. Run-once => Err.
+--   2. Always-fail: every attempt fails, maxAttempts = 4. Correct => last Err
+--      AND the counter file shows 4 attempts ran.
+--   3. RetryWhen short-circuit: RetryWhen (\_ -> False) must stop after the
+--      FIRST Err — counter shows exactly 1 attempt ran.
+--
+-- Run:  sky run src/Main.sky --target rust
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Sky.Core.File as File
+import Std.Log exposing (println)
+import Sky.Core.Error as Error
+import Sky.Core.Error exposing (Error)
+
+
+boomMessage : String
+boomMessage =
+    "boom-transient"
+
+
+-- Read the counter file, returning 0 when it does not exist yet.
+readCount : String -> Task Error Int
+readCount path =
+    File.readFile path
+        |> Task.map (\s -> Maybe.withDefault 0 (String.toInt (String.trim s)))
+        |> Task.onError (\_ -> Task.succeed 0)
+
+
+-- The transient task: increment the on-disk attempt counter, then fail if the
+-- new count is below `threshold`, otherwise succeed with the count.
+-- Because it WRITES the counter, each re-run advances it — that is the
+-- cross-attempt mutable state proving a real retry loop ran.
+transientTask : String -> Int -> Task Error Int
+transientTask path threshold =
+    readCount path
+        |> Task.andThen
+            (\n ->
+                let
+                    next =
+                        n + 1
+                in
+                File.writeFile path (String.fromInt next)
+                    |> Task.andThen
+                        (\_ ->
+                            if next >= threshold then
+                                Task.succeed next
+
+                            else
+                                Task.fail
+                                    (Error.unexpected
+                                        (boomMessage ++ " attempt " ++ String.fromInt next))))
+
+
+retryPolicy : Int -> Task.RetryPolicy e
+retryPolicy attempts =
+    Task.defaultRetryPolicy
+        |> Task.withMaxAttempts attempts
+        |> Task.withBaseMs 1
+
+
+-- A typed never-retry predicate (pins the policy's error type to Error so the
+-- short-circuit case does not leave `e` unconstrained).
+neverRetry : Error -> Bool
+neverRetry _ =
+    False
+
+
+-- Case 1 — transient success. Fails attempts 1 and 2, succeeds attempt 3,
+-- under a maxAttempts = 5 policy. A real retry loop reaches Ok 3.
+transientSuccess : Task Error ()
+transientSuccess =
+    let
+        path =
+            "/tmp/sky-61-retry-transient-c1.txt"
+    in
+    File.writeFile path "0"
+        |> Task.andThen (\_ -> Task.retryWith (retryPolicy 5) (transientTask path 3))
+        |> Task.andThen
+            (\n ->
+                if n == 3 then
+                    println "OK -> 61: transient task succeeded on attempt 3 (retry loop ran)"
+
+                else
+                    println ("FAIL -> 61: transient got " ++ String.fromInt n))
+        |> Task.onError
+            (\err ->
+                println ("FAIL -> 61: transient returned Err (run-once bug): " ++ Error.toString err))
+
+
+-- Case 2 — always-fail (threshold above maxAttempts). Returns last Err, and
+-- the counter file proves maxAttempts (4) attempts ran.
+alwaysFail : Task Error ()
+alwaysFail =
+    let
+        path =
+            "/tmp/sky-61-retry-transient-c2.txt"
+    in
+    File.writeFile path "0"
+        |> Task.andThen (\_ -> Task.retryWith (retryPolicy 4) (transientTask path 999))
+        |> Task.map (\_ -> ())
+        |> Task.onError
+            (\err ->
+                if String.contains boomMessage (Error.toString err) then
+                    readCount path
+                        |> Task.andThen
+                            (\ran ->
+                                if ran == 4 then
+                                    println "OK -> 61: always-fail ran exactly maxAttempts (4) and returned last Err"
+
+                                else
+                                    println ("FAIL -> 61: always-fail ran " ++ String.fromInt ran ++ " attempts (expected 4)"))
+
+                else
+                    println ("FAIL -> 61: always-fail Err changed: " ++ Error.toString err))
+
+
+-- Case 3 — RetryWhen (\_ -> False). Must stop after the first Err: counter = 1.
+retryWhenFalse : Task Error ()
+retryWhenFalse =
+    let
+        path =
+            "/tmp/sky-61-retry-transient-c3.txt"
+
+        policy =
+            retryPolicy 5
+                |> Task.withRetryOn neverRetry
+    in
+    File.writeFile path "0"
+        |> Task.andThen (\_ -> Task.retryWith policy (transientTask path 999))
+        |> Task.map (\_ -> ())
+        |> Task.onError
+            (\err ->
+                if String.contains boomMessage (Error.toString err) then
+                    readCount path
+                        |> Task.andThen
+                            (\ran ->
+                                if ran == 1 then
+                                    println "OK -> 61: RetryWhen False short-circuited after 1 attempt"
+
+                                else
+                                    println ("FAIL -> 61: short-circuit ran " ++ String.fromInt ran ++ " attempts (expected 1)"))
+
+                else
+                    println ("FAIL -> 61: short-circuit Err changed: " ++ Error.toString err))
+
+
+main : Task Error ()
+main =
+    transientSuccess
+        |> Task.andThen (\_ -> alwaysFail)
+        |> Task.andThen (\_ -> retryWhenFalse)
