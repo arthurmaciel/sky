@@ -280,10 +280,9 @@ jobs:
           name: examples-sweep-${{ matrix.os }}
           path: |
             ~/.cache/sky/examples-sweep/sweep-*.table
-            ~/.cache/sky/examples-sweep/run-*.log
-            ~/.cache/sky/examples-sweep/*.rust.sky.log
-            ~/.cache/sky/examples-sweep/*.rust.cargo.log
-            ~/.cache/sky/examples-sweep/*.rust.run.log
+            ~/.cache/sky/examples-sweep/*.log
+            ~/.cache/sky/examples-sweep/*.equiv
+            ~/.cache/sky/examples-sweep/*.equiv.*
           if-no-files-found: warn
 
   # ───────────────────────────────────────────────────────────────────────────
