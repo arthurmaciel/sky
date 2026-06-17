@@ -731,46 +731,42 @@ consumed by both this sweep and the run-side. Night-gated 22:00–08:00
 America/São_Paulo (`SKY_SWEEP_FORCE=1` overrides); `SKY_SWEEP_BUILD_ONLY=1` /
 `SKY_SWEEP_NO_EQUIV=1` for faster partial runs.
 
-**Latest full run (2026-06-17): 36 green · 1 red · 0 amber.** Every example
-**BUILD ok + RUN ok**; equivalence by mode:
+**Latest full run (2026-06-17): 37 green · 0 red · 0 amber — full Go≡Rust parity.**
+Every example **BUILD ok + RUN ok + EQUIV**; by mode:
 
 | Mode | N | Proves | Examples |
 |---|---|---|---|
-| `equiv-stdout` | 7 | Go & Rust byte-identical stdout + exit code | `00`, 01, 04, 06, 14, 20, `test_pkg` |
+| `equiv-stdout` | 8 | Go & Rust byte-identical stdout + exit code | `00`, 01, 04, 06, 14, 20, `simple`, `test_pkg` |
 | `equiv-body` | 4 | byte-identical HTTP response bodies over each comparable GET route | 15 (4 routes), 30, 32, 33 |
 | `equiv-scenario` | 13 | same Playwright browser round-trip passes on **both** backends (APP behaviour, not a DOM diff) | 09, 10, 12, 16–19, 25–28, 34, 37 |
 | `equiv-pty` | 5 | both drive the Sky.Tui runtime without panic (NOT cell-identical) | 21–24, 38 |
 | `equiv-serve` | 1 | both boot + serve (no comparable GET route to byte-compare) | 36 |
 | `n/a` | 6 | no Go comparison possible (webview stub / nondeterministic / Rust-FFI) | 02, 07, 29, 31, 35, `skyshop-rs` |
-| `DIFFER` (red) | 1 | a real Go≡Rust stdout divergence | `simple` (see below) |
 
-#### #8 — the eager-effect (deferred-Task) fix: IN PROGRESS, not yet shippable
+#### #8 — the eager-effect (deferred-Task) fix: **DONE** (`1ba0b764`)
 
-The Rust effect kernels (`log_*`, `io_*`, `file_*`, …) historically ran their I/O
-**eagerly at call time**, before the returned `SkyTask` is awaited — unlike Go's
-deferred Tasks. That made `00-standard-libs` DIFFER: `Sky/Test.sky` does
-`_ = List.map (\(n,_) -> println …) passing` (a `List (Task ())` **built and
-discarded, never run**); Go prints nothing (summary-only), eager-Rust printed all
-131 `ok` lines.
+Rust effect kernels (`log_*`, `io_*`, `file_*`, `crypto_*`, `random_*`, `system_*`,
+`time_*`, `trace_*`, `config_decode_*`) used to run their I/O **eagerly at call
+time**, before the returned `SkyTask` was awaited — unlike Go's deferred Tasks. That
+made `00-standard-libs` DIFFER: `Sky/Test.sky`'s `_ = List.map (\(n,_) -> println …)
+passing` is a `List (Task ())` **built and discarded, never run** — Go prints nothing
+(summary-only), eager-Rust printed all 131 `ok` lines.
 
-An in-progress fix (working tree, **uncommitted**) **defers** each effect kernel's
-I/O into its Task body (Part A) and adds a `54-discard-task-effect` regression
-fixture. Result of the build→run→equiv sweep with it applied:
+The fix has two halves:
+- **Part A — defer the effect** into each kernel's future body, so constructing a
+  Task is pure and the side effect fires only on `.await`.
+- **Part B — run discarded Task lets.** Codegen now `task_run`s (block_on) a
+  discarded Task-typed `let _ = <task call>` in program order, across **both**
+  emission paths — `exprToRustInner` (Def-`"_"`/DestructDef-`PAnything`) **and**
+  `substVar`'s `goDef` (the inlined-binding path `simple` reaches via its multi-used
+  `tasks` list). A **non-Task** discard (`_ = List.map …`, `_ = someVar`) keeps
+  bind/drop, so the `Sky/Test` discarded-List-of-Tasks stays silent (matches Go).
+  Entry: `sky_main` `block_on`s the main task iff its body TAIL is a Task
+  (`mainEntryTailReturnsTask` — the sound signal, not `usesTaskRun`).
 
-| Example | BUILD | RUN | EQUIV | Note |
-|---|---|---|---|---|
-| `00-standard-libs` | ok | ok | **`equiv-stdout`** ✅ | discarded `List.map` of `println` no longer prints → matches Go's summary-only |
-| `simple` | ok | ok | **`DIFFER`** ❌ | **regression** — Go prints `Sequential done` / `Parallel done`; Rust prints **nothing** |
-
-So the fix corrects `00` but **regresses `simple`**: its `let _ = println "x"`
-discards (a SINGLE Task in a `let` block) now lose their output. Part A deferred
-the effect, but **Part B is incomplete** — the codegen must auto-`task_run` a
-discarded Task-typed `let _ = <Task>` (today it binds + drops it; the eager print
-was what made it fire). Until Part B covers every discard shape (single Task
-discard, sequenced discards, ordering) the change is **not committed** — it would
-trade `00`'s red for `simple`'s. Net is still 36 green · 1 red; the red moved
-`00 → simple`. (`#5` `Std.Log` format gap is **closed**; `07`/`35` are `n/a` only
-for their nondeterministic timestamp / Dict-order.)
+Regression fixture `tests/sky/54-discard-task-effect` proves all three contracts
+(single discard runs, List-of-tasks discard does not, ordering). Verified: `00` and
+`simple` both `equiv-stdout`; full sweep **37 green**.
 
 > `00`'s Go reference builds (131/131 on `--target go`) via an in-progress fix in
 > the **shared Go codegen** (`src/Sky/Build/Compile.hs`, outside this Rust-backend
