@@ -141,6 +141,12 @@ emitRust b dbPath dbDriver ffiSlugs =
             , "pub fn log_info(msg: String) -> SkyTask<()> { sky_runtime::log::log_info(msg) }"
             , "pub fn log_debug(msg: String) -> SkyTask<()> { sky_runtime::log::log_debug(msg) }"
             , "pub fn log_warn(msg: String) -> SkyTask<()> { sky_runtime::log::log_warn(msg) }"
+            , "pub fn log_error(msg: String) -> SkyTask<()> { sky_runtime::log::log_error(msg) }"
+            -- `println` routes here (Log.println / bare println, kept bare — no
+            -- prefix). It MUST have the E-pinning wrapper too; without it a
+            -- discarded `let _ = log_println(...)` leaves E un-inferrable → E0283
+            -- (regressed 00/36/simple when println split off from log_info).
+            , "pub fn log_println(msg: String) -> SkyTask<()> { sky_runtime::log::log_println(msg) }"
             -- Keep the attr-element type GENERIC (`A`): Sky's `infoWith / errorWith
             -- : String -> List a -> …` is polymorphic in the attr element, and the
             -- common structured-log shape passes `List (String, String)` tuples
