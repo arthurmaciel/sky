@@ -511,6 +511,13 @@ data EmitCtx = EmitCtx
         --   (ecForcedClosureParam). Without this param 1 stays un-annotated and
         --   Rust can't always infer it (E0282) when the body uses param 1 before
         --   param 0.
+    , ecInResultCtorArg :: Bool
+        -- ^ G1: set by emitArg while emitting a `Result` Ok/Err ctor that is a
+        --   CALL ARGUMENT. The ctor's `ecEnclosingRet` recovery arm declines when
+        --   this is set: a call-arg ctor's type is the CALLEE's param slot (seeded
+        --   precisely by emitArg when concrete), never the enclosing fn's return.
+        --   Without this, `idResult (Ok n)` inside `wrap : Int -> Result Error
+        --   String` would mis-pin the arg to `String` though `n : Int` (E0308).
     , ecStructFields :: Map.Map String (Map.Map String Can.Type)
         -- ^ Rust struct name -> (field name -> field type), over every record
         --   alias in the program. Lets a record-UPDATE arm

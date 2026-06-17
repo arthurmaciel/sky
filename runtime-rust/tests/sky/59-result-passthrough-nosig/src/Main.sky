@@ -1,0 +1,69 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+
+
+-- G1 regression — the unconstrained-`Result` → i64 codegen gap.
+--
+-- `apply` is a `Result Error String` passthrough. Its body arms resolve
+-- concretely (the arm region == the concrete return). The failing site is the
+-- CALL ARG `apply (Ok s)`: the `Ok s` arg's own region the solver leaves free,
+-- so the Result ctor used to default the Ok payload to i64 →
+-- `SkyResult::<SkyError, i64>::Ok(...)` mismatched the callee's concrete
+-- `Result Error String` param (E0308). The G1 call-arg fix seeds the arg's
+-- region from the callee's concrete param slot so it constructs the right type.
+--
+-- `relabel` exercises a `Result` ctor as an inner-case SCRUTINEE (no region
+-- expected type) inside a fn whose return is concrete — the ecEnclosingRet /
+-- concrete-region recovery keeps the payload concrete there too.
+apply : Result Error String -> Result Error String
+apply r =
+    case r of
+
+        Ok v ->
+            Ok v
+
+        Err e ->
+            Err e
+
+
+relabel : String -> Result Error String
+relabel s =
+    case Ok s of
+
+        Ok v ->
+            Ok (v ++ "!")
+
+        Err e ->
+            Err e
+
+
+useApply : String -> String
+useApply s =
+    case apply (Ok s) of
+
+        Ok v ->
+            v
+
+        Err _ ->
+            "fallback"
+
+
+useRelabel : String -> String
+useRelabel s =
+    case relabel s of
+
+        Ok v ->
+            v
+
+        Err _ ->
+            "fallback"
+
+
+main =
+    let
+        _ = println (useApply "passed-through")
+        _ = println (useRelabel "relabelled")
+    in
+        println "done"

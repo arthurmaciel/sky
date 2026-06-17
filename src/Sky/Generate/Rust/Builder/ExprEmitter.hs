@@ -737,6 +737,25 @@ calleeParamStrings ctx fn arity = case fn of
             Nothing -> Nothing
     _ -> Nothing
 
+-- | G1 (call-arg): the callee's Can.Type parameter at position `i`, for a
+-- top-level / local fn whose solved sig is in scope. Used to seed the region
+-- type of a `Result` ctor ARG (`f (Ok x)`) so it constructs the callee's
+-- concrete `Result E A` slot rather than defaulting the payload to i64.
+-- Kernel callees are excluded: their param strings (knownDefSig) carry T0/T1
+-- tokens, not the real Sky Can.Type, so there's nothing concrete to recover.
+calleeParamCanTypeAt :: EmitCtx -> Can.Expr -> Int -> Maybe Can.Type
+calleeParamCanTypeAt ctx fn i = case fn of
+    Ann.At _ (Can.VarTopLevel _ name) -> fromSig name
+    Ann.At _ (Can.VarLocal name)      -> fromSig name
+    _                                 -> Nothing
+  where
+    fromSig name = do
+        ty <- case Map.lookup name (ecModuleEnv ctx) of
+                  Just t  -> Just t
+                  Nothing -> Map.lookup name (ecSolvedTypes ctx)
+        let ps = extractParamTypes ty
+        if i < length ps then Just (ps !! i) else Nothing
+
 -- | Tokenise a Rust type string into bare identifier tokens.
 rustTypeTokens :: String -> [String]
 rustTypeTokens = words . map (\c -> if c `elem` ("<>,()+&[]:;" :: String) then ' ' else c)
@@ -1167,18 +1186,58 @@ exprToRustInner ctx e = case e of
         , Just (Can.TType _ "Result" [errTy, okTy]) <- ecExpectedType ctx
         , Just rustErr <- rustifyExpectedType (ecRecordMap ctx) errTy
         , Just rustOk  <- rustifyExpectedType (ecRecordMap ctx) okTy ->
+            -- Clear ecInResultCtorArg for the PAYLOAD: the flag scopes to THIS
+            -- ctor only; a nested ctor inside the payload must judge itself afresh.
             "SkyResult::<" ++ rustErr ++ ", " ++ rustOk ++ ">::"
-                ++ ctorName ++ "(" ++ exprToRustString ctx innerArg ++ ")"
+                ++ ctorName ++ "(" ++ exprToRustString (ctx { ecInResultCtorArg = False }) innerArg ++ ")"
+    -- G1: the region carries no concrete expected type (a free Ok payload), so
+    -- the concrete-both-sides arm above missed. Before defaulting the payload to
+    -- i64, recover the real Result<E, A> from the ENCLOSING fn's return type —
+    -- but ONLY when that return is itself a concrete `Result E A` AND we are not
+    -- currently emitting a call ARGUMENT (`ecInResultCtorArg`). A ctor in a
+    -- `Result`-returning body's TAIL/arm constructs exactly that type, so the
+    -- enclosing return is the right turbofish (mirrors the Maybe-Nothing
+    -- `ecEnclosingRet` recovery ~1014). A ctor that is a call ARGUMENT does NOT
+    -- construct the enclosing return — its type is the CALLEE's param slot, which
+    -- emitArg seeds precisely when concrete; when the callee param is polymorphic
+    -- the arg must stay at the i64/inference default, NOT the enclosing return
+    -- (that mis-pins `idResult (Ok n)` inside `wrap : Int -> Result Error String`
+    -- to `String` though `n : Int`). emitArg sets `ecInResultCtorArg` so this arm
+    -- declines for every Result-ctor call arg.
+    --
+    -- STRICT GATING (correctness-critical — never over-pin):
+    --   * not (ecInGenericFn ctx)         — same as the i64 arm; inside a generic
+    --       fn Rust infers from the sig and a turbofish would clobber it.
+    --   * not (ecInResultCtorArg ctx)     — never fire for a CALL ARGUMENT ctor
+    --       (its type is the callee's param, not the enclosing return).
+    --   * ecExpectedType absent OR a Result whose payload is free — i.e. we are
+    --       genuinely DEFAULTING (the concrete arm did not fire). A Task-shaped
+    --       expected type is EXCLUDED so a `Result` ctor inside a Task-returning
+    --       body is never pinned to the Task's payload.
+    --   * ecEnclosingRet is a concrete `Result E A` (NOT Task — a Result ctor
+    --       never builds a Task's value slot). A polymorphic enclosing return
+    --       (the passthrough `Result Error a`) also fails this guard, so we keep
+    --       the i64 default rather than pin a polymorphic fn.
+    Can.Call (Ann.At _ (Can.VarCtor _ _ "Result" ctorName _)) [innerArg]
+        | (ctorName == "Ok" || ctorName == "Err")
+        , not (ecInGenericFn ctx)
+        , not (ecInResultCtorArg ctx)
+        , expectedIsFreeResultOrAbsent (ecExpectedType ctx)
+        , Just (errTy, okTy) <- enclosingResultPayload (ecEnclosingRet ctx)
+        , Just rustErr <- rustifyExpectedType (ecRecordMap ctx) errTy
+        , Just rustOk  <- rustifyExpectedType (ecRecordMap ctx) okTy ->
+            "SkyResult::<" ++ rustErr ++ ", " ++ rustOk ++ ">::"
+                ++ ctorName ++ "(" ++ exprToRustString (ctx { ecInResultCtorArg = False }) innerArg ++ ")"
     -- monomorphic fn, type not fully concrete -> default the unconstrained
     -- side. Err carries Sky's Error idiom (Cardinal Rule 1); the Ok side is
     -- phantom so i64 is a safe filler. Inside a GENERIC fn this arm does not
-    -- match, so control falls through to the generic Can.Call path where Rust
-    -- infers from the signature.
+    -- match, so control falls through to the generic Can.Call path below, where
+    -- Rust infers from the signature.
     Can.Call (Ann.At _ (Can.VarCtor _ _ "Result" ctorName _)) [innerArg]
         | (ctorName == "Ok" || ctorName == "Err")
         , not (ecInGenericFn ctx) ->
             "SkyResult::<SkyError, i64>::" ++ ctorName
-                ++ "(" ++ exprToRustString ctx innerArg ++ ")"  -- default (Task 8: stderr warning)
+                ++ "(" ++ exprToRustString (ctx { ecInResultCtorArg = False }) innerArg ++ ")"  -- default (Task 8: stderr warning)
     -- Partially-applied CONSTRUCTOR used as a function value (the canonical TEA
     -- `Cmd.perform task (JobDone jid)` where `JobDone : Int -> Result Error
     -- String -> Msg` — `JobDone jid` is the `Result -> Msg` toMsg). The codegen
@@ -2458,6 +2517,31 @@ foldAccTypeOf ctx fn = case fn of
     fromSig ty = let ps = extractParamTypes ty
                  in if length ps >= 2 then Just (ps !! 1) else Nothing
 
+-- | G1 gate: is the region's expected type ABSENT, or a Result whose payload
+-- still carries free type vars? Only then is the Ok/Err ctor genuinely being
+-- DEFAULTED (the concrete-both-sides arm did not fire). A concrete, or a
+-- Task-shaped, or any non-Result expected type returns False — we must not
+-- override it. Excluding Task is load-bearing: a `Result` ctor inside a
+-- Task-returning body (`main : Task Error ()`) must NOT be pinned to the Task's
+-- value slot, which would mis-pin an arbitrary nested `Ok 41` arg to `()`.
+expectedIsFreeResultOrAbsent :: Maybe Can.Type -> Bool
+expectedIsFreeResultOrAbsent Nothing = True
+expectedIsFreeResultOrAbsent (Just (Can.TType _ "Result" args)) = any hasTypeVars args
+expectedIsFreeResultOrAbsent (Just _) = False
+
+-- | G1 recovery: the (errType, okType) pair to turbofish a defaulted Ok/Err
+-- ctor, recovered from the enclosing fn's return type. Fires ONLY when that
+-- return is a CONCRETE `Result E A` — both slots free of type vars. NOT Task: a
+-- Result ctor never constructs a Task's value slot, so recovering from a
+-- `Task E A` enclosing return would pin the wrong type (e.g. main's
+-- `Task Error ()` → `()`). A polymorphic enclosing return (`Result Error a`)
+-- returns Nothing so the caller keeps the i64 default and never over-pins a
+-- genuinely polymorphic function.
+enclosingResultPayload :: Maybe Can.Type -> Maybe (Can.Type, Can.Type)
+enclosingResultPayload (Just (Can.TType _ "Result" [errTy, okTy]))
+    | not (hasTypeVars errTy), not (hasTypeVars okTy) = Just (errTy, okTy)
+enclosingResultPayload _ = Nothing
+
 listElemRustType :: EmitCtx -> Can.Expr -> Maybe String
 listElemRustType ctx (Ann.At region inner) =
     case Map.lookup region (ecRegionTypes ctx) of
@@ -2801,6 +2885,11 @@ emitDefaultCall ctx fn calleeName args =
         -- the rendered closure in `Arc::new` (same target as a bare fn item).
         isEventCbLambdaArg (Ann.At _ (Can.Lambda{})) = True
         isEventCbLambdaArg _                         = False
+        -- A `Result` Ok/Err ctor used as a call argument (`f (Ok x)`), the form
+        -- whose region the solver often leaves free → i64-defaulted payload.
+        isResultCtorArg (Ann.At _ (Can.Call (Ann.At _ (Can.VarCtor _ _ "Result" cn _)) [_])) =
+            cn == "Ok" || cn == "Err"
+        isResultCtorArg _ = False
         emitArg i a
             | isHandlerArcParam i, isBareHandlerArg a
                               = "std::sync::Arc::new(" ++ argToRustString ctx noCloneFn a ++ ")"
@@ -2808,6 +2897,25 @@ emitDefaultCall ctx fn calleeName args =
                               = "std::sync::Arc::new(" ++ argToRustString ctx noCloneFn a ++ ")"
             | i `elem` ctorBoxedPositions
                               = "Box::new(" ++ argToRustString ctx noCloneFn a ++ ")"
+            -- G1 (call-arg): a `Result` ctor ARG (`f (Ok x)` / `f (Err e)`)
+            -- whose own region the solver left free defaults the payload to i64
+            -- (the ctor's fallback arm). When the callee's param slot at this
+            -- position is a CONCRETE `Result E A`, seed it at the arg's region so
+            -- the ctor's concrete-both-sides arm constructs the right type — same
+            -- mechanism as the foldl-init seed below. Concrete-only (no free vars)
+            -- so a genuinely polymorphic callee param stays bare for Rust to infer.
+            | isResultCtorArg a
+            , Just slotTy <- calleeParamCanTypeAt ctx fn i
+            , Can.TType _ "Result" _ <- slotTy
+            , not (hasTypeVars slotTy)
+            , Ann.At ar _ <- a
+                              = exprToRustString (ctx { ecRegionTypes = Map.insert ar slotTy (ecRegionTypes ctx) }) a
+            -- A Result ctor arg we could NOT precisely seed (callee param is
+            -- polymorphic / unknown): mark it so the ctor's ecEnclosingRet
+            -- recovery arm declines (a call-arg ctor's type is the callee's slot,
+            -- never the enclosing return), keeping the sound i64/inference default.
+            | isResultCtorArg a
+                              = argToRustString (ctx { ecInResultCtorArg = True }) noCloneFn a
             -- foldl/foldr INIT (arg 1) is the accumulator `b`, whose type is the
             -- fold FUNCTION's 2nd parameter type (`f : a -> b -> b`). An empty
             -- `Dict.empty` / `[]` accumulator can't infer `b` from the generic
