@@ -715,8 +715,30 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- body actually calls a `db_get_*` (no blast radius on other generics).
         -- `SkyRow` is in scope via the generated module's `pub use sky_runtime::*`.
         bodyHasDbGet = "db_get_" `isInfixOf` tdBody
+        -- `errorToString`/`debugShow` (`debugShow v = errorToString v`) stringify
+        -- a generic value via the total `SkyStringify` trait. When THIS function's
+        -- body calls `basics_error_to_string`, its generic params must carry the
+        -- `SkyStringify` bound so the call type-checks. Narrowly scoped (mirrors
+        -- the `SkyRow`/`db_get_` precedent below): only functions that actually
+        -- stringify gain the bound, so the blast radius is exactly `errorToString`
+        -- and its wrappers (`debugShow`). Satisfiability is guaranteed — every
+        -- generated record/ADT gets a `SkyStringify` impl (Emitter.hs) and every
+        -- runtime data type impls it (stringify.rs); since the existing bound
+        -- already requires `PartialEq + Debug`, closures/fn-pointers (the only
+        -- non-`SkyStringify` shapes) can never flow into a generic param anyway.
+        -- Detection is TRANSITIVE: a function that calls another stringifying
+        -- function (e.g. Sky.Test.`equal` calls `debugShow`, which calls
+        -- `errorToString`) must also propagate the bound to ITS generic params,
+        -- else the inner call's `T: SkyStringify` requirement is unmet at THIS
+        -- frame. The stringifying-call surface is exactly `basics_error_to_string`
+        -- (the kernel) and any `*debug_show*` wrapper (Sky.Test.debugShow renders
+        -- as `sky_test_debug_show`). Both are matched by infix so a deeper chain
+        -- through a `debug_show`-named helper still propagates.
+        bodyStringifies = "basics_error_to_string" `isInfixOf` tdBody
+                       || "debug_show" `isInfixOf` tdBody
         genBound v = v ++ ": Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static"
                        ++ (if v == "any" && bodyHasDbGet then " + SkyRow" else "")
+                       ++ (if bodyStringifies then " + SkyStringify" else "")
         genDecl = if null tvarNames then ""
                   else "<" ++ intercalate ", " (map genBound tvarNames) ++ ">"
         multiBody = collectVarLocalsMulti body

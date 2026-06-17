@@ -29,10 +29,14 @@ pub fn basics_always<A, B>(x: A, _y: B) -> A { x }
 
 /// Sky `errorToString : a -> String` — universal Sky stringifier.
 /// Used by Sky.Test.debugShow and friends to render any Sky value into
-/// a diagnostic string. Backed by Rust's `Debug` since every codegen-emitted
-/// type derives `Debug` (matches Go's `fmt.Sprintf("%v", v)` semantics).
-pub fn basics_error_to_string<T: std::fmt::Debug>(v: T) -> String {
-    format!("{:?}", v)
+/// a diagnostic string. Backed by the total `SkyStringify` trait, which
+/// mirrors Go's `Basics_errorToString` EXACTLY: a `String` renders UNQUOTED
+/// (`hi`, not `"hi"`), scalars render like `%v`, and slices/tuples/maps follow
+/// Go's space-separated layout. Every codegen-emitted record/ADT gets a
+/// `SkyStringify` impl (Emitter.hs), so the bound is always satisfiable —
+/// the generic `debugShow : a -> String` body type-checks and is total.
+pub fn basics_error_to_string<T: crate::sky_runtime::stringify::SkyStringify>(v: T) -> String {
+    v.sky_show()
 }
 
 /// Sky `Debug.toString` — the `{{expr}}` string-interpolation stringifier.
@@ -70,8 +74,10 @@ mod tests {
     #[test] fn test_mod_by_exact() { assert_eq!(basics_mod_by(5, 10), 0); }
 
     #[test] fn test_error_to_string_i64() { assert_eq!(basics_error_to_string(42i64), "42"); }
-    #[test] fn test_error_to_string_string() { assert_eq!(basics_error_to_string("hi".to_string()), "\"hi\""); }
-    #[test] fn test_error_to_string_vec() { assert_eq!(basics_error_to_string(vec![1, 2, 3]), "[1, 2, 3]"); }
+    // String renders UNQUOTED now (Go parity) — the primary fix.
+    #[test] fn test_error_to_string_string() { assert_eq!(basics_error_to_string("hi".to_string()), "hi"); }
+    // Vec renders space-separated (Go's `%v`: `[1 2 3]`, NOT `[1, 2, 3]`).
+    #[test] fn test_error_to_string_vec() { assert_eq!(basics_error_to_string(vec![1i64, 2, 3]), "[1 2 3]"); }
 
     // Regression: identity/always were missing from the runtime (emitted as
     // `basics_identity`/`basics_always` calls but undefined → E0425).

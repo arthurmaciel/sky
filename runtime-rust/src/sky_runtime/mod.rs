@@ -177,6 +177,9 @@ pub use string::*;
 pub mod basics;
 pub use basics::*;
 
+pub mod stringify;
+pub use stringify::*;
+
 pub mod char_kernel;
 pub use char_kernel::*;
 

@@ -412,7 +412,8 @@ typeDefToString _ serdeTypes _ (REnumDef name gens variants) =
         derive = if hasFnPtrVariant
                  then "#[allow(unpredictable_function_pointer_comparisons)]\n" ++ baseDerive
                  else baseDerive
-    in derive ++ "\npub enum " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
+        enumDef = derive ++ "\npub enum " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
+    in enumDef ++ skyStringifyEnumImpl name gens variants
 typeDefToString formTargets serdeTypes fnFieldStructs (RStructDef name gens fields) =
     -- Sky record field names are camelCase and match the form `name=` attrs
     -- 1:1, so no #[serde(rename)] is needed.
@@ -449,12 +450,112 @@ typeDefToString formTargets serdeTypes fnFieldStructs (RStructDef name gens fiel
                 "\nimpl Default for " ++ name ++ gens ++ " {\n    fn default() -> Self {\n        "
                 ++ name ++ " {\n" ++ intercalate ",\n" (map defaultField fields) ++ "\n        }\n    }\n}"
             | otherwise = ""
-    in structDef ++ defaultImpl
+    in structDef ++ defaultImpl ++ skyStringifyStructImpl name gens fields
 typeDefToString _ _ _ (RAliasDef name ty) = "pub type " ++ name ++ " = " ++ ty ++ ";"
 typeDefToString _ _ _ (RPubUseAlias codegenName rustPath) =
     "pub use " ++ rustPath ++ " as " ++ codegenName ++ ";"
 typeDefToString _ _ _ (RAliasDefGen name gens path) =
     "pub type " ++ name ++ gens ++ " = " ++ path ++ ";"
+
+-- ============================================================
+-- SkyStringify impls for generated records/ADTs
+-- ============================================================
+-- `errorToString`/`Sky.Test.debugShow` stringify any value via the total
+-- `SkyStringify` trait (runtime-rust/src/sky_runtime/stringify.rs). Every
+-- generated struct/ADT must impl it so the bound on a stringifying generic
+-- function (ModuleEmitter `bodyStringifies`) is always satisfiable. Render to
+-- match Go's `%v`:
+--   * record -> `{f0 f1 ...}` (fields in declared order, space-separated, no names)
+--   * ADT    -> best-effort `Ctor`/`Ctor p0 p1` (NOT byte-identical to Go's
+--               flattened-struct layout — documented residual; the Error ADT,
+--               which Sky models as `String`, renders its message verbatim via
+--               the runtime `String` impl, so a user-facing Error reads cleanly).
+-- Function-typed fields/payloads (`Arc<dyn Fn`, `fn(`) render a `<fn>`
+-- placeholder rather than calling `.sky_show()` (they aren't SkyStringify and
+-- never carry user-visible data).
+
+-- | Strip a bare gens decl `<msg, a>` into its param-name list (["msg","a"]).
+-- The struct/enum gens carry NO bounds at the type def (just `<msg>` / `<msg, a>`).
+genParamNames :: String -> [String]
+genParamNames g = case dropWhile (/= '<') g of
+    ('<':rest) -> [ trim seg | seg <- splitTopComma (takeWhile (/= '>') rest), not (null (trim seg)) ]
+    _ -> []
+  where
+    trim = f . f where f = reverse . dropWhile (== ' ')
+    -- gens here are flat name lists (no nested `<>`), so a plain comma split is exact.
+    splitTopComma s = case break (== ',') s of
+        (a, ',':b) -> a : splitTopComma b
+        (a, _)     -> [a]
+
+-- | The bounded impl generics + the type-use generics for a SkyStringify impl.
+-- `<msg, a>` -> ("<msg: SkyStringify, a: SkyStringify>", "<msg, a>").
+-- Empty gens -> ("", "").
+skyStringifyImplGens :: String -> (String, String)
+skyStringifyImplGens g =
+    let names = genParamNames g
+    in if null names then ("", "")
+       else ( "<" ++ intercalate ", " (map (++ ": SkyStringify") names) ++ ">"
+            , "<" ++ intercalate ", " names ++ ">" )
+
+-- | True if a Rust field/payload type holds a function (stored callback or fn
+-- pointer) — not stringifiable, render a placeholder.
+isFnType :: String -> Bool
+isFnType t = "dyn Fn" `isInfixOf` t || "fn(" `isInfixOf` t
+
+skyStringifyStructImpl :: String -> String -> [(String, String)] -> String
+skyStringifyStructImpl name gens fields =
+    let (implGens, useGens) = skyStringifyImplGens gens
+        renderField (fname, ftype)
+            | isFnType ftype = "\"<fn>\".to_string()"
+            | otherwise      = "self." ++ fname ++ ".sky_show()"
+        -- Go `%v` on a struct: `{v0 v1 ...}` space-separated, no field names.
+        fmtStr = "{{" ++ intercalate " " (replicate (length fields) "{}") ++ "}}"
+        args = map renderField fields
+        bodyExpr
+            | null fields = "\"{}\".to_string()"
+            | otherwise   = "format!(\"" ++ fmtStr ++ "\", " ++ intercalate ", " args ++ ")"
+    in "\nimpl" ++ implGens ++ " SkyStringify for " ++ name ++ useGens
+       ++ " {\n    fn sky_show(&self) -> String {\n        " ++ bodyExpr ++ "\n    }\n}"
+
+skyStringifyEnumImpl :: String -> String -> [(String, Maybe String)] -> String
+skyStringifyEnumImpl name gens variants =
+    let (implGens, useGens) = skyStringifyImplGens gens
+        arm (vname, Nothing) =
+            "            " ++ name ++ "::" ++ vname ++ " => \"" ++ vname ++ "\".to_string(),"
+        arm (vname, Just payload) =
+            let parts = splitTopLevelCommas payload
+                n = length parts
+                -- A fn-typed payload renders a `<fn>` placeholder and never reads
+                -- its binder, so name it `_pN` to avoid an unused-variable warning
+                -- (some generated crates are warning-sensitive; this keeps it clean).
+                binder i pty = (if isFnType pty then "_p" else "p") ++ show i
+                binders = [ binder i pty | (i, pty) <- zip [0 :: Int ..] parts ]
+                renderBind (b, pty)
+                    | isFnType pty = "\"<fn>\".to_string()"
+                    | otherwise    = b ++ ".sky_show()"
+                fmtStr = vname ++ " " ++ intercalate " " (replicate n "{}")
+                args = map renderBind (zip binders parts)
+            in "            " ++ name ++ "::" ++ vname ++ "(" ++ intercalate ", " binders
+               ++ ") => format!(\"" ++ fmtStr ++ "\", " ++ intercalate ", " args ++ "),"
+        arms = intercalate "\n" (map arm variants)
+    in "\nimpl" ++ implGens ++ " SkyStringify for " ++ name ++ useGens
+       ++ " {\n    fn sky_show(&self) -> String {\n        match self {\n"
+       ++ arms ++ "\n        }\n    }\n}"
+
+-- | Split a Rust type-arg list on TOP-LEVEL commas only (so `Vec<(A,B)>, T`
+-- splits into two, not on the inner comma). Used for an enum variant's payload
+-- field types.
+splitTopLevelCommas :: String -> [String]
+splitTopLevelCommas = go 0 ""
+  where
+    trim = f . f where f = reverse . dropWhile (== ' ')
+    go :: Int -> String -> String -> [String]
+    go _ acc [] = [trim (reverse acc)]
+    go d acc (c:cs)
+        | c == ',' && d == 0 = trim (reverse acc) : go d "" cs
+        | c `elem` "(<[" = go (d + 1) (c:acc) cs
+        | c `elem` ")>]" = go (d - 1) (c:acc) cs
+        | otherwise = go d (c:acc) cs
 
 -- | The base type name of a Rust field type, stripping generics/whitespace
 -- (`Foo<..>` / `Foo ` -> `Foo`). Used to test a Model field's type against the

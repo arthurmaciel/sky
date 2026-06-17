@@ -1,0 +1,69 @@
+module Main exposing (main)
+
+-- 60-errortostring-string: `errorToString`/`Sky.Test.debugShow` (the value
+-- stringifier behind every `assertEqual` failure message) must render a value
+-- byte-identically to Go's `Basics_errorToString` / `fmt.Sprintf("%v", v)`.
+--
+-- THE BUG this pins: the Rust backend used to back `errorToString` with Rust's
+-- `Debug`, which QUOTES a String — a failing `Test.equal "hi" "bye"` produced
+-- `expected "hi" but got "bye"` instead of Go's unquoted `expected hi but got
+-- bye`. Now backed by the total `SkyStringify` trait.
+--
+-- `debugShow` is internal to Sky.Test, so we exercise it through the PUBLIC
+-- surface — `Test.equal`'s `Failed` message — which is exactly how every real
+-- assertion diagnostic is produced. Expected stdout (build BOTH targets, diff —
+-- must be byte-identical):
+--   expected hi but got bye
+--   expected 1 but got 2
+--   expected true but got false
+--   expected 3.5 but got 4.5
+--   expected [1 2 3] but got [4 5 6]
+--   expected [a b c] but got [d e f]
+--   passed
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Test as Test exposing (TestResult(..))
+import Std.Log exposing (println)
+
+
+-- Render a TestResult: a `Failed` carries the debugShow-built message.
+report : TestResult -> String
+report r =
+    case r of
+        Failed msg ->
+            msg
+
+        Passed ->
+            "passed"
+
+
+main : Task Error ()
+main =
+    let
+        -- (1) PRIMARY: a String renders UNQUOTED (Go: `hi`, not `"hi"`).
+        _ =
+            println (report (Test.equal "hi" "bye"))
+
+        -- (2) scalars match Go's `%v` (Debug already matched these; keep parity).
+        _ =
+            println (report (Test.equal 1 2))
+
+        _ =
+            println (report (Test.equal True False))
+
+        _ =
+            println (report (Test.equal 3.5 4.5))
+
+        -- (3) a List of Int renders space-separated (Go: `[1 2 3]`, not `[1, 2, 3]`).
+        _ =
+            println (report (Test.equal [ 1, 2, 3 ] [ 4, 5, 6 ]))
+
+        -- (4) a List of String — elements unquoted, space-separated (Go: `[a b c]`).
+        _ =
+            println (report (Test.equal [ "a", "b", "c" ] [ "d", "e", "f" ]))
+
+        -- (5) the passing path renders nothing from debugShow.
+        _ =
+            println (report (Test.equal "x" "x"))
+    in
+    Task.succeed ()
