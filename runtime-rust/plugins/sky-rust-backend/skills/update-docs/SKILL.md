@@ -47,6 +47,13 @@ Run `git status --short` to see what's dirty.
 
 ### Step 2 — Consolidate root docs, then refresh `runtime-rust/README.md`
 
+**HARD BOUNDARY — only edit `README.md` from `## CLI usage` DOWNWARD.** Everything
+ABOVE the `## CLI usage` heading (the title, intro, `## Contract`, etc.) is the
+maintainer's hand-written content — NEVER touch it (do not reword, reformat, or
+reflow a single line above `## CLI usage`). This skill regenerates ONLY the
+sections from `## CLI usage` to the end. Before writing, find the `## CLI usage`
+line and treat every line before it as read-only.
+
 **Enforce the root-`.md` policy first.** At `runtime-rust/` root, ONLY
 `CLAUDE.md`, `README.md`, and `PROGRESS.md` may exist. `PROGRESS.md` is the
 history/archaeology sink — an INPUT to this skill, never folded INTO the README

@@ -31,11 +31,15 @@ rule here is mandatory, not optional. Current settled rules:
   `skyshop-rs`). Sky projects that exist ONLY as Rust-backend tests/fixtures live
   under **`runtime-rust/tests/sky/`**, never in `examples/`.
 - **`rg`, never `grep`** — even on piped stdin (`… | rg`).
-- **`README.md` is written ONLY by `sky-rust-backend:update-docs`.** Never edit it
-  directly when advancing work — it is a *pristine current-state snapshot* with NO
-  history, dates, phases, tiers, SHAs, or changelog language. This is the cure for
-  multiple-sources-of-truth drift: progress is logged elsewhere, the README is
-  *regenerated* from current truth.
+- **`README.md` is written ONLY by `sky-rust-backend:update-docs`, and ONLY from
+  the `## CLI usage` heading DOWNWARD.** Everything ABOVE `## CLI usage` (title,
+  intro, `## Contract`, …) is the maintainer's hand-written content — NEVER touch
+  it (no reword, reformat, or reflow of any line above `## CLI usage`), not via
+  update-docs and not via any other edit. From `## CLI usage` to the end it is a
+  *pristine current-state snapshot* with NO history, dates, phases, tiers, SHAs,
+  or changelog language. This is the cure for multiple-sources-of-truth drift:
+  progress is logged elsewhere, the regenerated region is *regenerated* from
+  current truth.
   - **Log every step to `PROGRESS.md`** (the history / archaeology sink): an entry
     `## YYYY-MM-DD HH:MM — title` + what/why + the **Affected** files (newest at
     top). This is the ONLY place history/dates/SHAs belong.
