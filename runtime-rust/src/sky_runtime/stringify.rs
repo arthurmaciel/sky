@@ -34,6 +34,66 @@ pub trait SkyStringify {
     fn sky_show(&self) -> String;
 }
 
+// ─── Autoref specialization: total field rendering ───────────────────────────
+//
+// A codegen-emitted `impl SkyStringify for <GeneratedType>` renders each field
+// by calling the field's stringifier. If it called `field.sky_show()` directly,
+// a field of a RUNTIME type that doesn't impl `SkyStringify` (e.g.
+// `http_stream::ChunkEvent`) would be a `type-checks ⇒ cargo-fails` E0599 — a
+// soundness-floor regression, and a whack-a-mole (every unhandled runtime type
+// is a latent failure).
+//
+// The dispatch makes field rendering TOTAL BY CONSTRUCTION via dtolnay's
+// autoref-specialization: a field renders via `SkyStringify` IF its type impls
+// it, ELSE falls back to `Debug`. EVERY codegen + runtime type derives `Debug`,
+// so this can NEVER fail to compile, regardless of field type.
+//
+// Mechanism: codegen emits `(&Wrap(&value)).dispatch()` at a CONCRETE field
+// type. `Wrap<&T>: ViaSkyStringify` (no autoref) is preferred over
+// `&Wrap<T>: ViaDebug` (one autoref) when `T: SkyStringify`; otherwise only the
+// `Debug` impl applies. The dispatch is concrete-type-only by design — a generic
+// `fn<T>` frame can't select either arm (the same method name on both traits is
+// ambiguous when T's bounds are unknown), so the dispatch is emitted INLINE at
+// each field site (where the type is concrete or a `SkyStringify + Debug`-bounded
+// generic), NOT routed through a generic free function.
+// (`basics_error_to_string<T: SkyStringify>` keeps its bound: a top-level
+// `errorToString aString` must stay unquoted, which the SkyStringify path
+// guarantees; the autoref-`Debug` fallback would quote a String at a generic
+// frame.)
+
+/// Newtype carrier for the autoref-specialization receiver. Constructed only by
+/// the codegen-emitted `(&Wrap(&field)).dispatch()` field-render expression (and
+/// this module's own tests); not part of the user-facing surface.
+#[doc(hidden)]
+pub struct Wrap<T>(pub T);
+
+/// Higher-priority arm: a `Wrap<&T>` where `T: SkyStringify` renders via the
+/// trait (Go-`%v`-faithful — String unquoted, nested generated types via their
+/// own impl). Selected with ZERO autoref, so it beats the `Debug` fallback.
+#[doc(hidden)]
+pub trait ViaSkyStringify {
+    fn dispatch(&self) -> String;
+}
+impl<T: SkyStringify> ViaSkyStringify for Wrap<&T> {
+    fn dispatch(&self) -> String {
+        self.0.sky_show()
+    }
+}
+
+/// Lower-priority arm: ANY `Wrap<T>` where `T: Debug` renders via `Debug`.
+/// Reached only by ONE autoref (`&Wrap<T>`), so it loses to `ViaSkyStringify`
+/// whenever the field type impls `SkyStringify`. Every type derives `Debug`,
+/// so this arm is always available — the dispatch can never E0599.
+#[doc(hidden)]
+pub trait ViaDebug {
+    fn dispatch(&self) -> String;
+}
+impl<T: core::fmt::Debug> ViaDebug for &Wrap<T> {
+    fn dispatch(&self) -> String {
+        format!("{:?}", self.0)
+    }
+}
+
 // ─── Scalars ────────────────────────────────────────────────────────────────
 
 impl SkyStringify for String {
@@ -234,5 +294,42 @@ mod tests {
     #[test] fn result_err() {
         let r: SkyResult<String, i64> = SkyResult::Err("boom".to_string());
         assert_eq!(r.sky_show(), "Err boom");
+    }
+
+    // ─── Autoref-specialization dispatch (total field rendering) ─────────────
+
+    // (a) A `String` field renders UNQUOTED via the SkyStringify arm.
+    #[test] fn dispatch_string_unquoted() {
+        let s = "hi".to_string();
+        assert_eq!((&Wrap(&s)).dispatch(), "hi");
+    }
+
+    // (b) A type that impls ONLY `Debug` (NOT SkyStringify) renders via the
+    // Debug fallback — NO compile error (this is the whole point: total by
+    // construction). Mirrors a runtime payload type like `http_stream::ChunkEvent`.
+    #[derive(Debug)]
+    struct OnlyDebug { x: i64 }
+
+    #[test] fn dispatch_debug_fallback() {
+        let d = OnlyDebug { x: 42 };
+        assert_eq!((&Wrap(&d)).dispatch(), "OnlyDebug { x: 42 }");
+    }
+
+    // (c) A generated-style struct whose impl renders fields via the dispatch:
+    // its String field renders unquoted INSIDE the `{...}` Go-`%v` wrap.
+    struct GenStruct { name: String, debug_only: OnlyDebug }
+    impl SkyStringify for GenStruct {
+        fn sky_show(&self) -> String {
+            // Exactly what codegen now emits per field.
+            format!("{{{} {}}}",
+                (&Wrap(&self.name)).dispatch(),
+                (&Wrap(&self.debug_only)).dispatch())
+        }
+    }
+
+    #[test] fn dispatch_generated_struct_mixed_fields() {
+        let g = GenStruct { name: "alice".to_string(), debug_only: OnlyDebug { x: 7 } };
+        // String field unquoted; Debug-only field via fallback — never E0599.
+        assert_eq!(g.sky_show(), "{alice OnlyDebug { x: 7 }}");
     }
 }

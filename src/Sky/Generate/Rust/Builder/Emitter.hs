@@ -488,13 +488,20 @@ genParamNames g = case dropWhile (/= '<') g of
         (a, _)     -> [a]
 
 -- | The bounded impl generics + the type-use generics for a SkyStringify impl.
--- `<msg, a>` -> ("<msg: SkyStringify, a: SkyStringify>", "<msg, a>").
+-- `<msg, a>` -> ("<msg: SkyStringify + Debug, a: SkyStringify + Debug>", "<msg, a>").
 -- Empty gens -> ("", "").
+--
+-- Each param carries BOTH `SkyStringify` (so it can render via the trait when a
+-- field IS the bare param) AND `std::fmt::Debug` (so the autoref-`Debug` fallback
+-- is satisfiable when a field is a generic payload over the param — e.g.
+-- `ChunkEvent<E>` needs `E: Debug` to be `Debug`). Every generated/runtime type
+-- derives Debug, so `+ Debug` is always satisfiable; it is what makes the field
+-- dispatch TOTAL for generic-payload fields.
 skyStringifyImplGens :: String -> (String, String)
 skyStringifyImplGens g =
     let names = genParamNames g
     in if null names then ("", "")
-       else ( "<" ++ intercalate ", " (map (++ ": SkyStringify") names) ++ ">"
+       else ( "<" ++ intercalate ", " (map (++ ": SkyStringify + std::fmt::Debug") names) ++ ">"
             , "<" ++ intercalate ", " names ++ ">" )
 
 -- | True if a Rust field/payload type holds a function (stored callback or fn
@@ -502,12 +509,26 @@ skyStringifyImplGens g =
 isFnType :: String -> Bool
 isFnType t = "dyn Fn" `isInfixOf` t || "fn(" `isInfixOf` t
 
+-- | Render one field/payload value via the TOTAL autoref-specialization dispatch
+-- (`stringify.rs` `Wrap` / `ViaSkyStringify` / `ViaDebug`): the field renders via
+-- `SkyStringify` if its type impls it, ELSE via `Debug`. Emitted INLINE at the
+-- concrete field site (a generic free wrapper can't dispatch — the two arms share
+-- a method name and are ambiguous when the type's bounds are unknown).
+--
+-- `expr` is a place expression that already evaluates to a `&FieldType`
+-- (`&self.field` for a struct, a bound `pN` for an enum variant), so we form
+-- `(&Wrap(expr)).dispatch()`. This can NEVER E0599 regardless of the field type —
+-- the soundness-floor fix.
+skyShowFieldDispatch :: String -> String
+skyShowFieldDispatch refExpr =
+    "(&sky_runtime::stringify::Wrap(" ++ refExpr ++ ")).dispatch()"
+
 skyStringifyStructImpl :: String -> String -> [(String, String)] -> String
 skyStringifyStructImpl name gens fields =
     let (implGens, useGens) = skyStringifyImplGens gens
         renderField (fname, ftype)
             | isFnType ftype = "\"<fn>\".to_string()"
-            | otherwise      = "self." ++ fname ++ ".sky_show()"
+            | otherwise      = skyShowFieldDispatch ("&self." ++ fname)
         -- Go `%v` on a struct: `{v0 v1 ...}` space-separated, no field names.
         fmtStr = "{{" ++ intercalate " " (replicate (length fields) "{}") ++ "}}"
         args = map renderField fields
@@ -532,7 +553,9 @@ skyStringifyEnumImpl name gens variants =
                 binders = [ binder i pty | (i, pty) <- zip [0 :: Int ..] parts ]
                 renderBind (b, pty)
                     | isFnType pty = "\"<fn>\".to_string()"
-                    | otherwise    = b ++ ".sky_show()"
+                    -- `b` is a `match self` binder → already a `&PayloadType`,
+                    -- so `Wrap(b)` carries the reference the dispatch expects.
+                    | otherwise    = skyShowFieldDispatch b
                 fmtStr = vname ++ " " ++ intercalate " " (replicate n "{}")
                 args = map renderBind (zip binders parts)
             in "            " ++ name ++ "::" ++ vname ++ "(" ++ intercalate ", " binders
