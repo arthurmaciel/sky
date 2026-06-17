@@ -162,9 +162,56 @@ aliasToRustTypeDef recordMap _skyModName modPrefix name (Can.Alias vars ty) = ca
             -- fields can reference the var. Type vars kept verbatim to match
             -- typeToRustString's TVar/TAlias-arg rendering.
             gens = if null vars then "" else "<" ++ intercalate ", " vars ++ ">"
-        in [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) gens (map (\(n, Can.FieldType _ ft) -> (n, fieldTypeToRust recordMap ft)) sortedFields)]
+        in [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) gens
+              (map (\(n, Can.FieldType _ ft) ->
+                       (n, guardBareAny name vars n ft (fieldTypeToRust recordMap ft)))
+                   sortedFields)]
     _ ->
         [RAliasDef (toCamelCase (modPrefix ++ "_" ++ name)) (typeToRustString recordMap ty)]
+
+-- | Soundness gate for a bare-wildcard `any` in a record-alias field.
+--
+-- A field whose type is `Can.TVar "any"` (or contains one) where `any` is NOT
+-- one of the alias's declared type vars is Sky's source-level type-erasure
+-- escape hatch. The declared-var case (`type alias Box a = { value : a }`) is
+-- fine — `any` becomes a generic struct param `<any>` (TypeRenderer renders
+-- `TVar v -> v`). But a BARE wildcard (`type alias Carrier = { payload : any }`)
+-- has no generic slot to carry it and would render the literal identifier `any`
+-- — an undefined Rust type (E0412 at cargo) plus a non-generic struct that
+-- later usages reference with a phantom `<any>` arg (E0107). That is a
+-- `type-checks ⇒ cargo-fails` soundness-floor breach.
+--
+-- Unlike the ADT pub/sub-Msg carrier (`anyCarrierField`, where the variant
+-- ALWAYS wraps a `Dict String String` by convention so resolving to
+-- HashMap<String,String> is correct), a record field carries an arbitrary value
+-- — in the wild `payload = "hi"` is a String, not a Dict — so silently
+-- resolving it to HashMap<String,String> would mis-type it. Correctness/
+-- soundness outranks completeness: FAIL LOUD at codegen with a structured,
+-- actionable error rather than guess a carrier type or leak an undefined `any`
+-- to cargo. The author encodes the payload as an ADT (so the type is known per
+-- variant) or names a concrete type.
+guardBareAny :: String -> [String] -> String -> Can.Type -> String -> String
+guardBareAny typeName vars fieldName fieldTy rendered
+    | typeHasBareAny vars fieldTy =
+        error $ "error[Rust]: any-typed record field '" ++ fieldName ++ "' in '"
+             ++ typeName ++ "' — encode it as an ADT upstream, or use a concrete type"
+    | otherwise = rendered
+
+-- | Does this type contain a `TVar "any"` that is NOT a declared alias var?
+-- Declared-var `any` (rare but legal) is a generic param and renders fine.
+typeHasBareAny :: [String] -> Can.Type -> Bool
+typeHasBareAny vars = go
+  where
+    bareAny v = v == "any" && ("any" `notElem` vars)
+    go t = case t of
+        Can.TVar v          -> bareAny v
+        Can.TType _ _ args  -> any go args
+        Can.TLambda a b     -> go a || go b
+        Can.TTuple a b rest -> any go (a : b : rest)
+        Can.TRecord fs ext  -> any (go . Can._fieldType) (Map.elems fs)
+                                 || maybe False bareAny ext
+        Can.TAlias _ _ args _ -> any (go . snd) args
+        Can.TUnit           -> False
 
 
 -- | Render a FUNCTION PARAMETER's type. An EFFECTFUL function-typed parameter

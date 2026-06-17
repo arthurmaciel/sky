@@ -1,0 +1,31 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+
+
+
+-- POSITIVE: a record alias that uses `a` as a DECLARED generic type var.
+-- This lowers to a generic Rust struct `MainBox<a>` and compiles + runs —
+-- the `<a>` param carries the field type. Confirms the declared-var path is
+-- unaffected by the bare-wildcard `any` soundness gate.
+--
+-- (`any` is also a legal generic var name; if the alias declared it
+-- — `type alias Box any = { value : any, ... }` — it would render the same
+-- generic-param way. The gate only fires for a BARE `any` that is NOT one of
+-- the alias's declared vars; see NOTES.md.)
+
+
+type alias Box a =
+    { value : a
+    , label : String
+    }
+
+
+labelOf : Box a -> String
+labelOf b =
+    b.label
+
+
+main =
+    println (labelOf { value = 42, label = "answer" })
