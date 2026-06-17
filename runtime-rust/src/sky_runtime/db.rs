@@ -12,6 +12,114 @@ fn sky_err<E: From<String> + Send>(e: &sqlx::Error) -> E {
     str_err(&format!("{}", e))
 }
 
+// ─── Transaction connection routing (task-local) ──────────────────────────────
+//
+// `withTransaction` must run BEGIN, the entire body, and COMMIT/ROLLBACK on ONE
+// physical connection. A bare `pool.execute(BEGIN)` routes each statement to an
+// arbitrary free connection, so on a multi-connection pool (Postgres/MySQL
+// default, or `SKY_DB_MAX_CONNECTIONS > 1` on sqlite) the body's writes can
+// autocommit on a different connection that has no open transaction — a rollback
+// then silently fails to undo them.
+//
+// Fix: `db_with_transaction` acquires ONE `PoolConnection` from the pool, stores
+// it (behind a `tokio::sync::Mutex` for shared, serialised access) in a
+// `tokio::task_local!`, and runs the body inside `TXN_CONN.scope(..)`. Every
+// body-reachable DB op routes its query through `exec_*` / `fetch_*` helpers
+// below, which lock the task-local connection when one is present, else fall back
+// to the pool. Because the body runs on the SAME tokio task (and any spawned
+// child task does NOT inherit the task-local — by design, child tasks get the
+// pool and must not share the txn connection), every statement lands on the held
+// connection and the transaction is real on any pool size.
+//
+// A `tokio::task_local!` (NOT `thread_local!`) is mandatory: tokio's work-
+// stealing scheduler moves a task across worker threads at every `.await`, so a
+// thread-local would lose the connection mid-body.
+
+/// The concrete sqlx database backend for this build (sqlite / postgres / mysql),
+/// derived from the configured `DbRow` so the helpers stay driver-agnostic.
+type DbDatabase = <DbRow as sqlx::Row>::Database;
+
+/// A dedicated transaction connection, shared across the body via `Arc<Mutex<..>>`
+/// so re-entrant body ops serialise on it (sqlx connections are `&mut`-exclusive).
+type TxnConn = std::sync::Arc<tokio::sync::Mutex<sqlx::pool::PoolConnection<DbDatabase>>>;
+
+tokio::task_local! {
+    /// Present (Some) for the dynamic extent of a `withTransaction` body — holds
+    /// the dedicated connection BEGIN/COMMIT/ROLLBACK ran on.
+    static TXN_CONN: Option<TxnConn>;
+}
+
+/// Read the active transaction connection for the current task, if any.
+/// Total: returns `None` outside a `withTransaction` scope (task-local unset).
+fn current_txn_conn() -> Option<TxnConn> {
+    TXN_CONN
+        .try_with(|c| c.clone())
+        .ok()
+        .flatten()
+}
+
+// The query type produced by `sqlx::query(&sql)` for the configured backend.
+type DbQuery<'q> =
+    sqlx::query::Query<'q, DbDatabase, <DbDatabase as sqlx::Database>::Arguments<'q>>;
+
+/// Run a built query for its side effects, on the active transaction connection
+/// when one is present (so the statement shares the transaction), else on the
+/// pool. Returns the driver query result.
+async fn exec_routed<'q>(
+    pool: &Db,
+    query: DbQuery<'q>,
+) -> Result<<DbDatabase as sqlx::Database>::QueryResult, sqlx::Error> {
+    match current_txn_conn() {
+        Some(conn) => {
+            let mut guard = conn.lock().await;
+            query.execute(&mut **guard).await
+        }
+        None => query.execute(pool).await,
+    }
+}
+
+/// `fetch_all` routed through the active transaction connection when present.
+async fn fetch_all_routed<'q>(
+    pool: &Db,
+    query: DbQuery<'q>,
+) -> Result<Vec<DbRow>, sqlx::Error> {
+    match current_txn_conn() {
+        Some(conn) => {
+            let mut guard = conn.lock().await;
+            query.fetch_all(&mut **guard).await
+        }
+        None => query.fetch_all(pool).await,
+    }
+}
+
+/// `fetch_optional` routed through the active transaction connection when present.
+async fn fetch_optional_routed<'q>(
+    pool: &Db,
+    query: DbQuery<'q>,
+) -> Result<Option<DbRow>, sqlx::Error> {
+    match current_txn_conn() {
+        Some(conn) => {
+            let mut guard = conn.lock().await;
+            query.fetch_optional(&mut **guard).await
+        }
+        None => query.fetch_optional(pool).await,
+    }
+}
+
+/// `fetch_one` routed through the active transaction connection when present.
+async fn fetch_one_routed<'q>(
+    pool: &Db,
+    query: DbQuery<'q>,
+) -> Result<DbRow, sqlx::Error> {
+    match current_txn_conn() {
+        Some(conn) => {
+            let mut guard = conn.lock().await;
+            query.fetch_one(&mut **guard).await
+        }
+        None => query.fetch_one(pool).await,
+    }
+}
+
 // needless_range_loop (accepted, cosmetic): the loop indexes by position to pair
 // column name[i] with value[i] across two parallel slices — an iterator can't
 // thread both. Not a soundness concern.
@@ -435,7 +543,7 @@ pub fn db_open_with_path<E: Send + From<String> + 'static>(path: String) -> SkyT
 
 pub fn db_exec_raw<E: Send + From<String> + 'static>(conn: Db, sql: String) -> SkyTask<E, ()> {
     Box::pin(async move {
-        match sqlx::query(&sql).execute(&conn).await {
+        match exec_routed(&conn, sqlx::query(&sql)).await {
             Ok(_) => ok_res(()),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
@@ -450,7 +558,7 @@ pub fn db_exec<E: Send + From<String> + 'static>(conn: Db, sql: String, params: 
         let final_sql = db_format_sql(sql);
         let mut q = sqlx::query(&final_sql);
         for p in params { q = q.bind(p); }
-        match q.execute(&conn).await {
+        match exec_routed(&conn, q).await {
             Ok(_) => ok_res(()),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
@@ -462,7 +570,7 @@ pub fn db_query<E: Send + From<String> + 'static>(conn: Db, sql: String, params:
         let final_sql = db_format_sql(sql);
         let mut q = sqlx::query(&final_sql);
         for p in params { q = q.bind(p); }
-        match q.fetch_all(&conn).await {
+        match fetch_all_routed(&conn, q).await {
             Ok(rows) => ok_res(rows.iter().map(row_to_map).collect()),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
@@ -599,7 +707,7 @@ pub fn db_insert_row<E: Send + From<String> + 'static>(
             for k in &keys {
                 q = q.bind(row.get(*k).cloned().unwrap_or_default());
             }
-            match q.fetch_one(&conn).await {
+            match fetch_one_routed(&conn, q).await {
                 Ok(r) => ok_res(
                     r.try_get::<i64, _>("id")
                         .or_else(|_| r.try_get::<i32, _>("id").map(|v| v as i64))
@@ -613,7 +721,7 @@ pub fn db_insert_row<E: Send + From<String> + 'static>(
             for k in &keys {
                 q = q.bind(row.get(*k).cloned().unwrap_or_default());
             }
-            match q.execute(&conn).await {
+            match exec_routed(&conn, q).await {
                 Ok(res) => ok_res(db_last_insert_id(&res)),
                 Err(e) => SkyResult::Err(sky_err(&e)),
             }
@@ -631,7 +739,7 @@ pub fn db_get_by_id<E: Send + From<String> + 'static>(
             return SkyResult::Err(format!("db.getById: invalid table name {:?}", table).into());
         }
         let sql = db_format_sql(format!("SELECT * FROM {} WHERE id = ? LIMIT 1", qtable));
-        match sqlx::query(&sql).bind(id).fetch_optional(&conn).await {
+        match fetch_optional_routed(&conn, sqlx::query(&sql).bind(id)).await {
             Ok(Some(r)) => ok_res(SkyMaybe::Just(row_to_map(&r))),
             Ok(None) => ok_res(SkyMaybe::Nothing),
             Err(e) => SkyResult::Err(sky_err(&e)),
@@ -665,7 +773,7 @@ pub fn db_update_by_id<E: Send + From<String> + 'static>(
             q = q.bind(row.get(*k).cloned().unwrap_or_default());
         }
         q = q.bind(id);
-        match q.execute(&conn).await {
+        match exec_routed(&conn, q).await {
             Ok(res) => ok_res(res.rows_affected() as i64),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
@@ -683,7 +791,7 @@ pub fn db_delete_by_id<E: Send + From<String> + 'static>(
             return SkyResult::Err(format!("db.deleteById: invalid table name {:?}", table).into());
         }
         let sql = db_format_sql(format!("DELETE FROM {} WHERE id = ?", qtable));
-        match sqlx::query(&sql).bind(id).execute(&conn).await {
+        match exec_routed(&conn, sqlx::query(&sql).bind(id)).await {
             Ok(res) => ok_res(res.rows_affected() as i64),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
@@ -701,7 +809,7 @@ pub fn db_find_one_by_field<E: Send + From<String> + 'static>(
             return SkyResult::Err(format!("db.findOneByField: invalid identifier in {:?}.{:?}", table, field).into());
         }
         let sql = db_format_sql(format!("SELECT * FROM {} WHERE {} = ? LIMIT 1", qtable, qfield));
-        match sqlx::query(&sql).bind(value).fetch_optional(&conn).await {
+        match fetch_optional_routed(&conn, sqlx::query(&sql).bind(value)).await {
             Ok(Some(r)) => ok_res(SkyMaybe::Just(row_to_map(&r))),
             Ok(None) => ok_res(SkyMaybe::Nothing),
             Err(e) => SkyResult::Err(sky_err(&e)),
@@ -720,7 +828,7 @@ pub fn db_find_many_by_field<E: Send + From<String> + 'static>(
             return SkyResult::Err(format!("db.findManyByField: invalid identifier in {:?}.{:?}", table, field).into());
         }
         let sql = db_format_sql(format!("SELECT * FROM {} WHERE {} = ?", qtable, qfield));
-        match sqlx::query(&sql).bind(value).fetch_all(&conn).await {
+        match fetch_all_routed(&conn, sqlx::query(&sql).bind(value)).await {
             Ok(rows) => ok_res(rows.iter().map(row_to_map).collect()),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
@@ -753,7 +861,7 @@ pub fn db_find_by_conditions<E: Send + From<String> + 'static>(
         for k in &keys {
             q = q.bind(conditions.get(*k).cloned().unwrap_or_default());
         }
-        match q.fetch_all(&conn).await {
+        match fetch_all_routed(&conn, q).await {
             Ok(rows) => ok_res(rows.iter().map(row_to_map).collect()),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
@@ -792,7 +900,7 @@ pub fn db_query_decode<E: Send + From<String> + 'static, A: Send + 'static>(
         let final_sql = db_format_sql(sql);
         let mut q = sqlx::query(&final_sql);
         for p in params { q = q.bind(p); }
-        let rows = match q.fetch_all(&conn).await {
+        let rows = match fetch_all_routed(&conn, q).await {
             Ok(r)  => r,
             Err(e) => return SkyResult::Err(sky_err(&e)),
         };
@@ -826,7 +934,7 @@ pub fn db_get_by_id_decode<E: Send + From<String> + 'static, A: Send + 'static>(
         }
         // id is bound as a parameter — injection-safe.
         let sql = db_format_sql(format!("SELECT * FROM {} WHERE id = ? LIMIT 1", qtable));
-        match sqlx::query(&sql).bind(id).fetch_optional(&conn).await {
+        match fetch_optional_routed(&conn, sqlx::query(&sql).bind(id)).await {
             Ok(None)       => ok_res(SkyMaybe::Nothing),
             Ok(Some(row))  => {
                 let jv = row_to_json(&row);
@@ -843,37 +951,80 @@ pub fn db_get_by_id_decode<E: Send + From<String> + 'static, A: Send + 'static>(
 /// `withTransaction : Db -> (Db -> Task Error a) -> Task Error a` —
 /// runs the body inside a transaction. Commits on Ok, rolls back on Err.
 ///
-/// **Connection semantics:** sqlx::Pool dispatches each query to any
-/// connection in the pool. To make BEGIN/COMMIT/ROLLBACK actually
-/// transactional, the body MUST run all its statements on the same
-/// connection that issued BEGIN. We acquire one explicit connection
-/// from the pool, exec the transaction-control statements on it, and
-/// the body uses the same pool — but sqlx may route the body's queries
-/// to other connections. For true rollback isolation in production
-/// code, prefer single-connection pools (`max_connections(1)`).
+/// **Connection semantics (real isolation on any pool size).** sqlx's `Pool`
+/// dispatches each `.execute()` to an arbitrary free connection, so issuing
+/// BEGIN/COMMIT/ROLLBACK against the pool would scatter the transaction-control
+/// statements and the body's writes across different physical connections — on a
+/// multi-connection pool a rollback would then silently fail to undo the body's
+/// (autocommitted) writes.
 ///
-/// This implementation is correct for single-user scripts (sqlite default)
-/// and provides best-effort isolation for multi-user pools. Real
-/// transactional integrity over a shared pool requires `sqlx::Transaction`
-/// borrow semantics, which can't fit the Sky-side `Db -> Task Error a`
-/// shape (which passes Db by ownership, not borrow).
+/// This implementation pins the whole transaction to ONE connection:
+///  1. `pool.acquire()` takes a dedicated `PoolConnection` out of the pool.
+///  2. The connection is stored in the `TXN_CONN` `tokio::task_local!` (behind an
+///     `Arc<Mutex<..>>`) for the dynamic extent of the body.
+///  3. `BEGIN`, the body, and `COMMIT`/`ROLLBACK` all run on THAT connection —
+///     the body's `Db.exec`/`Db.query`/`insertRow`/… route through the `*_routed`
+///     helpers, which lock the task-local connection when present.
+///  4. On every exit (Ok / Err / body-error) the `PoolConnection` is dropped at
+///     the end of the scope, returning it to the pool (RAII — never leaked).
+///
+/// **Nested `withTransaction`.** If a transaction connection is already active on
+/// this task (a nested call), we DO NOT acquire a second connection or issue a
+/// nested `BEGIN` (sqlite/MySQL would error; it would also deadlock on the
+/// `Mutex`). Instead the inner call runs the body directly on the already-held
+/// connection (flattened semantics — the inner block shares the outer
+/// transaction's atomicity; an inner `Err` does not roll back independently). A
+/// true SAVEPOINT-per-nesting is the ideal future refinement; flattening is the
+/// simplest correct behaviour and never deadlocks.
 pub fn db_with_transaction<E: Send + From<String> + 'static, A: Send + 'static>(
     conn: Db,
     body: impl Fn(Db) -> SkyTask<E, A> + Send + 'static,
 ) -> SkyTask<E, A> {
     Box::pin(async move {
-        if let Err(e) = sqlx::query("BEGIN").execute(&conn).await {
-            return SkyResult::Err(sky_err(&e));
+        // Nested: already inside a transaction on this task → flatten onto the
+        // existing connection (no second acquire, no nested BEGIN, no deadlock).
+        if current_txn_conn().is_some() {
+            return body(conn).await;
         }
-        match body(conn.clone()).await {
+
+        // Acquire ONE dedicated connection; it returns to the pool when `tx_conn`
+        // drops at the end of this async block (every path below).
+        let tx_conn: TxnConn = match conn.acquire().await {
+            Ok(c)  => std::sync::Arc::new(tokio::sync::Mutex::new(c)),
+            Err(e) => return SkyResult::Err(sky_err(&e)),
+        };
+
+        // BEGIN on the held connection.
+        {
+            let mut guard = tx_conn.lock().await;
+            if let Err(e) = sqlx::query("BEGIN").execute(&mut **guard).await {
+                return SkyResult::Err(sky_err(&e));
+            }
+        }
+
+        // Run the body inside the task-local scope so every body DB op routes to
+        // `tx_conn`. The body still receives the pool by value (its `Db` arg) —
+        // the routing happens via the task-local, not the arg.
+        let pool_for_body = conn.clone();
+        let outcome = TXN_CONN
+            .scope(
+                Some(tx_conn.clone()),
+                async move { body(pool_for_body).await },
+            )
+            .await;
+
+        match outcome {
             SkyResult::Ok(a) => {
-                if let Err(e) = sqlx::query("COMMIT").execute(&conn).await {
+                let mut guard = tx_conn.lock().await;
+                if let Err(e) = sqlx::query("COMMIT").execute(&mut **guard).await {
                     return SkyResult::Err(sky_err(&e));
                 }
                 ok_res(a)
             }
             SkyResult::Err(e) => {
-                let _ = sqlx::query("ROLLBACK").execute(&conn).await;
+                let mut guard = tx_conn.lock().await;
+                // Best-effort rollback; the body's Err is the reported error.
+                let _ = sqlx::query("ROLLBACK").execute(&mut **guard).await;
                 SkyResult::Err(e)
             }
         }
@@ -1023,7 +1174,7 @@ pub fn db_insert_fields<E: Send + From<String> + 'static>(
         let sql = db_format_sql(base_sql);
         let mut q = sqlx::query(&sql);
         for p in args { q = bind_sql_param(q, p); }
-        match q.execute(&conn).await {
+        match exec_routed(&conn, q).await {
             Ok(res) => ok_res(db_last_insert_id(&res)),
             Err(e)  => SkyResult::Err(sky_err(&e)),
         }
@@ -1094,7 +1245,7 @@ pub fn db_update_fields<E: Send + From<String> + 'static>(
         let sql = db_format_sql(sql);
         let mut q = sqlx::query(&sql);
         for p in args { q = bind_sql_param(q, p); }
-        match q.execute(&conn).await {
+        match exec_routed(&conn, q).await {
             Ok(res) => ok_res(res.rows_affected() as i64),
             Err(e)  => SkyResult::Err(sky_err(&e)),
         }
@@ -1139,7 +1290,7 @@ pub fn db_insert_fields_returning<E: Send + From<String> + 'static, A: Send + 's
         let sql = db_format_sql(format!("{} RETURNING {}", base_sql, projection));
         let mut q = sqlx::query(&sql);
         for p in args { q = bind_sql_param(q, p); }
-        let rows = match q.fetch_all(&conn).await {
+        let rows = match fetch_all_routed(&conn, q).await {
             Ok(r)  => r,
             Err(e) => return SkyResult::Err(sky_err(&e)),
         };
@@ -1316,10 +1467,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_transaction_rollback_returns_err() {
-        // The Err propagates correctly. The actual "row not visible after
-        // rollback" guarantee depends on pool-connection routing — see the
-        // doc comment on db_with_transaction. We assert only what the
-        // shared-pool implementation can guarantee: Err propagation.
+        // Err propagates AND the write is actually undone. With the task-local
+        // dedicated-connection routing, BEGIN / INSERT / ROLLBACK all run on the
+        // same connection, so the row is gone after rollback (single-conn pool).
         let db = fresh_db().await;
         let r: SkyResult<String, i64> = db_with_transaction(db.clone(), |c| {
             Box::pin(async move {
@@ -1330,6 +1480,143 @@ mod tests {
             })
         }).await;
         assert!(matches!(r, SkyResult::Err(_)));
+        let found: SkyResult<String, Vec<HashMap<String, String>>> =
+            db_find_many_by_field(db, "todos".into(), "title".into(), "txn-err".into()).await;
+        match found {
+            SkyResult::Ok(v) => assert_eq!(v.len(), 0, "rollback must undo the INSERT"),
+            _ => panic!("post-rollback fetch"),
+        }
+    }
+
+    // Build a FILE-based sqlite pool (temp file, NOT `:memory:` — in-memory
+    // sqlite is per-connection so it can't exhibit the cross-connection bug)
+    // with `max_connections > 1` and WAL. Returns (pool, tempdir-guard); the
+    // guard must outlive the pool so the file isn't deleted early.
+    async fn fresh_file_db(max_conns: u32) -> (Db, std::path::PathBuf) {
+        let mut path = std::env::temp_dir();
+        // Unique per test run to avoid cross-test contamination.
+        let unique = format!(
+            "sky_txn_test_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        path.push(unique);
+        // Fresh file every time.
+        let _ = std::fs::remove_file(&path);
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(max_conns)
+            .connect(&url)
+            .await
+            .expect("connect file sqlite");
+        // WAL: concurrent readers alongside a single writer.
+        let _ = sqlx::query("PRAGMA journal_mode=WAL;").execute(&pool).await;
+        let _ = sqlx::query("PRAGMA busy_timeout=5000;").execute(&pool).await;
+        sqlx::query("CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0)")
+            .execute(&pool).await.expect("create table");
+        (pool, path)
+    }
+
+    // THE REGRESSION GATE. On a MULTI-connection (5) file-backed pool, a
+    // withTransaction body that INSERTs then returns Err must roll the INSERT
+    // back. Against the old bare-pool code BEGIN/INSERT/ROLLBACK scattered across
+    // different connections → the INSERT autocommitted on its own connection →
+    // this assert would find the row present (FAIL). With task-local routing all
+    // three run on one connection → row absent (PASS).
+    #[tokio::test]
+    async fn test_with_transaction_rollback_real_on_multiconn_pool() {
+        let (db, path) = fresh_file_db(5).await;
+
+        let r: SkyResult<String, i64> = db_with_transaction(db.clone(), |c| {
+            Box::pin(async move {
+                let mut row = HashMap::new();
+                row.insert("title".to_string(), "rollback-me".to_string());
+                let _: SkyResult<String, i64> = db_insert_row(c, "todos".into(), row).await;
+                SkyResult::Err("forced rollback".to_string())
+            })
+        }).await;
+        assert!(matches!(r, SkyResult::Err(_)), "body Err propagates");
+
+        // The row MUST be absent — rollback actually undid the write.
+        let found: SkyResult<String, Vec<HashMap<String, String>>> =
+            db_find_many_by_field(db.clone(), "todos".into(), "title".into(), "rollback-me".into()).await;
+        match found {
+            SkyResult::Ok(v) => assert_eq!(
+                v.len(), 0,
+                "ROLLBACK did not undo the INSERT on a multi-connection pool — \
+                 BEGIN/INSERT/ROLLBACK landed on different connections"
+            ),
+            other => panic!("post-rollback fetch: {:?}", other),
+        }
+
+        db.close().await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Ok-path on a multi-connection file pool: COMMIT must persist the row.
+    #[tokio::test]
+    async fn test_with_transaction_commit_real_on_multiconn_pool() {
+        let (db, path) = fresh_file_db(5).await;
+
+        let r: SkyResult<String, i64> = db_with_transaction(db.clone(), |c| {
+            Box::pin(async move {
+                let mut row = HashMap::new();
+                row.insert("title".to_string(), "commit-me".to_string());
+                db_insert_row(c, "todos".into(), row).await
+            })
+        }).await;
+        assert!(matches!(r, SkyResult::Ok(_)), "body Ok");
+
+        let found: SkyResult<String, Vec<HashMap<String, String>>> =
+            db_find_many_by_field(db.clone(), "todos".into(), "title".into(), "commit-me".into()).await;
+        match found {
+            SkyResult::Ok(v) => assert_eq!(v.len(), 1, "COMMIT must persist the row"),
+            other => panic!("post-commit fetch: {:?}", other),
+        }
+
+        db.close().await;
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Nested withTransaction must NOT deadlock and must NOT acquire a second
+    // connection. Flattened semantics: the inner block runs on the outer
+    // transaction's connection; an outer Err rolls everything back.
+    #[tokio::test]
+    async fn test_with_transaction_nested_no_deadlock() {
+        let (db, path) = fresh_file_db(5).await;
+        let db_for_inner = db.clone();
+
+        let r: SkyResult<String, i64> = db_with_transaction(db.clone(), move |c| {
+            let inner_db = db_for_inner.clone();
+            Box::pin(async move {
+                let mut row = HashMap::new();
+                row.insert("title".to_string(), "outer".to_string());
+                let _: SkyResult<String, i64> = db_insert_row(c, "todos".into(), row).await;
+                // Nested call — must reuse the held connection (no deadlock).
+                db_with_transaction(inner_db, |c2| {
+                    Box::pin(async move {
+                        let mut row2 = HashMap::new();
+                        row2.insert("title".to_string(), "inner".to_string());
+                        db_insert_row(c2, "todos".into(), row2).await
+                    })
+                }).await
+            })
+        }).await;
+        assert!(matches!(r, SkyResult::Ok(_)), "nested commit Ok");
+
+        // Both rows committed (flattened into one transaction).
+        let outer: SkyResult<String, Vec<HashMap<String, String>>> =
+            db_find_many_by_field(db.clone(), "todos".into(), "title".into(), "outer".into()).await;
+        let inner: SkyResult<String, Vec<HashMap<String, String>>> =
+            db_find_many_by_field(db.clone(), "todos".into(), "title".into(), "inner".into()).await;
+        assert!(matches!(outer, SkyResult::Ok(ref v) if v.len() == 1), "outer row present");
+        assert!(matches!(inner, SkyResult::Ok(ref v) if v.len() == 1), "inner row present");
+
+        db.close().await;
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
