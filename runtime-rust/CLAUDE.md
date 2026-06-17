@@ -421,6 +421,17 @@ log** — hold it to the same bar as a code review:
   call. This is a recurring class (money / Db.insertFields / SqlValue params).
 
 ### Pitfalls
+- **sccache's GitHub-Actions cache backend is dead — never use it on CI.**
+  `SCCACHE_GHA_ENABLED` drives sccache against GitHub's *v1* Actions-Cache API
+  (`artifactcache.actions.githubusercontent.com`), which GitHub retired; sccache
+  (≤0.15) still talks v1, so it fails at the first `rustc -vV` with `ghac …
+  services aren't available` (HTTP 400). Since sccache is `RUSTC_WRAPPER`, that
+  kills EVERY cargo build, not just the step it surfaces in. On CI persist
+  `CARGO_TARGET_DIR` + `~/.cargo/registry` via `actions/cache@v4` (v2 service)
+  instead, and disable sccache with `SKY_NO_SCCACHE=1` (lib/env.sh honours it).
+  sccache stays the LOCAL dev fast path (disk backend, unaffected). The
+  `CARGO_INCREMENTAL=0` mandate is coupled to sccache — drop it when sccache is
+  off so the cached target dir does incremental rebuilds.
 - **A NEW runtime `*.rs` file needs THREE wirings, none auto-discovered:** the
   source `runtime-rust/src/sky_runtime/mod.rs` (`pub mod x; pub use x::*;` — for
   the standalone `cargo build --features full`), AND `Project.hs`'s `baseMods`

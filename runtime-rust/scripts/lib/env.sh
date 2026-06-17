@@ -22,18 +22,31 @@
 # runner that needs node still prepends its own NODE_BIN BEFORE sourcing.
 export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin:$PATH"
 
-# ── Shared cargo target + sccache + CARGO_INCREMENTAL=0 (all mandatory) ──────
+# ── Shared cargo target + sccache + CARGO_INCREMENTAL=0 ─────────────────────
 # A shared CARGO_TARGET_DIR *outside* each example's sky-out/ compiles the heavy
 # deps (axum/tokio/serde/sqlx/…) ONCE and persists across the per-example
-# `rm -rf sky-out`. sccache (RUSTC_WRAPPER) additionally caches each rustc by
-# content hash. CARGO_INCREMENTAL=0 is NON-NEGOTIABLE: sccache silently caches
-# NOTHING when incremental=true (every request lands "non-cacheable: incremental");
-# with it off, cold builds drop ~75s → ~15s (verified). The sweeps are sequential,
-# so no target-dir lock contention. Override CARGO_TARGET_DIR to relocate the cache.
+# `rm -rf sky-out`. Override CARGO_TARGET_DIR to relocate the cache.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/sky-rust-target}"
-export CARGO_INCREMENTAL=0
-command -v sccache >/dev/null 2>&1 && export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
 mkdir -p "$CARGO_TARGET_DIR"
+
+# sccache (RUSTC_WRAPPER) additionally caches each rustc by content hash — the
+# big LOCAL win. It is coupled to CARGO_INCREMENTAL=0, which is NON-NEGOTIABLE
+# *when sccache is on*: sccache caches NOTHING with incremental=true (every
+# request lands "non-cacheable: incremental"); with it off, cold builds drop
+# ~75s → ~15s (verified). So set incremental=0 ONLY inside the sccache branch —
+# when sccache is OFF (e.g. CI), leave CARGO_INCREMENTAL at cargo's default so a
+# persisted (actions/cache'd) target dir does incremental rebuilds.
+#
+# SKY_NO_SCCACHE=1 force-disables sccache even when the binary is on PATH. CI
+# sets it: GitHub retired the v1 Actions-Cache API that sccache's GHA backend
+# (SCCACHE_GHA_ENABLED) depends on, so an sccache RUSTC_WRAPPER fails at the very
+# first `rustc -vV` ("ghac … services aren't available", HTTP 400) and kills
+# every cargo build. CI persists CARGO_TARGET_DIR + ~/.cargo via actions/cache
+# instead — equivalent cross-run warmth without the dead GHA dependency.
+if [ -z "${SKY_NO_SCCACHE:-}" ] && command -v sccache >/dev/null 2>&1; then
+    export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
+    export CARGO_INCREMENTAL=0
+fi
 
 # ── Repo-root detection → REPO + SKY_BIN ────────────────────────────────────
 # Honour an explicit SKY_REPO; else detect via the runner-script anchor (works

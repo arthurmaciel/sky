@@ -17,6 +17,40 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-17 14:00 — CI: drop sccache (retired GHA cache API kills every build)
+
+Second cross-OS run (`27700228755`, all 3 OSes) failed at the new "Pre-warm Rust
+deps" step — but the real cause is the sweep-wide sccache wrapper, not pre-warm:
+
+```
+sccache: error: Server startup failed: cache storage failed to read:
+  Unexpected (permanent) at read => Our services aren't available right now
+  uri: …artifactcache.actions.githubusercontent.com/…/_apis/artifactcache/cache?…&version=sccache-v0.15.0
+  response: status: 400 … service: ghac
+```
+
+sccache's `SCCACHE_GHA_ENABLED` backend uses GitHub's **v1 Actions-Cache API**,
+which GitHub retired; sccache 0.15.0 still talks v1, so no action bump fixes it.
+Because sccache was `RUSTC_WRAPPER`, it failed on the first `rustc -vV` — i.e. it
+would have killed EVERY cargo build on all three OSes, not just pre-warm.
+
+Fix: turn sccache OFF on CI, keep it the LOCAL dev fast path. Cross-run warmth on
+CI comes from `actions/cache@v4` (v2 cache service, already caching
+`CARGO_TARGET_DIR` + `~/.cargo/registry`).
+
+- `lib/env.sh`: couple `CARGO_INCREMENTAL=0` to the sccache branch (it exists ONLY
+  because sccache needs it) and add a `SKY_NO_SCCACHE` opt-out. When sccache is off,
+  `CARGO_INCREMENTAL` is left at cargo's default so a persisted target dir does
+  incremental rebuilds. Verified: local → `sccache` + `CARGO_INCREMENTAL=0`
+  (unchanged); `SKY_NO_SCCACHE=1` → both unset.
+- `examples-sweep.yml` (both jobs): drop `RUSTC_WRAPPER`/`SCCACHE_GHA_ENABLED`/
+  `CARGO_INCREMENTAL` job env + the `mozilla-actions/sccache-action` step; set
+  `SKY_NO_SCCACHE: '1'`; drop the `sccache --show-stats` line from pre-warm.
+
+- **Affected:** `.github/workflows/examples-sweep.yml`, `runtime-rust/scripts/lib/env.sh`.
+
+---
+
 ## 2026-06-17 13:00 — CI: fix the three env failures from the first cross-OS run
 
 First `examples-sweep.yml` run (all 3 OSes) failed on CI-environment issues, NOT
