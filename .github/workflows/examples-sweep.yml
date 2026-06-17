@@ -232,6 +232,31 @@ jobs:
         shell: bash
         run: bash runtime-rust/scripts/examples-sweep.sh
 
+      # ── Per-OS job summary: the BUILD·RUN·EQUIV table inline on the run page ─
+      # always() so it renders on a RED verdict too (the sweep exits non-zero on
+      # FAIL). The .table is fixed-width plain text → fence it to keep alignment.
+      # Each matrix job writes its OWN summary, so the run page shows one table
+      # per OS. This is the README's job-summary mirror — no commit, no write perms.
+      - name: Job summary (sweep table)
+        if: always()
+        shell: bash
+        run: |
+          HIST="$HOME/.cache/sky/examples-sweep"
+          table="$(ls -t "$HIST"/sweep-*.table 2>/dev/null | head -1)"
+          {
+            echo "## examples-sweep — ${{ matrix.os }}"
+            echo
+            verdict="$(grep -h '=== VERDICT:' "$HIST"/run-*.log 2>/dev/null | tail -1 | sed 's/^=== //; s/ ===.*$//')"
+            [ -n "$verdict" ] && { echo "**${verdict}**"; echo; }
+            if [ -n "$table" ]; then
+              echo '```'
+              cat "$table"
+              echo '```'
+            else
+              echo "_No sweep table produced — the sweep aborted before rendering it (see the \"Run examples sweep\" step log)._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # ── Scoreboard table artifact (always upload, even on a RED verdict) ────
       - name: Upload sweep scoreboard
         if: always()

@@ -17,6 +17,22 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-17 14:30 — CI: per-OS BUILD·RUN·EQUIV table in the job summary
+
+Added a `Job summary (sweep table)` step (`if: always()`) to the examples-sweep
+job: it finds the newest `~/.cache/sky/examples-sweep/sweep-*.table`, prepends the
+OS name + the `VERDICT:` line parsed from `run-*.log`, and appends it — fenced to
+preserve the fixed-width alignment — to `$GITHUB_STEP_SUMMARY`. Because each matrix
+job writes its own summary, the run page shows ONE table per OS (ubuntu/macos/
+windows). This is the no-write-perms README mirror the user chose (option 2): the
+sweep results are visible inline on every run with no commit and no `contents:
+write`. README stays single-writer via `update-docs`. Verified the shell logic
+locally against a real `.table` (renders heading + verdict + fenced table).
+
+- **Affected:** `.github/workflows/examples-sweep.yml`.
+
+---
+
 ## 2026-06-17 14:00 — CI: drop sccache (retired GHA cache API kills every build)
 
 Second cross-OS run (`27700228755`, all 3 OSes) failed at the new "Pre-warm Rust
