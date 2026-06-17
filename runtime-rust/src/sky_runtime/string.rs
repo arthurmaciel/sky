@@ -142,7 +142,10 @@ pub fn string_drop_right(n: i64, s: String) -> String {
     if n >= len {
         return String::new();
     }
-    runes[..((len - n) as usize)].iter().collect()
+    // 0 < len-n < len here (n>0 and n<len guarded above), so `take` keeps the
+    // leading runes. `take` is total (never panics) — clippy flags the `[..k]`
+    // slice form even though the bound is guaranteed, so use the iterator form.
+    runes.iter().take((len - n) as usize).collect()
 }
 
 /// `String.equalFold : String -> String -> Bool`
