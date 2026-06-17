@@ -17,6 +17,28 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-17 17:30 — errorToString regression follow-up: total field rendering (autoref)
+
+CI run `27711298427` (the fix-sweep) surfaced `28-streaming-chat` as a NEW red on
+all 3 OSes (the other 4 reds — 29/31-webview, 38-composite-ui, skyshop-rs — are
+pre-existing). Root cause = the SkyStringify fix's regression class, broader than
+the ui/html types: the generated `sky_show` recursed `field.sky_show()` into a
+runtime type with no impl (`http_stream::ChunkEvent<E>` → E0599). Whack-a-mole.
+
+Robust fix: make field rendering TOTAL BY CONSTRUCTION via dtolnay autoref-
+specialization (`stringify.rs` `Wrap`/`ViaSkyStringify`/`ViaDebug`): a field
+renders via `SkyStringify` if its type impls it, ELSE via `Debug` (every type
+derives Debug → can never E0599). Codegen emits `(&Wrap(&field)).dispatch()` inline
++ adds `+ Debug` to the generated impl gens. The top-level
+`basics_error_to_string<T: SkyStringify>` bound + ModuleEmitter propagation STAY
+(a generic frame erases the autoref to Debug, which would re-quote String —
+verified). The ui/element.rs + html.rs per-type impls stay (nicer than Debug).
+Validated: 28-streaming-chat + 26-ui-showcase build; 00-standard-libs 131/131;
+fixture 60 Go-identical; 34 stringify/basics unit tests. CLAUDE.md learning on the
+recursing-trait pitfall already updated.
+
+- **Affected:** `runtime-rust/src/sky_runtime/stringify.rs`, `src/Sky/Generate/Rust/Builder/Emitter.hs`.
+
 ## 2026-06-17 16:00 — Known-limitations triage + fix sweep (8 in-boundary fixes + 1 regression)
 
 Triaged the README "Known limitations" list (4-investigator read-only swarm),
