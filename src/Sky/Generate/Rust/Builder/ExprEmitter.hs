@@ -101,7 +101,7 @@ substVar ctx name inline = go
   where
     go e@(Ann.At _ expr) = case expr of
         Can.VarLocal n | n == name -> inline
-        Can.VarLocal n -> rustSafeIdent n ++ if n `Set.member` ecCloneVars ctx && not (n `Set.member` ecCopyVars ctx) then ".clone()" else ""
+        Can.VarLocal n -> rustSafeIdent n ++ if n `Set.member` ecCloneVars ctx && not (n `Set.member` ecCopyVars ctx) && not (n `Set.member` ecNoCloneVars ctx) then ".clone()" else ""
         Can.VarTopLevel mod n ->
             let modName = ModuleName._name mod
                 modPrefix = map (\c -> if c == '.' then '_' else c) modName
@@ -453,6 +453,40 @@ isTaskProducingCall (Ann.At _ e) = case e of
     Can.Case _ bs         -> not (null bs) && all (\(Can.CaseBranch _ b) -> isTaskProducingCall b) bs
     _                     -> False
 
+-- | #8: is `e` a SkyTask-VALUED expression — a value of type `Task e a`
+-- (`Pin<Box<dyn Future>>`, non-`Clone`)? Used by the single-use bound-SkyTask
+-- move arm to decide whether a `let`-binder holds a non-`Clone` task. Stricter
+-- than `isTaskProducingCall` (which matches ANY call, including `List.map`):
+-- here the head of the application chain (after peeling `|>`) must be a known
+-- `Task.*` / effect kernel. Broader than `taskExprInnerType /= ""` in exactly
+-- one place that matters: `Task.fail`, whose success type is polymorphic so
+-- `taskExprInnerType` is `""` even though the value is unambiguously a SkyTask.
+-- Conservative-by-default: an UNRECOGNISED head returns False (the binder keeps
+-- the existing clone path), so this never widens the move set beyond provable
+-- task values.
+isTaskValuedExpr :: Map.Map String Can.Type -> Can.Expr -> Bool
+isTaskValuedExpr solved e =
+    not (null (taskExprInnerType solved e)) || rootedAtTaskKernel e
+  where
+    -- The application head, after stripping `|>` pipes and Let wrappers, is a
+    -- `Sky.Core.Task` kernel that yields a SkyTask (covers `Task.fail`, and any
+    -- other Task constructor whose inner type is unconstrained). Module-gated to
+    -- `Sky.Core.Task` so no non-task callee is ever misread as a task value.
+    rootedAtTaskKernel (Ann.At _ ex) = case ex of
+        Can.Binop "|>" _ _ _ _ r          -> rootedAtTaskKernel r
+        Can.Let _ b                       -> rootedAtTaskKernel b
+        Can.Call f _                      -> rootedAtTaskKernel f
+        Can.VarTopLevel m n               -> ModuleName._name m == "Sky.Core.Task"
+                                             && n `elem` taskValueCtors
+        Can.VarKernel "Task" n            -> n `elem` taskValueCtors
+        _                                 -> False
+    -- Task constructors/combinators whose RESULT is a SkyTask. `fail` is the one
+    -- `taskExprInnerType` reports as "" (polymorphic success); the rest are
+    -- belt-and-braces (they already give a non-empty inner type) so the predicate
+    -- stays correct if `taskExprInnerType`'s coverage ever changes.
+    taskValueCtors = [ "fail", "succeed", "andThen", "onError", "map"
+                     , "mapError", "andThenResult", "fromResult", "retryWith" ]
+
 -- | Non-Clone capture fix (#52, Part B). Does EVERY free use of `name` in `e`
 -- appear ONLY in DISCARD position — i.e. as the RHS of a `let _ = name`
 -- (`Can.DestructDef PAnything (VarLocal name)`) or a `let _ = name`-shaped
@@ -509,6 +543,22 @@ allUsesDiscarded name = go
     ignoredPat (Ann.At _ Can.PAnything) = True
     ignoredPat _                        = False
 
+-- | #8: build the per-closure `.clone()` capture-prelude for `vars`, SKIPPING
+-- any var the context marks non-`Clone` (`ecNoCloneVars`). A non-`Clone`
+-- capture (a bound `SkyTask`, `Pin<Box<dyn Future>>`) is MOVED into the closure
+-- instead of `.clone()`d — sound for a SINGLE syntactic use, which is the only
+-- case that ever populates `ecNoCloneVars` (see the bound-SkyTask `Can.Let`
+-- arm). For every Clone var (the overwhelming majority) this is byte-identical
+-- to the old inline `concatMap … ".clone(); "` prelude. `ecNoCloneVars` is
+-- empty everywhere except inside the body of a single-use bound-SkyTask `let`,
+-- so this changes NO existing output.
+clonePreludeFor :: EmitCtx -> [String] -> String
+clonePreludeFor ctx vars = concatMap mk vars
+  where
+    mk v | v `Set.member` ecNoCloneVars ctx = ""
+         | otherwise = let v' = rustSafeIdent v
+                       in "let " ++ v' ++ " = " ++ v' ++ ".clone(); "
+
 -- | Helper: render a single function-call argument string, handling
 -- lambda capture cloning and VarLocal ownership.
 -- Clones every VarLocal argument by default (most Sky types implement Clone).
@@ -518,7 +568,7 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
     Can.Lambda ps body ->
         let paramNames = Set.fromList (concatMap patBindingVars ps)
             captured = Set.toList (Set.difference (collectVarLocals body) paramNames)
-            clones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") captured
+            clones = clonePreludeFor ctx captured
             innerCounts = collectVarLocalsMulti body
             innerMulti = [ v | (v, c) <- Map.toList innerCounts, c >= 2 ]
             -- sub-A.10 C6: For move closures, EVERY captured non-Copy variable
@@ -605,6 +655,7 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
     Can.VarLocal n ->
         let needsClone = (not noCloneFn) && (n `Set.member` ecCloneVars ctx)
                          && not (n `Set.member` ecCopyVars ctx)
+                         && not (n `Set.member` ecNoCloneVars ctx)
         in if needsClone then rustSafeIdent n ++ ".clone()" else rustSafeIdent n
     _ -> exprToRustString ctx (Ann.At Ann.one a)
 
@@ -945,7 +996,7 @@ peepholeArg ctx e = exprToRustString ctx e
 
 exprToRustInner :: EmitCtx -> Can.Expr_ -> String
 exprToRustInner ctx e = case e of
-    Can.VarLocal name -> rustSafeIdent name ++ if name `Set.member` ecCloneVars ctx && not (name `Set.member` ecCopyVars ctx) then ".clone()" else ""
+    Can.VarLocal name -> rustSafeIdent name ++ if name `Set.member` ecCloneVars ctx && not (name `Set.member` ecCopyVars ctx) && not (name `Set.member` ecNoCloneVars ctx) then ".clone()" else ""
     Can.VarTopLevel mod name ->
         let modName = ModuleName._name mod
             modPrefix = map (\c -> if c == '.' then '_' else c) modName
@@ -1757,7 +1808,7 @@ exprToRustInner ctx e = case e of
                    -- … }` prelude so the original survives; uses inside still
                    -- clone (ecCloneVars) since the Fn closure runs per element.
                    capturedList = Set.toList capturedSupplied
-                   clonePrelude = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") capturedList
+                   clonePrelude = clonePreludeFor ctx capturedList
                    theClosure = "(move |" ++ intercalate ", " freshParams ++ "| "
                                 ++ calleeName ++ "(" ++ intercalate ", " (suppliedStrs ++ freshParams) ++ "))"
                    -- A partial application whose RESIDUAL type is an effectful
@@ -1871,6 +1922,30 @@ exprToRustInner ctx e = case e of
                 , not (null (taskExprInnerType (ecSolvedTypes ctx) taskBody)) ->
                     "{ task_run::<SkyError, _>(" ++ exprToRustString ctx taskBody
                         ++ "); " ++ exprToRustString ctx body ++ " }"
+            -- Non-Clone capture fix (#8): a `let`-bound SkyTask
+            -- (`Pin<Box<dyn Future>>`, non-`Clone`) used EXACTLY ONCE and
+            -- captured into a closure that AWAITS it / passes it to a `task_*`
+            -- combinator (NOT discarded). The per-closure capture-prelude would
+            -- emit `let work = work.clone();` → E0599. A single syntactic use is
+            -- move-safe: mark the binder no-clone for the body so the prelude
+            -- MOVES the task into the closure and the use site drops `.clone()`.
+            --   * Gate (a): SkyTask-typed RHS (taskExprInnerType non-empty) — a
+            --     non-Task `let` is byte-identical (its name never enters the set).
+            --   * Gate (b): used EXACTLY ONCE (`collectVarLocalsMulti == 1`). A
+            --     ≥2-use task can't be `.await`ed twice soundly (SkyTask is
+            --     one-shot), so those stay on the existing paths: an all-discard
+            --     ≥2-use hits the Arc<Mutex> arm below; a non-discard ≥2-use is
+            --     the documented residual (genuine multi-attempt needs the inline
+            --     expression form, not a bound value).
+            -- The RHS is emitted with the OUTER ctx (the task value itself isn't
+            -- non-Clone-marked at its own construction); only the body's closures
+            -- see the no-clone mark.
+            Can.Def (Ann.At _ name) [] taskBody
+                | isTaskValuedExpr (ecSolvedTypes ctx) taskBody
+                , Just 1 <- Map.lookup name (collectVarLocalsMulti body) ->
+                    let bodyCtx = ctx { ecNoCloneVars = Set.insert name (ecNoCloneVars ctx) }
+                    in "{ let " ++ defToRustString ctx def ++ "; "
+                        ++ exprToRustString bodyCtx body ++ " }"
             -- Non-Clone capture fix (#52, Part B): a `let`-bound SkyTask
             -- (`Pin<Box<dyn Future>>`, non-`Clone`) captured by MULTIPLE sibling
             -- closures (each `.clone()`s its capture for ownership) is E0599.
@@ -1929,7 +2004,7 @@ exprToRustInner ctx e = case e of
         -- Clone captured locals used ≥ 2 times so each use gets its own copy.
         let counts = collectVarLocalsMulti expr
             multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
-            clones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") multi
+            clones = clonePreludeFor ctx multi
             hasClone = not (null multi)
             exprStr = case expr of
                 Ann.At _ (Can.Lambda ps lambdaBody)
@@ -1939,7 +2014,7 @@ exprToRustInner ctx e = case e of
                 Ann.At _ (Can.Lambda ps lambdaBody) ->
                     let paramNames = Set.fromList [ n | Ann.At _ p <- ps, let n = case p of Can.PVar s -> s; _ -> "_" ]
                         innerCapt = Set.toList (Set.difference (collectVarLocals lambdaBody) paramNames)
-                        innerClones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") innerCapt
+                        innerClones = clonePreludeFor ctx innerCapt
                         psStr = intercalate ", " (map patternToRustParam ps)
                         inner = "move |" ++ psStr ++ "| { " ++ exprToRustString ctx lambdaBody ++ " }"
                     in if null innerCapt && not hasClone then inner
@@ -3359,7 +3434,7 @@ defToRustString ctx (Can.Def (Ann.At _ name) [] body) =
     -- in scope at the prelude. Their use-site clones come from ecCloneVars.
     let counts = collectFreeVarLocalsMulti body
         multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
-        clones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") multi
+        clones = clonePreludeFor ctx multi
         -- Discarded task (`let _ = process_run …` lowers to a Def named "_"):
         -- annotate the wildcard with `: SkyTask<inner>` so the kernel's generic
         -- `E: From<String>` pins to `SkyError` (else E0283 with >1 impl). Only
@@ -3387,7 +3462,7 @@ defToRustString ctx (Can.Def (Ann.At _ name) [] body) =
 defToRustString ctx (Can.Def (Ann.At _ name) params body) =
     let paramNames = Set.fromList (concatMap patBindingVars params)
         captured   = Set.toList (Set.difference (collectVarLocals body) paramNames)
-        clones     = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") captured
+        clones     = clonePreludeFor ctx captured
         innerMulti = [ v | (v, c) <- Map.toList (collectVarLocalsMulti body), c >= 2 ]
         ctx'       = ctx { ecCloneVars = Set.unions
                              [ Set.fromList innerMulti
@@ -3419,7 +3494,7 @@ defToRustString ctx (Can.DestructDef (Ann.At _ Can.PAnything) expr)
 defToRustString ctx (Can.DestructDef pat expr) =
     let counts = collectVarLocalsMulti expr
         multi  = [ v | (v, c) <- Map.toList counts, c >= 2 ]
-        clones = concatMap (\v -> let v' = rustSafeIdent v in "let " ++ v' ++ " = " ++ v' ++ ".clone(); ") multi
+        clones = clonePreludeFor ctx multi
         exprStr = if null multi then exprToRustString ctx expr
                   else "{ " ++ clones ++ exprToRustString ctx expr ++ " }"
     in patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ exprStr

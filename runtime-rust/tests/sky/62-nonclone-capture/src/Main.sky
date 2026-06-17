@@ -1,0 +1,85 @@
+module Main exposing (main)
+
+-- 62-nonclone-capture (#8): a `let`-bound SkyTask (`Pin<Box<dyn Future>>`,
+-- NON-`Clone`) captured into a closure that AWAITS it / passes it to a `task_*`
+-- combinator — the case left UNCOVERED by #52 (which only mitigated impl-Fn HOF
+-- params and DISCARD-only let-bound tasks).
+--
+-- Pre-fix: the per-closure capture-prelude emitted `let work = work.clone();`
+-- and the in-closure use `work.clone()` — both E0599 ("clone not implemented"
+-- on `Pin<Box<dyn Future>>"). The `sky` type-check passed; only `cargo build`
+-- caught it.
+--
+-- Post-fix: a SINGLE syntactic use of a bound SkyTask is move-safe, so codegen
+-- MOVES the task into the closure (no prelude clone, no use-site clone) and the
+-- program builds + runs.
+--
+-- Run:  sky run src/Main.sky --target rust
+-- Expected stdout (3 lines, in order):
+--   OK -> 62: awaited bound task -> 42
+--   OK -> 62: andThen over bound task -> 100
+--   OK -> 62: onError fallback over bound task -> recovered
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.String as String
+import Sky.Core.Error as Error
+import Std.Log exposing (println)
+
+
+-- Case 1: a bound SkyTask captured into a `Task.andThen` continuation closure
+-- and AWAITED (passed to `Task.map`). Single use → moved into the closure.
+awaitedBound : Task Error Int
+awaitedBound =
+    let
+        work =
+            Task.succeed 41
+    in
+    Task.succeed 1
+        |> Task.andThen (\_ -> work |> Task.map (\n -> n + 1))
+
+
+-- Case 2: a bound SkyTask passed DIRECTLY to a combinator inside a closure.
+andThenBound : Task Error Int
+andThenBound =
+    let
+        work =
+            Task.succeed 50
+    in
+    Task.succeed 0
+        |> Task.andThen (\_ -> work |> Task.andThen (\n -> Task.succeed (n + n)))
+
+
+-- Case 3: a bound failing SkyTask captured into a closure and recovered via
+-- `Task.onError` — proves a non-Clone capture works on the error arm too.
+recoveredBound : Task Error String
+recoveredBound =
+    let
+        work =
+            Task.fail (Error.unexpected "boom-62")
+    in
+    Task.succeed ()
+        |> Task.andThen (\_ -> work |> Task.onError (\_ -> Task.succeed "recovered"))
+
+
+main : Task Error ()
+main =
+    awaitedBound
+        |> Task.andThen
+            (\n ->
+                let
+                    _ = println ("OK -> 62: awaited bound task -> " ++ String.fromInt n)
+                in
+                andThenBound)
+        |> Task.andThen
+            (\n ->
+                let
+                    _ = println ("OK -> 62: andThen over bound task -> " ++ String.fromInt n)
+                in
+                recoveredBound)
+        |> Task.andThen
+            (\s ->
+                let
+                    _ = println ("OK -> 62: onError fallback over bound task -> " ++ s)
+                in
+                Task.succeed ())
