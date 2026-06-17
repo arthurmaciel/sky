@@ -388,9 +388,22 @@ entryPointSection uk =
 -- superset of the Deserialize need, so a type in both gets the full pair once.
 typeDefToString :: Set.Set String -> Set.Set String -> Set.Set String -> RustTypeDef -> String
 typeDefToString _ serdeTypes _ (REnumDef name gens variants) =
-    let derive = if name `Set.member` serdeTypes
-                 then "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"
-                 else "#[derive(Clone, Debug, PartialEq)]"
+    let baseDerive = if name `Set.member` serdeTypes
+                     then "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"
+                     else "#[derive(Clone, Debug, PartialEq)]"
+        -- A `fn(…)` pointer in a variant payload (e.g. `ShouldRetry`'s
+        -- `RetryWhen (e -> Bool)` → `fn(E) -> bool`; `SkyTestTest`'s
+        -- `Leaf(String, fn(()) -> …)`) makes the DERIVED PartialEq compare fn
+        -- ADDRESSES — `unpredictable_function_pointer_comparisons` warns (the
+        -- addresses aren't unique). We KEEP PartialEq: a struct field of this
+        -- enum (e.g. `RetryPolicy { shouldRetry : ShouldRetry e }`) derives
+        -- PartialEq and needs it (dropping it cascades E0369 to every holder).
+        -- These enums are pattern-matched, never semantically `==`-compared on
+        -- the fn variant, so the fn-address compare is dead — `#[allow]` it.
+        hasFnPtrVariant = any (\(_, mt) -> maybe False ("fn(" `isInfixOf`) mt) variants
+        derive = if hasFnPtrVariant
+                 then "#[allow(unpredictable_function_pointer_comparisons)]\n" ++ baseDerive
+                 else baseDerive
     in derive ++ "\npub enum " ++ name ++ gens ++ " {\n" ++ intercalate ",\n" (map (\(n, mt) -> "    " ++ n ++ maybe "" (\x -> "(" ++ x ++ ")") mt) variants) ++ "\n}"
 typeDefToString formTargets serdeTypes fnFieldStructs (RStructDef name gens fields) =
     -- Sky record field names are camelCase and match the form `name=` attrs
