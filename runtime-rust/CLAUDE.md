@@ -429,6 +429,23 @@ log** — hold it to the same bar as a code review:
   `sky-rust-backend:autonomous-swarm`.)
 - **Wrapper shim string params must be `&str`** (the FFI generator passes `&arg`);
   a zero-arg fn binds `() -> Result` (call it `Mod.f ()`).
+- **Multibackend entry — force a non-req Live `init`'s param 0 to `()`, do NOT
+  trust the natural render.** A `Live.app` init's param 0 is the request slot; an
+  ignored slot (`init _` annotated `()` / `{}` / a free `a`) renders inconsistently
+  and sometimes WRONG (a `{}` annotation can resolve to the model struct via the
+  open-record-param quirk; a free `a` renders generic). The `Live.app` wrapper
+  `move |_r| init(())` then mismatches (E0308). Force param 0 uniformly: `LiveReq`
+  for a req-reader (detected by `collectLiveReqInitFns`), else `()` — the wrapper's
+  `init(())` always type-checks and Tui passes the `Fn(())` init directly. A
+  req-reader is "param 0 binds a var used in the body", not "init has an arg".
+- **`Task.run`/`Webview.app` are `Ffi.kernel` aliases → `VarTopLevel`, not
+  `VarKernel`.** Any backend-entry peephole that only matches `VarKernel` silently
+  misses the alias (the *pure* kernels `Live.app`/`Tui.app`/`Cli.program` DO arrive
+  as `VarKernel`). Match both. (Generalises the `VarTopLevel`-vs-`VarKernel`
+  ExprEmitter rule above to the multibackend-entry path.)
+- **Run the FULL sweep, not a hand-picked subset.** The non-req-init pin surfaced
+  ONLY in the complete sweep — a targeted regression subset missed `26-ui-showcase`.
+  A new codegen-shape fix needs its own pre-fix-failing fixture AND a full-sweep pass.
 - **Verification-skipping emulator/test paths MUST be dev-gated** (`ENV` then
   `SKY_ENV`; unset/dev/development/local ⇒ dev, else refuse). A leaked
   `*_EMULATOR_HOST` in production is an auth/data bypass — gate it.
@@ -470,3 +487,13 @@ log** — hold it to the same bar as a code review:
 - **Checkpoint-commit per stage** (general in-boundary fixes first, for
   bisectability) and carry a **wrinkles ledger** forward between agents.
 - `go clean -cache` reclaims multi-GB fast; abort agent spawns under ~5 GB free.
+- **Disk hygiene — cargo `target/` dirs accumulate fast** (a full example sweep can
+  exceed 20 GB). The sweep idiom deletes each example's target right after building
+  (`rm -rf sky-out/Rust/target` post-build). The shared `CARGO_TARGET_DIR` is
+  package `sky-app` for every example, so it holds only the LAST-built binary —
+  rebuild the specific example immediately before running it. Manual reclaim:
+  `rm -rf runtime-rust/target tools/sky-ffi-inspect-rs/target ~/.cache/sky` +
+  `find runtime-rust/tests/sky -type d -name target -exec rm -rf {} +`. Leave
+  `~/.cargo/registry` and `~/.cargo/git` alone (global, slow to rebuild). A stale
+  `sky-out/sky` from an unfinished background `cabal install` is the usual cause of
+  a "fix didn't take effect" symptom — confirm the binary mtime before building.
