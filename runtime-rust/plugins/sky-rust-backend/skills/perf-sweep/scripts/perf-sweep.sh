@@ -1,1 +1,0 @@
-../../../../../scripts/perf-sweep.sh

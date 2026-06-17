@@ -1,90 +1,31 @@
-# Go≡Rust EQUIVALENCE-MODE manifest — the SINGLE SOURCE OF TRUTH for HOW
-# build-sweep proves each example's Rust output matches Go. Consumed by
-# build-sweep.sh (per-example equiv mode) and gated for coverage by
-# build-sweep.sh + keep-go-parity.sh.
+# Go≡Rust equivalence-mode OVERRIDES — overrides-on-top-of-DERIVED.
 #
-# EVERY top-level dir under examples/ MUST appear here exactly once, PLUS each
-# build_set member that lives below a top-level dir (examples/rust/skyshop-rs).
-# An example present on disk but absent here is "unclassified" → build-sweep
-# FAILS and "Go parity maintained" CANNOT be claimed (forced-classification).
+# The equiv mode is DERIVED from example_shape by `equiv_mode` in lib/examples.sh
+# (cli→stdout, server→body, live→scenario, tui→pty, webview/fyne/Go-FFI→none).
+# Derivation guarantees coverage, so an author-added example AUTO-CLASSIFIES with
+# no line here. This file is ONLY exceptions: an example whose derived mode is
+# wrong (a non-deterministic cli, a known divergence parked as a finding, a
+# Rust-FFI app with no Go reference). Listed here, the mode in column 2 wins.
 #
-# Format:  <example>  <mode>  <reason>
-#   The <example> key is the build_set BASENAME (e.g. skyshop-rs, NOT rust) for
-#   in-scope examples, and the top-level dir name for out-of-scope / non-building
-#   ones (so the coverage gate sees every examples/ dir).
+# Format:  <basename>  <mode>  <reason>
+#   <basename>  the example dir basename (e.g. 35-composite-generics, skyshop-rs).
+#   <mode>      none | stdout | body | scenario | pty (the override mode).
+#   <reason>    why the derived mode is overridden (free text to end of line).
 #
-# Modes — each names exactly WHAT is proven (the build-sweep scoreboard bins
-# match these, so a reader never over-reads "equiv"):
-#   stdout    cli, deterministic + backend-independent stdout → run BOTH backends,
-#             DIFF normalized stdout. equiv-stdout = byte-identical (strongest).
-#   scenario  live → run the SAME web-verify browser scenario against BOTH
-#             binaries. equiv-scenario = both pass the scenario (APP behaviour
-#             parity — robust to the by-design console in-process(Go) vs
-#             cross-process(Rust) divergence; NOT a raw-DOM diff).
-#   serve     server → boot BOTH. equiv-serve = both serve HTTP (NOT response-body
-#             identical — just that both listeners come up).
-#   pty       tui → pty smoke BOTH. equiv-pty = both drive the TUI runtime without
-#             panic (NOT cell-identical rendering — an honest floor for a TTY app).
-#   none      genuinely incomparable: Rust build only → `builds`. Reasons: webview
-#             (opens a window, no comparable output), Go-FFI (does not build on
-#             --target rust — nothing to compare), no single entry point, or a
-#             non-deterministic cli (timestamps / Dict-iteration order).
-#
-# When a new example lands, CLASSIFY IT here with its natural mode (derive from
-# example_shape) + a reason. Do not leave it unclassified.
+# There is NO forced-full-coverage gate (derivation guarantees coverage). The
+# only sanity note: keep this list SMALL — most examples need no override.
 
-# ── stdout: deterministic cli — DIFF normalized stdout on both backends ──────
-01-hello-world          stdout    plain deterministic output
-04-local-pkg            stdout    multi-module; deterministic
-06-json                 stdout    encode/decode; object key order is _fieldIndex-stable on both backends
-14-task-demo            stdout    sequential Task andThen/fail/run; deterministic
-20-cli-counter          stdout    arg/stdin-driven; on </dev/null both backends print the same no-arg output
-simple                  stdout    task_sequence/parallel — results collected then printed in order
-test_pkg                stdout    Result/Maybe combinators; deterministic
+# ── Findings — NOT silently dropped ─────────────────────────────────────────
+# 00-standard-libs is DELIBERATELY NOT overridden: its derived mode is `stdout`,
+# so examples-sweep tries the Go reference build, it FAILS (upstream v0.16.29 Go
+# codegen emits `undefined: T1` at main.go — memory: upstream-v0-16-29-go-t1-
+# regression), and the sweep auto-reports amber `go-ref-broken` — honestly
+# surfacing the upstream Go bug live, and auto-flipping back to `equiv-stdout` the
+# moment upstream fixes T1 (no manual .tsv edit needed). FINDING #2.
+07-todo-cli        none   FINDING #1: banner emitted via Log.info — Go prints a `TIMESTAMP INFO message` structured line, Rust prints just `message` (Std.Log prefix-parity gap, task #5) AND the timestamp is non-deterministic so the determinism auto-probe would also flag it. Pin `none` + this note so the Log.* gap stays VISIBLE (not silently auto-downgraded). Drop (→ derived stdout) when Rust's Log.* matches Go's structured format.
 
-# ── scenario: Sky.Live — run the SAME browser scenario against both binaries ──
-09-live-counter         scenario  Sky.Live counter; both backends must pass the live-counter round-trip
-10-live-component       scenario  Sky.Live; both backends must pass the smoke round-trip
-12-skyvote              scenario  Sky.Live; both backends must pass the skyvote scenario
-16-skychess             scenario  Sky.Live; both backends must pass the skychess scenario
-17-skymon               scenario  Sky.Live; both backends must pass the skymon scenario
-18-job-queue            scenario  Sky.Live; both backends must pass the job-queue scenario
-19-skyforum             scenario  Sky.Live; both backends must pass the skyforum scenario
-25-sky-console          scenario  Sky.Live console; scenario asserts APP behaviour (console in-process Go vs cross-process Rust is by design, NOT diffed)
-26-ui-showcase          scenario  Sky.Live; both backends must pass the smoke round-trip
-27-multi-session-chat   scenario  Sky.Live; both backends must pass the smoke round-trip
-28-streaming-chat       scenario  Sky.Live; both backends must pass the smoke round-trip
-34-multi-tier-console   scenario  Sky.Live multi-tier; scenario asserts APP behaviour (console plumbing by-design divergence is NOT diffed)
-37-composite-live-shop  scenario  Sky.Live; both backends must pass the smoke round-trip
+# ── Non-deterministic cli — derived `stdout` would false-DIFFER ──────────────
+35-composite-generics   none   non-deterministic cli: prints a Time.now `Generated at` timestamp AND Dict.toList iteration order differs between backends. The stdout determinism auto-probe would catch the timestamp, but pin it here so the intent is explicit.
 
-# ── serve: headless HTTP server — both must boot + serve ─────────────────────
-15-http-server          serve     server; both backends must boot + serve an HTTP status
-30-sse-server-demo      serve     server (SSE stream); both backends must boot + serve
-32-sse-relay            serve     server (SSE relay); both backends must boot + serve
-33-websocket-echo       serve     server (WebSocket); both backends must boot + serve
-36-composite-server     serve     server; both backends must boot + serve (needs SKY_AUTH_TOKEN_SECRET; checks.sh provides it)
-
-# ── pty: Sky.Tui — both must drive the TUI runtime without panic ─────────────
-21-tui-stopwatch        pty       Sky.Tui; both backends drive the pty smoke without panic (NOT cell-identical)
-22-tui-stopwatch-ui     pty       Sky.Tui; both backends drive the pty smoke without panic
-23-tui-todo             pty       Sky.Tui; both backends drive the pty smoke without panic
-24-tui-kitchen-sink     pty       Sky.Tui; both backends drive the pty smoke without panic
-38-composite-ui-multibackend pty  Sky.Tui (argv-dispatched multibackend); both backends drive the pty smoke without panic
-
-# ── none: genuinely incomparable — Rust build only ───────────────────────────
-# Two of these are FINDINGS (a Rust-side gap / an upstream Go bug), parked `none`
-# with a precise reason + a flip-back condition, NOT silently dropped:
-00-standard-libs        none      Rust builds + runs it fine, but the GO backend can't build it right now — upstream v0.16.29 Go codegen emits `undefined: T1` at main.go (FINDING #2, upstream bug, not Rust). Flip back to `stdout` when upstream fixes T1. (memory: upstream-v0-16-29-go-t1-regression)
-07-todo-cli             none      its banner is emitted via Log.info — Go prints a `TIMESTAMP INFO message` structured line, Rust prints just `message` (a Std.Log prefix-parity gap, FINDING #1) AND the timestamp is non-deterministic. Flip back to `stdout` when Rust's Log.* matches Go's structured format.
-skyshop-rs              none      examples/rust/skyshop-rs — Rust-FFI app (firestore/stripe/firebase wrapper crates, target=rust); does NOT build on Go — nothing to compare. run-sweep boots it on Rust alone.
-35-composite-generics   none      non-deterministic cli: prints a Time.now `Generated at` timestamp AND Dict.toList iteration order differs between backends
-29-webview-threejs-spike none     Webview — opens a window, no comparable output
-31-webview-stopwatch-ui none      Webview/Tui — window, no comparable output
-39-hub-demo             none      two-app hub demo — no single src/Main.sky entry point (absent from build_set)
-rust                    none      fork-local FFI example subtree — classified per build_set member (skyshop-rs above), not as a single example
-02-go-stdlib            none      Go-FFI — does not build on --target rust (nothing to compare)
-03-tea-external         none      Go-FFI — does not build on --target rust
-05-mux-server           none      Go-FFI server — does not build on --target rust
-08-notes-app            none      Go-FFI server (Sky.Http.Server) — does not build on --target rust
-11-fyne-stopwatch       none      Go-FFI Fyne GUI — does not build on --target rust
-13-skyshop              none      Go-FFI Sky.Live — does not build on --target rust
+# ── Rust-FFI app — no Go reference exists to compare against ──────────────────
+skyshop-rs         none   examples/rust/skyshop-rs — Rust-FFI app (firestore/stripe/firebase wrapper crates, target=rust); does NOT build on Go — nothing to compare. examples-sweep builds+runs it on Rust alone.

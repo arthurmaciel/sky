@@ -3,15 +3,15 @@
 # "exercise an already-built binary" logic. SOURCE this (never execute it):
 #   source "$(dirname "$0")/lib/checks.sh"
 #
-# WHY THIS FILE EXISTS. Two sweeps need to drive a built binary per shape:
-#   • run-sweep  — exercise the RUST binary, assert it works headless.
-#   • build-sweep — exercise BOTH the Go and the Rust binary, assert EQUIVALENCE
-#     (same stdout for cli; both pass the same browser scenario for live; both
-#     boot for server; both no-crash for tui/webview).
+# WHY THIS FILE EXISTS. examples-sweep drives a built binary per shape TWICE —
+#   • RUN   — exercise the RUST binary, assert it works headless.
+#   • EQUIV — exercise BOTH the Go and the Rust binary, assert EQUIVALENCE
+#     (byte-diff stdout for cli; byte-diff comparable GET-route bodies for server;
+#     both pass the same browser scenario for live; both no-crash for tui).
 # The exercise logic (boot a server + poll, drive a pty, run an xvfb smoke, drive
-# the browser round-trip) is identical regardless of WHICH backend produced the
-# binary. Extracting it here means run-sweep and build-sweep share ONE definition
-# of "did this binary work?" — they can't drift, and a harness fix lands once.
+# the browser round-trip, body-compare two servers) is identical regardless of
+# WHICH backend produced the binary. Extracting it here means RUN and EQUIV share
+# ONE definition of "did this binary work?" — they can't drift, a fix lands once.
 #
 # CONTRACT. Every `exercise_*` takes an already-built, executable binary path and
 # a logfile path, runs the binary, writes its stdout+stderr to the logfile, and
@@ -26,6 +26,10 @@
 # assert; an in-process Go console vs a cross-process Rust console child would
 # otherwise be a spurious divergence — the equiv modes assert APP behaviour).
 export SKY_CONSOLE_EMBED="${SKY_CONSOLE_EMBED:-off}"
+# Suppress the dev-mode floating console link too: Go injects a `__sky-dev-console`
+# <a> into every page, Rust does not — that dev chrome would spuriously DIFFER the
+# body-equiv comparison of the APP's own HTML. Off on both → fair comparison.
+export SKY_DEV_BANNER="${SKY_DEV_BANNER:-off}"
 # Server/live examples that use Std.Auth refuse to boot without a >=32-byte
 # secret (CORRECT production behaviour — see 36-composite-server's startup gate).
 # Provide a test secret so those apps boot on BOTH backends; honoured only if the
@@ -37,6 +41,23 @@ export SKY_AUTH_TOKEN_SECRET="${SKY_AUTH_TOKEN_SECRET:-sky-run-sweep-test-secret
 # whole reason the Rust backend exists). Go panics surface the same way, so the
 # pattern catches both backends' aborts.
 PANIC_RE="panicked|CompilerBug|RUST_BACKTRACE|index out of bounds|unwrap\(\) on|called .Result::unwrap|goroutine [0-9]+ \[|runtime error:"
+
+# ── night_guard <sweep-name>: defer the heavy sweeps to the night window ─────
+# These sweeps build + run the whole example set (cargo + Go + browser) — heavy
+# enough to wedge this slim shared box during the day. Gate them to a low-load
+# window 22:00–08:00 America/Sao_Paulo (the user's TZ). Outside the window AND
+# SKY_SWEEP_FORCE unset → print a deferral message and exit 2 (the CALLER inherits
+# this exit because night_guard runs in the caller's shell, not a subshell). Inside
+# the window OR SKY_SWEEP_FORCE=1 → return 0 and the sweep proceeds.
+night_guard() {
+  local sweep="${1:-sweep}" hour
+  [ -n "${SKY_SWEEP_FORCE:-}" ] && return 0
+  hour="$(TZ=America/Sao_Paulo date +%H 2>/dev/null)"
+  hour="$((10#${hour:-12}))"   # strip a leading 0 so 08 isn't read as octal
+  if [ "$hour" -ge 22 ] || [ "$hour" -lt 8 ]; then return 0; fi
+  echo "deferred: $sweep runs 22:00–08:00 America/Sao_Paulo (slim machine); set SKY_SWEEP_FORCE=1 to override" >&2
+  exit 2
+}
 
 # ── http_responds <code>: any real HTTP status (100-599) = serving ──────────
 # 000 = connection refused / timeout = NOT serving. Accepts an API server with
@@ -121,8 +142,16 @@ browser_drivable() { case "$1" in examples/rust/*) return 1;; *) return 0;; esac
 # that isn't 124 is NOT a failure by itself (a cli may exit non-zero by design,
 # e.g. System.exit n) — the gate is panic/hang. Stdout+stderr → logfile.
 exercise_cli() {
-  local bin="$1" log="$2" tmo="${3:-25}" rc
-  timeout "$tmo" "$bin" >"$log" 2>&1 </dev/null; rc=$?
+  local bin="$1" log="$2" tmo="${3:-25}" rc tries=0
+  # A freshly-built/copied binary can be ETXTBSY (the builder's write fd not yet
+  # released) → exec fails 126 "Text file busy" (locale-dependent text), which
+  # would be captured as the program's "output" and false-DIFFER against the
+  # other backend. Retry briefly until it's executable.
+  while :; do
+    timeout "$tmo" "$bin" >"$log" 2>&1 </dev/null; rc=$?
+    { [ "$rc" = 126 ] || grep -qiE 'text file busy|texto ocupada|ETXTBSY' "$log" 2>/dev/null; } || break
+    tries=$((tries+1)); [ "$tries" -ge 10 ] && break; sync; sleep 0.4
+  done
   if   [ "$rc" = 124 ]; then return 1
   elif grep -qiE "$PANIC_RE" "$log"; then return 1
   fi
@@ -139,8 +168,9 @@ exercise_cli() {
 # state (a `./*.db` sqlite file, a session store) is born clean each invocation.
 # Without this, a server example that migrates a schema on boot (36-composite-
 # server writes ./composite-server.db) fails its SECOND boot with "table already
-# exists" — and in build-sweep the Go boot and the Rust boot would collide on the
-# same file. A unique cwd makes both repeat-runs and Go-vs-Rust boots independent.
+# exists" — and in examples-sweep's EQUIV the Go boot and the Rust boot would
+# collide on the same file. A unique cwd makes both repeat-runs and Go-vs-Rust
+# boots independent.
 exercise_server() {
   local bin="$1" port="$2" log="$3" pid i code lp code2 ok="" run_dir abin
   abin="$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")"   # absolutise before we cd away
@@ -192,9 +222,9 @@ exercise_live() {
 # within the window without a panic AND without a "no terminal" complaint.
 # timeout's exit 124 (we cut it off) is EXPECTED for a TUI waiting on input.
 # STDIN SEALED (`</dev/null`): `script` reads from stdin — without this it would
-# DRAIN the caller's stdin, which in build-sweep is the `< <(build_set)` example
-# pipe, silently ending the loop after the first tui example. (run-sweep reads
-# into an array first so it never hit this; build-sweep loops the pipe directly.)
+# DRAIN the caller's stdin. examples-sweep reads the example list into an array
+# first (not a live pipe), so the loop can't be ended early; sealing stdin here is
+# the belt-and-braces second line of defence regardless of how the caller loops.
 exercise_tui() {
   local bin="$1" log="$2"
   script -qec "timeout 8 '$bin'" /dev/null >"$log" 2>&1 </dev/null
@@ -213,4 +243,135 @@ exercise_webview() {
   xvfb-run -a timeout 8 "$bin" >"$log" 2>&1 </dev/null
   grep -qiE "$PANIC_RE" "$log" && return 1
   return 0
+}
+
+# ── _boot_server_at <bin> <port> <run_dir> <log> → echoes the PID it spawned ─
+# Boot a server binary in an ISOLATED cwd (so cwd-relative DB/session files of the
+# Go boot and the Rust boot never collide), waiting ≤15 s for ANY HTTP status on
+# <port>. Echoes the PID on stdout if it came up serving; empty + non-zero if not.
+# Caller is responsible for killing the PID and removing run_dir. Mirrors
+# exercise_server's boot logic but keeps the process alive for body comparison.
+# Boot a server binary; on success echo "PID:PORT" where PORT is the port it
+# ACTUALLY bound (a raw Sky.Http.Server `Server.listen N` hardcodes its port and
+# ignores the SKY_LIVE_PORT/PORT override, so we sniff the real port from the
+# "listening on …:N" log line, mirroring run-sweep's exercise_server). Empty echo
+# + non-zero on failure.
+_boot_server_at() {
+  local bin="$1" port="$2" run_dir="$3" log="$4" abin pid i code lp
+  abin="$(cd "$(dirname "$bin")" 2>/dev/null && pwd)/$(basename "$bin")"
+  ( cd "$run_dir" && exec env SKY_LIVE_PORT="$port" PORT="$port" "$abin" ) >"$log" 2>&1 </dev/null &
+  pid=$!
+  for i in $(seq 1 30); do
+    kill -0 "$pid" 2>/dev/null || { echo ""; return 1; }
+    code="$(curl -s -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:$port/" 2>/dev/null || true)"
+    http_responds "$code" && { echo "$pid:$port"; return 0; }
+    # Sniff the actually-bound port (hardcoded `Server.listen N` ignores the env).
+    lp="$(grep -iE "listening on" "$log" 2>/dev/null | grep -oE ':[0-9]+' | tail -1 | tr -d ':')"
+    if [ -n "$lp" ] && [ "$lp" != "$port" ]; then
+      code="$(curl -s -o /dev/null -m 1 -w '%{http_code}' "http://127.0.0.1:$lp/" 2>/dev/null || true)"
+      http_responds "$code" && { echo "$pid:$lp"; return 0; }
+    fi
+    sleep 0.5
+  done
+  echo ""; return 1
+}
+
+# ── exercise_server_equiv <go_bin> <rust_bin> <example_dir> <port_base> <log> ─
+# SERVER body-equivalence: boot Go and Rust on separate ports (isolated cwds) and
+# byte-compare the response bodies of each comparable GET route. PRINTS a result
+# token to stdout:
+#   equiv-body N   ≥1 comparable route compared, ALL byte-identical (N = count).
+#   equiv-serve    0 comparable routes but BOTH booted + served (honest floor).
+#   DIFFER         a route's body differs Go-vs-Rust (route + diff noted in log).
+#   go-ref-broken  the Go reference did not boot+serve (upstream Go bug, AMBER).
+#   rust-broken    the Rust binary did not boot+serve.
+# Comparable routes: literal GET routes (`Server.get "/lit"`), MINUS param routes
+# (contain `:`), MINUS streaming (basename in events/stream/sse/relay/upstream OR
+# curl doesn't return within 2 s), MINUS WebSocket (basename `ws` or path has `ws`).
+# `/` is always included. For each route, Go is curled TWICE — if its own body is
+# non-deterministic (run-to-run differ) the route is SKIPPED (no false DIFFER).
+exercise_server_equiv() {
+  local go_bin="$1" rust_bin="$2" dir="$3" log="$4"
+  local gport rport grun rrun gpid rpid route routes=() comparable=() n=0 verdict=""
+  gport="$(free_port)"; rport="$(free_port)"
+  [ "$gport" = "$rport" ] && rport=$((rport + 1))
+  grun="$(mktemp -d "${TMPDIR:-/tmp}/sky-eqv-go.XXXXXX")"
+  rrun="$(mktemp -d "${TMPDIR:-/tmp}/sky-eqv-rs.XXXXXX")"
+  : >"$log"
+
+  # 1) Discover literal GET routes from the Sky source (route LITERALS only).
+  routes=()
+  while IFS= read -r route; do [ -n "$route" ] && routes+=("$route"); done < <(
+    rg --no-filename -No 'Server\.get[[:space:]]+"([^"]*)"' -r '$1' "$dir"/src 2>/dev/null | sort -u)
+  # Always include `/`.
+  case " ${routes[*]} " in *" / "*) ;; *) routes=("/" "${routes[@]}");; esac
+
+  # 2) Filter to COMPARABLE routes (drop param/streaming/ws).
+  for route in "${routes[@]}"; do
+    case "$route" in
+      *:*) continue ;;                              # param route — needs a value
+      */ws|*ws/*|*/ws/*) continue ;;               # websocket path
+    esac
+    case "$(basename "$route")" in
+      ws|events|stream|sse|relay|upstream) continue ;;  # streaming/ws by name
+    esac
+    comparable+=("$route")
+  done
+
+  # 3) Boot Go, capture each comparable route's body (skip nondeterministic /
+  #    streaming), then KILL Go BEFORE booting Rust. Sequential boot means an
+  #    example that hardcodes `Server.listen N` on BOTH backends can't collide
+  #    on that port — only one server is ever up at a time.
+  local gboot gpid gp route
+  gboot="$(_boot_server_at "$go_bin" "$gport" "$grun" "$log.go")"
+  gpid="${gboot%%:*}"; gp="${gboot##*:}"
+  if [ -z "$gpid" ]; then
+    grep -qiE "$PANIC_RE" "$log.go" 2>/dev/null
+    rm -rf "$grun" "$rrun"; cat "$log.go" >>"$log" 2>/dev/null
+    echo "go-ref-broken"; return 0
+  fi
+  local -A gobody=()
+  for route in "${comparable[@]}"; do
+    local g1 g2 t0 t1 gcode
+    # Skip routes the app does not actually serve (Go 404) — `/` is always probed
+    # but an API-only server has no root route; comparing default 404 error pages
+    # is not app-equivalence.
+    gcode="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$gp$route" 2>/dev/null || true)"
+    [ "$gcode" = 404 ] && { printf 'SKIP (Go 404 — route not served) %s\n' "$route" >>"$log"; continue; }
+    # Time the first Go fetch: a route that doesn't return within ~2 s is an
+    # undetected stream (the -m 2 curl timed out) → skip rather than DIFFER.
+    t0="$(date +%s%N)"
+    g1="$(curl -s -m 2 "http://127.0.0.1:$gp$route" 2>/dev/null)" || { printf 'SKIP (no-response) %s\n' "$route" >>"$log"; continue; }
+    t1="$(date +%s%N)"
+    if [ "$(( (t1 - t0) / 1000000 ))" -ge 1900 ]; then printf 'SKIP (slow/streaming) %s\n' "$route" >>"$log"; continue; fi
+    g2="$(curl -s -m 2 "http://127.0.0.1:$gp$route" 2>/dev/null)"
+    if [ "$g1" != "$g2" ]; then printf 'SKIP (nondeterministic) %s\n' "$route" >>"$log"; continue; fi
+    gobody["$route"]="$g1"
+  done
+  kill -TERM "$gpid" 2>/dev/null; sleep 0.3; kill -KILL "$gpid" 2>/dev/null
+
+  # 4) Boot Rust, byte-compare each captured route.
+  local rboot rpid rp
+  rboot="$(_boot_server_at "$rust_bin" "$rport" "$rrun" "$log.rs")"
+  rpid="${rboot%%:*}"; rp="${rboot##*:}"
+  if [ -z "$rpid" ]; then
+    rm -rf "$grun" "$rrun"; cat "$log.rs" >>"$log" 2>/dev/null
+    echo "rust-broken"; return 0
+  fi
+  for route in "${!gobody[@]}"; do
+    local r1
+    r1="$(curl -s -m 2 "http://127.0.0.1:$rp$route" 2>/dev/null)"
+    if [ "${gobody[$route]}" = "$r1" ]; then
+      n=$((n + 1)); printf 'MATCH %s\n' "$route" >>"$log"
+    else
+      printf 'DIFFER %s\n  go:   %s\n  rust: %s\n' "$route" "${gobody[$route]:0:200}" "${r1:0:200}" >>"$log"
+      verdict="DIFFER"
+    fi
+  done
+  kill -TERM "$rpid" 2>/dev/null; sleep 0.3; kill -KILL "$rpid" 2>/dev/null
+  rm -rf "$grun" "$rrun"
+
+  if [ -n "$verdict" ]; then echo "DIFFER"; return 0; fi
+  if [ "$n" -ge 1 ]; then echo "equiv-body $n"; return 0; fi
+  echo "equiv-serve"; return 0   # 0 comparable routes — both booted (floor)
 }

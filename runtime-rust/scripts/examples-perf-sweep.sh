@@ -1,20 +1,33 @@
 #!/usr/bin/env bash
-# Sky Rust-backend PERF sweep — Rust-vs-Go perf over the perf-runnable example
-# set + a regression report vs the previous run. Build + run sweeps are separate
-# skills (/build-sweep, /run-sweep).
+# Sky Rust-backend EXAMPLES-PERF sweep — Rust-vs-Go perf over the perf-runnable
+# example set + a regression report vs the previous run. Build + run + equiv are
+# the sibling sky-rust-backend:examples-sweep skill.
 #
-# This script IS the procedure (the /perf-sweep skill). Do not re-decide
-# the steps ad-hoc; if a run reveals a better way (a new gotcha, a parse miss, a
-# flaky step, another example shape), IMPROVE THIS SCRIPT so the next run
-# inherits the fix.
+# This script IS the procedure (the sky-rust-backend:examples-perf-sweep skill).
+# Do not re-decide the steps ad-hoc; if a run reveals a better way (a new gotcha,
+# a parse miss, a flaky step, another example shape), IMPROVE THIS SCRIPT so the
+# next run inherits the fix.
+#
+# PRINCIPLES (README.md top, strict order): security > correctness > soundness >
+# efficiency > completeness > readability. Perf serves EFFICIENCY — never at the
+# cost of a higher principle; a perf "win" that broke correctness is not a win.
+#
+# NIGHT GATE: like examples-sweep, this heavy sweep is gated to 22:00–08:00
+# America/Sao_Paulo (slim shared box). SKY_SWEEP_FORCE=1 overrides.
 #
 # Exit: 0 always (perf is informational; regressions are reported, not fatal);
-#       2 = setup error.
+#       2 = setup error / deferred by the night gate.
 set -uo pipefail
 
-# ── Env + manifest (shared SINGLE SOURCE OF TRUTH under lib/) ───────────────
+# ── Env + manifest + shared checks (shared SINGLE SOURCE OF TRUTH under lib/) ─
+# checks.sh provides night_guard; sourced BEFORE this script's own purpose-built
+# reap() (which also kills hyperfine/ab/sse-bench) so the perf reap wins.
 source "$(dirname "$0")/lib/env.sh"
 source "$(dirname "$0")/lib/examples.sh"
+source "$(dirname "$0")/lib/checks.sh"
+
+# ── Night gate (22:00–08:00 America/Sao_Paulo; SKY_SWEEP_FORCE=1 overrides) ──
+night_guard "examples-perf-sweep"
 # rust-perf.sh's per-metric harness only knows cli/server/live; a tui/webview
 # binary waits for input/a window, so hyperfine cold-start would hang on it and
 # there's no throughput metric. We therefore measure build + cold-start ONLY for
@@ -29,7 +42,7 @@ command -v ab        >/dev/null 2>&1 || echo "WARN: 'ab' (apache-bench) missing 
 command -v hyperfine >/dev/null 2>&1 || echo "WARN: 'hyperfine' missing — cli cold-start will read 0." >&2
 command -v python3   >/dev/null 2>&1 || { echo "ERROR: python3 required for the regression diff." >&2; exit 2; }
 
-HIST="$HOME/.cache/sky/perf-sweep"; mkdir -p "$HIST"
+HIST="$HOME/.cache/sky/examples-perf-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PERF_TSV="$HIST/perf-$STAMP.tsv"
 LOG="$HIST/run-$STAMP.log"
@@ -63,7 +76,7 @@ for ex in "${EXAMPLES[@]}"; do
   shape="$(example_shape "examples/$ex")"
   # tui/webview/fyne: no throughput metric, and hyperfine cold-start would hang on
   # an input/window-waiting binary. Skip the throughput harness (build is already
-  # exercised by build-sweep; run by run-sweep's pty/xvfb smoke).
+  # exercised by examples-sweep's BUILD + RUN pty/xvfb smoke).
   case "$shape" in
     tui|webview|fyne) say "  -- $ex ($shape: build/cold-start only — no throughput metric; skipped) --"; SKIPPED="$SKIPPED $ex($shape)"; continue;;
   esac

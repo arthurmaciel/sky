@@ -127,7 +127,57 @@ build_set() {
 
 # ── run_set / perf_set: identical to build_set ───────────────────────────────
 # No shape exclusion — tui (pty) / webview (xvfb) / live (browser round-trip) all
-# RUN headless now. perf_set is the same set; perf-sweep chooses sensible metrics
-# per shape (throughput only for server/live).
+# RUN headless now. perf_set is the same set; examples-perf-sweep chooses sensible
+# metrics per shape (throughput only for server/live).
 run_set()  { build_set; }
 perf_set() { build_set; }
+
+# ── equiv_mode <dir>: DERIVE the Go≡Rust equivalence mode from the shape ─────
+# The equivalence mode says HOW examples-sweep proves the Rust output matches Go.
+# It is DERIVED from example_shape so an author-added example auto-classifies with
+# NO manual step — the same non-hardcoded discipline as build_set:
+#   Go-FFI / out-of-scope → none (does not build on --target rust → nothing to compare)
+#   cli      → stdout   (run BOTH backends, byte-diff normalized stdout)
+#   server   → body     (compare no-param GET-route response bodies; see exercise_server_equiv)
+#   live     → scenario (run the SAME web-verify scenario against BOTH binaries)
+#   tui      → pty      (both drive the runtime without panic — NOT cell-identical)
+#   webview  → none     (opens a window — no comparable output)
+#   fyne     → none     (Go-FFI GUI — does not build on --target rust)
+#
+# Then an OVERRIDE from equiv-classification.tsv wins if the example is listed
+# there (the .tsv is overrides-on-top-of-derived, NOT a full classification — a
+# small file of exceptions + reasons, e.g. a non-deterministic cli downgraded to
+# `none`). The override's mode is taken verbatim; derivation guarantees coverage,
+# so a brand-new example never needs a .tsv line at all.
+equiv_mode() {
+  local dir="$1" base over
+  base="$(basename "$dir")"
+  # OVERRIDE (column 2 of the .tsv, keyed by basename) takes precedence.
+  if [ -f "$EQUIV_TSV" ]; then
+    over="$(awk -v k="$base" '!/^#/ && $1==k {print $2; exit}' "$EQUIV_TSV" 2>/dev/null)"
+    [ -n "$over" ] && { printf '%s\n' "$over"; return 0; }
+  fi
+  # DERIVE from shape.
+  if is_out_of_scope "$dir"; then printf 'none\n'; return 0; fi
+  case "$(example_shape "$dir")" in
+    cli)     printf 'stdout\n'   ;;
+    server)  printf 'body\n'     ;;
+    live)    printf 'scenario\n' ;;
+    tui)     printf 'pty\n'      ;;
+    webview) printf 'none\n'     ;;
+    fyne)    printf 'none\n'     ;;
+    *)       printf 'none\n'     ;;
+  esac
+}
+
+# equiv_override_reason <dir> → the .tsv reason column for an overridden example
+# (empty when the example is not overridden). Used for the NOTE column.
+equiv_override_reason() {
+  local base; base="$(basename "$1")"
+  [ -f "$EQUIV_TSV" ] || return 0
+  awk -v k="$base" '!/^#/ && $1==k {$1="";$2="";sub(/^[[:space:]]+/,"");print;exit}' "$EQUIV_TSV" 2>/dev/null
+}
+
+# The overrides file (overrides-on-top-of-derived). Resolved relative to REPO so
+# every caller agrees. env.sh sets REPO before this file is sourced.
+EQUIV_TSV="${EQUIV_TSV:-$REPO/runtime-rust/scripts/equiv-classification.tsv}"

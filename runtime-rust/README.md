@@ -717,24 +717,40 @@ lower is better except throughput): binary size **≤ 2%**, RSS **≤ 15–19%**
 shape, CLI cold-start **≤ 20%**, throughput **≥ 88%**. The `live.rss` envelope +
 the SSE patch-latency leg are pending a re-baseline on a quiet (non-swapping) host.
 
-### Top-level `examples/[0-9]*` on `--target rust`
+### Top-level `examples/*` — `sky-rust-backend:examples-sweep`
 
-Build-level via `runtime-rust/scripts/rust-sweep.sh` (32/32 in-scope examples build) — covering
-CLI, FFI, `Std.Db`/`Auth`/`Config`, Sky.Http.Server, Sky.Live, Sky.Tui,
-Sky.Webview, and the multibackend entry model (`24-tui-kitchen-sink`).
+The cornerstone gate: ONE pass that **builds** each in-scope example on
+`--target rust`, **runs** it headless per shape, and asserts the Rust output
+**matches the Go reference** per the example's equiv mode — emitting a
+`BUILD · RUN · EQUIV` table (folds in the old build-sweep + run-sweep + equiv-sweep).
+The example set is DERIVED (`build_set` in `scripts/lib/examples.sh` — every
+`examples/` dir minus Go-FFI), so a new author example auto-includes; the equiv
+mode is DERIVED from shape (`equiv-classification.tsv` holds overrides only). The
+per-shape "exercise a binary" logic is the shared SSOT `scripts/lib/checks.sh`,
+consumed by both this sweep and the run-side. Night-gated 22:00–08:00
+America/São_Paulo (`SKY_SWEEP_FORCE=1` overrides); `SKY_SWEEP_BUILD_ONLY=1` /
+`SKY_SWEEP_NO_EQUIV=1` for faster partial runs.
 
-**Out of scope** (`OUT_OF_SCOPE` in `rust-sweep.sh`): `02 03 05 06 08 11 13 25 27
-29 34 36 37 38`:
+**Latest full run (2026-06-16): 37 green · 0 red · 1 amber.** Every example
+**BUILD ok + RUN ok**; equivalence by mode:
 
-- Go-package→Rust-native FFI (`02, 03, 05, 08, 13`): import gorilla/mux,
-  stripe-go, google/uuid, godotenv — refused clean at canonicalise (Rust FFI
-  targets Rust crates; see the **Project status** table, 🚫 Go-package row).
-- `11` Fyne GUI; `06` JSON-pipeline decoder (the `Box<dyn FnOnce>` chain).
-- `27` multi-session-chat — blocked on the `Db.getString`-on-`any`/Dict-row
-  codegen gap, not on pub/sub.
-- composite multi-app `34, 36, 37, 38` — need anon-struct field-method access,
-  not yet emitted; `25/29` are console/spike shapes covered by the dedicated
-  `runtime-rust/tests/sky/` fixtures.
+| Mode | N | Proves | Examples |
+|---|---|---|---|
+| `equiv-stdout` | 7 | Go & Rust byte-identical stdout + exit code | 01, 04, 06, 14, 20, `simple`, `test_pkg` |
+| `equiv-body` | 4 | byte-identical HTTP response bodies over each comparable GET route | 15 (4 routes), 30, 32, 33 |
+| `equiv-scenario` | 13 | same Playwright browser round-trip passes on **both** backends (APP behaviour, not a DOM diff) | 09, 10, 12, 16–19, 25–28, 34, 37 |
+| `equiv-pty` | 5 | both drive the Sky.Tui runtime without panic (NOT cell-identical) | 21–24, 38 |
+| `equiv-serve` | 1 | both boot + serve (no comparable GET route to byte-compare) | 36 |
+| `n/a` | 6 | no Go comparison possible (webview stub / nondeterministic / Rust-FFI) | 02, 07, 29, 31, 35, `skyshop-rs` |
+| `go-ref-broken` (amber) | 1 | the **Go reference itself** fails — NOT a Rust divergence | 00 (upstream `T1` Go-codegen regression) |
+
+`go-ref-broken` is **amber, never red** — it flags an upstream Go-side break, not a
+Rust failure. Two divergences the sweep keeps visible (filed, neither red): the
+`Std.Log.*` stdout-prefix gap on `07` (Rust omits Go's `TIMESTAMP LEVEL` prefix —
+the `07`/`35` cli are pinned `n/a` so the gap shows as a note, not a silent
+auto-downgrade), and the `00` upstream T1 Go build break. Performance is the
+sibling `sky-rust-backend:examples-perf-sweep` (Rust-vs-Go throughput / RSS /
+binary-size, same night gate).
 
 ---
 

@@ -43,10 +43,13 @@ done
 echo "  ✅ No Go artifacts detected"
 
 echo ""
-echo "=== 6. All-example --target rust sweep (scoreboard) ==="
-# build-sweep.sh bins every in-scope example (build_set) + prints a PASS/FAIL
-# verdict; a non-zero exit means in-scope build failures (we surface, don't abort).
-runtime-rust/scripts/build-sweep.sh || echo "  ⚠ sweep shows in-scope failures — see the scoreboard path above"
+echo "=== 6. All-example --target rust sweep (BUILD only) ==="
+# examples-sweep.sh bins every in-scope example (build_set) + prints a PASS/FAIL
+# verdict; a non-zero exit means in-scope failures (we surface, don't abort).
+# BUILD_ONLY keeps this verify fast + go-free; FORCE bypasses the night gate (this
+# verify is run on demand, not on a schedule).
+SKY_SWEEP_BUILD_ONLY=1 SKY_SWEEP_FORCE=1 runtime-rust/scripts/examples-sweep.sh \
+  || echo "  ⚠ sweep shows in-scope failures — see the table path above"
 
 echo ""
 echo "=== All checks passed ==="

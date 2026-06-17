@@ -2,8 +2,8 @@
 # runtime-rust/scripts/lib/env.sh — SINGLE SOURCE OF TRUTH for the Rust-backend
 # sweep command env. SOURCE this (never execute it): `source "$(dirname "$0")/lib/env.sh"`.
 #
-# Every sweep runner (build / run / web / perf / equiv) and the wrappers
-# (build-sweep / keep-go-parity) source this so the env gotchas live in ONE place
+# Every sweep runner (examples-sweep / examples-perf-sweep) and the wrappers
+# (keep-go-parity) source this so the env gotchas live in ONE place
 # and can't drift. Any VERIFIED speed improvement is added HERE so every skill
 # inherits it automatically (CLAUDE.md directive).
 #

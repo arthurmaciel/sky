@@ -64,28 +64,58 @@ iteration and has burned past sessions.
 
 ### Sweep tooling: single source of truth (no duplication, no drift)
 
-Run verification through the **`sky-rust-backend:*` skills** (build-sweep / run-sweep
-/ perf-sweep / keep-go-parity), NEVER the raw runner scripts — the skills are the
-agent-facing interface. The runners live ONLY under `runtime-rust/scripts/` (no
-Rust script at repo-root `scripts/`). build-sweep carries Go≡Rust EQUIVALENCE
-(the old equiv-sweep, folded in) and run-sweep carries the live/web browser
-round-trip (the old web-sweep, folded in).
+Run verification through the **`sky-rust-backend:*` skills** (examples-sweep /
+examples-perf-sweep / keep-go-parity), NEVER the raw runner scripts — the skills
+are the agent-facing interface. The runners live ONLY under
+`runtime-rust/scripts/` (no Rust script at repo-root `scripts/`).
+
+**Sweep taxonomy (consolidated).** ONE sweep does build + run + equivalence:
+- **examples-sweep** (`examples-sweep.sh`) — the cornerstone correctness gate.
+  Per in-scope example it BUILDS (`--target rust` + cargo), RUNS it headless per
+  shape, AND asserts Go≡Rust EQUIVALENCE, emitting a per-example **BUILD·RUN·EQUIV**
+  table. Folds the former build-sweep + run-sweep + equiv-sweep + web-sweep into
+  one. GREEN row = BUILD ok AND RUN ok AND EQUIV ∈ {equiv-*, n/a, amber
+  go-ref-broken}; RED = any *-fail / panic / hang / noserve / notty / DIFFER.
+- **examples-perf-sweep** (`examples-perf-sweep.sh`, helper `rust-perf.sh`) —
+  Rust-vs-Go cold-start / RSS / binsize / throughput + regression report.
+
+**Night policy.** BOTH sweeps are gated to **22:00–08:00 America/Sao_Paulo** (slim
+shared box) via `night_guard` in `lib/checks.sh`. Outside the window they print
+`deferred: <sweep> runs 22:00–08:00 …` and exit 2; **`SKY_SWEEP_FORCE=1`**
+overrides (and also downgrades the macOS-only mem-guard preflight to a WARN, for a
+host where mem-guard can't run). `keep-go-parity.sh run` forces past the gate.
+
+**Derived equiv mode.** The equiv mode is DERIVED from `example_shape` by
+`equiv_mode` in `lib/examples.sh` (cli→stdout, server→body, live→scenario,
+tui→pty, webview/fyne/Go-FFI→none), so an author-added example AUTO-CLASSIFIES
+with no manual step. `equiv-classification.tsv` is **OVERRIDES-ONLY** (a small
+file of exceptions + reasons), NOT a full classification — there is no
+forced-coverage gate. A stdout-mode determinism auto-probe (run Go twice; unstable
+stdout → `n/a`) and a per-route body-determinism probe stop false DIFFERs.
+
+**Swarm-fix after sweep.** Any RED example (Rust-side build/run/equiv failure —
+NOT amber `go-ref-broken`, which is an upstream Go bug) is root-caused + fixed
+in-boundary via **sky-rust-backend:autonomous-swarm**, adhering to the README
+principles, AFTER the full sweep (a complete RED list lets the swarm batch related
+fixes). Each fix passes the pre-final code gate + adds a pre-fix-failing
+regression fixture.
 
 Three shared files under `runtime-rust/scripts/lib/` are the SINGLE SOURCE OF TRUTH
 every runner sources — duplicating any across runners is forbidden:
 - **`env.sh`** — the command env header: `PATH`, `CARGO_TARGET_DIR`, `RUSTC_WRAPPER=sccache`,
   `CARGO_INCREMENTAL=0` (mandatory — see above), `SKY_BIN`. **Any verified speed
   improvement is added HERE so every skill inherits it automatically.**
-- **`examples.sh`** — the in-scope example manifest: the build / run / perf sets
-  and the rule for what counts as a web (Sky.Live/Server) example. When
-  sync-with-upstream lands new examples — or we add fixtures as Go-parity tests —
-  update ONLY this file; all sweeps follow.
+- **`examples.sh`** — the in-scope example manifest: `build_set`/`run_set`/
+  `perf_set` (all DERIVED from disk), `is_web_example`, `example_shape`, and
+  `equiv_mode` (DERIVED + tsv overrides). When sync-with-upstream lands new
+  examples — or we add fixtures as Go-parity tests — update ONLY this file.
 - **`checks.sh`** — the per-shape "exercise an already-built binary" functions
   (`exercise_cli` / `exercise_server` / `exercise_live` / `exercise_tui` /
-  `exercise_webview`) + the shared helpers (`http_responds`, `free_port`,
-  `scenario_for`, `reap`, `$PANIC_RE`, the browser-stack probe). run-sweep
-  exercises the RUST binary; build-sweep exercises BOTH backends' binaries to
-  assert equivalence. "Did the binary work?" has ONE definition both consume.
+  `exercise_webview` / `exercise_server_equiv`) + the shared helpers
+  (`http_responds`, `free_port`, `scenario_for`, `reap`, `night_guard`,
+  `$PANIC_RE`, the browser-stack probe). examples-sweep's RUN exercises the RUST
+  binary; its EQUIV exercises BOTH backends' binaries to compare. "Did the binary
+  work?" has ONE definition both consume.
 
 Directive: a new speed optimization → `env.sh`; a new/changed test example →
 `examples.sh`; a new/changed binary-exercise → `checks.sh`. Never edit a
@@ -264,10 +294,9 @@ script directly; the skill is just the agent-facing wrapper + procedure.
 
 | Skill | Runner (`runtime-rust/scripts/`) | Does |
 |---|---|---|
-| `sky-rust-backend:build-sweep` | `build-sweep.sh` + `lib/checks.sh` | `sky build --target rust` + `cargo build` over the largest example set, AND assert Go≡Rust EQUIVALENCE per the example's equiv mode (stdout-diff cli / both-pass-scenario live / both-serve server / both-no-crash tui). The Go≡Rust output-parity gate folded into build (was the separate equiv-sweep). |
-| `sky-rust-backend:run-sweep` | `run-sweep.sh` + `lib/checks.sh` + `web-verify.mjs` | build + RUN each runnable example (cli no-panic; server/live boots + serves; live drives the browser ROUND-TRIP — hard-fail "click is a no-op", folded the old web-sweep; tui pty; webview xvfb) |
-| `sky-rust-backend:perf-sweep` | `perf-sweep.sh` | Rust-vs-Go cold-start/RSS/binsize/throughput + regression report |
-| `sky-rust-backend:keep-go-parity` | `keep-go-parity.sh` | orchestrate sync → warranted sweeps (planner: `snapshot`/`plan`) |
+| `sky-rust-backend:examples-sweep` | `examples-sweep.sh` + `lib/checks.sh` + `web-verify.mjs` | The cornerstone gate. ONE sweep: per in-scope example BUILD (`--target rust` + cargo) · RUN headless per shape (cli no-panic / server+live boot+serve / live browser ROUND-TRIP / tui pty / webview xvfb) · EQUIV Go≡Rust per DERIVED mode (stdout-diff cli / body-diff server / both-pass-scenario live / both-no-crash tui). Emits a BUILD·RUN·EQUIV table. Folds the old build/run/equiv/web sweeps. Night-gated. |
+| `sky-rust-backend:examples-perf-sweep` | `examples-perf-sweep.sh` (helper `rust-perf.sh`) | Rust-vs-Go cold-start/RSS/binsize/throughput + regression report. Night-gated. |
+| `sky-rust-backend:keep-go-parity` | `keep-go-parity.sh` | orchestrate sync → examples-sweep (always) → examples-perf-sweep (warranted) → swarm-fix RED examples (planner: `snapshot`/`plan`/`run`) |
 | `sky-rust-backend:sync-with-upstream` | — (agent-driven git runbook) | ingest `anzellai/sky` upstream into `feat/runtime-rust` |
 | `sky-rust-backend:update-docs` | — (agent-driven) | commit pending work + refresh `runtime-rust/README.md` |
 | `sky-rust-backend:ffi-audit` | `ffi_audit.py` | measure Sky→Rust auto-FFI coverage across a ~50-crate sample |
