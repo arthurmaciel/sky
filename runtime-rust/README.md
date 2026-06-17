@@ -731,8 +731,8 @@ consumed by both this sweep and the run-side. Night-gated 22:00–08:00
 America/São_Paulo (`SKY_SWEEP_FORCE=1` overrides); `SKY_SWEEP_BUILD_ONLY=1` /
 `SKY_SWEEP_NO_EQUIV=1` for faster partial runs.
 
-**Latest full run (2026-06-16): 37 green · 0 red · 1 amber.** Every example
-**BUILD ok + RUN ok**; equivalence by mode:
+**Latest full run (2026-06-17, clean-slate rebuild): 36 green · 1 red · 0 amber.**
+Every example **BUILD ok + RUN ok**; equivalence by mode:
 
 | Mode | N | Proves | Examples |
 |---|---|---|---|
@@ -742,15 +742,50 @@ America/São_Paulo (`SKY_SWEEP_FORCE=1` overrides); `SKY_SWEEP_BUILD_ONLY=1` /
 | `equiv-pty` | 5 | both drive the Sky.Tui runtime without panic (NOT cell-identical) | 21–24, 38 |
 | `equiv-serve` | 1 | both boot + serve (no comparable GET route to byte-compare) | 36 |
 | `n/a` | 6 | no Go comparison possible (webview stub / nondeterministic / Rust-FFI) | 02, 07, 29, 31, 35, `skyshop-rs` |
-| `go-ref-broken` (amber) | 1 | the **Go reference itself** fails — NOT a Rust divergence | 00 (upstream `T1` Go-codegen regression) |
+| `DIFFER` (red) | 1 | a real Go≡Rust stdout divergence | 00 (see below) |
 
-`go-ref-broken` is **amber, never red** — it flags an upstream Go-side break, not a
-Rust failure. Two divergences the sweep keeps visible (filed, neither red): the
-`Std.Log.*` stdout-prefix gap on `07` (Rust omits Go's `TIMESTAMP LEVEL` prefix —
-the `07`/`35` cli are pinned `n/a` so the gap shows as a note, not a silent
-auto-downgrade), and the `00` upstream T1 Go build break. Performance is the
-sibling `sky-rust-backend:examples-perf-sweep` (Rust-vs-Go throughput / RSS /
-binary-size, same night gate).
+**`00`'s Go reference now builds, so the comparison runs.** With the current
+working tree `00-standard-libs` builds + runs 131/131 on `--target go` (its `T1`
+build error is addressed by an in-progress fix in the shared Go codegen —
+`src/Sky/Build/Compile.hs`, **outside** this Rust-backend work and not part of these
+commits). That unmasks `00`'s equiv comparison, which surfaces the Rust-side
+`DIFFER` below; if the Go reference stops building, `00` reverts to amber
+`go-ref-broken` (never a Rust red). `00`'s **Rust** BUILD + RUN are green
+independently.
+
+**The one real red — `00` — is a Rust eager-effect divergence (filed, NOT hidden).**
+`Sky/Test.sky` does `_ = List.map (\(n,_) -> println …) passing` — a list of
+`println` **Tasks built and discarded, never run**. Go's `println` is a deferred
+Task → no output (summary only). Rust's `log_*` run their I/O **eagerly at call
+time** (before the returned Task is awaited), so the discarded map prints the 131
+`ok` lines. The proper fix is a Rust soundness change — defer the effect into the
+Task body AND make codegen auto-`task_run` a discarded `let _ = <Task>` (today it
+relies on the eager print) — high blast radius, scoped for a focused pass. (The
+`#5` `Std.Log` format gap is **closed**: `07`/`35` stay `n/a` only for their
+nondeterministic timestamp / Dict-order, not a Log parity gap.)
+
+### Performance — `sky-rust-backend:examples-perf-sweep`
+
+Rust-vs-Go cold-start · RSS · binary-size · throughput, gated by CV-padded ratio
+thresholds (`rust-perf.thresholds`); **informational, never blocks**.
+**Baseline 2026-06-17 — throughput is a decisive Rust win:**
+
+| Example | Go req/s | Rust req/s | Rust/Go |
+|---|---|---|---|
+| 25-sky-console | 385 | 1846 | **4.80×** |
+| 27-multi-session-chat | 1500 | 6863 | **4.58×** |
+| 10-live-component | 1681 | 6701 | **3.99×** |
+| 34-multi-tier-console | 2265 | 6902 | **3.05×** |
+| 18-job-queue | 2270 | 6840 | **3.01×** |
+| 28-streaming-chat | 2391 | 6892 | **2.88×** |
+| 15-http-server · 30-sse · 32-relay · 33-ws | ~7.8k | ~10.6k | **~1.35×** |
+
+Live `live_event` / `live_warm` latency + `sse_eps` / `ws_eps` all PASS. The
+`rss` / `binsize` / `coldstart` rows show mixed PASS/FAIL against deliberately
+tight ratio thresholds on the tiny CLI examples (Go's small baseline inflates the
+ratio) — informational only. Probe artifacts: `36` throughput=0 (`/` 404s under
+auth), `09` go=0 (unmeasured). Both sweeps are night-gated (22:00–08:00
+America/São_Paulo; `SKY_SWEEP_FORCE=1` overrides) and CI-mirrored (below).
 
 ---
 

@@ -26,6 +26,7 @@
 
 # ── Non-deterministic cli — derived `stdout` would false-DIFFER ──────────────
 35-composite-generics   none   non-deterministic cli: prints a Time.now `Generated at` timestamp AND Dict.toList iteration order differs between backends. The stdout determinism auto-probe would catch the timestamp, but pin it here so the intent is explicit.
+02-go-stdlib       none   non-deterministic cli: prints a wall-clock `Current time:` (HH:MM:SS) AND makes a live HTTP call whose body length varies — a Go-stdlib-FFI demo with no stable Rust-comparable stdout. The stdout determinism auto-probe USUALLY flags it, but sub-second time stability can fool the 2-probe window into a false DIFFER; pin `none` so it is deterministically excluded.
 
 # ── Rust-FFI app — no Go reference exists to compare against ──────────────────
 skyshop-rs         none   examples/rust/skyshop-rs — Rust-FFI app (firestore/stripe/firebase wrapper crates, target=rust); does NOT build on Go — nothing to compare. examples-sweep builds+runs it on Rust alone.
