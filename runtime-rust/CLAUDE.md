@@ -355,8 +355,8 @@ the roadmap and future plan, the soundness/decision ledger, the glossary —
 lives in **`README.md`** (structured per the `prune-archaeology` house style:
 tables / bullets / `[ ]`-todo-lists / schemas over prose). Do NOT create new
 standalone root `.md` files; fold the content into `README.md`. (`docs/` subdir
-files — `docs/adr/`, escalated-decisions, etc. — are exempt; this rule is the
-root only.) The `update-docs` skill enforces this.
+files — `docs/adr/` (kept for future ADRs), the surviving specs, etc. — are
+exempt; this rule is the root only.) The `update-docs` skill enforces this.
 
 General skills enabled:
 - `/grill-me` — stress-test plans and designs
@@ -418,6 +418,17 @@ log** — hold it to the same bar as a code review:
 | **Link, don't duplicate** | Point to the spec/skill/memory holding the detail; keep entries to the distilled, transferable insight. |
 
 ### Foundational understanding
+- **Sky container/value runtime types stay TRANSPARENT ALIASES, not newtypes.**
+  `SkyDict<T> = HashMap<String, T>` (and `SkyString`/`SkyList`) are plain `type`
+  aliases, NOT `#[repr(transparent)]` newtypes. Codegen emits raw `HashMap<K,V>`
+  for `Dict` and never references `SkyDict` (the alias is runtime-internal), and
+  the no-`dyn Any`/concrete-types thesis is already satisfied by `HashMap` (a
+  concrete type), so a newtype is pure cost (143 `HashMap` sites across 15 files,
+  every `dict_*`/`db_query`/`LiveReq`/`SkyRow` signature) for no load-bearing
+  benefit. Promote to a `#[repr(transparent)]` newtype ONLY (as its own swept
+  change) if a real trait-coherence conflict, a shipped Dict-vs-internal-HashMap
+  type-confusion bug, or a needed Dict invariant materialises. (Was ADR 0001 —
+  accepted; folded here when `docs/adr/` was pruned.)
 - **A wrapper `fn(..) -> Result<T, String>` binds as a SYNC Sky `Result`, not a
   `Task`.** So a thin wrapper hiding an async runtime lets Sky call sites stay
   synchronous (no `Cmd.perform` re-threading). This is what makes async/framework
