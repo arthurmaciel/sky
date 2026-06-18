@@ -73,13 +73,13 @@ $ sky install                                  # regen FFI after rm -rf .skycach
 
 # Static / cross / allocator flags (see "Static & cross compilation" below)
 $ sky build src/Main.sky --backend rust --static                 # fully-static binary (musl Linux / crt-static Windows)
-$ sky build src/Main.sky --backend rust --platform linux-musl    # cross-compile (alias or raw triple)
+$ sky build src/Main.sky --backend rust --target x86_64-unknown-linux-musl  # cross-compile to a target triple
 $ sky build src/Main.sky --backend rust --mimalloc               # mimalloc global allocator (faster; +RSS)
 $ sky build src/Main.sky --backend rust --static --system-alloc  # static WITHOUT mimalloc (lean RSS; ~11x slower — warns)
 ```
 
 Precedence **CLI > env > `sky.toml`**; the env mirrors are `SKY_RUST_STATIC` /
-`SKY_RUST_TARGET` / `SKY_RUST_ALLOC`. `--static` / `--platform` / `--mimalloc`
+`SKY_RUST_TARGET` / `SKY_RUST_ALLOC`. `--static` / `--target` / `--mimalloc`
 compose with the backend selector `--backend rust` (they never clash with it).
 
 ---
@@ -440,7 +440,7 @@ rewrite when that lands.
 
 ```toml
 [project]
-target = "rust"                   # default "go"; overridden by --target
+backend = "rust"                   # default "go"; overridden by --backend
 
 ["rust.dependencies"]
 uuid  = "1.16.0"                  # crates.io — version string
@@ -450,7 +450,7 @@ mylib = { git = "https://github.com/org/mylib", rev = "abc123" }
 [rust]
 sqlx_tls  = "rustls"             # default; alt: "native-tls"
 static    = true                 # opt-in full-static binary (musl Linux / crt-static Windows). Default false.
-target    = "linux-musl"         # cross-compile platform (alias or raw triple). "" = host. Orthogonal to static.
+target    = "x86_64-unknown-linux-musl"  # cross-compile target triple. "" = host. Orthogonal to static/backend.
 allocator = "mimalloc"           # "" auto (mimalloc on musl/static, system on dynamic) | "system" | "mimalloc"
 
 [live]                            # Sky.Live apps
@@ -736,7 +736,7 @@ Rust reads like hand-written code when inspected. `SKY_RUST_FMT=0` skips it.
 ## Static & cross compilation
 
 Opt-in. The default build is unchanged (glibc-dynamic, host platform, system
-allocator). `--static` / `--platform` / `[rust] static` / `[rust] target` /
+allocator). `--static` / `--target` / `[rust] static` / `[rust] target` /
 `[rust] allocator` turn on the modes below; non-opt-in builds are byte-identical
 to before.
 
@@ -840,18 +840,19 @@ Release binary sizes (KiB) across every statically-compilable example:
 
 ### Cross compilation
 
-`[rust] target` / `--platform` (alias or raw triple) selects the **output
-platform**, orthogonal to `--static`: `--platform linux-gnu` alone is a dynamic
-Linux cross-build; `--static --platform linux-musl` is a static Linux artifact
-from any host.
+`--target <triple>` / `[rust] target` selects the **output platform** as a raw
+Rust target triple (no aliases — it matches `cargo --target` exactly), orthogonal
+to `--static`: `--target x86_64-unknown-linux-gnu` alone is a dynamic Linux
+cross-build; `--static --target x86_64-unknown-linux-musl` is a static Linux
+artifact from any host. (`--target` is distinct from `--backend`, which selects
+the codegen backend go/rust.) Common triples:
 
-| Alias | Triple |
+| Triple | Platform |
 |---|---|
-| `linux-musl` | `x86_64-unknown-linux-musl` |
-| `linux-musl-arm64` | `aarch64-unknown-linux-musl` |
-| `linux-gnu` | `x86_64-unknown-linux-gnu` |
-| `linux-gnu-arm64` | `aarch64-unknown-linux-gnu` |
-| `<raw triple>` | passthrough |
+| `x86_64-unknown-linux-musl` | Linux x86_64, static-capable |
+| `aarch64-unknown-linux-musl` | Linux arm64, static-capable |
+| `x86_64-unknown-linux-gnu` | Linux x86_64, glibc |
+| `aarch64-unknown-linux-gnu` | Linux arm64, glibc |
 
 Toolchain: `rustup target add <triple>` + a musl C cross-linker (`musl-tools` on
 Linux x86_64; `brew install FiloSottile/musl-cross/musl-cross` on macOS). `sky`

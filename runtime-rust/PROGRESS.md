@@ -17,6 +17,32 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-18 — Rename: `--target`→`--backend` (backend); `--target`=cross triple
+
+**Why.** The fork introduced `--target` + `CompileTarget` in the founding Rust
+commit (`42e67992`); upstream (anzellai/sky) has no backend flag at all — verified
+fork-only. So `--target` was overloaded onto two axes (backend vs OS/arch). Renamed
+to match Rust conventions; nothing upstream to conflict with.
+
+- **Backend selector:** `--target rust` → **`--backend rust`**; `[project] target`
+  → `[project] backend`; Haskell `CompileTarget`→`Backend`, `Target{Go,Rust}`→
+  `Backend{Go,Rust}`, `parseCompileTarget`/`parseTarget`→`parseBackend`.
+- **Cross-compile:** `--platform <alias>` → **`--target <raw triple>`**;
+  `[rust] target` now a raw triple; `SKY_RUST_TARGET` unchanged. **Aliases
+  DROPPED** (`resolvePlatformAlias` deleted) — raw triples match `cargo --target`,
+  are self-documenting, and cross-compilation already requires the triple.
+- **Migration guard:** old `--target rust|go` now ERRORS with a hint (not silently
+  stripped → default-Go build).
+- **Scope (option 1):** all functional code (GHC gated the 12 `.hs` files), 69
+  fixture `sky.toml`, CI scripts/workflows, plugin skills, `.sky` comments,
+  `examples/rust/skyshop-rs`, current docs. Dated `superpowers/` archaeology left
+  as-is.
+
+**Verified.** `--backend rust` + `[project] backend=rust` build Rust; `--target
+<triple>` cross-builds; old `--target rust` errors; `--static`/`--mimalloc`
+compose. **Affected:** `app/Main.hs`, `src/Sky/Sky/Toml.hs`, +10 `.hs`, 69 toml,
+scripts, skills, docs. Commit `b66c25ec`.
+
 ## 2026-06-18 — Opt-in full-static binaries + cross-compilation + release strip
 
 **What.** Added an opt-in static-linking + cross-compile path to `--backend rust`,
