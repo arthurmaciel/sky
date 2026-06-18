@@ -320,10 +320,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      # rg — the perf sweep's example_shape (lib/examples.sh) uses ripgrep.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      # Reclaim aggressively (mirror the sweep job): release builds of the Rust
+      # dep tree + the Go reference builds + go-build cache are heavy.
       - name: Free disk space (Linux)
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/share/swift || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /opt/microsoft /opt/google/chrome /opt/az || true
           sudo swapoff -a || true; sudo rm -f /swapfile /mnt/swapfile || true
+          sudo apt-get clean || true
+          df -h /
       - uses: haskell-actions/setup@v2
         with:
           ghc-version: '9.6.7'
@@ -358,14 +367,22 @@ jobs:
           mkdir -p sky-out
           ln -sf "$(cabal list-bin exe:sky)" sky-out/sky
           ./sky-out/sky --version
+      # Pre-warm the RELEASE dep tree (perf builds with `cargo build --release`,
+      # a different/slower target than the sweep's debug build) so the per-example
+      # 900s cargo ceiling isn't blown cold-compiling axum/tokio/sqlx in release.
+      - name: Pre-warm Rust deps (release)
+        run: ( cd runtime-rust && cargo build --release --features full )
       - name: Run perf sweep (informational)
         run: bash runtime-rust/scripts/examples-perf-sweep.sh
+      # Upload EVERYTHING under the perf cache (the TSV, the main run log, AND the
+      # per-example build logs preserved by examples-perf-sweep.sh) + the raw
+      # per-example metric JSONs — so a failure is fully diagnosable from the run.
       - name: Upload perf metrics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: examples-perf-sweep
           path: |
-            ~/.cache/sky/examples-perf-sweep/perf-*.tsv
-            ~/.cache/sky/examples-perf-sweep/run-*.log
+            ~/.cache/sky/examples-perf-sweep/
+            /tmp/rust-perf-*.json
           if-no-files-found: warn

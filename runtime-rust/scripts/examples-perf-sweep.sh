@@ -84,6 +84,12 @@ for ex in "${EXAMPLES[@]}"; do
   OUT="$(SKY_CONSOLE_EMBED=off timeout --kill-after=30 600 bash runtime-rust/scripts/rust-perf.sh "$ex" 2>&1)"; rc=$?
   reap
   printf '%s\n' "$OUT" >> "$LOG"
+  # Preserve the per-example build logs — rust-perf.sh writes FIXED /tmp names
+  # that the next example overwrites, so without this a build failure is not
+  # diagnosable from the uploaded artifact. Copy them under $HIST/<ex>.*.
+  for bl in perf-build-go perf-build-rust-gen perf-build-rust; do
+    [ -f "/tmp/$bl.log" ] && cp -f "/tmp/$bl.log" "$HIST/$ex.$bl.log" 2>/dev/null
+  done
   N="$(printf '%s\n' "$OUT" | grep -E '^[[:space:]]+(rss|coldstart|binsize|throughput|live_warm|live_event|sse_eps|ws_eps|broadcast)[[:space:]]' | tee -a "$LOG" | \
     awk -v ex="$ex" '{
       metric=$1; go=""; rust=""; ratio=""; thr=""; verdict=$NF
