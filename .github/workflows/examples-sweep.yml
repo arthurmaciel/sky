@@ -253,25 +253,30 @@ jobs:
       # FAIL). The .table is fixed-width plain text → fence it to keep alignment.
       # Each matrix job writes its OWN summary, so the run page shows one table
       # per OS. This is the README's job-summary mirror — no commit, no write perms.
+      # This step is COSMETIC — it must NEVER fail the job. `set -o pipefail`
+      # (GitHub's bash default) + `ls … | head -1` raises SIGPIPE on `ls` when
+      # head closes early → the assignment fails → the step (and the job) would
+      # exit 1 EVEN ON A GREEN SWEEP (observed on macOS). `set +e +o pipefail`
+      # and a trailing `|| true` make it incapable of failing the job.
       - name: Job summary (sweep table)
         if: always()
         shell: bash
         run: |
+          set +e +o pipefail
           HIST="$HOME/.cache/sky/examples-sweep"
           table="$(ls -t "$HIST"/sweep-*.table 2>/dev/null | head -1)"
+          verdict="$(grep -h '=== VERDICT:' "$HIST"/run-*.log 2>/dev/null | tail -1 | sed 's/^=== //; s/ ===.*$//')"
           {
             echo "## examples-sweep — ${{ matrix.os }}"
             echo
-            verdict="$(grep -h '=== VERDICT:' "$HIST"/run-*.log 2>/dev/null | tail -1 | sed 's/^=== //; s/ ===.*$//')"
             [ -n "$verdict" ] && { echo "**${verdict}**"; echo; }
-            if [ -n "$table" ]; then
-              echo '```'
-              cat "$table"
-              echo '```'
+            if [ -n "$table" ] && [ -f "$table" ]; then
+              echo '```'; cat "$table"; echo '```'
             else
-              echo "_No sweep table produced — the sweep aborted before rendering it (see the \"Run examples sweep\" step log)._"
+              echo "_No sweep table found (see the \"Run examples sweep\" step log)._"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
       # ── Scoreboard table artifact (always upload, even on a RED verdict) ────
       - name: Upload sweep scoreboard
