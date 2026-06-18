@@ -42,7 +42,13 @@ name: Rust examples sweep
 on:
   push:
     branches: [main, 'feat/**']
+    # Docs-only pushes change no built artefact — skip the (heavy) sweep.
+    # Applies to push/PR triggers only; workflow_dispatch always runs unfiltered.
+    paths-ignore:
+      - '**.md'
   pull_request:
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
 
 # Supersede an in-flight run on the same ref (a newer push wins) — saves runner
