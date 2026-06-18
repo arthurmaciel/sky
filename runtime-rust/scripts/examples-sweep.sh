@@ -279,6 +279,7 @@ run_for() {
     cli)
       if exercise_cli "$bin" "$rl"; then printf 'ok\t\n'
       elif grep -qiE "$PANIC_RE" "$rl"; then printf 'panic\tcli panicked\n'
+      elif is_live_network_cli "$n"; then printf 'skip\tcli makes a live external HTTP call — RUN is network-dependent (flaky CI egress, esp. Windows); not a Rust defect\n'
       else printf 'hang\tcli timed out\n'; fi
       ;;
     tui)

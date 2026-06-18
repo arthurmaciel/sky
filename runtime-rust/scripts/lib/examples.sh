@@ -93,6 +93,22 @@ is_out_of_scope() {
   return 1                                            # every import resolved → in scope
 }
 
+# ── is_live_network_cli <name>: a cli whose RUN makes a LIVE EXTERNAL call ───
+# A cli that issues a real HTTP request to a third-party host (not localhost) has
+# a non-deterministic, network-dependent RUN that can HANG on a CI runner with
+# flaky egress (Windows especially). A hang there is a host/network artifact, NOT
+# a Rust defect (the same binary runs fine where egress is healthy), so its
+# RUN-hang degrades to SKIP (green-neutral) instead of a flaky red. EXPLICIT,
+# documented set — not a heuristic — so it can never silently mask a real hang in
+# a non-network example. 02-go-stdlib (a Go-stdlib-FFI demo) GETs a live URL and
+# is already pinned `n/a` for equiv as "non-deterministic / live HTTP".
+is_live_network_cli() {
+  case "$1" in
+    02-go-stdlib) return 0 ;;
+  esac
+  return 1
+}
+
 # ── is_web_example <dir>: Sky.Live OR Sky.Http.Server (browser-drivable) ─────
 # NB: ripgrep recurses by default — do NOT pass `-r` (that is rg's --replace, not
 # recurse). Comment-stripped (via _shape_match) so prose doesn't false-positive.
