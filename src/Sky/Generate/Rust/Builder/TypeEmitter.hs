@@ -13,7 +13,7 @@ import Data.List (intercalate, sortBy, stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Sky.AST.Canonical as Can
 import Sky.Generate.Rust.Builder.Types (RustTypeDef(..), runtimeOpaqueTypes)
-import Sky.Generate.Rust.Builder.Naming (toCamelCase)
+import Sky.Generate.Rust.Builder.Naming (toCamelCase, mangleTVar, rustVariantName)
 import Sky.Generate.Rust.Builder.TypeRenderer (typeToRustString, flattenArrowType, resultIsTaskTy)
 
 unionsToRustTypes :: Map.Map String String -> String -> String -> Map.Map String Can.Union -> [RustTypeDef]
@@ -36,7 +36,7 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
         -- verbatim (lowercase) to match typeToRustString's TVar rendering and
         -- the generic params already emitted on functions.
         gens = if null uvars then ""
-               else "<" ++ intercalate ", " uvars ++ ">"
+               else "<" ++ intercalate ", " (map mangleTVar uvars) ++ ">"
     in case Map.lookup (skyModName, typeName) runtimeOpaqueTypes of
         -- Registry hit, PLAIN path (`sky_runtime::EmailProvider`):
         -- `pub use sky_runtime::X as <codegenName>;`. The runtime newtype IS the
@@ -48,7 +48,7 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
               -- pub type StdHtmlHtml<msg> = sky_runtime::Html<msg>;). Substitute
               -- the single Sky uvar for the {M} placeholder; the alias IS generic.
               -- [] is dead in practice: a {M} registry entry only pairs with a parametric Sky type.
-              let m = case uvars of (v:_) -> v; [] -> "M"
+              let m = case uvars of (v:_) -> mangleTVar v; [] -> "M"
                   path = substPlaceholder "{M}" m rustPath
               in RAliasDefGen codegenName gens path
           | '<' `notElem` rustPath -> RPubUseAlias codegenName rustPath
@@ -72,7 +72,7 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
     -- are NOT boxed. Construction wraps the arg in Box::new and matches deref it
     -- (ecBoxedCtorFields, consumed by the expr + pattern emitters).
     selfRustName = toCamelCase (modPrefix ++ "_" ++ typeName)
-    firstUVar = case uvars of (v:_) -> v; [] -> "M"
+    firstUVar = case uvars of (v:_) -> mangleTVar v; [] -> "M"
     -- An `any`-typed ADT variant field is Sky's source-level type-erasure escape
     -- hatch, but in these Std.Ui carriers the value is ALWAYS a concrete type
     -- (every construction wraps it). The Rust backend forbids type erasure
@@ -104,7 +104,7 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
         Can.TVar "any" | Just concrete <- anyCarrierField ctorName -> concrete
         _                                                          -> boxIfRecursive t
     ctorToRust (Can.Ctor name _idx _arity argTypes) =
-        (name, if null argTypes then Nothing
+        (rustVariantName name, if null argTypes then Nothing
                else Just (intercalate ", " (map (renderField name) argTypes)))
 
 -- | Substitute all occurrences of `needle` with `replacement` in `haystack`.
@@ -161,7 +161,7 @@ aliasToRustTypeDef recordMap _skyModName modPrefix name (Can.Alias vars ty) = ca
             -- shouldRetry : ShouldRetry e }`) must emit a generic struct so its
             -- fields can reference the var. Type vars kept verbatim to match
             -- typeToRustString's TVar/TAlias-arg rendering.
-            gens = if null vars then "" else "<" ++ intercalate ", " vars ++ ">"
+            gens = if null vars then "" else "<" ++ intercalate ", " (map mangleTVar vars) ++ ">"
         in [RStructDef (toCamelCase (modPrefix ++ "_" ++ name)) gens
               (map (\(n, Can.FieldType _ ft) ->
                        (n, guardBareAny name vars n ft (fieldTypeToRust recordMap ft)))

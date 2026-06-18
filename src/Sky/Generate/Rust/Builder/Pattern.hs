@@ -12,7 +12,7 @@ import Data.List (intercalate)
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as Ann
 import qualified Sky.Sky.ModuleName as ModuleName
-import Sky.Generate.Rust.Builder.Naming (toCamelCase, rustSafeIdent)
+import Sky.Generate.Rust.Builder.Naming (toCamelCase, rustSafeIdent, rustVariantName)
 
 -- | Simple check: does the body match a parameter with list patterns (cons, list)?
 bodyUsesList :: Can.Expr -> Bool
@@ -79,7 +79,7 @@ patternToRustPattern (Ann.At _ pat) = case pat of
             enumName = toCamelCase (modPrefix' ++ "_" ++ ty)
             argStrs = map (\(Can.PatternCtorArg _ _ p) -> patternToRustPattern p) args
             argsRendered = if null argStrs then "" else "(" ++ intercalate ", " argStrs ++ ")"
-        in enumName ++ "::" ++ ctor ++ argsRendered
+        in enumName ++ "::" ++ rustVariantName ctor ++ argsRendered
     _ -> "_"
 
 -- | Decompose a pattern function-argument into:

@@ -815,17 +815,18 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     , "crypto = []"
     , "json = []"
     , "db = []"
+    -- `live` / `redis_store` / `webview` are DECLARED unconditionally (but only
+    -- ENABLED via `default` above under their respective conditions). The
+    -- always-compiled `telemetry.rs` carries `#[cfg(feature = "live")]`, and
+    -- declaring an unused feature is free — without the declaration, rustc's
+    -- `unexpected_cfgs` lint fires on every cfg referencing an undeclared
+    -- feature (22 occ for `feature = "live"` in a non-Live project). Declaring
+    -- redis_store/webview here too future-proofs the same lint if an
+    -- always-copied module later gains one of those gates.
+    , "live = []"
+    , "redis_store = []"
+    , "webview = []"
     ] ++
-    -- Std.Live with `[live] store = "redis"`: gates the copied
-    -- `#[cfg(feature="redis_store")] RedisStore`.
-    [ "redis_store = []" | needsRedis ] ++
-    -- Std.Live: declare the live feature so #[cfg(feature = "live")] in the
-    -- copied runtime files evaluates to true when the project uses Sky.Live.
-    [ "live = []" | needsLive ] ++
-    -- Sky.Webview: declare the webview feature so #[cfg(feature="webview")] in the
-    -- copied webview.rs compiles the REAL wry/tao backend (not the Err stub).
-    -- Enabled by default above when usesWebview (detection model, like Live/Tui).
-    [ "webview = []" | usesWebview uk ] ++
     [ ""
     , "[dependencies]"
     , "tokio = { version = " ++ show (crateVersionFor "tokio") ++ ", features = [" ++ intercalate ", " (map show tokioFeats) ++ "] }"

@@ -71,6 +71,7 @@ import Sky.Generate.Rust.Builder.TypeRenderer
     , isEventArgType
     , flattenArrowType
     , resultIsTaskTy
+    , collectTVars
     )
 import Sky.Generate.Rust.Builder.Kernel
     ( kernelToRust
@@ -83,6 +84,7 @@ import Sky.Generate.Rust.Builder.Naming
     , rustFnName
     , toSnakeCase
     , toCamelCase
+    , mangleTVar
     )
 import Sky.Generate.Rust.Builder.Pattern
     ( patternToRustParam
@@ -842,14 +844,39 @@ rustConcreteLowerToks =
     , "f32", "f64", "bool", "char", "str"
     , "impl", "dyn", "fn" ]
 
+-- | The callee's GENERIC param tokens, as they appear in the RENDERED param
+-- strings. A Sky type-var is rendered UpperCamelCase by `mangleTVar`
+-- (`msg`→`Msg`), which is lexically indistinguishable from a concrete type —
+-- so `isRustTypeVarTok` (lowercase-leading heuristic) can no longer spot them.
+-- Derive the exact set from the callee's solved Can.Type / ctor field types
+-- (the RAW Sky TVars, then mangled to match the rendered strings). The
+-- knownDefSig path uses synthetic `T0`/`T1` tokens that `isRustTypeVarTok`
+-- already catches, so its callees return [] here (no change for them).
+calleeMangledGenTokens :: EmitCtx -> Can.Expr -> Set.Set String
+calleeMangledGenTokens ctx fn =
+    let raw = case fn of
+            Ann.At _ (Can.VarCtor _ _ _ ctorName _) ->
+                maybe [] (concatMap collectTVars) (Map.lookup ctorName (ecCtorFieldTypes ctx))
+            Ann.At _ (Can.VarTopLevel _ name) -> tvarsOfSolved name
+            Ann.At _ (Can.VarLocal name)      -> tvarsOfSolved name
+            _                                 -> []
+    in Set.fromList (map mangleTVar raw)
+  where
+    tvarsOfSolved name = case Map.lookup name (ecSolvedTypes ctx) of
+        Just ty -> collectTVars ty
+        Nothing -> []
+
 -- | Sub-A.13: decide how to emit an empty-collection argument at position i of
 -- a call, given the callee's known parameter-type strings.
 --   * param concrete                  -> turbofish the exact type
 --   * param has a var shared w/ sibling -> bare (Rust infers from the sibling)
 --   * param var appears only here      -> default filler (i64)
 --   * callee unknown / shape unexpected -> bare (Rust infers from the sig)
-emitEmptyArg :: EmitCtx -> Maybe (ParamSrc, [String]) -> Int -> Can.Expr -> String
-emitEmptyArg _ mps i arg =
+-- `genToks` carries the callee's mangled generic-param tokens so a rendered
+-- UpperCamelCase type-var (`Msg`) is recognised as a var rather than misread
+-- as a concrete type (which would wrongly turbofish an unbound generic → E0308).
+emitEmptyArg :: EmitCtx -> Set.Set String -> Maybe (ParamSrc, [String]) -> Int -> Can.Expr -> String
+emitEmptyArg _ genToks mps i arg =
     let kind = case emptyArgKind arg of
             Just k  -> k
             Nothing -> EKList  -- unreachable: only called on empty-ish args
@@ -890,7 +917,8 @@ emitEmptyArg _ mps i arg =
     in case mps of
         Just (src, ps) | i < length ps ->
             let pt   = ps !! i
-                vars = filter isRustTypeVarTok (rustTypeTokens pt)
+                isVarTok tok = isRustTypeVarTok tok || Set.member tok genToks
+                vars = filter isVarTok (rustTypeTokens pt)
                 -- A var is "pinned" only by a DATA sibling param. A closure
                 -- param (impl Fn(..)) that mentions the var does NOT pin it —
                 -- the closure's own param/return may be just as unconstrained
@@ -3063,7 +3091,7 @@ emitDefaultCall ctx fn calleeName args =
             , Just accTy <- foldAccTypeOf ctx (head args), not (hasTypeVars accTy)
             , Ann.At ar _ <- a
                               = exprToRustString (ctx { ecRegionTypes = Map.insert ar accTy (ecRegionTypes ctx) }) a
-            | isEmptyishArg a = emitEmptyArg ctx paramStrs i a
+            | isEmptyishArg a = emitEmptyArg ctx (calleeMangledGenTokens ctx fn) paramStrs i a
             -- An Int literal passed where the callee wants f64 (Sky's numeric-
             -- literal coercion: `Css.pct 100` → `std_css_pct(n: f64)`) must emit
             -- as f64 — Rust does NOT coerce an i64 literal (E0308).

@@ -27,7 +27,7 @@ import Sky.Generate.Rust.Builder.Types
     )
 import Sky.Generate.Rust.Builder.Naming
     ( toCamelCase, toSnakeCase, moduleNameToRust, rustSafeIdent, kernelCtorToRust
-    , anonStructName, rustFnName, disambiguateUserFnName
+    , anonStructName, rustFnName, disambiguateUserFnName, mangleTVar
     )
 import Sky.Generate.Rust.Builder.Kernel (kernelToRust, kernelSigPrefix, splitKernelName)
 import Sky.Generate.Rust.Builder.Pattern
@@ -106,8 +106,8 @@ buildModule ctx0 mod =
                 -- declare the type vars (its field params reference them, e.g.
                 -- shouldRetry : ShouldRetry e) and return the generic struct.
                 gens = if null vars then ""
-                       else "<" ++ intercalate ", " (map (\v -> v ++ ": Clone + PartialEq + std::fmt::Debug + Send + 'static") vars) ++ ">"
-                retTy = structName ++ (if null vars then "" else "<" ++ intercalate ", " vars ++ ">")
+                       else "<" ++ intercalate ", " (map (\v -> mangleTVar v ++ ": Clone + PartialEq + std::fmt::Debug + Send + 'static") vars) ++ ">"
+                retTy = structName ++ (if null vars then "" else "<" ++ intercalate ", " (map mangleTVar vars) ++ ">")
             in if Set.member ctorName existingNames then []
                else [RustFunction ctorName gens (map (\(n, t) -> n ++ ": " ++ t) rustFlds) retTy body]
         prefixItem (RustFunction n g p r b)
@@ -736,7 +736,12 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         -- through a `debug_show`-named helper still propagates.
         bodyStringifies = "basics_error_to_string" `isInfixOf` tdBody
                        || "debug_show" `isInfixOf` tdBody
-        genBound v = v ++ ": Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static"
+        -- `v` is the RAW Sky var (the `v == "any"` wildcard discriminator must
+        -- see it unmangled); only the EMITTED generic-param name is mangled to
+        -- UpperCamelCase (non_camel_case_types). Both decl here and every USE
+        -- via typeToRustString's `Can.TVar` arm route through mangleTVar, so
+        -- decl ≡ use.
+        genBound v = mangleTVar v ++ ": Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static"
                        ++ (if v == "any" && bodyHasDbGet then " + SkyRow" else "")
                        ++ (if bodyStringifies then " + SkyStringify" else "")
         genDecl = if null tvarNames then ""
@@ -760,7 +765,10 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
                    , ecReturnElem = taskElemOf ret
                    , ecEnclosingRet = Just retTy
                    , ecSolvedTypes = Map.union paramTypeEnv (ecSolvedTypes ctx)
-                   , ecGenParams = tvarNames }
+                   -- Mangled to match the rendered DECL (genBound) AND the USE
+                   -- comparison in ExprEmitter's ctor-turbofish gate, which now
+                   -- compares against typeToRustString-rendered (mangled) args.
+                   , ecGenParams = map mangleTVar tvarNames }
         -- NARROW task-wrap: an annotated `() -> Task Error X` whose body resolves
         -- to a kernel that is STRING-shaped in the Rust runtime but Task-shaped in
         -- Go. Per Sky.Core.Pure's note, `uuidV4Kernel : Task = Ffi.kernel "Uuid_v4"`

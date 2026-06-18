@@ -8,6 +8,8 @@ module Sky.Generate.Rust.Builder.Naming
   , rustFnName
   , kernelModulePrefixes
   , disambiguateUserFnName
+  , mangleTVar
+  , rustVariantName
   ) where
 
 import Data.Char (toLower, toUpper, isUpper)
@@ -86,6 +88,43 @@ toSnakeCase (c:cs) = toLower c : go cs
                   | isUpper c = '_' : toLower c : go cs
                   | otherwise = c : go cs
 
+-- | Map a Sky type-variable name to a valid UpperCamelCase Rust GENERIC param
+-- name. Sky type vars are lowercase-leading identifiers (`msg`, `a`, `e`,
+-- `any`, `msg2`); emitting them verbatim as Rust generics
+-- (`SkyCmd<msg>`, `pub enum Retry<e>`) trips `non_camel_case_types` (184 occ).
+-- Uppercasing the first letter and keeping the tail (digits included) yields a
+-- conventional Rust generic (`Msg`, `A`, `E`, `Any`, `Msg2`) while staying
+-- injective over the lowercase-leading var space — so two distinct Sky vars
+-- never collide after mangling.
+--
+-- MUST be applied IDENTICALLY at every generic-param DECLARATION site (the
+-- `<...>` lists + bounds on functions / structs / enums) AND at the `Can.TVar`
+-- USE site in `typeToRustString` — a decl `<Msg>` referenced as `msg` is E0412.
+--
+-- The wildcard `any` mangles to `Any` only when it is a DECLARED generic param
+-- (legal, e.g. `type alias Box any = { value : any }`); the BARE-wildcard `any`
+-- record-field case is rejected upstream by `guardBareAny` BEFORE any rendering,
+-- so mangling here never masks that soundness error. `Any` is a fresh ident in
+-- the generated code (no `use std::any::Any`), so it cannot resolve-clash.
+mangleTVar :: String -> String
+mangleTVar [] = []
+mangleTVar (c:cs) = toUpper c : cs
+
+-- | Normalise a Sky ADT-constructor name to a warning-clean Rust enum variant.
+-- The only offender in practice is the stdlib opaque-token convention
+-- `type Server = Server_OPAQUE` (Sky.Http.Server's Route/Server/Cookie), whose
+-- SCREAMING_SNAKE suffix trips `non_camel_case_types` when emitted verbatim as a
+-- Rust variant. These tokens are phantom — never constructed or matched in user
+-- code — so rewriting the variant name only needs to stay consistent between the
+-- enum DEF and its derived `SkyStringify` match arms (both consume one shared
+-- variant list) plus `kernelCtorToRust`. We rewrite a trailing `_OPAQUE` to a
+-- camel `Opaque`; every other ctor name is left untouched (so real ctors like
+-- `Just` / `Ok` / user variants are byte-identical).
+rustVariantName :: String -> String
+rustVariantName name = case reverse name of
+    'E':'U':'Q':'A':'P':'O':'_':rest -> reverse rest ++ "Opaque"
+    _                                -> name
+
 -- | Anonymous record struct name prefix
 anonStructName :: String -> String
 anonStructName key = toCamelCase ("Anon_" ++ map (\c -> if c == ',' then '_' else c) key)
@@ -137,4 +176,4 @@ kernelCtorToRust modName typeName ctorName =
         ("Sky.Core.Maybe", "Maybe", c) -> "SkyMaybe::" ++ c
         ("Sky.Core.Result", "Result", c) -> "SkyResult::" ++ c
         _ -> let modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
-             in toCamelCase (modPrefix ++ typeName) ++ "::" ++ ctorName
+             in toCamelCase (modPrefix ++ typeName) ++ "::" ++ rustVariantName ctorName

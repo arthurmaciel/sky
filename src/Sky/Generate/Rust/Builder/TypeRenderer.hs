@@ -17,7 +17,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Sky.ModuleName as ModuleName
-import Sky.Generate.Rust.Builder.Naming (toCamelCase)
+import Sky.Generate.Rust.Builder.Naming (toCamelCase, mangleTVar)
 import Sky.Generate.Rust.Builder.Types (runtimeOpaqueTypes)
 
 -- | Flatten a curried arrow type `A -> B -> C` into ([A, B], C) so it renders
@@ -210,11 +210,11 @@ typeToRustString recordMap t = case t of
                   -- generics". Non-generic structs have no free TVars → bare, as before.
                   case nub (concatMap (collectRenderedTVars . Can._fieldType . snd) (Map.toList fields)) of
                       []  -> ""
-                      tvs -> "<" ++ intercalate ", " tvs ++ ">"
+                      tvs -> "<" ++ intercalate ", " (map mangleTVar tvs) ++ ">"
               | otherwise = ""
         in structName ++ gens
     Can.TTuple a b rest -> "(" ++ intercalate ", " (map (typeToRustString recordMap) (a:b:rest)) ++ ")"
-    Can.TVar v -> v
+    Can.TVar v -> mangleTVar v
     Can.TType modName name [] ->
         let modStr = ModuleName._name modName
             modPrefix = if null modStr then "" else map (\c -> if c == '.' then '_' else c) modStr ++ "_"
