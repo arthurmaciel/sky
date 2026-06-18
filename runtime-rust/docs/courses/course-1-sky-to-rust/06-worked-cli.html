@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6 · Worked shape — CLI ×2</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>6 · Worked CLI</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 6</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 6 · whole programs, real output</span>
+  Worked shape — CLI ×2</h1>
+
+  <p class="lede">Theory becomes concrete here. We take two complete CLI programs and
+  show their <strong>actual</strong> emitted Rust — produced by
+  <code>sky build --backend rust</code>, not invented. First the simplest possible
+  effect; then a full TEA-style interactive CLI.</p>
+
+  <div class="callout key"><span class="tag">All code here is real</span>
+  Every Rust block below was copied from <code>sky-out/Rust/src/main.rs</code> after
+  building the example (lightly trimmed for length). Build it yourself and compare.</div>
+
+  <h2><span class="num">A</span>Example 1 — <code>01-hello-world</code></h2>
+  <p class="filetag">examples/01-hello-world/src/Main.sky</p>
+  <pre><code><span class="tok-kw">module</span> Main <span class="tok-kw">exposing</span> (main)
+<span class="tok-kw">import</span> Std.Log <span class="tok-kw">exposing</span> (println)
+
+main =
+    <span class="tok-fn">println</span> <span class="tok-str">"Hello from Sky!"</span></code></pre>
+
+  <p>Its <code>main</code> has type <code>Task Error ()</code> (a bare effect). The
+  emitted Rust:</p>
+  <p class="filetag">examples/01-hello-world/sky-out/Rust/src/main.rs (trimmed)</p>
+  <pre><code><span class="tok-com">// a thin local wrapper forwards into the runtime crate</span>
+<span class="tok-kw">pub fn</span> <span class="tok-fn">log_println</span>(msg: <span class="tok-ty">String</span>) -> <span class="tok-ty">SkyTask</span>&lt;()&gt; {
+    sky_runtime::log::<span class="tok-fn">log_println</span>(msg)
+}
+
+<span class="tok-kw">pub fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyTask</span>&lt;()&gt; {
+    <span class="tok-fn">log_println</span>(<span class="tok-str">"Hello from Sky!"</span>.<span class="tok-fn">to_string</span>())
+}
+
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() {
+    <span class="tok-kw">match</span> <span class="tok-fn">block_on</span>(<span class="tok-fn">sky_main</span>()) {
+        <span class="tok-ty">SkyResult</span>::Ok(_) => (),
+        <span class="tok-ty">SkyResult</span>::Err(e) => {
+            <span class="tok-fn">eprintln!</span>(<span class="tok-str">"{:?}"</span>, e);
+            std::process::exit(<span class="tok-num">1</span>);
+        }
+    }
+}</code></pre>
+
+  <p>Read it top to bottom:</p>
+  <ul>
+    <li>The <code>"Hello from Sky!"</code> literal gains <code>.to_string()</code> (Sky <code>String</code> → Rust <code>String</code>).</li>
+    <li><code>println</code> routed (via <code>kernelToRust</code>, Lesson 5) to <code>log_println</code> — a local wrapper that forwards to <code>sky_runtime::log::log_println</code>.</li>
+    <li><code>main</code>'s <code>Task</code> becomes <code>sky_main() -> SkyTask&lt;()&gt;</code> — a <em>value</em>, not yet run.</li>
+    <li>The real <code>fn main()</code> <strong>drives</strong> it with <code>block_on</code> and turns the <code>SkyResult</code> into an exit code. <em>This</em> is where the effect actually fires.</li>
+  </ul>
+
+  <h2><span class="num">B</span>Example 2 — <code>20-cli-counter</code> (TEA on the CLI)</h2>
+  <p>A real interactive program: type <code>+</code>/<code>-</code>/<code>r</code>/<code>q</code>
+  to drive a counter. It uses <code>Sky.Cli</code> — the same
+  <code>init</code>/<code>update</code>/<code>view</code>/<code>subscriptions</code>
+  shape as Sky.Live, plus <code>onLine</code> mapping each stdin line to a Msg.</p>
+  <p class="filetag">examples/20-cli-counter/src/Main.sky (trimmed)</p>
+  <pre><code><span class="tok-kw">type</span> Msg = Increment | Decrement | Reset | Quit | NoOp
+<span class="tok-kw">type alias</span> Model = { count : <span class="tok-ty">Int</span> }
+
+update msg model =
+    <span class="tok-kw">case</span> msg <span class="tok-kw">of</span>
+        Increment -> ( { model | count = model.count + <span class="tok-num">1</span> }, Cmd.none )
+        Decrement -> ( { model | count = model.count - <span class="tok-num">1</span> }, Cmd.none )
+        Reset     -> ( { count = <span class="tok-num">0</span> }, Cmd.none )
+        Quit      -> ( model, Cmd.perform (System.exit <span class="tok-num">0</span>) (\_ -> NoOp) )
+        NoOp      -> ( model, Cmd.none )
+
+main =
+    Cli.<span class="tok-fn">program</span> { init = init, update = update, view = view
+               , subscriptions = subscriptions, onLine = onLine }
+        |> Task.run</code></pre>
+
+  <h3>The type definitions lower to Rust enums + structs</h3>
+  <pre><code><span class="tok-kw">pub enum</span> <span class="tok-ty">MainMsg</span> { Increment, Decrement, Reset, Quit, NoOp }
+<span class="tok-kw">impl</span> <span class="tok-ty">SkyStringify</span> <span class="tok-kw">for</span> <span class="tok-ty">MainMsg</span> { <span class="tok-com">/* … "Increment".to_string() … */</span> }
+
+<span class="tok-kw">pub struct</span> <span class="tok-ty">MainModel</span> { <span class="tok-kw">pub</span> count: <span class="tok-ty">i64</span> }</code></pre>
+  <p class="src">A Sky <code>type</code> → Rust <code>enum</code>; a record <code>type alias</code> → Rust <code>struct</code> (<code>Int → i64</code>). Each variant also gets a <code>SkyStringify</code> impl (Lesson 2's autoref phase).</p>
+
+  <h3>Each TEA function becomes a Rust function</h3>
+  <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">main_init</span>(_: ()) -> (<span class="tok-ty">MainModel</span>, <span class="tok-ty">SkyCmd</span>&lt;<span class="tok-ty">MainMsg</span>&gt;) { … }
+<span class="tok-kw">pub fn</span> <span class="tok-fn">main_view</span>(model: <span class="tok-ty">MainModel</span>) -> <span class="tok-ty">String</span> {
+    <span class="tok-com">// "count=" ++ String.fromInt model.count ++ …</span>
+    … <span class="tok-fn">string_from_int</span>(model.count) …
+}
+<span class="tok-kw">pub fn</span> <span class="tok-fn">main_on_line</span>(line: <span class="tok-ty">String</span>) -> <span class="tok-ty">MainMsg</span> { <span class="tok-com">/* match String.trim line */</span> }</code></pre>
+
+  <h3>The interesting bit: record update + <code>case</code></h3>
+  <p><code>{ model | count = model.count + 1 }</code> can't mutate in place (Sky is
+  pure), so codegen clones, sets the field, and returns the clone:</p>
+  <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">main_update</span>(msg: <span class="tok-ty">MainMsg</span>, model: <span class="tok-ty">MainModel</span>) -> (<span class="tok-ty">MainModel</span>, <span class="tok-ty">SkyCmd</span>&lt;<span class="tok-ty">MainMsg</span>&gt;) {
+    <span class="tok-kw">match</span> msg {
+        <span class="tok-ty">MainMsg</span>::Increment => (
+            {
+                <span class="tok-kw">let mut</span> __rec = model.<span class="tok-fn">clone</span>();
+                __rec.count = (model.<span class="tok-fn">clone</span>().count + <span class="tok-num">1</span>);
+                __rec
+            },
+            <span class="tok-fn">cmd_none</span>(),
+        ),
+        <span class="tok-ty">MainMsg</span>::Reset => (<span class="tok-ty">MainModel</span> { count: <span class="tok-num">0</span> }, <span class="tok-fn">cmd_none</span>()),
+        <span class="tok-ty">MainMsg</span>::Quit => (
+            model.<span class="tok-fn">clone</span>(),
+            <span class="tok-fn">cmd_perform</span>::&lt;<span class="tok-ty">SkyError</span>, <span class="tok-ty">i64</span>, _, _&gt;(<span class="tok-fn">system_exit</span>(<span class="tok-num">0</span>), |_| <span class="tok-ty">MainMsg</span>::NoOp),
+        ),
+        <span class="tok-ty">MainMsg</span>::NoOp => (model.<span class="tok-fn">clone</span>(), <span class="tok-fn">cmd_none</span>()),
+    }
+}</code></pre>
+  <p>A Sky <code>case</code> → Rust <code>match</code>; <code>Cmd.none → cmd_none()</code>;
+  <code>Cmd.perform (System.exit 0) (\_ -> NoOp) → cmd_perform::&lt;…&gt;(system_exit(0), |_| MainMsg::NoOp)</code>
+  (the lambda becomes a Rust closure).</p>
+
+  <h3>The entry point — and a key contrast with Example 1</h3>
+  <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyResult</span>&lt;<span class="tok-ty">SkyError</span>, ()&gt; {
+    <span class="tok-fn">task_run</span>::&lt;<span class="tok-ty">SkyError</span>, _&gt;(<span class="tok-fn">cli_program</span>(
+        main_init, main_update, main_view, main_subscriptions, main_on_line,
+    ))
+}
+
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() { <span class="tok-fn">sky_main</span>(); }</code></pre>
+
+  <div class="callout why"><span class="tag">Why is this entry different from Example 1?</span>
+  Example 1's <code>main</code> was a bare <code>Task</code>, so <code>sky_main</code>
+  returned a <code>SkyTask</code> value and the real <code>fn main()</code> drove it
+  with <code>block_on</code>. Here the Sky source ends in <code>|&gt; Task.run</code>,
+  so codegen routes <code>Task.run → task_run</code> <em>inside</em> <code>sky_main</code>
+  — it already runs the program and returns a <code>SkyResult</code>. So
+  <code>fn main()</code> just calls it. Same idea (a Task only runs when driven), two
+  surface shapes — decided by whether the Sky source drives it itself.</div>
+
+  <h2><span class="num">C</span>The CLI pattern, generalised</h2>
+  <table>
+    <tr><th>Sky</th><th>Rust</th></tr>
+    <tr><td>a <code>type</code> (union)</td><td>a Rust <code>enum</code> (+ <code>SkyStringify</code>)</td></tr>
+    <tr><td>a record <code>type alias</code></td><td>a Rust <code>struct</code> (<code>Int → i64</code>)</td></tr>
+    <tr><td><code>{ r | f = v }</code> update</td><td><code>{ let mut __rec = r.clone(); __rec.f = v; __rec }</code></td></tr>
+    <tr><td><code>case</code></td><td><code>match</code></td></tr>
+    <tr><td><code>\x -> …</code></td><td>a Rust closure <code>|x| …</code></td></tr>
+    <tr><td>bare <code>Task</code>-typed <code>main</code></td><td><code>sky_main() -> SkyTask</code>, driven by <code>block_on</code> in <code>fn main()</code></td></tr>
+    <tr><td><code>… |&gt; Task.run</code></td><td><code>task_run(…)</code> inside <code>sky_main</code>; <code>fn main()</code> just calls it</td></tr>
+  </table>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. How does codegen lower a Sky record update
+    <code>{ model | count = model.count + 1 }</code>?</div>
+    <button data-ok="1">Clone the record, set the field on the clone, return it — <code>{ let mut __rec = model.clone(); __rec.count = …; __rec }</code></button>
+    <button data-ok="0">Mutate <code>model</code> in place</button>
+    <button data-ok="0">It can't be lowered</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. Why does <code>01-hello-world</code> use <code>block_on</code> in
+    <code>main()</code> but <code>20-cli-counter</code> doesn't?</div>
+    <button data-ok="1">cli-counter ends in <code>|&gt; Task.run</code>, so <code>task_run</code> already drives it inside <code>sky_main</code></button>
+    <button data-ok="0">cli-counter has no effects</button>
+    <button data-ok="0">block_on only works for hello-world</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. A Sky <code>type Msg = Increment | …</code> becomes…</div>
+    <button data-ok="1">a Rust <code>enum MainMsg { Increment, … }</code> (+ a <code>SkyStringify</code> impl)</button>
+    <button data-ok="0">a Rust <code>struct</code></button>
+    <button data-ok="0">a runtime kernel</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>A bare effect (<code>main = println …</code>) → <code>sky_main() -> SkyTask&lt;()&gt;</code> driven by <code>block_on</code> in <code>fn main()</code>.</li>
+      <li>A TEA CLI lowers each piece: <code>type</code>→<code>enum</code>, record alias→<code>struct</code>, <code>case</code>→<code>match</code>, record update→clone-set-return, lambda→closure.</li>
+      <li><code>|&gt; Task.run</code> moves the "drive" inside <code>sky_main</code> (<code>task_run</code>), so <code>fn main()</code> just calls it — the entry's shape follows the source.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Build these yourself: <code>cd examples/20-cli-counter &amp;&amp; sky build
+    --backend rust src/Main.sky</code>, then read
+    <code>sky-out/Rust/src/main.rs</code>. Ask your teacher to diff a field you change.</p>
+  </div>
+
+  <div class="pager">
+    <a href="05-kernel-routing.html">← 5 · Kernel routing</a>
+    <a href="index.html">Course 1 roadmap →</a>
+  </div>
+
+  <footer class="fin">Lesson 6 · grounded in real <code>sky-out/Rust/src/main.rs</code> from <code>01-hello-world</code> + <code>20-cli-counter</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

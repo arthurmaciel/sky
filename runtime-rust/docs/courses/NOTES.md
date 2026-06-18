@@ -9,8 +9,8 @@ Course 1 — Sky → Rust Backend
 - [x] 03 Front end: parse → canonicalise → type-solve (`03-the-front-end.html`)
 - [x] 04 Codegen anatomy: the Builder/ modules (`04-codegen-anatomy.html`)
 - [x] 05 Kernel routing (Kernel.hs) (`05-kernel-routing.html`)
-- [ ] 06 Worked shape: CLI ×2 (whole-program trace)  ← NEXT — needs real `sky build --backend rust` output
-- [ ] 07 Worked shape: HTTP server ×2
+- [x] 06 Worked shape: CLI ×2 (`06-worked-cli.html`) — REAL output from 01-hello-world + 20-cli-counter builds
+- [ ] 07 Worked shape: HTTP server ×2  ← NEXT — build 15-http-server + 30-sse-server-demo (heavier: axum/tokio)
 - [ ] 08 Worked shape: Sky.Live ×2
 - [ ] 09 Worked shape: Sky.Tui ×2
 - [ ] 10 Worked shape: Sky.Webview ×2

@@ -120,24 +120,28 @@
 (<span class="tok-str">"String"</span>, <span class="tok-str">"fromInt"</span>) -> <span class="tok-str">"string_from_int"</span>
 <span class="tok-com">-- println is special-cased in ExprEmitter → log_println</span></code></pre>
 
-  <p>And the emitted Rust (simplified) looks like this. The <code>Task</code>-typed
-  <code>main</code> becomes an <code>async</code> function run by <code>block_on</code>
-  at the entry point:</p>
+  <p>And here is the <strong>real</strong> emitted Rust (from
+  <code>sky build --backend rust</code>, lightly trimmed). The <code>Task</code>-typed
+  <code>main</code> becomes a <code>sky_main</code> that returns a
+  <code>SkyTask</code> value, driven at the entry by <code>block_on</code>:</p>
   <p class="filetag">sky-out/Rust/src/main.rs</p>
-  <pre><code><span class="tok-kw">async fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyTask</span>&lt;<span class="tok-ty">SkyError</span>, ()&gt; {
-    <span class="tok-fn">log_println</span>(<span class="tok-fn">string_from_int</span>((<span class="tok-num">1</span> + <span class="tok-num">2</span>))).<span class="tok-kw">await</span>
+  <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyTask</span>&lt;()&gt; {
+    <span class="tok-fn">log_println</span>(<span class="tok-fn">string_from_int</span>(<span class="tok-num">1</span> + <span class="tok-num">2</span>))
 }
 
 <span class="tok-kw">fn</span> <span class="tok-fn">main</span>() {
-    <span class="tok-kw">let</span> rt = tokio::runtime::Runtime::new().unwrap();
-    rt.<span class="tok-fn">block_on</span>(<span class="tok-fn">sky_main</span>());
+    <span class="tok-kw">match</span> <span class="tok-fn">block_on</span>(<span class="tok-fn">sky_main</span>()) {
+        <span class="tok-ty">SkyResult</span>::Ok(_)  => (),
+        <span class="tok-ty">SkyResult</span>::Err(e) => { <span class="tok-fn">eprintln!</span>(<span class="tok-str">"{:?}"</span>, e); std::process::exit(<span class="tok-num">1</span>); }
+    }
 }</code></pre>
 
-  <p>Those two runtime functions are ordinary hand-written Rust:</p>
+  <p>Codegen also emits a thin local <em>wrapper</em> for each kernel it uses, which
+  forwards into the runtime crate — so <code>log_println</code> in <code>main.rs</code>
+  is just <code>sky_runtime::log::log_println(msg)</code>. The real work is the
+  hand-written runtime fn:</p>
   <pre><code><span class="tok-com">// runtime-rust/src/sky_runtime/string.rs</span>
-<span class="tok-kw">pub fn</span> <span class="tok-fn">string_from_int</span>(i: <span class="tok-ty">i64</span>) -> <span class="tok-ty">String</span> { <span class="tok-fn">format!</span>(<span class="tok-str">"{}"</span>, i) }
-
-<span class="tok-com">// runtime-rust/src/sky_runtime/log.rs — log_println returns a SkyTask</span></code></pre>
+<span class="tok-kw">pub fn</span> <span class="tok-fn">string_from_int</span>(i: <span class="tok-ty">i64</span>) -> <span class="tok-ty">String</span> { <span class="tok-fn">format!</span>(<span class="tok-str">"{}"</span>, i) }</code></pre>
 
   <div class="callout gotcha"><span class="tag">Corner case</span>
   Why is <code>println</code> <em>special-cased</em> while <code>String.fromInt</code>
@@ -168,9 +172,9 @@
   </div>
 
   <div class="quiz" id="q3">
-    <div class="q">3. Why does <code>main</code> become an <code>async fn</code> run by
-    <code>block_on</code>?</div>
-    <button data-ok="1">Because its type is <code>Task Error ()</code> — Sky effects are async <code>SkyTask</code>s, executed at the entry</button>
+    <div class="q">3. Why is the program's effect driven by <code>block_on</code>
+    at the entry?</div>
+    <button data-ok="1">Because <code>main</code>'s type is <code>Task Error ()</code> — a <code>SkyTask</code> only runs when driven, and the entry drives it</button>
     <button data-ok="0">Because all Rust <code>main</code> functions are async</button>
     <button data-ok="0">Because <code>println</code> is slow</button>
     <div class="fb"></div>
