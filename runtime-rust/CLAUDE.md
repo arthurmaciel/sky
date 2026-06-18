@@ -40,12 +40,12 @@ rule here is mandatory, not optional. Current settled rules:
   or changelog language. This is the cure for multiple-sources-of-truth drift:
   progress is logged elsewhere, the regenerated region is *regenerated* from
   current truth.
-  - **Log every step to `PROGRESS.md`** (the history / archaeology sink): an entry
-    `## YYYY-MM-DD HH:MM — title` + what/why + the **Affected** files (newest at
-    top). This is the ONLY place history/dates/SHAs belong.
+  - **Log every step to `docs/PROGRESS.md`** (the history / archaeology sink): an
+    entry `## YYYY-MM-DD HH:MM — title` + what/why + the **Affected** files (newest
+    at top). This is the ONLY place history/dates/SHAs belong.
   - **Generalizable learnings & pitfalls** → the `## Agent learnings` section of
     THIS file (also no history/dates).
-  - `update-docs` mirrors current status into `README.md` from `PROGRESS.md` +
+  - `update-docs` mirrors current status into `README.md` from `docs/PROGRESS.md` +
     `git log` + the actual source (typically a background session when called).
   - **Machine-owned fenced regions** — `<!-- AUTOGEN:<id> BEGIN -->` … `<!-- AUTOGEN:<id> END -->`
     blocks are written ONLY by `runtime-rust/scripts/readme-tables.py` from the CI
@@ -67,8 +67,8 @@ rule here is mandatory, not optional. Current settled rules:
     truth for table DATA (CI TSVs → generator), another for surrounding PROSE
     (update-docs). The per-push `readme-tables.py headline-check` still flags
     sweep-headline drift (the `N green · M red` sentence is editorial, not fenced).
-  - Allowed `runtime-rust/` root `.md` files: **`CLAUDE.md`, `README.md`,
-    `PROGRESS.md`** — nothing else.
+  - Allowed `runtime-rust/` root `.md` files: **`CLAUDE.md`, `README.md`** —
+    nothing else (`PROGRESS.md` now lives at `docs/PROGRESS.md`).
 
 ## Goal
 Transpile Sky (Elm-compatible functional language) to Rust with native FFI to Rust libraries.
