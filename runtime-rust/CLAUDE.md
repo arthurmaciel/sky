@@ -534,6 +534,17 @@ log** — hold it to the same bar as a code review:
   `Dict.union`/`List.sortBy` absences).
 
 ### Optimization strategies (secure/correct/sound only)
+- **musl static builds MUST ship a fast global allocator (mimalloc), not musl's
+  default malloc.** Measured (alloc-stress 2×2): musl's own malloc is ~7× slower
+  than glibc (~11× slower than mimalloc) on high-volume small allocations, and
+  it is NOT contention-driven (≈same at `-c4` and `-c50`). mimalloc also beats
+  glibc 1.72× on dynamic. So `--static` keeps `static_alloc` (mimalloc)
+  default-on; a musl+system-malloc build is a ~11× throughput cliff (allowed only
+  RSS-constrained, behind a loud warning). The allocator is a `#[cfg(feature=
+  "static_alloc")]` toggle DECOUPLED from linking, so it composes on dynamic too.
+  NEVER a bump/arena allocator globally (can't free per-object → unbounded RSS →
+  OOM). Bench it with the alloc-stress fixture on a CLEAN CPU — concurrent build
+  load skews ab throughput.
 - **De-risk the make-or-break spine with a minimal vertical slice BEFORE fanning
   out** — the single highest-value step; it surfaces the wrinkles every later
   agent needs.
