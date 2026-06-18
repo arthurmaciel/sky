@@ -129,8 +129,13 @@ emitRust b dbPath dbDriver ffiSlugs =
         -- Wrappers for functions where E can't be inferred from args.
         -- These delegate to the generic sky_runtime functions, instantiating E = SkyError.
         wrapperFns = 
-            [ "type SkyTask<A> = sky_runtime::SkyTask<SkyError, A>;"
-            , "type Decoder<T> = sky_runtime::json::Decoder<SkyError, T>;"
+            -- `pub`: these are the canonical project-pinned (E = SkyError)
+            -- bindings; the crate-root `pub use sky_runtime::*;` glob also
+            -- re-exports the generic `SkyTask`/`Decoder`, so a PRIVATE alias
+            -- here would warn `private item shadows public glob re-export`. An
+            -- explicit `pub` item shadowing a glob is well-defined + warning-free.
+            [ "pub type SkyTask<A> = sky_runtime::SkyTask<SkyError, A>;"
+            , "pub type Decoder<T> = sky_runtime::json::Decoder<SkyError, T>;"
             , ""
             ] ++
             -- Wrappers for functions where E can't be inferred from args.
@@ -243,8 +248,8 @@ importSection uk dbDriver =
      then [] else []) ++  -- tokio::spawn used via fully-qualified path
     (if usesDb uk
      then
-        [ "use " ++ dbPoolType dbDriver ++ " as DbPool;"
-        , "use " ++ dbRowType dbDriver ++ " as DbRow;"
+        [ "pub use " ++ dbPoolType dbDriver ++ " as DbPool;"  -- pub: shadows the sky_runtime glob's DbPool (warning-free explicit-over-glob)
+        , "pub use " ++ dbRowType dbDriver ++ " as DbRow;"
         , "use sqlx::{Column, Row};"
         ]
      else [])
@@ -310,14 +315,14 @@ skyErrorLine b =
                infoName = toCamelCase "Sky_Core_Error_ErrorInfo"
            in unlines
                 [ "type SkyError = " ++ errName ++ ";"
-                , "fn str_err(s: &str) -> SkyError {"
+                , "pub fn str_err(s: &str) -> SkyError {"
                 , "    " ++ errName ++ "::Error("
                 , "        " ++ kindName ++ "::Unexpected,"
                 , "        " ++ infoName ++ " { details: SkyMaybe::Nothing, message: s.to_string() }"
                 , "    )"
                 , "}"
                 ]
-      else "type SkyError = String;\nfn str_err(s: &str) -> SkyError { s.to_string() }"
+      else "type SkyError = String;\npub fn str_err(s: &str) -> SkyError { s.to_string() }"
     , ""
     ]
 
