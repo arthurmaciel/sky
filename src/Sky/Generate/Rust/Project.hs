@@ -19,6 +19,9 @@ import System.Directory
     , copyFile, getCurrentDirectory, listDirectory )
 import qualified System.Directory
 import qualified System.Environment
+import qualified System.Process
+import qualified Control.Exception
+import System.Exit (ExitCode(..))
 import System.FilePath ((</>), takeDirectory, takeExtension)
 
 import qualified Sky.AST.Source as Src
@@ -210,8 +213,46 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
     let cacheDir = ".skycache"
     createDirectoryIfMissing True cacheDir
     writeFile (cacheDir </> "source.hash") srcHash
+    -- Best-effort: format the GENERATED Rust (NOT the already-formatted copied
+    -- runtime modules) with rustfmt so `sky-out/Rust/src` is human-readable — the
+    -- codegen emits cramped Strings. rustfmt is syntactic (no type-check, no
+    -- compile needed), so it runs before `cargo build`; the formatted file is
+    -- what compiles AND what a human inspects, including when the build fails.
+    -- `--edition 2021` is MANDATORY (rustfmt defaults to 2015 when invoked
+    -- directly and would reject the 2021 syntax in the generated code).
+    -- NEVER fails the build: a missing rustfmt or any non-zero exit is swallowed
+    -- (readProcessWithExitCode doesn't throw on non-zero; `try` catches a missing
+    -- binary; rustfmt leaves the file untouched on a parse error, so the valid
+    -- output still stands). Opt out via SKY_RUST_FMT=0 (e.g. sky watch's hot loop).
+    fmtOptOut <- System.Environment.lookupEnv "SKY_RUST_FMT"
+    when (fmtOptOut /= Just "0") $ do
+        let genRustFiles = mainRustPath : modPath : configPath
+                         : [ srcDir </> modName ++ ".rs" | (modName, _) <- moduleFiles ]
+        mapM_ rustfmtFileInPlace genRustFiles
     putStrLn "Compilation successful"
     return (Right mainRustPath)
+
+
+-- | Best-effort, RECURSION-FREE rustfmt of one GENERATED Rust file: pipe the file
+-- through `rustfmt` on STDIN (no path arg ⇒ rustfmt can't recurse into `mod`
+-- children — that recursion would re-format the already-formatted copied runtime
+-- AND let one odd/unresolvable module silently abort the whole pass), then write
+-- the result back ONLY on success. NEVER throws / never fails the build: a missing
+-- rustfmt or a non-zero exit leaves the valid (unformatted) file untouched —
+-- formatting is the lowest principle (readability) and must not risk correctness.
+-- `--edition 2021` is mandatory (rustfmt defaults to edition 2015 on stdin).
+rustfmtFileInPlace :: FilePath -> IO ()
+rustfmtFileInPlace path = do
+    exists <- doesFileExist path
+    when exists $ do
+        src <- readFile path
+        _   <- Control.Exception.evaluate (length src)   -- force the read; close the handle before write-back
+        res <- Control.Exception.try
+                 (System.Process.readProcessWithExitCode "rustfmt" ["--edition", "2021"] src)
+                 :: IO (Either Control.Exception.SomeException (ExitCode, String, String))
+        case res of
+            Right (ExitSuccess, out, _) | not (null out) -> writeFile path out
+            _                                            -> return ()
 
 
 -- | Run the Rust code generator over the whole canonicalised program.
