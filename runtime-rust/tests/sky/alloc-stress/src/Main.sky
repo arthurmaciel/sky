@@ -1,0 +1,127 @@
+module Main exposing (main)
+
+-- alloc-stress: a deliberately allocation-heavy Sky.Http.Server for the
+-- Rust backend (branch feat/runtime-rust). Each request to `/` does a large
+-- volume of TRANSIENT heap allocation — big List Int built/mapped/filtered/
+-- folded, many String concats, a JSON-encoded list — then discards almost all
+-- of it and returns a tiny response. The point is high allocation CHURN per
+-- request so the global allocator (system malloc on dynamic builds; mimalloc on
+-- static_alloc builds) is hammered. The harness (scripts/alloc-stress.sh)
+-- asserts RSS stays bounded under sustained load and throughput doesn't regress.
+--
+--   sky build src/Main.sky --target rust      # dynamic (system allocator)
+--   SKY_RUST_STATIC=1 sky build ...           # static (mimalloc)
+--   curl -s http://localhost:8080/            # {"sum":...,"kept":...,"len":...}
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.List as List
+import Sky.Core.String as String
+import Sky.Core.Json.Encode as JsonEnc
+import Sky.Http.Server as Server
+import Sky.Http.Server exposing (Request, Response, Handler)
+import Sky.Core.Error exposing (Error)
+
+
+main : Task Error ()
+main =
+    Server.listen
+        8080
+        [ Server.get "/" handleChurn
+        , Server.get "/healthz" handleHealth
+        ]
+
+
+-- A cheap liveness probe — the harness polls this to know the server is up
+-- without paying the per-request allocation cost of `/`.
+handleHealth : Handler
+handleHealth _ =
+    Task.succeed (Server.text "ok")
+
+
+-- The allocation-churn route. Everything here is transient: built fresh per
+-- request, partially folded to a couple of Ints + a small JSON string, then
+-- dropped. A leaking / fragmenting allocator shows up as unbounded RSS growth
+-- under sustained load against this route.
+handleChurn : Handler
+handleChurn _ =
+    let
+        -- Drive the allocation churn with a tail-recursive outer loop
+        -- (constant stack, auto-TCO'd) that on EACH of its 40 iterations
+        -- builds + maps + filters + folds a 4000-element list and throws it
+        -- all away except a running Int. List.{range,map,filter} are
+        -- non-tail-recursive (O(N) Go/Rust stack — limitation #8), so the
+        -- per-iteration list is kept well under the worker-thread stack
+        -- ceiling; the 40× repetition supplies the sustained churn volume
+        -- (~40 × 3 × 4000 ≈ 480k transient cons cells per request).
+        total =
+            churnLoop 0 40 0
+
+        -- Build + concat many transient strings (string-heavy churn). 400
+        -- iterations, each rebuilding the running accumulator.
+        blob =
+            buildBlob 1 400 ""
+
+        blobLen =
+            String.length blob
+
+        -- JSON-encode a list of Values (encoder + intermediate tree churn).
+        sampleEvens =
+            List.filter (\n -> modBy 4 n == 0) (List.map (\n -> n * 2) (List.range 1 2000))
+
+        sampleJson =
+            JsonEnc.encode 0
+                (JsonEnc.list JsonEnc.int (List.take 200 sampleEvens))
+
+        jsonLen =
+            String.length sampleJson
+
+        -- Tiny response — almost all of the above is discarded.
+        payload =
+            JsonEnc.encode 0
+                (JsonEnc.object
+                    [ ( "sum", JsonEnc.int total )
+                    , ( "blobLen", JsonEnc.int blobLen )
+                    , ( "jsonLen", JsonEnc.int jsonLen )
+                    ]
+                )
+    in
+        Task.succeed (Server.json payload)
+
+
+-- Tail-recursive churn driver. Each iteration allocates three fresh
+-- ~4000-element lists (range → map → filter), folds them to a scalar, and
+-- discards the lists. Auto-TCO'd to constant stack, so the outer loop count
+-- can be raised freely; only the inner list size touches the recursion depth.
+churnLoop : Int -> Int -> Int -> Int
+churnLoop i count acc =
+    if i >= count then
+        acc
+
+    else
+        let
+            xs =
+                List.range 1 4000
+
+            doubled =
+                List.map (\n -> n * 2) xs
+
+            evens =
+                List.filter (\n -> modBy 4 n == 0) doubled
+
+            sub =
+                List.foldl (\n a -> a + n) 0 evens
+        in
+            churnLoop (i + 1) count (acc + sub)
+
+
+-- Accumulate `count` transient strings via concatenation. Each step allocates
+-- a fresh String; the running accumulator is rebuilt every iteration. Returns
+-- the final blob (which the caller only measures the length of, then drops).
+buildBlob : Int -> Int -> String -> String
+buildBlob i count acc =
+    if i > count then
+        acc
+
+    else
+        buildBlob (i + 1) count (acc ++ "item-" ++ String.fromInt i ++ ";")
