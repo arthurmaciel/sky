@@ -107,42 +107,42 @@ measurement; `n/a` = measured but the probe couldn't compare.
 
 | Build | Run | Example | Shape | Round-trip | Equiv | Thru ↑ | RSS ↓ | Cold ↓ | Bin ↓ |
 |:-:|:-:|---|---|---|---|:-:|:-:|:-:|:-:|
-| ✅ | ✅ | 00-standard-libs | cli | stdout | ✅ | — | 0.21 | 0.59 | 0.054 |
-| ✅ | ✅ | 01-hello-world | cli | stdout | ✅ | — | 0.14 | 0.13 | 0.015 |
-| ✅ | ✅ | 02-go-stdlib | cli | stdout | n/a — non-deterministic (wall-clock time + live HTTP); Go-stdlib-FFI demo, no stable comparable stdout | — | 0.28 | 0.74 | 0.148 |
-| ✅ | ✅ | 04-local-pkg | cli | stdout | ✅ | — | 0.14 | 0.13 | 0.015 |
-| ✅ | ✅ | 06-json | cli | stdout | ✅ | — | 0.15 | 0.16 | 0.022 |
-| ✅ | ✅ | 07-todo-cli | cli | stdout | n/a — non-deterministic RFC3339Nano banner timestamp (Std.Log format itself matches Go) | — | 0.36 | 0.52 | 0.133 |
-| ✅ | ✅ | 09-live-counter | live | browser (live-counter) | ✅ | n/a | 0.10 | 1.04 | 0.017 |
-| ✅ | ✅ | 10-live-component | live | browser (live-component) | ✅ | **3.99×** | 0.30 | 0.96 | 0.017 |
+| ✅ | ✅ | 00-standard-libs | cli | stdout | ✅ | — | 0.18 | 0.65 | 0.054 |
+| ✅ | ✅ | 01-hello-world | cli | stdout | ✅ | — | 0.16 | 0.45 | 0.026 |
+| ✅ | ✅ | 02-go-stdlib | cli | stdout | n/a — non-deterministic (wall-clock time + live HTTP); Go-stdlib-FFI demo, no stable comparable stdout | — | 0.23 | 0.82 | 0.149 |
+| ✅ | ✅ | 04-local-pkg | cli | stdout | ✅ | — | 0.17 | 0.45 | 0.026 |
+| ✅ | ✅ | 06-json | cli | stdout | ✅ | — | 0.17 | 3.69 | 0.032 |
+| ✅ | ✅ | 07-todo-cli | cli | stdout | n/a — non-deterministic RFC3339Nano banner timestamp (Std.Log format itself matches Go) | — | 0.27 | 1.54 | 0.139 |
+| ✅ | ✅ | 09-live-counter | live | browser (live-counter) | ✅ | n/a | 0.05 | 0.85 | 0.016 |
+| ✅ | ✅ | 10-live-component | live | browser (live-component) | ✅ | **2.74×** | 0.31 | 0.97 | 0.017 |
 | ✅ | ✅ | 12-skyvote | live | browser (skyvote) | ✅ | — | — | — | — |
-| ✅ | ✅ | 14-task-demo | cli | stdout | ✅ | — | 0.20 | 0.31 | 0.025 |
-| ✅ | ✅ | 15-http-server | server | curl 4 routes | ✅ | **1.37×** | 0.04 | 0.18 | 0.006 |
-| ✅ | ✅ | 16-skychess | live | browser (skychess) | ✅ | — | — | — | — |
+| ✅ | ✅ | 14-task-demo | cli | stdout | ✅ | — | 0.16 | 0.74 | 0.026 |
+| ✅ | ✅ | 15-http-server | server | curl 4 routes | ✅ | 0.99× | 0.11 | 0.18 | 0.006 |
+| ✅ | ✅ | 16-skychess | live | browser (skychess) | ✅ | 1.34× | 0.25 | 0.96 | 0.030 |
 | ✅ | ✅ | 17-skymon | live | browser (skymon) | ✅ | — | — | — | — |
-| ✅ | ✅ | 18-job-queue | live | browser (job-queue) | ✅ | **3.01×** | 0.61 | 1.02 | 0.029 |
-| ✅ | ✅ | 19-skyforum | live | browser (skyforum) | ✅ | — | — | — | — |
-| ✅ | ✅ | 20-cli-counter | cli | stdout | ✅ | — | 0.19 | 0.23 | 0.029 |
+| ✅ | ✅ | 18-job-queue | live | browser (job-queue) | ✅ | **2.36×** | 0.62 | 0.88 | 0.029 |
+| ✅ | ✅ | 19-skyforum | live | browser (skyforum) | ✅ | **5.35×** | 0.31 | 0.75 | 0.017 |
+| ✅ | ✅ | 20-cli-counter | cli | stdout | ✅ | — | 0.15 | 0.43 | 0.029 |
 | ✅ | ✅ | 21-tui-stopwatch | tui | pty | ✅ | — | — | — | — |
 | ✅ | ✅ | 22-tui-stopwatch-ui | tui | pty | ✅ | — | — | — | — |
 | ✅ | ✅ | 23-tui-todo | tui | pty | ✅ | — | — | — | — |
 | ✅ | ✅ | 24-tui-kitchen-sink | tui | pty | ✅ | — | — | — | — |
-| ✅ | ✅ | 25-sky-console | live | browser (smoke) | ✅ | **4.80×** | 0.29 | 0.86 | 0.017 |
+| ✅ | ✅ | 25-sky-console | live | browser (smoke) | ✅ | **5.74×** | 0.28 | 0.78 | 0.017 |
 | ✅ | ✅ | 26-ui-showcase | live | browser (smoke) | ✅ | — | — | — | — |
-| ✅ | ✅ | 27-multi-session-chat | live | browser (smoke) | ✅ | **4.58×** | 0.52 | 1.14 | 0.029 |
-| ✅ | ✅ | 28-streaming-chat | live | browser (smoke) | ✅ | **2.88×** | 0.51 | 1.04 | 0.017 |
+| ✅ | ✅ | 27-multi-session-chat | live | browser (smoke) | ✅ | **4.20×** | 0.53 | 0.98 | 0.029 |
+| ✅ | ✅ | 28-streaming-chat | live | browser (smoke) | ✅ | **2.10×** | 0.51 | 0.88 | 0.017 |
 | ✅ | ✅ | 29-webview-threejs-spike | webview | xvfb | n/a — native wry window, no comparable output | — | — | — | — |
-| ✅ | ✅ | 30-sse-server-demo | server | curl `/` | ✅ | **1.35×** | 0.05 | 0.21 | 0.006 |
+| ✅ | ✅ | 30-sse-server-demo | server | curl `/` | ✅ | 0.98× | 0.11 | 0.18 | 0.006 |
 | ✅ | ✅ | 31-webview-stopwatch-ui | webview | xvfb | n/a | — | — | — | — |
-| ✅ | ✅ | 32-sse-relay | server | curl `/` | ✅ | **1.36×** | 0.10 | 0.20 | 0.015 |
-| ✅ | ✅ | 33-websocket-echo | server | curl `/` | ✅ | **1.37×** | 0.04 | 0.21 | 0.007 |
-| ✅ | ✅ | 34-multi-tier-console | live | browser (smoke) | ✅ | **3.05×** | 0.32 | 0.92 | 0.017 |
-| ✅ | ✅ | 35-composite-generics | cli | stdout | n/a — non-deterministic (Time.now + Dict.toList order) | — | 0.26 | 0.52 | 0.112 |
+| ✅ | ✅ | 32-sse-relay | server | curl `/` | ✅ | 0.98× | 0.17 | 0.18 | 0.015 |
+| ✅ | ✅ | 33-websocket-echo | server | curl `/` | ✅ | 1.00× | 0.14 | 0.18 | 0.007 |
+| ✅ | ✅ | 34-multi-tier-console | live | browser (smoke) | ✅ | **2.79×** | 0.32 | 0.97 | 0.017 |
+| ✅ | ✅ | 35-composite-generics | cli | stdout | n/a — non-deterministic (Time.now + Dict.toList order) | — | 0.21 | 0.72 | 0.111 |
 | ✅ | ✅ | 36-composite-server | server | curl | ✅ | n/a | n/a | n/a | 0.017 |
 | ✅ | ✅ | 37-composite-live-shop | live | browser (smoke) | ✅ | — | — | — | — |
 | ✅ | ✅ | 38-composite-ui-multibackend | tui | pty | ✅ | — | — | — | — |
-| ✅ | ✅ | simple | cli | stdout | ✅ | — | 0.20 | 0.29 | 0.027 |
-| ✅ | ✅ | test_pkg | cli | stdout | ✅ | — | 0.14 | 0.14 | 0.015 |
+| ✅ | ✅ | simple | cli | stdout | ✅ | — | 0.15 | 0.70 | 0.028 |
+| ✅ | ✅ | test_pkg | cli | stdout | ✅ | — | 0.19 | 0.45 | 0.026 |
 | ✅ | ✅ | examples/rust/skyshop-rs | live/FFI | curl | n/a — Rust-FFI app (stripe/firebase/firestore); does not build on Go — Rust-only | — | — | — | — |
 
 **Equiv modes:** `stdout` = byte-identical stdout + exit · `body N` = N GET-route
@@ -151,11 +151,24 @@ passes on both backends · `pty` = both drive the Tui runtime, no panic · `serv
 = both boot + serve · `n/a` = no Go comparison possible.
 
 **Perf** ratios are Rust/Go; the arrow marks the good direction (Thru higher,
-RSS/Cold/Bin lower). Headlines: throughput **1.35–4.80×** Go on the serving apps;
-Rust binaries **0.6–15%** of Go's static binaries; RSS **4–61%** of Go's;
-cold-start mostly faster (cli) to par (live). Live-only latency metrics
-(`live_event` ≈ par, `live_warm` 3–6× Go, `sse_eps`/`ws_eps` ≥ par) and the perf
-thresholds live in `examples-perf-sweep`'s output (informational, never blocks).
+RSS/Cold/Bin lower). Headlines:
+
+- **Throughput splits by workload.** Stateful live apps (DB / session / broadcast)
+  win **2.1–5.7×** Go (25-sky-console 5.74×, 19-skyforum 5.35×, 27-multi-session-chat
+  4.20×, 34-multi-tier-console 2.79×, 10-live-component 2.74×, 18-job-queue 2.36×,
+  28-streaming-chat 2.10×, 16-skychess 1.34×). Thin http/sse/ws **echo** servers sit
+  at **parity ~0.98–1.00×** (15/30/32/33) — there is almost no per-request work to
+  win on. 27's prior 0.78× loss is gone: a process-global pool cache made its
+  per-session `Db.connect` cheap.
+- **Binaries 0.6–15%** of Go's static binaries; **RSS 5–62%** of Go's resident set
+  — Rust wins both on every measured example.
+- **Cold-start** is faster on http/sse (~0.18×) and par-to-slightly-slower on live
+  (0.75–0.98×); on cli it is mixed (most faster, but 06-json 3.69× and 07-todo-cli
+  1.54× are slower — small absolute deltas, see the TSV).
+
+Live-only latency metrics (`live_event` ≈ par, `live_warm` 3–6× Go,
+`sse_eps`/`ws_eps` ≥ par) and the perf thresholds live in `examples-perf-sweep`'s
+output (informational, never blocks).
 
 ---
 
@@ -700,6 +713,10 @@ run --target rust src/Main.sky` rebuilds + runs — ~0.3 s warm, ~1-2 s on first
 change. A runtime-only `.rs` edit is re-copied into the generated project on the next
 `sky run` (no wipe needed). Detailed env setup and the disk-hygiene recipe live in
 `runtime-rust/CLAUDE.md`.
+
+**Readable output.** The generated `sky-out/Rust/src/*.rs` is run through `rustfmt`
+(per-file, `--edition 2021`, best-effort) before the `cargo build` — so the emitted
+Rust reads like hand-written code when inspected. `SKY_RUST_FMT=0` skips it.
 
 ---
 
