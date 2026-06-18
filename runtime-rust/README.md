@@ -415,53 +415,8 @@ Live-only latency metrics (`live_event` ≈ par, `live_warm` 3–6× Go,
 `sse_eps`/`ws_eps` ≥ par) and the perf thresholds live in `examples-perf-sweep`'s
 output (informational, never blocks).
 
----
-
-### sky.toml Rust fields
-
-```toml
-[project]
-backend = "rust"                   # default "go"; overridden by --backend
-
-["rust.dependencies"]
-uuid  = "1.16.0"                  # crates.io — version string
-serde = { version = "1", features = ["derive"] }
-mylib = { git = "https://github.com/org/mylib", rev = "abc123" }
-
-[rust]
-sqlx_tls  = "rustls"             # default; alt: "native-tls"
-static    = true                 # opt-in full-static binary (musl Linux / crt-static Windows). Default false.
-target    = "x86_64-unknown-linux-musl"  # cross-compile target triple. "" = host. Orthogonal to static/backend.
-allocator = "mimalloc"           # "" auto (mimalloc on musl/static, system on dynamic) | "system" | "mimalloc"
-
-[live]                            # Sky.Live apps
-store     = "memory"             # memory | sqlite | postgres | redis
-storePath = "sessions.db"        # file path / postgres:// URL / redis:// URL
-```
-
-Rust FFI is fully automatic (`rustdoc --output-format json`) — no hand-written
-glue, even for proc-macro/derive crates. There is no `[rust.shims]` section.
-
-**Reaching async / framework crates** (which auto-FFI can't bind directly — see the
-FFI Reach section): wrap the crate in a thin fork-local crate exposing plain
-`&str`→`Result`/`Dict`-shaped fns over a dedicated-thread async→sync bridge, then
-reference it as a local **`file://` git** dep:
-
-```toml
-["rust.dependencies"]
-my-shim = { git = "file:///abs/path/to/wrapper-repo", branch = "master" }
-```
-
-`examples/rust/skyshop-rs` is the worked example (firestore / async-stripe /
-rs-firebase-admin-sdk). Use the **literal** absolute path (Cargo does not expand
-`$HOME`); the wrapper must be a real git repo at that URL.
-
-The codegen wires Cargo features from `[live] store`: `sqlite`/`postgres` enable
-`db` (sqlx, both drivers — `store.rs` compiles `SqliteStore` + `PostgresStore`
-together); `redis` enables a `redis_store` feature + the redis crate; `memory`
-pulls neither. A non-live `Std.Db` app keeps its single driver.
-
----
+> **Deep internals** (architecture, soundness model, error type, verification,
+> FFI coercion rules, build-perf) live in [`docs/TECHNICAL-DETAILS.md`](docs/TECHNICAL-DETAILS.md).
 
 ## Static & cross compilation
 
@@ -498,22 +453,9 @@ knob** from static (`[rust] allocator` / `--mimalloc` / `--system-alloc`):
 | Per-thread heaps + low fragmentation — built for the multithreaded server hot path | ~2× baseline RSS vs the system allocator (its segment reservation) | The **default dynamic** build uses the system allocator = **glibc `malloc` (ptmalloc2, per-thread arenas)** — "arena-based malloc" in the glibc sense, but **not** a bump/arena (`bumpalo`-style) allocator, which Sky uses nowhere. |
 | Feature-gated → dynamic default builds are byte-identical | One more build dimension | musl static + `system` allocator is a throughput cliff (below) — gated behind a loud warning. |
 
-**Measured** (alloc-stress fixture: allocation-heavy `Sky.Http.Server`, `ab -c50`;
-2×2 linking × allocator):
-
-| variant | throughput | peak RSS |
-|---|--:|--:|
-| A dynamic + glibc malloc | 1457/s | 8.5 MB |
-| B dynamic + mimalloc | 2511/s (**1.72× A**) | 16.3 MB |
-| C static(musl) + mimalloc | 2149/s (**1.48× A**) | 14.7 MB |
-| D static(musl) + musl malloc | ~192/s (**0.14× A**) | 7.8 MB |
-
-mimalloc is **1.72×** glibc on dynamic; **musl's own malloc is ~7× slower** than
-glibc (~11× vs mimalloc) and it's **not** contention-driven (≈same at `-c4` and
-`-c50` — musl malloc is just slow for high-volume small allocations). So
-`--static` keeps mimalloc **default-on**; `--system-alloc` is an opt-out only for
-RSS-constrained deploys (D is the leanest at 7.8 MB) and emits a loud cliff
-warning. RSS stays bounded under sustained churn (C growth 1.024×).
+mimalloc is the default allocator for `--static` (musl): it beats glibc ~1.7× and
+is ~11× faster than musl's own malloc on high-volume small allocations. Full 2×2
+linking × allocator measurement: [Allocator 2×2 in TECHNICAL-DETAILS](docs/TECHNICAL-DETAILS.md#allocator-22-measurement-static-builds).
 
 #### Size: static vs dynamic vs Go
 
@@ -621,6 +563,57 @@ Linux x86_64; `brew install FiloSottile/musl-cross/musl-cross` on macOS). `sky`
 sets `CARGO_TARGET_<T>_LINKER` automatically and errors with the exact install
 command if the target/linker is missing. The macOS-host → Linux cross leg is
 implemented, pending macOS verification.
+
+---
+
+## FFI usage
+
+Point `sky.toml` at a Rust crate and the compiler generates the bindings —
+no hand-written FFI. Async / framework crates need a thin wrapper crate (below).
+
+### sky.toml Rust fields
+
+```toml
+[project]
+backend = "rust"                   # default "go"; overridden by --backend
+
+["rust.dependencies"]
+uuid  = "1.16.0"                  # crates.io — version string
+serde = { version = "1", features = ["derive"] }
+mylib = { git = "https://github.com/org/mylib", rev = "abc123" }
+
+[rust]
+sqlx_tls  = "rustls"             # default; alt: "native-tls"
+static    = true                 # opt-in full-static binary (musl Linux / crt-static Windows). Default false.
+target    = "x86_64-unknown-linux-musl"  # cross-compile target triple. "" = host. Orthogonal to static/backend.
+allocator = "mimalloc"           # "" auto (mimalloc on musl/static, system on dynamic) | "system" | "mimalloc"
+
+[live]                            # Sky.Live apps
+store     = "memory"             # memory | sqlite | postgres | redis
+storePath = "sessions.db"        # file path / postgres:// URL / redis:// URL
+```
+
+Rust FFI is fully automatic (`rustdoc --output-format json`) — no hand-written
+glue, even for proc-macro/derive crates. There is no `[rust.shims]` section.
+
+**Reaching async / framework crates** (which auto-FFI can't bind directly — see the
+[FFI Reach in TECHNICAL-DETAILS](docs/TECHNICAL-DETAILS.md#reach-what-auto-ffi-can-cant-cover)): wrap the crate in a thin fork-local crate exposing plain
+`&str`→`Result`/`Dict`-shaped fns over a dedicated-thread async→sync bridge, then
+reference it as a local **`file://` git** dep:
+
+```toml
+["rust.dependencies"]
+my-shim = { git = "file:///abs/path/to/wrapper-repo", branch = "master" }
+```
+
+`examples/rust/skyshop-rs` is the worked example (firestore / async-stripe /
+rs-firebase-admin-sdk). Use the **literal** absolute path (Cargo does not expand
+`$HOME`); the wrapper must be a real git repo at that URL.
+
+The codegen wires Cargo features from `[live] store`: `sqlite`/`postgres` enable
+`db` (sqlx, both drivers — `store.rs` compiles `SqliteStore` + `PostgresStore`
+together); `redis` enables a `redis_store` feature + the redis crate; `memory`
+pulls neither. A non-live `Std.Db` app keeps its single driver.
 
 ---
 

@@ -511,3 +511,22 @@ Rust reads like hand-written code when inspected. `SKY_RUST_FMT=0` skips it.
 
 ---
 
+
+## Allocator 2×2 measurement (static builds)
+
+**Measured** (alloc-stress fixture: allocation-heavy `Sky.Http.Server`, `ab -c50`;
+2×2 linking × allocator):
+
+| variant | throughput | peak RSS |
+|---|--:|--:|
+| A dynamic + glibc malloc | 1457/s | 8.5 MB |
+| B dynamic + mimalloc | 2511/s (**1.72× A**) | 16.3 MB |
+| C static(musl) + mimalloc | 2149/s (**1.48× A**) | 14.7 MB |
+| D static(musl) + musl malloc | ~192/s (**0.14× A**) | 7.8 MB |
+
+mimalloc is **1.72×** glibc on dynamic; **musl's own malloc is ~7× slower** than
+glibc (~11× vs mimalloc) and it's **not** contention-driven (≈same at `-c4` and
+`-c50` — musl malloc is just slow for high-volume small allocations). So
+`--static` keeps mimalloc **default-on**; `--system-alloc` is an opt-out only for
+RSS-constrained deploys (D is the leanest at 7.8 MB) and emits a loud cliff
+warning. RSS stays bounded under sustained churn (C growth 1.024×).
