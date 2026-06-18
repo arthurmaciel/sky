@@ -70,7 +70,17 @@ $ sky check src/Main.sky --target rust    # full emit + cargo build
 $ sky test  tests/MyTest.sky --target rust
 $ sky add uuid --features="v4" --target rust   # fully automatic, no shims
 $ sky install                                  # regen FFI after rm -rf .skycache
+
+# Static / cross / allocator flags (see "Static & cross compilation" below)
+$ sky build src/Main.sky --target rust --static                 # fully-static binary (musl Linux / crt-static Windows)
+$ sky build src/Main.sky --target rust --platform linux-musl    # cross-compile (alias or raw triple)
+$ sky build src/Main.sky --target rust --mimalloc               # mimalloc global allocator (faster; +RSS)
+$ sky build src/Main.sky --target rust --static --system-alloc  # static WITHOUT mimalloc (lean RSS; ~11x slower — warns)
 ```
+
+Precedence **CLI > env > `sky.toml`**; the env mirrors are `SKY_RUST_STATIC` /
+`SKY_RUST_TARGET` / `SKY_RUST_ALLOC`. `--static` / `--platform` / `--mimalloc`
+compose with the backend selector `--target rust` (they never clash with it).
 
 ---
 
@@ -438,7 +448,10 @@ serde = { version = "1", features = ["derive"] }
 mylib = { git = "https://github.com/org/mylib", rev = "abc123" }
 
 [rust]
-sqlx_tls = "rustls"              # default; alt: "native-tls"
+sqlx_tls  = "rustls"             # default; alt: "native-tls"
+static    = true                 # opt-in full-static binary (musl Linux / crt-static Windows). Default false.
+target    = "linux-musl"         # cross-compile platform (alias or raw triple). "" = host. Orthogonal to static.
+allocator = "mimalloc"           # "" auto (mimalloc on musl/static, system on dynamic) | "system" | "mimalloc"
 
 [live]                            # Sky.Live apps
 store     = "memory"             # memory | sqlite | postgres | redis
@@ -717,6 +730,134 @@ change. A runtime-only `.rs` edit is re-copied into the generated project on the
 **Readable output.** The generated `sky-out/Rust/src/*.rs` is run through `rustfmt`
 (per-file, `--edition 2021`, best-effort) before the `cargo build` — so the emitted
 Rust reads like hand-written code when inspected. `SKY_RUST_FMT=0` skips it.
+
+---
+
+## Static & cross compilation
+
+Opt-in. The default build is unchanged (glibc-dynamic, host platform, system
+allocator). `--static` / `--platform` / `[rust] static` / `[rust] target` /
+`[rust] allocator` turn on the modes below; non-opt-in builds are byte-identical
+to before.
+
+### Static compilation
+
+`--static` (or `[rust] static = true` / `SKY_RUST_STATIC=1`) per-OS matrix:
+
+| Host | Mechanism | Result |
+|---|---|---|
+| **Linux** | `--target x86_64-unknown-linux-musl` + mimalloc (`static_alloc`) | true static-pie; zero `ldd` deps |
+| **Windows** | `-C target-feature=+crt-static` | static MSVC CRT |
+| **macOS** | — (Apple ships no static libc) | **degrades** to a native dynamic binary + a warning showing the cross-compile recipe |
+| **webview app** | — (links system WebKit/WebView2) | **refused** with an actionable error |
+
+Toolchain: the Linux musl path needs `rustup target add
+x86_64-unknown-linux-musl` + a musl C toolchain (`musl-tools`); `sky` checks both
+and errors with the exact install command if either is missing.
+
+#### Global allocator (mimalloc)
+
+The static build swaps the Rust `#[global_allocator]` for **mimalloc**
+(feature-gated `static_alloc`, compiled only when enabled). It's a **separate
+knob** from static (`[rust] allocator` / `--mimalloc` / `--system-alloc`):
+**auto** default → mimalloc on musl/static, system on dynamic.
+
+| Pros | Cons | Risks |
+|---|---|---|
+| Drop-in malloc — frees per-allocation, so RSS stays bounded on a long-running server | Adds a C dep (cc-built; needs the musl C toolchain for the static target) | **Why not a bump/arena allocator:** it can't free per-object, so as a *global* allocator it grows unbounded → OOM (violates the no-OOM floor). mimalloc frees normally. |
+| Per-thread heaps + low fragmentation — built for the multithreaded server hot path | ~2× baseline RSS vs the system allocator (its segment reservation) | The **default dynamic** build uses the system allocator = **glibc `malloc` (ptmalloc2, per-thread arenas)** — "arena-based malloc" in the glibc sense, but **not** a bump/arena (`bumpalo`-style) allocator, which Sky uses nowhere. |
+| Feature-gated → dynamic default builds are byte-identical | One more build dimension | musl static + `system` allocator is a throughput cliff (below) — gated behind a loud warning. |
+
+**Measured** (alloc-stress fixture: allocation-heavy `Sky.Http.Server`, `ab -c50`;
+2×2 linking × allocator):
+
+| variant | throughput | peak RSS |
+|---|--:|--:|
+| A dynamic + glibc malloc | 1457/s | 8.5 MB |
+| B dynamic + mimalloc | 2511/s (**1.72× A**) | 16.3 MB |
+| C static(musl) + mimalloc | 2149/s (**1.48× A**) | 14.7 MB |
+| D static(musl) + musl malloc | ~192/s (**0.14× A**) | 7.8 MB |
+
+mimalloc is **1.72×** glibc on dynamic; **musl's own malloc is ~7× slower** than
+glibc (~11× vs mimalloc) and it's **not** contention-driven (≈same at `-c4` and
+`-c50` — musl malloc is just slow for high-volume small allocations). So
+`--static` keeps mimalloc **default-on**; `--system-alloc` is an opt-out only for
+RSS-constrained deploys (D is the leanest at 7.8 MB) and emits a loud cliff
+warning. RSS stays bounded under sustained churn (C growth 1.024×).
+
+#### Size: static vs dynamic vs Go
+
+Release binary sizes (KiB) across every statically-compilable example:
+
+| Example | Shape | Dynamic | Static (musl) | Go | Static/Dyn | Static/Go | Cold dyn→static |
+|---|---|--:|--:|--:|--:|--:|--:|
+| 00-standard-libs | cli | 1393K | 1622K | 31605K | 1.16 | 0.051 | 590→97 ms |
+| 01-hello-world | cli | 575K | 822K | 30381K | 1.43 | 0.027 | 7→109 ms |
+| 02-go-stdlib | cli | 3617K | 3880K | 31500K | 1.07 | 0.123 | 504→113 ms |
+| 04-local-pkg | cli | 576K | 822K | 30383K | 1.43 | 0.027 | 4→93 ms |
+| 06-json | cli | 756K | 994K | 30994K | 1.32 | 0.032 | 13→161 ms |
+| 07-todo-cli | cli | 3334K | 3634K | 30759K | 1.09 | 0.118 | 9→104 ms |
+| 09-live-counter | live | 4959K | 5180K | 397574K | 1.04 | 0.013 | — |
+| 10-live-component | live | 4951K | 5168K | 397546K | 1.04 | 0.013 | — |
+| 12-skyvote | live | 9505K | 9696K | 399679K | 1.02 | 0.024 | — |
+| 14-task-demo | cli | 599K | 842K | 30601K | 1.41 | 0.028 | 4→127 ms |
+| 15-http-server | server | 1825K | 2031K | 397536K | 1.11 | 0.005 | — |
+| 16-skychess | live | 9272K | 9500K | 399080K | 1.02 | 0.024 | — |
+| 17-skymon | live | 9693K | 9904K | 398871K | 1.02 | 0.025 | — |
+| 18-job-queue | live | 8991K | 9232K | 397798K | 1.03 | 0.023 | — |
+| 19-skyforum | live | 5195K | 5408K | 398045K | 1.04 | 0.014 | — |
+| 20-cli-counter | cli | 654K | 894K | 30568K | 1.37 | 0.029 | 4→123 ms |
+| 21-tui-stopwatch | tui | 688K | 922K | 30598K | 1.34 | 0.030 | — |
+| 22-tui-stopwatch-ui | tui | 856K | 1090K | 33121K | 1.27 | 0.033 | — |
+| 23-tui-todo | tui | 885K | 1118K | 33208K | 1.26 | 0.034 | — |
+| 24-tui-kitchen-sink | tui | 5354K | 5532K | 398426K | 1.03 | 0.014 | — |
+| 25-sky-console | live | 5151K | 5360K | 397827K | 1.04 | 0.013 | — |
+| 26-ui-showcase | live | 5348K | 5556K | 398498K | 1.04 | 0.014 | — |
+| 27-multi-session-chat | live | 9046K | 9288K | 397703K | 1.03 | 0.023 | — |
+| 28-streaming-chat | live | 5027K | 5252K | 397575K | 1.04 | 0.013 | — |
+| 30-sse-server-demo | server | 1836K | 2043K | 397559K | 1.11 | 0.005 | — |
+| 32-sse-relay | server | 4579K | 4804K | 397614K | 1.05 | 0.012 | — |
+| 33-websocket-echo | server | 2041K | 2239K | 397665K | 1.10 | 0.006 | — |
+| 34-multi-tier-console | live | 4984K | 5208K | n/a | 1.05 | — | — |
+| 35-composite-generics | cli | 2696K | 2922K | 31366K | 1.08 | 0.093 | 10→130 ms |
+| 36-composite-server | server | 5054K | 5190K | n/a | 1.03 | — | — |
+| 37-composite-live-shop | live | 5488K | 5676K | n/a | 1.03 | — | — |
+| 38-composite-ui-multibackend | tui | 6125K | build-fail | n/a | — | — | — |
+| simple | cli | 618K | 862K | 30516K | 1.40 | 0.028 | 4→105 ms |
+| test_pkg | cli | 575K | 822K | 30381K | 1.43 | 0.027 | 4→93 ms |
+
+- **Static/Dyn 1.02–1.43× (mean 1.15×)** — the static overhead is proportionally
+  bigger on tiny CLIs, ~1.02–1.05× on real apps.
+- **Static is 0.5–12.3% of Go's binary** — even static-vs-static, Rust wins
+  decisively. (Go Live binaries are ~390 MB because they embed the bundled
+  console; Rust static live binaries are ~5–9 MB.)
+- **Cold-start caveat:** static binaries start slower (~95–160 ms vs ~4–13 ms
+  dynamic) from musl + mimalloc init — amortized on long-running servers, but it
+  matters for frequently-invoked CLIs.
+- Anomalies: `34/36/37` Go build failed (Go size `n/a`; the Rust static built
+  fine); `38-composite-ui-multibackend` static `build-fail` — it includes a
+  webview backend, which can't link static (expected).
+
+### Cross compilation
+
+`[rust] target` / `--platform` (alias or raw triple) selects the **output
+platform**, orthogonal to `--static`: `--platform linux-gnu` alone is a dynamic
+Linux cross-build; `--static --platform linux-musl` is a static Linux artifact
+from any host.
+
+| Alias | Triple |
+|---|---|
+| `linux-musl` | `x86_64-unknown-linux-musl` |
+| `linux-musl-arm64` | `aarch64-unknown-linux-musl` |
+| `linux-gnu` | `x86_64-unknown-linux-gnu` |
+| `linux-gnu-arm64` | `aarch64-unknown-linux-gnu` |
+| `<raw triple>` | passthrough |
+
+Toolchain: `rustup target add <triple>` + a musl C cross-linker (`musl-tools` on
+Linux x86_64; `brew install FiloSottile/musl-cross/musl-cross` on macOS). `sky`
+sets `CARGO_TARGET_<T>_LINKER` automatically and errors with the exact install
+command if the target/linker is missing. The macOS-host → Linux cross leg is
+implemented, pending macOS verification.
 
 ---
 
