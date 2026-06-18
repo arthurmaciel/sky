@@ -17,6 +17,22 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-18 — CI→README: live status badge (the snapshot-table honesty fix)
+
+**What.** The auto-written examples table hardcodes Build/Run = ✅ (it is only
+rewritten on a green sweep), so on a broken backend it would silently go stale and
+mislead a reader into thinking the table is live. Fix: a **live `examples-sweep`
+status badge** at the top of Project status — the only thing that is actually live
+(any committed table is stale the instant after it is written). Green = latest
+sweep on `feat/runtime-rust` HEAD passed; red = a check failed → the run's
+job-summary BUILD·RUN·EQUIV table (rendered on every run, pass or fail) shows which
+example broke. Re-labelled the headline + the examples-table intro as the
+"last-green snapshot", pointing at the badge for live truth.
+
+**Affected.** `runtime-rust/README.md` (Project-status badge + snapshot labelling).
+
+---
+
 ## 2026-06-18 — CI→README automation, round 2: perf table + parity verdict auto-written
 
 **What.** Extended the round-1 automation (below) to fully auto-write the

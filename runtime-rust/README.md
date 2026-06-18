@@ -296,9 +296,24 @@ compose with the backend selector `--backend rust` (they never clash with it).
 
 ## Project status
 
-**examples-sweep = 37 green · 0 red — full Go≡Rust behavioral parity.** Every
-example **builds**, **runs** headless per shape, and **matches the Go reference**
-under its equivalence mode.
+[![Rust examples sweep](https://github.com/arthurmaciel/sky/actions/workflows/examples-sweep.yml/badge.svg?branch=feat/runtime-rust)](https://github.com/arthurmaciel/sky/actions/workflows/examples-sweep.yml?query=branch%3Afeat%2Fruntime-rust)
+
+> **The badge above is the LIVE status** — it tracks the latest `examples-sweep`
+> run on `feat/runtime-rust` at the current HEAD. **Green** = every example passed
+> build · run · equivalence on the last push. **Red** = a check failed — click it
+> for the run's per-example **BUILD·RUN·EQUIV** job-summary table, which is
+> rendered on *every* run, pass or fail, so you see exactly which example broke.
+>
+> The tables in this section are a **detailed snapshot of the last green sweep**
+> (the auto-writer only rewrites them on a fully-green run — see `update-readme` in
+> `.github/workflows/examples-sweep.yml`). So a **red badge over an all-✅ table**
+> means "currently broken; the table predates the break" — trust the badge, then
+> the run summary, for current truth. A committed table can only ever be a
+> snapshot; the badge is the only thing that is live.
+
+**examples-sweep = 37 green · 0 red — full Go≡Rust behavioral parity** *(last green
+snapshot — see the badge for live status)*. Every example **builds**, **runs**
+headless per shape, and **matches the Go reference** under its equivalence mode.
 
 ### Sweep summary (by equivalence mode)
 
@@ -317,9 +332,12 @@ measures Rust-vs-Go throughput separately (informational, never blocks).
 
 ### Examples
 
-**Build** / **Run** are per-row (✅ pass · ❌ fail). "Round-trip" = how RUN is
-exercised: `cli` = stdout · `server` = curl boot/serve · `live` = headless browser
-scenario · `tui` = pty smoke · `webview` = xvfb smoke. The four **Perf** columns
+**Build** / **Run** show ✅ for every row because this table is the *last-green
+snapshot* (it is only rewritten when the whole sweep passes — the live per-example
+pass/fail, including any ❌, is in the sweep badge's run summary at the top of
+Project status). "Round-trip" = how RUN is exercised: `cli` = stdout · `server` =
+curl boot/serve · `live` = headless browser scenario · `tui` = pty smoke ·
+`webview` = xvfb smoke. The four **Perf** columns
 are Rust/Go ratios from the perf sweep: **Thru** (request throughput, **↑** higher
 = Rust faster) · **RSS** (resident memory, **↓** lower = Rust leaner) · **Cold**
 (cold-start ms, **↓**) · **Bin** (binary size, **↓**). `—` = the shape has no such
