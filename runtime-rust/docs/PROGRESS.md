@@ -17,6 +17,48 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-18 — README + documentation overhaul (slim README + TECHNICAL-DETAILS + provenance)
+
+**What.** Restructured the docs per the approved spec
+(`docs/superpowers/specs/2026-06-18-readme-docs-overhaul-design.md`) + plan
+(`docs/superpowers/plans/2026-06-18-readme-docs-overhaul.md`). 8 commits
+(`c31786c0`..`55c4bf7d`).
+
+- **Provenance.** `examples-perf-sweep.sh` + `static-perf.sh` now write a
+  `*.provenance` sidecar (stamp/os/arch/runner); `readme-tables.py` emits a
+  `> _Machine-measured · <stamp> · <runner> <os> (<arch>) · <sweep>_` banner inside
+  AUTOGEN:examples-table / perf-verdict / static-table (falls back to the local
+  platform for a local seed; CI provenance overrides).
+- **Docs pruned.** Wiped 10 plans + 25 shipped specs + the conquest registry +
+  escalated-decisions + upstream-pr-proposals; kept the 4 referenced spec sets +
+  this overhaul's spec/plan. Lifted ADR 0001 (Sky container types stay transparent
+  aliases, not newtypes) into CLAUDE.md `## Agent learnings`; `docs/adr/.gitkeep`.
+- **PROGRESS moved.** `runtime-rust/PROGRESS.md` → `runtime-rust/docs/PROGRESS.md`;
+  repointed CLAUDE.md + update-docs skill (root `.md` cap is now CLAUDE.md +
+  README.md).
+- **README halved.** 1228 → 735 lines. Deep internals (Architecture / Verification
+  state / Error type / Soundness / Build-perf / allocator 2×2 / FFI coercion) moved
+  verbatim to `docs/TECHNICAL-DETAILS.md`. README kept: Contract · Getting started ·
+  Project status · Static & cross compilation · **new `## FFI usage`** (lifted
+  sky.toml fields + wrapper note) · Known limitations · Glossary.
+- **Readability.** GHC de-pinned (`>= 9.6.7`); cross-OS "continue with" anchor
+  links; macOS musl command moved inside a code block; the Fast-build `Why:` block
+  rewritten as bullets (line break per semicolon); Round-trip / Perf-columns /
+  Equiv-modes inline lists converted to tables (Equiv legend now precedes the
+  examples table).
+- **Governance.** update-docs skill section list rewritten to the slim README +
+  TECHNICAL-DETAILS as a second maintained file; CLAUDE.md `### Domain docs` +
+  settled-rule reconciled.
+
+**Affected.** `runtime-rust/scripts/{examples-perf-sweep,static-perf}.sh`,
+`runtime-rust/scripts/readme-tables.py`, `runtime-rust/README.md`,
+`runtime-rust/docs/TECHNICAL-DETAILS.md` (new), `runtime-rust/docs/PROGRESS.md`
+(moved), `runtime-rust/docs/adr/.gitkeep`, `runtime-rust/CLAUDE.md`,
+`runtime-rust/plugins/sky-rust-backend/skills/update-docs/SKILL.md`, + 39 pruned
+docs files.
+
+---
+
 ## 2026-06-18 — CI→README: live status badge (the snapshot-table honesty fix)
 
 **What.** The auto-written examples table hardcodes Build/Run = ✅ (it is only
