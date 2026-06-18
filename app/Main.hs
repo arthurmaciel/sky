@@ -1161,14 +1161,34 @@ data RustBuildPlan
 --               cross-build, and `static + target=linux-musl` is a static Linux
 --               artifact from any host.
 -- Webview apps are refused under static (they link the system WebKit/WebView2).
-planRustBuild :: Bool -> String -> FilePath -> IO (Either String ([String], FilePath))
-planRustBuild tomlStatic tomlTarget rustDir = do
+planRustBuild :: Bool -> String -> String -> FilePath -> IO (Either String ([String], FilePath))
+planRustBuild tomlStatic tomlTarget tomlAlloc rustDir = do
     envStatic <- maybe False (`elem` ["1", "true"]) <$> System.Environment.lookupEnv "SKY_RUST_STATIC"
     envTarget <- maybe ""    id                     <$> System.Environment.lookupEnv "SKY_RUST_TARGET"
-    let wantStatic = tomlStatic || envStatic
-        platform   = if null envTarget then tomlTarget else envTarget   -- CLI/env over toml
+    envAlloc  <- maybe ""    id                     <$> System.Environment.lookupEnv "SKY_RUST_ALLOC"
+    let wantStatic    = tomlStatic || envStatic
+        platform      = if null envTarget then tomlTarget else envTarget   -- CLI/env over toml
+        explicitAlloc = if null envAlloc  then tomlAlloc  else envAlloc      -- CLI/env over toml
+        muslish       = wantStatic || "musl" `isInfixOf` platform
+        -- Allocator (decoupled from static): explicit wins; else AUTO — mimalloc
+        -- on musl/static (musl's default malloc measured ~7-11x slower under
+        -- allocation churn), system otherwise. mimalloc is a build-time feature
+        -- toggle (the cfg-gated #[global_allocator]); it works on dynamic too,
+        -- so `allocator = "mimalloc"` on a default build gives the faster
+        -- dynamic+mimalloc variant.
+        allocator     = case explicitAlloc of
+                            "mimalloc" -> "mimalloc"
+                            "system"   -> "system"
+                            _          -> if muslish then "mimalloc" else "system"
+        mimallocFeat  = if allocator == "mimalloc" then ["--features", "static_alloc"] else []
+    -- A musl/static build with the system allocator is a ~7-11x throughput cliff
+    -- (see runtime-rust docs). Only worth it when RSS-constrained — warn loudly.
+    when (muslish && allocator == "system") $ hPutStrLn stderr (unlines
+        [ "warning: allocator = \"system\" on a musl/static build — musl's default malloc"
+        , "         is ~7-11x slower than mimalloc under allocation churn. Keep the default"
+        , "         allocator = \"mimalloc\" unless you are deliberately RSS-constrained." ])
     if not wantStatic && null platform
-      then return (Right ([], ""))   -- neither requested → default native dynamic build
+      then return (Right (mimallocFeat, ""))   -- default native dynamic build (+mimalloc only if explicitly asked → variant B)
       else do
         let mainRs = rustDir </> "src" </> "main.rs"
         isWebview <- do
@@ -1198,7 +1218,7 @@ planRustBuild tomlStatic tomlTarget rustDir = do
             RbNative -> do
                 when (wantStatic && System.Info.os == "mingw32") $
                     System.Environment.setEnv "RUSTFLAGS" "-C target-feature=+crt-static"
-                return (Right (staticFeatArgs wantStatic "", ""))
+                return (Right (mimallocFeat, ""))
             RbTriple triple -> do
                 chk <- ensureRustCrossTarget triple
                 case chk of
@@ -1207,14 +1227,7 @@ planRustBuild tomlStatic tomlTarget rustDir = do
                         maybeSetMuslLinker triple
                         when (wantStatic && "gnu" `isInfixOf` triple) $
                             System.Environment.setEnv "RUSTFLAGS" "-C target-feature=+crt-static"
-                        return (Right (["--target", triple] ++ staticFeatArgs wantStatic triple, triple ++ "/"))
-  where
-    -- mimalloc (`static_alloc`) only matters for the musl path (offsets musl's
-    -- slower malloc). Enable it only when static AND musl, so other builds are
-    -- untouched.
-    staticFeatArgs static triple =
-        if static && (null triple || "musl" `isInfixOf` triple)
-            then ["--features", "static_alloc"] else []
+                        return (Right (["--target", triple] ++ mimallocFeat, triple ++ "/"))
 
 -- | Resolve the (static, platform) request to a concrete build plan.
 resolveRustPlan :: Bool -> String -> RustBuildPlan
@@ -1278,19 +1291,23 @@ cargoLinkerEnvVar :: String -> String
 cargoLinkerEnvVar triple = "CARGO_TARGET_" ++ map shout triple ++ "_LINKER"
   where shout c = if c == '-' then '_' else toUpper c
 
--- | Strip the Rust-build CLI sugar (`--static`, `--platform <p>` /
--- `--platform=<p>`) from argv BEFORE optparse-applicative (strict on unknown
--- flags) parses it, setting the SKY_RUST_STATIC / SKY_RUST_TARGET env vars the
--- build path reads. Keeps `--target rust` (the backend selector) free of clash.
+-- | Strip the Rust-build CLI sugar (`--static`, `--platform <p>`, `--mimalloc`,
+-- `--system-alloc`) from argv BEFORE optparse-applicative (strict on unknown
+-- flags) parses it, setting the SKY_RUST_STATIC / SKY_RUST_TARGET / SKY_RUST_ALLOC
+-- env vars the build path reads. Keeps `--target rust` (the backend selector)
+-- free of clash.
 preprocessRustBuildFlags :: [String] -> IO [String]
 preprocessRustBuildFlags = go []
   where
     go acc [] = return (reverse acc)
-    go acc ("--static" : rest)       = System.Environment.setEnv "SKY_RUST_STATIC" "1" >> go acc rest
-    go acc ("--platform" : v : rest) = System.Environment.setEnv "SKY_RUST_TARGET" v   >> go acc rest
+    go acc ("--static" : rest)        = System.Environment.setEnv "SKY_RUST_STATIC" "1"        >> go acc rest
+    go acc ("--mimalloc" : rest)      = System.Environment.setEnv "SKY_RUST_ALLOC" "mimalloc"  >> go acc rest
+    go acc ("--system-alloc" : rest)  = System.Environment.setEnv "SKY_RUST_ALLOC" "system"    >> go acc rest
+    go acc ("--platform" : v : rest)  = System.Environment.setEnv "SKY_RUST_TARGET" v          >> go acc rest
     go acc (a : rest)
-      | Just v <- stripPrefix "--platform=" a = System.Environment.setEnv "SKY_RUST_TARGET" v >> go acc rest
-      | otherwise                             = go (a : acc) rest
+      | Just v <- stripPrefix "--platform=" a  = System.Environment.setEnv "SKY_RUST_TARGET" v >> go acc rest
+      | Just v <- stripPrefix "--allocator=" a = System.Environment.setEnv "SKY_RUST_ALLOC" v  >> go acc rest
+      | otherwise                              = go (a : acc) rest
 
 
 -- | Split a list into N roughly-equal chunks. Used by the install
@@ -1922,7 +1939,7 @@ runCommand cmd = case cmd of
                         -- same version).
                         System.Environment.setEnv "SKY_VERSION" skyBuildVersion
                         checkWebviewLibsRust rustDir
-                        (staticArgs, targetSub) <- planRustBuild (Toml._rustStatic config') (Toml._rustTarget config') rustDir
+                        (staticArgs, targetSub) <- planRustBuild (Toml._rustStatic config') (Toml._rustTarget config') (Toml._rustAllocator config') rustDir
                             >>= either (\m -> hPutStrLn stderr m >> exitFailure) return
                         putStrLn "Running cargo build..."
                         callProcess "cargo" (["build", "--manifest-path", rustDir ++ "/Cargo.toml"] ++ staticArgs)
@@ -1970,7 +1987,7 @@ runCommand cmd = case cmd of
                         let rustDir = outDir ++ "/Rust"
                         hFlush stdout
                         checkWebviewLibsRust rustDir
-                        (staticArgs, targetSub) <- planRustBuild (Toml._rustStatic config') (Toml._rustTarget config') rustDir
+                        (staticArgs, targetSub) <- planRustBuild (Toml._rustStatic config') (Toml._rustTarget config') (Toml._rustAllocator config') rustDir
                             >>= either (\m -> hPutStrLn stderr m >> exitFailure) return
                         putStrLn $ "Running cargo build in " ++ rustDir
                         callProcess "cargo" (["build", "--manifest-path", rustDir ++ "/Cargo.toml"] ++ staticArgs)

@@ -49,6 +49,7 @@ data SkyConfig = SkyConfig
     , _sqlxTls       :: !String           -- [rust] sqlx_tls: "rustls" (default) | "native-tls"
     , _rustStatic    :: !Bool             -- [rust] static: build a fully-static binary (musl Linux / crt-static Windows). Opt-in; default False.
     , _rustTarget    :: !String           -- [rust] target: cross-compile platform (alias `linux-musl`/`linux-gnu`/`linux-musl-arm64` or a raw triple). "" = host. Orthogonal to static.
+    , _rustAllocator :: !String           -- [rust] allocator: "" (auto: mimalloc on static, system on dynamic) | "system" | "mimalloc". Decoupled from static.
     }
     deriving (Show)
 
@@ -83,6 +84,7 @@ defaultConfig = SkyConfig
     , _sqlxTls       = "rustls"
     , _rustStatic    = False
     , _rustTarget    = ""
+    , _rustAllocator = ""
     }
 
 
@@ -170,9 +172,10 @@ applyKeyValue section config key value = case section of
     -- [rust] section: Rust target configuration
     "rust" -> case key of
         "sqlx_tls" -> config { _sqlxTls = value }
-        "static"   -> config { _rustStatic = value == "true" }   -- TOML bool: `static = true`
-        "target"   -> config { _rustTarget = value }             -- cross platform alias / triple
-        _          -> config
+        "static"    -> config { _rustStatic = value == "true" }   -- TOML bool: `static = true`
+        "target"    -> config { _rustTarget = value }             -- cross platform alias / triple
+        "allocator" -> config { _rustAllocator = value }          -- "" auto | "system" | "mimalloc"
+        _           -> config
     -- Top-level / [source] / [project] — project metadata.
     _ -> case key of
         "name"    -> config { _name = value }

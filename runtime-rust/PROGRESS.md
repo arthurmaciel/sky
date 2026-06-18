@@ -31,12 +31,30 @@ plus release-binary stripping and a static-vs-dynamic size benchmark harness.
   degrade to native dynamic + a warning showing the cross-compile recipe; webview
   apps → refused (link system WebKit). De-risked locally on a cli (01) and a
   DB+crypto example (18, sqlx/sqlite/ring) — both fully static.
-- **mimalloc global allocator**: codegen always emits an *optional* `mimalloc`
-  dep + a `#[cfg(feature="static_alloc")] #[global_allocator]` shim — inert unless
-  the static build enables it. Offsets musl's slower default malloc so the 2–5×
-  server throughput wins survive. Chosen over a bump/arena allocator (which can't
-  free per-object → unbounded RSS → OOM as a global allocator). Default dynamic
-  builds keep the system allocator (glibc ptmalloc2); no bump allocator anywhere.
+- **mimalloc global allocator** (`[rust] allocator = "system" | "mimalloc"` /
+  `--mimalloc` / `--system-alloc` / `SKY_RUST_ALLOC`, DECOUPLED from static):
+  codegen always emits an *optional* `mimalloc` dep + a
+  `#[cfg(feature="static_alloc")] #[global_allocator]` shim — inert unless the
+  build enables `static_alloc`. AUTO default: mimalloc on musl/static, system
+  (glibc ptmalloc2) on dynamic. Chosen over a bump/arena allocator (can't free
+  per-object → unbounded RSS → OOM as a global allocator); no bump allocator
+  anywhere. **Measured (alloc-stress 2×2, allocation-heavy Sky.Http.Server,
+  ab -c50):**
+
+  | variant | throughput | peak RSS |
+  |---|--:|--:|
+  | A dynamic + glibc malloc | 1457/s | 8.5 MB |
+  | B dynamic + mimalloc | 2511/s (1.72× A) | 16.3 MB |
+  | C static(musl) + mimalloc | 2149/s (1.48× A) | 14.7 MB |
+  | D static(musl) + musl malloc | ~192/s (0.14× A) | 7.8 MB |
+
+  Findings: mimalloc is **1.72×** glibc on dynamic; musl's own malloc is **~7×
+  slower** than glibc (and ~11× slower than mimalloc), and it's NOT
+  contention-driven (192/s at c=4 ≈ c=50) — musl malloc is just slow for
+  high-volume small allocations. So `--static` keeps mimalloc default-on (a
+  musl+system build is a ~11× cliff; allowed only with a loud warning for
+  RSS-constrained deploys, where D's 7.8 MB is the draw). RSS-bounded under
+  sustained churn (C growth 1.024×).
 - **Cross-compilation** (`[rust] target` / `--platform <alias|triple>` /
   `SKY_RUST_TARGET`): orthogonal to `static`. Aliases `linux-musl`,
   `linux-musl-arm64`, `linux-gnu`, `linux-gnu-arm64` + raw-triple passthrough;
