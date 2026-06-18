@@ -284,13 +284,13 @@ exercise_tui() {
       fi
       ;;
     windows)
-      # `winpty` (bundled with Git for Windows) allocates a pty for the Tui app.
-      # timeout -k 5 escalates to SIGKILL for a tui that ignores SIGTERM.
-      if command -v winpty >/dev/null 2>&1; then
-        timeout -k 5 8 winpty "$bin" >"$log" 2>&1 </dev/null
-      else
-        printf 'SKIP (windows: winpty not found)\n' >"$log"; return "$EXERCISE_SKIP_RC"
-      fi
+      # `winpty` (Git for Windows) needs an interactive CONSOLE to bridge into a
+      # pty; a headless CI runner has none, so the Tui app sees a non-tty and
+      # refuses ("no terminal allocated" → notty). The real headless-pty path on
+      # Windows is ConPTY (e.g. node-pty) — not yet wired — so SKIP for now rather
+      # than emit a false notty failure. (webview/server/cli all RUN on Windows.)
+      printf 'SKIP (windows: headless pty needs ConPTY/node-pty — not yet wired)\n' >"$log"
+      return "$EXERCISE_SKIP_RC"
       ;;
     *)
       # linux (and any util-linux host) — unchanged.
