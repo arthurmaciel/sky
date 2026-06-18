@@ -46,6 +46,15 @@ HIST="$HOME/.cache/sky/examples-perf-sweep"; mkdir -p "$HIST"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 PERF_TSV="$HIST/perf-$STAMP.tsv"
 LOG="$HIST/run-$STAMP.log"
+# Provenance sidecar (read by readme-tables.py to stamp the README banner with
+# WHERE + WHEN the numbers were measured). key=value, one per line.
+PERF_PROVENANCE="$HIST/perf-$STAMP.provenance"
+{
+  echo "stamp=$STAMP"
+  echo "os=${RUNNER_OS:-$(uname -s)}"
+  echo "arch=$(uname -m)"
+  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then echo "runner=GitHub Actions"; else echo "runner=$(hostname -s 2>/dev/null || echo local)"; fi
+} > "$PERF_PROVENANCE"
 say() { echo "$@" | tee -a "$LOG"; }
 say "=== Sky Rust PERF sweep @ $STAMP (repo: $REPO) ==="
 

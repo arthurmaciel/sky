@@ -77,6 +77,14 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 TSV="$HIST/static-perf-$OS_LABEL-$STAMP.tsv"
 MD="$HIST/static-perf-$OS_LABEL-$STAMP.md"
 LOG="$HIST/static-perf-$OS_LABEL-$STAMP.log"
+# Provenance sidecar (see examples-perf-sweep.sh). Per-OS, matching the TSV name.
+PROVENANCE="$HIST/static-perf-$OS_LABEL-$STAMP.provenance"
+{
+  echo "stamp=$STAMP"
+  echo "os=$OS_LABEL"
+  echo "arch=$(uname -m)"
+  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then echo "runner=GitHub Actions"; else echo "runner=$(hostname -s 2>/dev/null || echo local)"; fi
+} > "$PROVENANCE"
 say()  { echo "$@" | tee -a "$LOG" >&2; }     # STDERR → never pollutes captured values
 
 command -v "$SKY_BIN" >/dev/null 2>&1 || SKY_BIN="$REPO/sky-out/sky"
