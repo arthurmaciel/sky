@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Course 2 · GitHub CI, by example</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <span>Course 2</span><span class="spacer"></span>
+    <span class="badge ci">CI</span>
+  </div>
+
+  <h1><span class="eyebrow">Course 2 · from zero to confident</span>
+  GitHub CI — the Sky → Rust backend as a worked example</h1>
+
+  <p class="lede">Continuous Integration sounds intimidating and is actually
+  simple: a robot that builds and tests your code every time it changes. This
+  course teaches CI from nothing, then uses this repo's real pipeline — a 3-OS
+  sweep, perf benchmarks, and a README that updates itself — to take you all the
+  way to <strong>modifying it yourself</strong>.</p>
+
+  <div class="card">
+    <h3 style="margin-top:0">When you finish, you can…</h3>
+    <ul style="margin-bottom:0">
+      <li>explain what CI is and why every serious project uses it;</li>
+      <li>read and write GitHub Actions workflows — triggers, jobs, steps, matrices, caches, artifacts;</li>
+      <li>fully understand <code>.github/workflows/examples-sweep.yml</code> — the gating sweep, the dispatch-only perf/static jobs, and the self-updating README — and change it safely.</li>
+    </ul>
+  </div>
+
+  <h2><span class="num">→</span>Roadmap</h2>
+  <p>Seven lessons, beginner-first. The early ones need no prior CI knowledge; the
+  later ones dissect this repo's actual workflow. Lessons marked <em>“soon”</em>
+  aren't written yet.</p>
+
+  <ul class="roadmap">
+    <li><a href="01-what-is-ci.html">
+      <span class="n"></span>
+      <span><span class="t">What is CI? (from zero)</span>
+      <span class="d">The problem CI solves, the vocabulary (runner, workflow, job, step), and what "green" means.</span></span>
+      <span class="status">ready</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Your first workflow</span>
+      <span class="d">A 10-line <code>.github/workflows/hello.yml</code> — <code>on:</code>, <code>jobs:</code>, <code>steps:</code>, <code>uses:</code> vs <code>run:</code>.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Matrices, caching &amp; artifacts</span>
+      <span class="d">Run across 3 OSes with a matrix; cache the cargo target; upload results as artifacts. The three workhorses of real CI.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Anatomy of <code>examples-sweep.yml</code> — the gating job</span>
+      <span class="d">The cornerstone: build + run + Go≡Rust equivalence across ubuntu/macos/windows. Why it's the gate, and how SKIP ≠ fail.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Dispatch-only jobs: perf &amp; static-perf</span>
+      <span class="d">Why noisy benchmarks run on a button (<code>workflow_dispatch</code>) and a weekly <code>schedule</code>, never on every push.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">The CI → README automation</span>
+      <span class="d">The <code>update-readme</code> job: writing back to the repo with <code>contents: write</code>, <code>[skip ci]</code>, and the green-gate.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Modify it safely</span>
+      <span class="d">Add a job, change the matrix, add a check — and the guardrails that stop you breaking the gate or looping the auto-commit.</span></span>
+      <span class="status">soon</span></a></li>
+  </ul>
+
+  <div class="pager">
+    <a href="../index.html">← Course hub</a>
+    <a href="01-what-is-ci.html">Start: Lesson 1 →</a>
+  </div>
+
+  <footer class="fin">Course 2 · grounded in <code>.github/workflows/examples-sweep.yml</code> + <code>runtime-rust/scripts/</code>.</footer>
+
+</div>
+</body>
+</html>

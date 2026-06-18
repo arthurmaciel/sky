@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Course 1 · The Sky → Rust Backend</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <span>Course 1</span><span class="spacer"></span>
+    <span class="badge rust">Compiler</span>
+  </div>
+
+  <h1><span class="eyebrow">Course 1 · from newcomer to developer</span>
+  The Sky → Rust Backend</h1>
+
+  <p class="lede">How does a pure-functional Sky program become a native Rust
+  binary? This course answers that end to end — first the <strong>history</strong>
+  of how the backend was built, then a <strong>step-by-step</strong> trace of the
+  compiler, with two worked examples for every program shape.</p>
+
+  <div class="card">
+    <h3 style="margin-top:0">When you finish, you can…</h3>
+    <ul style="margin-bottom:0">
+      <li>narrate the backend's history in clear phases — runtime, codegen wiring, FFI, the backends (Live/Tui/Webview), perf, CI;</li>
+      <li>trace any Sky program through <b>parse → canonicalise → type-solve → codegen → cargo</b>, naming the functions and files;</li>
+      <li>explain the common path <em>and</em> the corner cases for each shape, and read the codegen confidently enough to change it.</li>
+    </ul>
+  </div>
+
+  <h2><span class="num">→</span>Roadmap</h2>
+  <p>Twelve lessons. Start at the big picture; each later lesson zooms into one
+  stage or one shape. Lessons marked <em>“soon”</em> aren't written yet — ask your
+  teacher to prioritise one.</p>
+
+  <ul class="roadmap">
+    <li><a href="01-the-big-picture.html">
+      <span class="n"></span>
+      <span><span class="t">The big picture: the five-stage pipeline</span>
+      <span class="d">Sky text → tokens → source AST → canonical AST → solved types → Rust → binary. The map you'll fill in.</span></span>
+      <span class="status">ready</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">A history of the backend (phases 1–11)</span>
+      <span class="d">Runtime bring-up, the deferred-effect fix, known-limitation sweeps, webview, static/cross, CI, docs automation — what &amp; why.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">The front end: parse → canonicalise → type-solve</span>
+      <span class="d">The stages Rust shares with Go. What each produces, and why codegen needs <code>SolvedTypes</code>.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Codegen anatomy: the Builder/ modules</span>
+      <span class="d">A tour of the eleven modules under <code>Builder/</code> — who owns what, and how they compose.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Kernel routing: how a Sky call becomes a Rust fn</span>
+      <span class="d"><code>kernelToRust</code> in <code>Kernel.hs</code> — the lookup table, the fallbacks, and the corner cases (zero-arg, aliases).</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Worked shape — CLI ×2</span>
+      <span class="d">Two whole programs (<code>01-hello-world</code>, <code>07-todo-cli</code>) traced line-by-line into Rust.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Worked shape — HTTP server ×2</span>
+      <span class="d"><code>15-http-server</code>, <code>30-sse-server-demo</code> — routes, handlers, the Task boundary.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Worked shape — Sky.Live ×2</span>
+      <span class="d"><code>09-live-counter</code>, <code>19-skyforum</code> — TEA (init/update/view), the broker, sessions.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Worked shape — Sky.Tui ×2</span>
+      <span class="d"><code>21-tui-stopwatch</code>, <code>23-tui-todo</code> — same TEA shape, terminal renderer.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Worked shape — Sky.Webview ×2</span>
+      <span class="d"><code>29-webview-threejs-spike</code>, <code>31-webview-stopwatch-ui</code> — wry/tao, the IPC bridge.</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">FFI: binding real Rust crates</span>
+      <span class="d">Automatic <code>rustdoc</code>-JSON binding + the wrapper-crate pattern for async/framework crates (skyshop-rs).</span></span>
+      <span class="status">soon</span></a></li>
+
+    <li><a class="todo">
+      <span class="n"></span>
+      <span><span class="t">Soundness: "no panic from well-typed Sky"</span>
+      <span class="d">The existential rule, and the corner cases the codegen designs out instead of catching.</span></span>
+      <span class="status">soon</span></a></li>
+  </ul>
+
+  <div class="pager">
+    <a href="../index.html">← Course hub</a>
+    <a href="01-the-big-picture.html">Start: Lesson 1 →</a>
+  </div>
+
+  <footer class="fin">Course 1 · grounded in <code>src/Sky/Generate/Rust/</code> + <code>runtime-rust/</code>.</footer>
+
+</div>
+</body>
+</html>

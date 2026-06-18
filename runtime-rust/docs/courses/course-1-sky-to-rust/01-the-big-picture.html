@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1 · The big picture — Sky → Rust pipeline</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>1 · The big picture</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 1</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 1 · the map</span>
+  From Sky text to a Rust binary in five stages</h1>
+
+  <p class="lede">Before we zoom into any one part, you need the map. A Sky program
+  becomes a Rust binary by passing through five stages. Learn their names and what
+  each one hands to the next, and every later lesson has a place to hang.</p>
+
+  <h2><span class="num">1</span>The pipeline at a glance</h2>
+
+  <p>The first three stages are the <strong>front end</strong> — Sky shares them
+  with its Go backend. The fourth, <strong>codegen</strong>, is where the Rust
+  backend lives. The fifth is just <code>cargo</code>.</p>
+
+  <div class="pipeline">
+    <div class="stage sky"><div class="k">1 · Lex + Parse</div><div class="v">Source AST</div><div class="f">Sky.Parse.Module<br>parseModule</div></div>
+    <div class="stage sky"><div class="k">2 · Canonicalise</div><div class="v">Canonical AST</div><div class="f">Sky.Canonicalise.Module<br>canonicaliseWithDeps</div></div>
+    <div class="stage sky"><div class="k">3 · Type-solve</div><div class="v">SolvedTypes</div><div class="f">Sky.Type.Solve<br>solve…</div></div>
+    <div class="stage rust"><div class="k">4 · Codegen</div><div class="v">Rust source</div><div class="f">Generate/Rust/…<br>generateRustProject</div></div>
+    <div class="stage rust"><div class="k">5 · Build</div><div class="v">Binary</div><div class="f">cargo build<br>sky-out/Rust/</div></div>
+  </div>
+
+  <div class="callout key"><span class="tag">Key idea</span>
+  Each stage <em>narrows ambiguity</em>. The parser recovers structure; the
+  canonicaliser resolves <em>which</em> <code>println</code> you meant; the solver
+  decides every type; codegen turns that fully-known program into Rust text.
+  Codegen can be "dumb" precisely because the three stages before it removed all
+  the guesswork.</div>
+
+  <h2><span class="num">2</span>What each stage produces</h2>
+
+  <h3>Stage 1 — Lex &amp; Parse → <span class="tok-ty">Source AST</span></h3>
+  <p>The lexer turns raw characters into tokens (and applies the layout rule, so
+  indentation becomes structure). The parser assembles tokens into a tree of
+  expressions and declarations. Names are still <em>bare</em> — a <code>println</code>
+  is just the word "println", not yet resolved to anything.</p>
+  <p class="src">Entry: <a href="../../../../src/Sky/Parse/Module.hs"><code>src/Sky/Parse/Module.hs</code></a> · <code>parseModule :: Text → Either ModuleError Src.Module</code>. Lexer/layout in <code>src/Sky/Parse/{Space,Keyword,Primitives}.hs</code>.</p>
+
+  <h3>Stage 2 — Canonicalise → <span class="tok-ty">Canonical AST</span></h3>
+  <p>Now every name gets resolved against imports and scope. A call head becomes
+  one of a few precise things — the ones you'll see constantly in codegen:</p>
+  <table>
+    <tr><th>Node</th><th>Means</th></tr>
+    <tr><td><code>Can.VarKernel mod name</code></td><td>A built-in stdlib op (e.g. <code>"String" "fromInt"</code>). Codegen routes these to runtime functions.</td></tr>
+    <tr><td><code>Can.VarTopLevel mod name</code></td><td>A user (or stdlib-as-Sky) top-level function defined elsewhere.</td></tr>
+    <tr><td><code>Can.VarLocal name</code></td><td>A parameter or <code>let</code> binding in scope.</td></tr>
+  </table>
+  <p class="src">Entry: <a href="../../../../src/Sky/Canonicalise/Module.hs"><code>src/Sky/Canonicalise/Module.hs</code></a> · <code>canonicaliseWithDeps</code> → <code>Can.Module</code>.</p>
+
+  <h3>Stage 3 — Type-solve (Hindley–Milner) → <span class="tok-ty">SolvedTypes</span></h3>
+  <p>The solver infers a type for every expression with no annotations required,
+  and records two things codegen will read:</p>
+  <ul>
+    <li>an <strong>environment</strong>: name → its resolved type;</li>
+    <li><strong>region types</strong>: a source location → the type inferred there.
+    This lets codegen ask "what's the type <em>right here</em>?" and pick the
+    correct Rust type — crucial for empty collections, closures, and generics.</li>
+  </ul>
+  <p class="src">Entry: <a href="../../../../src/Sky/Type/Solve.hs"><code>src/Sky/Type/Solve.hs</code></a> · the <code>SolvedTypes</code> record carries <code>_stEnv</code> (env) and the region map.</p>
+
+  <h3>Stage 4 — Codegen (lowering) → <span class="tok-ty">Rust source</span></h3>
+  <p>This is the Rust backend. The orchestrator
+  <code>generateRustProject</code> walks the canonical modules, consults
+  <code>SolvedTypes</code>, lowers each definition to Rust text, and writes a whole
+  cargo project to <code>sky-out/Rust/</code>: <code>main.rs</code>, one file per
+  module, a <code>Cargo.toml</code> with only the features the program needs, the
+  copied runtime crate, and any FFI bindings.</p>
+  <p class="src">Entry: <a href="../../../../src/Sky/Generate/Rust/Project.hs"><code>src/Sky/Generate/Rust/Project.hs</code></a> · <code>generateRustProject</code> (called from <code>src/Sky/Build/Compile.hs</code>). The lowering itself lives under <code>src/Sky/Generate/Rust/Builder/</code> — Lesson 4 tours it.</p>
+
+  <h3>Stage 5 — Build → <span class="tok-ty">Binary</span></h3>
+  <p>Plain <code>cargo build</code> on the generated project. If the codegen did its
+  job, this just works — which is the whole thesis of the backend (Lesson 12).</p>
+
+  <div class="callout why"><span class="tag">Why a separate runtime crate?</span>
+  Codegen never emits the implementation of <code>String.fromInt</code> or
+  <code>println</code> — it emits a <em>call</em> to a hand-written Rust function in
+  <code>runtime-rust/src/sky_runtime/</code>. Keeping the heavy logic in a real,
+  testable Rust library (not in generated strings) is what makes the output sound
+  and small. The compiler copies that crate into every project at build time.</div>
+
+  <h2><span class="num">3</span>One program, all the way down</h2>
+  <p>Let's make it real with the smallest interesting program. It prints the number
+  three.</p>
+
+  <p class="filetag">src/Main.sky</p>
+  <pre><code><span class="tok-fn">main</span> = <span class="tok-fn">println</span> (<span class="tok-ty">String</span>.<span class="tok-fn">fromInt</span> (<span class="tok-num">1</span> + <span class="tok-num">2</span>))</code></pre>
+
+  <p><strong>After Stage 2 (canonical AST)</strong>, sketched as a tree — note the
+  bare names are now resolved kernels:</p>
+  <pre><code><span class="tok-kw">Def</span> "main" []
+  <span class="tok-kw">Call</span> (<span class="tok-ty">VarKernel</span> "Log" "println")        <span class="tok-com">-- println is the Log kernel</span>
+    [ <span class="tok-kw">Call</span> (<span class="tok-ty">VarKernel</span> "String" "fromInt")    <span class="tok-com">-- String.fromInt</span>
+        [ <span class="tok-kw">Binop</span> "+" (<span class="tok-ty">Int</span> 1) (<span class="tok-ty">Int</span> 2) ] ]</code></pre>
+
+  <p><strong>After Stage 3</strong>, the solver has typed every node:
+  <code>1, 2, 1+2 : Int</code> → <code>String.fromInt (…) : String</code> →
+  <code>println (…) : Task Error ()</code>, so <code>main : Task Error ()</code>.</p>
+
+  <p><strong>Stage 4 routes the kernels.</strong> <code>kernelToRust</code> in
+  <a href="../../../../src/Sky/Generate/Rust/Builder/Kernel.hs"><code>Builder/Kernel.hs</code></a>
+  is a big lookup table from <code>(module, name)</code> to a Rust function name:</p>
+  <pre><code><span class="tok-com">-- Builder/Kernel.hs (kernelToRust)</span>
+(<span class="tok-str">"String"</span>, <span class="tok-str">"fromInt"</span>) -> <span class="tok-str">"string_from_int"</span>
+<span class="tok-com">-- println is special-cased in ExprEmitter → log_println</span></code></pre>
+
+  <p>And the emitted Rust (simplified) looks like this. The <code>Task</code>-typed
+  <code>main</code> becomes an <code>async</code> function run by <code>block_on</code>
+  at the entry point:</p>
+  <p class="filetag">sky-out/Rust/src/main.rs</p>
+  <pre><code><span class="tok-kw">async fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyTask</span>&lt;<span class="tok-ty">SkyError</span>, ()&gt; {
+    <span class="tok-fn">log_println</span>(<span class="tok-fn">string_from_int</span>((<span class="tok-num">1</span> + <span class="tok-num">2</span>))).<span class="tok-kw">await</span>
+}
+
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() {
+    <span class="tok-kw">let</span> rt = tokio::runtime::Runtime::new().unwrap();
+    rt.<span class="tok-fn">block_on</span>(<span class="tok-fn">sky_main</span>());
+}</code></pre>
+
+  <p>Those two runtime functions are ordinary hand-written Rust:</p>
+  <pre><code><span class="tok-com">// runtime-rust/src/sky_runtime/string.rs</span>
+<span class="tok-kw">pub fn</span> <span class="tok-fn">string_from_int</span>(i: <span class="tok-ty">i64</span>) -> <span class="tok-ty">String</span> { <span class="tok-fn">format!</span>(<span class="tok-str">"{}"</span>, i) }
+
+<span class="tok-com">// runtime-rust/src/sky_runtime/log.rs — log_println returns a SkyTask</span></code></pre>
+
+  <div class="callout gotcha"><span class="tag">Corner case</span>
+  Why is <code>println</code> <em>special-cased</em> while <code>String.fromInt</code>
+  goes through the plain table? Because <code>println</code> takes many arguments and
+  joins them with spaces (like Go's), so <code>ExprEmitter</code> builds that join
+  itself instead of a one-to-one call. You'll meet a handful of these
+  special-cased kernels (<code>Task.andThen</code>, deferred <code>let _ =</code>
+  effects, currying) in Lesson 5 — they're the interesting part of codegen.</div>
+
+  <h2><span class="num">4</span>Check yourself</h2>
+  <div class="quiz" id="q1">
+    <div class="q">1. Which stage decides that the bare word <code>println</code> means
+    "the Log kernel"?</div>
+    <button data-ok="0">Lex &amp; Parse (Stage 1)</button>
+    <button data-ok="1">Canonicalise (Stage 2)</button>
+    <button data-ok="0">Type-solve (Stage 3)</button>
+    <button data-ok="0">Codegen (Stage 4)</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q2">
+    <div class="q">2. Where does the actual implementation of <code>string_from_int</code>
+    live?</div>
+    <button data-ok="0">It's emitted inline into <code>main.rs</code> by codegen</button>
+    <button data-ok="1">In the hand-written runtime crate, <code>runtime-rust/src/sky_runtime/string.rs</code></button>
+    <button data-ok="0">In <code>Builder/Kernel.hs</code></button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q3">
+    <div class="q">3. Why does <code>main</code> become an <code>async fn</code> run by
+    <code>block_on</code>?</div>
+    <button data-ok="1">Because its type is <code>Task Error ()</code> — Sky effects are async <code>SkyTask</code>s, executed at the entry</button>
+    <button data-ok="0">Because all Rust <code>main</code> functions are async</button>
+    <button data-ok="0">Because <code>println</code> is slow</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>Five stages: <b>Lex/Parse → Canonicalise → Type-solve → Codegen → cargo build</b>.</li>
+      <li>The first three are the shared front end; each removes ambiguity so codegen can be straightforward.</li>
+      <li>Codegen (<code>generateRustProject</code>) emits <em>calls</em> into a hand-written <b>runtime crate</b>, then writes a whole cargo project to <code>sky-out/Rust/</code>.</li>
+      <li>A kernel call is routed to a Rust fn by <code>kernelToRust</code> (<code>Builder/Kernel.hs</code>); a <code>Task</code>-typed <code>main</code> runs via <code>block_on</code>.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Want to see this trace on <em>your own</em> tiny program, or peek at a real
+    <code>sky-out/Rust/main.rs</code>? Ask your teacher to build an example with
+    <code>sky build --backend rust</code> and walk the output with you.</p>
+  </div>
+
+  <div class="pager">
+    <a href="index.html">← Course 1 roadmap</a>
+    <a class="none">next</a>
+  </div>
+
+  <footer class="fin">Lesson 1 · grounded in <code>src/Sky/Parse</code>, <code>Canonicalise</code>, <code>Type/Solve.hs</code>, <code>Generate/Rust/</code>, <code>runtime-rust/src/sky_runtime/</code>.</footer>
+
+</div>
+
+<script>
+  // Tiny feedback loop: click an answer, get immediate right/wrong feedback.
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok
+          ? '✓ Correct.'
+          : '✗ Not quite — re-read the matching section above and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

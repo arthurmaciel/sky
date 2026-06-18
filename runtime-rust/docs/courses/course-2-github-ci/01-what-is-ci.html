@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1 · What is CI?</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 2</a><span class="sep">/</span>
+    <span>1 · What is CI?</span><span class="spacer"></span>
+    <span class="badge ci">Lesson 1</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 1 · from zero</span>
+  What is Continuous Integration?</h1>
+
+  <p class="lede">No prior knowledge needed. By the end of this page you'll know the
+  problem CI solves, the five words you need to read any workflow, and what the
+  little green check on a commit actually means.</p>
+
+  <h2><span class="num">1</span>The problem, before CI</h2>
+  <p>You change some code. Does it still build? Do the tests pass? On Linux
+  <em>and</em> macOS <em>and</em> Windows? Did you break an example you weren't even
+  looking at? The honest answer, if you only check by hand, is "probably?" — and
+  "probably" is how broken code reaches other people.</p>
+
+  <p>It gets worse with more contributors: everyone runs slightly different
+  machines, forgets a step, or tests only what they touched. Bugs slip in not
+  because people are careless, but because <strong>manual checking doesn't
+  scale</strong>.</p>
+
+  <div class="callout why"><span class="tag">The idea</span>
+  <b>Continuous Integration</b> = every time the code changes, a server
+  automatically builds it and runs the checks — the <em>same</em> checks, the same
+  way, every time. If something breaks, you find out in minutes, on the exact
+  commit that broke it.</div>
+
+  <h2><span class="num">2</span>How it works, in one picture</h2>
+
+  <div class="pipeline">
+    <div class="stage"><div class="k">You</div><div class="v">push code</div><div class="f">git push / open PR</div></div>
+    <div class="stage"><div class="k">GitHub</div><div class="v">sees a trigger</div><div class="f">on: push</div></div>
+    <div class="stage"><div class="k">Runner</div><div class="v">runs the workflow</div><div class="f">fresh VM</div></div>
+    <div class="stage"><div class="k">Result</div><div class="v">✓ green / ✗ red</div><div class="f">on the commit</div></div>
+  </div>
+
+  <p>You push. GitHub notices and spins up a <strong>fresh, clean machine</strong>
+  (a "runner"), follows your written recipe step by step, and reports back a green
+  check (everything passed) or a red X (something failed) right next to your
+  commit. Nobody had to remember to do anything.</p>
+
+  <div class="callout key"><span class="tag">Why "fresh machine" matters</span>
+  The runner starts from nothing every time. So if the build works there, it works
+  because of what's <em>in your repo</em> — not because of something you happened to
+  have installed locally. CI turns "works on my machine" into "works, period."</div>
+
+  <h2><span class="num">3</span>The five words you need</h2>
+  <p>Every GitHub Actions setup is built from these. Learn them once and you can
+  read any workflow file.</p>
+  <table>
+    <tr><th>Word</th><th>What it is</th></tr>
+    <tr><td><b>Workflow</b></td><td>One YAML file under <code>.github/workflows/</code> describing automation: <em>when</em> to run and <em>what</em> to do. This repo's is <code>examples-sweep.yml</code>.</td></tr>
+    <tr><td><b>Trigger</b> <span class="src">(<code>on:</code>)</span></td><td>What starts it — a <code>push</code>, a <code>pull_request</code>, a manual button (<code>workflow_dispatch</code>), or a clock (<code>schedule</code>).</td></tr>
+    <tr><td><b>Job</b></td><td>A chunk of work that runs on one fresh runner. A workflow can have many; they run in parallel unless one <code>needs</code> another.</td></tr>
+    <tr><td><b>Step</b></td><td>One thing inside a job, run top to bottom. Either <code>uses:</code> a prebuilt action, or <code>run:</code> a shell command.</td></tr>
+    <tr><td><b>Runner</b></td><td>The machine a job runs on — e.g. <code>ubuntu-latest</code>. GitHub provides Linux, macOS, and Windows runners.</td></tr>
+  </table>
+
+  <h2><span class="num">4</span>What it looks like (this repo)</h2>
+  <p>Here is the <em>top</em> of this project's real workflow — just the "when" and
+  the start of the "what". You already know every keyword:</p>
+
+  <p class="filetag">.github/workflows/examples-sweep.yml (excerpt)</p>
+  <pre><code><span class="tok-kw">name</span>: Rust examples sweep
+
+<span class="tok-kw">on</span>:                          <span class="tok-com"># the triggers</span>
+  <span class="tok-kw">push</span>:
+    <span class="tok-kw">branches</span>: [main, <span class="tok-str">'feat/**'</span>]
+    <span class="tok-kw">paths-ignore</span>: [<span class="tok-str">'**.md'</span>]  <span class="tok-com"># docs-only change? skip the heavy sweep</span>
+  <span class="tok-kw">workflow_dispatch</span>:           <span class="tok-com"># a manual "Run workflow" button</span>
+  <span class="tok-kw">schedule</span>:
+    - <span class="tok-kw">cron</span>: <span class="tok-str">'17 6 * * 1'</span>      <span class="tok-com"># every Monday, automatically</span>
+
+<span class="tok-kw">jobs</span>:                        <span class="tok-com"># the work</span>
+  <span class="tok-fn">examples-sweep</span>:
+    <span class="tok-kw">runs-on</span>: ${{ matrix.os }}   <span class="tok-com"># a fresh ubuntu / macos / windows runner</span>
+    <span class="tok-kw">steps</span>:
+      - <span class="tok-kw">uses</span>: actions/checkout@v4   <span class="tok-com"># step 1: grab the code</span>
+      - <span class="tok-kw">run</span>: bash runtime-rust/scripts/examples-sweep.sh  <span class="tok-com"># step 2: run the sweep</span></code></pre>
+
+  <p>Read it in English: <em>"On every push to <code>main</code> or a
+  <code>feat/*</code> branch (unless only docs changed), or when I click the button,
+  or every Monday — on a fresh Ubuntu/macOS/Windows machine, check out the code and
+  run the sweep script."</em> That's a complete CI pipeline, and you can already
+  follow it.</p>
+
+  <div class="callout gotcha"><span class="tag">Notice</span>
+  <code>paths-ignore: ['**.md']</code> — a real, practical touch. The sweep is
+  expensive, so a commit that only edits Markdown docs skips it. Small details like
+  this are most of what "writing good CI" actually is, and Course 2 is full of them.</div>
+
+  <h2><span class="num">5</span>What "green" means (and doesn't)</h2>
+  <p>A green check means: <em>every step the workflow ran finished successfully.</em>
+  It does <strong>not</strong> automatically mean the code is correct — only that
+  whatever checks you wrote passed. CI is exactly as good as the checks you give it.
+  That's why this repo's sweep doesn't just build — it also <em>runs</em> each
+  example and compares it against the Go reference (you'll meet that in Lesson 4).</p>
+
+  <h2><span class="num">6</span>Check yourself</h2>
+  <div class="quiz" id="q1">
+    <div class="q">1. What is a "runner"?</div>
+    <button data-ok="0">A person who approves the build</button>
+    <button data-ok="1">A fresh machine GitHub spins up to run your workflow</button>
+    <button data-ok="0">The YAML file describing the automation</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q2">
+    <div class="q">2. In <code>examples-sweep.yml</code>, why does
+    <code>paths-ignore: ['**.md']</code> exist?</div>
+    <button data-ok="1">So a docs-only commit skips the expensive sweep</button>
+    <button data-ok="0">To ignore Markdown syntax errors</button>
+    <button data-ok="0">To stop the workflow from ever running</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q3">
+    <div class="q">3. A green check guarantees the code is correct. True or false?</div>
+    <button data-ok="0">True — green always means correct</button>
+    <button data-ok="1">False — it only means the checks you wrote passed</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>CI = a server automatically runs the same checks on every change, on a fresh machine, and reports green/red on the commit.</li>
+      <li>Five words: <b>workflow</b> (the file), <b>trigger</b> (<code>on:</code>), <b>job</b> (work on one runner), <b>step</b> (<code>uses:</code>/<code>run:</code>), <b>runner</b> (the machine).</li>
+      <li>You can already read this repo's <code>on:</code> + first job in plain English.</li>
+      <li>Green means "the checks passed", not "the code is correct" — CI is only as good as its checks.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Want to watch a real run? Ask your teacher to point you at this repo's
+    <em>Actions</em> tab, or to walk through one failed run and how to read its logs.</p>
+  </div>
+
+  <div class="pager">
+    <a href="index.html">← Course 2 roadmap</a>
+    <a class="none">next</a>
+  </div>
+
+  <footer class="fin">Lesson 1 · grounded in <code>.github/workflows/examples-sweep.yml</code>.</footer>
+
+</div>
+
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

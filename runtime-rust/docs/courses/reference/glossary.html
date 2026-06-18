@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glossary · Sky → Rust courses</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <span>Glossary</span><span class="spacer"></span>
+    <span class="badge">reference</span>
+  </div>
+
+  <h1><span class="eyebrow">Shared vocabulary</span>Glossary</h1>
+  <p class="lede">The words both courses lean on. Skim it once; come back when a
+  term bites. Compiler terms first, then runtime, then CI.</p>
+
+  <h2><span class="num">1</span>Compiler &amp; language</h2>
+  <table>
+    <tr><th>Term</th><th>Meaning</th></tr>
+    <tr><td><b>Sky</b></td><td>An Elm-family, pure-functional language. Source files end in <code>.sky</code>. Compiles to typed Go (the reference backend) and — on this fork — to Rust.</td></tr>
+    <tr><td><b>Backend / target</b></td><td>The thing the compiler emits. <code>--backend go</code> (default) or <code>--backend rust</code>. (Distinct from <code>--target</code>, which is the cross-compile triple like <code>x86_64-unknown-linux-musl</code>.)</td></tr>
+    <tr><td><b>Token stream</b></td><td>The flat list of lexical pieces (keywords, identifiers, literals, layout markers) the <b>lexer</b> produces from raw text, before structure is recovered.</td></tr>
+    <tr><td><b>AST</b></td><td>Abstract Syntax Tree — the program as a tree of nodes (a definition holds an expression holds a call holds arguments…). Sky has several: <b>source</b>, <b>canonical</b>.</td></tr>
+    <tr><td><b>Source AST</b></td><td>The tree straight out of the parser — names are still unresolved (a bare <code>println</code>, not yet "the Log kernel"). Type <code>Sky.AST.Source.Module</code>.</td></tr>
+    <tr><td><b>Canonicalisation</b></td><td>Name resolution. Turns the source AST into the <b>canonical AST</b> where every name is qualified: a call is a <code>VarKernel</code>, a <code>VarTopLevel</code>, or a local. Function <code>canonicaliseWithDeps</code>.</td></tr>
+    <tr><td><b>Canonical AST</b></td><td>The resolved tree codegen actually walks. Type <code>Sky.AST.Canonical</code> (a.k.a. <code>Can.*</code>). Nodes you'll meet: <code>Can.Call</code>, <code>Can.VarKernel</code>, <code>Can.Binop</code>, <code>Can.Int</code>, <code>Can.Def</code>.</td></tr>
+    <tr><td><b>HM type inference</b></td><td>Hindley–Milner — the algorithm that infers a type for every expression without you writing annotations. Sky's solver lives in <code>Sky.Type.Solve</code>; it produces <code>SolvedTypes</code>.</td></tr>
+    <tr><td><b>SolvedTypes</b></td><td>The solver's output codegen consumes: an environment (name → type) plus <b>region types</b> (a source location → the type inferred there). Lets codegen pick the right Rust type at each spot.</td></tr>
+    <tr><td><b>Lowering</b></td><td>Translating a higher-level form into a lower-level one. Here: canonical AST → Rust source strings. The Builder modules do the lowering.</td></tr>
+    <tr><td><b>Kernel</b></td><td>A built-in stdlib operation backed by a hand-written runtime function — e.g. <code>String.fromInt</code>, <code>println</code>, <code>List.map</code>. The compiler routes a kernel call to its Rust runtime fn.</td></tr>
+    <tr><td><b>Kernel routing</b></td><td>The map from a Sky kernel <code>(module, name)</code> to a Rust runtime function name. The single source of truth is <code>kernelToRust</code> in <code>Builder/Kernel.hs</code> (e.g. <code>("String","fromInt") → "string_from_int"</code>).</td></tr>
+    <tr><td><b>Shape</b></td><td>The kind of program an example is, by how it runs: <b>cli</b>, <b>server</b> (HTTP), <b>live</b> (Sky.Live web UI), <b>tui</b> (terminal UI), <b>webview</b> (desktop). Each shape lowers a bit differently and is verified differently.</td></tr>
+    <tr><td><b>Task</b></td><td>Sky's effect type, <code>Task Error a</code>. Every observable side effect returns one. In Rust it becomes <code>SkyTask&lt;E, A&gt;</code>, an async future executed at the program entry via <code>block_on</code>.</td></tr>
+  </table>
+
+  <h2><span class="num">2</span>The Builder modules <span class="src">(src/Sky/Generate/Rust/Builder/)</span></h2>
+  <table>
+    <tr><th>Module</th><th>Owns</th></tr>
+    <tr><td><code>ModuleEmitter.hs</code></td><td>Top level. <code>buildProgram</code> drives every module; <code>buildModule</code> turns a module's declarations into Rust items; detects <code>main</code> and whether it returns a Task.</td></tr>
+    <tr><td><code>ExprEmitter.hs</code></td><td>The biggest module. Turns one expression into a Rust string — <code>exprToRustString</code> / <code>exprToRustInner</code> handle calls, kernels, binops, closures, deferred effects.</td></tr>
+    <tr><td><code>Kernel.hs</code></td><td>Kernel routing — <code>kernelToRust</code>. The lookup table from Sky kernel to Rust runtime fn name.</td></tr>
+    <tr><td><code>TypeRenderer.hs</code></td><td>Renders a Sky type as a Rust type string — <code>typeToRustString</code> (<code>Int → i64</code>, <code>Task _ a → SkyTask&lt;…&gt;</code>).</td></tr>
+    <tr><td><code>TypeEmitter.hs</code></td><td>Emits Sky union/record definitions as Rust <code>enum</code>s / <code>struct</code>s.</td></tr>
+    <tr><td><code>Emitter.hs</code></td><td>Assembles everything into the final <code>main.rs</code> + module files, and writes <code>Cargo.toml</code> — <code>emitRust</code>, <code>emitCargoToml</code>.</td></tr>
+    <tr><td><code>Naming.hs</code></td><td>Name mangling — <code>toSnakeCase</code>, <code>moduleNameToRust</code>, escaping Rust keywords.</td></tr>
+    <tr><td><code>Pattern.hs</code></td><td>Lowers patterns (a <code>case</code> arm, a destructuring param) to Rust match/param syntax.</td></tr>
+    <tr><td><code>Walker.hs</code></td><td>Pre-pass that scans the AST to collect metadata — which kernels are used (drives Cargo features), zero-arg defs, record shapes.</td></tr>
+    <tr><td><code>SigRegistry.hs</code></td><td>Hard-coded Rust signatures for known runtime fns — used to pin generic type params on a call.</td></tr>
+    <tr><td><code>Types.hs</code></td><td>The data structures: <code>RustBuilder</code> (accumulated output), <code>EmitCtx</code> (per-expression context), <code>UsedKernels</code> (feature gates).</td></tr>
+  </table>
+
+  <h2><span class="num">3</span>Runtime &amp; build</h2>
+  <table>
+    <tr><th>Term</th><th>Meaning</th></tr>
+    <tr><td><b>Runtime crate</b></td><td><code>runtime-rust/src/sky_runtime/</code> — the hand-written Rust library every kernel call lands in (<code>string.rs</code>, <code>log.rs</code>, <code>task.rs</code>, <code>db.rs</code>, …). Copied into each generated project at build time.</td></tr>
+    <tr><td><b>Generated project</b></td><td>The Rust crate the compiler writes to <code>sky-out/Rust/</code>: <code>main.rs</code> + module files + <code>Cargo.toml</code> + a copy of the runtime + FFI bindings. <code>cargo</code> builds it into a binary.</td></tr>
+    <tr><td><b>Feature gate</b></td><td>A Cargo feature that conditionally compiles part of the runtime. A CLI program doesn't pull in <code>axum</code>/<code>sqlx</code> — <code>Walker.hs</code> decides which features <code>Emitter.hs</code> turns on.</td></tr>
+    <tr><td><b>FFI</b></td><td>Foreign Function Interface — calling Rust crates from Sky. Sky's FFI is automatic: point <code>sky.toml</code> at a crate, the compiler reads its <code>rustdoc</code> JSON and generates bindings. Async/framework crates use a thin <b>wrapper crate</b>.</td></tr>
+    <tr><td><b>Equivalence (equiv)</b></td><td>The correctness gate: the Rust build of an example must behave identically to the Go build (same stdout / HTTP body / browser scenario / TUI run), per its shape.</td></tr>
+  </table>
+
+  <h2><span class="num">4</span>CI <span class="src">(GitHub Actions)</span></h2>
+  <table>
+    <tr><th>Term</th><th>Meaning</th></tr>
+    <tr><td><b>CI</b></td><td>Continuous Integration — automatically building and testing your code on a server every time it changes, so breakage is caught immediately.</td></tr>
+    <tr><td><b>GitHub Actions</b></td><td>GitHub's built-in CI. You describe what to run in YAML files under <code>.github/workflows/</code>; GitHub runs them on its machines (<b>runners</b>).</td></tr>
+    <tr><td><b>Workflow</b></td><td>One YAML file describing automation: when it runs (<code>on:</code>) and what it does (<code>jobs:</code>). This repo's is <code>.github/workflows/examples-sweep.yml</code>.</td></tr>
+    <tr><td><b>Job</b></td><td>A unit of work that runs on one fresh runner. Jobs run in parallel unless one <code>needs</code> another. This repo has <code>examples-sweep</code>, <code>examples-perf-sweep</code>, <code>static-perf</code>, <code>update-readme</code>.</td></tr>
+    <tr><td><b>Step</b></td><td>One command or action inside a job, run in order. A step is either <code>uses:</code> (a prebuilt action) or <code>run:</code> (a shell command).</td></tr>
+    <tr><td><b>Trigger</b></td><td>What starts a workflow: <code>push</code>, <code>pull_request</code>, <code>workflow_dispatch</code> (manual button), <code>schedule</code> (cron).</td></tr>
+    <tr><td><b>Matrix</b></td><td>Run the same job many times with different inputs — here, the same sweep across <code>ubuntu</code>, <code>macos</code>, <code>windows</code>.</td></tr>
+    <tr><td><b>Artifact</b></td><td>A file a job uploads so later jobs (or you) can download it — here, the sweep result tables and perf TSVs.</td></tr>
+    <tr><td><b>Cache</b></td><td>Saved files restored on the next run to avoid recompiling the world (the cargo target dir, the cabal store).</td></tr>
+  </table>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Missing a term, or want one expanded with an example? Ask your teacher and
+    this glossary grows.</p>
+  </div>
+
+  <footer class="fin">Glossary · Sky → Rust courses · print to PDF for a desk reference.</footer>
+
+</div>
+</body>
+</html>
