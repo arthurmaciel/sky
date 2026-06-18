@@ -349,14 +349,18 @@ steps.
 ### Domain docs
 
 **Of the `.md` files at `runtime-rust/` root, only `CLAUDE.md` and `README.md`
-exist.** Everything that matters for the future — new design decisions, progress
-conclusions that inform later decisions (not archaeology), TODO/checklist items,
-the roadmap and future plan, the soundness/decision ledger, the glossary —
-lives in **`README.md`** (structured per the `prune-archaeology` house style:
-tables / bullets / `[ ]`-todo-lists / schemas over prose). Do NOT create new
-standalone root `.md` files; fold the content into `README.md`. (`docs/` subdir
-files — `docs/adr/` (kept for future ADRs), the surviving specs, etc. — are
-exempt; this rule is the root only.) The `update-docs` skill enforces this.
+exist.** `README.md` is the SLIM user-facing document (intro · usage · FFI usage ·
+static · the examples/static tables · glossary); the DEEP internals (architecture,
+soundness model, error type, verification, FFI coercion rules, build-perf,
+allocator 2×2) live in **`docs/TECHNICAL-DETAILS.md`**; history lives in
+**`docs/PROGRESS.md`**. Both `README.md` and `TECHNICAL-DETAILS.md` are structured
+per the `prune-archaeology` house style (tables / bullets / `[ ]`-todo-lists /
+schemas over prose) and reconciled together each `update-docs` run. Do NOT create
+new standalone root `.md` files; fold user-facing content into `README.md`,
+internals into `docs/TECHNICAL-DETAILS.md`, history into `docs/PROGRESS.md`.
+(`docs/` subdir files — `docs/adr/` (kept for future ADRs), the surviving specs,
+etc. — are exempt; the root-only rule is the two-file cap.) The `update-docs`
+skill enforces this.
 
 General skills enabled:
 - `/grill-me` — stress-test plans and designs

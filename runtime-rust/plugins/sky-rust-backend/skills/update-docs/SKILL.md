@@ -99,9 +99,9 @@ Drift accumulates exactly in the sections recent work *didn't* touch, so a
 **High-drift sections that have gone stale and MUST be rebuilt from current
 state every run** (verified stale in practice — do not trust their prose):
 
-- `## API surface vs the Go backend` — what Rust covers vs Go drifts as kernels land.
-- `## Sky.Live on Rust (P0–P6 shipped)` — the P-tier list silently ages; re-derive shipped tiers from `git log` + the runtime, don't carry the old count/heading.
-- `## Soundness, correctness and security problems` — fixed problems linger as open; re-audit against the current runtime + codegen and delete what's resolved.
+- `## Project status` — the `N green · M red` headline drifts as examples land/break (the badge is live, but the editorial count + sweep-summary table age); re-derive from the latest scoreboard.
+- `## Known limitations` — fixed limitations linger as open; re-audit against the current runtime + codegen and delete what's resolved.
+- `docs/TECHNICAL-DETAILS.md` → `## Soundness, correctness and security` — fixed problems linger as open; re-audit and delete what's resolved (this file is reconciled alongside README every run).
 
 **Run `sky-rust-backend:prune-archaeology` over the README** as you rewrite — it
 owns the cut-history + structure-over-prose discipline (tables / bullets /
@@ -133,43 +133,42 @@ these rules over EVERY section:
 - [ ] Any example marked ✅ that no longer exists, or ❌ that now passes? → correct the mark.
 - [ ] Any section that contradicts another? → reconcile to the true value.
 
-Then update it to reflect **today's actual state**. The README must contain these
-sections (rewrite each from scratch based on what you observe in the repo):
+Then update it to reflect **today's actual state**. README is now a SLIM
+user-facing document; the deep internals live in `docs/TECHNICAL-DETAILS.md` (see
+"Second maintained file" below). The README must contain ONLY these `##` sections,
+in this order (rewrite each from current truth):
 
-1. **Architecture** — pipeline diagram (Sky → Haskell → AST → Rust codegen → binary).
-2. **Modification boundaries** — which directories are in-scope without permission.
-3. **Cross-backend rules** — the 6 load-bearing rules (Go = production, never
-   break Go, Go FFI at `.skycache/ffi/` root, Rust in `.skycache/ffi/rust/`, etc.).
-4. **`sky.toml` Rust fields** — all active sections: `[project]`, `["rust.dependencies"]`,
-   `[rust]`, `[rust.shims]` with annotated examples.
-5. **Project status** — the headline + the sweep-summary-by-mode + the **full
-   examples table** (the `examples-sweep` rows, one per example). The
-   **sweep-summary-by-mode table gets a leading `Shape` column** (the shape/mode
-   each row corresponds to, as the FIRST column). Canonical examples-table column
-   order: **Build · Run · Example · Shape · Round-trip · Equiv · Thru ↑ · RSS ↓ ·
-   Cold ↓ · Bin ↓**. The `Equiv` column is **MERGED** (no separate `Notes`
-   column): a single emoji for the equiv result — **✅** when equiv succeeded (any
-   `equiv-*` value: equiv-stdout / equiv-body / equiv-scenario / equiv-pty /
-   equiv-serve); **❌** when equiv failed (DIFFER); **`n/a`** when not applicable
-   (none / — / go-ref-broken / amber). When the result is ❌ or `n/a`, APPEND the
-   note text after the emoji (e.g. `n/a — non-deterministic cli: prints a
-   wall-clock …`); when ✅, show just ✅ (drop the note). Build/Run are **per-row**
-   emoji (✅/❌) — check each row from the latest sweep table, never a blanket
-   "all ✅". The four Perf columns are Rust/Go ratios from the latest
-   `examples-perf-sweep` TSV (Thru = throughput ↑better; RSS/Cold/Bin ↓better);
-   `—` = shape unmeasured, `n/a` = measured but the probe couldn't compare.
-   Sources: `~/.cache/sky/examples-sweep/sweep-*.table` (build/run/equiv) +
-   `~/.cache/sky/examples-perf-sweep/perf-*.tsv` (perf ratios) + `docs/PROGRESS.md` +
-   `git log`.
-6. **Verification state** — the `runtime-rust/tests/sky/` FFI/framework fixture set
-   (a sentence + count) + the runtime unit-test fact (`cargo test --features full`).
-   The per-example PARITY table lives under Project status (item 5), not here.
-7. **FFI codegen coercion rules** — `argCall` and `coerceRet` tables (from
-   `src/Sky/Build/FfiGen.hs emitRustFnSimple`).
-8. **CLI usage** — `sky build/run/check/test/add` with `--backend rust`. Place this
-   section immediately AFTER `## Goal` (settled README section order).
-9. **Known limitations** — table with Description and Workaround columns.
-10. **Remaining work** — Short / Medium / Long term.
+1. **`## Contract`** — maintainer-owned, ABOVE `## Getting started`. NEVER touch it.
+2. **`## Getting started`** — the 3-OS install (Linux/macOS/Windows) + Clone +
+   Fast-build env + Build the compiler + Running the examples + CLI reference. Keep
+   GHC de-pinned (`GHC >= 9.6.7`), the cross-OS "continue with" anchor links, the
+   macOS musl command inside a code block, the `Why:` bullet block.
+3. **`## Project status`** — the live sweep **badge** + the `N green · M red`
+   headline + the **Round-trip / Perf-columns / Equiv-modes legend tables** + the
+   `### Sweep summary (by equivalence mode)` table + the `### Examples` table. The
+   examples table, the perf verdict, and the cross-OS static table are
+   **`AUTOGEN`-fenced** (see the Second Boundary) — do NOT hand-write them; their
+   editorial columns come from `runtime-rust/scripts/readme-examples.tsv`.
+   Build/Run are a hardcoded ✅ snapshot (the CI writer only runs on a green sweep);
+   the live per-example pass/fail is the badge's run summary.
+4. **`## Static & cross compilation`** — static usage + the static-build matrix +
+   the `AUTOGEN:static-table` + the local size-benchmark table + the 1-line
+   allocator summary that links to the 2×2 in TECHNICAL-DETAILS.
+5. **`## FFI usage`** — the auto-FFI lead + `### sky.toml Rust fields` + the
+   "Reaching async / framework crates" wrapper-crate note.
+6. **`## Known limitations`** — table with Description and Workaround columns.
+7. **`## Glossary`** — term table.
+
+**Second maintained file — `docs/TECHNICAL-DETAILS.md`.** The deep sections
+(`## Architecture` incl. modification boundaries + cross-backend rules + FFI
+coercion rules, `## Verification state`, `## Error type`, `## Soundness,
+correctness and security`, `## Build performance & DX`, `## Allocator 2×2
+measurement`) live THERE, not in README. Reconcile BOTH files each run: README
+stays the slim user-facing snapshot; TECHNICAL-DETAILS holds the internals. Read
+`docs/PROGRESS.md` (moved from the root) as the history input. Sources for the
+Project-status data: `~/.cache/sky/examples-sweep/sweep-*.table` (build/run/equiv)
++ `~/.cache/sky/examples-perf-sweep/perf-*.tsv` (perf ratios) + `docs/PROGRESS.md`
++ `git log`.
 
 (No "Module structure" section and no "Safety invariant" section — neither is
 mandated nor produced; do not re-add them.)
