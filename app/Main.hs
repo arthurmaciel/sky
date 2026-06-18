@@ -1140,6 +1140,51 @@ checkWebviewLibsRust rustDir
                     exitFailure
 
 
+-- | Plan a `[rust] static` (or `SKY_RUST_STATIC=1`) build for `--target rust`.
+-- Returns Right (extra cargo args, target-triple subdir for the binary path) or
+-- Left a refusal message. Per-OS matrix:
+--   Linux   → musl target (true static, static-pie) + the `static_alloc`
+--             feature (mimalloc global allocator — offsets musl's slower malloc).
+--   Windows → `-C target-feature=+crt-static` via RUSTFLAGS (static MSVC CRT).
+--   macOS   → DEGRADE to a native dynamic binary (Apple ships no static libc) +
+--             a warning explaining how to cross-compile a Linux static artifact.
+--   webview → REFUSE (links the system WebKit/WebView2 — cannot be static).
+planRustStatic :: Bool -> FilePath -> IO (Either String ([String], FilePath))
+planRustStatic tomlStatic rustDir = do
+    envStatic <- maybe False (`elem` ["1", "true"]) <$> System.Environment.lookupEnv "SKY_RUST_STATIC"
+    if not (tomlStatic || envStatic)
+      then return (Right ([], ""))   -- not requested → default dynamic build, no-op
+      else do
+        let mainRs = rustDir </> "src" </> "main.rs"
+        isWebview <- do
+            ok <- doesFileExist mainRs
+            if ok then ("webview_app" `isInfixOf`) <$> readFile' mainRs else return False
+        if isWebview
+          then return (Left (unlines
+                [ "error: static build requested but this is a Sky.Webview app, which links"
+                , "       the system WebKit/WebView2 and cannot be built fully static."
+                , "  Remove `[rust] static` (or drop the webview backend) and rebuild." ]))
+          else case System.Info.os of
+            "linux"   -> return (Right (["--features", "static_alloc", "--target", "x86_64-unknown-linux-musl"], "x86_64-unknown-linux-musl/"))
+            "mingw32" -> do
+                System.Environment.setEnv "RUSTFLAGS" "-C target-feature=+crt-static"
+                return (Right ([], ""))
+            "darwin"  -> do
+                hPutStrLn stderr (unlines
+                    [ "warning: static build is unsupported on macOS (Apple ships no static libc) —"
+                    , "         building a DYNAMIC native binary instead."
+                    , "  To produce a LINUX static deploy artifact from macOS, cross-compile:"
+                    , "    brew install FiloSottile/musl-cross/musl-cross"
+                    , "    rustup target add x86_64-unknown-linux-musl"
+                    , "    cargo build --release --target x86_64-unknown-linux-musl \\"
+                    , "      --manifest-path " ++ rustDir ++ "/Cargo.toml --features static_alloc"
+                    , "  (the resulting ELF runs on Linux, not macOS.)" ])
+                return (Right ([], ""))
+            other     -> do
+                hPutStrLn stderr ("warning: static build: unknown OS " ++ other ++ "; building a dynamic binary.")
+                return (Right ([], ""))
+
+
 -- | Split a list into N roughly-equal chunks. Used by the install
 -- chunked-multi strategy. Filters out empty chunks so callers don't
 -- spawn no-op subprocesses.
@@ -1766,9 +1811,11 @@ runCommand cmd = case cmd of
                         -- same version).
                         System.Environment.setEnv "SKY_VERSION" skyBuildVersion
                         checkWebviewLibsRust rustDir
+                        (staticArgs, targetSub) <- planRustStatic (Toml._rustStatic config') rustDir
+                            >>= either (\m -> hPutStrLn stderr m >> exitFailure) return
                         putStrLn "Running cargo build..."
-                        callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
-                        putStrLn $ "Build complete: " ++ rustDir ++ "/target/debug/sky-app"
+                        callProcess "cargo" (["build", "--manifest-path", rustDir ++ "/Cargo.toml"] ++ staticArgs)
+                        putStrLn $ "Build complete: " ++ rustDir ++ "/target/" ++ targetSub ++ "debug/sky-app"
                         -- Epic A1: for a Sky.Live app, pre-build the bundled
                         -- console binary into the version-keyed cache so the
                         -- Live runtime's reverse-proxy can spawn it. One-time
@@ -1812,17 +1859,20 @@ runCommand cmd = case cmd of
                         let rustDir = outDir ++ "/Rust"
                         hFlush stdout
                         checkWebviewLibsRust rustDir
+                        (staticArgs, targetSub) <- planRustStatic (Toml._rustStatic config') rustDir
+                            >>= either (\m -> hPutStrLn stderr m >> exitFailure) return
                         putStrLn $ "Running cargo build in " ++ rustDir
-                        callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"]
+                        callProcess "cargo" (["build", "--manifest-path", rustDir ++ "/Cargo.toml"] ++ staticArgs)
                         putStrLn $ "Build complete, running..."
                         hFlush stdout
                         -- Honour a shared CARGO_TARGET_DIR (the recommended DX:
                         -- one target dir for every example). cargo built into it
                         -- above, so the binary lives there, NOT under sky-out/
-                        -- (mirrors `sky watch`'s Rust path).
+                        -- (mirrors `sky watch`'s Rust path). A static build nests
+                        -- the binary under the target-triple subdir (musl).
                         mTargetDir <- System.Environment.lookupEnv "CARGO_TARGET_DIR"
                         let targetBase = maybe (rustDir ++ "/target") id mTargetDir
-                            binPath = targetBase ++ "/debug/sky-app"
+                            binPath = targetBase ++ "/" ++ targetSub ++ "debug/sky-app"
                         hasBin <- doesFileExist binPath
                         if hasBin
                             then callProcess binPath []

@@ -47,6 +47,7 @@ data SkyConfig = SkyConfig
     , _logLevel      :: !String           -- [log] level: debug | info (default) | warn | error
     , _envPrefix     :: !String           -- [env] prefix: namespace for runtime SKY_* env reads (default "SKY")
     , _sqlxTls       :: !String           -- [rust] sqlx_tls: "rustls" (default) | "native-tls"
+    , _rustStatic    :: !Bool             -- [rust] static: build a fully-static binary (musl Linux / crt-static Windows). Opt-in; default False.
     }
     deriving (Show)
 
@@ -79,6 +80,7 @@ defaultConfig = SkyConfig
     , _logLevel      = ""
     , _envPrefix     = ""
     , _sqlxTls       = "rustls"
+    , _rustStatic    = False
     }
 
 
@@ -166,6 +168,7 @@ applyKeyValue section config key value = case section of
     -- [rust] section: Rust target configuration
     "rust" -> case key of
         "sqlx_tls" -> config { _sqlxTls = value }
+        "static"   -> config { _rustStatic = value == "true" }   -- TOML bool: `static = true`
         _          -> config
     -- Top-level / [source] / [project] — project metadata.
     _ -> case key of
