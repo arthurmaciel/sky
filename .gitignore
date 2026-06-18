@@ -138,3 +138,7 @@ cabal.project.local
 # skydex code-index DB (generated; per-machine; refreshed on sync-with-upstream)
 .skydex/
 tools/skydex/target/
+
+# Python bytecode (readme-tables.py / ffi_audit.py byte-compile)
+__pycache__/
+*.pyc

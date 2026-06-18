@@ -47,6 +47,18 @@ rule here is mandatory, not optional. Current settled rules:
     THIS file (also no history/dates).
   - `update-docs` mirrors current status into `README.md` from `PROGRESS.md` +
     `git log` + the actual source (typically a background session when called).
+  - **Machine-owned fenced regions** — `<!-- AUTOGEN:<id> BEGIN -->` … `<!-- AUTOGEN:<id> END -->`
+    blocks are written ONLY by `runtime-rust/scripts/readme-tables.py` from the CI
+    sweep result files, NEVER by hand and NEVER by update-docs. Current region:
+    `AUTOGEN:static-table` (the cross-OS static-build table) — the CI `update-readme`
+    job regenerates + auto-commits it (`[skip ci]`) after each `static-perf` run.
+    update-docs treats fenced regions as read-only data and leaves them alone; it
+    owns the prose AROUND them. This keeps ONE source of truth for the table DATA
+    (CI result TSVs → the generator) and another for the PROSE (update-docs), so
+    the two never fight. The examples/perf table is deliberately NOT auto-written —
+    its noisy per-run numbers must stay consistent with adjacent hand-written perf
+    headlines, so CI only runs `readme-tables.py headline-check` to FLAG its drift
+    (job summary) and update-docs reconciles table + prose together.
   - Allowed `runtime-rust/` root `.md` files: **`CLAUDE.md`, `README.md`,
     `PROGRESS.md`** — nothing else.
 

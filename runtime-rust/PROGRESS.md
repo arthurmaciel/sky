@@ -17,6 +17,51 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-18 — CI→README automation: AUTOGEN fences + generator + update-readme job + cron
+
+**What.** Automated the README's machine-generated tables off the CI sweep data,
+so they no longer rot between hand-runs of update-docs.
+
+- **`runtime-rust/scripts/readme-tables.py`** (new) — the single writer of the
+  README's fenced `AUTOGEN` regions. `static` subcommand regenerates the cross-OS
+  static-build table from the three `static-perf-<OS>-*.tsv` artifacts (recursive
+  glob under `--results`); `--write` splices it between the
+  `<!-- AUTOGEN:static-table … -->` fences, `--check` exits 3 on drift. Self-emits
+  its own "do-not-hand-edit" note as the first body line so the warning survives
+  every regen. `headline-check` subcommand reports (job-summary markdown, always
+  exit 0) whether the committed sweep headline / perf numbers have drifted — it
+  does NOT write.
+- **README** — wrapped the static cross-OS table in `AUTOGEN:static-table` fences.
+  Verified the generator round-trips the committed table byte-identically from a
+  reconstructed TSV set (faithful transform: K-sizes, Static/Dyn ratios incl. the
+  macOS `*`, `dyn→static` perf cells, ✅/❌ build).
+- **`.github/workflows/examples-sweep.yml`** —
+  - `schedule:` weekly cron (`17 6 * * 1`); perf + static-perf `if:` now also fire
+    on `schedule`; every checkout pins `ref: feat/runtime-rust` on schedule (GitHub
+    runs cron only from the default branch's workflow copy).
+  - per-push **README sync check** step (ubuntu, non-gating, always-exit-0) runs
+    `headline-check` into the job summary so drift is visible on every push.
+  - new **`update-readme`** job (`needs: static-perf`, `permissions: contents:
+    write`, dispatch+schedule): downloads the `static-perf-*` artifacts, runs the
+    generator `--write`, and on a real diff commits `… [skip ci]` + pushes to
+    feat/runtime-rust. `[skip ci]` + the GITHUB_TOKEN no-recursion rule prevent a
+    trigger loop; the `**.md` paths-ignore keeps the docs commit from re-running
+    the sweep.
+
+**Why static-only auto-write.** The static table is pure CI-only data (no host
+makes it locally) with no adjacent volatile prose → safe to overwrite. The
+examples/perf table is intentionally left hand-written (update-docs): its noisy
+per-run perf numbers sit beside editorial perf headlines only update-docs can keep
+consistent, so a blind auto-write would desync table ↔ prose (a correctness
+regression). CI flags its drift instead of overwriting it.
+
+**Affected.** `runtime-rust/scripts/readme-tables.py` (new),
+`runtime-rust/README.md` (static-table fences), `.github/workflows/examples-sweep.yml`,
+`runtime-rust/CLAUDE.md` (settled-rule: AUTOGEN fences),
+`runtime-rust/plugins/sky-rust-backend/skills/update-docs/SKILL.md` (second boundary).
+
+---
+
 ## 2026-06-18 — Rename: `--target`→`--backend` (backend); `--target`=cross triple
 
 **Why.** The fork introduced `--target` + `CompileTarget` in the founding Rust

@@ -50,6 +50,16 @@ on:
     paths-ignore:
       - '**.md'
   workflow_dispatch:
+  schedule:
+    # Weekly refresh of the dispatch-only perf + static-perf measurements AND the
+    # auto-synced README static table. Mondays 06:17 UTC (~03:17 America/Sao_Paulo,
+    # inside the 22:00–08:00 sweep night-window). NOTE: GitHub runs scheduled
+    # workflows ONLY from the *default branch's* copy of this file — so the cron
+    # fires only if `examples-sweep.yml` exists on the fork's default branch. The
+    # perf / static-perf / update-readme jobs force `ref: feat/runtime-rust` on
+    # schedule so they always operate on the Rust branch regardless of which branch
+    # the schedule fires from. (workflow_dispatch is the reliable manual trigger.)
+    - cron: '17 6 * * 1'
 
 # Supersede an in-flight run on the same ref (a newer push wins) — saves runner
 # minutes without cancelling unrelated branches.
@@ -106,7 +116,11 @@ jobs:
       CARGO_NET_RETRY: '5'
 
     steps:
+      # On a scheduled run `github.ref` is the default branch — force the Rust
+      # branch so the sweep tests feat/runtime-rust, not the default branch.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'feat/runtime-rust' || github.ref }}
 
       # ── ripgrep — REQUIRED by the sweep's is_out_of_scope Go-FFI filter ─────
       # Without it the scope scan silently fails → Go-FFI examples leak into the
@@ -302,6 +316,23 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit 0
 
+      # ── README drift check (ubuntu reference host, non-gating) ──────────────
+      # Reads the just-produced scoreboard + perf TSVs from the local sweep cache
+      # and reports — in the job summary — whether the committed README sweep
+      # headline / perf numbers have drifted, so `sky-rust-backend:update-docs` is
+      # run to reconcile the table AND its prose. NEVER writes (the perf table sits
+      # next to hand-written prose only update-docs keeps consistent) and NEVER
+      # fails the job (headline-check always exits 0). Ubuntu only — the reference
+      # host the README reflects.
+      - name: README sync check (sweep headline / perf)
+        if: always() && matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          {
+            python3 runtime-rust/scripts/readme-tables.py headline-check \
+              --results "$HOME/.cache/sky" || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # ── Scoreboard table artifact (always upload, even on a RED verdict) ────
       - name: Upload sweep scoreboard
         if: always()
@@ -322,7 +353,7 @@ jobs:
   # build on a ratio. Run it deliberately, read the artifact.
   # ───────────────────────────────────────────────────────────────────────────
   examples-perf-sweep:
-    if: github.repository == 'arthurmaciel/sky' && github.event_name == 'workflow_dispatch'
+    if: github.repository == 'arthurmaciel/sky' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
     name: examples-perf-sweep (ubuntu, non-gating)
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -344,6 +375,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'feat/runtime-rust' || github.ref }}
       # rg — the perf sweep's example_shape (lib/examples.sh) uses ripgrep.
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
@@ -424,9 +457,10 @@ jobs:
   # per-OS TSV + md artifact. Never fails the overall workflow (informational).
   # ───────────────────────────────────────────────────────────────────────────
   static-perf:
-    # workflow_dispatch ONLY — never on push/PR (3-OS musl builds are slow + CI
-    # perf is noisy; run it deliberately to refresh the README static table).
-    if: github.repository == 'arthurmaciel/sky' && github.event_name == 'workflow_dispatch'
+    # workflow_dispatch + weekly schedule — never on push/PR (3-OS musl builds are
+    # slow + CI perf is noisy; run it deliberately / on the cron to refresh the
+    # README static table, which the update-readme job auto-commits afterwards).
+    if: github.repository == 'arthurmaciel/sky' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
     name: static-perf (${{ matrix.os }}, non-gating)
     runs-on: ${{ matrix.os }}
     continue-on-error: true
@@ -449,6 +483,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'feat/runtime-rust' || github.ref }}
 
       # ── ripgrep — static-perf.sh uses `rg` for port-sniffing + log scanning ──
       - name: Install ripgrep
@@ -557,3 +593,67 @@ jobs:
             ~/.cache/sky/static-perf/*.md
             ~/.cache/sky/static-perf/*.log
           if-no-files-found: warn
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # UPDATE-README — the ONE auto-writer of a fenced README region. After the
+  # cross-OS static-perf jobs finish, it downloads their TSV artifacts and runs
+  # `readme-tables.py static --write`, which regenerates ONLY the
+  # `<!-- AUTOGEN:static-table … -->` region from the fresh data. If the table
+  # changed it commits `[skip ci]` and pushes to feat/runtime-rust. This is the
+  # only table auto-written: it is pure CI-only data (no host can produce it
+  # locally) with no adjacent hand-written prose to desync. The examples/perf
+  # table is intentionally NOT auto-written — its noisy per-run numbers sit next
+  # to editorial perf headlines that only `update-docs` can keep consistent, so
+  # the per-push "README sync check" step flags its drift instead.
+  # ───────────────────────────────────────────────────────────────────────────
+  update-readme:
+    if: github.repository == 'arthurmaciel/sky' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+    name: update-readme (static table auto-sync)
+    runs-on: ubuntu-latest
+    # static-perf is a 3-OS matrix with continue-on-error; this job runs after it
+    # and the generator simply renders whichever OS TSVs arrived.
+    needs: static-perf
+    permissions:
+      contents: write
+    steps:
+      # Operate on the Rust branch. On schedule `github.ref` is the default branch;
+      # force feat/runtime-rust. On dispatch use the ref the user dispatched from.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'feat/runtime-rust' || github.ref_name }}
+          fetch-depth: 0
+
+      # Pull every static-perf-<os> artifact into one flat dir; the generator
+      # globs `static-perf-<Label>-*.tsv` recursively.
+      - name: Download static-perf artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: static-perf-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Regenerate the README static table
+        shell: bash
+        run: |
+          python3 runtime-rust/scripts/readme-tables.py static \
+            --results artifacts --readme runtime-rust/README.md --write
+
+      - name: Commit & push if the table changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- runtime-rust/README.md; then
+            echo "README static table already in sync — nothing to commit." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          BRANCH="${{ github.event_name == 'schedule' && 'feat/runtime-rust' || github.ref_name }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add runtime-rust/README.md
+          # [skip ci] + the GITHUB_TOKEN no-recursion rule both prevent a trigger loop.
+          git commit -m "docs(rust): auto-sync README static table from CI [skip ci]"
+          git push origin "HEAD:${BRANCH}"
+          {
+            echo "### README static table auto-synced"
+            echo "Committed the refreshed \`AUTOGEN:static-table\` region to \`${BRANCH}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

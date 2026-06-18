@@ -54,6 +54,18 @@ reflow a single line above `## Getting started`). This skill regenerates ONLY th
 sections from `## Getting started` to the end. Before writing, find the `## Getting started`
 line and treat every line before it as read-only.
 
+**SECOND BOUNDARY — machine-owned `AUTOGEN` fences are read-only here too.** Any
+`<!-- AUTOGEN:<id> BEGIN -->` … `<!-- AUTOGEN:<id> END -->` block is written ONLY
+by `runtime-rust/scripts/readme-tables.py` from the CI sweep result files (the CI
+`update-readme` job auto-commits it). NEVER hand-edit content between those fences
+— regenerate it instead: `python3 runtime-rust/scripts/readme-tables.py static`.
+You own the PROSE around each fence (captions, headlines, analysis), the generator
+owns the table DATA inside it. Current region: `AUTOGEN:static-table` (the cross-OS
+static-build table). The examples/perf table is NOT fenced — keep writing it by
+hand so its numbers stay consistent with the perf-headline prose right below it
+(the per-push `headline-check` only FLAGS its drift; reconciling table + prose is
+this skill's job).
+
 **Enforce the root-`.md` policy first.** At `runtime-rust/` root, ONLY
 `CLAUDE.md`, `README.md`, and `PROGRESS.md` may exist. `PROGRESS.md` is the
 history/archaeology sink — an INPUT to this skill, never folded INTO the README
