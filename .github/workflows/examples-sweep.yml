@@ -277,6 +277,7 @@ jobs:
           set +e +o pipefail
           HIST="$HOME/.cache/sky/examples-sweep"
           table="$(ls -t "$HIST"/sweep-*.table 2>/dev/null | head -1)"
+          warns="$(ls -t "$HIST"/warnings-*.tsv 2>/dev/null | head -1)"
           verdict="$(grep -h '=== VERDICT:' "$HIST"/run-*.log 2>/dev/null | tail -1 | sed 's/^=== //; s/ ===.*$//')"
           {
             echo "## examples-sweep — ${{ matrix.os }}"
@@ -286,6 +287,17 @@ jobs:
               echo '```'; cat "$table"; echo '```'
             else
               echo "_No sweep table found (see the \"Run examples sweep\" step log)._"
+            fi
+            # Cargo warnings past the generated `#![allow(unused, non_snake_case)]`
+            # — each is a genuine codegen defect. Surfaces the cross-OS truth.
+            if [ -n "$warns" ] && [ -f "$warns" ]; then
+              total="$(awk -F'\t' '{s+=$2} END{print s+0}' "$warns")"
+              echo; echo "### Cargo warnings (past \`#![allow]\`): ${total} total"
+              if [ "${total:-0}" -gt 0 ]; then
+                echo '```'; awk -F'\t' '$2>0 {printf "%-28s %s\n", $1, $2}' "$warns"; echo '```'
+              else
+                echo "_Clean — 0 warnings across every built example._"
+              fi
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit 0
@@ -298,6 +310,7 @@ jobs:
           name: examples-sweep-${{ matrix.os }}
           path: |
             ~/.cache/sky/examples-sweep/sweep-*.table
+            ~/.cache/sky/examples-sweep/warnings-*.tsv
             ~/.cache/sky/examples-sweep/*.log
             ~/.cache/sky/examples-sweep/*.equiv
             ~/.cache/sky/examples-sweep/*.equiv.*

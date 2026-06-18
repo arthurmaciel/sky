@@ -109,6 +109,7 @@ reap; sync
 
 # ── build_rust <dir> <example> → 0=ok; sets BUILD_CELL to the failure word ───
 BUILD_CELL=""
+WARN_CELL=0   # cargo-warning count of the LAST successful build_rust (past #![allow])
 build_rust() {
   # SKY_SWEEP_BUILD_TIMEOUT overrides the per-example ceiling. The 180 s default
   # assumes a warm sccache (true locally). A COLD CI run cold-compiles the whole
@@ -151,7 +152,16 @@ build_rust() {
   if [ "$ok" != 1 ]; then
     BUILD_CELL="sky-fail"; return 1
   fi
-  if ( cd "$d" && timeout 600 cargo build --manifest-path sky-out/Rust/Cargo.toml -q >"$HIST/$n.rust.cargo.log" 2>&1 ); then
+  # No `-q`: we need rustc's diagnostics in the log to count warnings. Every
+  # generated crate carries `#![allow(unused, non_snake_case)]` — the
+  # conventional generated-code suppression of Sky's camelCase identifiers +
+  # stdlib glob-reexport noise. So a warning that LEAKS PAST that allow is a
+  # genuine codegen defect (e.g. private-shadows-glob, irrefutable_let_patterns),
+  # surfaced + gated in the verdict. WARN_CELL = rustc's own per-crate
+  # "generated N warnings" summary (authoritative; 0 when the line is absent).
+  if ( cd "$d" && timeout 600 cargo build --manifest-path sky-out/Rust/Cargo.toml >"$HIST/$n.rust.cargo.log" 2>&1 ); then
+    WARN_CELL="$(rg -o 'generated [0-9]+ warning' "$HIST/$n.rust.cargo.log" 2>/dev/null | rg -o '[0-9]+' | tail -1)"
+    : "${WARN_CELL:=0}"
     BUILD_CELL="ok"; return 0
   fi
   BUILD_CELL="cargo-fail"; return 1
@@ -342,6 +352,7 @@ fi
 # ── Sweep: one row per example, columns BUILD·RUN·EQUIV (+ NOTE) ─────────────
 say ""; say ">>> EXAMPLES SWEEP  (build_set DERIVED in lib/examples.sh; equiv modes DERIVED + overrides in equiv-classification.tsv)"
 ROWS="$HIST/rows-$STAMP.tsv"; : >"$ROWS"
+WARNS="$HIST/warnings-$STAMP.tsv"; : >"$WARNS"   # name<TAB>cargo-warning-count (past #![allow])
 DCUR=""   # current example dir (for run_for's live dispatch)
 
 for d in "${EXAMPLES[@]}"; do
@@ -361,6 +372,7 @@ for d in "${EXAMPLES[@]}"; do
     ( cd "$d" && rm -rf sky-out .skycache .skydeps ); continue
   fi
   build_cell="ok"
+  printf '%s\t%s\n' "$n" "${WARN_CELL:-0}" >>"$WARNS"   # record cargo-warning count (past #![allow])
   rbin="$(resolve_bin "$d")"
 
   if [ "$BUILD_ONLY" = 1 ] || [ -z "$rbin" ]; then
@@ -425,19 +437,34 @@ TOTAL="$(wc -l < "$ROWS" | tr -d ' ')"
 
 EQ_BREAK="stdout=${EQ_COUNT[stdout]:-0} body=${EQ_COUNT[body]:-0} scenario=${EQ_COUNT[scenario]:-0} serve=${EQ_COUNT[serve]:-0} pty=${EQ_COUNT[pty]:-0} n/a=${EQ_COUNT[na]:-0} go-ref-broken=${EQ_COUNT[goref]:-0}"
 
+# ── Cargo-warning tally (warnings that LEAK PAST the generated `#![allow]`) ──
+# Each is a genuine codegen defect, so the sweep surfaces per-example counts and
+# FAILS on any nonzero total. SKY_SWEEP_WARN_GATE=0 downgrades to report-only.
+WARN_TOTAL=0; WARN_ROWS=""
+if [ -f "$WARNS" ]; then
+  while IFS=$'\t' read -r wn wc; do
+    [ "${wc:-0}" -gt 0 ] 2>/dev/null || continue
+    WARN_TOTAL=$((WARN_TOTAL + wc)); WARN_ROWS="$WARN_ROWS $wn($wc)"
+  done < "$WARNS"
+fi
+WARN_FAIL=0
+[ "$WARN_TOTAL" -gt 0 ] && [ "${SKY_SWEEP_WARN_GATE:-1}" != 0 ] && WARN_FAIL=1
+
 say ""
 say "  summary: $GREEN green · $RED red · $SKIP skipped (of $TOTAL) · amber go-ref-broken=$AMBER"
 say "  equiv-mode breakdown: $EQ_BREAK"
-say "  full table: $TABLE"
+say "  cargo warnings (past #![allow]): $WARN_TOTAL total${WARN_ROWS:+ —$WARN_ROWS}"
+say "  full table: $TABLE · warnings: $WARNS"
 
 # ── HIST scoreboard (one line per run, like the sibling sweeps) ─────────────
 SCORE="$HIST/scoreboard.tsv"
 printf '%s\tgreen=%s\tred=%s\tskip=%s\tamber=%s\t%s\n' "$STAMP" "$GREEN" "$RED" "$SKIP" "$AMBER" "$EQ_BREAK" >>"$SCORE"
 
-if [ "$RED" -gt 0 ]; then
-  say "  RED rows (build/run/equiv failure — investigate or swarm-fix):${RED_ROWS}"
-  say ""; say "=== VERDICT: FAIL ($RED red row(s)) ==="
+if [ "$RED" -gt 0 ] || [ "$WARN_FAIL" = 1 ]; then
+  [ "$RED" -gt 0 ] && say "  RED rows (build/run/equiv failure — investigate or swarm-fix):${RED_ROWS}"
+  [ "$WARN_FAIL" = 1 ] && say "  WARNING rows (codegen defect past #![allow] — root-cause fix):${WARN_ROWS}"
+  say ""; say "=== VERDICT: FAIL ($RED red row(s), $WARN_TOTAL cargo warning(s)) ==="
   exit 1
 fi
-say ""; say "=== VERDICT: PASS · no red row · table=$TABLE ==="
+say ""; say "=== VERDICT: PASS · no red row · $WARN_TOTAL cargo warning(s) · table=$TABLE ==="
 exit 0
