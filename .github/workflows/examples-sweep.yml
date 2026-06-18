@@ -92,6 +92,12 @@ jobs:
       # raised in step too.
       SKY_SWEEP_BUILD_TIMEOUT: '900'
       SKY_SWEEP_BUILD_TIMEOUT_FFI: '2400'
+      # Cargo network resilience: the runners flake on crates.io with
+      # "[16] Error in the HTTP2 framing layer". Disabling HTTP/2 multiplexing is
+      # the known fix; bump the retry count for the rest. (build_rust also retries
+      # a transient registry/network failure as a backstop.)
+      CARGO_HTTP_MULTIPLEXING: 'false'
+      CARGO_NET_RETRY: '5'
 
     steps:
       - uses: actions/checkout@v4
@@ -307,6 +313,8 @@ jobs:
       SKY_NO_SCCACHE: '1'
       SKY_SWEEP_FORCE: '1'
       SKY_AUTH_TOKEN_SECRET: sky-ci-sweep-test-secret-0123456789-abcdef
+      CARGO_HTTP_MULTIPLEXING: 'false'
+      CARGO_NET_RETRY: '5'
       # A representative 3-shape subset keeps the perf job bounded on CI.
       RUST_PERF_QUICK: '1'
 

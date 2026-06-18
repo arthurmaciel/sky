@@ -30,12 +30,12 @@ real backend (firestore / async-stripe / rs-firebase-admin-sdk).
 
 | Fn | Sky signature | Stub returns |
 |----|---------------|--------------|
-| `fs_get_doc(collection, id)` | `String -> String -> Result String (Dict String String)` | `products` → matching canned product row (`_status=ok`) or `_status=not_found`; other collections → `{_status:ok, id}` |
-| `fs_set_doc(collection, id, fields_json)` | `String -> String -> String -> Result String String` | echoes `id` (validates `fields_json` parses) |
-| `fs_delete_doc(collection, id)` | `String -> String -> Result String String` | echoes `id` |
-| `fs_query(collection)` | `String -> Result String (List (Dict String String))` | `products` → 6 canned rows; else `[]` |
-| `fs_query_where(collection, field, op, value)` | `String -> String -> String -> String -> Result String (List (Dict String String))` | `products` filtered by exact-match on `field` (`published` always passes); else `[]` |
-| `fs_query_where_order(collection, field, op, value, order_field, dir)` | `String -> String -> String -> String -> String -> String -> Result String (List (Dict String String))` | as `fs_query_where` + numeric-aware sort on `order_field`, `dir=desc` reverses |
+| `fs_get_doc(collection, id)` | `String -> String -> Result Error (Dict String String)` | `products` → matching canned product row (`_status=ok`) or `_status=not_found`; other collections → `{_status:ok, id}` |
+| `fs_set_doc(collection, id, fields_json)` | `String -> String -> String -> Result Error String` | echoes `id` (validates `fields_json` parses) |
+| `fs_delete_doc(collection, id)` | `String -> String -> Result Error String` | echoes `id` |
+| `fs_query(collection)` | `String -> Result Error (List (Dict String String))` | `products` → 6 canned rows; else `[]` |
+| `fs_query_where(collection, field, op, value)` | `String -> String -> String -> String -> Result Error (List (Dict String String))` | `products` filtered by exact-match on `field` (`published` always passes); else `[]` |
+| `fs_query_where_order(collection, field, op, value, order_field, dir)` | `String -> String -> String -> String -> String -> String -> Result Error (List (Dict String String))` | as `fs_query_where` + numeric-aware sort on `order_field`, `dir=desc` reverses |
 
 Canned product row keys: `_status, id, title, summary, category, price_amount,
 price_currency (GBP), price_discount (0), price_tax (0), stock, published (true)`.
@@ -44,9 +44,9 @@ price_currency (GBP), price_discount (0), price_tax (0), stock, published (true)
 
 | Fn | Sky signature | Stub returns |
 |----|---------------|--------------|
-| `stripe_create_checkout_session(cart_id, customer_email, line_items_json, success_url, cancel_url)` | `String -> String -> String -> String -> String -> Result String (Dict String String)` | `{_status:ok, id: cs_test_stub_<cart>, url: <success_url>}` |
-| `stripe_create_customer(email, name)` | `String -> String -> Result String String` | `cus_test_stub_<email-slug>` |
-| `stripe_retrieve_session(session_id)` | `String -> Result String (Dict String String)` | always PAID+complete: `{_status, status=complete, payment_status=paid, customer_name, customer_email, customer_phone, shipping_line1, shipping_line2, shipping_city, shipping_country, shipping_postal_code}` |
+| `stripe_create_checkout_session(cart_id, customer_email, line_items_json, success_url, cancel_url)` | `String -> String -> String -> String -> String -> Result Error (Dict String String)` | `{_status:ok, id: cs_test_stub_<cart>, url: <success_url>}` |
+| `stripe_create_customer(email, name)` | `String -> String -> Result Error String` | `cus_test_stub_<email-slug>` |
+| `stripe_retrieve_session(session_id)` | `String -> Result Error (Dict String String)` | always PAID+complete: `{_status, status=complete, payment_status=paid, customer_name, customer_email, customer_phone, shipping_line1, shipping_line2, shipping_city, shipping_country, shipping_postal_code}` |
 
 `line_items_json` = flat JSON array of `{title,amount,quantity,currency}`.
 
@@ -54,4 +54,4 @@ price_currency (GBP), price_discount (0), price_tax (0), stock, published (true)
 
 | Fn | Sky signature | Stub returns |
 |----|---------------|--------------|
-| `fb_verify_id_token(id_token)` | `String -> Result String (Dict String String)` | empty token → `Err`; else `{_status:ok, uid: uid_stub_<hash>, email, name}` |
+| `fb_verify_id_token(id_token)` | `String -> Result Error (Dict String String)` | empty token → `Err`; else `{_status:ok, uid: uid_stub_<hash>, email, name}` |

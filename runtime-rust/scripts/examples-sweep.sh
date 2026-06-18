@@ -139,6 +139,13 @@ build_rust() {
        grep -qiE 'Access is denied \(os error 5\)|failed to remove file' "$HIST/$n.rust.sky.log"; then
       _win_reap_app; sleep 3; continue
     fi
+    # Transient cargo registry / network flake (any OS — e.g. crates.io
+    # "download of config.json failed", "Error in the HTTP2 framing layer",
+    # connection reset/timeout). Not a build error — back off + retry.
+    if [ "$attempt" -lt 4 ] && \
+       grep -qiE 'unable to update registry|download of .* failed|curl failed|HTTP2 framing|spurious network error|Connection reset|operation timed out|failed to get response' "$HIST/$n.rust.sky.log"; then
+      sleep 5; continue
+    fi
     break
   done
   if [ "$ok" != 1 ]; then
