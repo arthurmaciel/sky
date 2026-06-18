@@ -353,13 +353,13 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                    monoTys = map monoTy solvedParamTys
                in if length solvedParamTys == length params && all isJust monoTys
                then let pStrs = zipWith3
-                            (\i p mt -> fst (patternToRustArg i p) ++ ": " ++ fromMaybe "String" mt)
+                            (\i p mt -> fst (patternToRustArg (ecSingleVariantEnums ctx) i p) ++ ": " ++ fromMaybe "String" mt)
                             [0..] params monoTys
                     in (pStrs, "")
                else case knownDefSig modPrefix name n of
                    Just (paramTypes, retType) ->
                         let argTriples = zipWith3
-                                (\i p t -> let (nm, pre) = patternToRustArg i p
+                                (\i p t -> let (nm, pre) = patternToRustArg (ecSingleVariantEnums ctx) i p
                                            in (nm ++ ": " ++ t, pre))
                                 [0..] params paramTypes
                             safeParams = map fst argTriples
@@ -390,7 +390,7 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
                            -- (rendered "name: type", was-inferred?, Maybe generic-decl)
                            renderP i p =
                                let tn = "T" ++ show i
-                                   (nm, _pre) = patternToRustArg i p
+                                   (nm, _pre) = patternToRustArg (ecSingleVariantEnums ctx) i p
                                    pn = pnOf p
                                    -- open-record (TEA model) param → concrete struct
                                    openRec = solvedAt i >>= resolveOpenRecordParam (ecRecordMap ctx)
@@ -435,9 +435,9 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         paramStrs' = case (params, paramStrs) of
             ((p0 : _), (_ : rest))
                 | Set.member name (ecLiveReqInitFns ctx) ->
-                    (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
+                    (fst (patternToRustArg (ecSingleVariantEnums ctx) 0 p0) ++ ": sky_runtime::LiveReq") : rest
                 | Set.member name (ecLiveInitFns ctx) ->
-                    (fst (patternToRustArg 0 p0) ++ ": ()") : rest
+                    (fst (patternToRustArg (ecSingleVariantEnums ctx) 0 p0) ++ ": ()") : rest
             _ -> paramStrs
         -- Whether this is the program's entry `main` (used by `entryMainNeedsLift`
         -- below to reconcile a unit-tailed `main` against its forced `SkyTask<()>`
@@ -540,7 +540,7 @@ defToRustItem ctx modPrefix (Can.Def (Ann.At _ name) params body) =
         -- Collect destructure preludes for non-trivial pattern args. The
         -- prelude is `let <Pattern> = __pN else { unreachable!() };` per
         -- patternToRustArg. Empty for PVar/PAnything/PTuple params.
-        preludes = concat [ snd (patternToRustArg i p) | (i, p) <- zip [0..] params ]
+        preludes = concat [ snd (patternToRustArg (ecSingleVariantEnums ctx) i p) | (i, p) <- zip [0..] params ]
         -- S6: When the function returns SkyTask<T> but the body tail is a
         -- bare value (not already a Task expression), wrap in task_succeed({...}).
         -- Walk through let chains to find the tail expression, then check
@@ -658,7 +658,7 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         pats  = map (\(p, t) -> (p, applyAny t)) pats0
         retTy = applyAny retTy0
         argTriples = zipWith
-            (\i (pat, ty) -> let (nm, pre) = patternToRustArg i pat
+            (\i (pat, ty) -> let (nm, pre) = patternToRustArg (ecSingleVariantEnums ctx) i pat
                              in (nm ++ ": " ++ paramTypeToRust rm ty, pre))
             [0..] pats
         params0 = map fst argTriples
@@ -670,9 +670,9 @@ defToRustItem ctx _modPrefix (Can.TypedDef (Ann.At _ name) _ pats0 body retTy0) 
         params = case (pats, params0) of
             (((p0, _) : _), (_ : rest))
                 | Set.member name (ecLiveReqInitFns ctx) ->
-                    (fst (patternToRustArg 0 p0) ++ ": sky_runtime::LiveReq") : rest
+                    (fst (patternToRustArg (ecSingleVariantEnums ctx) 0 p0) ++ ": sky_runtime::LiveReq") : rest
                 | Set.member name (ecLiveInitFns ctx) ->
-                    (fst (patternToRustArg 0 p0) ++ ": ()") : rest
+                    (fst (patternToRustArg (ecSingleVariantEnums ctx) 0 p0) ++ ": ()") : rest
             _ -> params0
         preludes = concatMap snd argTriples
         -- `main : Task Error ()` lowers to `sky_main() -> SkyTask<()>` so the
@@ -1045,7 +1045,14 @@ buildProgram mods solvedTypes perModuleEnv regionTypes kernelAliases liveStore l
             , Can.Ctor ctorName _ _ fieldTys <- Can._u_alts union
             ]
 
-        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveReqInitFns = liveReqInitFns, ecUsesBackendApp = usesBackendApp, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "", ecStructFields = structFields, ecForcedClosureParam = Nothing, ecEnclosingRet = Nothing, ecGenParams = [], ecNameRenames = nameRenames, ecIndexedHofClosure = False, ecBinaryHofClosure = False, ecInResultCtorArg = False }
+        -- Single-variant Rust enum names (e.g. StdMoneyMoney) — derived from the
+        -- SAME REnumDef list patternToRustPattern names enums from, so membership
+        -- is directly comparable. A function-arg destructure of a single-variant
+        -- enum is irrefutable → patternToRustArg drops its dead let-else guard.
+        singleVariantEnums = Set.fromList
+            [ n | REnumDef n _ vs <- existingTypes, length vs == 1 ]
+
+        ctx = EmitCtx { ecRecordMap = recordMap, ecSolvedTypes = solvedTypes, ecRegionTypes = regionTypes, ecExpectedType = Nothing, ecInGenericFn = False, ecCloneVars = Set.empty, ecCopyVars = Set.empty, ecPipeInnerType = Nothing, ecUsesTaskRun = usesTaskRun usage, ecZeroArgDefs = zeroArgDefs, ecNoCloneVars = noCloneVars, ecCtorArity = ctorArity, ecSingleVariantEnums = singleVariantEnums, ecCtorFieldTypes = ctorFieldTypes, ecKernelAliases = kernelAliases, ecLiveInitFns = liveInitFns, ecLiveReqInitFns = liveReqInitFns, ecUsesBackendApp = usesBackendApp, ecLiveStore = (liveStore, liveStorePath), ecModuleEnv = Map.empty, ecAppMsg = appMsg, ecAppModel = appModel, ecClosureDefs = Map.empty, ecReturnElem = Nothing, ecSiblingFns = Map.empty, ecCurrentModule = "", ecStructFields = structFields, ecForcedClosureParam = Nothing, ecEnclosingRet = Nothing, ecGenParams = [], ecNameRenames = nameRenames, ecIndexedHofClosure = False, ecBinaryHofClosure = False, ecInResultCtorArg = False }
         -- Multi-module signature scoping. The flat `ecSolvedTypes` (`_stEnv`)
         -- collides on bare names across modules, so a DEP module's function
         -- (e.g. `Lib.Db.exec : String -> List String -> Task Error ()`) whose

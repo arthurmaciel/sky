@@ -435,6 +435,10 @@ data EmitCtx = EmitCtx
     , ecZeroArgDefs :: Set.Set (String, String)  -- (modPrefix, name) for zero-arg definitions
     , ecNoCloneVars :: Set.Set String  -- vars whose types don't implement Clone (e.g. Decoder)
     , ecCtorArity :: Map.Map String Int  -- alias name -> field count (for succeed curry wrapping)
+    , ecSingleVariantEnums :: Set.Set String
+        -- Rust enum names with exactly one variant. A function-argument PCtor
+        -- destructure of such a type is irrefutable, so patternToRustArg drops
+        -- its dead `else { unreachable!() }` (kills `irrefutable_let_patterns`).
     , ecCtorFieldTypes :: Map.Map String [Can.Type]
         -- Sub-A.13: ADT constructor name -> declared field types (from unions).
         -- Lets a ctor call propagate a concrete field type into an empty-

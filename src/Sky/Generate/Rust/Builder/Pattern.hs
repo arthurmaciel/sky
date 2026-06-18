@@ -9,6 +9,7 @@ module Sky.Generate.Rust.Builder.Pattern
   ) where
 
 import Data.List (intercalate)
+import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Reporting.Annotation as Ann
 import qualified Sky.Sky.ModuleName as ModuleName
@@ -91,16 +92,44 @@ patternToRustPattern (Ann.At _ pat) = case pat of
 -- get a synthesised `__pN` parameter and a destructure prelude.
 --
 -- Rust's `let <pattern> = <expr> else { unreachable!() };` accepts both
--- irrefutable and refutable patterns; the else branch is dead code when
--- the pattern is irrefutable (single-variant enum), and dead by
--- exhaustiveness when the pattern is refutable (the Sky type-checker
--- already proved this on the calling side).
-patternToRustArg :: Int -> Can.Pattern -> (String, String)
-patternToRustArg _ pat@(Ann.At _ (Can.PVar _))       = (patternToRustParam pat, "")
-patternToRustArg _ pat@(Ann.At _ Can.PAnything)      = (patternToRustParam pat, "")
-patternToRustArg _ pat@(Ann.At _ (Can.PTuple _ _ _)) = (patternToRustParam pat, "")
-patternToRustArg idx pat =
+-- irrefutable and refutable patterns. When the pattern is provably
+-- irrefutable (every ctor is the sole variant of its enum), the `else`
+-- arm is dead and rustc fires `irrefutable_let_patterns`; we drop it to a
+-- plain `let`. When the pattern is refutable — Sky (unlike Elm) ALLOWS a
+-- refutable arg pattern, e.g. `f (Just x) = …` — the `else` is REQUIRED
+-- (a refutable plain `let` is E0005), so we keep it; it stays dead by the
+-- caller's exhaustiveness. `singleVarEnums` is the set of single-variant
+-- Rust enum names (from builderTypes); an empty set conservatively keeps
+-- every `else` (always compiles).
+patternToRustArg :: Set.Set String -> Int -> Can.Pattern -> (String, String)
+patternToRustArg _ _ pat@(Ann.At _ (Can.PVar _))       = (patternToRustParam pat, "")
+patternToRustArg _ _ pat@(Ann.At _ Can.PAnything)      = (patternToRustParam pat, "")
+patternToRustArg _ _ pat@(Ann.At _ (Can.PTuple _ _ _)) = (patternToRustParam pat, "")
+patternToRustArg singleVarEnums idx pat =
     let paramName = "__p" ++ show idx
         rustPat = patternToRustPattern pat
-        prelude = "let " ++ rustPat ++ " = " ++ paramName ++ " else { unreachable!() }; "
+        elseClause = if patternIsIrrefutable singleVarEnums pat
+                     then ""
+                     else " else { unreachable!() }"
+        prelude = "let " ++ rustPat ++ " = " ++ paramName ++ elseClause ++ "; "
     in (paramName, prelude)
+
+-- | A function-argument pattern is irrefutable iff every constructor in it is
+-- the SOLE variant of its enum (the destructure can never fail) AND every
+-- sub-pattern is itself irrefutable. Conservative by construction: a
+-- multi-variant ctor, a literal, or an enum absent from the single-variant set
+-- yields False — keeping the `else { unreachable!() }` guard (which always
+-- compiles). Only a True result drops the else.
+patternIsIrrefutable :: Set.Set String -> Can.Pattern -> Bool
+patternIsIrrefutable singleVarEnums = go
+  where
+    go (Ann.At _ p) = case p of
+        Can.PVar _          -> True
+        Can.PAnything       -> True
+        Can.PTuple a b rest -> all go (a : b : rest)
+        Can.PCtor{Can._p_home = mod', Can._p_type = ty, Can._p_args = args} ->
+            let modPrefix' = map (\c -> if c == '.' then '_' else c) (ModuleName._name mod')
+                enumName    = toCamelCase (modPrefix' ++ "_" ++ ty)
+            in Set.member enumName singleVarEnums
+               && all (\(Can.PatternCtorArg _ _ sp) -> go sp) args
+        _ -> False
