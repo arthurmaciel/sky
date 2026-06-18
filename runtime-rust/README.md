@@ -1057,27 +1057,29 @@ target: **Linux** `x86_64-unknown-linux-musl` (native) · **Windows**
 three OS; `Thru`/`RSS`/`Cold` (static-vs-dynamic) on **Linux only** — a macOS
 cross-build produces a *Linux* binary that can't run on the macOS host, and the
 Windows runner has no `ab`/RSS harness. Webview examples are excluded — they link
-the system WebKit/WebView2 and cannot statically link. (macOS `Bin` is blank: the
-size probe used GNU `stat -c%s`, unavailable on macOS — but the cross artifact *is*
-the `linux-musl` binary, so its size ≈ the Linux `Bin` column.)
+the system WebKit/WebView2 and cannot statically link. The macOS `Static/Dyn`
+ratios carry a `*`: they compare the **cross** `linux-musl` static binary against
+the **native** macOS dynamic binary — a cross-platform size reference, not a
+like-for-like host comparison (the macOS `Bin` column is the Linux-ELF artifact's
+size, ≈ the Linux `Bin` column as expected).
 
 | OS | Example | Shape | Build | Bin (static) | Static/Dyn | Thru s/d | RSS s/d (MB) | Cold d→s (ms) |
 |---|---|---|:-:|--:|--:|--:|--:|--:|
 | Linux | 01-hello-world | cli | ✅ | 810K | 1.45 | — | — | 4→4 |
-| Linux | 15-http-server | server | ✅ | 1991K | 1.15 | 11727→11977 | 4→12 | — |
-| Linux | 18-job-queue | live | ✅ | 9152K | 1.01 | 9347→9158 | 106→130 | — |
+| Linux | 15-http-server | server | ✅ | 1991K | 1.15 | 74050→76300 | 5→14 | — |
+| Linux | 18-job-queue | live | ✅ | 9152K | 1.01 | 25632→26399 | 106→136 | — |
 | Linux | 21-tui-stopwatch | tui | ✅ | 910K | 1.38 | — | — | 4→4 |
-| Linux | 33-websocket-echo | server | ✅ | 2191K | 1.13 | 11618→11804 | 4→12 | — |
+| Linux | 33-websocket-echo | server | ✅ | 2191K | 1.13 | 76588→69557 | 6→14 | — |
 | Windows | 01-hello-world | cli | ✅ | 461K | 1.31 | — | — | — |
 | Windows | 15-http-server | server | ✅ | 1687K | 1.07 | — | — | — |
 | Windows | 18-job-queue | live | ✅ | 9242K | 1.01 | — | — | — |
 | Windows | 21-tui-stopwatch | tui | ✅ | 588K | 1.23 | — | — | — |
 | Windows | 33-websocket-echo | server | ✅ | 1888K | 1.06 | — | — | — |
-| macOS | 01-hello-world | cli | ✅ | — | — | — | — | — |
-| macOS | 15-http-server | server | ✅ | — | — | — | — | — |
-| macOS | 18-job-queue | live | ✅ | — | — | — | — | — |
-| macOS | 21-tui-stopwatch | tui | ✅ | — | — | — | — | — |
-| macOS | 33-websocket-echo | server | ✅ | — | — | — | — | — |
+| macOS | 01-hello-world | cli | ✅ | 806K | 1.46* | — | — | — |
+| macOS | 15-http-server | server | ✅ | 1983K | 1.26* | — | — | — |
+| macOS | 18-job-queue | live | ✅ | 9192K | 1.15* | — | — | — |
+| macOS | 21-tui-stopwatch | tui | ✅ | 902K | 1.38* | — | — | — |
+| macOS | 33-websocket-echo | server | ✅ | 2187K | 1.24* | — | — | — |
 
 All 5 shapes **build static on every OS** — including the **macOS → Linux cross**
 (the previously-unverified leg) and `tui`. On Linux all 5 also **run** static (the
