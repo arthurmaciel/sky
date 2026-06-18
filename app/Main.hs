@@ -13,7 +13,7 @@ import System.IO (hPutStr, hPutStrLn, hFlush, stdout, stderr, readFile')
 import qualified System.Directory
 import qualified System.Environment
 import qualified Language.Haskell.TH.Syntax
-import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, removeFile, renameFile, getCurrentDirectory)
+import System.Directory (canonicalizePath, createDirectoryIfMissing, doesFileExist, removeFile, renameFile, getCurrentDirectory, findExecutable)
 import System.IO.Error (catchIOError)
 import qualified Control.Concurrent
 import qualified Control.Exception
@@ -27,7 +27,7 @@ import Data.List (intercalate, isPrefixOf, isSuffixOf, isInfixOf, stripPrefix, t
 import Data.Maybe (isJust, listToMaybe, catMaybes, fromMaybe)
 import qualified Data.Maybe
 import Control.Exception (catch, SomeException)
-import Data.Char (toLower)
+import Data.Char (toLower, toUpper)
 import System.Process (callProcess, rawSystem, readProcessWithExitCode)
 import qualified System.Process
 import qualified System.IO.Temp
@@ -1140,49 +1140,157 @@ checkWebviewLibsRust rustDir
                     exitFailure
 
 
--- | Plan a `[rust] static` (or `SKY_RUST_STATIC=1`) build for `--target rust`.
--- Returns Right (extra cargo args, target-triple subdir for the binary path) or
--- Left a refusal message. Per-OS matrix:
---   Linux   → musl target (true static, static-pie) + the `static_alloc`
---             feature (mimalloc global allocator — offsets musl's slower malloc).
---   Windows → `-C target-feature=+crt-static` via RUSTFLAGS (static MSVC CRT).
---   macOS   → DEGRADE to a native dynamic binary (Apple ships no static libc) +
---             a warning explaining how to cross-compile a Linux static artifact.
---   webview → REFUSE (links the system WebKit/WebView2 — cannot be static).
-planRustStatic :: Bool -> FilePath -> IO (Either String ([String], FilePath))
-planRustStatic tomlStatic rustDir = do
+-- | The resolved build plan for `--target rust`'s static / cross dimensions.
+data RustBuildPlan
+    = RbNative            -- ^ build for the native host (no `--target`)
+    | RbTriple String     -- ^ cross / non-default triple (pass `--target <triple>`)
+    | RbDegradeMac        -- ^ static asked on macOS host → warn + native dynamic
+    | RbBadAlias String   -- ^ unrecognised platform alias → hard error
+
+-- | Plan a `--target rust` build's STATIC-linking + CROSS-compile options.
+--
+-- Inputs: `[rust] static` / `[rust] target` from sky.toml (the CLI `--static` /
+-- `--platform` flags pre-set SKY_RUST_STATIC / SKY_RUST_TARGET, which override
+-- the toml here). Returns Right (extra cargo args, target-triple subdir for the
+-- binary path) — having set any needed RUSTFLAGS / cross-linker env as a side
+-- effect — or Left a refusal / missing-toolchain message.
+--
+--   `static`  = link statically (musl on Linux, crt-static on Windows/gnu).
+--   `target`  = cross-compile platform (alias or raw triple); ORTHOGONAL to
+--               static, so e.g. `target=linux-gnu` alone is a dynamic Linux
+--               cross-build, and `static + target=linux-musl` is a static Linux
+--               artifact from any host.
+-- Webview apps are refused under static (they link the system WebKit/WebView2).
+planRustBuild :: Bool -> String -> FilePath -> IO (Either String ([String], FilePath))
+planRustBuild tomlStatic tomlTarget rustDir = do
     envStatic <- maybe False (`elem` ["1", "true"]) <$> System.Environment.lookupEnv "SKY_RUST_STATIC"
-    if not (tomlStatic || envStatic)
-      then return (Right ([], ""))   -- not requested → default dynamic build, no-op
+    envTarget <- maybe ""    id                     <$> System.Environment.lookupEnv "SKY_RUST_TARGET"
+    let wantStatic = tomlStatic || envStatic
+        platform   = if null envTarget then tomlTarget else envTarget   -- CLI/env over toml
+    if not wantStatic && null platform
+      then return (Right ([], ""))   -- neither requested → default native dynamic build
       else do
         let mainRs = rustDir </> "src" </> "main.rs"
         isWebview <- do
             ok <- doesFileExist mainRs
             if ok then ("webview_app" `isInfixOf`) <$> readFile' mainRs else return False
-        if isWebview
+        if isWebview && wantStatic
           then return (Left (unlines
                 [ "error: static build requested but this is a Sky.Webview app, which links"
                 , "       the system WebKit/WebView2 and cannot be built fully static."
-                , "  Remove `[rust] static` (or drop the webview backend) and rebuild." ]))
-          else case System.Info.os of
-            "linux"   -> return (Right (["--features", "static_alloc", "--target", "x86_64-unknown-linux-musl"], "x86_64-unknown-linux-musl/"))
-            "mingw32" -> do
-                System.Environment.setEnv "RUSTFLAGS" "-C target-feature=+crt-static"
-                return (Right ([], ""))
-            "darwin"  -> do
+                , "  Remove `[rust] static` / `--static` (or drop the webview backend)." ]))
+          else case resolveRustPlan wantStatic platform of
+            RbBadAlias a -> return (Left (unlines
+                [ "error: unknown [rust] target / --platform value: " ++ show a
+                , "  Use one of: linux-musl, linux-musl-arm64, linux-gnu, linux-gnu-arm64,"
+                , "  or a raw target triple (e.g. x86_64-unknown-linux-musl)." ]))
+            RbDegradeMac -> do
                 hPutStrLn stderr (unlines
                     [ "warning: static build is unsupported on macOS (Apple ships no static libc) —"
                     , "         building a DYNAMIC native binary instead."
-                    , "  To produce a LINUX static deploy artifact from macOS, cross-compile:"
-                    , "    brew install FiloSottile/musl-cross/musl-cross"
-                    , "    rustup target add x86_64-unknown-linux-musl"
-                    , "    cargo build --release --target x86_64-unknown-linux-musl \\"
-                    , "      --manifest-path " ++ rustDir ++ "/Cargo.toml --features static_alloc"
-                    , "  (the resulting ELF runs on Linux, not macOS.)" ])
+                    , "  To cross-build a LINUX static artifact from macOS, set the platform:"
+                    , "    [rust]"
+                    , "    static = true"
+                    , "    target = \"linux-musl\"      # or: sky build --target rust --static --platform linux-musl"
+                    , "  (needs a musl cross toolchain: brew install FiloSottile/musl-cross/musl-cross"
+                    , "   + rustup target add x86_64-unknown-linux-musl; the ELF runs on Linux, not macOS.)" ])
                 return (Right ([], ""))
-            other     -> do
-                hPutStrLn stderr ("warning: static build: unknown OS " ++ other ++ "; building a dynamic binary.")
-                return (Right ([], ""))
+            RbNative -> do
+                when (wantStatic && System.Info.os == "mingw32") $
+                    System.Environment.setEnv "RUSTFLAGS" "-C target-feature=+crt-static"
+                return (Right (staticFeatArgs wantStatic "", ""))
+            RbTriple triple -> do
+                chk <- ensureRustCrossTarget triple
+                case chk of
+                    Just err -> return (Left err)
+                    Nothing  -> do
+                        maybeSetMuslLinker triple
+                        when (wantStatic && "gnu" `isInfixOf` triple) $
+                            System.Environment.setEnv "RUSTFLAGS" "-C target-feature=+crt-static"
+                        return (Right (["--target", triple] ++ staticFeatArgs wantStatic triple, triple ++ "/"))
+  where
+    -- mimalloc (`static_alloc`) only matters for the musl path (offsets musl's
+    -- slower malloc). Enable it only when static AND musl, so other builds are
+    -- untouched.
+    staticFeatArgs static triple =
+        if static && (null triple || "musl" `isInfixOf` triple)
+            then ["--features", "static_alloc"] else []
+
+-- | Resolve the (static, platform) request to a concrete build plan.
+resolveRustPlan :: Bool -> String -> RustBuildPlan
+resolveRustPlan wantStatic platform
+    | not (null platform) = maybe (RbBadAlias platform) RbTriple (resolvePlatformAlias platform)
+    | otherwise = case System.Info.os of      -- static requested, no explicit platform → host static
+        "linux"   -> RbTriple "x86_64-unknown-linux-musl"   -- true static needs musl, not host gnu
+        "mingw32" -> RbNative                                -- crt-static handles it natively
+        "darwin"  -> RbDegradeMac                            -- no static libc
+        _         -> RbNative
+
+-- | Friendly platform alias → Rust target triple; a raw triple passes through.
+resolvePlatformAlias :: String -> Maybe String
+resolvePlatformAlias a = case a of
+    "linux-musl"       -> Just "x86_64-unknown-linux-musl"
+    "linux-musl-arm64" -> Just "aarch64-unknown-linux-musl"
+    "linux-gnu"        -> Just "x86_64-unknown-linux-gnu"
+    "linux-gnu-arm64"  -> Just "aarch64-unknown-linux-gnu"
+    _ | length (filter (== '-') a) >= 2 -> Just a   -- looks like a raw triple
+      | otherwise                       -> Nothing
+
+-- | Verify the Rust std target (and, for musl, the C cross-linker) is present;
+-- return an actionable error string if not, or Nothing when good. rustup absent
+-- → don't block (let cargo try and surface its own error).
+ensureRustCrossTarget :: String -> IO (Maybe String)
+ensureRustCrossTarget triple = do
+    (ec, out, _) <- readProcessWithExitCode "rustup" ["target", "list", "--installed"] ""
+    if ec /= ExitSuccess
+      then return Nothing
+      else if triple `notElem` lines out
+        then return (Just (unlines
+            [ "error: Rust std for target " ++ triple ++ " is not installed."
+            , "  Run:  rustup target add " ++ triple ]))
+        else if "musl" `isInfixOf` triple
+          then do
+            present <- findExecutable (muslLinkerName triple)
+            case present of
+              Just _  -> return Nothing
+              Nothing -> return (Just (unlines
+                [ "error: the musl C cross-linker " ++ show (muslLinkerName triple) ++ " is missing"
+                , "       (needed to compile this target's C dependencies)."
+                , "  Linux:  sudo apt install musl-tools        (x86_64)"
+                , "  macOS:  brew install FiloSottile/musl-cross/musl-cross" ]))
+          else return Nothing
+
+-- | The musl C cross-linker name for a triple, e.g. x86_64-linux-musl-gcc.
+muslLinkerName :: String -> String
+muslLinkerName triple = takeWhile (/= '-') triple ++ "-linux-musl-gcc"
+
+-- | Point cargo at the musl cross-linker (if present) for this triple.
+maybeSetMuslLinker :: String -> IO ()
+maybeSetMuslLinker triple = when ("musl" `isInfixOf` triple) $ do
+    let lk = muslLinkerName triple
+    present <- findExecutable lk
+    case present of
+      Just _  -> System.Environment.setEnv (cargoLinkerEnvVar triple) lk
+      Nothing -> return ()   -- ensureRustCrossTarget already errored if truly missing
+
+-- | The CARGO_TARGET_<TRIPLE>_LINKER env-var name for a triple.
+cargoLinkerEnvVar :: String -> String
+cargoLinkerEnvVar triple = "CARGO_TARGET_" ++ map shout triple ++ "_LINKER"
+  where shout c = if c == '-' then '_' else toUpper c
+
+-- | Strip the Rust-build CLI sugar (`--static`, `--platform <p>` /
+-- `--platform=<p>`) from argv BEFORE optparse-applicative (strict on unknown
+-- flags) parses it, setting the SKY_RUST_STATIC / SKY_RUST_TARGET env vars the
+-- build path reads. Keeps `--target rust` (the backend selector) free of clash.
+preprocessRustBuildFlags :: [String] -> IO [String]
+preprocessRustBuildFlags = go []
+  where
+    go acc [] = return (reverse acc)
+    go acc ("--static" : rest)       = System.Environment.setEnv "SKY_RUST_STATIC" "1" >> go acc rest
+    go acc ("--platform" : v : rest) = System.Environment.setEnv "SKY_RUST_TARGET" v   >> go acc rest
+    go acc (a : rest)
+      | Just v <- stripPrefix "--platform=" a = System.Environment.setEnv "SKY_RUST_TARGET" v >> go acc rest
+      | otherwise                             = go (a : acc) rest
 
 
 -- | Split a list into N roughly-equal chunks. Used by the install
@@ -1290,13 +1398,16 @@ main = do
     -- `sky` with no arguments should print the help screen and exit 0
     -- instead of a bare "Missing: (COMMAND)" error. Inject `--help`
     -- into argv when none is present.
-    args <- System.Environment.getArgs
+    -- Strip the Rust-build CLI sugar (`--static` / `--platform`) → env vars, so
+    -- the strict optparse parser below never sees them. Then parse the CLEANED
+    -- args via execParserPure (execParser would re-read the raw argv).
+    args <- preprocessRustBuildFlags =<< System.Environment.getArgs
     result <- if null args
         then do
             _ <- handleParseResult $ execParserPure defaultPrefs opts ["--help"]
             return (Right ())
         else do
-            cmd <- execParser opts
+            cmd <- handleParseResult $ execParserPure defaultPrefs opts args
             runCommand cmd
     case result of
         Right () -> exitSuccess
@@ -1811,7 +1922,7 @@ runCommand cmd = case cmd of
                         -- same version).
                         System.Environment.setEnv "SKY_VERSION" skyBuildVersion
                         checkWebviewLibsRust rustDir
-                        (staticArgs, targetSub) <- planRustStatic (Toml._rustStatic config') rustDir
+                        (staticArgs, targetSub) <- planRustBuild (Toml._rustStatic config') (Toml._rustTarget config') rustDir
                             >>= either (\m -> hPutStrLn stderr m >> exitFailure) return
                         putStrLn "Running cargo build..."
                         callProcess "cargo" (["build", "--manifest-path", rustDir ++ "/Cargo.toml"] ++ staticArgs)
@@ -1859,7 +1970,7 @@ runCommand cmd = case cmd of
                         let rustDir = outDir ++ "/Rust"
                         hFlush stdout
                         checkWebviewLibsRust rustDir
-                        (staticArgs, targetSub) <- planRustStatic (Toml._rustStatic config') rustDir
+                        (staticArgs, targetSub) <- planRustBuild (Toml._rustStatic config') (Toml._rustTarget config') rustDir
                             >>= either (\m -> hPutStrLn stderr m >> exitFailure) return
                         putStrLn $ "Running cargo build in " ++ rustDir
                         callProcess "cargo" (["build", "--manifest-path", rustDir ++ "/Cargo.toml"] ++ staticArgs)

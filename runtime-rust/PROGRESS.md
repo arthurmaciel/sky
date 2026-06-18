@@ -17,6 +17,44 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-18 — Opt-in full-static binaries + cross-compilation + release strip
+
+**What.** Added an opt-in static-linking + cross-compile path to `--target rust`,
+plus release-binary stripping and a static-vs-dynamic size benchmark harness.
+
+- **`strip`**: generated `[profile.release]` now sets `strip = true` (Go's
+  `-ldflags=-s -w` equivalent) — release binaries ship without the symbol table.
+  Dev profile keeps symbols.
+- **Static linking** (`[rust] static = true` / `--static` / `SKY_RUST_STATIC=1`):
+  Linux → `x86_64-unknown-linux-musl` (true static-pie) + `--features
+  static_alloc`; Windows → `RUSTFLAGS=-C target-feature=+crt-static`; macOS →
+  degrade to native dynamic + a warning showing the cross-compile recipe; webview
+  apps → refused (link system WebKit). De-risked locally on a cli (01) and a
+  DB+crypto example (18, sqlx/sqlite/ring) — both fully static.
+- **mimalloc global allocator**: codegen always emits an *optional* `mimalloc`
+  dep + a `#[cfg(feature="static_alloc")] #[global_allocator]` shim — inert unless
+  the static build enables it. Offsets musl's slower default malloc so the 2–5×
+  server throughput wins survive. Chosen over a bump/arena allocator (which can't
+  free per-object → unbounded RSS → OOM as a global allocator). Default dynamic
+  builds keep the system allocator (glibc ptmalloc2); no bump allocator anywhere.
+- **Cross-compilation** (`[rust] target` / `--platform <alias|triple>` /
+  `SKY_RUST_TARGET`): orthogonal to `static`. Aliases `linux-musl`,
+  `linux-musl-arm64`, `linux-gnu`, `linux-gnu-arm64` + raw-triple passthrough;
+  `planRustBuild` resolves the triple, sets the `CARGO_TARGET_<T>_LINKER` musl
+  cross-linker, detects a missing rustup target / musl C toolchain with
+  actionable errors, and nests the binary path under the target subdir. Linux
+  legs verified locally; macOS-host→Linux leg implemented, pending macOS
+  verification.
+- **CLI flags** `--static` / `--platform` are stripped from argv into env before
+  the strict optparse parser, so they compose with the backend `--target rust`
+  without clashing.
+
+**Affected.** `src/Sky/Sky/Toml.hs` (`_rustStatic`, `_rustTarget` + parsers),
+`src/Sky/Generate/Rust/Builder/Emitter.hs` (strip, mimalloc dep/feature/shim),
+`app/Main.hs` (`planRustBuild` + helpers, `preprocessRustBuildFlags`, build/run
+wiring), `runtime-rust/scripts/static-bench.sh` (new size benchmark). Commits:
+`55e22ad1` (strip), `bc97cfe7` (static+mimalloc), + cross-compile.
+
 ## 2026-06-17 18:30 — Modern wry/tao migration (de-risk the cross-OS webview spine)
 
 Replaced the stale wry 0.24 / tao 0.16 webview stack (legacy `objc 0.2` → breaks

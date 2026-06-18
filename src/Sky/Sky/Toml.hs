@@ -48,6 +48,7 @@ data SkyConfig = SkyConfig
     , _envPrefix     :: !String           -- [env] prefix: namespace for runtime SKY_* env reads (default "SKY")
     , _sqlxTls       :: !String           -- [rust] sqlx_tls: "rustls" (default) | "native-tls"
     , _rustStatic    :: !Bool             -- [rust] static: build a fully-static binary (musl Linux / crt-static Windows). Opt-in; default False.
+    , _rustTarget    :: !String           -- [rust] target: cross-compile platform (alias `linux-musl`/`linux-gnu`/`linux-musl-arm64` or a raw triple). "" = host. Orthogonal to static.
     }
     deriving (Show)
 
@@ -81,6 +82,7 @@ defaultConfig = SkyConfig
     , _envPrefix     = ""
     , _sqlxTls       = "rustls"
     , _rustStatic    = False
+    , _rustTarget    = ""
     }
 
 
@@ -169,6 +171,7 @@ applyKeyValue section config key value = case section of
     "rust" -> case key of
         "sqlx_tls" -> config { _sqlxTls = value }
         "static"   -> config { _rustStatic = value == "true" }   -- TOML bool: `static = true`
+        "target"   -> config { _rustTarget = value }             -- cross platform alias / triple
         _          -> config
     -- Top-level / [source] / [project] — project metadata.
     _ -> case key of
