@@ -8,8 +8,8 @@ Course 1 — Sky → Rust Backend
 - [x] 02 History of the backend (phases 1–11) (`02-history.html`)
 - [x] 03 Front end: parse → canonicalise → type-solve (`03-the-front-end.html`)
 - [x] 04 Codegen anatomy: the Builder/ modules (`04-codegen-anatomy.html`)
-- [ ] 05 Kernel routing (Kernel.hs) — how a Sky call becomes a Rust fn  ← NEXT (Course 1)
-- [ ] 06 Worked shape: CLI ×2 (whole-program trace)
+- [x] 05 Kernel routing (Kernel.hs) (`05-kernel-routing.html`)
+- [ ] 06 Worked shape: CLI ×2 (whole-program trace)  ← NEXT — needs real `sky build --backend rust` output
 - [ ] 07 Worked shape: HTTP server ×2
 - [ ] 08 Worked shape: Sky.Live ×2
 - [ ] 09 Worked shape: Sky.Tui ×2
@@ -17,15 +17,15 @@ Course 1 — Sky → Rust Backend
 - [ ] 11 FFI: auto-binding real Rust crates + the wrapper-crate pattern
 - [ ] 12 Soundness: "no panic from well-typed Sky" + the corner cases
 
-Course 2 — GitHub CI
+Course 2 — GitHub CI  ✅ COMPLETE (7/7)
 - [x] 00 Landing + roadmap (`course-2-github-ci/index.html`)
 - [x] 01 What is CI? (from zero)
-- [x] 02 Your first workflow (triggers, jobs, steps) (`02-your-first-workflow.html`)
-- [ ] 03 Matrices, caching, artifacts  ← NEXT (Course 2)
-- [ ] 04 Anatomy of examples-sweep.yml — the gating job
-- [ ] 05 Dispatch-only jobs: perf + static-perf
-- [ ] 06 The CI→README automation (update-readme + cron)
-- [ ] 07 Modify it: add a job / change the matrix safely
+- [x] 02 Your first workflow (`02-your-first-workflow.html`)
+- [x] 03 Matrices, caching, artifacts (`03-matrices-caching-artifacts.html`)
+- [x] 04 Anatomy of examples-sweep.yml — the gating job (`04-the-gating-sweep.html`)
+- [x] 05 Dispatch-only jobs: perf + static-perf (`05-dispatch-only-jobs.html`)
+- [x] 06 The CI→README automation (`06-ci-to-readme.html`)
+- [x] 07 Modify it safely (`07-modify-it-safely.html`)
 
 Reference docs
 - [x] Glossary (`reference/glossary.html`)

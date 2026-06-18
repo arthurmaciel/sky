@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7 · Modify it safely</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 2</a><span class="sep">/</span>
+    <span>7 · Modify it safely</span><span class="spacer"></span>
+    <span class="badge ci">Lesson 7</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 7 · the capstone</span>
+  Change the CI — without breaking the gate</h1>
+
+  <p class="lede">You now understand every part of this workflow. The final skill is
+  changing it confidently: adding a check, a job, or an OS, and knowing which
+  guardrails you must not trip. This lesson is a checklist you can actually use.</p>
+
+  <h2><span class="num">1</span>Three common changes</h2>
+
+  <h3>Add a step (a new check)</h3>
+  <p>Want a lint, a format check, an extra test? Add a step to the relevant job. Make
+  it <em>able to fail</em> — that's what makes it a check:</p>
+  <pre><code>      - <span class="tok-kw">name</span>: Check formatting
+        <span class="tok-kw">run</span>: cargo fmt --check    <span class="tok-com"># non-zero exit → step fails → job red</span></code></pre>
+  <p>Put it <em>before</em> the expensive sweep if it's cheap and likely to fail —
+  fast feedback first.</p>
+
+  <h3>Add an OS / value to the matrix</h3>
+  <p>One line. The job fans out automatically, and <code>${{ matrix.os }}</code>
+  already labels artifacts per value, so nothing downstream breaks:</p>
+  <pre><code>      <span class="tok-kw">matrix</span>:
+        <span class="tok-kw">os</span>: [ubuntu-latest, ubuntu-22.04, macos-latest, windows-latest]</code></pre>
+
+  <h3>Add a whole job</h3>
+  <p>Copy the shape: <code>runs-on</code>, the toolchain <code>uses:</code> steps,
+  your <code>run:</code>. If it should only run for the right repo/branch, copy the
+  <code>if:</code> guard. If it depends on another job's output, add <code>needs:</code>
+  and <code>download-artifact</code>.</p>
+
+  <h2><span class="num">2</span>The guardrails — do not trip these</h2>
+  <table>
+    <tr><th>Guardrail</th><th>Rule</th></tr>
+    <tr><td><b>The gate is sacred</b></td><td>The <code>examples-sweep</code> job is the pass/fail gate. Don't make it <code>continue-on-error</code>, and don't move correctness checks into a non-gating job — a green checkmark must still mean "the backend works".</td></tr>
+    <tr><td><b>Keep perf non-gating</b></td><td>Anything noisy (benchmarks) stays <code>continue-on-error: true</code> and dispatch/schedule-only. Don't gate on a number that bounces 2× between runs.</td></tr>
+    <tr><td><b>Don't loop write-back</b></td><td>If a job pushes, keep all three loop guards: <code>[skip ci]</code>, the <code>GITHUB_TOKEN</code> (no extra PAT that would re-trigger), and the <code>paths-ignore</code> on the trigger.</td></tr>
+    <tr><td><b>Least privilege</b></td><td>Top-level <code>permissions: contents: read</code>. Grant <code>write</code> only on the one job that needs it.</td></tr>
+    <tr><td><b>Logic lives in scripts</b></td><td>Real work belongs in <code>runtime-rust/scripts/</code> (so it runs locally too); the YAML just provides the machine + env. Don't bury a 40-line bash blob inline.</td></tr>
+    <tr><td><b>One source of truth</b></td><td>The example list, the per-shape checks, and the env live in <code>scripts/lib/{examples,checks,env}.sh</code>. Add a new example or a speed flag <em>there</em>, not in a per-runner copy.</td></tr>
+    <tr><td><b>Fork-only stays fork-only</b></td><td>Keep the <code>if: github.repository == 'arthurmaciel/sky'</code> guard so this fork-specific workflow never runs on someone else's fork.</td></tr>
+  </table>
+
+  <h2><span class="num">3</span>Test a workflow change without fear</h2>
+  <ul>
+    <li><b>Validate the YAML first.</b> A misindented key makes GitHub silently ignore
+    the file. Parse it locally (<code>python3 -c "import yaml,sys; yaml.safe_load(open('…'))"</code>) before pushing.</li>
+    <li><b>Use a feature branch.</b> The push trigger covers <code>feat/**</code>, so
+    your change runs on your branch — not on <code>main</code>.</li>
+    <li><b>Use the button.</b> For the dispatch-only jobs, click "Run workflow" to test
+    on demand instead of waiting for the cron.</li>
+    <li><b>Read the job summary + artifacts.</b> They tell you what happened far faster
+    than scrolling raw logs.</li>
+  </ul>
+
+  <div class="callout key"><span class="tag">A worked example of all this</span>
+  The CI → README automation in Lesson 6 was a <em>real</em> change made to this very
+  workflow: a new <code>update-readme</code> job, scoped <code>contents: write</code>,
+  a weekly <code>schedule</code> added to <code>on:</code>, the three loop guards, and
+  the generator logic kept in a script (<code>readme-tables.py</code>). Every rule on
+  this page is a rule that change had to follow.</div>
+
+  <h2><span class="num">4</span>You're done — what you can do now</h2>
+  <ul>
+    <li>Read any GitHub Actions workflow and explain it in plain English.</li>
+    <li>Write one from scratch — triggers, jobs, steps, matrix, cache, artifacts.</li>
+    <li>Navigate this repo's pipeline: the gating sweep, the dispatch-only perf/static
+    jobs, and the self-updating README — and change it without breaking the gate or
+    looping the bot.</li>
+  </ul>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. You want to add a CPU-throughput benchmark to CI. How should it run?</div>
+    <button data-ok="1">Dispatch/schedule-only and <code>continue-on-error: true</code> — never gate on a noisy number</button>
+    <button data-ok="0">On every push, as a gating check</button>
+    <button data-ok="0">It can't be added</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. Where should a new test example be registered?</div>
+    <button data-ok="1">In <code>scripts/lib/examples.sh</code> — the single source of truth</button>
+    <button data-ok="0">Pasted into each job in the YAML</button>
+    <button data-ok="0">Nowhere — it's auto-detected by GitHub</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. Your new job needs to push a commit. What two things must you get right?</div>
+    <button data-ok="1">Grant <code>contents: write</code> on that job, and keep the loop guards (<code>[skip ci]</code> + GITHUB_TOKEN + paths-ignore)</button>
+    <button data-ok="0">Disable the gate and remove the <code>if:</code> guard</button>
+    <button data-ok="0">Nothing special is required</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary — and course complete 🎉</h3>
+    <ul>
+      <li>Changes are easy: add a failable <b>step</b>, a matrix <b>value</b>, or a whole <b>job</b> (copy the shape + guards).</li>
+      <li>Guardrails: the sweep gate is sacred; perf stays non-gating; defend the write-back loop; least-privilege permissions; logic in scripts; one source of truth; fork-only guard.</li>
+      <li>Test safely: validate YAML, use a feature branch + the dispatch button, read the summary/artifacts.</li>
+      <li>You can now read, write, and <b>improve</b> this CI.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Ready to make a real change? Ask your teacher to pair with you on a small,
+    safe one — say, adding a <code>cargo fmt --check</code> step — end to end.</p>
+  </div>
+
+  <div class="pager">
+    <a href="06-ci-to-readme.html">← 6 · CI → README</a>
+    <a href="index.html">Course 2 roadmap →</a>
+  </div>
+
+  <footer class="fin">Lesson 7 · grounded in the whole <code>.github/workflows/examples-sweep.yml</code> + <code>runtime-rust/scripts/lib/</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

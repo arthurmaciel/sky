@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6 · The CI → README automation</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 2</a><span class="sep">/</span>
+    <span>6 · CI → README</span><span class="spacer"></span>
+    <span class="badge ci">Lesson 6</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 6 · CI that writes back</span>
+  The job that updates the README for you</h1>
+
+  <p class="lede">CI usually only <em>reads</em> your repo. This one writes to it: a
+  job downloads the perf + static numbers other jobs measured, regenerates the
+  tables in <code>README.md</code>, and commits the change — automatically. It's the
+  most advanced pattern in this workflow, and it's built from pieces you already
+  know.</p>
+
+  <h2><span class="num">1</span>The problem it solves</h2>
+  <p>The README shows tables of results — example status, perf ratios, static binary
+  sizes. Hand-maintained, those go stale within hours of a sweep. The fix: let the
+  machine that <em>produces</em> the numbers also <em>write</em> them, from one source
+  of truth.</p>
+
+  <div class="callout key"><span class="tag">Fenced regions = machine-owned</span>
+  Only specific blocks of the README are machine-written, marked with HTML comments:
+  <code>&lt;!-- AUTOGEN:static-table BEGIN --&gt; … END --&gt;</code>. A small script
+  (<code>readme-tables.py</code>) regenerates only what's between the fences; the
+  prose around them stays hand-written. Humans own the words, the machine owns the
+  data tables — no fighting over the same lines.</div>
+
+  <h2><span class="num">2</span>The job, piece by piece</h2>
+  <p class="filetag">.github/workflows/examples-sweep.yml (update-readme)</p>
+  <pre><code>  <span class="tok-fn">update-readme</span>:
+    <span class="tok-kw">if</span>: … (workflow_dispatch || schedule)
+    <span class="tok-kw">needs</span>: [examples-sweep, examples-perf-sweep, static-perf]   <span class="tok-com"># A · wait for the data + the gate</span>
+    <span class="tok-kw">permissions</span>:
+      <span class="tok-kw">contents</span>: write                                       <span class="tok-com"># B · allowed to push</span>
+    <span class="tok-kw">steps</span>:
+      - <span class="tok-kw">uses</span>: actions/checkout@v4
+      - <span class="tok-kw">uses</span>: actions/download-artifact@v4                    <span class="tok-com"># C · grab the perf/static TSVs</span>
+        <span class="tok-kw">with</span>: { path: artifacts, merge-multiple: true }
+      - <span class="tok-kw">run</span>: |                                              <span class="tok-com"># D · regenerate the fenced tables</span>
+          python3 runtime-rust/scripts/readme-tables.py static   --results artifacts --write
+          python3 runtime-rust/scripts/readme-tables.py examples --results artifacts --write
+      - <span class="tok-kw">run</span>: |                                              <span class="tok-com"># E · commit + push only if changed</span>
+          git diff --quiet -- runtime-rust/README.md &amp;&amp; exit 0
+          git commit -am "docs: auto-sync README tables [skip ci]"
+          git push</code></pre>
+
+  <table>
+    <tr><th></th><th>Piece</th><th>Why</th></tr>
+    <tr><td>A</td><td><code>needs:</code></td><td>Run only after the data jobs finish — and after the <b>gate</b>. <code>examples-sweep</code> in <code>needs</code> means a RED sweep skips this job, so the README never publishes a false "all green".</td></tr>
+    <tr><td>B</td><td><code>permissions: contents: write</code></td><td>By default a job can only read. To push, it must be granted write — scoped to <em>this job only</em>, not the whole workflow.</td></tr>
+    <tr><td>C</td><td><code>download-artifact</code></td><td>The numbers were measured in <em>other</em> jobs (Lesson 5) and uploaded as artifacts (Lesson 3). This is the cross-job hand-off.</td></tr>
+    <tr><td>D</td><td><code>readme-tables.py … --write</code></td><td>Regenerate only the fenced regions from the fresh TSVs.</td></tr>
+    <tr><td>E</td><td>commit + push</td><td>Only if something actually changed (<code>git diff --quiet</code>), so empty runs don't spam commits.</td></tr>
+  </table>
+
+  <h2><span class="num">3</span>The trap: an infinite loop</h2>
+  <p>A job that pushes a commit could trigger the workflow again… which pushes
+  again… forever. This is the danger of write-back CI, and it's defended three ways:</p>
+  <ul>
+    <li><b><code>[skip ci]</code></b> in the commit message — GitHub skips workflows for commits marked this way.</li>
+    <li><b>The token rule</b> — pushes made with the automatic <code>GITHUB_TOKEN</code> do not, by design, trigger further workflows. (No recursion by default.)</li>
+    <li><b><code>paths-ignore: ['**.md']</code></b> — the commit only touches <code>README.md</code>, and the push trigger ignores Markdown-only changes.</li>
+  </ul>
+  <div class="callout gotcha"><span class="tag">Belt and braces</span>
+  Any one of these would stop the loop; the workflow uses all three. With
+  write-back automation, defend the loop redundantly — a runaway CI commit storm is
+  embarrassing and burns minutes fast.</div>
+
+  <h2><span class="num">4</span>The full picture</h2>
+  <div class="pipeline">
+    <div class="stage rust"><div class="k">measure</div><div class="v">perf + static jobs</div><div class="f">upload TSVs</div></div>
+    <div class="stage"><div class="k">gate</div><div class="v">sweep green?</div><div class="f">needs: examples-sweep</div></div>
+    <div class="stage sky"><div class="k">regenerate</div><div class="v">fenced tables</div><div class="f">readme-tables.py</div></div>
+    <div class="stage"><div class="k">commit</div><div class="v">[skip ci]</div><div class="f">contents: write</div></div>
+  </div>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. Why does the job <code>needs: examples-sweep</code>?</div>
+    <button data-ok="1">So a RED sweep skips it — the README never publishes a false "all green"</button>
+    <button data-ok="0">To run the sweep twice</button>
+    <button data-ok="0">It's a typo</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. How does a job get permission to push back to the repo?</div>
+    <button data-ok="1"><code>permissions: contents: write</code> on that job</button>
+    <button data-ok="0">It's allowed by default</button>
+    <button data-ok="0">By disabling branch protection</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. What stops the auto-commit from triggering the workflow again?</div>
+    <button data-ok="1"><code>[skip ci]</code> + the GITHUB_TOKEN no-recursion rule + <code>paths-ignore: ['**.md']</code></button>
+    <button data-ok="0">Nothing — it does loop</button>
+    <button data-ok="0">A manual approval each time</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>Only <b>fenced</b> README regions are machine-written (<code>AUTOGEN:…</code>); prose stays human.</li>
+      <li>The job <code>needs</code> the data jobs <em>and</em> the gate, gets <code>contents: write</code>, <code>download-artifact</code>s the TSVs, regenerates via <code>readme-tables.py --write</code>, and commits only on a real diff.</li>
+      <li>The loop is defended three ways: <code>[skip ci]</code>, the GITHUB_TOKEN no-recursion rule, and <code>paths-ignore</code>.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>This exact pipeline was built recently — ask your teacher to show you the
+    <code>readme-tables.py</code> generator and the <code>AUTOGEN</code> fences in the
+    real README.</p>
+  </div>
+
+  <div class="pager">
+    <a href="05-dispatch-only-jobs.html">← 5 · Dispatch-only jobs</a>
+    <a href="07-modify-it-safely.html">7 · Modify it safely →</a>
+  </div>
+
+  <footer class="fin">Lesson 6 · grounded in the <code>update-readme</code> job + <code>runtime-rust/scripts/readme-tables.py</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

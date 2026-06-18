@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5 · Kernel routing</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>5 · Kernel routing</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 5</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 5 · the lookup table</span>
+  How a Sky call becomes a Rust function</h1>
+
+  <p class="lede">When codegen meets a kernel call like <code>String.fromInt</code>,
+  it has to know the exact Rust function to emit. That decision lives in one place:
+  <code>kernelToRust</code> in <code>Builder/Kernel.hs</code>. This lesson opens it,
+  including the fallbacks and the corner cases that bite.</p>
+
+  <h2><span class="num">1</span>The core: a big lookup function</h2>
+  <p><code>kernelToRust</code> takes the module and the name and returns a Rust
+  function name. It's a long pattern-match — the single source of truth for the
+  whole stdlib:</p>
+  <p class="filetag">src/Sky/Generate/Rust/Builder/Kernel.hs</p>
+  <pre><code><span class="tok-fn">kernelToRust</span> :: <span class="tok-ty">String</span> -> <span class="tok-ty">String</span> -> <span class="tok-ty">String</span>
+<span class="tok-fn">kernelToRust</span> mod name = <span class="tok-kw">case</span> (mod, name) <span class="tok-kw">of</span>
+    (<span class="tok-str">"String"</span>, <span class="tok-str">"fromInt"</span>)        -> <span class="tok-str">"string_from_int"</span>
+    (<span class="tok-str">"List"</span>,   <span class="tok-str">"map"</span>)            -> <span class="tok-str">"list_map_consume"</span>
+    (<span class="tok-str">"Dict"</span>,   <span class="tok-str">"empty"</span>)          -> <span class="tok-str">"dict_empty"</span>
+    (<span class="tok-str">"Task"</span>,   <span class="tok-str">"succeed"</span>)        -> <span class="tok-str">"task_succeed"</span>
+    (<span class="tok-str">"Task"</span>,   <span class="tok-str">"andThen"</span>)        -> <span class="tok-str">"task_and_then"</span>
+    (<span class="tok-str">"Task"</span>,   <span class="tok-str">"run"</span>)            -> <span class="tok-str">"task_run"</span>
+    <span class="tok-com">-- …hundreds of arms…</span></code></pre>
+
+  <div class="callout key"><span class="tag">Why a hand-written table?</span>
+  The Rust function name isn't always a mechanical transform of the Sky name —
+  <code>List.map</code> maps to <code>list_map_<b>consume</b></code> (the Rust fn
+  takes ownership of its list), and acronyms like <code>formatHTTP</code> need care
+  that automatic snake-casing gets wrong. An explicit table lets each kernel name
+  its exact runtime counterpart, with a comment when it's surprising.</div>
+
+  <h2><span class="num">2</span>Short names and qualified names</h2>
+  <p>The same kernel can arrive named two ways depending on imports —
+  <code>String</code> or the fully-qualified <code>Sky.Core.String</code>. The table
+  lists <em>both</em> forms pointing at the same Rust fn:</p>
+  <pre><code>(<span class="tok-str">"String"</span>,          <span class="tok-str">"fromInt"</span>) -> <span class="tok-str">"string_from_int"</span>
+(<span class="tok-str">"Sky.Core.String"</span>, <span class="tok-str">"fromInt"</span>) -> <span class="tok-str">"string_from_int"</span></code></pre>
+
+  <h2><span class="num">3</span>The fallbacks</h2>
+  <p>Two catch-all arms at the very bottom handle anything not explicitly listed —
+  this is how user FFI and new kernels still get a sensible name:</p>
+  <pre><code><span class="tok-com">-- user FFI: a `Rust_`-prefixed module → drop the prefix, snake_case</span>
+_ | <span class="tok-str">"Rust_"</span> `isPrefixOf` mod -> <span class="tok-fn">toSnakeCase</span> (drop <span class="tok-num">5</span> mod ++ <span class="tok-str">"_"</span> ++ name)
+
+<span class="tok-com">-- general fallback: dots → underscores, then snake_case the whole thing</span>
+_ -> <span class="tok-fn">toSnakeCase</span> (map (\c -> <span class="tok-kw">if</span> c == <span class="tok-str">'.'</span> <span class="tok-kw">then</span> <span class="tok-str">'_'</span> <span class="tok-kw">else</span> c) mod ++ <span class="tok-str">"_"</span> ++ name)</code></pre>
+  <p class="src">Real arms at <a href="../../../../src/Sky/Generate/Rust/Builder/Kernel.hs"><code>Builder/Kernel.hs</code></a> lines ~767–768. Snake-casing comes from <code>Builder/Naming.hs</code>.</p>
+
+  <h2><span class="num">4</span>Two helpers around it</h2>
+  <table>
+    <tr><th>Helper</th><th>Job</th></tr>
+    <tr><td><code>splitKernelName</code></td><td>Splits a combined name on the <em>first</em> underscore — <code>"Decimal_fromInt" → ("Decimal", "fromInt")</code> — so an <code>Ffi.kernel "Decimal_fromInt"</code> string can be routed.</td></tr>
+    <tr><td><code>kernelSigPrefix</code></td><td>Normalises a module name for looking up a hard-coded signature (e.g. <code>"List" → "Sky_Core_List"</code>), used with <code>SigRegistry</code> to pin generics.</td></tr>
+  </table>
+
+  <h2><span class="num">5</span>The corner cases that bite</h2>
+
+  <div class="callout gotcha"><span class="tag">Corner case · special-cased in ExprEmitter</span>
+  A few kernels don't go through the plain "emit <code>fn(args)</code>" path because
+  their shape is different — <code>println</code> joins its args with spaces;
+  <code>Task.andThen</code> / <code>Task.run</code> inline a closure; a discarded
+  <code>let _ = someEffect</code> must still <em>run</em> the effect (call
+  <code>task_run</code>), not bind-and-drop it. These live in <code>ExprEmitter.hs</code>,
+  using <code>kernelToRust</code> for the <em>name</em> but building the call by hand.</div>
+
+  <div class="callout gotcha"><span class="tag">Corner case · VarKernel vs VarTopLevel</span>
+  A Sky stdlib function written in Sky as an <code>Ffi.kernel</code> alias arrives as
+  <code>VarTopLevel</code>, <em>not</em> <code>VarKernel</code>. If a special-case in
+  <code>ExprEmitter</code> only matches <code>VarKernel</code>, it silently misses the
+  alias — and you get a "type-checks but cargo-fails" bug (e.g. the wrong type
+  conversion is skipped). The rule, recorded in the project's learnings: any
+  special-case arm must match <em>both</em> <code>VarKernel</code> and the
+  matching <code>VarTopLevel</code>.</div>
+
+  <div class="callout gotcha"><span class="tag">Corner case · zero-arg kernels</span>
+  Some kernels take no arguments — a constant like <code>Math.pi</code>, or
+  <code>Dict.empty</code>. <code>Walker.hs</code> collects these so <code>ExprEmitter</code>
+  emits them as a call <code>dict_empty()</code> rather than a bare value
+  <code>dict_empty</code>. Getting this wrong produces a function pointer where a
+  value was expected.</div>
+
+  <h2><span class="num">6</span>Trace it once more</h2>
+  <p>For <code>String.fromInt (1 + 2)</code>: <code>ExprEmitter</code> sees
+  <code>Can.VarKernel "String" "fromInt"</code>, calls
+  <code>kernelToRust "String" "fromInt"</code> → <code>"string_from_int"</code>, and
+  emits <code>string_from_int((1 + 2))</code>. That name resolves, at
+  <code>cargo build</code> time, to the real <code>pub fn string_from_int(i: i64)
+  -> String</code> in <code>runtime-rust/src/sky_runtime/string.rs</code>. The table
+  is the bridge between the two worlds.</p>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. Why is <code>kernelToRust</code> a hand-written table rather
+    than an automatic name transform?</div>
+    <button data-ok="1">Names aren't always mechanical (<code>List.map → list_map_consume</code>; acronyms); explicit arms are exact</button>
+    <button data-ok="0">Because Haskell can't transform strings</button>
+    <button data-ok="0">To make the compiler slower</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. An <code>Ffi.kernel</code> stdlib function arrives in codegen as…</div>
+    <button data-ok="1"><code>VarTopLevel</code> — so special-cases must match it too, not only <code>VarKernel</code></button>
+    <button data-ok="0">always <code>VarKernel</code></button>
+    <button data-ok="0">a raw Rust string</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. What happens to a kernel not listed in the table?</div>
+    <button data-ok="1">A fallback arm snake-cases <code>module_name</code> (dots → underscores)</button>
+    <button data-ok="0">Compilation aborts</button>
+    <button data-ok="0">It's silently dropped</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li><code>kernelToRust (module, name) → "rust_fn"</code> is the single source of truth for stdlib routing; it lists both short and <code>Sky.Core.*</code> forms.</li>
+      <li>Two fallbacks handle user FFI (<code>Rust_*</code>) and anything unlisted (dots→underscores, snake_case).</li>
+      <li>Corner cases: ExprEmitter special-cases (<code>println</code>, <code>Task.andThen</code>, discarded effects); <code>VarKernel</code> vs <code>VarTopLevel</code> for <code>Ffi.kernel</code> aliases; zero-arg kernels emitted as <code>fn()</code>.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Want to add a kernel yourself? Ask your teacher to walk the full path: a
+    runtime fn in <code>sky_runtime/</code>, an arm in <code>Kernel.hs</code>, and a
+    fixture under <code>runtime-rust/tests/sky/</code>.</p>
+  </div>
+
+  <div class="pager">
+    <a href="04-codegen-anatomy.html">← 4 · Codegen anatomy</a>
+    <a href="index.html">Course 1 roadmap →</a>
+  </div>
+
+  <footer class="fin">Lesson 5 · grounded in <code>src/Sky/Generate/Rust/Builder/Kernel.hs</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

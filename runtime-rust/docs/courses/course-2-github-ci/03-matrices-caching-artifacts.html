@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3 · Matrices, caching &amp; artifacts</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 2</a><span class="sep">/</span>
+    <span>3 · Matrices, caching &amp; artifacts</span><span class="spacer"></span>
+    <span class="badge ci">Lesson 3</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 3 · the three workhorses</span>
+  Matrices, caching &amp; artifacts</h1>
+
+  <p class="lede">Three features turn a toy workflow into real-world CI: a
+  <strong>matrix</strong> (run everywhere), a <strong>cache</strong> (don't recompile
+  the world), and <strong>artifacts</strong> (keep the results). This repo uses all
+  three — let's learn them from its actual code.</p>
+
+  <h2><span class="num">1</span>Matrix — run the same job many ways</h2>
+  <p>You want the sweep on Linux <em>and</em> macOS <em>and</em> Windows. Instead of
+  copy-pasting the job three times, declare a <strong>matrix</strong> and GitHub
+  fans it out into one job per value:</p>
+  <p class="filetag">.github/workflows/examples-sweep.yml (excerpt)</p>
+  <pre><code>  <span class="tok-fn">examples-sweep</span>:
+    <span class="tok-kw">strategy</span>:
+      <span class="tok-kw">fail-fast</span>: false                 <span class="tok-com"># one OS failing doesn't cancel the others</span>
+      <span class="tok-kw">matrix</span>:
+        <span class="tok-kw">os</span>: [ubuntu-latest, macos-latest, windows-latest]
+    <span class="tok-kw">runs-on</span>: ${{ matrix.os }}         <span class="tok-com"># each run picks one OS from the matrix</span></code></pre>
+  <p>That single block produces three parallel jobs. <code>${{ matrix.os }}</code> is
+  how a step reads "which value am I?" —
+  used again to label uploaded results per-OS.</p>
+  <div class="callout key"><span class="tag">fail-fast: false</span>
+  By default, if one matrix job fails GitHub cancels the rest. For a cross-platform
+  sweep you want the opposite — see <em>all</em> the failures at once, not just the
+  first. So this repo turns <code>fail-fast</code> off.</div>
+
+  <h2><span class="num">2</span>Cache — skip the expensive rebuild</h2>
+  <p>Compiling Rust's dependency tree (tokio, axum, sqlx, serde) from scratch every
+  run would take many minutes. The <code>actions/cache</code> action saves chosen
+  folders after a run and restores them at the start of the next one:</p>
+  <pre><code>      - <span class="tok-kw">name</span>: Cache cargo target
+        <span class="tok-kw">uses</span>: actions/cache@v4
+        <span class="tok-kw">with</span>:
+          <span class="tok-kw">path</span>: |
+            ~/.cargo/registry
+            ${{ github.workspace }}/.cache/sky-rust-target
+          <span class="tok-kw">key</span>: ${{ runner.os }}-cargo-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/Cargo.toml') }}
+          <span class="tok-kw">restore-keys</span>: ${{ runner.os }}-cargo-</code></pre>
+  <p>The <strong>key</strong> is the heart of it. It includes a <em>hash of the
+  dependency files</em>, so:</p>
+  <ul>
+    <li>same deps → same key → exact cache hit → instant restore;</li>
+    <li>deps changed → new key → no exact hit, so <code>restore-keys</code> grabs the
+    closest older cache as a warm starting point, and a fresh one is saved.</li>
+  </ul>
+  <div class="callout gotcha"><span class="tag">Cache the right thing</span>
+  Cache build <em>outputs</em> and downloaded packages (the cargo target dir, the
+  registry, the cabal store) — never your source. And key on what actually changes
+  the output (the lockfile). A key that's too broad serves stale builds; too narrow
+  never hits. This repo also notes that <code>sccache</code>'s GitHub backend is
+  retired, so on CI it relies on <code>actions/cache</code> alone.</div>
+
+  <h2><span class="num">3</span>Artifacts — keep the results</h2>
+  <p>A runner is destroyed when its job ends. To keep anything — a results table, a
+  log, a built binary — a job <strong>uploads</strong> it as an artifact:</p>
+  <pre><code>      - <span class="tok-kw">name</span>: Upload sweep scoreboard
+        <span class="tok-kw">if</span>: always()                       <span class="tok-com"># upload even if the sweep failed</span>
+        <span class="tok-kw">uses</span>: actions/upload-artifact@v4
+        <span class="tok-kw">with</span>:
+          <span class="tok-kw">name</span>: examples-sweep-${{ matrix.os }}   <span class="tok-com"># one artifact per OS</span>
+          <span class="tok-kw">path</span>: |
+            ~/.cache/sky/examples-sweep/sweep-*.table
+            ~/.cache/sky/examples-sweep/*.log
+          <span class="tok-kw">if-no-files-found</span>: warn</code></pre>
+  <p>You can download artifacts from the run's page — and, crucially, <em>another
+  job can download them too</em>. That's exactly how this repo's README-updater
+  (Lesson 6) gets the perf numbers a different job measured.</p>
+  <div class="callout why"><span class="tag">if: always()</span>
+  The sweep step exits non-zero when an example fails — which would normally skip
+  later steps. <code>if: always()</code> forces the upload to run anyway, so a
+  <em>failed</em> run still gives you the table that shows what broke. Diagnosing CI
+  is impossible without this habit.</div>
+
+  <h2><span class="num">4</span>One more: don't waste runners</h2>
+  <p>If you push twice quickly, the first run is now pointless. A
+  <strong>concurrency</strong> group cancels the in-flight run for the same branch:</p>
+  <pre><code><span class="tok-kw">concurrency</span>:
+  <span class="tok-kw">group</span>: examples-sweep-${{ github.ref }}
+  <span class="tok-kw">cancel-in-progress</span>: true</code></pre>
+
+  <h2><span class="num">5</span>Putting it together</h2>
+  <p>You can now read the <em>structure</em> of this repo's main job end to end: a
+  3-OS <b>matrix</b>, each runner <b>restores a cache</b>, runs the sweep, and
+  <b>uploads its results</b> as a per-OS artifact — with <b>concurrency</b> trimming
+  redundant runs. Lesson 4 reads what that sweep step actually checks.</p>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. Why does this repo set <code>fail-fast: false</code> on its matrix?</div>
+    <button data-ok="1">To see all OS failures at once, not just the first</button>
+    <button data-ok="0">To make the build faster</button>
+    <button data-ok="0">It's required for matrices</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. What goes in a cache <code>key</code> so changed dependencies
+    get a fresh cache?</div>
+    <button data-ok="1">A hash of the dependency files (e.g. <code>hashFiles('Cargo.lock')</code>)</button>
+    <button data-ok="0">The current time</button>
+    <button data-ok="0">Your username</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. Why <code>if: always()</code> on the artifact upload?</div>
+    <button data-ok="1">So a failed run still uploads the results table that shows what broke</button>
+    <button data-ok="0">To run the upload twice</button>
+    <button data-ok="0">To cache the artifact</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li><b>Matrix</b>: one job × N values (3 OSes here). <code>${{ matrix.os }}</code> reads the value; <code>fail-fast: false</code> shows all failures.</li>
+      <li><b>Cache</b>: <code>actions/cache</code> saves/restores build outputs, keyed on a hash of the lockfile (+ <code>restore-keys</code> for a warm fallback).</li>
+      <li><b>Artifacts</b>: <code>upload-artifact</code> keeps results past the runner's life; another job can <code>download-artifact</code> them. Use <code>if: always()</code>.</li>
+      <li><b>Concurrency</b> cancels superseded runs on the same branch.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Want to see real cache hit/miss timings, or an artifact downloaded? Ask your
+    teacher to open a recent run of this repo's sweep in the Actions tab.</p>
+  </div>
+
+  <div class="pager">
+    <a href="02-your-first-workflow.html">← 2 · Your first workflow</a>
+    <a href="04-the-gating-sweep.html">4 · The gating sweep →</a>
+  </div>
+
+  <footer class="fin">Lesson 3 · grounded in <code>.github/workflows/examples-sweep.yml</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

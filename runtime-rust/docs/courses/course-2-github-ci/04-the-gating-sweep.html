@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4 · The gating sweep</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 2</a><span class="sep">/</span>
+    <span>4 · The gating sweep</span><span class="spacer"></span>
+    <span class="badge ci">Lesson 4</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 4 · the cornerstone job</span>
+  Anatomy of <code>examples-sweep</code> — the gate</h1>
+
+  <p class="lede">This is the job that decides red or green for the whole backend.
+  For every example, on every OS, it does three things: <strong>build</strong> it on
+  the Rust backend, <strong>run</strong> it, and check it behaves <strong>the same as
+  the Go build</strong>. Let's read exactly what that means.</p>
+
+  <h2><span class="num">1</span>What one run does, per example</h2>
+  <div class="pipeline">
+    <div class="stage rust"><div class="k">BUILD</div><div class="v">--backend rust</div><div class="f">+ cargo build</div></div>
+    <div class="stage rust"><div class="k">RUN</div><div class="v">per shape</div><div class="f">cli / server / live / tui / webview</div></div>
+    <div class="stage sky"><div class="k">EQUIV</div><div class="v">Go ≡ Rust</div><div class="f">same behaviour</div></div>
+    <div class="stage"><div class="k">VERDICT</div><div class="v">✓ / ✗</div><div class="f">per row</div></div>
+  </div>
+  <p>The job itself is small — it builds the Sky compiler, then hands off to a script
+  that loops over the examples:</p>
+  <p class="filetag">.github/workflows/examples-sweep.yml (excerpt)</p>
+  <pre><code>      - <span class="tok-kw">name</span>: Run examples sweep
+        <span class="tok-kw">shell</span>: bash
+        <span class="tok-kw">run</span>: bash runtime-rust/scripts/examples-sweep.sh</code></pre>
+  <p>Keeping the logic in a committed <em>script</em> (not inline YAML) means you can
+  run the exact same sweep locally. The YAML just provides the machine.</p>
+
+  <h2><span class="num">2</span>"Run" means something different per shape</h2>
+  <p>An example is exercised the way its <em>shape</em> demands — the sweep's
+  <code>lib/checks.sh</code> has one function per shape:</p>
+  <table>
+    <tr><th>Shape</th><th>How RUN is checked</th></tr>
+    <tr><td><code>cli</code></td><td>run it; it must finish without panicking; compare stdout</td></tr>
+    <tr><td><code>server</code></td><td>boot it; <code>curl</code> a route; compare the HTTP body</td></tr>
+    <tr><td><code>live</code></td><td>boot it; drive a real headless-browser scenario; it must pass on both backends</td></tr>
+    <tr><td><code>tui</code></td><td>drive it through a pseudo-terminal; it must run without panic</td></tr>
+    <tr><td><code>webview</code></td><td>boot it under a virtual display (xvfb); it must not crash</td></tr>
+  </table>
+  <div class="callout key"><span class="tag">EQUIV is the real test</span>
+  Building proves it compiles; <em>running and comparing against Go</em> proves it's
+  correct. The Go backend is the reference oracle: if Rust's stdout / HTTP body /
+  browser scenario matches Go's, the Rust port is behaving. This is "green ≠ correct"
+  from Course 1 turned into a gate — a build-only check would miss a "the click does
+  nothing" regression.</div>
+
+  <h2><span class="num">3</span>What makes the job red</h2>
+  <p>The job fails if — and only if — the sweep prints <code>VERDICT: FAIL</code>,
+  which happens when any row is a genuine failure (build error, panic, hang, or a
+  Go≢Rust difference). Two things are deliberately <em>not</em> failures:</p>
+  <ul>
+    <li><b>SKIP</b> — a shape a host can't run (a TUI needs a real pty; Windows skips
+    the headless browser). An honest "not applicable here", coloured green-neutral.</li>
+    <li><b>amber <code>go-ref-broken</code></b> — the Go reference itself is broken
+    for that example (an upstream bug), so there's nothing to compare against.</li>
+  </ul>
+
+  <h2><span class="num">4</span>The guards around it</h2>
+  <pre><code>  <span class="tok-fn">examples-sweep</span>:
+    <span class="tok-kw">if</span>: github.repository == <span class="tok-str">'arthurmaciel/sky'</span>   <span class="tok-com"># fork-only — never runs upstream</span>
+    <span class="tok-kw">env</span>:
+      <span class="tok-kw">SKY_SWEEP_FORCE</span>: <span class="tok-str">'1'</span>      <span class="tok-com"># skip the local "only at night" gate; CI has no night window</span>
+      <span class="tok-kw">SKY_NO_SCCACHE</span>: <span class="tok-str">'1'</span>       <span class="tok-com"># sccache's GitHub backend is retired — use actions/cache instead</span></code></pre>
+  <ul>
+    <li>The <code>if:</code> repository guard means this fork-only Rust workflow never
+    runs if someone forks it elsewhere — it's tied to <code>arthurmaciel/sky</code>.</li>
+    <li>Environment toggles adapt the same script to CI: force past the
+    developer-only night-gate, and disable a caching wrapper that doesn't work on
+    GitHub's runners.</li>
+  </ul>
+
+  <h2><span class="num">5</span>Reading the result</h2>
+  <p>Each matrix job writes a per-OS <strong>BUILD·RUN·EQUIV table</strong> to the
+  run's summary (and uploads it as the artifact from Lesson 3). That table is the
+  honest, at-a-glance state of the backend on that OS — green rows, SKIP rows, and
+  any red. It's the same table the README mirrors (Lesson 6).</p>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. Why does the sweep <em>run</em> each example and compare to Go,
+    instead of only building it?</div>
+    <button data-ok="1">A build can't catch behavioural bugs (e.g. "the click does nothing"); Go is the correctness oracle</button>
+    <button data-ok="0">Because building is impossible on CI</button>
+    <button data-ok="0">To make the run slower</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. A <code>tui</code> example shows <b>SKIP</b> on Windows. The job…</div>
+    <button data-ok="1">stays green — SKIP means "this host can't run that shape", not a failure</button>
+    <button data-ok="0">turns red</button>
+    <button data-ok="0">retries forever</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. The actual sweep logic lives in…</div>
+    <button data-ok="1">a committed script (<code>runtime-rust/scripts/examples-sweep.sh</code>) the YAML just runs — so you can run it locally too</button>
+    <button data-ok="0">inline YAML only, impossible to run locally</button>
+    <button data-ok="0">a closed GitHub service</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>For every example × OS: <b>BUILD</b> (<code>--backend rust</code> + cargo) · <b>RUN</b> (per-shape) · <b>EQUIV</b> (matches the Go reference).</li>
+      <li>RUN differs by shape (cli stdout, server body, live browser scenario, tui pty, webview xvfb); EQUIV is the correctness test.</li>
+      <li>Red only on <code>VERDICT: FAIL</code>; <b>SKIP</b> and amber <code>go-ref-broken</code> are green-neutral.</li>
+      <li>Guarded by a fork-only <code>if:</code> and CI-adapting env; logic lives in a runnable script; results are a per-OS BUILD·RUN·EQUIV table.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Want to see the per-shape exercise functions? Ask your teacher to open
+    <code>runtime-rust/scripts/lib/checks.sh</code> and walk
+    <code>exercise_server</code> / <code>exercise_live</code> with you.</p>
+  </div>
+
+  <div class="pager">
+    <a href="03-matrices-caching-artifacts.html">← 3 · Matrices, caching &amp; artifacts</a>
+    <a href="05-dispatch-only-jobs.html">5 · Dispatch-only jobs →</a>
+  </div>
+
+  <footer class="fin">Lesson 4 · grounded in <code>.github/workflows/examples-sweep.yml</code> + <code>runtime-rust/scripts/{examples-sweep.sh,lib/checks.sh}</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

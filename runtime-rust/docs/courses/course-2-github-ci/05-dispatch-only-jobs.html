@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5 · Dispatch-only jobs</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 2</a><span class="sep">/</span>
+    <span>5 · Dispatch-only jobs</span><span class="spacer"></span>
+    <span class="badge ci">Lesson 5</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 5 · run it on purpose</span>
+  Perf &amp; static-perf — the deliberate, non-gating jobs</h1>
+
+  <p class="lede">Not every check belongs on every push. Performance benchmarks are
+  <em>noisy</em> on shared runners and <em>slow</em>. This repo runs them only when
+  you ask (a button) or on a weekly clock — and never lets them fail the build.
+  Here's why, and how that's expressed.</p>
+
+  <h2><span class="num">1</span>The problem with benchmarks on every push</h2>
+  <ul>
+    <li><b>Noisy.</b> GitHub runners are shared VMs with no CPU pinning — the same
+    benchmark can swing wildly run to run. A throughput number that bounces 2× isn't
+    a reliable gate.</li>
+    <li><b>Slow.</b> Building every example in release mode, on three OSes, plus the
+    Go reference, takes a long time.</li>
+  </ul>
+  <p>So perf is <strong>measured and archived</strong>, never used to pass/fail. The
+  gate stays the fast, deterministic sweep (Lesson 4).</p>
+
+  <h2><span class="num">2</span>Triggering on purpose, not on push</h2>
+  <p>Two jobs — <code>examples-perf-sweep</code> (throughput/RSS/cold-start) and
+  <code>static-perf</code> (static-binary sizes across 3 OSes) — share a guard that
+  runs them <em>only</em> on a manual button or the weekly cron:</p>
+  <p class="filetag">.github/workflows/examples-sweep.yml (excerpt)</p>
+  <pre><code>  <span class="tok-fn">examples-perf-sweep</span>:
+    <span class="tok-kw">if</span>: github.repository == <span class="tok-str">'arthurmaciel/sky'</span>
+        &amp;&amp; (github.event_name == <span class="tok-str">'workflow_dispatch'</span> || github.event_name == <span class="tok-str">'schedule'</span>)
+    <span class="tok-kw">continue-on-error</span>: true        <span class="tok-com"># never fails the overall workflow</span>
+    <span class="tok-kw">timeout-minutes</span>: 330          <span class="tok-com"># a hard ceiling well under GitHub's 6h limit</span></code></pre>
+  <p>Recall the triggers from Lesson 1: this workflow's <code>on:</code> includes
+  <code>workflow_dispatch</code> (the "Run workflow" button) and a
+  <code>schedule: cron: '17 6 * * 1'</code> (Mondays). The push trigger is excluded by
+  the <code>if:</code>, so a normal commit never starts these.</p>
+
+  <div class="callout key"><span class="tag">continue-on-error: true</span>
+  This is what "non-gating" means in YAML. The job still runs and reports, but even
+  if it fails, the <em>workflow</em> is considered successful. Perf is information,
+  not a verdict — you read it, you don't let it block a merge.</div>
+
+  <h2><span class="num">3</span>What each measures</h2>
+  <table>
+    <tr><th>Job</th><th>Measures</th><th>Where</th></tr>
+    <tr><td><code>examples-perf-sweep</code></td><td>Rust-vs-Go throughput, resident memory (RSS), cold-start, binary size</td><td>ubuntu only</td></tr>
+    <tr><td><code>static-perf</code></td><td>fully-static binary size (musl) + the static-vs-dynamic comparison; Linux also runs throughput/RSS</td><td>a 3-OS matrix (Linux native, Windows native, macOS cross-compiles a Linux binary)</td></tr>
+  </table>
+  <p>Both upload their numbers as <strong>artifacts</strong> (TSV files) — and, like
+  the sweep, the heavy lifting is in committed scripts
+  (<code>examples-perf-sweep.sh</code>, <code>static-perf.sh</code>), so you can run
+  them locally too.</p>
+
+  <h2><span class="num">4</span>Why a weekly schedule at all?</h2>
+  <p>So the numbers don't rot. Without a cadence, the perf table in the README would
+  reflect whenever someone last clicked the button — maybe weeks ago. The Monday
+  cron keeps it fresh automatically. (One subtlety the workflow handles: scheduled
+  runs fire from the repo's <em>default</em> branch, so these jobs force
+  <code>ref: feat/runtime-rust</code> to operate on the Rust branch.)</p>
+
+  <div class="callout gotcha"><span class="tag">Scheduled workflows run from the default branch</span>
+  A <code>schedule:</code> only triggers using the workflow file as it exists on the
+  repository's default branch. If your work lives on a feature branch, either the
+  workflow must also be on the default branch, or — as here — the jobs explicitly
+  check out the branch they mean to test. A common, surprising gotcha.</div>
+
+  <h2><span class="num">5</span>The shape so far</h2>
+  <p>One <strong>gating</strong> job on every push (the sweep), and two
+  <strong>informational</strong> jobs you run deliberately (perf + static). The perf
+  artifacts they produce don't just sit there — the next job picks them up and writes
+  them into the README, which is Lesson 6.</p>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. Why don't perf benchmarks run on every push?</div>
+    <button data-ok="1">They're noisy on shared runners and slow — unreliable as a gate</button>
+    <button data-ok="0">GitHub forbids it</button>
+    <button data-ok="0">They always pass, so they're pointless</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. What does <code>continue-on-error: true</code> achieve here?</div>
+    <button data-ok="1">The job runs and reports but can't fail the overall workflow — "non-gating"</button>
+    <button data-ok="0">It retries the job on error</button>
+    <button data-ok="0">It skips the job entirely</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. How are these jobs triggered?</div>
+    <button data-ok="1">Only <code>workflow_dispatch</code> (a button) or <code>schedule</code> (weekly cron)</button>
+    <button data-ok="0">On every push, like the sweep</button>
+    <button data-ok="0">They can't be triggered</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>Perf is noisy + slow, so it's <b>measured, not gated</b>: <code>continue-on-error: true</code>.</li>
+      <li>Triggered only via <code>workflow_dispatch</code> or a weekly <code>schedule</code> — excluded from <code>push</code> by the job's <code>if:</code>.</li>
+      <li><code>examples-perf-sweep</code> (throughput/RSS/cold/size, ubuntu) and <code>static-perf</code> (static sizes, 3-OS) upload TSV artifacts via runnable scripts.</li>
+      <li>Scheduled runs fire from the default branch — the jobs force the Rust branch explicitly.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Curious what the perf numbers actually say (Rust vs Go)? Ask your teacher to
+    open the README's perf verdict, or a downloaded perf TSV.</p>
+  </div>
+
+  <div class="pager">
+    <a href="04-the-gating-sweep.html">← 4 · The gating sweep</a>
+    <a href="06-ci-to-readme.html">6 · The CI → README automation →</a>
+  </div>
+
+  <footer class="fin">Lesson 5 · grounded in <code>.github/workflows/examples-sweep.yml</code> (perf + static-perf jobs).</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>
