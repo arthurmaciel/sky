@@ -9,7 +9,7 @@ module Main exposing (main)
 -- static_alloc builds) is hammered. The harness (scripts/alloc-stress.sh)
 -- asserts RSS stays bounded under sustained load and throughput doesn't regress.
 --
---   sky build src/Main.sky --target rust      # dynamic (system allocator)
+--   sky build src/Main.sky --backend rust      # dynamic (system allocator)
 --   SKY_RUST_STATIC=1 sky build ...           # static (mimalloc)
 --   curl -s http://localhost:8080/            # {"sum":...,"kept":...,"len":...}
 

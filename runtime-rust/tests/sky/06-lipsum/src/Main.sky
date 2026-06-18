@@ -3,7 +3,7 @@ module Main exposing (main)
 -- Lorem ipsum text generation via the `lipsum` crate — fully automatic FFI.
 -- `lipsum::lipsum` is a free function: Int -> String.
 --
--- Run:  sky run src/Main.sky --target rust
+-- Run:  sky run src/Main.sky --backend rust
 
 import Rust.Lipsum as Lipsum
 import Std.Log exposing (println)

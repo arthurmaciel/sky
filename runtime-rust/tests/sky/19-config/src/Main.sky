@@ -8,7 +8,7 @@ module Main exposing (main)
 -- the same Decoder (config_decode.rs). The `andThen` chain is the record-build
 -- path that the decoder-first codegen swap unblocked.
 --
--- Run:  sky run src/Main.sky --target rust
+-- Run:  sky run src/Main.sky --backend rust
 
 import Sky.Core.Prelude exposing (..)
 import Sky.Core.Task as Task

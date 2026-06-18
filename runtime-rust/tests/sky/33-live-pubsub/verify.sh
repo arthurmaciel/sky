@@ -31,7 +31,7 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $1"; exit 1; }
 
-[ -x "$BIN" ] || fail "binary not found at $BIN (build first: sky build src/Main.sky --target rust)"
+[ -x "$BIN" ] || fail "binary not found at $BIN (build first: sky build src/Main.sky --backend rust)"
 
 # Random free port in the ephemeral range.
 PORT=$(( (RANDOM % 20000) + 20000 ))

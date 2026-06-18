@@ -3,7 +3,7 @@ module Main exposing (main)
 -- CRC32 over a byte slice via the `crc32fast` crate — fully automatic FFI.
 -- `crc32fast::hash` takes `&[u8]`; Sky passes a `List Int` (auto-coerced).
 --
--- Run:  sky run src/Main.sky --target rust
+-- Run:  sky run src/Main.sky --backend rust
 
 import Sky.Core.Prelude exposing (..)
 import Std.Log exposing (println)

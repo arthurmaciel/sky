@@ -68,8 +68,8 @@ command -v curl  >/dev/null || die "curl not on PATH"
 HAVE_AB=0; command -v ab >/dev/null && HAVE_AB=1
 
 # ── 1. Emit the Rust project once, then build the four variants ─────────────
-info "Emitting Rust project (sky build --target rust) ..."
-( cd "$FIXTURE_DIR" && timeout 600 "$SKY_BIN" build --target rust src/Main.sky ) \
+info "Emitting Rust project (sky build --backend rust) ..."
+( cd "$FIXTURE_DIR" && timeout 600 "$SKY_BIN" build --backend rust src/Main.sky ) \
     >/tmp/alloc-stress-emit.log 2>&1 || { tail -20 /tmp/alloc-stress-emit.log; die "sky emit/build failed"; }
 [ -d "$RUST_DIR" ] || die "emitted Rust dir missing: $RUST_DIR"
 

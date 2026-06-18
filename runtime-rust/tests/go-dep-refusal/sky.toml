@@ -1,7 +1,7 @@
 name = "go-dep-refusal"
 version = "0.1.0"
 entry = "src/Main.sky"
-target = "rust"
+backend = "rust"
 
 # Negative-path fixture: a Go-only package declared under [go.dependencies].
 # The Rust backend has no Go inspector, so the qualified call to this package

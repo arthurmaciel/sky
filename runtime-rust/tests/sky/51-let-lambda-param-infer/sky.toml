@@ -2,4 +2,4 @@
 name = "51-let-lambda-param-infer"
 version = "0.1.0"
 entry = "src/Main.sky"
-target = "rust"
+backend = "rust"

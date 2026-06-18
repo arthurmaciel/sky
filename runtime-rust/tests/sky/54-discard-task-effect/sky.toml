@@ -2,7 +2,7 @@
 name = "54-discard-task-effect"
 version = "0.1.0"
 entry = "src/Main.sky"
-target = "rust"
+backend = "rust"
 
 [source]
 root = "src"

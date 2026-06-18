@@ -80,7 +80,7 @@ for n in "${EX[@]}"; do
   ( cd "$d" && rm -rf sky-out .skycache .skydeps sky-out/Rust 2>/dev/null ) || true
 
   # Generate the Rust project (sky build also debug-builds; harmless, we rebuild release).
-  if ! ( cd "$d" && SKY_RUST_FMT=0 timeout 600 "$SKY_BIN" build --target rust src/Main.sky ) >>"$LOG" 2>&1; then
+  if ! ( cd "$d" && SKY_RUST_FMT=0 timeout 600 "$SKY_BIN" build --backend rust src/Main.sky ) >>"$LOG" 2>&1; then
     printf '%s\t%s\t\t\t\t\t\tsky-gen-fail\n' "$n" "$shape" >> "$TSV"; continue
   fi
   MAN="$d/sky-out/Rust/Cargo.toml"

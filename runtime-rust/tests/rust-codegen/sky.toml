@@ -1,6 +1,6 @@
 name = "rust-codegen-regress"
 version = "0.1.0"
-target = "rust"
+backend = "rust"
 
 [source]
 root = "."

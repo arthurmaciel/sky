@@ -89,7 +89,7 @@ are the agent-facing interface. The runners live ONLY under
 
 **Sweep taxonomy (consolidated).** ONE sweep does build + run + equivalence:
 - **examples-sweep** (`examples-sweep.sh`) — the cornerstone correctness gate.
-  Per in-scope example it BUILDS (`--target rust` + cargo), RUNS it headless per
+  Per in-scope example it BUILDS (`--backend rust` + cargo), RUNS it headless per
   shape, AND asserts Go≡Rust EQUIVALENCE, emitting a per-example **BUILD·RUN·EQUIV**
   table. Folds the former build-sweep + run-sweep + equiv-sweep + web-sweep into
   one. GREEN row = BUILD ok AND RUN ok AND EQUIV ∈ {equiv-*, n/a, amber
@@ -149,13 +149,13 @@ SKY_BIN="$HOME/Documentos/comp/sky/sky-out/sky"
 
 # Canonical inner loop — build + run in one step
 cd examples/01-hello-world        # or whichever example
-"$SKY_BIN" run --target rust src/Main.sky
+"$SKY_BIN" run --backend rust src/Main.sky
 # Warm (source unchanged): ~0.3 s  |  First change: ~1-2 s (cargo incremental)
 # sky run honours CARGO_TARGET_DIR for the binary path (commit 0bd3a84e)
 
 # Runtime-only change (no Sky source touch needed, no wipe needed):
 # 1. Edit runtime-rust/src/sky_runtime/foo.rs
-# 2. "$SKY_BIN" run --target rust src/Main.sky   ← re-copies runtime and runs cargo
+# 2. "$SKY_BIN" run --backend rust src/Main.sky   ← re-copies runtime and runs cargo
 ```
 
 ### Standalone runtime compile-check (fastest correctness gate for `.rs` edits)
@@ -177,11 +177,11 @@ the generated project is fine for Cargo's own incremental tracker; the
 can cache. Sweep via
 `SKY_BIN=$(cabal list-bin exe:sky) ./runtime-rust/scripts/rust-sweep.sh` (~570s on warm sccache).
 
-### `sky check` does NOT support `--target rust`
+### `sky check` does NOT support `--backend rust`
 
 `sky check` always runs the Go pipeline (`go build -o /dev/null`). It is
 useful for HM type-check and Go codegen validation but it does NOT validate
-the Rust codegen path. For Rust type-check validation, use `sky build --target rust`
+the Rust codegen path. For Rust type-check validation, use `sky build --backend rust`
 or the standalone `cargo check` above.
 
 ## Code navigation — use skydex
@@ -248,7 +248,7 @@ gives wrong answers, so refreshing after writing code is not optional.
 - **Entry**: `generateRust` in `src/Sky/Build/Compile.hs`; the Rust codegen lives
   under `src/Sky/Generate/Rust/Builder/` (Kernel.hs routing, ExprEmitter, Types,
   TypeRenderer, Emitter, ModuleEmitter, Project).
-- **Output**: `sky-out/Rust/`. **Default target** is Go; Rust via `--target rust`.
+- **Output**: `sky-out/Rust/`. **Default target** is Go; Rust via `--backend rust`.
 - **Runtime**: `runtime-rust/src/sky_runtime/` is copied into the generated
   project at `sky build` time (external deps tokio/sqlx/axum/serde pulled per used
   feature). Current state of parity / what builds: ask `skydex parity --gaps` and
@@ -312,7 +312,7 @@ script directly; the skill is just the agent-facing wrapper + procedure.
 
 | Skill | Runner (`runtime-rust/scripts/`) | Does |
 |---|---|---|
-| `sky-rust-backend:examples-sweep` | `examples-sweep.sh` + `lib/checks.sh` + `web-verify.mjs` | The cornerstone gate. ONE sweep: per in-scope example BUILD (`--target rust` + cargo) · RUN headless per shape (cli no-panic / server+live boot+serve / live browser ROUND-TRIP / tui pty / webview xvfb) · EQUIV Go≡Rust per DERIVED mode (stdout-diff cli / body-diff server / both-pass-scenario live / both-no-crash tui). Emits a BUILD·RUN·EQUIV table. Folds the old build/run/equiv/web sweeps. Night-gated. |
+| `sky-rust-backend:examples-sweep` | `examples-sweep.sh` + `lib/checks.sh` + `web-verify.mjs` | The cornerstone gate. ONE sweep: per in-scope example BUILD (`--backend rust` + cargo) · RUN headless per shape (cli no-panic / server+live boot+serve / live browser ROUND-TRIP / tui pty / webview xvfb) · EQUIV Go≡Rust per DERIVED mode (stdout-diff cli / body-diff server / both-pass-scenario live / both-no-crash tui). Emits a BUILD·RUN·EQUIV table. Folds the old build/run/equiv/web sweeps. Night-gated. |
 | `sky-rust-backend:examples-perf-sweep` | `examples-perf-sweep.sh` (helper `rust-perf.sh`) | Rust-vs-Go cold-start/RSS/binsize/throughput + regression report. Night-gated. |
 | `sky-rust-backend:keep-go-parity` | `keep-go-parity.sh` | orchestrate sync → examples-sweep (always) → examples-perf-sweep (warranted) → swarm-fix RED examples (planner: `snapshot`/`plan`/`run`) |
 | `sky-rust-backend:sync-with-upstream` | — (agent-driven git runbook) | ingest `anzellai/sky` upstream into `feat/runtime-rust` |
@@ -512,7 +512,7 @@ log** — hold it to the same bar as a code review:
   stdlib kernels (`list_head`/`list_drop`/`file_mkdir_all`/`process_run`), 2
   closure-codegen gaps (E0282 param-infer, E0599 non-`Clone` capture), and a
   `sky run` `CARGO_TARGET_DIR` binary-path bug — the entire fixture sweep passed
-  over all of them. Pull a real app and `sky run` it on `--target rust`.
+  over all of them. Pull a real app and `sky run` it on `--backend rust`.
 - **ExprEmitter special-case patterns for Ffi.kernel stdlib functions MUST match
   `VarTopLevel`, not `VarKernel`.** When a Sky source imports `import Std.Db as Db`
   and calls `Db.insertFields`, the canonicaliser produces

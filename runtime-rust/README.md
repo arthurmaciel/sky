@@ -64,23 +64,23 @@ those guarantees, that *mechanism* divergence is recorded in **Rust vs Go backen
 ## CLI usage
 
 ```bash
-$ sky build src/Main.sky --target rust
-$ sky run   src/Main.sky --target rust
-$ sky check src/Main.sky --target rust    # full emit + cargo build
-$ sky test  tests/MyTest.sky --target rust
-$ sky add uuid --features="v4" --target rust   # fully automatic, no shims
+$ sky build src/Main.sky --backend rust
+$ sky run   src/Main.sky --backend rust
+$ sky check src/Main.sky --backend rust    # full emit + cargo build
+$ sky test  tests/MyTest.sky --backend rust
+$ sky add uuid --features="v4" --backend rust   # fully automatic, no shims
 $ sky install                                  # regen FFI after rm -rf .skycache
 
 # Static / cross / allocator flags (see "Static & cross compilation" below)
-$ sky build src/Main.sky --target rust --static                 # fully-static binary (musl Linux / crt-static Windows)
-$ sky build src/Main.sky --target rust --platform linux-musl    # cross-compile (alias or raw triple)
-$ sky build src/Main.sky --target rust --mimalloc               # mimalloc global allocator (faster; +RSS)
-$ sky build src/Main.sky --target rust --static --system-alloc  # static WITHOUT mimalloc (lean RSS; ~11x slower — warns)
+$ sky build src/Main.sky --backend rust --static                 # fully-static binary (musl Linux / crt-static Windows)
+$ sky build src/Main.sky --backend rust --platform linux-musl    # cross-compile (alias or raw triple)
+$ sky build src/Main.sky --backend rust --mimalloc               # mimalloc global allocator (faster; +RSS)
+$ sky build src/Main.sky --backend rust --static --system-alloc  # static WITHOUT mimalloc (lean RSS; ~11x slower — warns)
 ```
 
 Precedence **CLI > env > `sky.toml`**; the env mirrors are `SKY_RUST_STATIC` /
 `SKY_RUST_TARGET` / `SKY_RUST_ALLOC`. `--static` / `--platform` / `--mimalloc`
-compose with the backend selector `--target rust` (they never clash with it).
+compose with the backend selector `--backend rust` (they never clash with it).
 
 ---
 
@@ -199,7 +199,7 @@ instantiate `E = SkyError` for the generated project. No inline Rust
 implementation strings in the Haskell codegen.
 
 The `sky_runtime` crate is the **single source of truth** for all Rust code
-emitted by the Sky compiler's `--target rust` path. Every generated project
+emitted by the Sky compiler's `--backend rust` path. Every generated project
 copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
 
 ---
@@ -247,7 +247,7 @@ type collision and full fault isolation.
   `"dev"` and a version-only cache would never invalidate. `Sky.Build.Rust.Console`
   validates the cache by a content fingerprint (sha256 of the console source + the
   runtime `.rs`), rebuilding on any change.
-- **`--target rust` ignores `[go.dependencies]`.** Go FFI bindings are inert on the
+- **`--backend rust` ignores `[go.dependencies]`.** Go FFI bindings are inert on the
   Rust backend (it can't link Go), so `regenMissingBindings` short-circuits — a
   pure-Rust build needs no `go` toolchain even when the project declares Go deps.
 - **Observability export is OTLP/JSON, env-gated, inert by default.** Federation
@@ -593,7 +593,7 @@ construction:
 
 ### Rust FFI
 
-`sky add <crate> --target rust` invokes `sky-ffi-inspect-rs`, which runs
+`sky add <crate> --backend rust` invokes `sky-ffi-inspect-rs`, which runs
 `cargo +nightly rustdoc --output-format json` (so derive/proc-macro impls are
 visible), maps Rust types → Sky types (`Vec→List`, `Option→Maybe`, `HashMap→Dict`,
 `Result→Result E A`), and writes
@@ -719,10 +719,10 @@ Standalone runtime compile-check (fastest gate for `.rs` edits): `cargo check
 --manifest-path runtime-rust/Cargo.toml --features full` (~1.2 s warm); `cargo build
 --manifest-path runtime-rust/Cargo.toml --features full` (~2.4 s warm) when link
 errors matter. `sky check` always runs the **Go** pipeline; it does not validate the
-Rust codegen path — use `sky build --target rust` for that.
+Rust codegen path — use `sky build --backend rust` for that.
 
 The canonical inner loop (Sky source or runtime `.rs` change, no `.hs` edit): `sky
-run --target rust src/Main.sky` rebuilds + runs — ~0.3 s warm, ~1-2 s on first
+run --backend rust src/Main.sky` rebuilds + runs — ~0.3 s warm, ~1-2 s on first
 change. A runtime-only `.rs` edit is re-copied into the generated project on the next
 `sky run` (no wipe needed). Detailed env setup and the disk-hygiene recipe live in
 `runtime-rust/CLAUDE.md`.
@@ -900,7 +900,7 @@ implemented, pending macOS verification.
 | **Type check** | HM inference + exhaustiveness — `Type/` |
 | **Lower** | canonical AST → IR — `Build/Compile.hs` |
 | **Generate** | IR → target language — `Generate/{Go,Rust}/` |
-| **TargetGo / TargetRust** | the compile-target selector (`--target rust`); shared code branches on it at a minimal seam |
+| **TargetGo / TargetRust** | the compile-target selector (`--backend rust`); shared code branches on it at a minimal seam |
 
 **Rust codegen — Haskell side** (`src/Sky/Generate/Rust/`, `src/Sky/Build/Rust/`)
 

@@ -7,7 +7,7 @@ module Main exposing (main)
 -- toCode / fromCode (Char <-> Int) round-trip with the out-of-range ->
 -- replacement-char contract (U+FFFD = 65533).
 --
--- Run:  sky run src/Main.sky --target rust
+-- Run:  sky run src/Main.sky --backend rust
 -- Expected: OK -> 23-char: ...
 
 import Sky.Core.Prelude exposing (..)

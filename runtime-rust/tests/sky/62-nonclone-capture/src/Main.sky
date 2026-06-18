@@ -14,7 +14,7 @@ module Main exposing (main)
 -- MOVES the task into the closure (no prelude clone, no use-site clone) and the
 -- program builds + runs.
 --
--- Run:  sky run src/Main.sky --target rust
+-- Run:  sky run src/Main.sky --backend rust
 -- Expected stdout (3 lines, in order):
 --   OK -> 62: awaited bound task -> 42
 --   OK -> 62: andThen over bound task -> 100

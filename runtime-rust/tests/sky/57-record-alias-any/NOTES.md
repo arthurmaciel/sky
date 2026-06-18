@@ -9,7 +9,7 @@ uses it through a function parameter. `a` is a **declared generic type var**, so
 it lowers to a generic Rust struct `MainBox<a>` and compiles cleanly:
 
 ```
-$ sky build src/Main.sky --target rust   # -> Build complete
+$ sky build src/Main.sky --backend rust   # -> Build complete
 $ ./sky-app                              # -> answer
 ```
 
@@ -39,7 +39,7 @@ soundness outranks completeness: the backend now **fails loud at codegen** with
 a structured, actionable error instead of leaking an undefined `any` to cargo:
 
 ```
-$ sky build src/Main.sky --target rust
+$ sky build src/Main.sky --backend rust
 sky: error[Rust]: any-typed record field 'payload' in 'Carrier' — encode it as an ADT upstream, or use a concrete type
 $ echo $?
 1

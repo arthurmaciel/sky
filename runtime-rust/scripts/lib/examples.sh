@@ -15,7 +15,7 @@
 # stdlib module (07-todo-cli pulls os/log/slog via Std.Db/Std.Log; 16-skychess /
 # 17-skymon pull crypto/sha256 via Sky.Core.Crypto; 02-go-stdlib pulls
 # net/http+time+crypto/sha256 via Sky.Core.Http/Time/Crypto) BUILD FINE on Rust —
-# `--target rust` ignores `[go.dependencies]` entirely. The real Go-FFI tell is a
+# `--backend rust` ignores `[go.dependencies]` entirely. The real Go-FFI tell is a
 # Sky `import` of a Go-PACKAGE module — one that resolves to neither a Sky stdlib
 # module nor a local project `.sky` file (`Github.Com.…`, `Net.Http`, `Fyne.…`).
 #
@@ -159,13 +159,13 @@ perf_set() { build_set; }
 # The equivalence mode says HOW examples-sweep proves the Rust output matches Go.
 # It is DERIVED from example_shape so an author-added example auto-classifies with
 # NO manual step — the same non-hardcoded discipline as build_set:
-#   Go-FFI / out-of-scope → none (does not build on --target rust → nothing to compare)
+#   Go-FFI / out-of-scope → none (does not build on --backend rust → nothing to compare)
 #   cli      → stdout   (run BOTH backends, byte-diff normalized stdout)
 #   server   → body     (compare no-param GET-route response bodies; see exercise_server_equiv)
 #   live     → scenario (run the SAME web-verify scenario against BOTH binaries)
 #   tui      → pty      (both drive the runtime without panic — NOT cell-identical)
 #   webview  → none     (opens a window — no comparable output)
-#   fyne     → none     (Go-FFI GUI — does not build on --target rust)
+#   fyne     → none     (Go-FFI GUI — does not build on --backend rust)
 #
 # Then an OVERRIDE from equiv-classification.tsv wins if the example is listed
 # there (the .tsv is overrides-on-top-of-derived, NOT a full classification — a

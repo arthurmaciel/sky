@@ -50,7 +50,7 @@ adheres to them.
 4. **Run the sweeps per the plan** (BOTH are night-gated 22:00–08:00
    America/Sao_Paulo; during the day prefix `SKY_SWEEP_FORCE=1`):
    - **Always:** **sky-rust-backend:examples-sweep** — ONE sweep that, per
-     example, **BUILDS** (`--target rust` + cargo), **RUNS** it headless per shape
+     example, **BUILDS** (`--backend rust` + cargo), **RUNS** it headless per shape
      (cli no-panic / server+live boot+serve / live browser round-trip /
      tui pty / webview xvfb), AND asserts **Go≡Rust EQUIVALENCE** per the DERIVED
      equiv mode (stdout-diff cli / body-diff server / both-pass-scenario live /

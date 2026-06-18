@@ -25,7 +25,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "FAIL: $1"; exit 1; }
 
-[ -x "$BIN" ] || fail "binary not found at $BIN (build: sky build src/Main.sky --target rust)"
+[ -x "$BIN" ] || fail "binary not found at $BIN (build: sky build src/Main.sky --backend rust)"
 
 PORT=$(( (RANDOM % 20000) + 20000 ))
 echo "== starting server on port $PORT =="

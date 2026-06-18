@@ -20,7 +20,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GEN="$HERE/sky-out/Rust/src/main.rs"
 fail() { echo "FAIL: $1"; exit 1; }
 
-[ -f "$GEN" ] || fail "generated Rust not found at $GEN (build: sky build src/Main.sky --target rust)"
+[ -f "$GEN" ] || fail "generated Rust not found at $GEN (build: sky build src/Main.sky --backend rust)"
 
 # The let-bound `combine` closure params are annotated String (was bare → E0282).
 grep -qE 'combine = move \|buildOutput: String, runOutput: String\|' "$GEN" \

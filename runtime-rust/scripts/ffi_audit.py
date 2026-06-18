@@ -113,7 +113,7 @@ def find_inspector() -> str:
             return str(c)
     sys.exit("error: sky-ffi-inspect-rs not found. Set $SKY_FFI_INSPECTOR_RS, "
              "build tools/sky-ffi-inspect-rs (cargo build --release), or run "
-             "`sky add <anything> --target rust` once to materialise the embedded copy.")
+             "`sky add <anything> --backend rust` once to materialise the embedded copy.")
 
 
 def classify(fn: dict) -> str:

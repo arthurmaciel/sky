@@ -1,7 +1,7 @@
 # skyshop-rs
 
 A Rust-FFI port of `examples/13-skyshop` (the Stripe-SDK-scale benchmark) onto
-`sky build --target rust`. Same Sky.Live storefront — product catalogue,
+`sky build --backend rust`. Same Sky.Live storefront — product catalogue,
 cart, Stripe checkout, Firebase sign-in, admin CRUD — but every backend call
 goes through a **real Rust crate** instead of Go FFI:
 
@@ -13,7 +13,7 @@ goes through a **real Rust crate** instead of Go FFI:
 
 ## What it proves
 
-`--target rust` can consume **three independent, real-world async Rust crates
+`--backend rust` can consume **three independent, real-world async Rust crates
 at once** through the automatic FFI, with no user-written `unsafe`, no
 hand-written bindings, and no `Task`-vs-`Result` mismatch — and the resulting
 single binary boots clean against all three live test backends.
@@ -75,7 +75,7 @@ The entire storefront renders through `Std.Ui` (typed no-CSS layout DSL) →
 
 `sky.toml` declares the three crates under `["rust.dependencies"]` as
 `{ git = "file:///home/arthur/.cache/sky/skyshop-rs-wrappers", branch = "master" }`.
-`sky build --target rust` resolves them via Cargo's git checkout, runs the FFI
+`sky build --backend rust` resolves them via Cargo's git checkout, runs the FFI
 inspector against each, and emits the bindings. The path is a literal absolute
 `file://` URL (no env expansion). The `wrappers/` directory in this example is
 the source of truth; the cache repo is its committed mirror.
@@ -106,7 +106,7 @@ the source of truth; the cache repo is its committed mirror.
 export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin"
 export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target" RUSTC_WRAPPER=sccache
 cd examples/rust/skyshop-rs
-sky build src/Main.sky --target rust
+sky build src/Main.sky --backend rust
 # → sky-out/Rust/target/debug/sky-app
 ```
 

@@ -22,7 +22,7 @@ import System.FilePath ((</>))
 import System.IO (putStrLn)
 
 import Sky.Build.FfiTypeParser (FtyAst, parseFty)
-import Sky.Sky.Toml (CompileTarget(TargetGo, TargetRust))
+import Sky.Sky.Toml (Backend(BackendGo, BackendRust))
 
 
 data FfiFunction = FfiFunction
@@ -100,10 +100,10 @@ instance A.FromJSON FfiModule where
 -- For Go target: reads `.skycache/ffi/*.kernel.json` at the root (unchanged
 -- behavior). For Rust target: reads `.skycache/ffi/rust/*.kernel.json`.
 -- Silently returns an empty registry if the cache directory is absent.
-loadRegistry :: CompileTarget -> IO FfiRegistry
-loadRegistry TargetGo =
+loadRegistry :: Backend -> IO FfiRegistry
+loadRegistry BackendGo =
     loadFromDir ".skycache/ffi"
-loadRegistry TargetRust = do
+loadRegistry BackendRust = do
     reg <- loadFromDir ".skycache/ffi/rust"
     if null (_fr_modules reg)
         then do

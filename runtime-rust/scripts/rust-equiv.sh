@@ -7,7 +7,7 @@
 #       $SKY_REF (built lazily on first use into .equiv/sky-ref). Used by S0 to
 #       stabilize the Builder/ refactor.
 #   SKY_REF_TARGET=go — diff the Rust output's behavior vs the SAME compiler's
-#       --target go output. Used by S2+ to prove new-capability equivalence
+#       --backend go output. Used by S2+ to prove new-capability equivalence
 #       against the Go production backend.
 #
 # Usage: runtime-rust/scripts/rust-equiv.sh <example-name>
@@ -33,7 +33,7 @@ ensure_ref_binary() { # builds .equiv/sky-ref (HEAD monolith) on first use
 }
 
 gen_rust() { # $1=binary $2=outdir
-  ( cd "$D" && rm -rf sky-out .skycache .skydeps && timeout 180 "$1" build src/Main.sky --target rust ) \
+  ( cd "$D" && rm -rf sky-out .skycache .skydeps && timeout 180 "$1" build src/Main.sky --backend rust ) \
       >/tmp/equiv-$EX.gen.log 2>&1 || return 1
   rm -rf "$2"; cp -r "$D/sky-out/Rust" "$2"
 }

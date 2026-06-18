@@ -131,7 +131,7 @@ what was build-proven, run-verified, shim-level-proven, and not-yet-proven.
   Thread it into each subsequent brief. This is what stops N agents each
   re-discovering the same trap.
 - **Green gate.** Never hand a broken tree to the next phase. Each stage ends
-  with `sky build --target rust` + `cargo build` GREEN (run-verify where a test
+  with `sky build --backend rust` + `cargo build` GREEN (run-verify where a test
   backend exists: emulator / mock / test mode).
 - **Checkpoint commits** between stages, split by concern (general in-boundary
   fixes first for bisectability, then the artifact). Recoverable + reviewable.

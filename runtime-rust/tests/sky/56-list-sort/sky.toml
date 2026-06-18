@@ -1,10 +1,10 @@
 name = "list-sort-probe"
 version = "0.1.0"
 entry = "src/Main.sky"
-target = "rust"
+backend = "rust"
 
 # Fork-local regression fixture for List.sort / List.sortBy / List.sortWith on
-# --target rust. Pre-fix this fails `cargo build` with E0425 (unresolved
+# --backend rust. Pre-fix this fails `cargo build` with E0425 (unresolved
 # list_sort / list_sort_by / list_sort_with). Exercises:
 #   - sort        : List comparable -> List comparable (Int + String elements)
 #   - sortBy      : (a -> comparable) -> List a -> List a (key fn applied once)

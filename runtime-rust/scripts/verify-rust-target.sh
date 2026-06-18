@@ -28,13 +28,13 @@ echo ""
 echo "=== 4. Six green examples ==="
 for ex in 01-hello-world 04-local-pkg 14-task-demo simple 07-todo-cli test_pkg; do
     (cd examples/$ex && rm -rf sky-out .skycache .skydeps \
-        && $SKY_BIN build src/Main.sky --target rust \
+        && $SKY_BIN build src/Main.sky --backend rust \
         && cargo build --manifest-path sky-out/Rust/Cargo.toml -q 2>&1) \
         && echo "  ✅ $ex" || echo "  ❌ $ex"
 done
 
 echo ""
-echo "=== 5. No Go artifacts after --target rust ==="
+echo "=== 5. No Go artifacts after --backend rust ==="
 for ex in 01-hello-world; do
     for f in main.go go.mod go.sum rt; do
         [ ! -e "examples/$ex/sky-out/$f" ] || echo "  ❌ $ex has Go artifact sky-out/$f"
@@ -43,7 +43,7 @@ done
 echo "  ✅ No Go artifacts detected"
 
 echo ""
-echo "=== 6. All-example --target rust sweep (BUILD only) ==="
+echo "=== 6. All-example --backend rust sweep (BUILD only) ==="
 # examples-sweep.sh bins every in-scope example (build_set) + prints a PASS/FAIL
 # verdict; a non-zero exit means in-scope failures (we surface, don't abort).
 # BUILD_ONLY keeps this verify fast + go-free; FORCE bypasses the night gate (this

@@ -2,7 +2,7 @@
 
 Three Rust shim crates the Sky→Rust `examples/rust/skyshop-rs` port consumes via
 the auto-FFI. Stage 1 = STUB bodies (canned data, zero heavy deps) so the whole
-app builds + boots fast on `--target rust`. Later stages swap each stub for the
+app builds + boots fast on `--backend rust`. Later stages swap each stub for the
 real backend (firestore / async-stripe / rs-firebase-admin-sdk).
 
 ## Conventions (shared by all three)

@@ -1,10 +1,10 @@
 name = "kernel-parity-probe"
 version = "0.1.0"
 entry = "src/Main.sky"
-target = "rust"
+backend = "rust"
 
 # Fork-local regression fixture for the 2026-06-15 Go-parity kernel-gaps sweep.
-# Exercises the mechanical runtime kernels added on --target rust (String / Path
+# Exercises the mechanical runtime kernels added on --backend rust (String / Path
 # / Dict incl. HOFs / File effect cycle / Time / Random) so a green sky build +
 # cargo build + run proves the codegen routing (Kernel.hs) and E-inference at
 # call sites actually work — the behavioral gate the standalone runtime compile

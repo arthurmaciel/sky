@@ -1,12 +1,12 @@
 -- | Minimal sky.toml parser for Sky project configuration.
 -- No external TOML library dependency — hand-written for simplicity.
 module Sky.Sky.Toml
-    ( CompileTarget(..)
+    ( Backend(..)
     , RustDepSpec(..)
     , SkyConfig(..)
     , defaultConfig
     , parseSkyToml
-    , parseCompileTarget
+    , parseBackend
     , parseDurationSeconds
     ) where
 
@@ -16,8 +16,8 @@ import Data.List (isPrefixOf, stripPrefix)
 import Sky.Sky.Toml.Rust (RustDepSpec(..), parseRustDepSpec)
 
 
--- | Compilation target: go or rust
-data CompileTarget = TargetGo | TargetRust
+-- | Compilation backend: go or rust
+data Backend = BackendGo | BackendRust
     deriving (Show, Eq)
 
 -- | Sky project configuration
@@ -27,7 +27,7 @@ data SkyConfig = SkyConfig
     , _entry         :: !String           -- entry file (src/Main.sky)
     , _sourceRoot    :: !String           -- source root (src)
     , _binName       :: !String           -- output binary name (app)
-    , _target        :: !CompileTarget   -- compilation target (go or rust)
+    , _backend        :: !Backend   -- compilation target (go or rust)
     , _goDeps        :: [(String, String)]-- Go dependencies [(pkg, version)]
     , _rustDeps      :: [(String, RustDepSpec)]-- Rust crate deps
     , _skyDeps       :: [(String, String)]-- Sky-source dependencies [(repo, version)]
@@ -48,7 +48,7 @@ data SkyConfig = SkyConfig
     , _envPrefix     :: !String           -- [env] prefix: namespace for runtime SKY_* env reads (default "SKY")
     , _sqlxTls       :: !String           -- [rust] sqlx_tls: "rustls" (default) | "native-tls"
     , _rustStatic    :: !Bool             -- [rust] static: build a fully-static binary (musl Linux / crt-static Windows). Opt-in; default False.
-    , _rustTarget    :: !String           -- [rust] target: cross-compile platform (alias `linux-musl`/`linux-gnu`/`linux-musl-arm64` or a raw triple). "" = host. Orthogonal to static.
+    , _rustTarget    :: !String           -- [rust] target: cross-compile target triple (e.g. x86_64-unknown-linux-musl). "" = host. Orthogonal to static/backend.
     , _rustAllocator :: !String           -- [rust] allocator: "" (auto: mimalloc on static, system on dynamic) | "system" | "mimalloc". Decoupled from static.
     }
     deriving (Show)
@@ -62,7 +62,7 @@ defaultConfig = SkyConfig
     , _entry         = "src/Main.sky"
     , _sourceRoot    = "src"
     , _binName       = "app"
-    , _target        = TargetGo
+    , _backend        = BackendGo
     , _goDeps        = []
     , _rustDeps      = []
     , _skyDeps       = []
@@ -173,7 +173,7 @@ applyKeyValue section config key value = case section of
     "rust" -> case key of
         "sqlx_tls" -> config { _sqlxTls = value }
         "static"    -> config { _rustStatic = value == "true" }   -- TOML bool: `static = true`
-        "target"    -> config { _rustTarget = value }             -- cross platform alias / triple
+        "target"    -> config { _rustTarget = value }             -- cross-compile target triple (e.g. x86_64-unknown-linux-musl)
         "allocator" -> config { _rustAllocator = value }          -- "" auto | "system" | "mimalloc"
         _           -> config
     -- Top-level / [source] / [project] — project metadata.
@@ -183,7 +183,7 @@ applyKeyValue section config key value = case section of
         "entry"   -> config { _entry = value }
         "root"    -> config { _sourceRoot = value }
         "bin"     -> config { _binName = value }
-        "target"  -> config { _target = parseCompileTarget value }
+        "backend" -> config { _backend = parseBackend value }   -- [project] backend = "rust" | "go"
         -- top-level `port = 8000` (legacy — before [live] section existed)
         "port"    -> config { _livePort = safeReadInt value (_livePort config) }
         _         -> config
@@ -269,6 +269,6 @@ stripQuotes s = s
 -- (RustDepSpec + parseRustDepSpec + parseInlineTable now live in
 -- Sky.Sky.Toml.Rust; imported above and re-exported.)
 
-parseCompileTarget :: String -> CompileTarget
-parseCompileTarget "rust" = TargetRust
-parseCompileTarget _      = TargetGo
+parseBackend :: String -> Backend
+parseBackend "rust" = BackendRust
+parseBackend _      = BackendGo

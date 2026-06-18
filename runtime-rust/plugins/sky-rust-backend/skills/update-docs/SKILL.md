@@ -151,7 +151,7 @@ sections (rewrite each from scratch based on what you observe in the repo):
    The per-example PARITY table lives under Project status (item 5), not here.
 7. **FFI codegen coercion rules** — `argCall` and `coerceRet` tables (from
    `src/Sky/Build/FfiGen.hs emitRustFnSimple`).
-8. **CLI usage** — `sky build/run/check/test/add` with `--target rust`. Place this
+8. **CLI usage** — `sky build/run/check/test/add` with `--backend rust`. Place this
    section immediately AFTER `## Goal` (settled README section order).
 9. **Known limitations** — table with Description and Workaround columns.
 10. **Remaining work** — Short / Medium / Long term.

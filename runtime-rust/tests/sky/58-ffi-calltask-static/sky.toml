@@ -1,9 +1,9 @@
 name = "ffi-calltask-static-probe"
 version = "0.1.0"
 entry = "src/Main.sky"
-target = "rust"
+backend = "rust"
 
-# Fork-local regression fixture for STATIC-shape `Ffi.callTask` on --target rust.
+# Fork-local regression fixture for STATIC-shape `Ffi.callTask` on --backend rust.
 #
 # Pre-fix: a static-shape `Ffi.callTask "Kernel" [args]` had NO peephole arm in
 # src/Sky/Generate/Rust/Builder/ExprEmitter.hs (only callPure/call did), so it

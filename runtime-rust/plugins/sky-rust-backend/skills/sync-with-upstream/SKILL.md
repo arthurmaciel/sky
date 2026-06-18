@@ -145,7 +145,7 @@ commit in Step 8.
 ### Step 7 — Verify (do NOT skip; do NOT commit a broken merge)
 
 - **Rust sweep** — all 15 `runtime-rust/tests/sky/*` build + run from a clean slate
-  (clear `~/.cache/sky/tools/sky-ffi-inspect-rs` first; `sky add … --target rust`
+  (clear `~/.cache/sky/tools/sky-ffi-inspect-rs` first; `sky add … --backend rust`
   then `sky run`; `04-uuid` needs `--features v4`). Each must print `OK -> …`.
 - **Go regression** — `examples/01-hello-world` builds clean
   (`Build complete: sky-out/app`).

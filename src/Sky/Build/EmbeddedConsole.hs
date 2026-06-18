@@ -2,9 +2,9 @@
 
 -- | The bundled Sky Console mini-app (`sky-bundled/console/`) embedded into the
 -- sky binary at TH compile time, for the **Rust backend's pre-built console
--- child** (epic A). On a user's first `sky build --target rust` of a Sky.Live
+-- child** (epic A). On a user's first `sky build --backend rust` of a Sky.Live
 -- app, `Sky.Build.Rust.Console.ensureConsoleBinary` materialises these files
--- into a version-keyed cache dir, runs `sky build --target rust` on them once,
+-- into a version-keyed cache dir, runs `sky build --backend rust` on them once,
 -- and caches the resulting binary — the Live runtime's reverse-proxy then
 -- spawns it (`live/console_proxy.rs`).
 --

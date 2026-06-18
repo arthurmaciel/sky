@@ -3,7 +3,7 @@ module Main exposing (main)
 -- Human-readable byte sizes via the `bytesize` crate — fully automatic FFI.
 -- `ByteSize::mb` is a static method; Display gives the `to_string` bridge.
 --
--- Run:  sky run src/Main.sky --target rust
+-- Run:  sky run src/Main.sky --backend rust
 
 import Rust.Bytesize as Bytesize
 import Std.Log exposing (println)

@@ -58,7 +58,7 @@ export STRIPE_API_BASE=http://127.0.0.1:12111 STRIPE_API_KEY=sk_test_123
 for i in $(seq 1 15); do curl -s -o /dev/null --max-time 2 http://127.0.0.1:12111/v1/customers && break; sleep 1; done
 
 echo "== 4. build =="
-( cd "$HERE" && "$SKY_BIN" build src/Main.sky --target rust ) > "$LOG/build.log" 2>&1
+( cd "$HERE" && "$SKY_BIN" build src/Main.sky --backend rust ) > "$LOG/build.log" 2>&1
 grep -q "Build complete" "$LOG/build.log" || { fail "build failed"; tail "$LOG/build.log"; exit 1; }
 
 echo "== 5. run app (ENV unset) =="

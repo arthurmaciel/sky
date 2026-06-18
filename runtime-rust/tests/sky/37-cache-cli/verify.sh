@@ -11,7 +11,7 @@ else
     BIN="$HERE/sky-out/Rust/target/debug/sky-app"
 fi
 fail() { echo "FAIL: $1"; exit 1; }
-[ -x "$BIN" ] || fail "binary not found at $BIN (build: sky build src/Main.sky --target rust)"
+[ -x "$BIN" ] || fail "binary not found at $BIN (build: sky build src/Main.sky --backend rust)"
 
 OUT="$("$BIN" 2>&1)"
 echo "$OUT"

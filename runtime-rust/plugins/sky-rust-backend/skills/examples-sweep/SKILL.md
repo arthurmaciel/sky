@@ -1,6 +1,6 @@
 ---
 name: examples-sweep
-description: Run the Sky Rust-backend EXAMPLES sweep — the cornerstone correctness gate. ONE deterministic pass that BUILDS each in-scope example on `--target rust`, RUNS it headless per shape, AND asserts the Rust output matches the Go reference per the example's equiv mode, emitting a per-example BUILD·RUN·EQUIV table. Replaces the old build-sweep + run-sweep (folded into one). Use when the user asks to run the examples sweep, verify the examples still build + run on `--target rust`, check Go≡Rust parity, or after a codegen/runtime change. Siblings: sky-rust-backend:examples-perf-sweep (performance). Night-gated 22:00–08:00 America/Sao_Paulo. Trigger: /sky-rust-backend:examples-sweep.
+description: Run the Sky Rust-backend EXAMPLES sweep — the cornerstone correctness gate. ONE deterministic pass that BUILDS each in-scope example on `--backend rust`, RUNS it headless per shape, AND asserts the Rust output matches the Go reference per the example's equiv mode, emitting a per-example BUILD·RUN·EQUIV table. Replaces the old build-sweep + run-sweep (folded into one). Use when the user asks to run the examples sweep, verify the examples still build + run on `--backend rust`, check Go≡Rust parity, or after a codegen/runtime change. Siblings: sky-rust-backend:examples-perf-sweep (performance). Night-gated 22:00–08:00 America/Sao_Paulo. Trigger: /sky-rust-backend:examples-sweep.
 ---
 
 # examples-sweep
@@ -12,7 +12,7 @@ The **cornerstone** of the Rust-backend dev cycle: one deterministic script —
 
 | Column | What | Cells |
 |---|---|---|
-| **BUILD** | `sky build --target rust` + `cargo build` | `ok` · `sky-fail` · `cargo-fail` |
+| **BUILD** | `sky build --backend rust` + `cargo build` | `ok` · `sky-fail` · `cargo-fail` |
 | **RUN** | run the Rust binary headless, per `example_shape` (via `exercise_*` in `lib/checks.sh`) | `ok` · `panic` · `hang` · `noserve` · `notty` · `skip` |
 | **EQUIV** | build the Go reference + compare to Rust per the DERIVED equiv mode | `equiv-stdout` · `equiv-body N` · `equiv-serve` · `equiv-scenario` · `equiv-pty` · `n/a` · `DIFFER` · `go-ref-broken` |
 
@@ -135,7 +135,7 @@ definition of "did the binary work?", no drift.
   `CARGO_INCREMENTAL=0`; `SKY_BIN=<repo>/sky-out/sky`.
 - `go` is required by default (the EQUIV comparison side); `SKY_SWEEP_BUILD_ONLY=1`
   or `SKY_SWEEP_NO_EQUIV=1` drop it.
-- Go-FFI examples are ABSENT from `build_set` (don't build on `--target rust`).
+- Go-FFI examples are ABSENT from `build_set` (don't build on `--backend rust`).
 - Never edit runtime files while this runs (concurrent copy → false E0433).
 
 ## Capture learnings (self-improving loop)

@@ -3,8 +3,8 @@ module Main exposing (main)
 -- Date/time via chrono — fully automatic FFI, no shims needed.
 -- All bindings are discovered by `cargo +nightly rustdoc --output-format json`.
 --
--- Run:  sky add chrono --target rust
---       sky run src/Main.sky --target rust
+-- Run:  sky add chrono --backend rust
+--       sky run src/Main.sky --backend rust
 
 import Rust.Chrono as Chrono
 import Std.Log exposing (println)

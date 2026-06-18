@@ -24,7 +24,7 @@ build_run() { # $1=go|rust -> stdout (or empty on failure); writes nothing else
     ( cd "$H" && timeout 300 "$SKY" build src/Main.sky ) >/tmp/uip-build.log 2>&1 || return 1
     ( cd "$H" && ./sky-out/app ) 2>/dev/null | sanitize
   else
-    ( cd "$H" && timeout 300 "$SKY" build src/Main.sky --target rust ) >/tmp/uip-build.log 2>&1 || return 1
+    ( cd "$H" && timeout 300 "$SKY" build src/Main.sky --backend rust ) >/tmp/uip-build.log 2>&1 || return 1
     ( cd "$H" && cargo build --release --manifest-path sky-out/Rust/Cargo.toml ) >/tmp/uip-cargo.log 2>&1 || return 1
     # Honour CARGO_TARGET_DIR (shared target dir / sccache); fall back to the
     # project-local target when it is unset.

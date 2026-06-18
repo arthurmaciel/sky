@@ -1,7 +1,7 @@
 name = "skyshop-rs"
 version = "0.1.0"
 entry = "src/Main.sky"
-target = "rust"
+backend = "rust"
 
 [source]
 root = "src"
@@ -11,7 +11,7 @@ port = 8000
 store = "memory"
 
 # Three STUB wrapper crates delivered as RustGitDeps pointing at the local
-# `file://` git repo (D4). `sky build --target rust` resolves them via Cargo's
+# `file://` git repo (D4). `sky build --backend rust` resolves them via Cargo's
 # git checkout, runs the FFI inspector, and binds each fn as a synchronous Sky
 # `Result` (D1). Stage 2-4 swap the stub bodies for real backends — no sky.toml
 # change. branch = master (LITERAL absolute path — no env expansion).

@@ -3,7 +3,7 @@ module Main exposing (main)
 -- UUID v4 generation via the `uuid` crate — fully automatic FFI, no shims.
 -- All bindings are discovered by `cargo +nightly rustdoc --output-format json`.
 --
--- Run:  sky run src/Main.sky --target rust
+-- Run:  sky run src/Main.sky --backend rust
 
 import Rust.Uuid as Uuid
 import Std.Log exposing (println)

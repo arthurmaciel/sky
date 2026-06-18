@@ -265,11 +265,11 @@ runBuildInner WatchOpts{..} = do
     result <- Compile.compile cfg woEntry outDir
     case result of
         Left err  -> pure (Left err)
-        Right _   -> case Toml._target cfg of
+        Right _   -> case Toml._backend cfg of
             -- Rust target: the codegen wrote `sky-out/Rust/` (NO main.go), so build
-            -- it with cargo — mirroring `sky build --target rust`. Honour a shared
+            -- it with cargo — mirroring `sky build --backend rust`. Honour a shared
             -- CARGO_TARGET_DIR if the dev workflow set one; the package is `sky-app`.
-            Toml.TargetRust -> do
+            Toml.BackendRust -> do
                 let rustDir = outDir </> "Rust"
                     cmd = "cargo build --manifest-path " ++ (rustDir </> "Cargo.toml")
                 (ec, _, cerr) <- P.readCreateProcessWithExitCode (P.shell cmd) ""
@@ -279,7 +279,7 @@ runBuildInner WatchOpts{..} = do
                         let targetBase = maybe (rustDir </> "target") id mTargetDir
                         pure (Right (targetBase </> "debug" </> "sky-app"))
                     ExitFailure _ -> pure (Left ("cargo build failed:\n" ++ cerr))
-            Toml.TargetGo -> do
+            Toml.BackendGo -> do
                 let binPath = outDir </> Toml._binName cfg
                     cmd = "cd " ++ outDir ++ " && go build -o " ++ Toml._binName cfg ++ " ."
                 (ec, _, gerr) <- P.readCreateProcessWithExitCode (P.shell cmd) ""

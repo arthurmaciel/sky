@@ -8,7 +8,7 @@ module Main exposing (main)
 -- bounded mpsc channel) — NOT buffered to the end.
 --
 -- Run + verify:
---   sky run src/Main.sky --target rust
+--   sky run src/Main.sky --backend rust
 --   curl --no-buffer http://localhost:8000/events
 -- Expected: five `tick` lines appear ~200ms apart, then `done`.
 

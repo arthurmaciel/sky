@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Negative-path fixture for the Go-package -> Rust FFI divergence
 # (disposition DOCUMENT_BLOCKED). Proves that a [go.dependencies] build under
-# --target rust REFUSES CLEANLY: exit != 0, an E1001 / "Undefined name"
+# --backend rust REFUSES CLEANLY: exit != 0, an E1001 / "Undefined name"
 # refusal in the output, NO sky-out/Rust/src/main.rs produced, and NO Rust
 # panic marker. A clean compile-time refusal is the strongest failure mode —
 # not a panic, not a late cargo error, not a silent success.
@@ -16,10 +16,10 @@ note() { echo "  - $1"; }
 # Clean slate so the assertion on "no main.rs emitted" is meaningful.
 rm -rf sky-out .skycache .skydeps
 
-out=$(timeout 120 ../../../sky-out/sky build --target rust src/Main.sky 2>&1)
+out=$(timeout 120 ../../../sky-out/sky build --backend rust src/Main.sky 2>&1)
 code=$?
 
-echo "=== sky build --target rust (exit $code) ==="
+echo "=== sky build --backend rust (exit $code) ==="
 echo "$out"
 echo "==========================================="
 
@@ -62,5 +62,5 @@ if [ "$fail" -ne 0 ]; then
     echo "FAIL: go-dep-refusal — clean refusal NOT proven"
     exit 1
 fi
-echo "PASS: go-dep-refusal — [go.dependencies] under --target rust refuses cleanly"
+echo "PASS: go-dep-refusal — [go.dependencies] under --backend rust refuses cleanly"
 exit 0

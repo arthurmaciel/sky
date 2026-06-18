@@ -1,6 +1,6 @@
 -- | Rust-target project codegen orchestration: emit main.rs + module files,
 -- copy the runtime, write Cargo.toml, copy FFI bindings. Extracted from the
--- Compile.hs `TargetRust` branch (plus the Rust-only helpers `generateRust`
+-- Compile.hs `BackendRust` branch (plus the Rust-only helpers `generateRust`
 -- and `copyRustRuntime`) so upstream's Go-codegen block in Compile.hs stays
 -- minimally wrapped and merges cleanly. Dependency is one-way: Compile.hs
 -- imports this module, never the reverse.

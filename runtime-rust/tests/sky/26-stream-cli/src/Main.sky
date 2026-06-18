@@ -14,8 +14,8 @@ module Main exposing (main)
 -- the WebSocket client's onMessage.
 --
 -- Verify (needs 21-sse-server running on :8000):
---   (cd ../21-sse-server && sky run src/Main.sky --target rust) &
---   (sleep 3) | sky run src/Main.sky --target rust
+--   (cd ../21-sse-server && sky run src/Main.sky --backend rust) &
+--   (sleep 3) | sky run src/Main.sky --backend rust
 -- Expected: OK -> 26-stream-cli: received 6 chunks then Done
 -- (5 `tick` events + 1 `done` event = 6 chunks before clean EOF.)
 

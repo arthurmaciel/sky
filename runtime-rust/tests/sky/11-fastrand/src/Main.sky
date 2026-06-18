@@ -3,7 +3,7 @@ module Main exposing (main)
 -- Fast random numbers via the `fastrand` crate — fully automatic FFI.
 -- `fastrand::bool` is a zero-arg free function using a thread-local RNG.
 --
--- Run:  sky run src/Main.sky --target rust
+-- Run:  sky run src/Main.sky --backend rust
 
 import Rust.Fastrand as Fastrand
 import Std.Log exposing (println)

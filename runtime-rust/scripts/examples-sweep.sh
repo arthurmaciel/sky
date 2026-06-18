@@ -3,7 +3,7 @@
 # in-scope example (build_set, DERIVED in lib/examples.sh: every candidate dir
 # minus Go-FFI) it does THREE things and emits ONE table row with three columns:
 #
-#   BUILD   sky build --target rust + cargo build       → ok / sky-fail / cargo-fail
+#   BUILD   sky build --backend rust + cargo build       → ok / sky-fail / cargo-fail
 #   RUN     run the Rust binary headless, per shape      → ok / panic / hang / noserve / notty / skip
 #   EQUIV   build the Go reference + compare to Rust     → equiv-stdout / equiv-body N /
 #                                                           equiv-serve / equiv-scenario /
@@ -87,7 +87,7 @@ fi
 # rg (ripgrep) is required by `is_out_of_scope` — the build_set Go-FFI filter used
 # in EVERY mode. Without it the import-scan silently returns "in scope" for all, so
 # Go-FFI examples (02/03/05/08/11/13…) leak into build_set and every one fails
-# `--target rust`. Fail LOUDLY (a CI runner must install ripgrep) rather than run a
+# `--backend rust`. Fail LOUDLY (a CI runner must install ripgrep) rather than run a
 # wrong, all-red sweep.
 command -v rg >/dev/null 2>&1 || { echo "ERROR: rg (ripgrep) required for the example-scope filter (is_out_of_scope). Install ripgrep." >&2; exit 2; }
 # Skip the per-example console pre-build (not what this sweep checks).
@@ -133,7 +133,7 @@ build_rust() {
   _win_reap_app; [ "${SKY_HOST_OS:-}" = windows ] && sleep 1
   local attempt ok=0
   for attempt in 1 2 3 4; do
-    if ( cd "$d" && timeout "$tmo" "$SKY_BIN" build src/Main.sky --target rust >"$HIST/$n.rust.sky.log" 2>&1 ); then
+    if ( cd "$d" && timeout "$tmo" "$SKY_BIN" build src/Main.sky --backend rust >"$HIST/$n.rust.sky.log" 2>&1 ); then
       ok=1; break
     fi
     if [ "${SKY_HOST_OS:-}" = windows ] && [ "$attempt" -lt 4 ] && \

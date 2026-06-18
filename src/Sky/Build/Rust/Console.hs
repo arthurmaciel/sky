@@ -1,14 +1,14 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Epic A1 — build the bundled Sky Console as a standalone Rust binary at the
--- user's `sky build --target rust` time, cached once per sky version, so the
+-- user's `sky build --backend rust` time, cached once per sky version, so the
 -- Live runtime's reverse-proxy (`live/console_proxy.rs`) can spawn it. NEVER a
 -- runtime build — the only reason the Go backend dropped its subprocess console
 -- (see `runtime-rust/README.md` §"divergent strategies").
 --
 -- Flow: materialise the TH-embedded console source (`Sky.Build.EmbeddedConsole`)
 -- into a version-keyed cache build dir, recursively invoke THIS sky binary
--- (`getExecutablePath`) with `build --target rust`, and copy the resulting
+-- (`getExecutablePath`) with `build --backend rust`, and copy the resulting
 -- binary to `~/.cache/sky/rust-console/<version>/sky-console` (the exact path
 -- `console_bin_path()` resolves at runtime). Cache hit → no-op.
 --

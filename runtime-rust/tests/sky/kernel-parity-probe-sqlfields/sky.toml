@@ -1,10 +1,10 @@
 name = "kernel-parity-probe-sqlfields"
 version = "0.1.0"
 entry = "src/Main.sky"
-target = "rust"
+backend = "rust"
 
 # Fork-local regression fixture for Db.insertFields / Db.updateFields /
-# Db.insertFieldsReturning on --target rust.
+# Db.insertFieldsReturning on --backend rust.
 # Exercises: SqlString, SqlInt, SqlFloat, SqlBool, SqlNull, OmitField (DEFAULT),
 # updateFields (WHERE + SET with OmitField), insertFieldsReturning (RETURNING id).
 # Regression gate: build+run must print "SQLFIELDS PROBE OK".

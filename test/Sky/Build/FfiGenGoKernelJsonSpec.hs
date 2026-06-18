@@ -9,7 +9,7 @@ import System.IO.Temp (withSystemTempDirectory)
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Sky.Sky.Toml (CompileTarget(..))
+import Sky.Sky.Toml (Backend(..))
 import qualified Sky.Build.FfiGen as FfiGen
 
 

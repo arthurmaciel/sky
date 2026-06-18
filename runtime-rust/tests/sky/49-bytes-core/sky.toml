@@ -2,4 +2,4 @@
 name = "49-bytes-core"
 version = "0.1.0"
 entry = "src/Main.sky"
-target = "rust"
+backend = "rust"

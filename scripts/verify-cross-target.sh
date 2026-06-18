@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Cross-target output verification script.
-# Builds each example with both --target go and --target rust,
+# Builds each example with both --backend go and --backend rust,
 # runs both, and diffs their textual stdout output to catch
 # silent divergence between backends.
 set -euo pipefail
@@ -26,7 +26,7 @@ for ex in "${EXAMPLES[@]}"; do
 
     # Build and run Go target (from example dir so sky build finds the entry)
     (cd "examples/$ex" && rm -rf sky-out .skycache && \
-     "$SKY_BIN_ABS" build src/Main.sky --target go >/dev/null 2>&1)
+     "$SKY_BIN_ABS" build src/Main.sky --backend go >/dev/null 2>&1)
     if [ ! -x "examples/$ex/sky-out/app" ]; then
         echo "GO BUILD FAILED"
         FAILED=$((FAILED+1))
@@ -36,7 +36,7 @@ for ex in "${EXAMPLES[@]}"; do
 
     # Build and run Rust target
     (cd "examples/$ex" && rm -rf sky-out/Rust .skycache && \
-     "$SKY_BIN_ABS" build src/Main.sky --target rust >/dev/null 2>&1)
+     "$SKY_BIN_ABS" build src/Main.sky --backend rust >/dev/null 2>&1)
     if [ ! -d "examples/$ex/sky-out/Rust" ]; then
         echo "RUST BUILD FAILED"
         FAILED=$((FAILED+1))

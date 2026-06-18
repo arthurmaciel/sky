@@ -548,7 +548,7 @@ globalCurrentDepModule = unsafePerformIO $ newIORef Nothing
 -- | Read ffi/*.kernel.json and write the resulting module/function maps into
 -- Env.ffiKernelModulesRef and Env.ffiKernelFunctionsRef. After this call the
 -- pure kernelModules / kernelFunctions lookups include FFI entries.
-loadAndSeedFfiRegistry :: Toml.CompileTarget -> IO ()
+loadAndSeedFfiRegistry :: Toml.Backend -> IO ()
 loadAndSeedFfiRegistry target = do
     reg <- FfiReg.loadRegistry target
     let mods = FfiReg._fr_modules reg
@@ -685,7 +685,7 @@ compile config entryPath outDir = do
 
     -- Phase 0: Load FFI registry (ffi/*.kernel.json) and seed the kernel
     -- module/function IORefs so FFI packages resolve as first-class kernels.
-    loadAndSeedFfiRegistry (Toml._target config)
+    loadAndSeedFfiRegistry (Toml._backend config)
 
     -- Phase 0b: Install Sky-source dependencies declared in [dependencies].
     -- Each dep contributes an extra source root that discovery will probe
@@ -1833,8 +1833,8 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                     authDiags = authDiagsEntry ++ authDiagsDeps
                 -- Exclusive target dispatch: each branch writes its own
                 -- output directory and returns its own success path.
-                case Toml._target config of
-                    Toml.TargetRust -> do
+                case Toml._backend config of
+                    Toml.BackendRust -> do
                         -- Rust codegen orchestration lives in
                         -- Sky.Generate.Rust.Project (extracted to keep this Go
                         -- branch upstream-shaped). We read the global kernel
@@ -1862,7 +1862,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                         RustProject.generateRustProject config (canMod : prunedDeps)
                             entrySrcMod typesWithDeps rawAliases outDir srcHash
 
-                    Toml.TargetGo ->
+                    Toml.BackendGo ->
                         if not (null authDiags)
                           then do
                               rendered <- Render.renderCliMany authDiags
@@ -2744,7 +2744,7 @@ typecheckWorkspace config entryPath = do
         projectRoot = case takeDirectory entryDir of
             "" -> "."
             d  -> d
-    loadAndSeedFfiRegistry (Toml._target config)
+    loadAndSeedFfiRegistry (Toml._backend config)
     depRoots <- SkyDeps.installDeps (Toml._skyDeps config)
     -- Materialise stdlib inside `.skycache/` so it lives in the already-
     -- gitignored cache dir instead of polluting `src/`. LSP goto-def can
@@ -3109,7 +3109,7 @@ generateDeclsForDepScoped modName canMod modPrefix =
 
 -- | The bound name of a top-level decl (Def / TypedDef). DestructDef has no
 -- single name; callers handle it separately. Used by the Rust-backend DCE
--- prune in the TargetRust dispatch.
+-- prune in the BackendRust dispatch.
 rustDeclName :: Can.Def -> String
 rustDeclName (Can.Def (A.At _ n) _ _)          = n
 rustDeclName (Can.TypedDef (A.At _ n) _ _ _ _) = n

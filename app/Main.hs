@@ -53,7 +53,7 @@ import qualified Sky.Lsp.Server as Lsp
 import qualified Sky.Build.FfiGen as FfiGen
 import qualified Sky.Build.Rust.Ffi as RustFfi
 import qualified Sky.Build.Rust.Console as RustConsole
-import Sky.Sky.Toml (CompileTarget(..), RustDepSpec(..))
+import Sky.Sky.Toml (Backend(..), RustDepSpec(..))
 import qualified Sky.Build.SkyDeps as SkyDeps
 import qualified Sky.Build.Validator as Validator
 import qualified Sky.Reporting.Render as Render
@@ -895,14 +895,14 @@ addHandler opts = do
                     length content `seq` return (Toml.parseSkyToml content)
                 else return Toml.defaultConfig
             let target = case mTarget of
-                    Just t  -> parseTarget t
-                    Nothing -> Toml._target config
+                    Just t  -> parseBackend t
+                    Nothing -> Toml._backend config
             -- Rust git deps: discover the actual Cargo package name (the URL
             -- basename is a hint — repos commonly name their package
             -- differently from their dir), add to sky.toml, then ask the
             -- inspector to resolve via Cargo's git checkout cache.
             case (target, pkgSpec) of
-                (TargetRust, GitDep url mr mb mt) -> do
+                (BackendRust, GitDep url mr mb mt) -> do
                     let basenameGuess = basename url
                     putStrLn "   Probing git source for Cargo package name..."
                     discovered <- discoverGitPackageName url mr mb mt
@@ -919,7 +919,7 @@ addHandler opts = do
                     case r of
                         Left err -> do
                             putStrLn $ "   warning: " ++ err
-                            putStrLn "   `sky build src/Main.sky --target rust` will retry."
+                            putStrLn "   `sky build src/Main.sky --backend rust` will retry."
                             return (Right ())
                         Right info -> do
                             names <- RustFfi.generateRustBindings info
@@ -927,10 +927,10 @@ addHandler opts = do
                             return (Right ())
                 _ -> do
                     let inspName = case target of
-                            TargetGo   -> "sky-ffi-inspect"
-                            TargetRust -> "sky-ffi-inspect-rs"
+                            BackendGo   -> "sky-ffi-inspect"
+                            BackendRust -> "sky-ffi-inspect-rs"
                     case target of
-                        TargetGo -> do
+                        BackendGo -> do
                             createDirectoryIfMissing True "sky-out"
                             hasGoMod <- doesFileExist "sky-out/go.mod"
                             when (not hasGoMod) $ do
@@ -940,11 +940,11 @@ addHandler opts = do
                                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
                             callProcess "sh" ["-c", "cd sky-out && go get " ++ pkg]
                             appendGoDependency pkg
-                        TargetRust ->
+                        BackendRust ->
                             return ()
                     r <- case target of
-                        TargetGo   -> FfiGen.runInspector pkg
-                        TargetRust -> RustFfi.runRustInspector pkg features
+                        BackendGo   -> FfiGen.runInspector pkg
+                        BackendRust -> RustFfi.runRustInspector pkg features
                     case r of
                         Left err -> do
                             putStrLn $ "   " ++ inspName ++ " warning: " ++ err
@@ -952,28 +952,28 @@ addHandler opts = do
                             return (Right ())
                         Right info -> do
                             names <- case target of
-                                TargetGo   -> FfiGen.generateBindings info
-                                TargetRust -> RustFfi.generateRustBindings info
+                                BackendGo   -> FfiGen.generateBindings info
+                                BackendRust -> RustFfi.generateRustBindings info
                             putStrLn $ "Generated " ++ show (length names) ++ " bindings in .skycache/"
                             mapM_ (\n -> putStrLn $ "   " ++ n) (take 10 names)
                             when (length names > 10) $
                                 putStrLn $ "   ... and " ++ show (length names - 10) ++ " more"
                             case target of
-                                TargetGo -> appendGoDependency pkg
-                                TargetRust ->
+                                BackendGo -> appendGoDependency pkg
+                                BackendRust ->
                                     appendRustDependency pkg (FfiGen._pkgVersion info) features
                             let skyModuleName = case target of
-                                    TargetGo   -> FfiGen.pkgToModuleName pkg
-                                    TargetRust -> RustFfi.rustModuleName pkg
+                                    BackendGo   -> FfiGen.pkgToModuleName pkg
+                                    BackendRust -> RustFfi.rustModuleName pkg
                                 shortAlias = reverse (takeWhile (/= '.') (reverse skyModuleName))
                                 slug = FfiGen.slugify (FfiGen._pkgName info)
                                 ffiDir = case target of
-                                    TargetGo   -> ".skycache/ffi/"
-                                    TargetRust -> ".skycache/ffi/rust/"
+                                    BackendGo   -> ".skycache/ffi/"
+                                    BackendRust -> ".skycache/ffi/rust/"
                                 outputMsg = case target of
-                                    TargetGo ->
+                                    BackendGo ->
                                         "Call from Sky via: import " ++ skyModuleName ++ " as Pkg; Pkg.fnName args"
-                                    TargetRust ->
+                                    BackendRust ->
                                         "Import in your Sky module, e.g.:\n"
                                         ++ "  import " ++ skyModuleName ++ " as " ++ shortAlias ++ "\n"
                                         ++ "Then call any of the " ++ show (length names) ++ " functions"
@@ -1015,7 +1015,7 @@ runProject path = do
             if hasRt
                 then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                 else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-        regenMissingBindings (Toml._target config) goDeps
+        regenMissingBindings (Toml._backend config) goDeps
     result <- Compile.compile config path outDir
     case result of
         Left err -> return (Left err)
@@ -1034,16 +1034,16 @@ runProject path = do
                 ExitFailure _ -> exitWith ec
 
 
-regenMissingBindings :: CompileTarget -> [(String, String)] -> IO ()
+regenMissingBindings :: Backend -> [(String, String)] -> IO ()
 -- On the Rust backend `[go.dependencies]` are INERT: the Rust codegen can't link
 -- Go packages, and the FFI registry loads the rust bindings under
 -- `.skycache/ffi/rust`, never the Go kernel.json. Running the Go FFI inspector +
 -- `generateBindings` here would (a) pointlessly require the `go` toolchain on a
 -- pure-Rust build and (b) fail with a misleading "resource busy" lock on the
--- Go bindings file when `go` is absent. So short-circuit — a `--target rust`
+-- Go bindings file when `go` is absent. So short-circuit — a `--backend rust`
 -- build ignores Go deps entirely. (User-reported 2026-06-13.)
-regenMissingBindings TargetRust _ = return ()
-regenMissingBindings _ deps = do  -- always TargetGo (TargetRust short-circuits above)
+regenMissingBindings BackendRust _ = return ()
+regenMissingBindings _ deps = do  -- always BackendGo (BackendRust short-circuits above)
     createDirectoryIfMissing True ".skycache/ffi"
     -- Filter once: only keep deps whose kernel.json is missing.
     -- Subsequent `sky install` runs see this empty after a successful
@@ -1056,8 +1056,8 @@ regenMissingBindings _ deps = do  -- always TargetGo (TargetRust short-circuits 
     case missing of
         [] -> return ()
         _  -> do
-            -- `go get` the missing deps. `target` is always TargetGo here (the
-            -- TargetRust equation above short-circuits before this point).
+            -- `go get` the missing deps. `target` is always BackendGo here (the
+            -- BackendRust equation above short-circuits before this point).
             let pkgList = unwords (map fst missing)
             callProcess "sh"
                 [ "-c"
@@ -1131,7 +1131,7 @@ checkWebviewLibsRust rustDir
                         [ ""
                         , "error: Sky.Webview needs system webview dev libraries that are missing:"
                         , "         " ++ intercalate ", " missing
-                        , "  Install them, then re-run `sky build --target rust`:"
+                        , "  Install them, then re-run `sky build --backend rust`:"
                         , "    Debian/Ubuntu:  sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev"
                         , "    Fedora:         sudo dnf install webkit2gtk4.1-devel libsoup3-devel"
                         , "    Arch:           sudo pacman -S webkit2gtk-4.1 libsoup3"
@@ -1140,26 +1140,27 @@ checkWebviewLibsRust rustDir
                     exitFailure
 
 
--- | The resolved build plan for `--target rust`'s static / cross dimensions.
+-- | The resolved build plan for `--backend rust`'s static / cross dimensions.
 data RustBuildPlan
     = RbNative            -- ^ build for the native host (no `--target`)
-    | RbTriple String     -- ^ cross / non-default triple (pass `--target <triple>`)
+    | RbTriple String     -- ^ cross / non-default target triple (pass `--target <triple>`)
     | RbDegradeMac        -- ^ static asked on macOS host → warn + native dynamic
-    | RbBadAlias String   -- ^ unrecognised platform alias → hard error
 
--- | Plan a `--target rust` build's STATIC-linking + CROSS-compile options.
+-- | Plan a Rust build's STATIC-linking + CROSS-compile options.
 --
 -- Inputs: `[rust] static` / `[rust] target` from sky.toml (the CLI `--static` /
--- `--platform` flags pre-set SKY_RUST_STATIC / SKY_RUST_TARGET, which override
--- the toml here). Returns Right (extra cargo args, target-triple subdir for the
+-- `--target` flags pre-set SKY_RUST_STATIC / SKY_RUST_TARGET, which override the
+-- toml here). Returns Right (extra cargo args, target-triple subdir for the
 -- binary path) — having set any needed RUSTFLAGS / cross-linker env as a side
 -- effect — or Left a refusal / missing-toolchain message.
 --
 --   `static`  = link statically (musl on Linux, crt-static on Windows/gnu).
---   `target`  = cross-compile platform (alias or raw triple); ORTHOGONAL to
---               static, so e.g. `target=linux-gnu` alone is a dynamic Linux
---               cross-build, and `static + target=linux-musl` is a static Linux
---               artifact from any host.
+--   `target`  = cross-compile target triple (e.g. x86_64-unknown-linux-musl);
+--               ORTHOGONAL to static, so e.g. `target=x86_64-unknown-linux-gnu`
+--               alone is a dynamic Linux cross-build, and `static +
+--               target=x86_64-unknown-linux-musl` is a static Linux artifact from
+--               any host. No aliases — raw Rust triples, validated against the
+--               installed rustup targets + linker.
 -- Webview apps are refused under static (they link the system WebKit/WebView2).
 planRustBuild :: Bool -> String -> String -> FilePath -> IO (Either String ([String], FilePath))
 planRustBuild tomlStatic tomlTarget tomlAlloc rustDir = do
@@ -1200,18 +1201,15 @@ planRustBuild tomlStatic tomlTarget tomlAlloc rustDir = do
                 , "       the system WebKit/WebView2 and cannot be built fully static."
                 , "  Remove `[rust] static` / `--static` (or drop the webview backend)." ]))
           else case resolveRustPlan wantStatic platform of
-            RbBadAlias a -> return (Left (unlines
-                [ "error: unknown [rust] target / --platform value: " ++ show a
-                , "  Use one of: linux-musl, linux-musl-arm64, linux-gnu, linux-gnu-arm64,"
-                , "  or a raw target triple (e.g. x86_64-unknown-linux-musl)." ]))
             RbDegradeMac -> do
                 hPutStrLn stderr (unlines
                     [ "warning: static build is unsupported on macOS (Apple ships no static libc) —"
                     , "         building a DYNAMIC native binary instead."
-                    , "  To cross-build a LINUX static artifact from macOS, set the platform:"
+                    , "  To cross-build a LINUX static artifact from macOS, set the target triple:"
                     , "    [rust]"
                     , "    static = true"
-                    , "    target = \"linux-musl\"      # or: sky build --target rust --static --platform linux-musl"
+                    , "    target = \"x86_64-unknown-linux-musl\""
+                    , "    # or: sky build --backend rust --static --target x86_64-unknown-linux-musl"
                     , "  (needs a musl cross toolchain: brew install FiloSottile/musl-cross/musl-cross"
                     , "   + rustup target add x86_64-unknown-linux-musl; the ELF runs on Linux, not macOS.)" ])
                 return (Right ([], ""))
@@ -1229,25 +1227,18 @@ planRustBuild tomlStatic tomlTarget tomlAlloc rustDir = do
                             System.Environment.setEnv "RUSTFLAGS" "-C target-feature=+crt-static"
                         return (Right (["--target", triple] ++ mimallocFeat, triple ++ "/"))
 
--- | Resolve the (static, platform) request to a concrete build plan.
+-- | Resolve the (static, target-triple) request to a concrete build plan. An
+-- explicit triple passes straight through (no aliases — validated later against
+-- the installed rustup targets + linker); no triple + static picks the host's
+-- static triple.
 resolveRustPlan :: Bool -> String -> RustBuildPlan
-resolveRustPlan wantStatic platform
-    | not (null platform) = maybe (RbBadAlias platform) RbTriple (resolvePlatformAlias platform)
-    | otherwise = case System.Info.os of      -- static requested, no explicit platform → host static
+resolveRustPlan _wantStatic triple
+    | not (null triple) = RbTriple triple
+    | otherwise = case System.Info.os of      -- static requested, no explicit triple → host static
         "linux"   -> RbTriple "x86_64-unknown-linux-musl"   -- true static needs musl, not host gnu
         "mingw32" -> RbNative                                -- crt-static handles it natively
         "darwin"  -> RbDegradeMac                            -- no static libc
         _         -> RbNative
-
--- | Friendly platform alias → Rust target triple; a raw triple passes through.
-resolvePlatformAlias :: String -> Maybe String
-resolvePlatformAlias a = case a of
-    "linux-musl"       -> Just "x86_64-unknown-linux-musl"
-    "linux-musl-arm64" -> Just "aarch64-unknown-linux-musl"
-    "linux-gnu"        -> Just "x86_64-unknown-linux-gnu"
-    "linux-gnu-arm64"  -> Just "aarch64-unknown-linux-gnu"
-    _ | length (filter (== '-') a) >= 2 -> Just a   -- looks like a raw triple
-      | otherwise                       -> Nothing
 
 -- | Verify the Rust std target (and, for musl, the C cross-linker) is present;
 -- return an actionable error string if not, or Nothing when good. rustup absent
@@ -1291,10 +1282,10 @@ cargoLinkerEnvVar :: String -> String
 cargoLinkerEnvVar triple = "CARGO_TARGET_" ++ map shout triple ++ "_LINKER"
   where shout c = if c == '-' then '_' else toUpper c
 
--- | Strip the Rust-build CLI sugar (`--static`, `--platform <p>`, `--mimalloc`,
+-- | Strip the Rust-build CLI sugar (`--static`, `--target <triple>`, `--mimalloc`,
 -- `--system-alloc`) from argv BEFORE optparse-applicative (strict on unknown
 -- flags) parses it, setting the SKY_RUST_STATIC / SKY_RUST_TARGET / SKY_RUST_ALLOC
--- env vars the build path reads. Keeps `--target rust` (the backend selector)
+-- env vars the build path reads. Keeps `--backend rust` (the backend selector)
 -- free of clash.
 preprocessRustBuildFlags :: [String] -> IO [String]
 preprocessRustBuildFlags = go []
@@ -1303,11 +1294,23 @@ preprocessRustBuildFlags = go []
     go acc ("--static" : rest)        = System.Environment.setEnv "SKY_RUST_STATIC" "1"        >> go acc rest
     go acc ("--mimalloc" : rest)      = System.Environment.setEnv "SKY_RUST_ALLOC" "mimalloc"  >> go acc rest
     go acc ("--system-alloc" : rest)  = System.Environment.setEnv "SKY_RUST_ALLOC" "system"    >> go acc rest
-    go acc ("--platform" : v : rest)  = System.Environment.setEnv "SKY_RUST_TARGET" v          >> go acc rest
+    go acc ("--target" : v : rest)
+      | v `elem` ["rust", "go"] = migratedBackend v
+      | otherwise               = System.Environment.setEnv "SKY_RUST_TARGET" v >> go acc rest
     go acc (a : rest)
-      | Just v <- stripPrefix "--platform=" a  = System.Environment.setEnv "SKY_RUST_TARGET" v >> go acc rest
+      | Just v <- stripPrefix "--target=" a, v `elem` ["rust","go"] = migratedBackend v
+      | Just v <- stripPrefix "--target=" a    = System.Environment.setEnv "SKY_RUST_TARGET" v >> go acc rest
       | Just v <- stripPrefix "--allocator=" a = System.Environment.setEnv "SKY_RUST_ALLOC" v  >> go acc rest
       | otherwise                              = go (a : acc) rest
+    -- Guard the old syntax: `--backend rust|go` selected the BACKEND; it's now
+    -- `--backend`, and `--target` takes a Rust target TRIPLE. Fail loud rather
+    -- than silently strip it into SKY_RUST_TARGET (which would build the default
+    -- Go backend with a bogus target).
+    migratedBackend v = do
+        hPutStrLn stderr ("error: `--target " ++ v ++ "` is no longer valid — the codegen backend is now"
+                          ++ "\n       `--backend " ++ v ++ "`. `--target` selects a cross-compile TRIPLE"
+                          ++ "\n       (e.g. --target x86_64-unknown-linux-musl).")
+        exitFailure
 
 
 -- | Split a list into N roughly-equal chunks. Used by the install
@@ -1415,7 +1418,7 @@ main = do
     -- `sky` with no arguments should print the help screen and exit 0
     -- instead of a bare "Missing: (COMMAND)" error. Inject `--help`
     -- into argv when none is present.
-    -- Strip the Rust-build CLI sugar (`--static` / `--platform`) → env vars, so
+    -- Strip the Rust-build CLI sugar (`--static` / `--target`) → env vars, so
     -- the strict optparse parser below never sees them. Then parse the CLEANED
     -- args via execParserPure (execParser would re-read the raw argv).
     args <- preprocessRustBuildFlags =<< System.Environment.getArgs
@@ -1479,11 +1482,11 @@ data ConsoleOpts = ConsoleOpts
     , _consoleTui  :: Bool       -- --tui: run via Sky.Tui instead
     } deriving (Show)
 
--- | Parse target string to CompileTarget
-parseTarget :: String -> Toml.CompileTarget
-parseTarget t = case map toLower t of
-    "rust" -> Toml.TargetRust
-    _      -> Toml.TargetGo
+-- | Parse target string to Backend
+parseBackend :: String -> Toml.Backend
+parseBackend t = case map toLower t of
+    "rust" -> Toml.BackendRust
+    _      -> Toml.BackendGo
 
 
 -- | Options for `sky console serve` — the standalone Hub daemon.
@@ -1568,18 +1571,18 @@ basename url =
 
 
 -- | Parser for optional --target flag
-targetFlag :: Parser (Maybe String)
-targetFlag = optional (strOption
-    ( long "target"
-   <> metavar "TARGET"
-   <> help "Compilation target: go (default) or rust"
+backendFlag :: Parser (Maybe String)
+backendFlag = optional (strOption
+    ( long "backend"
+   <> metavar "BACKEND"
+   <> help "Codegen backend: go (default) or rust. (Cross-compile platform is --target <triple>.)"
     ))
 
 -- | Parser for `sky add` options: package, --target, --rev, --branch, --tag.
 addOptsParser :: Parser AddOpts
 addOptsParser = AddOpts
     <$> argument str (metavar "PACKAGE")
-    <*> targetFlag
+    <*> backendFlag
     <*> optional (strOption (long "rev" <> metavar "SHA" <> help "Git commit SHA for git dependencies"))
     <*> optional (strOption (long "branch" <> metavar "NAME" <> help "Git branch for git dependencies"))
     <*> optional (strOption (long "tag" <> metavar "NAME" <> help "Git tag for git dependencies"))
@@ -1589,11 +1592,11 @@ addOptsParser = AddOpts
 commandParser :: Parser Command
 commandParser = subparser
     ( command "build"
-        (info (Build <$> fileArg <*> targetFlag) (progDesc "Compile to binary"))
+        (info (Build <$> fileArg <*> backendFlag) (progDesc "Compile to binary"))
     <> command "run"
-        (info (Run <$> fileArg <*> targetFlag) (progDesc "Build and run"))
+        (info (Run <$> fileArg <*> backendFlag) (progDesc "Build and run"))
     <> command "watch"
-        (info (Watch <$> watchOptsParser <*> targetFlag)
+        (info (Watch <$> watchOptsParser <*> backendFlag)
             (progDesc "Watch source files; rebuild + restart on change"))
     <> command "check"
         (info (Check <$> fileArg) (progDesc "Type-check only"))
@@ -1601,7 +1604,7 @@ commandParser = subparser
         (info (Fmt <$> fmtTargetArg)
             (progDesc "Format source file (or stdin with --stdin / -)"))
     <> command "test"
-        (info (Test <$> fileArg <*> targetFlag) (progDesc "Run a Sky test module (exposing `tests : List Test`)"))
+        (info (Test <$> fileArg <*> backendFlag) (progDesc "Run a Sky test module (exposing `tests : List Test`)"))
     <> command "verify"
         (info (Verify <$> optional (argument str (metavar "EXAMPLE")))
             (progDesc "Build + run + panic-check every example; enforce forbidden-pattern gate"))
@@ -1898,7 +1901,7 @@ runCommand cmd = case cmd of
         config <- readConfigStrict
         -- CLI target overrides config
         let config' = case mTarget of
-                Just t -> config { Toml._target = parseTarget t }
+                Just t -> config { Toml._backend = parseBackend t }
                 Nothing -> config
         let outDir = "sky-out"
         createDirectoryIfMissing True outDir
@@ -1912,7 +1915,7 @@ runCommand cmd = case cmd of
                 if hasRt
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings (Toml._target config') goDeps
+            regenMissingBindings (Toml._backend config') goDeps
         let rustDeps = Toml._rustDeps config'
         when (not (null rustDeps)) $
             regenMissingRustBindings rustDeps
@@ -1920,8 +1923,8 @@ runCommand cmd = case cmd of
         case result of
             Left err -> return (Left err)
             Right _ -> do
-                case Toml._target config' of
-                    Toml.TargetGo -> do
+                case Toml._backend config' of
+                    Toml.BackendGo -> do
                         let goPath = outDir </> "main.go"
                         putStrLn "Running go build..."
                         runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
@@ -1929,7 +1932,7 @@ runCommand cmd = case cmd of
                         -- only print the success banner after `go build` returns 0.
                         putStrLn "Compilation successful"
                         putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config'
-                    Toml.TargetRust -> do
+                    Toml.BackendRust -> do
                         let rustDir = outDir ++ "/Rust"
                         hFlush stdout
                         -- Bake the sky version into the binary (compile-time
@@ -1956,7 +1959,7 @@ runCommand cmd = case cmd of
     Run path mTarget -> do
         config <- readConfigStrict
         let config' = case mTarget of
-                Just t -> config { Toml._target = parseTarget t }
+                Just t -> config { Toml._backend = parseBackend t }
                 Nothing -> config
             outDir = "sky-out"
         createDirectoryIfMissing True outDir
@@ -1968,7 +1971,7 @@ runCommand cmd = case cmd of
                 if hasRt
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings (Toml._target config') goDeps
+            regenMissingBindings (Toml._backend config') goDeps
         let rustDeps = Toml._rustDeps config'
         when (not (null rustDeps)) $
             regenMissingRustBindings rustDeps
@@ -1976,14 +1979,14 @@ runCommand cmd = case cmd of
         case result of
             Left err -> return (Left err)
             Right _ -> do
-                case Toml._target config' of
-                    Toml.TargetGo -> do
+                case Toml._backend config' of
+                    Toml.BackendGo -> do
                         let goPath = outDir </> "main.go"
                         putStrLn "Running go build..."
                         runGoBuildWithDiagnostics outDir (Toml._binName config') goPath
                         putStrLn $ "Build complete, running..."
                         callProcess (outDir ++ "/" ++ Toml._binName config') []
-                    Toml.TargetRust -> do
+                    Toml.BackendRust -> do
                         let rustDir = outDir ++ "/Rust"
                         hFlush stdout
                         checkWebviewLibsRust rustDir
@@ -2031,7 +2034,7 @@ runCommand cmd = case cmd of
                 if hasRt
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings (Toml._target config) goDeps
+            regenMissingBindings (Toml._backend config) goDeps
         let rustDeps = Toml._rustDeps config
         when (not (null rustDeps)) $
             regenMissingRustBindings rustDeps
@@ -2091,7 +2094,7 @@ runCommand cmd = case cmd of
         config <- readConfigStrict
         -- CLI target overrides config
         let config' = case mTarget of
-                Just t -> config { Toml._target = parseTarget t }
+                Just t -> config { Toml._backend = parseBackend t }
                 Nothing -> config
         absPath <- System.Directory.canonicalizePath path
         cwd <- System.Directory.getCurrentDirectory
@@ -2131,7 +2134,7 @@ runCommand cmd = case cmd of
                 if hasRt
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings (Toml._target config') goDeps
+            regenMissingBindings (Toml._backend config') goDeps
         let rustDeps = Toml._rustDeps config'
         when (not (null rustDeps)) $
             regenMissingRustBindings rustDeps
@@ -2148,8 +2151,8 @@ runCommand cmd = case cmd of
                 return (Left err)
             Right _ -> do
                 let binName = Toml._binName config'
-                case Toml._target config' of
-                    Toml.TargetGo -> do
+                case Toml._backend config' of
+                    Toml.BackendGo -> do
                         -- go build may fail (undefined references etc.);
                         -- wrap in try so cleanup always runs.
                         buildRc <- Control.Exception.try
@@ -2170,7 +2173,7 @@ runCommand cmd = case cmd of
                                     System.Exit.ExitSuccess   -> return (Right ())
                                     System.Exit.ExitFailure n ->
                                         exitWith (System.Exit.ExitFailure n)
-                    Toml.TargetRust -> do
+                    Toml.BackendRust -> do
                         let rustDir = outDir ++ "/Rust"
                         buildRc <- Control.Exception.try
                             (callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"])
@@ -2331,7 +2334,7 @@ runCommand cmd = case cmd of
                 if hasRt
                     then callProcess "cp" ["runtime-go/go.mod", "sky-out/go.mod"]
                     else writeFile "sky-out/go.mod" $ unlines ["module sky-app", "", "go 1.21"]
-            regenMissingBindings (Toml._target config) goDeps
+            regenMissingBindings (Toml._backend config) goDeps
             putStrLn $ "Go dependencies installed."
         -- Auto-regen Rust FFI bindings for every declared rust dep whose
         -- `.skycache/ffi/rust/<slug>.kernel.json` is absent.

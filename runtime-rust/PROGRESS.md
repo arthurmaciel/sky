@@ -19,7 +19,7 @@ then a short what/why and an **Affected** list (files / commit).
 
 ## 2026-06-18 — Opt-in full-static binaries + cross-compilation + release strip
 
-**What.** Added an opt-in static-linking + cross-compile path to `--target rust`,
+**What.** Added an opt-in static-linking + cross-compile path to `--backend rust`,
 plus release-binary stripping and a static-vs-dynamic size benchmark harness.
 
 - **`strip`**: generated `[profile.release]` now sets `strip = true` (Go's
@@ -64,7 +64,7 @@ plus release-binary stripping and a static-vs-dynamic size benchmark harness.
   legs verified locally; macOS-host→Linux leg implemented, pending macOS
   verification.
 - **CLI flags** `--static` / `--platform` are stripped from argv into env before
-  the strict optparse parser, so they compose with the backend `--target rust`
+  the strict optparse parser, so they compose with the backend `--backend rust`
   without clashing.
 
 **Affected.** `src/Sky/Sky/Toml.hs` (`_rustStatic`, `_rustTarget` + parsers),
@@ -375,7 +375,7 @@ pitfalls + "run the full sweep" learning into `CLAUDE.md`.
 
 - **Affected:** `README.md`, `CLAUDE.md`. Commit `eadcede7`.
 
-## 2026-06-17 11:26 — T1 Go-codegen guard (00 builds on --target go)
+## 2026-06-17 11:26 — T1 Go-codegen guard (00 builds on --backend go)
 
 Gated the literal-lambda / call-arg emission on `all isEmittableGoType paramTys` /
 `not (containsGenericTypeParam subbed)` so a callee-bound type var (`T1` from a

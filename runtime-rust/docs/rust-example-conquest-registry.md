@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-09 · **Branch:** `feat/runtime-rust` (fork-only)
 
-Root-cause triage of the `examples/[0-9]*` set on `--target rust`. **Important
+Root-cause triage of the `examples/[0-9]*` set on `--backend rust`. **Important
 framing:** only the gated-6 (`01/04/07/14/simple/test_pkg`) ever built on Rust;
 every failing example here is **greenfield (never worked), not a regression**.
 `examples/rust/` is a separate FFI set. This registry is the conquest map.
@@ -323,7 +323,7 @@ local-closure params (E0282) + serde + arg-count, a different class).
 
 ## Session outcome (2026-06-10)
 
-CONQUERED this session (now build clean on `--target rust`):
+CONQUERED this session (now build clean on `--backend rust`):
 `10-live-component` (multi-module Sky.Live + component) and
 `28-streaming-chat` (Sky.Live SSE). Plus broad advances: `12-skyvote`
 168→75 errors. Scoreboard: gated-6 → 15 building (in-scope 13). NO

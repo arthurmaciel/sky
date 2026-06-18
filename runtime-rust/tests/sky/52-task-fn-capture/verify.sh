@@ -25,7 +25,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GEN="$HERE/sky-out/Rust/src/main.rs"
 fail() { echo "FAIL: $1"; exit 1; }
 
-[ -f "$GEN" ] || fail "generated Rust not found at $GEN (build: sky build src/Main.sky --target rust)"
+[ -f "$GEN" ] || fail "generated Rust not found at $GEN (build: sky build src/Main.sky --backend rust)"
 
 # The `action` impl-Fn param is Arc-wrapped at function entry.
 grep -qE 'let action = std::sync::Arc::new\(action\)' "$GEN" \
