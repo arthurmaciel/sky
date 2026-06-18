@@ -84,9 +84,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 rustup toolchain install nightly      # the FFI inspector runs `cargo +nightly rustdoc`
 
-# Haskell — the Sky compiler is written in Haskell (GHC 9.6.7 + cabal 3.10)
+# Haskell — the Sky compiler is written in Haskell (GHC >= 9.6.7 + cabal 3.10)
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
-ghcup install ghc 9.6.7 && ghcup set ghc 9.6.7
+ghcup install ghc 9.6.7 && ghcup set ghc 9.6.7   # or any GHC >= 9.6.7; cabal resolves the rest
 ghcup install cabal 3.10.3.0
 
 # ripgrep — used by the build tooling
@@ -113,7 +113,7 @@ sudo apt install -y xvfb
 
 Sky.Tui (terminal UI) needs no extra package — just a real terminal.
 
-Now continue with **Clone, Fast-build env, and Build the compiler** below.
+Now continue with [Clone the repo](#clone-the-repo-all-oses), [Fast-build env](#fast-build-env-all-oses), and [Build the Sky compiler](#build-the-sky-compiler-all-oses).
 
 ### macOS
 
@@ -125,9 +125,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 rustup toolchain install nightly
 
-# Haskell — GHC 9.6.7 + cabal via ghcup
+# Haskell — GHC >= 9.6.7 + cabal via ghcup
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
-ghcup install ghc 9.6.7 && ghcup set ghc 9.6.7
+ghcup install ghc 9.6.7 && ghcup set ghc 9.6.7   # or any GHC >= 9.6.7; cabal resolves the rest
 ghcup install cabal 3.10.3.0
 
 # ripgrep + GNU coreutils (the helper scripts use GNU `timeout`)
@@ -142,10 +142,16 @@ System libraries:
 - **Sky.Webview** works natively — WKWebView is built into macOS, nothing to
   install.
 - **Sky.Tui** needs only a real terminal (Terminal.app / iTerm2).
-- `musl-cross` (`brew install FiloSottile/musl-cross/musl-cross`) is only needed
-  for static *cross*-builds to Linux — see *Static & cross compilation*.
+- `musl-cross` is only needed for static *cross*-builds to Linux (see *Static &
+  cross compilation*):
 
-Now continue with **Clone, Fast-build env, and Build the compiler** below.
+```bash
+# Only for static cross-builds to Linux from macOS:
+brew install FiloSottile/musl-cross/musl-cross
+rustup target add x86_64-unknown-linux-musl
+```
+
+Now continue with [Clone the repo](#clone-the-repo-all-oses), [Fast-build env](#fast-build-env-all-oses), and [Build the Sky compiler](#build-the-sky-compiler-all-oses).
 
 ### Windows
 
@@ -159,8 +165,8 @@ need bash.
 # Rust (rustup) — install from https://rustup.rs (run the installer), then:
 rustup toolchain install nightly      # FFI inspector needs nightly
 
-# Haskell — install GHC 9.6.7 + cabal via GHCup: https://www.haskell.org/ghcup/
-#   (the GHCup Windows installer walks you through it)
+# Haskell — install GHC >= 9.6.7 + cabal via GHCup: https://www.haskell.org/ghcup/
+#   (the GHCup Windows installer walks you through it; 9.6.7 is the tested floor)
 
 # ripgrep
 choco install ripgrep -y              # or: winget install BurntSushi.ripgrep.MSVC
@@ -181,7 +187,7 @@ System runtimes for the UI shapes:
   allocate a pty headlessly, so launch the interactive shapes from Windows
   Terminal.
 
-Now continue with **Clone, Fast-build env, and Build the compiler** below.
+Now continue with [Clone the repo](#clone-the-repo-all-oses), [Fast-build env](#fast-build-env-all-oses), and [Build the Sky compiler](#build-the-sky-compiler-all-oses).
 
 ### Clone the repo (all OSes)
 
@@ -205,13 +211,13 @@ export RUSTC_WRAPPER=sccache
 export CARGO_INCREMENTAL=0
 ```
 
-Why: the **shared `CARGO_TARGET_DIR`** compiles the heavy dependency tree
-(tokio / axum / serde / sqlx) **once** and reuses it across every example;
-**sccache** caches compiled crate objects across builds; **`CARGO_INCREMENTAL=0`**
-is mandatory with sccache (sccache silently skips caching when incremental builds
-are on). On macOS/Windows adapt the `PATH` to where your tools actually live
-(e.g. drop `/usr/local/go/bin` if Go isn't installed); the three `export` lines
-for the cargo/sccache env are the load-bearing ones.
+**Why:**
+
+- The shared `CARGO_TARGET_DIR` compiles the heavy dependency tree (tokio / axum / serde / sqlx) **once** and reuses it across every example.
+- `sccache` caches compiled crate objects across builds.
+- `CARGO_INCREMENTAL=0` is mandatory with sccache — sccache silently skips caching when incremental builds are on.
+- On macOS/Windows adapt the `PATH` to where your tools actually live (e.g. drop `/usr/local/go/bin` if Go isn't installed).
+- The three `export` lines for the cargo/sccache env are the load-bearing ones.
 
 ### Build the Sky compiler (all OSes)
 
@@ -333,15 +339,41 @@ measures Rust-vs-Go throughput separately (informational, never blocks).
 ### Examples
 
 **Build** / **Run** show ✅ for every row because this table is the *last-green
-snapshot* (it is only rewritten when the whole sweep passes — the live per-example
-pass/fail, including any ❌, is in the sweep badge's run summary at the top of
-Project status). "Round-trip" = how RUN is exercised: `cli` = stdout · `server` =
-curl boot/serve · `live` = headless browser scenario · `tui` = pty smoke ·
-`webview` = xvfb smoke. The four **Perf** columns
-are Rust/Go ratios from the perf sweep: **Thru** (request throughput, **↑** higher
-= Rust faster) · **RSS** (resident memory, **↓** lower = Rust leaner) · **Cold**
-(cold-start ms, **↓**) · **Bin** (binary size, **↓**). `—` = the shape has no such
-measurement; `n/a` = measured but the probe couldn't compare.
+snapshot* — it is rewritten only when the whole sweep passes. The live per-example
+pass/fail (including any ❌) is in the sweep badge's run summary at the top of
+Project status.
+
+**Round-trip** = how each shape's RUN is exercised:
+
+| Shape | RUN is exercised by |
+|---|---|
+| `cli` | stdout comparison |
+| `server` | curl boot / serve |
+| `live` | headless-browser scenario |
+| `tui` | pty smoke |
+| `webview` | xvfb smoke |
+
+The four **Perf** columns are Rust/Go ratios from the perf sweep:
+
+| Column | Meaning | Better |
+|---|---|:-:|
+| **Thru** | request throughput | ↑ higher = Rust faster |
+| **RSS** | resident memory | ↓ lower = Rust leaner |
+| **Cold** | cold-start time (ms) | ↓ lower |
+| **Bin** | binary size | ↓ lower |
+
+`—` = the shape has no such measurement · `n/a` = measured but the probe couldn't compare.
+
+**Equiv modes** (how Go≡Rust equivalence is proven per shape):
+
+| Mode | Means |
+|---|---|
+| `stdout` | byte-identical stdout + exit code |
+| `body N` | N GET-route response bodies byte-identical |
+| `scenario` | same headless-browser round-trip passes on both backends |
+| `pty` | both drive the Sky.Tui runtime, no panic |
+| `serve` | both boot + serve (no comparable GET route) |
+| `n/a` | no Go comparison possible |
 
 <!-- AUTOGEN:examples-table BEGIN -->
 <!-- Machine-generated by runtime-rust/scripts/readme-tables.py: the editorial
@@ -389,11 +421,6 @@ measurement; `n/a` = measured but the probe couldn't compare.
 | ✅ | ✅ | test_pkg | cli | stdout | ✅ | — | 0.19 | 0.45 | 0.026 |
 | ✅ | ✅ | examples/rust/skyshop-rs | live/FFI | curl | n/a — Rust-FFI app (stripe/firebase/firestore); does not build on Go — Rust-only | — | — | — | — |
 <!-- AUTOGEN:examples-table END -->
-
-**Equiv modes:** `stdout` = byte-identical stdout + exit · `body N` = N GET-route
-response bodies byte-identical · `scenario` = same headless-browser round-trip
-passes on both backends · `pty` = both drive the Tui runtime, no panic · `serve`
-= both boot + serve · `n/a` = no Go comparison possible.
 
 **Perf** ratios are Rust/Go; the arrow marks the good direction (Thru higher,
 RSS/Cold/Bin lower).
