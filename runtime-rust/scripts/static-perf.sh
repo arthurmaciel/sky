@@ -105,7 +105,9 @@ trap cleanup EXIT INT TERM
 HAVE_AB=0; command -v ab >/dev/null 2>&1 && HAVE_AB=1
 
 # size in bytes of an existing file, or empty. `stat -c%s` works under Git Bash.
-fsize() { [ -f "$1" ] && stat -c%s "$1" 2>/dev/null || echo ""; }
+# Portable file size: GNU `stat -c%s` (Linux) falls back to BSD `stat -f%z`
+# (macOS) — without this the macOS cross-build sizes come back empty.
+fsize() { [ -f "$1" ] && { stat -c%s "$1" 2>/dev/null || stat -f%z "$1" 2>/dev/null || echo ""; } || echo ""; }
 now_ns() { { gdate +%s%N 2>/dev/null || date +%s%N; }; }
 
 # cold-start ms (best of COLD_RUNS) of a cli/tui binary; "" for non-runnable.
@@ -133,9 +135,23 @@ server_port_for() {
   echo "${p:-8000}"
 }
 
-# Boot a server binary, wait until "/" answers (bounded), echo "pid port" or "".
-boot_server() {
+# Kill anything already listening on a port (a prior orphan / the just-reaped
+# binary still draining), so the next bind on the example's HARD-CODED port can't
+# silently fail (Server.listen ignores SKY_LIVE_PORT/PORT, so we can't dodge a
+# busy port by picking a free one — we must free THIS port). Best-effort.
+clear_port() { # $1=port
+  local p="$1" pids
+  pids="$(ss -ltnpH 2>/dev/null | awk -v k=":$p" '$4 ~ k"$" {print}' | rg -oN 'pid=[0-9]+' | cut -d= -f2 | sort -u)"
+  [ -z "$pids" ] && pids="$(lsof -nP -iTCP:"$p" -sTCP:LISTEN -t 2>/dev/null | sort -u)"
+  for pid in $pids; do kill -KILL "$pid" 2>/dev/null; done
+  [ -n "$pids" ] && sleep 0.5   # let the kernel release the socket
+  return 0
+}
+
+# One boot attempt: spawn, wait until "/" answers (bounded). Echo "pid port" or "".
+boot_server_once() {
   local bin="$1" port="$2" log deadline
+  clear_port "$port"
   log="$(mktemp)"
   SKY_LIVE_PORT="$port" PORT="$port" "$bin" >"$log" 2>&1 &
   local pid=$!; SERVER_PIDS+=("$pid")
@@ -153,6 +169,17 @@ boot_server() {
   rm -f "$log"; kill -9 "$pid" 2>/dev/null; echo ""
 }
 
+# Boot with one retry. The SECOND binary (static, measured after the dynamic
+# binary's ab flood) can fail its first bind while the port drains residual
+# TIME_WAIT sockets — a brief settle + retry recovers it deterministically, so
+# both dyn AND static get a real measurement.
+boot_server() { # $1=binary $2=port -> "pid port" | ""
+  local pp; pp="$(boot_server_once "$1" "$2")"
+  [ -n "$pp" ] && { echo "$pp"; return; }
+  sleep 2; clear_port "$2"
+  boot_server_once "$1" "$2"
+}
+
 reap_server() { # $1=pid
   local pid="$1"
   kill -TERM "$pid" 2>/dev/null; sleep 0.3; kill -KILL "$pid" 2>/dev/null
@@ -160,10 +187,14 @@ reap_server() { # $1=pid
 }
 
 # Throughput (req/s) of an already-running server. "" if ab absent / no result.
+# `-k` (HTTP keep-alive) reuses connections so the fixed listen port isn't flooded
+# with thousands of TIME_WAIT client sockets — that flood otherwise blocks the
+# NEXT binary's bind on the SAME hard-coded port (Server.listen ignores the env,
+# so dyn + static must share the port). `-r` keeps going past a socket reset.
 ab_throughput() { # $1=port
   [ "$HAVE_AB" -eq 1 ] || { echo ""; return; }
   local rps
-  rps="$(timeout "$AB_TIMEOUT_S" ab -r -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$1/" 2>/dev/null \
+  rps="$(timeout "$AB_TIMEOUT_S" ab -k -r -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$1/" 2>/dev/null \
         | awk '/Requests per second/{print $4}')"
   echo "${rps:-}"
 }
@@ -192,7 +223,7 @@ measure_server() { # $1=binary $2=port
 # ── Static link assertion (Linux): the musl binary must be statically linked ─
 assert_static_linux() { # $1=binary -> "yes"/"no"/""
   [ -x "$1" ] || { echo ""; return; }
-  if ldd "$1" 2>&1 | grep -qi 'not a dynamic executable\|statically linked'; then
+  if ldd "$1" 2>&1 | rg -qi 'not a dynamic executable|statically linked'; then
     echo "yes"
   else
     echo "no"
@@ -304,21 +335,25 @@ for entry in "${EXAMPLES[@]}"; do
 done
 
 # ── Markdown table (sizes in KiB; ratios; perf where measured) ──────────────
+# Built with `awk -F'\t'` (NOT a bash `read` loop): with `IFS=$'\t'`, bash's read
+# treats tab as IFS-whitespace and COLLAPSES runs of empty fields, mis-aligning
+# every column after the first empty perf cell. awk keeps empty fields positional.
 {
   echo "### static-perf — $OS_LABEL ($STAMP)"
   echo
   echo "| Example | Shape | Static build | Dynamic | Static | Go | Static/Dyn | Cold dyn→static | Thru dyn→static | RSS dyn→static |"
   echo "|---|---|---|--:|--:|--:|--:|--:|--:|--:|"
-  while IFS=$'\t' read -r ex sh os bstat dynb statb gob cdyn cstat tdyn tstat rdyn rstat; do
-    [ "$ex" = example ] && continue
-    kib() { [ -n "$1" ] && awk -v b="$1" 'BEGIN{printf "%.0fK", b/1024}' || echo "—"; }
-    ratio() { { [ -n "$1" ] && [ -n "$2" ] && [ "$2" -gt 0 ]; } 2>/dev/null && awk -v a="$1" -v b="$2" 'BEGIN{printf "%.2f", a/b}' || echo "—"; }
-    pair() { { [ -n "$1" ] || [ -n "$2" ]; } && echo "${1:-—}→${2:-—}" || echo "—"; }
-    printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
-      "$ex" "$sh" "$bstat" "$(kib "$dynb")" "$(kib "$statb")" "$(kib "$gob")" \
-      "$(ratio "$statb" "$dynb")" "$(pair "$cdyn" "$cstat")" \
-      "$(pair "$tdyn" "$tstat")" "$(pair "$rdyn" "$rstat")"
-  done < "$TSV"
+  awk -F'\t' '
+    function kib(b)  { return (b=="") ? "—" : sprintf("%.0fK", b/1024) }
+    function ratio(a,b) { return (a=="" || b=="" || b+0<=0) ? "—" : sprintf("%.2f", a/b) }
+    function pair(a,b) { if (a=="" && b=="") return "—"; return (a=="" ? "—" : a) "→" (b=="" ? "—" : b) }
+    NR==1 { next }
+    {
+      printf("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",
+        $1, $2, $4, kib($5), kib($6), kib($7),
+        ratio($6,$5), pair($8,$9), pair($10,$11), pair($12,$13))
+    }
+  ' "$TSV"
 } | tee "$MD" >&2
 
 say ""
