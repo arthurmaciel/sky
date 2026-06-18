@@ -47,11 +47,11 @@ Run `git status --short` to see what's dirty.
 
 ### Step 2 — Consolidate root docs, then refresh `runtime-rust/README.md`
 
-**HARD BOUNDARY — only edit `README.md` from `## CLI usage` DOWNWARD.** Everything
-ABOVE the `## CLI usage` heading (the title, intro, `## Contract`, etc.) is the
+**HARD BOUNDARY — only edit `README.md` from `## Getting started` DOWNWARD.** Everything
+ABOVE the `## Getting started` heading (the title, intro, `## Contract`, etc.) is the
 maintainer's hand-written content — NEVER touch it (do not reword, reformat, or
-reflow a single line above `## CLI usage`). This skill regenerates ONLY the
-sections from `## CLI usage` to the end. Before writing, find the `## CLI usage`
+reflow a single line above `## Getting started`). This skill regenerates ONLY the
+sections from `## Getting started` to the end. Before writing, find the `## Getting started`
 line and treat every line before it as read-only.
 
 **Enforce the root-`.md` policy first.** At `runtime-rust/` root, ONLY

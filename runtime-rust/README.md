@@ -61,7 +61,217 @@ those guarantees, that *mechanism* divergence is recorded in **Rust vs Go backen
 
 ---
 
-## CLI usage
+## Getting started
+
+The Rust backend compiles Sky source to a Rust program, then to a native binary
+via `cargo`. This guide takes you from a clean machine to **running every example
+in this repo** (except the Go-FFI ones — those need the default Go backend). You
+pick the Rust backend by adding `--backend rust` to any `sky` command; that's the
+only flag a newcomer needs. (Cross-compiling to another platform uses
+`--target <triple>` — covered in *Static & cross compilation* below; ignore it for
+now.)
+
+Running the examples is **identical on every OS** — only the one-time setup
+differs. Read the subsection for your OS, then jump to *Running the examples*.
+
+### Linux
+
+#### 1. Prerequisites
+
+```bash
+# Rust (rustup) — stable for building, nightly for the FFI inspector
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup toolchain install nightly      # the FFI inspector runs `cargo +nightly rustdoc`
+
+# Haskell — the Sky compiler is written in Haskell (GHC 9.6.7 + cabal 3.10)
+curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
+ghcup install ghc 9.6.7 && ghcup set ghc 9.6.7
+ghcup install cabal 3.10.3.0
+
+# ripgrep — used by the build tooling
+sudo apt install -y ripgrep
+
+# Go — OPTIONAL: only needed to build the Go reference or Go-FFI examples.
+# Skip it for a Rust-only setup.
+# sudo apt install -y golang-go     # or install from https://go.dev/dl/
+```
+
+System libraries for the UI app shapes:
+
+```bash
+# Sky.Webview (desktop) — WebKitGTK + GTK3 + libsoup3 stack
+sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+                    libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+
+# Only if you run a webview example with no display attached (e.g. over SSH):
+sudo apt install -y xvfb
+
+# Only if you later want fully-static binaries (see Static & cross compilation):
+# sudo apt install -y musl-tools
+```
+
+Sky.Tui (terminal UI) needs no extra package — just a real terminal.
+
+Now continue with **Clone, Fast-build env, and Build the compiler** below.
+
+### macOS
+
+#### 1. Prerequisites
+
+```bash
+# Rust (rustup) — stable + nightly (the FFI inspector needs nightly)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup toolchain install nightly
+
+# Haskell — GHC 9.6.7 + cabal via ghcup
+curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
+ghcup install ghc 9.6.7 && ghcup set ghc 9.6.7
+ghcup install cabal 3.10.3.0
+
+# ripgrep + GNU coreutils (the helper scripts use GNU `timeout`)
+brew install ripgrep coreutils
+
+# Go — OPTIONAL: only for the Go reference / Go-FFI examples.
+# brew install go
+```
+
+System libraries:
+
+- **Sky.Webview** works natively — WKWebView is built into macOS, nothing to
+  install.
+- **Sky.Tui** needs only a real terminal (Terminal.app / iTerm2).
+- `musl-cross` (`brew install FiloSottile/musl-cross/musl-cross`) is only needed
+  for static *cross*-builds to Linux — see *Static & cross compilation*.
+
+Now continue with **Clone, Fast-build env, and Build the compiler** below.
+
+### Windows
+
+Run everything in a **Git Bash / MSYS** shell — the helper scripts are bash. The
+`cabal`, `cargo`, and `go` toolchains themselves build natively; only the scripts
+need bash.
+
+#### 1. Prerequisites
+
+```bash
+# Rust (rustup) — install from https://rustup.rs (run the installer), then:
+rustup toolchain install nightly      # FFI inspector needs nightly
+
+# Haskell — install GHC 9.6.7 + cabal via GHCup: https://www.haskell.org/ghcup/
+#   (the GHCup Windows installer walks you through it)
+
+# ripgrep
+choco install ripgrep -y              # or: winget install BurntSushi.ripgrep.MSVC
+
+# Go — OPTIONAL: only for the Go reference / Go-FFI examples.
+#   https://go.dev/dl/
+```
+
+System runtimes for the UI shapes:
+
+- **Sky.Webview** needs the **WebView2 Runtime**. It is preinstalled on Windows
+  11; on Windows 10 install the Evergreen runtime from
+  <https://developer.microsoft.com/microsoft-edge/webview2/> (the "Evergreen
+  Standalone Installer").
+- **Sky.Tui caveat** — a TUI needs a real interactive console to allocate a pty.
+  Run TUI (and webview) examples from **Windows Terminal, PowerShell, or cmd**,
+  **not** from a piped or headless shell. Under Git Bash the `winpty` shim can't
+  allocate a pty headlessly, so launch the interactive shapes from Windows
+  Terminal.
+
+Now continue with **Clone, Fast-build env, and Build the compiler** below.
+
+### Clone the repo (all OSes)
+
+```bash
+git clone -b feat/runtime-rust https://github.com/arthurmaciel/sky.git
+cd sky
+```
+
+### Fast-build env (all OSes)
+
+Install `sccache` once, then export the fast-build environment in **every shell**
+you build from (shell state does not persist between sessions):
+
+```bash
+cargo install sccache    # one-time
+
+# Compilers + a SHARED cargo target dir + sccache + non-incremental cargo:
+export PATH="$HOME/.cargo/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.ghcup/bin"
+export CARGO_TARGET_DIR="$HOME/.cache/sky-rust-target"
+export RUSTC_WRAPPER=sccache
+export CARGO_INCREMENTAL=0
+```
+
+Why: the **shared `CARGO_TARGET_DIR`** compiles the heavy dependency tree
+(tokio / axum / serde / sqlx) **once** and reuses it across every example;
+**sccache** caches compiled crate objects across builds; **`CARGO_INCREMENTAL=0`**
+is mandatory with sccache (sccache silently skips caching when incremental builds
+are on). On macOS/Windows adapt the `PATH` to where your tools actually live
+(e.g. drop `/usr/local/go/bin` if Go isn't installed); the three `export` lines
+for the cargo/sccache env are the load-bearing ones.
+
+### Build the Sky compiler (all OSes)
+
+```bash
+cabal build -w ghc-9.6.7 exe:sky
+mkdir -p sky-out
+ln -sf "$(cabal list-bin -w ghc-9.6.7 exe:sky)" sky-out/sky
+./sky-out/sky --version
+```
+
+The `ln -sf` makes `sky-out/sky` point at the freshly-built compiler binary; a
+later `cabal build` updates it in place. **Never** use
+`cabal install --install-method=copy` — it pays a large copy on every rebuild for
+no benefit, and the symlink is what the tooling expects.
+
+### Running the examples
+
+This is the **same on every OS**. Each example is a self-contained Sky project; you
+`cd` into it and run it with `--backend rust`. `sky run` builds and runs in one
+step — exactly what you want to *see* a result.
+
+```bash
+# Make sure the fast-build env above is exported in this shell first.
+SKY="$PWD/sky-out/sky"     # absolute path to the compiler you just built
+```
+
+Five shapes to try:
+
+```bash
+# 1. CLI — prints to stdout and exits
+cd examples/01-hello-world
+"$SKY" run src/Main.sky --backend rust            # try 07-todo-cli too
+
+# 2. HTTP server — boots and serves; curl it from a second terminal
+cd ../15-http-server
+"$SKY" run src/Main.sky --backend rust            # leave it running…
+#   …in another terminal:
+#   curl localhost:8000/
+
+# 3. Sky.Live web app — open it in a browser
+cd ../18-job-queue
+"$SKY" run src/Main.sky --backend rust            # try 09-live-counter too
+#   then open http://localhost:8000 in your browser
+
+# 4. Sky.Tui — terminal UI; run in a REAL terminal
+cd ../21-tui-stopwatch
+"$SKY" run src/Main.sky --backend rust            # Windows: Windows Terminal, not Git Bash
+
+# 5. Sky.Webview — opens a native desktop window
+cd ../31-webview-stopwatch-ui
+"$SKY" run src/Main.sky --backend rust
+#   Linux needs the webkit deps above; macOS works out of the box;
+#   Windows needs the WebView2 Runtime.
+```
+
+**Go-FFI examples** (e.g. `02-go-stdlib`, `13-skyshop`) bind Go libraries and can
+only build on the **Go backend** — run them **without** `--backend rust` (Go is
+the default), or skip them for a Rust-only setup.
+
+### CLI reference
 
 ```bash
 $ sky build src/Main.sky --backend rust
@@ -787,7 +997,8 @@ warning. RSS stays bounded under sustained churn (C growth 1.024×).
 
 #### Size: static vs dynamic vs Go
 
-Release binary sizes (KiB) across every statically-compilable example:
+**Local sweep** — every statically-compilable example, release binary sizes (KiB),
+*measured 2026-06-18 on an x86_64 Linux host (native musl)*:
 
 | Example | Shape | Dynamic | Static (musl) | Go | Static/Dyn | Static/Go | Cold dyn→static |
 |---|---|--:|--:|--:|--:|--:|--:|

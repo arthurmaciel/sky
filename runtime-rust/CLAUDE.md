@@ -32,10 +32,10 @@ rule here is mandatory, not optional. Current settled rules:
   under **`runtime-rust/tests/sky/`**, never in `examples/`.
 - **`rg`, never `grep`** — even on piped stdin (`… | rg`).
 - **`README.md` is written ONLY by `sky-rust-backend:update-docs`, and ONLY from
-  the `## CLI usage` heading DOWNWARD.** Everything ABOVE `## CLI usage` (title,
+  the `## Getting started` heading DOWNWARD.** Everything ABOVE `## Getting started` (title,
   intro, `## Contract`, …) is the maintainer's hand-written content — NEVER touch
-  it (no reword, reformat, or reflow of any line above `## CLI usage`), not via
-  update-docs and not via any other edit. From `## CLI usage` to the end it is a
+  it (no reword, reformat, or reflow of any line above `## Getting started`), not via
+  update-docs and not via any other edit. From `## Getting started` to the end it is a
   *pristine current-state snapshot* with NO history, dates, phases, tiers, SHAs,
   or changelog language. This is the cure for multiple-sources-of-truth drift:
   progress is logged elsewhere, the regenerated region is *regenerated* from
