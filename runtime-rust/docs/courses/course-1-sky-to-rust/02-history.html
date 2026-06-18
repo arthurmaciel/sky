@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2 · A history of the backend</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>2 · History</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 2</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 2 · how it got here</span>
+  A history of the Sky → Rust backend, in eleven phases</h1>
+
+  <p class="lede">Code makes more sense when you know why it grew the way it did.
+  This is the backend's story, grouped into phases from the project's own dated log
+  (<code>runtime-rust/docs/PROGRESS.md</code>). Read it once for the shape of the
+  thing — later lessons revisit the pieces in depth.</p>
+
+  <div class="callout key"><span class="tag">How to read this</span>
+  Each phase is a <em>problem</em> the team hit and the thing they built to solve
+  it. Notice the rhythm: build a capability → discover it's subtly wrong → add a
+  regression test → fix the root cause. That loop <em>is</em> the project.</div>
+
+  <h2><span class="num">1</span>Foundations — runtime &amp; kernels</h2>
+  <p>Before any Sky could become Rust, there had to be Rust to call. The first work
+  was the <strong>runtime crate</strong> (<code>runtime-rust/src/sky_runtime/</code>)
+  — hand-written Rust mirroring Go's standard library, function by function — and
+  the <strong>kernel routing</strong> layer (<code>Builder/Kernel.hs</code>) that
+  connects a Sky stdlib call to its Rust function.</p>
+  <p class="src">~44 stdlib kernels (String / Path / Dict / File / Time / Random / Json) + the Set and <code>Std.Db.Decode</code> subsystems. PROGRESS: <em>"44 stdlib kernels + Set + DbDec subsystem"</em>.</p>
+
+  <h2><span class="num">2</span>The deferred-effect model</h2>
+  <p>A deep correctness bug surfaced early: Sky's effects (logging, I/O, time) must
+  run <em>when the Task executes</em>, not when it's constructed — that's how Go
+  behaves. The Rust runtime was running them eagerly, so an example could print
+  things in the wrong order or at the wrong time. Rewiring effects to defer into the
+  Task body (and fixing <code>Task.run</code>) aligned Rust with Go and unblocked the
+  first full pass of <strong>37/37 examples green</strong>.</p>
+  <p class="src">Commit <code>1ba0b764</code> — deferred-effect model + discarded-Task handling.</p>
+
+  <h2><span class="num">3</span>The "known-limitations" sweep — green ≠ correct</h2>
+  <p>Reaching 37/37 was a trap, not a finish line. The README's "Known limitations"
+  list hid real codegen holes — programs that <em>type-checked but failed to
+  compile</em>, and runtime panics. The team triaged and fixed eight in one sweep
+  (<code>List.sortBy</code>, wildcard <code>any</code> fields, unconstrained
+  <code>Result</code> payloads, <code>withTransaction</code> isolation,
+  <code>errorToString</code> quoting, the <code>Task.retryWith</code> run-once bug,
+  non-<code>Clone</code> task captures). Every fix shipped with a
+  <strong>pre-failing regression fixture</strong> first.</p>
+  <p class="src">Fixtures <code>runtime-rust/tests/sky/{56..62}-*</code>; commits incl. <code>283cae5d</code> (retryWith), <code>a6712e6b</code> (errorToString).</p>
+
+  <div class="callout why"><span class="tag">The lesson behind the phase</span>
+  "Green build ≠ correct" recurs through the whole project. A passing example sweep
+  can still hide a bug no example happens to exercise — so a fix isn't trusted until
+  a test that <em>failed before it</em> now passes. You'll see this principle baked
+  into the codegen and the CI.</div>
+
+  <h2><span class="num">4</span>Multibackend entry</h2>
+  <p>Some examples use more than one backend (e.g. Live <em>and</em> Tui in
+  <code>24-tui-kitchen-sink</code>). These broke with conflicting <code>init</code>
+  signatures and <code>Task.run</code> type mismatches. The fix came from a written
+  spec first: a backend's <code>Task.run</code> <em>is</em> the program entry, so
+  drop the wrapper and derive the init shape from Sky's own types.</p>
+  <p class="src">Spec <code>2026-06-12-rust-multibackend-entry-model.md</code>.</p>
+
+  <h2><span class="num">5</span>A modern webview stack</h2>
+  <p>The desktop backend was stuck on an old <code>wry</code>/<code>tao</code> that
+  wouldn't compile on current macOS/Windows and crashed on Linux. Migrating to
+  <code>wry 0.55</code> / <code>tao 0.35</code> with per-OS branches unblocked the
+  webview examples (29, 31) and the composite UI (38).</p>
+  <p class="src">Commits <code>abf3e92b</code> (modern wry/tao), <code>f8ba8e03</code> (CI deps).</p>
+
+  <h2><span class="num">6</span>Static linking, cross-compilation &amp; the allocator</h2>
+  <p>Production wants small, portable binaries. The team added opt-in static
+  binaries (Linux musl), cross-compilation (arm64, gnu), symbol stripping, and an
+  allocator choice. A 2×2 benchmark (<em>alloc-stress</em>) proved <strong>mimalloc
+  is ~1.7× faster than glibc</strong> and that musl's own malloc is a throughput
+  cliff — so static builds default to mimalloc.</p>
+  <p class="src">Commits <code>bc97cfe7</code> (static + mimalloc), <code>55e22ad1</code> (strip). The 2×2 table lives in <code>docs/TECHNICAL-DETAILS.md</code>.</p>
+
+  <h2><span class="num">7</span>Naming alignment: <code>--target</code> → <code>--backend</code></h2>
+  <p>The fork had overloaded <code>--target</code> onto two ideas — which backend
+  (go/rust) <em>and</em> which OS/arch. That confused users and clashed with Rust
+  tooling. The rename freed <code>--target</code> for the raw cross-compile triple
+  (matching <code>cargo --target</code>) and added a migration guard. A pervasive
+  but principled change — 69 fixtures, 12 Haskell files, CI, skills.</p>
+  <p class="src">Commit <code>b66c25ec</code>.</p>
+
+  <h2><span class="num">8</span>The DbDec subsystem</h2>
+  <p>The missing core DB feature: decoding query rows into typed records. A design
+  choice unified everything on one shared <code>Decoder&lt;E,T&gt;</code> (a DB row
+  is decoded as JSON), reusing the JSON decoder machinery instead of building a
+  second one — <code>DbDec.string/int/money/nullable/map/andThen/map2–5</code> +
+  SQL-gen kernels.</p>
+  <p class="src">Spec <code>2026-06-16-dbdec-subsystem.md</code>.</p>
+
+  <h2><span class="num">9</span>The autoref/SkyStringify pitfall</h2>
+  <p>A subtle, instructive bug: a generated trait impl that recurses into <em>all</em>
+  fields needs <em>every</em> field type to implement that trait. Fixing
+  <code>errorToString</code> with a <code>SkyStringify</code> trait broke every
+  Std.Ui project (E0599) because the impl lived in an always-compiled module and the
+  UI types (Element/Html/Color) didn't have it. Co-locating + feature-gating the
+  impl fixed the whole class.</p>
+  <p class="src">Commits <code>adfc2afe</code>, <code>0abe2e60</code>; recorded as a CLAUDE.md learning.</p>
+
+  <h2><span class="num">10</span>CI consolidation</h2>
+  <p>Verification was scattered across four separate sweeps and was Linux-only. The
+  team folded build + run + Go≡Rust equivalence into one cornerstone
+  <strong>examples-sweep</strong>, on a 3-OS matrix, with night-gating and a
+  per-OS result table. (Course 2 is all about this.)</p>
+  <p class="src">Commits <code>fbc19e83</code> (cross-platform CI), <code>22290857</code> (unified sweep); the <code>lib/{examples,checks,env}.sh</code> trio.</p>
+
+  <h2><span class="num">11</span>Docs automation</h2>
+  <p>The newest phase: the README kept going stale within hours of a sweep. The fix
+  was a single-source-of-truth policy — machine-owned fenced tables written only by
+  <code>readme-tables.py</code> from CI artifacts, a self-committing
+  <code>update-readme</code> CI job, and deep internals split into
+  <code>docs/TECHNICAL-DETAILS.md</code>.</p>
+  <p class="src">Spec/plan <code>2026-06-18-readme-docs-overhaul</code>; <code>runtime-rust/scripts/readme-tables.py</code>.</p>
+
+  <h2><span class="num">★</span>The threads that run through all of it</h2>
+  <ul>
+    <li><b>No runtime panic from well-typed Sky.</b> The reason the backend exists — soundness by construction, not by catching.</li>
+    <li><b>Green build ≠ correct.</b> Every fix earns a pre-failing regression test; real third-party projects are the strongest proof.</li>
+    <li><b>Single source of truth.</b> Humans edit prose; machines write data tables; history lives in <code>PROGRESS.md</code>.</li>
+    <li><b>Design first.</b> The hard phases (multibackend, webview, static, DbDec) each began with a written spec.</li>
+    <li><b>Boundary discipline.</b> Fork edits stay inside <code>runtime-rust/</code>, the Rust codegen, and <code>examples/rust/</code> — never the shared stdlib or the Go backend.</li>
+  </ul>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. Reaching "37/37 examples green" turned out to be…</div>
+    <button data-ok="0">the end of the project</button>
+    <button data-ok="1">a trap — real codegen holes still hid behind it (green ≠ correct)</button>
+    <button data-ok="0">impossible to achieve</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. Why do static builds default to the mimalloc allocator?</div>
+    <button data-ok="1">A 2×2 benchmark showed mimalloc ~1.7× faster than glibc and musl's malloc a throughput cliff</button>
+    <button data-ok="0">It's the only allocator Rust supports</button>
+    <button data-ok="0">It makes binaries larger, which is preferred</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>Eleven phases: runtime/kernels → deferred effects → known-limitation sweeps → multibackend → webview → static/cross → the <code>--backend</code> rename → DbDec → the autoref pitfall → CI consolidation → docs automation.</li>
+      <li>The recurring loop: build → discover a subtle wrong → add a regression test → fix the root cause.</li>
+      <li>Five threads run through everything: no-panic soundness, green≠correct, single-source-of-truth, design-first, boundary discipline.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Curious about any one phase in depth — the deferred-effect fix, or the
+    allocator benchmark? Ask your teacher to open the matching
+    <code>PROGRESS.md</code> entry or spec and walk it with you.</p>
+  </div>
+
+  <div class="pager">
+    <a href="01-the-big-picture.html">← 1 · The big picture</a>
+    <a href="03-the-front-end.html">3 · The front end →</a>
+  </div>
+
+  <footer class="fin">Lesson 2 · grounded in <code>runtime-rust/docs/PROGRESS.md</code> + the dated specs/plans.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching phase and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

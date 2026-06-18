@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2 · Your first workflow</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 2</a><span class="sep">/</span>
+    <span>2 · Your first workflow</span><span class="spacer"></span>
+    <span class="badge ci">Lesson 2</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 2 · hands-on</span>
+  Your first workflow, line by line</h1>
+
+  <p class="lede">In Lesson 1 you learned the five words. Now you'll read — and could
+  write — a complete, working GitHub Actions workflow. It's smaller than you'd
+  guess: a name, a trigger, and a job with a couple of steps.</p>
+
+  <h2><span class="num">1</span>The whole thing</h2>
+  <p>Save this as <code>.github/workflows/hello.yml</code> in any repo and it runs.
+  Every line is labelled; we'll unpack them below.</p>
+
+  <p class="filetag">.github/workflows/hello.yml</p>
+  <pre><code><span class="tok-kw">name</span>: Hello CI              <span class="tok-com"># A · what it's called (shown in the Actions tab)</span>
+
+<span class="tok-kw">on</span>: [push]                 <span class="tok-com"># B · the trigger — run on every push</span>
+
+<span class="tok-kw">jobs</span>:                       <span class="tok-com"># C · the work (one or more jobs)</span>
+  <span class="tok-fn">greet</span>:                     <span class="tok-com">#     a job, named "greet"</span>
+    <span class="tok-kw">runs-on</span>: ubuntu-latest    <span class="tok-com"># D · the runner (a fresh Ubuntu machine)</span>
+    <span class="tok-kw">steps</span>:                    <span class="tok-com"># E · the steps, run top to bottom</span>
+      - <span class="tok-kw">uses</span>: actions/checkout@v4        <span class="tok-com"># F · a prebuilt action: clone the repo</span>
+      - <span class="tok-kw">name</span>: Say hello
+        <span class="tok-kw">run</span>: echo "Hello from CI on $(uname -s)!"  <span class="tok-com"># G · a shell command</span></code></pre>
+
+  <h2><span class="num">2</span>Reading it, label by label</h2>
+  <table>
+    <tr><th>Label</th><th>Key</th><th>What it does</th></tr>
+    <tr><td>A</td><td><code>name:</code></td><td>A human label for the workflow. Optional but nice — it's what you see in the repo's <em>Actions</em> tab.</td></tr>
+    <tr><td>B</td><td><code>on:</code></td><td>The <b>trigger</b>. <code>[push]</code> means "run on every push to any branch". (Lesson 1's repo example used the longer form with branch + path filters.)</td></tr>
+    <tr><td>C</td><td><code>jobs:</code></td><td>The container for work. Everything indented under here is one or more jobs.</td></tr>
+    <tr><td>—</td><td><code>greet:</code></td><td>A <b>job</b>, with an id you choose. A workflow can have many; they run in parallel by default.</td></tr>
+    <tr><td>D</td><td><code>runs-on:</code></td><td>Which <b>runner</b> to use. <code>ubuntu-latest</code> / <code>macos-latest</code> / <code>windows-latest</code> are GitHub-hosted.</td></tr>
+    <tr><td>E</td><td><code>steps:</code></td><td>An ordered list. Each step runs after the previous one finishes; if one fails, the job stops and goes red.</td></tr>
+    <tr><td>F</td><td><code>uses:</code></td><td>Run a <b>prebuilt action</b> — reusable automation someone published. <code>actions/checkout@v4</code> clones your repo onto the runner (almost every workflow starts with it).</td></tr>
+    <tr><td>G</td><td><code>run:</code></td><td>Run a <b>shell command</b>, exactly as you would in a terminal on that runner.</td></tr>
+  </table>
+
+  <div class="callout key"><span class="tag">The one rule of steps</span>
+  Every step is either <code>uses:</code> (someone else's packaged action) or
+  <code>run:</code> (your own shell command) — never both. Reach for <code>uses:</code>
+  for common chores (checkout, install a language, cache, upload), and <code>run:</code>
+  for "do my actual thing".</div>
+
+  <h2><span class="num">3</span>What happens when you push</h2>
+  <div class="pipeline">
+    <div class="stage"><div class="k">1</div><div class="v">push</div><div class="f">on: [push] fires</div></div>
+    <div class="stage"><div class="k">2</div><div class="v">runner boots</div><div class="f">fresh ubuntu-latest</div></div>
+    <div class="stage"><div class="k">3</div><div class="v">checkout</div><div class="f">uses: actions/checkout</div></div>
+    <div class="stage"><div class="k">4</div><div class="v">echo</div><div class="f">run: echo "Hello…"</div></div>
+    <div class="stage"><div class="k">5</div><div class="v">✓ green</div><div class="f">both steps passed</div></div>
+  </div>
+
+  <h2><span class="num">4</span>Two upgrades you'll always want</h2>
+
+  <h3>Add a real check (the point of CI)</h3>
+  <p>A greeting proves the pipeline runs; a <em>check</em> makes it useful. Replace
+  the echo with something that can <em>fail</em> — and CI becomes a safety net:</p>
+  <pre><code>      - <span class="tok-kw">uses</span>: actions/checkout@v4
+      - <span class="tok-kw">name</span>: Install a toolchain
+        <span class="tok-kw">uses</span>: dtolnay/rust-toolchain@stable   <span class="tok-com"># prebuilt: installs Rust</span>
+      - <span class="tok-kw">name</span>: Build &amp; test
+        <span class="tok-kw">run</span>: |                              <span class="tok-com"># "|" lets you write multiple lines</span>
+          cargo build
+          cargo test</code></pre>
+  <p>If <code>cargo build</code> or <code>cargo test</code> exits non-zero, the step
+  fails, the job goes red, and the commit is flagged. That's the whole game.</p>
+
+  <h3>Add a manual button + control when it runs</h3>
+  <p>The short <code>on: [push]</code> grows into the structured form you saw in
+  Lesson 1 — adding a manual trigger and skipping docs-only pushes:</p>
+  <pre><code><span class="tok-kw">on</span>:
+  <span class="tok-kw">push</span>:
+    <span class="tok-kw">branches</span>: [main]
+    <span class="tok-kw">paths-ignore</span>: [<span class="tok-str">'**.md'</span>]   <span class="tok-com"># skip when only docs changed</span>
+  <span class="tok-kw">workflow_dispatch</span>:           <span class="tok-com"># adds a "Run workflow" button in the UI</span></code></pre>
+
+  <div class="callout gotcha"><span class="tag">YAML gotcha</span>
+  Indentation is meaningful in YAML (like Sky and Python) — spaces only, never tabs.
+  A misindented key is the #1 reason a workflow "doesn't run": GitHub silently
+  ignores a file it can't parse. When in doubt, copy the indentation of a working
+  file exactly.</div>
+
+  <h2><span class="num">5</span>You can now read the repo's first job</h2>
+  <p>Everything in this repo's real <code>examples-sweep</code> job is built from
+  what you just learned — <code>runs-on</code>, <code>steps</code>, <code>uses</code>
+  (checkout, setup-go, rust-toolchain, cache), and <code>run</code> (the sweep
+  script). It's longer, not harder. Lesson 3 adds the three things that make it
+  <em>real</em> CI: matrices, caching, and artifacts.</p>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. A step can be…</div>
+    <button data-ok="0">both <code>uses:</code> and <code>run:</code> at once</button>
+    <button data-ok="1">either <code>uses:</code> (a prebuilt action) or <code>run:</code> (a shell command)</button>
+    <button data-ok="0">only a <code>run:</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. Why does almost every workflow start with
+    <code>uses: actions/checkout@v4</code>?</div>
+    <button data-ok="1">The runner starts empty — checkout clones your repo onto it</button>
+    <button data-ok="0">It's required by YAML syntax</button>
+    <button data-ok="0">It deploys your code to production</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. What turns a "greeting" workflow into a useful safety net?</div>
+    <button data-ok="0">Giving it a longer <code>name:</code></button>
+    <button data-ok="1">A step that can <em>fail</em> — e.g. <code>cargo build</code> / <code>cargo test</code></button>
+    <button data-ok="0">Running it on more branches</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>A workflow is a <code>name</code> + <code>on</code> (trigger) + <code>jobs</code>; a job is <code>runs-on</code> (runner) + <code>steps</code>.</li>
+      <li>Every step is <code>uses:</code> (a prebuilt action like <code>checkout</code>) or <code>run:</code> (a shell command) — never both.</li>
+      <li>CI becomes useful when a step can <em>fail</em> (a build/test). A failing step → red job → flagged commit.</li>
+      <li>Grow <code>on: [push]</code> into branch + <code>paths-ignore</code> filters and a <code>workflow_dispatch</code> button. YAML is space-indented — no tabs.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Want to actually run one? Ask your teacher to help you drop a
+    <code>hello.yml</code> into a scratch repo and watch it go green in the Actions tab.</p>
+  </div>
+
+  <div class="pager">
+    <a href="01-what-is-ci.html">← 1 · What is CI?</a>
+    <a href="index.html">Course 2 roadmap →</a>
+  </div>
+
+  <footer class="fin">Lesson 2 · grounded in GitHub Actions docs + <code>.github/workflows/examples-sweep.yml</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

@@ -5,10 +5,10 @@
 Course 1 — Sky → Rust Backend
 - [x] 00 Landing + roadmap (`course-1-sky-to-rust/index.html`)
 - [x] 01 The big picture: the five-stage pipeline (`01-the-big-picture.html`)
-- [ ] 02 History of the backend (phases 1–11)
-- [ ] 03 Front end: parse → canonicalise → type-solve (shared with Go)
-- [ ] 04 Codegen anatomy: the Builder/ modules
-- [ ] 05 Kernel routing (Kernel.hs) — how a Sky call becomes a Rust fn
+- [x] 02 History of the backend (phases 1–11) (`02-history.html`)
+- [x] 03 Front end: parse → canonicalise → type-solve (`03-the-front-end.html`)
+- [x] 04 Codegen anatomy: the Builder/ modules (`04-codegen-anatomy.html`)
+- [ ] 05 Kernel routing (Kernel.hs) — how a Sky call becomes a Rust fn  ← NEXT (Course 1)
 - [ ] 06 Worked shape: CLI ×2 (whole-program trace)
 - [ ] 07 Worked shape: HTTP server ×2
 - [ ] 08 Worked shape: Sky.Live ×2
@@ -20,8 +20,8 @@ Course 1 — Sky → Rust Backend
 Course 2 — GitHub CI
 - [x] 00 Landing + roadmap (`course-2-github-ci/index.html`)
 - [x] 01 What is CI? (from zero)
-- [ ] 02 Your first workflow (triggers, jobs, steps)
-- [ ] 03 Matrices, caching, artifacts
+- [x] 02 Your first workflow (triggers, jobs, steps) (`02-your-first-workflow.html`)
+- [ ] 03 Matrices, caching, artifacts  ← NEXT (Course 2)
 - [ ] 04 Anatomy of examples-sweep.yml — the gating job
 - [ ] 05 Dispatch-only jobs: perf + static-perf
 - [ ] 06 The CI→README automation (update-readme + cron)

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3 · The front end</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>3 · The front end</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 3</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 3 · stages 1–3</span>
+  The front end: parse → canonicalise → type-solve</h1>
+
+  <p class="lede">These three stages are shared with Sky's Go backend — the Rust
+  backend reuses them untouched. Understanding them matters because they hand
+  codegen everything it needs: a fully-resolved, fully-typed tree with no
+  guesswork left.</p>
+
+  <div class="callout key"><span class="tag">The handoff</span>
+  Codegen (Lesson 4) never re-derives names or types. It trusts that by the time it
+  runs, "<code>println</code>" is already "the Log kernel" and "<code>1 + 2</code>"
+  is already known to be an <code>Int</code>. The front end's whole job is to make
+  that trust safe.</div>
+
+  <h2><span class="num">1</span>Stage 1 — Lex &amp; Parse</h2>
+  <p>Two sub-steps:</p>
+  <ul>
+    <li><b>Lexing</b> turns raw text into a flat <em>token stream</em> — keywords,
+    identifiers, operators, literals. A crucial extra: Sky is indentation-sensitive
+    (like Haskell/Python), so a <b>layout</b> pass converts indentation into explicit
+    structure tokens. That's why you don't write braces.</li>
+    <li><b>Parsing</b> assembles tokens into the <b>source AST</b> — a tree of
+    declarations and expressions. Names are still bare strings; nothing is resolved.</li>
+  </ul>
+  <p class="src">Entry: <a href="../../../../src/Sky/Parse/Module.hs"><code>src/Sky/Parse/Module.hs</code></a> · <code>parseModule :: Text → Either ModuleError Src.Module</code>. Lexer/layout: <code>src/Sky/Parse/{Space,Keyword,Primitives}.hs</code>; expression/declaration grammar: <code>src/Sky/Parse/{Expression,Declaration}.hs</code>.</p>
+
+  <p>For <code>main = println (String.fromInt (1 + 2))</code>, the source AST is a
+  <code>Def "main"</code> whose body is a <code>Call</code> of the bare name
+  <code>println</code> applied to a <code>Call</code> of <code>String.fromInt</code>
+  applied to a <code>Binop "+"</code>. Same tree shape as the canonical one — only
+  the <em>name</em> nodes differ, which is the next stage's job.</p>
+
+  <h2><span class="num">2</span>Stage 2 — Canonicalise (name resolution)</h2>
+  <p>This is where bare names become precise references. The canonicaliser walks the
+  tree with knowledge of the module's imports and the symbols its dependencies
+  export, and rewrites each name to exactly one of:</p>
+  <table>
+    <tr><th>Resolved node</th><th>When</th></tr>
+    <tr><td><code>Can.VarKernel mod name</code></td><td>The name is a built-in stdlib kernel — <code>println → ("Log","println")</code>, <code>String.fromInt → ("String","fromInt")</code>.</td></tr>
+    <tr><td><code>Can.VarTopLevel mod name</code></td><td>A top-level function defined in some module (yours, or stdlib written in Sky).</td></tr>
+    <tr><td><code>Can.VarLocal name</code></td><td>A function parameter or a <code>let</code> binding currently in scope.</td></tr>
+  </table>
+  <p>It also resolves union/record types and cross-module constructors (so an
+  imported <code>type Color = Red | Green</code> exposes <code>Red</code> as a real
+  constructor), and expands type aliases.</p>
+  <p class="src">Entry: <a href="../../../../src/Sky/Canonicalise/Module.hs"><code>src/Sky/Canonicalise/Module.hs</code></a> · <code>canonicaliseWithDeps :: Map String DepInfo → Src.Module → Either String Can.Module</code>.</p>
+
+  <div class="callout gotcha"><span class="tag">Why this matters for Rust</span>
+  The <code>VarKernel</code> vs <code>VarTopLevel</code> distinction is load-bearing
+  in codegen. A <code>VarKernel</code> goes straight through the
+  <code>kernelToRust</code> table; a <code>VarTopLevel</code> might be a Sky-written
+  stdlib function that's actually an <code>Ffi.kernel</code> alias — a recurring
+  source of "type-checks but cargo-fails" bugs when codegen handles only one of the
+  two. (You'll see this pattern named in Lesson 5.)</div>
+
+  <h2><span class="num">3</span>Stage 3 — Type-solve (Hindley–Milner)</h2>
+  <p>Sky requires almost no type annotations because it <em>infers</em> them. The
+  solver uses <b>Hindley–Milner</b>: it walks the tree assigning each expression a
+  fresh type variable, generates equations ("constraints") from how expressions are
+  used, and then <b>unifies</b> — solving those equations with a union-find
+  structure until every variable has a concrete type (or an error if they can't be
+  reconciled).</p>
+
+  <p>For our example the constraints resolve cleanly:</p>
+  <pre><code><span class="tok-num">1</span>            : <span class="tok-ty">Int</span>            <span class="tok-com">-- integer literal</span>
+<span class="tok-num">2</span>            : <span class="tok-ty">Int</span>
+<span class="tok-num">1</span> + <span class="tok-num">2</span>        : <span class="tok-ty">Int</span>            <span class="tok-com">-- (+) : Int -> Int -> Int</span>
+<span class="tok-ty">String</span>.fromInt : <span class="tok-ty">Int</span> -> <span class="tok-ty">String</span>
+fromInt (…)  : <span class="tok-ty">String</span>
+println (…)  : <span class="tok-ty">Task</span> <span class="tok-ty">Error</span> ()  <span class="tok-com">-- so main : Task Error ()</span></code></pre>
+
+  <p>The output is the <code>SolvedTypes</code> record. Two parts of it matter to
+  codegen:</p>
+  <ul>
+    <li><b>The environment</b> (<code>_stEnv</code>): every name → its final type. This is how codegen knows <code>main</code> returns a <code>Task</code> and must be run with <code>block_on</code>.</li>
+    <li><b>Region types</b>: a source <em>location</em> → the type inferred there. This lets codegen ask "what is the type of the expression at this exact spot?"</li>
+  </ul>
+  <p class="src">Entry: <a href="../../../../src/Sky/Type/Solve.hs"><code>src/Sky/Type/Solve.hs</code></a> · <code>solve…</code>; the <code>SolvedTypes</code> record (env + region map, with per-module snapshots). Unification: <code>Sky.Type.Unify</code> + a union-find.</p>
+
+  <div class="callout why"><span class="tag">Why region types, not just the environment?</span>
+  Some Rust output can't be chosen from a name alone. The classic case is an
+  <em>empty</em> collection: <code>[]</code> in <code>List Int</code> position must
+  become <code>Vec::&lt;i64&gt;::new()</code>, but <code>[]</code> in
+  <code>List String</code> position needs <code>Vec::&lt;String&gt;</code>. The name
+  "<code>[]</code>" doesn't tell you which — but the <b>region</b> (the exact spot in
+  the source) does, because the solver pinned a concrete type there. Region types
+  are how codegen turbofishes the right Rust type. The same trick drives closure and
+  generic inference.</div>
+
+  <h2><span class="num">4</span>The picture so far</h2>
+  <div class="pipeline">
+    <div class="stage sky"><div class="k">raw text</div><div class="v">.sky file</div><div class="f">characters</div></div>
+    <div class="stage sky"><div class="k">lex+parse</div><div class="v">source AST</div><div class="f">bare names</div></div>
+    <div class="stage sky"><div class="k">canonicalise</div><div class="v">canonical AST</div><div class="f">VarKernel / VarTopLevel</div></div>
+    <div class="stage sky"><div class="k">type-solve</div><div class="v">+ SolvedTypes</div><div class="f">env + region types</div></div>
+    <div class="stage rust"><div class="k">→ Lesson 4</div><div class="v">codegen</div><div class="f">Builder/</div></div>
+  </div>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. What does canonicalisation turn the bare name
+    <code>println</code> into?</div>
+    <button data-ok="1"><code>Can.VarKernel "Log" "println"</code></button>
+    <button data-ok="0">A Rust <code>log_println</code> call</button>
+    <button data-ok="0">An <code>i64</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. Why does codegen need <b>region types</b>, not just the name→type
+    environment?</div>
+    <button data-ok="0">To make compilation slower</button>
+    <button data-ok="1">To choose the right Rust type at a specific spot — e.g. an empty <code>[]</code>'s element type</button>
+    <button data-ok="0">To resolve import names</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. The three front-end stages are…</div>
+    <button data-ok="1">shared with the Go backend — Rust reuses them untouched</button>
+    <button data-ok="0">unique to the Rust backend</button>
+    <button data-ok="0">skipped when targeting Rust</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li><b>Lex+Parse</b> → source AST (layout makes indentation structural; names still bare).</li>
+      <li><b>Canonicalise</b> → resolves every name to <code>VarKernel</code> / <code>VarTopLevel</code> / <code>VarLocal</code>; the kernel-vs-toplevel split matters in codegen.</li>
+      <li><b>Type-solve (HM)</b> → <code>SolvedTypes</code>: a name→type environment <em>and</em> region types (location→type) that let codegen pick exact Rust types.</li>
+      <li>All three are shared with Go; codegen trusts their output completely.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Want to see a real canonical AST or the solver's region map for a snippet?
+    Ask your teacher — these are Haskell data types we can dump and read together.</p>
+  </div>
+
+  <div class="pager">
+    <a href="02-history.html">← 2 · History</a>
+    <a href="04-codegen-anatomy.html">4 · Codegen anatomy →</a>
+  </div>
+
+  <footer class="fin">Lesson 3 · grounded in <code>src/Sky/Parse</code>, <code>src/Sky/Canonicalise</code>, <code>src/Sky/Type/Solve.hs</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

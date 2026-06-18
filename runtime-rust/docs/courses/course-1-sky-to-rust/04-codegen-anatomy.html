@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4 · Codegen anatomy</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>4 · Codegen anatomy</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 4</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 4 · stage 4, opened up</span>
+  Codegen anatomy: the <code>Builder/</code> modules</h1>
+
+  <p class="lede">Stage 4 — lowering the typed canonical AST to Rust text — is one
+  orchestrator plus eleven focused modules under
+  <code>src/Sky/Generate/Rust/Builder/</code>. This lesson is the map: who owns
+  what, and the order they run in.</p>
+
+  <h2><span class="num">1</span>The orchestrator</h2>
+  <p>The whole Rust project is produced by <code>generateRustProject</code>. It calls
+  the core engine <code>generateRust</code>, then writes the files: <code>main.rs</code>,
+  one <code>.rs</code> per module, <code>sky_runtime/mod.rs</code> (assembled from
+  only the runtime modules this program uses), <code>Cargo.toml</code>, the copied
+  runtime crate, and any FFI bindings.</p>
+  <p class="src">Entry: <a href="../../../../src/Sky/Generate/Rust/Project.hs"><code>src/Sky/Generate/Rust/Project.hs</code></a> · <code>generateRustProject</code> (called from <code>src/Sky/Build/Compile.hs</code>). It copies <code>runtime-rust/src/sky_runtime/</code> via <code>copyRustRuntime</code>.</p>
+
+  <h2><span class="num">2</span>The call flow</h2>
+  <p>From program down to a single expression, the lowering nests like this:</p>
+  <pre><code><span class="tok-fn">buildProgram</span>            <span class="tok-com">-- ModuleEmitter.hs — all modules; detect `main`; build type map</span>
+ └─ <span class="tok-fn">buildModule</span>         <span class="tok-com">-- one module → Rust items</span>
+     └─ <span class="tok-fn">declsToRustItems</span>  <span class="tok-com">-- declarations → [RustItem]</span>
+         └─ <span class="tok-fn">defToRustItem</span>  <span class="tok-com">-- one definition → a Rust fn (sig + body)</span>
+             └─ <span class="tok-fn">exprToRustString</span>   <span class="tok-com">-- ExprEmitter.hs — one expression → Rust text</span>
+                 └─ <span class="tok-fn">kernelToRust</span>   <span class="tok-com">-- Kernel.hs — a kernel call → a runtime fn name</span></code></pre>
+
+  <h2><span class="num">3</span>The eleven modules</h2>
+  <p>Grouped by what they do. Open them alongside —
+  <code>src/Sky/Generate/Rust/Builder/</code>.</p>
+
+  <h3>Driving the walk</h3>
+  <table>
+    <tr><th>Module</th><th>Owns</th></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/ModuleEmitter.hs"><code>ModuleEmitter.hs</code></a></td><td>The top of the walk. <code>buildProgram</code> coordinates all modules, builds the record/ADT name map, detects <code>main</code> and whether its tail is a <code>Task</code> (→ <code>block_on</code>), and handles name-collision renaming. <code>buildModule</code> emits one module's declarations.</td></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/ExprEmitter.hs"><code>ExprEmitter.hs</code></a></td><td>The largest module (~3.8k lines). Turns one expression into Rust text: <code>exprToRustString</code> / <code>exprToRustInner</code> handle calls, kernels, binops, literals, closures, currying, and the deferred-effect <code>let _ =</code> case.</td></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/Pattern.hs"><code>Pattern.hs</code></a></td><td>Lowers patterns — a <code>case</code> arm or a destructuring parameter — to Rust match/param syntax, and lists the variables a pattern binds.</td></tr>
+  </table>
+
+  <h3>Resolving names &amp; types</h3>
+  <table>
+    <tr><th>Module</th><th>Owns</th></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/Kernel.hs"><code>Kernel.hs</code></a></td><td>Kernel routing — <code>kernelToRust (module, name) → "rust_fn"</code>. The single source of truth mapping every stdlib call to its runtime function. (Lesson 5 is all about this.)</td></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/TypeRenderer.hs"><code>TypeRenderer.hs</code></a></td><td>Renders a Sky <code>Can.Type</code> as a Rust type string — <code>typeToRustString</code> (<code>Int → i64</code>, <code>Task _ a → SkyTask&lt;…&gt;</code>, function types → closures). Also peels arrow types into params + return.</td></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/TypeEmitter.hs"><code>TypeEmitter.hs</code></a></td><td>Emits user type <em>definitions</em>: Sky unions → Rust <code>enum</code>s, record aliases → <code>struct</code>s, with derives + a <code>SkyStringify</code> impl.</td></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/Naming.hs"><code>Naming.hs</code></a></td><td>Name mangling — <code>toSnakeCase</code> (<code>fromInt → from_int</code>), module-path mangling, and escaping Rust keywords (<code>type → type_</code>).</td></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/SigRegistry.hs"><code>SigRegistry.hs</code></a></td><td>Hard-coded Rust signatures for known runtime fns — used to pin generic type parameters on a call when the args' types alone don't fix them.</td></tr>
+  </table>
+
+  <h3>Collecting &amp; assembling</h3>
+  <table>
+    <tr><th>Module</th><th>Owns</th></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/Walker.hs"><code>Walker.hs</code></a></td><td>A metadata <em>pre-pass</em>. Scans the AST to find which kernels are used (→ Cargo features), which defs take zero args, and what record shapes exist. Runs <em>before</em> emission so the rest knows what to turn on.</td></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/Types.hs"><code>Types.hs</code></a></td><td>The data structures: <code>RustBuilder</code> (accumulated output), <code>EmitCtx</code> (the per-expression context — solved types, clone hints, record map), and <code>UsedKernels</code> (the feature-gate flags).</td></tr>
+    <tr><td><a href="../../../../src/Sky/Generate/Rust/Builder/Emitter.hs"><code>Emitter.hs</code></a></td><td>The finish line. <code>emitRust</code> formats the accumulated <code>RustBuilder</code> into the final <code>main.rs</code> + module files; <code>emitCargoToml</code> writes <code>Cargo.toml</code> with only the feature-gated deps the program needs.</td></tr>
+  </table>
+
+  <h2><span class="num">4</span>Two ideas worth holding onto</h2>
+
+  <div class="callout key"><span class="tag">EmitCtx — the context that travels</span>
+  As codegen walks the tree, it carries an <code>EmitCtx</code> (Types.hs): the
+  solved types, the record-name map, and hints like "which variables are used twice
+  and therefore need <code>.clone()</code>". This is how a deeply-nested expression
+  still knows its types and how to render them. When you read <code>ExprEmitter</code>,
+  watch the <code>EmitCtx</code> thread through every function.</div>
+
+  <div class="callout why"><span class="tag">Walker first → a small binary</span>
+  Because <code>Walker.hs</code> records exactly which capabilities a program uses,
+  <code>Emitter.hs</code> can turn <em>off</em> everything it doesn't. A CLI program
+  never pulls in <code>axum</code>, <code>sqlx</code>, or <code>tokio</code>'s heavy
+  features — the generated <code>Cargo.toml</code> omits them entirely. That's why a
+  hello-world compiles fast and links small, while a Sky.Live app pulls the web
+  stack. Same codegen, different feature set, decided by the pre-pass.</div>
+
+  <h2><span class="num">5</span>Where the example landed</h2>
+  <p>Back to <code>main = println (String.fromInt (1 + 2))</code>:
+  <code>buildProgram</code> saw a single module with one <code>Task</code>-tailed
+  <code>main</code>; <code>ExprEmitter</code> lowered the body, routing
+  <code>String.fromInt</code> via <code>kernelToRust</code> and special-casing
+  <code>println</code>; <code>TypeRenderer</code> turned <code>Task Error ()</code>
+  into <code>SkyTask&lt;SkyError, ()&gt;</code>; <code>Emitter</code> wrapped it in
+  <code>sky_main</code> + a <code>block_on</code> <code>main</code> and wrote a tiny
+  <code>Cargo.toml</code> (no web/db features). <code>Walker</code> had already noted
+  it uses only basic kernels.</p>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. Which module is the single source of truth mapping a Sky
+    kernel to a Rust runtime function?</div>
+    <button data-ok="0"><code>Emitter.hs</code></button>
+    <button data-ok="1"><code>Kernel.hs</code> (<code>kernelToRust</code>)</button>
+    <button data-ok="0"><code>Walker.hs</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. How does a CLI program avoid pulling in <code>axum</code>/<code>sqlx</code>?</div>
+    <button data-ok="1"><code>Walker.hs</code> records used kernels → <code>Emitter</code> writes a <code>Cargo.toml</code> with only the needed features</button>
+    <button data-ok="0">cargo removes unused crates automatically</button>
+    <button data-ok="0">It can't — every binary includes the web stack</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. What does <code>EmitCtx</code> carry through the walk?</div>
+    <button data-ok="1">Solved types, the record-name map, and clone hints — the context each expression needs</button>
+    <button data-ok="0">The final Cargo.toml</button>
+    <button data-ok="0">Nothing — codegen is stateless</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>One orchestrator (<code>generateRustProject</code>) + eleven focused modules under <code>Builder/</code>.</li>
+      <li>The walk: <code>buildProgram → buildModule → declsToRustItems → defToRustItem → exprToRustString → kernelToRust</code>.</li>
+      <li>Roles: drive the walk (ModuleEmitter / ExprEmitter / Pattern), resolve names+types (Kernel / TypeRenderer / TypeEmitter / Naming / SigRegistry), collect+assemble (Walker / Types / Emitter).</li>
+      <li><code>EmitCtx</code> threads context through; <code>Walker</code>'s pre-pass drives feature gates so binaries stay small.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Ready to go deeper into one module? Lesson 5 opens <code>Kernel.hs</code>. Or
+    ask your teacher to walk a real function in <code>ExprEmitter.hs</code> with you.</p>
+  </div>
+
+  <div class="pager">
+    <a href="03-the-front-end.html">← 3 · The front end</a>
+    <a href="index.html">Course 1 roadmap →</a>
+  </div>
+
+  <footer class="fin">Lesson 4 · grounded in <code>src/Sky/Generate/Rust/Builder/</code> + <code>Project.hs</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>
