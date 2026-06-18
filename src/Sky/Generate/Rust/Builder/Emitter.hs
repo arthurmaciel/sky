@@ -951,6 +951,14 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     , "[profile.dev]"
     , "debug = 0"
     , "incremental = true"
+    -- Release-profile tuning: strip symbols + debuginfo from the release binary
+    -- (Go strips via `-ldflags=-s -w`; this is the Rust equivalent). Pure size
+    -- win, no functional effect — the no-panic-by-construction runtime doesn't
+    -- rely on symbolized backtraces. Only `--release` builds (perf sweep,
+    -- deploy) are affected; [profile.dev] keeps symbols for debugging.
+    , ""
+    , "[profile.release]"
+    , "strip = true"
     ]
   where
     userDepNames = [ n | (n, _) <- rustDeps, not (null n) ]
