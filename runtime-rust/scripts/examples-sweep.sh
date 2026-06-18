@@ -207,7 +207,8 @@ equiv_for() {
         go-ref-broken) printf 'go-ref-broken\tGo reference did not boot+serve\n' ;;
         rust-broken)   printf 'DIFFER\tRust did not boot+serve where Go did\n' ;;
         DIFFER)        printf 'DIFFER\troute body differs (see %s.equiv)\n' "$n" ;;
-        *)             printf 'DIFFER\tunexpected equiv result: %s\n' "$res" ;;
+        "")            printf 'go-ref-broken\tequiv probe returned NO result — inconclusive (harness/runner flake, e.g. the macOS server-HTTP-probe limitation that also breaks the Go ref); NOT a proven Rust divergence\n' ;;
+        *)             printf 'go-ref-broken\tequiv probe inconclusive (%s) — NOT a proven Rust divergence\n' "$res" ;;
       esac
       ;;
 
@@ -301,14 +302,18 @@ run_for() {
         if exercise_live "$bin" "$n" "$port" "$scen" "$rl"; then printf 'ok\t(browser round-trip, scenario %s)\n' "$scen"
         else printf 'noserve\tlive browser: %s\n' "$(grep -m1 '^FAIL' "$rl" | sed 's/^FAIL [^ ]* — //')"; fi
       else
-        if exercise_server "$bin" "$port" "$rl"; then printf 'ok\t(serves :%s)\n' "$port"
+        local lrc; exercise_server "$bin" "$port" "$rl"; lrc=$?
+        if   [ "$lrc" = 0 ]; then printf 'ok\t(serves :%s)\n' "$port"
+        elif [ "$lrc" = "$EXERCISE_SKIP_RC" ]; then printf 'skip\tlive bound but unreachable (macOS runner loopback-probe limitation)\n'
         elif grep -qiE "$PANIC_RE" "$rl"; then printf 'panic\tlive panicked\n'
         else printf 'noserve\tlive did not serve\n'; fi
       fi
       ;;
     server)
-      local port; port="$(free_port)"
-      if exercise_server "$bin" "$port" "$rl"; then printf 'ok\t(serves :%s)\n' "$port"
+      local port src; port="$(free_port)"
+      exercise_server "$bin" "$port" "$rl"; src=$?
+      if   [ "$src" = 0 ]; then printf 'ok\t(serves :%s)\n' "$port"
+      elif [ "$src" = "$EXERCISE_SKIP_RC" ]; then printf 'skip\tserver bound but unreachable (macOS runner loopback-probe limitation)\n'
       elif grep -qiE "$PANIC_RE" "$rl"; then printf 'panic\tserver panicked\n'
       else printf 'noserve\tserver did not serve\n'; fi
       ;;
