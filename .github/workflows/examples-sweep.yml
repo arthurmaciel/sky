@@ -307,6 +307,9 @@ jobs:
     name: examples-perf-sweep (ubuntu, non-gating)
     runs-on: ubuntu-latest
     continue-on-error: true
+    # Full perf_set + Go+Rust release builds + throughput runs is long; bound it
+    # well under GitHub's 6 h hard ceiling (per-example timeouts keep it shorter).
+    timeout-minutes: 330
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.cache/sky-rust-target
       # sccache OFF on CI (retired GHA backend) — see SKY_NO_SCCACHE in the sweep job.
@@ -315,8 +318,10 @@ jobs:
       SKY_AUTH_TOKEN_SECRET: sky-ci-sweep-test-secret-0123456789-abcdef
       CARGO_HTTP_MULTIPLEXING: 'false'
       CARGO_NET_RETRY: '5'
-      # A representative 3-shape subset keeps the perf job bounded on CI.
-      RUST_PERF_QUICK: '1'
+      # Measure the FULL perf_set (every Rust-buildable example, minus Go-FFI) —
+      # NOT the 3-shape RUST_PERF_QUICK subset — to match the README perf table.
+      # tui/webview self-limit to build+cold-start (no throughput); per-example
+      # timeouts in rust-perf.sh + examples-perf-sweep.sh keep it bounded.
 
     steps:
       - uses: actions/checkout@v4
