@@ -17,6 +17,48 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-18 — CI→README automation, round 2: perf table + parity verdict auto-written
+
+**What.** Extended the round-1 automation (below) to fully auto-write the
+examples/perf table AND replace the hand-written perf headline bullets with a
+machine-generated per-metric parity verdict. Decided with the user: **geometric
+mean** of per-example Rust/Go ratios (Fleming-Wallace CACM 1986 / SPEC), **±10%**
+parity band (absorbs shared-CI throughput noise), **per-metric** (4 lines, not one
+blended — keeps the deterministic ~25× binsize win from drowning the noisy ~parity
+throughput signal).
+
+- **`readme-tables.py examples`** (new subcommand) — writes TWO fenced regions from
+  the perf TSV: `AUTOGEN:examples-table` (joins the committed editorial sidecar
+  `readme-examples.tsv` with the fresh perf ratios; Build/Run hardcode ✅ since the
+  CI writer gates on a green sweep) and `AUTOGEN:perf-verdict` (per-metric 3-state
+  verdict: Rust outperforms / at parity / underperforms Go, from the geomean vs the
+  ±10% band). `--check` exits 3 on drift; `--band` overrides.
+- **`readme-tables.py readme-examples.tsv`** (new sidecar) — the human-owned
+  editorial columns (example, shape, round-trip, equiv-cell) extracted verbatim
+  from the committed table. The ONLY place those columns are edited.
+- **README** — wrapped the examples table in `AUTOGEN:examples-table`; replaced the
+  three perf headline bullets with the `AUTOGEN:perf-verdict` fence (seeded with
+  REAL generated content from the local perf cache: throughput 2.07×, RSS 0.21×,
+  cold 0.63×, binsize 0.024× — all "outperforms" at ±10%). Verified the generator
+  round-trips the examples table from the sidecar + perf TSV.
+- **examples-sweep.yml `update-readme`** — now regenerates all THREE regions
+  (`static` + `examples`); `needs: [examples-sweep, examples-perf-sweep,
+  static-perf]` (examples-sweep = the green gate; the table hardcodes ✅ so it must
+  only publish on a fully-green sweep); downloads all result artifacts (flat) so the
+  generator finds both `static-perf-*.tsv` and `perf-*.tsv`.
+
+**Why the green gate.** The examples table hardcodes Build/Run = ✅; gating
+`update-readme` on a non-continue-on-error `examples-sweep` success means a RED
+sweep skips the writer, so the README never shows a false all-green table.
+
+**Affected.** `runtime-rust/scripts/readme-tables.py`,
+`runtime-rust/scripts/readme-examples.tsv` (new), `runtime-rust/README.md`
+(examples-table + perf-verdict fences), `.github/workflows/examples-sweep.yml`
+(update-readme: 3 regions + green gate), `runtime-rust/CLAUDE.md`,
+`runtime-rust/plugins/sky-rust-backend/skills/update-docs/SKILL.md`.
+
+---
+
 ## 2026-06-18 — CI→README automation: AUTOGEN fences + generator + update-readme job + cron
 
 **What.** Automated the README's machine-generated tables off the CI sweep data,

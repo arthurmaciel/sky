@@ -49,16 +49,24 @@ rule here is mandatory, not optional. Current settled rules:
     `git log` + the actual source (typically a background session when called).
   - **Machine-owned fenced regions** — `<!-- AUTOGEN:<id> BEGIN -->` … `<!-- AUTOGEN:<id> END -->`
     blocks are written ONLY by `runtime-rust/scripts/readme-tables.py` from the CI
-    sweep result files, NEVER by hand and NEVER by update-docs. Current region:
-    `AUTOGEN:static-table` (the cross-OS static-build table) — the CI `update-readme`
-    job regenerates + auto-commits it (`[skip ci]`) after each `static-perf` run.
-    update-docs treats fenced regions as read-only data and leaves them alone; it
-    owns the prose AROUND them. This keeps ONE source of truth for the table DATA
-    (CI result TSVs → the generator) and another for the PROSE (update-docs), so
-    the two never fight. The examples/perf table is deliberately NOT auto-written —
-    its noisy per-run numbers must stay consistent with adjacent hand-written perf
-    headlines, so CI only runs `readme-tables.py headline-check` to FLAG its drift
-    (job summary) and update-docs reconciles table + prose together.
+    sweep result files, NEVER by hand and NEVER by update-docs. The CI `update-readme`
+    job regenerates + auto-commits them (`[skip ci]`) after each dispatch/scheduled
+    perf + static-perf run. Three regions:
+    - `AUTOGEN:static-table` ← `static-perf-<OS>-*.tsv` (cross-OS static build).
+    - `AUTOGEN:examples-table` ← `perf-*.tsv` ⋈ `readme-examples.tsv` (the editorial
+      sidecar: shape / round-trip / equiv-note per example — human-owned; only the
+      perf columns are machine-written). Build/Run hardcode ✅ because `update-readme`
+      gates on a GREEN sweep (`needs: examples-sweep`).
+    - `AUTOGEN:perf-verdict` ← `perf-*.tsv` (per-metric 3-state parity verdict: the
+      geometric mean of per-example Rust/Go ratios vs a ±10% band — Fleming-Wallace/
+      SPEC geomean; ±10% absorbs shared-CI throughput noise). This REPLACED the old
+      hand-written perf headline bullets.
+    update-docs treats fenced regions as read-only and leaves them alone; it owns
+    the prose AROUND them (the legend, the closing latency note) + the
+    `readme-examples.tsv` sidecar when an example is added/renamed. ONE source of
+    truth for table DATA (CI TSVs → generator), another for surrounding PROSE
+    (update-docs). The per-push `readme-tables.py headline-check` still flags
+    sweep-headline drift (the `N green · M red` sentence is editorial, not fenced).
   - Allowed `runtime-rust/` root `.md` files: **`CLAUDE.md`, `README.md`,
     `PROGRESS.md`** — nothing else.
 

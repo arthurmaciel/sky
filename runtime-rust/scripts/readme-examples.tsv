@@ -1,0 +1,44 @@
+# Editorial sidecar for the README examples table (AUTOGEN:examples-table).
+# readme-tables.py joins these STABLE columns with the fresh perf TSV to
+# render the table. Human-owned: edit when an example is added / renamed /
+# its shape|round-trip|equiv-note changes. Order here = table row order.
+# Columns (tab-separated): example  shape  roundtrip  equiv_cell
+#   equiv_cell renders verbatim in the Equiv column (the table hardcodes
+#   Build/Run = ✅ because update-readme only writes on a GREEN sweep).
+00-standard-libs	cli	stdout	✅
+01-hello-world	cli	stdout	✅
+02-go-stdlib	cli	stdout	n/a — non-deterministic (wall-clock time + live HTTP); Go-stdlib-FFI demo, no stable comparable stdout
+04-local-pkg	cli	stdout	✅
+06-json	cli	stdout	✅
+07-todo-cli	cli	stdout	n/a — non-deterministic RFC3339Nano banner timestamp (Std.Log format itself matches Go)
+09-live-counter	live	browser (live-counter)	✅
+10-live-component	live	browser (live-component)	✅
+12-skyvote	live	browser (skyvote)	✅
+14-task-demo	cli	stdout	✅
+15-http-server	server	curl 4 routes	✅
+16-skychess	live	browser (skychess)	✅
+17-skymon	live	browser (skymon)	✅
+18-job-queue	live	browser (job-queue)	✅
+19-skyforum	live	browser (skyforum)	✅
+20-cli-counter	cli	stdout	✅
+21-tui-stopwatch	tui	pty	✅
+22-tui-stopwatch-ui	tui	pty	✅
+23-tui-todo	tui	pty	✅
+24-tui-kitchen-sink	tui	pty	✅
+25-sky-console	live	browser (smoke)	✅
+26-ui-showcase	live	browser (smoke)	✅
+27-multi-session-chat	live	browser (smoke)	✅
+28-streaming-chat	live	browser (smoke)	✅
+29-webview-threejs-spike	webview	xvfb	n/a — native wry window, no comparable output
+30-sse-server-demo	server	curl `/`	✅
+31-webview-stopwatch-ui	webview	xvfb	n/a
+32-sse-relay	server	curl `/`	✅
+33-websocket-echo	server	curl `/`	✅
+34-multi-tier-console	live	browser (smoke)	✅
+35-composite-generics	cli	stdout	n/a — non-deterministic (Time.now + Dict.toList order)
+36-composite-server	server	curl	✅
+37-composite-live-shop	live	browser (smoke)	✅
+38-composite-ui-multibackend	tui	pty	✅
+simple	cli	stdout	✅
+test_pkg	cli	stdout	✅
+examples/rust/skyshop-rs	live/FFI	curl	n/a — Rust-FFI app (stripe/firebase/firestore); does not build on Go — Rust-only
