@@ -486,44 +486,44 @@ linking × allocator measurement: [Allocator 2×2 in TECHNICAL-DETAILS](docs/TEC
 
 #### Size: static vs dynamic vs Go
 
-**Local sweep** — every statically-compilable example, release binary sizes (KiB),
+**Local sweep** — every statically-compilable example, release binary sizes (MiB),
 *measured 2026-06-18 on an x86_64 Linux host (native musl)*:
 
 | Example | Shape | Dynamic | Static (musl) | Go | Static/Dyn | Static/Go | Cold dyn→static |
 |---|---|--:|--:|--:|--:|--:|--:|
-| 00-standard-libs | cli | 1393K | 1622K | 31605K | 1.16 | 0.051 | 590→97 ms |
-| 01-hello-world | cli | 575K | 822K | 30381K | 1.43 | 0.027 | 7→109 ms |
-| 02-go-stdlib | cli | 3617K | 3880K | 31500K | 1.07 | 0.123 | 504→113 ms |
-| 04-local-pkg | cli | 576K | 822K | 30383K | 1.43 | 0.027 | 4→93 ms |
-| 06-json | cli | 756K | 994K | 30994K | 1.32 | 0.032 | 13→161 ms |
-| 07-todo-cli | cli | 3334K | 3634K | 30759K | 1.09 | 0.118 | 9→104 ms |
-| 09-live-counter | live | 4959K | 5180K | 397574K | 1.04 | 0.013 | — |
-| 10-live-component | live | 4951K | 5168K | 397546K | 1.04 | 0.013 | — |
-| 12-skyvote | live | 9505K | 9696K | 399679K | 1.02 | 0.024 | — |
-| 14-task-demo | cli | 599K | 842K | 30601K | 1.41 | 0.028 | 4→127 ms |
-| 15-http-server | server | 1825K | 2031K | 397536K | 1.11 | 0.005 | — |
-| 16-skychess | live | 9272K | 9500K | 399080K | 1.02 | 0.024 | — |
-| 17-skymon | live | 9693K | 9904K | 398871K | 1.02 | 0.025 | — |
-| 18-job-queue | live | 8991K | 9232K | 397798K | 1.03 | 0.023 | — |
-| 19-skyforum | live | 5195K | 5408K | 398045K | 1.04 | 0.014 | — |
-| 20-cli-counter | cli | 654K | 894K | 30568K | 1.37 | 0.029 | 4→123 ms |
-| 21-tui-stopwatch | tui | 688K | 922K | 30598K | 1.34 | 0.030 | — |
-| 22-tui-stopwatch-ui | tui | 856K | 1090K | 33121K | 1.27 | 0.033 | — |
-| 23-tui-todo | tui | 885K | 1118K | 33208K | 1.26 | 0.034 | — |
-| 24-tui-kitchen-sink | tui | 5354K | 5532K | 398426K | 1.03 | 0.014 | — |
-| 25-sky-console | live | 5151K | 5360K | 397827K | 1.04 | 0.013 | — |
-| 26-ui-showcase | live | 5348K | 5556K | 398498K | 1.04 | 0.014 | — |
-| 27-multi-session-chat | live | 9046K | 9288K | 397703K | 1.03 | 0.023 | — |
-| 28-streaming-chat | live | 5027K | 5252K | 397575K | 1.04 | 0.013 | — |
-| 30-sse-server-demo | server | 1836K | 2043K | 397559K | 1.11 | 0.005 | — |
-| 32-sse-relay | server | 4579K | 4804K | 397614K | 1.05 | 0.012 | — |
-| 33-websocket-echo | server | 2041K | 2239K | 397665K | 1.10 | 0.006 | — |
-| 34-multi-tier-console | live | 4984K | 5208K | n/a | 1.05 | — | — |
-| 35-composite-generics | cli | 2696K | 2922K | 31366K | 1.08 | 0.093 | 10→130 ms |
-| 36-composite-server | server | 5054K | 5190K | n/a | 1.03 | — | — |
-| 37-composite-live-shop | live | 5488K | 5676K | n/a | 1.03 | — | — |
-| 38-composite-ui-multibackend | tui | 6125K | build-fail | n/a | — | — | — |
-| simple | cli | 618K | 862K | 30516K | 1.40 | 0.028 | 4→105 ms |
+| 00-standard-libs | cli | 1.36M | 1.58M | 30.86M | 1.16 | 0.051 | 590→97 ms |
+| 01-hello-world | cli | 0.56M | 0.80M | 29.67M | 1.43 | 0.027 | 7→109 ms |
+| 02-go-stdlib | cli | 3.53M | 3.79M | 30.76M | 1.07 | 0.123 | 504→113 ms |
+| 04-local-pkg | cli | 0.56M | 0.80M | 29.67M | 1.43 | 0.027 | 4→93 ms |
+| 06-json | cli | 0.74M | 0.97M | 30.27M | 1.32 | 0.032 | 13→161 ms |
+| 07-todo-cli | cli | 3.26M | 3.55M | 30.04M | 1.09 | 0.118 | 9→104 ms |
+| 09-live-counter | live | 4.84M | 5.06M | 388.26M | 1.04 | 0.013 | — |
+| 10-live-component | live | 4.83M | 5.05M | 388.23M | 1.04 | 0.013 | — |
+| 12-skyvote | live | 9.28M | 9.47M | 390.31M | 1.02 | 0.024 | — |
+| 14-task-demo | cli | 0.58M | 0.82M | 29.88M | 1.41 | 0.028 | 4→127 ms |
+| 15-http-server | server | 1.78M | 1.98M | 388.22M | 1.11 | 0.005 | — |
+| 16-skychess | live | 9.05M | 9.28M | 389.73M | 1.02 | 0.024 | — |
+| 17-skymon | live | 9.47M | 9.67M | 389.52M | 1.02 | 0.025 | — |
+| 18-job-queue | live | 8.78M | 9.02M | 388.47M | 1.03 | 0.023 | — |
+| 19-skyforum | live | 5.07M | 5.28M | 388.72M | 1.04 | 0.014 | — |
+| 20-cli-counter | cli | 0.64M | 0.87M | 29.85M | 1.37 | 0.029 | 4→123 ms |
+| 21-tui-stopwatch | tui | 0.67M | 0.90M | 29.88M | 1.34 | 0.030 | — |
+| 22-tui-stopwatch-ui | tui | 0.84M | 1.06M | 32.34M | 1.27 | 0.033 | — |
+| 23-tui-todo | tui | 0.86M | 1.09M | 32.43M | 1.26 | 0.034 | — |
+| 24-tui-kitchen-sink | tui | 5.23M | 5.40M | 389.09M | 1.03 | 0.014 | — |
+| 25-sky-console | live | 5.03M | 5.23M | 388.50M | 1.04 | 0.013 | — |
+| 26-ui-showcase | live | 5.22M | 5.43M | 389.16M | 1.04 | 0.014 | — |
+| 27-multi-session-chat | live | 8.83M | 9.07M | 388.38M | 1.03 | 0.023 | — |
+| 28-streaming-chat | live | 4.91M | 5.13M | 388.26M | 1.04 | 0.013 | — |
+| 30-sse-server-demo | server | 1.79M | 2.00M | 388.24M | 1.11 | 0.005 | — |
+| 32-sse-relay | server | 4.47M | 4.69M | 388.29M | 1.05 | 0.012 | — |
+| 33-websocket-echo | server | 1.99M | 2.19M | 388.34M | 1.10 | 0.006 | — |
+| 34-multi-tier-console | live | 4.87M | 5.09M | n/a | 1.05 | — | — |
+| 35-composite-generics | cli | 2.63M | 2.85M | 30.63M | 1.08 | 0.093 | 10→130 ms |
+| 36-composite-server | server | 4.94M | 5.07M | n/a | 1.03 | — | — |
+| 37-composite-live-shop | live | 5.36M | 5.54M | n/a | 1.03 | — | — |
+| 38-composite-ui-multibackend | tui | 5.98M | build-fail | n/a | — | — | — |
+| simple | cli | 0.60M | 0.84M | 29.80M | 1.40 | 0.028 | 4→105 ms |
 | test_pkg | cli | 575K | 822K | 30381K | 1.43 | 0.027 | 4→93 ms |
 
 - **Static/Dyn 1.02–1.43× (mean 1.15×)** — the static overhead is proportionally

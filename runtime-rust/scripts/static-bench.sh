@@ -109,8 +109,8 @@ for n in "${EX[@]}"; do
   ( cd "$d" && rm -rf sky-out .skycache .skydeps 2>/dev/null ) || true
 done
 
-# ── Markdown table (sizes in KiB, ratios) ───────────────────────────────────
-kib() { [ -n "$1" ] && awk -v b="$1" 'BEGIN{printf "%.0fK", b/1024}' || echo "—"; }
+# ── Markdown table (sizes in MiB, ratios) ───────────────────────────────────
+mib() { [ -n "$1" ] && awk -v b="$1" 'BEGIN{printf "%.2fM", b/1048576}' || echo "—"; }
 ratio() { { [ -n "$1" ] && [ -n "$2" ] && [ "$2" -gt 0 ]; } 2>/dev/null && awk -v a="$1" -v b="$2" 'BEGIN{printf "%.2f", a/b}' || echo "—"; }
 {
   echo "| Example | Shape | Dynamic | Static (musl) | Go | Static/Dyn | Static/Go | Cold dyn→static (cli) |"
@@ -120,7 +120,7 @@ ratio() { { [ -n "$1" ] && [ -n "$2" ] && [ "$2" -gt 0 ]; } 2>/dev/null && awk -
     cold="—"; { [ -n "$cd" ] && [ -n "$cs" ]; } && cold="${cd}→${cs} ms"
     note=""; [ "$status" != ok ] && note=" ⚠$status"
     printf '| %s | %s | %s | %s | %s | %s | %s | %s |%s\n' \
-      "$n" "$shape" "$(kib "$dyn")" "$(kib "$st")" "$(kib "$go")" \
+      "$n" "$shape" "$(mib "$dyn")" "$(mib "$st")" "$(mib "$go")" \
       "$(ratio "$st" "$dyn")" "$(ratio "$st" "$go")" "$cold" "$note"
   done < "$TSV"
 } | tee "$MD" | tee -a "$LOG"
