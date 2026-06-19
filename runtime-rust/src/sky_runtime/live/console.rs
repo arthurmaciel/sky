@@ -113,18 +113,35 @@ pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::R
     if !telemetry::production_from_env() {
         return None;
     }
+    // Admin-token source precedence mirrors Go: SKY_ADMIN_TOKEN, then the legacy
+    // aliases SKY_CONSOLE_TOKEN and SKY_METRICS_TOKEN (Go honours SKY_METRICS_TOKEN
+    // as a back-compat alias — without it a prod operator who only set the legacy
+    // var is locked out / forced to a weaker config).
     let want = std::env::var("SKY_ADMIN_TOKEN")
         .ok()
-        .or_else(|| std::env::var("SKY_CONSOLE_TOKEN").ok());
+        .filter(|t| !t.is_empty())
+        .or_else(|| std::env::var("SKY_CONSOLE_TOKEN").ok().filter(|t| !t.is_empty()))
+        .or_else(|| std::env::var("SKY_METRICS_TOKEN").ok().filter(|t| !t.is_empty()));
     let authed = match (want, headers.get(header::AUTHORIZATION)) {
-        (Some(tok), Some(h)) if !tok.is_empty() => {
-            h.to_str().map(|h| h == format!("Bearer {tok}")).unwrap_or(false)
+        (Some(tok), Some(h)) => {
+            // CONSTANT-TIME compare — `==` on the formatted "Bearer <tok>" string
+            // is a timing oracle on the admin token. Mirror the ingest path's
+            // `ct_eq` (subtle). The byte lengths differing is itself a (benign)
+            // signal; ct_eq over equal-length inputs is the standard guard.
+            use subtle::ConstantTimeEq;
+            let expected = format!("Bearer {tok}");
+            h.to_str()
+                .map(|h| bool::from(h.as_bytes().ct_eq(expected.as_bytes())))
+                .unwrap_or(false)
         }
         _ => false,
     };
     if authed {
         None
     } else {
+        // Audit the denial (Go parity: `console.auth.denied` warn into the
+        // telemetry ring) so an operator sees brute-force / probing attempts.
+        telemetry::record_log("warn", "console.auth.denied reason=bad-or-missing-bearer");
         Some(
             (StatusCode::UNAUTHORIZED, "console requires a Bearer admin token in production")
                 .into_response(),

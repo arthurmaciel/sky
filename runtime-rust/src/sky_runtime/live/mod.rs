@@ -10,6 +10,7 @@ pub mod form;
 pub use form::*;
 pub mod route;
 pub use route::*;
+pub mod csrf;
 pub mod console;
 // Pre-built console child + reverse-proxy — spawns the bundled console
 // binary and proxies /_sky/console/*; falls back to in-process `console` when the
@@ -113,12 +114,13 @@ pub fn render_page(body: &str) -> String {
 /// The JS client reads `window.__SKY_SID` / `window.__SKY_BASE` from the
 /// page rather than receiving them as Sprintf args — the 12 header vars in
 /// `client.js` are static literals that reference those window globals.
-pub fn render_page_full(sid: &str, base: &str, body: &str) -> String {
-    // sid_js / base_js: Rust Debug ("{:?}") of a &str yields a
+pub fn render_page_full(sid: &str, base: &str, body: &str, csrf_token: &str) -> String {
+    // sid_js / base_js / csrf_js: Rust Debug ("{:?}") of a &str yields a
     // double-quoted, properly-escaped JS string literal for plain ASCII
-    // session ids and base paths.
+    // session ids, base paths, and the hex CSRF token.
     let sid_js = format!("{sid:?}");
     let base_js = format!("{base:?}");
+    let csrf_js = format!("{csrf_token:?}");
     let dev_banner = dev_console_banner(base);
     format!(
         "<!DOCTYPE html><html><head>\
@@ -128,7 +130,7 @@ pub fn render_page_full(sid: &str, base: &str, body: &str) -> String {
          <style>{BASE_CSS}</style>\
          </head>\
          <body><div id=\"sky-root\">{body}</div>{dev_banner}\
-         <script>window.__SKY_SID={sid_js};window.__SKY_BASE={base_js};\n{CLIENT_JS}</script>\
+         <script>window.__SKY_SID={sid_js};window.__SKY_BASE={base_js};window.__SKY_CSRF_TOKEN={csrf_js};\n{CLIENT_JS}</script>\
          </body></html>"
     )
 }
@@ -525,23 +527,40 @@ fn cookie_path() -> String {
 
 /// Build the full-page HTTP response for a GET (initial render or reuse): the
 /// client-bearing HTML wrap + the session cookie (name/path base-path-aware).
-fn page_response(sid: &str, body: &str) -> axum::response::Response {
+fn page_response(sid: &str, body: &str, csrf_token: &str) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let html = render_page_full(sid, &live_base_path(), body);
-    let cookie = format!(
-        "{}={sid}; Path={}; HttpOnly; SameSite=Lax",
+    let html = render_page_full(sid, &live_base_path(), body, csrf_token);
+    // Session cookie now carries `Secure` in production / behind TLS (was
+    // unconditionally omitted — a downgrade hole). SameSite=Lax stays so
+    // top-level navigations keep the session.
+    let secure = if csrf::cookies_secure() { "; Secure" } else { "" };
+    let session_cookie = format!(
+        "{}={sid}; Path={}; HttpOnly; SameSite=Lax{secure}",
         session_cookie_name(),
         cookie_path()
     );
-    (
+    let csrf_cookie = csrf::csrf_set_cookie(csrf_token);
+    let mut resp = (
         axum::http::StatusCode::OK,
-        [
-            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
-            (axum::http::header::SET_COOKIE, cookie),
-        ],
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
         html,
     )
-        .into_response()
+        .into_response();
+    let h = resp.headers_mut();
+    // Two Set-Cookie headers — `append`, not `insert`, so both land.
+    if let Ok(v) = axum::http::HeaderValue::from_str(&session_cookie) {
+        h.append(axum::http::header::SET_COOKIE, v);
+    }
+    if let Ok(v) = axum::http::HeaderValue::from_str(&csrf_cookie) {
+        h.append(axum::http::header::SET_COOKIE, v);
+    }
+    // Security response headers (Go parity + hardening) — page GET only.
+    for (name, val) in csrf::security_headers() {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&val) {
+            h.insert(axum::http::HeaderName::from_static(name), v);
+        }
+    }
+    resp
 }
 
 /// Maximum request body bytes for `/_sky/event`: `SKY_LIVE_MAX_BODY_BYTES`,
@@ -707,6 +726,13 @@ where
             //                 hydrate a fresh driver seeded with it (no init).
             //   * miss      → init a new session.
             let cookie_sid = sid_from_cookie(&headers);
+            // CSRF double-submit token: reuse the browser's existing well-formed
+            // `__sky_csrf` cookie (so a reload keeps the same token), else mint a
+            // fresh one. page_response sets the cookie + injects the value into
+            // the page JS; the client echoes it back in the X-Sky-Csrf header.
+            let csrf_tok = csrf::cookie_value(&headers, csrf::csrf_cookie_name())
+                .filter(|t| csrf::token_is_well_formed(t))
+                .unwrap_or_else(csrf::gen_token);
             let hit = match cookie_sid.as_ref() {
                 Some(s) => st.store.get(s).await,
                 None => None,
@@ -728,7 +754,7 @@ where
                         render_html(&tree)
                     };
                     st.store.set(&s, handle).await; // touch last-seen
-                    return page_response(&s, &body);
+                    return page_response(&s, &body, &csrf_tok);
                 }
                 Some(store::StoreHit::Cold(m)) => {
                     let s = cookie_sid.unwrap_or_else(new_sid);
@@ -782,7 +808,7 @@ where
             // Fire init's Cmd into the loop (None for a cold-restored session).
             run_cmd(cmd0, &msg_tx, &sid);
 
-            page_response(&sid, &body)
+            page_response(&sid, &body, &csrf_tok)
         }
 
         // ── GET /_sky/sse ─────────────────────────────────────────────────
@@ -808,7 +834,17 @@ where
             };
             let entry = match entry {
                 Some(e) => e,
-                None => return (StatusCode::NOT_FOUND, "no session").into_response(),
+                // X-Sky-Live: 1 lets the client distinguish a genuine session-lost
+                // 404 (reload to recover) from a wedged proxy (client.js probes for
+                // exactly this header — l1481/l1530).
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        [(axum::http::HeaderName::from_static("x-sky-live"), "1")],
+                        "no session",
+                    )
+                        .into_response()
+                }
             };
 
             let (tx, rx) = sse::channel();
@@ -875,7 +911,17 @@ where
             };
             let entry = match entry {
                 Some(e) => e,
-                None => return (StatusCode::NOT_FOUND, "no session").into_response(),
+                // X-Sky-Live: 1 lets the client distinguish a genuine session-lost
+                // 404 (reload to recover) from a wedged proxy (client.js probes for
+                // exactly this header — l1481/l1530).
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        [(axum::http::HeaderName::from_static("x-sky-live"), "1")],
+                        "no session",
+                    )
+                        .into_response()
+                }
             };
 
             let hid = if !parsed.handler_id.is_empty() { parsed.handler_id } else { parsed.id };
@@ -918,9 +964,14 @@ where
                 }
             }
             // Real patches flow over SSE from the driver; ack with an empty list.
+            // X-Sky-Live: 1 marks this as a genuine Sky.Live response (the client
+            // treats a 200 WITHOUT it as a wedged-proxy signal).
             (
                 StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/json"),
+                    (axum::http::HeaderName::from_static("x-sky-live"), "1"),
+                ],
                 format!("{{\"seq\":{seq},\"patches\":[]}}"),
             )
                 .into_response()
@@ -998,6 +1049,10 @@ where
         let app: Router = router
             .route("/", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             .route("/*path", get(page::<Model, Msg, FInit, FUpdate, FView, FSubs>))
+            // Layer order (axum: last `.layer` = outermost): CSRF is INNER of
+            // observability::track so a rejected CSRF POST still gets counted +
+            // access-logged (Go parity — CSRF sits inside the observability mw).
+            .layer(axum::middleware::from_fn(csrf::csrf_middleware))
             .layer(axum::middleware::from_fn(observability::track))
             .with_state(state);
 
@@ -1079,11 +1134,11 @@ mod base_path_tests {
 
     #[test]
     fn render_page_threads_base_into_meta_and_window_global() {
-        let root = render_page_full("sid1", "", "<b>x</b>");
+        let root = render_page_full("sid1", "", "<b>x</b>", "deadbeef");
         assert!(root.contains("<meta name=\"sky-base\" content=\"\">"));
         assert!(root.contains("window.__SKY_BASE=\"\""));
 
-        let sub = render_page_full("sid1", "/_sky/console", "<b>x</b>");
+        let sub = render_page_full("sid1", "/_sky/console", "<b>x</b>", "deadbeef");
         assert!(sub.contains("<meta name=\"sky-base\" content=\"/_sky/console\">"));
         assert!(sub.contains("window.__SKY_BASE=\"/_sky/console\""));
     }

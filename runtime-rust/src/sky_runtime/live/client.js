@@ -1,6 +1,6 @@
 var __skySid = window.__SKY_SID;
 var __skyBase = window.__SKY_BASE || "";
-var __skyCsrfToken = "";
+var __skyCsrfToken = window.__SKY_CSRF_TOKEN || "";
 var __skyBannerEnabled = true;
 var __skyRetryBaseMs = 500;
 var __skyRetryMaxMs = 16000;
