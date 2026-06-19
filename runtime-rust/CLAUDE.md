@@ -17,6 +17,11 @@ When the user settles a rule, it is recorded HERE and applied to all future work
 without re-asking — it only changes when the user asks to change it. Adding the
 rule here is mandatory, not optional. Current settled rules:
 
+- **Caveman mode always on.** Respond terse — drop articles/filler/pleasantries/
+  hedging, keep all technical substance, code/errors/identifiers exact, use
+  arrows for causality. Be verbose ONLY when the user explicitly asks to explain.
+  Auto-clarity exception stays: full sentences for security warnings, irreversible-
+  action confirmations, and multi-step sequences where fragments risk misread.
 - **Boundary.** Edit only `runtime-rust/`, `src/Sky/Generate/Rust/`,
   `src/Sky/Build/Rust/`, `tools/`. NEVER the shared stdlib (`sky-stdlib/`), the Go
   backend (`runtime-go/`, `src/Sky/Generate/Go/`), or the author's `examples/`
