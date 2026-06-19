@@ -44,6 +44,10 @@ STATE_FILE="${SKY_KGP_STATE:-$REPO/.skycache/keep-go-parity.state}"
 
 state_init() {
   mkdir -p "$(dirname "$STATE_FILE")"
+  if [ -f "$STATE_FILE" ]; then
+    echo "state-init: run-state already exists (BASE=$(state_get BASE), phase=$(state_get last_completed_phase)). Use --restart to clear." >&2
+    return 1
+  fi
   printf 'BASE=%s\nlast_completed_phase=0\n' "$(git rev-parse HEAD)" > "$STATE_FILE"
 }
 state_get() {  # state_get <key> → value (empty if absent)
@@ -56,7 +60,7 @@ state_set() {  # state_set <key> <value> — portable (no in-place sed)
   tmp="$(mktemp)"
   awk -v k="$k" -v v="$v" '
     $0 ~ "^"k"=" { print k"="v; done=1; next } { print }
-    END { if (!done) print k"="v }' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+    END { if (!done) print k"="v }' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
 }
 state_done() { state_set last_completed_phase "$1"; state_set "phase_$1" ok; }   # phase N complete
 state_clear() { rm -f "$STATE_FILE"; }
@@ -194,6 +198,10 @@ case "$cmd" in
     list="${SCOPED[*]}"
     echo "scoped-sweep: ${#SCOPED[@]} example(s) since $base"
     echo "RUST_EXAMPLES=$list"
+    if [ "${#SCOPED[@]}" -eq 0 ]; then
+      echo "scoped-sweep: changed_examples returned no examples — nothing to sweep (NOT falling back to a full sweep)." >&2
+      exit 0
+    fi
     if [ "${2:-}" = "--dry-run" ]; then
       echo "would run: SKY_SWEEP_FORCE=1 bash $SCRIPTS/examples-sweep.sh (with RUST_EXAMPLES set as above)"
       exit 0
