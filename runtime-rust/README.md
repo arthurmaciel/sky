@@ -55,8 +55,8 @@ as possible in generated code (fully-typed codegen), no change to Sky/Go source 
 the upstream examples. 
 
 Fixes are root-cause only. Where Rust implements a mechanism differently from Go to hold
-those guarantees, that *mechanism* divergence is recorded in **Rust vs Go backend
-— divergent implementation strategies**.
+those guarantees, that *mechanism* divergence is recorded in
+**[Rust vs Go backend — divergent implementation strategies](docs/TECHNICAL-DETAILS.md#rust-vs-go-backend--divergent-implementation-strategies)**.
 
 
 ---
