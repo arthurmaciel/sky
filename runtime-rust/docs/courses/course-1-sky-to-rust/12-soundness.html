@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>12 · Soundness — why it exists</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>12 · Soundness</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 12</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 12 · the whole point</span>
+  Soundness: "no panic from well-typed Sky"</h1>
+
+  <p class="lede">Everything in this course serves one promise: a well-typed Sky
+  program must <strong>never</strong> trigger a runtime crash in the generated Rust.
+  Not "rarely". Never. This final lesson explains why that's the reason the Rust
+  backend exists — and the corner cases it designs out to keep the promise.</p>
+
+  <h2><span class="num">1</span>The existential rule</h2>
+  <div class="callout key"><span class="tag">If it compiles, it works</span>
+  A well-typed Sky program must not be able to trigger a panic, an
+  <code>unwrap</code>/<code>expect</code> failure, an unchecked downcast, an
+  out-of-bounds index, or any other runtime abort — in the generated Rust <em>or</em>
+  the runtime crate. This isn't aspirational; it's the product. "It type-checks, so
+  it builds, so it works" is a chain the whole pipeline exists to make true.</div>
+
+  <h2><span class="num">2</span>Statically total, not caught-at-runtime</h2>
+  <p>There are two ways to deal with the things that can go wrong. Sky's Go backend
+  leans on the dynamic one; the Rust backend insists on the static one.</p>
+  <table>
+    <tr><th></th><th>Go backend</th><th>Rust backend</th></tr>
+    <tr><td>strategy</td><td>reflection + <code>recover</code>: a panic is <em>caught</em> and turned into a 500</td><td><b>statically total</b>: the failure is <em>designed out</em>, so it can't happen</td></tr>
+    <tr><td>errors Sky models</td><td colspan="2" style="text-align:center"><code>Result</code> / <code>Task</code> values (both backends)</td></tr>
+    <tr><td>everything else</td><td>defended by a recover net</td><td>made unrepresentable</td></tr>
+  </table>
+  <p>So in generated Rust and the runtime's Sky-reachable paths, the project treats
+  <code>.unwrap()</code>, <code>.expect()</code>, <code>panic!</code>, <code>[i]</code>
+  indexing, and unchecked <code>downcast</code> as <strong>bugs to fix at the root</strong>.
+  An invariant that "can't fail" still uses a total form — <code>if let</code>,
+  <code>match</code>, <code>.get()</code> — with a structured-error fallback.</p>
+
+  <div class="callout gotcha"><span class="tag">The one panic you saw — and why it's allowed</span>
+  In the worked lessons you spotted an <code>ffi_kernel_polyfill</code> that
+  <code>panic!</code>s. That's a <em>compiler-bug contract</em>, not a Sky-reachable
+  path: it only fires if codegen itself produced something impossible. Well-typed Sky
+  can never reach it. The rule isn't "zero <code>panic!</code> tokens" — it's "no
+  panic reachable from well-typed Sky".</div>
+
+  <h2><span class="num">3</span>Designing out dynamism (the hard part)</h2>
+  <p>The interesting cases are where a Sky feature is dynamically typed at the
+  <em>language</em> level — pub/sub payloads, FFI <code>any</code>, JSON values.
+  The tempting move is to erase the type, downcast later, and hope. The project's
+  rule:</p>
+  <div class="callout why"><span class="tag">Mirroring Go's reflect/any risk is a defect, not parity</span>
+  Instead of erase-and-downcast, use the concrete types the type-checker already
+  knows at each call site to <strong>monomorphise the dynamism away</strong>. The
+  pub/sub broker, for example, is keyed by <code>TypeId</code> into per-type channels,
+  so a payload travels as its real type <code>T</code> and is <em>never</em> downcast.
+  Any residual <code>dyn Any</code> must be provably correct by construction — keyed
+  so the one cast can't fail — never payload-dependent.</div>
+
+  <h2><span class="num">4</span>When something genuinely can't be caught at compile time</h2>
+  <p>A few mismatches the Sky type system can't see — say a publisher and a subscriber
+  that disagree on a topic's payload type. The rule there is equally strict:
+  <strong>degrade gracefully</strong> — drop the message and emit a structured warning
+  — <strong>never panic</strong>. Graceful degradation, not a crash, is the floor for
+  the rare unprovable case.</p>
+
+  <h2><span class="num">5</span>How the promise is kept honest</h2>
+  <p>A promise this strong needs enforcement, which is the "green ≠ correct" thread
+  from Lesson 2 turned into practice:</p>
+  <ul>
+    <li><b>Every fix earns a pre-failing regression test.</b> The failing test is the
+    discovery artifact; the fix isn't trusted until that test passes.</li>
+    <li><b>The equivalence sweep</b> (Course 2, Lesson 4) runs each example and
+    compares to Go — catching behavioural bugs a build can't.</li>
+    <li><b>Real third-party projects</b> are the strongest proof — they exercise code
+    shapes no example happens to.</li>
+    <li><b>"Type-checks but cargo-fails" is a tracked bug class</b>, not an acceptable
+    state — the whole point is that type-checking implies building implies working.</li>
+  </ul>
+
+  <h2><span class="num">★</span>The course, in one sentence</h2>
+  <p>The front end (parse → canonicalise → type-solve) removes every ambiguity, so
+  codegen can lower a fully-known program into Rust that calls a hand-written,
+  total runtime — and the result is a native binary where, if it compiled, it
+  works. That sentence is the whole pipeline, and now you can defend every clause of
+  it.</p>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. How does the Rust backend differ from Go's on the things Sky's
+    types <em>can't</em> model away?</div>
+    <button data-ok="1">Rust designs them out (statically total); Go catches panics with <code>recover</code> and returns a 500</button>
+    <button data-ok="0">They're identical</button>
+    <button data-ok="0">Rust ignores them</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. How does the pub/sub broker avoid an unsafe downcast?</div>
+    <button data-ok="1">It's keyed by <code>TypeId</code> into per-type channels, so the payload travels as its real type <code>T</code></button>
+    <button data-ok="0">It uses <code>.unwrap()</code> and hopes</button>
+    <button data-ok="0">It converts everything to strings</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. A publisher and subscriber disagree on a topic's payload type at
+    runtime. The runtime…</div>
+    <button data-ok="1">drops the message + emits a structured warning — never panics</button>
+    <button data-ok="0">panics to surface the bug</button>
+    <button data-ok="0">silently corrupts memory</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary — and Course 1 complete 🎉</h3>
+    <ul>
+      <li>The promise: no runtime panic reachable from well-typed Sky — the reason the Rust backend exists.</li>
+      <li>Strategy: statically total (design the failure out), not reflect+recover. <code>unwrap</code>/<code>panic!</code>/unchecked-downcast in Sky-reachable code are bugs.</li>
+      <li>Dynamism is monomorphised away (TypeId-keyed broker); residual <code>dyn Any</code> is correct-by-construction; unprovable mismatches degrade gracefully, never crash.</li>
+      <li>Kept honest by pre-failing regression tests, the equivalence sweep, and real-app proof-tests — "green ≠ correct" in practice.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>You've finished Course 1. Want to go deeper on any thread — the TypeId broker,
+    the regression-test discipline, or adding your own kernel end to end? Ask your
+    teacher; that's the natural next step from here.</p>
+  </div>
+
+  <div class="pager">
+    <a href="11-ffi.html">← 11 · FFI</a>
+    <a href="index.html">Course 1 roadmap →</a>
+  </div>
+
+  <footer class="fin">Lesson 12 · grounded in the project's "no runtime errors" contract + the soundness learnings.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8 · Worked shape — Sky.Live ×2</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>8 · Worked Live</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 8</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 8 · TEA on the web</span>
+  Worked shape — Sky.Live ×2</h1>
+
+  <p class="lede">Sky.Live is The Elm Architecture, served over HTTP with live
+  updates. You already know the shape from Lesson 6 (init/update/view/subscriptions)
+  — here the <code>view</code> produces <strong>HTML</strong>, and the entry is a
+  whole web server. We trace the real Rust of a counter, then point at a full app.</p>
+
+  <h2><span class="num">A</span>Example 1 — <code>09-live-counter</code></h2>
+  <p class="filetag">examples/09-live-counter/src/Main.sky (trimmed)</p>
+  <pre><code><span class="tok-kw">import</span> Std.Html <span class="tok-kw">exposing</span> (..)
+<span class="tok-kw">import</span> Std.Html.Events <span class="tok-kw">exposing</span> (onClick)
+
+main =
+    Live.<span class="tok-fn">app</span>
+        { init = init, update = update, view = view
+        , subscriptions = subscriptions
+        , routes = [ route <span class="tok-str">"/"</span> CounterPage, route <span class="tok-str">"/about"</span> AboutPage ]
+        }
+
+view model =
+    div []
+        [ nav [ class <span class="tok-str">"navbar"</span> ]
+            [ button [ onClick (Navigate CounterPage) ] [ text <span class="tok-str">"Counter"</span> ]
+            , button [ onClick (Navigate AboutPage) ]   [ text <span class="tok-str">"About"</span> ]
+            ]
+        , …
+        ]</code></pre>
+
+  <h3>The view lowers to an <code>Html</code> tree of <code>std_html_*</code> calls</h3>
+  <p class="filetag">examples/09-live-counter/sky-out/Rust/src/main.rs (real, trimmed)</p>
+  <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">main_view</span>(model: <span class="tok-ty">MainModel</span>) -> <span class="tok-ty">StdHtmlHtml</span>&lt;<span class="tok-ty">MainMsg</span>&gt; {
+    <span class="tok-fn">std_html_div</span>(
+        <span class="tok-fn">vec!</span>[],
+        <span class="tok-fn">vec!</span>[
+            <span class="tok-fn">std_html_nav</span>(
+                <span class="tok-fn">vec!</span>[<span class="tok-fn">std_html_attributes_class</span>(<span class="tok-str">"navbar"</span>.to_string())],
+                <span class="tok-fn">vec!</span>[
+                    <span class="tok-fn">std_html_button</span>( <span class="tok-com">/* onClick(Navigate(…)) attr + children */</span> ),
+                    …
+                ],
+            ),
+        ],
+    )
+}</code></pre>
+  <p>Key points:</p>
+  <ul>
+    <li>The <code>view</code> returns <code>StdHtmlHtml&lt;MainMsg&gt;</code> — an HTML
+    tree <em>parameterised by your Msg type</em>, so a click attribute carries a typed
+    <code>MainMsg</code>.</li>
+    <li>Each HTML builder (<code>div</code>, <code>nav</code>, <code>button</code>,
+    <code>text</code>, <code>class</code>) routes to a <code>std_html_*</code> kernel,
+    taking <code>vec![attrs]</code> and <code>vec![children]</code>.</li>
+    <li><code>init</code>, <code>update</code>, <code>Msg</code>, <code>Model</code>
+    lower exactly like the CLI in Lesson 6 — it's the same TEA.</li>
+  </ul>
+
+  <h3>The entry is a routed web app</h3>
+  <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyTask</span>&lt;()&gt; {
+    <span class="tok-fn">live_app_routed</span>::&lt;<span class="tok-ty">SkyError</span>, _, _, _, _, _, _, _, _&gt;(
+        main_init, main_update, main_view, main_subscriptions, <span class="tok-com">/* routes, cfg… */</span>
+    )
+}
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() { <span class="tok-kw">match</span> <span class="tok-fn">block_on</span>(<span class="tok-fn">sky_main</span>()) { … } }</code></pre>
+  <p><code>Live.app</code> with a <code>routes</code> field routes to
+  <code>live_app_routed</code> (without routes it would be <code>live_app</code>). It
+  returns a bare <code>Task</code>, so — like the server in Lesson 7 — the entry
+  drives it with <code>block_on</code>, which starts the HTTP server, the SSE update
+  channel, and the session store.</p>
+
+  <div class="callout key"><span class="tag">The big realisation</span>
+  <b>CLI, Live, Tui, and Webview are the same program with different runtimes.</b>
+  Identical <code>init</code>/<code>update</code>/<code>view</code>/<code>subscriptions</code>;
+  only the entry kernel differs (<code>cli_program</code> / <code>live_app</code> /
+  <code>tui_app</code> / <code>webview_app</code>) and the <code>view</code>'s output
+  type (<code>String</code> for a text CLI/TUI, <code>Html</code> for Live/Webview).
+  Learn one, you've learned all four.</div>
+
+  <h2><span class="num">B</span>Example 2 — <code>19-skyforum</code> (a real app)</h2>
+  <p>A full forum: posts, comments, a database, forms, multiple pages. It's split
+  across several modules (a Std.Ui-heavy app must be, to keep the type-checker
+  happy), but every module lowers by the same rules — its <code>State.sky</code> types
+  become enums/structs, its <code>Update.sky</code> becomes <code>match</code>
+  functions, its view modules become <code>std_html_*</code> / <code>ui_*</code>
+  trees, and <code>Main.sky</code> wires <code>Live.app</code> → <code>live_app_routed</code>.</p>
+  <p>It builds and passes the equivalence sweep (Course 2, Lesson 4): the headless
+  browser drives the same scenario on both the Go and Rust builds and they behave
+  identically. The difference from the counter is <em>scale</em>, not <em>mechanism</em>
+  — DB calls become <code>db_*</code> kernels (Task-typed), forms decode into typed
+  records, but the lowering rules are the ones you already know.</p>
+
+  <div class="callout why"><span class="tag">Why split a Live app into modules?</span>
+  A single file with ~25+ polymorphic <code>Html msg</code>/<code>Element msg</code>
+  helpers can blow the HM type-checker's heap. So real Live apps split into
+  <code>State</code> / <code>Update</code> / <code>View/*</code> / <code>Main</code>.
+  This is a Sky front-end constraint, not a Rust-codegen one — but it's why the
+  worked example here is the small counter, with the big one described.</div>
+
+  <h2><span class="num">C</span>The Live pattern, generalised</h2>
+  <ul>
+    <li>Same TEA as the CLI: <code>Msg</code>→enum, <code>Model</code>→struct, <code>update</code>→<code>match</code>.</li>
+    <li><code>view : Model -> Html Msg</code> → <code>fn main_view(model) -> StdHtmlHtml&lt;Msg&gt;</code>, an <code>std_html_*</code> tree.</li>
+    <li><code>Live.app { routes = … }</code> → <code>live_app_routed</code>; bare Task → <code>block_on</code> entry that boots HTTP + SSE + sessions.</li>
+    <li>Persistence/forms are just more Task-typed kernels (<code>db_*</code>) and typed-record decoding.</li>
+  </ul>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. A Sky.Live <code>view : Model -> Html Msg</code> lowers to…</div>
+    <button data-ok="1"><code>fn main_view(model) -> StdHtmlHtml&lt;Msg&gt;</code> — an <code>std_html_*</code> tree parameterised by Msg</button>
+    <button data-ok="0">a <code>String</code></button>
+    <button data-ok="0">a Cargo feature</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. What's the relationship between CLI, Live, Tui and Webview programs?</div>
+    <button data-ok="1">Same TEA shape; only the entry kernel and the view's output type differ</button>
+    <button data-ok="0">Completely different architectures</button>
+    <button data-ok="0">Only Live is real; the others are fake</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. Why is the small counter the worked example, not the big forum?</div>
+    <button data-ok="1">The big app must split into modules (an HM type-checker constraint); the lowering rules are identical regardless</button>
+    <button data-ok="0">The forum doesn't compile on Rust</button>
+    <button data-ok="0">Live apps can't have a database</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>Sky.Live is TEA over HTTP: same <code>init/update/view/subscriptions</code> as the CLI, but <code>view → Html Msg → StdHtmlHtml&lt;Msg&gt;</code> (a tree of <code>std_html_*</code> calls).</li>
+      <li><code>Live.app { routes }</code> → <code>live_app_routed</code>, a bare Task driven by <code>block_on</code> (boots HTTP + SSE + sessions).</li>
+      <li>CLI / Live / Tui / Webview = one program, four runtimes — only the entry kernel + view type differ.</li>
+      <li>Real apps (19-skyforum) add scale (DB, forms, modules) but no new lowering rules.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Run the counter: <code>sky run --backend rust src/Main.sky</code>, open
+    <code>localhost:8000</code>, click. Ask your teacher to trace one <code>onClick</code>
+    from Sky attribute to Rust closure with you.</p>
+  </div>
+
+  <div class="pager">
+    <a href="07-worked-server.html">← 7 · Worked server</a>
+    <a href="09-worked-tui.html">9 · Worked Tui →</a>
+  </div>
+
+  <footer class="fin">Lesson 8 · grounded in a real build of <code>09-live-counter</code> (+ <code>19-skyforum</code> from source &amp; the equiv sweep).</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

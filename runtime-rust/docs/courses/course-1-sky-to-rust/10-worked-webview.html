@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10 · Worked shape — Sky.Webview ×2</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>10 · Worked Webview</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 10</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 10 · TEA on the desktop</span>
+  Worked shape — Sky.Webview ×2</h1>
+
+  <p class="lede">The last shape: a native desktop window. Sky.Webview is —
+  predictably now — the same TEA, rendered into a system webview (WebKit / WebView2)
+  via the <code>wry</code>/<code>tao</code> crates. Same <code>Html</code> view as
+  Sky.Live; the only new thing is a window config.</p>
+
+  <div class="callout gotcha"><span class="tag">An honest note on grounding</span>
+  The real <code>wry</code>/<code>tao</code> window links the system WebKit
+  development libraries, which aren't installed on the machine these courses were
+  built on — so unlike Lessons 6–9, this lesson isn't traced from a freshly-built
+  <code>main.rs</code>. Instead it's grounded in (a) the example's Sky source, (b)
+  the lowering rules you've already verified, and (c) a <em>real</em> runtime-level
+  Rust example checked into the repo. Where something is shown by pattern rather than
+  a fresh build, it's flagged.</div>
+
+  <h2><span class="num">A</span>The Sky shape</h2>
+  <p class="filetag">examples/31-webview-stopwatch-ui / Std.Webview shape</p>
+  <pre><code><span class="tok-kw">import</span> Std.Webview <span class="tok-kw">as</span> Webview
+
+main =
+    Webview.<span class="tok-fn">app</span>
+        { init = init, update = update, view = view
+        , subscriptions = subscriptions
+        , window = { title = <span class="tok-str">"Sky App"</span>, size = ( <span class="tok-num">800</span>, <span class="tok-num">600</span> ) }
+        }
+        |> Task.run</code></pre>
+  <p>Identical to Sky.Live except: no <code>routes</code>, and a <code>window</code>
+  record (title + size). The <code>view</code> produces the same <code>Html</code>
+  tree — in fact Sky.Webview <em>reuses Sky.Live's renderer</em>, so one
+  <code>view</code> function paints in a browser (Live) or a desktop window
+  (Webview) unchanged.</p>
+
+  <h2><span class="num">B</span>The lowering (by the established rules)</h2>
+  <p><code>Webview.app { … } |> Task.run</code> routes to the
+  <code>webview_app</code> kernel, wrapped by <code>task_run</code> (the
+  <code>|&gt; Task.run</code> entry shape from Lesson 6). The <code>window</code>
+  record becomes a <code>WebviewWindowCfg</code> struct. <code>init</code>/
+  <code>update</code>/<code>view</code>/<code>subscriptions</code> lower exactly as in
+  Lessons 6 and 8.</p>
+
+  <h2><span class="num">C</span>A real runtime-level proof</h2>
+  <p>The repo ships a hand-written Rust smoke test that exercises the <em>exact</em>
+  runtime API the codegen targets — so even without building an example, you can see
+  the real shape <code>webview_app</code> expects:</p>
+  <p class="filetag">runtime-rust/examples/webview_smoke.rs (real, trimmed)</p>
+  <pre><code><span class="tok-kw">fn</span> <span class="tok-fn">view</span>(n: <span class="tok-ty">i64</span>) -> <span class="tok-ty">Html</span>&lt;<span class="tok-ty">i64</span>&gt; {
+    <span class="tok-ty">Html</span>::HElement(<span class="tok-str">"div"</span>.into(), <span class="tok-fn">vec!</span>[], <span class="tok-fn">vec!</span>[
+        <span class="tok-ty">Html</span>::HElement(<span class="tok-str">"button"</span>.into(),
+            <span class="tok-fn">vec!</span>[<span class="tok-ty">Attribute</span>::EventAttr(<span class="tok-ty">Event</span>::OnMsg(<span class="tok-str">"click"</span>.into(), n + <span class="tok-num">1</span>))],
+            <span class="tok-fn">vec!</span>[<span class="tok-ty">Html</span>::HText(<span class="tok-str">"increment"</span>.into())]),
+    ])
+}
+
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() {
+    <span class="tok-kw">let</span> task = <span class="tok-fn">webview_app</span>::&lt;<span class="tok-ty">i64</span>, <span class="tok-ty">i64</span>, <span class="tok-ty">String</span>, _, _, _, _&gt;(
+        |()| (<span class="tok-num">0i64</span>, <span class="tok-ty">SkyCmd</span>::None),         <span class="tok-com">// init</span>
+        |msg, _model| (msg, <span class="tok-ty">SkyCmd</span>::None), <span class="tok-com">// update</span>
+        view,                            <span class="tok-com">// view</span>
+        |_m| <span class="tok-ty">SkySub</span>::None,               <span class="tok-com">// subscriptions</span>
+        <span class="tok-ty">WebviewWindowCfg</span> { title: <span class="tok-str">"Sky Webview smoke"</span>.into(), size: (<span class="tok-num">420</span>, <span class="tok-num">280</span>) },
+    );
+    <span class="tok-kw">let</span> _ = <span class="tok-fn">block_on</span>(task);
+}</code></pre>
+  <p>This is exactly what the codegen produces in spirit: the five TEA values + a
+  <code>WebviewWindowCfg</code>, passed to <code>webview_app</code>, driven by
+  <code>block_on</code>. The <code>view</code> builds the same <code>Html</code> the
+  Live backend uses (<code>HElement</code> / <code>HText</code> / <code>EventAttr</code>
+  / <code>OnMsg</code>), which is why one Sky <code>view</code> serves both.</p>
+
+  <h2><span class="num">D</span>The build flip you should know</h2>
+  <div class="callout why"><span class="tag">cgo / cargo features</span>
+  When a project uses Sky.Webview, the build runner switches the cargo build to
+  enable the <code>webview</code> feature (which pulls in <code>wry</code>/<code>tao</code>
+  and needs the system WebKit libs). On a host without those libs, a non-webview
+  project still builds fine because the feature is gated off (Lesson 4's
+  feature-gating in action) — and a stub keeps non-webview platforms linking.</div>
+
+  <h2><span class="num">E</span>The four shapes, complete</h2>
+  <table>
+    <tr><th>Shape</th><th>Entry kernel</th><th>view output</th><th>extra</th></tr>
+    <tr><td>CLI</td><td><code>cli_program</code></td><td><code>String</code></td><td><code>onLine</code></td></tr>
+    <tr><td>Server</td><td><code>server_listen</code></td><td><code>Response</code> (per handler)</td><td>routes</td></tr>
+    <tr><td>Live</td><td><code>live_app[_routed]</code></td><td><code>Html</code></td><td>routes</td></tr>
+    <tr><td>Tui</td><td><code>tui_app</code></td><td><code>String</code>/<code>Element</code></td><td><code>onKey</code></td></tr>
+    <tr><td>Webview</td><td><code>webview_app</code></td><td><code>Html</code></td><td>window cfg</td></tr>
+  </table>
+  <p>One language, one lowering, five runtimes. If you can read one, you can read all.</p>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. What's the only structural difference between a Sky.Live and a
+    Sky.Webview app?</div>
+    <button data-ok="1">Webview swaps <code>routes</code> for a <code>window</code> cfg and uses the <code>webview_app</code> entry; the <code>Html</code> view is shared</button>
+    <button data-ok="0">Webview uses a totally different view type</button>
+    <button data-ok="0">Webview can't use update/init</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. Why isn't this lesson traced from a fresh <code>main.rs</code> like 6–9?</div>
+    <button data-ok="1">The real wry/tao window needs system WebKit libs absent on the build host — so it's grounded in source + the runtime smoke test instead</button>
+    <button data-ok="0">Webview apps don't generate Rust</button>
+    <button data-ok="0">The author forgot</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. How can one <code>view</code> function serve both Live and Webview?</div>
+    <button data-ok="1">Both render the same <code>Html</code> tree; Webview reuses Sky.Live's renderer</button>
+    <button data-ok="0">They can't — each needs its own view</button>
+    <button data-ok="0">Webview views are written in JavaScript</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary — all five shapes done</h3>
+    <ul>
+      <li>Sky.Webview = TEA + a <code>window</code> cfg, entry <code>webview_app</code>, same <code>Html</code> view as Live (shared renderer).</li>
+      <li><code>Webview.app{…} |&gt; Task.run</code> → <code>task_run(webview_app(init, update, view, subs, WebviewWindowCfg{…}))</code>.</li>
+      <li>The real runtime API is proven by <code>runtime-rust/examples/webview_smoke.rs</code>; the window build needs system WebKit + the <code>webview</code> cargo feature.</li>
+      <li>Five shapes, one lowering — only the entry kernel + view type + extra handler differ.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>On a machine with WebKit, run <code>cargo run --example webview_smoke
+    --features webview</code> from <code>runtime-rust/</code> to see the real window.
+    Ask your teacher about the in-process IPC bridge that carries click events back.</p>
+  </div>
+
+  <div class="pager">
+    <a href="09-worked-tui.html">← 9 · Worked Tui</a>
+    <a href="11-ffi.html">11 · FFI →</a>
+  </div>
+
+  <footer class="fin">Lesson 10 · grounded in the Sky source + <code>runtime-rust/examples/webview_smoke.rs</code> (real) + the established lowering rules.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

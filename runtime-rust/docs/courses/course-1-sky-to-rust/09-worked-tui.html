@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9 · Worked shape — Sky.Tui ×2</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>9 · Worked Tui</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 9</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 9 · TEA in the terminal</span>
+  Worked shape — Sky.Tui ×2</h1>
+
+  <p class="lede">By now the pattern should feel inevitable. Sky.Tui is the same TEA
+  again — in a terminal. The only new piece is <code>onKey</code> (keyboard events)
+  and an entry kernel <code>tui_app</code>. Short lesson; you already know the rest.</p>
+
+  <h2><span class="num">A</span>Example 1 — <code>21-tui-stopwatch</code></h2>
+  <p class="filetag">examples/21-tui-stopwatch/src/Main.sky (trimmed)</p>
+  <pre><code>init : () -> ( Model, Cmd Msg )
+update : Msg -> Model -> ( Model, Cmd Msg )
+view : Model -> <span class="tok-ty">String</span>
+subscriptions model = <span class="tok-com">-- Sub.every 100 Tick when running</span>
+onKey : KeyEvent -> Msg
+
+main =
+    Tui.<span class="tok-fn">app</span>
+        { init = init, update = update, view = view
+        , subscriptions = subscriptions, onKey = onKey }</code></pre>
+
+  <h3>The emitted entry</h3>
+  <p class="filetag">examples/21-tui-stopwatch/sky-out/Rust/src/main.rs (real, trimmed)</p>
+  <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">main_view</span>(model: <span class="tok-ty">MainModel</span>) -> <span class="tok-ty">String</span> { … }
+
+<span class="tok-kw">pub fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyTask</span>&lt;()&gt; {
+    <span class="tok-fn">tui_app</span>(main_init, main_update, main_view, main_subscriptions, <span class="tok-com">/* onKey */</span>)
+}
+
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() { <span class="tok-kw">match</span> <span class="tok-fn">block_on</span>(<span class="tok-fn">sky_main</span>()) { … } }</code></pre>
+  <p>That's the whole story:</p>
+  <ul>
+    <li><code>Tui.app</code> → <code>tui_app(init, update, view, subscriptions, onKey)</code> — the same five TEA functions, plus the key handler.</li>
+    <li>This stopwatch's <code>view</code> returns a plain <code>String</code> (a text TUI), so <code>main_view -> String</code>. (A richer TUI returns a <code>Std.Ui</code> <code>Element</code>, which the Tui runtime renders to ANSI cells.)</li>
+    <li><code>subscriptions</code> uses <code>Sub.every 100 Tick</code> → a <code>sub_every</code> kernel that fires a Msg on a timer.</li>
+    <li>Bare <code>Task</code> entry → <code>block_on</code> (which puts the terminal in raw mode, runs the loop, restores it on exit).</li>
+  </ul>
+
+  <h2><span class="num">B</span>Example 2 — <code>23-tui-todo</code></h2>
+  <p>A to-do TUI: add, toggle, delete items with the keyboard. More state and more
+  <code>onKey</code> arms, but identical machinery — <code>type Msg</code> → enum,
+  <code>Model</code> (a list of items) → struct with a <code>Vec</code>,
+  <code>update</code> → <code>match</code>, list operations → the <code>list_*</code>
+  kernels from Lesson 5. Its <code>main</code> is the same <code>Tui.app { … }</code> →
+  <code>tui_app(…)</code> entry.</p>
+
+  <div class="callout key"><span class="tag">Live and Tui, side by side</span>
+  <table style="margin:8px 0 0">
+    <tr><th></th><th>Sky.Live</th><th>Sky.Tui</th></tr>
+    <tr><td>entry</td><td><code>live_app[_routed]</code></td><td><code>tui_app</code></td></tr>
+    <tr><td>view output</td><td><code>Html Msg</code></td><td><code>String</code> or <code>Element</code></td></tr>
+    <tr><td>extra handler</td><td><code>routes</code> (URLs)</td><td><code>onKey</code> (keys)</td></tr>
+    <tr><td>init/update/subscriptions</td><td colspan="2" style="text-align:center">identical</td></tr>
+  </table>
+  Same program, two runtimes. The Std.Ui <code>view</code> can even be <em>shared</em>:
+  one <code>view</code> renders to a browser (Live), a terminal (Tui), or a desktop
+  window (Webview, next lesson).</div>
+
+  <h2><span class="num">C</span>The Tui pattern, generalised</h2>
+  <ul>
+    <li>TEA as always: <code>Msg</code>→enum, <code>Model</code>→struct, <code>update</code>→<code>match</code>.</li>
+    <li><code>view → String</code> (text) or <code>→ Element</code> (Std.Ui, rendered to ANSI cells).</li>
+    <li><code>Tui.app { …, onKey }</code> → <code>tui_app(init, update, view, subscriptions, onKey)</code>; bare Task → <code>block_on</code> entry that manages the terminal.</li>
+  </ul>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. What's the one new piece in a Tui app vs a CLI/Live one?</div>
+    <button data-ok="1"><code>onKey</code> — a keyboard-event handler — plus the <code>tui_app</code> entry</button>
+    <button data-ok="0">A completely different type system</button>
+    <button data-ok="0">It can't use a Model</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. A simple text TUI's <code>view : Model -> String</code> lowers to…</div>
+    <button data-ok="1"><code>fn main_view(model) -> String</code> (a richer one returns a Std.Ui <code>Element</code>)</button>
+    <button data-ok="0">an HTTP handler</button>
+    <button data-ok="0">a Cargo feature</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. Can one <code>view</code> function serve Live, Tui, and Webview?</div>
+    <button data-ok="1">Yes — a Std.Ui <code>Element</code> view renders to browser, terminal, or desktop window</button>
+    <button data-ok="0">No, each needs a totally separate view</button>
+    <button data-ok="0">Only Live supports views</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>Sky.Tui = TEA in the terminal: <code>Tui.app{…, onKey}</code> → <code>tui_app(init, update, view, subscriptions, onKey)</code>, bare-Task <code>block_on</code> entry.</li>
+      <li><code>view</code> → <code>String</code> (text) or <code>Element</code> (Std.Ui → ANSI).</li>
+      <li>Live vs Tui differ only in entry kernel, view output, and routes-vs-onKey; everything else is identical TEA.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Run it in a real terminal: <code>sky run --backend rust src/Main.sky</code>.
+    Ask your teacher how the same Std.Ui <code>view</code> renders to both a browser
+    and ANSI cells.</p>
+  </div>
+
+  <div class="pager">
+    <a href="08-worked-live.html">← 8 · Worked Live</a>
+    <a href="10-worked-webview.html">10 · Worked Webview →</a>
+  </div>
+
+  <footer class="fin">Lesson 9 · grounded in a real build of <code>21-tui-stopwatch</code> (+ <code>23-tui-todo</code> from source).</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

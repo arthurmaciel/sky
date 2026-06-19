@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7 · Worked shape — HTTP server ×2</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>7 · Worked server</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 7</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 7 · routes, handlers, the Task boundary</span>
+  Worked shape — HTTP server ×2</h1>
+
+  <p class="lede">A server is a list of routes, each a handler that takes a
+  <code>Request</code> and returns a <code>Task</code> of a <code>Response</code>.
+  We trace a full REST server into its real Rust, then a streaming (SSE) server —
+  both built with <code>sky build --backend rust</code>.</p>
+
+  <h2><span class="num">A</span>Example 1 — <code>15-http-server</code></h2>
+  <p class="filetag">examples/15-http-server/src/Main.sky (trimmed)</p>
+  <pre><code><span class="tok-kw">import</span> Sky.Http.Server <span class="tok-kw">exposing</span> (Request, Response, Handler)
+
+main =
+    Server.<span class="tok-fn">listen</span> <span class="tok-num">8000</span>
+        [ Server.<span class="tok-fn">get</span> <span class="tok-str">"/"</span> handleHome
+        , Server.<span class="tok-fn">get</span> <span class="tok-str">"/hello/:name"</span> handleHello
+        , Server.<span class="tok-fn">post</span> <span class="tok-str">"/api/echo"</span> handleEcho
+        ]
+
+handleHello : Handler          <span class="tok-com">-- = Request -> Task Error Response</span>
+handleHello req =
+    <span class="tok-kw">case</span> Server.<span class="tok-fn">param</span> <span class="tok-str">"name"</span> req <span class="tok-kw">of</span>
+        Just name -> Task.<span class="tok-fn">succeed</span> (Server.<span class="tok-fn">text</span> (<span class="tok-str">"Hello, "</span> ++ name ++ <span class="tok-str">"!"</span>))
+        Nothing   -> Task.<span class="tok-fn">succeed</span> (Server.<span class="tok-fn">text</span> <span class="tok-str">"Hello, stranger!"</span>)</code></pre>
+
+  <h3>The routes lower to a vector of <code>server_get</code> / <code>server_post</code></h3>
+  <p class="filetag">examples/15-http-server/sky-out/Rust/src/main.rs (real, trimmed)</p>
+  <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyTask</span>&lt;()&gt; {
+    <span class="tok-fn">server_listen</span>::&lt;<span class="tok-ty">SkyError</span>&gt;(
+        <span class="tok-num">8000</span>,
+        <span class="tok-fn">vec!</span>[
+            <span class="tok-fn">server_get</span>::&lt;<span class="tok-ty">SkyError</span>, _&gt;(<span class="tok-str">"/"</span>.to_string(), main_handle_home),
+            <span class="tok-fn">server_get</span>::&lt;<span class="tok-ty">SkyError</span>, _&gt;(<span class="tok-str">"/hello/:name"</span>.to_string(), main_handle_hello),
+            <span class="tok-fn">server_post</span>::&lt;<span class="tok-ty">SkyError</span>, _&gt;(<span class="tok-str">"/api/echo"</span>.to_string(), main_handle_echo),
+        ],
+    )
+}</code></pre>
+  <p>The route list becomes a Rust <code>vec![]</code>; each <code>Server.get</code> /
+  <code>Server.post</code> routes (via <code>kernelToRust</code>) to
+  <code>server_get</code> / <code>server_post</code>, passing the path string and the
+  <em>handler function by name</em>.</p>
+
+  <h3>A handler is <code>Request → Task Response</code></h3>
+  <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">main_handle_hello</span>(req: <span class="tok-ty">SkyHttpServerRequest</span>) -> <span class="tok-ty">SkyTask</span>&lt;<span class="tok-ty">SkyHttpServerResponse</span>&gt; {
+    <span class="tok-kw">let</span> name = <span class="tok-kw">match</span> <span class="tok-fn">server_param</span>(<span class="tok-str">"name"</span>.to_string(), req) {
+        <span class="tok-ty">SkyMaybe</span>::Just(n)  => n,
+        <span class="tok-ty">SkyMaybe</span>::Nothing => <span class="tok-str">"stranger"</span>.to_string(),
+    };
+    <span class="tok-fn">task_succeed</span>(<span class="tok-fn">server_text</span>(<span class="tok-fn">format!</span>(<span class="tok-str">"{}{}"</span>, <span class="tok-str">"Hello, "</span>.to_string(),
+        <span class="tok-fn">format!</span>(<span class="tok-str">"{}{}"</span>, name, <span class="tok-str">"!"</span>.to_string()))))
+}</code></pre>
+  <p>Several lowerings at once:</p>
+  <ul>
+    <li>The <code>Handler</code> alias is <code>Request → Task Error Response</code>, so the Rust fn is <code>fn(SkyHttpServerRequest) -> SkyTask&lt;SkyHttpServerResponse&gt;</code>.</li>
+    <li><code>Server.param "name" req</code> → <code>server_param("name".to_string(), req)</code>, returning a <code>SkyMaybe</code>; the Sky <code>case</code> on it → a Rust <code>match</code> over <code>SkyMaybe::Just/Nothing</code>.</li>
+    <li><code>++</code> string concat → nested <code>format!("{}{}", a, b)</code>.</li>
+    <li><code>Task.succeed (Server.text …)</code> → <code>task_succeed(server_text(…))</code>.</li>
+  </ul>
+
+  <div class="callout key"><span class="tag">The SkyTask alias, demystified</span>
+  Every generated project defines <code>pub type SkyTask&lt;A&gt; =
+  sky_runtime::SkyTask&lt;SkyError, A&gt;;</code>. That's why you see one-parameter
+  <code>SkyTask&lt;Response&gt;</code> in the output even though the runtime's task
+  has an error parameter too — the error is fixed to <code>SkyError</code> at the
+  alias. And <code>Handler</code> itself is
+  <code>Arc&lt;dyn Fn(Request) -> SkyTask&lt;Response&gt; + Send + Sync&gt;</code>
+  so handlers can be stored and shared across the async server.</div>
+
+  <h3>Entry</h3>
+  <p><code>Server.listen</code> returns a <code>Task</code>, so this is the bare-Task
+  shape from Lesson 6: <code>sky_main() -> SkyTask&lt;()&gt;</code>, and the real
+  <code>fn main()</code> drives it with <code>block_on</code> (which spins up the
+  async server and blocks until it stops).</p>
+
+  <h2><span class="num">B</span>Example 2 — <code>30-sse-server-demo</code> (streaming)</h2>
+  <p>Same skeleton, but one route <em>streams</em> Server-Sent Events instead of
+  returning a single body. It uses <code>Sky.Http.Server.Stream</code>:</p>
+  <p class="filetag">examples/30-sse-server-demo/src/Main.sky (trimmed)</p>
+  <pre><code><span class="tok-kw">import</span> Sky.Http.Server.Stream <span class="tok-kw">as</span> Stream
+
+main =
+    Server.<span class="tok-fn">listen</span> <span class="tok-num">8000</span>
+        [ Server.<span class="tok-fn">get</span> <span class="tok-str">"/"</span> handleHome, Server.<span class="tok-fn">get</span> <span class="tok-str">"/events"</span> handleEvents ]
+
+handleEvents req =
+    Stream.<span class="tok-fn">stream</span> <span class="tok-str">"text/event-stream"</span>
+        (\writer ->
+            emitTick writer <span class="tok-num">1</span> |> Task.<span class="tok-fn">andThen</span> (\_ -> emitTick writer <span class="tok-num">2</span>)
+                |> Task.<span class="tok-fn">andThen</span> (\_ -> Stream.<span class="tok-fn">finish</span> writer))
+
+emitTick : Stream.StreamWriter -> Int -> Task Error ()
+emitTick writer n =
+    Stream.<span class="tok-fn">emit</span> (<span class="tok-str">"event: tick\ndata: "</span> ++ String.<span class="tok-fn">fromInt</span> n ++ <span class="tok-str">"\n\n"</span>) writer</code></pre>
+
+  <p>It builds clean on the Rust backend (the runtime pulls in its
+  <code>sky_http_server_stream</code> module on demand — Lesson 4's feature gating).
+  The lowering uses only patterns you've already met:</p>
+  <table>
+    <tr><th>Sky</th><th>Rust</th></tr>
+    <tr><td><code>Stream.stream "…" (\writer -> …)</code></td><td><code>stream_stream("…".to_string(), |writer| …)</code> (lambda → closure)</td></tr>
+    <tr><td><code>Stream.emit s writer</code> / <code>Stream.finish writer</code></td><td><code>stream_emit(s, writer)</code> / <code>stream_finish(writer)</code></td></tr>
+    <tr><td><code>a |&gt; Task.andThen (\_ -> b)</code></td><td><code>task_and_then(a, |_| b)</code> — the chained effects</td></tr>
+    <tr><td><code>emitTick : StreamWriter -> Int -> Task Error ()</code></td><td><code>fn main_emit_tick(writer: …, n: i64) -> SkyTask&lt;()&gt;</code></td></tr>
+  </table>
+
+  <div class="callout why"><span class="tag">Why both fit the same model</span>
+  A normal handler returns <code>Task Response</code> (one body); a streaming handler
+  returns a <code>Task</code> too, but its body writes chunks through a
+  <code>StreamWriter</code> over time. Same Task boundary, same
+  <code>server_listen</code> entry — only the handler's <em>shape</em> differs. That's
+  the power of "every effect is a Task": one model covers request/response and
+  streaming alike.</div>
+
+  <h2><span class="num">C</span>The server pattern, generalised</h2>
+  <ul>
+    <li>A route list → a <code>vec![]</code> of <code>server_get</code>/<code>server_post</code>(path, handler-fn).</li>
+    <li>A <code>Handler</code> → <code>fn(SkyHttpServerRequest) -> SkyTask&lt;SkyHttpServerResponse&gt;</code>.</li>
+    <li>Extractors/responses are kernels: <code>server_param</code>, <code>server_text</code>/<code>server_html</code>/<code>server_json</code>, <code>server_with_header</code>, <code>server_get_cookie</code>.</li>
+    <li><code>Server.listen</code> is a bare <code>Task</code> → <code>block_on</code> entry (Lesson 6).</li>
+  </ul>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. What does a Sky <code>Handler</code> become in Rust?</div>
+    <button data-ok="1"><code>fn(SkyHttpServerRequest) -> SkyTask&lt;SkyHttpServerResponse&gt;</code></button>
+    <button data-ok="0">a <code>struct</code></button>
+    <button data-ok="0">a Cargo feature</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. Why does generated code show one-parameter <code>SkyTask&lt;Response&gt;</code>?</div>
+    <button data-ok="1">A project-level alias fixes the error type: <code>type SkyTask&lt;A&gt; = sky_runtime::SkyTask&lt;SkyError, A&gt;</code></button>
+    <button data-ok="0">The runtime task has no error type</button>
+    <button data-ok="0">It's a typo in codegen</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. How does a streaming (SSE) handler fit the same model as a normal one?</div>
+    <button data-ok="1">It still returns a <code>Task</code>; its body writes chunks via a <code>StreamWriter</code> over time</button>
+    <button data-ok="0">It uses a completely different entry point</button>
+    <button data-ok="0">It can't be expressed in Sky</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>Routes → <code>vec![server_get/server_post(path, handler)]</code>; <code>Server.listen</code> → bare-Task <code>block_on</code> entry.</li>
+      <li>A <code>Handler</code> → <code>fn(Request) -> SkyTask&lt;Response&gt;</code>; extractors/responses are <code>server_*</code> kernels; <code>case</code> on <code>Server.param</code> → <code>match</code> on <code>SkyMaybe</code>.</li>
+      <li>The <code>SkyTask&lt;A&gt;</code> alias fixes the error to <code>SkyError</code>; <code>Handler</code> is an <code>Arc&lt;dyn Fn…&gt;</code>.</li>
+      <li>Streaming (SSE) is the same Task boundary — the body writes chunks via a <code>StreamWriter</code>.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Build it and hit it: <code>sky run --backend rust src/Main.sky</code>, then
+    <code>curl localhost:8000/hello/world</code>. Ask your teacher to add a route with you.</p>
+  </div>
+
+  <div class="pager">
+    <a href="06-worked-cli.html">← 6 · Worked CLI</a>
+    <a href="08-worked-live.html">8 · Worked Live →</a>
+  </div>
+
+  <footer class="fin">Lesson 7 · grounded in real builds of <code>15-http-server</code> + <code>30-sse-server-demo</code>.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>

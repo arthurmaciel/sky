@@ -2,20 +2,20 @@
 
 ## Build status (lessons authored)
 
-Course 1 — Sky → Rust Backend
+Course 1 — Sky → Rust Backend  ✅ COMPLETE (12/12)
 - [x] 00 Landing + roadmap (`course-1-sky-to-rust/index.html`)
 - [x] 01 The big picture: the five-stage pipeline (`01-the-big-picture.html`)
 - [x] 02 History of the backend (phases 1–11) (`02-history.html`)
 - [x] 03 Front end: parse → canonicalise → type-solve (`03-the-front-end.html`)
 - [x] 04 Codegen anatomy: the Builder/ modules (`04-codegen-anatomy.html`)
 - [x] 05 Kernel routing (Kernel.hs) (`05-kernel-routing.html`)
-- [x] 06 Worked shape: CLI ×2 (`06-worked-cli.html`) — REAL output from 01-hello-world + 20-cli-counter builds
-- [ ] 07 Worked shape: HTTP server ×2  ← NEXT — build 15-http-server + 30-sse-server-demo (heavier: axum/tokio)
-- [ ] 08 Worked shape: Sky.Live ×2
-- [ ] 09 Worked shape: Sky.Tui ×2
-- [ ] 10 Worked shape: Sky.Webview ×2
-- [ ] 11 FFI: auto-binding real Rust crates + the wrapper-crate pattern
-- [ ] 12 Soundness: "no panic from well-typed Sky" + the corner cases
+- [x] 06 Worked shape: CLI ×2 (`06-worked-cli.html`) — REAL output: 01-hello-world + 20-cli-counter
+- [x] 07 Worked shape: HTTP server ×2 (`07-worked-server.html`) — REAL: 15-http-server + 30-sse-server-demo
+- [x] 08 Worked shape: Sky.Live ×2 (`08-worked-live.html`) — REAL: 09-live-counter (+ 19-skyforum from source)
+- [x] 09 Worked shape: Sky.Tui ×2 (`09-worked-tui.html`) — REAL: 21-tui-stopwatch (+ 23-tui-todo from source)
+- [x] 10 Worked shape: Sky.Webview ×2 (`10-worked-webview.html`) — source + webview_smoke.rs (no webkit on host; flagged)
+- [x] 11 FFI: auto-binding + wrapper-crate pattern (`11-ffi.html`)
+- [x] 12 Soundness: no-panic existential rule + corner cases (`12-soundness.html`)
 
 Course 2 — GitHub CI  ✅ COMPLETE (7/7)
 - [x] 00 Landing + roadmap (`course-2-github-ci/index.html`)

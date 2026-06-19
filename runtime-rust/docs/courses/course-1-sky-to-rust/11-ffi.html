@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 · FFI — binding real Rust crates</title>
+<link rel="stylesheet" href="../assets/theme.css">
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a href="../index.html">Courses</a><span class="sep">/</span>
+    <a href="index.html">Course 1</a><span class="sep">/</span>
+    <span>11 · FFI</span><span class="spacer"></span>
+    <span class="badge rust">Lesson 11</span>
+  </div>
+
+  <h1><span class="eyebrow">Lesson 11 · reaching the crate ecosystem</span>
+  FFI — binding real Rust crates, automatically</h1>
+
+  <p class="lede">Sky's standard library is large, but the real prize is Rust's
+  ecosystem. Sky's FFI is <strong>automatic</strong>: point <code>sky.toml</code> at a
+  crate and the compiler generates the bindings — no hand-written glue. This lesson
+  covers how that works, what it can and can't reach, and the pattern for the
+  crates it can't.</p>
+
+  <h2><span class="num">1</span>How automatic FFI works</h2>
+  <p>You declare a dependency:</p>
+  <p class="filetag">sky.toml</p>
+  <pre><code>[<span class="tok-str">"rust.dependencies"</span>]
+uuid  = <span class="tok-str">"1.16.0"</span>
+serde = { version = <span class="tok-str">"1"</span>, features = [<span class="tok-str">"derive"</span>] }</code></pre>
+  <p>At build time the compiler runs the crate through Rust's own documentation
+  tool — <code>cargo +nightly rustdoc --output-format json</code> — to get a machine
+  description of every public function and type. An inspector
+  (<code>tools/sky-ffi-inspect-rs</code>) reads that JSON and, for each function it can
+  represent, generates a Sky binding. The artifacts land in
+  <code>.skycache/ffi/rust/</code> (a <code>.skyi</code> with HM types, plus a Rust
+  <code>_bindings.rs</code>), and codegen calls them like any other function.</p>
+  <div class="callout key"><span class="tag">Why rustdoc JSON?</span>
+  It's the crate's <em>own</em> compiler-verified description — names, signatures,
+  generics, types. Parsing that is far more reliable than guessing from source, and
+  it tracks the crate version exactly. No hand-written FFI means no drift and no
+  human error in the binding.</div>
+
+  <h2><span class="num">2</span>What it can and can't reach</h2>
+  <p>A function is auto-bindable when its shape can be <em>named</em> on the Sky side.</p>
+  <table>
+    <tr><th>Reaches well</th><th>Struggles</th></tr>
+    <tr><td>free functions &amp; constructors (<code>new</code>, <code>from_*</code>, <code>parse</code>)</td><td>complex generics / lifetimes that don't map to HM</td></tr>
+    <tr><td>simple value types, strings, numbers, bytes</td><td>trait-object–heavy or builder-macro APIs</td></tr>
+    <tr><td>"leaf" utility crates (uuid, semver, chrono, bytesize…)</td><td>async / framework crates (axum, sqlx, reqwest…)</td></tr>
+  </table>
+  <div class="callout gotcha"><span class="tag">A subtle trap measured in practice</span>
+  A crate can bind <em>many</em> functions and still be unusable — e.g. a web
+  framework might expose dozens of error/accessor methods but no way to
+  <em>construct</em> the core <code>Router</code>/handler from Sky. Usability is about
+  whether you can build the values you need, not the raw count of bound functions.</div>
+
+  <h2><span class="num">3</span>The wrapper-crate pattern (for what auto-FFI can't bind)</h2>
+  <p>Async and framework crates don't bind directly. The solution is a thin,
+  fork-local <strong>wrapper crate</strong> that exposes a simple, nameable surface
+  over the complex one. Four ingredients:</p>
+  <ul>
+    <li>plain <code>&amp;str</code> → <code>Result</code> / <code>Dict String String</code> signatures (things Sky can name);</li>
+    <li>a <strong>dedicated-thread async→sync bridge</strong>: spin up a current-thread tokio runtime on its own thread and <code>block_on</code> there — never <code>block_on</code> an ambient runtime;</li>
+    <li>delivered as a local <code>file://</code> git dependency in <code>["rust.dependencies"]</code>;</li>
+    <li>a key insight: a wrapper <code>fn(..) -> Result&lt;T, String&gt;</code> binds as a <em>synchronous</em> Sky <code>Result</code>, so Sky call sites stay simple — no <code>Cmd.perform</code> re-threading.</li>
+  </ul>
+  <p class="src">Proven end to end by <code>examples/rust/skyshop-rs</code> — a real app binding async-stripe, firestore, and a firebase admin SDK through one wrapper crate.</p>
+
+  <div class="callout why"><span class="tag">A learned gotcha worth your time</span>
+  An FFI <code>Result&lt;_, String&gt;</code>'s <em>error</em> slot is unusable on the
+  Sky side — the binding advertises <code>String</code> but codegen emits the runtime
+  error type, so <code>Err e</code> can't be read as a string. The fix the project
+  settled on: encode any status the Sky side inspects in the <em>Ok</em> payload
+  (e.g. <code>_status=…</code>), never in the <code>Err</code> slot. Small rule, saves
+  a confusing afternoon.</div>
+
+  <h2><span class="num">4</span>The takeaway</h2>
+  <p>Two tiers. <strong>Leaf crates</strong>: just add them to <code>sky.toml</code> and
+  call them — the compiler does everything. <strong>Framework/async crates</strong>:
+  write a small wrapper crate exposing a Sky-nameable, synchronous surface over a
+  dedicated-thread runtime, and point a <code>file://</code> git dep at it. Either way,
+  you never hand-write an FFI binding.</p>
+
+  <div class="quiz" id="q1">
+    <div class="q">1. How does the compiler learn a crate's functions for auto-FFI?</div>
+    <button data-ok="1">It runs <code>cargo +nightly rustdoc --output-format json</code> and an inspector reads the JSON</button>
+    <button data-ok="0">It parses the crate's source with regexes</button>
+    <button data-ok="0">You write the bindings by hand</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q2">
+    <div class="q">2. Why can a crate bind many functions yet be unusable?</div>
+    <button data-ok="1">If you can't <em>construct</em> the core values you need (only accessors bound), the count doesn't help</button>
+    <button data-ok="0">Binding always means full usability</button>
+    <button data-ok="0">Rust crates can't be bound at all</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q3">
+    <div class="q">3. What makes a wrapper crate's calls stay simple on the Sky side?</div>
+    <button data-ok="1">A <code>fn(..) -> Result&lt;T, String&gt;</code> binds as a synchronous Sky <code>Result</code> (the async is hidden behind a dedicated-thread bridge)</button>
+    <button data-ok="0">Sky rewrites async to sync automatically for any crate</button>
+    <button data-ok="0">It requires <code>Cmd.perform</code> everywhere</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="summary">
+    <h3>Summary</h3>
+    <ul>
+      <li>Auto-FFI: <code>sky.toml</code> dep → <code>rustdoc</code> JSON → inspector → generated <code>.skyi</code>/<code>_bindings.rs</code> in <code>.skycache/ffi/rust/</code>. No hand-written glue.</li>
+      <li>Reaches leaf crates (free fns, ctors, simple types); struggles with async/framework/heavy-generic APIs. Usability = can you construct the values, not the bound count.</li>
+      <li>Framework crates → a thin fork-local <b>wrapper crate</b>: nameable <code>&amp;str → Result/Dict</code> surface, dedicated-thread async→sync bridge, <code>file://</code> git dep. (skyshop-rs proves it.)</li>
+      <li>Encode inspectable status in the <b>Ok</b> payload — the FFI <code>Err</code> slot's <code>String</code> isn't readable on the Sky side.</li>
+    </ul>
+  </div>
+
+  <div class="teacher">
+    <span class="ico">🧑‍🏫</span>
+    <p>Want to bind a crate? Ask your teacher to add a leaf crate (say <code>semver</code>)
+    to a project and call it — then to walk the <code>skyshop-rs</code> wrapper for the
+    framework case.</p>
+  </div>
+
+  <div class="pager">
+    <a href="10-worked-webview.html">← 10 · Worked Webview</a>
+    <a href="12-soundness.html">12 · Soundness →</a>
+  </div>
+
+  <footer class="fin">Lesson 11 · grounded in <code>tools/sky-ffi-inspect-rs</code>, <code>examples/rust/skyshop-rs</code>, and the project's FFI learnings.</footer>
+
+</div>
+<script>
+  document.querySelectorAll('.quiz').forEach(function (quiz) {
+    var fb = quiz.querySelector('.fb');
+    quiz.querySelectorAll('button').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var ok = btn.getAttribute('data-ok') === '1';
+        quiz.querySelectorAll('button').forEach(function (b) { b.classList.remove('right','wrong'); });
+        btn.classList.add(ok ? 'right' : 'wrong');
+        fb.textContent = ok ? '✓ Correct.' : '✗ Re-read the matching section and try again.';
+        fb.style.color = ok ? 'var(--green)' : 'var(--amber)';
+      });
+    });
+  });
+</script>
+</body>
+</html>
