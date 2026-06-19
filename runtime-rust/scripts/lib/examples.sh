@@ -155,6 +155,31 @@ build_set() {
 run_set()  { build_set; }
 perf_set() { build_set; }
 
+# ── changed_examples <base> — scope a local sweep to a diff's blast radius ────
+# Per the keep-go-parity v2 spec (§C): partition `git diff <base>..HEAD` into the
+# example dirs worth sweeping LOCALLY. Precise only for example-source changes;
+# runtime/codegen changes widen broadly (CI's full 3-OS sweep is the real gate).
+# All pieces are DERIVED from disk + skydex — no hardcoded example lists.
+
+# representative_floor: one in-scope example per shape (cli/server/live/tui/
+# webview) — the baseline coverage when the change→example map is imprecise.
+# Deterministic: the first in-scope example of each shape in build_set order.
+representative_floor() {
+  local d shape
+  declare -A seen
+  while IFS= read -r d; do
+    shape="$(example_shape "$d")"
+    case "$shape" in
+      cli|server|live|tui|webview) ;;
+      *) continue ;;                  # fyne is Go-FFI (not in build_set anyway)
+    esac
+    [ -n "${seen[$shape]:-}" ] && continue
+    seen[$shape]=1
+    printf '%s\n' "$d"
+  done < <(build_set)
+}
+
+
 # ── equiv_mode <dir>: DERIVE the Go≡Rust equivalence mode from the shape ─────
 # The equivalence mode says HOW examples-sweep proves the Rust output matches Go.
 # It is DERIVED from example_shape so an author-added example auto-classifies with
