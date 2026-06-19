@@ -35,6 +35,27 @@ codebase). One pass, one file at a time.
 build artifacts, the `courses/` HTML, and `examples/`.
 
 ---
+## Security-only audit — 2026-06-19 (whole codebase, diagnose-only)
+
+120 in-scope code+script files, 10 read-only security-lens agents (token-conserving).
+**97 sound · 18 weak-but-bounded · 3 exploitable** — 1 high · 5 medium · 82 low.
+**DIAGNOSE-ONLY** (no fixes this pass); full per-file record:
+`docs/audits/2026-06-19-security-whole.md`. Actionable (all ⏸️ filed):
+
+| Sev | File | Finding | Disposition |
+|---|---|---|---|
+| HIGH | `app/Main.hs` | `[go.dependencies]` names spliced unquoted into `sh -c "… go get …"` → shell injection from a crafted `sky.toml` | ⏸️ **shared CLI / Go-path — out of Rust boundary; flag upstream.** Fix: `proc "go" (["get"]++deps)`, no `sh -c` |
+| MED | `app/Main.hs` | `sky add/remove <pkg>` + `sky verify` `method` field (verify.json) raw into `sh -c` | ⏸️ shared CLI; same arg-vector fix. `method` also missing `shellQuote` (url/body are quoted) |
+| MED | `http_client.rs` | SSRF — `Http.get/post` to a Sky-supplied URL, no host allow-list, redirects on (max 10) | ⏸️ runtime; opt-in private/loopback-range reject + per-redirect re-check |
+| MED | `time.rs` | `dt.format(pattern).to_string()` panics (chrono Display→Err) on a malformed Sky format string → DoS | ⏸️ runtime; render via `write!` + treat `fmt::Error` as fallback |
+| MED | `compression.rs` | decompression bomb — `gunzip`/`zstd` decode to an unbounded `Vec<u8>` | ⏸️ runtime; cap output size (bounded reader) |
+
+The runtime trio (`http_client` SSRF, `time` format-panic, `compression` bomb) are
+reachable from a deployed Sky app handling untrusted input — highest real-world
+priority. The `app/Main.hs` shell-injections are dev-CLI / shared-compiler (the
+project author's own `sky.toml`/`sky add` arg), out of the Rust boundary.
+
+---
 ## Full re-audit — 2026-06-19 (whole codebase, swarm)
 
 A full principles-audit re-swept **131 in-scope files** (58 read-only review agents, leaf-first). Severity: **8 high · 16 medium · 53 low · 54 clean** — **191 findings across 78 files**. Priority order applied: security > correctness > soundness > efficiency > completeness > readability. High/medium dispositions below; the low findings (parity-doc / efficiency / readability) are recorded in the run artifact and triaged as accepted or parity-fixture-deferred.
