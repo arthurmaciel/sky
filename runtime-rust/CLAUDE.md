@@ -312,6 +312,14 @@ gives wrong answers, so refreshing after writing code is not optional.
     wraparound), never the bare operator. When auditing a kernel that takes an
     `i64`/`Decimal` from Sky, grep it for `*`/`+`/`-`/`.abs()`/`.pow(`/`Instant`
     and prove each is total.
+  - **Every secret/token/MAC equality check MUST be constant-time** (`subtle`'s
+    `ct_eq`, already a dep). The 2026-06-19 audit found `console.rs:gate_blocked`
+    comparing the admin Bearer with `h == format!("Bearer {tok}")` — a timing
+    oracle — while the sibling `ingest_token_blocked` 10 lines down correctly used
+    `ct_eq`. Inconsistency like that is the tell: when auditing auth, grep for
+    `==`/`!=`/`.eq(` on anything carrying a token / password / signature / cookie
+    value and convert to `ct_eq`. (CSRF double-submit, console Bearer, ingest
+    token, JWT/HMAC verify all now route through `subtle`.)
 - Rust-native FFI (direct Rust lib calls) — mandatory from day 1 - MUST BE FULLY automatic, secure and sound
 - All Rust targets: desktop, WASM, CLI, embedded
 
