@@ -48,4 +48,17 @@ assert_eq "$GOT" "$FIRST_INSCOPE" "_intersect_build_set: drops out-of-scope/bogu
 assert_eq "$(_runtime_token runtime-rust/src/sky_runtime/string.rs)" "String" "_runtime_token: string.rs → String"
 assert_eq "$(_runtime_token runtime-rust/src/sky_runtime/server_stream.rs)" "Server" "_runtime_token: server_stream.rs → Server (drops _suffix)"
 
+# --- changed_examples: empty diff (base = HEAD) → exactly the floor ---
+GOT="$(changed_examples HEAD | sort -u)"
+WANT="$(representative_floor | _intersect_build_set | sort -u)"
+assert_eq "$GOT" "$WANT" "changed_examples HEAD (empty diff): equals the in-scope floor"
+
+# --- changed_examples always includes the floor (superset of floor) ---
+floor_ok=1
+while IFS= read -r d; do
+  [ -z "$d" ] && continue
+  printf '%s\n' "$GOT" | grep -qxF "$d" || floor_ok=0
+done < <(representative_floor | _intersect_build_set)
+assert_eq "$floor_ok" "1" "changed_examples: result always includes the representative floor"
+
 exit "$fail"

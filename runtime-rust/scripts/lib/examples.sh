@@ -245,6 +245,30 @@ _intersect_build_set() {
   done
 }
 
+# changed_examples <base>: the scoped local-sweep list. ONE `git diff` feeds the
+# whole partition (the caller passes the same <base> to the incremental audit).
+# Union of: example-source dirs (precise) + skydex-covered consumers of changed
+# runtime kernels (best-effort) + the representative floor — intersected with
+# build_set, deduped. Codegen changes have no clean per-example map, so they
+# WIDEN to the full build_set ("broad"). Emits dir paths, one per line, for
+# RUST_EXAMPLES. Honest contract: precise only for example-source changes; for
+# runtime/codegen changes this is fast pre-push feedback, NOT the gate — CI's
+# full 3-OS sweep is.
+changed_examples() {
+  local base="${1:?changed_examples: <base> required}" diff
+  diff="$(git diff --name-only "$base"..HEAD 2>/dev/null)"
+  # Codegen touch → broad: the whole in-scope set (supersets every other source).
+  if printf '%s\n' "$diff" | grep -qE '^src/Sky/(Generate|Build)/Rust/'; then
+    build_set | sort -u
+    return 0
+  fi
+  {
+    printf '%s\n' "$diff" | _paths_to_example_dirs
+    printf '%s\n' "$diff" | _runtime_paths_to_covered_examples
+    representative_floor
+  } | sort -u | _intersect_build_set | sort -u
+}
+
 # ── equiv_mode <dir>: DERIVE the Go≡Rust equivalence mode from the shape ─────
 # The equivalence mode says HOW examples-sweep proves the Rust output matches Go.
 # It is DERIVED from example_shape so an author-added example auto-classifies with
