@@ -179,6 +179,71 @@ representative_floor() {
   done < <(build_set)
 }
 
+# _paths_to_example_dirs: PURE. Reads repo-relative changed paths (one per line)
+# on stdin; emits the example dir for each `examples/<name>/...` path (the precise
+# case — an example depends only on its own source). New example dirs surface here
+# automatically (their source shows in the diff). Non-example paths are ignored.
+_paths_to_example_dirs() {
+  local p name
+  while IFS= read -r p; do
+    case "$p" in
+      examples/*/*)
+        name="${p#examples/}"; name="${name%%/*}"
+        [ -d "examples/$name" ] && printf 'examples/%s\n' "$name"
+        ;;
+    esac
+  done
+}
+
+# _runtime_token <rs-path>: derive a `skydex covers` module token from a runtime
+# file name. Heuristic, best-effort: capitalize the basename and drop a trailing
+# `_<suffix>` (string.rs → String, server_stream.rs → Server, db.rs → Db). The
+# covers LIKE-match is forgiving; a token matching no module yields no rows and
+# the representative floor still covers that change.
+_runtime_token() {
+  local base
+  base="$(basename "$1" .rs)"
+  base="${base%%_*}"
+  printf '%s%s\n' "$(printf '%s' "${base:0:1}" | tr '[:lower:]' '[:upper:]')" "${base:1}"
+}
+
+# _runtime_paths_to_covered_examples: PURE-ish (reads skydex, no mutation). For
+# each changed runtime-rust/src/**.rs path, ask skydex which examples `cover`
+# (import) the derived module, mapping .sky consumers back to example dirs.
+# GUARDED: if skydex isn't built or the index db is absent, emit nothing — the
+# broad floor (and CI) still cover the change. Best-effort enrichment, never a
+# hard dependency.
+_runtime_paths_to_covered_examples() {
+  local p tok line name
+  local sky="$REPO/tools/skydex/target/release/skydex"
+  local db="$REPO/.skydex/index.db"
+  [ -x "$sky" ] && [ -f "$db" ] || return 0
+  while IFS= read -r p; do
+    case "$p" in runtime-rust/src/*) ;; *) continue ;; esac
+    [ "${p%.rs}" != "$p" ] || continue          # only .rs files
+    tok="$(_runtime_token "$p")"
+    [ -n "$tok" ] || continue
+    while IFS= read -r line; do
+      case "$line" in
+        examples/*/*)
+          name="${line#examples/}"; name="${name%%/*}"
+          [ -d "examples/$name" ] && printf 'examples/%s\n' "$name"
+          ;;
+      esac
+    done < <("$sky" covers "$tok" --db "$db" 2>/dev/null)
+  done
+}
+
+# _intersect_build_set: keep only dirs present in build_set (drops Go-FFI /
+# non-buildable / bogus). Reads candidate dirs on stdin.
+_intersect_build_set() {
+  local d
+  declare -A inscope
+  while IFS= read -r d; do [ -n "$d" ] && inscope[$d]=1; done < <(build_set)
+  while IFS= read -r d; do
+    [ -n "${inscope[$d]:-}" ] && printf '%s\n' "$d"
+  done
+}
 
 # ── equiv_mode <dir>: DERIVE the Go≡Rust equivalence mode from the shape ─────
 # The equivalence mode says HOW examples-sweep proves the Rust output matches Go.

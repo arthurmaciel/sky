@@ -32,4 +32,20 @@ assert_eq "$floor_ok" "1" "representative_floor: every emitted dir is in build_s
 SHAPES="$(while IFS= read -r d; do [ -n "$d" ] && example_shape "$d"; done <<< "$FLOOR" | sort)"
 assert_eq "$SHAPES" "$(printf '%s\n' "$SHAPES" | sort -u)" "representative_floor: one example per shape (no dup shapes)"
 
+# --- _paths_to_example_dirs: example-source paths → their example dirs ---
+SOME_EX="$(all_examples | head -1)"            # a real in-scope-or-not example dir on disk
+SOME_NAME="$(basename "$SOME_EX")"
+PATHS="$(printf '%s\n' "$SOME_EX/src/Main.sky" "runtime-rust/src/x.rs" "README.md")"
+GOT="$(printf '%s\n' "$PATHS" | _paths_to_example_dirs)"
+assert_eq "$GOT" "examples/$SOME_NAME" "_paths_to_example_dirs: maps example src path to its dir, ignores non-example paths"
+
+# --- _intersect_build_set: keep only in-scope dirs ---
+FIRST_INSCOPE="$(build_set | head -1)"
+GOT="$(printf '%s\n' "$FIRST_INSCOPE" "examples/does-not-exist-zzz" | _intersect_build_set)"
+assert_eq "$GOT" "$FIRST_INSCOPE" "_intersect_build_set: drops out-of-scope/bogus dirs"
+
+# --- _runtime_token: rs basename → covers token ---
+assert_eq "$(_runtime_token runtime-rust/src/sky_runtime/string.rs)" "String" "_runtime_token: string.rs → String"
+assert_eq "$(_runtime_token runtime-rust/src/sky_runtime/server_stream.rs)" "Server" "_runtime_token: server_stream.rs → Server (drops _suffix)"
+
 exit "$fail"
