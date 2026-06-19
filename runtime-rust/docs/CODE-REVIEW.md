@@ -61,6 +61,28 @@ A full principles-audit re-swept **131 in-scope files** (58 read-only review age
 - `db.rs` **bind_sql_param hardcoded to Sqlite** — a postgres/mysql build cargo-fails (E0308). Driver-portability codegen (move to per-driver config.rs).
 - `log.rs` **`*With` variants drop attrs** — Go renders `key=value`; mechanical follow-up.
 
+### Security/soundness specialist 2nd pass (high-risk subset, commit `30c76bad`)
+
+A focused adversarial re-review of 20 high-risk files (auth/crypto/cookies/SQL/
+network/`unsafe`/FFI/codegen) — **5 sound · 14 weak-but-bounded · 1 exploitable**.
+It caught what the broad per-file sweep missed (full record:
+`docs/audits/2026-06-19-security-2nd-pass.md`):
+
+- **✅ HIGH (exploitable):** `new_sid()` was not a CSPRNG (clock⊕counter through an
+  invertible splitmix64 → guessable session ids → hijacking). Now 128-bit OsRng.
+- **✅ MEDIUM auth-bypass:** `event_handler` trusted the body `sessionId` → now
+  cookie-sid only.
+- **✅ MEDIUM injection:** `ingest`/`fold_log` terminal-escape injection → now
+  `sanitise_ingest` (control-byte strip + length cap) on the untrusted paths.
+- **✅ MEDIUM auth-bypass:** `server.rs` trusted client `X-Forwarded-For` → now
+  real-peer by default, XFF only behind `SKY_TRUSTED_PROXY`.
+- **✅ LOW DoS:** ingest route now body-capped.
+- **⏸️ Deferred (low / parity-locked):** `jwt.rs` HS256 no min-secret floor
+  (matches Go's primitive; `Std.Auth` gates it — diverging would break parity);
+  `crypto.rs` PBKDF2 100k + md5/sha1 exposure (cross-backend key/digest interop —
+  must move in lockstep with Go, not Rust-locally); per-session/SSE global concurrency
+  caps (larger hardening — filed).
+
 ### High + medium findings — disposition
 
 | Sev | File | Location | Finding (abridged) | Disposition |
