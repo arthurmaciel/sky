@@ -468,6 +468,20 @@ log** — hold it to the same bar as a code review:
   call. This is a recurring class (money / Db.insertFields / SqlValue params).
 
 ### Pitfalls
+- **Adding a NEW external-crate dependency to a SHARED / always-compiled runtime
+  module silently breaks projects that don't trigger that crate's feature gate.**
+  A runtime module that is included for a whole CLASS of programs (e.g.
+  `server_stream.rs` for every server/live project, anything in `baseMods`) must
+  only use crates that are ALWAYS in the generated `Cargo.toml`. Crates like
+  `uuid`/`sqlx`/`axum` are added conditionally (keyed on `usesUuid`/`usesDb`/…
+  from the Sky source), so referencing `uuid::Uuid` in `server_stream.rs` compiles
+  in the standalone runtime (`--features full`) but a server example with no
+  `Uuid` usage fails `cargo build` with E0433 `unresolved crate uuid` — the
+  classic "type-checks-but-cargo-fails" class, invisible to `cargo build
+  --features full` and only caught by building a feature-MINIMAL example. For a
+  per-process random nonce in a shared module, use the std-only OS-seeded
+  `std::collections::hash_map::RandomState` (`build_hasher().finish()`), NOT a new
+  crate. (Hit + fixed during the 2026-06 fix-swarm; see [[../docs/CODE-REVIEW.md]].)
 - **A codegen-emitted trait impl that recurses into ALL fields needs EVERY field
   type to impl the trait — including runtime opaque types.** The `SkyStringify`
   derive (errorToString fix) emits `impl SkyStringify for <GeneratedType>` whose
