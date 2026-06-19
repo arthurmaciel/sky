@@ -301,6 +301,17 @@ gives wrong answers, so refreshing after writing code is not optional.
     treated as bugs to fix at the root, exactly like the main project's
     no-deferral rule. An internal invariant that "can't fail" still uses a
     total form (`if let` / `match` / `get`) with a structured-error fallback.
+  - **Panicking std/3rd-party ARITHMETIC on caller-controlled `Int`/`Decimal`
+    is the same bug class** (the 2026-06-19 audit found a cluster missed by the
+    unwrap/index list above): debug-overflow-checked `+`/`-`/`*` on `i64`,
+    `i64::abs()` / `n % -1` on `i64::MIN`, `i64::pow` / `10_i64.pow`,
+    `Instant + Duration` (overflow-on-add), and `rust_decimal`'s operator `+`/`-`/`*`
+    (which `panic!("… overflowed")`) are ALL reachable from a well-typed Sky
+    `Math.abs`/`Basics.modBy`/`Std.Decimal`/`Cache.withTTL`/`Auth.signToken`.
+    Fix with `checked_*` + saturate (or `wrapping_*` where Go-parity wants
+    wraparound), never the bare operator. When auditing a kernel that takes an
+    `i64`/`Decimal` from Sky, grep it for `*`/`+`/`-`/`.abs()`/`.pow(`/`Instant`
+    and prove each is total.
 - Rust-native FFI (direct Rust lib calls) — mandatory from day 1 - MUST BE FULLY automatic, secure and sound
 - All Rust targets: desktop, WASM, CLI, embedded
 
