@@ -26,9 +26,11 @@ using **Rust crates** in place of the Go-FFI packages the original uses.
 Live as a standalone git repo (cargo `file://` git source needs a real repo).
 `$WRAPREPO = $HOME/.cache/sky/skyshop-rs-wrappers` (git-inited; one workspace,
 three member crates). Sources ALSO committed under
-`examples/rust/skyshop-rs/wrappers/` (tracked, self-contained) + a
-`prepare-wrappers.sh` that materialises `$WRAPREPO` from them. `sky.toml`
-`["rust.dependencies"]` references each via `{ git = "file://$WRAPREPO", branch = "main" }`.
+`examples/rust/skyshop-rs/wrappers/` (tracked, self-contained); the shipped
+example materialises `$WRAPREPO` via `verify.sh` (the planned standalone
+`prepare-wrappers.sh` was not added). `sky.toml`
+`["rust.dependencies"]` references each via `{ git = "file://$WRAPREPO", branch = "master" }`
+(the shipped branch is `master`, not `main`).
 
 | Crate | Over | Sky-needed ops (from `Lib/Db.sky`,`Lib/Stripe.sky`,`Lib/Auth.sky`) |
 |-------|------|--------------------------------------------------------------------|

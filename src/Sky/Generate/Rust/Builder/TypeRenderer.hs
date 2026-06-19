@@ -136,7 +136,7 @@ collectRenderedTVars t = case t of
 -- (either an alias or an anonymous struct name).
 typeToRustString :: Map.Map String String -> Can.Type -> String
 typeToRustString recordMap t = case t of
-    Can.TType modName "Int" [] -> "i64"
+    Can.TType _ "Int" [] -> "i64"
     Can.TType _ "Float" [] -> "f64"
     Can.TType _ "Bool" [] -> "bool"
     Can.TType _ "Char" [] -> "char"

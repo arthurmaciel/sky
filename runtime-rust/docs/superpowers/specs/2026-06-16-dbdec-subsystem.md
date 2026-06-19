@@ -104,6 +104,13 @@ row_to_json(row: &DbRow) -> JsonVal:
 
 ## STATUS (2026-06-16) — core shipped + verified, 7 hard kernels remain
 
+> **Update.** Since this 2026-06-16 snapshot, 6 of the 7 "REMAINING" kernels have
+> since been routed in `Kernel.hs` (`DbDec.nullable`/`required`/`optional` via the
+> `{run, fields}` Decoder redesign; `Db.insertFields`/`updateFields`/
+> `insertFieldsReturning` via the SqlField SQL-gen path). Only `DbDec.money`
+> stays UNROUTED (still needs the Money-ADT codegen wrapper). The per-row notes
+> below are the original blocker analysis, kept for context.
+
 **CLOSED + probe-verified** (`runtime-rust/tests/sky/kernel-parity-probe-dbdec`, real SQLite —
 `rows=…|…  byId1=…  DBDEC PROBE OK`): the shared-Decoder design proven end-to-end.
 - Primitives: `db_dec_string/int/float/bool` (read+parse a column; TOTAL).

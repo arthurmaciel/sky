@@ -47,8 +47,10 @@ because several downstream groups are blocked on them.
 
 0.4 **`13-skyshop` is explicitly classified `out` and Go-package FFI on
    `--target rust` is DOCUMENT_BLOCKED** (see
-   `runtime-rust/docs/superpowers/specs/2026-06-15-go-package-rust-ffi-design.md`
-   and `runtime-rust/scripts/equiv-classification.tsv`). The port is a *new*
+   `runtime-rust/scripts/equiv-classification.tsv`; the former
+   `2026-06-15-go-package-rust-ffi-design.md` was pruned in the 2026-06-18
+   docs overhaul — answers are in `2026-06-15-skyshop-rs-port-SYNTHESIS.md`).
+   The port is a *new*
    Rust-native example, not a rebuild of the Go one — confirm the boundary rule
    "NEVER edit `examples/13-skyshop`" is understood and that nothing in the port
    re-introduces a `[go.dependencies]` table. Where does `skyshop-rs` get

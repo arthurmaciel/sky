@@ -56,10 +56,12 @@ not a reason to skip it.
   Walk the list top to bottom and apply the one-test + structure-over-prose +
   no-stale-dates/SHAs/metrics discipline to EACH `##` section. No section is
   exempt.
-- **Recurring high-drift sections — scrub these by name every pass:**
-  `## API surface vs the Go backend`, `## Sky.Live on Rust`, and
-  `## Soundness, correctness and security problems`. These have repeatedly gone
-  stale and been skipped; treat them as mandatory stops, not optional ones.
+- **Recurring high-drift sections — scrub these by name every pass:** in
+  `runtime-rust/README.md`, `## Project status` and `## Known limitations`; in
+  `docs/TECHNICAL-DETAILS.md` (where the deep internals now live),
+  `## Architecture`, `## Verification state`, and
+  `## Soundness, correctness and security`. These have repeatedly gone stale and
+  been skipped; treat them as mandatory stops, not optional ones.
 - A pass that left any `##` section unreviewed is incomplete.
 
 ## CUT — pure archaeology
@@ -106,7 +108,7 @@ not a reason to skip it.
    code, prefer one language/dir at a time so judgment stays consistent. When
    the target is `runtime-rust/README.md`, the scope is the WHOLE file — run
    `grep -nE '^## ' runtime-rust/README.md` and review every `##` section top to
-   bottom (see "Whole-file scope" above), with the three high-drift sections as
+   bottom (see "Whole-file scope" above), with the named high-drift sections as
    mandatory stops. Never narrow to "the parts recent work touched".
 2. **Read before cutting.** Never blanket-delete by regex — a `2026-` date can
    sit inside a load-bearing sentence. Edit line-by-line / comment-by-comment.

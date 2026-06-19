@@ -124,7 +124,7 @@ substVar ctx name inline = go
         Can.Chr s -> rustStringLit s  -- multi-char or empty: fall back to string
         Can.Str s -> rustStringLit s ++ ".to_string()"
         Can.Int i -> show i
-        Can.Float f -> show f
+        Can.Float f -> rustFloatLit f
         Can.Unit -> "()"
         Can.List es -> "vec![" ++ intercalate ", " (map go es) ++ "]"
         Can.Negate e -> "-" ++ go e
@@ -218,7 +218,13 @@ collectVarLocalsMulti = go Set.empty
                             in Map.unionWith (+) a (go boundD (canDefBody d))) Map.empty defs
             in Map.unionWith (+) (go bound body) goDefs
         Can.LetDestruct pat expr body ->
-            Map.unionWith (+) (go bound expr) (go bound body)
+            -- The pattern's binders are in scope in `body`, so a var bound by the
+            -- destructuring let and reused there is NOT an outer multi-use.
+            -- Without binding them here, a reuse was over-counted → a spurious
+            -- use-site `.clone()` (E0599 for a move-only/non-Clone destructured
+            -- value). Mirror collectVarLocals / collectFreeVarLocalsMulti.
+            let bound' = foldr Set.insert bound (patBindingVars pat)
+            in Map.unionWith (+) (go bound expr) (go bound' body)
         -- Sub-D: count the scrutinee too. A var used in a case scrutinee
         -- (e.g. `case f key of …`) AND again elsewhere must be marked multi-use
         -- so it gets cloned at the first use — otherwise it's moved and the
@@ -685,6 +691,16 @@ rustCharLit c
     | c == '\\'  = "'\\\\'"
     | otherwise  = "'" ++ [c] ++ "'"
 
+-- | Render a Sky Float literal as a valid Rust f64 expression. Haskell's
+-- `show` renders non-finite doubles as `Infinity` / `-Infinity` / `NaN`,
+-- none of which are valid Rust literals; map those to the f64 associated
+-- constants. Finite values are byte-identical to `show f`.
+rustFloatLit :: Double -> String
+rustFloatLit f
+    | isNaN f      = "f64::NAN"
+    | isInfinite f = if f < 0 then "f64::NEG_INFINITY" else "f64::INFINITY"
+    | otherwise    = show f
+
 -- | #24 tenet 2: is this expression a backend-entry app constructor call
 -- (`Live.app {…}` / `Tui.app {…}` / `Tui.program {…}` / `Webview.app {…}`)?
 -- Each lowers to a `SkyTask<()>` driver future, so a `… |> Task.run` over one of
@@ -1131,7 +1147,7 @@ exprToRustInner ctx e = case e of
     Can.Int i
         | Just (Can.TType _ "Float" []) <- ecExpectedType ctx -> show i ++ "_f64"
         | otherwise -> show i
-    Can.Float f -> show f
+    Can.Float f -> rustFloatLit f
     Can.List es
         -- Sub-A.13: an empty list literal gives Rust no element type to infer.
         -- Three states drive the choice (set in exprToRustString from the
@@ -1853,9 +1869,13 @@ exprToRustInner ctx e = case e of
                   else "{ " ++ clonePrelude ++ theClosure ++ " }"
            else
             case succeedArity of
-            Just n ->
-                let [arg] = args
-                in case arg of
+            -- succeedArity is gated on `not (null args)`, which guarantees a
+            -- head but not exactly one element. Match the head totally (`arg:_`)
+            -- so a residual ≥2-arg application can't crash the compiler with a
+            -- pattern-match failure; `succeed` takes a single decoder/value arg
+            -- so the head is the one we curry.
+            Just n | (arg:_) <- args ->
+                case arg of
                     Ann.At _ (Can.Lambda params body) ->
                         let counts = collectVarLocalsMulti body
                             innerMulti = [v | (v, c) <- Map.toList counts, c >= 2]
@@ -3449,8 +3469,14 @@ binopToRust op = case op of
     ">=" -> ">="
     "&&" -> "&&"
     "||" -> "||"
-    "::" -> "::"  -- cons
-    "++" -> "++"
+    -- `::` (cons) and `++` (concat) are NOT Rust binary operators — emitting
+    -- them verbatim produces invalid Rust. Both call sites (substVar, the
+    -- Can.Binop arm in exprToRustInner) special-case them BEFORE reaching here
+    -- (`sky_list_cons(..)` / `format!("{}{}", ..)`), so these arms are dead.
+    -- Fail loudly if a future binop path mis-routes one through binopToRust,
+    -- rather than silently emitting garbage Rust.
+    "::" -> error "binopToRust: `::` (cons) must be lowered via sky_list_cons, not as a Rust binop"
+    "++" -> error "binopToRust: `++` (concat) must be lowered via format!, not as a Rust binop"
     _ -> op
 
 defToRustString :: EmitCtx -> Can.Def -> String
@@ -3554,7 +3580,15 @@ renderPatGuarded recMap n0 (Ann.At _ pat) = case pat of
     Can.PAnything  -> ("_", [], n0)
     Can.PInt i     -> (show i, [], n0)
     Can.PBool b    -> (if b then "true" else "false", [], n0)
-    Can.PChr c     -> ("'" ++ c ++ "'", [], n0)
+    -- A single-char Sky char pattern routes through rustCharLit so escapes
+    -- (`'\''`, `'\\'`, non-ASCII `'\u{…}'`) are emitted as valid Rust char
+    -- literals rather than a raw splice (`'''` / `'\'`). Multi-char / empty
+    -- carried strings (shouldn't reach here for a Char pattern, but be total)
+    -- fall back to a bind + string-eq guard, mirroring the PStr arm.
+    Can.PChr [c]   -> (rustCharLit c, [], n0)
+    Can.PChr s     ->
+        let v = "__sg" ++ show n0
+        in (v, [v ++ ".to_string().as_str() == " ++ show s], n0 + 1)
     Can.PUnit      -> ("()", [], n0)
     Can.PTuple a b rest ->
         let (n', parts, gss) = goSubs n0 (a : b : rest)
@@ -3658,7 +3692,13 @@ patternToMatchString _recMap (Ann.At _ pat) = case pat of
     Can.PAnything -> "_"
     Can.PInt i -> show i
     Can.PBool b -> if b then "true" else "false"
-    Can.PChr c -> "'" ++ c ++ "'"
+    -- Single-char char pattern → valid Rust char literal via rustCharLit
+    -- (handles `'\''` / `'\\'` / non-ASCII escapes); raw splice produced the
+    -- invalid `'''` / `'\'`. Multi-char/empty carried strings (malformed for a
+    -- Char pattern) fall back to a string literal, mirroring the Can.Chr
+    -- expression side.
+    Can.PChr [c] -> rustCharLit c
+    Can.PChr s -> show s
     Can.PStr s -> show s
     Can.PUnit -> "()"
     Can.PCtor{Can._p_home = home, Can._p_type = typeName, Can._p_name = name, Can._p_args = args} ->

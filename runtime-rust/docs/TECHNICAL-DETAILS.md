@@ -64,7 +64,7 @@ type collision and full fault isolation.
   `libc`) so it dies even when the parent is SIGKILL'd / OOM'd.
 - **reqwest is a Std.Live dependency.** The live runtime's reverse-proxy forwards
   via reqwest, so codegen declares reqwest for **every** Live app (`usesHttp ||
-  usesEmail || usesLive`).
+  usesEmail || needsLive`).
 - **Console pre-build is fingerprint-validated.** The Rust backend is dev-only (the
   runtime is sourced from disk, never embedded), so `SKY_VERSION` is always
   `"dev"` and a version-only cache would never invalidate. `Sky.Build.Rust.Console`

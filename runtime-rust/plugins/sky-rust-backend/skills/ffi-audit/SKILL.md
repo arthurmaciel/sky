@@ -80,12 +80,11 @@ counts at summary time, so tweaking the heuristic needs no re-run. NB: a `rich`
 are peripheral config/error types, not the generic/macro core; judge frameworks
 by hand.
 
-Map the rollup to the strategic alternatives in
-`runtime-rust/README.md` -> "FFI reach":
-- many `leaf`/`generic` crates `leaf-usable` -> confirms the **Alt 1** universe is real & worth widening (monomorphize-on-demand, std-type mapping, slice/iterator coercion).
-- `framework` crates `peripheral`/`empty` -> confirms frameworks need **Alt 2** (generated idiomatic glue) or **Alt 3** (Sky-native modules over the crate, the Sky.Live model).
+Map the rollup to the strategic alternatives:
+- many `rich`/`usable` crates (strong `free` + `ctor` surface) -> confirms the **Alt 1** universe is real & worth widening (monomorphize-on-demand, std-type mapping, slice/iterator coercion).
+- `framework` crates landing `peripheral`/`empty` (accessor-only or no constructable surface) -> confirms frameworks need **Alt 2** (generated idiomatic glue) or **Alt 3** (Sky-native modules over the crate, the Sky.Live model).
 
-When asked to record findings, update the "FFI reach" section of
+When asked to record findings, update the `## FFI usage` section of
 `runtime-rust/README.md` and (optionally) drop a dated report under
 `docs/runtime-rust/`. Then follow the user's usual **sky-rust-backend:update-docs**.
 

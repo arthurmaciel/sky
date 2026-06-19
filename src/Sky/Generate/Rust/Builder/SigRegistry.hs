@@ -14,16 +14,24 @@ import Data.List (isPrefixOf)
 import qualified Data.Set as Set
 import Sky.Generate.Rust.Builder.Naming (toCamelCase)
 
+-- | Does a mangled module prefix `p` name exactly the stdlib module `seg`
+-- (or one of its sub-modules)? An exact `==` match, or `seg` followed by a `_`
+-- boundary — so the stdlib `Sky_Core_List` matches but a USER module
+-- `Sky_Core_ListExtra` (which would mangle to a single segment `…ListExtra`)
+-- does NOT get hijacked onto listSig. `isPrefixOf` alone was too loose.
+matchesModulePrefix :: String -> String -> Bool
+matchesModulePrefix seg p = p == seg || (seg ++ "_") `isPrefixOf` p
+
 -- | Known signatures for common Def functions (stdlib etc.), keyed by (module_prefix, name, arity)
 knownDefSig :: String -> String -> Int -> Maybe ([String], String)
 -- List module
-knownDefSig p n a | "Sky_Core_List" `isPrefixOf` p = listSig n a
+knownDefSig p n a | matchesModulePrefix "Sky_Core_List" p = listSig n a
 -- Maybe module
-knownDefSig p n a | "Sky_Core_Maybe" `isPrefixOf` p = maybeSig n a
+knownDefSig p n a | matchesModulePrefix "Sky_Core_Maybe" p = maybeSig n a
 -- Error module
-knownDefSig p n a | "Sky_Core_Error" `isPrefixOf` p = errorSig n a
-knownDefSig p n a | "Sky_Core_Result" `isPrefixOf` p = resultSig n a
-knownDefSig p n a | "Sky_Core_String" `isPrefixOf` p = stringSig n a
+knownDefSig p n a | matchesModulePrefix "Sky_Core_Error" p = errorSig n a
+knownDefSig p n a | matchesModulePrefix "Sky_Core_Result" p = resultSig n a
+knownDefSig p n a | matchesModulePrefix "Sky_Core_String" p = stringSig n a
 -- Main module helpers
 knownDefSig _ _ _ = Nothing
 

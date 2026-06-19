@@ -60,6 +60,14 @@ that yields a backend entry (Tenet 2 dropped its `Task.run`) is a `SkyTask` →
 pure-CLI `someTask |> Task.run` (no backend app) runs inline → `()`. `ret`
 (ModuleEmitter) mirrors this: `()` only for `usesTaskRun && not usesBackendApp`.
 
+> **Shipped-design note.** The implementation DROPPED `Cli.program` from
+> `usesBackendApp` — the shipped predicate is
+> `usesBackendApp = usesLive || usesTui || usesWebview` (ModuleEmitter.hs:1074).
+> `Cli.program` keeps its `Task.run` and runs inline, so Tenet 2/3's inclusion of
+> `Cli.program` in the backend-entry set did not ship. See
+> `docs/TECHNICAL-DETAILS.md` "Multibackend program-entry model" for the
+> authoritative current behaviour.
+
 This changes the *codegen* of pure-Tui `Tui.app{} |> Task.run` mains (21/38/41)
 from "run `task_run` inline, `main : ()`" to "drop + `main : SkyTask` + entry
 `block_on`" — **behaviour-identical** (`task_run` ≡ `block_on`). All examples

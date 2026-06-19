@@ -1,5 +1,15 @@
 # skyshop-rs port — buildable plan (Planner-Reasoner-A)
 
+> **SUPERSEDED — non-authoritative.** This reasoner plan was folded into
+> `2026-06-15-skyshop-rs-port-SYNTHESIS.md`, which holds the locked decisions
+> (D1–D6) the shipped port follows. Notably, plan-A's central compiler change —
+> adding a `RustPathDep` constructor + emitting `path = …` — did **NOT** ship:
+> per the user's D4 override the delivery uses `RustGitDep` with a `file://` URL
+> (`Sky/Toml/Rust.hs` still has only `RustVersion` + `RustGitDep`, no path
+> variant). The shipped port also has **3** wrapper crates
+> (`sky-firestore-shim` / `sky-stripe-shim` / `sky-firebase-auth-shim`), not the
+> 2 named below. Kept for grep; act on SYNTHESIS, not this plan.
+
 Target: a NEW fork-local example `examples/rust/skyshop-rs/`, a faithful port of
 `examples/13-skyshop` (8,200-line Sky.Live e-commerce app) onto the Sky→Rust
 backend (`sky build --target rust`), replacing the Go-FFI deps with two

@@ -96,13 +96,22 @@ parseLine raw =
 parseSpec :: String -> CrateSpec
 parseSpec v
     | "{" `isPrefixOf` v =
+        -- An inline table MUST be closed: a missing `}` would otherwise have
+        -- dropEnd1 silently eat the last real char and yield a wrong version.
+        let vt = trim v
+        in if not (null vt) && last vt == '}'
+           then parseInlineTable vt
+           else error ("CrateSpecs: malformed inline table (missing closing '}') in: " ++ show v)
+    | otherwise = CrateSpec (stripQuotes v) True []      -- bare "version"
+
+parseInlineTable :: String -> CrateSpec
+parseInlineTable v =
         let inner = trim (dropEnd1 (drop 1 v))           -- strip the { }
             pairs = map parseKV (splitTopCommas inner)
             ver   = maybe "" stripQuotes (lookup "version" pairs)
             df    = maybe True (\x -> trim x /= "false") (lookup "default-features" pairs)
             feats = maybe [] parseFeatures (lookup "features" pairs)
         in CrateSpec ver df feats
-    | otherwise = CrateSpec (stripQuotes v) True []      -- bare "version"
 
 parseKV :: String -> (String, String)
 parseKV kv = case break (== '=') kv of
@@ -136,12 +145,15 @@ quote s = "\"" ++ s ++ "\""
 trim :: String -> String
 trim = f . f where f = reverse . dropWhile isSpace
 
+-- | Strip a surrounding pair of double quotes. Only strips when BOTH a leading
+-- and a trailing quote are present (a matched pair) — an unbalanced single quote
+-- is left verbatim rather than silently dropping the one quote it does find.
 stripQuotes :: String -> String
 stripQuotes s = case trim s of
-    ('"':rest) -> reverse (dropQuote (reverse rest))
-    other      -> other
-  where dropQuote ('"':r) = r
-        dropQuote r        = r
+    t@('"':rest)
+        | not (null rest) && last rest == '"' -> init rest
+        | otherwise                           -> t   -- unbalanced: leave as-is
+    other -> other
 
 dropEnd1 :: String -> String
 dropEnd1 [] = []

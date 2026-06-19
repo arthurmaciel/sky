@@ -67,7 +67,29 @@ instance Semigroup UsedKernels where
         , usesWebview = usesWebview a || usesWebview b
         }
 instance Monoid UsedKernels where
-    mempty = UsedKernels False False False False False False False False False False False False False False False False False False
+    -- Named-field form so adding / reordering a Used* field is a compile error,
+    -- not a silent positional remap (every field is Bool — a positional literal
+    -- gives no type signal when the record shape changes).
+    mempty = UsedKernels
+        { usesDb = False
+        , usesTaskRun = False
+        , usesTaskParallel = False
+        , usesJson = False
+        , usesCrypto = False
+        , usesTime = False
+        , usesRandom = False
+        , usesFile = False
+        , usesUuid = False
+        , usesHttpServer = False
+        , usesHttp = False
+        , usesTea = False
+        , usesWsClient = False
+        , usesEmail = False
+        , usesLive = False
+        , usesHtml = False
+        , usesTui = False
+        , usesWebview = False
+        }
 
 data RustBuilder = RustBuilder
     { builderModules    :: [RustModule]

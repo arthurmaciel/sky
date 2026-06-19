@@ -165,6 +165,26 @@ rustSafeIdent "crate" = "r#crate"
 rustSafeIdent "super" = "r#super"
 rustSafeIdent "pub" = "r#pub"
 rustSafeIdent "move" = "r#move"
+-- Rust reserved-but-unused keywords (RFC-reserved for future use) + the
+-- 2018/2021/2024-edition keywords. These are not Sky keywords, so a Sky local
+-- named `box` / `do` / `yield` / `try` reaches codegen as a bare identifier and
+-- would be a Rust parse error. Escape them via raw identifiers. (`true`/`false`
+-- are predeclared but NOT keywords — they can be raw-escaped too, but Sky never
+-- emits them as locals: they route through the Bool ctor path.)
+rustSafeIdent "abstract" = "r#abstract"
+rustSafeIdent "become" = "r#become"
+rustSafeIdent "box" = "r#box"
+rustSafeIdent "do" = "r#do"
+rustSafeIdent "final" = "r#final"
+rustSafeIdent "macro" = "r#macro"
+rustSafeIdent "override" = "r#override"
+rustSafeIdent "priv" = "r#priv"
+rustSafeIdent "typeof" = "r#typeof"
+rustSafeIdent "unsized" = "r#unsized"
+rustSafeIdent "virtual" = "r#virtual"
+rustSafeIdent "yield" = "r#yield"
+rustSafeIdent "try" = "r#try"
+rustSafeIdent "gen" = "r#gen"
 rustSafeIdent name = name
 
 kernelCtorToRust :: ModuleName.Canonical -> String -> String -> String

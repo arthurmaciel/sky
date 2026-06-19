@@ -19,6 +19,19 @@ splitKernelName s = case break (== '_') s of
 -- | Normalise a kernel module name to the underscore prefix knownDefSig keys
 -- on. Short names ("List") get the "Sky_Core_" prefix; dotted names
 -- ("Sky.Core.List") just swap dots for underscores.
+--
+-- CONTRACT (load-bearing): this synthesis is only correct for modules whose
+-- canonical prefix really is "Sky_Core_<short>" — today that is exactly the
+-- set registered in knownDefSig (SigRegistry.hs): List / Maybe / Error /
+-- Result / String. For any OTHER short name it produces the WRONG prefix
+-- (e.g. JsonDec -> "Sky_Core_JsonDec" but the real module is
+-- Sky_Core_Json_Decode; Log/Db/Auth/Cmd/… are Std_*, not Sky_Core_*). That is
+-- harmless ONLY because those modules have no entry in knownDefSig, so the
+-- mis-prefixed lookup returns Nothing anyway. If you ever register a sig for a
+-- Std.* or Sky.Core.Json.* (etc.) module in knownDefSig, you MUST first teach
+-- this function the correct short->canonical alias here, or its call sites
+-- (ExprEmitter.hs) will silently miss the param strings and fall back to
+-- untyped args.
 kernelSigPrefix :: String -> String
 kernelSigPrefix m
     | '.' `elem` m = map (\c -> if c == '.' then '_' else c) m
@@ -51,6 +64,10 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.List", "any") -> "list_any"
     ("List", "all") -> "list_all"
     ("Sky.Core.List", "all") -> "list_all"
+    -- NOTE: sort/sortBy/sortWith are FUTURE-PROOFING — Sky.Core.List does not
+    -- currently expose them, so these arms are unreachable today. Kept so the
+    -- routes already exist when the stdlib surface lands; do not treat their
+    -- presence as evidence the surface is exposed.
     ("List", "sort") -> "list_sort"
     ("Sky.Core.List", "sort") -> "list_sort"
     ("List", "sortBy") -> "list_sort_by"
@@ -170,6 +187,14 @@ kernelToRust mod name = case (mod, name) of
     ("Crypto", "chachaKeyFromPassword")        -> "crypto_chacha_key_from_password"
     ("Sky.Core.Crypto", "chachaKeyFromPassword") -> "crypto_chacha_key_from_password"
     -- Std.Time advanced (sub-A.5)
+    -- INVARIANT: Time kernels are only ever referenced by their SHORT
+    -- ("Time", …) key — stdlib lowers to short Time_* kernel names. A handful
+    -- of arms below additionally carry the ("Sky.Core.Time", …) variant; that
+    -- asymmetry is harmless given the invariant, but a hypothetical
+    -- Can.VarKernel "Sky.Core.Time" "<fn>" for an arm without the qualified
+    -- variant would fall to the default and snake-case to a non-existent
+    -- runtime fn (E0425). Keep new Time arms keyed on the short name; only add
+    -- the qualified variant if a dotted reference is actually emitted.
     ("Time", "inZone")            -> "time_in_zone"
     ("Time", "formatInZone")      -> "time_format_in_zone"
     -- formatISO8601 must be mapped: the default snake_case mangles the `ISO`
@@ -285,7 +310,10 @@ kernelToRust mod name = case (mod, name) of
     ("Sky.Core.Char", "toCode")  -> "char_to_code"
     ("Char", "fromCode")         -> "char_from_code"
     ("Sky.Core.Char", "fromCode") -> "char_from_code"
-    -- sub-A.8 T3 — Sky.Core.Math (14 kernels; all 36 Math entries)
+    -- sub-A.8 T3 — Sky.Core.Math: the explicitly-routed Math kernels below.
+    -- The rest of the 36 Math entries (cbrt/hypot/exp/log/sin/cos/tan/atan2/
+    -- trunc/…) are NOT listed here because they snake-case cleanly via the
+    -- default arm (math_cbrt, math_atan2, …) and need no override.
     ("Math", "abs")             -> "math_abs"
     ("Sky.Core.Math", "abs")    -> "math_abs"
     ("Math", "min")             -> "math_min"
@@ -763,6 +791,12 @@ kernelToRust mod name = case (mod, name) of
     -- Rust user-FFI kernel: snake_case the suffix, no panic stub.
     -- The wrapper function lives in a .skycache/ffi/rust/*_bindings.rs file
     -- that gets copied into sky-out/Rust/src/ at codegen time.
+    --
+    -- LOAD-BEARING COUPLING: this default must stay byte-for-byte in step with
+    -- Build/Rust/Ffi.hs:526 (toSnakeCase including the _from_<recvType>
+    -- receiver-type disambiguation suffix). The suffix is already baked into
+    -- `name` here before kernelToRust is reached, so we only snake_case it —
+    -- but if the Ffi.hs naming convention changes, this arm must follow.
     _ | "Rust_" `isPrefixOf` mod ->
         toSnakeCase (drop 5 mod ++ "_" ++ name)
     _ -> toSnakeCase (map (\c -> if c == '.' then '_' else c) mod ++ "_" ++ name)

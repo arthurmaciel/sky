@@ -13,7 +13,9 @@ soundness > efficiency > completeness > readability** — this work is mostly a
 **readability** win that must not regress the higher principles (no content with
 forward/reference value is lost; it is relocated, not deleted).
 
-Current README is **1228 lines**; target after the move is **~550 lines**.
+Current README is **1228 lines**; target after the move is **~550 lines**
+(aspirational — the achieved figure was 735 lines per `docs/PROGRESS.md`; the
+~550 target was not fully met).
 
 ## Non-goals
 

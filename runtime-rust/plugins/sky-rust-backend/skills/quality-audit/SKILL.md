@@ -1,6 +1,6 @@
 ---
 name: quality-audit
-description: Deep Rust soundness / security / efficiency / readability audit of the runtime-rust crate (or a generated example crate), beyond the per-commit clippy gate. Surfaces every panic vector, unsafe block, dyn Any / downcast, lossy cast, undocumented #[allow], AND naming/clarity inconsistencies (opaque wrappers that obscure a named type, e.g. ok_res(x) vs the self-documenting SkyResult::Ok(x); the same concept spelled two ways across files); then walks the MATERIAL findings with the developer one-by-one (why + pros/cons), forcing an attributed, dated decision — agree (consciously accept) or disagree (brainstorm a fix now, or defer for investigation) — recorded in the README "Soundness, correctness and security problems" ledger. Use when the user asks to audit/harden the Rust runtime, check for panic vectors / unsafe / Any / footguns / unsound or inefficient / inconsistent / hard-to-read code, or do a soundness/security/readability pass. Trigger: /sky-rust-backend:quality-audit.
+description: Deep Rust soundness / security / efficiency / readability audit of the runtime-rust crate (or a generated example crate), beyond the per-commit clippy gate. Surfaces every panic vector, unsafe block, dyn Any / downcast, lossy cast, undocumented #[allow], AND naming/clarity inconsistencies (opaque wrappers that obscure a named type, e.g. ok_res(x) vs the self-documenting SkyResult::Ok(x); the same concept spelled two ways across files); then walks the MATERIAL findings with the developer one-by-one (why + pros/cons), forcing an attributed, dated decision — agree (consciously accept) or disagree (brainstorm a fix now, or defer for investigation) — recorded in the `docs/TECHNICAL-DETAILS.md` "Soundness, correctness and security" ledger. Use when the user asks to audit/harden the Rust runtime, check for panic vectors / unsafe / Any / footguns / unsound or inefficient / inconsistent / hard-to-read code, or do a soundness/security/readability pass. Trigger: /sky-rust-backend:quality-audit.
 ---
 
 # quality-audit
@@ -9,9 +9,9 @@ The deep, **interactive, sign-off-driven** soundness/quality pass over the Rust
 runtime — beyond the per-commit clippy gate (`runtime-rust/scripts/verify-rust-target.sh`).
 The standard is `runtime-rust/CLAUDE.md` **"NO RUNTIME ERRORS — existential"**.
 Every *material* finding ends in an **attributed, dated developer decision** in
-the README **"Soundness, correctness and security problems"** ledger — nothing is
-left in limbo, nothing rubber-stamped. The script harvests facts; the developer
-decides; you record.
+the `docs/TECHNICAL-DETAILS.md` **"Soundness, correctness and security"** ledger —
+nothing is left in limbo, nothing rubber-stamped. The script harvests facts; the
+developer decides; you record.
 
 ## Workflow (every invocation)
 
@@ -49,7 +49,7 @@ decides; you record.
 
 4. **Reconcile against settled decisions** (idempotency, code-level + ledger) —
    a finding is already settled if its site carries a `SKY-RUST-AUDIT:` marker (see
-   the convention below) OR it has a matching row in the README ledger. **Drop**
+   the convention below) OR it has a matching row in the `docs/TECHNICAL-DETAILS.md` ledger. **Drop**
    settled findings whose decision still matches the code; **keep** NEW ones and
    any `SKY-RUST-AUDIT:DEFERRED` (deferred always resurface). The inline marker is the
    primary key — a human or the next audit sees the decision *at the code*.
@@ -57,7 +57,7 @@ decides; you record.
 5. **Walk the developer through each remaining problem, one at a time:**
    present **location · why it's a problem · pros & cons (accept-as-is vs fix) ·
    your recommendation**, then ask **agree or disagree?** Record the decision
-   BOTH inline (greppable marker at the site) AND in the README ledger:
+   BOTH inline (greppable marker at the site) AND in the `docs/TECHNICAL-DETAILS.md` ledger:
    - **Agree (accept)** → irreducible / cost-and-risk of fixing exceeds that of
      accepting. Add `// SKY-RUST-AUDIT:ACCEPTED (<dev>, <date>) — <why> [ledger #N]` at
      the site (+ the narrowest `#[allow(...)]` if a lint applies); add the ledger row.
@@ -68,7 +68,7 @@ decides; you record.
      row under "Deferred for investigation".
    - `<dev>` = `git config user.name` (fallback `$USER`); `<date>` = today (UTC).
 
-6. **Mirror every decision in the README ledger in the same pass.** The inline
+6. **Mirror every decision in the `docs/TECHNICAL-DETAILS.md` ledger in the same pass.** The inline
    markers are the code-level truth; the ledger is the central index. Report:
    hard-gate verdict, decisions taken (accepted / fixed / deferred, each
    attributed), and the cosmetic-lint count handled in bulk.

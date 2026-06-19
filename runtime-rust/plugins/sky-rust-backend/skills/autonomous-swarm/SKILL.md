@@ -9,8 +9,8 @@ Drive a large, architecturally-uncertain, in-boundary task to completion with an
 autonomous sub-agent team **when one context can't hold it**. The orchestrator
 (you) plans with a brainstorming panel, de-risks the unknowns, fans work out to
 executors under a hard anti-race contract, and verifies relentlessly. Distilled
-from the real `examples/rust/skyshop-rs` port (a 1:1 port of an 8.2k-line app
-binding 3 real async crates).
+from the real `examples/rust/skyshop-rs` port (a ~6.4k-line Sky app binding 3
+real async crates).
 
 **Prime directive:** the orchestrator is the single source of truth and the only
 message bus. Sub-agents never peer-chat and never share mutable build state;

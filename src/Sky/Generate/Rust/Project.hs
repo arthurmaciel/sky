@@ -229,7 +229,11 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         let genRustFiles = mainRustPath : modPath : configPath
                          : [ srcDir </> modName ++ ".rs" | (modName, _) <- moduleFiles ]
         mapM_ rustfmtFileInPlace genRustFiles
-    putStrLn "Compilation successful"
+    -- Match the Go path's v0.15.42 §3.4 fix: do NOT print "Compilation
+    -- successful" here — this function only EMITS Rust sources; `cargo build`
+    -- runs in the caller and is the real success gate. Printing success before
+    -- the compiler runs is the misleading-success regression the project bans.
+    putStrLn "Sky lowering succeeded"
     return (Right mainRustPath)
 
 
@@ -309,17 +313,26 @@ copyRustRuntime outDir = do
                 Nothing -> putStrLn "  [warn] could not locate runtime-rust/src/sky_runtime/"
         Just srcDir -> copyRuntimeDir srcDir targetDir
 
--- | Copy all .rs files from srcDir to targetDir, plus the .rs files in any
--- immediate subdirectory (e.g. live/). One level deep only — sufficient for
--- the current runtime layout; add real recursion if a deeper tree appears.
+-- | Copy all .rs files (plus the non-Rust assets the runtime include_str!'s,
+-- e.g. live/client.js) from srcDir to targetDir, recursing into EVERY
+-- subdirectory at arbitrary depth. Previously this was one level deep only,
+-- so a grandchild dir (e.g. live/dispatch/) would be silently dropped →
+-- E0583/E0432 cargo-fail with no compiler diagnostic. Full recursion removes
+-- that footgun.
 copyRuntimeDir :: FilePath -> FilePath -> IO ()
 copyRuntimeDir srcDir targetDir = do
+    total <- copyRuntimeDirRec srcDir targetDir
+    putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show total ++ " files)"
+
+-- | Recursive worker: copies the asset files in srcDir into targetDir, then
+-- recurses into every real subdirectory. Returns the count of files copied.
+copyRuntimeDirRec :: FilePath -> FilePath -> IO Int
+copyRuntimeDirRec srcDir targetDir = do
     files <- listDirectory srcDir
-    let rsFiles = filter (\f -> takeExtension f == ".rs") files
-    mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) rsFiles
-    -- Candidate subdirs: entries with no extension. doesDirectoryExist below is
-    -- the real discriminant (a plain extensionless file is probed then skipped).
-    let subDirs = filter (\f -> takeExtension f == "") files
+    let assets = filter (\f -> takeExtension f `elem` [".rs", ".js"]) files
+    mapM_ (\name -> copyFile (srcDir </> name) (targetDir </> name)) assets
+    -- Candidate subdirs: any entry that is a real directory. doesDirectoryExist
+    -- is the discriminant (a plain file is probed then skipped).
     subCounts <- mapM (\sub -> do
         let srcSub = srcDir </> sub
             tgtSub = targetDir </> sub
@@ -327,13 +340,7 @@ copyRuntimeDir srcDir targetDir = do
         if isDir
             then do
                 createDirectoryIfMissing True tgtSub
-                subFiles <- listDirectory srcSub
-                -- Copy .rs sources plus non-Rust assets the runtime include_str!'s
-                -- (e.g. live/client.js embedded by render_page_full).
-                let subAssets = filter (\f -> takeExtension f `elem` [".rs", ".js"]) subFiles
-                mapM_ (\name -> copyFile (srcSub </> name) (tgtSub </> name)) subAssets
-                pure (length subAssets)
+                copyRuntimeDirRec srcSub tgtSub
             else pure 0
-        ) subDirs
-    let totalFiles = length rsFiles + sum subCounts
-    putStrLn $ "   Copied runtime-rust/src/sky_runtime/ (" ++ show totalFiles ++ " files)"
+        ) files
+    pure (length assets + sum subCounts)

@@ -292,9 +292,11 @@ walkExprs handler = foldMap walkMod
     walkSub _                       = mempty
 
 -- | Walk all expressions collecting anonymous record field signatures.
--- Returns field-key → [(field-name, HM-inferred-type)] for records NOT
--- covered by type-alias-defined structs.  Skips records with unresolved
--- type variables (TVar) to avoid emitting invalid generic struct fields.
+-- Returns field-key → [field-name] for every `Can.Record` literal, keyed by
+-- the comma-joined sorted field-key. NOTE: this emits EVERY record literal
+-- unconditionally; it does NOT inspect or skip records whose inferred field
+-- types still carry unresolved type variables. (An earlier docstring claimed a
+-- TVar skip that the implementation never performed.)
 collectAnonRecordTypes :: [Can.Module] -> Map.Map String [String]
 collectAnonRecordTypes = walkExprs onExpr
   where
@@ -504,9 +506,20 @@ collectLiveSerdeTypes recordMap mods solvedTypes perModuleEnv =
     firstJust (Just x) _ = Just x
     firstJust Nothing  y = y
 
-    -- Step 2: name -> def maps from ALL modules (bare type names as keys).
-    unions  = Map.unions (map Can._unions mods)
-    aliases = Map.unions (map Can._aliases mods)
+    -- Step 2: (module, name) -> def maps from ALL modules. Keying by the
+    -- DEFINING module's name (not the bare type name) avoids collapsing
+    -- cross-module same-named types — a bare-name `Map.unions` is left-biased
+    -- and would silently drop one of two `State` types from different modules,
+    -- pulling the WRONG constructors into the serde closure (E0277 / over- or
+    -- under-derive). `bfs` resolves each lookup with the reference site's own
+    -- `modName`, mirroring `scopedLookup`'s collision-safe discipline used for
+    -- view/init detection.
+    unions  = Map.fromList
+        [ ((ModuleName._name (Can._name m), k), u)
+        | m <- mods, (k, u) <- Map.toList (Can._unions m) ]
+    aliases = Map.fromList
+        [ ((ModuleName._name (Can._name m), k), a)
+        | m <- mods, (k, a) <- Map.toList (Can._aliases m) ]
 
     -- Rust codegen name for a (modName, name) pair — matches typeDefToString's
     -- naming (toCamelCase of the mangled module prefix + the type name).
@@ -527,16 +540,17 @@ collectLiveSerdeTypes recordMap mods solvedTypes perModuleEnv =
             let rn = rustName modName name
                 -- Recurse into type args regardless (e.g. List Foo, Maybe Bar).
                 accArgs = foldl bfs acc args
+                key = (ModuleName._name modName, name)
             in if isOpaque modName name
                   then accArgs
-                  else if Map.member name unions && not (Set.member rn accArgs)
+                  else if Map.member key unions && not (Set.member rn accArgs)
                        then let acc' = Set.insert rn accArgs
                                 ctorFts = concatMap (\(Can.Ctor _ _ _ fts) -> fts)
-                                                    (Can._u_alts (unions Map.! name))
+                                                    (Can._u_alts (unions Map.! key))
                             in foldl bfs acc' ctorFts
-                  else if Map.member name aliases && not (Set.member rn accArgs)
+                  else if Map.member key aliases && not (Set.member rn accArgs)
                        then let acc' = Set.insert rn accArgs
-                                Can.Alias _ body = aliases Map.! name
+                                Can.Alias _ body = aliases Map.! key
                             in bfs acc' body
                   else accArgs  -- builtin (Int/String/List/...) or already visited
         Can.TAlias modName name pairs aliasType ->
@@ -577,7 +591,12 @@ serdeMatchStruct recordMap fieldSet
                      in if fieldSet `Set.isSubsetOf` kSet && extras >= 0
                         then case acc of
                                Nothing                  -> Just (extras, nm)
-                               Just (e, _) | extras < e -> Just (extras, nm)
+                               Just (e, n)
+                                 -- Fewest-extras wins; on a tie break on the
+                                 -- struct name so the pick is stable regardless
+                                 -- of Map iteration order.
+                                 | extras < e || (extras == e && nm < n)
+                                                          -> Just (extras, nm)
                                _                        -> acc
                         else acc) Nothing (Map.toList recordMap)
         in case best of

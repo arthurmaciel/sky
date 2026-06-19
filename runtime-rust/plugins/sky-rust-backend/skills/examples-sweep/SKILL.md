@@ -75,7 +75,8 @@ no-crash"; `n/a` is incomparable.
 
 ## Night gate
 
-This heavy sweep (build + run + Go reference + browser over 37 examples) is gated
+This heavy sweep (build + run + Go reference + browser over the in-scope
+`build_set`, derived from disk) is gated
 to **22:00–08:00 America/Sao_Paulo** (slim shared box). Outside the window AND
 `SKY_SWEEP_FORCE` unset → prints `deferred: examples-sweep runs 22:00–08:00 …`
 and exits 2. Inside the window OR `SKY_SWEEP_FORCE=1` → proceeds. Same gate on

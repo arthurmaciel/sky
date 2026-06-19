@@ -1,5 +1,14 @@
 # skyshop-rs port plan — Reasoner B
 
+> **SUPERSEDED — non-authoritative.** This reasoner plan was folded into
+> `2026-06-15-skyshop-rs-port-SYNTHESIS.md` (locked decisions D1–D6). Two of
+> plan-B's headline choices were overridden by the shipped port: D5 mandates a
+> **Std.Ui rewrite**, so plan-B's `Std.Html`+sky-tailwind "14/19 files
+> byte-for-byte" view-parity claim does NOT hold; and D4 ships the wrapper deps
+> as `RustGitDep` `file://` (no `RustPathDep` — `Sky/Toml/Rust.hs` has no path
+> variant), so plan-B's `RustPathDep`-primary recommendation did not ship. Kept
+> for grep; act on SYNTHESIS, not this plan.
+
 A faithful 1:1 port of `examples/13-skyshop` (Sky.Live e-commerce, ~9.6k lines /
 19 `.sky` files) to the Sky→Rust backend (`sky build --target rust`), with Rust
 crates (`firestore` 0.49, `async-stripe` 1.0.0-rc.6, hand-rolled Firebase JWKS)

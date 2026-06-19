@@ -469,8 +469,17 @@ typeDefToString formTargets serdeTypes fnFieldStructs (RStructDef name gens fiel
             (if skipField fld then "    #[serde(skip)]\n" else "") ++ "    " ++ n ++ ": " ++ t
         structDef = derives ++ "\npub struct " ++ name ++ gens ++ " {\n"
             ++ intercalate ",\n" (map renderField fields) ++ "\n}"
-        defaultField (n, t) =
-            "            " ++ n ++ ": sky_runtime::core::disconnected_fn" ++ show (fnArgCount t) ++ "()"
+        -- Only a BARE fn field (`Arc<dyn Fn..>` / `fn(..)`) can be defaulted via
+        -- `disconnected_fnN()` (which returns exactly `Arc<dyn Fn(..) -> SkyTask>`).
+        -- Any other field — a plain field that happens to co-exist in a
+        -- function-typed struct, OR a WRAPPED fn field (`Vec<Arc<dyn Fn>>`,
+        -- `Option<Arc<dyn Fn>>`, `HashMap<.., Arc<dyn Fn>>`) — must default via
+        -- `Default::default()`; `disconnected_fnN()` would mistype it (E0308/E0599).
+        defaultField (n, t)
+            | isBareFnField t =
+                "            " ++ n ++ ": sky_runtime::core::disconnected_fn" ++ show (fnArgCount t) ++ "()"
+            | otherwise =
+                "            " ++ n ++ ": Default::default()"
         defaultImpl
             | hasFnField =
                 "\nimpl Default for " ++ name ++ gens ++ " {\n    fn default() -> Self {\n        "
@@ -534,6 +543,22 @@ skyStringifyImplGens g =
 -- pointer) — not stringifiable, render a placeholder.
 isFnType :: String -> Bool
 isFnType t = "dyn Fn" `isInfixOf` t || "fn(" `isInfixOf` t
+
+-- | Is this field type a BARE function pointer/closure — i.e. exactly the shape
+-- `disconnected_fnN()` produces (`Arc<dyn Fn(..) -> SkyTask>`) or a raw `fn(..)`?
+-- A WRAPPED fn field (`Vec<Arc<dyn Fn>>`, `Option<Arc<dyn Fn>>`,
+-- `HashMap<.., Arc<dyn Fn>>`) is NOT bare: its container can't hold a
+-- `disconnected_fnN()` value, so it must default via `Default::default()`.
+isBareFnField :: String -> Bool
+isBareFnField t0 =
+    let t = dropWhile (== ' ') t0
+        afterArc
+            | "std::sync::Arc<" `isPrefixOf` t = Just (drop (length ("std::sync::Arc<" :: String)) t)
+            | "Arc<" `isPrefixOf` t            = Just (drop (length ("Arc<" :: String)) t)
+            | otherwise                        = Nothing
+    in case afterArc of
+        Just inner -> "dyn Fn" `isPrefixOf` dropWhile (== ' ') inner
+        Nothing    -> "dyn Fn" `isPrefixOf` t || "fn(" `isPrefixOf` t
 
 -- | Render one field/payload value via the TOTAL autoref-specialization dispatch
 -- (`stringify.rs` `Wrap` / `ViaSkyStringify` / `ViaDebug`): the field renders via

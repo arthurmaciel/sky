@@ -64,12 +64,24 @@ const SENTINEL_PREFIX: &str = "__sky_stream:";
 /// matched on the BODY of any response, so without an unguessable component an
 /// app (or a relayed upstream) whose body begins `__sky_stream:<digits>` could be
 /// misread as a streaming sentinel and divert control flow. The nonce is drawn
-/// once from the OS CSPRNG (uuid v4 → getrandom) so body-controlled content can
-/// neither forge nor collide with a real sentinel. Sentinel shape:
-/// `__sky_stream:<nonce>:<token>`.
+/// once from the OS-seeded `RandomState` (std-only — no extra crate dep, so this
+/// module compiles in every server/live project regardless of `Uuid` usage) so
+/// body-controlled content can neither forge nor collide with a real sentinel.
+/// Sentinel shape: `__sky_stream:<nonce>:<token>`.
 fn sentinel_nonce() -> &'static str {
     static N: OnceLock<String> = OnceLock::new();
-    N.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+    N.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        // RandomState seeds from the OS each process; hashing two fixed values
+        // mixes the two independent 64-bit seeds into 128 bits of entropy.
+        let rs = std::collections::hash_map::RandomState::new();
+        let mut h = rs.build_hasher();
+        h.write_u64(0x5359_5F73_7472_6D31);
+        let a = h.finish();
+        h.write_u64(0xA5A5_5A5A_F0F0_0F0F);
+        let b = h.finish();
+        format!("{:016x}{:016x}", a, b)
+    })
 }
 // Bounded channel — matches the Go runtime's streamChanBuffer (16). emit's
 // `send().await` blocks when full → backpressure to the producer/relay.

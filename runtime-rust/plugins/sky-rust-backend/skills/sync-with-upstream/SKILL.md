@@ -7,7 +7,7 @@ description: "Ingest the latest anzellai/sky upstream RELEASE TAG (not main — 
 
 Pull the latest upstream `anzellai/sky` into the long-lived `feat/runtime-rust`
 branch with the thin-seam workflow. The thin-seam refactor
-(`docs/superpowers/specs/2026-05-26-upstream-sync-thin-seam-design.md`) keeps the
+(`runtime-rust/superpowers/specs/2026-05-26-upstream-sync-thin-seam-design.md`) keeps the
 conflict surface tiny: expect **exactly two conflicts** (`sky-compiler.cabal`
 trivial + `src/Sky/Build/Compile.hs` dispatch hunk), plus occasional small
 Rust-side adaptations when upstream changes a *shared* type the Rust codegen
@@ -25,8 +25,8 @@ Reference runbook in-repo: `docs/runtime-rust/syncing-upstream.md`.
 - **Never break the Go backend.** All our changes are Rust-target-gated. If a
   resolution would alter Go behaviour, it's wrong.
 - **Never push** unless the user explicitly asks.
-- Append the `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>` trailer to
-  any new commit (the merge commit).
+- Do NOT add a `Co-Authored-By` trailer to the merge commit — the repo convention
+  forbids the trailer (see `git log`: no recent commit carries one).
 
 ## Steps (execute in order)
 
@@ -144,7 +144,7 @@ commit in Step 8.
 
 ### Step 7 — Verify (do NOT skip; do NOT commit a broken merge)
 
-- **Rust sweep** — all 15 `runtime-rust/tests/sky/*` build + run from a clean slate
+- **Rust sweep** — every `runtime-rust/tests/sky/*` fixture builds + runs from a clean slate
   (clear `~/.cache/sky/tools/sky-ffi-inspect-rs` first; `sky add … --backend rust`
   then `sky run`; `04-uuid` needs `--features v4`). Each must print `OK -> …`.
 - **Go regression** — `examples/01-hello-world` builds clean
@@ -183,8 +183,8 @@ git add sky-compiler.cabal src/Sky/Build/Compile.hs runtime-rust/Cargo.toml <any
 git commit --no-edit   # or supply a message describing the version + resolutions
 ```
 Merge-commit message should name the upstream version, the two resolutions, the
-`runtime_version` bump (Step 6b), and any Rust-side adaptation — then the
-`Co-Authored-By` trailer.
+`runtime_version` bump (Step 6b), and any Rust-side adaptation (no
+`Co-Authored-By` trailer — see Constraints).
 
 ### Step 9 — Refresh the code index (skydex)
 
@@ -207,13 +207,13 @@ sync-with-upstream complete
   merge commit: <sha>
   runtime_version: <X.Y.Z> (mirrored into runtime-rust/Cargo.toml)
   conflicts: cabal (union) + Compile.hs (dispatch wrap)[ + Rust adaptation: <what>]
-  verify: 15/15 Rust examples · Go hello-world · FFI byte-identity (N examples, 0 failures)
+  verify: all Rust fixtures · Go hello-world · FFI byte-identity (N examples, 0 failures)
   branch: feat/runtime-rust (not pushed)
 ```
 
 ## Background-task hygiene
 
-Building 15 examples + a partial test run spawns subprocesses. Before declaring
+Building the Rust fixtures + a partial test run spawns subprocesses. Before declaring
 done, sweep orphans (per the project CLAUDE.md): kill stray
 `sky-out/app` / `app-live` / `sky console` / `example-sweep` / `sky-tests`
 processes and any leftover poll loops.

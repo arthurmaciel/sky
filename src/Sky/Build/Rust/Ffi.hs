@@ -78,7 +78,11 @@ runRustInspectorWith pkgPath features mGit = do
                             ++ maybe "" (\r -> " --rev "    ++ quoteShell r) mr
                             ++ maybe "" (\b -> " --branch " ++ quoteShell b) mb
                             ++ maybe "" (\t -> " --tag "    ++ quoteShell t) mt
-                cmd' = bin ++ " " ++ pkgPath ++ featuresArg ++ gitArg
+                -- Shell-quote pkgPath exactly as the git URL/rev/branch/tag are
+                -- quoted below: the crate path/name can originate from sky.toml,
+                -- so a space or shell metachar would otherwise break the
+                -- invocation (or be an injection vector via a crafted dep name).
+                cmd' = bin ++ " " ++ quoteShell pkgPath ++ featuresArg ++ gitArg
             (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
             if null out
                 then return (Left $ "sky-ffi-inspect-rs: empty output; stderr: " ++ err)
@@ -312,9 +316,19 @@ seqKind raw =
                    Just (SeqKind (Arr n) ElemU8)
                  _ -> seqGeneral s
   where
+    -- Clamp N to a sane array-size ceiling: a pathological `[u8; 999999999999]`
+    -- from odd/malicious rustdoc JSON would otherwise emit an absurd array type.
+    -- Above the ceiling we reject so the caller falls through to the opaque path.
+    maxArrayLen = 65536
     digitsBeforeClose rest =
         case span (/= ']') rest of
-            (digits, "]") | not (null digits) && all isDigit digits -> Just (read digits)
+            (digits, "]")
+              | not (null digits) && all isDigit digits
+              -- Parse as Integer (unbounded) first so a giant literal can't
+              -- wrap a fixed-width Int negative, then range-check before
+              -- narrowing to the Int the codegen uses.
+              , n <- (read digits :: Integer)
+              , n >= 0 && n <= maxArrayLen -> Just (fromInteger n)
             _ -> Nothing
 
     seqGeneral s =
