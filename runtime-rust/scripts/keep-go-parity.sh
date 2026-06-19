@@ -36,6 +36,31 @@ cd "$REPO"
 STATE="$HOME/.cache/sky/keep-go-parity"; mkdir -p "$STATE"
 SHA_F="$STATE/pre.sha"; LIST_F="$STATE/pre.examples"
 
+# ── Run-state file — the resume frontier for the v2 chain (spec §B) ──────────
+# Gitignored, in-repo. NOT commit-derived: several phases (skydex update, scoped
+# sweep, a clean audit) produce zero commits, so a commit-derived frontier would
+# mis-locate. BASE is the phase-0 pre-run HEAD, fixed for the whole run.
+STATE_FILE="${SKY_KGP_STATE:-$REPO/.skycache/keep-go-parity.state}"
+
+state_init() {
+  mkdir -p "$(dirname "$STATE_FILE")"
+  printf 'BASE=%s\nlast_completed_phase=0\n' "$(git rev-parse HEAD)" > "$STATE_FILE"
+}
+state_get() {  # state_get <key> → value (empty if absent)
+  [ -f "$STATE_FILE" ] || return 0
+  sed -n "s/^$1=//p" "$STATE_FILE" | tail -1
+}
+state_set() {  # state_set <key> <value> — portable (no in-place sed)
+  local k="$1" v="$2" tmp
+  [ -f "$STATE_FILE" ] || state_init
+  tmp="$(mktemp)"
+  awk -v k="$k" -v v="$v" '
+    $0 ~ "^"k"=" { print k"="v; done=1; next } { print }
+    END { if (!done) print k"="v }' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+}
+state_done() { state_set last_completed_phase "$1"; state_set "phase_$1" ok; }   # phase N complete
+state_clear() { rm -f "$STATE_FILE"; }
+
 # Top-level example dirs that carry a Sky entry point. runtime-rust/tests/sky/ (our
 # fork-local FFI set) is a single top-level entry, so it never shows as "new".
 list_examples() { find examples -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort; }
@@ -153,12 +178,45 @@ case "$cmd" in
     exit 1
     ;;
 
+  state-init)  state_init; echo "keep-go-parity: state @ $STATE_FILE (BASE=$(state_get BASE))" ;;
+  state-get)   state_get "${2:?state-get <key>}" ;;
+  state-done)  state_done "${2:?state-done <phase-number>}"; echo "phase ${2} done (frontier=$(state_get last_completed_phase))" ;;
+  state-show)  [ -f "$STATE_FILE" ] && cat "$STATE_FILE" || echo "(no run-state — fresh run)" ;;
+  --restart)   state_clear; echo "keep-go-parity: run-state cleared — next run starts at phase 0" ;;
+
+  scoped-sweep)
+    # Phase-5 helper: scope examples-sweep to the change blast-radius since BASE.
+    # changed_examples lives in lib/examples.sh (already sourced). RUST_EXAMPLES
+    # is examples-sweep's subset override. --dry-run prints the plan only.
+    base="$(state_get BASE)"
+    [ -n "$base" ] || { echo "ERROR: no BASE in run-state — run 'keep-go-parity.sh state-init' first." >&2; exit 3; }
+    mapfile -t SCOPED < <(changed_examples "$base")
+    list="${SCOPED[*]}"
+    echo "scoped-sweep: ${#SCOPED[@]} example(s) since $base"
+    echo "RUST_EXAMPLES=$list"
+    if [ "${2:-}" = "--dry-run" ]; then
+      echo "would run: SKY_SWEEP_FORCE=1 bash $SCRIPTS/examples-sweep.sh (with RUST_EXAMPLES set as above)"
+      exit 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+      SKY_SWEEP_FORCE=1 RUST_EXAMPLES="$list" timeout 7200 bash "$SCRIPTS/examples-sweep.sh"; exit $?
+    else
+      SKY_SWEEP_FORCE=1 RUST_EXAMPLES="$list" bash "$SCRIPTS/examples-sweep.sh"; exit $?
+    fi
+    ;;
+
   *)
-    echo "usage: keep-go-parity.sh {snapshot|plan|run}" >&2
-    echo "  snapshot  record examples/ + HEAD sha BEFORE the upstream sync" >&2
-    echo "  plan      AFTER the sync: print which sweeps the merge warrants" >&2
-    echo "  run       AFTER the sync: print the plan AND auto-run examples-sweep" >&2
-    echo "            (BUILD·RUN·EQUIV; forces past the night gate). perf is surfaced," >&2
-    echo "            not run (needs apps closed). For non-agent use." >&2
+    echo "usage: keep-go-parity.sh {snapshot|plan|run|state-init|state-get|state-done|state-show|scoped-sweep|--restart}" >&2
+    echo "  snapshot    record examples/ + HEAD sha BEFORE the upstream sync" >&2
+    echo "  plan        AFTER the sync: print which sweeps the merge warrants" >&2
+    echo "  run         AFTER the sync: print the plan AND auto-run examples-sweep" >&2
+    echo "              (BUILD·RUN·EQUIV; forces past the night gate). perf is surfaced," >&2
+    echo "              not run (needs apps closed). For non-agent use." >&2
+    echo "  state-init  start a new v2-chain run (records BASE=HEAD, phase=0)" >&2
+    echo "  state-get   <key>  read a value from the run-state file" >&2
+    echo "  state-done  <N>    mark phase N complete, advance the frontier" >&2
+    echo "  state-show  dump the full run-state file" >&2
+    echo "  scoped-sweep       phase-5: run examples-sweep scoped to changed_examples since BASE" >&2
+    echo "  --restart   clear the run-state file (force fresh run)" >&2
     exit 2 ;;
 esac
