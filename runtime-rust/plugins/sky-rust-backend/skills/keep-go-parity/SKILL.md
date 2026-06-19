@@ -18,90 +18,40 @@ efficiency > completeness > readability** (a lower never overrides a higher).
 Parity work serves correctness/soundness above all; the swarm-fix step below
 adheres to them.
 
-## Workflow (execute in order)
+## Workflow — the v2 chain (resumable via .skycache/keep-go-parity.state)
 
-1. **Snapshot BEFORE the sync** (records `examples/` + HEAD sha):
-   ```bash
-   bash runtime-rust/scripts/keep-go-parity.sh snapshot
-   ```
+Resume is driven by the **run-state file**, NOT the last commit (phases 2/4/5/6
+produce zero commits). On entry: if a state file exists, resume at
+`last_completed_phase + 1`; else `state-init` (records BASE = HEAD) and start at
+phase 1. `keep-go-parity.sh --restart` forces a fresh run. After each phase
+completes, `keep-go-parity.sh state-done <N>`.
 
-2. **Sync upstream** — invoke **sky-rust-backend:sync-with-upstream**.
-   - Resolve the two expected thin-seam conflicts (`sky-compiler.cabal`,
-     `src/Sky/Build/Compile.hs`) **autonomously** per that skill's runbook, plus
-     any mechanical Rust-side shared-type adaptation the build pinpoints.
-   - **Ask the user only when a real design decision emerges** — an unexpected
-     conflict surface (e.g. `FfiGen.hs`/`Toml.hs`), an upstream shared-type
-     reshape with more than one defensible Rust adaptation, or anything that
-     would change Go behaviour. Otherwise proceed without stopping.
-   - The sync's **pre-final code gate** (Step 7b — security/correctness/
-     soundness, `## Pre-final code gate` in `runtime-rust/CLAUDE.md`) MUST pass
-     before its merge commit; a resolution that violates one of the three is
-     reverted + logged in `runtime-rust/README.md` + signalled, not committed.
-   - Do not push. The merge commit is the durable artifact.
+| # | Phase | Skill / step | Commits? |
+|---|---|---|---|
+| 0 | `state-init` — record BASE = HEAD | `keep-go-parity.sh state-init` | no |
+| 1 | sync + resolve conflicts | **sky-rust-backend:sync-with-upstream** | merge commit |
+| 2 | re-index | `skydex update` | no |
+| 3 | implement new functionality | **sky-rust-backend:implement-parity-gap** (`skydex parity --gaps` → swarm) | work commits |
+| 4 | re-index | `skydex update` | no |
+| 5 | **scoped** build·run·equivalence·round-trip | `keep-go-parity.sh scoped-sweep` (changed_examples → RUST_EXAMPLES) | no |
+| 6 | audit the diff | **sky-rust-backend:quality-audit** + **sky-rust-backend:principles-audit** (incremental, since BASE) | fix commits |
+| 7 | docs | **sky-rust-backend:update-docs** | docs commit |
+| 8 | push → CI full verification | **sky-rust-backend:push** → CI: full 3-OS sweep + examples-perf-sweep + static-perf | — |
 
-3. **Plan the sweeps** (diffs against the snapshot):
-   ```bash
-   bash runtime-rust/scripts/keep-go-parity.sh plan
-   ```
-   Read the `PLAN_*` lines: `PLAN_EXAMPLES` is always 1; `PLAN_PERF` is 1 when any
-   new example landed OR the Go backend changed. No classification gate — the
-   equiv mode is DERIVED from `example_shape`, so a new example auto-classifies.
-
-4. **Run the sweeps per the plan** (BOTH are night-gated 22:00–08:00
-   America/Sao_Paulo; during the day prefix `SKY_SWEEP_FORCE=1`):
-   - **Always:** **sky-rust-backend:examples-sweep** — ONE sweep that, per
-     example, **BUILDS** (`--backend rust` + cargo), **RUNS** it headless per shape
-     (cli no-panic / server+live boot+serve / live browser round-trip /
-     tui pty / webview xvfb), AND asserts **Go≡Rust EQUIVALENCE** per the DERIVED
-     equiv mode (stdout-diff cli / body-diff server / both-pass-scenario live /
-     both-no-crash tui). Emits a BUILD·RUN·EQUIV table. There is NO separate
-     build / run / equiv / web sweep — they are all this one sweep.
-   - **New web/live example?** examples-sweep covers it automatically — RUN drives
-     the browser round-trip and EQUIV runs the SAME scenario against both backends
-     (scenario derived from the example name → falls back to `smoke`). Author a
-     richer scenario in `scripts/verify-scenarios.mjs` if the smoke fallback is too
-     thin.
-   - **If `PLAN_PERF=1`:** **sky-rust-backend:examples-perf-sweep** — needs the
-     user to close apps first, so follow that skill's close-the-apps reminder and
-     wait for go-ahead. When `PLAN_PERF` fired only on `GO_BACKEND_CHANGED`,
-     confirm the change is genuinely perf-relevant (read the changelog) before
-     spending the hour.
-
-5. **Autonomous swarm-fix of RED examples (AFTER the full sweep).** Any **RED**
-   row in examples-sweep — a Rust-side **build / run / equiv** failure
-   (`sky-fail` / `cargo-fail` / `panic` / `hang` / `noserve` / `notty` /
-   `DIFFER`) — is **root-caused and fixed in-boundary via the autonomous swarm**
-   (**sky-rust-backend:autonomous-swarm**), adhering to the README principles,
-   **after** the full sweep finishes (not mid-sweep — a complete RED list lets the
-   swarm batch related fixes). **AMBER `go-ref-broken` is NOT swarmed** — it is an
-   upstream Go bug, not a Rust failure; report it, don't fix it here. The fix lands
-   in-boundary (`runtime-rust/`, `src/Sky/Generate/Rust/`, …), passes the pre-final
-   code gate, and a regression fixture that fails pre-fix is added (green build ≠
-   correct). Re-run examples-sweep to confirm the row flips green.
-
-6. **Kernel-parity backlog (skydex)** — examples-sweep verifies *runtime* parity;
-   skydex surfaces *structural* parity: kernels upstream now has on the **Go** side
-   that the **Rust** backend doesn't implement yet (which no example may exercise).
-   The index is fresh — the sync's Step 9 ran `skydex update`:
-   ```bash
-   ( cd tools/skydex && cargo build --release >/dev/null )   # once, if not built
-   tools/skydex/target/release/skydex parity --gaps | grep '^go-only'
-   ```
-   Each `go-only` row carries its `route=…`/`go=…` locations. A tracked
-   **backlog, NOT a hard gate** — but any `go-only` kernel **this sync newly
-   introduced** must be reported so it enters the pipeline (no-deferral). Use
-   skydex, not Gortex (it OOMs this repo).
-
-7. **Report the consolidated parity verdict** — upstream version + merge commit;
-   then examples-sweep `N green · M red · K skipped · amber=A` with the equiv-mode
-   breakdown (`stdout=… body=… scenario=… serve=… pty=… n/a=…`), the RED list +
-   swarm-fix outcome, perf summary (if run), and the **kernel-parity backlog**
-   from step 6. **"✓ GO PARITY MAINTAINED" only when examples-sweep is green (no
-   RED row; amber go-ref-broken is acceptable)** — the skydex backlog is reported
-   but does NOT gate the verdict. Otherwise "✗ GO PARITY NOT MAINTAINED".
+- Phase 3 escalates per implement-parity-gap's gate (subsystem-scale / no
+  equivalence oracle → stop + signal the user).
+- Phase 5 is **fast pre-push feedback**, scoped to the diff blast-radius since
+  BASE. Honest contract: precise only for example-source changes; for
+  runtime/codegen changes the scope widens broadly and **CI's full 3-OS sweep on
+  push (phase 8) is the real gate** — keep-go-parity does NOT gate on the scoped
+  local run for runtime/codegen changes.
+- `skydex update` is **early** (2 + 4), never last — phases 3/5/6 consume the index.
+- Work commits stay separate from the state file (bisectability); the state file
+  is bookkeeping, never bundled into a work commit.
 
 > The always-run examples-sweep is also one command for non-agent use:
-> `keep-go-parity.sh run` (forces past the night gate; perf stays surfaced).
+> `keep-go-parity.sh run` (after you've synced upstream yourself — forces past
+> the night gate; perf stays surfaced as a recommendation).
 
 ## Why a planner, not one mega-script
 
