@@ -662,7 +662,22 @@ pulls neither. A non-live `Std.Db` app keeps its single driver.
 
 ---
 
-## Glossary
+## Learning materials
+
+Two self-contained HTML courses (open in a browser; each lesson ends with
+interactive quizzes) live under [`docs/courses/`](docs/courses/index.html):
+
+- **[Course 1 · The Sky → Rust Backend](docs/courses/course-1-sky-to-rust/index.html)**
+  (12 lessons, newcomer → developer) — the backend's history, then a step-by-step
+  walk of how Sky source passes through the compiler into an AST and on to
+  generated Rust, with two worked examples per program shape (cli / server /
+  live / tui / webview), the kernel-routing table, FFI, and the soundness floor.
+- **[Course 2 · GitHub CI, by example](docs/courses/course-2-github-ci/index.html)**
+  (7 lessons, zero → confident) — what CI is and how it works, taught against
+  this repo's own CI: the gating examples-sweep, matrices/caching/artifacts,
+  dispatch-only jobs, CI→README table automation, and how to modify the CI safely.
+
+### Glossary
 
 **Sky language**
 
