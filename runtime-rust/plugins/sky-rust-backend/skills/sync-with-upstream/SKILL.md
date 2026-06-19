@@ -13,7 +13,7 @@ trivial + `src/Sky/Build/Compile.hs` dispatch hunk), plus occasional small
 Rust-side adaptations when upstream changes a *shared* type the Rust codegen
 consumes.
 
-Reference runbook in-repo: `docs/runtime-rust/syncing-upstream.md`.
+Reference runbook in-repo: `runtime-rust/docs/syncing-upstream.md`.
 
 ## Constraints (read before doing anything)
 
