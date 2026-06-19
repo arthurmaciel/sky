@@ -1,6 +1,28 @@
 // System helpers — some generic over E (when returning SkyTask).
 use super::*;
 
+// `std::env::set_var`/`remove_var` are documented as NOT thread-safe; under
+// `Task.parallel` (Task-tier `System.setenv`/`unsetenv`/`loadEnv` compose with
+// it) two threads mutating the environment is a data race / UB by the std
+// contract. Serialise every mutation behind this process-global lock so a
+// concurrent mutator can't race another. (Concurrent readers on another thread
+// are still technically unsynchronised against this — but this removes the
+// mutator↔mutator race, which is the one reachable purely from env-Task
+// composition; Go's os.Setenv is likewise only mutex-guarded among Go callers.)
+static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Set an environment variable under the process-global env-mutation lock.
+fn locked_set_var(key: &str, val: &str) {
+    let _guard = ENV_MUTATION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    std::env::set_var(key, val);
+}
+
+/// Remove an environment variable under the process-global env-mutation lock.
+fn locked_remove_var(key: &str) {
+    let _guard = ENV_MUTATION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    std::env::remove_var(key);
+}
+
 pub fn system_args<E: Send + 'static>(_: ()) -> SkyTask<E, Vec<String>> {
     Box::pin(async move { ok_res(std::env::args().skip(1).collect()) })
 }
@@ -29,7 +51,21 @@ pub fn process_run<E: Send + From<String> + 'static>(
                 if out.status.success() {
                     ok_res(text)
                 } else {
-                    SkyResult::Err(str_err(&format!("{}: {}", text, out.status)))
+                    // Cap the captured output folded into the Err string: large /
+                    // binary subprocess output bloats the error and may embed
+                    // secrets the process printed. Truncate to a bounded prefix
+                    // (on a char boundary) before prepending the status.
+                    const MAX_ERR_OUTPUT: usize = 4096;
+                    let snippet: String = if text.len() > MAX_ERR_OUTPUT {
+                        let mut end = MAX_ERR_OUTPUT;
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}… (output truncated)", &text[..end])
+                    } else {
+                        text
+                    };
+                    SkyResult::Err(str_err(&format!("{}: {}", snippet, out.status)))
                 }
             }
             Err(e) => SkyResult::Err(str_err(&format!("{}: {}", cmd, e))),
@@ -124,14 +160,14 @@ pub fn system_get_arg<E: Send + 'static>(n: i64) -> SkyTask<E, SkyMaybe<String>>
 
 pub fn system_setenv<E: Send + 'static>(key: String, val: String) -> SkyTask<E, ()> {
     Box::pin(async move {
-        std::env::set_var(&key, &val);
+        locked_set_var(&key, &val);
         ok_res(())
     })
 }
 
 pub fn system_unsetenv<E: Send + 'static>(key: String) -> SkyTask<E, ()> {
     Box::pin(async move {
-        std::env::remove_var(&key);
+        locked_remove_var(&key);
         ok_res(())
     })
 }
@@ -166,7 +202,7 @@ pub fn system_load_env<E: Send + 'static>(_: ()) -> SkyTask<E, ()> {
                 if let Some((k, v)) = line.split_once('=') {
                     let k = k.trim();
                     let v = v.trim().trim_matches('"').trim_matches('\'');
-                    if std::env::var(k).is_err() { std::env::set_var(k, v); }
+                    if std::env::var(k).is_err() { locked_set_var(k, v); }
                 }
             }
         }

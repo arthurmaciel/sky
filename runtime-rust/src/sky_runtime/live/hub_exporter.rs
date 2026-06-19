@@ -14,8 +14,9 @@
 //!
 //! Spool backend: in-memory (bounded) here — covers transient outages + retry.
 //! File-spool restart-durability (`SKY_CONSOLE_SPOOL_MODE=file`, Go's
-//! `exporter_spool.go`) is a noted parity extension; the env knobs are read so a
-//! future file backend slots in without an interface change.
+//! `exporter_spool.go`) is a noted parity extension; its env knobs
+//! (`SKY_CONSOLE_SPOOL_*`) are NOT yet read — a future file backend will wire
+//! them in.
 //!
 //! `live`-gated. Best-effort, no panic vectors: bounded offer queue (drop on
 //! full), push failures fall back to the spool, the spool itself is bounded
@@ -64,6 +65,20 @@ pub async fn enable_from_env() {
     if token.len() < MIN_TOKEN_BYTES {
         eprintln!(
             "[sky.hub] {TOKEN_ENV} must be ≥{MIN_TOKEN_BYTES} bytes to push to {hub}; exporter disabled"
+        );
+        return;
+    }
+    // Secrets-in-transit: refuse to push a bearer token over cleartext HTTP.
+    // A misconfigured `http://` hub URL would leak the ≥32-byte token on the
+    // wire. Allow a non-https scheme only when no token is set (anonymous push).
+    let scheme_ok = {
+        let lower = hub.trim_start().to_ascii_lowercase();
+        lower.starts_with("https://") || lower.starts_with("http://localhost") || lower.starts_with("http://127.0.0.1")
+    };
+    if !scheme_ok {
+        eprintln!(
+            "[sky.hub] refusing to push bearer token over non-https {HUB_ENV}={hub}; \
+             use https:// (or a localhost loopback); exporter disabled"
         );
         return;
     }

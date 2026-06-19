@@ -25,7 +25,9 @@ pub fn jwt_decode_hs256<E: From<String>>(secret: String, token: String) -> SkyRe
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
     validation.validate_nbf = true;
-    validation.required_spec_claims.clear();
+    // Keep `exp` required (jsonwebtoken's default) so an omitted-exp token is
+    // rejected rather than treated as non-expiring — matches Go's exp/nbf check
+    // and aligns with auth.rs's verify path (which never clears required claims).
     match decode::<JsonValue>(&token, &key, &validation) {
         Ok(data) => match serde_json::to_string(&data.claims) {
             Ok(s) => SkyResult::Ok(s),
@@ -61,7 +63,9 @@ pub fn jwt_decode_rs256<E: From<String>>(key_pem: String, token: String) -> SkyR
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
     validation.validate_nbf = true;
-    validation.required_spec_claims.clear();
+    // Keep `exp` required (jsonwebtoken's default) so an omitted-exp token is
+    // rejected rather than treated as non-expiring — matches Go's exp/nbf check
+    // and aligns with auth.rs's verify path (which never clears required claims).
     match decode::<JsonValue>(&token, &key, &validation) {
         Ok(data) => match serde_json::to_string(&data.claims) {
             Ok(s) => SkyResult::Ok(s),

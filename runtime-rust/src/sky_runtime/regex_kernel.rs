@@ -3,47 +3,81 @@
 
 use super::SkyMaybe;
 use regex::Regex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Hard cap on distinct compiled patterns we retain. Patterns are
+/// user-controlled, so an UNBOUNDED cache would be a memory-DoS vector
+/// (worse than the per-call recompile CPU cost it avoids — soundness
+/// outranks efficiency). Once the cache is full we stop inserting and fall
+/// back to a fresh compile, so memory stays bounded while the common case
+/// (a small fixed set of hot patterns) is still cached.
+const REGEX_CACHE_CAP: usize = 256;
+
+/// Compile `pattern`, reusing a cached `Regex` when one exists. Returns
+/// `None` for an invalid pattern — callers degrade to identity/false/empty
+/// per the Sky stdlib contract (NEVER panic). Total: the `Mutex` lock is
+/// only ever held briefly here and any `PoisonError` is recovered via
+/// `into_inner`, so a panic in another thread can't wedge this path.
+fn compiled(pattern: &str) -> Option<Arc<Regex>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Regex>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let map = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(re) = map.get(pattern) {
+            return Some(Arc::clone(re));
+        }
+    }
+    // Compile OUTSIDE the lock so a slow compile never blocks other lookups.
+    let re = Arc::new(Regex::new(pattern).ok()?);
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if map.len() < REGEX_CACHE_CAP {
+        // Another thread may have inserted concurrently; entry() keeps it total.
+        map.entry(pattern.to_string()).or_insert_with(|| Arc::clone(&re));
+    }
+    Some(re)
+}
 
 /// Sky `match : String -> String -> Bool`. Pattern first, then haystack.
 pub fn regex_match(pattern: String, s: String) -> bool {
-    match Regex::new(&pattern) {
-        Ok(re) => re.is_match(&s),
-        Err(_) => false,
+    match compiled(&pattern) {
+        Some(re) => re.is_match(&s),
+        None => false,
     }
 }
 
 /// Sky `find : String -> String -> Maybe String`
 pub fn regex_find(pattern: String, s: String) -> SkyMaybe<String> {
-    match Regex::new(&pattern) {
-        Ok(re) => match re.find(&s) {
+    match compiled(&pattern) {
+        Some(re) => match re.find(&s) {
             Some(m) => SkyMaybe::Just(m.as_str().to_string()),
             None => SkyMaybe::Nothing,
         },
-        Err(_) => SkyMaybe::Nothing,
+        None => SkyMaybe::Nothing,
     }
 }
 
 /// Sky `findAll : String -> String -> List String`
 pub fn regex_find_all(pattern: String, s: String) -> Vec<String> {
-    match Regex::new(&pattern) {
-        Ok(re) => re.find_iter(&s).map(|m| m.as_str().to_string()).collect(),
-        Err(_) => Vec::new(),
+    match compiled(&pattern) {
+        Some(re) => re.find_iter(&s).map(|m| m.as_str().to_string()).collect(),
+        None => Vec::new(),
     }
 }
 
 /// Sky `replace : String -> String -> String -> String` (pattern, replacement, input).
 pub fn regex_replace(pattern: String, replacement: String, s: String) -> String {
-    match Regex::new(&pattern) {
-        Ok(re) => re.replace_all(&s, replacement.as_str()).to_string(),
-        Err(_) => s,
+    match compiled(&pattern) {
+        Some(re) => re.replace_all(&s, replacement.as_str()).to_string(),
+        None => s,
     }
 }
 
 /// Sky `split : String -> String -> List String`
 pub fn regex_split(pattern: String, s: String) -> Vec<String> {
-    match Regex::new(&pattern) {
-        Ok(re) => re.split(&s).map(|x| x.to_string()).collect(),
-        Err(_) => vec![s],
+    match compiled(&pattern) {
+        Some(re) => re.split(&s).map(|x| x.to_string()).collect(),
+        None => vec![s],
     }
 }
 

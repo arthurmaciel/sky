@@ -554,8 +554,10 @@ fn live_ttl() -> std::time::Duration {
 /// per-session TEA loop, and serves an SSE patch channel + a POST event
 /// endpoint. The driver diffs view-over-view and pushes patches over SSE.
 ///
-/// `init` ignores its `req` arg; the generated `main_init` is monomorphic
-/// over a unit-shaped arg, so we call `init(())`.
+/// `init` receives a typed `req::LiveReq` (path/query/method/params/headers/
+/// cookies) built from the incoming request; the driver calls `init(req)` so a
+/// req-reader can bootstrap session state on first render. A non-req init is
+/// monomorphised to ignore the threaded `LiveReq`.
 #[allow(clippy::too_many_arguments)]
 pub fn live_app<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
     init: FInit,

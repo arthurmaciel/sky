@@ -19,7 +19,7 @@
 use super::super::ui::{Attribute, Color, Element, Length};
 use super::cell::sanitize_rune;
 use super::focus::{Focusable, InputRegistry};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const CANVAS_W: usize = 1280;
 const CANVAS_H: usize = 720;
@@ -181,16 +181,26 @@ impl Block {
                         let mut text = String::new();
                         let mut tw = 0usize;
                         for ch in run.text.chars() {
-                            let cw = UnicodeWidthStr::width(ch.to_string().as_str());
+                            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
                             if used + tw + cw > w {
                                 break;
                             }
                             text.push(ch);
                             tw += cw;
                         }
+                        used += tw;
                         kept.push(Run { text, style: run.style });
                         break;
                     }
+                }
+                // A clip landing on a wide-char boundary can leave the kept
+                // width one cell short of `w`; pad the remainder with
+                // `bg`-styled spaces so the box always fills exactly `w`.
+                if used < w {
+                    kept.push(Run {
+                        text: " ".repeat(w - used),
+                        style: Style { bg, ..Style::default() },
+                    });
                 }
                 *line = kept;
             } else if lw < w {
@@ -755,7 +765,7 @@ fn emit_block(block: &Block, cols: usize, scroll_y: usize, rows: usize) -> Strin
             let mut text = String::new();
             let mut w = 0usize;
             for ch in run.text.chars() {
-                let cw = UnicodeWidthStr::width(ch.to_string().as_str());
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
                 if col + w + cw > cols {
                     break;
                 }

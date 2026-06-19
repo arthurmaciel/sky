@@ -29,11 +29,11 @@ pub fn time_time_string(ms: i64) -> String { format!("timestamp:{}", ms) }
 /// Go: `return AsInt(ms) + AsInt(delta)`. Args order: delta first, ms second
 /// (matches the Sky sig `addMillis : Int -> Int -> Int`, called
 /// `Time.addMillis delta ms`).
-pub fn time_add_millis(delta: i64, ms: i64) -> i64 { ms + delta }
+pub fn time_add_millis(delta: i64, ms: i64) -> i64 { ms.saturating_add(delta) }
 
 /// `Time.diffMillis : Int -> Int -> Int` — `later - earlier`.
 /// Go: `return AsInt(later) - AsInt(earlier)`. Args: (later, earlier).
-pub fn time_diff_millis(later: i64, earlier: i64) -> i64 { later - earlier }
+pub fn time_diff_millis(later: i64, earlier: i64) -> i64 { later.saturating_sub(earlier) }
 
 /// `Time.format : String -> Int -> String` — custom Go-style layout.
 /// Go uses `t.UTC().Format(layout)`. We map the Go reference-time layout to
@@ -59,8 +59,11 @@ pub fn time_format(layout: String, ms: i64) -> String {
         .replace("Jan", "%b")
         .replace("Mon", "%a")
         .replace("MST", "UTC")
-        .replace(".000", ".%3f")
+        // Longer fractional-second token MUST be translated before the shorter
+        // one, else `.000` shadows the `.000000` form (it matches the leading 4
+        // chars and leaves a stray `000`).
         .replace(".000000", ".%6f")
+        .replace(".000", ".%3f")
         .replace("PM", "%p")
         .replace("pm", "%P");
     dt.format(&strfmt).to_string()
@@ -118,10 +121,14 @@ pub fn time_in_zone<E: From<String>>(zone: String, ms: i64) -> SkyResult<E, Stri
     SkyResult::Ok(dt.to_rfc3339())
 }
 
-pub fn time_add_days(days: i64, ms: i64) -> i64 { ms + days * 86_400_000 }
-pub fn time_add_hours(h: i64, ms: i64) -> i64 { ms + h * 3_600_000 }
-pub fn time_add_minutes(m: i64, ms: i64) -> i64 { ms + m * 60_000 }
-pub fn time_add_seconds(s: i64, ms: i64) -> i64 { ms + s * 1000 }
+// Saturating arithmetic: extreme caller-controlled Ints would otherwise
+// overflow-panic in debug / wrap silently in release. Saturation keeps these
+// total (no panic path) and is the closest bare-`i64` analogue of the
+// `time_add_months` "return ms on out-of-range" fallback.
+pub fn time_add_days(days: i64, ms: i64) -> i64 { ms.saturating_add(days.saturating_mul(86_400_000)) }
+pub fn time_add_hours(h: i64, ms: i64) -> i64 { ms.saturating_add(h.saturating_mul(3_600_000)) }
+pub fn time_add_minutes(m: i64, ms: i64) -> i64 { ms.saturating_add(m.saturating_mul(60_000)) }
+pub fn time_add_seconds(s: i64, ms: i64) -> i64 { ms.saturating_add(s.saturating_mul(1000)) }
 
 pub fn time_add_months(months: i64, ms: i64) -> i64 {
     let utc = match Utc.timestamp_millis_opt(ms).single() {
@@ -153,7 +160,7 @@ pub fn time_add_months(months: i64, ms: i64) -> i64 {
 }
 
 pub fn time_add_years(years: i64, ms: i64) -> i64 {
-    time_add_months(years * 12, ms)
+    time_add_months(years.saturating_mul(12), ms)
 }
 
 fn zoned_field<E: From<String>, F>(zone: String, ms: i64, f: F) -> SkyResult<E, i64>
@@ -309,10 +316,12 @@ pub fn time_format_iso8601(ms: i64) -> String {
 // === advanced diff / fromParts / zone kernels ===
 
 /// `diffSeconds later earlier` — integer seconds between two epoch-ms timestamps.
-pub fn time_diff_seconds(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - earlier_ms) / 1_000 }
-pub fn time_diff_minutes(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - earlier_ms) / 60_000 }
-pub fn time_diff_hours(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - earlier_ms) / 3_600_000 }
-pub fn time_diff_days(later_ms: i64, earlier_ms: i64) -> i64 { (later_ms - earlier_ms) / 86_400_000 }
+// Division truncates toward zero (Go parity; negative spans truncate toward
+// zero too). `saturating_sub` avoids an overflow-panic on extreme epoch inputs.
+pub fn time_diff_seconds(later_ms: i64, earlier_ms: i64) -> i64 { later_ms.saturating_sub(earlier_ms) / 1_000 }
+pub fn time_diff_minutes(later_ms: i64, earlier_ms: i64) -> i64 { later_ms.saturating_sub(earlier_ms) / 60_000 }
+pub fn time_diff_hours(later_ms: i64, earlier_ms: i64) -> i64 { later_ms.saturating_sub(earlier_ms) / 3_600_000 }
+pub fn time_diff_days(later_ms: i64, earlier_ms: i64) -> i64 { later_ms.saturating_sub(earlier_ms) / 86_400_000 }
 
 /// Sky source: `fromParts zone y m d h mins s -> Result Error Int`.
 /// Computes the UTC epoch-ms for the given local date/time in the given IANA

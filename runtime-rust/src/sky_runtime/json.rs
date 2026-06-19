@@ -29,6 +29,18 @@ impl<E, T> Decoder<E, T> {
     }
 }
 
+/// Append every field from `extra` into `base` that isn't already present.
+/// The shared field-union used by every multi-decoder combinator (map2..5,
+/// and_map, the pipeline helpers) so the open-coded O(n²) merge lives in one
+/// place instead of ~10 copies.
+fn union_fields(base: &mut Vec<String>, extra: &[String]) {
+    for fld in extra {
+        if !base.contains(fld) {
+            base.push(fld.clone());
+        }
+    }
+}
+
 pub fn decode_ok<E, T>(t: T) -> SkyResult<E, T> { SkyResult::Ok(t) }
 pub fn decode_err_str<E: From<String>, T>(s: String) -> SkyResult<E, T> { SkyResult::Err(str_err(&s)) }
 
@@ -133,7 +145,16 @@ pub fn decode_list<E: From<String> + 'static, T: 'static + Send>(decoder: impl F
         Box::new(move |v| match v.as_array() {
             Some(arr) => {
                 let mut out = Vec::with_capacity(arr.len());
-                for item in arr { let d = decoder(); match (d.run)(item) { SkyResult::Ok(t) => out.push(t), SkyResult::Err(_) => return decode_err_str("decode error".into()) } }
+                for item in arr {
+                    let d = decoder();
+                    match (d.run)(item) {
+                        SkyResult::Ok(t) => out.push(t),
+                        // Surface the REAL inner-element error rather than
+                        // collapsing it to a generic "decode error" — keeps the
+                        // diagnostic Go's `JsonDec.list` preserves.
+                        SkyResult::Err(e) => return SkyResult::Err(e),
+                    }
+                }
                 decode_ok(out)
             },
             None => decode_err_str("expected array".into())
@@ -155,7 +176,7 @@ pub fn decode_map2<E: From<String> + 'static, A: 'static + Send, B: 'static + Se
     f: impl Fn(A, B) -> C + Send + 'static, da: Decoder<E, A>, db: Decoder<E, B>,
 ) -> Decoder<E, C> {
     let mut fields = da.fields.clone();
-    for fld in &db.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
+    union_fields(&mut fields, &db.fields);
     Decoder::new(
         Box::new(move |v| {
             let a = match (da.run)(v) { SkyResult::Ok(a) => a, SkyResult::Err(e) => return SkyResult::Err(e) };
@@ -169,8 +190,8 @@ pub fn decode_map3<E: From<String> + 'static, A: 'static + Send, B: 'static + Se
     f: impl Fn(A, B, C) -> D + Send + 'static, da: Decoder<E, A>, db: Decoder<E, B>, dc: Decoder<E, C>,
 ) -> Decoder<E, D> {
     let mut fields = da.fields.clone();
-    for fld in &db.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
-    for fld in &dc.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
+    union_fields(&mut fields, &db.fields);
+    union_fields(&mut fields, &dc.fields);
     Decoder::new(
         Box::new(move |v| {
             let a = match (da.run)(v) { SkyResult::Ok(a) => a, SkyResult::Err(e) => return SkyResult::Err(e) };
@@ -185,9 +206,9 @@ pub fn decode_map4<E: From<String> + 'static, A: 'static + Send, B: 'static + Se
     f: impl Fn(A, B, C, D) -> G + Send + 'static, da: Decoder<E, A>, db: Decoder<E, B>, dc: Decoder<E, C>, dd: Decoder<E, D>,
 ) -> Decoder<E, G> {
     let mut fields = da.fields.clone();
-    for fld in &db.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
-    for fld in &dc.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
-    for fld in &dd.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
+    union_fields(&mut fields, &db.fields);
+    union_fields(&mut fields, &dc.fields);
+    union_fields(&mut fields, &dd.fields);
     Decoder::new(
         Box::new(move |v| {
             let a = match (da.run)(v) { SkyResult::Ok(a) => a, SkyResult::Err(e) => return SkyResult::Err(e) };
@@ -206,10 +227,10 @@ pub fn decode_map5<E: From<String> + 'static, A: 'static + Send, B: 'static + Se
     da: Decoder<E, A>, db: Decoder<E, B>, dc: Decoder<E, C>, dd: Decoder<E, D>, de: Decoder<E, G>,
 ) -> Decoder<E, H> {
     let mut fields = da.fields.clone();
-    for fld in &db.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
-    for fld in &dc.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
-    for fld in &dd.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
-    for fld in &de.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
+    union_fields(&mut fields, &db.fields);
+    union_fields(&mut fields, &dc.fields);
+    union_fields(&mut fields, &dd.fields);
+    union_fields(&mut fields, &de.fields);
     Decoder::new(
         Box::new(move |v| {
             let a = match (da.run)(v) { SkyResult::Ok(a) => a, SkyResult::Err(e) => return SkyResult::Err(e) };
@@ -233,7 +254,7 @@ pub fn decode_and_map<E: From<String> + 'static, A: 'static + Send, B: 'static +
     dec_fn: Decoder<E, Box<dyn FnOnce(A) -> B + Send>>,
 ) -> Decoder<E, B> {
     let mut fields = dec_fn.fields.clone();
-    for fld in &dec_val.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
+    union_fields(&mut fields, &dec_val.fields);
     Decoder::new(
         Box::new(move |v| {
             // Evaluate the function decoder first (pipeline accumulator), then the value.
@@ -287,7 +308,18 @@ pub fn decode_fail<E: From<String> + 'static, A: 'static + Send>(msg: String) ->
 }
 pub fn decode_one_of<E: From<String> + 'static, T: 'static + Send>(decoders: Vec<Decoder<E, T>>) -> Decoder<E, T> {
     Decoder::new(
-        Box::new(move |v| { for d in &decoders { let r = (d.run)(v); if r.is_ok() { return r; } } decode_err_str("oneOf: no match".into()) }),
+        Box::new(move |v| {
+            // Try each branch; on total failure surface the LAST branch's real
+            // error rather than a generic "oneOf: no match" (Go's `oneOf`
+            // likewise reports the underlying failure).
+            let mut last_err: Option<SkyResult<E, T>> = None;
+            for d in &decoders {
+                let r = (d.run)(v);
+                if r.is_ok() { return r; }
+                last_err = Some(r);
+            }
+            last_err.unwrap_or_else(|| decode_err_str("oneOf: no match".into()))
+        }),
         vec![],
     )
 }
@@ -389,7 +421,7 @@ pub fn curry10<A1: 'static + Send, A2: 'static + Send, A3: 'static + Send, A4: '
 // — matches that shape (35-composite-generics; was a 2-arg curried fn → E0061).
 pub fn decode_pipeline_required<E: From<String> + 'static, T: 'static, F: 'static>(name: String, decoder: Decoder<E, T>, next_decoder: Decoder<E, Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<E, F> {
     let mut fields = next_decoder.fields.clone();
-    for fld in &decoder.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
+    union_fields(&mut fields, &decoder.fields);
     let n = name; let d = decoder; let nd = next_decoder;
     Decoder::new(
         Box::new(move |v| {
@@ -401,7 +433,7 @@ pub fn decode_pipeline_required<E: From<String> + 'static, T: 'static, F: 'stati
 }
 pub fn decode_pipeline_optional<E: From<String> + 'static, T: Clone + 'static + Send, F: 'static>(name: String, decoder: Decoder<E, T>, default: T, next_decoder: Decoder<E, Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<E, F> {
     let mut fields = next_decoder.fields.clone();
-    for fld in &decoder.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
+    union_fields(&mut fields, &decoder.fields);
     let n = name; let d = decoder; let nd = next_decoder; let def = default;
     Decoder::new(
         Box::new(move |v| {
@@ -422,7 +454,7 @@ pub fn decode_pipeline_required_at<E: From<String> + 'static, T: 'static, F: 'st
     next_decoder: Decoder<E, Box<dyn FnOnce(T) -> F + Send>>,
 ) -> Decoder<E, F> {
     let mut fields = next_decoder.fields.clone();
-    for fld in &decoder.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
+    union_fields(&mut fields, &decoder.fields);
     let p = path;
     let d = decoder;
     let nd = next_decoder;
@@ -456,7 +488,7 @@ pub fn decode_pipeline_required_at<E: From<String> + 'static, T: 'static, F: 'st
 /// pipeline argument. A custom decode failure aborts the pipeline.
 pub fn decode_pipeline_custom<E: From<String> + 'static, T: 'static, F: 'static>(decoder: Decoder<E, T>, next_decoder: Decoder<E, Box<dyn FnOnce(T) -> F + Send>>) -> Decoder<E, F> {
     let mut fields = next_decoder.fields.clone();
-    for fld in &decoder.fields { if !fields.contains(fld) { fields.push(fld.clone()); } }
+    union_fields(&mut fields, &decoder.fields);
     let d = decoder; let nd = next_decoder;
     Decoder::new(
         Box::new(move |v| {

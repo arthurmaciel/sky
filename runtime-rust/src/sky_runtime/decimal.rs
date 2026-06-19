@@ -29,8 +29,11 @@ pub fn decimal_from_float(f: f64) -> Decimal {
 // Arg order is (places, minor): places is the scale, minor is the integer
 // value in minor units. Mantissa = minor, scale = places.
 pub fn decimal_from_minor(places: i64, minor: i64) -> Decimal {
-    let scale = places.max(0) as u32;
-    Decimal(RD::new(minor, scale))
+    // rust_decimal's MAX_SCALE is 28; `RD::new` PANICS above it. Clamp the
+    // user-supplied scale and use the checked constructor so a well-typed Sky
+    // call (`Std.Decimal.fromMinor 30 1`) can never abort.
+    let scale = (places.max(0) as u32).min(RD::MAX_SCALE);
+    Decimal(RD::try_new(minor, scale).unwrap_or(RD::ZERO))
 }
 pub fn decimal_zero() -> Decimal { Decimal(RD::ZERO) }
 pub fn decimal_one() -> Decimal { Decimal(RD::ONE) }
@@ -40,7 +43,10 @@ pub fn decimal_one_hundred() -> Decimal { Decimal(RD::from(100)) }
 
 pub fn decimal_to_string(d: Decimal) -> String { d.0.normalize().to_string() }
 pub fn decimal_to_string_fixed(places: i64, d: Decimal) -> String {
-    let p = places.max(0) as u32;
+    // Clamp to MAX_SCALE: digits beyond the decimal's max scale are all zeros,
+    // so a huge `places` (e.g. 1e9) would only force a multi-GB allocation for
+    // trailing zeros. Cap the format width to keep the kernel bounded.
+    let p = (places.max(0) as u32).min(RD::MAX_SCALE);
     let r = d.0.round_dp_with_strategy(p, RoundingStrategy::MidpointNearestEven);
     format!("{:.*}", p as usize, r)
 }
@@ -50,7 +56,10 @@ pub fn decimal_to_int(d: Decimal) -> i64 {
 }
 pub fn decimal_to_minor(scale: i64, d: Decimal) -> i64 {
     let p = scale.max(0) as u32;
-    let scaled = d.0 * RD::from(10_i64.pow(p));
+    // `10_i64.pow(19)` overflows i64 → panic (debug) / wrap (release). Use
+    // checked_pow with a saturating fallback so the kernel stays total.
+    let factor = 10_i64.checked_pow(p).unwrap_or(i64::MAX);
+    let scaled = d.0 * RD::from(factor);
     scaled.trunc().to_i64().unwrap_or(0)
 }
 
@@ -133,7 +142,10 @@ pub fn decimal_sub_percent(pct: Decimal, base: Decimal) -> Decimal {
 // === formatWith — Sky source: formatWith thousandsSep decimalSep places d ===
 // (group every 3 digits right-to-left)
 pub fn decimal_format_with(grp_sep: String, dec_sep: String, places: i64, d: Decimal) -> String {
-    let p = places.max(0) as u32;
+    // Clamp to MAX_SCALE: digits past the decimal's max scale are zeros anyway,
+    // so a huge `places` only inflates the format-width allocation (DoS) without
+    // adding precision.
+    let p = (places.max(0) as u32).min(RD::MAX_SCALE);
     let rounded = if p > 0 {
         d.0.round_dp_with_strategy(p, RoundingStrategy::MidpointNearestEven)
     } else {

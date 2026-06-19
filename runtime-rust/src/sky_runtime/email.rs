@@ -174,9 +174,14 @@ async fn send_resend<E: From<String>>(api_key: &str, m: &EmailMessage) -> SkyRes
             .attachments
             .iter()
             .map(|a| {
+                // Resend expects `content` as a base64 STRING, not a JSON byte
+                // array. `a.content` is a Latin-1 byte-string (one char per byte
+                // per encoding.rs convention), so decode it back to raw bytes via
+                // sky_bytes BEFORE base64 — `as_bytes()` would re-UTF-8-encode and
+                // corrupt any byte >= 0x80. `base64_encode` does sky_bytes→base64.
                 serde_json::json!({
                     "filename": a.filename,
-                    "content": a.content.as_bytes(),
+                    "content": base64_encode(a.content.clone()),
                 })
             })
             .collect();
@@ -486,9 +491,12 @@ async fn send_smtp<E: From<String>>(cfg: &SmtpConfig, m: &EmailMessage) -> SkyRe
                 .mimeType
                 .parse::<ContentType>()
                 .unwrap_or(ContentType::TEXT_PLAIN);
+            // `att.content` is a Latin-1 byte-string (one char per byte); decode
+            // it back to raw bytes via sky_bytes. `into_bytes()` would re-UTF-8-
+            // encode and corrupt any attachment byte >= 0x80.
             mixed = mixed.singlepart(
                 Attachment::new(att.filename.clone())
-                    .body(att.content.clone().into_bytes(), ct),
+                    .body(sky_bytes(&att.content), ct),
             );
         }
         builder.multipart(mixed)

@@ -11,10 +11,17 @@ pub(crate) fn lcg_init() {
 }
 
 pub(crate) fn lcg_next() -> u64 {
-    let state = LCG_STATE.load(Ordering::Relaxed);
-    let next = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    LCG_STATE.store(next, Ordering::Relaxed);
-    next
+    // Atomic RMW (CAS loop) so two threads under `task_parallel` can't read the
+    // same state and emit identical sequences (lost-update / duplicate-randomness
+    // race). The non-atomic load→compute→store this replaces was racy.
+    let mut state = LCG_STATE.load(Ordering::Relaxed);
+    loop {
+        let next = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        match LCG_STATE.compare_exchange_weak(state, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(observed) => state = observed,
+        }
+    }
 }
 
 // ── Deterministic seeded PRNG (splitmix64) — byte-for-byte parity with Go's
@@ -58,8 +65,17 @@ pub fn random_seeded_choice<T: Clone>(s: i64, items: Vec<T>) -> (SkyMaybe<T>, i6
 pub fn random_int<E: Send + 'static>(lo: i64, hi: i64) -> SkyTask<E, i64> {
     Box::pin(async move {
         lcg_init();
-        let range = (hi - lo).abs() + 1;
-        let v = lo + (lcg_next() as i64 % range);
+        // Inclusive [lo, hi] semantics matching Go's `mrand.Intn(hi-lo+1)`.
+        // Do the modulo in u64 and add to lo so the result can never fall below
+        // lo (the previous `lcg_next() as i64 % range` produced negative
+        // remainders → out-of-range draws). `wrapping_*`/u64 width avoid the
+        // `i64::MIN.abs()` overflow-panic on extreme `lo`/`hi`.
+        if hi < lo {
+            return ok_res(lo);
+        }
+        let span = (hi.wrapping_sub(lo)) as u64;
+        let range = span.wrapping_add(1).max(1);
+        let v = lo.wrapping_add((lcg_next() % range) as i64);
         ok_res(v)
     })
 }

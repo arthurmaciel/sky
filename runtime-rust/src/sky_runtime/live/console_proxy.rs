@@ -302,7 +302,10 @@ async fn forward(
         }
         rb = rb.header(name, value);
     }
-    let upstream_resp = match rb.body(body_bytes.to_vec()).send().await {
+    // Pass the buffered `Bytes` straight to reqwest (which impls `From<Bytes>`)
+    // rather than cloning into a `Vec<u8>` — avoids a second full-body copy and
+    // halves peak per-request memory for large proxied POSTs.
+    let upstream_resp = match rb.body(body_bytes).send().await {
         Ok(r) => r,
         Err(_) => {
             return error_response(

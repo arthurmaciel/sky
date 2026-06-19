@@ -156,6 +156,12 @@ pub(crate) fn cli_run_cmd<M: Send + 'static>(cmd: SkyCmd<M>, tx: &tokio::sync::m
         }
         SkyCmd::Perform(thunk) => {
             let tx = tx.clone();
+            // Fire-and-forget: a panic inside the composed task→toMsg thunk aborts
+            // only this task and is intentionally swallowed — that is the
+            // Task-boundary recover contract (an effectful task that faults must
+            // not crash the TEA loop). The fault therefore produces no Msg (the
+            // send never runs); structured-warn observability on this path is a
+            // known follow-up (would require awaiting the JoinHandle's JoinError).
             tokio::spawn(async move {
                 let msg = thunk().await;
                 let _ = tx.send(CliEvent::Msg(msg));
@@ -200,6 +206,14 @@ where
 
         // Blocking stdin reader → raw Line events, then Eof. onLine is applied in
         // the main task (keeps it off the blocking thread / out of Send bounds).
+        //
+        // KNOWN LEAK (intentional, bounded): this detached thread is never joined
+        // or signalled — if the returned future is dropped/cancelled the thread
+        // stays parked on `lines()` until the next stdin line (or process exit).
+        // Benign for a one-shot Cli `main` (the process is exiting anyway); a
+        // shutdown flag wouldn't help since the read blocks until the next line
+        // regardless. Do NOT compose `cli_program` under a cancelling parent or
+        // invoke it twice in one process without first accounting for this.
         let line_tx = tx.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;

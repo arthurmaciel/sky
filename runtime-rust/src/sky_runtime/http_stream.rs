@@ -47,6 +47,12 @@ pub enum ChunkEvent<E> {
 // Storing the `reqwest::Response` (rather than its byte stream) avoids naming
 // `bytes::Bytes` — `forEachChunk` calls `.bytes_stream()` and the chunk type is
 // inferred, so no extra `bytes` dependency is needed.
+//
+// Contract: every `open` MUST be paired with a `forEachChunk` (which removes the
+// entry on exit) or a `close` (idempotent removal) — both release the parked
+// response + its connection. Calling `open` repeatedly without draining/closing
+// leaks responses; the 30s connect_timeout bounds only the header stage, not an
+// abandoned-but-open stream. (A future idle reaper could bound this registry.)
 fn client_streams() -> &'static Mutex<HashMap<i64, reqwest::Response>> {
     static R: OnceLock<Mutex<HashMap<i64, reqwest::Response>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(HashMap::new()))

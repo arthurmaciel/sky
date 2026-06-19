@@ -104,14 +104,40 @@ pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) ->
     if !is_internal_path(&path) && !is_sub_app() {
         let dur_us = start.elapsed().as_micros().min(u64::MAX as u128) as u64;
         let ok = status < 500;
-        super::super::telemetry::record_span(&format!("{method} {path}"), dur_us, ok);
+        // Bound + sanitise the (attacker-controllable) raw path before it enters
+        // the in-RAM log ring / OTLP push: cap the length and strip control bytes
+        // so a `/<huge-or-control-char path>` can't inject ANSI/control sequences
+        // into the operator console or amplify per-entry memory.
+        let safe_path = sanitise_path(&path);
+        super::super::telemetry::record_span(&format!("{method} {safe_path}"), dur_us, ok);
         let level = if status >= 500 { "error" } else { "info" };
         super::super::telemetry::record_log(
             level,
-            &format!("{method} {path} -> {status} ({}ms)", dur_us / 1000),
+            &format!("{method} {safe_path} -> {status} ({}ms)", dur_us / 1000),
         );
     }
     resp
+}
+
+/// Cap the request path to a sane length and strip control characters before it
+/// is recorded into the telemetry rings / federation push. Mirrors the Sky.Tui
+/// `sanitiseRune` discipline — the path is user-supplied and otherwise
+/// unbounded, a low-grade log-injection / memory-amplification vector.
+fn sanitise_path(path: &str) -> String {
+    const MAX_PATH_BYTES: usize = 256;
+    let mut out = String::with_capacity(path.len().min(MAX_PATH_BYTES));
+    for ch in path.chars() {
+        // Drop ASCII/Unicode control chars (incl. ESC for ANSI, NUL, newlines).
+        if ch.is_control() {
+            continue;
+        }
+        if out.len() + ch.len_utf8() > MAX_PATH_BYTES {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Internal observability/transport paths that must NOT be auto-instrumented:

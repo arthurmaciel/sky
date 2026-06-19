@@ -10,6 +10,23 @@
 
 use super::*;
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// A fixed, valid cost-12 bcrypt hash used ONLY to make the unknown-email login
+/// path do the same KDF work as the known-email path (anti-enumeration timing
+/// defence). Computed once; the verify result is always discarded. Cost 12
+/// matches the register default so both paths cost the same.
+fn dummy_bcrypt_hash() -> &'static str {
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| {
+        // bcrypt::hash is infallible for a fixed valid input + cost; on the
+        // structurally-unreachable Err, fall back to a static valid cost-12
+        // hash literal so the verify still runs the KDF.
+        bcrypt::hash("sky-login-timing-defence", 12).unwrap_or_else(|_| {
+            "$2b$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW".to_string()
+        })
+    })
+}
 
 // ─── Pure crypto kernels ──────────────────────────────────────────────
 
@@ -23,7 +40,7 @@ pub fn auth_hash_password<E: From<String>>(pw: String) -> SkyResult<E, String> {
 /// to [4, 31] (bcrypt's valid range; 4 = fast for tests, 12 = production
 /// default, 14+ = high security).
 pub fn auth_hash_password_cost<E: From<String>>(pw: String, cost: i64) -> SkyResult<E, String> {
-    if pw.len() < 8 {
+    if pw.chars().count() < 8 {
         return SkyResult::Err("password must be at least 8 characters".to_string().into());
     }
     if pw.len() > 72 {
@@ -54,7 +71,7 @@ pub fn auth_verify_password<E: From<String>>(pw: String, hash: String) -> SkyRes
 /// > ≥10 chars + letter + digit          → "medium"
 /// > otherwise (passes letter+digit check) → "weak"
 pub fn auth_password_strength<E: From<String>>(pw: String) -> SkyResult<E, String> {
-    if pw.len() < 8 {
+    if pw.chars().count() < 8 {
         return SkyResult::Err("password must be at least 8 characters".to_string().into());
     }
     if pw.len() > 72 {
@@ -66,9 +83,10 @@ pub fn auth_password_strength<E: From<String>>(pw: String) -> SkyResult<E, Strin
     if !has_letter || !has_digit {
         return SkyResult::Err("password must contain both letters and digits".to_string().into());
     }
-    let rating = if pw.len() >= 12 && has_symbol { "strong" }
-                 else if pw.len() >= 10          { "medium" }
-                 else                            { "weak" };
+    let char_count = pw.chars().count();
+    let rating = if char_count >= 12 && has_symbol { "strong" }
+                 else if char_count >= 10          { "medium" }
+                 else                              { "weak" };
     SkyResult::Ok(rating.to_string())
 }
 
@@ -226,7 +244,14 @@ pub fn auth_login<E: Send + From<String> + 'static>(
                     _ => SkyResult::Err("auth.login: invalid credentials".to_string().into()),
                 }
             }
-            Ok(None) => SkyResult::Err("auth.login: invalid credentials".to_string().into()),
+            Ok(None) => {
+                // TIMING: perform an equal-cost bcrypt verify against a fixed
+                // cost-12 hash so the unknown-email path does the same hashing
+                // work as the known-email path — removing the email-enumeration
+                // timing oracle. The result is discarded.
+                let _ = bcrypt::verify(&password, dummy_bcrypt_hash());
+                SkyResult::Err("auth.login: invalid credentials".to_string().into())
+            }
             Err(e) => SkyResult::Err(format!("auth.login: {}", e).into()),
         }
     })

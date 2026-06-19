@@ -91,6 +91,21 @@ fn with_slot<R>(handle: i64, default: R, f: impl FnOnce(&mut Slot) -> R) -> R {
 /// `Cache.newRaw : CacheCfg -> Task Error Int` — allocate a cache, return its handle.
 pub fn cache_new_raw<E: Send + From<String> + 'static>(cfg: CacheCfg) -> SkyTask<E, i64> {
     Box::pin(async move {
+        // `maxBytes` is not enforced on the Rust backend: the value is erased to a
+        // `Box<dyn Any>`, so per-entry byte accounting isn't available without a
+        // size-measuring bound. Warn ONCE so a caller relying on it for a memory
+        // bound isn't silently unprotected — `maxEntries` (LRU) is the live bound.
+        if cfg.maxBytes > 0 {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "[sky.cache] CacheCfg.maxBytes ({}) is not enforced on the Rust backend; \
+                     use maxEntries (LRU) to bound memory",
+                    cfg.maxBytes
+                );
+            }
+        }
         let h = {
             let mut g = registry().lock().unwrap_or_else(|e| e.into_inner());
             g.0 += 1;

@@ -23,13 +23,10 @@ pub fn file_exists<E: Send + 'static>(path: String) -> SkyTask<E, bool> {
     Box::pin(async move { ok_res(std::path::Path::new(&path).exists()) })
 }
 
+/// Alias of `file_remove` (the `remove` contract). Kept as a public name for
+/// ABI stability; delegates so the two never drift.
 pub fn file_delete<E: Send + From<String> + 'static>(path: String) -> SkyTask<E, ()> {
-    Box::pin(async move {
-        match std::fs::remove_file(&path) {
-            Ok(_) => ok_res(()),
-            Err(e) => SkyResult::Err(str_err(&format!("{}", e))),
-        }
-    })
+    file_remove(path)
 }
 
 /// `Sky.Core.File.mkdirAll : String -> Task Error ()` — create the directory

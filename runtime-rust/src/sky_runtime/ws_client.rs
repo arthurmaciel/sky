@@ -290,8 +290,16 @@ where M: Send + 'static, F: Fn(WsClientMessage) -> M + Send + Sync + 'static {
         if ws_mark_subscribed(socket_id, "message") {
             tokio::spawn(async move {
                 let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
-                while let Ok(ev) = rx.recv().await {
-                    if let WsEvent::Message(m) = ev { emit(to_msg(m)); }
+                loop {
+                    match rx.recv().await {
+                        Ok(WsEvent::Message(m)) => emit(to_msg(m)),
+                        Ok(_) => {}
+                        // A momentarily-slow consumer that lags past the buffer gets
+                        // a Lagged error — skip the gap and keep the subscription
+                        // alive (do NOT treat it as terminal). Closed channel ends it.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             });
         }
@@ -317,8 +325,14 @@ where M: Send + 'static, F: Fn(WsCloseCode) -> M + Send + Sync + 'static {
         if ws_mark_subscribed(socket_id, "close") {
             tokio::spawn(async move {
                 let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
-                while let Ok(ev) = rx.recv().await {
-                    if let WsEvent::Closed(code) = ev { emit(to_msg(ws_close_code(code))); break; }
+                loop {
+                    match rx.recv().await {
+                        Ok(WsEvent::Closed(code)) => { emit(to_msg(ws_close_code(code))); break; }
+                        Ok(_) => {}
+                        // Transient lag: skip the gap, keep waiting for the close event.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             });
         }
@@ -333,8 +347,14 @@ where E: From<String> + Send + 'static, M: Send + 'static, F: Fn(E) -> M + Send 
         if ws_mark_subscribed(socket_id, "error") {
             tokio::spawn(async move {
                 let mut rx = match subscribe_events(socket_id) { Some(rx) => rx, None => return };
-                while let Ok(ev) = rx.recv().await {
-                    if let WsEvent::Error(s) = ev { emit(to_msg(s.into())); break; }
+                loop {
+                    match rx.recv().await {
+                        Ok(WsEvent::Error(s)) => { emit(to_msg(s.into())); break; }
+                        Ok(_) => {}
+                        // Transient lag: skip the gap, keep waiting for the error event.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             });
         }

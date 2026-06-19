@@ -92,8 +92,22 @@ pub async fn api_metrics_summary() -> impl IntoResponse {
 /// (`SKY_ADMIN_TOKEN`, legacy `SKY_CONSOLE_TOKEN`) — 401 otherwise. Dev mode (the
 /// default) is open and returns `None`.
 pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::Response> {
-    if std::env::var("SKY_CONSOLE_AUTH").map(|v| v == "off").unwrap_or(false) {
+    let console_auth = std::env::var("SKY_CONSOLE_AUTH").unwrap_or_default();
+    if console_auth == "off" {
         return Some((StatusCode::NOT_FOUND, "console disabled").into_response());
+    }
+    // `SKY_CONSOLE_AUTH=app` (the row-poly `consoleAuth` callback mode) is not yet
+    // implemented in the Rust runtime. Fail closed with a clear, correctly-typed
+    // 501 rather than a misleading 401 that suggests a bad token would fix it.
+    if console_auth == "app" {
+        return Some(
+            (
+                StatusCode::NOT_IMPLEMENTED,
+                "SKY_CONSOLE_AUTH=app (row-poly consoleAuth callback) is not yet \
+                 supported on the Rust runtime; use token/off or SKY_ADMIN_TOKEN",
+            )
+                .into_response(),
+        );
     }
     if !telemetry::production_from_env() {
         return None;
@@ -178,7 +192,25 @@ fn fold_log(it: &serde_json::Value) {
 /// is absent or wrong (constant-time compare). Unset → `None` (open endpoint).
 fn ingest_token_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::Response> {
     use subtle::ConstantTimeEq;
-    let want = std::env::var("SKY_INGEST_TOKEN").ok().filter(|t| !t.is_empty())?;
+    let want = match std::env::var("SKY_INGEST_TOKEN").ok().filter(|t| !t.is_empty()) {
+        Some(t) => t,
+        None => {
+            // Unset token: open in dev (single-process / no federation), but in
+            // production fail CLOSED — an unauthenticated ingest endpoint folds
+            // attacker-supplied telemetry straight into the operator console
+            // (log-injection). Matches the console mount's own production gate.
+            if telemetry::production_from_env() {
+                return Some(
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        "observability ingest requires SKY_INGEST_TOKEN in production",
+                    )
+                        .into_response(),
+                );
+            }
+            return None;
+        }
+    };
     let got = headers
         .get("x-sky-ingest-token")
         .and_then(|h| h.to_str().ok())

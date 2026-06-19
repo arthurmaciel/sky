@@ -220,7 +220,14 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
 }
 
 fn escape_text(t: &str) -> String {
-    t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    // `&` first (so the inserted `&xxx;` entities aren't re-escaped), then the
+    // remaining metacharacters. The single quote `'` is escaped too — Go's
+    // html.EscapeString covers the full `& ' < > "` set, and a missed `'` is an
+    // attribute-breakout XSS hole when the result lands in a single-quoted attr.
+    t.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\'', "&#39;")
 }
 
 fn escape_attr(t: &str) -> String {
@@ -325,13 +332,17 @@ pub fn html_render_<M>(node: Html<M>) -> String {
 }
 
 /// `Ffi.callPure "htmlEscapeText"` — HTML-escape a string for text content.
+/// Routes through the same escaper as render so the escape set (`& ' < > "`,
+/// matching Go's html.EscapeString for the text subset) can never drift.
 pub fn html_escape_text_(s: String) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    escape_text(&s)
 }
 
-/// `Ffi.callPure "htmlEscapeAttr"` — escape a string for use in a double-quoted attribute.
+/// `Ffi.callPure "htmlEscapeAttr"` — escape a string for use in a quoted
+/// attribute. Shares render's attr escaper, so a value placed in a single- or
+/// double-quoted attribute is escaped identically (no attribute-breakout hole).
 pub fn html_escape_attr_(s: String) -> String {
-    html_escape_text_(s).replace('"', "&quot;")
+    escape_attr(&s)
 }
 
 /// `Ffi.callPure "htmlAttrToString"` — serialise a single Attribute to its key="value" form.
@@ -387,6 +398,26 @@ mod tests {
         assert!(s.contains("1 &lt; 2"));
         assert!(s.contains("<b>ok</b>"));
         assert!(s.contains("</div>"));
+    }
+
+    #[test]
+    fn single_quote_is_escaped_everywhere() {
+        // A `'` in attr/text/kernel output must become `&#39;` so a value placed
+        // in a single-quoted attribute can't break out (XSS) and the escape set
+        // matches Go's html.EscapeString.
+        assert_eq!(escape_text("it's <b>"), "it&#39;s &lt;b&gt;");
+        assert_eq!(escape_attr("a'\"b"), "a&#39;&quot;b");
+        assert_eq!(html_escape_text_("x'y".to_string()), "x&#39;y");
+        assert_eq!(html_escape_attr_("x'y".to_string()), "x&#39;y");
+        // Round-trips through render on a real attribute value.
+        let mut t: Html<()> = Html::HElement(
+            "a".into(),
+            vec![Attribute::Attr("href".into(), "/x?q='z".into())],
+            vec![],
+        );
+        assign_sky_ids(&mut t, "r");
+        let s = render_html(&t);
+        assert!(s.contains("href=\"/x?q=&#39;z\""), "{s}");
     }
 
     #[test]

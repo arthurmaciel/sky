@@ -2,24 +2,32 @@
 use super::*;
 
 pub fn crypto_random_bytes<E: Send + 'static>(n: i64) -> SkyTask<E, Vec<i64>> {
+    use aes_gcm::aead::{OsRng, rand_core::RngCore};
     Box::pin(async move {
-        super::random::lcg_init();
-        let mut out = Vec::with_capacity(n as usize);
-        for _ in 0..n { out.push(super::random::lcg_next() as i64); }
-        ok_res(out)
+        // SECURITY: Crypto.randomBytes is a documented entropy primitive (session
+        // tokens, CSRF, key material) — draw from the OS CSPRNG, NOT the non-crypto
+        // LCG. Each byte is masked to [0,255] so the result is a true byte stream
+        // matching Go's crypto/rand-backed `randomBytes`.
+        let count = n.max(0) as usize;
+        let mut buf = vec![0u8; count];
+        OsRng.fill_bytes(&mut buf);
+        ok_res(buf.into_iter().map(|b| b as i64).collect())
     })
 }
 
 pub fn crypto_random_token<E: Send + 'static>(n: i64) -> SkyTask<E, String> {
+    use aes_gcm::aead::{OsRng, rand_core::RngCore};
     Box::pin(async move {
-        super::random::lcg_init();
-        let hex = "0123456789abcdef";
-        let mut out = String::with_capacity((n * 2) as usize);
-        for _ in 0..n {
-            let b = super::random::lcg_next();
+        // SECURITY: token entropy from the OS CSPRNG (see crypto_random_bytes).
+        let hex = b"0123456789abcdef";
+        let count = n.max(0) as usize;
+        let mut buf = vec![0u8; count];
+        OsRng.fill_bytes(&mut buf);
+        let mut out = String::with_capacity(count * 2);
+        for b in buf {
             // `& 0x0f` bounds the index to [0, 15] < 16 (hex.len()); .get keeps it total.
-            out.push(hex.as_bytes().get((b & 0x0f) as usize).copied().unwrap_or(b'0') as char);
-            out.push(hex.as_bytes().get(((b >> 4) & 0x0f) as usize).copied().unwrap_or(b'0') as char);
+            out.push(hex.get((b & 0x0f) as usize).copied().unwrap_or(b'0') as char);
+            out.push(hex.get(((b >> 4) & 0x0f) as usize).copied().unwrap_or(b'0') as char);
         }
         ok_res(out)
     })

@@ -205,8 +205,12 @@ pub fn money_clear_rates<E: From<String>>() -> SkyResult<E, ()> {
 pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> {
     if parts <= 0 { return Vec::new(); }
     let places = places.max(0) as u32;
-    // Shift to minor units (× 10^places), truncate to integer.
-    let scale = RD::from(10_i64.pow(places));
+    // Shift to minor units (× 10^places), truncate to integer. `places` only
+    // ever arrives as `minorUnits c` (0/2/3/8) from the Sky wrapper today, but
+    // this kernel is `pub` — guard `10^places` with checked_pow so a caller
+    // passing places ≥ 19 saturates instead of panicking on i64 overflow.
+    let factor = 10_i64.checked_pow(places).unwrap_or(i64::MAX);
+    let scale = RD::from(factor);
     let total_minor = (amount.0 * scale).trunc();
     let parts_dec = RD::from(parts);
     let base = (total_minor / parts_dec).trunc();
@@ -216,7 +220,7 @@ pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> 
         .parse::<i64>()
         .unwrap_or(0)
         .max(0);
-    let inv_scale = RD::from(10_i64.pow(places));
+    let inv_scale = RD::from(factor);
     let mut out = Vec::with_capacity(parts as usize);
     for i in 0..parts {
         let share = if i < rem_int { base + RD::from(1) } else { base };

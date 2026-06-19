@@ -10,6 +10,12 @@
 //! overflow, POST failures warn + drop. The observability path must never block
 //! or panic the request path. No `unwrap`/`expect`/indexing in any reachable
 //! path.
+//!
+//! Deliberate divergence from `hub_exporter` (which keeps a bounded retry spool):
+//! child→parent federation is a same-host loopback hop on a short cadence — a
+//! transient parent blip is recovered by the very next tick's fresh batch, so the
+//! added complexity + memory of a retry spool buys little here. The remote-hub
+//! exporter spools because its push crosses the network to a possibly-distant hub.
 
 use std::sync::OnceLock;
 use std::time::Duration;

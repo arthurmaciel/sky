@@ -153,6 +153,14 @@ async fn read_logs_value(db_path: &str, service: &str, filter: HubLogFilter) -> 
             continue;
         }
         let attr = |k: &str| attrs.get(k).cloned().unwrap_or_default();
+        // Derive status/latency from the log's attrs (Go `toHubLogRow` parity) —
+        // the writer carries `status` / `latency_ms` keys (the same `latency_ms`
+        // `aggregate_service_stat` reads). Missing/unparseable → 0.0.
+        let status = attrs.get("status").and_then(|s| parse_float_attr(s)).unwrap_or(0.0);
+        let latency_ms = attrs
+            .get("latency_ms")
+            .and_then(|s| parse_float_attr(s))
+            .unwrap_or(0.0);
         out.push(json!({
             "time": r.try_get::<String, _>("time").unwrap_or_default(),
             "level": r.try_get::<String, _>("level").unwrap_or_default(),
@@ -162,8 +170,8 @@ async fn read_logs_value(db_path: &str, service: &str, filter: HubLogFilter) -> 
             "sessionId": attr("session_id"),
             "userLabel": attr("user_label"),
             "route": attr("route"),
-            "status": 0.0,
-            "latencyMs": 0.0,
+            "status": status,
+            "latencyMs": latency_ms,
         }));
     }
     Value::Array(out)

@@ -7,10 +7,27 @@ pub struct SsePatch(pub String);
 pub type SseTx = mpsc::Sender<SsePatch>;
 pub type SseRx = mpsc::Receiver<SsePatch>;
 
-/// Bounded buffer (Go default 16); drops oldest under backpressure are surfaced
-/// by the caller. hello/heartbeat framing is done in mod.rs when wiring axum.
+/// Buffer capacity, honouring `SKY_LIVE_SSE_BUFFER` (clamped to `[1, 1024]`,
+/// default 16) to match the Go runtime's configurable bound. Parse failures
+/// and out-of-range values fall back to the clamp/default.
+fn buffer_capacity() -> usize {
+    const DEFAULT: usize = 16;
+    const MIN: usize = 1;
+    const MAX: usize = 1024;
+    std::env::var("SKY_LIVE_SSE_BUFFER")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .map(|n| n.clamp(MIN, MAX))
+        .unwrap_or(DEFAULT)
+}
+
+/// Bounded buffer (Go default 16, configurable via `SKY_LIVE_SSE_BUFFER`). The
+/// current caller in mod.rs `.await`s on send, so this channel BLOCKS (applies
+/// TCP backpressure) when full rather than dropping — it does not implement the
+/// drop-oldest + `sky_live_sse_drops_total` behaviour. hello/heartbeat framing
+/// is done in mod.rs when wiring axum.
 pub fn channel() -> (SseTx, SseRx) {
-    mpsc::channel(16)
+    mpsc::channel(buffer_capacity())
 }
 
 /// SSE event framing: `event: <name>\ndata: <payload>\n\n`.

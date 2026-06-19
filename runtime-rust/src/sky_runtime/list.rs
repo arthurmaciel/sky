@@ -52,9 +52,11 @@ pub fn list_foldl<T0, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<
     for item in list { acc = f(item, acc); }
     acc
 }
-pub fn list_foldr<T0: Clone, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
+pub fn list_foldr<T0, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<T0>) -> T1 {
     let mut acc = init;
-    for item in list.into_iter().rev() { acc = f(item.clone(), acc); }
+    // `into_iter().rev()` yields OWNED items, so no clone (and no `T0: Clone`
+    // bound) is needed — matching `sky_list_cons`'s move-only-friendly shape.
+    for item in list.into_iter().rev() { acc = f(item, acc); }
     acc
 }
 // Sky `List.range` is INCLUSIVE: range 1 3 = [1, 2, 3].

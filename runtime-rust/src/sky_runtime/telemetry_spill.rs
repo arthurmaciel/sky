@@ -78,9 +78,14 @@ fn service_name() -> String {
 }
 
 fn rfc3339(ts_ms: u64) -> String {
+    // Fall back to `now` rather than "" on an out-of-range ts: an empty `time`
+    // column sorts before every real row and would never satisfy `time < cutoff`
+    // with a real cutoff in a prunable way — making a bad row un-prunable. `now`
+    // keeps the row bounded by the same retention window. (Unreachable for real
+    // u64 ms timestamps; this is a belt-and-braces total fallback.)
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ts_ms as i64)
         .map(|d| d.to_rfc3339())
-        .unwrap_or_default()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339())
 }
 
 /// Enable the spill from `SKY_CONSOLE_DB_PATH`. Idempotent + best-effort: a
@@ -187,6 +192,13 @@ async fn pruner(pool: SqlitePool) {
             if let Err(e) = sqlx::query(&sql).bind(&cutoff).execute(&pool).await {
                 eprintln!("[sky.spill] prune {table}: {e}");
             }
+        }
+        // Bound the -wal file: under sustained writes WAL mode lets the -wal grow
+        // unbounded between automatic checkpoints. A TRUNCATE checkpoint after the
+        // hourly prune resets it to zero bytes (best-effort — a long-lived reader
+        // holding back the checkpoint just defers it to the next tick, never blocks).
+        if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(&pool).await {
+            eprintln!("[sky.spill] wal_checkpoint: {e}");
         }
     }
 }

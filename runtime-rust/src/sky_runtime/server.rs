@@ -226,9 +226,27 @@ pub fn server_get_cookie(name: String, req: ServerRequest) -> SkyMaybe<String> {
 // ─── cookies ──────────────────────────────────────────────────────────────
 
 pub fn server_cookie(name: String, value: String) -> ServerCookie { ServerCookie { name, value } }
+
+/// Strip any byte that could smuggle extra cookie attributes or inject a header
+/// line. We drop CTLs (incl. CR/LF), `;`, `,`, and whitespace from both the
+/// cookie name and value rather than reject (a total, never-panicking transform):
+/// the resulting Set-Cookie carries exactly one attribute set we control, and the
+/// downstream `builder.header` can't see a CRLF to error on. Conservative — these
+/// bytes are not valid in a cookie name/value per RFC 6265 token/cookie-octet
+/// grammar anyway.
+fn sanitise_cookie_field(s: &str) -> String {
+    s.chars()
+        .filter(|&c| !c.is_control() && c != ';' && c != ',' && c != ' ' && c != '\t' && c != '"' && c != '\\')
+        .collect()
+}
+
 pub fn server_with_cookie(c: ServerCookie, mut r: ServerResponse) -> ServerResponse {
     // Minimal Set-Cookie with safe defaults; full attributes land with step 4.
-    let v = format!("{}={}; HttpOnly; Path=/; SameSite=Lax", c.name, c.value);
+    // name/value are sanitised so a value containing `;`/`,`/CRLF can't smuggle
+    // extra attributes or inject a second header line.
+    let name = sanitise_cookie_field(&c.name);
+    let value = sanitise_cookie_field(&c.value);
+    let v = format!("{}={}; HttpOnly; Path=/; SameSite=Lax", name, value);
     r.headers.insert("Set-Cookie".to_string(), v);
     r
 }
@@ -389,7 +407,15 @@ pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<Se
         // Sky doctrine: a panicking handler returns 500, never crashes the
         // process (mirrors the Go runtime's per-handler recover()).
         let app = app.layer(tower_http::catch_panic::CatchPanicLayer::new());
-        let addr = format!("0.0.0.0:{}", port);
+        // Bind host is overridable via SKY_HTTP_BIND (e.g. 127.0.0.1 to avoid
+        // exposing on every interface). Default stays 0.0.0.0 for byte-identical
+        // behaviour with prior releases; an empty/blank override falls back too.
+        let host = std::env::var("SKY_HTTP_BIND")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "0.0.0.0".to_string());
+        let addr = format!("{}:{}", host, port);
         let listener = match tokio::net::TcpListener::bind(&addr).await {
             Ok(l) => l,
             Err(e) => return SkyResult::Err(format!("Server.listen: bind {}: {}", addr, e).into()),
@@ -734,9 +760,15 @@ struct WindowEntry { start: f64, count: i64 }
 fn fixed_window_allow(key: &str, client: &str, limit: i64, window_secs: i64) -> bool {
     static W: OnceLock<Mutex<HashMap<(String, String), WindowEntry>>> = OnceLock::new();
     let now = unix_secs_f64();
+    let window = window_secs.max(1) as f64;
     let mut m = W.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    // Evict fully-expired entries on access so the map can't grow without bound
+    // (distinct clients/keys would otherwise accumulate forever → memory-DoS). An
+    // entry whose window has elapsed would reset to count 0 anyway, so dropping it
+    // is behaviour-preserving for the surviving (live) entries.
+    m.retain(|_, ent| now - ent.start < window);
     let e = m.entry((key.to_string(), client.to_string())).or_insert(WindowEntry { start: now, count: 0 });
-    if now - e.start >= window_secs.max(1) as f64 { e.start = now; e.count = 0; }
+    if now - e.start >= window { e.start = now; e.count = 0; }
     if e.count < limit.max(0) { e.count += 1; true } else { false }
 }
 
@@ -749,9 +781,16 @@ pub fn rate_limit_allow(name: String, key: String, capacity: i64, refill_per_sec
     static B: OnceLock<Mutex<HashMap<(String, String), Bucket>>> = OnceLock::new();
     let cap = capacity.max(0) as f64;
     let now = unix_secs_f64();
+    let refill = refill_per_sec.max(0) as f64;
     let mut m = B.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    // Evict buckets that have refilled back to full capacity: a fully-refilled
+    // idle bucket is indistinguishable from a fresh one, so dropping it preserves
+    // the allow/deny decision while bounding the map against unbounded (key, IP)
+    // growth (memory-DoS). The current (name, key) entry is re-created below if it
+    // was swept.
+    m.retain(|_, bk| (bk.tokens + (now - bk.last) * refill).min(cap) < cap);
     let b = m.entry((name, key)).or_insert(Bucket { tokens: cap, last: now });
-    b.tokens = (b.tokens + (now - b.last) * refill_per_sec.max(0) as f64).min(cap);
+    b.tokens = (b.tokens + (now - b.last) * refill).min(cap);
     b.last = now;
     if b.tokens >= 1.0 { b.tokens -= 1.0; true } else { false }
 }

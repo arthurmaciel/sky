@@ -11,11 +11,11 @@ use super::encoding::{sky_bytes, bytes_to_sky};
 use std::future::ready;
 use std::io::{Read, Write};
 
-fn gzip_bytes(data: &[u8]) -> Vec<u8> {
+fn gzip_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
     use flate2::{write::GzEncoder, Compression};
     let mut e = GzEncoder::new(Vec::new(), Compression::default());
-    let _ = e.write_all(data);
-    e.finish().unwrap_or_default()
+    e.write_all(data).map_err(|err| err.to_string())?;
+    e.finish().map_err(|err| err.to_string())
 }
 
 fn gunzip_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -27,9 +27,12 @@ fn gunzip_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 /// Compression.gzip : String -> Task Error String
-pub fn compression_gzip<E: Send + 'static>(s: String) -> SkyTask<E, String> {
-    let out = bytes_to_sky(&gzip_bytes(&sky_bytes(&s)));
-    Box::pin(ready(ok_res(out)))
+pub fn compression_gzip<E: From<String> + Send + 'static>(s: String) -> SkyTask<E, String> {
+    let r = match gzip_bytes(&sky_bytes(&s)) {
+        Ok(b) => ok_res(bytes_to_sky(&b)),
+        Err(e) => SkyResult::Err(format!("Compression.gzip: {}", e).into()),
+    };
+    Box::pin(ready(r))
 }
 
 /// Compression.gunzip : String -> Task Error String
@@ -42,9 +45,12 @@ pub fn compression_gunzip<E: From<String> + Send + 'static>(s: String) -> SkyTas
 }
 
 /// Compression.zstdCompress : String -> Task Error String
-pub fn compression_zstd_compress<E: Send + 'static>(s: String) -> SkyTask<E, String> {
-    let out = zstd::encode_all(&sky_bytes(&s)[..], 0).unwrap_or_default();
-    Box::pin(ready(ok_res(bytes_to_sky(&out))))
+pub fn compression_zstd_compress<E: From<String> + Send + 'static>(s: String) -> SkyTask<E, String> {
+    let r = match zstd::encode_all(&sky_bytes(&s)[..], 0) {
+        Ok(out) => ok_res(bytes_to_sky(&out)),
+        Err(e) => SkyResult::Err(format!("Compression.zstdCompress: {}", e).into()),
+    };
+    Box::pin(ready(r))
 }
 
 /// Compression.zstdDecompress : String -> Task Error String

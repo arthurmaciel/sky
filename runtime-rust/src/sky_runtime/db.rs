@@ -626,7 +626,16 @@ pub fn db_get_string<R: SkyRow>(field: String, row: R) -> String {
 }
 
 pub fn db_get_int<R: SkyRow>(field: String, row: R) -> i64 {
-    row.sky_get(&field).parse::<i64>().unwrap_or(0)
+    // Align with db_decode_int / Go: accept "42" or a decimal string like
+    // "3.0" (truncate to 3) before defaulting to 0.
+    let s = row.sky_get(&field);
+    if let Ok(i) = s.parse::<i64>() {
+        return i;
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return f as i64;
+    }
+    0
 }
 
 pub fn db_migrate_apply<E: Send + From<String> + 'static>(db: Db, migrations: Vec<(String, String)>) -> SkyTask<E, Vec<String>> {

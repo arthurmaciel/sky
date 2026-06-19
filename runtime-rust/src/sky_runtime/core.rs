@@ -187,7 +187,7 @@ pub fn maybe_with_default<A>(def: A, m: SkyMaybe<A>) -> A {
     match m { SkyMaybe::Just(v) => v, SkyMaybe::Nothing => def }
 }
 
-pub fn result_traverse<T0: Clone, T1: Clone, E>(f: impl Fn(T0) -> SkyResult<E, T1> + Clone, items: Vec<T0>) -> SkyResult<E, Vec<T1>> {
+pub fn result_traverse<T0: Clone, T1: Clone, E>(f: impl Fn(T0) -> SkyResult<E, T1>, items: Vec<T0>) -> SkyResult<E, Vec<T1>> {
     let mut out = Vec::with_capacity(items.len());
     for item in items { match f(item) { SkyResult::Ok(v) => out.push(v), SkyResult::Err(e) => return SkyResult::Err(e) } }
     SkyResult::Ok(out)

@@ -98,24 +98,37 @@ mod imp {
   document.addEventListener('click', function(e){ var id=idOf(e.target.closest('[sky-id]')); if(id) send(id,'click',[]); });
   document.addEventListener('input', function(e){ var id=idOf(e.target.closest('[sky-id]')); if(id) send(id,'input',[e.target.value||'']); }, true);
   document.addEventListener('change', function(e){ var id=idOf(e.target.closest('[sky-id]')); if(id) send(id,'change',[e.target.value||'']); }, true);
+  // INVARIANT: `html` is produced by `render_html` (the shared Sky.Live renderer),
+  // which HTML-escapes every text + attribute node — so this innerHTML assignment
+  // is not an XSS sink for user data. Any future RAW-html node added to the
+  // renderer becomes the XSS boundary and must be audited there.
   window.__skyApply = function(html){ document.body.innerHTML = html; };
 })();
 "#;
 
+    /// Encode `s` as a JSON string literal for embedding in `evaluate_script`.
+    /// Delegates to serde (already a dep here via `parse_ipc`) so there is one
+    /// escaping implementation. serde never fails on a `&str`; the `Err` arm is
+    /// unreachable but kept total (a minimal correct literal fallback).
     fn json_str(s: &str) -> String {
-        let mut out = String::from("\"");
-        for c in s.chars() {
-            match c {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
+        serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+    }
+
+    /// The synchronous webview event loop doesn't pump tokio, so a real (non-`None`)
+    /// `Cmd` returned from `init`/`update` is dropped. Warn ONCE so this otherwise-
+    /// silent dropped-effect behaviour is observable rather than a quiet surprise.
+    fn warn_dropped_cmd_if_real<M>(cmd: &SkyCmd<M>) {
+        use std::sync::Once;
+        static WARNED: Once = Once::new();
+        if !matches!(cmd, SkyCmd::None) {
+            WARNED.call_once(|| {
+                eprintln!(
+                    "[sky.webview] warn: a non-`Cmd.none` command was returned but \
+                     Sky.Webview v0.1's synchronous event loop does not run \
+                     Cmd.perform/Sub.every yet — the effect was dropped."
+                );
+            });
         }
-        out.push('"');
-        out
     }
 
     /// Parse `{skyId, event, args}` (from the bridge) without serde.
@@ -210,6 +223,7 @@ mod imp {
             };
 
             let (mut model, _cmd0) = init(());
+            warn_dropped_cmd_if_real(&_cmd0);
             let (body0, mut index) = render::<Model, Msg, _>(&view, &model);
             let html = format!(
                 "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>{body0}</body><script>{BRIDGE_JS}</script></html>"
@@ -254,6 +268,7 @@ mod imp {
                         if let Some((sky_id, ev, args)) = parse_ipc(&body) {
                             if let Some(msg) = index.resolve(&sky_id, &ev, &args) {
                                 let (next, _cmd) = update(msg, model.clone());
+                                warn_dropped_cmd_if_real(&_cmd);
                                 model = next;
                                 let (nbody, nindex) = render::<Model, Msg, _>(&view, &model);
                                 index = nindex;

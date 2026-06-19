@@ -59,6 +59,18 @@ static NEXT_TOKEN: AtomicI64 = AtomicI64::new(1);
 static NEXT_STREAM_ID: AtomicI64 = AtomicI64::new(1);
 
 const SENTINEL_PREFIX: &str = "__sky_stream:";
+
+/// Per-process random nonce woven into the streaming sentinel. The sentinel is
+/// matched on the BODY of any response, so without an unguessable component an
+/// app (or a relayed upstream) whose body begins `__sky_stream:<digits>` could be
+/// misread as a streaming sentinel and divert control flow. The nonce is drawn
+/// once from the OS CSPRNG (uuid v4 → getrandom) so body-controlled content can
+/// neither forge nor collide with a real sentinel. Sentinel shape:
+/// `__sky_stream:<nonce>:<token>`.
+fn sentinel_nonce() -> &'static str {
+    static N: OnceLock<String> = OnceLock::new();
+    N.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+}
 // Bounded channel — matches the Go runtime's streamChanBuffer (16). emit's
 // `send().await` blocks when full → backpressure to the producer/relay.
 const STREAM_CHAN_BUFFER: usize = 16;
@@ -88,7 +100,7 @@ where
     Box::pin(async move {
         SkyResult::Ok(ServerResponse {
             status: 200,
-            body: format!("{}{}", SENTINEL_PREFIX, token),
+            body: format!("{}{}:{}", SENTINEL_PREFIX, sentinel_nonce(), token),
             headers: HashMap::new(),
             contentType: ct,
         })
@@ -141,7 +153,12 @@ pub fn server_stream_with_content_type<E: From<String> + Send + 'static>(
 /// sentinel, set up the channel + spawn the handler and return the streaming
 /// axum response; otherwise None (the caller falls back to the buffered path).
 pub fn serve_streaming_sentinel(r: &ServerResponse) -> Option<axum::response::Response> {
-    let token: i64 = r.body.strip_prefix(SENTINEL_PREFIX)?.parse().ok()?;
+    // Sentinel shape: `__sky_stream:<nonce>:<token>`. The per-process nonce must
+    // match exactly, so application/relayed body content can neither forge nor
+    // collide with a real pending stream. A non-match falls through to buffered.
+    let rest = r.body.strip_prefix(SENTINEL_PREFIX)?;
+    let token_str = rest.strip_prefix(sentinel_nonce())?.strip_prefix(':')?;
+    let token: i64 = token_str.parse().ok()?;
     let handler = pending_handlers().lock().unwrap_or_else(|e| e.into_inner()).remove(&token)?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(STREAM_CHAN_BUFFER);

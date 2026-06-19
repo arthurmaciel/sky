@@ -76,11 +76,14 @@ pub fn csv_encode_with_delimiter(delim: String, doc: CsvDoc) -> String {
 /// Returns every row (including the header).
 pub fn csv_parse_stream_from_file<E: From<String> + Send + 'static>(path: String) -> SkyTask<E, Vec<Vec<String>>> {
     let result = (|| -> Result<Vec<Vec<String>>, String> {
-        let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        // Stream rows from a BufReader<File> rather than slurping the whole file
+        // into a String first — the csv reader pulls records incrementally, so a
+        // large/untrusted file no longer forces a full-file in-memory copy.
+        let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
         let mut rdr = ::csv::ReaderBuilder::new()
             .has_headers(false)
             .flexible(true)
-            .from_reader(content.as_bytes());
+            .from_reader(std::io::BufReader::new(file));
         let mut out = Vec::new();
         for rec in rdr.records() {
             let r = rec.map_err(|e| e.to_string())?;
