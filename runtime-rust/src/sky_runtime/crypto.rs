@@ -1,28 +1,35 @@
 // Crypto kernel stubs — generic over E where needed.
 use super::*;
 
-pub fn crypto_random_bytes<E: Send + 'static>(n: i64) -> SkyTask<E, Vec<i64>> {
+pub fn crypto_random_bytes<E: From<String> + Send + 'static>(n: i64) -> SkyTask<E, Vec<i64>> {
     use aes_gcm::aead::{OsRng, rand_core::RngCore};
     Box::pin(async move {
-        // SECURITY: Crypto.randomBytes is a documented entropy primitive (session
-        // tokens, CSRF, key material) — draw from the OS CSPRNG, NOT the non-crypto
-        // LCG. Each byte is masked to [0,255] so the result is a true byte stream
-        // matching Go's crypto/rand-backed `randomBytes`.
-        let count = n.max(0) as usize;
+        // SECURITY: Mirror Go oracle exactly: reject size <= 0 || size > 1024
+        // (rt.go ~l6536: `if size <= 0 || size > 1024 { return ErrInvalidInput }`)
+        // to prevent unbounded attacker-controlled allocation (DoS vector).
+        if n <= 0 || n > 1024 {
+            return SkyResult::Err(format!("Crypto.randomBytes: size must be 1..1024").into());
+        }
+        let count = n as usize;
         let mut buf = vec![0u8; count];
         OsRng.fill_bytes(&mut buf);
         ok_res(buf.into_iter().map(|b| b as i64).collect())
     })
 }
 
-pub fn crypto_random_token<E: Send + 'static>(n: i64) -> SkyTask<E, String> {
+pub fn crypto_random_token<E: From<String> + Send + 'static>(n: i64) -> SkyTask<E, String> {
     use aes_gcm::aead::{OsRng, rand_core::RngCore};
     Box::pin(async move {
-        // SECURITY: token entropy from the OS CSPRNG (see crypto_random_bytes).
-        let hex = b"0123456789abcdef";
-        let count = n.max(0) as usize;
+        // SECURITY: Mirror Go oracle exactly: reject size <= 0 || size > 1024
+        // (rt.go ~l6553: `if size <= 0 || size > 1024 { return ErrInvalidInput }`)
+        // to prevent unbounded attacker-controlled allocation (DoS vector).
+        if n <= 0 || n > 1024 {
+            return SkyResult::Err(format!("Crypto.randomToken: size must be 1..1024").into());
+        }
+        let count = n as usize;
         let mut buf = vec![0u8; count];
         OsRng.fill_bytes(&mut buf);
+        let hex = b"0123456789abcdef";
         let mut out = String::with_capacity(count * 2);
         for b in buf {
             // `& 0x0f` bounds the index to [0, 15] < 16 (hex.len()); .get keeps it total.
@@ -99,39 +106,57 @@ pub fn crypto_hmac_sha512(key: String, msg: String) -> String {
 }
 
 /// Sky `rsaSha256Sign : String -> String -> Result Error String`
-/// Sign `msg` with the PKCS#1 v1.5 SHA-256 RSA scheme using `key_pem`
-/// (RSA PRIVATE KEY block). Returns hex-encoded signature on success.
+/// Sign `msg` with the PKCS#1 v1.5 SHA-256 RSA scheme using `key_pem`.
+/// Accepts PKCS#1 (`-----BEGIN RSA PRIVATE KEY-----`) and PKCS#8
+/// (`-----BEGIN PRIVATE KEY-----`) PEM private keys — mirrors Go oracle
+/// (rt.go ~l6472: tries ParsePKCS1PrivateKey then ParsePKCS8PrivateKey).
+/// Returns standard-base64-encoded signature (base64.StdEncoding, rt.go ~l6488).
 #[cfg(feature = "crypto")]
 pub fn crypto_rsa_sha256_sign<E: From<String>>(key_pem: String, msg: String) -> SkyResult<E, String> {
-    use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs1v15::SigningKey, signature::{Signer, SignatureEncoding}};
+    use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs8::DecodePrivateKey, pkcs1v15::SigningKey, signature::{Signer, SignatureEncoding}};
     use sha2::Sha256;
+    use base64::{Engine, engine::general_purpose::STANDARD};
 
-    let priv_key = match rsa::RsaPrivateKey::from_pkcs1_pem(&key_pem) {
-        Ok(k) => k,
-        Err(e) => return SkyResult::Err(format!("rsaSign: parse: {}", e).into()),
+    // Try PKCS#8 first (the openssl default), then fall back to PKCS#1 — mirrors Go.
+    let priv_key = if let Ok(k) = rsa::RsaPrivateKey::from_pkcs8_pem(&key_pem) {
+        k
+    } else if let Ok(k) = rsa::RsaPrivateKey::from_pkcs1_pem(&key_pem) {
+        k
+    } else {
+        return SkyResult::Err("Crypto.rsaSha256Sign: could not parse the private key".to_string().into());
     };
     let signing_key = SigningKey::<Sha256>::new(priv_key);
     let signature = signing_key.sign(msg.as_bytes());
-    let hex_sig: String = signature.to_bytes().iter().map(|b| format!("{:02x}", b)).collect();
-    SkyResult::Ok(hex_sig)
+    // Go returns base64.StdEncoding (standard base64, with padding) — match exactly.
+    SkyResult::Ok(STANDARD.encode(signature.to_bytes()))
 }
 
 /// Sky `rsaSha256Verify : String -> String -> String -> Bool`
-/// (key_pem, msg, hex_signature). Returns `false` on any failure — never panics.
+/// (pemPublicKey, msg, base64Signature). Returns `false` on any failure — never panics.
+/// Accepts SPKI/PKIX public keys (`-----BEGIN PUBLIC KEY-----`, the common openssl form)
+/// and PKCS#1 public keys (`-----BEGIN RSA PUBLIC KEY-----`) — mirrors Go oracle
+/// (rt.go ~l6500: tries ParsePKIXPublicKey then ParsePKCS1PublicKey).
+/// Signature is standard-base64 (base64.StdEncoding, rt.go ~l6511).
 #[cfg(feature = "crypto")]
-pub fn crypto_rsa_sha256_verify(key_pem: String, msg: String, sig_hex: String) -> bool {
-    use rsa::{pkcs1::DecodeRsaPrivateKey, pkcs1v15::{Signature, VerifyingKey}, signature::Verifier};
+pub fn crypto_rsa_sha256_verify(key_pem: String, msg: String, sig_b64: String) -> bool {
+    use rsa::{pkcs1::DecodeRsaPublicKey, pkcs8::DecodePublicKey, pkcs1v15::{Signature, VerifyingKey}, signature::Verifier};
     use sha2::Sha256;
+    use base64::{Engine, engine::general_purpose::STANDARD};
 
-    let priv_key = match rsa::RsaPrivateKey::from_pkcs1_pem(&key_pem) {
-        Ok(k) => k,
-        Err(_) => return false,
+    // Try SPKI/PKIX first (-----BEGIN PUBLIC KEY-----), then PKCS#1 — mirrors Go.
+    let pub_key = if let Ok(k) = rsa::RsaPublicKey::from_public_key_pem(&key_pem) {
+        k
+    } else if let Ok(k) = rsa::RsaPublicKey::from_pkcs1_pem(&key_pem) {
+        k
+    } else {
+        return false;
     };
-    let verifying_key: VerifyingKey<Sha256> = VerifyingKey::<Sha256>::new(priv_key.to_public_key());
-    let sig_bytes = match hex::decode(&sig_hex) {
+    // Go decodes with base64.StdEncoding (standard base64, with padding) — match exactly.
+    let sig_bytes = match STANDARD.decode(sig_b64.as_bytes()) {
         Ok(b) => b,
         Err(_) => return false,
     };
+    let verifying_key: VerifyingKey<Sha256> = VerifyingKey::<Sha256>::new(pub_key);
     let signature = match Signature::try_from(sig_bytes.as_slice()) {
         Ok(s) => s,
         Err(_) => return false,
@@ -324,23 +349,33 @@ R/3PhF+J1YFX5QIgG9S7a5pNlAa78gW32+2GU4F56IMnk9mRCKksbvJVrd8CIFuA
 y7anow7/QOtvB1/UdyrxegB+sHZoBWA9+SsMl2zn
 -----END RSA PRIVATE KEY-----";
 
+    // SPKI/PKIX public key derived from RSA_PRIV_PEM (`openssl rsa -pubout`).
+    // Sky's rsaSha256Verify takes a PUBLIC key — this is the correct pairing.
+    const RSA_PUB_PEM: &str = "-----BEGIN PUBLIC KEY-----
+MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAK1QGnsdSyVv+JT4WDnGIIr3QA75yZTi
+TsgxkiXH9sjXrPHT1hXn2tKCv9MkR8MD1Ndh6jo7inBZUK0YG7H6Jx0CAwEAAQ==
+-----END PUBLIC KEY-----";
+
     #[test]
     fn test_rsa_sign_verify_roundtrip() {
         let msg = "hello, sky".to_string();
         let sig: SkyResult<String, String> = crypto_rsa_sha256_sign(
             RSA_PRIV_PEM.to_string(), msg.clone());
-        let sig_hex = match sig {
+        // Sign returns standard base64 (mirrors Go's base64.StdEncoding).
+        let sig_b64 = match sig {
             SkyResult::Ok(s) => s,
             SkyResult::Err(e) => panic!("sign failed: {}", e),
         };
+        // Verify takes the PUBLIC key, not the private key (mirrors Go oracle).
         assert!(crypto_rsa_sha256_verify(
-            RSA_PRIV_PEM.to_string(), msg, sig_hex));
+            RSA_PUB_PEM.to_string(), msg, sig_b64));
     }
 
     #[test]
     fn test_rsa_verify_wrong_sig() {
+        // "deadbeef" is not valid standard base64 with padding → decodes to false.
         assert!(!crypto_rsa_sha256_verify(
-            RSA_PRIV_PEM.to_string(),
+            RSA_PUB_PEM.to_string(),
             "hello".to_string(),
             "deadbeef".to_string()));
     }

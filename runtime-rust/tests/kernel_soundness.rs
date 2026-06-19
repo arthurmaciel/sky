@@ -25,10 +25,13 @@ fn mod_by_positive_divisor_is_always_nonnegative() {
 }
 
 #[test]
-fn mod_by_negative_divisor_matches_sign_convention() {
-    // r>0 && divisor<0 ⇒ r + divisor
-    assert_eq!(sky_runtime::basics::basics_mod_by(-3, 7), -2);
-    assert_eq!(sky_runtime::basics::basics_mod_by(-3, -7), -1);
+fn mod_by_negative_divisor_matches_go() {
+    // Go Basics_modByT(divisor, n): `r := n % divisor; if r < 0 { r += divisor }`.
+    // basics_mod_by(-3, 7): 7 % -3 = 1 (Rust/Go % takes the dividend's sign);
+    //   r=1 not < 0 ⇒ 1.
+    assert_eq!(sky_runtime::basics::basics_mod_by(-3, 7), 1);
+    // basics_mod_by(-3, -7): -7 % -3 = -1; r<0 ⇒ -1 + (-3) = -4.
+    assert_eq!(sky_runtime::basics::basics_mod_by(-3, -7), -4);
 }
 
 #[test]

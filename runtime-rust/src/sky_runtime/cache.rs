@@ -134,9 +134,18 @@ where
             let max = slot.cfg.maxEntries;
             let ttl = slot.cfg.ttlMs;
             let expires_at = if ttl > 0 {
-                Some(Instant::now() + Duration::from_millis(ttl as u64))
+                // Saturate instead of panicking: a Sky caller passing a near-i64::MAX ttl
+                // (e.g. `withTTL Int.maxInt`) must not cause "overflow when adding duration
+                // to instant". ttl > 0 is already guarded above, so the cast is lossless.
+                Some(
+                    Instant::now()
+                        .checked_add(Duration::from_millis(ttl as u64))
+                        .unwrap_or_else(|| {
+                            Instant::now() + Duration::from_secs(60 * 60 * 24 * 365 * 30)
+                        }),
+                )
             } else {
-                None
+                None // ttl <= 0 → no expiry (existing semantics preserved)
             };
             let (added, evicted) = {
                 let store = slot

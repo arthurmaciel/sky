@@ -22,7 +22,8 @@ pub fn math_inf()   -> f64 { f64::INFINITY }
 /// Not-a-number (IEEE 754). Note: NaN ≠ NaN by IEEE 754.
 pub fn math_nan()   -> f64 { f64::NAN }
 
-pub fn math_abs(x: i64) -> i64 { x.abs() }
+/// Saturates `i64::MIN` to `i64::MAX` (no-panic rule: `-i64::MIN` is not representable).
+pub fn math_abs(x: i64) -> i64 { x.checked_abs().unwrap_or(i64::MAX) }
 
 pub fn math_min<T: PartialOrd>(a: T, b: T) -> T { if a <= b { a } else { b } }
 pub fn math_max<T: PartialOrd>(a: T, b: T) -> T { if a >= b { a } else { b } }

@@ -495,14 +495,31 @@ tokio::task_local! {
 
 async fn ws_loop<E: From<String> + Send + 'static>(mut socket: axum::extract::ws::WebSocket, cfg: WsServerCfg<E>, id: i64) {
     use axum::extract::ws::Message;
+    // Mirror Go's SetReadLimit: treat 0/negative as "unset" → apply the 1 MiB
+    // default (wsDefaultMaxMessageBytes = 1 << 20 in runtime-go/rt/websocket.go).
+    let max_bytes: usize = if cfg.maxMessageBytes > 0 {
+        cfg.maxMessageBytes as usize
+    } else {
+        1 << 20 // 1 MiB
+    };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsOut>();
     ws_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
     let _ = (cfg.onConnect)(WsHandle::WebSocketServer(id)).await;
     loop {
         tokio::select! {
             incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Text(t))) => { let _ = (cfg.onMessage)(WsHandle::WebSocketServer(id), t).await; }
+                Some(Ok(Message::Text(t))) => {
+                    if t.len() > max_bytes {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                    let _ = (cfg.onMessage)(WsHandle::WebSocketServer(id), t).await;
+                }
                 Some(Ok(Message::Binary(b))) => {
+                    if b.len() > max_bytes {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
                     let s = bytes_to_sky(&b);
                     let _ = (cfg.onMessage)(WsHandle::WebSocketServer(id), s).await;
                 }

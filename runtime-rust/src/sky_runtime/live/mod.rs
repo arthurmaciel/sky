@@ -165,7 +165,7 @@ fn dev_console_banner(base: &str) -> String {
 
 use crate::sky_runtime::tea::{SkyCmd, SkySub};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
+use tokio::sync::mpsc::{self, Sender, Receiver};
 
 /// Per-session live state behind an `Arc<Mutex<…>>`. `index` / `last_view` are
 /// re-derived on every commit; `sse_tx` is filled when the browser attaches the
@@ -176,7 +176,7 @@ pub struct SessionEntry<Model, Msg> {
     pub index: HandlerIndex<Msg>,
     pub seq: u64,
     pub sse_tx: Option<SseTx>,
-    pub msg_tx: UnboundedSender<Msg>,
+    pub msg_tx: Sender<Msg>,
 }
 
 /// SSE patches envelope. The browser client (`live/client.js`) consumes the
@@ -276,7 +276,7 @@ impl<Model, Msg, FInit, FUpdate, FView, FSubs> Clone
 
 /// Fire a `Cmd`: None/Batch recurse; Perform spawns the composed task→Msg thunk
 /// and pushes the result back into the per-session loop.
-fn run_cmd<Msg: Send + 'static>(cmd: SkyCmd<Msg>, tx: &UnboundedSender<Msg>, sid: &str) {
+fn run_cmd<Msg: Send + 'static>(cmd: SkyCmd<Msg>, tx: &Sender<Msg>, sid: &str) {
     match cmd {
         SkyCmd::None => {}
         SkyCmd::Batch(items) => {
@@ -288,7 +288,11 @@ fn run_cmd<Msg: Send + 'static>(cmd: SkyCmd<Msg>, tx: &UnboundedSender<Msg>, sid
             let tx = tx.clone();
             tokio::spawn(async move {
                 let m = thunk().await;
-                let _ = tx.send(m);
+                // Bounded send: drop the Msg and warn if the session queue is
+                // full (a stalled driver or a burst of fast Perform tasks).
+                if tx.send(m).await.is_err() {
+                    eprintln!("[sky.live] run_cmd: session msg channel closed; dropping Perform result");
+                }
             });
         }
         SkyCmd::Publish(thunk) => {
@@ -304,7 +308,7 @@ fn run_cmd<Msg: Send + 'static>(cmd: SkyCmd<Msg>, tx: &UnboundedSender<Msg>, sid
 /// `Sub.none`, this is exercised mainly by the None arm.
 fn spawn_subs<Msg: Clone + Send + 'static>(
     sub: SkySub<Msg>,
-    tx: &UnboundedSender<Msg>,
+    tx: &Sender<Msg>,
     handles: &mut Vec<tokio::task::JoinHandle<()>>,
 ) {
     for h in handles.drain(..) {
@@ -312,7 +316,7 @@ fn spawn_subs<Msg: Clone + Send + 'static>(
     }
     fn go<Msg: Clone + Send + 'static>(
         sub: SkySub<Msg>,
-        tx: &UnboundedSender<Msg>,
+        tx: &Sender<Msg>,
         handles: &mut Vec<tokio::task::JoinHandle<()>>,
     ) {
         match sub {
@@ -331,7 +335,9 @@ fn spawn_subs<Msg: Clone + Send + 'static>(
                 let h = tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(dur).await;
-                        if tx.send(msg.clone()).is_err() {
+                        // Bounded send: break when the session queue is full
+                        // or the receiver is gone (driver exited).
+                        if tx.send(msg.clone()).await.is_err() {
                             break;
                         }
                     }
@@ -341,7 +347,7 @@ fn spawn_subs<Msg: Clone + Send + 'static>(
             SkySub::Source(spawn) => {
                 let tx = tx.clone();
                 let emit: Arc<dyn Fn(Msg) + Send + Sync> =
-                    Arc::new(move |m| { let _ = tx.send(m); });
+                    Arc::new(move |m| { let _ = tx.try_send(m); });
                 handles.push(spawn(emit));
             }
         }
@@ -358,8 +364,8 @@ fn spawn_subs<Msg: Clone + Send + 'static>(
 #[allow(clippy::too_many_arguments)]
 async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     entry: Arc<Mutex<SessionEntry<Model, Msg>>>,
-    mut msg_rx: UnboundedReceiver<Msg>,
-    msg_tx: UnboundedSender<Msg>,
+    mut msg_rx: Receiver<Msg>,
+    msg_tx: Sender<Msg>,
     update: Arc<FUpdate>,
     view: Arc<FView>,
     subs: Arc<FSubs>,
@@ -536,6 +542,17 @@ fn page_response(sid: &str, body: &str) -> axum::response::Response {
         html,
     )
         .into_response()
+}
+
+/// Maximum request body bytes for `/_sky/event`: `SKY_LIVE_MAX_BODY_BYTES`,
+/// default 5 MiB (5 << 20 = 5 242 880). Mirrors Go's `handleEvent` body cap
+/// (runtime-go/rt/live.go ~l3911). The default covers `Event.onFile` /
+/// `Event.onImage` data-URL payloads; override for larger file uploads.
+fn live_max_body_bytes() -> usize {
+    std::env::var("SKY_LIVE_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(5 << 20)
 }
 
 /// Session idle-TTL: `SKY_LIVE_TTL` seconds, default 1800 (30 min) — matches the
@@ -734,7 +751,13 @@ where
             let index = build_index(&tree);
             let body = render_html(&tree);
 
-            let (msg_tx, msg_rx) = unbounded_channel::<Msg>();
+            // Bounded per-session Msg queue: cap at 1024 to prevent a fast
+            // client from growing the queue without bound (per-session memory
+            // DoS). On overflow events are dropped with a warn (see
+            // event_handler). Go serialises dispatch under sess.mu instead of
+            // a channel — no Go bound to match; 1024 is far above any
+            // legitimate burst of user-driven events.
+            let (msg_tx, msg_rx) = mpsc::channel::<Msg>(1024);
             let entry = Arc::new(Mutex::new(SessionEntry {
                 model,
                 last_view: tree,
@@ -884,7 +907,15 @@ where
             };
             if let Some(m) = msg {
                 let tx = { entry.lock().unwrap_or_else(|e| e.into_inner()).msg_tx.clone() };
-                let _ = tx.send(m);
+                // try_send is non-blocking; on a full queue drop the event and
+                // return 429 so the client can back off (Go parity: Go
+                // serialises under sess.mu and drops the handler if the
+                // session is gone; no client-side queue bound to match — we
+                // choose 429 over silent drop so the browser retry loop fires).
+                if let Err(e) = tx.try_send(m) {
+                    eprintln!("[sky.live] event_handler: session msg queue full or closed; dropping event ({})", e);
+                    return (StatusCode::TOO_MANY_REQUESTS, "event queue full").into_response();
+                }
             }
             // Real patches flow over SSE from the driver; ack with an empty list.
             (
@@ -931,9 +962,16 @@ where
         // and the two never collide on `/_sky/console`.
         let use_console_proxy = console_proxy::ensure_console_proxy().await;
 
+        // Body-size cap on /_sky/event: mirrors Go's http.MaxBytesReader
+        // (runtime-go/rt/live.go:3915). axum's DefaultBodyLimit applies
+        // before the handler sees the bytes, so an over-sized payload is
+        // rejected at the extract layer with 413 Payload Too Large.
+        let event_route = post(event_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>)
+            .layer(axum::extract::DefaultBodyLimit::max(live_max_body_bytes()));
+
         let mut router = Router::new()
             .route("/_sky/sse", get(sse_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>))
-            .route("/_sky/event", post(event_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>))
+            .route("/_sky/event", event_route)
             // Observability surface (Go parity — observability.go).
             .route("/_sky/healthz", get(observability::healthz))
             .route("/_sky/readyz", get(observability::readyz))

@@ -95,9 +95,9 @@ pub fn auth_password_strength<E: From<String>>(pw: String) -> SkyResult<E, Strin
 /// Sky `signToken : String -> a -> Int -> Result Error String`.
 /// `signToken secret claims expirySeconds`. `claims` is a string-keyed map of
 /// string values at the runtime level (Sky's polymorphic `a` resolves to
-/// HashMap<String,String> at the FFI boundary). Adds an `exp` claim
-/// `expirySeconds` from now. Secret must be ≥32 bytes (matches Go's
-/// production gate).
+/// HashMap<String,String> at the FFI boundary). Adds `exp` (now + expirySeconds)
+/// and `iat` (now) claims, mirroring Go's Auth_signToken. Secret must be ≥32
+/// bytes (matches Go's production gate).
 pub fn auth_sign_token<E: From<String>>(
     secret: String,
     claims: HashMap<String, String>,
@@ -106,16 +106,22 @@ pub fn auth_sign_token<E: From<String>>(
     if secret.len() < 32 {
         return SkyResult::Err("auth.signToken: secret must be ≥32 bytes".to_string().into());
     }
-    let exp = (std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64) + expiry_seconds;
-    // Build a JSON object with string claims + exp.
+        .as_secs() as i64;
+    // Saturate to i64::MAX on overflow so a caller-controlled large
+    // expiry_seconds (or i64::MIN) never panics under debug overflow-checks.
+    // i64::MAX is a far-future timestamp (~292 billion years) — a safe floor.
+    let exp = now.checked_add(expiry_seconds).unwrap_or(i64::MAX);
+    let iat = now; // issued-at = current unix seconds (mirrors Go's Auth_signToken)
+    // Build a JSON object with string claims + exp + iat.
     let mut payload = serde_json::Map::new();
     for (k, v) in claims {
         payload.insert(k, serde_json::Value::String(v));
     }
     payload.insert("exp".to_string(), serde_json::Value::Number(exp.into()));
+    payload.insert("iat".to_string(), serde_json::Value::Number(iat.into()));
     let value = serde_json::Value::Object(payload);
     let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
     let key = jsonwebtoken::EncodingKey::from_secret(secret.as_bytes());
@@ -337,6 +343,7 @@ mod tests {
                 assert_eq!(m.get("sub").unwrap(), "user-123");
                 assert_eq!(m.get("role").unwrap(), "admin");
                 assert!(m.contains_key("exp"));
+                assert!(m.contains_key("iat")); // parity with Go's Auth_signToken
             }
             _ => panic!("verify"),
         }

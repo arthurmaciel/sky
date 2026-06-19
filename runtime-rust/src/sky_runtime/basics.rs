@@ -3,13 +3,20 @@
 //! Mirrors Go's runtime-go/rt/rt.go (Basics_modByT, etc.).
 
 /// Sky `modBy : Int -> Int -> Int`. Divisor-first convention (Elm/pipeline order).
-/// Positive-result modulo: if the raw `%` result is negative, add `divisor`.
-/// Divisor of 0 returns 0 (matches Go's `Basics_modByT`).
+/// Mirrors Go's `Basics_modByT` exactly:
+///   - divisor == 0  → 0
+///   - r = n % divisor; if r < 0 { r += divisor }
+/// Adjust fires ONLY when r < 0 (irrespective of divisor sign) — Go parity.
+///
+/// Overflow guard: `i64::MIN % -1` is undefined behaviour in Rust debug/release
+/// (the mathematical result is 0).  `checked_rem` returns `None` for that case;
+/// we map it to r = 0, which is the correct mathematical remainder and leaves
+/// the adjust condition (`0 < 0`) false, so the final result is 0.
 pub fn basics_mod_by(divisor: i64, n: i64) -> i64 {
     if divisor == 0 { return 0; }
-    let r = n % divisor;
-    if (r < 0 && divisor > 0) || (r > 0 && divisor < 0) { r + divisor }
-    else { r }
+    // checked_rem returns None only for i64::MIN % -1 (overflow); treat as 0.
+    let r = n.checked_rem(divisor).unwrap_or(0);
+    if r < 0 { r.wrapping_add(divisor) } else { r }
 }
 
 /// Sky `fst : (a, b) -> a` / `snd : (a, b) -> b`. Pure in stdlib, but the
@@ -72,6 +79,19 @@ mod tests {
         assert_eq!(basics_mod_by(3, -4), 2);
     }
     #[test] fn test_mod_by_exact() { assert_eq!(basics_mod_by(5, 10), 0); }
+
+    // Go parity: adjust fires only when r < 0.
+    // positive divisor, positive dividend — no adjust needed.
+    #[test] fn test_mod_by_pos_div_pos_n() { assert_eq!(basics_mod_by(3, 7), 1); }
+    // negative divisor, positive dividend — r > 0, no adjust (was wrong pre-fix).
+    // Go: 7 % -3 = 1; 1 >= 0 → no adjust → 1.
+    #[test] fn test_mod_by_neg_divisor_pos_n() { assert_eq!(basics_mod_by(-3, 7), 1); }
+    // negative divisor, negative dividend — r < 0 → adjust.
+    // Go: -7 % -3 = -1; -1 < 0 → -1 + (-3) = -4.  Wait — divisor=-3 so r+divisor=-4.
+    // Verify: Go does r += divisor → -1 + (-3) = -4.
+    #[test] fn test_mod_by_neg_divisor_neg_n() { assert_eq!(basics_mod_by(-3, -7), -4); }
+    // Overflow guard: i64::MIN % -1 must not panic, result = 0.
+    #[test] fn test_mod_by_min_i64_neg1() { assert_eq!(basics_mod_by(-1, i64::MIN), 0); }
 
     #[test] fn test_error_to_string_i64() { assert_eq!(basics_error_to_string(42i64), "42"); }
     // String renders UNQUOTED now (Go parity) — the primary fix.

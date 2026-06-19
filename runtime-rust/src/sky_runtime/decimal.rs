@@ -59,15 +59,36 @@ pub fn decimal_to_minor(scale: i64, d: Decimal) -> i64 {
     // `10_i64.pow(19)` overflows i64 → panic (debug) / wrap (release). Use
     // checked_pow with a saturating fallback so the kernel stays total.
     let factor = 10_i64.checked_pow(p).unwrap_or(i64::MAX);
-    let scaled = d.0 * RD::from(factor);
+    // checked_mul: saturate to MAX/MIN (overflow not possible in practice for
+    // normal monetary values, but guards the extreme edge without panicking).
+    let sat = if d.0.is_sign_negative() { RD::MIN } else { RD::MAX };
+    let scaled = d.0.checked_mul(RD::from(factor)).unwrap_or(sat);
     scaled.trunc().to_i64().unwrap_or(0)
 }
 
 // Arithmetic
 
-pub fn decimal_add(a: Decimal, b: Decimal) -> Decimal { Decimal(a.0 + b.0) }
-pub fn decimal_sub(a: Decimal, b: Decimal) -> Decimal { Decimal(a.0 - b.0) }
-pub fn decimal_mul(a: Decimal, b: Decimal) -> Decimal { Decimal(a.0 * b.0) }
+// Saturating arithmetic: rust_decimal's std ops panic on 96-bit mantissa
+// overflow; the Go oracle (shopspring/big.Int-backed) never overflows.
+// On overflow we saturate toward the mathematically correct signed extreme
+// rather than panicking — documented divergence only at values near ±7.9e28.
+pub fn decimal_add(a: Decimal, b: Decimal) -> Decimal {
+    Decimal(a.0.checked_add(b.0).unwrap_or_else(|| {
+        if a.0.is_sign_negative() && b.0.is_sign_negative() { RD::MIN } else { RD::MAX }
+    }))
+}
+pub fn decimal_sub(a: Decimal, b: Decimal) -> Decimal {
+    Decimal(a.0.checked_sub(b.0).unwrap_or_else(|| {
+        // a - b overflows positive when a is very large positive and b very negative
+        if b.0.is_sign_negative() { RD::MAX } else { RD::MIN }
+    }))
+}
+pub fn decimal_mul(a: Decimal, b: Decimal) -> Decimal {
+    Decimal(a.0.checked_mul(b.0).unwrap_or_else(|| {
+        // result sign = sign(a) XOR sign(b)
+        if a.0.is_sign_negative() == b.0.is_sign_negative() { RD::MAX } else { RD::MIN }
+    }))
+}
 pub fn decimal_div<E: From<String>>(a: Decimal, b: Decimal) -> SkyResult<E, Decimal> {
     if b.0.is_zero() {
         return SkyResult::Err("Std.Decimal: divide by zero".to_string().into());
@@ -129,14 +150,23 @@ pub fn decimal_is_positive(d: Decimal) -> bool { d.0 > RD::ZERO }
 pub fn decimal_is_negative(d: Decimal) -> bool { d.0 < RD::ZERO }
 
 // === percent ===
+// Use the saturating helpers so an extreme pct/base combo doesn't panic.
 pub fn decimal_percent_of(pct: Decimal, of_: Decimal) -> Decimal {
-    Decimal(pct.0 * of_.0 / RD::from(100))
+    decimal_div_raw(decimal_mul(pct, of_), Decimal(RD::from(100)))
 }
 pub fn decimal_add_percent(pct: Decimal, base: Decimal) -> Decimal {
-    Decimal(base.0 + (pct.0 * base.0 / RD::from(100)))
+    decimal_add(base, decimal_div_raw(decimal_mul(pct, base), Decimal(RD::from(100))))
 }
 pub fn decimal_sub_percent(pct: Decimal, base: Decimal) -> Decimal {
-    Decimal(base.0 - (pct.0 * base.0 / RD::from(100)))
+    decimal_sub(base, decimal_div_raw(decimal_mul(pct, base), Decimal(RD::from(100))))
+}
+
+// Internal helper: divide without returning a Result (denominator is always
+// a compile-time constant 100 in the percent helpers, never zero).
+#[inline]
+fn decimal_div_raw(a: Decimal, b: Decimal) -> Decimal {
+    if b.0.is_zero() { return Decimal(RD::ZERO); }
+    Decimal(a.0 / b.0)
 }
 
 // === formatWith — Sky source: formatWith thousandsSep decimalSep places d ===

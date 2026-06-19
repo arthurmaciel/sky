@@ -372,11 +372,11 @@ where
 mod tests {
     use super::*;
     use crate::sky_runtime::live::{build_index, Html};
-    use tokio::sync::mpsc::unbounded_channel;
+    use tokio::sync::mpsc::channel;
 
     // A minimal SessionEntry<(), ()> for exercising the store's TTL/touch logic.
     fn handle() -> SessionHandle<(), ()> {
-        let (tx, _rx) = unbounded_channel::<()>();
+        let (tx, _rx) = channel::<()>(1);
         let tree: Html<()> = Html::HText(String::new());
         let index = build_index(&tree);
         Arc::new(Mutex::new(SessionEntry {
@@ -402,7 +402,7 @@ mod tests {
     // A SessionEntry<i32, ()> with a given model, for the checkpoint tests.
     #[cfg(any(feature = "db", feature = "redis_store"))]
     fn handle_i32(model: i32) -> SessionHandle<i32, ()> {
-        let (tx, _rx) = unbounded_channel::<()>();
+        let (tx, _rx) = channel::<()>(1);
         let tree: Html<()> = Html::HText(String::new());
         let index = build_index(&tree);
         Arc::new(Mutex::new(SessionEntry { model, last_view: tree, index, seq: 0, sse_tx: None, msg_tx: tx }))
