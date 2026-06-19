@@ -15,6 +15,8 @@ codebase). One pass, one file at a time.
   ➖ no-defect · ❌ attempted, won't verify — each with a date).
 - A **living ledger**: each re-audit stamps **Last audited** and only re-sweeps
   files changed since their last date. Skill: `sky-rust-backend:principles-audit`.
+- **Latest full re-audit: 2026-06-19** (whole codebase, 131 code/script/skill files) —
+  see the dated section immediately below for severity summary + high/medium dispositions.
 
 ## Scope inventory
 
@@ -31,6 +33,65 @@ codebase). One pass, one file at a time.
 **Total: 139 files.** `Compile.hs`* is shared — only its Rust-codegen entry
 (`generateRust` / `generateRustProject`) is in scope. Excluded: `target/`
 build artifacts, the `courses/` HTML, and `examples/`.
+
+---
+## Full re-audit — 2026-06-19 (whole codebase, swarm)
+
+A full principles-audit re-swept **131 in-scope files** (58 read-only review agents, leaf-first). Severity: **8 high · 16 medium · 53 low · 54 clean** — **191 findings across 78 files**. Priority order applied: security > correctness > soundness > efficiency > completeness > readability. High/medium dispositions below; the low findings (parity-doc / efficiency / readability) are recorded in the run artifact and triaged as accepted or parity-fixture-deferred.
+
+**Fixed this session (build-verified):** the soundness panics-from-well-typed-Sky (decimal overflow, math_abs, basics modBy, cache Instant, auth exp), mechanical security (crypto RSA key-kind/base64/PKCS#8 + randomBytes bound, console XSS, ws message limit, live body-cap + bounded channel), and codegen/script (ExprEmitter TypedDef arm, Ffi.hs feature quoting, rust-perf.sh injection guard). See commits `a81b1b7b` (runtime) + the codegen/script batch.
+
+**Deferred — filed, NOT buried (require user awareness / a coordinated follow-up):**
+- `live/mod.rs` **CSRF middleware + security response headers** — Go ships a default-on double-submit-cookie CSRF gate + Referrer-Policy/X-Frame-Options/CSP; the Rust port has neither. Subsystem Go-parity port. **SIGNAL.**
+- `live/console_proxy.rs` **missing per-request console auth** — Go gates every console handler through `consoleAccessAllowed` (Bearer admin token in prod); the Rust proxy does not. Security regression vs Go. **SIGNAL.**
+- `crypto.rs` **randomBytes return-type** (`Vec<i64>` vs Go hex-`String`) — codegen-coupled (Emitter splice); a coordinated runtime+codegen change.
+- `db.rs` **bind_sql_param hardcoded to Sqlite** — a postgres/mysql build cargo-fails (E0308). Driver-portability codegen (move to per-driver config.rs).
+- `log.rs` **`*With` variants drop attrs** — Go renders `key=value`; mechanical follow-up.
+
+### High + medium findings — disposition
+
+| Sev | File | Location | Finding (abridged) | Disposition |
+|---|---|---|---|---|
+| high | `basics.rs` | basics_mod_by (l10) | (soundness) i64::MIN % -1 overflows: in Rust the `%` operator on i64::MIN with divisor -1 panics in debug builds ('attempt to calculate the remainder with overflo… | ✅ fixed 2026-06-19 |
+| high | `basics.rs` | basics_mod_by (l11) | (correctness) Divergence from Go's Basics_modByT (rt.go l1485). Go does `r := n % divisor; if r < 0 { r += divisor }` — it adjusts ONLY when the raw remainder is ne… | ✅ fixed 2026-06-19 |
+| high | `crypto.rs` | crypto_rsa_sha256_verify (l122-140) | (security) Verify takes the WRONG key kind vs the Go oracle and the Sky stdlib contract. Sky declares `rsaSha256Verify pemPublicKey message base64Signature` and … | ✅ fixed 2026-06-19 |
+| high | `crypto.rs` | crypto_rsa_sha256_sign (l105-117) / crypto_rsa_s | (correctness) Signature encoding diverges from Go and the Sky doc. Go sign returns STANDARD BASE64 (rt.go:6488) and verify base64-decodes (rt.go:6511); the Sky stdl… | ✅ fixed 2026-06-19 |
+| high | `crypto.rs` | crypto_random_bytes (l4-16) | (correctness) Return type contradicts the Sky stdlib signature. Sky declares `randomBytes : Int -> Task Error String` and Go returns a HEX-ENCODED String (rt.go:653… | ⏸️ deferred 2026-06-19 (randomBytes Vec<i64>→hex-String return-type is codegen-coupled, Emitter splice) |
+| high | `decimal.rs` | decimal_add/decimal_sub/decimal_mul (l68-70) | (soundness) `a.0 + b.0`, `a.0 - b.0`, `a.0 * b.0` use rust_decimal's std operator impls, which `panic!("Addition overflowed")` / `"Subtraction overflowed"` / `"Mu… | ✅ fixed 2026-06-19 |
+| high | `decimal.rs` | decimal_add/sub/mul (l68-70) + decimal_percent_o | (correctness) Go-parity break: Go's kernel calls shopspring/decimal `.Add`/`.Mul`/`.Sub` (decimal_kernel.go l171/l178/l185), which is big.Int-backed and does NOT ov… | ✅ fixed 2026-06-19 |
+| high | `decimal.rs` | decimal_to_minor (l57-63) | (soundness) `d.0 * RD::from(factor)` uses the panicking `*` operator. `factor` can be up to i64::MAX (~9.2e18 ⇒ ~19 significant digits); multiplying a moderately … | ✅ fixed 2026-06-19 |
+| high | `console.rs` | console_html (l40-43) | (security) The dashboard JS builds each log line as `"<span class='lvl'>"+d+" "+e.level+"</span> "+ ... e.message.replace(/&/.../</...)` and assigns it via `out.… | ✅ fixed 2026-06-19 |
+| high | `console_proxy.rs` | forward / proxy_entry (l270-l350), mount in live | (security) MISSING PER-REQUEST AUTH — Go-parity regression with a real exposure. The Go oracle gates EVERY console handler through consoleAccessAllowed → evaluat… | ⏸️ deferred 2026-06-19 (per-request console auth Go-parity port — subsystem; SIGNAL user) |
+| high | `mod.rs` | serve_live router build (l934-964) + render_page | (security) The Go backend wraps the mux with a default-ON double-submit-cookie CSRF middleware (live.go:3449 CSRFMiddleware) and injects a per-session csrfToken … | ⏸️ deferred 2026-06-19 (CSRF middleware + security-headers Go-parity port — subsystem; SIGNAL user) |
+| high | `math.rs` | math_abs (l25) | (soundness) `x.abs()` on i64 panics in debug builds and overflows (UB-free but wrong) in release when `x == i64::MIN`, since `-i64::MIN` is not representable. `ma… | ✅ fixed 2026-06-19 |
+| high | `Ffi.hs` | runRustInspectorWith (l73, l85-86) | (security) `featuresArg = " --features " ++ intercalate "," features` interpolates each feature string RAW into the `sh -c` command, while pkgPath/git-url/rev/br… | ✅ fixed 2026-06-19 |
+| medium | `checks.sh` | exercise_server_equiv (l472-475) | (correctness) The streaming-route guard times curl via `$( { gdate +%s%N \|\| date +%s%N; } )`. The comment (l470-472) documents that BSD `date` (macOS) lacks `%N` … | ⏸️ deferred 2026-06-19 (BSD date %N fallback — macOS-only, harness) |
+| medium | `rust-perf.sh` | pyf/pytrue (l32-33), consumed by gate_metric (l4 | (security) `pyf() { python3 -c "import sys; print($1)"; }` interpolates its argument directly into Python SOURCE. The arguments are metric values parsed out of s… | ✅ fixed 2026-06-19 |
+| medium | `rust-perf.sh` | better (l427), better_ref (l431-433), run_one js | (correctness) Division/`min`/`max` over metric values is only guarded for zero in gate_metric (l440 `$3==0`). better/better_ref and the json line feed `${GO[$m]}` /… | ➖ accepted 2026-06-19 (divide-by-empty guard folded into the pyf numval fix) |
+| medium | `web-verify.mjs` | main (l235) reading serverLogPath written via pi | (soundness) The server-log write-stream (createWriteStream, l91) fed by child.stdout/stderr (l93-94) is NEVER explicitly .end()'d or awaited for its 'finish' even… | ⏸️ deferred 2026-06-19 (server-log stream not flushed before grep — test harness) |
+| medium | `auth.rs` | auth_sign_token (l109-112) | (soundness) `exp = (now.as_secs() as i64) + expiry_seconds` is unchecked i64 addition over caller-controlled `expiry_seconds` (a well-typed Sky `Int`). In the def… | ✅ fixed 2026-06-19 |
+| medium | `auth.rs` | auth_sign_token (l113-118) | (correctness) The Go oracle (Auth_signToken in runtime-go/rt/db_auth.go) inserts BOTH `exp` and `iat` claims; this Rust version inserts only `exp`. A JWT signed by … | ✅ fixed 2026-06-19 |
+| medium | `auth.rs` | auth_password_strength (l86-90) | (correctness) Go's Auth_passwordStrength returns `Ok ()` (unit) on success; this Rust version returns `Ok String` with a rating ("weak"/"medium"/"strong"). The Sky … | ➖ accepted 2026-06-19 (Rust shape matches the Sky `Result Error String` sig better than Go) |
+| medium | `cache.rs` | cache_put (l136-137) | (soundness) `Instant::now() + Duration::from_millis(ttl as u64)` panics ("overflow when adding duration to instant") for a large positive `ttlMs`. `ttlMs` is an `… | ✅ fixed 2026-06-19 |
+| medium | `crypto.rs` | crypto_rsa_sha256_sign (l109) | (correctness) Sign accepts only PKCS#1 private keys (`from_pkcs1_pem`). Go (rt.go:6472-6482) accepts BOTH PKCS#1 and PKCS#8 PEM keys. A well-typed Sky program handi… | ✅ fixed 2026-06-19 |
+| medium | `crypto.rs` | crypto_random_bytes (l11) / crypto_random_token  | (security) Missing the Go size bound enables an unbounded attacker-controlled allocation. Go errs for `size <= 0 \|\| size > 1024` (rt.go:6536, 6555) and surface… | ✅ fixed 2026-06-19 |
+| medium | `db.rs` | bind_sql_param (l1103-1115) consumed by db_inser | (correctness) bind_sql_param is HARDCODED to `sqlx::query::Query<sqlx::Sqlite, sqlx::sqlite::SqliteArguments>`, but it lives in the always-copied db.rs (not the per… | ⏸️ deferred 2026-06-19 (Sqlite-hardcoded bind → postgres/mysql cargo-fail; driver-portability codegen) |
+| medium | `html.rs` | escape_attr (l233-235) | (correctness) escape_attr maps '"' -> "&quot;", but the Go oracle escapes attribute values via html.EscapeString, which maps '"' -> "&#34;" (confirmed at GOROOT/src… | ⏸️ deferred 2026-06-19 (escape_attr &quot; vs Go &#34; — byte-parity, needs fixture) |
+| medium | `diff.rs` | diff_node (l76-84) | (correctness) Top-level tag/kind mismatch emits NO patch (the `_ => return` arm), diverging from the Go oracle. Go's diffNodes (live.go l1250-1253) emits a whole-su… | ⏸️ deferred 2026-06-19 (top-level tag/kind mismatch emits no patch — parity, needs fixture) |
+| medium | `mod.rs` | serve_live page render / response headers (l960- | (security) Go sets Referrer-Policy: strict-origin-when-cross-origin, an X-Frame-Options / CSP frame-ancestors cross-origin allow-list, and related hardening head… | ⏸️ deferred 2026-06-19 (CSRF middleware + security-headers Go-parity port — subsystem; SIGNAL user) |
+| medium | `mod.rs` | event_handler (l830-846) | (security) No request-body size cap. Go applies http.MaxBytesReader(w, r.Body, maxBody) on /_sky/event (live.go:3915), default 5 MiB and configurable via SKY_LIV… | ✅ fixed 2026-06-19 |
+| medium | `mod.rs` | page handler msg_tx channel (l737) + event_handl | (security) The per-session Msg channel is unbounded_channel(). A client (or any party who can reach /_sky/event with a valid/forged session cookie) can fire even… | ✅ fixed 2026-06-19 |
+| medium | `route.rs` | match_routes (l55-62) feeding codegen build clos | (soundness) match_route returns params whose length equals the pattern's :param-segment count. The codegen-emitted build closure indexes __p[0..ctorArity-1] where… | ⏸️ deferred 2026-06-19 (param-count vs ctor-arity indexing — soundness, needs codegen coordination) |
+| medium | `log.rs` | log_info_with / log_error_with / log_debug_with  | (correctness) All *With variants call drop(attrs) and NEVER render the key/value pairs into the emitted line or the telemetry ring. Go's Log_*With flattens attrs vi… | ⏸️ deferred 2026-06-19 (*With variants drop attrs; Go renders key=value — real parity gap, mechanical follow-up) |
+| medium | `math.rs` | math_floor/math_ceil/math_round/math_trunc (l33, | (correctness) `x.floor() as i64` uses Rust's saturating float->int cast: NaN->0, +inf->i64::MAX, -inf->i64::MIN, out-of-range finite saturates to the bounds. Go's `… | ⏸️ deferred 2026-06-19 (floor/ceil/round saturating-cast parity — needs Go-fixture corpus) |
+| medium | `money.rs` | money_allocate (l218-222) | (correctness) Remainder is extracted via `remainder.to_string().parse::<i64>().unwrap_or(0)`. `remainder = total_minor - base*parts` where both operands are `.trunc… | ⏸️ deferred 2026-06-19 (allocate remainder parse scale — parity, needs fixture) |
+| medium | `path.rs` | path_ext (l74) | (correctness) Diverges from Go's `filepath.Ext` on dotfiles. `Path::extension()` returns None for a leading-dot-only name, so `path_ext(".bashrc")` → "" and `path_e… | ⏸️ deferred 2026-06-19 (ext/dir vs Go filepath — parity, matches prior deferral) |
+| medium | `path.rs` | path_dir (l43) | (correctness) Diverges from Go's `filepath.Dir`, which runs `Clean` on its result. `Path::parent()` does not clean. e.g. `filepath.Dir("/foo/bar/")` (Go) = "/foo/ba… | ⏸️ deferred 2026-06-19 (ext/dir vs Go filepath — parity, matches prior deferral) |
+| medium | `server.rs` | ws_loop (l496-526) + WsServerCfg.maxMessageBytes | (security) cfg.maxMessageBytes is stored but NEVER applied to the axum WebSocket. The Go oracle calls conn.SetReadLimit(cfg.maxMessageBytes) (runtime-go/rt/serve… | ✅ fixed 2026-06-19 |
+| medium | `ws_client.rs` | sub_subscribe_ws_open (l311-319) | (correctness) Lost-event race on onOpen. The guard is `if ws_mark_subscribed(socket_id, "open") && registry().…contains_key(&socket_id)`. `ws_mark_subscribed` is ev… | ⏸️ deferred 2026-06-19 (onOpen race + close-code truncation — parity) |
+| medium | `ws_client.rs` | web_socket_close_with_code (l253-259) | (correctness) `code as u16` silently truncates the i64 Sky Int. Sky's CloseCode carries `Custom Int`, so a user code like 70000 wraps to 4464 (70000 mod 65536), and… | ⏸️ deferred 2026-06-19 (onOpen race + close-code truncation — parity) |
+| medium | `ExprEmitter.hs` | defToRustString catch-all (l3555) | (completeness) The catch-all `defToRustString _ctx _ = "_ = unimplemented()"` has no arm for `Can.TypedDef`. A let-annotated binding `let x : T = e in body` reaches … | ✅ fixed 2026-06-19 |
+| medium | `ModuleEmitter.hs` | maybeMemoiseNullary (l311-324) | (correctness) Memoisation fires on a purely mechanical gate (nParams==0, monomorphic, concrete-owned retTy, and `"task_run" isInfixOf body`). This is NOT a proof of… | ⏸️ deferred 2026-06-19 (memoise-nullary idempotency gate — needs effect-idempotency analysis) |
 
 ---
 
