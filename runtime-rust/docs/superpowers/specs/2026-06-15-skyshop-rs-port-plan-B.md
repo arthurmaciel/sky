@@ -43,7 +43,7 @@ The single load-bearing finding of this investigation, which makes the whole por
 emulators, NOT byte-identical Firestore/Stripe wire behaviour.** Concretely the
 bar is:
 
-1. `sky build src/Main.sky --target rust` exit 0 **and** `cd sky-out/Rust && cargo
+1. `sky build src/Main.sky --target rust` exit 0 **and** `cd sky-out/rust && cargo
    build` exit 0 (the hard gate).
 2. Creds-less boot reachable: binary starts, `curl localhost:<port>/` → 200, no
    `panic`/abort in stderr (the original logs a Firestore error and renders an

@@ -42,7 +42,7 @@ handleHello req =
         Nothing   -> Task.<span class="tok-fn">succeed</span> (Server.<span class="tok-fn">text</span> <span class="tok-str">"Hello, stranger!"</span>)</code></pre>
 
   <h3>The routes lower to a vector of <code>server_get</code> / <code>server_post</code></h3>
-  <p class="filetag">examples/15-http-server/sky-out/Rust/src/main.rs (real, trimmed)</p>
+  <p class="filetag">examples/15-http-server/sky-out/rust/src/main.rs (real, trimmed)</p>
   <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyTask</span>&lt;()&gt; {
     <span class="tok-fn">server_listen</span>::&lt;<span class="tok-ty">SkyError</span>&gt;(
         <span class="tok-num">8000</span>,

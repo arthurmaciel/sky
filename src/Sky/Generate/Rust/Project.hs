@@ -69,7 +69,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         allEmitted = rustCode ++ concatMap snd moduleFiles
         uuidReferenced = "uuid_v4" `isInfixOf` allEmitted || "uuid_v7" `isInfixOf` allEmitted
         usage = usage0 { RustBuilder.usesUuid = RustBuilder.usesUuid usage0 || uuidReferenced }
-        rustDir = outDir </> "Rust"
+        rustDir = outDir </> "rust"
     createDirectoryIfMissing True rustDir
     let srcDir = rustDir </> "src"
         mainRustPath = srcDir </> "main.rs"
@@ -198,7 +198,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         rustDeps = Toml._rustDeps config
     writeFile cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDeps (Toml._liveStore config))
     putStrLn $ "   Wrote " ++ cargoTomlPath
-    -- Copy Rust FFI binding files into sky-out/Rust/src/
+    -- Copy Rust FFI binding files into sky-out/rust/src/
     -- Slugs must match what generateBindings writes (via slugify).
     mapM_ (\(depName, _) -> do
         let fileSlug = map (\c -> if c `elem` ("./" :: String) then '_' else c) depName
@@ -214,7 +214,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
     createDirectoryIfMissing True cacheDir
     writeFile (cacheDir </> "source.hash") srcHash
     -- Best-effort: format the GENERATED Rust (NOT the already-formatted copied
-    -- runtime modules) with rustfmt so `sky-out/Rust/src` is human-readable — the
+    -- runtime modules) with rustfmt so `sky-out/rust/src` is human-readable — the
     -- codegen emits cramped Strings. rustfmt is syntactic (no type-check, no
     -- compile needed), so it runs before `cargo build`; the formatted file is
     -- what compiles AND what a human inspects, including when the build fails.
@@ -280,11 +280,11 @@ generateRust canMods _srcMod solvedTypes dbPath dbDriver ffiSlugs kernelAliases 
     in (code, moduleFiles, usage)
 
 
--- | Copy the Rust sky_runtime module into sky-out/Rust/src/sky_runtime/
+-- | Copy the Rust sky_runtime module into sky-out/rust/src/sky_runtime/
 -- so `mod sky_runtime; use sky_runtime::*;` resolves at compile time.
 copyRustRuntime :: FilePath -> IO ()
 copyRustRuntime outDir = do
-    let targetDir = outDir </> "Rust" </> "src" </> "sky_runtime"
+    let targetDir = outDir </> "rust" </> "src" </> "sky_runtime"
     createDirectoryIfMissing True targetDir
     exePath <- System.Environment.getExecutablePath
     -- Walk up from the exe directory looking for runtime-rust/src/sky_runtime/

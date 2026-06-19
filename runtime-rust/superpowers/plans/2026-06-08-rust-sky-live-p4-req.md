@@ -335,14 +335,14 @@ main =
 ```bash
 cd examples/rust/31-live-req && rm -rf sky-out .skycache
 /home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky 2>&1 | tail -4
-grep -nE "fn main_init\(.*LiveReq|req\.path|req\.cookies" sky-out/Rust/src/main.rs | head
+grep -nE "fn main_init\(.*LiveReq|req\.path|req\.cookies" sky-out/rust/src/main.rs | head
 ```
 Expected: `Build complete`; `fn main_init(req: sky_runtime::LiveReq)` (or `LiveReq`); `req.path` / `req.cookies` accesses.
 
 - [ ] **Step 3: HTTP gate**
 ```bash
 cd examples/rust/31-live-req
-timeout 45 ./sky-out/Rust/target/debug/sky-app &   # or run_in_background
+timeout 45 ./sky-out/rust/target/debug/sky-app &   # or run_in_background
 sleep 1.5
 echo "--- GET /hello with a cookie ---"
 curl -s -H 'Cookie: sky_sid=abc123; x=y' http://localhost:8000/hello | grep -oE '<p[^>]*>[^<]*</p>'

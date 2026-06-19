@@ -18,7 +18,7 @@ developer decides; you record.
 1. **Run the harvester** (~5–10 min — clippy ×2 + tests; background + wait):
    ```bash
    bash runtime-rust/scripts/quality-audit.sh            # default: runtime-rust/
-   bash runtime-rust/scripts/quality-audit.sh examples/07-todo-cli/sky-out/Rust   # generated code
+   bash runtime-rust/scripts/quality-audit.sh examples/07-todo-cli/sky-out/rust   # generated code
    ```
    Hard gate (`clippy -D warnings` + `cargo test`) + advisory (curated
    restriction/pedantic lints, panic-vector sweep, `unsafe`/SAFETY, `dyn Any`,
@@ -90,7 +90,7 @@ marker (the code changed); cosmetic lints get a plain `// reason`, not a marker.
 ## Scope + gotchas
 
 - Default target is the **runtime-rust crate** (the persistent, reused surface);
-  pass a generated example's `sky-out/Rust` to audit emitted code too.
+  pass a generated example's `sky-out/rust` to audit emitted code too.
 - **Interactive** — step 5 asks the developer per material problem; don't
   self-approve acceptances. Orthogonal to `sky-rust-backend:keep-go-parity`
   (that proves Go≡Rust *behaviour*; this proves the Rust is *sound*) — not wired

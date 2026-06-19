@@ -613,7 +613,7 @@ Expected: `from_bytes_from_uuid : List Int -> Result Error Uuid` and `as_bytes_f
 
 - [ ] **Step 3: Verify the generated wrapper has the fixed-array prelude**
 
-Run: `grep -A3 "fn uuid_from_bytes_from_uuid" sky-out/Rust/src/uuid_bindings.rs`
+Run: `grep -A3 "fn uuid_from_bytes_from_uuid" sky-out/rust/src/uuid_bindings.rs`
 Expected: a `let b0: [u8; 16] = match to_u8_array::<SkyError, 16>(&arg0) { … };` prelude line, then `ok_res(... Uuid::from_bytes(b0))`.
 
 - [ ] **Step 4: Build and run — verify fixed-array param + byte result**

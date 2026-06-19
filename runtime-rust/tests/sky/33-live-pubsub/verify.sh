@@ -15,7 +15,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -x "$CARGO_TARGET_DIR/debug/sky-app" ]; then
     BIN="$CARGO_TARGET_DIR/debug/sky-app"
 else
-    BIN="$HERE/sky-out/Rust/target/debug/sky-app"
+    BIN="$HERE/sky-out/rust/target/debug/sky-app"
 fi
 TMP="$(mktemp -d)"
 SRV_PID=""

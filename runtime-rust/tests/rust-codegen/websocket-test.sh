@@ -9,7 +9,7 @@ cd "$(dirname "$0")"
 SKY=../../../sky-out/sky
 PORT=8162
 work=$(mktemp -d)
-trap 'pkill -f "sky-out/Rust/target/debug/sky-app" 2>/dev/null; rm -rf "$work"' EXIT
+trap 'pkill -f "sky-out/rust/target/debug/sky-app" 2>/dev/null; rm -rf "$work"' EXIT
 fail=0
 command -v python3 >/dev/null || { echo "SKIP websocket: python3 not found"; exit 0; }
 
@@ -46,11 +46,11 @@ main =
 EOF
 
 ( cd "$work" && "$OLDPWD/$SKY" build src/Main.sky >/tmp/ws-test-build.log 2>&1 )
-if [ ! -x "$work/sky-out/Rust/target/debug/sky-app" ]; then
+if [ ! -x "$work/sky-out/rust/target/debug/sky-app" ]; then
     echo "FAIL websocket: build produced no binary"; tail -6 /tmp/ws-test-build.log; exit 1
 fi
 
-( cd "$work" && setsid ./sky-out/Rust/target/debug/sky-app >/tmp/ws-test-run.log 2>&1 < /dev/null & )
+( cd "$work" && setsid ./sky-out/rust/target/debug/sky-app >/tmp/ws-test-run.log 2>&1 < /dev/null & )
 # Wait for the port to accept.
 for _ in $(seq 1 50); do
     python3 -c "import socket,sys; s=socket.socket(); s.settimeout(0.3); sys.exit(0 if s.connect_ex(('127.0.0.1',$PORT))==0 else 1)" 2>/dev/null && break
@@ -91,5 +91,5 @@ check "echo hello"    "echo: hello"
 check "echo world"    "echo: world"
 
 if [ "$fail" -eq 0 ]; then echo "PASS websocket: upgrade + echo round-trip"; else echo "FAIL websocket"; echo "--- output ---"; echo "$out"; fi
-pkill -f "sky-out/Rust/target/debug/sky-app" 2>/dev/null
+pkill -f "sky-out/rust/target/debug/sky-app" 2>/dev/null
 exit "$fail"

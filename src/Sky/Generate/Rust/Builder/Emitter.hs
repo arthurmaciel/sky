@@ -827,7 +827,7 @@ ffiPlaceholder name =
 -- | Generate Cargo.toml for the Rust project
 emitCargoToml :: UsedKernels -> String -> String -> [(String, Toml.RustDepSpec)] -> String -> String
 emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
-    -- The sky_runtime files copied into sky-out/Rust/src/ carry cfg(feature = "X")
+    -- The sky_runtime files copied into sky-out/rust/src/ carry cfg(feature = "X")
     -- gates inherited from runtime-rust/Cargo.toml. The generated Cargo.toml
     -- below declares a [features] section enabling everything by default so the
     -- gates evaluate as true. We also pull in the matching crates directly

@@ -41,7 +41,7 @@ The user now supplies run-verification means (Firestore emulator + Stripe test
 mode), so the bar rises above build-only but stays below "byte-identical to the
 Go app". Acceptance:
 
-1. `sky build src/Main.sky --target rust` exit 0 **and** `cd sky-out/Rust &&
+1. `sky build src/Main.sky --target rust` exit 0 **and** `cd sky-out/rust &&
    cargo build` exit 0 (the hard gate).
 2. Creds-less boot smoke: binary boots, `curl localhost:<port>/` → 200, no
    `panic`/`UNIQUE`/Rust-backtrace in stderr. The Home page renders with empty
@@ -112,7 +112,7 @@ emitDepLine name (Toml.RustPathDep dir feats) =
         else name ++ " = { path = " ++ show dir ++ ", features = [" ++ intercalate ", " (map show feats) ++ "] }"
 ```
 
-→ generated `sky-out/Rust/Cargo.toml`:
+→ generated `sky-out/rust/Cargo.toml`:
 
 ```toml
 sky-firestore-shim = { path = "firestore-shim" }
@@ -121,12 +121,12 @@ sky-stripe-shim = { path = "stripe-shim" }
 
 **Path-resolution detail (must verify in execution):** `emitCargoToml` runs the
 path string verbatim; the generated `Cargo.toml` lives at
-`examples/rust/skyshop-rs/sky-out/Rust/Cargo.toml`, so a bare relative `path =
-"firestore-shim"` resolves against `sky-out/Rust/`, NOT the example root. Two
+`examples/rust/skyshop-rs/sky-out/rust/Cargo.toml`, so a bare relative `path =
+"firestore-shim"` resolves against `sky-out/rust/`, NOT the example root. Two
 clean options — pick **(a)** for self-containment:
-(a) emit the path **relative to `sky-out/Rust/`**, i.e. the executor writes
+(a) emit the path **relative to `sky-out/rust/`**, i.e. the executor writes
 `sky.toml` with `path = "../../firestore-shim"` (two levels up from
-`sky-out/Rust/` back to the example dir). The Toml value is passed through
+`sky-out/rust/` back to the example dir). The Toml value is passed through
 verbatim, so this needs zero codegen logic — just the right string in `sky.toml`.
 (b) have `Project.hs` rewrite a path dep to an absolute path at emit time
 (more robust to `sky-out` depth, slightly more code). Plan adopts **(a)** and
@@ -144,7 +144,7 @@ on-disk crate — no clone). Cache + naming follow the existing rules:
   where `fileSlug` = the dep name with `./` → `_` (`Project.hs:199`). For
   `sky-firestore-shim` the slug is `sky-firestore-shim` (no `.`/`/`), file
   `sky-firestore-shim_bindings.rs`.
-- `_bindings.rs` copied to `sky-out/Rust/src/<modSlug>_bindings.rs`, `modSlug`
+- `_bindings.rs` copied to `sky-out/rust/src/<modSlug>_bindings.rs`, `modSlug`
   = non-alphanumerics → `_` → `sky_firestore_shim_bindings.rs` (`Project.hs:201`).
 - Sky module name = `rustModuleName` = `"Rust." ++ capitalise(alnum-cleaned)` →
   **`Rust.Sky_firestore_shim`** and **`Rust.Sky_stripe_shim`**. (Confirmed
@@ -450,7 +450,7 @@ The order de-risks the async bridge from the Sky-compile problem (§12.1/§12.2)
 The tonic+prost+gcloud-sdk+async-stripe+tokio tree is large. skyshop-rs uses its
 **OWN** `CARGO_TARGET_DIR` (e.g. `~/.cache/sky-rust-target-skyshop`) so it does
 not poison the shared leaf-example sweep cache. Export sccache. `rm -rf
-sky-out/Rust/target` after build per the sweep idiom. Classified `out` in
+sky-out/rust/target` after build per the sweep idiom. Classified `out` in
 `equiv-classification.tsv` (no Go counterpart to diff — §0.4); add the
 classification row so the coverage gate passes; the example is NOT added to the
 default `rust-sweep.sh` set (heavy deps + live creds) — it gets a dedicated

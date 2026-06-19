@@ -61,12 +61,12 @@ main =
 EOF
 
 ( cd "$work" && "$OLDPWD/$SKY" build src/Main.sky >/tmp/cli-ticker-build.log 2>&1 )
-if [ ! -x "$work/sky-out/Rust/target/debug/sky-app" ]; then
+if [ ! -x "$work/sky-out/rust/target/debug/sky-app" ]; then
     echo "FAIL cli-ticker: build produced no binary"; tail -6 /tmp/cli-ticker-build.log; exit 1
 fi
 
 # ~0.45s window @ 100ms ticks → expect tick=0..4ish. Assert >=2 ticks fired.
-out=$(sleep 0.45 | "$work/sky-out/Rust/target/debug/sky-app")
+out=$(sleep 0.45 | "$work/sky-out/rust/target/debug/sky-app")
 if echo "$out" | grep -q "tick=0" && echo "$out" | grep -q "tick=2"; then
     echo "PASS cli-ticker: Sub.every fired periodic ticks"
 else

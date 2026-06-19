@@ -165,7 +165,7 @@ build_rust() {
   # genuine codegen defect (e.g. private-shadows-glob, irrefutable_let_patterns),
   # surfaced + gated in the verdict. WARN_CELL = rustc's own per-crate
   # "generated N warnings" summary (authoritative; 0 when the line is absent).
-  if ( cd "$d" && timeout 600 cargo build --manifest-path sky-out/Rust/Cargo.toml >"$HIST/$n.rust.cargo.log" 2>&1 ); then
+  if ( cd "$d" && timeout 600 cargo build --manifest-path sky-out/rust/Cargo.toml >"$HIST/$n.rust.cargo.log" 2>&1 ); then
     WARN_CELL="$(rg -o 'generated [0-9]+ warning' "$HIST/$n.rust.cargo.log" 2>/dev/null | rg -o '[0-9]+' | tail -1)"
     : "${WARN_CELL:=0}"
     BUILD_CELL="ok"; return 0

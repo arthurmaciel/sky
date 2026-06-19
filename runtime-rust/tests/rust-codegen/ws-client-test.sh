@@ -86,11 +86,11 @@ main = Cli.program { init = init, update = update, view = view, subscriptions = 
 EOF
 
 ( cd "$work" && "$OLDPWD/$SKY" build src/Main.sky >/tmp/ws-client-build.log 2>&1 )
-if [ ! -x "$work/sky-out/Rust/target/debug/sky-app" ]; then
+if [ ! -x "$work/sky-out/rust/target/debug/sky-app" ]; then
     echo "FAIL ws-client: build produced no binary"; tail -8 /tmp/ws-client-build.log; exit 1
 fi
 
-out=$(sleep 0.8 | "$work/sky-out/Rust/target/debug/sky-app")
+out=$(sleep 0.8 | "$work/sky-out/rust/target/debug/sky-app")
 if echo "$out" | grep -q "last=hello"; then
     echo "PASS ws-client: onMessage delivered the frame"
 else

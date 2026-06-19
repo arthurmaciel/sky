@@ -77,23 +77,23 @@ for n in "${EX[@]}"; do
   d="examples/$n"; [ -f "$d/src/Main.sky" ] || continue
   shape="$(example_shape "$d")"
   say "  -- $n ($shape) --"
-  ( cd "$d" && rm -rf sky-out .skycache .skydeps sky-out/Rust 2>/dev/null ) || true
+  ( cd "$d" && rm -rf sky-out .skycache .skydeps sky-out/rust 2>/dev/null ) || true
 
   # Generate the Rust project (sky build also debug-builds; harmless, we rebuild release).
   if ! ( cd "$d" && SKY_RUST_FMT=0 timeout 600 "$SKY_BIN" build --backend rust src/Main.sky ) >>"$LOG" 2>&1; then
     printf '%s\t%s\t\t\t\t\t\tsky-gen-fail\n' "$n" "$shape" >> "$TSV"; continue
   fi
-  MAN="$d/sky-out/Rust/Cargo.toml"
+  MAN="$d/sky-out/rust/Cargo.toml"
 
   # Dynamic release.
-  dyn_b=""; if ( cd "$d" && timeout 900 cargo build --release --manifest-path sky-out/Rust/Cargo.toml ) >>"$LOG" 2>&1; then
+  dyn_b=""; if ( cd "$d" && timeout 900 cargo build --release --manifest-path sky-out/rust/Cargo.toml ) >>"$LOG" 2>&1; then
     dyn_b="$(fsize "$TBASE/release/sky-app")"; fi
   cold_d="$(coldstart_ms "$TBASE/release/sky-app")"
   [ "$shape" = cli ] || cold_d=""   # only cli/simple have a meaningful cold-start-to-exit
 
   # Static (musl) release.
   st_b=""; status="ok"
-  if ( cd "$d" && timeout 1200 cargo build --release --target "$MUSL_TRIPLE" --features static_alloc --manifest-path sky-out/Rust/Cargo.toml ) >>"$LOG" 2>&1; then
+  if ( cd "$d" && timeout 1200 cargo build --release --target "$MUSL_TRIPLE" --features static_alloc --manifest-path sky-out/rust/Cargo.toml ) >>"$LOG" 2>&1; then
     st_b="$(fsize "$TBASE/$MUSL_TRIPLE/release/sky-app")"
   else
     status="static-build-fail"

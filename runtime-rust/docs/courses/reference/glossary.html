@@ -58,7 +58,7 @@
   <table>
     <tr><th>Term</th><th>Meaning</th></tr>
     <tr><td><b>Runtime crate</b></td><td><code>runtime-rust/src/sky_runtime/</code> — the hand-written Rust library every kernel call lands in (<code>string.rs</code>, <code>log.rs</code>, <code>task.rs</code>, <code>db.rs</code>, …). Copied into each generated project at build time.</td></tr>
-    <tr><td><b>Generated project</b></td><td>The Rust crate the compiler writes to <code>sky-out/Rust/</code>: <code>main.rs</code> + module files + <code>Cargo.toml</code> + a copy of the runtime + FFI bindings. <code>cargo</code> builds it into a binary.</td></tr>
+    <tr><td><b>Generated project</b></td><td>The Rust crate the compiler writes to <code>sky-out/rust/</code>: <code>main.rs</code> + module files + <code>Cargo.toml</code> + a copy of the runtime + FFI bindings. <code>cargo</code> builds it into a binary.</td></tr>
     <tr><td><b>Feature gate</b></td><td>A Cargo feature that conditionally compiles part of the runtime. A CLI program doesn't pull in <code>axum</code>/<code>sqlx</code> — <code>Walker.hs</code> decides which features <code>Emitter.hs</code> turns on.</td></tr>
     <tr><td><b>FFI</b></td><td>Foreign Function Interface — calling Rust crates from Sky. Sky's FFI is automatic: point <code>sky.toml</code> at a crate, the compiler reads its <code>rustdoc</code> JSON and generates bindings. Async/framework crates use a thin <b>wrapper crate</b>.</td></tr>
     <tr><td><b>Equivalence (equiv)</b></td><td>The correctness gate: the Rust build of an example must behave identically to the Go build (same stdout / HTTP body / browser scenario / TUI run), per its shape.</td></tr>

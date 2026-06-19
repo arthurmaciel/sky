@@ -25,7 +25,7 @@
   effect; then a full TEA-style interactive CLI.</p>
 
   <div class="callout key"><span class="tag">All code here is real</span>
-  Every Rust block below was copied from <code>sky-out/Rust/src/main.rs</code> after
+  Every Rust block below was copied from <code>sky-out/rust/src/main.rs</code> after
   building the example (lightly trimmed for length). Build it yourself and compare.</div>
 
   <h2><span class="num">A</span>Example 1 — <code>01-hello-world</code></h2>
@@ -38,7 +38,7 @@ main =
 
   <p>Its <code>main</code> has type <code>Task Error ()</code> (a bare effect). The
   emitted Rust:</p>
-  <p class="filetag">examples/01-hello-world/sky-out/Rust/src/main.rs (trimmed)</p>
+  <p class="filetag">examples/01-hello-world/sky-out/rust/src/main.rs (trimmed)</p>
   <pre><code><span class="tok-com">// a thin local wrapper forwards into the runtime crate</span>
 <span class="tok-kw">pub fn</span> <span class="tok-fn">log_println</span>(msg: <span class="tok-ty">String</span>) -> <span class="tok-ty">SkyTask</span>&lt;()&gt; {
     sky_runtime::log::<span class="tok-fn">log_println</span>(msg)
@@ -223,7 +223,7 @@ main =
     <span class="ico">🧑‍🏫</span>
     <p>Build these yourself: <code>cd examples/20-cli-counter &amp;&amp; sky build
     --backend rust src/Main.sky</code>, then read
-    <code>sky-out/Rust/src/main.rs</code>. Ask your teacher to diff a field you change.</p>
+    <code>sky-out/rust/src/main.rs</code>. Ask your teacher to diff a field you change.</p>
   </div>
 
   <div class="pager">
@@ -231,7 +231,7 @@ main =
     <a href="index.html">Course 1 roadmap →</a>
   </div>
 
-  <footer class="fin">Lesson 6 · grounded in real <code>sky-out/Rust/src/main.rs</code> from <code>01-hello-world</code> + <code>20-cli-counter</code>.</footer>
+  <footer class="fin">Lesson 6 · grounded in real <code>sky-out/rust/src/main.rs</code> from <code>01-hello-world</code> + <code>20-cli-counter</code>.</footer>
 
 </div>
 <script>

@@ -16,8 +16,8 @@ for f in empty-list-head.sky maybe-map-nothing.sky result-err.sky generic-adt.sk
         fail=1
     else
         # Build succeeded — also run to confirm "ok: ..." prints.
-        if [ -x sky-out/Rust/target/debug/sky-app ]; then
-            run_out=$(./sky-out/Rust/target/debug/sky-app)
+        if [ -x sky-out/rust/target/debug/sky-app ]; then
+            run_out=$(./sky-out/rust/target/debug/sky-app)
             case "$run_out" in
                 ok:*) echo "PASS $f: $run_out" ;;
                 *) echo "FAIL $f: unexpected runtime output: $run_out"; fail=1 ;;
@@ -28,6 +28,6 @@ for f in empty-list-head.sky maybe-map-nothing.sky result-err.sky generic-adt.sk
         fi
     fi
     rm -f Main.sky
-    rm -rf sky-out/Rust/target sky-out .skycache .skydeps
+    rm -rf sky-out/rust/target sky-out .skycache .skydeps
 done
 exit $fail

@@ -415,7 +415,7 @@ main =
 ```bash
 cd examples/rust/29-live-form && rm -rf sky-out .skycache
 /home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky 2>&1 | tail -4
-grep -n "decode_form\|OnForm\|Deserialize" sky-out/Rust/src/main.rs | head   # confirm codegen
+grep -n "decode_form\|OnForm\|Deserialize" sky-out/rust/src/main.rs | head   # confirm codegen
 ```
 Expected: `Build complete`; `decode_form::<…Creds…>` + `Event::OnForm` present; the
 `Creds` struct derives `Deserialize`.
@@ -426,7 +426,7 @@ Start the server (background, self-timeout) and drive the form via curl, matchin
 the wire shape (`args=[{email,password}]`, `event="submit"`, `handlerId=<form sky-id>`):
 ```bash
 cd examples/rust/29-live-form
-timeout 45 ./sky-out/Rust/target/debug/sky-app &   # or run_in_background
+timeout 45 ./sky-out/rust/target/debug/sky-app &   # or run_in_background
 sleep 1.5
 curl -s -c /tmp/jar29 http://localhost:8000/ -o /tmp/p29.html
 FORM=$(grep -oE 'sky-id="[^"]*"' /tmp/p29.html | grep -iE 'form|_form' | head -1 | sed 's/sky-id="//;s/"//')

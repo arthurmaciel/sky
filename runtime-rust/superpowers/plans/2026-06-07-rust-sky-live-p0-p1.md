@@ -619,7 +619,7 @@ Expected: a line of HTML containing
 
 - [ ] **Step 6: Verify the bridge emission (sanity)**
 
-Run: `grep -n "pub type StdHtmlHtml" examples/rust/27-live-static/sky-out/Rust/src/main.rs`
+Run: `grep -n "pub type StdHtmlHtml" examples/rust/27-live-static/sky-out/rust/src/main.rs`
 Expected: `pub type StdHtmlHtml<...> = sky_runtime::Html<...>;` (generic alias, not `pub use`).
 
 - [ ] **Step 7: Commit**
@@ -1299,7 +1299,7 @@ main =
 ```bash
 cd examples/rust/28-live-counter && rm -rf sky-out .skycache
 /home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky 2>&1 | tail -3
-./sky-out/Rust/target/debug/sky-app > /tmp/live28.log 2>&1 &
+./sky-out/rust/target/debug/sky-app > /tmp/live28.log 2>&1 &
 APP=$!; until grep -qiE "listening|800" /tmp/live28.log; do sleep 0.3; done
 ```
 

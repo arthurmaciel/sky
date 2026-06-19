@@ -67,11 +67,11 @@ main =
 EOF
 
 ( cd "$work" && "$OLDPWD/$SKY" build src/Main.sky >/tmp/cli-quit-build.log 2>&1 )
-if [ ! -x "$work/sky-out/Rust/target/debug/sky-app" ]; then
+if [ ! -x "$work/sky-out/rust/target/debug/sky-app" ]; then
     echo "FAIL cli-quit: build produced no binary (diverging Cmd.perform?)"; tail -8 /tmp/cli-quit-build.log; exit 1
 fi
 
-out=$(printf '+\n+\nq\n' | "$work/sky-out/Rust/target/debug/sky-app")
+out=$(printf '+\n+\nq\n' | "$work/sky-out/rust/target/debug/sky-app")
 rc=$?
 if echo "$out" | grep -q "count=2" && [ "$rc" -eq 0 ]; then
     echo "PASS cli-quit: System.exit via Cmd.perform (count=2, exit 0)"

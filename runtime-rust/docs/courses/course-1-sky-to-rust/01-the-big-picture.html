@@ -34,7 +34,7 @@
     <div class="stage sky"><div class="k">2 · Canonicalise</div><div class="v">Canonical AST</div><div class="f">Sky.Canonicalise.Module<br>canonicaliseWithDeps</div></div>
     <div class="stage sky"><div class="k">3 · Type-solve</div><div class="v">SolvedTypes</div><div class="f">Sky.Type.Solve<br>solve…</div></div>
     <div class="stage rust"><div class="k">4 · Codegen</div><div class="v">Rust source</div><div class="f">Generate/Rust/…<br>generateRustProject</div></div>
-    <div class="stage rust"><div class="k">5 · Build</div><div class="v">Binary</div><div class="f">cargo build<br>sky-out/Rust/</div></div>
+    <div class="stage rust"><div class="k">5 · Build</div><div class="v">Binary</div><div class="f">cargo build<br>sky-out/rust/</div></div>
   </div>
 
   <div class="callout key"><span class="tag">Key idea</span>
@@ -79,7 +79,7 @@
   <p>This is the Rust backend. The orchestrator
   <code>generateRustProject</code> walks the canonical modules, consults
   <code>SolvedTypes</code>, lowers each definition to Rust text, and writes a whole
-  cargo project to <code>sky-out/Rust/</code>: <code>main.rs</code>, one file per
+  cargo project to <code>sky-out/rust/</code>: <code>main.rs</code>, one file per
   module, a <code>Cargo.toml</code> with only the features the program needs, the
   copied runtime crate, and any FFI bindings.</p>
   <p class="src">Entry: <a href="../../../../src/Sky/Generate/Rust/Project.hs"><code>src/Sky/Generate/Rust/Project.hs</code></a> · <code>generateRustProject</code> (called from <code>src/Sky/Build/Compile.hs</code>). The lowering itself lives under <code>src/Sky/Generate/Rust/Builder/</code> — Lesson 4 tours it.</p>
@@ -124,7 +124,7 @@
   <code>sky build --backend rust</code>, lightly trimmed). The <code>Task</code>-typed
   <code>main</code> becomes a <code>sky_main</code> that returns a
   <code>SkyTask</code> value, driven at the entry by <code>block_on</code>:</p>
-  <p class="filetag">sky-out/Rust/src/main.rs</p>
+  <p class="filetag">sky-out/rust/src/main.rs</p>
   <pre><code><span class="tok-kw">pub fn</span> <span class="tok-fn">sky_main</span>() -> <span class="tok-ty">SkyTask</span>&lt;()&gt; {
     <span class="tok-fn">log_println</span>(<span class="tok-fn">string_from_int</span>(<span class="tok-num">1</span> + <span class="tok-num">2</span>))
 }
@@ -203,7 +203,7 @@
     <div class="q">6. What does the generated cargo project output to when
     <code>sky build --backend rust</code> runs?</div>
     <button data-ok="0"><code>sky-out/app</code></button>
-    <button data-ok="1"><code>sky-out/Rust/</code></button>
+    <button data-ok="1"><code>sky-out/rust/</code></button>
     <button data-ok="0"><code>dist-newstyle/</code></button>
     <div class="fb"></div>
   </div>
@@ -213,7 +213,7 @@
     <ul>
       <li>Five stages: <b>Lex/Parse → Canonicalise → Type-solve → Codegen → cargo build</b>.</li>
       <li>The first three are the shared front end; each removes ambiguity so codegen can be straightforward.</li>
-      <li>Codegen (<code>generateRustProject</code>) emits <em>calls</em> into a hand-written <b>runtime crate</b>, then writes a whole cargo project to <code>sky-out/Rust/</code>.</li>
+      <li>Codegen (<code>generateRustProject</code>) emits <em>calls</em> into a hand-written <b>runtime crate</b>, then writes a whole cargo project to <code>sky-out/rust/</code>.</li>
       <li>A kernel call is routed to a Rust fn by <code>kernelToRust</code> (<code>Builder/Kernel.hs</code>); a <code>Task</code>-typed <code>main</code> runs via <code>block_on</code>.</li>
     </ul>
   </div>
@@ -221,7 +221,7 @@
   <div class="teacher">
     <span class="ico">🧑‍🏫</span>
     <p>Want to see this trace on <em>your own</em> tiny program, or peek at a real
-    <code>sky-out/Rust/main.rs</code>? Ask your teacher to build an example with
+    <code>sky-out/rust/main.rs</code>? Ask your teacher to build an example with
     <code>sky build --backend rust</code> and walk the output with you.</p>
   </div>
 

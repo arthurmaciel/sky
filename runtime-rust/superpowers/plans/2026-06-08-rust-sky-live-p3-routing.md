@@ -365,14 +365,14 @@ main =
 ```bash
 cd examples/rust/30-live-routing && rm -rf sky-out .skycache
 /home/arthur/Documentos/comp/sky/sky-out/sky build src/Main.sky 2>&1 | tail -4
-grep -nE "live_app_routed|Route::new|set_page|\.\.__model|page: __page" sky-out/Rust/src/main.rs | head
+grep -nE "live_app_routed|Route::new|set_page|\.\.__model|page: __page" sky-out/rust/src/main.rs | head
 ```
 Expected: `Build complete`; `live_app_routed(...)` with a `vec![Route::new("/", …), Route::new("/apps/:slug", …)]`, `NotFound`, and a `MainModel { page: __page, ..__model }` setter.
 
 - [ ] **Step 3: Routing gate (HTTP)**
 ```bash
 cd examples/rust/30-live-routing
-timeout 45 ./sky-out/Rust/target/debug/sky-app &   # or run_in_background
+timeout 45 ./sky-out/rust/target/debug/sky-app &   # or run_in_background
 sleep 1.5
 echo "--- GET / (expect Home) ---"
 curl -s http://localhost:8000/ | grep -oE '<h1[^>]*>[^<]*</h1>' | head -1

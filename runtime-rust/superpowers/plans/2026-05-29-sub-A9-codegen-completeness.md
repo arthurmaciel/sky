@@ -34,7 +34,7 @@ cp examples/00-standard-libs/sky.toml /tmp/sky.toml.subA9.bak
 printf '\ntarget = "rust"\n' >> examples/00-standard-libs/sky.toml
 cd examples/00-standard-libs && rm -rf sky-out .skycache
 ../../sky-out/sky build src/Main.sky 2>/dev/null
-cd sky-out/Rust
+cd sky-out/rust
 cargo build 2>&1 | grep -c "^error\[" > /tmp/subA9-baseline-errcount.txt
 cargo build 2>&1 | grep "^error\[" | sort | uniq -c | sort -rn > /tmp/subA9-baseline-cats.txt
 cargo build 2>&1 | grep "  --> src/" | sed -E 's/.*--> (src\/[a-z_]+\.rs).*/\1/' | sort | uniq -c | sort -rn > /tmp/subA9-baseline-files.txt
@@ -125,7 +125,7 @@ Expected: build succeeds (no longer referenced arms = dead code; deletion is saf
 cp -f dist-newstyle/build/x86_64-linux/ghc-9.6.7/sky-compiler-0.0.0/x/sky/build/sky/sky sky-out/sky
 cd examples/rust/01-rand && rm -rf sky-out .skycache && ../../../sky-out/sky build src/Main.sky 2>&1 | tail -3
 ```
-Expected: `Build complete: sky-out/Rust/target/debug/sky-app`.
+Expected: `Build complete: sky-out/rust/target/debug/sky-app`.
 
 - [ ] **Step 7: Measure error count after B1**
 
@@ -134,7 +134,7 @@ cd /home/arthur/Documentos/comp/sky
 printf '\ntarget = "rust"\n' >> examples/00-standard-libs/sky.toml
 cd examples/00-standard-libs && rm -rf sky-out .skycache
 ../../sky-out/sky build src/Main.sky 2>/dev/null
-cd sky-out/Rust && cargo build 2>&1 | grep -c "^error\["
+cd sky-out/rust && cargo build 2>&1 | grep -c "^error\["
 cd /home/arthur/Documentos/comp/sky
 # Restore
 cp /tmp/sky.toml.subA9.bak examples/00-standard-libs/sky.toml
@@ -314,7 +314,7 @@ cd /home/arthur/Documentos/comp/sky
 printf '\ntarget = "rust"\n' >> examples/00-standard-libs/sky.toml
 cd examples/00-standard-libs && rm -rf sky-out .skycache
 ../../sky-out/sky build src/Main.sky 2>/dev/null
-grep -A1 "std_money_amount\|std_money_currency" sky-out/Rust/src/std_money.rs | head -8
+grep -A1 "std_money_amount\|std_money_currency" sky-out/rust/src/std_money.rs | head -8
 cd /home/arthur/Documentos/comp/sky
 cp /tmp/sky.toml.subA9.bak examples/00-standard-libs/sky.toml
 rm -rf examples/00-standard-libs/sky-out examples/00-standard-libs/.skycache
@@ -400,7 +400,7 @@ Expected: 16/0.
 printf '\ntarget = "rust"\n' >> examples/00-standard-libs/sky.toml
 cd examples/00-standard-libs && rm -rf sky-out .skycache
 ../../sky-out/sky build src/Main.sky 2>/dev/null
-grep "with_claim\b" sky-out/Rust/src/sky_core_jwt.rs | head -3
+grep "with_claim\b" sky-out/rust/src/sky_core_jwt.rs | head -3
 cd /home/arthur/Documentos/comp/sky
 cp /tmp/sky.toml.subA9.bak examples/00-standard-libs/sky.toml
 rm -rf examples/00-standard-libs/sky-out examples/00-standard-libs/.skycache
@@ -445,7 +445,7 @@ strict-superset fix. Otherwise skip.
 printf '\ntarget = "rust"\n' >> examples/00-standard-libs/sky.toml
 cd examples/00-standard-libs && rm -rf sky-out .skycache
 ../../sky-out/sky build src/Main.sky 2>/dev/null
-cd sky-out/Rust
+cd sky-out/rust
 cargo build 2>&1 | grep "expected function" | head -5
 cd /home/arthur/Documentos/comp/sky
 cp /tmp/sky.toml.subA9.bak examples/00-standard-libs/sky.toml
@@ -518,7 +518,7 @@ Expected: 16/16.
 
 ```bash
 for d in examples/rust/*/; do
-    bin="$d/sky-out/Rust/target/debug/sky-app"
+    bin="$d/sky-out/rust/target/debug/sky-app"
     [ -x "$bin" ] && timeout 10s "$bin" 2>&1 | head -1 | sed "s|^|$(basename $d): |"
 done
 ```
@@ -543,7 +543,7 @@ Expected: 27 / 0 failures.
 printf '\ntarget = "rust"\n' >> examples/00-standard-libs/sky.toml
 cd examples/00-standard-libs && rm -rf sky-out .skycache
 ../../sky-out/sky build src/Main.sky 2>/dev/null
-cd sky-out/Rust
+cd sky-out/rust
 cargo build 2>&1 | grep -c "^error\["
 cargo build 2>&1 | grep "^error\[" | sort | uniq -c | sort -rn | head -8
 cargo build 2>&1 | grep "  --> src/" | sed -E 's/.*--> (src\/[a-z_]+\.rs).*/\1/' | sort | uniq -c | sort -rn | head -8

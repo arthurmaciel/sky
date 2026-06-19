@@ -30,7 +30,7 @@ FAIL=0
 for ex in 01-hello-world 04-local-pkg 14-task-demo simple 07-todo-cli test_pkg; do
     if (cd "examples/$ex" && rm -rf sky-out .skycache .skydeps \
         && "$SKY_BIN" build src/Main.sky --backend rust \
-        && cargo build --manifest-path sky-out/Rust/Cargo.toml -q 2>&1); then
+        && cargo build --manifest-path sky-out/rust/Cargo.toml -q 2>&1); then
         echo "  ✅ $ex"
     else
         echo "  ❌ $ex"

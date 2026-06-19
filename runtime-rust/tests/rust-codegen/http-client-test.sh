@@ -88,7 +88,7 @@ main =
 EOF
 
 ( cd "$work" && "$OLDPWD/$SKY" build src/Main.sky >/tmp/httpc-test-build.log 2>&1 )
-if [ ! -x "$work/sky-out/Rust/target/debug/sky-app" ]; then
+if [ ! -x "$work/sky-out/rust/target/debug/sky-app" ]; then
     echo "FAIL http-client: build produced no binary"; tail -5 /tmp/httpc-test-build.log; exit 1
 fi
 
@@ -103,7 +103,7 @@ for _ in $(seq 1 50); do
     sleep 0.2
 done
 [ "$ready" -eq 1 ] || { echo "FAIL http-client: responder never came up on :$PORT"; exit 1; }
-out=$("$work/sky-out/Rust/target/debug/sky-app" 2>&1)
+out=$("$work/sky-out/rust/target/debug/sky-app" 2>&1)
 
 check() { if echo "$out" | grep -qF "$2"; then echo "  ok: $1"; else echo "  FAIL: $1 — not in output"; fail=1; fi; }
 check "GET status+ctype+body" "GET: status=201 ctype=application/json method=GET"

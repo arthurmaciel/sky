@@ -182,7 +182,7 @@ buildConsole ver cacheDir cacheBin fpFile fingerprint = do
     -- build-once console artifact (smaller + faster startup).
 
     -- Isolated env: drop CARGO_TARGET_DIR so the console builds into its own
-    -- buildDir/sky-out/Rust/target (every generated crate is "sky-app" — sharing
+    -- buildDir/sky-out/rust/target (every generated crate is "sky-app" — sharing
     -- the user's target dir would clobber their binary). Keep RUSTC_WRAPPER so
     -- sccache still de-dupes the shared deps (axum/tokio/sqlx) at the rustc
     -- level. Set the recursion guard so the child build skips THIS hook.
@@ -199,7 +199,7 @@ buildConsole ver cacheDir cacheBin fpFile fingerprint = do
                 "[sky.console] console pre-build failed; the in-process console will serve.\n"
                 ++ unlines (lastN 8 (lines errOut))
         ExitSuccess -> do
-            let built = buildDir </> "sky-out" </> "Rust" </> "target" </> "debug" </> "sky-app"
+            let built = buildDir </> "sky-out" </> "rust" </> "target" </> "debug" </> "sky-app"
             builtExists <- doesFileExist built
             if not builtExists
                 then hPutStrLn stderr

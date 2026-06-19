@@ -34,7 +34,7 @@ export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURE_DIR="$REPO_ROOT/runtime-rust/tests/sky/alloc-stress"
-RUST_DIR="$FIXTURE_DIR/sky-out/Rust"
+RUST_DIR="$FIXTURE_DIR/sky-out/rust"
 SKY_BIN="${SKY_BIN:-$REPO_ROOT/sky-out/sky}"
 MUSL_TRIPLE="x86_64-unknown-linux-musl"
 SERVER_PORT=8080      # the fixture's Server.listen port is hardcoded in Main.sky

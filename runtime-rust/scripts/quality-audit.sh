@@ -11,7 +11,7 @@
 # fix-vs-consciously-accept. Improve THIS SCRIPT after a run, never improvise.
 #
 # Usage:  quality-audit.sh [crate-dir]      # default: runtime-rust/
-#         quality-audit.sh examples/07-todo-cli/sky-out/Rust   # audit generated code
+#         quality-audit.sh examples/07-todo-cli/sky-out/rust   # audit generated code
 #
 # Exit: 0 = hard gate (clippy -D + tests) green · 1 = gate failed · 2 = setup error.
 # (The advisory findings never flip the exit — they're for triage, not a CI veto.)

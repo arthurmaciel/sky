@@ -69,11 +69,11 @@ main =
 EOF
 
 ( cd "$work" && "$OLDPWD/$SKY" build src/Main.sky >/tmp/cli-tea-build.log 2>&1 )
-if [ ! -x "$work/sky-out/Rust/target/debug/sky-app" ]; then
+if [ ! -x "$work/sky-out/rust/target/debug/sky-app" ]; then
     echo "FAIL cli-tea: build produced no binary"; tail -6 /tmp/cli-tea-build.log; exit 1
 fi
 
-out=$(printf '+\n+\n-\nr\n+\n' | "$work/sky-out/Rust/target/debug/sky-app" | tr -d '\n')
+out=$(printf '+\n+\n-\nr\n+\n' | "$work/sky-out/rust/target/debug/sky-app" | tr -d '\n')
 want="count=0 count=1 count=2 count=1 count=0 count=1 "
 if [ "$out" = "$want" ]; then
     echo "PASS cli-tea: view sequence correct"

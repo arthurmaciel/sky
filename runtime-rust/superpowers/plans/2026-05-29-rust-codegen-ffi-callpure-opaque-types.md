@@ -690,7 +690,7 @@ Expected: every example builds, final line printed.
 ```bash
 set -e
 for d in examples/rust/*/; do
-    bin="$d/sky-out/Rust/target/debug/sky-app"
+    bin="$d/sky-out/rust/target/debug/sky-app"
     if [ -x "$bin" ]; then
         echo "=== $d ==="
         timeout 10s "$bin" 2>&1 | head -5 || echo "(timeout or non-zero exit)"

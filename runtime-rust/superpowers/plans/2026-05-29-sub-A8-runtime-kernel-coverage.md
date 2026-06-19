@@ -744,7 +744,7 @@ Expected: 16/0.
 
 ```bash
 for d in examples/rust/*/; do
-    bin="$d/sky-out/Rust/target/debug/sky-app"
+    bin="$d/sky-out/rust/target/debug/sky-app"
     [ -x "$bin" ] && timeout 10s "$bin" 2>&1 | head -1 | sed "s|^|$(basename $d): |"
 done
 ```

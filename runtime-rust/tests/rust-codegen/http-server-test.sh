@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 SKY=../../../sky-out/sky
 PORT=8231
 work=$(mktemp -d)
-trap 'pkill -f "sky-out/Rust/target/debug/sky-app" 2>/dev/null; rm -rf "$work"' EXIT
+trap 'pkill -f "sky-out/rust/target/debug/sky-app" 2>/dev/null; rm -rf "$work"' EXIT
 fail=0
 
 mkdir -p "$work/src" "$work/public"
@@ -56,11 +56,11 @@ main =
 EOF
 
 ( cd "$work" && "$OLDPWD/$SKY" build src/Main.sky >/tmp/httpd-test-build.log 2>&1 )
-if [ ! -x "$work/sky-out/Rust/target/debug/sky-app" ]; then
+if [ ! -x "$work/sky-out/rust/target/debug/sky-app" ]; then
     echo "FAIL http-server: build produced no binary"; tail -5 /tmp/httpd-test-build.log; exit 1
 fi
 
-( cd "$work" && setsid ./sky-out/Rust/target/debug/sky-app >/tmp/httpd-test-run.log 2>&1 < /dev/null & )
+( cd "$work" && setsid ./sky-out/rust/target/debug/sky-app >/tmp/httpd-test-run.log 2>&1 < /dev/null & )
 srv_pid=$!
 sleep 1.5
 
@@ -78,6 +78,6 @@ if [ "$fail" -eq 0 ]; then echo "PASS http-server: all routes answered"; else ec
 # Kill the server explicitly and reap it so the trap's later pkill (and the
 # job-control teardown) can't reflect a signal into this script's exit code.
 kill "$srv_pid" 2>/dev/null
-pkill -f "sky-out/Rust/target/debug/sky-app" 2>/dev/null
+pkill -f "sky-out/rust/target/debug/sky-app" 2>/dev/null
 wait "$srv_pid" 2>/dev/null
 exit "$fail"

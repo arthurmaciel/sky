@@ -266,7 +266,7 @@ for entry in "${EXAMPLES[@]}"; do
   fi
 
   # 2. Dynamic release build.
-  if ( cd "$d" && timeout "$CARGO_TIMEOUT" cargo build --release --manifest-path sky-out/Rust/Cargo.toml ) >>"$LOG" 2>&1; then
+  if ( cd "$d" && timeout "$CARGO_TIMEOUT" cargo build --release --manifest-path sky-out/rust/Cargo.toml ) >>"$LOG" 2>&1; then
     dyn_b="$(fsize "$CARGO_TARGET_DIR/release/sky-app")"
     DYN_BIN="$CARGO_TARGET_DIR/release/sky-app"
   else
@@ -281,7 +281,7 @@ for entry in "${EXAMPLES[@]}"; do
       # musl static-pie + mimalloc (macOS cross-compiles → linux ELF).
       if ( cd "$d" && timeout "$CARGO_TIMEOUT" cargo build --release \
             --target "$MUSL_TRIPLE" --features static_alloc \
-            --manifest-path sky-out/Rust/Cargo.toml ) >>"$LOG" 2>&1; then
+            --manifest-path sky-out/rust/Cargo.toml ) >>"$LOG" 2>&1; then
         build_static="ok"
         STATIC_BIN="$CARGO_TARGET_DIR/$MUSL_TRIPLE/release/sky-app"
         static_b="$(fsize "$STATIC_BIN")"
@@ -290,7 +290,7 @@ for entry in "${EXAMPLES[@]}"; do
     Windows)
       # Native target, static MSVC CRT via RUSTFLAGS.
       if ( cd "$d" && RUSTFLAGS="-C target-feature=+crt-static" timeout "$CARGO_TIMEOUT" \
-            cargo build --release --manifest-path sky-out/Rust/Cargo.toml ) >>"$LOG" 2>&1; then
+            cargo build --release --manifest-path sky-out/rust/Cargo.toml ) >>"$LOG" 2>&1; then
         build_static="ok"
         # Windows native release binary (Git Bash sees the .exe).
         STATIC_BIN="$CARGO_TARGET_DIR/release/sky-app.exe"

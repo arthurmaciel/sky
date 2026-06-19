@@ -273,7 +273,7 @@ gives wrong answers, so refreshing after writing code is not optional.
 - **Entry**: `generateRust` in `src/Sky/Build/Compile.hs`; the Rust codegen lives
   under `src/Sky/Generate/Rust/Builder/` (Kernel.hs routing, ExprEmitter, Types,
   TypeRenderer, Emitter, ModuleEmitter, Project).
-- **Output**: `sky-out/Rust/`. **Default target** is Go; Rust via `--backend rust`.
+- **Output**: `sky-out/rust/`. **Default target** is Go; Rust via `--backend rust`.
 - **Runtime**: `runtime-rust/src/sky_runtime/` is copied into the generated
   project at `sky build` time (external deps tokio/sqlx/axum/serde pulled per used
   feature). Current state of parity / what builds: ask `skydex parity --gaps` and
@@ -629,7 +629,7 @@ log** — hold it to the same bar as a code review:
 - `go clean -cache` reclaims multi-GB fast; abort agent spawns under ~5 GB free.
 - **Disk hygiene — cargo `target/` dirs accumulate fast** (a full example sweep can
   exceed 20 GB). The sweep idiom deletes each example's target right after building
-  (`rm -rf sky-out/Rust/target` post-build). The shared `CARGO_TARGET_DIR` is
+  (`rm -rf sky-out/rust/target` post-build). The shared `CARGO_TARGET_DIR` is
   package `sky-app` for every example, so it holds only the LAST-built binary —
   rebuild the specific example immediately before running it. Manual reclaim:
   `rm -rf runtime-rust/target tools/sky-ffi-inspect-rs/target ~/.cache/sky` +

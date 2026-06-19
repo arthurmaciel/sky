@@ -76,7 +76,7 @@ From reading the tree at HEAD `c899b9d5`:
 - **`Generate/Go/Kernel.hs:126`** — Go reference: each Ffi entry registers
   with the Go runtime by name + arity. The Rust analogue at codegen level
   is what this spec adds.
-- **Generated `std_decimal.rs`** (from `examples/00-standard-libs/sky-out/Rust/src/`)
+- **Generated `std_decimal.rs`** (from `examples/00-standard-libs/sky-out/rust/src/`)
   literally contains:
   ```rust
   pub fn std_decimal_from_int(n: i64) -> StdDecimalDecimal {

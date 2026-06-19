@@ -539,7 +539,7 @@ because several downstream groups are blocked on them.
    Sky-compile problem.
 
 12.3 **What proves "done"?** `sky build src/Main.sky --target rust` exit 0 +
-   `cd sky-out/Rust && cargo build` exit 0. Plus optionally: boot the binary,
+   `cd sky-out/rust && cargo build` exit 0. Plus optionally: boot the binary,
    `curl localhost:<port>/` → 200 with no panic in stderr (creds-less). Is the
    creds-less boot even reachable (does a lazy wrapper avoid constructing the
    Firestore client until first query)?

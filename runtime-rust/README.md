@@ -745,7 +745,7 @@ interactive quizzes) live under [`docs/courses/`](docs/courses/index.html):
 
 | Term | Meaning |
 |---|---|
-| **`sky-out/` · `sky-out/Rust/`** | compiler output · Rust codegen output (capital `R` by convention) |
+| **`sky-out/` · `sky-out/rust/`** | compiler output · Rust codegen output |
 | **`.skycache/` · `.skycache/ffi/rust/`** | build cache (source hashes, lowered IR) · Rust FFI registry |
 | **`SKY-RUST-AUDIT:` marker** | an in-code decision marker (ACCEPTED) mirroring the soundness ledger |
 | **no-`Any` invariant** | generated code + Sky-reachable runtime paths use the static type system end-to-end; the one `unsafe` is the console orphan-guard |

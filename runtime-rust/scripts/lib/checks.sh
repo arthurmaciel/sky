@@ -165,12 +165,12 @@ resolve_bin() {
   for b in \
     "$CARGO_TARGET_DIR/debug/$name" \
     "$CARGO_TARGET_DIR/debug/sky-app" \
-    "$d/sky-out/Rust/target/debug/$name" \
-    "$d/sky-out/Rust/target/debug/sky-app"; do
+    "$d/sky-out/rust/target/debug/$name" \
+    "$d/sky-out/rust/target/debug/sky-app"; do
     [ -n "$b" ] && [ -x "$b" ] && [ ! -d "$b" ] && { echo "$b"; return 0; }
   done
   # Last resort: newest executable file in either target/debug.
-  b="$(find "$CARGO_TARGET_DIR/debug" "$d/sky-out/Rust/target/debug" -maxdepth 1 -type f -executable 2>/dev/null \
+  b="$(find "$CARGO_TARGET_DIR/debug" "$d/sky-out/rust/target/debug" -maxdepth 1 -type f -executable 2>/dev/null \
         | xargs -r ls -t 2>/dev/null | head -1)"
   [ -n "$b" ] && { echo "$b"; return 0; }
   return 1

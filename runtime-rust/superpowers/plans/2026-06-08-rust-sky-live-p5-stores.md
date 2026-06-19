@@ -304,7 +304,7 @@ same sqlite file + cookie → count preserved).
 ```bash
 cd examples/rust/32-live-sessions && rm -rf sky-out .skycache sessions.db
 sky build src/Main.sky
-./sky-out/Rust/target/debug/sky-app &   # run 1
+./sky-out/rust/target/debug/sky-app &   # run 1
 # GET / (capture sky_sid cookie); POST /_sky/event click x3; GET / with cookie → count 3
 # kill run 1; restart; GET / with the SAME cookie → count STILL 3 (restored from sqlite)
 ```

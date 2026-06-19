@@ -12,7 +12,7 @@ Sky Source → Haskell Parser → Type-Check → Canonical AST → Rust Codegen 
                                                                     ↓
                                             sky_runtime/ modules (this directory)
                                                                     ↓
-                                          sky-out/Rust/src/main.rs + sky_runtime/
+                                          sky-out/rust/src/main.rs + sky_runtime/
                                                                     ↓
                                                        cargo build → binary
 ```
@@ -23,7 +23,7 @@ implementation strings in the Haskell codegen.
 
 The `sky_runtime` crate is the **single source of truth** for all Rust code
 emitted by the Sky compiler's `--backend rust` path. Every generated project
-copies this crate's modules into `sky-out/Rust/src/sky_runtime/` at build time.
+copies this crate's modules into `sky-out/rust/src/sky_runtime/` at build time.
 
 ---
 
@@ -505,7 +505,7 @@ change. A runtime-only `.rs` edit is re-copied into the generated project on the
 `sky run` (no wipe needed). Detailed env setup and the disk-hygiene recipe live in
 `runtime-rust/CLAUDE.md`.
 
-**Readable output.** The generated `sky-out/Rust/src/*.rs` is run through `rustfmt`
+**Readable output.** The generated `sky-out/rust/src/*.rs` is run through `rustfmt`
 (per-file, `--edition 2021`, best-effort) before the `cargo build` — so the emitted
 Rust reads like hand-written code when inspected. `SKY_RUST_FMT=0` skips it.
 

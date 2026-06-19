@@ -2,7 +2,7 @@
 # Negative-path fixture for the Go-package -> Rust FFI divergence
 # (disposition DOCUMENT_BLOCKED). Proves that a [go.dependencies] build under
 # --backend rust REFUSES CLEANLY: exit != 0, an E1001 / "Undefined name"
-# refusal in the output, NO sky-out/Rust/src/main.rs produced, and NO Rust
+# refusal in the output, NO sky-out/rust/src/main.rs produced, and NO Rust
 # panic marker. A clean compile-time refusal is the strongest failure mode —
 # not a panic, not a late cargo error, not a silent success.
 #
@@ -40,11 +40,11 @@ else
 fi
 
 # ASSERT 3 — no Rust source was emitted (refusal happened before codegen).
-if [ -f sky-out/Rust/src/main.rs ]; then
-    note "FAIL: sky-out/Rust/src/main.rs was produced — codegen ran despite refusal"
+if [ -f sky-out/rust/src/main.rs ]; then
+    note "FAIL: sky-out/rust/src/main.rs was produced — codegen ran despite refusal"
     fail=1
 else
-    note "ok: no sky-out/Rust/src/main.rs produced"
+    note "ok: no sky-out/rust/src/main.rs produced"
 fi
 
 # ASSERT 4 — no Rust panic leaked (must be a clean refusal, not an abort).

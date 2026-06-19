@@ -36,7 +36,7 @@ ensure_ref_binary() { # builds .equiv/sky-ref (HEAD monolith) on first use
 gen_rust() { # $1=binary $2=outdir
   ( cd "$D" && rm -rf sky-out .skycache .skydeps && timeout 180 "$1" build src/Main.sky --backend rust ) \
       >/tmp/equiv-$EX.gen.log 2>&1 || return 1
-  rm -rf "$2"; cp -r "$D/sky-out/Rust" "$2"
+  rm -rf "$2"; cp -r "$D/sky-out/rust" "$2"
 }
 gen_go() { # $1=binary -> echoes the go binary path
   ( cd "$D" && rm -rf sky-out .skycache .skydeps && timeout 180 "$1" build src/Main.sky ) \

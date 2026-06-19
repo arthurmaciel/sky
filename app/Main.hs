@@ -1933,7 +1933,7 @@ runCommand cmd = case cmd of
                         putStrLn "Compilation successful"
                         putStrLn $ "Build complete: " ++ outDir ++ "/" ++ Toml._binName config'
                     Toml.BackendRust -> do
-                        let rustDir = outDir ++ "/Rust"
+                        let rustDir = outDir ++ "/rust"
                         hFlush stdout
                         -- Bake the sky version into the binary (compile-time
                         -- `option_env!("SKY_VERSION")` — drives /_sky/buildinfo
@@ -1987,7 +1987,7 @@ runCommand cmd = case cmd of
                         putStrLn $ "Build complete, running..."
                         callProcess (outDir ++ "/" ++ Toml._binName config') []
                     Toml.BackendRust -> do
-                        let rustDir = outDir ++ "/Rust"
+                        let rustDir = outDir ++ "/rust"
                         hFlush stdout
                         checkWebviewLibsRust rustDir
                         (staticArgs, targetSub) <- planRustBuild (Toml._rustStatic config') (Toml._rustTarget config') (Toml._rustAllocator config') rustDir
@@ -2174,7 +2174,7 @@ runCommand cmd = case cmd of
                                     System.Exit.ExitFailure n ->
                                         exitWith (System.Exit.ExitFailure n)
                     Toml.BackendRust -> do
-                        let rustDir = outDir ++ "/Rust"
+                        let rustDir = outDir ++ "/rust"
                         buildRc <- Control.Exception.try
                             (callProcess "cargo" ["build", "--manifest-path", rustDir ++ "/Cargo.toml"])
                             :: IO (Either Control.Exception.SomeException ())

@@ -790,7 +790,7 @@ kernelToRust mod name = case (mod, name) of
     ("Ffi", "toAny")    -> "ffi_to_any_polyfill"
     -- Rust user-FFI kernel: snake_case the suffix, no panic stub.
     -- The wrapper function lives in a .skycache/ffi/rust/*_bindings.rs file
-    -- that gets copied into sky-out/Rust/src/ at codegen time.
+    -- that gets copied into sky-out/rust/src/ at codegen time.
     --
     -- LOAD-BEARING COUPLING: this default must stay byte-for-byte in step with
     -- Build/Rust/Ffi.hs:526 (toSnakeCase including the _from_<recvType>

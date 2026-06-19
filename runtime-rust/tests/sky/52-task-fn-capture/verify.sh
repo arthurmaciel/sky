@@ -22,7 +22,7 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GEN="$HERE/sky-out/Rust/src/main.rs"
+GEN="$HERE/sky-out/rust/src/main.rs"
 fail() { echo "FAIL: $1"; exit 1; }
 
 [ -f "$GEN" ] || fail "generated Rust not found at $GEN (build: sky build src/Main.sky --backend rust)"
@@ -38,9 +38,9 @@ grep -qE 'cleanup = std::sync::Arc::new\(' "$GEN" \
 # Build + run into a PROJECT-LOCAL target so a shared CARGO_TARGET_DIR (set by
 # the sweep — every example is package `sky-app`, so the shared dir holds only
 # the LAST build) can't hand us a sibling example's binary. Unset it for our own
-# cargo invocation so the binary lands deterministically under sky-out/Rust/target.
-BIN="$HERE/sky-out/Rust/target/debug/sky-app"
-( cd "$HERE/sky-out/Rust" && env -u CARGO_TARGET_DIR cargo build -q ) \
+# cargo invocation so the binary lands deterministically under sky-out/rust/target.
+BIN="$HERE/sky-out/rust/target/debug/sky-app"
+( cd "$HERE/sky-out/rust" && env -u CARGO_TARGET_DIR cargo build -q ) \
     || fail "cargo build failed"
 [ -f "$BIN" ] || fail "binary not found at $BIN after build"
 
