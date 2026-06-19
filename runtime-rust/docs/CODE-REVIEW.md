@@ -41,9 +41,22 @@ A full principles-audit re-swept **131 in-scope files** (58 read-only review age
 
 **Fixed this session (build-verified):** the soundness panics-from-well-typed-Sky (decimal overflow, math_abs, basics modBy, cache Instant, auth exp), mechanical security (crypto RSA key-kind/base64/PKCS#8 + randomBytes bound, console XSS, ws message limit, live body-cap + bounded channel), and codegen/script (ExprEmitter TypedDef arm, Ffi.hs feature quoting, rust-perf.sh injection guard). See commits `a81b1b7b` (runtime) + the codegen/script batch.
 
-**Deferred — filed, NOT buried (require user awareness / a coordinated follow-up):**
-- `live/mod.rs` **CSRF middleware + security response headers** — Go ships a default-on double-submit-cookie CSRF gate + Referrer-Policy/X-Frame-Options/CSP; the Rust port has neither. Subsystem Go-parity port. **SIGNAL.**
-- `live/console_proxy.rs` **missing per-request console auth** — Go gates every console handler through `consoleAccessAllowed` (Bearer admin token in prod); the Rust proxy does not. Security regression vs Go. **SIGNAL.**
+**✅ Security findings RESOLVED post-audit (commit `723c61cd`, 2026-06-19):**
+- `live/mod.rs` **CSRF + security headers** — ✅ shipped. New `live/csrf.rs`:
+  double-submit `__sky_csrf` cookie (HttpOnly, SameSite=Strict, Secure-in-prod) +
+  `X-Sky-Csrf` constant-time validation on mutating methods; security headers
+  (nosniff / Referrer-Policy / X-Frame-Options|CSP / Permissions-Policy) on the
+  page GET. BEYOND Go: `__Host-` cookie prefix when Secure, opt-in Origin check,
+  session-cookie Secure-in-prod, `X-Sky-Live: 1` on event responses. Behaviorally
+  verified (dev + prod) + adversarial-reviewed (no exploitable bypass).
+- `live/console_proxy.rs` **"missing per-request auth"** — ➖ **REVIEW
+  FALSE-POSITIVE.** `observability::track` gates every `/_sky/console*` path via
+  `gate_blocked` BEFORE the proxy forwards (the reviewer read console_proxy.rs in
+  isolation, missing the `track` layer). No hole. The real console-auth fix was
+  the **non-constant-time Bearer compare** in `console.rs` (`==` → `subtle::ct_eq`)
+  + `SKY_METRICS_TOKEN` fallback + audit log — ✅ shipped in `723c61cd`.
+
+**Deferred — filed, NOT buried (require a coordinated follow-up):**
 - `crypto.rs` **randomBytes return-type** (`Vec<i64>` vs Go hex-`String`) — codegen-coupled (Emitter splice); a coordinated runtime+codegen change.
 - `db.rs` **bind_sql_param hardcoded to Sqlite** — a postgres/mysql build cargo-fails (E0308). Driver-portability codegen (move to per-driver config.rs).
 - `log.rs` **`*With` variants drop attrs** — Go renders `key=value`; mechanical follow-up.
