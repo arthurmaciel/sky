@@ -22,9 +22,13 @@
 # divergence. A DIFFER is reported precisely, not papered over.
 #
 # GREEN row  = BUILD ok AND RUN ok AND EQUIV ∈ {equiv-*, n/a, amber go-ref-broken}.
-# RED row    = any *-fail / panic / hang / noserve / notty / DIFFER.
-# AMBER      = go-ref-broken (the Go reference itself fails — an upstream Go bug,
-#              NOT a Rust-backend failure; discriminated from DIFFER explicitly).
+# RED row    = BUILD/RUN/EQUIV failure (*-fail / panic / hang / noserve / notty /
+#              DIFFER) — UNLESS EQUIV = go-ref-broken (see AMBER).
+# AMBER      = go-ref-broken — equiv.sh BUILT + RAN the Go reference and it failed
+#              the SAME check. If BOTH backends fail identically it is environment/
+#              upstream, NOT a Rust regression, so the row is downgraded RED→AMBER
+#              and does NOT fail the verdict. (Build-fail can't co-occur: equiv
+#              needs the Rust binary → build-fail yields n/a, never go-ref-broken.)
 # VERDICT PASS iff no RED row.
 #
 # FLAGS:
@@ -409,8 +413,10 @@ done
 } | tee "$TABLE" | tee -a "$RUNLOG"
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
-# RED = any cell in {sky-fail, cargo-fail, panic, hang, noserve, notty, DIFFER}.
-# AMBER = go-ref-broken in EQUIV (upstream Go bug — NOT a Rust failure).
+# RED = {sky-fail, cargo-fail, panic, hang, noserve, notty, DIFFER} — UNLESS the
+#       row's EQUIV = go-ref-broken (Go proven to fail the same check → AMBER, the
+#       run-failure red is cleared; a Rust-only run fail keeps EQUIV non-goref → RED).
+# AMBER = go-ref-broken in EQUIV (Go ref also fails — NOT a Rust failure).
 # GREEN = BUILD ok AND RUN ∈ {ok, —, skip} AND EQUIV ∈ {equiv-*, n/a, —, go-ref-broken}.
 RED=0; GREEN=0; SKIP=0; AMBER=0; RED_ROWS=""
 declare -A EQ_COUNT=()
@@ -418,7 +424,15 @@ while IFS=$'\t' read -r n b r e note; do
   row_red=0
   case "$b" in sky-fail|cargo-fail) row_red=1 ;; esac
   case "$r" in panic|hang|noserve|notty) row_red=1 ;; esac
-  case "$e" in DIFFER) row_red=1 ;; go-ref-broken) AMBER=$((AMBER+1)) ;; esac
+  case "$e" in DIFFER) row_red=1 ;; esac
+  # AMBER override: go-ref-broken means equiv.sh BUILT + RAN the Go reference and
+  # it failed the SAME check (proven, not assumed). A Rust RUN failure whose Go
+  # counterpart ALSO fails is environment/upstream, NOT a Rust regression -> clear
+  # the row's RED. Build-fail cannot co-occur with go-ref-broken (equiv needs the
+  # Rust binary, so a build-fail yields equiv n/a, never go-ref-broken), so only a
+  # RUN-failure red is ever downgraded here — a real Rust-only run failure (Go ok)
+  # stays RED because equiv is then DIFFER/equiv-*, not go-ref-broken.
+  if [ "$e" = go-ref-broken ]; then AMBER=$((AMBER+1)); row_red=0; fi
   # equiv-mode tally
   case "$e" in
     equiv-stdout)   EQ_COUNT[stdout]=$(( ${EQ_COUNT[stdout]:-0} + 1 )) ;;
