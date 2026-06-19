@@ -61,6 +61,35 @@ There is **no "human review" column** — a recurring autonomous audit makes it 
 A small helper parses each swarm's `{file, …}` JSON and writes the cells (don't
 re-improvise the table edit each run).
 
+## The second pass — security/soundness specialist re-review (high-value, ~10% cost)
+
+The step-3 sweep is **one agent per file, all six principles at once** — cheap,
+parallel, and good at *cross-principle* findings (a soundness bug that's also a
+security bug). But a generalist reviewing a whole file can under-weight the two
+principles that **outrank all others**. So after step 3, run a focused
+**second pass** over only the **high-risk subset** — files that touch
+**auth / secrets / crypto / cookies / SQL / network input / `unsafe` / FFI /
+codegen-that-emits-code** (typically ~15-20 files, not all 130).
+
+- **Why not one-agent-per-principle instead?** That re-reads the *whole*
+  codebase once per principle (~6× the file-reads + worse parallelism) AND
+  fragments cross-principle reasoning. The two-pass shape gets the specialist
+  depth for ~10% of that cost: breadth once (step 3), then depth only where the
+  blast radius is largest.
+- **Adversarial lens.** Each specialist agent is **read-only** and prompted to
+  *break* its files: auth/CSRF bypass, secret leakage into logs/errors,
+  injection (SQL / shell / path / header / log), panic-from-untrusted-input,
+  `unsafe`/UB, TOCTOU/races on shared mutable state, missing-bound DoS, weak
+  crypto/RNG, **non-constant-time secret compares** (`==`/`!=` on tokens — see
+  the CLAUDE.md learning). It returns each finding with a *concrete exploit* +
+  severity + fix, or declares the file sound (a clean verdict is valuable).
+- **This pass routinely corrects the broad sweep** — both false-positives (a
+  per-file reviewer missing a protection applied at a *middleware layer*) and
+  false-negatives (a timing oracle the generalist skimmed past). The 2026-06-19
+  run found both.
+- Confirmed findings flow into the same step-4 fix loop (anti-race + build-gate)
+  and the ledger; an exploit that survives an *independent* skeptic is real.
+
 ## Verification gates (a fix is ✅ only past these)
 
 | Component | Gate (what it proves) |
