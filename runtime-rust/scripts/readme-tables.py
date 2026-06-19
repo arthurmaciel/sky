@@ -44,6 +44,7 @@ import os
 import platform
 import re
 import sys
+import tempfile
 
 # Canonical render order. Rows present in the TSVs are emitted in this order;
 # anything unexpected is appended afterwards (alphabetically) so new data never
@@ -80,6 +81,24 @@ PERF_METRICS = {
 
 
 # ── small helpers ────────────────────────────────────────────────────────────
+def _write_atomic(path: str, text: str) -> None:
+    """Write to a temp file in the same dir, then os.replace — so an interrupted
+    write can't truncate README.md (this script is its SINGLE writer for the
+    AUTOGEN region, so a half-write corrupts the committed doc)."""
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".readme-tables.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _num(s: str):
     """Parse a possibly-empty TSV cell as float; return None if blank/non-numeric."""
     s = (s or "").strip()
@@ -287,8 +306,7 @@ def cmd_static(args) -> int:
     if new_text == text:
         print("static-table: already up to date (no write).")
         return 0
-    with open(args.readme, "w", encoding="utf-8") as fh:
-        fh.write(new_text)
+    _write_atomic(args.readme, new_text)
     print(f"static-table: wrote refreshed table to {args.readme}")
     return 0
 
@@ -475,8 +493,7 @@ def cmd_examples(args) -> int:
     if new_text == text:
         print("examples-table + perf-verdict: already up to date (no write).")
         return 0
-    with open(args.readme, "w", encoding="utf-8") as fh:
-        fh.write(new_text)
+    _write_atomic(args.readme, new_text)
     print(f"examples-table + perf-verdict: wrote refreshed content to {args.readme}")
     return 0
 

@@ -59,7 +59,10 @@ say() { echo "$@" | tee -a "$LOG"; }
 say "=== Sky Rust PERF sweep @ $STAMP (repo: $REPO) ==="
 
 # ── Pre-flight hygiene: orphans skew perf + leak the process table ──────────
-reap() { for p in hyperfine ab sse-bench sky-app app sky-console; do pkill -x "$p" 2>/dev/null; done
+# Drop bare `app` from the -x list: it could match an unrelated user process
+# literally named `app`. The Go output binary (named `app`) is reaped by the
+# path-scoped `pkill -f examples/.*/sky-out/` line below instead.
+reap() { for p in hyperfine ab sse-bench sky-app sky-console; do pkill -x "$p" 2>/dev/null; done
          pkill -f "examples/.*/sky-out/" 2>/dev/null; }
 reap; sync; sleep 1
 
@@ -131,9 +134,10 @@ else
 import sys
 def load(p):
     d={}
-    for ln in open(p):
-        f=ln.rstrip("\n").split("\t")
-        if len(f)>=7: d[(f[0],f[1])]=dict(go=f[2],rust=f[3],ratio=f[4],thr=f[5],verdict=f[6])
+    with open(p) as fh:
+        for ln in fh:
+            f=ln.rstrip("\n").split("\t")
+            if len(f)>=7: d[(f[0],f[1])]=dict(go=f[2],rust=f[3],ratio=f[4],thr=f[5],verdict=f[6])
     return d
 def num(x):
     try: return float(x)

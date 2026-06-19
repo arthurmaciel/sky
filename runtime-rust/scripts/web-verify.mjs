@@ -74,6 +74,17 @@ const RUST_PANIC_RE = [
     /CompilerBug/,
 ];
 
+// Single source of truth for "benign asset/plumbing URL" — referenced by BOTH
+// the response handler (to skip 4xx/5xx benign URLs) and the console-error
+// filter. Kept as ONE const so the two can't drift (they were byte-identical
+// duplicated regexes before).
+const BENIGN_URL_RE = /(favicon\.ico|robots\.txt|apple-touch-icon|manifest\.json|sitemap\.xml|\/_sky\/console)/i;
+
+// Per-scenario wall-clock ceiling — a scenario awaiting a selector that never
+// appears would otherwise hang the driver forever (project timeout-bounded
+// mandate). Override with SKY_SCENARIO_TIMEOUT_MS.
+const SCENARIO_TIMEOUT_MS = parseInt(process.env.SKY_SCENARIO_TIMEOUT_MS || '30000', 10);
+
 async function main() {
     const env = { ...process.env, PORT: String(port), SKY_LIVE_PORT: String(port), SKY_CONSOLE_EMBED: 'off' };
     const serverLogPath = path.join(artefactDir, 'server.log');
@@ -124,7 +135,7 @@ async function main() {
     // the Go backend (injects the /_sky/console link) and the Rust backend
     // (console federation staged) WITHOUT being an app-behaviour divergence.
     // The scenario must assert APP behaviour, not console/asset plumbing.
-    const BENIGN_URL_RE = /(favicon\.ico|robots\.txt|apple-touch-icon|manifest\.json|sitemap\.xml|\/_sky\/console)/i;
+    // (BENIGN_URL_RE is the module-level shared const.)
     const nonBenignFailedUrls = [];
     page.on('response', resp => {
         if (resp.status() >= 400 && !BENIGN_URL_RE.test(resp.url())) {
@@ -155,7 +166,22 @@ async function main() {
         if (typeof scenarioFn !== 'function') {
             throw new Error(`unknown scenario: ${scenarioName} (known: ${Object.keys(scenarios).join(', ')})`);
         }
-        await scenarioFn(page, { baseUrl, pause, skyEventPosts });
+        // Bound the scenario: a click-await on a selector that never appears must
+        // fail FAST, not hang the driver. Promise.race against a rejecting deadline.
+        let scenarioTimer;
+        const scenarioDeadline = new Promise((_, reject) => {
+            scenarioTimer = setTimeout(
+                () => reject(new Error(`scenario '${scenarioName}' exceeded ${SCENARIO_TIMEOUT_MS}ms`)),
+                SCENARIO_TIMEOUT_MS);
+        });
+        try {
+            await Promise.race([
+                scenarioFn(page, { baseUrl, pause, skyEventPosts }),
+                scenarioDeadline,
+            ]);
+        } finally {
+            clearTimeout(scenarioTimer);
+        }
 
         await page.screenshot({ path: path.join(artefactDir, 'home.png'), fullPage: false }).catch(() => {});
 
@@ -172,10 +198,9 @@ async function main() {
         // console-plumbing asset). This makes the gate robust to the by-design
         // Go-vs-Rust console/asset divergence while still catching a real broken
         // app resource (a missing JS/CSS the app actually needs).
-        const benignRe = /(favicon\.ico|robots\.txt|apple-touch-icon|manifest\.json|sitemap\.xml|\/_sky\/console)/i;
         const genericLoadFailRe = /Failed to load resource/i;
         const realErrors = consoleErrors.filter(e => {
-            if (benignRe.test(e)) return false;
+            if (BENIGN_URL_RE.test(e)) return false;
             // Generic load-failure with nothing non-benign actually failing → benign.
             if (genericLoadFailRe.test(e) && nonBenignFailedUrls.length === 0) return false;
             return true;
@@ -195,6 +220,16 @@ async function main() {
     child.kill('SIGTERM');
     await new Promise(r => setTimeout(r, 500));
     if (!child.killed) child.kill('SIGKILL');
+
+    // A server that bound the port then crashed DURING the browser phase is not
+    // caught by the post-waitForPort check — re-check the exit handler here. The
+    // handler ignores our own SIGTERM/SIGKILL, so a non-null value is a real
+    // early exit (crash) that must fail the run.
+    if (exitedEarly && outcome === 'PASS') {
+        outcome = 'FAIL';
+        detail = (detail ? detail + '; ' : '')
+               + `server exited during browser phase: code=${exitedEarly.code} signal=${exitedEarly.signal}`;
+    }
 
     // Rust-panic grep on the server log (mirror of the Go driver's panic tail).
     const log = fs.readFileSync(serverLogPath, 'utf8');

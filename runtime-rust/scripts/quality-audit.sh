@@ -36,6 +36,12 @@ say "=== Sky Rust QUALITY/SOUNDNESS audit @ $STAMP (crate: $CRATE) ==="
 
 # Non-test source files only (the Sky-reachable surface; tests legitimately panic).
 mapfile -t SRC_FILES < <(find "$SRC" -name '*.rs' 2>/dev/null | sort)
+if [ "${#SRC_FILES[@]}" -eq 0 ]; then
+  # No .rs files: passing zero file args to grep would make it read STDIN and
+  # hang. Use /dev/null as a sentinel so every `grep "${SRC_FILES[@]}"` is a
+  # well-defined no-match instead.
+  SRC_FILES=(/dev/null)
+fi
 # A heuristic "is this line inside a #[cfg(test)] / #[test] region" is unreliable
 # in grep; instead we lean on clippy.toml (allow-*-in-tests) for the gate, and
 # report raw counts here for the agent to eyeball against test modules.
@@ -61,7 +67,11 @@ STRICT=( -W clippy::pedantic
   -W clippy::undocumented_unsafe_blocks -W clippy::missing_safety_doc
   -W clippy::string_slice -W clippy::integer_division )
 ( cd "$CRATE" && cargo clippy --all-targets $FEATURES -- "${STRICT[@]}" ) >"$HIST/clippy-strict.log" 2>&1 || true
-STRICT_N="$(grep -cE '^warning' "$HIST/clippy-strict.log" 2>/dev/null || echo 0)"
+# `grep -c` prints 0 AND exits 1 on no-match; the old `|| echo 0` then appended a
+# SECOND "0", yielding a two-line value that broke the numeric `say` below. Take
+# the count unconditionally (grep always prints a count) and default empty→0.
+STRICT_N="$(grep -cE '^warning' "$HIST/clippy-strict.log" 2>/dev/null)"
+STRICT_N="${STRICT_N:-0}"
 say "  $STRICT_N advisory warnings (full log: $HIST/clippy-strict.log). Top lints:"
 grep -oE 'clippy::[a-z_]+' "$HIST/clippy-strict.log" 2>/dev/null | sort | uniq -c | sort -rn | head -12 | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log"
 
@@ -105,7 +115,10 @@ for f in "${SRC_FILES[@]}"; do
 done
 if [ -z "$UNJUSTIFIED" ]; then say "  ✓ every #[allow] has an adjacent comment/attr"; else
   say "  ✗ #[allow] without a justifying comment on the line above (document or remove):"
-  printf "$UNJUSTIFIED" | sed '/^$/d;s/^/    /' | tee -a "$HIST/audit-$STAMP.log"
+  # `printf '%b'` interprets the accumulated `\n` separators WITHOUT treating a
+  # path containing `%`/`\` as a format directive (the old `printf "$UNJUSTIFIED"`
+  # was a format-string bug).
+  printf '%b' "$UNJUSTIFIED" | sed '/^$/d;s/^/    /' | tee -a "$HIST/audit-$STAMP.log"
 fi
 
 # ── 6b. Settled-decision markers (code-level ledger; reconcile new findings against these) ─

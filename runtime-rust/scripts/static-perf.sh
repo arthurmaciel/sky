@@ -106,7 +106,10 @@ cleanup() {
   for pid in "${SERVER_PIDS[@]:-}"; do [ -n "${pid:-}" ] && kill -TERM "$pid" 2>/dev/null; done
   sleep 1
   for pid in "${SERVER_PIDS[@]:-}"; do [ -n "${pid:-}" ] && kill -KILL "$pid" 2>/dev/null; done
-  pkill -f "$CARGO_TARGET_DIR/.*sky-app" 2>/dev/null
+  # Match the binary basename (fixed substring) rather than interpolating
+  # $CARGO_TARGET_DIR into the pkill -f regex — a cache path with regex
+  # metacharacters (. + ( ) would otherwise broaden/narrow the match.
+  pkill -f 'sky-app' 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 

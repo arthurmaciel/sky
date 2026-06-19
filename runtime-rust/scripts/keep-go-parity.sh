@@ -43,14 +43,21 @@ list_examples() { find examples -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
 # Compute the post-merge delta + plan into shell vars (used by `plan` and `run`).
 compute_plan() {
     [ -f "$SHA_F" ] && [ -f "$LIST_F" ] || { echo "ERROR: no snapshot — run 'keep-go-parity.sh snapshot' BEFORE the sync." >&2; exit 3; }
-    PRE_SHA="$(cat "$SHA_F")"; NOW_SHA="$(git rev-parse HEAD)"
+    PRE_SHA="$(cat "$SHA_F")"
+    # Fail closed if HEAD can't be resolved (not a git repo / detached weirdness):
+    # an empty NOW_SHA would silently mis-diff every example as "new".
+    NOW_SHA="$(git rev-parse HEAD)" || { echo "ERROR: 'git rev-parse HEAD' failed — not a git checkout?" >&2; exit 2; }
+    [ -n "$NOW_SHA" ] || { echo "ERROR: empty HEAD sha from git rev-parse." >&2; exit 2; }
 
-    # New top-level example dirs (present now, absent at snapshot).
-    NEW_EXAMPLES="$(comm -13 "$LIST_F" <(list_examples) | tr '\n' ' ' | sed 's/ *$//')"
+    # New top-level example dirs (present now, absent at snapshot). Read into an
+    # array so a dir name with whitespace can't mis-iterate / mis-count; keep the
+    # space-joined string only for human-readable display.
+    mapfile -t NEW_EXAMPLES_ARR < <(comm -13 "$LIST_F" <(list_examples))
+    NEW_EXAMPLES="${NEW_EXAMPLES_ARR[*]}"
     # New web/live example(s) — informational (run-sweep already browser-drives
     # every live/web example, so no separate sweep is gated on this).
     NEW_WEB=""
-    for ex in $NEW_EXAMPLES; do is_web_example "examples/$ex" && NEW_WEB="$NEW_WEB $ex"; done
+    for ex in "${NEW_EXAMPLES_ARR[@]}"; do is_web_example "examples/$ex" && NEW_WEB="$NEW_WEB $ex"; done
     NEW_WEB="${NEW_WEB# }"
 
     # Go backend touched by the merge? (perf-relevant candidate — judge vs changelog.)
@@ -66,7 +73,7 @@ compute_plan() {
 
     PLAN_EXAMPLES=1            # examples-sweep (build+run+equiv) is ALWAYS-run
     PLAN_PERF=0; PERF_WHY="no new example, Go backend unchanged"
-    if [ -n "$NEW_EXAMPLES" ]; then PLAN_PERF=1; PERF_WHY="$(echo $NEW_EXAMPLES | wc -w | tr -d ' ') new example(s): $NEW_EXAMPLES"
+    if [ "${#NEW_EXAMPLES_ARR[@]}" -gt 0 ]; then PLAN_PERF=1; PERF_WHY="${#NEW_EXAMPLES_ARR[@]} new example(s): $NEW_EXAMPLES"
     elif [ -n "$GO_FILES" ]; then PLAN_PERF=1; PERF_WHY="Go backend changed (confirm perf-relevance vs changelog): $GO_FILES"; fi
 }
 
@@ -115,9 +122,21 @@ case "$cmd" in
     compute_plan
     print_plan
     echo ""; echo ">>> examples-sweep (BUILD·RUN·EQUIV table; Go≡Rust equivalence) ..."
-    SKY_SWEEP_FORCE=1 bash "$SCRIPTS/examples-sweep.sh"; EX_RC=$?
+    # Bound the unattended post-merge sweep so a wedged example build/run can't
+    # block forever (project timeout-bounded-long-command mandate). 2h ceiling;
+    # exit 124 = the sweep timed out → treat as parity-NOT-maintained below.
+    # `timeout` may be absent (e.g. macOS base); fall back to a raw run there.
+    if command -v timeout >/dev/null 2>&1; then
+      SKY_SWEEP_FORCE=1 timeout 7200 bash "$SCRIPTS/examples-sweep.sh"; EX_RC=$?
+    else
+      SKY_SWEEP_FORCE=1 bash "$SCRIPTS/examples-sweep.sh"; EX_RC=$?
+    fi
     echo ""; echo "=== keep-go-parity run complete ==="
-    echo "  examples-sweep: rc=$EX_RC"
+    if [ "$EX_RC" = 124 ]; then
+      echo "  examples-sweep: rc=124 (TIMED OUT after 7200s — a wedged example build/run)"
+    else
+      echo "  examples-sweep: rc=$EX_RC"
+    fi
     if [ "$PLAN_PERF" = 1 ]; then
       echo "  examples-perf-sweep WARRANTED ($PERF_WHY) — NOT auto-run (close other apps first, then:"
       echo "    SKY_SWEEP_FORCE=1 bash $SCRIPTS/examples-perf-sweep.sh )"

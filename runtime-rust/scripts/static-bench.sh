@@ -57,7 +57,7 @@ coldstart_ms() {
     timeout 10 "$bin" >/dev/null 2>&1 </dev/null || true
     t1="$({ gdate +%s%N 2>/dev/null || date +%s%N; })"
     ms=$(( (t1 - t0) / 1000000 ))
-    [ -z "$best" ] || [ "$ms" -lt "$best" ] && best="$ms"
+    { [ -z "$best" ] || [ "$ms" -lt "$best" ]; } && best="$ms"
   done
   echo "$best"
 }
@@ -110,13 +110,13 @@ for n in "${EX[@]}"; do
 done
 
 # ── Markdown table (sizes in KiB, ratios) ───────────────────────────────────
+kib() { [ -n "$1" ] && awk -v b="$1" 'BEGIN{printf "%.0fK", b/1024}' || echo "—"; }
+ratio() { { [ -n "$1" ] && [ -n "$2" ] && [ "$2" -gt 0 ]; } 2>/dev/null && awk -v a="$1" -v b="$2" 'BEGIN{printf "%.2f", a/b}' || echo "—"; }
 {
   echo "| Example | Shape | Dynamic | Static (musl) | Go | Static/Dyn | Static/Go | Cold dyn→static (cli) |"
   echo "|---|---|--:|--:|--:|--:|--:|--:|"
   while IFS=$'\t' read -r n shape dyn st go cd cs status; do
     [ "$n" = example ] && continue
-    kib() { [ -n "$1" ] && awk -v b="$1" 'BEGIN{printf "%.0fK", b/1024}' || echo "—"; }
-    ratio() { { [ -n "$1" ] && [ -n "$2" ] && [ "$2" -gt 0 ]; } 2>/dev/null && awk -v a="$1" -v b="$2" 'BEGIN{printf "%.2f", a/b}' || echo "—"; }
     cold="—"; { [ -n "$cd" ] && [ -n "$cs" ]; } && cold="${cd}→${cs} ms"
     note=""; [ "$status" != ok ] && note=" ⚠$status"
     printf '| %s | %s | %s | %s | %s | %s | %s | %s |%s\n' \

@@ -110,7 +110,7 @@ probe_coldstart_server() { # $1=binary -> median ms (exec→first 200)
       sleep 0.05
     done
     [ -n "$ok" ] && samples+=("$(pyf "($(date +%s.%N)-$t0)*1000")")
-    kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -f "$log"
+    pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -f "$log"
   done
   [ ${#samples[@]} -eq 0 ] && { echo 0; return; }
   printf '%s\n' "${samples[@]}" | sort -n | awk '{a[NR]=$1} END{print a[int(NR/2)+1]}'
@@ -135,7 +135,7 @@ start_server() { # $1=binary -> echoes "pid port"
     sleep 0.2
   done
   rm -f "$log"
-  [ -n "$actual" ] || { kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 1; }
+  [ -n "$actual" ] || { pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; return 1; }
   echo "$pid $actual"
 }
 
@@ -143,7 +143,7 @@ probe_throughput() { # $1=binary -> req/s
   local pp; pp=$(start_server "$1") || { echo 0; return; }
   local pid=${pp% *} port=${pp#* } rps
   rps=$(timeout "$AB_TIMEOUT_S" ab $AB_FLAGS -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$port/" 2>/dev/null | awk '/Requests per second/{print $4}')
-  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
+  pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
 }
 
 # ── Core-feature drivers ────────────────────────────────────────────────────
@@ -191,7 +191,7 @@ probe_live_warm() { # $1=binary -> req/s
   local pid=${pp% *} port=${pp#* } ck rps
   ck="$(session_cookie "$port")"
   [ -n "$ck" ] && rps=$(timeout "$AB_TIMEOUT_S" ab $AB_FLAGS -n "$AB_N" -c "$AB_C" -H "Cookie: $ck" "http://127.0.0.1:$port/" 2>/dev/null | awk '/Requests per second/{print $4}')
-  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
+  pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
 }
 
 # EVENT round-trip throughput: POST /_sky/event with a real state-changing handler
@@ -210,7 +210,7 @@ probe_live_event() { # $1=binary -> req/s
       rm -f "$bf"
     fi
   fi
-  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
+  pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${rps:-0}"
 }
 
 SSE_WINDOW_S="${SSE_WINDOW_S:-3}"
@@ -328,7 +328,7 @@ probe_broadcast() { # $1=binary $2=exampleDir -> patches/sec across subscribers
   curl -s -c "$pjar" -o "$tmp/room.html" "http://127.0.0.1:$port$room" 2>/dev/null
   pck="$(awk -F'\t' '$6=="sky_sid"{print $6"="$7}' "$pjar" 2>/dev/null | tail -1)"
   hid="$(grep -oP '<[^>]*sky-submit="[^"]*"[^>]*>' "$tmp/room.html" 2>/dev/null | grep -oP 'data-sky-hid="\K[^"]*' | head -1)"
-  if [ -z "$hid" ] || [ -z "$pck" ]; then kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$tmp"; echo 0; return; fi
+  if [ -z "$hid" ] || [ -z "$pck" ]; then pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$tmp"; echo 0; return; fi
   # N subscribers: own session, then read /_sky/sse counting broadcast patches
   local c
   for c in $(seq 1 "$nsub"); do
@@ -345,7 +345,7 @@ probe_broadcast() { # $1=binary $2=exampleDir -> patches/sec across subscribers
   wait
   local total=0
   for c in $(seq 1 "$nsub"); do total=$((total + $(cat "$tmp/n$c" 2>/dev/null || echo 0))); done
-  rm -rf "$tmp"; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  rm -rf "$tmp"; pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   python3 -c "print(round($total/$SSE_WINDOW_S,2))" 2>/dev/null || echo 0
 }
 
@@ -370,17 +370,17 @@ collect_server_metrics() { # $1=binary $2=exampleDir -> metric lines
   rps=$(timeout "$AB_TIMEOUT_S" ab $AB_FLAGS -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$port/" 2>/dev/null | awk '/Requests per second/{print $4}')
   echo "throughput ${rps:-0}"
   hwm=$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null); echo "rss ${hwm:-0}"
-  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 }
 
-probe_rss_cli() { /usr/bin/time -v "$1" 2>/tmp/perf-time.txt >/dev/null; awk '/Maximum resident set size/{print $NF}' /tmp/perf-time.txt; }
+probe_rss_cli() { timeout 30 /usr/bin/time -v "$1" </dev/null 2>/tmp/perf-time.txt >/dev/null || true; awk '/Maximum resident set size/{print $NF}' /tmp/perf-time.txt; }
 
 probe_rss_server() { # $1=binary -> peak RSS KB under load
   local pp; pp=$(start_server "$1") || { echo 0; return; }
   local pid=${pp% *} port=${pp#* } hwm
   timeout "$AB_TIMEOUT_S" ab $AB_FLAGS -n "$AB_N" -c "$AB_C" "http://127.0.0.1:$port/" >/dev/null 2>&1
   hwm=$(awk '/VmHWM/{print $2}' "/proc/$pid/status" 2>/dev/null)
-  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${hwm:-0}"
+  pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; echo "${hwm:-0}"
 }
 
 probe_live_sse() { # $1=binary -> "p95_ms eps"
@@ -393,7 +393,7 @@ probe_live_sse() { # $1=binary -> "p95_ms eps"
   local pp; pp=$(start_server "$1") || { echo "0 0"; return; }
   local pid=${pp% *} port=${pp#* } out
   out=$(timeout "${SSE_TIMEOUT_S:-15}" "$SSE_BIN" --url "http://127.0.0.1:$port" --events "$SSE_EVENTS" --concurrency "$SSE_CONC" 2>/dev/null)
-  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
   echo "$(echo "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["patch_p95"],d["events_per_sec"])' 2>/dev/null || echo "0 0")"
 }
 

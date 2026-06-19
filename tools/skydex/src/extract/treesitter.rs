@@ -87,6 +87,13 @@ fn expand_rust_use(text: &str) -> Vec<String> {
     let prefix = text[..brace_start].trim_end_matches(':').trim();
     let inner_start = brace_start + 1;
     let inner_end = text.rfind('}').unwrap_or(text.len());
+    // Defence-in-depth: error-recovered / malformed parse text can place `}` before
+    // `{` (e.g. `a::}{b`), giving inner_end < inner_start. Slicing a reversed range
+    // panics, so bail to the unexpanded text instead. Well-formed tree-sitter output
+    // never hits this.
+    if inner_end <= inner_start {
+        return vec![text.to_string()];
+    }
     let inner = &text[inner_start..inner_end];
 
     // Split on commas at depth 0 (no nested braces for now — covers the common case).
@@ -171,9 +178,18 @@ pub fn treesitter_defs(src: &str, lang: Lang) -> Vec<String> {
     };
     let Some((grammar, query_src)) = lang_grammar(path, lang) else { return Vec::new() };
     let mut parser = Parser::new();
-    if parser.set_language(&grammar).is_err() { return Vec::new(); }
+    if let Err(e) = parser.set_language(&grammar) {
+        eprintln!("skydex: treesitter_defs set_language failed for {lang:?}: {e}");
+        return Vec::new();
+    }
     let Some(tree) = parser.parse(src, None) else { return Vec::new() };
-    let Ok(query) = Query::new(&grammar, query_src) else { return Vec::new() };
+    let query = match Query::new(&grammar, query_src) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("skydex: treesitter_defs query compile failed for {lang:?}: {e}");
+            return Vec::new();
+        }
+    };
     let def_idx = query.capture_index_for_name("def");
     let mut cur = QueryCursor::new();
     let mut defs = Vec::new();

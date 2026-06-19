@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -88,6 +89,14 @@ DEFAULT_RESULTS = Path.home() / ".cache" / "sky" / "ffi-audit" / "results"
 CTOR_EXACT = {"new", "default", "builder", "with_capacity", "init", "empty"}
 CTOR_PREFIX = ("from", "with", "parse", "try_from", "try_new", "create",
                "open", "connect", "build", "make", "of", "load")
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write via a temp file + os.replace so a crash mid-write can't leave a
+    truncated JSON the next load swallows."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 def find_inspector() -> str:
@@ -154,26 +163,39 @@ def run_one(inspector: str, crate: str, results_dir: Path, timeout: int,
             st = json.loads(out_status.read_text())
             if st.get("status") == "ok":
                 return st
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  (ignoring corrupt cache for {crate}: {e})", file=sys.stderr)
     t0 = time.time()
     status = "ok"
     detail = ""
     data = None
     cmd = [inspector] + (["--features", features] if features else []) + [crate]
     try:
-        proc = subprocess.run(cmd, capture_output=True,
-                              text=True, timeout=timeout)
+        # start_new_session=True puts the inspector in its own process group so a
+        # timeout can kill the WHOLE tree (cargo/rustc descendants it spawned),
+        # not just the direct child — otherwise a timed-out rustdoc build keeps
+        # running and pressures RAM (see the rustdoc note in `main`).
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, start_new_session=True)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            proc.communicate()  # reap so no zombie lingers
+            raise
         if proc.returncode != 0:
             status = "inspector-error"
-            detail = (proc.stderr or "").strip()[-400:]
+            detail = (err or "").strip()[-400:]
         else:
             try:
-                data = json.loads(proc.stdout)
-                out_json.write_text(proc.stdout)
+                data = json.loads(out)
+                _write_atomic(out_json, out)
             except json.JSONDecodeError as e:
                 status = "parse-error"
-                detail = f"{e}; stderr: {(proc.stderr or '').strip()[-200:]}"
+                detail = f"{e}; stderr: {(err or '').strip()[-200:]}"
     except subprocess.TimeoutExpired:
         status = "timeout"
         detail = f">{timeout}s"
@@ -198,7 +220,7 @@ def run_one(inspector: str, crate: str, results_dir: Path, timeout: int,
         st.update({"version": "", "kept": 0, "free": 0, "ctor": 0,
                    "accessor": 0, "recv_types": 0, "inspector_errors": 0})
     st["verdict"] = verdict(st["kept"], st["free"], st["ctor"], status)
-    out_status.write_text(json.dumps(st, indent=2))
+    _write_atomic(out_status, json.dumps(st, indent=2))
     return st
 
 
@@ -214,8 +236,8 @@ def load_all(results_dir: Path) -> list[dict]:
             r["verdict"] = verdict(r.get("kept", 0), r.get("free", 0),
                                    r.get("ctor", 0), r.get("status", "ok"))
             rows.append(r)
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  (skipping unreadable result {p.name}: {e})", file=sys.stderr)
     return rows
 
 

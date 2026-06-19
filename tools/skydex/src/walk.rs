@@ -1,5 +1,5 @@
 use crate::model::{lang_of, role_of, Lang, Role};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::process::Command;
 
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024; // 2 MB cap (anti-OOM)
@@ -42,6 +42,12 @@ pub fn tracked(repo: &str) -> Result<Vec<Tracked>> {
     let run = |extra: &[&str]| -> Result<String> {
         let out = Command::new("git").arg("-C").arg(repo)
             .arg("ls-files").args(extra).output()?;
+        // Distinguish a real empty index from a git failure (non-repo, corrupt
+        // state): a failed `ls-files` yields empty stdout and would otherwise be
+        // read as "0 files" silently.
+        if !out.status.success() {
+            bail!("git ls-files failed in {repo}: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     };
     let mut combined = run(&[])?;                                   // tracked
@@ -53,6 +59,9 @@ pub fn tracked(repo: &str) -> Result<Vec<Tracked>> {
 pub fn changed(repo: &str, since: &str) -> Result<(Vec<Tracked>, Vec<String>)> {
     let out = Command::new("git").arg("-C").arg(repo)
         .args(["diff", "--name-status", &format!("{since}..HEAD")]).output()?;
+    if !out.status.success() {
+        bail!("git diff failed in {repo}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut upserts = Vec::new();
     let mut deletes = Vec::new();
@@ -68,6 +77,9 @@ pub fn changed(repo: &str, since: &str) -> Result<(Vec<Tracked>, Vec<String>)> {
 
 pub fn head_sha(repo: &str) -> Result<String> {
     let out = Command::new("git").arg("-C").arg(repo).args(["rev-parse","HEAD"]).output()?;
+    if !out.status.success() {
+        bail!("git rev-parse HEAD failed in {repo}: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 

@@ -104,7 +104,9 @@ say "=== Sky Rust EXAMPLES sweep @ $STAMP (repo: $REPO) ==="
 [ "$NO_EQUIV" = 1 ] || [ "$WEB_OK" = 1 ] || say "  NOTE: browser stack incomplete — scenario equiv falls back to a both-backends boot check."
 
 # ── Hygiene: stray `sky lsp` / `sky doc --serve` hold .skycache locks ───────
-ps -u "$USER" -o pid,args 2>/dev/null | awk '/\/sky (lsp|doc)/{print $1}' | xargs -r kill 2>/dev/null
+# $USER can be unset in a cron/CI shell; under `set -u` that would abort here.
+U="${USER:-$(id -un)}"
+ps -u "$U" -o pid,args 2>/dev/null | awk '/\/sky (lsp|doc)/{print $1}' | xargs -r kill 2>/dev/null
 reap; sync
 
 # ── build_rust <dir> <example> → 0=ok; sets BUILD_CELL to the failure word ───

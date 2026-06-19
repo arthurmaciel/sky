@@ -166,7 +166,15 @@ fn main() {
                 modules: vec![],
                 errors: vec![format!("JSON serialization failed: {}", e)],
             };
-            println!("{}", serde_json::to_string_pretty(&err).unwrap());
+            let body = serde_json::to_string_pretty(&err).unwrap_or_else(|_| {
+                // Last-resort hand-rolled JSON so a serialization failure on the
+                // error payload itself degrades instead of aborting the process.
+                format!(
+                    "{{\"errors\":[\"JSON serialization failed: {}\"]}}",
+                    e.to_string().replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            });
+            println!("{}", body);
         }
     }
 }
@@ -312,8 +320,12 @@ fn run_rustdoc_package(
                               // errors on crates with binary or example targets.
             "--manifest-path",
             manifest_str,
-            "--target-dir",
-            target_dir.to_str().unwrap(),
+        ])
+        // Pass the target dir as an OsStr so a non-UTF8 tempdir path can't panic
+        // (an earlier `.to_str().unwrap()` aborted on TMPDIR with invalid bytes).
+        .arg("--target-dir")
+        .arg(target_dir)
+        .args([
             "--quiet",
             "--",
             "--output-format",
@@ -438,14 +450,36 @@ fn fetch_dep(manifest_str: &str) -> Result<(), String> {
     }
 }
 
+/// Escape a value for embedding inside a TOML basic string (`"..."`).
+/// Closes the manifest-injection surface: a crate name / git URL / rev / branch
+/// / tag containing `"` or a newline would otherwise break out of the string and
+/// inject arbitrary `[dependencies]` / build config that cargo then fetches and
+/// rustdocs. Per the TOML spec, basic strings escape `\`, `"`, and control chars.
+fn toml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"'  => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn build_dep_entry(crate_name: &str, features: &[String], git: Option<&GitSource>) -> String {
+    let crate_name = toml_escape(crate_name);
     // Common fields: features list (rendered as Cargo TOML array).
     let feats_field = if features.is_empty() {
         None
     } else {
         let feats = features
             .iter()
-            .map(|f| format!("\"{}\"", f))
+            .map(|f| format!("\"{}\"", toml_escape(f)))
             .collect::<Vec<_>>()
             .join(", ");
         Some(format!("features = [{}]", feats))
@@ -457,10 +491,10 @@ fn build_dep_entry(crate_name: &str, features: &[String], git: Option<&GitSource
             Some(f) => format!("{} = {{ version = \"*\", {} }}", crate_name, f),
         },
         Some(g) => {
-            let mut fields = vec![format!("git = \"{}\"", g.url)];
-            if let Some(r) = &g.rev    { fields.push(format!("rev = \"{}\"", r)); }
-            if let Some(b) = &g.branch { fields.push(format!("branch = \"{}\"", b)); }
-            if let Some(t) = &g.tag    { fields.push(format!("tag = \"{}\"", t)); }
+            let mut fields = vec![format!("git = \"{}\"", toml_escape(&g.url))];
+            if let Some(r) = &g.rev    { fields.push(format!("rev = \"{}\"", toml_escape(r))); }
+            if let Some(b) = &g.branch { fields.push(format!("branch = \"{}\"", toml_escape(b))); }
+            if let Some(t) = &g.tag    { fields.push(format!("tag = \"{}\"", toml_escape(t))); }
             if let Some(f) = feats_field { fields.push(f); }
             format!("{} = {{ {} }}", crate_name, fields.join(", "))
         }
@@ -808,10 +842,16 @@ fn parse_fn_item(
     // Skip `unsafe fn`: the generated wrapper calls it outside an `unsafe`
     // block, and auto-exposing unsafe constructors (e.g. new_unchecked) to
     // Sky would bypass the very invariants `unsafe` exists to protect.
-    let is_unsafe = fn_data["header"]["is_unsafe"].as_bool().unwrap_or(false)
-        || fn_data["header"]["unsafe_"].as_bool().unwrap_or(false);
-    if is_unsafe {
-        return None;
+    //
+    // Fail CLOSED: if neither header key is present (a rustdoc format-version
+    // rename of `is_unsafe` / `unsafe_`), drop the function rather than risk
+    // auto-exposing an unsafe fn we simply failed to detect.
+    let unsafe_flag = fn_data["header"]["is_unsafe"]
+        .as_bool()
+        .or_else(|| fn_data["header"]["unsafe_"].as_bool());
+    match unsafe_flag {
+        Some(false) => {}        // confirmed safe
+        Some(true) | None => return None, // unsafe, or undetectable → drop
     }
 
     // Monomorphise-on-demand (Alt-1): resolve each generic param's bound to a

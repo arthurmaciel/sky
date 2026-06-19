@@ -13,8 +13,9 @@
 # Usage: runtime-rust/scripts/rust-equiv.sh <example-name>
 # Exit: 0 equivalent · 1 regression · 3 out-of-scope (ref can't build it)
 set -uo pipefail
-cd "$(dirname "$0")/../.."
-EX="$1"
+cd "$(dirname "$0")/../.." || { echo "cannot cd to repo root"; exit 2; }
+EX="${1:-}"
+[ -n "$EX" ] || { echo "usage: rust-equiv.sh <example-name>"; exit 2; }
 WIP="${SKY_WIP:-$PWD/sky-out/sky}"
 REF_TARGET="${SKY_REF_TARGET:-monolith}"
 D="examples/$EX"
@@ -47,6 +48,7 @@ WIPD=/tmp/equiv-$EX-wip
 gen_rust "$WIP" "$WIPD" || { echo "FAIL[$EX]: WIP rust generate failed"; exit 1; }
 cargo build --manifest-path "$WIPD/Cargo.toml" -q || { echo "FAIL[$EX]: WIP cargo-build failed"; exit 1; }
 WIPBIN=$(find "$WIPD/target/debug" -maxdepth 1 -type f -executable | head -1)
+[ -n "$WIPBIN" ] || { echo "FAIL[$EX]: no WIP binary produced"; exit 1; }
 
 battery="scripts/equiv-battery/$EX.sh"
 run() { if [ -x "$battery" ]; then "$battery" "$1"; else timeout 30 "$1" </dev/null 2>&1 || true; fi ; }
@@ -67,11 +69,17 @@ else
   norm() { find "$1/src" -name '*.rs' | sort | xargs cat \
       | rustfmt --emit stdout 2>/dev/null \
       | grep -vE '^\s*(pub )?mod [a-z_]+;|^\s*use (crate|super)::' ; }
-  diff <(norm "$REFD") <(norm "$WIPD") > /tmp/equiv-$EX.struct.diff || true
-  [ -s /tmp/equiv-$EX.struct.diff ] && \
+  # diff exit: 0 = identical, 1 = differs (both fine), >1 = norm pipeline error.
+  diff <(norm "$REFD") <(norm "$WIPD") > /tmp/equiv-$EX.struct.diff
+  struct_rc=$?
+  if [ "$struct_rc" -gt 1 ]; then
+      echo "STRUCT[$EX]: normalization pipeline failed (rc=$struct_rc) — struct diff unreliable" >&2
+  elif [ -s /tmp/equiv-$EX.struct.diff ]; then
       echo "STRUCT[$EX]: review /tmp/equiv-$EX.struct.diff — split-plumbing only"
+  fi
   cargo build --manifest-path "$REFD/Cargo.toml" -q || { echo "OUT-OF-SCOPE[$EX]: ref cargo-build failed"; exit 3; }
   REFBIN=$(find "$REFD/target/debug" -maxdepth 1 -type f -executable | head -1)
+  [ -n "$REFBIN" ] || { echo "OUT-OF-SCOPE[$EX]: no ref binary produced"; exit 3; }
   if diff <(run "$REFBIN") <(run "$WIPBIN") > /tmp/equiv-$EX.behav.diff; then
     echo "OK[$EX]: behavioral byte-identical vs monolith"
     exit 0

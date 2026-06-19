@@ -173,6 +173,10 @@ pub fn cmd_rdeps(db: &str, module: &str, count: bool, subtree: bool) -> Result<(
 
 pub fn cmd_deps(db: &str, module: &str) -> Result<()> {
     let s = Store::open(db)?;
+    // NOTE: deliberately unanchored substring match (the CLI documents `deps` as
+    // "substring match"). `?1` is bound as a parameter, so this is injection-safe;
+    // the looseness — `deps "List"` folding in any path containing "List" — is the
+    // documented CLI contract, not a bug. Use `rdeps` for exact dst/resolved match.
     let mut st = s.conn.prepare(
         "SELECT DISTINCT dst FROM edges WHERE src LIKE ?1 AND kind='import' ORDER BY dst",
     )?;
@@ -211,6 +215,8 @@ pub fn cmd_pipeline(db: &str) -> Result<()> {
 
 pub fn cmd_covers(db: &str, kernel: &str) -> Result<()> {
     let s = Store::open(db)?;
+    // Unanchored substring match by design (the CLI documents `covers` as
+    // "substring match"); `?1` is a bound parameter so it stays injection-safe.
     let mut st = s
         .conn
         .prepare("SELECT src FROM edges WHERE kind='covers' AND dst LIKE ?1 ORDER BY src")?;
@@ -424,6 +430,10 @@ pub fn resolve_edges(s: &Store, repo: &str) -> Result<()> {
 
     // Use unchecked_transaction only if not already inside a transaction.
     // When called from cmd_index (inside BEGIN/COMMIT), we can write directly.
+    // SAFETY of `unchecked_transaction`: the SELECT result above is fully
+    // materialised into `to_update` BEFORE any write below, so no prepared
+    // statement is live on `conn` during the UPDATEs. Do NOT reorder to stream
+    // rows from a live statement into the writes — that would alias `conn`.
     let in_txn = s.conn.is_autocommit();
     if in_txn {
         // Not in a transaction — wrap in one for efficiency.

@@ -146,11 +146,14 @@ pub fn reconcile_with_locs(
     sky_kernel_decls: &HashSet<String>,
 ) -> Vec<Kernel> {
     routes.iter().map(|(rust_fn, ri)| {
-        let go = go_fns.contains(&go_name(&ri.kernel_name));
+        // The `Mod_fn` form is used both for the Go impl lookup and as the
+        // sky-stdlib Ffi.kernel name — compute it once per kernel.
+        let go_form = go_name(&ri.kernel_name);
+        let go = go_fns.contains(&go_form);
         let rust = rust_fns.contains(rust_fn)
             || peephole_alias_present(&ri.kernel_name, rust_fns);
         // The Ffi.kernel name used in sky-stdlib is the Go-convention `Mod_fn` form.
-        let sky_decl = sky_kernel_decls.contains(&ri.kernel_name.replace('.', "_"));
+        let sky_decl = sky_kernel_decls.contains(&go_form);
         let parity = match (go, rust) {
             (true, true)   => "ok",
             (true, false)  => if sky_decl { "go-only" } else { "go-kernel-opt" },

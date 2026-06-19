@@ -103,7 +103,15 @@ fn cmd_index(repo: &str, db: &str) -> Result<()> {
             std::fs::create_dir_all(parent).ok();
         }
     }
-    let _ = std::fs::remove_file(db);
+    // `index` builds from scratch. The non-PK `symbols`/`edges` tables would
+    // accumulate duplicate rows across re-index if opened against a stale DB, so
+    // fail loudly if an existing DB can't be removed (NotFound on first run is
+    // expected and ignored).
+    match std::fs::remove_file(db) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::anyhow!("cannot remove stale index db {db}: {e}")),
+    }
     let store = store::Store::open(db)?;
     store.begin()?;
     let files = walk::tracked(repo)?;

@@ -99,8 +99,14 @@ night_guard() {
 # exactly 200 false-failed such apps (e.g. 36-composite-server).
 http_responds() { case "$1" in [1-5][0-9][0-9]) return 0;; *) return 1;; esac; }
 
-# ── free_port: an ephemeral free TCP port (fallback 8743) ───────────────────
-free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()' 2>/dev/null || echo 8743; }
+# ── free_port: an ephemeral free TCP port. FAIL-CLOSED ──────────────────────
+# Returns a kernel-assigned ephemeral port on stdout. If python3 is unavailable
+# the function returns NON-ZERO with no output rather than echoing a FIXED port:
+# a fixed fallback (the old 8743) defeats the ephemeral-port isolation this
+# function exists to provide — two concurrent exercises would collide on it and
+# the collision would masquerade as a flaky Rust noserve/red. A caller that needs
+# a port checks the rc and records SKIP/error instead of running on a stale port.
+free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()' 2>/dev/null; }
 
 # ── reap: kill stray app / console / driver / Xvfb processes between examples ─
 # `pkill` is absent on Windows Git Bash (no procps). Guard the whole body on its
@@ -117,7 +123,11 @@ reap() {
 # node lives under nvm; chromium is the system binary. Prepend node's bin so the
 # driver resolves. If any piece is absent, WEB_OK=0 and exercise_live degrades to
 # a server boot check (logged by the caller), so the sweeps still work browser-less.
-NODE_BIN="$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)"
+# Pick the highest nvm node version dir without parsing `ls` output (the classic
+# ls-parse antipattern breaks on odd dir names). Glob over the matching dirs
+# (null-safe: a no-match literal is skipped by the [ -d ] test), sort -V, take the
+# last.
+NODE_BIN="$(for _nb in "$HOME"/.nvm/versions/node/*/bin; do [ -d "$_nb" ] && printf '%s\n' "$_nb"; done | sort -V | tail -1)"
 export PATH="${NODE_BIN:+$NODE_BIN:}$PATH"
 export SKY_CHROMIUM="${SKY_CHROMIUM:-/usr/bin/chromium}"
 DRIVER="${DRIVER:-$REPO/runtime-rust/scripts/web-verify.mjs}"
@@ -303,8 +313,13 @@ exercise_tui() {
       return "$EXERCISE_SKIP_RC"
       ;;
     *)
-      # linux (and any util-linux host) — unchanged.
-      script -qec "timeout 8 '$bin'" /dev/null >"$log" 2>&1 </dev/null
+      # linux (and any util-linux host). `script -c` takes a SHELL STRING, so the
+      # binary path is interpolated into a command line — shell-quote it with
+      # printf %q so a path containing a quote/space/metachar can't break out of
+      # the quoting (defence-in-depth; paths come from controlled target dirs).
+      local q_bin
+      printf -v q_bin '%q' "$bin"
+      script -qec "timeout 8 $q_bin" /dev/null >"$log" 2>&1 </dev/null
       ;;
   esac
   if   grep -qiE "$PANIC_RE" "$log"; then return 1
@@ -401,6 +416,10 @@ exercise_server_equiv() {
   local go_bin="$1" rust_bin="$2" dir="$3" log="$4"
   local gport rport grun rrun gpid rpid route routes=() comparable=() n=0 verdict=""
   gport="$(free_port)"; rport="$(free_port)"
+  if [ -z "$gport" ] || [ -z "$rport" ]; then
+    printf 'free_port unavailable (python3 missing) — cannot allocate equiv ports\n' >>"$log" 2>/dev/null
+    echo "rust-broken"; return 0
+  fi
   [ "$gport" = "$rport" ] && rport=$((rport + 1))
   grun="$(mktemp -d "${TMPDIR:-/tmp}/sky-eqv-go.XXXXXX")"
   rrun="$(mktemp -d "${TMPDIR:-/tmp}/sky-eqv-rs.XXXXXX")"

@@ -20,7 +20,7 @@ pub fn extract_file(store: &Store, path: &str, lang: Lang, src: &str) -> Result<
         Lang::Sky => {
             let r = sky::scan_sky(src);
             for i in r.imports { store.put_edge(path, &i, "import")?; }
-            for b in r.bindings { store.put_symbol(path, &b, "binding", 0, 0)?; }
+            for (b, line) in r.bindings { store.put_symbol(path, &b, "binding", line, 0)?; }
             // kernels handled by parity.rs over the whole repo
         }
         Lang::Haskell => {

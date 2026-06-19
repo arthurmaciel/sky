@@ -54,7 +54,10 @@ cleanup() {
     for pid in "${SERVER_PIDS[@]:-}"; do [ -n "${pid:-}" ] && kill -TERM "$pid" 2>/dev/null; done
     sleep 1
     for pid in "${SERVER_PIDS[@]:-}"; do [ -n "${pid:-}" ] && kill -KILL "$pid" 2>/dev/null; done
-    pkill -f "$CARGO_TARGET_DIR/.*sky-app" 2>/dev/null
+    # Match the binary basename (fixed substring) rather than interpolating
+    # $CARGO_TARGET_DIR into the pkill -f regex — a cache path with regex
+    # metacharacters would otherwise broaden/narrow the match.
+    pkill -f 'sky-app' 2>/dev/null
 }
 trap cleanup EXIT INT TERM
 
@@ -66,6 +69,11 @@ command -v curl  >/dev/null || die "curl not on PATH"
 [ -x "$SKY_BIN" ]           || die "sky binary not found at $SKY_BIN"
 [ -d "$FIXTURE_DIR" ]       || die "fixture missing: $FIXTURE_DIR"
 HAVE_AB=0; command -v ab >/dev/null && HAVE_AB=1
+
+# The per-server watchdog kills the server after SERVER_CEILING seconds; if that
+# is <= the load window it would pre-empt a legitimate measurement. Fail closed.
+[ "$SERVER_CEILING" -gt "$LOAD_SECONDS" ] || \
+    die "SERVER_CEILING ($SERVER_CEILING) must exceed LOAD_SECONDS ($LOAD_SECONDS) — else the watchdog pre-empts the run"
 
 # ── 1. Emit the Rust project once, then build the four variants ─────────────
 info "Emitting Rust project (sky build --backend rust) ..."
@@ -164,7 +172,7 @@ run_variant() {
         local ct; ct="$(awk '/CURL_TOTAL/{print $2}' "$abf" | tail -1)"
         thr="$(awk -v c="${ct:-0}" -v s="$LOAD_SECONDS" 'BEGIN{ if(s>0) printf "%.1f", c/s; else print 0 }')"
     fi
-    kill "$watchdog" 2>/dev/null
+    kill "$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
     kill -TERM "$srv" 2>/dev/null; sleep 0.5; kill -KILL "$srv" 2>/dev/null
     local growth; growth="$(awk -v e="$end_kb" -v s="$start_kb" 'BEGIN{ if(s>0) printf "%.3f", e/s; else print 0 }')"
     info "[$label] samples=${#samples[@]} thr=${thr}/s peak=$((peak_kb/1024))MB start=$((start_kb/1024))MB end=$((end_kb/1024))MB growth=${growth}x"
