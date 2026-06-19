@@ -29,8 +29,32 @@ SSE_EVENTS="${SSE_EVENTS:-2000}"; SSE_CONC="${SSE_CONC:-16}"; COLD_RUNS="${COLD_
 AB_FLAGS="-r"
 SSE_BIN="$REPO_ROOT/tools/sse-bench/target/release/sse-bench"
 
-pyf() { python3 -c "import sys; print($1)"; }   # float expr → stdout
-pytrue() { python3 -c "import sys; sys.exit(0 if ($1) else 1)"; }  # bool expr → exit
+# Pass numeric values via sys.argv so they are DATA, not source.
+# Usage: pyf EXPR VAL...  where EXPR uses a[0], a[1], … for the values.
+# The expression itself is a fixed string written by this script, never
+# derived from probe output — only the numeric arguments are untrusted.
+pyf() {
+  local expr="$1"; shift
+  python3 - "$@" <<PYF
+import sys
+a=[float(x) for x in sys.argv[1:]]
+print($expr)
+PYF
+}
+# Same but exits 0/1 for a boolean expression over a[0], a[1], …
+pytrue() {
+  local expr="$1"; shift
+  python3 - "$@" <<PYTRUE
+import sys
+a=[float(x) for x in sys.argv[1:]]
+sys.exit(0 if ($expr) else 1)
+PYTRUE
+}
+# Validate that a string is a (possibly negative) number; echo it or echo 0.
+# Used to sanitise metric values from probe subprocess output before they
+# reach pyf/pytrue, so a malformed or empty probe result can never inject
+# into the Python expression string.
+numval() { [[ "${1:-}" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] && echo "$1" || echo 0; }
 
 detect_shape() { # $1=example dir (relative to REPO_ROOT or absolute)
   local d; [[ "$1" = /* ]] && d="$1" || d="$REPO_ROOT/$1"
@@ -109,7 +133,7 @@ probe_coldstart_server() { # $1=binary -> median ms (exec→first 200)
       curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$lp/" && { ok=1; break; }
       sleep 0.05
     done
-    [ -n "$ok" ] && samples+=("$(pyf "($(date +%s.%N)-$t0)*1000")")
+    [ -n "$ok" ] && samples+=("$(pyf "(a[0]-a[1])*1000" "$(date +%s.%N)" "$t0")")
     pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -f "$log"
   done
   [ ${#samples[@]} -eq 0 ] && { echo 0; return; }
@@ -424,34 +448,36 @@ collect_metrics() { # $1=binary $2=shape $3=exampleDir -> "metric value" lines
 is_higher_better() { case "$1" in throughput|event_throughput|live_warm|live_event|sse_eps|ws_eps|broadcast) return 0;; *) return 1;; esac; }
 thr_for() { local key="$1"; [ -f "$THRESH" ] || return 0; awk -F' *= *' -v k="$key" '$1~("^"k"$"){print $2}' "$THRESH"; }
 
-better() { if is_higher_better "$1"; then pyf "max($2,$3)"; else pyf "min($2,$3)"; fi; }
+better() { if is_higher_better "$1"; then pyf "max(a[0],a[1])" "$(numval "$2")" "$(numval "$3")"; else pyf "min(a[0],a[1])" "$(numval "$2")" "$(numval "$3")"; fi; }
 # Best Go reference across re-rolls, for the ratio's direction. A lower-is-better
 # ratio (rust/go) is minimised by the LARGEST go; a higher-is-better ratio by the
 # SMALLEST NONZERO go (a 0 is a failed probe and must be ignored, never chosen).
 better_ref() {
-  if is_higher_better "$1"; then pyf "min([x for x in [$2,$3] if x>0] or [0])"
-  else pyf "max($2,$3)"; fi
+  if is_higher_better "$1"; then pyf "min([x for x in [a[0],a[1]] if x>0] or [0])" "$(numval "$2")" "$(numval "$3")"
+  else pyf "max(a[0],a[1])" "$(numval "$2")" "$(numval "$3")"; fi
 }
 
 gate_metric() { # $1=shape $2=metric $3=go $4=rust -> row; 0 pass / 1 fail
   # A failed reference probe (Go side 0/empty) leaves the ratio undefined — you
   # cannot gate Rust against a measurement that did not happen. Report SKIP and
   # pass: a transient Go `ab` startup failure must not read as a Rust regression.
-  if pytrue "${3:-0}==0"; then
-    printf "  %-18s go=%-12s rust=%-12s ratio=%-8s thr=%-8s %s\n" "$2" "${3:-0}" "$4" "n/a" "-" "SKIP"
+  local _go; _go="$(numval "${3:-}")"
+  local _rust; _rust="$(numval "${4:-}")"
+  if pytrue "a[0]==0" "$_go"; then
+    printf "  %-18s go=%-12s rust=%-12s ratio=%-8s thr=%-8s %s\n" "$2" "$_go" "$_rust" "n/a" "-" "SKIP"
     return 0
   fi
-  local ratio; ratio=$(pyf "round($4/$3,4)")
+  local ratio; ratio=$(pyf "round(a[1]/a[0],4)" "$_go" "$_rust")
   local key thr verdict
   if is_higher_better "$2"; then
     key="$1.$2_ratio_min"; thr=$(thr_for "$key"); [ -z "$thr" ] && thr=0
-    pytrue "$ratio >= $thr" && verdict=1 || verdict=0
+    pytrue "a[0] >= a[1]" "$ratio" "$(numval "$thr")" && verdict=1 || verdict=0
   else
     key="$1.$2_ratio_max"; thr=$(thr_for "$key"); [ -z "$thr" ] && thr=999
-    pytrue "$ratio <= $thr" && verdict=1 || verdict=0
+    pytrue "a[0] <= a[1]" "$ratio" "$(numval "$thr")" && verdict=1 || verdict=0
   fi
   local tag; [ "$verdict" = 1 ] && tag=PASS || tag=FAIL
-  printf "  %-18s go=%-12s rust=%-12s ratio=%-8s thr=%-8s %s\n" "$2" "$3" "$4" "$ratio" "$thr" "$tag"
+  printf "  %-18s go=%-12s rust=%-12s ratio=%-8s thr=%-8s %s\n" "$2" "$_go" "$_rust" "$ratio" "$thr" "$tag"
   [ "$verdict" = 1 ]
 }
 
@@ -494,7 +520,7 @@ run_one() { # $1=example -> table + exit code
   local fail=0 json="{\"example\":\"$ex\",\"shape\":\"$shape\",\"metrics\":{"
   for m in "${!GO[@]}"; do
     gate_metric "$shape" "$m" "${GO[$m]}" "${RUST[$m]:-0}" || fail=1
-    json="$json\"$m\":{\"go\":${GO[$m]},\"rust\":${RUST[$m]:-0}},"
+    json="$json\"$m\":{\"go\":$(numval "${GO[$m]}"),\"rust\":$(numval "${RUST[$m]:-}")},"
   done
   echo "${json%,}}}" > "/tmp/rust-perf-$ex.json"
   return $fail
@@ -520,8 +546,9 @@ baseline() {
         # with a non-measurement — e.g. one failed Go ab dragged
         # server.throughput_ratio_min to 0.0 (a non-gate). Keep only paired
         # real measurements.
-        pytrue "$g>0 and $r>0" || continue
-        ratios[$m]="${ratios[$m]:-} $(pyf "$r/$g")"
+        local _g; _g="$(numval "$g")"; local _r; _r="$(numval "$r")"
+        pytrue "a[0]>0 and a[1]>0" "$_g" "$_r" || continue
+        ratios[$m]="${ratios[$m]:-} $(pyf "a[1]/a[0]" "$_g" "$_r")"
       done
     done
     for m in "${!ratios[@]}"; do
@@ -545,10 +572,11 @@ print(m, min(sd/m if m else 0.0, 0.45))')
       # ratios — binsize's measured 0.0144 rounded to 0.01, BELOW itself, so the
       # baseline failed its own gate. `//` is float floor-division; ceil(x) is
       # -(-x//1).
+      local _mean; _mean="$(numval "$mean")"; local _cv; _cv="$(numval "$cv")"
       if is_higher_better "$m"; then
-        echo "${shape}.${m}_ratio_min = $(pyf "($mean*(1-2*$cv)*100//1)/100")" >> "$THRESH"
+        echo "${shape}.${m}_ratio_min = $(pyf "(a[0]*(1-2*a[1])*100//1)/100" "$_mean" "$_cv")" >> "$THRESH"
       else
-        echo "${shape}.${m}_ratio_max = $(pyf "(-(-$mean*(1+2*$cv)*100//1))/100")" >> "$THRESH"
+        echo "${shape}.${m}_ratio_max = $(pyf "(-(-a[0]*(1+2*a[1])*100//1))/100" "$_mean" "$_cv")" >> "$THRESH"
       fi
     done
   done

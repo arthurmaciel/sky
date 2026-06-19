@@ -3552,7 +3552,57 @@ defToRustString ctx (Can.DestructDef pat expr) =
         exprStr = if null multi then exprToRustString ctx expr
                   else "{ " ++ clones ++ exprToRustString ctx expr ++ " }"
     in patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ exprStr
-defToRustString _ctx _ = "_ = unimplemented()"
+-- Type-annotated binding: `let x : T = e` lowers identically to the
+-- plain Def arm — the Sky type annotation carries HM information already
+-- consumed by the solver; we do not need to emit a Rust type annotation
+-- here (inference covers it). The `_freeVars` and `_retType` fields are
+-- intentionally ignored; `typedParams` uses only the pattern component
+-- (fst of each TypedPattern pair), matching how defParamVars/canDefBody
+-- treat TypedDef throughout this file.
+defToRustString ctx (Can.TypedDef (Ann.At _ name) _freeVars [] body _retType) =
+    -- Zero-param annotated binding — same lowering as `Can.Def name [] body`.
+    let counts = collectFreeVarLocalsMulti body
+        multi = [ v | (v, c) <- Map.toList counts, c >= 2 ]
+        clones = clonePreludeFor ctx multi
+        discardAnnot
+            | name == "_"
+            , isTaskProducingCall body
+            , inner <- taskExprInnerType (ecSolvedTypes ctx) body
+            , not (null inner) = ": SkyTask<" ++ inner ++ ">"
+            | otherwise = ""
+    in case body of
+        Ann.At _ (Can.Lambda [] lambdaBody) ->
+            let inner = "|| { " ++ exprToRustString ctx lambdaBody ++ " }"
+            in name ++ " = " ++ if null multi then inner else "{ " ++ clones ++ inner ++ " }"
+        _ ->
+            let inner = exprToRustString ctx body
+            in name ++ discardAnnot ++ " = " ++ if null multi then inner else "{ " ++ clones ++ inner ++ " }"
+defToRustString ctx (Can.TypedDef (Ann.At _ name) _freeVars typedParams body _retType) =
+    -- Multi-param annotated binding — strip type annotations from params,
+    -- then lower identically to `Can.Def name params body`.
+    let params = map fst typedParams
+        paramNames = Set.fromList (concatMap patBindingVars params)
+        captured   = Set.toList (Set.difference (collectVarLocals body) paramNames)
+        clones     = clonePreludeFor ctx captured
+        innerMulti = [ v | (v, c) <- Map.toList (collectVarLocalsMulti body), c >= 2 ]
+        ctx'       = ctx { ecCloneVars = Set.unions
+                             [ Set.fromList innerMulti
+                             , Set.difference (ecCloneVars ctx) paramNames
+                             , Set.fromList captured ] }
+        psStr      = intercalate ", " (map (annotClosureParam ctx body) params)
+        closure    = "move |" ++ psStr ++ "| { " ++ exprToRustString ctx' body ++ " }"
+    in name ++ " = " ++ if null captured then closure else "{ " ++ clones ++ closure ++ " }"
+-- Catch-all: any future Can.Def variant not handled above is a compiler
+-- bug — fail loudly at Haskell runtime rather than emitting invalid Rust
+-- that produces a confusing cargo error at the user's build site.
+defToRustString _ctx d = error $ "defToRustString: unsupported Can.Def variant: " ++ show (defVariantTag d)
+
+-- | Return a short human-readable tag for a Can.Def value (used only in
+-- the error message above — avoids a Show instance on Can.Def).
+defVariantTag :: Can.Def -> String
+defVariantTag (Can.Def (Ann.At _ n) _ _)          = "Def(" ++ n ++ ")"
+defVariantTag (Can.TypedDef (Ann.At _ n) _ _ _ _) = "TypedDef(" ++ n ++ ")"
+defVariantTag (Can.DestructDef _ _)                = "DestructDef"
 
 -- | Does a pattern contain a string-literal sub-pattern anywhere?
 hasStrAnywhere :: Can.Pattern -> Bool

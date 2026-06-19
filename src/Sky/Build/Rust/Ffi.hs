@@ -70,7 +70,7 @@ runRustInspectorWith pkgPath features mGit = do
     case resolved of
         Left e    -> return (Left e)
         Right bin -> do
-            let featuresArg = if null features then "" else " --features " ++ intercalate "," features
+            let featuresArg = if null features then "" else " --features " ++ quoteShell (intercalate "," features)
                 gitArg = case mGit of
                     Nothing -> ""
                     Just (url, mr, mb, mt) ->
