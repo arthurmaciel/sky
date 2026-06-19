@@ -180,6 +180,34 @@
     <div class="fb"></div>
   </div>
 
+  <div class="quiz" id="q4">
+    <div class="q">4. Which file is the entry point for Stage 4 codegen that writes the full
+    cargo project?</div>
+    <button data-ok="1"><code>src/Sky/Generate/Rust/Project.hs</code> · <code>generateRustProject</code></button>
+    <button data-ok="0"><code>src/Sky/Build/Compile.hs</code> · <code>compileModule</code></button>
+    <button data-ok="0"><code>src/Sky/Generate/Rust/Builder/Kernel.hs</code> · <code>kernelToRust</code></button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q5">
+    <div class="q">5. Why is <code>println</code> <em>special-cased</em> in
+    <code>ExprEmitter</code> instead of going through the plain <code>kernelToRust</code>
+    lookup table?</div>
+    <button data-ok="0">Because <code>println</code> is not a stdlib kernel</button>
+    <button data-ok="1">Because it takes many arguments and joins them with spaces, so <code>ExprEmitter</code> builds that join itself</button>
+    <button data-ok="0">Because the runtime crate has no <code>log_println</code> function</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q6">
+    <div class="q">6. What does the generated cargo project output to when
+    <code>sky build --backend rust</code> runs?</div>
+    <button data-ok="0"><code>sky-out/app</code></button>
+    <button data-ok="1"><code>sky-out/Rust/</code></button>
+    <button data-ok="0"><code>dist-newstyle/</code></button>
+    <div class="fb"></div>
+  </div>
+
   <div class="summary">
     <h3>Summary</h3>
     <ul>

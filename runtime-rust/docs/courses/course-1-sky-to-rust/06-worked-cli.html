@@ -181,6 +181,34 @@ main =
     <button data-ok="0">a runtime kernel</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. A Sky string literal <code>"Hello from Sky!"</code> appears in emitted Rust as…</div>
+    <button data-ok="0"><code>"Hello from Sky!"</code> — no change needed</button>
+    <button data-ok="1"><code>"Hello from Sky!".to_string()</code> — because Sky <code>String</code> maps to a Rust owned <code>String</code></button>
+    <button data-ok="0"><code>String::from_static("Hello from Sky!")</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. In the emitted Rust for <code>20-cli-counter</code>, the Sky lambda <code>\_ -&gt; NoOp</code> (inside <code>Cmd.perform</code>) becomes…</div>
+    <button data-ok="0">a named helper function <code>fn noop_handler()</code></button>
+    <button data-ok="1">a Rust closure <code>|_| MainMsg::NoOp</code></button>
+    <button data-ok="0">it is dropped — closures are not supported</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. What does a bare effect <code>main = println "…"</code> produce as the real Rust <code>fn main()</code>?</div>
+    <button data-ok="1">It drives <code>sky_main()</code> with <code>block_on</code> and converts the <code>SkyResult</code> into an exit code — <code>Err</code> prints to stderr and exits 1</button>
+    <button data-ok="0">It calls <code>task_run(sky_main())</code> and ignores errors</button>
+    <button data-ok="0">It is generated empty — the task runs on its own</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. A Sky record <code>type alias Model = { count : Int }</code> lowers to what Rust type?</div>
+    <button data-ok="0"><code>type MainModel = (i64,);</code> — a tuple alias</button>
+    <button data-ok="0"><code>enum MainModel { count(i64) }</code></button>
+    <button data-ok="1"><code>pub struct MainModel { pub count: i64 }</code> — record alias → struct, <code>Int → i64</code></button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

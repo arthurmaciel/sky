@@ -111,6 +111,34 @@
     <button data-ok="0">a closed GitHub service</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. What is the role of the Go backend in the EQUIV check?</div>
+    <button data-ok="1">It is the correctness oracle — Rust output must match Go output to be considered correct</button>
+    <button data-ok="0">It is a fallback build if Rust fails</button>
+    <button data-ok="0">It provides faster compilation for the sweep</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. What does the <code>if: github.repository == 'arthurmaciel/sky'</code> guard on the sweep job do?</div>
+    <button data-ok="1">Prevents the fork-only Rust workflow from running if someone forks the repo elsewhere</button>
+    <button data-ok="0">Forces the job to run on every branch, not just <code>main</code></button>
+    <button data-ok="0">Skips the sweep when the repository is private</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. Why is <code>SKY_SWEEP_FORCE=1</code> set in the CI environment?</div>
+    <button data-ok="1">CI has no night window, so this env var forces past the developer-only night-gate that limits local runs to 22:00–08:00</button>
+    <button data-ok="0">It enables debug logging for the sweep</button>
+    <button data-ok="0">It forces the sweep to run on all forks, not just the origin</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. A <code>server</code> example's RUN check works by…</div>
+    <button data-ok="1">booting the binary, then using <code>curl</code> to hit a route and comparing the HTTP body</button>
+    <button data-ok="0">running the binary and checking its exit code is zero</button>
+    <button data-ok="0">compiling the example and counting build warnings</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

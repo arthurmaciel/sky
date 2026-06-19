@@ -121,6 +121,34 @@
     <button data-ok="0">Nothing — codegen is stateless</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. Which module is the largest in <code>Builder/</code> and turns one expression into Rust text?</div>
+    <button data-ok="0"><code>ModuleEmitter.hs</code></button>
+    <button data-ok="1"><code>ExprEmitter.hs</code> (~3.8k lines) — <code>exprToRustString</code> / <code>exprToRustInner</code></button>
+    <button data-ok="0"><code>Walker.hs</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. What is the role of <code>Walker.hs</code> relative to the rest of the emission pipeline?</div>
+    <button data-ok="0">It emits the final <code>main.rs</code> file</button>
+    <button data-ok="0">It resolves kernel names to Rust function names</button>
+    <button data-ok="1">It is a metadata pre-pass that runs <em>before</em> emission, recording which kernels and features are used</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. Which module handles name mangling — for example turning <code>fromInt</code> into <code>from_int</code> and escaping Rust keywords like <code>type</code>?</div>
+    <button data-ok="0"><code>TypeRenderer.hs</code></button>
+    <button data-ok="1"><code>Naming.hs</code> — <code>toSnakeCase</code> plus keyword escaping (<code>type → type_</code>)</button>
+    <button data-ok="0"><code>SigRegistry.hs</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. What does <code>TypeRenderer.hs</code> produce for the Sky type <code>Task _ a</code>?</div>
+    <button data-ok="0"><code>Box&lt;dyn Future&gt;</code></button>
+    <button data-ok="0"><code>Result&lt;a, _&gt;</code></button>
+    <button data-ok="1"><code>SkyTask&lt;…&gt;</code> — via <code>typeToRustString</code>, which also maps <code>Int → i64</code> and function types to closures</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

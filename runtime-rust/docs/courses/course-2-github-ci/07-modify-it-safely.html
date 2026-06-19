@@ -106,6 +106,34 @@
     <button data-ok="0">Nothing special is required</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. You push a workflow change to branch <code>feat/my-new-check</code>. Will CI run on that branch?</div>
+    <button data-ok="1">Yes — the push trigger covers <code>feat/**</code>, so your branch runs the workflow automatically</button>
+    <button data-ok="0">No — only pushes to <code>main</code> trigger CI</button>
+    <button data-ok="0">Only if you open a pull request first</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. Before pushing a YAML change, the lesson recommends validating it locally. Which command does it suggest?</div>
+    <button data-ok="1"><code>python3 -c "import yaml,sys; yaml.safe_load(open('…'))"</code></button>
+    <button data-ok="0"><code>gh workflow validate</code></button>
+    <button data-ok="0"><code>cargo check --manifest-path .github/workflows/…</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. Why must the <code>examples-sweep</code> gate job NEVER be set to <code>continue-on-error: true</code>?</div>
+    <button data-ok="1">Because the gate is what makes a green checkmark mean "the backend works" — softening it lets failures through silently</button>
+    <button data-ok="0">Because GitHub doesn't support that flag on matrix jobs</button>
+    <button data-ok="0">Because it would prevent artifacts from being uploaded</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. You want to add a new check that runs a 40-line bash script. Where should that logic live, and why?</div>
+    <button data-ok="1">In a file under <code>runtime-rust/scripts/</code>, called from a single <code>run:</code> line — so it can also run locally and isn't buried in YAML</button>
+    <button data-ok="0">Inline in the YAML <code>run:</code> block, to keep everything in one place</button>
+    <button data-ok="0">In a separate repository, linked via a <code>uses:</code> action</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary — and course complete 🎉</h3>

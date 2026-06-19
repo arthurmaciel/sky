@@ -128,6 +128,38 @@
     <div class="fb"></div>
   </div>
 
+  <div class="quiz" id="q4">
+    <div class="q">4. What does the <code>name:</code> field at the top of a workflow file do?</div>
+    <button data-ok="1">Provides a human-readable label shown in the Actions tab — it is optional</button>
+    <button data-ok="0">Sets the name of the job that runs</button>
+    <button data-ok="0">Is required; the workflow fails to parse without it</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q5">
+    <div class="q">5. What happens when a step's shell command (via <code>run:</code>) exits with a non-zero status?</div>
+    <button data-ok="1">That step fails, the job stops and goes red, and the commit is flagged</button>
+    <button data-ok="0">GitHub retries the step automatically three times</button>
+    <button data-ok="0">The job continues running the remaining steps and reports a warning</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q6">
+    <div class="q">6. In YAML workflow files, which character is forbidden for indentation?</div>
+    <button data-ok="0">Spaces</button>
+    <button data-ok="1">Tabs</button>
+    <button data-ok="0">Hyphens (<code>-</code>)</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q7">
+    <div class="q">7. The <code>|</code> character after <code>run:</code> in a step lets you…</div>
+    <button data-ok="0">Comment out the step</button>
+    <button data-ok="1">Write multiple shell command lines in one step</button>
+    <button data-ok="0">Reference a secret stored in GitHub</button>
+    <div class="fb"></div>
+  </div>
+
   <div class="summary">
     <h3>Summary</h3>
     <ul>

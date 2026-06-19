@@ -128,6 +128,27 @@ main =
     <button data-ok="0">Webview views are written in JavaScript</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. In the smoke test, what drives the <code>webview_app</code> task after it is constructed?</div>
+    <button data-ok="1"><code>block_on(task)</code> — the async executor that runs the future to completion</button>
+    <button data-ok="0"><code>Task.run</code> from the Sky stdlib handles execution internally</button>
+    <button data-ok="0">The OS event loop picks it up automatically — no driver is needed</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. What are the two fields of <code>WebviewWindowCfg</code>?</div>
+    <button data-ok="1"><code>title: String</code> and <code>size: (u32, u32)</code> — matching the Sky <code>{ title, size }</code> record</button>
+    <button data-ok="0"><code>url: String</code> and <code>width: u32</code></button>
+    <button data-ok="0"><code>html: String</code> and <code>fullscreen: bool</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. Why does a non-Webview project still build on a host that lacks WebKit libraries?</div>
+    <button data-ok="1">The <code>webview</code> cargo feature is gated off by default; a stub keeps non-webview platforms linking</button>
+    <button data-ok="0">WebKit is bundled inside the <code>wry</code> crate so no system library is needed</button>
+    <button data-ok="0">The compiler skips the Webview runtime entirely when it detects a missing library</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary — all five shapes done</h3>

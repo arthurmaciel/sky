@@ -143,6 +143,34 @@ view model =
     <button data-ok="0">Live apps can't have a database</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. Which entry kernel is used when <code>Live.app</code> is given a <code>routes</code> field?</div>
+    <button data-ok="1"><code>live_app_routed</code></button>
+    <button data-ok="0"><code>live_app</code></button>
+    <button data-ok="0"><code>server_listen</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. What does each HTML builder call (<code>div</code>, <code>button</code>, <code>nav</code>) lower to in the generated Rust?</div>
+    <button data-ok="1">A <code>std_html_*</code> kernel call taking <code>vec![attrs]</code> and <code>vec![children]</code></button>
+    <button data-ok="0">A <code>tui_*</code> kernel call</button>
+    <button data-ok="0">Raw HTML string concatenation</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. What does <code>block_on</code> start up when it drives a <code>live_app_routed</code> task?</div>
+    <button data-ok="1">The HTTP server, the SSE update channel, and the session store</button>
+    <button data-ok="0">Only the HTTP server; SSE and sessions are separate processes</button>
+    <button data-ok="0">A terminal event loop</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. Database calls in a Sky.Live app (e.g. in <code>19-skyforum</code>) lower to…</div>
+    <button data-ok="1"><code>db_*</code> Task-typed kernels — no new lowering rules, same pattern as everything else</button>
+    <button data-ok="0">A special <code>live_db_*</code> kernel that bypasses the Task boundary</button>
+    <button data-ok="0">Raw SQL strings embedded directly in the view function</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

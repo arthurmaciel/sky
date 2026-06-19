@@ -106,6 +106,34 @@
     <button data-ok="0">They can't be triggered</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. Why does the weekly <code>schedule</code> cron exist for perf jobs, instead of only <code>workflow_dispatch</code>?</div>
+    <button data-ok="1">To keep the perf numbers fresh automatically — without a cadence, the table would reflect whenever someone last clicked the button, possibly weeks ago</button>
+    <button data-ok="0">Because <code>workflow_dispatch</code> is not available on public repositories</button>
+    <button data-ok="0">To reduce costs by batching all CI work into one weekly run</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. Scheduled workflows run from which branch by default?</div>
+    <button data-ok="1">The repository's default branch — so this workflow must explicitly check out <code>feat/runtime-rust</code> to test the Rust work</button>
+    <button data-ok="0">The branch where the <code>schedule:</code> trigger was last edited</button>
+    <button data-ok="0">Whatever branch the last <code>push</code> event touched</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. What does <code>examples-perf-sweep</code> measure that <code>static-perf</code> does not?</div>
+    <button data-ok="1">Rust-vs-Go throughput, RSS memory, and cold-start time — <code>static-perf</code> focuses on static binary sizes across OSes</button>
+    <button data-ok="0"><code>examples-perf-sweep</code> checks headless browser scenarios; <code>static-perf</code> checks CLI output</button>
+    <button data-ok="0">They measure exactly the same things but on different machines</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. What would happen if <code>continue-on-error: true</code> were removed from <code>examples-perf-sweep</code> and the benchmark failed?</div>
+    <button data-ok="1">The entire workflow would be marked as failed, blocking merges — perf noise on shared runners would randomly break CI</button>
+    <button data-ok="0">The job would be silently skipped</button>
+    <button data-ok="0">Nothing — <code>continue-on-error</code> has no effect on workflow-level status</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

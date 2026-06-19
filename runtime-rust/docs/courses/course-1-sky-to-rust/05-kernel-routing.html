@@ -127,6 +127,34 @@ _ -> <span class="tok-fn">toSnakeCase</span> (map (\c -> <span class="tok-kw">if
     <button data-ok="0">It's silently dropped</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. Why does <code>kernelToRust</code> list <em>both</em> <code>"String"</code> and <code>"Sky.Core.String"</code> for the same kernel?</div>
+    <button data-ok="1">The same kernel can arrive with a short or fully-qualified module name depending on the Sky import — both must route to the same Rust fn</button>
+    <button data-ok="0">They produce different Rust functions for performance reasons</button>
+    <button data-ok="0">Only the fully-qualified form is used; the short form is legacy</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. What does <code>splitKernelName</code> do?</div>
+    <button data-ok="0">Splits a module path on dots to build the fallback Rust name</button>
+    <button data-ok="1">Splits a combined <code>Ffi.kernel</code> string on the first underscore — e.g. <code>"Decimal_fromInt" → ("Decimal", "fromInt")</code> — so it can be routed</button>
+    <button data-ok="0">Removes the <code>Rust_</code> prefix from user FFI module names</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. Why is a zero-arg kernel like <code>Dict.empty</code> treated specially by <code>Walker.hs</code>?</div>
+    <button data-ok="0">Because zero-arg kernels aren't in the <code>kernelToRust</code> table</button>
+    <button data-ok="0">To avoid generating a Rust function for them at all</button>
+    <button data-ok="1">So <code>ExprEmitter</code> emits <code>dict_empty()</code> — a call — rather than a bare value, preventing a function pointer where a value is expected</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. The user FFI fallback handles a module named <code>Rust_Http</code>. What Rust name does it produce for the function <code>get</code>?</div>
+    <button data-ok="0"><code>rust_http_get</code> — the prefix is preserved</button>
+    <button data-ok="1"><code>http_get</code> — the <code>Rust_</code> prefix (5 chars) is dropped, then the remainder is snake-cased with the name appended</button>
+    <button data-ok="0"><code>Http_get</code> — only the casing changes</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

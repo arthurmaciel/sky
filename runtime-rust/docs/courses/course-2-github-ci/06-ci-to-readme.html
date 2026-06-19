@@ -108,6 +108,34 @@
     <button data-ok="0">A manual approval each time</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. What marks a region of <code>README.md</code> as machine-owned?</div>
+    <button data-ok="1">HTML comments like <code>&lt;!-- AUTOGEN:static-table BEGIN --&gt; … END --&gt;</code></button>
+    <button data-ok="0">A <code>.gitattributes</code> lock on that file section</button>
+    <button data-ok="0">A special heading like <code>## AUTO</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. What does <code>readme-tables.py … --write</code> actually do?</div>
+    <button data-ok="1">Regenerates only the content between the <code>AUTOGEN</code> fences, leaving all surrounding prose untouched</button>
+    <button data-ok="0">Rewrites the entire <code>README.md</code> from scratch</button>
+    <button data-ok="0">Uploads the TSVs to a remote server</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. Why does step E run <code>git diff --quiet -- runtime-rust/README.md &amp;&amp; exit 0</code> before committing?</div>
+    <button data-ok="1">To skip the commit entirely when the tables haven't changed, avoiding a pointless empty commit</button>
+    <button data-ok="0">To check whether the fenced regions are valid YAML</button>
+    <button data-ok="0">To verify that the <code>GITHUB_TOKEN</code> has write permission</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. The <code>update-readme</code> job only runs on <code>workflow_dispatch</code> or <code>schedule</code>, not on every push. Why?</div>
+    <button data-ok="1">Because the perf and static numbers it depends on are only measured in dispatch/schedule runs — a push-triggered job would have no fresh TSVs to read</button>
+    <button data-ok="0">Because <code>contents: write</code> is not allowed on push events</button>
+    <button data-ok="0">To save money on GitHub Actions minutes</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

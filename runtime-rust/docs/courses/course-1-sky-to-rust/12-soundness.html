@@ -118,6 +118,34 @@
     <button data-ok="0">silently corrupts memory</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. The worked lessons show an <code>ffi_kernel_polyfill</code> that calls <code>panic!</code>. Does this violate the "no panic from well-typed Sky" rule?</div>
+    <button data-ok="1">No — it's a <em>compiler-bug contract</em>; well-typed Sky can never reach it. The rule is "no panic reachable from well-typed Sky", not "zero <code>panic!</code> tokens"</button>
+    <button data-ok="0">Yes — any <code>panic!</code> in the runtime crate is forbidden, full stop</button>
+    <button data-ok="0">No — it's acceptable because it's in a polyfill, which is a special category of code</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. Which of the following is treated as a <strong>bug to fix at the root</strong> in Sky-reachable generated Rust code?</div>
+    <button data-ok="1"><code>.unwrap()</code>, <code>[i]</code> indexing, and unchecked <code>downcast</code> — all must be replaced with total forms like <code>if let</code>, <code>.get()</code>, or <code>match</code></button>
+    <button data-ok="0">Using <code>Result</code> return types instead of panicking — those should be eliminated</button>
+    <button data-ok="0">Any call to an async runtime — the Rust backend must be fully synchronous</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. A green build and a passing fixture sweep are not sufficient proof of correctness. What does the lesson say is the <em>strongest</em> check?</div>
+    <button data-ok="1">Running a real third-party project as a proof-test — it exercises code shapes no example happens to cover</button>
+    <button data-ok="0">Running <code>clippy --deny warnings</code> on the generated Rust</button>
+    <button data-ok="0">Enabling Rust's debug-overflow-checks flag on every build</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. What does "statically total" mean in practice for an internal invariant that "can't fail"?</div>
+    <button data-ok="1">Even then, use a total form — <code>if let</code> / <code>match</code> / <code>.get()</code> — with a structured-error fallback; never rely on <code>.unwrap()</code> because the invariant "can't fail"</button>
+    <button data-ok="0">Mark it <code>#[allow(clippy::unwrap_used)]</code> to suppress the lint and document the reasoning</button>
+    <button data-ok="0">It is fine to <code>.unwrap()</code> when you're certain the value is <code>Some</code> — "statically total" only applies to uncertain paths</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary — and Course 1 complete 🎉</h3>

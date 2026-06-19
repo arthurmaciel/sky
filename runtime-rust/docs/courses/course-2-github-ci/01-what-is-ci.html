@@ -136,6 +136,38 @@
     <div class="fb"></div>
   </div>
 
+  <div class="quiz" id="q4">
+    <div class="q">4. Where must a GitHub Actions workflow file be saved?</div>
+    <button data-ok="1">Under <code>.github/workflows/</code> in the repository</button>
+    <button data-ok="0">In a <code>ci/</code> folder at the project root</button>
+    <button data-ok="0">Anywhere, as long as it ends in <code>.yml</code></button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q5">
+    <div class="q">5. In the <code>examples-sweep.yml</code> workflow, which trigger lets you start a run manually from the GitHub UI?</div>
+    <button data-ok="0"><code>push:</code></button>
+    <button data-ok="0"><code>schedule:</code></button>
+    <button data-ok="1"><code>workflow_dispatch:</code></button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q6">
+    <div class="q">6. Multiple jobs in one workflow run in what order by default?</div>
+    <button data-ok="1">In parallel, unless one job declares it <code>needs</code> another</button>
+    <button data-ok="0">One after the other, in the order they appear in the file</button>
+    <button data-ok="0">Alphabetically by job id</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q7">
+    <div class="q">7. Which keyword inside a job specifies <em>what machine</em> the job runs on?</div>
+    <button data-ok="0"><code>steps:</code></button>
+    <button data-ok="0"><code>on:</code></button>
+    <button data-ok="1"><code>runs-on:</code></button>
+    <div class="fb"></div>
+  </div>
+
   <div class="summary">
     <h3>Summary</h3>
     <ul>

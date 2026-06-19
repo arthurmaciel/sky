@@ -126,6 +126,38 @@
     <div class="fb"></div>
   </div>
 
+  <div class="quiz" id="q4">
+    <div class="q">4. This repo's matrix has one dimension: <code>os: [ubuntu-latest, macos-latest, windows-latest]</code>. How many parallel jobs does that produce?</div>
+    <button data-ok="0">1</button>
+    <button data-ok="1">3</button>
+    <button data-ok="0">6</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q5">
+    <div class="q">5. How does a step read "which OS value am I running on?" from the matrix?</div>
+    <button data-ok="0">It reads the <code>RUNNER_OS</code> environment variable</button>
+    <button data-ok="1">It uses the expression <code>${{ matrix.os }}</code></button>
+    <button data-ok="0">It queries GitHub's API at runtime</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q6">
+    <div class="q">6. The cache <code>restore-keys</code> field is used when…</div>
+    <button data-ok="0">You want to delete a stale cache entry</button>
+    <button data-ok="1">No exact <code>key</code> match exists — it falls back to the closest older cache as a warm starting point</button>
+    <button data-ok="0">The runner is offline and can't download packages</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q7">
+    <div class="q">7. What does the <code>concurrency</code> block (with <code>cancel-in-progress: true</code>) do in this repo's workflow?</div>
+    <button data-ok="0">It limits how many artifacts can be uploaded at once</button>
+    <button data-ok="0">It prevents two commits from being pushed at the same time</button>
+    <button data-ok="1">It cancels the still-running workflow for the same branch when a newer push supersedes it</button>
+    <div class="fb"></div>
+  </div>
+
   <div class="summary">
     <h3>Summary</h3>
     <ul>

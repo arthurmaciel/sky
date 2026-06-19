@@ -138,6 +138,32 @@ println (…)  : <span class="tok-ty">Task</span> <span class="tok-ty">Error</sp
     <div class="fb"></div>
   </div>
 
+  <div class="quiz" id="q4">
+    <div class="q">4. What does the layout pass in Stage 1 do?</div>
+    <button data-ok="0">It resolves import names to their module of origin</button>
+    <button data-ok="0">It infers types for every expression</button>
+    <button data-ok="1">It converts significant indentation into explicit structure tokens, so Sky programs don't need braces</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q5">
+    <div class="q">5. A call to <code>String.fromInt</code> resolves in the canonical
+    AST to which node?</div>
+    <button data-ok="1"><code>Can.VarKernel "String" "fromInt"</code></button>
+    <button data-ok="0"><code>Can.VarLocal "fromInt"</code></button>
+    <button data-ok="0"><code>Can.VarTopLevel "String" "fromInt"</code></button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q6">
+    <div class="q">6. The <code>SolvedTypes</code> record contains two things codegen
+    reads. What are they?</div>
+    <button data-ok="0">The source AST and the list of all imported modules</button>
+    <button data-ok="0">A union-find structure and the constraint list</button>
+    <button data-ok="1">The name→type environment (<code>_stEnv</code>) and a region map (source location → inferred type)</button>
+    <div class="fb"></div>
+  </div>
+
   <div class="summary">
     <h3>Summary</h3>
     <ul>

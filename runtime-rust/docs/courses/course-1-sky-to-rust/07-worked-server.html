@@ -158,6 +158,34 @@ emitTick writer n =
     <button data-ok="0">It can't be expressed in Sky</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. What Rust runtime kernel does <code>Server.listen 8000 routes</code> lower to?</div>
+    <button data-ok="1"><code>server_listen::&lt;SkyError&gt;(8000, vec![…])</code></button>
+    <button data-ok="0"><code>block_on(8000, routes)</code></button>
+    <button data-ok="0"><code>tui_app(8000, routes)</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. <code>Server.param "name" req</code> in Sky lowers to what Rust expression, and what type does it return?</div>
+    <button data-ok="1"><code>server_param("name".to_string(), req)</code> returning a <code>SkyMaybe</code>, matched with <code>SkyMaybe::Just</code> / <code>SkyMaybe::Nothing</code></button>
+    <button data-ok="0"><code>req.name</code> returning a <code>String</code> directly</button>
+    <button data-ok="0"><code>server_get("name", req)</code> returning a <code>Result</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. What does the <code>++</code> string-concatenation operator lower to in generated Rust?</div>
+    <button data-ok="1">Nested <code>format!("{}{}", a, b)</code> calls</button>
+    <button data-ok="0">The <code>+</code> operator on <code>String</code></button>
+    <button data-ok="0">A call to <code>string_append(a, b)</code></button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q7">
+    <div class="q">7. What is the concrete Rust type of a <code>Handler</code> in the runtime (not the project alias)?</div>
+    <button data-ok="1"><code>Arc&lt;dyn Fn(Request) -&gt; SkyTask&lt;Response&gt; + Send + Sync&gt;</code></button>
+    <button data-ok="0">A plain <code>fn</code> pointer with no wrapper</button>
+    <button data-ok="0">A <code>Box&lt;dyn Future&gt;</code></button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

@@ -106,6 +106,27 @@ serde = { version = <span class="tok-str">"1"</span>, features = [<span class="t
     <button data-ok="0">It requires <code>Cmd.perform</code> everywhere</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. Where do the generated FFI artifacts land after the inspector runs?</div>
+    <button data-ok="1"><code>.skycache/ffi/rust/</code> — a <code>.skyi</code> with HM types plus a Rust <code>_bindings.rs</code></button>
+    <button data-ok="0"><code>sky-out/ffi/</code> alongside the compiled binary</button>
+    <button data-ok="0"><code>src/generated/</code> inside the project's source tree</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. The lesson warns that the <code>Err</code> slot of an FFI <code>Result&lt;_, String&gt;</code> is unusable on the Sky side. What should you put there instead, and where?</div>
+    <button data-ok="1">Encode any status the Sky side needs to inspect in the <code>Ok</code> payload (e.g. <code>_status=…</code>), never in the <code>Err</code> slot</button>
+    <button data-ok="0">Use a typed ADT for the error so the binding can decode it correctly</button>
+    <button data-ok="0">Return only <code>Result&lt;T, ()&gt;</code> so the error slot is always unit</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. How is a fork-local wrapper crate delivered to the Sky build system?</div>
+    <button data-ok="1">As a local <code>file://</code> git dependency in <code>["rust.dependencies"]</code> in <code>sky.toml</code></button>
+    <button data-ok="0">By copying the wrapper's source into <code>.skycache/ffi/rust/</code> by hand</button>
+    <button data-ok="0">By publishing it to <code>crates.io</code> and listing a version number</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

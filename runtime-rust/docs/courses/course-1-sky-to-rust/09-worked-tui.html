@@ -101,6 +101,27 @@ main =
     <button data-ok="0">Only Live supports views</button>
     <div class="fb"></div>
   </div>
+  <div class="quiz" id="q4">
+    <div class="q">4. What does <code>Tui.app { init, update, view, subscriptions, onKey }</code> lower to?</div>
+    <button data-ok="1"><code>tui_app(main_init, main_update, main_view, main_subscriptions, main_on_key)</code> — a bare <code>SkyTask&lt;()&gt;</code></button>
+    <button data-ok="0"><code>live_app_routed(…)</code> with an extra key argument</button>
+    <button data-ok="0"><code>cli_program(…)</code> with keyboard extensions</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q5">
+    <div class="q">5. What does <code>Sub.every 100 Tick</code> in <code>subscriptions</code> lower to?</div>
+    <button data-ok="1">A <code>sub_every</code> kernel that fires the <code>Tick</code> Msg on a timer</button>
+    <button data-ok="0">A raw <code>std::thread::sleep</code> call</button>
+    <button data-ok="0">An HTTP polling loop</button>
+    <div class="fb"></div>
+  </div>
+  <div class="quiz" id="q6">
+    <div class="q">6. What extra responsibility does <code>block_on</code> have in a Tui app vs a CLI one?</div>
+    <button data-ok="1">It puts the terminal into raw mode, runs the event loop, and restores the terminal on exit</button>
+    <button data-ok="0">It spawns an HTTP server for the TUI's web interface</button>
+    <button data-ok="0">Nothing — it behaves identically to the CLI case</button>
+    <div class="fb"></div>
+  </div>
 
   <div class="summary">
     <h3>Summary</h3>

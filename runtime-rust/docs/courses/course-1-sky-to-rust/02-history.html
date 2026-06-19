@@ -150,6 +150,51 @@
     <div class="fb"></div>
   </div>
 
+  <div class="quiz" id="q3">
+    <div class="q">3. What was the root cause of the deferred-effect bug fixed in
+    Phase 2?</div>
+    <button data-ok="0">Sky's type checker was not inferring <code>Task</code> types correctly</button>
+    <button data-ok="1">The Rust runtime ran effects eagerly (at construction time) instead of deferring them into the Task body</button>
+    <button data-ok="0">The <code>cargo build</code> step was not running before the binary executed</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q4">
+    <div class="q">4. In Phase 3 (the known-limitations sweep), what practice was
+    required before merging <em>every</em> fix?</div>
+    <button data-ok="0">A Go-vs-Rust equivalence comparison on all 37 examples</button>
+    <button data-ok="0">A full <code>cabal test</code> run with no failures</button>
+    <button data-ok="1">A pre-failing regression fixture — a test that failed before the fix and passes after</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q5">
+    <div class="q">5. What forced the <code>--target</code> → <code>--backend</code>
+    rename in Phase 7?</div>
+    <button data-ok="1"><code>--target</code> was overloaded for two different ideas — which backend (go/rust) and which OS/arch — clashing with <code>cargo --target</code> for cross-compilation triples</button>
+    <button data-ok="0">The Rust toolchain itself reserved the <code>--target</code> flag</button>
+    <button data-ok="0">The Go backend was removed and the flag became ambiguous</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q6">
+    <div class="q">6. Which design decision unified the DbDec subsystem (Phase 8)
+    instead of building a second decoder?</div>
+    <button data-ok="0">Storing DB rows as raw CSV strings and reusing the CSV parser</button>
+    <button data-ok="1">Decoding a DB row as JSON — representing it as a <code>JsonVal</code> object — and reusing the existing JSON decoder machinery</button>
+    <button data-ok="0">Using Go's <code>database/sql</code> reflection layer via CGo</button>
+    <div class="fb"></div>
+  </div>
+
+  <div class="quiz" id="q7">
+    <div class="q">7. In Phase 9, what made the <code>SkyStringify</code> trait fix
+    break <em>every</em> Std.Ui project with E0599?</div>
+    <button data-ok="0">The trait was declared <code>unsafe</code></button>
+    <button data-ok="0">The trait was only implemented for <code>String</code> and <code>i64</code></button>
+    <button data-ok="1">The impl lived in an always-compiled module and recursed into all fields — but UI types like <code>Element</code>/<code>Html</code>/<code>Color</code> didn't implement the trait</button>
+    <div class="fb"></div>
+  </div>
+
   <div class="summary">
     <h3>Summary</h3>
     <ul>
