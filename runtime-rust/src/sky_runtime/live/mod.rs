@@ -437,28 +437,24 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
 
 /// Generate a 128-bit random session id as 32 hex chars. Self-contained
 /// (no uuid crate / uuid_kernel module dependency, since the generated
-/// project's runtime mod.rs only declares those when Sky.Core.Uuid is used).
-/// Entropy from a process-unique atomic counter mixed with the system clock
-/// (sufficient for session-id uniqueness; not a security token).
+/// A fresh session id: **128 bits from the OS CSPRNG**, hex-encoded.
+///
+/// SECURITY: the sid is the SOLE bearer credential for a Sky.Live session
+/// (`sid_from_cookie` + `store.get` authorise every event off it). It MUST be
+/// unpredictable. The prior scheme — `clock_nanos XOR counter` through
+/// splitmix64 — was an invertible bijection over low-entropy, partly-known
+/// inputs (the counter starts at 0; the clock is estimable), so sids were
+/// guessable → session hijacking. OsRng is the OS CSPRNG (the same one
+/// `crypto.rs` / `csrf.rs` use; no new dependency). Never panics.
 fn new_sid() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
-    // splitmix64 the two words for decent dispersion.
-    let mix = |mut z: u64| {
-        z = z.wrapping_add(0x9E3779B97F4A7C15);
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^ (z >> 31)
-    };
-    let hi = mix(nanos ^ (c.rotate_left(17)));
-    let lo = mix(c ^ nanos.rotate_left(40));
-    format!("{hi:016x}{lo:016x}")
+    use aes_gcm::aead::{rand_core::RngCore, OsRng};
+    let mut buf = [0u8; 16];
+    OsRng.fill_bytes(&mut buf);
+    let mut s = String::with_capacity(32);
+    for b in buf {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// Normalise a raw `SKY_LIVE_BASE_PATH` value: trim, drop a trailing slash,
@@ -903,8 +899,24 @@ where
                 Ok(b) => b,
                 Err(_) => return (StatusCode::BAD_REQUEST, "bad body").into_response(),
             };
-            // Prefer the cookie sid; fall back to the body's sessionId.
-            let sid = sid_from_cookie(&headers).unwrap_or(parsed.session_id);
+            // Authenticate the target session by the COOKIE sid ONLY — never the
+            // body-supplied `sessionId`. Trusting a body id lets a caller act on
+            // ANY session by naming it (an auth-bypass that, paired with a
+            // guessable sid, was a hijack path). A legitimate browser always has
+            // the HttpOnly session cookie by the time an event fires (the page
+            // GET set it). No cookie → no session.
+            let _ = &parsed.session_id; // body field retained for wire-compat; not trusted for auth
+            let sid = match sid_from_cookie(&headers) {
+                Some(s) => s,
+                None => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        [(axum::http::HeaderName::from_static("x-sky-live"), "1")],
+                        "no session",
+                    )
+                        .into_response()
+                }
+            };
             let entry = match st.store.get(&sid).await {
                 Some(store::StoreHit::Live(h)) => Some(h),
                 _ => None,
@@ -1029,8 +1041,14 @@ where
             .route("/_sky/buildinfo", get(observability::buildinfo))
             .route("/_sky/metrics", get(observability::metrics))
             // Observability federation receiver stays on the parent regardless
-            // of console mode (sub-apps push telemetry here).
-            .route("/_sky/observability/ingest", post(console::ingest));
+            // of console mode (sub-apps push telemetry here). Body-capped (reuses
+            // the /_sky/event limit) so an unbounded ingest POST can't exhaust
+            // memory before the JSON parse.
+            .route(
+                "/_sky/observability/ingest",
+                post(console::ingest)
+                    .layer(axum::extract::DefaultBodyLimit::max(live_max_body_bytes())),
+            );
 
         router = if use_console_proxy {
             // Real bundled Sky.Live console, spawned as a child + proxied.

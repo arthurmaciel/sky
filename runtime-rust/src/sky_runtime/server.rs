@@ -311,15 +311,36 @@ async fn build_request(req: axum::extract::Request) -> (ServerRequest, Option<ax
         Ok(rpp) => rpp.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         Err(_) => HashMap::new(),
     };
-    // Peer address from the connect-info extension (see server_listen). A
-    // proxy's X-Forwarded-For / X-Real-IP wins when present (the real client).
-    let remote_addr = headers.iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-for"))
-        .map(|(_, v)| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("x-real-ip")).map(|(_, v)| v.clone()))
-        .or_else(|| parts.extensions.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>().map(|ci| ci.0.ip().to_string()))
-        .unwrap_or_default();
+    // remoteAddr: trust the real TCP peer (ConnectInfo) by DEFAULT. Only honour a
+    // proxy's X-Forwarded-For / X-Real-IP when `SKY_TRUSTED_PROXY` is set — i.e.
+    // the operator declares the app sits behind a trusted proxy that sets those
+    // headers. Trusting client-supplied XFF unconditionally let ANY client spoof
+    // their IP → rate-limit bypass (the fixed-window limiter keys on remoteAddr)
+    // + forged access logs. Security-by-default: spoofable headers are opt-in.
+    let peer = parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string());
+    let trust_proxy = std::env::var("SKY_TRUSTED_PROXY")
+        .map(|v| !v.is_empty() && v != "0" && v != "false")
+        .unwrap_or(false);
+    let remote_addr = if trust_proxy {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-forwarded-for"))
+            .map(|(_, v)| v.split(',').next().unwrap_or("").trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("x-real-ip"))
+                    .map(|(_, v)| v.clone())
+            })
+            .or(peer)
+            .unwrap_or_default()
+    } else {
+        peer.unwrap_or_default()
+    };
     // Extract the WebSocket upgrader if this is an upgrade request
     // (succeeds only when the Connection/Upgrade/Sec-WebSocket-* headers are
     // present). Stashed via task-local so server_web_socket_upgrade can reach it.

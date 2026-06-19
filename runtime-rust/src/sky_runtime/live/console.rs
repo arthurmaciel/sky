@@ -186,7 +186,9 @@ pub async fn ingest(headers: axum::http::HeaderMap, body: String) -> axum::respo
                         let dur_us = it.get("durUs").and_then(|x| x.as_u64()).unwrap_or(0);
                         let ok = it.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
                         if !name.is_empty() {
-                            telemetry::record_span(name, dur_us, ok);
+                            // Sanitise the untrusted span name (same terminal-escape
+                            // injection vector as fold_log's message).
+                            telemetry::record_span(&sanitise_ingest(name), dur_us, ok);
                         }
                     }
                 }
@@ -197,12 +199,24 @@ pub async fn ingest(headers: axum::http::HeaderMap, body: String) -> axum::respo
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// Strip control / escape bytes and cap the length of UNTRUSTED ingest text
+/// before it enters the operator console rings (which render to a terminal AND
+/// re-export over OTLP). A malicious or compromised sub-app could otherwise
+/// inject ANSI/CSI/OSC escapes, NUL, or newlines — forged log lines,
+/// clear-screen, cursor moves, terminal-title rewrites — into the operator's
+/// terminal. Mirrors the discipline `observability::track` already applies to
+/// the request path via `sanitise_path`; first-party `Log.*` does NOT route
+/// through ingest, so it is unaffected.
+fn sanitise_ingest(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(2048).collect()
+}
+
 /// Fold one ingested log object `{level, message}` into the local rings.
 fn fold_log(it: &serde_json::Value) {
     let level = it.get("level").and_then(|v| v.as_str()).unwrap_or("info");
     let message = it.get("message").and_then(|v| v.as_str()).unwrap_or("");
     if !message.is_empty() {
-        telemetry::record_log(level, message);
+        telemetry::record_log(&sanitise_ingest(level), &sanitise_ingest(message));
     }
 }
 
