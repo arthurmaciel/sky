@@ -37,7 +37,31 @@ Multi-gap fan-out reuses `sky-rust-backend:autonomous-swarm` (agents author
 **disjoint** files, never build; orchestrator does the single integration build).
 **Boundary:** runtime + Rust codegen + `examples/rust/` fixtures only.
 
-## B. `keep-go-parity` v2 — the chain (resumable, checkpoint-commit per phase)
+### Autonomy model — autonomous-by-default, equivalence-fixture-gated, with escalation
+
+The skill closes mechanical gaps **autonomously**; it escalates the rest. The
+gate that makes autonomy safe is a **Go≡Rust equivalence fixture** — a build-green
+binary is *necessary but not sufficient* for parity. A new kernel that compiles
+but returns the wrong bytes is a silent parity regression; only an equivalence
+fixture that runs the Go reference and the Rust output on the same input and
+diffs them proves the mirror.
+
+| | Autonomous (close it) | Escalate to the user |
+|---|---|---|
+| **Shape** | a mechanical gap: a new **pure stdlib kernel** (String/List/Dict/Math/etc.) with a clear Go oracle and a deterministic I/O | anything below |
+| **Gate** | a **Go≡Rust equivalence fixture** can be auto-established AND passes non-vacuously | — |
+| **Trigger** | — | build fails after a bounded fix attempt; OR an equivalence fixture **can't be auto-established** or only passes **vacuously** (no real oracle / non-deterministic output — clocks, entropy, ordering); OR the gap is **subsystem-scale** (new runtime module, new dep, codegen-shape change, framework/effect surface) |
+
+- **Equivalence-fixture-as-gate** is the load-bearing rule the skill teaches: the
+  build gate proves *it compiles*, the equivalence gate proves *it mirrors Go*.
+  A fixture that passes because both sides emit nothing (vacuous) is a failed gate
+  → escalate.
+- **Escalation is explicit, not silent.** On a trigger, the skill stops, records
+  the gap (a one-paragraph spec + the no-deferral entry), and signals the user —
+  it never buries a subsystem-scale gap as a half-fix or marks an unmirrored
+  kernel done.
+
+## B. `keep-go-parity` v2 — the chain (resumable via a run-state file)
 
 | # | Phase | Skill / step |
 |---|---|---|
@@ -51,9 +75,19 @@ Multi-gap fan-out reuses `sky-rust-backend:autonomous-swarm` (agents author
 | 7 | docs | `update-docs` |
 | 8 | push → CI full verification | `push` → CI: full 3-OS sweep + `examples-perf-sweep` + `static-perf` |
 
-- **Checkpoint-commit per phase** so a long autonomous run is **resumable**; a
-  mid-pipeline failure re-enters at the first incomplete phase (phase state recorded
-  in a small run-state file or derived from the last commit).
+- **Resume is driven by a gitignored run-state file**, NOT by the last commit.
+  Several phases produce **zero commits** — `skydex update` (2, 4), the scoped
+  sweep (5), a clean audit (6) — so a commit-derived resume would mis-locate the
+  frontier and re-run or skip phases. The state file is the single source of
+  truth for "where are we".
+  - Path: `.skycache/keep-go-parity.state` (gitignored — the cache dir already is).
+  - Contents: `BASE=<sha>` (the phase-0 pre-run HEAD, fixed for the whole run) +
+    `last_completed_phase=N` + a per-phase status line (`ok` / `failed` / `skipped`).
+  - A mid-pipeline failure re-enters at `last_completed_phase + 1`; a fresh run
+    (no state file, or `--restart`) starts at phase 0 and records a new `BASE`.
+- **Work commits stay separate** from the state file — implement (3) and docs (7)
+  commit real changes for **bisectability**; the state file is bookkeeping, never
+  bundled into a work commit.
 - `skydex update` is **early** (2 + 4), never last — phases 3/5/6 consume the index.
 
 ## C. Change-scoped sweep — `lib/examples.sh changed_examples <base>`
@@ -92,5 +126,5 @@ sweep (phase 5) and the incremental audit (phase 6). Scope = **union** of:
 1. `lib/examples.sh changed_examples <base>` helper (+ a tiny test).
 2. `sky-rust-backend:implement-parity-gap` SKILL.md (via `writing-skills`: baseline →
    write → verify on a real `parity --gaps` gap).
-3. `keep-go-parity` v2 — chain the phases + checkpoint/resume in `keep-go-parity.sh`
-   and its SKILL.md.
+3. `keep-go-parity` v2 — chain the phases + `.skycache/keep-go-parity.state`
+   resume (read/write/`--restart`) in `keep-go-parity.sh` and its SKILL.md.
