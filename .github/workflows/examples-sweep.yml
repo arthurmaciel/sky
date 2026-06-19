@@ -42,13 +42,16 @@ name: Rust examples sweep
 on:
   push:
     branches: [main, 'feat/**']
-    # Docs-only pushes change no built artefact — skip the (heavy) sweep.
-    # Applies to push/PR triggers only; workflow_dispatch always runs unfiltered.
+    # Docs-only pushes (Markdown + the HTML courses) change no built artefact —
+    # skip the (heavy) sweep. Applies to push/PR triggers only; workflow_dispatch
+    # always runs unfiltered. A run is skipped only when EVERY changed file matches.
     paths-ignore:
       - '**.md'
+      - '**.html'
   pull_request:
     paths-ignore:
       - '**.md'
+      - '**.html'
   workflow_dispatch:
   schedule:
     # Weekly refresh of the dispatch-only perf + static-perf measurements AND the

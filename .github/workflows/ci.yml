@@ -3,8 +3,17 @@ name: CI
 on:
   push:
     branches: [main, 'feat/**']
+    # Docs-only pushes (Markdown + the HTML courses) change no compiler/runtime
+    # artefact — skip the build+test cycle. A run is skipped only when EVERY
+    # changed file matches; any code/script/yaml change still triggers CI.
+    paths-ignore:
+      - '**.md'
+      - '**.html'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '**.html'
 
 jobs:
   build-and-test:
