@@ -1,0 +1,42 @@
+module Main exposing (main)
+
+-- 63-int-overflow-wrap: Go-parity i64 wraparound on target = rust.
+--
+-- Go's `int` is 64-bit two's-complement and WRAPS on overflow (never traps).
+-- Rust debug builds default `overflow-checks = true` and PANIC on a bare
+-- `+`/`-`/`*` overflow. A well-typed Sky program doing extreme i64 arithmetic
+-- must not panic (no-panic-from-well-typed-Sky is the product), so the generated
+-- project's `[profile.dev]` sets `overflow-checks = false` (Emitter.hs
+-- emitCargoToml) to match Go's wraparound.
+--
+-- Pre-fix (overflow-checks default true): this binary aborts with
+-- "attempt to add with overflow" in the debug build.
+-- Post-fix: i64::MAX + i64::MAX wraps to -2, exactly like Go.
+--
+-- Run:  sky run src/Main.sky --backend rust
+-- Expected: OK -> 63-int-overflow-wrap: max+max=-2 max*2=-2
+
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+
+
+maxInt : Int
+maxInt =
+    9223372036854775807
+
+
+main : Task Error ()
+main =
+    let
+        addWrap =
+            maxInt + maxInt
+
+        mulWrap =
+            maxInt * 2
+    in
+    println
+        ("OK -> 63-int-overflow-wrap: max+max="
+            ++ String.fromInt addWrap
+            ++ " max*2="
+            ++ String.fromInt mulWrap
+        )

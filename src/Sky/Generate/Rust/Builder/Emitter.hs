@@ -993,6 +993,16 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     , "[profile.dev]"
     , "debug = 0"
     , "incremental = true"
+    -- Go-parity arithmetic: Go's int is 64-bit two's-complement and WRAPS on
+    -- overflow (never traps); Rust debug builds default overflow-checks=true and
+    -- PANIC on bare `+`/`-`/`*` overflow. A well-typed Sky program doing extreme
+    -- i64 arithmetic must not panic (no-panic-from-well-typed-Sky is the product),
+    -- so disable the debug overflow trap to match Go's wraparound. Release already
+    -- defaults overflow-checks=false; this aligns dev with release AND with Go.
+    -- The explicit `checked_*`/saturate kernel guards (Math.abs, Basics.modBy,
+    -- Std.Decimal, Auth.signToken, Cache.withTTL) are unaffected — they call
+    -- `.checked_*()` regardless of profile, so the intended total semantics hold.
+    , "overflow-checks = false"
     -- Release-profile tuning: strip symbols + debuginfo from the release binary
     -- (Go strips via `-ldflags=-s -w`; this is the Rust equivalent). Pure size
     -- win, no functional effect — the no-panic-by-construction runtime doesn't

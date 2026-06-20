@@ -17,6 +17,34 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-19 18:30 — Go-parity i64 wraparound: generated `[profile.dev] overflow-checks = false` (suggestion #4)
+
+**What.** Generated project's `[profile.dev]` now emits `overflow-checks = false`
+(`emitCargoToml`). Go's `int` is 64-bit two's-complement and WRAPS on overflow;
+Rust debug builds default `overflow-checks = true` and PANIC on a bare
+`+`/`-`/`*` overflow. A well-typed Sky program doing extreme i64 arithmetic could
+therefore abort in a debug build — a no-panic-from-well-typed-Sky violation.
+Disabling the debug overflow trap restores Go's wraparound and aligns dev with
+release (release already defaults `overflow-checks=false`).
+
+**Why this over per-op codegen wrapping.** Wrapping each emitted `+`/`-`/`*` in
+`wrapping_*` would require discriminating Int vs Float at every arithmetic emit
+site (high blast radius) for a debug-only, extreme-value bug. The profile flag is
+one line, total, and the explicit `checked_*`/saturate kernel guards (Math.abs,
+Basics.modBy, Std.Decimal, Auth.signToken, Cache.withTTL) are unaffected — they
+call `.checked_*()` regardless of profile, so their intended total semantics hold.
+
+**Verified.** New fixture `tests/sky/63-int-overflow-wrap` prints
+`max+max=-2 max*2=-2` (i64::MAX wraps to -2, exactly like Go); pre-fix this aborts
+with "attempt to add with overflow" in debug. `00-standard-libs` still `131
+passed, 0 failed` (normal arithmetic unaffected). Generated `Cargo.toml`
+`[profile.dev]` confirmed to carry the key.
+
+**Affected.** `src/Sky/Generate/Rust/Builder/Emitter.hs` (emitCargoToml),
+`runtime-rust/tests/sky/63-int-overflow-wrap/` (new regression fixture).
+
+---
+
 ## 2026-06-18 — README + documentation overhaul (slim README + TECHNICAL-DETAILS + provenance)
 
 **What.** Restructured the docs per the approved spec
