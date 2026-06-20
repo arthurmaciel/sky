@@ -17,6 +17,50 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 14:00 — Security audit LOW/bounded-tail hardenings (in-boundary)
+
+Closed the in-boundary remainder of the 2026-06-19 security audit's bounded/low
+tail (security = top value). `cargo test --features full`: 480 green (+1 new).
+Out-of-boundary `app/Main.hs` shell-injection EXCLUDED per user (upstream PR
+already submitted; does not affect the Rust backend).
+
+**Code hardenings (no parity break):**
+- **ws_client.rs** `web_socket_close_with_code` — `code as u16` silently
+  truncated a Sky `Int` outside 0..=65535 onto a *different valid* close code.
+  Now `u16::try_from(code).unwrap_or(1000)` (out-of-range → normal closure).
+- **jwt.rs** — reject an EMPTY HS256 secret in encode + decode (zero-length HMAC
+  key → trivially-forgeable token). Std.Auth enforces ≥32 upstream; this catches
+  a direct misconfigured `Jwt.*` caller. +`test_hs256_empty_secret_rejected`.
+- **random.rs** — module SECURITY-INVARIANT doc: `Random.*` is a non-CSPRNG
+  (LCG, math/rand parity), MUST NEVER back a secret/token/sid/nonce; enumerates
+  the canonical `OsRng` sites so a future change can't silently violate it.
+
+**Documented-as-accepted (parity / key-compat-locked — changing them breaks
+Go≡Rust interop = correctness regression, for no in-boundary security gain):**
+- crypto.rs — md5/sha1 are collision-broken checksum/interop hashes only (not a
+  security primitive); PBKDF2_ITERS=100_000 pinned for cross-backend key/hash
+  interop (raising to OWASP ≈600k is a coordinated migration, not a Rust knob).
+- uuid_kernel.rs — v7 is sortable/guessable by design, not a secret.
+
+**Re-verified already-fixed (no action):** `basics_mod_by` (checked_rem → no
+`i64::MIN % -1` panic; Go-shape remainder adjust), `cookie_value` (exact-key
+split_once, not strip_prefix), console `ingest` (DefaultBodyLimit), server
+status/maxMessage casts (clamp / try_from), `new_sid` (OsRng).
+
+**Audit status:** zero open in-boundary attacker-reachable security defects.
+Only out-of-boundary `app/Main.hs` remains (excluded). Non-security Go-parity
+correctness gaps (math float→int saturation, path dir/ext, log `*With` attr
+render, escape_attr `&quot;` vs `&#34;`) are tracked separately — they need a
+Go-oracle fixture corpus, not a security fix.
+
+**Affected:** `runtime-rust/src/sky_runtime/ws_client.rs`,
+`runtime-rust/src/sky_runtime/jwt.rs`,
+`runtime-rust/src/sky_runtime/random.rs`,
+`runtime-rust/src/sky_runtime/crypto.rs`,
+`runtime-rust/src/sky_runtime/uuid_kernel.rs`.
+
+---
+
 ## 2026-06-20 13:00 — Security audit fixes, batch 4 (remaining actionable highs + console DiD)
 
 Closed the last of the audit-actionable critical+high findings (the earlier
