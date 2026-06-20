@@ -48,7 +48,7 @@ fn gunzip_bytes(data: &[u8]) -> Result<Vec<u8>, String> {
     // Read up to max+1 bytes; if we fill the buffer exactly at max+1 the
     // input would expand beyond the cap.
     let mut out = Vec::new();
-    d.take(max + 1)
+    d.take(max.saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|e| e.to_string())?;
     if out.len() as u64 > max {
@@ -101,7 +101,7 @@ fn zstd_decompress_capped(data: &[u8]) -> Result<Vec<u8>, String> {
     let max = decompress_max_bytes();
     let d = ZstdDecoder::new(data).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    d.take(max + 1)
+    d.take(max.saturating_add(1))
         .read_to_end(&mut out)
         .map_err(|e| e.to_string())?;
     if out.len() as u64 > max {
@@ -163,7 +163,7 @@ mod tests {
             use std::io::Read;
             let d = GzDecoder::new(&data[..]);
             let mut out = Vec::new();
-            let _ = d.take(max + 1).read_to_end(&mut out);
+            let _ = d.take(max.saturating_add(1)).read_to_end(&mut out);
             if out.len() as u64 > max {
                 Err(format!("decompressed output exceeds {} bytes (SKY_DECOMPRESS_MAX_BYTES)", max))
             } else {
@@ -188,7 +188,7 @@ mod tests {
             use std::io::Read;
             let d = ZstdDecoder::new(&data[..]).expect("zstd decoder");
             let mut out = Vec::new();
-            let _ = d.take(max + 1).read_to_end(&mut out);
+            let _ = d.take(max.saturating_add(1)).read_to_end(&mut out);
             if out.len() as u64 > max {
                 Err(format!("decompressed output exceeds {} bytes (SKY_DECOMPRESS_MAX_BYTES)", max))
             } else {

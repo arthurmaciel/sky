@@ -1301,6 +1301,17 @@ pub fn db_insert_fields_returning<E: Send + From<String> + 'static, A: Send + 's
             Ok(v)  => v,
             Err(e) => return SkyResult::Err(e.into()),
         };
+        // Validate the RETURNING projection — it is a caller-supplied String
+        // interpolated into SQL. Allow "*" or a comma-separated list of valid
+        // identifiers (col / table.col); reject anything else (SQL injection).
+        let proj = projection.trim();
+        let proj_ok = proj == "*"
+            || proj.split(',').all(|t| valid_sql_ident(t.trim()));
+        if !proj_ok {
+            return SkyResult::Err(format!(
+                "db.insertFieldsReturning: invalid RETURNING projection {:?}", projection
+            ).into());
+        }
         let sql = db_format_sql(format!("{} RETURNING {}", base_sql, projection));
         let mut q = sqlx::query(&sql);
         for p in args { q = bind_sql_param(q, p); }

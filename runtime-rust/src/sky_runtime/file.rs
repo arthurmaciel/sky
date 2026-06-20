@@ -210,6 +210,15 @@ pub fn file_temp_dir<E: Send + From<String> + 'static>(prefix: String) -> SkyTas
 /// external crate needed.
 fn make_temp_path(prefix: &str, is_dir: bool) -> Result<String, String> {
     use std::time::{SystemTime, UNIX_EPOCH};
+    // Sanitise the caller-controlled prefix: keep only filename-safe chars so it
+    // cannot contain a path separator ('/'/'\\' — would escape temp_dir) or be
+    // absolute. Without this, prefix="../../etc/" or "/tmp/evil" is a
+    // write-arbitrary-path primitive (Path::join honours absolute/.. components).
+    let prefix: String = prefix
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    let prefix = prefix.as_str();
     let base = std::env::temp_dir();
     let pid = std::process::id();
     // Retry loop: collision is extremely rare but theoretically possible.

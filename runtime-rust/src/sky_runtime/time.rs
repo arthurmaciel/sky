@@ -15,7 +15,9 @@ pub fn time_now<E: Send + 'static>(_: ()) -> SkyTask<E, i64> {
 #[cfg(feature = "tokio")]
 pub fn time_sleep<E: Send + 'static>(ms: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+        // Clamp negative ms to 0: `ms as u64` on a negative wraps to a near-
+        // infinite Duration (permanent deadlock from a well-typed Time.sleep).
+        tokio::time::sleep(std::time::Duration::from_millis(ms.max(0) as u64)).await;
         ok_res(())
     })
 }

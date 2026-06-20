@@ -60,7 +60,14 @@ pub fn list_foldr<T0, T1>(f: impl Fn(T0, T1) -> T1 + Clone, init: T1, list: Vec<
     acc
 }
 // Sky `List.range` is INCLUSIVE: range 1 3 = [1, 2, 3].
-pub fn list_range(lo: i64, hi: i64) -> Vec<i64> { (lo..=hi).collect() }
+pub fn list_range(lo: i64, hi: i64) -> Vec<i64> {
+    if hi < lo { return Vec::new(); }
+    // Bound the allocation: lo/hi are caller-controlled; an absurd span (e.g.
+    // 0..i64::MAX) would OOM. Cap at 10M elements (any real list is far smaller).
+    let n = (hi as i128) - (lo as i128) + 1;
+    if n > 10_000_000 { return Vec::new(); }
+    (lo..=hi).collect()
+}
 pub fn list_indexed_map<T0, T1>(f: impl Fn(i64, T0) -> T1 + Clone, list: Vec<T0>) -> Vec<T1> {
     list.into_iter().enumerate().map(|(i, x)| f(i as i64, x)).collect()
 }

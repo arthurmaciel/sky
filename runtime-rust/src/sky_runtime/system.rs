@@ -13,12 +13,21 @@ static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Set an environment variable under the process-global env-mutation lock.
 fn locked_set_var(key: &str, val: &str) {
+    // std::env::set_var PANICS on an empty key, a key containing '=' or NUL, or a
+    // value containing NUL. Skip such a key/value (no-op) rather than panic.
+    if key.is_empty() || key.contains('=') || key.contains('\0') || val.contains('\0') {
+        return;
+    }
     let _guard = ENV_MUTATION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     std::env::set_var(key, val);
 }
 
 /// Remove an environment variable under the process-global env-mutation lock.
 fn locked_remove_var(key: &str) {
+    // std::env::remove_var panics on the same invalid keys as set_var — guard it.
+    if key.is_empty() || key.contains('=') || key.contains('\0') {
+        return;
+    }
     let _guard = ENV_MUTATION_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     std::env::remove_var(key);
 }

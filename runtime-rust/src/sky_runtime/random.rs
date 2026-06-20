@@ -39,8 +39,10 @@ fn seed_step(z_in: i64) -> i64 {
 pub fn random_seeded_int(s: i64, lo: i64, hi: i64) -> (i64, i64) {
     let next = seed_step(s);
     if hi <= lo { return (lo, next); }
-    let width = (hi - lo + 1) as u64;
-    let v = lo + ((next as u64 >> 33) % width) as i64;
+    // i128 width so `hi - lo + 1` never overflows i64 (hi=MAX, lo=MIN panicked).
+    let width = (hi as i128 - lo as i128 + 1) as u128;
+    let off = ((next as u64 >> 33) as u128) % width;
+    let v = (lo as i128 + off as i128) as i64; // in [lo, hi] -> fits i64
     (if v < lo { lo } else { v }, next)
 }
 

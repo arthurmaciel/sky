@@ -249,6 +249,9 @@ pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> 
         .unwrap_or(0)
         .max(0);
     let inv_scale = RD::from(factor);
+    // Bound the share count: `parts` is caller-controlled; a huge value aborts the
+    // process on Vec::with_capacity (and DoSes the loop). A >1e6-way split is a bug.
+    if parts > 1_000_000 { return Vec::new(); }
     let mut out = Vec::with_capacity(parts as usize);
     for i in 0..parts {
         // checked_add: base + 1 for early slots.

@@ -10,7 +10,7 @@ use super::SkyMaybe;
 pub fn string_from_int(i: i64) -> String { format!("{}", i) }
 pub fn string_join(sep: String, strs: Vec<String>) -> String { strs.join(&sep) }
 pub fn string_append(a: String, b: String) -> String { a + &b }
-pub fn string_length(s: String) -> i64 { s.len() as i64 }
+pub fn string_length(s: String) -> i64 { s.chars().count() as i64 }
 pub fn string_is_empty(s: String) -> bool { s.is_empty() }
 pub fn string_reverse(s: String) -> String { s.chars().rev().collect() }
 pub fn string_to_upper(s: String) -> String { s.to_uppercase() }
@@ -87,7 +87,13 @@ pub fn string_ends_with(suffix: String, s: String) -> bool {
 
 /// Sky `repeat : Int -> String -> String`. Non-positive `n` returns "".
 pub fn string_repeat(n: i64, s: String) -> String {
-    if n <= 0 { String::new() } else { s.repeat(n as usize) }
+    if n <= 0 { return String::new(); }
+    // Bound the result: n is caller-controlled; n * s.len() can overflow / OOM.
+    // Cap at 64 MiB (any real repeated string is far smaller).
+    if (n as u64).saturating_mul(s.len() as u64) > 64 * 1024 * 1024 {
+        return String::new();
+    }
+    s.repeat(n as usize)
 }
 
 // ── Missing kernels (Go-parity sweep 2026-06-15) ──────────────────────────────
