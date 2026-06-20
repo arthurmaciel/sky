@@ -3,87 +3,147 @@
 //   base, dir, ext : String -> String
 //   isAbsolute     : String -> Bool
 //
+// These are FAITHFUL ports of Go's `path/filepath` (Unix semantics, separator
+// `/`) rather than thin wrappers over Rust's `std::path` — `std::path` is
+// OS-tagged and diverges from Go on trailing slashes, repeated separators, and
+// dotfiles (`std::path::Path::extension(".bashrc")` → None, Go's
+// `filepath.Ext(".bashrc")` → ".bashrc"). The Rust backend's Go≡Rust equivalence
+// target runs on Linux, where Go's filepath uses `/`, so we implement Unix
+// filepath exactly. (Audit 2026-06-19, correctness/parity — was deferred.)
+//
 // Routing (Kernel.hs fallthrough — all map cleanly via toSnakeCase):
 //   ("Path", "base")       / ("Sky.Core.Path", "base")       -> "path_base"
 //   ("Path", "dir")        / ("Sky.Core.Path", "dir")        -> "path_dir"
 //   ("Path", "ext")        / ("Sky.Core.Path", "ext")        -> "path_ext"
 //   ("Path", "isAbsolute") / ("Sky.Core.Path", "isAbsolute") -> "path_is_absolute"
 
-/// `Sky.Core.Path.base : String -> String`
-/// Return the last element of the path (the file name including extension).
-/// Mirrors Go's `filepath.Base`:
-/// - empty string  → "."
-/// - "/" or "C:\"  → "/" or "\" (root)
-/// - otherwise     → the component after the last separator
-///
-/// Implemented via `std::path::Path::file_name`, falling back to the full
-/// path string when the OS considers it a root (no file_name component).
-pub fn path_base(path: String) -> String {
-    let p = std::path::Path::new(&path);
-    // file_name() returns None for paths that end in ".." or are root.
-    // Mirrors Go: filepath.Base("") = ".", filepath.Base("/") = "/".
-    if path.is_empty() {
-        return ".".to_string();
-    }
-    match p.file_name() {
-        Some(name) => name.to_string_lossy().into_owned(),
-        // Root path ("/") or parent-component-only ("..") — return the path itself,
-        // matching Go's behaviour for these edge cases.
-        None => path,
-    }
-}
+const SEP: u8 = b'/';
 
-/// `Sky.Core.Path.dir : String -> String`
-/// Return all but the last element of the path (the directory component).
-/// Mirrors Go's `filepath.Dir`:
-/// - empty string → "."
-/// - "/" → "/"
-/// - "foo" (no separator) → "."
-/// - "/foo/bar" → "/foo"
-pub fn path_dir(path: String) -> String {
+/// Faithful port of Go `path/filepath.Clean` (Unix). Lexically simplifies a
+/// path: collapses repeated `/`, resolves `.`/`..` elements, drops a trailing
+/// `/` (except root). Pure byte work — multi-byte UTF-8 path elements are copied
+/// intact (their bytes are never `/` or ASCII `.`), so the result is valid
+/// UTF-8.
+fn clean(path: &str) -> String {
     if path.is_empty() {
         return ".".to_string();
     }
-    let p = std::path::Path::new(&path);
-    match p.parent() {
-        // parent() of "/" is Some("") on Unix; treat as root.
-        Some(parent) => {
-            let s = parent.to_string_lossy();
-            if s.is_empty() {
-                // Occurs when path is a bare filename ("foo") — Go returns ".".
-                // Also occurs for "/" on some platforms.
-                if path.starts_with('/') || path.starts_with('\\') {
-                    // Root separator — return the root.
-                    s.into_owned()
-                } else {
-                    ".".to_string()
+    let b = path.as_bytes();
+    let n = b.len();
+    let rooted = b[0] == SEP;
+    let mut out: Vec<u8> = Vec::with_capacity(n + 1);
+    let mut r = 0usize;
+    // `dotdot` is the index in `out` past which leading `..`s have been written
+    // (for a relative path) or past the root `/` — popping never crosses it.
+    let mut dotdot = 0usize;
+    if rooted {
+        out.push(SEP);
+        r = 1;
+        dotdot = 1;
+    }
+    while r < n {
+        if b[r] == SEP {
+            // empty path element → skip
+            r += 1;
+        } else if b[r] == b'.' && (r + 1 == n || b[r + 1] == SEP) {
+            // `.` element → skip
+            r += 1;
+        } else if b[r] == b'.' && r + 1 < n && b[r + 1] == b'.' && (r + 2 == n || b[r + 2] == SEP) {
+            // `..` element → back up
+            r += 2;
+            if out.len() > dotdot {
+                // pop the last element
+                let mut w = out.len() - 1;
+                while w > dotdot && out[w] != SEP {
+                    w -= 1;
                 }
-            } else {
-                s.into_owned()
+                out.truncate(w);
+            } else if !rooted {
+                // cannot back up → keep the `..`
+                if !out.is_empty() {
+                    out.push(SEP);
+                }
+                out.push(b'.');
+                out.push(b'.');
+                dotdot = out.len();
+            }
+        } else {
+            // real path element → append a separator (if needed) then the element
+            if (rooted && out.len() != 1) || (!rooted && !out.is_empty()) {
+                out.push(SEP);
+            }
+            while r < n && b[r] != SEP {
+                out.push(b[r]);
+                r += 1;
             }
         }
-        // No parent means path was already the root.
-        None => path,
     }
+    if out.is_empty() {
+        return ".".to_string();
+    }
+    String::from_utf8(out).unwrap_or_else(|_| ".".to_string())
 }
 
-/// `Sky.Core.Path.ext : String -> String`
-/// Return the file-name extension, including the leading dot.
-/// Returns an empty string when the file has no extension.
-/// Mirrors Go's `filepath.Ext` (which includes the dot, e.g. ".txt").
+/// `Sky.Core.Path.base : String -> String` — Go `filepath.Base` (Unix).
+/// "" → "."; all-slashes → "/"; else the final element with trailing slashes
+/// stripped.
+pub fn path_base(path: String) -> String {
+    if path.is_empty() {
+        return ".".to_string();
+    }
+    // strip trailing separators
+    let b = path.as_bytes();
+    let mut end = b.len();
+    while end > 0 && b[end - 1] == SEP {
+        end -= 1;
+    }
+    if end == 0 {
+        // path was all separators
+        return "/".to_string();
+    }
+    let stripped = &path[..end];
+    let sb = stripped.as_bytes();
+    // find the last separator
+    let mut i = sb.len();
+    while i > 0 && sb[i - 1] != SEP {
+        i -= 1;
+    }
+    stripped[i..].to_string()
+}
+
+/// `Sky.Core.Path.dir : String -> String` — Go `filepath.Dir` (Unix).
+/// All but the last element, then `Clean`ed: "" / "foo" → "."; "/" → "/";
+/// "/foo/bar" → "/foo"; "/foo/" → "/foo"; "a//b" → "a".
+pub fn path_dir(path: String) -> String {
+    let b = path.as_bytes();
+    let mut i = b.len();
+    while i > 0 && b[i - 1] != SEP {
+        i -= 1;
+    }
+    // path[..i] is everything up to and including the last separator (or "" when
+    // there is none). Clean("") = ".".
+    clean(&path[..i])
+}
+
+/// `Sky.Core.Path.ext : String -> String` — Go `filepath.Ext` (Unix).
+/// The suffix from the LAST `.` in the final path element (including the dot),
+/// or "" when the final element has no dot. `filepath.Ext(".bashrc")` → ".bashrc".
 pub fn path_ext(path: String) -> String {
-    let p = std::path::Path::new(&path);
-    match p.extension() {
-        Some(ext) => format!(".{}", ext.to_string_lossy()),
-        None => String::new(),
+    let b = path.as_bytes();
+    let mut i = b.len();
+    while i > 0 && b[i - 1] != SEP {
+        if b[i - 1] == b'.' {
+            return path[i - 1..].to_string();
+        }
+        i -= 1;
     }
+    String::new()
 }
 
-/// `Sky.Core.Path.isAbsolute : String -> Bool`
-/// Returns `true` when `path` is an absolute path.
-/// Mirrors Go's `filepath.IsAbs`.
+/// `Sky.Core.Path.isAbsolute : String -> Bool` — Go `filepath.IsAbs` (Unix):
+/// an absolute path begins with `/`.
 pub fn path_is_absolute(path: String) -> bool {
-    std::path::Path::new(&path).is_absolute()
+    path.as_bytes().first() == Some(&SEP)
 }
 
 #[cfg(test)]
@@ -106,6 +166,18 @@ mod tests {
     }
 
     #[test]
+    fn base_trailing_slash() {
+        // Go: filepath.Base("/foo/") = "foo"
+        assert_eq!(path_base("/foo/".to_string()), "foo");
+    }
+
+    #[test]
+    fn base_root() {
+        // Go: filepath.Base("/") = "/"
+        assert_eq!(path_base("/".to_string()), "/");
+    }
+
+    #[test]
     fn dir_empty() {
         assert_eq!(path_dir(String::new()), ".");
     }
@@ -121,6 +193,24 @@ mod tests {
     }
 
     #[test]
+    fn dir_trailing_slash() {
+        // Go: filepath.Dir("/foo/") = "/foo"
+        assert_eq!(path_dir("/foo/".to_string()), "/foo");
+    }
+
+    #[test]
+    fn dir_double_separator() {
+        // Go: filepath.Dir("a//b") = "a"  (Clean collapses the repeat)
+        assert_eq!(path_dir("a//b".to_string()), "a");
+    }
+
+    #[test]
+    fn dir_root() {
+        // Go: filepath.Dir("/") = "/"
+        assert_eq!(path_dir("/".to_string()), "/");
+    }
+
+    #[test]
     fn ext_present() {
         assert_eq!(path_ext("/foo/bar.txt".to_string()), ".txt");
     }
@@ -128,6 +218,18 @@ mod tests {
     #[test]
     fn ext_absent() {
         assert_eq!(path_ext("/foo/bar".to_string()), "");
+    }
+
+    #[test]
+    fn ext_dotfile() {
+        // Go: filepath.Ext(".bashrc") = ".bashrc"
+        assert_eq!(path_ext(".bashrc".to_string()), ".bashrc");
+    }
+
+    #[test]
+    fn ext_multiple_dots() {
+        // Go: filepath.Ext("a.b.c") = ".c"
+        assert_eq!(path_ext("a.b.c".to_string()), ".c");
     }
 
     #[test]

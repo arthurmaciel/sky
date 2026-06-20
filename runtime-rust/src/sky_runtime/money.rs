@@ -8,6 +8,7 @@
 //! these kernels — so every function below takes the code as a plain String.
 
 use super::{Decimal, SkyMaybe, SkyResult};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal as RD;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -243,11 +244,12 @@ pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> 
         Some(v) => v,
         None => return Vec::new(),
     };
-    let rem_int = remainder
-        .to_string()
-        .parse::<i64>()
-        .unwrap_or(0)
-        .max(0);
+    // `remainder` is integer-VALUED (both operands were `.trunc()`'d) but its
+    // Decimal scale may be > 0, so `to_string()` can render "3.00" — which
+    // `parse::<i64>()` then REJECTS, silently dropping the remainder pennies and
+    // mis-distributing the allocation. Convert via the numeric `to_i64()` (scale-
+    // independent) instead of a string round-trip. (Audit 2026-06-19, correctness.)
+    let rem_int = remainder.trunc().to_i64().unwrap_or(0).max(0);
     let inv_scale = RD::from(factor);
     // Bound the share count: `parts` is caller-controlled; a huge value aborts the
     // process on Vec::with_capacity (and DoSes the loop). A >1e6-way split is a bug.
@@ -292,6 +294,21 @@ mod tests {
     fn rate_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn test_allocate_distributes_remainder_pennies() {
+        // 100.00 / 3 at 2 places → [33.34, 33.33, 33.33], summing to 100.00.
+        // The remainder penny MUST land on the first share — the old
+        // `to_string().parse::<i64>()` rendered the remainder as "1.00" and
+        // failed to parse, dropping it (shares would sum to 99.99).
+        let shares = money_allocate(2, 3, d("100.00"));
+        assert_eq!(shares.len(), 3);
+        assert_eq!(shares[0].0, RD::from_str("33.34").unwrap());
+        assert_eq!(shares[1].0, RD::from_str("33.33").unwrap());
+        assert_eq!(shares[2].0, RD::from_str("33.33").unwrap());
+        let sum: RD = shares.iter().fold(RD::from(0), |acc, s| acc + s.0);
+        assert_eq!(sum, RD::from_str("100.00").unwrap());
     }
 
     #[test]

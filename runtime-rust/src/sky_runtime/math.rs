@@ -25,12 +25,24 @@ pub fn math_nan()   -> f64 { f64::NAN }
 /// Saturates `i64::MIN` to `i64::MAX` (no-panic rule: `-i64::MIN` is not representable).
 pub fn math_abs(x: i64) -> i64 { x.checked_abs().unwrap_or(i64::MAX) }
 
+// CONTRACT (documented deliberately — audit 2026-06-19): `min`/`max` use a real
+// `PartialOrd` compare. For floats this tracks the TYPED Go path (`Math_minT`),
+// NOT Go's polymorphic any-path (which routes floats through `AsInt` and compares
+// truncated ints) — the typed compare is the correct one. NaN tie-break is fixed
+// and total: `min(NaN, x)` / `max(NaN, x)` return the SECOND argument (`<=`/`>=`
+// is false for any NaN), never panic.
 pub fn math_min<T: PartialOrd>(a: T, b: T) -> T { if a <= b { a } else { b } }
 pub fn math_max<T: PartialOrd>(a: T, b: T) -> T { if a >= b { a } else { b } }
 
 pub fn math_sqrt(x: f64) -> f64 { x.sqrt() }
 pub fn math_pow(base: f64, exp: f64) -> f64 { base.powf(exp) }
 
+// CONTRACT (documented deliberately — audit 2026-06-19): the `as i64` float→int
+// casts SATURATE by Rust's definition — NaN → 0, +∞ → i64::MAX, −∞ → i64::MIN,
+// out-of-range finite → the nearest bound. This is TOTAL (never panics/UB) and is
+// the deliberate contract; Go's `int64(math.Floor(x))` on the same extreme inputs
+// is implementation-defined (not a well-defined parity target), so we pin the
+// safe saturating behaviour rather than chase undefined Go output.
 pub fn math_floor(x: f64) -> i64 { x.floor() as i64 }
 pub fn math_ceil(x: f64) -> i64 { x.ceil() as i64 }
 

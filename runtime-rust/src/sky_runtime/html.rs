@@ -271,7 +271,10 @@ fn escape_text(t: &str) -> String {
 }
 
 fn escape_attr(t: &str) -> String {
-    escape_text(t).replace('"', "&quot;")
+    // `"` → `&#34;` (NOT `&quot;`) to match Go's html.EscapeString byte-for-byte
+    // (GOROOT/src/html/escape.go uses the numeric entity). Both are valid HTML;
+    // the numeric form is what the Go renderer emits, so equiv tests byte-compare.
+    escape_text(t).replace('"', "&#34;")
 }
 
 /// True when `name` is safe to emit UNESCAPED as a tag name, attribute key, or
@@ -495,7 +498,7 @@ mod tests {
         // in a single-quoted attribute can't break out (XSS) and the escape set
         // matches Go's html.EscapeString.
         assert_eq!(escape_text("it's <b>"), "it&#39;s &lt;b&gt;");
-        assert_eq!(escape_attr("a'\"b"), "a&#39;&quot;b");
+        assert_eq!(escape_attr("a'\"b"), "a&#39;&#34;b");
         assert_eq!(html_escape_text_("x'y".to_string()), "x&#39;y");
         assert_eq!(html_escape_attr_("x'y".to_string()), "x&#39;y");
         // Round-trips through render on a real attribute value.

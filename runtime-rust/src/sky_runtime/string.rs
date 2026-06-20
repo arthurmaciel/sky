@@ -241,8 +241,17 @@ pub fn string_is_url(s: String) -> bool {
         // "://" and at least one non-whitespace host character.
         Regex::new(r"(?i)^(https?|wss?)://[^/\s?#]+").ok()
     });
+    let t = s.trim();
+    // Go's url.Parse rejects ASCII control bytes (0x00–0x1F, 0x7F) anywhere in
+    // the URL, but the regex host class `[^/\s?#]` only excludes `\s` whitespace
+    // — an embedded NUL / ESC / other control char would otherwise pass and slip
+    // through this XSS-link gate. Reject up front. (Audit 2026-06-19,
+    // security-relevant validator parity.)
+    if t.bytes().any(|b| b.is_ascii_control()) {
+        return false;
+    }
     match re {
-        Some(re) => re.is_match(s.trim()),
+        Some(re) => re.is_match(t),
         None => false,
     }
 }
@@ -408,6 +417,11 @@ mod tests {
     #[test] fn test_is_url_data() { assert!(!string_is_url("data:text/html,<h1>".into())); }
     #[test] fn test_is_url_empty() { assert!(!string_is_url("".into())); }
     #[test] fn test_is_url_ftp() { assert!(!string_is_url("ftp://example.com".into())); }
+    #[test] fn test_is_url_rejects_control_chars() {
+        // Embedded control bytes (NUL / ESC) → reject (XSS-link-gate parity with Go url.Parse).
+        assert!(!string_is_url("http://exa\u{0}mple.com".into()));
+        assert!(!string_is_url("https://e\u{1b}vil.com".into()));
+    }
 
     // string_pad_left
     #[test] fn test_pad_left_basic() { assert_eq!(string_pad_left(5, '0', "42".into()), "00042"); }
