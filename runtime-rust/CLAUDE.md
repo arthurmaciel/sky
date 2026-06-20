@@ -577,6 +577,22 @@ log** — hold it to the same bar as a code review:
   sccache stays the LOCAL dev fast path (disk backend, unaffected). The
   `CARGO_INCREMENTAL=0` mandate is coupled to sccache — drop it when sccache is
   off so the cached target dir does incremental rebuilds.
+- **`cargo clippy/test --all-features` pulls in the `webview` feature → needs the
+  GTK/WebKit `-dev` system libs.** `--all-features` turns on `webview` → wry/tao →
+  `glib-sys`, whose build script links WebKitGTK + GTK3 + libsoup3; without
+  `libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev
+  libjavascriptcoregtk-4.1-dev` it aborts at `glib-2.0 not found` BEFORE any
+  lint/test runs — so a CI gate fails in ~30 s looking like a clippy/test failure
+  when it's a missing-syslib build failure (the `security-audit` red was this, not
+  a lint or toolchain delta). Local always passes because the dev box has the GTK
+  stack (it's in the README prereqs). No xvfb needed to BUILD/lint/test webview —
+  only to RUN a window. GitHub Actions can't `include` one workflow YAML into
+  another (anchors ignored), so per-OS package lists drift across workflows — that
+  drift is exactly how one gate had the libs and another didn't. SSOT fix: the
+  `.github/actions/setup-system-deps` composite action owns every package group
+  (`ripgrep`/`webview`/`xvfb`/`bench`/`apache_bench`/`musl`/`coreutils`,
+  OS-branching); workflows call it with toggles. Add a package ONCE there. A local
+  `uses: ./…` action requires `actions/checkout` to run first in that job.
 - **A NEW runtime `*.rs` file needs THREE wirings, none auto-discovered:** the
   source `runtime-rust/src/sky_runtime/mod.rs` (`pub mod x; pub use x::*;` — for
   the standalone `cargo build --features full`), AND `Project.hs`'s `baseMods`
