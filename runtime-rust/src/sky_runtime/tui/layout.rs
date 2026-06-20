@@ -714,9 +714,11 @@ fn render_input<M: Clone>(
             let masked = input_type == "password";
             let run_style = style; // field is NOT whole-reversed (Go: only the cell)
             let cursor_cell: Option<(usize, usize)> = if masked {
-                // Masked single line: content hidden as bullets; cursor at end.
+                // Masked single line: content hidden as bullets; cursor tracks the
+                // EDIT position (st.cursor), not always the end — Left/Home/Ctrl-Left
+                // move the caret and it must render where the caret actually is.
                 let n = st.buffer.chars().count();
-                if focused { Some((0, n)) } else { None }
+                if focused { Some((0, st.cursor.min(n))) } else { None }
             } else if st.buffer.is_empty() && !focused {
                 None
             } else {
@@ -1360,6 +1362,14 @@ fn distribute_row_fill(
 
 const SGR_RESET: &str = "\x1b[0m";
 
+/// Honour the `NO_COLOR` convention (https://no-color.org): when the env var is
+/// present and non-empty, suppress all COLOUR output (fg/bg) — text attributes
+/// (bold/italic/underline/…) are kept, only colour is dropped. Cached once.
+fn no_color() -> bool {
+    static NC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NC.get_or_init(|| std::env::var_os("NO_COLOR").map(|v| !v.is_empty()).unwrap_or(false))
+}
+
 fn sgr(style: Style) -> String {
     let mut codes: Vec<String> = Vec::new();
     if style.bold {
@@ -1377,11 +1387,13 @@ fn sgr(style: Style) -> String {
     if style.reverse {
         codes.push("7".to_string());
     }
-    if let Some((r, g, b)) = style.fg {
-        codes.push(format!("38;2;{r};{g};{b}"));
-    }
-    if let Some((r, g, b)) = style.bg {
-        codes.push(format!("48;2;{r};{g};{b}"));
+    if !no_color() {
+        if let Some((r, g, b)) = style.fg {
+            codes.push(format!("38;2;{r};{g};{b}"));
+        }
+        if let Some((r, g, b)) = style.bg {
+            codes.push(format!("48;2;{r};{g};{b}"));
+        }
     }
     if codes.is_empty() {
         String::new()
