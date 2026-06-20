@@ -276,6 +276,43 @@ Precedence **CLI > env > `sky.toml`**; the env mirrors are `SKY_RUST_STATIC` /
 `SKY_RUST_TARGET` / `SKY_RUST_ALLOC`. `--static` / `--target` / `--mimalloc`
 compose with the backend selector `--backend rust` (they never clash with it).
 
+### Rust-backend environment variables
+
+Env vars **introduced by the Rust backend** — read/written by the Rust runtime,
+the Rust codegen, or the Rust-backend scripts, and NOT part of the shared Go
+backend. Shared `SKY_LIVE_*` / `SKY_LOG_*` / `SKY_CONSOLE_*` mirrors that the Go
+runtime also reads (`SKY_CSRF`, `SKY_LIVE_FRAME_ANCESTORS`,
+`SKY_OBSERVABILITY_BUFFER`, …) are deliberately **excluded** — this table lists
+only what the Rust backend adds on top.
+
+| Env var | Scope | Default | Purpose |
+|---|---|---|---|
+| `SKY_RUST_STATIC` | build | unset (`0`) | Env mirror of `--static` — fully-static binary (musl Linux / crt-static Windows). |
+| `SKY_RUST_TARGET` | build | `""` (host) | Env mirror of `--target` — cross-compile to a target triple. |
+| `SKY_RUST_ALLOC` | build | `""` | Env mirror of `--mimalloc` / `--system-alloc` — global allocator (`mimalloc` / `system`). |
+| `SKY_RUST_FMT` | build | on (`1`) | `0` skips the post-codegen `rustfmt` pass on generated Rust (e.g. `sky watch`'s hot loop). |
+| `SKY_FFI_INSPECTOR_RS` | build | unset | Override path to the Rust FFI inspector (`sky-ffi-inspect-rs`); distinct from Go's `SKY_FFI_INSPECTOR`. |
+| `SKY_BUILD_IS_CONSOLE` | build | unset | Recursion guard set when pre-building the Rust console sub-app (prevents a build cycle). |
+| `SKY_CONSOLE_PREBUILD` | build | on | `off` / `0` / `false` skips the Rust console pre-build step. |
+| `SKY_HTTP_DENY_PRIVATE` | runtime | off (`false`) | `1` / `on` / `true` blocks outbound HTTP to private/loopback hosts (SSRF guard). |
+| `SKY_TRUSTED_PROXY` | runtime | off (`false`) | Truthy (non-empty, not `0`/`false`) trusts `X-Forwarded-For` / `X-Real-IP` for the client IP; default ignores spoofable proxy headers. |
+| `SKY_HTTP_BIND` | runtime | `0.0.0.0` | Override the server bind host (e.g. `127.0.0.1` to avoid exposing on every interface). |
+| `SKY_DECOMPRESS_MAX_BYTES` | runtime | `268435456` (256 MiB) | Decompression output cap (gzip/zstd) — guards against decompression bombs. |
+| `SKY_DB_MAX_CONNECTIONS` | runtime | `16` | Max DB connection-pool size for the Rust `sqlx` pool. |
+| `SKY_LIVE_CSRF_ORIGIN_CHECK` | runtime | off | `on` enables an additional `Origin`/`Host` same-origin check on Sky.Live event POSTs. |
+| `SKY_NO_SCCACHE` | sweep | unset | Force-disable `sccache` even when on PATH (CI; also un-couples the `CARGO_INCREMENTAL=0` mandate). |
+| `CARGO_TARGET_DIR` | sweep | `~/.cache/sky-rust-target` | Shared cargo target dir outside each example's `sky-out/` so the heavy deps compile once. |
+| `SKY_SWEEP_FORCE` | sweep | unset | Override the 22:00–08:00 night-gate (and downgrade the mem-guard preflight to a warn). |
+| `SKY_SWEEP_BUILD_ONLY` | sweep | `0` | `1` builds examples without the run/equiv phases. |
+| `SKY_SWEEP_NO_EQUIV` | sweep | `0` | `1` skips the Go≡Rust equivalence phase. |
+| `SKY_SWEEP_BUILD_TIMEOUT` | sweep | `180` | Per-example build-timeout ceiling (seconds). |
+| `SKY_SWEEP_BUILD_TIMEOUT_FFI` | sweep | `1800` | Build-timeout ceiling for `examples/rust/*` FFI examples (seconds). |
+| `SKY_SWEEP_WARN_GATE` | sweep | `1` | `0` stops sweep warnings from failing the run. |
+| `SKY_SCENARIO_TIMEOUT_MS` | sweep | `30000` | Per-scenario timeout for the web-verify (`web-verify.mjs`) browser checks. |
+| `SKY_STATIC_PERF_TARGET` | sweep | `~/.cache/sky-static-perf-target` | Cargo target dir for the static-perf sweep. |
+| `SKY_STATIC_PERF_EXAMPLES` | sweep | unset (all) | Restrict the static-perf sweep to a subset of examples. |
+| `SKY_KGP_STATE` | sweep | `$REPO/.skycache/keep-go-parity.state` | State-file path for the `keep-go-parity` planner. |
+
 ---
 
 ## Project status
