@@ -75,7 +75,8 @@ Where Rust implements a mechanism differently from Go, the divergence is recorde
 ## Getting started
 
 The Rust backend compiles Sky source to a Rust program, then to a native binary
-via `cargo`. 
+via `cargo`. If you want to learn more about the compilation process, see our
+[courses](docs/courses/index.html). 
 
 This guide takes you from a clean machine to **running every example
 in this repo** (except the Go-FFI ones — those need the default Go backend). 
