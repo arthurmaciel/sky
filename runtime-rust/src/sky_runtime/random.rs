@@ -1,4 +1,19 @@
 // Random kernel stubs — generic over E.
+//
+// SECURITY INVARIANT — this module is a NON-CRYPTOGRAPHIC PRNG (a 64-bit LCG
+// seeded from the wall clock), implementing Sky's `Random.*` surface with the
+// SAME contract as the Go backend's `math/rand`. Its output is fully predictable
+// and MUST NEVER back a secret, token, session id, nonce, salt, or any value an
+// attacker must not guess. Every security-bearing draw in this runtime already
+// uses the OS CSPRNG (`OsRng` / `getrandom`) instead:
+//   - session ids        → live/mod.rs `new_sid` (OsRng, 128-bit)
+//   - tokens / entropy    → crypto.rs `crypto_random_token` / `crypto_random_bytes`
+//   - AEAD nonces, keys   → crypto.rs (OsRng)
+//   - CSRF token          → live/csrf.rs `gen_token` (OsRng)
+//   - UUID v4             → `uuid::new_v4` (getrandom)
+// When adding a new security-bearing random value, route it through `OsRng`, NOT
+// through any `lcg_*` / `random_*` fn here. (Audit 2026-06-19, low/weak-crypto —
+// recorded as an invariant so a future change can't silently violate it.)
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 

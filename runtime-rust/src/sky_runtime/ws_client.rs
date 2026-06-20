@@ -272,7 +272,12 @@ pub fn web_socket_close<E: From<String> + Send + 'static>(id: i64) -> SkyTask<E,
 /// WebSocket.closeWithCode : Int -> String -> Int -> Task Error ()
 pub fn web_socket_close_with_code<E: From<String> + Send + 'static>(code: i64, reason: String, id: i64) -> SkyTask<E, ()> {
     Box::pin(async move {
-        let _ = send_cmd(id, WsCmd::CloseWithCode(code as u16, reason));
+        // A WebSocket close code is a u16 (RFC 6455 §7.4). A bare `code as u16`
+        // SILENTLY TRUNCATES a Sky `Int` outside 0..=65535 (e.g. 70000 → 4464),
+        // which is worse than rejecting it because the wrapped value can land on
+        // a *different valid* code. Out-of-range → 1000 (normal closure).
+        let ws_code = u16::try_from(code).unwrap_or(1000);
+        let _ = send_cmd(id, WsCmd::CloseWithCode(ws_code, reason));
         deregister(id);
         ok_res(())
     })

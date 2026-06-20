@@ -73,6 +73,13 @@ pub fn crypto_sha512(s: String) -> String {
     result.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// SECURITY (parity-locked): `sha1` and `md5` below are COLLISION-BROKEN and are
+/// exposed ONLY as named checksum/interop hashes, matching the Go backend's
+/// surface. They MUST NOT be used as a security primitive (password hashing,
+/// signatures, integrity against an adversary) — those paths use SHA-256/512 +
+/// HMAC + bcrypt/PBKDF2 elsewhere in this module. Removing them would break Go
+/// parity; the hardening is this contract note. (Audit 2026-06-19, low/weak-crypto.)
+///
 /// Sky `sha1 : String -> String` — hex-encoded SHA-1 digest.
 pub fn crypto_sha1(s: String) -> String {
     use sha1::{Sha1, Digest};
@@ -204,6 +211,13 @@ pub fn crypto_constant_time_equal(a: String, b: String) -> bool {
 // AEAD fns base64-decode it back to 32 raw bytes.
 
 const AEAD_KEY_BYTES: usize = 32;
+// PBKDF2-HMAC-SHA256 work factor. PINNED to the Go backend's value: a
+// password-derived key/blob produced on one backend must verify/decrypt on the
+// other, so this is a cross-backend interop contract, NOT a Rust-local knob.
+// It is below current OWASP guidance (≈600k for PBKDF2-SHA256); raising it is a
+// COORDINATED cross-backend migration (re-derive + re-encrypt existing data),
+// not a unilateral Rust change. (Audit 2026-06-19, low/weak-crypto — accepted,
+// parity/key-compat-locked.)
 const PBKDF2_ITERS: u32 = 100_000;
 
 // Decode a base64 key string to exactly 32 bytes, or an error message.

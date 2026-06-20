@@ -16,6 +16,13 @@ pub fn uuid_v4() -> String {
 }
 
 /// Sky.Core.Uuid.v7 : String  (time-ordered)
+///
+/// SECURITY: a v7 UUID embeds a millisecond timestamp and is SORTABLE/guessable
+/// by design — it is NOT a secret. Use it for ordered ids, never as a bearer
+/// token / session id / password-reset nonce (use `crypto_random_token` for
+/// those). `v4` is random (getrandom/CSPRNG) but UUIDs are still only 122 bits of
+/// formatted entropy — prefer `crypto_random_token` for security tokens.
+/// (Audit 2026-06-19, low — documented contract.)
 pub fn uuid_v7() -> String {
     ::uuid::Uuid::now_v7().to_string()
 }

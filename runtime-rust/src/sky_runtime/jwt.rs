@@ -7,6 +7,13 @@ use serde_json::Value as JsonValue;
 
 /// Sky `Jwt_encodeHs256 : String -> String -> Result Error String`
 pub fn jwt_encode_hs256<E: From<String>>(secret: String, claims_json: String) -> SkyResult<E, String> {
+    // An EMPTY HMAC key is never a legitimate signing secret — the token it mints
+    // is forgeable by anyone (HMAC-SHA256 with a zero-length key). Reject it
+    // rather than emit a trivially-forgeable token. (Std.Auth enforces a 32-byte
+    // floor upstream; this catches a direct misconfigured Jwt.* caller.)
+    if secret.is_empty() {
+        return SkyResult::Err("jwt-encode: HS256 secret must not be empty".to_string().into());
+    }
     let claims: JsonValue = match serde_json::from_str(&claims_json) {
         Ok(v) => v,
         Err(e) => return SkyResult::Err(format!("jwt-encode: bad claims json: {}", e).into()),
@@ -21,6 +28,11 @@ pub fn jwt_encode_hs256<E: From<String>>(secret: String, claims_json: String) ->
 
 /// Sky `Jwt_decodeHs256 : String -> String -> Result Error String`
 pub fn jwt_decode_hs256<E: From<String>>(secret: String, token: String) -> SkyResult<E, String> {
+    // Reject verification under an empty HMAC key — see jwt_encode_hs256. A token
+    // "verified" with a zero-length key carries no authenticity guarantee.
+    if secret.is_empty() {
+        return SkyResult::Err("jwt-decode: HS256 secret must not be empty".to_string().into());
+    }
     let key = DecodingKey::from_secret(secret.as_bytes());
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
@@ -103,5 +115,16 @@ mod tests {
         };
         let bad: SkyResult<String, String> = jwt_decode_hs256("wrong".to_string(), token);
         assert!(matches!(bad, SkyResult::Err(_)));
+    }
+
+    #[test]
+    fn test_hs256_empty_secret_rejected() {
+        // Empty HMAC secret → forgeable token; both encode and verify must refuse.
+        let enc: SkyResult<String, String> =
+            jwt_encode_hs256(String::new(), r#"{"sub":"x","exp":9999999999}"#.to_string());
+        assert!(matches!(enc, SkyResult::Err(_)));
+        let dec: SkyResult<String, String> =
+            jwt_decode_hs256(String::new(), "a.b.c".to_string());
+        assert!(matches!(dec, SkyResult::Err(_)));
     }
 }
