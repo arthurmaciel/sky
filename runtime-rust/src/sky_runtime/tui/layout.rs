@@ -59,6 +59,9 @@ struct Style {
     fg: Option<(u8, u8, u8)>,
     bg: Option<(u8, u8, u8)>,
     bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
     reverse: bool,
 }
 
@@ -266,6 +269,13 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
             Attribute::AttrFontColor(c) => w.style.fg = Some(color_of(c)),
             Attribute::AttrBgColor(c) => w.style.bg = Some(color_of(c)),
             Attribute::AttrFontWeight(n) if *n >= 600 => w.style.bold = true,
+            // Typography SGR (Go parity — tui_ui.go cellStyleSGR emits 3/4/9).
+            Attribute::AttrFontItalic => w.style.italic = true,
+            Attribute::AttrFontUnderline => w.style.underline = true,
+            Attribute::AttrFontDecoration(s) if s == "underline" => w.style.underline = true,
+            Attribute::AttrFontDecoration(s) if s == "line-through" || s == "strike" => {
+                w.style.strike = true
+            }
             _ => {}
         }
     }
@@ -737,6 +747,15 @@ fn sgr(style: Style) -> String {
     let mut codes: Vec<String> = Vec::new();
     if style.bold {
         codes.push("1".to_string());
+    }
+    if style.italic {
+        codes.push("3".to_string());
+    }
+    if style.underline {
+        codes.push("4".to_string());
+    }
+    if style.strike {
+        codes.push("9".to_string());
     }
     if style.reverse {
         codes.push("7".to_string());
