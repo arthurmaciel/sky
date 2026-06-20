@@ -1168,7 +1168,17 @@ fn sgr(style: Style) -> String {
 
 fn emit_block(block: &Block, cols: usize, scroll_y: usize, rows: usize) -> String {
     let mut out = String::new();
-    for line in block.lines.iter().skip(scroll_y).take(rows) {
+    // Lines are CRLF-separated, but the SEPARATOR goes BEFORE each line after the
+    // first — NOT a trailing CRLF after the last visible row. A trailing CRLF on a
+    // full-height frame (visible lines == terminal rows) advances the cursor past
+    // the bottom row and scrolls the whole screen up by one, dropping the top row
+    // (the root padding) and diverging from Go on the very first paint (Go
+    // positions each row absolutely and never trails a newline). `paint()` issues
+    // ESC[2J + home first, so a leading-separator model lands every row correctly.
+    for (i, line) in block.lines.iter().skip(scroll_y).take(rows).enumerate() {
+        if i > 0 {
+            out.push_str("\r\n");
+        }
         let mut col = 0usize;
         for run in line {
             if col >= cols {
@@ -1194,7 +1204,6 @@ fn emit_block(block: &Block, cols: usize, scroll_y: usize, rows: usize) -> Strin
             }
             col += w;
         }
-        out.push_str("\r\n");
     }
     out
 }
@@ -1539,6 +1548,20 @@ mod tests {
         };
         assert!(element_to_cells(&mk("dashed"), 80, 24).contains('┄'));
         assert!(element_to_cells(&mk("dotted"), 80, 24).contains('┈'));
+    }
+
+    #[test]
+    fn frame_has_no_trailing_newline() {
+        // A full-height frame must NOT end with CRLF — a trailing newline on the
+        // bottom row scrolls the screen up one (drops the top row, diverges from
+        // Go on first paint). Build a frame with as many lines as terminal rows.
+        let kids: Vec<Element<()>> =
+            (0..10).map(|i| node(vec![], vec![Element::Text(format!("r{i}"))])).collect();
+        let t: Element<()> = node(vec![], kids);
+        let frame = element_to_cells(&t, 80, 10);
+        assert!(!frame.ends_with("\r\n"), "no trailing CRLF: {frame:?}");
+        // Still CRLF-separated between rows.
+        assert_eq!(frame.matches("\r\n").count(), 9, "9 separators for 10 rows: {frame:?}");
     }
 
     #[test]
