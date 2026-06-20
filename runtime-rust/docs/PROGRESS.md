@@ -17,6 +17,32 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-19 21:10 — Scheduled security re-audit CI workflow (suggestion #3)
+
+**What.** New `.github/workflows/security-audit.yml` — a fork-local scheduled
+re-audit so the no-panic / no-Any / constant-time-secret-compare invariants can't
+silently rot between releases. Runs `runtime-rust/scripts/quality-audit.sh`
+(clippy -D + tests HARD gate + the panic-vector / unsafe / dyn-Any / `#[allow]`
+advisory harvest) plus a focused `rg` pass for the two highest-severity CLAUDE.md
+learning classes: non-constant-time secret/token/MAC compares and panicking i64/
+Decimal arithmetic.
+
+**Triggers.** Weekly cron (Thu 05:23 UTC, offset from the Mon examples-sweep cron)
++ `workflow_dispatch` + push touching `runtime-rust/src/**` / Cargo / the audit
+script. Forces `ref: feat/runtime-rust` on schedule (GitHub fires crons from the
+default branch). **Gating:** fails ONLY on the hard gate (clippy -D OR a test
+failure → quality-audit.sh exit 1); the grep/vector findings are advisory job-
+summary triage, never a silent pass and never a veto. Uploads the full audit
+report artifact.
+
+**Verified.** YAML parses; the focused secret-compare + panic-arith grep patterns
+run locally and surface triage candidates (mostly false positives — UI label
+`== "password"`, f64 test asserts — confirming the advisory framing).
+
+**Affected.** `.github/workflows/security-audit.yml` (new, fork-local).
+
+---
+
 ## 2026-06-19 20:50 — Std.Db driver portability: postgres/mysql projects now cargo-build
 
 **What.** A `[database] driver = "postgres"` (or `mysql`) Std.Db project failed

@@ -1,0 +1,143 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Sky Rust-backend SECURITY / SOUNDNESS re-audit — scheduled cron (FORK-LOCAL).
+#
+# Runs `runtime-rust/scripts/quality-audit.sh` (the deterministic harvester behind
+# sky-rust-backend:quality-audit) on a cadence so the no-panic / no-Any / secret-
+# compare invariants can't silently rot between releases. It goes BEYOND the
+# per-push clippy gate: every panic vector (unwrap/expect/panic!/unreachable!),
+# unsafe block, `dyn Any`/downcast site, lossy cast, and undocumented `#[allow]`
+# is surfaced for triage, on top of the HARD gate (clippy -D warnings + tests).
+#
+# Plus a focused grep pass for the two highest-severity classes the CLAUDE.md
+# learnings call out: NON-constant-time secret/token/MAC compares (`==`/`!=` on a
+# token/password/signature/cookie — must use `subtle::ct_eq`) and panicking
+# arithmetic on caller-controlled i64/Decimal (bare `+`/`-`/`*`/`.abs()`/`.pow(`).
+# These are advisory (printed to the job summary), never a silent pass.
+#
+# WHY FORK-LOCAL. The Rust backend lives ONLY on feat/runtime-rust in
+# arthurmaciel/sky; this workflow must NEVER run on upstream (anzellai/sky). The
+# repository guard enforces it. Nothing here pushes or opens a PR.
+#
+# GATING. The job FAILS iff quality-audit.sh's HARD gate fails (clippy -D warnings
+# OR a unit-test failure → exit 1) — a genuine soundness/security regression. The
+# advisory findings (panic-vector counts, unsafe/Any sites, the secret-compare
+# grep) are reported in the job summary + uploaded artifact; they do NOT flip the
+# verdict (triage signal, not a veto), matching the script's own exit contract.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Rust security audit
+
+on:
+  workflow_dispatch:
+  # Run on a push that touches the Rust runtime/codegen so a regression in the
+  # hard gate is caught at the source (not only weekly). Docs-only changes skip.
+  push:
+    branches: [main, 'feat/**']
+    paths:
+      - 'runtime-rust/src/**'
+      - 'runtime-rust/Cargo.toml'
+      - 'runtime-rust/Cargo.lock'
+      - 'runtime-rust/scripts/quality-audit.sh'
+      - '.github/workflows/security-audit.yml'
+  schedule:
+    # Weekly re-audit — Thursdays 05:23 UTC (~02:23 America/Sao_Paulo), offset from
+    # the Monday examples-sweep cron so the two don't contend for runner minutes.
+    # GitHub fires scheduled workflows only from the DEFAULT branch's copy of this
+    # file; the checkout step forces ref: feat/runtime-rust so the audit always
+    # runs against the Rust branch regardless of which branch the schedule fires
+    # from. (workflow_dispatch is the reliable manual trigger.)
+    - cron: '23 5 * * 4'
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  security-audit:
+    # FORK-LOCAL: only this fork ever runs the Rust security audit. Never upstream.
+    if: github.repository == 'arthurmaciel/sky'
+    name: security-audit (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cache/sky-rust-target
+      # sccache OFF on CI (its retired GHA backend kills every build) — see the
+      # examples-sweep workflow. actions/cache@v4 carries cross-run warmth instead.
+      SKY_NO_SCCACHE: '1'
+      CARGO_HTTP_MULTIPLEXING: 'false'
+      CARGO_NET_RETRY: '5'
+
+    steps:
+      # On a scheduled run github.ref is the default branch — force the Rust branch.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'feat/runtime-rust' || github.ref }}
+
+      # ripgrep — the focused secret-compare / panic-arith grep pass uses `rg`.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ${{ github.workspace }}/.cache/sky-rust-target
+          key: ${{ runner.os }}-secaudit-cargo-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-secaudit-cargo-
+
+      # ── The hard gate + advisory harvest (clippy -D + tests + vectors) ───────
+      # quality-audit.sh exits 1 ONLY when the hard gate (clippy -D warnings or a
+      # unit-test failure) fails — that fails this job. Advisory findings exit 0.
+      - name: Run quality / soundness audit
+        shell: bash
+        run: bash runtime-rust/scripts/quality-audit.sh runtime-rust
+
+      # ── Focused secret-compare + panic-arithmetic grep (advisory) ────────────
+      # The two highest-severity CLAUDE.md learning classes. Non-test src only.
+      # NEVER fails the job (|| true everywhere) — it's a triage signal surfaced in
+      # the job summary; a real finding becomes a fix in a follow-up commit.
+      - name: Focused security grep (advisory)
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          SRC=runtime-rust/src
+          {
+            echo "## Rust security audit — focused grep (advisory)"
+            echo
+            echo "### Non-constant-time secret compares (\`==\`/\`!=\` near token/secret/password/sig/cookie/mac)"
+            echo "Each should route through \`subtle::ct_eq\` (timing-oracle class)."
+            echo '```'
+            rg -n --no-heading -g '*.rs' \
+              '(token|secret|password|passwd|signature|\bsig\b|cookie|\bmac\b|hmac|bearer)[^\n]*(==|!=)|(==|!=)[^\n]*(token|secret|password|passwd|signature|\bsig\b|cookie|\bmac\b|hmac|bearer)' \
+              "$SRC" -i | rg -v '//|test|ct_eq' | head -40 || echo '(none)'
+            echo '```'
+            echo
+            echo "### Panicking arithmetic on i64/Decimal (bare \`.abs()\`/\`.pow(\`/\`% -\` — prefer checked_*)"
+            echo '```'
+            rg -n --no-heading -g '*.rs' '\.abs\(\)|\.pow\(|i64::MIN|10_i64\.pow|Instant\s*\+' "$SRC" \
+              | rg -v '//|test|checked_|saturating_|wrapping_' | head -30 || echo '(none)'
+            echo '```'
+            echo
+            echo "_Advisory only — these do not fail the job. The hard gate (clippy -D + tests) does._"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      # ── Upload the full audit report (always, even on a gate failure) ────────
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-report
+          path: |
+            ~/.cache/sky/quality-audit/audit-*.log
+            ~/.cache/sky/quality-audit/clippy-gate.log
+            ~/.cache/sky/quality-audit/clippy-strict.log
+          if-no-files-found: warn
