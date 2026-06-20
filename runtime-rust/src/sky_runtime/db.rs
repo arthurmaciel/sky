@@ -1099,11 +1099,16 @@ pub fn valid_sql_ident(name: &str) -> bool {
 /// Bind a `SqlParam` value onto a sqlx `Query` builder.
 /// Returns `SkyResult::Err` only when the DB pool is absent (no-db build).
 /// Every variant is handled — this function is TOTAL.
+///
+/// Driver-agnostic: typed on the `DbQuery<'q>` alias (the configured backend's
+/// query type) rather than a hardcoded `sqlx::Sqlite`, so a project built with
+/// `[database] driver = "postgres"` (which does NOT enable sqlx's `sqlite`
+/// feature) still compiles — `sqlx::Sqlite` / `SqliteArguments` would be E0433
+/// there. Each bound value type (String / i64 / f64 / bool / Vec<u8> / Option)
+/// impls `Encode + Type` for both Sqlite and Postgres, so the monomorphic
+/// per-build `q.bind(..)` resolves on either backend.
 #[cfg(feature = "db")]
-fn bind_sql_param<'q>(
-    q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
-    p: SqlParam,
-) -> sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>> {
+fn bind_sql_param<'q>(q: DbQuery<'q>, p: SqlParam) -> DbQuery<'q> {
     match p {
         SqlParam::Text(s)  => q.bind(s),
         SqlParam::Int(i)   => q.bind(i),

@@ -531,6 +531,19 @@ log** — hold it to the same bar as a code review:
   have HARDCODED forwarding wrappers in `Emitter.hs` (`log_*_with`), and a bare
   `<A>` wrapper calling a `<A: SkyStringify>` runtime fn is E0277. Render attrs
   BEFORE the future (`String` is `Send`; avoids an `A: Send` bound).
+- **A runtime module that uses a SPECIFIC sqlx driver needs that driver's Cargo
+  feature whenever the module compiles — independent of the app's configured
+  driver.** `telemetry_spill.rs` (the console spool) is an inherently-SQLite local
+  file compiled on EVERY Std.Db build (`Project.hs dbMod`, gated on `usesDb`) and
+  uses `sqlx::SqlitePool`. A `[database] driver = "postgres"` app enabled only
+  sqlx's `postgres` feature → `sqlx::SqlitePool` E0432 + `sqlx::query` E0282. So
+  `sqlxFeats` must add `sqlite` whenever `usesDb` (the spool), in addition to the
+  app's own driver. General rule: when a module hardwires one sqlx backend type,
+  that backend's feature is required wherever the module is included — don't assume
+  the app driver covers it. Also: a driver-AGNOSTIC helper (`bind_sql_param`) must
+  type on the `DbQuery<'q>`/`DbDatabase` aliases, NOT a hardcoded `sqlx::Sqlite`,
+  or it E0433s on a non-sqlite build. Verify with a postgres-configured fixture
+  (`cargo build` only — no server needed), not just the sqlite default.
 - **Feature-gated crate types need `#[cfg(feature=…)]` on their trait impls too.**
   An `impl SkyStringify for serde_json::Value` in an always-compiled module fails
   E0433 when the `json` feature is off (generated projects DO enable `json` by

@@ -17,6 +17,40 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-19 20:50 — Std.Db driver portability: postgres/mysql projects now cargo-build
+
+**What.** A `[database] driver = "postgres"` (or `mysql`) Std.Db project failed
+`cargo build` with two `sqlx::Sqlite`-rooted errors, because the postgres driver
+feature does not enable sqlx's `sqlite` feature. Two independent causes, both fixed:
+
+1. **`db.rs` `bind_sql_param`** hardcoded `sqlx::query::Query<'q, sqlx::Sqlite,
+   sqlx::sqlite::SqliteArguments<'q>>` in its signature → E0433 on a postgres-only
+   build. Re-typed on the existing driver-agnostic `DbQuery<'q>` alias (the
+   configured backend's query type). Each bound value (String/i64/f64/bool/
+   Vec<u8>/Option) impls `Encode + Type` for both Sqlite and Postgres, so the
+   monomorphic per-build `q.bind(..)` resolves on either backend.
+2. **`telemetry_spill.rs`** (the console spool — an inherently-SQLite local file,
+   Go-parity `SKY_CONSOLE_DB_PATH`) is compiled on EVERY Std.Db build (`Project.hs`
+   `dbMod`, gated on `usesDb`) and uses `sqlx::SqlitePool`. A postgres app didn't
+   enable sqlx `sqlite` → E0432 (`SqlitePool`) + E0282 (`sqlx::query` type). Fixed
+   in `Emitter.hs sqlxFeats`: add `sqlite` to the sqlx feature set whenever
+   `usesDb`, in addition to the app's own driver. So a postgres app links
+   `["postgres", "sqlite"]` (app DB + spool); a sqlite app stays `["sqlite"]` (no
+   bloat — Set-deduped).
+
+**Verified.** New compile-only fixture `tests/sky/66-db-postgres-compile`
+(`driver = "postgres"`, exercises `Db.insertFields`/`SqlValue` → bind_sql_param):
+`cargo build` succeeds, features `["runtime-tokio-rustls", "postgres", "sqlite"]`.
+Not run (postgres needs a server; the gate is compile). Sqlite path unregressed:
+`kernel-parity-probe-sqlfields` runs → `SQLFIELDS PROBE OK`, features `["…","sqlite"]`
+only. Standalone runtime `cargo check --features full` clean.
+
+**Affected.** `runtime-rust/src/sky_runtime/db.rs`,
+`src/Sky/Generate/Rust/Builder/Emitter.hs`,
+`runtime-rust/tests/sky/66-db-postgres-compile/` (new compile-only fixture).
+
+---
+
 ## 2026-06-19 20:20 — Crypto.randomBytes/randomToken Go-parity encoding (hex String / base64url)
 
 **What.** Two Go-parity correctness bugs in the entropy kernels:

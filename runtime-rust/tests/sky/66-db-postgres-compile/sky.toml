@@ -1,0 +1,17 @@
+name = "66-db-postgres-compile"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Compile-only regression: a Std.Db project configured for POSTGRES must cargo-build
+# (the postgres driver feature does NOT enable sqlx's `sqlite` feature, so any
+# hardcoded `sqlx::Sqlite` in the runtime is E0433). Exercises bind_sql_param /
+# build_insert_sql via Db.insertFields/SqlValue. Not run (postgres needs a server);
+# the gate is `cargo build` succeeds. Pre-fix: E0433 unresolved `sqlx::Sqlite`.
+
+[source]
+root = "src"
+
+[database]
+driver = "postgres"
+url = "DATABASE_URL"

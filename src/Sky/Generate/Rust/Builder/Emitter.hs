@@ -1042,6 +1042,14 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     sqlxTlsFeature = if sqlxTls == "native-tls" then "runtime-tokio-native-tls" else "runtime-tokio-rustls"
     sqlxFeats = sqlxTlsFeature : Set.toList (Set.fromList (
         [ dbFeature dbDriver | usesDb uk ]
+        -- The console spool (telemetry_spill.rs) is compiled on EVERY Std.Db build
+        -- (Project.hs `dbMod`, gated on usesDb). It is an inherently-SQLite local
+        -- file (Go-parity SKY_CONSOLE_DB_PATH) and uses `sqlx::SqlitePool`, so the
+        -- `sqlite` driver feature must be present whenever Std.Db is used —
+        -- regardless of the app's OWN driver. Without this a `[database] driver =
+        -- "postgres"` (or mysql) app fails: sqlx's `sqlite` feature is off, so
+        -- `sqlx::SqlitePool` is E0432 and the spool's `sqlx::query` is E0282.
+        ++ [ "sqlite" | usesDb uk ]
         ++ (if usesLive uk && needsDb then ["sqlite", "postgres"] else [])))
     -- Sky.Http.Server's axum serve loop + the reqwest client both need tokio net.
     -- The TEA loop (tea.rs) uses tokio::sync::mpsc + tokio::time + tokio::spawn;
