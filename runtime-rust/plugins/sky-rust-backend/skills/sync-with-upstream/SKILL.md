@@ -132,15 +132,25 @@ real number — so do NOT read it from there):
 
 ```bash
 SKY_VER="${UPSTREAM_TAG#v}"   # e.g. 0.16.31  (re-derive UPSTREAM_TAG if a new shell)
+[ -n "$SKY_VER" ] || { echo "ERROR: UPSTREAM_TAG empty — re-derive it (Step 2) before bumping." >&2; exit 1; }
 sed -i -E "s/^(runtime_version = )\"[^\"]*\"/\1\"$SKY_VER\"/" runtime-rust/Cargo.toml
-rg -A1 'package.metadata.sky' runtime-rust/Cargo.toml          # confirm new value
+# VERIFY the bump LANDED — this is the load-bearing line. A silent sed no-op (the
+# key got indented/renamed under [package.metadata.sky], or SKY_VER was empty)
+# would otherwise leave runtime_version STALE through the entire sync with no
+# visible error — exactly the "Rust version stuck at an old release" bug. Assert
+# the file now holds the expected value; fail LOUD if not.
+got="$(awk -F'"' '/^runtime_version = /{print $2}' runtime-rust/Cargo.toml)"   # portable (rg -oP needs PCRE2, not always built)
+[ "$got" = "$SKY_VER" ] || { echo "ERROR: runtime_version bump FAILED — got '${got:-<none>}', want '$SKY_VER'. The sed did not match: confirm the [package.metadata.sky] block has 'runtime_version' at column 0. Fix before committing." >&2; exit 1; }
+echo "runtime_version bumped → $SKY_VER ✓"
 ```
 
 This is a metadata-only field (`[package.metadata.*]` is ignored by Cargo's
 build), so it never affects the Rust build or the Go backend — it's purely the
-crate's self-reported provenance. If the value already matches (re-running a
-sync), the `sed` is a no-op. Stage `runtime-rust/Cargo.toml` with the merge
-commit in Step 8.
+crate's self-reported provenance. Re-running a sync at the same version is a
+clean no-op: the `sed` rewrites the line to the identical value and the VERIFY
+passes. The VERIFY is mandatory precisely so a *failed* bump (sed matched
+nothing) can never masquerade as a successful no-op. Stage
+`runtime-rust/Cargo.toml` with the merge commit in Step 8.
 
 ### Step 7 — Verify (do NOT skip; do NOT commit a broken merge)
 
