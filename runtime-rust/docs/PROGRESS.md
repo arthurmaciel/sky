@@ -30,16 +30,23 @@ Three divergences, TWO distinct root causes:
    (textarea, no explicit children, non-empty) emit the escaped value as content —
    mirrors Go `live.go renderVNode`. Now Rust emits `>fill the column</textarea>`.
 
-2. **sparkline + heatmap coordinates differ (GO BUG — Rust is correct).** Both use
-   `Math.min`/`Math.max` (typed `a -> a -> a`, "any comparable type") to compute
-   their value range. Go's `Math_min`/`Math_max` compare via `AsInt(a) < AsInt(b)`
-   — they TRUNCATE Floats to Int, so the range of `[0.4 … 1.3]` collapses to
-   `(0, 1)` and the sparkline path / heatmap cell scaling is wrong. Rust's
-   `math_min`/`math_max` are generic `T: PartialOrd` (`a <= b`), correct on `f64`.
-   Hand-computed range `(0.31, 1.39)` → first y `29.33`, last `2.67` = the RUST
-   output; Go's `18.67 … −5.33` matches the truncated `(−0.1, 1.1)` range. NOT a
-   Rust defect — needs a Go-backend fix (use `skyLessThan`, not `AsInt`); prepared
-   as an upstream PR (Rust unchanged).
+2. **sparkline + heatmap coordinates differ (GO CODEGEN BUG — Rust is correct).**
+   Both use `Math.min`/`Math.max` (typed `a -> a -> a`, "any comparable type") to
+   compute their value range over a `List Float`. The GO CODEGEN lowers these to
+   the **Int-typed companion** `rt.Math_minT(rt.AsInt(lo), rt.AsInt(x))` (verified
+   in generated `main.go` `Std_Ui_Chart_yRangeHelp`/`xRangeHelp`) — the `AsInt`
+   coercion TRUNCATES the Floats, so the range of `[0.4 … 1.3]` collapses to
+   `(0, 1)` and the sparkline path / heatmap cell scaling is wrong. (Note: the
+   `any` runtime `Math_min`/`Math_max` ALSO compare via `AsInt` — a sibling latent
+   bug — but the chart never reaches them; the codegen picks `Math_minT` directly.)
+   Rust's `math_min`/`math_max` are generic `T: PartialOrd` (`a <= b`), correct on
+   `f64`. Hand-computed range `(0.31, 1.39)` → first y `29.33`, last `2.67` = the
+   RUST output; Go's `18.67 … −5.33` matches the truncated `(−0.1, 1.1)` range.
+   NOT a Rust defect — the fix is in the Go backend (codegen must not select the
+   Int companion for a Float `Math.min`/`Math.max`, AND the `any` runtime fns
+   should compare via `skyLessThan`). Out of the Rust boundary; reported to the
+   author for a Go-backend fix. A speculative runtime-only `Math_min`→`skyLessThan`
+   patch was tried and REVERTED — it doesn't touch the chart's `Math_minT` path.
 
 **Verified.** New `html.rs` unit tests (textarea value→content, escaping,
 explicit-children-win, select strips value) pass; `cargo check --features full`
