@@ -82,6 +82,20 @@ struct Walked {
     /// Resolved to cells lazily (avail_w + canvas are only known at render time).
     width: Option<Length>,
     style: Style,
+    /// `__grid` marker present (`Ui.grid`). Children flow row-major into auto-flow
+    /// columns sized off `grid_min_px` (Go's `box.gridLayout`).
+    is_grid: bool,
+    /// `__paragraph` / `__textcolumn` marker (`Ui.paragraph` / `Ui.textColumn`).
+    /// Text children are joined + word-wrapped to the available width.
+    is_paragraph: bool,
+    is_text_column: bool,
+    /// `__gridMin` value — the minimum column WIDTH in logical px (set by
+    /// `Ui.gridColumns N`). The actual column COUNT is `availW / cells_x(min)`.
+    grid_min_px: i64,
+    /// Border frame: `(color, style)` present when `Border.width > 0`. The colour
+    /// is `None` when only width (no `Border.color`) was given — glyphs then keep
+    /// the inherited fg, matching Go's `drawBorder` (sets fg only when colour set).
+    border: Option<(Option<(u8, u8, u8)>, String)>,
 }
 
 /// The `Ui.width` `Length` on a node, if present.
@@ -254,11 +268,27 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         pad_left: 0,
         width: width_length(attrs),
         style: inherited,
+        is_grid: false,
+        is_paragraph: false,
+        is_text_column: false,
+        grid_min_px: 0,
+        border: None,
     };
+    // Border accumulates across two attrs (width gate + colour); style defaults
+    // to "solid". A frame is drawn only when width > 0 (Go: borderWidth sum > 0).
+    let mut border_width = 0i64;
+    let mut border_color: Option<Color> = None;
+    let mut border_style = String::from("solid");
     for a in attrs {
         match a {
             Attribute::AttrStyle(k, _) if k == "__row" => w.dir = Dir::Row,
             Attribute::AttrStyle(k, _) if k == "__col" => w.dir = Dir::Column,
+            Attribute::AttrStyle(k, _) if k == "__grid" => w.is_grid = true,
+            Attribute::AttrStyle(k, _) if k == "__paragraph" => w.is_paragraph = true,
+            Attribute::AttrStyle(k, _) if k == "__textcolumn" => w.is_text_column = true,
+            Attribute::AttrStyle(k, v) if k == "__gridMin" => {
+                w.grid_min_px = v.trim().parse().unwrap_or(0);
+            }
             Attribute::AttrSpacing(n) => w.spacing_px = *n,
             Attribute::AttrPadding(t, r, b, l) => {
                 w.pad_top = *t;
@@ -276,8 +306,20 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
             Attribute::AttrFontDecoration(s) if s == "line-through" || s == "strike" => {
                 w.style.strike = true
             }
+            // Border frame (Go: drawBorder — solid/dashed/dotted box). Width is
+            // taken as present/absent (the frame is always 1 cell each side in the
+            // terminal regardless of CSS px); colour + style drive the glyphs.
+            Attribute::AttrBorderWidth(n) if *n > 0 => border_width = *n,
+            Attribute::AttrBorderWidthEach(t, r, b, l) if t + r + b + l > 0 => {
+                border_width = (t + r + b + l).max(1)
+            }
+            Attribute::AttrBorderColor(c) => border_color = Some(c.clone()),
+            Attribute::AttrBorderStyle(s) => border_style = s.clone(),
             _ => {}
         }
+    }
+    if border_width > 0 {
+        w.border = Some((border_color.as_ref().map(color_of), border_style));
     }
     w
 }
@@ -601,45 +643,288 @@ fn render_node<M: Clone>(
         Element::Node(_d, attrs, kids) | Element::TaggedNode(_, _d, attrs, kids) => {
             let w = walk_attrs(attrs, inherited);
             let content_avail = node_content_avail(avail_w, &w, ctx.canvas);
-            // Render children IN ORDER (preserves focusable push order = Tab order),
-            // pairing each with its fill spec, then drop empty blocks.
-            let mut specs: Vec<Option<FillSpec>> = Vec::new();
-            let mut children: Vec<Rendered> = Vec::new();
-            for k in kids.iter() {
-                let r = render_node(k, w.style, ctx, content_avail);
-                if r.block.height() > 0 {
-                    specs.push(child_width_length(k).and_then(|l| fill_spec(&l, ctx.canvas)));
-                    children.push(r);
+            // Paragraph / textColumn: join the element's text content and
+            // word-wrap to the available width (Go's isParagraph/isTextColumn
+            // branch in layoutElement, ~1474-1518). Each wrapped line is one
+            // Text run; textColumn inserts a blank line between child paragraphs.
+            let inner = if w.is_paragraph || w.is_text_column {
+                let wrap_w = content_avail.max(1);
+                let mut lines: Vec<Vec<Run>> = Vec::new();
+                if w.is_text_column {
+                    for (i, k) in kids.iter().enumerate() {
+                        if i > 0 {
+                            lines.push(Vec::new());
+                        }
+                        for l in wrap_text(&extract_text(k), wrap_w) {
+                            lines.push(vec![Run { text: l, style: w.style }]);
+                        }
+                    }
+                } else {
+                    let joined = kids
+                        .iter()
+                        .map(extract_text)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    for l in wrap_text(&joined, wrap_w) {
+                        lines.push(vec![Run { text: l, style: w.style }]);
+                    }
                 }
-            }
-            // In a ROW, fill children share the leftover width (column children
-            // already span the full width). Post-pass: rewrite fill child widths.
-            if w.dir == Dir::Row {
-                distribute_row_fill(
-                    &mut children,
-                    &specs,
-                    content_avail,
-                    ctx.canvas.cells_x(w.spacing_px),
-                );
-            }
-            let mut inner = if children.is_empty() {
-                Rendered { block: Block { lines: vec![Vec::new()] }, hits: vec![] }
+                if lines.is_empty() {
+                    lines.push(Vec::new());
+                }
+                Rendered { block: Block { lines }, hits: vec![] }
+            } else if w.is_grid {
+                render_grid(kids, &w, ctx, content_avail)
             } else {
-                match w.dir {
-                    Dir::Column => vstack(children, ctx.canvas.cells_y(w.spacing_px)),
-                    Dir::Row => hstack(children, ctx.canvas.cells_x(w.spacing_px)),
+                // Render children IN ORDER (preserves focusable push order = Tab
+                // order), pairing each with its fill spec, then drop empty blocks.
+                let mut specs: Vec<Option<FillSpec>> = Vec::new();
+                let mut children: Vec<Rendered> = Vec::new();
+                for k in kids.iter() {
+                    let r = render_node(k, w.style, ctx, content_avail);
+                    if r.block.height() > 0 {
+                        specs.push(child_width_length(k).and_then(|l| fill_spec(&l, ctx.canvas)));
+                        children.push(r);
+                    }
                 }
+                // In a ROW, fill children share the leftover width (column children
+                // already span the full width). Post-pass: rewrite fill child widths.
+                if w.dir == Dir::Row {
+                    distribute_row_fill(
+                        &mut children,
+                        &specs,
+                        content_avail,
+                        ctx.canvas.cells_x(w.spacing_px),
+                    );
+                }
+                let mut inner = if children.is_empty() {
+                    Rendered { block: Block { lines: vec![Vec::new()] }, hits: vec![] }
+                } else {
+                    match w.dir {
+                        Dir::Column => vstack(children, ctx.canvas.cells_y(w.spacing_px)),
+                        Dir::Row => hstack(children, ctx.canvas.cells_x(w.spacing_px)),
+                    }
+                };
+                apply_self_width(&mut inner.block, &w, content_avail, ctx.canvas);
+                inner
             };
-            apply_self_width(&mut inner.block, &w, content_avail, ctx.canvas);
-            apply_padding(inner, &w, ctx.canvas, w.style)
+            let padded = apply_padding(inner, &w, ctx.canvas, w.style);
+            // Border frame (Go's drawBorder): wrap the padded block in a 1-cell
+            // box. The frame consumes 1 cell on each side of the OUTER block, so
+            // the border sits outside the padding ring (Go insets children by
+            // padding + borderWidth; here padding is already applied, the frame
+            // adds the border ring outside it).
+            apply_border(padded, &w, w.style)
         }
     }
 }
 
+/// Extract the concatenated text content of an element subtree (Go's
+/// `extractTextContent` — flattens every `Text` leaf, space-joining nested ones).
+fn extract_text<M>(el: &Element<M>) -> String {
+    match el {
+        Element::Text(t) => t.clone(),
+        Element::Node(_, _, kids) | Element::TaggedNode(_, _, _, kids) => {
+            kids.iter().map(extract_text).collect::<Vec<_>>().join(" ")
+        }
+        _ => String::new(),
+    }
+}
+
+/// Word-wrap `text` to `width` cells. Mirrors Go's `wrapText`/`wrapParagraph`
+/// (tui_wrap.go): soft-break on whitespace runs, hard-break (char chunks) only
+/// for words longer than the line; embedded `'\n'` forces a break. Always ≥ 1
+/// line. Total + bounds-checked — no panics.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        wrap_paragraph_into(paragraph, width, &mut out);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn wrap_paragraph_into(text: &str, width: usize, out: &mut Vec<String>) {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        out.push(String::new());
+        return;
+    }
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for word in words {
+        let ww = UnicodeWidthStr::width(word);
+        // Word wider than the line — flush, then hard-break into chunks.
+        if ww > width {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            hard_break_chunks(word, width, out);
+            continue;
+        }
+        let needed = if cur.is_empty() { ww } else { ww + 1 };
+        if cur_w + needed > width {
+            out.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+            cur_w = ww;
+        } else {
+            if !cur.is_empty() {
+                cur.push(' ');
+                cur_w += 1;
+            }
+            cur.push_str(word);
+            cur_w += ww;
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+}
+
+/// Split a long word into chunks of at most `width` display cells (Go's
+/// `hardBreakChunks`). Char-counted, total.
+fn hard_break_chunks(word: &str, width: usize, out: &mut Vec<String>) {
+    if width == 0 || word.is_empty() {
+        out.push(word.to_string());
+        return;
+    }
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for ch in word.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_w + cw > width && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(ch);
+        cur_w += cw;
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+}
+
+/// Grid layout (Go's `gridLayout` branch, ~2518-2549). `grid_min_px` (from
+/// `Ui.gridColumns N`) → min column cells; `ncols = avail / min` (≥1); cells flow
+/// row-major into `ncols` per row, each column padded to `col_width`; rows stack
+/// vertically with the spacing gap. Focusable hits are shifted to absolute coords.
+fn render_grid<M: Clone>(
+    kids: &[Element<M>],
+    w: &Walked,
+    ctx: &mut Ctx<M>,
+    content_avail: usize,
+) -> Rendered {
+    let min_col = {
+        let c = ctx.canvas.cells_x(w.grid_min_px);
+        if c == 0 { 10 } else { c }
+    };
+    let avail = content_avail.max(1);
+    let ncols = (avail / min_col).max(1);
+    let col_width = (avail / ncols).max(1);
+    let gap_y = ctx.canvas.cells_y(w.spacing_px);
+
+    // Render every child at col_width (its own content fits within); collect into
+    // a flat list (skipping empty blocks would break row-major alignment, so keep
+    // ALL cells in order).
+    let cells: Vec<Rendered> =
+        kids.iter().map(|k| render_node(k, w.style, ctx, col_width)).collect();
+
+    // Chunk row-major into rows of `ncols`, hstack each row (no inter-cell gap —
+    // each cell is padded to col_width, matching Go's `x = innerCol + col*colWidth`),
+    // vstack the rows with the spacing gap.
+    let mut rows: Vec<Rendered> = Vec::new();
+    for chunk in cells.chunks(ncols.max(1)) {
+        let mut sized: Vec<Rendered> = Vec::new();
+        for r in chunk {
+            let mut r2 = Rendered { block: r.block.clone(), hits: r.hits.clone() };
+            r2.block.set_width(col_width, w.style.bg);
+            sized.push(r2);
+        }
+        rows.push(hstack(sized, 0));
+    }
+    vstack(rows, gap_y)
+}
+
+/// Wrap a rendered block in a 1-cell border frame (Go's `drawBorder`). The frame
+/// is only drawn when `w.border` is set AND the block is ≥ 2×2 (Go's `w<2||h<2`
+/// guard). Corners ┌┐└┘, edges ─│ per style; the border colour (when set)
+/// overrides the glyph fg. Hits + content shift down/right by 1.
+fn apply_border(inner: Rendered, w: &Walked, self_style: Style) -> Rendered {
+    let (border_fg, style) = match &w.border {
+        Some((c, s)) => (*c, s.as_str()),
+        None => return inner,
+    };
+    let inner_w = inner.block.width();
+    let inner_h = inner.block.height();
+    let outer_w = inner_w + 2;
+    let outer_h = inner_h + 2;
+    if outer_w < 2 || outer_h < 2 {
+        return inner;
+    }
+    let (hor, vert, tl, tr, bl, br) = border_glyphs(style);
+    // Border runs inherit the frame fg (when set) but keep the node's bg so the
+    // box reads as one filled rect.
+    let bstyle = Style { fg: border_fg.or(self_style.fg), ..self_style };
+    let edge = |ch: &str, n: usize| Run { text: ch.repeat(n), style: bstyle };
+    let corner = |ch: &str| Run { text: ch.to_string(), style: bstyle };
+
+    let mut block = Block::default();
+    // Top edge: ┌──…──┐
+    {
+        let mut row = vec![corner(tl)];
+        if inner_w > 0 {
+            row.push(edge(hor, inner_w));
+        }
+        row.push(corner(tr));
+        block.lines.push(row);
+    }
+    // Middle rows: │ <content padded to inner_w> │
+    for line in &inner.block.lines {
+        let mut row = vec![corner(vert)];
+        let lw: usize = line.iter().map(Run::width).sum();
+        row.extend(line.iter().cloned());
+        if lw < inner_w {
+            row.push(Run { text: " ".repeat(inner_w - lw), style: self_style });
+        }
+        row.push(corner(vert));
+        block.lines.push(row);
+    }
+    // Bottom edge: └──…──┘
+    {
+        let mut row = vec![corner(bl)];
+        if inner_w > 0 {
+            row.push(edge(hor, inner_w));
+        }
+        row.push(corner(br));
+        block.lines.push(row);
+    }
+    // Content + focusables shift +1 line / +1 col (the frame's top-left).
+    let hits = inner.hits.into_iter().map(|(idx, l, c, ww, hh)| (idx, l + 1, c + 1, ww, hh)).collect();
+    Rendered { block, hits }
+}
+
+/// Box-drawing glyphs `(hor, vert, tl, tr, bl, br)` for a border style. Mirrors
+/// Go's `borderGlyphs`: dashed ┄┆, dotted ┈┊, everything else solid ─│.
+fn border_glyphs(style: &str) -> (&'static str, &'static str, &'static str, &'static str, &'static str, &'static str) {
+    match style {
+        "dashed" => ("┄", "┆", "┌", "┐", "└", "┘"),
+        "dotted" => ("┈", "┊", "┌", "┐", "└", "┘"),
+        _ => ("─", "│", "┌", "┐", "└", "┘"),
+    }
+}
+
 /// Content width available to a node's children = the node's allocation minus its
-/// horizontal padding.
+/// horizontal padding (and the 1-cell-each-side border ring, when present).
 fn node_content_avail(avail_w: usize, w: &Walked, canvas: Canvas) -> usize {
-    let pad = canvas.cells_x(w.pad_left) + canvas.cells_x(w.pad_right);
+    let pad = canvas.cells_x(w.pad_left)
+        + canvas.cells_x(w.pad_right)
+        + if w.border.is_some() { 2 } else { 0 };
     let base = match &w.width {
         None => avail_w,
         Some(l) => {
@@ -1019,6 +1304,95 @@ mod tests {
         assert!(a.is_some() && c.is_some(), "both visual lines render: {frame:?}");
         assert!(a < c, "first line above second: {frame:?}");
         assert!(frame.contains('▏'), "cursor glyph present (focused): {frame:?}");
+    }
+
+    #[test]
+    fn wrap_text_breaks_on_whitespace() {
+        let lines = wrap_text("the quick brown fox", 9);
+        assert_eq!(lines, vec!["the quick", "brown fox"]);
+    }
+
+    #[test]
+    fn wrap_text_hard_breaks_long_word() {
+        // A 12-char word exceeds width 5 → char-chunks of ≤5.
+        let lines = wrap_text("abcdefghijkl", 5);
+        assert_eq!(lines, vec!["abcde", "fghij", "kl"]);
+    }
+
+    #[test]
+    fn wrap_text_honours_newlines_and_zero_width() {
+        assert_eq!(wrap_text("a\nb", 10), vec!["a", "b"]);
+        assert_eq!(wrap_text("anything", 0), vec![""]);
+        assert_eq!(wrap_text("", 10), vec![""]);
+    }
+
+    #[test]
+    fn paragraph_word_wraps() {
+        // A paragraph node carrying long text wraps to the canvas width.
+        let t: Element<()> = node(
+            vec![Attribute::AttrStyle("__paragraph".into(), "true".into())],
+            vec![Element::Text(
+                "alpha beta gamma delta epsilon zeta eta theta iota".into(),
+            )],
+        );
+        // 20 cols → multiple wrapped lines.
+        let frame = element_to_cells(&t, 20, 24);
+        let body_lines: Vec<&str> = frame.split("\r\n").filter(|l| l.contains("alpha") || l.contains("zeta")).collect();
+        assert!(frame.contains("alpha"), "first word present: {frame:?}");
+        // The text spans more than one line (not a single truncated line).
+        assert!(frame.matches("\r\n").count() >= 2, "wrapped onto ≥2 lines: {frame:?}");
+        let _ = body_lines;
+    }
+
+    #[test]
+    fn grid_flows_row_major() {
+        // gridColumns 80 px ≈ 5 cells min → on 60 cols, ncols = 60/5 = 12 → all
+        // six single-char cells land on one row.
+        let cell = |s: &str| -> Element<()> {
+            node(vec![], vec![Element::Text(s.into())])
+        };
+        let g: Element<()> = node(
+            vec![
+                Attribute::AttrStyle("__grid".into(), "true".into()),
+                Attribute::AttrStyle("__gridMin".into(), "80".into()),
+            ],
+            vec![cell("G1"), cell("G2"), cell("G3"), cell("G4"), cell("G5"), cell("G6")],
+        );
+        let frame = element_to_cells(&g, 60, 24);
+        let first = frame.split("\r\n").next().unwrap_or("");
+        assert!(first.contains("G1"), "G1 on row 0: {first:?}");
+        assert!(first.contains("G6"), "G6 on the SAME row 0 (row-major flow): {first:?}");
+    }
+
+    #[test]
+    fn border_frames_a_box() {
+        let t: Element<()> = node(
+            vec![
+                Attribute::AttrBorderWidth(1),
+                Attribute::AttrBorderColor(rgb(100, 130, 180)),
+            ],
+            vec![Element::Text("hi".into())],
+        );
+        let frame = element_to_cells(&t, 80, 24);
+        assert!(frame.contains('┌') && frame.contains('┐'), "top corners: {frame:?}");
+        assert!(frame.contains('└') && frame.contains('┘'), "bottom corners: {frame:?}");
+        assert!(frame.contains('│') && frame.contains('─'), "edges: {frame:?}");
+        assert!(frame.contains("hi"), "content inside frame: {frame:?}");
+    }
+
+    #[test]
+    fn border_style_picks_dashed_dotted_glyphs() {
+        let mk = |style: &str| -> Element<()> {
+            node(
+                vec![
+                    Attribute::AttrBorderWidth(1),
+                    Attribute::AttrBorderStyle(style.into()),
+                ],
+                vec![Element::Text("x".into())],
+            )
+        };
+        assert!(element_to_cells(&mk("dashed"), 80, 24).contains('┄'));
+        assert!(element_to_cells(&mk("dotted"), 80, 24).contains('┈'));
     }
 
     #[test]
