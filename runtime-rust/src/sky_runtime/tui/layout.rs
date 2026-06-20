@@ -104,6 +104,9 @@ struct Walked {
     align_x: Option<HAlign>,
     /// `Ui.centerY`/`alignTop`/`alignBottom` (cross-axis in a row). `None` → top.
     align_y: Option<VAlign>,
+    /// `Font.alignCenter`/`alignRight`/`justify` — horizontal alignment of TEXT
+    /// lines within this box's content width. `None` → flush-left.
+    font_align: Option<HAlign>,
 }
 
 /// A border frame's `(colour, style)`. The colour is `None` when only width (no
@@ -515,6 +518,7 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         border: None,
         align_x: None,
         align_y: None,
+        font_align: None,
     };
     // Border accumulates across two attrs (width gate + colour); style defaults
     // to "solid". A frame is drawn only when width > 0 (Go: borderWidth sum > 0).
@@ -575,6 +579,15 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
             // for a single-child el). Was silently dropped → everything flush-left.
             Attribute::AttrAlignX(h) => w.align_x = Some(*h),
             Attribute::AttrAlignY(v) => w.align_y = Some(*v),
+            // Font text-align: align the box's text lines (center/right; justify →
+            // left in a terminal). Was dropped → text always flush-left (audit #7).
+            Attribute::AttrFontAlign(s) => {
+                w.font_align = match s.as_str() {
+                    "center" => Some(HAlign::CenterX),
+                    "right" => Some(HAlign::AlignRight),
+                    _ => None, // left / justify → flush-left
+                }
+            }
             _ => {}
         }
     }
@@ -1050,7 +1063,7 @@ fn render_node<M: Clone>(
             // word-wrap to the available width (Go's isParagraph/isTextColumn
             // branch in layoutElement, ~1474-1518). Each wrapped line is one
             // Text run; textColumn inserts a blank line between child paragraphs.
-            let inner = if w.is_paragraph || w.is_text_column {
+            let mut inner = if w.is_paragraph || w.is_text_column {
                 let wrap_w = content_avail.max(1);
                 let mut lines: Vec<Vec<Run>> = Vec::new();
                 if w.is_text_column {
@@ -1148,6 +1161,20 @@ fn render_node<M: Clone>(
                 apply_self_height(&mut inner.block, &w, ctx.canvas);
                 inner
             };
+            // Font text-align: shift each text line within the box's content width
+            // (center/right). Only visible when the box is wider than the text — a
+            // content-sized box has no slack, so it's a no-op there. (audit #7)
+            if let Some(fa) = w.font_align {
+                let sized = !matches!(w.width, None | Some(Length::Content));
+                let target = if sized { content_avail } else { inner.block.width() };
+                for line in &mut inner.block.lines {
+                    let lw: usize = line.iter().map(Run::width).sum();
+                    let off = halign_offset(Some(fa), target.saturating_sub(lw));
+                    if off > 0 {
+                        line.insert(0, Run { text: " ".repeat(off), style: Style { bg: w.style.bg, ..Style::default() } });
+                    }
+                }
+            }
             let padded = apply_padding(inner, &w, ctx.canvas, w.style);
             // Border frame (Go's drawBorder): wrap the padded block in a 1-cell
             // box. The frame consumes 1 cell on each side of the OUTER block, so
