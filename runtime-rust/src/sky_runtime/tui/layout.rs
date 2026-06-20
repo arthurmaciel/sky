@@ -102,6 +102,32 @@ struct Walked {
 /// style string is one of `solid` / `dashed` / `dotted` (anything else → solid).
 type BorderSpec = (Option<(u8, u8, u8)>, String);
 
+/// The root element's `Background.color`, if it sets one — the page background Go
+/// paints across the whole frame rect (`fillRect` on the root box). `None` when the
+/// root carries no bg (then nothing is backfilled and blank cells stay terminal-
+/// default, matching Go's empty `newCellGrid`). Only the OUTERMOST node's bg is the
+/// page fill; a child's bg belongs to that child's own box.
+fn root_bg<M>(view: &Element<M>) -> Option<(u8, u8, u8)> {
+    let attrs = match view {
+        Element::Node(_, attrs, _) | Element::TaggedNode(_, _, attrs, _) => attrs,
+        _ => return None,
+    };
+    attrs.iter().rev().find_map(|a| match a {
+        Attribute::AttrBgColor(c) => Some(color_of(c)),
+        _ => None,
+    })
+}
+
+/// The root element's `Ui.width` `Length`, if it sets one — drives whether the
+/// page background fills to the frame's right edge (a full-width / unsized root) or
+/// stops at the root box's own width (a narrower px / vw / capped root).
+fn root_width<M>(view: &Element<M>) -> Option<Length> {
+    match view {
+        Element::Node(_, attrs, _) | Element::TaggedNode(_, _, attrs, _) => width_length(attrs),
+        _ => None,
+    }
+}
+
 /// The `Ui.width` `Length` on a node, if present.
 fn width_length<M>(attrs: &[Attribute<M>]) -> Option<Length> {
     attrs.iter().find_map(|a| match a {
@@ -281,6 +307,46 @@ impl Block {
             }
         }
     }
+    /// Backfill the root element's background across the WHOLE frame rect, the way
+    /// Go's `paintBox` fills the root box's rect with `box.bg` via `fillRect`
+    /// BEFORE any child paints (`tui_ui.go` ~2418). The run model has no
+    /// "paint underneath" step, so a gap / padding / trailing cell that no child
+    /// covered is left with the default (terminal) background instead of the root
+    /// bg — the 6-trailing-column + inter-gap divergence the styled-cell-grid
+    /// equivalence test caught.
+    ///
+    /// Faithful equivalent: every cell whose bg is still unset (`None`) sits on the
+    /// root box's fill in Go, so it takes `root_bg`. A cell that ALREADY carries a
+    /// bg was painted by its owning box (a header / card / input with its own
+    /// `Background.color`) and is left untouched.
+    ///
+    /// `fill_to_edge` extends each line to the full `cols` width with `root_bg` —
+    /// Go's root box width is `innerMaxW == cols` ONLY when the root carries no
+    /// explicit width, so the page background reaches the right edge. A root with an
+    /// explicit narrower width (`Ui.width (px/vw …)`) fills only to its own width
+    /// and the trailing columns stay terminal-default (Go's `fillRect` covers just
+    /// `box.width`). Total — no index/panic.
+    fn backfill_root_bg(&mut self, cols: usize, root_bg: (u8, u8, u8), fill_to_edge: bool) {
+        let fill_style = Style { bg: Some(root_bg), ..Style::default() };
+        for line in &mut self.lines {
+            // Set the root bg on every run that has no bg of its own (a real glyph
+            // on the root surface, or a blank gap/pad cell), preserving fg/flags.
+            let mut width = 0usize;
+            for run in line.iter_mut() {
+                if run.style.bg.is_none() {
+                    run.style.bg = Some(root_bg);
+                }
+                width += run.width();
+            }
+            // Extend the line to the full frame width with root-bg spaces (the page
+            // background reaching the right edge). A line wider than `cols` is left
+            // as-is — `emit_block` clips it to `cols` at paint time.
+            if fill_to_edge && width < cols {
+                line.push(Run { text: " ".repeat(cols - width), style: fill_style });
+            }
+        }
+    }
+
     /// Reverse-video the single display cell at `(line, col)` — the text-input
     /// cursor (Go renders the cursor as `grid[cur].reverse`, never an inserted
     /// glyph). Rebuilds the line one char at a time, flagging the char at display
@@ -834,7 +900,16 @@ fn render_node<M: Clone>(
                 if lines.is_empty() {
                     lines.push(Vec::new());
                 }
-                Rendered { block: Block { lines }, hits: vec![] }
+                let mut block = Block { lines };
+                // Go's paragraph/textColumn box width is `wrapW` (= the full
+                // available content width when unsized), and its bg fills that whole
+                // rect via `fillRect`. So a bg-carrying paragraph paints every
+                // wrapped line out to `wrap_w`, not just to the text — matching Go's
+                // wide page-card fill (the styled-cell-grid `232837×41` divergence).
+                if w.style.bg.is_some() {
+                    block.set_width(wrap_w, w.style.bg);
+                }
+                Rendered { block, hits: vec![] }
             } else if w.is_grid {
                 render_grid(kids, &w, ctx, content_avail)
             } else {
@@ -1005,12 +1080,28 @@ fn render_grid<M: Clone>(
         let mut sized: Vec<Rendered> = Vec::new();
         for r in chunk {
             let mut r2 = Rendered { block: r.block.clone(), hits: r.hits.clone() };
-            r2.block.set_width(col_width, w.style.bg);
+            // Pad the cell to col_width with the CELL's OWN bg, not the grid's — Go
+            // gives each grid cell box `width = colWidth` and fills it with that
+            // cell's `box.bg` (`60 50 80` here), so the padding to col_width carries
+            // the cell colour, not the grid background (the `3c3250×30` contiguous
+            // fill the styled-cell-grid test expects). Fall back to the grid's bg
+            // for a cell that declares none.
+            let cell_bg = cell_block_bg(&r2.block).or(w.style.bg);
+            r2.block.set_width(col_width, cell_bg);
             sized.push(r2);
         }
         rows.push(hstack(sized, 0));
     }
     vstack(rows, gap_y)
+}
+
+/// The cell's own background, read from its rendered runs — the bg a grid cell
+/// painted on itself (via its `Background.color` cascading into `apply_padding` /
+/// `set_width`). Returns the first run-level bg found scanning the block. `None`
+/// when no run carries a bg (a cell with no `Background.color`), letting the caller
+/// fall back to the grid's bg. Total — no index/unwrap.
+fn cell_block_bg(block: &Block) -> Option<(u8, u8, u8)> {
+    block.lines.iter().flatten().find_map(|run| run.style.bg)
 }
 
 /// Wrap a rendered block in a 1-cell border frame (Go's `drawBorder`). The frame
@@ -1276,7 +1367,25 @@ pub fn render_with_focus<M: Clone>(
 ) -> (String, Vec<Focusable<M>>, usize) {
     let canvas = Canvas::new(cols, rows);
     let mut ctx = Ctx { canvas, focus_idx, focusables: Vec::new(), inputs };
-    let rendered = render_node(view, Style::default(), &mut ctx, cols);
+    let mut rendered = render_node(view, Style::default(), &mut ctx, cols);
+    // Backfill the root element's page background across the full frame rect — the
+    // gap / padding / trailing cells no child covered take the root bg (Go paints
+    // the root box's rect first via `fillRect`, then children on top). Without this
+    // the page background stops at the content's right edge + inter-element gaps
+    // read as terminal-default (the styled-cell-grid equivalence divergence).
+    if let Some(bg) = root_bg(view) {
+        // The page bg reaches the right edge only when the root box spans the full
+        // width — i.e. it has no explicit width, or a width that resolves to the
+        // whole frame (Go: root `width == innerMaxW == cols`). An explicitly
+        // NARROWER root (px / vw / a capped max / capped fill) fills only its own
+        // resolved width; the trailing columns stay terminal-default.
+        let fill_to_edge = match root_width(view) {
+            None | Some(Length::Content) => true,
+            Some(Length::Fill(_)) => true,
+            Some(l) => resolve_fixed_w(&l, cols, canvas).is_none_or(|cells| cells >= cols),
+        };
+        rendered.block.backfill_root_bg(cols, bg, fill_to_edge);
+    }
     let content_h = rendered.block.height();
     // Write back absolute positions onto the focusables (for scroll + hit-test).
     for (idx, line, col, width, h) in rendered.hits {
@@ -1661,6 +1770,81 @@ mod tests {
         assert!(!frame.ends_with("\r\n"), "no trailing CRLF: {frame:?}");
         // Still CRLF-separated between rows.
         assert_eq!(frame.matches("\r\n").count(), 9, "9 separators for 10 rows: {frame:?}");
+    }
+
+    #[test]
+    fn root_bg_fills_full_width_and_gaps() {
+        // Go paints the root box's bg across the WHOLE frame rect, so trailing
+        // columns + inter-element gaps the content didn't cover read as the page
+        // bg, not terminal-default. A root column (bg set, no explicit width) with
+        // a child narrower than the frame must still paint bg to the right edge.
+        let t: Element<()> = node(
+            vec![Attribute::AttrBgColor(rgb(18, 22, 38))],
+            vec![node(vec![], vec![Element::Text("x".into())])],
+        );
+        let frame = element_to_cells(&t, 20, 3);
+        let first = frame.split("\r\n").next().unwrap_or("");
+        // The page bg SGR reaches the row; the glyph 'x' sits on it and the
+        // remaining cells to col 20 carry the same bg (one fill run to the edge).
+        assert!(first.contains("48;2;18;22;38"), "page bg present: {first:?}");
+        // Count visible spaces after 'x' — the bg-filled tail to col 20.
+        let spaces = first.matches(' ').count();
+        assert!(spaces >= 15, "bg fills toward the right edge: {first:?} ({spaces})");
+    }
+
+    #[test]
+    fn root_bg_none_leaves_cells_default() {
+        // No root bg → nothing is backfilled (matches Go's empty cell grid); the
+        // frame carries no 48;2 background SGR at all.
+        let t: Element<()> = node(vec![], vec![node(vec![], vec![Element::Text("x".into())])]);
+        let frame = element_to_cells(&t, 20, 3);
+        assert!(!frame.contains("48;2;"), "no bg backfilled without a root bg: {frame:?}");
+    }
+
+    #[test]
+    fn grid_cell_bg_fills_column_not_grid_bg() {
+        // Go fills each grid cell to col_width with that CELL's own bg. A grid with
+        // a page bg whose cells carry a different bg must show the CELL bg across
+        // each column (contiguous), not the grid bg between content + col edge.
+        let cell = |s: &str| -> Element<()> {
+            node(
+                vec![Attribute::AttrBgColor(rgb(60, 50, 80))],
+                vec![Element::Text(s.into())],
+            )
+        };
+        let g: Element<()> = node(
+            vec![
+                Attribute::AttrBgColor(rgb(18, 22, 38)),
+                Attribute::AttrStyle("__grid".into(), "true".into()),
+                Attribute::AttrStyle("__gridMin".into(), "80".into()),
+            ],
+            vec![cell("G1"), cell("G2")],
+        );
+        let frame = element_to_cells(&g, 60, 4);
+        let first = frame.split("\r\n").next().unwrap_or("");
+        // The cell bg (60,50,80 = 3c3250) is present and fills past the 2-char
+        // label toward its column width.
+        assert!(first.contains("48;2;60;50;80"), "grid cell bg present: {first:?}");
+    }
+
+    #[test]
+    fn paragraph_bg_fills_wrap_width() {
+        // A bg-carrying paragraph paints every wrapped line out to the wrap width
+        // (Go's paragraph box width = wrapW), not just to the text.
+        let t: Element<()> = node(
+            vec![
+                Attribute::AttrStyle("__paragraph".into(), "true".into()),
+                Attribute::AttrBgColor(rgb(35, 40, 55)),
+            ],
+            vec![Element::Text("alpha beta gamma delta epsilon".into())],
+        );
+        let frame = element_to_cells(&t, 20, 6);
+        // Every text row carries the paragraph bg filling to ~20 cells.
+        let body: Vec<&str> = frame.split("\r\n").filter(|l| l.contains("48;2;35;40;55")).collect();
+        assert!(!body.is_empty(), "paragraph bg present on wrapped lines: {frame:?}");
+        let first = body.first().copied().unwrap_or("");
+        // The bg run pads the wrapped line out (≥ several trailing bg spaces).
+        assert!(first.matches(' ').count() >= 3, "paragraph bg pads to wrap width: {first:?}");
     }
 
     #[test]
