@@ -17,6 +17,67 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 13:00 — Security audit fixes, batch 4 (remaining actionable highs + console DiD)
+
+Closed the last of the audit-actionable critical+high findings (the earlier
+batches landed in 3b35ba52 / 7954f82d / 94756941). All in-bound, root-cause, no
+deferral. `cargo test --features full` green (28 + 6 + others).
+
+**What/why:**
+- **email.rs** `send_ses` — SSRF: `cfg.region` is interpolated into the SES host
+  (`email.{region}.amazonaws.com`) + the SigV4 credential scope. Validate
+  `[a-z0-9-]` before use → a crafted region can no longer redirect the signed
+  request to an arbitrary host.
+- **html.rs** `render_into` — tag names, attribute keys, and event names are
+  emitted UNESCAPED → injection/XSS via `Std.Html.node` / `attribute` / event
+  handlers (the name is a Sky `String`, can be attacker-derived). New
+  `is_safe_html_name` (`[A-Za-z0-9-_:.]` only); invalid name drops the
+  element / attr / event marker rather than emitting it.
+- **http_client.rs** `do_request` — unbounded `resp.text()` buffered the whole
+  response body into a `String` → OOM DoS from an upstream-controlled body. New
+  `read_body_capped` caps at 100 MiB (`SKY_HTTP_MAX_BODY_BYTES`): fail-fast on
+  `Content-Length` over cap + incremental enforcement while streaming. Streaming
+  consumers use `Http.Stream`.
+- **server.rs** `ws_origin_matches` — CSWSH glob bypass: a `*` could span a URL
+  delimiter (`/ @ ? #`) so the trusted literal suffix sat behind a path/userinfo
+  segment (`https://evil.com/.example.com` matched `https://*.example.com`).
+  Wildcard spans that precede a literal anchor are now host-only
+  (`[A-Za-z0-9.:-]`); explicit allow-all `*` / trailing-`*` preserved.
+  +regression assertions.
+- **live/store.rs** — unbounded `mem_cache` on the sqlite/postgres/redis session
+  stores: live handles were never evicted, so a cookie-less request flood grew
+  RAM without bound (session-DoS). Cache is now `(handle, Instant)` (mirror
+  MemoryStore), touched on `get`, idle-TTL-evicted in each `sweep` (+ a new redis
+  sweep). Evicted-but-valid sessions re-hydrate Cold from the checkpoint.
+- **console_proxy.rs** — added a defense-in-depth `console::gate_blocked` per
+  request. The audit's "proxy missing per-request auth" was a FALSE POSITIVE:
+  the outermost `observability::track` middleware already gates every
+  `/_sky/console*` request (in-process AND proxied) through the same gate. The
+  second call hardens the high-value surface against a future router change.
+
+**Ledger reconciliation:** several deferred ⏸️ items proved already-shipped or
+false-positives: CSRF middleware + security headers (csrf.rs — shipped),
+`crypto.rs randomBytes` return type (already `Task Error String`), console
+per-request auth (middleware-layer protection). Updated CODE-REVIEW.md.
+
+**Still open (summarized to user, not fixed):** `app/Main.hs` shell-injection
+via `[go.dependencies]` / verify `method` spliced into `sh -c` (OUT OF BOUNDARY —
+shared CLI/Go-path; flag upstream); `SKY_CONSOLE_AUTH=app`/token cookie+login
+flow (console.rs fails closed 501/Bearer-only — subsystem port); assorted MED
+Go-parity correctness gaps needing fixture corpora (math float→int saturation,
+path dir/ext, log `*With` attr rendering, ws close-code truncation, escape_attr
+`&quot;` vs Go `&#34;`).
+
+**Affected:** `runtime-rust/src/sky_runtime/email.rs`,
+`runtime-rust/src/sky_runtime/html.rs`,
+`runtime-rust/src/sky_runtime/http_client.rs`,
+`runtime-rust/src/sky_runtime/server.rs`,
+`runtime-rust/src/sky_runtime/live/store.rs`,
+`runtime-rust/src/sky_runtime/live/console_proxy.rs`,
+`runtime-rust/docs/CODE-REVIEW.md`.
+
+---
+
 ## 2026-06-20 04:30 — Go≡Rust rendered-output equivalence tests (live HTML + Tui grid)
 
 **What.** New `equiv-render.sh` + two normalisers under `scripts/lib/` add STRICT
