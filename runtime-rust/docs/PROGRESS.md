@@ -17,6 +17,35 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 00:30 — Root-cause + mitigate 12-skyvote / 17-skymon CI Playwright timeout (suggestion #6)
+
+**Root cause.** Both examples have CUSTOM browser scenarios in the shared
+`scripts/verify-scenarios.mjs` that are NAVIGATION-HEAVY:
+- `skyvote` — visits /about + /roadmap, signs up (DB write), submits an idea (DB
+  write), upvotes (DB write), signs out: ~6 full `gotoAndSettle` navigations each
+  with a settle wait, plus form fills.
+- `skymon` — `gotoAndSettle` over 5 pages (`/`, `/status`, `/settings`, `/alerts`,
+  `/auth`) with a 1s settle each.
+
+On a shared CI runner under build+browser load, the cumulative Playwright
+navigation + settle time exceeds the 30s `SCENARIO_TIMEOUT_MS` default. The time
+is dominated by browser navigation + settle + runner load, NOT backend speed —
+which is exactly why the GO reference times out IDENTICALLY (→ amber
+`go-ref-broken`, already non-failing per the sweep's RED→AMBER downgrade). So this
+is a harness/load issue, NOT a Rust-backend defect.
+
+**Mitigation.** Raise `SKY_SCENARIO_TIMEOUT_MS` to 90000 (3×) in the examples-sweep
+CI job env — the per-scenario ceiling is already env-overridable; the local
+default stays 30s. Gives a slow-but-correct round-trip room to complete on a
+loaded runner, which should turn 12/17 from amber → green. (Validated on the next
+CI sweep per the no-local-sweeps policy; the navigation-heavy scenarios can't be
+meaningfully reproduced on the slim local box.)
+
+**Affected.** `.github/workflows/examples-sweep.yml` (`SKY_SCENARIO_TIMEOUT_MS`
+job env).
+
+---
+
 ## 2026-06-19 21:40 — Go≡Rust equivalence-fixture corpus (suggestion #8)
 
 **What.** New `runtime-rust/scripts/equiv-corpus.sh` — a curated set of small,

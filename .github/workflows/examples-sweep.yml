@@ -117,6 +117,15 @@ jobs:
       # a transient registry/network failure as a backstop.)
       CARGO_HTTP_MULTIPLEXING: 'false'
       CARGO_NET_RETRY: '5'
+      # Browser-scenario headroom on a loaded CI runner. The navigation-heavy live
+      # scenarios — skyvote (sign-up + submit + upvote across 6 page navigations,
+      # each a DB write) and skymon (5 full-page navigations × a 1s settle) — are
+      # dominated by Playwright navigation + settle time under shared-runner load,
+      # NOT backend speed, so they intermittently exceed the 30s local default on
+      # BOTH backends (the Go reference times out identically → an amber
+      # go-ref-broken, not a Rust defect). Triple the per-scenario ceiling on CI so
+      # a slow-but-correct round-trip completes; the local default stays 30s.
+      SKY_SCENARIO_TIMEOUT_MS: '90000'
 
     steps:
       # On a scheduled run `github.ref` is the default branch — force the Rust
