@@ -17,6 +17,35 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-19 19:45 — Stop example DBs leaking into the repo root (sweep + perf runner cwd isolation)
+
+**What.** Example binaries that open a cwd-relative `./*.db` (Sky.Db / Sky.Live
+sqlite store / a CLI todo DB) were writing it into the REPO ROOT, because the
+sweep + perf runners invoke the binary with cwd = repo root. 21 stray files had
+accumulated (`chat.db`, `composite-server.db`, `dbdec-probe.db`, `skychess.db`,
+`skymon.db`, `skyvote.db`, `todos.db` × {.db, -shm, -wal}). They were already
+gitignored (never committed) but cluttered the working tree.
+
+**Fix — run every example binary from an ephemeral TMPDIR scratch cwd:**
+- `lib/checks.sh`: `exercise_server`/`exercise_live` already isolated cwd; added
+  the same isolation to `exercise_cli`, `exercise_tui`, `exercise_webview` (new
+  shared `_abs_bin` helper absolutises the binary before the `cd`). So the
+  examples-sweep RUN + cli-stdout EQUIV paths land DB state in TMPDIR, never root.
+- `rust-perf.sh`: the 4 binary-launch sites (`probe_coldstart_cli` hyperfine,
+  `probe_coldstart_server`, `start_server`, `probe_rss_cli` time -v) now launch
+  via `( cd "$(perf_app_cwd)" && … )`. `perf_app_cwd` hands out fresh dirs under
+  one per-run parent that `run_one`/`baseline` wipe via `perf_cwd_cleanup`.
+
+**Verified.** Wiped the 21 root files. Ran `exercise_cli` from the repo root on
+`17-db-todo-cli` and the `kernel-parity-probe-dbdec` probe (the latter opens a DB
+at startup → previously wrote `dbdec-probe.db` to root): repo root stays clean,
+exit 0. `bash -n` clean on both scripts; `examples_test.sh` 8/8 ok.
+
+**Affected.** `runtime-rust/scripts/lib/checks.sh`,
+`runtime-rust/scripts/rust-perf.sh`.
+
+---
+
 ## 2026-06-19 19:10 — Std.Log.*With now flatten attrs onto the line (Go-parity), via SkyStringify bound
 
 **What.** `Log.{info,error,warn,debug}With : String -> List a -> Task` previously

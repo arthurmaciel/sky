@@ -29,6 +29,20 @@ SSE_EVENTS="${SSE_EVENTS:-2000}"; SSE_CONC="${SSE_CONC:-16}"; COLD_RUNS="${COLD_
 AB_FLAGS="-r"
 SSE_BIN="$REPO_ROOT/tools/sse-bench/target/release/sse-bench"
 
+# ── Ephemeral cwd for app launches (no repo-root leak) ──────────────────────
+# This script runs from $REPO_ROOT (line "cd "$REPO_ROOT""), so an app that
+# opens a cwd-relative `./*.db` (Sky.Db / Sky.Live sqlite store / a CLI todo DB)
+# would write it INTO the repo root and leak there (chat.db, skymon.db,
+# skyvote.db, todos.db, …). Every app binary is launched via a
+# `( cd "$(perf_app_cwd)" && … )` subshell so that state lands in TMPDIR instead.
+# All scratch dirs live under one parent that run_one/baseline wipe when done.
+PERF_CWD_ROOT=""
+perf_app_cwd() { # -> a fresh scratch dir under the per-run parent
+  [ -n "$PERF_CWD_ROOT" ] || PERF_CWD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sky-perf-cwd.XXXXXX")"
+  mktemp -d "$PERF_CWD_ROOT/run.XXXXXX"
+}
+perf_cwd_cleanup() { [ -n "$PERF_CWD_ROOT" ] && rm -rf "$PERF_CWD_ROOT"; PERF_CWD_ROOT=""; }
+
 # Pass numeric values via sys.argv so they are DATA, not source.
 # Usage: pyf EXPR VAL...  where EXPR uses a[0], a[1], … for the values.
 # The expression itself is a fixed string written by this script, never
@@ -85,7 +99,7 @@ free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0)
 probe_binsize() { stat -c%s "$1"; }
 
 probe_coldstart_cli() { # $1=binary -> median ms
-  hyperfine --warmup 3 --runs "$COLD_RUNS" --export-json /tmp/perf-hf.json "$1" >/dev/null 2>&1 || { echo 0; return; }
+  ( cd "$(perf_app_cwd)" && hyperfine --warmup 3 --runs "$COLD_RUNS" --export-json /tmp/perf-hf.json "$1" ) >/dev/null 2>&1 || { echo 0; return; }
   python3 -c 'import json;d=json.load(open("/tmp/perf-hf.json"));print(d["results"][0]["median"]*1000)'
 }
 
@@ -124,7 +138,7 @@ probe_coldstart_server() { # $1=binary -> median ms (exec→first 200)
   local samples=() i port pid t0 log deadline lp ok
   for i in $(seq 1 "$COLD_RUNS"); do
     port=$(free_port); log="$(mktemp)"; t0=$(date +%s.%N)
-    SKY_LIVE_PORT="$port" PORT="$port" "$1" >"$log" 2>&1 & pid=$!
+    ( cd "$(perf_app_cwd)" && exec env SKY_LIVE_PORT="$port" PORT="$port" "$1" ) >"$log" 2>&1 & pid=$!
     ok=""; deadline=$(( $(date +%s) + ${READY_TIMEOUT_S%.*} ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
       kill -0 "$pid" 2>/dev/null || break
@@ -149,7 +163,7 @@ start_server() { # $1=binary -> echoes "pid port"
   # honours SKY_LIVE_PORT) only if the app prints nothing.
   local port; port=$(free_port)
   local log; log="$(mktemp)"
-  SKY_LIVE_PORT="$port" PORT="$port" "$1" >"$log" 2>&1 & local pid=$!
+  ( cd "$(perf_app_cwd)" && exec env SKY_LIVE_PORT="$port" PORT="$port" "$1" ) >"$log" 2>&1 & local pid=$!
   local actual="" deadline; deadline=$(( $(date +%s) + ${READY_TIMEOUT_S%.*} ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     kill -0 "$pid" 2>/dev/null || { rm -f "$log"; return 1; }
@@ -397,7 +411,7 @@ collect_server_metrics() { # $1=binary $2=exampleDir -> metric lines
   pkill -P "$pid" 2>/dev/null; kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 }
 
-probe_rss_cli() { timeout 30 /usr/bin/time -v "$1" </dev/null 2>/tmp/perf-time.txt >/dev/null || true; awk '/Maximum resident set size/{print $NF}' /tmp/perf-time.txt; }
+probe_rss_cli() { ( cd "$(perf_app_cwd)" && timeout 30 /usr/bin/time -v "$1" </dev/null ) 2>/tmp/perf-time.txt >/dev/null || true; awk '/Maximum resident set size/{print $NF}' /tmp/perf-time.txt; }
 
 probe_rss_server() { # $1=binary -> peak RSS KB under load
   local pp; pp=$(start_server "$1") || { echo 0; return; }
@@ -523,6 +537,7 @@ run_one() { # $1=example -> table + exit code
     json="$json\"$m\":{\"go\":$(numval "${GO[$m]}"),\"rust\":$(numval "${RUST[$m]:-}")},"
   done
   echo "${json%,}}}" > "/tmp/rust-perf-$ex.json"
+  perf_cwd_cleanup
   return $fail
 }
 
@@ -580,6 +595,7 @@ print(m, min(sd/m if m else 0.0, 0.45))')
       fi
     done
   done
+  perf_cwd_cleanup
   echo "wrote $THRESH"; cat "$THRESH"
 }
 

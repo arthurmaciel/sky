@@ -182,9 +182,18 @@ resolve_bin() {
 # but the driver can't find its dir → drive it as a server boot check instead.
 browser_drivable() { case "$1" in examples/rust/*) return 1;; *) return 0;; esac; }
 
+# _abs_bin <path> -> absolute path (passthrough if already absolute). Needed
+# before a `cd <scratch>` so a relative binary path still resolves after the cd.
+_abs_bin() { case "$1" in /*) printf '%s\n' "$1";; *) printf '%s/%s\n' "$(cd "$(dirname "$1")" 2>/dev/null && pwd)" "$(basename "$1")";; esac; }
+
 # ════════════════════════════════════════════════════════════════════════════
 # exercise_* — drive an already-built binary per shape. 0=pass / 1=fail.
 # Each writes the binary's stdout+stderr to <logfile>.
+#
+# ISOLATED CWD (all shapes): every binary is launched from a fresh TMPDIR scratch
+# dir so any cwd-relative state it opens (a `./*.db` sqlite store, an export file)
+# lands there, NEVER in the repo root the sweep is invoked from (the source of the
+# leaked chat.db / skymon.db / todos.db / dbdec-probe.db files).
 # ════════════════════════════════════════════════════════════════════════════
 
 # exercise_cli <bin> <logfile> [timeout]
@@ -192,16 +201,23 @@ browser_drivable() { case "$1" in examples/rust/*) return 1;; *) return 0;; esac
 # that isn't 124 is NOT a failure by itself (a cli may exit non-zero by design,
 # e.g. System.exit n) — the gate is panic/hang. Stdout+stderr → logfile.
 exercise_cli() {
-  local bin="$1" log="$2" tmo="${3:-25}" rc tries=0
+  local bin="$1" log="$2" tmo="${3:-25}" rc tries=0 abin run_dir
+  abin="$bin"; case "$bin" in /*) ;; *) abin="$(cd "$(dirname "$bin")" 2>/dev/null && pwd)/$(basename "$bin")";; esac
+  # ISOLATED CWD: run in a fresh ephemeral dir so any cwd-relative state a CLI
+  # opens (a `./*.db` sqlite todo store, an exported file) is born clean AND lands
+  # in TMPDIR — never the repo root the sweep is invoked from (the source of the
+  # leaked todos.db / dbdec-probe.db). Mirrors exercise_server's isolation.
+  run_dir="$(mktemp -d "${TMPDIR:-/tmp}/sky-cli.XXXXXX")"
   # A freshly-built/copied binary can be ETXTBSY (the builder's write fd not yet
   # released) → exec fails 126 "Text file busy" (locale-dependent text), which
   # would be captured as the program's "output" and false-DIFFER against the
   # other backend. Retry briefly until it's executable.
   while :; do
-    timeout "$tmo" "$bin" >"$log" 2>&1 </dev/null; rc=$?
+    ( cd "$run_dir" && exec timeout "$tmo" "$abin" ) >"$log" 2>&1 </dev/null; rc=$?
     { [ "$rc" = 126 ] || grep -qiE 'text file busy|texto ocupada|ETXTBSY' "$log" 2>/dev/null; } || break
     tries=$((tries+1)); [ "$tries" -ge 10 ] && break; sync; sleep 0.4
   done
+  rm -rf "$run_dir" 2>/dev/null
   if   [ "$rc" = 124 ]; then return 1
   elif grep -qiE "$PANIC_RE" "$log"; then return 1
   fi
@@ -293,14 +309,16 @@ exercise_live() {
 # its isatty() check passes. We use it instead of SKIPping. The Linux branch is
 # the default and is byte-identical to the pre-existing line.
 exercise_tui() {
-  local bin="$1" log="$2"
+  local bin="$1" log="$2" abin run_dir
+  abin="$(_abs_bin "$bin")"                                   # absolutise before cd
+  run_dir="$(mktemp -d "${TMPDIR:-/tmp}/sky-tui.XXXXXX")"     # isolated cwd (no repo-root leak)
   case "$SKY_HOST_OS" in
     macos)
       # BSD script: command + args follow the typescript file (/dev/null here).
       if command -v script >/dev/null 2>&1; then
-        script -q /dev/null timeout 8 "$bin" >"$log" 2>&1 </dev/null
+        ( cd "$run_dir" && script -q /dev/null timeout 8 "$abin" ) >"$log" 2>&1 </dev/null
       else
-        printf 'SKIP (macos: no `script` for pty)\n' >"$log"; return "$EXERCISE_SKIP_RC"
+        printf 'SKIP (macos: no `script` for pty)\n' >"$log"; rm -rf "$run_dir" 2>/dev/null; return "$EXERCISE_SKIP_RC"
       fi
       ;;
     windows)
@@ -310,6 +328,7 @@ exercise_tui() {
       # Windows is ConPTY (e.g. node-pty) — not yet wired — so SKIP for now rather
       # than emit a false notty failure. (webview/server/cli all RUN on Windows.)
       printf 'SKIP (windows: headless pty needs ConPTY/node-pty — not yet wired)\n' >"$log"
+      rm -rf "$run_dir" 2>/dev/null
       return "$EXERCISE_SKIP_RC"
       ;;
     *)
@@ -317,11 +336,13 @@ exercise_tui() {
       # binary path is interpolated into a command line — shell-quote it with
       # printf %q so a path containing a quote/space/metachar can't break out of
       # the quoting (defence-in-depth; paths come from controlled target dirs).
+      # q_bin uses the ABSOLUTE path so it still resolves after the cd.
       local q_bin
-      printf -v q_bin '%q' "$bin"
-      script -qec "timeout 8 $q_bin" /dev/null >"$log" 2>&1 </dev/null
+      printf -v q_bin '%q' "$abin"
+      ( cd "$run_dir" && script -qec "timeout 8 $q_bin" /dev/null ) >"$log" 2>&1 </dev/null
       ;;
   esac
+  rm -rf "$run_dir" 2>/dev/null
   if   grep -qiE "$PANIC_RE" "$log"; then return 1
   elif grep -qiE "not a tty|inappropriate ioctl|TERM environment" "$log"; then return 1
   fi
@@ -345,24 +366,27 @@ exercise_tui() {
 # Returns EXERCISE_SKIP_RC when the host genuinely can't run it (so the caller can
 # record SKIP). The Linux xvfb path is byte-identical to before.
 exercise_webview() {
-  local bin="$1" log="$2"
+  local bin="$1" log="$2" abin run_dir
+  abin="$(_abs_bin "$bin")"                                       # absolutise before cd
+  run_dir="$(mktemp -d "${TMPDIR:-/tmp}/sky-webview.XXXXXX")"     # isolated cwd (no repo-root leak)
   case "$SKY_HOST_OS" in
     macos)
-      timeout 8 "$bin" >"$log" 2>&1 </dev/null
+      ( cd "$run_dir" && timeout 8 "$abin" ) >"$log" 2>&1 </dev/null
       ;;
     windows)
       # GUI .exe may ignore SIGTERM → `-k 5` escalates to SIGKILL 5s later.
-      timeout -k 5 8 "$bin" >"$log" 2>&1 </dev/null
+      ( cd "$run_dir" && timeout -k 5 8 "$abin" ) >"$log" 2>&1 </dev/null
       ;;
     *)
       # linux — unchanged; caller still owns the xvfb-run-absent SKIP, but guard
       # here too so a direct call degrades to SKIP instead of "command not found".
       if ! command -v xvfb-run >/dev/null 2>&1; then
-        printf 'SKIP (linux: xvfb-run not installed)\n' >"$log"; return "$EXERCISE_SKIP_RC"
+        printf 'SKIP (linux: xvfb-run not installed)\n' >"$log"; rm -rf "$run_dir" 2>/dev/null; return "$EXERCISE_SKIP_RC"
       fi
-      xvfb-run -a timeout 8 "$bin" >"$log" 2>&1 </dev/null
+      ( cd "$run_dir" && xvfb-run -a timeout 8 "$abin" ) >"$log" 2>&1 </dev/null
       ;;
   esac
+  rm -rf "$run_dir" 2>/dev/null
   grep -qiE "$PANIC_RE" "$log" && return 1
   return 0
 }
