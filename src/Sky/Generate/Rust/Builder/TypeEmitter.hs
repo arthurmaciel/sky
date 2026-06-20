@@ -9,7 +9,7 @@ module Sky.Generate.Rust.Builder.TypeEmitter
   , paramTypeToRust
   ) where
 
-import Data.List (intercalate, sortBy, stripPrefix)
+import Data.List (intercalate, isPrefixOf, sortBy, stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Sky.AST.Canonical as Can
 import Sky.Generate.Rust.Builder.Types (RustTypeDef(..), runtimeOpaqueTypes)
@@ -97,9 +97,17 @@ unionToRustTypeDef recordMap skyModName modPrefix typeName (Can.Union uvars alts
         -- bare `any` field produced on a non-generic enum.
         _ | null uvars                       -> Just "HashMap<String, String>"
           | otherwise                        -> Nothing
+    -- Self-recursive iff the field renders to the enum's OWN Rust name: either
+    -- exactly (`Length`, non-generic) OR the name followed by `<` (a generic
+    -- self-edge like `MainTree<A>` for `type Tree a = Node a (Tree a)`). The
+    -- `<` guard avoids a false match on a different type sharing the prefix
+    -- (`MainTreeNode`). `Vec<Self>` / `SkyMaybe<Self>` render to a different head
+    -- and stay unboxed (already heap/finite). MUST match the construction-side
+    -- (`ctorBoxedPositions`) and pattern-deref predicates in ExprEmitter.
     boxIfRecursive t =
         let r = typeToRustString recordMap t
-        in if r == selfRustName then "Box<" ++ r ++ ">" else r
+        in if r == selfRustName || (selfRustName ++ "<") `isPrefixOf` r
+           then "Box<" ++ r ++ ">" else r
     renderField ctorName t = case t of
         Can.TVar "any" | Just concrete <- anyCarrierField ctorName -> concrete
         _                                                          -> boxIfRecursive t

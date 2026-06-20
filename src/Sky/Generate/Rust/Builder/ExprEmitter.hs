@@ -2984,8 +2984,11 @@ emitDefaultCall ctx fn calleeName args =
             Ann.At _ (Can.VarCtor _ _ _ cn _)
                 | Just fieldTys <- Map.lookup cn (ecCtorFieldTypes ctx) ->
                     let typeRust = takeWhile (/= ':') calleeName
+                    -- Head-match (exact OR `Name<…>`) so a GENERIC self-edge
+                    -- (`MainTree<A>`) boxes too — must mirror TypeEmitter.boxIfRecursive.
                     in [ i | (i, t) <- zip [0 :: Int ..] fieldTys
-                           , typeToRustString (ecRecordMap ctx) t == typeRust ]
+                           , let r = typeToRustString (ecRecordMap ctx) t
+                           , r == typeRust || (typeRust ++ "<") `isPrefixOf` r ]
             _ -> []
         -- A param typed `Arc<dyn Fn(String) -> ..>` / `Arc<dyn Fn(Bool) -> ..>`
         -- is an event-callback slot (the `String -> msg` / `Bool -> msg` handler
@@ -3708,7 +3711,10 @@ branchToRustString ctx (Can.CaseBranch pat body) =
                 , let fieldTys = ctorPatFieldTypes
                 , boxedVars <- [ v | (i, Can.PatternCtorArg _ _ argPat) <- zip [0 :: Int ..] ctorArgs
                                    , i < length fieldTys
-                                   , typeToRustString (ecRecordMap ctx) (fieldTys !! i) == pTypeRust
+                                   , let rField = typeToRustString (ecRecordMap ctx) (fieldTys !! i)
+                                   -- Head-match (exact OR `Name<…>`) — mirror the
+                                   -- type + construction sides so a generic self-edge derefs.
+                                   , rField == pTypeRust || (pTypeRust ++ "<") `isPrefixOf` rField
                                    , not (null pTypeRust)
                                    , v <- patBindingVars argPat ]
                 , not (null boxedVars) ->
