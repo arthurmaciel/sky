@@ -1,61 +1,43 @@
-# Sky Rust Runtime
+# Sky Rust backend
 
-I learned about Sky in the middle of April 2026 and quickly started to admire the language 
-project. As I have studied Rust in the last year, I had the idea to implement a new **experimental** 
+```
+ATTENTION: the Rust backend is still **experimental**. Don't use it for production yet.
+```
+---
+
+## Introduction 
+
+Sky is an awesome language! Industrial-grade code and utilitites, a really nice author
+and a broad vision towards the future.
+
+As I have studied Rust in the last year, I thought about implementing a new **experimental** 
 backend with it. 
 
-The Sky author shared his initial thought of using Rust as a target language, but choose Go 
-due to Rust type system, that would block 'universal' and automatic FFI.
+The Sky author shared his initial thoughts on using Rust as the target language. He chose Go 
+due to Rust type system, which would block universal/automatic [Foreign Function Interface](https://en.wikipedia.org/wiki/Foreign_function_interface) (FFI).
 
-In fact, that is the case. But when I faced the FFI limits, I decided to pursue the following
-goals:
+In fact, that is the case. But even with that limitation, I tried to achieve the following goals
+with the project:
 
-- Have a Rust backend for real use
-- Test the limits of Sky FFI to Rust (complex lifetimes, generics, traits etc)
-- Learn more about Rust itself
-- Learn more about compilers
-- See the limits of AI tooling on a practical and complex project
+- have a Rust backend for actual use
+- understand the limits of FFI to Rust (complex lifetimes, generics, traits etc)
+  learn more about Rust itself
+- learn more about compilers
+- learn the limits of AI tooling on a practical and complex project
 
+If you want, get to know more about the project **[principles](docs/PRINCIPLES.md)**.
 
-## Contract
+---
 
-The Rust backend is **experimental**. Don't use it for production yet.
+### Limitations
 
-Its principles declaration is:
+Sky and its default Go backend are heavily and quickly developed by its author. 
+Keeping the Rust backend up-to-date is difficult.
 
-> **Principles — applied to every change, in this strict priority order:**
-> **1. Security · 2. Correctness · 3. Soundness · 4. Efficiency · 5. Completeness · 6. Readability.**
-> A lower principle never justifies compromising a higher one (a readable name
-> that breaks correctness is rejected; an efficient path that opens a soundness
-> hole is rejected).
+At the moment the Rust backend reaches full behavioral parity with the Go reference. 
+But usually **expect a one-month delay to Go backend parity**.
 
-Code changes must not hurt any of these principles. If at a specific decision those principles conflict, 
-the priority order should guide the choices for human and artificial agents. 
-
-The Rust backend must **mirror** Go backend functionality and look for byte-equality results. If not 
-possible, the divergence must be logged here.
-There is no commitment about implementation parity - Rust should be idiomatic.
-
-The backend must have the smallest footprint at Sky project code base as possible, changing
-only necessary files.
-
-
-### Limitations to the contract
-
-**Expect a one-month parity delay**.
-
-Sky is heavily and quickly developed by its author. It provides industrial-grade source 
-code and utilities ("batteries included" -> I read it as "power plant included"). 
-
-So keeping the Rust backend up-to-date is difficult and demands careful orchestration. 
-
-Anyway, at the moment the backend reaches full behavioral parity with the Go reference, 
-holding four hard rules: no panic vector, no runtime error from well-typed Sky, as few `Any`
-as possible in generated code (fully-typed codegen), no change to Sky/Go source or 
-the upstream examples. 
-
-Fixes are root-cause only. Where Rust implements a mechanism differently from Go to hold
-those guarantees, that *mechanism* divergence is recorded in
+Where Rust implements a mechanism differently from Go, the divergence is recorded in
 **[Rust vs Go backend — divergent implementation strategies](docs/TECHNICAL-DETAILS.md#rust-vs-go-backend--divergent-implementation-strategies)**.
 
 
