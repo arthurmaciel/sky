@@ -7,7 +7,7 @@ ATTENTION: the Rust backend is still **experimental**. Don't use it for producti
 
 ## Introduction 
 
-Sky is an awesome language! Industrial-grade code and utilitites, a really nice author
+Sky is an awesome language! Industrial-grade code and utilities, a really nice author
 and a broad vision towards the future.
 
 As I have been learning Rust, I thought about implementing a new **experimental** 
@@ -15,11 +15,11 @@ backend with it.
 
 Goals:
 
-- have a Sky -> Rust backend for actual use
+- have a Sky -> Rust backend for real-world use
 - understand the limits of [FFI](https://en.wikipedia.org/wiki/Foreign_function_interface) to Rust (complex lifetimes, generics, traits etc)
 - learn more about Rust itself
 - learn about compilers
-- learn the limits of AI tooling on a practical and complex project
+- understand the limits of AI tooling on a practical and complex project
 
 If you want, get to know more about the project **[principles](docs/PRINCIPLES.md)**.
 
