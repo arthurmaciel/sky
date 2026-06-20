@@ -81,6 +81,9 @@ struct Walked {
     /// The raw `Ui.width` `Length`, if any. `None` (or `Content`) → content-sized.
     /// Resolved to cells lazily (avail_w + canvas are only known at render time).
     width: Option<Length>,
+    /// The raw `Ui.height` `Length`, if any. `None`/`Content` → content-sized;
+    /// `Px`/`Vh`/`Min`/`Max` give a fixed row count (apply_self_height).
+    height: Option<Length>,
     style: Style,
     /// `__grid` marker present (`Ui.grid`). Children flow row-major into auto-flow
     /// columns sized off `grid_min_px` (Go's `box.gridLayout`).
@@ -139,6 +142,32 @@ fn width_length<M>(attrs: &[Attribute<M>]) -> Option<Length> {
         Attribute::AttrWidth(l) => Some(l.clone()),
         _ => None,
     })
+}
+
+/// The `Ui.height` `Length` on a node, if present.
+fn height_length<M>(attrs: &[Attribute<M>]) -> Option<Length> {
+    attrs.iter().find_map(|a| match a {
+        Attribute::AttrHeight(l) => Some(l.clone()),
+        _ => None,
+    })
+}
+
+/// Resolve a NON-fill height `Length` to explicit ROWS. `None` → content-sized.
+/// The y-axis analogue of `resolve_fixed_w` (cells_y for px, canvas.rows for vh).
+fn resolve_fixed_h(l: &Length, canvas: Canvas) -> Option<usize> {
+    match l {
+        Length::Px(n) => Some(canvas.cells_y(*n).max(1)),
+        Length::Vh(p) => Some(canvas.rows.saturating_mul((*p).max(0) as usize) / 100),
+        Length::Content | Length::Fill(_) | Length::Vw(_) => None,
+        Length::Min(n, inner) => {
+            let mn = canvas.cells_y(*n);
+            Some(resolve_fixed_h(inner, canvas).map_or(mn, |c| c.max(mn)))
+        }
+        Length::Max(n, inner) => {
+            let mx = canvas.cells_y(*n);
+            Some(resolve_fixed_h(inner, canvas).map_or(mx, |c| c.min(mx)))
+        }
+    }
 }
 
 /// `(portion, min_cells, max_cells)` for a fill child (see `fill_spec`).
@@ -459,6 +488,7 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         pad_bottom: 0,
         pad_left: 0,
         width: width_length(attrs),
+        height: height_length(attrs),
         style: inherited,
         is_grid: false,
         is_paragraph: false,
@@ -1056,6 +1086,7 @@ fn render_node<M: Clone>(
                     }
                 };
                 apply_self_width(&mut inner.block, &w, content_avail, ctx.canvas);
+                apply_self_height(&mut inner.block, &w, ctx.canvas);
                 inner
             };
             let padded = apply_padding(inner, &w, ctx.canvas, w.style);
@@ -1332,6 +1363,29 @@ fn apply_self_width(block: &mut Block, w: &Walked, content_avail: usize, _canvas
     let sized = !matches!(w.width, None | Some(Length::Content));
     if sized {
         block.set_width(content_avail, w.style.bg);
+    }
+}
+
+/// Hold a box to its declared `Ui.height` (Px/Vh/Min/Max): pad short blocks with
+/// bg-filled blank rows, clip tall ones. A `None`/`Content`/`Fill` height is
+/// content-sized (no change). Was missing entirely → fixed-height boxes collapsed
+/// to their content height (audit #1/#15).
+fn apply_self_height(block: &mut Block, w: &Walked, canvas: Canvas) {
+    let rows = match &w.height {
+        Some(l) => match resolve_fixed_h(l, canvas) {
+            Some(r) => r,
+            None => return,
+        },
+        None => return,
+    };
+    let width = block.width();
+    if block.lines.len() > rows {
+        block.lines.truncate(rows.max(1));
+    } else {
+        let blank = vec![Run { text: " ".repeat(width), style: Style { bg: w.style.bg, ..Style::default() } }];
+        while block.lines.len() < rows {
+            block.lines.push(blank.clone());
+        }
     }
 }
 
