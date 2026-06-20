@@ -92,11 +92,15 @@ struct Walked {
     /// `__gridMin` value — the minimum column WIDTH in logical px (set by
     /// `Ui.gridColumns N`). The actual column COUNT is `availW / cells_x(min)`.
     grid_min_px: i64,
-    /// Border frame: `(color, style)` present when `Border.width > 0`. The colour
-    /// is `None` when only width (no `Border.color`) was given — glyphs then keep
-    /// the inherited fg, matching Go's `drawBorder` (sets fg only when colour set).
-    border: Option<(Option<(u8, u8, u8)>, String)>,
+    /// Border frame, present when `Border.width > 0`. See [`BorderSpec`].
+    border: Option<BorderSpec>,
 }
+
+/// A border frame's `(colour, style)`. The colour is `None` when only width (no
+/// `Border.color`) was given — glyphs then keep the inherited fg, matching Go's
+/// `drawBorder` (which sets the glyph fg only when the border colour is set). The
+/// style string is one of `solid` / `dashed` / `dotted` (anything else → solid).
+type BorderSpec = (Option<(u8, u8, u8)>, String);
 
 /// The `Ui.width` `Length` on a node, if present.
 fn width_length<M>(attrs: &[Attribute<M>]) -> Option<Length> {
@@ -619,7 +623,7 @@ fn render_input<M: Clone>(
                 let (cl, cc) = cursor_line_col(&runes, cursor);
                 if focused { Some((cl, cc)) } else { None }
             };
-            let mut block = if masked {
+            let block = if masked {
                 Block::single("•".repeat(st.buffer.chars().count()), run_style)
             } else if st.buffer.is_empty() && !focused {
                 // Empty + unfocused: italic placeholder when present, else empty
