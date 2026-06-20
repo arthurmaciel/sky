@@ -228,6 +228,55 @@ impl Block {
             }
         }
     }
+    /// Constrain every line to EXACTLY `w` cells, filling the slack with the input
+    /// TRACK (`░` in `track_fg` over `bg`) instead of plain spaces — mirrors Go's
+    /// `paintInputBufferAdvanced`, which paints a shaded track across the whole
+    /// field so its bounds stay visible even when empty. Real content (clipped to
+    /// `w`) stays painted over the track. The cursor run keeps its own style.
+    fn fill_input_track(&mut self, w: usize, bg: Option<(u8, u8, u8)>, track_fg: (u8, u8, u8)) {
+        let track_run = |n: usize| Run {
+            text: "░".repeat(n),
+            style: Style { fg: Some(track_fg), bg, ..Style::default() },
+        };
+        for line in &mut self.lines {
+            let lw: usize = line.iter().map(Run::width).sum();
+            if lw > w {
+                // Clip to `w` cells (reuse the same per-rune walk as set_width).
+                let mut kept: Vec<Run> = Vec::new();
+                let mut used = 0usize;
+                for run in line.iter() {
+                    if used >= w {
+                        break;
+                    }
+                    let rw = run.width();
+                    if used + rw <= w {
+                        kept.push(run.clone());
+                        used += rw;
+                    } else {
+                        let mut text = String::new();
+                        let mut tw = 0usize;
+                        for ch in run.text.chars() {
+                            let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                            if used + tw + cw > w {
+                                break;
+                            }
+                            text.push(ch);
+                            tw += cw;
+                        }
+                        used += tw;
+                        kept.push(Run { text, style: run.style });
+                        break;
+                    }
+                }
+                if used < w {
+                    kept.push(track_run(w - used));
+                }
+                *line = kept;
+            } else if lw < w {
+                line.push(track_run(w - lw));
+            }
+        }
+    }
 }
 
 /// A rendered subtree plus the focusables it produced, each as
@@ -249,6 +298,21 @@ struct Ctx<'a, M> {
 fn color_of(c: &Color) -> (u8, u8, u8) {
     let Color::Rgba(r, g, b, _) = c;
     ((*r & 0xff) as u8, (*g & 0xff) as u8, (*b & 0xff) as u8)
+}
+
+/// Clamp-add `delta` to a channel (Go's `lighten`). Saturating — no overflow.
+fn lighten(c: u8, delta: i64) -> u8 {
+    (c as i64 + delta).clamp(0, 255) as u8
+}
+
+/// The input track foreground: dim grey when the input has no bg, else the bg
+/// lightened by 38 (Go's `paintInputBufferAdvanced` trackFg rule). The `░` shade
+/// glyph rendered in this fg gives the field a visible groove.
+fn input_track_fg(bg: Option<(u8, u8, u8)>) -> (u8, u8, u8) {
+    match bg {
+        Some((r, g, b)) => (lighten(r, 38), lighten(g, 38), lighten(b, 38)),
+        None => (110, 110, 110),
+    }
 }
 
 fn attr_str<'a, M>(attrs: &'a [Attribute<M>], key: &str) -> Option<&'a str> {
@@ -423,11 +487,24 @@ fn apply_padding(inner: Rendered, w: &Walked, canvas: Canvas, self_style: Style)
 /// single-line block, registering it as a focusable.
 fn render_input<M: Clone>(
     attrs: &[Attribute<M>],
-    style: Style,
+    inherited: Style,
     ctx: &mut Ctx<M>,
     avail_w: usize,
     is_multiline: bool,
 ) -> Rendered {
+    // Fold the input's OWN visual attrs (Background.color / Font.color) on top of
+    // the inherited style. An input is a leaf `TaggedNode` dispatched straight to
+    // this fn, so its attrs were never walked by a parent — without this, the
+    // input's `Background.color` track / text colour is silently dropped (Go reads
+    // box.bg from the input's own attrs in `boxOwnStyle`).
+    let mut style = inherited;
+    for a in attrs {
+        match a {
+            Attribute::AttrBgColor(c) => style.bg = Some(color_of(c)),
+            Attribute::AttrFontColor(c) => style.fg = Some(color_of(c)),
+            _ => {}
+        }
+    }
     // A `<textarea>` carries no `type` attr; mark it "textarea" so the cursor
     // renders multiline and the loop inserts `\n` on Enter (vs submit on input).
     let input_type = if is_multiline {
@@ -486,17 +563,21 @@ fn render_input<M: Clone>(
             if masked {
                 // Masked: hide content (and any newlines) on one line; the cursor
                 // sits at the end (per-char column tracking is meaningless hidden).
+                // Empty + unfocused → empty line so the shaded track shows through
+                // (Go renders a bare track, never a `▁▁▁▁` stub).
                 let mut s = "•".repeat(st.buffer.chars().count());
                 if focused {
                     s.push('▏');
                 }
-                if s.is_empty() {
-                    s = "▁▁▁▁".to_string();
-                }
                 Block::single(s, run_style)
             } else if st.buffer.is_empty() && !focused {
-                let s = if placeholder.is_empty() { "▁▁▁▁".to_string() } else { placeholder.clone() };
-                Block::single(s, run_style)
+                // Empty + unfocused: render the placeholder (italic) when present,
+                // else an empty line — the track fill paints the field bounds.
+                if placeholder.is_empty() {
+                    Block::single(String::new(), run_style)
+                } else {
+                    Block::single(placeholder.clone(), Style { italic: true, ..run_style })
+                }
             } else {
                 // Real buffer: split into visual lines, insert the cursor glyph at
                 // the focused (line, col).
@@ -521,18 +602,45 @@ fn render_input<M: Clone>(
             }
         }
     };
-    // Honour `Ui.width` on a text-like field so it renders at a fixed/fill width
-    // (the field background fills it). `Fill` expands to the parent's allocation.
+    // Honour `Ui.width` on a text-like field so it renders at a fixed/fill width.
+    // checkbox / radio are glyph-only (no track); range owns its slider track.
+    // Text-like inputs (text / password / email / search / textarea) paint a SHADED
+    // TRACK across their full width (Go's paintInputBufferAdvanced) so the field
+    // bounds stay visible even when empty — dim grey when no bg, else the bg
+    // lightened by 38; real content + cursor paint over the track.
+    let is_text_like = !matches!(input_type.as_str(), "checkbox" | "radio" | "range");
+    // A bordered input does NOT draw a frame (Go suppresses box-drawing on
+    // `tag=="input"` — chunky on a 1-row field), but the border STILL widens the
+    // field box by 1 cell each side (Go folds borderWidth into the input box width,
+    // then zeroes it for drawing so the track fills the whole box). So a bordered
+    // text input's track is 2 cells wider than its bare `Ui.width`.
+    let border_cells: usize = attrs
+        .iter()
+        .map(|a| match a {
+            Attribute::AttrBorderWidth(n) if *n > 0 => 2,
+            Attribute::AttrBorderWidthEach(t, r, b, l) if t + r + b + l > 0 => {
+                usize::from(*r > 0) + usize::from(*l > 0)
+            }
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
     if input_type != "range" {
-        if let Some(l) = width_length(attrs) {
-            // Fill → the parent's allocation (avail_w); otherwise resolve to cells.
-            let cells = if fill_spec(&l, ctx.canvas).is_some() {
-                Some(avail_w)
+        // Resolve the field width: explicit `Ui.width` → its cells (+ border ring);
+        // else the text-like field stretches to the parent's allocation (Go's
+        // innerW), so an unsized input still shows a full-width groove.
+        let cells = match width_length(attrs) {
+            Some(l) if fill_spec(&l, ctx.canvas).is_some() => Some(avail_w),
+            Some(l) => resolve_fixed_w(&l, avail_w, ctx.canvas).map(|c| c + border_cells),
+            None if is_text_like => Some(avail_w),
+            None => None,
+        };
+        if let Some(c) = cells {
+            let target = c.max(1);
+            if is_text_like {
+                block.fill_input_track(target, style.bg, input_track_fg(style.bg));
             } else {
-                resolve_fixed_w(&l, avail_w, ctx.canvas)
-            };
-            if let Some(c) = cells {
-                block.set_width(c.max(1), style.bg);
+                block.set_width(target, style.bg);
             }
         }
     }
@@ -1362,6 +1470,44 @@ mod tests {
         let first = frame.split("\r\n").next().unwrap_or("");
         assert!(first.contains("G1"), "G1 on row 0: {first:?}");
         assert!(first.contains("G6"), "G6 on the SAME row 0 (row-major flow): {first:?}");
+    }
+
+    #[test]
+    fn input_paints_shaded_track() {
+        // A bg-coloured text input with explicit width fills its full width with
+        // the ░ track (lightened bg fg), not plain spaces.
+        let inp: Element<()> = Element::TaggedNode(
+            "input".into(),
+            Description::NoDescription,
+            vec![
+                Attribute::AttrWidth(Length::Px(160)),
+                Attribute::AttrBgColor(rgb(30, 36, 60)),
+                Attribute::AttrAttribute("type".into(), "text".into()),
+            ],
+            vec![],
+        );
+        let frame = element_to_cells(&inp, 80, 24);
+        assert!(frame.contains('░'), "shaded track present: {frame:?}");
+        // track fg = lighten(bg, 38) = (68, 74, 98).
+        assert!(frame.contains("38;2;68;74;98"), "track fg = lightened bg: {frame:?}");
+        // bg of the field present too.
+        assert!(frame.contains("48;2;30;36;60"), "field bg present: {frame:?}");
+    }
+
+    #[test]
+    fn input_track_no_bg_is_dim_grey() {
+        let inp: Element<()> = Element::TaggedNode(
+            "input".into(),
+            Description::NoDescription,
+            vec![
+                Attribute::AttrWidth(Length::Px(160)),
+                Attribute::AttrAttribute("type".into(), "text".into()),
+            ],
+            vec![],
+        );
+        let frame = element_to_cells(&inp, 80, 24);
+        assert!(frame.contains('░'), "track present without bg: {frame:?}");
+        assert!(frame.contains("38;2;110;110;110"), "dim-grey track: {frame:?}");
     }
 
     #[test]
