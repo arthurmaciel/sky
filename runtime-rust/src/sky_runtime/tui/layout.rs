@@ -16,6 +16,7 @@
 //! Follow-on: mouse hit-testing, multiline cursor up/down, word-jumps, precise
 //! slider value, Length(Fill/Min/Max). No panic vectors.
 
+use super::super::html::Html;
 use super::super::ui::{Attribute, Color, Description, Element, HAlign, Length, VAlign};
 use super::cell::sanitize_rune;
 use super::focus::{Focusable, InputRegistry};
@@ -109,7 +110,10 @@ struct Walked {
 /// `Border.color`) was given — glyphs then keep the inherited fg, matching Go's
 /// `drawBorder` (which sets the glyph fg only when the border colour is set). The
 /// style string is one of `solid` / `dashed` / `dotted` (anything else → solid).
-type BorderSpec = (Option<(u8, u8, u8)>, String);
+/// `(colour, style, (top, right, bottom, left) present-flags)`. The per-side flags
+/// let `Border.widthEach` draw a partial frame (e.g. a top rule only) instead of
+/// a full box (audit #6); `Border.width` sets all four.
+type BorderSpec = (Option<(u8, u8, u8)>, String, (bool, bool, bool, bool));
 
 /// The root element's `Background.color`, if it sets one — the page background Go
 /// paints across the whole frame rect (`fillRect` on the root box). `None` when the
@@ -517,6 +521,9 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
     let mut border_width = 0i64;
     let mut border_color: Option<Color> = None;
     let mut border_style = String::from("solid");
+    // Per-side presence (top, right, bottom, left). Border.width → all four;
+    // Border.widthEach → only the sides with width > 0 (partial frame).
+    let mut sides = (false, false, false, false);
     for a in attrs {
         match a {
             Attribute::AttrStyle(k, _) if k == "__row" => w.dir = Dir::Row,
@@ -548,9 +555,13 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
             // Border frame (Go: drawBorder — solid/dashed/dotted box). Width is
             // taken as present/absent (the frame is always 1 cell each side in the
             // terminal regardless of CSS px); colour + style drive the glyphs.
-            Attribute::AttrBorderWidth(n) if *n > 0 => border_width = *n,
+            Attribute::AttrBorderWidth(n) if *n > 0 => {
+                border_width = *n;
+                sides = (true, true, true, true);
+            }
             Attribute::AttrBorderWidthEach(t, r, b, l) if t + r + b + l > 0 => {
-                border_width = (t + r + b + l).max(1)
+                border_width = (t + r + b + l).max(1);
+                sides = (*t > 0, *r > 0, *b > 0, *l > 0);
             }
             Attribute::AttrBorderColor(c) => border_color = Some(c.clone()),
             Attribute::AttrBorderStyle(s) => border_style = s.clone(),
@@ -568,7 +579,7 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         }
     }
     if border_width > 0 {
-        w.border = Some((border_color.as_ref().map(color_of), border_style));
+        w.border = Some((border_color.as_ref().map(color_of), border_style, sides));
     }
     w
 }
@@ -848,7 +859,7 @@ fn render_input<M: Clone>(
         }
     }
     let border_spec: Option<BorderSpec> = if bw > 0 {
-        Some((bcolor.as_ref().map(color_of), bsty))
+        Some((bcolor.as_ref().map(color_of), bsty, (true, true, true, true)))
     } else {
         None
     };
@@ -966,7 +977,21 @@ fn render_node<M: Clone>(
             let clean: String = t.chars().map(sanitize_rune).collect();
             Rendered { block: Block::single(clean, inherited), hits: vec![] }
         }
-        Element::Raw(_) => Rendered { block: Block::default(), hits: vec![] },
+        Element::Raw(h) => {
+            // `Ui.html` (Std.Html escape hatch): the terminal can't render markup,
+            // so degrade to the node's TEXT content (word-wrapped) instead of a
+            // blank region (audit #22). Empty → nothing.
+            let text = html_text(h);
+            if text.trim().is_empty() {
+                Rendered { block: Block::default(), hits: vec![] }
+            } else {
+                let lines: Vec<Vec<Run>> = wrap_text(&text, avail_w.max(1))
+                    .into_iter()
+                    .map(|l| vec![Run { text: l, style: inherited }])
+                    .collect();
+                Rendered { block: Block { lines }, hits: vec![] }
+            }
+        }
         Element::TaggedNode(tag, _desc, attrs, _kids) if tag == "input" || tag == "textarea" => {
             render_input(attrs, inherited, ctx, avail_w, tag == "textarea")
         }
@@ -1134,6 +1159,17 @@ fn render_node<M: Clone>(
     }
 }
 
+/// Flatten the visible text of a `Std.Html` node (for the `Ui.html` raw escape
+/// hatch rendered in a terminal): concatenate `HText`/`HRaw` leaves, recursing
+/// into elements. Markup/attrs are dropped — the terminal shows text only.
+fn html_text<M>(h: &Html<M>) -> String {
+    match h {
+        Html::HText(t) => t.clone(),
+        Html::HRaw(r) => r.clone(),
+        Html::HElement(_, _, kids) => kids.iter().map(html_text).collect::<Vec<_>>().join(""),
+    }
+}
+
 /// Extract the concatenated text content of an element subtree (Go's
 /// `extractTextContent` — flattens every `Text` leaf, space-joining nested ones).
 fn extract_text<M>(el: &Element<M>) -> String {
@@ -1297,14 +1333,8 @@ fn apply_border(inner: Rendered, w: &Walked, self_style: Style) -> Rendered {
 /// box borders (`apply_border`) and bordered inputs (`render_input`). Shifts the
 /// inner content + focusable hits +1 line / +1 col (the frame's top-left).
 fn frame_rendered(inner: Rendered, spec: &BorderSpec, self_style: Style) -> Rendered {
-    let (border_fg, style) = (spec.0, spec.1.as_str());
+    let (border_fg, style, (s_top, s_right, s_bottom, s_left)) = (spec.0, spec.1.as_str(), spec.2);
     let inner_w = inner.block.width();
-    let inner_h = inner.block.height();
-    let outer_w = inner_w + 2;
-    let outer_h = inner_h + 2;
-    if outer_w < 2 || outer_h < 2 {
-        return inner;
-    }
     let (hor, vert, tl, tr, bl, br) = border_glyphs(style);
     // Border runs inherit the frame fg (when set) but keep the node's bg so the
     // box reads as one filled rect.
@@ -1312,38 +1342,49 @@ fn frame_rendered(inner: Rendered, spec: &BorderSpec, self_style: Style) -> Rend
     let edge = |ch: &str, n: usize| Run { text: ch.repeat(n), style: bstyle };
     let corner = |ch: &str| Run { text: ch.to_string(), style: bstyle };
 
-    let mut block = Block::default();
-    // Top edge: ┌──…──┐
-    {
-        let mut row = vec![corner(tl)];
+    // A horizontal edge row carries a corner only where a vertical side also
+    // meets it; otherwise the edge glyph runs the full width (a partial border —
+    // e.g. a lone top rule — is just a horizontal line, no corners). audit #6.
+    let h_edge_row = |left_glyph: &str, right_glyph: &str| -> Vec<Run> {
+        let mut row = Vec::new();
+        if s_left {
+            row.push(corner(left_glyph));
+        }
         if inner_w > 0 {
             row.push(edge(hor, inner_w));
         }
-        row.push(corner(tr));
-        block.lines.push(row);
+        if s_right {
+            row.push(corner(right_glyph));
+        }
+        row
+    };
+
+    let mut block = Block::default();
+    if s_top {
+        block.lines.push(h_edge_row(tl, tr));
     }
-    // Middle rows: │ <content padded to inner_w> │
     for line in &inner.block.lines {
-        let mut row = vec![corner(vert)];
+        let mut row = Vec::new();
+        if s_left {
+            row.push(corner(vert));
+        }
         let lw: usize = line.iter().map(Run::width).sum();
         row.extend(line.iter().cloned());
         if lw < inner_w {
             row.push(Run { text: " ".repeat(inner_w - lw), style: self_style });
         }
-        row.push(corner(vert));
-        block.lines.push(row);
-    }
-    // Bottom edge: └──…──┘
-    {
-        let mut row = vec![corner(bl)];
-        if inner_w > 0 {
-            row.push(edge(hor, inner_w));
+        if s_right {
+            row.push(corner(vert));
         }
-        row.push(corner(br));
         block.lines.push(row);
     }
-    // Content + focusables shift +1 line / +1 col (the frame's top-left).
-    let hits = inner.hits.into_iter().map(|(idx, l, c, ww, hh)| (idx, l + 1, c + 1, ww, hh)).collect();
+    if s_bottom {
+        block.lines.push(h_edge_row(bl, br));
+    }
+    // Content + focusables shift by the present top/left edges.
+    let dl = usize::from(s_top);
+    let dc = usize::from(s_left);
+    let hits = inner.hits.into_iter().map(|(idx, l, c, ww, hh)| (idx, l + dl, c + dc, ww, hh)).collect();
     Rendered { block, hits }
 }
 
