@@ -121,10 +121,18 @@ async fn email_post_json<E: From<String>>(
     headers: &[(&str, String)],
     payload: Vec<u8>,
 ) -> Result<serde_json::Value, E> {
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
+    // SSRF guard parity with the Http.* client. The provider endpoint is
+    // operator-supplied (SKY_EMAIL_ENDPOINT_<PROVIDER>) and the SES host is
+    // region-interpolated, so when SKY_HTTP_DENY_PRIVATE is set this pins DNS to
+    // a vetted non-private addr — otherwise a crafted endpoint could exfiltrate
+    // the bearer token + payload to a metadata/loopback host. Email POSTs never
+    // follow redirects (false / 0).
+    let builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+    let builder = match crate::sky_runtime::http_client::ssrf_apply(builder, url, false, 0) {
+        Ok(b) => b,
+        Err(e) => return Err(e.into()),
+    };
+    let client = match builder.build() {
         Ok(c) => c,
         Err(e) => return Err(format!("email: client build failed: {}", e).into()),
     };
