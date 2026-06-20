@@ -16,7 +16,7 @@
 //! Follow-on: mouse hit-testing, multiline cursor up/down, word-jumps, precise
 //! slider value, Length(Fill/Min/Max). No panic vectors.
 
-use super::super::ui::{Attribute, Color, Element, Length};
+use super::super::ui::{Attribute, Color, Element, HAlign, Length, VAlign};
 use super::cell::sanitize_rune;
 use super::focus::{Focusable, InputRegistry};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -94,6 +94,11 @@ struct Walked {
     grid_min_px: i64,
     /// Border frame, present when `Border.width > 0`. See [`BorderSpec`].
     border: Option<BorderSpec>,
+    /// `Ui.centerX`/`alignLeft`/`alignRight` (cross-axis in a column / self-align
+    /// in an `el`). `None` → flush-left.
+    align_x: Option<HAlign>,
+    /// `Ui.centerY`/`alignTop`/`alignBottom` (cross-axis in a row). `None` → top.
+    align_y: Option<VAlign>,
 }
 
 /// A border frame's `(colour, style)`. The colour is `None` when only width (no
@@ -460,6 +465,8 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         is_text_column: false,
         grid_min_px: 0,
         border: None,
+        align_x: None,
+        align_y: None,
     };
     // Border accumulates across two attrs (width gate + colour); style defaults
     // to "solid". A frame is drawn only when width > 0 (Go: borderWidth sum > 0).
@@ -507,6 +514,11 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
             // value was dropped and dashed/dotted rendered as solid (border_glyphs
             // already supports ┄┆ / ┈┊).
             Attribute::AttrStyle(k, v) if k == "border-style" => border_style = v.clone(),
+            // Alignment — cross-axis placement of a child within its parent's slot
+            // (centerX/alignRight in a column, centerY/alignBottom in a row, both
+            // for a single-child el). Was silently dropped → everything flush-left.
+            Attribute::AttrAlignX(h) => w.align_x = Some(*h),
+            Attribute::AttrAlignY(v) => w.align_y = Some(*v),
             _ => {}
         }
     }
@@ -990,11 +1002,13 @@ fn render_node<M: Clone>(
                 // Render children IN ORDER (preserves focusable push order = Tab
                 // order), pairing each with its fill spec, then drop empty blocks.
                 let mut specs: Vec<Option<FillSpec>> = Vec::new();
+                let mut aligns: Vec<(Option<HAlign>, Option<VAlign>)> = Vec::new();
                 let mut children: Vec<Rendered> = Vec::new();
                 for k in kids.iter() {
                     let r = render_node(k, w.style, ctx, content_avail);
                     if r.block.height() > 0 {
                         specs.push(child_width_length(k).and_then(|l| fill_spec(&l, ctx.canvas)));
+                        aligns.push(child_align(k));
                         children.push(r);
                     }
                 }
@@ -1007,6 +1021,31 @@ fn render_node<M: Clone>(
                         content_avail,
                         ctx.canvas.cells_x(w.spacing_px),
                     );
+                }
+                // Cross-axis alignment: offset each child within the stack's cross
+                // size per its Ui.alignX/alignY (was dropped → everything flush
+                // top-left). Column cross-axis = horizontal (alignX); row cross-axis
+                // = vertical (alignY). Applied before stacking.
+                match w.dir {
+                    Dir::Column => {
+                        let target_w = if matches!(w.width, None | Some(Length::Content)) {
+                            children.iter().map(|r| r.block.width()).max().unwrap_or(0)
+                        } else {
+                            content_avail
+                        };
+                        for (i, r) in children.iter_mut().enumerate() {
+                            let off = halign_offset(aligns[i].0, target_w.saturating_sub(r.block.width()));
+                            pad_left_block(r, off, w.style.bg);
+                        }
+                    }
+                    Dir::Row => {
+                        let target_h = children.iter().map(|r| r.block.height()).max().unwrap_or(0);
+                        for (i, r) in children.iter_mut().enumerate() {
+                            let cw = r.block.width();
+                            let off = valign_offset(aligns[i].1, target_h.saturating_sub(r.block.height()));
+                            pad_top_block(r, off, cw, w.style.bg);
+                        }
+                    }
                 }
                 let mut inner = if children.is_empty() {
                     Rendered { block: Block { lines: vec![Vec::new()] }, hits: vec![] }
@@ -1301,6 +1340,77 @@ fn child_width_length<M>(el: &Element<M>) -> Option<Length> {
     match el {
         Element::Node(_, attrs, _) | Element::TaggedNode(_, _, attrs, _) => width_length(attrs),
         _ => None,
+    }
+}
+
+/// The `(Ui.alignX, Ui.alignY)` a child declares, read by its PARENT to place it
+/// on the cross axis. `(None, None)` → flush top-left.
+fn child_align<M>(el: &Element<M>) -> (Option<HAlign>, Option<VAlign>) {
+    match el {
+        Element::Node(_, attrs, _) | Element::TaggedNode(_, _, attrs, _) => {
+            let mut ax = None;
+            let mut ay = None;
+            for a in attrs {
+                match a {
+                    Attribute::AttrAlignX(h) => ax = Some(*h),
+                    Attribute::AttrAlignY(v) => ay = Some(*v),
+                    _ => {}
+                }
+            }
+            (ax, ay)
+        }
+        _ => (None, None),
+    }
+}
+
+/// Cross-axis offset for an alignment within `slack` free cells: center → half,
+/// right/bottom → all, left/top/unset → 0.
+fn halign_offset(a: Option<HAlign>, slack: usize) -> usize {
+    match a {
+        Some(HAlign::CenterX) => slack / 2,
+        Some(HAlign::AlignRight) => slack,
+        _ => 0,
+    }
+}
+fn valign_offset(a: Option<VAlign>, slack: usize) -> usize {
+    match a {
+        Some(VAlign::CenterY) => slack / 2,
+        Some(VAlign::AlignBottom) => slack,
+        _ => 0,
+    }
+}
+
+/// Left-pad every line of `r` by `off` cells (carrying `bg`) and shift its hits —
+/// places the content at horizontal offset `off` within its slot (column cross-axis
+/// alignment / el self-align).
+fn pad_left_block(r: &mut Rendered, off: usize, bg: Option<(u8, u8, u8)>) {
+    if off == 0 {
+        return;
+    }
+    let pad = Run { text: " ".repeat(off), style: Style { bg, ..Style::default() } };
+    for line in &mut r.block.lines {
+        line.insert(0, pad.clone());
+    }
+    for h in &mut r.hits {
+        h.2 += off;
+    }
+}
+
+/// Prepend `off` blank `width`-wide lines to `r` and shift its hits — places the
+/// content at vertical offset `off` within its slot (row cross-axis alignment).
+fn pad_top_block(r: &mut Rendered, off: usize, width: usize, bg: Option<(u8, u8, u8)>) {
+    if off == 0 {
+        return;
+    }
+    let blank = vec![Run { text: " ".repeat(width), style: Style { bg, ..Style::default() } }];
+    let mut lines = Vec::with_capacity(off + r.block.lines.len());
+    for _ in 0..off {
+        lines.push(blank.clone());
+    }
+    lines.append(&mut r.block.lines);
+    r.block.lines = lines;
+    for h in &mut r.hits {
+        h.1 += off;
     }
 }
 
