@@ -55,6 +55,21 @@ clean; 26-ui-showcase rebuilt on Rust now renders the textarea content.
 **Affected.** `runtime-rust/src/sky_runtime/html.rs` (textarea/select value
 handling + 2 regression tests).
 
+**Follow-up — dev console badge byte-parity (RUST fix).** A 4th divergence found
+while screenshotting: the floating "Console" dev badge differed visibly — Go
+emits a blue monospace `#7eb6ff` link (`id=__sky-dev-console`, `target=_blank`,
+`rel=noopener`, `title`, `right/bottom:12px`, `&#128269;` ENTITY); Rust emitted a
+green sans-serif `#8ec8a8` link (`id=__sky-console-link`, `aria-label`,
+`right/bottom:16px`, literal 🔍). Rewrote `dev_console_banner` (`live/mod.rs`) to
+byte-match Go's `devBannerHTML` (dev_banner.go), honouring `SKY_CONSOLE_URL` with
+attribute-escaping. Verified byte-identical to Go on the live page; 2 regression
+tests (markup match + sub-app suppression).
+
+**Visual confirmation (screenshots).** The heatmap renders as a single broken cell
+on Go (truncated range) vs the full 24×7 grid on Rust — confirming Rust is the
+correct backend for the chart math, and the Go `Math.min/max` truncation is a
+genuine bug, not deliberate tuning.
+
 ---
 
 ## 2026-06-20 00:30 — Root-cause + mitigate 12-skyvote / 17-skymon CI Playwright timeout (suggestion #6)

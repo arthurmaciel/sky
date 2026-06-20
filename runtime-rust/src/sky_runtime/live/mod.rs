@@ -208,13 +208,32 @@ fn dev_console_banner(base: &str) -> String {
     {
         return String::new();
     }
-    "<a href=\"/_sky/console\" id=\"__sky-console-link\" aria-label=\"Open Sky Console\" \
-     style=\"position:fixed;bottom:16px;right:16px;z-index:2147483646;\
-     background:#1a1a2e;color:#8ec8a8;padding:8px 12px;border-radius:6px;\
-     font:13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;\
-     text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,0.25)\">\
-     🔍 Console</a>"
-        .to_string()
+    // Byte-match Go's `devBannerHTML` (dev_banner.go): same id, target/rel/title,
+    // monospace blue styling, and the `&#128269;` entity (NOT a literal emoji) so
+    // both backends emit identical bytes. href honours SKY_CONSOLE_URL (default
+    // /_sky/console), attribute-escaped against a hostile env value.
+    let url = std::env::var("SKY_CONSOLE_URL")
+        .map(|v| v.trim().to_string())
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/_sky/console".to_string());
+    let esc = url
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&#34;")
+        .replace('\'', "&#39;");
+    format!(
+        "<a id=\"__sky-dev-console\" href=\"{esc}\" target=\"_blank\" rel=\"noopener\" \
+         title=\"Sky Console (dev only)\" \
+         style=\"position:fixed;right:12px;bottom:12px;z-index:2147483646;\
+         font:12px/1.4 ui-monospace,Menlo,monospace;\
+         background:#1c2027;color:#7eb6ff;\
+         border:1px solid #353b46;border-radius:6px;\
+         padding:6px 10px;text-decoration:none;\
+         box-shadow:0 2px 8px rgba(0,0,0,0.4);\">\
+         &#128269; Console</a>"
+    )
 }
 
 // ─── live_app: axum mount + per-session TEA driver over SSE ─────────────────
@@ -1186,6 +1205,35 @@ fn sid_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
 // standalone top-level `sky_runtime::html` module (re-exported here via
 // `use super::*`), so a non-Live Std.Html / Std.Ui render doesn't pull this
 // server module in.
+
+#[cfg(test)]
+mod dev_banner_tests {
+    use super::dev_console_banner;
+
+    #[test]
+    fn banner_byte_matches_go_dev_banner_markup() {
+        // Go parity (dev_banner.go devBannerHTML): same id, target/rel/title,
+        // monospace blue style, `&#128269;` ENTITY (not a literal emoji).
+        let b = dev_console_banner("");
+        let expected = "<a id=\"__sky-dev-console\" href=\"/_sky/console\" target=\"_blank\" \
+            rel=\"noopener\" title=\"Sky Console (dev only)\" \
+            style=\"position:fixed;right:12px;bottom:12px;z-index:2147483646;\
+            font:12px/1.4 ui-monospace,Menlo,monospace;\
+            background:#1c2027;color:#7eb6ff;\
+            border:1px solid #353b46;border-radius:6px;\
+            padding:6px 10px;text-decoration:none;\
+            box-shadow:0 2px 8px rgba(0,0,0,0.4);\">\
+            &#128269; Console</a>";
+        assert_eq!(b, expected, "dev console banner must byte-match Go");
+        assert!(!b.contains("🔍"), "must use the &#128269; entity, not a literal emoji");
+    }
+
+    #[test]
+    fn banner_suppressed_for_subapp() {
+        // A non-empty base = sub-app (e.g. the console child) → no recursive link.
+        assert_eq!(dev_console_banner("/_sky/console"), "");
+    }
+}
 
 #[cfg(test)]
 mod base_path_tests {
