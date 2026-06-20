@@ -160,6 +160,18 @@ fn fill_spec(l: &Length, canvas: Canvas) -> Option<FillSpec> {
 /// `resolveLengthCells` on the x-axis, EXCEPT `Min`/`Max` bounds are correctly
 /// converted px→cells (the Go path returns the raw px as cells — a latent bug;
 /// the Tui surface is not byte-gated against Go, so Rust does the right thing).
+/// The fixed pixel height of `attrs` (`Ui.height (Ui.px n)`) in CELLS, when set.
+/// Only `Px` yields a fixed row count (the multiline-textarea case); Fill/Content
+/// auto-size and return `None`.
+fn height_cells<M>(attrs: &[Attribute<M>], canvas: Canvas) -> Option<usize> {
+    for a in attrs {
+        if let Attribute::AttrHeight(Length::Px(n)) = a {
+            return Some(canvas.cells_y(*n).max(1));
+        }
+    }
+    None
+}
+
 fn resolve_fixed_w(l: &Length, available: usize, canvas: Canvas) -> Option<usize> {
     match l {
         Length::Px(n) => Some(canvas.cells_x(*n)),
@@ -490,6 +502,11 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
             }
             Attribute::AttrBorderColor(c) => border_color = Some(c.clone()),
             Attribute::AttrBorderStyle(s) => border_style = s.clone(),
+            // Raw CSS escape hatch `Ui.style "border-style" "dashed"|"dotted"` —
+            // the list-driven way the kitchen-sink picks a style. Without this the
+            // value was dropped and dashed/dotted rendered as solid (border_glyphs
+            // already supports ┄┆ / ┈┊).
+            Attribute::AttrStyle(k, v) if k == "border-style" => border_style = v.clone(),
             _ => {}
         }
     }
@@ -625,7 +642,15 @@ fn render_input<M: Clone>(
     };
     let value = attr_str(attrs, "value").unwrap_or("").to_string();
     let placeholder = attr_str(attrs, "placeholder").unwrap_or("").to_string();
-    let checked = attr_str(attrs, "checked").is_some() || value == "true";
+    // Checked detection. A checkbox uses `checked`/`value="true"`. A radio in the
+    // common hand-rolled idiom (`value = if selected then val else ""`) signals
+    // selection by a NON-EMPTY value — so a radio is checked when an explicit
+    // `checked` attr is present OR its value is non-empty and not "false". Without
+    // the radio clause the selected radio kept drawing ○ (the "radio doesn't work"
+    // report — onClick fires, but there was no visual feedback).
+    let checked = attr_str(attrs, "checked").is_some()
+        || value == "true"
+        || (input_type == "radio" && !value.is_empty() && value != "false");
     let events = super::focus::collect_events(attrs);
 
     let idx = ctx.focusables.len();
@@ -645,13 +670,24 @@ fn render_input<M: Clone>(
             Block::single(g.to_string(), Style { reverse: focused, ..style })
         }
         "range" => {
-            // Track with the thumb positioned at value within [min, max].
+            // Track with the thumb positioned at value within [min, max]. Track
+            // width follows `Ui.width` (was a fixed 12 — the slider rendered
+            // narrower than its declared width); fall back to 12 when unsized.
             let min: f64 = attr_str(attrs, "min").and_then(|s| s.trim().parse().ok()).unwrap_or(0.0);
             let max: f64 = attr_str(attrs, "max").and_then(|s| s.trim().parse().ok()).unwrap_or(100.0);
             let val: f64 = value.trim().parse().unwrap_or(min);
-            let width = 12usize;
+            let width = width_length(attrs)
+                .and_then(|l| resolve_fixed_w(&l, avail_w, ctx.canvas))
+                .unwrap_or(12)
+                .max(3);
             let frac = if max > min { ((val - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 };
-            let thumb = ((frac * (width - 1) as f64).round() as usize).min(width - 1);
+            // Inset the thumb to the INNER span [1, width-2] so it is never
+            // overwritten by the `├`/`┤` end-glyphs (the "ball disappears at the
+            // extremes" report — at val≈0/100 the thumb landed on position
+            // 0 / width-1 and the bracket won the cell).
+            let span = width - 3; // count of steps between the two inner ends
+            let thumb = 1 + (frac * span as f64).round() as usize;
+            let thumb = thumb.clamp(1, width - 2);
             let track: String = (0..width)
                 .map(|i| {
                     if i == 0 {
@@ -724,34 +760,41 @@ fn render_input<M: Clone>(
     // bounds stay visible even when empty — dim grey when no bg, else the bg
     // lightened by 38; real content + cursor paint over the track.
     let is_text_like = !matches!(input_type.as_str(), "checkbox" | "radio" | "range");
-    // A bordered input does NOT draw a frame (Go suppresses box-drawing on
-    // `tag=="input"` — chunky on a 1-row field), but the border STILL widens the
-    // field box by 1 cell each side (Go folds borderWidth into the input box width,
-    // then zeroes it for drawing so the track fills the whole box). So a bordered
-    // text input's track is 2 cells wider than its bare `Ui.width`.
-    let border_cells: usize = attrs
-        .iter()
-        .map(|a| match a {
-            Attribute::AttrBorderWidth(n) if *n > 0 => 2,
-            Attribute::AttrBorderWidthEach(t, r, b, l) if t + r + b + l > 0 => {
-                usize::from(*r > 0) + usize::from(*l > 0)
-            }
-            _ => 0,
-        })
-        .max()
-        .unwrap_or(0);
+    // Border frame spec — a bordered input draws a REAL 1-cell box (correct
+    // Std.Ui: Border.width > 0 ⇒ a frame). Previously the frame was suppressed
+    // (a Go-mirror) and the border only widened the track, so no border showed.
+    let mut bw = 0i64;
+    let mut bcolor: Option<Color> = None;
+    let mut bsty = String::from("solid");
+    for a in attrs {
+        match a {
+            Attribute::AttrBorderWidth(n) if *n > 0 => bw = *n,
+            Attribute::AttrBorderWidthEach(t, r, b, l) if t + r + b + l > 0 => bw = (t + r + b + l).max(1),
+            Attribute::AttrBorderColor(c) => bcolor = Some(c.clone()),
+            Attribute::AttrBorderStyle(s) => bsty = s.clone(),
+            _ => {}
+        }
+    }
+    let border_spec: Option<BorderSpec> = if bw > 0 {
+        Some((bcolor.as_ref().map(color_of), bsty))
+    } else {
+        None
+    };
+    // The frame consumes a 1-cell ring each side; reserve it so the OUTER box
+    // still fits the requested `Ui.width` (border-box sizing, Elm-ui style).
+    let frame_ring = if border_spec.is_some() { 2 } else { 0 };
     if input_type != "range" {
-        // Resolve the field width: explicit `Ui.width` → its cells (+ border ring);
-        // else the text-like field stretches to the parent's allocation (Go's
-        // innerW), so an unsized input still shows a full-width groove.
+        // Resolve the field width: explicit `Ui.width` → its cells; else the
+        // text-like field stretches to the parent's allocation so an unsized input
+        // still shows a full-width groove.
         let cells = match width_length(attrs) {
             Some(l) if fill_spec(&l, ctx.canvas).is_some() => Some(avail_w),
-            Some(l) => resolve_fixed_w(&l, avail_w, ctx.canvas).map(|c| c + border_cells),
+            Some(l) => resolve_fixed_w(&l, avail_w, ctx.canvas),
             None if is_text_like => Some(avail_w),
             None => None,
         };
         if let Some(c) = cells {
-            let target = c.max(1);
+            let target = c.saturating_sub(frame_ring).max(1);
             if is_text_like {
                 block.fill_input_track(target, style.bg, input_track_fg(style.bg));
             } else {
@@ -759,10 +802,35 @@ fn render_input<M: Clone>(
             }
         }
     }
-    // Reverse-video the cursor cell (Go's reverse-over-track cursor) — applied
-    // after the track fill so a cursor at/after the content lands on a track ░.
+    // Reverse-video the cursor cell (reverse-over-track cursor) — applied after the
+    // track fill so a cursor at/after the content lands on a track ░.
     if let Some((cl, cc)) = cursor_marker {
         block.reverse_cell_at(cl, cc);
+    }
+    // Multiline: honour a fixed `Ui.height (px)` — normalise to EXACTLY that many
+    // rows, scrolling the window to keep the cursor row visible (correct Std.Ui: a
+    // fixed-height textarea scrolls internally; it neither grows with content nor
+    // shrinks below its height).
+    if is_multiline {
+        if let Some(rows) = height_cells(attrs, ctx.canvas) {
+            let inner_rows = rows.saturating_sub(frame_ring).max(1);
+            let total = block.lines.len();
+            if total > inner_rows {
+                let cur_line = cursor_marker.map(|(l, _)| l).unwrap_or(0);
+                let start = cur_line.saturating_sub(inner_rows - 1).min(total - inner_rows);
+                block.lines = block.lines[start..start + inner_rows].to_vec();
+            } else {
+                // Pad with blank track rows so the box keeps its fixed height.
+                let track_w = block.width();
+                let tfg = input_track_fg(style.bg);
+                while block.lines.len() < inner_rows {
+                    block.lines.push(vec![Run {
+                        text: "░".repeat(track_w),
+                        style: Style { fg: Some(tfg), bg: style.bg, ..Style::default() },
+                    }]);
+                }
+            }
+        }
     }
     let width = block.width();
     let height = block.height().max(1);
@@ -777,7 +845,11 @@ fn render_input<M: Clone>(
         width,
         height,
     });
-    Rendered { block, hits: vec![(idx, 0, 0, width, height)] }
+    let rendered = Rendered { block, hits: vec![(idx, 0, 0, width, height)] };
+    match &border_spec {
+        Some(spec) => frame_rendered(rendered, spec, style),
+        None => rendered,
+    }
 }
 
 /// Map a flat char-cursor into `(line, col)` over a `'\n'`-separated buffer.
@@ -1109,10 +1181,17 @@ fn cell_block_bg(block: &Block) -> Option<(u8, u8, u8)> {
 /// guard). Corners ┌┐└┘, edges ─│ per style; the border colour (when set)
 /// overrides the glyph fg. Hits + content shift down/right by 1.
 fn apply_border(inner: Rendered, w: &Walked, self_style: Style) -> Rendered {
-    let (border_fg, style) = match &w.border {
-        Some((c, s)) => (*c, s.as_str()),
-        None => return inner,
-    };
+    match &w.border {
+        Some(spec) => frame_rendered(inner, spec, self_style),
+        None => inner,
+    }
+}
+
+/// Wrap a `Rendered` in a 1-cell box-drawing frame from a `BorderSpec`. Shared by
+/// box borders (`apply_border`) and bordered inputs (`render_input`). Shifts the
+/// inner content + focusable hits +1 line / +1 col (the frame's top-left).
+fn frame_rendered(inner: Rendered, spec: &BorderSpec, self_style: Style) -> Rendered {
+    let (border_fg, style) = (spec.0, spec.1.as_str());
     let inner_w = inner.block.width();
     let inner_h = inner.block.height();
     let outer_w = inner_w + 2;
