@@ -1038,13 +1038,30 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     dbFeature "postgres" = "postgres"
     dbFeature "mysql"    = "mysql"
     dbFeature _          = "sqlite"
-    emitDepLine name (Toml.RustVersion ver feats) =
-        if null feats
-            then name ++ " = \"" ++ ver ++ "\""
-            else name ++ " = { version = \"" ++ ver ++ "\", features = [" ++ intercalate ", " (map show feats) ++ "] }"
-    emitDepLine name (Toml.RustGitDep url mRev mBranch mTag) =
-        let fields = [ "git = " ++ show url ]
-                ++ maybe [] (\r -> ["rev = " ++ show r]) mRev
-                ++ maybe [] (\b -> ["branch = " ++ show b]) mBranch
-                ++ maybe [] (\t -> ["tag = " ++ show t]) mTag
-        in name ++ " = { " ++ intercalate ", " fields ++ " }"
+    -- Guard: crate names must be [A-Za-z0-9_-] (Cargo convention).
+    validCrateName n = not (null n) && all (\c -> isAlphaNum c || c == '_' || c == '-') n
+    -- Guard: TOML inline string values must not contain characters that can
+    -- escape the surrounding double-quote or inject extra lines.
+    validTomlStr v = not (any (`elem` ("\"\\\n\r" :: String)) v)
+    emitDepLine name (Toml.RustVersion ver feats)
+        | not (validCrateName name) =
+            error $ "sky codegen: invalid Rust crate name in sky.toml: " ++ show name
+        | not (validTomlStr ver) =
+            error $ "sky codegen: invalid version string for crate " ++ show name ++ ": " ++ show ver
+        | not (all validTomlStr feats) =
+            error $ "sky codegen: invalid feature string for crate " ++ show name
+        | null feats    = name ++ " = \"" ++ ver ++ "\""
+        | otherwise     = name ++ " = { version = \"" ++ ver ++ "\", features = [" ++ intercalate ", " (map show feats) ++ "] }"
+    emitDepLine name (Toml.RustGitDep url mRev mBranch mTag)
+        | not (validCrateName name) =
+            error $ "sky codegen: invalid Rust crate name in sky.toml: " ++ show name
+        | not (validTomlStr url) =
+            error $ "sky codegen: invalid git URL for crate " ++ show name ++ ": " ++ show url
+        | not (all validTomlStr (maybe [] pure mRev ++ maybe [] pure mBranch ++ maybe [] pure mTag)) =
+            error $ "sky codegen: invalid git ref (rev/branch/tag) for crate " ++ show name
+        | otherwise =
+            let fields = [ "git = " ++ show url ]
+                    ++ maybe [] (\r -> ["rev = " ++ show r]) mRev
+                    ++ maybe [] (\b -> ["branch = " ++ show b]) mBranch
+                    ++ maybe [] (\t -> ["tag = " ++ show t]) mTag
+            in name ++ " = { " ++ intercalate ", " fields ++ " }"

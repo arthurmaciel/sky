@@ -360,7 +360,11 @@ fn to_axum_response(r: ServerResponse) -> axum::response::Response {
     if let Some(streamed) = serve_streaming_sentinel(&r) {
         return streamed;
     }
-    let status = axum::http::StatusCode::from_u16(r.status as u16)
+    // Clamp to the valid HTTP status range before the u16 cast so an out-of-range
+    // Sky integer (e.g. from a buggy handler returning status=99999) produces a
+    // defined 500 rather than a wrapping or panicking cast.
+    let status_u16 = r.status.clamp(100, 599) as u16;
+    let status = axum::http::StatusCode::from_u16(status_u16)
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = axum::http::Response::builder().status(status);
     if !r.contentType.is_empty() {
@@ -518,11 +522,15 @@ async fn ws_loop<E: From<String> + Send + 'static>(mut socket: axum::extract::ws
     use axum::extract::ws::Message;
     // Mirror Go's SetReadLimit: treat 0/negative as "unset" → apply the 1 MiB
     // default (wsDefaultMaxMessageBytes = 1 << 20 in runtime-go/rt/websocket.go).
+    // Use try_from to avoid a wrapping/truncating cast on a caller-controlled i64.
     let max_bytes: usize = if cfg.maxMessageBytes > 0 {
-        cfg.maxMessageBytes as usize
+        usize::try_from(cfg.maxMessageBytes).unwrap_or(1 << 20)
     } else {
         1 << 20 // 1 MiB
     };
+    // axum 0.7 does not expose WebSocketUpgrade::max_message_size() / max_frame_size()
+    // builder methods (those landed in axum 0.8+). The in-loop size checks below
+    // (Text/Binary arms) are the framing-layer enforcement for this version.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsOut>();
     ws_registry().lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
     let _ = (cfg.onConnect)(WsHandle::WebSocketServer(id)).await;

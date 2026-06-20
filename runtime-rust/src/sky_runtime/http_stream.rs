@@ -48,11 +48,19 @@ pub enum ChunkEvent<E> {
 // `bytes::Bytes` — `forEachChunk` calls `.bytes_stream()` and the chunk type is
 // inferred, so no extra `bytes` dependency is needed.
 //
+// Hard cap on simultaneous open streams. When `http_stream_open` would push
+// the registry past this limit it evicts the numerically-lowest (oldest) id
+// before inserting — that response/connection is dropped immediately. Keeps
+// memory bounded under abandoned-stream workloads; normal well-behaved callers
+// (paired open→forEachChunk/close) are unaffected.
+const CLIENT_STREAMS_MAX: usize = 1024;
+
 // Contract: every `open` MUST be paired with a `forEachChunk` (which removes the
 // entry on exit) or a `close` (idempotent removal) — both release the parked
 // response + its connection. Calling `open` repeatedly without draining/closing
 // leaks responses; the 30s connect_timeout bounds only the header stage, not an
-// abandoned-but-open stream. (A future idle reaper could bound this registry.)
+// abandoned-but-open stream. The CLIENT_STREAMS_MAX cap bounds unbounded growth
+// by evicting the oldest entry when the registry is full.
 fn client_streams() -> &'static Mutex<HashMap<i64, reqwest::Response>> {
     static R: OnceLock<Mutex<HashMap<i64, reqwest::Response>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(HashMap::new()))
@@ -110,7 +118,17 @@ pub fn http_stream_open<E: From<String> + Send + 'static>(req: HttpRequest) -> S
         // carry the error payload the caller wants to read. Mirrors Http.get
         // returning Ok with a 4xx status.
         let id = next_stream_id();
-        client_streams().lock().unwrap_or_else(|e| e.into_inner()).insert(id, resp);
+        {
+            let mut map = client_streams().lock().unwrap_or_else(|e| e.into_inner());
+            // Evict the oldest (lowest id) entry when the cap is reached, so the
+            // registry stays bounded under abandoned-stream workloads.
+            if map.len() >= CLIENT_STREAMS_MAX {
+                if let Some(&oldest) = map.keys().min() {
+                    map.remove(&oldest);
+                }
+            }
+            map.insert(id, resp);
+        }
         SkyResult::Ok(id)
     })
 }

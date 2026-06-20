@@ -82,7 +82,7 @@ runRustInspectorWith pkgPath features mGit = do
                 -- quoted below: the crate path/name can originate from sky.toml,
                 -- so a space or shell metachar would otherwise break the
                 -- invocation (or be an injection vector via a crafted dep name).
-                cmd' = bin ++ " " ++ quoteShell pkgPath ++ featuresArg ++ gitArg
+                cmd' = quoteShell bin ++ " " ++ quoteShell pkgPath ++ featuresArg ++ gitArg
             (_, out, err) <- readProcessWithExitCode "sh" ["-c", cmd'] ""
             if null out
                 then return (Left $ "sky-ffi-inspect-rs: empty output; stderr: " ++ err)

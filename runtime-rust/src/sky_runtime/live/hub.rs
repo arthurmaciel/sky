@@ -31,6 +31,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
+use sqlx::sqlite::SqliteConnectOptions;
 use std::collections::HashMap;
 
 /// Default per-table read cap (Go `hub/bridge.go` uses 200 for logs/metrics).
@@ -662,11 +663,13 @@ where
         let Some(pool) = open_spill(&db_path).await else {
             return decode_rows(Value::Array(vec![]));
         };
-        // Distinct services (reuse the list query).
+        // Distinct services (reuse the list query). LIMIT 200 mirrors LOG_LIMIT /
+        // METRIC_LIMIT and bounds the per-request aggregation fan-out.
         let services: Vec<String> = match sqlx::query(
             "SELECT service_name FROM telemetry_log \
              UNION SELECT service_name FROM telemetry_metric \
-             UNION SELECT service_name FROM telemetry_span ORDER BY service_name",
+             UNION SELECT service_name FROM telemetry_span \
+             ORDER BY service_name LIMIT 200",
         )
         .fetch_all(&pool)
         .await
@@ -712,14 +715,20 @@ async fn open_spill(db_path: &str) -> Option<SqlitePool> {
     if db_path.is_empty() {
         return None;
     }
-    // `mode=rw` (NOT ro): the spill is WAL-mode (the parent writer needs
-    // concurrent read+write — see telemetry_spill.rs). A `mode=ro` connection
-    // can't attach the -wal/-shm and so never sees frames the writer committed
-    // but hasn't checkpointed; a `mode=rw` reader participates in WAL and sees
-    // them. The console only ever SELECTs, so rw grants no real write. A missing
-    // file fails to connect → None → empty result (no panic, no surfaced error).
-    let url = format!("sqlite:{db_path}?mode=rw");
-    match SqlitePool::connect(&url).await {
+    // NOT read-only: the spill is WAL-mode (the parent writer needs concurrent
+    // read+write — see telemetry_spill.rs). A read-only connection can't attach
+    // the -wal/-shm and so never sees frames the writer committed but hasn't
+    // checkpointed; a read-write reader participates in WAL and sees them. The
+    // console only ever SELECTs, so rw grants no real write. A missing file fails
+    // to connect → None → empty result (no panic, no surfaced error).
+    //
+    // Use SqliteConnectOptions::from_path (not a format!-built URL) so that
+    // special characters in db_path (spaces, '?', '#', etc.) can't corrupt the
+    // connection string.
+    let opts = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(false);
+    match SqlitePool::connect_with(opts).await {
         Ok(pool) => Some(pool),
         Err(e) => {
             eprintln!("[sky.hub] open_spill {db_path}: {e}");

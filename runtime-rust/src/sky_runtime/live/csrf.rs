@@ -50,14 +50,32 @@ pub fn csrf_enabled() -> bool {
 /// `true` when responses run in cross-origin-iframe mode (`SKY_LIVE_FRAME_ANCESTORS`
 /// set — the SkyDeploy control-plane embeds the console). In that mode the CSRF
 /// cookie must be `SameSite=None; Secure` so it survives the cross-site iframe.
-fn frame_ancestors() -> Option<String> {
-    std::env::var("SKY_LIVE_FRAME_ANCESTORS").ok().filter(|s| !s.is_empty())
+///
+/// Snapshotted once into a `OnceLock` on first call so env is not re-read on
+/// every request (eliminates the TOCTOU window where a dynamic env mutation
+/// could produce a half-`__Host-`/half-bare cookie name split between the reader
+/// and the setter within the same request).
+fn frame_ancestors() -> Option<&'static str> {
+    use std::sync::OnceLock;
+    // `None` sentinel: an empty string (the env var was absent or blank).
+    static FA: OnceLock<String> = OnceLock::new();
+    let v = FA.get_or_init(|| {
+        std::env::var("SKY_LIVE_FRAME_ANCESTORS")
+            .unwrap_or_default()
+    });
+    if v.is_empty() { None } else { Some(v.as_str()) }
 }
 
 /// Whether to mark cookies `Secure`. Production (or frame-ancestors mode, which
 /// is always HTTPS) → Secure. Mirrors Go's `r.TLS != nil || X-Forwarded-Proto`.
+///
+/// Snapshotted once into a `OnceLock` on first call (env is stable at process
+/// start; eliminates per-request `getenv` + the TOCTOU race between
+/// `cookies_secure()` deciding on `__Host-` and `csrf_set_cookie()` writing it).
 pub fn cookies_secure() -> bool {
-    telemetry::production_from_env() || frame_ancestors().is_some()
+    use std::sync::OnceLock;
+    static SECURE: OnceLock<bool> = OnceLock::new();
+    *SECURE.get_or_init(|| telemetry::production_from_env() || frame_ancestors().is_some())
 }
 
 /// 32 cryptographically-random bytes, hex-encoded (64 chars) — Go parity
@@ -83,12 +101,17 @@ pub fn token_is_well_formed(t: &str) -> bool {
 
 /// Read a named cookie value from the `Cookie:` header (generic; the session
 /// cookie has its own base-path-aware reader in `mod.rs`).
+///
+/// Uses `split_once('=')` and compares the key exactly (after trim) so a cookie
+/// named `sky_csrf` never accidentally matches `__Host-sky_csrf` or vice-versa
+/// (the old `strip_prefix` shape would match any name that is a prefix of the
+/// cookie key).
 pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
     for part in raw.split(';') {
         let part = part.trim();
-        if let Some(rest) = part.strip_prefix(name) {
-            if let Some(v) = rest.strip_prefix('=') {
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim() == name {
                 return Some(v.to_string());
             }
         }

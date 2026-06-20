@@ -46,13 +46,16 @@ impl Store {
         Ok(self.conn.query_row("SELECT v FROM meta WHERE k=?", [k], |r| r.get(0)).ok())
     }
     pub fn count(&self, table: &str) -> Result<i64> {
-        // Allowlist guard: table is always a hardcoded literal, but be explicit so
-        // a future caller can't inadvertently pass user-controlled input here.
-        match table {
-            "files" | "symbols" | "edges" | "kernels" | "meta" => {}
+        // Defense-in-depth: map table names to static SQL literals instead of formatting.
+        // This ensures no caller value (even allowlisted) is interpolated into the SQL string.
+        let sql = match table {
+            "files" => "SELECT COUNT(*) FROM files",
+            "symbols" => "SELECT COUNT(*) FROM symbols",
+            "edges" => "SELECT COUNT(*) FROM edges",
+            "kernels" => "SELECT COUNT(*) FROM kernels",
             _ => bail!("store::count: unexpected table name {table:?}"),
-        }
-        Ok(self.conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?)
+        };
+        Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
     }
     // Used in unit tests and by cmd_locate's direct SQL path; suppress dead_code
     // lint that fires because the integration path uses symbols_named_in_lang.

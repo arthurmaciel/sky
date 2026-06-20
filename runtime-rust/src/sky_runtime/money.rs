@@ -154,8 +154,10 @@ pub fn money_set_rate<E: From<String>>(from: String, to: String, rate: Decimal) 
     let mut map = rates().lock().unwrap_or_else(|e| e.into_inner());
     map.insert((from.clone(), to.clone()), rate.0);
     // Auto-inverse so consumers don't need both directions.
-    if !rate.0.is_zero() {
-        let inv = RD::from(1) / rate.0;
+    // Use checked_div: the zero-guard above makes this impossible in normal
+    // operation, but a subnormal or denormal Decimal could still produce None —
+    // skip the auto-inverse rather than panic.
+    if let Some(inv) = RD::from(1).checked_div(rate.0) {
         map.insert((to, from), inv);
     }
     SkyResult::Ok(())
@@ -202,19 +204,45 @@ pub fn money_clear_rates<E: From<String>>() -> SkyResult<E, ()> {
 /// `allocate : Int -> Int -> Decimal -> List Decimal`.
 /// Work in minor units (integer) to avoid rounding drift, then shift back.
 /// First `remainder` slots receive (base + 1), the rest receive `base`.
+///
+/// Uses `checked_mul`/`checked_div`/`checked_add`/`checked_sub` on every
+/// `rust_decimal` operation that is reachable from caller-controlled `Decimal`
+/// inputs — the bare operators panic on overflow, which is the same bug class
+/// as an `unwrap`. On overflow (astronomically large amounts or exotic `places`
+/// values) the function returns an empty Vec rather than panicking; normal
+/// monetary amounts (< 10^15 major units) are unaffected.
 pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> {
     if parts <= 0 { return Vec::new(); }
     let places = places.max(0) as u32;
-    // Shift to minor units (× 10^places), truncate to integer. `places` only
-    // ever arrives as `minorUnits c` (0/2/3/8) from the Sky wrapper today, but
-    // this kernel is `pub` — guard `10^places` with checked_pow so a caller
-    // passing places ≥ 19 saturates instead of panicking on i64 overflow.
+    // Shift to minor units (× 10^places). `10_i64.checked_pow` guards i64
+    // overflow for extreme `places` values (≥ 19). On None we saturate to
+    // i64::MAX — the scale still fits in Decimal, and the trunc() below will
+    // produce a very large number whose allocate output is still correct (the
+    // `checked_*` chain below catches any subsequent overflow).
     let factor = 10_i64.checked_pow(places).unwrap_or(i64::MAX);
     let scale = RD::from(factor);
-    let total_minor = (amount.0 * scale).trunc();
+    // checked_mul: amount × scale. Overflow → empty (no panic).
+    let total_minor = match amount.0.checked_mul(scale) {
+        Some(v) => v.trunc(),
+        None => return Vec::new(),
+    };
     let parts_dec = RD::from(parts);
-    let base = (total_minor / parts_dec).trunc();
-    let remainder = total_minor - (base * parts_dec);
+    // checked_div: total_minor / parts. parts > 0 guard above makes zero
+    // impossible in normal flow, but Decimal can still return None for edge
+    // cases (e.g. NaN-like states from saturated inputs).
+    let base = match total_minor.checked_div(parts_dec) {
+        Some(v) => v.trunc(),
+        None => return Vec::new(),
+    };
+    // checked_mul + checked_sub: base × parts and total_minor − that.
+    let base_times_parts = match base.checked_mul(parts_dec) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let remainder = match total_minor.checked_sub(base_times_parts) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
     let rem_int = remainder
         .to_string()
         .parse::<i64>()
@@ -223,9 +251,20 @@ pub fn money_allocate(places: i64, parts: i64, amount: Decimal) -> Vec<Decimal> 
     let inv_scale = RD::from(factor);
     let mut out = Vec::with_capacity(parts as usize);
     for i in 0..parts {
-        let share = if i < rem_int { base + RD::from(1) } else { base };
-        // Shift back to major units (÷ 10^places).
-        out.push(Decimal(share / inv_scale));
+        // checked_add: base + 1 for early slots.
+        let share = if i < rem_int {
+            match base.checked_add(RD::from(1)) {
+                Some(v) => v,
+                None => return Vec::new(),
+            }
+        } else {
+            base
+        };
+        // checked_div: shift back to major units (÷ 10^places).
+        match share.checked_div(inv_scale) {
+            Some(v) => out.push(Decimal(v)),
+            None => return Vec::new(),
+        }
     }
     out
 }

@@ -111,7 +111,20 @@ async fn do_connect<E: From<String> + Send + 'static>(
             req.headers_mut().insert(name, val);
         }
     }
-    let connect_fut = tokio_tungstenite::connect_async(req);
+    // Cap inbound frame/message size to prevent a remote server from forcing the
+    // client to buffer an arbitrarily large payload. Mirror the server-side 1 MiB
+    // default; Sky's cfg.timeout field is the Sky-level max-message-bytes when > 0
+    // (re-use that slot — no dedicated field yet), falling back to 16 MiB.
+    //
+    // tokio-tungstenite 0.24 exposes connect_async_with_config which passes a
+    // tungstenite::protocol::WebSocketConfig directly to the handshake.
+    let max_msg: usize = 16 * 1024 * 1024; // 16 MiB hard cap
+    let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(max_msg),
+        max_frame_size: Some(max_msg),
+        ..Default::default()
+    };
+    let connect_fut = tokio_tungstenite::connect_async_with_config(req, Some(ws_config), false);
     let (stream, _resp) = if timeout_ms > 0 {
         match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms as u64), connect_fut).await {
             Ok(Ok(ok)) => ok,

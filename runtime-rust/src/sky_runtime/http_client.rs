@@ -5,9 +5,24 @@
 //! these pub fields and the Sky-built `defaultRequest` record constructs this
 //! struct directly. Field names match the Sky records verbatim (camelCase
 //! `followRedirects` / `maxRedirects` — hence the non_snake_case allow).
+//!
+//! ## SSRF protection (opt-in)
+//!
+//! Set `SKY_HTTP_DENY_PRIVATE=1` (or `on` / `true`) to block requests whose
+//! resolved host is loopback, RFC-1918 private, link-local, unique-local (ULA),
+//! unspecified, or v4-mapped-private. This guard is OFF by default so that
+//! development against `localhost` keeps working unchanged.
+//!
+//! When ON the check runs:
+//! 1. **Pre-send**: parse the URL; DNS-resolve the host; reject if any resolved
+//!    IP is in a disallowed range.
+//! 2. **Each redirect**: a custom `reqwest::redirect::Policy` repeats the same
+//!    IP check on every `Location` target before following it, preventing
+//!    open-redirect chains that bypass the pre-send check.
 
 use super::*;
 use std::collections::HashMap;
+use std::net::{IpAddr, ToSocketAddrs};
 
 /// Sky.Core.Http.HttpResponse — field names/types match the Sky record alias.
 #[derive(Clone, Debug)]
@@ -31,10 +46,174 @@ pub struct HttpRequest {
     pub maxRedirects: i64,
 }
 
+// ---------------------------------------------------------------------------
+// SSRF guard helpers
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when `SKY_HTTP_DENY_PRIVATE` is set to a truthy value
+/// (`1`, `on`, `true`, case-insensitive).
+fn ssrf_deny_private_enabled() -> bool {
+    match std::env::var("SKY_HTTP_DENY_PRIVATE") {
+        Ok(v) => matches!(v.to_ascii_lowercase().trim(), "1" | "on" | "true"),
+        Err(_) => false,
+    }
+}
+
+/// Returns `true` when the address belongs to a range that must be blocked
+/// under `SKY_HTTP_DENY_PRIVATE`:
+///
+/// - loopback        (127.0.0.0/8, ::1)
+/// - RFC-1918        (10/8, 172.16/12, 192.168/16)
+/// - link-local      (169.254/16, fe80::/10)
+/// - unique-local    (fc00::/7 — fc00:: and fd00::)
+/// - unspecified     (0.0.0.0, ::)
+/// - v4-mapped IPv6  (::ffff:0:0/96) whose embedded v4 is in the above ranges
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() || v6.is_unspecified() {
+                return true;
+            }
+            // Link-local: fe80::/10
+            let seg = v6.segments();
+            if (seg[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            // Unique-local: fc00::/7 (covers fc00:: and fd00::)
+            if (seg[0] & 0xfe00) == 0xfc00 {
+                return true;
+            }
+            // v4-mapped: ::ffff:0:0/96
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(IpAddr::V4(v4));
+            }
+            false
+        }
+    }
+}
+
+/// Resolves `host` (plain hostname or IP literal) and checks that none of its
+/// addresses is in a disallowed private range.
+///
+/// Returns `Ok(())` if allowed, `Err(message)` if blocked.
+///
+/// Uses port 0 for the dummy `ToSocketAddrs` resolution; the port is not
+/// significant for the DNS lookup but is required by the API.
+fn check_host_not_private(host: &str) -> Result<(), String> {
+    // Try parsing as an IP literal first (avoids a DNS round-trip for bare IPs).
+    let literal: Option<IpAddr> = host.parse().ok();
+    if let Some(ip) = literal {
+        if is_private_ip(ip) {
+            return Err(format!(
+                "http: blocked: private/loopback host {} (SKY_HTTP_DENY_PRIVATE)",
+                ip
+            ));
+        }
+        return Ok(());
+    }
+
+    // Hostname → DNS resolve via std (synchronous; called before the async send).
+    let addr_iter = match (host, 0u16).to_socket_addrs() {
+        Ok(it) => it,
+        Err(e) => {
+            return Err(format!(
+                "http: blocked: could not resolve host {:?}: {} (SKY_HTTP_DENY_PRIVATE)",
+                host, e
+            ));
+        }
+    };
+
+    for sock_addr in addr_iter {
+        let ip = sock_addr.ip();
+        if is_private_ip(ip) {
+            return Err(format!(
+                "http: blocked: private/loopback host {:?} resolved to {} (SKY_HTTP_DENY_PRIVATE)",
+                host, ip
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validates a URL string under the SSRF deny-private policy.
+/// Rejects non-http/https schemes and private-range hosts.
+///
+/// Returns `Ok(())` if the request is allowed, `Err(message)` if blocked.
+fn ssrf_check_url(url: &str) -> Result<(), String> {
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(e) => {
+            return Err(format!(
+                "http: blocked: invalid URL {:?}: {} (SKY_HTTP_DENY_PRIVATE)",
+                url, e
+            ));
+        }
+    };
+
+    // Only http / https are permitted when the deny guard is on.
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "http: blocked: scheme {:?} is not http/https (SKY_HTTP_DENY_PRIVATE)",
+            scheme
+        ));
+    }
+
+    // Extract and check the host.
+    let host = match parsed.host_str() {
+        Some(h) => h,
+        None => {
+            return Err(
+                "http: blocked: URL has no host (SKY_HTTP_DENY_PRIVATE)".to_string()
+            );
+        }
+    };
+
+    check_host_not_private(host)
+}
+
+// ---------------------------------------------------------------------------
+// Core request executor
+// ---------------------------------------------------------------------------
+
 async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyResult<E, HttpResponse> {
+    let deny_private = ssrf_deny_private_enabled();
+
+    // Pre-send SSRF check (when guard is enabled).
+    if deny_private {
+        if let Err(msg) = ssrf_check_url(&req.url) {
+            return SkyResult::Err(msg.into());
+        }
+    }
+
     let mut builder = reqwest::Client::builder();
     builder = if req.followRedirects {
-        builder.redirect(reqwest::redirect::Policy::limited(req.maxRedirects.max(0) as usize))
+        if deny_private {
+            // Redirect policy that re-applies the SSRF check on every hop.
+            let max = req.maxRedirects.max(0) as usize;
+            builder.redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= max {
+                    return attempt.error(format!(
+                        "http: too many redirects (max {})",
+                        max
+                    ));
+                }
+                // Check the redirect target URL.
+                let next_url = attempt.url().as_str();
+                if let Err(msg) = ssrf_check_url(next_url) {
+                    return attempt.error(msg);
+                }
+                attempt.follow()
+            }))
+        } else {
+            builder.redirect(reqwest::redirect::Policy::limited(req.maxRedirects.max(0) as usize))
+        }
     } else {
         builder.redirect(reqwest::redirect::Policy::none())
     };
@@ -120,5 +299,105 @@ mod tests {
         let q2 = http_parse_query("?x=9&".to_string());
         assert_eq!(q2.get("x").map(String::as_str), Some("9"));
         assert_eq!(q2.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // SSRF guard unit tests (no network — purely local logic)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_private_ip_loopback_v4() {
+        assert!(is_private_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("127.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_rfc1918() {
+        assert!(is_private_ip("10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip("172.31.255.255".parse().unwrap()));
+        assert!(is_private_ip("192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_link_local_v4() {
+        assert!(is_private_ip("169.254.0.1".parse().unwrap()));
+        assert!(is_private_ip("169.254.169.254".parse().unwrap())); // AWS IMDS
+    }
+
+    #[test]
+    fn is_private_ip_unspecified_v4() {
+        assert!(is_private_ip("0.0.0.0".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_loopback_v6() {
+        assert!(is_private_ip("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_link_local_v6() {
+        assert!(is_private_ip("fe80::1".parse().unwrap()));
+        assert!(is_private_ip("fe80::dead:beef".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_ula_v6() {
+        assert!(is_private_ip("fc00::1".parse().unwrap()));
+        assert!(is_private_ip("fd00::1".parse().unwrap()));
+        assert!(is_private_ip("fdff:ffff:ffff::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_v4mapped_private() {
+        // ::ffff:192.168.1.1 — v4-mapped RFC-1918
+        assert!(is_private_ip("::ffff:192.168.1.1".parse().unwrap()));
+        // ::ffff:127.0.0.1 — v4-mapped loopback
+        assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_public_is_allowed() {
+        assert!(!is_private_ip("1.1.1.1".parse().unwrap()));
+        assert!(!is_private_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_private_ip("2606:4700:4700::1111".parse().unwrap())); // Cloudflare v6
+    }
+
+    #[test]
+    fn ssrf_check_url_rejects_non_http_scheme() {
+        let err = ssrf_check_url("ftp://example.com/file").unwrap_err();
+        assert!(err.contains("scheme"), "expected scheme rejection, got: {err}");
+        let err2 = ssrf_check_url("file:///etc/passwd").unwrap_err();
+        assert!(err2.contains("scheme") || err2.contains("invalid"), "got: {err2}");
+    }
+
+    #[test]
+    fn ssrf_check_url_rejects_private_ip_literal() {
+        let err = ssrf_check_url("http://192.168.1.1/secret").unwrap_err();
+        assert!(err.contains("blocked"), "expected blocked, got: {err}");
+    }
+
+    #[test]
+    fn ssrf_check_url_rejects_loopback_ip_literal() {
+        let err = ssrf_check_url("http://127.0.0.1:8080/admin").unwrap_err();
+        assert!(err.contains("blocked"), "expected blocked, got: {err}");
+    }
+
+    #[test]
+    fn ssrf_check_url_rejects_aws_imds() {
+        let err = ssrf_check_url("http://169.254.169.254/latest/meta-data/").unwrap_err();
+        assert!(err.contains("blocked"), "expected blocked, got: {err}");
+    }
+
+    #[test]
+    fn ssrf_check_url_rejects_invalid_url() {
+        let err = ssrf_check_url("not a url at all").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn ssrf_check_url_allows_public_ip() {
+        // 1.1.1.1 is public — should pass (no DNS needed for IP literals)
+        assert!(ssrf_check_url("https://1.1.1.1/").is_ok());
     }
 }

@@ -66,7 +66,14 @@ pub fn time_format(layout: String, ms: i64) -> String {
         .replace(".000", ".%3f")
         .replace("PM", "%p")
         .replace("pm", "%P");
-    dt.format(&strfmt).to_string()
+    // Non-panicking render: chrono's DelayedFormat Display can return Err on an
+    // invalid/unterminated format specifier (e.g. a stray `%`), and std's
+    // to_string() panics when a Display impl returns Err. Use write! instead.
+    let mut out = String::new();
+    match std::fmt::write(&mut out, format_args!("{}", dt.format(&strfmt))) {
+        Ok(()) => out,
+        Err(_) => String::new(),
+    }
 }
 
 /// `Time.formatHTTP : Int -> String` — HTTP date header format.
@@ -300,7 +307,14 @@ pub fn time_format_in_zone<E: From<String>>(
         SkyResult::Ok(d) => d,
         SkyResult::Err(e) => return SkyResult::Err(e),
     };
-    SkyResult::Ok(dt.format(&pattern).to_string())
+    // Non-panicking render: same risk as time_format — stray `%` in a
+    // Sky-supplied pattern causes DelayedFormat::fmt to return Err, which
+    // to_string() turns into a panic. Use write! and fall back to "".
+    let mut out = String::new();
+    match std::fmt::write(&mut out, format_args!("{}", dt.format(&pattern))) {
+        Ok(()) => SkyResult::Ok(out),
+        Err(_) => SkyResult::Ok(String::new()),
+    }
 }
 
 /// `Sky.Core.Time.formatISO8601 ms` — the UTC instant as an RFC3339 / ISO-8601

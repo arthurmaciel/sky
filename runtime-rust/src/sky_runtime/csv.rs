@@ -18,8 +18,25 @@ pub struct CsvDoc {
     pub rows: Vec<Vec<String>>,
 }
 
-fn first_byte(delim: &str) -> u8 {
-    delim.as_bytes().first().copied().unwrap_or(b',')
+/// Validate that `delim` is exactly one ASCII byte, as required by the csv
+/// crate. A multi-byte string (e.g. a UTF-8 character) or an empty string is
+/// silently mishandled by the old `first_byte` helper — the multi-byte case
+/// takes only the first (possibly continuation) byte, producing a nonsense
+/// delimiter; the empty case silently falls back to `,`, which is wrong for
+/// callers that passed an explicit delimiter. Return `Err` for both cases.
+fn validated_delimiter<E: From<String>>(delim: &str) -> SkyResult<E, u8> {
+    let bytes = delim.as_bytes();
+    if bytes.len() == 1 && bytes[0].is_ascii() {
+        SkyResult::Ok(bytes[0])
+    } else {
+        SkyResult::Err(
+            format!(
+                "Csv: delimiter must be a single ASCII byte, got {:?}",
+                delim
+            )
+            .into(),
+        )
+    }
 }
 
 fn parse_delim<E: From<String>>(text: &str, delim: u8) -> SkyResult<E, CsvDoc> {
@@ -59,7 +76,11 @@ pub fn csv_parse<E: From<String>>(text: String) -> SkyResult<E, CsvDoc> {
 
 /// Csv.parseWithDelimiter : String -> String -> Result Error Csv
 pub fn csv_parse_with_delimiter<E: From<String>>(delim: String, text: String) -> SkyResult<E, CsvDoc> {
-    parse_delim(&text, first_byte(&delim))
+    let byte = match validated_delimiter::<E>(&delim) {
+        SkyResult::Ok(b) => b,
+        SkyResult::Err(e) => return SkyResult::Err(e),
+    };
+    parse_delim(&text, byte)
 }
 
 /// Csv.encode : Csv -> String
@@ -69,7 +90,15 @@ pub fn csv_encode(doc: CsvDoc) -> String {
 
 /// Csv.encodeWithDelimiter : String -> Csv -> String
 pub fn csv_encode_with_delimiter(delim: String, doc: CsvDoc) -> String {
-    encode_delim(&doc, first_byte(&delim))
+    // Sky's `encodeWithDelimiter` returns `String` (no Result), so on an
+    // invalid delimiter we fall back to the standard comma rather than
+    // silently taking a partial/wrong byte. This matches Go's behaviour
+    // (the Go csv.Writer panics on a non-ASCII Comma — we degrade gracefully).
+    let byte = match validated_delimiter::<String>(&delim) {
+        SkyResult::Ok(b) => b,
+        SkyResult::Err(_) => b',',
+    };
+    encode_delim(&doc, byte)
 }
 
 /// Csv.parseStreamFromFile : String -> Task Error (List (List String))

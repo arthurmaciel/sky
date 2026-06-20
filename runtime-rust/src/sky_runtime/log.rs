@@ -63,6 +63,34 @@ fn json_str(s: &str) -> String {
     format!("\"{}\"", super::telemetry::json_escape(s))
 }
 
+/// Strip ASCII control characters from a log message for the plain-text path,
+/// matching the safety guarantee the JSON path already gets via `json_escape`.
+/// Keeps all printable ASCII, spaces (0x20), and multi-byte UTF-8 sequences
+/// intact — only bytes 0x00–0x1F and 0x7F are affected:
+///   - `\n` (0x0A) and `\r` (0x0D) are replaced by a visible `\n`/`\r` literal
+///     so an attacker cannot inject newlines that forge additional log lines.
+///   - All other ASCII controls are replaced by `·` (U+00B7, MIDDLE DOT) so the
+///     presence of unusual bytes is visible rather than silently dropped.
+///   - `\t` (0x09) is preserved as-is (benign, readable in plain log viewers).
+fn sanitise_log_msg(msg: &str) -> std::borrow::Cow<'_, str> {
+    // Fast path: most messages are clean — scan without allocating.
+    let needs_escape = msg.bytes().any(|b| matches!(b, 0x00..=0x08 | 0x0A..=0x1F | 0x7F) && b != b'\t');
+    if !needs_escape {
+        return std::borrow::Cow::Borrowed(msg);
+    }
+    let mut out = String::with_capacity(msg.len() + 8);
+    for ch in msg.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push('\t'),
+            c if (c as u32) < 0x20 || c == '\x7F' => out.push('·'),
+            c => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// The Go `logEmit` core: gate on the threshold, mirror into the telemetry ring,
 /// then write the plain or JSON line to the correct stream. `level` is the
 /// numeric severity; `level_name` is the lowercase token (`info` / `warn` / …).
@@ -90,7 +118,10 @@ fn log_emit(level: i32, level_name: &str, msg: &str) {
         }
         return;
     }
-    let line = format!("{} {} {}", rfc3339_nano_now(), level_name.to_ascii_uppercase(), msg);
+    // Plain mode: sanitise before writing so control chars / embedded newlines
+    // can't forge extra log lines (the JSON path is safe via json_escape already).
+    let safe_msg = sanitise_log_msg(msg);
+    let line = format!("{} {} {}", rfc3339_nano_now(), level_name.to_ascii_uppercase(), safe_msg);
     if to_stderr {
         eprintln!("{line}");
     } else {

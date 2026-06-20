@@ -46,7 +46,9 @@ pub fn jwt_encode_rs256<E: From<String>>(key_pem: String, claims_json: String) -
     let header = Header::new(Algorithm::RS256);
     let key = match EncodingKey::from_rsa_pem(key_pem.as_bytes()) {
         Ok(k) => k,
-        Err(e) => return SkyResult::Err(format!("jwt-encode-rs: key: {}", e).into()),
+        // Suppress the parse-error detail to avoid leaking structural hints
+        // about the key material (e.g. PEM framing, DER structure).
+        Err(_) => return SkyResult::Err("jwt-encode-rs: invalid RSA key".to_string().into()),
     };
     match encode(&header, &claims, &key) {
         Ok(t) => SkyResult::Ok(t),
@@ -58,7 +60,9 @@ pub fn jwt_encode_rs256<E: From<String>>(key_pem: String, claims_json: String) -
 pub fn jwt_decode_rs256<E: From<String>>(key_pem: String, token: String) -> SkyResult<E, String> {
     let key = match DecodingKey::from_rsa_pem(key_pem.as_bytes()) {
         Ok(k) => k,
-        Err(e) => return SkyResult::Err(format!("jwt-decode-rs: key: {}", e).into()),
+        // Suppress the parse-error detail to avoid leaking structural hints
+        // about the key material (e.g. PEM framing, DER structure).
+        Err(_) => return SkyResult::Err("jwt-decode-rs: invalid RSA key".to_string().into()),
     };
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = true;
