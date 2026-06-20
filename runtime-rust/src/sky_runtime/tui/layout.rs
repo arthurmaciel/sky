@@ -563,6 +563,7 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
     // Per-side presence (top, right, bottom, left). Border.width → all four;
     // Border.widthEach → only the sides with width > 0 (partial frame).
     let mut sides = (false, false, false, false);
+    let mut rounded = false;
     for a in attrs {
         match a {
             Attribute::AttrStyle(k, _) if k == "__row" => w.dir = Dir::Row,
@@ -615,6 +616,10 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
             }
             Attribute::AttrBorderColor(c) => border_color = Some(c.clone()),
             Attribute::AttrBorderStyle(s) => border_style = s.clone(),
+            // Border.rounded → rounded corner glyphs (╭╮╰╯) on a solid frame
+            // (audit #18). Shadow/glow/inset-shadow can't render in cells and are
+            // silently dropped (a stderr warn would corrupt the live TUI).
+            Attribute::AttrBorderRounded(n) if *n > 0 => rounded = true,
             // Raw CSS escape hatch `Ui.style "border-style" "dashed"|"dotted"` —
             // the list-driven way the kitchen-sink picks a style. Without this the
             // value was dropped and dashed/dotted rendered as solid (border_glyphs
@@ -638,7 +643,12 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         }
     }
     if border_width > 0 {
-        w.border = Some((border_color.as_ref().map(color_of), border_style, sides));
+        let style = if rounded && border_style == "solid" {
+            "rounded".to_string()
+        } else {
+            border_style
+        };
+        w.border = Some((border_color.as_ref().map(color_of), style, sides));
     }
     w
 }
@@ -1625,6 +1635,7 @@ fn border_glyphs(style: &str) -> (&'static str, &'static str, &'static str, &'st
     match style {
         "dashed" => ("┄", "┆", "┌", "┐", "└", "┘"),
         "dotted" => ("┈", "┊", "┌", "┐", "└", "┘"),
+        "rounded" => ("─", "│", "╭", "╮", "╰", "╯"),
         _ => ("─", "│", "┌", "┐", "└", "┘"),
     }
 }
