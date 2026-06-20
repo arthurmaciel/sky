@@ -1,20 +1,18 @@
 # Sky Rust backend
 
-```
-ATTENTION:
+> **ATTENTION**
+>
+> The Rust backend is **experimental** and **not supported** by the Sky project.
+>
+> All the bugs, incompleteness and vulnerabilites are my sole responsability.
+>
+> Don't use it for production yet.
 
-The Rust backend is **experimental** and **not supported** by the Sky project.
-
-All the bugs, incompleteness and vulnerabilites are my sole responsability.
-
-Don't use it for production yet.
-```
----
 
 ## Contents
 
 - [Introduction](#introduction)
-  - [Limitations](#limitations)
+  - [Support](#how-to-support)
 - [Getting started](#getting-started)
   - [Linux](#linux)
   - [macOS](#macos)
@@ -40,11 +38,10 @@ Don't use it for production yet.
 
 ## Introduction 
 
-Sky is an awesome language! Industrial-grade code and utilities, a really nice author
+[Sky](https://sky-lang.org/) is an awesome language! Industrial-grade code and utilities, a really nice author
 and a broad vision towards the future.
 
-As I have been learning Rust, I thought about implementing a new experimental
-backend with it. 
+As I like Rust, why not trying to implement a new backend with it?
 
 Goals:
 
@@ -58,17 +55,15 @@ If you want, get to know more about the project **[principles](docs/PRINCIPLES.m
 
 ---
 
-### Limitations
+### How to support
 
 Sky and its default Go backend are heavily and quickly developed by its author. 
-Keeping the Rust backend up-to-date is difficult.
+Keeping the Rust backend up-to-date is difficult. 
 
-At the moment the Rust backend reaches full behavioral parity with the Go reference. 
-But usually **expect a one-month delay to Go backend parity**.
+I'd love to have your [support](https://ko-fi.com/arthur_maciel??g=1) :)
 
-Where Rust implements a mechanism differently from Go, the divergence is recorded in
-**[Rust vs Go backend — divergent implementation strategies](docs/TECHNICAL-DETAILS.md#rust-vs-go-backend--divergent-implementation-strategies)**.
-
+At the moment the Rust backend reaches almost full behavioral parity with the Go reference (95-99%). 
+But usually **expect a one-month delay to Go backend parity**. With your support we can make it faster!
 
 ---
 
