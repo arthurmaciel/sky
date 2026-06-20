@@ -121,7 +121,7 @@ fn root_bg<M>(view: &Element<M>) -> Option<(u8, u8, u8)> {
         _ => return None,
     };
     attrs.iter().rev().find_map(|a| match a {
-        Attribute::AttrBgColor(c) => Some(color_of(c)),
+        Attribute::AttrBgColor(c) => bg_of(c),
         _ => None,
     })
 }
@@ -457,6 +457,19 @@ fn color_of(c: &Color) -> (u8, u8, u8) {
     ((*r & 0xff) as u8, (*g & 0xff) as u8, (*b & 0xff) as u8)
 }
 
+/// A BACKGROUND colour, honouring alpha: a fully-transparent colour
+/// (`Ui.transparent` / any rgba with alpha 0) paints NOTHING (`None`) rather than
+/// an opaque black box. The terminal cell model is 1-bit alpha — any non-zero
+/// alpha is treated as fully opaque (no blending). (audit #10)
+fn bg_of(c: &Color) -> Option<(u8, u8, u8)> {
+    let Color::Rgba(_, _, _, a) = c;
+    if *a <= 0.0 {
+        None
+    } else {
+        Some(color_of(c))
+    }
+}
+
 /// Clamp-add `delta` to a channel (Go's `lighten`). Saturating — no overflow.
 fn lighten(c: u8, delta: i64) -> u8 {
     (c as i64 + delta).clamp(0, 255) as u8
@@ -521,7 +534,7 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
                 w.pad_left = *l;
             }
             Attribute::AttrFontColor(c) => w.style.fg = Some(color_of(c)),
-            Attribute::AttrBgColor(c) => w.style.bg = Some(color_of(c)),
+            Attribute::AttrBgColor(c) => w.style.bg = bg_of(c),
             Attribute::AttrFontWeight(n) if *n >= 600 => w.style.bold = true,
             // Typography SGR (Go parity — tui_ui.go cellStyleSGR emits 3/4/9).
             Attribute::AttrFontItalic => w.style.italic = true,
@@ -558,15 +571,25 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
     w
 }
 
-fn vstack(children: Vec<Rendered>, gap: usize) -> Rendered {
+fn vstack(children: Vec<Rendered>, gap: usize, bg: Option<(u8, u8, u8)>) -> Rendered {
+    // When the column carries a bg, the inter-child gap ROWS must take that bg too
+    // (else they render terminal-default — the wrong-colour-gap bug, audit #5). A
+    // bg gap row spans the stack width; with no bg, keep the empty row (default).
+    let stack_w = children.iter().map(|r| r.block.width()).max().unwrap_or(0);
+    let gap_row = |w: &mut Block| {
+        for _ in 0..gap {
+            match bg {
+                Some(c) => w.lines.push(vec![Run { text: " ".repeat(stack_w), style: Style { bg: Some(c), ..Style::default() } }]),
+                None => w.lines.push(Vec::new()),
+            }
+        }
+    };
     let mut block = Block::default();
     let mut hits = Vec::new();
     let mut line0 = 0usize;
     for (i, r) in children.into_iter().enumerate() {
         if i > 0 {
-            for _ in 0..gap {
-                block.lines.push(Vec::new());
-            }
+            gap_row(&mut block);
             line0 += gap;
         }
         for (idx, l, c, w, h) in r.hits {
@@ -579,7 +602,10 @@ fn vstack(children: Vec<Rendered>, gap: usize) -> Rendered {
     Rendered { block, hits }
 }
 
-fn hstack(children: Vec<Rendered>, gap: usize) -> Rendered {
+fn hstack(children: Vec<Rendered>, gap: usize, bg: Option<(u8, u8, u8)>) -> Rendered {
+    // Gap columns + short-child filler take the row's bg when set (audit #5), else
+    // terminal-default.
+    let fill_style = Style { bg, ..Style::default() };
     let height = children.iter().map(|r| r.block.height()).max().unwrap_or(0);
     let mut block = Block { lines: vec![Vec::new(); height] };
     let mut hits = Vec::new();
@@ -596,7 +622,7 @@ fn hstack(children: Vec<Rendered>, gap: usize) -> Rendered {
         for row in 0..height {
             if let Some(target) = block.lines.get_mut(row) {
                 if bi > 0 && gap > 0 {
-                    target.push(Run { text: " ".repeat(gap), style: Style::default() });
+                    target.push(Run { text: " ".repeat(gap), style: fill_style });
                 }
                 match r.block.lines.get(row) {
                     Some(line) => {
@@ -608,11 +634,11 @@ fn hstack(children: Vec<Rendered>, gap: usize) -> Rendered {
                         if lw < bw {
                             target.push(Run {
                                 text: " ".repeat(bw.saturating_sub(lw)),
-                                style: Style::default(),
+                                style: fill_style,
                             });
                         }
                     }
-                    None => target.push(Run { text: " ".repeat(bw), style: Style::default() }),
+                    None => target.push(Run { text: " ".repeat(bw), style: fill_style }),
                 }
             }
         }
@@ -670,7 +696,7 @@ fn render_input<M: Clone>(
     let mut style = inherited;
     for a in attrs {
         match a {
-            Attribute::AttrBgColor(c) => style.bg = Some(color_of(c)),
+            Attribute::AttrBgColor(c) => style.bg = bg_of(c),
             Attribute::AttrFontColor(c) => style.fg = Some(color_of(c)),
             _ => {}
         }
@@ -965,8 +991,8 @@ fn render_node<M: Clone>(
             let child_blocks: Vec<Rendered> =
                 kids.iter().map(|k| render_node(k, label_style, ctx, content_avail)).collect();
             let mut inner = match w.dir {
-                Dir::Column => vstack(child_blocks, 0),
-                Dir::Row => hstack(child_blocks, ctx.canvas.cells_x(w.spacing_px)),
+                Dir::Column => vstack(child_blocks, 0, label_style.bg),
+                Dir::Row => hstack(child_blocks, ctx.canvas.cells_x(w.spacing_px), label_style.bg),
             };
             apply_self_width(&mut inner.block, &w, content_avail, ctx.canvas);
             let mut padded = apply_padding(inner, &w, ctx.canvas, label_style);
@@ -1081,8 +1107,8 @@ fn render_node<M: Clone>(
                     Rendered { block: Block { lines: vec![Vec::new()] }, hits: vec![] }
                 } else {
                     match w.dir {
-                        Dir::Column => vstack(children, ctx.canvas.cells_y(w.spacing_px)),
-                        Dir::Row => hstack(children, ctx.canvas.cells_x(w.spacing_px)),
+                        Dir::Column => vstack(children, ctx.canvas.cells_y(w.spacing_px), w.style.bg),
+                        Dir::Row => hstack(children, ctx.canvas.cells_x(w.spacing_px), w.style.bg),
                     }
                 };
                 apply_self_width(&mut inner.block, &w, content_avail, ctx.canvas);
@@ -1234,9 +1260,9 @@ fn render_grid<M: Clone>(
             r2.block.set_width(col_width, cell_bg);
             sized.push(r2);
         }
-        rows.push(hstack(sized, 0));
+        rows.push(hstack(sized, 0, w.style.bg));
     }
-    vstack(rows, gap_y)
+    vstack(rows, gap_y, w.style.bg)
 }
 
 /// The cell's own background, read from its rendered runs — the bg a grid cell
