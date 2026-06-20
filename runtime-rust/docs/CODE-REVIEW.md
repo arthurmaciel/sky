@@ -35,6 +35,44 @@ codebase). One pass, one file at a time.
 build artifacts, the `courses/` HTML, and `examples/`.
 
 ---
+## Security audit — 2026-06-20 (incremental, tiered, diagnose+1-fix)
+
+Scope: the in-boundary delta since the 2026-06-19 fix baseline (`6d43ad16`) — my
+session's security hardening + the changed Rust codegen + new CI/scripts.
+**Tiered, token-cost-effective** (deterministic first, LLM only on the high-risk
+delta):
+
+- **T0 deterministic (≈free):** secret-compare grep clean (only hit
+  `input_type == "password"`, a field name); sole `unsafe` is the documented
+  console-proxy prctl orphan-guard; CI has no `pull_request_target` (no
+  poisoned-PR RCE). `crypto`/`csrf` confirmed `subtle::ct_eq`.
+- **T0 CVE / supply-chain (`cargo-audit` + `cargo-deny`, ≈free):** `cargo-deny`
+  advisories/bans/sources OK. `cargo-audit` = **1 vuln + 12 unmaintained warns**.
+- **T2/T3 LLM (2 adversarial agents):** codegen emitters + 6 runtime fixes.
+
+| Sev | File / crate | Finding | Disposition |
+|---|---|---|---|
+| MED | `email.rs` | email HTTP client (Resend/SendGrid/SES) built its own `reqwest::Client` with NO `ssrf_apply`; under `SKY_HTTP_DENY_PRIVATE=1` a crafted `SKY_EMAIL_ENDPOINT_*` / region-host could exfiltrate the bearer token to a metadata/loopback host. `http_client.rs` doc *falsely* claimed the SES path was guarded | ✅ **FIXED** `35e8790a` — thread `ssrf_apply` (no redirects); doc claim now true. cargo+clippy green |
+| MED | `rsa 0.9.10` (RUSTSEC-2023-0071) | Marvin Attack — timing sidechannel key recovery; via RS256 (JWT/Crypto). **No upstream-fixed release exists** | ⏸️ bounded — RSA used for JWT sign/verify, not a decryption oracle; no patched `rsa` to bump to. Track; consider `cargo-deny` ignore w/ rationale + revisit on upstream fix |
+| LOW | GTK3 stack + `proc-macro-error` (12 RUSTSEC unmaintained/unsound) | `gtk-sys`/`gdk`/`atk`/`glib`(unsound iter)/… — transitive via wry/tao **webview** feature | ⏸️ accept — no maintained pre-GTK4 alternative; webview-only; not vulnerabilities |
+| LOW | `html.rs` | `escape_attr` doesn't strip dangerous URL schemes → `href="javascript:…"` survives (entity-escaped, not scheme-filtered). Markup-injection itself is sound | ⏸️ Go-parity; caller's responsibility. Defense-in-depth: scheme allowlist for href/src/action |
+| LOW | `server.rs` | `host_safe` permits `:` in the pre-anchor Origin span (`evil.com:.example.com`) — not a registrable/browser-emittable host | ⏸️ not browser-reachable; CSWSH glob bypasses all correctly rejected. Optional: structural Origin parse |
+| LOW | `live/store.rs` | no hard session-count cap → burst DoS within a TTL window (idle growth IS bounded; eviction race-free) | ⏸️ Go-parity (memory store ~ user-count×size). Optional `SKY_LIVE_MAX_SESSIONS` LRU cap |
+| LOW | `Emitter.hs` | `validTomlStr` rejects `" \ \n \r` (blocks TOML section-injection / value-break) but not `\t`/`\f`/U+2028/U+2029 | ➖ not exploitable (can't break a TOML value); defense-in-depth tighten only |
+
+**Sound (break-attempted, no defect):** `ExprEmitter.hs`, `TypeEmitter.hs`
+(full string-literal escaping incl. control+non-ASCII; identifiers normalized;
+bare-`any` fails loud) · `path.rs` (panic-free, Go-parity) · `http_client.rs`
+`read_body_capped` + per-redirect SSRF re-check · the `email`/`html`/`server`/
+`store` fixes' core logic. Full per-agent JSON in this commit's session.
+
+**Efficiency note:** the deterministic tier (greps + cargo-audit/deny) caught the
+CVE/supply-chain class in seconds at zero LLM cost; LLM agents found the only
+net-new code defect (email SSRF, now fixed) + defense-in-depth nits. → folded
+into `quality-audit.sh` (§6c SECGREP + §6d SUPPLY) and the `principles-audit`
+skill (audit's-own-fix exclusion + CVE tier).
+
+---
 ## Security-only audit — 2026-06-19 (whole codebase, diagnose-only)
 
 120 in-scope code+script files, 10 read-only security-lens agents (token-conserving).

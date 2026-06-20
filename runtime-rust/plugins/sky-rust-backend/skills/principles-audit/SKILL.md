@@ -47,6 +47,22 @@ There is **no "human review" column** — a recurring autonomous audit makes it 
 1. **Re-index + scope the delta.** `skydex update --repo .`; compute which
    in-scope files changed since their row's **Last audited** (git diff) — only
    those (plus never-audited rows) need work this pass. First run = all files.
+   **Audit's-own-fix exclusion (the #1 repeat-run cost leak):** a file whose
+   ONLY post-`Last audited` commit IS the audit's own recorded fix (the
+   ledger's `Fix` cell already cites that commit) must NOT re-trigger — the
+   change *is* the recorded resolution, not new unreviewed code. Re-audit it
+   only when a LATER, unrelated commit touches it. Without this, the fix commits
+   from the previous run re-flag nearly every file (e.g. 2026-06-19's fixes made
+   a naive since-date show ~59 files when the true delta was a handful).
+1b. **Deterministic tier FIRST (≈free, before any LLM).** Run
+   `sky-rust-backend:quality-audit` — its `[SECGREP]` (timing-oracle /
+   injection-sink / un-guarded `reqwest::Client`) and `[SUPPLY]`
+   (`cargo-audit` CVE/unmaintained + `cargo-deny` bans/sources) tiers catch the
+   whole CVE + secret-compare + sink class at zero LLM cost. Feed their hits into
+   the high-risk shortlist; the swarm then spends tokens only on human-judgment
+   security the greps/clippy provably can't decide. (Install once:
+   `cargo install cargo-audit cargo-deny`; both are guarded — skip-with-note if
+   absent.)
 2. **Inventory (new/empty rows only).** A swarm skims each file → `Purpose` +
    `Risk`; insert leaf-first into its component section. Update the scope inventory.
 3. **Review.** A swarm reads each in-scope-delta file **line-by-line** against the

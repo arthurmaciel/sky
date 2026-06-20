@@ -130,6 +130,45 @@ DEF_SITES="$(count 'SKY-RUST-AUDIT:DEFERRED' || true)"
 [ -n "$DEF_SITES" ] && { say "  deferred backlog:"; printf '%s\n' "$DEF_SITES" | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log"; }
 say "  (grep -rn SKY-RUST-AUDIT for all · …:ACCEPTED accepted compromises · …:DEFERRED known issues)"
 
+# ── 6c. Security grep — timing-oracle + injection sinks (advisory) ───────────
+# Versioned here (not re-improvised per run). Patterns the 2026-06-20 security
+# audit found load-bearing: non-constant-time secret compares (must route via
+# `subtle::ct_eq`) and untrusted values reaching SQL/shell/host sinks.
+say ""; say ">>> [SECGREP] timing-oracle + injection-sink scan (advisory)"
+if command -v rg >/dev/null 2>&1; then
+  say "  -- secret/token/mac compared with ==/!= (use subtle::ct_eq) --"
+  rg -n --no-heading -g '*.rs' -i \
+    '(token|secret|password|passwd|signature|\bsig\b|cookie|\bmac\b|hmac|bearer)[^\n]*(==|!=)|(==|!=)[^\n]*(token|secret|password|passwd|signature|\bsig\b|cookie|\bmac\b|hmac|bearer)' \
+    "$SRC" 2>/dev/null | rg -v '//|test|ct_eq|constant_time|subtle' | head -20 | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log" || say "    (none)"
+  say "  -- raw SQL via format!/push_str (prefer bound params) --"
+  rg -n --no-heading -g '*.rs' '(format!|push_str|write!)[^\n]*(SELECT|INSERT|UPDATE|DELETE|WHERE)' "$SRC" 2>/dev/null | rg -v '//|test' | head -15 | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log" || say "    (none)"
+  say "  -- new outbound reqwest::Client::builder (must thread http_client::ssrf_apply) --"
+  rg -n --no-heading -g '*.rs' 'reqwest::Client(::builder)?\(' "$SRC" 2>/dev/null | rg -v '//|test|ssrf_apply' | head -15 | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log" || say "    (none)"
+else
+  say "  (rg not on PATH — skipped)"
+fi
+
+# ── 6d. CVE / supply-chain (advisory; deterministic, ~free) ──────────────────
+# cargo-audit = RustSec CVE/unmaintained/unsound advisories against Cargo.lock;
+# cargo-deny = license/bans/duplicate-source policy. Both guarded — skip with a
+# note if absent (install: cargo install cargo-audit cargo-deny). Advisory only:
+# they never flip the hard gate (CVEs are triaged, not auto-blocking).
+say ""; say ">>> [SUPPLY] cargo-audit + cargo-deny (advisory)"
+if command -v cargo-audit >/dev/null 2>&1; then
+  ( cd "$CRATE" && cargo audit ) >"$HIST/cargo-audit.log" 2>&1 || true
+  VULN_N="$(grep -cE '^Crate:' "$HIST/cargo-audit.log" 2>/dev/null || echo 0)"
+  say "  cargo-audit: $(grep -E 'vulnerabilit|warning:.*allowed' "$HIST/cargo-audit.log" | tail -2 | tr '\n' ' ')"
+  grep -E '^(Crate|Title|ID):' "$HIST/cargo-audit.log" 2>/dev/null | head -24 | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log"
+else
+  say "  cargo-audit absent — skipped (cargo install cargo-audit)"
+fi
+if command -v cargo-deny >/dev/null 2>&1; then
+  ( cd "$CRATE" && cargo deny check advisories bans sources ) >"$HIST/cargo-deny.log" 2>&1 || true
+  say "  cargo-deny: $(grep -cE '^error' "$HIST/cargo-deny.log" 2>/dev/null || echo 0) errors · $(grep -cE '^warning' "$HIST/cargo-deny.log" 2>/dev/null || echo 0) warnings (see $HIST/cargo-deny.log)"
+else
+  say "  cargo-deny absent — skipped (cargo install cargo-deny)"
+fi
+
 # ── 7. Tests (behaviour gate) ────────────────────────────────────────────────
 say ""; say ">>> [TEST] cargo test --all-targets $FEATURES"
 TEST=0
