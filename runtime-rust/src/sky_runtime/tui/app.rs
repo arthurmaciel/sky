@@ -14,8 +14,8 @@ use super::super::core::{ok_res, SkyResult, SkyTask};
 use super::super::tea::{cli_run_cmd, CliEvent, SkyCmd, SkySub, SubManager};
 use super::super::ui::Element;
 use super::focus::{
-    clamp_focus, edit_input, ensure_focus_visible, extract_click_msg, extract_input_msg, hit_test,
-    parse_mouse, Focusable, InputRegistry,
+    clamp_focus, edit_input, ensure_focus_visible, extract_click_msg, extract_input_msg,
+    extract_msg_named, hit_test, parse_mouse, Focusable, InputRegistry,
 };
 use super::key::decode_key;
 use super::layout::render_with_focus;
@@ -105,6 +105,28 @@ fn paint(frame: &str) {
     let _ = out.write_all(CLEAR_HOME.as_bytes());
     let _ = out.write_all(frame.as_bytes());
     let _ = out.flush();
+}
+
+/// Fire `onBlur` for the previously-focused element + `onFocus` for the newly-
+/// focused one (when those events are bound), enqueuing each Msg on the event
+/// channel so it flows through the same `update` sequence as everything else.
+/// Mirrors Go's `tuiDispatchFocusChange`. A send failure (receiver gone) is
+/// ignored — the loop is tearing down anyway. No-op when focus didn't move.
+fn dispatch_focus_change<Msg: Clone + Send + 'static>(
+    focusables: &[Focusable<Msg>],
+    old_idx: usize,
+    new_idx: usize,
+    tx: &tokio::sync::mpsc::UnboundedSender<CliEvent<Msg>>,
+) {
+    if old_idx == new_idx {
+        return;
+    }
+    if let Some(msg) = focusables.get(old_idx).and_then(|f| extract_msg_named(&f.events, "blur")) {
+        let _ = tx.send(CliEvent::Msg(msg));
+    }
+    if let Some(msg) = focusables.get(new_idx).and_then(|f| extract_msg_named(&f.events, "focus")) {
+        let _ = tx.send(CliEvent::Msg(msg));
+    }
 }
 
 /// Current terminal size in cells; `(80, 24)` if it can't be queried (e.g. the
@@ -373,7 +395,11 @@ where
                                     mrow.saturating_sub(1),
                                     scroll_y,
                                 ) {
+                                    let old_focus = focus_idx;
                                     focus_idx = hit;
+                                    // onBlur (old) + onFocus (new) on a click focus
+                                    // change — same as Tab nav (Go fires it on both).
+                                    dispatch_focus_change(&focusables, old_focus, hit, &tx);
                                     let is_input =
                                         focusables.get(hit).map(|f| f.is_input).unwrap_or(false);
                                     if !is_input {
@@ -418,6 +444,7 @@ where
                     };
 
                     if (nav_fwd || nav_back) && n > 0 {
+                        let old_focus = focus_idx;
                         focus_idx = if nav_back {
                             (focus_idx + n - 1) % n
                         } else {
@@ -425,6 +452,8 @@ where
                         };
                         focusables =
                             render_and_paint(&view, &model, &mut inputs, &mut focus_idx, &mut scroll_y);
+                        // onBlur (old) + onFocus (new) — Go's tuiDispatchFocusChange.
+                        dispatch_focus_change(&focusables, old_focus, focus_idx, &tx);
                         continue;
                     }
 

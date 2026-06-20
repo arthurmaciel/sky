@@ -139,7 +139,14 @@ pub fn extract_input_msg<M: Clone>(events: &[Event<M>], name: &str, buffer: &str
 
 /// Pull the Msg from a `click` (`OnMsg`) handler.
 pub fn extract_click_msg<M: Clone>(events: &[Event<M>]) -> Option<M> {
-    let i = event_named(events, "click")?;
+    extract_msg_named(events, "click")
+}
+
+/// Pull the Msg from a named `OnMsg` handler (`focus` / `blur` / `click` / …).
+/// Returns `None` when the event is absent or carries a non-`OnMsg` payload.
+/// Used for `onFocus` / `onBlur` dispatch on a Tab/click focus change.
+pub fn extract_msg_named<M: Clone>(events: &[Event<M>], name: &str) -> Option<M> {
+    let i = event_named(events, name)?;
     match events.get(i)? {
         Event::OnMsg(_, m) => Some(m.clone()),
         _ => None,
@@ -416,6 +423,22 @@ mod tests {
         }
         let events = vec![Event::OnString("input".into(), std::sync::Arc::new(M::Got))];
         assert_eq!(extract_input_msg(&events, "input", "hi"), Some(M::Got("hi".into())));
+    }
+
+    #[test]
+    fn extract_msg_named_pulls_focus_blur() {
+        #[derive(Clone, PartialEq, Debug)]
+        enum M {
+            Focused,
+            Blurred,
+        }
+        let events: Vec<Event<M>> = vec![
+            Event::OnMsg("focus".into(), M::Focused),
+            Event::OnMsg("blur".into(), M::Blurred),
+        ];
+        assert_eq!(extract_msg_named(&events, "focus"), Some(M::Focused));
+        assert_eq!(extract_msg_named(&events, "blur"), Some(M::Blurred));
+        assert_eq!(extract_msg_named(&events, "click"), None);
     }
 
     #[test]
