@@ -17,6 +17,46 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 16:00 — Codegen: generic self-recursive ADT boxing (E0072) FIXED; record-destructure lambda param confirmed
+
+Confirmed two audit codegen items with real repro fixtures (TDD), fixed one,
+scoped the other precisely.
+
+**FIXED — generic self-recursive ADT (E0072).** `type Tree a = Leaf | Node a
+(Tree a)` failed `cargo build` (recursive type, infinite size) because the box
+predicate string-EQUAL-compared the self-edge field `MainTree<A>` to the bare
+enum name `MainTree`. Fixed to HEAD-match (`== Name || (Name++"<") isPrefixOf`)
+at all three consistent sites: `TypeEmitter.boxIfRecursive`, ExprEmitter
+`ctorBoxedPositions` (construction `Box::new`), ExprEmitter pattern-deref
+(`let v = *v`). Verified: `tests/sky/codegen-generic-recursive-adt` builds +
+runs (prints 3); 19-skyforum unchanged. Commit 486002a9.
+
+**CONFIRMED, NOT YET FIXED — record-destructure lambda param.** `\{ x, y } -> x
++ y` emits `|_| (x + y)` — the `PRecord` pattern renders as `_` (drops the `x`/`y`
+binders) → `E0425 cannot find value y`. Real "compiles-in-Sky, cargo-fails"
+bug. Root: `Pattern.hs patternToRustParam`/`patternToRustPattern` fall through
+to `_` for PRecord (also PCons/PCtor/PAlias). FIX PLAN (deferred to a focused
+pass — the lambda-emission path is load-bearing across every example, ~6 emit
+sites at ExprEmitter 132/163/166/657/1222 + `annotClosureParam`, so it needs a
+careful shared helper + full sweep, not an end-of-session cut):
+- A `PRecord` param can't be a Rust struct pattern (the pattern carries field
+  names but NOT the struct type name). Bind the param to a fresh `__pN` and
+  prepend FIELD-ACCESS lets to the body: `let x = __pN.x.clone(); let y =
+  __pN.y.clone();` (struct-name-independent, total). Field names via
+  `rustSafeIdent`; keep `patBindingVars` consistent (it already returns the raw
+  field names — the body refs map raw→rust identically, so the scope-set holds).
+- Introduce one `lambdaParamsWithPrelude :: [Pattern] -> (paramStr, prelude)`
+  helper and route every lambda emit site through it (PVar/PAnything/PTuple keep
+  the direct-param fast path; PRecord/PCtor/PCons/PAlias get `__pN` + prelude).
+- Repro fixture authored + verified-failing (kept in /tmp, NOT committed to the
+  swept set so CI stays green); re-add under `tests/sky/` once the fix lands.
+
+**Affected:** `src/Sky/Generate/Rust/Builder/TypeEmitter.hs`,
+`src/Sky/Generate/Rust/Builder/ExprEmitter.hs`,
+`runtime-rust/tests/sky/codegen-generic-recursive-adt/`.
+
+---
+
 ## 2026-06-20 15:00 — Security audit correctness/parity tail (in-boundary, runtime)
 
 Per the broadened goal (fix ALL in-boundary audit items, not only the security
