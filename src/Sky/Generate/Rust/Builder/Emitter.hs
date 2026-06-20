@@ -184,7 +184,7 @@ emitRust b dbPath dbDriver ffiSlugs =
             , "pub fn file_read_file(path: String) -> SkyTask<String> { sky_runtime::file::file_read_file(path) }"
             , "pub fn file_write_file(path: String, content: String) -> SkyTask<()> { sky_runtime::file::file_write_file(path, content) }"
             , "pub fn file_delete(path: String) -> SkyTask<()> { sky_runtime::file::file_delete(path) }"
-            , "pub fn crypto_random_bytes(n: i64) -> SkyTask<Vec<i64>> { sky_runtime::crypto::crypto_random_bytes(n) }"
+            , "pub fn crypto_random_bytes(n: i64) -> SkyTask<String> { sky_runtime::crypto::crypto_random_bytes(n) }"
             , "pub fn crypto_random_token(n: i64) -> SkyTask<String> { sky_runtime::crypto::crypto_random_token(n) }"
             ] ++
             (if usesDb (builderKernels b)

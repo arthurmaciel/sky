@@ -1,0 +1,38 @@
+module Main exposing (main)
+
+-- 65-crypto-random-encoding: Crypto.randomBytes / randomToken Go-parity.
+--
+-- The random VALUE is non-deterministic, but the ENCODING (hence LENGTH) is
+-- fixed and must match Go:
+--   randomBytes n -> lowercase HEX string, length 2n      (Go hex.EncodeToString)
+--   randomToken n -> URL-safe base64, NO pad, length ceil(4n/3)  (Go RawURLEncoding)
+-- n=8  -> bytesLen 16 ; n=6 -> tokLen 8.
+-- A pre-fix Rust randomBytes returned a byte LIST (not a String, would not even
+-- type-check as String.length here); a pre-fix randomToken returned HEX
+-- (tokLen 12 for n=6, not 8). So the lengths pin the fix.
+--
+-- Run:  sky run src/Main.sky --backend rust
+-- Expected (identical on Go): bytesLen=16 tokLen=8
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Crypto as Crypto
+import Sky.Core.Task as Task
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    Crypto.randomBytes 8
+        |> Task.andThen
+            (\hb ->
+                Crypto.randomToken 6
+                    |> Task.andThen
+                        (\tok ->
+                            println
+                                ("bytesLen="
+                                    ++ String.fromInt (String.length hb)
+                                    ++ " tokLen="
+                                    ++ String.fromInt (String.length tok)
+                                )
+                        )
+            )

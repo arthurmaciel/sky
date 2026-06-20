@@ -2873,7 +2873,7 @@ taskExprInnerTypeCall solved (Ann.At _ (Can.VarKernel modName fnName)) args
             "choice" -> "String"
             _ -> ""
         | "Crypto" `isSuffixOf` modName || modName == "Crypto" = case fnName of
-            "randomBytes"  -> "Vec<i64>"
+            "randomBytes"  -> "String"   -- Go hex.EncodeToString; Sky sig is String
             "randomToken"  -> "String"
             _ -> ""
         | "File" `isSuffixOf` modName || modName == "File" = case fnName of

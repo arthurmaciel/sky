@@ -17,6 +17,38 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-19 20:20 — Crypto.randomBytes/randomToken Go-parity encoding (hex String / base64url)
+
+**What.** Two Go-parity correctness bugs in the entropy kernels:
+
+- `Crypto.randomBytes : Int -> Task Error String` — Go returns the bytes as a
+  lowercase HEX string (`hex.EncodeToString`), and the Sky signature is `String`,
+  but the Rust runtime returned `Vec<i64>` (a byte list). A Sky call site treating
+  the result as a String/Bytes mismatched at codegen. Now returns a hex `String`
+  via a shared `hex_lower` helper (high-nibble-first, byte-order identical to Go).
+- `Crypto.randomToken : Int -> Task Error String` — Go returns URL-safe base64 with
+  NO padding (`base64.RawURLEncoding`), but the Rust runtime hex-encoded (wrong
+  alphabet AND wrong length; the manual hex loop also had its nibbles reversed).
+  Now `base64::URL_SAFE_NO_PAD.encode`.
+
+Codegen kept in step: the hardcoded `crypto_random_bytes` FFI wrapper return type
+(`Emitter.hs`) and the `taskExprInnerTypeCall` hint (`ExprEmitter.hs`) both moved
+`Vec<i64>` → `String`.
+
+**Verified (Go≡Rust).** New fixture `tests/sky/65-crypto-random-encoding`: both
+backends print `bytesLen=16 tokLen=8` (randomBytes 8 → 16 hex chars; randomToken 6
+→ 8 base64url chars — the lengths pin each encoding; pre-fix Rust gave a byte list
++ a 12-char hex token). `00-standard-libs` still `131 passed, 0 failed`. No example
+uses `randomBytes` (so the wrapper type change has no call-site fallout);
+`randomToken` is used display-only for errIds in 18/36.
+
+**Affected.** `runtime-rust/src/sky_runtime/crypto.rs`,
+`src/Sky/Generate/Rust/Builder/Emitter.hs`,
+`src/Sky/Generate/Rust/Builder/ExprEmitter.hs`,
+`runtime-rust/tests/sky/65-crypto-random-encoding/` (new fixture).
+
+---
+
 ## 2026-06-19 19:45 — Stop example DBs leaking into the repo root (sweep + perf runner cwd isolation)
 
 **What.** Example binaries that open a cwd-relative `./*.db` (Sky.Db / Sky.Live

@@ -1,42 +1,58 @@
 // Crypto kernel stubs — generic over E where needed.
 use super::*;
 
-pub fn crypto_random_bytes<E: From<String> + Send + 'static>(n: i64) -> SkyTask<E, Vec<i64>> {
+// `Crypto.randomBytes : Int -> Task Error String`. Go returns the entropy as a
+// LOWERCASE HEX string (rt.go ~l6543: `hex.EncodeToString(b)`), NOT a byte list —
+// the Sky signature is `String`, so the Rust side must return a hex `String` too.
+// (A prior `Vec<i64>` return diverged from both the Sky type and Go: a Sky call
+// site treating the result as a String/Bytes mismatched at codegen.)
+pub fn crypto_random_bytes<E: From<String> + Send + 'static>(n: i64) -> SkyTask<E, String> {
     use aes_gcm::aead::{OsRng, rand_core::RngCore};
     Box::pin(async move {
         // SECURITY: Mirror Go oracle exactly: reject size <= 0 || size > 1024
         // (rt.go ~l6536: `if size <= 0 || size > 1024 { return ErrInvalidInput }`)
         // to prevent unbounded attacker-controlled allocation (DoS vector).
         if n <= 0 || n > 1024 {
-            return SkyResult::Err(format!("Crypto.randomBytes: size must be 1..1024").into());
+            return SkyResult::Err("Crypto.randomBytes: size must be 1..1024".to_string().into());
         }
         let count = n as usize;
         let mut buf = vec![0u8; count];
         OsRng.fill_bytes(&mut buf);
-        ok_res(buf.into_iter().map(|b| b as i64).collect())
+        ok_res(hex_lower(&buf))
     })
 }
 
+/// Lowercase hex encoding, byte-order + nibble-order identical to Go's
+/// `hex.EncodeToString` (high nibble first, then low). Total: the `& 0x0f` index
+/// is always < 16 so `.get` never falls back.
+fn hex_lower(buf: &[u8]) -> String {
+    let hex = b"0123456789abcdef";
+    let mut out = String::with_capacity(buf.len() * 2);
+    for &b in buf {
+        out.push(hex.get(((b >> 4) & 0x0f) as usize).copied().unwrap_or(b'0') as char);
+        out.push(hex.get((b & 0x0f) as usize).copied().unwrap_or(b'0') as char);
+    }
+    out
+}
+
+// `Crypto.randomToken : Int -> Task Error String`. Go returns URL-safe base64
+// WITHOUT padding (rt.go ~l6560: `base64.RawURLEncoding.EncodeToString(b)`) — the
+// `-_` alphabet, no `=` pad. Width `n` is bytes of ENTROPY; the returned string is
+// longer (ceil(n*4/3) chars). (A prior hex encoding diverged from Go's base64.)
 pub fn crypto_random_token<E: From<String> + Send + 'static>(n: i64) -> SkyTask<E, String> {
     use aes_gcm::aead::{OsRng, rand_core::RngCore};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     Box::pin(async move {
         // SECURITY: Mirror Go oracle exactly: reject size <= 0 || size > 1024
         // (rt.go ~l6553: `if size <= 0 || size > 1024 { return ErrInvalidInput }`)
         // to prevent unbounded attacker-controlled allocation (DoS vector).
         if n <= 0 || n > 1024 {
-            return SkyResult::Err(format!("Crypto.randomToken: size must be 1..1024").into());
+            return SkyResult::Err("Crypto.randomToken: size must be 1..1024".to_string().into());
         }
         let count = n as usize;
         let mut buf = vec![0u8; count];
         OsRng.fill_bytes(&mut buf);
-        let hex = b"0123456789abcdef";
-        let mut out = String::with_capacity(count * 2);
-        for b in buf {
-            // `& 0x0f` bounds the index to [0, 15] < 16 (hex.len()); .get keeps it total.
-            out.push(hex.get((b & 0x0f) as usize).copied().unwrap_or(b'0') as char);
-            out.push(hex.get(((b >> 4) & 0x0f) as usize).copied().unwrap_or(b'0') as char);
-        }
-        ok_res(out)
+        ok_res(URL_SAFE_NO_PAD.encode(&buf))
     })
 }
 
