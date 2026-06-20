@@ -54,7 +54,7 @@ impl Canvas {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 struct Style {
     fg: Option<(u8, u8, u8)>,
     bg: Option<(u8, u8, u8)>,
@@ -276,6 +276,47 @@ impl Block {
                 line.push(track_run(w - lw));
             }
         }
+    }
+    /// Reverse-video the single display cell at `(line, col)` — the text-input
+    /// cursor (Go renders the cursor as `grid[cur].reverse`, never an inserted
+    /// glyph). Rebuilds the line one char at a time, flagging the char at display
+    /// column `col` (or appending a reverse space if the cursor sits past the
+    /// content). Adjacent same-style chars re-coalesce into runs. Total — uses
+    /// iterators + `.get`, never indexes or unwraps.
+    fn reverse_cell_at(&mut self, line: usize, col: usize) {
+        let Some(target_line) = self.lines.get_mut(line) else { return };
+        // Flatten to (char, style) cells, marking the cursor char's style reverse.
+        let mut cells: Vec<(char, Style)> = Vec::new();
+        let mut acc = 0usize;
+        for run in target_line.iter() {
+            for ch in run.text.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                let style = if acc == col {
+                    Style { reverse: true, ..run.style }
+                } else {
+                    run.style
+                };
+                cells.push((ch, style));
+                acc += cw;
+            }
+        }
+        // Cursor past the end of the line content → append a reverse space.
+        if acc <= col {
+            // Pad any gap with normal spaces, then the reverse cursor space.
+            for _ in acc..col {
+                cells.push((' ', Style::default()));
+            }
+            cells.push((' ', Style { reverse: true, ..Style::default() }));
+        }
+        // Re-coalesce adjacent cells sharing a style into runs.
+        let mut out: Vec<Run> = Vec::new();
+        for (ch, style) in cells {
+            match out.last_mut() {
+                Some(last) if last.style == style => last.text.push(ch),
+                _ => out.push(Run { text: ch.to_string(), style }),
+            }
+        }
+        *target_line = out;
     }
 }
 
@@ -520,6 +561,10 @@ fn render_input<M: Clone>(
     let idx = ctx.focusables.len();
     let focused = idx == ctx.focus_idx;
 
+    // The text-input cursor, as `(line, col)` to reverse-video AFTER the track
+    // fill (so a cursor past the content lands on a track cell, like Go). `None`
+    // for non-text / unfocused inputs.
+    let mut cursor_marker: Option<(usize, usize)> = None;
     let mut block: Block = match input_type.as_str() {
         "checkbox" => {
             let g = if checked { "☑" } else { "☐" };
@@ -553,53 +598,53 @@ fn render_input<M: Clone>(
             Block::single(track, Style { reverse: focused, ..style })
         }
         _ => {
-            // Text-like input (incl. textarea): sync the edit buffer to the
-            // model's value, then render it (or placeholder) with the cursor at
-            // its real (line, col) — multiline when the buffer has newlines.
+            // Text-like input (incl. textarea): sync the edit buffer to the model's
+            // value, then render it (or placeholder). The cursor is a REVERSE-VIDEO
+            // cell over the underlying char/track (Go's paintInputBufferAdvanced
+            // sets grid[cur].reverse), NOT a glyph insert — so it doesn't shift the
+            // track and the field is byte-identical to Go in a text dump.
             ctx.inputs.sync_value(idx, &value);
             let st = ctx.inputs.get(idx);
             let masked = input_type == "password";
-            let run_style = Style { reverse: focused && !masked, ..style };
-            if masked {
-                // Masked: hide content (and any newlines) on one line; the cursor
-                // sits at the end (per-char column tracking is meaningless hidden).
-                // Empty + unfocused → empty line so the shaded track shows through
-                // (Go renders a bare track, never a `▁▁▁▁` stub).
-                let mut s = "•".repeat(st.buffer.chars().count());
-                if focused {
-                    s.push('▏');
-                }
-                Block::single(s, run_style)
+            let run_style = style; // field is NOT whole-reversed (Go: only the cell)
+            let cursor_cell: Option<(usize, usize)> = if masked {
+                // Masked single line: content hidden as bullets; cursor at end.
+                let n = st.buffer.chars().count();
+                if focused { Some((0, n)) } else { None }
             } else if st.buffer.is_empty() && !focused {
-                // Empty + unfocused: render the placeholder (italic) when present,
-                // else an empty line — the track fill paints the field bounds.
+                None
+            } else {
+                let runes: Vec<char> = st.buffer.chars().collect();
+                let cursor = st.cursor.min(runes.len());
+                let (cl, cc) = cursor_line_col(&runes, cursor);
+                if focused { Some((cl, cc)) } else { None }
+            };
+            let mut block = if masked {
+                Block::single("•".repeat(st.buffer.chars().count()), run_style)
+            } else if st.buffer.is_empty() && !focused {
+                // Empty + unfocused: italic placeholder when present, else empty
+                // line — the track fill paints the field bounds.
                 if placeholder.is_empty() {
                     Block::single(String::new(), run_style)
                 } else {
                     Block::single(placeholder.clone(), Style { italic: true, ..run_style })
                 }
             } else {
-                // Real buffer: split into visual lines, insert the cursor glyph at
-                // the focused (line, col).
                 let runes: Vec<char> = st.buffer.chars().collect();
-                let cursor = st.cursor.min(runes.len());
-                let (cur_line, cur_col) = cursor_line_col(&runes, cursor);
                 let mut out: Vec<Vec<Run>> = Vec::new();
-                for (li, seg) in split_buffer_lines(&runes).into_iter().enumerate() {
-                    let mut chars = seg;
-                    if focused && li == cur_line {
-                        chars.insert(cur_col.min(chars.len()), '▏');
-                    }
-                    out.push(vec![Run { text: chars.into_iter().collect(), style: run_style }]);
+                for seg in split_buffer_lines(&runes) {
+                    out.push(vec![Run { text: seg.into_iter().collect(), style: run_style }]);
                 }
                 if out.is_empty() {
-                    out.push(vec![Run {
-                        text: if focused { "▏".to_string() } else { "▁▁▁▁".to_string() },
-                        style: run_style,
-                    }]);
+                    out.push(vec![Run { text: String::new(), style: run_style }]);
                 }
                 Block { lines: out }
-            }
+            };
+            // Stash the cursor cell so it's applied AFTER the track fill (the track
+            // pads the line out, so reversing a cell past current content lands on a
+            // track ░ — exactly Go's reverse-over-track cursor).
+            cursor_marker = cursor_cell;
+            block
         }
     };
     // Honour `Ui.width` on a text-like field so it renders at a fixed/fill width.
@@ -643,6 +688,11 @@ fn render_input<M: Clone>(
                 block.set_width(target, style.bg);
             }
         }
+    }
+    // Reverse-video the cursor cell (Go's reverse-over-track cursor) — applied
+    // after the track fill so a cursor at/after the content lands on a track ░.
+    if let Some((cl, cc)) = cursor_marker {
+        block.reverse_cell_at(cl, cc);
     }
     let width = block.width();
     let height = block.height().max(1);
@@ -1420,7 +1470,9 @@ mod tests {
         let c = frame.find("cd");
         assert!(a.is_some() && c.is_some(), "both visual lines render: {frame:?}");
         assert!(a < c, "first line above second: {frame:?}");
-        assert!(frame.contains('▏'), "cursor glyph present (focused): {frame:?}");
+        // Cursor is a reverse-video cell (Go parity), not an inserted glyph.
+        assert!(frame.contains("\x1b[7"), "reverse-video cursor present (focused): {frame:?}");
+        assert!(!frame.contains('▏'), "no inserted cursor glyph: {frame:?}");
     }
 
     #[test]
@@ -1479,6 +1531,49 @@ mod tests {
         let first = frame.split("\r\n").next().unwrap_or("");
         assert!(first.contains("G1"), "G1 on row 0: {first:?}");
         assert!(first.contains("G6"), "G6 on the SAME row 0 (row-major flow): {first:?}");
+    }
+
+    #[test]
+    fn reverse_cell_marks_one_cell() {
+        let mut b = Block::single("hello".into(), Style::default());
+        b.reverse_cell_at(0, 2); // reverse the 'l' at col 2
+        let line = b.lines.first().expect("one line");
+        // Rebuilds as before("he") + reverse("l") + after("lo").
+        let rev: Vec<&Run> = line.iter().filter(|r| r.style.reverse).collect();
+        assert_eq!(rev.len(), 1, "exactly one reverse run");
+        assert_eq!(rev.first().map(|r| r.text.as_str()), Some("l"));
+        let full: String = line.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(full, "hello", "content unchanged, only style split");
+    }
+
+    #[test]
+    fn reverse_cell_past_content_appends_space() {
+        let mut b = Block::single("hi".into(), Style::default());
+        b.reverse_cell_at(0, 5); // cursor past "hi"
+        let line = b.lines.first().expect("one line");
+        let full: String = line.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(full, "hi    ", "padded to col 5 + reverse space");
+        assert!(line.iter().any(|r| r.style.reverse), "reverse cursor appended");
+    }
+
+    #[test]
+    fn focused_empty_input_has_no_glyph_just_reverse_track() {
+        // A focused empty text input shows a reverse-video track cell (Go), not a
+        // ▏ glyph.
+        let inp: Element<()> = Element::TaggedNode(
+            "input".into(),
+            Description::NoDescription,
+            vec![
+                Attribute::AttrWidth(Length::Px(160)),
+                Attribute::AttrAttribute("type".into(), "text".into()),
+            ],
+            vec![],
+        );
+        let mut reg = InputRegistry::new();
+        let (frame, _f, _h) = render_with_focus(&inp, 80, 24, 0, &mut reg, 0);
+        assert!(!frame.contains('▏'), "no inserted cursor glyph: {frame:?}");
+        assert!(frame.contains("\x1b[7"), "reverse-video cursor cell: {frame:?}");
+        assert!(frame.contains('░'), "track still present: {frame:?}");
     }
 
     #[test]
