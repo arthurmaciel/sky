@@ -73,6 +73,36 @@ enum Dir {
     Row,
 }
 
+/// A CSS-grid column track (the subset the terminal can size): a fixed `px`
+/// width, an `fr` proportional share, or `auto` (treated as `1fr` of the
+/// leftover). `repeat()`/`minmax()` are not parsed — the grid falls back to
+/// auto-flow then.
+#[derive(Clone, Copy)]
+enum GridTrack {
+    Px(i64),
+    Fr(i64),
+    Auto,
+}
+
+/// Parse a `grid-template-columns` value (`"1fr 200px 1fr"`). Returns empty if it
+/// contains `repeat(`/`minmax(` (caller falls back to auto-flow).
+fn parse_grid_tracks(css: &str) -> Vec<GridTrack> {
+    if css.contains("repeat(") || css.contains("minmax(") {
+        return Vec::new();
+    }
+    css.split_whitespace()
+        .map(|t| {
+            if let Some(n) = t.strip_suffix("fr") {
+                GridTrack::Fr(n.trim().parse().unwrap_or(1))
+            } else if let Some(n) = t.strip_suffix("px") {
+                GridTrack::Px(n.trim().parse().unwrap_or(0))
+            } else {
+                GridTrack::Auto
+            }
+        })
+        .collect()
+}
+
 struct Walked {
     dir: Dir,
     spacing_px: i64,
@@ -97,6 +127,10 @@ struct Walked {
     /// `__gridMin` value — the minimum column WIDTH in logical px (set by
     /// `Ui.gridColumns N`). The actual column COUNT is `availW / cells_x(min)`.
     grid_min_px: i64,
+    /// Explicit column tracks from `Std.Ui.Grid.columns`/`tracks`
+    /// (`grid-template-columns`). Empty → auto-flow (`grid_min_px`). A
+    /// `repeat()`/`minmax()` spec is left empty (falls back to auto-flow).
+    grid_cols: Vec<GridTrack>,
     /// Border frame, present when `Border.width > 0`. See [`BorderSpec`].
     border: Option<BorderSpec>,
     /// `Ui.centerX`/`alignLeft`/`alignRight` (cross-axis in a column / self-align
@@ -515,6 +549,7 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
         is_paragraph: false,
         is_text_column: false,
         grid_min_px: 0,
+        grid_cols: Vec::new(),
         border: None,
         align_x: None,
         align_y: None,
@@ -533,6 +568,17 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
             Attribute::AttrStyle(k, _) if k == "__row" => w.dir = Dir::Row,
             Attribute::AttrStyle(k, _) if k == "__col" => w.dir = Dir::Column,
             Attribute::AttrStyle(k, _) if k == "__grid" => w.is_grid = true,
+            // Std.Ui.Grid.columns/tracks → "grid-template-columns|grid-template-rows".
+            // Parse the column tracks; a non-empty parse turns this into an explicit
+            // grid (audit #13). repeat()/minmax() → empty → auto-flow fallback.
+            Attribute::AttrStyle(k, v) if k == "__gridTracks" => {
+                let cols = v.split('|').next().unwrap_or("");
+                let tracks = parse_grid_tracks(cols);
+                if !tracks.is_empty() {
+                    w.is_grid = true;
+                    w.grid_cols = tracks;
+                }
+            }
             Attribute::AttrStyle(k, _) if k == "__paragraph" => w.is_paragraph = true,
             Attribute::AttrStyle(k, _) if k == "__textcolumn" => w.is_text_column = true,
             Attribute::AttrStyle(k, v) if k == "__gridMin" => {
@@ -1383,6 +1429,11 @@ fn render_grid<M: Clone>(
     ctx: &mut Ctx<M>,
     content_avail: usize,
 ) -> Rendered {
+    // Explicit tracks (Std.Ui.Grid.columns/tracks) → size each column from its
+    // px/fr/auto spec (audit #13); else auto-flow by grid_min_px.
+    if !w.grid_cols.is_empty() {
+        return render_grid_tracked(kids, w, ctx, content_avail);
+    }
     let min_col = {
         let c = ctx.canvas.cells_x(w.grid_min_px);
         if c == 0 { 10 } else { c }
@@ -1417,6 +1468,65 @@ fn render_grid<M: Clone>(
             sized.push(r2);
         }
         rows.push(hstack(sized, 0, w.style.bg));
+    }
+    vstack(rows, gap_y, w.style.bg)
+}
+
+/// Explicit-track grid (`Std.Ui.Grid.columns`/`tracks`): size each column from its
+/// px/fr/auto spec, lay children row-major into those columns with the spacing
+/// gap. fr tracks split the leftover after px tracks + gaps; auto ≈ 1fr.
+fn render_grid_tracked<M: Clone>(
+    kids: &[Element<M>],
+    w: &Walked,
+    ctx: &mut Ctx<M>,
+    content_avail: usize,
+) -> Rendered {
+    let canvas = ctx.canvas;
+    let gap_x = canvas.cells_x(w.spacing_px);
+    let gap_y = canvas.cells_y(w.spacing_px);
+    let ncols = w.grid_cols.len().max(1);
+    let avail = content_avail.max(1);
+    let total_gap = gap_x.saturating_mul(ncols.saturating_sub(1));
+    let fixed: usize = w
+        .grid_cols
+        .iter()
+        .map(|t| match t {
+            GridTrack::Px(n) => canvas.cells_x(*n),
+            _ => 0,
+        })
+        .sum();
+    let fr_total: usize = w
+        .grid_cols
+        .iter()
+        .map(|t| match t {
+            GridTrack::Fr(n) => (*n).max(0) as usize,
+            GridTrack::Auto => 1,
+            _ => 0,
+        })
+        .sum::<usize>()
+        .max(1);
+    let leftover = avail.saturating_sub(fixed + total_gap);
+    let widths: Vec<usize> = w
+        .grid_cols
+        .iter()
+        .map(|t| match t {
+            GridTrack::Px(n) => canvas.cells_x(*n).max(1),
+            GridTrack::Fr(n) => (leftover * (*n).max(0) as usize / fr_total).max(1),
+            GridTrack::Auto => (leftover / fr_total).max(1),
+        })
+        .collect();
+
+    let mut rows: Vec<Rendered> = Vec::new();
+    for chunk in kids.chunks(ncols) {
+        let mut sized: Vec<Rendered> = Vec::new();
+        for (ci, k) in chunk.iter().enumerate() {
+            let cw = widths.get(ci).copied().unwrap_or(1);
+            let mut r = render_node(k, w.style, ctx, cw);
+            let cell_bg = cell_block_bg(&r.block).or(w.style.bg);
+            r.block.set_width(cw, cell_bg);
+            sized.push(r);
+        }
+        rows.push(hstack(sized, gap_x, w.style.bg));
     }
     vstack(rows, gap_y, w.style.bg)
 }
