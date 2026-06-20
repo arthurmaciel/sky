@@ -16,7 +16,7 @@
 //! Follow-on: mouse hit-testing, multiline cursor up/down, word-jumps, precise
 //! slider value, Length(Fill/Min/Max). No panic vectors.
 
-use super::super::ui::{Attribute, Color, Element, HAlign, Length, VAlign};
+use super::super::ui::{Attribute, Color, Description, Element, HAlign, Length, VAlign};
 use super::cell::sanitize_rune;
 use super::focus::{Focusable, InputRegistry};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -61,6 +61,7 @@ struct Style {
     bold: bool,
     italic: bool,
     underline: bool,
+    overline: bool,
     strike: bool,
     reverse: bool,
 }
@@ -540,6 +541,7 @@ fn walk_attrs<M>(attrs: &[Attribute<M>], inherited: Style) -> Walked {
             Attribute::AttrFontItalic => w.style.italic = true,
             Attribute::AttrFontUnderline => w.style.underline = true,
             Attribute::AttrFontDecoration(s) if s == "underline" => w.style.underline = true,
+            Attribute::AttrFontDecoration(s) if s == "overline" => w.style.overline = true,
             Attribute::AttrFontDecoration(s) if s == "line-through" || s == "strike" => {
                 w.style.strike = true
             }
@@ -1011,7 +1013,13 @@ fn render_node<M: Clone>(
             padded
         }
         Element::Node(_d, attrs, kids) | Element::TaggedNode(_, _d, attrs, kids) => {
-            let w = walk_attrs(attrs, inherited);
+            let mut w = walk_attrs(attrs, inherited);
+            // Region.heading → bold (the heading text reads as a heading; was
+            // visually indistinct from body text — audit #8). The style cascades
+            // to the heading's text children via `w.style`.
+            if matches!(_d, Description::DescHeading(_)) {
+                w.style.bold = true;
+            }
             let content_avail = node_content_avail(avail_w, &w, ctx.canvas);
             // Paragraph / textColumn: join the element's text content and
             // word-wrap to the available width (Go's isParagraph/isTextColumn
@@ -1570,6 +1578,9 @@ fn sgr(style: Style) -> String {
     }
     if style.underline {
         codes.push("4".to_string());
+    }
+    if style.overline {
+        codes.push("53".to_string());
     }
     if style.strike {
         codes.push("9".to_string());
