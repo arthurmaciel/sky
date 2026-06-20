@@ -55,6 +55,18 @@ reachable from a deployed Sky app handling untrusted input — highest real-worl
 priority. The `app/Main.hs` shell-injections are dev-CLI / shared-compiler (the
 project author's own `sky.toml`/`sky add` arg), out of the Rust boundary.
 
+**Resolution (commit `6d43ad16`, 2026-06-19):** ALL in-boundary findings ✅ FIXED +
+build-verified (cargo+cabal+skydex green, 00/15 examples) — the 4 runtime mediums
+(`http_client` SSRF guard, `compression` bomb cap, `time` no-panic format, `csv`
+delimiter) plus the genuine mechanical lows (`server`/`ws_client` ws limits, `csrf`
+cookie-exact+OnceLock, `log` sanitise, `jwt` generic key error, `money` checked ops,
+`hub` SqliteConnectOptions+LIMIT, `http_stream` bounded registry, codegen
+`Emitter` dep-line validation + `Ffi` quoteShell, skydex `store.count` static SQL).
+⏸️ **`app/Main.hs` shell-injections (HIGH+2×MED) NOT fixed — shared CLI / Go-path,
+out of the Rust boundary; flagged for the maintainer.** The remaining lows were
+disposition ➖ (document-only / parity-locked / "no change needed" per the per-file
+record).
+
 ---
 ## Full re-audit — 2026-06-19 (whole codebase, swarm)
 
