@@ -17,6 +17,43 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 04:30 — Go≡Rust rendered-output equivalence tests (live HTML + Tui grid)
+
+**What.** New `equiv-render.sh` + two normalisers under `scripts/lib/` add STRICT
+render-equivalence for the two heavy UI shapes the examples-sweep's weak modes
+(live=scenario-boot, tui=pty-no-crash) miss — the shapes where the textarea /
+badge / grid / typography regressions slipped through.
+
+- **live** (`equiv_normalize_html.py`): serve both backends, GET `/`, extract the
+  `#sky-root` view, and byte-diff after canonicalising the LEGITIMATE
+  implementation-detail differences (the backends are committed to BEHAVIOURAL,
+  not byte, parity): sky-id separators (`#`/`.`↔`_`, same structural path), attr
+  order (both sort for self-determinism; order is arbitrary), event wire-encoding
+  (`sky-click="Dec"` vs `="click"+data-sky-on` → canonical event-type set), and
+  pseudo/mq/anim/tr style-DELIVERY (Go scoped `<style>` child vs Rust
+  `data-sky-*-rules` attrs → dropped). SVG chart coords are MASKED (the known Go
+  `Math.min/max`/bar-height float→int truncation, upstream PR #136; un-mask when
+  it syncs). **Verified: 26-ui-showcase normalises to a 0-line diff** (665 lines
+  each) — structural parity. A future content/structure regression (e.g. the
+  textarea-value bug) re-surfaces immediately.
+- **tui** (`equiv_tui_grid.py`): capture the initial frame in a fixed 80×N pty,
+  render through pyte to a STYLED cell grid (char + fg/bg/bold/italic/underline),
+  diff. Catches layout (grid/border/wrap) AND styling (typography/input-bg).
+  Verified it DETECTS the current 24-tui-kitchen-sink divergences (will collapse
+  to ~0 after the Tui renderer-parity fixes land).
+
+**Sequencing.** The normalisers are verified against real captures from both
+backends (live → 0 diff; tui → detects divergences). The full build-harness
+green-run + CI wiring is deferred until the in-flight Tui renderer fixes land
+(so the tui test commits GREEN, not a known-red baseline) and to avoid racing the
+shared `CARGO_TARGET_DIR` while the Tui implementer rebuilds.
+
+**Affected.** `runtime-rust/scripts/equiv-render.sh`,
+`runtime-rust/scripts/lib/equiv_normalize_html.py`,
+`runtime-rust/scripts/lib/equiv_tui_grid.py` (all new).
+
+---
+
 ## 2026-06-20 03:00 — Sky.Tui terminal corruption + blank-frame fixes (Go parity)
 
 Two root causes behind "all TUI examples mess with the terminal (need `reset`)" +
