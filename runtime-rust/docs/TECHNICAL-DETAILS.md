@@ -77,6 +77,27 @@ type collision and full fault isolation.
   push (`SKY_PARENT_URL` → parent ingest) and the remote HubExporter
   (`SKY_CONSOLE_HUB` → `/v1/{logs,traces}` OTLP/**JSON** + bearer + bounded retry
   spool) mirror Go's behaviour; OTLP's JSON encoding means no protobuf dep.
+- **Client JS served as a cacheable external asset with SRI (Rust-only).** Go inlines
+  the full `CLIENT_JS` body inside every page's `<script>` tag so the browser
+  re-downloads ~36 KB of identical JS on every page load / session. The Rust backend
+  serves the client body as a **separate HTTP route** (`GET
+  /_sky/client.<hex16>.js`) with `Cache-Control: public, max-age=31536000,
+  immutable` — the browser fetches it once and reuses the cached copy for all
+  subsequent requests. The URL is **content-addressed**: `<hex16>` is the first 16
+  hex digits of `SHA-256(CLIENT_JS)`, so the URL changes automatically whenever
+  `client.js` changes, making `immutable` safe. The page still emits a small inline
+  `<script>` for the three per-session `window.__SKY_*` globals (SID, base-path,
+  CSRF token) that must never be cached. The external script tag carries a
+  `integrity="sha256-<base64>"` SRI attribute (full 32-byte digest, standard
+  base64) so the browser verifies integrity before execution. Both the hex URL
+  suffix and the base64 SRI value are derived from the same one-time
+  `OnceLock`-cached SHA-256 computation at server startup. The Go backend inlines
+  for simplicity; the Rust backend externalises because the savings compound
+  across every session and the content-addressed URL makes the change safe.
+  Observable parity: the browser-visible behaviour is identical — the three
+  `window.__SKY_*` globals are set before the client script executes (document
+  order; neither tag is `defer`/`async`). CSP note: `'unsafe-inline'` is still
+  required for the per-session inline prefix, unchanged from the Go baseline.
 - **Console telemetry data flow — push-to-local-collector.** Rust's console is a
   SEPARATE process and can't read the app's in-RAM rings, so the data path is the
   industrial push-to-collector model applied locally: the app auto-instruments each

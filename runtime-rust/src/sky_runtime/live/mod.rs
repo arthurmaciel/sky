@@ -60,6 +60,39 @@ use super::*;
 /// the two `%%` CSS escapes are un-escaped to `%`.
 const CLIENT_JS: &str = include_str!("client.js");
 
+/// Content-addressing for the client asset: computed ONCE at first access via
+/// `OnceLock`. Holds `(hex16, base64full)` where:
+///   - `hex16`    — first 16 hex chars of SHA-256(CLIENT_JS) → used in the URL
+///                  (`/_sky/client.<hex16>.js`) for cache-busting.
+///   - `base64full` — standard base64 of the full 32-byte SHA-256 digest → the
+///                  `integrity="sha256-<base64full>"` SRI attribute value.
+///
+/// Both are derived from the same digest, computed once and interned.
+/// The `sha2` crate is unconditionally available in every generated Live project
+/// (`default` features always include `crypto` which gates `sha2`).
+static CLIENT_JS_HASH: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+/// Return `(hex16, base64full)` for `CLIENT_JS`, computing once on first call.
+fn client_js_hashes() -> &'static (String, String) {
+    CLIENT_JS_HASH.get_or_init(|| {
+        use sha2::{Sha256, Digest};
+        use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+        let digest: [u8; 32] = Sha256::digest(CLIENT_JS.as_bytes()).into();
+        let hex16: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let base64full = B64.encode(&digest);
+        (hex16, base64full)
+    })
+}
+
+/// The content-addressed URL path for the client JS asset, e.g.
+/// `/_sky/client.a1b2c3d4e5f6a7b8.js`. The path is stable for a given
+/// `client.js` build and changes whenever the file changes — making
+/// `Cache-Control: immutable` safe. Callers may prepend the sub-app `base`.
+pub fn client_js_path() -> String {
+    let (hex16, _) = client_js_hashes();
+    format!("/_sky/client.{}.js", hex16)
+}
+
 /// Minimal CSS reset injected into every Sky.Live page.
 /// Ported verbatim from Go's `liveBaseCSS` (runtime-go/rt/live.go:3847-3858).
 const BASE_CSS: &str = concat!(
@@ -104,16 +137,30 @@ pub fn render_page(body: &str) -> String {
     )
 }
 
-/// Full page wrap with the live client embedded.
+/// Full page wrap with the live client loaded as a cacheable external asset.
 /// Mirrors Go's live page render (runtime-go/rt/live.go:3788).
 ///
 /// `sid`  — session id (injected into the JS via `window.__SKY_SID`).
 /// `base` — sub-app base path, e.g. "" for root-mounted apps.
 /// `body` — pre-rendered HTML body (from `render_html`).
 ///
-/// The JS client reads `window.__SKY_SID` / `window.__SKY_BASE` from the
-/// page rather than receiving them as Sprintf args — the 12 header vars in
-/// `client.js` are static literals that reference those window globals.
+/// Two scripts are emitted in document order (no defer/async — execution order
+/// is left-to-right by the HTML spec):
+///   1. A tiny inline `<script>` setting the three per-session window globals
+///      (`__SKY_SID`, `__SKY_BASE`, `__SKY_CSRF_TOKEN`). These MUST stay inline
+///      because they are per-session values and must never be cached.
+///   2. An external `<script src="…/_sky/client.<hash>.js" integrity="sha256-…"
+///      crossorigin="anonymous">` loading the invariant client body. The URL is
+///      content-addressed (hash of the file) so it is safe to cache with
+///      `immutable`. The SRI `integrity` attribute lets the browser verify the
+///      file has not been tampered with before execution.
+///
+/// CSP note: the inline window-vars script still requires `script-src
+/// 'unsafe-inline'` (unchanged from the fully-inlined baseline). The external
+/// script requires no additional CSP directive beyond `script-src 'self'`
+/// (already needed for same-origin resource loading). Adding a nonce to the
+/// inline script to tighten CSP is deferred; it requires threading the nonce
+/// through the response pipeline and is outside the scope of this change.
 pub fn render_page_full(sid: &str, base: &str, body: &str, csrf_token: &str) -> String {
     // sid_js / base_js / csrf_js: Rust Debug ("{:?}") of a &str yields a
     // double-quoted, properly-escaped JS string literal for plain ASCII
@@ -122,6 +169,12 @@ pub fn render_page_full(sid: &str, base: &str, body: &str, csrf_token: &str) -> 
     let base_js = format!("{base:?}");
     let csrf_js = format!("{csrf_token:?}");
     let dev_banner = dev_console_banner(base);
+    // Content-addressed client asset URL and SRI hash — computed once at first call.
+    let (hex16, b64) = client_js_hashes();
+    // Honour the sub-app base prefix so the external script request goes through
+    // the parent proxy (same as /_sky/sse, /_sky/event, /_sky/console).
+    let client_src = format!("{base}/_sky/client.{hex16}.js");
+    let integrity = format!("sha256-{b64}");
     format!(
         "<!DOCTYPE html><html><head>\
          <meta charset=\"utf-8\">\
@@ -130,7 +183,8 @@ pub fn render_page_full(sid: &str, base: &str, body: &str, csrf_token: &str) -> 
          <style>{BASE_CSS}</style>\
          </head>\
          <body><div id=\"sky-root\">{body}</div>{dev_banner}\
-         <script>window.__SKY_SID={sid_js};window.__SKY_BASE={base_js};window.__SKY_CSRF_TOKEN={csrf_js};\n{CLIENT_JS}</script>\
+         <script>window.__SKY_SID={sid_js};window.__SKY_BASE={base_js};window.__SKY_CSRF_TOKEN={csrf_js};</script>\
+         <script src=\"{client_src}\" integrity=\"{integrity}\" crossorigin=\"anonymous\"></script>\
          </body></html>"
     )
 }
@@ -1032,9 +1086,26 @@ where
         let event_route = post(event_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>)
             .layer(axum::extract::DefaultBodyLimit::max(live_max_body_bytes()));
 
+        // Content-addressed client JS asset route. The URL is computed once at
+        // startup from SHA-256(CLIENT_JS) so the path changes when the file
+        // changes, making `Cache-Control: immutable` safe. This route is CSRF-
+        // exempt (GET; the CSRF middleware only checks mutating verbs) and open
+        // to all (it's a static public asset). It is registered BEFORE the
+        // catch-all `/*path` route so it is matched first.
+        let client_js_route_path = client_js_path(); // e.g. "/_sky/client.a1b2c3d4e5f6a7b8.js"
+        async fn serve_client_js() -> impl axum::response::IntoResponse {
+            use axum::http::header;
+            (
+                [(header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+                 (header::CACHE_CONTROL, "public, max-age=31536000, immutable")],
+                CLIENT_JS,
+            )
+        }
+
         let mut router = Router::new()
             .route("/_sky/sse", get(sse_handler::<Model, Msg, FInit, FUpdate, FView, FSubs>))
             .route("/_sky/event", event_route)
+            .route(&client_js_route_path, get(serve_client_js))
             // Observability surface (Go parity — observability.go).
             .route("/_sky/healthz", get(observability::healthz))
             .route("/_sky/readyz", get(observability::readyz))
@@ -1118,7 +1189,7 @@ fn sid_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
 
 #[cfg(test)]
 mod base_path_tests {
-    use super::{cookie_name_for, cookie_path_for, normalise_base_path, render_page_full};
+    use super::{client_js_path, cookie_name_for, cookie_path_for, normalise_base_path, render_page_full};
 
     #[test]
     fn normalise_root_and_empty_collapse() {
@@ -1159,5 +1230,51 @@ mod base_path_tests {
         let sub = render_page_full("sid1", "/_sky/console", "<b>x</b>", "deadbeef");
         assert!(sub.contains("<meta name=\"sky-base\" content=\"/_sky/console\">"));
         assert!(sub.contains("window.__SKY_BASE=\"/_sky/console\""));
+    }
+
+    #[test]
+    fn render_page_emits_external_client_script_with_sri() {
+        let root = render_page_full("sid1", "", "<b>x</b>", "tok1");
+        // Per-session values stay inline.
+        assert!(root.contains("window.__SKY_SID=\"sid1\""));
+        assert!(root.contains("window.__SKY_CSRF_TOKEN=\"tok1\""));
+        // CLIENT_JS body must NOT be inlined.
+        assert!(!root.contains("var __skySid = window.__SKY_SID"));
+        // External script tag with content-addressed src.
+        assert!(root.contains("<script src=\"/_sky/client."));
+        assert!(root.contains(".js\" integrity=\"sha256-"));
+        assert!(root.contains("crossorigin=\"anonymous\">"));
+        // SRI attribute is present and non-empty.
+        assert!(root.contains("integrity=\"sha256-"));
+    }
+
+    #[test]
+    fn render_page_sub_app_prefixes_client_src() {
+        let sub = render_page_full("sid1", "/_sky/console", "<b>x</b>", "tok1");
+        // External script src must carry the base prefix.
+        assert!(root_or_sub_has_prefixed_client_src(&sub, "/_sky/console"));
+    }
+
+    fn root_or_sub_has_prefixed_client_src(html: &str, base: &str) -> bool {
+        // Find `<script src="` and check the src starts with `base/_sky/client.`
+        let needle = format!("<script src=\"{}/_sky/client.", base);
+        html.contains(&needle)
+    }
+
+    #[test]
+    fn client_js_path_is_content_addressed_and_stable() {
+        let p1 = client_js_path();
+        let p2 = client_js_path();
+        // Same result on repeated calls (OnceLock).
+        assert_eq!(p1, p2);
+        // Path format: /_sky/client.<16 hex chars>.js
+        assert!(p1.starts_with("/_sky/client."));
+        assert!(p1.ends_with(".js"));
+        let hash_part = p1
+            .trim_start_matches("/_sky/client.")
+            .trim_end_matches(".js");
+        assert_eq!(hash_part.len(), 16, "URL hash should be 16 hex chars");
+        assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()),
+            "URL hash should be hex: {hash_part}");
     }
 }

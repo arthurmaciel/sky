@@ -13,16 +13,34 @@
 //! unspecified, or v4-mapped-private. This guard is OFF by default so that
 //! development against `localhost` keeps working unchanged.
 //!
-//! When ON the check runs:
-//! 1. **Pre-send**: parse the URL; DNS-resolve the host; reject if any resolved
-//!    IP is in a disallowed range.
-//! 2. **Each redirect**: a custom `reqwest::redirect::Policy` repeats the same
-//!    IP check on every `Location` target before following it, preventing
-//!    open-redirect chains that bypass the pre-send check.
+//! When ON the check runs in three layers:
+//! 1. **Pre-send resolve + pin (DNS-rebinding defence)**: parse the URL;
+//!    DNS-resolve the host; reject if any resolved IP is private; then
+//!    **pin** the client to the first vetted non-private `SocketAddr` via
+//!    `ClientBuilder::resolve_to_addrs(host, &[vetted_addr])`.  This closes
+//!    the TOCTOU window: reqwest connects to the exact IP that passed the
+//!    check — a rebind returning a private address at connect time cannot
+//!    bypass the guard.
+//! 2. **Each redirect (URL-level re-check)**: a custom
+//!    `reqwest::redirect::Policy` repeats the scheme + private-IP check on
+//!    every `Location` target before following it, preventing open-redirect
+//!    chains that bypass the pre-send check.
+//!
+//! ### Redirect-pin limitation
+//! Full per-redirect IP pinning (resolving + pinning the *new* host on each
+//! hop) is not expressible with reqwest's current `redirect::Policy` API: the
+//! callback receives only the redirect URL, not a `ClientBuilder`, so we
+//! cannot rebuild and re-pin the client mid-chain.  The URL-level re-check
+//! (layer 2) is therefore the floor for redirect hops: it catches IP literals
+//! and known-private hostnames but cannot prevent a mid-chain rebind on a
+//! freshly registered hostname.  In practice redirect chains to attacker-
+//! controlled domains are blocked by the scheme + private-IP URL check; a
+//! full per-hop pin would require a reqwest API extension or a custom
+//! `hyper` connector.
 
 use super::*;
 use std::collections::HashMap;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 /// Sky.Core.Http.HttpResponse — field names/types match the Sky record alias.
 #[derive(Clone, Debug)]
@@ -98,24 +116,33 @@ fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// Resolves `host` (plain hostname or IP literal) and checks that none of its
-/// addresses is in a disallowed private range.
+/// Resolves `host` (plain hostname or IP literal), checks that none of its
+/// addresses is in a disallowed private range, and returns the first non-private
+/// `SocketAddr` (port 0) so the caller can **pin** reqwest's DNS resolver to
+/// that exact address via `ClientBuilder::resolve_to_addrs`.
 ///
-/// Returns `Ok(())` if allowed, `Err(message)` if blocked.
+/// This closes the TOCTOU / DNS-rebinding window: the IP that passed the check
+/// is the IP reqwest connects to — a rebind happening between the check and the
+/// TCP connect has no effect because reqwest's per-client DNS override wins.
 ///
-/// Uses port 0 for the dummy `ToSocketAddrs` resolution; the port is not
-/// significant for the DNS lookup but is required by the API.
-fn check_host_not_private(host: &str) -> Result<(), String> {
+/// Returns `Ok(SocketAddr)` if allowed (with the vetted address), or
+/// `Err(message)` if blocked or if the host could not be resolved.
+///
+/// Uses port 0 for the `ToSocketAddrs` resolution; the port is not significant
+/// for the DNS lookup but is required by the API.  Callers must override the
+/// port in `resolve_to_addrs` if needed — reqwest's `resolve_to_addrs` only
+/// overrides the host→IP mapping; it uses the URL's port for the actual
+/// connection, so port 0 here is safe.
+fn resolve_first_non_private_addr(host: &str) -> Result<SocketAddr, String> {
     // Try parsing as an IP literal first (avoids a DNS round-trip for bare IPs).
-    let literal: Option<IpAddr> = host.parse().ok();
-    if let Some(ip) = literal {
+    if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_ip(ip) {
             return Err(format!(
                 "http: blocked: private/loopback host {} (SKY_HTTP_DENY_PRIVATE)",
                 ip
             ));
         }
-        return Ok(());
+        return Ok(SocketAddr::new(ip, 0));
     }
 
     // Hostname → DNS resolve via std (synchronous; called before the async send).
@@ -129,6 +156,7 @@ fn check_host_not_private(host: &str) -> Result<(), String> {
         }
     };
 
+    let mut first_ok: Option<SocketAddr> = None;
     for sock_addr in addr_iter {
         let ip = sock_addr.ip();
         if is_private_ip(ip) {
@@ -137,8 +165,26 @@ fn check_host_not_private(host: &str) -> Result<(), String> {
                 host, ip
             ));
         }
+        if first_ok.is_none() {
+            first_ok = Some(sock_addr);
+        }
     }
-    Ok(())
+
+    first_ok.ok_or_else(|| {
+        format!(
+            "http: blocked: host {:?} resolved to no addresses (SKY_HTTP_DENY_PRIVATE)",
+            host
+        )
+    })
+}
+
+/// Validates a URL's host against the SSRF deny-private policy without
+/// returning the resolved address.  Used in the redirect policy callback
+/// where we only have a URL and cannot rebuild the client.
+///
+/// Returns `Ok(())` if allowed, `Err(message)` if blocked.
+fn check_host_not_private(host: &str) -> Result<(), String> {
+    resolve_first_non_private_addr(host).map(|_| ())
 }
 
 /// Validates a URL string under the SSRF deny-private policy.
@@ -185,14 +231,63 @@ fn ssrf_check_url(url: &str) -> Result<(), String> {
 async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyResult<E, HttpResponse> {
     let deny_private = ssrf_deny_private_enabled();
 
-    // Pre-send SSRF check (when guard is enabled).
-    if deny_private {
-        if let Err(msg) = ssrf_check_url(&req.url) {
-            return SkyResult::Err(msg.into());
+    // Pre-send SSRF check + DNS-rebinding pin (when guard is enabled).
+    //
+    // We resolve the host once here, verify it is non-private, and then
+    // instruct reqwest to connect to that exact `SocketAddr` via
+    // `resolve_to_addrs`.  Because reqwest's DNS override is applied at
+    // client-build time and wins over any subsequent OS-level DNS lookup,
+    // a rebind that returns a private address at TCP-connect time has no
+    // effect — the connection goes to the vetted IP regardless.
+    let pinned_host_addr: Option<(String, SocketAddr)> = if deny_private {
+        // Validate URL structure and scheme first.
+        let parsed = match reqwest::Url::parse(&req.url) {
+            Ok(u) => u,
+            Err(e) => {
+                return SkyResult::Err(
+                    format!(
+                        "http: blocked: invalid URL {:?}: {} (SKY_HTTP_DENY_PRIVATE)",
+                        req.url, e
+                    )
+                    .into(),
+                );
+            }
+        };
+        let scheme = parsed.scheme();
+        if scheme != "http" && scheme != "https" {
+            return SkyResult::Err(
+                format!(
+                    "http: blocked: scheme {:?} is not http/https (SKY_HTTP_DENY_PRIVATE)",
+                    scheme
+                )
+                .into(),
+            );
         }
-    }
+        let host = match parsed.host_str() {
+            Some(h) => h.to_owned(),
+            None => {
+                return SkyResult::Err(
+                    "http: blocked: URL has no host (SKY_HTTP_DENY_PRIVATE)".to_string().into(),
+                );
+            }
+        };
+        // Resolve + validate; get back the vetted SocketAddr for pinning.
+        match resolve_first_non_private_addr(&host) {
+            Ok(addr) => Some((host, addr)),
+            Err(msg) => return SkyResult::Err(msg.into()),
+        }
+    } else {
+        None
+    };
 
     let mut builder = reqwest::Client::builder();
+
+    // Pin DNS to the vetted address so reqwest cannot re-resolve to a
+    // different (potentially private) IP at connect time.
+    if let Some((ref host, vetted_addr)) = pinned_host_addr {
+        builder = builder.resolve_to_addrs(host.as_str(), &[vetted_addr]);
+    }
+
     builder = if req.followRedirects {
         if deny_private {
             // Redirect policy that re-applies the SSRF check on every hop.
@@ -399,5 +494,35 @@ mod tests {
     fn ssrf_check_url_allows_public_ip() {
         // 1.1.1.1 is public — should pass (no DNS needed for IP literals)
         assert!(ssrf_check_url("https://1.1.1.1/").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_first_non_private_addr — pin-address path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_non_private_returns_socket_addr_for_public_ip_literal() {
+        let sa = resolve_first_non_private_addr("1.1.1.1").unwrap();
+        assert_eq!(sa.ip(), "1.1.1.1".parse::<IpAddr>().unwrap());
+        // Port is 0 — reqwest uses the URL's port; we just need the IP.
+        assert_eq!(sa.port(), 0);
+    }
+
+    #[test]
+    fn resolve_non_private_rejects_private_ip_literal() {
+        let err = resolve_first_non_private_addr("192.168.1.1").unwrap_err();
+        assert!(err.contains("blocked"), "expected blocked, got: {err}");
+    }
+
+    #[test]
+    fn resolve_non_private_rejects_loopback_ip_literal() {
+        let err = resolve_first_non_private_addr("127.0.0.1").unwrap_err();
+        assert!(err.contains("blocked"), "expected blocked, got: {err}");
+    }
+
+    #[test]
+    fn resolve_non_private_rejects_v4mapped_loopback() {
+        let err = resolve_first_non_private_addr("::ffff:127.0.0.1").unwrap_err();
+        assert!(err.contains("blocked"), "expected blocked, got: {err}");
     }
 }
