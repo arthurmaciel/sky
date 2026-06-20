@@ -137,15 +137,9 @@ jobs:
       # ── ripgrep — REQUIRED by the sweep's is_out_of_scope Go-FFI filter ─────
       # Without it the scope scan silently fails → Go-FFI examples leak into the
       # set and every one fails `--target rust`. Not preinstalled on the runners.
+      # (package list owned by the shared composite action — SSOT)
       - name: Install ripgrep
-        shell: bash
-        run: |
-          case "${{ runner.os }}" in
-            Linux)   sudo apt-get update && sudo apt-get install -y ripgrep ;;
-            macOS)   brew install ripgrep || true ;;
-            Windows) choco install ripgrep -y || true ;;
-          esac
-          rg --version
+        uses: ./.github/actions/setup-system-deps
 
       # ── Disk headroom (the sweep refuses to start under 5 GB free) ──────────
       # Linux runners ship ~14 GB free after checkout; cabal build + a shared
@@ -238,21 +232,20 @@ jobs:
       # webview builds sky-fail (no webkit) — a host-capability gap, not a defect.
       - name: Install webview deps + xvfb (Linux)
         if: startsWith(matrix.os, 'ubuntu')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb \
-            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libsoup-3.0-dev \
-            libjavascriptcoregtk-4.1-dev
+        uses: ./.github/actions/setup-system-deps
+        with:
+          ripgrep: "false"
+          webview: "true"
+          xvfb: "true"
 
       # ── GNU coreutils on macOS (the sweep + libs use bare `timeout`) ────────
       # macOS ships no GNU `timeout`; symlink coreutils' so `timeout` resolves.
       - name: Install GNU coreutils (macOS)
         if: matrix.os == 'macos-latest'
-        run: |
-          brew install coreutils
-          mkdir -p "$HOME/.local/bin"
-          ln -sf "$(brew --prefix coreutils)/libexec/gnubin/timeout" "$HOME/.local/bin/timeout"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/setup-system-deps
+        with:
+          ripgrep: "false"
+          coreutils: "true"
 
       # ── Build the compiler + symlink sky-out/sky (what the sweep expects) ───
       # The sweep invokes $SKY_BIN = $REPO/sky-out/sky. Build exe:sky and symlink
@@ -403,7 +396,7 @@ jobs:
           ref: ${{ github.event_name == 'schedule' && 'feat/runtime-rust' || github.ref }}
       # rg — the perf sweep's example_shape (lib/examples.sh) uses ripgrep.
       - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
+        uses: ./.github/actions/setup-system-deps
       # Reclaim aggressively (mirror the sweep job): release builds of the Rust
       # dep tree + the Go reference builds + go-build cache are heavy.
       - name: Free disk space (Linux)
@@ -441,7 +434,10 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('runtime-rust/Cargo.lock', 'runtime-rust/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-cargo-
       - name: Install perf tools (hyperfine + apache-bench)
-        run: sudo apt-get update && sudo apt-get install -y hyperfine apache2-utils
+        uses: ./.github/actions/setup-system-deps
+        with:
+          ripgrep: "false"
+          bench: "true"
       - name: Build sky compiler
         run: |
           cabal build exe:sky
@@ -511,15 +507,9 @@ jobs:
           ref: ${{ github.event_name == 'schedule' && 'feat/runtime-rust' || github.ref }}
 
       # ── ripgrep — static-perf.sh uses `rg` for port-sniffing + log scanning ──
+      # (package list owned by the shared composite action — SSOT)
       - name: Install ripgrep
-        shell: bash
-        run: |
-          case "${{ runner.os }}" in
-            Linux)   sudo apt-get update && sudo apt-get install -y ripgrep ;;
-            macOS)   brew install ripgrep || true ;;
-            Windows) choco install ripgrep -y || true ;;
-          esac
-          rg --version
+        uses: ./.github/actions/setup-system-deps
 
       - name: Free disk space (Linux)
         if: startsWith(matrix.os, 'ubuntu')
@@ -560,27 +550,33 @@ jobs:
 
       - name: Install musl-tools (Linux)
         if: startsWith(matrix.os, 'ubuntu')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        uses: ./.github/actions/setup-system-deps
+        with:
+          ripgrep: "false"
+          musl: "true"
 
       - name: Install musl-cross + set musl linker (macOS)
         if: matrix.os == 'macos-latest'
-        run: |
-          brew install FiloSottile/musl-cross/musl-cross
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc" >> "$GITHUB_ENV"
+        uses: ./.github/actions/setup-system-deps
+        with:
+          ripgrep: "false"
+          musl: "true"
 
       # ── apache-bench for Linux throughput perf (server/live) ────────────────
       - name: Install apache-bench (Linux)
         if: startsWith(matrix.os, 'ubuntu')
-        run: sudo apt-get update && sudo apt-get install -y apache2-utils
+        uses: ./.github/actions/setup-system-deps
+        with:
+          ripgrep: "false"
+          apache_bench: "true"
 
       # ── GNU coreutils on macOS (the script uses bare `timeout`) ─────────────
       - name: Install GNU coreutils (macOS)
         if: matrix.os == 'macos-latest'
-        run: |
-          brew install coreutils
-          mkdir -p "$HOME/.local/bin"
-          ln -sf "$(brew --prefix coreutils)/libexec/gnubin/timeout" "$HOME/.local/bin/timeout"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/setup-system-deps
+        with:
+          ripgrep: "false"
+          coreutils: "true"
 
       # ── Cache the isolated static-perf cargo target + registry ──────────────
       - name: Cache cargo target
