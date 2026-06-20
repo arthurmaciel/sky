@@ -10,19 +10,15 @@ ATTENTION: the Rust backend is still **experimental**. Don't use it for producti
 Sky is an awesome language! Industrial-grade code and utilitites, a really nice author
 and a broad vision towards the future.
 
-As I have studied Rust in the last year, I thought about implementing a new **experimental** 
+As I have been learning Rust, I thought about implementing a new **experimental** 
 backend with it. 
 
-The Sky author shared his initial thoughts on using Rust as the target language. He chose Go 
-due to Rust type system, which would block universal/automatic [Foreign Function Interface](https://en.wikipedia.org/wiki/Foreign_function_interface) (FFI).
+Goals:
 
-In fact, that is the case. But even with that limitation, I tried to achieve the following goals
-with the project:
-
-- have a Rust backend for actual use
-- understand the limits of FFI to Rust (complex lifetimes, generics, traits etc)
-  learn more about Rust itself
-- learn more about compilers
+- have a Sky -> Rust backend for actual use
+- understand the limits of [FFI](https://en.wikipedia.org/wiki/Foreign_function_interface) to Rust (complex lifetimes, generics, traits etc)
+- learn more about Rust itself
+- learn about compilers
 - learn the limits of AI tooling on a practical and complex project
 
 If you want, get to know more about the project **[principles](docs/PRINCIPLES.md)**.
