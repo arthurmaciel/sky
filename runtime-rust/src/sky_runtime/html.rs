@@ -147,6 +147,12 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
         Html::HText(t) => s.push_str(&escape_text(t)),
         Html::HRaw(r) => s.push_str(r),
         Html::HElement(tag, attrs, kids) => {
+            // Injection guard: an unsafe tag name (spaces / `>` / `<` …) would
+            // break out of the start tag. Drop the whole element — including its
+            // subtree — rather than emit an attacker-controlled tag.
+            if !is_safe_html_name(tag) {
+                return;
+            }
             s.push('<');
             s.push_str(tag);
             // Collect regular + bool attrs into (key, value) pairs, then sort
@@ -188,6 +194,11 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
             }
             pairs.sort_by(|a, b| a.0.cmp(b.0));
             for (k, v) in &pairs {
+                // Attr KEY is emitted unescaped; an unsafe key (`x onload=…`)
+                // injects a new attribute. Skip it (the value is still escaped).
+                if !is_safe_html_name(k) {
+                    continue;
+                }
                 s.push(' ');
                 s.push_str(k);
                 s.push_str("=\"");
@@ -201,6 +212,10 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
             // (the client doesn't send the event type otherwise) — the handler
             // resolves by (sky-id, event). `data-sky-on` is kept for parity
             // with Go's render.
+            // Event names are emitted unescaped as both the `data-sky-on` value
+            // and the `sky-<ev>` attribute key — an unsafe name injects markup.
+            // Drop any that aren't valid HTML names.
+            events.retain(|e| is_safe_html_name(e));
             if !events.is_empty() {
                 s.push_str(" data-sky-on=\"");
                 s.push_str(&events.join(" "));
@@ -257,6 +272,23 @@ fn escape_text(t: &str) -> String {
 
 fn escape_attr(t: &str) -> String {
     escape_text(t).replace('"', "&quot;")
+}
+
+/// True when `name` is safe to emit UNESCAPED as a tag name, attribute key, or
+/// event name. Tag/attr/event names are NEVER escaped (an escaped `<` in a tag
+/// position is meaningless), so a name carrying a structural metacharacter is a
+/// direct injection: a tag `"div><script>…"` or an attr key `"x onmouseover=…"`
+/// would break out of the element. Sky `Html.node` / `Html.attribute` take the
+/// name as a `String`, so it can be attacker-derived. Accept only the characters
+/// that appear in real HTML names — letters, digits, and `-_:.` — and reject
+/// everything else (whitespace, `<>"'=/\``, control bytes, non-ASCII). An invalid
+/// name causes the element / attribute / event marker to be DROPPED rather than
+/// emitted, closing the XSS hole with no escaping ambiguity.
+fn is_safe_html_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.')
+        })
 }
 
 /// Stamp every HElement (not HText/HRaw) with a stable `sky-id` attribute derived

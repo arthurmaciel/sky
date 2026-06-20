@@ -582,7 +582,23 @@ fn ws_resp(status: i64, body: &str) -> ServerResponse {
 
 /// Glob match with `*` wildcards (e.g. "https://*.example.com"). `*` matches any
 /// run of characters; all other chars are literal. Used for WS origin allowlists.
+///
+/// Security (CSWSH glob bypass): when a `*` is followed by a non-empty literal
+/// anchor (a middle segment, or the trailing domain suffix), the region the `*`
+/// covers MUST be a syntactic host fragment — `[A-Za-z0-9.:-]` only. Without this
+/// a pattern like `https://*.example.com` would wrongly accept a forged origin
+/// such as `https://evil.com/.example.com` or `https://evil.com@x.example.com`,
+/// where the trusted suffix sits behind a path / userinfo delimiter. The explicit
+/// allow-all pattern `*` (and any pattern ending in `*`) keeps matching anything —
+/// that region has no literal anchor after it, so the user has opted into it.
 fn ws_origin_matches(pattern: &str, origin: &str) -> bool {
+    // A `*`-covered span that precedes a literal anchor may only contain host
+    // characters — never a `/`, `@`, `?`, `#`, whitespace, or control byte that
+    // could push the trusted literal behind a URL delimiter.
+    fn host_safe(span: &str) -> bool {
+        span.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+    }
     let parts: Vec<&str> = pattern.split('*').collect();
     if parts.len() == 1 {
         return pattern == origin; // no wildcard → exact
@@ -598,12 +614,24 @@ fn ws_origin_matches(pattern: &str, origin: &str) -> bool {
     for seg in parts.get(1..parts.len() - 1).unwrap_or(&[]) {
         if seg.is_empty() { continue; }
         match rest.find(seg) {
-            Some(i) => rest = rest.get(i + seg.len()..).unwrap_or(""),
+            Some(i) => {
+                // `rest[..i]` was covered by the preceding `*`, and `seg` is a
+                // literal anchor after it → enforce host-only.
+                if !host_safe(rest.get(..i).unwrap_or("")) { return false; }
+                rest = rest.get(i + seg.len()..).unwrap_or("");
+            }
             None => return false,
         }
     }
     // Last segment must be a suffix (unless pattern ends with '*').
-    rest.ends_with(parts.last().copied().unwrap_or(""))
+    let last = parts.last().copied().unwrap_or("");
+    if last.is_empty() {
+        // Pattern ends with `*` → trailing region unrestricted (explicit allow-all).
+        return true;
+    }
+    if !rest.ends_with(last) { return false; }
+    // The span the trailing `*` covered (before the literal suffix) must be a host.
+    host_safe(rest.get(..rest.len() - last.len()).unwrap_or(""))
 }
 
 /// ServerWebSocket_upgrade : Request -> WebSocketServerCfg -> Task Error Response
@@ -869,6 +897,14 @@ mod tests {
         assert!(ws_origin_matches("*", "anything://x"));
         assert!(ws_origin_matches("*.local", "x.local"));
         assert!(!ws_origin_matches("*.local", "x.remote"));
+        // CSWSH glob-bypass: the trusted suffix must not be reachable behind a
+        // path / userinfo / query delimiter smuggled through the `*`.
+        assert!(!ws_origin_matches("https://*.example.com", "https://evil.com/.example.com"));
+        assert!(!ws_origin_matches("https://*.example.com", "https://evil.com@x.example.com"));
+        assert!(!ws_origin_matches("https://*.example.com", "https://evil.com?.example.com"));
+        assert!(!ws_origin_matches("https://*.example.com", "https://evil.com#.example.com"));
+        // A trailing `*` is an explicit allow-all of the remainder (opt-in).
+        assert!(ws_origin_matches("https://app.example.com*", "https://app.example.com/anything"));
     }
 
     #[test]

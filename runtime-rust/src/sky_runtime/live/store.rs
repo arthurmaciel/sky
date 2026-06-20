@@ -105,7 +105,7 @@ fn now_secs() -> i64 {
 #[cfg(feature = "db")]
 pub struct SqliteStore<Model, Msg> {
     pool: sqlx::SqlitePool,
-    mem_cache: RwLock<HashMap<String, SessionHandle<Model, Msg>>>,
+    mem_cache: RwLock<SessionMap<Model, Msg>>,
     ttl: Duration,
 }
 
@@ -133,7 +133,13 @@ where
 {
     async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
         // Same-process live handle wins (owns the running driver).
-        let cached = self.mem_cache.read().unwrap_or_else(|e| e.into_inner()).get(sid).cloned();
+        let cached = {
+            let mut w = self.mem_cache.write().unwrap_or_else(|e| e.into_inner());
+            w.get_mut(sid).map(|(h, seen)| {
+                *seen = Instant::now(); // touch — keep active sessions in cache
+                h.clone()
+            })
+        };
         if let Some(h) = cached {
             let _ = sqlx::query("UPDATE sky_sessions SET last_seen = ? WHERE sid = ?")
                 .bind(now_secs()).bind(sid).execute(&self.pool).await;
@@ -150,7 +156,7 @@ where
     }
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
         let model = handle.lock().unwrap_or_else(|e| e.into_inner()).model.clone();
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), handle);
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), (handle, Instant::now()));
         if let Ok(blob) = serde_json::to_string(&model) {
             let _ = sqlx::query(
                 "INSERT INTO sky_sessions (sid, blob, last_seen) VALUES (?, ?, ?) \
@@ -168,8 +174,15 @@ where
         let cutoff = now_secs() - self.ttl.as_secs() as i64;
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE last_seen < ?")
             .bind(cutoff).execute(&self.pool).await;
-        // mem_cache entries are live (driver running); the DB is the TTL
-        // authority for the persisted checkpoint. Go keeps the live pointers too.
+        // Bound the in-RAM handle cache by idle-TTL too. Without this, every
+        // distinct sid ever seen (e.g. a flood of cookie-less requests) leaves a
+        // live handle in mem_cache forever → unbounded growth → OOM (session-DoS).
+        // An evicted-but-still-valid session simply re-hydrates Cold from the
+        // checkpoint blob on its next request.
+        let now = Instant::now();
+        let ttl = self.ttl;
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (_, seen)| now.duration_since(*seen) <= ttl);
     }
 }
 
@@ -183,7 +196,7 @@ where
 #[cfg(feature = "db")]
 pub struct PostgresStore<Model, Msg> {
     pool: sqlx::PgPool,
-    mem_cache: RwLock<HashMap<String, SessionHandle<Model, Msg>>>,
+    mem_cache: RwLock<SessionMap<Model, Msg>>,
     ttl: Duration,
 }
 
@@ -209,7 +222,13 @@ where
     Msg: Send + Sync + 'static,
 {
     async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
-        let cached = self.mem_cache.read().unwrap_or_else(|e| e.into_inner()).get(sid).cloned();
+        let cached = {
+            let mut w = self.mem_cache.write().unwrap_or_else(|e| e.into_inner());
+            w.get_mut(sid).map(|(h, seen)| {
+                *seen = Instant::now(); // touch — keep active sessions in cache
+                h.clone()
+            })
+        };
         if let Some(h) = cached {
             let _ = sqlx::query("UPDATE sky_sessions SET last_seen = $1 WHERE sid = $2")
                 .bind(now_secs()).bind(sid).execute(&self.pool).await;
@@ -225,7 +244,7 @@ where
     }
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
         let model = handle.lock().unwrap_or_else(|e| e.into_inner()).model.clone();
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), handle);
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), (handle, Instant::now()));
         if let Ok(blob) = serde_json::to_string(&model) {
             let _ = sqlx::query(
                 "INSERT INTO sky_sessions (sid, blob, last_seen) VALUES ($1, $2, $3) \
@@ -243,6 +262,12 @@ where
         let cutoff = now_secs() - self.ttl.as_secs() as i64;
         let _ = sqlx::query("DELETE FROM sky_sessions WHERE last_seen < $1")
             .bind(cutoff).execute(&self.pool).await;
+        // Bound the in-RAM handle cache by idle-TTL too (see SqliteStore::sweep)
+        // — otherwise a cookie-less request flood grows mem_cache without bound.
+        let now = Instant::now();
+        let ttl = self.ttl;
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (_, seen)| now.duration_since(*seen) <= ttl);
     }
 }
 
@@ -263,7 +288,7 @@ fn redis_key(sid: &str) -> String {
 #[cfg(feature = "redis_store")]
 pub struct RedisStore<Model, Msg> {
     conn: redis::aio::MultiplexedConnection,
-    mem_cache: RwLock<HashMap<String, SessionHandle<Model, Msg>>>,
+    mem_cache: RwLock<SessionMap<Model, Msg>>,
     ttl_secs: u64,
 }
 
@@ -295,7 +320,13 @@ where
 {
     async fn get(&self, sid: &str) -> Option<StoreHit<Model, Msg>> {
         use redis::AsyncCommands;
-        let cached = self.mem_cache.read().unwrap_or_else(|e| e.into_inner()).get(sid).cloned();
+        let cached = {
+            let mut w = self.mem_cache.write().unwrap_or_else(|e| e.into_inner());
+            w.get_mut(sid).map(|(h, seen)| {
+                *seen = Instant::now(); // touch — keep active sessions in cache
+                h.clone()
+            })
+        };
         let mut conn = self.conn.clone();
         if let Some(h) = cached {
             // Touch native TTL so an active session doesn't expire mid-conversation.
@@ -310,7 +341,7 @@ where
     async fn set(&self, sid: &str, handle: SessionHandle<Model, Msg>) {
         use redis::AsyncCommands;
         let model = handle.lock().unwrap_or_else(|e| e.into_inner()).model.clone();
-        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), handle);
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), (handle, Instant::now()));
         if let Ok(blob) = serde_json::to_string(&model) {
             let mut conn = self.conn.clone();
             let _: Result<(), _> = conn.set_ex(redis_key(sid), blob, self.ttl_secs).await;
@@ -322,7 +353,16 @@ where
         let mut conn = self.conn.clone();
         let _: Result<(), _> = conn.del(redis_key(sid)).await;
     }
-    // No sweep: Redis evicts expired keys natively.
+    async fn sweep(&self) {
+        // Redis evicts the persisted blob natively, but the in-RAM handle cache
+        // still needs idle-TTL eviction — otherwise a cookie-less request flood
+        // grows mem_cache without bound → OOM (session-DoS). An evicted-but-valid
+        // session re-hydrates Cold from Redis on its next request.
+        let now = Instant::now();
+        let ttl = Duration::from_secs(self.ttl_secs);
+        self.mem_cache.write().unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (_, seen)| now.duration_since(*seen) <= ttl);
+    }
 }
 
 /// Select a backend from `[live] store` (Go `chooseStore`), falling back to

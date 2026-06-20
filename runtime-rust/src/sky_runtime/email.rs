@@ -274,6 +274,22 @@ async fn send_ses<E: From<String>>(cfg: &SesConfig, m: &EmailMessage) -> SkyResu
             "email.send/Ses: region+key+secret required".to_string().into(),
         );
     }
+    // SSRF guard: `region` is interpolated into the SES host
+    // (`email.{region}.amazonaws.com`) AND the SigV4 credential scope. An
+    // attacker-controlled region containing `/`, `.`, `@`, `:` or other URL
+    // metacharacters would redirect the signed request to an arbitrary host.
+    // AWS region names are `[a-z0-9-]+` only — reject anything else.
+    if !cfg
+        .region
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return SkyResult::Err(
+            "email.send/Ses: invalid region (must match [a-z0-9-])"
+                .to_string()
+                .into(),
+        );
+    }
     let mut simple = serde_json::json!({
         "Subject": { "Data": m.subject, "Charset": "UTF-8" },
         "Body": { "Text": { "Data": m.textBody, "Charset": "UTF-8" } },

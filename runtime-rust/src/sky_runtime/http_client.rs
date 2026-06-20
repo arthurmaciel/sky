@@ -409,11 +409,67 @@ async fn do_request<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyRe
             headers.insert(k.as_str().to_string(), s.to_string());
         }
     }
-    let body = match resp.text().await {
-        Ok(b) => b,
-        Err(e) => return SkyResult::Err(format!("http: reading body failed: {}", e).into()),
+    let body = match read_body_capped::<E>(resp).await {
+        SkyResult::Ok(b) => b,
+        SkyResult::Err(e) => return SkyResult::Err(e),
     };
     ok_res(HttpResponse { status, body, headers })
+}
+
+/// Default cap on a buffered HTTP response body (`Http.get`/`post`/`request`):
+/// 100 MiB. `Http.*` returns the body as a single `String`, so an unbounded
+/// read of an attacker- or upstream-controlled response is a memory-exhaustion
+/// (OOM) vector. Override via `SKY_HTTP_MAX_BODY_BYTES` (streaming consumers that
+/// need unbounded bodies use `Sky.Core.Http.Stream` instead).
+const HTTP_BODY_CAP_DEFAULT: usize = 100 * 1024 * 1024;
+
+fn http_body_cap() -> usize {
+    std::env::var("SKY_HTTP_MAX_BODY_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(HTTP_BODY_CAP_DEFAULT)
+}
+
+/// Read a response body into a `String` with a hard byte cap. Fails fast on a
+/// declared `Content-Length` over the cap, then enforces the cap incrementally
+/// while streaming (a lying / chunked response can't bypass the limit). UTF-8
+/// lossy (matches `Http.Stream`'s chunk decode; Go reads bytes→string too).
+async fn read_body_capped<E: From<String> + Send + 'static>(
+    resp: reqwest::Response,
+) -> SkyResult<E, String> {
+    use futures_util::StreamExt;
+    let cap = http_body_cap();
+    if let Some(len) = resp.content_length() {
+        if len as usize > cap {
+            return SkyResult::Err(
+                format!(
+                    "http: response body too large ({} > {} bytes; raise SKY_HTTP_MAX_BODY_BYTES or use Http.Stream)",
+                    len, cap
+                )
+                .into(),
+            );
+        }
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(e) => return SkyResult::Err(format!("http: reading body failed: {}", e).into()),
+        };
+        if buf.len().saturating_add(bytes.len()) > cap {
+            return SkyResult::Err(
+                format!(
+                    "http: response body too large (> {} bytes; raise SKY_HTTP_MAX_BODY_BYTES or use Http.Stream)",
+                    cap
+                )
+                .into(),
+            );
+        }
+        buf.extend_from_slice(&bytes);
+    }
+    SkyResult::Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// Http.get : String -> Task Error HttpResponse
