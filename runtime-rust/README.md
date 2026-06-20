@@ -99,8 +99,8 @@ rustup toolchain install nightly      # the FFI inspector runs `cargo +nightly r
 
 # Haskell — the Sky compiler is written in Haskell (GHC >= 9.6.7 + cabal 3.10)
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
-ghcup install ghc 9.6.7 && ghcup set ghc 9.6.7   # or any GHC >= 9.6.7; cabal resolves the rest
-ghcup install cabal 3.10.3.0
+ghcup install ghc latest && ghcup set ghc latest   # GHC >= 9.6.7 minimum; latest is fine
+ghcup install cabal latest
 
 # ripgrep — used by the build tooling
 sudo apt install -y ripgrep
@@ -140,8 +140,8 @@ rustup toolchain install nightly
 
 # Haskell — GHC >= 9.6.7 + cabal via ghcup
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
-ghcup install ghc 9.6.7 && ghcup set ghc 9.6.7   # or any GHC >= 9.6.7; cabal resolves the rest
-ghcup install cabal 3.10.3.0
+ghcup install ghc latest && ghcup set ghc latest   # GHC >= 9.6.7 minimum; latest is fine
+ghcup install cabal latest
 
 # ripgrep + GNU coreutils (the helper scripts use GNU `timeout`)
 brew install ripgrep coreutils
@@ -178,8 +178,8 @@ need bash.
 # Rust (rustup) — install from https://rustup.rs (run the installer), then:
 rustup toolchain install nightly      # FFI inspector needs nightly
 
-# Haskell — install GHC >= 9.6.7 + cabal via GHCup: https://www.haskell.org/ghcup/
-#   (the GHCup Windows installer walks you through it; 9.6.7 is the tested floor)
+# Haskell — install GHC >= 9.6.7 (minimum; latest recommended) + cabal via GHCup:
+#   https://www.haskell.org/ghcup/  (the GHCup Windows installer walks you through it)
 
 # ripgrep
 choco install ripgrep -y              # or: winget install BurntSushi.ripgrep.MSVC
@@ -235,9 +235,9 @@ export CARGO_INCREMENTAL=0
 ### Build the Sky compiler (all OSes)
 
 ```bash
-cabal build -w ghc-9.6.7 exe:sky
+cabal build exe:sky
 mkdir -p sky-out
-ln -sf "$(cabal list-bin -w ghc-9.6.7 exe:sky)" sky-out/sky
+ln -sf "$(cabal list-bin exe:sky)" sky-out/sky
 ./sky-out/sky --version
 ```
 
