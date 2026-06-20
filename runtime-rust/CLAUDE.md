@@ -31,6 +31,23 @@ rule here is mandatory, not optional. Current settled rules:
   (command/env header — new speed opts go here) + `lib/examples.sh` (the build/
   run/web/perf example manifest — new test examples go here). Never duplicate
   either across runners.
+- **Every written runtime Rust MUST be clippy-clean — no risk lints, ever.** The
+  CI `security-audit` gate is `cargo clippy --all-targets --all-features -D warnings`;
+  a violation is a red build, NOT a follow-up. The risk lints are enforced as a
+  crate-level HARD DENY (so `cargo clippy` fails locally too, before commit):
+  `unwrap_used` + `expect_used` (`Cargo.toml [lints.clippy]`, all targets) and
+  `indexing_slicing` + `panic` + `unreachable` + `todo` + `unimplemented` +
+  `panic_in_result_fn` (`src/lib.rs` `cfg_attr(not(test), deny(...))` — non-test
+  runtime code). When writing runtime code, COMPLY BY CONSTRUCTION: never `[i]` /
+  `[a..b]` (use `.get()` / slice patterns `[x]` / iterators), never `.unwrap()` /
+  `.expect()` / `panic!` / `unreachable!` / `todo!` / `unimplemented!` in a
+  Sky-reachable path (return `Result`/`Task`, or use a total fallback like
+  `.unwrap_or_else(|e| e.into_inner())` on a lock). Tests may panic/index freely
+  (the deny is `not(test)`). The two sanctioned `#[allow(clippy::panic)]` sites
+  are the INFALLIBLE-tagged HMAC ctors (README "Soundness attention points"); any
+  new `#[allow]` of a risk lint needs the same explicit INFALLIBLE justification.
+  This is the no-runtime-panic thesis as a compile gate — do not weaken it; fix
+  the code, never the lint level.
 - **Verify through the `sky-rust-backend:*` skills**, never the raw runner scripts.
 - **`examples/rust/` holds only real, complete Sky projects** (currently just
   `skyshop-rs`). Sky projects that exist ONLY as Rust-backend tests/fixtures live

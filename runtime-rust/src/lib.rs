@@ -21,7 +21,15 @@
     deny(
         clippy::indexing_slicing,
         clippy::panic,
-        clippy::unreachable
+        clippy::unreachable,
+        // Promoted from the quality-audit advisory set to a HARD deny: these are
+        // all panic vectors a well-typed Sky program must never reach. `cargo
+        // clippy` now FAILS on any of them in non-test runtime code, so risky
+        // code cannot be merged (CI security-audit gate + local clippy enforce
+        // it). See `## Settled rules` in CLAUDE.md.
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::panic_in_result_fn
     )
 )]
 
