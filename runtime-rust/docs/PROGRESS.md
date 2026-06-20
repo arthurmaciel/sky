@@ -17,6 +17,43 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-19 21:40 — Go≡Rust equivalence-fixture corpus (suggestion #8)
+
+**What.** New `runtime-rust/scripts/equiv-corpus.sh` — a curated set of small,
+pure-stdlib, deterministic-stdout fixtures under `runtime-rust/tests/sky/` that pin
+SPECIFIC kernel/codegen behaviours the example sweep doesn't exercise (the "green
+build ≠ correct" gap). Each is built on BOTH backends (`--backend go` FORCED — the
+fixtures pin `backend = "rust"`), run in an isolated cwd, and its stdout compared
+byte-for-byte after a light normalisation (blank lines + the RFC3339 log
+timestamp, the only legitimately non-deterministic token). A fixture that doesn't
+build on Go (needs a Rust-only FFI crate / a missing Go kernel) auto-SKIPs — the
+corpus is deliberately pure-stdlib. Green baseline: `23-char`,
+`53-cons-pattern-tuple`, `60-errortostring-string`, `63-int-overflow-wrap`,
+`64-log-with-attrs`, `65-crypto-random-encoding` — 6 ok / 0 fail / 0 skip. Wired
+into the examples-sweep CI as a gating ubuntu-only step.
+
+**High value: it caught a verification-methodology bug.** The corpus exposed that
+the fixtures' `sky.toml backend = "rust"` makes a bare `sky build`/`sky run`
+produce the RUST binary — so the earlier "Go vs Rust" checks for #4/log/crypto
+were actually RUST-vs-RUST. Forcing `--backend go` gives the TRUE Go≡Rust diff,
+which now retroactively validates those three fixes against the real Go runtime
+(all match, modulo the normalised timestamp).
+
+**Found issues (surfaced BY the corpus, held out of the green baseline):**
+- `49-bytes-core` — Rust E0282: `bytes_from_hex`/`bytes_from_base64` return
+  `SkyResult<E,T>` and `E` is unconstrained at the `match` call site (the Err arm
+  doesn't pin it). In-boundary Rust codegen gap (an E-pinning wrapper like
+  `log_*_with` would fix it). Pre-existing (unrelated to this session's changes);
+  tracked for a follow-up.
+- `56-list-sort` — Go build fails: `List.sortWith`/`sortBy` has no `List_sortWith`
+  kernel in the GO backend (`kernelToGo` default). Out of the Rust boundary
+  (shared stdlib / Go codegen); can't be a Go≡Rust member until Go gains it.
+
+**Affected.** `runtime-rust/scripts/equiv-corpus.sh` (new),
+`.github/workflows/examples-sweep.yml` (gating ubuntu step).
+
+---
+
 ## 2026-06-19 21:10 — Scheduled security re-audit CI workflow (suggestion #3)
 
 **What.** New `.github/workflows/security-audit.yml` — a fork-local scheduled

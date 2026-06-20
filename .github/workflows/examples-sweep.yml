@@ -277,6 +277,18 @@ jobs:
         shell: bash
         run: bash runtime-rust/scripts/examples-sweep.sh
 
+      # ── Go≡Rust equivalence corpus (ubuntu only, GATING) ────────────────────
+      # The deterministic-stdout regression fixtures under runtime-rust/tests/sky/
+      # that pin kernel/codegen behaviours the example set doesn't exercise (i64
+      # overflow wrap, Log.*With attr flatten, crypto encoding, …). Builds each on
+      # BOTH backends (`--backend go` forced — the fixtures pin backend=rust) and
+      # diffs normalised stdout. Ubuntu only (the reference host); exits 1 on a
+      # DIFFER → fails the job, exactly like a RED sweep row.
+      - name: Go≡Rust equivalence corpus
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: bash runtime-rust/scripts/equiv-corpus.sh
+
       # ── Per-OS job summary: the BUILD·RUN·EQUIV table inline on the run page ─
       # always() so it renders on a RED verdict too (the sweep exits non-zero on
       # FAIL). The .table is fixed-width plain text → fence it to keep alignment.
