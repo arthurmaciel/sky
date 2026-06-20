@@ -282,9 +282,6 @@ store     = "memory"             # memory | sqlite | postgres | redis
 storePath = "sessions.db"        # file path / postgres:// URL / redis:// URL
 ```
 
-Rust FFI is fully automatic (`rustdoc --output-format json`) — no hand-written
-glue, even for proc-macro/derive crates. There is no `[rust.shims]` section.
-
 **Reaching async / framework crates** (which auto-FFI can't bind directly — see the
 [FFI Reach in TECHNICAL-DETAILS](docs/TECHNICAL-DETAILS.md#reach-what-auto-ffi-can-cant-cover)): wrap the crate in a thin fork-local crate exposing plain
 `&str`→`Result`/`Dict`-shaped fns over a dedicated-thread async→sync bridge, then
