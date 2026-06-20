@@ -72,7 +72,37 @@ pub fn process_run<E: Send + From<String> + 'static>(
         }
     })
 }
-pub fn system_exit(code: i64) -> ! { std::process::exit(code as i32) }
+/// Process-exit cleanup hook. `std::process::exit` (what `System.exit` lowers to)
+/// bypasses Drop, so an RAII guard's destructor never runs on that path. A backend
+/// driver that puts the terminal/process into a state needing restoration (the
+/// Sky.Tui driver: raw mode + alternate screen + hidden cursor + mouse reporting)
+/// registers its idempotent teardown here; `system_exit` runs it BEFORE
+/// `process::exit`. Mirrors Go's `System_exit` → `tuiTeardown()` → `os.Exit`.
+/// A plain `fn()` keeps the boundary clean — `system` (always compiled) never
+/// references the feature-gated `tui`/crossterm; the TUI provides the function.
+static EXIT_HOOK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Register the process-exit cleanup (idempotent target; set once per process —
+/// there is a single backend driver). Subsequent registrations are ignored.
+pub fn register_exit_hook(f: fn()) {
+    let _ = EXIT_HOOK.set(f);
+}
+
+/// Run the registered exit hook, if any. Called by `system_exit`; also safe to
+/// call from a backend driver's own normal-exit path (the hook is idempotent).
+pub fn run_exit_hook() {
+    if let Some(f) = EXIT_HOOK.get() {
+        f();
+    }
+}
+
+pub fn system_exit(code: i64) -> ! {
+    // Restore any driver-owned terminal/process state BEFORE exiting — Drop does
+    // NOT run on std::process::exit, so without this a Sky.Tui `System.exit` quit
+    // would leave the TTY in raw mode + the alternate screen (needing `reset`).
+    run_exit_hook();
+    std::process::exit(code as i32)
+}
 
 /// `Sky.Core.System.getenv key : String -> Task Error String` — the env var as a
 /// Task, or `Err` when unset. Returning a `SkyTask` (not a bare `String`) is
@@ -208,4 +238,27 @@ pub fn system_load_env<E: Send + 'static>(_: ()) -> SkyTask<E, ()> {
         }
         ok_res(())
     })
+}
+
+#[cfg(test)]
+mod exit_hook_tests {
+    use super::{register_exit_hook, run_exit_hook};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn bump() {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn exit_hook_runs_and_is_safe_without_registration() {
+        // No hook registered yet → run_exit_hook must be a safe no-op (the common
+        // CLI / server / non-TUI case — System.exit must not require a hook).
+        run_exit_hook();
+        // Register one and confirm it runs (the Sky.Tui driver registers its
+        // terminal-restore here so a System.exit quit doesn't bypass cleanup).
+        register_exit_hook(bump);
+        run_exit_hook();
+        assert!(CALLS.load(Ordering::SeqCst) >= 1, "registered exit hook must run");
+    }
 }

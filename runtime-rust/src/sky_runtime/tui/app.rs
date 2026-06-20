@@ -31,12 +31,40 @@ const SHOW_CURSOR: &str = "\x1b[?25h";
 const MOUSE_ON: &str = "\x1b[?1000;1006h";
 const MOUSE_OFF: &str = "\x1b[?1000;1006l";
 
-/// RAII terminal-state guard — restores cooked mode + cursor + main screen (and
-/// mouse reporting, when enabled) on Drop (normal exit or panic unwind).
-/// Best-effort, never panics.
-struct TuiGuard {
-    mouse: bool,
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether a TUI session is currently active (terminal in raw mode + alt screen).
+/// Gates `tui_teardown` so the restore runs exactly once, from whichever path
+/// fires first (Drop on a clean break / panic unwind, OR the System.exit hook).
+static TUI_RESTORE_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Whether mouse reporting was enabled (so the teardown emits MOUSE_OFF).
+static TUI_MOUSE: AtomicBool = AtomicBool::new(false);
+
+/// Idempotent terminal restore: mouse off → cursor shown → main screen → cooked
+/// mode. Runs once (AtomicBool gate). Called from EITHER the `TuiGuard` Drop
+/// (clean break / panic unwind) OR the `System.exit` hook — the latter is the
+/// load-bearing path: `std::process::exit` bypasses Drop, so without the hook a
+/// `Cmd.perform (System.exit n)` quit would leave the TTY in raw mode + the
+/// alternate screen (needing `reset`). Mirrors Go's `tuiTeardown`. Never panics.
+fn tui_teardown() {
+    if !TUI_RESTORE_ACTIVE.swap(false, Ordering::SeqCst) {
+        return; // already restored, or never entered
+    }
+    let mut out = std::io::stdout();
+    if TUI_MOUSE.load(Ordering::SeqCst) {
+        let _ = out.write_all(MOUSE_OFF.as_bytes());
+    }
+    let _ = out.write_all(SHOW_CURSOR.as_bytes());
+    let _ = out.write_all(ALT_SCREEN_OFF.as_bytes());
+    let _ = out.flush();
+    let _ = crossterm::terminal::disable_raw_mode();
 }
+
+/// RAII terminal-state guard — restores cooked mode + cursor + main screen (and
+/// mouse reporting, when enabled) on Drop (normal exit or panic unwind) AND via
+/// the registered `System.exit` hook (process::exit bypasses Drop). Best-effort,
+/// never panics.
+struct TuiGuard;
 
 impl TuiGuard {
     /// String-view driver (`tui_app` / `Tui.program`) — no mouse reporting.
@@ -50,6 +78,11 @@ impl TuiGuard {
     }
     fn enter_with(mouse: bool) -> Result<Self, String> {
         crossterm::terminal::enable_raw_mode().map_err(|e| format!("Tui: enable raw mode: {e}"))?;
+        TUI_MOUSE.store(mouse, Ordering::SeqCst);
+        TUI_RESTORE_ACTIVE.store(true, Ordering::SeqCst);
+        // Register the teardown so a `System.exit` quit restores the terminal even
+        // though process::exit skips Drop. Idempotent with the Drop path below.
+        crate::sky_runtime::system::register_exit_hook(tui_teardown);
         let mut out = std::io::stdout();
         let _ = out.write_all(ALT_SCREEN_ON.as_bytes());
         let _ = out.write_all(HIDE_CURSOR.as_bytes());
@@ -57,20 +90,13 @@ impl TuiGuard {
             let _ = out.write_all(MOUSE_ON.as_bytes());
         }
         let _ = out.flush();
-        Ok(TuiGuard { mouse })
+        Ok(TuiGuard)
     }
 }
 
 impl Drop for TuiGuard {
     fn drop(&mut self) {
-        let mut out = std::io::stdout();
-        if self.mouse {
-            let _ = out.write_all(MOUSE_OFF.as_bytes());
-        }
-        let _ = out.write_all(SHOW_CURSOR.as_bytes());
-        let _ = out.write_all(ALT_SCREEN_OFF.as_bytes());
-        let _ = out.flush();
-        let _ = crossterm::terminal::disable_raw_mode();
+        tui_teardown();
     }
 }
 
@@ -85,9 +111,14 @@ fn paint(frame: &str) {
 /// stream isn't a TTY). Re-queried each paint so the Element renderer reflows on
 /// resize.
 fn term_size() -> (usize, usize) {
+    // Fall back to 80×24 when the size can't be determined OR is reported as 0 in
+    // either dimension (a pty with no winsize set / a non-interactive pipe reports
+    // (0, 0); crossterm passes that through). Clamping a 0 to 1 — as the old code
+    // did — rendered a 1×1 canvas, i.e. an (almost) blank frame, diverging from Go
+    // (which defaults to 80×24). Only a genuine non-zero size is honoured.
     match crossterm::terminal::size() {
-        Ok((w, h)) => (w.max(1) as usize, h.max(1) as usize),
-        Err(_) => (80, 24),
+        Ok((w, h)) if w > 0 && h > 0 => (w as usize, h as usize),
+        _ => (80, 24),
     }
 }
 

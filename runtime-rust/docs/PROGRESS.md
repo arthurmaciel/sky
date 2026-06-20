@@ -17,6 +17,43 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 03:00 — Sky.Tui terminal corruption + blank-frame fixes (Go parity)
+
+Two root causes behind "all TUI examples mess with the terminal (need `reset`)" +
+"24-tui-kitchen-sink diverges a lot from Go":
+
+1. **Terminal not restored on `System.exit` (corruption — the `reset` cause).** A
+   Sky.Tui app quits via `Quit -> Cmd.perform (System.exit 0)`. Rust's
+   `system_exit` was a bare `std::process::exit`, which **bypasses Drop** — so the
+   `TuiGuard` destructor (cooked mode + show cursor + main screen + mouse off)
+   never ran, leaving the TTY wedged. Go avoids this: `System_exit` calls
+   `tuiTeardown()` BEFORE `os.Exit`. Mirrored it: a process-exit hook
+   (`system.rs register_exit_hook`/`run_exit_hook`, a plain `fn()` so the
+   always-compiled `system` module never references feature-gated `tui`/crossterm)
+   that the Sky.Tui driver registers with an idempotent `tui_teardown`;
+   `system_exit` runs it before `process::exit`. Verified in a pty: the quit now
+   emits `MOUSE_OFF + SHOW_CURSOR + ALT_SCREEN_OFF` + disables raw mode.
+
+2. **`term_size` rendered a 1×1 (blank) frame.** `crossterm::terminal::size()`
+   returns `Ok((0,0))` on a pty with no winsize / a non-interactive pipe; the old
+   `term_size` clamped that to `(1,1)` (`w.max(1)`), so the whole UI rendered into
+   one cell. Go falls back to 80×24. Fixed: fall back to 80×24 when the size is
+   `Err` OR 0 in either dimension. Verified via a sized (80×24) pty + a pyte
+   render: the full kitchen-sink UI now renders.
+
+**Residual (documented, not yet fixed).** With both fixes the UI renders fully,
+but the INITIAL viewport still differs: Rust scrolls to the first focusable (the
+section-5 input) on init, Go shows the top. Both run identical init code
+(`focusIdx=0; ensureFocusVisible(...)`) and `ensure_focus_visible` is
+byte-identical — so the divergence is upstream, in the focused element's computed
+line / focus-collection. Needs a focus-model comparison; tracked for follow-up.
+
+**Affected.** `runtime-rust/src/sky_runtime/system.rs` (exit hook + system_exit +
+test), `runtime-rust/src/sky_runtime/tui/app.rs` (TuiGuard→exit-hook + tui_teardown
++ term_size fallback).
+
+---
+
 ## 2026-06-20 01:30 — 26-ui-showcase Go≡Rust: textarea value→content (Rust fix); sparkline/heatmap = Go Math bug
 
 **Investigation.** Diffed the rendered `/` HTML of 26-ui-showcase on both backends.
