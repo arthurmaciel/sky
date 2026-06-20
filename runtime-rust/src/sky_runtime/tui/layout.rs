@@ -1208,12 +1208,14 @@ fn render_node<M: Clone>(
                 // Render children IN ORDER (preserves focusable push order = Tab
                 // order), pairing each with its fill spec, then drop empty blocks.
                 let mut specs: Vec<Option<FillSpec>> = Vec::new();
+                let mut h_specs: Vec<Option<FillSpec>> = Vec::new();
                 let mut aligns: Vec<(Option<HAlign>, Option<VAlign>)> = Vec::new();
                 let mut children: Vec<Rendered> = Vec::new();
                 for k in kids.iter() {
                     let r = render_node(k, w.style, ctx, content_avail);
                     if r.block.height() > 0 {
                         specs.push(child_width_length(k).and_then(|l| fill_spec(&l, ctx.canvas)));
+                        h_specs.push(child_height_length(k).and_then(|l| fill_spec(&l, ctx.canvas)));
                         aligns.push(child_align(k));
                         children.push(r);
                     }
@@ -1227,6 +1229,13 @@ fn render_node<M: Clone>(
                         content_avail,
                         ctx.canvas.cells_x(w.spacing_px),
                     );
+                }
+                // In a fixed-height COLUMN, height-fill children split the leftover
+                // vertical space (audit #2/#4). Needs the column's resolved height.
+                if w.dir == Dir::Column {
+                    if let Some(th) = w.height.as_ref().and_then(|l| resolve_fixed_h(l, ctx.canvas)) {
+                        distribute_col_fill(&mut children, &h_specs, th, ctx.canvas.cells_y(w.spacing_px), w.style.bg);
+                    }
                 }
                 // Cross-axis alignment: offset each child within the stack's cross
                 // size per its Ui.alignX/alignY (was dropped → everything flush
@@ -1691,6 +1700,68 @@ fn child_width_length<M>(el: &Element<M>) -> Option<Length> {
     match el {
         Element::Node(_, attrs, _) | Element::TaggedNode(_, _, attrs, _) => width_length(attrs),
         _ => None,
+    }
+}
+
+/// The `Ui.height` `Length` declared on a child element, if any.
+fn child_height_length<M>(el: &Element<M>) -> Option<Length> {
+    match el {
+        Element::Node(_, attrs, _) | Element::TaggedNode(_, _, attrs, _) => height_length(attrs),
+        _ => None,
+    }
+}
+
+/// Height-fill distribution for a fixed-height COLUMN: fill children (`specs[i]`
+/// `Some`) split `total_h` minus the non-fill heights and inter-child gaps, by
+/// portion. Each fill child's block is padded (with `bg` blank rows) or clipped
+/// to its share. Non-fill children keep their height. The y-axis analogue of
+/// `distribute_row_fill`. (audit #2/#4)
+fn distribute_col_fill(
+    children: &mut [Rendered],
+    specs: &[Option<FillSpec>],
+    total_h: usize,
+    gap: usize,
+    bg: Option<(u8, u8, u8)>,
+) {
+    let n = children.len();
+    if n == 0 {
+        return;
+    }
+    let fill_idx: Vec<usize> = (0..n).filter(|i| specs.get(*i).copied().flatten().is_some()).collect();
+    if fill_idx.is_empty() {
+        return;
+    }
+    let gaps = gap.saturating_mul(n.saturating_sub(1));
+    let fixed: usize = (0..n)
+        .filter(|i| specs.get(*i).copied().flatten().is_none())
+        .map(|i| children[i].block.height())
+        .sum();
+    let leftover = total_h.saturating_sub(fixed + gaps);
+    let portion_total: usize = fill_idx
+        .iter()
+        .map(|i| specs[*i].map_or(1, |(p, _, _)| p.max(1) as usize))
+        .sum::<usize>()
+        .max(1);
+    let mut used = 0usize;
+    let last = *fill_idx.last().unwrap_or(&0);
+    for &i in &fill_idx {
+        let p = specs[i].map_or(1, |(p, _, _)| p.max(1) as usize);
+        let share = if i == last {
+            leftover.saturating_sub(used)
+        } else {
+            leftover * p / portion_total
+        };
+        used += share;
+        let cw = children[i].block.width();
+        let cur = children[i].block.height();
+        if cur > share {
+            children[i].block.lines.truncate(share.max(1));
+        } else {
+            let blank = vec![Run { text: " ".repeat(cw), style: Style { bg, ..Style::default() } }];
+            while children[i].block.lines.len() < share {
+                children[i].block.lines.push(blank.clone());
+            }
+        }
     }
 }
 
