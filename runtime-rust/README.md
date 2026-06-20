@@ -11,6 +11,33 @@ Don't use it for production yet.
 ```
 ---
 
+## Contents
+
+- [Introduction](#introduction)
+  - [Limitations](#limitations)
+- [Getting started](#getting-started)
+  - [Linux](#linux)
+  - [macOS](#macos)
+  - [Windows](#windows)
+  - [Clone the repo (all OSes)](#clone-the-repo-all-oses)
+  - [Fast-build env (all OSes)](#fast-build-env-all-oses)
+  - [Build the Sky compiler (all OSes)](#build-the-sky-compiler-all-oses)
+  - [Running the examples](#running-the-examples)
+  - [FFI usage](#ffi-usage)
+  - [CLI reference](#cli-reference)
+  - [Rust-backend environment variables](#rust-backend-environment-variables)
+- [Project status](#project-status)
+  - [Sweep summary (by equivalence mode)](#sweep-summary-by-equivalence-mode)
+  - [Examples](#examples)
+- [Static & cross compilation](#static--cross-compilation)
+  - [Static compilation](#static-compilation)
+  - [Cross compilation](#cross-compilation)
+- [Known limitations](#known-limitations)
+- [Learning materials](#learning-materials)
+  - [Glossary](#glossary)
+
+---
+
 ## Introduction 
 
 Sky is an awesome language! Industrial-grade code and utilities, a really nice author
@@ -57,7 +84,7 @@ You pick the Rust backend by adding `--backend rust` to any `sky` command; that'
 only flag a newcomer needs. 
 
 Cross-compiling to another platform uses
-`--target <triple>` — covered in *Static & cross compilation* below; ignore it for
+`--target <triple>` — covered in [Static & cross compilation](#static--cross-compilation) below; ignore it for
 now.
 
 Running the examples is **identical on every OS** — only the one-time setup
@@ -131,8 +158,8 @@ System libraries:
 - **Sky.Webview** works natively — WKWebView is built into macOS, nothing to
   install.
 - **Sky.Tui** needs only a real terminal (Terminal.app / iTerm2).
-- `musl-cross` is only needed for static *cross*-builds to Linux (see *[Static &
-  cross compilation](#static--cross-compilation))* ):
+- `musl-cross` is only needed for static *cross*-builds to Linux (see [Static &
+  cross compilation](#static--cross-compilation)):
 
 ```bash
 # Only for static cross-builds to Linux from macOS:
@@ -413,7 +440,7 @@ measures Rust-vs-Go throughput separately (informational, never blocks).
 **Build** / **Run** show ✅ for every row because this table is the *last-green
 snapshot* — it is rewritten only when the whole sweep passes. The live per-example
 pass/fail (including any ❌) is in the sweep badge's run summary at the top of
-Project status.
+[Project status](#project-status).
 
 **Round-trip** = how each shape's RUN is exercised:
 
