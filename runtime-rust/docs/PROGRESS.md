@@ -17,6 +17,58 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 15:00 — Security audit correctness/parity tail (in-boundary, runtime)
+
+Per the broadened goal (fix ALL in-boundary audit items, not only the security
+subset), closed the runtime-tractable correctness/Go-parity findings. `cargo
+test --features full` green (+ new regressions).
+
+- **path.rs** — rewrote base/dir/ext as faithful Go `path/filepath` ports (Unix)
+  including a real `Clean`. Fixes trailing-slash (`Dir("/foo/")`=`/foo`),
+  multi-separator (`Dir("a//b")`=`a`), and dotfile (`Ext(".bashrc")`=`.bashrc`)
+  divergences from the old OS-tagged std::path impl. +7 parity tests.
+- **html.rs** — `escape_attr` `"`→`&#34;` (was `&quot;`) for byte-parity with Go
+  `html.EscapeString` (what the equiv tests compare).
+- **money.rs** — `money_allocate` remainder via `to_i64()`, not
+  `to_string().parse::<i64>()`: a scaled remainder rendered `"1.00"`, failed to
+  parse, dropped the penny, mis-distributed (shares summed to 99.99). +regression.
+- **string.rs** — `string_is_url` rejects embedded ASCII control bytes (regex host
+  class missed them) — Go `url.Parse` parity on the XSS-link gate. +regression.
+- **math.rs** — documented the deliberate CONTRACT for min/max NaN tie-break and
+  floor/ceil/round saturating float→i64 casts (total; Go's int conversion on
+  NaN/Inf is implementation-defined, not a parity target — pin the safe form).
+
+**Re-verified already-fixed (stale deferrals, no action):** `log_*With` renders
+attrs via `SkyStringify`; `string_length` is char-count; `bind_sql_param` is
+`DbQuery`-aliased (driver-agnostic); `ws closeWithCode` total cast (this session).
+
+**Remaining — CODEGEN-pipeline / diff-protocol items (need `cabal build exe:sky`
++ a Go-oracle fixture + careful cross-site work; a rushed fix would violate
+soundness/correctness, so they get a proper focused pass each, NOT a quick
+patch):**
+- `Pattern.hs` — lambda/closure params that are PCons/PRecord/PCtor/PAlias render
+  as `_`, dropping bound names (→ E0425 / wrong arm). Naive `rustSafeIdent` fix is
+  unsafe (scope-set vs raw-name mismatch) — needs real pattern lowering.
+- `TypeEmitter.hs` — `boxIfRecursive` matches self-type by rendered string, so a
+  generic self-recursive enum (`type Tree a = Node (Tree a)` → `MainTree<A>`)
+  isn't boxed → E0072. Fix: head-match (modName,typeName); must stay consistent
+  with the `ecBoxedCtorFields` recorder.
+- `route.rs`/codegen — match-route param-count vs ctor-arity indexing (soundness).
+- `uuid_kernel`/Kernel.hs — `Pure.uuidV4/V7` Task-surface unsupported on
+  target=rust (completeness; new Task-wrapping kernel wiring).
+- `live/diff.rs` — top-level tag/kind mismatch emits no patch (Go emits a
+  whole-subtree replace); needs the patch-protocol + a fixture to verify safely.
+
+**Accepted-as-is (parity/by-design, documented):** `string_is_email` vs Go
+net/mail + f64 Display vs Go %v (need a fixture corpus); tui non-TTY check (would
+break the PTY sweep); `Console.hs` debug-path (brittle only to an anticipated
+future --release). Out-of-boundary `app/Main.hs` (upstream PR submitted).
+
+**Affected:** `runtime-rust/src/sky_runtime/path.rs`, `html.rs`, `money.rs`,
+`string.rs`, `math.rs`.
+
+---
+
 ## 2026-06-20 14:00 — Security audit LOW/bounded-tail hardenings (in-boundary)
 
 Closed the in-boundary remainder of the 2026-06-19 security audit's bounded/low
