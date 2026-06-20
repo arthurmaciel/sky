@@ -1,0 +1,8 @@
+[project]
+name = "64-log-with-attrs"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+[source]
+root = "src"

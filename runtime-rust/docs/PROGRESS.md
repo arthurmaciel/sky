@@ -17,6 +17,42 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-19 19:10 — Std.Log.*With now flatten attrs onto the line (Go-parity), via SkyStringify bound
+
+**What.** `Log.{info,error,warn,debug}With : String -> List a -> Task` previously
+DROPPED the attrs slot in the Rust runtime (a TODO from when no element bound was
+chosen) — the attrs never reached the log line. Now they are flattened onto the
+message byte-for-byte like Go's `renderLogMsgWithAttrs`: `msg a1 a2 …`, each `ai`
+rendered via the TOTAL Go-`%v` stringifier `SkyStringify`.
+
+- **Runtime** (`log.rs`): new `render_with_attrs<A: SkyStringify>` helper; the
+  four `log_*_with` fns bound `A: SkyStringify`, render before the future
+  (`Send`-clean `String`, no `A: Send` needed), and pass the flattened line to
+  `log_emit` — so the plain path sanitises attr values too (no newline injection
+  via an attr) and the JSON path surfaces them inside `msg` exactly as Go does
+  for the List call shape (Go's With variants pass `ctx=nil`).
+- **Codegen** (`Emitter.hs`): the hardcoded FFI wrappers `log_info_with` /
+  `log_error_with` now carry `<A: SkyStringify>` (was bare `<A>` → E0277 against
+  the bounded runtime fn). `Display` was wrong — tuples + generated records don't
+  impl `Display` (the original E0277 in routes_auth/routes_todos); `SkyStringify`
+  is impl'd for String, tuples `(A,B)`/`(A,B,C)`, Vec, and every codegen ADT/
+  record, so it is satisfiable at every concrete element type. Added the missing
+  `log_debug_with` / `log_warn_with` wrappers so all four levels carry the same
+  E-pinning + bound consistently.
+
+**Verified (Go≡Rust).** New fixture `tests/sky/64-log-with-attrs`: Rust and Go
+both emit `INFO flat ok 200` (flat `List String`) and
+`INFO tuple {errId abc} {code 42}` (`List (String,String)`, Go's `%v` of a tuple
+= `{k v}`) — byte-identical modulo timestamp. `17-db-todo-cli` (flat errorWith,
+cli) builds+runs; `36-composite-server` (tuple errorWith + warnWith) builds clean
+— no duplicate-definition collision from the new wrappers.
+
+**Affected.** `runtime-rust/src/sky_runtime/log.rs`,
+`src/Sky/Generate/Rust/Builder/Emitter.hs`,
+`runtime-rust/tests/sky/64-log-with-attrs/` (new fixture).
+
+---
+
 ## 2026-06-19 18:30 — Go-parity i64 wraparound: generated `[profile.dev] overflow-checks = false` (suggestion #4)
 
 **What.** Generated project's `[profile.dev]` now emits `overflow-checks = false`

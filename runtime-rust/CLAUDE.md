@@ -520,6 +520,17 @@ log** — hold it to the same bar as a code review:
   used (`Project.hs` gates `ui`/`html` on usesHtml/Live/Tui), so an always-present
   module referencing them is E0433 on a non-UI build. Validate against a Std.Ui
   example (`26-ui-showcase`/`19-skyforum`), not just a CLI one.
+- **A runtime kernel that RENDERS a Sky-polymorphic element bounds `SkyStringify`,
+  never `Display`.** Sky's `Log.*With : String -> List a -> Task` (and any kernel
+  taking a `List a`/`a` it must stringify) is instantiated at flat `List String`
+  AND tuple `List (String, String)` AND generated records — none of which impl
+  `Display` (the E0277 in routes_auth/routes_todos). `SkyStringify` is the TOTAL
+  Go-`%v` stringifier impl'd for String, tuples, Vec, and every codegen ADT/record,
+  so it is satisfiable at every concrete element type. CAVEAT: the bound must be on
+  the **codegen-emitted FFI wrapper** too, not just the runtime fn — these kernels
+  have HARDCODED forwarding wrappers in `Emitter.hs` (`log_*_with`), and a bare
+  `<A>` wrapper calling a `<A: SkyStringify>` runtime fn is E0277. Render attrs
+  BEFORE the future (`String` is `Send`; avoids an `A: Send` bound).
 - **Feature-gated crate types need `#[cfg(feature=…)]` on their trait impls too.**
   An `impl SkyStringify for serde_json::Value` in an always-compiled module fails
   E0433 when the `json` feature is off (generated projects DO enable `json` by

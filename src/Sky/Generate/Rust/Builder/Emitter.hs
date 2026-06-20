@@ -152,15 +152,26 @@ emitRust b dbPath dbDriver ffiSlugs =
             -- discarded `let _ = log_println(...)` leaves E un-inferrable → E0283
             -- (regressed 00/36/simple when println split off from log_info).
             , "pub fn log_println(msg: String) -> SkyTask<()> { sky_runtime::log::log_println(msg) }"
-            -- Keep the attr-element type GENERIC (`A`): Sky's `infoWith / errorWith
-            -- : String -> List a -> …` is polymorphic in the attr element, and the
-            -- common structured-log shape passes `List (String, String)` tuples
-            -- (`[("errId", id), ("error", msg)]`). Hardcoding `Vec<String>` here
-            -- rejected the tuple form (E0308 — composite-server). The wrapper still
-            -- pins `E = SkyError` via the `SkyTask<()>` return alias (the reason it
-            -- exists — E is otherwise un-inferrable from the args).
-            , "pub fn log_info_with<A>(msg: String, attrs: Vec<A>) -> SkyTask<()> { sky_runtime::log::log_info_with(msg, attrs) }"
-            , "pub fn log_error_with<A>(msg: String, attrs: Vec<A>) -> SkyTask<()> { sky_runtime::log::log_error_with(msg, attrs) }"
+            -- Keep the attr-element type GENERIC (`A`): Sky's `*With : String ->
+            -- List a -> …` is polymorphic in the attr element, and the common
+            -- structured-log shape passes `List (String, String)` tuples
+            -- (`[("errId", id), ("error", msg)]`) OR a flat `List String`
+            -- (`["errId", id]`). Hardcoding `Vec<String>` rejected the tuple form
+            -- (E0308 — composite-server). `A` is bounded by `SkyStringify` (NOT
+            -- `Display` — tuples + generated records don't impl `Display`, which
+            -- was the E0277), the TOTAL Go-`%v` stringifier every Sky-representable
+            -- type implements, so the runtime can flatten the attrs onto the line
+            -- byte-for-byte like Go's `renderLogMsgWithAttrs`. The bound is
+            -- satisfiable at every concrete element type, so it never rejects a
+            -- valid call site. The wrapper still pins `E = SkyError` via the
+            -- `SkyTask<()>` return alias (the reason it exists — E is otherwise
+            -- un-inferrable from the args). All four levels are hardcoded so the
+            -- E-pinning + `SkyStringify` bound are consistent regardless of which
+            -- `*With` an app uses.
+            , "pub fn log_info_with<A: SkyStringify>(msg: String, attrs: Vec<A>) -> SkyTask<()> { sky_runtime::log::log_info_with(msg, attrs) }"
+            , "pub fn log_error_with<A: SkyStringify>(msg: String, attrs: Vec<A>) -> SkyTask<()> { sky_runtime::log::log_error_with(msg, attrs) }"
+            , "pub fn log_debug_with<A: SkyStringify>(msg: String, attrs: Vec<A>) -> SkyTask<()> { sky_runtime::log::log_debug_with(msg, attrs) }"
+            , "pub fn log_warn_with<A: SkyStringify>(msg: String, attrs: Vec<A>) -> SkyTask<()> { sky_runtime::log::log_warn_with(msg, attrs) }"
             , "pub fn system_args(_: ()) -> SkyTask<Vec<String>> { sky_runtime::system::system_args(()) }"
             , "pub fn system_setenv(key: String, val: String) -> SkyTask<()> { sky_runtime::system::system_setenv(key, val) }"
             , "pub fn system_unsetenv(key: String) -> SkyTask<()> { sky_runtime::system::system_unsetenv(key) }"
