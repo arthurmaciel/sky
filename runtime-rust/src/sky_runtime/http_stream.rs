@@ -85,15 +85,21 @@ fn next_stream_id() -> i64 {
 /// a 30s connect timeout bounds the header stage only.
 pub fn http_stream_open<E: From<String> + Send + 'static>(req: HttpRequest) -> SkyTask<E, i64> {
     Box::pin(async move {
-        let client = match reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .redirect(if req.followRedirects {
-                reqwest::redirect::Policy::limited(req.maxRedirects.max(0) as usize)
-            } else {
-                reqwest::redirect::Policy::none()
-            })
-            .build()
-        {
+        // SSRF guard (was MISSING here — this surface built its own client and
+        // bypassed SKY_HTTP_DENY_PRIVATE entirely). Resolve+validate+pin + the
+        // per-redirect re-check via the shared helper, identical to Http.get/post.
+        let builder = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30));
+        let builder = match crate::sky_runtime::http_client::ssrf_apply(
+            builder,
+            &req.url,
+            req.followRedirects,
+            req.maxRedirects,
+        ) {
+            Ok(b) => b,
+            Err(msg) => return SkyResult::Err(msg.into()),
+        };
+        let client = match builder.build() {
             Ok(c) => c,
             Err(e) => return SkyResult::Err(format!("http.stream.open: client: {}", e).into()),
         };

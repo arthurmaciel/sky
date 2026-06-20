@@ -224,6 +224,70 @@ fn ssrf_check_url(url: &str) -> Result<(), String> {
     check_host_not_private(host)
 }
 
+/// Apply the SSRF deny-private guard to a `reqwest::ClientBuilder` for `url`.
+/// When `SKY_HTTP_DENY_PRIVATE` is set, validates the URL scheme + host, resolves
+/// to a vetted non-private `SocketAddr`, pins DNS to it (defeats DNS-rebinding),
+/// and installs a per-redirect-hop re-check. SHARED by every outbound request
+/// surface — the regular Http client, `Http.Stream.open`, the WebSocket client,
+/// the Email SES path — so the guard can NEVER be missing from a request path
+/// (the bug class this closes: a new path that built its own client without the
+/// check). When the guard is off, installs the caller's plain redirect policy.
+pub(crate) fn ssrf_apply(
+    mut builder: reqwest::ClientBuilder,
+    url: &str,
+    follow_redirects: bool,
+    max_redirects: i64,
+) -> Result<reqwest::ClientBuilder, String> {
+    let deny = ssrf_deny_private_enabled();
+    if deny {
+        let parsed = reqwest::Url::parse(url).map_err(|e| {
+            format!("http: blocked: invalid URL {:?}: {} (SKY_HTTP_DENY_PRIVATE)", url, e)
+        })?;
+        let scheme = parsed.scheme();
+        if scheme != "http" && scheme != "https" && scheme != "ws" && scheme != "wss" {
+            return Err(format!(
+                "http: blocked: scheme {:?} is not http/https/ws/wss (SKY_HTTP_DENY_PRIVATE)",
+                scheme
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "http: blocked: URL has no host (SKY_HTTP_DENY_PRIVATE)".to_string())?
+            .to_owned();
+        let addr = resolve_first_non_private_addr(&host)?;
+        builder = builder.resolve_to_addrs(host.as_str(), &[addr]);
+    }
+    builder = if follow_redirects {
+        if deny {
+            let max = max_redirects.max(0) as usize;
+            builder.redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= max {
+                    return attempt.error(format!("http: too many redirects (max {})", max));
+                }
+                if let Err(msg) = ssrf_check_url(attempt.url().as_str()) {
+                    return attempt.error(msg);
+                }
+                attempt.follow()
+            }))
+        } else {
+            builder.redirect(reqwest::redirect::Policy::limited(max_redirects.max(0) as usize))
+        }
+    } else {
+        builder.redirect(reqwest::redirect::Policy::none())
+    };
+    Ok(builder)
+}
+
+/// Validate a single URL against the deny-private guard (no client build) — for
+/// surfaces (WebSocket) that connect outside reqwest. No-op when the guard is off.
+pub(crate) fn ssrf_validate_url(url: &str) -> Result<(), String> {
+    if ssrf_deny_private_enabled() {
+        ssrf_check_url(url)
+    } else {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core request executor
 // ---------------------------------------------------------------------------

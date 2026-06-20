@@ -100,6 +100,13 @@ async fn do_connect<E: From<String> + Send + 'static>(
 ) -> SkyResult<E, i64> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
+    // SSRF guard: when SKY_HTTP_DENY_PRIVATE is set, reject a ws/wss URL whose host
+    // resolves to a private/loopback/link-local address BEFORE the handshake — the
+    // WebSocket surface previously connected with no deny-private check, so an
+    // attacker-controlled URL could reach internal services the Http client blocks.
+    if let Err(msg) = crate::sky_runtime::http_client::ssrf_validate_url(&url) {
+        return SkyResult::Err(msg.into());
+    }
     // Build the handshake request so custom headers (e.g. Authorization) from
     // connectWith's cfg.headers are sent.
     let mut req = match url.as_str().into_client_request() {

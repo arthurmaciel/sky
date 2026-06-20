@@ -93,13 +93,22 @@ pub fn decimal_div<E: From<String>>(a: Decimal, b: Decimal) -> SkyResult<E, Deci
     if b.0.is_zero() {
         return SkyResult::Err("Std.Decimal: divide by zero".to_string().into());
     }
-    SkyResult::Ok(Decimal(a.0 / b.0))
+    // checked_div, NOT the bare `/`: rust_decimal's `Div` panics ("Division
+    // overflowed") on 96-bit mantissa overflow during scale-alignment — a panic
+    // reachable from a well-typed `Std.Decimal.div`. Post zero-guard, `None` is
+    // overflow → saturate to the signed extreme (sign = sign(a) XOR sign(b)),
+    // matching decimal_add/sub/mul.
+    SkyResult::Ok(Decimal(a.0.checked_div(b.0).unwrap_or_else(|| {
+        if a.0.is_sign_negative() == b.0.is_sign_negative() { RD::MAX } else { RD::MIN }
+    })))
 }
 pub fn decimal_mod<E: From<String>>(a: Decimal, b: Decimal) -> SkyResult<E, Decimal> {
     if b.0.is_zero() {
         return SkyResult::Err("Std.Decimal: mod by zero".to_string().into());
     }
-    SkyResult::Ok(Decimal(a.0 % b.0))
+    // checked_rem, NOT the bare `%`: rust_decimal's `Rem` also panics on overflow.
+    // Post zero-guard, `None` is overflow → 0 (a sound saturating remainder).
+    SkyResult::Ok(Decimal(a.0.checked_rem(b.0).unwrap_or(RD::ZERO)))
 }
 pub fn decimal_neg(d: Decimal) -> Decimal { Decimal(-d.0) }
 pub fn decimal_abs(d: Decimal) -> Decimal { Decimal(d.0.abs()) }
@@ -166,7 +175,10 @@ pub fn decimal_sub_percent(pct: Decimal, base: Decimal) -> Decimal {
 #[inline]
 fn decimal_div_raw(a: Decimal, b: Decimal) -> Decimal {
     if b.0.is_zero() { return Decimal(RD::ZERO); }
-    Decimal(a.0 / b.0)
+    // checked_div (see decimal_div) — saturate on mantissa overflow, never panic.
+    Decimal(a.0.checked_div(b.0).unwrap_or_else(|| {
+        if a.0.is_sign_negative() == b.0.is_sign_negative() { RD::MAX } else { RD::MIN }
+    }))
 }
 
 // === formatWith — Sky source: formatWith thousandsSep decimalSep places d ===
