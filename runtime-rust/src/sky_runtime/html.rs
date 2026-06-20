@@ -172,6 +172,20 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                     Attribute::EventAttr(e) => events.push(e.name()),
                 }
             }
+            // <textarea> and <select> have NO `value` attribute in the HTML spec
+            // — a textarea's displayed value is its TEXT CONTENT; a select's is the
+            // `selected` <option>. Emitting `<textarea value="…">` renders EMPTY in
+            // every browser (and a server re-render would wipe the user's text). So
+            // strip the `value` attr here for both, and (textarea only) splice it
+            // back as escaped text content after the open tag when there are no
+            // explicit children. Mirrors Go `renderVNode` (live.go).
+            let mut textarea_value: Option<String> = None;
+            if tag == "textarea" || tag == "select" {
+                if let Some(pos) = pairs.iter().position(|(k, _)| *k == "value") {
+                    let (_, v) = pairs.remove(pos);
+                    textarea_value = Some(v);
+                }
+            }
             pairs.sort_by(|a, b| a.0.cmp(b.0));
             for (k, v) in &pairs {
                 s.push(' ');
@@ -209,6 +223,17 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                 return;
             }
             s.push('>');
+            // Textarea value-as-content (Go parity): write the captured value as
+            // escaped text content. Explicit children take precedence (a user who
+            // wrote `textarea [] [ text "hi" ]` keeps that), matching Go's
+            // `isTextarea && value != "" && len(children) == 0` guard.
+            if tag == "textarea" {
+                if let Some(v) = &textarea_value {
+                    if !v.is_empty() && kids.is_empty() {
+                        s.push_str(&escape_text(v));
+                    }
+                }
+            }
             for c in kids {
                 render_into(c, s);
             }
@@ -398,6 +423,38 @@ mod tests {
         assert!(s.contains("1 &lt; 2"));
         assert!(s.contains("<b>ok</b>"));
         assert!(s.contains("</div>"));
+    }
+
+    #[test]
+    fn textarea_value_renders_as_content_not_attr() {
+        // <textarea value="…"> renders EMPTY in browsers — the value must become
+        // the text content. Go parity (live.go renderVNode). Std.Ui.Input.multiline
+        // sets a `value` attr; the renderer must move it into the body.
+        let t: Html<()> = Html::HElement("textarea".into(),
+            vec![Attribute::Attr("value".into(), "fill the column".into())],
+            vec![]);
+        let s = render_html(&t);
+        assert!(!s.contains("value=\""), "value attr must be stripped from textarea: {s}");
+        assert!(s.contains(">fill the column</textarea>"), "value must be content: {s}");
+    }
+
+    #[test]
+    fn textarea_value_is_escaped_and_select_strips_value() {
+        // textarea content is HTML-escaped (XSS); explicit children win over the
+        // attr-derived value; <select> strips a redundant `value` attr (no content).
+        let ta: Html<()> = Html::HElement("textarea".into(),
+            vec![Attribute::Attr("value".into(), "a<b'c".into())], vec![]);
+        assert!(render_html(&ta).contains(">a&lt;b&#39;c</textarea>"), "{}", render_html(&ta));
+
+        let ta_kids: Html<()> = Html::HElement("textarea".into(),
+            vec![Attribute::Attr("value".into(), "ignored".into())],
+            vec![Html::HText("explicit".into())]);
+        let s = render_html(&ta_kids);
+        assert!(s.contains(">explicit</textarea>") && !s.contains("ignored"), "{s}");
+
+        let sel: Html<()> = Html::HElement("select".into(),
+            vec![Attribute::Attr("value".into(), "x".into())], vec![]);
+        assert!(!render_html(&sel).contains("value="), "select strips value: {}", render_html(&sel));
     }
 
     #[test]

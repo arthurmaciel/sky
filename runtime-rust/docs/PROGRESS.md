@@ -17,6 +17,39 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 01:30 — 26-ui-showcase Go≡Rust: textarea value→content (Rust fix); sparkline/heatmap = Go Math bug
+
+**Investigation.** Diffed the rendered `/` HTML of 26-ui-showcase on both backends.
+Three divergences, TWO distinct root causes:
+
+1. **`Input.multiline` text dropped (RUST BUG — fixed here).** Rust rendered
+   `<textarea … value="fill the column"></textarea>` — but `<textarea>` has no
+   `value` attribute in HTML; the value must be the TEXT CONTENT, so the browser
+   showed an empty box. Go strips `value` and splices it as content. Fixed
+   `html.rs render_into`: strip `value` from `<textarea>`/`<select>` attrs and
+   (textarea, no explicit children, non-empty) emit the escaped value as content —
+   mirrors Go `live.go renderVNode`. Now Rust emits `>fill the column</textarea>`.
+
+2. **sparkline + heatmap coordinates differ (GO BUG — Rust is correct).** Both use
+   `Math.min`/`Math.max` (typed `a -> a -> a`, "any comparable type") to compute
+   their value range. Go's `Math_min`/`Math_max` compare via `AsInt(a) < AsInt(b)`
+   — they TRUNCATE Floats to Int, so the range of `[0.4 … 1.3]` collapses to
+   `(0, 1)` and the sparkline path / heatmap cell scaling is wrong. Rust's
+   `math_min`/`math_max` are generic `T: PartialOrd` (`a <= b`), correct on `f64`.
+   Hand-computed range `(0.31, 1.39)` → first y `29.33`, last `2.67` = the RUST
+   output; Go's `18.67 … −5.33` matches the truncated `(−0.1, 1.1)` range. NOT a
+   Rust defect — needs a Go-backend fix (use `skyLessThan`, not `AsInt`); prepared
+   as an upstream PR (Rust unchanged).
+
+**Verified.** New `html.rs` unit tests (textarea value→content, escaping,
+explicit-children-win, select strips value) pass; `cargo check --features full`
+clean; 26-ui-showcase rebuilt on Rust now renders the textarea content.
+
+**Affected.** `runtime-rust/src/sky_runtime/html.rs` (textarea/select value
+handling + 2 regression tests).
+
+---
+
 ## 2026-06-20 00:30 — Root-cause + mitigate 12-skyvote / 17-skymon CI Playwright timeout (suggestion #6)
 
 **Root cause.** Both examples have CUSTOM browser scenarios in the shared
