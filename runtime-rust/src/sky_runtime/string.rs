@@ -179,6 +179,7 @@ pub fn string_from_list(chars: Vec<char>) -> String {
 ///   - exactly one "@" not at the start or end
 ///   - local part non-empty
 ///   - domain part non-empty and contains at least one "."
+///
 /// This intentionally stays as tight as Go's check (no regex crate needed).
 pub fn string_is_email(s: String) -> bool {
     // Reject anything that parses with a name component: Go only accepts

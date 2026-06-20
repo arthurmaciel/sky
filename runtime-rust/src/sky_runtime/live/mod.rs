@@ -62,10 +62,10 @@ const CLIENT_JS: &str = include_str!("client.js");
 
 /// Content-addressing for the client asset: computed ONCE at first access via
 /// `OnceLock`. Holds `(hex16, base64full)` where:
-///   - `hex16`    — first 16 hex chars of SHA-256(CLIENT_JS) → used in the URL
-///                  (`/_sky/client.<hex16>.js`) for cache-busting.
+///   - `hex16` — first 16 hex chars of SHA-256(CLIENT_JS) → used in the URL
+///     (`/_sky/client.<hex16>.js`) for cache-busting.
 ///   - `base64full` — standard base64 of the full 32-byte SHA-256 digest → the
-///                  `integrity="sha256-<base64full>"` SRI attribute value.
+///     `integrity="sha256-<base64full>"` SRI attribute value.
 ///
 /// Both are derived from the same digest, computed once and interned.
 /// The `sha2` crate is unconditionally available in every generated Live project
@@ -79,7 +79,7 @@ fn client_js_hashes() -> &'static (String, String) {
         use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
         let digest: [u8; 32] = Sha256::digest(CLIENT_JS.as_bytes()).into();
         let hex16: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-        let base64full = B64.encode(&digest);
+        let base64full = B64.encode(digest);
         (hex16, base64full)
     })
 }

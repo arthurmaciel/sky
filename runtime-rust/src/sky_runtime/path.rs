@@ -30,7 +30,10 @@ fn clean(path: &str) -> String {
     }
     let b = path.as_bytes();
     let n = b.len();
-    let rooted = b[0] == SEP;
+    // Total byte access (no `[]` indexing — clippy::indexing_slicing / no-panic
+    // gate). Out-of-range reads as `None`, never panics.
+    let at = |i: usize| -> Option<u8> { b.get(i).copied() };
+    let rooted = at(0) == Some(SEP);
     let mut out: Vec<u8> = Vec::with_capacity(n + 1);
     let mut r = 0usize;
     // `dotdot` is the index in `out` past which leading `..`s have been written
@@ -42,19 +45,19 @@ fn clean(path: &str) -> String {
         dotdot = 1;
     }
     while r < n {
-        if b[r] == SEP {
+        if at(r) == Some(SEP) {
             // empty path element → skip
             r += 1;
-        } else if b[r] == b'.' && (r + 1 == n || b[r + 1] == SEP) {
+        } else if at(r) == Some(b'.') && (r + 1 == n || at(r + 1) == Some(SEP)) {
             // `.` element → skip
             r += 1;
-        } else if b[r] == b'.' && r + 1 < n && b[r + 1] == b'.' && (r + 2 == n || b[r + 2] == SEP) {
+        } else if at(r) == Some(b'.') && at(r + 1) == Some(b'.') && (r + 2 == n || at(r + 2) == Some(SEP)) {
             // `..` element → back up
             r += 2;
             if out.len() > dotdot {
                 // pop the last element
                 let mut w = out.len() - 1;
-                while w > dotdot && out[w] != SEP {
+                while w > dotdot && out.get(w).copied() != Some(SEP) {
                     w -= 1;
                 }
                 out.truncate(w);
@@ -72,8 +75,10 @@ fn clean(path: &str) -> String {
             if (rooted && out.len() != 1) || (!rooted && !out.is_empty()) {
                 out.push(SEP);
             }
-            while r < n && b[r] != SEP {
-                out.push(b[r]);
+            while r < n && at(r) != Some(SEP) {
+                if let Some(c) = at(r) {
+                    out.push(c);
+                }
                 r += 1;
             }
         }
@@ -94,21 +99,21 @@ pub fn path_base(path: String) -> String {
     // strip trailing separators
     let b = path.as_bytes();
     let mut end = b.len();
-    while end > 0 && b[end - 1] == SEP {
+    while end > 0 && b.get(end - 1).copied() == Some(SEP) {
         end -= 1;
     }
     if end == 0 {
         // path was all separators
         return "/".to_string();
     }
-    let stripped = &path[..end];
+    let stripped = path.get(..end).unwrap_or(&path);
     let sb = stripped.as_bytes();
     // find the last separator
     let mut i = sb.len();
-    while i > 0 && sb[i - 1] != SEP {
+    while i > 0 && sb.get(i - 1).copied() != Some(SEP) {
         i -= 1;
     }
-    stripped[i..].to_string()
+    stripped.get(i..).unwrap_or("").to_string()
 }
 
 /// `Sky.Core.Path.dir : String -> String` — Go `filepath.Dir` (Unix).
@@ -117,12 +122,12 @@ pub fn path_base(path: String) -> String {
 pub fn path_dir(path: String) -> String {
     let b = path.as_bytes();
     let mut i = b.len();
-    while i > 0 && b[i - 1] != SEP {
+    while i > 0 && b.get(i - 1).copied() != Some(SEP) {
         i -= 1;
     }
     // path[..i] is everything up to and including the last separator (or "" when
     // there is none). Clean("") = ".".
-    clean(&path[..i])
+    clean(path.get(..i).unwrap_or(""))
 }
 
 /// `Sky.Core.Path.ext : String -> String` — Go `filepath.Ext` (Unix).
@@ -131,9 +136,11 @@ pub fn path_dir(path: String) -> String {
 pub fn path_ext(path: String) -> String {
     let b = path.as_bytes();
     let mut i = b.len();
-    while i > 0 && b[i - 1] != SEP {
-        if b[i - 1] == b'.' {
-            return path[i - 1..].to_string();
+    while i > 0 {
+        match b.get(i - 1).copied() {
+            Some(c) if c == SEP => break,
+            Some(b'.') => return path.get(i - 1..).unwrap_or("").to_string(),
+            _ => {}
         }
         i -= 1;
     }

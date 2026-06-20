@@ -150,7 +150,7 @@ pub fn bytes_to_base64(b: String) -> String {
 /// Sky `Bytes.fromHex : String -> Maybe Bytes` — Nothing on odd length or any
 /// non-hex digit; otherwise Just the decoded bytes as a Latin-1 byte-string.
 pub fn bytes_from_hex<E>(s: String) -> SkyMaybe<String> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return SkyMaybe::Nothing;
     }
     match hex::decode(&s) {

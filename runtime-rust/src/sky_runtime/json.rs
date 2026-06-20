@@ -353,7 +353,7 @@ pub fn decode_from_json_string<E: From<String> + 'static, T>(decoder: Decoder<E,
 pub fn curry1<A: 'static + Send, R: 'static + Send, F: Fn(A) -> R + Clone + Send + 'static>(f: F)
 -> Box<dyn Fn() -> Box<dyn FnOnce(A) -> R + Send> + Send>
 {
-    Box::new(move || { let f = f.clone(); Box::new(move |a| f(a)) })
+    Box::new(move || { let f = f.clone(); Box::new(f) })
 }
 pub fn curry2<A1: 'static + Send, A2: 'static + Send, R: 'static + Send, F: Fn(A1, A2) -> R + Clone + Send + 'static>(
     f: F,

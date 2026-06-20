@@ -230,7 +230,7 @@ impl SkyStringify for crate::sky_runtime::decimal::Decimal {
     // Reuse the canonical Decimal renderer (normalized, no trailing zeros) —
     // matches `Decimal.toString`. Total (no panic).
     fn sky_show(&self) -> String {
-        crate::sky_runtime::decimal::decimal_to_string(self.clone())
+        crate::sky_runtime::decimal::decimal_to_string(*self)
     }
 }
 
@@ -301,13 +301,14 @@ mod tests {
     // (a) A `String` field renders UNQUOTED via the SkyStringify arm.
     #[test] fn dispatch_string_unquoted() {
         let s = "hi".to_string();
-        assert_eq!((&Wrap(&s)).dispatch(), "hi");
+        assert_eq!(Wrap(&s).dispatch(), "hi");
     }
 
     // (b) A type that impls ONLY `Debug` (NOT SkyStringify) renders via the
     // Debug fallback — NO compile error (this is the whole point: total by
     // construction). Mirrors a runtime payload type like `http_stream::ChunkEvent`.
     #[derive(Debug)]
+    #[allow(dead_code)] // read only via the derived Debug (the test's whole point)
     struct OnlyDebug { x: i64 }
 
     #[test] fn dispatch_debug_fallback() {
@@ -322,7 +323,7 @@ mod tests {
         fn sky_show(&self) -> String {
             // Exactly what codegen now emits per field.
             format!("{{{} {}}}",
-                (&Wrap(&self.name)).dispatch(),
+                Wrap(&self.name).dispatch(),
                 (&Wrap(&self.debug_only)).dispatch())
         }
     }

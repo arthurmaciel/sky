@@ -25,17 +25,15 @@ pub struct CsvDoc {
 /// delimiter; the empty case silently falls back to `,`, which is wrong for
 /// callers that passed an explicit delimiter. Return `Err` for both cases.
 fn validated_delimiter<E: From<String>>(delim: &str) -> SkyResult<E, u8> {
-    let bytes = delim.as_bytes();
-    if bytes.len() == 1 && bytes[0].is_ascii() {
-        SkyResult::Ok(bytes[0])
-    } else {
-        SkyResult::Err(
+    match delim.as_bytes() {
+        [b] if b.is_ascii() => SkyResult::Ok(*b),
+        _ => SkyResult::Err(
             format!(
                 "Csv: delimiter must be a single ASCII byte, got {:?}",
                 delim
             )
             .into(),
-        )
+        ),
     }
 }
 

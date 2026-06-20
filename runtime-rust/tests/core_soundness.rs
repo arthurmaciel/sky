@@ -165,7 +165,7 @@ fn result_traverse_short_circuits_on_first_err() {
 #[test]
 fn result_traverse_empty_is_ok_empty() {
     let r = sky_runtime::core::result_traverse::<i64, i64, SkyError>(
-        |x| SkyResult::Ok(x),
+        SkyResult::Ok,
         vec![],
     );
     assert_eq!(r.with_default(vec![99]), Vec::<i64>::new());
@@ -209,7 +209,7 @@ proptest! {
     #[test]
     fn prop_result_traverse_preserves_length_when_all_ok(xs in proptest::collection::vec(any::<i64>(), 0..50)) {
         let n = xs.len();
-        let r = sky_runtime::core::result_traverse::<i64, i64, SkyError>(|x| SkyResult::Ok(x), xs);
+        let r = sky_runtime::core::result_traverse::<i64, i64, SkyError>(SkyResult::Ok, xs);
         prop_assert_eq!(r.with_default(vec![]).len(), n);
     }
 }

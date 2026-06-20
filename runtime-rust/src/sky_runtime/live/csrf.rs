@@ -176,7 +176,7 @@ fn origin_mismatch(headers: &HeaderMap) -> bool {
         .unwrap_or("");
     // Compare the Origin's host[:port] to the request Host. Origin is
     // `scheme://host[:port]`; strip the scheme.
-    let origin_host = origin.splitn(2, "://").nth(1).unwrap_or(origin);
+    let origin_host = origin.split_once("://").map(|x| x.1).unwrap_or(origin);
     !host.is_empty() && origin_host != host
 }
 

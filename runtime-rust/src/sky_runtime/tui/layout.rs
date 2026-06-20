@@ -1028,7 +1028,8 @@ fn render_input<M: Clone>(
             if total > inner_rows {
                 let cur_line = cursor_marker.map(|(l, _)| l).unwrap_or(0);
                 let start = cur_line.saturating_sub(inner_rows - 1).min(total - inner_rows);
-                block.lines = block.lines[start..start + inner_rows].to_vec();
+                let end = (start + inner_rows).min(block.lines.len());
+                block.lines = block.lines.get(start..end).map(<[Vec<Run>]>::to_vec).unwrap_or_default();
             } else {
                 // Pad with blank track rows so the box keeps its fixed height.
                 let track_w = block.width();
@@ -1259,7 +1260,8 @@ fn render_node<M: Clone>(
                             content_avail
                         };
                         for (i, r) in children.iter_mut().enumerate() {
-                            let off = halign_offset(aligns[i].0, target_w.saturating_sub(r.block.width()));
+                            let ax = aligns.get(i).and_then(|a| a.0);
+                            let off = halign_offset(ax, target_w.saturating_sub(r.block.width()));
                             pad_left_block(r, off, w.style.bg);
                         }
                     }
@@ -1267,7 +1269,8 @@ fn render_node<M: Clone>(
                         let target_h = children.iter().map(|r| r.block.height()).max().unwrap_or(0);
                         for (i, r) in children.iter_mut().enumerate() {
                             let cw = r.block.width();
-                            let off = valign_offset(aligns[i].1, target_h.saturating_sub(r.block.height()));
+                            let ay = aligns.get(i).and_then(|a| a.1);
+                            let off = valign_offset(ay, target_h.saturating_sub(r.block.height()));
                             pad_top_block(r, off, cw, w.style.bg);
                         }
                     }
@@ -1738,39 +1741,40 @@ fn distribute_col_fill(
     if n == 0 {
         return;
     }
-    let fill_idx: Vec<usize> = (0..n).filter(|i| specs.get(*i).copied().flatten().is_some()).collect();
+    let is_fill = |i: usize| specs.get(i).copied().flatten().is_some();
+    let portion = |i: usize| specs.get(i).copied().flatten().map_or(1usize, |(p, _, _)| p.max(1) as usize);
+    let fill_idx: Vec<usize> = (0..n).filter(|i| is_fill(*i)).collect();
     if fill_idx.is_empty() {
         return;
     }
     let gaps = gap.saturating_mul(n.saturating_sub(1));
-    let fixed: usize = (0..n)
-        .filter(|i| specs.get(*i).copied().flatten().is_none())
-        .map(|i| children[i].block.height())
+    let fixed: usize = children
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !is_fill(*i))
+        .map(|(_, r)| r.block.height())
         .sum();
     let leftover = total_h.saturating_sub(fixed + gaps);
-    let portion_total: usize = fill_idx
-        .iter()
-        .map(|i| specs[*i].map_or(1, |(p, _, _)| p.max(1) as usize))
-        .sum::<usize>()
-        .max(1);
+    let portion_total: usize = fill_idx.iter().map(|i| portion(*i)).sum::<usize>().max(1);
+    let last = fill_idx.last().copied().unwrap_or(0);
     let mut used = 0usize;
-    let last = *fill_idx.last().unwrap_or(&0);
     for &i in &fill_idx {
-        let p = specs[i].map_or(1, |(p, _, _)| p.max(1) as usize);
         let share = if i == last {
             leftover.saturating_sub(used)
         } else {
-            leftover * p / portion_total
+            leftover * portion(i) / portion_total
         };
         used += share;
-        let cw = children[i].block.width();
-        let cur = children[i].block.height();
-        if cur > share {
-            children[i].block.lines.truncate(share.max(1));
-        } else {
-            let blank = vec![Run { text: " ".repeat(cw), style: Style { bg, ..Style::default() } }];
-            while children[i].block.lines.len() < share {
-                children[i].block.lines.push(blank.clone());
+        if let Some(child) = children.get_mut(i) {
+            let cw = child.block.width();
+            let cur = child.block.height();
+            if cur > share {
+                child.block.lines.truncate(share.max(1));
+            } else {
+                let blank = vec![Run { text: " ".repeat(cw), style: Style { bg, ..Style::default() } }];
+                while child.block.lines.len() < share {
+                    child.block.lines.push(blank.clone());
+                }
             }
         }
     }

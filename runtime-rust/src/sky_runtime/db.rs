@@ -350,10 +350,7 @@ pub fn db_decode_nullable<E: From<String> + 'static, T: Send + 'static>(
         Box::new(move |v| {
             if gate_fields.is_empty() {
                 // Leaf decoder with no named fields — gate on the current value itself.
-                match v {
-                    JsonVal::Null => return decode_ok(SkyMaybe::Nothing),
-                    _ => {}
-                }
+                if v == &JsonVal::Null { return decode_ok(SkyMaybe::Nothing) }
             } else {
                 // Gate on every field the inner decoder reads.
                 for col in &gate_fields {
@@ -405,6 +402,7 @@ pub fn db_decode_required<E: From<String> + 'static, A: 'static + Send, B: 'stat
 /// Implemented applicatively: wrap `fieldDec` so that:
 /// - Column absent or `JsonVal::Null` → `Ok(fallback.clone())`
 /// - Column present + non-null → `fieldDec` decode result (Err on type mismatch)
+///
 /// Then `decode_and_map` applies the ctor.
 ///
 /// Totality: NULL/absent → Ok(fallback); present but bad type → Err; ctor Err → Err.

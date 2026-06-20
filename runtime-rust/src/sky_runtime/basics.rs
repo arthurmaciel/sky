@@ -6,6 +6,7 @@
 /// Mirrors Go's `Basics_modByT` exactly:
 ///   - divisor == 0  → 0
 ///   - r = n % divisor; if r < 0 { r += divisor }
+///
 /// Adjust fires ONLY when r < 0 (irrespective of divisor sign) — Go parity.
 ///
 /// Overflow guard: `i64::MIN % -1` is undefined behaviour in Rust debug/release
