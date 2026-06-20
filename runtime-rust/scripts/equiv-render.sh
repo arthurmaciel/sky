@@ -48,9 +48,13 @@ free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0)
 # rm -rf's sky-out which would clobber it). Returns 1 on either build failure.
 build_both() {
   local d="$1"
+  # Clear caches before EACH backend — building go then rust in the same dir
+  # otherwise lets the rust build's "source unchanged" short-circuit reuse the
+  # go build's .skycache, so sky-out/rust/ is never generated (cargo: no manifest).
   ( cd "$d" && rm -rf sky-out .skycache .skydeps ) >/dev/null 2>&1
   ( cd "$d" && timeout 300 "$SKY" build --backend go src/Main.sky ) >"$HIST/go-build.log" 2>&1 || { echo "  go build failed (see $HIST/go-build.log)"; return 1; }
   GO_BIN="$HIST/$(basename "$d").gobin"; cp -f "$d/sky-out/app" "$GO_BIN" || return 1
+  ( cd "$d" && rm -rf sky-out .skycache .skydeps ) >/dev/null 2>&1
   ( cd "$d" && timeout 600 "$SKY" build --backend rust src/Main.sky ) >"$HIST/rust-build.log" 2>&1 || { echo "  rust build failed (see $HIST/rust-build.log)"; return 1; }
   RUST_BIN="$(find "${CARGO_TARGET_DIR:-$d/sky-out/rust/target}/debug" -maxdepth 1 -type f -executable -name sky-app 2>/dev/null | head -1)"
   [ -x "$RUST_BIN" ] || { echo "  rust binary not found"; return 1; }

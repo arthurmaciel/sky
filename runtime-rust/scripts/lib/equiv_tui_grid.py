@@ -25,7 +25,18 @@ except ImportError:
 
 def style_tag(cell):
     """Compact per-cell style signature: flags + fg/bg. 'default' bg/fg collapse
-    to '-' so an unstyled cell is just '------'."""
+    to '-' so an unstyled cell is just '------'.
+
+    A BLANK cell (space / empty) has no glyph, so its foreground colour AND text
+    attributes (bold/italic/underline/strike) are INVISIBLE — only the background
+    is observable. We collapse those to default on a blank cell so the comparison
+    is by what's actually seen, not redundant style bytes one backend happens to
+    set on empty cells. (`reverse` keeps fg/bg both relevant — it swaps them.)"""
+    bg = cell.bg if cell.bg and cell.bg != 'default' else '-'
+    ch = cell.data or ' '
+    blank = ch == ' ' and not cell.reverse
+    if blank:
+        return '-----/-/%s' % bg
     flags = ''
     flags += 'b' if cell.bold else '-'
     flags += 'i' if cell.italics else '-'
@@ -33,7 +44,6 @@ def style_tag(cell):
     flags += 's' if getattr(cell, 'strikethrough', False) else '-'
     flags += 'r' if cell.reverse else '-'
     fg = cell.fg if cell.fg and cell.fg != 'default' else '-'
-    bg = cell.bg if cell.bg and cell.bg != 'default' else '-'
     return '%s/%s/%s' % (flags, fg, bg)
 
 
