@@ -12,7 +12,7 @@
 ## Contents
 
 - [Introduction](#introduction)
-  - [Support](#how-to-support)
+  - [Development support](#development-support)
 - [Getting started](#getting-started)
   - [Linux](#linux)
   - [macOS](#macos)
@@ -55,15 +55,16 @@ If you want, get to know more about the project **[principles](docs/PRINCIPLES.m
 
 ---
 
-### How to support
+### Development support
 
-Sky and its default Go backend are heavily and quickly developed by its author. 
-Keeping the Rust backend up-to-date is difficult. 
+Today the Rust backend reaches about 98% behavioral parity with the Go reference.
 
-I'd love to have your [support](https://ko-fi.com/arthur_maciel??g=1) :)
+But Sky and its default Go backend are heavily and quickly developed by its author. 
+So keeping the Rust backend up-to-date is complex. 
 
-At the moment the Rust backend reaches almost full behavioral parity with the Go reference (95-99%). 
-But usually **expect a one-month delay to Go backend parity**. With your support we can make it faster!
+Usually **expect a one-month delay to Go backend parity** at every update. 
+
+With your [support](https://ko-fi.com/arthur_maciel??g=1) we can make it faster! :)
 
 ---
 
