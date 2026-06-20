@@ -1,0 +1,24 @@
+module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Std.Log exposing (println)
+
+type alias Point = { x : Int, y : Int }
+
+sumP : Point -> Int
+sumP p =
+    let
+        addXY = \{ x, y } -> x + y
+    in
+    addXY p
+
+mapped : List Int
+mapped =
+    List.map (\{ x, y } -> x * y) [ { x = 2, y = 5 }, { x = 3, y = 4 } ]
+
+total : Int
+total =
+    List.foldl (\a b -> a + b) 0 mapped
+
+main =
+    let _ = println (String.fromInt (sumP { x = 10, y = 32 }))
+    in println (String.fromInt total)

@@ -129,7 +129,7 @@ substVar ctx name inline = go
         Can.List es -> "vec![" ++ intercalate ", " (map go es) ++ "]"
         Can.Negate e -> "-" ++ go e
         Can.Lambda params body ->
-            "|" ++ intercalate ", " (map patternToRustParam params) ++ "| { " ++ go body ++ " }"
+            "|" ++ intercalate ", " (map (recordParamOrPlain ctx) params) ++ "| { " ++ go body ++ " }"
         Can.Call fn args ->
             let fs = go fn
                 isPrintln = "println" `isSuffixOf` fs
@@ -160,10 +160,10 @@ substVar ctx name inline = go
               , not (null (taskExprInnerType (ecSolvedTypes ctx) dBody)) =
                   "task_run::<SkyError, _>(" ++ go dBody ++ "); "
             goDef (Can.Def (Ann.At _ n) [] dBody) = "let " ++ n ++ " = " ++ go dBody ++ "; "
-            goDef (Can.Def (Ann.At _ n) ps dBody) = "let " ++ n ++ " = |" ++ intercalate ", " (map patternToRustParam ps) ++ "| { " ++ go dBody ++ " }; "
+            goDef (Can.Def (Ann.At _ n) ps dBody) = "let " ++ n ++ " = |" ++ intercalate ", " (map (recordParamOrPlain ctx) ps) ++ "| { " ++ go dBody ++ " }; "
             goDef _ = error "Builder.Rust.substVar.goDef: unsupported Can.Def variant"
         Can.LetRec defs body ->
-            let strs = map (\(Can.Def (Ann.At _ n) ps d) -> n ++ " = |" ++ intercalate ", " (map patternToRustParam ps) ++ "| { " ++ go d ++ " }") defs
+            let strs = map (\(Can.Def (Ann.At _ n) ps d) -> n ++ " = |" ++ intercalate ", " (map (recordParamOrPlain ctx) ps) ++ "| { " ++ go d ++ " }") defs
             in "let mut " ++ intercalate "; let mut " strs ++ "; " ++ go body
         Can.LetDestruct pat e0 body ->
             "let " ++ patternToMatchString (ecRecordMap ctx) pat ++ " = " ++ go e0 ++ "; " ++ go body
@@ -622,6 +622,10 @@ argToRustString ctx noCloneFn (Ann.At _ a) = case a of
                 -- a still-generic element stays bare for Rust to infer from the
                 -- sibling collection arg (List.map/filter unchanged).
                 | Just s <- inferParamRustTypeFromRegions ctx pn body = patternToRustParam p ++ ": " ++ s
+            -- A record-destructure element param (`List.map (\{x,y} -> …) pts`)
+            -- becomes a Rust struct pattern binding the fields (else `_` drops
+            -- them → E0425).
+            annotPsIx _ p@(Ann.At _ (Can.PRecord _)) = recordParamOrPlain ctx p
             annotPsIx _ p = patternToRustParam p ++ annot
             psStr = intercalate ", " (zipWith annotPsIx [0..] ps)
             -- Each task-continuation closure's return inner type must come from
@@ -3367,6 +3371,19 @@ matchStructByFieldsE recordMap fieldSet
 -- sql, vec![…, ts])` → `|db: Db, ts: String|`). The region-type approach failed
 -- (solver records expression, not pattern, regions). HOF args route through
 -- argToRustString, so List.map/filter closures don't reach here and stay bare.
+-- | A lambda / closure param that is a RECORD pattern (`\{ x, y } -> …`) renders
+-- as a Rust struct pattern `Struct { x, y, .. }` so the field binders are in
+-- scope (patternToRustParam would drop them to `_` → E0425). The struct name is
+-- recovered by field-set match (matchStructByFieldsE); `..` tolerates a
+-- subset-record param and the struct's type args are inferred. Anything else
+-- (and an unknown record shape) delegates to patternToRustParam unchanged.
+recordParamOrPlain :: EmitCtx -> Can.Pattern -> String
+recordParamOrPlain ctx p@(Ann.At _ (Can.PRecord fields))
+    | Just structName <- matchStructByFieldsE (ecRecordMap ctx) (Set.fromList fields)
+    = structName ++ " { " ++ intercalate ", " (map rustSafeIdent fields) ++ ", .. }"
+    | otherwise = patternToRustParam p
+recordParamOrPlain _ p = patternToRustParam p
+
 annotClosureParam :: EmitCtx -> Can.Expr -> Can.Pattern -> String
 annotClosureParam ctx body p@(Ann.At _ (Can.PVar pn)) =
     -- Body-driven kernel-flow inference first; then the field-set struct match
@@ -3391,6 +3408,16 @@ annotClosureParam ctx body p@(Ann.At _ (Can.PVar pn)) =
             Nothing -> case inferParamRustTypeFromRegions ctx pn body of
                 Just t  -> patternToRustParam p ++ ": " ++ t
                 Nothing -> patternToRustParam p
+-- A RECORD-destructure param (`\{ x, y } -> …`) cannot render as `_` —
+-- patternToRustParam dropped the field binders, so the body's `x`/`y` were
+-- undefined (E0425). Emit a Rust STRUCT PATTERN `Struct { x, y, .. }` instead:
+-- field-shorthand binds each field as a local (matching the body's
+-- rustSafeIdent'd refs), `..` tolerates a subset-record param, and the struct's
+-- type args are inferred. The struct NAME is recovered by field-set match
+-- (matchStructByFieldsE — the same heuristic that types a PVar record closure
+-- param). If no struct matches (unknown record shape) fall back to `_` (no
+-- worse than before).
+annotClosureParam ctx _ p@(Ann.At _ (Can.PRecord _)) = recordParamOrPlain ctx p
 annotClosureParam _ _ p = patternToRustParam p
 
 -- | Recover a closure param's Rust type from the solver's per-region type map by
