@@ -259,6 +259,9 @@ pub fn string_pad_left(n: i64, ch: char, s: String) -> String {
     if rune_count >= n {
         return s;
     }
+    // Bound the pad width: n is caller-controlled; a huge n would OOM on
+    // with_capacity + the push loop. Cap the padded width at 16M chars.
+    if n > 16_000_000 { return s; }
     let pad_count = (n - rune_count) as usize;
     let mut out = String::with_capacity(s.len() + pad_count);
     for _ in 0..pad_count {
@@ -280,6 +283,9 @@ pub fn string_pad_right(n: i64, ch: char, s: String) -> String {
     if rune_count >= n {
         return s;
     }
+    // Bound the pad width: n is caller-controlled; a huge n would OOM on
+    // with_capacity + the push loop. Cap the padded width at 16M chars.
+    if n > 16_000_000 { return s; }
     let pad_count = (n - rune_count) as usize;
     let mut out = String::with_capacity(s.len() + pad_count);
     out.push_str(&s);

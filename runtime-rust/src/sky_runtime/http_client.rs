@@ -111,6 +111,12 @@ fn is_private_ip(ip: IpAddr) -> bool {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 return is_private_ip(IpAddr::V4(v4));
             }
+            // v4-compatible (deprecated): ::a.b.c.d, e.g. ::10.0.0.1 still routes to
+            // the embedded private IPv4 — to_ipv4() covers both compat + mapped.
+            #[allow(deprecated)]
+            if let Some(v4) = v6.to_ipv4() {
+                return is_private_ip(IpAddr::V4(v4));
+            }
             false
         }
     }

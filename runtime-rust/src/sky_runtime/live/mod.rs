@@ -836,7 +836,10 @@ where
                     let params = (st.param_resolver)(uri.path());
                     let req = req::live_req(&method, &uri, &headers, params);
                     let (m, c) = (st.init)(req);
-                    let s = cookie_sid.unwrap_or_else(new_sid);
+                    // Session fixation guard: a store MISS means this sid is NOT a
+                    // known session, so NEVER adopt the client-supplied cookie value
+                    // — always mint a fresh sid. (A HIT path keeps cookie_sid.)
+                    let s = new_sid();
                     (s, (st.route_resolver)(m, uri.path()), c)
                 }
             };
