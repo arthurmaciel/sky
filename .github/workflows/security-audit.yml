@@ -92,6 +92,18 @@ jobs:
         with:
           components: clippy
 
+      # cargo-audit + cargo-deny (prebuilt binaries, seconds — NOT a from-source
+      # `cargo install`). quality-audit.sh's §6d SUPPLY tier is guarded by
+      # `command -v`, so without these it silently skips the CVE/supply-chain scan
+      # — the gap that made CI weaker than a local run. Installing them makes §6d
+      # actually run on CI. It stays ADVISORY (surfaced in the report/summary,
+      # never flips the hard gate): the known rsa-Marvin advisory has no upstream
+      # fix, so a gating CVE check would pin CI red forever.
+      - name: Install cargo-audit + cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
       - name: Cache cargo target
         uses: actions/cache@v4
         with:
