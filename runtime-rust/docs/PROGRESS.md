@@ -17,6 +17,39 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 19:00 — Sky.Tui whole-library correctness sweep (audit → 11 fix batches)
+
+Drove the 22-finding `tui-correctness-audit` catalog to closure across 11
+verified batches, all in `tui/layout.rs`. Each: `cargo test --features full tui`
+green (52 unit tests); final consolidated pyte grid-verify on
+`24-tui-kitchen-sink` confirms every fix renders + no regression.
+
+| # | Fix | audit |
+|---|---|---|
+| 1 | NO_COLOR honoured; masked-input caret tracks st.cursor | #9, #11 |
+| 2 | alignment centerX/Y, alignLeft/Right/Top/Bottom (was all no-op) | #3 |
+| 3 | fixed-height boxes Ui.height px/vh/min/max (apply_self_height) | #1, #15 |
+| 4 | bg-coloured gaps (vstack/hstack); transparent/alpha-0 bg (bg_of) | #5, #10 |
+| 5 | Region heading bold; Font.overline (SGR 53) | #8, #19 |
+| 6 | Ui.html raw text render; per-side borders (Border.widthEach) | #22, #6 |
+| 7 | Font text-align center/right | #7 |
+| 8 | nearby overlays above/below/onLeft/onRight/inFront/behind | #12, #16 |
+| 9 | explicit grid tracks (Grid.columns/tracks px/fr/auto) + grid gap | #13, #21 |
+| 10 | height-fill distribution in fixed-height columns | #2, #4 |
+| 11 | Border.rounded corners (╭╮╰╯) | #18 |
+
+**Dispositioned (correct as-is for a terminal, not a defect):**
+- clip-to-fixed-dimension (#14) — already covered by apply_self_height (height
+  clip) + set_width (width clip); the interactive scrollbar *indicator* /
+  scroll-within-subregion is beyond the whole-screen scroll model (out of scope).
+- Border.shadow/glow/inset-shadow (#18), Background.image/linearGradient (#20) —
+  cannot render in cells; SILENTLY degraded on purpose (a stderr warn mid-TUI
+  corrupts the live display, so silence is the correct terminal behaviour).
+
+**Affected:** `runtime-rust/src/sky_runtime/tui/layout.rs`.
+
+---
+
 ## 2026-06-20 17:30 — Sky.Tui kitchen-sink render fixes + whole-library correctness audit
 
 Fixed 5 Sky.Tui render bugs in `tui/layout.rs` (correct Std.Ui layout, NOT
