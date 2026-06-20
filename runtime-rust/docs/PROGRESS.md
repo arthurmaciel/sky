@@ -17,6 +17,35 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-20 17:30 — Sky.Tui kitchen-sink render fixes + whole-library correctness audit
+
+Fixed 5 Sky.Tui render bugs in `tui/layout.rs` (correct Std.Ui layout, NOT
+Go-mirror — several are wrong in Go too). Verified via the pyte styled-grid
+capture (`equiv-render.sh tui 24-tui-kitchen-sink`). 52 tui unit tests green.
+
+- **radio** — `checked` now detected for the `value=val-when-selected` idiom
+  (checked = `checked` attr OR non-empty/non-`false` value) → selected draws `●`
+  (was always `○`; onClick already fired — only the visual was dead).
+- **slider** — track width follows `Ui.width` (was fixed 12) + thumb inset to
+  `[1, width-2]` so the `├`/`┤` end-glyphs never overwrite it (the "ball vanishes
+  at the extremes" bug).
+- **multiline** — honours fixed `Ui.height (px)`: clip+scroll window around the
+  cursor, else pad with track rows; no longer grows unbounded with lines.
+- **input border** — bordered inputs draw a real `┌─┐` frame via a new shared
+  `frame_rendered` helper (extracted from `apply_border`); was suppressed.
+- **border style** — `Ui.style "border-style" "dashed"|"dotted"` now reaches the
+  renderer (`AttrStyle` arm) → dashed `┄┆` / dotted `┈┊` (were all solid).
+
+In flight: a read-only diagnostic swarm (`tui-correctness-audit` workflow, 10
+parallel area audits — sizing / spacing / alignment / borders / text-wrap /
+color-bg / inputs-focus / nearby-overlays / grid / scroll-clip / misc) building a
+deduped bug catalog for the broader "fix the TUI library completely" goal; fixes
+to follow sequentially (single-file `layout.rs` → no parallel fixers).
+
+**Affected:** `runtime-rust/src/sky_runtime/tui/layout.rs`.
+
+---
+
 ## 2026-06-20 16:00 — Codegen: generic self-recursive ADT boxing (E0072) FIXED; record-destructure lambda param confirmed
 
 Confirmed two audit codegen items with real repro fixtures (TDD), fixed one,
