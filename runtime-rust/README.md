@@ -1,7 +1,13 @@
 # Sky Rust backend
 
 ```
-ATTENTION: the Rust backend is still **experimental**. Don't use it for production yet.
+ATTENTION:
+
+The Rust backend is **experimental** and **not supported** by the Sky project.
+
+All the bugs, incompleteness and vulnerabilites are my sole responsability.
+
+Don't use it for production yet.
 ```
 ---
 
@@ -10,7 +16,7 @@ ATTENTION: the Rust backend is still **experimental**. Don't use it for producti
 Sky is an awesome language! Industrial-grade code and utilities, a really nice author
 and a broad vision towards the future.
 
-As I have been learning Rust, I thought about implementing a new **experimental** 
+As I have been learning Rust, I thought about implementing a new experimental
 backend with it. 
 
 Goals:
@@ -42,15 +48,20 @@ Where Rust implements a mechanism differently from Go, the divergence is recorde
 ## Getting started
 
 The Rust backend compiles Sky source to a Rust program, then to a native binary
-via `cargo`. This guide takes you from a clean machine to **running every example
-in this repo** (except the Go-FFI ones — those need the default Go backend). You
-pick the Rust backend by adding `--backend rust` to any `sky` command; that's the
-only flag a newcomer needs. (Cross-compiling to another platform uses
+via `cargo`. 
+
+This guide takes you from a clean machine to **running every example
+in this repo** (except the Go-FFI ones — those need the default Go backend). 
+
+You pick the Rust backend by adding `--backend rust` to any `sky` command; that's the
+only flag a newcomer needs. 
+
+Cross-compiling to another platform uses
 `--target <triple>` — covered in *Static & cross compilation* below; ignore it for
-now.)
+now.
 
 Running the examples is **identical on every OS** — only the one-time setup
-differs. Read the subsection for your OS, then jump to *Running the examples*.
+differs. Read the subsection for your OS, then jump to *[Clone the repo](#clone-the-repo-all-oses)*.
 
 ### Linux
 
@@ -120,8 +131,8 @@ System libraries:
 - **Sky.Webview** works natively — WKWebView is built into macOS, nothing to
   install.
 - **Sky.Tui** needs only a real terminal (Terminal.app / iTerm2).
-- `musl-cross` is only needed for static *cross*-builds to Linux (see *Static &
-  cross compilation*):
+- `musl-cross` is only needed for static *cross*-builds to Linux (see *[Static &
+  cross compilation](#static--cross-compilation))* ):
 
 ```bash
 # Only for static cross-builds to Linux from macOS:
