@@ -18,6 +18,51 @@ has to keep up.
 integration build is green**, OR explicitly **deferred with a reason + date**.
 "Authored a fix" ≠ "fixed".
 
+## Modes
+
+Two modes share **one mechanism** (the loop, the deterministic tier, the
+specialist re-pass, the verification gates, the anti-race fix protocol, the
+ledger — everything below). They differ only in **scope** and **how many tokens
+they spend per file**. The default is cost-bounded; exhaustive is opt-in for when
+tokens are plentiful and you want maximum depth on demand.
+
+| | **cost-effective** (default) | **tokens-available / exhaustive** (opt-in) |
+|---|---|---|
+| **Trigger** | nothing / `mode=cost-effective` | `mode=exhaustive` (aliases `tokens-available`, `deep`); `budget=med\|high\|max` scales the depth knobs |
+| **Scope** | delta only — files changed since their `Last audited`, **with** the audit's-own-fix exclusion (§1) | **ALL in-boundary files**, leaf-first; **ignores** delta-scoping **and** the audit's-own-fix exclusion (re-reads even files whose only change was a prior fix) |
+| **Deterministic tier (§1b)** | first, free, seeds shortlist | **same** — runs first; its hits seed the exhaustive shortlist too |
+| **Broad sweep (§3)** | 1 generalist agent/file, six principles at once | **same** breadth pass over the full set |
+| **Specialist pass (second pass)** | high-risk subset, 1 adversarial agent/file | **deepened** — see knobs below |
+| **Cost vs default** | 1× | **~5–12×** (scales with `budget`; capped so it terminates) |
+| **Same invariants** | ✅ | ✅ — deterministic-tier-first · anti-race fix · build-gate before ✅ · ledger recording · boundary discipline (Go / `app/` / `Main.hs` out) all unchanged |
+
+### Exhaustive depth knobs — what each extra token *buys*
+
+The point of exhaustive mode is **not re-reading once more** — it is spending the
+budget on independent perspectives + adversarial verification + iteration until
+the high-risk set stops yielding. Each knob is mapped to the **finding-class a
+single broad-sweep pass misses**; scale each with `budget` up to its cap.
+
+| Knob | What it does | Finding-class it catches (that single-pass misses) | Scale (med → max) | Cap |
+|---|---|---|---|---|
+| **Perspective-diverse lenses** | per high-risk file, fan out N specialists each with ONE lens — `injection` / `authz` / `crypto-timing` / `memory-safety+UB` / `DoS+resource` — instead of one generalist | the *outranking* principle a six-at-once generalist under-weights (e.g. the `console.rs` Bearer timing oracle the broad sweep skimmed past) | 2 → 5 lenses | 5 (the lens set) |
+| **Adversarial N-vote** | each candidate finding is re-judged by N independent skeptics; **majority-refute kills it** | false positives that survive ONE skeptic — e.g. a "missing" check actually applied at a middleware layer | 3 → 5 votes | 5 (odd, to break ties) |
+| **Loop-until-dry** | re-sweep the high-risk set until **K consecutive rounds find nothing new** (a fix reshapes a file → new round) | second-order issues unlocked only *after* an earlier fix changes the file — which delta-scoped runs never revisit | K = 1 → 3 | max 5 rounds total |
+| **Completeness critic** | one final read-only agent asks "what modality / trust boundary / file-class did we NOT cover?" against the boundary inventory | an entire untouched class — a boundary nobody was assigned a lens for | always on | 1 pass |
+
+Confirmed findings (survived the N-vote) flow into the **same** step-4 fix loop
+(anti-race + build-gate) and the ledger. A clean verdict from a lens is recorded
+as `—`, same as the default — exhaustive depth makes a `—` *more* trustworthy,
+never an excuse to invent findings.
+
+### Cost shape & budget scaling
+
+Rough multiplier vs default ≈ `lenses × votes` on the high-risk subset, repeated
+≤ rounds, plus one critic. `budget=med` ≈ 5×, `budget=high` ≈ 8×, `budget=max` ≈
+12×. The caps (5 lenses, 5 votes, 5 rounds) guarantee termination regardless of
+budget — never an unbounded loop. Below the high-risk subset, the broad sweep is
+still 1 agent/file, so the multiplier applies to ~15-20 files, not all ~130.
+
 ## When to use / not
 
 - **Use:** before a release; after a large change / merge / upstream sync; on a
@@ -105,6 +150,10 @@ codegen-that-emits-code** (typically ~15-20 files, not all 130).
   run found both.
 - Confirmed findings flow into the same step-4 fix loop (anti-race + build-gate)
   and the ledger; an exploit that survives an *independent* skeptic is real.
+- **Exhaustive mode deepens THIS pass** (not a separate procedure): it swaps the
+  single adversarial agent for the perspective-lenses + N-vote + loop-until-dry +
+  completeness-critic knobs in `## Modes`. Same subset, same fix loop — more
+  independent eyes, run until dry.
 
 ## Verification gates (a fix is ✅ only past these)
 
