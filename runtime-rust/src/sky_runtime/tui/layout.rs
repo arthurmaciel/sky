@@ -17,7 +17,7 @@
 //! slider value, Length(Fill/Min/Max). No panic vectors.
 
 use super::super::html::Html;
-use super::super::ui::{Attribute, Color, Description, Element, HAlign, Length, VAlign};
+use super::super::ui::{Attribute, Color, Description, Element, HAlign, Length, Location, VAlign};
 use super::cell::sanitize_rune;
 use super::focus::{Focusable, InputRegistry};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -672,6 +672,64 @@ fn hstack(children: Vec<Rendered>, gap: usize, bg: Option<(u8, u8, u8)>) -> Rend
     Rendered { block, hits }
 }
 
+/// Overlay `top` onto `base` at the top-left, cell by cell. `top_wins` → a
+/// non-blank `top` cell covers the base (InFront); `false` → the base shows
+/// through wherever it has a non-blank cell (Behind). Best-effort width-1 cell
+/// model (wide glyphs in an overlay may misalign — overlays are rare). Used for
+/// `Ui.inFront` / `Ui.behind` nearby overlays.
+fn overlay_blocks(base: Rendered, top: Rendered, top_wins: bool) -> Rendered {
+    fn to_cells(b: &Block) -> Vec<Vec<(char, Style)>> {
+        b.lines
+            .iter()
+            .map(|line| {
+                let mut row = Vec::new();
+                for run in line {
+                    for ch in run.text.chars() {
+                        row.push((ch, run.style));
+                    }
+                }
+                row
+            })
+            .collect()
+    }
+    let bc = to_cells(&base.block);
+    let tc = to_cells(&top.block);
+    let h = bc.len().max(tc.len());
+    let mut out_lines = Vec::with_capacity(h);
+    for i in 0..h {
+        let brow = bc.get(i);
+        let trow = tc.get(i);
+        let w = brow.map_or(0, Vec::len).max(trow.map_or(0, Vec::len));
+        let mut runs: Vec<Run> = Vec::new();
+        for j in 0..w {
+            let b = brow.and_then(|r| r.get(j)).copied();
+            let t = trow.and_then(|r| r.get(j)).copied();
+            let (ch, st) = match (t, b) {
+                (Some(tcell), Some(bcell)) => {
+                    if top_wins {
+                        if tcell.0 == ' ' { bcell } else { tcell }
+                    } else if bcell.0 == ' ' {
+                        tcell
+                    } else {
+                        bcell
+                    }
+                }
+                (Some(tcell), None) => tcell,
+                (None, Some(bcell)) => bcell,
+                (None, None) => (' ', Style::default()),
+            };
+            match runs.last_mut() {
+                Some(last) if last.style == st => last.text.push(ch),
+                _ => runs.push(Run { text: ch.to_string(), style: st }),
+            }
+        }
+        out_lines.push(runs);
+    }
+    let mut hits = base.hits;
+    hits.extend(top.hits);
+    Rendered { block: Block { lines: out_lines }, hits }
+}
+
 fn apply_padding(inner: Rendered, w: &Walked, canvas: Canvas, self_style: Style) -> Rendered {
     let top = canvas.cells_y(w.pad_top);
     let bottom = canvas.cells_y(w.pad_bottom);
@@ -1181,7 +1239,34 @@ fn render_node<M: Clone>(
             // the border sits outside the padding ring (Go insets children by
             // padding + borderWidth; here padding is already applied, the frame
             // adds the border ring outside it).
-            apply_border(padded, &w, w.style)
+            let host = apply_border(padded, &w, w.style);
+            // Nearby overlays (Ui.above/below/onLeft/onRight/inFront/behind) — were
+            // silently dropped (audit #12/#16). Place each relative to the host:
+            // directional ones stack; inFront/behind overlay at the top-left.
+            let nearby: Vec<(Location, &Element<M>)> = attrs
+                .iter()
+                .filter_map(|a| match a {
+                    Attribute::AttrNearby(loc, el) => Some((*loc, el)),
+                    _ => None,
+                })
+                .collect();
+            if nearby.is_empty() {
+                host
+            } else {
+                let mut result = host;
+                for (loc, el) in nearby {
+                    let ov = render_node(el, w.style, ctx, content_avail);
+                    result = match loc {
+                        Location::Above => vstack(vec![ov, result], 0, w.style.bg),
+                        Location::Below => vstack(vec![result, ov], 0, w.style.bg),
+                        Location::OnLeft => hstack(vec![ov, result], 0, w.style.bg),
+                        Location::OnRight => hstack(vec![result, ov], 0, w.style.bg),
+                        Location::InFront => overlay_blocks(result, ov, true),
+                        Location::Behind => overlay_blocks(result, ov, false),
+                    };
+                }
+                result
+            }
         }
     }
 }
