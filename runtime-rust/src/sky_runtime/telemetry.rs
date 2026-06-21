@@ -309,6 +309,13 @@ pub fn metric_add_gauge(name: &str, labels: &[(&str, &str)], delta: i64) {
 /// whose boundary `>= v` (Go's `Observe`). Labels MUST be low-cardinality (see
 /// `MetricKey.labels`) — callers pass `&[]` or a bounded class, NEVER a raw path.
 pub fn metric_observe(name: &str, labels: &[(&str, &str)], v: f64) {
+    // Contract guard: a non-finite or negative observation would poison `_sum`
+    // (e.g. `_sum NaN`) and skip every finite bucket while still bumping `count`.
+    // The sole current caller passes a provably-finite, non-negative duration;
+    // this guards a future caller from corrupting the exposition.
+    if !v.is_finite() || v < 0.0 {
+        return;
+    }
     let key = MetricKey { name: name.to_string(), labels: norm_labels(labels) };
     let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     let entry = g.entry(key).or_insert_with(|| MetricValue::Histogram {
