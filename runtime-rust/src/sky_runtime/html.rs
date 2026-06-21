@@ -134,6 +134,9 @@ const VOID: &[&str] = &[
 /// True for HTML void elements (no children, self-closing). Exposed for the
 /// style-injection pass, which must hoist a `<style>` to a sibling slot after a
 /// void element because `render_into` emits no children for void tags (#409).
+/// Its sole consumer is `live/style_inject.rs`, so it is `live`-gated (webview
+/// enables `live` too); a non-live build that gained a caller would fail loud.
+#[cfg(feature = "live")]
 pub(crate) fn is_void(tag: &str) -> bool {
     VOID.contains(&tag)
 }

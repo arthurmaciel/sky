@@ -17,6 +17,31 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 17:55 — Parity batch 18: clear dead-code that fails `--features db` clippy `-D`
+
+Batch 17 made `--features db` BUILD; under `clippy -D warnings` it still failed on 2
+dead-code lints. Root cause: `html.rs`/`tea.rs` are compiled in narrow subsets while
+their consumers are feature-gated.
+
+- `html::is_void` — sole consumer `live/style_inject.rs` (live-only; webview enables
+  live). Gated `#[cfg(feature = "live")]` — a non-live caller would now fail loud
+  (E0425), the intended tightness. Generated Tui/Html-only projects compile html.rs
+  without the live feature but also without style_inject → no caller, harmless.
+- `tea::CliEvent::Key` — constructed only by the `tui` raw-key reader, but matched
+  defensively in `cli_program` (tea.rs `Key(_,_) => continue`) in every tea build, so
+  the variant must stay in the shared enum. `#[cfg_attr(not(feature="tui"), allow(dead_code))]`
+  — honest "constructed-only-under-tui" (dead_code is a hygiene lint, not a denied risk lint).
+
+Verified: `clippy --features db -D warnings` clean (was 2 errors); CI `--all-features`
+clean; `--features live,crypto` keeps is_void live; 503/0. Guardian APPROVE (verified the
+generated module-gating asymmetry harmless by construction). Broader narrow-subset
+feature-self-containment (E0433 missing-crate edges under `json`/`tui`/`live` + `now_secs`/
+`ssrf_validate_url` dead-code, none CI-reachable) filed as its own follow-up.
+
+**Affected:** `runtime-rust/src/sky_runtime/html.rs`, `runtime-rust/src/sky_runtime/tea.rs`.
+
+---
+
 ## 2026-06-21 17:30 — Parity batch 17: fix standalone `--features db` build (serde + auth-gate)
 
 `cargo build --no-default-features --features db` failed with 9 × E0433: 4 × `serde`

@@ -82,6 +82,10 @@ pub fn time_every<M>(ms: i64, msg: M) -> SkySub<M> { sub_every(ms, msg) }
 /// `cli_program` and `tui_app` so both reuse `SubManager` (Tick) + `cli_run_cmd`.
 pub(crate) enum CliEvent<M> {
     Line(String),
+    // Constructed only by the `tui` raw-key reader; cli_program matches it
+    // defensively (keys are ignored under Cli). In a non-tui build the variant
+    // is never constructed but must remain in the shared enum for that arm.
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
     Key(String, String),
     Msg(M),
     Eof,
