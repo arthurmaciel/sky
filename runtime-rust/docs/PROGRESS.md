@@ -17,6 +17,28 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 15:20 — Parity batch 14: sky_live_msg_total{name,outcome,noop} counter (completes the Msg-metrics surface)
+
+The other half of Go's `msg_logging.go` (batch 13 did `sky_live_msg_seconds`). The
+dispatch loop now increments `sky_live_msg_total{name,outcome,noop}`: `name` =
+`telemetry::variant_name` (bounded variant); `outcome` = `"ok"` (the Rust update path
+has no error channel — Go's `err==nil` conjunct is always true); `noop` = `cmd_is_none
+&& e.model == next` computed AT the write-back where `e.model` still holds the OLD model
+— a STRUCTURAL equality (no hash-collision false-noop, unlike Go's hash) with NO extra
+clone. Required widening the Model bound with `+ PartialEq` across the same 5 sites as
+batch-13's `Msg: Debug` (generated Models always derive PartialEq). All labels bounded
+→ cardinality-safe. metric_inc emitted OUTSIDE the entry lock.
+
+Guardian-supervised (pre-write PASS w/ mandatory metric_meta arm — landed; post-write
+APPROVE). Verified: build + clippy `-D warnings` clean; 501/0; END-TO-END on
+09-live-counter (--backend rust, auto-tick) → `sky_live_msg_total{name="Tick",
+noop="false",outcome="ok"} 4` (Tick mutates the model → noop=false), alongside
+batch-13's `sky_live_msg_seconds{name="Tick"}`. Closes task #8 — the Sky.Live
+Msg-metrics surface is now at full Go parity.
+
+**Affected:** `runtime-rust/src/sky_runtime/telemetry.rs` (metric_meta arm),
+`runtime-rust/src/sky_runtime/live/mod.rs` (noop + counter inc + 5 Model PartialEq bounds).
+
 ## 2026-06-21 15:05 — Parity batch 13: sky_live_msg_seconds{name} Msg-latency histogram
 
 Go's Sky.Live records `sky_live_msg_seconds{name}` — Msg-handling latency labeled by

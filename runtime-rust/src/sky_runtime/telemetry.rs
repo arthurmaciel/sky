@@ -425,6 +425,7 @@ fn metric_meta(name: &str) -> (&'static str, &'static str) {
         "sky_live_errors_total" => ("counter", "Total responses with a 5xx status."),
         "sky_live_request_seconds" => ("histogram", "HTTP request latency in seconds."),
         "sky_live_msg_seconds" => ("histogram", "Msg-handling latency in seconds, by Msg variant name."),
+        "sky_live_msg_total" => ("counter", "Total Msgs handled, by variant name, outcome, and noop."),
         _ => ("counter", "Sky runtime metric."),
     }
 }

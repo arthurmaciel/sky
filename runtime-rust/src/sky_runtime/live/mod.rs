@@ -449,7 +449,9 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     store: Arc<dyn store::SessionStore<Model, Msg>>,
     sid: String,
 ) where
-    Model: Clone + Send + 'static,
+    // PartialEq: the `noop` signal compares old vs new Model by structural
+    // equality. Generated Model structs always derive PartialEq.
+    Model: Clone + PartialEq + Send + 'static,
     // `Debug` is required to derive the BOUNDED Msg variant-name label for the
     // `sky_live_msg_seconds` histogram (telemetry::variant_name). Generated Msg
     // enums always derive Debug, so this internal bound is always satisfiable.
@@ -486,20 +488,44 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
             &[("name", &msg_name)],
             msg_started.elapsed().as_secs_f64(),
         );
+        // Borrow (not move) cmd to detect a no-command update; cmd is moved into
+        // run_cmd later. Part of the `noop` signal below.
+        let cmd_is_none = matches!(cmd, SkyCmd::None);
 
         let mut tree = view(next.clone());
         assign_sky_ids(&mut tree, "r");
         style_inject::apply_style_injections(&mut tree);
 
-        let (patches, seq, sse) = {
+        let (patches, seq, sse, noop) = {
             let mut e = entry.lock().unwrap_or_else(|e| e.into_inner());
             let patches = diff(&e.last_view, &tree);
+            // noop (Go parity: oldHash==newHash && cmdIsNone && err==nil). Here
+            // `e.model` STILL holds the OLD model (top-of-loop cloned it OUT; the
+            // store isn't updated until the assignment below), so `e.model ==
+            // next` is old==new — a STRUCTURAL equality (no hash-collision false
+            // noop, unlike Go's hash), computed with NO extra clone. The Rust
+            // dispatch has no error channel, so the `err==nil` conjunct is always
+            // true and is dropped.
+            let noop = cmd_is_none && e.model == next;
             e.last_view = tree.clone();
             e.index = build_index(&tree);
             e.model = next.clone();
             e.seq += 1;
-            (patches, e.seq, e.sse_tx.clone())
+            (patches, e.seq, e.sse_tx.clone(), noop)
         };
+        // Msg counter (Go parity: sky_live_msg_total{name,outcome,noop}). All
+        // labels bounded: name = finite variant set, outcome = "ok" (this path
+        // has no error channel), noop ∈ {true,false}. Emitted OUTSIDE the entry
+        // lock (no registry-lock-under-entry-lock nesting).
+        crate::sky_runtime::telemetry::metric_inc(
+            "sky_live_msg_total",
+            &[
+                ("name", &msg_name),
+                ("outcome", "ok"),
+                ("noop", if noop { "true" } else { "false" }),
+            ],
+            1,
+        );
 
         if !patches.is_empty() {
             if let Some(sse) = sse {
@@ -691,7 +717,7 @@ pub fn live_app<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
 ) -> SkyTask<E, ()>
 where
     E: From<String> + Send + 'static,
-    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + PartialEq + Send + Sync + 'static,
     // Debug: forwarded through serve_live → drive_session for the
     // sky_live_msg_seconds{name} label. Generated Msg enums always derive Debug.
     Msg: Clone + Send + Sync + std::fmt::Debug + 'static,
@@ -738,7 +764,7 @@ pub fn live_app_routed<E, Model, Msg, Page, FInit, FUpdate, FView, FSubs, FSetPa
 ) -> SkyTask<E, ()>
 where
     E: From<String> + Send + 'static,
-    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
+    Model: serde::Serialize + serde::de::DeserializeOwned + Clone + PartialEq + Send + Sync + 'static,
     // Debug: forwarded through serve_live → drive_session for the
     // sky_live_msg_seconds{name} label. Generated Msg enums always derive Debug.
     Msg: Clone + Send + Sync + std::fmt::Debug + 'static,
@@ -780,7 +806,7 @@ async fn serve_live<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
 ) -> SkyResult<E, ()>
 where
     E: From<String> + Send + 'static,
-    Model: Clone + Send + 'static,
+    Model: Clone + PartialEq + Send + 'static,
     // Debug: forwarded to drive_session for the sky_live_msg_seconds{name} label.
     Msg: Clone + Send + std::fmt::Debug + 'static,
     FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
@@ -803,7 +829,7 @@ where
             headers: axum::http::HeaderMap,
         ) -> Response
         where
-            Model: Clone + Send + 'static,
+            Model: Clone + PartialEq + Send + 'static,
             // Debug: the GET handler creates a session and spawns drive_session,
             // which needs the bound for the sky_live_msg_seconds{name} label.
             Msg: Clone + Send + std::fmt::Debug + 'static,
