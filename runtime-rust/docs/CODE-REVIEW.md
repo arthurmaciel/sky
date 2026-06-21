@@ -73,6 +73,37 @@ into `quality-audit.sh` (§6c SECGREP + §6d SUPPLY) and the `principles-audit`
 skill (audit's-own-fix exclusion + CVE tier).
 
 ---
+## Security audit — 2026-06-20 (EXHAUSTIVE mode, PARTIAL — vote phase token-capped)
+
+Ran the new tokens-available exhaustive mode (Workflow: 118 files, broad sweep +
+21 high-risk × 2 adversarial lenses + 3-vote verification + critic). **76 agents,
+~6M tokens.** Broad sweep (120 entries) + specialist lenses (51) **completed**;
+the **adversarial-vote and completeness-critic phases hit the session token
+limit and did NOT run** — so every candidate below is **UNVERIFIED** (not
+refuted; the 3 skeptics never executed). Carry to next session: re-run vote on
+these 7, then fix the confirmed. Inline triage (severity = reviewer estimate,
+not yet vote-confirmed):
+
+| Sev | File | Finding (unverified) | Boundary / disposition |
+|---|---|---|---|
+| MED→HIGH | `ws_client.rs` | SSRF guard non-functional for WebSocket: `ssrf_validate_url`→`ssrf_check_url` rejects any non-`http(s)` scheme, so for `ws://`/`wss://` it's deny-all when `SKY_HTTP_DENY_PRIVATE=1` and no-op when unset → the private-IP/loopback filter NEVER runs; also no DNS-pin (tungstenite re-resolves at connect) → rebinding | ⏸️ in-boundary — **fix next**: ws/wss scheme handling in `ssrf_check_url` + pin/connect to vetted addr |
+| MED | `html.rs` | `html_attr_to_string_` (`Std.Html.attrToString` kernel) emits the attr KEY unescaped/ungated (value IS escaped), unlike the `render_into` path which drops via `is_safe_html_name`; key is attacker-derivable via `Std.Html.Attributes.attribute` (BoolAttr/EventAttr same class) | ⏸️ in-boundary — **fix next**: gate `k`/event name with `is_safe_html_name` here too |
+| MED | `http_client.rs` | redirect-hop DNS-rebinding TOCTOU: redirect target host is re-checked (`ssrf_check_url`) but not re-pinned (reqwest Policy API can't rebuild the resolver mid-chain; doc acknowledges) → check-IP ≠ connect-IP window | ⏸️ in-boundary — bounded/documented reqwest limitation; mitigate (block-all-redirects option, or custom connector) |
+| MED | `server.rs` | `server_with_cookie` Set-Cookie has `HttpOnly; SameSite=Lax` but **no `Secure`** → auth cookie can leak over a cleartext proxy→app hop / SSL-strip | ⏸️ in-boundary — **fix next**: add `Secure` (gate on prod/ENV if needed) |
+| MED | `FfiGen.hs` | `runInspector` builds `sh -c "cd sky-out && " ++ bin ++ " " ++ pkgPath` with NO shell quoting; `pkgPath` from a dep identifier. Sibling `runInspectorMulti` single-quotes — asymmetric | ⏸️ **OUT-OF-BOUNDARY** (shared Go-FFI path) → flag-upstream (same class as 2026-06-19 `app/Main.hs` `sh -c`) |
+| LOW-MED | `examples-sweep.yml` | `update-readme` job (`contents: write`) consumes artifact TSV/MD produced by code-execution sweep jobs and auto-commits → `readme-tables.py` must treat artifact content as untrusted | ⏸️ in-boundary (fork CI) — bounded: fork-guarded, GITHUB_TOKEN, green-gated, `[skip ci]` |
+| LOW-MED | `release.yml` | actions floating-major-tag pinned (not SHA) in a job holding DockerHub creds + `contents: write`; docker job `continue-on-error: true` masks failures; checksums.txt unsigned | ⏸️ shared CI → flag-upstream / optional: SHA-pin, cosign |
+
+Plus a broad-sweep LOW tail (action SHA-pinning across `ci.yml` etc.) — all
+defense-in-depth. **No item confirmed by independent vote → none fixed this run.**
+Full agent output saved in the session task log (`w4juztc7o`).
+
+**Process learning:** exhaustive mode's vote+critic tail is token-heavy (~6M for
+118 files at med); run it in a SEPARATE session from the sweep, or use
+`budget=low` (single-skeptic, no 3-vote) when the session pool is already drawn
+down.
+
+---
 ## Security-only audit — 2026-06-19 (whole codebase, diagnose-only)
 
 120 in-scope code+script files, 10 read-only security-lens agents (token-conserving).
