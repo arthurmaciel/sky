@@ -17,6 +17,28 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 14:05 — Parity batch 6: console Basic-auth + WWW-Authenticate challenge
+
+The production console/metrics auth gate (`console.rs gate_blocked`) accepted
+ONLY `Authorization: Bearer <tok>` and returned a bare 401, so a Prometheus
+scraper configured with `basic_auth` (the documented Go path) was locked out
+with no actionable challenge. Added a `header_authorizes` helper that ALSO
+accepts `Basic base64(user:tok)` — any username, the password segment is
+constant-time compared (subtle::ct_eq) against the admin token — and the 401 now
+carries `WWW-Authenticate: Basic realm="sky-metrics"` (Go parity:
+`hasAdminAuth` + `HandleMetrics`). Total (no unwrap/index): every fallible step
+is Option/Result. Audit log reason generalised to `bad-or-missing-credentials`.
+
+Verified live (28-live-counter, ENV=production + SKY_ADMIN_TOKEN): no-auth → 401
++ WWW-Authenticate; `Bearer <tok>` → 200; `Basic any:<tok>` → 200; wrong
+password → 401. Full suite green; clippy `--all-features` clean.
+
+Still deferred: `SKY_CONSOLE_AUTH=app` (row-poly consoleAuth callback, P1/L) —
+returns 501; needs threading the Sky-side callback closure through the Live cfg
+into the gate (a larger codegen+runtime change).
+
+**Affected:** `runtime-rust/src/sky_runtime/live/console.rs`.
+
 ## 2026-06-21 13:40 — Parity batch 5: labeled metric registry + Prometheus exposition
 
 Closes the core of the `/_sky/metrics` P0 ("single unlabeled counter — no

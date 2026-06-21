@@ -92,6 +92,30 @@ pub async fn api_metrics_summary() -> impl IntoResponse {
 /// In production (ENV/SKY_ENV non-dev) a `Bearer` admin token is required
 /// (`SKY_ADMIN_TOKEN`, legacy `SKY_CONSOLE_TOKEN`) — 401 otherwise. Dev mode (the
 /// default) is open and returns `None`.
+/// Does an `Authorization` header value authorize the admin surface? Accepts
+/// either `Bearer <tok>` OR `Basic base64(user:tok)` (Go parity: `hasAdminAuth`
+/// honours both, the latter being the Prometheus `basic_auth` scrape path —
+/// any username, the password segment is the admin token). Both comparisons are
+/// constant-time (subtle::ct_eq). Total: every fallible step is Option/Result.
+fn header_authorizes(auth: &str, tok: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let bearer = format!("Bearer {tok}");
+    if bool::from(auth.as_bytes().ct_eq(bearer.as_bytes())) {
+        return true;
+    }
+    if let Some(b64) = auth.strip_prefix("Basic ") {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+        if let Ok(raw) = B64.decode(b64.trim()) {
+            if let Ok(creds) = std::str::from_utf8(&raw) {
+                if let Some((_user, pw)) = creds.split_once(':') {
+                    return bool::from(pw.as_bytes().ct_eq(tok.as_bytes()));
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::Response> {
     let console_auth = std::env::var("SKY_CONSOLE_AUTH").unwrap_or_default();
     if console_auth == "off" {
@@ -123,17 +147,7 @@ pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::R
         .or_else(|| std::env::var("SKY_CONSOLE_TOKEN").ok().filter(|t| !t.is_empty()))
         .or_else(|| std::env::var("SKY_METRICS_TOKEN").ok().filter(|t| !t.is_empty()));
     let authed = match (want, headers.get(header::AUTHORIZATION)) {
-        (Some(tok), Some(h)) => {
-            // CONSTANT-TIME compare — `==` on the formatted "Bearer <tok>" string
-            // is a timing oracle on the admin token. Mirror the ingest path's
-            // `ct_eq` (subtle). The byte lengths differing is itself a (benign)
-            // signal; ct_eq over equal-length inputs is the standard guard.
-            use subtle::ConstantTimeEq;
-            let expected = format!("Bearer {tok}");
-            h.to_str()
-                .map(|h| bool::from(h.as_bytes().ct_eq(expected.as_bytes())))
-                .unwrap_or(false)
-        }
+        (Some(tok), Some(h)) => h.to_str().map(|h| header_authorizes(h, &tok)).unwrap_or(false),
         _ => false,
     };
     if authed {
@@ -141,9 +155,16 @@ pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::R
     } else {
         // Audit the denial (Go parity: `console.auth.denied` warn into the
         // telemetry ring) so an operator sees brute-force / probing attempts.
-        telemetry::record_log("warn", "console.auth.denied reason=bad-or-missing-bearer");
+        telemetry::record_log("warn", "console.auth.denied reason=bad-or-missing-credentials");
+        // WWW-Authenticate so a Prometheus `basic_auth` scraper (Go parity:
+        // HandleMetrics realm "sky-metrics") gets a proper challenge instead of a
+        // bare 401 it can't act on.
         Some(
-            (StatusCode::UNAUTHORIZED, "console requires a Bearer admin token in production")
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Basic realm=\"sky-metrics\"")],
+                "console requires a Bearer or Basic admin token in production",
+            )
                 .into_response(),
         )
     }
