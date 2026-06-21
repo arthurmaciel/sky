@@ -17,6 +17,43 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 12:30 — Parity batch 3 (P0): Std.Ui style-marker injection
+
+Guardian-supervised (security model reviewed pre-write; `</style>`-breakout
+regression required + delivered). The biggest UX P0 in the audit: the shared
+`Std.Ui` emits `data-sky-{mq,pc,tr,anim}-*` marker attributes for
+`Ui.breakpoint`/`Ui.mediaQuery`, `Background.hoverColor`/`Ui.onPseudo`,
+`Transition.attribute`, `Animation.attribute`, but the Rust backend had **no
+consumer** — so hover / breakpoint / media-query / transition / animation
+rendered inert markers and produced **zero CSS** (all dead).
+
+New `runtime-rust/src/sky_runtime/live/style_inject.rs` ports Go's
+`applyStyleInjections` (live.go:872-1110): 4 passes turning markers into
+sky-id-scoped `<style>` blocks (prepended child, or sibling-hoisted after a void
+element, #409), with the 2 ident sanitisers (`sanitiseAnimationName`,
+`skyIDToCSSIdent`) and the load-bearing `</style`/`</STYLE` close-tag strip on
+every CSS fragment (the only XSS guard, since the `<style>` body is raw).
+
+ORDERING (load-bearing): `apply_style_injections` is called immediately after
+EVERY `assign_sky_ids` (mod.rs ×4 page/commit/cold-restore + webview.rs ×1), so
+the render output AND the diff baseline are both injected → the diff never sees a
+marker-vs-`<style>` asymmetry (no spurious whole-subtree replace). Idempotent
+(markers stripped on first run) as belt-and-braces.
+
+Verified: 6 unit tests (incl. `</style><script>` breakout neutralised, void
+sibling-hoist, idempotency) + live fixture `70-style-injection` — `<style>`
+blocks for hover/breakpoint/mediaQuery present, `:hover` auto-wrapped in
+`@media (hover: hover)`, and an injected `</style><script>alert(1)</script>`
+breakout count = 0 (stripped; the `<script>` survives only as inert text inside
+the never-closed `<style>`, exactly Go). Full suite: 495 lib + all integration
+green. Clippy `--all-features` clean.
+
+**Affected:** `runtime-rust/src/sky_runtime/live/style_inject.rs` (new),
+`runtime-rust/src/sky_runtime/html.rs` (pub `is_void`),
+`runtime-rust/src/sky_runtime/live/mod.rs`,
+`runtime-rust/src/sky_runtime/webview.rs`,
+`runtime-rust/tests/sky/70-style-injection/`.
+
 ## 2026-06-21 11:40 — Parity batch 2: HTML render-path Go-parity (4 fixes)
 
 Guardian-supervised (pre-write guardrails + verification). The shared

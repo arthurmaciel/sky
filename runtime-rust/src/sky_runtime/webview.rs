@@ -156,6 +156,7 @@ mod imp {
     {
         let mut tree = view(model.clone());
         assign_sky_ids(&mut tree, "r");
+        crate::sky_runtime::live::style_inject::apply_style_injections(&mut tree);
         let index = build_index(&tree);
         (render_html(&tree), index)
     }

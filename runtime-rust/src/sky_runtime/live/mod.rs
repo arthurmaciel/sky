@@ -11,6 +11,7 @@ pub use form::*;
 pub mod route;
 pub use route::*;
 pub mod csrf;
+pub mod style_inject;
 pub mod console;
 // Pre-built console child + reverse-proxy — spawns the bundled console
 // binary and proxies /_sky/console/*; falls back to in-process `console` when the
@@ -124,6 +125,7 @@ where
     Box::pin(async move {
         let mut tree = view(model);
         assign_sky_ids(&mut tree, "r");
+        style_inject::apply_style_injections(&mut tree);
         println!("{}", render_page(&render_html(&tree)));
         SkyResult::Ok(())
     })
@@ -473,6 +475,7 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
 
         let mut tree = view(next.clone());
         assign_sky_ids(&mut tree, "r");
+        style_inject::apply_style_injections(&mut tree);
 
         let (patches, seq, sse) = {
             let mut e = entry.lock().unwrap_or_else(|e| e.into_inner());
@@ -818,6 +821,7 @@ where
                         e.model = (st.route_resolver)(e.model.clone(), uri.path());
                         let mut tree = (st.view)(e.model.clone());
                         assign_sky_ids(&mut tree, "r");
+                        style_inject::apply_style_injections(&mut tree);
                         e.index = build_index(&tree);
                         e.last_view = tree.clone();
                         render_html(&tree)
@@ -846,6 +850,7 @@ where
 
             let mut tree = (st.view)(model.clone());
             assign_sky_ids(&mut tree, "r");
+            style_inject::apply_style_injections(&mut tree);
             let index = build_index(&tree);
             let body = render_html(&tree);
 

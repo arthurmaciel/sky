@@ -131,6 +131,13 @@ const VOID: &[&str] = &[
     "link", "meta", "param", "source", "track", "wbr",
 ];
 
+/// True for HTML void elements (no children, self-closing). Exposed for the
+/// style-injection pass, which must hoist a `<style>` to a sibling slot after a
+/// void element because `render_into` emits no children for void tags (#409).
+pub(crate) fn is_void(tag: &str) -> bool {
+    VOID.contains(&tag)
+}
+
 /// Render an `Html` tree to an HTML string. Text is HTML-escaped; Raw is
 /// emitted verbatim; void elements self-close with no children; event
 /// handlers emit a `data-sky-on="<space-separated event names>"` marker
