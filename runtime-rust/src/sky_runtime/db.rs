@@ -1084,6 +1084,36 @@ pub fn db_query_decode<E: Send + From<String> + 'static, A: Send + 'static>(
     })
 }
 
+/// `queryDecode` with `List SqlValue` params (Go v0.16.26 mixed-type) — mirror of
+/// `db_query_decode` binding each param via the total `bind_sql_param` instead of
+/// `q.bind(String)`. Codegen routes HERE when the params arg's solved element type
+/// is `SqlValue` (ExprEmitter `isSqlValueListArg`); a homogeneous `List String`
+/// keeps the `db_query_decode` (Vec<String>) path. Same fetch_all_routed +
+/// row_to_json + decoder loop; same positional binding (never interpolated).
+pub fn db_query_decode_params<E: Send + From<String> + 'static, A: Send + 'static>(
+    conn: Db, sql: String, params: Vec<SqlParam>,
+    decoder: Decoder<E, A>,
+) -> SkyTask<E, Vec<A>> {
+    Box::pin(async move {
+        let final_sql = db_format_sql(sql);
+        let mut q = sqlx::query(&final_sql);
+        for p in params { q = bind_sql_param(q, p); }
+        let rows = match fetch_all_routed(&conn, q).await {
+            Ok(r)  => r,
+            Err(e) => return SkyResult::Err(sky_err(&e)),
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let jv = row_to_json(row);
+            match (decoder.run)(&jv) {
+                SkyResult::Ok(a)  => out.push(a),
+                SkyResult::Err(e) => return SkyResult::Err(e),
+            }
+        }
+        ok_res(out)
+    })
+}
+
 /// `getByIdDecode : Db -> String -> Int -> Decoder a -> Task Error (Maybe a)` —
 /// SELECT * FROM `table` WHERE id = `id` LIMIT 1; returns Nothing when no row
 /// matches, Just(decoded) on success, Err on DB error or decode error.

@@ -17,6 +17,26 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 14:45 — Parity batch 12: Db.queryDecode `List SqlValue` params (completes the SqlValue surface)
+
+Extends batch 11 to the third param-taking Db kernel. `db_query_decode_params` is a
+byte-for-byte mirror of `db_query_decode` except the bind loop uses the total
+`bind_sql_param` (SqlParam) instead of `q.bind(String)`; same fetch_all_routed +
+row_to_json + decoder loop. Codegen adds 2 Call arms (VarKernel+VarTopLevel) for the
+4-arg `queryDecode` [conn, sql, params, decoder] guarded by the same
+`isSqlValueListArg` — a `List String` keeps the existing `db_query_decode` path
+(unchanged). Guardian-supervised (APPROVE — "a pure mechanical mirror of an
+already-approved pattern; zero new safety properties"). Verified: cabal rebuilt; clippy
+`-D warnings` clean; 500/0; the `67-db-sqlvalue-params` fixture (extended with an
+`itemDecoder` + `Db.queryDecode … [Db.SqlInt 3] itemDecoder`) builds+runs on `--backend
+rust` → adds `decode-query count=1 name=gadget` (SqlInt-param matched + decoded the
+typed row) alongside the batch-11 lines. SqlValue param binding now covers exec +
+query + queryDecode.
+
+**Affected:** `runtime-rust/src/sky_runtime/db.rs` (db_query_decode_params),
+`src/Sky/Generate/Rust/Builder/ExprEmitter.hs` (2 queryDecode arms),
+`runtime-rust/tests/sky/67-db-sqlvalue-params/src/Main.sky` (queryDecode coverage).
+
 ## 2026-06-21 14:30 — Parity batch 11: Db.exec/Db.query `List SqlValue` mixed-type params
 
 `Db.exec`/`Db.query` are `Db -> String -> List a -> Task ...`. The Rust runtime only

@@ -1727,6 +1727,22 @@ exprToRustInner ctx e = case e of
                 ++ exprToRustString ctx connArg ++ ", "
                 ++ exprToRustString ctx sqlArg ++ ", "
                 ++ sqlValuesToVec ctx paramsArg ++ ")"
+    -- queryDecode with `List SqlValue` params (same routing as query, plus the
+    -- trailing decoder arg → db_query_decode_params).
+    Can.Call (Ann.At _ (Can.VarKernel modDb "queryDecode")) [connArg, sqlArg, paramsArg, decArg]
+        | (modDb == "Db" || modDb == "Std.Db") && isSqlValueListArg ctx paramsArg ->
+            "db_query_decode_params("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx sqlArg ++ ", "
+                ++ sqlValuesToVec ctx paramsArg ++ ", "
+                ++ exprToRustString ctx decArg ++ ")"
+    Can.Call (Ann.At _ (Can.VarTopLevel mdlDb "queryDecode")) [connArg, sqlArg, paramsArg, decArg]
+        | let mn = ModuleName._name mdlDb in (mn == "Db" || mn == "Std.Db") && isSqlValueListArg ctx paramsArg ->
+            "db_query_decode_params("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx sqlArg ++ ", "
+                ++ sqlValuesToVec ctx paramsArg ++ ", "
+                ++ exprToRustString ctx decArg ++ ")"
     -- DbDec.money col — the runtime `db_decode_money` decodes the "CODE AMOUNT"
     -- column into a `(Decimal, String)` pair; the GENERATED `Money` ADT can only
     -- be NAMED at the codegen boundary, so wrap the pair into
