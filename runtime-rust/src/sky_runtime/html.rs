@@ -143,10 +143,47 @@ pub fn render_html<M>(node: &Html<M>) -> String {
 }
 
 fn render_into<M>(node: &Html<M>, s: &mut String) {
+    render_into_ctx(node, s, None, false)
+}
+
+// `select_value`: when this node renders as a direct child of a `<select>` that
+// carries a value, the chosen value is threaded here so the matching `<option>`
+// flips `selected` (Go renderVNode, live.go:432-453). `raw_text`: set when the
+// parent is `<script>`/`<style>` so HText children emit verbatim — see SECURITY.
+fn render_into_ctx<M>(node: &Html<M>, s: &mut String, select_value: Option<&str>, raw_text: bool) {
     match node {
-        Html::HText(t) => s.push_str(&escape_text(t)),
+        // SECURITY: verbatim (un-escaped) text is reachable ONLY here, with
+        // raw_text=true, which is set ONLY when the parent tag is the literal
+        // "script"/"style" (see the child loop below). Std.Ui never produces a
+        // script/style ELEMENT — its styling flows through data-sky-* markers
+        // consumed server-side — so the "Std.Ui HTML-escapes everything" contract
+        // is NOT weakened. This path is the documented Std.Html raw escape hatch
+        // (`node "script" [] [text code]`): the author owns sanitisation of any
+        // interpolated value, exactly as on the Go backend (live.go:421-438,
+        // which likewise does NOT strip `</script>` here — matching it keeps the
+        // byte-for-byte equivalence gate green).
+        Html::HText(t) => {
+            if raw_text {
+                s.push_str(t);
+            } else {
+                s.push_str(&escape_text(t));
+            }
+        }
         Html::HRaw(r) => s.push_str(r),
         Html::HElement(tag, attrs, kids) => {
+            // Html.doctype wraps children in a pseudo-element; emit a literal
+            // `<!DOCTYPE html>` then the children directly (Go live.go:303-312).
+            // Handled BEFORE the name gate because `!doctype-wrapper` contains a
+            // `!`. The doctype string is a fixed literal and the wrapper's own
+            // tag/attrs are never interpolated → not an injection vector; the
+            // children keep full name/attr/text gating via render_into_ctx.
+            if tag == "!doctype-wrapper" {
+                s.push_str("<!DOCTYPE html>");
+                for c in kids {
+                    render_into_ctx(c, s, None, false);
+                }
+                return;
+            }
             // Injection guard: an unsafe tag name (spaces / `>` / `<` …) would
             // break out of the start tag. Drop the whole element — including its
             // subtree — rather than emit an attacker-controlled tag.
@@ -192,6 +229,20 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                     textarea_value = Some(v);
                 }
             }
+            // <option selected> flip: when rendered as a direct child of a
+            // <select> with a value, set `selected` on the value-matching option
+            // and drop any stale `selected` otherwise (Go renderVNode, copy-
+            // don't-mutate). We touch only the local `pairs`, never the caller's
+            // tree (it is the diff baseline — mutating it would corrupt the next
+            // diff). Added before the sort so byte order matches Go's map+sort.
+            if tag == "option" {
+                if let Some(sv) = select_value {
+                    pairs.retain(|(k, _)| *k != "selected");
+                    if pairs.iter().any(|(k, v)| *k == "value" && v == sv) {
+                        pairs.push(("selected", "selected".to_string()));
+                    }
+                }
+            }
             pairs.sort_by(|a, b| a.0.cmp(b.0));
             for (k, v) in &pairs {
                 // Attr KEY is emitted unescaped; an unsafe key (`x onload=…`)
@@ -226,8 +277,20 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                     s.push('"');
                 }
                 for ev in &events {
-                    s.push_str(" sky-");
-                    s.push_str(ev);
+                    // File/image meta-events arrive already `sky-`-prefixed
+                    // (`sky-image`/`sky-file`); the client's upload driver reads
+                    // them via the `data-sky-ev-<name>` HTML5 data-attribute
+                    // convention, while plain DOM events keep `sky-<name>` (Go
+                    // live.go:395-405). Emitting `sky-sky-image` made the driver
+                    // lookup miss, so uploads never fired. `ev` is already
+                    // name-gated (events.retain above), so both keys are safe.
+                    let key = if ev.starts_with("sky-") {
+                        format!("data-sky-ev-{ev}")
+                    } else {
+                        format!("sky-{ev}")
+                    };
+                    s.push(' ');
+                    s.push_str(&key);
                     s.push_str("=\"");
                     s.push_str(ev);
                     s.push('"');
@@ -249,8 +312,17 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                     }
                 }
             }
+            // <script>/<style> emit text children verbatim (rawBody); a
+            // <select> threads its value to option children for the `selected`
+            // flip. Both reset for deeper descendants (Go parity).
+            let raw_body = tag == "script" || tag == "style";
+            let child_select_value = if tag == "select" {
+                textarea_value.as_deref().filter(|v| !v.is_empty())
+            } else {
+                None
+            };
             for c in kids {
-                render_into(c, s);
+                render_into_ctx(c, s, child_select_value, raw_body);
             }
             s.push_str("</");
             s.push_str(tag);

@@ -190,17 +190,29 @@ fn diff_events<M>(old: &[Attribute<M>], new: &[Attribute<M>], p: &mut Patch) {
             })
             .collect()
     };
+    // Wire-marker key per event name — MUST match render_html's emission
+    // (html.rs): file/image meta-events are already `sky-`-prefixed and the
+    // client reads them as `data-sky-ev-<name>`; plain DOM events use
+    // `sky-<name>`. Render and diff disagreeing here = a dead listener or a
+    // spurious patch.
+    let ev_key = |ev: &str| -> String {
+        if ev.starts_with("sky-") {
+            format!("data-sky-ev-{ev}")
+        } else {
+            format!("sky-{ev}")
+        }
+    };
     let (on, nn) = (names(old), names(new));
     let id = p.id.clone();
     for ev in &nn {
         if !on.contains(ev) {
-            p.attrs.insert(format!("sky-{ev}"), ev.clone());
+            p.attrs.insert(ev_key(ev), ev.clone());
             p.attrs.insert("data-sky-hid".into(), id.clone());
         }
     }
     for ev in &on {
         if !nn.contains(ev) {
-            p.attrs.insert(format!("sky-{ev}"), String::new());
+            p.attrs.insert(ev_key(ev), String::new());
             if nn.is_empty() {
                 p.attrs.insert("data-sky-hid".into(), String::new());
             }

@@ -17,6 +17,40 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 11:40 — Parity batch 2: HTML render-path Go-parity (4 fixes)
+
+Guardian-supervised (pre-write guardrails + verification). The shared
+`render_into` (Sky.Live/Tui/Webview render path) diverged from Go's `renderVNode`
+in four ways:
+
+1. **`<select>` selected flip** (P1) — Rust stripped the select `value` but never
+   flipped `selected` onto the matching `<option>`, so only the first option
+   showed. Now threads the select value to option children and adds
+   `selected="selected"` on value-match (copy-don't-mutate; the tree is the diff
+   baseline). Verified: only `value="b"` gets selected.
+2. **`<script>`/`<style>` verbatim text** (P1, XSS-sensitive) — Rust entity-escaped
+   their text children, baking `&lt;`/`&#39;` into inline JS/CSS. Now emits HText
+   verbatim ONLY under the literal `script`/`style` tag (Go's `rawBody`). SECURITY
+   comment documents the boundary: Std.Ui never produces a script/style element
+   (its styling is data-sky-* markers), so this is solely the Std.Html raw escape
+   hatch; ordinary text still escapes. Verified: `if (1 < 2) { x = '&'; }` raw,
+   `<b>raw</b>` in a div → `&lt;b&gt;raw&lt;/b&gt;`.
+3. **onImage/onFile event marker** (P2) — Rust emitted `sky-sky-image`
+   (double-prefix) so the client upload driver lookup missed. Now branches:
+   `sky-`-prefixed meta-events → `data-sky-ev-<name>`, plain DOM events →
+   `sky-<name>` (Go live.go:395-405). Fixed symmetrically in `html.rs` render AND
+   `diff.rs diff_events` so render/diff agree.
+4. **`Html.doctype`** (P3) — `!doctype-wrapper` was rejected by `is_safe_html_name`
+   and dropped. Now emits a literal `<!DOCTYPE html>` then children, before the
+   name gate (fixed literal → no injection vector).
+
+Clippy `--all-features` clean. Fixture `69-html-render-parity`. Batch-1 CI: Rust
+security-audit (clippy) green.
+
+**Affected:** `runtime-rust/src/sky_runtime/html.rs`,
+`runtime-rust/src/sky_runtime/live/diff.rs`,
+`runtime-rust/tests/sky/69-html-render-parity/`.
+
 ## 2026-06-21 08:15 — Go→Rust parity audit (108 gaps) + first guardian-supervised fix batch
 
 Ran a deep multi-agent behavioral parity audit of the Go backend vs the Rust
