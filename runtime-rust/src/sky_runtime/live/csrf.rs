@@ -47,24 +47,11 @@ pub fn csrf_enabled() -> bool {
     )
 }
 
-/// `true` when responses run in cross-origin-iframe mode (`SKY_LIVE_FRAME_ANCESTORS`
-/// set — the SkyDeploy control-plane embeds the console). In that mode the CSRF
-/// cookie must be `SameSite=None; Secure` so it survives the cross-site iframe.
-///
-/// Snapshotted once into a `OnceLock` on first call so env is not re-read on
-/// every request (eliminates the TOCTOU window where a dynamic env mutation
-/// could produce a half-`__Host-`/half-bare cookie name split between the reader
-/// and the setter within the same request).
-fn frame_ancestors() -> Option<&'static str> {
-    use std::sync::OnceLock;
-    // `None` sentinel: an empty string (the env var was absent or blank).
-    static FA: OnceLock<String> = OnceLock::new();
-    let v = FA.get_or_init(|| {
-        std::env::var("SKY_LIVE_FRAME_ANCESTORS")
-            .unwrap_or_default()
-    });
-    if v.is_empty() { None } else { Some(v.as_str()) }
-}
+// `frame_ancestors` + `security_headers` were relocated to the always-compiled
+// `telemetry` module so the Sky.Http.Server path can share them (the `live`
+// module is DCE'd out of server-only builds). Re-exported here so existing
+// `csrf::frame_ancestors` / `csrf::security_headers` call sites keep resolving.
+pub use crate::sky_runtime::telemetry::{frame_ancestors, security_headers};
 
 /// Whether to mark cookies `Secure`. Production (or frame-ancestors mode, which
 /// is always HTTPS) → Secure. Mirrors Go's `r.TLS != nil || X-Forwarded-Proto`.
@@ -222,26 +209,5 @@ pub async fn csrf_middleware(req: axum::extract::Request, next: axum::middleware
     next.run(req).await
 }
 
-/// The security response headers for the initial page GET (Go parity:
-/// `setSecurityHeaders` on `handleInitial`), plus hardening additions. Returned
-/// as owned `(name, value)` pairs so the caller can splice them into the page
-/// response builder.
-pub fn security_headers() -> Vec<(&'static str, String)> {
-    let mut h: Vec<(&'static str, String)> = vec![
-        // Go parity.
-        ("x-content-type-options", "nosniff".to_string()),
-        ("referrer-policy", "strict-origin-when-cross-origin".to_string()),
-        // Beyond Go: deny powerful features by default for a server-rendered app.
-        (
-            "permissions-policy",
-            "geolocation=(), microphone=(), camera=(), payment=()".to_string(),
-        ),
-    ];
-    // Framing: CSP frame-ancestors when an embed origin is configured, else
-    // X-Frame-Options: SAMEORIGIN (mutually exclusive, Go parity).
-    match frame_ancestors() {
-        Some(fa) => h.push(("content-security-policy", format!("frame-ancestors {fa}"))),
-        None => h.push(("x-frame-options", "SAMEORIGIN".to_string())),
-    }
-    h
-}
+// `security_headers` now lives in `telemetry` (re-exported at the top of this
+// module) so the Sky.Http.Server path can share it.

@@ -179,7 +179,7 @@ emitRust b dbPath dbDriver ffiSlugs =
             , "pub fn time_sleep(ms: i64) -> SkyTask<()> { sky_runtime::time::time_sleep(ms) }"
             , "pub fn time_unix_millis(_: ()) -> SkyTask<i64> { sky_runtime::time::time_unix_millis(()) }"
             , "pub fn random_int(lo: i64, hi: i64) -> SkyTask<i64> { sky_runtime::random::random_int(lo, hi) }"
-            , "pub fn random_float(_: ()) -> SkyTask<f64> { sky_runtime::random::random_float(()) }"
+            , "pub fn random_float(lo: f64, hi: f64) -> SkyTask<f64> { sky_runtime::random::random_float(lo, hi) }"
             , "pub fn random_choice(items: Vec<String>) -> SkyTask<String> { sky_runtime::random::random_choice(items) }"
             , "pub fn file_read_file(path: String) -> SkyTask<String> { sky_runtime::file::file_read_file(path) }"
             , "pub fn file_write_file(path: String, content: String) -> SkyTask<()> { sky_runtime::file::file_write_file(path, content) }"

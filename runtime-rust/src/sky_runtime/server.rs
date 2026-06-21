@@ -301,7 +301,13 @@ fn parse_cookies(header: &str, out: &mut HashMap<String, String>) {
     }
 }
 
-async fn build_request(req: axum::extract::Request) -> (ServerRequest, Option<axum::extract::ws::WebSocketUpgrade>) {
+/// Build the Sky `ServerRequest` from the axum request. Returns `Err(status)`
+/// when the request must be rejected before the handler runs — currently only
+/// `Err(413)` for an oversize body (Go parity: `http.MaxBytesReader` →
+/// `WriteHeader(413)`, rt.go:7738). The previous code collapsed an oversize
+/// (and any body read error) into an empty body via `.unwrap_or_default()`,
+/// silently handing the handler `""` instead of refusing the request.
+async fn build_request(req: axum::extract::Request) -> Result<(ServerRequest, Option<axum::extract::ws::WebSocketUpgrade>), u16> {
     use axum::extract::{RawPathParams, FromRequestParts};
     let method = req.method().as_str().to_string();
     let uri = req.uri().clone();
@@ -355,10 +361,27 @@ async fn build_request(req: axum::extract::Request) -> (ServerRequest, Option<ax
     // present). Stashed via task-local so server_web_socket_upgrade can reach it.
     let upgrader = axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &())
         .await.ok();
-    let body = axum::body::to_bytes(body, max_body()).await
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default();
-    (ServerRequest { method, path, body, headers, params, query, cookies, remoteAddr: remote_addr }, upgrader)
+    let cap = max_body();
+    // Reject an oversize body with 413 instead of silently truncating to "".
+    // Pre-check Content-Length when declared (deterministic for non-chunked
+    // requests); to_bytes still enforces the cap for chunked bodies.
+    if let Some(declared) = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+    {
+        if declared > cap {
+            return Err(413);
+        }
+    }
+    let body = match axum::body::to_bytes(body, cap).await {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        // to_bytes-with-limit fails almost exclusively on cap-exceeded; a
+        // transport read error means the client is already gone so the status
+        // is moot. Either way never hand the handler a silently-truncated body.
+        Err(_) => return Err(413),
+    };
+    Ok((ServerRequest { method, path, body, headers, params, query, cookies, remoteAddr: remote_addr }, upgrader))
 }
 
 fn to_axum_response(r: ServerResponse) -> axum::response::Response {
@@ -382,6 +405,16 @@ fn to_axum_response(r: ServerResponse) -> axum::response::Response {
     for (k, v) in &r.headers {
         builder = builder.header(k.as_str(), v.as_str());
     }
+    // Safe-by-default security headers (Go parity: setSecurityHeaders on the
+    // server path, rt.go:7838) — applied only when the handler hasn't already
+    // set them, so an explicit handler override wins (mirrors Go's `if h.Get
+    // (...) == ""`). Values are env/static (no request-derived strings → no
+    // header-injection surface).
+    for (name, value) in crate::sky_runtime::telemetry::security_headers() {
+        if !r.headers.keys().any(|k| k.eq_ignore_ascii_case(name)) {
+            builder = builder.header(name, value);
+        }
+    }
     match builder.body(axum::body::Body::from(r.body)) {
         Ok(resp) => resp,
         Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -394,7 +427,14 @@ fn method_router(method: &str, h: ErasedHandler) -> axum::routing::MethodRouter 
     let svc = move |req: axum::extract::Request| {
         let h = h.clone();
         async move {
-            let (sky_req, upgrader) = build_request(req).await;
+            let (sky_req, upgrader) = match build_request(req).await {
+                Ok(v) => v,
+                Err(code) => {
+                    let status = axum::http::StatusCode::from_u16(code)
+                        .unwrap_or(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+                    return (status, "Payload Too Large").into_response();
+                }
+            };
             // Run the handler with the WS upgrader + a response slot in scope.
             // If the handler called server_web_socket_upgrade, it stashed the
             // real 101 response in WS_RESPONSE — prefer it over the sentinel.

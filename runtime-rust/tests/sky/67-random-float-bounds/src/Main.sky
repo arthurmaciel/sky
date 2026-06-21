@@ -1,0 +1,68 @@
+module Main exposing (main)
+
+-- Regression: Random.float lo hi must return a uniform draw in [lo, hi)
+-- (stdlib contract `float : Float -> Float -> Task Error Float`, Go parity
+-- `Random_floatT = lo + Float64()*(hi-lo)`). The Rust kernel previously took
+-- `(_: ())` and returned [0,1) ignoring its bounds. We draw repeatedly and
+-- assert every sample lands in range — a deterministic boolean despite the RNG.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.List as List
+import Sky.Core.String as String
+import Sky.Core.Random as Random
+import Std.Log exposing (println)
+
+
+lo : Float
+lo =
+    10.0
+
+
+hi : Float
+hi =
+    20.0
+
+
+inRange : Float -> Bool
+inRange x =
+    x >= lo && x < hi
+
+
+draw : Int -> Task Error (List Float)
+draw n =
+    Task.sequence (List.map (\_ -> Random.float lo hi) (List.range 1 n))
+
+
+main =
+    draw 200
+        |> Task.andThen
+               (\xs ->
+                   let
+                       allIn = List.all inRange xs
+                    -- degenerate bounds clamp to lo (no NaN / no value < lo)
+                       _ =
+                           println ("count=" ++ String.fromInt (List.length xs))
+                       _ =
+                           println
+                               ("inRange="
+                                   ++ (if allIn then
+                                          "true"
+
+                                      else
+                                          "false"))
+                   in
+                       Random.float hi lo
+                           |> Task.andThen
+                                  (\d ->
+                                      let
+                                          _ =
+                                              println
+                                                  ("degenerateClampedToLo="
+                                                      ++ (if d == hi then
+                                                             "true"
+
+                                                         else
+                                                             "false"))
+                                      in
+                                          println "RANDOM_FLOAT_BOUNDS OK"))
+        |> Task.run

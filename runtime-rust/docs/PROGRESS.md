@@ -17,6 +17,64 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 08:15 — Go→Rust parity audit (108 gaps) + first guardian-supervised fix batch
+
+Ran a deep multi-agent behavioral parity audit of the Go backend vs the Rust
+backend (10 domain auditors reading both runtimes + codegen, + 1 cross-cutting
+critic). Result: **108 gaps** (10 real P0, 43 P1, 38 P2, 18 P3) catalogued in
+`runtime-rust/docs/go-rust-parity-audit-2026-06-21.md` with how-Go-works /
+how-Rust-works traces, both-backend locations, and a fill approach per gap.
+
+Then implemented a first focused batch (security + correctness, in-boundary),
+**plan and code both gated through the security-soundness-guardian** (pre-write
+guardrails + post-write PASS review). All four runtime-verified:
+
+1. **Random.float lo hi** (P0 correctness) — the kernel took `(_: ())` and
+   returned `[0,1)` ignoring its bounds. Now `(lo, hi)` → uniform `[lo, hi)`
+   (53-bit mantissa unit draw; degenerate `hi <= lo` clamps to `lo`). Codegen
+   shim arity fixed too. Fixture `67-random-float-bounds`: 200 draws all in
+   range, degenerate clamps to lo.
+2. **Oversize body → 413** (P1 security) — `build_request` collapsed an oversize
+   (and any read error) into an empty body via `unwrap_or_default()`, silently
+   handing the handler `""`. Now returns `Result<_, u16>` → 413 (Content-Length
+   pre-check + `to_bytes` cap enforcement for chunked). Fixture `68-server-413`.
+3. **Security headers on Sky.Http.Server** (P1 security) — `setSecurityHeaders`
+   parity (nosniff / referrer-policy / permissions-policy / x-frame-options or
+   CSP frame-ancestors), applied in `to_axum_response` only when unset (handler
+   override wins). Verified live on a GET response.
+4. **SSE reconnect-resync frame** (P0 correctness) — `sse_handler` sent only
+   hello+heartbeat; a store-restored / restarted session's DOM stayed frozen
+   until the next user Msg. Now emits a full-body `event: patch` `{seq, body}`
+   after hello (Go parity live.go:5498; client.js:1318 consumes it). Verified
+   on the SSE stream.
+
+To let the Sky.Http.Server path share the headers (the `live` module is DCE'd
+out of server-only builds), `frame_ancestors` + `security_headers` were
+relocated from `live/csrf.rs` to the always-compiled `telemetry` module and
+re-exported from `csrf` (no behavior change).
+
+Guardian rulings on the rest of the batch: item 4 (federation ingest auth)
+already implemented and better-than-Go (dropped); item 5 (tenant-prefix SQL)
+**blocked** on a missing prerequisite — Rust `Hub_currentIdentity` is a stub,
+so a tenant gate would read empty claims and enforce nothing (security theater);
+item 3b (mux-wide CSRF on Sky.Http.Server) **deferred** to a focused PR because
+Go's default-on CSRF 403s API/curl POSTs and needs the `Server.csrfToken`
+kernel + `withoutCsrf` + `SKY_CSRF` plumbing. Follow-up filed: security headers
+skip the streaming-sentinel + WS-101 early-return paths (low risk, defense-in-
+depth).
+
+Clippy `--all-targets --all-features` clean (exit 0).
+
+**Affected:** `src/Sky/Generate/Rust/Builder/Emitter.hs`,
+`runtime-rust/src/sky_runtime/random.rs`,
+`runtime-rust/src/sky_runtime/server.rs`,
+`runtime-rust/src/sky_runtime/telemetry.rs`,
+`runtime-rust/src/sky_runtime/live/csrf.rs`,
+`runtime-rust/src/sky_runtime/live/mod.rs`,
+`runtime-rust/tests/sky/67-random-float-bounds/`,
+`runtime-rust/tests/sky/68-server-413/`,
+`runtime-rust/docs/go-rust-parity-audit-2026-06-21.md`.
+
 ## 2026-06-20 19:00 — Sky.Tui whole-library correctness sweep (audit → 11 fix batches)
 
 Drove the 22-finding `tui-correctness-audit` catalog to closure across 11

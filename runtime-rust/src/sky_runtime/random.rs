@@ -97,11 +97,24 @@ pub fn random_int<E: Send + 'static>(lo: i64, hi: i64) -> SkyTask<E, i64> {
     })
 }
 
-pub fn random_float<E: Send + 'static>(_: ()) -> SkyTask<E, f64> {
+pub fn random_float<E: Send + 'static>(lo: f64, hi: f64) -> SkyTask<E, f64> {
     Box::pin(async move {
         lcg_init();
-        let v = (lcg_next() >> 11) as f64 * (1.0 / 9007199254740992.0);
-        ok_res(v)
+        // Uniform float in [lo, hi) — matches the stdlib contract
+        // `float : Float -> Float -> Task Error Float` and Go's
+        // `Random_floatT` (lo + Float64()*(hi-lo)).
+        // Unit draw is the 53-bit mantissa trick → [0, 1); never
+        // `/ u64::MAX` (which rounds to 1.0 and could emit `hi`,
+        // breaking the half-open upper bound).
+        let unit = (lcg_next() >> 11) as f64 / (1u64 << 53) as f64;
+        // Degenerate bounds: Go silently returns a value < lo when
+        // hi < lo. We clamp to lo instead (sound, no negative-range
+        // footgun) — same defensive choice as random_int's `hi < lo`
+        // guard above.
+        if hi <= lo {
+            return ok_res(lo);
+        }
+        ok_res(lo + unit * (hi - lo))
     })
 }
 

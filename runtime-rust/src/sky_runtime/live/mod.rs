@@ -926,6 +926,25 @@ where
             // heartbeat keepalive (Go parity: live.go SSE handshake).
             let _ = tx.send(SsePatch(format!(": {}\n\n", " ".repeat(2048)))).await;
             let _ = tx.send(SsePatch(sse::frame("hello", "{}"))).await;
+
+            // Reconnect-resync (Go parity: handleSSE full-body frame, live.go:5498).
+            // A session restored from the store on a cold hit — or any process
+            // restart / `sky watch` rebuild / redeploy paired with a persistent
+            // store — has no live subscriptions from the previous process, so
+            // nothing pushes until the next user Msg. Render the current view once
+            // and ship it as a full-body `event: patch` frame; the client consumes
+            // `{seq, body}` → __skyPatch full replace (client.js:1318). No globalSeq
+            // field → the client's broadcast-dedup guard (globalSeq>0) can never
+            // drop this authoritative, idempotent frame. Bump seq under the same
+            // lock the event path uses so it stays monotonic vs later patches; drop
+            // the guard before the await (never hold a std Mutex across .await).
+            let resync = {
+                let mut g = entry.lock().unwrap_or_else(|e| e.into_inner());
+                g.seq += 1;
+                let html = render_html(&g.last_view);
+                serde_json::json!({ "seq": g.seq, "body": html }).to_string()
+            };
+            let _ = tx.send(SsePatch(sse::frame("patch", &resync))).await;
             {
                 let tx = tx.clone();
                 tokio::spawn(async move {

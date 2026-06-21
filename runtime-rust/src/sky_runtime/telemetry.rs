@@ -146,6 +146,51 @@ pub fn production_from_env() -> bool {
     !matches!(e.as_str(), "dev" | "development" | "local")
 }
 
+/// `Some(value)` when responses run in cross-origin-iframe mode
+/// (`SKY_LIVE_FRAME_ANCESTORS` set — the SkyDeploy control-plane embeds the
+/// console). Snapshotted once into a `OnceLock` so env is read only once
+/// (eliminates the TOCTOU window where a dynamic env mutation could split the
+/// cookie name / CSP framing decision within a single request).
+///
+/// Lives here (the always-compiled telemetry module) rather than under `live`
+/// so the Sky.Http.Server path (`server.rs`) can reach it too — the `live`
+/// module is DCE'd out of server-only builds.
+pub fn frame_ancestors() -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static FA: OnceLock<String> = OnceLock::new();
+    let v = FA.get_or_init(|| std::env::var("SKY_LIVE_FRAME_ANCESTORS").unwrap_or_default());
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.as_str())
+    }
+}
+
+/// Safe-by-default security response headers (Go parity: `setSecurityHeaders`,
+/// live.go:3557 — applied on both the Sky.Live page path and the Sky.Http.Server
+/// response path, rt.go:7838). Returned as owned `(name, value)` pairs so each
+/// caller splices them into its response builder only when the header is unset
+/// (an explicit handler override wins).
+pub fn security_headers() -> Vec<(&'static str, String)> {
+    let mut h: Vec<(&'static str, String)> = vec![
+        // Go parity.
+        ("x-content-type-options", "nosniff".to_string()),
+        ("referrer-policy", "strict-origin-when-cross-origin".to_string()),
+        // Beyond Go: deny powerful features by default for a server-rendered app.
+        (
+            "permissions-policy",
+            "geolocation=(), microphone=(), camera=(), payment=()".to_string(),
+        ),
+    ];
+    // Framing: CSP frame-ancestors when an embed origin is configured, else
+    // X-Frame-Options: SAMEORIGIN (mutually exclusive, Go parity).
+    match frame_ancestors() {
+        Some(fa) => h.push(("content-security-policy", format!("frame-ancestors {fa}"))),
+        None => h.push(("x-frame-options", "SAMEORIGIN".to_string())),
+    }
+    h
+}
+
 /// Record a structured log line (called from `Std.Log.*`). Errors also land in
 /// the error ring + bump the error counter.
 pub fn record_log(level: &str, message: &str) {

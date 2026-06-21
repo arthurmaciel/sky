@@ -1,0 +1,28 @@
+module Main exposing (main)
+
+-- Regression: an oversize request body must be rejected with 413 (Go parity:
+-- http.MaxBytesReader -> WriteHeader(413), rt.go:7738) instead of being silently
+-- truncated to an empty body. Cap is SKY_LIVE_MAX_BODY_BYTES (default 32 MiB);
+-- the test lowers it to a few bytes and POSTs more.
+--
+-- Also exercises the safe-by-default security response headers on the
+-- Sky.Http.Server path (Go parity: setSecurityHeaders).
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Http.Server as Server exposing (Handler)
+
+
+handleHome : Handler
+handleHome _ =
+    Task.succeed (Server.text "home")
+
+
+handleEcho : Handler
+handleEcho req =
+    Task.succeed (Server.text ("echo:" ++ req.body))
+
+
+main =
+    Server.listen
+        8068
+        [ Server.get "/" handleHome, Server.post "/echo" handleEcho ]
