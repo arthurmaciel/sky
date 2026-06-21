@@ -238,6 +238,14 @@ struct MetricKey {
     name: String,
     /// Label pairs, kept sorted so two call sites with the same labels in a
     /// different order map to the same series (and the exposition is stable).
+    ///
+    /// CARDINALITY CONSTRAINT (read before adding a labeled series): label
+    /// VALUES MUST be bounded / low-cardinality — a fixed status class, a
+    /// route template, etc. NEVER a session id, raw request path, user id, or
+    /// any unbounded value. The registry creates one entry per distinct
+    /// `(name, labels)` and NEVER evicts, so an unbounded label is a
+    /// memory-DoS (the classic Prometheus cardinality explosion). All current
+    /// call sites pass `&[]`.
     labels: Vec<(String, String)>,
 }
 
@@ -260,7 +268,10 @@ fn norm_labels(labels: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 /// Add `by` to a labeled counter (creating it at 0 first). A name already
-/// registered as a gauge is left untouched (defensive; call sites don't mix).
+/// registered as a gauge is left untouched (defensive — a given name is touched
+/// by exactly ONE variant; mixing counter/gauge writes on one name silently
+/// no-ops the mismatch, so don't). See `MetricKey.labels` for the cardinality
+/// constraint on `labels`.
 pub fn metric_inc(name: &str, labels: &[(&str, &str)], by: u64) {
     let key = MetricKey { name: name.to_string(), labels: norm_labels(labels) };
     let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
