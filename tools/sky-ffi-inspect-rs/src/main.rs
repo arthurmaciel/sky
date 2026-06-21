@@ -250,6 +250,21 @@ fn inspect_crate(crate_name: &str, features: &[String], git: Option<&GitSource>)
 /// if the first rustdoc run produces 0 functions, we scan the JSON for glob
 /// `pub use other_crate::*` re-exports and re-run on the underlying crate.
 fn run_rustdoc(crate_name: &str, features: &[String], git: Option<&GitSource>) -> Result<(String, String), String> {
+    // Reject any crate name outside the crates.io charset BEFORE it is spliced into
+    // the generated Cargo.toml (the `[package] name` field and the dependency
+    // entry). A name containing `"`, newline, `]`, etc. could otherwise inject a
+    // TOML key/section into the probe manifest. Real crate names are [A-Za-z0-9_-].
+    if crate_name.is_empty()
+        || !crate_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "invalid crate name {:?}: only [A-Za-z0-9_-] are allowed",
+            crate_name
+        ));
+    }
+
     let tmp = tempfile::tempdir().map_err(|e| format!("tempdir: {}", e))?;
     let dir = tmp.path();
 

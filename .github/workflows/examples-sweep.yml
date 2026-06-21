@@ -666,13 +666,20 @@ jobs:
 
       - name: Commit & push if anything changed
         shell: bash
+        # Pass the GitHub context through env (NOT inlined into the run: body) so a
+        # ref name can never be spliced as shell — the script-injection-safe
+        # pattern. (Job is dispatch/schedule-only + repo-guarded, so not reachable
+        # from a PR today; this keeps it safe if the trigger set ever widens.)
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           if git diff --quiet -- runtime-rust/README.md; then
             echo "README fenced tables already in sync — nothing to commit." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          BRANCH="${{ github.event_name == 'schedule' && 'feat/runtime-rust' || github.ref_name }}"
+          if [ "$EVENT_NAME" = "schedule" ]; then BRANCH="feat/runtime-rust"; else BRANCH="$REF_NAME"; fi
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add runtime-rust/README.md

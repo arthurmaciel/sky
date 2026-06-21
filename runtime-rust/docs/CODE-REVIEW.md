@@ -35,6 +35,40 @@ codebase). One pass, one file at a time.
 build artifacts, the `courses/` HTML, and `examples/`.
 
 ---
+## Security audit — 2026-06-21 (EXHAUSTIVE mode, full + fixed, guardian-supervised)
+
+Second exhaustive run (Workflow `w21jngpfw`: 118 files, broad 118 + specialist 57
+× 2 lenses + 3-vote + critic, prior 7 candidates excluded). 1 confirmed (3/3
+vote) + a LOW tail. Every in-boundary candidate FIXED + verified (`cargo build` +
+`clippy --all-targets --all-features -D` + full `cargo test --features full`),
+each adversarially reviewed by `security-soundness-guardian` (the html `data:`
+and ws-Close fixes each took a second guardian round to close a residual).
+
+| Sev | File | Fix | Verdict |
+|---|---|---|---|
+| **MED (confirmed 3/3)** | `html.rs` | dangerous-URL-scheme XSS: new `is_url_attr`/`url_scheme`/`is_dangerous_url`/`sanitise_url_attr` at the render sink (`render_into` + `html_attr_to_string_`). Blocks `javascript:`/`vbscript:` on all URL attrs; `data:` allowed ONLY as an inert raster image (`is_inert_data_image`, **svg+xml excluded**) on media attrs (src/poster/background), blocked on navigational attrs. Browser-parser-tolerant scheme parse (strips C0/ws, case-fold), runs before entity-escape | ✅ sound |
+| MED | `email.rs` | SMTP TLS: port 465→`Wrapper`, creds set→`Required` (no cleartext STARTTLS fallback), else `Opportunistic` — PLAIN creds never ride a strippable channel | ✅ sound |
+| LOW | `config_decode.rs` | `loadFromFile` size cap (metadata vs `SKY_CONFIG_MAX_BYTES`, default 16 MiB) before slurp → memory-DoS bound | ✅ sound |
+| LOW | `server_stream.rs` | clamp `r.status` to 100..=599 before `as u16` (parity w/ server.rs) | ✅ sound |
+| LOW | `live/console_proxy.rs` | telemetry store path gets an OS-seeded `RandomState` nonce (`sky-console-<pid>-<nonce>.db`) → defeats predictable shared-/tmp squat/TOCTOU | ✅ sound |
+| LOW | `ws_client.rs` | outbound cmd channel unbounded→bounded(1024)+`try_send` (stalled-peer memory-DoS); a full-queue `Close` is GUARANTEED via aborting both split-half tasks + notify + deregister (no stranded socket) | ✅ sound |
+| LOW | `http_client.rs` | doc-only: clarify the gzip fast-fail is skipped (Content-Length stripped) and the incremental cap is the real bound | ✅ accurate |
+| LOW | `tools/sky-ffi-inspect-rs/main.rs` | `run_rustdoc` rejects crate names outside `[A-Za-z0-9_-]` before the Cargo.toml splice → closes `[package] name` + dep-entry TOML injection | ✅ sound |
+| LOW | `examples-sweep.yml` | `${{ github.ref_name }}` moved from the `run:` body into `env:` (script-injection-safe) | ✅ sound |
+
+**WON'T FIX (guardian-agreed):**
+- `http_stream.rs` cumulative cap — streaming is unbounded by nature; per-chunk emit, no runtime accumulation; a default cap breaks legit LLM/SSE streams; an opt-in-default-off cap buys no baseline protection. `agree-bounded`.
+- `src/Sky/Build/Rust/Ffi.hs` inspector-ident splice — rustdoc emits valid Rust idents by construction + the inspector now rejects bad crate names at the source (#8); non-exploitable. `agree` (tied to the inspector guard staying in place).
+- `release.yml` tag→sed — shared/upstream CI, safe `${VAR}` param-expansion (not `${{}}` splice), tag is write-access-trusted. `agree-out-of-boundary`.
+- `FfiGen.hs` `sh -c` — out-of-boundary (shared Go path). `agree`.
+- `file.rs` `File.*` traversal — by-design Go-parity; app-call-site responsibility. `agree-bounded`.
+- `live/store.rs` no session cap — Go-parity, TTL-bounded. `agree-bounded`.
+- `server_redirect` open-redirect — app call-site choice. `agree-bounded`.
+- `SKY_CONSOLE_AUTH=app` 501 — fail-closed (correct secure default). `agree-bounded`.
+
+Note: `tools/sky-ffi-inspect-rs` has PRE-EXISTING clippy-`-D` debt (`expect_fun_call`, dead fns) unrelated to this fix (the added guard compiles clean); filed separately, not a security item.
+
+---
 ## Security audit — 2026-06-20 (incremental, tiered, diagnose+1-fix)
 
 Scope: the in-boundary delta since the 2026-06-19 fix baseline (`6d43ad16`) — my

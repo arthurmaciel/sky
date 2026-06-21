@@ -202,7 +202,7 @@ fn render_into<M>(node: &Html<M>, s: &mut String) {
                 s.push(' ');
                 s.push_str(k);
                 s.push_str("=\"");
-                s.push_str(&escape_attr(v));
+                s.push_str(&escape_attr(sanitise_url_attr(k, v)));
                 s.push('"');
             }
             // Browser-client wire markers (live/client.js): the delegated
@@ -292,6 +292,106 @@ fn is_safe_html_name(name: &str) -> bool {
         && name.bytes().all(|b| {
             b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.')
         })
+}
+
+/// URL-bearing attributes whose VALUE is fetched/navigated as a URL — a
+/// `javascript:` / `vbscript:` / non-image `data:` value here is a script-execution
+/// (XSS) vector that HTML entity-escaping does NOT neutralise. Case-insensitive.
+fn is_url_attr(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "href"
+            | "src"
+            | "xlink:href"
+            | "formaction"
+            | "action"
+            | "poster"
+            | "cite"
+            | "background"
+            | "manifest"
+            | "longdesc"
+    )
+}
+
+/// Media URL attributes where an inert *raster* `data:image/...` value is
+/// legitimately useful (and cannot script). `data:` is allowed ONLY here, and
+/// only for the raster types in `is_inert_data_image`. All other URL attributes
+/// are navigational/document-context, where `data:` is a navigable document
+/// (incl. scriptable SVG) and is blocked outright.
+fn is_media_url_attr(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "src" | "poster" | "background")
+}
+
+/// The URL scheme = the run before the first `:` that precedes any `/`, `?` or
+/// `#`, with leading C0 controls/space and intra-scheme controls/whitespace
+/// stripped + lowercased (mirrors the browser URL parser, so `java\tscript:` and
+/// `\x01javascript:` are caught). `None` = relative / no-scheme URL (safe). Runs
+/// BEFORE HTML entity-escaping, so the value is the raw scheme the browser sees.
+fn url_scheme(value: &str) -> Option<String> {
+    let mut scheme = String::new();
+    for ch in value.chars() {
+        match ch {
+            ':' => return Some(scheme),
+            '/' | '?' | '#' => return None,
+            c if (c as u32) <= 0x20 => continue,
+            c => scheme.push(c.to_ascii_lowercase()),
+        }
+    }
+    None
+}
+
+/// True only for an inert *raster* `data:image/...` value. SVG (`image/svg+xml`)
+/// is deliberately EXCLUDED — an SVG document can execute script — as is every
+/// non-image / text/html data payload.
+fn is_inert_data_image(value: &str) -> bool {
+    let rest = match value.find(':').and_then(|i| value.get(i + 1..)) {
+        Some(r) => r,
+        None => return false,
+    };
+    let rest = rest.trim_start().to_ascii_lowercase();
+    match rest.strip_prefix("image/") {
+        Some(after) => {
+            let subtype: String = after.chars().take_while(|c| *c != ';' && *c != ',').collect();
+            matches!(
+                subtype.as_str(),
+                "png" | "jpeg" | "jpg" | "gif" | "webp" | "bmp" | "avif" | "x-icon"
+                    | "vnd.microsoft.icon"
+            )
+        }
+        None => false,
+    }
+}
+
+/// True if `value` is a dangerous URL for attribute `name`. `javascript:` /
+/// `vbscript:` are always dangerous. `data:` is dangerous EXCEPT an inert raster
+/// `data:image/...` on a media attribute (src/poster/background) — on a
+/// navigational attribute (href/action/cite/…) every `data:` is blocked, since a
+/// `data:image/svg+xml,<svg onload=…>` navigated there executes script.
+fn is_dangerous_url(name: &str, value: &str) -> bool {
+    let scheme = match url_scheme(value) {
+        Some(s) => s,
+        None => return false,
+    };
+    if matches!(scheme.as_str(), "javascript" | "vbscript") {
+        return true;
+    }
+    if scheme == "data" {
+        return !(is_media_url_attr(name) && is_inert_data_image(value));
+    }
+    false
+}
+
+/// For a URL-bearing attribute, neutralise a dangerous-scheme value to empty
+/// (an inert URL) before it is escaped + emitted; pass any other value through.
+/// Closes the `href="javascript:…"` / `src="data:text/html,…"` /
+/// `href="data:image/svg+xml,…"` XSS class at the render sink (so every producer
+/// — Std.Html, Std.Ui link/image — is covered).
+fn sanitise_url_attr<'a>(name: &str, value: &'a str) -> &'a str {
+    if is_url_attr(name) && is_dangerous_url(name, value) {
+        ""
+    } else {
+        value
+    }
 }
 
 /// Stamp every HElement (not HText/HRaw) with a stable `sky-id` attribute derived
@@ -414,6 +514,7 @@ pub fn html_attr_to_string_<M>(attr: Attribute<M>) -> String {
     // attribute, mirroring render_into's `events.retain(is_safe_html_name)`.
     match attr {
         Attribute::Attr(k, v) if is_safe_html_name(&k) => {
+            let v = sanitise_url_attr(&k, &v).to_string();
             format!("{}=\"{}\"", k, html_escape_attr_(v))
         }
         Attribute::BoolAttr(k, true) if is_safe_html_name(&k) => k,

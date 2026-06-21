@@ -402,10 +402,22 @@ fn pick_free_port() -> Option<u16> {
 fn console_store_path() -> String {
     match std::env::var("SKY_CONSOLE_DB_PATH") {
         Ok(p) if !p.is_empty() => p,
-        _ => std::env::temp_dir()
-            .join(format!("sky-console-{}.db", std::process::id()))
-            .to_string_lossy()
-            .into_owned(),
+        // Default to a per-process file in the temp dir, but add an UNGUESSABLE
+        // suffix: a bare `sky-console-<pid>.db` is predictable, so a local
+        // attacker on the shared temp dir could pre-create that path (or a
+        // symlink) and hijack/redirect the console store (TOCTOU). The nonce is
+        // OS-seeded via RandomState (std-only — no new crate in this shared
+        // module). Computed once per process and passed to the child via env.
+        _ => {
+            use std::hash::{BuildHasher, Hasher};
+            let nonce = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            std::env::temp_dir()
+                .join(format!("sky-console-{}-{:016x}.db", std::process::id(), nonce))
+                .to_string_lossy()
+                .into_owned()
+        }
     }
 }
 

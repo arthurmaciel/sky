@@ -530,15 +530,26 @@ async fn send_smtp<E: From<String>>(cfg: &SmtpConfig, m: &EmailMessage) -> SkyRe
         Err(e) => return SkyResult::Err(format!("email.send/Smtp: build: {}", e).into()),
     };
 
-    // Transport: opportunistic STARTTLS (matches Go's smtp.SendMail). PLAIN auth
-    // only when a user is configured (Go does the same).
+    // Transport TLS policy. PLAIN auth must NEVER ride a cleartext channel: when
+    // credentials are configured a network MITM that strips the STARTTLS
+    // advertisement would otherwise harvest user/pass under opportunistic mode.
+    // So: port 465 → implicit TLS (Wrapper); credentials set → STARTTLS REQUIRED
+    // (no cleartext fallback); no credentials → opportunistic (Go smtp.SendMail
+    // parity for an unauthenticated relay, nothing secret to leak).
     let tls = match TlsParameters::new(cfg.host.clone()) {
         Ok(t) => t,
         Err(e) => return SkyResult::Err(format!("email.send/Smtp: tls: {}", e).into()),
     };
+    let tls_policy = if cfg.port == 465 {
+        Tls::Wrapper(tls)
+    } else if !cfg.user.is_empty() {
+        Tls::Required(tls)
+    } else {
+        Tls::Opportunistic(tls)
+    };
     let mut tb = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&cfg.host)
         .port(cfg.port as u16)
-        .tls(Tls::Opportunistic(tls));
+        .tls(tls_policy);
     if !cfg.user.is_empty() {
         tb = tb.credentials(Credentials::new(cfg.user.clone(), cfg.pass.clone()));
     }

@@ -197,7 +197,9 @@ pub fn serve_streaming_sentinel(r: &ServerResponse) -> Option<axum::response::Re
             .map(|chunk| (Ok::<String, std::io::Error>(chunk), rx))
     });
 
-    let status = axum::http::StatusCode::from_u16(r.status as u16)
+    // Clamp to the valid HTTP range before the u16 cast (parity with server.rs's
+    // buffered path) so an out-of-range Sky status can't wrap/panic the cast.
+    let status = axum::http::StatusCode::from_u16(r.status.clamp(100, 599) as u16)
         .unwrap_or(axum::http::StatusCode::OK);
     let mut builder = axum::http::Response::builder().status(status);
     if !r.contentType.is_empty() {

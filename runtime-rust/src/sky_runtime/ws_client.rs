@@ -74,8 +74,18 @@ enum WsCmd {
 }
 
 struct ClientEntry {
-    cmd_tx: tokio::sync::mpsc::UnboundedSender<WsCmd>,
+    // Bounded (not unbounded) so a remote peer that stalls reads — wedging the
+    // writer task on `write.send().await` — can't make this outbound queue grow
+    // without limit (memory DoS). A full queue makes send_cmd return false
+    // (try_send) rather than buffering forever.
+    cmd_tx: tokio::sync::mpsc::Sender<WsCmd>,
     frames_tx: tokio::sync::broadcast::Sender<WsEvent>,
+    // Abort handles for the writer + reader tasks. A Close that can't be enqueued
+    // (full queue ⇒ the writer is wedged on a stalled peer) is honoured by
+    // aborting BOTH halves — dropping just one leaves the split stream open — so a
+    // close request can never strand an open socket. See send_cmd.
+    writer_abort: tokio::task::AbortHandle,
+    reader_abort: tokio::task::AbortHandle,
 }
 
 fn registry() -> &'static Mutex<HashMap<i64, ClientEntry>> {
@@ -192,13 +202,13 @@ async fn do_connect<E: From<String> + Send + 'static>(
     };
     let id = WS_CLIENT_NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (mut write, mut read) = stream.split();
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WsCmd>();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<WsCmd>(1024);
     let (frames_tx, _) = tokio::sync::broadcast::channel::<WsEvent>(64);
 
     // Writer task: drain outbound commands → ws frames. When pingInterval > 0,
     // also send a periodic Ping so idle connections survive proxy/server idle
     // timeouts (tungstenite auto-pongs inbound pings on the read side).
-    tokio::spawn(async move {
+    let writer = tokio::spawn(async move {
         // `interval` ticks immediately on the first poll; skip that first tick so
         // we ping after the interval, not at t=0.
         let mut ping_iv = if ping_interval_ms > 0 {
@@ -248,8 +258,9 @@ async fn do_connect<E: From<String> + Send + 'static>(
     // close/error it deregisters the socket so the writer + subscription tasks
     // wind down (dropping the last frames_tx makes their recv() error) — no leak
     // on server-initiated close / reconnect.
+    let writer_abort = writer.abort_handle();
     let frames = frames_tx.clone();
-    tokio::spawn(async move {
+    let reader = tokio::spawn(async move {
         while let Some(item) = read.next().await {
             match item {
                 Ok(Message::Text(t)) => { let _ = frames.send(WsEvent::Message(WsClientMessage::Text(t))); }
@@ -266,7 +277,11 @@ async fn do_connect<E: From<String> + Send + 'static>(
         deregister(id);
     });
 
-    registry().lock().unwrap_or_else(|e| e.into_inner()).insert(id, ClientEntry { cmd_tx, frames_tx });
+    let reader_abort = reader.abort_handle();
+    registry().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        id,
+        ClientEntry { cmd_tx, frames_tx, writer_abort, reader_abort },
+    );
     ok_res(id)
 }
 
@@ -284,9 +299,42 @@ pub fn web_socket_connect_with<E: From<String> + Send + 'static>(cfg: WsClientCf
 }
 
 fn send_cmd(id: i64, cmd: WsCmd) -> bool {
-    match registry().lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
-        Some(e) => e.cmd_tx.send(cmd).is_ok(),
-        None => false,
+    let is_close = matches!(cmd, WsCmd::Close | WsCmd::CloseWithCode(..));
+    // Clone what we need, then RELEASE the registry lock before try_send / abort /
+    // deregister (deregister re-locks the registry — holding it here would deadlock).
+    let handles = {
+        let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        reg.get(&id).map(|e| {
+            (
+                e.cmd_tx.clone(),
+                e.frames_tx.clone(),
+                e.writer_abort.clone(),
+                e.reader_abort.clone(),
+            )
+        })
+    };
+    let (tx, frames, writer_abort, reader_abort) = match handles {
+        Some(h) => h,
+        None => return false,
+    };
+    match tx.try_send(cmd) {
+        Ok(()) => true,
+        Err(_) => {
+            // Queue full. For a non-close command we drop it (caller sees false).
+            // For a Close, the full queue means the writer is wedged on a stalled
+            // peer, so a queued Close would never be sent — guarantee teardown by
+            // aborting BOTH halves (drops the split stream → the connection
+            // closes), notifying subscribers, and deregistering. Close "succeeds".
+            if is_close {
+                writer_abort.abort();
+                reader_abort.abort();
+                let _ = frames.send(WsEvent::Closed(1000));
+                deregister(id);
+                true
+            } else {
+                false
+            }
+        }
     }
 }
 

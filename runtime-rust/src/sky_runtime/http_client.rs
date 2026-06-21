@@ -468,10 +468,15 @@ fn http_body_cap() -> usize {
         .unwrap_or(HTTP_BODY_CAP_DEFAULT)
 }
 
-/// Read a response body into a `String` with a hard byte cap. Fails fast on a
-/// declared `Content-Length` over the cap, then enforces the cap incrementally
-/// while streaming (a lying / chunked response can't bypass the limit). UTF-8
-/// lossy (matches `Http.Stream`'s chunk decode; Go reads bytes→string too).
+/// Read a response body into a `String` with a hard byte cap. The
+/// `Content-Length` pre-check only fast-fails the declared-length case — note
+/// reqwest's `gzip` feature transparently decompresses and STRIPS
+/// `Content-Length`, so for a gzip'd (e.g. compression-bomb) response
+/// `content_length()` is `None` and this pre-check is skipped. The load-bearing
+/// guard is the INCREMENTAL cap in the stream loop below, which bounds the
+/// decompressed body to `cap` regardless of encoding or a lying/chunked length —
+/// a bomb is capped at `cap` resident bytes, never unbounded. UTF-8 lossy
+/// (matches `Http.Stream`'s chunk decode; Go reads bytes→string too).
 async fn read_body_capped<E: From<String> + Send + 'static>(
     resp: reqwest::Response,
 ) -> SkyResult<E, String> {

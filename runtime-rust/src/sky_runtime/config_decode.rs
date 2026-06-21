@@ -63,6 +63,24 @@ pub fn config_load_from_file<E: From<String> + Send + 'static, T: Send + 'static
     decoder: Decoder<E, T>,
 ) -> SkyTask<E, T> {
     Box::pin(async move {
+        // Cap the file size before slurping it into memory so a Config.loadFromFile
+        // on an attacker-influenced path can't force an unbounded in-memory copy
+        // (memory DoS). Default 16 MiB; override via SKY_CONFIG_MAX_BYTES.
+        let cap: u64 = std::env::var("SKY_CONFIG_MAX_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(16 * 1024 * 1024);
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > cap {
+                return SkyResult::Err(str_err(&format!(
+                    "config file {:?} is {} bytes, over the {} byte cap (SKY_CONFIG_MAX_BYTES)",
+                    path,
+                    meta.len(),
+                    cap
+                )));
+            }
+        }
         let contents = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => return SkyResult::Err(str_err(&format!("{}", e))),
