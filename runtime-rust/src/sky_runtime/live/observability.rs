@@ -16,10 +16,7 @@
 
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-/// Process-global request counter, surfaced by `/_sky/metrics`.
-static REQUESTS: AtomicU64 = AtomicU64::new(0);
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Readiness flag. Starts ready; a graceful-shutdown signal flips it so
 /// `/_sky/readyz` reports `draining` and load balancers stop routing new traffic
@@ -60,20 +57,17 @@ pub async fn buildinfo() -> impl IntoResponse {
     (StatusCode::OK, [JSON], body)
 }
 
-/// `GET /_sky/metrics` — Prometheus text exposition of the request counter.
+/// `GET /_sky/metrics` — full Prometheus 0.0.4 text exposition.
 pub async fn metrics() -> impl IntoResponse {
-    let n = REQUESTS.load(Ordering::Relaxed);
-    let mut body = format!(
-        "# HELP sky_live_requests_total Total HTTP requests served by the Sky.Live app.\n\
-         # TYPE sky_live_requests_total counter\n\
-         sky_live_requests_total {n}\n"
-    );
-    // Append the labeled registry — active sessions, SSE connections, 5xx errors
-    // — so /_sky/metrics is a real Prometheus exposition, not a single counter
-    // (Go parity with prometheus.go's full WriteProm). `sky_live_requests_total`
-    // stays the unlabeled grand-total line above; the registry never registers
-    // that name, so there's no duplicate HELP/TYPE.
-    body.push_str(&crate::sky_runtime::telemetry::write_prom());
+    // The whole exposition comes from the labeled registry (Go parity:
+    // prometheus.go's WriteProm) — active sessions, SSE connections, 5xx errors,
+    // request-latency histogram, AND `sky_live_requests_total{method,status}`
+    // written per request by the `track` middleware below. `write_prom` emits
+    // exactly one #HELP/#TYPE per metric name, so there is NO hand-printed
+    // unlabeled `sky_live_requests_total` line here: a second, unlabeled series
+    // under the same name would mean a duplicate #HELP/#TYPE block, which makes
+    // a Prometheus scraper reject the entire exposition.
+    let body = crate::sky_runtime::telemetry::write_prom();
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
@@ -86,7 +80,6 @@ pub async fn metrics() -> impl IntoResponse {
 /// user-facing requests auto-records a span + an access log so the console has
 /// data without the app calling `Std.Trace`/`Std.Log` itself.
 pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
-    REQUESTS.fetch_add(1, Ordering::Relaxed);
     // Gate the console + metrics surface (off / production-auth) before serving.
     let path = req.uri().path().to_string();
     let method = req.method().as_str().to_string();
@@ -118,6 +111,21 @@ pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) ->
             &[],
             dur_us as f64 / 1_000_000.0,
         );
+        // Labeled request counter (Go parity: prometheus.go's
+        // sky_live_requests_total{method,route,status}). We keep Go's two
+        // BOUNDED labels — `method` normalised to a closed set, and the full
+        // numeric `status` (bounded by the HTTP spec) — but DROP Go's `route`
+        // label: it is derived from the raw request path, an attacker-
+        // controllable, UNBOUNDED value, and the registry never evicts (the
+        // classic Prometheus cardinality memory-DoS). The histogram above drops
+        // its label for the same reason. `method` is itself bounded here because
+        // HTTP permits arbitrary extension-method tokens.
+        let status_str = status.to_string();
+        super::super::telemetry::metric_inc(
+            "sky_live_requests_total",
+            &[("method", normalize_method(&method)), ("status", &status_str)],
+            1,
+        );
         let ok = status < 500;
         // Bound + sanitise the (attacker-controllable) raw path before it enters
         // the in-RAM log ring / OTLP push: cap the length and strip control bytes
@@ -132,6 +140,33 @@ pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) ->
         );
     }
     resp
+}
+
+/// Map an HTTP method token to one of a CLOSED set of labels, so the
+/// `sky_live_requests_total{method=…}` series can never explode in cardinality.
+/// HTTP permits arbitrary extension-method tokens and `req.method()` preserves
+/// the on-wire bytes verbatim, so without this an attacker could mint an
+/// unbounded number of distinct `method` label values against a registry that
+/// never evicts (a memory-DoS). Only the RFC-canonical UPPER-CASE spellings
+/// match; any case-variant (`get`/`Get`) or non-standard token deliberately
+/// buckets to `"other"` — a non-conformant client is not worth a distinct
+/// series, and bounded cardinality outranks label fidelity. Returns a
+/// `&'static str` so the labelling path stays zero-allocation (no `to_uppercase`
+/// — case-folding would allocate per request for zero cardinality benefit, since
+/// every variant already collapses to one arm here).
+fn normalize_method(method: &str) -> &'static str {
+    match method {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "DELETE" => "DELETE",
+        "PATCH" => "PATCH",
+        "HEAD" => "HEAD",
+        "OPTIONS" => "OPTIONS",
+        "TRACE" => "TRACE",
+        "CONNECT" => "CONNECT",
+        _ => "other",
+    }
 }
 
 /// Cap the request path to a sane length and strip control characters before it
@@ -219,9 +254,36 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_exposes_counter() {
+        // The registry is empty until the first inc (matches Go, whose own
+        // metrics test Incs first); the `track` middleware writes this series
+        // per request. Seed one labeled series, then assert the name + its
+        // bounded labels appear. Substring-only assertions keep this
+        // order-independent against the process-global registry.
+        crate::sky_runtime::telemetry::metric_inc(
+            "sky_live_requests_total",
+            &[("method", "GET"), ("status", "200")],
+            1,
+        );
         let r = metrics().await.into_response();
         assert_eq!(r.status(), StatusCode::OK);
-        assert!(body_string(r).await.contains("sky_live_requests_total"));
+        let b = body_string(r).await;
+        assert!(b.contains("sky_live_requests_total"), "{b}");
+        assert!(b.contains("method=\"GET\""), "{b}");
+        assert!(b.contains("status=\"200\""), "{b}");
+    }
+
+    #[test]
+    fn normalize_method_buckets_unknown_and_case_variants() {
+        // Canonical methods pass through verbatim.
+        assert_eq!(super::normalize_method("GET"), "GET");
+        assert_eq!(super::normalize_method("POST"), "POST");
+        assert_eq!(super::normalize_method("CONNECT"), "CONNECT");
+        // Case variants of a known method are non-canonical → bucketed.
+        assert_eq!(super::normalize_method("get"), "other");
+        assert_eq!(super::normalize_method("Get"), "other");
+        // Arbitrary extension-method token / empty → bucketed (cardinality guard).
+        assert_eq!(super::normalize_method("FOOBAR"), "other");
+        assert_eq!(super::normalize_method(""), "other");
     }
 
     #[tokio::test]

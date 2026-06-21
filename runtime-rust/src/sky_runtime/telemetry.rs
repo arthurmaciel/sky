@@ -358,7 +358,7 @@ fn render_labels_with_le(labels: &[(String, String)], le: &str) -> String {
 /// counter with a generic help line (still well-formed for scrapers).
 fn metric_meta(name: &str) -> (&'static str, &'static str) {
     match name {
-        "sky_live_requests_total" => ("counter", "Total HTTP requests served, by status class."),
+        "sky_live_requests_total" => ("counter", "Total HTTP requests served, by method and status."),
         "sky_live_sse_drops_total" => ("counter", "SSE patches dropped due to a full per-session buffer."),
         "sky_live_sse_connections_total" => ("counter", "Total SSE connections opened."),
         "sky_live_sessions_active" => ("gauge", "Currently-active Sky.Live sessions."),

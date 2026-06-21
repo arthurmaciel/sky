@@ -17,6 +17,31 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 13:10 — Parity batch 8: bounded `{method,status}` labels on sky_live_requests_total
+
+`/_sky/metrics` exposed `sky_live_requests_total` as a single UNLABELED grand-total,
+so an operator got no method/status breakdown (Go labels it `{method,route,status}`
+in observability_middleware.go:172). The `track` middleware now writes a labeled
+counter via the registry. SECURITY: kept Go's two BOUNDED labels — `method`
+normalised to a CLOSED 9-method set (`normalize_method`, else `"other"`; closes the
+arbitrary-extension-method-token cardinality-DoS) + full numeric `status` (bounded
+by the HTTP spec, Go-exact for Grafana parity) — but DROPPED Go's `route` label,
+which is raw-path-derived = attacker-controllable = unbounded against a never-evicting
+registry (the histogram already dropped its label for the same reason). Removed the
+hand-printed unlabeled line in `metrics()` (it would collide as a duplicate
+#HELP/#TYPE block under the same name → scrape rejection) + the now-dead redundant
+`REQUESTS` atomic; `metrics()` is now purely `write_prom()`. The counter fires only
+inside the existing non-internal + non-sub-app guard (matches the histogram scope; no
+/_sky/* inflation). Guardian-supervised (G1 closed-set+zero-alloc, G2 single-fire-in-
+guard, G3 dead-static-removed) — pre-write PASS + post-write APPROVE. Verified: clippy
+`-D warnings` clean; 496/0 incl. 2 new tests; live curl on 09-live-counter →
+`{method="GET",status="200"} 2` + `{method="POST",status="403"} 1`, exactly one
+#HELP/#TYPE, CSRF 403 intact.
+
+**Affected:** `runtime-rust/src/sky_runtime/live/observability.rs` (labeled counter +
+`normalize_method` + dead-static removal + tests), `runtime-rust/src/sky_runtime/telemetry.rs`
+(metric_meta help string).
+
 ## 2026-06-21 14:25 — Parity batch 7: latency histograms (completes the /_sky/metrics P0)
 
 Extends the batch-5 registry with a `Histogram` MetricValue variant (cumulative
