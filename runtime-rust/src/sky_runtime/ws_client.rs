@@ -131,7 +131,53 @@ async fn do_connect<E: From<String> + Send + 'static>(
         max_frame_size: Some(max_msg),
         ..Default::default()
     };
-    let connect_fut = tokio_tungstenite::connect_async_with_config(req, Some(ws_config), false);
+    // SSRF pin (R1): when SKY_HTTP_DENY_PRIVATE is on, resolve the host to a
+    // vetted non-private addr and dial THAT ourselves, so tokio-tungstenite can't
+    // re-resolve the name to a rebind target at connect time — closing the
+    // resolve->connect TOCTOU that the bare ssrf_validate_url check above leaves
+    // open (it validates a name that connect_async would resolve again).
+    let pinned = match crate::sky_runtime::http_client::ssrf_pinned_ws_addr(&url) {
+        Ok(p) => p,
+        Err(msg) => return SkyResult::Err(msg.into()),
+    };
+    type WsConnOut = Result<
+        (
+            tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+            tokio_tungstenite::tungstenite::handshake::client::Response,
+        ),
+        tokio_tungstenite::tungstenite::Error,
+    >;
+    let connect_fut: std::pin::Pin<Box<dyn std::future::Future<Output = WsConnOut> + Send>> =
+        match pinned {
+            Some(addr) => {
+                // No TLS feature is built, so a pinned connection can only be a
+                // plain ws:// stream; refuse wss under the guard rather than dial
+                // plaintext to a TLS endpoint.
+                if url.starts_with("wss://") {
+                    return SkyResult::Err(format!(
+                        "WebSocket.connect {}: wss with SKY_HTTP_DENY_PRIVATE is unsupported (no TLS feature to pin the connection)",
+                        url
+                    ).into());
+                }
+                let tcp = match tokio::net::TcpStream::connect(addr).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return SkyResult::Err(format!(
+                            "WebSocket.connect {}: pinned dial {} failed: {}",
+                            url, addr, e
+                        ).into())
+                    }
+                };
+                Box::pin(tokio_tungstenite::client_async_with_config(
+                    req,
+                    tokio_tungstenite::MaybeTlsStream::Plain(tcp),
+                    Some(ws_config),
+                ))
+            }
+            None => {
+                Box::pin(tokio_tungstenite::connect_async_with_config(req, Some(ws_config), false))
+            }
+        };
     let (stream, _resp) = if timeout_ms > 0 {
         match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms as u64), connect_fut).await {
             Ok(Ok(ok)) => ok,

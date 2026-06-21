@@ -246,7 +246,16 @@ pub fn server_with_cookie(c: ServerCookie, mut r: ServerResponse) -> ServerRespo
     // extra attributes or inject a second header line.
     let name = sanitise_cookie_field(&c.name);
     let value = sanitise_cookie_field(&c.value);
-    let v = format!("{}={}; HttpOnly; Path=/; SameSite=Lax", name, value);
+    // Add `Secure` in production so an auth/session cookie is never transmitted
+    // over the cleartext proxy→app hop (SSL-strip / sniff). Omit it in dev so
+    // cookies still work over plain-http localhost. Gate matches the rest of the
+    // runtime's production detection (ENV / SKY_ENV via productionFromEnv).
+    let secure = if crate::sky_runtime::telemetry::production_from_env() {
+        "; Secure"
+    } else {
+        ""
+    };
+    let v = format!("{}={}; HttpOnly; Path=/; SameSite=Lax{}", name, value, secure);
     r.headers.insert("Set-Cookie".to_string(), v);
     r
 }

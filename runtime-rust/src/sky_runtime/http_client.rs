@@ -140,6 +140,16 @@ fn is_private_ip(ip: IpAddr) -> bool {
 /// overrides the host→IP mapping; it uses the URL's port for the actual
 /// connection, so port 0 here is safe.
 fn resolve_first_non_private_addr(host: &str) -> Result<SocketAddr, String> {
+    // The HTTP client only needs the IP (reqwest's resolve_to_addrs ignores the
+    // port), so port 0 is fine here.
+    resolve_first_non_private_addr_with_port(host, 0)
+}
+
+/// Resolve `host` to its first non-private `SocketAddr` carrying `port`, rejecting
+/// if any resolved address is private/loopback/link-local. Used by the WebSocket
+/// pin (which dials the returned addr directly so the connect cannot re-resolve
+/// to a rebind target).
+fn resolve_first_non_private_addr_with_port(host: &str, port: u16) -> Result<SocketAddr, String> {
     // Try parsing as an IP literal first (avoids a DNS round-trip for bare IPs).
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_ip(ip) {
@@ -148,11 +158,11 @@ fn resolve_first_non_private_addr(host: &str) -> Result<SocketAddr, String> {
                 ip
             ));
         }
-        return Ok(SocketAddr::new(ip, 0));
+        return Ok(SocketAddr::new(ip, port));
     }
 
     // Hostname → DNS resolve via std (synchronous; called before the async send).
-    let addr_iter = match (host, 0u16).to_socket_addrs() {
+    let addr_iter = match (host, port).to_socket_addrs() {
         Ok(it) => it,
         Err(e) => {
             return Err(format!(
@@ -184,6 +194,29 @@ fn resolve_first_non_private_addr(host: &str) -> Result<SocketAddr, String> {
     })
 }
 
+/// WebSocket SSRF pin: when `SKY_HTTP_DENY_PRIVATE` is on, resolve `url`'s host to
+/// a vetted non-private `SocketAddr` (with the real ws/wss port) so the caller can
+/// dial THAT addr — closing the DNS-rebinding TOCTOU that an unpinned
+/// `connect_async` (which re-resolves the name at connect) would leave open.
+/// Returns `Ok(None)` when the guard is off (caller uses the normal path).
+#[cfg(feature = "websocket_client")]
+pub(crate) fn ssrf_pinned_ws_addr(url: &str) -> Result<Option<SocketAddr>, String> {
+    if !ssrf_deny_private_enabled() {
+        return Ok(None);
+    }
+    let parsed = reqwest::Url::parse(url).map_err(|e| {
+        format!("ws: blocked: invalid URL {:?}: {} (SKY_HTTP_DENY_PRIVATE)", url, e)
+    })?;
+    let scheme = parsed.scheme();
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "ws: blocked: URL has no host (SKY_HTTP_DENY_PRIVATE)".to_string())?;
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or(if scheme == "wss" { 443 } else { 80 });
+    resolve_first_non_private_addr_with_port(host, port).map(Some)
+}
+
 /// Validates a URL's host against the SSRF deny-private policy without
 /// returning the resolved address.  Used in the redirect policy callback
 /// where we only have a URL and cannot rebuild the client.
@@ -208,11 +241,15 @@ fn ssrf_check_url(url: &str) -> Result<(), String> {
         }
     };
 
-    // Only http / https are permitted when the deny guard is on.
+    // Permit http / https (HTTP client + redirect hops) AND ws / wss (the
+    // WebSocket client validates through this same fn). Without ws/wss here the
+    // guard rejected EVERY WebSocket URL when enabled (deny-all) and the private-
+    // IP host check below never ran for ws/wss — i.e. the guard was a no-op for
+    // the WebSocket surface. Everything else (ftp/file/…) stays rejected.
     let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
+    if scheme != "http" && scheme != "https" && scheme != "ws" && scheme != "wss" {
         return Err(format!(
-            "http: blocked: scheme {:?} is not http/https (SKY_HTTP_DENY_PRIVATE)",
+            "http: blocked: scheme {:?} is not http/https/ws/wss (SKY_HTTP_DENY_PRIVATE)",
             scheme
         ));
     }

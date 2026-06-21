@@ -95,8 +95,26 @@ not yet vote-confirmed):
 | LOW-MED | `release.yml` | actions floating-major-tag pinned (not SHA) in a job holding DockerHub creds + `contents: write`; docker job `continue-on-error: true` masks failures; checksums.txt unsigned | ⏸️ shared CI → flag-upstream / optional: SHA-pin, cosign |
 
 Plus a broad-sweep LOW tail (action SHA-pinning across `ci.yml` etc.) — all
-defense-in-depth. **No item confirmed by independent vote → none fixed this run.**
-Full agent output saved in the session task log (`w4juztc7o`).
+defense-in-depth.
+
+**Resolution (next-day pass, `security-soundness-guardian`-supervised):** the
+candidates were verified by the guardian and the in-boundary ones fixed +
+build/clippy/test-green (cargo build + `clippy --all-targets --all-features -D` +
+full suite):
+
+| Candidate | Outcome |
+|---|---|
+| `ws_client.rs` ws/wss SSRF | ✅ **FIXED** — `ssrf_check_url` now permits ws/wss so the private-IP host check RUNS for WebSocket; **plus** `ssrf_pinned_ws_addr` + a pinned `TcpStream` dial in `do_connect` closes the DNS-rebind TOCTOU (guardian: *rebind_closed: true*). wss-under-guard refused (no TLS feature to pin) |
+| `html.rs` attr-key | ✅ **FIXED** — `html_attr_to_string_` gates key + event name with `is_safe_html_name` (mirrors `render_into`); guardian: sound |
+| `server.rs` cookie `Secure` | ✅ **FIXED** — `; Secure` added when `production_from_env()` (dev over http unaffected); guardian: sound |
+| `http_client.rs` redirect rebind (R2) | ⏸️ **bounded-ok** (guardian) — reqwest Policy API can't re-pin mid-chain; initial hop IS pinned, each hop name-checked; documented. Filed for the same custom-resolver fix |
+| `FfiGen.hs` `sh -c` (R3) | 🚩 **flag-upstream** — shared Go-FFI path, out of the Rust boundary; report to upstream maintainer (same disposition as the 2026-06-19 `app/Main.hs` `sh -c`) |
+| `examples-sweep.yml` / `release.yml` (R4) | ⏸️ **bounded-ok** (guardian) — fork-guarded/green-gated artifact trust; floating-tag actions → SHA-pin in a follow-up CI-hardening pass |
+
+Code fixes verified twice by the guardian (the three + the R1 pin). Out-of-boundary
+`FfiGen.hs` cannot be fixed here by the boundary rule; R2/R4 are guardian-ruled
+bounded, filed (not must-fix). Full agent output: session task logs `w4juztc7o`
+(audit) + guardian verdicts.
 
 **Process learning:** exhaustive mode's vote+critic tail is token-heavy (~6M for
 118 files at med); run it in a SEPARATE session from the sweep, or use

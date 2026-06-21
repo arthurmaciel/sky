@@ -407,11 +407,24 @@ pub fn html_escape_attr_(s: String) -> String {
 
 /// `Ffi.callPure "htmlAttrToString"` — serialise a single Attribute to its key="value" form.
 pub fn html_attr_to_string_<M>(attr: Attribute<M>) -> String {
+    // Gate the attribute KEY / event name with is_safe_html_name — same as the
+    // render_into path. The key is emitted UNESCAPED, so a hostile key such as
+    // `x onload=alert(1)` (reachable via Std.Html.Attributes.attribute) would
+    // inject markup; the value is entity-escaped. An unsafe name drops the whole
+    // attribute, mirroring render_into's `events.retain(is_safe_html_name)`.
     match attr {
-        Attribute::Attr(k, v) => format!("{}=\"{}\"", k, html_escape_attr_(v)),
-        Attribute::BoolAttr(k, true) => k,
-        Attribute::BoolAttr(_, false) | Attribute::NoAttr => String::new(),
-        Attribute::EventAttr(e) => format!("data-sky-on=\"{}\"", e.name()),
+        Attribute::Attr(k, v) if is_safe_html_name(&k) => {
+            format!("{}=\"{}\"", k, html_escape_attr_(v))
+        }
+        Attribute::BoolAttr(k, true) if is_safe_html_name(&k) => k,
+        Attribute::EventAttr(e) if is_safe_html_name(e.name()) => {
+            format!("data-sky-on=\"{}\"", e.name())
+        }
+        // unsafe key / event name, false bool attr, or NoAttr → emit nothing
+        Attribute::Attr(..)
+        | Attribute::BoolAttr(..)
+        | Attribute::EventAttr(..)
+        | Attribute::NoAttr => String::new(),
     }
 }
 
