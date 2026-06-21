@@ -210,6 +210,7 @@ pub fn record_request(status: u16) {
     REQUESTS_TOTAL.fetch_add(1, Ordering::Relaxed);
     if status >= 500 {
         ERRORS_TOTAL.fetch_add(1, Ordering::Relaxed);
+        metric_inc("sky_live_errors_total", &[], 1);
     }
 }
 
@@ -218,6 +219,127 @@ pub fn requests_total() -> u64 {
 }
 pub fn errors_total() -> u64 {
     ERRORS_TOTAL.load(Ordering::Relaxed)
+}
+
+// ===========================================
+// Labeled metric registry + Prometheus exposition (Go parity:
+// telemetry/store.go + prometheus.go). Before this, /_sky/metrics emitted a
+// single unlabeled `sky_live_requests_total` line — no labels, no other series,
+// so an operator pointing Prometheus/Grafana at a Rust Sky binary got zero
+// route/status/SSE breakdown. This adds labeled counters + gauges keyed by
+// (name, sorted-labels) and a canonical 0.0.4 text renderer. Latency histograms
+// (request_seconds / msg_seconds) are a tracked follow-up.
+// ===========================================
+
+use std::collections::BTreeMap;
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct MetricKey {
+    name: String,
+    /// Label pairs, kept sorted so two call sites with the same labels in a
+    /// different order map to the same series (and the exposition is stable).
+    labels: Vec<(String, String)>,
+}
+
+enum MetricValue {
+    Counter(u64),
+    Gauge(i64),
+}
+
+// `Mutex::new` + `BTreeMap::new` are const → a plain static, no OnceLock. BTree
+// iteration is sorted by (name, labels), giving deterministic, grouped output.
+static REGISTRY: Mutex<BTreeMap<MetricKey, MetricValue>> = Mutex::new(BTreeMap::new());
+
+fn norm_labels(labels: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = labels
+        .iter()
+        .map(|(k, val)| ((*k).to_string(), (*val).to_string()))
+        .collect();
+    v.sort();
+    v
+}
+
+/// Add `by` to a labeled counter (creating it at 0 first). A name already
+/// registered as a gauge is left untouched (defensive; call sites don't mix).
+pub fn metric_inc(name: &str, labels: &[(&str, &str)], by: u64) {
+    let key = MetricKey { name: name.to_string(), labels: norm_labels(labels) };
+    let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    match g.entry(key).or_insert(MetricValue::Counter(0)) {
+        MetricValue::Counter(c) => *c = c.saturating_add(by),
+        MetricValue::Gauge(_) => {}
+    }
+}
+
+/// Adjust a labeled gauge by `delta` (creating it at 0 first). Saturating, and
+/// floored at 0 — the gauges here (active sessions / connections) never go
+/// negative in correct operation; the floor stops a double-decrement underflow.
+pub fn metric_add_gauge(name: &str, labels: &[(&str, &str)], delta: i64) {
+    let key = MetricKey { name: name.to_string(), labels: norm_labels(labels) };
+    let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    match g.entry(key).or_insert(MetricValue::Gauge(0)) {
+        MetricValue::Gauge(v) => *v = v.saturating_add(delta).max(0),
+        MetricValue::Counter(_) => {}
+    }
+}
+
+/// Per-metric (TYPE, HELP) for the exposition header. Unknown names default to a
+/// counter with a generic help line (still well-formed for scrapers).
+fn metric_meta(name: &str) -> (&'static str, &'static str) {
+    match name {
+        "sky_live_requests_total" => ("counter", "Total HTTP requests served, by status class."),
+        "sky_live_sse_drops_total" => ("counter", "SSE patches dropped due to a full per-session buffer."),
+        "sky_live_sse_connections_total" => ("counter", "Total SSE connections opened."),
+        "sky_live_sessions_active" => ("gauge", "Currently-active Sky.Live sessions."),
+        "sky_live_errors_total" => ("counter", "Total responses with a 5xx status."),
+        _ => ("counter", "Sky runtime metric."),
+    }
+}
+
+/// Escape a Prometheus label VALUE (`\`, `"`, newline) — spec 0.0.4.
+fn escape_label_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn render_labels(labels: &[(String, String)]) -> String {
+    if labels.is_empty() {
+        return String::new();
+    }
+    let inner: Vec<String> = labels
+        .iter()
+        .map(|(k, v)| format!("{}=\"{}\"", k, escape_label_value(v)))
+        .collect();
+    format!("{{{}}}", inner.join(","))
+}
+
+/// Render the registry as Prometheus text exposition (0.0.4). `# HELP`/`# TYPE`
+/// are emitted once per metric name (BTree groups same-name series adjacently).
+pub fn write_prom() -> String {
+    let g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    let mut out = String::new();
+    let mut last_name: Option<&str> = None;
+    for (key, val) in g.iter() {
+        if last_name != Some(key.name.as_str()) {
+            let (typ, help) = metric_meta(&key.name);
+            out.push_str(&format!("# HELP {} {}\n# TYPE {} {}\n", key.name, help, key.name, typ));
+            last_name = Some(key.name.as_str());
+        }
+        let labels = render_labels(&key.labels);
+        let v = match val {
+            MetricValue::Counter(c) => c.to_string(),
+            MetricValue::Gauge(g) => g.to_string(),
+        };
+        out.push_str(&format!("{}{} {}\n", key.name, labels, v));
+    }
+    out
 }
 
 /// Most-recent `limit` log entries, oldest→newest.

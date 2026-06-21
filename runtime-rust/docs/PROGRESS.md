@@ -17,6 +17,38 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 13:40 — Parity batch 5: labeled metric registry + Prometheus exposition
+
+Closes the core of the `/_sky/metrics` P0 ("single unlabeled counter — no
+registry, no labels, no other series"). Added a labeled metric registry to
+`telemetry.rs` — counters + gauges keyed by `(name, sorted-labels)` in a
+`Mutex<BTreeMap>` (sorted → deterministic, grouped output) — with `metric_inc`,
+`metric_add_gauge` (saturating, floored at 0), and a canonical Prometheus 0.0.4
+`write_prom()` renderer (one `# HELP`/`# TYPE` per name, label-value escaping).
+
+Wired: `sky_live_errors_total` (5xx, in `record_request`),
+`sky_live_sse_connections_total` (SSE connect), and the
+`sky_live_sessions_active` GAUGE — incremented on SSE connect and decremented via
+a `SessionGauge` Drop guard carried in the response body stream, so it tracks
+real connect/disconnect. `/_sky/metrics` now appends `write_prom()` after the
+back-compat unlabeled `sky_live_requests_total` grand-total line (registry never
+registers that name → no duplicate HELP/TYPE).
+
+Verified live (28-live-counter): with an active SSE connection
+`sky_live_sessions_active 1` + `sky_live_sse_connections_total 1`; after
+disconnect the gauge drops to `0` (Drop guard) while the counter stays. Valid
+0.0.4 exposition. Full suite green; clippy `--all-features` clean.
+
+Follow-ups (filed): latency histograms `sky_live_request_seconds` /
+`sky_live_msg_seconds` (P1/M — needs a Histogram type + BucketsLatency);
+per-status/route labels on `sky_live_requests_total`; `sky_live_sse_drops_total`
+is N/A on Rust today (the SSE channel BACKPRESSURES when full rather than
+drop-oldest — a separate behavioral divergence, not a metrics gap).
+
+**Affected:** `runtime-rust/src/sky_runtime/telemetry.rs`,
+`runtime-rust/src/sky_runtime/live/observability.rs`,
+`runtime-rust/src/sky_runtime/live/mod.rs`.
+
 ## 2026-06-21 13:10 — Parity batch 4: synchronous-panic gate (Go LogPanicAndExit parity)
 
 Guardian-supervised (PASS, incl. the server-gating safety decision). A panic

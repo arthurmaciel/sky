@@ -927,6 +927,13 @@ where
             let (tx, rx) = sse::channel();
             { entry.lock().unwrap_or_else(|e| e.into_inner()).sse_tx = Some(tx.clone()); }
 
+            // Metrics (Go parity: sky_live_sse_connections_total /
+            // sky_live_sessions_active). Count the connection and mark the session
+            // active; the gauge is decremented when the response body stream is
+            // dropped on disconnect (the SessionGauge guard below).
+            crate::sky_runtime::telemetry::metric_inc("sky_live_sse_connections_total", &[], 1);
+            crate::sky_runtime::telemetry::metric_add_gauge("sky_live_sessions_active", &[], 1);
+
             // Immediate hello + ~2KB proxy-buffer padding comment, then a 15s
             // heartbeat keepalive (Go parity: live.go SSE handshake).
             let _ = tx.send(SsePatch(format!(": {}\n\n", " ".repeat(2048)))).await;
@@ -962,11 +969,22 @@ where
                 });
             }
 
-            let body_stream = futures_util::stream::unfold(rx, |mut rx| async move {
-                rx.recv()
-                    .await
-                    .map(|SsePatch(s)| (Ok::<_, std::io::Error>(axum::body::Bytes::from(s)), rx))
-            });
+            // Drop guard tied to the stream lifetime: when the client disconnects
+            // (axum drops the response body) or the channel closes, the unfold
+            // state — and this guard — drops, decrementing the active-sessions
+            // gauge exactly once.
+            struct SessionGauge;
+            impl Drop for SessionGauge {
+                fn drop(&mut self) {
+                    crate::sky_runtime::telemetry::metric_add_gauge("sky_live_sessions_active", &[], -1);
+                }
+            }
+            let body_stream =
+                futures_util::stream::unfold((rx, SessionGauge), |(mut rx, guard)| async move {
+                    rx.recv().await.map(|SsePatch(s)| {
+                        (Ok::<_, std::io::Error>(axum::body::Bytes::from(s)), (rx, guard))
+                    })
+                });
             match Response::builder()
                 .status(StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, "text/event-stream")

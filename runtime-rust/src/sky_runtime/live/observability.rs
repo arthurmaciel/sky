@@ -63,11 +63,17 @@ pub async fn buildinfo() -> impl IntoResponse {
 /// `GET /_sky/metrics` — Prometheus text exposition of the request counter.
 pub async fn metrics() -> impl IntoResponse {
     let n = REQUESTS.load(Ordering::Relaxed);
-    let body = format!(
+    let mut body = format!(
         "# HELP sky_live_requests_total Total HTTP requests served by the Sky.Live app.\n\
          # TYPE sky_live_requests_total counter\n\
          sky_live_requests_total {n}\n"
     );
+    // Append the labeled registry — active sessions, SSE connections, 5xx errors
+    // — so /_sky/metrics is a real Prometheus exposition, not a single counter
+    // (Go parity with prometheus.go's full WriteProm). `sky_live_requests_total`
+    // stays the unlabeled grand-total line above; the registry never registers
+    // that name, so there's no duplicate HELP/TYPE.
+    body.push_str(&crate::sky_runtime::telemetry::write_prom());
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
