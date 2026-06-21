@@ -2886,8 +2886,10 @@ taskExprInnerTypeCall solved (Ann.At _ (Can.VarKernel modName fnName)) args
             _ -> ""
         | "Db" `isSuffixOf` modName || modName == "Db" = case fnName of
             "query"    -> "Vec<HashMap<String, String>>"
-            "exec"     -> "()"
-            "execRaw"  -> "()"
+            -- exec / execRaw return rows-affected (stdlib `Task Error Int`; Go
+            -- parity res.RowsAffected()). Runtime db_exec/db_exec_raw return i64.
+            "exec"     -> "i64"
+            "execRaw"  -> "i64"
             "connect"  -> "Db"
             "getField" -> "String"
             "getString" -> "String"

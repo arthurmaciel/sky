@@ -17,6 +17,34 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 15:45 — Parity batch 15: Db.exec/execRaw return rows-affected Int (was unit)
+
+stdlib `exec`/`execRaw : ... -> Task Error Int` (rows-affected, Go's res.RowsAffected())
+but the Rust runtime returned `SkyTask<E,()>` and codegen mapped exec/execRaw → `"()"` —
+a stdlib-signature/runtime divergence (`let n = Db.exec …` got unit where the type says
+Int). Fixed end-to-end: db_exec/db_exec_raw/db_exec_params → `SkyTask<E,i64>` with
+`ok_res(res.rows_affected() as i64)` (matches the existing insert/update/delete sites +
+Go's int64() truncation); codegen exec/execRaw return-type → `i64` AND the two Emitter.hs
+forwarding shims (`pub fn db_exec…-> SkyTask<()>` — a SECOND hardcoded site independent of
+the ExprEmitter mapping) → `SkyTask<i64>`. Updated the internal `db_migrate_apply`
+consumer (the `db_with_transaction::<E,()>` turbofish + outcome type + `Ok(())`→`Ok(_)` —
+the load-bearing hard-break the guardian caught pre-write) and 5 test sites
+(`Ok(())`→`Ok(1)` for inserts; the injection-safety test's `Ok(1)` now also witnesses the
+bound INSERT ran exactly once, DROP didn't execute).
+
+No valid Sky code regresses: stdlib already types exec as Int (Go returns Int), so every
+call site treats it as Int; discard-via-`\_`/`let _` ignores an i64 exactly as `()`.
+Guardian-supervised (pre-write PASS w/ the migrate-consumer + full-test-set fixes;
+post-write APPROVE). Verified: clippy `-D warnings` clean; 501/0; fixture
+67-db-sqlvalue-params extended with a `let widgetRows … String.fromInt widgetRows`
+capture → `exec-rows-affected=1` (exercises the NEW i64 path no prior fixture did);
+07-todo-cli (heavy Db.exec) no regression on `--backend rust`. Closes task #7.
+
+**Affected:** `runtime-rust/src/sky_runtime/db.rs` (3 fns + migrate consumer + 5 tests),
+`src/Sky/Generate/Rust/Builder/ExprEmitter.hs` (exec/execRaw return mapping),
+`src/Sky/Generate/Rust/Builder/Emitter.hs` (2 forwarding shims),
+`runtime-rust/tests/sky/67-db-sqlvalue-params/src/Main.sky` (exec Int capture).
+
 ## 2026-06-21 15:20 — Parity batch 14: sky_live_msg_total{name,outcome,noop} counter (completes the Msg-metrics surface)
 
 The other half of Go's `msg_logging.go` (batch 13 did `sky_live_msg_seconds`). The

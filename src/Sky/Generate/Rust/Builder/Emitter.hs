@@ -191,8 +191,8 @@ emitRust b dbPath dbDriver ffiSlugs =
              then [ "pub fn db_connect(_: ()) -> SkyTask<Db> { sky_runtime::db::db_connect(()) }"
                   , "pub fn db_open(driver: String, path: String) -> SkyTask<Db> { sky_runtime::db::db_open(driver, path) }"
                   , "pub fn db_open_with_path(path: String) -> SkyTask<Db> { sky_runtime::db::db_open_with_path(path) }"
-                  , "pub fn db_exec_raw(conn: Db, sql: String) -> SkyTask<()> { sky_runtime::db::db_exec_raw(conn, sql) }"
-                  , "pub fn db_exec(conn: Db, sql: String, params: Vec<String>) -> SkyTask<()> { sky_runtime::db::db_exec(conn, sql, params) }"
+                  , "pub fn db_exec_raw(conn: Db, sql: String) -> SkyTask<i64> { sky_runtime::db::db_exec_raw(conn, sql) }"
+                  , "pub fn db_exec(conn: Db, sql: String, params: Vec<String>) -> SkyTask<i64> { sky_runtime::db::db_exec(conn, sql, params) }"
                    , "pub fn db_query(conn: Db, sql: String, params: Vec<String>) -> SkyTask<Vec<HashMap<String, String>>> { sky_runtime::db::db_query(conn, sql, params) }"
                    , "pub fn db_migrate_apply(db: Db, migrations: Vec<(String, String)>) -> SkyTask<Vec<String>> { sky_runtime::db::db_migrate_apply::<SkyError>(db, migrations) }"
                    ]

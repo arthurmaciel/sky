@@ -539,25 +539,30 @@ pub fn db_open_with_path<E: Send + From<String> + 'static>(path: String) -> SkyT
     Box::pin(connect_cached(path))
 }
 
-pub fn db_exec_raw<E: Send + From<String> + 'static>(conn: Db, sql: String) -> SkyTask<E, ()> {
+pub fn db_exec_raw<E: Send + From<String> + 'static>(conn: Db, sql: String) -> SkyTask<E, i64> {
     Box::pin(async move {
+        // `execRaw : Db -> String -> Task Error Int` — Int is the rows-affected
+        // count (Go parity: res.RowsAffected()). `as i64` matches the existing
+        // insert/update/delete sites + Go's int64() truncation (rows-affected can
+        // never realistically exceed i64::MAX).
         match exec_routed(&conn, sqlx::query(&sql)).await {
-            Ok(_) => ok_res(()),
+            Ok(res) => ok_res(res.rows_affected() as i64),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
     })
 }
 
-pub fn db_exec<E: Send + From<String> + 'static>(conn: Db, sql: String, params: Vec<String>) -> SkyTask<E, ()> {
+pub fn db_exec<E: Send + From<String> + 'static>(conn: Db, sql: String, params: Vec<String>) -> SkyTask<E, i64> {
     Box::pin(async move {
         // Same path as the structured kernels: `db_format_sql` adapts `?`
         // placeholders per backend, then bind positionally. sqlx owns the
         // escaping; a placeholder/param count mismatch surfaces as Err.
+        // `exec : ... -> Task Error Int` returns rows-affected (Go parity).
         let final_sql = db_format_sql(sql);
         let mut q = sqlx::query(&final_sql);
         for p in params { q = q.bind(p); }
         match exec_routed(&conn, q).await {
-            Ok(_) => ok_res(()),
+            Ok(res) => ok_res(res.rows_affected() as i64),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
     })
@@ -591,13 +596,14 @@ pub fn db_query<E: Send + From<String> + 'static>(conn: Db, sql: String, params:
 // binding — values are NEVER interpolated (sqlx owns escaping); the SQL string is
 // app-authored, exactly as in the String path and as in Go.
 
-pub fn db_exec_params<E: Send + From<String> + 'static>(conn: Db, sql: String, params: Vec<SqlParam>) -> SkyTask<E, ()> {
+pub fn db_exec_params<E: Send + From<String> + 'static>(conn: Db, sql: String, params: Vec<SqlParam>) -> SkyTask<E, i64> {
     Box::pin(async move {
         let final_sql = db_format_sql(sql);
         let mut q = sqlx::query(&final_sql);
         for p in params { q = bind_sql_param(q, p); }
+        // Rows-affected (Go parity), same as db_exec.
         match exec_routed(&conn, q).await {
-            Ok(_) => ok_res(()),
+            Ok(res) => ok_res(res.rows_affected() as i64),
             Err(e) => SkyResult::Err(sky_err(&e)),
         }
     })
@@ -777,7 +783,10 @@ pub fn db_migrate_apply<E: Send + From<String> + 'static>(db: Db, migrations: Ve
             let applied_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             // db_with_transaction takes an `Fn` (may be invoked more than once),
             // so the captured owned values are cloned per-invocation inside.
-            let outcome: SkyResult<E, ()> = db_with_transaction::<E, ()>(
+            // db_exec/db_exec_raw now return rows-affected (i64), so the tx body's
+            // tail yields i64 — bind/turbofish accordingly; the count is unused
+            // (migrate cares about success, not row counts).
+            let outcome: SkyResult<E, i64> = db_with_transaction::<E, i64>(
                 db.clone(),
                 move |c| {
                     let stmt = stmt.clone();
@@ -802,7 +811,7 @@ pub fn db_migrate_apply<E: Send + From<String> + 'static>(db: Db, migrations: Ve
             .await;
 
             match outcome {
-                SkyResult::Ok(()) => out.push(name),
+                SkyResult::Ok(_) => out.push(name),
                 SkyResult::Err(e) => return SkyResult::Err(e),
             }
         }
@@ -1673,15 +1682,17 @@ mod tests {
         // round-trip through a SqlValue-param WHERE. `with_default` extracts the
         // Ok value (a wrong/Err result then fails the following assert).
         let db = fresh_db().await;
-        let mk: SkyResult<String, ()> = db_exec_raw(
+        // exec/execRaw now return rows-affected (i64). DDL rows-affected is
+        // driver-defined → assert Ok(_); each INSERT affects exactly 1 row.
+        let mk: SkyResult<String, i64> = db_exec_raw(
             db.clone(),
             "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER, \
              active INTEGER, price REAL)".to_string(),
         )
         .await;
-        assert!(matches!(mk, SkyResult::Ok(())), "create: {mk:?}");
+        assert!(matches!(mk, SkyResult::Ok(_)), "create: {mk:?}");
 
-        let ins: SkyResult<String, ()> = db_exec_params(
+        let ins: SkyResult<String, i64> = db_exec_params(
             db.clone(),
             "INSERT INTO items (name, qty, active, price) VALUES (?, ?, ?, ?)".to_string(),
             vec![
@@ -1692,16 +1703,16 @@ mod tests {
             ],
         )
         .await;
-        assert!(matches!(ins, SkyResult::Ok(())), "mixed insert: {ins:?}");
+        assert!(matches!(ins, SkyResult::Ok(1)), "mixed insert: {ins:?}");
 
         // A row with typed NULLs (SqlNull → SqlParam::Null).
-        let ins2: SkyResult<String, ()> = db_exec_params(
+        let ins2: SkyResult<String, i64> = db_exec_params(
             db.clone(),
             "INSERT INTO items (name, qty, active, price) VALUES (?, ?, ?, ?)".to_string(),
             vec![SqlParam::Null, SqlParam::Int(0), SqlParam::Bool(false), SqlParam::Null],
         )
         .await;
-        assert!(matches!(ins2, SkyResult::Ok(())), "null insert: {ins2:?}");
+        assert!(matches!(ins2, SkyResult::Ok(1)), "null insert: {ins2:?}");
 
         // SELECT with an Int SqlValue param.
         let rows: SkyResult<String, Vec<HashMap<String, String>>> = db_query_params(
@@ -2179,12 +2190,12 @@ mod tests {
     #[tokio::test]
     async fn test_exec_and_query_with_params() {
         let db = fresh_db().await;
-        let ins: SkyResult<String, ()> = db_exec(
+        let ins: SkyResult<String, i64> = db_exec(
             db.clone(),
             "INSERT INTO todos (title, done) VALUES (?, ?)".into(),
             vec!["buy milk".to_string(), "0".to_string()],
         ).await;
-        assert!(matches!(ins, SkyResult::Ok(())));
+        assert!(matches!(ins, SkyResult::Ok(1))); // exec returns rows-affected
 
         let rows: SkyResult<String, Vec<HashMap<String, String>>> = db_query(
             db,
@@ -2208,12 +2219,12 @@ mod tests {
     async fn test_query_param_with_quotes_and_metachars_roundtrips_safely() {
         let db = fresh_db().await;
         let nasty = "x'); DROP TABLE todos;-- O'Brien".to_string();
-        let ins: SkyResult<String, ()> = db_exec(
+        let ins: SkyResult<String, i64> = db_exec(
             db.clone(),
             "INSERT INTO todos (title, done) VALUES (?, ?)".into(),
             vec![nasty.clone(), "0".to_string()],
         ).await;
-        assert!(matches!(ins, SkyResult::Ok(())));
+        assert!(matches!(ins, SkyResult::Ok(1))); // exec returns rows-affected
 
         // The value comes back byte-for-byte (proves it was bound, not splice-escaped-into-SQL).
         let rows: SkyResult<String, Vec<HashMap<String, String>>> = db_query(

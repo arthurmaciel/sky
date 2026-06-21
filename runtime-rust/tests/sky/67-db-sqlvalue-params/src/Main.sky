@@ -54,7 +54,12 @@ runDemo conn =
                     [ Db.SqlString "widget", Db.SqlInt 7, Db.SqlBool True, Db.SqlFloat 9.99 ]
             )
         |> Task.andThen
-            (\_ ->
+            (\widgetRows ->
+                let
+                    -- exec returns rows-affected (Int) — prove it is usable.
+                    _ =
+                        println ("exec-rows-affected=" ++ String.fromInt widgetRows)
+                in
                 Db.exec conn
                     "INSERT INTO items (name, qty, active, price) VALUES (?, ?, ?, ?)"
                     [ Db.SqlString "gadget", Db.SqlInt 3, Db.SqlBool False, Db.SqlFloat 1.5 ]
