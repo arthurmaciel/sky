@@ -24,7 +24,13 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "pool", "tokio1", "tokio1-rustls-tls"], optional = true }
 tokio-tungstenite = { version = "0.24", optional = true }
 futures-util = { version = "0.3", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
+# NON-optional: the always-compiled `core.rs` derives `serde::Serialize`/`Deserialize`
+# on `SkyMaybe`/`SkyResult` unconditionally, so serde is needed by EVERY feature subset
+# (the `optional = true` was a lie — it left ~12 narrow `--features X` subsets failing
+# with E0433). Matches crate-specs.toml + the generated-project Cargo.toml, which both
+# declare serde non-optional. Generic-bound (`impl<T: Serialize>`) so a non-serde inner
+# type is unaffected.
+serde = { version = "1", features = ["derive"] }
 serde_urlencoded = { version = "0.7", optional = true }
 subtle = "2"
 hmac = "0.12"
@@ -64,19 +70,18 @@ json = ["serde_json", "jsonwebtoken"]
 # sha256-hex checksum per migration — a cross-backend DB contract that must match
 # the Go backend byte-for-byte). Generated projects always enable `crypto`
 # (which also pulls sha2); listing it here fixes the standalone `--features db`
-# build, which has no crypto.
-# `serde` is required by the always-compiled `core.rs` (its `SkyMaybe`/`SkyResult`
-# derive `serde::Serialize`/`Deserialize` — generic-bound, so a non-serde inner
-# type is unaffected). Generated projects carry serde unconditionally; the
-# standalone `--features db` build has no other serde source, so listing it here
-# (same precedent as `sha2` above) keeps the standalone `db` build green.
-db = ["sqlx", "tokio", "serde_json", "json", "sha2", "serde"]
-redis_store = ["redis", "tokio", "serde", "serde_json", "async-trait"]
+# build, which has no crypto. (serde is now a non-optional dep — see [dependencies] —
+# so it is NOT listed here.)
+db = ["sqlx", "tokio", "serde_json", "json", "sha2"]
+redis_store = ["redis", "tokio", "serde_json", "async-trait"]
 crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]
 csv_kernel = ["csv", "tokio"]
 cache_kernel = ["tokio"]
-tui = ["unicode-width", "crossterm"]
+# `tokio`: tea.rs (the shared Cli/Tui event loop, pulled by tui/app.rs) uses
+# `tokio::sync::mpsc`. Without it the standalone `--features tui` build fails to
+# resolve the `tea` module + `tokio`.
+tui = ["unicode-width", "crossterm", "tokio"]
 # Real native-window Webview backend (opt-in; needs the system webview dev libs).
 # NOT in `full` — default/CI builds compile the cross-platform stub instead.
 # Pulls `live` to reuse its Html renderer + event-dispatch (HandlerIndex) for the
@@ -85,9 +90,17 @@ webview = ["wry", "tao", "live"]
 config = ["json", "toml", "serde_yaml"]
 server = ["tokio", "axum", "tower-http", "futures-util"]
 http_client = ["tokio", "reqwest", "futures-util"]
-email = ["tokio", "reqwest", "lettre", "serde_json", "sha2"]
-websocket_client = ["tokio", "tokio-tungstenite", "futures-util"]
-live = ["server", "http_client", "serde", "serde_json", "serde_urlencoded", "async-trait"]
+# `http_client`: email.rs reuses `http_client::ssrf_apply` for outbound-request
+# SSRF hardening; ws_client.rs reuses `http_client::ssrf_validate_url` +
+# `ssrf_pinned_ws_addr`. Both need the http_client module present.
+email = ["tokio", "reqwest", "lettre", "serde_json", "sha2", "http_client"]
+websocket_client = ["tokio", "tokio-tungstenite", "futures-util", "http_client"]
+# `aes-gcm` (CSRF cookie AEAD — live/csrf.rs) + `sha2` (client-JS SRI integrity
+# hash — live/mod.rs) are used by always-compiled-under-live code. Generated Live
+# projects get them via the always-on `crypto` default; the standalone `live`
+# feature must pull them directly. (`subtle` for the constant-time compare is a
+# non-optional dep; `OsRng` rides in with `aes-gcm`.) serde is non-optional now.
+live = ["server", "http_client", "serde_json", "serde_urlencoded", "async-trait", "aes-gcm", "sha2"]
 full = ["async", "json", "db", "redis_store", "crypto", "compression", "csv_kernel", "cache_kernel", "tui", "config", "server", "http_client", "email", "websocket_client", "live"]
 
 [dev-dependencies]

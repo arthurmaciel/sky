@@ -113,10 +113,12 @@ pub fn to_array<E: From<String>, T: Clone, const N: usize>(xs: &[T]) -> SkyResul
 // ===========================================
 // Maybe
 // ===========================================
-// serde derives are CONDITIONAL (the macro emits `impl<T: Serialize> … for
-// SkyMaybe<T>`), so a `SkyMaybe<NonSerde>` is unaffected — but a Sky.Live model
-// carrying a `Maybe X` field (X serde-able) now serialises for the session
-// store. Without this, any model with a `Maybe`/`Result` field failed E0277.
+// The serde derive is UNCONDITIONAL but its impls are generic-BOUND (the macro
+// emits `impl<T: Serialize> … for SkyMaybe<T>`), so a `SkyMaybe<NonSerde>` is
+// unaffected — yet a Sky.Live model carrying a `Maybe X` field (X serde-able)
+// serialises for the session store. Without this, any model with a `Maybe`/
+// `Result` field failed E0277. NOTE: `serde` is therefore a NON-OPTIONAL dep in
+// the runtime crate (core.rs is always compiled) — do NOT re-add `optional = true`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SkyMaybe<T> {
     Nothing,

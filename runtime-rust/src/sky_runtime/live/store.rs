@@ -87,6 +87,10 @@ impl<Model: Send + 'static, Msg: Send + 'static> SessionStore<Model, Msg> for Me
     }
 }
 
+// Used only by the sqlx-backed Sqlite/Postgres session stores (all
+// `#[cfg(feature = "db")]`); the memory + redis stores don't call it, so a
+// memory-only live build (no db) would orphan it.
+#[cfg(feature = "db")]
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

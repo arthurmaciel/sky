@@ -17,6 +17,36 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 18:40 — Parity batch 19: standalone runtime feature self-containment (all subsets clippy-clean)
+
+Enumerated `cargo check --no-default-features --features X` for every single feature:
+~12 subsets failed E0433 `serde` (always-compiled `core.rs` derives serde unconditionally,
+but serde was `optional`), plus `tui` (tokio), `live` (aes_gcm/sha2), `email`/`websocket_client`
+(http_client module), and dead-code `ssrf_validate_url`/`now_secs` under narrow subsets.
+
+Design A′ (guardian pre-write GO): make `serde` NON-optional in the standalone crate —
+it is genuinely always needed by core.rs and is exactly how crate-specs.toml + generated
+projects already declare it; the `optional` was a lie. One change fixes all serde subsets;
+removed the now-invalid `"serde"` token from db/redis_store/live feature lists (reverts
+batch-17's serde-in-db hack). Then: `tui += tokio`; `live += aes-gcm, sha2`;
+`email`/`websocket_client += http_client`. Two source dead-code gates: `ssrf_validate_url`
+→ `#[cfg_attr(not(feature="websocket_client"), allow(dead_code))]` (cfg_attr, NOT cfg —
+generated projects include ws_client by module WITHOUT a websocket_client feature, so cfg
+would remove the fn and E0425 the generated caller); `now_secs` → `#[cfg(feature="db")]`
+(safe removal — its Sqlite/Postgres callers are co-gated on db).
+
+Verified: all 15 single-feature subsets + bare `--no-default-features` clippy `-D warnings`
+CLEAN (was ~14 failing); CI `--all-features` clean; 503/0; generated `28-live-counter`
+(`sky build --backend rust`) compiles clean (now_secs cfg(db) + live-feature generated-safe).
+Guardian post-write APPROVE. Disclosed PRE-EXISTING greenfield gap (Project.hs untouched,
+NOT a regression): generated email/ws-client projects miss the http_client module
+(`could not find http_client in sky_runtime`) — Project.hs gates it on usesHttp only; filed
+as a follow-up (the generated mirror of the email/ws feature fix here).
+
+**Affected:** `runtime-rust/Cargo.toml`, `runtime-rust/src/sky_runtime/{core.rs,http_client.rs,live/store.rs}`.
+
+---
+
 ## 2026-06-21 17:55 — Parity batch 18: clear dead-code that fails `--features db` clippy `-D`
 
 Batch 17 made `--features db` BUILD; under `clippy -D warnings` it still failed on 2

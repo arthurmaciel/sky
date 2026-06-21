@@ -323,6 +323,12 @@ pub(crate) fn ssrf_apply(
 
 /// Validate a single URL against the deny-private guard (no client build) — for
 /// surfaces (WebSocket) that connect outside reqwest. No-op when the guard is off.
+/// Sole consumer is `ws_client.rs`. Use `cfg_attr`+`allow`, NOT `#[cfg(...)]`:
+/// the item must stay PRESENT (generated projects include ws_client by module,
+/// without declaring a `websocket_client` Cargo feature, so removing the fn would
+/// E0425 their ws_client caller). The attribute only silences the dead-code lint
+/// in standalone subsets that compile http_client without the ws client.
+#[cfg_attr(not(feature = "websocket_client"), allow(dead_code))]
 pub(crate) fn ssrf_validate_url(url: &str) -> Result<(), String> {
     if ssrf_deny_private_enabled() {
         ssrf_check_url(url)
