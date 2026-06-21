@@ -17,6 +17,36 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 17:30 — Parity batch 17: fix standalone `--features db` build (serde + auth-gate)
+
+`cargo build --no-default-features --features db` failed with 9 × E0433: 4 × `serde`
+(always-compiled `core.rs:120,157` derive `serde::Serialize/Deserialize` on
+`SkyMaybe`/`SkyResult`) + 5 × `bcrypt` (auth.rs). Two root causes, two fixes — both
+standalone-crate-only (generated projects carry serde unconditionally + crypto/json
+always-default, so they were never affected).
+
+- **serde:** `serde` is an optional dep → implicit `serde` feature; `db` had no edge
+  pulling it, yet `core.rs` derives serde unconditionally. Added `serde` to the `db`
+  feature (same precedent as the existing `sha2`-in-`db` entry). The derive pre-existed
+  → no wire/format change, soundness-neutral.
+- **bcrypt:** auth.rs's real dep surface is crypto(`bcrypt`) + db(`sqlx`/`Db`,
+  register/login/setRole) + json(`jsonwebtoken`/`serde_json`) — ALL THREE. The old
+  `mod.rs` gate `all(db, json)` omitted `crypto`, so `--features db` compiled auth and
+  failed on unresolved `bcrypt`. Corrected to `all(crypto, db, json)`. (Mid-flight I
+  first wrote `all(crypto, json)` — empirically caught it dropping `sqlx`/`Db`; auth
+  DOES hit the DB. The full three-feature gate is the true surface.)
+
+Verified: `--features db` green (was 9 errors); `--features crypto,db,json` compiles auth;
+`--features full` green; `cargo clippy --all-targets --all-features -D warnings` green
+(CI gate); `cargo test --features full` 503/0 + all integration suites. Guardian
+pre-write GO + post-write APPROVE (correction disclosed). Side-finding filed as a
+follow-up: `cargo clippy --features db` (narrow subset) orphans `html::is_void` +
+`tea::Key` as dead code — pre-existing, NOT CI-reachable (CI = `--all-features`).
+
+**Affected:** `runtime-rust/Cargo.toml` (db feature +serde), `runtime-rust/src/sky_runtime/mod.rs` (auth gate), `runtime-rust/Cargo.lock`.
+
+---
+
 ## 2026-06-21 16:10 — Parity batch 16: classified, no-leak panic 500 body on both server surfaces
 
 Batch 9 gave both Sky.Http.Server + Sky.Live a `CatchPanicLayer` with the DEFAULT static

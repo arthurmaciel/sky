@@ -189,7 +189,12 @@ pub use list::*;
 pub mod io;
 pub use io::*;
 
-#[cfg(all(feature = "db", feature = "json"))]
+// auth.rs's external deps are `bcrypt` (crypto), `jsonwebtoken`/`serde_json`
+// (json), AND `sqlx`/`Db` (db — register/login/setRole write the user table).
+// Gate on ALL THREE: the old `all(db, json)` gate omitted `crypto`, so a
+// `--features db` build (crypto off) compiled auth and failed on unresolved
+// `bcrypt`. With `crypto` required, that build excludes auth instead.
+#[cfg(all(feature = "crypto", feature = "db", feature = "json"))]
 pub mod auth;
-#[cfg(all(feature = "db", feature = "json"))]
+#[cfg(all(feature = "crypto", feature = "db", feature = "json"))]
 pub use auth::*;

@@ -65,7 +65,12 @@ json = ["serde_json", "jsonwebtoken"]
 # the Go backend byte-for-byte). Generated projects always enable `crypto`
 # (which also pulls sha2); listing it here fixes the standalone `--features db`
 # build, which has no crypto.
-db = ["sqlx", "tokio", "serde_json", "json", "sha2"]
+# `serde` is required by the always-compiled `core.rs` (its `SkyMaybe`/`SkyResult`
+# derive `serde::Serialize`/`Deserialize` — generic-bound, so a non-serde inner
+# type is unaffected). Generated projects carry serde unconditionally; the
+# standalone `--features db` build has no other serde source, so listing it here
+# (same precedent as `sha2` above) keeps the standalone `db` build green.
+db = ["sqlx", "tokio", "serde_json", "json", "sha2", "serde"]
 redis_store = ["redis", "tokio", "serde", "serde_json", "async-trait"]
 crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]
