@@ -1,0 +1,77 @@
+module Main exposing (main)
+
+-- Batch-11 fixture: Db.exec / Db.query with `List SqlValue` (mixed-type
+-- positional params — String + Int + Bool + Float, Go v0.16.26 parity) AND the
+-- homogeneous `List String` param path in the SAME program (proves no
+-- regression on the existing String path). Codegen routes each call by the
+-- params arg's solved element type: List SqlValue -> db_*_params (SqlParam),
+-- List String -> db_* (Vec<String>).
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.List as List
+import Sky.Core.Dict as Dict
+import Sky.Core.Maybe as Maybe
+import Sky.Core.Task as Task
+import Std.Db as Db
+import Sky.Core.Error as Error exposing (Error)
+import Std.Log exposing (println)
+
+
+main =
+    let
+        pipeline =
+            Db.connect () |> Task.andThen runDemo |> Task.onError reportError
+
+        _ =
+            Task.run pipeline
+    in
+    ()
+
+
+runDemo : Db -> Task Error ()
+runDemo conn =
+    Db.exec conn "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER, active INTEGER, price REAL)" []
+        |> Task.andThen (\_ -> Db.exec conn "DELETE FROM items" [])
+        |> Task.andThen
+            (\_ ->
+                -- Mixed-type SqlValue params: String + Int + Bool + Float.
+                Db.exec conn
+                    "INSERT INTO items (name, qty, active, price) VALUES (?, ?, ?, ?)"
+                    [ Db.SqlString "widget", Db.SqlInt 7, Db.SqlBool True, Db.SqlFloat 9.99 ]
+            )
+        |> Task.andThen
+            (\_ ->
+                Db.exec conn
+                    "INSERT INTO items (name, qty, active, price) VALUES (?, ?, ?, ?)"
+                    [ Db.SqlString "gadget", Db.SqlInt 3, Db.SqlBool False, Db.SqlFloat 1.5 ]
+            )
+        -- String-param path (no regression): a homogeneous List String.
+        |> Task.andThen (\_ -> Db.query conn "SELECT name FROM items WHERE name = ?" [ "widget" ])
+        |> Task.andThen
+            (\srows ->
+                let
+                    _ =
+                        println ("string-param-rows=" ++ String.fromInt (List.length srows))
+                in
+                -- SqlValue-param query: bind an Int param.
+                Db.query conn "SELECT name, qty FROM items WHERE qty = ?" [ Db.SqlInt 7 ]
+            )
+        |> Task.andThen
+            (\rows ->
+                let
+                    first =
+                        Maybe.withDefault Dict.empty (List.head rows)
+
+                    name =
+                        Maybe.withDefault "?" (Dict.get "name" first)
+
+                    qty =
+                        Maybe.withDefault "?" (Dict.get "qty" first)
+                in
+                println ("sqlvalue-query name=" ++ name ++ " qty=" ++ qty ++ " count=" ++ String.fromInt (List.length rows))
+            )
+
+
+reportError : Error -> Task Error ()
+reportError e =
+    println ("ERROR: " ++ Error.toString e)

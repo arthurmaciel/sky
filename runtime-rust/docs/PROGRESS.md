@@ -17,6 +17,46 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 14:30 — Parity batch 11: Db.exec/Db.query `List SqlValue` mixed-type params
+
+`Db.exec`/`Db.query` are `Db -> String -> List a -> Task ...`. The Rust runtime only
+took `Vec<String>` params, so Go's v0.16.26 `List SqlValue` (mixed-type positional
+params — String + Int + Bool + Float + Decimal + Time + Money + typed NULL in one
+list, e.g. `INSERT … VALUES (?, ?, ?)` mixing String + Int + Bool) FAILED to compile
+on Rust (a `List SqlValue` arg rendered as `Vec<StdDbSqlValue>` ≠ `Vec<String>`).
+Closed across runtime + codegen:
+- RUNTIME (db.rs): `db_exec_params` / `db_query_params` — mirror db_exec/db_query but
+  bind each param via the EXISTING total `bind_sql_param` (the SqlParam→query binder
+  already used by insertFields/updateFields) instead of `q.bind(String)`. Same
+  exec_routed/fetch_all_routed (task-local tx-aware), same db_format_sql, same
+  positional binding (never interpolated).
+- CODEGEN (ExprEmitter.hs): `sqlValuesToVec` (reuses the exact StdDbSqlValue→SqlParam
+  `sqlValueMatchArms`) + `isSqlValueListArg` (region-type detection: matches ONLY
+  `List <SqlValue>`, suffix-tolerant for a qualified spelling) + 4 new Call arms
+  (VarKernel+VarTopLevel × exec+query) routing to the params binders when the params
+  arg's solved element type is SqlValue. A `List String` fails the guard → falls
+  through to the existing db_exec/db_query (Vec<String>) UNCHANGED — zero regression;
+  an unresolved region → String path (fail-safe: a genuine misroute is a loud cargo
+  error, never a silent wrong binding).
+
+Guardian-supervised (pre-write PASS + post-write APPROVE; suffix-match guardrail,
+SqlParam-reuse soundness, no false-positive on String params). Verified: cabal rebuilt
++ symlinked; clippy `-D warnings` clean; 500/0 incl. a new runtime test (Text/Int/Bool/
+Float/Null bind + SqlValue-param WHERE roundtrip); END-TO-END fixture
+`runtime-rust/tests/sky/67-db-sqlvalue-params` exercises BOTH paths in one program and
+builds+runs on `--backend rust` → `string-param-rows=1` (String path, no regression) +
+`sqlvalue-query name=widget qty=7 count=1` (mixed-type inserts + SqlInt-param query).
+The clean build is itself the routing proof (a misroute = cargo type-mismatch).
+
+FOLLOW-UPS: task #7 — `Db.exec` returns () vs stdlib `Task Error Int` (rows-affected),
+touches both db_exec + db_exec_params (pre-existing). queryDecode params + SqlValue
+not yet wired (exec+query only this batch).
+
+**Affected:** `runtime-rust/src/sky_runtime/db.rs` (db_exec_params/db_query_params +
+test), `src/Sky/Generate/Rust/Builder/ExprEmitter.hs` (sqlValuesToVec +
+isSqlValueListArg + 4 Call arms), `runtime-rust/tests/sky/67-db-sqlvalue-params/` (new
+fixture).
+
 ## 2026-06-21 13:55 — Parity batch 10: Db.migrate `_sky_migrations` ledger (idempotent + drift-guarded)
 
 Rust `db_migrate_apply` was NAIVE — it ran every migration's SQL unconditionally

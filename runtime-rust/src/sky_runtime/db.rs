@@ -575,6 +575,46 @@ pub fn db_query<E: Send + From<String> + 'static>(conn: Db, sql: String, params:
     })
 }
 
+// ─── Typed-parameter exec/query (Go's v0.16.26 `List SqlValue`) ────────────────
+//
+// `Db.exec`/`Db.query` are `Db -> String -> List a -> Task ...`. With `a = String`
+// the params route through `db_exec`/`db_query` above (Vec<String>). With
+// `a = SqlValue` (mixed-type params: String + Int + Bool + Float + Decimal + Time
+// + Money + typed NULL), codegen detects the `List SqlValue` element type, lowers
+// each element to the runtime-nameable `SqlParam`, and routes HERE. The String
+// path is untouched (zero regression); these are a parallel, typed binding path.
+//
+// Identical to `db_exec`/`db_query` except each param binds via `bind_sql_param`
+// (the total SqlParam→query binder used by insertFields/updateFields) instead of
+// `q.bind(String)`. Same `exec_routed`/`fetch_all_routed` (task-local
+// transaction-aware), same `db_format_sql` placeholder adaptation, same positional
+// binding — values are NEVER interpolated (sqlx owns escaping); the SQL string is
+// app-authored, exactly as in the String path and as in Go.
+
+pub fn db_exec_params<E: Send + From<String> + 'static>(conn: Db, sql: String, params: Vec<SqlParam>) -> SkyTask<E, ()> {
+    Box::pin(async move {
+        let final_sql = db_format_sql(sql);
+        let mut q = sqlx::query(&final_sql);
+        for p in params { q = bind_sql_param(q, p); }
+        match exec_routed(&conn, q).await {
+            Ok(_) => ok_res(()),
+            Err(e) => SkyResult::Err(sky_err(&e)),
+        }
+    })
+}
+
+pub fn db_query_params<E: Send + From<String> + 'static>(conn: Db, sql: String, params: Vec<SqlParam>) -> SkyTask<E, Vec<HashMap<String, String>>> {
+    Box::pin(async move {
+        let final_sql = db_format_sql(sql);
+        let mut q = sqlx::query(&final_sql);
+        for p in params { q = bind_sql_param(q, p); }
+        match fetch_all_routed(&conn, q).await {
+            Ok(rows) => ok_res(rows.iter().map(row_to_map).collect()),
+            Err(e) => SkyResult::Err(sky_err(&e)),
+        }
+    })
+}
+
 /// A value a Sky `Db.get*` accessor can read string-keyed fields from.
 ///
 /// Sky's `getString : String -> row -> String` is polymorphic in `row`; the
@@ -1593,6 +1633,58 @@ mod tests {
         match r4 {
             SkyResult::Ok(v) => assert_eq!(v, vec!["003_posts".to_string()]),
             SkyResult::Err(e) => panic!("resume migrate: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_query_params_bind_mixed_sqlvalue_types() {
+        // db_exec_params / db_query_params bind the full SqlParam range (the
+        // Go `List SqlValue` mixed-type path) — Text/Int/Bool/Float/Null — and
+        // round-trip through a SqlValue-param WHERE. `with_default` extracts the
+        // Ok value (a wrong/Err result then fails the following assert).
+        let db = fresh_db().await;
+        let mk: SkyResult<String, ()> = db_exec_raw(
+            db.clone(),
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER, \
+             active INTEGER, price REAL)".to_string(),
+        )
+        .await;
+        assert!(matches!(mk, SkyResult::Ok(())), "create: {mk:?}");
+
+        let ins: SkyResult<String, ()> = db_exec_params(
+            db.clone(),
+            "INSERT INTO items (name, qty, active, price) VALUES (?, ?, ?, ?)".to_string(),
+            vec![
+                SqlParam::Text("widget".to_string()),
+                SqlParam::Int(7),
+                SqlParam::Bool(true),
+                SqlParam::Float(9.99),
+            ],
+        )
+        .await;
+        assert!(matches!(ins, SkyResult::Ok(())), "mixed insert: {ins:?}");
+
+        // A row with typed NULLs (SqlNull → SqlParam::Null).
+        let ins2: SkyResult<String, ()> = db_exec_params(
+            db.clone(),
+            "INSERT INTO items (name, qty, active, price) VALUES (?, ?, ?, ?)".to_string(),
+            vec![SqlParam::Null, SqlParam::Int(0), SqlParam::Bool(false), SqlParam::Null],
+        )
+        .await;
+        assert!(matches!(ins2, SkyResult::Ok(())), "null insert: {ins2:?}");
+
+        // SELECT with an Int SqlValue param.
+        let rows: SkyResult<String, Vec<HashMap<String, String>>> = db_query_params(
+            db.clone(),
+            "SELECT name, qty FROM items WHERE qty = ?".to_string(),
+            vec![SqlParam::Int(7)],
+        )
+        .await;
+        let rs = rows.with_default(Vec::new());
+        assert_eq!(rs.len(), 1, "expected exactly 1 matching row, got {rs:?}");
+        if let Some(r) = rs.first() {
+            assert_eq!(r.get("name").map(String::as_str), Some("widget"));
+            assert_eq!(r.get("qty").map(String::as_str), Some("7"));
         }
     }
 

@@ -1694,6 +1694,39 @@ exprToRustInner ctx e = case e of
                 ++ sqlFieldsToVec ctx fieldsArg ++ ", "
                 ++ exprToRustString ctx projArg ++ ", "
                 ++ exprToRustString ctx decArg ++ ")"
+    -- ─── Db.exec / Db.query with `List SqlValue` (mixed-type params) ──────────
+    -- Go v0.16.26: `Db.exec`/`Db.query` accept `List SqlValue` (String + Int +
+    -- Bool + Float + Decimal + Time + Money + typed NULL in one positional list).
+    -- When the params arg's SOLVED element type is `SqlValue`, lower each element
+    -- to the runtime `SqlParam` (sqlValuesToVec) and route to the SqlParam-binding
+    -- runtime fns. A homogeneous `List String` does NOT satisfy `isSqlValueListArg`
+    -- → these arms don't fire → the generic Call handler emits db_exec/db_query
+    -- (Vec<String>) UNCHANGED (zero regression). Both VarKernel + VarTopLevel
+    -- (Ffi.kernel alias) forms, as with insertFields above.
+    Can.Call (Ann.At _ (Can.VarKernel modDb "exec")) [connArg, sqlArg, paramsArg]
+        | (modDb == "Db" || modDb == "Std.Db") && isSqlValueListArg ctx paramsArg ->
+            "db_exec_params("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx sqlArg ++ ", "
+                ++ sqlValuesToVec ctx paramsArg ++ ")"
+    Can.Call (Ann.At _ (Can.VarTopLevel mdlDb "exec")) [connArg, sqlArg, paramsArg]
+        | let mn = ModuleName._name mdlDb in (mn == "Db" || mn == "Std.Db") && isSqlValueListArg ctx paramsArg ->
+            "db_exec_params("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx sqlArg ++ ", "
+                ++ sqlValuesToVec ctx paramsArg ++ ")"
+    Can.Call (Ann.At _ (Can.VarKernel modDb "query")) [connArg, sqlArg, paramsArg]
+        | (modDb == "Db" || modDb == "Std.Db") && isSqlValueListArg ctx paramsArg ->
+            "db_query_params("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx sqlArg ++ ", "
+                ++ sqlValuesToVec ctx paramsArg ++ ")"
+    Can.Call (Ann.At _ (Can.VarTopLevel mdlDb "query")) [connArg, sqlArg, paramsArg]
+        | let mn = ModuleName._name mdlDb in (mn == "Db" || mn == "Std.Db") && isSqlValueListArg ctx paramsArg ->
+            "db_query_params("
+                ++ exprToRustString ctx connArg ++ ", "
+                ++ exprToRustString ctx sqlArg ++ ", "
+                ++ sqlValuesToVec ctx paramsArg ++ ")"
     -- DbDec.money col — the runtime `db_decode_money` decodes the "CODE AMOUNT"
     -- column into a `(Decimal, String)` pair; the GENERATED `Money` ADT can only
     -- be NAMED at the codegen boundary, so wrap the pair into
@@ -3898,3 +3931,34 @@ sqlWhereToVec ctx e =
     let inner = exprToRustString ctx e
         arms = sqlValueMatchArms
     in inner ++ ".into_iter().map(|(col, sv)| (col, match sv { " ++ arms ++ " })).collect::<Vec<_>>()"
+
+-- | Emit a Rust expression converting a Sky `List SqlValue` argument (the
+-- positional params of `Db.exec` / `Db.query` when the element type is
+-- `SqlValue`) into `Vec<SqlParam>`, reusing the SAME StdDbSqlValue→SqlParam arms
+-- as insertFields/updateFields. The runtime `db_exec_params` / `db_query_params`
+-- bind these positionally — never interpolated.
+sqlValuesToVec :: EmitCtx -> Can.Expr -> String
+sqlValuesToVec ctx e =
+    let inner = exprToRustString ctx e
+    in inner ++ ".into_iter().map(|sv| match sv { " ++ sqlValueMatchArms ++ " }).collect::<Vec<SqlParam>>()"
+
+-- | Does this argument's solver-inferred type read as `List SqlValue`? This is
+-- the routing key that distinguishes `Db.exec`/`Db.query`'s mixed-type
+-- `List SqlValue` params (→ db_exec_params/db_query_params, binding SqlParam)
+-- from the homogeneous `List String` params (→ the existing db_exec/db_query,
+-- Vec<String>).
+--
+-- CONSERVATIVE + PRECISE: matches ONLY `List <X>` where `X`'s type name is (or
+-- ends with) "SqlValue" — the suffix tolerance covers a qualified spelling
+-- (`Std.Db.SqlValue`) per the canonicalisation that the sibling Db arms already
+-- defend against. A `List String` is `List String` → no match (no false
+-- positive — `String` ≠ a SqlValue suffix). An unresolved/generic region → no
+-- match → the existing Vec<String> path (which only compiles for a genuine
+-- String list, so a real `List SqlValue` that slipped through would surface as a
+-- loud cargo error, never silent wrong binding).
+isSqlValueListArg :: EmitCtx -> Can.Expr -> Bool
+isSqlValueListArg ctx (Ann.At region _) =
+    case Map.lookup region (ecRegionTypes ctx) of
+        Just (Can.TType _ "List" [Can.TType _ elemName _]) ->
+            elemName == "SqlValue" || "SqlValue" `isSuffixOf` elemName
+        _ -> False
