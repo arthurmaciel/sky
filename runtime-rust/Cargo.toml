@@ -60,7 +60,12 @@ libc = "0.2"
 default = []
 async = ["tokio"]
 json = ["serde_json", "jsonwebtoken"]
-db = ["sqlx", "tokio", "serde_json", "json"]
+# `sha2` is required by `db_migrate_apply` (the `_sky_migrations` ledger stores a
+# sha256-hex checksum per migration — a cross-backend DB contract that must match
+# the Go backend byte-for-byte). Generated projects always enable `crypto`
+# (which also pulls sha2); listing it here fixes the standalone `--features db`
+# build, which has no crypto.
+db = ["sqlx", "tokio", "serde_json", "json", "sha2"]
 redis_store = ["redis", "tokio", "serde", "serde_json", "async-trait"]
 crypto = ["sha2", "rsa", "bcrypt", "aes-gcm", "chacha20poly1305", "pbkdf2"]
 compression = ["flate2", "zstd", "tokio"]

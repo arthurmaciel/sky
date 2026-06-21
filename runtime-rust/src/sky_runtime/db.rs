@@ -636,16 +636,137 @@ pub fn db_get_int<R: SkyRow>(field: String, row: R) -> i64 {
     0
 }
 
+/// Lowercase sha256-hex of a migration's SQL text. This value is stored in the
+/// `_sky_migrations` ledger and is a CROSS-BACKEND DB CONTRACT: the Go backend
+/// records `fmt.Sprintf("%x", sha256.Sum256([]byte(stmt)))` (db_auth.go), so a
+/// database created/advanced by one backend must hash byte-identically under the
+/// other. Hence sha256, lowercase hex, over the exact statement bytes — never a
+/// different/cheaper hash. `{:x}` on a `Sha256` digest is lowercase hex.
+fn migrate_checksum(sql: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(sql.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// `migrate : Db -> List (String, String) -> Task Error (List String)` — apply
+/// forward-only schema migrations, recording each in the `_sky_migrations`
+/// ledger so re-runs are idempotent. Go parity: `Db_migrateApply`'s library
+/// (Task-return) path in `runtime-go/rt/db_auth.go`.
+///
+/// Per migration `(name, sql)`:
+/// - checksum = sha256-hex(sql).
+/// - already in the ledger: checksum match → SKIP (already up to date);
+///   checksum DIFFERS → ERROR (the migration's SQL was edited after it was
+///   applied — "drift"; the developer must restore the text or ship a new
+///   compensating migration).
+/// - not yet applied: run the SQL AND record `(name, checksum, applied_at)` in
+///   ONE transaction (via the single-connection `db_with_transaction`), so a
+///   failure rolls back only that migration and a re-run resumes from it.
+///
+/// Trust model (matches Go): the migration SQL is compile-time app source the
+/// developer ships — it is run verbatim via `db_exec_raw` (arbitrary DDL is the
+/// point). Only the ledger bookkeeping crosses into bound-parameter territory
+/// (the INSERT binds name/checksum/applied_at — never string-interpolated).
+///
+/// Single-deployer assumption (matches Go): not concurrency-safe by design. The
+/// `name TEXT PRIMARY KEY` ledger column is the backstop — a racing double-apply
+/// loses the INSERT to a PK violation inside its own tx, which rolls back, so
+/// there is no partial-corruption window. The `SKY_DB_OP=status/migrate` CLI
+/// exit-modes + pretty status report are a tracked follow-up (this is the
+/// library Task-return path only).
 pub fn db_migrate_apply<E: Send + From<String> + 'static>(db: Db, migrations: Vec<(String, String)>) -> SkyTask<E, Vec<String>> {
     Box::pin(async move {
-        let mut applied = Vec::new();
+        // 1. Ensure the ledger exists. `IF NOT EXISTS` → idempotent.
+        if let SkyResult::Err(e) = db_exec_raw::<E>(
+            db.clone(),
+            "CREATE TABLE IF NOT EXISTS _sky_migrations (name TEXT PRIMARY KEY, \
+             checksum TEXT NOT NULL, applied_at TEXT NOT NULL)".to_string(),
+        )
+        .await
+        {
+            return SkyResult::Err(e);
+        }
+
+        // 2. Snapshot already-applied migrations: name -> checksum. Read OUTSIDE
+        //    any transaction (the per-migration txns come below); single-deployer
+        //    so no TOCTOU concern (see doc comment). No interpolation in the SELECT.
+        let rows: Vec<HashMap<String, String>> = match db_query::<E>(
+            db.clone(),
+            "SELECT name, checksum FROM _sky_migrations".to_string(),
+            Vec::new(),
+        )
+        .await
+        {
+            SkyResult::Ok(r) => r,
+            SkyResult::Err(e) => return SkyResult::Err(e),
+        };
+        let mut applied: HashMap<String, String> = HashMap::new();
+        for row in &rows {
+            // Total: a row missing either column is skipped rather than panicking.
+            if let (Some(name), Some(sum)) = (row.get("name"), row.get("checksum")) {
+                applied.insert(name.clone(), sum.clone());
+            }
+        }
+
+        // 3. Apply pending migrations in declaration order.
+        let mut out: Vec<String> = Vec::new();
         for (name, sql) in migrations {
-            match db_exec_raw(db.clone(), sql).await {
-                SkyResult::Ok(_) => applied.push(name),
+            let sum = migrate_checksum(&sql);
+            if let Some(prev) = applied.get(&name) {
+                if prev != &sum {
+                    // Drift: error embeds only the app-authored NAME, never the
+                    // SQL body (which may carry seed-data literals) nor the hash.
+                    return SkyResult::Err(
+                        format!(
+                            "db.migrate: migration '{name}' changed after it was \
+                             applied — checksum mismatch"
+                        )
+                        .into(),
+                    );
+                }
+                continue; // already up to date
+            }
+
+            // Each migration in its OWN transaction (single held connection via
+            // db_with_transaction's task-local routing): the migration SQL + the
+            // ledger INSERT commit together or roll back together.
+            let stmt = sql.clone();
+            let rec_name = name.clone();
+            let rec_sum = sum.clone();
+            let applied_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            // db_with_transaction takes an `Fn` (may be invoked more than once),
+            // so the captured owned values are cloned per-invocation inside.
+            let outcome: SkyResult<E, ()> = db_with_transaction::<E, ()>(
+                db.clone(),
+                move |c| {
+                    let stmt = stmt.clone();
+                    let rec_name = rec_name.clone();
+                    let rec_sum = rec_sum.clone();
+                    let applied_at = applied_at.clone();
+                    Box::pin(async move {
+                        if let SkyResult::Err(e) = db_exec_raw::<E>(c.clone(), stmt).await {
+                            return SkyResult::Err(e);
+                        }
+                        // Ledger INSERT uses BOUND params — no interpolation.
+                        db_exec::<E>(
+                            c.clone(),
+                            "INSERT INTO _sky_migrations (name, checksum, applied_at) \
+                             VALUES (?, ?, ?)".to_string(),
+                            vec![rec_name, rec_sum, applied_at],
+                        )
+                        .await
+                    })
+                },
+            )
+            .await;
+
+            match outcome {
+                SkyResult::Ok(()) => out.push(name),
                 SkyResult::Err(e) => return SkyResult::Err(e),
             }
         }
-        SkyResult::Ok(applied)
+        SkyResult::Ok(out)
     })
 }
 
@@ -1392,6 +1513,87 @@ mod tests {
         sqlx::query("CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0)")
             .execute(&pool).await.expect("create table");
         pool
+    }
+
+    #[test]
+    fn migrate_checksum_is_lowercase_sha256_hex_matching_go() {
+        // G4 pin: the ledger checksum is a cross-backend DB contract. This value
+        // is `sha256hex("SELECT 1;")` — identical to Go's
+        // fmt.Sprintf("%x", sha256.Sum256([]byte("SELECT 1;"))). A future hasher
+        // swap that broke cross-backend ledger interop would fail HERE.
+        assert_eq!(
+            super::migrate_checksum("SELECT 1;"),
+            "17db4fd369edb9244b9f91d9aeed145c3d04ad8ba6e95d06247f07a63527d11a"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_is_idempotent_and_drift_guarded() {
+        let db = fresh_db().await;
+        let base = vec![
+            (
+                "001_users".to_string(),
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)".to_string(),
+            ),
+            (
+                "002_email_idx".to_string(),
+                "CREATE INDEX idx_users_email ON users(email)".to_string(),
+            ),
+        ];
+
+        // First run applies both, in declaration order.
+        let r1: SkyResult<String, Vec<String>> =
+            db_migrate_apply(db.clone(), base.clone()).await;
+        match r1 {
+            SkyResult::Ok(v) => assert_eq!(v, vec!["001_users".to_string(), "002_email_idx".to_string()]),
+            SkyResult::Err(e) => panic!("first migrate: {e}"),
+        }
+
+        // Second run is idempotent — both already applied → 0 applied.
+        let r2: SkyResult<String, Vec<String>> =
+            db_migrate_apply(db.clone(), base.clone()).await;
+        match r2 {
+            SkyResult::Ok(v) => assert!(v.is_empty(), "expected 0 applied on re-run, got {v:?}"),
+            SkyResult::Err(e) => panic!("idempotent re-run: {e}"),
+        }
+
+        // Ledger recorded exactly the two migrations.
+        let ledger: SkyResult<String, Vec<HashMap<String, String>>> = db_query(
+            db.clone(),
+            "SELECT name, checksum FROM _sky_migrations ORDER BY name".to_string(),
+            Vec::new(),
+        )
+        .await;
+        match ledger {
+            SkyResult::Ok(rows) => assert_eq!(rows.len(), 2, "ledger rows: {rows:?}"),
+            SkyResult::Err(e) => panic!("read ledger: {e}"),
+        }
+
+        // Drift: same name, edited SQL → checksum-mismatch error, nothing applied.
+        let drift = vec![(
+            "001_users".to_string(),
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT, name TEXT)".to_string(),
+        )];
+        let r3: SkyResult<String, Vec<String>> = db_migrate_apply(db.clone(), drift).await;
+        match r3 {
+            SkyResult::Err(e) => assert!(
+                e.contains("checksum mismatch"),
+                "expected drift error, got: {e}"
+            ),
+            SkyResult::Ok(v) => panic!("expected drift error, but applied {v:?}"),
+        }
+
+        // Adding a NEW migration after the applied ones resumes — only it applies.
+        let mut extended = base.clone();
+        extended.push((
+            "003_posts".to_string(),
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY)".to_string(),
+        ));
+        let r4: SkyResult<String, Vec<String>> = db_migrate_apply(db.clone(), extended).await;
+        match r4 {
+            SkyResult::Ok(v) => assert_eq!(v, vec!["003_posts".to_string()]),
+            SkyResult::Err(e) => panic!("resume migrate: {e}"),
+        }
     }
 
     #[tokio::test]

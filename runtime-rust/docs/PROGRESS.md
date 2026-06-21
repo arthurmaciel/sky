@@ -17,6 +17,42 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 13:55 — Parity batch 10: Db.migrate `_sky_migrations` ledger (idempotent + drift-guarded)
+
+Rust `db_migrate_apply` was NAIVE — it ran every migration's SQL unconditionally
+and returned the names, with no ledger. Running `Db.migrate` twice re-ran all
+migrations (CREATE TABLE → error / dup data) — a P0 correctness gap. Rewrote it to
+Go's contract (`runtime-go/rt/db_auth.go` Db_migrateApply, library Task-return path):
+a `_sky_migrations(name PRIMARY KEY, checksum, applied_at)` ledger; per migration a
+sha256-hex checksum (cross-backend DB CONTRACT — byte-identical to Go's
+`fmt.Sprintf("%x", sha256.Sum256(...))`, pinned by a unit test); already-applied +
+matching checksum → SKIP (idempotent); already-applied + changed SQL → drift ERROR
+(name only, never the SQL body/hash); pending → run SQL + ledger INSERT in ONE
+transaction via the existing single-connection `db_with_transaction` (failure rolls
+back only that migration; re-run resumes). Ledger INSERT uses bound params (no
+interpolation); the migration SQL itself is run verbatim as trusted compile-time app
+source (same trust model as Go). Single-deployer by design; `name PRIMARY KEY` is the
+double-apply backstop.
+
+`sha2` added to the runtime `db` feature (generated projects already pull it via the
+always-on `crypto` default; this fixes the standalone build). `chrono` (unconditional)
+supplies the RFC3339 `applied_at`.
+
+Guardian-supervised (pre-write PASS + post-write APPROVE; G1 no-interpolation, G2
+name-only error, G3 Fn-clone-captures, G4 checksum pin, G5 total non-test code, G6
+feature wiring). Verified: clippy `-D warnings` clean; 499/0 incl. 2 new tests
+(checksum pin + apply/idempotent/drift/resume against real in-memory sqlite);
+07-todo-cli (Std.Db CLI) builds AND runs on `--backend rust` (add+list, exit 0).
+
+FOLLOW-UPS: task #6 — `SKY_DB_OP=status/migrate` CLI exit-modes + pretty status
+report (this batch is the library Task-return path only). task #5 — pre-existing
+`--features db`-only standalone build breakage (serde/bcrypt E0433, orthogonal).
+Deferred (non-blocking, low value): a `MigrationChecksum` newtype (single
+producer/consumer today).
+
+**Affected:** `runtime-rust/src/sky_runtime/db.rs` (migrate_checksum + db_migrate_apply
+rewrite + 2 tests), `runtime-rust/Cargo.toml` (`db` feature += sha2).
+
 ## 2026-06-21 13:35 — Parity batch 9: per-request CatchPanic→500 on the Sky.Live router
 
 `Sky.Http.Server` already wraps its router in `tower_http::CatchPanicLayer` (server.rs)
