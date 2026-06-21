@@ -286,6 +286,55 @@ mod tests {
         assert_eq!(super::normalize_method(""), "other");
     }
 
+    // Regression: a panicking handler must become a 500 (not an unwound, dropped
+    // connection) AND still be counted by `track` as status 500 — the Go-parity
+    // contract for the new `CatchPanicLayer` placed INNER of `track` in the
+    // Sky.Live router. Well-typed Sky can't panic (the no-panic thesis), so this
+    // defense-in-depth floor can only be exercised from a test handler that
+    // deliberately panics. NOTE: `.unwrap()`/`.expect()` are denied on ALL
+    // targets (incl. tests); `panic!` and `match Infallible {}` are the allowed
+    // totals here.
+    #[tokio::test]
+    async fn handler_panic_becomes_500_and_is_counted() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt; // oneshot
+
+        // Test-only handler that deliberately panics — the behaviour under test
+        // (what `CatchPanicLayer` must convert to a 500). Explicit `-> Response`
+        // return so the never type doesn't trip the denied
+        // `dependency_on_unit_never_type_fallback` lint; `#[cfg(test)]` marks it
+        // as genuine test code for the risk-lint precheck.
+        #[cfg(test)]
+        async fn boom() -> axum::response::Response {
+            panic!("intentional test panic")
+        }
+
+        // Mirror the real Sky.Live nesting: track( catch_panic( handler ) ). csrf
+        // is omitted — it only acts on mutating methods, so a GET panic exercises
+        // the catch_panic→500 path + track's post-`next.run` metering identically.
+        let app = Router::new()
+            .route("/boom", get(boom))
+            .layer(tower_http::catch_panic::CatchPanicLayer::new())
+            .layer(axum::middleware::from_fn(track));
+
+        let req = match Request::builder().uri("/boom").body(Body::empty()) {
+            Ok(r) => r,
+            Err(e) => panic!("build request: {e}"),
+        };
+        // Router's Service error is `Infallible`; `match e {}` is total.
+        let resp = app.oneshot(req).await.unwrap_or_else(|e| match e {});
+        // Panic was caught and converted, not propagated.
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // Go parity: the converted 500 returns through `track` normally, so the
+        // request is counted with status="500" (not skipped via an unwind).
+        let m = crate::sky_runtime::telemetry::write_prom();
+        assert!(m.contains("sky_live_requests_total"), "{m}");
+        assert!(m.contains("status=\"500\""), "{m}");
+    }
+
     #[tokio::test]
     async fn readyz_flips_to_draining() {
         // Default ready.

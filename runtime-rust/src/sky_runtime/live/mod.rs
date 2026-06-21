@@ -1206,6 +1206,22 @@ where
             // observability::track so a rejected CSRF POST still gets counted +
             // access-logged (Go parity — CSRF sits inside the observability mw).
             .layer(axum::middleware::from_fn(csrf::csrf_middleware))
+            // Per-request panic recovery (Go parity — its handlers run under a
+            // defer/recover that returns 500 instead of crashing the worker;
+            // rt.go:3463 etc.). Symmetric with Sky.Http.Server (server.rs). The
+            // Rust thesis is that well-typed Sky can't panic, so this is the
+            // defense-in-depth FLOOR, not the foundation: a handler / csrf-mw
+            // panic becomes a 500 instead of an unwound tokio task that drops the
+            // connection with no response. Placed INNER of `track` (and OUTER of
+            // csrf + the route handlers) so the converted 500 returns through
+            // track's `next.run().await` normally — track still counts +
+            // access-logs + histograms it as status 500, matching Go (whose
+            // recover is innermost; the outer middleware observes the 500). If it
+            // were outermost the panic would unwind through track, skipping its
+            // post-`next.run` metering. Default body is a static, secret-free
+            // "Service panicked"; a structured/classified handler is a tracked
+            // follow-up for both this surface and server.rs.
+            .layer(tower_http::catch_panic::CatchPanicLayer::new())
             .layer(axum::middleware::from_fn(observability::track))
             .with_state(state);
 

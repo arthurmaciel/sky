@@ -83,6 +83,11 @@ full = ["async", "json", "db", "redis_store", "crypto", "compression", "csv_kern
 [dev-dependencies]
 regex = "1"
 proptest = "1"
+# `tower` (util feature) is a TEST-ONLY dep for `ServiceExt::oneshot`, which
+# drives a Router through a single request in unit tests (e.g. asserting a
+# panicking handler is caught as a 500). It does NOT propagate to generated
+# projects — those emit their own Cargo.toml from crate-specs.toml.
+tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["full", "test-util", "macros"] }
 serde_json = "1"
 sha2 = "0.10"

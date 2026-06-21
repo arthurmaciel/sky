@@ -17,6 +17,33 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 13:35 — Parity batch 9: per-request CatchPanic→500 on the Sky.Live router
+
+`Sky.Http.Server` already wraps its router in `tower_http::CatchPanicLayer` (server.rs)
+→ a panicking handler returns 500. `Sky.Live` did NOT: a panic in a Live handler
+(page render / `/_sky/event` POST / SSE) unwound the tokio task and DROPPED the
+connection with no response, while Go's per-request defer/recover returns 500
+(rt.go:3463). Closed by inserting `.layer(CatchPanicLayer::new())` into the Live
+layer stack, placed INNER of `observability::track` and OUTER of csrf + handlers
+(runtime nesting `track(catch_panic(csrf(handler)))`) so the converted 500 returns
+through track normally and is still counted + access-logged + histogrammed as status
+500 — Go-parity (Go's recover is innermost; the outer mw observes the 500). Default
+static "Service panicked" body (secret-free; symmetric with server.rs). The no-panic
+thesis means well-typed Sky can't panic, so this is the defense-in-depth FLOOR, not the
+foundation. Guardian-supervised (G1 csrf is pure validate-before/tail-call → unwind is
+fail-safe; G2 default-layer floor; G3 follow-up filed). Verified: clippy `-D warnings`
+clean; 497/0 incl. a new `#[tokio::test]` that oneshots a panicking route and asserts
+500 AND `sky_live_requests_total{status="500"}` (the counted-as-500 parity claim);
+live rebuild+boot of 09-live-counter → GET / =200, /_sky/metrics intact.
+
+FOLLOW-UP (task #4, guardian G3): route BOTH catch-panic surfaces through
+`core::classify_panic` for a structured Error log (errId + class) + stable non-leaking
+body; until then the default static body is the leak-free floor.
+
+**Affected:** `runtime-rust/src/sky_runtime/live/mod.rs` (CatchPanicLayer),
+`runtime-rust/src/sky_runtime/live/observability.rs` (regression test),
+`runtime-rust/Cargo.toml` (test-only `tower` dev-dep for `ServiceExt::oneshot`).
+
 ## 2026-06-21 13:10 — Parity batch 8: bounded `{method,status}` labels on sky_live_requests_total
 
 `/_sky/metrics` exposed `sky_live_requests_total` as a single UNLABELED grand-total,
