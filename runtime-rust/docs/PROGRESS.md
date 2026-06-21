@@ -17,6 +17,29 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 14:25 — Parity batch 7: latency histograms (completes the /_sky/metrics P0)
+
+Extends the batch-5 registry with a `Histogram` MetricValue variant (cumulative
+buckets on Go's `BucketsLatency` boundaries 1ms…5s, sum, count) + `metric_observe`
++ the `_bucket{le=…}` / `+Inf` / `_sum` / `_count` exposition (Go's
+writeHistogram). The track middleware now observes `sky_live_request_seconds` per
+request — UNLABELED on purpose: labeling by the raw path would be the
+unbounded-cardinality memory-DoS the batch-5 guardian flagged (the registry never
+evicts; Go labels by a bounded route template the Rust middleware lacks here).
+
+With this the `/_sky/metrics` P0 ("single unlabeled counter — no registry, no
+labels, no histograms") is FULLY closed: counters + gauges + a latency histogram.
+
+Verified live (28-live-counter, 6 requests): `# TYPE sky_live_request_seconds
+histogram` with 8 cumulative `_bucket{le=…}` lines + `+Inf` (all 6, sub-ms) +
+`_sum 0.002996` + `_count 6`. Full suite green; clippy `--all-features` clean.
+
+Remaining metrics follow-up: `sky_live_msg_seconds` (Msg-dispatch histogram) +
+per-status/route request labels (needs a bounded route-template source).
+
+**Affected:** `runtime-rust/src/sky_runtime/telemetry.rs`,
+`runtime-rust/src/sky_runtime/live/observability.rs`.
+
 ## 2026-06-21 14:05 — Parity batch 6: console Basic-auth + WWW-Authenticate challenge
 
 The production console/metrics auth gate (`console.rs gate_blocked`) accepted

@@ -252,7 +252,18 @@ struct MetricKey {
 enum MetricValue {
     Counter(u64),
     Gauge(i64),
+    /// Cumulative histogram: `buckets[i]` counts observations `<= boundaries[i]`
+    /// (Prometheus cumulative semantics); the `+Inf` bucket is `count`.
+    Histogram {
+        boundaries: Vec<f64>,
+        buckets: Vec<u64>,
+        sum: f64,
+        count: u64,
+    },
 }
+
+/// Go's `BucketsLatency` (buckets.go) — hot-path latency seconds, 1ms…5s.
+const LATENCY_BUCKETS: [f64; 8] = [0.001, 0.005, 0.010, 0.050, 0.100, 0.500, 1.0, 5.0];
 
 // `Mutex::new` + `BTreeMap::new` are const → a plain static, no OnceLock. BTree
 // iteration is sorted by (name, labels), giving deterministic, grouped output.
@@ -277,7 +288,7 @@ pub fn metric_inc(name: &str, labels: &[(&str, &str)], by: u64) {
     let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     match g.entry(key).or_insert(MetricValue::Counter(0)) {
         MetricValue::Counter(c) => *c = c.saturating_add(by),
-        MetricValue::Gauge(_) => {}
+        MetricValue::Gauge(_) | MetricValue::Histogram { .. } => {}
     }
 }
 
@@ -289,8 +300,51 @@ pub fn metric_add_gauge(name: &str, labels: &[(&str, &str)], delta: i64) {
     let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     match g.entry(key).or_insert(MetricValue::Gauge(0)) {
         MetricValue::Gauge(v) => *v = v.saturating_add(delta).max(0),
-        MetricValue::Counter(_) => {}
+        MetricValue::Counter(_) | MetricValue::Histogram { .. } => {}
     }
+}
+
+/// Record a latency/duration `v` (seconds) into a labeled histogram (creating it
+/// with the BucketsLatency boundaries first). Cumulative: bumps every bucket
+/// whose boundary `>= v` (Go's `Observe`). Labels MUST be low-cardinality (see
+/// `MetricKey.labels`) — callers pass `&[]` or a bounded class, NEVER a raw path.
+pub fn metric_observe(name: &str, labels: &[(&str, &str)], v: f64) {
+    let key = MetricKey { name: name.to_string(), labels: norm_labels(labels) };
+    let mut g = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    let entry = g.entry(key).or_insert_with(|| MetricValue::Histogram {
+        boundaries: LATENCY_BUCKETS.to_vec(),
+        buckets: vec![0; LATENCY_BUCKETS.len()],
+        sum: 0.0,
+        count: 0,
+    });
+    if let MetricValue::Histogram { boundaries, buckets, sum, count } = entry {
+        for (i, b) in boundaries.iter().enumerate() {
+            if v <= *b {
+                if let Some(c) = buckets.get_mut(i) {
+                    *c = c.saturating_add(1);
+                }
+            }
+        }
+        *sum += v;
+        *count = count.saturating_add(1);
+    }
+}
+
+/// Format a float for Prometheus exposition (bucket `le` / `_sum`). Rust's `{}`
+/// gives the canonical short form (`0.001`, `0.01`, `1`, `5`).
+fn format_float(f: f64) -> String {
+    format!("{f}")
+}
+
+/// Like `render_labels` but always appends an `le="<bound>"` label (histograms),
+/// so the block is never empty.
+fn render_labels_with_le(labels: &[(String, String)], le: &str) -> String {
+    let mut pairs: Vec<String> = labels
+        .iter()
+        .map(|(k, v)| format!("{}=\"{}\"", k, escape_label_value(v)))
+        .collect();
+    pairs.push(format!("le=\"{}\"", escape_label_value(le)));
+    format!("{{{}}}", pairs.join(","))
 }
 
 /// Per-metric (TYPE, HELP) for the exposition header. Unknown names default to a
@@ -302,6 +356,7 @@ fn metric_meta(name: &str) -> (&'static str, &'static str) {
         "sky_live_sse_connections_total" => ("counter", "Total SSE connections opened."),
         "sky_live_sessions_active" => ("gauge", "Currently-active Sky.Live sessions."),
         "sky_live_errors_total" => ("counter", "Total responses with a 5xx status."),
+        "sky_live_request_seconds" => ("histogram", "HTTP request latency in seconds."),
         _ => ("counter", "Sky runtime metric."),
     }
 }
@@ -344,11 +399,31 @@ pub fn write_prom() -> String {
             last_name = Some(key.name.as_str());
         }
         let labels = render_labels(&key.labels);
-        let v = match val {
-            MetricValue::Counter(c) => c.to_string(),
-            MetricValue::Gauge(g) => g.to_string(),
-        };
-        out.push_str(&format!("{}{} {}\n", key.name, labels, v));
+        match val {
+            MetricValue::Counter(c) => out.push_str(&format!("{}{} {}\n", key.name, labels, c)),
+            MetricValue::Gauge(gv) => out.push_str(&format!("{}{} {}\n", key.name, labels, gv)),
+            MetricValue::Histogram { boundaries, buckets, sum, count } => {
+                // Cumulative _bucket lines, then +Inf, _sum, _count (Go's
+                // writeHistogram). buckets[i] already holds the cumulative count.
+                for (i, b) in boundaries.iter().enumerate() {
+                    let c = buckets.get(i).copied().unwrap_or(0);
+                    out.push_str(&format!(
+                        "{}_bucket{} {}\n",
+                        key.name,
+                        render_labels_with_le(&key.labels, &format_float(*b)),
+                        c
+                    ));
+                }
+                out.push_str(&format!(
+                    "{}_bucket{} {}\n",
+                    key.name,
+                    render_labels_with_le(&key.labels, "+Inf"),
+                    count
+                ));
+                out.push_str(&format!("{}_sum{} {}\n", key.name, labels, format_float(*sum)));
+                out.push_str(&format!("{}_count{} {}\n", key.name, labels, count));
+            }
+        }
     }
     out
 }

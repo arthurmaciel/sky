@@ -109,6 +109,15 @@ pub async fn track(req: axum::extract::Request, next: axum::middleware::Next) ->
     // telemetry, not its own page renders.
     if !is_internal_path(&path) && !is_sub_app() {
         let dur_us = start.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        // Request-latency histogram (Go parity: Observe sky_live_request_seconds).
+        // UNLABELED on purpose — labeling by the raw path would be an unbounded-
+        // cardinality memory-DoS (the registry never evicts); Go labels by a
+        // bounded route template, which the Rust middleware doesn't have here.
+        super::super::telemetry::metric_observe(
+            "sky_live_request_seconds",
+            &[],
+            dur_us as f64 / 1_000_000.0,
+        );
         let ok = status < 500;
         // Bound + sanitise the (attacker-controllable) raw path before it enters
         // the in-RAM log ring / OTLP push: cap the length and strip control bytes
