@@ -1265,10 +1265,23 @@ where
             // access-logs + histograms it as status 500, matching Go (whose
             // recover is innermost; the outer middleware observes the 500). If it
             // were outermost the panic would unwind through track, skipping its
-            // post-`next.run` metering. Default body is a static, secret-free
-            // "Service panicked"; a structured/classified handler is a tracked
-            // follow-up for both this surface and server.rs.
-            .layer(tower_http::catch_panic::CatchPanicLayer::new())
+            // post-`next.run` metering. The custom responder classifies + logs the
+            // panic SERVER-SIDE (errId, via core::panic_500_body) and returns a 500
+            // carrying ONLY the errId — never the panic message (no info leak).
+            // Symmetric with Sky.Http.Server (the body shape is shared in `core`;
+            // the Live router can't reference `server.rs` — a Live-only generated
+            // project doesn't include it).
+            .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+                |err: Box<dyn std::any::Any + Send + 'static>| {
+                    use axum::response::IntoResponse;
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        crate::sky_runtime::core::panic_500_body(&*err),
+                    )
+                        .into_response()
+                },
+            ))
             .layer(axum::middleware::from_fn(observability::track))
             .with_state(state);
 

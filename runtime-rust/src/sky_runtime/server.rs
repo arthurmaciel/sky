@@ -479,8 +479,20 @@ pub fn server_listen<E: From<String> + Send + 'static>(port: i64, routes: Vec<Se
             }
         }
         // Sky doctrine: a panicking handler returns 500, never crashes the
-        // process (mirrors the Go runtime's per-handler recover()).
-        let app = app.layer(tower_http::catch_panic::CatchPanicLayer::new());
+        // process (mirrors the Go runtime's per-handler recover()). The custom
+        // responder classifies + logs the panic SERVER-SIDE (errId) and returns a
+        // 500 carrying ONLY the errId — never the panic message (no info leak).
+        let app = app.layer(tower_http::catch_panic::CatchPanicLayer::custom(
+            |err: Box<dyn std::any::Any + Send + 'static>| {
+                use axum::response::IntoResponse;
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    crate::sky_runtime::core::panic_500_body(&*err),
+                )
+                    .into_response()
+            },
+        ));
         // Bind host is overridable via SKY_HTTP_BIND (e.g. 127.0.0.1 to avoid
         // exposing on every interface). Default stays 0.0.0.0 for byte-identical
         // behaviour with prior releases; an empty/blank override falls back too.

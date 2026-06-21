@@ -232,32 +232,104 @@ fn short_err_id() -> String {
     format!("{n:08x}")
 }
 
+/// Extract a panic payload's message, classify it, emit the structured/plain
+/// server-side log line (honouring `SKY_LOG_FORMAT=json`), and RETURN the 8-hex
+/// correlation errId. SHARED by the exit-on-panic hook (`install_panic_classifier`,
+/// used for Sky.Cli/Tui binaries) and the server/live `CatchPanicLayer` responder
+/// (`server::panic_response`).
+///
+/// Two load-bearing properties:
+/// 1. **Total** — it runs in a panic-unwinding context; a panic of ITS OWN would
+///    abort the process. Downcast falls back to `"panic"`; no unwrap/index.
+/// 2. **Does NOT exit** — the raw message goes to the SERVER LOG only; the caller
+///    decides the fate (the hook adds `process::exit(1)`; the HTTP layer returns a
+///    500 carrying ONLY the errId, never the message — so a panic message that
+///    happens to contain a secret / PII / internal path is never sent to a client).
+pub fn classify_and_log_panic(payload: &(dyn std::any::Any + Send)) -> String {
+    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic".to_string()
+    };
+    let kind = classify_panic(&msg);
+    let err_id = short_err_id();
+    let json = std::env::var("SKY_LOG_FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    if json {
+        eprintln!(
+            "{{\"level\":\"error\",\"kind\":\"{}\",\"errId\":\"{}\",\"message\":\"{}\"}}",
+            kind,
+            err_id,
+            crate::sky_runtime::telemetry::json_escape(&msg)
+        );
+    } else {
+        eprintln!("[error] {kind} (ref {err_id}): {msg}");
+    }
+    err_id
+}
+
+/// The JSON body for a server `CatchPanicLayer` 500: classifies + logs the panic
+/// SERVER-SIDE (errId) via `classify_and_log_panic`, then returns a body carrying
+/// ONLY the errId — NEVER the panic message. The SINGLE source of the 500 body
+/// shape, shared by Sky.Http.Server and Sky.Live (each wraps it in a 500 Response
+/// at its own `CatchPanicLayer::custom` site). Axum-free, so it lives in the
+/// always-compiled `core` — the generated project includes `server.rs` only for
+/// Sky.Http.Server apps, so a Live-only app can't reference a server-module fn.
+///
+/// SECURITY: `err_id` (8 lowercase-hex chars) is the ONLY value interpolated; the
+/// rest is a fixed literal. A panic message (free-form, may carry secrets / PII /
+/// paths) never reaches this body.
+pub fn panic_500_body(payload: &(dyn std::any::Any + Send)) -> String {
+    let err_id = classify_and_log_panic(payload);
+    format!("{{\"error\":\"internal server error\",\"ref\":\"{err_id}\"}}")
+}
+
 /// Install the classifying panic hook. Idempotent in effect (re-installing just
-/// replaces the hook). Called at the top of generated `fn main()`.
+/// replaces the hook). Called at the top of generated `fn main()` for non-server
+/// shapes (Sky.Cli/Tui); server/live binaries rely on the per-request
+/// `CatchPanicLayer` instead (so a handler panic returns a 500, not exit).
 pub fn install_panic_classifier() {
     std::panic::set_hook(Box::new(|info| {
-        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
-            (*s).to_string()
-        } else if let Some(s) = info.payload().downcast_ref::<String>() {
-            s.clone()
-        } else {
-            "panic".to_string()
-        };
-        let kind = classify_panic(&msg);
-        let err_id = short_err_id();
-        let json = std::env::var("SKY_LOG_FORMAT")
-            .map(|v| v.eq_ignore_ascii_case("json"))
-            .unwrap_or(false);
-        if json {
-            eprintln!(
-                "{{\"level\":\"error\",\"kind\":\"{}\",\"errId\":\"{}\",\"message\":\"{}\"}}",
-                kind,
-                err_id,
-                crate::sky_runtime::telemetry::json_escape(&msg)
-            );
-        } else {
-            eprintln!("[error] {kind} (ref {err_id}): {msg}");
-        }
+        // Log (classified, with errId) then exit — the CLI/Tui contract.
+        let _ = classify_and_log_panic(info.payload());
         std::process::exit(1);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_and_log_panic_returns_8hex_errid_and_never_panics() {
+        // &str, String, and a non-string payload all yield an 8-hex errId — and
+        // the call itself never panics (it runs in a panic-unwinding context).
+        let s: &str = "divide by zero";
+        let e1 = classify_and_log_panic(&s);
+        let owned: String = "index out of bounds: the len is 0".to_string();
+        let e2 = classify_and_log_panic(&owned);
+        let other: i32 = 42; // non-string payload → "panic" fallback
+        let e3 = classify_and_log_panic(&other);
+        for id in [&e1, &e2, &e3] {
+            assert_eq!(id.len(), 8, "errId not 8 chars: {id}");
+            // The errId is the ONLY value interpolated into the HTTP 500 body, so
+            // its charset MUST be [0-9a-f] — proving the body can carry nothing
+            // attacker-influenced.
+            assert!(
+                id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "errId not lowercase hex: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_panic_maps_known_kinds() {
+        assert_eq!(classify_panic("attempt to divide by zero"), "DivisionByZero");
+        assert_eq!(classify_panic("index out of bounds: the len is 3"), "IndexOutOfRange");
+        assert_eq!(classify_panic("attempt to add with overflow"), "ArithmeticOverflow");
+        assert_eq!(classify_panic("something else entirely"), "Unexpected");
+    }
 }

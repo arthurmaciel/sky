@@ -307,17 +307,30 @@ mod tests {
         // return so the never type doesn't trip the denied
         // `dependency_on_unit_never_type_fallback` lint; `#[cfg(test)]` marks it
         // as genuine test code for the risk-lint precheck.
+        // The panic message embeds a FAKE SECRET — the no-leak assertion below
+        // proves it never reaches the client (it goes to the server log only).
         #[cfg(test)]
         async fn boom() -> axum::response::Response {
-            panic!("intentional test panic")
+            panic!("token=SECRET123 internal /etc/secret leaked")
         }
 
-        // Mirror the real Sky.Live nesting: track( catch_panic( handler ) ). csrf
-        // is omitted — it only acts on mutating methods, so a GET panic exercises
-        // the catch_panic→500 path + track's post-`next.run` metering identically.
+        // Mirror the real Sky.Live nesting: track( catch_panic( handler ) ) with
+        // the REAL shared responder. csrf is omitted — it only acts on mutating
+        // methods, so a GET panic exercises the catch_panic→500 path + track's
+        // post-`next.run` metering identically.
         let app = Router::new()
             .route("/boom", get(boom))
-            .layer(tower_http::catch_panic::CatchPanicLayer::new())
+            .layer(tower_http::catch_panic::CatchPanicLayer::custom(
+                |err: Box<dyn std::any::Any + Send + 'static>| {
+                    use axum::response::IntoResponse;
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        crate::sky_runtime::core::panic_500_body(&*err),
+                    )
+                        .into_response()
+                },
+            ))
             .layer(axum::middleware::from_fn(track));
 
         let req = match Request::builder().uri("/boom").body(Body::empty()) {
@@ -327,7 +340,17 @@ mod tests {
         // Router's Service error is `Infallible`; `match e {}` is total.
         let resp = app.oneshot(req).await.unwrap_or_else(|e| match e {});
         // Panic was caught and converted, not propagated.
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let status = resp.status();
+        let body = body_string(resp).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        // SECURITY (the load-bearing invariant): the 500 body carries ONLY the
+        // errId — the panic message (here a fake secret) must NEVER reach the
+        // client.
+        assert!(body.contains("ref"), "expected an errId `ref` in the body: {body}");
+        assert!(
+            !body.contains("SECRET123") && !body.contains("/etc/secret"),
+            "panic message LEAKED into the 500 response body: {body}"
+        );
         // Go parity: the converted 500 returns through `track` normally, so the
         // request is counted with status="500" (not skipped via an unwind).
         let m = crate::sky_runtime::telemetry::write_prom();

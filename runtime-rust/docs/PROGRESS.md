@@ -17,6 +17,36 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 16:10 — Parity batch 16: classified, no-leak panic 500 body on both server surfaces
+
+Batch 9 gave both Sky.Http.Server + Sky.Live a `CatchPanicLayer` with the DEFAULT static
+"Service panicked" body + no structured log. Upgraded both to a custom responder that
+classifies + logs the panic SERVER-SIDE (errId, via the batch-4 classifier) and returns a
+500 whose body carries ONLY the 8-hex errId — NEVER the panic message (a panic message is
+free-form and can carry secrets/PII/paths). core.rs: extracted the shared non-exiting
+`classify_and_log_panic(payload) -> errId` (the hook now calls it then exits — behaviour-
+identical) + `panic_500_body(payload) -> String` (the SINGLE source of the 500 body; only
+the lowercase-hex errId is interpolated). Both layers pass an inline
+`CatchPanicLayer::custom` closure calling `core::panic_500_body`.
+
+DESIGN NOTE (caught by a real generated-project rebuild): the shared helper MUST live in
+always-compiled `core`, NOT in `server.rs` — a Live-only generated project does NOT include
+server.rs (it's gated on usesHttpServer, not usesLive), so a `server::*` reference E0433'd.
+The runtime crate's own feature graph (live=[server]) masks this; only rebuilding a
+Live-only project surfaces it.
+
+Guardian-supervised (pre-write PASS w/ G1-G5; G3c — verified the exit-on-panic hook is
+gated OFF for server/live mains (Emitter.hs:403), so the layer is reached not pre-empted).
+Verified: clippy `-D warnings` clean; 503/0 incl. a no-leak test (panic with
+`token=SECRET123 … /etc/secret`, assert the 500 body has `ref` but NOT the secret) + core
+unit tests (8-hex errId, never panics over &str/String/non-string; kind mapping); Live-only
+generated project (no server.rs) builds + serves 200; Sky.Http.Server project builds.
+Closes task #4 — supersedes the batch-9 default-body floor.
+
+**Affected:** `runtime-rust/src/sky_runtime/core.rs` (classify_and_log_panic +
+panic_500_body + tests), `runtime-rust/src/sky_runtime/server.rs` + `live/mod.rs` (custom
+responder closures), `runtime-rust/src/sky_runtime/live/observability.rs` (no-leak test).
+
 ## 2026-06-21 15:45 — Parity batch 15: Db.exec/execRaw return rows-affected Int (was unit)
 
 stdlib `exec`/`execRaw : ... -> Task Error Int` (rows-affected, Go's res.RowsAffected())
