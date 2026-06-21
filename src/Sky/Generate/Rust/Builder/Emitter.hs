@@ -393,6 +393,21 @@ entryPointSection uk mainReturnsTask =
         -- backend shape (cli / live / tui / server) keeps the spawning
         -- `block_on` unchanged.
         entryDriver = if usesWebview uk then "block_on_current_thread" else "block_on"
+        -- Synchronous-panic gate (Go parity: rt.LogPanicAndExit). Installed on
+        -- every SYNCHRONOUS main shape (Sky.Cli / Sky.Tui / Sky.Webview / batch)
+        -- but NOT on a server (Sky.Live / Sky.Http.Server): a server's request
+        -- handlers must recover-to-500 per request, so a process-global
+        -- exit-on-panic hook would crash the WHOLE server on a single bad
+        -- request. Mirrors Go, whose synchronous LogPanicAndExit is the
+        -- non-server path while handlers carry their own per-request recover.
+        installPanicGate = not (usesHttpServer uk || usesLive uk)
+        panicGate = if installPanicGate then
+            [ "    // Synchronous-panic gate (Go parity: rt.LogPanicAndExit) —"
+            , "    // classify an escaping panic (div-by-zero / index-OOB /"
+            , "    // overflow) into a Sky error + exit 1, not a raw Rust backtrace."
+            , "    sky_runtime::core::install_panic_classifier();"
+            ]
+          else []
     in
     [ ""
     , "// ==========================================="
@@ -400,7 +415,7 @@ entryPointSection uk mainReturnsTask =
     , "// ==========================================="
     , ""
     , "fn main() {"
-    ] ++ (if mainIsTask then
+    ] ++ panicGate ++ (if mainIsTask then
         -- sky_main returns SkyTask<()> → run it via block_on. The `tokio`
         -- Cargo feature is ALWAYS in the default set (see emitCargoToml), so
         -- `block_on` is unconditionally available. This MUST block_on even when

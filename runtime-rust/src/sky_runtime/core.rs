@@ -192,3 +192,72 @@ pub fn result_traverse<T0: Clone, T1: Clone, E>(f: impl Fn(T0) -> SkyResult<E, T
     for item in items { match f(item) { SkyResult::Ok(v) => out.push(v), SkyResult::Err(e) => return SkyResult::Err(e) } }
     SkyResult::Ok(out)
 }
+
+// ===========================================
+// Synchronous-panic gate (Go parity: rt.LogPanicAndExit)
+// ===========================================
+// The generated `fn main()` installs this FIRST so any panic that escapes the
+// synchronous Sky path — a div-by-zero (`a / 0`), an index-out-of-range, an
+// arithmetic overflow, etc. — is CLASSIFIED into a Sky error kind, logged
+// structurally with a short correlation id, and the process exits 1 — instead of
+// dumping a raw Rust backtrace. Mirrors Go's `defer rt.LogPanicAndExit()` on
+// every emitted `func main()` (CLAUDE.md "Synchronous-panic gate"). The hook is
+// total (no unwrap/index/panic of its own) and honours `SKY_LOG_FORMAT=json`.
+
+/// Map a Rust panic message to a Sky error classification (Go's panic-class
+/// taxonomy, restricted to the kinds reachable from well-typed Sky on the typed
+/// Rust backend — TypeMismatch/CoerceFailure are Go-runtime-only).
+fn classify_panic(msg: &str) -> &'static str {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("divide by zero") || m.contains("divisor of zero") {
+        "DivisionByZero"
+    } else if m.contains("index out of bounds") || m.contains("out of range") {
+        "IndexOutOfRange"
+    } else if m.contains("overflow") {
+        "ArithmeticOverflow"
+    } else {
+        "Unexpected"
+    }
+}
+
+/// 8 hex chars (4 bytes) of correlation id — derives from the wall-clock
+/// sub-second component so two panics in one process don't collide. Total: a
+/// clock read failure falls back to `0`.
+fn short_err_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    format!("{n:08x}")
+}
+
+/// Install the classifying panic hook. Idempotent in effect (re-installing just
+/// replaces the hook). Called at the top of generated `fn main()`.
+pub fn install_panic_classifier() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "panic".to_string()
+        };
+        let kind = classify_panic(&msg);
+        let err_id = short_err_id();
+        let json = std::env::var("SKY_LOG_FORMAT")
+            .map(|v| v.eq_ignore_ascii_case("json"))
+            .unwrap_or(false);
+        if json {
+            eprintln!(
+                "{{\"level\":\"error\",\"kind\":\"{}\",\"errId\":\"{}\",\"message\":\"{}\"}}",
+                kind,
+                err_id,
+                crate::sky_runtime::telemetry::json_escape(&msg)
+            );
+        } else {
+            eprintln!("[error] {kind} (ref {err_id}): {msg}");
+        }
+        std::process::exit(1);
+    }));
+}

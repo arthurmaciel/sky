@@ -17,6 +17,39 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 13:10 — Parity batch 4: synchronous-panic gate (Go LogPanicAndExit parity)
+
+Guardian-supervised (PASS, incl. the server-gating safety decision). A panic
+escaping the synchronous Sky path (div-by-zero, index-OOB, overflow) dumped a raw
+Rust backtrace instead of a classified Sky error. New
+`core::install_panic_classifier()` installs a `panic::set_hook` that classifies
+the message (DivisionByZero / IndexOutOfRange / ArithmeticOverflow / Unexpected),
+logs it structurally with an 8-hex correlation id (honours `SKY_LOG_FORMAT=json`
+via `telemetry::json_escape`), and `process::exit(1)` — total (no
+unwrap/index/panic of its own).
+
+Codegen (`Emitter.hs`) calls it as `fn main()`'s first statement, GATED:
+`installPanicGate = not (usesHttpServer uk || usesLive uk)`. SAFETY: it is
+installed only for synchronous shapes (Sky.Cli / Sky.Tui / Sky.Webview / batch),
+NEVER for a server — the default `block_on` runs on a spawned thread, so a global
+exit-on-panic hook would crash the WHOLE server on a single request-handler
+panic. Mirrors Go, whose synchronous LogPanicAndExit is the non-server path
+(servers recover-to-500 per request).
+
+Verified: fixture `71-panic-classifier` (CLI div-by-zero) → classified
+DivisionByZero + exit 1 in both plain and json; normal CLI (67) still exits 0;
+server fixture (68) generated main.rs has install-count 0. Clippy
+`--all-features` clean.
+
+OPEN follow-up (filed): Sky.Live/Server synchronous-SETUP panic (before block_on)
++ per-request axum CatchPanic→500 — one tracked gap; the deliberate server
+exclusion above is the reason. Diagnostic-quality only (process still exits
+non-zero), not soundness.
+
+**Affected:** `runtime-rust/src/sky_runtime/core.rs`,
+`src/Sky/Generate/Rust/Builder/Emitter.hs`,
+`runtime-rust/tests/sky/71-panic-classifier/`.
+
 ## 2026-06-21 12:30 — Parity batch 3 (P0): Std.Ui style-marker injection
 
 Guardian-supervised (security model reviewed pre-write; `</style>`-breakout

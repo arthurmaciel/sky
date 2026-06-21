@@ -1,0 +1,23 @@
+module Main exposing (main)
+
+-- Regression: an integer division by zero (a panic in the synchronous Sky path)
+-- must be CLASSIFIED into a Sky error + exit 1 (Go parity: rt.LogPanicAndExit)
+-- instead of dumping a raw Rust backtrace. The denominator is derived at runtime
+-- (from an unset env var) so the compiler can't constant-fold the division away.
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.String as String
+import Sky.Core.System as System
+import Std.Log exposing (println)
+
+
+zero : Int
+zero =
+    Maybe.withDefault 0 (String.toInt (System.getenvOr "SKY_PANIC_DENOM" "0"))
+
+
+main =
+    let
+        _ = println "before-divide"
+        result = 100 // zero
+    in
+        println (String.fromInt result)
