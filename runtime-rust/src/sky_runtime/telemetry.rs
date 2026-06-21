@@ -337,6 +337,66 @@ pub fn metric_observe(name: &str, labels: &[(&str, &str)], v: f64) {
     }
 }
 
+/// Extract the BOUNDED variant name from a `Debug` value, for use as a
+/// low-cardinality metric label (e.g. `sky_live_msg_seconds{name}` — Go parity
+/// with msg_logging.go). Returns ONLY the leading Rust-identifier characters of
+/// the `{:?}` rendering — the enum variant name — and NEVER any payload field.
+///
+/// CARDINALITY GUARD (load-bearing): a derived-`Debug` enum renders as `Variant`
+/// / `Variant(..)` / `Variant { .. }`, so the variant ident is always the leading
+/// run of `[A-Za-z_][A-Za-z0-9_]*`; the first `(`, `{`, or space ends it. The
+/// distinct label values are therefore bounded by the FINITE variant set, and an
+/// attacker-controlled payload field (e.g. a `SetName(String)`'s string) can
+/// never reach the label — which would otherwise be the classic Prometheus
+/// cardinality memory-DoS (the registry never evicts; see `MetricKey.labels`).
+///
+/// A capped writer halts the `Debug` render after a small prefix, so a giant
+/// payload field can't even force a full-`Debug` allocation on the hot dispatch
+/// path. Result capped at 64 bytes; an empty extraction falls back to `"Msg"`.
+/// Shared (not Live-specific) so Tui/Webview dispatch can record the same metric.
+pub fn variant_name<M: std::fmt::Debug>(m: &M) -> String {
+    use std::fmt::Write;
+    // Sink accepting at most CAP bytes, then signalling "stop" via Err so
+    // `write!` halts rendering — the variant ident is at the very front, so we
+    // never materialise a large payload field.
+    const CAP: usize = 80;
+    struct Prefix {
+        buf: String,
+    }
+    impl Write for Prefix {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for ch in s.chars() {
+                if self.buf.len() + ch.len_utf8() > CAP {
+                    return Err(std::fmt::Error); // halt the Debug render
+                }
+                self.buf.push(ch);
+            }
+            Ok(())
+        }
+    }
+    let mut sink = Prefix { buf: String::new() };
+    let _ = write!(sink, "{:?}", m); // ignore the deliberate halt error
+
+    // Take the leading Rust identifier only.
+    let mut name = String::new();
+    for (idx, ch) in sink.buf.chars().enumerate() {
+        let is_ident = if idx == 0 {
+            ch.is_ascii_alphabetic() || ch == '_'
+        } else {
+            ch.is_ascii_alphanumeric() || ch == '_'
+        };
+        if !is_ident || name.len() >= 64 {
+            break;
+        }
+        name.push(ch);
+    }
+    if name.is_empty() {
+        "Msg".to_string()
+    } else {
+        name
+    }
+}
+
 /// Format a float for Prometheus exposition (bucket `le` / `_sum`). Rust's `{}`
 /// gives the canonical short form (`0.001`, `0.01`, `1`, `5`).
 fn format_float(f: f64) -> String {
@@ -364,6 +424,7 @@ fn metric_meta(name: &str) -> (&'static str, &'static str) {
         "sky_live_sessions_active" => ("gauge", "Currently-active Sky.Live sessions."),
         "sky_live_errors_total" => ("counter", "Total responses with a 5xx status."),
         "sky_live_request_seconds" => ("histogram", "HTTP request latency in seconds."),
+        "sky_live_msg_seconds" => ("histogram", "Msg-handling latency in seconds, by Msg variant name."),
         _ => ("counter", "Sky runtime metric."),
     }
 }
@@ -486,6 +547,46 @@ pub fn entries_json(entries: &[LogEntry]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variant_name_extracts_only_the_bounded_variant_ident() {
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        enum M {
+            Increment,
+            Tick(i64),
+            SetName(String),
+            Login { user: String },
+        }
+        assert_eq!(variant_name(&M::Increment), "Increment");
+        assert_eq!(variant_name(&M::Tick(42)), "Tick");
+        // SECURITY (the load-bearing invariant): an attacker-controlled payload
+        // field must NEVER reach the label — only the bounded variant ident.
+        let evil = "x".repeat(5000) + "\n}{ injected control chars";
+        assert_eq!(variant_name(&M::SetName(evil)), "SetName");
+        assert_eq!(variant_name(&M::Login { user: "a".repeat(9000) }), "Login");
+
+        // A >64-byte leading ident truncates to 64 without leaking (synthetic
+        // Debug — real Sky variant idents are short; this proves the cap).
+        struct LongIdent;
+        impl std::fmt::Debug for LongIdent {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "{}", "A".repeat(200))
+            }
+        }
+        let n = variant_name(&LongIdent);
+        assert_eq!(n.len(), 64);
+        assert!(n.chars().all(|c| c == 'A'));
+
+        // A Debug rendering that doesn't start with an ident char → "Msg".
+        struct NonIdent;
+        impl std::fmt::Debug for NonIdent {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "(weird")
+            }
+        }
+        assert_eq!(variant_name(&NonIdent), "Msg");
+    }
 
     #[test]
     fn record_and_read_logs() {

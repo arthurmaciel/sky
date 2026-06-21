@@ -450,7 +450,10 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     sid: String,
 ) where
     Model: Clone + Send + 'static,
-    Msg: Clone + Send + 'static,
+    // `Debug` is required to derive the BOUNDED Msg variant-name label for the
+    // `sky_live_msg_seconds` histogram (telemetry::variant_name). Generated Msg
+    // enums always derive Debug, so this internal bound is always satisfiable.
+    Msg: Clone + Send + std::fmt::Debug + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
     FSubs: Fn(Model) -> SkySub<Msg> + Send + Sync + 'static,
@@ -471,7 +474,18 @@ async fn drive_session<Model, Msg, FUpdate, FView, FSubs>(
     while let Some(msg) = msg_rx.recv().await {
         // Clone the model under a short lock, release before update.
         let model = { entry.lock().unwrap_or_else(|e| e.into_inner()).model.clone() };
+        // Msg-handling latency histogram (Go parity: sky_live_msg_seconds{name},
+        // msg_logging.go). The `name` label is the BOUNDED Msg variant name
+        // (finite cardinality), never a payload — see telemetry::variant_name.
+        // Extracted BEFORE `update` consumes `msg`.
+        let msg_name = crate::sky_runtime::telemetry::variant_name(&msg);
+        let msg_started = std::time::Instant::now();
         let (next, cmd) = update(msg, model);
+        crate::sky_runtime::telemetry::metric_observe(
+            "sky_live_msg_seconds",
+            &[("name", &msg_name)],
+            msg_started.elapsed().as_secs_f64(),
+        );
 
         let mut tree = view(next.clone());
         assign_sky_ids(&mut tree, "r");
@@ -678,7 +692,9 @@ pub fn live_app<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
 where
     E: From<String> + Send + 'static,
     Model: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
-    Msg: Clone + Send + Sync + 'static,
+    // Debug: forwarded through serve_live → drive_session for the
+    // sky_live_msg_seconds{name} label. Generated Msg enums always derive Debug.
+    Msg: Clone + Send + Sync + std::fmt::Debug + 'static,
     FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
@@ -723,7 +739,9 @@ pub fn live_app_routed<E, Model, Msg, Page, FInit, FUpdate, FView, FSubs, FSetPa
 where
     E: From<String> + Send + 'static,
     Model: serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
-    Msg: Clone + Send + Sync + 'static,
+    // Debug: forwarded through serve_live → drive_session for the
+    // sky_live_msg_seconds{name} label. Generated Msg enums always derive Debug.
+    Msg: Clone + Send + Sync + std::fmt::Debug + 'static,
     Page: Clone + Send + Sync + 'static,
     FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
@@ -763,7 +781,8 @@ async fn serve_live<E, Model, Msg, FInit, FUpdate, FView, FSubs>(
 where
     E: From<String> + Send + 'static,
     Model: Clone + Send + 'static,
-    Msg: Clone + Send + 'static,
+    // Debug: forwarded to drive_session for the sky_live_msg_seconds{name} label.
+    Msg: Clone + Send + std::fmt::Debug + 'static,
     FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
     FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,
@@ -785,7 +804,9 @@ where
         ) -> Response
         where
             Model: Clone + Send + 'static,
-            Msg: Clone + Send + 'static,
+            // Debug: the GET handler creates a session and spawns drive_session,
+            // which needs the bound for the sky_live_msg_seconds{name} label.
+            Msg: Clone + Send + std::fmt::Debug + 'static,
             FInit: Fn(req::LiveReq) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
             FUpdate: Fn(Msg, Model) -> (Model, SkyCmd<Msg>) + Send + Sync + 'static,
             FView: Fn(Model) -> Html<Msg> + Send + Sync + 'static,

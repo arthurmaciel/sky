@@ -17,6 +17,35 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 15:05 — Parity batch 13: sky_live_msg_seconds{name} Msg-latency histogram
+
+Go's Sky.Live records `sky_live_msg_seconds{name}` — Msg-handling latency labeled by
+the Msg variant name (msg_logging.go); Rust recorded nothing. Added a shared
+`telemetry::variant_name<M: Debug>` that extracts ONLY the leading Rust-identifier
+(the variant name) from `{:?}` via a capped writer — the BOUNDED label (finite variant
+set), never a payload field (an attacker-controlled `SetName(String)` string can't reach
+the label → no Prometheus cardinality memory-DoS). drive_session's dispatch loop times
+`update(msg, model)` and observes `sky_live_msg_seconds{name=<variant>}` via the batch-7
+registry. Required widening the internal `Msg` generic bound with `+ std::fmt::Debug`
+across 4 sites (drive_session, serve_live, the GET page handler, live_app +
+live_app_routed) — generated Msg enums always derive Debug, so it's a non-breaking
+internal widening.
+
+Guardian-supervised (pre-write PASS + post-write APPROVE; G1 leading-ident-only
+extraction, G2 capped-writer prevents large transient alloc, G3 cardinality-boundary
+unit test incl. the SetName-huge security case). Verified: clippy `-D warnings` clean;
+501/0 incl. the new test; END-TO-END on 09-live-counter (auto-tick sub) on `--backend
+rust` → `sky_live_msg_seconds_bucket{name="Tick",le="0.001"} 4` (bounded variant name
+from a real generated Msg; generated Msg satisfied the Debug bound = no codegen-compat
+regression).
+
+FOLLOW-ON (task #8): `sky_live_msg_total{name,outcome,noop}` counter (Go's other
+msg metric) — needs `Model: PartialEq` + the noop computation. `variant_name` is shared
+so Tui/Webview dispatch can record the same metric later.
+
+**Affected:** `runtime-rust/src/sky_runtime/telemetry.rs` (variant_name + metric_meta +
+test), `runtime-rust/src/sky_runtime/live/mod.rs` (timed observe + 4 Debug bounds).
+
 ## 2026-06-21 14:45 — Parity batch 12: Db.queryDecode `List SqlValue` params (completes the SqlValue surface)
 
 Extends batch 11 to the third param-taking Db kernel. `db_query_decode_params` is a
