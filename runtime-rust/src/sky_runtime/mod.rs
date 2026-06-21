@@ -101,6 +101,13 @@ pub mod server_stream;
 #[cfg(feature = "server")]
 pub use server_stream::*;
 
+// ssrf: reqwest-free SSRF deny-private validators, shared by http_client (reqwest)
+// and ws_client (no reqwest). Present whenever either compiles. Consumers import
+// via the full `crate::sky_runtime::ssrf::…` path; the fns are `pub(crate)`, so a
+// `pub use ssrf::*;` glob would reexport nothing — intentionally omitted.
+#[cfg(any(feature = "http_client", feature = "websocket_client"))]
+pub mod ssrf;
+
 #[cfg(feature = "http_client")]
 pub mod http_client;
 #[cfg(feature = "http_client")]

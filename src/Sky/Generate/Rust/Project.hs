@@ -147,8 +147,20 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         srvUse = if RustBuilder.usesHttpServer usage then ["pub use server::*;", "pub use server_stream::*;"] else []
         -- Sky.Core.Http client only when used (pulls reqwest). http_stream rides
         -- along — it shares the reqwest dep + the HttpRequest bridge struct.
-        httpMod = if RustBuilder.usesHttp usage then ["pub mod http_client;", "pub mod http_stream;"] else []
-        httpUse = if RustBuilder.usesHttp usage then ["pub use http_client::*;", "pub use http_stream::*;"] else []
+        -- http_client.rs carries `ssrf_apply` (reqwest), which Std.Email's SES path
+        -- reuses — so the MODULE is needed on usesHttp OR usesEmail. The Http kernel
+        -- surface (`pub use http_client::*;`) + http_stream stay usesHttp-only (email
+        -- calls `ssrf_apply` by full path, not the kernel glob).
+        needsHttpClientMod = RustBuilder.usesHttp usage || RustBuilder.usesEmail usage
+        httpMod = [ "pub mod http_client;" | needsHttpClientMod ]
+                  ++ [ "pub mod http_stream;" | RustBuilder.usesHttp usage ]
+        httpUse = [ "pub use http_client::*;" | RustBuilder.usesHttp usage ]
+                  ++ [ "pub use http_stream::*;" | RustBuilder.usesHttp usage ]
+        -- ssrf.rs: reqwest-free SSRF validators shared by http_client (reqwest) and
+        -- ws_client (no reqwest). Present whenever any consumer compiles. No glob
+        -- re-export — the fns are pub(crate), consumed via full `ssrf::…` path.
+        ssrfMod = [ "pub mod ssrf;"
+                  | RustBuilder.usesHttp usage || RustBuilder.usesEmail usage || RustBuilder.usesWsClient usage ]
         -- Std.Email only when used (pulls reqwest; mirrors http_client).
         emailMod = if RustBuilder.usesEmail usage then ["pub mod email;"] else []
         emailUse = if RustBuilder.usesEmail usage then ["pub use email::*;"] else []
@@ -184,7 +196,7 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         tuiUse = if RustBuilder.usesTui usage then ["pub use tui::{tui_app, tui_app_ui};"] else []
         webviewMod = if RustBuilder.usesWebview usage then ["pub mod webview;"] else []
         webviewUse = if RustBuilder.usesWebview usage then ["pub use webview::{webview_app, WebviewAppCfg, WebviewWindowCfg};"] else []
-        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ uiMod ++ liveMod ++ tuiMod ++ webviewMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse ++ tuiUse ++ webviewUse)
+        modCode = unlines (baseMods ++ dbMod ++ uuidMod ++ srvMod ++ ssrfMod ++ httpMod ++ emailMod ++ teaMod ++ wscMod ++ htmlMod ++ uiMod ++ liveMod ++ tuiMod ++ webviewMod ++ baseUse ++ dbUse ++ uuidUse ++ srvUse ++ httpUse ++ emailUse ++ teaUse ++ wscUse ++ htmlUse ++ liveUse ++ tuiUse ++ webviewUse)
     writeFile modPath modCode
     putStrLn $ "   Wrote " ++ modPath
     writeFile mainRustPath rustCode

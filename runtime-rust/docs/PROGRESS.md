@@ -17,6 +17,47 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-21 20:10 — Parity batch 20: factor reqwest-free `ssrf` module (generated ws/email get http_client; ws stays reqwest-free)
+
+Closes #11 (generated Std.Email / Sky.Core.WebSocket-client projects failed
+`could not find http_client in sky_runtime` — Project.hs gated the http_client
+module on usesHttp only). Option B (guardian pre-write design sign-off): factor the
+reqwest-free SSRF deny-private validators out of http_client.rs into a new
+`ssrf.rs`, so a WebSocket-only binary validates URLs WITHOUT linking the reqwest
+HTTP stack.
+
+- New `runtime-rust/src/sky_runtime/ssrf.rs`: the 8 reqwest-free validators
+  (ssrf_deny_private_enabled / is_private_ip / resolve_first_non_private_addr[_with_port]
+  / check_host_not_private / ssrf_check_url / ssrf_pinned_ws_addr / ssrf_validate_url),
+  byte-faithful move. The ONLY behavior change is `reqwest::Url::parse` → `url::Url::parse`
+  at 2 sites — a SEMANTIC NO-OP: reqwest re-exports the `url` crate (`pub use url::Url;`,
+  reqwest/src/lib.rs:280) and Cargo.lock has one `url` node (2.5.8) → same compiled
+  parser. Added `url_parse_parity_with_reqwest_for_ssrf_extractions` (10 adversarial
+  URLs: IDN/punycode, user:pass@, octal/hex IPv4-looking, ::ffff:127.0.0.1, [::1]:8443
+  wss, trailing-dot) asserting identical scheme/host/port through both parsers.
+- http_client.rs keeps the reqwest-coupled `ssrf_apply` + executor (import the 3 ssrf
+  fns they use). ws_client.rs: `http_client::ssrf_*` → `ssrf::ssrf_*`. The 2 ws-only
+  fns use `#[cfg_attr(not(feature="websocket_client"), allow(dead_code))]` (NOT `#[cfg]`)
+  so generated ws projects — which include ssrf by MODULE without a websocket_client
+  Cargo feature — keep them present.
+- Codegen: crate-specs `url = "2"`; Project.hs `ssrfMod` (usesHttp||usesEmail||usesWsClient)
+  + http_client module on usesHttp||usesEmail (http_stream + kernel-glob stay usesHttp);
+  Emitter `url` dep (usesHttp||usesEmail||usesWsClient) + futures-util += usesEmail (email
+  reuses http_client.rs's stream body reader). Standalone Cargo: `url` optional dep,
+  http_client+=url, websocket_client http_client→url (reverts batch-19's ws→http_client).
+
+Verified: generated 42-ws-client-onmessage GREEN with `url` and NO `reqwest`
+(`cargo tree -i reqwest --features websocket_client` = no match); 20-email, 24-http-api,
+26-stream-cli, 28-live-counter GREEN. Standalone: 16/16 subsets + bare clippy `-D` clean;
+`--all-features` clean; 504/0 (+1 parse-parity; 19 SSRF tests relocated). Guardian
+pre-write GO + post-write APPROVE (is_private_ip + resolve confirmed byte-identical by
+diff). Pre-existing test-harness gap (tests/wasm_floor_scope.rs json under --all-targets
+non-json subset) filed separately — not this diff.
+
+**Affected:** `runtime-rust/src/sky_runtime/{ssrf.rs (new),http_client.rs,ws_client.rs,mod.rs}`, `runtime-rust/Cargo.toml`, `src/Sky/Generate/Rust/Project.hs`, `src/Sky/Generate/Rust/Builder/{Emitter.hs,crate-specs.toml}`.
+
+---
+
 ## 2026-06-21 18:40 — Parity batch 19: standalone runtime feature self-containment (all subsets clippy-clean)
 
 Enumerated `cargo check --no-default-features --features X` for every single feature:

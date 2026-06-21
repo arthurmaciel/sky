@@ -114,7 +114,7 @@ async fn do_connect<E: From<String> + Send + 'static>(
     // resolves to a private/loopback/link-local address BEFORE the handshake — the
     // WebSocket surface previously connected with no deny-private check, so an
     // attacker-controlled URL could reach internal services the Http client blocks.
-    if let Err(msg) = crate::sky_runtime::http_client::ssrf_validate_url(&url) {
+    if let Err(msg) = crate::sky_runtime::ssrf::ssrf_validate_url(&url) {
         return SkyResult::Err(msg.into());
     }
     // Build the handshake request so custom headers (e.g. Authorization) from
@@ -146,7 +146,7 @@ async fn do_connect<E: From<String> + Send + 'static>(
     // re-resolve the name to a rebind target at connect time — closing the
     // resolve->connect TOCTOU that the bare ssrf_validate_url check above leaves
     // open (it validates a name that connect_async would resolve again).
-    let pinned = match crate::sky_runtime::http_client::ssrf_pinned_ws_addr(&url) {
+    let pinned = match crate::sky_runtime::ssrf::ssrf_pinned_ws_addr(&url) {
         Ok(p) => p,
         Err(msg) => return SkyResult::Err(msg.into()),
     };

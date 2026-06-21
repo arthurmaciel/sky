@@ -58,6 +58,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "pool", "tokio1", "tokio1-rustls-tls"] }
 futures-util = "0.3"
 tokio-tungstenite = "0.24"
+# url: the reqwest-free `ssrf` module's URL parser (reqwest re-exports this exact
+# crate as `reqwest::Url`). Lets a WebSocket-only project validate URLs without reqwest.
+url = "2"
 
 # Tui
 crossterm = "0.28"

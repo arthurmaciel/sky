@@ -978,11 +978,19 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     | usesEmail uk, "lettre" `notElem` userDepNames ] ++
     -- futures-util: WebSocket client, plus the streaming paths — http_stream.rs
     -- (StreamExt::next) and server_stream.rs (stream::unfold for the body).
+    -- Std.Email reuses http_client.rs (for `ssrf_apply`), whose body-stream reader
+    -- (`read_body_capped`) uses `futures_util::StreamExt` — so email needs it too.
     [ cargoDependencyFor "futures-util"
-    | usesWsClient uk || usesHttp uk || usesHttpServer uk || needsLive, "futures-util" `notElem` userDepNames ] ++
+    | usesWsClient uk || usesHttp uk || usesHttpServer uk || usesEmail uk || needsLive, "futures-util" `notElem` userDepNames ] ++
     -- Sky.Core.WebSocket client: tokio-tungstenite (futures-util above).
     [ cargoDependencyFor "tokio-tungstenite"
     | usesWsClient uk, "tokio-tungstenite" `notElem` userDepNames ] ++
+    -- url: the reqwest-free `ssrf` module (SSRF deny-private validators). Needed by
+    -- http_client (reqwest), Std.Email (reuses ssrf_apply), AND the WebSocket client
+    -- (which validates URLs WITHOUT linking reqwest). reqwest re-exports this exact
+    -- crate as `reqwest::Url`, so it resolves to the same lockfile node.
+    [ cargoDependencyFor "url"
+    | usesHttp uk || usesEmail uk || usesWsClient uk, "url" `notElem` userDepNames ] ++
     -- Std.Tui: crossterm (raw mode) + unicode-width (display width).
     [ cargoDependencyFor "crossterm"
     | usesTui uk, "crossterm" `notElem` userDepNames ] ++
