@@ -1,0 +1,61 @@
+module Main exposing (main)
+
+-- 48-ffi-generics: Wall #2 of the demand-driven generic Sky→Rust FFI epic
+-- (the (A)-model). Proves a GENERIC Rust FFI fn binds + runs at every sound
+-- instantiation the program uses, via ONE rustc-monomorphised generic wrapper.
+--
+-- `Box1 a` is an UNCONSTRAINED generic foreign type (kernel.json `generic`
+-- block, no inspector). We use it at TWO instantiations in one program:
+--   * Box1 Int    — make 42  |> get  == 42
+--   * Box1 String — make "hi" |> get == "hi"
+-- One generic wrapper `box1_make<a>` serves both; rustc specialises the
+-- unchanged call sites. Values flow concrete (no boxing).
+--
+-- `Keyed a` is a HASH-BOUNDED generic (stub records the full Hash+Eq+Clone
+-- union — F1). Int satisfies it: keyedMake 7 |> keyedCount == 1.
+--
+-- The FFI wrappers are SYNC (`ok_res` → `Result Error a`), so compose via
+-- `Result.andThen`; only the top-level println is a Task.
+--
+-- Run:  bash setup.sh && sky build --backend rust src/Main.sky
+-- Expected stdout: [ALL OK]
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Result as Result
+import Rust.Box1 as Box1
+import Std.Log exposing (println)
+
+
+-- Box1 Int round-trip → 42.
+intRoundTrip : Result Error Int
+intRoundTrip =
+    Box1.make 42 |> Result.andThen Box1.get
+
+
+-- Box1 String round-trip → "hi".
+strRoundTrip : Result Error String
+strRoundTrip =
+    Box1.make "hi" |> Result.andThen Box1.get
+
+
+-- Keyed Int: insert one key, count → 1.
+keyedCount : Result Error Int
+keyedCount =
+    Box1.keyedMake 7 |> Result.andThen Box1.keyedCount
+
+
+main : Task Error ()
+main =
+    let
+        n = Result.withDefault 0 intRoundTrip
+        s = Result.withDefault "" strRoundTrip
+        c = Result.withDefault 0 keyedCount
+        _ = println ("Box1 Int    -> " ++ String.fromInt n)
+        _ = println ("Box1 String -> " ++ s)
+        _ = println ("Keyed count -> " ++ String.fromInt c)
+    in
+    if n == 42 && s == "hi" && c == 1 then
+        println "[ALL OK]"
+    else
+        println "[FAIL]"

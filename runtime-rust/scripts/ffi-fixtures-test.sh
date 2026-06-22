@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -230,6 +230,105 @@ run_basic() {
   rm -rf "$wd"
 }
 
+# ── run_handstub <fixture>  (Wall #2 — 48-ffi-generics). A HAND-STUB fixture:
+# a CHECKED-IN parametric kernel.json (the `generic` blocks) + an (empty)
+# bindings .rs under `ffi-stub/`, NO inspector. Differs from run_basic in three
+# ways: (1) it stages the committed `ffi-stub/*.{kernel.json,rs}` into the
+# workdir's `.skycache/ffi/rust/` AFTER the build's own wipe so the build reads
+# the hand stub (no inspector regenerates it); (2) it asserts `[ALL OK]` on the
+# POSITIVE program AND the per-wrapper tree-shake (only reached wrappers in
+# `sky_ffi_generics.rs`); (3) it drives the NEGATIVE matrix — Float-on-Hash,
+# out-of-closed-set, unmodellable-bound — each must produce the Sky `E4400`
+# diagnostic, NOT a cargo failure. ───────────────────────────────────────────
+run_handstub() {
+  local base="48-ffi-generics"
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  [ -d "$src/ffi-stub" ]     || { _fail "$base (no ffi-stub/ dir)"; return; }
+
+  # Stage the local crate (git-init under $HOME) via setup.sh.
+  bash "$src/setup.sh" >/tmp/ffi-fixture-"$base".setup.log 2>&1 || {
+    _fail "$base (setup.sh failed — see /tmp/ffi-fixture-$base.setup.log)"; return; }
+  local staged="$HOME/.cache/sky/$base-crate"
+  [ -d "$staged/.git" ] || { _fail "$base (expected staged crate at $staged)"; return; }
+
+  local wd; wd="$(mktemp -d "${TMPDIR:-/tmp}/ffi-fixture-$base.XXXXXX")" || { _fail "$base (mktemp)"; return; }
+  mkdir -p "$wd/src" "$wd/ffi-stub"
+  cp -r "$src/src/." "$wd/src/" 2>/dev/null || true
+  cp -r "$src/ffi-stub/." "$wd/ffi-stub/" 2>/dev/null || true
+  cp "$src/sky.toml" "$wd/sky.toml" || { rm -rf "$wd"; _fail "$base (cp sky.toml)"; return; }
+  local newurl="file://$staged" esc
+  esc="$(printf '%s' "$newurl" | sed -e 's/[\/&]/\\&/g')"
+  sed -i -E "s|file://[^\"]*/$base-crate|$esc|g" "$wd/sky.toml"
+
+  # stage_stub: re-place the hand stub into .skycache (the build wipes it).
+  _stage_stub() { mkdir -p "$wd/.skycache/ffi/rust"; cp "$wd"/ffi-stub/*.kernel.json "$wd"/ffi-stub/*_bindings.rs "$wd/.skycache/ffi/rust/" 2>/dev/null; }
+
+  # _build <main-src>: wipe generated dirs, RE-stage the stub, build. Echoes the
+  # build log path; returns the build's exit code.
+  _build() {
+    ( cd "$wd" && rm -rf sky-out .skycache .skydeps ) >/dev/null 2>&1
+    _stage_stub
+    local logp="/tmp/ffi-fixture-$base.build.log"
+    ( cd "$wd" && timeout "$BUILD_TMO" "$SKY" build --backend rust src/Main.sky ) >"$logp" 2>&1
+    local rc=$?; printf '%s\n' "$logp"; return $rc
+  }
+
+  # ── POSITIVE: default program builds, runs [ALL OK], tree-shake = 4 wrappers.
+  local logp; logp="$(_build)"; local rc=$?
+  if [ $rc -ne 0 ]; then _fail "$base (positive build failed — $logp)"; rm -rf "$wd"; return; fi
+  local gen="$wd/sky-out/rust/src/sky_ffi_generics.rs"
+  local nwrap; nwrap="$(rg -c "$SENTINEL" "$gen" 2>/dev/null || echo 0)"
+  if [ "$nwrap" != "4" ]; then _fail "$base (expected 4 reached wrappers, got $nwrap)"; rm -rf "$wd"; return; fi
+  if rg -q 'tagged_make' "$gen" 2>/dev/null; then _fail "$base (unreached taggedMake leaked into generics)"; rm -rf "$wd"; return; fi
+  local bin; bin="$(resolve_bin "$wd")" || { _fail "$base (no binary)"; rm -rf "$wd"; return; }
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  rg -q '\[ALL OK\]' "$outp" || { _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"; rm -rf "$wd"; return; }
+
+  # ── NEGATIVE matrix. Each must yield the Sky E4400 diagnostic, NOT a cargo
+  # error. We swap Main.sky in the workdir, rebuild, and assert E4400 + absence
+  # of a cargo 'error[E0' line in the build log.
+  _neg() {
+    local label="$1" body="$2"
+    printf '%s\n' "$body" > "$wd/src/Main.sky"
+    local lp; lp="$(_build)"; local brc=$?
+    if [ $brc -eq 0 ]; then _fail "$base/$label (expected build FAIL, got success)"; return 1; fi
+    if ! rg -q 'E4400' "$lp"; then _fail "$base/$label (no E4400 Sky diagnostic — $lp)"; return 1; fi
+    if rg -q 'error\[E0' "$lp"; then _fail "$base/$label (got a cargo error, not a Sky diagnostic — $lp)"; return 1; fi
+    return 0
+  }
+
+  local hdr='module Main exposing (main)
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Result as Result
+import Rust.Box1 as Box1
+import Std.Log exposing (println)
+'
+  _neg "float-on-hash" "$hdr
+main : Task Error ()
+main =
+    let c = Result.withDefault 0 (Box1.keyedMake 3.14 |> Result.andThen Box1.keyedCount)
+    in println (String.fromInt c)" || { rm -rf "$wd"; return; }
+
+  _neg "out-of-closed-set" "$hdr
+main : Task Error ()
+main =
+    let _ = Box1.make (1, 2)
+    in println \"x\"" || { rm -rf "$wd"; return; }
+
+  _neg "unmodellable-bound" "$hdr
+main : Task Error ()
+main =
+    let _ = Box1.taggedMake 5
+    in println \"x\"" || { rm -rf "$wd"; return; }
+
+  _ok "$base  (positive [ALL OK] + tree-shake=4 + 3 E4400 negatives)"
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 43-ffi-dce S4 suite — used-only (a) · D4 equivalence (d) · staleness (R-4).
 # Self-contained: stages its OWN workdir (so the Main.sky patch never touches the
@@ -321,7 +420,7 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
 echo "── Sky→Rust auto-FFI fixture gate ──"
 for n in "${FIXTURES[@]}"; do
-  run_basic "$n"
+  if [ "$n" = "48-ffi-generics" ]; then run_handstub; else run_basic "$n"; fi
 done
 # S4 DCE suite runs iff 43-ffi-dce is in the requested set.
 for n in "${FIXTURES[@]}"; do

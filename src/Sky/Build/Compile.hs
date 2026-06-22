@@ -60,6 +60,8 @@ import qualified Sky.Generate.Rust.Project as RustProject
 import qualified Sky.Build.ModuleGraph as Graph
 import qualified Sky.Build.Dce as Dce
 import qualified Sky.Build.FfiRegistry as FfiReg
+import qualified Sky.Build.Rust.FfiInstance as RustFfiInst
+import qualified Sky.Generate.Rust.Builder.Naming as RustNaming
 import qualified Sky.Build.FfiTypeResolve as FfiTy
 import qualified Sky.Build.SkyDeps as SkyDeps
 import qualified Sky.Canonicalise.Environment as Env
@@ -180,6 +182,18 @@ globalReachableProgram = unsafePerformIO $ newIORef Set.empty
 {-# NOINLINE globalDceDisabled #-}
 globalDceDisabled :: IORef Bool
 globalDceDisabled = unsafePerformIO $ newIORef False
+
+
+-- | Wall #2 (demand-driven generic Sky→Rust FFI epic): the whole loaded FFI
+-- registry, stashed by `loadAndSeedFfiRegistry` so the Rust-target dispatch
+-- can read each binding's optional `generic` block (params + bounds +
+-- template).  The existing Env IORefs only carry name/arity/type maps — the
+-- generic metadata never reached them — so we keep the full registry here.
+-- Go never reads this (its inspector drops generics at the producer, so every
+-- Go kernel.json has `_ffn_generic = Nothing`); the Go path leaves it untouched.
+{-# NOINLINE globalFfiRegistry #-}
+globalFfiRegistry :: IORef FfiReg.FfiRegistry
+globalFfiRegistry = unsafePerformIO $ newIORef FfiReg.emptyRegistry
 
 
 -- | v0.13 E: anon-record shape registry. Populated by
@@ -551,6 +565,9 @@ globalCurrentDepModule = unsafePerformIO $ newIORef Nothing
 loadAndSeedFfiRegistry :: Toml.Backend -> IO ()
 loadAndSeedFfiRegistry target = do
     reg <- FfiReg.loadRegistry target
+    -- Wall #2: stash the whole registry so the Rust dispatch can read the
+    -- per-fn `generic` blocks (the Env maps below drop that metadata).
+    writeIORef globalFfiRegistry reg
     let mods = FfiReg._fr_modules reg
         moduleMap =
             Map.fromList [ (FfiReg._fm_moduleName m, FfiReg._fm_kernelName m) | m <- mods ]
@@ -590,6 +607,96 @@ loadAndSeedFfiRegistry target = do
     if null mods
         then return ()
         else putStrLn $ "-- Loaded " ++ show (length mods) ++ " FFI module(s)"
+
+
+-- ─── Wall #2: generic Sky→Rust FFI inputs ────────────────────────────
+
+
+-- | Build the per-instance bindability-check inputs (Wall #2 (A)-model). For
+-- each reachable call-site instance whose callee resolves to a GENERIC FFI
+-- binding (one whose kernel.json carried a `generic` block), pair the
+-- instance's concrete type-args + region with that binding's `FfiGeneric`
+-- metadata. Non-generic / non-FFI callees produce no entries — the whole
+-- result is empty for every Go build and for every Rust build with no generic
+-- FFI in use (so the check + gate are dead there).
+--
+-- Callee matching: an `FfiModule`'s Sky-side name is `_fm_moduleName` (dotted,
+-- e.g. `Rust.Box1`); a function's Sky name is `_ffn_name`. The instance callee
+-- (`_instance_callee`) is the qualified Sky reference, so it matches
+-- `<moduleName>.<fnName>`.
+buildRustGenericInstances
+    :: FfiReg.FfiRegistry -> FilePath -> [Solve.CallSiteInstance]
+    -> [RustFfiInst.FfiInstance]
+buildRustGenericInstances reg file csis =
+    [ RustFfiInst.FfiInstance
+        { RustFfiInst._fi_callee  = callee
+        , RustFfiInst._fi_types   = Solve._instance_types inst
+        , RustFfiInst._fi_region  = Solve._cs_region csi
+        , RustFfiInst._fi_file    = file
+        , RustFfiInst._fi_generic = gen
+        }
+    | csi <- csis
+    , let inst   = Solve._cs_instance csi
+          callee = Solve._instance_callee inst
+    , Just gen <- [lookupGenericByCallee reg callee]
+    ]
+
+
+-- | Every GENERIC FFI function in the registry as a synthesis-ready
+-- 'RustFfiInst.GenericFn' (base name + ref name pre-computed). Consumed by
+-- 'RustFfiInst.synthesiseGenericWrappers' to emit ONE generic wrapper per
+-- function (tree-shaken by its base `FfiRef`). The synthetic file/region are
+-- for the malformed-stub / unmodellable-bound diagnostic (no call site). Empty
+-- for Go (no Go kernel.json carries a `generic` block).
+--
+-- The wrapper names MUST match what the CALL SITE routes to:
+--   * base `pub fn` name = @kernelToRust@'s Rust-FFI default arm
+--     (@toSnakeCase (drop 5 kernelName ++ "_" ++ fnName)@);
+--   * S4 ref name = @wrapperRefName@'s no-receiver case
+--     (@lowerFirst fnName@) — = the kernel.json `name` + the FfiRef key.
+rustGenericFnRecords
+    :: FfiReg.FfiRegistry -> FilePath -> [RustFfiInst.GenericFn]
+rustGenericFnRecords reg file =
+    [ RustFfiInst.GenericFn
+        { RustFfiInst._gf_kernelName = kernelName
+        , RustFfiInst._gf_baseName   =
+            RustNaming.toSnakeCase (drop 5 kernelName ++ "_" ++ fnName)
+        , RustFfiInst._gf_refName    = lowerFirstChar fnName
+        , RustFfiInst._gf_generic    = gen
+        , RustFfiInst._gf_region     = A.one
+        , RustFfiInst._gf_file       = file
+        }
+    | m <- FfiReg._fr_modules reg
+    , f <- FfiReg._fm_functions m
+    , Just gen <- [FfiReg._ffn_generic f]
+    , let kernelName = FfiReg._fm_kernelName m
+          fnName     = FfiReg._ffn_name f
+    ]
+  where
+    lowerFirstChar []     = []
+    lowerFirstChar (c:cs) = Char.toLower c : cs
+
+
+-- | Resolve a qualified Sky callee to its `FfiGeneric` block, if the callee
+-- names a generic FFI function. Matches `<moduleName>.<fnName>`.
+lookupGenericByCallee :: FfiReg.FfiRegistry -> String -> Maybe FfiReg.FfiGeneric
+lookupGenericByCallee reg callee =
+    case [ gen
+         | m <- FfiReg._fr_modules reg
+         , f <- FfiReg._fm_functions m
+         , Just gen <- [FfiReg._ffn_generic f]
+         , let fn = FfiReg._ffn_name f
+               -- The solver records the callee with the KERNEL name
+               -- (`Rust_Box1.keyedMake`), not the dotted module name — the
+               -- canonicaliser rewrites the FFI alias to a `VarKernel
+               -- <kernelName> <fn>`. Match the kernel form; also accept the
+               -- dotted module form defensively in case a future canon path
+               -- keeps it.
+         , FfiReg._fm_kernelName m ++ "." ++ fn == callee
+            || FfiReg._fm_moduleName m ++ "." ++ fn == callee
+         ] of
+        (g : _) -> Just g
+        []      -> Nothing
 
 
 -- | P7: scan ffi/*.go (and ffi/**/*.go) for `^func Go_X_yT(` definitions
@@ -1859,9 +1966,58 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             prunedDeps = [ depMod { Can._decls =
                                                       filterRustDecls (keepRustDecl (Can._name depMod)) (Can._decls depMod) }
                                          | depMod <- map snd validDeps ]
-                        RustProject.generateRustProject config (canMod : prunedDeps)
-                            entrySrcMod typesWithDeps rawAliases outDir srcHash
-                            reached dceOff
+                        -- Wall #2 (demand-driven generic Sky→Rust FFI epic),
+                        -- the (A)-model. Two independent gates run HERE, before
+                        -- generateRustProject (mirroring the Go branch's
+                        -- authDiags gate) — an un-gated diagnostic would render
+                        -- but the build would proceed to cargo and fail with
+                        -- E0425 (the absent wrapper):
+                        --   (1) PER-INSTANCE bindability: every reachable
+                        --       generic-FFI instantiation's concrete type-args
+                        --       are closed + satisfy the declared bounds.
+                        --   (2) PER-FUNCTION synthesis: ONE generic wrapper per
+                        --       generic FFI fn; a rejection (unmodellable bound
+                        --       / missing `// ret:` marker) is the same E4400.
+                        -- The synthesised wrappers (clean) thread into
+                        -- generateRustProject for the `sky_ffi_generics.rs`
+                        -- write. All of this is empty/dead for Go (no Go
+                        -- kernel.json carries a `generic` block).
+                        ffiReg <- readIORef globalFfiRegistry
+                        let allCsis = callSiteInstances
+                                        ++ concatMap snd depCsiByMod
+                            genInstances = buildRustGenericInstances
+                                ffiReg entryPath allCsis
+                            instDiags = RustFfiInst.checkInstances genInstances
+                            -- F1 (guardian): an unmodellable bound / malformed
+                            -- stub is a hard E4400 ONLY when the wrapper is
+                            -- REACHED. An UNREACHED such fn is tree-shaken away
+                            -- (the call site never references it → no E0425),
+                            -- so it must NOT block the build — filter to the
+                            -- reached set BEFORE synthesis (same `FfiRef` key
+                            -- the S4 tree-shake uses). DCE-off / empty reached
+                            -- keeps every fn (matches the tree-shake fallback).
+                            genFnReached gf =
+                                dceOff || Set.null reached
+                                    || Set.member
+                                        (Dce.FfiRef (RustFfiInst._gf_kernelName gf)
+                                                    (RustFfiInst._gf_refName gf))
+                                        reached
+                            genFnRecords =
+                                filter genFnReached (rustGenericFnRecords ffiReg entryPath)
+                            (genWrappers, wrapperRejects) =
+                                RustFfiInst.synthesiseGenericWrappers genFnRecords
+                            allGenDiags = instDiags ++ wrapperRejects
+                        if not (null allGenDiags)
+                          then do
+                              rendered <- Render.renderCliMany
+                                  (Diag.sortDiagnostics allGenDiags)
+                              putStrLn rendered
+                              removeStaleBuildOutput outDir (Toml._binName config)
+                              return (Left ("ffi.generic.not-bindable: " ++ entryPath))
+                          else
+                              RustProject.generateRustProject config (canMod : prunedDeps)
+                                  entrySrcMod typesWithDeps rawAliases outDir srcHash
+                                  reached dceOff genWrappers
 
                     Toml.BackendGo ->
                         if not (null authDiags)

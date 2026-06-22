@@ -1,0 +1,57 @@
+{
+  "moduleName": "Rust.Box1",
+  "kernelName": "Rust_Box1",
+  "package": "box1",
+  "functions": [
+    {
+      "name": "make",
+      "arity": 1,
+      "skyType": "a -> Result Error (Box1 a)",
+      "generic": {
+        "params": ["a"],
+        "bounds": {},
+        "rustTemplate": "// ret: ::box1::Box1<{a}>\n::box1::Box1::<{a}>::make({arg0})"
+      }
+    },
+    {
+      "name": "get",
+      "arity": 1,
+      "skyType": "Box1 a -> Result Error a",
+      "generic": {
+        "params": ["a"],
+        "bounds": {},
+        "rustTemplate": "// ret: {a}\n// arg0: ::box1::Box1<{a}>\n::box1::Box1::<{a}>::get({arg0})"
+      }
+    },
+    {
+      "name": "keyedMake",
+      "arity": 1,
+      "skyType": "a -> Result Error (Keyed a)",
+      "generic": {
+        "params": ["a"],
+        "bounds": {"a": ["Hash", "Eq", "Clone"]},
+        "rustTemplate": "// ret: ::box1::Keyed<{a}>\n::box1::Keyed::<{a}>::make({arg0})"
+      }
+    },
+    {
+      "name": "keyedCount",
+      "arity": 1,
+      "skyType": "Keyed a -> Result Error Int",
+      "generic": {
+        "params": ["a"],
+        "bounds": {"a": ["Hash", "Eq", "Clone"]},
+        "rustTemplate": "// ret: i64\n// arg0: ::box1::Keyed<{a}>\n::box1::Keyed::<{a}>::count({arg0})"
+      }
+    },
+    {
+      "name": "taggedMake",
+      "arity": 1,
+      "skyType": "a -> Result Error (Tagged a)",
+      "generic": {
+        "params": ["a"],
+        "bounds": {"a": ["Serialize"]},
+        "rustTemplate": "// ret: ::box1::Tagged<{a}>\n::box1::Tagged::<{a}>::make({arg0})"
+      }
+    }
+  ]
+}

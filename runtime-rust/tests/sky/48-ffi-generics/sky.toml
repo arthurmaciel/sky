@@ -1,0 +1,12 @@
+[project]
+name = "48-ffi-generics"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local box1 crate (Box1<T> / Keyed<T> / Tagged<T>), delivered as a file:// git
+# dep. setup.sh git-inits ./box1-crate into the cache path below AND stages the
+# CHECKED-IN parametric kernel.json + (empty) bindings into .skycache/ffi/rust/
+# so NO inspector runs (Wall #2 is provable without the inspector — Wall #3).
+["rust.dependencies"]
+box1 = { git = "file:///home/arthur/.cache/sky/48-ffi-generics-crate", branch = "master" }

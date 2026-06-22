@@ -6,6 +6,7 @@ module Sky.Build.FfiRegistry
     ( FfiRegistry(..)
     , FfiModule(..)
     , FfiFunction(..)
+    , FfiGeneric(..)
     , loadRegistry
     , emptyRegistry
     , lookupFunction
@@ -37,6 +38,43 @@ data FfiFunction = FfiFunction
         -- and for older kernel.json files written before this field
         -- existed. The HM-wire path falls back to the legacy
         -- "no Sky type known" branch in those cases.
+    , _ffn_generic :: !(Maybe FfiGeneric)
+        -- ^ Wall #2 (demand-driven generic Sky→Rust FFI epic): the
+        -- parametric synthesis metadata for a GENERIC FFI function.
+        -- 'Nothing' for every non-generic binding — i.e. every
+        -- inspector-emitted kernel.json today and every existing
+        -- fixture (the field decodes via @.:?@, so byte-identical
+        -- behaviour for files that omit it). Present ONLY when a
+        -- (currently hand-written, Wall #3 inspector-written) stub
+        -- declares a Rust template + per-type-param trait bounds so
+        -- codegen can monomorphise a concrete wrapper per used
+        -- instantiation.
+    }
+    deriving (Show, Eq)
+
+
+-- | Wall #2 parametric-synthesis metadata for a generic FFI function.
+-- Carried in the kernel.json @generic@ object. All three fields are
+-- load-bearing for the per-instance synthesis + the bindability gate:
+--
+--   * @_fg_params@   — the type-param names (Sky-source @Forall@ order),
+--                      e.g. @["a"]@ for @make : a -> Box1 a@. Positional
+--                      with the call instance's resolved type-args.
+--   * @_fg_bounds@   — per-param declared Rust trait bounds (a list of
+--                      bound names like @["Hash","Eq"]@). A param absent
+--                      from the map carries no bound (unconstrained
+--                      generic). The bindability gate checks each
+--                      concrete arg satisfies every declared bound via a
+--                      static closed-set × trait table.
+--   * @_fg_template@ — the parametric Rust expression with @{a}@ holes
+--                      for each type-param (substituted with the Rust
+--                      type) and @{arg0}@ … @{argN}@ holes for the
+--                      wrapper's value args. Codegen substitutes both
+--                      hole families to emit the concrete wrapper body.
+data FfiGeneric = FfiGeneric
+    { _fg_params   :: ![String]
+    , _fg_bounds   :: !(Map.Map String [String])
+    , _fg_template :: !String
     }
     deriving (Show, Eq)
 
@@ -80,7 +118,16 @@ instance A.FromJSON FfiFunction where
         a <- o .:? "arity" .!= 1
         rawSky <- o .:? "skyType"
         let parsed = rawSky >>= parseFty
-        return (FfiFunction n a parsed)
+        gen <- o .:? "generic"
+        return (FfiFunction n a parsed gen)
+
+
+instance A.FromJSON FfiGeneric where
+    parseJSON = A.withObject "FfiGeneric" $ \o -> do
+        ps <- o .:? "params" .!= []
+        bs <- o .:? "bounds" .!= Map.empty
+        tm <- o .:? "rustTemplate" .!= ""
+        return (FfiGeneric ps bs tm)
 
 
 instance A.FromJSON FfiModule where

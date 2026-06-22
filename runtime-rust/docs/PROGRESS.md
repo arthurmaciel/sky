@@ -17,6 +17,64 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-22 — Wall #2: demand-driven generic Sky→Rust FFI codegen (the (A)-model)
+
+**What.** Implemented Wall #2 of the demand-driven generic Sky→Rust FFI epic
+(task #20), the (A)-model: a GENERIC Rust FFI fn now binds + runs at every sound
+instantiation a Sky program uses, via ONE rustc-monomorphised generic wrapper
+per fn (NOT per-instance — the Rust call path has no call-site-rewrite seam;
+rustc's own generics + inference specialise the unchanged call sites). Driven by
+a hand-written parametric `kernel.json` `generic` block (no inspector — that is
+Wall #3). Spec: `runtime-rust/docs/superpowers/specs/2026-06-22-wall2-instance-codegen-design.md`.
+
+- **Synthesis** (`src/Sky/Build/Rust/FfiInstance.hs`, repointed from the first
+  attempt's per-instance design): one `pub fn <base><T: bounds>(args) ->
+  SkyResult<SkyError, <Ret>> { ok_res(<body>) }` per generic FFI fn. `<T: bounds>`
+  rendered from the stub's `_fg_bounds` (`Hash→::std::hash::Hash`, …). Template
+  carries `// ret:` + `// argN:` markers (author-supplied crate paths, same
+  contract as `// ret:`) so a foreign-typed arg (`get : Box1 a -> a`, arg
+  `::box1::Box1<A>`) renders concrete. TVar→UpperCamel (`a`→`A`) for clippy.
+- **Per-instance bindability check**: each reachable generic-FFI instantiation's
+  concrete type-args must be closed (`skyTypeToRustClosed`) + satisfy the
+  declared bounds via the static `{Hash,Eq,Ord,Clone,Default}` table
+  (`traitsOfRustType`). A violation → first-class Sky `E4400` `Diagnostic`
+  (region from `_cs_region`, hint), NEVER a cargo-fail.
+- **F1 unmodellable bound**: a declared bound outside the static table (e.g.
+  `Serialize`) → reject the wrapper with `E4400` when the fn is REACHED; an
+  UNREACHED such fn is tree-shaken away (no false block).
+- **F3-b fix**: `SkyMaybe<T>` (runtime enum, derives `Clone+PartialEq` only) maps
+  to `{Clone}` IFF `T:Clone` — NOT std `Option`'s `{Default,Hash,Eq,Ord}`. `f64/f32`
+  = `{Clone,Default}` only.
+- **Threading** (`Compile.hs`): `globalFfiRegistry` IORef; the BackendRust dispatch
+  builds the instance list + synthesises wrappers, filters by reachability
+  (`Dce.FfiRef`), GATES the build (`return Left`) on any `E4400` BEFORE
+  `generateRustProject` (G1), and threads the clean wrappers in.
+- **Output** (`Project.hs`): a single build-synthesised `sky_ffi_generics.rs`
+  (separate from the inspector's `_bindings.rs`, which is untouched),
+  sentinel-wrapped, run through the same S4 tree-shake (kept iff base `FfiRef`
+  reached). Hardened hole-coverage gate (guardian): a non-arg `{hole}` not in
+  `params`, or a gap in `{argN}` indices, → `E4400` (no leaked hole → no
+  cargo-fail).
+- **Go-safety**: `generic` decodes via `.:?` → `Nothing` for every Go kernel.json
+  → all new paths dead for Go; threading is BackendRust-only. Verified
+  `examples/01-hello-world` Go build unperturbed.
+
+**Verification (light, local).** `cabal build exe:sky` clean; 22/22
+`Sky.Build.Rust.FfiInstanceSpec`; fixture `48-ffi-generics` via
+`ffi-fixtures-test.sh` GREEN — positive `[ALL OK]` (Box1 Int→42, Box1 String→hi
+through ONE `box1_make<A>`, Keyed count→1), tree-shake=4 reached wrappers, and 3
+`E4400` negatives (Float-on-Hash, out-of-closed-set, unmodellable-bound) each a
+Sky diagnostic, NOT a cargo error. Full suite → CI.
+
+**Affected.** `src/Sky/Build/Rust/FfiInstance.hs` (new), `src/Sky/Build/Compile.hs`,
+`src/Sky/Generate/Rust/Project.hs`, `src/Sky/Build/FfiRegistry.hs`,
+`src/Sky/Reporting/Diagnostic.hs`, `sky-compiler.cabal`, `test/Spec.hs`,
+`test/Sky/Build/Rust/FfiInstanceSpec.hs` (new),
+`runtime-rust/tests/sky/48-ffi-generics/` (new fixture),
+`runtime-rust/scripts/ffi-fixtures-test.sh`.
+
+---
+
 ## 2026-06-22 03:30 — Batch 28: speed up `sky watch --backend rust` (incremental rebuilds)
 
 Reported "very slow". Root cause: every rebuild (a) re-copied the ~74 runtime files,

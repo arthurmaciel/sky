@@ -248,6 +248,24 @@ authE_UntypedBoundary = DiagCode "E4006"
 --   String" error in an audit log. Diagnostic kind:
 --   `Sky.Auth.UntypedBoundary`.
 
+ffiE_GenericNotBindable :: DiagCode
+ffiE_GenericNotBindable = DiagCode "E4400"
+-- ^ Wall #2 of the demand-driven generic Sky→Rust FFI epic: an
+--   actually-used generic FFI instantiation cannot be soundly
+--   monomorphised into a concrete Rust wrapper because one of its
+--   concrete type-args is either OUTSIDE the closed Sky↔Rust set
+--   (closed-set check) or fails to satisfy a trait bound the
+--   parametric stub declared on the corresponding type-param
+--   (trait-bound check — e.g. a `Hash`-bounded key instantiated at
+--   `Float`, which is not `Hash` in Rust). Raised at the
+--   monomorphise→codegen boundary so the user sees a first-class
+--   Sky compile error at the call site (`CallInstanceRecord`
+--   region) instead of a downstream `cargo build` failure or a
+--   silently-dropped symbol. Diagnostic category: CatCodegen.
+--   (The spec's illustrative `E2401` sat in the type-error range;
+--   this gate is a codegen-boundary check, so it takes the
+--   documented codegen range E4000-E4999.)
+
 
 -- | Go-build / runtime codes (E5000-E5999).
 goE_BuildFailed          :: DiagCode
