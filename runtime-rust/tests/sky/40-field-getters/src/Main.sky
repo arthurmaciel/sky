@@ -1,0 +1,84 @@
+module Main exposing (main)
+
+-- S1 field-getter FFI proof. The `fieldtest` crate's struct fields are read
+-- with NO hand-written wrapper: the inspector auto-generates total getters and
+-- the Rust codegen synthesizes `recv.field` / `recv.field.clone()` accessors.
+--
+-- Field getters are INFALLIBLE (C6): `n_field_from_point : Point -> Int`,
+-- returned bare (not Result-wrapped). Constructors return `Result String T`.
+--
+-- C2: `Counter` has BOTH a `pub id` field and an `id()` method. They bind to
+-- distinct Sky names — `id_field_from_counter` (getter) and `id_from_counter`
+-- (method) — and coexist with no collision.
+
+import Rust.Fieldtest as F
+import Std.Log exposing (println)
+
+
+main =
+    case F.make_point 7 "hello" of
+        Err _ ->
+            println "make_point failed"
+
+        Ok p ->
+            let
+                pn =
+                    F.n_field_from_point p
+
+                plabel =
+                    F.label_field_from_point p
+            in
+            case F.make_counter 5 of
+                Err _ ->
+                    println "make_counter failed"
+
+                Ok c ->
+                    let
+                        cid =
+                            F.id_field_from_counter c
+                    in
+                    case F.id_from_counter c of
+                        Err _ ->
+                            println "counter.id() method failed"
+
+                        Ok cidMethod ->
+                            case F.make_holder 42 of
+                                Err _ ->
+                                    println "make_holder failed"
+
+                                Ok h ->
+                                    let
+                                        -- C5 opaque-Clone getter: returns a
+                                        -- foreign `Inner` (cloned out), then we
+                                        -- read its `tag` field via another getter.
+                                        inner =
+                                            F.good_inner_field_from_holder h
+
+                                        innerTag =
+                                            F.tag_field_from_inner inner
+
+                                        ok =
+                                            pn
+                                                == 7
+                                                && plabel
+                                                == "hello"
+                                                && cid
+                                                == 5
+                                                && cidMethod
+                                                == 50
+                                                && innerTag
+                                                == 42
+                                    in
+                                    println
+                                        ("Point.n="
+                                            ++ String.fromInt pn
+                                            ++ " Point.label="
+                                            ++ plabel
+                                            ++ " Counter.id(field)="
+                                            ++ String.fromInt cid
+                                            ++ " Counter.id()(method)="
+                                            ++ String.fromInt cidMethod
+                                            ++ " Holder.good_inner.tag="
+                                            ++ String.fromInt innerTag
+                                            ++ (if ok then "  [ALL OK]" else "  [MISMATCH]")
+                                        )

@@ -127,7 +127,14 @@ generateRustBindings pkg0 = do
     -- Rust target: methods get `_from_<RecvType>` suffix so users can
     -- disambiguate `Chrono.now_from_utc` etc. (rustdoc preserves receiver
     -- info; the Sky source explicitly references suffixed names).
-    writeFile jsonFile (emitKernelJson True mname kname pkg)
+    --
+    -- Rust-LOCAL kernel.json emitter (not the shared `emitKernelJson`): a field
+    -- getter's HM type must be INFALLIBLE (`Recv -> FieldTy`, C6), matching the
+    -- infallible wrapper + `.skyi`. The shared emitter always Result-wraps via
+    -- `wrapperSkyType`, which would type a getter as `Recv -> Result Error
+    -- FieldTy` and make every read need an `Ok`-unwrap. The FFI registry seeds
+    -- HM from THIS json, so it is the load-bearing type source.
+    writeFile jsonFile (emitRustKernelJson mname kname pkg)
     return names
 
 
@@ -226,6 +233,18 @@ isNumericRust t = t `elem`
     [ "i8", "i16", "i32", "i64", "i128"
     , "u8", "u16", "u32", "u64", "u128"
     , "isize", "usize", "f32", "f64" ]
+
+
+-- | True when the given Rust type string is a `Copy` primitive, so a field
+-- getter can read it as `recv.field` (no `.clone()`). The S1 closed set's Copy
+-- members are the inspector-allowed ints (i8..i64 / u8..u32), the floats, bool,
+-- and char. Everything else eligible (String / Vec / Option / Clone-opaque) is
+-- non-Copy and must be `.clone()`d out of the borrowed receiver.
+isCopyRust :: String -> Bool
+isCopyRust t = trimStr t `elem`
+    [ "i8", "i16", "i32", "i64"
+    , "u8", "u16", "u32"
+    , "f32", "f64", "bool", "char" ]
 
 
 -- | Make extern-crate references absolute (`csv::X` → `::csv::X`) so they never
@@ -732,7 +751,54 @@ emitRustFile kernelName pkg =
                          Just (SeqKind (RefArr m) e) -> [(m, e)]
                          _                           -> []
                 ]
-        in if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
+            -- ── Field GETTER (S1) ──────────────────────────────────────
+            -- A field getter reads the field BY VALUE from the receiver —
+            -- `recv.field` for a `Copy` primitive, `recv.field.clone()` for the
+            -- eligible non-Copy set (String / Vec / Option / a Clone-deriving
+            -- opaque). The read is INFALLIBLE (C6): the wrapper returns the bare
+            -- field type, NOT a `SkyResult`, and the `.skyi` advertises
+            -- `Recv -> FieldTy`. The inspector already gated the field type to
+            -- the closed eligible set, so the projection / `.clone()` is total —
+            -- it can never panic, index, or partially move the field out.
+            --
+            -- The receiver param is taken by VALUE to match the FFI call-site
+            -- convention (the Sky→Rust codegen passes the receiver owned, e.g.
+            -- `getter(p)` / `getter(p.clone())` for a multi-use value). Reading
+            -- a `Copy` field copies it out (the moved-in receiver then drops
+            -- intact); reading a non-`Copy` field `.clone()`s it before the
+            -- receiver drops. Neither moves the field out of a partial borrow,
+            -- so C4's value-semantics + no-partial-drop intent holds.
+            fieldRecvRust   = resolveRustType crateImport recvType (_fnRecvRustType fn)
+            fieldName       = _fnMethodName fn   -- the REAL Rust field name
+            fieldRawTy      = if nRawRustResult > 0 then rawRustResultTypes !! 0 else ""
+            (fieldRetInner0, fieldCoerce) = translateRustRet fieldRawTy
+            fieldRetInner   = absolutizeCrate crateImport fieldRetInner0
+            -- `Copy` field → copy-out read; everything else in the closed set is
+            -- `Clone` → `.clone()` the field before the receiver drops.
+            fieldAccess     = if isCopyRust fieldRawTy
+                              then "arg0." ++ fieldName
+                              else "arg0." ++ fieldName ++ ".clone()"
+            fieldBody       = fieldCoerce fieldAccess
+            -- Total-by-construction guard: a getter needs exactly one result
+            -- (the field type), a real field name, and a nameable receiver. The
+            -- inspector always supplies these for an `is_field` entry, but if a
+            -- future inspector change emitted a degenerate one we DROP it (emit
+            -- nothing) rather than synthesise a `()`-returning broken wrapper.
+            fieldWellFormed =
+                nRawRustResult == 1
+                    && not (null (trimStr fieldRawTy))
+                    && not (null fieldName)
+                    && not (null (trimStr fieldRecvRust))
+            fieldLines =
+                [ "// [field] " ++ wrapper
+                , "pub fn " ++ rustName ++ "(arg0: " ++ fieldRecvRust ++ ") -> "
+                  ++ fieldRetInner ++ " {"
+                , "    " ++ fieldBody
+                , "}"
+                ]
+        in if _fnIsField fn
+           then if fieldWellFormed then fieldLines else []
+           else if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
            then []
            else [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
                 , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
@@ -773,12 +839,88 @@ dedupByRustName = go Set.empty
         key = lowerFirst (_fnName fn) ++ sfx
 
 
+-- | Rust-target kernel.json emitter. Mirrors the shared `emitKernelJson True`
+-- (method `_from_<Recv>` disamb, `{name, arity, skyType}` entries) EXCEPT that a
+-- field getter's `skyType` is the INFALLIBLE `Recv -> FieldTy` (C6) — the FFI
+-- registry seeds HM inference from this file, so the type here is what the Sky
+-- type-checker enforces at every call site.
+emitRustKernelJson :: String -> String -> PkgInfo -> String
+emitRustKernelJson moduleName kernelName pkg =
+    let fns = _pkgFns pkg
+        entries = intercalate ",\n" (map emitFnEntry fns)
+        emitFnEntry fn =
+            let st = if _fnIsField fn then fieldSkyType fn else wrapperSkyType fn
+                recv = _fnRecvType fn
+                disamb = if null recv then "" else "_from_" ++ lowerFirst recv
+                nm = lowerFirst (_fnName fn) ++ disamb
+                arity = max 1 (length (_fnParams fn))
+            in "    {\"name\": " ++ jsonQuote nm
+               ++ ", \"arity\": " ++ show arity
+               ++ ", \"skyType\": " ++ jsonQuote st ++ "}"
+    in unlines
+        [ "{"
+        , "  \"moduleName\": " ++ jsonQuote moduleName ++ ","
+        , "  \"kernelName\": " ++ jsonQuote kernelName ++ ","
+        , "  \"package\": " ++ jsonQuote (_pkgPath pkg) ++ ","
+        , "  \"functions\": ["
+        , entries
+        , "  ]"
+        , "}"
+        ]
+  where
+    -- Minimal JSON string escaper (mirrors FfiGen.quote, which isn't exported).
+    jsonQuote s = "\"" ++ concatMap esc s ++ "\""
+      where
+        esc '"'  = "\\\""
+        esc '\\' = "\\\\"
+        esc c    = [c]
+
+
 emitSkyiRustFn :: FnInfo -> String
 emitSkyiRustFn fn =
-    let sig = wrapperSkyType fn
+    let sig = if _fnIsField fn then fieldSkyType fn else wrapperSkyType fn
         recvt = _fnRecvType fn
+        -- C2: the `_field` discriminator is already baked into `_fnName` by the
+        -- inspector, so a field getter's name (`id_field_from_<Recv>`) can never
+        -- collide with a same-named method's (`id_from_<Recv>`) in the `.skyi`,
+        -- the kernel.json, or `dedupByRustName` — they all key off `_fnName`.
         disamb = if null recvt then "" else "_from_" ++ lowerFirst recvt
         name = lowerFirst (_fnName fn) ++ disamb
     in name ++ " : " ++ sig
+
+
+-- | C6: a field getter's `.skyi` type is INFALLIBLE — `Recv -> FieldTy`, NOT
+-- `Recv -> Result Error FieldTy`. `wrapperSkyType` always Result-wraps the
+-- result (every other FFI wrapper can fail), so for a field getter we take its
+-- rendering and strip the leading `Result Error ` from the result segment. The
+-- receiver-side rendering (left of the final ` -> `) is reused verbatim so the
+-- receiver type matches the struct's methods exactly.
+fieldSkyType :: FnInfo -> String
+fieldSkyType fn =
+    let full = wrapperSkyType fn               -- "<Recv> -> Result Error <FieldTy>"
+        (lhs, rhs) = splitLastArrow full
+        stripped = case stripPrefix "Result Error " (trimStr rhs) of
+            Just inner -> unParen (trimStr inner)
+            Nothing    -> trimStr rhs           -- already infallible (defensive)
+    in lhs ++ " -> " ++ stripped
+  where
+    -- Split on the LAST " -> " separator. A field getter's wrapperSkyType has
+    -- exactly one arrow (`Recv -> Result Error Field`), so "last" == "only";
+    -- using "last" is robust even if a receiver type ever curried.
+    splitLastArrow s =
+        case reverse (splitOnArrow s) of
+            (r : ls@(_:_)) -> (intercalate " -> " (reverse ls), r)
+            [r]            -> ("()", r)
+            []             -> ("()", s)
+    -- Split a type string on top-level " -> " occurrences.
+    splitOnArrow = go "" []
+      where
+        go cur acc [] = reverse (reverse cur : acc)
+        go cur acc s@(c:cs)
+            | " -> " `isPrefixOf` s = go "" (reverse cur : acc) (drop 4 s)
+            | otherwise             = go (c : cur) acc cs
+    -- Drop one matching outer paren pair if present (`(Maybe Int)` → `Maybe Int`).
+    unParen ('(':r) | not (null r) && last r == ')' = init r
+    unParen s = s
 
 

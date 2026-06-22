@@ -195,7 +195,15 @@ fn emit_tail_audit_report(crate_args: &[String], results: &[PkgInfo]) {
         drops.len()
     );
 
-    for reason in ["lifetime", "result_borrow", "array_slice"] {
+    for reason in [
+        "lifetime",
+        "result_borrow",
+        "array_slice",
+        // S1 field-getter drops (C1 + C5 + the char-unmapped C6 guard).
+        "wide_int_lossy",
+        "not_in_closed_set",
+        "char_unmapped",
+    ] {
         let in_reason: Vec<&(String, bool, String)> =
             drops.iter().filter(|(r, _, _)| r == reason).collect();
         let valuable = in_reason.iter().filter(|(_, v, _)| *v).count();
@@ -567,6 +575,10 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         }
     }
 
+    // Crate-local structs that derive/impl `Clone` — needed by the field-getter
+    // walk to decide whether a crate-local opaque field type is eligible (C5).
+    let clone_struct_ids = collect_clone_struct_ids(index);
+
     for (item_id, item) in index {
         // Only items from this crate (crate_id == 0); deps have crate_id > 0
         let crate_id = item["crate_id"].as_u64().unwrap_or(1);
@@ -642,6 +654,95 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 }
             }
         }
+
+        // ── Struct field GETTERS (S1) ──────────────────────────────────
+        // For a crate-local PUBLIC, non-doc-hidden struct with named (`plain`)
+        // fields, emit a pure getter `Function` per PUBLIC, non-doc-hidden,
+        // closed-set-eligible field. The owning struct's Sky / Rust types come
+        // from the SAME converters the impl-block uses, so the receiver type
+        // matches the struct's methods exactly (e.g. `fieldtest::P`).
+        if let Some(struct_data) = inner.get("struct") {
+            // C3: skip a doc-hidden struct entirely.
+            if !is_public(item) || doc_hidden(item) {
+                continue;
+            }
+            let Some(plain) = struct_data.get("kind").and_then(|k| k.get("plain")) else {
+                continue; // tuple / unit struct — no named fields in S1
+            };
+            let Some(field_ids) = plain.get("fields").and_then(|f| f.as_array()) else {
+                continue;
+            };
+
+            // Receiver Sky / Rust types from a synthetic resolved_path to this
+            // struct (identical output to the impl-block `for` handling).
+            let recv_path = serde_json::json!({
+                "resolved_path": { "name": name, "path": name, "id": item_id, "args": null }
+            });
+            let recv_sky = rustdoc_type_to_sky(&recv_path, &aliases);
+            let recv_rust = rustdoc_type_to_rust_str(&recv_path);
+            if recv_sky.is_empty() || recv_rust.is_empty() {
+                continue;
+            }
+
+            for field_id in field_ids {
+                let fid = item_id_to_str(field_id);
+                let Some(field_item) = index.get(&fid) else { continue };
+                // Visibility (C3 sibling): only `pub` fields. `pub(crate)` /
+                // `pub(in path)` read as non-"public" and are excluded here.
+                if !is_public(field_item) || doc_hidden(field_item) {
+                    continue;
+                }
+                let Some(field_name) = field_item["name"].as_str() else { continue };
+                let Some(field_ty) = field_item["inner"].get("struct_field") else { continue };
+
+                // C1 + C5 closed-type-set gate.
+                if let Err(reason) = field_type_eligible(field_ty, index, &clone_struct_ids) {
+                    record_tail_drop(
+                        reason,
+                        false,
+                        &rustdoc_type_to_rust_str(field_ty),
+                    );
+                    continue;
+                }
+
+                let field_sky = rustdoc_type_to_sky(field_ty, &aliases);
+                let field_rust = rustdoc_type_to_rust_str(field_ty);
+                if field_sky.is_empty() || field_rust.is_empty() {
+                    continue;
+                }
+
+                // C2: bake a `_field` discriminator into the Sky-visible NAME so
+                // a `pub id` field and an `id()` method on the same struct can't
+                // collide in the dedup / kernel-json / `.skyi` name key. The
+                // codegen body uses `method_name` (the REAL field name) for the
+                // `recv.field` projection.
+                functions.push(Function {
+                    name: format!("{field_name}_field"),
+                    params: vec![Param {
+                        name: "self".into(),
+                        ty: recv_sky.clone(),
+                        sky_type: recv_sky.clone(),
+                        rust_type: recv_rust.clone(),
+                    }],
+                    results: vec![Param {
+                        name: String::new(),
+                        ty: field_sky.clone(),
+                        sky_type: field_sky,
+                        rust_type: field_rust,
+                    }],
+                    variadic: false,
+                    effect: "pure".into(),
+                    exported: true,
+                    recv_type: recv_sky.clone(),
+                    recv_rust_type: recv_rust.clone(),
+                    method_name: field_name.to_string(),
+                    is_field: true,
+                    is_field_set: false,
+                    is_pkg_var: false,
+                    self_returning: false,
+                });
+            }
+        }
     }
 
     // Synthetic to_string / from_string bridge functions (Display/FromStr)
@@ -698,6 +799,16 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         // `to_string` Display bridges take `arg0: impl Display`, not a concrete
         // by-value receiver — exempt (matches the nameability retain above).
         if f.method_name == "to_string" {
+            return true;
+        }
+        // Field getters (S1) take the receiver by value (`arg0`, the established
+        // Ffi.hs receiver convention), but the wrapper body NEVER moves a field
+        // out: a Copy field is read by copy (`arg0.field`) and any eligible
+        // non-Copy field is `.clone()`d (borrow-then-own). So no partial move
+        // (E0509) is possible and the by-value-Sized concern below — which guards
+        // against a receiver type never produced by value — does not gate a field
+        // getter: the caller already holds the receiver (produced by some ctor).
+        if f.is_field {
             return true;
         }
         // The Sized concern is ONLY for INSTANCE methods — the wrapper takes the
@@ -763,6 +874,159 @@ fn collect_public_modules(doc: &serde_json::Value) -> Vec<String> {
 
 fn is_public(item: &serde_json::Value) -> bool {
     item["visibility"].as_str() == Some("public")
+}
+
+/// True if a rustdoc item carries `#[doc(hidden)]`.
+///
+/// Default `rustdoc` already STRIPS `#[doc(hidden)] pub` members from the index
+/// (they vanish from a struct's `fields` list and from the index entirely), so
+/// in the common case a hidden field never reaches the field walk. This is the
+/// belt-and-braces gate (C3): if a future rustdoc format or a
+/// `--document-hidden-items` run leaves a hidden item visible, we still refuse
+/// to surface it. The `attrs` array stringifies attributes; a doc-hidden item
+/// shows a fragment containing `doc(hidden)` / `hidden`.
+fn doc_hidden(item: &serde_json::Value) -> bool {
+    item.get("attrs")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter().any(|a| {
+                // Attribute entries are either bare strings ("#[doc(hidden)]")
+                // or objects ({ "other": "#[attr = …]" }). Check both stringy
+                // shapes for the doc(hidden) marker.
+                let s = a.as_str().map(str::to_string).or_else(|| {
+                    a.get("other").and_then(|o| o.as_str()).map(str::to_string)
+                });
+                s.map(|t| t.contains("doc(hidden)") || t.contains("DocHidden"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Set of crate-local struct rustdoc-ids that derive (or hand-impl) `Clone`.
+/// A field whose type is a crate-local opaque struct is getter-eligible (C5)
+/// ONLY if that struct is in this set — the generated getter clones the field
+/// out of the borrowed receiver (`recv.field.clone()`), which requires `Clone`.
+fn collect_clone_struct_ids(index: &serde_json::Map<String, serde_json::Value>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for (_id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let Some(impl_data) = item["inner"].get("impl") else { continue };
+        let trait_path = impl_data
+            .get("trait")
+            .and_then(|t| t.as_object())
+            .and_then(|t| t.get("path").or_else(|| t.get("name")))
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        if trait_path == "Clone" || trait_path.ends_with("::Clone") {
+            let for_val = impl_data.get("for").or_else(|| impl_data.get("for_"));
+            if let Some(id) = for_val
+                .and_then(|v| v.get("resolved_path"))
+                .and_then(|rp| rp.get("id"))
+            {
+                out.insert(item_id_to_str(id));
+            }
+        }
+    }
+    out
+}
+
+/// C1/C5 closed-type-set gate for a struct field's type, driven by the rustdoc
+/// type JSON so it can reach inner resolved-path ids (needed for the opaque
+/// `Clone` check and for `Vec<Opaque>` / `Option<Opaque>` recursion).
+///
+/// Returns `Ok(())` when the field type is in the S1 eligible set:
+///   `{i8,i16,i32,i64,u8,u16,u32}` ∪ `{f32,f64,bool,char}` ∪ `String`
+///   ∪ `Vec<T>` ∪ `Option<T>` (T recursive in the set)
+///   ∪ a crate-local opaque struct that derives `Clone`.
+/// Returns `Err(reason)` otherwise (`wide_int_lossy` for u64/u128/i128/usize/
+/// isize per C1; `not_in_closed_set` for everything else — references, generics,
+/// non-Clone opaque, external types, …). Conservative: anything unrecognised is
+/// dropped, never widened or force-cloned.
+fn field_type_eligible(
+    ty: &serde_json::Value,
+    index: &serde_json::Map<String, serde_json::Value>,
+    clone_ids: &HashSet<String>,
+) -> Result<(), &'static str> {
+    // See through a crate-local non-generic alias first (uuid::Bytes-style).
+    if let Some(rp) = ty.get("resolved_path") {
+        if let Some(aliased) = rp.get("id").and_then(resolve_alias) {
+            return field_type_eligible(&aliased, index, clone_ids);
+        }
+    }
+
+    // Primitive types (ints / floats / bool). Strings arrive as a resolved_path
+    // to `String`, not a primitive, so they're handled below.
+    if let Some(prim) = ty.get("primitive").and_then(|p| p.as_str()) {
+        return match prim {
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "f32" | "f64"
+            | "bool" => Ok(()),
+            // C1: value-NON-preserving into Sky's i64. Drop rather than widen.
+            "u64" | "u128" | "i128" | "usize" | "isize" => Err("wide_int_lossy"),
+            // `char` is Copy and conceptually in the S1 set, but the Sky-type
+            // converter (`type_str_to_sky`) has no `char -> Char` arm — it would
+            // advertise a bare lowercase `char`, which is NOT a Sky type, so the
+            // getter's `.skyi` / kernel.json type would not resolve in codegen
+            // ("type-checks but cargo-fails"). Per the inspector's own "unsure ->
+            // DROP" rule, defer `char` field getters until the converter maps
+            // `char -> Char` (tracked for S2).
+            "char" => Err("char_unmapped"),
+            _ => Err("not_in_closed_set"),
+        };
+    }
+
+    // References / lifetimes can't cross the owned FFI boundary (C5).
+    if ty.get("borrowed_ref").is_some() || ty.get("raw_pointer").is_some() {
+        return Err("not_in_closed_set");
+    }
+
+    if let Some(rp) = ty.get("resolved_path") {
+        let raw = rp["name"].as_str().or_else(|| rp["path"].as_str()).unwrap_or("");
+        let last = raw.rsplit("::").next().unwrap_or(raw);
+        let args: Vec<&serde_json::Value> = rp
+            .get("args")
+            .and_then(|a| a.get("angle_bracketed"))
+            .and_then(|ab| ab.get("args"))
+            .and_then(|a| a.as_array())
+            .map(|arr| arr.iter().filter_map(|a| a.get("type")).collect())
+            .unwrap_or_default();
+        match last {
+            "String" => return Ok(()),
+            "Vec" | "Option" => {
+                return match args.first() {
+                    Some(inner) => field_type_eligible(inner, index, clone_ids),
+                    None => Err("not_in_closed_set"),
+                };
+            }
+            _ => {
+                // Crate-local opaque struct: eligible iff it derives Clone AND is
+                // a generic-free struct we can name. Its id must resolve to a
+                // crate-local struct item in the index.
+                if !args.is_empty() {
+                    return Err("not_in_closed_set"); // generic opaque — out of S1
+                }
+                if let Some(id) = rp.get("id") {
+                    let key = item_id_to_str(id);
+                    let is_local_struct = index
+                        .get(&key)
+                        .map(|it| {
+                            it["crate_id"].as_u64().unwrap_or(1) == 0
+                                && it["inner"].get("struct").is_some()
+                        })
+                        .unwrap_or(false);
+                    if is_local_struct && clone_ids.contains(&key) {
+                        return Ok(());
+                    }
+                }
+                return Err("not_in_closed_set");
+            }
+        }
+    }
+
+    // tuples, slices, arrays, generics, impl-trait, … — not in the S1 set.
+    Err("not_in_closed_set")
 }
 
 // ── Drop-reason audit (diagnostic; `--audit` only) ─────────────────────
