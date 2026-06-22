@@ -390,7 +390,11 @@ emitKernelJson disambMethods moduleName kernelName pkg =
     let fns = filter (not . shouldSkipFn) (_pkgFns pkg)
         fnEntries = intercalate ",\n" (map emitFnEntry fns)
         emitFnEntry fn =
-            let st = wrapperSkyType fn
+            -- Go target: effectful functions keep their synchronous
+            -- `Result Error _` surface (Go's runtime wrapper is sync — see
+            -- wrapperSkyType's note). Passing False keeps Go output byte-
+            -- identical to the pre-effectful-lift behaviour.
+            let st = wrapperSkyType False fn
                 recv = _fnRecvType fn
                 disamb = if disambMethods && not (null recv)
                          then "_from_" ++ lowerFirst recv
@@ -432,8 +436,17 @@ emitKernelJson disambMethods moduleName kernelName pkg =
 -- Param list flows through goTypeToSky verbatim. Zero-param Go
 -- functions emit `() -> Result Error R` — Sky calls them as
 -- `Pkg.fn ()` (unit applied), matching the existing convention.
-wrapperSkyType :: FnInfo -> String
-wrapperSkyType fn =
+-- | The first argument lifts an @effect="effectful"@ function's result from
+-- the synchronous @Result Error _@ wrap to @Task Error _@. ONLY the Rust
+-- target passes 'True' — the Rust runtime emits a real @SkyTask@ wrapper that
+-- @.await@s the foreign future. The Go target passes 'False' (byte-identical
+-- to the pre-fix behaviour): Go's inspector marks package-var setters and
+-- chan/func results @effectful@ too, but the Go runtime wrapper returns a
+-- synchronous @SkyResult@ (via @SkyFfiReflectCall@), so its registry/.skyi
+-- type MUST stay @Result Error _@. 'fallible' / 'pure' are byte-identical on
+-- both targets regardless of the flag.
+wrapperSkyType :: Bool -> FnInfo -> String
+wrapperSkyType liftEffectful fn =
     -- Per-param / per-result Sky-side override from the inspector
     -- (e.g. CheckoutSessionStatus -> string). Length matches
     -- _fnParams / _fnResults; "" means use the bare Go type.
@@ -466,7 +479,9 @@ wrapperSkyType fn =
             (_, multi)            ->
                 -- Multi non-error returns pack into a Sky tuple.
                 "(" ++ intercalate ", " (map skyOf multi) ++ ")"
-        okType
+        -- The synchronous Result-wrapped surface (default for pure/fallible,
+        -- and for effectful on the Go target).
+        resultType
             -- Inspector already produced a Result type (shims, or union
             -- returns that already carry the Result layer) — don't double-wrap.
             | "Result " `isPrefixOf` innerOk = innerOk
@@ -474,6 +489,20 @@ wrapperSkyType fn =
             -- Result wrap composites need parens to bind tightly.
             ('(':_) -> "Result Error " ++ innerOk
             _       -> "Result Error " ++ wrapIfMulti innerOk
+        -- Effectful lift (Rust target): re-wrap the Ok payload as Task Error.
+        -- `innerOk` is the bare Ok type the wrapper actually produces; when
+        -- the inspector already rendered a `Result e a` layer we peel it to
+        -- the inner `a` before re-wrapping, mirroring the Result special-case
+        -- above so we never emit `Task Error (Result …)`.
+        taskOkInner
+            | "Result " `isPrefixOf` innerOk = stripResultLayer innerOk
+            | otherwise                      = innerOk
+        taskType = case taskOkInner of
+            ('(':_) -> "Task Error " ++ taskOkInner
+            _       -> "Task Error " ++ wrapIfMulti taskOkInner
+        okType
+            | liftEffectful && _fnEffect fn == "effectful" = taskType
+            | otherwise                                    = resultType
     in paramSig ++ " -> " ++ okType
   where
     -- "List X" / "Dict String V" / "Maybe X" etc. need parens when
@@ -481,6 +510,15 @@ wrapperSkyType fn =
     wrapIfMulti s
         | ' ' `elem` s && head s /= '(' = "(" ++ s ++ ")"
         | otherwise                     = s
+    -- Peel a leading `Result <err> ` layer to the inner Ok type so the
+    -- effectful lift re-wraps as `Task Error <inner>`, not `Task Error
+    -- (Result …)`. `Result Error (List X)` -> `List X`; `Result String Int`
+    -- -> `Int`. Drops the first two space-separated tokens (the `Result` ctor
+    -- and its error arg), keeping the remainder (which may itself be a
+    -- parenthesised composite) verbatim.
+    stripResultLayer s = case words s of
+        ("Result" : _err : rest) -> unwords rest
+        _                        -> s
 
 
 -- | Reject Sky-type strings that still carry Go-side residue. These

@@ -87,7 +87,7 @@ BUILD_TMO="${SKY_FFI_FIXTURE_BUILD_TIMEOUT:-900}"   # cold cargo + nightly rustd
 RUN_TMO=25
 
 # The full fixture set (numbered order). Default when no args given.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real

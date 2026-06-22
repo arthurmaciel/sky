@@ -694,11 +694,25 @@ emitRustFile kernelName pkg =
                     (case paramTypes of (t:_) -> t; [] -> "()", id)
                 | otherwise =
                     let (t, co) = case _fnEffect fn of
-                            "fallible" -> translateRustRet (okTypeOfResult effRawResult)
-                            _          -> translateRustRet effRawResult
+                            -- Both fallible AND effectful unwrap the Result's
+                            -- Ok type: the body's `ok_res(v)` binds `v` to the
+                            -- unwrapped Ok value, so retInner must be the Ok
+                            -- type (e.g. `i64`), not the raw `Result<i64,
+                            -- String>`. The effectful branch additionally
+                            -- handles an async fn whose Ok is itself a Result —
+                            -- okTypeOfResult peels exactly one layer, matching
+                            -- the `.await`'s single Result.
+                            "fallible"  -> translateRustRet (okTypeOfResult effRawResult)
+                            "effectful" -> translateRustRet (okTypeOfResult effRawResult)
+                            _           -> translateRustRet effRawResult
                     in (absolutizeCrate crateImport t, co)
+            -- The effectful wrapper returns the generated project's 1-arg
+            -- `SkyTask<A>` alias (`pub type SkyTask<A> = sky_runtime::SkyTask
+            -- <SkyError, A>;`, emitted by Emitter.hs) — NOT the 2-arg runtime
+            -- form, which would be E0107 against that alias. `retInner` is the
+            -- unwrapped Ok type, matching the future's `ok_res(v)` output.
             retType = case _fnEffect fn of
-                "effectful" -> "SkyTask<SkyError, " ++ retInner ++ ">"
+                "effectful" -> "SkyTask<" ++ retInner ++ ">"
                 _           -> "SkyResult<SkyError, " ++ retInner ++ ">"
             crateImport = pkgToCrateImport (_pkgPath pkg)
             fnName    = _fnName fn
@@ -1174,7 +1188,7 @@ emitRustKernelJson moduleName kernelName pkg =
     let fns = _pkgFns pkg
         entries = intercalate ",\n" (map emitFnEntry fns)
         emitFnEntry fn =
-            let st = if infallibleFfiFn fn then fieldSkyType fn else wrapperSkyType fn
+            let st = if infallibleFfiFn fn then fieldSkyType fn else wrapperSkyType True fn
                 nm = wrapperRefName fn
                 arity = max 1 (length (_fnParams fn))
             in "    {\"name\": " ++ jsonQuote nm
@@ -1201,7 +1215,7 @@ emitRustKernelJson moduleName kernelName pkg =
 
 emitSkyiRustFn :: FnInfo -> String
 emitSkyiRustFn fn =
-    let sig = if infallibleFfiFn fn then fieldSkyType fn else wrapperSkyType fn
+    let sig = if infallibleFfiFn fn then fieldSkyType fn else wrapperSkyType True fn
         -- C2: the `_field` discriminator is already baked into `_fnName` by the
         -- inspector, so a field getter's name (`id_field_from_<Recv>`) can never
         -- collide with a same-named method's (`id_from_<Recv>`) in the `.skyi`,
@@ -1230,7 +1244,10 @@ infallibleFfiFn fn =
 -- receiver type matches the struct's methods exactly.
 fieldSkyType :: FnInfo -> String
 fieldSkyType fn =
-    let full = wrapperSkyType fn               -- "<Recv> -> Result Error <FieldTy>"
+    -- False: this path runs only for infallibleFfiFn (field getters / enum
+    -- accessors), which are never effectful; we need the Result-wrapped form
+    -- so the strip below produces the infallible `Recv -> FieldTy`.
+    let full = wrapperSkyType False fn         -- "<Recv> -> Result Error <FieldTy>"
         (lhs, rhs) = splitLastArrow full
         stripped = case stripPrefix "Result Error " (trimStr rhs) of
             Just inner -> unParen (trimStr inner)

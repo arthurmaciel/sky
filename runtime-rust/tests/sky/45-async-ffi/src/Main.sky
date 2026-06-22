@@ -1,0 +1,45 @@
+module Main exposing (main)
+
+-- 45-async-ffi: probe + regression for task #15 — does the async→Task auto-FFI
+-- binding drive a REAL async foreign fn end-to-end on Sky's Task runtime?
+--
+-- `asyncffi::delay_echo` is an `async fn(i64, i64) -> Result<i64, String>`
+-- backed by `tokio::time::sleep` (needs the reactor). The inspector correctly
+-- marks it `effect="effectful"`, so the INTENDED binding is:
+--
+--     delay_echo : Int -> Int -> Task Error Int
+--
+-- and the Rust wrapper should return `SkyTask<SkyError, i64>`, driven by Sky's
+-- Task runtime. We drive it via the Task path (top-level `main : Task Error ()`,
+-- runtime auto-run) and assert `delay_echo 21 5 == 42`.
+--
+-- STATUS (2026-06-22 probe): this fixture FAILS today — three compile-time
+-- codegen bugs in the effectful-FFI path (see runtime-rust/docs/PROGRESS.md
+-- entry + task #15). It is committed RED-by-design as the regression artifact:
+-- it must go GREEN once the async→Task bridge lands. It is NOT in the green
+-- fixture set yet.
+--
+-- Run:  bash setup.sh && sky build --backend rust src/Main.sky
+-- Expected (after fix): delay_echo(21, 5)=42  [ALL OK]
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Rust.Asyncffi as A
+import Std.Log exposing (println)
+
+
+main : Task Error ()
+main =
+    A.delay_echo 21 5
+        |> Task.andThen
+            (\r ->
+                let
+                    ok =
+                        r == 42
+                in
+                println
+                    ("delay_echo(21, 5)="
+                        ++ String.fromInt r
+                        ++ (if ok then "  [ALL OK]" else "  [MISMATCH]")
+                    )
+            )
