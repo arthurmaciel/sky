@@ -86,6 +86,7 @@ import qualified Sky.Build.CtorConsPatternSpec
 import qualified Sky.Build.EnvPrefixSpec
 import qualified Sky.Build.FfiGenMultiSpec
 import qualified Sky.Build.FfiTypeParserSpec
+import qualified Sky.Build.FfiTypeResolveSpec
 import qualified Sky.Build.TaskResultBridgesSpec
 import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
@@ -528,6 +529,15 @@ allSpecs fastMode = do
     -- field into a typed AST. Locks the closed grammar against
     -- producer/consumer drift.
     describeT "Sky.Build.FfiTypeParser"  Sky.Build.FfiTypeParserSpec.spec
+    -- Wall #1 of the demand-driven generic Sky→Rust FFI epic:
+    -- parametric foreign type ctors (e.g. Rust IndexMap<K,V> →
+    -- `IndexMap k v`) survive FfiTypeResolve as a real parametric
+    -- TType with a NON-EMPTY home + preserved args + generalised
+    -- TVars, instead of collapsing to the opaque `Value` sentinel.
+    -- A NULLARY foreign ctor stays at `Value` byte-for-byte. SHARED
+    -- compiler layer; Go never reaches the parametric branch (its
+    -- inspector drops generic fns before emitting skyType).
+    describeT "Sky.Build.FfiTypeResolve" Sky.Build.FfiTypeResolveSpec.spec
     -- Result/Task bridge helpers (Task.fromResult, Task.andThenResult,
     -- Result.andThenTask) — runtime + canonicaliser + kernel sigs gate.
     describeT "Sky.Build.TaskResultBridges" Sky.Build.TaskResultBridgesSpec.spec

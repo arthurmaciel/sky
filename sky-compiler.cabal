@@ -400,6 +400,7 @@ test-suite sky-tests
       Sky.Build.EnvPrefixSpec
       Sky.Build.FfiGenMultiSpec
       Sky.Build.FfiTypeParserSpec
+      Sky.Build.FfiTypeResolveSpec
       Sky.Build.TaskResultBridgesSpec
       Sky.Build.CheckIsBuildSpec
       Sky.Build.RecordFieldOrderSpec

@@ -48,11 +48,13 @@ ftyToAnnotation kernelName ast =
 -- without collision — each kernelName is a separate canonical home,
 -- and TType identity is by (home, name, args).
 ftyToType :: String -> FtyAst -> Can.Type
-ftyToType _kernelName = go
-    -- _kernelName is reserved for the proper fix (see opaqueHome
-    -- comment): when the inspector starts emitting fully-qualified
-    -- Go-package paths in skyType, the kernel name will pin the
-    -- canonical home for opaque types referenced there.
+ftyToType kernelName = go
+    -- kernelName pins the canonical home for the parametric-foreign
+    -- branch in goApp (Wall #1 of the demand-driven generic FFI
+    -- epic). For the nullary opaque path it is still unused — see
+    -- the opaqueValue comment for why that path keeps the empty
+    -- home (and the future-work note on fully-qualified Go-package
+    -- paths in skyType).
   where
     go = \case
         FtyVar name           -> Can.TVar name
@@ -70,15 +72,39 @@ ftyToType _kernelName = go
     goApp :: String -> [Can.Type] -> Can.Type
     goApp name args = case lookup name builtinHome of
         Just home -> Can.TType home name args
-        Nothing   -> opaqueValue
-      where
-        -- Drop @args@ for opaque types — anything generic at the
-        -- Go side would have been filtered by isSkyParseable on
-        -- the producer; the only remaining shapes are bare opaque
-        -- type names and List/Dict/Maybe applied to them. The
-        -- latter still resolve to LIst (Value) etc. because we
-        -- recurse through arg positions before reaching here.
-        _used = name : map (const "_") args
+        Nothing
+            -- (A) Gate on NON-EMPTY args. A non-builtin ctor that
+            -- carries type arguments is a genuine PARAMETRIC foreign
+            -- type (e.g. a Rust @IndexMap<K, V>@ surfaced as
+            -- @IndexMap k v@). Wall #1 of the demand-driven generic
+            -- Sky→Rust FFI epic preserves it as a real
+            -- @TType <foreignHome> name args@ so HM can solve a
+            -- use-site @IndexMap String Int@ and the monomorphiser
+            -- sees the concrete @[String, Int]@. The args were
+            -- already recursively resolved by @go@ (the @map go@ at
+            -- the FtyApp call site), so a nested
+            -- @IndexMap k (Maybe v)@ preserves its structure.
+            | not (null args) -> Can.TType foreignHome name args
+            -- (B) Nullary non-builtin ctor → unchanged. A concrete
+            -- foreign type with no parameters (e.g. @NaiveDate@,
+            -- @Token@, @ActionCodeSettings@) keeps the existing
+            -- @Value@-sentinel representation byte-for-byte. Do NOT
+            -- alter this path.
+            | otherwise       -> opaqueValue
+
+    -- (C) Non-empty home for the parametric-foreign branch. The
+    -- unifier (Unify.hs) relaxes empty-home matching, so a
+    -- @Canonical ""@ home would let two different crates' same-named
+    -- @IndexMap@ cross-unify and lose nominal identity. Pin the home
+    -- to the FFI binding's kernel/crate name so each crate's
+    -- @IndexMap k v@ is a distinct nominal type. If @kernelName@ is
+    -- somehow empty (it never is for a real FFI symbol — the
+    -- registry always threads a kernel name), fall back to a stable
+    -- non-empty sentinel rather than the relaxed empty home.
+    foreignHome :: ModuleName.Canonical
+    foreignHome
+        | null kernelName = ModuleName.Canonical "Sky.Ffi.Foreign"
+        | otherwise       = ModuleName.Canonical kernelName
 
     -- Every opaque FFI type collapses to the @Value@ sentinel —
     -- the same canonical that handcoded kernel sigs use for
