@@ -125,7 +125,17 @@ data FnInfo = FnInfo
         -- ^ Rust only (S3). "unit" | "tuple" | "struct" (ctor + extract). "".
     , _fnEnumStructFields :: [String]
         -- ^ Rust only (S3). Struct-variant field names in declaration order
-        -- (ctor + extract for a struct variant); [] for unit / tuple variants.
+        -- (ctor for a struct variant); [] for unit / tuple variants.
+        --
+        -- EXTRACT REUSE (multi-field, task #18): for a payload extractor this
+        -- holds a SINGLE entry — the binder the body returns: the field NAME
+        -- (struct variant) or the positional INDEX as a string, e.g. "0"/"1"
+        -- (tuple variant). The Rust emit reads head to pick the field.
+    , _fnEnumFieldCount :: Int
+        -- ^ Rust only (S3 extract, multi-field). The variant's TOTAL field
+        -- arity. The tuple-extractor body binds every position
+        -- (`E::V(f0, f1, ..)`) before returning the selected one, so it needs
+        -- the count. 0 / absent for ctors, tags, and struct extractors.
     , _fnEnumArms :: [String]
         -- ^ Rust only (S3, tag). Each entry "<rust-pattern>\t<tag-string>",
         -- e.g. "A\tA", "B(..)\tB", "C{..}\tC". []  for non-tag functions.
@@ -174,6 +184,7 @@ instance A.FromJSON FnInfo where
             <*> o A..:? "enumVariant" A..!= ""
             <*> o A..:? "enumKind" A..!= ""
             <*> o A..:? "enumStructFields" A..!= []
+            <*> o A..:? "enumFieldCount" A..!= 0
             <*> o A..:? "enumArms" A..!= []
             <*> o A..:? "enumWildcard" A..!= False
       where

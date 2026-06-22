@@ -73,10 +73,25 @@ SKY="${SKY_BIN:-$REPO/sky-out/sky}"
 # built source inspector unless the caller already pinned one — this matches what
 # a clean `sky` build embeds, so the result tracks CI exactly.
 if [ -z "${SKY_FFI_INSPECTOR_RS:-}" ]; then
-  _insp="$REPO/tools/sky-ffi-inspect-rs/target/release/sky-ffi-inspect-rs"
-  if cargo build --release --manifest-path "$REPO/tools/sky-ffi-inspect-rs/Cargo.toml" >/tmp/ffi-inspector-build.log 2>&1 && [ -x "$_insp" ]; then
-    export SKY_FFI_INSPECTOR_RS="$_insp"
-    echo "  (using freshly built inspector: $_insp)"
+  if cargo build --release --manifest-path "$REPO/tools/sky-ffi-inspect-rs/Cargo.toml" >/tmp/ffi-inspector-build.log 2>&1; then
+    # env.sh exports CARGO_TARGET_DIR (shared cache), so the release binary lands
+    # under $CARGO_TARGET_DIR/release/, NOT the crate-local tools/.../target/. A
+    # stale crate-local copy (from an earlier non-shared build) would otherwise
+    # be picked verbatim and SILENTLY shadow the just-built source — exactly the
+    # staleness this guard exists to prevent. Prefer the actual output dir, fall
+    # back to the crate-local default only when no override is set.
+    _insp=""
+    for _cand in \
+        "${CARGO_TARGET_DIR:-}/release/sky-ffi-inspect-rs" \
+        "$REPO/tools/sky-ffi-inspect-rs/target/release/sky-ffi-inspect-rs"; do
+      [ -n "$_cand" ] && [ -x "$_cand" ] && { _insp="$_cand"; break; }
+    done
+    if [ -n "$_insp" ]; then
+      export SKY_FFI_INSPECTOR_RS="$_insp"
+      echo "  (using freshly built inspector: $_insp)"
+    else
+      echo "  WARNING: built the inspector but found no binary (checked CARGO_TARGET_DIR + crate-local); falling back to sky's embedded inspector — may be stale." >&2
+    fi
   else
     echo "  WARNING: could not build the source inspector (see /tmp/ffi-inspector-build.log); falling back to sky's embedded inspector — may be stale on an incremental local build." >&2
   fi
@@ -87,7 +102,7 @@ BUILD_TMO="${SKY_FFI_FIXTURE_BUILD_TIMEOUT:-900}"   # cold cargo + nightly rustd
 RUN_TMO=25
 
 # The full fixture set (numbered order). Default when no args given.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real

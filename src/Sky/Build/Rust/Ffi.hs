@@ -33,6 +33,7 @@ import System.Directory (createDirectoryIfMissing, doesFileExist, getCurrentDire
 import System.Environment (lookupEnv)
 import System.FilePath ((</>), takeDirectory)
 import System.Process (readProcessWithExitCode)
+import Text.Read (readMaybe)
 import qualified Sky.Build.EmbeddedInspectorRust as EIRust
 import Sky.Build.FfiGen
     ( PkgInfo(..), FnInfo(..)
@@ -1075,29 +1076,65 @@ emitRustFile kernelName pkg =
                    , "    t.to_string()"
                    , "}"
                    ]
-            -- Single-field payload extractor (R6): `E -> Maybe T`. The receiver
-            -- is BY VALUE so the matched arm MOVES the owned single field out
-            -- (no clone, no E0509). The result inner Rust type comes from the
-            -- raw result `Option<T>` (the field's owned type); the wrapper
-            -- returns `SkyMaybe<T'>` built directly (NOT Result-wrapped — C6/E6).
-            -- A struct variant binds the single named field; a tuple variant
-            -- binds the positional `x`. The `_ => Nothing` wildcard is always
-            -- present (the non-matching variants collapse to Nothing).
+            -- Per-field payload extractor (R6, multi-field generalisation):
+            -- `E -> Maybe T`. The receiver is BY VALUE so the matched arm MOVES
+            -- the SELECTED owned field out (no clone, no E0509); every sibling
+            -- field is bound too and simply DROPS — also a move out of the owned
+            -- `e`, so there is no partial-move/E0509 hazard. The result inner
+            -- Rust type comes from the raw result `Option<T>` (the selected
+            -- field's owned type); the wrapper returns `SkyMaybe<T'>` built
+            -- directly (NOT Result-wrapped — C6/E6).
+            --
+            -- The inspector carries the SELECTOR in `enumStructFields[0]`: for a
+            -- struct variant the field NAME, for a tuple variant the positional
+            -- INDEX (as a string). `enumFieldCount` is the variant's total arity
+            -- (tuple binds every position). A struct variant binds `{ name, .. }`
+            -- (the `..` drops the rest); a tuple variant binds all positions
+            -- `(f0, f1, ..)` and returns `f<idx>`. The `_ => Nothing` wildcard is
+            -- present per R3 (non_exhaustive OR >1 variant).
             enumExtractRawResult = if nRawRustResult > 0 then head rawRustResultTypes else ""
             enumExtractInnerRaw = case stripGeneric1 "Option" enumExtractRawResult of
                 Just inner -> trimStr inner
                 Nothing    -> enumExtractRawResult
             (enumExtractInner0, enumExtractCoerce) = translateRustRet enumExtractInnerRaw
             enumExtractInner = absolutizeCrate crateImport enumExtractInner0
-            enumExtractPat = case enumKind of
-                "struct" -> case enumSFields of
-                    (f:_) -> enumPath enumVariant ++ " { " ++ rustSafeIdent f ++ ": x }"
-                    []    -> enumPath enumVariant ++ " { .. }"  -- defensive
-                _        -> enumPath enumVariant ++ "(x)"
+            -- The selected binder: head of `enumSFields` (struct field name /
+            -- tuple index string). Defensive "" → falls back to the legacy
+            -- single-field shape (binds `x`).
+            enumExtractSelector = case enumSFields of
+                (s:_) -> s
+                []    -> ""
+            enumExtractArity = _fnEnumFieldCount fn
+            -- (pattern, returned-binder-ident). Tuple binds f0..f(arity-1) by
+            -- position and returns the indexed one; struct binds `{ name, .. }`
+            -- and returns the (raw-escaped) name.
+            (enumExtractPat, enumExtractBinder) = case enumKind of
+                "struct" -> case enumExtractSelector of
+                    "" -> (enumPath enumVariant ++ " { .. }", "x")  -- defensive
+                    nm -> let ident = rustSafeIdent nm
+                          in (enumPath enumVariant ++ " { " ++ ident ++ ", .. }", ident)
+                _ ->  -- tuple
+                    case enumExtractSelector of
+                        "" -> (enumPath enumVariant ++ "(x)", "x")  -- defensive single-field
+                        _  ->
+                            let n = max 1 enumExtractArity
+                                idx = case readMaybe enumExtractSelector :: Maybe Int of
+                                          Just i | i >= 0 && i < n -> i
+                                          _ -> 0
+                                ret = "f" ++ show idx
+                                -- Bind ONLY the selected position; every other
+                                -- position is `_` so the unmatched siblings drop
+                                -- without an `unused_variables` warning (the
+                                -- emitted bindings header allows unused_imports /
+                                -- _mut / dead_code, but NOT unused_variables).
+                                -- All bindings still move out of the owned `e`.
+                                binders = [ if i == idx then ret else "_"
+                                          | i <- [0 .. n - 1] ]
+                            in (enumPath enumVariant ++ "(" ++ intercalate ", " binders ++ ")", ret)
             enumExtractWellFormed =
                 not (null (trimStr enumRecvRust)) && not (null enumVariant)
                     && not (null (trimStr enumExtractInnerRaw))
-                    && (enumKind /= "struct" || not (null enumSFields))
+                    && (enumKind /= "struct" || not (null enumExtractSelector))
             -- The `_ => Nothing` wildcard is appended IFF `_fnEnumWildcard` (R3):
             -- the enum is non_exhaustive OR has >1 variant. For a single-variant
             -- exhaustive enum the matched arm is already total, so omitting the
@@ -1110,7 +1147,7 @@ emitRustFile kernelName pkg =
                   ++ ") -> SkyMaybe<" ++ enumExtractInner ++ "> {"
                 , "    match arg0 {"
                 , "        " ++ enumExtractPat ++ " => SkyMaybe::Just("
-                  ++ enumExtractCoerce "x" ++ "),"
+                  ++ enumExtractCoerce enumExtractBinder ++ "),"
                 ]
                 ++ enumExtractWildcard
                 ++ [ "    }"

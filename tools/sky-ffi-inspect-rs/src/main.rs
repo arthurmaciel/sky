@@ -33,6 +33,13 @@ struct Param {
     rust_type: String,
 }
 
+/// serde `skip_serializing_if` predicate: omit a `u64` field from the JSON when
+/// it is the default 0 (keeps the bindings JSON minimal + matches the other
+/// `skip_serializing_if` defaults on `Function`).
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
 #[derive(Serialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 struct Function {
@@ -84,8 +91,19 @@ struct Function {
     enum_kind: String,
     /// Struct-variant field names in declaration order (ctor + extract for a
     /// struct variant). Empty for unit / tuple variants.
+    ///
+    /// EXTRACT REUSE: for a payload extractor this slot holds a SINGLE entry —
+    /// the selected binder the body returns: the field NAME for a struct
+    /// variant, the positional INDEX (as a string, e.g. "0"/"1") for a tuple
+    /// variant. The Rust emit reads slot 0 to pick the field.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     enum_struct_fields: Vec<String>,
+    /// Extractor only: the variant's TOTAL field arity. The Rust emit binds
+    /// every tuple position (`E::V(f0, f1, ..)`) before returning the selected
+    /// one, so a multi-field tuple extractor needs the count. 0 / absent for
+    /// ctors, tags, and struct-variant extractors (which use `{ name, .. }`).
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    enum_field_count: u64,
     /// Tag-match arms (tag only): each entry is "<rust-pattern>\t<tag-string>",
     /// e.g. "A\tA", "B(..)\tB", "C{..}\tC". FfiGen renders `E::<pat> => "<tag>"`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1450,31 +1468,51 @@ fn emit_enum_bindings(
             }
         }
 
-        // ── Single-field payload extractor (R6) ────────────────────────
-        // Emitted for a SINGLE-field tuple/struct variant whose one field is in
-        // the closed set. Multi-field variants: SKIP (tag-only). The extractor
-        // receiver is BY VALUE and MOVES the owned field out (no clone, no
-        // E0509). The non-matching variants fall through to `Nothing` via the
-        // `_` arm.
+        // ── Payload extractor(s) (R6, multi-field generalisation) ──────
+        // PER-FIELD extractor: one `<v>[_<idx-or-name>]_as_variant : E -> Maybe
+        // T` for EACH variant field whose type is in the S1 closed set (C5 + C1
+        // wide-int gate). Sky has no clean FFI tuple, so a multi-field variant
+        // `V(A,B)` / `V{a,b}` is decomposed into one extractor PER eligible field
+        // (`<v>_0_as_variant`/`<v>_1_as_variant`, `<v>_a_as_variant`/…), not
+        // skipped. A field whose type is ineligible (non-closed / non-Clone
+        // opaque / wide-int) gets NO extractor — but its sibling eligible fields
+        // still do (e.g. `Mix(i64, NoClone)` → only field 0).
+        //
+        // A SINGLE-field variant keeps its un-suffixed `<v>_as_variant` name
+        // (the 1-field case of the general emit), so existing S3 bindings are
+        // byte-identical. The body (`Rust/Ffi.hs`) binds ALL fields by position/
+        // name and returns the i-th — total, by-value receiver moves the chosen
+        // owned field out, siblings drop (no clone, no E0509).
         //
         // The `_ => Nothing` wildcard is needed ONLY when a value could be a
         // DIFFERENT variant — i.e. the enum is non_exhaustive OR has >1 variant.
         // A single-variant exhaustive enum's `E::Only(x) => Just(x)` is already
         // exhaustive, so emitting the wildcard would be `unreachable_patterns`
         // (clippy). Gate it precisely (mirrors the tag's R3 gating).
-        if kind != "unit" && fields_eligible {
-            if let Some(field) = resolved_fields.as_ref().and_then(|f| {
-                if f.len() == 1 { f.first() } else { None }
-            }) {
+        if kind != "unit" {
+            if let Some(fields) = resolved_fields.as_ref() {
+                let n_fields = fields.len();
+                let single = n_fields == 1;
                 let extract_wildcard = enum_non_exhaustive || variant_ids.len() > 1;
-                pending.push(make_enum_extract(
-                    &variant_name,
-                    kind,
-                    field,
-                    &enum_sky,
-                    &enum_rust,
-                    extract_wildcard,
-                ));
+                for (idx, field) in fields.iter().enumerate() {
+                    // Per-field eligibility — a sibling's ineligibility never
+                    // suppresses THIS field's extractor (independent of the
+                    // ctor's all-fields `fields_eligible` gate above).
+                    if field_type_eligible(&field.1, index, clone_ids).is_err() {
+                        continue;
+                    }
+                    pending.push(make_enum_extract(
+                        &variant_name,
+                        kind,
+                        field,
+                        idx,
+                        n_fields,
+                        single,
+                        &enum_sky,
+                        &enum_rust,
+                        extract_wildcard,
+                    ));
+                }
             }
         }
     }
@@ -1571,25 +1609,51 @@ fn make_enum_ctor(
     }
 }
 
-/// Build a single-field payload EXTRACTOR `Function` (R6/E6): `<v>_as_variant :
-/// E -> Maybe T`. The receiver is by value; the body moves the owned field out.
-/// `field` is the variant's single resolved field tuple.
+/// Build a payload EXTRACTOR `Function` for ONE variant field (R6/E6, multi-
+/// field generalisation): `<v>[_<idx-or-name>]_as_variant : E -> Maybe T`.
+/// The receiver is by value; the body binds ALL fields and moves the chosen
+/// owned one out (siblings drop). `field` is THIS field's resolved tuple,
+/// `field_idx` its 0-based declaration position, `field_count` the variant's
+/// total field count, `single` whether the variant has exactly one field (then
+/// the name carries NO `_<idx-or-name>` suffix — keeps S3 single-field names
+/// byte-identical).
+#[allow(clippy::too_many_arguments)]
 fn make_enum_extract(
     variant_name: &str,
     kind: &str,
     field: &(String, serde_json::Value, String, String),
+    field_idx: usize,
+    field_count: usize,
+    single: bool,
     enum_sky: &str,
     enum_rust: &str,
     wildcard: bool,
 ) -> Function {
     let (fname, _, fsky, frust) = field;
-    let struct_field_names: Vec<String> = if kind == "struct" {
-        vec![fname.clone()]
+    // The binder/selector the Rust body returns: a struct variant uses the field
+    // NAME, a tuple variant uses the positional index (as a string). This rides
+    // in `enum_struct_fields[0]` for BOTH kinds (the Rust emit already reads that
+    // slot for the struct case; the tuple case now uses it as the index).
+    let selector = if kind == "struct" {
+        fname.clone()
     } else {
-        Vec::new()
+        field_idx.to_string()
     };
+    // Name disambiguation (E5): a single-field variant keeps `<v>_as_variant`
+    // (the S3 name, unchanged); a multi-field variant suffixes the field name
+    // (struct) or positional index (tuple) so per-field keys are distinct from
+    // each other AND from the single-field shape. Both flow through
+    // `wrapperRefName` → kernel.json / .skyi / dedup identically.
+    let infix = if single {
+        String::new()
+    } else if kind == "struct" {
+        format!("_{fname}")
+    } else {
+        format!("_{field_idx}")
+    };
+    let name = format!("{variant_name}{infix}_as_variant");
     Function {
-        name: format!("{variant_name}_as_variant"),
+        name: name.clone(),
         params: vec![Param {
             name: "e".into(),
             ty: enum_sky.to_string(),
@@ -1606,11 +1670,17 @@ fn make_enum_extract(
         exported: true,
         recv_type: enum_sky.to_string(),
         recv_rust_type: enum_rust.to_string(),
-        method_name: format!("{variant_name}_as_variant"),
+        method_name: name,
         is_enum_extract: true,
         enum_variant: variant_name.to_string(),
         enum_kind: kind.to_string(),
-        enum_struct_fields: struct_field_names,
+        // The selected binder (struct field name / tuple index string). The Rust
+        // emit reads slot 0; carrying it for tuple variants too lets the body
+        // return the right positional field in a multi-field tuple.
+        enum_struct_fields: vec![selector],
+        // The variant's total field arity — the Rust emit needs it to bind every
+        // tuple position (`E::V(f0, f1, ..)`) before returning the chosen one.
+        enum_field_count: field_count as u64,
         enum_wildcard: wildcard,
         ..Default::default()
     }

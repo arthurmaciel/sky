@@ -1,0 +1,140 @@
+module Main exposing (main)
+
+-- Multi-field enum-variant payload EXTRACTOR proof (task #18 — completes S3).
+--
+-- S3 emitted `<v>_as_variant : E -> Maybe T` ONLY for a SINGLE-field variant.
+-- This fixture exercises the PER-FIELD generalisation for ≥2-field variants of
+-- the `multifield` crate's `Geo` enum — NO hand-written wrapper:
+--
+--   • Pair(i64, String) — multi TUPLE  → `pair_0_as_variant : Geo -> Maybe Int`
+--                                         `pair_1_as_variant : Geo -> Maybe String`
+--   • Rect { w, h }     — multi STRUCT → `rect_w_as_variant : Geo -> Maybe Int`
+--                                         `rect_h_as_variant : Geo -> Maybe Int`
+--   • Mix(i64, NoClone) — mixed        → `mix_0_as_variant : Geo -> Maybe Int`
+--                                         ONLY (field 1 non-Clone → no extractor)
+--
+-- `Geo` holds the non-`Clone` `NoClone`, so every opaque value is read LINEARLY
+-- (used exactly once); a fresh value is constructed per read. Sky cannot
+-- construct `Mix` (NoClone is non-closed → no ctor), so `make_mix` supplies it.
+import Rust.Multifield as G
+import Std.Log exposing (println)
+
+
+showMaybeInt : Maybe Int -> String
+showMaybeInt m =
+    case m of
+
+        Just n ->
+            "Just " ++ String.fromInt n
+
+        Nothing ->
+            "Nothing"
+
+
+showMaybeStr : Maybe String -> String
+showMaybeStr m =
+    case m of
+
+        Just s ->
+            "Just " ++ s
+
+        Nothing ->
+            "Nothing"
+
+
+main =
+    let
+        -- TUPLE multi-field: extract EACH field. Field 0 = 5 (Int), field 1 =
+        -- "hi" (String). A fresh Pair per read (linear use, no clone).
+        pair0 =
+            G.pair_0_as_variant_from_geo (G.pair_new_variant_from_geo 5 "hi")
+        pair1 =
+            G.pair_1_as_variant_from_geo (G.pair_new_variant_from_geo 5 "hi")
+        -- STRUCT multi-field: extract w (4) and h (6).
+        rectW =
+            G.rect_w_as_variant_from_geo (G.rect_new_variant_from_geo 4 6)
+        rectH =
+            G.rect_h_as_variant_from_geo (G.rect_new_variant_from_geo 4 6)
+        -- MIXED: only field 0 has an extractor. `Mix` has no ctor (NoClone is
+        -- non-closed), so `make_mix` supplies a value (returns Result).
+        --   make_mix 7 → Mix(7, NoClone{70}); field 0 extracts → Just 7.
+        -- There is NO `mix_1_as_variant` binding — referencing one would be a
+        -- name-resolution error; this file compiling proves it's absent.
+
+        -- A NON-matching value through Pair's field-0 extractor → Nothing
+        -- (the `_ => Nothing` wildcard arm; Rect is a different variant).
+        pairNoMatch =
+            G.pair_0_as_variant_from_geo (G.rect_new_variant_from_geo 4 6)
+        tupleOk =
+            (case pair0 of
+
+                Just 5 ->
+                    True
+
+                _ ->
+                    False)
+                && (case pair1 of
+
+                       Just "hi" ->
+                           True
+
+                       _ ->
+                           False)
+        structOk =
+            (case rectW of
+
+                Just 4 ->
+                    True
+
+                _ ->
+                    False)
+                && (case rectH of
+
+                       Just 6 ->
+                           True
+
+                       _ ->
+                           False)
+        noMatchOk =
+            case pairNoMatch of
+
+                Nothing ->
+                    True
+
+                _ ->
+                    False
+    in
+        case G.make_mix 7 of
+
+            Ok mix ->
+                let
+                    mix0 = G.mix_0_as_variant_from_geo mix
+                    mixOk =
+                        case mix0 of
+
+                            Just 7 ->
+                                True
+
+                            _ ->
+                                False
+                    ok = tupleOk && structOk && noMatchOk && mixOk
+                in
+                    println
+                        ("Pair[0]=" ++ showMaybeInt pair0 ++ " Pair[1]="
+                            ++ showMaybeStr pair1
+                            ++ " | Rect.w="
+                            ++ showMaybeInt rectW
+                            ++ " Rect.h="
+                            ++ showMaybeInt rectH
+                            ++ " | Mix[0]="
+                            ++ showMaybeInt mix0
+                            ++ " | Pair[0] noMatch(Rect)="
+                            ++ showMaybeInt pairNoMatch
+                            ++ (if ok then
+                                   "  [ALL OK]"
+
+                               else
+                                   "  [MISMATCH]"))
+
+            Err _ ->
+                println "make_mix failed"

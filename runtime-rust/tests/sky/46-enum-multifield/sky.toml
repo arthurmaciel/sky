@@ -1,0 +1,11 @@
+[project]
+name = "46-enum-multifield"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local multifield crate, delivered as a file:// git dep (Cargo can't resolve a
+# bare path dep through sky's ["rust.dependencies"] — only crates.io version or
+# git). setup.sh git-inits ./enumtest-crate into the cache path below.
+["rust.dependencies"]
+multifield = { git = "file:///home/arthur/.cache/sky/46-enum-multifield-crate", branch = "master" }
