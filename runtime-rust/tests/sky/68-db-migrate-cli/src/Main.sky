@@ -1,0 +1,39 @@
+module Main exposing (main)
+
+-- Drives the `sky db status` / `sky db migrate` CLI op modes. `main` opens the DB
+-- and calls `Db.migrate`; when the CLI sets SKY_DB_OP the runtime intercepts that
+-- call to print a report and exit, so "app: started serving" prints ONLY on a
+-- normal run (SKY_DB_OP unset).
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error exposing (Error)
+import Std.Db as Db
+import Std.Log exposing (println)
+
+
+migrations : List Db.Migration
+migrations =
+    [ { name = "0001_widgets"
+      , sql = "CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
+      }
+    , { name = "0002_gadgets"
+      , sql = "CREATE TABLE gadgets (id INTEGER PRIMARY KEY)"
+      }
+    ]
+
+
+main =
+    let
+        pipeline =
+            Db.connect ()
+                |> Task.andThen (\db -> Db.migrate db migrations)
+                |> Task.andThen (\_ -> println "app: started serving")
+                |> Task.onError reportError
+        _ = Task.run pipeline
+    in
+        ()
+
+
+reportError : Error -> Task Error ()
+reportError e =
+    println ("error: " ++ Error.toString e)

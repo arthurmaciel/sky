@@ -17,6 +17,39 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-22 00:15 — Parity batch 21: `sky db status` / `sky db migrate --backend rust` (#6)
+
+Closes #6. Previously `sky db` always ran the GO binary (`runProject`), so a Rust
+project's migrations were unreachable from the CLI. User authorized touching
+`app/Main.hs` to add the `--backend rust` path.
+
+- **Haskell (surgical):** `Db` command gains a `Maybe String` backend (like Build/Run);
+  db subparsers add `<*> backendFlag`. The handler sets `SKY_DB_OP` then branches on
+  `maybe (Toml._backend config) parseBackend mTarget`: `BackendGo → runProject` (unchanged),
+  `BackendRust → buildAndRunRustBinary` (a new helper mirroring the Run handler's Rust
+  branch — regen rust bindings, Compile.compile, planRustBuild, cargo build, run binary
+  honouring CARGO_TARGET_DIR + static subdir, propagate exit code). Does NOT touch the
+  existing Run/Build handlers. Bonus: a `backend = "rust"` project's bare `sky db status`
+  now correctly uses Rust (was silently running the Go build).
+- **Rust kernel `db_migrate_apply`:** honours `SKY_DB_OP` (parity with Go's
+  `Db_migrateApply`): `status` → applied ✓ / pending • / drift ✗ report (with applied_at,
+  Go's column layout) + exit 0 (1 on drift); `migrate` → apply + summary + exit 0 (1 on
+  error → stderr); unset → UNCHANGED library Task-return. `process::exit`/prints are
+  reachable ONLY under the CLI-set env op — a normal Sky `Db.migrate` is byte-identical.
+  Report prints only migration NAMES + timestamps + marks (never SQL/checksums).
+
+Verified e2e (new fork-local fixture `runtime-rust/tests/sky/68-db-migrate-cli`):
+migrate → "db: applied 2 migration(s): …" (re-run "schema already up to date");
+status → "db: 2 migration(s) — 2 applied, 0 pending" + ✓ lines (pending → • lines);
+drift → "✗ … DRIFT — SQL changed since applied <ts>" + stderr advice, **exit 1**; clean
+exit 0; normal run → "app: started serving". clippy `--all-features -D` clean; 504/0
+(db library tests unchanged). Guardian post-write APPROVE (no secret leak, no new
+panic/unwrap, faithful Haskell mirror, library path provably intact).
+
+**Affected:** `app/Main.hs`, `runtime-rust/src/sky_runtime/db.rs`, `runtime-rust/tests/sky/68-db-migrate-cli/` (new).
+
+---
+
 ## 2026-06-21 20:10 — Parity batch 20: factor reqwest-free `ssrf` module (generated ws/email get http_client; ws stays reqwest-free)
 
 Closes #11 (generated Std.Email / Sky.Core.WebSocket-client projects failed

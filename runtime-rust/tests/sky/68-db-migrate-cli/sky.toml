@@ -1,0 +1,15 @@
+# Fork-local regression fixture for `sky db status` / `sky db migrate --backend rust`
+# (task #6): the Rust db_migrate_apply honours SKY_DB_OP (set by the CLI) to print a
+# status / migrate report and exit, instead of starting the app. `main` calls
+# Db.migrate so the CLI op intercepts it.
+name = "68-db-migrate-cli"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+[source]
+root = "src"
+
+[database]
+driver = "sqlite"
+path = "migrate-cli.db"

@@ -718,11 +718,39 @@ fn migrate_checksum(sql: &str) -> String {
 /// Single-deployer assumption (matches Go): not concurrency-safe by design. The
 /// `name TEXT PRIMARY KEY` ledger column is the backstop — a racing double-apply
 /// loses the INSERT to a PK violation inside its own tx, which rolls back, so
-/// there is no partial-corruption window. The `SKY_DB_OP=status/migrate` CLI
-/// exit-modes + pretty status report are a tracked follow-up (this is the
-/// library Task-return path only).
+/// there is no partial-corruption window.
+///
+/// DB-ops mode (parity with Go's `Db_migrateApply`): when the `SKY_DB_OP` env var
+/// is set — the CLI `sky db status` / `sky db migrate --backend rust` sets it — the
+/// task PRINTS a human report and `process::exit`s instead of returning, so the
+/// surrounding app never starts serving:
+///
+/// - `status`: print applied / pending / drifted, exit 0 (1 if drift)
+/// - `migrate`: apply pending, print summary, exit 0 (1 on error, to stderr)
+/// - unset: normal Task behaviour (apply, return Ok/Err) — UNCHANGED
+///
+/// `process::exit` is reachable ONLY under the CLI-set env op (never from a normal
+/// well-typed Sky `Db.migrate` call), and it is a deliberate CLI termination, not a
+/// panic — the no-runtime-panic thesis is about faults, not intentional exits.
 pub fn db_migrate_apply<E: Send + From<String> + 'static>(db: Db, migrations: Vec<(String, String)>) -> SkyTask<E, Vec<String>> {
     Box::pin(async move {
+        // CLI op mode (empty when unset → library Task-return path, unchanged).
+        let op: String = std::env::var("SKY_DB_OP")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        // In `migrate` op mode an infra error prints context to stderr + exits 1;
+        // otherwise it is returned as a Task Err. Mirrors Go's `fail`.
+        macro_rules! db_op_fail {
+            ($ctx:expr, $err:expr) => {{
+                if op == "migrate" {
+                    eprintln!("db: {} failed", $ctx);
+                    let _ = std::io::Write::flush(&mut std::io::stderr());
+                    std::process::exit(1);
+                }
+                return SkyResult::Err($err);
+            }};
+        }
+
         // 1. Ensure the ledger exists. `IF NOT EXISTS` → idempotent.
         if let SkyResult::Err(e) = db_exec_raw::<E>(
             db.clone(),
@@ -731,38 +759,93 @@ pub fn db_migrate_apply<E: Send + From<String> + 'static>(db: Db, migrations: Ve
         )
         .await
         {
-            return SkyResult::Err(e);
+            db_op_fail!("create _sky_migrations", e);
         }
 
-        // 2. Snapshot already-applied migrations: name -> checksum. Read OUTSIDE
-        //    any transaction (the per-migration txns come below); single-deployer
-        //    so no TOCTOU concern (see doc comment). No interpolation in the SELECT.
+        // 2. Snapshot already-applied migrations: name -> (checksum, applied_at).
+        //    Read OUTSIDE any transaction (the per-migration txns come below);
+        //    single-deployer so no TOCTOU concern. No interpolation in the SELECT.
         let rows: Vec<HashMap<String, String>> = match db_query::<E>(
             db.clone(),
-            "SELECT name, checksum FROM _sky_migrations".to_string(),
+            "SELECT name, checksum, applied_at FROM _sky_migrations".to_string(),
             Vec::new(),
         )
         .await
         {
             SkyResult::Ok(r) => r,
-            SkyResult::Err(e) => return SkyResult::Err(e),
+            SkyResult::Err(e) => db_op_fail!("read _sky_migrations", e),
         };
-        let mut applied: HashMap<String, String> = HashMap::new();
+        let mut applied: HashMap<String, (String, String)> = HashMap::new();
         for row in &rows {
-            // Total: a row missing either column is skipped rather than panicking.
+            // Total: a row missing a column is skipped rather than panicking
+            // (applied_at defaults to empty — only used for the status report).
             if let (Some(name), Some(sum)) = (row.get("name"), row.get("checksum")) {
-                applied.insert(name.clone(), sum.clone());
+                let at = row.get("applied_at").cloned().unwrap_or_default();
+                applied.insert(name.clone(), (sum.clone(), at));
             }
+        }
+
+        // 2b. `status` op mode — read-only report from `applied` × `migrations`,
+        //     then exit. Mirrors Go's `dbPrintMigrationStatus`.
+        if op == "status" {
+            let (mut applied_n, mut pending_n, mut drift_n) = (0usize, 0usize, 0usize);
+            // (mark, name, detail) per declared migration.
+            let mut lines: Vec<(&'static str, &str, String)> = Vec::with_capacity(migrations.len());
+            for (name, sql) in &migrations {
+                let sum = migrate_checksum(sql);
+                match applied.get(name) {
+                    Some((csum, at)) if csum != &sum => {
+                        drift_n += 1;
+                        lines.push(("✗", name, format!("DRIFT — SQL changed since applied {at}")));
+                    }
+                    Some((_, at)) => {
+                        applied_n += 1;
+                        lines.push(("✓", name, format!("applied {at}")));
+                    }
+                    None => {
+                        pending_n += 1;
+                        lines.push(("•", name, "pending".to_string()));
+                    }
+                }
+            }
+            print!("db: {} migration(s) — {applied_n} applied, {pending_n} pending", migrations.len());
+            if drift_n > 0 {
+                print!(", {drift_n} DRIFTED");
+            }
+            print!("\n\n");
+            let width = lines.iter().map(|(_, n, _)| n.len()).max().unwrap_or(0);
+            for (mark, name, detail) in &lines {
+                println!("  {mark}  {name:<width$}  {detail}");
+            }
+            if lines.is_empty() {
+                println!("  (no migrations declared)");
+            }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            if drift_n > 0 {
+                eprintln!(
+                    "\ndb: drift detected — an applied migration's SQL was edited. \
+                     Restore its original text, or ship a new compensating migration."
+                );
+                std::process::exit(1);
+            }
+            std::process::exit(0);
         }
 
         // 3. Apply pending migrations in declaration order.
         let mut out: Vec<String> = Vec::new();
         for (name, sql) in migrations {
             let sum = migrate_checksum(&sql);
-            if let Some(prev) = applied.get(&name) {
+            if let Some((prev, _)) = applied.get(&name) {
                 if prev != &sum {
                     // Drift: error embeds only the app-authored NAME, never the
                     // SQL body (which may carry seed-data literals) nor the hash.
+                    if op == "migrate" {
+                        eprintln!(
+                            "db: migration '{name}' changed after it was applied — checksum mismatch"
+                        );
+                        let _ = std::io::Write::flush(&mut std::io::stderr());
+                        std::process::exit(1);
+                    }
                     return SkyResult::Err(
                         format!(
                             "db.migrate: migration '{name}' changed after it was \
@@ -812,8 +895,19 @@ pub fn db_migrate_apply<E: Send + From<String> + 'static>(db: Db, migrations: Ve
 
             match outcome {
                 SkyResult::Ok(_) => out.push(name),
-                SkyResult::Err(e) => return SkyResult::Err(e),
+                SkyResult::Err(e) => db_op_fail!(format!("apply migration '{name}'"), e),
             }
+        }
+
+        // 4. `migrate` op mode — print the summary, then exit. Mirrors Go.
+        if op == "migrate" {
+            if out.is_empty() {
+                println!("db: schema already up to date — 0 migrations applied");
+            } else {
+                println!("db: applied {} migration(s): {}", out.len(), out.join(", "));
+            }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::process::exit(0);
         }
         SkyResult::Ok(out)
     })

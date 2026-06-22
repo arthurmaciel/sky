@@ -1034,6 +1034,42 @@ runProject path = do
                 ExitFailure _ -> exitWith ec
 
 
+-- | Compile `config` (assumed `BackendRust`) at `path` to the Rust backend and
+-- run the produced binary. The Rust counterpart of `runProject`'s Go tail —
+-- used by `sky db … --backend rust`, which pre-sets SKY_DB_OP so the binary runs
+-- in DB-ops mode and exits. Mirrors the `Run` handler's `BackendRust` branch
+-- (binary path honours a shared CARGO_TARGET_DIR + static-target subdir).
+buildAndRunRustBinary :: Toml.SkyConfig -> FilePath -> IO (Either String ())
+buildAndRunRustBinary config path = do
+    let outDir = "sky-out"
+    createDirectoryIfMissing True outDir
+    let rustDeps = Toml._rustDeps config
+    when (not (null rustDeps)) $ regenMissingRustBindings rustDeps
+    result <- Compile.compile config path outDir
+    case result of
+        Left err -> return (Left err)
+        Right _  -> do
+            let rustDir = outDir ++ "/rust"
+            hFlush stdout
+            checkWebviewLibsRust rustDir
+            (staticArgs, targetSub) <-
+                planRustBuild (Toml._rustStatic config) (Toml._rustTarget config) (Toml._rustAllocator config) rustDir
+                    >>= either (\m -> hPutStrLn stderr m >> exitFailure) return
+            putStrLn "Running cargo build..."
+            callProcess "cargo" (["build", "--manifest-path", rustDir ++ "/Cargo.toml"] ++ staticArgs)
+            mTargetDir <- System.Environment.lookupEnv "CARGO_TARGET_DIR"
+            let targetBase = maybe (rustDir ++ "/target") id mTargetDir
+                binPath = targetBase ++ "/" ++ targetSub ++ "debug/sky-app"
+            hasBin <- doesFileExist binPath
+            if hasBin
+                then do
+                    ec <- rawSystem binPath []
+                    case ec of
+                        ExitSuccess   -> return (Right ())
+                        ExitFailure _ -> exitWith ec
+                else return (Left ("binary not found at " ++ binPath))
+
+
 regenMissingBindings :: Backend -> [(String, String)] -> IO ()
 -- On the Rust backend `[go.dependencies]` are INERT: the Rust codegen can't link
 -- Go packages, and the FFI registry loads the rust bindings under
@@ -1464,7 +1500,7 @@ data Command
                                  -- run the standalone Sky Console hub daemon
     | Doc DocOpts                -- print / serve API documentation
     | Doctor Doctor.DoctorOpts   -- diagnose project / runtime issues
-    | Db DbAction FilePath       -- sky db status / sky db migrate
+    | Db DbAction FilePath (Maybe String)  -- sky db status / migrate, optional backend (go/rust)
     | Version
     deriving (Show)
 
@@ -1663,10 +1699,10 @@ fileArg = argument str (metavar "FILE" <> value "src/Main.sky")
 dbParser :: Parser Command
 dbParser = subparser
     ( command "status"
-        (info (Db DbStatus <$> fileArg)
+        (info (Db DbStatus <$> fileArg <*> backendFlag)
             (progDesc "Show applied / pending / drifted migrations, then exit"))
     <> command "migrate"
-        (info (Db DbMigrate <$> fileArg)
+        (info (Db DbMigrate <$> fileArg <*> backendFlag)
             (progDesc "Apply all pending migrations in order, then exit"))
     )
 
@@ -2010,11 +2046,18 @@ runCommand cmd = case cmd of
                             else putStrLn ("Error: binary not found at " ++ binPath)
                 return (Right ())
 
-    Db action path -> do
+    Db action path mTarget -> do
+        -- The runtime reads SKY_DB_OP at Db.migrate: "status" reports without
+        -- mutating, "migrate" applies then exits. Set before build/run.
         System.Environment.setEnv "SKY_DB_OP" $ case action of
             DbStatus  -> "status"
             DbMigrate -> "migrate"
-        runProject path
+        config <- readConfigStrict
+        let backend = maybe (Toml._backend config) parseBackend mTarget
+        case backend of
+            Toml.BackendGo   -> runProject path
+            Toml.BackendRust ->
+                buildAndRunRustBinary (config { Toml._backend = Toml.BackendRust }) path
 
     Watch opts mTarget -> do
         Watch.runWatch opts
