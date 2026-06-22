@@ -5,3 +5,6 @@ backend = "rust"
 
 [source]
 root = "src"
+
+[live]
+port = 8080

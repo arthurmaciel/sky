@@ -56,7 +56,11 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
                    | dep <- Toml._rustDeps config ]
         ffiSlugs = depSlugs
         kernelAliases = Map.mapKeys (\(cn, fn) -> (ModuleName._name cn, fn)) rawAliases
-        (rustCode, moduleFiles, usage0) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases (Toml._liveStore config) (Toml._liveStorePath config)
+        -- sky.toml [live] config baked into the generated main() as env fallbacks
+        -- (Go parity: rt.SetPortDefault). Port only for now — the value the Rust
+        -- Live runtime reads via SKY_LIVE_PORT; env still wins (set-only-when-unset).
+        liveDefaults = [ ("SKY_LIVE_PORT", show (Toml._livePort config)) ]
+        (rustCode, moduleFiles, usage0) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases (Toml._liveStore config) (Toml._liveStorePath config) liveDefaults
         -- usesUuid is detected from Sky-module usage (Uuid.*), but a transitive
         -- reference can slip past it: importing Sky.Core.Pure emits its whole
         -- module incl. uuidV4/uuidV7 bindings that call the uuid_v4/uuid_v7
@@ -276,8 +280,9 @@ generateRust :: [Can.Module] -> Src.Module -> Solve.SolvedTypes
     -> String -> String -> [String]
     -> Map.Map (String, String) (String, String)  -- kernel alias map (keys as strings)
     -> String -> String                            -- [live] store kind + store path
+    -> [(String, String)]                          -- sky.toml [live] env defaults baked into main()
     -> (String, [(String, String)], RustBuilder.UsedKernels)
-generateRust canMods _srcMod solvedTypes dbPath dbDriver ffiSlugs kernelAliases liveStore liveStorePath =
+generateRust canMods _srcMod solvedTypes dbPath dbDriver ffiSlugs kernelAliases liveStore liveStorePath liveDefaults =
     -- v0.15: Solve.SolvedTypes became a record; the Rust codegen (RustBuilder)
     -- consumes the bare env map, so project the `_stEnv` field out.
     let builder = RustBuilder.buildProgram canMods
@@ -287,7 +292,7 @@ generateRust canMods _srcMod solvedTypes dbPath dbDriver ffiSlugs kernelAliases 
                                             kernelAliases
                                             liveStore
                                             liveStorePath
-        (code, moduleFiles) = RustBuilder.emitRust builder dbPath dbDriver ffiSlugs
+        (code, moduleFiles) = RustBuilder.emitRust builder dbPath dbDriver ffiSlugs liveDefaults
         usage = RustBuilder.builderKernels builder
     in (code, moduleFiles, usage)
 

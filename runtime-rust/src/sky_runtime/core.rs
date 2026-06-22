@@ -24,6 +24,18 @@ pub fn ok_res<E, A>(a: A) -> SkyResult<E, A> { SkyResult::Ok(a) }
 /// When E = SkyCoreErrorError, the generated code provides the impl.
 pub fn str_err<E: From<String>>(s: &str) -> E { s.to_string().into() }
 
+/// Bake a config-derived default for an env var: set `key=val` ONLY when the
+/// var is unset, so shell env / `.env` still win (precedence: process env >
+/// baked default). Go parity: the generated `init()`'s `rt.SetPortDefault` +
+/// `tomlSkyEnv` family. The generated `main()` calls this BEFORE the async
+/// runtime / any thread starts, so the `set_var` is race-free (the one window
+/// where mutating the process environment is sound).
+pub fn set_env_default(key: &str, val: &str) {
+    if std::env::var_os(key).is_none() {
+        std::env::set_var(key, val);
+    }
+}
+
 // ===========================================
 // Disconnected-store placeholders (closure-Model `Default`)
 // ===========================================

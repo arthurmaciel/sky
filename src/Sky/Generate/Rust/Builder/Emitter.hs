@@ -110,8 +110,12 @@ dbBackendHelpers _ =  -- sqlite default
     , "}"
     ]
 
-emitRust :: RustBuilder -> String -> String -> [String] -> (String, [(String, String)])
-emitRust b dbPath dbDriver ffiSlugs =
+-- `liveDefaults` are (env-var, value) pairs baked from sky.toml's `[live]`
+-- section into the generated `main()` (set-only-when-unset), so a Sky.Live
+-- binary honours e.g. `port = 8080` standalone — Go parity for the
+-- `rt.SetPortDefault` mechanism the Rust runtime previously lacked.
+emitRust :: RustBuilder -> String -> String -> [String] -> [(String, String)] -> (String, [(String, String)])
+emitRust b dbPath dbDriver ffiSlugs liveDefaults =
     let modules = builderModules b
         -- Each module gets its own .rs file (except Main — kept inline
         -- to avoid naming conflict with main.rs).  Included via
@@ -226,7 +230,7 @@ emitRust b dbPath dbDriver ffiSlugs =
             , concatMap (concatMap itemToRustStrings . modItems) inlineModules
             , kernelHelperSection
             , ffiPlaceholderSection b
-            , entryPointSection (builderKernels b) (builderMainReturnsTask b)
+            , entryPointSection (builderKernels b) (builderMainReturnsTask b) liveDefaults
             ]
     in (mainCode, moduleFiles)
 
@@ -357,8 +361,8 @@ ffiPlaceholderSection b =
     ] ++ map ffiPlaceholder (collectUndefinedTypes b)
 
 -- | Entry point
-entryPointSection :: UsedKernels -> Bool -> [String]
-entryPointSection uk mainReturnsTask =
+entryPointSection :: UsedKernels -> Bool -> [(String, String)] -> [String]
+entryPointSection uk mainReturnsTask liveDefaults =
     let _hasTokio = usesTaskRun uk || usesTaskParallel uk || usesDb uk || usesHttpServer uk || usesEmail uk || usesLive uk
         -- sky_main returns SkyTask<()> (needs block_on) UNLESS the user calls
         -- Task.run itself, in which case sky_main returns () and runs the task
@@ -408,6 +412,17 @@ entryPointSection uk mainReturnsTask =
             , "    sky_runtime::core::install_panic_classifier();"
             ]
           else []
+        -- Bake sky.toml `[live]` defaults (port, …) as env fallbacks at the TOP
+        -- of main(), BEFORE the async runtime starts — so a Sky.Live binary
+        -- honours `[live] port = 8080` even run standalone (Go parity:
+        -- rt.SetPortDefault). set_env_default only sets when the var is unset,
+        -- so SKY_LIVE_PORT / shell env / .env still take precedence. Gated on
+        -- usesLive — Sky.Http.Server takes its port as a `Server.listen` arg.
+        liveDefaultsBlock = if usesLive uk && not (null liveDefaults)
+            then "    // sky.toml [live] config baked as env fallbacks (env still wins)."
+                 : [ "    sky_runtime::core::set_env_default(" ++ show k ++ ", " ++ show v ++ ");"
+                   | (k, v) <- liveDefaults ]
+            else []
     in
     [ ""
     , "// ==========================================="
@@ -415,7 +430,7 @@ entryPointSection uk mainReturnsTask =
     , "// ==========================================="
     , ""
     , "fn main() {"
-    ] ++ panicGate ++ (if mainIsTask then
+    ] ++ liveDefaultsBlock ++ panicGate ++ (if mainIsTask then
         -- sky_main returns SkyTask<()> → run it via block_on. The `tokio`
         -- Cargo feature is ALWAYS in the default set (see emitCargoToml), so
         -- `block_on` is unconditionally available. This MUST block_on even when

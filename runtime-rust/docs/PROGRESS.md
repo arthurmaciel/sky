@@ -17,6 +17,33 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-22 02:30 — Batch 26: bake sky.toml `[live] port` into the Rust binary (Go parity)
+
+Reported: `sky watch/run --backend rust` ignored `[live] port = 8080`, fell back to 8000,
+and hit "Address already in use" — but `SKY_LIVE_PORT` env worked. Root cause:
+`live/mod.rs:1290` read ONLY `SKY_LIVE_PORT` (default 8000), never sky.toml. The Go backend
+bakes the port via `rt.SetPortDefault` in the generated `init()`; the Rust generated main
+baked NOTHING.
+
+Fix (Go parity): new always-compiled `core::set_env_default(key, val)` (sets only when the
+var is unset → shell env / .env still win). The Rust codegen now bakes the sky.toml
+`[live]` defaults into the TOP of generated `fn main()` (before the async runtime starts —
+single-threaded, so `set_var` is race-free) gated on `usesLive`. Port only for now (the
+value the Rust runtime reads via `SKY_LIVE_PORT`); threaded `liveDefaults :: [(String,String)]`
+through `generateRust → emitRust → entryPointSection`.
+
+Verified: generated `main.rs` emits `set_env_default("SKY_LIVE_PORT", "8080")`; the binary
+logs `listening on http://0.0.0.0:8080` (was 8000); clippy `--all-features` clean. Guardian
+APPROVE (race-free window, env>toml precedence, usesLive-gated, Int value injection-safe).
+NOTE (guardian forward-flag): `liveDefaults` values are emitted via Haskell `show`, safe for
+the Int port; baking any STRING `[live]` value later (storePath/host/cookie) needs a proper
+Rust-literal escaper, NOT `show`. Regression fixture: `[live] port = 8080` on 28-live-counter
+(sweep-safe — the sweep exports a free SKY_LIVE_PORT which overrides the bake).
+
+**Affected:** `runtime-rust/src/sky_runtime/core.rs`, `src/Sky/Generate/Rust/Builder/Emitter.hs`, `src/Sky/Generate/Rust/Project.hs`, `runtime-rust/tests/sky/28-live-counter/sky.toml`.
+
+---
+
 ## 2026-06-22 02:05 — Batch 25: fix the #12 matrix leg scope (`--all-targets` → `--lib`)
 
 Batch-23's matrix leg used `--all-targets`, committed on a STATIC verification (the bash
