@@ -526,7 +526,21 @@ translateRustRet raw0 =
                , \e -> if co "x" == "x" then e
                        else e ++ ".into_iter().map(|x| " ++ co "x" ++ ").collect()" )
           Nothing
-            | raw `elem` intRusts   -> ("i64", \e -> "(" ++ e ++ ") as i64")
+            -- Sky `Int` is `i64`. Ints that LOSSLESSLY widen into i64
+            -- (i8..i32, u8..u32, and i64 itself) keep the plain `as i64` —
+            -- the widening can never change the value.
+            | raw `elem` intLosslessRusts -> ("i64", \e -> "(" ++ e ++ ") as i64")
+            -- Ints WIDER than i64 (u64/usize/u128/i128/isize) can hold values
+            -- outside i64's range; a bare `as i64` would sign-flip/truncate
+            -- (e.g. `u64::MAX as i64 == -1`). Coerce with a TOTAL SATURATING
+            -- clamp into i64 range instead: no panic, no sign-flip, and a
+            -- real-world `len() -> usize` still round-trips (lengths never
+            -- exceed i64::MAX). `unwrap_or` is clippy-clean (no unwrap/expect).
+            | raw `elem` intSaturateUnsignedRusts ->
+                ("i64", \e -> "(" ++ e ++ ").min(i64::MAX as " ++ raw ++ ") as i64")
+            | raw `elem` intSaturateWideRusts ->
+                ("i64", \e -> "i64::try_from(" ++ e
+                              ++ ").unwrap_or(if (" ++ e ++ ") < 0 { i64::MIN } else { i64::MAX })")
             | raw `elem` floatRusts -> ("f64", \e -> "(" ++ e ++ ") as f64")
             | raw == "bool"   -> ("bool", id)
             | raw == "String" -> ("String", id)
@@ -538,8 +552,16 @@ translateRustRet raw0 =
                         in (dt, \e -> e ++ ".to_owned()")
             | otherwise -> (raw, id)   -- opaque type: keep as-is, no coercion
   where
-    intRusts   = [ "i8","i16","i32","i64","i128","isize"
-                 , "u8","u16","u32","u64","u128","usize" ]
+    -- Lossless: every value fits in i64 after widening. `isize` is i16/i32/i64
+    -- depending on target pointer width — all ≤ i64, so it widens losslessly.
+    intLosslessRusts = [ "i8","i16","i32","i64","u8","u16","u32","isize" ]
+    -- Unsigned types whose max can exceed i64::MAX (u64/u128 always; usize is
+    -- u32 on 32-bit / u64 on 64-bit). Unsigned can only OVER-shoot (never
+    -- negative), so a one-sided `.min(i64::MAX as T)` clamp is total + correct.
+    intSaturateUnsignedRusts = [ "u64","usize","u128" ]
+    -- Signed 128-bit — can exceed i64 in BOTH directions, so saturate via total
+    -- `try_from` (Ok → value; Err → clamp to i64::MIN when negative else MAX).
+    intSaturateWideRusts = [ "i128" ]
     floatRusts = [ "f32", "f64" ]
     stripRef s =
         let s1 = dropWhile (\c -> c == '&' || c == ' ') s

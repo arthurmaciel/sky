@@ -238,6 +238,9 @@ fn emit_tail_audit_report(crate_args: &[String], results: &[PkgInfo]) {
         "wide_int_lossy",
         "not_in_closed_set",
         "char_unmapped",
+        // S2 setter-only drop: getter kept (lossless widening read), setter
+        // suppressed because the field is narrower than / wider than Sky's i64.
+        "setter_narrowing",
         // S3 enum-level drops (R7 generic enum, R4 empty / all-skipped enum).
         "generic_enum",
         "empty_enum",
@@ -804,6 +807,20 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 // key distinct from BOTH the getter (`<field>_field`) and any
                 // same-named method/getter, so `x` field + `x` getter + `x`
                 // setter + `x()` method yield FOUR non-colliding bindings.
+                //
+                // Wide-int / narrow-numeric SETTER GATE: Sky `Int` is i64 and
+                // Sky `Float` is f64. A setter that assigns a Sky scalar into a
+                // NARROWER field (`i8..i32`, `u8..u32`, `f32`) — or a
+                // wider-than-i64 int field — would silently truncate/reinterpret
+                // out-of-range values, corrupting the foreign object. We DROP the
+                // setter (the getter above stays, since reading widens
+                // losslessly). The setter must stay INFALLIBLE (C6) — dropping it
+                // is the only sound option (a fallible setter breaks the
+                // `FieldTy -> Recv -> Recv` contract).
+                if !setter_receives_losslessly(&field_rust) {
+                    record_tail_drop("setter_narrowing", false, &field_rust);
+                    continue;
+                }
                 functions.push(Function {
                     name: format!("{field_name}_set_field"),
                     params: vec![
@@ -1149,6 +1166,34 @@ fn field_type_eligible(
 
     // tuples, slices, arrays, generics, impl-trait, … — not in the S1 set.
     Err("not_in_closed_set")
+}
+
+/// True when a field's Rust type can LOSSLESSLY RECEIVE a Sky scalar in a
+/// setter's inbound assignment. Sky `Int` is `i64` and Sky `Float` is `f64`, so
+/// a setter that assigns into a NARROWER numeric field (`i8..i32`, `u8..u32`,
+/// `f32`) — or a wider-than-i64 int field (already dropped by
+/// `field_type_eligible`, listed here for completeness) — would silently
+/// truncate/reinterpret out-of-range values. We therefore SUPPRESS the setter
+/// for those fields (the GETTER stays — reading widens losslessly into i64/f64).
+///
+/// The lossless-receive numeric set is exactly `{i64, f64}`. Every non-numeric
+/// closed-set field type (String / Vec / Option / bool / char / Clone-opaque)
+/// receives a Sky value of the same shape with no narrowing, so those keep their
+/// setter. `rust_ty` is the inspector's raw Rust type string (`field_rust`).
+fn setter_receives_losslessly(rust_ty: &str) -> bool {
+    let t = rust_ty.trim();
+    match t {
+        // Numeric fields NARROWER than the Sky scalar — setter would truncate.
+        "i8" | "i16" | "i32" | "u8" | "u16" | "u32" | "f32" => false,
+        // Wider-than-i64 ints — a Sky i64 can't faithfully fill them, and a
+        // negative i64 reinterprets. (These are already dropped wholesale by
+        // `field_type_eligible`'s `wide_int_lossy`, so this arm is belt-and-
+        // braces against a future widening of the getter gate.)
+        "u64" | "u128" | "i128" | "usize" | "isize" => false,
+        // Exact-width scalars + every non-numeric closed-set type receive a Sky
+        // value losslessly: a setter is safe.
+        _ => true,
+    }
 }
 
 /// True when a rustdoc item carries `#[non_exhaustive]` (R2). The attribute

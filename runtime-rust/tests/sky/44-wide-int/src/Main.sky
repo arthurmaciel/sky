@@ -1,0 +1,85 @@
+module Main exposing (main)
+
+-- WIDE-INT truncation fix proof (task #16). Two symmetric coercion sites:
+--
+-- READ side — `big()` returns Rust `u64::MAX`. Sky Int is i64; the OLD codegen
+-- coerced it with a bare `as i64`, which SIGN-FLIPS to -1. The fix saturates
+-- into i64 range, so the bound value is i64::MAX = 9223372036854775807.
+-- `count()` returns a small `usize` (7) — saturation is a no-op below the clamp,
+-- so it reads back exactly.
+--
+-- WRITE side — the `Wide` struct's `ok` (i64) field keeps a working SETTER
+-- (exact-width, lossless receive). The `small` (i32) field keeps only its
+-- GETTER (the narrowing setter is DROPPED by the new gate). The `big` (u64)
+-- field is dropped wholesale (no getter, no setter) by the pre-existing
+-- closed-set gate. Referencing a dropped binding would be a build error, so the
+-- program simply exercises the `ok` setter + the `small`/`ok` getters; the
+-- ABSENCE of `small`/`big` setters is asserted out-of-band (inspector JSON /
+-- generated bindings).
+
+import Rust.Wideint as W
+import Std.Log exposing (println)
+
+
+main =
+    case W.big 0 of
+        Err _ ->
+            println "big() failed"
+
+        Ok bigVal ->
+            case W.make_counter 0 of
+                Err _ ->
+                    println "make_counter failed"
+
+                Ok counter ->
+                    case W.count_from_counter counter of
+                        Err _ ->
+                            println "count() failed"
+
+                        Ok countVal ->
+                            case W.make_wide 11 7 100 of
+                                Err _ ->
+                                    println "make_wide failed"
+
+                                Ok w0 ->
+                                    let
+                                        small0 =
+                                            W.small_field_from_wide w0
+
+                                        ok0 =
+                                            W.ok_field_from_wide w0
+
+                                        -- i64 field keeps a working SETTER.
+                                        w1 =
+                                            W.ok_set_field_from_wide 999 w0
+
+                                        ok1 =
+                                            W.ok_field_from_wide w1
+
+                                        bigSaturated =
+                                            -- i64::MAX, NOT -1 (the old sign-flip bug).
+                                            bigVal == 9223372036854775807
+
+                                        ok =
+                                            bigSaturated
+                                                && countVal
+                                                == 7
+                                                && small0
+                                                == 11
+                                                && ok0
+                                                == 100
+                                                && ok1
+                                                == 999
+                                    in
+                                    println
+                                        ("big() u64::MAX saturated->"
+                                            ++ String.fromInt bigVal
+                                            ++ " (expect 9223372036854775807, NOT -1)"
+                                            ++ " count()="
+                                            ++ String.fromInt countVal
+                                            ++ " Wide.small(getter)="
+                                            ++ String.fromInt small0
+                                            ++ " Wide.ok 100->"
+                                            ++ String.fromInt ok1
+                                            ++ (if ok then "  [ALL OK]" else "  [MISMATCH]")
+                                        )

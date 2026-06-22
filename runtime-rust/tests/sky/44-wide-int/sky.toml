@@ -1,0 +1,11 @@
+[project]
+name = "44-wide-int"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local wideint crate, delivered as a file:// git dep (Cargo can't resolve a
+# bare path dep through sky's ["rust.dependencies"] — only crates.io version or
+# git). setup.sh git-inits ./wideint-crate into the cache path below.
+["rust.dependencies"]
+wideint = { git = "file:///home/arthur/.cache/sky/44-wide-int-crate", branch = "master" }
