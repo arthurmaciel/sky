@@ -34,7 +34,7 @@ import Sky.Build.FfiGen
     ( PkgInfo(..), FnInfo(..)
     , slugify, lowerFirst, capitaliseFirst, splitOnChar, emitKernelJson, wrapperSkyType
     )
-import Sky.Generate.Rust.Builder.Naming (toSnakeCase)
+import Sky.Generate.Rust.Builder.Naming (toSnakeCase, rustSafeIdent)
 
 
 -- | Inspect a single Rust crate (rustdoc-JSON backend). Optional features are
@@ -272,6 +272,28 @@ absolutizeCrate crate = go ' '
 -- | Strip leading/trailing spaces.
 trimStr :: String -> String
 trimStr = f . f where f = reverse . dropWhile (== ' ')
+
+
+-- | Split a tag-arm entry "<rust-pattern>\t<tag-string>" on the first TAB into
+-- the pattern and the tag string. The inspector always emits exactly one TAB;
+-- a missing TAB (defensive) yields the whole string as the pattern and an empty
+-- tag (which would render `=> ""`, still total — no panic).
+breakTab :: String -> (String, String)
+breakTab s = case break (== '\t') s of
+    (a, '\t':b) -> (a, b)
+    (a, _)      -> (a, "")
+
+
+-- | Render a Rust string literal, escaping `\` and `"` so an enum-variant /
+-- tag name containing those bytes can't break out of the literal. Variant
+-- idents are `[A-Za-z0-9_]`, so this is belt-and-braces — but it keeps the
+-- emitted Rust total even on a pathological inspector input.
+rustStrLit :: String -> String
+rustStrLit s = "\"" ++ concatMap esc s ++ "\""
+  where
+    esc '\\' = "\\\\"
+    esc '"'  = "\\\""
+    esc c    = [c]
 
 
 -- | If the type is `Wrapper<...>`, return the inner argument string.
@@ -864,7 +886,164 @@ emitRustFile kernelName pkg =
                 , "    r"
                 , "}"
                 ]
-        in if _fnIsField fn
+            -- ── Enum-variant binding (S3) ──────────────────────────────
+            -- A foreign enum is an OPAQUE handle (`::crate::E`). The three
+            -- accessor kinds are TOTAL by construction:
+            --   • ctor    `::crate::E::Variant(args)`  (infallible, `-> E`)
+            --   • tag      exhaustive `match` → String (R3 wildcard when needed)
+            --   • extract  `match e { E::V(x) => Just(x), _ => Nothing }` (R6:
+            --              by-value receiver MOVES the owned single field out)
+            -- The inspector pre-gated every field type to the S1 closed set
+            -- (E4) and suppressed ctors for non_exhaustive enums/variants (E2),
+            -- so the emitted Rust can never index/unwrap/panic/E0639/E0004/E0509.
+            enumRecvRust = resolveRustType crateImport recvType (_fnRecvRustType fn)
+            enumVariant  = _fnEnumVariant fn
+            enumKind     = _fnEnumKind fn
+            enumSFields  = _fnEnumStructFields fn
+            -- The fully-qualified `::crate::E` path drops the trailing turbofish
+            -- — enum bindings are non-generic (R7), so enumRecvRust is a bare
+            -- `::crate::E`; the variant path is `<enumRecvRust>::<Variant>`. The
+            -- variant ident is raw-escaped (`r#match` etc.): rustdoc reports a
+            -- keyword variant/field name WITHOUT the `r#` prefix, so a crate with
+            -- a `move`/`type`/`match`-named variant or field would otherwise emit
+            -- unparseable Rust (E0762). `rustSafeIdent` is the same parser-of-
+            -- idents the rest of the Rust codegen uses.
+            enumPath v   = enumRecvRust ++ "::" ++ rustSafeIdent v
+            -- Owned per-arg coercion for a ctor: lift the Sky-resolved wrapper
+            -- value (`argJ` of type paramTypes!!j) into the field's exact raw
+            -- Rust type, OWNED. Mirrors the field setter's `setValExpr` (closed
+            -- set: identity / narrowing `as` / Vec<u8> / Vec<T> element cast /
+            -- Option inner cast). Never borrows (a ctor moves owned values in).
+            ctorArgOwned j =
+                let base   = arg j
+                    rawTy  = if j < nRawRustParam then rawRustParamTypes !! j else ""
+                    declTy = if j < length paramTypes then paramTypes !! j else "String"
+                in case seqKind rawTy of
+                    Just (SeqKind Owned ElemU8) -> "to_u8_vec(&" ++ base ++ ")"
+                    Just (SeqKind Owned (ElemGeneral elemRust _)) ->
+                        if elemRust `elem` ["i64", "f64"] || not (isNumericRust elemRust)
+                        then base
+                        else base ++ ".into_iter().map(|x| x as " ++ elemRust ++ ").collect()"
+                    Just _ -> base
+                    Nothing
+                        | Just innerRaw <- stripGeneric1 "Option" rawTy ->
+                            let inner = trimStr innerRaw
+                                opt   = "sky_maybe_to_option(" ++ base ++ ")"
+                            in if isNumericRust inner
+                               then opt ++ ".map(|x| x as " ++ inner ++ ")"
+                               else opt
+                        | declTy == "String" -> base                -- owned String
+                        | null rawTy || rawTy == declTy -> base
+                        | isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
+                            -> base ++ " as " ++ rawTy
+                        | otherwise -> base
+            ctorArgs = map ctorArgOwned [0 .. nParams - 1]
+            -- Variant construction expression, dispatched on variant KIND (R5):
+            --   unit   → `E::V`
+            --   tuple  → `E::V(a0, a1, …)`
+            --   struct → `E::V { f0: a0, f1: a1, … }` (decl-order field names)
+            enumCtorExpr = case enumKind of
+                "unit"   -> enumPath enumVariant
+                "struct" ->
+                    let assigns = intercalate ", "
+                            [ rustSafeIdent f ++ ": " ++ a
+                            | (f, a) <- zip enumSFields ctorArgs ]
+                    in enumPath enumVariant ++ " { " ++ assigns ++ " }"
+                _        ->  -- tuple (default)
+                    enumPath enumVariant ++ "(" ++ intercalate ", " ctorArgs ++ ")"
+            enumCtorWellFormed =
+                not (null (trimStr enumRecvRust)) && not (null enumVariant)
+            enumCtorLines =
+                [ "// [enum-ctor] " ++ wrapper
+                , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> "
+                  ++ enumRecvRust ++ " {"
+                , "    " ++ enumCtorExpr
+                , "}"
+                ]
+            -- Tag accessor: an exhaustive `match` mapping each variant to its
+            -- name string. The arms come from the inspector as "<pat>\t<tag>"
+            -- (pattern dispatched on kind: `V` / `V(..)` / `V{..}` — R5). The
+            -- `_ => "<unknown>"` wildcard is appended IFF `_fnEnumWildcard` (R3):
+            -- precisely when the enum is non_exhaustive or a variant was
+            -- skipped, so an exhaustive local enum stays clippy-clean (no
+            -- unreachable `_`).
+            -- The inspector emits the arm pattern as `<variant><suffix>` where
+            -- suffix ∈ {"", "(..)", "{..}"}. Raw-escape JUST the leading variant
+            -- ident (a keyword variant would otherwise be E0762) while keeping
+            -- the `(..)`/`{..}` suffix verbatim.
+            enumTagArm raw =
+                let (pat, tagStr) = breakTab raw
+                    (vid, suffix) = span (\c -> c /= '(' && c /= '{') pat
+                in "        " ++ enumRecvRust ++ "::" ++ rustSafeIdent vid ++ suffix
+                   ++ " => " ++ rustStrLit tagStr ++ ","
+            enumTagArms = map enumTagArm (_fnEnumArms fn)
+            enumTagWildcard =
+                [ "        _ => " ++ rustStrLit "<unknown>" ++ "," | _fnEnumWildcard fn ]
+            enumTagWellFormed =
+                not (null (trimStr enumRecvRust)) && not (null (_fnEnumArms fn))
+            -- The match arms yield `&'static str` literals; the wrapper returns
+            -- an owned `String`, so the whole match is `.to_string()`-converted
+            -- once (clippy-clean — one conversion, not a per-arm `.to_string()`).
+            enumTagLines =
+                [ "// [enum-tag] " ++ wrapper
+                , "pub fn " ++ rustName ++ "(arg0: " ++ enumRecvRust
+                  ++ ") -> String {"
+                , "    let t: &str = match arg0 {"
+                ]
+                ++ enumTagArms
+                ++ enumTagWildcard
+                ++ [ "    };"
+                   , "    t.to_string()"
+                   , "}"
+                   ]
+            -- Single-field payload extractor (R6): `E -> Maybe T`. The receiver
+            -- is BY VALUE so the matched arm MOVES the owned single field out
+            -- (no clone, no E0509). The result inner Rust type comes from the
+            -- raw result `Option<T>` (the field's owned type); the wrapper
+            -- returns `SkyMaybe<T'>` built directly (NOT Result-wrapped — C6/E6).
+            -- A struct variant binds the single named field; a tuple variant
+            -- binds the positional `x`. The `_ => Nothing` wildcard is always
+            -- present (the non-matching variants collapse to Nothing).
+            enumExtractRawResult = if nRawRustResult > 0 then head rawRustResultTypes else ""
+            enumExtractInnerRaw = case stripGeneric1 "Option" enumExtractRawResult of
+                Just inner -> trimStr inner
+                Nothing    -> enumExtractRawResult
+            (enumExtractInner0, enumExtractCoerce) = translateRustRet enumExtractInnerRaw
+            enumExtractInner = absolutizeCrate crateImport enumExtractInner0
+            enumExtractPat = case enumKind of
+                "struct" -> case enumSFields of
+                    (f:_) -> enumPath enumVariant ++ " { " ++ rustSafeIdent f ++ ": x }"
+                    []    -> enumPath enumVariant ++ " { .. }"  -- defensive
+                _        -> enumPath enumVariant ++ "(x)"
+            enumExtractWellFormed =
+                not (null (trimStr enumRecvRust)) && not (null enumVariant)
+                    && not (null (trimStr enumExtractInnerRaw))
+                    && (enumKind /= "struct" || not (null enumSFields))
+            -- The `_ => Nothing` wildcard is appended IFF `_fnEnumWildcard` (R3):
+            -- the enum is non_exhaustive OR has >1 variant. For a single-variant
+            -- exhaustive enum the matched arm is already total, so omitting the
+            -- wildcard keeps the match clippy `unreachable_patterns`-clean.
+            enumExtractWildcard =
+                [ "        _ => SkyMaybe::Nothing," | _fnEnumWildcard fn ]
+            enumExtractLines =
+                [ "// [enum-extract] " ++ wrapper
+                , "pub fn " ++ rustName ++ "(arg0: " ++ enumRecvRust
+                  ++ ") -> SkyMaybe<" ++ enumExtractInner ++ "> {"
+                , "    match arg0 {"
+                , "        " ++ enumExtractPat ++ " => SkyMaybe::Just("
+                  ++ enumExtractCoerce "x" ++ "),"
+                ]
+                ++ enumExtractWildcard
+                ++ [ "    }"
+                   , "}"
+                   ]
+        in if _fnIsEnumCtor fn
+           then if enumCtorWellFormed then enumCtorLines else []
+           else if _fnIsEnumTag fn
+           then if enumTagWellFormed then enumTagLines else []
+           else if _fnIsEnumExtract fn
+           then if enumExtractWellFormed then enumExtractLines else []
+           else if _fnIsField fn
            then if fieldWellFormed then fieldLines else []
            else if _fnIsFieldSet fn
            then if setFieldWellFormed then setFieldLines else []
@@ -919,7 +1098,7 @@ emitRustKernelJson moduleName kernelName pkg =
     let fns = _pkgFns pkg
         entries = intercalate ",\n" (map emitFnEntry fns)
         emitFnEntry fn =
-            let st = if _fnIsField fn || _fnIsFieldSet fn then fieldSkyType fn else wrapperSkyType fn
+            let st = if infallibleFfiFn fn then fieldSkyType fn else wrapperSkyType fn
                 recv = _fnRecvType fn
                 disamb = if null recv then "" else "_from_" ++ lowerFirst recv
                 nm = lowerFirst (_fnName fn) ++ disamb
@@ -948,7 +1127,7 @@ emitRustKernelJson moduleName kernelName pkg =
 
 emitSkyiRustFn :: FnInfo -> String
 emitSkyiRustFn fn =
-    let sig = if _fnIsField fn || _fnIsFieldSet fn then fieldSkyType fn else wrapperSkyType fn
+    let sig = if infallibleFfiFn fn then fieldSkyType fn else wrapperSkyType fn
         recvt = _fnRecvType fn
         -- C2: the `_field` discriminator is already baked into `_fnName` by the
         -- inspector, so a field getter's name (`id_field_from_<Recv>`) can never
@@ -957,6 +1136,18 @@ emitSkyiRustFn fn =
         disamb = if null recvt then "" else "_from_" ++ lowerFirst recvt
         name = lowerFirst (_fnName fn) ++ disamb
     in name ++ " : " ++ sig
+
+
+-- | True for an FFI function whose `.skyi` / kernel.json type is INFALLIBLE
+-- (rendered by `fieldSkyType`, which strips the `Result Error` wrapper) rather
+-- than the default `wrapperSkyType` (which Result-wraps). Field getters/setters
+-- (C6) and all three S3 enum accessors (E6: ctor `() -> E`, tag `E -> String`,
+-- extract `E -> Maybe T`) are infallible — their bodies are
+-- projection/match/construct, never a fallible call.
+infallibleFfiFn :: FnInfo -> Bool
+infallibleFfiFn fn =
+    _fnIsField fn || _fnIsFieldSet fn
+        || _fnIsEnumCtor fn || _fnIsEnumTag fn || _fnIsEnumExtract fn
 
 
 -- | C6: a field getter's `.skyi` type is INFALLIBLE — `Recv -> FieldTy`, NOT

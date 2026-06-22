@@ -1,0 +1,253 @@
+module Main exposing (main)
+
+-- S3 enum-variant FFI proof. The `enumtest` crate's `Shape` / `Mode` enums bind
+-- as OPAQUE handles (`::enumtest::Shape` / `::enumtest::Mode`) with TOTAL
+-- accessors — NO hand-written wrapper:
+--
+--   • CONSTRUCTORS  unit/tuple/struct → `<v>_new_variant_from_<E>` (infallible
+--                   `-> E`). The multi-field tuple ctor also binds (both fields
+--                   closed). A `#[non_exhaustive]` enum gets NO ctor (E2).
+--   • TAG accessor  `tag_of_<E> : E -> String` — exhaustive `match`; the
+--                   non_exhaustive `Mode` carries a `_ => "<unknown>"` wildcard.
+--   • EXTRACTORS    single-field tuple/struct → `<v>_as_variant_from_<E> :
+--                   E -> Maybe T`. Multi-field (`Multi`) + non-closed (`Tagged`)
+--                   variants have NO extractor (tag-only).
+--
+-- `Shape` (holds the non-`Clone` `NoClone`) and `Mode` are NOT `Clone`, so every
+-- opaque enum value is read LINEARLY (used exactly once) — the call-site codegen
+-- then never inserts a `.clone()`. A fresh value is constructed per read.
+--
+-- Sky can't construct a non_exhaustive enum itself, so `make_mode_a/b` (crate
+-- ctor fns returning Result) supply each `Mode` value. There is NO `*_new_variant`
+-- binding for any `Mode` variant — the build must not name one (proven by this
+-- file compiling without referencing it).
+
+import Rust.Enumtest as E
+import Std.Log exposing (println)
+
+
+-- Read a Maybe Int as a display string ("Just N" / "Nothing").
+showMaybeInt : Maybe Int -> String
+showMaybeInt m =
+    case m of
+        Just n ->
+            "Just " ++ String.fromInt n
+
+        Nothing ->
+            "Nothing"
+
+
+main =
+    let
+        -- TAG accessor — a fresh value per read (linear use, no clone).
+        tagUnit =
+            E.tag_of_Shape (E.unit_new_variant_from_shape ())
+
+        tagTup =
+            E.tag_of_Shape (E.tup_new_variant_from_shape 5)
+
+        tagStrukt =
+            E.tag_of_Shape (E.strukt_new_variant_from_shape 9)
+
+        -- EXTRACTOR: Tup's payload from a matching value → Just 5.
+        extMatch =
+            E.tup_as_variant_from_shape (E.tup_new_variant_from_shape 5)
+
+        -- EXTRACTOR on a NON-matching value (Strukt through Tup's extractor)
+        -- → Nothing (the `_ => Nothing` wildcard arm).
+        extNoMatch =
+            E.tup_as_variant_from_shape (E.strukt_new_variant_from_shape 9)
+
+        -- Struct-variant extractor → Just 9.
+        extStrukt =
+            E.strukt_as_variant_from_shape (E.strukt_new_variant_from_shape 9)
+
+        -- Multi-field ctor binds (both fields closed) — construct + read its tag
+        -- (it has NO extractor: multi-field, tag-only).
+        tagMulti =
+            E.tag_of_Shape (E.multi_new_variant_from_shape 1 "two")
+
+        -- F2: a SINGLE-variant exhaustive enum. The extractor has NO `_ =>
+        -- Nothing` wildcard (the one arm is already total) — still returns Just.
+        tagSolo =
+            E.tag_of_Solo (E.only_new_variant_from_solo 3)
+
+        extSolo =
+            E.only_as_variant_from_solo (E.only_new_variant_from_solo 3)
+
+        -- F1: keyword variant (`move`) + keyword struct-variant field (`type`).
+        -- The codegen raw-escapes them (`::enumtest::Kw::r#move`, `r#type: …`).
+        tagKwMove =
+            E.tag_of_Kw (E.move_new_variant_from_kw 4)
+
+        extKwMove =
+            E.move_as_variant_from_kw (E.move_new_variant_from_kw 4)
+
+        tagKwFields =
+            E.tag_of_Kw (E.fields_new_variant_from_kw 6)
+
+        extKwFields =
+            E.fields_as_variant_from_kw (E.fields_new_variant_from_kw 6)
+
+        extrasOk =
+            tagSolo
+                == "Only"
+                && tagKwMove
+                == "move"
+                && tagKwFields
+                == "Fields"
+                && (case extSolo of
+                        Just 3 ->
+                            True
+
+                        _ ->
+                            False
+                   )
+                && (case extKwMove of
+                        Just 4 ->
+                            True
+
+                        _ ->
+                            False
+                   )
+                && (case extKwFields of
+                        Just 6 ->
+                            True
+
+                        _ ->
+                            False
+                   )
+
+        tagsOk =
+            tagUnit
+                == "Unit"
+                && tagTup
+                == "Tup"
+                && tagStrukt
+                == "Strukt"
+                && tagMulti
+                == "Multi"
+
+        extMatchOk =
+            case extMatch of
+                Just 5 ->
+                    True
+
+                _ ->
+                    False
+
+        extNoMatchOk =
+            case extNoMatch of
+                Nothing ->
+                    True
+
+                _ ->
+                    False
+
+        extStruktOk =
+            case extStrukt of
+                Just 9 ->
+                    True
+
+                _ ->
+                    False
+    in
+    -- `Mode` is non_exhaustive: Sky CANNOT construct it (no `*_new_variant`
+    -- binding exists); the crate ctor fns supply each value. Each `Mode` value
+    -- is read once (linear, no clone) — so the tag + extractor reads each build
+    -- a fresh value via `make_mode_*`.
+    case ( E.make_mode_b 7, E.make_mode_a () ) of
+        ( Ok mB1, Ok mA1 ) ->
+            case ( E.make_mode_b 7, E.make_mode_a () ) of
+                ( Ok mB2, Ok mA2 ) ->
+                    let
+                        tagModeB =
+                            E.tag_of_Mode mB1
+
+                        tagModeA =
+                            E.tag_of_Mode mA1
+
+                        -- Mode's single-closed-field B(i64) extractor → Just 7.
+                        extModeB =
+                            E.b_as_variant_from_mode mB2
+
+                        -- Non-matching: A through B's extractor → Nothing
+                        -- (routed via the wildcard).
+                        extModeA =
+                            E.b_as_variant_from_mode mA2
+
+                        -- `Mode::A` is itself `#[non_exhaustive]`, so it CANNOT
+                        -- be named in a match arm from outside the crate (E0603).
+                        -- The tag accessor correctly routes it through the
+                        -- wildcard → "<unknown>" (sound: a non_exhaustive variant
+                        -- is not name-discriminable). `Mode::B` (exhaustive) tags
+                        -- as "B".
+                        modeOk =
+                            tagModeB
+                                == "B"
+                                && tagModeA
+                                == "<unknown>"
+                                && (case extModeB of
+                                        Just 7 ->
+                                            True
+
+                                        _ ->
+                                            False
+                                   )
+                                && (case extModeA of
+                                        Nothing ->
+                                            True
+
+                                        _ ->
+                                            False
+                                   )
+
+                        ok =
+                            tagsOk
+                                && extMatchOk
+                                && extNoMatchOk
+                                && extStruktOk
+                                && extrasOk
+                                && modeOk
+                    in
+                    println
+                        ("Shape tags: "
+                            ++ tagUnit
+                            ++ "/"
+                            ++ tagTup
+                            ++ "/"
+                            ++ tagStrukt
+                            ++ "/"
+                            ++ tagMulti
+                            ++ " | Solo="
+                            ++ tagSolo
+                            ++ "("
+                            ++ showMaybeInt extSolo
+                            ++ ") Kw="
+                            ++ tagKwMove
+                            ++ "("
+                            ++ showMaybeInt extKwMove
+                            ++ ")/"
+                            ++ tagKwFields
+                            ++ "("
+                            ++ showMaybeInt extKwFields
+                            ++ ") | Tup extract="
+                            ++ showMaybeInt extMatch
+                            ++ " noMatch="
+                            ++ showMaybeInt extNoMatch
+                            ++ " Strukt extract="
+                            ++ showMaybeInt extStrukt
+                            ++ " | Mode tags: "
+                            ++ tagModeB
+                            ++ "/"
+                            ++ tagModeA
+                            ++ " (non_exhaustive, wildcard) B extract="
+                            ++ showMaybeInt extModeB
+                            ++ (if ok then "  [ALL OK]" else "  [MISMATCH]")
+                        )
+
+                _ ->
+                    println "make_mode_* failed (inner)"
+
+        _ ->
+            println "make_mode_* failed (outer)"

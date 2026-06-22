@@ -47,7 +47,7 @@ The Rust FFI path is more developed than "nothing":
 - **S2 — field SETTERS + Clone-typed getters.** `is_field_set`; getters for
   non-Copy `Clone` fields (return an owned clone — never move the field out of a
   borrowed receiver). Builds on S1.
-- **S3 — enum-variant binding** (construct + match foreign enums).
+- **S3 — enum-variant binding** (construct + discriminate foreign enums). DESIGN below.
 - **S4 — FFI-surface DCE / tree-shake** (reachability filter so binding a huge crate
   emits only reached symbols). Highest blast radius — last.
 
@@ -110,6 +110,82 @@ The Rust FFI path is more developed than "nothing":
   contains `isField:true` entries for `n` and `label`.
 - clippy HARD-DENY clean on generated + runtime; pre-final code gate; guardian final.
 - Checkpoint-commit S1 before S2.
+
+## S3 design — enum-variant binding (opaque handle + TOTAL accessors)
+A foreign enum stays an OPAQUE handle to Sky (Rust `::crate::E`), exactly like a
+foreign struct — we do NOT lower it to a generated Sky ADT (the runtime can't name /
+destructure a per-project ADT across the FFI boundary — see CLAUDE.md learning). Bind
+three accessor kinds, all total-by-construction:
+- **Unit-variant constructor** `<variant> : () -> E` → `::crate::E::<Variant>`. Emitted
+  ONLY for a crate-local PUBLIC enum that is NOT `#[non_exhaustive]` and whose variant
+  is not `#[non_exhaustive]`/doc-hidden (external code cannot construct a non_exhaustive
+  enum's variants — would be `E0639`/cargo-fail).
+- **Data-variant constructor** for tuple variants `V(F1,..)` → `<variant> : F1 -> .. -> E`
+  and struct variants `V{a,b}` → `<variant> : A -> B -> E` (fields in declaration order),
+  ONLY when EVERY field type is in the S1 closed set (C5) and the enum is constructible
+  (not non_exhaustive). Skip a variant with any non-closed field.
+- **Tag accessor** `tag : E -> String` → generated `match e { E::A => "A", E::B(..) =>
+  "B", .. }`; a `#[non_exhaustive]` enum (or one with a skipped variant) gets a trailing
+  `_ => "<unknown>"` arm so the match is TOTAL. Lets Sky branch on the variant name.
+- **Payload extractor** `as_<variant> : E -> Maybe T` for a SINGLE-field tuple/struct
+  variant whose field is in the closed set → `match e { E::V(x) => Just x.clone(), _ =>
+  Nothing }` (total; clones before the by-value receiver drops). Multi-field variants:
+  SKIP in S3 (Sky has no clean FFI tuple) — defer. No payload extractor → Sky still
+  discriminates via `tag` and reconstructs via the constructor if needed.
+### S3 locked constraints
+- **E1 (totality).** Every generated `match` is exhaustive OR has a `_` wildcard arm —
+  NO non-exhaustive match (cargo-fail) and NO panic. `#[non_exhaustive]` ⇒ wildcard
+  mandatory on tag + every `as_`.
+- **E2 (constructibility).** No constructor for a `#[non_exhaustive]` enum or variant,
+  or a variant with any non-closed-set / generic / ref / lifetime field. Discriminators
+  (tag/as_) are still emitted for non_exhaustive enums.
+- **E3 (visibility).** PUBLIC enums + PUBLIC variants only; `#[doc(hidden)]` enum or
+  variant skipped (both levels), mirroring C3.
+- **E4 (closed types).** Variant field types obey the S1 closed set (C5) + the C1
+  wide-int gate; a variant with an ineligible field gets no constructor/extractor (but
+  still appears in `tag`'s match, via the wildcard if needed).
+- **E5 (dedup).** Distinct keys per kind: constructor `<v>_new_variant_from_<E>`, tag
+  `tag_of_<E>`, extractor `<v>_as_variant_from_<E>` — non-colliding with each other,
+  with struct field/method bindings, and across variants. Fixture must witness an enum
+  with a unit variant + a single-field tuple variant + (ideally) a `#[non_exhaustive]`
+  case.
+- **E6 (.skyi infallible).** Constructors/tag are pure (`() -> E` / `E -> String`);
+  extractors are pure `E -> Maybe T`. NONE Result-wrapped; bodies are
+  match/clone/construct — no unwrap/index/arith/panic.
+- **E7 (generics).** Generic enums (`Option<T>`-style, any `E<T>`) are SKIPPED in S3
+  (monomorphisation is out of scope) — drop with an audited reason.
+
+### S3 LOCKED refinements (guardian design review 2026-06-22 — APPROVE-WITH-CONSTRAINTS)
+- **R1 (F1 CRITICAL, refines E3).** A variant's rustdoc `visibility` is `"default"`, NOT
+  `"public"` — variant visibility is INHERITED from the enum. Do NOT call `is_public()`
+  on a variant (it returns false → S3 silently emits NOTHING). Gate on the ENUM's
+  visibility + the enum's/variant's doc-hidden only.
+- **R2 (F2 CRITICAL, refines E2).** `doc_hidden()` does NOT detect `#[non_exhaustive]`.
+  Add a `non_exhaustive(item)` detector (rustdoc `attrs` contains the bare string
+  `"non_exhaustive"`). Detection FAILURE ⇒ assume non_exhaustive (losing a ctor is safe;
+  emitting one on a real non_exhaustive enum is E0639 cargo-fail).
+- **R3 (F3+F4 HIGH, refines E1).** The `tag`/`as_` match needs a `_ => …` wildcard arm
+  iff (enum is `#[non_exhaustive]`) OR (ANY variant was skipped: doc-hidden / ineligible
+  field / multi-field). Both conditions independently force E0004 without it.
+- **R4 (F5 MEDIUM).** SKIP an enum with zero variants (uninhabited) or all-variants-
+  skipped — audited reason; don't emit a dead/all-`<unknown>` tag.
+- **R5 (F6 MEDIUM, refines E1).** Match-arm syntax dispatches on variant KIND: unit →
+  `E::V`, tuple → `E::V(..)`, struct → `E::V{..}`. A uniform `(..)` is E0769 on struct
+  variants.
+- **R6 (F7 MEDIUM, refines E6).** Extractor receiver is BY VALUE (the established
+  convention): `match e { E::V(x) => Just(x), .. }` — an owned `e` MOVES the single
+  closed-set field out (no clone needed, no E0509). For a struct variant: `E::V{ a } =>
+  Just(a)`. (If a future variant binds the receiver by `&E`, switch to `ref a` +
+  `.clone()`.) `T: Clone`/closed-set already guaranteed by reusing the S1 field gate.
+- **R7 (F9 LOW, refines E7).** Detect generics at the ENUM level (`generics.params`
+  non-empty ⇒ skip `generic_enum`), not via per-field failure. Variant fields are always
+  as-public-as the enum (no S1-style private-field trap).
+- **Fixture (refines E5).** One crate witnessing: unit + single-closed-tuple + single-
+  closed-struct + multi-field (deferred → tag-only) + non-closed-field (tag-only) variants;
+  AND a separate `#[non_exhaustive]` enum with a `#[non_exhaustive]` variant. Assert:
+  non_exhaustive ⇒ tag/as_ carry a wildcard + NO constructors; skipped variants reachable
+  via the tag wildcard; feature-minimal `cargo build` clean (proves no E0639/E0004/E0509/
+  E0769) + clippy HARD-DENY clean.
 
 ## Invariants (apply to every slice)
 - **No-runtime-panic thesis holds.** Every generated accessor is total by

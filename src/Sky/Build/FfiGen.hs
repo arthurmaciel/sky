@@ -110,6 +110,28 @@ data FnInfo = FnInfo
         -- codegen then emits an owned-threading wrapper (move the receiver,
         -- mutate, return it) instead of dropping the &mut Self return. The
         -- JSON field is absent (→ False) for Go and for every non-setter.
+    , _fnIsEnumCtor :: Bool
+        -- ^ Rust only (S3). True for an enum-variant CONSTRUCTOR
+        -- (`<variant> : F1 -> .. -> E` → `E::Variant(args)`). Absent → False.
+    , _fnIsEnumTag :: Bool
+        -- ^ Rust only (S3). True for an enum TAG accessor
+        -- (`tag_of_<E> : E -> String` → exhaustive `match`). Absent → False.
+    , _fnIsEnumExtract :: Bool
+        -- ^ Rust only (S3). True for a single-field payload EXTRACTOR
+        -- (`<v>_as_variant : E -> Maybe T`). Absent → False.
+    , _fnEnumVariant :: String
+        -- ^ Rust only (S3). The Rust variant identifier (ctor + extract). "".
+    , _fnEnumKind :: String
+        -- ^ Rust only (S3). "unit" | "tuple" | "struct" (ctor + extract). "".
+    , _fnEnumStructFields :: [String]
+        -- ^ Rust only (S3). Struct-variant field names in declaration order
+        -- (ctor + extract for a struct variant); [] for unit / tuple variants.
+    , _fnEnumArms :: [String]
+        -- ^ Rust only (S3, tag). Each entry "<rust-pattern>\t<tag-string>",
+        -- e.g. "A\tA", "B(..)\tB", "C{..}\tC". []  for non-tag functions.
+    , _fnEnumWildcard :: Bool
+        -- ^ Rust only (S3, tag + extract). Whether the generated `match` needs
+        -- a trailing `_ => …` wildcard (R3). Absent → False.
     }
     deriving (Show)
 
@@ -146,6 +168,14 @@ instance A.FromJSON FnInfo where
             <*> pure (map (\(_, _, _, r) -> r) results)
             <*> o A..:? "recvRustType" A..!= ""
             <*> o A..:? "selfReturning" A..!= False
+            <*> o A..:? "isEnumCtor" A..!= False
+            <*> o A..:? "isEnumTag" A..!= False
+            <*> o A..:? "isEnumExtract" A..!= False
+            <*> o A..:? "enumVariant" A..!= ""
+            <*> o A..:? "enumKind" A..!= ""
+            <*> o A..:? "enumStructFields" A..!= []
+            <*> o A..:? "enumArms" A..!= []
+            <*> o A..:? "enumWildcard" A..!= False
       where
         parseParamFull = A.withObject "param" $ \o -> do
             n <- o A..:? "name" A..!= ""

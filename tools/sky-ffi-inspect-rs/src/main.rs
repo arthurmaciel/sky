@@ -33,7 +33,7 @@ struct Param {
     rust_type: String,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 struct Function {
     name: String,
@@ -61,6 +61,41 @@ struct Function {
     // Go and every non-setter.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     self_returning: bool,
+
+    // ── Enum-variant binding (S3) ───────────────────────────────────────
+    // A foreign enum stays an OPAQUE handle (`::crate::E`); these three flags
+    // (mutually exclusive, at most one true) drive the Rust codegen's three
+    // total-by-construction accessor kinds. All absent (→ false) for Go and
+    // every non-enum function. The Rust-only emit details live in `enum_*`.
+    /// Variant CONSTRUCTOR: `<variant> : F1 -> .. -> E` → `E::Variant(args)`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_enum_ctor: bool,
+    /// Tag ACCESSOR: `tag_of_<E> : E -> String` → `match e { … }`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_enum_tag: bool,
+    /// Single-field payload EXTRACTOR: `<v>_as_variant : E -> Maybe T`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_enum_extract: bool,
+    /// Rust variant identifier (ctor + extract). Empty otherwise.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    enum_variant: String,
+    /// Variant kind: "unit" | "tuple" | "struct" (ctor + extract).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    enum_kind: String,
+    /// Struct-variant field names in declaration order (ctor + extract for a
+    /// struct variant). Empty for unit / tuple variants.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    enum_struct_fields: Vec<String>,
+    /// Tag-match arms (tag only): each entry is "<rust-pattern>\t<tag-string>",
+    /// e.g. "A\tA", "B(..)\tB", "C{..}\tC". FfiGen renders `E::<pat> => "<tag>"`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    enum_arms: Vec<String>,
+    /// Whether the tag / extract match needs a trailing `_ => …` wildcard arm
+    /// (R3): enum is non_exhaustive OR a variant was skipped. Extract always
+    /// sets it (the non-matching variants collapse to Nothing). Tag sets it per
+    /// the R3 condition only, to stay clippy unreachable-pattern clean.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    enum_wildcard: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -203,6 +238,10 @@ fn emit_tail_audit_report(crate_args: &[String], results: &[PkgInfo]) {
         "wide_int_lossy",
         "not_in_closed_set",
         "char_unmapped",
+        // S3 enum-level drops (R7 generic enum, R4 empty / all-skipped enum).
+        "generic_enum",
+        "empty_enum",
+        "all_variants_skipped",
     ] {
         let in_reason: Vec<&(String, bool, String)> =
             drops.iter().filter(|(r, _, _)| r == reason).collect();
@@ -740,6 +779,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                     is_field_set: false,
                     is_pkg_var: false,
                     self_returning: false,
+                    ..Default::default()
                 });
 
                 // ── Struct field SETTER (S2) ───────────────────────────
@@ -796,8 +836,28 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                     is_field_set: true,
                     is_pkg_var: false,
                     self_returning: false,
+                    ..Default::default()
                 });
             }
+        }
+
+        // ── Enum-variant binding (S3) ──────────────────────────────────
+        // Bind a crate-local PUBLIC enum as an OPAQUE handle (`::crate::E`) with
+        // TOTAL accessors: per-variant constructors (when constructible), a tag
+        // accessor, and single-field payload extractors. NEVER lowered to a Sky
+        // ADT (the runtime can't cross that boundary). See the S3 design /
+        // E1–E7 / R1–R7 in the parity spec.
+        if let Some(enum_data) = inner.get("enum") {
+            emit_enum_bindings(
+                &mut functions,
+                &name,
+                item_id,
+                item,
+                enum_data,
+                index,
+                &aliases,
+                &clone_struct_ids,
+            );
         }
     }
 
@@ -1089,6 +1149,426 @@ fn field_type_eligible(
 
     // tuples, slices, arrays, generics, impl-trait, … — not in the S1 set.
     Err("not_in_closed_set")
+}
+
+/// True when a rustdoc item carries `#[non_exhaustive]` (R2). The attribute
+/// appears in the item's `attrs` array as the bare string `"non_exhaustive"`
+/// (verified empirically against rustdoc JSON format v57 on both an enum and a
+/// variant). Two stringy attr shapes are checked (bare string OR a `{"other":
+/// …}` object) to survive format drift. Detection FAILURE must mean "assume
+/// non_exhaustive" at the call sites (losing a ctor is safe; emitting one on a
+/// real non_exhaustive enum is E0639 / cargo-fail) — so callers OR this with a
+/// conservative default, they do NOT treat a parse miss as "exhaustive".
+fn non_exhaustive(item: &serde_json::Value) -> bool {
+    item.get("attrs")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter().any(|a| {
+                let s = a.as_str().map(str::to_string).or_else(|| {
+                    a.get("other").and_then(|o| o.as_str()).map(str::to_string)
+                });
+                s.map(|t| t.contains("non_exhaustive")).unwrap_or(false)
+            })
+        })
+        // FAIL-SAFE (R2): an empty `attrs` array legitimately reports `false`
+        // (handled by `.any()` inside `.map` above — a normal enum keeps its
+        // constructors). This outer default fires ONLY when `attrs` is absent or
+        // not an array — a rustdoc-format change we cannot parse, i.e. a genuine
+        // DETECTION FAILURE — and must assume `#[non_exhaustive]` (suppress
+        // constructors): losing a ctor is safe, emitting one on a real
+        // non_exhaustive enum is E0639 / cargo-fail.
+        .unwrap_or(true)
+}
+
+/// The variant KIND (R5) read from a variant item's `inner.variant.kind`:
+///   "plain"                          → Unit  (arm `E::V`)
+///   { "tuple":  [field_ids…] }       → Tuple (arm `E::V(..)`)
+///   { "struct": { "fields": […] } }  → Struct(arm `E::V{..}`)
+/// Returns (kind_tag, field_type_ids) where kind_tag ∈ {"unit","tuple",
+/// "struct"} and field_type_ids is the list of rustdoc field-item ids (the
+/// `struct_field` items carrying the field types) in declaration order.
+fn variant_kind(variant_inner: &serde_json::Value) -> Option<(&'static str, Vec<String>)> {
+    let kind = variant_inner.get("kind")?;
+    if kind.as_str() == Some("plain") {
+        return Some(("unit", Vec::new()));
+    }
+    if let Some(tup) = kind.get("tuple") {
+        // A tuple variant's `tuple` is an array of field-item ids (or null for
+        // a stripped private field — which makes the variant inconstructible).
+        let ids: Vec<String> = tup
+            .as_array()?
+            .iter()
+            .map(item_id_to_str)
+            .collect();
+        // A null id stringifies to "" (item_id_to_str on null). A "" id means a
+        // stripped field → not constructible; signal via an empty-string entry.
+        return Some(("tuple", ids));
+    }
+    if let Some(st) = kind.get("struct") {
+        let ids: Vec<String> = st
+            .get("fields")
+            .and_then(|f| f.as_array())?
+            .iter()
+            .map(item_id_to_str)
+            .collect();
+        return Some(("struct", ids));
+    }
+    None
+}
+
+/// Resolve a variant's field-type ids to `(field_name, type_json, type_sky,
+/// type_rust)` tuples in declaration order. For a tuple variant the field name
+/// is the positional index ("0","1",…); for a struct variant it's the real
+/// field name. Returns `None` if any id is missing / stripped (`""`) or any
+/// field item lacks a `struct_field` type — both mean the variant can't be
+/// soundly constructed and must be treated as ineligible.
+fn resolve_variant_fields(
+    field_ids: &[String],
+    index: &serde_json::Map<String, serde_json::Value>,
+    aliases: &HashMap<String, String>,
+) -> Option<Vec<(String, serde_json::Value, String, String)>> {
+    let mut out = Vec::with_capacity(field_ids.len());
+    for fid in field_ids {
+        if fid.is_empty() {
+            return None; // stripped / private field → inconstructible
+        }
+        let field_item = index.get(fid)?;
+        let field_name = field_item["name"].as_str().unwrap_or("").to_string();
+        let ty = field_item["inner"].get("struct_field")?;
+        let sky = rustdoc_type_to_sky(ty, aliases);
+        let rust = rustdoc_type_to_rust_str(ty);
+        if sky.is_empty() || rust.is_empty() {
+            return None;
+        }
+        out.push((field_name, ty.clone(), sky, rust));
+    }
+    Some(out)
+}
+
+/// Emit the S3 enum bindings (ctors + tag + extractors) for one crate-local
+/// enum item. Pushes `Function`s onto `functions`. Total-by-construction:
+/// every emitted accessor is a constructor / exhaustive `match` (with a `_`
+/// wildcard exactly when R3 requires it) — never an index / unwrap / panic.
+#[allow(clippy::too_many_arguments)]
+fn emit_enum_bindings(
+    functions: &mut Vec<Function>,
+    enum_name: &str,
+    enum_id: &str,
+    enum_item: &serde_json::Value,
+    enum_data: &serde_json::Value,
+    index: &serde_json::Map<String, serde_json::Value>,
+    aliases: &HashMap<String, String>,
+    clone_ids: &HashSet<String>,
+) {
+    // E3 + R1: PUBLIC enum, not doc-hidden. Variant visibility is INHERITED
+    // (rustdoc reports it as "default"), so we gate on the ENUM's visibility +
+    // doc-hidden only — NEVER call is_public() on a variant (R1: it returns
+    // false and would silently emit nothing).
+    if !is_public(enum_item) || doc_hidden(enum_item) {
+        return;
+    }
+
+    // R7 / E7: skip a generic enum (`E<T>`) — monomorphisation is out of S3.
+    let is_generic = enum_data
+        .get("generics")
+        .and_then(|g| g.get("params"))
+        .and_then(|p| p.as_array())
+        .map(|p| !p.is_empty())
+        .unwrap_or(false);
+    if is_generic {
+        record_tail_drop("generic_enum", false, enum_name);
+        return;
+    }
+
+    // R2 + E2: a non_exhaustive enum is NOT constructible from external code
+    // (E0639). Constructors are suppressed; tag/extract are still emitted but
+    // MUST carry a wildcard (R3). Detection failure → assume non_exhaustive.
+    let enum_non_exhaustive = non_exhaustive(enum_item);
+
+    // The opaque receiver type (`::crate::E`) — identical resolution to the
+    // struct field walk's receiver, so the enum handle names match the crate's
+    // own methods exactly.
+    let recv_path = serde_json::json!({
+        "resolved_path": { "name": enum_name, "path": enum_name, "id": enum_id, "args": null }
+    });
+    let enum_sky = rustdoc_type_to_sky(&recv_path, aliases);
+    let enum_rust = rustdoc_type_to_rust_str(&recv_path);
+    if enum_sky.is_empty() || enum_rust.is_empty() {
+        return;
+    }
+
+    let variant_ids: Vec<String> = enum_data
+        .get("variants")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().map(item_id_to_str).collect())
+        .unwrap_or_default();
+
+    // R4: skip a zero-variant (uninhabited) enum — no value can exist, so a tag
+    // accessor would be dead and emit no usable surface.
+    if variant_ids.is_empty() {
+        record_tail_drop("empty_enum", false, enum_name);
+        return;
+    }
+
+    // Per-variant pass: collect tag arms + whether any variant was skipped
+    // (forces the R3 wildcard), and emit ctor + extract as eligibility allows.
+    let mut tag_arms: Vec<String> = Vec::new();
+    let mut any_variant_skipped = false;
+    // Pending ctor/extract pushes are buffered so the per-enum totality checks
+    // (R4 all-skipped, tag emission) run first.
+    let mut pending: Vec<Function> = Vec::new();
+
+    for vid in &variant_ids {
+        let Some(variant_item) = index.get(vid) else {
+            any_variant_skipped = true;
+            continue;
+        };
+        let variant_name = variant_item["name"].as_str().unwrap_or("").to_string();
+        if variant_name.is_empty() {
+            any_variant_skipped = true;
+            continue;
+        }
+        // R1/E3: a `#[doc(hidden)]` variant is skipped (both levels). Its
+        // visibility is "default" (inherited) — we do NOT gate on is_public.
+        if doc_hidden(variant_item) {
+            any_variant_skipped = true;
+            // A doc-hidden variant still EXISTS at runtime, so the match must be
+            // able to fall through to it via the wildcard — but we never name it
+            // in an arm (it may be unnameable). Mark skipped → forces wildcard.
+            continue;
+        }
+        let Some(variant_inner) = variant_item["inner"].get("variant") else {
+            any_variant_skipped = true;
+            continue;
+        };
+        // R2 + E2 (refined empirically): a `#[non_exhaustive]` VARIANT cannot be
+        // NAMED in a pattern from outside the defining crate — even a `match`
+        // arm `E::A => …` / `E::B(x) => …` is rejected with E0603 ("variant is
+        // private"). So a non_exhaustive variant is excluded ENTIRELY: no ctor,
+        // no extractor, AND no tag arm — it is routed through the wildcard
+        // instead (mark skipped → the R3 wildcard already fires for a
+        // non_exhaustive enum, but mark it regardless for an exhaustive enum
+        // that happens to carry a non_exhaustive variant).
+        if non_exhaustive(variant_item) {
+            any_variant_skipped = true;
+            continue;
+        }
+
+        let Some((kind, field_ids)) = variant_kind(variant_inner) else {
+            any_variant_skipped = true;
+            continue;
+        };
+
+        // The tag arm pattern dispatches on variant KIND (R5). Always emitted
+        // for a NAMEABLE, non-doc-hidden variant (a doc-hidden one is handled
+        // above via the wildcard). The tag string is the Rust variant ident.
+        let arm_pat = match kind {
+            "unit" => variant_name.clone(),
+            "tuple" => format!("{variant_name}(..)"),
+            "struct" => format!("{variant_name}{{..}}"),
+            _ => {
+                any_variant_skipped = true;
+                continue;
+            }
+        };
+        tag_arms.push(format!("{arm_pat}\t{variant_name}"));
+
+        // ── Constructibility (E2) ──────────────────────────────────────
+        // A constructor is emitted ONLY when the enum AND the variant are both
+        // exhaustive-constructible AND every field type is in the S1 closed set
+        // (E4 reuses field_type_eligible). Otherwise the variant is still
+        // tag-reachable but gets no ctor (E2) — which, if it ends up being the
+        // reason a variant lacks an extractor too, contributes to the wildcard.
+        let resolved_fields = resolve_variant_fields(&field_ids, index, aliases);
+
+        // Field eligibility (E4): every field type must pass the S1 gate.
+        let fields_eligible = match &resolved_fields {
+            Some(fields) => fields
+                .iter()
+                .all(|(_, ty, _, _)| field_type_eligible(ty, index, clone_ids).is_ok()),
+            None => false, // stripped / unresolvable field → not constructible
+        };
+
+        // A non_exhaustive variant has already been `continue`d above, so by
+        // here the variant is exhaustive-constructible iff the ENUM is.
+        let constructible = !enum_non_exhaustive && fields_eligible;
+
+        if constructible {
+            if let Some(fields) = &resolved_fields {
+                pending.push(make_enum_ctor(
+                    &variant_name,
+                    kind,
+                    fields,
+                    &enum_sky,
+                    &enum_rust,
+                ));
+            }
+        }
+
+        // ── Single-field payload extractor (R6) ────────────────────────
+        // Emitted for a SINGLE-field tuple/struct variant whose one field is in
+        // the closed set. Multi-field variants: SKIP (tag-only). The extractor
+        // receiver is BY VALUE and MOVES the owned field out (no clone, no
+        // E0509). The non-matching variants fall through to `Nothing` via the
+        // `_` arm.
+        //
+        // The `_ => Nothing` wildcard is needed ONLY when a value could be a
+        // DIFFERENT variant — i.e. the enum is non_exhaustive OR has >1 variant.
+        // A single-variant exhaustive enum's `E::Only(x) => Just(x)` is already
+        // exhaustive, so emitting the wildcard would be `unreachable_patterns`
+        // (clippy). Gate it precisely (mirrors the tag's R3 gating).
+        if kind != "unit" && fields_eligible {
+            if let Some(field) = resolved_fields.as_ref().and_then(|f| {
+                if f.len() == 1 { f.first() } else { None }
+            }) {
+                let extract_wildcard = enum_non_exhaustive || variant_ids.len() > 1;
+                pending.push(make_enum_extract(
+                    &variant_name,
+                    kind,
+                    field,
+                    &enum_sky,
+                    &enum_rust,
+                    extract_wildcard,
+                ));
+            }
+        }
+    }
+
+    // R4: if every variant was skipped (no tag arm survived), don't emit a
+    // dead all-`<unknown>` tag.
+    if tag_arms.is_empty() {
+        record_tail_drop("all_variants_skipped", false, enum_name);
+        return;
+    }
+
+    // R3: the tag match carries a `_ => "<unknown>"` wildcard iff the enum is
+    // non_exhaustive OR any variant was skipped. Gating precisely keeps a
+    // fully-known exhaustive local enum's match wildcard-free (clippy
+    // unreachable_patterns clean); a non_exhaustive enum legitimately needs it.
+    let tag_wildcard = enum_non_exhaustive || any_variant_skipped;
+
+    functions.push(Function {
+        name: format!("tag_of_{enum_name}"),
+        params: vec![Param {
+            name: "e".into(),
+            ty: enum_sky.clone(),
+            sky_type: enum_sky.clone(),
+            rust_type: enum_rust.clone(),
+        }],
+        results: vec![Param {
+            name: String::new(),
+            ty: "String".into(),
+            sky_type: "String".into(),
+            rust_type: "String".into(),
+        }],
+        effect: "pure".into(),
+        exported: true,
+        // E5: the tag's Sky name is `tag_of_<E>` — it ALREADY embeds the enum
+        // name, so it must NOT get the `_from_<E>` disambiguation suffix the
+        // dedup/.skyi/kernel.json naming derives from `recv_type`. Leave
+        // `recv_type` EMPTY (no suffix) but keep `recv_rust_type` set so the
+        // Rust emit still resolves the by-value receiver type `::crate::E`.
+        recv_type: String::new(),
+        recv_rust_type: enum_rust.clone(),
+        method_name: format!("tag_of_{enum_name}"),
+        is_enum_tag: true,
+        enum_arms: tag_arms,
+        enum_wildcard: tag_wildcard,
+        ..Default::default()
+    });
+
+    functions.extend(pending);
+}
+
+/// Build a variant CONSTRUCTOR `Function` (E2/E6). `fields` are the resolved
+/// `(name, type_json, sky, rust)` tuples in declaration order; params take the
+/// field Sky/Rust types, the result is the opaque enum. INFALLIBLE (no Result).
+fn make_enum_ctor(
+    variant_name: &str,
+    kind: &str,
+    fields: &[(String, serde_json::Value, String, String)],
+    enum_sky: &str,
+    enum_rust: &str,
+) -> Function {
+    let params: Vec<Param> = fields
+        .iter()
+        .map(|(fname, _, sky, rust)| Param {
+            name: fname.clone(),
+            ty: sky.clone(),
+            sky_type: sky.clone(),
+            rust_type: rust.clone(),
+        })
+        .collect();
+    let struct_field_names: Vec<String> = if kind == "struct" {
+        fields.iter().map(|(n, _, _, _)| n.clone()).collect()
+    } else {
+        Vec::new()
+    };
+    Function {
+        name: format!("{variant_name}_new_variant"),
+        params,
+        results: vec![Param {
+            name: String::new(),
+            ty: enum_sky.to_string(),
+            sky_type: enum_sky.to_string(),
+            rust_type: enum_rust.to_string(),
+        }],
+        effect: "pure".into(),
+        exported: true,
+        recv_type: enum_sky.to_string(),
+        recv_rust_type: enum_rust.to_string(),
+        method_name: format!("{variant_name}_new_variant"),
+        is_enum_ctor: true,
+        enum_variant: variant_name.to_string(),
+        enum_kind: kind.to_string(),
+        enum_struct_fields: struct_field_names,
+        ..Default::default()
+    }
+}
+
+/// Build a single-field payload EXTRACTOR `Function` (R6/E6): `<v>_as_variant :
+/// E -> Maybe T`. The receiver is by value; the body moves the owned field out.
+/// `field` is the variant's single resolved field tuple.
+fn make_enum_extract(
+    variant_name: &str,
+    kind: &str,
+    field: &(String, serde_json::Value, String, String),
+    enum_sky: &str,
+    enum_rust: &str,
+    wildcard: bool,
+) -> Function {
+    let (fname, _, fsky, frust) = field;
+    let struct_field_names: Vec<String> = if kind == "struct" {
+        vec![fname.clone()]
+    } else {
+        Vec::new()
+    };
+    Function {
+        name: format!("{variant_name}_as_variant"),
+        params: vec![Param {
+            name: "e".into(),
+            ty: enum_sky.to_string(),
+            sky_type: enum_sky.to_string(),
+            rust_type: enum_rust.to_string(),
+        }],
+        results: vec![Param {
+            name: String::new(),
+            ty: format!("Maybe {fsky}"),
+            sky_type: format!("Maybe {fsky}"),
+            rust_type: format!("Option<{frust}>"),
+        }],
+        effect: "pure".into(),
+        exported: true,
+        recv_type: enum_sky.to_string(),
+        recv_rust_type: enum_rust.to_string(),
+        method_name: format!("{variant_name}_as_variant"),
+        is_enum_extract: true,
+        enum_variant: variant_name.to_string(),
+        enum_kind: kind.to_string(),
+        enum_struct_fields: struct_field_names,
+        enum_wildcard: wildcard,
+        ..Default::default()
+    }
 }
 
 // ── Drop-reason audit (diagnostic; `--audit` only) ─────────────────────
@@ -1430,6 +1910,7 @@ fn parse_fn_item(
         is_field_set: false,
         is_pkg_var: false,
         self_returning,
+        ..Default::default()
     })
 }
 
@@ -1851,6 +2332,7 @@ fn emit_display_fromstr_bridges(
             is_field_set: false,
             is_pkg_var: false,
             self_returning: false,
+            ..Default::default()
         });
     }
 
@@ -1879,6 +2361,7 @@ fn emit_display_fromstr_bridges(
             is_field_set: false,
             is_pkg_var: false,
             self_returning: false,
+            ..Default::default()
         });
     }
 }
