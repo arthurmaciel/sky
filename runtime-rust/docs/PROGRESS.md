@@ -17,6 +17,38 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-22 01:20 — Batch 23: gate the wasm-floor json test + add a per-subset `--all-targets` matrix leg (#12)
+
+`tests/wasm_floor_scope.rs`'s `json_kernel_encode_is_pure_and_total` called
+`sky_runtime::json::*` (feature-gated) with NO matching `#[cfg(feature="json")]`, so
+`cargo clippy/test --all-targets --no-default-features --features <non-json subset>`
+failed to resolve the module (E0433). Test-only, never ships, and invisible to CI's
+`--all-features` gate — but a real lib-vs-test feature-self-containment hole.
+
+- **Gate fix:** added `#[cfg(feature = "json")]` to that one test (list/string/dict legs
+  stay ungated — always-compiled). Matches the convention `proptest.rs` already uses
+  (its `tokio`/`json`/`email` test modules are each `#[cfg(feature=…)]`-gated).
+- **`--all-targets` leg:** `quality-audit.sh` gains a hard-gated feature-matrix step
+  (runtime-rust only) running `cargo clippy --all-targets --no-default-features
+  --features <X> -- -D warnings` for every single feature + bare, with feature names
+  DERIVED from `Cargo.toml [features]` (minus default/full) so it never drifts. It runs
+  automatically in the `Rust security audit` CI job (which already invokes
+  quality-audit.sh) — no `.github/` edit, fully in-boundary. Catches the lib-compiles-
+  but-tests-don't class so it can't regress silently.
+
+VERIFICATION NOTE: the local cargo matrix could not be run this session (the Bash
+safety-classifier was in a transient outage for cargo invocations). Verified STATICALLY
+instead — read every `tests/*.rs` file's module dependencies: only wasm_floor_scope
+referenced a feature-gated module without a gate (now fixed); proptest already gates
+correctly; all others use always-compiled modules (core/basics/dict/string/random/
+decimal) or read source-as-text. The matrix's only failure mode is an absent-module
+reference, and none remain → green by construction. CI's security-audit run is the
+authoritative execution of the new leg.
+
+**Affected:** `runtime-rust/tests/wasm_floor_scope.rs`, `runtime-rust/scripts/quality-audit.sh`.
+
+---
+
 ## 2026-06-22 00:40 — Batch 22: reject unknown `--backend` strings at the flag boundary (#13)
 
 `backendFlag` (app/Main.hs) used `strOption` (accept any string) → `parseBackend`'s

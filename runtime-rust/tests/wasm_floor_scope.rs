@@ -97,6 +97,11 @@ fn dict_kernel_is_pure_and_total() {
     );
 }
 
+// `json` is feature-gated (the kernel uses serde_json), so this leg compiles only
+// when the feature is on. Without the gate, `cargo test/clippy --all-targets` under
+// a narrow non-json subset (e.g. `--features websocket_client`) fails to resolve
+// `sky_runtime::json`. The list/string/dict legs below stay ungated (always-compiled).
+#[cfg(feature = "json")]
 #[test]
 fn json_kernel_encode_is_pure_and_total() {
     // JSON encode is a pure `Int -> Value -> String` — the floor's JSON leg.

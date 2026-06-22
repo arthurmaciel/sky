@@ -55,6 +55,36 @@ GATE=0
 ( cd "$CRATE" && cargo clippy --all-targets $FEATURES -- -D warnings ) >"$HIST/clippy-gate.log" 2>&1 || GATE=1
 if [ "$GATE" = 0 ]; then say "  ✓ clippy gate clean"; else say "  ✗ clippy gate FAILED — see $HIST/clippy-gate.log"; tail -20 "$HIST/clippy-gate.log" | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log"; fi
 
+# ── 1b. Feature-matrix leg — per-subset `--all-targets` clippy (runtime-rust only) ─
+# The --all-features gate above proves the union compiles, but NOT that each narrow
+# `--features X` subset does — including the TEST targets. A test that references a
+# feature-gated module (e.g. `sky_runtime::json`) without an equal `#[cfg(feature=…)]`
+# gate compiles fine under --all-features yet fails `--all-targets --features <subset
+# lacking it>` (the #12 class). This leg runs every single feature + bare so that
+# self-containment regression can't land silently. Feature names are DERIVED from
+# Cargo.toml [features] (minus default/full) so the matrix never drifts.
+if [ "$CRATE" = "runtime-rust" ]; then
+  mapfile -t FEATS < <(awk '
+    /^\[features\]/ {inf=1; next}
+    /^\[/           {inf=0}
+    inf && /=/ {
+      key=$0; sub(/[ \t]*=.*/, "", key); gsub(/[ \t]/, "", key)
+      if (key != "" && key !~ /^#/ && key != "default" && key != "full") print key
+    }' "$CRATE/Cargo.toml")
+  say ""; say ">>> [GATE] feature matrix — cargo clippy --all-targets --no-default-features --features <X> -- -D warnings (${#FEATS[@]} features + bare)"
+  for f in "" "${FEATS[@]}"; do
+    if [ -z "$f" ]; then sel=(--no-default-features); lbl="<bare>"; slug="bare"
+    else sel=(--no-default-features --features "$f"); lbl="$f"; slug="$f"; fi
+    if ( cd "$CRATE" && cargo clippy --all-targets "${sel[@]}" -- -D warnings ) >"$HIST/clippy-matrix-$slug.log" 2>&1; then
+      say "  ✓ $lbl"
+    else
+      GATE=1
+      say "  ✗ $lbl FAILED — see $HIST/clippy-matrix-$slug.log"
+      tail -12 "$HIST/clippy-matrix-$slug.log" | sed 's/^/      /' | tee -a "$HIST/audit-$STAMP.log"
+    fi
+  done
+fi
+
 # ── 2. Advisory — curated soundness/footgun lints as WARNINGS (triage) ───────
 say ""; say ">>> [LINTS] curated restriction/pedantic pass (advisory)"
 STRICT=( -W clippy::pedantic
