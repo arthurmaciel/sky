@@ -17,6 +17,36 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-22 03:00 — Batch 27: Sky.Live serves the sky.toml `[live] static` dir (Go parity)
+
+Reported: `sky run --backend rust` ignored `[live] static` and "doesn't ship JS"
+(verified on sky-playground: `[live] static = "static"`, page loads `/static/editor.js`).
+Root cause: the Rust Sky.Live router had NO static route — the `/*path` page catch-all
+swallowed `/static/<file>` and returned HTML — and the runtime never read
+`SKY_LIVE_STATIC_DIR`. (Sky.Http.Server already served static via ServeDir; Sky.Live
+didn't.)
+
+Fix (Go parity: live.go staticURL "/static"): `serve_live` now nests
+`tower_http::services::ServeDir` at `/static` (before the catch-all) when
+`SKY_LIVE_STATIC_DIR` is set; the codegen bakes that env var from `[live] static`
+(when non-empty) into the generated main via the batch-26 liveDefaults path. The
+bake emission now uses `rustStringLit` (proper Rust-literal escaper) for BOTH key and
+value — not Haskell `show` — closing batch-26's guardian forward-flag (a string path
+with quotes/spaces/unicode escapes correctly; `show` would emit invalid Rust escapes).
+
+Verified e2e on sky-playground: builds `--backend rust`; main.rs bakes
+`SKY_LIVE_PORT=8080` + `SKY_LIVE_STATIC_DIR=static`; running it, `curl /static/editor.js`
+→ 200 text/javascript serving the real file (was swallowed before). clippy
+`--all-features` clean; 504/0. Guardian APPROVE: ServeDir blocks `..` (percent-decodes
+first) by construction; it FOLLOWS symlinks inside the dir = exact Go parity
+(http.FileServer), dir is author-controlled; nest+catch-all no overlap panic
+(static prefix beats wildcard); rustStringLit injection-proof; gating preserves
+non-static-app behavior.
+
+**Affected:** `runtime-rust/src/sky_runtime/live/mod.rs`, `src/Sky/Generate/Rust/Project.hs`, `src/Sky/Generate/Rust/Builder/Emitter.hs`.
+
+---
+
 ## 2026-06-22 02:30 — Batch 26: bake sky.toml `[live] port` into the Rust binary (Go parity)
 
 Reported: `sky watch/run --backend rust` ignored `[live] port = 8080`, fell back to 8000,

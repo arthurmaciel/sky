@@ -31,6 +31,7 @@ import Sky.Generate.Rust.Builder.Types
     )
 import Sky.Generate.Rust.Builder.Naming (toCamelCase, toSnakeCase)
 import Sky.Generate.Rust.Builder.CrateSpecs (cargoDependencyFor, crateVersionFor)
+import Sky.Generate.Rust.Builder.ExprEmitter (rustStringLit)
 
 -- | Backend-specific sqlx types
 dbPoolType :: String -> String
@@ -420,7 +421,7 @@ entryPointSection uk mainReturnsTask liveDefaults =
         -- usesLive — Sky.Http.Server takes its port as a `Server.listen` arg.
         liveDefaultsBlock = if usesLive uk && not (null liveDefaults)
             then "    // sky.toml [live] config baked as env fallbacks (env still wins)."
-                 : [ "    sky_runtime::core::set_env_default(" ++ show k ++ ", " ++ show v ++ ");"
+                 : [ "    sky_runtime::core::set_env_default(" ++ rustStringLit k ++ ", " ++ rustStringLit v ++ ");"
                    | (k, v) <- liveDefaults ]
             else []
     in

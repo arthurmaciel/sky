@@ -57,9 +57,14 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         ffiSlugs = depSlugs
         kernelAliases = Map.mapKeys (\(cn, fn) -> (ModuleName._name cn, fn)) rawAliases
         -- sky.toml [live] config baked into the generated main() as env fallbacks
-        -- (Go parity: rt.SetPortDefault). Port only for now — the value the Rust
-        -- Live runtime reads via SKY_LIVE_PORT; env still wins (set-only-when-unset).
+        -- (Go parity: rt.SetPortDefault + tomlSkyEnv "LIVE_STATIC_DIR"). The Rust
+        -- Live runtime reads these via SKY_LIVE_*; env still wins (set-only-when-
+        -- unset). `static` only baked when set → the runtime nests a ServeDir at
+        -- /static. (Values are emitted via rustStringLit, so a path with quotes/
+        -- spaces is escaped correctly — not via Haskell `show`.)
         liveDefaults = [ ("SKY_LIVE_PORT", show (Toml._livePort config)) ]
+                    ++ [ ("SKY_LIVE_STATIC_DIR", Toml._liveStatic config)
+                       | not (null (Toml._liveStatic config)) ]
         (rustCode, moduleFiles, usage0) = generateRust allMods entrySrcMod typesWithDeps dbUrl dbDriver ffiSlugs kernelAliases (Toml._liveStore config) (Toml._liveStorePath config) liveDefaults
         -- usesUuid is detected from Sky-module usage (Uuid.*), but a transitive
         -- reference can slip past it: importing Sky.Core.Pure emits its whole
