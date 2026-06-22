@@ -727,8 +727,8 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                     results: vec![Param {
                         name: String::new(),
                         ty: field_sky.clone(),
-                        sky_type: field_sky,
-                        rust_type: field_rust,
+                        sky_type: field_sky.clone(),
+                        rust_type: field_rust.clone(),
                     }],
                     variadic: false,
                     effect: "pure".into(),
@@ -738,6 +738,62 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                     method_name: field_name.to_string(),
                     is_field: true,
                     is_field_set: false,
+                    is_pkg_var: false,
+                    self_returning: false,
+                });
+
+                // ── Struct field SETTER (S2) ───────────────────────────
+                // Same field reached here was already proven getter-eligible
+                // by `field_type_eligible` above, so it is setter-eligible too
+                // (C1/C3/C5 share the SAME gate — a getter-eligible field type
+                // is a closed-set OWNED type, hence assignable by value). We
+                // therefore emit a setter ONLY in lockstep with a getter; a
+                // field with no getter never gets a setter.
+                //
+                // Shape mirrors Go's FfiGen setter (`setField(value, recv) ->
+                // recv`): param order is [value : FieldTy, self : Recv], result
+                // is the receiver type. `wrapperSkyType` renders this as
+                // `FieldTy -> Recv -> Result Error Recv`; the Rust-local
+                // `fieldSkyType` strips the `Result Error` to the INFALLIBLE
+                // (C6) `FieldTy -> Recv -> Recv`. The setter returns a NEW
+                // receiver with the field replaced (Sky immutable-update value
+                // semantics — total: a public owned field assigned on an owned
+                // receiver, no panic/move-out/borrow hazard).
+                //
+                // C2: a `_set_field` discriminator in the NAME keeps the setter
+                // key distinct from BOTH the getter (`<field>_field`) and any
+                // same-named method/getter, so `x` field + `x` getter + `x`
+                // setter + `x()` method yield FOUR non-colliding bindings.
+                functions.push(Function {
+                    name: format!("{field_name}_set_field"),
+                    params: vec![
+                        Param {
+                            name: "value".into(),
+                            ty: field_sky.clone(),
+                            sky_type: field_sky.clone(),
+                            rust_type: field_rust.clone(),
+                        },
+                        Param {
+                            name: "self".into(),
+                            ty: recv_sky.clone(),
+                            sky_type: recv_sky.clone(),
+                            rust_type: recv_rust.clone(),
+                        },
+                    ],
+                    results: vec![Param {
+                        name: String::new(),
+                        ty: recv_sky.clone(),
+                        sky_type: recv_sky.clone(),
+                        rust_type: recv_rust.clone(),
+                    }],
+                    variadic: false,
+                    effect: "pure".into(),
+                    exported: true,
+                    recv_type: recv_sky.clone(),
+                    recv_rust_type: recv_rust.clone(),
+                    method_name: field_name.to_string(),
+                    is_field: false,
+                    is_field_set: true,
                     is_pkg_var: false,
                     self_returning: false,
                 });
@@ -809,6 +865,14 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         // against a receiver type never produced by value — does not gate a field
         // getter: the caller already holds the receiver (produced by some ctor).
         if f.is_field {
+            return true;
+        }
+        // Field setters (S2) take the receiver by value (`arg1`) and return a
+        // NEW receiver with the field replaced. The receiver is already held by
+        // the caller (produced by some ctor), and the body never moves a field
+        // out — it ASSIGNS one. So, like the getter above, the by-value-Sized
+        // concern below does not gate a field setter.
+        if f.is_field_set {
             return true;
         }
         // The Sized concern is ONLY for INSTANCE methods — the wrapper takes the
@@ -965,14 +1029,12 @@ fn field_type_eligible(
             | "bool" => Ok(()),
             // C1: value-NON-preserving into Sky's i64. Drop rather than widen.
             "u64" | "u128" | "i128" | "usize" | "isize" => Err("wide_int_lossy"),
-            // `char` is Copy and conceptually in the S1 set, but the Sky-type
-            // converter (`type_str_to_sky`) has no `char -> Char` arm — it would
-            // advertise a bare lowercase `char`, which is NOT a Sky type, so the
-            // getter's `.skyi` / kernel.json type would not resolve in codegen
-            // ("type-checks but cargo-fails"). Per the inspector's own "unsure ->
-            // DROP" rule, defer `char` field getters until the converter maps
-            // `char -> Char` (tracked for S2).
-            "char" => Err("char_unmapped"),
+            // `char` is Copy and maps cleanly end-to-end: `type_str_to_sky` now
+            // has a `char -> Char` arm (S2), the Rust TypeRenderer already lowers
+            // Sky `Char -> char` (`Can.TType _ "Char" []`), and `char_kernel`
+            // already takes/returns `char` across the FFI boundary. So a `Char`
+            // field get+set resolves in codegen with no `any` boxing.
+            "char" => Ok(()),
             _ => Err("not_in_closed_set"),
         };
     }
@@ -2223,6 +2285,9 @@ fn type_str_to_sky(s: &str, aliases: &HashMap<String, String>) -> String {
         "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
         | "u128" | "usize" => "Int".into(),
         "f32" | "f64" => "Float".into(),
+        // A Rust `char` is one Unicode scalar value = Sky `Char` (the Rust
+        // TypeRenderer lowers Sky `Char -> char`; char_kernel round-trips it).
+        "char" => "Char".into(),
         "SkyError" | "Error" => "Error".into(),
         _ => {
             // Strip module path

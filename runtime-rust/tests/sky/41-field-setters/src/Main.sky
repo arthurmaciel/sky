@@ -1,0 +1,147 @@
+module Main exposing (main)
+
+-- S2 field-SETTER FFI proof. The `setfieldtest` crate's struct fields are
+-- WRITTEN with NO hand-written wrapper: the inspector auto-generates total
+-- setters and the Rust codegen synthesizes `{ let mut r = recv; r.field = v; r }`
+-- immutable-update accessors.
+--
+-- Setters are INFALLIBLE (C6): `w_set_field_from_box3 : Int -> Box3 -> Box3`,
+-- returning a NEW Box3 (not Result-wrapped). Constructors return `Result String T`.
+--
+-- C2 four-way no-collision: `Item` has BOTH a `pub id` field and an `id()`
+-- method. The field drives a GETTER (`id_field_from_item`) and a SETTER
+-- (`id_set_field_from_item`); the method binds as `id_from_item`. Four distinct
+-- Sky names coexist with no collision.
+
+import Rust.Setfieldtest as F
+import Sky.Core.List as List
+import Std.Log exposing (println)
+
+
+main =
+    case F.make_box3 7 "hello" of
+        Err _ ->
+            println "make_box3 failed"
+
+        Ok b0 ->
+            let
+                -- Original construction values.
+                w0 =
+                    F.w_field_from_box3 b0
+
+                label0 =
+                    F.label_field_from_box3 b0
+
+                -- SET w to a new value → a NEW Box3 with w replaced (immutable
+                -- update). Read the field back from the modified copy.
+                b1 =
+                    F.w_set_field_from_box3 99 b0
+
+                w1 =
+                    F.w_field_from_box3 b1
+
+                -- SET label (String field) on the modified copy.
+                b2 =
+                    F.label_set_field_from_box3 "world" b1
+
+                label2 =
+                    F.label_field_from_box3 b2
+
+                w2 =
+                    F.w_field_from_box3 b2
+
+                -- Option<i64> field: construct None, SET Just 42, read back.
+                maybe0 =
+                    F.maybe_n_field_from_box3 b2
+
+                b3 =
+                    F.maybe_n_set_field_from_box3 (Just 42) b2
+
+                maybe1 =
+                    F.maybe_n_field_from_box3 b3
+
+                -- Vec<i64> field: construct [1,2], SET [9,9,9], read back length.
+                b4 =
+                    F.tags_set_field_from_box3 [ 9, 9, 9 ] b3
+
+                tags1 =
+                    F.tags_field_from_box3 b4
+            in
+            case F.make_item 5 of
+                Err _ ->
+                    println "make_item failed"
+
+                Ok it0 ->
+                    let
+                        -- C2 four-way: getter, setter, method on the same `id`.
+                        idGet0 =
+                            F.id_field_from_item it0
+
+                        it1 =
+                            F.id_set_field_from_item 8 it0
+
+                        idGet1 =
+                            F.id_field_from_item it1
+                    in
+                    case F.id_from_item it1 of
+                        Err _ ->
+                            println "item.id() method failed"
+
+                        Ok idMethod ->
+                            let
+                                tagsLen =
+                                    List.length tags1
+
+                                maybeOk =
+                                    case ( maybe0, maybe1 ) of
+                                        ( Nothing, Just n ) ->
+                                            n == 42
+
+                                        _ ->
+                                            False
+
+                                ok =
+                                    -- construction values
+                                    w0
+                                        == 7
+                                        && label0
+                                        == "hello"
+                                        -- setter replaced w, label unchanged on b1
+                                        && w1
+                                        == 99
+                                        -- label setter replaced label, w preserved
+                                        && label2
+                                        == "world"
+                                        && w2
+                                        == 99
+                                        -- Option<i64> setter: None -> Just 42
+                                        && maybeOk
+                                        -- Vec<i64> setter: [1,2] -> [9,9,9]
+                                        && tagsLen
+                                        == 3
+                                        -- four-way C2: getter sees construction,
+                                        -- setter writes new value, method reads it
+                                        && idGet0
+                                        == 5
+                                        && idGet1
+                                        == 8
+                                        && idMethod
+                                        == 80
+                            in
+                            println
+                                ("Box3.w 7->"
+                                    ++ String.fromInt w1
+                                    ++ " Box3.label hello->"
+                                    ++ label2
+                                    ++ " (w preserved="
+                                    ++ String.fromInt w2
+                                    ++ ") Box3.maybe_n None->Just="
+                                    ++ (if maybeOk then "42" else "BAD")
+                                    ++ " Box3.tags len="
+                                    ++ String.fromInt tagsLen
+                                    ++ " Item.id field 5->"
+                                    ++ String.fromInt idGet1
+                                    ++ " method(*10)="
+                                    ++ String.fromInt idMethod
+                                    ++ (if ok then "  [ALL OK]" else "  [MISMATCH]")
+                                )

@@ -213,6 +213,7 @@ skyTypeToRust "Int"    = "i64"
 skyTypeToRust "Float"  = "f64"
 skyTypeToRust "Bool"   = "bool"
 skyTypeToRust "String" = "String"
+skyTypeToRust "Char"   = "char"
 skyTypeToRust "()"     = "()"
 skyTypeToRust "Bytes"  = "Vec<u8>"
 skyTypeToRust s
@@ -544,7 +545,7 @@ emitRustFile kernelName pkg =
     -- i.e. the type is a primitive/container Sky understands, not an opaque
     -- crate type that merely defaults to "String".
     isKnownSky st =
-        st `elem` ["String", "Int", "Float", "Bool", "Bytes", "()"]
+        st `elem` ["String", "Int", "Float", "Bool", "Char", "Bytes", "()"]
         || any (`isPrefixOf` st)
                ["List ", "Maybe ", "Result ", "Dict String ", "Task SkyError "]
 
@@ -796,8 +797,77 @@ emitRustFile kernelName pkg =
                 , "    " ++ fieldBody
                 , "}"
                 ]
+            -- ── Field SETTER (S2) ──────────────────────────────────────
+            -- A field setter produces a NEW receiver with one field replaced —
+            -- Sky immutable-update value semantics. The inspector emits it ONLY
+            -- in lockstep with a getter, with params `[value : FieldTy, self :
+            -- Recv]` and result `Recv` (Go's `setField(value, recv) -> recv`
+            -- order). So:
+            --   arg0 = the new field value (resolved Rust type `setValRust`)
+            --   arg1 = the receiver, taken by VALUE (owned, mutable)
+            -- The body `{ let mut r = arg1; r.<field> = <coerced arg0>; r }`
+            -- assigns the (owned) value into the (owned) receiver's public
+            -- field and returns it. Total by construction: a public owned field
+            -- assigned on an owned receiver — no unwrap/index/panic, no move-out
+            -- (we ASSIGN, never read-then-move), no borrow hazard. The wrapper
+            -- return type is the bare receiver type (INFALLIBLE, C6) — matching
+            -- the Rust-local `fieldSkyType`'s `FieldTy -> Recv -> Recv`.
+            --
+            -- The setter's field type is `params[0]` (NOT the result), so its
+            -- raw + resolved Rust types come from the param arrays.
+            setFieldRawTy   = if nRawRustParam > 0 then head rawRustParamTypes else ""
+            setValRust      = if not (null paramTypes) then head paramTypes else "String"
+            -- Inbound coercion: lift the Sky-resolved wrapper value (`arg0` of
+            -- type `setValRust`) into the field's exact raw Rust type, OWNED.
+            -- Distinct from `argCall` (which borrows for method calls); a field
+            -- assignment needs an owned RHS. Covers the closed eligible set:
+            --   • same type (i64/f64/bool/String/char/opaque)  → identity
+            --   • narrower numeric (declTy i64/f64, raw narrower) → `as <raw>`
+            --   • Vec<u8> field (Sky List Int → Vec<i64>)        → to_u8_vec
+            --   • Vec<T> general                                 → element cast / identity
+            --   • Option<T> field (SkyMaybe<T'>)                 → sky_maybe_to_option (+ inner cast)
+            setValExpr =
+                let base = "arg0" in
+                case seqKind setFieldRawTy of
+                    Just (SeqKind Owned ElemU8) -> "to_u8_vec(&" ++ base ++ ")"
+                    Just (SeqKind Owned (ElemGeneral elemRust _)) ->
+                        -- Sky `List T` is `Vec<declElem>`; map to the field's
+                        -- `Vec<elemRust>` only when the element widths differ.
+                        if elemRust `elem` ["i64", "f64"] || not (isNumericRust elemRust)
+                        then base   -- already the matching Vec<T>
+                        else base ++ ".into_iter().map(|x| x as " ++ elemRust ++ ").collect()"
+                    Just _ -> base   -- slice/array field shapes don't reach here (not in closed set)
+                    Nothing
+                        | Just innerRaw <- stripGeneric1 "Option" setFieldRawTy ->
+                            let inner = trimStr innerRaw
+                                opt   = "sky_maybe_to_option(" ++ base ++ ")"
+                            in if isNumericRust inner
+                               then opt ++ ".map(|x| x as " ++ inner ++ ")"
+                               else opt   -- String/bool/char/owned opaque inner: identity
+                        | null setFieldRawTy || setFieldRawTy == setValRust -> base
+                        | isNumericRust setFieldRawTy && (setValRust == "i64" || setValRust == "f64")
+                            -> base ++ " as " ++ setFieldRawTy   -- narrowing cast
+                        | otherwise -> base                      -- opaque / matching: identity
+            -- Total-by-construction guard (mirrors the getter's): a setter needs
+            -- a value param, a real field name, and a nameable receiver type.
+            setFieldWellFormed =
+                nParams >= 1
+                    && nRawRustParam >= 1
+                    && not (null fieldName)
+                    && not (null (trimStr fieldRecvRust))
+            setFieldLines =
+                [ "// [field-set] " ++ wrapper
+                , "pub fn " ++ rustName ++ "(arg0: " ++ setValRust
+                  ++ ", arg1: " ++ fieldRecvRust ++ ") -> " ++ fieldRecvRust ++ " {"
+                , "    let mut r = arg1;"
+                , "    r." ++ fieldName ++ " = " ++ setValExpr ++ ";"
+                , "    r"
+                , "}"
+                ]
         in if _fnIsField fn
            then if fieldWellFormed then fieldLines else []
+           else if _fnIsFieldSet fn
+           then if setFieldWellFormed then setFieldLines else []
            else if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
            then []
            else [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
@@ -849,7 +919,7 @@ emitRustKernelJson moduleName kernelName pkg =
     let fns = _pkgFns pkg
         entries = intercalate ",\n" (map emitFnEntry fns)
         emitFnEntry fn =
-            let st = if _fnIsField fn then fieldSkyType fn else wrapperSkyType fn
+            let st = if _fnIsField fn || _fnIsFieldSet fn then fieldSkyType fn else wrapperSkyType fn
                 recv = _fnRecvType fn
                 disamb = if null recv then "" else "_from_" ++ lowerFirst recv
                 nm = lowerFirst (_fnName fn) ++ disamb
@@ -878,7 +948,7 @@ emitRustKernelJson moduleName kernelName pkg =
 
 emitSkyiRustFn :: FnInfo -> String
 emitSkyiRustFn fn =
-    let sig = if _fnIsField fn then fieldSkyType fn else wrapperSkyType fn
+    let sig = if _fnIsField fn || _fnIsFieldSet fn then fieldSkyType fn else wrapperSkyType fn
         recvt = _fnRecvType fn
         -- C2: the `_field` discriminator is already baked into `_fnName` by the
         -- inspector, so a field getter's name (`id_field_from_<Recv>`) can never
