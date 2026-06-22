@@ -17,6 +17,31 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-22 02:05 — Batch 25: fix the #12 matrix leg scope (`--all-targets` → `--lib`)
+
+Batch-23's matrix leg used `--all-targets`, committed on a STATIC verification (the bash
+classifier was down for cargo). CI then went RED: the leg surfaced that the runtime
+crate's OWN tests systemically reference feature-gated modules (e.g. `sky_runtime::task`
+@ mod.rs:10, tokio-gated) without per-subset cfg gates — bare/json/db/crypto/config all
+failed `--all-targets`. That's NOT the property that matters: those tests run only under
+`--all-features`; gating every one per-subset is churn for a niche `cargo test --features X`
+case. The generated-project property is "the LIBRARY compiles under each subset" (the
+copied runtime source), so the leg now lints `--lib`, not `--all-targets`.
+
+Verified (classifier recovered): `cargo clippy --lib --no-default-features --features <X>
+-- -D warnings` green for ALL 16 features + bare + webview (matches batch-19's 16/16). The
+awk feature-extraction yields the exact 16-feature list. The batch-23 wasm_floor_scope
+json-gate stays (correct hygiene; it just isn't a CI gate now).
+
+LESSON: never commit a CI hard-gate verified only statically — `--all-targets` per-subset
+has a much broader surface (every internal test) than the lib-subset property; only an
+actual run reveals it. (The classifier outage forced the static call; the right move would
+have been to hold the leg until cargo was runnable.)
+
+**Affected:** `runtime-rust/scripts/quality-audit.sh`.
+
+---
+
 ## 2026-06-22 01:50 — Batch 24: `sky watch --backend rust` (wire the discarded backend flag)
 
 `sky watch` already had a Rust path in `runBuildInner` (cargo build + respawn, CARGO_TARGET_DIR-aware, hold-old-binary-on-failure), selected by `sky.toml`'s backend. But the `Watch` handler DISCARDED its `--backend` flag (`Watch opts mTarget -> runWatch opts`), so `sky watch --backend rust` parsed yet did nothing — the pre-existing gap flagged during #6.

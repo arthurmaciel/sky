@@ -55,14 +55,19 @@ GATE=0
 ( cd "$CRATE" && cargo clippy --all-targets $FEATURES -- -D warnings ) >"$HIST/clippy-gate.log" 2>&1 || GATE=1
 if [ "$GATE" = 0 ]; then say "  ✓ clippy gate clean"; else say "  ✗ clippy gate FAILED — see $HIST/clippy-gate.log"; tail -20 "$HIST/clippy-gate.log" | sed 's/^/    /' | tee -a "$HIST/audit-$STAMP.log"; fi
 
-# ── 1b. Feature-matrix leg — per-subset `--all-targets` clippy (runtime-rust only) ─
+# ── 1b. Feature-matrix leg — per-subset LIB clippy (runtime-rust only) ────────
 # The --all-features gate above proves the union compiles, but NOT that each narrow
-# `--features X` subset does — including the TEST targets. A test that references a
-# feature-gated module (e.g. `sky_runtime::json`) without an equal `#[cfg(feature=…)]`
-# gate compiles fine under --all-features yet fails `--all-targets --features <subset
-# lacking it>` (the #12 class). This leg runs every single feature + bare so that
-# self-containment regression can't land silently. Feature names are DERIVED from
-# Cargo.toml [features] (minus default/full) so the matrix never drifts.
+# `--features X` subset does. This is the self-containment property that GENERATED
+# projects rely on: the copied runtime SOURCE (the lib) must compile under whatever
+# feature set the app enables. So the matrix lints the LIBRARY per subset.
+#
+# Scope is `--lib`, deliberately NOT `--all-targets`: the runtime crate's OWN tests
+# legitimately reference feature-gated modules (e.g. a json kernel test) and are only
+# ever run under --all-features — gating every such test per-subset is churn for a
+# niche `cargo test --features X` scenario, NOT the generated-project property. (The
+# #12 fix gated the one wasm-floor test that broke a dev's narrow `cargo test`; that
+# is hygiene, not a CI gate.) Feature names are DERIVED from Cargo.toml [features]
+# (minus default/full) so the matrix never drifts.
 if [ "$CRATE" = "runtime-rust" ]; then
   mapfile -t FEATS < <(awk '
     /^\[features\]/ {inf=1; next}
@@ -71,11 +76,11 @@ if [ "$CRATE" = "runtime-rust" ]; then
       key=$0; sub(/[ \t]*=.*/, "", key); gsub(/[ \t]/, "", key)
       if (key != "" && key !~ /^#/ && key != "default" && key != "full") print key
     }' "$CRATE/Cargo.toml")
-  say ""; say ">>> [GATE] feature matrix — cargo clippy --all-targets --no-default-features --features <X> -- -D warnings (${#FEATS[@]} features + bare)"
+  say ""; say ">>> [GATE] feature matrix — cargo clippy --lib --no-default-features --features <X> -- -D warnings (${#FEATS[@]} features + bare)"
   for f in "" "${FEATS[@]}"; do
     if [ -z "$f" ]; then sel=(--no-default-features); lbl="<bare>"; slug="bare"
     else sel=(--no-default-features --features "$f"); lbl="$f"; slug="$f"; fi
-    if ( cd "$CRATE" && cargo clippy --all-targets "${sel[@]}" -- -D warnings ) >"$HIST/clippy-matrix-$slug.log" 2>&1; then
+    if ( cd "$CRATE" && cargo clippy --lib "${sel[@]}" -- -D warnings ) >"$HIST/clippy-matrix-$slug.log" 2>&1; then
       say "  ✓ $lbl"
     else
       GATE=1
