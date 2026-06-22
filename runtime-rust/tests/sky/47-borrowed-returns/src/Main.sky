@@ -1,0 +1,164 @@
+module Main exposing (main)
+
+-- Borrowed-return owned-copy lowering (#22) + lossless wide-int field getters.
+--
+-- Two real crates exercise the gate-narrowing slice end-to-end:
+--
+--   • `url`    — `Url::host_str` / `query` / `fragment` return `Option<&str>`,
+--                a BORROWED return that used to be DROPPED. Now owned-copied to
+--                `Maybe String` via the recursive Option arm composing with the
+--                `&str -> String` inner (`Some(v) => Just(v.to_string())`). A
+--                plain `&str` return (`scheme`) was already admitted — asserted
+--                here so we know the composition didn't regress it.
+--
+--   • `semver` — `Version::{major,minor,patch}` are `u64` FIELDS, previously
+--                dropped as `wide_int_lossy`. Now admitted as saturating GETTERS
+--                (`(field).min(i64::MAX as u64) as i64`), Int-typed. The matching
+--                SETTERS stay dropped (a Sky i64 can't faithfully fill a u64) —
+--                asserted out-of-band by the harness (`major_set_field` etc. must
+--                be ABSENT from semver.skyi). Referencing one here would be a
+--                build error, so this program only READS the wide-int fields.
+--
+-- STAYS DROPPED: `Url::query_pairs -> form_urlencoded::Parse<'a>` (borrowed
+-- iterator, explicit lifetime) and `Url::path_segments_mut -> &mut …` never
+-- bind, so this program — which never names them — compiles clean.
+--
+-- Run:  sky run src/Main.sky --backend rust
+import Rust.Url as Url
+import Rust.Semver as Semver
+import Std.Log exposing (println)
+
+
+main =
+    -- url: Option<&str> returns now own-copy to Maybe String.
+    case Url.parse_from_url "https://example.com/a/b?x=1&y=2#section-2" of
+
+        Err _ ->
+            println "url parse failed  [MISMATCH]"
+
+        Ok u ->
+            case Url.scheme_from_url u of
+
+                Err _ ->
+                    println "scheme read failed  [MISMATCH]"
+
+                Ok scheme ->
+                    case Url.host_str_from_url u of
+
+                        Err _ ->
+                            println "host_str read failed  [MISMATCH]"
+
+                        Ok host ->
+                            case Url.query_from_url u of
+
+                                Err _ ->
+                                    println "query read failed  [MISMATCH]"
+
+                                Ok query ->
+                                    case Url.fragment_from_url u of
+
+                                        Err _ ->
+                                            println
+                                                "fragment read failed  [MISMATCH]"
+
+                                        Ok fragment ->
+                                            -- A URL with no query/fragment exercises the
+                                            -- `None -> Nothing` arm of the same wrapper.
+                                            case Url.parse_from_url
+                                                     "https://example.com/plain" of
+
+                                                Err _ ->
+                                                    println
+                                                        "url2 parse failed  [MISMATCH]"
+
+                                                Ok plain ->
+                                                    case Url.query_from_url
+                                                             plain of
+
+                                                        Err _ ->
+                                                            println
+                                                                "query2 read failed  [MISMATCH]"
+
+                                                        Ok noQuery ->
+                                                            -- semver: u64 fields read as saturating Int getters.
+                                                            case Semver.new_from_version
+                                                                     1
+                                                                     16
+                                                                     42 of
+
+                                                                Err _ ->
+                                                                    println
+                                                                        "semver build failed  [MISMATCH]"
+
+                                                                Ok v ->
+                                                                    let
+                                                                        major =
+                                                                            Semver.major_field_from_version
+                                                                                v
+                                                                        minor =
+                                                                            Semver.minor_field_from_version
+                                                                                v
+                                                                        patch =
+                                                                            Semver.patch_field_from_version
+                                                                                v
+                                                                        ok =
+                                                                            scheme
+                                                                                == "https"
+                                                                                && host
+                                                                                == Just
+                                                                                       "example.com"
+                                                                                && query
+                                                                                == Just
+                                                                                       "x=1&y=2"
+                                                                                && fragment
+                                                                                == Just
+                                                                                       "section-2"
+                                                                                && noQuery
+                                                                                == Nothing
+                                                                                && major
+                                                                                == 1
+                                                                                && minor
+                                                                                == 16
+                                                                                && patch
+                                                                                == 42
+                                                                    in
+                                                                        println
+                                                                            ("scheme="
+                                                                                ++ scheme
+                                                                                ++ " host_str="
+                                                                                ++ maybeStr
+                                                                                       host
+                                                                                ++ " query="
+                                                                                ++ maybeStr
+                                                                                       query
+                                                                                ++ " fragment="
+                                                                                ++ maybeStr
+                                                                                       fragment
+                                                                                ++ " query2="
+                                                                                ++ maybeStr
+                                                                                       noQuery
+                                                                                ++ " semver="
+                                                                                ++ String.fromInt
+                                                                                       major
+                                                                                ++ "."
+                                                                                ++ String.fromInt
+                                                                                       minor
+                                                                                ++ "."
+                                                                                ++ String.fromInt
+                                                                                       patch
+                                                                                ++ (if ok then
+                                                                                       "  [ALL OK]"
+
+                                                                                   else
+                                                                                       "  [MISMATCH]"))
+
+
+maybeStr : Maybe String -> String
+maybeStr m =
+    case m of
+
+        Just s ->
+            "Just " ++ s
+
+        Nothing ->
+            "Nothing"

@@ -639,6 +639,26 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // walk to decide whether a crate-local opaque field type is eligible (C5).
     let clone_struct_ids = collect_clone_struct_ids(index);
 
+    // RENDERED names of those clone-deriving structs, for the borrowed-return
+    // gate (`&T -> T` via `.to_owned()` is sound only when `T: Clone`). Render
+    // each id with the SAME rule `rustdoc_type_to_rust_str` uses for a bare
+    // resolved_path: the reachable public path when known, else the last
+    // segment. REACHABLE_PATHS was populated above, so the lookup is consistent
+    // with what the gate will see in `p.rust_type`.
+    {
+        let names: HashSet<String> = clone_struct_ids
+            .iter()
+            .filter_map(|id| {
+                index.get(id).and_then(|it| it["name"].as_str()).map(|nm| {
+                    REACHABLE_PATHS
+                        .with(|c| c.borrow().get(id).cloned())
+                        .unwrap_or_else(|| nm.to_string())
+                })
+            })
+            .collect();
+        CLONE_OPAQUE_NAMES.with(|c| *c.borrow_mut() = names);
+    }
+
     for (item_id, item) in index {
         // Only items from this crate (crate_id == 0); deps have crate_id > 0
         let crate_id = item["crate_id"].as_u64().unwrap_or(1);
@@ -1122,8 +1142,18 @@ fn field_type_eligible(
         return match prim {
             "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "f32" | "f64"
             | "bool" => Ok(()),
-            // C1: value-NON-preserving into Sky's i64. Drop rather than widen.
-            "u64" | "u128" | "i128" | "usize" | "isize" => Err("wide_int_lossy"),
+            // Wide ints (`u64`/`u128`/`i128`/`usize`/`isize`) are admitted as a
+            // GETTER only. The getter reads them through `translateRustRet`'s #16
+            // SATURATING coercion (`(field).min(i64::MAX as T) as i64` /
+            // total `i64::try_from(..).unwrap_or(..)`), which is value-preserving
+            // for any in-range value and clamps (never panics / sign-flips) at
+            // the edges — a real-world `u64` like a `semver` major/minor/patch
+            // round-trips exactly. The matching SETTER is dropped separately by
+            // `setter_receives_losslessly` (all five stay `false` there), so an
+            // inbound Sky i64 can never silently truncate/reinterpret into a
+            // wider/narrower-signedness field. Asymmetric by design: lossless to
+            // READ, lossy to WRITE.
+            "u64" | "u128" | "i128" | "usize" | "isize" => Ok(()),
             // `char` is Copy and maps cleanly end-to-end: `type_str_to_sky` now
             // has a `char -> Char` arm (S2), the Rust TypeRenderer already lowers
             // Sky `Char -> char` (`Can.TType _ "Char" []`), and `char_kernel`
@@ -1189,29 +1219,39 @@ fn field_type_eligible(
 /// True when a field's Rust type can LOSSLESSLY RECEIVE a Sky scalar in a
 /// setter's inbound assignment. Sky `Int` is `i64` and Sky `Float` is `f64`, so
 /// a setter that assigns into a NARROWER numeric field (`i8..i32`, `u8..u32`,
-/// `f32`) — or a wider-than-i64 int field (already dropped by
-/// `field_type_eligible`, listed here for completeness) — would silently
-/// truncate/reinterpret out-of-range values. We therefore SUPPRESS the setter
-/// for those fields (the GETTER stays — reading widens losslessly into i64/f64).
+/// `f32`) — or a wider-than-i64 int field — would silently truncate/reinterpret
+/// out-of-range values. We therefore SUPPRESS the setter for those fields (the
+/// GETTER stays — reading widens/saturates losslessly into i64/f64).
 ///
-/// The lossless-receive numeric set is exactly `{i64, f64}`. Every non-numeric
-/// closed-set field type (String / Vec / Option / bool / char / Clone-opaque)
-/// receives a Sky value of the same shape with no narrowing, so those keep their
-/// setter. `rust_ty` is the inspector's raw Rust type string (`field_rust`).
+/// CONTAINER-AWARE: the narrowing hazard survives one level of container. A
+/// `Option<u64>` field setter lowers to `…map(|x| x as u64)` and a `Vec<u32>`
+/// setter to `…map(|x| x as u32)` — both reinterpret/truncate the Sky i64 just
+/// like the bare field would. So we scan EVERY numeric word-token in the type
+/// string (tokenising on non-identifier chars so an opaque type whose NAME
+/// merely contains `u64` as a substring — e.g. `Fu64` — is not matched) and
+/// reject the setter if any token is a numeric type outside the lossless-receive
+/// set `{i64, f64}`. The GETTER stays in all cases (it saturates losslessly).
+///
+/// Every non-numeric closed-set field type (String / bool / char / Clone-opaque,
+/// and containers thereof) receives a Sky value of the same shape with no
+/// narrowing, so those keep their setter. `rust_ty` is the inspector's raw Rust
+/// type string (`field_rust`).
 fn setter_receives_losslessly(rust_ty: &str) -> bool {
-    let t = rust_ty.trim();
-    match t {
-        // Numeric fields NARROWER than the Sky scalar — setter would truncate.
-        "i8" | "i16" | "i32" | "u8" | "u16" | "u32" | "f32" => false,
-        // Wider-than-i64 ints — a Sky i64 can't faithfully fill them, and a
-        // negative i64 reinterprets. (These are already dropped wholesale by
-        // `field_type_eligible`'s `wide_int_lossy`, so this arm is belt-and-
-        // braces against a future widening of the getter gate.)
-        "u64" | "u128" | "i128" | "usize" | "isize" => false,
-        // Exact-width scalars + every non-numeric closed-set type receive a Sky
-        // value losslessly: a setter is safe.
-        _ => true,
-    }
+    // Word-tokenise: split on any char that can't be part of a Rust ident, so
+    // `Option<u64>` yields {"Option","u64"} and `Fu64` yields {"Fu64"}.
+    let narrowing = rust_ty
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|tok| {
+            matches!(
+                tok,
+                // Narrower than the Sky scalar — assignment truncates.
+                "i8" | "i16" | "i32" | "u8" | "u16" | "u32" | "f32"
+                // Wider-than-i64 ints — a Sky i64 over/under-shoots or a negative
+                // i64 reinterprets when cast into them.
+                | "u64" | "u128" | "i128" | "usize" | "isize"
+            )
+        });
+    !narrowing
 }
 
 /// True when a rustdoc item carries `#[non_exhaustive]` (R2). The attribute
@@ -1965,12 +2005,64 @@ fn parse_fn_item(
     // Skip functions whose RESULT is a borrow (`&mut Builder` from a builder
     // setter, a nested `(.., &[u8; 8])` tuple, `&InnerType`).  A borrowed
     // return binds to a lifetime the owned wrapper can't supply (E0106) or
-    // needs a ToOwned impl that may not exist (E0599).  Plain `&str`/`&String`
-    // is fine — FfiGen copies it to an owned String.  References in PARAMETER
+    // needs a ToOwned impl that may not exist (E0599).  References in PARAMETER
     // position are unaffected (the wrapper takes an owned value and borrows).
+    //
+    // ORDERING (load-bearing): the `touches_lifetime` filter above ALREADY
+    // returned for any param/result whose rust_type carries a lifetime token
+    // (`&'a str`, `&'static [u8]`, …). So every return reaching this gate is
+    // lifetime-free — an elided `&self` borrow (`"lifetime": null`). Owning
+    // such a return by eager inline copy is sound; a `&'a`-tied or `&'static`
+    // return never gets here (a wrong own would be E0515/E0106 cargo-fail).
+    // Do NOT move this gate before the lifetime filter.
+    //
+    // OWNED-COPY ADMISSIONS (all coerced eagerly inside the call expression by
+    // `translateRustRet`, so the by-value receiver lives to the wrapper's
+    // closing brace and the owned result never borrows it — no E0515):
+    //   • `&str` / `&String`     → owned `String`        (`.to_string()`)
+    //   • `Option<&str>` / `Option<&String>` → `Maybe String`
+    //                              (recursive Option arm composes with the
+    //                               `&str -> String` inner — single-pass, no
+    //                               double-wrap)
+    //   • `&T` where T is a crate-local DERIVED-`Clone` opaque → owned `T`
+    //                              (`.to_owned()`; sound only for derived Clone)
+    //
+    // STAY DROPPED (conservative-on-doubt): `&mut T`, `&T` for non-Clone T,
+    // `&(A,B)` / nested borrows, and any borrowed shape whose owned form isn't
+    // in this closed set.
+    let owned_copy_admissible = |rt: &str| -> bool {
+        let t = rt.trim();
+        // Plain borrowed &str / &String → owned String.
+        if t == "&str" || t == "&String" {
+            return true;
+        }
+        // Option<&str> / Option<&String> → Maybe String. (Reject &mut inside.)
+        if let Some(inner) = t
+            .strip_prefix("Option<")
+            .and_then(|s| s.strip_suffix('>'))
+        {
+            let inner = inner.trim();
+            return inner == "&str" || inner == "&String";
+        }
+        // &T for a crate-local derived-Clone opaque → owned T (.to_owned()).
+        // Single leading `&`, not `&mut`, not a nested borrow / generic / tuple.
+        if let Some(rest) = t.strip_prefix('&') {
+            let rest = rest.trim();
+            if !rest.starts_with("mut ")
+                && !rest.starts_with('&')
+                && !rest.starts_with('(')
+                && !rest.starts_with('[')
+                && !rest.contains('<')
+                && is_clone_opaque_name(rest)
+            {
+                return true;
+            }
+        }
+        false
+    };
     let is_result_borrow = |p: &Param| {
         let rt = p.rust_type.trim();
-        rt.contains('&') && rt != "&str" && rt != "&String" && !is_coercible_seq(rt)
+        rt.contains('&') && !owned_copy_admissible(rt) && !is_coercible_seq(rt)
     };
     let result_borrows = results.iter().any(is_result_borrow);
     if result_borrows {
@@ -2044,6 +2136,24 @@ thread_local! {
     // array/slice filter drops constructors that can't take a Sky Vec<u8>.
     static ALIAS_MAP: std::cell::RefCell<HashMap<String, serde_json::Value>> =
         std::cell::RefCell::new(HashMap::new());
+
+    // RENDERED rust-type names of crate-local opaque structs that DERIVE `Clone`
+    // (the S1 `clone_struct_ids` set, mapped through the same name renderer
+    // `rustdoc_type_to_rust_str` uses).  The borrowed-return gate consults this
+    // to decide whether a `&T` return may be owned via `.to_owned()` (sound only
+    // when `T: Clone`).  Must be set BEFORE any function is parsed.
+    static CLONE_OPAQUE_NAMES: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// True when `rendered` is the rust-type name of a crate-local opaque struct
+/// that DERIVES `Clone` (so `(&T).to_owned()` yields an owned `T` soundly — no
+/// hand-written Clone that might panic).  `rendered` is the gate's view of the
+/// type with any leading `&`/`&mut` already stripped.  Conservative: an unknown
+/// name returns false (the `&T` return stays dropped).
+fn is_clone_opaque_name(rendered: &str) -> bool {
+    let t = rendered.trim();
+    CLONE_OPAQUE_NAMES.with(|c| c.borrow().contains(t))
 }
 
 /// Fully-qualified public path of a crate-local type by its rustdoc id, if
@@ -3404,6 +3514,85 @@ mod tests {
         assert!(!is_coercible_seq("[u8; abc]"));            // non-digit N
         assert!(!is_coercible_seq("&str"));                 // not a sequence
         assert!(!is_coercible_seq(""));
+    }
+
+    #[test]
+    fn test_setter_receives_losslessly() {
+        // Lossless-receive set {i64, f64} + every non-numeric closed-set type.
+        assert!(setter_receives_losslessly("i64"));
+        assert!(setter_receives_losslessly("f64"));
+        assert!(setter_receives_losslessly("bool"));
+        assert!(setter_receives_losslessly("String"));
+        assert!(setter_receives_losslessly("char"));
+        assert!(setter_receives_losslessly("Vec<String>"));
+        assert!(setter_receives_losslessly("Option<String>"));
+        // An opaque whose NAME merely contains a numeric substring is NOT matched
+        // (word-tokenised, so `Fu64` / `Mu32Val` are not `u64` / `u32`).
+        assert!(setter_receives_losslessly("Fu64"));
+        assert!(setter_receives_losslessly("MyType"));
+
+        // Narrower-than-Sky-scalar numerics → setter would truncate → dropped.
+        for t in ["i8", "i16", "i32", "u8", "u16", "u32", "f32"] {
+            assert!(!setter_receives_losslessly(t), "{t} setter must drop");
+        }
+        // Wider-than-i64 ints → reinterpret/overshoot → dropped (the #22 getter
+        // is admitted, but the setter must stay dropped).
+        for t in ["u64", "u128", "i128", "usize", "isize"] {
+            assert!(!setter_receives_losslessly(t), "{t} setter must drop");
+        }
+        // CONTAINER-AWARE: the hazard survives one container level. An
+        // `Option<u64>` / `Vec<u32>` setter lowers to `…map(|x| x as u64/u32)`,
+        // reinterpreting/truncating the Sky i64 — must stay dropped.
+        assert!(!setter_receives_losslessly("Option<u64>"));
+        assert!(!setter_receives_losslessly("Option<u32>"));
+        assert!(!setter_receives_losslessly("Vec<u64>"));
+        assert!(!setter_receives_losslessly("Vec<i128>"));
+    }
+
+    #[test]
+    fn test_owned_copy_borrowed_return_gate() {
+        // Mirror the `owned_copy_admissible` policy used by `is_result_borrow`.
+        // (Inlined here as a closure since the real one is a local in
+        // `parse_fn_item`; this test pins the EXACT admit/drop contract of #22.)
+        let admit = |t: &str| -> bool {
+            let t = t.trim();
+            if t == "&str" || t == "&String" {
+                return true;
+            }
+            if let Some(inner) = t.strip_prefix("Option<").and_then(|s| s.strip_suffix('>')) {
+                let inner = inner.trim();
+                return inner == "&str" || inner == "&String";
+            }
+            if let Some(rest) = t.strip_prefix('&') {
+                let rest = rest.trim();
+                // Treat `Foo` as a derived-Clone opaque for this unit (the real
+                // gate also consults CLONE_OPAQUE_NAMES — exercised end-to-end by
+                // the 47-borrowed-returns fixture).
+                return !rest.starts_with("mut ")
+                    && !rest.starts_with('&')
+                    && !rest.starts_with('(')
+                    && !rest.starts_with('[')
+                    && !rest.contains('<');
+            }
+            false
+        };
+
+        // ADMIT (owned-copy): plain &str/&String, Option<&str>/<&String>, &T.
+        assert!(admit("&str"));
+        assert!(admit("&String"));
+        assert!(admit("Option<&str>"));
+        assert!(admit("Option<&String>"));
+        assert!(admit("&NaiveDate"));
+        assert!(admit("&chrono::NaiveDate"));
+
+        // DROP (conservative-on-doubt): &mut, nested/tuple borrow, generic borrow,
+        // Option<&T> opaque (owned form not in the closed {String} set here).
+        assert!(!admit("&mut Builder"));
+        assert!(!admit("&(A, B)"));
+        assert!(!admit("&[u8]"));
+        assert!(!admit("&Vec<u8>"));
+        assert!(!admit("Option<&NaiveDate>"));
+        assert!(!admit("&mut str"));
     }
 
     fn trait_bound(path: &str, args: Vec<serde_json::Value>) -> serde_json::Value {

@@ -281,14 +281,19 @@ isNumericRust t = t `elem`
 
 
 -- | True when the given Rust type string is a `Copy` primitive, so a field
--- getter can read it as `recv.field` (no `.clone()`). The S1 closed set's Copy
--- members are the inspector-allowed ints (i8..i64 / u8..u32), the floats, bool,
--- and char. Everything else eligible (String / Vec / Option / Clone-opaque) is
--- non-Copy and must be `.clone()`d out of the borrowed receiver.
+-- getter can read it as `recv.field` (no `.clone()` — a `.clone()` on a Copy
+-- type is a `clippy::clone_on_copy` deny). The S1 closed set's Copy members are
+-- EVERY integer width (i8..i128 / u8..u128 / isize / usize — all `Copy`), the
+-- floats, bool, and char. The wide ints (`u64`/`u128`/`i128`/`usize`/`isize`)
+-- only reach a field getter via the #22 wide-int-getter admission, and reading
+-- them is a saturating copy-out (the matching setter is dropped). Everything
+-- else eligible (String / Vec / Option / Clone-opaque) is non-Copy and must be
+-- `.clone()`d out of the borrowed receiver.
 isCopyRust :: String -> Bool
 isCopyRust t = trimStr t `elem`
-    [ "i8", "i16", "i32", "i64"
-    , "u8", "u16", "u32"
+    [ "i8", "i16", "i32", "i64", "i128"
+    , "u8", "u16", "u32", "u64", "u128"
+    , "isize", "usize"
     , "f32", "f64", "bool", "char" ]
 
 

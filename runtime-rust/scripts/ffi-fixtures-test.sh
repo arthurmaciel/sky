@@ -102,7 +102,14 @@ BUILD_TMO="${SKY_FFI_FIXTURE_BUILD_TIMEOUT:-900}"   # cold cargo + nightly rustd
 RUN_TMO=25
 
 # The full fixture set (numbered order). Default when no args given.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield)
+#
+# Two fixture flavours coexist (auto-detected by the presence of `setup.sh`):
+#   • LOCAL-crate fixtures (40-46) wire a `file://` git dep + a `setup.sh` that
+#     stages the crate under $HOME; stage_workdir rewrites the URL per host.
+#   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
+#     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
+#     are copied verbatim and cargo fetches the crate from crates.io.
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -110,9 +117,23 @@ ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-w
 # sky.toml `file://…/<name>-crate` URL to the actually-staged $HOME path. Never
 # touches the committed fixture. Echoes the workdir path on success; non-zero on
 # failure. ───────────────────────────────────────────────────────────────────
+# ── stage_workdir_cratesio <fixture-dir> → echoes a TMPDIR build copy for a
+# CRATES.IO-dep fixture (no local crate, no setup.sh, no URL rewrite). Copies
+# src/ + sky.toml verbatim; cargo resolves the deps from crates.io at build
+# time. Keeps the committed tree pristine, like the local-crate path. ──────────
+stage_workdir_cratesio() {
+  local src="$1" base; base="$(basename "$src")"
+  local wd; wd="$(mktemp -d "${TMPDIR:-/tmp}/ffi-fixture-$base.XXXXXX")" || return 1
+  mkdir -p "$wd/src"
+  cp -r "$src/src/." "$wd/src/" 2>/dev/null || true
+  cp "$src/sky.toml" "$wd/sky.toml" || { rm -rf "$wd"; return 1; }
+  printf '%s\n' "$wd"
+}
+
 stage_workdir() {
   local src="$1" base; base="$(basename "$src")"
-  [ -f "$src/setup.sh" ] || { echo "no setup.sh in $src" >&2; return 1; }
+  # CRATES.IO-dep fixtures have no setup.sh — copy sources verbatim.
+  [ -f "$src/setup.sh" ] || { stage_workdir_cratesio "$src"; return $?; }
 
   # 1. Stage the crate (git-init under the REAL $HOME). setup.sh is `set -e`.
   bash "$src/setup.sh" >/tmp/ffi-fixture-"$base".setup.log 2>&1 || {

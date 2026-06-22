@@ -1,0 +1,9 @@
+[project]
+name = "47-borrowed-returns"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+["rust.dependencies"]
+url = "2"
+semver = "1"
