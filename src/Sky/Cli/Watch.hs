@@ -66,6 +66,7 @@ data WatchOpts = WatchOpts
     , woDebounceMs     :: Int          -- debounce after a change (150ms default)
     , woKillTimeoutMs  :: Int          -- ms to wait for graceful SIGTERM
     , woExtras         :: [FilePath]   -- extra paths from --watch=...
+    , woBackend        :: Maybe Toml.Backend  -- `--backend` override; Nothing → sky.toml
     }
     deriving (Show)
 
@@ -79,6 +80,7 @@ defaultWatchOpts entry = WatchOpts
     , woDebounceMs    = 150
     , woKillTimeoutMs = 3000
     , woExtras        = []
+    , woBackend       = Nothing
     }
 
 
@@ -257,9 +259,13 @@ runBuild opts = do
 runBuildInner :: WatchOpts -> IO (Either String FilePath)
 runBuildInner WatchOpts{..} = do
     haveToml <- Dir.doesFileExist "sky.toml"
-    cfg <- if haveToml
+    cfg0 <- if haveToml
         then Toml.parseSkyToml <$> readFile "sky.toml"
         else pure Toml.defaultConfig
+    -- A `--backend` flag (woBackend) overrides the sky.toml backend so BOTH the
+    -- codegen (Compile.compile) and the build step below agree; Nothing → the
+    -- project's configured backend. Matches the Build/Run/Db handlers.
+    let cfg = cfg0 { Toml._backend = maybe (Toml._backend cfg0) id woBackend }
     let outDir = "sky-out"
     Dir.createDirectoryIfMissing True outDir
     result <- Compile.compile cfg woEntry outDir

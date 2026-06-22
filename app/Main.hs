@@ -2069,7 +2069,10 @@ runCommand cmd = case cmd of
                 buildAndRunRustBinary (config { Toml._backend = Toml.BackendRust }) path
 
     Watch opts mTarget -> do
-        Watch.runWatch opts
+        -- Thread the `--backend` flag into the watch loop (Nothing → sky.toml
+        -- backend), matching the Build/Run/Db handlers so `sky watch --backend rust`
+        -- works without editing sky.toml.
+        Watch.runWatch (opts { Watch.woBackend = parseBackend <$> mTarget })
         return (Right ())
 
     Check path -> do

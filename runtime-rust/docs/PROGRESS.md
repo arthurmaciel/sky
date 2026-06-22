@@ -17,6 +17,27 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-22 01:50 — Batch 24: `sky watch --backend rust` (wire the discarded backend flag)
+
+`sky watch` already had a Rust path in `runBuildInner` (cargo build + respawn, CARGO_TARGET_DIR-aware, hold-old-binary-on-failure), selected by `sky.toml`'s backend. But the `Watch` handler DISCARDED its `--backend` flag (`Watch opts mTarget -> runWatch opts`), so `sky watch --backend rust` parsed yet did nothing — the pre-existing gap flagged during #6.
+
+Wired it, matching Build/Run/Db: `WatchOpts` gains `woBackend :: Maybe Toml.Backend`
+(Nothing → sky.toml); the handler passes `parseBackend <$> mTarget`; `runBuildInner`
+applies the override to `cfg` BEFORE `Compile.compile` so codegen AND the build step
+agree on the backend (a flag over a mismatched toml can't emit Go code then cargo-build
+it). `defaultWatchOpts` defaults it Nothing → no-flag behavior is byte-identical (record
+update to the same value); watchOptsParser builds via record-update so no parser change.
+
+Verified: `cabal build` clean; `sky watch --backend rust --no-run` on examples/01-hello-world
+(Go-default sky.toml) generated `sky-out/rust/Cargo.toml` with NO main.go (override worked);
+`sky build --backend rust` on it completes (6.03s). Guardian APPROVE (codegen/build agree;
+default preserves prior behavior; total; stable across rebuilds; unknown-backend rejected at
+the flag boundary by the #13 hardening).
+
+**Affected:** `src/Sky/Cli/Watch.hs`, `app/Main.hs`.
+
+---
+
 ## 2026-06-22 01:20 — Batch 23: gate the wasm-floor json test + add a per-subset `--all-targets` matrix leg (#12)
 
 `tests/wasm_floor_scope.rs`'s `json_kernel_encode_is_pure_and_total` called
