@@ -53,6 +53,17 @@ pub use crate::sky_runtime::html::*;
 
 use super::*;
 
+/// Body returned with a session-miss 404 from `/_sky/event` and `/_sky/sse`.
+///
+/// LOAD-BEARING CONTRACT — `client.js` `__skyProbeSessionLost` only triggers
+/// `window.location.reload()` (the SSE-reconnect recovery path) when a probe
+/// POST gets a 404 + `X-Sky-Live: 1` AND the body CONTAINS the substring
+/// `"session not found"` (client.js l1481/l1530/l1536). Go's backend returns
+/// the same string; diverging it (the old `"no session"` body) silently broke
+/// recovery after a server restart — the browser shows "Reconnecting…" forever.
+/// Guarded by `session_lost_body_tests`.
+const SESSION_LOST_BODY: &str = "session not found";
+
 // ─── Client assets ────────────────────────────────────────────────────────────
 
 /// The browser-side Sky.Live client, extracted verbatim from Go's
@@ -965,7 +976,7 @@ where
                     return (
                         StatusCode::NOT_FOUND,
                         [(axum::http::HeaderName::from_static("x-sky-live"), "1")],
-                        "no session",
+                        SESSION_LOST_BODY,
                     )
                         .into_response()
                 }
@@ -1077,7 +1088,7 @@ where
                     return (
                         StatusCode::NOT_FOUND,
                         [(axum::http::HeaderName::from_static("x-sky-live"), "1")],
-                        "no session",
+                        SESSION_LOST_BODY,
                     )
                         .into_response()
                 }
@@ -1095,7 +1106,7 @@ where
                     return (
                         StatusCode::NOT_FOUND,
                         [(axum::http::HeaderName::from_static("x-sky-live"), "1")],
-                        "no session",
+                        SESSION_LOST_BODY,
                     )
                         .into_response()
                 }
@@ -1458,5 +1469,86 @@ mod base_path_tests {
         assert_eq!(hash_part.len(), 16, "URL hash should be 16 hex chars");
         assert!(hash_part.chars().all(|c| c.is_ascii_hexdigit()),
             "URL hash should be hex: {hash_part}");
+    }
+}
+
+#[cfg(test)]
+mod session_lost_body_tests {
+    //! Guards the LOAD-BEARING session-lost 404 wire contract.
+    //!
+    //! After a server restart, the browser recovers ONLY because
+    //! `client.js` `__skyProbeSessionLost` reloads the page when its probe
+    //! POST to `/_sky/event` gets a 404 + `X-Sky-Live: 1` whose body CONTAINS
+    //! the substring `"session not found"` (client.js l1481/l1530/l1536). A
+    //! refactor that flips the body back to the old `"no session"` would
+    //! silently strand every client on a permanent "Reconnecting…" banner —
+    //! this module makes that regression a compile/test failure.
+    use super::SESSION_LOST_BODY;
+    use axum::body::Body;
+    use axum::http::{HeaderName, Request, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::post;
+    use axum::Router;
+    use tower::ServiceExt; // for `oneshot`
+
+    /// The exact response shape both real `event_handler` session-miss arms
+    /// emit (no-cookie + store-miss), reproduced here over `SESSION_LOST_BODY`
+    /// — the SAME constant the handlers reference — so the substring contract
+    /// is mechanically checked against the real source of truth.
+    async fn no_session_event_handler() -> Response {
+        (
+            StatusCode::NOT_FOUND,
+            [(HeaderName::from_static("x-sky-live"), "1")],
+            SESSION_LOST_BODY,
+        )
+            .into_response()
+    }
+
+    #[test]
+    fn const_body_satisfies_client_probe_substring() {
+        // client.js: `if (body.indexOf("session not found") < 0) return;`
+        assert!(
+            SESSION_LOST_BODY.contains("session not found"),
+            "session-lost 404 body must contain the client-probed substring \
+             \"session not found\"; got {SESSION_LOST_BODY:?}"
+        );
+        // Belt-and-braces: the old broken body must never reappear.
+        assert_ne!(
+            SESSION_LOST_BODY, "no session",
+            "session-lost body regressed to \"no session\" — client recovery breaks"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_session_miss_returns_404_marker_and_contract_body() {
+        let app = Router::new().route("/_sky/event", post(no_session_event_handler));
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/_sky/event")
+            .body(Body::from("{}"))
+            .expect("build probe request");
+
+        let resp = app.oneshot(req).await.expect("router responds");
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "must be a 404");
+        assert_eq!(
+            resp.headers()
+                .get("x-sky-live")
+                .expect("x-sky-live header present")
+                .to_str()
+                .expect("ascii header value"),
+            "1",
+            "X-Sky-Live marker distinguishes session-lost from a wedged proxy"
+        );
+
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("collect body");
+        let body = String::from_utf8(bytes.to_vec()).expect("utf8 body");
+        assert!(
+            body.contains("session not found"),
+            "body must contain the client-probed recovery substring; got {body:?}"
+        );
     }
 }
