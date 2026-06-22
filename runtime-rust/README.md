@@ -1,6 +1,6 @@
 # Sky Rust backend
 
-> **ATTENTION**
+> [!CAUTION]
 >
 > The Rust backend is **experimental** and **not supported** by the Sky project.
 >
@@ -27,7 +27,7 @@
 - [Project status](#project-status)
   - [Sweep summary (by equivalence mode)](#sweep-summary-by-equivalence-mode)
   - [Examples](#examples)
-- [Static & cross compilation](#static--cross-compilation)
+- [Static and cross compilation](#static-and-cross-compilation)
   - [Static compilation](#static-compilation)
   - [Cross compilation](#cross-compilation)
 - [Known limitations](#known-limitations)
@@ -77,11 +77,12 @@ via `cargo`. If you want to learn more about the compilation process, see our
 This guide takes you from a clean machine to **running every example
 in this repo** (except the Go-FFI ones — those need the default Go backend). 
 
-You pick the Rust backend by adding `--backend rust` to any `sky` command; that's the
+> [!TIP]
+> You pick the Rust backend by adding `--backend rust` to any `sky` command; that's the
 only flag a newcomer needs. 
 
 Cross-compiling to another platform uses
-`--target <triple>` — covered in [Static & cross compilation](#static--cross-compilation) below; ignore it for
+`--target <triple>` — covered in [Static and cross compilation](#static-and-cross-compilation) below; ignore it for
 now.
 
 Running the examples is **identical on every OS** — only the one-time setup
@@ -120,7 +121,7 @@ sudo apt install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
 # Only if you run a webview example with no display attached (e.g. over SSH):
 sudo apt install -y xvfb
 
-# Only if you later want fully-static binaries (see Static & cross compilation):
+# Only if you later want fully-static binaries (see Static and cross compilation):
 # sudo apt install -y musl-tools
 ```
 
@@ -155,8 +156,8 @@ System libraries:
 - **Sky.Webview** works natively — WKWebView is built into macOS, nothing to
   install.
 - **Sky.Tui** needs only a real terminal (Terminal.app / iTerm2).
-- `musl-cross` is only needed for static *cross*-builds to Linux (see [Static &
-  cross compilation](#static--cross-compilation)):
+- `musl-cross` is only needed for static *cross*-builds to Linux (see [Static and
+  cross compilation](#static-and-cross-compilation)):
 
 ```bash
 # Only for static cross-builds to Linux from macOS:
@@ -346,7 +347,7 @@ $ sky test  tests/MyTest.sky --backend rust
 $ sky add uuid --features="v4" --backend rust   # fully automatic, no shims
 $ sky install                                  # regen FFI after rm -rf .skycache
 
-# Static / cross / allocator flags (see "Static & cross compilation" below)
+# Static / cross / allocator flags (see "Static and cross compilation" below)
 $ sky build src/Main.sky --backend rust --static                 # fully-static binary (musl Linux / crt-static Windows)
 $ sky build src/Main.sky --backend rust --target x86_64-unknown-linux-musl  # cross-compile to a target triple
 $ sky build src/Main.sky --backend rust --mimalloc               # mimalloc global allocator (faster; +RSS)
@@ -541,7 +542,7 @@ output (informational, never blocks).
 > **Deep internals** (architecture, soundness model, error type, verification,
 > FFI coercion rules, build-perf) live in [`docs/TECHNICAL-DETAILS.md`](docs/TECHNICAL-DETAILS.md).
 
-## Static & cross compilation
+## Static and cross compilation
 
 Opt-in. The default build is unchanged (glibc-dynamic, host platform, system
 allocator). `--static` / `--target` / `[rust] static` / `[rust] target` /
