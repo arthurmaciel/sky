@@ -18,6 +18,23 @@ codebase). One pass, one file at a time.
 - **Latest full re-audit: 2026-06-19** (whole codebase, 131 code/script/skill files) —
   see the dated section immediately below for severity summary + high/medium dispositions.
 
+### 2026-06-22 — delta audit (batches 17–28), guardian-supervised specialist pass
+
+Scope: the 13 in-boundary files changed this session (10 `runtime-rust/src/` + 3
+`src/Sky/Generate/Rust/`). Deterministic tier `[SECGREP]` clean (no non-constant-time
+secret compares). Security/soundness specialist (guardian) adversarial re-pass:
+**6/6 high-risk files clear the gate; no critical/high/med findings.**
+
+| File | Verdict | Last audited | Fix |
+|---|---|:-:|:-:|
+| `sky_runtime/ssrf.rs` (new) | **L1 (low)** `is_private_ip` was RFC-1918-only → 100.64/10 (CGNAT) + 240/4 (reserved/bcast) + 192.0.0.0/24 + 198.18/15 reachable under the (opt-in, off-by-default) deny-private guard. IMDS 169.254.169.254 already covered. L2 (note-only): redirect re-check scheme set includes ws/wss — unexploitable (reqwest won't follow cross-scheme). | 2026-06-22 | ✅ L1 fixed (octet masks + boundary regression test); L2 ➖ note |
+| `sky_runtime/http_client.rs` | — sound (ssrf_apply + do_request: scheme-validate, DNS-pin, per-hop re-check, incremental body cap via saturating_add) | 2026-06-22 | ➖ |
+| `sky_runtime/live/mod.rs` | — sound (ServeDir before `/*path`; `..` blocked + %2e%2e decoded; symlink-follow = author-dir Go-parity; bind total; panic→500 errId-only) | 2026-06-22 | ➖ |
+| `sky_runtime/core.rs` | — sound (`set_env_default` set_var is race-free: first stmt of generated main, pre-tokio/thread; fixed keys + rustStringLit-escaped values) | 2026-06-22 | ➖ |
+| `sky_runtime/db.rs` | — sound (`process::exit` only under CLI-set SKY_DB_OP; report prints names+timestamps only, never SQL/checksum; bound params) | 2026-06-22 | ➖ |
+| `src/Sky/Generate/Rust/Project.hs`, `…/Builder/Emitter.hs` | — sound (`rustStringLit` total over arbitrary input → no break-out of emitted Rust literal; both baked values escaped; write/copy-if-changed byte-exact) | 2026-06-22 | ➖ |
+| `ws_client.rs`, `live/store.rs`, `mod.rs`, `tea.rs`, `html.rs`, `crate-specs.toml` | — sound (ssrf repoint pins+dials; cfg gates correct; poison-total locks) | 2026-06-22 | ➖ |
+
 ## Scope inventory
 
 | # | Component | Files | Review lens |

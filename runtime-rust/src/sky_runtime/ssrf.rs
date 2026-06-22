@@ -35,14 +35,29 @@ pub(crate) fn ssrf_deny_private_enabled() -> bool {
 /// - link-local      (169.254/16, fe80::/10)
 /// - unique-local    (fc00::/7 — fc00:: and fd00::)
 /// - unspecified     (0.0.0.0, ::)
+/// - CGNAT/shared    (100.64.0.0/10 — RFC 6598; cloud internal hosts live here)
+/// - IETF protocol   (192.0.0.0/24 — incl. 192.0.0.192)
+/// - benchmarking    (198.18.0.0/15 — RFC 2544)
+/// - reserved/bcast  (240.0.0.0/4 — incl. 255.255.255.255)
 /// - v4-mapped IPv6  (::ffff:0:0/96) whose embedded v4 is in the above ranges
+///
+/// The std `Ipv4Addr` predicates for CGNAT / benchmarking / reserved are
+/// nightly-only (`is_shared`/`is_benchmarking`/`is_reserved`), so the extra
+/// ranges are matched by octet here (audit finding L1, 2026-06-22: RFC-1918-only
+/// coverage left 100.64/10 + 240/4 reachable under the deny-private guard).
 pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            // Array-destructure (not indexing) → provably total, no panic site.
+            let [a, b, c, _] = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_unspecified()
+                || (a == 100 && (b & 0xc0) == 0x40)   // 100.64.0.0/10
+                || (a == 192 && b == 0 && c == 0)     // 192.0.0.0/24
+                || (a == 198 && (b & 0xfe) == 18)     // 198.18.0.0/15
+                || a >= 240                           // 240.0.0.0/4 (incl. 255.255.255.255)
         }
         IpAddr::V6(v6) => {
             if v6.is_loopback() || v6.is_unspecified() {
@@ -300,6 +315,24 @@ mod tests {
         assert!(!is_private_ip("1.1.1.1".parse().unwrap()));
         assert!(!is_private_ip("8.8.8.8".parse().unwrap()));
         assert!(!is_private_ip("2606:4700:4700::1111".parse().unwrap())); // Cloudflare v6
+    }
+
+    #[test]
+    fn is_private_ip_extra_reserved_ranges_blocked() {
+        // audit L1 (2026-06-22): non-RFC-1918 ranges that std's is_private misses.
+        assert!(is_private_ip("100.64.0.1".parse().unwrap()));       // CGNAT lo
+        assert!(is_private_ip("100.127.255.255".parse().unwrap()));  // CGNAT hi
+        assert!(is_private_ip("192.0.0.192".parse().unwrap()));      // IETF protocol
+        assert!(is_private_ip("198.18.0.1".parse().unwrap()));       // benchmarking lo
+        assert!(is_private_ip("198.19.255.255".parse().unwrap()));   // benchmarking hi
+        assert!(is_private_ip("240.0.0.1".parse().unwrap()));        // reserved
+        assert!(is_private_ip("255.255.255.255".parse().unwrap()));  // broadcast
+        // Boundaries that must STAY public (no over-block):
+        assert!(!is_private_ip("100.63.255.255".parse().unwrap()));  // just below CGNAT
+        assert!(!is_private_ip("100.128.0.0".parse().unwrap()));     // just above CGNAT
+        assert!(!is_private_ip("192.0.1.1".parse().unwrap()));       // 192.0.1/24 is public
+        assert!(!is_private_ip("198.20.0.0".parse().unwrap()));      // just above benchmarking
+        assert!(!is_private_ip("239.255.255.255".parse().unwrap())); // just below reserved (multicast, routable-ish)
     }
 
     #[test]
