@@ -118,3 +118,45 @@ S0 (coarse key reuse) < S1a (frozen-stdlib solve) < S2 (per-module dirty-set) < 
 - I5 harness: small–medium.
 - S1a: large (separate-compilation front-end + the equivalence evidence) — multi-session.
 - S2: XL.
+
+---
+
+## Evidence & decision (2026-06-22, guardian-reviewed) — HOLD
+
+Read-only probes (instrumentation reverted; tree clean). Measured on sky-playground,
+`--backend rust`, `SKY_RUST_FMT=0`, warm; ~4.1s rebuild:
+- parse+canon+setup ~0.80s · dep-solve **fixpoint ~0.75s (×10 rounds, re-solves ALL deps
+  incl. stdlib, "1039 dep functions typed")** · codegen+emit ~0.65s (front-end ~1.55s;
+  Haskell ~2.2s) · **cargo ~1.88s — irreducible from the Sky side, dominant chunk.**
+
+Soundness precondition for S1a (frozen-stdlib solve ≡ whole-program solve): **MET** — the
+stdlib is fully type-annotated (1588 bindings / 1515 sigs = multi-clause gap; zero
+unsigned top-level bindings), Sky has no typeclasses/HKT/consumer-resolved dictionaries,
+and row-poly is resolved at the consumer, not the library. So a user call can't refine a
+stdlib binding's annotated type.
+
+The two implementable slices and their verdicts:
+- **B2 — cache stdlib SOLVE, exclude from the fixpoint** (the ~20% win): requires a seam in
+  the dep-solve fixpoint (`solveRound`). **Guardian: inherently NOT autonomous-safe** — an
+  equivalence/Go-identity corpus gate samples program *strings*, but a fixpoint-convergence
+  bug can pass on an unsampled *dep-graph topology* (e.g. mutually-recursive user modules
+  over a stdlib binding frozen at a too-early iteration). The correctness argument is
+  human-review-shaped; gates downgrade it to "ship behind review + kill switch", never
+  autonomous. **RECOMMEND-HOLD.**
+- **B1 — cache stdlib parse+canon in-memory** (~10%, ~0.4s): semantically sound (stdlib
+  canon is closed over {stdlib ∪ kernel} — it never imports user modules, so user `DepInfo`
+  entries are inert). BUT canon is a **monolithic fixpoint** over all deps; reuse needs
+  restructuring it to seed cached-stdlib + iterate only user modules — not the clean memo
+  that would make it low-risk. Per the guardian's own tree, that pushes B1's risk up while
+  its value stays modest + cargo-capped. **HOLD.**
+
+DECISION: **HOLD on autonomous implementation.** No slice is BOTH autonomous-safe AND clears
+the value/risk bar (B2 unsafe-autonomous; B1 modest + needs fixpoint restructuring). The
+Sky-side ceiling is ~20% of a rebuild that stays >3s because cargo (~1.9s) + user codegen
+are irreducible.
+
+Prerequisite for ANY future incremental work (and the price of admission for a later
+human-reviewed B2): build the **I5 equivalence harness** (incremental output ==
+`SKY_NO_INCR=1` full output, byte-for-byte, over the example corpus + a random-edit fuzz)
+and a **Go-byte-identical gate**. These are reusable and load-bearing; the theory never
+substitutes for them. Both live in the shared build path → an upstream/author conversation.
