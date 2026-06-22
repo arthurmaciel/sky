@@ -210,16 +210,60 @@ fn render_into_ctx<M>(node: &Html<M>, s: &mut String, select_value: Option<&str>
             let mut pairs: Vec<(&str, String)> = vec![];
             let mut events: Vec<&str> = vec![];
             let mut sky_id: Option<&str> = None;
+            // Multi-valued attribute merge — mirrors Go `HtmlToVNode`
+            // (live.go ~L161-185). `class` is HTML's space-separated and
+            // `style` HTML's semicolon-separated multi-valued attribute: an
+            // element carrying BOTH a Std.Ui-computed inline `style` (from
+            // padding/background/border attrs) AND a user
+            // `Ui.htmlAttribute "style" "z-index: 5"` must emit ONE merged
+            // `style="…computed…; z-index: 5"`, not two `style="…"`
+            // attributes (the browser keeps only the first → the user's
+            // declarations are silently dropped). The Rust attribute list
+            // never went through Go's map accumulation, so we fold the merge
+            // here at collection time. First-seen value keeps its position
+            // (Std.Ui composes the computed style first); later values append
+            // so a user style declared last can override. Every other key is
+            // last-wins (two `href`/`value` ⇒ override, matching Go's map set).
             for a in attrs {
                 match a {
                     Attribute::Attr(k, v) => {
+                        let k = k.as_str();
                         if k == "sky-id" {
                             sky_id = Some(v);
                         }
-                        pairs.push((k.as_str(), v.clone()));
+                        match pairs.iter_mut().find(|(pk, _)| *pk == k) {
+                            Some((_, existing)) if !existing.is_empty() && k == "class" => {
+                                existing.push(' ');
+                                existing.push_str(v);
+                            }
+                            Some((_, existing)) if !existing.is_empty() && k == "style" => {
+                                // `; ` separator unless `existing` already ends
+                                // with `;` (then a single space) — avoids `;;`.
+                                if existing.ends_with(';') {
+                                    existing.push(' ');
+                                } else {
+                                    existing.push_str("; ");
+                                }
+                                existing.push_str(v);
+                            }
+                            Some((_, existing)) => {
+                                // Last-wins for every other key (and for an
+                                // empty existing style/class — nothing to join).
+                                existing.clear();
+                                existing.push_str(v);
+                            }
+                            None => pairs.push((k, v.clone())),
+                        }
                     }
                     Attribute::BoolAttr(k, true) => {
-                        pairs.push((k.as_str(), "true".to_string()));
+                        let k = k.as_str();
+                        match pairs.iter_mut().find(|(pk, _)| *pk == k) {
+                            Some((_, existing)) => {
+                                existing.clear();
+                                existing.push_str("true");
+                            }
+                            None => pairs.push((k, "true".to_string())),
+                        }
                     }
                     Attribute::BoolAttr(_, false) | Attribute::NoAttr => {}
                     Attribute::EventAttr(e) => events.push(e.name()),
@@ -654,6 +698,72 @@ mod tests {
         assert!(s.contains("1 &lt; 2"));
         assert!(s.contains("<b>ok</b>"));
         assert!(s.contains("</div>"));
+    }
+
+    #[test]
+    fn style_attrs_merge_into_one_attribute() {
+        // Std.Ui composes a computed inline `style` from layout attrs
+        // (padding/background/border) AND a user `Ui.htmlAttribute "style" V`
+        // adds another. The renderer MUST merge both into ONE `style="…"` —
+        // emitting two `style="…"` attrs makes the browser keep only the first,
+        // silently dropping the user's declarations. Go parity (live.go ~L176).
+        let computed = "padding: 8px; background-color: rgb(255, 102, 0)";
+        let t: Html<()> = Html::HElement(
+            "div".into(),
+            vec![
+                Attribute::Attr("style".into(), computed.into()),
+                Attribute::Attr("style".into(), "z-index: 5".into()),
+            ],
+            vec![],
+        );
+        let s = render_html(&t);
+        // Exactly ONE style attribute …
+        assert_eq!(s.matches("style=\"").count(), 1, "expected a single style attr: {s}");
+        // … containing BOTH the computed declarations AND the user's z-index,
+        // joined `; ` (computed has no trailing `;`), computed first/user last.
+        assert!(
+            s.contains(r#"style="padding: 8px; background-color: rgb(255, 102, 0); z-index: 5""#),
+            "merged style must keep both declarations: {s}"
+        );
+    }
+
+    #[test]
+    fn style_merge_handles_trailing_semicolon_and_user_only() {
+        // Trailing `;` on the computed style ⇒ single-space join (no `;;`).
+        let t: Html<()> = Html::HElement(
+            "div".into(),
+            vec![
+                Attribute::Attr("style".into(), "color: red;".into()),
+                Attribute::Attr("style".into(), "z-index: 5".into()),
+            ],
+            vec![],
+        );
+        let s = render_html(&t);
+        assert!(s.contains(r#"style="color: red; z-index: 5""#), "{s}");
+        assert!(!s.contains(";;"), "no double semicolon: {s}");
+
+        // Only a user style (no computed) ⇒ emitted verbatim, single attr.
+        let only: Html<()> = Html::HElement(
+            "div".into(),
+            vec![Attribute::Attr("style".into(), "z-index: 5".into())],
+            vec![],
+        );
+        let s2 = render_html(&only);
+        assert_eq!(s2.matches("style=\"").count(), 1, "{s2}");
+        assert!(s2.contains(r#"style="z-index: 5""#), "{s2}");
+
+        // `class` merges space-separated (HTML multi-valued parity).
+        let cls: Html<()> = Html::HElement(
+            "div".into(),
+            vec![
+                Attribute::Attr("class".into(), "a".into()),
+                Attribute::Attr("class".into(), "b".into()),
+            ],
+            vec![],
+        );
+        let s3 = render_html(&cls);
+        assert_eq!(s3.matches("class=\"").count(), 1, "{s3}");
+        assert!(s3.contains(r#"class="a b""#), "{s3}");
     }
 
     #[test]
