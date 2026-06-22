@@ -57,7 +57,7 @@ If you want, get to know more about the project **[principles](docs/PRINCIPLES.m
 
 ### Development support
 
-Today the Rust backend reaches about 98% behavioral parity with the Go reference.
+Today the Rust backend reaches about 90% behavioral parity with the Go reference.
 
 But Sky and its default Go backend are heavily and quickly developed by its author. 
 So keeping the Rust backend up-to-date is complex. 
