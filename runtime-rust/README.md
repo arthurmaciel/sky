@@ -544,24 +544,40 @@ output (informational, never blocks).
 
 ## Static and cross compilation
 
-Opt-in. The default build is unchanged (glibc-dynamic, host platform, system
-allocator). `--static` / `--target` / `[rust] static` / `[rust] target` /
-`[rust] allocator` turn on the modes below; non-opt-in builds are byte-identical
-to before.
+Opt-in. The default build is glibc-dynamic, host platform, system
+allocator. 
 
 ### Static compilation
 
-`--static` (or `[rust] static = true` / `SKY_RUST_STATIC=1`) per-OS matrix:
+>[!IMPORTANT]
+> macOS doesn't support static linking. If you want a static binary for deployment, [cross compile](#cross-compilation) to a Linux static binary instead.
+
+There are 3 ways to produce a fully static binary in Linux and Windows:
+
+- adding `[rust] static = true` to `sky.toml`
+- exporting an environment varible:
+```bash
+export SKY_RUST_STATIC=1 sky run --backend rust
+```
+- call every Sky command with the static flag (don't forget the `--backend`)
+```bash
+sky run --backend rust --static
+```
+
+`--static` flag represents different things on each platform:
 
 | Host | Mechanism | Result |
 |---|---|---|
 | **Linux** | `--target x86_64-unknown-linux-musl` + mimalloc (`static_alloc`) | true static-pie; zero `ldd` deps |
 | **Windows** | `-C target-feature=+crt-static` | static MSVC CRT |
-| **macOS** | — (Apple ships no static libc) | **degrades** to a native dynamic binary + a warning showing the cross-compile recipe |
-| **webview app** | — (links system WebKit/WebView2) | **refused** with an actionable error |
+| **macOS** | ❌ (Apple ships no static libc) | **degrades** to a native dynamic binary + a warning showing the cross-compile recipe |
+| **webview app** | ❌ (links dynamically to system WebKit/WebView2) | **refused** with an actionable error |
 
-Toolchain: the Linux musl path needs `rustup target add
-x86_64-unknown-linux-musl` + a musl C toolchain (`musl-tools`); `sky` checks both
+Toolchain: 
+- the Linux musl path needs `rustup target add
+x86_64-unknown-linux-musl` + a musl C toolchain (`musl-tools`)
+
+`sky` checks both
 and errors with the exact install command if either is missing.
 
 #### Global allocator (mimalloc)
