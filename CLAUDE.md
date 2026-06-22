@@ -313,6 +313,23 @@ repo.
 
 ### 6. Disk hygiene — unused build caches MUST be pruned
 
+**Pre-build disk check — run BEFORE any full build / test suite /
+example sweep.** Check free space first (`df -h /`); if it's low
+(rule of thumb: under ~15-20 GB free, or the run will rebuild a
+freshly-cleaned go-build cache), reclaim BEFORE starting: `go clean
+-cache`, `rm -rf "$CARGO_TARGET_DIR"` (or `~/.cache/sky-rust-target`),
+prune example artifacts (`sky-out`/`.skycache`/`.skydeps`/`target`).
+A long build on a near-full disk dies mid-run with
+`resource exhausted (No space left on device)` AFTER type-check +
+codegen succeed — so it surfaces as a *file-copy / install / "build
+failed"* error and **masquerades as a build/codegen regression**,
+wasting the entire run (a full `cabal test` ≈ 40 min) on a
+mis-diagnosis. Learned 2026-06-22: a clean Wall-#1 type change looked
+like a 26-example sweep failure until the build log showed ENOSPC at
+the runtime copy step, not in codegen. Always read the actual build
+log before blaming a code change; and check `df` before the build so
+it never happens.
+
 The Go toolchain on macOS does NOT auto-prune its build cache. In
 one session of heavy Sky compilation + example sweeps + agent
 worktrees, `~/Library/Caches/go-build` grew to 202 GB and pushed a
