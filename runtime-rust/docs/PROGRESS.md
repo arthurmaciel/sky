@@ -17,6 +17,34 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-22 03:30 — Batch 28: speed up `sky watch --backend rust` (incremental rebuilds)
+
+Reported "very slow". Root cause: every rebuild (a) re-copied the ~74 runtime files,
+(b) rewrote every generated `.rs`, and (c) ran per-file rustfmt — all of which bump
+mtimes, so cargo recompiled the WHOLE generated crate (runtime + lowered stdlib + user
+code) on every keystroke instead of just the edited module.
+
+Fix (Haskell codegen/CLI only — NO runtime `.rs` changed):
+- `copyFileIfChanged` / `writeFileIfChanged` (Project.hs): copy/write a runtime or
+  generated file ONLY when its bytes differ (byte-exact UTF-8 compare — `TE.encodeUtf8
+  . T.pack`, locale-independent), so unchanged files keep their mtime and cargo's
+  incremental compiler skips them. Applied to the 74 runtime copies + the 5 generated-
+  file sites (config.rs / mod.rs / main.rs / per-module loop / Cargo.toml). Output is
+  byte-identical (guardian-confirmed; also closes a latent non-UTF-8-locale portability
+  bug in the old `writeFile`).
+- `sky watch` now defaults `SKY_RUST_FMT=0` (when unset) — the cosmetic per-file rustfmt
+  reformat-rewrites every file (defeating the skip) + spawns a subprocess per module;
+  the hot loop doesn't need it. `sky build`/`sky run` still format; explicit env wins.
+
+Result: a `sky watch --backend rust` rebuild on a one-file change dropped to ~4.3s (was a
+full-crate recompile). clippy/tests unaffected (no runtime change). Guardian APPROVE
+(byte-identical output, total + handle-safe helpers, skip-iff-equal is correct by
+definition, rustfmt is semantically inert).
+
+**Affected:** `src/Sky/Generate/Rust/Project.hs`, `app/Main.hs`.
+
+---
+
 ## 2026-06-22 03:00 — Batch 27: Sky.Live serves the sky.toml `[live] static` dir (Go parity)
 
 Reported: `sky run --backend rust` ignored `[live] static` and "doesn't ship JS"

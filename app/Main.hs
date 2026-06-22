@@ -2069,6 +2069,15 @@ runCommand cmd = case cmd of
                 buildAndRunRustBinary (config { Toml._backend = Toml.BackendRust }) path
 
     Watch opts mTarget -> do
+        -- Hot loop: skip the per-file rustfmt of the GENERATED Rust by default.
+        -- rustfmt is cosmetic (sky-out/rust readability), but in the watch loop its
+        -- ~one-subprocess-per-module cost AND its post-codegen reformat-rewrite (which
+        -- bumps every file's mtime, defeating the write-if-changed incremental skip)
+        -- dominate rebuild time. `sky build`/`sky run` still format. An explicit
+        -- SKY_RUST_FMT wins (only defaulted here when unset). Rust-only env; a Go
+        -- watch ignores it.
+        fmtSet <- System.Environment.lookupEnv "SKY_RUST_FMT"
+        when (fmtSet == Nothing) $ System.Environment.setEnv "SKY_RUST_FMT" "0"
         -- Thread the `--backend` flag into the watch loop (Nothing → sky.toml
         -- backend), matching the Build/Run/Db handlers so `sky watch --backend rust`
         -- works without editing sky.toml.
