@@ -23,6 +23,7 @@ import System.FilePath ((</>))
 import System.IO (putStrLn)
 
 import Sky.Build.FfiTypeParser (FtyAst, parseFty)
+import Sky.Build.Rust.FfiCall (Call, parseCall)
 import Sky.Sky.Toml (Backend(BackendGo, BackendRust))
 
 
@@ -66,15 +67,18 @@ data FfiFunction = FfiFunction
 --                      generic). The bindability gate checks each
 --                      concrete arg satisfies every declared bound via a
 --                      static closed-set × trait table.
---   * @_fg_template@ — the parametric Rust expression with @{a}@ holes
---                      for each type-param (substituted with the Rust
---                      type) and @{arg0}@ … @{argN}@ holes for the
---                      wrapper's value args. Codegen substitutes both
---                      hole families to emit the concrete wrapper body.
+--   * @_fg_call@     — Wall #3 (Scheme A) typed call-AST that REPLACES the
+--                      retired @{hole}@ Rust string template. A closed
+--                      'Call' ADT (path + turbofish type-args + receiver +
+--                      value-args + return TypeRef) over which codegen's
+--                      'renderCall' walker is TOTAL — illegal param
+--                      placement is unrepresentable, so a malformed AST is a
+--                      hard parse error (validated at decode against
+--                      @_fg_params@), never a leaked un-substituted hole.
 data FfiGeneric = FfiGeneric
     { _fg_params   :: ![String]
     , _fg_bounds   :: !(Map.Map String [String])
-    , _fg_template :: !String
+    , _fg_call     :: !Call
     }
     deriving (Show, Eq)
 
@@ -126,8 +130,16 @@ instance A.FromJSON FfiGeneric where
     parseJSON = A.withObject "FfiGeneric" $ \o -> do
         ps <- o .:? "params" .!= []
         bs <- o .:? "bounds" .!= Map.empty
-        tm <- o .:? "rustTemplate" .!= ""
-        return (FfiGeneric ps bs tm)
+        -- The Scheme-A call-AST. Decoded + VALIDATED against the declared
+        -- param count (every {param:i} < |params|, receiver-iff-method,
+        -- gap-free arg refs) — a malformed AST is a hard parse error, never a
+        -- silent default (guardian constraint #2). The `call` key is REQUIRED
+        -- for a `generic` block (a generic stub without a call body is
+        -- malformed); the whole `generic` object is itself `.:?`-optional on
+        -- the parent FfiFunction, so non-generic bindings are unaffected.
+        callV <- o .: "call"
+        call  <- parseCall (length ps) callV
+        return (FfiGeneric ps bs call)
 
 
 instance A.FromJSON FfiModule where

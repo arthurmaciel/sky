@@ -142,6 +142,15 @@ data FnInfo = FnInfo
     , _fnEnumWildcard :: Bool
         -- ^ Rust only (S3, tag + extract). Whether the generated `match` needs
         -- a trailing `_ => …` wildcard (R3). Absent → False.
+    , _fnGeneric :: Maybe A.Value
+        -- ^ Rust only (Wall #3). The inspector's parametric @generic@ block
+        -- (params + bounds + the Scheme-A call-AST), carried VERBATIM as a raw
+        -- JSON object so the Rust kernel.json emitter can re-emit it losslessly
+        -- into @.skycache/ffi/rust/<crate>.kernel.json@, where
+        -- 'Sky.Build.FfiRegistry' decodes + validates it into an 'FfiGeneric'.
+        -- Absent (→ 'Nothing') for the Go inspector (which drops generics at the
+        -- producer — no Go kernel.json ever carries a @generic@ key) and for
+        -- every non-generic Rust binding, so the whole path is dead for Go.
     }
     deriving (Show)
 
@@ -187,6 +196,7 @@ instance A.FromJSON FnInfo where
             <*> o A..:? "enumFieldCount" A..!= 0
             <*> o A..:? "enumArms" A..!= []
             <*> o A..:? "enumWildcard" A..!= False
+            <*> o A..:? "generic"   -- Wall #3: raw `generic` object, verbatim
       where
         parseParamFull = A.withObject "param" $ \o -> do
             n <- o A..:? "name" A..!= ""

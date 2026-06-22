@@ -114,6 +114,115 @@ struct Function {
     /// the R3 condition only, to stay clippy unreachable-pattern clean.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     enum_wildcard: bool,
+
+    // ── Wall #3 parametric generic stub ─────────────────────────────────
+    // Present ONLY for a bindable generic free fn / struct method emitted as a
+    // PARAMETRIC stub (Sky tyvars + a typed call-AST + the FULL-UNION bounds).
+    // Absent (→ None) for every non-generic binding and for Go (whose inspector
+    // drops generics at the producer). Decoded Haskell-side under
+    // `_ffn_generic = Just`, so the whole field is dead for the Go path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generic: Option<Generic>,
+}
+
+// ── Wall #3 Scheme-A call-AST (mirror of Haskell Sky.Build.Rust.FfiCall) ──
+//
+// The Rust serde here and the Haskell `FromJSON` MUST agree on the wire shape;
+// the drift test (Haskell-side FfiCallSpec corpus + the Rust `mod tests` shape
+// asserts below) keeps them in lock-step. Field names are the camelCase wire
+// keys the Haskell decoder reads.
+
+/// The parametric `generic` block on a `Function`: type-param names (Sky-source
+/// order), per-param FULL-UNION trait bounds, and the typed call-AST.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+struct Generic {
+    params: Vec<String>,
+    /// per-param trait NAMES (the modellable-5 only reach Haskell; an
+    /// unmodellable bound here is defense-in-depth — Wall #2 still rejects it).
+    bounds: std::collections::BTreeMap<String, Vec<String>>,
+    call: Call,
+}
+
+/// One Rust call expression as a structure (parse-don't-validate). `kind` is
+/// "method" | "function"; the Haskell decoder validates receiver-iff-method and
+/// every {param}/arg ref at decode time.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+struct Call {
+    kind: String,
+    path: Vec<String>,
+    #[serde(rename = "typeArgs", skip_serializing_if = "Vec::is_empty")]
+    type_args: Vec<TypeRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receiver: Option<Receiver>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    args: Vec<usize>,
+    #[serde(rename = "argTypes", skip_serializing_if = "Vec::is_empty")]
+    arg_types: Vec<TypeRef>,
+    ret: TypeRef,
+}
+
+/// The receiver of a method call: which wrapper value-arg supplies it + borrow.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+struct Receiver {
+    arg: usize,
+    /// "ref" | "refmut" | "value".
+    by: String,
+}
+
+/// A type reference inside typeArgs / argTypes / ret. Exactly one of the three
+/// variants is serialised (serde-untagged via a manual Serialize-shape: each
+/// arm emits its own discriminator key).
+#[derive(Debug, Clone, PartialEq)]
+enum TypeRef {
+    Param(usize),
+    Prim(String),
+    Ctor(String, Vec<TypeRef>),
+}
+
+impl Serialize for TypeRef {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            TypeRef::Param(i) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("param", i)?;
+                m.end()
+            }
+            TypeRef::Prim(p) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("prim", p)?;
+                m.end()
+            }
+            TypeRef::Ctor(nm, args) => {
+                let n = if args.is_empty() { 1 } else { 2 };
+                let mut m = s.serialize_map(Some(n))?;
+                m.serialize_entry("ctor", nm)?;
+                if !args.is_empty() {
+                    m.serialize_entry("args", args)?;
+                }
+                m.end()
+            }
+        }
+    }
+}
+
+/// The five trait bounds the Sky→Rust backend can statically model on a generic
+/// FFI type-param. SINGLE SOURCE on the Rust side; the Haskell side has the same
+/// literal in `Sky.Build.Rust.FfiInstance.modellableTrait`. The drift fence
+/// (4a) is `test_modellable_5_matches` here + the Haskell
+/// "modellable-5 set is EXACTLY {…}" spec — if either side adds/removes a trait
+/// without the other, one of the two fails.
+///
+/// DISTINCT from `MARKER_TRAITS` (a 13-elem auto/marker SUPERSET used by Alt-1's
+/// bound-IGNORING resolution): MODELLABLE_5 is the set the parametric-stub
+/// path is allowed to EMIT as a `<T: …>` bound. Do not conflate them.
+const MODELLABLE_5: &[&str] = &["Hash", "Eq", "Ord", "Clone", "Default"];
+
+/// Whether a trait NAME (last `::` segment) is in the modellable-5.
+fn is_modellable_5(name: &str) -> bool {
+    MODELLABLE_5.contains(&name)
 }
 
 #[derive(Serialize, Debug)]
@@ -598,6 +707,11 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
     ALIAS_MAP.with(|c| *c.borrow_mut() = collect_aliases(doc));
 
+    // Wall #3 coverage accumulators are per-crate — reset so a multi-crate run
+    // reports each crate's bind%/drops independently.
+    GENERIC_DROPS.with(|v| v.borrow_mut().clear());
+    GENERIC_BOUND.with(|c| c.set(0));
+
     let index = match doc["index"].as_object() {
         Some(idx) => idx,
         None => return pkg_error(crate_name, "rustdoc JSON missing 'index' field"),
@@ -713,6 +827,16 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 fromstr_types.entry(self_sky.clone()).or_insert_with(|| self_rust.clone());
             }
 
+            // C5: the parametric-stub bound-union gathers ONLY from the OWNING
+            // impl block. A TRAIT impl's method bounds can come from the trait
+            // (cross-impl) — out of scope, so the parametric path is attempted
+            // ONLY for an INHERENT impl (empty trait). The impl's own generics
+            // (C1 — where `K: Hash+Eq` lives) + the struct DEFINITION's generics
+            // (C1) feed the union.
+            let is_inherent_impl = trait_name.is_empty();
+            let impl_generics = impl_data.get("generics");
+            let struct_generics = for_val.and_then(|v| struct_generics_of(v, index));
+
             // Walk method items.
             // Item IDs may be integers (new format) or strings (old format).
             if let Some(items) = impl_data["items"].as_array() {
@@ -724,6 +848,36 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                         }
                         let method_name = method_item["name"].as_str().unwrap_or("");
                         if let Some(fn_data) = method_item["inner"].get("function") {
+                            // Wall #3: if this method is GENERIC-BEARING (its
+                            // own / the impl's / the struct's generics declare a
+                            // type param used in the sig), retire Alt-1's concrete
+                            // monomorphisation and EMIT a parametric stub (or
+                            // drop+report). A non-generic method stays on the
+                            // existing path unchanged.
+                            if is_inherent_impl
+                                && method_is_generic_bearing(
+                                    fn_data, impl_generics, struct_generics)
+                            {
+                                match try_parametric_stub(
+                                    method_name,
+                                    fn_data,
+                                    Some((&self_sky, &self_rust)),
+                                    impl_generics,
+                                    struct_generics,
+                                ) {
+                                    Ok(generic) => {
+                                        record_generic_bound();
+                                        if let Some(f) = parametric_function(
+                                            method_name, fn_data,
+                                            &self_sky, &self_rust, generic,
+                                        ) {
+                                            functions.push(f);
+                                        }
+                                    }
+                                    Err(drop) => record_generic_drop(method_name, drop),
+                                }
+                                continue;
+                            }
                             if let Some(f) =
                                 parse_fn_item(method_name, fn_data, &aliases, Some((&self_sky, &self_rust)))
                             {
@@ -1002,6 +1156,10 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         // surface errors visibly
         errors.insert(0, format!("{}: 0 functions extracted", crate_name));
     }
+
+    // Wall #3 coverage report (no silent drops) — ALWAYS a one-line terminal
+    // summary + the full per-symbol `.coverage.md` when the crate name is safe.
+    emit_generic_coverage(crate_name);
 
     PkgInfo {
         pkg: crate_name.to_string(),
@@ -1737,6 +1895,102 @@ thread_local! {
     static TAIL_AUDIT_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TAIL_AUDIT_DROPS: std::cell::RefCell<Vec<(String, bool, String)>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    // Wall #3 coverage: per-symbol generic-stub drops (always recorded — the
+    // coverage report is surfaced BY DEFAULT, not just under `--audit`). Each
+    // entry is (symbol-name, GenericDrop). Plus the count of generic symbols
+    // that WERE bound parametrically, for the `bound N/M` headline.
+    static GENERIC_DROPS: std::cell::RefCell<Vec<(String, GenericDrop)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static GENERIC_BOUND: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Record a parametric-stub drop for the coverage report (always on).
+fn record_generic_drop(symbol: &str, drop: GenericDrop) {
+    GENERIC_DROPS.with(|v| v.borrow_mut().push((symbol.to_string(), drop)));
+}
+
+/// Record that a generic symbol WAS bound parametrically (for `bound N/M`).
+fn record_generic_bound() {
+    GENERIC_BOUND.with(|c| c.set(c.get() + 1));
+}
+
+/// Validate a crate name for safe interpolation into the `.coverage.md` path
+/// (#6): only `[A-Za-z0-9_-]`; reject `/`, `..`, NUL, and the empty string.
+/// Returns the name unchanged when safe, else `None`.
+fn safe_crate_name(name: &str) -> Option<&str> {
+    if name.is_empty() {
+        return None;
+    }
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Emit the Wall #3 coverage report: ALWAYS a one-line terminal summary (fires
+/// even on an EMPTY drop set — `bound N/N · 0 unbindable`), plus a full
+/// per-symbol markdown report to `.skycache/ffi/rust/<crate>.coverage.md` when
+/// the crate name validates (#6). `--audit` is NOT required.
+fn emit_generic_coverage(crate_name: &str) {
+    let bound = GENERIC_BOUND.with(|c| c.get());
+    let drops: Vec<(String, GenericDrop)> = GENERIC_DROPS.with(|v| v.borrow().clone());
+    let total = bound + drops.len();
+
+    // Per-reason histogram for the headline.
+    let mut by_reason: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    for (_, d) in &drops {
+        *by_reason.entry(d.reason()).or_insert(0) += 1;
+    }
+    let reason_summary = by_reason
+        .iter()
+        .map(|(r, n)| format!("{r} ×{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // One-line terminal summary (stderr, always — prefixed FFI_COVERAGE so a
+    // sweep can grep it). Fires on an empty drop set too.
+    let report_path = safe_crate_name(crate_name)
+        .map(|c| format!(".skycache/ffi/rust/{c}.coverage.md"));
+    let report_note = report_path
+        .as_deref()
+        .map(|p| format!(" — report: {p}"))
+        .unwrap_or_else(|| " — report: (skipped: unsafe crate name)".to_string());
+    if drops.is_empty() {
+        eprintln!("FFI_COVERAGE {crate_name}: bound {bound}/{total} · 0 unbindable{report_note}");
+    } else {
+        eprintln!(
+            "FFI_COVERAGE {crate_name}: bound {bound}/{total} · {} unbindable ({reason_summary}){report_note}",
+            drops.len()
+        );
+    }
+
+    // Full per-symbol markdown report (only when the path validated).
+    if let Some(path) = report_path {
+        let mut body = String::new();
+        body.push_str(&format!("# FFI generic coverage — {crate_name}\n\n"));
+        body.push_str(&format!(
+            "bound parametrically: **{bound}/{total}** · dropped: **{}**\n\n",
+            drops.len()
+        ));
+        if !drops.is_empty() {
+            body.push_str("## Dropped generic symbols\n\n");
+            body.push_str("| symbol | reason | detail |\n|---|---|---|\n");
+            for (sym, d) in &drops {
+                body.push_str(&format!("| `{}` | {} | {} |\n", sym, d.reason(), d.detail()));
+            }
+            body.push('\n');
+        }
+        // Best-effort write; a write failure must not abort the inspection (the
+        // terminal summary already carries the headline).
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, body) {
+            eprintln!("FFI_COVERAGE warning: could not write {path}: {e}");
+        }
+    }
 }
 
 fn tail_audit_enabled() -> bool {
@@ -3245,6 +3499,730 @@ fn is_marker_bound(bound: &serde_json::Value) -> bool {
     MARKER_TRAITS.contains(&name)
 }
 
+// ── Wall #3 FULL-UNION bound gather (C1-C5) ─────────────────────────────
+//
+// The parametric stub's wrapper body `::crate::Type::<K,V>::method(..)` needs
+// the union of every trait bound on each USED type-param, sourced from items on
+// DIFFERENT rustdoc nodes: the method's own generics + where-preds, the OWNING
+// impl block's generics + where-preds (C1 — where `K: Hash+Eq` lives, C5 — only
+// the owning impl), and the struct DEFINITION's generics + where-preds. The
+// union is over trait NAMES (not Alt-1 concrete resolution). COMPLETENESS-OR-
+// DROP: any shape that doesn't reduce to a plain trait name on a `{generic}` ⇒
+// the whole symbol is dropped (never a partial-bounds stub → never a cargo-fail).
+
+/// Why a generic symbol was dropped from the parametric-stub path. Carried into
+/// the coverage report. `String` payload = the offending detail (trait name,
+/// shape, …).
+#[derive(Debug, Clone, PartialEq)]
+enum GenericDrop {
+    /// A `bound_predicate` subject that is not a plain `{generic:NAME}` (C2 —
+    /// e.g. an associated-type projection `<K as Foo>::Item: Bar`, a
+    /// `qualified_path`). Never skip-and-continue.
+    NonGenericPredicate(String),
+    /// A bound is a real (non-marker) trait outside the modellable-5, or whose
+    /// super-trait closure escapes it (C3). Reported as `unmodellable-bound`.
+    UnmodellableBound(String),
+    /// A defaulted struct/impl type-param carries a bound the stub doesn't bind
+    /// and the default is not provably erased (C4).
+    DefaultedBoundParam(String),
+    /// Not in the bindable subset (Q1): generic enum, const generic, lifetime-
+    /// borrowed return, trait-object / impl-Trait param, closure param, …
+    NotBindable(String),
+}
+
+impl GenericDrop {
+    /// The coverage-report reason tag.
+    fn reason(&self) -> &'static str {
+        match self {
+            GenericDrop::NonGenericPredicate(_) => "non-generic-predicate",
+            GenericDrop::UnmodellableBound(_)   => "unmodellable-bound",
+            GenericDrop::DefaultedBoundParam(_) => "defaulted-bound-param",
+            GenericDrop::NotBindable(_)         => "not-bindable",
+        }
+    }
+    fn detail(&self) -> &str {
+        match self {
+            GenericDrop::NonGenericPredicate(d)
+            | GenericDrop::UnmodellableBound(d)
+            | GenericDrop::DefaultedBoundParam(d)
+            | GenericDrop::NotBindable(d) => d,
+        }
+    }
+}
+
+/// Extract a trait NAME (last `::` segment) from a `trait_bound`, or `None` for
+/// a lifetime/outlives bound (no `trait_bound` key) — those carry no trait to
+/// model and are ignored by the caller.
+fn trait_bound_name(bound: &serde_json::Value) -> Option<String> {
+    let tr = bound.get("trait_bound")?.get("trait")?;
+    let path = tr.get("path").or_else(|| tr.get("name")).and_then(|p| p.as_str())?;
+    Some(path.rsplit("::").next().unwrap_or(path).to_string())
+}
+
+/// True for a higher-ranked bound (`for<'a> …`) — the generic-params list on the
+/// trait_bound is non-empty. Such a bound can't reduce to a plain trait name on
+/// the param, so the caller drops (C2 sibling).
+fn bound_is_higher_ranked(bound: &serde_json::Value) -> bool {
+    bound
+        .get("trait_bound")
+        .and_then(|tb| tb.get("generic_params"))
+        .and_then(|g| g.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false)
+}
+
+/// The super-trait closure of a modellable-5 trait is statically known and
+/// entirely marker/modellable (`Eq: PartialEq`, `Ord: PartialOrd + Eq`, the
+/// rest have no constraining super). So once a trait NAME is in the modellable-5
+/// its closure introduces no hole (C3 holds by construction). A trait NOT in the
+/// modellable-5 is rejected before we'd need its closure. This returns whether
+/// `name`'s super-closure stays inside the modellable-5 ∪ markers.
+fn modellable_5_superclosure_ok(name: &str) -> bool {
+    // All five have only marker/modellable supers — verified against std:
+    //   Hash: (none constraining)   Eq: PartialEq   Ord: PartialOrd+Eq
+    //   Clone: Sized                Default: Sized
+    is_modellable_5(name)
+}
+
+/// Classify ONE trait bound on a USED param for the modellable check (C3):
+///   * marker/auto trait or lifetime bound → contributes no `<T: …>` bound (Ok None)
+///   * higher-ranked (`for<'a>`) → drop (C2 sibling)
+///   * modellable-5 (super-closure ok) → contributes that trait name (Ok Some)
+///   * any other real trait → unmodellable-bound drop (C3)
+fn classify_param_bound(bound: &serde_json::Value) -> Result<Option<String>, GenericDrop> {
+    if bound_is_higher_ranked(bound) {
+        return Err(GenericDrop::NonGenericPredicate(
+            "higher-ranked (for<'a>) bound".to_string(),
+        ));
+    }
+    let name = match trait_bound_name(bound) {
+        None => return Ok(None), // lifetime/outlives — ignore
+        Some(n) => n,
+    };
+    if MARKER_TRAITS.contains(&name.as_str()) && !is_modellable_5(&name) {
+        // A pure auto/marker trait (Sized/Send/Sync/Copy/Debug/Unpin/…) that is
+        // NOT one of the modellable-5 contributes no Sky-facing `<T: …>` bound.
+        return Ok(None);
+    }
+    if is_modellable_5(&name) {
+        if modellable_5_superclosure_ok(&name) {
+            return Ok(Some(name));
+        }
+        return Err(GenericDrop::UnmodellableBound(name));
+    }
+    // A real, non-marker, non-modellable trait (FromStr / Serialize / a crate
+    // trait / BuildHasher / …) → C3 drop.
+    Err(GenericDrop::UnmodellableBound(name))
+}
+
+/// Gather the inline + where-predicate bounds for each generic param of one
+/// rustdoc `generics` object, keyed by param name, into `acc`. C2: any
+/// `where_predicate` whose `bound_predicate.type` is NOT a plain `{generic:N}`
+/// ⇒ `Err(NonGenericPredicate)` (never skip-and-continue). Inline param bounds
+/// are always on a `{generic}` by construction (they are the param's own).
+fn gather_generics_into(
+    generics: &serde_json::Value,
+    acc: &mut std::collections::BTreeMap<String, Vec<serde_json::Value>>,
+) -> Result<(), GenericDrop> {
+    if let Some(params) = generics.get("params").and_then(|p| p.as_array()) {
+        for p in params {
+            // const generic on the OWNING impl/struct is out of the bindable
+            // subset; defaulted handling is C4, done by the caller with the
+            // used-set in hand. Here we only collect the bound lists.
+            let name = match p.get("name").and_then(|n| n.as_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if let Some(bs) = p.get("kind")
+                .and_then(|k| k.get("type"))
+                .and_then(|t| t.get("bounds"))
+                .and_then(|b| b.as_array())
+            {
+                acc.entry(name).or_default().extend(bs.iter().cloned());
+            }
+        }
+    }
+    if let Some(wps) = generics.get("where_predicates").and_then(|w| w.as_array()) {
+        for wp in wps {
+            let Some(bp) = wp.get("bound_predicate") else {
+                // A region/eq predicate carries no trait bound on a param — skip
+                // only outlives/region predicates, which have no `bound_predicate`.
+                continue;
+            };
+            let subject = bp.get("type");
+            // C2: the subject MUST be a plain `{generic:NAME}`. An associated-
+            // type projection / qualified_path / anything else ⇒ DROP+report.
+            let Some(g) = subject.and_then(|t| t.get("generic")).and_then(|g| g.as_str()) else {
+                let shape = subject
+                    .map(describe_type_shape)
+                    .unwrap_or_else(|| "missing".to_string());
+                return Err(GenericDrop::NonGenericPredicate(shape));
+            };
+            if let Some(bs) = bp.get("bounds").and_then(|b| b.as_array()) {
+                acc.entry(g.to_string()).or_default().extend(bs.iter().cloned());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A short human description of a where-predicate subject's shape, for the
+/// coverage report (C2 drop detail).
+fn describe_type_shape(t: &serde_json::Value) -> String {
+    if t.get("generic").is_some() {
+        "generic".to_string()
+    } else if t.get("qualified_path").is_some() {
+        "qualified_path (associated-type projection)".to_string()
+    } else if t.get("resolved_path").is_some() {
+        "resolved_path".to_string()
+    } else if let Some(obj) = t.as_object() {
+        obj.keys().next().cloned().unwrap_or_else(|| "unknown".to_string())
+    } else {
+        "unknown".to_string()
+    }
+}
+
+/// C4 — a struct/impl type-param that carries a DEFAULT (`S = RandomState`) AND
+/// a bound the stub doesn't bind is a hidden hole unless the default is provably
+/// erased. We can only prove erasure when the param is UNUSED in the method's
+/// signature (then the stub never names it, so the default applies and its
+/// bound is the crate's concern, not ours). A USED defaulted-and-bounded param
+/// ⇒ DROP. Returns `Err(DefaultedBoundParam)` for that case.
+fn check_defaulted_params(
+    generics: &serde_json::Value,
+    used: &HashSet<String>,
+) -> Result<(), GenericDrop> {
+    let Some(params) = generics.get("params").and_then(|p| p.as_array()) else {
+        return Ok(());
+    };
+    for p in params {
+        let Some(name) = p.get("name").and_then(|n| n.as_str()) else { continue };
+        let ty = p.get("kind").and_then(|k| k.get("type"));
+        let has_default = ty
+            .and_then(|t| t.get("default"))
+            .map(|d| !d.is_null())
+            .unwrap_or(false);
+        if !has_default {
+            continue;
+        }
+        let has_bound = ty
+            .and_then(|t| t.get("bounds"))
+            .and_then(|b| b.as_array())
+            .map(|bs| bs.iter().any(|b| !is_marker_bound(b)))
+            .unwrap_or(false);
+        // A defaulted param with a real bound is safe ONLY if the stub never
+        // names it (i.e. it's unused → the default applies, the crate owns the
+        // bound). A USED one would need us to bind that bound — drop.
+        if has_bound && used.contains(name) {
+            return Err(GenericDrop::DefaultedBoundParam(name.to_string()));
+        }
+    }
+    Ok(())
+}
+
+/// Compute the FULL-UNION modellable bounds for the USED params of a generic
+/// method, from the method + owning-impl + struct-def generics (C1/C5). Returns
+/// the per-USED-param sorted, de-duped trait-name list (modellable-5 only;
+/// markers contribute nothing), or the first `GenericDrop` (C2/C3/C4).
+///
+///   * `method_generics` — the fn item's `generics`.
+///   * `impl_generics` — the OWNING impl block's `generics` (C1+C5); `None` for
+///     a free function.
+///   * `struct_generics` — the struct DEFINITION's `generics` (C1); `None` when
+///     the receiver type isn't a crate-local struct we found.
+///   * `used` — the set of type-param names appearing in the sig.
+fn full_union_bounds(
+    method_generics: &serde_json::Value,
+    impl_generics: Option<&serde_json::Value>,
+    struct_generics: Option<&serde_json::Value>,
+    used: &HashSet<String>,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, GenericDrop> {
+    let mut raw: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    gather_generics_into(method_generics, &mut raw)?;
+    if let Some(ig) = impl_generics {
+        gather_generics_into(ig, &mut raw)?;
+        check_defaulted_params(ig, used)?;
+    }
+    if let Some(sg) = struct_generics {
+        gather_generics_into(sg, &mut raw)?;
+        check_defaulted_params(sg, used)?;
+    }
+    // Reduce each USED param's bound list to modellable trait names (C3); an
+    // unmodellable / non-reducible bound aborts the whole symbol.
+    let mut out: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (param, bounds) in &raw {
+        if !used.contains(param) {
+            continue; // an unused param's bounds never reach the wrapper sig
+        }
+        let mut names: Vec<String> = Vec::new();
+        for b in bounds {
+            if let Some(n) = classify_param_bound(b)? {
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+        names.sort();
+        out.insert(param.clone(), names);
+    }
+    Ok(out)
+}
+
+// ── Wall #3 parametric-stub builder (the bindable subset, Q1) ───────────
+
+/// Collect the NAMES of every `{generic:NAME}` node anywhere in a rustdoc type.
+fn collect_generic_names(val: &serde_json::Value, out: &mut HashSet<String>) {
+    if let Some(g) = val.get("generic").and_then(|g| g.as_str()) {
+        out.insert(g.to_string());
+    }
+    match val {
+        serde_json::Value::Object(o) => o.values().for_each(|v| collect_generic_names(v, out)),
+        serde_json::Value::Array(a) => a.iter().for_each(|v| collect_generic_names(v, out)),
+        _ => {}
+    }
+}
+
+/// The declaration-ordered list of TYPE-param names from a rustdoc `generics`
+/// object (skips const + lifetime params). Used to fix the stub's param order.
+fn type_param_order(generics: &serde_json::Value) -> Vec<String> {
+    generics
+        .get("params")
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|p| p.get("kind").and_then(|k| k.get("type")).is_some())
+                .filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a rustdoc `generics` object declares a const generic param (Q1 drop).
+fn has_const_generic(generics: &serde_json::Value) -> bool {
+    generics
+        .get("params")
+        .and_then(|p| p.as_array())
+        .map(|arr| arr.iter().any(|p| p.get("kind").and_then(|k| k.get("const")).is_some()))
+        .unwrap_or(false)
+}
+
+/// Map a rustdoc type to a Scheme-A `TypeRef`, given the stub's param-index map.
+/// Returns `Err(NotBindable)` for any shape outside the bindable subset (Q1):
+/// closures, trait-objects/`impl Trait`, borrowed/lifetime returns, tuples,
+/// slices/arrays, `dyn`, raw pointers — over-drop is acceptable, under-bind is
+/// not. The bindable shapes:
+///   * `{generic:NAME}` (NAME a stub param) → `TRParam(idx)`
+///   * a primitive → `TRPrim` (i64 / f64 / bool / char mapped to the closed set)
+///   * a resolved_path WITH all-bindable args → `TRCtor(::path::Name, [args…])`
+///     (the parametric-foreign receiver type, e.g. `IndexMap<K,V>`)
+fn type_to_typeref(
+    val: &serde_json::Value,
+    param_idx: &HashMap<String, usize>,
+) -> Result<TypeRef, GenericDrop> {
+    if let Some(g) = val.get("generic").and_then(|g| g.as_str()) {
+        return match param_idx.get(g) {
+            Some(i) => Ok(TypeRef::Param(*i)),
+            None => Err(GenericDrop::NotBindable(format!("free type-var `{g}`"))),
+        };
+    }
+    if let Some(p) = val.get("primitive").and_then(|p| p.as_str()) {
+        // Closed-set primitive mapping (Sky Int=i64, Float=f64).
+        let r = match p {
+            "i8" | "i16" | "i32" | "i64" | "isize"
+            | "u8" | "u16" | "u32" | "u64" | "usize" => "i64",
+            "f32" | "f64" => "f64",
+            "bool" => "bool",
+            "char" => "char",
+            "str" => "String",
+            other => return Err(GenericDrop::NotBindable(format!("primitive `{other}`"))),
+        };
+        return Ok(TypeRef::Prim(r.to_string()));
+    }
+    if let Some(rp) = val.get("resolved_path") {
+        // The receiver-foreign ctor (or a nested one). Render the `::`-path the
+        // SAME way rustdoc_type_to_rust_str does, then recurse into its args.
+        let raw_name = rp["name"].as_str().or_else(|| rp["path"].as_str()).unwrap_or("");
+        let qualified = rp.get("id").and_then(reachable_local_path);
+        let name: String = match qualified {
+            Some(full) => full,
+            None => raw_name.rsplit("::").next().unwrap_or(raw_name).to_string(),
+        };
+        // Force a leading `::` so the emitted Rust path is crate-absolute (the
+        // generated wrapper crate glob-imports nothing for these).
+        let path = if name.starts_with("::") { name } else { format!("::{name}") };
+        let args = rp
+            .get("args")
+            .and_then(|a| a.get("angle_bracketed"))
+            .and_then(|ab| ab.get("args"))
+            .and_then(|a| a.as_array());
+        let mut trefs: Vec<TypeRef> = Vec::new();
+        if let Some(arr) = args {
+            for arg in arr {
+                if let Some(t) = arg.get("type") {
+                    trefs.push(type_to_typeref(t, param_idx)?);
+                } else if arg.get("lifetime").is_some() {
+                    // A lifetime arg on the receiver type can't be expressed in
+                    // an owned monomorphic wrapper → drop.
+                    return Err(GenericDrop::NotBindable("lifetime type-arg".to_string()));
+                } else {
+                    return Err(GenericDrop::NotBindable("const type-arg".to_string()));
+                }
+            }
+        }
+        return Ok(TypeRef::Ctor(path, trefs));
+    }
+    // borrowed_ref / dyn_trait / impl_trait / function_pointer / tuple / slice /
+    // array / qualified_path / raw_pointer → outside the bindable subset.
+    Err(GenericDrop::NotBindable(describe_type_shape(val)))
+}
+
+/// Try to build a Wall #3 parametric `Generic` stub for one generic function.
+/// `recv` is `Some((sky, rust, struct_generics, impl_generics))` for a struct
+/// method, `None` for a free fn. Returns the stub or a `GenericDrop` reason.
+///
+/// Gated to the bindable subset (Q1): every generic param a simple TYPE param,
+/// every arg/return a stub-param / closed primitive / parametric-foreign ctor.
+/// The bound-union (C1-C5) is computed over the USED params; any non-reducible
+/// bound (C2/C3/C4) aborts.
+fn try_parametric_stub(
+    method_name: &str,
+    fn_data: &serde_json::Value,
+    recv: Option<(&str, &str)>,
+    impl_generics: Option<&serde_json::Value>,
+    struct_generics: Option<&serde_json::Value>,
+) -> Result<Generic, GenericDrop> {
+    let sig = fn_data
+        .get("sig")
+        .or_else(|| fn_data.get("decl"))
+        .ok_or_else(|| GenericDrop::NotBindable("no signature".to_string()))?;
+    let method_generics = &fn_data["generics"];
+
+    // Q1: a const generic ANYWHERE in scope (method/impl/struct) leaves the
+    // bindable subset.
+    for g in [Some(method_generics), impl_generics, struct_generics]
+        .into_iter()
+        .flatten()
+    {
+        if has_const_generic(g) {
+            return Err(GenericDrop::NotBindable("const generic".to_string()));
+        }
+    }
+
+    // The USED type-params: every {generic:N} appearing in inputs/output.
+    let mut used: HashSet<String> = HashSet::new();
+    if let Some(inputs) = sig["inputs"].as_array() {
+        for input in inputs {
+            collect_generic_names(&input[1], &mut used);
+        }
+    }
+    collect_generic_names(&sig["output"], &mut used);
+
+    // Param ORDER = declaration order across method, then impl, then struct,
+    // restricted to USED type-params, deduped. This fixes the {param:i} index
+    // and the Sky tyvar order (round-trips with the <A: …> clause).
+    let mut order: Vec<String> = Vec::new();
+    for src in [Some(method_generics), impl_generics, struct_generics]
+        .into_iter()
+        .flatten()
+    {
+        for name in type_param_order(src) {
+            if used.contains(&name) && !order.contains(&name) {
+                order.push(name);
+            }
+        }
+    }
+    // A used name that is NOT a declared type-param anywhere is a free/synthetic
+    // var we can't bind soundly → drop.
+    for u in &used {
+        if !order.contains(u) {
+            return Err(GenericDrop::NotBindable(format!("undeclared type-var `{u}`")));
+        }
+    }
+    let param_idx: HashMap<String, usize> =
+        order.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
+
+    // FULL-UNION bounds (C1-C5) over the USED params.
+    let bounds_map = full_union_bounds(method_generics, impl_generics, struct_generics, &used)?;
+
+    // Build the call AST.
+    let inputs = sig["inputs"].as_array().cloned().unwrap_or_default();
+    let has_self = inputs
+        .first()
+        .and_then(|i| i[0].as_str())
+        .map(|n| n == "self")
+        .unwrap_or(false);
+
+    // typeArgs = the stub params in order (turbofish on the path).
+    let type_args: Vec<TypeRef> = (0..order.len()).map(TypeRef::Param).collect();
+
+    // A free generic fn isn't in scope here — we only reach the bindable subset
+    // through a struct method/assoc-fn (the IndexMap-shaped target). The crate
+    // path for a free fn isn't cheaply available, so drop (over-drop ok, Q1).
+    let (_, recv_rust) = recv
+        .ok_or_else(|| GenericDrop::NotBindable("free generic fn (path unresolved)".to_string()))?;
+
+    // Callee path = the receiver type's `::`-path (sans any `<…>` suffix),
+    // crate-absolute. e.g. `::indexmap::IndexMap` → `["::indexmap", "IndexMap"]`.
+    let base = recv_rust.split('<').next().unwrap_or(recv_rust).trim();
+    let base = if base.starts_with("::") { base.to_string() } else { format!("::{base}") };
+    let path: Vec<String> = {
+        // split on "::" but keep the leading "::" attached to the first segment
+        // (matches the hand-stub `["::box1", "Box1"]` shape).
+        let trimmed = base.trim_start_matches(':');
+        let segs: Vec<&str> = trimmed.split("::").filter(|s| !s.is_empty()).collect();
+        match segs.split_first() {
+            Some((first, rest)) => {
+                let mut v = vec![format!("::{first}")];
+                v.extend(rest.iter().map(|s| s.to_string()));
+                v
+            }
+            None => vec![base.clone()],
+        }
+    };
+    // The receiver type as a TypeRef ctor at the stub params, for arg0's type.
+    let recv_ctor = TypeRef::Ctor(base.clone(), (0..order.len()).map(TypeRef::Param).collect());
+
+    // Receiver + value args. A method WITH a self input passes the receiver as
+    // value arg0 (owned-FFI convention); a static assoc fn has no receiver.
+    let mut arg_types: Vec<TypeRef> = Vec::new();
+    let mut next_arg: usize = 0;
+    let (receiver, kind): (Option<Receiver>, &str) = if has_self {
+        arg_types.push(recv_ctor);
+        next_arg += 1;
+        (Some(Receiver { arg: 0, by: "value".to_string() }), "method")
+    } else {
+        (None, "function")
+    };
+    let method = Some(method_name.to_string());
+
+    let mut args: Vec<usize> = receiver.as_ref().map(|r| vec![r.arg]).unwrap_or_default();
+    for input in &inputs {
+        if input[0].as_str() == Some("self") {
+            continue;
+        }
+        let tref = type_to_typeref(&input[1], &param_idx)?;
+        arg_types.push(tref);
+        args.push(next_arg);
+        next_arg += 1;
+    }
+
+    let ret = type_to_typeref(&sig["output"], &param_idx)?;
+
+    let bounds: std::collections::BTreeMap<String, Vec<String>> = bounds_map
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+
+    Ok(Generic {
+        params: order,
+        bounds,
+        call: Call {
+            kind: kind.to_string(),
+            path,
+            type_args,
+            method,
+            receiver,
+            args,
+            arg_types,
+            ret,
+        },
+    })
+}
+
+/// Look up the struct DEFINITION's `generics` for a `for`-type rustdoc node, by
+/// resolving its `resolved_path.id` against the index (C1). `None` when the
+/// receiver isn't a crate-local struct we can resolve.
+fn struct_generics_of<'a>(
+    for_val: &serde_json::Value,
+    index: &'a serde_json::Map<String, serde_json::Value>,
+) -> Option<&'a serde_json::Value> {
+    let id = for_val.get("resolved_path").and_then(|rp| rp.get("id"))?;
+    let id_s = item_id_to_str(id);
+    let item = index.get(&id_s)?;
+    item["inner"].get("struct").map(|_| &item["inner"]["struct"]["generics"])
+}
+
+/// True when a method is GENERIC-BEARING: it (or its owning impl, or the struct
+/// def) declares a TYPE param that the method's signature USES. A method that
+/// uses no type param (even inside a `impl<K,V>`) binds at the existing concrete
+/// path — only a sig that actually mentions a param needs the parametric stub.
+fn method_is_generic_bearing(
+    fn_data: &serde_json::Value,
+    impl_generics: Option<&serde_json::Value>,
+    struct_generics: Option<&serde_json::Value>,
+) -> bool {
+    let sig = match fn_data.get("sig").or_else(|| fn_data.get("decl")) {
+        Some(s) => s,
+        None => return false,
+    };
+    let mut used: HashSet<String> = HashSet::new();
+    if let Some(inputs) = sig["inputs"].as_array() {
+        for input in inputs {
+            collect_generic_names(&input[1], &mut used);
+        }
+    }
+    collect_generic_names(&sig["output"], &mut used);
+    if used.is_empty() {
+        return false;
+    }
+    // At least one used name must be a declared TYPE param somewhere in scope.
+    let declared: HashSet<String> = [Some(&fn_data["generics"]), impl_generics, struct_generics]
+        .into_iter()
+        .flatten()
+        .flat_map(type_param_order)
+        .collect();
+    used.iter().any(|u| declared.contains(u))
+}
+
+/// Build the FFI `Function` for a parametric generic stub: the Sky-facing sig
+/// uses lowercased tyvars (`k`/`v`), the receiver renders as the Wall-#1
+/// parametric Sky type (`IndexMap k v`), and the `generic` block carries the
+/// typed call-AST + bounds for codegen. `None` if the sig can't be rendered.
+fn parametric_function(
+    method_name: &str,
+    fn_data: &serde_json::Value,
+    self_sky: &str,
+    self_rust: &str,
+    generic: Generic,
+) -> Option<Function> {
+    let sig = fn_data.get("sig").or_else(|| fn_data.get("decl"))?;
+    let inputs = sig["inputs"].as_array()?;
+    let has_self = inputs
+        .first()
+        .and_then(|i| i[0].as_str())
+        .map(|n| n == "self")
+        .unwrap_or(false);
+
+    // Sky tyvar names = the lowercased stub params (Wall #1 round-trip: Sky `k`
+    // ↔ Rust `<K>`). The receiver Sky type is the parametric foreign type with
+    // its tyvar args, e.g. `IndexMap k v`.
+    let tyvars: Vec<String> = generic.params.iter().map(|p| lower_first(p)).collect();
+    let recv_sky_parametric = parametric_sky_type(self_sky, &tyvars);
+
+    // Render a Sky type for a `TypeRef` (used for the value-arg + ret Sky sides).
+    let sky_of = |tr: &TypeRef| sky_of_typeref(tr, &tyvars, self_sky);
+
+    let mut params: Vec<Param> = Vec::new();
+    // Receiver param (arg0) for a method with self.
+    let mut at = 0usize;
+    if has_self {
+        params.push(Param {
+            name: "self".into(),
+            ty: recv_sky_parametric.clone(),
+            sky_type: recv_sky_parametric.clone(),
+            rust_type: self_rust.to_string(),
+        });
+        at += 1;
+    }
+    // Value args (non-self inputs), Sky types from the call's argTypes.
+    for input in inputs {
+        if input[0].as_str() == Some("self") {
+            continue;
+        }
+        let pname = input[0].as_str().unwrap_or("_").to_string();
+        let tref = generic.call.arg_types.get(at)?;
+        let sky = sky_of(tref);
+        params.push(Param {
+            name: pname,
+            ty: sky.clone(),
+            sky_type: sky,
+            rust_type: String::new(),
+        });
+        at += 1;
+    }
+
+    // Result.
+    let mut results: Vec<Param> = Vec::new();
+    let ret_sky = sky_of(&generic.call.ret);
+    if ret_sky != "()" {
+        results.push(Param {
+            name: String::new(),
+            ty: ret_sky.clone(),
+            sky_type: ret_sky,
+            rust_type: String::new(),
+        });
+    }
+
+    Some(Function {
+        name: method_name.to_string(),
+        params,
+        results,
+        effect: "pure".into(),
+        exported: true,
+        recv_type: recv_sky_parametric.clone(),
+        recv_rust_type: self_rust.to_string(),
+        method_name: method_name.to_string(),
+        generic: Some(generic),
+        ..Default::default()
+    })
+}
+
+/// Lowercase the first character of a Rust type-param name (`K` → `k`) for the
+/// Sky tyvar. Total on empty.
+fn lower_first(s: &str) -> String {
+    let mut cs = s.chars();
+    match cs.next() {
+        Some(c) => c.to_lowercase().collect::<String>() + cs.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Render the Wall-#1 parametric Sky type for a receiver: the bare Sky type name
+/// (the receiver's `self_sky` with any existing tyvar suffix stripped) followed
+/// by the stub's lowercased tyvars, e.g. `IndexMap` + `[k,v]` → `IndexMap k v`.
+fn parametric_sky_type(self_sky: &str, tyvars: &[String]) -> String {
+    // self_sky may already be `IndexMap k v` (rustdoc_type_to_sky renders the
+    // generic args). Take only the head constructor token.
+    let head = self_sky.split_whitespace().next().unwrap_or(self_sky);
+    if tyvars.is_empty() {
+        head.to_string()
+    } else {
+        format!("{head} {}", tyvars.join(" "))
+    }
+}
+
+/// Render a `TypeRef` as a Sky type string (parametric — tyvars, not concretes).
+fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
+    match tr {
+        TypeRef::Param(i) => tyvars.get(*i).cloned().unwrap_or_else(|| "a".to_string()),
+        TypeRef::Prim(p) => match p.as_str() {
+            "i64" => "Int".to_string(),
+            "f64" => "Float".to_string(),
+            "bool" => "Bool".to_string(),
+            "char" => "Char".to_string(),
+            "String" => "String".to_string(),
+            other => other.to_string(),
+        },
+        TypeRef::Ctor(name, args) => {
+            // The receiver/foreign ctor: use the Sky head from self_sky when the
+            // path matches the receiver; otherwise the last `::` segment.
+            let head = {
+                let last = name.rsplit("::").next().unwrap_or(name);
+                // Prefer the receiver's Sky name for the receiver ctor.
+                if self_sky.split_whitespace().next() == Some(last) {
+                    self_sky.split_whitespace().next().unwrap_or(last).to_string()
+                } else {
+                    last.to_string()
+                }
+            };
+            if args.is_empty() {
+                head
+            } else {
+                let parts: Vec<String> = args
+                    .iter()
+                    .map(|a| {
+                        let s = sky_of_typeref(a, tyvars, self_sky);
+                        if s.contains(' ') { format!("({s})") } else { s }
+                    })
+                    .collect();
+                format!("{head} {}", parts.join(" "))
+            }
+        }
+    }
+}
+
 /// Resolve a parameter's full bound list to a single concrete node, or `None`
 /// (drop) if: only markers (no type pinned), an unmappable non-marker bound, or
 /// two disagreeing shape bounds.
@@ -3939,5 +4917,233 @@ mod tests {
         assert_eq!(f4.params[0].sky_type, "List Int");
         assert_eq!(f4.params[0].rust_type, "&[u8]");
         assert_eq!(f4.results[0].sky_type, "List Int");
+    }
+
+    // ── Wall #3 — bound-union (C1-C5), modellable-5 drift (4a), stub shape ──
+
+    fn gnode(name: &str) -> serde_json::Value {
+        serde_json::json!({ "generic": name })
+    }
+    fn generics_obj(params: Vec<serde_json::Value>, wheres: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({ "params": params, "where_predicates": wheres })
+    }
+
+    #[test]
+    fn test_modellable_5_matches() {
+        // Drift fence 4a (Rust side): the inspector's MODELLABLE_5 is EXACTLY
+        // {Hash,Eq,Ord,Clone,Default}. The Haskell side asserts the same set in
+        // FfiInstanceSpec — if either drifts, one of the two fails.
+        let mut got: Vec<&str> = MODELLABLE_5.to_vec();
+        got.sort_unstable();
+        assert_eq!(got, vec!["Clone", "Default", "Eq", "Hash", "Ord"]);
+        assert!(is_modellable_5("Hash"));
+        assert!(!is_modellable_5("Serialize"));
+        // Distinct from the marker SUPERSET — do not conflate.
+        assert!(MARKER_TRAITS.len() > MODELLABLE_5.len());
+    }
+
+    #[test]
+    fn test_c1_full_union_from_impl_and_struct() {
+        // C1: the bound `K: Hash+Eq` lives on the IMPL generics, NOT the method.
+        // The union must pick it up for the USED param K.
+        let method_g = generics_obj(vec![], vec![]);
+        let impl_g = generics_obj(
+            vec![type_param("K", vec![trait_bound("Hash", vec![]), trait_bound("Eq", vec![])]),
+                 type_param("V", vec![])],
+            vec![]);
+        let struct_g = generics_obj(
+            vec![type_param("K", vec![]), type_param("V", vec![])], vec![]);
+        let used: HashSet<String> = ["K", "V"].iter().map(|s| s.to_string()).collect();
+        let union = full_union_bounds(&method_g, Some(&impl_g), Some(&struct_g), &used).unwrap();
+        assert_eq!(union.get("K"), Some(&vec!["Eq".to_string(), "Hash".to_string()]));
+        // V has no bound → empty list.
+        assert_eq!(union.get("V"), Some(&Vec::<String>::new()));
+    }
+
+    #[test]
+    fn test_c1_union_via_where_predicate() {
+        // Same bound supplied via the impl's where_predicates (the IndexMap shape).
+        let method_g = generics_obj(vec![], vec![]);
+        let wp = serde_json::json!({ "bound_predicate": {
+            "type": gnode("K"),
+            "bounds": [trait_bound("Hash", vec![]), trait_bound("Eq", vec![])] } });
+        let impl_g = generics_obj(vec![type_param("K", vec![])], vec![wp]);
+        let used: HashSet<String> = ["K"].iter().map(|s| s.to_string()).collect();
+        let union = full_union_bounds(&method_g, Some(&impl_g), None, &used).unwrap();
+        assert_eq!(union.get("K"), Some(&vec!["Eq".to_string(), "Hash".to_string()]));
+    }
+
+    #[test]
+    fn test_c2_non_generic_predicate_drops() {
+        // C2: a where-pred subject that is an associated-type projection
+        // (`qualified_path`) — NOT a plain {generic} — must DROP, never skip.
+        let method_g = generics_obj(vec![], vec![]);
+        let wp = serde_json::json!({ "bound_predicate": {
+            "type": { "qualified_path": { "name": "Item", "self_type": gnode("K") } },
+            "bounds": [trait_bound("Hash", vec![])] } });
+        let impl_g = generics_obj(vec![type_param("K", vec![])], vec![wp]);
+        let used: HashSet<String> = ["K"].iter().map(|s| s.to_string()).collect();
+        match full_union_bounds(&method_g, Some(&impl_g), None, &used) {
+            Err(GenericDrop::NonGenericPredicate(_)) => {}
+            other => panic!("expected NonGenericPredicate drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_c3_unmodellable_bound_drops() {
+        // C3: a real, non-marker trait outside the modellable-5 (Serialize) on a
+        // used param ⇒ unmodellable-bound DROP.
+        let method_g = generics_obj(
+            vec![type_param("T", vec![trait_bound("Serialize", vec![])])], vec![]);
+        let used: HashSet<String> = ["T"].iter().map(|s| s.to_string()).collect();
+        match full_union_bounds(&method_g, None, None, &used) {
+            Err(GenericDrop::UnmodellableBound(t)) => assert_eq!(t, "Serialize"),
+            other => panic!("expected UnmodellableBound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_c3_modellable_super_closure_ok() {
+        // Ord (super: PartialOrd + Eq — all marker/modellable) is admissible.
+        let method_g = generics_obj(
+            vec![type_param("T", vec![trait_bound("Ord", vec![])])], vec![]);
+        let used: HashSet<String> = ["T"].iter().map(|s| s.to_string()).collect();
+        let union = full_union_bounds(&method_g, None, None, &used).unwrap();
+        assert_eq!(union.get("T"), Some(&vec!["Ord".to_string()]));
+    }
+
+    #[test]
+    fn test_c4_defaulted_bound_param_drops_when_used() {
+        // C4: a struct/impl type-param with a DEFAULT (S = RandomState) carrying
+        // a real bound (BuildHasher) ⇒ DROP when S is USED by the method.
+        let s_default = serde_json::json!({
+            "name": "S",
+            "kind": { "type": {
+                "bounds": [trait_bound("BuildHasher", vec![])],
+                "default": { "resolved_path": { "name": "RandomState", "path": "RandomState", "id": 0, "args": null } },
+                "is_synthetic": false } } });
+        let struct_g = generics_obj(vec![type_param("K", vec![]), s_default], vec![]);
+        let used_with_s: HashSet<String> = ["K", "S"].iter().map(|s| s.to_string()).collect();
+        match check_defaulted_params(&struct_g, &used_with_s) {
+            Err(GenericDrop::DefaultedBoundParam(p)) => assert_eq!(p, "S"),
+            other => panic!("expected DefaultedBoundParam, got {other:?}"),
+        }
+        // …but a defaulted+bounded param that is UNUSED is provably erased → ok.
+        let used_no_s: HashSet<String> = ["K"].iter().map(|s| s.to_string()).collect();
+        assert!(check_defaulted_params(&struct_g, &used_no_s).is_ok());
+    }
+
+    // Build an `IndexMap<K,V>`-shaped inherent method fn_data:
+    //   pub fn get(map: IndexMap<K,V>, key: K) -> Option<V>   (static assoc fn)
+    fn indexmap_get_fn() -> serde_json::Value {
+        serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["map", path_with_args("IndexMap", vec![gnode("K"), gnode("V")])],
+                ["key", gnode("K")]
+            ], "output": path_with_args("Option", vec![gnode("V")]) }
+        })
+    }
+
+    #[test]
+    fn test_try_parametric_stub_indexmap_shape() {
+        // The impl `impl<K: Hash+Eq, V> IndexMap<K,V>` carries the K bound.
+        let impl_g = generics_obj(
+            vec![type_param("K", vec![trait_bound("Hash", vec![]), trait_bound("Eq", vec![])]),
+                 type_param("V", vec![])],
+            vec![]);
+        let struct_g = generics_obj(
+            vec![type_param("K", vec![]), type_param("V", vec![])], vec![]);
+        let stub = try_parametric_stub(
+            "get",
+            &indexmap_get_fn(),
+            Some(("IndexMap k v", "::indexmap::IndexMap<K, V>")),
+            Some(&impl_g),
+            Some(&struct_g),
+        ).expect("IndexMap::get should bind parametrically");
+
+        // params in declaration order, USED → [K, V].
+        assert_eq!(stub.params, vec!["K".to_string(), "V".to_string()]);
+        // FULL-UNION bound: K: Eq+Hash (from the impl), V: none.
+        assert_eq!(stub.bounds.get("K"), Some(&vec!["Eq".to_string(), "Hash".to_string()]));
+        assert_eq!(stub.bounds.get("V"), None); // empty filtered out
+        // Call AST: static assoc fn (no self input) → function, no receiver.
+        assert_eq!(stub.call.kind, "function");
+        assert!(stub.call.receiver.is_none());
+        assert_eq!(stub.call.path, vec!["::indexmap".to_string(), "IndexMap".to_string()]);
+        assert_eq!(stub.call.method.as_deref(), Some("get"));
+        assert_eq!(stub.call.type_args, vec![TypeRef::Param(0), TypeRef::Param(1)]);
+        // args: map (arg0, the IndexMap<K,V> ctor) + key (arg1, param K).
+        // The arg ctor path comes from the rustdoc node's resolved name; with a
+        // synthetic id:0 it's the bare `::IndexMap` (a real crate resolves the
+        // full `::indexmap::IndexMap` via reachable_local_path). The CALLEE path
+        // (stub.call.path) is the full one from the receiver rust type.
+        assert_eq!(stub.call.args, vec![0, 1]);
+        assert_eq!(stub.call.arg_types, vec![
+            TypeRef::Ctor("::IndexMap".to_string(),
+                vec![TypeRef::Param(0), TypeRef::Param(1)]),
+            TypeRef::Param(0),
+        ]);
+        // ret: Option<V> → in the bindable subset Option is a resolved_path ctor.
+        assert_eq!(stub.call.ret,
+            TypeRef::Ctor("::Option".to_string(), vec![TypeRef::Param(1)]));
+    }
+
+    #[test]
+    fn test_try_parametric_stub_drops_serialize_method() {
+        // A method whose impl carries an unmodellable Serialize bound on a USED
+        // param ⇒ C3 drop (no partial-bounds stub).
+        let impl_g = generics_obj(
+            vec![type_param("T", vec![trait_bound("Serialize", vec![])])], vec![]);
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [["x", gnode("T")]], "output": gnode("T") }
+        });
+        match try_parametric_stub("id", &fd, Some(("Wrap t", "::w::Wrap<T>")), Some(&impl_g), None) {
+            Err(GenericDrop::UnmodellableBound(t)) => assert_eq!(t, "Serialize"),
+            other => panic!("expected UnmodellableBound drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_safe_crate_name() {
+        // #6: only [A-Za-z0-9_-]; reject path-traversal / NUL / empty.
+        assert_eq!(safe_crate_name("indexmap"), Some("indexmap"));
+        assert_eq!(safe_crate_name("serde_json"), Some("serde_json"));
+        assert_eq!(safe_crate_name("foo-bar"), Some("foo-bar"));
+        assert_eq!(safe_crate_name("../etc/passwd"), None);
+        assert_eq!(safe_crate_name("a/b"), None);
+        assert_eq!(safe_crate_name("a\0b"), None);
+        assert_eq!(safe_crate_name(""), None);
+    }
+
+    #[test]
+    fn test_generic_serde_shape() {
+        // The emitted `generic` JSON must match the wire keys the Haskell
+        // FromJSON reads (drift 4b — Rust emission side).
+        let g = Generic {
+            params: vec!["K".into(), "V".into()],
+            bounds: [("K".to_string(), vec!["Hash".to_string()])].into_iter().collect(),
+            call: Call {
+                kind: "function".into(),
+                path: vec!["::c".into(), "T".into()],
+                type_args: vec![TypeRef::Param(0)],
+                method: Some("make".into()),
+                receiver: None,
+                args: vec![0],
+                arg_types: vec![TypeRef::Param(0)],
+                ret: TypeRef::Ctor("::c::T".into(), vec![TypeRef::Param(0)]),
+            },
+        };
+        let v = serde_json::to_value(&g).unwrap();
+        assert_eq!(v["params"], serde_json::json!(["K", "V"]));
+        assert_eq!(v["call"]["kind"], "function");
+        assert_eq!(v["call"]["typeArgs"], serde_json::json!([{ "param": 0 }]));
+        assert_eq!(v["call"]["argTypes"], serde_json::json!([{ "param": 0 }]));
+        assert_eq!(v["call"]["ret"], serde_json::json!({ "ctor": "::c::T", "args": [{ "param": 0 }] }));
+        // a function call must NOT serialise a receiver key.
+        assert!(v["call"].get("receiver").is_none());
     }
 }

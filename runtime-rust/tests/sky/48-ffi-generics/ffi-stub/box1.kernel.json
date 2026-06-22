@@ -10,7 +10,15 @@
       "generic": {
         "params": ["a"],
         "bounds": {},
-        "rustTemplate": "// ret: ::box1::Box1<{a}>\n::box1::Box1::<{a}>::make({arg0})"
+        "call": {
+          "kind": "function",
+          "path": ["::box1", "Box1"],
+          "typeArgs": [{"param": 0}],
+          "method": "make",
+          "args": [0],
+          "argTypes": [{"param": 0}],
+          "ret": {"ctor": "::box1::Box1", "args": [{"param": 0}]}
+        }
       }
     },
     {
@@ -20,7 +28,15 @@
       "generic": {
         "params": ["a"],
         "bounds": {},
-        "rustTemplate": "// ret: {a}\n// arg0: ::box1::Box1<{a}>\n::box1::Box1::<{a}>::get({arg0})"
+        "call": {
+          "kind": "function",
+          "path": ["::box1", "Box1"],
+          "typeArgs": [{"param": 0}],
+          "method": "get",
+          "args": [0],
+          "argTypes": [{"ctor": "::box1::Box1", "args": [{"param": 0}]}],
+          "ret": {"param": 0}
+        }
       }
     },
     {
@@ -30,7 +46,15 @@
       "generic": {
         "params": ["a"],
         "bounds": {"a": ["Hash", "Eq", "Clone"]},
-        "rustTemplate": "// ret: ::box1::Keyed<{a}>\n::box1::Keyed::<{a}>::make({arg0})"
+        "call": {
+          "kind": "function",
+          "path": ["::box1", "Keyed"],
+          "typeArgs": [{"param": 0}],
+          "method": "make",
+          "args": [0],
+          "argTypes": [{"param": 0}],
+          "ret": {"ctor": "::box1::Keyed", "args": [{"param": 0}]}
+        }
       }
     },
     {
@@ -40,7 +64,15 @@
       "generic": {
         "params": ["a"],
         "bounds": {"a": ["Hash", "Eq", "Clone"]},
-        "rustTemplate": "// ret: i64\n// arg0: ::box1::Keyed<{a}>\n::box1::Keyed::<{a}>::count({arg0})"
+        "call": {
+          "kind": "function",
+          "path": ["::box1", "Keyed"],
+          "typeArgs": [{"param": 0}],
+          "method": "count",
+          "args": [0],
+          "argTypes": [{"ctor": "::box1::Keyed", "args": [{"param": 0}]}],
+          "ret": {"prim": "i64"}
+        }
       }
     },
     {
@@ -50,7 +82,15 @@
       "generic": {
         "params": ["a"],
         "bounds": {"a": ["Serialize"]},
-        "rustTemplate": "// ret: ::box1::Tagged<{a}>\n::box1::Tagged::<{a}>::make({arg0})"
+        "call": {
+          "kind": "function",
+          "path": ["::box1", "Tagged"],
+          "typeArgs": [{"param": 0}],
+          "method": "make",
+          "args": [0],
+          "argTypes": [{"param": 0}],
+          "ret": {"ctor": "::box1::Tagged", "args": [{"param": 0}]}
+        }
       }
     }
   ]

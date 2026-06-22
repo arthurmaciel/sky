@@ -77,6 +77,7 @@ import qualified Data.Set as Set
 
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Build.FfiRegistry as FfiReg
+import Sky.Build.Rust.FfiCall (callArity, renderArgType, renderCall, renderRetType)
 import Sky.Generate.Rust.Builder.Naming (mangleTVar)
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Reporting.Diagnostic as Diag
@@ -374,7 +375,7 @@ synthesiseGenericWrappers fns =
     in (oks, bad)
 
 
--- | Synthesise ONE generic wrapper. Emits
+-- | Synthesise ONE generic wrapper from the Scheme-A typed call-AST. Emits
 --
 -- @
 -- pub fn <base><T: bound + …>(arg0: <argTy0>, …) -> SkyResult<SkyError, <Ret>> {
@@ -382,115 +383,79 @@ synthesiseGenericWrappers fns =
 -- }
 -- @
 --
--- where:
+-- where, walking the validated 'FfiCall.Call':
 --
 --   * @<T: …>@ joins the per-param bounds (from @_fg_bounds@) rendered via
 --     'traitToRustPath'. A param with no bound emits a bare @T@.
---   * @<Ret>@ is the template's leading @// ret: <type>@ marker, with @{param}@
---     holes kept as the generic param names (so @::box1::Box1<{T}>@ →
---     @::box1::Box1<T>@).
---   * @<body>@ is the template (sans the @// ret:@ line) with @{param}@ →
---     param name and @{argJ}@ → @argJ@.
---   * @<argTyJ>@ — the wrapper's value-arg types — are the J-th type-param
---     name for the hand-stub's @make : a -> Box1 a@ shape (arity == #params).
+--   * @<Ret>@ is 'FfiCall.renderRetType' over the call's @ret@ TypeRef, with
+--     @{param:i}@ refs rendered as the mangled generic name (@a → A@).
+--   * @<body>@ is 'FfiCall.renderCall' — path + turbofish type-args + receiver
+--     (borrow-formed) + value-args. No string substitution: the AST IS the
+--     structure, so there is no hole to leak (the retired @{hole}@ failure
+--     mode is unrepresentable, and the parse-time 'FfiCall.validateCall'
+--     already proved every ref is in range + gap-free).
+--   * @<argTyJ>@ — the wrapper's value-arg Rust types — are taken from the
+--     per-param @_fg_argTypes@ marker family rendered the same way; absent →
+--     the J-th type-param (the @make : a -> Box1 a@ shape, arg == param).
 --
--- Rejections (return 'WrapperRejected'):
---   * a declared bound is not modellable (F1 — never emit-and-hope);
---   * the template has no @// ret:@ marker (can't emit a valid @-> <Ret>@).
+-- The ONLY remaining rejection is F1: a declared bound outside the modellable
+-- @{Hash,Eq,Ord,Clone,Default}@ table (never emit-and-hope a crate trait). The
+-- template-marker rejections (@// ret:@ missing, unknown @{hole}@, arg-index
+-- gap) are GONE — the typed AST + its parse-time validity replace them.
 synthesiseGenericWrapper :: GenericFn -> WrapperResult
 synthesiseGenericWrapper gf =
-    let gen      = _gf_generic gf
-        params   = FfiReg._fg_params gen
-        bounds   = FfiReg._fg_bounds gen
-        template = FfiReg._fg_template gen
+    let gen    = _gf_generic gf
+        params = FfiReg._fg_params gen
+        bounds = FfiReg._fg_bounds gen
+        call   = FfiReg._fg_call gen
         -- F1: any declared bound outside the modellable table → reject.
         unmodellable =
             [ (p, t)
             | p <- params
             , t <- Map.findWithDefault [] p bounds
             , not (modellableTrait t) ]
-        markers   = leadingMarkers template
-        body      = stripLeadingMarkers template
-        -- Every `{...}` hole anywhere in the template (markers' values + body).
-        allHoles  = collectHoles template
-        -- Holes split into `argN` value-holes (carrying their index) and
-        -- everything else (which MUST be a declared type-param `{p}`).
-        argIdxs   = [ j | h <- allHoles, Just j <- [argHoleIndex h] ]
-        nonArg    = [ h | h <- allHoles, argHoleIndex h == Nothing ]
-        -- The wrapper's VALUE-arg count: one past the max `{argJ}` index, so
-        -- the param list always covers every referenced hole (densely — the
-        -- coverage gate below rejects a gap, so this can't undercount).
-        arity     = if null argIdxs then 0 else maximum argIdxs + 1
-        -- COVERAGE (guardian): prove every hole is substitutable BEFORE
-        -- emitting, so a malformed template can never leak an un-substituted
-        -- `{…}` into the Rust (which would be a cargo-fail with no Sky
-        -- diagnostic — the exact failure mode this epic eliminates). Two ways
-        -- a hole is unsubstitutable: a NON-arg hole that isn't a declared
-        -- type-param, OR a GAP in the arg indices (`{arg0}` + `{arg2}` skips
-        -- `{arg1}`, so `arg1` would never be a wrapper param).
-        unknownParamHoles = [ h | h <- nub' nonArg, h `notElem` params ]
-        argGaps = [ j | j <- [0 .. arity - 1], j `notElem` argIdxs ]
     in case unmodellable of
         ((p, t) : _) -> WrapperRejected (mkUnmodellableFnError gf p t)
-        [] | (h : _) <- unknownParamHoles ->
-               WrapperRejected (mkUnknownHoleError gf h)
-           | (j : _) <- argGaps ->
-               WrapperRejected (mkArgGapError gf j)
-        _ -> case lookup "ret" markers of
-            Nothing -> WrapperRejected (mkMissingRetError gf)
-            Just retTy ->
-                let -- σ_type: {param} → the UpperCamelCase Rust generic name
-                    -- (`a` → `A`); Sky type-var names are lowercase-leading and
-                    -- would trip `non_camel_case_types`. Applied IDENTICALLY at
-                    -- the decl, bounds, arg types, ret, and body `::<…>` so the
-                    -- one mangled name is referenced consistently.
-                    typeSubst = [ ("{" ++ p ++ "}", mangleTVar p) | p <- params ]
-                    argSubst  = [ ("{arg" ++ show j ++ "}", "arg" ++ show j)
-                                | j <- [0 .. arity - 1] ]
-                    bodyR  = applySubsts (typeSubst ++ argSubst) body
-                    retR   = applySubsts typeSubst retTy
-                    -- <T: bound + …> per param; bare param when unbounded.
-                    paramDecls =
-                        [ case mapMaybe traitToRustPath
-                                  (Map.findWithDefault [] p bounds) of
-                            []    -> mangleTVar p
-                            paths -> mangleTVar p ++ ": " ++ intercalate " + " paths
-                        | p <- params ]
-                    generics
-                        | null paramDecls = ""
-                        | otherwise = "<" ++ intercalate ", " paramDecls ++ ">"
-                    -- Wrapper value-arg J's Rust type: an explicit `// argJ:`
-                    -- marker when present (needed whenever the arg is NOT a
-                    -- bare type-param — e.g. `get : Box1 a -> a` whose arg is
-                    -- the foreign `::box1::Box1<a>`, `keyedCount : Keyed a ->
-                    -- Int` whose arg is `::box1::Keyed<a>`). Absent → the
-                    -- J-th type-param (the `make : a -> Box1 a` shape, arg ==
-                    -- param). `{param}` holes in the marker resolve to the
-                    -- param name. This keeps every parametric-foreign arg type
-                    -- CONCRETE (F2) with the crate path author-supplied (same
-                    -- contract as `// ret:`).
-                    valArgTypes =
-                        [ case lookup ("arg" ++ show j) markers of
-                            Just m  -> applySubsts typeSubst m
-                            Nothing -> case drop j params of
-                                (p : _) -> mangleTVar p
-                                []      -> "String"  -- defensive; never hit
-                        | j <- [0 .. arity - 1] ]
-                    paramDecl
-                        | arity == 0 = "_: ()"
-                        | otherwise  = intercalate ", "
-                            [ "arg" ++ show j ++ ": " ++ t
-                            | (j, t) <- zip [0 :: Int ..] valArgTypes ]
-                    src = unlines
-                        [ "// [ffi-generic] " ++ _gf_baseName gf
-                            ++ " <" ++ intercalate ", " params ++ ">"
-                        , "pub fn " ++ _gf_baseName gf ++ generics
-                            ++ "(" ++ paramDecl ++ ") -> SkyResult<SkyError, "
-                            ++ retR ++ "> {"
-                        , "    ok_res(" ++ bodyR ++ ")"
-                        , "}"
-                        ]
-                in WrapperOk (_gf_kernelName gf) (_gf_refName gf) src
+        [] ->
+            let -- The wrapper's value-arg count, derived from the call's
+                -- receiver + value-arg refs (validated gap-free at parse).
+                arity = callArity call
+                -- <Ret> and <body> walked from the validated AST. mangleTVar
+                -- (`a → A`) is applied INSIDE renderCall/renderRetType so the
+                -- one mangled name matches the <A: …> decl below.
+                retR  = renderRetType call params
+                bodyR = renderCall call params
+                -- <T: bound + …> per param; bare param when unbounded.
+                paramDecls =
+                    [ case mapMaybe traitToRustPath
+                              (Map.findWithDefault [] p bounds) of
+                        []    -> mangleTVar p
+                        paths -> mangleTVar p ++ ": " ++ intercalate " + " paths
+                    | p <- params ]
+                generics
+                    | null paramDecls = ""
+                    | otherwise = "<" ++ intercalate ", " paramDecls ++ ">"
+                -- Wrapper value-arg J's Rust type, walked from the per-arg
+                -- TypeRef in the call's argTypes (a parametric-foreign arg such
+                -- as `::box1::Box1<A>` for `get`, or the bare type-param `A`
+                -- for `make`). Renders to a CONCRETE Rust type (F2).
+                valArgTypes =
+                    [ renderArgType call params j | j <- [0 .. arity - 1] ]
+                paramDecl
+                    | arity == 0 = "_: ()"
+                    | otherwise  = intercalate ", "
+                        [ "arg" ++ show j ++ ": " ++ t
+                        | (j, t) <- zip [0 :: Int ..] valArgTypes ]
+                src = unlines
+                    [ "// [ffi-generic] " ++ _gf_baseName gf
+                        ++ " <" ++ intercalate ", " params ++ ">"
+                    , "pub fn " ++ _gf_baseName gf ++ generics
+                        ++ "(" ++ paramDecl ++ ") -> SkyResult<SkyError, "
+                        ++ retR ++ "> {"
+                    , "    ok_res(" ++ bodyR ++ ")"
+                    , "}"
+                    ]
+            in WrapperOk (_gf_kernelName gf) (_gf_refName gf) src
 
 
 mkUnmodellableFnError :: GenericFn -> String -> String -> Diag.Diagnostic
@@ -505,147 +470,6 @@ mkUnmodellableFnError gf pname trait =
             ++ "generic FFI wrapper at the concrete type(s) you need.")
         (Diag.mkError (_gf_file gf) (_gf_region gf)
             Diag.CatCodegen Diag.ffiE_GenericNotBindable msg)
-
-
-mkMissingRetError :: GenericFn -> Diag.Diagnostic
-mkMissingRetError gf =
-    Diag.withHint
-        ("Add a leading `// ret: <RustType>` line to the `rustTemplate` for `"
-            ++ _gf_baseName gf ++ "` in its kernel.json.")
-        (Diag.mkError (_gf_file gf) (_gf_region gf)
-            Diag.CatCodegen Diag.ffiE_GenericNotBindable
-            ("The generic FFI binding `" ++ _gf_baseName gf
-                ++ "` is missing a `// ret:` return-type marker in its Rust "
-                ++ "template; cannot synthesise a concrete wrapper."))
-
-
--- | A @{hole}@ in the template that is neither an @argN@ value-hole nor a
--- declared type-param — it would leak un-substituted into the emitted Rust
--- (a cargo-fail with no Sky diagnostic), so the wrapper is rejected instead.
-mkUnknownHoleError :: GenericFn -> String -> Diag.Diagnostic
-mkUnknownHoleError gf hole =
-    Diag.withHint
-        ("Use `{argN}` for value args and `{<param>}` only for a type "
-            ++ "parameter declared in the `generic.params` list.")
-        (Diag.mkError (_gf_file gf) (_gf_region gf)
-            Diag.CatCodegen Diag.ffiE_GenericNotBindable
-            ("The generic FFI binding `" ++ _gf_baseName gf
-                ++ "`'s Rust template references an unknown hole `{" ++ hole
-                ++ "}` that is neither a value arg (`{argN}`) nor a declared "
-                ++ "type parameter; cannot synthesise a sound wrapper."))
-
-
--- | A gap in the @{argN}@ value-hole indices (e.g. @{arg0}@ + @{arg2}@ with no
--- @{arg1}@) — the missing index would never become a wrapper parameter, so a
--- referenced @{argN}@ could leak. Rejected.
-mkArgGapError :: GenericFn -> Int -> Diag.Diagnostic
-mkArgGapError gf j =
-    Diag.withHint
-        "Use contiguous value-arg holes `{arg0}`, `{arg1}`, … with no gaps."
-        (Diag.mkError (_gf_file gf) (_gf_region gf)
-            Diag.CatCodegen Diag.ffiE_GenericNotBindable
-            ("The generic FFI binding `" ++ _gf_baseName gf
-                ++ "`'s Rust template skips value-arg `{arg" ++ show j
-                ++ "}`; value-arg holes must be contiguous from `{arg0}`."))
-
-
--- ─── template helpers ────────────────────────────────────────────────
-
-
--- | Parse the CONTIGUOUS leading @// key: value@ marker lines off a template
--- into @(key, value)@ pairs (value @{param}@ holes intact). A key is one of
--- @ret@ / @arg0@ / @arg1@ / … (the keys this synthesiser consults); any other
--- leading @//@ comment that isn't a @key: value@ marker stops the scan and is
--- treated as body. Parsing stops at the first non-marker line.
-leadingMarkers :: String -> [(String, String)]
-leadingMarkers tmpl = go (lines tmpl)
-  where
-    go (l : ls) = case parseMarker l of
-        Just kv -> kv : go ls
-        Nothing -> []
-    go [] = []
-
-
--- | Drop the contiguous leading @// key: value@ marker lines, returning the
--- remaining body. Mirrors 'leadingMarkers' so consumed lines never leak into
--- the emitted body.
-stripLeadingMarkers :: String -> String
-stripLeadingMarkers tmpl = intercalate "\n" (dropWhile isMarker (lines tmpl))
-  where
-    isMarker l = case parseMarker l of
-        Just _  -> True
-        Nothing -> False
-
-
--- | Parse a single @// <key>: <value>@ line. The key must match @ret@ or
--- @argN@ (a deliberate allow-list so an ordinary @// comment@ inside the body
--- isn't mistaken for a marker). Returns @Nothing@ for any non-marker line.
-parseMarker :: String -> Maybe (String, String)
-parseMarker line0 =
-    let s = dropWhile (== ' ') line0
-    in case stripPfx "// " s of
-        Just rest ->
-            case break (== ':') rest of
-                (key, ':' : ' ' : val)
-                    | isMarkerKey key -> Just (key, trim val)
-                _ -> Nothing
-        Nothing -> Nothing
-  where
-    isMarkerKey "ret" = True
-    isMarkerKey ('a':'r':'g':ds) = not (null ds) && all (`elem` ("0123456789" :: String)) ds
-    isMarkerKey _ = False
-    stripPfx [] ys = Just ys
-    stripPfx (x:xs) (y:ys) | x == y = stripPfx xs ys
-    stripPfx _ _ = Nothing
-    trim = f . f where f = reverse . dropWhile (== ' ')
-
-
--- | Collect EVERY @{...}@ hole name in a string (the text between a @{@ and the
--- next @}@), in order of appearance. Used to prove every hole is substitutable
--- before emission (a leaked hole would be a cargo-fail with no Sky diagnostic).
-collectHoles :: String -> [String]
-collectHoles [] = []
-collectHoles ('{' : rest) =
-    case break (== '}') rest of
-        (name, '}' : after) -> name : collectHoles after
-        (_, [])             -> []   -- unterminated `{` → no further holes
-collectHoles (_ : rest) = collectHoles rest
-
-
--- | If a hole name is @argN@ (N a run of digits), its index; else Nothing.
-argHoleIndex :: String -> Maybe Int
-argHoleIndex ('a':'r':'g':ds)
-    | not (null ds) && all (`elem` ("0123456789" :: String)) ds = Just (read ds)
-argHoleIndex _ = Nothing
-
-
--- | Order-preserving dedupe (avoids a Data.List import for nub).
-nub' :: Eq a => [a] -> [a]
-nub' = go []
-  where
-    go _ [] = []
-    go seen (x:xs)
-        | x `elem` seen = go seen xs
-        | otherwise     = x : go (x : seen) xs
-
-
--- | Apply a list of literal find→replace substitutions left-to-right. Holes
--- are unique (@{a}@, @{arg0}@) and a replacement never reintroduces a hole, so
--- order between distinct holes is irrelevant.
-applySubsts :: [(String, String)] -> String -> String
-applySubsts subs s0 = foldl (\acc (from, to) -> replaceAll from to acc) s0 subs
-
-
--- | Replace every non-overlapping occurrence of @from@ with @to@.
-replaceAll :: String -> String -> String -> String
-replaceAll _ _ [] = []
-replaceAll from to s@(c:cs)
-    | from `isPrefixOfStr` s = to ++ replaceAll from to (drop (length from) s)
-    | otherwise              = c : replaceAll from to cs
-  where
-    isPrefixOfStr [] _ = True
-    isPrefixOfStr _ [] = False
-    isPrefixOfStr (x:xs) (y:ys) = x == y && isPrefixOfStr xs ys
 
 
 -- | 'Data.Maybe.mapMaybe' inlined to avoid an extra import.

@@ -14,6 +14,7 @@ import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Build.FfiRegistry as FfiReg
+import qualified Sky.Build.Rust.FfiCall as Call
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Reporting.Diagnostic as Diag
 import Sky.Build.Rust.FfiInstance
@@ -33,9 +34,23 @@ tList el  = Can.TType (ModuleName.Canonical "") "List" [el]
 tMaybe el = Can.TType (ModuleName.Canonical "") "Maybe" [el]
 
 
--- A generic-FFI metadata block with the given params/bounds/template.
-mkGen :: [String] -> [(String, [String])] -> String -> FfiReg.FfiGeneric
-mkGen ps bs tmpl = FfiReg.FfiGeneric ps (Map.fromList bs) tmpl
+-- A generic-FFI metadata block with the given params/bounds/Call-AST.
+mkGen :: [String] -> [(String, [String])] -> Call.Call -> FfiReg.FfiGeneric
+mkGen ps bs call = FfiReg.FfiGeneric ps (Map.fromList bs) call
+
+-- The canonical `make : a -> Box1 a` call-AST: static assoc-fn (no receiver),
+-- one value-arg of type `a`, returns `::box1::Box1<a>`.
+makeCall :: Call.Call
+makeCall = Call.Call
+    { Call._call_kind     = Call.CallFunction
+    , Call._call_path     = ["::box1", "Box1"]
+    , Call._call_typeArgs = [Call.TRParam 0]
+    , Call._call_method   = Just "make"
+    , Call._call_receiver = Nothing
+    , Call._call_args     = [0]
+    , Call._call_argTypes = [Call.TRParam 0]
+    , Call._call_ret      = Call.TRCtor "::box1::Box1" [Call.TRParam 0]
+    }
 
 -- An instance over a single param `a` at type `ty`, with the given bounds.
 mkInst :: [(String, [String])] -> Can.Type -> FfiInstance
@@ -44,7 +59,7 @@ mkInst bs ty = FfiInstance
     , _fi_types   = [ty]
     , _fi_region  = A.one
     , _fi_file    = "T.sky"
-    , _fi_generic = mkGen ["a"] bs "// ret: ::box1::Box1<{a}>\n::box1::Box1::<{a}>::make({arg0})"
+    , _fi_generic = mkGen ["a"] bs makeCall
     }
 
 isE4400 :: Diag.Diagnostic -> Bool
@@ -104,6 +119,20 @@ spec = do
         it "a crate-specific trait (Serialize) is NOT modellable" $ do
             modellableTrait "Serialize" `shouldBe` False
             traitToRustPath "Serialize" `shouldBe` Nothing
+        -- Drift fence 4a: the modellable-5 set is duplicated in the inspector
+        -- (`MODELLABLE_5`). This asserts the Haskell side is EXACTLY these five
+        -- and no more; the inspector crate has the mirror assertion
+        -- (test_modellable_5_matches). If either side adds/removes a trait
+        -- without the other, one of the two fails — the cross-language set
+        -- can't silently drift.
+        it "the modellable-5 set is EXACTLY {Hash,Eq,Ord,Clone,Default} (drift 4a)" $ do
+            let candidates =
+                    [ "Hash", "Eq", "Ord", "Clone", "Default"
+                    , "Sized", "Send", "Sync", "Copy", "Debug", "Serialize"
+                    , "PartialEq", "PartialOrd", "Display", "FromStr" ]
+                modellable = filter modellableTrait candidates
+            Set.fromList modellable
+                `shouldBe` Set.fromList ["Hash", "Eq", "Ord", "Clone", "Default"]
 
     describe "checkInstance (per-instance bindability)" $ do
         it "accepts an unconstrained primitive instantiation" $
@@ -127,55 +156,57 @@ spec = do
             ds `shouldSatisfy` (not . null)
             all isE4400 ds `shouldBe` True
 
-    describe "synthesiseGenericWrapper (one generic wrapper, A-model)" $ do
-        let mkFn bs tmpl = GenericFn
+    describe "synthesiseGenericWrapper (one generic wrapper, A-model, Scheme-A AST)" $ do
+        let mkFn bs call = GenericFn
                 { _gf_kernelName = "Rust_Box1"
                 , _gf_baseName   = "rust_box1_make"
                 , _gf_refName    = "make"
-                , _gf_generic    = mkGen ["a"] bs tmpl
+                , _gf_generic    = mkGen ["a"] bs call
                 , _gf_region     = A.one
                 , _gf_file       = "T.sky"
                 }
             okSrc r = case r of WrapperOk _ _ s -> s; _ -> ""
+            -- `get : Box1 a -> a` — static-style assoc fn with a foreign-typed
+            -- VALUE arg (`::box1::Box1<a>`), returns the bare param.
+            getCall = Call.Call
+                { Call._call_kind     = Call.CallFunction
+                , Call._call_path     = ["::box1", "Box1"]
+                , Call._call_typeArgs = [Call.TRParam 0]
+                , Call._call_method   = Just "get"
+                , Call._call_receiver = Nothing
+                , Call._call_args     = [0]
+                , Call._call_argTypes = [Call.TRCtor "::box1::Box1" [Call.TRParam 0]]
+                , Call._call_ret      = Call.TRParam 0
+                }
+            -- `Idx::of : a -> Idx a` — a bounded ctor for the bounds-render test.
+            idxOfCall = Call.Call
+                { Call._call_kind     = Call.CallFunction
+                , Call._call_path     = ["::idx", "Idx"]
+                , Call._call_typeArgs = [Call.TRParam 0]
+                , Call._call_method   = Just "of"
+                , Call._call_receiver = Nothing
+                , Call._call_args     = [0]
+                , Call._call_argTypes = [Call.TRParam 0]
+                , Call._call_ret      = Call.TRCtor "::idx::Idx" [Call.TRParam 0]
+                }
         it "emits a generic <T> wrapper for an unconstrained fn (TVar→UpperCamel)" $ do
-            let r = synthesiseGenericWrapper
-                      (mkFn [] "// ret: ::box1::Box1<{a}>\n::box1::Box1::<{a}>::make({arg0})")
-                src = okSrc r
+            let src = okSrc (synthesiseGenericWrapper (mkFn [] makeCall))
             src `shouldContain` "pub fn rust_box1_make<A>(arg0: A)"
             src `shouldContain` "-> SkyResult<SkyError, ::box1::Box1<A>>"
             src `shouldContain` "ok_res(::box1::Box1::<A>::make(arg0))"
-        it "renders the arg type from an // arg0: marker (foreign-typed arg)" $ do
-            let src = okSrc (synthesiseGenericWrapper
-                      (mkFn []
-                        "// ret: {a}\n// arg0: ::box1::Box1<{a}>\n::box1::Box1::<{a}>::get({arg0})"))
+        it "renders a foreign-typed value arg from the call's argTypes" $ do
+            let src = okSrc (synthesiseGenericWrapper (mkFn [] getCall))
             src `shouldContain` "pub fn rust_box1_make<A>(arg0: ::box1::Box1<A>)"
+            src `shouldContain` "ok_res(::box1::Box1::<A>::get(arg0))"
         it "renders bounds onto <T: ...> from metadata" $ do
             let src = okSrc (synthesiseGenericWrapper
-                      (mkFn [("a",["Hash","Eq"])]
-                        "// ret: ::idx::Idx<{a}>\n::idx::Idx::<{a}>::of({arg0})"))
+                      (mkFn [("a",["Hash","Eq"])] idxOfCall))
             src `shouldContain`
                 "<A: ::std::hash::Hash + ::std::cmp::Eq>"
         it "REJECTS an unmodellable bound (no emit-and-hope)" $
-            case synthesiseGenericWrapper
-                   (mkFn [("a",["Serialize"])]
-                     "// ret: ::s::S<{a}>\n::s::S::<{a}>::of({arg0})") of
+            case synthesiseGenericWrapper (mkFn [("a",["Serialize"])] idxOfCall) of
                 WrapperRejected d -> isE4400 d `shouldBe` True
                 _ -> expectationFailure "unmodellable bound must reject"
-        it "REJECTS a template with no // ret: marker" $
-            case synthesiseGenericWrapper
-                   (mkFn [] "::box1::Box1::<{a}>::make({arg0})") of
-                WrapperRejected d -> isE4400 d `shouldBe` True
-                _ -> expectationFailure "missing // ret: must reject"
-        it "REJECTS an unknown {hole} not in params/argN (would leak)" $
-            case synthesiseGenericWrapper
-                   (mkFn [] "// ret: ::s::S<{a}>\n::s::S::<{a}>::of({arg0}, {b})") of
-                WrapperRejected d -> isE4400 d `shouldBe` True
-                _ -> expectationFailure "unknown hole {b} must reject"
-        it "REJECTS a gap in {argN} indices ({arg0}+{arg2}, no {arg1})" $
-            case synthesiseGenericWrapper
-                   (mkFn [] "// ret: i64\n::f::g({arg0}, {arg2})") of
-                WrapperRejected d -> isE4400 d `shouldBe` True
-                _ -> expectationFailure "arg-index gap must reject"
   where
     isLeft (Left _)  = True
     isLeft (Right _) = False

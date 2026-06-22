@@ -234,6 +234,7 @@ executable sky
     Sky.Build.EmbeddedInspectorRust
     Sky.Build.FfiGen
     Sky.Build.Rust.Ffi
+    Sky.Build.Rust.FfiCall
     Sky.Build.Rust.FfiInstance
     Sky.Build.Rust.Console
     Sky.Build.FfiRegistry
@@ -403,6 +404,7 @@ test-suite sky-tests
       Sky.Build.FfiTypeParserSpec
       Sky.Build.FfiTypeResolveSpec
       Sky.Build.Rust.FfiInstanceSpec
+      Sky.Build.Rust.FfiCallSpec
       Sky.Build.TaskResultBridgesSpec
       Sky.Build.CheckIsBuildSpec
       Sky.Build.RecordFieldOrderSpec

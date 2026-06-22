@@ -1233,9 +1233,18 @@ emitRustKernelJson moduleName kernelName pkg =
             let st = if infallibleFfiFn fn then fieldSkyType fn else wrapperSkyType True fn
                 nm = wrapperRefName fn
                 arity = max 1 (length (_fnParams fn))
+                -- Wall #3: re-emit the inspector's parametric `generic` block
+                -- VERBATIM (the raw JSON object the inspector produced), so the
+                -- registry decodes + validates it into an `FfiGeneric`. `Nothing`
+                -- for Go and every non-generic Rust binding → no `generic` key,
+                -- byte-identical to the pre-Wall-#3 output.
+                genericField = case _fnGeneric fn of
+                    Just v  -> ", \"generic\": " ++ encodeValue v
+                    Nothing -> ""
             in "    {\"name\": " ++ jsonQuote nm
                ++ ", \"arity\": " ++ show arity
-               ++ ", \"skyType\": " ++ jsonQuote st ++ "}"
+               ++ ", \"skyType\": " ++ jsonQuote st
+               ++ genericField ++ "}"
     in unlines
         [ "{"
         , "  \"moduleName\": " ++ jsonQuote moduleName ++ ","
@@ -1253,6 +1262,9 @@ emitRustKernelJson moduleName kernelName pkg =
         esc '"'  = "\\\""
         esc '\\' = "\\\\"
         esc c    = [c]
+    -- Re-encode a raw Aeson value to its compact JSON text (verbatim passthrough
+    -- of the inspector's `generic` object — Aeson round-trips losslessly).
+    encodeValue v = T.unpack (TE.decodeUtf8 (BL.toStrict (A.encode v)))
 
 
 emitSkyiRustFn :: FnInfo -> String
