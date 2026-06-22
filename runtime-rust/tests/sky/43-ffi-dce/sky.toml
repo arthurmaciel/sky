@@ -1,0 +1,11 @@
+[project]
+name = "43-ffi-dce"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local dcetest crate, delivered as a file:// git dep (Cargo can't resolve a
+# bare path dep through sky's ["rust.dependencies"] — only crates.io version or
+# git). setup.sh git-inits ./dcetest-crate into the cache path below.
+["rust.dependencies"]
+dcetest = { git = "file:///home/arthur/.cache/sky/43-ffi-dce-crate", branch = "master" }

@@ -1861,6 +1861,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                                          | depMod <- map snd validDeps ]
                         RustProject.generateRustProject config (canMod : prunedDeps)
                             entrySrcMod typesWithDeps rawAliases outDir srcHash
+                            reached dceOff
 
                     Toml.BackendGo ->
                         if not (null authDiags)

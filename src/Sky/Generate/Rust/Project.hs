@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedStrings #-}
 -- | Rust-target project codegen orchestration: emit main.rs + module files,
 -- copy the runtime, write Cargo.toml, copy FFI bindings. Extracted from the
 -- Compile.hs `BackendRust` branch (plus the Rust-only helpers `generateRust`
@@ -11,10 +12,14 @@ module Sky.Generate.Rust.Project
     ) where
 
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.Char as Char
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, stripPrefix)
 import Control.Monad (when)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.Foldable as Foldable
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory
@@ -33,6 +38,8 @@ import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Type.Solve as Solve
 import qualified Sky.Generate.Rust.Builder as RustBuilder
 import qualified Sky.Sky.Toml as Toml
+import qualified Sky.Build.Dce as Dce
+import qualified Sky.Build.Rust.Ffi as RustFfi
 
 
 -- | Orchestrate Rust-target codegen for the whole program. `rawAliases` is the
@@ -46,8 +53,10 @@ generateRustProject
     -> Map.Map (ModuleName.Canonical, String) (String, String)     -- ^ raw kernel aliases
     -> FilePath                                                    -- ^ output dir
     -> String                                                      -- ^ source hash
+    -> Set.Set Dce.Ref                                             -- ^ whole-program reachable set (S4 FFI tree-shake)
+    -> Bool                                                        -- ^ DCE disabled (SKY_DCE=0)
     -> IO (Either String FilePath)
-generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir srcHash = do
+generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir srcHash reached dceDisabled = do
     let dbUrl = case Toml._dbDriver config of
             "sqlite" -> "sqlite:" ++ Toml._dbPath config ++ "?mode=rwc"
             _        -> Toml._dbPath config
@@ -222,17 +231,22 @@ generateRustProject config allMods entrySrcMod typesWithDeps rawAliases outDir s
         rustDeps = Toml._rustDeps config
     writeFileIfChanged cargoTomlPath (RustBuilder.emitCargoToml usage dbDriver sqlxTls rustDeps (Toml._liveStore config))
     putStrLn $ "   Wrote " ++ cargoTomlPath
-    -- Copy Rust FFI binding files into sky-out/rust/src/
-    -- Slugs must match what generateBindings writes (via slugify).
+    -- Copy Rust FFI binding files into sky-out/rust/src/, REACHABILITY-FILTERED
+    -- (S4 FFI tree-shake). Slugs must match what generateRustBindings writes
+    -- (via slugify). Rather than copy the whole cached `*_bindings.rs`, we drop
+    -- the per-fn wrapper regions whose `FfiRef` key is not in the whole-program
+    -- reachable set — so binding a 76k-symbol crate and calling 4 of them emits
+    -- only those 4 wrappers, matching the Go backend's `dceFfiWrappers`.
     mapM_ (\(depName, _) -> do
         let fileSlug = map (\c -> if c `elem` ("./" :: String) then '_' else c) depName
             modSlug  = map (\c -> if Char.isAlphaNum c then c else '_') depName
             srcPath' = ".skycache/ffi/rust" </> fileSlug ++ "_bindings.rs"
+            jsonPath' = ".skycache/ffi/rust" </> fileSlug ++ ".kernel.json"
             dstPath' = srcDir </> modSlug ++ "_bindings.rs"
         exists <- doesFileExist srcPath'
         when exists $ do
-            copyFile srcPath' dstPath'
-            putStrLn $ "   Copied " ++ srcPath'
+            written <- writeFilteredBindings srcPath' jsonPath' dstPath' reached dceDisabled
+            putStrLn $ "   " ++ written ++ " " ++ srcPath'
         ) (Toml._rustDeps config)
     let cacheDir = ".skycache"
     createDirectoryIfMissing True cacheDir
@@ -388,6 +402,176 @@ writeFileIfChanged path content = do
     exists <- doesFileExist path
     same <- if exists then (== new) <$> BS.readFile path else pure False
     when (not same) (BS.writeFile path new)
+
+-- ── S4: FFI-surface DCE (reachability filter) ────────────────────────────────
+--
+-- The cached `<slug>_bindings.rs` is written at `sky add` time with EVERY
+-- discovered wrapper, each bracketed by `// SKY-FFI-WRAPPER BEGIN <ref>` …
+-- `// SKY-FFI-WRAPPER END` sentinels (Sky.Build.Rust.Ffi). Everything OUTSIDE a
+-- sentinel pair (the preamble, `use`s, opaque type aliases, all trait impls —
+-- the Display/FromStr bridges) is PREAMBLE-class and kept unconditionally
+-- (R-A/R-B). At BUILD time — when the whole-program reachable set is finally
+-- known — we drop the wrapper regions whose `FfiRef` key is unreached.
+--
+-- KEYING (R-D). A wrapper's reached key is `Dce.FfiRef kernelName <ref>` where
+-- `kernelName` is the kernel.json `"kernelName"` (the registry's
+-- `_fm_kernelName`, e.g. "Rust_Fieldtest") and `<ref>` is the sentinel name (==
+-- the kernel.json function `"name"` == `wrapperRefName fn`). The kernel.json is
+-- the on-disk, key-aligned source of those keys (its `name`s ARE the keys by
+-- construction), so the build-time key and the emitted item can never diverge.
+--
+-- FAIL-SAFE (R-3). FULL-EMIT (copy the file verbatim) on ANY of:
+--   * `SKY_DCE=0` / `dceDisabled`,
+--   * `Set.null reached` (no reachability info — same fallback as the Go path),
+--   * a missing / unparseable kernel.json,
+--   * a BIJECTION failure: a sentinel `<ref>` in the `.rs` that is NOT a unique
+--     kernel.json `name`, or a duplicate sentinel name. Then the keying is
+--     suspect and we MUST NOT drop on doubt.
+--
+-- STALENESS (R-4). This runs EVERY build from (sentinels ∩ reached); it is never
+-- served from a `source.hash`-keyed cache, so a `Main.sky` edit that newly calls
+-- `Foo.bar` re-includes `bar` on the next build. Cargo's own incremental tracker
+-- handles the no-change case (writeFileIfChanged preserves the mtime on identity).
+--
+-- Returns a short verb ("Filtered" / "Copied") for the build log.
+writeFilteredBindings
+    :: FilePath           -- ^ cached `<slug>_bindings.rs`
+    -> FilePath           -- ^ cached `<slug>.kernel.json`
+    -> FilePath           -- ^ destination `<modSlug>_bindings.rs`
+    -> Set.Set Dce.Ref    -- ^ whole-program reachable set
+    -> Bool               -- ^ DCE disabled
+    -> IO String
+writeFilteredBindings srcPath jsonPath dstPath reached dceDisabled = do
+    raw <- readFileUtf8 srcPath
+    -- The set of every sentinel name physically present in the cached `.rs`.
+    let emittedRefsList = sentinelNames raw
+        emittedRefs = Set.fromList emittedRefsList
+        duplicateSentinel = length emittedRefsList /= Set.size emittedRefs
+        -- A balanced BEGIN/END structure is a precondition for `filterWrapperRegions`
+        -- to span regions correctly. The emitter always pairs them, but a dangling
+        -- BEGIN (or stray END) means the `.rs` is malformed — full-emit rather than
+        -- risk dropping the unterminated remainder (R-3: never drop on doubt).
+        beginCount = length emittedRefsList
+        endCount = length (filter isEndSentinel (lines raw))
+        sentinelsBalanced = beginCount == endCount
+    if dceDisabled || Set.null reached
+        then fullEmit raw "Copied"
+        else do
+            mMeta <- readKernelMeta jsonPath
+            case mMeta of
+                -- No / unparseable kernel.json → can't key soundly → full-emit.
+                Nothing -> fullEmit raw "Copied"
+                Just (kernelName, jsonNames) ->
+                    let jsonNameSet = Set.fromList jsonNames
+                        -- BIJECTION (R-D): every emitted sentinel must be a
+                        -- unique kernel.json name; no duplicate sentinels; and
+                        -- the BEGIN/END structure must be balanced.
+                        bijectionOk =
+                            not duplicateSentinel
+                                && sentinelsBalanced
+                                && emittedRefs `Set.isSubsetOf` jsonNameSet
+                    in if not bijectionOk
+                        then fullEmit raw "Copied"
+                        else do
+                            let keep ref = Set.member
+                                    (Dce.FfiRef kernelName ref) reached
+                                filtered = filterWrapperRegions keep raw
+                            writeFileIfChanged dstPath filtered
+                            pure "Filtered"
+  where
+    fullEmit raw verb = do
+        writeFileIfChanged dstPath raw
+        pure verb
+
+
+-- | Read a UTF-8 text file (locale-independent), returning "" if absent.
+readFileUtf8 :: FilePath -> IO String
+readFileUtf8 path = do
+    exists <- doesFileExist path
+    if exists
+        then (T.unpack . TE.decodeUtf8) <$> BS.readFile path
+        else pure ""
+
+
+-- | Every wrapper-reference name opened by a `// SKY-FFI-WRAPPER BEGIN <ref>`
+-- line in the bindings text (whitespace-trimmed). rustfmt is NOT run on the
+-- cached `.skycache/...` source (only on the generated `sky-out` files), so the
+-- sentinel lines survive verbatim; we still tolerate leading indentation.
+sentinelNames :: String -> [String]
+sentinelNames txt =
+    [ trimStr rest
+    | line <- lines txt
+    , let stripped = dropWhile (== ' ') line
+    , Just rest <- [stripPrefix RustFfi.wrapperSentinelPrefix stripped]
+    ]
+
+
+-- | True for a wrapper END sentinel line (indentation-tolerant).
+isEndSentinel :: String -> Bool
+isEndSentinel line = dropWhile (== ' ') line == RustFfi.wrapperEndSentinel
+
+
+-- | Keep only the wrapper regions whose ref satisfies `keep`; everything outside
+-- any BEGIN/END pair is preamble-class and kept unconditionally (R-A/R-B). A
+-- malformed nesting (a BEGIN with no END, or an END with no open BEGIN) is
+-- treated conservatively as "keep" — we never silently swallow lines on doubt.
+filterWrapperRegions :: (String -> Bool) -> String -> String
+filterWrapperRegions keep txt = unlines (go (lines txt))
+  where
+    go [] = []
+    go (line : rest) =
+        let stripped = dropWhile (== ' ') line
+        in case stripPrefix RustFfi.wrapperSentinelPrefix stripped of
+            Just refRaw ->
+                let ref = trimStr refRaw
+                    (region, after) = spanRegion rest
+                in if keep ref
+                    then line : region ++ go after
+                    else go after
+            Nothing -> line : go rest
+
+    -- Collect lines up to and INCLUDING the matching END sentinel. If no END is
+    -- found (malformed), the rest is returned as the region (kept) — total, no
+    -- silent drop.
+    spanRegion [] = ([], [])
+    spanRegion (l : ls) =
+        let stripped = dropWhile (== ' ') l
+        in if stripped == RustFfi.wrapperEndSentinel
+            then ([l], ls)
+            else let (reg, after) = spanRegion ls in (l : reg, after)
+
+
+-- | Parse the kernel.json for its `"kernelName"` and the list of function
+-- `"name"`s. Returns Nothing on a missing / unparseable file (→ full-emit).
+readKernelMeta :: FilePath -> IO (Maybe (String, [String]))
+readKernelMeta path = do
+    exists <- doesFileExist path
+    if not exists
+        then pure Nothing
+        else do
+            bytes <- BS.readFile path
+            case Aeson.decodeStrict' bytes :: Maybe Aeson.Value of
+                Just (Aeson.Object o) ->
+                    let kname = case KeyMap.lookup "kernelName" o of
+                            Just (Aeson.String s) -> T.unpack s
+                            _                     -> ""
+                        names = case KeyMap.lookup "functions" o of
+                            Just (Aeson.Array arr) ->
+                                [ T.unpack s
+                                | Aeson.Object fo <- foldrToList arr
+                                , Just (Aeson.String s) <- [KeyMap.lookup "name" fo]
+                                ]
+                            _ -> []
+                    in if null kname then pure Nothing else pure (Just (kname, names))
+                _ -> pure Nothing
+  where
+    foldrToList = Foldable.toList
+
+
+-- | Strip leading/trailing spaces.
+trimStr :: String -> String
+trimStr = f . f where f = reverse . dropWhile (== ' ')
+
 
 copyRuntimeDirRec :: FilePath -> FilePath -> IO Int
 copyRuntimeDirRec srcDir targetDir = do

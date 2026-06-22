@@ -16,6 +16,10 @@ module Sky.Build.Rust.Ffi
     , rustKernelName         -- :: PkgInfo -> String
     , emitRustFile           -- :: String -> PkgInfo -> String
     , dedupByRustName        -- :: [FnInfo] -> [FnInfo]
+    , wrapperRefName         -- :: FnInfo -> String
+    , wrapperBeginSentinel   -- :: String -> String
+    , wrapperEndSentinel     -- :: String
+    , wrapperSentinelPrefix  -- :: String
     ) where
 
 import qualified Data.Aeson as A
@@ -121,7 +125,7 @@ generateRustBindings pkg0 = do
         rsFile   = ".skycache/ffi/rust" </> (slug ++ "_bindings.rs")
         skyiFile = ".skycache/ffi/rust" </> (slug ++ ".skyi")
         jsonFile = ".skycache/ffi/rust" </> (slug ++ ".kernel.json")
-        names = map (\fn -> mname ++ "." ++ lowerFirst (_fnName fn)) (_pkgFns pkg)
+        names = map (\fn -> mname ++ "." ++ wrapperRefName fn) (_pkgFns pkg)
     writeFile rsFile (emitRustFile kname pkg)
     writeFile skyiFile (emitRustSkyi pkg)
     -- Rust target: methods get `_from_<RecvType>` suffix so users can
@@ -136,6 +140,45 @@ generateRustBindings pkg0 = do
     -- HM from THIS json, so it is the load-bearing type source.
     writeFile jsonFile (emitRustKernelJson mname kname pkg)
     return names
+
+
+-- | THE single disambiguated wrapper-reference name for an FFI function — the
+-- SSOT consumed by the kernel.json emitter, the `.skyi` emitter,
+-- `dedupByRustName`, the `.rs` BEGIN/END sentinels, and the S4 reachability
+-- filter. Routing all of them through this one function makes "the reached
+-- `FfiRef` key" and "the emitted item" provably the same string (R-D): the key
+-- is `Dce.FfiRef (rustKernelName pkg) (wrapperRefName fn)`, and the kernel.json
+-- `name` IS `wrapperRefName fn` by construction, so a key/item divergence is
+-- impossible by code structure rather than by hope.
+--
+-- Shape: `lowerFirst (_fnName fn)` plus a `_from_<lowerFirst recv>` suffix for an
+-- accessor with a receiver. The kind-specific discriminators (field getter
+-- `_field`, setter `_set_field`, enum `_new_variant`/`tag_of_`/`_as_variant`)
+-- are already baked into `_fnName` by the inspector, so they ride along here for
+-- free and never collide across kinds.
+wrapperRefName :: FnInfo -> String
+wrapperRefName fn =
+    let recv = _fnRecvType fn
+        disamb = if null recv then "" else "_from_" ++ lowerFirst recv
+    in lowerFirst (_fnName fn) ++ disamb
+
+
+-- | The literal prefix that opens a per-fn wrapper region in the emitted `.rs`.
+-- The S4 build-time filter splits on these so it can drop an unreached wrapper
+-- without parsing Rust. Anything OUTSIDE a BEGIN/END pair is preamble-class and
+-- kept unconditionally (R-A/R-B).
+wrapperSentinelPrefix :: String
+wrapperSentinelPrefix = "// SKY-FFI-WRAPPER BEGIN "
+
+
+-- | The full BEGIN sentinel line for a wrapper of the given reference name.
+wrapperBeginSentinel :: String -> String
+wrapperBeginSentinel refName = wrapperSentinelPrefix ++ refName
+
+
+-- | The END sentinel line (closes the most-recently-opened wrapper region).
+wrapperEndSentinel :: String
+wrapperEndSentinel = "// SKY-FFI-WRAPPER END"
 
 
 -- | Rust-side module name: "github.com/google/uuid" / "uuid" → "Rust.Uuid".
@@ -1037,25 +1080,38 @@ emitRustFile kernelName pkg =
                 ++ [ "    }"
                    , "}"
                    ]
-        in if _fnIsEnumCtor fn
-           then if enumCtorWellFormed then enumCtorLines else []
-           else if _fnIsEnumTag fn
-           then if enumTagWellFormed then enumTagLines else []
-           else if _fnIsEnumExtract fn
-           then if enumExtractWellFormed then enumExtractLines else []
-           else if _fnIsField fn
-           then if fieldWellFormed then fieldLines else []
-           else if _fnIsFieldSet fn
-           then if setFieldWellFormed then setFieldLines else []
-           else if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
+            -- The actual wrapper body for this fn (or [] when the fn is dropped:
+            -- a degenerate method or an unresolved-generic receiver). The S4
+            -- build-time filter brackets every NON-EMPTY body in BEGIN/END
+            -- sentinels keyed on `wrapperRefName fn` (== the kernel.json name ==
+            -- the `FfiRef` key), so it can drop an unreached wrapper by name
+            -- without parsing Rust. A dropped fn emits nothing, so it carries no
+            -- sentinel and never participates in the filter.
+            bodyLines =
+                if _fnIsEnumCtor fn
+                then if enumCtorWellFormed then enumCtorLines else []
+                else if _fnIsEnumTag fn
+                then if enumTagWellFormed then enumTagLines else []
+                else if _fnIsEnumExtract fn
+                then if enumExtractWellFormed then enumExtractLines else []
+                else if _fnIsField fn
+                then if fieldWellFormed then fieldLines else []
+                else if _fnIsFieldSet fn
+                then if setFieldWellFormed then setFieldLines else []
+                else if isDegenerateMethod || ((isInstance || isStaticFn) && hasGenericRecvParam)
+                then []
+                else [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
+                     , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
+                     ]
+                     ++ map ("    " ++) arrPrelude
+                     ++ [ "    " ++ body
+                        , "}"
+                        ]
+        in if null bodyLines
            then []
-           else [ "// [" ++ _fnEffect fn ++ "] " ++ wrapper
-                , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
-                ]
-                ++ map ("    " ++) arrPrelude
-                ++ [ "    " ++ body
-                   , "}"
-                   ]
+           else [ wrapperBeginSentinel (wrapperRefName fn) ]
+                ++ bodyLines
+                ++ [ wrapperEndSentinel ]
 
 
 -- | Convert a pkg path to a Rust crate import path.
@@ -1083,9 +1139,7 @@ dedupByRustName = go Set.empty
         | Set.member key seen = go seen rest
         | otherwise           = fn : go (Set.insert key seen) rest
       where
-        sfx = if null (_fnRecvType fn) then ""
-              else "_from_" ++ lowerFirst (_fnRecvType fn)
-        key = lowerFirst (_fnName fn) ++ sfx
+        key = wrapperRefName fn
 
 
 -- | Rust-target kernel.json emitter. Mirrors the shared `emitKernelJson True`
@@ -1099,9 +1153,7 @@ emitRustKernelJson moduleName kernelName pkg =
         entries = intercalate ",\n" (map emitFnEntry fns)
         emitFnEntry fn =
             let st = if infallibleFfiFn fn then fieldSkyType fn else wrapperSkyType fn
-                recv = _fnRecvType fn
-                disamb = if null recv then "" else "_from_" ++ lowerFirst recv
-                nm = lowerFirst (_fnName fn) ++ disamb
+                nm = wrapperRefName fn
                 arity = max 1 (length (_fnParams fn))
             in "    {\"name\": " ++ jsonQuote nm
                ++ ", \"arity\": " ++ show arity
@@ -1128,13 +1180,11 @@ emitRustKernelJson moduleName kernelName pkg =
 emitSkyiRustFn :: FnInfo -> String
 emitSkyiRustFn fn =
     let sig = if infallibleFfiFn fn then fieldSkyType fn else wrapperSkyType fn
-        recvt = _fnRecvType fn
         -- C2: the `_field` discriminator is already baked into `_fnName` by the
         -- inspector, so a field getter's name (`id_field_from_<Recv>`) can never
         -- collide with a same-named method's (`id_from_<Recv>`) in the `.skyi`,
-        -- the kernel.json, or `dedupByRustName` — they all key off `_fnName`.
-        disamb = if null recvt then "" else "_from_" ++ lowerFirst recvt
-        name = lowerFirst (_fnName fn) ++ disamb
+        -- the kernel.json, or `dedupByRustName` — they all key off `wrapperRefName`.
+        name = wrapperRefName fn
     in name ++ " : " ++ sig
 
 

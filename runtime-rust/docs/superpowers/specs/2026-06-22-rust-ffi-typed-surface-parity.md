@@ -49,7 +49,76 @@ The Rust FFI path is more developed than "nothing":
   borrowed receiver). Builds on S1.
 - **S3 — enum-variant binding** (construct + discriminate foreign enums). DESIGN below.
 - **S4 — FFI-surface DCE / tree-shake** (reachability filter so binding a huge crate
-  emits only reached symbols). Highest blast radius — last.
+  emits only reached symbols). Highest blast radius — last. DESIGN below.
+
+## S4 design — reachability-filter the emitted Rust FFI bindings
+### Verified current state
+- `RustFfi.n` (`src/Sky/Build/Rust/Ffi.hs`) emits the FULL `*_bindings.rs` (every
+  `_pkgFns` symbol, deduped, `#![allow(dead_code)]`) at **`sky add` / FFI-install time**
+  (invoked from `app/Main.hs`), cached under `.skycache/ffi/rust/<slug>_bindings.rs`.
+- Build time just COPIES the cached file (`src/Sky/Generate/Rust/Project.hs:230-231`).
+- The shared whole-program DCE (`Sky.Build.Dce.reachableWholeProgram`, result in
+  `globalReachableProgram :: IORef (Set Dce.Ref)`, kinds `TopRef`/`FfiRef`/`CtorRef`)
+  already gates `main.rs` user-code emission — but NOTHING filters the copied wrappers.
+  So `main.rs` is already reachability-pruned (Go-parity for the user file); the gap is
+  only the wrapper crate, which cargo compiles in full (compile-time + the 76k→4k
+  source-size parity).
+### Approach (build-time filter, conservative superset) — CORRECTED per guardian review
+**Name-mapping reality (the guardian's design-breaking correction).** An FFI dep call
+site canonicalises to `Can.VarKernel kernelMod name` → recorded by `Dce.collectRefs` as
+**`FfiRef km fn`**, NEVER `TopRef`. So the reached key for a wrapper is
+`FfiRef (rustKernelName pkg) (wrapperRefName fn)` where `rustKernelName = "Rust_"++base`
+(underscore, NOT the dotted `mname="Rust."++base`) and `wrapperRefName` is the EXACT
+disambiguated name `emitRustKernelJson`/`emitSkyiRustFn` emit (`lowerFirst (_fnName fn)`
++ `_from_<lowerFirst recv>` for accessors; field getters already bake `_field`, setters
+`_set_field`, enums `_new_variant`/`tag_of_`/`_as_variant`). The earlier `TopRef
+"Rust.X" (lowerFirst fnName)` premise was WRONG (that shape is the stdlib `.sky`-dep
+path, a different code path) — it would never match → silent no-op, or if mis-gated,
+drop every used wrapper (E0425 on every FFI call).
+**Mechanism.** Re-emit/filter at build time from the on-disk `*.kernel.json` (structured,
+key-aligned: its `name` IS the `FfiRef` key by construction) ∩ the reached set — NOT by
+regex over the rendered `.rs` (unsound: multi-line bodies, orphaned impls, rustfmt
+reflow). If text-slicing the cached `.rs` is used instead, each per-fn wrapper MUST be
+emitted at `sky add` time wrapped in `// SKY-FFI-WRAPPER BEGIN <name>` … `END` sentinels.
+### S4 LOCKED invariants (guardian-reviewed — R-D / R-A / R-B / R-2 / R-3 / R-4)
+- **R-D (keying, CARDINAL).** Filter keys on `FfiRef (rustKernelName pkg) (wrapperRefName
+  fn)` via a SINGLE shared `wrapperRefName :: FnInfo -> String` consumed by kernel.json
+  emit, `.skyi` emit, `dedupByRustName`, AND the S4 filter — so the reached key and the
+  emitted item can never diverge (today the disamb name is hand-inlined in ≥4 places; unify
+  it first, ideally `newtype WrapperRef`). Add a build-time BIJECTION check: if the computed
+  key set and the emitted-wrapper-name set are not in bijection ⇒ FULL-EMIT (R-3).
+- **R-A (Display/FromStr).** The synthetic `to_string`/`from_string` bridges emit as
+  `impl Display`/`FromStr` on the opaque type (NOT free `pub fn`s with a kernel.json name).
+  They are PREAMBLE-class — kept unconditionally, never per-fn filtered (a kept wrapper may
+  format the opaque value).
+- **R-B (preamble + only-1:1-wrappers-filtered).** Keep UNCONDITIONALLY: the preamble
+  (`use crate::*`, `use std::collections::HashMap`), every `use`, every opaque type alias,
+  ALL trait impls, and any item that is NOT a recognised 1:1 kernel.json wrapper. Filter
+  ONLY the per-fn wrapper items that have an exact kernel.json `name`. Enforce: any
+  unrecognised item is preamble-class (kept). This makes "no per-fn→per-fn call edge"
+  (true today) an ENFORCED invariant, not an observed accident — so a future
+  wrapper→wrapper edge (e.g. async-bridge helpers, #15) can't silently break it.
+- **R-2 (sound mechanism).** Re-emit from kernel.json (on-disk, key-aligned) ∩ reached;
+  do NOT regex-filter the bare `.rs` unless BEGIN/END sentinels are emitted at add time.
+- **R-3 (fail-safe).** FULL-EMIT on ANY of: `SKY_DCE=0`/`globalDceDisabled`,
+  `Set.null reached`, OR an R-D bijection/ambiguity failure. Never drop on doubt.
+- **R-4 (cache staleness — I1 trap).** The filtered `.rs` is a function of the WHOLE-PROGRAM
+  reached set, not one file's bytes. NEVER serve a filtered `.rs` cached on `source.hash`
+  alone (edit Main.sky to newly call `Foo.bar` ⇒ stale filtered `.rs` missing `bar` ⇒
+  E0425). Either fold the sorted kept-wrapper-name set into the cache key, OR re-filter
+  every build (cheap; cargo's own incremental handles no-change). DEFAULT: re-filter each
+  build from kernel.json ∩ reached.
+- **D4 proof obligation.** Filtered build ≡ full build except absent dead wrappers — holds
+  because (kept set) = (all preamble/impls) ∪ (reachable wrappers) ⊇ closure of any kept
+  wrapper's deps, since every kept-wrapper dependency is preamble-class (R-A/R-B).
+- **D5 (boundary).** In-boundary: `src/Sky/Build/Rust/Ffi.hs`, `src/Sky/Generate/Rust/
+  Project.hs`, reads shared `Dce`/`globalReachableProgram` WITHOUT changing its semantics.
+### S4 PRECONDITION (guardian DEFER→APPROVE gate)
+Before/with implementation: a fixture under `runtime-rust/tests/sky/` that binds a real
+MULTI-symbol crate and calls 1-of-N, asserting (a) the emitted bindings `.rs` contains the
+used wrapper + preamble + impls and NOT the unused wrappers, (b) the program builds + runs
+identically to a full-emit (`SKY_DCE=0`) build, (c) a measured source-size/compile delta.
+This is both the value-proof the guardian required and the D4 regression guard.
 
 ## S1 design (the slice under guardian review)
 ### Inspector (`tools/sky-ffi-inspect-rs/src/main.rs`)

@@ -1,0 +1,26 @@
+module Main exposing (main)
+
+-- S4 FFI-surface DCE proof. The `dcetest` crate exposes MANY symbols
+-- (used_one + unused_1..unused_9 + Widget fields/method/ctor). This program
+-- calls ONLY `used_one`, so the reachability filter must emit just that one
+-- wrapper (+ preamble/impls) and drop every `unused_*` / Widget wrapper.
+--
+-- The R-4 staleness guard is exercised by the test harness: after this builds,
+-- it adds an `unused_3` call and rebuilds — the wrapper must reappear (no
+-- stale-cache E0425).
+
+import Rust.Dcetest as D
+import Std.Log exposing (println)
+
+
+main =
+    case D.used_one 41 of
+        Err _ ->
+            println "used_one failed"
+
+        Ok n ->
+            println
+                ("used_one(41)="
+                    ++ String.fromInt n
+                    ++ (if n == 42 then "  [ALL OK]" else "  [MISMATCH]")
+                )
