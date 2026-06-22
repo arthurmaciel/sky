@@ -49,6 +49,12 @@ rule here is mandatory, not optional. Current settled rules:
   This is the no-runtime-panic thesis as a compile gate — do not weaken it; fix
   the code, never the lint level.
 - **Verify through the `sky-rust-backend:*` skills**, never the raw runner scripts.
+- **Guardian supervision is mandatory for every plan AND every code change.** Settled
+  2026-06-22. A `security-soundness-guardian` **design review** runs on a non-trivial
+  PLAN before implementation, and a guardian **final review** runs on the diff before
+  every commit (the `## Pre-final code gate` is the floor, not optional). This holds
+  for in-boundary Rust work and especially for shared-compiler changes (HM/codegen),
+  where the guardian also vets Go-byte-identity. No "small enough to skip it".
 - **`examples/rust/` holds only real, complete Sky projects** (currently just
   `skyshop-rs`). Sky projects that exist ONLY as Rust-backend tests/fixtures live
   under **`runtime-rust/tests/sky/`**, never in `examples/`.
