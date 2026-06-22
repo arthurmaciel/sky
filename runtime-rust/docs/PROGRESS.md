@@ -17,6 +17,25 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-22 00:40 — Batch 22: reject unknown `--backend` strings at the flag boundary (#13)
+
+`backendFlag` (app/Main.hs) used `strOption` (accept any string) → `parseBackend`'s
+`_ -> BackendGo` fallback silently built Go for a typo like `--backend rsut`. Changed to
+`option (eitherReader readBackend)`: accepts only case-insensitive `go`/`rust`, else
+`Left "unknown backend '<s>' (expected: go | rust)"`. Return type unchanged
+(`Parser (Maybe String)`) so all 5 downstream `parseBackend` call sites are untouched and
+now only ever see a validated value. Shared by build/run/watch/test/db.
+
+Verified: `--backend rsut` → `option --backend: unknown backend 'rsut' (expected: go | rust)`,
+exit 1 (was: silent Go); `--backend rust`/`go`/`GO` accepted unchanged. Guardian post-write
+APPROVE (total reader, case-folding identical at both layers, strict security/correctness
+tightening — the only changed inputs were already-wrong ones). Fuller typed version
+(`Parser (Maybe Toml.Backend)`, delete parseBackend) deferred — wider Command-ADT change.
+
+**Affected:** `app/Main.hs`.
+
+---
+
 ## 2026-06-22 00:15 — Parity batch 21: `sky db status` / `sky db migrate --backend rust` (#6)
 
 Closes #6. Previously `sky db` always ran the GO binary (`runProject`), so a Rust

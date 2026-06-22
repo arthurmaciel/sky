@@ -1608,11 +1608,20 @@ basename url =
 
 -- | Parser for optional --target flag
 backendFlag :: Parser (Maybe String)
-backendFlag = optional (strOption
+backendFlag = optional (option (eitherReader readBackend)
     ( long "backend"
    <> metavar "BACKEND"
    <> help "Codegen backend: go (default) or rust. (Cross-compile platform is --target <triple>.)"
     ))
+  where
+    -- Reject an unknown backend at the flag boundary rather than silently
+    -- defaulting to Go (a `--backend rsut` typo otherwise built the wrong
+    -- backend with no diagnostic). `parseBackend` downstream now only ever sees
+    -- a validated "go"/"rust".
+    readBackend s = case map toLower s of
+        "go"   -> Right "go"
+        "rust" -> Right "rust"
+        _      -> Left ("unknown backend '" ++ s ++ "' (expected: go | rust)")
 
 -- | Parser for `sky add` options: package, --target, --rev, --branch, --tag.
 addOptsParser :: Parser AddOpts
