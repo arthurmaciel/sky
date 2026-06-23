@@ -816,6 +816,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     EXTERNAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_external_type_ids(doc));
     STD_TRAIT_BY_ID.with(|c| *c.borrow_mut() = collect_std_trait_ids(doc));
     EXTERNAL_TRAIT_PATH_BY_ID.with(|c| *c.borrow_mut() = collect_external_trait_paths(doc));
+    EXTERNAL_TYPE_PATH_BY_ID.with(|c| *c.borrow_mut() = collect_external_type_paths(doc));
 
     // Wall #3 coverage accumulators are per-crate — reset so a multi-crate run
     // reports each crate's bind%/drops independently.
@@ -1330,6 +1331,40 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
             let t = rt.trim();
             !t.is_empty() && !t.contains('&') && !t.contains('[')
         };
+        // Unwrap one layer of `Result<T, _>` or `Option<T>` to expose the inner
+        // owned type T.  This ensures that a type produced only as a wrapped value
+        // (e.g. `url::Url` inside `Result<url::Url, url::ParseError>`) still
+        // admits its instance methods through the Sized gate.  We only peel ONE
+        // layer — the outer container is itself owned (no `&`), so the inner type
+        // inherits that property.
+        let inner_owned = |rt: &str| -> Option<String> {
+            let t = rt.trim();
+            // Result<T, E> — take the first comma-separated segment
+            if let Some(rest) = t.strip_prefix("Result<") {
+                let rest = rest.strip_suffix('>')?;
+                // Find the comma that separates T from E, respecting nesting
+                let mut depth: usize = 0;
+                for (i, c) in rest.char_indices() {
+                    match c {
+                        '<' => depth += 1,
+                        '>' => { if depth == 0 { break; } depth -= 1; }
+                        ',' if depth == 0 => {
+                            let inner = rest[..i].trim().to_string();
+                            if owned(&inner) { return Some(inner); }
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+                return None;
+            }
+            // Option<T>
+            if let Some(inner) = t.strip_prefix("Option<").and_then(|r| r.strip_suffix('>')) {
+                let inner = inner.trim().to_string();
+                if owned(&inner) { return Some(inner); }
+            }
+            None
+        };
         for f in &functions {
             // A self-returning setter's result is SYNTHETICALLY the receiver
             // (own-threaded), not a genuine producer — counting it would let an
@@ -1339,6 +1374,12 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 for r in &f.results {
                     if owned(&r.rust_type) {
                         s.insert(r.rust_type.trim().to_string());
+                    }
+                    // Also admit the inner type of Result<T,_> / Option<T> so
+                    // that types only produced through a fallible ctor (e.g.
+                    // `Url::parse` → `Result<Url, …>`) are treated as producible.
+                    if let Some(inner) = inner_owned(&r.rust_type) {
+                        s.insert(inner);
                     }
                 }
             }
@@ -2843,6 +2884,17 @@ thread_local! {
     // from REACHABLE_PATHS via `reachable_local_path`).
     static EXTERNAL_TRAIT_PATH_BY_ID: std::cell::RefCell<HashMap<String, String>> =
         std::cell::RefCell::new(HashMap::new());
+
+    // [#48-R1] Rustdoc id -> fully-qualified PUBLIC path (joined `::`, e.g.
+    // `core::any::TypeId`, `std::time::Duration`) for every EXTERNAL-crate TYPE
+    // that appears in `doc["paths"]`.  Used by `type_to_typeref` to emit a
+    // fully-qualified `::core::any::TypeId` path instead of the bare `::TypeId`
+    // last-segment form, which is unresolvable without an explicit `use`.
+    // A crate-local type (`crate_id == 0`) is NEVER inserted (its path comes
+    // from REACHABLE_PATHS).  `alloc::` paths are remapped to `std::` for the
+    // same reason as in `collect_external_trait_paths`.
+    static EXTERNAL_TYPE_PATH_BY_ID: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 
 /// Canonical std/core/alloc trait paths that the modellable-5 + the Display/
@@ -2932,10 +2984,70 @@ fn collect_external_trait_paths(doc: &serde_json::Value) -> HashMap<String, Stri
             continue;
         };
         if !joined.is_empty() {
-            out.insert(id.clone(), joined);
+            // `alloc::` is NOT importable in normal Rust code (only reachable in
+            // `#![no_std]` crates with an explicit `extern crate alloc`).  The
+            // rustdoc JSON records the raw internal crate path, which uses `alloc`
+            // for heap types (String, Vec, ToOwned, …).  Remap to `std::` so the
+            // emitted UFCS qualifier `::std::borrow::ToOwned` compiles under the
+            // normal `std`-linked target.
+            let public_path = if let Some(rest) = joined.strip_prefix("alloc::") {
+                format!("std::{rest}")
+            } else {
+                joined
+            };
+            out.insert(id.clone(), public_path);
         }
     }
     out
+}
+
+/// [#48-R1] Build `EXTERNAL_TYPE_PATH_BY_ID`: for every `doc["paths"]` entry
+/// whose `kind` is a type-like kind (`struct`, `enum`, `union`, `type_alias`,
+/// `typedef`) AND `crate_id > 0` (external), record `id -> joined-::-path`.
+/// This gives `type_to_typeref` a fully-qualified path for external types like
+/// `TypeId` (`core::any::TypeId`), avoiding the bare `::TypeId` last-segment
+/// form which is unresolvable without an explicit `use`.
+/// `alloc::` paths are remapped to `std::` for the same reason as trait paths.
+fn collect_external_type_paths(doc: &serde_json::Value) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    let Some(paths) = doc["paths"].as_object() else {
+        return out;
+    };
+    for (id, entry) in paths {
+        if entry["crate_id"].as_u64().unwrap_or(0) == 0 {
+            continue; // crate-local → path resolved via REACHABLE_PATHS
+        }
+        let kind = entry["kind"].as_str().unwrap_or("");
+        if !TYPE_KINDS.contains(&kind) {
+            continue;
+        }
+        let Some(joined) = entry["path"].as_array().map(|segs| {
+            segs.iter()
+                .filter_map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("::")
+        }) else {
+            continue;
+        };
+        if !joined.is_empty() {
+            let public_path = if let Some(rest) = joined.strip_prefix("alloc::") {
+                format!("std::{rest}")
+            } else {
+                joined
+            };
+            out.insert(id.clone(), public_path);
+        }
+    }
+    out
+}
+
+/// [#48-R1] Fully-qualified public path of an external type by its rustdoc id,
+/// if recorded in `EXTERNAL_TYPE_PATH_BY_ID`.  Returns `None` for crate-local
+/// types (their path comes from REACHABLE_PATHS) and for external types absent
+/// from `doc["paths"]` (pub(crate) / stripped).
+fn reachable_external_type_path(id: &serde_json::Value) -> Option<String> {
+    let key = item_id_to_str(id);
+    EXTERNAL_TYPE_PATH_BY_ID.with(|m| m.borrow().get(&key).cloned())
 }
 
 /// Resolve a trait reference node (`{ path, name, id, args }`) to the std-trait
@@ -3178,7 +3290,12 @@ fn type_is_nameable(ty: &str) -> bool {
             }
             let tok = &ty[start..i];
             if tok.as_bytes()[0].is_ascii_uppercase() {
-                let qualified = start >= 2 && &ty[start - 2..start] == "::";
+                // A segment preceded by "::" is "qualified" only when there is a
+                // non-empty prefix BEFORE those two colons (start > 2).  The form
+                // `::TypeId` has start == 2 — the leading "::" has no module before
+                // it — and is NOT nameable: the compiler cannot resolve the bare
+                // identifier without an explicit `use`.
+                let qualified = start > 2 && &ty[start - 2..start] == "::";
                 if !qualified && !ALWAYS_NAMEABLE.contains(&tok) {
                     return false;
                 }
@@ -4673,6 +4790,13 @@ enum TraitMethodDropTag {
     /// code, so it MUST drop here rather than emit a `trait_qualifier=None`
     /// inherent-call form (which would E0599/E0603 at the host). [C-1]
     TraitUnreachable,
+    /// [#48-R2] The method has no own type-params but uses type vars that belong
+    /// exclusively to the IMPL-level generics (a blanket impl such as
+    /// `impl<T: Clone> ToOwned for T`).  For a concrete receiver (e.g. `Widget`)
+    /// the impl var `T = Widget`, but the generated wrapper would have a concrete
+    /// receiver and a still-generic `T` return — an E0308 mismatch in the body.
+    /// Over-drop these rather than emit an ill-typed wrapper.
+    BlanketImplOnlyVar,
 }
 
 impl TraitMethodDropTag {
@@ -4683,6 +4807,7 @@ impl TraitMethodDropTag {
             TraitMethodDropTag::AssocUnresolved => "trait-method-assoc-unresolved",
             TraitMethodDropTag::NonRustAbi => "trait-method-nonrust-abi",
             TraitMethodDropTag::TraitUnreachable => "trait-method-trait-unreachable",
+            TraitMethodDropTag::BlanketImplOnlyVar => "trait-method-blanket-impl-only-var",
         }
     }
 }
@@ -5174,9 +5299,28 @@ fn type_to_typeref(
             }
         }
         let qualified = rp.get("id").and_then(reachable_local_path);
-        let name: String = match qualified {
+        let ext_path = rp.get("id").and_then(reachable_external_type_path);
+        let name: String = match qualified.or(ext_path) {
             Some(full) => full,
-            None => raw_name.rsplit("::").next().unwrap_or(raw_name).to_string(),
+            // [#48-R1] Fall back to bare last-segment ONLY for always-nameable
+            // containers (Vec, Option, …) — these don't need a qualified path
+            // because their name is globally bound.  Any other external type
+            // that has no reachable local path AND no doc["paths"] entry is
+            // unbindable: the bare `::LastSegment` form would fail to compile
+            // without an explicit `use`.  Drop it rather than emit a broken path.
+            None => {
+                let last = raw_name.rsplit("::").next().unwrap_or(raw_name);
+                if ALWAYS_NAMEABLE.contains(&last) {
+                    last.to_string()
+                } else {
+                    return Err(GenericDrop::NotBindable(format!(
+                        "external type `{raw_name}` has no fully-qualified path \
+                         in doc[\"paths\"] — bare `::{}` is unresolvable without \
+                         an explicit `use`",
+                        last
+                    )));
+                }
+            }
         };
         // Force a leading `::` so the emitted Rust path is crate-absolute (the
         // generated wrapper crate glob-imports nothing for these).
@@ -5701,6 +5845,31 @@ fn try_parametric_stub(
     for u in &tyvars {
         if !order.contains(u) {
             return Err(GenericDrop::NotBindable(format!("undeclared type-var `{u}`")));
+        }
+    }
+    // [#48-R2] Blanket-impl gate: if the METHOD has NO own generic type-params
+    // but DOES have used tyvars, they all originate from `impl_generics` (the
+    // blanket impl's own `<T: Bound>` — for example `impl<T: Clone> ToOwned for T`).
+    // For a concrete receiver (e.g. Widget), `T = Widget`.  The wrapper would be
+    // `fn m<T: Clone>(arg0: Widget) -> T` — receiver is concrete but return is still
+    // `T`, causing E0308 in the body (where `T` is not known to be Widget).
+    // Over-drop these blanket-impl methods: the concrete method IS reachable via the
+    // concrete receiver type's own inherent impl (e.g. `Clone::clone` is NOT lost —
+    // it's bound via the modellable-5 Clone path) or is simply not useful (ToOwned
+    // `to_owned` duplicates Clone for concrete types).
+    if trait_ctx.is_some() && !tyvars.is_empty() {
+        let method_own_tyvars: HashSet<String> =
+            type_param_order(method_generics).into_iter().collect();
+        if method_own_tyvars.is_empty() {
+            return Err(GenericDrop::TraitMethodDrop(
+                TraitMethodDropTag::BlanketImplOnlyVar,
+                format!(
+                    "trait-impl method `{method_name}` has impl-level-only type vars \
+                     ({}) — blanket impl with concrete receiver; wrapper would be \
+                     ill-typed (receiver concrete, return generic)",
+                    tyvars.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            ));
         }
     }
     let param_idx: HashMap<String, usize> =
@@ -6553,13 +6722,11 @@ fn resolve_param_bounds(bounds: &[serde_json::Value], pos: BoundPos) -> Option<s
     let mut concrete: Option<serde_json::Value> = None;
     for b in bounds {
         if is_marker_bound(b) { continue; }
-        match bound_to_concrete(b, pos) {
-            Some(c) => match &concrete {
-                Some(prev) if *prev != c => return None, // conflict
-                Some(_) => {}
-                None => concrete = Some(c),
-            },
-            None => return None, // non-marker bound we can't map
+        let c = bound_to_concrete(b, pos)?; // non-marker bound we can't map → drop
+        match &concrete {
+            Some(prev) if *prev != c => return None, // conflict
+            Some(_) => {}
+            None => concrete = Some(c),
         }
     }
     concrete
@@ -7578,12 +7745,14 @@ mod tests {
         EXTERNAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_external_type_ids(doc));
         STD_TRAIT_BY_ID.with(|c| *c.borrow_mut() = collect_std_trait_ids(doc));
         EXTERNAL_TRAIT_PATH_BY_ID.with(|c| *c.borrow_mut() = collect_external_trait_paths(doc));
+        EXTERNAL_TYPE_PATH_BY_ID.with(|c| *c.borrow_mut() = collect_external_type_paths(doc));
         REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
         let out = f();
         LOCAL_TYPE_IDS.with(|c| c.borrow_mut().clear());
         EXTERNAL_TYPE_IDS.with(|c| c.borrow_mut().clear());
         STD_TRAIT_BY_ID.with(|c| c.borrow_mut().clear());
         EXTERNAL_TRAIT_PATH_BY_ID.with(|c| c.borrow_mut().clear());
+        EXTERNAL_TYPE_PATH_BY_ID.with(|c| c.borrow_mut().clear());
         REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
         out
     }
@@ -10877,6 +11046,120 @@ mod tests {
         assert_eq!(
             rustdoc_type_to_rust_str(&serde_json_value_node()),
             "serde_json::Value"
+        );
+    }
+
+    // ── R1/R2/R3 regression tests (#48) ──────────────────────────────────────
+
+    /// R1 [#48]: A single-segment type name at the very start of a type string
+    /// preceded only by `::` (i.e. `::TypeId`) has `start == 2` and MUST be
+    /// unnameable.  The pre-fix bug treated it as "qualified" (start >= 2 caught
+    /// this case and wrongly allowed it through).
+    #[test]
+    fn test_r1_leading_colons_single_segment_unnameable() {
+        // `::TypeId` — the identifier starts at index 2, preceded only by "::".
+        // No module before the leading colons → unnameable (can't import).
+        assert!(!type_is_nameable("::TypeId"),
+            "::TypeId (no module before leading ::) must be unnameable");
+        // Contrast: a genuinely module-qualified name (module before the segment)
+        // IS nameable.
+        assert!(type_is_nameable("std::any::TypeId"),
+            "std::any::TypeId is module-qualified and must be nameable");
+        // Sanity: a plain bare uppercase that is not in ALWAYS_NAMEABLE is unnameable.
+        assert!(!type_is_nameable("TypeId"),
+            "bare TypeId (not in ALWAYS_NAMEABLE) must be unnameable");
+        // A return like `-> ::SomePrivate` at start-of-string is the real cargo-fail
+        // class this fixes (Any::type_id → TypeId, ToOwned → Owned).
+        assert!(!type_is_nameable("::Owned"),
+            "::Owned (no module prefix) must be unnameable");
+    }
+
+    /// R2 [#48]: `alloc::borrow::ToOwned` recorded by `collect_external_trait_paths`
+    /// must be remapped to `std::borrow::ToOwned` so the emitted UFCS qualifier
+    /// `::std::borrow::ToOwned` compiles under the normal std-linked target.
+    /// `::alloc::borrow::ToOwned` would fail (E0433: `alloc` not in scope).
+    #[test]
+    fn test_r2_alloc_trait_path_remapped_to_std() {
+        let doc = serde_json::json!({
+            "index": {
+                "1": { "name": "mycrate", "crate_id": 0, "visibility": "public",
+                       "inner": { "module": { "items": [] } } }
+            },
+            "paths": {
+                // `alloc::borrow::ToOwned` as rustdoc would record it
+                "300": { "crate_id": 1, "kind": "trait",
+                         "path": ["alloc", "borrow", "ToOwned"] }
+            },
+        });
+        let paths = collect_external_trait_paths(&doc);
+        let stored = paths.get("300").expect("trait 300 must be recorded");
+        assert_eq!(stored, "std::borrow::ToOwned",
+            "alloc::borrow::ToOwned must be remapped to std::borrow::ToOwned");
+        assert!(!stored.starts_with("alloc::"),
+            "stored path must NOT start with alloc:: (not importable)");
+    }
+
+    /// R3 [#48]: A type produced only inside `Result<T, E>` (e.g. `url::Url`
+    /// from `Url::parse`) must be admitted to `owned_producible` so its instance
+    /// methods survive the Sized gate (P4).  The fix unwraps one layer of
+    /// Result/Option when building the set.
+    #[test]
+    fn test_r3_owned_producible_unwraps_result_inner() {
+        // Simulate the owned_producible logic directly.
+        // A function returning `Result<url::Url, url::ParseError>` — the inner
+        // `url::Url` must land in owned_producible even though the outer type is
+        // the container.
+        let inner_owned = |rt: &str| -> Option<String> {
+            let t = rt.trim();
+            if let Some(rest) = t.strip_prefix("Result<") {
+                let rest = rest.strip_suffix('>')?;
+                let mut depth: usize = 0;
+                for (i, c) in rest.char_indices() {
+                    match c {
+                        '<' => depth += 1,
+                        '>' => { if depth == 0 { break; } depth -= 1; }
+                        ',' if depth == 0 => {
+                            let inner = rest[..i].trim().to_string();
+                            let owned = !inner.is_empty() && !inner.contains('&') && !inner.contains('[');
+                            if owned { return Some(inner); }
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+                return None;
+            }
+            if let Some(inner) = t.strip_prefix("Option<").and_then(|r| r.strip_suffix('>')) {
+                let inner = inner.trim().to_string();
+                let owned = !inner.is_empty() && !inner.contains('&') && !inner.contains('[');
+                if owned { return Some(inner); }
+            }
+            None
+        };
+
+        // Result<url::Url, url::ParseError> → inner = "url::Url"
+        assert_eq!(
+            inner_owned("Result<url::Url, url::ParseError>"),
+            Some("url::Url".to_string()),
+            "Result<url::Url, url::ParseError> must yield inner url::Url"
+        );
+        // Option<url::Url> → inner = "url::Url"
+        assert_eq!(
+            inner_owned("Option<url::Url>"),
+            Some("url::Url".to_string()),
+            "Option<url::Url> must yield inner url::Url"
+        );
+        // Borrowed inner is NOT owned → None
+        assert_eq!(
+            inner_owned("Result<&str, String>"),
+            None,
+            "Result<&str, _> inner is borrowed — must NOT be admitted"
+        );
+        // Plain type (no wrapper) → None (not the job of inner_owned)
+        assert_eq!(
+            inner_owned("url::Url"),
+            None,
+            "bare url::Url is not a Result/Option — inner_owned returns None"
         );
     }
 }
