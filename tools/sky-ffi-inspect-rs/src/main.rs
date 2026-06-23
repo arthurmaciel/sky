@@ -2332,6 +2332,27 @@ fn parse_fn_item(
         return None;
     }
 
+    // Trait-objects arc tail (#26): DROP any NON-generic fn carrying a NON-`Fn`
+    // `dyn Trait` object in a param or the return. `rustdoc_type_to_rust_str`
+    // renders such an opaque object's type-arg as EMPTY (`Box<>` / `&`), which
+    // would pass the downstream `fn_types_nameable` string-gate and BIND an
+    // under-bound slot the host actually wants as `dyn Trait` → E0308. Per the
+    // universal-FFI-arc feasibility verdict (§3) every non-`dyn-Fn` trait object
+    // drops; `dyn Fn`/`FnMut`/`FnOnce` is EXCLUDED (the closure seam owns it) by
+    // `is_dyn_trait_object`. `impl Trait` is already handled above (resolvable ones
+    // monomorphise; the rest dropped via `impl_traits_resolvable`).
+    {
+        let input_dyn = inputs.iter().find(|i| is_dyn_trait_object(&i[1]));
+        let output_dyn = if is_dyn_trait_object(output) { Some(output) } else { None };
+        if let Some(offending) = input_dyn.map(|i| &i[1]).or(output_dyn) {
+            record_generic_drop(
+                name,
+                GenericDrop::TraitObjectDrop(rustdoc_type_to_rust_str(offending)),
+            );
+            return None;
+        }
+    }
+
     let mut params: Vec<Param> = Vec::new();
 
     // Determine if this is an instance method by checking whether `self`
@@ -4082,6 +4103,14 @@ enum GenericDrop {
     /// A trait-impl method that can't bind (#21). The tag is the SPECIFIC trait-
     /// method coverage reason; the `String` is the offending detail.
     TraitMethodDrop(TraitMethodDropTag, String),
+    /// A NON-generic fn carrying a NON-`Fn` `dyn Trait` object (`Box<dyn UserTrait>`
+    /// / `&dyn UserTrait` / `-> Box<dyn UserTrait>`) in a param/return. The
+    /// rustdoc→rust-string converter renders the opaque object's type-arg as EMPTY
+    /// (`Box<>` / `&`), which sneaks past the nameability string-gate and binds an
+    /// under-bound slot → E0308 at the host. Per the universal-FFI-arc feasibility
+    /// verdict (§3) EVERY non-`dyn-Fn` trait object DROPS — `dyn Fn` is the closure
+    /// seam's job and is excluded by `is_dyn_trait_object`. `String` = offending type.
+    TraitObjectDrop(String),
 }
 
 /// The distinct reason a trait-impl method could not be bound (#21). Each maps to
@@ -4205,6 +4234,7 @@ impl GenericDrop {
             GenericDrop::ClosureDrop(tag, _)    => tag.tag(),
             GenericDrop::IteratorDrop(tag, _)   => tag.tag(),
             GenericDrop::TraitMethodDrop(tag, _) => tag.tag(),
+            GenericDrop::TraitObjectDrop(_)     => "trait-object-unsupported",
         }
     }
     fn detail(&self) -> &str {
@@ -4215,7 +4245,8 @@ impl GenericDrop {
             | GenericDrop::NotBindable(d)
             | GenericDrop::ClosureDrop(_, d)
             | GenericDrop::IteratorDrop(_, d)
-            | GenericDrop::TraitMethodDrop(_, d) => d,
+            | GenericDrop::TraitMethodDrop(_, d)
+            | GenericDrop::TraitObjectDrop(d) => d,
         }
     }
 }
@@ -5957,6 +5988,51 @@ fn impl_traits_resolvable(val: &serde_json::Value, pos: BoundPos) -> bool {
         serde_json::Value::Object(obj) => obj.values().all(|v| impl_traits_resolvable(v, pos)),
         serde_json::Value::Array(arr) => arr.iter().all(|v| impl_traits_resolvable(v, pos)),
         _ => true,
+    }
+}
+
+/// The last `::` segment of a `dyn_trait`'s FIRST trait reference (the principal
+/// trait of the object), if any. rustdoc models a `dyn Trait + Send` object as
+/// `{"dyn_trait":{"traits":[{"trait":{path|name}}, …], "lifetime":…}}`; the first
+/// entry is the principal trait, the rest are auto/marker traits.
+fn dyn_trait_principal_name(node: &serde_json::Value) -> Option<String> {
+    let traits = node.get("dyn_trait")?.get("traits")?.as_array()?;
+    let tr = traits.first()?.get("trait")?;
+    let path = tr.get("path").or_else(|| tr.get("name")).and_then(|p| p.as_str())?;
+    Some(path.rsplit("::").next().unwrap_or(path).to_string())
+}
+
+/// True for a closure trait name (`Fn` / `FnMut` / `FnOnce`). A `dyn Fn(..)` is a
+/// satisfiable Sky fn-value, owned by the CLOSURE seam (try_parametric_stub) — it
+/// must NOT be caught by the trait-object drop.
+fn is_fn_family_trait_name(name: &str) -> bool {
+    ClosureKind::from_trait_name(name).is_some()
+}
+
+/// True if `val` contains, ANYWHERE, a NON-`Fn`-family `dyn Trait` object — the
+/// feasibility-mandated drop class (`trait-object-unsupported`). A `dyn Fn`/
+/// `FnMut`/`FnOnce` is EXCLUDED (the closure seam owns it), so a
+/// `Box<dyn Fn(i64)->i64>` returns `false` here and stays routable. Used by the
+/// NON-GENERIC `parse_fn_item` path, whose `rustdoc_type_to_rust_str` would
+/// otherwise render the opaque `dyn Trait` as an EMPTY type-arg (`Box<>` / `&`),
+/// pass the nameability string-gate, and bind an under-bound slot → E0308 at the
+/// host. `impl Trait` is handled separately (resolvable ones monomorphise, the
+/// rest drop via `impl_traits_resolvable`), so this checks `dyn_trait` only.
+fn is_dyn_trait_object(val: &serde_json::Value) -> bool {
+    if val.get("dyn_trait").is_some() {
+        // A `dyn Fn(..)` is the closure seam's job — never a trait-object drop.
+        let is_fn = dyn_trait_principal_name(val)
+            .as_deref()
+            .map(is_fn_family_trait_name)
+            .unwrap_or(false);
+        if !is_fn {
+            return true;
+        }
+    }
+    match val {
+        serde_json::Value::Object(obj) => obj.values().any(is_dyn_trait_object),
+        serde_json::Value::Array(arr) => arr.iter().any(is_dyn_trait_object),
+        _ => false,
     }
 }
 
@@ -8655,5 +8731,161 @@ mod tests {
                 dropped_generic_self,
                 "area on Holder<i64> must record a trait-method-generic-self drop");
         }
+    }
+
+    // ── Trait-objects arc tail (#26) — non-dyn-Fn `dyn`/`impl Trait` MUST DROP ──
+    //
+    // Feasibility verdict (2026-06-22-universal-ffi-arc-feasibility.md §3): `dyn Fn`
+    // is absorbed by the closures epic; EVERY OTHER trait-object drops. These tests
+    // pin the binding-path contract: a NON-GENERIC (concrete-Self / free) fn carrying
+    // a `Box<dyn UserTrait>` / `&dyn UserTrait` / `-> Box<dyn UserTrait>` param/return
+    // must NOT bind (it would render an under-bound String-shaped slot → E0308), while
+    // a `dyn Fn` boxed-closure param STILL routes to the closure seam, and a normal
+    // `&Foo` param is unaffected (no over-drop).
+
+    /// A `dyn_trait` rustdoc node naming a single trait `name` (no Fn-sugar).
+    fn dyn_trait_node(name: &str) -> serde_json::Value {
+        serde_json::json!({ "dyn_trait": {
+            "lifetime": null,
+            "traits": [ { "generic_params": [], "trait": {
+                "path": name, "name": name, "id": 0, "args": null
+            } } ]
+        } })
+    }
+
+    /// `Box<inner>` resolved-path node.
+    fn box_of(inner: serde_json::Value) -> serde_json::Value {
+        path_with_args("Box", vec![inner])
+    }
+
+    #[test]
+    fn dyn_box_param_drops() {
+        // fn takes_box(&self, x: Box<dyn SomeTrait>)  — concrete free fn (no generics)
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["x", box_of(dyn_trait_node("SomeTrait"))] ], "output": null }
+        });
+        let parsed = parse_fn_item("takes_box", &fd, &HashMap::new(), None);
+        // STEP 1 evidence: if this binds, the rendered rust_type is the under-bound
+        // `Box<>` (empty arg) which passes the nameable gate → cargo-fail E0308.
+        assert!(
+            parsed.is_none(),
+            "Box<dyn SomeTrait> param must DROP (trait-object-unsupported), got {:?}",
+            parsed.map(|f| f.params.iter().map(|p| p.rust_type.clone()).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn dyn_ref_param_drops() {
+        // fn takes_ref(&self, x: &dyn SomeTrait)
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["x", borrowed(dyn_trait_node("SomeTrait"))] ], "output": null }
+        });
+        let parsed = parse_fn_item("takes_ref", &fd, &HashMap::new(), None);
+        assert!(
+            parsed.is_none(),
+            "&dyn SomeTrait param must DROP (trait-object-unsupported), got {:?}",
+            parsed.map(|f| f.params.iter().map(|p| p.rust_type.clone()).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn dyn_box_return_drops() {
+        // fn returns_box(&self) -> Box<dyn SomeTrait>
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [], "output": box_of(dyn_trait_node("SomeTrait")) }
+        });
+        let parsed = parse_fn_item("returns_box", &fd, &HashMap::new(), None);
+        assert!(
+            parsed.is_none(),
+            "-> Box<dyn SomeTrait> must DROP (trait-object-unsupported), got {:?}",
+            parsed.map(|f| f.results.iter().map(|p| p.rust_type.clone()).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn impl_trait_nonfn_param_drops() {
+        // fn takes_impl(&self, x: impl SomeTrait)  — a bare non-Fn/non-Iterator impl
+        // Trait that can't be monomorphised → already drops via impl_traits_resolvable;
+        // this control locks that behaviour in alongside the dyn-trait drops.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["x", { "impl_trait": [trait_bound("SomeTrait", vec![])] }] ], "output": null }
+        });
+        assert!(
+            parse_fn_item("takes_impl", &fd, &HashMap::new(), None).is_none(),
+            "impl SomeTrait (non-Fn) param must DROP");
+    }
+
+    #[test]
+    fn dyn_fn_param_still_routes_to_closure_seam() {
+        // CONTROL: fn takes_fn(&self, f: Box<dyn Fn(i64) -> i64>) — a BOXED CLOSURE.
+        // `dyn Fn` is a satisfiable Sky fn-value; the new trait-object drop must NOT
+        // catch it. The non-generic parse_fn_item path doesn't emit closure metadata
+        // (that's try_parametric_stub's job), but the dyn-trait drop must EXCLUDE
+        // Fn/FnMut/FnOnce so the closure seam keeps it. We assert the rendered/sky
+        // shape is NOT the trait-object drop — `is_dyn_trait_object` returns false for
+        // an Fn-family dyn trait.
+        let fn_dyn = serde_json::json!({ "dyn_trait": {
+            "lifetime": null,
+            "traits": [ { "generic_params": [], "trait": {
+                "path": "Fn", "name": "Fn", "id": 0,
+                "args": { "parenthesized": { "inputs": [ { "primitive": "i64" } ],
+                                             "output": { "primitive": "i64" } } }
+            } } ]
+        } });
+        assert!(
+            !is_dyn_trait_object(&box_of(fn_dyn.clone())),
+            "Box<dyn Fn(..)> must NOT be classified as a trait-object drop (closure seam owns it)");
+        assert!(
+            !is_dyn_trait_object(&fn_dyn),
+            "dyn Fn(..) must NOT be classified as a trait-object drop");
+    }
+
+    #[test]
+    fn normal_ref_param_does_not_over_drop() {
+        // CONTROL: fn uses(&self, x: &Foo) where Foo is a nameable opaque — a normal
+        // borrowed param must STILL bind (no over-drop from the trait-object gate).
+        let foo = serde_json::json!({
+            "resolved_path": { "name": "Foo", "path": "Foo", "id": 0, "args": null }
+        });
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["x", borrowed(foo)] ], "output": null }
+        });
+        let f = parse_fn_item("uses", &fd, &HashMap::new(), None)
+            .expect("&Foo param must still bind — no over-drop");
+        assert_eq!(f.params[0].rust_type, "&Foo");
+    }
+
+    #[test]
+    fn trait_object_drop_coverage_tag() {
+        // The drop carries the `trait-object-unsupported` coverage tag — the
+        // taxonomy entry alongside the closure/iterator tags.
+        let d = GenericDrop::TraitObjectDrop("Box<dyn SomeTrait>".into());
+        assert_eq!(d.reason(), "trait-object-unsupported");
+        assert_eq!(d.detail(), "Box<dyn SomeTrait>");
+
+        // And `parse_fn_item` actually RECORDS that tag when it drops a dyn-object fn.
+        GENERIC_DROPS.with(|v| v.borrow_mut().clear());
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["x", box_of(dyn_trait_node("SomeTrait"))] ], "output": null }
+        });
+        assert!(parse_fn_item("takes_box", &fd, &HashMap::new(), None).is_none());
+        let recorded = GENERIC_DROPS.with(|v| {
+            v.borrow().iter().any(|(sym, d)| {
+                sym == "takes_box" && d.reason() == "trait-object-unsupported"
+            })
+        });
+        assert!(recorded, "dyn-object drop must record the trait-object-unsupported tag");
     }
 }

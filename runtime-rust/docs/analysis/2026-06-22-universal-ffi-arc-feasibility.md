@@ -109,6 +109,22 @@ from a Sky record-of-functions — real work, and there is **no measured demand*
 justify it. Verdict: **fold `dyn Fn` into the closures epic; drop every other `dyn`
 with a coverage report.** No standalone trait-objects epic.
 
+**Closed 2026-06-23.** `dyn Fn` absorbed by the closures epic (#28); every other
+`dyn`/`impl Trait` drops with the `trait-object-unsupported` coverage tag. No epic.
+The inspector's GENERIC/parametric path (`type_to_typeref`) already dropped
+`dyn`/`impl Trait` via `NotBindable`; the residual hole was the NON-generic
+`parse_fn_item` path, where `rustdoc_type_to_rust_str` rendered a non-`dyn-Fn`
+`dyn Trait`'s opaque type-arg as EMPTY (`Box<dyn UserTrait>` → `Box<>`, `&dyn
+UserTrait` → `&`). That under-bound slot slipped past the `fn_types_nameable`
+string-gate and bound → E0308 at the host (the arc's under-bind class). Fixed by an
+`is_dyn_trait_object` gate in `parse_fn_item` that DROPS any param/return carrying a
+non-`Fn`/`FnMut`/`FnOnce` `dyn Trait` (the Fn-family is excluded so `dyn Fn` still
+routes to the closure seam). Over-drop of a real `dyn UserTrait` is correct
+(feasibility-mandated). Regression: `dyn_box_param_drops` / `dyn_ref_param_drops` /
+`dyn_box_return_drops` (+ `dyn_fn_param_still_routes_to_closure_seam` /
+`normal_ref_param_does_not_over_drop` / `impl_trait_nonfn_param_drops` /
+`trait_object_drop_coverage_tag` controls) in `tools/sky-ffi-inspect-rs/src/main.rs`.
+
 ## Recommended order (feasibility × demand)
 
 1. **Finish #22 — borrowed-ref / owned-copy return** (already in flight). Biggest

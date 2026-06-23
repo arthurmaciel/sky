@@ -17,6 +17,40 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-23 — #26 arc tail: drop non-`dyn-Fn` trait objects (close trait-objects arc)
+
+**What.** Closed the trait-objects arc item per the feasibility verdict
+(`docs/analysis/2026-06-22-universal-ffi-arc-feasibility.md` §3): `dyn Fn` absorbed
+by the closures epic (#28); every other `dyn`/`impl Trait` DROPS with a
+`trait-object-unsupported` coverage tag — no epic.
+
+**Why / the hole.** The GENERIC path (`type_to_typeref`) already dropped
+`dyn`/`impl Trait` via `NotBindable`. But the NON-generic `parse_fn_item` path
+used `rustdoc_type_to_rust_str`, which rendered a non-`dyn-Fn` `dyn Trait`'s opaque
+type-arg as EMPTY: `Box<dyn UserTrait>` → `Box<>`, `&dyn UserTrait` → `&`. That
+under-bound slot passed the `fn_types_nameable` string-gate and BOUND → E0308 at the
+host (the arc's under-bind class). STEP-1 unit probes confirmed it: `Box<dyn>` /
+`&dyn` / `-> Box<dyn>` all bound today (`rust_type = "Box<>"` / `"&"`).
+
+**Fix.** New `is_dyn_trait_object` predicate (recurses through containers; EXCLUDES
+the Fn-family so `dyn Fn`/`FnMut`/`FnOnce` stays routed to the closure seam) + a gate
+in `parse_fn_item` that records `GenericDrop::TraitObjectDrop` (tag
+`trait-object-unsupported`) and drops the fn. `impl Trait` already handled
+(resolvable monomorphises, rest drop via `impl_traits_resolvable`). Over-drop of a
+real `dyn UserTrait` is correct (feasibility-mandated); the bug was the under-bind.
+
+**Tests.** +7 (102 → 109 green): `dyn_box_param_drops`, `dyn_ref_param_drops`,
+`dyn_box_return_drops`, `dyn_fn_param_still_routes_to_closure_seam`,
+`normal_ref_param_does_not_over_drop`, `impl_trait_nonfn_param_drops`,
+`trait_object_drop_coverage_tag`. clippy `-D warnings` clean.
+
+**Affected.**
+- `tools/sky-ffi-inspect-rs/src/main.rs` — `GenericDrop::TraitObjectDrop` +
+  `dyn_trait_principal_name` / `is_fn_family_trait_name` / `is_dyn_trait_object` +
+  `parse_fn_item` gate + tests.
+- `runtime-rust/docs/analysis/2026-06-22-universal-ffi-arc-feasibility.md` — §3
+  closure note.
+
 ## 2026-06-23 — #25 trait identity by resolved rustdoc id (not last path segment)
 
 **What.** The inspector decided trait identity (the modellable-5 bound check + the
