@@ -24,6 +24,20 @@ pub fn ok_res<E, A>(a: A) -> SkyResult<E, A> { SkyResult::Ok(a) }
 /// When E = SkyCoreErrorError, the generated code provides the impl.
 pub fn str_err<E: From<String>>(s: &str) -> E { s.to_string().into() }
 
+/// Convert a foreign async error into a SkyError (= String).
+///
+/// Used by the fallible-async FFI wrapper bodies to flatten a foreign
+/// `Result<T, E>` Err arm into a Sky-compatible error string:
+///
+///   `Ok(Err(e)) => SkyResult::Err(sky_error_from_foreign(e))`
+///
+/// C5: `tokio::task::spawn(...).await` already catches panics via JoinError;
+/// this fn handles the non-panic `Err(e)` arm.  Any `Debug`-able foreign
+/// error type is accepted — `Debug` is universal, safe, and always available.
+pub fn sky_error_from_foreign<E: std::fmt::Debug>(e: E) -> String {
+    format!("{e:?}")
+}
+
 /// Bake a config-derived default for an env var: set `key=val` ONLY when the
 /// var is unset, so shell env / `.env` still win (precedence: process env >
 /// baked default). Go parity: the generated `init()`'s `rt.SetPortDefault` +

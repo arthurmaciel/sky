@@ -857,12 +857,24 @@ emitRustFile kernelName pkg =
             -- the (already `mut`) receiver, discard its borrowed `&mut Self`/`()`
             -- return, and return the owned receiver. No lifetime, no Clone.
             ownThreadArgs = intercalate ", " (map argCall [1 .. nParams - 1])
+            -- True when the async fn's raw return is a Result (fallible async).
+            -- Infallible async (ping→String, add→i64) do NOT start with "Result<".
+            -- This drives the two-pronged body below.
+            isAsyncFallible = "Result<" `isPrefixOf` effRawResult
             body
                 | _fnSelfReturning fn =
                     "ok_res({ arg0." ++ fnName ++ "(" ++ ownThreadArgs ++ "); arg0 })"
                 | otherwise = case _fnEffect fn of
+                    "effectful" | isAsyncFallible ->
+                        -- Fallible async: `async fn -> Result<T, E>`.
+                        -- tokio::task::spawn drives C5 (panic → JoinError → Err).
+                        -- Three arms: Ok(Ok(v)) / Ok(Err(e)) / Err(join_panic).
+                        -- sky_error_from_foreign<E: Debug>(e) converts any Error to SkyError.
+                        "Box::pin(async move { match tokio::task::spawn(async move { " ++ callExpr ++ ".await }).await { Ok(Ok(v)) => ok_res(" ++ retCoerce "v" ++ "), Ok(Err(e)) => SkyResult::Err(sky_error_from_foreign(e)), Err(_) => SkyResult::Err(str_err(\"foreign async call panicked\")) } })"
                     "effectful" ->
-                        "Box::pin(async move { match " ++ callExpr ++ ".await { Ok(v) => ok_res(" ++ retCoerce "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) } })"
+                        -- Infallible async: `async fn -> T` (not a Result).
+                        -- tokio::task::spawn drives C5; two arms: Ok(v) / Err(join_panic).
+                        "Box::pin(async move { match tokio::task::spawn(async move { " ++ callExpr ++ ".await }).await { Ok(v) => ok_res(" ++ retCoerce "v" ++ "), Err(_) => SkyResult::Err(str_err(\"foreign async call panicked\")) } })"
                     "fallible" ->
                         "match " ++ callExpr ++ " { Ok(v) => ok_res(" ++ retCoerce "v" ++ "), Err(e) => SkyResult::Err(str_err(&format!(\"{:?}\", e))) }"
                     _ ->
