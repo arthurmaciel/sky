@@ -2156,10 +2156,30 @@ fn parse_fn_item(
     // cannot pick a sound concrete type.
     let subst_map = resolve_generics(fn_data)?;
 
-    // Drop if any `impl Trait` arg/return can't be soundly monomorphised.
-    if !sig["inputs"].as_array().map(|ins| ins.iter().all(impl_traits_resolvable)).unwrap_or(true)
-        || !impl_traits_resolvable(output)
-    {
+    // Drop if any `impl Trait` arg/return can't be soundly monomorphised. The
+    // POSITION matters ([C-R]): an iterator-trait `impl Trait` resolves in PARAM
+    // position (sound `Vec<Item>` arg) but is undecidable in RETURN position
+    // (latent E0308 / unbounded `.collect()`), so the output is checked with
+    // `BoundPos::Return` and drops the whole fn.
+    let inputs_ok = sig["inputs"]
+        .as_array()
+        .map(|ins| ins.iter().all(|i| impl_traits_resolvable(i, BoundPos::Param)))
+        .unwrap_or(true);
+    let output_ok = impl_traits_resolvable(output, BoundPos::Return);
+    if !inputs_ok || !output_ok {
+        // Attribute a RETURN-position iterator-trait drop to its specific coverage
+        // tag ([C-R]) — but only when it is the OUTPUT gate that failed on an
+        // iterator-trait return. Every other impl-trait drop stays the silent
+        // generic drop.
+        if !output_ok && contains_iterator_impl_trait(output) {
+            record_generic_drop(
+                name,
+                GenericDrop::IteratorDrop(
+                    IteratorDropTag::ReturnUndecidable,
+                    "return-position impl IntoIterator/Iterator (undecidable finiteness)".to_string(),
+                ),
+            );
+        }
         return None;
     }
 
@@ -2197,7 +2217,7 @@ fn parse_fn_item(
         if param_name == "self" {
             continue;
         }
-        let type_json = subst_generic_json(&input[1], &subst_map);
+        let type_json = subst_generic_json(&input[1], &subst_map, BoundPos::Param);
         let sky = rustdoc_type_to_sky(&type_json, aliases);
         let rust = rustdoc_type_to_rust_str(&type_json);
         // `Self` in a parameter position means "the receiver type" (e.g.
@@ -2218,7 +2238,7 @@ fn parse_fn_item(
     // Return type
     let mut results: Vec<Param> = Vec::new();
     if !output.is_null() {
-        let out_json = subst_generic_json(output, &subst_map);
+        let out_json = subst_generic_json(output, &subst_map, BoundPos::Return);
         let sky = rustdoc_type_to_sky(&out_json, aliases);
         let rust = rustdoc_type_to_rust_str(&out_json);
         // Substitute `Self` (possibly nested, e.g. `Option<Self>`) with the
@@ -3493,11 +3513,37 @@ fn concrete_for_inner_type(t: &serde_json::Value) -> Option<serde_json::Value> {
     None
 }
 
+/// Where an `impl Trait` bound sits in the signature. Iterator-trait bounds
+/// (`IntoIterator`/`Iterator`) resolve to a concrete `Vec<Item>` ONLY in
+/// PARAM position (`Vec<T>: IntoIterator<Item=T>`, so passing a `Vec` to an
+/// `impl IntoIterator` param is sound). In RETURN position the wrapper sig
+/// would be `-> Vec<T>` over an `impl IntoIterator` body — a latent E0308 — and
+/// rustdoc carries no finiteness metadata to safely `.collect()`, so it must
+/// DROP ([C-R], `iterator-return-undecidable`). Every NON-iterator bound is
+/// position-agnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundPos {
+    Param,
+    Return,
+}
+
+/// True for the two iterator trait names whose `impl Trait` resolution is
+/// position-sensitive ([C-R]). Recognises BOTH `IntoIterator` AND `Iterator`
+/// (the bare-`Iterator` case is net-new vs the param-only `bound_to_concrete`
+/// arm, which only knew `IntoIterator`).
+fn is_iterator_trait_name(name: &str) -> bool {
+    name == "IntoIterator" || name == "Iterator"
+}
+
 /// Map a single trait bound to the concrete type-JSON node to substitute, or
 /// `None` if the bound is not recognised. The arms delegate inner-type
 /// resolution to `concrete_for_inner_type`, which makes the table recursive:
 /// `AsRef<X>` works for any X the helper can resolve, etc.
-fn bound_to_concrete(bound: &serde_json::Value) -> Option<serde_json::Value> {
+///
+/// `pos` is position-aware ONLY for iterator traits ([C-R]): an iterator-trait
+/// `impl Trait` in RETURN position returns `None` (drop the fn). Every other
+/// bound ignores `pos`.
+fn bound_to_concrete(bound: &serde_json::Value, pos: BoundPos) -> Option<serde_json::Value> {
     let tr = bound.get("trait_bound")?.get("trait")?;
     let path = tr.get("path").or_else(|| tr.get("name")).and_then(|p| p.as_str())?;
     let name = path.rsplit("::").next().unwrap_or(path);
@@ -3535,8 +3581,18 @@ fn bound_to_concrete(bound: &serde_json::Value) -> Option<serde_json::Value> {
                 concrete_for_inner_type(arg)
             }
         }
-        // IntoIterator<Item=X>: Item is an assoc-type CONSTRAINT, not a type arg.
-        "IntoIterator" => {
+        // IntoIterator<Item=X> / Iterator<Item=X>: Item is an assoc-type
+        // CONSTRAINT, not a type arg. POSITION-AWARE ([C-R]): a `Vec<X>` IS an
+        // `IntoIterator<Item=X>` (and `Vec::into_iter()` an `Iterator<Item=X>`),
+        // so passing a concrete `Vec<X>` to an iterator-bound PARAM is sound; but
+        // a RETURN-position iterator-trait `impl Trait` would emit `-> Vec<X>`
+        // over a non-`Vec` body (latent E0308) and has no finiteness metadata to
+        // safely `.collect()` — so it DROPS (the fn yields `None` → coverage tag
+        // `iterator-return-undecidable`).
+        n if is_iterator_trait_name(n) => {
+            if pos == BoundPos::Return {
+                return None;
+            }
             let item = tr.get("args")
                 .and_then(|a| a.get("angle_bracketed"))
                 .and_then(|ab| ab.get("constraints"))
@@ -3607,6 +3663,46 @@ enum GenericDrop {
     /// A closure-typed param the backend can't model. The tag is the SPECIFIC
     /// closure coverage reason (Task 5.2); the `String` is the offending detail.
     ClosureDrop(ClosureDropTag, String),
+    /// An iterator-typed param the backend can't model. The tag is the SPECIFIC
+    /// iterator coverage reason (epic #30); the `String` is the offending detail.
+    IteratorDrop(IteratorDropTag, String),
+}
+
+/// The distinct reason an iterator-typed slot could not be modelled. Each maps
+/// to a stable coverage tag string flowing through `emit_generic_coverage`.
+//
+// STEP 1 ([C-R]) constructs only `ReturnUndecidable`; the other three tags are
+// wired into the PARAM seam in STEP 2 (`classify_iterator_param`). The
+// `#[allow(dead_code)]` mirrors the closure `IndirectNoAnalysis` precedent and
+// is REMOVED when STEP 2 lands. The `.tag()` test already exercises all four.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IteratorDropTag {
+    /// A `-> impl IntoIterator`/`Iterator` (or otherwise iterator-trait) RETURN
+    /// — undecidable finiteness, latent E0308 ([C-R]). Position-aware drop.
+    ReturnUndecidable,
+    /// `Item=T` resolves to a non-closed / nested-closure / nested-iterator type
+    /// the closed-set resolver can't bind (C3).
+    #[allow(dead_code)] // wired in STEP 2 (classify_iterator_param)
+    ItemUnmodellable,
+    /// An iterator companion bound beyond `Sized`+lifetime (C5) — e.g.
+    /// `I: Iterator + Send`, `where I::Item: Ord`.
+    #[allow(dead_code)] // wired in STEP 2 (iterator_bound_of companion gate)
+    CompanionUnsatisfiable,
+    /// Iterator metadata suppressed because the host fn's ABI is not `"Rust"`
+    /// (C8) — mirrors `closure-nonrust-abi`.
+    #[allow(dead_code)] // wired in STEP 2 (host_abi_is_rust gate)
+    NonRustAbi,
+}
+
+impl IteratorDropTag {
+    fn tag(self) -> &'static str {
+        match self {
+            IteratorDropTag::ReturnUndecidable => "iterator-return-undecidable",
+            IteratorDropTag::ItemUnmodellable => "iterator-item-unmodellable",
+            IteratorDropTag::CompanionUnsatisfiable => "iterator-companion-unsatisfiable",
+            IteratorDropTag::NonRustAbi => "iterator-nonrust-abi",
+        }
+    }
 }
 
 /// The distinct reason a closure-typed param could not be modelled. Each maps to
@@ -3655,6 +3751,7 @@ impl GenericDrop {
             GenericDrop::DefaultedBoundParam(_) => "defaulted-bound-param",
             GenericDrop::NotBindable(_)         => "not-bindable",
             GenericDrop::ClosureDrop(tag, _)    => tag.tag(),
+            GenericDrop::IteratorDrop(tag, _)   => tag.tag(),
         }
     }
     fn detail(&self) -> &str {
@@ -3663,7 +3760,8 @@ impl GenericDrop {
             | GenericDrop::UnmodellableBound(d)
             | GenericDrop::DefaultedBoundParam(d)
             | GenericDrop::NotBindable(d)
-            | GenericDrop::ClosureDrop(_, d) => d,
+            | GenericDrop::ClosureDrop(_, d)
+            | GenericDrop::IteratorDrop(_, d) => d,
         }
     }
 }
@@ -4642,11 +4740,11 @@ fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
 /// Resolve a parameter's full bound list to a single concrete node, or `None`
 /// (drop) if: only markers (no type pinned), an unmappable non-marker bound, or
 /// two disagreeing shape bounds.
-fn resolve_param_bounds(bounds: &[serde_json::Value]) -> Option<serde_json::Value> {
+fn resolve_param_bounds(bounds: &[serde_json::Value], pos: BoundPos) -> Option<serde_json::Value> {
     let mut concrete: Option<serde_json::Value> = None;
     for b in bounds {
         if is_marker_bound(b) { continue; }
-        match bound_to_concrete(b) {
+        match bound_to_concrete(b, pos) {
             Some(c) => match &concrete {
                 Some(prev) if *prev != c => return None, // conflict
                 Some(_) => {}
@@ -4664,6 +4762,7 @@ fn resolve_param_bounds(bounds: &[serde_json::Value]) -> Option<serde_json::Valu
 fn subst_generic_json(
     val: &serde_json::Value,
     map: &std::collections::HashMap<String, serde_json::Value>,
+    pos: BoundPos,
 ) -> serde_json::Value {
     if let Some(g) = val.get("generic").and_then(|g| g.as_str()) {
         if let Some(concrete) = map.get(g) {
@@ -4671,17 +4770,20 @@ fn subst_generic_json(
         }
     }
     // impl Trait: replace with the concrete the bounds resolve to (if any).
+    // POSITION-AWARE ([C-R]): in RETURN position an iterator-trait impl Trait
+    // resolves to `None`, so it stays an unresolved impl_trait node — the
+    // `impl_traits_resolvable(output)` gate then drops the whole fn.
     if let Some(bounds) = val.get("impl_trait").and_then(|b| b.as_array()) {
-        if let Some(concrete) = resolve_param_bounds(bounds) {
+        if let Some(concrete) = resolve_param_bounds(bounds, pos) {
             return concrete;
         }
     }
     match val {
         serde_json::Value::Object(obj) => serde_json::Value::Object(
-            obj.iter().map(|(k, v)| (k.clone(), subst_generic_json(v, map))).collect(),
+            obj.iter().map(|(k, v)| (k.clone(), subst_generic_json(v, map, pos))).collect(),
         ),
         serde_json::Value::Array(arr) => serde_json::Value::Array(
-            arr.iter().map(|v| subst_generic_json(v, map)).collect(),
+            arr.iter().map(|v| subst_generic_json(v, map, pos)).collect(),
         ),
         other => other.clone(),
     }
@@ -4726,7 +4828,13 @@ fn resolve_generics(
             .and_then(|t| t.get("bounds")).and_then(|b| b.as_array())
             .cloned().unwrap_or_default();
         if let Some(extra) = where_bounds.get(name) { bounds.extend(extra.iter().cloned()); }
-        match resolve_param_bounds(&bounds) {
+        // A NAMED generic param resolves in PARAM position: its concrete is
+        // substituted into the turbofish (`crate::f::<Vec<X>>(..)`), so even when
+        // the param appears in return position the wrapper returns the concrete
+        // `Vec<X>` the host fn yields — sound. (The return-position iterator DROP
+        // [C-R] is exclusively the `impl Trait` RETURN case, gated in
+        // `subst_generic_json`/`impl_traits_resolvable` with `BoundPos::Return`.)
+        match resolve_param_bounds(&bounds, BoundPos::Param) {
             Some(concrete) => { map.insert(name.to_string(), concrete); }
             None => return None, // unresolvable type param -> drop whole fn
         }
@@ -4738,15 +4846,32 @@ fn resolve_generics(
 /// type. An UNresolvable `impl Trait` arg would otherwise fall through to the
 /// `"String"` fallback in `rustdoc_type_to_sky`, which is unsound — so the
 /// caller drops the function instead.
-fn impl_traits_resolvable(val: &serde_json::Value) -> bool {
+/// True if `val` contains (anywhere) an `impl Trait` node whose bound list is an
+/// iterator trait (`IntoIterator`/`Iterator`). Used to attribute a return-gate
+/// drop to the specific `iterator-return-undecidable` coverage tag ([C-R])
+/// rather than the generic silent impl-trait drop.
+fn contains_iterator_impl_trait(val: &serde_json::Value) -> bool {
     if let Some(bounds) = val.get("impl_trait").and_then(|b| b.as_array()) {
-        if resolve_param_bounds(bounds).is_none() {
+        if bounds.iter().filter_map(trait_bound_name).any(|n| is_iterator_trait_name(&n)) {
+            return true;
+        }
+    }
+    match val {
+        serde_json::Value::Object(obj) => obj.values().any(contains_iterator_impl_trait),
+        serde_json::Value::Array(arr) => arr.iter().any(contains_iterator_impl_trait),
+        _ => false,
+    }
+}
+
+fn impl_traits_resolvable(val: &serde_json::Value, pos: BoundPos) -> bool {
+    if let Some(bounds) = val.get("impl_trait").and_then(|b| b.as_array()) {
+        if resolve_param_bounds(bounds, pos).is_none() {
             return false;
         }
     }
     match val {
-        serde_json::Value::Object(obj) => obj.values().all(impl_traits_resolvable),
-        serde_json::Value::Array(arr) => arr.iter().all(impl_traits_resolvable),
+        serde_json::Value::Object(obj) => obj.values().all(|v| impl_traits_resolvable(v, pos)),
+        serde_json::Value::Array(arr) => arr.iter().all(|v| impl_traits_resolvable(v, pos)),
         _ => true,
     }
 }
@@ -5029,23 +5154,23 @@ mod tests {
     fn test_bound_to_concrete() {
         // AsRef<[u8]> / Borrow<[u8]>  -> Vec<u8> (List Int)
         let asref_u8 = trait_bound("AsRef", vec![serde_json::json!({ "slice": { "primitive": "u8" } })]);
-        assert_eq!(bound_to_concrete(&asref_u8), Some(vec_u8_node()));
+        assert_eq!(bound_to_concrete(&asref_u8, BoundPos::Param), Some(vec_u8_node()));
         // AsRef<str> / Borrow<str>    -> String
-        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("str")])), Some(string_node()));
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("str")]), BoundPos::Param), Some(string_node()));
         // Display / ToString (no arg) -> String
-        assert_eq!(bound_to_concrete(&trait_bound("Display", vec![])), Some(string_node()));
-        assert_eq!(bound_to_concrete(&trait_bound("ToString", vec![])), Some(string_node()));
+        assert_eq!(bound_to_concrete(&trait_bound("Display", vec![]), BoundPos::Param), Some(string_node()));
+        assert_eq!(bound_to_concrete(&trait_bound("ToString", vec![]), BoundPos::Param), Some(string_node()));
         // Into<Vec<u8>> -> Vec<u8> ; Into<String> -> String
-        assert_eq!(bound_to_concrete(&trait_bound("Into", vec![path_with_args("Vec", vec![prim("u8")])])), Some(vec_u8_node()));
-        assert_eq!(bound_to_concrete(&trait_bound("Into", vec![path("String")])), Some(string_node()));
+        assert_eq!(bound_to_concrete(&trait_bound("Into", vec![path_with_args("Vec", vec![prim("u8")])]), BoundPos::Param), Some(vec_u8_node()));
+        assert_eq!(bound_to_concrete(&trait_bound("Into", vec![path("String")]), BoundPos::Param), Some(string_node()));
         // Unknown / unsupported -> None
-        assert_eq!(bound_to_concrete(&trait_bound("FromStr", vec![])), None);
+        assert_eq!(bound_to_concrete(&trait_bound("FromStr", vec![]), BoundPos::Param), None);
         // AsRef<u16> drops — the v2 soundness gate restored after 09-bytesize
         // showed `i64: AsRef<u16>` doesn't exist. v1's drop behaviour is restored
         // for AsRef<primitive_non_str>.
-        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("u16")])), None);
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![prim("u16")]), BoundPos::Param), None);
         // A truly unsupported inner type still returns None
-        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![serde_json::json!({ "resolved_path": { "name": "SomeWeirdType", "path": "SomeWeirdType", "id": 0, "args": null } })])), None);
+        assert_eq!(bound_to_concrete(&trait_bound("AsRef", vec![serde_json::json!({ "resolved_path": { "name": "SomeWeirdType", "path": "SomeWeirdType", "id": 0, "args": null } })]), BoundPos::Param), None);
     }
 
     #[test]
@@ -5057,15 +5182,15 @@ mod tests {
         let asref_str = trait_bound("AsRef", vec![prim("str")]);
 
         // shape bound alone -> resolves
-        assert_eq!(resolve_param_bounds(&[asref_u8.clone()]), Some(vec_u8_node()));
+        assert_eq!(resolve_param_bounds(&[asref_u8.clone()], BoundPos::Param), Some(vec_u8_node()));
         // shape + marker bounds -> markers ignored, resolves
-        assert_eq!(resolve_param_bounds(&[asref_u8.clone(), clone.clone(), send]), Some(vec_u8_node()));
+        assert_eq!(resolve_param_bounds(&[asref_u8.clone(), clone.clone(), send], BoundPos::Param), Some(vec_u8_node()));
         // only markers -> can't pin a type -> None
-        assert_eq!(resolve_param_bounds(&[clone]), None);
+        assert_eq!(resolve_param_bounds(&[clone], BoundPos::Param), None);
         // an unknown non-marker bound -> None (unsound to guess)
-        assert_eq!(resolve_param_bounds(&[asref_u8.clone(), foo]), None);
+        assert_eq!(resolve_param_bounds(&[asref_u8.clone(), foo], BoundPos::Param), None);
         // two conflicting shape bounds -> None
-        assert_eq!(resolve_param_bounds(&[asref_u8, asref_str]), None);
+        assert_eq!(resolve_param_bounds(&[asref_u8, asref_str], BoundPos::Param), None);
     }
 
     fn type_param(name: &str, bounds: Vec<serde_json::Value>) -> serde_json::Value {
@@ -5111,15 +5236,15 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         map.insert("T".to_string(), vec_u8_node());
         // bare {generic:"T"} -> Vec<u8>
-        assert_eq!(subst_generic_json(&serde_json::json!({ "generic": "T" }), &map), vec_u8_node());
+        assert_eq!(subst_generic_json(&serde_json::json!({ "generic": "T" }), &map, BoundPos::Param), vec_u8_node());
         // nested Option<T> -> Option<Vec<u8>>: the T node deep inside is replaced
         let opt_t = path_with_args("Option", vec![serde_json::json!({ "generic": "T" })]);
-        let got = subst_generic_json(&opt_t, &map);
+        let got = subst_generic_json(&opt_t, &map, BoundPos::Param);
         // Nested multi-word generic arg is parenthesised so Sky's
         // left-associative type application parses it as one argument.
         assert_eq!(sky(&got), "Maybe (List Int)");
         // an unrelated generic "U" not in map is left intact
-        assert_eq!(subst_generic_json(&serde_json::json!({ "generic": "U" }), &map),
+        assert_eq!(subst_generic_json(&serde_json::json!({ "generic": "U" }), &map, BoundPos::Param),
                    serde_json::json!({ "generic": "U" }));
     }
 
@@ -5178,7 +5303,7 @@ mod tests {
                 { "name": "Item", "binding": { "equality": { "type": { "primitive": "u8" } } } }
             ] } }
         }, "modifier": "none" } });
-        assert_eq!(bound_to_concrete(&b), Some(vec_u8_node()));
+        assert_eq!(bound_to_concrete(&b, BoundPos::Param), Some(vec_u8_node()));
     }
 
     #[test]
@@ -5203,6 +5328,104 @@ mod tests {
         assert!(parse_fn_item("f", &fd2, &HashMap::new(), None).is_none());
     }
 
+    /// A `trait_bound` carrying an `Item=<inner>` associated-type constraint,
+    /// for `IntoIterator`/`Iterator` (`Item` is a CONSTRAINT, not a type-arg).
+    fn iter_bound(trait_name: &str, item: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "trait_bound": { "trait": {
+            "path": trait_name, "name": trait_name, "id": 0,
+            "args": { "angle_bracketed": { "args": [], "constraints": [
+                { "name": "Item", "binding": { "equality": { "type": item } } }
+            ] } }
+        }, "modifier": "none" } })
+    }
+
+    #[test]
+    fn test_return_position_into_iterator_drops() {
+        // [C-R] BLOCKING. `fn evens() -> impl IntoIterator<Item=i64>` is a latent
+        // E0308: position-AGNOSTIC `bound_to_concrete` resolves the return to
+        // `Vec<i64>`, so the wrapper sig says `-> Vec<i64>` while the body returns
+        // an `impl IntoIterator` value. The return MUST be position-aware: an
+        // iterator-TRAIT return → drop the whole fn (no binding).
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [], "output": { "impl_trait": [ iter_bound("IntoIterator", primitive("i64")) ] } }
+        });
+        assert!(
+            parse_fn_item("evens", &fd, &HashMap::new(), None).is_none(),
+            "a return-position impl IntoIterator must DROP (latent E0308 otherwise)"
+        );
+
+        // The SAME for a bare `impl Iterator<Item=i64>` return.
+        let fd_it = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [], "output": { "impl_trait": [ iter_bound("Iterator", primitive("i64")) ] } }
+        });
+        assert!(
+            parse_fn_item("ints", &fd_it, &HashMap::new(), None).is_none(),
+            "a return-position impl Iterator must DROP"
+        );
+    }
+
+    #[test]
+    fn test_iterator_drop_tags_are_distinct_and_stable() {
+        // The four iterator coverage tags are distinct stable strings, flowing
+        // through GenericDrop::reason() so emit_generic_coverage histograms them.
+        let tags = [
+            IteratorDropTag::ReturnUndecidable.tag(),
+            IteratorDropTag::ItemUnmodellable.tag(),
+            IteratorDropTag::CompanionUnsatisfiable.tag(),
+            IteratorDropTag::NonRustAbi.tag(),
+        ];
+        let mut sorted = tags.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "all four iterator tags must be distinct");
+        assert_eq!(
+            tags,
+            [
+                "iterator-return-undecidable",
+                "iterator-item-unmodellable",
+                "iterator-companion-unsatisfiable",
+                "iterator-nonrust-abi",
+            ]
+        );
+        let d = GenericDrop::IteratorDrop(IteratorDropTag::ReturnUndecidable, "x".into());
+        assert_eq!(d.reason(), "iterator-return-undecidable");
+        assert_eq!(d.detail(), "x");
+    }
+
+    #[test]
+    fn test_return_position_concrete_vec_still_binds() {
+        // A CONCRETE-collection return `-> Vec<i64>` must NOT be wrongly dropped —
+        // only an iterator-TRAIT return drops. (The position gate must be narrow.)
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [], "output": path_with_args("Vec", vec![primitive("i64")]) }
+        });
+        let f = parse_fn_item("evens_vec", &fd, &HashMap::new(), None)
+            .expect("a concrete Vec<i64> return must still bind");
+        assert_eq!(f.results[0].sky_type, "List Int");
+    }
+
+    #[test]
+    fn test_param_position_into_iterator_still_resolves() {
+        // The param-position `impl IntoIterator<Item=u8>` → `Vec<u8>` resolution
+        // (the Alt-1 concrete path) is UNAFFECTED by the return gate — it still
+        // resolves in PARAM position.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["xs", { "impl_trait": [ iter_bound("IntoIterator", primitive("u8")) ] }] ], "output": null }
+        });
+        let f = parse_fn_item("sink", &fd, &HashMap::new(), None)
+            .expect("a param-position impl IntoIterator<Item=u8> must still resolve to Vec<u8>");
+        assert_eq!(f.params[0].sky_type, "List Int");
+        assert_eq!(f.params[0].rust_type, "Vec<u8>");
+    }
+
     #[test]
     fn test_v2_concrete_node_builders() {
         // The new owned-concrete nodes for v2 entries:
@@ -5223,22 +5446,22 @@ mod tests {
     fn test_bound_to_concrete_v2() {
         // Path / OsStr / PathBuf / OsString -> String  (Linux pragma)
         let asref_path = trait_bound("AsRef", vec![serde_json::json!({ "resolved_path": { "name": "Path", "path": "Path", "id": 0, "args": null } })]);
-        assert_eq!(bound_to_concrete(&asref_path), Some(string_node()));
+        assert_eq!(bound_to_concrete(&asref_path, BoundPos::Param), Some(string_node()));
         let asref_osstr = trait_bound("AsRef", vec![serde_json::json!({ "resolved_path": { "name": "OsStr", "path": "OsStr", "id": 0, "args": null } })]);
-        assert_eq!(bound_to_concrete(&asref_osstr), Some(string_node()));
+        assert_eq!(bound_to_concrete(&asref_osstr, BoundPos::Param), Some(string_node()));
         let into_pb = trait_bound("Into", vec![serde_json::json!({ "resolved_path": { "name": "PathBuf", "path": "PathBuf", "id": 0, "args": null } })]);
-        assert_eq!(bound_to_concrete(&into_pb), Some(string_node()));
+        assert_eq!(bound_to_concrete(&into_pb, BoundPos::Param), Some(string_node()));
 
         // Numeric Into: ONLY identity (i64/f64) resolves — substituting i64
         // for Into<u32> would emit `i64: Into<u32>` which Rust does not
         // implement. v2 originally accepted these (unsound); the soundness
         // gate restored after the 09-bytesize regression drops them.
-        assert_eq!(sky(&bound_to_concrete(&trait_bound("Into", vec![primitive("i64")])).unwrap()), "Int");
-        assert_eq!(sky(&bound_to_concrete(&trait_bound("Into", vec![primitive("f64")])).unwrap()), "Float");
+        assert_eq!(sky(&bound_to_concrete(&trait_bound("Into", vec![primitive("i64")]), BoundPos::Param).unwrap()), "Int");
+        assert_eq!(sky(&bound_to_concrete(&trait_bound("Into", vec![primitive("f64")]), BoundPos::Param).unwrap()), "Float");
         // Other numeric Into targets now correctly drop.
         for name in ["i32", "u32", "u64", "usize", "isize", "f32"] {
             let b = trait_bound("Into", vec![primitive(name)]);
-            assert_eq!(bound_to_concrete(&b), None,
+            assert_eq!(bound_to_concrete(&b, BoundPos::Param), None,
                 "Into<{}> must drop (i64/f64 unsound substitution)", name);
         }
 
@@ -5247,13 +5470,13 @@ mod tests {
             "path": "num_traits::Integer", "name": "Integer", "id": 0,
             "args": { "angle_bracketed": { "args": [], "constraints": [] } }
         }, "modifier": "none" } });
-        assert_eq!(sky(&bound_to_concrete(&int_b).unwrap()), "Int");
+        assert_eq!(sky(&bound_to_concrete(&int_b, BoundPos::Param).unwrap()), "Int");
 
         let float_b = serde_json::json!({ "trait_bound": { "trait": {
             "path": "num_traits::Float", "name": "Float", "id": 0,
             "args": { "angle_bracketed": { "args": [], "constraints": [] } }
         }, "modifier": "none" } });
-        assert_eq!(sky(&bound_to_concrete(&float_b).unwrap()), "Float");
+        assert_eq!(sky(&bound_to_concrete(&float_b, BoundPos::Param).unwrap()), "Float");
 
         // Recursive composition: IntoIterator<Item = X> where X resolves
         let str_ref = serde_json::json!({ "borrowed_ref": { "lifetime": null, "is_mutable": false, "type": primitive("str") } });
@@ -5263,13 +5486,13 @@ mod tests {
                 { "name": "Item", "binding": { "equality": { "type": str_ref } } }
             ] } }
         }, "modifier": "none" } });
-        let got = bound_to_concrete(&into_iter_str).expect("IntoIterator<Item=&str>");
+        let got = bound_to_concrete(&into_iter_str, BoundPos::Param).expect("IntoIterator<Item=&str>");
         assert_eq!(sky(&got), "List String");
 
         // v1 paths still work (regression):
         let asref_u8 = trait_bound("AsRef", vec![serde_json::json!({ "slice": { "primitive": "u8" } })]);
-        assert_eq!(bound_to_concrete(&asref_u8), Some(vec_u8_node()));
-        assert_eq!(bound_to_concrete(&trait_bound("Display", vec![])), Some(string_node()));
+        assert_eq!(bound_to_concrete(&asref_u8, BoundPos::Param), Some(vec_u8_node()));
+        assert_eq!(bound_to_concrete(&trait_bound("Display", vec![]), BoundPos::Param), Some(string_node()));
     }
 
     #[test]
