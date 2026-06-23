@@ -607,6 +607,10 @@ translateRustRet raw0 =
             | raw `elem` floatRusts -> ("f64", \e -> "(" ++ e ++ ") as f64")
             | raw == "bool"   -> ("bool", id)
             | raw == "String" -> ("String", id)
+            -- [#47(a)] serde-bound return: serde_json::Value → Sky String (JSON text).
+            -- serde_json::to_string on a Value is total (Value's Serialize never errs);
+            -- unwrap_or_default is the safe floor (empty string on the impossible failure).
+            | raw == "serde_json::Value" -> ("String", \e -> "serde_json::to_string(&(" ++ e ++ ")).unwrap_or_default()")
             | "&" `isPrefixOf` raw ->
                 let inner = stripRef raw
                 in if inner == "str" || inner == "String"
@@ -821,6 +825,10 @@ emitRustFile kernelName pkg =
                                  _ | isNumericRust inner       -> opt ++ ".map(|x| x as " ++ inner ++ ")"
                                    | "&" `isPrefixOf` inner     -> opt ++ ".as_ref()"  -- Option<&T> borrowed opaque
                                    | otherwise                  -> opt   -- String/bool/owned opaque: identity
+                        -- [#47(a)] serde-bound param: Sky String → serde_json::Value.
+                        -- The JSON is deserialized in `serdePrelude` and bound to `sv_j`;
+                        -- `argCall` just names that local (to be used at the call site).
+                        | rawTy == "serde_json::Value" -> "sv_" ++ show j
                         | declTy == "String" -> "&" ++ base          -- Sky String → &str
                         | null rawTy || rawTy == declTy -> base      -- same type, pass through
                         | isNumericRust rawTy && (declTy == "i64" || declTy == "f64")
@@ -927,6 +935,16 @@ emitRustFile kernelName pkg =
                          Just (SeqKind (Arr m)    e) -> [(m, e)]
                          Just (SeqKind (RefArr m) e) -> [(m, e)]
                          _                           -> []
+                ]
+            -- [#47(a)] serde-bound params: Sky `String` → `serde_json::Value`.
+            -- Each param whose raw Rust type is `serde_json::Value` is deserialized
+            -- BEFORE the call (C-G4: fallible, propagates Err via early return).
+            -- `argCall` references the bound local `sv_j` instead of `argJ`.
+            serdePrelude =
+                [ "let sv_" ++ show j ++ ": serde_json::Value = match serde_json::from_str::<serde_json::Value>(&arg" ++ show j ++ ") { Ok(v) => v, Err(e) => return SkyResult::Err(str_err(&format!(\"{:?}\", e))), };"
+                | j <- [0 .. nParams - 1]
+                , let rawTy = if j < nRawRustParam then rawRustParamTypes !! j else ""
+                , rawTy == "serde_json::Value"
                 ]
             -- ── Field GETTER (S1) ──────────────────────────────────────
             -- A field getter reads the field BY VALUE from the receiver —
@@ -1251,6 +1269,7 @@ emitRustFile kernelName pkg =
                      , "pub fn " ++ rustName ++ "(" ++ paramDecl ++ ") -> " ++ retType ++ " {"
                      ]
                      ++ map ("    " ++) arrPrelude
+                     ++ map ("    " ++) serdePrelude
                      ++ [ "    " ++ body
                         , "}"
                         ]
