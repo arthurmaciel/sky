@@ -21,6 +21,7 @@ module Sky.Build.Rust.Ffi
     , wrapperEndSentinel     -- :: String
     , wrapperSentinelPrefix  -- :: String
     , translateRustRet       -- :: String -> (String, String -> String)  (#22 — exposed for unit tests)
+    , cargoProfilePanicIsUnwind  -- :: String -> Bool  (#28 B2 — closure-wrapper catch_unwind guard)
     ) where
 
 import qualified Data.Aeson as A
@@ -41,6 +42,38 @@ import Sky.Build.FfiGen
     , slugify, lowerFirst, capitaliseFirst, splitOnChar, emitKernelJson, wrapperSkyType
     )
 import Sky.Generate.Rust.Builder.Naming (toSnakeCase, rustSafeIdent)
+
+
+-- | #28 B2 — the closure-wrapper @catch_unwind@ panic boundary is SOUND only
+-- under a @panic = "unwind"@ cargo profile. Under @panic = "abort"@ the runtime
+-- aborts the process on a panic before @catch_unwind@ can intercept it, so the
+-- closure wrapper's "map the Sky-closure panic to a typed @Err@" contract would
+-- silently fail. The emitted Cargo.toml (Sky.Generate.Rust.Builder.Emitter)
+-- sets no @panic =@ key, so cargo defaults to @unwind@ — but this guard makes
+-- the requirement explicit and lets the codegen path (or its unit fence) reject
+-- a profile that ever declares @panic = "abort"@.
+--
+-- Returns @True@ when the profile text declares NO @panic = "abort"@ in any
+-- @[profile.*]@ table (cargo-default @unwind@, or an explicit @"unwind"@);
+-- @False@ when any @panic@ key is set to @abort@. Tolerant of quote style
+-- (@"abort"@ / @'abort'@) and surrounding whitespace.
+cargoProfilePanicIsUnwind :: String -> Bool
+cargoProfilePanicIsUnwind cargoTomlText =
+    not (any lineDeclaresAbort (lines cargoTomlText))
+  where
+    -- A line `panic = "abort"` (any quote / spacing) sets the abort strategy.
+    lineDeclaresAbort line =
+        let trimmed = dropWhile (== ' ') line
+        in case stripPrefix "panic" trimmed of
+            Just rest ->
+                let afterKey = dropWhile (`elem` (" \t" :: String)) rest
+                in case afterKey of
+                    ('=' : valuePart) ->
+                        let normalised =
+                                filter (`notElem` (" \t\"'" :: String)) valuePart
+                        in normalised == "abort"
+                    _ -> False
+            Nothing -> False
 
 
 -- | Inspect a single Rust crate (rustdoc-JSON backend). Optional features are

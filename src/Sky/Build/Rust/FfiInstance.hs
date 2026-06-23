@@ -81,7 +81,12 @@ import qualified Data.Set as Set
 
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Build.FfiRegistry as FfiReg
-import Sky.Build.Rust.FfiCall (callArity, renderArgType, renderCall, renderRetType)
+import Sky.Build.Rust.FfiCall
+    ( callArity, renderArgType, renderArgTypeAt, renderCall, renderRetType
+    , closureBounds
+    , Call, TypeRef(TRClosure)
+    , _call_argTypes
+    )
 import Sky.Generate.Rust.Builder.Naming (mangleTVar)
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Reporting.Diagnostic as Diag
@@ -480,30 +485,72 @@ synthesiseGenericWrapper gf =
                         []    -> mangleTVar p
                         paths -> mangleTVar p ++ ": " ++ intercalate " + " paths
                     | p <- params ]
+                -- Closure args (B1): each closure-typed wrapper arg introduces a
+                -- fresh `Fj: Fn(..) -> R [+ Clone]` type-param. Splice those bounds
+                -- into the `<…>` clause AFTER the named generic params so the
+                -- closure param's Rust type (`Fj`, emitted by 'renderArgTypeAt')
+                -- has a matching bound. `params` is the REAL declared param list
+                -- (so the closure's own arg/ret TypeRefs render correctly — C-A).
+                closureDecls = closureBounds call params
+                allDecls = paramDecls ++ closureDecls
                 generics
-                    | null paramDecls = ""
-                    | otherwise = "<" ++ intercalate ", " paramDecls ++ ">"
+                    | null allDecls = ""
+                    | otherwise = "<" ++ intercalate ", " allDecls ++ ">"
                 -- Wrapper value-arg J's Rust type, walked from the per-arg
                 -- TypeRef in the call's argTypes (a parametric-foreign arg such
-                -- as `::box1::Box1<A>` for `get`, or the bare type-param `A`
-                -- for `make`). Renders to a CONCRETE Rust type (F2).
+                -- as `::box1::Box1<A>` for `get`, the bare type-param `A` for
+                -- `make`, or `Fj` for a closure arg). Renders to a CONCRETE Rust
+                -- type (F2) — 'renderArgTypeAt' maps a 'TRClosure' to `Fj`.
                 valArgTypes =
-                    [ renderArgType call params j | j <- [0 .. arity - 1] ]
+                    [ renderArgTypeAt params j tr
+                    | (j, tr) <- zip [0 :: Int ..] (_call_argTypes call) ]
                 paramDecl
                     | arity == 0 = "_: ()"
                     | otherwise  = intercalate ", "
                         [ "arg" ++ show j ++ ": " ++ t
                         | (j, t) <- zip [0 :: Int ..] valArgTypes ]
-                src = unlines
+                -- B2: the wrapper BODY. When any wrapper arg is a Sky closure, a
+                -- panic INSIDE the host call most likely originated in the Sky
+                -- closure the host invoked. Catch it at this FFI boundary and map
+                -- it to a typed `Err` instead of unwinding across the boundary
+                -- (UB-adjacent on a `panic = "abort"` profile, and never the
+                -- product's "no panic from well-typed Sky" contract). The total
+                -- match has no `.unwrap()` / index / `panic!` — it is the
+                -- sanctioned no-panic shape. A closure-free wrapper keeps the
+                -- plain `ok_res(<body>)` form (byte-identical to pre-Phase-3).
+                body
+                    | callHasClosureArg call =
+                        [ "    match ::std::panic::catch_unwind("
+                            ++ "::std::panic::AssertUnwindSafe(|| {"
+                        , "        " ++ bodyR
+                        , "    })) {"
+                        , "        Ok(__v)  => ok_res(__v),"
+                        , "        Err(_)   => SkyResult::Err(str_err::<SkyError>("
+                            ++ "\"a Sky closure passed to FFI panicked\")),"
+                        , "    }"
+                        ]
+                    | otherwise = [ "    ok_res(" ++ bodyR ++ ")" ]
+                src = unlines $
                     [ "// [ffi-generic] " ++ _gf_baseName gf
                         ++ " <" ++ intercalate ", " params ++ ">"
                     , "pub fn " ++ _gf_baseName gf ++ generics
                         ++ "(" ++ paramDecl ++ ") -> SkyResult<SkyError, "
                         ++ retR ++ "> {"
-                    , "    ok_res(" ++ bodyR ++ ")"
-                    , "}"
-                    ]
+                    ] ++ body ++
+                    [ "}" ]
             in WrapperOk (_gf_kernelName gf) (_gf_refName gf) src
+
+
+-- | @True@ when any of the wrapper's value-args is a Sky closure (a
+-- 'TRClosure' directly in @_call_argTypes@ — validation already proved a
+-- closure can only appear there, never nested). Drives the B2 'catch_unwind'
+-- panic boundary: a closure-carrying wrapper invokes Sky code inside the host
+-- call, so a panic must be caught and mapped to a typed @Err@ at the boundary.
+callHasClosureArg :: Call -> Bool
+callHasClosureArg call = any isClosure (_call_argTypes call)
+  where
+    isClosure TRClosure{} = True
+    isClosure _           = False
 
 
 mkUnmodellableFnError :: GenericFn -> String -> String -> Diag.Diagnostic

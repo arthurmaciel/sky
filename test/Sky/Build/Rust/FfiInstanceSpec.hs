@@ -26,7 +26,7 @@ import Sky.Build.Rust.FfiInstance
     , skyTypeToRustClosed, traitsOfRustType, traitToRustPath, modellableTrait
     , rustTypeIsClone, skyCaptureIsClone, mkCaptureNotCloneError
     )
-import Sky.Build.Rust.Ffi (translateRustRet)
+import Sky.Build.Rust.Ffi (translateRustRet, cargoProfilePanicIsUnwind)
 
 
 -- ── Can.Type builders ────────────────────────────────────────────────
@@ -263,6 +263,79 @@ spec = do
             let d = mkCaptureNotCloneError A.one "myFile.sky" "task0" "Task Error ()"
             Diag._diag_code d `shouldBe` Diag.ffiE_GenericNotBindable
             isInfixOf "must be Clone" (Diag._diag_message d) `shouldBe` True
+
+    describe "#28 closure wrapper synthesis (Task 3.1 — B1/B2 catch_unwind boundary)" $ do
+        -- `map_each : List a -> (a -> b) -> List b` over two real params ["a","b"].
+        -- arg0 is the Vec<a>; arg1 is the closure (an owned `Fn(A) -> B`).
+        let mapEachFn = GenericFn
+                { _gf_kernelName = "Rust_Clo"
+                , _gf_baseName   = "rust_clo_map_each"
+                , _gf_refName    = "mapEach"
+                , _gf_generic    = mkGen ["a", "b"] [] mapEachCall
+                , _gf_region     = A.one
+                , _gf_file       = "T.sky"
+                }
+            mapEachCall = Call.Call
+                { Call._call_kind     = Call.CallFunction
+                , Call._call_path     = ["::clo"]
+                , Call._call_typeArgs = [Call.TRParam 0, Call.TRParam 1]
+                , Call._call_method   = Just "map_each"
+                , Call._call_receiver = Nothing
+                , Call._call_args     = [0, 1]
+                , Call._call_argTypes =
+                    [ Call.TRCtor "Vec" [Call.TRParam 0]
+                    , Call.TRClosure Call.FnKind False
+                        [Call.TRParam 0] (Call.TRParam 1) ]
+                , Call._call_ret      = Call.TRCtor "Vec" [Call.TRParam 1]
+                }
+            okSrc' r = case r of WrapperOk _ _ s -> s; _ -> ""
+        it "carries the <Fj: Fn(..) -> R + Clone> bound in the generics clause" $ do
+            let src = okSrc' (synthesiseGenericWrapper mapEachFn)
+            src `shouldContain` "F1: Fn(A) -> B + ::core::clone::Clone"
+        it "uses Fj as the closure param's Rust type (not F?)" $ do
+            let src = okSrc' (synthesiseGenericWrapper mapEachFn)
+            src `shouldContain` "arg1: F1"
+            isInfixOf "F?" src `shouldBe` False
+        it "wraps the host call in catch_unwind + AssertUnwindSafe" $ do
+            let src = okSrc' (synthesiseGenericWrapper mapEachFn)
+            isInfixOf "::std::panic::catch_unwind" src `shouldBe` True
+            isInfixOf "::std::panic::AssertUnwindSafe" src `shouldBe` True
+        it "maps the panic Err arm to a SkyError (no .unwrap / panic! in output)" $ do
+            let src = okSrc' (synthesiseGenericWrapper mapEachFn)
+            isInfixOf "a Sky closure passed to FFI panicked" src `shouldBe` True
+            isInfixOf ".unwrap()" src `shouldBe` False
+            isInfixOf "panic!" src `shouldBe` False
+        it "B2: catch_unwind requires a panic=unwind cargo profile (guard)" $ do
+            -- The emitted profile (Emitter.hs) sets no `panic =`, so cargo
+            -- defaults to "unwind" — the catch_unwind in the closure wrapper is
+            -- live. This guard rejects a profile that flips to `panic = "abort"`
+            -- (which would silently turn catch_unwind into an abort, defeating
+            -- the boundary). Whitespace / quote-style tolerant.
+            cargoProfilePanicIsUnwind
+                "[profile.dev]\ndebug = 0\noverflow-checks = false\n"
+                `shouldBe` True
+            cargoProfilePanicIsUnwind
+                "[profile.release]\nstrip = true\n" `shouldBe` True
+            cargoProfilePanicIsUnwind
+                "[profile.release]\npanic = \"abort\"\n" `shouldBe` False
+            cargoProfilePanicIsUnwind
+                "[profile.dev]\npanic='abort'\n" `shouldBe` False
+            cargoProfilePanicIsUnwind
+                "[profile.release]\npanic = \"unwind\"\n" `shouldBe` True
+        it "a closure-free fn keeps the plain ok_res body (no catch_unwind)" $ do
+            -- regression: the non-closure path must be byte-identical (no spurious
+            -- catch_unwind wrap on a wrapper with no closure arg).
+            let plain = GenericFn
+                    { _gf_kernelName = "Rust_Box1"
+                    , _gf_baseName   = "rust_box1_make"
+                    , _gf_refName    = "make"
+                    , _gf_generic    = mkGen ["a"] [] makeCall
+                    , _gf_region     = A.one
+                    , _gf_file       = "T.sky"
+                    }
+                src = okSrc' (synthesiseGenericWrapper plain)
+            src `shouldContain` "ok_res(::box1::Box1::<A>::make(arg0))"
+            isInfixOf "catch_unwind" src `shouldBe` False
 
   where
     isLeft (Left _)  = True
