@@ -819,6 +819,20 @@ fn shutdown_grace() -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
+/// Best-effort bounded flush of all active telemetry exporters (push + hub).
+/// Waits at most 500 ms in total. Never panics, never blocks shutdown beyond
+/// the cap. This MUST be called before every `process::exit` because
+/// `process::exit` skips Drop, so the mpsc Sender never drops and the
+/// batchers' channel-close drain path never runs without this explicit flush.
+async fn flush_exporters() {
+    // 500 ms total cap (split across two exporters in sequence — each is capped
+    // independently so a slow/unavailable first target doesn't eat all of the
+    // second exporter's budget).
+    const CAP_MS: u64 = 250;
+    push_exporter::flush_now(CAP_MS).await;
+    hub_exporter::flush_now(CAP_MS).await;
+}
+
 /// Await the FIRST shutdown signal (SIGINT or SIGTERM), then run the graceful
 /// teardown and return so axum's `with_graceful_shutdown` drains in-flight
 /// connections and the serve future resolves `Ok(())` (→ the SkyTask is `Ok` →
@@ -853,11 +867,15 @@ async fn live_shutdown_signal() {
     // `start_kill` is what prevents an orphan console child after a clean exit.
     console_proxy::shutdown_console();
 
-    // The observability export pipelines (push/hub exporters) flush every ~2 s
-    // on a tick AND drain a final batch when their channel closes at process
-    // exit, so an explicit pre-drain flush is not required for at-least-once
-    // delivery; Go's `ShutdownTracing`/`RunShutdownHooks` are the equivalent
-    // best-effort path. The graceful axum drain below bounds how long we wait.
+    // Telemetry export pipelines (push/hub exporters) flush every ~2 s on a
+    // tick. The channel-close drain ONLY runs when the mpsc Sender is dropped,
+    // which requires Drop — and `process::exit` skips Drop entirely. Without an
+    // explicit pre-exit flush the grace-timer and watchdog paths below would
+    // silently lose ≤1 batch-interval (~2 s default) of buffered telemetry.
+    // `flush_exporters` sends a Flush sentinel to each active exporter and waits
+    // a bounded 500 ms; it is best-effort (telemetry only, never user data) and
+    // never hangs shutdown. Go's `ShutdownTracing`/`RunShutdownHooks` are the
+    // equivalent path.
 
     // Grace timer: force a CLEAN exit-0 after the window so a never-idle SSE
     // connection can't hang the drain (Go's `srv.Close()` drops them outright).
@@ -869,6 +887,7 @@ async fn live_shutdown_signal() {
         // Defense-in-depth: kill the console child again in case it was spawned
         // after the first teardown call (shutdown_console is idempotent).
         console_proxy::shutdown_console();
+        flush_exporters().await;
         std::process::exit(0);
     });
 
@@ -879,11 +898,14 @@ async fn live_shutdown_signal() {
         wait_for_term_or_int().await;
         eprintln!("Sky.Live: forcing exit (second signal)");
         console_proxy::shutdown_console();
+        flush_exporters().await;
         std::process::exit(130); // 128 + SIGINT(2)
     });
     // Return → axum drains in-flight connections → serve future resolves Ok
     // (fast path when nothing long-lived is open; otherwise the grace timer
-    // force-exits 0).
+    // force-exits 0). The graceful return path also flushes exporters to cover
+    // the no-open-connections fast exit where process tear-down follows quickly.
+    flush_exporters().await;
 }
 
 /// Resolve when the next SIGINT or SIGTERM arrives. Total + robust: if SIGTERM

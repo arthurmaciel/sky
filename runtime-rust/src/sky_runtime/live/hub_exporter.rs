@@ -47,6 +47,9 @@ const SPOOL_MAX_BATCHES: usize = 256;
 pub(crate) enum Entry {
     Log { ts_ms: u64, level: String, message: String },
     Span { ts_ms: u64, name: String, dur_us: u64, ok: bool },
+    /// Synchronous flush request: batcher drains its buffer then acks via the
+    /// oneshot. Used by `flush_now` for a bounded pre-exit drain.
+    Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 static SENDER: OnceLock<mpsc::Sender<Entry>> = OnceLock::new();
@@ -109,7 +112,8 @@ struct OtlpBatch {
 }
 
 /// Accumulate entries; on each tick encode + push, retrying spooled batches
-/// first. Channel close drains a final flush.
+/// first. Channel close drains a final flush. A `Flush` sentinel drains
+/// immediately and acks.
 async fn batcher(
     mut rx: mpsc::Receiver<Entry>,
     base: String,
@@ -126,6 +130,11 @@ async fn batcher(
     loop {
         tokio::select! {
             maybe = rx.recv() => match maybe {
+                Some(Entry::Flush(ack)) => {
+                    flush(&client, &base, &token, &service, &mut logs, &mut spans, &mut spool).await;
+                    // Best-effort ack — ignore send errors (caller may have timed out).
+                    let _ = ack.send(());
+                }
                 Some(Entry::Log { ts_ms, level, message }) => logs.push((ts_ms, level, message)),
                 Some(Entry::Span { ts_ms, name, dur_us, ok }) => spans.push((ts_ms, name, dur_us, ok)),
                 None => {
@@ -138,6 +147,19 @@ async fn batcher(
             }
         }
     }
+}
+
+/// Best-effort pre-exit flush: sends a `Flush` sentinel and waits up to
+/// `cap_ms` milliseconds for the batcher to drain its buffer and the spool.
+/// No-op when the exporter is disabled or the channel is full. Never panics.
+pub async fn flush_now(cap_ms: u64) {
+    let Some(tx) = SENDER.get() else { return };
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<()>();
+    // try_send: non-blocking; best-effort (telemetry only).
+    if tx.try_send(Entry::Flush(ack_tx)).is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(Duration::from_millis(cap_ms), ack_rx).await;
 }
 
 /// Encode the accumulated logs/spans into OTLP batches, then push the spool

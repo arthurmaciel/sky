@@ -39,6 +39,9 @@ const MIN_INTERVAL_MS: u64 = 100;
 enum Entry {
     Log { ts_ms: u64, level: String, message: String },
     Span { ts_ms: u64, name: String, dur_us: u64, ok: bool },
+    /// Synchronous flush request: batcher drains its buffer then acks via the
+    /// oneshot. Used by `flush_now` for a bounded pre-exit drain.
+    Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 static SENDER: OnceLock<mpsc::Sender<Entry>> = OnceLock::new();
@@ -93,7 +96,7 @@ fn enable(label: &str, ingest_url: String, interval_ms: u64) {
 }
 
 /// Accumulate entries and flush a batch on each tick. Channel close drains a
-/// final batch then exits.
+/// final batch then exits. A `Flush` sentinel drains immediately and acks.
 async fn batcher(
     mut rx: mpsc::Receiver<Entry>,
     ingest_url: String,
@@ -108,6 +111,14 @@ async fn batcher(
     loop {
         tokio::select! {
             maybe = rx.recv() => match maybe {
+                Some(Entry::Flush(ack)) => {
+                    if !buf.is_empty() {
+                        flush(&client, &ingest_url, token.as_deref(), &buf).await;
+                        buf.clear();
+                    }
+                    // Best-effort ack — ignore send errors (caller may have timed out).
+                    let _ = ack.send(());
+                }
                 Some(e) => buf.push(e),
                 None => {
                     if !buf.is_empty() {
@@ -126,6 +137,20 @@ async fn batcher(
     }
 }
 
+/// Best-effort pre-exit flush: sends a `Flush` sentinel and waits up to
+/// `cap_ms` milliseconds for the batcher to drain its buffer. No-op when the
+/// exporter is disabled or the channel is full. Never panics.
+pub async fn flush_now(cap_ms: u64) {
+    let Some(tx) = SENDER.get() else { return };
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<()>();
+    // try_send: non-blocking; if the channel is full the flush is skipped
+    // (best-effort — this is telemetry only, never user/persistent data).
+    if tx.try_send(Entry::Flush(ack_tx)).is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(Duration::from_millis(cap_ms), ack_rx).await;
+}
+
 /// Build the `{ "logs": [...], "spans": [...] }` payload the receiver accepts.
 /// serde_json (a `live` dep) keeps the escaping correct.
 fn build_payload(buf: &[Entry]) -> String {
@@ -139,6 +164,9 @@ fn build_payload(buf: &[Entry]) -> String {
             Entry::Span { ts_ms, name, dur_us, ok } => spans.push(serde_json::json!({
                 "ts": ts_ms, "name": name, "durUs": dur_us, "ok": ok,
             })),
+            // The batcher clears the buf before any Flush sentinel reaches here;
+            // this arm is unreachable in practice but required for exhaustiveness.
+            Entry::Flush(_) => {}
         }
     }
     serde_json::json!({ "logs": logs, "spans": spans }).to_string()
@@ -205,5 +233,52 @@ mod tests {
         assert_eq!(v["spans"][0]["name"], "db.query");
         assert_eq!(v["spans"][0]["ok"], true);
         assert_eq!(v["spans"][0]["durUs"], 5000);
+    }
+
+    /// Verify that the `Flush` sentinel causes the batcher to drain its
+    /// buffer and send the ack. This is the load-bearing seam for
+    /// `flush_now`: the ack proves the buffered batch was processed before
+    /// the pre-exit window expires.
+    ///
+    /// Uses a fake HTTP server (httptest) is not a dep here — instead we
+    /// verify the sentinel path purely at the channel level: the batcher
+    /// receives the Flush, calls flush() on the buf (which POSTs; we use a
+    /// channel cap=0 so the buf is empty → the POST is skipped), and sends
+    /// the ack. We send a Log first to ensure non-empty buf, but since
+    /// we can't stand up a real HTTP server in a unit test, we rely on the
+    /// "flush POST fails with a log warning" path (best-effort) and confirm
+    /// the ack still arrives — i.e. a flush failure does NOT prevent the ack.
+    #[tokio::test]
+    async fn flush_sentinel_acks_even_when_ingest_unreachable() {
+        let (tx, rx) = mpsc::channel::<Entry>(16);
+        // Pre-load a log entry into the channel (will land in the batcher's buf).
+        tx.try_send(Entry::Log {
+            ts_ms: 42,
+            level: "info".into(),
+            message: "pre-exit".into(),
+        })
+        .ok();
+        // Send the Flush sentinel.
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<()>();
+        tx.try_send(Entry::Flush(ack_tx)).ok();
+        // Drop the sender so the batcher exits after the ack.
+        drop(tx);
+
+        // Spawn the batcher against an unreachable URL.
+        tokio::spawn(batcher(rx, "http://127.0.0.1:19999".into(), None, 5000));
+
+        // The ack must arrive within 500 ms — same cap as flush_now uses.
+        let result = tokio::time::timeout(Duration::from_millis(500), ack_rx).await;
+        assert!(result.is_ok(), "flush ack must arrive within 500 ms");
+        assert!(result.unwrap().is_ok(), "ack oneshot must not be dropped");
+    }
+
+    /// `flush_now` is a no-op when the exporter is disabled (SENDER not set).
+    #[tokio::test]
+    async fn flush_now_noop_when_disabled() {
+        // flush_now on a fresh (not-enabled) state must return quickly.
+        let deadline =
+            tokio::time::timeout(Duration::from_millis(200), flush_now(250)).await;
+        assert!(deadline.is_ok(), "flush_now must not block when exporter is off");
     }
 }
