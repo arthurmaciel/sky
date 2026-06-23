@@ -46,6 +46,27 @@
       }
     },
     {
+      "name": "keepUnbounded",
+      "arity": 2,
+      "skyType": "List a -> (a -> Bool) -> Result Error (List a)",
+      "generic": {
+        "params": ["a"],
+        "bounds": {},
+        "call": {
+          "kind": "function", "assocOnType": false,
+          "path": ["::clo"], "method": "keep_unbounded",
+          "typeArgs": [{"param": 0}],
+          "args": [0, 1],
+          "argTypes": [
+            {"ctor": "Vec", "args": [{"param": 0}]},
+            {"closure": {"kind": "Fn", "byRef": true,
+                         "argTypes": [{"param": 0}], "ret": {"prim": "bool"}}}
+          ],
+          "ret": {"ctor": "Vec", "args": [{"param": 0}]}
+        }
+      }
+    },
+    {
       "name": "runOnce",
       "arity": 1,
       "skyType": "(() -> a) -> Result Error a",

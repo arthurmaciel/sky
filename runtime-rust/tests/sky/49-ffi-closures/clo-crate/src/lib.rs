@@ -14,6 +14,14 @@ pub fn keep<A: Clone, F: Fn(&A) -> bool>(xs: Vec<A>, pred: F) -> Vec<A> {
     xs.into_iter().filter(|a| pred(a)).collect()
 }
 
+/// by-ref predicate `Fn(&A)->bool` WITHOUT an `A: Clone` host bound — filter
+/// only BORROWS each element, so Rust does not require `A: Clone` here. The
+/// owned-clone bridge in the generated wrapper still needs `A: Clone` to clone
+/// the `&A` borrow to owned, so the wrapper must FORCE it (guardian-final #28).
+pub fn keep_unbounded<A, F: Fn(&A) -> bool>(xs: Vec<A>, pred: F) -> Vec<A> {
+    xs.into_iter().filter(|a| pred(a)).collect()
+}
+
 /// multi-arg comparator `Fn(&A,&A)->i64`.
 pub fn count_lt<A: Clone, F: Fn(&A, &A) -> i64>(xs: Vec<A>, cmp: F) -> i64 {
     let mut n = 0i64;

@@ -12,10 +12,18 @@ mapped =
     Clo.mapEach [ 1, 2, 3 ] (\x -> x * 10)
 
 
--- by-ref predicate Fn(&A)->Bool (owned-clone bridge).
+-- by-ref predicate Fn(&A)->Bool (owned-clone bridge). Host bound: A: Clone.
 kept : Result Error (List Int)
 kept =
     Clo.keep [ 1, 2, 3, 4 ] (\x -> modBy 2 x == 0)
+
+
+-- by-ref predicate Fn(&A)->Bool over a host fn WITHOUT an A: Clone bound. The
+-- generated wrapper must FORCE +Clone on A so the owned-clone bridge type-checks
+-- (guardian-final #28 — without the fix this is a cargo E0308).
+keptU : Result Error (List Int)
+keptU =
+    Clo.keepUnbounded [ 1, 2, 3, 4 ] (\x -> x > 2)
 
 
 main : Task Error ()
@@ -23,10 +31,12 @@ main =
     let
         m = Result.withDefault [] mapped
         k = Result.withDefault [] kept
+        ku = Result.withDefault [] keptU
         _ = println ("mapped sum -> " ++ String.fromInt (List.foldl (\a b -> a + b) 0 m))
         _ = println ("kept len   -> " ++ String.fromInt (List.length k))
+        _ = println ("keptU len  -> " ++ String.fromInt (List.length ku))
     in
-    if List.foldl (\a b -> a + b) 0 m == 60 && List.length k == 2 then
+    if List.foldl (\a b -> a + b) 0 m == 60 && List.length k == 2 && List.length ku == 2 then
         println "[ALL OK]"
     else
         println "[FAIL]"

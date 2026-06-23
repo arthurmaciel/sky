@@ -446,6 +446,63 @@ spec = do
             src `shouldContain` "ok_res(::box1::Box1::<A>::make(arg0))"
             isInfixOf "catch_unwind" src `shouldBe` False
 
+    describe "#28 by-ref closure params force +Clone on the borrowed param (guardian-final E0308 hole)" $ do
+        -- `keep : List a -> (a -> Bool) -> List a` over ONE param ["a"]. arg0 is
+        -- the Vec<a>; arg1 is a BY-REF closure `Fn(&A) -> bool`. The owned-clone
+        -- bridge emits `__r0.clone()` on `&A`, which needs `A: Clone` IN THE
+        -- WRAPPER'S bounds — even when the host fn (filter-only) declares no
+        -- `A: Clone`.
+        let keepCall = Call.Call
+                { Call._call_kind     = Call.CallFunction
+                , Call._call_path     = ["::clo"]
+                , Call._call_typeArgs = [Call.TRParam 0]
+                , Call._call_method   = Just "keep"
+                , Call._call_receiver = Nothing
+                , Call._call_args     = [0, 1]
+                , Call._call_argTypes =
+                    [ Call.TRCtor "Vec" [Call.TRParam 0]
+                    , Call.TRClosure Call.FnKind True
+                        [Call.TRParam 0] (Call.TRPrim "bool") ]
+                , Call._call_ret      = Call.TRCtor "Vec" [Call.TRParam 0]
+                , Call._call_assocOnType = False
+                }
+            mkKeepFn bs = GenericFn
+                { _gf_kernelName = "Rust_Clo"
+                , _gf_baseName   = "rust_clo_keep"
+                , _gf_refName    = "keep"
+                , _gf_generic    = mkGen ["a"] bs keepCall
+                , _gf_region     = A.one
+                , _gf_file       = "T.sky"
+                }
+            okSrcK r = case r of WrapperOk _ _ s -> s; _ -> ""
+        it "forces A: ::core::clone::Clone onto the borrowed param when source bounds are EMPTY" $ do
+            let src = okSrcK (synthesiseGenericWrapper (mkKeepFn []))
+            -- The named param `A` must carry the forced Clone bound (so the
+            -- bridge's `__r0.clone()` resolves to owned `A`, not `&A`).
+            src `shouldContain` "A: ::core::clone::Clone"
+        it "does NOT double-emit Clone when the source already declares A: Clone (dedupe)" $ do
+            let src = okSrcK (synthesiseGenericWrapper (mkKeepFn [("a", ["Clone"])]))
+            -- Exactly one Clone path on A — never `Clone + Clone` / a duplicate.
+            src `shouldContain` "A: ::core::clone::Clone"
+            isInfixOf "Clone + ::core::clone::Clone" src `shouldBe` False
+            isInfixOf "::core::clone::Clone + ::core::clone::Clone" src `shouldBe` False
+        it "merges the forced Clone after a pre-existing modellable bound (Hash) without dropping it" $ do
+            let src = okSrcK (synthesiseGenericWrapper (mkKeepFn [("a", ["Hash"])]))
+            src `shouldContain` "::std::hash::Hash"
+            src `shouldContain` "::core::clone::Clone"
+        it "leaves a by-VALUE closure param untouched (no spurious Clone force)" $ do
+            -- map_each's closure is by-VALUE (byRef=False), so its arg is MOVED in,
+            -- not cloned — the param must NOT pick up a forced Clone.
+            let byValCall = keepCall
+                    { Call._call_argTypes =
+                        [ Call.TRCtor "Vec" [Call.TRParam 0]
+                        , Call.TRClosure Call.FnKind False
+                            [Call.TRParam 0] (Call.TRPrim "bool") ] }
+                fn = (mkKeepFn []) { _gf_generic = mkGen ["a"] [] byValCall }
+                src = okSrcK (synthesiseGenericWrapper fn)
+            -- The param `A` appears bare in the generics clause (no Clone forced).
+            isInfixOf "A: ::core::clone::Clone" src `shouldBe` False
+
   where
     isLeft (Left _)  = True
     isLeft (Right _) = False

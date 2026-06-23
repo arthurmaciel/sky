@@ -545,13 +545,31 @@ synthesiseGenericWrapper gf =
                 -- one mangled name matches the <A: …> decl below.
                 retR  = renderRetType call params
                 bodyR = renderCall call params
-                -- <T: bound + …> per param; bare param when unbounded.
+                -- Guardian-final E0308 hole: a param borrowed inside a by-ref
+                -- closure slot (`Fn(&A)`) reaches the owned-clone bridge's
+                -- `__r0.clone()`, which needs `A: Clone` IN THE WRAPPER'S bounds.
+                -- The host fn may declare no `A: Clone` (filter only BORROWS), so
+                -- the source bounds don't carry it — the bridge AUTHOR owns the
+                -- Clone obligation. Force `+ Clone` onto each such param's index.
+                -- Sound + complete: every concrete Sky type reaching a call site
+                -- maps to a closed Rust type that IS Clone (rustTypeIsClone
+                -- allowlist), so forcing Clone never rejects a real call.
+                forcedCloneParams = borrowedClosureParamIdxs call
+                -- <T: bound + …> per param; bare param when unbounded. A param in
+                -- forcedCloneParams gets `::core::clone::Clone` appended, DEDUPED
+                -- against a source-declared `Clone` (the bounded `keep` case).
                 paramDecls =
-                    [ case mapMaybe traitToRustPath
-                              (Map.findWithDefault [] p bounds) of
-                        []    -> mangleTVar p
-                        paths -> mangleTVar p ++ ": " ++ intercalate " + " paths
-                    | p <- params ]
+                    [ let declaredPaths = mapMaybe traitToRustPath
+                                            (Map.findWithDefault [] p bounds)
+                          clonePath = "::core::clone::Clone"
+                          forceClone = i `elem` forcedCloneParams
+                                       && clonePath `notElem` declaredPaths
+                          allPaths = declaredPaths
+                                     ++ [ clonePath | forceClone ]
+                      in case allPaths of
+                          []    -> mangleTVar p
+                          paths -> mangleTVar p ++ ": " ++ intercalate " + " paths
+                    | (i, p) <- zip [0 :: Int ..] params ]
                 -- Closure args (B1): each closure-typed wrapper arg introduces a
                 -- fresh `Fj: Fn(..) -> R [+ Clone]` type-param. Splice those bounds
                 -- into the `<…>` clause AFTER the named generic params so the
@@ -626,6 +644,35 @@ callHasClosureArg call = any isClosure (_call_argTypes call)
   where
     isClosure TRClosure{} = True
     isClosure _           = False
+
+
+-- | #28 guardian-final — the set of generic-param indices that appear as a
+-- BORROWED argument inside a BY-REF closure slot (@TRClosure _ True as_ _@) of
+-- this call. Each such param reaches the owned-clone bridge's @__r.clone()@ on a
+-- @&A@ (the closed Sky↔Rust set has no reference arm, so the bridge clones the
+-- borrow to an OWNED value before the Sky closure sees it). That @.clone()@ is
+-- well-typed ONLY if @A: Clone@ holds IN THE WRAPPER'S generic bounds — but the
+-- wrapper's bounds derive from the host fn's declared bounds, and a real host fn
+-- (@keep\<A, F: Fn(&A) -> bool\>@, filter-only) needs no @A: Clone@. So the
+-- bridge author must FORCE @+ Clone@ on these params (deduped against a
+-- source-declared @Clone@); 'synthesiseGenericWrapper' consumes this list.
+--
+-- Only direct @argTypes@ closures are inspected (validation already proved a
+-- closure can only appear there — see 'FfiCall.validateCall' C-B). A by-VALUE
+-- closure (@byRef == False@) MOVES its arg in (no bridge clone), so its params
+-- are NOT collected. A non-'TRParam' borrowed arg (a concrete ctor) does not add
+-- a param bound — and a concrete non-Clone borrowed arg is already DROPPED by
+-- 'closureDropReason' (@closure-by-ref-noclone@) before synthesis, so it can't
+-- reach here.
+--
+-- The result is deduplicated and order-independent (consumed by an @elem@
+-- membership test).
+borrowedClosureParamIdxs :: Call -> [Int]
+borrowedClosureParamIdxs call =
+    Set.toList . Set.fromList $
+        [ i
+        | TRClosure _ True argTRs _ <- _call_argTypes call
+        , TRParam i <- argTRs ]
 
 
 -- | #28 Phase 3 — classify a wrapper-arg 'TypeRef' as an UNSOUND closure shape
