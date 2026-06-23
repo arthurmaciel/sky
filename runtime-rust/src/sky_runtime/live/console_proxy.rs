@@ -184,44 +184,14 @@ pub fn shutdown_console() {
     }
 }
 
-/// Install a signal handler that kills the console child on SIGINT/SIGTERM and
-/// THEN terminates the parent, so the child dies with the parent and the parent
-/// still honours the signal.
-///
-/// Subtlety this guards against: installing a tokio signal handler SUPPRESSES
-/// the default disposition (terminate) for that signal. So the handler MUST
-/// re-establish termination itself by exiting — otherwise trapping SIGTERM would
-/// leave the parent running (unkillable except by SIGKILL) after reaping the
-/// child. We exit with the conventional 128+signum code (Go parity:
-/// `exit 128+signum`). Spawned once at mount time.
-pub fn install_shutdown_hook() {
-    tokio::spawn(async {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut term = match signal(SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            let mut intr = match signal(SignalKind::interrupt()) {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            let code = tokio::select! {
-                _ = term.recv() => 143, // 128 + SIGTERM(15)
-                _ = intr.recv() => 130, // 128 + SIGINT(2)
-            };
-            shutdown_console();
-            std::process::exit(code);
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = tokio::signal::ctrl_c().await;
-            shutdown_console();
-            std::process::exit(130);
-        }
-    });
-}
+// NOTE (shutdown ownership): the console child's teardown on parent shutdown is
+// owned by the ONE coherent graceful-shutdown path in `live::live_shutdown_signal`
+// — it calls `shutdown_console()` then returns so axum drains and the process
+// exits 0. A previous `install_shutdown_hook` here installed a SECOND tokio
+// signal handler that `std::process::exit(130)`'d; two handlers raced and the
+// 130 exit defeated the exit-0-on-clean-shutdown contract. It was removed. The
+// `PR_SET_PDEATHSIG` (Linux) + `kill_on_drop` set in `spawn_console` remain the
+// defense-in-depth floor for NON-graceful parent death (SIGKILL / OOM / crash).
 
 // ─── Reverse proxy ──────────────────────────────────────────────────────────
 
@@ -480,7 +450,13 @@ pub async fn ensure_console_proxy() -> bool {
         // Already initialised once (shouldn't happen — one Live server per process).
         eprintln!("[sky.console] proxy already initialised; keeping the first mount");
     }
-    install_shutdown_hook();
+    // NOTE: child teardown on shutdown is now owned by the ONE coherent
+    // graceful-shutdown path in `live::live_shutdown_signal` (it calls
+    // `shutdown_console()` then lets axum drain → exit 0). We deliberately do
+    // NOT install the old `install_shutdown_hook` here — two signal handlers
+    // would race, and that hook's `std::process::exit(130)` would defeat the
+    // exit-0-on-clean-shutdown contract. The PR_SET_PDEATHSIG + kill_on_drop on
+    // the child remain the defense-in-depth floor for non-graceful parent death.
     eprintln!("[sky.console] reverse-proxy ready at {CONSOLE_BASE}/* → 127.0.0.1:{port}");
     true
 }

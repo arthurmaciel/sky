@@ -116,6 +116,32 @@ fn header_authorizes(auth: &str, tok: &str) -> bool {
     false
 }
 
+/// The console-auth mode label, mirroring Go's `describeConsoleAuthMode`
+/// (`console_auth_v2.go:149`) over `resolveConsoleAuthMode`'s env/production
+/// derivation. Used for the `[sky.console] inline console mounted … mode=<m>`
+/// startup log (Go parity — `console.go:328`). Total: every branch is explicit.
+///
+/// Derivation (Go parity): `SKY_CONSOLE_AUTH` (case-insensitive, trimmed) selects
+/// `off`/`token`/`app`; unset → `dev-open` in dev (the default) or `unset-prod`
+/// in production (`ENV`/`SKY_ENV` non-dev); any unknown value → `off` (Go refuses
+/// to silently widen to something more permissive).
+pub fn console_auth_mode_label() -> &'static str {
+    let raw = std::env::var("SKY_CONSOLE_AUTH").unwrap_or_default();
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" => "off",
+        "token" => "token",
+        "app" => "app",
+        "" => {
+            if telemetry::production_from_env() {
+                "unset-prod"
+            } else {
+                "dev-open"
+            }
+        }
+        _ => "off",
+    }
+}
+
 pub fn gate_blocked(headers: &axum::http::HeaderMap) -> Option<axum::response::Response> {
     let console_auth = std::env::var("SKY_CONSOLE_AUTH").unwrap_or_default();
     if console_auth == "off" {

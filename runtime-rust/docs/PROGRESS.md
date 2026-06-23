@@ -17,6 +17,54 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-23 — #35 Sky.Live graceful shutdown + #36 startup-log parity (Go)
+
+**#35 — graceful shutdown on SIGINT.** Pre-fix: `axum::serve(listener, app).await`
+had no `.with_graceful_shutdown`; the only signal handling was
+`console_proxy::install_shutdown_hook` which `std::process::exit(130)` AND only
+when a console child was spawned. So ^C → no message, exit 130
+(`sky: callProcess … (exit 130): failed`). Fix: wrap the serve with
+`.with_graceful_shutdown(live_shutdown_signal())`. `live_shutdown_signal` awaits
+SIGINT (`ctrl_c`) or SIGTERM (`tokio::signal::unix`, degrading to ctrl_c-only on a
+failed SIGTERM registration — robust, no panic), prints `\nSky.Live shutting down…`
+to stdout (Go `fmt.Println`), flips readyz→draining (`observability::mark_draining`),
+kills the console child (`console_proxy::shutdown_console`), then returns so axum
+drains → `serve.await` resolves `Ok(())` → SkyTask Ok → entry exits **0**. A bounded
+grace timer (`SKY_LIVE_SHUTDOWN_GRACE_MS`, default 1500 ms) force-exits **0** so a
+never-idle SSE stream can't wedge the drain (Go `srv.Close()` semantics). A SECOND
+signal force-exits **130** (Go's `os.Exit(130)` escalation). Removed the old
+`install_shutdown_hook` (a racing second handler whose exit(130) defeated the
+exit-0 contract) so there is ONE coherent shutdown path; `shutdown_console` is
+called on all three exit routes (load-bearing — `process::exit` skips `Drop`, so
+`kill_on_drop` never fires on a clean exit → no orphan child). `PR_SET_PDEATHSIG` +
+`kill_on_drop` remain the non-graceful-death floor.
+
+**#36 — startup-log parity.** (1) Memory session-store line: emitted in
+`store::choose_store` (root) AND at the in-process console mount (the sub-app
+store Go inits) → printed TWICE like Go, each with a Go `log.LstdFlags` timestamp
+prefix (`YYYY/MM/DD HH:MM:SS `) + a Go-`Duration.String()` ttl (`1h0m0s`/`30m0s`)
+via the new `memory_store_log_line` / `go_duration_string` / `go_log_timestamp`
+helpers (store.rs). (2) `[sky.console] inline console mounted as Sky.Live sub-app
+at /_sky/console mode=<m>` — emitted in the in-process-console branch ONLY when
+`console_proxy::gate_allows()` (mirrors Go's mount skip), `<m>` from the new
+`console::console_auth_mode_label` (Go `resolveConsoleAuthMode`/`describeConsoleAuthMode`
+parity — `dev-open` when SKY_CONSOLE_AUTH unset + dev). The label is a fixed enum
+of static strings — a hostile env value can NEVER inject into the log line.
+(3) Listening line: added the Go-parity `Sky.Live listening on :<port>` on stdout
+(kept the informative `[sky.live] listening on http://0.0.0.0:<port>` bind line on
+stderr).
+
+**Verify (sky-playground, store=memory ttl=3600).** In-process console (gate open):
+the two timestamped store lines + `mode=dev-open` mount line + both listening
+lines print; ^C → `Sky.Live shutting down…` → exit 0. Proxy path (console child
+spawned): exit 0 in ~0.2 s, console child reaped (no orphan). SSE-open: grace
+timer force-exits 0 (no hang). Runtime live+store tests 99/99 green; clippy
+`-D warnings` clean. Guardian final review: APPROVE-FOR-COMMIT, no blocking
+findings (2 minor non-blocking rewrite opportunities filed: env-config
+consolidation, `ConsoleAuthMode` ADT SSOT shared with `gate_blocked`).
+
+**Affected:** `runtime-rust/src/sky_runtime/live/{mod.rs,store.rs,console.rs,console_proxy.rs}`.
+
 ## 2026-06-23 — #32 FFI-Result error-type E0308 + dyn-Fn-object under-bind closure
 
 **#32 — FFI Result error-type.** An FFI wrapper always returns `SkyResult<SkyError, _>`,

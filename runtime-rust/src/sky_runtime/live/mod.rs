@@ -707,6 +707,117 @@ fn live_ttl() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Graceful-drain grace window (Go parity for `srv.Close()`): how long the
+/// pure axum graceful drain is allowed before we force a CLEAN exit-0. Go does
+/// NOT drain — it calls `srv.Close()` which forcibly drops every connection
+/// (including the never-idle SSE streams) and returns immediately. axum's
+/// `with_graceful_shutdown` instead WAITS for every connection to finish, so an
+/// open SSE `EventSource` (heartbeat every 15 s, otherwise idle — it never
+/// completes) would hang the drain forever. This window lets ordinary in-flight
+/// requests finish, then force-exits 0 so SSE clients are dropped exactly as Go
+/// drops them (the browser banner flips to "Reconnecting…", same UX as a deploy).
+/// Tunable via `SKY_LIVE_SHUTDOWN_GRACE_MS` (default 1500 ms; 0 = exit at once).
+fn shutdown_grace() -> std::time::Duration {
+    let ms = std::env::var("SKY_LIVE_SHUTDOWN_GRACE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(1500);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Await the FIRST shutdown signal (SIGINT or SIGTERM), then run the graceful
+/// teardown and return so axum's `with_graceful_shutdown` drains in-flight
+/// connections and the serve future resolves `Ok(())` (→ the SkyTask is `Ok` →
+/// the generated entry exits 0). Go parity: `live.go:3503` (the SIGINT/SIGTERM
+/// handler that prints the line, flips readyz, drains, then returns naturally).
+///
+/// Two escapes guard against the drain hanging — both keep the no-panic thesis:
+///  - A bounded grace timer that force-exits 0 (CLEAN) after `shutdown_grace()`,
+///    so a never-idle SSE stream can't wedge the process (Go's `srv.Close()`
+///    equivalent — it drops long-lived connections rather than waiting).
+///  - A SECOND signal (Ctrl-C twice) that force-exits 130 immediately (Go's
+///    nested `os.Exit(130)` escalation).
+///
+/// Robustness: a failed SIGTERM registration must NOT crash — it degrades to
+/// SIGINT-only (`ctrl_c`). On non-unix only `ctrl_c` is available.
+async fn live_shutdown_signal() {
+    // First press: block until SIGINT or SIGTERM arrives.
+    wait_for_term_or_int().await;
+
+    // Print to stdout (Go uses `fmt.Println`, which is stdout). The leading
+    // newline keeps the `^C` echo on its own line, matching Go.
+    println!("\nSky.Live shutting down…");
+
+    // Flip readyz → draining so orchestrators stop routing new traffic while
+    // in-flight requests finish (Go: `SetReady(false)`).
+    observability::mark_draining();
+
+    // Tear down the console child (Go: `ShutdownSubApps`; here the pre-built
+    // console child, if one was spawned). Idempotent no-op when none exists.
+    // Load-bearing: the child is tracked in a `static` whose `Drop`
+    // (`kill_on_drop`) never runs on `process::exit`, so this explicit
+    // `start_kill` is what prevents an orphan console child after a clean exit.
+    console_proxy::shutdown_console();
+
+    // The observability export pipelines (push/hub exporters) flush every ~2 s
+    // on a tick AND drain a final batch when their channel closes at process
+    // exit, so an explicit pre-drain flush is not required for at-least-once
+    // delivery; Go's `ShutdownTracing`/`RunShutdownHooks` are the equivalent
+    // best-effort path. The graceful axum drain below bounds how long we wait.
+
+    // Grace timer: force a CLEAN exit-0 after the window so a never-idle SSE
+    // connection can't hang the drain (Go's `srv.Close()` drops them outright).
+    // Spawned (not awaited) so we still return immediately and let the axum drain
+    // win the race when there are no long-lived connections (the common case →
+    // sub-window exit). Exit 0 keeps the SkyTask-Ok / exit-0 contract.
+    tokio::spawn(async {
+        tokio::time::sleep(shutdown_grace()).await;
+        // Defense-in-depth: kill the console child again in case it was spawned
+        // after the first teardown call (shutdown_console is idempotent).
+        console_proxy::shutdown_console();
+        std::process::exit(0);
+    });
+
+    // Second press: a watchdog that force-exits 130 if the user hits Ctrl-C
+    // again while the drain is in progress (Go parity: the nested
+    // `<-sigCh; os.Exit(130)`). Spawned (not awaited).
+    tokio::spawn(async {
+        wait_for_term_or_int().await;
+        eprintln!("Sky.Live: forcing exit (second signal)");
+        console_proxy::shutdown_console();
+        std::process::exit(130); // 128 + SIGINT(2)
+    });
+    // Return → axum drains in-flight connections → serve future resolves Ok
+    // (fast path when nothing long-lived is open; otherwise the grace timer
+    // force-exits 0).
+}
+
+/// Resolve when the next SIGINT or SIGTERM arrives. Total + robust: if SIGTERM
+/// can't be registered (rare), fall back to SIGINT (`ctrl_c`) only rather than
+/// panicking. On non-unix, only `ctrl_c` exists.
+async fn wait_for_term_or_int() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            // SIGTERM registration failed — degrade to SIGINT only.
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// `Std.Live.app { init, update, view, subscriptions }` — serve via axum.
 ///
 /// HTTP-first: a GET renders the full page with the embedded client, opens a
@@ -1244,10 +1355,27 @@ where
             );
 
         router = if use_console_proxy {
-            // Real bundled Sky.Live console, spawned as a child + proxied.
+            // Real bundled Sky.Live console, spawned as a child + proxied. The
+            // child process logs its OWN `session store: …` line + a
+            // `reverse-proxy ready` line (console_proxy), so the parent does not
+            // duplicate the inline-mount log here.
             console_proxy::proxy_routes(router)
         } else {
-            // In-process console (plain-HTML shell + JSON APIs).
+            // In-process console (plain-HTML shell + JSON APIs). Go mounts the
+            // console as an in-process Sky.Live sub-app that inits its OWN session
+            // store, so Go logs the memory-store line TWICE (root + console) and
+            // then the inline-mount line (console.go:328). The Rust in-process
+            // console has no separate store, so we emit the matching SECOND store
+            // line + the mount line here — but ONLY when the console actually
+            // mounts (gate open: not a sub-app, not `SKY_CONSOLE_AUTH=off`, not
+            // production-without-admin-token), mirroring Go's mount skip.
+            if console_proxy::gate_allows() {
+                eprintln!("{}", store::memory_store_log_line(live_ttl()));
+                eprintln!(
+                    "[sky.console] inline console mounted as Sky.Live sub-app at /_sky/console mode={}",
+                    console::console_auth_mode_label()
+                );
+            }
             router
                 .route("/_sky/console", get(console::console_html))
                 .route("/_sky/console/api/overview", get(console::api_overview))
@@ -1320,8 +1448,19 @@ where
             Ok(l) => l,
             Err(e) => return SkyResult::Err(format!("Live.app: bind {addr}: {e}").into()),
         };
+        // Bind-address line (stderr, Rust-specific — carries the 0.0.0.0 bind).
         eprintln!("[sky.live] listening on http://{addr}");
-        match axum::serve(listener, app).await {
+        // Go-parity user-facing line (stdout, `fmt.Printf("Sky.Live listening on
+        // :%d\n", port)` — live.go:3546).
+        println!("Sky.Live listening on :{port}");
+        // Graceful shutdown (Go parity — live.go:3503): trap SIGINT/SIGTERM,
+        // print the shutdown line, drain in-flight requests, and return cleanly so
+        // the SkyTask resolves Ok → the generated entry exits 0 (NOT 130). A
+        // SECOND signal force-exits 130 via the watchdog inside live_shutdown_signal.
+        match axum::serve(listener, app)
+            .with_graceful_shutdown(live_shutdown_signal())
+            .await
+        {
             Ok(()) => ok_res(()),
             Err(e) => SkyResult::Err(format!("Live.app: serve: {e}").into()),
         }

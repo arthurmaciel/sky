@@ -409,7 +409,85 @@ where
         }
     }
     let _ = (kind, path);
+    // Go parity (live_store.go:1032): the memory store logs through Go's `log`
+    // package, so the line carries a `log.LstdFlags` timestamp prefix and a
+    // Go-`Duration.String()` ttl (`1h0m0s` / `30m0s`). The persistent stores
+    // above use a bare `eprintln!` (matching Go's `log.Printf` there too, minus
+    // the duration), so only memory needs the duration + timestamp shape.
+    eprintln!("{}", memory_store_log_line(ttl));
     Arc::new(MemoryStore::new(ttl))
+}
+
+/// The exact `[sky.live] session store: memory (ttl=…)` line Go emits, with a
+/// Go `log.LstdFlags` timestamp prefix and a Go-`Duration.String()` ttl. Shared
+/// so the in-process console sub-app mount can emit the SAME second line Go's
+/// console sub-app store init produces (Go prints this line TWICE: root + console).
+pub(crate) fn memory_store_log_line(ttl: Duration) -> String {
+    format!(
+        "{} [sky.live] session store: memory (ttl={})",
+        go_log_timestamp(),
+        go_duration_string(ttl)
+    )
+}
+
+/// Render a `chrono::Local` now as Go's `log.LstdFlags` prefix: `2006/01/02 15:04:05`.
+fn go_log_timestamp() -> String {
+    chrono::Local::now().format("%Y/%m/%d %H:%M:%S").to_string()
+}
+
+/// Render a whole-second `Duration` the way Go's `time.Duration.String()` does
+/// for our TTL granularity: `1h0m0s`, `30m0s`, `45s`, `0s`. Sub-second remainder
+/// is dropped (TTLs are whole seconds — `SKY_LIVE_TTL` parses to `u64` seconds).
+fn go_duration_string(d: Duration) -> String {
+    let total = d.as_secs();
+    if total == 0 {
+        return "0s".to_string();
+    }
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes}m{seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+#[cfg(test)]
+mod go_format_tests {
+    use super::{go_duration_string, memory_store_log_line};
+    use std::time::Duration;
+
+    #[test]
+    fn duration_matches_go_string() {
+        // Go time.Duration.String() reference values.
+        assert_eq!(go_duration_string(Duration::from_secs(3600)), "1h0m0s");
+        assert_eq!(go_duration_string(Duration::from_secs(1800)), "30m0s");
+        assert_eq!(go_duration_string(Duration::from_secs(90)), "1m30s");
+        assert_eq!(go_duration_string(Duration::from_secs(45)), "45s");
+        assert_eq!(go_duration_string(Duration::from_secs(0)), "0s");
+        // Sub-second remainder dropped (whole-second TTL granularity).
+        assert_eq!(go_duration_string(Duration::from_millis(1500)), "1s");
+    }
+
+    #[test]
+    fn memory_line_shape_matches_go() {
+        let line = memory_store_log_line(Duration::from_secs(3600));
+        // Trailing message exactly as Go (post-timestamp).
+        assert!(
+            line.ends_with("[sky.live] session store: memory (ttl=1h0m0s)"),
+            "got {line:?}"
+        );
+        // A `log.LstdFlags` timestamp prefix `YYYY/MM/DD HH:MM:SS ` precedes it.
+        let prefix = line
+            .strip_suffix("[sky.live] session store: memory (ttl=1h0m0s)")
+            .unwrap_or("");
+        assert_eq!(prefix.len(), 20, "timestamp prefix `YYYY/MM/DD HH:MM:SS ` is 20 chars: {prefix:?}");
+        assert_eq!(prefix.matches('/').count(), 2);
+        assert_eq!(prefix.matches(':').count(), 2);
+    }
 }
 
 #[cfg(test)]
