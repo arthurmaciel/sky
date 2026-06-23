@@ -3607,6 +3607,46 @@ enum GenericDrop {
     /// Not in the bindable subset (Q1): generic enum, const generic, lifetime-
     /// borrowed return, trait-object / impl-Trait param, closure param, …
     NotBindable(String),
+    /// A closure-typed param the backend can't model. The tag is the SPECIFIC
+    /// closure coverage reason (Task 5.2); the `String` is the offending detail.
+    ClosureDrop(ClosureDropTag, String),
+}
+
+/// The distinct reason a closure-typed param could not be modelled. Each maps to
+/// a stable coverage tag string. The first three MIRROR the Haskell
+/// `Sky.Build.Rust.FfiInstance.closureDropReason` taxonomy (`closure-mut-slot` /
+/// `closure-ho-return` / `closure-by-ref-noclone`); `closure-nonrust-abi` (B3) +
+/// `closure-indirect-noanalysis` are inspector-side parity tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClosureDropTag {
+    /// `Fn(&mut T)` — a mutable-borrow slot (the owned-clone bridge can't
+    /// reconstruct a `&mut` from an owned Sky value).
+    MutSlot,
+    /// The closure RETURNS a function/closure (`-> impl Fn`) — the closed
+    /// Sky↔Rust set has no function arm to marshal back.
+    HoReturn,
+    /// A by-ref closure whose borrowed element is a concrete non-`Clone` type —
+    /// the owned-clone bridge needs `.clone()` on the borrow.
+    ByRefNoClone,
+    /// Closure metadata suppressed because the host fn's ABI is not `"Rust"`
+    /// (B3) — only a Rust-ABI host can take a Rust closure.
+    NonRustAbi,
+    /// The call-site indirect case (the inspector itself does not decide this;
+    /// kept in the taxonomy for parity with the downstream call-site analysis).
+    #[allow(dead_code)] // taxonomy parity only — the inspector never constructs this
+    IndirectNoAnalysis,
+}
+
+impl ClosureDropTag {
+    fn tag(self) -> &'static str {
+        match self {
+            ClosureDropTag::MutSlot => "closure-mut-slot",
+            ClosureDropTag::HoReturn => "closure-ho-return",
+            ClosureDropTag::ByRefNoClone => "closure-by-ref-noclone",
+            ClosureDropTag::NonRustAbi => "closure-nonrust-abi",
+            ClosureDropTag::IndirectNoAnalysis => "closure-indirect-noanalysis",
+        }
+    }
 }
 
 impl GenericDrop {
@@ -3617,6 +3657,7 @@ impl GenericDrop {
             GenericDrop::UnmodellableBound(_)   => "unmodellable-bound",
             GenericDrop::DefaultedBoundParam(_) => "defaulted-bound-param",
             GenericDrop::NotBindable(_)         => "not-bindable",
+            GenericDrop::ClosureDrop(tag, _)    => tag.tag(),
         }
     }
     fn detail(&self) -> &str {
@@ -3624,7 +3665,8 @@ impl GenericDrop {
             GenericDrop::NonGenericPredicate(d)
             | GenericDrop::UnmodellableBound(d)
             | GenericDrop::DefaultedBoundParam(d)
-            | GenericDrop::NotBindable(d) => d,
+            | GenericDrop::NotBindable(d)
+            | GenericDrop::ClosureDrop(_, d) => d,
         }
     }
 }
@@ -4017,12 +4059,12 @@ fn classify_closure_param(
         GenericDrop::NotBindable(format!("trait `{trait_name}` is not a closure trait"))
     })?;
 
-    // B3: only a Rust-ABI host can receive a Rust closure. (Task 5.2 upgrades
-    // this NotBindable to the specific `closure-nonrust-abi` coverage tag.)
+    // B3: only a Rust-ABI host can receive a Rust closure.
     if !host_abi_rust {
-        return Err(GenericDrop::NotBindable(format!(
-            "{trait_name} closure on a non-Rust-ABI host"
-        )));
+        return Err(GenericDrop::ClosureDrop(
+            ClosureDropTag::NonRustAbi,
+            format!("{trait_name} closure on a non-Rust-ABI host"),
+        ));
     }
 
     // The `Fn(A) -> R` sugar lives in the trait's parenthesized generic args.
@@ -4049,11 +4091,11 @@ fn classify_closure_param(
     if let Some(inputs) = inputs {
         for input in inputs {
             if let Some(br) = input.get("borrowed_ref") {
-                // (Task 5.2 upgrades this to the `closure-mut-slot` tag.)
                 if is_mutable(br) {
-                    return Err(GenericDrop::NotBindable(format!(
-                        "{trait_name}(&mut _) mutable-borrow slot"
-                    )));
+                    return Err(GenericDrop::ClosureDrop(
+                        ClosureDropTag::MutSlot,
+                        format!("{trait_name}(&mut _) mutable-borrow slot"),
+                    ));
                 }
                 by_ref = true;
                 // The inner type key is `type_` (newer rustdoc) or `type` (older).
@@ -4074,20 +4116,22 @@ fn classify_closure_param(
     };
 
     // A closure that RETURNS another closure can't be marshalled back (no
-    // function arm in the closed Sky↔Rust set). (Task 5.2 → `closure-ho-return`.)
+    // function arm in the closed Sky↔Rust set) → closure-ho-return.
     if matches!(ret, TypeRef::Closure { .. }) {
-        return Err(GenericDrop::NotBindable(format!(
-            "{trait_name}(..) -> impl Fn (higher-order return)"
-        )));
+        return Err(GenericDrop::ClosureDrop(
+            ClosureDropTag::HoReturn,
+            format!("{trait_name}(..) -> impl Fn (higher-order return)"),
+        ));
     }
 
     // A by-ref closure whose borrowed element is a concrete non-Clone type breaks
-    // the owned-clone bridge. (Task 5.2 → `closure-by-ref-noclone`.)
+    // the owned-clone bridge → closure-by-ref-noclone.
     if by_ref {
         if let Some(bad) = arg_types.iter().find(|tr| !typeref_is_clone(tr)) {
-            return Err(GenericDrop::NotBindable(format!(
-                "by-ref {trait_name} over a non-Clone arg: {bad:?}"
-            )));
+            return Err(GenericDrop::ClosureDrop(
+                ClosureDropTag::ByRefNoClone,
+                format!("by-ref {trait_name} over a non-Clone arg: {bad:?}"),
+            ));
         }
     }
 
@@ -5506,32 +5550,60 @@ mod tests {
         assert!(!host_abi_is_rust(&c_str));
     }
 
+    // ── Phase 5.2: coverage drop tags ──────────────────────────────────
+
     #[test]
-    fn closure_param_nonrust_abi_drops() {
-        // B3: a non-Rust-ABI host suppresses closure metadata (Task 5.1 records a
-        // generic NotBindable; Task 5.2 upgrades it to `closure-nonrust-abi`).
+    fn closure_drop_nonrust_abi() {
+        // B3: a non-Rust-ABI host records the specific `closure-nonrust-abi` tag.
         let bound = closure_bound("Fn", vec![gnode("a")], Some(prim("bool")));
         match classify_closure_param(&bound, &ab_idx(), false) {
-            Err(GenericDrop::NotBindable(_)) => {}
-            other => panic!("expected a non-Rust-ABI drop, got {other:?}"),
+            Err(GenericDrop::ClosureDrop(tag, _)) => assert_eq!(tag.tag(), "closure-nonrust-abi"),
+            other => panic!("expected closure-nonrust-abi drop, got {other:?}"),
         }
     }
 
     #[test]
-    fn closure_param_mut_slot_drops() {
-        // `Fn(&mut a)` is a mutable-borrow slot the owned-clone bridge can't
-        // reconstruct → DROP (Task 5.2 tags it `closure-mut-slot`).
+    fn closure_drop_mut_slot() {
+        // `Fn(&mut a)` ⇒ closure-mut-slot.
         let bound = closure_bound("Fn", vec![mut_ref(gnode("a"))], Some(prim("bool")));
         match classify_closure_param(&bound, &ab_idx(), true) {
-            Err(GenericDrop::NotBindable(_)) => {}
-            other => panic!("expected a mut-slot drop, got {other:?}"),
+            Err(GenericDrop::ClosureDrop(tag, _)) => assert_eq!(tag.tag(), "closure-mut-slot"),
+            other => panic!("expected closure-mut-slot drop, got {other:?}"),
         }
     }
 
     #[test]
-    fn closure_param_by_ref_noclone_helper() {
-        // The by-ref-noclone gate's Clone oracle: a closure (and any container
-        // carrying one) is never Clone; closed primitives / params are.
+    fn closure_drop_ho_return() {
+        // A closure RETURNING a closure ⇒ closure-ho-return. rustdoc models
+        // `-> impl Fn(..)` as an impl_trait output, which type_to_typeref can't
+        // resolve to the closed set, so it surfaces as a NotBindable BEFORE the
+        // ho-return check — that drop is still correct (a higher-order return is
+        // never emitted as a closure argType). The DEDICATED ho-return tag fires
+        // when the output resolves to a closure TypeRef; assert the taxonomy
+        // entry exists and the drop happens.
+        assert_eq!(ClosureDropTag::HoReturn.tag(), "closure-ho-return");
+        let output = serde_json::json!({ "impl_trait": [
+            closure_bound("Fn", vec![gnode("b")], Some(gnode("b")))
+        ] });
+        let bound = closure_bound("Fn", vec![gnode("a")], Some(output));
+        assert!(
+            classify_closure_param(&bound, &ab_idx(), true).is_err(),
+            "a closure returning a closure must DROP"
+        );
+    }
+
+    #[test]
+    fn closure_drop_by_ref_noclone() {
+        // A by-ref closure whose borrowed element is a concrete non-Clone type ⇒
+        // closure-by-ref-noclone. A bare opaque ctor `::Foo` (no args) IS treated
+        // as Clone-by-vacuous-args, so use a borrowed Vec<closure> — but
+        // type_to_typeref can't emit a nested closure. Drive the gate directly
+        // through its Clone oracle + assert the tag, and exercise the drop with a
+        // borrowed element type_to_typeref CAN resolve to a non-Clone TypeRef:
+        // there is no such closed-set concrete (every closed primitive/ctor IS
+        // Clone), so the gate is reached only via a nested closure — covered by
+        // the oracle assertions below.
+        assert_eq!(ClosureDropTag::ByRefNoClone.tag(), "closure-by-ref-noclone");
         let clo = TypeRef::Closure {
             kind: ClosureKind::Fn,
             by_ref: false,
@@ -5543,5 +5615,37 @@ mod tests {
         assert!(typeref_is_clone(&TypeRef::Param(0)));
         assert!(typeref_is_clone(&TypeRef::Prim("String".into())));
         assert!(typeref_is_clone(&TypeRef::Prim("i64".into())));
+    }
+
+    #[test]
+    fn closure_drop_tags_are_distinct_and_stable() {
+        // The five Phase-5.2 tags are distinct stable strings (parity with the
+        // Haskell `closureDropReason` taxonomy + the two inspector-only tags).
+        let tags = [
+            ClosureDropTag::MutSlot.tag(),
+            ClosureDropTag::HoReturn.tag(),
+            ClosureDropTag::ByRefNoClone.tag(),
+            ClosureDropTag::NonRustAbi.tag(),
+            ClosureDropTag::IndirectNoAnalysis.tag(),
+        ];
+        let mut sorted = tags.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 5, "all five closure tags must be distinct");
+        assert_eq!(
+            tags,
+            [
+                "closure-mut-slot",
+                "closure-ho-return",
+                "closure-by-ref-noclone",
+                "closure-nonrust-abi",
+                "closure-indirect-noanalysis",
+            ]
+        );
+        // A ClosureDrop flows its tag through GenericDrop::reason() (the coverage
+        // taxonomy emission), so emit_generic_coverage histograms it correctly.
+        let d = GenericDrop::ClosureDrop(ClosureDropTag::MutSlot, "x".into());
+        assert_eq!(d.reason(), "closure-mut-slot");
+        assert_eq!(d.detail(), "x");
     }
 }
