@@ -34,8 +34,15 @@ pub fn str_err<E: From<String>>(s: &str) -> E { s.to_string().into() }
 /// C5: `tokio::task::spawn(...).await` already catches panics via JoinError;
 /// this fn handles the non-panic `Err(e)` arm.  Any `Debug`-able foreign
 /// error type is accepted — `Debug` is universal, safe, and always available.
-pub fn sky_error_from_foreign<E: std::fmt::Debug>(e: E) -> String {
-    format!("{e:?}")
+/// Convert a foreign async error into the project's error type.
+///
+/// Same generic `E: From<String>` contract as `str_err` — the project
+/// provides `impl From<String> for SkyCoreErrorError` so both arms of
+/// the fallible-async match resolve to the same `SkyResult<E, A>`.
+///
+/// Requires `Debug` on the foreign error (universally available).
+pub fn sky_error_from_foreign<ForeignE: std::fmt::Debug, E: From<String>>(e: ForeignE) -> E {
+    format!("{e:?}").into()
 }
 
 /// Bake a config-derived default for an env var: set `key=val` ONLY when the
@@ -337,11 +344,30 @@ pub fn panic_500_body(payload: &(dyn std::any::Any + Send)) -> String {
 /// replaces the hook). Called at the top of generated `fn main()` for non-server
 /// shapes (Sky.Cli/Tui); server/live binaries rely on the per-request
 /// `CatchPanicLayer` instead (so a handler panic returns a 500, not exit).
+///
+/// **Design note — hook logs then RESUMES the unwind (never calls exit).** Calling
+/// `process::exit(1)` from the hook would prevent `catch_unwind` anywhere in the
+/// process from absorbing panics, which breaks two load-bearing mechanisms:
+///
+///   1. `tokio::task::spawn(...)` internally uses `catch_unwind` to turn a task
+///      panic into a `JoinError`.  The async-FFI binding bodies use this to satisfy
+///      C5 (foreign `async fn` panics → `SkyResult::Err`) — see #44.
+///
+///   2. `block_on`'s `std::thread::spawn(…).join()` catches a panicking entry
+///      future at the OS-thread boundary and maps it to `SkyResult::Err`.
+///
+/// By resuming the unwind, both mechanisms can absorb the panic after the hook
+/// has logged the classified error.  For a truly uncaught panic (nothing catches
+/// it), the Rust runtime prints a backtrace and aborts/exits — still a clean
+/// non-zero exit. The classified log line always fires first.
 pub fn install_panic_classifier() {
     std::panic::set_hook(Box::new(|info| {
-        // Log (classified, with errId) then exit — the CLI/Tui contract.
+        // Log (classified, with errId) — diagnostic fires regardless of whether
+        // the panic is subsequently caught by catch_unwind / tokio::task::spawn.
         let _ = classify_and_log_panic(info.payload());
-        std::process::exit(1);
+        // Do NOT call process::exit — let the panic unwind propagate so that
+        // catch_unwind callers (tokio task spawn, block_on thread join, async-FFI
+        // wrappers) can absorb it and map it to a Sky Err value.
     }));
 }
 

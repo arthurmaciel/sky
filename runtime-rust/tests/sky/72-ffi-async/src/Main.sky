@@ -63,10 +63,8 @@ checkBoom =
 
 main : Task Error ()
 main =
-    let
-        _ = checkPing
-        _ = checkAdd
-        _ = checkTryDiv
-        _ = checkBoom
-    in
-    println "[ALL OK]"
+    checkPing
+        |> Task.andThen (\_ -> checkAdd)
+        |> Task.andThen (\_ -> checkTryDiv)
+        |> Task.andThen (\_ -> checkBoom)
+        |> Task.andThen (\_ -> println "[ALL OK]")
