@@ -17,6 +17,46 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-23 — Sky.Live Go↔Rust divergence sweep (#37–#41) + deep-sweep finds
+
+**Mission:** fix Sky.Live Rust-backend divergences from Go (repro: `sky-playground`).
+Two parallel read-only investigators mapped the gaps; fixes landed serially,
+guardian-gated where the surface warranted it (codegen/concurrency/security).
+
+- **#37 form-submit decode** (codegen) — Rust's `serde_urlencoded` hard-errored on a
+  MISSING record field → the form silently did nothing; Go's `json.Unmarshal`
+  defaults missing fields. Fix: `#[serde(default)]`+`Default` on form-target structs,
+  GATED on `allFieldsDefaultable` (+ unbounded `impl Default for SkyMaybe`=Nothing) —
+  the gate closes a guardian-found E0277 (a `Maybe`/`Result`/ADT form field would
+  else cargo-fail). sky-playground RunClicked now dispatches on Rust. (Present-`Maybe`
+  value round-trip stays a shared limitation → #42.)
+- **#38 tui cfg** (codegen) — generated Cargo.toml now declares `tui = []` → the
+  `unexpected cfg condition value: tui` warning is gone.
+- **#35 graceful shutdown** + **#36 startup logs** — see the entry below.
+- **#39 SSE hello payload** — Rust sent `{}`; now `{"v":1,"sid":...,"ts":<ms>}` (Go
+  parity, session-lost/reconnect). `data:` body verified e2e.
+- **#40 client-JS env templating** — Rust hardcoded the 7 retry/queue/timeout vars +
+  2 status strings; now `render_page_full` injects `window.__SKY_*` from
+  `SKY_LIVE_RETRY_*`/`QUEUE_MAX`/`HELLO_TIMEOUT_MS`/`HEARTBEAT_TTL_MS`/`BANNER` and
+  `client.js` reads them with the hardcoded fallback (CSP-safe). `SKY_LIVE_RETRY_BASE_MS=999`
+  verified in the served page.
+- **#41 cookie Max-Age + TTL parse** (security) — session cookie now carries
+  `Max-Age=<store-ttl>` (was session-scoped → state lost on tab close);
+  `SameSite=None;Secure` under `SKY_LIVE_FRAME_ANCESTORS` else `Lax` (mirrors Go +
+  the CSRF cookie); `SKY_LIVE_TTL` now parses Go duration strings (`45m`→2700,
+  `1h30m`, `24h`) via a total `parse_duration_secs` (bad→default, no panic). Verified
+  `Set-Cookie: …; SameSite=Lax; Max-Age=2700`. Security invariants self-certified:
+  HttpOnly kept, Secure never weakened, `None` always pairs `Secure`.
+- **Deep-sweep filed:** #42 (present-`Maybe` form value declines — shared Go/Rust
+  limitation, not a divergence; Go's `SkyMaybe` also lacks a custom Unmarshal), #43
+  (telemetry ≤1-batch loss on `process::exit` shutdown paths — best-effort parity).
+
+**Affected.** `runtime-rust/src/sky_runtime/live/{mod.rs,store.rs,console.rs,console_proxy.rs,client.js}`,
+`src/Sky/Generate/Rust/Builder/{Emitter.hs}`, `test/Sky/Generate/Rust/FormDefaultGateSpec.hs`,
+`runtime-rust/tests/sky/29-live-form` (+ Maybe field). Commits `7ec63f3c..be7cb38a`.
+
+---
+
 ## 2026-06-23 — #35 Sky.Live graceful shutdown + #36 startup-log parity (Go)
 
 **#35 — graceful shutdown on SIGINT.** Pre-fix: `axum::serve(listener, app).await`
