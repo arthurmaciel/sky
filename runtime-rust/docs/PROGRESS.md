@@ -17,6 +17,57 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-23 13:30 — #44: auto async→Task FFI for foreign `async fn` (keystone)
+
+**Mission:** bind a foreign `async fn` / `-> impl Future<Output=T>` as a Sky
+`Task Error T'` end-to-end — the FFI keystone that unlocks 100% of real async-crate
+operations. TDD in 4 phases; 8 blocking constraints enforced.
+
+**P0 — fixture** (commit `bfe8715a`): `runtime-rust/tests/sky/72-ffi-async/` with
+4 async shapes (`ping`, `add`, `try_div`, `boom`) + 1 NEGATIVE case (`non_send`).
+Main.sky chains 4 checks via `Task.andThen`.
+
+**P1 — inspector Send gate** (commit `2d638a51`): `tools/sky-ffi-inspect-rs/src/main.rs`
+— added C1 Send gate in the `effectful` branch: strips outer `Result<T,E>` → inner T,
+drops via `async-future-not-send` if T not in closed coercible set. 119 tests.
+
+**P1 hardening** (commit `1515a035`): guardian found `is_clone_opaque_name` admits
+`Clone + !Send` structs (E0277 on `tokio::task::spawn`). Fix: introduce
+`is_async_send_output` (primitives + String, no clone-opaque arm) and `is_async_send_seq`
+for sequence types — used exclusively at the async gate. Sync FFI unchanged. Added
+regression test `async_send_gate_drops_clone_but_not_send_output`. 120 tests pass.
+
+**P2 — codegen** (commit `a7f0aca7`): `src/Sky/Build/Rust/Ffi.hs` — two-pronged
+effectful body: fallible-async (`Result<T,E>` return) and infallible-async (plain T).
+Both use `tokio::task::spawn(async move { CALL.await }).await` → JoinError → Err (C5).
+`runtime-rust/src/sky_runtime/core.rs` — added `sky_error_from_foreign<ForeignE: Debug, E: From<String>>`.
+
+**P3 — integration** (commit `758cdf89`):
+- `install_panic_classifier` removes `process::exit(1)` from the panic hook. The hook
+  logs then RESUMES the unwind, enabling tokio `catch_unwind` (via spawn's JoinError)
+  and `block_on`'s thread-join to absorb panics → SkyResult::Err (C5 proof).
+- Main.sky `main` rewritten: `let _ = TaskExpr` → `Task.andThen` chain (Rust doesn't
+  auto-force discarded let bindings the way Go's `rt.AnyTaskRun` does).
+
+**Proof bar (all 8 constraints)**:
+```
+ping=pong                           — C1+C2: infallible async, unit arg
+add(2,3)=5                          — C1+C2: infallible async, multi-arg
+try_div(6,2)=3                      — Result-flatten: Ok path
+try_div(6,0)=Err(Unexpected: "…")   — Result-flatten: Err path
+boom=Err (panic caught)             — C5: panic → JoinError → SkyResult::Err
+[ALL OK]
+non_send: DROPPED (4 bindings, not 5) — C1 Send gate
+```
+
+**Affected:**
+- `tools/sky-ffi-inspect-rs/src/main.rs`
+- `src/Sky/Build/Rust/Ffi.hs`
+- `runtime-rust/src/sky_runtime/core.rs`
+- `runtime-rust/tests/sky/72-ffi-async/` (fixture + async-crate + setup.sh)
+
+---
+
 ## 2026-06-23 — Sky.Live Go↔Rust divergence sweep (#37–#41) + deep-sweep finds
 
 **Mission:** fix Sky.Live Rust-backend divergences from Go (repro: `sky-playground`).

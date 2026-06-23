@@ -526,6 +526,24 @@ log** — hold it to the same bar as a code review:
   call. This is a recurring class (money / Db.insertFields / SqlValue params).
 
 ### Pitfalls
+- **`Clone` ≠ `Send` — async FFI gates must use a TIGHTER predicate than sync FFI
+  gates.** `tokio::task::spawn` requires `Output: Send + 'static`. If you use the same
+  coercibility predicate (`is_sky_coercible_elem`) for both sync and async gates, you
+  admit `Clone + !Send` structs (Rc-backed, cell-backed) to the async gate → E0277 at
+  cargo build, silently passing `sky build` (type-checks) but failing `cargo`. The rule:
+  **split the predicates** — `is_sky_coercible_elem` for sync (admits clone-opaques,
+  no Send requirement), `is_async_send_output` for async (closed primitives + String
+  only). Apply the same split to sequence types. Verified in #44 (`1515a035`).
+- **`process::exit(1)` in a global panic hook defeats ALL `catch_unwind` callers in
+  the process.** `tokio::task::spawn` and `std::thread::spawn(...).join()` both use
+  `catch_unwind` internally to convert panics into JoinErrors / Err returns. A panic
+  hook that calls `exit(1)` fires BEFORE `catch_unwind`'s recovery point, killing the
+  process instead of letting the error propagate as a value. For the async-FFI C5
+  guarantee (foreign panic → SkyResult::Err), the hook MUST only log and resume the
+  unwind — never exit. Uncaught panics (nothing catches) still reach a non-zero exit
+  via Rust's own panic runtime, so the "log and exit on panic" user contract holds for
+  the synchronous path (CLI/Tui) via `block_on`'s `thread::spawn(...).join()` mapping.
+  Verified in #44 (`758cdf89`).
 - **Adding a NEW external-crate dependency to a SHARED / always-compiled runtime
   module silently breaks projects that don't trigger that crate's feature gate.**
   A runtime module that is included for a whole CLASS of programs (e.g.
