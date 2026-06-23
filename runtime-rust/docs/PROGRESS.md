@@ -17,6 +17,39 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-23 — #29 entry-module DCE filter + #19 inspector embed staleness
+
+**#29 — Rust entry-module dead-binding DCE.** The Rust backend filtered DEPENDENCY
+module decls by the whole-program DCE reachable set but passed the ENTRY module raw
+→ a dead top-level binding whose body called a (correctly) tree-shaken FFI generic
+wrapper emitted a reference to a pruned fn → cargo E0425. Found by the #28 Phase-4
+guardian. Fix (`Compile.hs:1971-2003`): `keepEntryDecl` mirrors the sibling dep
+filter — keep `DestructDef`; else `dceOff || Set.null reached || Set.member
+(TopRef entryModName dn) reached`. The load-bearing invariant: `entryModName` is the
+TEXTUALLY IDENTICAL `mainModuleName entrySrcMod` expression the reachable set was
+seeded with (`Compile.hs:1533`) — a divergent string (e.g. `Can._name canMod`) would
+over-prune every entry binding. Guardian-final proved the two sites equal by
+construction; `main` (the DCE root) is never droppable; transitive helper chains
+survive. Escape hatch (`SKY_DCE=0`/empty-reached) emits everything, byte-identical to
+pre-fix. Fixture `runtime-rust/tests/sky/52-ffi-dce-deadbinding` (dead binding → E0425
+pre-fix → `[ALL OK]` post-fix), wired into `ffi-fixtures-test.sh`; 43-ffi-dce still
+green; 88 cabal specs. Commit `6e141a09`. (Filed follow-up: a `Result String Int`
+error-type lowering mismatch surfacing only under `SKY_DCE=0` on a dead binding —
+orthogonal, pre-existing.)
+
+**#19 — embedded inspector staleness.** The TH splice embedding `sky-ffi-inspect-rs`
+into the `sky` binary registered only `main.rs` as a `qAddDependentFile`, so editing
+`Cargo.toml`/`Cargo.lock`/a future `mod *.rs` left the embedded inspector stale until
+an unrelated rebuild — the manual-rebuild friction that bit twice. Fix
+(`EmbeddedInspectorRust.hs`): register EVERY inspector source file (recursive, via
+`EmbedDir.listSourceFilesExcluding`, excluding `target`/`.skycache`/`.git`) in both
+embed strategies; freshness compares the prebuilt release binary against the NEWEST
+source mtime. Release fast-path + first-use cargo fallback preserved; `.skycache`
+excluded so a coverage-file regen never spuriously skips Strategy 1. Commit
+`a16d9917`.
+
+---
+
 ## 2026-06-23 — #31 ungate trait-impl methods on real crates — delivers #21 end-to-end
 
 **What.** Relaxed the visibility gate so trait-impl methods (which carry rustdoc
