@@ -268,6 +268,67 @@ spec = do
             case synthesiseGenericWrapper (mkFn [("a",["Serialize"])] idxOfCall) of
                 WrapperRejected d -> isE4400 d `shouldBe` True
                 _ -> expectationFailure "unmodellable bound must reject"
+        -- #21 — UFCS trait methods on a concrete type. The wrapper renders the
+        -- `<Self as Trait>::method` callee and threads the receiver borrow.
+        it "emits a UFCS callee + immutable recv binding for a &self trait method" $ do
+            -- `keyed<T: Ord>(&self, k: T) -> i64` on `impl Scale for Circle`.
+            let keyedFn = GenericFn
+                    { _gf_kernelName = "Rust_Tm"
+                    , _gf_baseName   = "rust_tm_keyed"
+                    , _gf_refName    = "keyed"
+                    , _gf_generic    = mkGen ["T"] [("T",["Ord"])] keyedCall
+                    , _gf_region     = A.one
+                    , _gf_file       = "T.sky"
+                    }
+                keyedCall = Call.Call
+                    { Call._call_kind     = Call.CallMethod
+                    , Call._call_path     = ["::tm", "Circle"]
+                    , Call._call_typeArgs = []
+                    , Call._call_method   = Just "keyed"
+                    , Call._call_receiver = Just (Call.Receiver 0 Call.ByRef)
+                    , Call._call_args     = [1]
+                    , Call._call_argTypes = [ Call.TRCtor "::tm::Circle" []
+                                            , Call.TRParam 0 ]
+                    , Call._call_ret      = Call.TRPrim "i64"
+                    , Call._call_assocOnType = True
+                    , Call._call_iterAdapters = []
+                    , Call._call_traitQualifier = Just ("::tm::Circle", "::tm::Scale")
+                    }
+                src = okSrc (synthesiseGenericWrapper keyedFn)
+            -- by-ref receiver: immutable param binding + `&arg0` UFCS first-arg.
+            src `shouldContain` "pub fn rust_tm_keyed<T: ::std::cmp::Ord>(arg0: ::tm::Circle, arg1: T)"
+            src `shouldContain` "<::tm::Circle as ::tm::Scale>::keyed(&arg0, arg1)"
+            -- NOT marked `mut` (a &self receiver needs no mutable binding).
+            ("mut arg0" `isInfixOf` src) `shouldBe` False
+        it "marks the receiver `mut` for a &mut self trait method (&mut arg0)" $ do
+            -- `push(&mut self, x: i64) -> ()`-shaped setter on a trait impl,
+            -- returning the receiver by own-thread → ret is the receiver type.
+            let pushFn = GenericFn
+                    { _gf_kernelName = "Rust_Tm"
+                    , _gf_baseName   = "rust_tm_push"
+                    , _gf_refName    = "push"
+                    , _gf_generic    = mkGen ["T"] [("T",["Ord"])] pushCall
+                    , _gf_region     = A.one
+                    , _gf_file       = "T.sky"
+                    }
+                pushCall = Call.Call
+                    { Call._call_kind     = Call.CallMethod
+                    , Call._call_path     = ["::tm", "Bag"]
+                    , Call._call_typeArgs = []
+                    , Call._call_method   = Just "insert"
+                    , Call._call_receiver = Just (Call.Receiver 0 Call.ByRefMut)
+                    , Call._call_args     = [1]
+                    , Call._call_argTypes = [ Call.TRCtor "::tm::Bag" [Call.TRParam 0]
+                                            , Call.TRParam 0 ]
+                    , Call._call_ret      = Call.TRPrim "i64"
+                    , Call._call_assocOnType = True
+                    , Call._call_iterAdapters = []
+                    , Call._call_traitQualifier = Just ("::tm::Bag", "::tm::Insertable")
+                    }
+                src = okSrc (synthesiseGenericWrapper pushFn)
+            -- by-mut-ref receiver: `mut arg0` binding + `&mut arg0` first-arg.
+            src `shouldContain` "mut arg0: ::tm::Bag<T>"
+            src `shouldContain` "<::tm::Bag as ::tm::Insertable>::insert(&mut arg0, arg1)"
     describe "#28 closure-capture Clone allowlist" $ do
         it "rustTypeIsClone is a positive allowlist over closed Clone types" $ do
             map rustTypeIsClone ["i64","String","bool","char","()","Vec<i64>","SkyMaybe<i64>","f64"]

@@ -90,7 +90,8 @@ import Sky.Build.Rust.FfiCall
     ( callArity, renderArgType, renderArgTypeAt, renderCall, renderRetType
     , closureBounds, renderTypeRef
     , Call, TypeRef(..), ClosureKind(..)
-    , _call_argTypes
+    , Receiver(..), ByKind(..)
+    , _call_argTypes, _call_receiver
     )
 import Sky.Generate.Rust.Builder.Naming (mangleTVar)
 import qualified Sky.Reporting.Annotation as A
@@ -589,10 +590,25 @@ synthesiseGenericWrapper gf =
                 valArgTypes =
                     [ renderArgTypeAt params j tr
                     | (j, tr) <- zip [0 :: Int ..] (_call_argTypes call) ]
+                -- #21: a `&mut self` trait method threads its receiver by
+                -- `&mut argJ` (UFCS first-arg). UFCS function-call syntax never
+                -- auto-refs, and `&mut argJ` on a by-value param is E0596 unless
+                -- the binding is `mut`. So the wrapper marks the receiver param
+                -- `mut` exactly when the receiver borrow is `ByRefMut`. The
+                -- wrapper OWNS argJ (a fresh owned copy from the runtime), so a
+                -- local `&mut` mutates that copy with no aliasing surface — parity
+                -- with an inherent `&mut self` setter. A `ByRef`/`ByValue`
+                -- receiver and every value-arg stay immutable (byte-identical).
+                mutArgIdx = case _call_receiver call of
+                    Just r | _recv_by r == ByRefMut -> Just (_recv_arg r)
+                    _                                -> Nothing
+                argBinder j
+                    | Just j == mutArgIdx = "mut arg" ++ show j
+                    | otherwise           = "arg" ++ show j
                 paramDecl
                     | arity == 0 = "_: ()"
                     | otherwise  = intercalate ", "
-                        [ "arg" ++ show j ++ ": " ++ t
+                        [ argBinder j ++ ": " ++ t
                         | (j, t) <- zip [0 :: Int ..] valArgTypes ]
                 -- B2: the wrapper BODY. When any wrapper arg is a Sky closure, a
                 -- panic INSIDE the host call most likely originated in the Sky

@@ -1000,6 +1000,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                                     trait_node,
                                     method_name,
                                     for_val,
+                                    impl_data,
                                     index,
                                 );
                                 match try_parametric_stub(
@@ -3774,10 +3775,7 @@ enum TraitMethodDropTag {
     BoundCrossImpl,
     /// The method sig references an associated type (`Self::Assoc`) the impl does
     /// not bind concretely (constraint 6 / Q3) — no projection inference, direct
-    /// impl-binding lookup only. Constructed by the assoc-type gate (STEP 4);
-    /// the `.tag()` arm exercises it until then (taxonomy-parity precedent —
-    /// mirrors `IteratorDropTag::CompanionUnsatisfiable`).
-    #[allow(dead_code)]
+    /// impl-binding lookup only.
     AssocUnresolved,
     /// Trait-method metadata suppressed because the host fn's ABI is not `"Rust"`
     /// (constraint 10) — mirrors `closure-nonrust-abi` / `iterator-nonrust-abi`.
@@ -4132,6 +4130,54 @@ fn collect_generic_names(val: &serde_json::Value, out: &mut HashSet<String>) {
         serde_json::Value::Object(o) => o.values().for_each(|v| collect_generic_names(v, out)),
         serde_json::Value::Array(a) => a.iter().for_each(|v| collect_generic_names(v, out)),
         _ => {}
+    }
+}
+
+/// The declaration-ordered list of TYPE-param names from a rustdoc `generics`
+/// Constraint 6 / Q3: substitute every `Self::Assoc` projection (`qualified_path`
+/// node) in a rustdoc type with the impl's concrete binding. A projection whose
+/// `name` is in `assoc` is replaced by its concrete type node (recursively, so a
+/// `Vec<Self::A>` resolves its element); a projection NOT in `assoc` is left as-
+/// is so `assoc_projection_unresolved` can detect + drop it. Direct lookup only
+/// — no projection inference.
+fn subst_assoc_json(
+    val: &serde_json::Value,
+    assoc: &std::collections::HashMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(qp) = val.get("qualified_path") {
+        if let Some(name) = qp.get("name").and_then(|n| n.as_str()) {
+            if let Some(concrete) = assoc.get(name) {
+                // Recurse into the binding too (in case it nests further) — but a
+                // concrete impl binding (`i64`) has no projection, so this is a
+                // clone in the common case.
+                return subst_assoc_json(concrete, assoc);
+            }
+        }
+    }
+    match val {
+        serde_json::Value::Object(o) => serde_json::Value::Object(
+            o.iter().map(|(k, v)| (k.clone(), subst_assoc_json(v, assoc))).collect(),
+        ),
+        serde_json::Value::Array(a) => {
+            serde_json::Value::Array(a.iter().map(|v| subst_assoc_json(v, assoc)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// True if `val` still contains a `qualified_path` (associated-type projection)
+/// anywhere — i.e. an unresolved `Self::Assoc` the impl did not bind. After
+/// `subst_assoc_json` runs, any surviving `qualified_path` is unresolvable →
+/// drop `trait-method-assoc-unresolved` (constraint 6 / Q3 — never pick a trait
+/// default).
+fn contains_qualified_path(val: &serde_json::Value) -> bool {
+    if val.get("qualified_path").is_some() {
+        return true;
+    }
+    match val {
+        serde_json::Value::Object(o) => o.values().any(contains_qualified_path),
+        serde_json::Value::Array(a) => a.iter().any(contains_qualified_path),
+        _ => false,
     }
 }
 
@@ -4585,6 +4631,26 @@ fn try_parametric_stub(
             format!("non-Rust ABI trait method `{method_name}`"),
         ));
     }
+    // Constraint 6 / Q3: resolve `Self::Assoc` projections in the method sig via
+    // the impl's CONCRETE assoc-type bindings (direct lookup). A projection the
+    // impl does not bind survives the substitution → drop
+    // `trait-method-assoc-unresolved` (never a trait default → no phantom type).
+    // For an inherent impl (no trait ctx) the sig is used unchanged.
+    let sig_owned;
+    let sig: &serde_json::Value = match trait_ctx {
+        Some(tc) if !tc.assoc_bindings.is_empty() || contains_qualified_path(sig) => {
+            sig_owned = subst_assoc_json(sig, &tc.assoc_bindings);
+            if contains_qualified_path(&sig_owned) {
+                return Err(GenericDrop::TraitMethodDrop(
+                    TraitMethodDropTag::AssocUnresolved,
+                    format!("unresolved associated-type projection in `{method_name}` \
+                             (impl binds no concrete `type` for it)"),
+                ));
+            }
+            &sig_owned
+        }
+        _ => sig,
+    };
     // Q2-A (THE soundness gate): for a TRAIT-impl method, the trait DEFINITION's
     // method generics are unioned into the bound scope BEFORE the modellable
     // gate. rustdoc does NOT inline a trait method's where-clauses onto the
@@ -4896,6 +4962,12 @@ struct TraitCtx<'a> {
     /// The UFCS qualifier: `(selfPath, traitPath)`, both fully-qualified
     /// `::crate::…` public paths resolved id-first (constraint 3 / #25).
     qualifier: (String, String),
+    /// Constraint 6 / Q3: the impl's CONCRETE associated-type bindings
+    /// (`type A = i64;` → `"A" ↦ {primitive:"i64"}`). A `Self::A` projection in
+    /// the method sig is resolved by DIRECT lookup here (no projection
+    /// inference); a projection absent from this map drops
+    /// `trait-method-assoc-unresolved` (never a trait default → no phantom type).
+    assoc_bindings: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Build the trait context (#21) for a generic-bearing method on a CONCRETE-Self
@@ -4914,6 +4986,7 @@ fn build_trait_ctx<'a>(
     trait_node: Option<&'a serde_json::Value>,
     method_name: &str,
     for_val: Option<&serde_json::Value>,
+    impl_data: &serde_json::Value,
     index: &'a serde_json::Map<String, serde_json::Value>,
 ) -> Option<TraitCtx<'a>> {
     let trait_node = trait_node?;
@@ -4929,7 +5002,43 @@ fn build_trait_ctx<'a>(
     Some(TraitCtx {
         trait_def_generics,
         qualifier: (ufcs_path(&self_path), ufcs_path(&trait_path)),
+        assoc_bindings: impl_assoc_bindings(impl_data, index),
     })
+}
+
+/// Constraint 6 / Q3: collect the impl's CONCRETE associated-type bindings
+/// (`type A = i64;`) as `assoc-name ↦ concrete-type-node`. Walks the impl's
+/// `items`, keeping each member whose inner is an `assoc_type` (or older
+/// `type`) carrying a bound `type`/`default`. A member without a concrete RHS
+/// (an unbound assoc — shouldn't occur on a non-defaulted impl, but guard it) is
+/// skipped, so a `Self::A` projection it would have bound drops
+/// `trait-method-assoc-unresolved` downstream. Direct lookup only — no
+/// projection inference.
+fn impl_assoc_bindings(
+    impl_data: &serde_json::Value,
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut out = std::collections::HashMap::new();
+    let Some(items) = impl_data.get("items").and_then(|i| i.as_array()) else {
+        return out;
+    };
+    for member_id in items {
+        let mid = item_id_to_str(member_id);
+        let Some(member) = index.get(&mid) else { continue };
+        let Some(name) = member["name"].as_str() else { continue };
+        // Format-version tolerant: `assoc_type` (newer) / `type` (older). The
+        // concrete RHS is under `type` (newer) or `default` (the impl's binding).
+        let inner = &member["inner"];
+        let assoc = inner.get("assoc_type").or_else(|| inner.get("type"));
+        if let Some(a) = assoc {
+            if let Some(rhs) = a.get("type").or_else(|| a.get("default")) {
+                if !rhs.is_null() {
+                    out.insert(name.to_string(), rhs.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Normalise a reachable crate-local path (`mycrate::Mod::Type`) to the crate-
@@ -7030,6 +7139,18 @@ mod tests {
         TraitCtx {
             trait_def_generics: trait_def,
             qualifier: ("::tm::Circle".to_string(), "::tm::Scale".to_string()),
+            assoc_bindings: std::collections::HashMap::new(),
+        }
+    }
+
+    /// A `TraitCtx` carrying concrete assoc-type bindings (constraint 6 tests).
+    fn trait_ctx_assoc<'a>(
+        binds: &[(&str, serde_json::Value)],
+    ) -> TraitCtx<'a> {
+        TraitCtx {
+            trait_def_generics: None,
+            qualifier: ("::tm::Circle".to_string(), "::tm::Pair".to_string()),
+            assoc_bindings: binds.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
         }
     }
 
@@ -7092,6 +7213,76 @@ mod tests {
         }
     }
 
+    /// A trait-impl method `fn first(&self) -> Self::A` (no method generics) —
+    /// the return is the trait's associated type `Self::A`, a `qualified_path`.
+    fn first_assoc_method() -> serde_json::Value {
+        serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["self", borrowed(serde_json::json!({ "generic": "Self" }))]
+            ], "output": {
+                "qualified_path": { "name": "A", "self_type": { "generic": "Self" },
+                                    "trait": { "name": "Pair", "id": 9 } }
+            } }
+        })
+    }
+
+    #[test]
+    fn test_assoc_type_resolves_via_impl_binding() {
+        // Constraint 6 / Q3: `impl Pair for Circle { type A = i64; … }` binds
+        // `A → i64`, so `first(&self) -> Self::A` resolves its return to i64 and
+        // BINDS (no method tyvars).
+        let fd = first_assoc_method();
+        let ctx = trait_ctx_assoc(&[("A", prim("i64"))]);
+        let stub = try_parametric_stub(
+            "first", &fd, Some(("Circle", "::tm::Circle")), None, None, Some(&ctx),
+        ).expect("assoc Self::A bound to i64 → first must bind");
+        assert!(stub.params.is_empty());
+        assert_eq!(stub.call.ret, TypeRef::Prim("i64".to_string()));
+        // It rode through the UFCS qualifier.
+        assert_eq!(
+            stub.call.trait_qualifier,
+            Some(("::tm::Circle".to_string(), "::tm::Pair".to_string())));
+    }
+
+    #[test]
+    fn test_assoc_type_unbound_drops() {
+        // The impl binds NO concrete `type A` → the `Self::A` projection survives
+        // → drop `trait-method-assoc-unresolved` (never pick a trait default).
+        let fd = first_assoc_method();
+        let ctx = trait_ctx_assoc(&[]); // empty bindings
+        match try_parametric_stub(
+            "first", &fd, Some(("Circle", "::tm::Circle")), None, None, Some(&ctx),
+        ) {
+            Err(GenericDrop::TraitMethodDrop(TraitMethodDropTag::AssocUnresolved, _)) => {}
+            other => panic!("expected trait-method-assoc-unresolved drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_impl_assoc_bindings_extraction() {
+        // `impl Pair for Circle { type A = i64; }` — the assoc-type item carries
+        // the concrete RHS under inner.assoc_type.type.
+        let assoc_item = serde_json::json!({
+            "name": "A",
+            "inner": { "assoc_type": { "type": prim("i64") } }
+        });
+        let mut index = serde_json::Map::new();
+        index.insert("200".to_string(), assoc_item);
+        let impl_data = serde_json::json!({ "items": [ 200 ] });
+        let binds = impl_assoc_bindings(&impl_data, &index);
+        assert_eq!(binds.get("A"), Some(&prim("i64")));
+        // Older `type` inner key + `default` RHS also resolve.
+        let assoc_old = serde_json::json!({
+            "name": "B", "inner": { "type": { "default": prim("bool") } }
+        });
+        let mut index2 = serde_json::Map::new();
+        index2.insert("201".to_string(), assoc_old);
+        let impl2 = serde_json::json!({ "items": [ 201 ] });
+        assert_eq!(impl_assoc_bindings(&impl2, &index2).get("B"), Some(&prim("bool")));
+    }
+
     #[test]
     fn test_trait_def_method_generics_lookup() {
         let (index, trait_node) = scale_trait_index();
@@ -7131,7 +7322,9 @@ mod tests {
         let for_val = serde_json::json!({
             "resolved_path": { "name": "Circle", "path": "Circle", "id": 7, "args": null }
         });
-        let ctx = build_trait_ctx(Some(&trait_node), "scaled", Some(&for_val), &index)
+        let impl_data = serde_json::json!({ "items": [] });
+        let ctx = build_trait_ctx(
+            Some(&trait_node), "scaled", Some(&for_val), &impl_data, &index)
             .expect("ctx must build when both paths are reachable");
         // BOTH halves are the id-resolved, crate-absolute module paths — NOT the
         // last-segment `::tm::Circle` / `::tm::Scale` a name-based build would
@@ -7146,7 +7339,8 @@ mod tests {
         REACHABLE_PATHS.with(|c| {
             c.borrow_mut().remove("42"); // trait path no longer reachable
         });
-        assert!(build_trait_ctx(Some(&trait_node), "scaled", Some(&for_val), &index).is_none());
+        assert!(build_trait_ctx(
+            Some(&trait_node), "scaled", Some(&for_val), &impl_data, &index).is_none());
 
         REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
     }
