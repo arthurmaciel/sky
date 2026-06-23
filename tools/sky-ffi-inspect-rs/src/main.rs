@@ -5082,23 +5082,48 @@ fn ufcs_path(path: &str) -> String {
     }
 }
 
-/// Constraint 11 — concrete-Self gate. True ONLY when the impl `for` type is a
-/// concrete NAMED type (`resolved_path`) carrying NO free type-vars anywhere in
-/// its args. `self_sky.is_empty()` (`main.rs:909`) is INSUFFICIENT: `Vec<T>`
-/// renders a non-empty Sky type yet is a generic Self. A blanket `impl<T> Foo
-/// for T` (`for_val` is a bare `{generic:T}` node) and a parametric-Self
-/// `impl<T> Foo for Vec<T>` (a `{generic:T}` nested in the args) BOTH carry a
-/// free type-var → not concrete. Over-restrictive is correct: a generic Self the
-/// monomorphiser can't pin must drop `trait-method-generic-self`, never emit.
+/// Constraint 11 — concrete-Self gate (v1: concrete NON-generic named struct
+/// ONLY). True ONLY when the impl `for` type is a `resolved_path` with NO
+/// angle-bracketed type-args at all. Three reasons the test is "no args", not
+/// "no free type-var":
+///   * a free type-var (`impl<T> Foo for T` / `Vec<T>`) is obviously generic;
+///   * a MONOMORPHIC instantiation of a generic struct (`impl Foo for Pair<i64>`)
+///     carries NO `{generic}` node yet is still parametric — and
+///     `try_parametric_stub` reconstructs the receiver type from the BASE path
+///     (`recv_rust.split('<').next()` → `Pair`) + the USED stub params, DROPPING
+///     the pinned `<i64>`. That yields a wrapper `arg0: ::Pair` (missing `<i64>`)
+///     and a `<::Pair as Trait>` qualifier that won't resolve → E0107 / unresolved
+///     Self cargo-fail. So a generic struct's concrete instantiation must DROP.
+///   * v1's bindable trait-method receiver surface is a bare non-generic named
+///     struct (the `Circle` shape) — over-drop on anything parametric is correct.
+/// A `Self` carrying args → `trait-method-generic-self` drop downstream.
 fn self_is_concrete_named(for_val: &serde_json::Value) -> bool {
     // Must be a named path (not a bare generic / dyn / impl Trait / tuple).
-    if for_val.get("resolved_path").is_none() {
+    let Some(rp) = for_val.get("resolved_path") else {
         return false;
-    }
-    // No `{generic:NAME}` node anywhere in the Self type → no free type-var.
+    };
+    // No `{generic:NAME}` node anywhere → no FREE type-var (blanket / `Vec<T>`).
     let mut free: HashSet<String> = HashSet::new();
     collect_generic_names(for_val, &mut free);
-    free.is_empty()
+    if !free.is_empty() {
+        return false;
+    }
+    // AND no angle-bracketed type-args at all — a monomorphic `Pair<i64>` has no
+    // free var but is still parametric, and the receiver-base strip would drop
+    // its `<i64>` (cargo-fail). `args` absent / null → bare named struct → bind.
+    match rp.get("args") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(args) => {
+            // An `angle_bracketed` node with a non-empty `args` list is parametric.
+            let bracketed = args
+                .get("angle_bracketed")
+                .and_then(|ab| ab.get("args"))
+                .and_then(|a| a.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            !bracketed
+        }
+    }
 }
 
 /// Q2-A (THE soundness gate) — look up the trait DEFINITION's method generics by
@@ -7100,14 +7125,18 @@ mod tests {
 
     #[test]
     fn test_self_is_concrete_named() {
-        // Concrete named type → concrete.
+        // Concrete BARE named type (no type-args) → concrete.
         assert!(self_is_concrete_named(&path("Circle")));
-        assert!(self_is_concrete_named(&path_with_args("Pair", vec![prim("i64")])));
+        // A MONOMORPHIC instantiation of a generic struct (`Pair<i64>`) carries
+        // NO free tyvar but IS parametric — the receiver-base strip would drop
+        // its `<i64>` (→ E0107 cargo-fail). v1 over-drops it (guardian-final fix).
+        assert!(!self_is_concrete_named(&path_with_args("Pair", vec![prim("i64")])));
+        // A nested concrete instantiation (`Pair<Vec<i64>>`) likewise drops.
+        assert!(!self_is_concrete_named(
+            &path_with_args("Pair", vec![path_with_args("Vec", vec![prim("i64")])])));
         // A blanket `impl<T> Foo for T` — the Self IS the bare type-var.
         assert!(!self_is_concrete_named(&serde_json::json!({ "generic": "T" })));
-        // `impl<T> Foo for Vec<T>` — a free type-var nested in args (constraint 11
-        // — `self_sky.is_empty()` would be FALSE here, so the bare emptiness check
-        // is insufficient).
+        // `impl<T> Foo for Vec<T>` — a free type-var nested in args.
         assert!(!self_is_concrete_named(&vec_of_generic("T")));
         // A non-path Self (slice / tuple) is not a concrete named type.
         assert!(!self_is_concrete_named(&prim("i64")));

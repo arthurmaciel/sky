@@ -102,3 +102,19 @@ impl<T> Blanket for T {
 // constructed in safe Rust (the impl must bind `type B`), so the unbound case is
 // exercised at the inspector unit-test level (`test_assoc_type_unbound_drops`);
 // here we only ship the resolvable `Pair` row above.
+
+// A trait impl on a MONOMORPHIC INSTANTIATION of a generic struct
+// (`impl Area for Holder<i64>`). The Self carries no free type-var yet is
+// parametric — the inspector must DROP it `trait-method-generic-self`, because
+// the receiver-base strip would lose the `<i64>` (→ E0107 cargo-fail). Verified
+// by `test_self_is_concrete_named` (the `Pair<i64>` → !concrete assertion);
+// absent from the hand-stub kernel.json.
+pub struct Holder<T> {
+    pub v: T,
+}
+
+impl Area for Holder<i64> {
+    fn area(&self) -> f64 {
+        self.v as f64
+    }
+}
