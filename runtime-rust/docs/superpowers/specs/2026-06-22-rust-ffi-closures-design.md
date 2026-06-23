@@ -1,8 +1,11 @@
 # Closures / HOFs auto-FFI — design (the arc keystone)
 
-Status: BRAINSTORM-APPROVED + GUARDIAN-FINAL APPROVE-WITH-CONSTRAINTS (2026-06-22);
-pending user review before writing-plans. The 5 blocking guardian amendments (B1–B5)
-are folded in below (see "Guardian-final amendments"). Top NEW epic of the universal safe-API auto-FFI arc, selected by empirical
+Status: BRAINSTORM-APPROVED; GUARDIAN-CLEARED for v1 with multi-call `Fn` (user-required).
+Path: guardian-final APPROVE-WITH-CONSTRAINTS on the FnOnce-floor cut → user required
+multi-call `Fn` → guardian REJECTED the denylist gate (`ecNoCloneVars` incomplete) →
+spec inverted to a POSITIVE `Clone`-allowlist → guardian cleared to APPROVE-WITH-CONSTRAINTS
+once C-Q1/Q2/Q4/Q5 committed (now folded in). Pending user review, then writing-plans. The
+blocking guardian amendments (B1–B5) are folded in below. Top NEW epic of the universal safe-API auto-FFI arc, selected by empirical
 demand (closures = 24% of itertools, 9% of indexmap public fns — see
 `runtime-rust/docs/analysis/2026-06-22-universal-ffi-arc-feasibility.md`). Builds on the
 generics keystone (Walls #1–#3, #20) and reuses its (A)-model wholesale. Task #28.
@@ -29,9 +32,11 @@ owned-clone bridge for by-ref closure params, and (4) the panic boundary.
 where every `Ai` and `R` is already-bindable closed-set (primitive / `String` / `Vec<T>`
 / `Option<T>` / `Result<E,T>` / `bool` / derived-`Clone` opaque foreign), **any arity**,
 **any closed-set return including `bool` / `Maybe` / `Result`** (covers map, filter,
-filter_map, fold, position, partition, sort_by-shaped comparators). By-value closure args
-bind directly; **by-reference closure args (`Fn(&Ai)`) bind via the owned-clone bridge**
-(below) when `Ai: Clone`.
+filter_map, fold, position, partition, sort_by-shaped comparators). **All three trait
+kinds bind in v1 — `FnOnce` (single-call), and multi-call `Fn`/`FnMut`** — the latter
+gated by the load-bearing emitter capture-Clone gate (see B5; the user requires multi-call
+`Fn` in v1). By-value closure args bind directly; **by-reference closure args (`Fn(&Ai)`)
+bind via the owned-clone bridge** (below) when `Ai: Clone`.
 
 **DROP + REPORT (coverage report; out of v1):** closures that capture/return/take an
 escaping borrow not covered by the owned-clone bridge; `FnMut(&mut T)` mutation slots;
@@ -141,9 +146,15 @@ dead for Go. Decode additive (`.:?`). Go `.skyi`/kernel.json/codegen byte-identi
 - **Hand-stub fixture** `runtime-rust/tests/sky/49-ffi-closures/` (no inspector): a tiny
   local crate + `kernel.json` closure-arg stubs proving — by-value `Fn(A)->B` map; multi-
   arg `Fn(A,A)->Ordering` comparator with `+Clone`; by-ref `Fn(&A)->bool` predicate via
-  owned-clone bridge; `Fn(A)->Result/Maybe` fallible; **non-`Clone` capture into a
-  multi-call slot ⇒ E4400** (region + hint, not cargo-fail); **`Fn(&mut T)` / `-> &U`
-  ⇒ drop + coverage line**; **a panicking Sky closure ⇒ `SkyError`, not abort/UB**.
+  owned-clone bridge; `Fn(A)->Result/Maybe` fallible; **the multi-call `Fn` ALLOWLIST
+  gate: all-`Clone` captures into a multi-call `Fn` slot ⇒ builds + runs; an `FnMut` slot
+  (`retain`-shaped) ⇒ builds + runs; and E4400 (NOT cargo-fail) for a non-`Clone` capture
+  of EACH escaping species — opaque-non-`Clone`, `Decoder`, captured `FnOnce`** (these are
+  the rows that prove the positive allowlist is in force, not just the denylist species);
+  a `FnOnce` slot with a non-`Clone` capture ⇒ builds + runs (no gate); an **indirect
+  closure arg (let-bound lambda) ⇒ drop + `closure-indirect-noanalysis` coverage line**;
+  **`Fn(&mut T)` / `-> &U` ⇒ drop + coverage line**; **a panicking Sky closure ⇒
+  `SkyError`, not abort/UB**.
 - **Real-crate proof:** bind a real crate's FREE functions / INHERENT closure methods
   end-to-end (candidate chosen at impl time — a by-value or `&A:Clone` inherent/free
   closure API such as a `Lazy::new(FnOnce)` / retry-style `Fn()->Result` / inherent
@@ -179,17 +190,51 @@ already gestured at (no redesign):
   is structurally unreachable. Restate this as the invariant, add a regression assert that
   the closed set stays reference-free, and gate multi-`&` (`sort_by(&A,&B)`)
   **conjunctively** (every ref arg's element `Clone`, else drop the whole method).
-- **B5 (highest priority) — the capture-Clone gate (C1) needs per-call-site capture
-  types; enforcement home is the EMITTER, not the pre-emit Haskell check.** Verified:
-  there is no `Mono`-carried capture metadata, but `ExprEmitter.hs` already computes
-  capture Clone-ness (`ecCloneVars`/`ecNoCloneVars`/`ecCopyVars`, :566,:668). So C1 is
-  enforced where the Sky lambda is lowered: a non-`Clone` capture (`ecNoCloneVars`) landing
-  in a slot the wrapper bound declares `Fn`/`FnMut` or multi-call ⇒ E4400 at that site.
-  This requires threading the slot's required trait-kind (Fn vs FnOnce, single vs
-  multi-call) to the emit site. **Conservative floor until that threading is proven in
-  writing-plans: bind `FnOnce` single-call slots only (non-`Clone` capture is sound
-  there); DROP+REPORT multi-call `Fn`/`FnMut` slots.** No `Fn`-bound is emitted without a
-  proven all-captures-`Clone` gate — never risk `E0525`/`E0382` cargo-fail.
+- **B5 (highest priority, now LOAD-BEARING in v1 — multi-call `Fn` required) — the
+  capture-Clone gate (C1) is built up front, not deferred.** Verified: there is no
+  `Mono`-carried capture metadata, but `ExprEmitter.hs` already computes capture
+  Clone-ness (`ecCloneVars`/`ecNoCloneVars`/`ecCopyVars`, :566,:668), and the inspector
+  reads the param's trait kind (`Fn`/`FnMut`/`FnOnce`) the same way it reads any generic
+  bound trait name. **v1 mechanism (the new plumbing the plan MUST build + test):**
+  1. **Inspector** emits per-closure-arg metadata `{ argIndex, traitKind: Fn|FnMut|FnOnce,
+     byRef, argTypes, ret }` (closures currently land in the dropped tail at
+     `main.rs:3813` — stop dropping the closed-set ones).
+  2. **Wrapper synthesis** renders one type-param per closure arg with the bound from the
+     trait kind: `Fn`/`FnMut` ⇒ `<Fi: Fn(A..)->R + Clone>` (multi-call-capable),
+     `FnOnce` ⇒ `<Fi: FnOnce(A..)->R>` (no `Clone`).
+  3. **Emitter gate — POSITIVE `Clone`-ALLOWLIST, not a denylist (guardian re-bless,
+     the load-bearing correction).** `ecNoCloneVars` MUST NOT gate this — it is a
+     *denylist* holding exactly ONE species (a let-bound single-use `SkyTask`;
+     `ExprEmitter.hs:560-562,2047`), so it would pass every other non-`Clone` capture
+     (non-derive-`Clone` opaque foreign, captured `Decoder` = `Box<dyn Fn>`, captured
+     `FnOnce`, moved-in non-`Clone` `Vec`) → `E0599`/`E0525` cargo-fail (already observed
+     in `sky-playground`, per `runtime-rust/CLAUDE.md`). Instead, gate on each capture's
+     **monomorphised type** (solved per-region type, data already in hand):
+       - **`Fn`/`FnMut` (multi-call) slot:** REQUIRE every capture's type be **positively
+         `Clone`** — i.e. in the reference-free closed set (`FfiInstance.hs:248-268`, all
+         `Clone`) OR an inspector-*confirmed* derived-`Clone` opaque foreign. Every
+         capture in the allowlist ⇒ emit (`Fn + Clone`). ANY capture not provably in it
+         ⇒ **E4400 at the call site** — never emit, so `E0525`/`E0599` is structurally
+         unreachable.
+       - **`FnOnce` (single-call) slot:** no capture gate (move-in is sound).
+       - **Hard precondition (B1 restated):** emit `Fn + Clone` ONLY for a by-value
+         capture closure (the panic-boundary `AssertUnwindSafe` and the `Clone` story both
+         depend on it); any `&mut`/by-ref capture ⇒ drop.
+  4. **Direct-lambda-only (guardian Q4).** Trait-kind threading is reliable only when the
+     closure arg is a **syntactic `Can.Lambda` at the `Can.Call` site** (`argToRustString`,
+     `:576`). Indirect shapes — a let-bound lambda var, a call-produced closure, a
+     point-free reference — decouple capture-analysis from the slot kind ⇒ **DROP+REPORT
+     `closure-indirect-noanalysis`**. v1 binds the direct-lambda shape only.
+  5. **Regression proof (gates the epic) — the both-directions fixture must exercise the
+     ALLOWLIST, not just the one denylist species.** Required rows: all-`Clone`-capture
+     multi-call `Fn` slot ⇒ builds+runs; an `FnMut` slot (`retain`-shaped) ⇒ builds+runs;
+     and E4400 (NOT cargo-fail) for a non-`Clone` capture of EACH escaping species —
+     **opaque-non-`Clone`, `Decoder`, captured `FnOnce`** (these passing as E4400 is the
+     real proof the allowlist is in force; a `SkyTask`-only negative would only sample the
+     denylist species and miss the Q1 holes).
+  **No `Fn`/`FnMut` bound is ever emitted unless every capture is positively in the
+  `Clone`-allowlist.** That positive invariant — never a denylist membership — is what
+  makes multi-call `Fn` sound in v1.
 
 ## Dependencies
 - **Blocked on:** nothing new — reuses Walls #1–#3 ((A)-model, bindability gate, coverage
@@ -205,5 +250,7 @@ already gestured at (no redesign):
 - by-ref closure params → **owned-clone bridge when `A: Clone`**, else drop+report.
 - drop granularity → crate-side ⇒ method-level coverage drop; user-lambda-side ⇒ E4400.
 - panic boundary → RULED boundary-level `catch_unwind` + B1/B2/B3 gates.
-- capture-Clone gate → enforced at the EMITTER (`ecNoCloneVars`); conservative floor =
-  FnOnce-single-call binds, multi-call Fn/FnMut drop until trait-kind threading proven (B5).
+- capture-Clone gate → **multi-call `Fn`/`FnMut` bind in v1** (user-required) via a
+  POSITIVE `Clone`-allowlist on each capture's monomorphised type (NOT the `ecNoCloneVars`
+  denylist — guardian REJECT then re-bless); direct-lambda-only; expanded negative
+  fixtures prove the allowlist (B5).
