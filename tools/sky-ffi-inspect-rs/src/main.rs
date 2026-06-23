@@ -2615,6 +2615,72 @@ fn parse_fn_item(
     }
 
     let effect = classify_effect(output, &params, is_async);
+
+    // C1 Send gate — async FFI: output type MUST be in the closed Sky-coercible
+    // (and therefore Send) set.  The closed set (is_sky_coercible_elem +
+    // is_coercible_seq) is entirely Send: primitives, String, opaque Clone
+    // structs.  An opaque non-Clone / non-Send output (e.g. `*mut u8`-containing
+    // struct) is NOT in the set → drop.
+    //
+    // Gate only fires for effectful (async / Future-returning) fns.  Sync fns
+    // are unaffected (Go-byte-identity preserved).
+    //
+    // Fallible async `async fn -> Result<T, E>` → unwrap to T before checking;
+    // the E slot is the SkyError conversion path (always String-Debug → Send).
+    //
+    // Void async (`results` empty, Sky binding `Task Error ()`) passes — () is Send.
+    if effect == "effectful" {
+        if let Some(ret) = results.first() {
+            // Unwrap outer Result<T, _> → T for the Send check.
+            let inner_rt: &str = ret.rust_type
+                .trim()
+                .strip_prefix("Result<")
+                .and_then(|s| {
+                    // Find the matching '>' for the outer Result, accounting for
+                    // nesting.  Walk forward skipping angle-bracket-balanced commas.
+                    let bytes = s.as_bytes();
+                    let mut depth: usize = 0;
+                    let mut comma_pos: Option<usize> = None;
+                    for (i, &b) in bytes.iter().enumerate() {
+                        match b {
+                            b'<' => depth += 1,
+                            b'>' => {
+                                if depth == 0 {
+                                    // Trailing '>' consumed by strip_prefix above
+                                    // closed the outer Result — take everything before
+                                    // the last comma at depth 0.
+                                    if let Some(cp) = comma_pos {
+                                        return Some(s[..cp].trim());
+                                    }
+                                    return None;
+                                }
+                                depth -= 1;
+                            }
+                            b',' if depth == 0 => {
+                                comma_pos = Some(i);
+                            }
+                            _ => {}
+                        }
+                    }
+                    None
+                })
+                .unwrap_or(ret.rust_type.trim());
+            let output_is_send = inner_rt.is_empty()
+                || is_sky_coercible_elem(inner_rt)
+                || is_coercible_seq(inner_rt);
+            if !output_is_send {
+                if tail_audit_enabled() {
+                    record_tail_drop(
+                        "async-future-not-send",
+                        drop_is_valuable(name, recv),
+                        inner_rt,
+                    );
+                }
+                return None;
+            }
+        }
+    }
+
     let (recv_sky, recv_rust) = recv.unwrap_or(("", ""));
 
     Some(Function {
@@ -9062,5 +9128,110 @@ mod tests {
         assert!(
             !is_dyn_trait_object(&box_of(fn_obj)),
             "closure-seam predicate must still EXCLUDE the Fn-family dyn object");
+    }
+
+    // ── P1 unit tests: async Send gate (C1) ───────────────────────────────────
+
+    /// Helper: extract the T from `Result<T, E>` as the Send gate does (mirrors
+    /// the inline extraction logic in the gate body).
+    fn unwrap_result_outer_test(rt: &str) -> &str {
+        rt.trim()
+            .strip_prefix("Result<")
+            .and_then(|s| {
+                let bytes = s.as_bytes();
+                let mut depth: usize = 0;
+                let mut comma_pos: Option<usize> = None;
+                for (i, &b) in bytes.iter().enumerate() {
+                    match b {
+                        b'<' => depth += 1,
+                        b'>' => {
+                            if depth == 0 {
+                                if let Some(cp) = comma_pos {
+                                    return Some(s[..cp].trim());
+                                }
+                                return None;
+                            }
+                            depth -= 1;
+                        }
+                        b',' if depth == 0 => {
+                            comma_pos = Some(i);
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            })
+            .unwrap_or(rt.trim())
+    }
+
+    #[test]
+    fn async_send_gate_unwrap_result_outer() {
+        // Plain Result<T, E> → T
+        assert_eq!(unwrap_result_outer_test("Result<i64, String>"), "i64");
+        assert_eq!(unwrap_result_outer_test("Result<String, String>"), "String");
+        // Nested Result<Vec<i64>, String> → Vec<i64>
+        assert_eq!(unwrap_result_outer_test("Result<Vec<i64>, String>"), "Vec<i64>");
+        // NOT a Result → unchanged
+        assert_eq!(unwrap_result_outer_test("String"), "String");
+        assert_eq!(unwrap_result_outer_test("i64"), "i64");
+        assert_eq!(unwrap_result_outer_test("asyncffi72::NonSendAux"), "asyncffi72::NonSendAux");
+    }
+
+    #[test]
+    fn async_send_gate_coercible_admits_primitives_and_string() {
+        // All primitives and String are in the closed coercible set → admitted by gate.
+        for t in ["i64", "i32", "u64", "f64", "bool", "char", "String"] {
+            assert!(
+                is_sky_coercible_elem(t),
+                "primitive {t} must be admitted by Send gate"
+            );
+        }
+    }
+
+    #[test]
+    fn async_send_gate_drops_non_send_output() {
+        // An opaque non-Clone (hence non-Send by raw-pointer) output type is NOT in the
+        // closed coercible set — CLONE_OPAQUE_NAMES is empty here, so any opaque drops.
+        // This mirrors the `non_send()` → NonSendAux NEGATIVE fixture (72-ffi-async).
+        let non_send_types = [
+            "asyncffi72::NonSendAux",
+            "some_crate::RawPtrHolder",
+            "OpaqueStruct",
+        ];
+        for t in non_send_types {
+            assert!(
+                !is_sky_coercible_elem(t),
+                "non-Send opaque {t} must be DROPPED by Send gate"
+            );
+            assert!(
+                !is_coercible_seq(t),
+                "non-Send opaque {t} is not a coercible sequence"
+            );
+        }
+    }
+
+    #[test]
+    fn async_send_gate_fallible_result_strips_to_inner() {
+        // `Result<i64, String>` → inner T = `i64` → admitted.
+        let inner = unwrap_result_outer_test("Result<i64, String>");
+        assert_eq!(inner, "i64");
+        assert!(
+            is_sky_coercible_elem(inner),
+            "inner type {inner} of Result<i64,String> must be admitted"
+        );
+
+        // `Result<String, String>` → inner T = `String` → admitted.
+        let inner2 = unwrap_result_outer_test("Result<String, String>");
+        assert_eq!(inner2, "String");
+        assert!(is_sky_coercible_elem(inner2));
+
+        // `Result<asyncffi72::NonSendAux, String>` → inner T = `asyncffi72::NonSendAux`
+        // → not coercible → the Send gate would drop this function.
+        let inner3 = unwrap_result_outer_test("Result<asyncffi72::NonSendAux, String>");
+        assert_eq!(inner3, "asyncffi72::NonSendAux");
+        assert!(
+            !is_sky_coercible_elem(inner3),
+            "non-Send inner type must NOT be admitted"
+        );
     }
 }
