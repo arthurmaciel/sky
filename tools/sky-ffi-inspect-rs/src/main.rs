@@ -4793,7 +4793,15 @@ fn try_parametric_stub(
     };
     let method = Some(method_name.to_string());
 
-    let mut args: Vec<usize> = receiver.as_ref().map(|r| vec![r.arg]).unwrap_or_default();
+    // `args` carries the VALUE-arg indices only. The receiver is threaded
+    // SEPARATELY via `_call_receiver` (the Haskell `renderCall` prepends it,
+    // borrow-formed, before the value args), and `validateCall` checks
+    // uniqueness over `receiver.arg ++ args` — so seeding `args` with the
+    // receiver index would double-reference arg0 (E "value-arg referenced more
+    // than once"). next_arg already skipped index 0 in the receiver block above,
+    // so a self-method's first value arg lands at index 1 (gap-free with the
+    // receiver at 0).
+    let mut args: Vec<usize> = Vec::new();
     // Value-arg indices whose iterator param needs `arg.into_iter()` at the call
     // site (`Iterator` kind); `IntoIterator` passes the `Vec` directly (C6).
     let mut iter_adapters: Vec<usize> = Vec::new();
@@ -6738,6 +6746,9 @@ mod tests {
         assert_eq!(v["call"]["ret"], serde_json::json!({ "ctor": "::c::T", "args": [{ "param": 0 }] }));
         // a function call must NOT serialise a receiver key.
         assert!(v["call"].get("receiver").is_none());
+        // #21 constraint 9: a non-trait Call (trait_qualifier=None) MUST NOT
+        // serialise a `traitQualifier` key — byte-identical to a pre-#21 stub.
+        assert!(v["call"].get("traitQualifier").is_none());
     }
 
     // ── Phase 5: closure-param metadata ────────────────────────────────
@@ -7098,5 +7109,45 @@ mod tests {
         assert!(trait_def_method_generics(Some(&no_id), "scaled", &index).is_none());
         // No trait node at all (inherent impl) → None.
         assert!(trait_def_method_generics(None, "scaled", &index).is_none());
+    }
+
+    #[test]
+    fn test_build_trait_ctx_resolves_qualifier_id_first() {
+        // Constraint 3 / #25: the UFCS qualifier is built from the trait + Self
+        // rustdoc IDs resolved to their PUBLIC paths, NOT the last-segment
+        // `trait.name` string. Seed REACHABLE_PATHS so the id lookups resolve to
+        // module-qualified paths that DIFFER from the last segment — proving the
+        // id-first resolution.
+        REACHABLE_PATHS.with(|c| {
+            let mut m = c.borrow_mut();
+            m.clear();
+            // Self id 7 → a MODULE-qualified path (last segment alone is `Circle`).
+            m.insert("7".to_string(), "tm::shapes::Circle".to_string());
+            // Trait id 42 → module-qualified (last segment alone is `Scale`).
+            m.insert("42".to_string(), "tm::ops::Scale".to_string());
+        });
+        let (index, trait_node) = scale_trait_index();
+        // The `for`-Self node references id 7.
+        let for_val = serde_json::json!({
+            "resolved_path": { "name": "Circle", "path": "Circle", "id": 7, "args": null }
+        });
+        let ctx = build_trait_ctx(Some(&trait_node), "scaled", Some(&for_val), &index)
+            .expect("ctx must build when both paths are reachable");
+        // BOTH halves are the id-resolved, crate-absolute module paths — NOT the
+        // last-segment `::tm::Circle` / `::tm::Scale` a name-based build would
+        // produce.
+        assert_eq!(ctx.qualifier.0, "::tm::shapes::Circle");
+        assert_eq!(ctx.qualifier.1, "::tm::ops::Scale");
+        // The trait-def generics rode through (the `scaled<T: Into<f64>>` def).
+        assert!(ctx.trait_def_generics.is_some());
+
+        // A trait whose id is UNREACHABLE (private) → ctx build aborts (the
+        // method can't be called UFCS) → None drop.
+        REACHABLE_PATHS.with(|c| {
+            c.borrow_mut().remove("42"); // trait path no longer reachable
+        });
+        assert!(build_trait_ctx(Some(&trait_node), "scaled", Some(&for_val), &index).is_none());
+
+        REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
     }
 }

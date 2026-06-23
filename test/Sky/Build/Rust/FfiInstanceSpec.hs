@@ -71,6 +71,7 @@ makeCall = Call.Call
     , Call._call_ret      = Call.TRCtor "::box1::Box1" [Call.TRParam 0]
     , Call._call_assocOnType = True
     , Call._call_iterAdapters = []
+    , Call._call_traitQualifier = Nothing
     }
 
 -- An instance over a single param `a` at type `ty`, with the given bounds.
@@ -233,6 +234,7 @@ spec = do
                 , Call._call_ret      = Call.TRParam 0
                 , Call._call_assocOnType = True
                 , Call._call_iterAdapters = []
+                , Call._call_traitQualifier = Nothing
                 }
             -- `Idx::of : a -> Idx a` — a bounded ctor for the bounds-render test.
             idxOfCall = Call.Call
@@ -246,6 +248,7 @@ spec = do
                 , Call._call_ret      = Call.TRCtor "::idx::Idx" [Call.TRParam 0]
                 , Call._call_assocOnType = True
                 , Call._call_iterAdapters = []
+                , Call._call_traitQualifier = Nothing
                 }
         it "emits a generic <T> wrapper for an unconstrained fn (TVar→UpperCamel)" $ do
             let src = okSrc (synthesiseGenericWrapper (mkFn [] makeCall))
@@ -336,6 +339,7 @@ spec = do
                 , Call._call_ret      = Call.TRCtor "Vec" [Call.TRParam 1]
                 , Call._call_assocOnType = False
                 , Call._call_iterAdapters = []
+                , Call._call_traitQualifier = Nothing
                 }
         it "maps each closure-typed argTypes slot to its ClosureKind by index" $ do
             Call.closureSlotKinds (twoArg Call.FnKind)
@@ -401,6 +405,7 @@ spec = do
                 , Call._call_ret      = Call.TRCtor "Vec" [Call.TRParam 1]
                 , Call._call_assocOnType = False
                 , Call._call_iterAdapters = []
+                , Call._call_traitQualifier = Nothing
                 }
             okSrc' r = case r of WrapperOk _ _ s -> s; _ -> ""
         it "carries the <Fj: Fn(..) -> R + Clone> bound in the generics clause" $ do
@@ -471,6 +476,7 @@ spec = do
                 , Call._call_ret      = Call.TRCtor "Vec" [Call.TRParam 0]
                 , Call._call_assocOnType = False
                 , Call._call_iterAdapters = []
+                , Call._call_traitQualifier = Nothing
                 }
             mkKeepFn bs = GenericFn
                 { _gf_kernelName = "Rust_Clo"

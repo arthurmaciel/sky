@@ -57,6 +57,7 @@ spec = do
                 , _call_ret      = TRCtor "::box1::Box1" [TRParam 0]
                 , _call_assocOnType = True
                 , _call_iterAdapters = []
+                , _call_traitQualifier = Nothing
                 }
         it "decodes a method call with a ref receiver `left : Pair a b -> a`" $ do
             let j = A.object
@@ -85,6 +86,7 @@ spec = do
                 , _call_ret      = TRParam 0
                 , _call_assocOnType = True
                 , _call_iterAdapters = []
+                , _call_traitQualifier = Nothing
                 }
         it "decodes a prim TypeRef leaf in ret (`count : Keyed a -> Int`)" $ do
             let j = A.object
@@ -199,6 +201,7 @@ spec = do
                 , _call_ret      = TRCtor "::c::T" [TRParam 0]
                 , _call_assocOnType = True
                 , _call_iterAdapters = []
+                , _call_traitQualifier = Nothing
                 }
         it "accepts a valid single-param call" $
             validateCall 1 okCall `shouldSatisfy` isRight
@@ -234,6 +237,7 @@ spec = do
                     , _call_ret      = TRCtor "Vec" [TRParam 1]
                     , _call_assocOnType = False
                     , _call_iterAdapters = []
+                    , _call_traitQualifier = Nothing
                     }
             -- C-A: real params ["a","b"] → TRParam 0 → A, TRParam 1 → B
             closureBounds call ["a", "b"] `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
@@ -251,6 +255,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = []
+                    , _call_traitQualifier = Nothing
                     }
             -- C-B: a closure nested inside Vec<_> must be rejected by validateCall
             isLeft (validateCall 1 call) `shouldBe` True
@@ -268,6 +273,7 @@ spec = do
                     , _call_ret      = TRCtor "::box1::Box1" [TRParam 0]
                     , _call_assocOnType = True
                     , _call_iterAdapters = []
+                    , _call_traitQualifier = Nothing
                     }
             renderCall c ["a"]    `shouldBe` "::box1::Box1::<A>::make(arg0)"
             renderRetType c ["a"] `shouldBe` "::box1::Box1<A>"
@@ -284,6 +290,7 @@ spec = do
                     , _call_ret      = TRParam 0
                     , _call_assocOnType = True
                     , _call_iterAdapters = []
+                    , _call_traitQualifier = Nothing
                     }
             renderCall c ["k", "v"] `shouldBe`
                 "::mycrate::Pair::<K, V>::left(&arg0)"
@@ -308,6 +315,7 @@ spec = do
                     , _call_ret      = TRCtor "Vec" [TRParam 1]
                     , _call_assocOnType = False
                     , _call_iterAdapters = []
+                    , _call_traitQualifier = Nothing
                     }
             renderCall c ["a", "b"] `shouldBe`
                 "::clo::map_each(arg0, arg1)"
@@ -328,6 +336,7 @@ spec = do
                 , _call_ret      = TRPrim "i64"
                 , _call_assocOnType = False
                 , _call_iterAdapters = adapters
+                , _call_traitQualifier = Nothing
                 }
         it "an Iterator-kind arg (in iterAdapters) renders arg0.into_iter()" $
             renderCall (iterCall [0]) [] `shouldBe` "::iter::go(arg0.into_iter())"
@@ -347,6 +356,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = [1]
+                    , _call_traitQualifier = Nothing
                     }
             renderCall c [] `shouldBe` "::iter::zip2(arg0, arg1.into_iter())"
         it "validateCall REJECTS an out-of-range iterAdapters index" $ do
@@ -361,6 +371,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = [3]   -- arity is 1 → out of range
+                    , _call_traitQualifier = Nothing
                     }
             isLeft' (validateCall 0 bad) `shouldBe` True
         it "validateCall REJECTS an iterAdapters index on a non-Vec arg" $ do
@@ -375,6 +386,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = [0]
+                    , _call_traitQualifier = Nothing
                     }
             isLeft' (validateCall 0 bad) `shouldBe` True
         it "validateCall ACCEPTS a well-formed iterAdapters index on a Vec arg" $ do
@@ -389,6 +401,7 @@ spec = do
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
                     , _call_iterAdapters = [0]
+                    , _call_traitQualifier = Nothing
                     }
             isRight (validateCall 0 ok) `shouldBe` True
 
@@ -410,6 +423,7 @@ spec = do
                 , _call_ret      = TRCtor "Vec" [TRParam 0]
                 , _call_assocOnType = False
                 , _call_iterAdapters = []
+                , _call_traitQualifier = Nothing
                 }
         it "byRef closure arg passes an owned-clone bridge, not arg1 directly" $
             renderCall (keepCall True) ["a"] `shouldContain`
@@ -432,10 +446,71 @@ spec = do
                     , _call_ret      = TRParam 0
                     , _call_assocOnType = False
                     , _call_iterAdapters = []
+                    , _call_traitQualifier = Nothing
                     }
             renderCall zipCall ["a", "b"] `shouldContain`
                 "move |__r0, __r1| { let __v0 = __r0.clone(); \
                 \let __v1 = __r1.clone(); arg0(__v0, __v1) }"
+
+    describe "#21 — UFCS trait-method qualifier (call-path, #25)" $ do
+        let keyedJson = A.object
+                [ "kind"     A..= ("method" :: String)
+                , "path"     A..= (["::tm", "Circle"] :: [String])
+                , "method"   A..= ("keyed" :: String)
+                , "receiver" A..= A.object
+                    [ "arg" A..= (0 :: Int), "by" A..= ("ref" :: String) ]
+                , "args"     A..= ([1] :: [Int])
+                , "argTypes" A..=
+                    [ A.object ["ctor" A..= ("::tm::Circle" :: String)]
+                    , A.object ["param" A..= (0 :: Int)] ]
+                , "ret"      A..= A.object ["prim" A..= ("i64" :: String)]
+                , "traitQualifier" A..=
+                    (["::tm::Circle", "::tm::Scale"] :: [String])
+                ]
+        it "decodes the traitQualifier into _call_traitQualifier" $ do
+            (_call_traitQualifier <$> decodeCall 1 keyedJson)
+                `shouldBe` Right (Just ("::tm::Circle", "::tm::Scale"))
+        it "renders the UFCS callee `<Self as Trait>::method` (not path::method)" $ do
+            case decodeCall 1 keyedJson of
+                Left e  -> expectationFailure ("decode failed: " ++ e)
+                Right c -> do
+                    let r = renderCall c ["T"]
+                    r `shouldBe` "<::tm::Circle as ::tm::Scale>::keyed(&arg0, arg1)"
+                    ("::tm::Circle::keyed" `isInfixOf` r) `shouldBe` False
+        it "a trait method OMITS the method turbofish (type-params inferred)" $ do
+            let withTArgs = A.object
+                    [ "kind"     A..= ("method" :: String)
+                    , "path"     A..= (["::tm", "Circle"] :: [String])
+                    , "typeArgs" A..= [A.object ["param" A..= (0 :: Int)]]
+                    , "method"   A..= ("keyed" :: String)
+                    , "receiver" A..= A.object
+                        [ "arg" A..= (0 :: Int), "by" A..= ("ref" :: String) ]
+                    , "args"     A..= ([1] :: [Int])
+                    , "argTypes" A..=
+                        [ A.object ["ctor" A..= ("::tm::Circle" :: String)]
+                        , A.object ["param" A..= (0 :: Int)] ]
+                    , "ret"      A..= A.object ["prim" A..= ("i64" :: String)]
+                    , "traitQualifier" A..=
+                        (["::tm::Circle", "::tm::Scale"] :: [String])
+                    ]
+            case decodeCall 1 withTArgs of
+                Left e  -> expectationFailure ("decode failed: " ++ e)
+                Right c -> ("::<" `isInfixOf` renderCall c ["T"]) `shouldBe` False
+        it "Nothing traitQualifier renders the historical inherent callee" $ do
+            let inherentJson = A.object
+                    [ "kind"     A..= ("function" :: String)
+                    , "path"     A..= (["::box1", "Box1"] :: [String])
+                    , "typeArgs" A..= [A.object ["param" A..= (0 :: Int)]]
+                    , "method"   A..= ("make" :: String)
+                    , "args"     A..= ([0] :: [Int])
+                    , "argTypes" A..= [A.object ["param" A..= (0 :: Int)]]
+                    , "ret"      A..= A.object ["param" A..= (0 :: Int)]
+                    ]
+            case decodeCall 1 inherentJson of
+                Left e  -> expectationFailure ("decode failed: " ++ e)
+                Right c -> do
+                    _call_traitQualifier c `shouldBe` Nothing
+                    renderCall c ["A"] `shouldBe` "::box1::Box1::<A>::make(arg0)"
   where
     isLeft  = either (const True) (const False)
     isRight = either (const False) (const True)

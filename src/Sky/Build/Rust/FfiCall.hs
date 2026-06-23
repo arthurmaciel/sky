@@ -102,6 +102,16 @@ data Call = Call
       --   @"iterAdapters"@ ⇒ no arg needs the adapter) keeps every pre-iterators
       --   stub byte-identical — an un-tagged arg renders exactly as today
       --   (guardian C6). Rust-backend-only; the Go pipeline never reads it.
+    , _call_traitQualifier :: !(Maybe (String, String))
+      -- ^ #21 UFCS trait qualifier @(selfPath, traitPath)@. @Just@ ⇒ the method
+      --   comes from @impl Trait for ConcreteType@; the callee renders as
+      --   @\<selfPath as traitPath\>::method(\<by\>recv, args…)@ — a trait
+      --   method on a concrete type, disambiguated (no @use Trait;@ needed,
+      --   never ambiguous with an inherent same-named method). DEFAULT @Nothing@
+      --   (the parsed @call@ omits @"traitQualifier"@ ⇒ inherent / free / static
+      --   case) renders the historical @path::method@ / @path::\<…\>::method@
+      --   callee BYTE-IDENTICALLY (guardian constraint 9). Rust-backend-only; the
+      --   Go pipeline never produces or reads it.
     }
     deriving (Show, Eq)
 
@@ -325,11 +335,22 @@ renderCall c params =
         -- instead inferred from the value-arg types (`arg0: Vec<A>` pins A,
         -- `arg1: F1` pins F and its return B). A turbofish on the crate path is
         -- also invalid Rust (E0109), so omission is the only sound free-fn form.
-        callee = case _call_method c of
-            Just m
-              | _call_assocOnType c -> pathStr ++ turbofish ++ "::" ++ m
-              | otherwise           -> pathStr ++ "::" ++ m
-            Nothing -> pathStr ++ turbofish
+        callee = case _call_traitQualifier c of
+            -- #21 UFCS: a trait method on a concrete type renders
+            -- @\<selfPath as traitPath\>::method@. NO turbofish — every Sky
+            -- tyvar reaches the callee through a typed value-arg (@arg1: T@
+            -- pins @T@), so Rust infers the method type-params; a partial / Self-
+            -- type turbofish here is an arity error (E0107) or invalid on the
+            -- qualified path. The receiver borrow (@\<by\>arg0@) is applied below
+            -- via @_call_receiver@, identical to the inherent path.
+            Just (selfP, traitP) ->
+                let m = maybe "" id (_call_method c)
+                in "<" ++ selfP ++ " as " ++ traitP ++ ">::" ++ m
+            Nothing -> case _call_method c of
+                Just m
+                  | _call_assocOnType c -> pathStr ++ turbofish ++ "::" ++ m
+                  | otherwise           -> pathStr ++ "::" ++ m
+                Nothing -> pathStr ++ turbofish
         -- Receiver argument (if any), borrow-formed, prepended to the value args.
         recvArg = case _call_receiver c of
             Nothing -> []
@@ -586,6 +607,9 @@ parseCall nParams = A.withObject "Call" $ \o -> do
     -- pre-iterators stub. Only an `Iterator`-kind (not `IntoIterator`) param
     -- carries an entry here.
     iterAdapters <- o .:? "iterAdapters" .!= []
+    -- #21: default Nothing ⇒ no qualifier ⇒ byte-identical to a pre-#21 stub.
+    -- A trait-impl method carries @"traitQualifier": [selfPath, traitPath]@.
+    traitQualifier <- o .:? "traitQualifier"
     let c = Call
             { _call_kind     = kind
             , _call_path     = path
@@ -597,6 +621,7 @@ parseCall nParams = A.withObject "Call" $ \o -> do
             , _call_ret      = ret
             , _call_assocOnType = assocOnType
             , _call_iterAdapters = iterAdapters
+            , _call_traitQualifier = traitQualifier
             }
     case validateCall nParams c of
         Right ok -> pure ok
