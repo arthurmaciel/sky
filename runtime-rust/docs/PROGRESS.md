@@ -17,6 +17,96 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-23 — #31 ungate trait-impl methods on real crates — delivers #21 end-to-end
+
+**What.** Relaxed the visibility gate so trait-impl methods (which carry rustdoc
+`visibility:"default"`) surface from the REAL inspector, not just the hand stub —
+#21's UFCS binding now actually fires on real crates. Spec:
+`docs/superpowers/specs/2026-06-23-rust-ffi-trait-method-visibility-design.md`
+(guardian APPROVE-WITH-CONSTRAINTS, C-1/C-4 blocking). Two guardian-final BLOCKs
+caught + closed before push.
+
+- **The relaxation:** skip the method-level `is_public` check ONLY for
+  `trait_name.is_some()`; rely on trait-reachable + Self-reachable
+  (`REACHABLE_PATHS`) + per-signature nameability. Inherent-impl methods unchanged
+  (a genuinely-private `"default"` inherent method still drops).
+- **[C-1] `pub(crate)`-trait hole** (guardian design-review): a `pub(crate)` trait
+  on a public Self → `build_trait_ctx None` → was forwarded as `trait_qualifier=None`
+  → inherent-call form → E0599/E0603. Fixed with a `BoundSource::{Inherent,
+  TraitImpl(TraitCtx)}` enum making "a concrete trait method with no qualifier"
+  unrepresentable; `None` → `TraitMethodDropTag::TraitUnreachable` drop on both arms.
+- **Real-path-surfaced codegen bugs** (the hand stub had sidestepped them): a trait
+  stub setting `recv_type`/`method_name` → duplicate inherent wrapper (E0659/E0599);
+  the receiver ctor carrying method-level tyvars → `Circle<T>` (E0107). Both fixed
+  in `parametric_function`/`try_parametric_stub` (receiver ctor now carries only
+  STRUCT generics; inherent generic methods like `IndexMap<K,V>` unaffected).
+- **[guardian-final BLOCK] index-stripped private-type under-bind:** a public trait
+  method referencing a `pub(crate)`/private TYPE bound with a bare `::Secret` path →
+  E0603/E0433, because default `cargo rustdoc` STRIPS private types from the index so
+  the old `is_unreachable_local_type` (membership-based) gate missed it, and the
+  parametric path's empty `rust_type` strings disabled the nameability retain.
+  Reproduced end-to-end (return/param/generic-return shapes). Fixed: new
+  `resolved_path_is_bindable` total provenance discriminator (`crate_id==0` local-
+  unreachable → drop; `crate_id>0` external + `ALWAYS_NAMEABLE` → bind; id in no set
+  → drop), `type_to_typeref` returns `Err(NotBindable)` instead of the bare last-
+  segment fallback. External types (`Vec`/`String`/`Duration`/IndexMap) still bind.
+- **Proof.** New real-inspector fixture `runtime-rust/tests/sky/51b-ffi-trait-methods-realcrate`
+  runs the actual `cargo +nightly rustdoc` introspection — UFCS wrappers compile +
+  `[ALL OK]`; `pub(crate)` trait + private-type-in-sig methods + blanket + parametric-
+  Self all coverage-dropped. 94 inspector tests, clippy delta 0. Commits
+  `b1b204a2..9ac06fc3`.
+- **NOTE:** #19 (embedded inspector staleness) bit twice this session — the inspector
+  had to be manually `cabal build exe:sky`-rebuilt to re-embed; prioritized next.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs`,
+`runtime-rust/scripts/ffi-fixtures-test.sh`,
+`runtime-rust/tests/sky/51b-ffi-trait-methods-realcrate/` (new),
+`docs/superpowers/specs/2026-06-23-rust-ffi-trait-method-visibility-design.md` (new).
+
+---
+
+## 2026-06-23 — Trait methods on concrete types (#21) — UFCS binding, sound foundation (inert pending #31)
+
+**What.** A method from `impl Trait for ConcreteType` now binds via fully-qualified UFCS
+`<::crate::Type as ::crate::Trait>::method(recv, args)` — unambiguous, no `use` injection.
+Spec: `docs/superpowers/specs/2026-06-23-rust-ffi-trait-methods-design.md` (guardian
+APPROVE-WITH-CONSTRAINTS; 12-constraint contract). Subagent-driven, guardian design-review +
+independent guardian-final (APPROVE-FOR-PUSH).
+
+- **Q2-A — the soundness crux.** rustdoc does NOT inline a trait method's where-clauses onto the
+  IMPL's method sig; an impl may restate `fn scaled<T>` bare while the bound lives on the trait
+  DEFINITION. Emitting `<T>` then → E0277. Fix: `trait_def_method_generics` looks up the trait by
+  `impl.trait.id`, unions its method generics' bounds into `full_union_bounds` before the modellable
+  gate; an unconditional backstop drops any trait-impl method whose used tyvar still has empty
+  resolved bounds (`trait-method-bound-cross-impl`). E0277 structurally impossible.
+- **Concrete-Self gate** (`self_is_concrete_named`): binds only a bare non-generic named Self;
+  free-tyvar Self (`impl<T> Tr for T`) AND monomorphic-generic Self (`impl Tr for Pair<i64>` — a
+  latent E0107 the guardian caught) both drop (`trait-method-generic-self`).
+- **UFCS qualifier id-based** (closes the call-path half of #25): trait + Self paths resolved from
+  rustdoc `id` → reachable public path, never the last `::` segment; private/unreachable → drop.
+  Additive `_call_traitQualifier :: Maybe (String,String)` on `Call` (`FfiCall.hs`), skip-serialize
+  when None → Go-byte-identical. Method-level generics monomorphised away (no method turbofish).
+- **Assoc-type** resolved via the impl's concrete `type A = …;` binding (absent → drop); `&mut self`
+  receiver threaded by `RefMut`; non-Rust-ABI → drop; Display/FromStr bridge non-regressed (one
+  `to_string`, zero `fmt`).
+- **KNOWN — inert on real crates (→ #31).** A pre-existing `is_public` gate (`main.rs:1391`,
+  predates #21) drops trait-impl method items (they carry `visibility:"default"`) before any #21
+  code. So the hand-stub `51-ffi-trait-methods` fixture is the sole exerciser today; #21 is a sound
+  foundation but emits nothing on real crates until #31 relaxes the gate (guarded by the trait+type
+  reachability #21 already enforces). #31 also folds the latent parametric-Self non-generic E0599
+  explicit drop.
+- **Proof.** Fixture `runtime-rust/tests/sky/51-ffi-trait-methods` (`area` non-generic, `scaledBy`
+  trait-def-bound-union, `first` assoc-type, Display non-regression, blanket/unbound NEGATIVE rows)
+  → `[ALL OK]`. 78 inspector + 88 `Sky.Build.Rust` specs green; 0 net-new clippy.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs`, `src/Sky/Build/Rust/{FfiCall,FfiInstance}.hs`,
+`test/Sky/Build/Rust/{FfiCallSpec,FfiInstanceSpec}.hs`, `runtime-rust/scripts/ffi-fixtures-test.sh`,
+`runtime-rust/tests/sky/51-ffi-trait-methods/` (new),
+`docs/superpowers/specs/2026-06-23-rust-ffi-trait-methods-design.md` (new). Commits
+`487900b9..3c58381e`. Filed #31 (ungate trait-impl methods on real crates).
+
+---
+
 ## 2026-06-23 — Iterators auto-FFI v1 (#30) — bind IntoIterator/Iterator param + fix return-position latent cargo-fail
 
 **What.** A Sky `List T` now passes to a Rust fn taking `impl IntoIterator<Item=T>`,
