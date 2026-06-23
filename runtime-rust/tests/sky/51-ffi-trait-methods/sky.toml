@@ -1,0 +1,13 @@
+[project]
+name = "51-ffi-trait-methods"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local tm crate (trait methods on a concrete type, called via UFCS), delivered
+# as a file:// git dep. setup.sh git-inits ./tm-crate into the cache path below
+# AND stages the CHECKED-IN trait-method kernel.json + bindings into
+# .skycache/ffi/rust/ so NO inspector runs (Wall #2 hand stub — the inspector
+# binding is proven by the sky-ffi-inspect-rs unit tests).
+["rust.dependencies"]
+tm = { git = "file:///home/arthur/.cache/sky/51-ffi-trait-methods-crate", branch = "master" }

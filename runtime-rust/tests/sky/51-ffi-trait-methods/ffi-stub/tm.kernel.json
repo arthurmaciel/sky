@@ -1,0 +1,79 @@
+{
+  "moduleName": "Rust.Tm",
+  "kernelName": "Rust_Tm",
+  "package": "tm",
+  "functions": [
+    {
+      "name": "circleNew",
+      "arity": 1,
+      "skyType": "Float -> Result Error Circle",
+      "generic": {
+        "params": [],
+        "bounds": {},
+        "call": {
+          "kind": "function",
+          "path": ["::tm", "Circle"],
+          "method": "new",
+          "args": [0],
+          "argTypes": [{"prim": "f64"}],
+          "ret": {"ctor": "::tm::Circle"}
+        }
+      }
+    },
+    {
+      "name": "area",
+      "arity": 1,
+      "skyType": "Circle -> Result Error Float",
+      "generic": {
+        "params": [],
+        "bounds": {},
+        "call": {
+          "kind": "method",
+          "path": ["::tm", "Circle"],
+          "method": "area",
+          "receiver": {"arg": 0, "by": "ref"},
+          "argTypes": [{"ctor": "::tm::Circle"}],
+          "ret": {"prim": "f64"},
+          "traitQualifier": ["::tm::Circle", "::tm::Area"]
+        }
+      }
+    },
+    {
+      "name": "scaledBy",
+      "arity": 3,
+      "skyType": "Circle -> a -> a -> Result Error Float",
+      "generic": {
+        "params": ["T"],
+        "bounds": {"T": ["Ord"]},
+        "call": {
+          "kind": "method",
+          "path": ["::tm", "Circle"],
+          "method": "scaled_by",
+          "receiver": {"arg": 0, "by": "ref"},
+          "args": [1, 2],
+          "argTypes": [{"ctor": "::tm::Circle"}, {"param": 0}, {"param": 0}],
+          "ret": {"prim": "f64"},
+          "traitQualifier": ["::tm::Circle", "::tm::Scale"]
+        }
+      }
+    },
+    {
+      "name": "first",
+      "arity": 1,
+      "skyType": "Circle -> Result Error Int",
+      "generic": {
+        "params": [],
+        "bounds": {},
+        "call": {
+          "kind": "method",
+          "path": ["::tm", "Circle"],
+          "method": "first",
+          "receiver": {"arg": 0, "by": "ref"},
+          "argTypes": [{"ctor": "::tm::Circle"}],
+          "ret": {"prim": "i64"},
+          "traitQualifier": ["::tm::Circle", "::tm::Pair"]
+        }
+      }
+    }
+  ]
+}

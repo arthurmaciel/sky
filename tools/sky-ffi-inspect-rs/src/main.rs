@@ -972,25 +972,53 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             // existing path unchanged.
                             let generic_bearing = method_is_generic_bearing(
                                 fn_data, impl_generics, struct_generics);
-                            // #21: a generic-bearing TRAIT-impl method over a
-                            // GENERIC Self can never be monomorphised — drop
+                            // #21: a TRAIT-impl method over a GENERIC Self can
+                            // never be monomorphised — drop
                             // `trait-method-generic-self` BEFORE the parametric
                             // path so it never reaches an unsound emit
-                            // (constraint 11).
-                            if generic_bearing && !is_inherent_impl && !trait_self_concrete {
-                                record_generic_drop(
-                                    method_name,
-                                    GenericDrop::TraitMethodDrop(
-                                        TraitMethodDropTag::GenericSelf,
-                                        format!("generic Self `{self_rust}`"),
-                                    ),
-                                );
+                            // (constraint 11). Applies to generic-bearing AND
+                            // non-generic trait methods (both need a concrete
+                            // receiver type the wrapper can name).
+                            if !is_inherent_impl && !trait_self_concrete {
+                                if generic_bearing {
+                                    record_generic_drop(
+                                        method_name,
+                                        GenericDrop::TraitMethodDrop(
+                                            TraitMethodDropTag::GenericSelf,
+                                            format!("generic Self `{self_rust}`"),
+                                        ),
+                                    );
+                                }
+                                // A NON-generic method on a generic-Self trait
+                                // impl is also unbindable here; fall through to
+                                // parse_fn_item which drops it via the existing
+                                // nameability filter (its receiver type carries a
+                                // free tyvar). Either way: not the parametric path.
+                                if !generic_bearing {
+                                    if let Some(f) = parse_fn_item(
+                                        method_name, fn_data, &aliases,
+                                        Some((&self_sky, &self_rust)))
+                                    {
+                                        functions.push(f);
+                                    }
+                                }
                                 continue;
                             }
-                            // The parametric path now serves BOTH inherent impls
-                            // and concrete-Self trait impls (the lifted gate).
-                            let take_parametric = generic_bearing
-                                && (is_inherent_impl || trait_self_concrete);
+                            // The parametric/UFCS path serves: (a) any generic-
+                            // bearing inherent method (the historical case), and
+                            // (b) EVERY concrete-Self trait method — generic OR
+                            // non-generic. A non-generic trait method still needs
+                            // the UFCS qualifier (`<Self as Trait>::m`) so the
+                            // wrapper doesn't depend on a `use Trait;` that the
+                            // bindings codegen can't inject; routing it here (vs
+                            // parse_fn_item's `recv.m()` method-call form) closes
+                            // that gap. A non-trait inherent non-generic method
+                            // stays on parse_fn_item (no qualifier needed).
+                            let is_concrete_trait_method =
+                                !is_inherent_impl && trait_self_concrete;
+                            let take_parametric =
+                                (generic_bearing && is_inherent_impl)
+                                || is_concrete_trait_method;
                             if take_parametric {
                                 // Build the trait context for a trait impl: the
                                 // Q2-A trait-def method generics (unioned into the
@@ -7281,6 +7309,45 @@ mod tests {
         index2.insert("201".to_string(), assoc_old);
         let impl2 = serde_json::json!({ "items": [ 201 ] });
         assert_eq!(impl_assoc_bindings(&impl2, &index2).get("B"), Some(&prim("bool")));
+    }
+
+    #[test]
+    fn test_display_bridge_one_to_string_zero_fmt() {
+        // Constraint 8: a `Display` impl yields EXACTLY ONE binding — the
+        // `to_string` bridge — and ZERO `fmt` UFCS binding.
+        // (a) the bridge: emit_display_fromstr_bridges produces one `to_string`.
+        let mut functions: Vec<Function> = Vec::new();
+        let mut display_types: HashMap<String, String> = HashMap::new();
+        display_types.insert("Label".to_string(), "::tm::Label".to_string());
+        emit_display_fromstr_bridges(&mut functions, &display_types, &HashMap::new());
+        let to_strings: Vec<&Function> =
+            functions.iter().filter(|f| f.method_name == "to_string").collect();
+        assert_eq!(to_strings.len(), 1, "exactly one to_string bridge");
+        assert!(functions.iter().all(|f| f.method_name != "fmt"),
+            "the bridge must NOT emit a `fmt` binding");
+
+        // (b) the `fmt` trait method itself drops: its `f: &mut Formatter` arg is
+        // unnameable in the wrapper, so the parametric/UFCS path drops it (a
+        // `&mut Formatter` borrowed-ref is not in the bindable subset). So no
+        // `fmt` UFCS binding is ever emitted alongside the bridge.
+        let fmt_fn = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["self", borrowed(serde_json::json!({ "generic": "Self" }))],
+                ["f", { "borrowed_ref": { "lifetime": null, "mutable": true,
+                        "type_": { "resolved_path": { "name": "Formatter",
+                                    "path": "Formatter", "id": 0, "args": null } } } }]
+            ], "output": { "resolved_path": {
+                "name": "Result", "path": "Result", "id": 0, "args": null } } }
+        });
+        let ctx = trait_ctx_with(None);
+        assert!(
+            try_parametric_stub(
+                "fmt", &fmt_fn, Some(("Label", "::tm::Label")), None, None, Some(&ctx)
+            ).is_err(),
+            "a `fmt(&self, &mut Formatter)` trait method must DROP (unnameable arg)"
+        );
     }
 
     #[test]

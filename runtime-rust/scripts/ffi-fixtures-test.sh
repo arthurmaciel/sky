@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -474,10 +474,11 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 echo "── Sky→Rust auto-FFI fixture gate ──"
 for n in "${FIXTURES[@]}"; do
   case "$n" in
-    48-ffi-generics)  run_handstub ;;
-    49-ffi-closures)  run_handstub_basic "$n" ;;
-    50-ffi-iterators) run_handstub_basic "$n" ;;
-    *)                run_basic "$n" ;;
+    48-ffi-generics)      run_handstub ;;
+    49-ffi-closures)      run_handstub_basic "$n" ;;
+    50-ffi-iterators)     run_handstub_basic "$n" ;;
+    51-ffi-trait-methods) run_handstub_basic "$n" ;;
+    *)                    run_basic "$n" ;;
   esac
 done
 # S4 DCE suite runs iff 43-ffi-dce is in the requested set.

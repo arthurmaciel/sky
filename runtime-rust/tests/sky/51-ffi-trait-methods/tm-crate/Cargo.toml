@@ -1,0 +1,8 @@
+[package]
+name = "tm"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "tm"
+path = "src/lib.rs"

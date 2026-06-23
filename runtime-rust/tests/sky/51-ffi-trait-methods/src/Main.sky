@@ -1,0 +1,51 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Result as Result
+import Rust.Tm as Tm
+import Std.Log exposing (println)
+
+
+-- A Circle{r=2.0}, made via the inherent ctor (an opaque foreign receiver the
+-- trait methods are called on). The opaque receiver type collapses to the FFI
+-- `Value` sentinel on the Sky side, so it threads from `circleNew`'s Ok payload
+-- straight into each trait method's receiver slot — no type annotation needed.
+main : Task Error ()
+main =
+    case Tm.circleNew 2.0 of
+        Err _ ->
+            println "[FAIL] circleNew"
+
+        Ok c ->
+            let
+                -- (1) NON-generic trait method: Area::area(&self) -> f64 via
+                --     UFCS. 3.14 * 2 * 2 = 12.56
+                areaOf =
+                    Result.withDefault 0.0 (Tm.area c)
+
+                -- (2) GENERIC trait method with a trait-def bound (T: Ord),
+                --     restated bare on the impl — the row that binds ONLY because
+                --     the inspector unions the trait-def bound. scaled_by(&self,
+                --     5, 2): 5 >= 2 → bigger=1 → r*(2+1) = 2*3 = 6.0
+                scaledOf =
+                    Result.withDefault 0.0 (Tm.scaledBy c 5 2)
+
+                -- (3) Associated-type method: Pair::first(&self) -> Self::A,
+                --     A=i64 → 7.
+                firstOf =
+                    Result.withDefault 0 (Tm.first c)
+
+                _ = println ("area     -> " ++ String.fromFloat areaOf)
+                _ = println ("scaledBy -> " ++ String.fromFloat scaledOf)
+                _ = println ("first    -> " ++ String.fromInt firstOf)
+            in
+            if floatEq areaOf 12.56 && floatEq scaledOf 6.0 && firstOf == 7 then
+                println "[ALL OK]"
+            else
+                println "[FAIL]"
+
+
+floatEq : Float -> Float -> Bool
+floatEq a b =
+    let d = a - b
+    in (if d < 0.0 then 0.0 - d else d) < 0.001
