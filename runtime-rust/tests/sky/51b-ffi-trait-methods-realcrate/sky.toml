@@ -1,0 +1,15 @@
+[project]
+name = "51b-ffi-trait-methods-realcrate"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local tm crate (trait methods on a concrete type, called via UFCS), delivered
+# as a file:// git dep. setup.sh git-inits ./tm-crate into the cache path below.
+# Unlike 51-ffi-trait-methods (the hand stub), this fixture stages NO checked-in
+# kernel.json — the REAL inspector (`cargo +nightly rustdoc`) runs at build time
+# and emits the trait-method bindings itself (#31 / C-4). That makes the #31
+# visibility relaxation load-bearing: every trait-impl method here is
+# `visibility:"default"` and would have dropped at the is_public gate pre-#31.
+["rust.dependencies"]
+tm = { git = "file:///home/arthur/.cache/sky/51b-ffi-trait-methods-realcrate-crate", branch = "master" }

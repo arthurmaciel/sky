@@ -4956,8 +4956,28 @@ fn try_parametric_stub(
             None => vec![base.clone()],
         }
     };
-    // The receiver type as a TypeRef ctor at the stub params, for arg0's type.
-    let recv_ctor = TypeRef::Ctor(base.clone(), (0..order.len()).map(TypeRef::Param).collect());
+    // The receiver type as a TypeRef ctor. Its type args are ONLY the STRUCT's
+    // own generic params (in `order` position) — NEVER a method-level tyvar. A
+    // generic METHOD on a NON-generic struct (`scaled_by<T: Ord>` on `Circle`)
+    // has `order = [T]` (the method tyvar) but `Circle` takes no type args, so
+    // emitting `Circle<T>` is E0107. Restrict the receiver args to the params the
+    // struct itself declares (`struct_generics`); a method tyvar lives only in
+    // the value-args / return.
+    let struct_param_names: HashSet<String> = struct_generics
+        .map(type_param_order)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let recv_param_idxs: Vec<usize> = order
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| struct_param_names.contains(*n))
+        .map(|(i, _)| i)
+        .collect();
+    let recv_ctor = TypeRef::Ctor(
+        base.clone(),
+        recv_param_idxs.into_iter().map(TypeRef::Param).collect(),
+    );
 
     // Receiver + value args. A method WITH a self input passes the receiver at
     // value arg0; a static assoc fn has no receiver. The BORROW FORM (constraint
@@ -5440,15 +5460,31 @@ fn parametric_function(
         });
     }
 
+    // [C-4 codegen] A TRAIT method must render via UFCS (`<Self as Trait>::m`),
+    // synthesised SOLELY from the `generic.call` AST (which carries the receiver +
+    // the UFCS qualifier). Leaving `recv_type` / `method_name` SET would ALSO
+    // trip the Sky compiler's NON-generic inherent-method path (`arg0.m()`),
+    // emitting a DUPLICATE wrapper with the same name (E0659 ambiguity) whose
+    // inherent body is an E0599 (a trait method isn't callable inherently). So a
+    // trait stub leaves these EMPTY — matching the hand-stub convention. An
+    // INHERENT generic method (no qualifier) KEEPS them: its wrapper IS the
+    // inherent `arg0.method()` form, the only correct render (no qualifier
+    // exists).
+    let is_trait_method = generic.call.trait_qualifier.is_some();
+    let (out_recv_type, out_recv_rust, out_method_name) = if is_trait_method {
+        (String::new(), String::new(), String::new())
+    } else {
+        (recv_sky_parametric.clone(), self_rust.to_string(), method_name.to_string())
+    };
     Some(Function {
         name: method_name.to_string(),
         params,
         results,
         effect: "pure".into(),
         exported: true,
-        recv_type: recv_sky_parametric.clone(),
-        recv_rust_type: self_rust.to_string(),
-        method_name: method_name.to_string(),
+        recv_type: out_recv_type,
+        recv_rust_type: out_recv_rust,
+        method_name: out_method_name,
         generic: Some(generic),
         ..Default::default()
     })
@@ -7655,6 +7691,97 @@ mod tests {
         assert_eq!(
             TraitMethodDropTag::TraitUnreachable.tag(),
             "trait-method-trait-unreachable");
+    }
+
+    #[test]
+    fn test_generic_method_on_nongeneric_struct_recv_has_no_method_tyvar() {
+        // [C-4 codegen] A GENERIC method (`scaled_by<T: Ord>`) on a NON-generic
+        // struct (`Circle`) must render the receiver as the BARE `::tm::Circle`,
+        // NOT `::tm::Circle<T>`. The method tyvar `T` belongs in the args/ret, NOT
+        // the receiver type — `Circle` takes no type params, so `Circle<T>` is
+        // E0107 (wrong number of type arguments). The receiver ctor must carry
+        // ONLY the STRUCT's generics (here: none), never the method's.
+        let into_ord = trait_bound("Ord", vec![]);
+        let scaled = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [ type_param("T", vec![into_ord]) ],
+                          "where_predicates": [] },
+            "sig": { "inputs": [
+                ["self", borrowed(serde_json::json!({ "generic": "Self" }))],
+                ["k", serde_json::json!({ "generic": "T" })],
+                ["floor", serde_json::json!({ "generic": "T" })]
+            ], "output": prim("f64") }
+        });
+        // struct_generics = NONE (Circle is non-generic). trait_ctx with the
+        // qualifier so it routes as a trait method (the real scaled_by shape).
+        let trait_def = fn_with_generics(
+            vec![type_param("T", vec![trait_bound("Ord", vec![])])], vec![]);
+        let stub = try_parametric_stub(
+            "scaled_by", &scaled, Some(("Circle", "::tm::Circle")),
+            None, /* impl_generics */ None, /* struct_generics: NON-generic */
+            Some(&trait_ctx_with(Some(&trait_def["generics"]))),
+        ).expect("scaled_by<T: Ord> on non-generic Circle binds");
+        // The receiver (arg_types[0]) must be a BARE ctor — no `T` arg.
+        match stub.call.arg_types.first() {
+            Some(TypeRef::Ctor(p, args)) => {
+                assert_eq!(p, "::tm::Circle");
+                assert!(args.is_empty(),
+                    "receiver Circle (non-generic struct) must carry NO type args; \
+                     a method tyvar `<T>` in the receiver is E0107. got {args:?}");
+            }
+            other => panic!("expected a receiver ctor, got {other:?}"),
+        }
+        // `T` still appears as a Sky tyvar (in the value args), just not the recv.
+        assert_eq!(stub.params, vec!["T".to_string()]);
+    }
+
+    #[test]
+    fn test_trait_method_parametric_fn_leaves_recv_empty() {
+        // [C-4 codegen] A TRAIT-method parametric stub MUST leave `recv_type` /
+        // `method_name` EMPTY so the Sky compiler routes it ONLY through the
+        // generic-wrapper synthesiser (UFCS `<Self as Trait>::m`) and does NOT
+        // ALSO emit an INHERENT `arg0.m()` duplicate via the non-generic path.
+        // A set `recv_type` triggers BOTH paths → a duplicate wrapper (E0659
+        // ambiguity) whose inherent body is an E0599 (a trait method isn't
+        // callable inherently). The receiver lives in `generic.call.receiver` +
+        // `argTypes`, so synthesiseGenericWrapper needs nothing from recv_type.
+        let fd = first_assoc_method(); // `fn first(&self) -> Self::A`, A=i64.
+        let ctx = trait_ctx_assoc(&[("A", prim("i64"))]);
+        let stub = try_parametric_stub(
+            "first", &fd, Some(("Circle", "::tm::Circle")), None, None, Some(&ctx),
+        ).expect("assoc Self::A=i64 → binds");
+        let f = parametric_function("first", &fd, "Circle", "::tm::Circle", stub)
+            .expect("parametric_function builds the trait-method Function");
+        // The Function carries the UFCS qualifier in its generic block …
+        assert!(f.generic.as_ref().map(|g| g.call.trait_qualifier.is_some()).unwrap_or(false));
+        // … and leaves recv_type / method_name EMPTY (no inherent duplicate).
+        assert_eq!(f.recv_type, "", "a trait method must not set recv_type (inherent dup)");
+        assert_eq!(f.method_name, "", "a trait method must not set method_name (inherent dup)");
+    }
+
+    #[test]
+    fn test_inherent_generic_method_keeps_recv() {
+        // CONTROL: an INHERENT generic method (NO trait qualifier) MUST keep
+        // recv_type / method_name set — its wrapper renders the inherent
+        // `arg0.method()` form (correct; no UFCS qualifier exists). Only the
+        // trait-method case clears them.
+        let fd = keyed_impl_method_bare_t(); // `fn keyed<T>(&self, k: T) -> i64`
+        let ord = trait_bound("Ord", vec![]);
+        let trait_def = fn_with_generics(vec![type_param("T", vec![ord])], vec![]);
+        // Inherent: thread a trait ctx with NO qualifier? No — inherent means
+        // trait_ctx None. Use None so the stub has trait_qualifier=None.
+        let stub = try_parametric_stub(
+            "keyed", &fd, Some(("Box1", "::cr::Box1")), None, None, None,
+        ).expect("inherent generic method binds");
+        assert!(stub.call.trait_qualifier.is_none());
+        let f = parametric_function("keyed", &fd, "Box1", "::cr::Box1", stub)
+            .expect("parametric_function builds");
+        // recv_type is KEPT non-empty (the inherent path needs it). Its exact
+        // value carries the method tyvar (`Box1 t`) — the point is it is NOT
+        // cleared, so the inherent `arg0.keyed()` wrapper still renders.
+        assert!(!f.recv_type.is_empty(), "inherent method keeps recv_type");
+        assert_eq!(f.method_name, "keyed", "inherent method keeps method_name");
+        let _ = trait_def; // (kept for shape parity with the trait-def union test)
     }
 
     /// Build a minimal rustdoc doc: a public crate-root module exporting a

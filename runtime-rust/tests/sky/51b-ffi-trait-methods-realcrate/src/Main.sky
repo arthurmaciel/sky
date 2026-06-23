@@ -1,0 +1,44 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Result as Result
+import Rust.Tm as Tm
+import Std.Log exposing (println)
+
+
+-- A Circle{r=2.0}, made via the inherent ctor (bound by the REAL inspector as
+-- `new_from_circle`). The trait methods bound BY THE REAL INSPECTOR are called
+-- via UFCS (`<::tm::Circle as ::tm::Area>::area(&arg0)`). The `pub(crate)`
+-- `Hidden::hush` is NOT in the bound surface (it dropped
+-- trait-method-trait-unreachable) — the build compiling at all is the C-1 proof:
+-- a wrong emit would have been a `None`-qualifier inherent call → E0603/E0599.
+main : Task Error ()
+main =
+    case Tm.new_from_circle 2.0 of
+        Err _ ->
+            println "[FAIL] new_from_circle"
+
+        Ok c ->
+            let
+                -- (1) NON-generic trait method: Area::area(&self) -> f64.
+                --     3.14 * 2 * 2 = 12.56
+                areaOf =
+                    Result.withDefault 0.0 (Tm.area c)
+
+                -- (3) Associated-type method: Pair::first(&self) -> Self::A=i64 → 7.
+                firstOf =
+                    Result.withDefault 0 (Tm.first c)
+
+                _ = println ("area  -> " ++ String.fromFloat areaOf)
+                _ = println ("first -> " ++ String.fromInt firstOf)
+            in
+            if floatEq areaOf 12.56 && firstOf == 7 then
+                println "[ALL OK]"
+            else
+                println "[FAIL]"
+
+
+floatEq : Float -> Float -> Bool
+floatEq a b =
+    let d = a - b
+    in (if d < 0.0 then 0.0 - d else d) < 0.001
