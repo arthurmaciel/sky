@@ -56,6 +56,7 @@ spec = do
                 , _call_argTypes = [TRParam 0]
                 , _call_ret      = TRCtor "::box1::Box1" [TRParam 0]
                 , _call_assocOnType = True
+                , _call_iterAdapters = []
                 }
         it "decodes a method call with a ref receiver `left : Pair a b -> a`" $ do
             let j = A.object
@@ -83,6 +84,7 @@ spec = do
                 , _call_argTypes = [TRCtor "::mycrate::Pair" [TRParam 0, TRParam 1]]
                 , _call_ret      = TRParam 0
                 , _call_assocOnType = True
+                , _call_iterAdapters = []
                 }
         it "decodes a prim TypeRef leaf in ret (`count : Keyed a -> Int`)" $ do
             let j = A.object
@@ -196,6 +198,7 @@ spec = do
                 , _call_argTypes = [TRParam 0]
                 , _call_ret      = TRCtor "::c::T" [TRParam 0]
                 , _call_assocOnType = True
+                , _call_iterAdapters = []
                 }
         it "accepts a valid single-param call" $
             validateCall 1 okCall `shouldSatisfy` isRight
@@ -230,6 +233,7 @@ spec = do
                         , TRClosure FnKind False [TRParam 0] (TRParam 1) ]
                     , _call_ret      = TRCtor "Vec" [TRParam 1]
                     , _call_assocOnType = False
+                    , _call_iterAdapters = []
                     }
             -- C-A: real params ["a","b"] → TRParam 0 → A, TRParam 1 → B
             closureBounds call ["a", "b"] `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
@@ -246,6 +250,7 @@ spec = do
                             [TRClosure FnKind False [TRParam 0] (TRPrim "bool")] ]
                     , _call_ret      = TRPrim "i64"
                     , _call_assocOnType = False
+                    , _call_iterAdapters = []
                     }
             -- C-B: a closure nested inside Vec<_> must be rejected by validateCall
             isLeft (validateCall 1 call) `shouldBe` True
@@ -262,6 +267,7 @@ spec = do
                     , _call_argTypes = [TRParam 0]
                     , _call_ret      = TRCtor "::box1::Box1" [TRParam 0]
                     , _call_assocOnType = True
+                    , _call_iterAdapters = []
                     }
             renderCall c ["a"]    `shouldBe` "::box1::Box1::<A>::make(arg0)"
             renderRetType c ["a"] `shouldBe` "::box1::Box1<A>"
@@ -277,6 +283,7 @@ spec = do
                     , _call_argTypes = [TRCtor "::mycrate::Pair" [TRParam 0, TRParam 1]]
                     , _call_ret      = TRParam 0
                     , _call_assocOnType = True
+                    , _call_iterAdapters = []
                     }
             renderCall c ["k", "v"] `shouldBe`
                 "::mycrate::Pair::<K, V>::left(&arg0)"
@@ -300,9 +307,48 @@ spec = do
                         , TRClosure FnKind False [TRParam 0] (TRParam 1) ]
                     , _call_ret      = TRCtor "Vec" [TRParam 1]
                     , _call_assocOnType = False
+                    , _call_iterAdapters = []
                     }
             renderCall c ["a", "b"] `shouldBe`
                 "::clo::map_each(arg0, arg1)"
+
+    describe "#30 — iterator param call form (Iterator → arg.into_iter())" $ do
+        -- `sum_all<I: IntoIterator<Item=i64>>(xs: I) -> i64` — the Vec arg passes
+        -- DIRECTLY (a Vec IS IntoIterator); no adapter. `count<I: Iterator<Item=
+        -- i64>>(it: I)` — the Vec is not itself an Iterator, so the call site
+        -- must pass `arg0.into_iter()` (the adapter at arg index 0).
+        let iterCall adapters = Call
+                { _call_kind     = CallFunction
+                , _call_path     = ["::iter"]
+                , _call_typeArgs = []
+                , _call_method   = Just "go"
+                , _call_receiver = Nothing
+                , _call_args     = [0]
+                , _call_argTypes = [TRCtor "Vec" [TRPrim "i64"]]
+                , _call_ret      = TRPrim "i64"
+                , _call_assocOnType = False
+                , _call_iterAdapters = adapters
+                }
+        it "an Iterator-kind arg (in iterAdapters) renders arg0.into_iter()" $
+            renderCall (iterCall [0]) [] `shouldBe` "::iter::go(arg0.into_iter())"
+        it "an IntoIterator-kind arg (empty iterAdapters) renders the bare arg0" $ do
+            let rendered = renderCall (iterCall []) []
+            rendered `shouldBe` "::iter::go(arg0)"
+            (".into_iter()" `isInfixOf` rendered) `shouldBe` False
+        it "only the tagged index gets the adapter (arg1 tagged, arg0 bare)" $ do
+            let c = Call
+                    { _call_kind     = CallFunction
+                    , _call_path     = ["::iter"]
+                    , _call_typeArgs = []
+                    , _call_method   = Just "zip2"
+                    , _call_receiver = Nothing
+                    , _call_args     = [0, 1]
+                    , _call_argTypes = [TRCtor "Vec" [TRPrim "i64"], TRCtor "Vec" [TRPrim "i64"]]
+                    , _call_ret      = TRPrim "i64"
+                    , _call_assocOnType = False
+                    , _call_iterAdapters = [1]
+                    }
+            renderCall c [] `shouldBe` "::iter::zip2(arg0, arg1.into_iter())"
 
     describe "#28 — owned-clone bridge for Fn(&A) closure params (Task 3.2, B4)" $ do
         -- `keep : List a -> (&a -> Bool) -> List a` — the host wants Fn(&A) but
@@ -321,6 +367,7 @@ spec = do
                     , TRClosure FnKind byRef [TRParam 0] (TRPrim "bool") ]
                 , _call_ret      = TRCtor "Vec" [TRParam 0]
                 , _call_assocOnType = False
+                , _call_iterAdapters = []
                 }
         it "byRef closure arg passes an owned-clone bridge, not arg1 directly" $
             renderCall (keepCall True) ["a"] `shouldContain`
@@ -342,6 +389,7 @@ spec = do
                             [TRParam 0, TRParam 1] (TRParam 0) ]
                     , _call_ret      = TRParam 0
                     , _call_assocOnType = False
+                    , _call_iterAdapters = []
                     }
             renderCall zipCall ["a", "b"] `shouldContain`
                 "move |__r0, __r1| { let __v0 = __r0.clone(); \

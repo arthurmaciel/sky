@@ -94,6 +94,14 @@ data Call = Call
       --   is why the producer must distinguish the two; the in-repo hand stubs
       --   set @"assocOnType": false@ for free functions, and the durable fix is
       --   an explicit discriminator from the out-of-boundary inspector.
+    , _call_iterAdapters :: ![Int]
+      -- ^ Value-arg indices whose iterator param is bound @Iterator<Item=T>@
+      --   (NOT @IntoIterator@): the call site passes @argJ.into_iter()@ instead
+      --   of the bare @argJ@ (a @Vec<T>@ is @IntoIterator<Item=T>@ but not
+      --   itself an @Iterator@). DEFAULT @[]@ (the parsed @call@ omits
+      --   @"iterAdapters"@ ⇒ no arg needs the adapter) keeps every pre-iterators
+      --   stub byte-identical — an un-tagged arg renders exactly as today
+      --   (guardian C6). Rust-backend-only; the Go pipeline never reads it.
     }
     deriving (Show, Eq)
 
@@ -326,7 +334,14 @@ renderCall c params =
         []       -> Nothing
     renderValueArg j (Just (TRClosure _ True borrowedArgTRs _)) =
         ownedCloneBridge j (length borrowedArgTRs)
-    renderValueArg j _ = argName j
+    -- C6: an `Iterator<Item=T>`-bound arg (in `iterAdapters`) is passed
+    -- `argJ.into_iter()` — a `Vec<T>` is not itself an `Iterator`, so the host
+    -- `impl Iterator` param needs the adapter. An `IntoIterator`-bound arg (NOT
+    -- in the set) passes the bare `Vec` directly. Total: `.into_iter()` is
+    -- infallible (no `.unwrap()`/panic).
+    renderValueArg j _
+        | j `elem` _call_iterAdapters c = argName j ++ ".into_iter()"
+        | otherwise                     = argName j
 
 
 -- | Render the wrapper RETURN type (the @_@ inside @SkyResult<SkyError, _>@)
@@ -546,6 +561,10 @@ parseCall nParams = A.withObject "Call" $ \o -> do
     -- function in a crate/module must opt out with "assocOnType": false so the
     -- turbofish renders after the method name (clo::map_each::<A,B>).
     assocOnType <- o .:? "assocOnType" .!= True
+    -- C6: default [] ⇒ no arg needs `.into_iter()` ⇒ byte-identical to a
+    -- pre-iterators stub. Only an `Iterator`-kind (not `IntoIterator`) param
+    -- carries an entry here.
+    iterAdapters <- o .:? "iterAdapters" .!= []
     let c = Call
             { _call_kind     = kind
             , _call_path     = path
@@ -556,6 +575,7 @@ parseCall nParams = A.withObject "Call" $ \o -> do
             , _call_argTypes = argTypes
             , _call_ret      = ret
             , _call_assocOnType = assocOnType
+            , _call_iterAdapters = iterAdapters
             }
     case validateCall nParams c of
         Right ok -> pure ok
