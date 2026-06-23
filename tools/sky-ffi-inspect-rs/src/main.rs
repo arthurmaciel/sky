@@ -171,14 +171,64 @@ struct Receiver {
     by: String,
 }
 
-/// A type reference inside typeArgs / argTypes / ret. Exactly one of the three
+/// The Rust closure trait-kind a closure-typed argument satisfies. Mirrors the
+/// Haskell `Sky.Build.Rust.FfiCall.ClosureKind` (the metadata-contract consumer).
+//
+// Phase 5 emits the closure-metadata CLASSIFIER + its types; wiring the
+// classifier into `try_parametric_stub`'s arg loop is Phase 6.2 (a closure-bound
+// fn still drops for the independent unmodellable-`Fn`-bound reason until then).
+// So these items are exercised by the `#[cfg(test)]` suite but not yet by the
+// bin's main path — `#[allow(dead_code)]` matches the `split_top_level`
+// precedent above. REMOVE the allows when Phase 6.2 wires them in.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClosureKind {
+    Fn,
+    FnMut,
+    FnOnce,
+}
+
+#[allow(dead_code)] // see ClosureKind note — wired in Phase 6.2
+impl ClosureKind {
+    /// The wire string the Haskell `FromJSON ClosureKind` decodes (`"Fn"` /
+    /// `"FnMut"` / `"FnOnce"`).
+    fn as_str(self) -> &'static str {
+        match self {
+            ClosureKind::Fn => "Fn",
+            ClosureKind::FnMut => "FnMut",
+            ClosureKind::FnOnce => "FnOnce",
+        }
+    }
+    /// Parse a Rust closure trait NAME (last `::` segment) into a `ClosureKind`.
+    fn from_trait_name(name: &str) -> Option<ClosureKind> {
+        match name {
+            "Fn" => Some(ClosureKind::Fn),
+            "FnMut" => Some(ClosureKind::FnMut),
+            "FnOnce" => Some(ClosureKind::FnOnce),
+            _ => None,
+        }
+    }
+}
+
+/// A type reference inside typeArgs / argTypes / ret. Exactly one of the four
 /// variants is serialised (serde-untagged via a manual Serialize-shape: each
-/// arm emits its own discriminator key).
+/// arm emits its own discriminator key). `Closure` mirrors the Haskell
+/// `TRClosure` — it is valid ONLY as a direct `argTypes` element (validated on
+/// the Haskell side, C-B), never nested in a ctor / ret.
 #[derive(Debug, Clone, PartialEq)]
 enum TypeRef {
     Param(usize),
     Prim(String),
     Ctor(String, Vec<TypeRef>),
+    /// `{closure:{kind, byRef, argTypes, ret}}`. `by_ref` ⇒ the foreign param is
+    /// `Fn(&A)` (a borrowed input — drives the owned-clone bridge downstream).
+    #[allow(dead_code)] // constructed by classify_closure_param — wired in Phase 6.2
+    Closure {
+        kind: ClosureKind,
+        by_ref: bool,
+        arg_types: Vec<TypeRef>,
+        ret: Box<TypeRef>,
+    },
 }
 
 impl Serialize for TypeRef {
@@ -202,6 +252,25 @@ impl Serialize for TypeRef {
                 if !args.is_empty() {
                     m.serialize_entry("args", args)?;
                 }
+                m.end()
+            }
+            TypeRef::Closure { kind, by_ref, arg_types, ret } => {
+                // One key: `closure`, carrying an inner map of {kind, byRef,
+                // argTypes, ret}. Matches the hand-stub `clo.kernel.json` shape
+                // the Haskell `FromJSON TypeRef` closure branch reads.
+                let mut inner = serde_json::Map::new();
+                inner.insert("kind".into(), serde_json::Value::from(kind.as_str()));
+                inner.insert("byRef".into(), serde_json::Value::from(*by_ref));
+                inner.insert(
+                    "argTypes".into(),
+                    serde_json::to_value(arg_types).map_err(serde::ser::Error::custom)?,
+                );
+                inner.insert(
+                    "ret".into(),
+                    serde_json::to_value(ret.as_ref()).map_err(serde::ser::Error::custom)?,
+                );
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("closure", &serde_json::Value::Object(inner))?;
                 m.end()
             }
         }
@@ -3888,6 +3957,143 @@ fn type_to_typeref(
     Err(GenericDrop::NotBindable(describe_type_shape(val)))
 }
 
+/// Whether the host function's ABI is plain `"Rust"`. The rustdoc header `abi`
+/// field is `"Rust"` for an ordinary fn and an object (e.g. `{"C": {…}}`) for an
+/// `extern "X"` fn. Closure metadata is emitted ONLY for a Rust-ABI host (B3) —
+/// a non-Rust host cannot receive a Rust closure. A MISSING `abi` (older rustdoc
+/// format) is treated as Rust (the common case), since closure-taking `extern`
+/// fns are vanishingly rare and the downstream wall re-checks before emission.
+#[allow(dead_code)] // the B3 ABI reader a Phase-6.2 caller threads into classify_closure_param
+fn host_abi_is_rust(fn_data: &serde_json::Value) -> bool {
+    match fn_data.get("header").and_then(|h| h.get("abi")) {
+        None => true,                                  // absent → assume Rust
+        Some(serde_json::Value::String(s)) => s == "Rust",
+        Some(_) => false,                              // {"C":…} / {"Cdecl":…}/… → non-Rust
+    }
+}
+
+/// Whether a closed-set `TypeRef` is provably `Clone` (for the by-ref owned-clone
+/// bridge — `closure-by-ref-noclone`). Mirrors the Haskell `concreteNotClone`
+/// negation: a `TRParam` is generic (its Clone-ness is enforced by the closure's
+/// `+ Clone` bound at instantiation, so NOT a drop); the closed primitive set is
+/// Clone; a closed container is Clone iff every arg is; a nested closure is never
+/// Clone.
+#[allow(dead_code)] // used by classify_closure_param's by-ref-noclone gate — wired in Phase 6.2
+fn typeref_is_clone(tr: &TypeRef) -> bool {
+    match tr {
+        TypeRef::Param(_) => true,
+        TypeRef::Prim(p) => matches!(p.as_str(), "i64" | "f64" | "bool" | "char" | "String"),
+        // Every closed container the resolver emits (Vec/Option/Result/HashMap/…)
+        // derives Clone when its args do.
+        TypeRef::Ctor(_, args) => args.iter().all(typeref_is_clone),
+        TypeRef::Closure { .. } => false,
+    }
+}
+
+/// Classify a Rust closure trait bound (`Fn(A) -> R` sugar) into the
+/// `{"closure":{kind,byRef,argTypes,ret}}` `TypeRef` the metadata contract
+/// carries.
+///
+/// `bound` is a rustdoc `trait_bound` node whose trait NAME (last `::` segment)
+/// is one of `Fn` / `FnMut` / `FnOnce`. rustdoc models the `Fn(A) -> R` sugar as
+/// the trait's generic args in `parenthesized` form:
+/// `trait_bound.trait.args.parenthesized = { inputs: [A…], output: R }`.
+/// Each input + the output are mapped through the SAME closed-set `type_to_typeref`
+/// resolver the rest of the stub uses. A `&A` input ⇒ `by_ref=true` and the inner
+/// `A`'s `TypeRef` is the recorded argType.
+///
+/// `host_abi_rust` is the B3 gate: pass `false` to suppress (records a
+/// `closure-nonrust-abi` drop). Drops are returned as a `ClosureDrop` carrying
+/// the specific Task-5.2 tag.
+#[allow(dead_code)] // the Phase-5 keystone; wired into try_parametric_stub's arg loop in Phase 6.2
+fn classify_closure_param(
+    bound: &serde_json::Value,
+    param_idx: &HashMap<String, usize>,
+    host_abi_rust: bool,
+) -> Result<TypeRef, GenericDrop> {
+    let trait_name = trait_bound_name(bound)
+        .ok_or_else(|| GenericDrop::NotBindable("closure bound has no trait name".to_string()))?;
+    let kind = ClosureKind::from_trait_name(&trait_name).ok_or_else(|| {
+        GenericDrop::NotBindable(format!("trait `{trait_name}` is not a closure trait"))
+    })?;
+
+    // B3: only a Rust-ABI host can receive a Rust closure. (Task 5.2 upgrades
+    // this NotBindable to the specific `closure-nonrust-abi` coverage tag.)
+    if !host_abi_rust {
+        return Err(GenericDrop::NotBindable(format!(
+            "{trait_name} closure on a non-Rust-ABI host"
+        )));
+    }
+
+    // The `Fn(A) -> R` sugar lives in the trait's parenthesized generic args.
+    let paren = bound
+        .get("trait_bound")
+        .and_then(|tb| tb.get("trait"))
+        .and_then(|tr| tr.get("args"))
+        .and_then(|a| a.get("parenthesized"));
+    let paren = match paren {
+        Some(p) => p,
+        None => {
+            return Err(GenericDrop::NotBindable(format!(
+                "{trait_name} bound without parenthesized Fn(..)->R sugar"
+            )))
+        }
+    };
+
+    // Inputs. A `&A` (borrowed_ref, non-mut) ⇒ by_ref + inner A's TypeRef.
+    // A `&mut A` ⇒ a mutable-borrow slot (closure-mut-slot, the owned-clone
+    // bridge can't reconstruct a `&mut`).
+    let inputs = paren.get("inputs").and_then(|i| i.as_array());
+    let mut by_ref = false;
+    let mut arg_types: Vec<TypeRef> = Vec::new();
+    if let Some(inputs) = inputs {
+        for input in inputs {
+            if let Some(br) = input.get("borrowed_ref") {
+                // (Task 5.2 upgrades this to the `closure-mut-slot` tag.)
+                if is_mutable(br) {
+                    return Err(GenericDrop::NotBindable(format!(
+                        "{trait_name}(&mut _) mutable-borrow slot"
+                    )));
+                }
+                by_ref = true;
+                // The inner type key is `type_` (newer rustdoc) or `type` (older).
+                let inner = br.get("type_").or_else(|| br.get("type")).ok_or_else(|| {
+                    GenericDrop::NotBindable("borrowed closure input without inner type".to_string())
+                })?;
+                arg_types.push(type_to_typeref(inner, param_idx)?);
+            } else {
+                arg_types.push(type_to_typeref(input, param_idx)?);
+            }
+        }
+    }
+
+    // Output. rustdoc omits `output` (or sets it null) for a `-> ()` closure.
+    let ret = match paren.get("output") {
+        None | Some(serde_json::Value::Null) => TypeRef::Ctor("::()".to_string(), vec![]),
+        Some(o) => type_to_typeref(o, param_idx)?,
+    };
+
+    // A closure that RETURNS another closure can't be marshalled back (no
+    // function arm in the closed Sky↔Rust set). (Task 5.2 → `closure-ho-return`.)
+    if matches!(ret, TypeRef::Closure { .. }) {
+        return Err(GenericDrop::NotBindable(format!(
+            "{trait_name}(..) -> impl Fn (higher-order return)"
+        )));
+    }
+
+    // A by-ref closure whose borrowed element is a concrete non-Clone type breaks
+    // the owned-clone bridge. (Task 5.2 → `closure-by-ref-noclone`.)
+    if by_ref {
+        if let Some(bad) = arg_types.iter().find(|tr| !typeref_is_clone(tr)) {
+            return Err(GenericDrop::NotBindable(format!(
+                "by-ref {trait_name} over a non-Clone arg: {bad:?}"
+            )));
+        }
+    }
+
+    Ok(TypeRef::Closure { kind, by_ref, arg_types, ret: Box::new(ret) })
+}
+
 /// Try to build a Wall #3 parametric `Generic` stub for one generic function.
 /// `recv` is `Some((sky, rust, struct_generics, impl_generics))` for a struct
 /// method, `None` for a free fn. Returns the stub or a `GenericDrop` reason.
@@ -4229,6 +4435,25 @@ fn sky_of_typeref(tr: &TypeRef, tyvars: &[String], self_sky: &str) -> String {
                     .collect();
                 format!("{head} {}", parts.join(" "))
             }
+        }
+        // A closure argType renders as a Sky function type. `byRef` is invisible
+        // to Sky (the borrow never escapes — B4); the Sky side only sees the
+        // owned arg/ret types. Zero-arg ⇒ `(() -> R)` (the `run_once` shape).
+        TypeRef::Closure { arg_types, ret, .. } => {
+            let ret_sky = sky_of_typeref(ret, tyvars, self_sky);
+            let arrow = if arg_types.is_empty() {
+                format!("() -> {ret_sky}")
+            } else {
+                let ins: Vec<String> = arg_types
+                    .iter()
+                    .map(|a| {
+                        let s = sky_of_typeref(a, tyvars, self_sky);
+                        if s.contains(' ') { format!("({s})") } else { s }
+                    })
+                    .collect();
+                format!("{} -> {ret_sky}", ins.join(" -> "))
+            };
+            format!("({arrow})")
         }
     }
 }
@@ -5183,5 +5408,140 @@ mod tests {
         assert_eq!(v["call"]["ret"], serde_json::json!({ "ctor": "::c::T", "args": [{ "param": 0 }] }));
         // a function call must NOT serialise a receiver key.
         assert!(v["call"].get("receiver").is_none());
+    }
+
+    // ── Phase 5: closure-param metadata ────────────────────────────────
+
+    /// A rustdoc `trait_bound` carrying the `Fn(A) -> R` parenthesized sugar.
+    /// `inputs` are rustdoc type nodes; `output` is `Some(node)` or `None` (→ `()`).
+    fn closure_bound(
+        trait_name: &str,
+        inputs: Vec<serde_json::Value>,
+        output: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        serde_json::json!({ "trait_bound": { "trait": {
+            "path": trait_name, "name": trait_name, "id": 0,
+            "args": { "parenthesized": { "inputs": inputs, "output": output } }
+        }, "modifier": "none" } })
+    }
+
+    /// `&A` (shared borrow) and `&mut A` rustdoc nodes for closure inputs.
+    fn shared_ref(inner: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "borrowed_ref": { "lifetime": null, "is_mutable": false, "type_": inner } })
+    }
+    fn mut_ref(inner: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "borrowed_ref": { "lifetime": null, "is_mutable": true, "type_": inner } })
+    }
+
+    /// param_idx map mirroring `{a:0, b:1}` (the hand-stub closures' tyvars).
+    fn ab_idx() -> HashMap<String, usize> {
+        [("a".to_string(), 0usize), ("b".to_string(), 1usize)].into_iter().collect()
+    }
+
+    #[test]
+    fn closure_param_emits_closure_argtype() {
+        // A by-ref `Fn(&a) -> bool` bound (the `keep` shape). byRef=true, kind=Fn.
+        let bound = closure_bound("Fn", vec![shared_ref(gnode("a"))], Some(prim("bool")));
+        let tr = classify_closure_param(&bound, &ab_idx(), true)
+            .expect("a by-ref Fn(&a)->bool must classify");
+        let v = serde_json::to_value(&tr).unwrap();
+        assert_eq!(v["closure"]["kind"], "Fn");
+        assert_eq!(v["closure"]["byRef"], true);
+        assert_eq!(v["closure"]["argTypes"], serde_json::json!([{ "param": 0 }]));
+        assert_eq!(v["closure"]["ret"], serde_json::json!({ "prim": "bool" }));
+    }
+
+    #[test]
+    fn closure_param_by_value_fn() {
+        // `Fn(a) -> b` (the `map_each` shape) — by-value, byRef=false.
+        let bound = closure_bound("Fn", vec![gnode("a")], Some(gnode("b")));
+        let tr = classify_closure_param(&bound, &ab_idx(), true).expect("Fn(a)->b classifies");
+        let v = serde_json::to_value(&tr).unwrap();
+        assert_eq!(v["closure"]["kind"], "Fn");
+        assert_eq!(v["closure"]["byRef"], false);
+        assert_eq!(v["closure"]["argTypes"], serde_json::json!([{ "param": 0 }]));
+        assert_eq!(v["closure"]["ret"], serde_json::json!({ "param": 1 }));
+    }
+
+    #[test]
+    fn closure_param_fnonce_zero_arg() {
+        // `FnOnce() -> a` (the `run_once` shape) — no inputs, ret = param 0.
+        let bound = closure_bound("FnOnce", vec![], Some(gnode("a")));
+        let tr = classify_closure_param(&bound, &ab_idx(), true).expect("FnOnce()->a classifies");
+        let v = serde_json::to_value(&tr).unwrap();
+        assert_eq!(v["closure"]["kind"], "FnOnce");
+        assert_eq!(v["closure"]["byRef"], false);
+        assert_eq!(v["closure"]["argTypes"], serde_json::json!([]));
+        assert_eq!(v["closure"]["ret"], serde_json::json!({ "param": 0 }));
+    }
+
+    #[test]
+    fn closure_matches_hand_stub_key_order() {
+        // The emitted JSON must carry EXACTLY {kind, byRef, argTypes, ret} under a
+        // single `closure` key — the shape the Haskell `FromJSON TypeRef` reads
+        // and the hand-stub `clo.kernel.json` carries.
+        let bound = closure_bound("Fn", vec![gnode("a")], Some(prim("bool")));
+        let tr = classify_closure_param(&bound, &ab_idx(), true).unwrap();
+        let v = serde_json::to_value(&tr).unwrap();
+        let inner = v.get("closure").and_then(|c| c.as_object()).expect("closure object");
+        let mut keys: Vec<&String> = inner.keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["argTypes", "byRef", "kind", "ret"]);
+        // exactly one top-level discriminator
+        assert_eq!(v.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn host_abi_rust_reader() {
+        // The B3 host-ABI reader: `"Rust"` / absent ⇒ Rust; an `extern "C"` ABI
+        // object ⇒ non-Rust. This is the value a caller threads into
+        // `classify_closure_param`'s `host_abi_rust` gate.
+        let rust = serde_json::json!({ "header": { "abi": "Rust" } });
+        assert!(host_abi_is_rust(&rust));
+        let absent = serde_json::json!({ "header": { "is_async": false } });
+        assert!(host_abi_is_rust(&absent)); // missing abi → assume Rust
+        let c = serde_json::json!({ "header": { "abi": { "C": { "unwind": false } } } });
+        assert!(!host_abi_is_rust(&c));
+        let c_str = serde_json::json!({ "header": { "abi": "C" } });
+        assert!(!host_abi_is_rust(&c_str));
+    }
+
+    #[test]
+    fn closure_param_nonrust_abi_drops() {
+        // B3: a non-Rust-ABI host suppresses closure metadata (Task 5.1 records a
+        // generic NotBindable; Task 5.2 upgrades it to `closure-nonrust-abi`).
+        let bound = closure_bound("Fn", vec![gnode("a")], Some(prim("bool")));
+        match classify_closure_param(&bound, &ab_idx(), false) {
+            Err(GenericDrop::NotBindable(_)) => {}
+            other => panic!("expected a non-Rust-ABI drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn closure_param_mut_slot_drops() {
+        // `Fn(&mut a)` is a mutable-borrow slot the owned-clone bridge can't
+        // reconstruct → DROP (Task 5.2 tags it `closure-mut-slot`).
+        let bound = closure_bound("Fn", vec![mut_ref(gnode("a"))], Some(prim("bool")));
+        match classify_closure_param(&bound, &ab_idx(), true) {
+            Err(GenericDrop::NotBindable(_)) => {}
+            other => panic!("expected a mut-slot drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn closure_param_by_ref_noclone_helper() {
+        // The by-ref-noclone gate's Clone oracle: a closure (and any container
+        // carrying one) is never Clone; closed primitives / params are.
+        let clo = TypeRef::Closure {
+            kind: ClosureKind::Fn,
+            by_ref: false,
+            arg_types: vec![TypeRef::Param(0)],
+            ret: Box::new(TypeRef::Prim("bool".into())),
+        };
+        assert!(!typeref_is_clone(&clo));
+        assert!(!typeref_is_clone(&TypeRef::Ctor("::Vec".into(), vec![clo])));
+        assert!(typeref_is_clone(&TypeRef::Param(0)));
+        assert!(typeref_is_clone(&TypeRef::Prim("String".into())));
+        assert!(typeref_is_clone(&TypeRef::Prim("i64".into())));
     }
 }
