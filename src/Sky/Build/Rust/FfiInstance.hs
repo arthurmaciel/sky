@@ -69,6 +69,10 @@ module Sky.Build.Rust.FfiInstance
     , traitsOfRustType
     , traitToRustPath
     , modellableTrait
+      -- * Phase 2: closure-capture Clone allowlist (#28)
+    , rustTypeIsClone
+    , skyCaptureIsClone
+    , mkCaptureNotCloneError
     ) where
 
 import Data.List (intercalate)
@@ -280,6 +284,50 @@ modellableTrait t = t `elem` ["Hash", "Eq", "Ord", "Clone", "Default"]
 -- | Does the (already-closed) Rust type satisfy the named MODELLABLE trait?
 rustTypeHasTrait :: String -> String -> Bool
 rustTypeHasTrait rustTy trait = Set.member trait (traitsOfRustType rustTy)
+
+
+-- ─── Phase 2: closure-capture Clone allowlist (#28) ──────────────────
+
+
+-- | A capture is admissible into a multi-call Fn/FnMut slot ONLY when its
+-- monomorphised Rust type is positively Clone (guardian B5: never a denylist).
+-- Built on the SAME closed-set machinery as the bound check, so a capture type
+-- that is not even in the closed set is rejected here too (Left → not Clone).
+rustTypeIsClone :: String -> Bool
+rustTypeIsClone rustTy = rustTypeHasTrait rustTy "Clone"
+
+
+-- | Returns 'True' iff the Sky type maps to a closed Rust type that is
+-- positively Clone. A type outside the closed set (records, functions, bare
+-- TVars, opaque foreign types) is conservatively rejected — the backend cannot
+-- prove Clone holds on faith (F2: never admit-and-hope).
+skyCaptureIsClone :: Can.Type -> Bool
+skyCaptureIsClone ty = case skyTypeToRustClosed ty of
+    Right rustTy -> rustTypeIsClone rustTy
+    Left _       -> False
+
+
+-- | E4400: a Sky lambda captures a non-Clone value into a multi-call (Fn/FnMut)
+-- FFI closure slot, which Rust requires to be @Fn + Clone@. First-class Sky
+-- diagnostic at the call site — never a cargo-fail.
+--
+-- The message names the captured variable and its Sky type; the hint explains
+-- the two escape routes (use a Clone-able type, or restructure for FnOnce).
+mkCaptureNotCloneError
+    :: A.Region   -- ^ call-site region
+    -> FilePath   -- ^ source file
+    -> String     -- ^ name of the captured variable
+    -> String     -- ^ Sky type of the capture (rendered as a string)
+    -> Diag.Diagnostic
+mkCaptureNotCloneError region file captureName captureTy =
+    let msg = "Capture `" ++ captureName ++ "` of type `" ++ captureTy
+            ++ "` is passed into a multi-call closure that Rust requires to be "
+            ++ "`Fn + Clone`, but `" ++ captureTy ++ "` is not Clone and must be Clone "
+            ++ "for the closure to be called more than once."
+    in Diag.withHint
+        ("Use a Clone-able captured value, or restructure so the closure "
+            ++ "captures nothing (or pass it to a single-call FnOnce slot).")
+        (Diag.mkError file region Diag.CatCodegen Diag.ffiE_GenericNotBindable msg)
 
 
 -- | The set of @{Hash, Eq, Ord, Clone, Default}@ traits a closed Rust type

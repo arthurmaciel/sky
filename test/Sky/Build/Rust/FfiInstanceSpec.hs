@@ -8,6 +8,7 @@ module Sky.Build.Rust.FfiInstanceSpec (spec) where
 
 import Test.Hspec
 
+import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
@@ -18,6 +19,13 @@ import qualified Sky.Build.Rust.FfiCall as Call
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Reporting.Diagnostic as Diag
 import Sky.Build.Rust.FfiInstance
+    ( checkInstance, checkInstances
+    , FfiInstance(..), GenericFn(..)
+    , WrapperResult(..)
+    , synthesiseGenericWrapper, synthesiseGenericWrappers
+    , skyTypeToRustClosed, traitsOfRustType, traitToRustPath, modellableTrait
+    , rustTypeIsClone, skyCaptureIsClone, mkCaptureNotCloneError
+    )
 import Sky.Build.Rust.Ffi (translateRustRet)
 
 
@@ -241,6 +249,21 @@ spec = do
             case synthesiseGenericWrapper (mkFn [("a",["Serialize"])] idxOfCall) of
                 WrapperRejected d -> isE4400 d `shouldBe` True
                 _ -> expectationFailure "unmodellable bound must reject"
+    describe "#28 closure-capture Clone allowlist" $ do
+        it "rustTypeIsClone is a positive allowlist over closed Clone types" $ do
+            map rustTypeIsClone ["i64","String","bool","char","()","Vec<i64>","SkyMaybe<i64>","f64"]
+                `shouldBe` replicate 8 True   -- f64 IS Clone (only Hash/Eq/Ord fail)
+            rustTypeIsClone "SomeOpaque" `shouldBe` False   -- not closed => not provably Clone
+        it "skyCaptureIsClone admits closed Clone Sky types, rejects non-closed" $ do
+            skyCaptureIsClone tInt  `shouldBe` True
+            skyCaptureIsClone tStr  `shouldBe` True
+            -- a record type is NOT closed => rejected
+            skyCaptureIsClone (Can.TRecord Map.empty Nothing) `shouldBe` False
+        it "non-Clone capture into a multi-call Fn slot => E4400 (not cargo-fail)" $ do
+            let d = mkCaptureNotCloneError A.one "myFile.sky" "task0" "Task Error ()"
+            Diag._diag_code d `shouldBe` Diag.ffiE_GenericNotBindable
+            isInfixOf "must be Clone" (Diag._diag_message d) `shouldBe` True
+
   where
     isLeft (Left _)  = True
     isLeft (Right _) = False
