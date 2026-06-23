@@ -17,6 +17,37 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-23 — #32 FFI-Result error-type E0308 + dyn-Fn-object under-bind closure
+
+**#32 — FFI Result error-type.** An FFI wrapper always returns `SkyResult<SkyError, _>`,
+but a top-level binding over an FFI Result whose `.skyi` advertises `Result String _`
+(annotated `Result String a` OR unannotated) rendered its return type
+`SkyResult<String, _>` from the advertised annotation → E0308 on the NORMAL DCE-on path
+(real crates hit it, not just `SKY_DCE=0` as first thought). Fix (`TypeRenderer.hs:160` +
+`ModuleEmitter.hs:889`): normalize a `String` Result ERROR slot to `SkyError` — sound
+because Sky bans `Result String a` (non-regression rule #8), the Result-returning kernels
+are generic over `E: From<String>` (instantiate `E = SkyError` at the binding seam), and
+the only `String` error slot's origin is the FFI skyi. ONLY the error slot moves — value
+`String` (`Result Error String`) preserved (guardian verified all four quadrants);
+`Result Error a` byte-identical; `Task String a` immune (`SkyTask` discards the error
+slot). Error stays unreadable on the Sky side (use the Ok payload); just no longer
+cargo-fails. Fixture `61-ffi-result-string-err` + `TypeRendererSpec` (6 cases); 94 Rust
+specs. Commit `5975d0a9`. (Filed hardening follow-up: key the error-slot match on the
+`Can.TType _ "String" []` constructor, not the rendered string, to remove a latent
+foot-gun where an anon-record/unknown type also renders `"String"`.)
+
+**dyn-Fn-object under-bind (correction to the entry below).** The trait-objects drop
+below EXCLUDED the `dyn Fn`-family on the premise the closure seam binds them — the
+guardian-final proved that false: the closure seam binds only GENERIC `F: Fn`, never a
+`dyn Fn` OBJECT, so a non-generic `Box<dyn Fn(..)>` fell through to `Box<>` → E0308 (a
+PRE-EXISTING under-bind). Closed by also dropping `dyn Fn` objects in the non-generic
+path (`is_dyn_trait_object_including_fn`; the generic `F: Fn` closure seam is untouched,
+the dual contract pinned by tests). 115 inspector tests, clippy `-D` clean. Commit
+`edf58ab8`. Filed #33 (route `dyn Fn` objects to the closure seam — ≈0 demand; sound
+over-drop in place until then).
+
+---
+
 ## 2026-06-23 — #26 arc tail: drop non-`dyn-Fn` trait objects (close trait-objects arc)
 
 **What.** Closed the trait-objects arc item per the feasibility verdict
