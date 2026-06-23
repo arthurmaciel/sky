@@ -61,6 +61,8 @@ import qualified Sky.Build.ModuleGraph as Graph
 import qualified Sky.Build.Dce as Dce
 import qualified Sky.Build.FfiRegistry as FfiReg
 import qualified Sky.Build.Rust.FfiInstance as RustFfiInst
+import qualified Sky.Build.Rust.FfiCall as RustFfiCall
+import qualified Sky.Generate.Rust.Builder.ExprEmitter as RustExpr
 import qualified Sky.Generate.Rust.Builder.Naming as RustNaming
 import qualified Sky.Build.FfiTypeResolve as FfiTy
 import qualified Sky.Build.SkyDeps as SkyDeps
@@ -2007,6 +2009,19 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             (genWrappers, wrapperRejects) =
                                 RustFfiInst.synthesiseGenericWrappers genFnRecords
                             allGenDiags = instDiags ++ wrapperRejects
+                            -- #28 Phase 4: the per-call closure-capture gate's
+                            -- input — every reached generic FFI wrapper's
+                            -- closure-typed arg slots, keyed by its lowered base
+                            -- name (== `bareCallee` at the emit site). The
+                            -- emitter reads this to gate a lambda flowing into a
+                            -- Fn/FnMut slot (capture must be Clone) and to drop
+                            -- an indirect (non-lambda) closure arg.
+                            ffiClosureSlotMap =
+                                Map.fromList
+                                    [ ( RustFfiInst._gf_baseName gf
+                                      , RustFfiCall.closureSlotKinds
+                                            (FfiReg._fg_call (RustFfiInst._gf_generic gf)) )
+                                    | gf <- genFnRecords ]
                         if not (null allGenDiags)
                           then do
                               rendered <- Render.renderCliMany
@@ -2014,10 +2029,30 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                               putStrLn rendered
                               removeStaleBuildOutput outDir (Toml._binName config)
                               return (Left ("ffi.generic.not-bindable: " ++ entryPath))
-                          else
-                              RustProject.generateRustProject config (canMod : prunedDeps)
-                                  entrySrcMod typesWithDeps rawAliases outDir srcHash
-                                  reached dceOff genWrappers
+                          else do
+                              -- Gate lifecycle (set-before / read-after; the
+                              -- globals persist across builds in a long-lived
+                              -- `sky watch` / LSP process, hence the reset).
+                              RustExpr.resetFfiClosureGateState
+                              RustExpr.setFfiClosureSlots entryPath ffiClosureSlotMap
+                              -- generateRustProject WRITES every emitted source
+                              -- (main.rs included) to disk, forcing the lazy
+                              -- codegen `String` to normal form — which is what
+                              -- fires the gate's diagnostic appends. So the
+                              -- accumulator is fully populated once this returns.
+                              genResult <-
+                                  RustProject.generateRustProject config (canMod : prunedDeps)
+                                      entrySrcMod typesWithDeps rawAliases outDir srcHash
+                                      reached dceOff genWrappers
+                              gateDiags <- RustExpr.takeFfiClosureGateDiagnostics
+                              if not (null gateDiags)
+                                then do
+                                    rendered <- Render.renderCliMany
+                                        (Diag.sortDiagnostics gateDiags)
+                                    putStrLn rendered
+                                    removeStaleBuildOutput outDir (Toml._binName config)
+                                    return (Left ("ffi.closure.capture-gate: " ++ entryPath))
+                                else return genResult
 
                     Toml.BackendGo ->
                         if not (null authDiags)

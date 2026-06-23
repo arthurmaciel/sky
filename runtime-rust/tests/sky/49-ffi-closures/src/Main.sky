@@ -23,10 +23,10 @@ main =
     let
         m = Result.withDefault [] mapped
         k = Result.withDefault [] kept
-        _ = println ("mapped sum -> " ++ String.fromInt (List.foldl (+) 0 m))
+        _ = println ("mapped sum -> " ++ String.fromInt (List.foldl (\a b -> a + b) 0 m))
         _ = println ("kept len   -> " ++ String.fromInt (List.length k))
     in
-    if List.foldl (+) 0 m == 60 && List.length k == 2 then
+    if List.foldl (\a b -> a + b) 0 m == 60 && List.length k == 2 then
         println "[ALL OK]"
     else
         println "[FAIL]"

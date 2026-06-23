@@ -42,16 +42,26 @@ module Sky.Generate.Rust.Builder.ExprEmitter
     , ctorArgToPattern
     , flattenCons
     , isBackendEntryApp
+      -- * #28 Phase 4: per-call FFI closure-capture gate threading
+    , setFfiClosureSlots
+    , resetFfiClosureGateState
+    , takeFfiClosureGateDiagnostics
+    , mkIndirectClosureDropDiag
     ) where
 
 import Data.List (intercalate, isSuffixOf, isPrefixOf, isInfixOf, sortBy, stripPrefix, minimumBy, nub)
 import Data.Char (isUpper, isDigit)
 import Numeric (showHex)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
+import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Sky.AST.Canonical as Can
 import qualified Sky.Sky.ModuleName as ModuleName
 import qualified Sky.Reporting.Annotation as Ann
+import qualified Sky.Reporting.Diagnostic as Diag
+import Sky.Build.Rust.FfiCall (ClosureKind)
+import Sky.Build.Rust.FfiInstance (gateClosureArg)
 import Sky.Generate.Rust.Builder.Types
     ( EmitCtx(..)
     , kernelsNeedingErrorPin
@@ -92,6 +102,193 @@ import Sky.Generate.Rust.Builder.Pattern
     , hasStrPat
     , isWildcard
     )
+
+
+-- ─── #28 Phase 4: per-call FFI closure-capture gate threading ─────────
+--
+-- ExprEmitter is a pure `String`-returning emitter and `EmitCtx` is built in
+-- the OUT-OF-BOUNDARY `ModuleEmitter`/`Project`, so the closure-slot metadata
+-- (which FFI arg index is a Fn/FnMut/FnOnce closure slot, per lowered wrapper
+-- base name) and the gate's diagnostics cannot be threaded as parameters. They
+-- travel through two module-level IORefs — the same cross-cut the compiler
+-- already uses for `globalFfiRegistry` / `globalAnonRecords` (a single-threaded
+-- compiler, set-once-before-codegen / read-after-codegen lifecycle).
+--
+-- LIFECYCLE CONTRACT (enforced by Compile.hs):
+--   1. `resetFfiClosureGateState` clears BOTH refs at the start of each project
+--      codegen (the globals persist across builds in a long-lived `sky watch` /
+--      LSP process — a stale slot map or stale diags would mis-gate).
+--   2. `setFfiClosureSlots` installs the per-build slot map BEFORE codegen runs.
+--   3. codegen runs; the gate APPENDS a diagnostic for each rejected/dropped
+--      closure FFI arg.
+--   4. Compile.hs FORCES the emitted sources to normal form, THEN
+--      `takeFfiClosureGateDiagnostics` drains the accumulator (the force is
+--      load-bearing: the append is a side effect of evaluating the lazy result
+--      `String`; reading before the force would miss diagnostics).
+
+-- | FFI closure-slot metadata for the current build: the lowered wrapper base
+-- name (e.g. @"clo_map_each"@, == `bareCallee` at the emit site == the FFI
+-- generic's `_gf_baseName`) maps to the `ClosureKind` of each closure-typed
+-- value-arg, keyed by arg index.
+{-# NOINLINE ffiClosureSlotsRef #-}
+ffiClosureSlotsRef :: IORef (Map.Map String (Map.Map Int ClosureKind))
+ffiClosureSlotsRef = unsafePerformIO (newIORef Map.empty)
+
+-- | The entry source file, used as the @FilePath@ on a gate diagnostic. Set by
+-- Compile.hs together with the slot map (the call-site region carries the
+-- precise line:col; the file is constant for the build).
+{-# NOINLINE ffiClosureGateFileRef #-}
+ffiClosureGateFileRef :: IORef FilePath
+ffiClosureGateFileRef = unsafePerformIO (newIORef "")
+
+-- | The capture-gate diagnostics accumulated during the current build's codegen
+-- (E4400 capture rejections + indirect-closure coverage drops).
+{-# NOINLINE ffiClosureGateDiagsRef #-}
+ffiClosureGateDiagsRef :: IORef [Diag.Diagnostic]
+ffiClosureGateDiagsRef = unsafePerformIO (newIORef [])
+
+-- | Install the per-build FFI closure-slot map + the entry file for diagnostics
+-- (step 2 of the lifecycle).
+setFfiClosureSlots :: FilePath -> Map.Map String (Map.Map Int ClosureKind) -> IO ()
+setFfiClosureSlots file slots = do
+    writeIORef ffiClosureGateFileRef file
+    writeIORef ffiClosureSlotsRef slots
+
+-- | Clear the gate IORefs (step 1 — call once before each project codegen).
+resetFfiClosureGateState :: IO ()
+resetFfiClosureGateState = do
+    writeIORef ffiClosureSlotsRef Map.empty
+    writeIORef ffiClosureGateFileRef ""
+    writeIORef ffiClosureGateDiagsRef []
+
+-- | Drain the gate diagnostics (step 4 — call AFTER forcing the emitted sources
+-- to normal form). Returns and clears the accumulator.
+takeFfiClosureGateDiagnostics :: IO [Diag.Diagnostic]
+takeFfiClosureGateDiagnostics = do
+    ds <- readIORef ffiClosureGateDiagsRef
+    writeIORef ffiClosureGateDiagsRef []
+    pure ds
+
+-- | The closure-slot kinds for a lowered FFI wrapper base name, if any. Read
+-- inside the pure emitter. The strict `seq` keeps GHC from floating the
+-- `unsafePerformIO` read out of the per-call context (mirrors the read
+-- discipline of the other compiler-global IORefs).
+lookupFfiClosureSlots :: String -> Map.Map Int ClosureKind
+lookupFfiClosureSlots baseName =
+    let m = unsafePerformIO (readIORef ffiClosureSlotsRef)
+    in m `seq` Map.findWithDefault Map.empty baseName m
+{-# NOINLINE lookupFfiClosureSlots #-}
+
+-- | Append a gate diagnostic from inside the pure emitter (the only write of
+-- `ffiClosureGateDiagsRef` during codegen). Returns @()@ via `seq` so the
+-- effect is forced when the surrounding rendered `String` is forced; a dropped
+-- append is a missed E4400 (a soundness floor breach), so this MUST run.
+recordFfiClosureGateDiag :: Diag.Diagnostic -> ()
+recordFfiClosureGateDiag d =
+    unsafePerformIO (modifyIORef' ffiClosureGateDiagsRef (d :))
+{-# NOINLINE recordFfiClosureGateDiag #-}
+
+-- | The entry source file for gate diagnostics (read inside the pure emitter).
+ffiClosureGateFile :: String
+ffiClosureGateFile = unsafePerformIO (readIORef ffiClosureGateFileRef)
+{-# NOINLINE ffiClosureGateFile #-}
+
+-- | The first concrete (no-type-var) `Can.Type` recorded by the solver for a
+-- capture variable's USE-SITE region inside a lambda body. Returns 'Nothing'
+-- when the var has no concrete recorded type (e.g. a still-polymorphic capture,
+-- or a region the solver didn't pin) — which the capture gate treats
+-- CONSERVATIVELY (a multi-call slot cannot prove Clone ⇒ reject). Mirrors the
+-- region-walk of 'inferParamRustTypeFromRegions' but yields the raw 'Can.Type'.
+captureCanTypeFromRegions :: EmitCtx -> String -> Can.Expr -> Maybe Can.Type
+captureCanTypeFromRegions ctx vname = firstJust . go
+  where
+    firstJust = foldr (\x acc -> case x of Just _ -> x; Nothing -> acc) Nothing
+    useType region = case Map.lookup region (ecRegionTypes ctx) of
+      Just t | not (hasTypeVars t) -> Just t
+      _                            -> Nothing
+    shadows names = vname `elem` names
+    go (Ann.At region e) =
+      (case e of
+         Can.VarLocal v | v == vname -> [useType region]
+         _                           -> [])
+      ++ children e
+    children e = case e of
+      Can.Call fn args        -> concatMap go (fn : args)
+      Can.Lambda ps b
+        | shadows (concatMap patBindingVars ps) -> []
+        | otherwise                             -> go b
+      Can.Let d b ->
+        let dBodies = if shadows (defParamVars d) then [] else concatMap go (defLocalBodies d)
+            bRest   = if shadows (defLocalNames d) then [] else go b
+        in dBodies ++ bRest
+      Can.LetRec ds b ->
+        let names   = concatMap defLocalNames ds
+            dBodies = [ x | d <- ds, not (shadows (defParamVars d))
+                          , body <- defLocalBodies d, x <- go body ]
+            bRest   = if shadows names then [] else go b
+        in dBodies ++ bRest
+      Can.LetDestruct pat x b
+        | shadows (patBindingVars pat) -> go x
+        | otherwise                    -> go x ++ go b
+      Can.Case s bs           -> go s ++ concat [ go b | Can.CaseBranch p b <- bs
+                                                       , not (shadows (patBindingVars p)) ]
+      Can.If brs el           -> concat [ go c ++ go t | (c, t) <- brs ] ++ go el
+      Can.Binop _ _ _ _ a b   -> go a ++ go b
+      Can.Access r _          -> go r
+      Can.Update _ r ups      -> go r ++ concat [ go x | (_, Can.FieldUpdate _ x) <- Map.toList ups ]
+      Can.Record fs           -> concat [ go x | (_, x) <- Map.toList fs ]
+      Can.List xs             -> concatMap go xs
+      Can.Tuple a b rest      -> concatMap go (a : b : rest)
+      Can.Negate x            -> go x
+      _                       -> []
+
+-- | Run the #28 capture gate for a DIRECT lambda flowing into an FFI closure
+-- slot of kind @kind@. Reuses the emitter's existing genuine-capture set
+-- (free `VarLocal`s of the body minus the lambda's own params — exactly the
+-- set 'argToRustString' clones), resolves each capture's solved `Can.Type` from
+-- the region map, and delegates to 'gateClosureArg'. On a non-Clone capture in
+-- a multi-call (Fn/FnMut) slot it records the E4400 diagnostic (which fails the
+-- build in Compile.hs) and returns 'False' (do not emit). A capture whose type
+-- could not be resolved to a concrete `Can.Type` is passed as an UNKNOWN sentinel
+-- (`Can.TVar "?"` — never Clone), so the gate conservatively rejects it for a
+-- multi-call slot (B5: cannot prove Clone ⇒ refuse). FnOnce slots admit any
+-- capture (moved once). Returns 'True' when the lambda may be lowered as-is.
+gateFfiClosureLambda :: EmitCtx -> ClosureKind -> Ann.Region -> [Can.Pattern] -> Can.Expr -> Bool
+gateFfiClosureLambda ctx kind callRegion ps body =
+    let paramNames = Set.fromList (concatMap patBindingVars ps)
+        captured   = Set.toList (Set.difference (collectVarLocals body) paramNames)
+        -- An unresolved capture type → a TVar sentinel the closed-set Clone
+        -- check rejects, so a multi-call slot cannot silently admit it.
+        capWithTy v = (v, maybe (Can.TVar "?") id (captureCanTypeFromRegions ctx v body))
+        capturesTyped = map capWithTy captured
+    in case gateClosureArg kind callRegion ffiClosureGateFile capturesTyped of
+        Right () -> True
+        Left d   -> recordFfiClosureGateDiag d `seq` False
+
+-- | The indirect-closure coverage-drop diagnostic (an FFI closure slot fed a
+-- non-syntactic-lambda arg — a let-bound var / a function returning a closure —
+-- whose captures the gate cannot inspect, so a sound wrapper can't be emitted).
+-- Pure + exported for unit testing.
+mkIndirectClosureDropDiag :: Ann.Region -> FilePath -> String -> Int -> Diag.Diagnostic
+mkIndirectClosureDropDiag callRegion file baseName argIx =
+    let msg = "FFI closure argument " ++ show argIx ++ " of `" ++ baseName
+            ++ "` is not a literal lambda at the call site (closure-indirect-"
+            ++ "noanalysis). The capture gate can only verify a closure written "
+            ++ "directly as a `\\... -> ...` lambda, so an indirect closure value "
+            ++ "is not bound."
+    in Diag.withHint
+        ("Pass the closure inline as a `\\... -> ...` lambda at the call site "
+            ++ "so the compiler can verify its captures.")
+        (Diag.mkError file callRegion Diag.CatCodegen
+            Diag.ffiE_GenericNotBindable msg)
+
+-- | Record the indirect-closure coverage drop. Returns @()@; the call's binding
+-- is dropped at the emit site.
+recordFfiIndirectClosureDrop :: Ann.Region -> String -> Int -> ()
+recordFfiIndirectClosureDrop callRegion baseName argIx =
+    recordFfiClosureGateDiag
+        (mkIndirectClosureDropDiag callRegion ffiClosureGateFile baseName argIx)
+
 
 -- | Walk an expression and collect VarLocal names, counting occurrences.
 -- Used to decide which variables need .clone() (those used ≥ 2 times).
@@ -3131,7 +3328,32 @@ emitDefaultCall ctx fn calleeName args =
         isResultCtorArg (Ann.At _ (Can.Call (Ann.At _ (Can.VarCtor _ _ "Result" cn _)) [_])) =
             cn == "Ok" || cn == "Err"
         isResultCtorArg _ = False
-        emitArg i a
+        -- #28 Phase 4: the per-call FFI closure-capture gate runs FIRST. When
+        -- this callee's lowered base name (`bareCallee`) has a closure slot at
+        -- arg index `i`, a DIRECT lambda is verified by `gateFfiClosureLambda`
+        -- (non-Clone capture into a multi-call slot ⇒ E4400 recorded, build
+        -- fails); a NON-lambda (indirect) closure value is dropped with a
+        -- recorded coverage diagnostic. Any other arg falls through to the
+        -- normal emission. Slot-free callees skip the gate entirely (the common
+        -- path — `Map.lookup` misses).
+        emitArg i a = case Map.lookup i (lookupFfiClosureSlots bareCallee) of
+            Just kind -> case a of
+                Ann.At callRegion (Can.Lambda ps body)
+                    | gateFfiClosureLambda ctx kind callRegion ps body
+                                  -> emitArgNormal i a
+                    | otherwise   -> ffiClosureGateRejectedSentinel
+                Ann.At callRegion _
+                    -> recordFfiIndirectClosureDrop callRegion bareCallee i
+                       `seq` ffiClosureGateRejectedSentinel
+            Nothing -> emitArgNormal i a
+        -- A placeholder for a closure arg the gate refused (rejected capture or
+        -- indirect closure). A diagnostic has ALREADY been recorded, so the
+        -- build aborts in Compile.hs before this Rust is compiled; the sentinel
+        -- is never reached by a successful build, but it keeps the emitter total
+        -- (no partial function) and is an obvious marker if it ever leaked.
+        ffiClosureGateRejectedSentinel =
+            "compile_error!(\"sky: FFI closure capture gate rejected this argument (#28)\")"
+        emitArgNormal i a
             | isHandlerArcParam i, isBareHandlerArg a
                               = "std::sync::Arc::new(" ++ argToRustString ctx noCloneFn a ++ ")"
             | isEventCbParam i, isBareFnItemArg a || isEventCbLambdaArg a

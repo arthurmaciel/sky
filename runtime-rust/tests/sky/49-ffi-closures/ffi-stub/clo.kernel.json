@@ -11,7 +11,7 @@
         "params": ["a", "b"],
         "bounds": {},
         "call": {
-          "kind": "function",
+          "kind": "function", "assocOnType": false,
           "path": ["::clo"], "method": "map_each",
           "typeArgs": [{"param": 0}, {"param": 1}],
           "args": [0, 1],
@@ -32,7 +32,7 @@
         "params": ["a"],
         "bounds": {"a": ["Clone"]},
         "call": {
-          "kind": "function",
+          "kind": "function", "assocOnType": false,
           "path": ["::clo"], "method": "keep",
           "typeArgs": [{"param": 0}],
           "args": [0, 1],
@@ -53,7 +53,7 @@
         "params": ["a"],
         "bounds": {},
         "call": {
-          "kind": "function",
+          "kind": "function", "assocOnType": false,
           "path": ["::clo"], "method": "run_once",
           "typeArgs": [{"param": 0}],
           "args": [0],

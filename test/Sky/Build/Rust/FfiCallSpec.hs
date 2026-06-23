@@ -55,6 +55,7 @@ spec = do
                 , _call_args     = [0]
                 , _call_argTypes = [TRParam 0]
                 , _call_ret      = TRCtor "::box1::Box1" [TRParam 0]
+                , _call_assocOnType = True
                 }
         it "decodes a method call with a ref receiver `left : Pair a b -> a`" $ do
             let j = A.object
@@ -81,6 +82,7 @@ spec = do
                 , _call_args     = []
                 , _call_argTypes = [TRCtor "::mycrate::Pair" [TRParam 0, TRParam 1]]
                 , _call_ret      = TRParam 0
+                , _call_assocOnType = True
                 }
         it "decodes a prim TypeRef leaf in ret (`count : Keyed a -> Int`)" $ do
             let j = A.object
@@ -193,6 +195,7 @@ spec = do
                 , _call_args     = [0]
                 , _call_argTypes = [TRParam 0]
                 , _call_ret      = TRCtor "::c::T" [TRParam 0]
+                , _call_assocOnType = True
                 }
         it "accepts a valid single-param call" $
             validateCall 1 okCall `shouldSatisfy` isRight
@@ -226,6 +229,7 @@ spec = do
                         [ TRCtor "Vec" [TRParam 0]
                         , TRClosure FnKind False [TRParam 0] (TRParam 1) ]
                     , _call_ret      = TRCtor "Vec" [TRParam 1]
+                    , _call_assocOnType = False
                     }
             -- C-A: real params ["a","b"] → TRParam 0 → A, TRParam 1 → B
             closureBounds call ["a", "b"] `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
@@ -241,6 +245,7 @@ spec = do
                         [ TRCtor "Vec"
                             [TRClosure FnKind False [TRParam 0] (TRPrim "bool")] ]
                     , _call_ret      = TRPrim "i64"
+                    , _call_assocOnType = False
                     }
             -- C-B: a closure nested inside Vec<_> must be rejected by validateCall
             isLeft (validateCall 1 call) `shouldBe` True
@@ -256,6 +261,7 @@ spec = do
                     , _call_args     = [0]
                     , _call_argTypes = [TRParam 0]
                     , _call_ret      = TRCtor "::box1::Box1" [TRParam 0]
+                    , _call_assocOnType = True
                     }
             renderCall c ["a"]    `shouldBe` "::box1::Box1::<A>::make(arg0)"
             renderRetType c ["a"] `shouldBe` "::box1::Box1<A>"
@@ -270,10 +276,33 @@ spec = do
                     , _call_args     = []
                     , _call_argTypes = [TRCtor "::mycrate::Pair" [TRParam 0, TRParam 1]]
                     , _call_ret      = TRParam 0
+                    , _call_assocOnType = True
                     }
             renderCall c ["k", "v"] `shouldBe`
                 "::mycrate::Pair::<K, V>::left(&arg0)"
             renderRetType c ["k", "v"] `shouldBe` "K"
+        it "renders a FREE crate function with NO turbofish (assocOnType=False)" $ do
+            -- `map_each : List a -> (a -> b) -> Result Error (List b)` from a
+            -- crate-level free fn `map_each<A, B, F: Fn(A) -> B>`. The closure
+            -- type-param `F` is NOT in the kernel.json typeArgs, so a partial
+            -- `::<A, B>` is an arity error (E0107) and a turbofish on the crate
+            -- path is E0109 — the only sound form omits the turbofish and lets
+            -- Rust infer A from `arg0: Vec<A>`, F from `arg1`, B from F's return.
+            let c = Call
+                    { _call_kind     = CallFunction
+                    , _call_path     = ["::clo"]
+                    , _call_typeArgs = [TRParam 0, TRParam 1]
+                    , _call_method   = Just "map_each"
+                    , _call_receiver = Nothing
+                    , _call_args     = [0, 1]
+                    , _call_argTypes =
+                        [ TRCtor "Vec" [TRParam 0]
+                        , TRClosure FnKind False [TRParam 0] (TRParam 1) ]
+                    , _call_ret      = TRCtor "Vec" [TRParam 1]
+                    , _call_assocOnType = False
+                    }
+            renderCall c ["a", "b"] `shouldBe`
+                "::clo::map_each(arg0, arg1)"
 
     describe "#28 — owned-clone bridge for Fn(&A) closure params (Task 3.2, B4)" $ do
         -- `keep : List a -> (&a -> Bool) -> List a` — the host wants Fn(&A) but
@@ -291,6 +320,7 @@ spec = do
                     [ TRCtor "Vec" [TRParam 0]
                     , TRClosure FnKind byRef [TRParam 0] (TRPrim "bool") ]
                 , _call_ret      = TRCtor "Vec" [TRParam 0]
+                , _call_assocOnType = False
                 }
         it "byRef closure arg passes an owned-clone bridge, not arg1 directly" $
             renderCall (keepCall True) ["a"] `shouldContain`
@@ -311,6 +341,7 @@ spec = do
                         [ TRClosure FnKind True
                             [TRParam 0, TRParam 1] (TRParam 0) ]
                     , _call_ret      = TRParam 0
+                    , _call_assocOnType = False
                     }
             renderCall zipCall ["a", "b"] `shouldContain`
                 "move |__r0, __r1| { let __v0 = __r0.clone(); \

@@ -592,7 +592,15 @@ synthesiseGenericWrapper gf =
                         , "        " ++ bodyR
                         , "    })) {"
                         , "        Ok(__v)  => ok_res(__v),"
-                        , "        Err(_)   => SkyResult::Err(str_err::<SkyError>("
+                        -- Bare `str_err(...)`, NO turbofish: the value flows into
+                        -- `SkyResult::Err(_)` whose wrapper return type fixes the
+                        -- error slot to `SkyError`, so inference resolves the type
+                        -- param. A turbofish `str_err::<SkyError>` is rejected
+                        -- (E0107) when the generated `main.rs` `use crate::*`
+                        -- brings a 0-generic `str_err` shadow into scope; the bare
+                        -- call type-checks against BOTH the core `str_err<E: From
+                        -- <String>>` and the 0-generic shadow.
+                        , "        Err(_)   => SkyResult::Err(str_err("
                             ++ "\"a Sky closure passed to FFI panicked\")),"
                         , "    }"
                         ]

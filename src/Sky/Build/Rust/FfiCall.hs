@@ -82,6 +82,18 @@ data Call = Call
                                        --   (length == 'callArity'; entry j is the type of @argJ@,
                                        --   covering the receiver arg too, e.g. @::box1::Box1<A>@)
     , _call_ret      :: !TypeRef      -- ^ wrapper return type (inside the @SkyResult<SkyError, _>@)
+    , _call_assocOnType :: !Bool
+      -- ^ Where the turbofish type-args attach when a @method@ is present.
+      --   @True@ (the default for a parsed @call@ that omits @"assocOnType"@):
+      --   the path's last segment is the impl Self-TYPE, so the turbofish binds
+      --   the type — @::box1::Box1::\<A\>::make(…)@ (and method-call receivers,
+      --   @::mycrate::Pair::\<K, V\>::left(&arg0)@). @False@: the path is a
+      --   crate\/module and @method@ is a FREE function, so the turbofish binds
+      --   the function AFTER its name — @::clo::map_each::\<A, B\>(…)@. A free
+      --   function's turbofish on the crate path is invalid Rust (E0109), which
+      --   is why the producer must distinguish the two; the in-repo hand stubs
+      --   set @"assocOnType": false@ for free functions, and the durable fix is
+      --   an explicit discriminator from the out-of-boundary inspector.
     }
     deriving (Show, Eq)
 
@@ -272,9 +284,22 @@ renderCall c params =
         turbofish = case _call_typeArgs c of
             []  -> ""
             trs -> "::<" ++ intercalate ", " (map (renderTypeRef params) trs) ++ ">"
-        -- The callee: path (+ turbofish) optionally followed by ::method.
+        -- The callee. For an assoc-fn/method on a TYPE (`_call_assocOnType`),
+        -- the type-args bind the impl Self-type, so the turbofish sits on the
+        -- path BEFORE the method (`::box1::Box1::<A>::make`,
+        -- `::mycrate::Pair::<K, V>::left`). For a FREE function in a crate/module
+        -- the turbofish is OMITTED entirely: a free FFI closure-taking fn's full
+        -- generic list includes the closure type-param `F` (e.g. crate
+        -- `map_each<A, B, F: Fn(A) -> B>`), which the kernel.json `typeArgs` does
+        -- NOT carry (it lists only the Sky-visible params A, B). Supplying a
+        -- partial `::<A, B>` is an arity error (E0107); every type-param is
+        -- instead inferred from the value-arg types (`arg0: Vec<A>` pins A,
+        -- `arg1: F1` pins F and its return B). A turbofish on the crate path is
+        -- also invalid Rust (E0109), so omission is the only sound free-fn form.
         callee = case _call_method c of
-            Just m  -> pathStr ++ turbofish ++ "::" ++ m
+            Just m
+              | _call_assocOnType c -> pathStr ++ turbofish ++ "::" ++ m
+              | otherwise           -> pathStr ++ "::" ++ m
             Nothing -> pathStr ++ turbofish
         -- Receiver argument (if any), borrow-formed, prepended to the value args.
         recvArg = case _call_receiver c of
@@ -516,6 +541,11 @@ parseCall nParams = A.withObject "Call" $ \o -> do
     args     <- o .:? "args" .!= []
     argTypes <- o .:? "argTypes" .!= []
     ret      <- o .: "ret"
+    -- Default True preserves the pre-existing turbofish-on-path rendering for
+    -- every assoc-fn / method stub (Box1::<A>::make, Pair::<K,V>::left); a FREE
+    -- function in a crate/module must opt out with "assocOnType": false so the
+    -- turbofish renders after the method name (clo::map_each::<A,B>).
+    assocOnType <- o .:? "assocOnType" .!= True
     let c = Call
             { _call_kind     = kind
             , _call_path     = path
@@ -525,6 +555,7 @@ parseCall nParams = A.withObject "Call" $ \o -> do
             , _call_args     = args
             , _call_argTypes = argTypes
             , _call_ret      = ret
+            , _call_assocOnType = assocOnType
             }
     case validateCall nParams c of
         Right ok -> pure ok

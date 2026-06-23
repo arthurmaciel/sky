@@ -29,6 +29,7 @@ import Sky.Build.Rust.FfiInstance
     , gateClosureArg, gateClosureArgNames
     )
 import Sky.Build.Rust.Ffi (translateRustRet, cargoProfilePanicIsUnwind)
+import Sky.Generate.Rust.Builder.ExprEmitter (mkIndirectClosureDropDiag)
 
 
 -- ── Can.Type builders ────────────────────────────────────────────────
@@ -68,6 +69,7 @@ makeCall = Call.Call
     , Call._call_args     = [0]
     , Call._call_argTypes = [Call.TRParam 0]
     , Call._call_ret      = Call.TRCtor "::box1::Box1" [Call.TRParam 0]
+    , Call._call_assocOnType = True
     }
 
 -- An instance over a single param `a` at type `ty`, with the given bounds.
@@ -228,6 +230,7 @@ spec = do
                 , Call._call_args     = [0]
                 , Call._call_argTypes = [Call.TRCtor "::box1::Box1" [Call.TRParam 0]]
                 , Call._call_ret      = Call.TRParam 0
+                , Call._call_assocOnType = True
                 }
             -- `Idx::of : a -> Idx a` — a bounded ctor for the bounds-render test.
             idxOfCall = Call.Call
@@ -239,6 +242,7 @@ spec = do
                 , Call._call_args     = [0]
                 , Call._call_argTypes = [Call.TRParam 0]
                 , Call._call_ret      = Call.TRCtor "::idx::Idx" [Call.TRParam 0]
+                , Call._call_assocOnType = True
                 }
         it "emits a generic <T> wrapper for an unconstrained fn (TVar→UpperCamel)" $ do
             let src = okSrc (synthesiseGenericWrapper (mkFn [] makeCall))
@@ -327,6 +331,7 @@ spec = do
                     [ Call.TRCtor "Vec" [Call.TRParam 0]
                     , Call.TRClosure k False [Call.TRParam 0] (Call.TRParam 1) ]
                 , Call._call_ret      = Call.TRCtor "Vec" [Call.TRParam 1]
+                , Call._call_assocOnType = False
                 }
         it "maps each closure-typed argTypes slot to its ClosureKind by index" $ do
             Call.closureSlotKinds (twoArg Call.FnKind)
@@ -356,6 +361,17 @@ spec = do
             gateClosureArg Call.FnMutKind A.one "t.sky" [("n", tInt)] `shouldBe` Right ()
             gateClosureArg Call.FnOnceKind A.one "t.sky" [("task0", tTaskErrorUnit)] `shouldBe` Right ()
 
+    describe "#28 indirect-closure coverage drop (Task 4.2 — non-lambda closure arg)" $ do
+        -- An FFI closure slot fed a value the gate can't inspect (a let-bound
+        -- closure var, a fn returning a closure) is dropped with a recorded
+        -- E4400 carrying the "closure-indirect-noanalysis" coverage marker.
+        it "builds an E4400 naming the arg index + base name + coverage marker" $ do
+            let d = mkIndirectClosureDropDiag A.one "app.sky" "clo_map_each" 1
+            Diag._diag_code d `shouldBe` Diag.ffiE_GenericNotBindable
+            isInfixOf "closure-indirect-noanalysis" (Diag._diag_message d) `shouldBe` True
+            isInfixOf "clo_map_each" (Diag._diag_message d) `shouldBe` True
+            isInfixOf "1" (Diag._diag_message d) `shouldBe` True
+
     describe "#28 closure wrapper synthesis (Task 3.1 — B1/B2 catch_unwind boundary)" $ do
         -- `map_each : List a -> (a -> b) -> List b` over two real params ["a","b"].
         -- arg0 is the Vec<a>; arg1 is the closure (an owned `Fn(A) -> B`).
@@ -379,6 +395,7 @@ spec = do
                     , Call.TRClosure Call.FnKind False
                         [Call.TRParam 0] (Call.TRParam 1) ]
                 , Call._call_ret      = Call.TRCtor "Vec" [Call.TRParam 1]
+                , Call._call_assocOnType = False
                 }
             okSrc' r = case r of WrapperOk _ _ s -> s; _ -> ""
         it "carries the <Fj: Fn(..) -> R + Clone> bound in the generics clause" $ do
