@@ -494,7 +494,18 @@ log** — hold it to the same bar as a code review:
 - **An FFI `Result<_, String>` error slot is UNUSABLE on the Sky side** — the
   `.skyi` advertises `String` but codegen emits `SkyError`, so `Err e` can't be
   read. Encode any status the Sky side inspects in the **Ok** payload
-  (`_status=...`), never in the `Err` slot.
+  (`_status=...`), never in the `Err` slot. **#32 (closed):** that same
+  skyi-vs-codegen divergence USED TO be a cargo E0308 whenever the FFI Result
+  flowed through a top-level binding (annotated `Result String a` OR
+  unannotated): the binding's return type rendered `SkyResult<String, _>` from
+  the advertised annotation while the wrapper value is `SkyResult<SkyError, _>`.
+  Now `typeToRustString` + `returnTypeWithGenerics` normalise a `String` Result
+  ERROR slot to `SkyError` (sound — `String` is never a legitimate Result error
+  in this backend: Sky bans `Result String a`, the runtime never constructs
+  `SkyResult<String, _>`, the only origin is the FFI skyi). `Result Error a` is
+  unchanged. The error is still unreadable on the Sky side (use the Ok payload);
+  it just no longer cargo-fails. Regression: `Sky.Generate.Rust.TypeRendererSpec`
+  + fixture `runtime-rust/tests/sky/61-ffi-result-string-err`.
 - **Sky's ONE global `Decoder a` forces a SHARED Rust decoder, not per-source
   specialization.** JsonDec/DbDec/Config all use the same `Decoder a` (no source
   type param), so codegen renders every `Decoder a` identically and can't pick

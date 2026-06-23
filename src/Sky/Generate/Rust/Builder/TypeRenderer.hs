@@ -157,7 +157,22 @@ typeToRustString recordMap t = case t of
     Can.TType _ "Maybe" [a] -> "SkyMaybe<" ++ typeToRustString recordMap a ++ ">"
     Can.TType _ "Dict" [k, v] -> "HashMap<" ++ typeToRustString recordMap k ++ ", " ++ typeToRustString recordMap v ++ ">"
     Can.TType _ "Set" [a] -> "BTreeSet<" ++ typeToRustString recordMap a ++ ">"
-    Can.TType _ "Result" [e, a] -> "SkyResult<" ++ typeToRustString recordMap e ++ ", " ++ typeToRustString recordMap a ++ ">"
+    -- #32: normalise the Result ERROR slot to `SkyError` whenever it would
+    -- render to `String`. An auto-FFI `.skyi` can advertise a foreign Result as
+    -- `Result String a`, but the generated FFI wrapper ALWAYS returns
+    -- `SkyResult<SkyError, _>` (the documented design — an FFI Result's error
+    -- slot is unusable on the Sky side; codegen forces `SkyError`). A binding
+    -- carrying such a Result would otherwise lower its return type to
+    -- `SkyResult<String, _>` from the advertised annotation while the value is
+    -- `SkyResult<SkyError, _>` → cargo E0308. Sound because `String` is never a
+    -- legitimate Result error slot in the Rust backend: Sky bans `Result String a`
+    -- in public surfaces, the runtime never constructs a `SkyResult<String, _>`
+    -- value, and the only origin is the FFI skyi. `Result Error a` is unchanged.
+    Can.TType _ "Result" [e, a] ->
+        let errStr = case typeToRustString recordMap e of
+                         "String" -> "SkyError"
+                         other    -> other
+        in "SkyResult<" ++ errStr ++ ", " ++ typeToRustString recordMap a ++ ">"
     Can.TType _ "Error" [] -> "SkyError"
     Can.TRecord fields _ ->
         let key = intercalate "," (Map.keys fields)

@@ -1,0 +1,28 @@
+{
+  "moduleName": "Rust.Clo",
+  "kernelName": "Rust_Clo",
+  "package": "clo",
+  "functions": [
+    {
+      "name": "mapEach",
+      "arity": 2,
+      "skyType": "List a -> (a -> b) -> Result String (List b)",
+      "generic": {
+        "params": ["a", "b"],
+        "bounds": {},
+        "call": {
+          "kind": "function", "assocOnType": false,
+          "path": ["::clo"], "method": "map_each",
+          "typeArgs": [{"param": 0}, {"param": 1}],
+          "args": [0, 1],
+          "argTypes": [
+            {"ctor": "Vec", "args": [{"param": 0}]},
+            {"closure": {"kind": "Fn", "byRef": false,
+                         "argTypes": [{"param": 0}], "ret": {"param": 1}}}
+          ],
+          "ret": {"ctor": "Vec", "args": [{"param": 1}]}
+        }
+      }
+    }
+  ]
+}

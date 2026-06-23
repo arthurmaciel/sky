@@ -1,0 +1,8 @@
+[package]
+name = "clo"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "clo"
+path = "src/lib.rs"

@@ -1,0 +1,19 @@
+[project]
+name = "61-ffi-result-string-err"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# #32 regression. The hand-stub `.skyi` advertises `mapEach` as
+# `... -> Result String (List b)` (a foreign Result whose error slot the
+# inspector rendered as `String`). The generated FFI wrapper ALWAYS returns
+# `SkyResult<SkyError, _>` (the documented design — an FFI Result's error slot
+# is unusable on the Sky side; codegen forces `SkyError`). Pre-fix, routing
+# such a Result through a top-level binding (annotated `Result String a` OR
+# unannotated) lowered the binding's return type to `SkyResult<String, _>` from
+# the advertised annotation while the value was `SkyResult<SkyError, _>` → cargo
+# E0308 on the NORMAL (DCE-on) path. The fix normalises a `String` Result error
+# slot to `SkyError` in codegen. setup.sh stages the dependency-free clo crate +
+# the checked-in stub (no inspector — Wall #2 hand-stub, mirrors 49).
+["rust.dependencies"]
+clo = { git = "file:///home/arthur/.cache/sky/61-ffi-result-string-err-crate", branch = "master" }

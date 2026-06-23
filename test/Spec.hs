@@ -89,6 +89,7 @@ import qualified Sky.Build.FfiTypeParserSpec
 import qualified Sky.Build.FfiTypeResolveSpec
 import qualified Sky.Build.Rust.FfiInstanceSpec
 import qualified Sky.Build.Rust.FfiCallSpec
+import qualified Sky.Generate.Rust.TypeRendererSpec
 import qualified Sky.Build.TaskResultBridgesSpec
 import qualified Sky.Build.CheckIsBuildSpec
 import qualified Sky.Build.RecordFieldOrderSpec
@@ -542,6 +543,7 @@ allSpecs fastMode = do
     describeT "Sky.Build.FfiTypeResolve" Sky.Build.FfiTypeResolveSpec.spec
     describeT "Sky.Build.Rust.FfiInstance" Sky.Build.Rust.FfiInstanceSpec.spec
     describeT "Sky.Build.Rust.FfiCall" Sky.Build.Rust.FfiCallSpec.spec
+    describeT "Sky.Generate.Rust.TypeRenderer" Sky.Generate.Rust.TypeRendererSpec.spec
     -- Result/Task bridge helpers (Task.fromResult, Task.andThenResult,
     -- Result.andThenTask) — runtime + canonicaliser + kernel sigs gate.
     describeT "Sky.Build.TaskResultBridges" Sky.Build.TaskResultBridgesSpec.spec

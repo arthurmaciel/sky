@@ -1,0 +1,41 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Result as Result
+import Rust.Clo as Clo
+import Std.Log exposing (println)
+
+
+-- #32 regression. `Clo.mapEach`'s `.skyi` advertises `Result String (List b)`
+-- but the generated FFI wrapper returns `SkyResult<SkyError, _>`.
+--
+-- (b) annotated `Result String a` matching the skyi. Pre-fix the binding
+-- lowered to `SkyResult<String, _>` ≠ the value's `SkyResult<SkyError, _>` →
+-- cargo E0308 on the NORMAL (DCE-on) path. Post-fix the error slot normalises
+-- to `SkyError`, so binding ≡ value.
+shapeAnnotated : Result String (List Int)
+shapeAnnotated =
+    Clo.mapEach [ 1, 2, 3 ] (\x -> x * 10)
+
+
+-- (c) UNANNOTATED — inferred type follows the skyi's `String` error slot.
+-- Same pre-fix E0308; same post-fix normalisation.
+shapeInferred =
+    Clo.mapEach [ 1, 2, 3 ] (\x -> x * 10)
+
+
+main : Task Error ()
+main =
+    let
+        b = Result.withDefault [] shapeAnnotated
+        c = Result.withDefault [] shapeInferred
+        sumB = List.foldl (\p q -> p + q) 0 b
+        sumC = List.foldl (\p q -> p + q) 0 c
+        _ = println ("annotated sum -> " ++ String.fromInt sumB)
+        _ = println ("inferred sum  -> " ++ String.fromInt sumC)
+    in
+        if sumB == 60 && sumC == 60 then
+            println "[ALL OK]"
+
+        else
+            println "[FAIL]"
