@@ -813,6 +813,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
     ALIAS_MAP.with(|c| *c.borrow_mut() = collect_aliases(doc));
     LOCAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_local_type_ids(doc));
+    EXTERNAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_external_type_ids(doc));
 
     // Wall #3 coverage accumulators are per-crate — reset so a multi-crate run
     // reports each crate's bind%/drops independently.
@@ -2634,18 +2635,18 @@ thread_local! {
     // function is parsed (parse_rustdoc, next to REACHABLE_PATHS).
     static LOCAL_TYPE_IDS: std::cell::RefCell<HashSet<String>> =
         std::cell::RefCell::new(HashSet::new());
-}
 
-/// True if `id` is a crate-local type whose public path is NOT reachable (a
-/// private / `pub(crate)` crate-local type). Such an id, when it appears in a
-/// parametric stub's call AST, would render as a bare `::LastSegment` that the
-/// generated wrapper can't resolve (E0603/E0433) — so `type_to_typeref` drops
-/// it. An EXTERNAL type's id (std `Vec`/`String`) is absent from `LOCAL_TYPE_IDS`
-/// → returns false → the existing std last-segment fallback stays.
-fn is_unreachable_local_type(id: &serde_json::Value) -> bool {
-    let key = item_id_to_str(id);
-    let is_local = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key));
-    is_local && REACHABLE_PATHS.with(|c| !c.borrow().contains_key(&key))
+    // Rustdoc ids of every EXTERNAL-crate (`crate_id > 0`) type that rustdoc
+    // KNOWS about (recorded in `doc["paths"]`). This is the positive
+    // discriminator the parametric `type_to_typeref` fallback needs: an id NOT
+    // in here AND not crate-local-reachable AND not always-nameable is an
+    // UNNAMEABLE type (a `pub(crate)`/private crate-local type, including one
+    // STRIPPED from the default rustdoc index — whose id never enters
+    // LOCAL_TYPE_IDS) → must DROP, never emit a bare `::Secret`. Populated from
+    // `doc["paths"]` (which lists external ids with their crate provenance) in
+    // parse_rustdoc, next to LOCAL_TYPE_IDS.
+    static EXTERNAL_TYPE_IDS: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
 }
 
 /// True when `rendered` is the rust-type name of a crate-local opaque struct
@@ -2804,6 +2805,74 @@ fn collect_local_type_ids(doc: &serde_json::Value) -> HashSet<String> {
         }
     }
     out
+}
+
+/// Collect the rustdoc ids of every EXTERNAL-crate (`crate_id > 0`) type that
+/// rustdoc records in `doc["paths"]`. `doc["paths"]` is the cross-crate id ⇒
+/// `{path, kind, crate_id}` table; an entry with `crate_id > 0` and a type-shaped
+/// `kind` is a foreign/std type the bindings can name via its last segment
+/// (`Duration`, `NaiveDate`, …). The parametric-path nameability fallback in
+/// `type_to_typeref` consults this as the POSITIVE external discriminator: an id
+/// that is neither crate-local-reachable nor in THIS set (and not always-nameable)
+/// is an unnameable private/stripped crate-local type → drop. Discrimination is
+/// purely by `crate_id` / index-provenance — never by name-casing.
+fn collect_external_type_ids(doc: &serde_json::Value) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    let Some(paths) = doc["paths"].as_object() else {
+        return out;
+    };
+    for (id, entry) in paths {
+        let crate_id = entry["crate_id"].as_u64().unwrap_or(0);
+        if crate_id == 0 {
+            continue; // a crate-local entry — handled by LOCAL_TYPE_IDS.
+        }
+        let kind = entry["kind"].as_str().unwrap_or("");
+        if TYPE_KINDS.contains(&kind) {
+            out.insert(id.clone());
+        }
+    }
+    out
+}
+
+/// Whether a `resolved_path`'s id names a type the generated bindings can
+/// reproduce. The total discriminator backing the parametric `type_to_typeref`
+/// fallback (must NOT rely on the id being present in the rustdoc index — a
+/// default-rustdoc-STRIPPED `pub(crate)` type's id is referenced in signatures
+/// but absent from the index, so its id is in NEITHER `LOCAL_TYPE_IDS` NOR
+/// `EXTERNAL_TYPE_IDS`). Cases, in order:
+///   * id resolves to a reachable crate-local public path → bindable (qualified).
+///   * id is an in-index crate-local type that is NOT reachable → drop (private).
+///   * id is a known EXTERNAL type (`crate_id > 0`, in `EXTERNAL_TYPE_IDS`) → bind.
+///   * last segment is an always-nameable container (`Vec`/`Option`/…) → bind.
+///   * otherwise (index-stripped pub(crate) / unknown uppercase) → drop.
+///
+/// Discrimination is by `crate_id`/index-provenance, NEVER by name-casing alone:
+/// an external `Duration` (in `EXTERNAL_TYPE_IDS`) binds; a stripped `Secret`
+/// (in neither set) drops.
+fn resolved_path_is_bindable(id: &serde_json::Value, raw_name: &str) -> bool {
+    let key = item_id_to_str(id);
+    // Crate-local + reachable via a public module → bindable (qualified path).
+    if REACHABLE_PATHS.with(|c| c.borrow().contains_key(&key)) {
+        return true;
+    }
+    // A CRATE-LOCAL id (in the index) that is NOT reachable is a private /
+    // `pub(crate)` type → unnameable. Decided by index-provenance, NOT name: a
+    // (pathological) crate-local `pub(crate) struct Vec` must still drop, never
+    // alias the std container below.
+    if LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key)) {
+        return false;
+    }
+    // A known EXTERNAL type (`crate_id > 0`, recorded in `doc["paths"]`) → the
+    // last-segment / fully-qualified fallback is sound (`Duration`, `NaiveDate`).
+    if EXTERNAL_TYPE_IDS.with(|s| s.borrow().contains(&key)) {
+        return true;
+    }
+    // The id is in NEITHER set → either a default-rustdoc-STRIPPED `pub(crate)`
+    // crate-local type (absent from the index) or an unknown reference. Only the
+    // always-nameable std containers (`Vec`/`Option`/…) — which rustdoc may not
+    // record an id for — may bind via the bare last segment; anything else drops.
+    let last = raw_name.rsplit("::").next().unwrap_or(raw_name);
+    ALWAYS_NAMEABLE.contains(&last)
 }
 
 fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
@@ -4348,16 +4417,26 @@ fn type_to_typeref(
         // The receiver-foreign ctor (or a nested one). Render the `::`-path the
         // SAME way rustdoc_type_to_rust_str does, then recurse into its args.
         let raw_name = rp["name"].as_str().or_else(|| rp["path"].as_str()).unwrap_or("");
-        // A PRIVATE / `pub(crate)` crate-local type (its id is crate-local but has
-        // no reachable public path) would otherwise fall back to a bare
-        // last-segment `::Secret` — an E0603/E0433 in the generated wrapper. DROP
-        // it (the per-signature nameability gate for the parametric path, where
-        // the rust_type strings are empty so `fn_types_nameable` can't see it).
-        // An EXTERNAL std type (`Vec`/`String`: id not crate-local) is unaffected.
+        // TOTAL nameability fallback (guardian #31). A PRIVATE / `pub(crate)`
+        // crate-local type — including one STRIPPED from the default rustdoc index
+        // (default `cargo rustdoc` omits `--document-private-items`, so a
+        // `pub(crate) struct Secret` referenced in a public trait method's
+        // signature has its id present in the signature but ABSENT from the index,
+        // hence NEVER in LOCAL_TYPE_IDS) — would otherwise fall through to the bare
+        // last-segment `::Secret` and cargo-fail with E0603/E0433. This path's
+        // `rust_type` strings are empty (see parse_generic_method_fn), so the
+        // downstream `fn_types_nameable` string-gate can't catch it either. So the
+        // drop MUST happen HERE: any resolved_path that does NOT resolve to a
+        // reachable public path, is NOT a known external type (`crate_id > 0`),
+        // and is NOT an always-nameable container → `Err(NotBindable)`. Never
+        // depend on the id being in the index. An EXTERNAL std type (`Vec`/`String`
+        // — always-nameable; `Duration`/`NaiveDate` — in EXTERNAL_TYPE_IDS) still
+        // binds. Discrimination is by crate_id/index-provenance, NOT name-casing.
         if let Some(id) = rp.get("id") {
-            if is_unreachable_local_type(id) {
+            if !resolved_path_is_bindable(id, raw_name) {
                 return Err(GenericDrop::NotBindable(format!(
-                    "unreachable crate-local type `{raw_name}` (no public path)"
+                    "unnameable type `{raw_name}` (no reachable public path; \
+                     not a known external/std type)"
                 )));
             }
         }
@@ -6570,12 +6649,23 @@ mod tests {
 
     // Build an `IndexMap<K,V>`-shaped inherent method fn_data:
     //   pub fn get(map: IndexMap<K,V>, key: K) -> Option<V>   (static assoc fn)
+    // The IndexMap receiver ctor carries a distinct crate-local id (7) so a test
+    // can seed it REACHABLE (mirroring parse_rustdoc); `Option`'s id stays the
+    // synthetic 0 (always-nameable, no seed needed).
     fn indexmap_get_fn() -> serde_json::Value {
+        let index_map_node = serde_json::json!({
+            "resolved_path": {
+                "name": "IndexMap", "path": "IndexMap", "id": 7,
+                "args": { "angle_bracketed": {
+                    "args": [ { "type": gnode("K") }, { "type": gnode("V") } ],
+                    "bindings": [] } }
+            }
+        });
         serde_json::json!({
             "header": { "is_async": false, "is_unsafe": false },
             "generics": { "params": [], "where_predicates": [] },
             "sig": { "inputs": [
-                ["map", path_with_args("IndexMap", vec![gnode("K"), gnode("V")])],
+                ["map", index_map_node],
                 ["key", gnode("K")]
             ], "output": path_with_args("Option", vec![gnode("V")]) }
         })
@@ -6583,6 +6673,15 @@ mod tests {
 
     #[test]
     fn test_try_parametric_stub_indexmap_shape() {
+        // Seed the receiver ctor's id (7) as REACHABLE — this is what
+        // `parse_rustdoc` does for a real crate-local type, and is the precondition
+        // the TOTAL `type_to_typeref` nameability fallback (guardian #31) checks.
+        // Without it the bare-name `IndexMap` (not an always-nameable container)
+        // would correctly DROP as unnameable. `Option`'s synthetic id (0) is left
+        // UNSEEDED so it renders via its always-nameable last segment (`::Option`).
+        REACHABLE_PATHS.with(|c| {
+            c.borrow_mut().insert("7".to_string(), "indexmap::IndexMap".to_string());
+        });
         // The impl `impl<K: Hash+Eq, V> IndexMap<K,V>` carries the K bound.
         let impl_g = generics_obj(
             vec![type_param("K", vec![trait_bound("Hash", vec![]), trait_bound("Eq", vec![])]),
@@ -6611,19 +6710,20 @@ mod tests {
         assert_eq!(stub.call.method.as_deref(), Some("get"));
         assert_eq!(stub.call.type_args, vec![TypeRef::Param(0), TypeRef::Param(1)]);
         // args: map (arg0, the IndexMap<K,V> ctor) + key (arg1, param K).
-        // The arg ctor path comes from the rustdoc node's resolved name; with a
-        // synthetic id:0 it's the bare `::IndexMap` (a real crate resolves the
-        // full `::indexmap::IndexMap` via reachable_local_path). The CALLEE path
+        // The arg ctor path resolves via `reachable_local_path` from the seeded
+        // id:0 → the FULL `::indexmap::IndexMap` (matching the production flow,
+        // where the receiver type's id is reachable). The CALLEE path
         // (stub.call.path) is the full one from the receiver rust type.
         assert_eq!(stub.call.args, vec![0, 1]);
         assert_eq!(stub.call.arg_types, vec![
-            TypeRef::Ctor("::IndexMap".to_string(),
+            TypeRef::Ctor("::indexmap::IndexMap".to_string(),
                 vec![TypeRef::Param(0), TypeRef::Param(1)]),
             TypeRef::Param(0),
         ]);
         // ret: Option<V> → in the bindable subset Option is a resolved_path ctor.
         assert_eq!(stub.call.ret,
             TypeRef::Ctor("::Option".to_string(), vec![TypeRef::Param(1)]));
+        REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
     }
 
     #[test]
@@ -7978,6 +8078,138 @@ mod tests {
             !pkg.functions.iter().any(|f| f.name == "area"),
             "a trait method returning a private/unreachable type must DROP \
              (nameability), even after the visibility relaxation");
+    }
+
+    #[test]
+    fn test_trait_method_index_stripped_private_return_drops() {
+        // [guardian #31 — BLOCKING under-bind] The headline defect. A PUBLIC
+        // trait method `reveal(&self) -> Secret` where `Secret` is `pub(crate)`.
+        // Default `cargo rustdoc` (no `--document-private-items`) STRIPS `Secret`
+        // from the index, so its id (8) is referenced in the signature but ABSENT
+        // from `doc["index"]` → never enters LOCAL_TYPE_IDS. The OLD gate
+        // (`is_unreachable_local_type` = in-LOCAL_TYPE_IDS && !reachable) returned
+        // FALSE → no drop → the parametric path fell to the bare last-segment
+        // `::Secret` → E0603/E0433 cargo-fail. The TOTAL `resolved_path_is_bindable`
+        // fallback must DROP it (neither reachable, nor in EXTERNAL_TYPE_IDS, nor
+        // always-nameable). This was RED before the fix (the method BOUND today).
+        let doc = circle_area_doc(
+            "default",
+            serde_json::json!([ ["self", borrowed(serde_json::json!({ "generic": "Self" }))] ]),
+            serde_json::json!({
+                "resolved_path": { "name": "Secret", "path": "Secret", "id": 8, "args": null }
+            }),
+        );
+        // CRITICAL: id 8 is NOT added to doc["index"] (stripped by default rustdoc)
+        // and NOT in doc["paths"] (not a public/external item). It exists ONLY in
+        // the signature reference above.
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            !pkg.functions.iter().any(|f| f.name == "area"),
+            "a trait method RETURNING an index-stripped pub(crate) type must DROP \
+             (no bare ::Secret under-bind)");
+    }
+
+    #[test]
+    fn test_trait_method_index_stripped_private_param_drops() {
+        // [guardian #31] Same defect via a PARAM position: `take(&self, s: Secret)`
+        // where `Secret` is index-stripped pub(crate). The param's `type_to_typeref`
+        // must drop (the `?` at the value-arg conversion propagates) → no method.
+        let doc = circle_area_doc(
+            "default",
+            serde_json::json!([
+                ["self", borrowed(serde_json::json!({ "generic": "Self" }))],
+                ["s", { "resolved_path": { "name": "Secret", "path": "Secret", "id": 8, "args": null } }]
+            ]),
+            serde_json::json!({ "primitive": "f64" }),
+        );
+        // id 8 deliberately absent from index + paths (stripped).
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            !pkg.functions.iter().any(|f| f.name == "area"),
+            "a trait method TAKING an index-stripped pub(crate) type must DROP");
+    }
+
+    #[test]
+    fn test_generic_trait_method_index_stripped_private_return_drops() {
+        // [guardian #31 — headline-delivery path] A GENERIC trait method
+        // `gen_reveal<T: Ord>(&self, k: T) -> Secret` returning the index-stripped
+        // pub(crate) `Secret`. This is the parametric-stub path where the ret
+        // `rust_type` is empty (parse_generic_method_fn) so the downstream
+        // `fn_types_nameable` string-gate is blind — the drop MUST come from the
+        // `type_to_typeref` total fallback on the `-> Secret` output node.
+        let mut doc = circle_area_doc(
+            "default",
+            serde_json::json!([
+                ["self", borrowed(serde_json::json!({ "generic": "Self" }))],
+                ["k", { "generic": "T" }]
+            ]),
+            serde_json::json!({
+                "resolved_path": { "name": "Secret", "path": "Secret", "id": 8, "args": null }
+            }),
+        );
+        // Declare the method-level generic `<T: Ord>` on the method node (id 100)
+        // so it parses as a generic method (not an undeclared-tyvar drop on `k`).
+        doc["index"]["100"]["inner"]["function"]["generics"] = serde_json::json!({
+            "params": [ type_param("T", vec![ trait_bound("Ord", vec![]) ]) ],
+            "where_predicates": []
+        });
+        // id 8 (Secret) absent from index + paths (stripped pub(crate)).
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            !pkg.functions.iter().any(|f| f.name == "area"),
+            "a GENERIC trait method returning an index-stripped pub(crate) type \
+             must DROP (the parametric-path under-bind the guardian reproduced)");
+    }
+
+    #[test]
+    fn test_trait_method_external_return_still_binds() {
+        // [guardian #31 — over-drop control] The fix must NOT over-drop a
+        // legitimate EXTERNAL type. A trait method `area(&self) -> Vec<i64>`
+        // returns the always-nameable `Vec` container — it MUST still bind (the
+        // total fallback short-circuits on ALWAYS_NAMEABLE). `Vec`'s id (absent or
+        // crate_id>0) is irrelevant: discrimination is by provenance, not name.
+        let doc = circle_area_doc(
+            "default",
+            serde_json::json!([ ["self", borrowed(serde_json::json!({ "generic": "Self" }))] ]),
+            serde_json::json!({
+                "resolved_path": {
+                    "name": "Vec", "path": "Vec", "id": 9999,
+                    "args": { "angle_bracketed": {
+                        "args": [ { "type": { "primitive": "i64" } } ], "bindings": [] } }
+                }
+            }),
+        );
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            pkg.functions.iter().any(|f| f.name == "area"),
+            "a trait method returning Vec<i64> (external/always-nameable) must \
+             STILL BIND — the under-bind fix must not over-drop external types");
+    }
+
+    #[test]
+    fn test_trait_method_known_external_id_return_binds() {
+        // [guardian #31 — external-by-crate_id control] An external type that is
+        // NOT always-nameable (e.g. `Duration`) but IS recorded in doc["paths"]
+        // with `crate_id > 0` MUST bind via EXTERNAL_TYPE_IDS — proving the
+        // positive external discriminator is `crate_id`/provenance, not name-casing.
+        let mut doc = circle_area_doc(
+            "default",
+            serde_json::json!([ ["self", borrowed(serde_json::json!({ "generic": "Self" }))] ]),
+            serde_json::json!({
+                "resolved_path": { "name": "Duration", "path": "std::time::Duration",
+                                   "id": 5000, "args": null }
+            }),
+        );
+        // Record id 5000 as an EXTERNAL (crate_id 1) struct in doc["paths"] — the
+        // shape rustdoc emits for a foreign type referenced in a signature.
+        doc["paths"]["5000"] = serde_json::json!({
+            "path": ["std", "time", "Duration"], "kind": "struct", "crate_id": 1
+        });
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            pkg.functions.iter().any(|f| f.name == "area"),
+            "a trait method returning a known EXTERNAL type (crate_id>0 in paths) \
+             must BIND — external discrimination is by provenance, not name");
     }
 
     #[test]

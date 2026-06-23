@@ -132,3 +132,50 @@ impl Hidden for Circle {
 pub fn _internal_uses_hidden(c: &Circle) -> i64 {
     c.hush()
 }
+
+// ── NEGATIVE (guardian #31): a PUBLIC trait whose method SIGNATURE mentions a
+// `pub(crate)` TYPE ───────────────────────────────────────────────────────
+// `Secret` is `pub(crate)` → default `cargo rustdoc` (no `--document-private-items`)
+// STRIPS it from the index, so its rustdoc id is referenced in the signatures
+// below but has NO index entry → never enters the inspector's LOCAL_TYPE_IDS. The
+// OLD nameability gate (in-LOCAL_TYPE_IDS && !reachable) returned FALSE → no drop
+// → the parametric path fell to a bare `::Secret` → E0603/E0433 cargo-fail in the
+// generated bindings. The `Reveal` trait IS public + reachable, so the #31
+// visibility relaxation makes its methods candidates; the TOTAL nameability
+// fallback in `type_to_typeref` (guardian #31) must DROP every `Reveal` method
+// because its signature references the unnameable `Secret`. The build compiling at
+// all (no `reveal`/`take_secret`/`gen_reveal` symbol referencing a bare `Secret`)
+// is the proof — a wrong emit would E0603 here. `area`/`first`/`scaled_by` (no
+// `Secret` in their sigs) still bind.
+pub(crate) struct Secret {
+    pub token: i64,
+}
+
+pub trait Reveal {
+    /// Non-generic method RETURNING the pub(crate) type → must DROP.
+    fn reveal(&self) -> Secret;
+    /// Non-generic method TAKING the pub(crate) type as a PARAM → must DROP.
+    fn take_secret(&self, s: Secret) -> i64;
+    /// GENERIC method (the headline-delivery path) returning the pub(crate) type
+    /// → must DROP at the parametric `type_to_typeref` fallback.
+    fn gen_reveal<T: Ord>(&self, k: T, floor: T) -> Secret;
+}
+
+impl Reveal for Circle {
+    fn reveal(&self) -> Secret {
+        Secret { token: self.r as i64 }
+    }
+    fn take_secret(&self, s: Secret) -> i64 {
+        s.token + 1
+    }
+    fn gen_reveal<T: Ord>(&self, k: T, floor: T) -> Secret {
+        Secret { token: if k >= floor { 1 } else { 0 } }
+    }
+}
+
+/// Internal use so the `Reveal` impl + `Secret` are live (not pruned by rustc),
+/// keeping the rows in the rustdoc the inspector reads.
+pub fn _internal_uses_reveal(c: &Circle) -> i64 {
+    let s = c.reveal();
+    c.take_secret(s) + c.gen_reveal(1_i64, 0_i64).token
+}
