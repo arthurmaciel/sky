@@ -2,15 +2,49 @@ module Main exposing (main)
 
 -- 73-ffi-serde: Sky #47(a) — serde-bound generic methods (T: Serialize/DeserializeOwned).
 --
--- P0 fixture: validates the serde-fixture crate compiles and the Sky project
--- builds cleanly. The inspector recognition + serde→String reduction bindings
--- land in P1/P2; end-to-end call assertions land in P3.
+-- P3 assertions: put/roundtrip/get_one are bound and callable; by_ref/pair/map_val
+-- are absent (C-G3); own_serde is absent (C-G1).
 --
 -- Expected output:
 --   [ALL OK]
 
+import Rust.Serde_fixture exposing (put, roundtrip, get_one)
 import Std.Log exposing (println)
 
 
 main =
-    println "[ALL OK]"
+    let
+        -- put<T: Serialize>(x: T) -> String: pass a JSON array, get back
+        -- serde_json::to_string of the Value, then its .len() as a string.
+        putResult =
+            put "[1,2,3]"
+
+        -- roundtrip<T: Serialize + DeserializeOwned>(x: T) -> T: JSON round-trip
+        rtResult =
+            roundtrip "{\"key\":\"val\"}"
+
+        -- get_one<T: DeserializeOwned>() -> T: produces a JSON-encoded value
+        goResult =
+            get_one ()
+
+        -- Verify all three succeeded
+        ok =
+            case putResult of
+                Err _ -> False
+                Ok putStr ->
+                    case rtResult of
+                        Err _ -> False
+                        Ok rtStr ->
+                            case goResult of
+                                Err _ -> False
+                                Ok _ ->
+                                    -- put: fixture calls serde_json::to_string then format!("{}", s.len())
+                                    -- "[1,2,3]" → serialised back as "[1,2,3]" (7 chars) → "7"
+                                    putStr == "7"
+                                        -- roundtrip: deserialise then re-serialise
+                                        && (String.length rtStr > 0)
+    in
+    if ok then
+        println "[ALL OK]"
+    else
+        println "[FAIL] serde-bound calls returned unexpected results"

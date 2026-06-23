@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding 61-ffi-result-string-err 73-ffi-serde)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -520,6 +520,41 @@ run_deadbinding_dce() {
   rm -rf "$wd"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 73-ffi-serde — #47(a): serde-bound generic methods.
+# POSITIVE: put / roundtrip / get_one bound; [ALL OK] emitted.
+# NEGATIVE (P3 assertions from the spec):
+#   C-G3: by_ref / pair / map_val ABSENT from bindings (inadmissible positions).
+#   C-G1: own_serde ABSENT (crate-local Serialize, not serde's).
+# ─────────────────────────────────────────────────────────────────────────────
+run_serde() {
+  local base=73-ffi-serde
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base (stage failed)"; return; }
+  local binds; binds="$(bindings_file "$wd")" || { _fail "$base (cannot derive bindings path)"; rm -rf "$wd"; return; }
+  local bin;  bin="$(build_fixture "$wd")"  || { _fail "$base (build failed)"; rm -rf "$wd"; return; }
+
+  # C-G3 + C-G1: inadmissible fns must be ABSENT from the bindings.
+  for banned in by_ref pair map_val own_serde; do
+    if [ -f "$binds" ] && rg -q "SKY-FFI-WRAPPER BEGIN $banned" "$binds"; then
+      _fail "$base: inadmissible fn '$banned' leaked into bindings (C-G3/C-G1 violated)"; rm -rf "$wd"; return
+    fi
+  done
+
+  # [ALL OK] output.
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  (put·roundtrip·get_one bound · by_ref/pair/map_val/own_serde absent · [ALL OK])"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
@@ -532,6 +567,7 @@ for n in "${FIXTURES[@]}"; do
     51-ffi-trait-methods)     run_handstub_basic "$n" ;;
     52-ffi-dce-deadbinding)   run_deadbinding_dce ;;
     61-ffi-result-string-err) run_handstub_basic "$n" ;;
+    73-ffi-serde)             run_serde ;;
     *)                        run_basic "$n" ;;
   esac
 done

@@ -855,8 +855,17 @@ emitRustFile kernelName pkg =
                 | otherwise =
                     -- Absolute `::<crate>` path: never collide with a same-named
                     -- runtime kernel module re-exported at the app crate root.
-                    if null params then "::" ++ crateImport ++ "::" ++ fnName ++ "()"
-                    else "::" ++ crateImport ++ "::" ++ fnName ++ "(" ++ callArgs ++ ")"
+                    -- [#47(a)] When the raw return type is `serde_json::Value` the
+                    -- callee is a serde-bound generic (`-> T where T: Deserialize`).
+                    -- Rust cannot infer `T` from `to_string(&(f()))` alone, so we
+                    -- always emit the turbofish `::<serde_json::Value>` for the
+                    -- free-function form to satisfy E0283 at cargo build.
+                    let tf = if effRawResult == "serde_json::Value"
+                                 then "::<serde_json::Value>"
+                                 else ""
+                    in if null params
+                        then "::" ++ crateImport ++ "::" ++ fnName ++ tf ++ "()"
+                        else "::" ++ crateImport ++ "::" ++ fnName ++ tf ++ "(" ++ callArgs ++ ")"
             -- Build the function body based on effect.  retCoerce lifts the
             -- raw Rust value into the declared return type (Option→SkyMaybe,
             -- Vec element map, numeric widening to i64/f64, &T→owned, opaque

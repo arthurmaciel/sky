@@ -4193,15 +4193,21 @@ fn serde_json_value_node() -> serde_json::Value {
 }
 
 /// Canonical serde trait paths as seen in `EXTERNAL_TRAIT_PATH_BY_ID`.
-/// Any path whose LAST segment matches one of these AND whose full joined path
-/// begins with `"serde::"` (or IS one of these exactly) is a serde trait.
+/// Serde ships its core traits in the `serde_core` crate (re-exported by the
+/// `serde` facade), so rustdoc records paths as `serde_core::ser::Serialize`
+/// rather than `serde::ser::Serialize`.  We accept both naming conventions.
 const SERDE_TRAIT_PATHS: &[&str] = &[
+    // Public serde re-export paths
     "serde::Serialize",
     "serde::ser::Serialize",
     "serde::de::Deserialize",
     "serde::Deserialize",
     "serde::de::DeserializeOwned",
     "serde::DeserializeOwned",
+    // serde_core internal paths (how rustdoc actually records them)
+    "serde_core::ser::Serialize",
+    "serde_core::de::Deserialize",
+    "serde_core::de::DeserializeOwned",
 ];
 
 /// C-G1: true iff the trait_bound node refers to a real serde trait (confirmed
@@ -4348,11 +4354,14 @@ fn serde_occurrence_admissible_in(val: &serde_json::Value, name: &str, ctx: Occu
 /// All inputs are treated as ADMISSIBLE at the top level (by-value param); the
 /// return is also ADMISSIBLE at the top level (owned return).
 fn fn_serde_param_all_admissible(fn_data: &serde_json::Value, name: &str) -> bool {
+    // rustdoc v24+: inner.function uses "sig"; older formats used "decl".
+    let sig = fn_data.get("sig").or_else(|| fn_data.get("decl")).unwrap_or(&serde_json::Value::Null);
     // Check all input types.
-    let inputs_ok = fn_data["decl"]["inputs"]
+    let inputs_ok = sig["inputs"]
         .as_array()
         .map(|inputs| {
             inputs.iter().all(|inp| {
+                // Each input is either `{"type": T, ...}` (object) or `[name, T]` (2-array).
                 let ty = inp.get("type").or_else(|| inp.get(1)).unwrap_or(inp);
                 serde_occurrence_admissible_in(ty, name, OccurrenceCtx::Admissible)
             })
@@ -4362,7 +4371,7 @@ fn fn_serde_param_all_admissible(fn_data: &serde_json::Value, name: &str) -> boo
         return false;
     }
     // Check return type.
-    let output = fn_data["decl"].get("output").unwrap_or(&serde_json::Value::Null);
+    let output = sig.get("output").unwrap_or(&serde_json::Value::Null);
     serde_occurrence_admissible_in(output, name, OccurrenceCtx::Admissible)
 }
 
@@ -10416,6 +10425,94 @@ mod tests {
                 "Display bound must NOT produce serde_json_value sentinel");
         }
         // (resolve_generics may return Some(string_node()) or None for Display — both ok)
+    }
+
+    // ── rustdoc_type_to_sky / rustdoc_type_to_rust_str sentinel ──────────────
+
+    #[test]
+    fn serde_core_serialize_path_detected_via_id() {
+        // Real serde rustdoc stores the Serialize trait as
+        // `serde_core::ser::Serialize` (crate_id > 0) in doc["paths"].
+        // `is_serde_trait_bound` must recognise it via EXTERNAL_TRAIT_PATH_BY_ID.
+        let doc = serde_json::json!({
+            "root": 0,
+            "crate_version": null,
+            "includes_private": false,
+            "index": {},
+            "paths": {
+                "2": { "crate_id": 22, "path": ["serde_core", "ser", "Serialize"], "kind": "trait" }
+            },
+            "external_crates": {},
+            "format_version": 38
+        });
+        // Build a bound with id=2 (integer form, as rustdoc emits).
+        let bound = serde_json::json!({
+            "trait_bound": {
+                "trait": {
+                    "path": "serde::Serialize",
+                    "id": 2,
+                    "args": null
+                },
+                "generic_params": [],
+                "modifier": "none"
+            }
+        });
+        let result = with_doc_provenance(&doc, || is_serde_trait_bound(&bound));
+        assert!(result, "serde_core::ser::Serialize via EXTERNAL_TRAIT_PATH_BY_ID must be detected");
+    }
+
+    #[test]
+    fn serde_core_deserialize_owned_path_detected_via_id() {
+        let doc = serde_json::json!({
+            "root": 0, "crate_version": null, "includes_private": false, "index": {},
+            "paths": {
+                "4": { "crate_id": 22, "path": ["serde_core", "de", "DeserializeOwned"], "kind": "trait" }
+            },
+            "external_crates": {}, "format_version": 38
+        });
+        let bound = serde_json::json!({
+            "trait_bound": {
+                "trait": { "path": "serde::de::DeserializeOwned", "id": 4, "args": null },
+                "generic_params": [], "modifier": "none"
+            }
+        });
+        let result = with_doc_provenance(&doc, || is_serde_trait_bound(&bound));
+        assert!(result, "serde_core::de::DeserializeOwned via EXTERNAL_TRAIT_PATH_BY_ID must be detected");
+    }
+
+    // ── fn_serde_param_all_admissible: "sig" key (real rustdoc format) ──────────
+
+    #[test]
+    fn fn_admissible_sig_format_by_value() {
+        // Real rustdoc uses "sig" not "decl" — fn_serde_param_all_admissible must
+        // handle both.  `fn put(x: T) -> String` with sig key → admissible.
+        let fd = serde_json::json!({
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": {
+                "inputs": [["x", { "generic": "T" }]],
+                "output": { "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } },
+                "is_c_variadic": false
+            },
+            "header": { "is_const": false, "is_unsafe": false, "is_async": false, "abi": "Rust" }
+        });
+        assert!(fn_serde_param_all_admissible(&fd, "T"),
+            "by-value T in sig format must be admissible");
+    }
+
+    #[test]
+    fn fn_inadmissible_sig_format_borrow_drops() {
+        // `fn by_ref(_x: &T)` in real rustdoc "sig" format → inadmissible → false.
+        let fd = serde_json::json!({
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": {
+                "inputs": [["_x", { "borrowed_ref": { "lifetime": null, "is_mutable": false, "type": { "generic": "T" } } }]],
+                "output": null,
+                "is_c_variadic": false
+            },
+            "header": { "is_const": false, "is_unsafe": false, "is_async": false, "abi": "Rust" }
+        });
+        assert!(!fn_serde_param_all_admissible(&fd, "T"),
+            "&T in sig format must be inadmissible");
     }
 
     // ── rustdoc_type_to_sky / rustdoc_type_to_rust_str sentinel ──────────────
