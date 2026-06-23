@@ -902,10 +902,14 @@ emitCargoToml uk dbDriver sqlxTls rustDeps liveStore = unlines $
     -- `unexpected_cfgs` lint fires on every cfg referencing an undeclared
     -- feature (22 occ for `feature = "live"` in a non-Live project). Declaring
     -- redis_store/webview here too future-proofs the same lint if an
-    -- always-copied module later gains one of those gates.
+    -- always-copied module later gains one of those gates. `tui` is the
+    -- always-compiled `tea.rs`'s gate (`#[cfg_attr(not(feature = "tui"), …)]`)
+    -- — declaring it silences `unexpected cfg condition value: tui` in every
+    -- generated build (#38).
     , "live = []"
     , "redis_store = []"
     , "webview = []"
+    , "tui = []"
     -- `static_alloc` activates the optional mimalloc dep + the cfg-gated global
     -- allocator (crate preamble). Declared unconditionally, enabled only by
     -- `sky build --static` via `--features static_alloc`. Off by default.
