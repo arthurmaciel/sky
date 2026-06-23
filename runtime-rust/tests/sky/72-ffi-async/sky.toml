@@ -1,0 +1,10 @@
+[project]
+name = "72-ffi-async"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local asyncffi72 crate (ping/add/try_div/boom/non_send), delivered as a
+# file:// git dep. setup.sh git-inits ./async-crate into the cache path below.
+["rust.dependencies"]
+asyncffi72 = { git = "file:///home/arthur/.cache/sky/72-ffi-async-crate", branch = "master" }

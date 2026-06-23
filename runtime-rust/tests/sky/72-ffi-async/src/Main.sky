@@ -1,0 +1,72 @@
+module Main exposing (main)
+
+-- 72-ffi-async: Sky #44 — auto async→Task FFI for foreign `async fn`.
+--
+-- Exercises four async binding shapes driven end-to-end through Sky's tokio
+-- runtime.  The NEGATIVE case (non_send) must be dropped by the inspector
+-- (Send gate) and never appear as a usable binding here.
+--
+-- Expected output:
+--   ping=pong
+--   add(2,3)=5
+--   try_div(6,2)=3
+--   try_div(6,0)=Err(...)
+--   boom=Err (panic caught)
+--   [ALL OK]
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Asyncffi72 as A
+import Std.Log exposing (println)
+
+
+-- (1) ping : () -> Task Error String
+checkPing : Task Error ()
+checkPing =
+    A.ping ()
+        |> Task.andThen (\s -> println ("ping=" ++ s))
+
+
+-- (2) add : Int -> Int -> Task Error Int
+checkAdd : Task Error ()
+checkAdd =
+    A.add 2 3
+        |> Task.andThen (\n -> println ("add(2,3)=" ++ String.fromInt n))
+
+
+-- (3) try_div : Int -> Int -> Task Error Int — fallible async
+--     Ok path then Err path
+checkTryDiv : Task Error ()
+checkTryDiv =
+    let
+        okCase =
+            A.try_div 6 2
+                |> Task.andThen (\n -> println ("try_div(6,2)=" ++ String.fromInt n))
+
+        errCase =
+            Task.onError
+                (\e -> println ("try_div(6,0)=Err(" ++ Error.toString e ++ ")"))
+                (A.try_div 6 0 |> Task.andThen (\_ -> println "try_div(6,0)=UNEXPECTED OK"))
+    in
+    okCase
+        |> Task.andThen (\_ -> errCase)
+
+
+-- (4) boom : () -> Task Error Int — async fn that panics; must become Err
+checkBoom : Task Error ()
+checkBoom =
+    Task.onError
+        (\_ -> println "boom=Err (panic caught)")
+        (A.boom () |> Task.andThen (\_ -> println "boom=UNEXPECTED OK"))
+
+
+main : Task Error ()
+main =
+    let
+        _ = checkPing
+        _ = checkAdd
+        _ = checkTryDiv
+        _ = checkBoom
+    in
+    println "[ALL OK]"
