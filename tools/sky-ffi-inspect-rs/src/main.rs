@@ -161,6 +161,13 @@ struct Call {
     #[serde(rename = "argTypes", skip_serializing_if = "Vec::is_empty")]
     arg_types: Vec<TypeRef>,
     ret: TypeRef,
+    /// Value-arg indices whose iterator param is bound `Iterator<Item=T>` (NOT
+    /// `IntoIterator`): the call site passes `argJ.into_iter()` instead of the
+    /// bare `argJ` (a `Vec<T>` is `IntoIterator` but not itself an `Iterator`).
+    /// Empty ⇒ omitted from the wire ⇒ byte-identical to a pre-iterators stub,
+    /// and every arg renders as the bare identifier ([C6] default = direct).
+    #[serde(rename = "iterAdapters", skip_serializing_if = "Vec::is_empty")]
+    iter_adapters: Vec<usize>,
 }
 
 /// The receiver of a method call: which wrapper value-arg supplies it + borrow.
@@ -203,6 +210,31 @@ impl ClosureKind {
             "Fn" => Some(ClosureKind::Fn),
             "FnMut" => Some(ClosureKind::FnMut),
             "FnOnce" => Some(ClosureKind::FnOnce),
+            _ => None,
+        }
+    }
+}
+
+/// The Rust iterator trait-kind a generic param is bound by (epic #30). An
+/// `IntoIterator<Item=T>` param takes a `Vec<T>` DIRECTLY (`Vec<T>:
+/// IntoIterator<Item=T>`); an `Iterator<Item=T>` param needs `.into_iter()`
+/// at the call site (a `Vec` is not itself an `Iterator`). Both lower the param
+/// to the same `Vec<ItemT>` argType — only the CALL FORM differs (`arg0` vs
+/// `arg0.into_iter()`), recorded per-arg in `Call::iter_adapters`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IterKind {
+    /// `IntoIterator<Item=T>` — pass the `Vec<T>` directly.
+    IntoIter,
+    /// `Iterator<Item=T>` — pass `arg.into_iter()`.
+    Iter,
+}
+
+impl IterKind {
+    /// Parse a Rust iterator trait NAME (last `::` segment) into an `IterKind`.
+    fn from_trait_name(name: &str) -> Option<IterKind> {
+        match name {
+            "IntoIterator" => Some(IterKind::IntoIter),
+            "Iterator" => Some(IterKind::Iter),
             _ => None,
         }
     }
@@ -3532,7 +3564,7 @@ enum BoundPos {
 /// (the bare-`Iterator` case is net-new vs the param-only `bound_to_concrete`
 /// arm, which only knew `IntoIterator`).
 fn is_iterator_trait_name(name: &str) -> bool {
-    name == "IntoIterator" || name == "Iterator"
+    IterKind::from_trait_name(name).is_some()
 }
 
 /// Map a single trait bound to the concrete type-JSON node to substitute, or
@@ -3670,11 +3702,6 @@ enum GenericDrop {
 
 /// The distinct reason an iterator-typed slot could not be modelled. Each maps
 /// to a stable coverage tag string flowing through `emit_generic_coverage`.
-//
-// STEP 1 ([C-R]) constructs only `ReturnUndecidable`; the other three tags are
-// wired into the PARAM seam in STEP 2 (`classify_iterator_param`). The
-// `#[allow(dead_code)]` mirrors the closure `IndirectNoAnalysis` precedent and
-// is REMOVED when STEP 2 lands. The `.tag()` test already exercises all four.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IteratorDropTag {
     /// A `-> impl IntoIterator`/`Iterator` (or otherwise iterator-trait) RETURN
@@ -3682,15 +3709,16 @@ enum IteratorDropTag {
     ReturnUndecidable,
     /// `Item=T` resolves to a non-closed / nested-closure / nested-iterator type
     /// the closed-set resolver can't bind (C3).
-    #[allow(dead_code)] // wired in STEP 2 (classify_iterator_param)
     ItemUnmodellable,
     /// An iterator companion bound beyond `Sized`+lifetime (C5) — e.g.
-    /// `I: Iterator + Send`, `where I::Item: Ord`.
-    #[allow(dead_code)] // wired in STEP 2 (iterator_bound_of companion gate)
+    /// `I: Iterator + Send`. v1 routes this to the `None`-fallthrough safe drop
+    /// (`unmodellable-bound`) rather than constructing this tag, so it stays a
+    /// taxonomy-parity entry (mirrors the closure `IndirectNoAnalysis`
+    /// precedent); the `.tag()` test exercises it.
+    #[allow(dead_code)] // taxonomy parity — the iterator_bound_of gate returns None instead
     CompanionUnsatisfiable,
     /// Iterator metadata suppressed because the host fn's ABI is not `"Rust"`
     /// (C8) — mirrors `closure-nonrust-abi`.
-    #[allow(dead_code)] // wired in STEP 2 (host_abi_is_rust gate)
     NonRustAbi,
 }
 
@@ -4285,6 +4313,105 @@ fn closure_bound_of(bounds: &[serde_json::Value]) -> Option<&serde_json::Value> 
     closure
 }
 
+/// A param's bound list is an ITERATOR-SLOT shape (epic #30) iff exactly one
+/// bound is an iterator trait (`IntoIterator`/`Iterator`) and every OTHER bound
+/// is companion-satisfiable. v1 admits NO iterator companion beyond
+/// `Sized`+lifetime (C5) — it REUSES `closure_companion_satisfiable` for the
+/// gate (a `Vec` arg is `Sized` and owns its data, so `Sized`/lifetime
+/// companions hold; `Send`/`ExactSizeIterator`/`where I::Item: Ord`/… do NOT
+/// reduce to the bare `Vec<Item>` slot → `None` → the param falls through to the
+/// existing safe `UnmodellableBound` drop). Returns `(IterKind, &bound_node)` —
+/// the kind drives the call form, the node carries the `Item=T` to classify.
+/// `None` ⇒ NOT a bindable iterator slot (over-drop is acceptable; under-bind
+/// is forbidden). Recognises BOTH `IntoIterator` AND `Iterator`.
+fn iterator_bound_of(bounds: &[serde_json::Value]) -> Option<(IterKind, &serde_json::Value)> {
+    let mut found: Option<(IterKind, &serde_json::Value)> = None;
+    for b in bounds {
+        match trait_bound_name(b) {
+            Some(n) if IterKind::from_trait_name(&n).is_some() => {
+                if found.is_some() {
+                    return None; // two iterator bounds on one param — not a plain slot
+                }
+                // SAFETY: from_trait_name(&n).is_some() proved above.
+                if let Some(k) = IterKind::from_trait_name(&n) {
+                    found = Some((k, b));
+                }
+            }
+            // A companion the `Vec` arg can satisfy (`Sized` / lifetime). Anything
+            // else (Send/Sync/ExactSizeIterator/a where-clause trait/…) makes this
+            // NOT a bindable plain iterator slot.
+            _ if closure_companion_satisfiable(b) => {}
+            _ => return None,
+        }
+    }
+    found
+}
+
+/// Classify an ITERATOR trait bound (`IntoIterator<Item=T>` / `Iterator<Item=T>`)
+/// into `(IterKind, item_typeref)`. The emitted argType is `Vec<ItemT>` (built
+/// by the CALLER via `TypeRef::Ctor("::Vec", [item_tr])`) — no new TypeRef
+/// variant ([the insight]: `Vec<T>: IntoIterator<Item=T>`).
+///
+/// The `Item=T` type resolves through the param-idx-aware `type_to_typeref`
+/// (NOT `concrete_for_inner_type` — C3: the latter can't see stub params and
+/// mishandles `{generic:T}`). A non-closed / nested-closure / nested-iterator
+/// Item → `Err` → drop (`iterator-item-unmodellable`).
+///
+/// `host_abi_rust` is the C8 gate (mirrors the closure B3): a non-Rust-ABI host
+/// records `iterator-nonrust-abi`.
+fn classify_iterator_param(
+    kind: IterKind,
+    bound: &serde_json::Value,
+    param_idx: &HashMap<String, usize>,
+    host_abi_rust: bool,
+) -> Result<(IterKind, TypeRef), GenericDrop> {
+    let trait_name = trait_bound_name(bound)
+        .ok_or_else(|| GenericDrop::NotBindable("iterator bound has no trait name".to_string()))?;
+
+    // C8: only a Rust-ABI host can receive a Rust-side `Vec`/iterator arg.
+    if !host_abi_rust {
+        return Err(GenericDrop::IteratorDrop(
+            IteratorDropTag::NonRustAbi,
+            format!("{trait_name} iterator on a non-Rust-ABI host"),
+        ));
+    }
+
+    // The `Item=T` associated-type binding lives in the trait's angle-bracketed
+    // `constraints` (the SAME shape `bound_to_concrete`'s iterator arm reads).
+    let item = bound
+        .get("trait_bound")
+        .and_then(|tb| tb.get("trait"))
+        .and_then(|tr| tr.get("args"))
+        .and_then(|a| a.get("angle_bracketed"))
+        .and_then(|ab| ab.get("constraints"))
+        .and_then(|c| c.as_array())
+        .and_then(|cs| {
+            cs.iter()
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some("Item"))
+        })
+        .and_then(|c| c.get("binding"))
+        .and_then(|b| b.get("equality"))
+        .and_then(|e| e.get("type"))
+        .ok_or_else(|| {
+            GenericDrop::IteratorDrop(
+                IteratorDropTag::ItemUnmodellable,
+                format!("{trait_name} without an Item= associated-type binding"),
+            )
+        })?;
+
+    // C3: resolve Item through the PARAM-IDX-AWARE resolver. A non-closed /
+    // nested-closure / nested-iterator Item is a NotBindable → re-tag as the
+    // specific iterator-item-unmodellable coverage reason.
+    let item_tr = type_to_typeref(item, param_idx).map_err(|e| {
+        GenericDrop::IteratorDrop(
+            IteratorDropTag::ItemUnmodellable,
+            format!("{trait_name} Item= unmodellable: {}", e.detail()),
+        )
+    })?;
+
+    Ok((kind, item_tr))
+}
+
 /// Gather the union of inline + where-predicate bounds for each generic param of
 /// one rustdoc `generics` object into `acc` (keyed by param name). The bound-list
 /// twin of `full_union_bounds`' `raw` map, exposed so the closure-slot detection
@@ -4388,13 +4515,32 @@ fn try_parametric_stub(
             closure_param_bound.insert(name.clone(), cb.clone());
         }
     }
-    // B3 ABI gate: a Rust closure can only be received by a Rust-ABI host. A
-    // non-Rust host with a closure param → drop (ClosureDrop::NonRustAbi via the
-    // classifier). Read once; threaded into every classify_closure_param call.
+    // ── Iterator-param split (epic #30). A USED param whose bound is an iterator
+    // trait (`IntoIterator`/`Iterator`) is NOT a Sky tyvar — it is CONSUMED into
+    // a `Vec<Item>` argType at its slot (the wrapper takes the concrete Vec; the
+    // `I` tyvar and its iterator bound vanish). The `Item=T`'s OWN tyvars stay
+    // ordinary used params. A param can't be BOTH a closure and an iterator slot
+    // (disjoint trait sets) — guard the priority anyway so the two splits never
+    // double-consume one name.
+    let mut iter_param_bound: HashMap<String, (IterKind, serde_json::Value)> = HashMap::new();
+    for (name, bounds) in &all_bounds {
+        if !used.contains(name) || closure_param_bound.contains_key(name) {
+            continue;
+        }
+        if let Some((kind, ib)) = iterator_bound_of(bounds) {
+            iter_param_bound.insert(name.clone(), (kind, ib.clone()));
+        }
+    }
+    // B3/C8 ABI gate: a Rust closure / Vec arg can only be received by a Rust-ABI
+    // host. Read once; threaded into every classify_{closure,iterator}_param call.
     let host_abi_rust = host_abi_is_rust(fn_data);
-    // The Sky-facing TYVARS = used params MINUS the consumed closure params.
-    let tyvars: HashSet<String> =
-        used.iter().filter(|u| !closure_param_bound.contains_key(*u)).cloned().collect();
+    // The Sky-facing TYVARS = used params MINUS the consumed closure/iterator
+    // params.
+    let tyvars: HashSet<String> = used
+        .iter()
+        .filter(|u| !closure_param_bound.contains_key(*u) && !iter_param_bound.contains_key(*u))
+        .cloned()
+        .collect();
 
     // Param ORDER = declaration order across method, then impl, then struct,
     // restricted to the TYVARS (closure params excluded), deduped. This fixes
@@ -4480,23 +4626,39 @@ fn try_parametric_stub(
     let method = Some(method_name.to_string());
 
     let mut args: Vec<usize> = receiver.as_ref().map(|r| vec![r.arg]).unwrap_or_default();
+    // Value-arg indices whose iterator param needs `arg.into_iter()` at the call
+    // site (`Iterator` kind); `IntoIterator` passes the `Vec` directly (C6).
+    let mut iter_adapters: Vec<usize> = Vec::new();
     for input in &inputs {
         if input[0].as_str() == Some("self") {
             continue;
         }
-        // A bare `{generic:F}` arg where F is a consumed closure param lowers to
-        // the `{closure:…}` argType via the Phase-5 classifier (using param_idx,
-        // which now maps the closure's tyvars A/B to their final indices).
-        let closure_name = input[1]
-            .get("generic")
-            .and_then(|g| g.as_str())
-            .filter(|n| closure_param_bound.contains_key(*n));
-        let tref = match closure_name {
-            Some(n) => {
+        // A bare `{generic:F}`/`{generic:I}` arg where F/I is a consumed closure /
+        // iterator param lowers via the matching classifier. The consume is
+        // keyed by the BARE-`{generic:NAME}` arg node, so a SHARED iterator tyvar
+        // across two params (`zip(a: I, b: I)`) routes BOTH slots through the
+        // classifier (C1); a `&mut I` / borrowed-ref iterator arg is NOT a bare
+        // `{generic}` node → falls to type_to_typeref → drop (C4).
+        let bare_generic = input[1].get("generic").and_then(|g| g.as_str());
+        let closure_name = bare_generic.filter(|n| closure_param_bound.contains_key(*n));
+        let iter_name = bare_generic.filter(|n| iter_param_bound.contains_key(*n));
+        let tref = match (closure_name, iter_name) {
+            (Some(n), _) => {
                 let bound = &closure_param_bound[n];
                 classify_closure_param(bound, &param_idx, host_abi_rust)?
             }
-            None => type_to_typeref(&input[1], &param_idx)?,
+            (None, Some(n)) => {
+                let (kind, bound) = &iter_param_bound[n];
+                let (kind, item_tr) =
+                    classify_iterator_param(*kind, bound, &param_idx, host_abi_rust)?;
+                if kind == IterKind::Iter {
+                    iter_adapters.push(next_arg);
+                }
+                // The argType IS a `Vec<ItemT>` — reuse the existing ctor shape
+                // (no new TypeRef variant); `Vec<T>: IntoIterator<Item=T>`.
+                TypeRef::Ctor("::Vec".to_string(), vec![item_tr])
+            }
+            (None, None) => type_to_typeref(&input[1], &param_idx)?,
         };
         arg_types.push(tref);
         args.push(next_arg);
@@ -4522,6 +4684,7 @@ fn try_parametric_stub(
             args,
             arg_types,
             ret,
+            iter_adapters,
         },
     })
 }
@@ -5956,6 +6119,239 @@ mod tests {
         assert!(stub.call.arg_types.iter().any(|t| matches!(t, TypeRef::Closure { .. })));
     }
 
+    // ── epic #30: iterator-param seam ──────────────────────────────────
+
+    #[test]
+    fn iterator_bound_of_detects_both_kinds() {
+        // A single IntoIterator bound → IntoIter; a single Iterator bound → Iter.
+        let into = vec![iter_bound("IntoIterator", primitive("i64"))];
+        let (k, _) = iterator_bound_of(&into).expect("IntoIterator slot detected");
+        assert_eq!(k, IterKind::IntoIter);
+        let it = vec![iter_bound("Iterator", primitive("i64"))];
+        let (k2, _) = iterator_bound_of(&it).expect("Iterator slot detected");
+        assert_eq!(k2, IterKind::Iter);
+        // A non-iterator bound list → None (ordinary tyvar path).
+        assert!(iterator_bound_of(&[trait_bound("Clone", vec![])]).is_none());
+        // Two iterator bounds on one param → None (not a plain slot).
+        assert!(iterator_bound_of(&[
+            iter_bound("IntoIterator", primitive("i64")),
+            iter_bound("Iterator", primitive("i64")),
+        ])
+        .is_none());
+    }
+
+    #[test]
+    fn iterator_bound_of_rejects_unsatisfiable_companion() {
+        // [C5] `I: Iterator + Send` → NOT a bindable iterator slot (a `Vec` arg
+        // can't carry an arbitrary companion the host might rely on) → None →
+        // the param falls through to the existing safe UnmodellableBound drop.
+        let send = vec![
+            iter_bound("Iterator", primitive("i64")),
+            trait_bound("Send", vec![]),
+        ];
+        assert!(iterator_bound_of(&send).is_none());
+        // A `Sized` companion IS satisfiable → still a slot.
+        let sized = vec![
+            iter_bound("IntoIterator", primitive("i64")),
+            trait_bound("Sized", vec![]),
+        ];
+        assert!(iterator_bound_of(&sized).is_some());
+        // A lifetime/outlives companion (no trait name) is satisfiable → slot.
+        let lt = vec![
+            iter_bound("IntoIterator", primitive("i64")),
+            serde_json::json!({ "outlives": "'static" }),
+        ];
+        assert!(iterator_bound_of(&lt).is_some());
+    }
+
+    #[test]
+    fn classify_iterator_param_emits_vec_item_and_kind() {
+        // [C3] classify resolves Item= through the PARAM-IDX-AWARE resolver and
+        // returns (kind, item_typeref). The caller wraps it in `Vec<item>`.
+        let bound = iter_bound("IntoIterator", primitive("i64"));
+        let (kind, item) = classify_iterator_param(
+            IterKind::IntoIter, &bound, &HashMap::new(), true,
+        )
+        .expect("IntoIterator<Item=i64> classifies");
+        assert_eq!(kind, IterKind::IntoIter);
+        assert_eq!(item, TypeRef::Prim("i64".into()));
+
+        // Iterator kind preserved.
+        let it = iter_bound("Iterator", primitive("i64"));
+        let (k2, _) = classify_iterator_param(IterKind::Iter, &it, &HashMap::new(), true)
+            .expect("Iterator<Item=i64> classifies");
+        assert_eq!(k2, IterKind::Iter);
+    }
+
+    #[test]
+    fn classify_iterator_param_item_is_param_aware() {
+        // [C3] `Item=T` where T is a stub param resolves to TRParam, NOT a String
+        // fallback. param_idx maps T→0.
+        let param_idx: HashMap<String, usize> = [("T".to_string(), 0usize)].into_iter().collect();
+        let bound = iter_bound("IntoIterator", gnode("T"));
+        let (_, item) = classify_iterator_param(IterKind::IntoIter, &bound, &param_idx, true)
+            .expect("IntoIterator<Item=T> with T a stub param classifies");
+        assert_eq!(item, TypeRef::Param(0));
+    }
+
+    #[test]
+    fn classify_iterator_param_nonrust_abi_drops() {
+        // [C8] a non-Rust-ABI host records iterator-nonrust-abi.
+        let bound = iter_bound("IntoIterator", primitive("i64"));
+        match classify_iterator_param(IterKind::IntoIter, &bound, &HashMap::new(), false) {
+            Err(GenericDrop::IteratorDrop(tag, _)) => assert_eq!(tag.tag(), "iterator-nonrust-abi"),
+            other => panic!("expected iterator-nonrust-abi drop, got {other:?}"),
+        }
+    }
+
+    /// A static assoc fn `fn f<I: <trait><Item=i64>>(xs: I) -> i64` on `Foo`.
+    fn iter_assoc_fn(bound: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [ type_param("I", vec![bound]) ], "where_predicates": [] },
+            "sig": { "inputs": [ ["xs", gnode("I")] ], "output": primitive("i64") }
+        })
+    }
+
+    #[test]
+    fn parametric_stub_into_iterator_param_emits_vec_direct() {
+        // `sum_all<I: IntoIterator<Item=i64>>(xs: I) -> i64` binds: I is CONSUMED
+        // (no tyvar), the arg is `Vec<i64>`, no into_iter adapter (direct).
+        let fd = iter_assoc_fn(iter_bound("IntoIterator", primitive("i64")));
+        let stub = try_parametric_stub("sum_all", &fd, Some(("Foo", "::iter::Foo")), None, None)
+            .expect("IntoIterator param must bind");
+        assert!(stub.params.is_empty(), "I is consumed → no Sky tyvar");
+        assert!(stub.bounds.is_empty(), "no iterator bound survives as a Sky bound");
+        assert_eq!(
+            stub.call.arg_types,
+            vec![TypeRef::Ctor("::Vec".into(), vec![TypeRef::Prim("i64".into())])]
+        );
+        assert!(stub.call.iter_adapters.is_empty(), "IntoIterator is direct (no .into_iter())");
+        assert_eq!(stub.call.ret, TypeRef::Prim("i64".into()));
+    }
+
+    #[test]
+    fn parametric_stub_iterator_param_records_into_iter_adapter() {
+        // `count<I: Iterator<Item=i64>>(it: I) -> i64` binds: arg is `Vec<i64>`,
+        // and the call form needs `.into_iter()` → adapter at arg index 0 (C6).
+        let fd = iter_assoc_fn(iter_bound("Iterator", primitive("i64")));
+        let stub = try_parametric_stub("count", &fd, Some(("Foo", "::iter::Foo")), None, None)
+            .expect("Iterator param must bind");
+        assert!(stub.params.is_empty());
+        assert_eq!(
+            stub.call.arg_types,
+            vec![TypeRef::Ctor("::Vec".into(), vec![TypeRef::Prim("i64".into())])]
+        );
+        assert_eq!(stub.call.iter_adapters, vec![0], "Iterator arg needs .into_iter()");
+    }
+
+    #[test]
+    fn parametric_stub_shared_iterator_tyvar_routes_both_slots() {
+        // [C1] `zip(a: I, b: I)` — ONE shared iterator tyvar I across two params.
+        // The name-keyed consume routes BOTH slots → both emit `Vec<i64>`, no
+        // surviving tyvar.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [
+                type_param("I", vec![iter_bound("IntoIterator", primitive("i64"))]),
+            ], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["a", gnode("I")],
+                ["b", gnode("I")]
+            ], "output": primitive("i64") }
+        });
+        let stub = try_parametric_stub("zip_sum", &fd, Some(("Foo", "::iter::Foo")), None, None)
+            .expect("shared iterator tyvar must bind both slots");
+        assert!(stub.params.is_empty(), "the shared I is consumed in BOTH slots");
+        let vec_i64 = TypeRef::Ctor("::Vec".into(), vec![TypeRef::Prim("i64".into())]);
+        assert_eq!(stub.call.arg_types, vec![vec_i64.clone(), vec_i64]);
+    }
+
+    #[test]
+    fn parametric_stub_mut_ref_iterator_param_drops() {
+        // [C4] a `&mut I` iterator param is NOT a bare `{generic:I}` node → it
+        // does NOT match the consume filter → falls to type_to_typeref → drop
+        // (a borrowed-ref is outside the bindable owned-monomorphic subset). We
+        // must NOT add a borrowed-ref-unwrapping branch.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [
+                type_param("I", vec![iter_bound("Iterator", primitive("i64"))]),
+            ], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["it", mut_ref(gnode("I"))]
+            ], "output": primitive("i64") }
+        });
+        match try_parametric_stub("drain", &fd, Some(("Foo", "::iter::Foo")), None, None) {
+            Err(GenericDrop::NotBindable(_)) => {}
+            other => panic!("expected a NotBindable drop for &mut I, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parametric_stub_iterator_item_ord_predicate_drops() {
+        // [C5] `where I::Item: Ord` is a NON-generic predicate (an assoc-type
+        // projection subject) → the full_union_bounds C2 gate drops it. Over-drop
+        // is acceptable; under-bind is forbidden.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [
+                type_param("I", vec![iter_bound("Iterator", primitive("i64"))]),
+            ], "where_predicates": [
+                { "bound_predicate": {
+                    "type": { "qualified_path": {
+                        "name": "Item",
+                        "self_type": { "generic": "I" },
+                        "trait": { "path": "Iterator", "name": "Iterator", "id": 0, "args": null }
+                    } },
+                    "bounds": [ trait_bound("Ord", vec![]) ]
+                } }
+            ] },
+            "sig": { "inputs": [ ["it", gnode("I")] ], "output": primitive("i64") }
+        });
+        assert!(
+            try_parametric_stub("sorted", &fd, Some(("Foo", "::iter::Foo")), None, None).is_err(),
+            "where I::Item: Ord must DROP (non-generic predicate)"
+        );
+    }
+
+    #[test]
+    fn parametric_stub_iterator_tyvar_reused_in_return_drops() {
+        // [C2] a consumed iterator tyvar reused in the RETURN (`-> I`) must DROP.
+        // I is consumed (no param_idx entry) → type_to_typeref on the `-> I`
+        // output hits the free-type-var arm → NotBindable.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [
+                type_param("I", vec![iter_bound("IntoIterator", primitive("i64"))]),
+            ], "where_predicates": [] },
+            "sig": { "inputs": [ ["xs", gnode("I")] ], "output": gnode("I") }
+        });
+        match try_parametric_stub("ident", &fd, Some(("Foo", "::iter::Foo")), None, None) {
+            Err(GenericDrop::NotBindable(m)) => assert!(m.contains("free type-var")),
+            other => panic!("expected free-type-var NotBindable drop for -> I, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parametric_stub_iterator_item_unmodellable_drops() {
+        // [C3] an `Item=` that resolves to a non-closed shape (a tuple here) →
+        // iterator-item-unmodellable drop (type_to_typeref refuses it).
+        let fd = iter_assoc_fn(serde_json::json!({ "trait_bound": { "trait": {
+            "path": "IntoIterator", "name": "IntoIterator", "id": 0,
+            "args": { "angle_bracketed": { "args": [], "constraints": [
+                { "name": "Item", "binding": { "equality": { "type":
+                    { "tuple": [ primitive("i64"), primitive("i64") ] } } } }
+            ] } }
+        }, "modifier": "none" } }));
+        match try_parametric_stub("sink", &fd, Some(("Foo", "::iter::Foo")), None, None) {
+            Err(GenericDrop::IteratorDrop(tag, _)) => {
+                assert_eq!(tag.tag(), "iterator-item-unmodellable")
+            }
+            other => panic!("expected iterator-item-unmodellable drop, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_safe_crate_name() {
         // #6: only [A-Za-z0-9_-]; reject path-traversal / NUL / empty.
@@ -5984,6 +6380,7 @@ mod tests {
                 args: vec![0],
                 arg_types: vec![TypeRef::Param(0)],
                 ret: TypeRef::Ctor("::c::T".into(), vec![TypeRef::Param(0)]),
+                iter_adapters: vec![],
             },
         };
         let v = serde_json::to_value(&g).unwrap();
