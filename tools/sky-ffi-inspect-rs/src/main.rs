@@ -2332,18 +2332,22 @@ fn parse_fn_item(
         return None;
     }
 
-    // Trait-objects arc tail (#26): DROP any NON-generic fn carrying a NON-`Fn`
-    // `dyn Trait` object in a param or the return. `rustdoc_type_to_rust_str`
-    // renders such an opaque object's type-arg as EMPTY (`Box<>` / `&`), which
-    // would pass the downstream `fn_types_nameable` string-gate and BIND an
-    // under-bound slot the host actually wants as `dyn Trait` → E0308. Per the
-    // universal-FFI-arc feasibility verdict (§3) every non-`dyn-Fn` trait object
-    // drops; `dyn Fn`/`FnMut`/`FnOnce` is EXCLUDED (the closure seam owns it) by
-    // `is_dyn_trait_object`. `impl Trait` is already handled above (resolvable ones
-    // monomorphise; the rest dropped via `impl_traits_resolvable`).
+    // Trait-objects arc tail (#26): DROP any NON-generic fn carrying a `dyn Trait`
+    // OBJECT in a param or the return — INCLUDING the `dyn Fn`/`FnMut`/`FnOnce`
+    // OBJECT form. `rustdoc_type_to_rust_str` renders such an opaque object's
+    // type-arg as EMPTY (`Box<>` / `&`), which would pass the downstream
+    // `fn_types_nameable` string-gate and BIND an under-bound slot the host actually
+    // wants as `dyn Trait` → E0308. Per the universal-FFI-arc feasibility verdict
+    // (§3) every `dyn` trait object drops. The closure seam (`try_parametric_stub`)
+    // owns only the GENERIC `F: Fn` bound — it never sees a `dyn Fn` OBJECT in a
+    // non-generic signature, so the Fn-family must NOT be excluded HERE (the
+    // pre-existing `Box<dyn Fn>` under-bind hole, #26 arc tail). The Fn-exclusion
+    // survives only in `is_dyn_trait_object` (the closure-seam predicate); this gate
+    // uses the inclusive variant. `impl Trait` is already handled above (resolvable
+    // ones monomorphise; the rest dropped via `impl_traits_resolvable`).
     {
-        let input_dyn = inputs.iter().find(|i| is_dyn_trait_object(&i[1]));
-        let output_dyn = if is_dyn_trait_object(output) { Some(output) } else { None };
+        let input_dyn = inputs.iter().find(|i| is_dyn_trait_object_including_fn(&i[1]));
+        let output_dyn = if is_dyn_trait_object_including_fn(output) { Some(output) } else { None };
         if let Some(offending) = input_dyn.map(|i| &i[1]).or(output_dyn) {
             record_generic_drop(
                 name,
@@ -6018,20 +6022,57 @@ fn is_fn_family_trait_name(name: &str) -> bool {
 /// pass the nameability string-gate, and bind an under-bound slot → E0308 at the
 /// host. `impl Trait` is handled separately (resolvable ones monomorphise, the
 /// rest drop via `impl_traits_resolvable`), so this checks `dyn_trait` only.
+/// The closure-seam predicate: a `dyn Trait` OBJECT present anywhere, with the
+/// `dyn Fn`/`FnMut`/`FnOnce` family EXCLUDED (those route to the closure seam, not
+/// the trait-object drop). Non-generic `parse_fn_item` now uses the inclusive
+/// `is_dyn_trait_object_including_fn` for its drop gate (a `dyn Fn` OBJECT in a
+/// non-generic sig is unreachable by the closure seam), so this Fn-excluded form is
+/// retained as the documented closure-seam contract and is exercised by the
+/// `dyn_fn_param_still_routes_to_closure_seam` regression.
+#[cfg(test)]
 fn is_dyn_trait_object(val: &serde_json::Value) -> bool {
+    dyn_trait_object_present(val, false)
+}
+
+/// Sibling of `is_dyn_trait_object` that ALSO catches `dyn Fn`/`FnMut`/`FnOnce`
+/// OBJECT nodes (the Fn-family exclusion does NOT apply). The closure seam
+/// (`try_parametric_stub`) only ever fires on a GENERIC `F: Fn` bound — a
+/// `dyn Fn(..)` OBJECT in a NON-GENERIC signature is never reached by it, so the
+/// `parse_fn_item` gate must drop it too. Without the drop,
+/// `rustdoc_type_to_rust_str` renders the opaque object's type-arg as EMPTY
+/// (`Box<>` / `&`), it passes the nameable string-gate, and BINDS an under-bound
+/// slot → E0308 at the host (the pre-existing `Box<dyn Fn>` hole #26's trait-object
+/// drop excluded). Over-drop of a `dyn Fn` object is sound v1 (≈0 demand; a future
+/// epic can route it to the closure seam); under-bind is the bug. This predicate is
+/// for the OBJECT form ONLY — a generic `trait_bound`/`impl_trait` carrying `Fn`
+/// stays the closure seam's job and is NOT a `dyn_trait` node.
+fn is_dyn_trait_object_including_fn(val: &serde_json::Value) -> bool {
+    dyn_trait_object_present(val, true)
+}
+
+/// Core walk shared by `is_dyn_trait_object` (closure-seam, Fn-excluded) and
+/// `is_dyn_trait_object_including_fn` (gate, Fn-included). `include_fn = false`
+/// EXCLUDES the Fn-family `dyn` object (the closure seam owns it); `true` treats
+/// every `dyn_trait` node as a drop regardless of principal trait.
+fn dyn_trait_object_present(val: &serde_json::Value, include_fn: bool) -> bool {
     if val.get("dyn_trait").is_some() {
-        // A `dyn Fn(..)` is the closure seam's job — never a trait-object drop.
         let is_fn = dyn_trait_principal_name(val)
             .as_deref()
             .map(is_fn_family_trait_name)
             .unwrap_or(false);
-        if !is_fn {
+        // Non-Fn dyn object always drops; Fn-family dyn object drops only in the
+        // inclusive (gate) mode — the closure-seam mode leaves it routable.
+        if include_fn || !is_fn {
             return true;
         }
     }
     match val {
-        serde_json::Value::Object(obj) => obj.values().any(is_dyn_trait_object),
-        serde_json::Value::Array(arr) => arr.iter().any(is_dyn_trait_object),
+        serde_json::Value::Object(obj) => {
+            obj.values().any(|v| dyn_trait_object_present(v, include_fn))
+        }
+        serde_json::Value::Array(arr) => {
+            arr.iter().any(|v| dyn_trait_object_present(v, include_fn))
+        }
         _ => false,
     }
 }
@@ -8887,5 +8928,139 @@ mod tests {
             })
         });
         assert!(recorded, "dyn-object drop must record the trait-object-unsupported tag");
+    }
+
+    // ── #26 arc tail: NON-GENERIC `dyn Fn`-OBJECT param/return must DROP ──────────
+    //
+    // A non-generic fn carrying a `Box<dyn Fn(..)>` / `&dyn Fn()` param or a
+    // `-> Box<dyn Fn()>` return is NOT reachable by the closure seam (that only
+    // fires on a GENERIC `F: Fn` bound in `try_parametric_stub`). The
+    // `parse_fn_item` gate's `is_dyn_trait_object` excludes the Fn-family, so the
+    // object falls through, `rustdoc_type_to_rust_str` renders it as an EMPTY
+    // type-arg (`Box<>` / `&`), it passes the nameable string-gate, and BINDS an
+    // under-bound slot → E0308 at the host. The fix DROPS it too.
+
+    /// A `dyn Fn`-family OBJECT node: `dyn Fn(inputs...) -> output`.
+    fn dyn_fn_object_node(
+        kind: &str,
+        inputs: Vec<serde_json::Value>,
+        output: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({ "dyn_trait": {
+            "lifetime": null,
+            "traits": [ { "generic_params": [], "trait": {
+                "path": kind, "name": kind, "id": 0,
+                "args": { "parenthesized": { "inputs": inputs, "output": output } }
+            } } ]
+        } })
+    }
+
+    #[test]
+    fn dyn_fn_box_param_drops() {
+        // fn takes_cb(&self, cb: Box<dyn Fn(i64) -> i64>) — NON-generic, OBJECT form.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["cb", box_of(
+                dyn_fn_object_node("Fn", vec![prim("i64")], prim("i64"))
+            )] ], "output": null }
+        });
+        let parsed = parse_fn_item("takes_cb", &fd, &HashMap::new(), None);
+        // RED today: binds with rust_type "Box<>" (empty arg) → E0308 at host.
+        assert!(
+            parsed.is_none(),
+            "Box<dyn Fn(i64)->i64> OBJECT param must DROP (under-bind → E0308), got {:?}",
+            parsed.map(|f| f.params.iter().map(|p| p.rust_type.clone()).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn dyn_fn_ref_param_drops() {
+        // fn takes_cb(&self, cb: &dyn Fn()) — &-borrowed OBJECT form.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["cb", borrowed(
+                dyn_fn_object_node("Fn", vec![], serde_json::Value::Null)
+            )] ], "output": null }
+        });
+        let parsed = parse_fn_item("takes_cb", &fd, &HashMap::new(), None);
+        assert!(
+            parsed.is_none(),
+            "&dyn Fn() OBJECT param must DROP, got {:?}",
+            parsed.map(|f| f.params.iter().map(|p| p.rust_type.clone()).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn dyn_fn_box_return_drops() {
+        // fn make_cb(&self) -> Box<dyn Fn()> — OBJECT return.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [], "output": box_of(
+                dyn_fn_object_node("Fn", vec![], serde_json::Value::Null)
+            ) }
+        });
+        let parsed = parse_fn_item("make_cb", &fd, &HashMap::new(), None);
+        assert!(
+            parsed.is_none(),
+            "-> Box<dyn Fn()> OBJECT return must DROP, got {:?}",
+            parsed.map(|f| f.results.iter().map(|p| p.rust_type.clone()).collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn dyn_fn_object_drop_records_tag() {
+        // The drop carries the trait-object-unsupported coverage tag, same taxonomy
+        // bucket as the non-Fn dyn-object drop.
+        GENERIC_DROPS.with(|v| v.borrow_mut().clear());
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["cb", box_of(
+                dyn_fn_object_node("FnMut", vec![prim("i64")], prim("i64"))
+            )] ], "output": null }
+        });
+        assert!(parse_fn_item("takes_cb", &fd, &HashMap::new(), None).is_none());
+        let recorded = GENERIC_DROPS.with(|v| {
+            v.borrow().iter().any(|(sym, d)| {
+                sym == "takes_cb" && d.reason() == "trait-object-unsupported"
+            })
+        });
+        assert!(recorded, "dyn-Fn-object drop must record the trait-object-unsupported tag");
+    }
+
+    #[test]
+    fn generic_fn_bound_not_caught_by_dyn_fn_object_drop() {
+        // CONTROL: a GENERIC `F: Fn(i64)->i64` param (a `generic` node, NOT a
+        // `dyn_trait` object) must NOT be classified as a dyn-Fn-OBJECT drop — it is
+        // the closure seam's job (#28). The object-only predicate must return false
+        // for the bare type-variable param node.
+        let f_param = serde_json::json!({ "generic": "F" });
+        assert!(
+            !is_dyn_trait_object_including_fn(&f_param),
+            "a generic `F` param node must NOT be classified as a dyn-trait OBJECT drop");
+        // And the bound carrier (the trait_bound node in generics.params) is not a
+        // dyn_trait object either.
+        let bound = closure_bound("Fn", vec![gnode("A")], Some(gnode("B")));
+        assert!(
+            !is_dyn_trait_object_including_fn(&bound),
+            "a generic `F: Fn` trait_bound must NOT be a dyn-trait OBJECT drop");
+    }
+
+    #[test]
+    fn dyn_fn_object_classified_by_inclusive_predicate() {
+        // The inclusive predicate DOES catch a `dyn Fn` OBJECT (nested in Box) — the
+        // distinction from `is_dyn_trait_object` (which excludes the Fn-family for
+        // the closure seam).
+        let fn_obj = dyn_fn_object_node("Fn", vec![prim("i64")], prim("i64"));
+        assert!(
+            is_dyn_trait_object_including_fn(&box_of(fn_obj.clone())),
+            "Box<dyn Fn(..)> OBJECT must be caught by the inclusive predicate");
+        // And the closure-seam predicate still EXCLUDES it (unchanged contract).
+        assert!(
+            !is_dyn_trait_object(&box_of(fn_obj)),
+            "closure-seam predicate must still EXCLUDE the Fn-family dyn object");
     }
 }
