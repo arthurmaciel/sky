@@ -73,6 +73,8 @@ module Sky.Build.Rust.FfiInstance
     , rustTypeIsClone
     , skyCaptureIsClone
     , mkCaptureNotCloneError
+      -- * Phase 3: drop + report unsound closure shapes (#28)
+    , closureDropReason
     ) where
 
 import Data.List (intercalate)
@@ -83,8 +85,8 @@ import qualified Sky.AST.Canonical as Can
 import qualified Sky.Build.FfiRegistry as FfiReg
 import Sky.Build.Rust.FfiCall
     ( callArity, renderArgType, renderArgTypeAt, renderCall, renderRetType
-    , closureBounds
-    , Call, TypeRef(TRClosure)
+    , closureBounds, renderTypeRef
+    , Call, TypeRef(..), ClosureKind(..)
     , _call_argTypes
     )
 import Sky.Generate.Rust.Builder.Naming (mangleTVar)
@@ -414,12 +416,20 @@ stripWrap pfx s =
 data WrapperResult
     = WrapperOk !String !String !String  -- ^ (kernel name, ref name, synthesised @pub fn@ source)
     | WrapperRejected !Diag.Diagnostic   -- ^ unmodellable bound / malformed stub
+    | WrapperDropped !String !String     -- ^ (ref name, drop reason) — an UNSOUND
+                                          --   closure shape (Task 3.3): silently NOT
+                                          --   bound, reason recorded for coverage. NOT a
+                                          --   hard cargo-fail (the call site is itself
+                                          --   tree-shaken away — see 'closureDropReason').
     deriving (Show)
 
 
 -- | Synthesise wrappers for every generic FFI function; collect the emitted
 -- sources (keyed by @(kernelName, refName)@ for the S4 tree-shake's
--- @FfiRef kernelName refName@) and any rejection diagnostics separately.
+-- @FfiRef kernelName refName@) and any rejection diagnostics separately. A
+-- 'WrapperDropped' (an unsound closure shape per 'closureDropReason') is
+-- neither emitted nor a hard reject — it is silently dropped (its reason is
+-- recorded on the constructor for coverage tooling).
 synthesiseGenericWrappers :: [GenericFn] -> ([(String, String, String)], [Diag.Diagnostic])
 synthesiseGenericWrappers fns =
     let results = map synthesiseGenericWrapper fns
@@ -461,15 +471,24 @@ synthesiseGenericWrapper gf =
         params = FfiReg._fg_params gen
         bounds = FfiReg._fg_bounds gen
         call   = FfiReg._fg_call gen
+        -- Task 3.3: an UNSOUND closure shape (mut-slot / ho-return / by-ref
+        -- non-Clone) is DROPPED, not bound — a silent drop with a recorded
+        -- reason, never a hard cargo-fail. Checked FIRST: an unsound closure
+        -- isn't worth a bound-modellability pass.
+        dropReasons =
+            [ reason
+            | tr <- _call_argTypes call
+            , Just reason <- [closureDropReason tr] ]
         -- F1: any declared bound outside the modellable table → reject.
         unmodellable =
             [ (p, t)
             | p <- params
             , t <- Map.findWithDefault [] p bounds
             , not (modellableTrait t) ]
-    in case unmodellable of
-        ((p, t) : _) -> WrapperRejected (mkUnmodellableFnError gf p t)
-        [] ->
+    in case (dropReasons, unmodellable) of
+        (reason : _, _) -> WrapperDropped (_gf_refName gf) reason
+        (_, (p, t) : _) -> WrapperRejected (mkUnmodellableFnError gf p t)
+        ([], []) ->
             let -- The wrapper's value-arg count, derived from the call's
                 -- receiver + value-arg refs (validated gap-free at parse).
                 arity = callArity call
@@ -551,6 +570,45 @@ callHasClosureArg call = any isClosure (_call_argTypes call)
   where
     isClosure TRClosure{} = True
     isClosure _           = False
+
+
+-- | #28 Phase 3 — classify a wrapper-arg 'TypeRef' as an UNSOUND closure shape
+-- that must be DROPPED (the method is silently not bound + the reason recorded
+-- for coverage), or @Nothing@ for a bindable shape. Three unsound shapes:
+--
+--   * @closure-mut-slot@ — an @FnMut@/@FnOnce@ closure passed BY REF. A by-ref
+--     mut/once slot means the host wants @Fn{Mut,Once}(&mut T)@; the owned-clone
+--     bridge (Task 3.2) clones the borrow to an OWNED value, so mutations to the
+--     clone never propagate back to the host's referent — binding it would
+--     silently lose writes. (A by-VALUE FnMut/FnOnce is fine — no bridge.)
+--   * @closure-ho-return@ — the closure RETURNS a function/closure type. The
+--     closed Sky↔Rust set has no function arm, so a returned closure cannot be
+--     marshalled back across the boundary.
+--   * @closure-by-ref-noclone@ — a BY-REF closure whose borrowed arg is a
+--     CONCRETE type the backend cannot prove @Clone@ (a 'TRPrim'/'TRCtor' outside
+--     the closed Clone set). The owned-clone bridge needs @.clone()@ on the
+--     borrow; a non-Clone borrowed type makes that bridge ill-typed. A 'TRParam'
+--     borrowed arg is NOT flagged: it is generic and the @+ Clone@ bound on the
+--     closure's @Fj@ (from 'closureBounds') enforces Clone at instantiation.
+--
+-- A non-'TRClosure' 'TypeRef' is never a closure drop (@Nothing@).
+closureDropReason :: TypeRef -> Maybe String
+closureDropReason (TRClosure kind byRef argTRs ret)
+    | byRef && kind /= FnKind            = Just "closure-mut-slot"
+    | returnsClosure ret                 = Just "closure-ho-return"
+    | byRef, any concreteNotClone argTRs = Just "closure-by-ref-noclone"
+    | otherwise                          = Nothing
+  where
+    returnsClosure TRClosure{} = True
+    returnsClosure _           = False
+    -- A concrete (non-generic) leaf the backend cannot prove Clone. A TRParam is
+    -- generic — its Clone-ness is enforced by the closure's `+ Clone` bound, so
+    -- it is NOT a drop here. A nested closure in an arg is itself out of the
+    -- closed set, so treat it as not-Clone (drop).
+    concreteNotClone (TRParam _)    = False
+    concreteNotClone TRClosure{}    = True
+    concreteNotClone tr             = not (rustTypeIsClone (renderTypeRef [] tr))
+closureDropReason _ = Nothing
 
 
 mkUnmodellableFnError :: GenericFn -> String -> String -> Diag.Diagnostic

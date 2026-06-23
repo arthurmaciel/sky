@@ -25,6 +25,7 @@ import Sky.Build.Rust.FfiInstance
     , synthesiseGenericWrapper, synthesiseGenericWrappers
     , skyTypeToRustClosed, traitsOfRustType, traitToRustPath, modellableTrait
     , rustTypeIsClone, skyCaptureIsClone, mkCaptureNotCloneError
+    , closureDropReason
     )
 import Sky.Build.Rust.Ffi (translateRustRet, cargoProfilePanicIsUnwind)
 
@@ -263,6 +264,46 @@ spec = do
             let d = mkCaptureNotCloneError A.one "myFile.sky" "task0" "Task Error ()"
             Diag._diag_code d `shouldBe` Diag.ffiE_GenericNotBindable
             isInfixOf "must be Clone" (Diag._diag_message d) `shouldBe` True
+
+    describe "#28 closureDropReason (Task 3.3 — drop+report unsound closure shapes)" $ do
+        it "drops an FnMut/FnOnce by-ref (&mut) slot: closure-mut-slot" $ do
+            -- An FnMut/FnOnce + byRef means the host wants Fn{Mut,Once}(&mut T);
+            -- the owned-clone bridge can't propagate mutations back, so it is
+            -- unsound to bind — drop with a recorded reason.
+            closureDropReason
+                (Call.TRClosure Call.FnMutKind True [Call.TRParam 0] (Call.TRParam 0))
+                `shouldBe` Just "closure-mut-slot"
+            closureDropReason
+                (Call.TRClosure Call.FnOnceKind True [Call.TRParam 0] (Call.TRParam 0))
+                `shouldBe` Just "closure-mut-slot"
+        it "drops a higher-order RETURN (closure returns a closure): closure-ho-return" $
+            closureDropReason
+                (Call.TRClosure Call.FnKind False [Call.TRParam 0]
+                    (Call.TRClosure Call.FnKind False [Call.TRParam 1] (Call.TRPrim "bool")))
+                `shouldBe` Just "closure-ho-return"
+        it "drops a by-ref closure over a concrete non-Clone leaf: closure-by-ref-noclone" $
+            -- a concrete foreign ctor with no provable Clone, borrowed → bridge
+            -- can't clone it → drop.
+            closureDropReason
+                (Call.TRClosure Call.FnKind True [Call.TRCtor "::opaque::Handle" []] (Call.TRPrim "bool"))
+                `shouldBe` Just "closure-by-ref-noclone"
+        it "keeps a bindable by-value Fn(A) -> B: Nothing" $
+            closureDropReason
+                (Call.TRClosure Call.FnKind False [Call.TRParam 0] (Call.TRParam 1))
+                `shouldBe` Nothing
+        it "keeps a by-ref Fn(&A) over a generic param (the +Clone bound covers it): Nothing" $
+            -- a TRParam borrowed arg is generic; the Fn/FnMut + Clone bound from
+            -- closureBounds enforces Clone at instantiation, so it is NOT dropped.
+            closureDropReason
+                (Call.TRClosure Call.FnKind True [Call.TRParam 0] (Call.TRPrim "bool"))
+                `shouldBe` Nothing
+        it "keeps a by-ref Fn(&i64) over a Clone primitive: Nothing" $
+            closureDropReason
+                (Call.TRClosure Call.FnKind True [Call.TRPrim "i64"] (Call.TRPrim "bool"))
+                `shouldBe` Nothing
+        it "a non-closure TypeRef is never a closure drop: Nothing" $ do
+            closureDropReason (Call.TRParam 0) `shouldBe` Nothing
+            closureDropReason (Call.TRCtor "Vec" [Call.TRParam 0]) `shouldBe` Nothing
 
     describe "#28 closure wrapper synthesis (Task 3.1 — B1/B2 catch_unwind boundary)" $ do
         -- `map_each : List a -> (a -> b) -> List b` over two real params ["a","b"].
