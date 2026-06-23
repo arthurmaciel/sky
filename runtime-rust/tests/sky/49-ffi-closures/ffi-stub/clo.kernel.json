@@ -1,0 +1,69 @@
+{
+  "moduleName": "Rust.Clo",
+  "kernelName": "Rust_Clo",
+  "package": "clo",
+  "functions": [
+    {
+      "name": "mapEach",
+      "arity": 2,
+      "skyType": "List a -> (a -> b) -> Result Error (List b)",
+      "generic": {
+        "params": ["a", "b"],
+        "bounds": {},
+        "call": {
+          "kind": "function",
+          "path": ["::clo"], "method": "map_each",
+          "typeArgs": [{"param": 0}, {"param": 1}],
+          "args": [0, 1],
+          "argTypes": [
+            {"ctor": "Vec", "args": [{"param": 0}]},
+            {"closure": {"kind": "Fn", "byRef": false,
+                         "argTypes": [{"param": 0}], "ret": {"param": 1}}}
+          ],
+          "ret": {"ctor": "Vec", "args": [{"param": 1}]}
+        }
+      }
+    },
+    {
+      "name": "keep",
+      "arity": 2,
+      "skyType": "List a -> (a -> Bool) -> Result Error (List a)",
+      "generic": {
+        "params": ["a"],
+        "bounds": {"a": ["Clone"]},
+        "call": {
+          "kind": "function",
+          "path": ["::clo"], "method": "keep",
+          "typeArgs": [{"param": 0}],
+          "args": [0, 1],
+          "argTypes": [
+            {"ctor": "Vec", "args": [{"param": 0}]},
+            {"closure": {"kind": "Fn", "byRef": true,
+                         "argTypes": [{"param": 0}], "ret": {"prim": "bool"}}}
+          ],
+          "ret": {"ctor": "Vec", "args": [{"param": 0}]}
+        }
+      }
+    },
+    {
+      "name": "runOnce",
+      "arity": 1,
+      "skyType": "(() -> a) -> Result Error a",
+      "generic": {
+        "params": ["a"],
+        "bounds": {},
+        "call": {
+          "kind": "function",
+          "path": ["::clo"], "method": "run_once",
+          "typeArgs": [{"param": 0}],
+          "args": [0],
+          "argTypes": [
+            {"closure": {"kind": "FnOnce", "byRef": false,
+                         "argTypes": [], "ret": {"param": 0}}}
+          ],
+          "ret": {"param": 0}
+        }
+      }
+    }
+  ]
+}

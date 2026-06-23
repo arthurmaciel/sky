@@ -1,0 +1,12 @@
+[project]
+name = "49-ffi-closures"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local clo crate (map_each / keep / run_once), delivered as a file:// git
+# dep. setup.sh git-inits ./clo-crate into the cache path below AND stages the
+# CHECKED-IN closure kernel.json + (empty) bindings into .skycache/ffi/rust/
+# so NO inspector runs (Wall #2 is provable without the inspector — Wall #3).
+["rust.dependencies"]
+clo = { git = "file:///home/arthur/.cache/sky/49-ffi-closures-crate", branch = "master" }

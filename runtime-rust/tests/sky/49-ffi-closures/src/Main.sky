@@ -1,0 +1,32 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Result as Result
+import Rust.Clo as Clo
+import Std.Log exposing (println)
+
+
+-- by-value Fn(A)->B over a multi-call slot.
+mapped : Result Error (List Int)
+mapped =
+    Clo.mapEach [ 1, 2, 3 ] (\x -> x * 10)
+
+
+-- by-ref predicate Fn(&A)->Bool (owned-clone bridge).
+kept : Result Error (List Int)
+kept =
+    Clo.keep [ 1, 2, 3, 4 ] (\x -> modBy 2 x == 0)
+
+
+main : Task Error ()
+main =
+    let
+        m = Result.withDefault [] mapped
+        k = Result.withDefault [] kept
+        _ = println ("mapped sum -> " ++ String.fromInt (List.foldl (+) 0 m))
+        _ = println ("kept len   -> " ++ String.fromInt (List.length k))
+    in
+    if List.foldl (+) 0 m == 60 && List.length k == 2 then
+        println "[ALL OK]"
+    else
+        println "[FAIL]"
