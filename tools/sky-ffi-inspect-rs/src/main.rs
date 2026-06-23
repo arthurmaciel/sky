@@ -3650,6 +3650,12 @@ fn rustdoc_type_to_sky(val: &serde_json::Value, aliases: &HashMap<String, String
         return "()".to_string();
     }
 
+    // [#47(a)] Sentinel for a serde-bound generic reduced to serde_json::Value.
+    // Sky surface type is `String` (the JSON text).
+    if val.get("__sky_serde_value").is_some() {
+        return "String".to_string();
+    }
+
     // { "primitive": "bool" | "usize" | "str" | … }
     if let Some(prim) = val.get("primitive") {
         return type_str_to_sky(prim.as_str().unwrap_or(""), aliases);
@@ -3918,6 +3924,12 @@ fn rustdoc_type_to_rust_str(val: &serde_json::Value) -> String {
         return "()".to_string();
     }
 
+    // [#47(a)] Sentinel for a serde-bound generic reduced to serde_json::Value.
+    // Rust type is `serde_json::Value` (fully-qualified — serde_json is always a dep).
+    if val.get("__sky_serde_value").is_some() {
+        return "serde_json::Value".to_string();
+    }
+
     if let Some(prim) = val.get("primitive") {
         return prim.as_str().unwrap_or("()").to_string();
     }
@@ -4157,6 +4169,201 @@ fn f64_node() -> serde_json::Value {
 #[cfg(test)]
 fn usize_node() -> serde_json::Value {
     serde_json::json!({ "primitive": "usize" })
+}
+
+// ── #47(a) serde-bound generic monomorphisation ──────────────────────────────
+//
+// A foreign fn `fn f<T: serde::Serialize>(x: T)` is MONOMORPHISED to
+// `fn f(x: serde_json::Value)`. Sky's surface type is `String` (JSON text).
+//
+// C-G1: serde traits are identified by RESOLVED canonical path via
+//        EXTERNAL_TRAIT_PATH_BY_ID, never by last segment alone.
+// C-G3: a positive OCCURRENCE CENSUS runs before monomorphisation. Admissible
+//        positions: by-value param (`T`), owned return (`T`), inside
+//        `Result<T,_>` / `Vec<T>` / `Option<T>`. Inadmissible: `&T`, `&mut T`,
+//        tuple element, map value → whole fn dropped (`unmodellable-bound`).
+// C-G4: `serde_json::from_str` is fallible → wrappers are fallible.
+// C-G6: independent per-param reduction (`<T: Serialize, U: DeserializeOwned>`).
+
+/// Sentinel JSON node for `serde_json::Value` — used as the concrete substitute
+/// for a serde-bound generic param.  Both `rustdoc_type_to_sky` and
+/// `rustdoc_type_to_rust_str` have matching arms for this sentinel.
+fn serde_json_value_node() -> serde_json::Value {
+    serde_json::json!({ "__sky_serde_value": true })
+}
+
+/// Canonical serde trait paths as seen in `EXTERNAL_TRAIT_PATH_BY_ID`.
+/// Any path whose LAST segment matches one of these AND whose full joined path
+/// begins with `"serde::"` (or IS one of these exactly) is a serde trait.
+const SERDE_TRAIT_PATHS: &[&str] = &[
+    "serde::Serialize",
+    "serde::ser::Serialize",
+    "serde::de::Deserialize",
+    "serde::Deserialize",
+    "serde::de::DeserializeOwned",
+    "serde::DeserializeOwned",
+];
+
+/// C-G1: true iff the trait_bound node refers to a real serde trait (confirmed
+/// by resolved path via EXTERNAL_TRAIT_PATH_BY_ID, or by canonical-path
+/// fallback). A crate-local trait named `Serialize` does NOT match (crate_id=0
+/// is skipped by `collect_external_trait_paths`).
+fn is_serde_trait_bound(bound: &serde_json::Value) -> bool {
+    let Some(tr) = bound.get("trait_bound").and_then(|tb| tb.get("trait")) else {
+        return false;
+    };
+    // Try confirmed-id path first (most reliable — crate_id=0 was excluded).
+    if let Some(id) = tr.get("id") {
+        let key = item_id_to_str(id);
+        if let Some(path) = EXTERNAL_TRAIT_PATH_BY_ID.with(|m| m.borrow().get(&key).cloned()) {
+            return SERDE_TRAIT_PATHS.contains(&path.as_str());
+        }
+        // If the id is confirmed crate-local → NOT serde (C-G1).
+        let is_local = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key))
+            || REACHABLE_PATHS.with(|c| c.borrow().contains_key(&key));
+        if is_local {
+            return false;
+        }
+    }
+    // Fallback (no id in index): check the raw path string.
+    let raw = tr.get("path").or_else(|| tr.get("name")).and_then(|p| p.as_str()).unwrap_or("");
+    SERDE_TRAIT_PATHS.contains(&raw)
+}
+
+/// True iff every REAL (non-marker, non-lifetime) bound on a set of bounds is a
+/// serde bound (so the param is purely serde-constrained and reducible to Value).
+/// Requires at LEAST one serde bound (a param with zero bounds isn't serde).
+fn bounds_are_all_serde_or_marker(bounds: &[serde_json::Value]) -> bool {
+    let mut saw_serde = false;
+    for b in bounds {
+        if is_marker_bound(b) {
+            continue;
+        }
+        if is_serde_trait_bound(b) {
+            saw_serde = true;
+        } else {
+            return false; // real non-serde, non-marker bound → not reducible
+        }
+    }
+    saw_serde
+}
+
+// ── C-G3: positive occurrence census ─────────────────────────────────────────
+//
+// Before reducing T→serde_json::Value we WALK the entire fn signature to confirm
+// every occurrence of T sits in an admissible position:
+//   ADMISSIBLE  : by-value param `T`, owned return `T`,
+//                 `Result<T, _>`, `Vec<T>`, `Option<T>`.
+//   INADMISSIBLE: `&T`, `&mut T`, tuple element `(T, ...)`,
+//                 HashMap/BTreeMap value `HashMap<K,T>`.
+//
+// An inadmissible occurrence → the whole fn is DROPPED (`unmodellable-bound`).
+// This is the MAKE-OR-BREAK constraint; `subst_generic_json` is POSITION-BLIND
+// (see comment there) so the census MUST run BEFORE substitution.
+
+/// Context for where a type node appears in the signature.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OccurrenceCtx {
+    /// Direct by-value position (fn param or owned return), or inside an
+    /// admissible transparent wrapper (Result/Vec/Option).
+    Admissible,
+    /// Inside an inadmissible position (&T/&mut T/tuple/(K,V)-map-value).
+    Inadmissible,
+}
+
+/// Walk `val`, looking for `{"generic": name}` nodes. Every occurrence must be
+/// in an admissible position (captured via `ctx`). Returns `true` iff ALL
+/// occurrences are admissible (or `name` doesn't appear at all — no issue).
+fn serde_occurrence_admissible_in(val: &serde_json::Value, name: &str, ctx: OccurrenceCtx) -> bool {
+    // Generic node: the one we're looking for.
+    if let Some(g) = val.get("generic").and_then(|g| g.as_str()) {
+        if g == name {
+            return ctx == OccurrenceCtx::Admissible;
+        }
+        return true; // a different generic param — not our concern
+    }
+
+    // borrowed_ref: &T or &mut T → INADMISSIBLE for the inner T.
+    if let Some(inner) = val.get("borrowed_ref") {
+        let t = inner.get("type").or_else(|| inner.get("type_")).unwrap_or(inner);
+        return serde_occurrence_admissible_in(t, name, OccurrenceCtx::Inadmissible);
+    }
+
+    // tuple: every element → INADMISSIBLE.
+    if let Some(items) = val.get("tuple").and_then(|v| v.as_array()) {
+        return items.iter().all(|item| serde_occurrence_admissible_in(item, name, OccurrenceCtx::Inadmissible));
+    }
+
+    // resolved_path: gate on the container kind.
+    if let Some(rp) = val.get("resolved_path") {
+        let raw = rp.get("name").or_else(|| rp.get("path")).and_then(|n| n.as_str()).unwrap_or("");
+        let leaf = raw.rsplit("::").next().unwrap_or(raw);
+        let type_args: Vec<&serde_json::Value> = rp.get("args")
+            .and_then(|a| a.get("angle_bracketed"))
+            .and_then(|ab| ab.get("args"))
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|a| a.get("type")).collect())
+            .unwrap_or_default();
+        match leaf {
+            // Admissible transparent wrappers: T is allowed inside.
+            "Result" | "Option" | "Vec" => {
+                // For Result<T, E>: only the FIRST arg is the Ok type; the
+                // error slot must also be admissible but T can't appear there.
+                return type_args.iter().all(|t| serde_occurrence_admissible_in(t, name, ctx));
+            }
+            // HashMap / BTreeMap / IndexMap: key (arg[0]) is fine; value
+            // (arg[1]) is INADMISSIBLE for T (no Sky coercion for map values).
+            "HashMap" | "BTreeMap" | "IndexMap" | "AHashMap" => {
+                if let Some(key_t) = type_args.first() {
+                    if !serde_occurrence_admissible_in(key_t, name, ctx) {
+                        return false;
+                    }
+                }
+                // value position → inadmissible
+                if let Some(val_t) = type_args.get(1) {
+                    if !serde_occurrence_admissible_in(val_t, name, OccurrenceCtx::Inadmissible) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            // Any other resolved_path: recurse over all type args with inherited ctx.
+            _ => {
+                return type_args.iter().all(|t| serde_occurrence_admissible_in(t, name, ctx));
+            }
+        }
+    }
+
+    // Arrays / slices — admissible (same as Vec).
+    if let Some(inner) = val.get("slice").or_else(|| val.get("array").and_then(|a| a.get("type"))) {
+        return serde_occurrence_admissible_in(inner, name, ctx);
+    }
+
+    // impl Trait / dyn Trait / primitive / null / other → no generic occurrence.
+    true
+}
+
+/// C-G3 gate: verify that every occurrence of the param named `name` in the
+/// fn's full signature (all inputs + output) sits in an admissible position.
+/// All inputs are treated as ADMISSIBLE at the top level (by-value param); the
+/// return is also ADMISSIBLE at the top level (owned return).
+fn fn_serde_param_all_admissible(fn_data: &serde_json::Value, name: &str) -> bool {
+    // Check all input types.
+    let inputs_ok = fn_data["decl"]["inputs"]
+        .as_array()
+        .map(|inputs| {
+            inputs.iter().all(|inp| {
+                let ty = inp.get("type").or_else(|| inp.get(1)).unwrap_or(inp);
+                serde_occurrence_admissible_in(ty, name, OccurrenceCtx::Admissible)
+            })
+        })
+        .unwrap_or(true);
+    if !inputs_ok {
+        return false;
+    }
+    // Check return type.
+    let output = fn_data["decl"].get("output").unwrap_or(&serde_json::Value::Null);
+    serde_occurrence_admissible_in(output, name, OccurrenceCtx::Admissible)
 }
 
 /// Map an INNER TYPE NODE (the X in AsRef<X> / Into<X> / IntoIterator<Item=X>)
@@ -6188,6 +6395,15 @@ fn resolve_param_bounds(bounds: &[serde_json::Value], pos: BoundPos) -> Option<s
 /// Recursively replace every `{"generic":"NAME"}` node whose NAME is in `map`
 /// with the mapped concrete type node. Other nodes pass through unchanged.
 /// (`impl Trait` nodes are handled separately in Task 6.)
+///
+/// [C-G3] CALLER MUST RUN THE OCCURRENCE CENSUS BEFORE CALLING FOR SERDE PARAMS.
+/// This function is POSITION-BLIND: it substitutes regardless of whether the
+/// `{"generic":"T"}` node sits inside `&T`, a tuple `(T,T)`, or a map value
+/// `HashMap<K,T>` — all of which are inadmissible for the serde-Value reduction.
+/// `resolve_generics` calls `fn_serde_param_all_admissible` BEFORE inserting a
+/// `serde_json_value_node()` into the map.  Any code that bypasses that census
+/// and calls `subst_generic_json` directly on serde nodes risks emitting a
+/// `&serde_json::Value` or `HashMap<K,serde_json::Value>` that cargo rejects.
 fn subst_generic_json(
     val: &serde_json::Value,
     map: &std::collections::HashMap<String, serde_json::Value>,
@@ -6265,7 +6481,24 @@ fn resolve_generics(
         // `subst_generic_json`/`impl_traits_resolvable` with `BoundPos::Return`.)
         match resolve_param_bounds(&bounds, BoundPos::Param) {
             Some(concrete) => { map.insert(name.to_string(), concrete); }
-            None => return None, // unresolvable type param -> drop whole fn
+            None => {
+                // [#47(a)] serde-bound reduction arm (C-G1 + C-G3 + C-G6).
+                // If ALL real (non-marker) bounds are serde traits, try to reduce
+                // T → serde_json::Value, but only after confirming every occurrence
+                // in the fn signature sits in an admissible position (C-G3).
+                if bounds_are_all_serde_or_marker(&bounds) {
+                    // C-G3: census walk over the full fn signature.
+                    if fn_serde_param_all_admissible(fn_data, name) {
+                        // Admissible → monomorphise T=serde_json::Value.
+                        map.insert(name.to_string(), serde_json_value_node());
+                    } else {
+                        // An occurrence in &T / tuple / map-value position → DROP.
+                        return None;
+                    }
+                } else {
+                    return None; // unresolvable type param -> drop whole fn
+                }
+            }
         }
     }
     Some(map)
@@ -9863,6 +10096,343 @@ mod tests {
         assert!(
             parse_fn_item("sync_non_send", &fd_sync_non_send, &HashMap::new(), None).is_some(),
             "sync fn with a non-Send opaque param must NOT be affected by the async Send gate"
+        );
+    }
+
+    // ── #47(a) serde-bound generic tests ─────────────────────────────────────
+
+    /// Build a minimal serde trait_bound node with the given canonical path.
+    /// `id` is left at 0 (no doc["paths"] loaded in unit tests) so the
+    /// fallback last-segment + path check in `is_serde_trait_bound` fires.
+    fn serde_bound(canonical_path: &str) -> serde_json::Value {
+        let last = canonical_path.rsplit("::").next().unwrap_or(canonical_path);
+        serde_json::json!({
+            "trait_bound": {
+                "trait": {
+                    "name": last,
+                    "path": canonical_path,
+                    "id": { "index": 0, "is_crate_root": false },
+                    "args": null
+                },
+                "generic_params": [],
+                "modifier": "none"
+            }
+        })
+    }
+
+    fn marker_bound(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "trait_bound": {
+                "trait": { "name": name, "path": name, "id": { "index": 0, "is_crate_root": false }, "args": null },
+                "generic_params": [],
+                "modifier": "none"
+            }
+        })
+    }
+
+    fn generic_node(name: &str) -> serde_json::Value {
+        serde_json::json!({ "generic": name })
+    }
+
+    fn borrowed_generic(name: &str) -> serde_json::Value {
+        serde_json::json!({ "borrowed_ref": { "lifetime": null, "mutable": false, "type_": { "generic": name } } })
+    }
+
+    fn tuple_of_generics(name: &str) -> serde_json::Value {
+        serde_json::json!({ "tuple": [{ "generic": name }, { "generic": name }] })
+    }
+
+    /// Build a fn_data JSON for `resolve_generics` tests.  `inputs` is a list of
+    /// type-JSON nodes (each becomes `["argN", <type>]`); `output` is the return.
+    fn fn_data_with_generic_bounds(
+        param_name: &str,
+        bounds: Vec<serde_json::Value>,
+        inputs: Vec<serde_json::Value>,
+        output: serde_json::Value,
+    ) -> serde_json::Value {
+        let input_pairs: Vec<serde_json::Value> = inputs.into_iter().enumerate()
+            .map(|(i, t)| serde_json::json!([format!("arg{}", i), t]))
+            .collect();
+        serde_json::json!({
+            "generics": {
+                "params": [{
+                    "name": param_name,
+                    "kind": {
+                        "type": {
+                            "bounds": bounds,
+                            "default": null,
+                            "synthetic": false
+                        }
+                    }
+                }],
+                "where_predicates": []
+            },
+            "decl": {
+                "inputs": input_pairs,
+                "output": output
+            }
+        })
+    }
+
+    // ── C-G1: canonical path detection ───────────────────────────────────────
+
+    #[test]
+    fn serde_serialize_bound_detected() {
+        let b = serde_bound("serde::Serialize");
+        assert!(is_serde_trait_bound(&b), "serde::Serialize must be detected as a serde bound");
+    }
+
+    #[test]
+    fn serde_deserialize_owned_bound_detected() {
+        let b = serde_bound("serde::de::DeserializeOwned");
+        assert!(is_serde_trait_bound(&b), "serde::de::DeserializeOwned must be detected");
+    }
+
+    #[test]
+    fn own_serialize_look_alike_not_detected() {
+        // A crate-local `trait Serialize` at crate_id=0 should NOT match.
+        // In unit tests, the id 0 is NOT in EXTERNAL_TRAIT_PATH_BY_ID (nothing is
+        // loaded), AND it IS confirmed local via LOCAL_TYPE_IDS being empty →
+        // fallback fires on the raw path "Serialize" (no "::") → last segment
+        // is "Serialize" but path is just "Serialize" which is NOT in
+        // SERDE_TRAIT_PATHS (they all start with "serde::") → returns false.
+        let b = serde_json::json!({
+            "trait_bound": {
+                "trait": {
+                    "name": "Serialize",
+                    "path": "Serialize",
+                    "id": { "index": 1, "is_crate_root": false },
+                    "args": null
+                },
+                "generic_params": [],
+                "modifier": "none"
+            }
+        });
+        assert!(!is_serde_trait_bound(&b), "crate-local Serialize must NOT be detected as serde");
+    }
+
+    #[test]
+    fn display_bound_not_serde() {
+        let b = serde_json::json!({
+            "trait_bound": {
+                "trait": { "name": "Display", "path": "core::fmt::Display", "id": { "index": 0, "is_crate_root": false }, "args": null },
+                "generic_params": [],
+                "modifier": "none"
+            }
+        });
+        assert!(!is_serde_trait_bound(&b), "Display is not a serde bound");
+    }
+
+    // ── bounds_are_all_serde_or_marker ────────────────────────────────────────
+
+    #[test]
+    fn serialize_plus_send_is_all_serde_or_marker() {
+        let bounds = vec![
+            serde_bound("serde::Serialize"),
+            marker_bound("Send"),
+        ];
+        assert!(bounds_are_all_serde_or_marker(&bounds));
+    }
+
+    #[test]
+    fn serialize_plus_display_not_all_serde() {
+        let bounds = vec![
+            serde_bound("serde::Serialize"),
+            serde_json::json!({
+                "trait_bound": {
+                    "trait": { "name": "Display", "path": "core::fmt::Display", "id": { "index": 0, "is_crate_root": false }, "args": null },
+                    "generic_params": [],
+                    "modifier": "none"
+                }
+            }),
+        ];
+        assert!(!bounds_are_all_serde_or_marker(&bounds));
+    }
+
+    #[test]
+    fn empty_bounds_not_serde() {
+        assert!(!bounds_are_all_serde_or_marker(&[]), "no bounds → not serde (needs at least one)");
+    }
+
+    // ── C-G3: occurrence census ───────────────────────────────────────────────
+
+    #[test]
+    fn by_value_param_admissible() {
+        // `fn f(x: T)` — T appears directly by value → admissible.
+        assert!(serde_occurrence_admissible_in(&generic_node("T"), "T", OccurrenceCtx::Admissible));
+    }
+
+    #[test]
+    fn borrowed_ref_inadmissible() {
+        // `fn f(x: &T)` — T appears inside a borrowed_ref → inadmissible.
+        assert!(!serde_occurrence_admissible_in(&borrowed_generic("T"), "T", OccurrenceCtx::Admissible));
+    }
+
+    #[test]
+    fn tuple_element_inadmissible() {
+        // `fn f(x: (T, T))` → inadmissible.
+        assert!(!serde_occurrence_admissible_in(&tuple_of_generics("T"), "T", OccurrenceCtx::Admissible));
+    }
+
+    #[test]
+    fn hashmap_value_inadmissible() {
+        // `fn f(m: HashMap<String, T>)` → T in value position → inadmissible.
+        let map_ty = serde_json::json!({
+            "resolved_path": {
+                "name": "HashMap",
+                "path": "HashMap",
+                "id": 0,
+                "args": {
+                    "angle_bracketed": {
+                        "args": [
+                            { "type": { "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } } },
+                            { "type": { "generic": "T" } }
+                        ],
+                        "constraints": []
+                    }
+                }
+            }
+        });
+        assert!(!serde_occurrence_admissible_in(&map_ty, "T", OccurrenceCtx::Admissible));
+    }
+
+    #[test]
+    fn result_ok_admissible() {
+        // `fn f() -> Result<T, E>` — T in Ok slot → admissible.
+        let result_ty = path_with_args("Result", vec![generic_node("T"), path("String")]);
+        assert!(serde_occurrence_admissible_in(&result_ty, "T", OccurrenceCtx::Admissible));
+    }
+
+    #[test]
+    fn vec_t_admissible() {
+        // `fn f(v: Vec<T>)` → admissible.
+        let vec_ty = path_with_args("Vec", vec![generic_node("T")]);
+        assert!(serde_occurrence_admissible_in(&vec_ty, "T", OccurrenceCtx::Admissible));
+    }
+
+    #[test]
+    fn other_generic_param_ignored() {
+        // `fn f(x: U)` with name="T" — no occurrence of T → admissible vacuously.
+        assert!(serde_occurrence_admissible_in(&generic_node("U"), "T", OccurrenceCtx::Admissible));
+    }
+
+    // ── resolve_generics integration ──────────────────────────────────────────
+
+    #[test]
+    fn serde_bound_by_value_reduces_to_value_node() {
+        // `fn put<T: serde::Serialize>(x: T)` → T reduces to serde_json_value_node().
+        let fd = fn_data_with_generic_bounds(
+            "T",
+            vec![serde_bound("serde::Serialize")],
+            vec![generic_node("T")],
+            serde_json::Value::Null,
+        );
+        let map = resolve_generics(&fd).expect("put<T: Serialize> must resolve");
+        assert_eq!(map.get("T"), Some(&serde_json_value_node()),
+            "T must reduce to the serde_json_value sentinel");
+    }
+
+    #[test]
+    fn serde_bound_with_marker_reduces() {
+        // `fn f<T: serde::Serialize + Send + Sync>(x: T)` → still reduces.
+        let fd = fn_data_with_generic_bounds(
+            "T",
+            vec![serde_bound("serde::Serialize"), marker_bound("Send"), marker_bound("Sync")],
+            vec![generic_node("T")],
+            serde_json::Value::Null,
+        );
+        let map = resolve_generics(&fd).expect("Serialize + Send + Sync must reduce");
+        assert_eq!(map.get("T"), Some(&serde_json_value_node()));
+    }
+
+    #[test]
+    fn serde_bound_borrow_drops_fn() {
+        // `fn by_ref<T: serde::Serialize>(_x: &T)` → C-G3 census fails → None.
+        let fd = fn_data_with_generic_bounds(
+            "T",
+            vec![serde_bound("serde::Serialize")],
+            vec![borrowed_generic("T")],
+            serde_json::Value::Null,
+        );
+        assert!(resolve_generics(&fd).is_none(),
+            "by_ref<T: Serialize>(_x: &T) must be dropped (inadmissible &T)");
+    }
+
+    #[test]
+    fn serde_bound_tuple_drops_fn() {
+        // `fn pair<T: serde::Serialize>(_x: (T, T))` → dropped.
+        let fd = fn_data_with_generic_bounds(
+            "T",
+            vec![serde_bound("serde::Serialize")],
+            vec![tuple_of_generics("T")],
+            serde_json::Value::Null,
+        );
+        assert!(resolve_generics(&fd).is_none(),
+            "pair<T: Serialize>(_x: (T,T)) must be dropped (inadmissible tuple)");
+    }
+
+    #[test]
+    fn serde_bound_map_value_drops_fn() {
+        // `fn map_val<T: serde::Serialize>(_m: HashMap<String, T>)` → dropped.
+        let map_ty = serde_json::json!({
+            "resolved_path": {
+                "name": "HashMap", "path": "HashMap", "id": 0,
+                "args": { "angle_bracketed": { "args": [
+                    { "type": { "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } } },
+                    { "type": { "generic": "T" } }
+                ], "constraints": [] } }
+            }
+        });
+        let fd = fn_data_with_generic_bounds(
+            "T",
+            vec![serde_bound("serde::Serialize")],
+            vec![map_ty],
+            serde_json::Value::Null,
+        );
+        assert!(resolve_generics(&fd).is_none(),
+            "map_val<T: Serialize>(_m: HashMap<String,T>) must be dropped");
+    }
+
+    #[test]
+    fn non_serde_bound_not_reduced() {
+        // `fn f<T: Display>(x: T)` → NOT reduced (Display is not serde).
+        let display_bound = serde_json::json!({
+            "trait_bound": {
+                "trait": { "name": "Display", "path": "core::fmt::Display", "id": { "index": 0, "is_crate_root": false }, "args": null },
+                "generic_params": [], "modifier": "none"
+            }
+        });
+        let fd = fn_data_with_generic_bounds(
+            "T",
+            vec![display_bound.clone()],
+            vec![generic_node("T")],
+            serde_json::Value::Null,
+        );
+        // Display IS handled by bound_to_concrete → resolves to String, not dropped.
+        // The point is it does NOT yield a serde_json_value_node.
+        let map = resolve_generics(&fd);
+        if let Some(ref m) = map {
+            assert_ne!(m.get("T"), Some(&serde_json_value_node()),
+                "Display bound must NOT produce serde_json_value sentinel");
+        }
+        // (resolve_generics may return Some(string_node()) or None for Display — both ok)
+    }
+
+    // ── rustdoc_type_to_sky / rustdoc_type_to_rust_str sentinel ──────────────
+
+    #[test]
+    fn serde_value_node_to_sky_is_string() {
+        assert_eq!(
+            rustdoc_type_to_sky(&serde_json_value_node(), &HashMap::new()),
+            "String"
+        );
+    }
+
+    #[test]
+    fn serde_value_node_to_rust_str_is_serde_json_value() {
+        assert_eq!(
+            rustdoc_type_to_rust_str(&serde_json_value_node()),
+            "serde_json::Value"
         );
     }
 }
