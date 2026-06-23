@@ -1,0 +1,16 @@
+module Main exposing (main)
+
+-- 73-ffi-serde: Sky #47(a) — serde-bound generic methods (T: Serialize/DeserializeOwned).
+--
+-- P0 fixture: validates the serde-fixture crate compiles and the Sky project
+-- builds cleanly. The inspector recognition + serde→String reduction bindings
+-- land in P1/P2; end-to-end call assertions land in P3.
+--
+-- Expected output:
+--   [ALL OK]
+
+import Std.Log exposing (println)
+
+
+main =
+    println "[ALL OK]"
