@@ -812,6 +812,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // set BEFORE any function is parsed (parse_fn_item -> rust_str reads it).
     REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
     ALIAS_MAP.with(|c| *c.borrow_mut() = collect_aliases(doc));
+    LOCAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_local_type_ids(doc));
 
     // Wall #3 coverage accumulators are per-crate — reset so a multi-crate run
     // reports each crate's bind%/drops independently.
@@ -959,7 +960,23 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 for method_id in items {
                     let id = item_id_to_str(method_id);
                     if let Some(method_item) = index.get(&id) {
-                        if !is_public(method_item) {
+                        // [Relaxation #31] A TRAIT-impl method item carries
+                        // `visibility:"default"` even when it is fully callable (a
+                        // trait method inherits the trait's visibility; it is never
+                        // written `pub` in the impl), so the method-level
+                        // `is_public` check is the WRONG gate for it. Callability
+                        // of `<Self as Trait>::method` is instead carried by:
+                        //   * the trait being public+reachable (the C-1
+                        //     `TraitUnreachable` drop in route_concrete_method),
+                        //   * the Self type being public+reachable (REACHABLE_PATHS
+                        //     — a pub(crate) Self renders bare → nameability drop),
+                        //   * the per-signature `fn_types_nameable` gate (a private
+                        //     type anywhere in the sig → drop, no E0603).
+                        // These fire INDEPENDENTLY of `is_public`. An INHERENT-impl
+                        // method without `pub` is genuinely private, so its
+                        // `"default"` visibility correctly drops it — the skip is
+                        // scoped strictly to `trait_name.is_some()`.
+                        if is_inherent_impl && !is_public(method_item) {
                             continue;
                         }
                         let method_name = method_item["name"].as_str().unwrap_or("");
@@ -2607,6 +2624,28 @@ thread_local! {
     // when `T: Clone`).  Must be set BEFORE any function is parsed.
     static CLONE_OPAQUE_NAMES: std::cell::RefCell<HashSet<String>> =
         std::cell::RefCell::new(HashSet::new());
+
+    // Rustdoc ids of every CRATE-LOCAL (`crate_id == 0`) TYPE item. A
+    // resolved_path whose id is in THIS set but ABSENT from REACHABLE_PATHS is a
+    // private/unreachable crate-local type — `type_to_typeref` must DROP it
+    // rather than emit a bare last-segment `::Secret` (E0603/E0433). An EXTERNAL
+    // type (`crate_id > 0`: std `Vec`/`String`/…) is NOT in this set, so the
+    // existing last-segment fallback (`::Vec`) is preserved. Set BEFORE any
+    // function is parsed (parse_rustdoc, next to REACHABLE_PATHS).
+    static LOCAL_TYPE_IDS: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// True if `id` is a crate-local type whose public path is NOT reachable (a
+/// private / `pub(crate)` crate-local type). Such an id, when it appears in a
+/// parametric stub's call AST, would render as a bare `::LastSegment` that the
+/// generated wrapper can't resolve (E0603/E0433) — so `type_to_typeref` drops
+/// it. An EXTERNAL type's id (std `Vec`/`String`) is absent from `LOCAL_TYPE_IDS`
+/// → returns false → the existing std last-segment fallback stays.
+fn is_unreachable_local_type(id: &serde_json::Value) -> bool {
+    let key = item_id_to_str(id);
+    let is_local = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key));
+    is_local && REACHABLE_PATHS.with(|c| !c.borrow().contains_key(&key))
 }
 
 /// True when `rendered` is the rust-type name of a crate-local opaque struct
@@ -2750,6 +2789,23 @@ fn fn_types_nameable(f: &Function) -> bool {
 /// other modules transitively.  Prefers the shortest path so root re-exports
 /// win over deep submodule definitions.  rustdoc_type_to_rust_str uses this to
 /// qualify opaque types unambiguously instead of relying on glob imports.
+/// Collect the rustdoc ids of every CRATE-LOCAL (`crate_id == 0`) TYPE item
+/// (struct / enum / trait / alias / union / primitive). Used by
+/// `is_unreachable_local_type` to tell a private crate-local type (drop) from an
+/// external std type (keep the last-segment fallback).
+fn collect_local_type_ids(doc: &serde_json::Value) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    let Some(index) = doc["index"].as_object() else {
+        return out;
+    };
+    for (id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) == 0 && item_is_type(item) {
+            out.insert(id.clone());
+        }
+    }
+    out
+}
+
 fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
     let mut out: HashMap<String, String> = HashMap::new();
     let index = match doc["index"].as_object() {
@@ -4292,6 +4348,19 @@ fn type_to_typeref(
         // The receiver-foreign ctor (or a nested one). Render the `::`-path the
         // SAME way rustdoc_type_to_rust_str does, then recurse into its args.
         let raw_name = rp["name"].as_str().or_else(|| rp["path"].as_str()).unwrap_or("");
+        // A PRIVATE / `pub(crate)` crate-local type (its id is crate-local but has
+        // no reachable public path) would otherwise fall back to a bare
+        // last-segment `::Secret` — an E0603/E0433 in the generated wrapper. DROP
+        // it (the per-signature nameability gate for the parametric path, where
+        // the rust_type strings are empty so `fn_types_nameable` can't see it).
+        // An EXTERNAL std type (`Vec`/`String`: id not crate-local) is unaffected.
+        if let Some(id) = rp.get("id") {
+            if is_unreachable_local_type(id) {
+                return Err(GenericDrop::NotBindable(format!(
+                    "unreachable crate-local type `{raw_name}` (no public path)"
+                )));
+            }
+        }
         let qualified = rp.get("id").and_then(reachable_local_path);
         let name: String = match qualified {
             Some(full) => full,
@@ -7659,6 +7728,196 @@ mod tests {
                 "42": { "path": ["tm","Area"],   "kind": "trait" }
             }
         })
+    }
+
+    /// Build a minimal rustdoc doc: a public crate-root module exporting a
+    /// BARE concrete struct `Circle`, a public trait `Area`, and an
+    /// `impl Area for Circle` carrying ONE non-generic method `area(&self) -> f64`
+    /// whose `visibility` is the caller-supplied value (trait methods carry
+    /// `"default"` even when callable). The Self `Circle` is a bare named path
+    /// (no angle-bracket args) → `self_is_concrete_named` true → routes through
+    /// the parametric/UFCS path.
+    fn circle_area_doc(method_vis: &str, sig_inputs: serde_json::Value,
+                       sig_output: serde_json::Value) -> serde_json::Value {
+        let area_method = serde_json::json!({
+            "name": "area", "crate_id": 0, "visibility": method_vis,
+            "inner": { "function": {
+                "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+                "generics": { "params": [], "where_predicates": [] },
+                "sig": { "inputs": sig_inputs, "output": sig_output }
+            } }
+        });
+        let area_trait = serde_json::json!({
+            "name": "Area", "crate_id": 0, "visibility": "public",
+            "inner": { "trait": { "items": [ 100 ] } }
+        });
+        // Self `Circle` — bare resolved_path id 7, NO angle-bracket args.
+        let circle = serde_json::json!({
+            "resolved_path": { "name": "Circle", "path": "Circle", "id": 7, "args": null }
+        });
+        let area_impl = serde_json::json!({
+            "name": null, "crate_id": 0, "visibility": "default",
+            "inner": { "impl": {
+                "generics": { "params": [], "where_predicates": [] },
+                "trait": { "id": 42, "name": "Area", "path": "Area" },
+                "for": circle,
+                "items": [ 100 ]
+            } }
+        });
+        let circle_struct = serde_json::json!({
+            "name": "Circle", "crate_id": 0, "visibility": "public",
+            "inner": { "struct": {
+                "kind": "unit",
+                "generics": { "params": [], "where_predicates": [] }
+            } }
+        });
+        // A public free constructor `make_circle() -> Circle` (id 60) so `Circle`
+        // is owned-producible → the by-value-receiver Sized gate keeps `area`.
+        let make_circle = serde_json::json!({
+            "name": "make_circle", "crate_id": 0, "visibility": "public",
+            "inner": { "function": {
+                "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+                "generics": { "params": [], "where_predicates": [] },
+                "sig": { "inputs": [], "output": {
+                    "resolved_path": { "name": "Circle", "path": "Circle", "id": 7, "args": null } } }
+            } }
+        });
+        let root_mod = serde_json::json!({
+            "name": "tm", "crate_id": 0, "visibility": "public",
+            "inner": { "module": { "items": [ 7, 42, 50, 60 ], "is_crate": true } }
+        });
+        serde_json::json!({
+            "root": 1,
+            "index": {
+                "1": root_mod, "7": circle_struct, "42": area_trait,
+                "50": area_impl, "100": area_method, "60": make_circle
+            },
+            "paths": {
+                "1":  { "path": ["tm"],          "kind": "module" },
+                "7":  { "path": ["tm","Circle"], "kind": "struct" },
+                "42": { "path": ["tm","Area"],   "kind": "trait" }
+            }
+        })
+    }
+
+    #[test]
+    fn test_default_visibility_trait_method_binds() {
+        // [Relaxation / the delivery] A public-trait + public-type method whose
+        // item-level `visibility` is `"default"` (the structural value for EVERY
+        // trait-impl method) must now BIND — the trait+Self reachability + the
+        // per-signature nameability gates carry callability, NOT the method's own
+        // visibility. Pre-relaxation this dropped at the `is_public` gate.
+        let doc = circle_area_doc(
+            "default",
+            serde_json::json!([ ["self", borrowed(serde_json::json!({ "generic": "Self" }))] ]),
+            serde_json::json!({ "primitive": "f64" }),
+        );
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        let area = pkg.functions.iter().find(|f| f.name == "area")
+            .expect("a `default`-visibility trait method on a public trait+type \
+                     MUST bind after the relaxation");
+        // It bound as a trait method → carries the UFCS qualifier.
+        let g = area.generic.as_ref().expect("trait method binds as a parametric stub");
+        assert_eq!(
+            g.call.trait_qualifier,
+            Some(("::tm::Circle".to_string(), "::tm::Area".to_string())),
+            "the bound trait method must carry the UFCS qualifier");
+    }
+
+    #[test]
+    fn test_trait_method_private_type_in_sig_drops() {
+        // [Regression] A `default` trait method whose RETURN references a PRIVATE
+        // type (`Secret`, absent from REACHABLE_PATHS → renders bare `Secret`)
+        // still DROPS via the per-signature nameability gate — no E0603. The
+        // relaxation does NOT weaken this gate.
+        let mut doc = circle_area_doc(
+            "default",
+            serde_json::json!([ ["self", borrowed(serde_json::json!({ "generic": "Self" }))] ]),
+            // Return a private opaque type by id 8 (crate-local but NOT a public
+            // module item → unreachable → renders bare `Secret`).
+            serde_json::json!({
+                "resolved_path": { "name": "Secret", "path": "Secret", "id": 8, "args": null }
+            }),
+        );
+        // `Secret` is a CRATE-LOCAL struct (crate_id 0) but is NOT listed in any
+        // public module's items → absent from REACHABLE_PATHS → unreachable.
+        doc["index"]["8"] = serde_json::json!({
+            "name": "Secret", "crate_id": 0, "visibility": "default",
+            "inner": { "struct": { "kind": "unit",
+                "generics": { "params": [], "where_predicates": [] } } }
+        });
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            !pkg.functions.iter().any(|f| f.name == "area"),
+            "a trait method returning a private/unreachable type must DROP \
+             (nameability), even after the visibility relaxation");
+    }
+
+    #[test]
+    fn test_trait_method_pubcrate_self_drops() {
+        // [Regression] A `pub(crate)` Self: `Circle`'s id is absent from
+        // REACHABLE_PATHS, so the receiver renders as the bare unqualified
+        // `Circle` → the nameability gate drops the method. The relaxation's
+        // Self-reachability reliance is exactly this.
+        let mut doc = circle_area_doc(
+            "default",
+            serde_json::json!([ ["self", borrowed(serde_json::json!({ "generic": "Self" }))] ]),
+            serde_json::json!({ "primitive": "f64" }),
+        );
+        // Drop `Circle` (id 7) from the module's item list AND the paths map so
+        // collect_reachable_paths never records it → unreachable Self.
+        doc["index"]["1"]["inner"]["module"]["items"] =
+            serde_json::json!([ 42, 50, 60 ]);
+        doc["paths"].as_object_mut().unwrap().remove("7");
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            !pkg.functions.iter().any(|f| f.name == "area"),
+            "a trait method on a pub(crate) (unreachable) Self must DROP \
+             (nameability), even after the visibility relaxation");
+    }
+
+    #[test]
+    fn test_blanket_impl_trait_method_drops() {
+        // [Regression] A blanket `impl<T> Area for T`: the Self is a free type-var
+        // → `self_is_concrete_named` false → `trait-method-generic-self` drop.
+        let mut doc = circle_area_doc(
+            "default",
+            serde_json::json!([ ["self", borrowed(serde_json::json!({ "generic": "Self" }))] ]),
+            serde_json::json!({ "primitive": "f64" }),
+        );
+        // Replace the `for`-Self with a bare generic `T`, and declare `<T>` on the
+        // impl's generics → a blanket impl.
+        doc["index"]["50"]["inner"]["impl"]["for"] =
+            serde_json::json!({ "generic": "T" });
+        doc["index"]["50"]["inner"]["impl"]["generics"] =
+            serde_json::json!({ "params": [ type_param("T", vec![]) ], "where_predicates": [] });
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            !pkg.functions.iter().any(|f| f.name == "area"),
+            "a blanket impl<T> Area for T must DROP (concrete-Self gate)");
+        let dropped = GENERIC_DROPS.with(|v| {
+            v.borrow().iter().any(|(s, d)| s == "area"
+                && matches!(d, GenericDrop::TraitMethodDrop(TraitMethodDropTag::GenericSelf, _)))
+        });
+        assert!(dropped, "blanket impl must record trait-method-generic-self");
+    }
+
+    #[test]
+    fn test_inherent_default_method_still_drops() {
+        // [Relaxation scope] An INHERENT-impl method with `"default"` visibility
+        // (no `pub`) is genuinely private — the relaxation is `trait_name.is_some()`
+        // scoped, so it STILL DROPS. Same Circle doc but NO trait node on the impl.
+        let mut doc = circle_area_doc(
+            "default",
+            serde_json::json!([ ["self", borrowed(serde_json::json!({ "generic": "Self" }))] ]),
+            serde_json::json!({ "primitive": "f64" }),
+        );
+        // Strip the trait → an inherent impl.
+        doc["index"]["50"]["inner"]["impl"].as_object_mut().unwrap().remove("trait");
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            !pkg.functions.iter().any(|f| f.name == "area"),
+            "an inherent-impl `default` (non-pub) method stays private → must DROP");
     }
 
     #[test]
