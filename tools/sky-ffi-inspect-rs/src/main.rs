@@ -2630,6 +2630,20 @@ fn parse_fn_item(
     // the E slot is the SkyError conversion path (always String-Debug → Send).
     //
     // Void async (`results` empty, Sky binding `Task Error ()`) passes — () is Send.
+    //
+    // C1b Send gate — PARAM types.  The generated wrapper is:
+    //   `tokio::task::spawn(async move { foreign_fn(arg0, arg1, …).await })`
+    // `async move` captures arg0…argN by value.  Tokio's spawn requires the
+    // future (and therefore every captured value) to be `Send`.  The output-only
+    // check above misses non-Send args passed by value — e.g. a `Clone + !Send`
+    // Rc-backed struct admitted by `owned_copy_admissible` for sync FFI would
+    // be captured in the async block and yield E0277 at cargo build.
+    //
+    // Send-safe param shapes:
+    //   • `&str` / `&String`  → coerced to owned `String` (always Send)
+    //   • primitives + String by value   → `is_async_send_output`
+    //   • Vec/slice of those             → `is_async_send_seq`
+    //   • everything else (including `&CloneOpaque`, owned `CloneButNotSend`) → drop
     if effect == "effectful" {
         if let Some(ret) = results.first() {
             // Unwrap outer Result<T, _> → T for the Send check.
@@ -2679,6 +2693,44 @@ fn parse_fn_item(
                 }
                 return None;
             }
+        }
+
+        // C1b — param-level Send check (see comment above).
+        // Skip the implicit "self" receiver at index 0 when present; its type is
+        // the recv type which is always a concrete crate-local struct (opaque but
+        // used as the first arg to the call, not moved into the spawn closure).
+        // All non-self params are captured by the `async move` block.
+        let param_send_ok = |p: &Param| -> bool {
+            let rt = p.rust_type.trim();
+            // `&str` / `&String` → coerced to owned `String` (Send).
+            if rt == "&str" || rt == "&String" {
+                return true;
+            }
+            // Primitives + String by value.
+            if is_async_send_output(rt) {
+                return true;
+            }
+            // Vec/slice of Send-primitive elements.
+            if is_async_send_seq(rt) {
+                return true;
+            }
+            false
+        };
+        let non_send_param = params
+            .iter()
+            // Skip the implicit self receiver — it is the dispatch target, not a
+            // captured value (the call is `arg0.method(arg1, arg2, …).await`).
+            .skip(if recv.is_some() && params.first().map(|p| p.name == "self").unwrap_or(false) { 1 } else { 0 })
+            .find(|p| !param_send_ok(p));
+        if let Some(offending_param) = non_send_param {
+            if tail_audit_enabled() {
+                record_tail_drop(
+                    "async-future-not-send",
+                    drop_is_valuable(name, recv),
+                    &offending_param.rust_type,
+                );
+            }
+            return None;
         }
     }
 
@@ -9314,6 +9366,106 @@ mod tests {
         assert!(
             !is_async_send_output(inner3),
             "non-Send inner type must NOT be admitted by async Send gate"
+        );
+    }
+
+    // ── P2 unit test: async Send gate covers ARG types (guardian #44 follow-up) ──
+    //
+    // An `async fn f(x: RcBacked) -> i64` where `RcBacked` is a crate-local
+    // Clone-but-!Send struct MUST be dropped.  Today parse_fn_item checks the
+    // OUTPUT type only — so with `i64` as the return type the gate passes and
+    // the fn binds.  After the fix, the param-side Send check fires and returns
+    // None (tagged `async-future-not-send`).
+    //
+    // In this unit-test context CLONE_OPAQUE_NAMES is empty, so
+    // `is_clone_opaque_name("RcBacked")` returns false.  That means
+    // `owned_copy_admissible("&RcBacked")` also returns false, which is the
+    // correct structural property: an `Rc`-backed type is not Send regardless
+    // of whether the thread-local name set is populated.
+    #[test]
+    fn async_send_gate_covers_param_types() {
+        // Async fn with a non-Send opaque param (owned) and a Send output (i64).
+        // MUST be dropped — the async wrapper captures params in `async move { … }`
+        // which requires all captured values (including args) to be Send.
+        let non_send_param = serde_json::json!({
+            "resolved_path": { "name": "RcBacked", "path": "RcBacked", "id": 0, "args": null }
+        });
+        let fd_owned_param = serde_json::json!({
+            "header": { "is_async": true, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": {
+                "inputs": [ ["x", non_send_param] ],
+                "output": { "primitive": "i64" }
+            }
+        });
+        assert!(
+            parse_fn_item("take_non_send", &fd_owned_param, &HashMap::new(), None).is_none(),
+            "async fn with a non-Send opaque param MUST be dropped (async-future-not-send)"
+        );
+
+        // By-ref non-Send opaque param (`&RcBacked`): the wrapper would call
+        // `.to_owned()` on it (owned_copy_admissible path), yielding an owned
+        // `RcBacked` that is still `!Send` and still captured by the async move.
+        // In this unit-test, CLONE_OPAQUE_NAMES is empty so `owned_copy_admissible`
+        // already returns false — but the param-level async Send gate ALSO blocks it.
+        let non_send_ref_param = serde_json::json!({
+            "borrowed_ref": {
+                "lifetime": null,
+                "mutable": false,
+                "type": { "resolved_path": { "name": "RcBacked", "path": "RcBacked", "id": 0, "args": null } }
+            }
+        });
+        let fd_ref_param = serde_json::json!({
+            "header": { "is_async": true, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": {
+                "inputs": [ ["x", non_send_ref_param] ],
+                "output": { "primitive": "i64" }
+            }
+        });
+        assert!(
+            parse_fn_item("take_non_send_ref", &fd_ref_param, &HashMap::new(), None).is_none(),
+            "async fn with a &non-Send opaque param MUST be dropped (async-future-not-send)"
+        );
+
+        // Control: async fn with only Send params (primitives + String) and a Send
+        // return MUST bind.
+        let fd_send_params = serde_json::json!({
+            "header": { "is_async": true, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": {
+                "inputs": [
+                    ["n", { "primitive": "i64" }],
+                    ["s", { "resolved_path": { "name": "String", "path": "String", "id": 0, "args": null } }]
+                ],
+                "output": { "primitive": "bool" }
+            }
+        });
+        assert!(
+            parse_fn_item("send_async_fn", &fd_send_params, &HashMap::new(), None).is_some(),
+            "async fn with Send-only params must still bind"
+        );
+
+        // Control: SYNC fn with a non-Send opaque param MUST still bind (no spawn →
+        // no Send requirement).
+        let non_send_param2 = serde_json::json!({
+            "resolved_path": { "name": "RcBacked", "path": "RcBacked", "id": 0, "args": null }
+        });
+        let fd_sync_non_send = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": {
+                "inputs": [ ["x", non_send_param2] ],
+                "output": { "primitive": "i64" }
+            }
+        });
+        // Sync fns are UNAFFECTED: the param-side async Send gate fires only when
+        // effect == "effectful".  A non-Send opaque param is still bindable for
+        // sync FFI.  (fn_types_nameable drops it later, outside parse_fn_item, but
+        // parse_fn_item itself must return Some here.)
+        assert!(
+            parse_fn_item("sync_non_send", &fd_sync_non_send, &HashMap::new(), None).is_some(),
+            "sync fn with a non-Send opaque param must NOT be affected by the async Send gate"
         );
     }
 }
