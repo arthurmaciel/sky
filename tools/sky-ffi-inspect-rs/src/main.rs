@@ -980,28 +980,30 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             // non-generic trait methods (both need a concrete
                             // receiver type the wrapper can name).
                             if !is_inherent_impl && !trait_self_concrete {
-                                if generic_bearing {
-                                    record_generic_drop(
-                                        method_name,
-                                        GenericDrop::TraitMethodDrop(
-                                            TraitMethodDropTag::GenericSelf,
-                                            format!("generic Self `{self_rust}`"),
-                                        ),
-                                    );
-                                }
-                                // A NON-generic method on a generic-Self trait
-                                // impl is also unbindable here; fall through to
-                                // parse_fn_item which drops it via the existing
-                                // nameability filter (its receiver type carries a
-                                // free tyvar). Either way: not the parametric path.
-                                if !generic_bearing {
-                                    if let Some(f) = parse_fn_item(
-                                        method_name, fn_data, &aliases,
-                                        Some((&self_sky, &self_rust)))
-                                    {
-                                        functions.push(f);
-                                    }
-                                }
+                                // [C-3] A trait method on a NON-concrete Self can
+                                // never bind via UFCS — the wrapper can't name a
+                                // concrete receiver type. This is true for
+                                // generic-bearing AND non-generic methods, and for
+                                // a free-tyvar Self (`impl<T> Foo for T` /
+                                // `Vec<T>`) AND a monomorphic-instantiation Self
+                                // (`Holder<i64>`: no free tyvar, yet
+                                // `self_is_concrete_named` rejects its `<i64>`
+                                // args). The OLD code dropped only the
+                                // generic-bearing case and routed a non-generic
+                                // method through `parse_fn_item`, which emits an
+                                // INHERENT-call form (`::tm::Holder::area(&arg0)`)
+                                // — E0599 (a trait method isn't callable
+                                // inherently, and `Holder` is missing its
+                                // `<i64>`). Drop ALL of them with the same
+                                // concrete-Self gate (over-drop is correct;
+                                // parametric-Self trait methods are a later epic).
+                                record_generic_drop(
+                                    method_name,
+                                    GenericDrop::TraitMethodDrop(
+                                        TraitMethodDropTag::GenericSelf,
+                                        format!("non-concrete Self `{self_rust}`"),
+                                    ),
+                                );
                                 continue;
                             }
                             // The parametric/UFCS path serves: (a) any generic-
@@ -7584,5 +7586,112 @@ mod tests {
         assert_eq!(
             TraitMethodDropTag::TraitUnreachable.tag(),
             "trait-method-trait-unreachable");
+    }
+
+    /// Build a minimal rustdoc doc: a public crate-root module exporting a
+    /// generic struct `Holder<T>`, a trait `Area { fn area(&self) -> f64; }`, and
+    /// an `impl Area for Holder<i64>` carrying ONE method `area`. `recv_self` is
+    /// the receiver-type JSON of the method's first input (`&self` / `self`).
+    /// The `for`-Self is `Holder<i64>` — a MONOMORPHIC instantiation of a generic
+    /// struct (carries `<i64>` angle-bracket args → `self_is_concrete_named`
+    /// returns false → NON-concrete-Self trait method).
+    fn holder_i64_area_doc(recv_self: serde_json::Value) -> serde_json::Value {
+        // The impl-method `area(&self) -> f64` (NON-generic: no method tyvars).
+        // visibility "public" here so the method passes the method-level
+        // `is_public` gate independently of Step 3's relaxation — this test
+        // isolates the C-3 concrete-Self gate on the trait-routing path, not the
+        // visibility relaxation.
+        let area_method = serde_json::json!({
+            "name": "area", "crate_id": 0, "visibility": "public",
+            "inner": { "function": {
+                "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+                "generics": { "params": [], "where_predicates": [] },
+                "sig": { "inputs": [ ["self", recv_self] ], "output": { "primitive": "f64" } }
+            } }
+        });
+        // The trait `Area` (id 42) with `area` as a member (id 100).
+        let area_trait = serde_json::json!({
+            "name": "Area", "crate_id": 0, "visibility": "public",
+            "inner": { "trait": { "items": [ 100 ] } }
+        });
+        // Self `Holder<i64>` — resolved_path id 7 WITH angle-bracket `<i64>`.
+        let holder_i64 = serde_json::json!({
+            "resolved_path": { "name": "Holder", "path": "Holder", "id": 7,
+                "args": { "angle_bracketed": {
+                    "args": [ { "type": { "primitive": "i64" } } ], "bindings": [] } } }
+        });
+        // The impl `Area for Holder<i64>` (id 50), listing `area` (id 100).
+        let area_impl = serde_json::json!({
+            "name": null, "crate_id": 0, "visibility": "default",
+            "inner": { "impl": {
+                "generics": { "params": [], "where_predicates": [] },
+                "trait": { "id": 42, "name": "Area", "path": "Area" },
+                "for": holder_i64,
+                "items": [ 100 ]
+            } }
+        });
+        // The generic struct `Holder<T>` (id 7).
+        let holder_struct = serde_json::json!({
+            "name": "Holder", "crate_id": 0, "visibility": "public",
+            "inner": { "struct": {
+                "kind": "unit",
+                "generics": { "params": [ type_param("T", vec![]) ], "where_predicates": [] }
+            } }
+        });
+        // The crate-root module (id 1) exporting struct + trait + impl so
+        // REACHABLE_PATHS resolves `tm::Holder` / `tm::Area`.
+        let root_mod = serde_json::json!({
+            "name": "tm", "crate_id": 0, "visibility": "public",
+            "inner": { "module": { "items": [ 7, 42, 50 ], "is_crate": true } }
+        });
+        serde_json::json!({
+            "root": 1,
+            "index": {
+                "1": root_mod,
+                "7": holder_struct,
+                "42": area_trait,
+                "50": area_impl,
+                "100": area_method
+            },
+            "paths": {
+                "1":  { "path": ["tm"],          "kind": "module" },
+                "7":  { "path": ["tm","Holder"], "kind": "struct" },
+                "42": { "path": ["tm","Area"],   "kind": "trait" }
+            }
+        })
+    }
+
+    #[test]
+    fn test_nongeneric_trait_method_on_parametric_self_drops() {
+        // [C-3 BLOCKING] A NON-generic trait method `area(&self) -> f64` on a
+        // concrete-but-PARAMETRIC Self `Holder<i64>` must DROP
+        // `trait-method-generic-self` — NEVER route through parse_fn_item, which
+        // would emit an inherent-call `::tm::Holder::area(&arg0)` (E0599: a trait
+        // method isn't callable inherently, and `Holder` is missing its `<i64>`).
+        // Cover BOTH `&self` and `self`-by-value receivers.
+        for recv in [
+            borrowed(serde_json::json!({ "generic": "Self" })), // &self
+            serde_json::json!({ "generic": "Self" }),           // self by value
+        ] {
+            let doc = holder_i64_area_doc(recv);
+            let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+            // No `area` function may be emitted.
+            assert!(
+                !pkg.functions.iter().any(|f| f.name == "area"),
+                "area on Holder<i64> (parametric Self) must NOT bind — \
+                 parse_fn_item would emit an inherent E0599 call");
+            // And the drop is the concrete-Self gate, recorded for coverage.
+            let dropped_generic_self = GENERIC_DROPS.with(|v| {
+                v.borrow().iter().any(|(sym, d)| {
+                    sym == "area"
+                        && matches!(
+                            d,
+                            GenericDrop::TraitMethodDrop(TraitMethodDropTag::GenericSelf, _))
+                })
+            });
+            assert!(
+                dropped_generic_self,
+                "area on Holder<i64> must record a trait-method-generic-self drop");
+        }
     }
 }
