@@ -180,7 +180,6 @@ struct Receiver {
 // So these items are exercised by the `#[cfg(test)]` suite but not yet by the
 // bin's main path — `#[allow(dead_code)]` matches the `split_top_level`
 // precedent above. REMOVE the allows when Phase 6.2 wires them in.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClosureKind {
     Fn,
@@ -188,7 +187,6 @@ enum ClosureKind {
     FnOnce,
 }
 
-#[allow(dead_code)] // see ClosureKind note — wired in Phase 6.2
 impl ClosureKind {
     /// The wire string the Haskell `FromJSON ClosureKind` decodes (`"Fn"` /
     /// `"FnMut"` / `"FnOnce"`).
@@ -222,7 +220,6 @@ enum TypeRef {
     Ctor(String, Vec<TypeRef>),
     /// `{closure:{kind, byRef, argTypes, ret}}`. `by_ref` ⇒ the foreign param is
     /// `Fn(&A)` (a borrowed input — drives the owned-clone bridge downstream).
-    #[allow(dead_code)] // constructed by classify_closure_param — wired in Phase 6.2
     Closure {
         kind: ClosureKind,
         by_ref: bool,
@@ -4005,7 +4002,6 @@ fn type_to_typeref(
 /// a non-Rust host cannot receive a Rust closure. A MISSING `abi` (older rustdoc
 /// format) is treated as Rust (the common case), since closure-taking `extern`
 /// fns are vanishingly rare and the downstream wall re-checks before emission.
-#[allow(dead_code)] // the B3 ABI reader a Phase-6.2 caller threads into classify_closure_param
 fn host_abi_is_rust(fn_data: &serde_json::Value) -> bool {
     match fn_data.get("header").and_then(|h| h.get("abi")) {
         None => true,                                  // absent → assume Rust
@@ -4020,7 +4016,6 @@ fn host_abi_is_rust(fn_data: &serde_json::Value) -> bool {
 /// `+ Clone` bound at instantiation, so NOT a drop); the closed primitive set is
 /// Clone; a closed container is Clone iff every arg is; a nested closure is never
 /// Clone.
-#[allow(dead_code)] // used by classify_closure_param's by-ref-noclone gate — wired in Phase 6.2
 fn typeref_is_clone(tr: &TypeRef) -> bool {
     match tr {
         TypeRef::Param(_) => true,
@@ -4047,7 +4042,6 @@ fn typeref_is_clone(tr: &TypeRef) -> bool {
 /// `host_abi_rust` is the B3 gate: pass `false` to suppress (records a
 /// `closure-nonrust-abi` drop). Drops are returned as a `ClosureDrop` carrying
 /// the specific Task-5.2 tag.
-#[allow(dead_code)] // the Phase-5 keystone; wired into try_parametric_stub's arg loop in Phase 6.2
 fn classify_closure_param(
     bound: &serde_json::Value,
     param_idx: &HashMap<String, usize>,
@@ -4138,6 +4132,97 @@ fn classify_closure_param(
     Ok(TypeRef::Closure { kind, by_ref, arg_types, ret: Box::new(ret) })
 }
 
+/// Whether a CLOSURE-companion bound is one a Sky-synthesized closure can
+/// actually satisfy. A generated Sky closure wrapper is `Sized` by construction
+/// and (for Fn/FnMut) gains a `+ Clone` from codegen — but it can NOT honour the
+/// many `MARKER_TRAITS` that a closure type does not impl: `Send` / `Sync` /
+/// `Hash` / `Eq` / `Ord` / `PartialEq` / `PartialOrd` / `Default` / `Copy` /
+/// `Debug` / `Unpin` / `RefUnwindSafe` / `UnwindSafe`. So the companion
+/// allowlist is INTENTIONALLY narrow: only `Sized` and lifetime/outlives bounds
+/// (which carry no `trait_bound` key). `Clone` is NOT admitted as a companion —
+/// the wrapper adds Clone on its own terms (by-ref bridge), never as a satisfied
+/// foreign obligation. Anything else ⇒ NOT a plain closure slot (the param falls
+/// through to the existing `UnmodellableBound` safe drop). Admitting an
+/// unsatisfiable companion would emit a wrapper whose call is E0277 at the
+/// foreign fn (a cargo-FAIL — under-bind; over-drop is acceptable, under-bind is
+/// not). This is the canonical async/threadpool shape
+/// (`spawn<F: Fn() + Send + 'static>`), so the gate is load-bearing.
+fn closure_companion_satisfiable(bound: &serde_json::Value) -> bool {
+    match trait_bound_name(bound) {
+        // A lifetime/outlives bound has no trait name — closures own their
+        // captures, so an outlives obligation is honourable.
+        None => true,
+        Some(n) => n == "Sized",
+    }
+}
+
+/// A param's bound list (across method/impl/struct generics) is a CLOSURE-SLOT
+/// shape iff exactly one bound is a closure trait (`Fn`/`FnMut`/`FnOnce`) and
+/// every OTHER bound is closure-companion-satisfiable (`Sized` / lifetime — see
+/// `closure_companion_satisfiable`). Returns the closure trait bound node to
+/// classify, or `None` when the param is an ordinary type-var (no closure bound)
+/// — leaving the existing tyvar/bound path to handle it. A param carrying a
+/// closure trait AND any other obligation the wrapper can't honour (e.g.
+/// `F: Fn(A)->B + Serialize`, OR the very common `F: Fn() + Send + 'static`)
+/// returns `None` too: it is NOT a bindable plain closure slot, so it falls
+/// through to the existing `UnmodellableBound` drop (over-drop is acceptable,
+/// under-bind — a wrapper that fails to compile — is not).
+fn closure_bound_of(bounds: &[serde_json::Value]) -> Option<&serde_json::Value> {
+    let mut closure: Option<&serde_json::Value> = None;
+    for b in bounds {
+        match trait_bound_name(b) {
+            Some(n) if ClosureKind::from_trait_name(&n).is_some() => {
+                if closure.is_some() {
+                    return None; // two closure bounds on one param — not a plain slot
+                }
+                closure = Some(b);
+            }
+            // A companion bound the synthesized closure can satisfy (`Sized` /
+            // lifetime) is fine; anything else (Send/Sync/Hash/a crate trait/…)
+            // makes this NOT a bindable plain closure slot.
+            _ if closure_companion_satisfiable(b) => {}
+            _ => return None,
+        }
+    }
+    closure
+}
+
+/// Gather the union of inline + where-predicate bounds for each generic param of
+/// one rustdoc `generics` object into `acc` (keyed by param name). The bound-list
+/// twin of `full_union_bounds`' `raw` map, exposed so the closure-slot detection
+/// can union method+impl+struct bounds the same way. Never errors (it only
+/// collects); the C2 non-generic-predicate gate stays in `full_union_bounds`.
+fn collect_param_bounds_into(
+    generics: &serde_json::Value,
+    acc: &mut std::collections::BTreeMap<String, Vec<serde_json::Value>>,
+) {
+    if let Some(params) = generics.get("params").and_then(|p| p.as_array()) {
+        for p in params {
+            let Some(name) = p.get("name").and_then(|n| n.as_str()) else { continue };
+            if let Some(bs) = p
+                .get("kind")
+                .and_then(|k| k.get("type"))
+                .and_then(|t| t.get("bounds"))
+                .and_then(|b| b.as_array())
+            {
+                acc.entry(name.to_string()).or_default().extend(bs.iter().cloned());
+            }
+        }
+    }
+    if let Some(wps) = generics.get("where_predicates").and_then(|w| w.as_array()) {
+        for wp in wps {
+            let Some(bp) = wp.get("bound_predicate") else { continue };
+            let Some(g) = bp.get("type").and_then(|t| t.get("generic")).and_then(|g| g.as_str())
+            else {
+                continue;
+            };
+            if let Some(bs) = bp.get("bounds").and_then(|b| b.as_array()) {
+                acc.entry(g.to_string()).or_default().extend(bs.iter().cloned());
+            }
+        }
+    }
+}
+
 /// Try to build a Wall #3 parametric `Generic` stub for one generic function.
 /// `recv` is `Some((sky, rust, struct_generics, impl_generics))` for a struct
 /// method, `None` for a free fn. Returns the stub or a `GenericDrop` reason.
@@ -4179,23 +4264,59 @@ fn try_parametric_stub(
     }
     collect_generic_names(&sig["output"], &mut used);
 
+    // ── Closure-param split (epic #28). A USED param whose bound is a closure
+    // trait (`Fn`/`FnMut`/`FnOnce`) is NOT a Sky tyvar — it is CONSUMED into a
+    // `{closure:…}` argType at its slot. Identify those params from the UNION of
+    // method+impl+struct bounds (the same scopes full_union_bounds unions), so
+    // they're excluded from `order`/`param_idx`/typeArgs and from the bound
+    // reduction below. The closure's own arg/ret tyvars (e.g. `A`,`B`) remain
+    // ordinary used params and keep their index. `closure_param_bound[name]` is
+    // the trait-bound node to classify at the arg loop.
+    let mut all_bounds: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        std::collections::BTreeMap::new();
+    collect_param_bounds_into(method_generics, &mut all_bounds);
+    if let Some(ig) = impl_generics {
+        collect_param_bounds_into(ig, &mut all_bounds);
+    }
+    if let Some(sg) = struct_generics {
+        collect_param_bounds_into(sg, &mut all_bounds);
+    }
+    let mut closure_param_bound: HashMap<String, serde_json::Value> = HashMap::new();
+    for (name, bounds) in &all_bounds {
+        if !used.contains(name) {
+            continue; // an unused closure param never reaches the wrapper sig
+        }
+        if let Some(cb) = closure_bound_of(bounds) {
+            closure_param_bound.insert(name.clone(), cb.clone());
+        }
+    }
+    // B3 ABI gate: a Rust closure can only be received by a Rust-ABI host. A
+    // non-Rust host with a closure param → drop (ClosureDrop::NonRustAbi via the
+    // classifier). Read once; threaded into every classify_closure_param call.
+    let host_abi_rust = host_abi_is_rust(fn_data);
+    // The Sky-facing TYVARS = used params MINUS the consumed closure params.
+    let tyvars: HashSet<String> =
+        used.iter().filter(|u| !closure_param_bound.contains_key(*u)).cloned().collect();
+
     // Param ORDER = declaration order across method, then impl, then struct,
-    // restricted to USED type-params, deduped. This fixes the {param:i} index
-    // and the Sky tyvar order (round-trips with the <A: …> clause).
+    // restricted to the TYVARS (closure params excluded), deduped. This fixes
+    // the {param:i} index and the Sky tyvar order (round-trips with the <A: …>
+    // clause). A closure param contributes no tyvar (consumed into its argType).
     let mut order: Vec<String> = Vec::new();
     for src in [Some(method_generics), impl_generics, struct_generics]
         .into_iter()
         .flatten()
     {
         for name in type_param_order(src) {
-            if used.contains(&name) && !order.contains(&name) {
+            if tyvars.contains(&name) && !order.contains(&name) {
                 order.push(name);
             }
         }
     }
-    // A used name that is NOT a declared type-param anywhere is a free/synthetic
-    // var we can't bind soundly → drop.
-    for u in &used {
+    // A used TYVAR that is NOT a declared type-param anywhere is a free/synthetic
+    // var we can't bind soundly → drop. (Closure params are already declared by
+    // construction — they carry a closure bound — so this only guards tyvars.)
+    for u in &tyvars {
         if !order.contains(u) {
             return Err(GenericDrop::NotBindable(format!("undeclared type-var `{u}`")));
         }
@@ -4203,8 +4324,11 @@ fn try_parametric_stub(
     let param_idx: HashMap<String, usize> =
         order.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
 
-    // FULL-UNION bounds (C1-C5) over the USED params.
-    let bounds_map = full_union_bounds(method_generics, impl_generics, struct_generics, &used)?;
+    // FULL-UNION bounds (C1-C5) over the TYVARS only — the closure params' `Fn`
+    // bounds are consumed into their argType, NOT reduced to a Sky `<F: …>`
+    // bound, so they must not reach classify_param_bound (which would drop `Fn`
+    // as UnmodellableBound).
+    let bounds_map = full_union_bounds(method_generics, impl_generics, struct_generics, &tyvars)?;
 
     // Build the call AST.
     let inputs = sig["inputs"].as_array().cloned().unwrap_or_default();
@@ -4262,7 +4386,20 @@ fn try_parametric_stub(
         if input[0].as_str() == Some("self") {
             continue;
         }
-        let tref = type_to_typeref(&input[1], &param_idx)?;
+        // A bare `{generic:F}` arg where F is a consumed closure param lowers to
+        // the `{closure:…}` argType via the Phase-5 classifier (using param_idx,
+        // which now maps the closure's tyvars A/B to their final indices).
+        let closure_name = input[1]
+            .get("generic")
+            .and_then(|g| g.as_str())
+            .filter(|n| closure_param_bound.contains_key(*n));
+        let tref = match closure_name {
+            Some(n) => {
+                let bound = &closure_param_bound[n];
+                classify_closure_param(bound, &param_idx, host_abi_rust)?
+            }
+            None => type_to_typeref(&input[1], &param_idx)?,
+        };
         arg_types.push(tref);
         args.push(next_arg);
         next_arg += 1;
@@ -5412,6 +5549,188 @@ mod tests {
             Err(GenericDrop::UnmodellableBound(t)) => assert_eq!(t, "Serialize"),
             other => panic!("expected UnmodellableBound drop, got {other:?}"),
         }
+    }
+
+    // ── Closures wired into the bind path (epic #28, Task 6.2 prerequisite) ──
+
+    /// An inherent ASSOCIATED fn `fn map_each<A,B,F: Fn(A)->B>(xs: Vec<A>, f: F)
+    /// -> Vec<B>` (no `self` — the cleanly-bindable inherent shape, matching the
+    /// `indexmap_get_fn` static-assoc precedent). The generics live on the fn.
+    /// Mirrors the real rustdoc bound shape verified against `cargo +nightly
+    /// rustdoc` (a `Fn(A)->B` bound → `trait_bound.trait.path = "Fn"` with
+    /// `args.parenthesized = { inputs:[…], output:… }`).
+    fn map_each_assoc_fn(closure: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [
+                type_param("A", vec![]),
+                type_param("B", vec![]),
+                type_param("F", vec![closure]),
+            ], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["xs", path_with_args("Vec", vec![gnode("A")])],
+                ["f", gnode("F")]
+            ], "output": path_with_args("Vec", vec![gnode("B")]) }
+        })
+    }
+
+    #[test]
+    fn test_parametric_stub_inherent_closure_emits_closure_argtype() {
+        // by-value `F: Fn(A) -> B` on an inherent assoc fn now binds — the closure
+        // param F is CONSUMED into a `{closure:…}` argType via the real
+        // classify_closure_param path (NOT the old UnmodellableBound("Fn") drop).
+        let fd = map_each_assoc_fn(closure_bound("Fn", vec![gnode("A")], Some(gnode("B"))));
+        let stub = try_parametric_stub(
+            "map_each",
+            &fd,
+            Some(("Foo", "::clo::Foo")),
+            None, // inherent impl on a non-generic type → no impl/struct generics
+            None,
+        )
+        .expect("inherent-assoc Fn(A)->B must bind");
+
+        // F is consumed: the Sky tyvars are exactly [A, B], in declaration order.
+        assert_eq!(stub.params, vec!["A".to_string(), "B".to_string()]);
+        // No `<F: Fn>` Sky bound leaks (the Fn bound went into the closure shape).
+        assert!(stub.bounds.is_empty(), "no Fn bound should survive as a Sky bound");
+        // Static assoc fn → function kind, no receiver.
+        assert_eq!(stub.call.kind, "function");
+        assert!(stub.call.receiver.is_none());
+
+        // arg_types: [Vec<A>, {closure Fn(A)->B}]. Assert the closure's shape.
+        let closure_tr = stub
+            .call
+            .arg_types
+            .iter()
+            .find(|t| matches!(t, TypeRef::Closure { .. }))
+            .expect("a closure argType must be emitted");
+        let v = serde_json::to_value(closure_tr).unwrap();
+        assert_eq!(v["closure"]["kind"], "Fn");
+        assert_eq!(v["closure"]["byRef"], false);
+        // argTypes ref the TYVAR indices: A=param 0, B=param 1.
+        assert_eq!(v["closure"]["argTypes"], serde_json::json!([{ "param": 0 }]));
+        assert_eq!(v["closure"]["ret"], serde_json::json!({ "param": 1 }));
+        // The Vec<A> arg keeps param 0; the return is Vec<B> at param 1.
+        assert_eq!(
+            stub.call.arg_types.first(),
+            Some(&TypeRef::Ctor("::Vec".to_string(), vec![TypeRef::Param(0)]))
+        );
+        assert_eq!(stub.call.ret, TypeRef::Ctor("::Vec".to_string(), vec![TypeRef::Param(1)]));
+    }
+
+    #[test]
+    fn test_parametric_stub_inherent_byref_closure() {
+        // by-ref `F: Fn(&A) -> bool` (the `keep` predicate shape). byRef=true,
+        // arg = inner A (param 0). A is Clone-provable as a TRParam (the closure's
+        // own `+ Clone` enforces it), so no closure-by-ref-noclone drop.
+        let fd_in = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [
+                type_param("A", vec![]),
+                type_param("F", vec![closure_bound(
+                    "Fn",
+                    vec![shared_ref(gnode("A"))],
+                    Some(prim("bool")),
+                )]),
+            ], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["xs", path_with_args("Vec", vec![gnode("A")])],
+                ["pred", gnode("F")]
+            ], "output": path_with_args("Vec", vec![gnode("A")]) }
+        });
+        let stub = try_parametric_stub("keep", &fd_in, Some(("Foo", "::clo::Foo")), None, None)
+            .expect("inherent-assoc Fn(&A)->bool must bind");
+        assert_eq!(stub.params, vec!["A".to_string()]);
+        let closure_tr = stub
+            .call
+            .arg_types
+            .iter()
+            .find(|t| matches!(t, TypeRef::Closure { .. }))
+            .expect("a closure argType must be emitted");
+        let v = serde_json::to_value(closure_tr).unwrap();
+        assert_eq!(v["closure"]["kind"], "Fn");
+        assert_eq!(v["closure"]["byRef"], true);
+        assert_eq!(v["closure"]["argTypes"], serde_json::json!([{ "param": 0 }]));
+        assert_eq!(v["closure"]["ret"], serde_json::json!({ "prim": "bool" }));
+    }
+
+    #[test]
+    fn test_parametric_stub_free_closure_fn_still_drops() {
+        // A FREE generic closure fn (recv = None) STILL drops at the path-unresolved
+        // gate — closure wiring does NOT unblock the free-fn shape (that needs the
+        // separate free-fn-binding work, #20/#24). Documents the boundary.
+        let fd = map_each_assoc_fn(closure_bound("Fn", vec![gnode("A")], Some(gnode("B"))));
+        match try_parametric_stub("map_each", &fd, None, None, None) {
+            Err(GenericDrop::NotBindable(m)) => assert!(m.contains("free generic fn")),
+            other => panic!("expected free-fn NotBindable drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parametric_stub_nonrust_abi_closure_drops() {
+        // A closure param on a NON-Rust-ABI host → ClosureDrop::NonRustAbi (B3).
+        let mut fd = map_each_assoc_fn(closure_bound("Fn", vec![gnode("A")], Some(gnode("B"))));
+        fd["header"]["abi"] = serde_json::json!({ "C": { "unwind": false } });
+        match try_parametric_stub("map_each", &fd, Some(("Foo", "::clo::Foo")), None, None) {
+            Err(GenericDrop::ClosureDrop(tag, _)) => assert_eq!(tag.tag(), "closure-nonrust-abi"),
+            other => panic!("expected NonRustAbi ClosureDrop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parametric_stub_closure_with_send_companion_drops() {
+        // The canonical async/threadpool shape `F: Fn(A)->B + Send`. A synthesized
+        // Sky closure can't honour `Send`, so binding it would emit a wrapper whose
+        // call is E0277 at the foreign fn (a cargo-FAIL). The closure-slot detector
+        // must REFUSE the slot (companion not satisfiable) → the param falls through
+        // to the existing UnmodellableBound("Fn") safe drop. Over-drop, not
+        // under-bind. (Guardian-flagged soundness gate, epic #28.)
+        // F's bound list = the Fn closure bound PLUS a `Send` marker companion.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [
+                type_param("A", vec![]),
+                type_param("B", vec![]),
+                type_param("F", vec![
+                    closure_bound("Fn", vec![gnode("A")], Some(gnode("B"))),
+                    trait_bound("Send", vec![]),
+                ]),
+            ], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["xs", path_with_args("Vec", vec![gnode("A")])],
+                ["f", gnode("F")]
+            ], "output": path_with_args("Vec", vec![gnode("B")]) }
+        });
+        match try_parametric_stub("map_each", &fd, Some(("Foo", "::clo::Foo")), None, None) {
+            Err(GenericDrop::UnmodellableBound(t)) => assert_eq!(t, "Fn"),
+            other => panic!("expected UnmodellableBound(\"Fn\") safe drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parametric_stub_closure_with_lifetime_companion_binds() {
+        // A `'static` outlives companion (no trait name) IS satisfiable by an
+        // owned-capture Sky closure → still binds. Confirms the gate admits
+        // lifetime bounds, only rejecting unsatisfiable TRAIT companions.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [
+                type_param("A", vec![]),
+                type_param("B", vec![]),
+                // F: Fn(A)->B + 'static  (the outlives bound carries no trait name)
+                type_param("F", vec![
+                    closure_bound("Fn", vec![gnode("A")], Some(gnode("B"))),
+                    serde_json::json!({ "outlives": "'static" }),
+                ]),
+            ], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["xs", path_with_args("Vec", vec![gnode("A")])],
+                ["f", gnode("F")]
+            ], "output": path_with_args("Vec", vec![gnode("B")]) }
+        });
+        let stub = try_parametric_stub("map_each", &fd, Some(("Foo", "::clo::Foo")), None, None)
+            .expect("Fn + 'static must still bind");
+        assert!(stub.call.arg_types.iter().any(|t| matches!(t, TypeRef::Closure { .. })));
     }
 
     #[test]
