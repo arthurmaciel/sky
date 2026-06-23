@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -329,6 +329,58 @@ main =
   rm -rf "$wd"
 }
 
+# ── run_handstub_basic <fixture>  (Wall #2 — 49-ffi-closures, epic #28). A
+# HAND-STUB closure fixture: a CHECKED-IN closure kernel.json (the `closure`
+# argType blocks) + an (empty) bindings .rs under `ffi-stub/`, NO inspector.
+# Like run_handstub it must re-stage the committed `ffi-stub/*.{kernel.json,rs}`
+# into the workdir's `.skycache/ffi/rust/` AFTER the build's own wipe so the
+# build reads the hand stub (no inspector regenerates it). Unlike run_handstub
+# (48-ffi-generics) there is no NEGATIVE E4400 matrix and no tree-shake count to
+# assert here — the proof is the POSITIVE end-to-end: a Sky lambda lowers to a
+# Rust closure FFI arg (by-value Fn `mapEach`, by-ref Fn `keep`) and the program
+# prints `[ALL OK]`. ──────────────────────────────────────────────────────────
+run_handstub_basic() {
+  local base="$1"
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base (no such fixture)"; return; }
+  [ -d "$src/ffi-stub" ]     || { _fail "$base (no ffi-stub/ dir)"; return; }
+
+  # Stage the local crate (git-init under $HOME) via setup.sh.
+  bash "$src/setup.sh" >/tmp/ffi-fixture-"$base".setup.log 2>&1 || {
+    _fail "$base (setup.sh failed — see /tmp/ffi-fixture-$base.setup.log)"; return; }
+  local staged="$HOME/.cache/sky/$base-crate"
+  [ -d "$staged/.git" ] || { _fail "$base (expected staged crate at $staged)"; return; }
+
+  local wd; wd="$(mktemp -d "${TMPDIR:-/tmp}/ffi-fixture-$base.XXXXXX")" || { _fail "$base (mktemp)"; return; }
+  mkdir -p "$wd/src" "$wd/ffi-stub"
+  cp -r "$src/src/." "$wd/src/" 2>/dev/null || true
+  cp -r "$src/ffi-stub/." "$wd/ffi-stub/" 2>/dev/null || true
+  cp "$src/sky.toml" "$wd/sky.toml" || { rm -rf "$wd"; _fail "$base (cp sky.toml)"; return; }
+  local newurl="file://$staged" esc
+  esc="$(printf '%s' "$newurl" | sed -e 's/[\/&]/\\&/g')"
+  sed -i -E "s|file://[^\"]*/$base-crate|$esc|g" "$wd/sky.toml"
+
+  # Re-place the hand stub into .skycache AFTER the build wipes generated dirs.
+  ( cd "$wd" && rm -rf sky-out .skycache .skydeps ) >/dev/null 2>&1
+  mkdir -p "$wd/.skycache/ffi/rust"
+  cp "$wd"/ffi-stub/*.kernel.json "$wd"/ffi-stub/*_bindings.rs "$wd/.skycache/ffi/rust/" 2>/dev/null
+
+  local logp="/tmp/ffi-fixture-$base.build.log"
+  ( cd "$wd" && timeout "$BUILD_TMO" "$SKY" build --backend rust src/Main.sky ) >"$logp" 2>&1 || {
+    _fail "$base (build failed — $logp)"; rm -rf "$wd"; return; }
+  local bin; bin="$(resolve_bin "$wd")" || { _fail "$base (no binary; build log: $logp)"; rm -rf "$wd"; return; }
+
+  local outp="/tmp/ffi-fixture-$base.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base  ($(tr -d '\n' <"$outp" | sed 's/  */ /g'))"
+  else
+    _fail "$base (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 43-ffi-dce S4 suite — used-only (a) · D4 equivalence (d) · staleness (R-4).
 # Self-contained: stages its OWN workdir (so the Main.sky patch never touches the
@@ -420,7 +472,11 @@ FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
 echo "── Sky→Rust auto-FFI fixture gate ──"
 for n in "${FIXTURES[@]}"; do
-  if [ "$n" = "48-ffi-generics" ]; then run_handstub; else run_basic "$n"; fi
+  case "$n" in
+    48-ffi-generics)  run_handstub ;;
+    49-ffi-closures)  run_handstub_basic "$n" ;;
+    *)                run_basic "$n" ;;
+  esac
 done
 # S4 DCE suite runs iff 43-ffi-dce is in the requested set.
 for n in "${FIXTURES[@]}"; do
