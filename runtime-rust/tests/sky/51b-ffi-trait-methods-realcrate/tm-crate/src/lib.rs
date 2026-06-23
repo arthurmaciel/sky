@@ -11,12 +11,13 @@
 //!   * `Scale::scaled_by<T:Ord>` — generic trait method, bound on the trait DEF
 //!                                 + restated bare on the impl (Q2-A union).
 //!   * `Pair::first -> Self::A`  — associated-type method that RESOLVES (A=i64).
+//!   * `impl Area for Holder<i64>` — closed-monomorphic Self (#45 lift).
+//!                                   `Holder::new_holder(v)` is the ctor.
 //!
 //! NEGATIVE rows (the inspector MUST DROP — proven by the build NOT cargo-failing
 //! on a bad emit, plus the inspector unit tests):
 //!   * `impl Display for Label` — the `to_string` bridge, NEVER a `fmt` UFCS.
 //!   * `impl<T> Blanket for T`   — blanket/generic Self → trait-method-generic-self.
-//!   * `impl Area for Holder<i64>` — monomorphic-instantiation Self → generic-self.
 //!   * `impl Hidden for Circle` where `Hidden` is `pub(crate)` — the trait has no
 //!     reachable public path → trait-method-trait-unreachable. THIS is the C-1
 //!     row the hand stub can't exercise: a wrong emit here is a `None`-qualifier
@@ -99,9 +100,18 @@ impl<T> Blanket for T {
     }
 }
 
-// ── NEGATIVE: monomorphic-instantiation Self → trait-method-generic-self ──
+// ── POSITIVE (#45): closed-monomorphic Self → binds via UFCS ────────────
+// `impl Area for Holder<i64>` has no free type-vars (all concrete) →
+// `self_is_closed_monomorphic` gate lifts the old C-3 drop.
 pub struct Holder<T> {
     pub v: T,
+}
+
+impl Holder<i64> {
+    /// Constructor so the Sky side can build a `Holder<i64>` to exercise `area`.
+    pub fn new_holder(v: i64) -> Holder<i64> {
+        Holder { v }
+    }
 }
 
 impl Area for Holder<i64> {

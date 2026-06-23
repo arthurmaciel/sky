@@ -12,6 +12,9 @@ import Std.Log exposing (println)
 -- `Hidden::hush` is NOT in the bound surface (it dropped
 -- trait-method-trait-unreachable) — the build compiling at all is the C-1 proof:
 -- a wrong emit would have been a `None`-qualifier inherent call → E0603/E0599.
+--
+-- `new_holder` + `area` on `Holder<i64>` exercises the #45 lift:
+-- a closed-monomorphic-Self UFCS binding (`<::tm::Holder<i64> as ::tm::Area>`).
 main : Task Error ()
 main =
     case Tm.new_from_circle 2.0 of
@@ -19,23 +22,35 @@ main =
             println "[FAIL] new_from_circle"
 
         Ok c ->
-            let
-                -- (1) NON-generic trait method: Area::area(&self) -> f64.
-                --     3.14 * 2 * 2 = 12.56
-                areaOf =
-                    Result.withDefault 0.0 (Tm.area c)
+            case Tm.new_holder_from_holder 5 of
+                Err _ ->
+                    println "[FAIL] new_holder_from_holder"
 
-                -- (3) Associated-type method: Pair::first(&self) -> Self::A=i64 → 7.
-                firstOf =
-                    Result.withDefault 0 (Tm.first c)
+                Ok h ->
+                    let
+                        -- (1) NON-generic trait method: Area::area(&self) -> f64.
+                        --     3.14 * 2 * 2 = 12.56
+                        areaOf =
+                            Result.withDefault 0.0 (Tm.area c)
 
-                _ = println ("area  -> " ++ String.fromFloat areaOf)
-                _ = println ("first -> " ++ String.fromInt firstOf)
-            in
-            if floatEq areaOf 12.56 && firstOf == 7 then
-                println "[ALL OK]"
-            else
-                println "[FAIL]"
+                        -- (3) Associated-type method: Pair::first(&self) -> Self::A=i64 → 7.
+                        firstOf =
+                            Result.withDefault 0 (Tm.first c)
+
+                        -- (#45) Holder<i64>::area(&self) -> f64 via closed-monomorphic UFCS.
+                        --       Holder{v=5} → area = 5.0
+                        --       Bound as `area_from_holder` (deconflicted: Self carries <i64>)
+                        holderAreaOf =
+                            Result.withDefault 0.0 (Tm.area_from_holder h)
+
+                        _ = println ("area        -> " ++ String.fromFloat areaOf)
+                        _ = println ("first       -> " ++ String.fromInt firstOf)
+                        _ = println ("holder_area -> " ++ String.fromFloat holderAreaOf)
+                    in
+                    if floatEq areaOf 12.56 && firstOf == 7 && floatEq holderAreaOf 5.0 then
+                        println "[ALL OK]"
+                    else
+                        println "[FAIL]"
 
 
 floatEq : Float -> Float -> Bool

@@ -918,6 +918,9 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 .map(rustdoc_type_to_rust_str)
                 .unwrap_or_default();
 
+            if std::env::var("SKY_FFI_DBG").is_ok() {
+                eprintln!("[DBG0] impl block: self_sky={self_sky:?} self_rust={self_sky:?}");
+            }
             if self_sky.is_empty() {
                 continue;
             }
@@ -958,19 +961,27 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
             let trait_node = impl_data
                 .get("trait")
                 .filter(|_| !is_inherent_impl);
-            // Constraint 11: a TRAIT impl over a generic Self is out of scope.
+            // Constraint 11: a TRAIT impl over a generic Self is out of scope
+            // UNLESS the Self is closed-monomorphic (#45).
             let trait_self_concrete = match for_val {
-                Some(fv) => self_is_concrete_named(fv),
+                Some(fv) => self_is_concrete_named(fv) || self_is_closed_monomorphic(fv),
                 None => false,
             };
             let impl_generics = impl_data.get("generics");
             let struct_generics = for_val.and_then(|v| struct_generics_of(v, index));
 
+            if std::env::var("SKY_FFI_DBG").is_ok() {
+                eprintln!("[DBG0b] about to walk items: self_sky={self_sky:?} is_inherent={is_inherent_impl} items_count={}", 
+                    impl_data["items"].as_array().map(|a| a.len()).unwrap_or(0));
+            }
             // Walk method items.
             // Item IDs may be integers (new format) or strings (old format).
             if let Some(items) = impl_data["items"].as_array() {
                 for method_id in items {
                     let id = item_id_to_str(method_id);
+                    if std::env::var("SKY_FFI_DBG").is_ok() {
+                        eprintln!("[DBG1] impl method id={id:?} self_sky={self_sky:?} is_inherent={is_inherent_impl}");
+                    }
                     if let Some(method_item) = index.get(&id) {
                         // [Relaxation #31] A TRAIT-impl method item carries
                         // `visibility:"default"` even when it is fully callable (a
@@ -1045,6 +1056,9 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             // parse_fn_item's `recv.m()` method-call form) closes
                             // that gap. A non-trait inherent non-generic method
                             // stays on parse_fn_item (no qualifier needed).
+                            if std::env::var("SKY_FFI_DBG").is_ok() {
+                                eprintln!("[DBG2] method={method_name:?} self_sky={self_sky:?} self_rust={self_rust:?} is_inherent={is_inherent_impl} generic_bearing={generic_bearing} trait_self_concrete={trait_self_concrete}");
+                            }
                             let is_concrete_trait_method =
                                 !is_inherent_impl && trait_self_concrete;
                             let take_parametric =
@@ -1096,9 +1110,11 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                                 }
                                 continue;
                             }
-                            if let Some(f) =
-                                parse_fn_item(method_name, fn_data, &aliases, Some((&self_sky, &self_rust)))
-                            {
+                            let _dbg_f = parse_fn_item(method_name, fn_data, &aliases, Some((&self_sky, &self_rust)));
+                            if std::env::var("SKY_FFI_DBG").is_ok() {
+                                eprintln!("[DBG] parse_fn_item({:?}, self_sky={:?}, self_rust={:?}) => {:?}", method_name, self_sky, self_rust, _dbg_f.as_ref().map(|f| &f.name));
+                            }
+                            if let Some(f) = _dbg_f {
                                 functions.push(f);
                             }
                         }
@@ -5770,8 +5786,24 @@ fn try_parametric_stub(
         .filter(|(_, n)| struct_param_names.contains(*n))
         .map(|(i, _)| i)
         .collect();
+    // #45: for a closed-monomorphic Self (e.g. `Holder<i64>`), `recv_param_idxs`
+    // is empty (the struct's T is not USED in the method sig) but the ctor name
+    // must carry the concrete args (`::tm::Holder<i64>`, not bare `::tm::Holder`)
+    // so the wrapper `arg0: ::tm::Holder<i64>` type-checks.  When there ARE free
+    // params, `base` (stripped) is correct: the concrete args come from
+    // `TypeRef::Param` entries in `recv_param_idxs`.
+    let recv_ctor_name = if recv_param_idxs.is_empty() && recv_rust.contains('<') {
+        // Use the full qualified form (already has `::` prefix from rustdoc_type_to_rust_str).
+        if recv_rust.starts_with("::") {
+            recv_rust.to_string()
+        } else {
+            format!("::{recv_rust}")
+        }
+    } else {
+        base.clone()
+    };
     let recv_ctor = TypeRef::Ctor(
-        base.clone(),
+        recv_ctor_name,
         recv_param_idxs.into_iter().map(TypeRef::Param).collect(),
     );
 
@@ -5938,11 +5970,10 @@ fn build_trait_ctx<'a>(
     index: &'a serde_json::Map<String, serde_json::Value>,
 ) -> Option<TraitCtx<'a>> {
     let trait_node = trait_node?;
-    // selfPath: the concrete `for`-type's reachable public path, id-resolved.
-    let self_path = for_val
-        .and_then(|v| v.get("resolved_path"))
-        .and_then(|rp| rp.get("id"))
-        .and_then(reachable_local_path)?;
+    // selfPath: the concrete `for`-type's reachable public path, id-resolved,
+    // WITH any concrete type args appended (#45 closed-monomorphic: `Holder<i64>`
+    // must carry `<i64>` in the UFCS qualifier so Rust resolves the correct impl).
+    let self_path = for_val.and_then(self_path_with_concrete_args)?;
     // traitPath: the trait's KNOWN-CORRECT public path, id-resolved (NOT the
     // last-segment `trait.name`/`trait.path` string — constraint 3 / #25), WITH
     // its concrete generic args (`From<i64>` → `::core::convert::From<i64>`).
@@ -6107,6 +6138,105 @@ fn self_is_concrete_named(for_val: &serde_json::Value) -> bool {
                 .unwrap_or(false);
             !bracketed
         }
+    }
+}
+
+/// #45 — closed-monomorphic-Self gate.  True when the impl `for` type is a
+/// `resolved_path` WITH angle-bracket args where EVERY type arg is "closed":
+/// no free type-vars (`{generic:NAME}` nodes) anywhere in the arg tree, and
+/// every named type arg renders to a non-empty Rust type string (nameable).
+///
+/// Examples:
+///   `Holder<i64>`        → true  (concrete primitive arg)
+///   `Holder<Vec<i64>>`   → true  (Vec + concrete element — all nameable)
+///   `Holder<T>`          → false (free type-var T present)
+///   `Holder<Private>`    → false (unnameable: not in REACHABLE_PATHS → drop)
+///
+/// See `self_is_concrete_named` for the companion that handles bare-named structs.
+fn self_is_closed_monomorphic(for_val: &serde_json::Value) -> bool {
+    // Must be a resolved_path WITH angle-bracketed args.
+    let Some(rp) = for_val.get("resolved_path") else {
+        return false;
+    };
+    let args_node = match rp.get("args") {
+        None | Some(serde_json::Value::Null) => return false,
+        Some(a) => a,
+    };
+    let Some(ab_args) = args_node
+        .get("angle_bracketed")
+        .and_then(|ab| ab.get("args"))
+        .and_then(|a| a.as_array())
+    else {
+        return false;
+    };
+    if ab_args.is_empty() {
+        return false;
+    }
+    // No free type-var anywhere in the entire for_val tree.
+    let mut free: HashSet<String> = HashSet::new();
+    collect_generic_names(for_val, &mut free);
+    if !free.is_empty() {
+        return false;
+    }
+    // Every type arg must render to a non-empty, REACHABLE (nameable) Rust type string.
+    // is_empty() alone is NOT sufficient: a pub(crate)/stripped type renders to a
+    // bare non-empty last segment ("Private"). Gate with type_is_nameable — the same
+    // string-check the sibling ufcs_trait_path_with_args uses.
+    for arg in ab_args {
+        if let Some(t) = arg.get("type") {
+            let rendered = rustdoc_type_to_rust_str(t);
+            if rendered.is_empty() || !type_is_nameable(&rendered) {
+                return false;
+            }
+            // A bare single uppercase letter is almost certainly a free tyvar.
+            if rendered.len() == 1
+                && rendered.chars().next().is_some_and(|c| c.is_uppercase())
+            {
+                return false;
+            }
+        }
+        // Lifetime args: skip.
+    }
+    true
+}
+
+/// Build the fully-qualified UFCS self-path string for a `for`-type,
+/// appending its concrete type args to the base path.  For
+/// `Holder<i64>` (id → `::tm::Holder`) this returns `::tm::Holder<i64>`.
+/// For a bare `Circle` (no args) returns the path unchanged.
+///
+/// Returns `None` when the Self's id can't be resolved to a reachable public
+/// path (→ `TraitUnreachable` drop at the caller).
+fn self_path_with_concrete_args(
+    for_val: &serde_json::Value,
+) -> Option<String> {
+    let rp = for_val.get("resolved_path")?;
+    let base = rp.get("id").and_then(reachable_local_path)?;
+    let args: Vec<String> = rp
+        .get("args")
+        .and_then(|a| a.get("angle_bracketed"))
+        .and_then(|ab| ab.get("args"))
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|arg| {
+                    if let Some(t) = arg.get("type") {
+                        let s = rustdoc_type_to_rust_str(t);
+                        // is_empty() alone is NOT sufficient — pub(crate) types render
+                        // to a non-empty bare last segment; type_is_nameable gates on
+                        // REACHABLE_PATHS, same as ufcs_trait_path_with_args does.
+                        if s.is_empty() || !type_is_nameable(&s) { None } else { Some(s) }
+                    } else {
+                        None // skip lifetime args
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if args.is_empty() {
+        Some(base)
+    } else {
+        Some(format!("{}<{}>", base, args.join(", ")))
     }
 }
 
@@ -6285,8 +6415,42 @@ fn parametric_function(
     } else {
         (recv_sky_parametric.clone(), self_rust.to_string(), method_name.to_string())
     };
+    // #45 — deconfliction for closed-monomorphic Self trait methods.
+    // Two `impl Trait for Holder<i64>` and `impl Trait for Circle` both produce
+    // `recv_type=""` (C-4 above) so `wrapperRefName` in Haskell can't distinguish
+    // them → `dedupByRustName` drops the second.  Fix: when the Self carries
+    // concrete type args (trait_qualifier.0 contains `<…>`), derive a lowercase
+    // last-segment suffix from the self path and embed it directly in `name`:
+    //   `::tm::Holder<i64>` → last segment before `<` → `holder` → `area_from_holder`
+    // Bare-named Self (Circle, no `<`) is unaffected (no suffix added).
+    let emitted_name = if is_trait_method {
+        if let Some((self_path, _)) = &generic.call.trait_qualifier {
+            if self_path.contains('<') {
+                // Extract last `::`-delimited segment, strip `<…>` suffix.
+                let seg = self_path
+                    .split("::")
+                    .last()
+                    .unwrap_or(self_path)
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !seg.is_empty() {
+                    format!("{}_from_{}", method_name, seg.to_lowercase())
+                } else {
+                    method_name.to_string()
+                }
+            } else {
+                method_name.to_string()
+            }
+        } else {
+            method_name.to_string()
+        }
+    } else {
+        method_name.to_string()
+    };
     Some(Function {
-        name: method_name.to_string(),
+        name: emitted_name,
         params,
         results,
         effect: "pure".into(),
@@ -9549,25 +9713,45 @@ mod tests {
     }
 
     #[test]
-    fn test_nongeneric_trait_method_on_parametric_self_drops() {
-        // [C-3 BLOCKING] A NON-generic trait method `area(&self) -> f64` on a
-        // concrete-but-PARAMETRIC Self `Holder<i64>` must DROP
-        // `trait-method-generic-self` — NEVER route through parse_fn_item, which
-        // would emit an inherent-call `::tm::Holder::area(&arg0)` (E0599: a trait
-        // method isn't callable inherently, and `Holder` is missing its `<i64>`).
-        // Cover BOTH `&self` and `self`-by-value receivers.
+    fn test_nongeneric_trait_method_on_closed_monomorphic_self_binds() {
+        // [#45] A NON-generic trait method `area(&self) -> f64` on a
+        // closed-monomorphic Self `Holder<i64>` (no free type-vars, all args
+        // concrete + nameable) MUST BIND via UFCS — the old C-3 gate wrongly
+        // dropped it.  Cover BOTH `&self` and `self`-by-value receivers.
         for recv in [
             borrowed(serde_json::json!({ "generic": "Self" })), // &self
             serde_json::json!({ "generic": "Self" }),           // self by value
         ] {
             let doc = holder_i64_area_doc(recv);
             let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
-            // No `area` function may be emitted.
+            // `area_from_holder` MUST be emitted (deconflicted name: Holder<i64> Self
+            // carries `<i64>` args → suffix `_from_holder` appended to prevent
+            // `dedupByRustName` from dropping a same-named method on another type).
             assert!(
-                !pkg.functions.iter().any(|f| f.name == "area"),
-                "area on Holder<i64> (parametric Self) must NOT bind — \
-                 parse_fn_item would emit an inherent E0599 call");
-            // And the drop is the concrete-Self gate, recorded for coverage.
+                pkg.functions.iter().any(|f| f.name == "area_from_holder"),
+                "area on Holder<i64> (closed-monomorphic Self) MUST bind as `area_from_holder` (#45)");
+            let area_fn = pkg.functions.iter().find(|f| f.name == "area_from_holder").unwrap();
+            // Binds as a parametric stub (the concrete-Self UFCS path goes through
+            // try_parametric_stub).
+            let g = area_fn.generic.as_ref()
+                .expect("trait method on closed-monomorphic Self must bind as parametric stub");
+            // UFCS qualifier must carry the concrete type args.
+            let (self_path, trait_path) = g.call.trait_qualifier.as_ref()
+                .expect("UFCS qualifier must be Some for a trait method");
+            assert!(
+                self_path.contains("::tm::Holder<i64>"),
+                "UFCS self-path must contain `::tm::Holder<i64>`, got: {:?}", self_path);
+            assert!(
+                trait_path.contains("::tm::Area"),
+                "UFCS trait-path must contain `::tm::Area`, got: {:?}", trait_path);
+            // For a trait method, recv_type is intentionally cleared (the UFCS
+            // qualifier carries the receiver identity — see `is_trait_method` in
+            // `try_parametric_stub`). Confirm it's empty.
+            assert!(
+                area_fn.recv_type.is_empty(),
+                "recv_type must be empty for a trait method (identity in qualifier), got: {:?}",
+                area_fn.recv_type);
+            // Must NOT record a trait-method-generic-self drop.
             let dropped_generic_self = GENERIC_DROPS.with(|v| {
                 v.borrow().iter().any(|(sym, d)| {
                     sym == "area"
@@ -9577,9 +9761,116 @@ mod tests {
                 })
             });
             assert!(
-                dropped_generic_self,
-                "area on Holder<i64> must record a trait-method-generic-self drop");
+                !dropped_generic_self,
+                "area on Holder<i64> must NOT record a trait-method-generic-self drop (#45)");
         }
+    }
+
+    #[test]
+    fn test_vec_of_concrete_parametric_self_binds() {
+        // [#45] `impl Area for Holder<Vec<i64>>` — nested concrete parametric arg.
+        // `self_is_closed_monomorphic` must return true (no free vars, Vec<i64> is
+        // fully nameable) → binds via UFCS.
+        let vec_i64_node = serde_json::json!({
+            "resolved_path": { "name": "Vec", "path": "Vec", "id": 88,
+                "args": { "angle_bracketed": {
+                    "args": [ { "type": { "primitive": "i64" } } ], "bindings": [] } } }
+        });
+        // Build a doc like holder_i64_area_doc but with `Holder<Vec<i64>>` as Self.
+        // Re-use the same index shape; replace the `for` node in the impl.
+        let recv = borrowed(serde_json::json!({ "generic": "Self" }));
+        let mut doc = holder_i64_area_doc(recv);
+        let holder_vec_i64 = serde_json::json!({
+            "resolved_path": { "name": "Holder", "path": "Holder", "id": 7,
+                "args": { "angle_bracketed": {
+                    "args": [ { "type": vec_i64_node } ], "bindings": [] } } }
+        });
+        doc["index"]["50"]["inner"]["impl"]["for"] = holder_vec_i64;
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        // Holder<Vec<i64>> Self carries angle-bracket args → suffix `_from_holder`.
+        assert!(
+            pkg.functions.iter().any(|f| f.name == "area_from_holder"),
+            "area on Holder<Vec<i64>> (closed-monomorphic nested) MUST bind as `area_from_holder` (#45)");
+    }
+
+    #[test]
+    fn test_free_tyvar_parametric_self_still_drops() {
+        // [#45 guard] `impl<T> Area for Holder<T>` — free type-var T present.
+        // `self_is_closed_monomorphic` must return false (free var) → still drops.
+        let recv = borrowed(serde_json::json!({ "generic": "Self" }));
+        let mut doc = holder_i64_area_doc(recv);
+        // Replace the `for` Self with `Holder<T>` (free generic T).
+        let holder_t = serde_json::json!({
+            "resolved_path": { "name": "Holder", "path": "Holder", "id": 7,
+                "args": { "angle_bracketed": {
+                    "args": [ { "type": { "generic": "T" } } ], "bindings": [] } } }
+        });
+        doc["index"]["50"]["inner"]["impl"]["for"] = holder_t;
+        // Add T as an impl-level generic param so the free-var check fires.
+        doc["index"]["50"]["inner"]["impl"]["generics"] = serde_json::json!({
+            "params": [ type_param("T", vec![]) ], "where_predicates": []
+        });
+        let pkg = parse_rustdoc(&doc, "tm", "0.1.0");
+        assert!(
+            !pkg.functions.iter().any(|f| f.name == "area"),
+            "area on Holder<T> (free type-var Self) must NOT bind — free T still drops (#45)");
+        let dropped_generic_self = GENERIC_DROPS.with(|v| {
+            v.borrow().iter().any(|(sym, d)| {
+                sym == "area"
+                    && matches!(
+                        d,
+                        GenericDrop::TraitMethodDrop(TraitMethodDropTag::GenericSelf, _))
+            })
+        });
+        assert!(
+            dropped_generic_self,
+            "area on Holder<T> must still record trait-method-generic-self drop (#45)");
+    }
+
+    #[test]
+    fn test_unnameable_type_arg_parametric_self_drops() {
+        // self_is_closed_monomorphic must return FALSE when a type arg renders to a
+        // non-empty string that is NOT nameable (pub(crate)/private type or any bare
+        // uppercase token not in ALWAYS_NAMEABLE and not path-qualified).
+        //
+        // The soundness hole was: is_empty() doesn't catch "Private" — rustdoc_type_to_rust_str
+        // falls back to the last path segment for unresolved/stripped ids, returning "Private"
+        // (non-empty). type_is_nameable("Private") returns false because "Private" starts with
+        // an uppercase letter, has no "::" prefix, and is absent from ALWAYS_NAMEABLE.
+        //
+        // Simulates: impl Area for Holder<Private> where Private is pub(crate) and its
+        // id ("0:2:9999") has no entry in REACHABLE_PATHS.
+        //
+        // REACHABLE_PATHS is thread-local and starts empty in each test, so the resolved_path
+        // lookup for id "0:2:9999" returns None → rustdoc_type_to_rust_str falls back to the
+        // last path segment → renders "Private" (non-empty). type_is_nameable("Private") then
+        // returns false → self_is_closed_monomorphic must return false.
+        let for_val = serde_json::json!({
+            "resolved_path": {
+                "name": "Holder",
+                "id": "0:2:1000",
+                "args": {
+                    "angle_bracketed": {
+                        "args": [
+                            {
+                                "type": {
+                                    "resolved_path": {
+                                        "name": "Private",
+                                        "id": "0:2:9999",
+                                        "args": null
+                                    }
+                                }
+                            }
+                        ],
+                        "bindings": []
+                    }
+                }
+            }
+        });
+        assert!(
+            !self_is_closed_monomorphic(&for_val),
+            "Holder<Private> with unnameable Private must NOT be closed-monomorphic"
+        );
     }
 
     // ── Trait-objects arc tail (#26) — non-dyn-Fn `dyn`/`impl Trait` MUST DROP ──
