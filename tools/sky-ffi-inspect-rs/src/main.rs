@@ -815,6 +815,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     LOCAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_local_type_ids(doc));
     EXTERNAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_external_type_ids(doc));
     STD_TRAIT_BY_ID.with(|c| *c.borrow_mut() = collect_std_trait_ids(doc));
+    EXTERNAL_TRAIT_PATH_BY_ID.with(|c| *c.borrow_mut() = collect_external_trait_paths(doc));
 
     // Wall #3 coverage accumulators are per-crate — reset so a multi-crate run
     // reports each crate's bind%/drops independently.
@@ -2812,6 +2813,20 @@ thread_local! {
     // to drive the existing name-keyed decision sites once provenance is confirmed.
     static STD_TRAIT_BY_ID: std::cell::RefCell<HashMap<String, &'static str>> =
         std::cell::RefCell::new(HashMap::new());
+
+    // [#46] Rustdoc id -> canonical EXTERNAL trait PATH (joined `::`, e.g.
+    // `core::convert::From`, `serde::ser::Serialize`) for every trait reference
+    // whose resolved path lives in an EXTERNAL crate (`crate_id > 0`). Built from
+    // `doc["paths"]` (the cross-crate id ⇒ `{path, kind, crate_id}` table) in
+    // parse_rustdoc, alongside STD_TRAIT_BY_ID. This is the KNOWN-CORRECT public
+    // path the UFCS qualifier needs for a trait that is NOT crate-local: a
+    // `pub(crate)` trait STRIPPED from the index has no `paths` entry and so is
+    // ABSENT here → `build_trait_ctx` still drops `TraitUnreachable` (over-drop is
+    // sound; emitting a UFCS to a wrong/unreachable trait is forbidden). A
+    // crate-local trait (`crate_id == 0`) is NEVER inserted (its public path comes
+    // from REACHABLE_PATHS via `reachable_local_path`).
+    static EXTERNAL_TRAIT_PATH_BY_ID: std::cell::RefCell<HashMap<String, String>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 
 /// Canonical std/core/alloc trait paths that the modellable-5 + the Display/
@@ -2866,6 +2881,42 @@ fn collect_std_trait_ids(doc: &serde_json::Value) -> HashMap<String, &'static st
         };
         if let Some((_, tag)) = STD_TRAIT_CANONICAL.iter().find(|(p, _)| *p == joined) {
             out.insert(id.clone(), *tag);
+        }
+    }
+    out
+}
+
+/// [#46] Build `EXTERNAL_TRAIT_PATH_BY_ID`: for every `doc["paths"]` entry whose
+/// `kind` is `trait` and `crate_id > 0` (external to the crate under inspection —
+/// std/core/alloc OR any foreign crate), record `id -> joined-`::`-path`. This is
+/// the canonical public path the UFCS qualifier renders for an external trait
+/// (`<Self as ::core::convert::From<i64>>::from`). A crate-local trait
+/// (`crate_id == 0`) is skipped — its public path comes from REACHABLE_PATHS.
+/// An external trait absent from `doc["paths"]` (a `pub(crate)` re-export the
+/// default rustdoc stripped) is NOT recorded → `build_trait_ctx` drops it.
+fn collect_external_trait_paths(doc: &serde_json::Value) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    let Some(paths) = doc["paths"].as_object() else {
+        return out;
+    };
+    for (id, entry) in paths {
+        if entry["kind"].as_str() != Some("trait") {
+            continue;
+        }
+        // crate_id == 0 → crate-local; its path is resolved via REACHABLE_PATHS.
+        if entry["crate_id"].as_u64().unwrap_or(0) == 0 {
+            continue;
+        }
+        let Some(joined) = entry["path"].as_array().map(|segs| {
+            segs.iter()
+                .filter_map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("::")
+        }) else {
+            continue;
+        };
+        if !joined.is_empty() {
+            out.insert(id.clone(), joined);
         }
     }
     out
@@ -2934,6 +2985,84 @@ fn is_clone_opaque_name(rendered: &str) -> bool {
 fn reachable_local_path(id: &serde_json::Value) -> Option<String> {
     let key = item_id_to_str(id);
     REACHABLE_PATHS.with(|c| c.borrow().get(&key).cloned())
+}
+
+/// [#46] Canonical PUBLIC path of an EXTERNAL trait by its rustdoc id, if the
+/// trait's provenance is KNOWN-CORRECT. Two confirmation sources, in order:
+///   1. `STD_TRAIT_BY_ID` — a std/core/alloc trait confirmed by canonical path;
+///      we recover its full path from `STD_TRAIT_CANONICAL` by the stored tag,
+///      preferring the `core::`/`alloc::` spelling (the first matching entry).
+///   2. `EXTERNAL_TRAIT_PATH_BY_ID` — any external (`crate_id > 0`) trait with a
+///      `doc["paths"]` entry (its joined `::`-path).
+///
+/// `None` when the id is in NEITHER map — a `pub(crate)` / index-stripped trait
+/// with no confirmable public path. Over-drop (returning `None`) is sound;
+/// emitting a UFCS qualifier to a wrong/unreachable external trait is forbidden.
+fn external_trait_path(id: &serde_json::Value) -> Option<String> {
+    let key = item_id_to_str(id);
+    // (1) std/core/alloc confirmed-by-canonical-path → recover its canonical path.
+    if let Some(tag) = STD_TRAIT_BY_ID.with(|m| m.borrow().get(&key).copied()) {
+        if let Some((path, _)) =
+            STD_TRAIT_CANONICAL.iter().find(|(_, t)| *t == tag)
+        {
+            return Some((*path).to_string());
+        }
+    }
+    // (2) Any external trait recorded in `doc["paths"]` (KNOWN-CORRECT path).
+    EXTERNAL_TRAIT_PATH_BY_ID.with(|m| m.borrow().get(&key).cloned())
+}
+
+/// [#46] Render an impl's `trait` node into the UFCS trait-path STRING, including
+/// its concrete generic args (`From<i64>` → `::core::convert::From<i64>`).
+/// Returns `None` when:
+///   * the trait id has no KNOWN-CORRECT public path (`reachable_local_path` for
+///     crate-local OR `external_trait_path` for std/external), OR
+///   * any of the trait's own generic args is non-concrete / unnameable (a free
+///     type-var, or an unnameable type the wrapper can't reproduce).
+///
+/// The `::`-leading crate-absolute form is applied by `ufcs_path` at the caller.
+fn ufcs_trait_path_with_args(trait_node: &serde_json::Value) -> Option<String> {
+    let id = trait_node.get("id")?;
+    // Base path: crate-local reachable first, then std/external canonical.
+    let base = reachable_local_path(id).or_else(|| external_trait_path(id))?;
+    // Trait's own generic args (the `X` in `From<X>`). Each must be CONCRETE
+    // (no free `{generic:…}` tyvar) and NAMEABLE — else the UFCS qualifier
+    // would carry an unbindable / unresolved arg → cargo-fail. Drop in that case.
+    let mut free: HashSet<String> = HashSet::new();
+    collect_generic_names(trait_node, &mut free);
+    if !free.is_empty() {
+        return None;
+    }
+    let args: Vec<String> = trait_node
+        .get("args")
+        .and_then(|a| a.get("angle_bracketed"))
+        .and_then(|ab| ab.get("args"))
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|arg| {
+                    if let Some(t) = arg.get("type") {
+                        Some(rustdoc_type_to_rust_str(t))
+                    } else if let Some(l) = arg.get("lifetime") {
+                        let s = l.as_str().unwrap_or("'a");
+                        Some(if s.starts_with('\'') { s.to_string() } else { format!("'{s}") })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Every rendered arg must be nameable (a lifetime like `'a` passes —
+    // `type_is_nameable` only gates uppercase-initial type tokens).
+    if args.iter().any(|a| a.is_empty() || !type_is_nameable(a)) {
+        return None;
+    }
+    Some(if args.is_empty() {
+        base
+    } else {
+        format!("{}<{}>", base, args.join(", "))
+    })
 }
 
 /// If `id` is a crate-local non-generic type alias, return the aliased type.
@@ -5565,13 +5694,18 @@ struct TraitCtx<'a> {
 /// Build the trait context (#21) for a generic-bearing method on a CONCRETE-Self
 /// trait impl. Resolves BOTH halves id-first:
 ///   * the trait-def method generics (Q2-A) by `trait.id` + method name;
-///   * the UFCS qualifier — selfPath from the `for`-type id, traitPath from the
-///     `trait.id` — both via `reachable_local_path` (the resolved PUBLIC path,
-///     NOT a last-segment string).
+///   * the UFCS qualifier — selfPath from the `for`-type id via
+///     `reachable_local_path`; traitPath from the `trait.id` via
+///     `ufcs_trait_path_with_args`, which resolves BOTH crate-local traits
+///     (REACHABLE_PATHS) AND EXTERNAL/std traits (`STD_TRAIT_BY_ID` canonical
+///     path or the `doc["paths"]` table, #46) and appends the trait's concrete
+///     generic args (`From<i64>`). The resolved PUBLIC path, NOT a last-segment
+///     string.
 ///
 /// Returns `None` for an inherent impl (no `trait_node`) OR when the UFCS
-/// qualifier can't be resolved to reachable public paths (a private/unreachable
-/// trait or Self type). On a TRAIT impl, a `None` return MUST become a
+/// qualifier can't be resolved to a KNOWN-CORRECT public path (a private/
+/// unreachable trait or Self type, an unconfirmable external trait, or a trait
+/// carrying a non-concrete/unnameable generic arg). On a TRAIT impl, a `None` return MUST become a
 /// `TraitMethodDropTag::TraitUnreachable` drop at the caller — `BoundSource`
 /// (below) enforces this by construction: `BoundSource::TraitImpl` can only hold
 /// a fully-resolved `TraitCtx`, so a trait method with no qualifier is
@@ -5593,9 +5727,16 @@ fn build_trait_ctx<'a>(
         .and_then(|v| v.get("resolved_path"))
         .and_then(|rp| rp.get("id"))
         .and_then(reachable_local_path)?;
-    // traitPath: the trait's reachable public path, id-resolved (NOT the
-    // last-segment `trait.name`/`trait.path` string — constraint 3 / #25).
-    let trait_path = trait_node.get("id").and_then(reachable_local_path)?;
+    // traitPath: the trait's KNOWN-CORRECT public path, id-resolved (NOT the
+    // last-segment `trait.name`/`trait.path` string — constraint 3 / #25), WITH
+    // its concrete generic args (`From<i64>` → `::core::convert::From<i64>`).
+    // [#46] `ufcs_trait_path_with_args` resolves crate-local traits via
+    // REACHABLE_PATHS *and* EXTERNAL/std traits via the confirmed canonical path
+    // (`STD_TRAIT_BY_ID`/`STD_TRAIT_CANONICAL` or the `doc["paths"]` table). An
+    // unconfirmable external trait, or a trait carrying a non-concrete/unnameable
+    // type-arg, yields `None` → `TraitUnreachable` drop at the caller (sound
+    // over-drop; a UFCS to a wrong/unreachable external trait is forbidden).
+    let trait_path = ufcs_trait_path_with_args(trait_node)?;
     let trait_def_generics = trait_def_method_generics(Some(trait_node), method_name, index);
     Some(TraitCtx {
         trait_def_generics,
@@ -7030,11 +7171,13 @@ mod tests {
         LOCAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_local_type_ids(doc));
         EXTERNAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_external_type_ids(doc));
         STD_TRAIT_BY_ID.with(|c| *c.borrow_mut() = collect_std_trait_ids(doc));
+        EXTERNAL_TRAIT_PATH_BY_ID.with(|c| *c.borrow_mut() = collect_external_trait_paths(doc));
         REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
         let out = f();
         LOCAL_TYPE_IDS.with(|c| c.borrow_mut().clear());
         EXTERNAL_TYPE_IDS.with(|c| c.borrow_mut().clear());
         STD_TRAIT_BY_ID.with(|c| c.borrow_mut().clear());
+        EXTERNAL_TRAIT_PATH_BY_ID.with(|c| c.borrow_mut().clear());
         REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
         out
     }
@@ -8421,6 +8564,260 @@ mod tests {
         assert_eq!(
             TraitMethodDropTag::TraitUnreachable.tag(),
             "trait-method-trait-unreachable");
+    }
+
+    // ── #46 — UFCS-resolve EXTERNAL / std-trait methods ────────────────────
+
+    /// A `doc` modelling `impl From<i64> for Foo { fn from(x: i64) -> Foo }`
+    /// where `From` is the real external std trait (id 200 in `doc["paths"]`,
+    /// `core::convert::From`, `crate_id: 1`) and `Foo` is a crate-local public
+    /// struct (id 7). Returns `(doc, impl_data, for_val, trait_node)`.
+    fn from_i64_for_foo() -> (
+        serde_json::Value, serde_json::Value, serde_json::Value, serde_json::Value,
+    ) {
+        let doc = serde_json::json!({
+            "index": {
+                // crate-local public root module (id 1) listing Foo → REACHABLE.
+                "1": { "name": "mycrate", "crate_id": 0, "visibility": "public",
+                       "inner": { "module": { "items": [ 7 ] } } },
+                // crate-local public struct Foo (id 7), reachable as `mycrate::Foo`.
+                "7": { "name": "Foo", "crate_id": 0,
+                       "visibility": "public",
+                       "inner": { "struct": { "kind": { "unit": null } } } },
+            },
+            "paths": {
+                // root module path so REACHABLE_PATHS resolves `mycrate::Foo`.
+                "1":   { "crate_id": 0, "kind": "module", "path": ["mycrate"] },
+                // EXTERNAL std trait `From` (crate_id 1 → not the crate under test).
+                "200": { "crate_id": 1, "kind": "trait",
+                         "path": ["core", "convert", "From"] },
+                // crate-local struct Foo path entry.
+                "7":   { "crate_id": 0, "kind": "struct", "path": ["mycrate", "Foo"] },
+            },
+        });
+        let for_val = serde_json::json!({
+            "resolved_path": { "name": "Foo", "path": "Foo", "id": 7, "args": null }
+        });
+        // The impl-side trait node carries the trait id (200) and its arg `<i64>`.
+        let trait_node = serde_json::json!({
+            "id": 200, "name": "From", "path": "From",
+            "args": { "angle_bracketed": {
+                "args": [ { "type": { "primitive": "i64" } } ], "constraints": [] } }
+        });
+        let impl_data = serde_json::json!({ "items": [] });
+        (doc, impl_data, for_val, trait_node)
+    }
+
+    #[test]
+    fn test_external_from_trait_binds_with_canonical_ufcs() {
+        // [#46 RED→GREEN] `impl From<i64> for Foo` — `From` is EXTERNAL (std).
+        // Pre-#46 `build_trait_ctx` resolved traitPath only via
+        // `reachable_local_path`, which returns None for an external id → the
+        // method dropped `trait-method-trait-unreachable`. Post-#46 the trait
+        // resolves to its CANONICAL std path `::core::convert::From<i64>` and the
+        // method ROUTES (no drop).
+        let (doc, impl_data, for_val, trait_node) = from_i64_for_foo();
+        with_doc_provenance(&doc, || {
+            let index = doc["index"].as_object().unwrap();
+            let ctx = build_trait_ctx(
+                Some(&trait_node), "from", Some(&for_val), &impl_data, index)
+                .expect("external std `From` MUST resolve its canonical UFCS path \
+                         (no trait-unreachable drop)");
+            assert_eq!(ctx.qualifier.0, "::mycrate::Foo");
+            // The traitPath carries the canonical std module path AND the `<i64>`
+            // generic arg — the exact UFCS qualifier the codegen renders.
+            assert_eq!(ctx.qualifier.1, "::core::convert::From<i64>");
+
+            // And the full routing returns a TraitImpl (not a TraitUnreachable).
+            match route_concrete_method(
+                Some(&trait_node), "from", Some(&for_val), &impl_data, index)
+                .expect("external-trait method must route to TraitImpl") {
+                BoundSource::TraitImpl(c) => {
+                    assert_eq!(c.qualifier.1, "::core::convert::From<i64>");
+                }
+                BoundSource::Inherent => panic!("a trait impl must not route Inherent"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_external_trait_display_drops_on_unbindable_arg_not_unreachable() {
+        // [#46] `impl Display for Foo { fn fmt(&self, f: &mut Formatter) }` —
+        // `Display` is an external std trait, so post-#46 the UFCS qualifier
+        // RESOLVES (no trait-unreachable drop). The method MUST still DROP — but
+        // because the `&mut Formatter` arg is unnameable, NOT because the trait is
+        // unreachable. We prove the qualifier resolves, then that the per-sig
+        // bindability gate in `try_parametric_stub` drops it.
+        let doc = serde_json::json!({
+            "index": {
+                "1": { "name": "mycrate", "crate_id": 0, "visibility": "public",
+                       "inner": { "module": { "items": [ 7 ] } } },
+                "7": { "name": "Foo", "crate_id": 0, "visibility": "public",
+                       "inner": { "struct": { "kind": { "unit": null } } } } },
+            "paths": {
+                "1":   { "crate_id": 0, "kind": "module", "path": ["mycrate"] },
+                "201": { "crate_id": 1, "kind": "trait",
+                         "path": ["core", "fmt", "Display"] },
+                "7":   { "crate_id": 0, "kind": "struct", "path": ["mycrate", "Foo"] },
+            },
+        });
+        let for_val = serde_json::json!({
+            "resolved_path": { "name": "Foo", "path": "Foo", "id": 7, "args": null }
+        });
+        let trait_node = serde_json::json!({ "id": 201, "name": "Display", "path": "Display" });
+        let impl_data = serde_json::json!({ "items": [] });
+        // `fmt(&self, f: &mut Formatter)` — Formatter is an unnameable arg.
+        let fmt_fn = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["self", borrowed(serde_json::json!({ "generic": "Self" }))],
+                ["f", borrowed(serde_json::json!({ "resolved_path": {
+                    "name": "Formatter", "path": "Formatter", "id": 0, "args": null } }))]
+            ], "output": { "resolved_path": {
+                "name": "Result", "path": "Result", "id": 0, "args": null } } }
+        });
+
+        with_doc_provenance(&doc, || {
+            let index = doc["index"].as_object().unwrap();
+            // Step 1: the qualifier resolves (Display is external + canonical).
+            let bs = route_concrete_method(
+                Some(&trait_node), "fmt", Some(&for_val), &impl_data, index)
+                .expect("external `Display` qualifier MUST resolve (not unreachable)");
+            let ctx = match &bs {
+                BoundSource::TraitImpl(c) => c,
+                BoundSource::Inherent => panic!("trait impl must not route Inherent"),
+            };
+            assert_eq!(ctx.qualifier.1, "::core::fmt::Display");
+            // Step 2: the method still DROPS — for the unbindable `Formatter` arg,
+            // NOT trait-unreachable.
+            let dropped = try_parametric_stub(
+                "fmt", &fmt_fn, Some(("Foo", "::mycrate::Foo")), None, None, Some(ctx));
+            match dropped {
+                Err(GenericDrop::TraitMethodDrop(TraitMethodDropTag::TraitUnreachable, _)) =>
+                    panic!("Display.fmt must NOT drop trait-unreachable post-#46 — \
+                            it drops on the unbindable Formatter arg"),
+                Err(_) => {}  // any OTHER drop (arg unbindable) is correct
+                Ok(_) => panic!("fmt(&self, &mut Formatter) must DROP (unnameable arg)"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_unconfirmable_external_trait_still_drops_unreachable() {
+        // [#46 boundary] An external trait whose canonical path is UNCONFIRMABLE
+        // — its id is NOT in `doc["paths"]` (a `pub(crate)` re-export the default
+        // rustdoc stripped, or a private trait) and NOT crate-local-reachable —
+        // MUST still drop `trait-method-trait-unreachable`. Over-drop is sound;
+        // emitting a UFCS to an unconfirmable trait is forbidden.
+        let doc = serde_json::json!({
+            "index": {
+                "1": { "name": "mycrate", "crate_id": 0, "visibility": "public",
+                       "inner": { "module": { "items": [ 7 ] } } },
+                "7": { "name": "Foo", "crate_id": 0, "visibility": "public",
+                       "inner": { "struct": { "kind": { "unit": null } } } } },
+            "paths": {
+                "1": { "crate_id": 0, "kind": "module", "path": ["mycrate"] },
+                // Foo is recorded, but trait id 999 is deliberately ABSENT.
+                "7": { "crate_id": 0, "kind": "struct", "path": ["mycrate", "Foo"] },
+            },
+        });
+        let for_val = serde_json::json!({
+            "resolved_path": { "name": "Foo", "path": "Foo", "id": 7, "args": null }
+        });
+        // Trait id 999 — unknown provenance (not in paths, not reachable-local).
+        let trait_node = serde_json::json!({ "id": 999, "name": "Mystery", "path": "Mystery" });
+        let impl_data = serde_json::json!({ "items": [] });
+        with_doc_provenance(&doc, || {
+            let index = doc["index"].as_object().unwrap();
+            assert!(
+                build_trait_ctx(Some(&trait_node), "go", Some(&for_val), &impl_data, index)
+                    .is_none(),
+                "an unconfirmable external trait MUST yield no qualifier");
+            match route_concrete_method(
+                Some(&trait_node), "go", Some(&for_val), &impl_data, index) {
+                Err(GenericDrop::TraitMethodDrop(TraitMethodDropTag::TraitUnreachable, _)) => {}
+                other => panic!("expected trait-unreachable drop, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_external_any_trait_drops_on_typeid_return_not_unreachable() {
+        // [#46] `impl Any for Foo { fn type_id(&self) -> TypeId }` — `Any` is an
+        // external std trait, so post-#46 the qualifier resolves. The method MUST
+        // still DROP because the `TypeId` return is unnameable — NOT trait-
+        // unreachable.
+        let doc = serde_json::json!({
+            "index": {
+                "1": { "name": "mycrate", "crate_id": 0, "visibility": "public",
+                       "inner": { "module": { "items": [ 7 ] } } },
+                "7": { "name": "Foo", "crate_id": 0, "visibility": "public",
+                       "inner": { "struct": { "kind": { "unit": null } } } } },
+            "paths": {
+                "1":   { "crate_id": 0, "kind": "module", "path": ["mycrate"] },
+                "202": { "crate_id": 1, "kind": "trait", "path": ["core", "any", "Any"] },
+                "7":   { "crate_id": 0, "kind": "struct", "path": ["mycrate", "Foo"] },
+            },
+        });
+        let for_val = serde_json::json!({
+            "resolved_path": { "name": "Foo", "path": "Foo", "id": 7, "args": null }
+        });
+        // `Any` is NOT in STD_TRAIT_CANONICAL, but IS an external trait recorded
+        // in doc["paths"] → resolves via EXTERNAL_TRAIT_PATH_BY_ID.
+        let trait_node = serde_json::json!({ "id": 202, "name": "Any", "path": "Any" });
+        let impl_data = serde_json::json!({ "items": [] });
+        let type_id_fn = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["self", borrowed(serde_json::json!({ "generic": "Self" }))]
+            ], "output": { "resolved_path": {
+                "name": "TypeId", "path": "TypeId", "id": 0, "args": null } } }
+        });
+        with_doc_provenance(&doc, || {
+            let index = doc["index"].as_object().unwrap();
+            let bs = route_concrete_method(
+                Some(&trait_node), "type_id", Some(&for_val), &impl_data, index)
+                .expect("external `Any` qualifier MUST resolve via doc[paths]");
+            let ctx = match &bs {
+                BoundSource::TraitImpl(c) => c,
+                BoundSource::Inherent => panic!("trait impl must not route Inherent"),
+            };
+            assert_eq!(ctx.qualifier.1, "::core::any::Any");
+            match try_parametric_stub(
+                "type_id", &type_id_fn, Some(("Foo", "::mycrate::Foo")), None, None, Some(ctx)) {
+                Err(GenericDrop::TraitMethodDrop(TraitMethodDropTag::TraitUnreachable, _)) =>
+                    panic!("Any.type_id must NOT drop trait-unreachable post-#46"),
+                Err(_) => {}  // dropped on unnameable TypeId return — correct
+                Ok(_) => panic!("type_id(&self) -> TypeId must DROP (unnameable return)"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_external_trait_with_unnameable_typearg_drops() {
+        // [#46 boundary] `impl From<PrivateThing> for Foo` where the trait's own
+        // generic arg `PrivateThing` is unnameable → the UFCS qualifier would
+        // carry an unbindable arg → MUST drop (return None), never emit a UFCS to
+        // `From<PrivateThing>`.
+        let (doc, impl_data, for_val, _) = from_i64_for_foo();
+        // Trait `From<PrivateThing>` — the arg is a bare unknown uppercase type.
+        let trait_node = serde_json::json!({
+            "id": 200, "name": "From", "path": "From",
+            "args": { "angle_bracketed": {
+                "args": [ { "type": { "resolved_path": {
+                    "name": "PrivateThing", "path": "PrivateThing", "id": 0, "args": null } } } ],
+                "constraints": [] } }
+        });
+        with_doc_provenance(&doc, || {
+            let index = doc["index"].as_object().unwrap();
+            assert!(
+                build_trait_ctx(Some(&trait_node), "from", Some(&for_val), &impl_data, index)
+                    .is_none(),
+                "From<unnameable-arg> MUST drop — never emit a UFCS with an \
+                 unbindable trait type-arg");
+        });
     }
 
     #[test]
