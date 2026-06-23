@@ -226,7 +226,23 @@ spec = do
                         , TRClosure FnKind False [TRParam 0] (TRParam 1) ]
                     , _call_ret      = TRCtor "Vec" [TRParam 1]
                     }
-            closureBounds call `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
+            -- C-A: real params ["a","b"] → TRParam 0 → A, TRParam 1 → B
+            closureBounds call ["a", "b"] `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
+        it "#28: rejects a closure nested inside a container (Vec<closure>)" $ do
+            let call = Call
+                    { _call_kind     = CallFunction
+                    , _call_path     = ["::clo"]
+                    , _call_typeArgs = [TRParam 0]
+                    , _call_method   = Nothing
+                    , _call_receiver = Nothing
+                    , _call_args     = [0]
+                    , _call_argTypes =
+                        [ TRCtor "Vec"
+                            [TRClosure FnKind False [TRParam 0] (TRPrim "bool")] ]
+                    , _call_ret      = TRPrim "i64"
+                    }
+            -- C-B: a closure nested inside Vec<_> must be rejected by validateCall
+            isLeft (validateCall 1 call) `shouldBe` True
 
     describe "renderCall / renderRetType (total over a validated Call)" $ do
         it "renders a static ctor body + ret + arg type" $ do

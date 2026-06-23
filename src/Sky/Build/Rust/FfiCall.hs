@@ -188,6 +188,15 @@ validateCall nParams c = do
         Left ("argTypes has " ++ show (length (_call_argTypes c))
                ++ " entry(ies) but the call references " ++ show arity
                ++ " value-arg(s)")
+    -- (6) C-B: a closure type is valid ONLY as a direct _call_argTypes element.
+    -- A closure nested inside a container (e.g. Vec<closure>), inside ret, or
+    -- inside typeArgs would reach renderTypeRef's `TRClosure{} -> "F?"` fallback
+    -- and emit invalid Rust (Vec<F?> → cargo E0412). Reject here.
+    unless (not (any nestedClosure (_call_argTypes c))
+            && not (any hasClosure (_call_typeArgs c))
+            && not (hasClosure (_call_ret c))) $
+        Left "a closure type may only appear as a direct wrapper argument, \
+             \not nested inside a container, return, or type-argument"
     Right c
   where
     checkParamRef i
@@ -223,6 +232,24 @@ allTypeRefs c =
     paramIdxs (TRPrim _)           = []
     paramIdxs (TRCtor _ args)      = concatMap paramIdxs args
     paramIdxs (TRClosure _ _ as r) = concatMap paramIdxs as ++ paramIdxs r
+
+
+-- | @True@ if a 'TRClosure' appears anywhere in the PROPER subtree of this
+-- 'TypeRef' (i.e. inside a container or a closure's own arg/ret positions),
+-- NOT counting the 'TypeRef' itself if it IS a closure at the top level.
+-- Used by 'validateCall' (C-B) to reject @Vec\<closure\>@ and similar shapes
+-- that would reach 'renderTypeRef'\'s @\"F?\"@ fallback and emit invalid Rust.
+nestedClosure :: TypeRef -> Bool
+nestedClosure (TRCtor _ args)      = any hasClosure args
+nestedClosure (TRClosure _ _ as r) = any hasClosure as || hasClosure r
+nestedClosure _                    = False
+
+
+-- | @True@ if a 'TRClosure' appears at or anywhere inside this 'TypeRef'.
+hasClosure :: TypeRef -> Bool
+hasClosure (TRClosure _ _ _ _) = True
+hasClosure (TRCtor _ args)     = any hasClosure args
+hasClosure _                   = False
 
 
 -- ─── total render over a validated Call ──────────────────────────────
@@ -302,23 +329,19 @@ closureNeedsClone _          = True
 -- fn. Non-closure args are silently skipped (they contribute named params
 -- through the regular generic-param pathway).
 --
--- @params@ is the call's declared generic param list (positional with 'TRParam'
--- indices); needed to render the closure's own arg/ret type refs.
-closureBounds :: Call -> [String]
-closureBounds c =
+-- @params@ is the call's REAL declared generic param list (positional with
+-- 'TRParam' indices, matching the @params@ field of the enclosing
+-- @FfiGeneric@); needed to render the closure's own arg/ret type refs.
+-- Callers MUST pass the actual param names — fabricating a positional list
+-- keyed off @typeArgs@ length is wrong when the real names differ (C-A fix).
+closureBounds :: Call -> [String] -> [String]
+closureBounds c params =
     [ "F" ++ show j ++ ": " ++ closureKindStr k
         ++ "(" ++ intercalate ", " (map (renderTypeRef params) as_) ++ ") -> "
         ++ renderTypeRef params r
         ++ (if closureNeedsClone k then " + ::core::clone::Clone" else "")
     | (j, TRClosure k _ as_ r) <- zip [0..] (_call_argTypes c)
     ]
-  where
-    -- Derive the params list from the call's typeArgs: one mangled name per
-    -- TRParam index present in typeArgs, in index order. For the common
-    -- case where typeArgs = [TRParam 0, TRParam 1, …] this gives ["a","b",…]
-    -- which mangleTVar renders as ["A","B",…].
-    -- We use a simple positional list matching the length of typeArgs.
-    params = take (length (_call_typeArgs c)) ["a","b","c","d","e","f","g","h"]
 
 
 -- | The wrapper value-arg identifier for index @j@ (matches the param-list the
