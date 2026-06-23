@@ -1020,24 +1020,37 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                                 (generic_bearing && is_inherent_impl)
                                 || is_concrete_trait_method;
                             if take_parametric {
-                                // Build the trait context for a trait impl: the
-                                // Q2-A trait-def method generics (unioned into the
-                                // bound gate) + the UFCS qualifier (selfPath +
-                                // traitPath). An inherent impl threads `None`.
-                                let trait_ctx = build_trait_ctx(
+                                // [C-1] Resolve the BoundSource FIRST. For a trait
+                                // impl this builds the Q2-A trait-def method
+                                // generics + the UFCS qualifier (selfPath +
+                                // traitPath); if the qualifier can't resolve to
+                                // reachable public paths (`pub(crate)` trait /
+                                // unreachable Self) it DROPS `TraitUnreachable`
+                                // rather than threading a `None` ctx into emission
+                                // (which would emit `trait_qualifier=None` — an
+                                // inherent-call form on a trait method → E0599/
+                                // E0603 at the host). An inherent impl → `Inherent`
+                                // (no qualifier, byte-identical to a pre-#21 stub).
+                                let bound_source = match route_concrete_method(
                                     trait_node,
                                     method_name,
                                     for_val,
                                     impl_data,
                                     index,
-                                );
+                                ) {
+                                    Ok(bs) => bs,
+                                    Err(drop) => {
+                                        record_generic_drop(method_name, drop);
+                                        continue;
+                                    }
+                                };
                                 match try_parametric_stub(
                                     method_name,
                                     fn_data,
                                     Some((&self_sky, &self_rust)),
                                     impl_generics,
                                     struct_generics,
-                                    trait_ctx.as_ref(),
+                                    bound_source.ctx(),
                                 ) {
                                     Ok(generic) => {
                                         record_generic_bound();
@@ -3808,6 +3821,13 @@ enum TraitMethodDropTag {
     /// Trait-method metadata suppressed because the host fn's ABI is not `"Rust"`
     /// (constraint 10) — mirrors `closure-nonrust-abi` / `iterator-nonrust-abi`.
     NonRustAbi,
+    /// The trait impl's `Self` type OR the trait itself has no reachable PUBLIC
+    /// path (`build_trait_ctx` yields no UFCS qualifier) — e.g. a `pub(crate)`
+    /// trait on a public Self, whose trait id is absent from `REACHABLE_PATHS`.
+    /// Such a method can't be called via `<Self as Trait>::m` from generated
+    /// code, so it MUST drop here rather than emit a `trait_qualifier=None`
+    /// inherent-call form (which would E0599/E0603 at the host). [C-1]
+    TraitUnreachable,
 }
 
 impl TraitMethodDropTag {
@@ -3817,6 +3837,7 @@ impl TraitMethodDropTag {
             TraitMethodDropTag::BoundCrossImpl => "trait-method-bound-cross-impl",
             TraitMethodDropTag::AssocUnresolved => "trait-method-assoc-unresolved",
             TraitMethodDropTag::NonRustAbi => "trait-method-nonrust-abi",
+            TraitMethodDropTag::TraitUnreachable => "trait-method-trait-unreachable",
         }
     }
 }
@@ -4982,6 +5003,7 @@ fn struct_generics_of<'a>(
 /// UFCS qualifier `(selfPath, traitPath)` the codegen renders as
 /// `<selfPath as traitPath>::method(recv, args)`. An inherent impl threads `None`
 /// — its methods bind via inherent dispatch (no qualifier, no trait-def union).
+#[derive(Debug)]
 struct TraitCtx<'a> {
     /// The trait-DEF method's `generics` node (Q2-A), or `None` when the trait
     /// def / method couldn't be resolved (→ a `trait-method-bound-cross-impl`
@@ -5004,10 +5026,16 @@ struct TraitCtx<'a> {
 ///   * the UFCS qualifier — selfPath from the `for`-type id, traitPath from the
 ///     `trait.id` — both via `reachable_local_path` (the resolved PUBLIC path,
 ///     NOT a last-segment string).
+///
 /// Returns `None` for an inherent impl (no `trait_node`) OR when the UFCS
 /// qualifier can't be resolved to reachable public paths (a private/unreachable
-/// trait or Self type → the method can't be called UFCS → drop downstream). The
-/// trait-def-generics half being `None` is NOT fatal here (it becomes a
+/// trait or Self type). On a TRAIT impl, a `None` return MUST become a
+/// `TraitMethodDropTag::TraitUnreachable` drop at the caller — `BoundSource`
+/// (below) enforces this by construction: `BoundSource::TraitImpl` can only hold
+/// a fully-resolved `TraitCtx`, so a trait method with no qualifier is
+/// unrepresentable and can never reach the `trait_qualifier=None` inherent-call
+/// emit (which would E0599/E0603 at the host). [C-1]
+/// The trait-def-generics half being `None` is NOT fatal here (it becomes a
 /// per-tyvar bound-resolution drop inside `try_parametric_stub`); only an
 /// unresolvable QUALIFIER aborts ctx construction.
 fn build_trait_ctx<'a>(
@@ -5032,6 +5060,62 @@ fn build_trait_ctx<'a>(
         qualifier: (ufcs_path(&self_path), ufcs_path(&trait_path)),
         assoc_bindings: impl_assoc_bindings(impl_data, index),
     })
+}
+
+/// Where a concrete-Self method's binding comes from (#21, [C-1]). Making this an
+/// explicit enum — rather than threading a bare `Option<&TraitCtx>` — closes the
+/// `None`-means-drop vs `None`-means-emit-bare ambiguity that was the C-1 root
+/// cause: a `TraitImpl` arm ALWAYS carries a fully-resolved `TraitCtx` (with a
+/// reachable UFCS qualifier), so "a trait method with no qualifier" cannot be
+/// constructed. The only way a trait method reaches emission is WITH a qualifier;
+/// an unresolvable qualifier is turned into a `TraitUnreachable` drop BEFORE this
+/// value is ever built (see `route_concrete_method`).
+#[derive(Debug)]
+enum BoundSource<'a> {
+    /// An inherent (`impl Type { … }`) method — inherent dispatch, no qualifier.
+    Inherent,
+    /// A trait (`impl Trait for Type { … }`) method — UFCS-qualified, always with
+    /// a resolved context.
+    TraitImpl(TraitCtx<'a>),
+}
+
+impl<'a> BoundSource<'a> {
+    /// The `TraitCtx` threaded into `try_parametric_stub`: `Some` for a trait
+    /// impl, `None` for an inherent impl.
+    fn ctx(&self) -> Option<&TraitCtx<'a>> {
+        match self {
+            BoundSource::Inherent => None,
+            BoundSource::TraitImpl(c) => Some(c),
+        }
+    }
+}
+
+/// Resolve a method's `BoundSource` BEFORE emission ([C-1], the total-by-
+/// construction gate). For an inherent impl → `Inherent`. For a trait impl →
+/// build the UFCS context; if it can't be resolved to reachable public paths
+/// (`pub(crate)` trait / unreachable Self → no qualifier) → `Err(TraitUnreachable)`
+/// so the method DROPS instead of emitting a `trait_qualifier=None` inherent
+/// call. `trait_node` is `Some` exactly when the impl is a trait impl.
+fn route_concrete_method<'a>(
+    trait_node: Option<&'a serde_json::Value>,
+    method_name: &str,
+    for_val: Option<&serde_json::Value>,
+    impl_data: &serde_json::Value,
+    index: &'a serde_json::Map<String, serde_json::Value>,
+) -> Result<BoundSource<'a>, GenericDrop> {
+    match trait_node {
+        None => Ok(BoundSource::Inherent),
+        Some(tn) => match build_trait_ctx(Some(tn), method_name, for_val, impl_data, index) {
+            Some(ctx) => Ok(BoundSource::TraitImpl(ctx)),
+            None => Err(GenericDrop::TraitMethodDrop(
+                TraitMethodDropTag::TraitUnreachable,
+                format!(
+                    "trait method `{method_name}`: trait or Self has no reachable \
+                     public path (UFCS qualifier unresolvable)"
+                ),
+            )),
+        },
+    }
 }
 
 /// Constraint 6 / Q3: collect the impl's CONCRETE associated-type bindings
@@ -7439,5 +7523,66 @@ mod tests {
             Some(&trait_node), "scaled", Some(&for_val), &impl_data, &index).is_none());
 
         REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
+    }
+
+    #[test]
+    fn test_route_concrete_method_pubcrate_trait_drops_trait_unreachable() {
+        // [C-1 BLOCKING] A `pub(crate) trait Scale { fn scaled(&self); }` on a
+        // PUBLIC Self: the trait's id is absent from REACHABLE_PATHS (no public
+        // path), so `build_trait_ctx` yields no UFCS qualifier. The routing MUST
+        // turn that into a `trait-method-trait-unreachable` DROP — NEVER a
+        // `BoundSource::TraitImpl` with a `None` qualifier (which would emit an
+        // inherent-call form on a trait method → E0599/E0603 at the host).
+        let (index, trait_node) = scale_trait_index();
+        let for_val = serde_json::json!({
+            "resolved_path": { "name": "Circle", "path": "Circle", "id": 7, "args": null }
+        });
+        let impl_data = serde_json::json!({ "items": [] });
+
+        // Self (id 7) is reachable+public; the TRAIT (id 42) is NOT → pub(crate).
+        REACHABLE_PATHS.with(|c| {
+            let mut m = c.borrow_mut();
+            m.clear();
+            m.insert("7".to_string(), "tm::Circle".to_string());
+            // id 42 (the trait) deliberately ABSENT — pub(crate) trait.
+        });
+        let routed = route_concrete_method(
+            Some(&trait_node), "scaled", Some(&for_val), &impl_data, &index);
+        match routed {
+            Err(GenericDrop::TraitMethodDrop(TraitMethodDropTag::TraitUnreachable, _)) => {}
+            Ok(_) => panic!(
+                "pub(crate) trait MUST drop trait-method-trait-unreachable, NEVER \
+                 route to a BoundSource (a None-qualifier inherent emit → E0603)"),
+            other => panic!("expected trait-method-trait-unreachable drop, got {other:?}"),
+        }
+
+        // POSITIVE control: with the trait id reachable, the SAME method routes to
+        // a `TraitImpl` carrying the resolved UFCS qualifier (no drop).
+        REACHABLE_PATHS.with(|c| {
+            c.borrow_mut().insert("42".to_string(), "tm::Scale".to_string());
+        });
+        let ok = route_concrete_method(
+            Some(&trait_node), "scaled", Some(&for_val), &impl_data, &index)
+            .expect("reachable trait+Self → TraitImpl, not a drop");
+        match ok {
+            BoundSource::TraitImpl(ctx) => {
+                assert_eq!(ctx.qualifier, ("::tm::Circle".to_string(), "::tm::Scale".to_string()));
+            }
+            BoundSource::Inherent => panic!("a trait impl must NOT route to Inherent"),
+        }
+
+        // An INHERENT impl (no trait node) always routes to `Inherent` (no ctx).
+        let inh = route_concrete_method(None, "scaled", Some(&for_val), &impl_data, &index)
+            .expect("inherent impl routes Ok");
+        assert!(inh.ctx().is_none(), "an inherent BoundSource carries no qualifier");
+
+        REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
+    }
+
+    #[test]
+    fn test_trait_unreachable_tag_string() {
+        assert_eq!(
+            TraitMethodDropTag::TraitUnreachable.tag(),
+            "trait-method-trait-unreachable");
     }
 }
