@@ -349,6 +349,48 @@ spec = do
                     , _call_iterAdapters = [1]
                     }
             renderCall c [] `shouldBe` "::iter::zip2(arg0, arg1.into_iter())"
+        it "validateCall REJECTS an out-of-range iterAdapters index" $ do
+            let bad = Call
+                    { _call_kind     = CallFunction
+                    , _call_path     = ["::iter"]
+                    , _call_typeArgs = []
+                    , _call_method   = Just "go"
+                    , _call_receiver = Nothing
+                    , _call_args     = [0]
+                    , _call_argTypes = [TRCtor "::Vec" [TRPrim "i64"]]
+                    , _call_ret      = TRPrim "i64"
+                    , _call_assocOnType = False
+                    , _call_iterAdapters = [3]   -- arity is 1 → out of range
+                    }
+            isLeft' (validateCall 0 bad) `shouldBe` True
+        it "validateCall REJECTS an iterAdapters index on a non-Vec arg" $ do
+            let bad = Call
+                    { _call_kind     = CallFunction
+                    , _call_path     = ["::iter"]
+                    , _call_typeArgs = []
+                    , _call_method   = Just "go"
+                    , _call_receiver = Nothing
+                    , _call_args     = [0]
+                    , _call_argTypes = [TRPrim "i64"]   -- not a Vec — .into_iter() unsound
+                    , _call_ret      = TRPrim "i64"
+                    , _call_assocOnType = False
+                    , _call_iterAdapters = [0]
+                    }
+            isLeft' (validateCall 0 bad) `shouldBe` True
+        it "validateCall ACCEPTS a well-formed iterAdapters index on a Vec arg" $ do
+            let ok = Call
+                    { _call_kind     = CallFunction
+                    , _call_path     = ["::iter"]
+                    , _call_typeArgs = []
+                    , _call_method   = Just "go"
+                    , _call_receiver = Nothing
+                    , _call_args     = [0]
+                    , _call_argTypes = [TRCtor "::Vec" [TRPrim "i64"]]
+                    , _call_ret      = TRPrim "i64"
+                    , _call_assocOnType = False
+                    , _call_iterAdapters = [0]
+                    }
+            isRight (validateCall 0 ok) `shouldBe` True
 
     describe "#28 — owned-clone bridge for Fn(&A) closure params (Task 3.2, B4)" $ do
         -- `keep : List a -> (&a -> Bool) -> List a` — the host wants Fn(&A) but

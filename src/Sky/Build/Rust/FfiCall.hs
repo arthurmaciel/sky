@@ -219,6 +219,15 @@ validateCall nParams c = do
             && not (hasClosure (_call_ret c))) $
         Left "a closure type may only appear as a direct wrapper argument, \
              \not nested inside a container, return, or type-argument"
+    -- (7) C6: every `iterAdapters` index must reference a real value-arg slot
+    -- whose argType is a `Vec<_>` ctor. The adapter emits `argJ.into_iter()`,
+    -- which is sound ONLY when argJ is a `Vec` (an `Iterator`-bound host param
+    -- the inspector lowered to `Vec<ItemT>`). The inspector upholds this by
+    -- construction (it pushes an adapter index only at a slot where it emits a
+    -- `Vec<ItemT>` argType); enforcing it HERE turns an ill-formed kernel.json
+    -- (a hand-written or future-producer adapter on a non-Vec arg) into a hard
+    -- parse error rather than a deferred `argJ.into_iter()` cargo-fail.
+    mapM_ (checkIterAdapter arity (_call_argTypes c)) (_call_iterAdapters c)
     Right c
   where
     checkParamRef i
@@ -241,6 +250,18 @@ validateCall nParams c = do
                               ++ "referenced (arg indices must be contiguous "
                               ++ "from 0)")
             []      -> Right ()
+    checkIterAdapter arity argTypes i
+        | i < 0 || i >= arity =
+            Left ("iterAdapters index " ++ show i ++ " is out of range "
+                   ++ "(the call references " ++ show arity ++ " value-arg(s))")
+        | not (isVecCtor (argTypes !! i)) =
+            Left ("iterAdapters index " ++ show i ++ " targets a non-Vec "
+                   ++ "argType (`.into_iter()` is sound only on a Vec arg)")
+        | otherwise = Right ()
+    -- The `Vec<_>` ctor an `Iterator`-bound param lowers to. The inspector emits
+    -- `::Vec`; accept the bare `Vec` too (hand stubs / older producers).
+    isVecCtor (TRCtor nm _) = nm == "::Vec" || nm == "Vec"
+    isVecCtor _             = False
 
 
 -- | Every 'TypeRef' leaf reachable from a 'Call' (typeArgs + ret + nested ctor
