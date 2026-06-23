@@ -174,6 +174,45 @@ pub fn render_page(body: &str) -> String {
 /// (already needed for same-origin resource loading). Adding a nonce to the
 /// inline script to tighten CSP is deferred; it requires threading the nonce
 /// through the response pipeline and is outside the scope of this change.
+/// Server-side client-config templating (Go parity, live.go ~5993): read the
+/// `SKY_LIVE_*` tuning env vars and emit the `window.__SKY_*` assignments the
+/// client (`client.js`) reads with a hardcoded fallback. Without this the Rust
+/// client ignored every `SKY_LIVE_RETRY_*` / `QUEUE_MAX` / `HELLO_TIMEOUT_MS` /
+/// `HEARTBEAT_TTL_MS` / `BANNER` override. Totally parsed: a malformed value
+/// falls back to Go's default; never panics.
+fn live_client_config_js() -> String {
+    fn num(var: &str, default: u64) -> u64 {
+        std::env::var(var)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(default)
+    }
+    // SKY_LIVE_BANNER: off/0/false → disabled (Go parity); anything else → on.
+    let banner = !matches!(
+        std::env::var("SKY_LIVE_BANNER")
+            .ok()
+            .map(|s| s.trim().to_ascii_lowercase()),
+        Some(ref v) if v == "off" || v == "0" || v == "false"
+    );
+    format!(
+        "window.__SKY_BANNER_ENABLED={banner};\
+         window.__SKY_RETRY_BASE_MS={};\
+         window.__SKY_RETRY_MAX_MS={};\
+         window.__SKY_RETRY_MAX_ATTEMPTS={};\
+         window.__SKY_EVENT_QUEUE_MAX={};\
+         window.__SKY_HELLO_TIMEOUT_MS={};\
+         window.__SKY_HEARTBEAT_TTL_MS={};\
+         window.__SKY_MSG_RECONNECTING=\"Reconnecting…\";\
+         window.__SKY_MSG_OFFLINE=\"Connection lost — refresh to retry\";",
+        num("SKY_LIVE_RETRY_BASE_MS", 500),
+        num("SKY_LIVE_RETRY_MAX_MS", 16000),
+        num("SKY_LIVE_RETRY_MAX_ATTEMPTS", 10),
+        num("SKY_LIVE_QUEUE_MAX", 50),
+        num("SKY_LIVE_HELLO_TIMEOUT_MS", 8000),
+        num("SKY_LIVE_HEARTBEAT_TTL_MS", 35000),
+    )
+}
+
 pub fn render_page_full(sid: &str, base: &str, body: &str, csrf_token: &str) -> String {
     // sid_js / base_js / csrf_js: Rust Debug ("{:?}") of a &str yields a
     // double-quoted, properly-escaped JS string literal for plain ASCII
@@ -188,6 +227,7 @@ pub fn render_page_full(sid: &str, base: &str, body: &str, csrf_token: &str) -> 
     // the parent proxy (same as /_sky/sse, /_sky/event, /_sky/console).
     let client_src = format!("{base}/_sky/client.{hex16}.js");
     let integrity = format!("sha256-{b64}");
+    let config_js = live_client_config_js();
     format!(
         "<!DOCTYPE html><html><head>\
          <meta charset=\"utf-8\">\
@@ -196,7 +236,7 @@ pub fn render_page_full(sid: &str, base: &str, body: &str, csrf_token: &str) -> 
          <style>{BASE_CSS}</style>\
          </head>\
          <body><div id=\"sky-root\">{body}</div>{dev_banner}\
-         <script>window.__SKY_SID={sid_js};window.__SKY_BASE={base_js};window.__SKY_CSRF_TOKEN={csrf_js};</script>\
+         <script>window.__SKY_SID={sid_js};window.__SKY_BASE={base_js};window.__SKY_CSRF_TOKEN={csrf_js};{config_js}</script>\
          <script src=\"{client_src}\" integrity=\"{integrity}\" crossorigin=\"anonymous\"></script>\
          </body></html>"
     )
@@ -657,8 +697,18 @@ fn page_response(sid: &str, body: &str, csrf_token: &str) -> axum::response::Res
     // unconditionally omitted — a downgrade hole). SameSite=Lax stays so
     // top-level navigations keep the session.
     let secure = if csrf::cookies_secure() { "; Secure" } else { "" };
+    // SameSite (Go parity, live.go ~5653): a deploy opted into cross-origin
+    // embedding via SKY_LIVE_FRAME_ANCESTORS needs `SameSite=None; Secure` so the
+    // session cookie survives inside a third-party iframe; otherwise `Lax`
+    // (top-level navigations keep the session). `cookies_secure()` is already true
+    // in frame-ancestors mode, so `None` always pairs with `Secure`.
+    let same_site = if csrf::frame_ancestors().is_some() { "None" } else { "Lax" };
+    // Max-Age (Go parity, live.go ~5641): persist the cookie for the store TTL so a
+    // tab-close doesn't drop a still-live server session. Without it the cookie is
+    // session-scoped and the user loses state on tab close.
+    let max_age = live_ttl().as_secs();
     let session_cookie = format!(
-        "{}={sid}; Path={}; HttpOnly; SameSite=Lax{secure}",
+        "{}={sid}; Path={}; HttpOnly; SameSite={same_site}{secure}; Max-Age={max_age}",
         session_cookie_name(),
         cookie_path()
     );
@@ -702,9 +752,53 @@ fn live_max_body_bytes() -> usize {
 fn live_ttl() -> std::time::Duration {
     let secs = std::env::var("SKY_LIVE_TTL")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| parse_duration_secs(&s))
         .unwrap_or(1800u64);
     std::time::Duration::from_secs(secs)
+}
+
+/// Parse a Go-style duration (Go parity for `SKY_LIVE_TTL` / `[live] ttl`): a bare
+/// integer is seconds (legacy), otherwise one or more `<number><unit>` segments
+/// with units `h` / `m` / `s` (e.g. `30m`, `1h`, `24h`, `90s`, `1h30m`). Total: any
+/// malformed input returns `None` (caller falls back to the default) — never panics.
+fn parse_duration_secs(raw: &str) -> Option<u64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Bare integer → seconds (legacy form).
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+    let mut total: u64 = 0;
+    let mut num: u64 = 0;
+    let mut saw_unit = false;
+    let mut saw_digit = false;
+    for ch in s.chars() {
+        if let Some(d) = ch.to_digit(10) {
+            num = num.checked_mul(10)?.checked_add(d as u64)?;
+            saw_digit = true;
+        } else {
+            let unit_secs = match ch {
+                'h' => 3600,
+                'm' => 60,
+                's' => 1,
+                _ => return None, // unknown unit / stray char → malformed
+            };
+            if !saw_digit {
+                return None; // a unit with no preceding number
+            }
+            total = total.checked_add(num.checked_mul(unit_secs)?)?;
+            num = 0;
+            saw_digit = false;
+            saw_unit = true;
+        }
+    }
+    // A trailing number with no unit (e.g. `1h30`) is malformed.
+    if saw_digit || !saw_unit {
+        return None;
+    }
+    Some(total)
 }
 
 /// Graceful-drain grace window (Go parity for `srv.Close()`): how long the
@@ -1071,8 +1165,8 @@ where
             FSubs: Send + Sync + 'static,
         {
             let sid = sid_from_cookie(&headers);
-            let entry = match sid {
-                Some(s) => match st.store.get(&s).await {
+            let entry = match &sid {
+                Some(s) => match st.store.get(s).await {
                     Some(store::StoreHit::Live(h)) => Some(h),
                     _ => None,
                 },
@@ -1106,7 +1200,19 @@ where
             // Immediate hello + ~2KB proxy-buffer padding comment, then a 15s
             // heartbeat keepalive (Go parity: live.go SSE handshake).
             let _ = tx.send(SsePatch(format!(": {}\n\n", " ".repeat(2048)))).await;
-            let _ = tx.send(SsePatch(sse::frame("hello", "{}"))).await;
+            // Go-parity hello payload (live.go ~5486): `{"v":1,"sid":...,"ts":<ms>}`.
+            // Reaching here means `entry` exists ⇒ the cookie sid was a live session,
+            // so `sid` is Some; the impossible None degrades to an empty sid (the
+            // client already holds its sid via window.__SKY_SID — the body is
+            // confirmatory). The sid is hex (new_sid) ⇒ JSON-safe without escaping.
+            let hello_sid = sid.as_deref().unwrap_or("");
+            let hello_ts = chrono::Utc::now().timestamp_millis();
+            let _ = tx
+                .send(SsePatch(sse::frame(
+                    "hello",
+                    &format!("{{\"v\":1,\"sid\":\"{hello_sid}\",\"ts\":{hello_ts}}}"),
+                )))
+                .await;
 
             // Reconnect-resync (Go parity: handleSSE full-body frame, live.go:5498).
             // A session restored from the store on a cold hit — or any process
@@ -1516,6 +1622,33 @@ mod dev_banner_tests {
     fn banner_suppressed_for_subapp() {
         // A non-empty base = sub-app (e.g. the console child) → no recursive link.
         assert_eq!(dev_console_banner("/_sky/console"), "");
+    }
+}
+
+#[cfg(test)]
+mod duration_parse_tests {
+    use super::parse_duration_secs;
+
+    #[test]
+    fn go_style_durations_and_bare_seconds() {
+        assert_eq!(parse_duration_secs("1800"), Some(1800)); // bare seconds (legacy)
+        assert_eq!(parse_duration_secs("30m"), Some(1800));
+        assert_eq!(parse_duration_secs("1h"), Some(3600));
+        assert_eq!(parse_duration_secs("24h"), Some(86400));
+        assert_eq!(parse_duration_secs("90s"), Some(90));
+        assert_eq!(parse_duration_secs("1h30m"), Some(5400));
+        assert_eq!(parse_duration_secs("45m"), Some(2700)); // the e2e check (SKY_LIVE_TTL=45m)
+        assert_eq!(parse_duration_secs("  1h  "), Some(3600));
+    }
+
+    #[test]
+    fn malformed_is_none_never_panics() {
+        assert_eq!(parse_duration_secs(""), None);
+        assert_eq!(parse_duration_secs("abc"), None);
+        assert_eq!(parse_duration_secs("1d"), None); // unsupported unit
+        assert_eq!(parse_duration_secs("1h30"), None); // trailing unit-less number
+        assert_eq!(parse_duration_secs("m"), None); // unit with no number
+        assert_eq!(parse_duration_secs("-5m"), None);
     }
 }
 

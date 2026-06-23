@@ -1,15 +1,19 @@
 var __skySid = window.__SKY_SID;
 var __skyBase = window.__SKY_BASE || "";
 var __skyCsrfToken = window.__SKY_CSRF_TOKEN || "";
-var __skyBannerEnabled = true;
-var __skyRetryBaseMs = 500;
-var __skyRetryMaxMs = 16000;
-var __skyRetryMaxAttempts = 10;
-var __skyEventQueueMax = 50;
-var __skyMsgReconnecting = "Reconnecting…";
-var __skyMsgOffline = "Connection lost — refresh to retry";
-var __skyHelloTimeoutMs = 8000;
-var __skyHeartbeatTtlMs = 35000;
+// Server-templated config (mod.rs render_page_full → window.__SKY_* ; Go parity
+// live.go ~5993). Each reads the injected window global when present, else the
+// hardcoded default — so SKY_LIVE_RETRY_* / QUEUE_MAX / HELLO_TIMEOUT_MS /
+// HEARTBEAT_TTL_MS / BANNER overrides reach the client. CSP-safe (no eval).
+var __skyBannerEnabled = (window.__SKY_BANNER_ENABLED != null) ? window.__SKY_BANNER_ENABLED : true;
+var __skyRetryBaseMs = (window.__SKY_RETRY_BASE_MS != null) ? window.__SKY_RETRY_BASE_MS : 500;
+var __skyRetryMaxMs = (window.__SKY_RETRY_MAX_MS != null) ? window.__SKY_RETRY_MAX_MS : 16000;
+var __skyRetryMaxAttempts = (window.__SKY_RETRY_MAX_ATTEMPTS != null) ? window.__SKY_RETRY_MAX_ATTEMPTS : 10;
+var __skyEventQueueMax = (window.__SKY_EVENT_QUEUE_MAX != null) ? window.__SKY_EVENT_QUEUE_MAX : 50;
+var __skyMsgReconnecting = (window.__SKY_MSG_RECONNECTING != null) ? window.__SKY_MSG_RECONNECTING : "Reconnecting…";
+var __skyMsgOffline = (window.__SKY_MSG_OFFLINE != null) ? window.__SKY_MSG_OFFLINE : "Connection lost — refresh to retry";
+var __skyHelloTimeoutMs = (window.__SKY_HELLO_TIMEOUT_MS != null) ? window.__SKY_HELLO_TIMEOUT_MS : 8000;
+var __skyHeartbeatTtlMs = (window.__SKY_HEARTBEAT_TTL_MS != null) ? window.__SKY_HEARTBEAT_TTL_MS : 35000;
 
 // ── Input authority protocol state ───────────────────────────
 // See docs/skylive/input-authority-protocol.md §Client state.
