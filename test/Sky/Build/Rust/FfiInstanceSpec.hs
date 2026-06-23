@@ -26,6 +26,7 @@ import Sky.Build.Rust.FfiInstance
     , skyTypeToRustClosed, traitsOfRustType, traitToRustPath, modellableTrait
     , rustTypeIsClone, skyCaptureIsClone, mkCaptureNotCloneError
     , closureDropReason
+    , gateClosureArg, gateClosureArgNames
     )
 import Sky.Build.Rust.Ffi (translateRustRet, cargoProfilePanicIsUnwind)
 
@@ -42,6 +43,13 @@ tUnit  = Can.TUnit
 tList, tMaybe :: Can.Type -> Can.Type
 tList el  = Can.TType (ModuleName.Canonical "") "List" [el]
 tMaybe el = Can.TType (ModuleName.Canonical "") "Maybe" [el]
+
+tError :: Can.Type
+tError = Can.TType (ModuleName.Canonical "") "Error" []
+
+-- `Task Error ()` — an effectful, non-closed (so non-Clone) capture type.
+tTaskErrorUnit :: Can.Type
+tTaskErrorUnit = Can.TType (ModuleName.Canonical "") "Task" [tError, tUnit]
 
 
 -- A generic-FFI metadata block with the given params/bounds/Call-AST.
@@ -304,6 +312,49 @@ spec = do
         it "a non-closure TypeRef is never a closure drop: Nothing" $ do
             closureDropReason (Call.TRParam 0) `shouldBe` Nothing
             closureDropReason (Call.TRCtor "Vec" [Call.TRParam 0]) `shouldBe` Nothing
+
+    describe "#28 closureSlotKinds (Task 4.1 — argTypes -> Map argIndex ClosureKind)" $ do
+        -- A call AST with arg0 = Vec<a> (non-closure) and arg1 = Fn-closure:
+        -- only index 1 maps to a ClosureKind; index 0 is absent.
+        let twoArg k = Call.Call
+                { Call._call_kind     = Call.CallFunction
+                , Call._call_path     = ["::clo"]
+                , Call._call_typeArgs = []
+                , Call._call_method   = Just "map_each"
+                , Call._call_receiver = Nothing
+                , Call._call_args     = [0, 1]
+                , Call._call_argTypes =
+                    [ Call.TRCtor "Vec" [Call.TRParam 0]
+                    , Call.TRClosure k False [Call.TRParam 0] (Call.TRParam 1) ]
+                , Call._call_ret      = Call.TRCtor "Vec" [Call.TRParam 1]
+                }
+        it "maps each closure-typed argTypes slot to its ClosureKind by index" $ do
+            Call.closureSlotKinds (twoArg Call.FnKind)
+                `shouldBe` Map.fromList [(1, Call.FnKind)]
+            Call.closureSlotKinds (twoArg Call.FnOnceKind)
+                `shouldBe` Map.fromList [(1, Call.FnOnceKind)]
+        it "a call with no closure slots yields an empty map" $
+            Call.closureSlotKinds makeCall `shouldBe` Map.empty
+
+    describe "#28 gateClosureArg / gateClosureArgNames (Task 4.1 — capture gate)" $ do
+        it "gate passes all-Clone captures, rejects a non-Clone capture (multi-call Fn)" $ do
+            -- all-Clone capture (String) into a multi-call Fn slot → OK
+            gateClosureArgNames Call.FnKind [("name", tStr)] `shouldBe` Nothing
+            -- a Task-typed capture into a multi-call Fn slot → rejected, naming it
+            gateClosureArgNames Call.FnKind [("task0", tTaskErrorUnit)]
+                `shouldBe` Just ("task0", "Task Error ()")
+            -- the SAME Task-typed capture into an FnOnce slot → OK (no gate)
+            gateClosureArgNames Call.FnOnceKind [("task0", tTaskErrorUnit)] `shouldBe` Nothing
+        it "gateClosureArg surfaces E4400 for a non-Clone capture in a multi-call slot" $ do
+            case gateClosureArg Call.FnKind A.one "t.sky" [("task0", tTaskErrorUnit)] of
+                Left d -> do
+                    Diag._diag_code d `shouldBe` Diag.ffiE_GenericNotBindable
+                    isInfixOf "must be Clone" (Diag._diag_message d) `shouldBe` True
+                Right () -> expectationFailure "expected a Left E4400 diagnostic"
+        it "gateClosureArg admits an all-Clone Fn slot and any FnOnce slot" $ do
+            gateClosureArg Call.FnKind A.one "t.sky" [("name", tStr)] `shouldBe` Right ()
+            gateClosureArg Call.FnMutKind A.one "t.sky" [("n", tInt)] `shouldBe` Right ()
+            gateClosureArg Call.FnOnceKind A.one "t.sky" [("task0", tTaskErrorUnit)] `shouldBe` Right ()
 
     describe "#28 closure wrapper synthesis (Task 3.1 — B1/B2 catch_unwind boundary)" $ do
         -- `map_each : List a -> (a -> b) -> List b` over two real params ["a","b"].

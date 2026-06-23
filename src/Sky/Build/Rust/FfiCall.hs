@@ -51,11 +51,13 @@ module Sky.Build.Rust.FfiCall
     , renderTypeRef
       -- * closure-specific helpers
     , closureBounds
+    , closureSlotKinds
     ) where
 
 import Control.Applicative ((<|>))
 import Control.Monad (foldM, unless)
 import Data.List (intercalate)
+import qualified Data.Map.Strict as Map
 import qualified Data.Aeson as A
 import Data.Aeson ((.:), (.:?), (.!=))
 import qualified Data.Aeson.Types as AT
@@ -361,6 +363,20 @@ closureBounds c params =
         ++ (if closureNeedsClone k then " + ::core::clone::Clone" else "")
     | (j, TRClosure k _ as_ r) <- zip [0 :: Int ..] (_call_argTypes c)
     ]
+
+
+-- | The wrapper value-arg's 'ClosureKind' for every closure-typed slot, keyed by
+-- the wrapper value-arg index. A non-closure 'TypeRef' contributes no entry, so
+-- the result maps exactly the slots that take a Sky lambda. The call-site capture
+-- gate (Task 4.2) consults this to learn, per FFI argument, whether the slot is a
+-- multi-call (@Fn@/@FnMut@) slot — which requires Clone captures — or a single-call
+-- (@FnOnce@) slot that admits a move-in non-Clone capture.
+closureSlotKinds :: Call -> Map.Map Int ClosureKind
+closureSlotKinds c =
+    Map.fromList
+        [ (j, k)
+        | (j, TRClosure k _ _ _) <- zip [0 :: Int ..] (_call_argTypes c)
+        ]
 
 
 -- | The wrapper value-arg identifier for index @j@ (matches the param-list the

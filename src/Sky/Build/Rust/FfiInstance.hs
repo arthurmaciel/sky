@@ -75,6 +75,9 @@ module Sky.Build.Rust.FfiInstance
     , mkCaptureNotCloneError
       -- * Phase 3: drop + report unsound closure shapes (#28)
     , closureDropReason
+      -- * Phase 4: per-call capture gate (#28)
+    , gateClosureArg
+    , gateClosureArgNames
     ) where
 
 import Data.List (intercalate)
@@ -335,6 +338,51 @@ mkCaptureNotCloneError region file captureName captureTy =
         ("Use a Clone-able captured value, or restructure so the closure "
             ++ "captures nothing (or pass it to a single-call FnOnce slot).")
         (Diag.mkError file region Diag.CatCodegen Diag.ffiE_GenericNotBindable msg)
+
+
+-- ─── Phase 4: per-call capture gate (#28) ────────────────────────────
+
+
+-- | The region-agnostic core of the capture gate (B5/Q4). Given the closure
+-- slot's 'ClosureKind' and the lambda's captures (each as a @(name, Sky type)@),
+-- returns the FIRST offending capture as @(name, renderedType)@, or 'Nothing'
+-- when every capture is admissible:
+--
+--   * 'FnOnceKind' — the host calls the closure at most once, so a non-Clone
+--     capture is MOVED in soundly. Never gated ('Nothing' for any captures).
+--   * 'FnKind' \/ 'FnMutKind' — the host may call the closure many times, so the
+--     owned-clone bridge re-clones every capture. ALL captures must be positively
+--     'skyCaptureIsClone' (B5: a positive allowlist, never a denylist). The first
+--     capture that is NOT provably Clone is reported.
+--
+-- Exposed separately from 'gateClosureArg' so the gate is unit-testable without
+-- constructing a 'Diag.Diagnostic' (no region/file context needed).
+gateClosureArgNames
+    :: ClosureKind                 -- ^ the FFI closure slot's trait kind
+    -> [(String, Can.Type)]        -- ^ the lambda's captures (name, Sky type)
+    -> Maybe (String, String)      -- ^ first non-Clone capture: (name, rendered Sky type)
+gateClosureArgNames FnOnceKind _ = Nothing
+gateClosureArgNames _ captures =
+    case [ (n, ty) | (n, ty) <- captures, not (skyCaptureIsClone ty) ] of
+        []            -> Nothing
+        ((n, ty) : _) -> Just (n, renderSkyType ty)
+
+
+-- | The full capture gate over a closure FFI argument (B5/Q4). Wraps
+-- 'gateClosureArgNames' in the @Either Diagnostic ()@ shell the call-site emitter
+-- consumes: 'Right' when the lambda may be lowered into the slot as-is, 'Left' an
+-- E4400 'Diag.Diagnostic' (never a cargo-fail) naming the offending capture when a
+-- non-Clone value flows into a multi-call (@Fn@\/@FnMut@) slot.
+gateClosureArg
+    :: ClosureKind                 -- ^ the FFI closure slot's trait kind
+    -> A.Region                    -- ^ call-site region (for the diagnostic)
+    -> FilePath                    -- ^ source file (for the diagnostic)
+    -> [(String, Can.Type)]        -- ^ the lambda's captures (name, Sky type)
+    -> Either Diag.Diagnostic ()
+gateClosureArg kind region file captures =
+    case gateClosureArgNames kind captures of
+        Nothing            -> Right ()
+        Just (name, tyStr) -> Left (mkCaptureNotCloneError region file name tyStr)
 
 
 -- | The set of @{Hash, Eq, Ord, Clone, Default}@ traits a closed Rust type
