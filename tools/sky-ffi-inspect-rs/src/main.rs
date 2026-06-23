@@ -2616,11 +2616,12 @@ fn parse_fn_item(
 
     let effect = classify_effect(output, &params, is_async);
 
-    // C1 Send gate — async FFI: output type MUST be in the closed Sky-coercible
-    // (and therefore Send) set.  The closed set (is_sky_coercible_elem +
-    // is_coercible_seq) is entirely Send: primitives, String, opaque Clone
-    // structs.  An opaque non-Clone / non-Send output (e.g. `*mut u8`-containing
-    // struct) is NOT in the set → drop.
+    // C1 Send gate — async FFI: output type MUST be in the provably-Send
+    // closed set.  `tokio::task::spawn` requires `Output: Send + 'static`;
+    // `is_sky_coercible_elem`'s clone-opaque arm admits `Clone + !Send` structs
+    // (e.g. `Rc`-backed), which compiles for sync FFI but yields E0277 for
+    // `spawn`.  The async-specific gate `is_async_send_output` is therefore
+    // TIGHTER: primitives + String only, no clone-opaque arm.
     //
     // Gate only fires for effectful (async / Future-returning) fns.  Sync fns
     // are unaffected (Go-byte-identity preserved).
@@ -2666,8 +2667,8 @@ fn parse_fn_item(
                 })
                 .unwrap_or(ret.rust_type.trim());
             let output_is_send = inner_rt.is_empty()
-                || is_sky_coercible_elem(inner_rt)
-                || is_coercible_seq(inner_rt);
+                || is_async_send_output(inner_rt)
+                || is_async_send_seq(inner_rt);
             if !output_is_send {
                 if tail_audit_enabled() {
                     record_tail_drop(
@@ -3253,6 +3254,56 @@ fn is_sky_coercible_elem(s: &str) -> bool {
       | "f32" | "f64" | "bool" | "char" | "String"
     );
     prim || is_clone_opaque_name(s)
+}
+
+/// Async-output variant of `is_sky_coercible_elem`.
+///
+/// `tokio::task::spawn` requires `Output: Send + 'static`.  `is_sky_coercible_elem`
+/// admits crate-local `#[derive(Clone)]` structs via `is_clone_opaque_name`, but
+/// `Clone` does NOT imply `Send` — an `Rc`-backed struct is Clone but `!Send`, and
+/// emitting it as a `spawn` output type produces E0277 at `cargo build`.
+///
+/// This predicate is strictly tighter: primitives + `String` only.  No
+/// clone-opaque arm.  Sync-FFI callers continue to use `is_sky_coercible_elem`
+/// unchanged (no `spawn`, no `Send` requirement).
+fn is_async_send_output(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() { return false; }
+    if s.starts_with('&') || s.contains(' ') || s.contains('<') || s.contains('[') || s.contains(',') {
+        return false;
+    }
+    matches!(s,
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+      | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+      | "f32" | "f64" | "bool" | "char" | "String"
+    )
+}
+
+/// Async-output sequence variant: `Vec<T>` / `&[T]` / `[T; N]` / `&[T; N]`
+/// where T passes `is_async_send_output` (primitives + String, no clone-opaque).
+fn is_async_send_seq(rt: &str) -> bool {
+    let t = rt.trim();
+    if t.is_empty() { return false; }
+    if t.starts_with("&mut ") { return false; }
+    let (is_ref, body) = if let Some(b) = t.strip_prefix('&') { (true, b.trim()) } else { (false, t) };
+    if !is_ref {
+        if let Some(rest) = body.strip_prefix("Vec<") {
+            if let Some(elem) = rest.strip_suffix('>') {
+                return is_async_send_output(elem.trim());
+            }
+        }
+    }
+    if let Some(inner) = body.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        if let Some((elem, n_str)) = inner.split_once(';') {
+            let n_str = n_str.trim();
+            if !n_str.is_empty() && n_str.chars().all(|c| c.is_ascii_digit()) {
+                return is_async_send_output(elem.trim());
+            }
+            return false;
+        }
+        return is_ref && is_async_send_output(inner.trim());
+    }
+    false
 }
 
 /// True if `rt` is a sequence shape whose element is Sky-coercible:
@@ -9179,19 +9230,18 @@ mod tests {
 
     #[test]
     fn async_send_gate_coercible_admits_primitives_and_string() {
-        // All primitives and String are in the closed coercible set → admitted by gate.
+        // All primitives and String are admitted by the async-specific Send gate.
         for t in ["i64", "i32", "u64", "f64", "bool", "char", "String"] {
             assert!(
-                is_sky_coercible_elem(t),
-                "primitive {t} must be admitted by Send gate"
+                is_async_send_output(t),
+                "primitive {t} must be admitted by async Send gate"
             );
         }
     }
 
     #[test]
     fn async_send_gate_drops_non_send_output() {
-        // An opaque non-Clone (hence non-Send by raw-pointer) output type is NOT in the
-        // closed coercible set — CLONE_OPAQUE_NAMES is empty here, so any opaque drops.
+        // A non-Clone opaque output type is NOT in the closed coercible set.
         // This mirrors the `non_send()` → NonSendAux NEGATIVE fixture (72-ffi-async).
         let non_send_types = [
             "asyncffi72::NonSendAux",
@@ -9200,14 +9250,46 @@ mod tests {
         ];
         for t in non_send_types {
             assert!(
-                !is_sky_coercible_elem(t),
-                "non-Send opaque {t} must be DROPPED by Send gate"
+                !is_async_send_output(t),
+                "non-Send opaque {t} must be DROPPED by async Send gate"
             );
             assert!(
-                !is_coercible_seq(t),
-                "non-Send opaque {t} is not a coercible sequence"
+                !is_async_send_seq(t),
+                "non-Send opaque {t} is not a coercible async sequence"
             );
         }
+    }
+
+    #[test]
+    fn async_send_gate_drops_clone_but_not_send_output() {
+        // `Clone + !Send` structs (e.g. Rc-backed) are admitted by the SYNC gate
+        // (`is_sky_coercible_elem` via `is_clone_opaque_name`) because sync FFI
+        // does not need `Send`.  The ASYNC gate (`is_async_send_output`) must DROP
+        // them — `tokio::task::spawn` requires `Output: Send + 'static`, and admitting
+        // a `!Send` type produces E0277 at cargo build.
+        //
+        // In the unit test context CLONE_OPAQUE_NAMES is empty (populated at
+        // crate-load time from the real rustdoc JSON), so we verify the structural
+        // property: `is_sky_coercible_elem` vs `is_async_send_output` for a plain
+        // name that would be a clone-opaque candidate (no `&`, no `<`, no `[`).
+        //
+        // The key invariant: `is_clone_opaque_name("CloneButNotSend")` would be true
+        // in a real run (the struct derives Clone), but `is_async_send_output` never
+        // calls `is_clone_opaque_name` — it only admits the 15-item primitive set.
+        // Verify the structural branching:
+        let clone_not_send = "CloneButNotSend";
+        // is_sky_coercible_elem calls is_clone_opaque_name (empty here → false, but
+        // the key point is that even if CLONE_OPAQUE_NAMES were populated, the ASYNC
+        // gate would still drop it because is_async_send_output has no clone-opaque arm).
+        assert!(
+            !is_async_send_output(clone_not_send),
+            "a non-primitive opaque ({clone_not_send}) must be DROPPED by async Send gate \
+             even if it derives Clone"
+        );
+        assert!(
+            !is_async_send_seq(&format!("Vec<{clone_not_send}>")),
+            "Vec<CloneButNotSend> must be DROPPED by async sequence gate"
+        );
     }
 
     #[test]
@@ -9216,22 +9298,22 @@ mod tests {
         let inner = unwrap_result_outer_test("Result<i64, String>");
         assert_eq!(inner, "i64");
         assert!(
-            is_sky_coercible_elem(inner),
-            "inner type {inner} of Result<i64,String> must be admitted"
+            is_async_send_output(inner),
+            "inner type {inner} of Result<i64,String> must be admitted by async Send gate"
         );
 
         // `Result<String, String>` → inner T = `String` → admitted.
         let inner2 = unwrap_result_outer_test("Result<String, String>");
         assert_eq!(inner2, "String");
-        assert!(is_sky_coercible_elem(inner2));
+        assert!(is_async_send_output(inner2));
 
         // `Result<asyncffi72::NonSendAux, String>` → inner T = `asyncffi72::NonSendAux`
-        // → not coercible → the Send gate would drop this function.
+        // → not in async-send set → the async gate would drop this function.
         let inner3 = unwrap_result_outer_test("Result<asyncffi72::NonSendAux, String>");
         assert_eq!(inner3, "asyncffi72::NonSendAux");
         assert!(
-            !is_sky_coercible_elem(inner3),
-            "non-Send inner type must NOT be admitted"
+            !is_async_send_output(inner3),
+            "non-Send inner type must NOT be admitted by async Send gate"
         );
     }
 }
