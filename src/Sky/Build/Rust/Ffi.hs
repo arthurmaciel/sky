@@ -20,6 +20,7 @@ module Sky.Build.Rust.Ffi
     , wrapperBeginSentinel   -- :: String -> String
     , wrapperEndSentinel     -- :: String
     , wrapperSentinelPrefix  -- :: String
+    , translateRustRet       -- :: String -> (String, String -> String)  (#22 — exposed for unit tests)
     ) where
 
 import qualified Data.Aeson as A
@@ -445,30 +446,37 @@ seqKind raw =
                      _ -> Nothing
                  _ -> Nothing
 
+    -- A Sky-coercible List element (#22). Mirrors the inspector's
+    -- `is_sky_coercible_elem` (the AUTHORITATIVE gate, which also consults
+    -- CLONE_OPAQUE_NAMES for opaque elements). Admits the closed-set numerics
+    -- (each soundly mapped to Int/Float by the per-element saturate/widen in the
+    -- ElemGeneral arm below), bool/char/String, and a bare opaque name
+    -- (Clone-ness already verified inspector-side). DROPS `str` (unsized — no
+    -- Vec<str>), `OsString`/`PathBuf` (not Sky-closed): they would otherwise
+    -- sneak through the opaque catch-all, so they are denied explicitly.
     isCoercibleElem e =
         let t = trimStr e in
         not (null t)
         && not ('&' `elem` t || ' ' `elem` t || '<' `elem` t
                 || '[' `elem` t || ',' `elem` t)
-        && (t `elem` knownPrim
-            || (not (null t)
-                && (isAlpha (head t) || head t == '_')))
+        && (t `elem` admitPrim
+            || ((isAlpha (head t) || head t == '_') && t `notElem` denyOpaque))
       where
-        knownPrim = ["u8","u16","u32","u64","usize"
-                    ,"i8","i16","i32","i64","isize"
-                    ,"f32","f64","bool","char","str"
-                    ,"String","OsString","PathBuf"]
+        admitPrim = ["u8","u16","u32","u64","u128","usize"
+                    ,"i8","i16","i32","i64","i128","isize"
+                    ,"f32","f64","bool","char","String"]
+        denyOpaque = ["str","OsString","PathBuf"]
 
     skyOfElem e
         | e `elem` intLike   = "Int"
         | e `elem` floatLike = "Float"
         | e == "bool"        = "Bool"
         | e == "char"        = "Char"
-        | e == "str" || e == "String" || e == "OsString" || e == "PathBuf" = "String"
+        | e == "String"      = "String"
         | otherwise          = e
       where
-        intLike   = ["u8","u16","u32","u64","usize"
-                    ,"i8","i16","i32","i64","isize"]
+        intLike   = ["u8","u16","u32","u64","u128","usize"
+                    ,"i8","i16","i32","i64","i128","isize"]
         floatLike = ["f32","f64"]
 
     -- Manual suffix-strip; modern Data.List.stripSuffix is also fine if it's imported.
@@ -509,16 +517,32 @@ translateRustRet raw0 =
             Slice    -> "from_u8_slice(" ++ e ++ ")"
             RefArr _ -> "from_u8_slice(" ++ e ++ ")" )
       Just (SeqKind shape (ElemGeneral elemRust _elemSky)) ->
-        -- General element coercion. Sky `List T` is `Vec<T>` in the runtime,
-        -- so Vec<T> result is identity; &[T] / [T; N] / &[T; N] all clone to
-        -- owned Vec<T> via .to_vec() (T: Clone required and assumed for
-        -- coercible elems).
-        ( "Vec<" ++ elemRust ++ ">"
-        , \e -> case shape of
-            Owned    -> e                       -- Vec<T> identity
-            Slice    -> e ++ ".to_vec()"
-            Arr _    -> e ++ ".to_vec()"
-            RefArr _ -> e ++ ".to_vec()" )
+        -- General element coercion (#22). Each element is coerced through the
+        -- SAME scalar machinery a single return uses (`translateRustRet`): an
+        -- element type that does NOT map to itself — every wide/narrow int
+        -- (u64→i64 saturating, u32→i64 widening, …) and f32→f64 — is mapped
+        -- per-element so the Sky `List` element type (`Vec<i64>` / `Vec<f64>`)
+        -- matches the runtime, never a raw `Vec<u64>` ≠ `Vec<i64>` mismatch.
+        -- An element that DOES map to itself (i64 / f64 / bool / char / String /
+        -- a Clone opaque) needs no coercion: owned is identity, borrowed clones
+        -- via `.to_vec()` (Copy for primitives, Clone for the inspector-gated
+        -- opaque). Slice/RefArr elements arrive as `&T`; for the coerced numeric
+        -- case `|&x|` copies them out (all such elems are Copy).
+        let (elemDeclTy, elemCo) = translateRustRet elemRust
+            declTy = "Vec<" ++ elemDeclTy ++ ">"
+        in if elemDeclTy == elemRust
+           then ( declTy
+                , \e -> case shape of
+                    Owned    -> e                       -- Vec<T> identity
+                    Slice    -> e ++ ".to_vec()"
+                    Arr _    -> e ++ ".to_vec()"
+                    RefArr _ -> e ++ ".to_vec()" )
+           else ( declTy
+                , \e -> case shape of
+                    Owned    -> e ++ ".into_iter().map(|x| " ++ elemCo "x" ++ ").collect::<Vec<_>>()"
+                    Arr _    -> e ++ ".into_iter().map(|x| " ++ elemCo "x" ++ ").collect::<Vec<_>>()"
+                    Slice    -> e ++ ".iter().map(|&x| " ++ elemCo "x" ++ ").collect::<Vec<_>>()"
+                    RefArr _ -> e ++ ".iter().map(|&x| " ++ elemCo "x" ++ ").collect::<Vec<_>>()" )
       Nothing -> case stripGeneric1 "Option" raw of
         Just inner ->
           let (dt, co) = translateRustRet inner

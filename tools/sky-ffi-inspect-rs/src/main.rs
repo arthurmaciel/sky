@@ -2685,13 +2685,23 @@ fn is_sky_coercible_elem(s: &str) -> bool {
     if s.starts_with('&') || s.contains(' ') || s.contains('<') || s.contains('[') || s.contains(',') {
         return false;
     }
-    // Primitives:
-    matches!(s,
-        "u8" | "u16" | "u32" | "u64" | "usize"
-      | "i8" | "i16" | "i32" | "i64" | "isize"
-      | "f32" | "f64" | "bool" | "char" | "str"
-      | "String" | "OsString" | "PathBuf"
-    ) || s.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false)
+    // Closed-set numerics (each soundly mapped to Sky Int/Float by the
+    // per-element saturate/widen in `translateRustRet`'s ElemGeneral arm),
+    // bool/char/String. The blanket "any identifier" catch-all was UNSOUND:
+    // `[Foo; N]` / `&[Foo]` / `Vec<Foo>` for a non-`Clone` opaque `Foo` would be
+    // admitted, then `.to_vec()` (which assumes Clone) → E0599 cargo-fail (#22).
+    // An opaque element is admitted ONLY when it is a crate-local DERIVED-Clone
+    // struct (`is_clone_opaque_name`, the SAME authority the borrowed-return &T
+    // gate uses); `.to_vec()` is then total. `str` (unsized — no Vec<str>),
+    // `OsString`/`PathBuf` (not Sky-closed), and any dep-crate / non-Clone
+    // opaque are NOT admitted → the sequence drops with the `array_slice`
+    // coverage reason.
+    let prim = matches!(s,
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+      | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+      | "f32" | "f64" | "bool" | "char" | "String"
+    );
+    prim || is_clone_opaque_name(s)
 }
 
 /// True if `rt` is a sequence shape whose element is Sky-coercible:
@@ -4571,6 +4581,34 @@ mod tests {
         assert!(!admit("&Vec<u8>"));
         assert!(!admit("Option<&NaiveDate>"));
         assert!(!admit("&mut str"));
+    }
+
+    #[test]
+    fn test_coercible_elem_gate_tightened() {
+        // #22: the List-element gate admits ONLY closed-set numerics, bool,
+        // char, String (each soundly coerced per-element by translateRustRet),
+        // plus a crate-local Clone opaque (via CLONE_OPAQUE_NAMES — empty in
+        // this unit, so opaque names correctly DROP here). Pins the removal of
+        // the old blanket "any identifier" catch-all that admitted non-Clone
+        // opaque elements → E0599 cargo-fail.
+
+        // ADMIT — numerics (incl. the wide ones now per-element saturated).
+        for t in ["u8","u16","u32","u64","u128","usize",
+                  "i8","i16","i32","i64","i128","isize",
+                  "f32","f64","bool","char","String"] {
+            assert!(is_sky_coercible_elem(t), "should admit {t}");
+        }
+
+        // DROP — str (unsized: no Vec<str>), OsString/PathBuf (not Sky-closed),
+        // and any opaque (CLONE_OPAQUE_NAMES empty in this unit → not Clone-proven).
+        for t in ["str","OsString","PathBuf","Foo","NaiveDate","_Hidden","f128"] {
+            assert!(!is_sky_coercible_elem(t), "should DROP {t}");
+        }
+
+        // Markers still reject.
+        assert!(!is_sky_coercible_elem("&u8"));
+        assert!(!is_sky_coercible_elem("Vec<u8>"));
+        assert!(!is_sky_coercible_elem(""));
     }
 
     fn trait_bound(path: &str, args: Vec<serde_json::Value>) -> serde_json::Value {

@@ -18,6 +18,7 @@ import qualified Sky.Build.Rust.FfiCall as Call
 import qualified Sky.Reporting.Annotation as A
 import qualified Sky.Reporting.Diagnostic as Diag
 import Sky.Build.Rust.FfiInstance
+import Sky.Build.Rust.Ffi (translateRustRet)
 
 
 -- ── Can.Type builders ────────────────────────────────────────────────
@@ -68,6 +69,39 @@ isE4400 d = Diag._diag_code d == Diag.ffiE_GenericNotBindable
 
 spec :: Spec
 spec = do
+    describe "#22 List-element coercion (translateRustRet seq arm)" $ do
+        let decl t = fst (translateRustRet t)
+            body t e = snd (translateRustRet t) e
+        it "identity-mapping elements: decl is the element type, borrowed clones" $ do
+            -- i64 / f64 / bool / char / String map to themselves → no per-element
+            -- coercion: owned is identity, borrowed `.to_vec()`.
+            decl "Vec<i64>"  `shouldBe` "Vec<i64>"
+            body "Vec<i64>" "v" `shouldBe` "v"
+            decl "&[f64]"    `shouldBe` "Vec<f64>"
+            body "&[f64]" "v" `shouldBe` "v.to_vec()"
+            decl "Vec<String>" `shouldBe` "Vec<String>"
+        it "wide-int element saturates per element; decl is Vec<i64> (not Vec<u64>)" $ do
+            decl "&[u64]" `shouldBe` "Vec<i64>"
+            body "&[u64]" "v"
+                `shouldBe` "v.iter().map(|&x| (x).min(i64::MAX as u64) as i64).collect::<Vec<_>>()"
+            decl "Vec<u64>" `shouldBe` "Vec<i64>"
+            body "Vec<u64>" "v"
+                `shouldBe` "v.into_iter().map(|x| (x).min(i64::MAX as u64) as i64).collect::<Vec<_>>()"
+        it "narrow-int + f32 elements widen per element to Vec<i64> / Vec<f64>" $ do
+            decl "&[u32]" `shouldBe` "Vec<i64>"
+            body "&[u32]" "v"
+                `shouldBe` "v.iter().map(|&x| (x) as i64).collect::<Vec<_>>()"
+            decl "&[f32]" `shouldBe` "Vec<f64>"
+            body "&[f32]" "v"
+                `shouldBe` "v.iter().map(|&x| (x) as f64).collect::<Vec<_>>()"
+        it "u8 stays the byte fast-path (ElemU8), unaffected" $ do
+            decl "&[u8]" `shouldBe` "Vec<i64>"
+            body "&[u8]" "v" `shouldBe` "from_u8_slice(v)"
+        it "fixed-size array of a wide int saturates per element" $ do
+            decl "[u64; 4]" `shouldBe` "Vec<i64>"
+            body "[u64; 4]" "v"
+                `shouldBe` "v.into_iter().map(|x| (x).min(i64::MAX as u64) as i64).collect::<Vec<_>>()"
+
     describe "skyTypeToRustClosed (closed set)" $ do
         it "maps every primitive" $ do
             skyTypeToRustClosed tInt   `shouldBe` Right "i64"
