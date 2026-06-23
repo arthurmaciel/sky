@@ -914,7 +914,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 .map(|v| rustdoc_type_to_sky(v, &aliases))
                 .unwrap_or_default();
             let self_rust = for_val
-                .map(|v| rustdoc_type_to_rust_str(v))
+                .map(rustdoc_type_to_rust_str)
                 .unwrap_or_default();
 
             if self_sky.is_empty() {
@@ -3020,7 +3020,7 @@ fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
             })
     };
     let insert_shorter = |out: &mut HashMap<String, String>, id: String, path: String| {
-        if out.get(&id).map_or(true, |e| path.len() < e.len()) {
+        if out.get(&id).is_none_or(|e| path.len() < e.len()) {
             out.insert(id, path);
         }
     };
@@ -3117,6 +3117,7 @@ fn collect_reachable_paths(doc: &serde_json::Value) -> HashMap<String, String> {
 
 /// True for a read-only byte sequence: `&[u8]`, `Vec<u8>`, `[u8; N]`, or
 /// `&[u8; N]` (N = literal digits). Excludes `&mut [u8]` and non-u8 elements.
+#[cfg(test)]
 fn is_byte_seq(rt: &str) -> bool {
     let t = rt.trim();
     if t == "Vec<u8>" || t == "&[u8]" {
@@ -3679,7 +3680,7 @@ fn rustdoc_type_to_rust_str(val: &serde_json::Value) -> String {
     if let Some(items) = val.get("tuple") {
         let parts: Vec<String> = items
             .as_array()
-            .map(|arr| arr.iter().map(|t| rustdoc_type_to_rust_str(t)).collect())
+            .map(|arr| arr.iter().map(rustdoc_type_to_rust_str).collect())
             .unwrap_or_default();
         return format!("({})", parts.join(", "));
     }
@@ -3814,6 +3815,7 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
 // AsRef<str>+Into<String>+Display+ToString), and the exact raw shapes FfiGen
 // already coerces from Sky List Int / String.
 
+#[cfg(test)]
 fn vec_u8_node() -> serde_json::Value {
     serde_json::json!({ "resolved_path": { "name": "Vec", "path": "Vec", "id": 0,
         "args": { "angle_bracketed": { "args": [{ "type": { "primitive": "u8" } }], "constraints": [] } } } })
@@ -3829,6 +3831,7 @@ fn i64_node() -> serde_json::Value {
 fn f64_node() -> serde_json::Value {
     serde_json::json!({ "primitive": "f64" })
 }
+#[cfg(test)]
 fn usize_node() -> serde_json::Value {
     serde_json::json!({ "primitive": "usize" })
 }
@@ -5515,6 +5518,7 @@ fn ufcs_path(path: &str) -> String {
 ///     Self cargo-fail. So a generic struct's concrete instantiation must DROP.
 ///   * v1's bindable trait-method receiver surface is a bare non-generic named
 ///     struct (the `Circle` shape) — over-drop on anything parametric is correct.
+///
 /// A `Self` carrying args → `trait-method-generic-self` drop downstream.
 fn self_is_concrete_named(for_val: &serde_json::Value) -> bool {
     // Must be a named path (not a bare generic / dyn / impl Trait / tuple).
@@ -6262,7 +6266,7 @@ mod tests {
         let asref_str = trait_bound("AsRef", vec![prim("str")]);
 
         // shape bound alone -> resolves
-        assert_eq!(resolve_param_bounds(&[asref_u8.clone()], BoundPos::Param), Some(vec_u8_node()));
+        assert_eq!(resolve_param_bounds(std::slice::from_ref(&asref_u8), BoundPos::Param), Some(vec_u8_node()));
         // shape + marker bounds -> markers ignored, resolves
         assert_eq!(resolve_param_bounds(&[asref_u8.clone(), clone.clone(), send], BoundPos::Param), Some(vec_u8_node()));
         // only markers -> can't pin a type -> None
@@ -6629,11 +6633,13 @@ mod tests {
 
         // Numeric primitives -> their owned concrete
         for name in ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize"] {
-            let r = concrete_for_inner_type(&primitive(name)).expect(&format!("missing: {}", name));
+            let r = concrete_for_inner_type(&primitive(name))
+                .unwrap_or_else(|| panic!("missing: {}", name));
             assert_eq!(sky(&r), "Int", "bad sky for {}", name);
         }
         for name in ["f32", "f64"] {
-            let r = concrete_for_inner_type(&primitive(name)).expect(&format!("missing: {}", name));
+            let r = concrete_for_inner_type(&primitive(name))
+                .unwrap_or_else(|| panic!("missing: {}", name));
             assert_eq!(sky(&r), "Float", "bad sky for {}", name);
         }
 
@@ -7772,8 +7778,8 @@ mod tests {
     }
 
     /// Build a tiny rustdoc index for a `trait Scale { fn scaled<T: Into<f64>>(…) }`
-    /// + the trait item, returning (index, trait_node_for_impl). The impl-side
-    /// `trait` node carries `id` pointing at the trait item.
+    /// plus the trait item, returning (index, trait_node_for_impl). The impl-side
+    /// trait node carries `id` pointing at the trait item.
     fn scale_trait_index() -> (serde_json::Map<String, serde_json::Value>, serde_json::Value) {
         let into_f64 = trait_bound("Into", vec![prim("f64")]);
         // The trait-DEF method `scaled<T: Into<f64>>(&self, k: T) -> f64`.
