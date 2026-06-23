@@ -3613,15 +3613,25 @@ fn bound_to_concrete(bound: &serde_json::Value, pos: BoundPos) -> Option<serde_j
                 concrete_for_inner_type(arg)
             }
         }
-        // IntoIterator<Item=X> / Iterator<Item=X>: Item is an assoc-type
-        // CONSTRAINT, not a type arg. POSITION-AWARE ([C-R]): a `Vec<X>` IS an
-        // `IntoIterator<Item=X>` (and `Vec::into_iter()` an `Iterator<Item=X>`),
-        // so passing a concrete `Vec<X>` to an iterator-bound PARAM is sound; but
-        // a RETURN-position iterator-trait `impl Trait` would emit `-> Vec<X>`
-        // over a non-`Vec` body (latent E0308) and has no finiteness metadata to
-        // safely `.collect()` — so it DROPS (the fn yields `None` → coverage tag
+        // `Iterator<Item=X>` is INTENTIONALLY NOT resolved here. This is the
+        // Alt-1 monomorphisation path (it rewrites the param's bound to a
+        // concrete type the wrapper passes DIRECTLY — `host_fn(arg0)`); it has
+        // NO place to emit the `arg0.into_iter()` adapter a bare `Iterator`
+        // param needs (a `Vec` is `IntoIterator` but NOT itself an `Iterator`,
+        // so a direct `Vec` arg to an `impl Iterator` host param is E0277). The
+        // bare-`Iterator` param binding is admitted ONLY on the parametric-stub
+        // path (`iterator_bound_of`/`classify_iterator_param`), which records the
+        // adapter in `Call::iter_adapters`. So `Iterator` falls through to `None`
+        // here — over-drop is acceptable; an unsound direct `Vec` is NOT.
+        //
+        // `IntoIterator<Item=X>`: Item is an assoc-type CONSTRAINT, not a type
+        // arg. POSITION-AWARE ([C-R]): a `Vec<X>` IS an `IntoIterator<Item=X>`,
+        // so passing a concrete `Vec<X>` to an `impl IntoIterator` PARAM is sound
+        // (no adapter); but a RETURN-position `impl IntoIterator` would emit
+        // `-> Vec<X>` over a non-`Vec` body (latent E0308) with no finiteness
+        // metadata to safely `.collect()` — so it DROPS (`None` → coverage tag
         // `iterator-return-undecidable`).
-        n if is_iterator_trait_name(n) => {
+        "IntoIterator" => {
             if pos == BoundPos::Return {
                 return None;
             }
@@ -5571,6 +5581,38 @@ mod tests {
         let f = parse_fn_item("evens_vec", &fd, &HashMap::new(), None)
             .expect("a concrete Vec<i64> return must still bind");
         assert_eq!(f.results[0].sky_type, "List Int");
+    }
+
+    #[test]
+    fn test_bound_to_concrete_bare_iterator_param_drops() {
+        // SOUNDNESS: the Alt-1 `bound_to_concrete` path passes the resolved type
+        // to the host DIRECTLY (no place for an `.into_iter()` adapter). A bare
+        // `Iterator<Item=i64>` PARAM must therefore DROP here (a `Vec` is NOT an
+        // `Iterator` → a direct `Vec` arg to `impl Iterator` is E0277). Only
+        // `IntoIterator` (a `Vec` IS one) resolves on this path; bare `Iterator`
+        // binds ONLY via the parametric-stub seam, which emits the adapter.
+        let it = iter_bound("Iterator", primitive("i64"));
+        assert_eq!(bound_to_concrete(&it, BoundPos::Param), None,
+            "bare Iterator must NOT resolve to Vec on the adapter-less Alt-1 path");
+        // IntoIterator still resolves in param position (the sound direct case).
+        let into = iter_bound("IntoIterator", primitive("i64"));
+        assert_eq!(sky(&bound_to_concrete(&into, BoundPos::Param).unwrap()), "List Int");
+    }
+
+    #[test]
+    fn test_param_position_iterator_impl_trait_drops() {
+        // The Alt-1 free-fn shape `fn f(it: impl Iterator<Item=i64>)` DROPS — the
+        // bare `Iterator` param can't be passed a `Vec` directly without the
+        // adapter, which parse_fn_item's Alt-1 path can't emit.
+        let fd = serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            "generics": { "params": [], "where_predicates": [] },
+            "sig": { "inputs": [ ["it", { "impl_trait": [ iter_bound("Iterator", primitive("i64")) ] }] ], "output": null }
+        });
+        assert!(
+            parse_fn_item("sink", &fd, &HashMap::new(), None).is_none(),
+            "a param-position impl Iterator (adapter-less Alt-1 path) must DROP"
+        );
     }
 
     #[test]
