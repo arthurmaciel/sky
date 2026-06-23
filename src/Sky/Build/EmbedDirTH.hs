@@ -19,6 +19,7 @@
 module Sky.Build.EmbedDirTH
     ( embedDirRecursive
     , embedDirFiltered
+    , listSourceFilesExcluding
     , isEmbeddableRuntimeFile
     , isEmbeddableRuntimeDir
     ) where
@@ -107,6 +108,38 @@ embedDirFiltered root excluded = do
                      then return []
                      else walkFiltered base rel excluded
                 else return [(rel, abs_)]
+
+
+-- | Enumerate every file under `root` (recursively), as absolute /
+-- project-relative paths, skipping any directory whose NAME is in
+-- `excluded`.  Pure IO — no TH.  Lives here (the dedicated TH-helper
+-- module) so callers can use it inside a top-level splice without
+-- tripping GHC's stage restriction (a function defined in the same
+-- module as the splice cannot be used by it).
+--
+-- Used by `Sky.Build.EmbeddedInspectorRust` to register EVERY inspector
+-- source file via `qAddDependentFile`, so any source edit forces the
+-- embed splice to re-run (issue #19 — no stale embedded inspector on
+-- incremental builds).  Returns `[]` for a missing root.
+listSourceFilesExcluding :: FilePath -> [FilePath] -> IO [FilePath]
+listSourceFilesExcluding root excluded = walk root ""
+  where
+    walk base sub = do
+        let dirPath = base </> sub
+        present <- Dir.doesDirectoryExist dirPath
+        if not present
+            then return []
+            else do
+                items <- Dir.listDirectory dirPath
+                fmap concat $ forM items $ \name -> do
+                    let rel  = if null sub then name else sub </> name
+                        abs_ = base </> rel
+                    isDir <- Dir.doesDirectoryExist abs_
+                    if isDir
+                        then if name `elem` excluded
+                                then return []
+                                else walk base rel
+                        else return [abs_]
 
 
 -- | True for files that belong in the embedded runtime / stdlib
