@@ -1,0 +1,44 @@
+{
+  "moduleName": "Rust.Iter",
+  "kernelName": "Rust_Iter",
+  "package": "iter",
+  "functions": [
+    {
+      "name": "sumAll",
+      "arity": 1,
+      "skyType": "List Int -> Result Error Int",
+      "generic": {
+        "params": [],
+        "bounds": {},
+        "call": {
+          "kind": "function", "assocOnType": false,
+          "path": ["::iter"], "method": "sum_all",
+          "args": [0],
+          "argTypes": [
+            {"ctor": "Vec", "args": [{"prim": "i64"}]}
+          ],
+          "ret": {"prim": "i64"}
+        }
+      }
+    },
+    {
+      "name": "countIter",
+      "arity": 1,
+      "skyType": "List Int -> Result Error Int",
+      "generic": {
+        "params": [],
+        "bounds": {},
+        "call": {
+          "kind": "function", "assocOnType": false,
+          "path": ["::iter"], "method": "count_iter",
+          "args": [0],
+          "argTypes": [
+            {"ctor": "Vec", "args": [{"prim": "i64"}]}
+          ],
+          "ret": {"prim": "i64"},
+          "iterAdapters": [0]
+        }
+      }
+    }
+  ]
+}

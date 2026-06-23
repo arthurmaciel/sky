@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -329,9 +329,10 @@ main =
   rm -rf "$wd"
 }
 
-# ── run_handstub_basic <fixture>  (Wall #2 — 49-ffi-closures, epic #28). A
-# HAND-STUB closure fixture: a CHECKED-IN closure kernel.json (the `closure`
-# argType blocks) + an (empty) bindings .rs under `ffi-stub/`, NO inspector.
+# ── run_handstub_basic <fixture>  (Wall #2 — 49-ffi-closures epic #28, plus
+# 50-ffi-iterators epic #30). A HAND-STUB fixture: a CHECKED-IN kernel.json
+# (closure `argType` blocks for 49; iterator `Vec<Item>` argTypes + `iterAdapters`
+# for 50) + an (empty) bindings .rs under `ffi-stub/`, NO inspector.
 # Like run_handstub it must re-stage the committed `ffi-stub/*.{kernel.json,rs}`
 # into the workdir's `.skycache/ffi/rust/` AFTER the build's own wipe so the
 # build reads the hand stub (no inspector regenerates it). Unlike run_handstub
@@ -475,6 +476,7 @@ for n in "${FIXTURES[@]}"; do
   case "$n" in
     48-ffi-generics)  run_handstub ;;
     49-ffi-closures)  run_handstub_basic "$n" ;;
+    50-ffi-iterators) run_handstub_basic "$n" ;;
     *)                run_basic "$n" ;;
   esac
 done

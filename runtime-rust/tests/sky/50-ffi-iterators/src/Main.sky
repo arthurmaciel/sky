@@ -1,0 +1,35 @@
+module Main exposing (main)
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Result as Result
+import Rust.Iter as Iter
+import Std.Log exposing (println)
+
+
+-- IntoIterator<Item=i64> param: the List Int lowers to Vec<i64> and passes
+-- DIRECTLY to the host `impl IntoIterator` param (no `.into_iter()` adapter).
+summed : Result Error Int
+summed =
+    Iter.sumAll [ 1, 2, 3, 4 ]
+
+
+-- Iterator<Item=i64> param: the same Vec<i64>, but the call site must
+-- `arg0.into_iter()` it (a Vec is not itself an Iterator). The kernel.json
+-- carries `iterAdapters: [0]` for this slot.
+counted : Result Error Int
+counted =
+    Iter.countIter [ 1, 2, 3 ]
+
+
+main : Task Error ()
+main =
+    let
+        s = Result.withDefault 0 summed
+        c = Result.withDefault 0 counted
+        _ = println ("sumAll [1,2,3,4]  -> " ++ String.fromInt s)
+        _ = println ("countIter [1,2,3] -> " ++ String.fromInt c)
+    in
+    if s == 10 && c == 3 then
+        println "[ALL OK]"
+    else
+        println "[FAIL]"

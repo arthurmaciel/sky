@@ -1,0 +1,13 @@
+[project]
+name = "50-ffi-iterators"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Local iter crate (sum_all / count_iter / evens), delivered as a file:// git
+# dep. setup.sh git-inits ./iter-crate into the cache path below AND stages the
+# CHECKED-IN iterator kernel.json + (empty) bindings into .skycache/ffi/rust/
+# so NO inspector runs (the end-to-end proof is the build+run; the inspector's
+# emission of this exact shape is proven by the Rust unit tests).
+["rust.dependencies"]
+iter = { git = "file:///home/arthur/.cache/sky/50-ffi-iterators-crate", branch = "master" }
