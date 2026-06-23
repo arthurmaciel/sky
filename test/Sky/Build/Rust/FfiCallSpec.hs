@@ -207,6 +207,27 @@ spec = do
                              , _call_argTypes = [TRParam 0, TRParam 0] }
                 `shouldBe` 2
 
+    describe "#28 — TRClosure variant" $ do
+        it "#28: decodes a closure argType" $ do
+            let j = "{\"closure\":{\"kind\":\"Fn\",\"byRef\":false,\
+                    \\"argTypes\":[{\"param\":0}],\"ret\":{\"param\":1}}}"
+            (A.decode j :: Maybe TypeRef) `shouldBe`
+                Just (TRClosure FnKind False [TRParam 0] (TRParam 1))
+        it "#28: closureBounds renders a multi-call Fn closure param as <Fj: Fn(..)+Clone>" $ do
+            let call = Call
+                    { _call_kind     = CallFunction
+                    , _call_path     = ["::clo"]
+                    , _call_typeArgs = [TRParam 0, TRParam 1]
+                    , _call_method   = Just "map_each"
+                    , _call_receiver = Nothing
+                    , _call_args     = [0, 1]
+                    , _call_argTypes =
+                        [ TRCtor "Vec" [TRParam 0]
+                        , TRClosure FnKind False [TRParam 0] (TRParam 1) ]
+                    , _call_ret      = TRCtor "Vec" [TRParam 1]
+                    }
+            closureBounds call `shouldBe` ["F1: Fn(A) -> B + ::core::clone::Clone"]
+
     describe "renderCall / renderRetType (total over a validated Call)" $ do
         it "renders a static ctor body + ret + arg type" $ do
             let c = Call

@@ -38,6 +38,7 @@ module Sky.Build.Rust.FfiCall
     , Receiver(..)
     , ByKind(..)
     , TypeRef(..)
+    , ClosureKind(..)
     , callArity
       -- * parse-time validation (exposed for the drift corpus + negative tests)
     , validateCall
@@ -46,9 +47,13 @@ module Sky.Build.Rust.FfiCall
     , renderCall
     , renderRetType
     , renderArgType
+    , renderArgTypeAt
     , renderTypeRef
+      -- * closure-specific helpers
+    , closureBounds
     ) where
 
+import Control.Applicative ((<|>))
 import Control.Monad (foldM, unless)
 import Data.List (intercalate)
 import qualified Data.Aeson as A
@@ -105,14 +110,28 @@ data ByKind
     deriving (Show, Eq)
 
 
+-- | The Rust closure trait a closure-argument wrapper param must satisfy.
+-- @FnKind@ and @FnMutKind@ additionally require @+ ::core::clone::Clone@
+-- because multi-call closures are cloned by the wrapper internals (Phase 3
+-- owned-clone bridge). @FnOnceKind@ is consumed at most once — no clone needed.
+data ClosureKind
+    = FnKind      -- ^ @Fn(args) -> ret + Clone@
+    | FnMutKind   -- ^ @FnMut(args) -> ret + Clone@
+    | FnOnceKind  -- ^ @FnOnce(args) -> ret@ (no Clone — consumed once)
+    deriving (Show, Eq)
+
+
 -- | A type reference inside @typeArgs@ / @ret@ / nested ctor args. Either an
--- indexed generic param, a concrete primitive, or a (possibly parametric)
--- named constructor. Leaves are data, never control — there is no string-
--- substitution surface, so nothing can be left unfilled or misplaced.
+-- indexed generic param, a concrete primitive, a (possibly parametric) named
+-- constructor, or a closure-typed wrapper arg (Phase 1 — bound encoding only;
+-- the owned-clone bridge is Phase 3).
 data TypeRef
     = TRParam !Int           -- ^ @{param:i}@ — the i-th generic param (mangled @a → A@)
     | TRPrim  !String        -- ^ @{prim:"i64"}@ — a concrete Rust primitive leaf
     | TRCtor  !String ![TypeRef] -- ^ @{ctor:"Option", args:[…]}@ — @Name<args…>@ (@::@-joined name ok)
+    | TRClosure !ClosureKind !Bool ![TypeRef] !TypeRef
+      -- ^ @{closure:{kind,byRef,argTypes,ret}}@ — a closure-typed wrapper arg.
+      --   @byRef=True@ ⇒ the foreign param is @Fn(&A)@ (owned-clone bridge, Phase 3).
     deriving (Show, Eq)
 
 
@@ -195,14 +214,15 @@ validateCall nParams c = do
 
 -- | Every 'TypeRef' leaf reachable from a 'Call' (typeArgs + ret + nested ctor
 -- args), as a flat list of the indices used by @TRParam@. Used by validation to
--- bound param refs.
+-- bound param refs. Recurses into 'TRClosure' arg/ret positions.
 allTypeRefs :: Call -> [Int]
 allTypeRefs c =
     concatMap paramIdxs (_call_typeArgs c ++ _call_argTypes c ++ [_call_ret c])
   where
-    paramIdxs (TRParam i)     = [i]
-    paramIdxs (TRPrim _)      = []
-    paramIdxs (TRCtor _ args) = concatMap paramIdxs args
+    paramIdxs (TRParam i)          = [i]
+    paramIdxs (TRPrim _)           = []
+    paramIdxs (TRCtor _ args)      = concatMap paramIdxs args
+    paramIdxs (TRClosure _ _ as r) = concatMap paramIdxs as ++ paramIdxs r
 
 
 -- ─── total render over a validated Call ──────────────────────────────
@@ -251,6 +271,56 @@ renderArgType c params j = case drop j (_call_argTypes c) of
     []       -> "()"   -- unreachable post-validation; total fallback
 
 
+-- | Render wrapper value-arg @j@'s Rust type, accounting for closure args.
+-- A 'TRClosure' at arg index @j@ emits @Fj@ (the fresh wrapper type-param
+-- introduced by 'closureBounds'); all other 'TypeRef' variants delegate to
+-- 'renderTypeRef'. Use this instead of @renderTypeRef params@ when iterating
+-- over @_call_argTypes@ to build the wrapper fn signature.
+renderArgTypeAt :: [String] -> Int -> TypeRef -> String
+renderArgTypeAt _      j TRClosure{} = "F" ++ show j
+renderArgTypeAt params _ tr          = renderTypeRef params tr
+
+
+-- | The Rust closure-trait name string for a 'ClosureKind'.
+closureKindStr :: ClosureKind -> String
+closureKindStr FnKind     = "Fn"
+closureKindStr FnMutKind  = "FnMut"
+closureKindStr FnOnceKind = "FnOnce"
+
+
+-- | Whether the closure kind requires @+ ::core::clone::Clone@ in its bound
+-- (@Fn@ / @FnMut@ are multi-call, so the wrapper clones them; @FnOnce@ is
+-- consumed at most once — no clone needed).
+closureNeedsClone :: ClosureKind -> Bool
+closureNeedsClone FnOnceKind = False
+closureNeedsClone _          = True
+
+
+-- | Produce one @\"Fj: Kind(args) -> ret [+ ::core::clone::Clone]\"@ bound string
+-- for each closure arg in the call, in wrapper-arg-index order. The generated
+-- strings slot directly into the @<…>@ type-param clause of the emitted wrapper
+-- fn. Non-closure args are silently skipped (they contribute named params
+-- through the regular generic-param pathway).
+--
+-- @params@ is the call's declared generic param list (positional with 'TRParam'
+-- indices); needed to render the closure's own arg/ret type refs.
+closureBounds :: Call -> [String]
+closureBounds c =
+    [ "F" ++ show j ++ ": " ++ closureKindStr k
+        ++ "(" ++ intercalate ", " (map (renderTypeRef params) as_) ++ ") -> "
+        ++ renderTypeRef params r
+        ++ (if closureNeedsClone k then " + ::core::clone::Clone" else "")
+    | (j, TRClosure k _ as_ r) <- zip [0..] (_call_argTypes c)
+    ]
+  where
+    -- Derive the params list from the call's typeArgs: one mangled name per
+    -- TRParam index present in typeArgs, in index order. For the common
+    -- case where typeArgs = [TRParam 0, TRParam 1, …] this gives ["a","b",…]
+    -- which mangleTVar renders as ["A","B",…].
+    -- We use a simple positional list matching the length of typeArgs.
+    params = take (length (_call_typeArgs c)) ["a","b","c","d","e","f","g","h"]
+
+
 -- | The wrapper value-arg identifier for index @j@ (matches the param-list the
 -- caller emits: @arg0@, @arg1@, …).
 argName :: Int -> String
@@ -267,6 +337,13 @@ renderBy ByValue  s = s
 -- | Render a 'TypeRef' to a Rust type string. @TRParam i@ → the mangled name of
 -- @params !! i@ (validation already proved @i@ in range, so the lookup is total
 -- via a guarded @drop@). Total over every constructor.
+--
+-- 'TRClosure' at top level (inside @argTypes@) is NOT rendered here — use
+-- 'renderArgTypeAt' for wrapper-arg slots (it emits @Fj@ for the closure's
+-- fresh type-param). This fallback path handles 'TRClosure' nodes ONLY when
+-- nested inside another type ref, which is unusual but kept total via the
+-- @Fj?@ placeholder (post-validation, only arg-position closures are
+-- expected — the fallback is unreachable in practice).
 renderTypeRef :: [String] -> TypeRef -> String
 renderTypeRef params tr = case tr of
     TRParam i -> case drop i params of
@@ -276,9 +353,19 @@ renderTypeRef params tr = case tr of
     TRCtor nm [] -> nm
     TRCtor nm args ->
         nm ++ "<" ++ intercalate ", " (map (renderTypeRef params) args) ++ ">"
+    TRClosure{} -> "F?"  -- unreachable in arg-position context; total fallback
 
 
 -- ─── JSON decoding (validating) ──────────────────────────────────────
+
+
+instance A.FromJSON ClosureKind where
+    parseJSON = A.withText "ClosureKind" $ \t -> case T.unpack t of
+        "Fn"     -> pure FnKind
+        "FnMut"  -> pure FnMutKind
+        "FnOnce" -> pure FnOnceKind
+        other    -> fail ("unknown closure kind: " ++ show other
+                          ++ " (expected \"Fn\", \"FnMut\", or \"FnOnce\")")
 
 
 instance A.FromJSON ByKind where
@@ -308,6 +395,16 @@ instance A.FromJSON TypeRef where
             (Nothing, Nothing, Just nm) -> do
                 args <- o .:? "args" .!= []
                 pure (TRCtor nm args)
+            (Nothing, Nothing, Nothing) ->
+                -- Try the closure branch (only when no other discriminator
+                -- is present — keeps the "two discriminators" rejection
+                -- working for param+prim etc.).
+                (do c <- o .: "closure"
+                    TRClosure <$> c .: "kind"
+                              <*> c .:? "byRef" .!= False
+                              <*> c .: "argTypes"
+                              <*> c .: "ret")
+                <|> fail "TypeRef must have exactly one of `param`, `prim`, `ctor`, or `closure`"
             _ -> fail "TypeRef must have exactly one of `param`, `prim`, or `ctor`"
 
 
