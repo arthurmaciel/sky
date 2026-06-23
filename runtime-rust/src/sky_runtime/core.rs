@@ -152,10 +152,121 @@ pub fn to_array<E: From<String>, T: Clone, const N: usize>(xs: &[T]) -> SkyResul
 // serialises for the session store. Without this, any model with a `Maybe`/
 // `Result` field failed E0277. NOTE: `serde` is therefore a NON-OPTIONAL dep in
 // the runtime crate (core.rs is always compiled) — do NOT re-add `optional = true`.
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+//
+// `Deserialize` is NOT derived — we use a manual impl (see below) that accepts
+// BOTH the externally-tagged repr (session-store round-trip) AND a bare value
+// (form data: `note=hello` → `Just("hello")`). `Serialize` stays derived (tagged)
+// so the session store writes `{"Just":"x"}` / `"Nothing"` and the manual
+// `Deserialize` reads those back correctly (#42).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum SkyMaybe<T> {
     Nothing,
     Just(T),
+}
+
+// Custom `Deserialize` for `SkyMaybe<T>` (#42).
+//
+// Accepted input shapes:
+//   - Externally-tagged map `{"Just": v}` → `Just(T::deserialize(v))`.
+//     This is what `Serialize` emits → session-store round-trip is preserved.
+//   - Externally-tagged string `"Nothing"` (unit variant) → `Nothing`.
+//   - Bare non-null value `v` → `Just(T::deserialize(v))`.
+//     This is the form-data case: `note=hello` → the urlencoded deserialiser
+//     presents a bare string, which the tagged derive rejected (#42 bug).
+//   - `null` / absent (handled by `Default` + `#[serde(default)]` at the struct
+//     field level) → `Nothing`.
+//
+// The "Nothing" string-variant sentinel is accepted for backward compat with
+// any stored sessions, even though the serialiser now no longer writes bare
+// `"Nothing"` (it stays externally-tagged as the unit variant string).
+//
+// Edge case: a bare string value of exactly `"Nothing"` in form data decodes as
+// `Nothing`, not `Just("Nothing")`. This is the same trade-off as the tagged
+// derive and is acceptable — form fields named `note` with the literal value
+// "Nothing" are pathological; real user notes should not hit this.
+impl<'de, T: serde::de::Deserialize<'de>> serde::de::Deserialize<'de> for SkyMaybe<T> {
+    fn deserialize<D: serde::de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(SkyMaybeVisitor(std::marker::PhantomData))
+    }
+}
+
+struct SkyMaybeVisitor<T>(std::marker::PhantomData<T>);
+
+impl<'de, T: serde::de::Deserialize<'de>> serde::de::Visitor<'de> for SkyMaybeVisitor<T> {
+    type Value = SkyMaybe<T>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a SkyMaybe value: `{\"Just\": v}`, `\"Nothing\"`, or a bare value")
+    }
+
+    // --- bare unit / null → Nothing ---
+    fn visit_unit<E: serde::de::Error>(self) -> Result<SkyMaybe<T>, E> {
+        Ok(SkyMaybe::Nothing)
+    }
+    fn visit_none<E: serde::de::Error>(self) -> Result<SkyMaybe<T>, E> {
+        Ok(SkyMaybe::Nothing)
+    }
+    fn visit_some<D: serde::de::Deserializer<'de>>(self, d: D) -> Result<SkyMaybe<T>, D::Error> {
+        T::deserialize(d).map(SkyMaybe::Just)
+    }
+
+    // --- bare string → "Nothing" sentinel OR Just(T) ---
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<SkyMaybe<T>, E> {
+        if v == "Nothing" {
+            return Ok(SkyMaybe::Nothing);
+        }
+        // Bare non-sentinel string: deserialize T from it.
+        T::deserialize(serde::de::value::StrDeserializer::new(v)).map(SkyMaybe::Just)
+    }
+
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<SkyMaybe<T>, E> {
+        if v == "Nothing" {
+            return Ok(SkyMaybe::Nothing);
+        }
+        T::deserialize(serde::de::value::StringDeserializer::new(v)).map(SkyMaybe::Just)
+    }
+
+    // --- externally-tagged map `{"Just": v}` → Just(T) ---
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> Result<SkyMaybe<T>, A::Error> {
+        use serde::de::Error as _;
+        let key: Option<String> = map.next_key()?;
+        match key.as_deref() {
+            Some("Just") => {
+                let val: T = map.next_value()?;
+                // Consume any remaining entries (defensive; tagged enums have one).
+                while map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+                    let _: serde::de::IgnoredAny = map.next_value()?;
+                }
+                Ok(SkyMaybe::Just(val))
+            }
+            Some("Nothing") => {
+                // Unit variant as a map key (edge case from some serialisers).
+                while map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+                    let _: serde::de::IgnoredAny = map.next_value()?;
+                }
+                Ok(SkyMaybe::Nothing)
+            }
+            Some(other) => Err(A::Error::unknown_variant(other, &["Just", "Nothing"])),
+            None => Err(A::Error::missing_field("Just")),
+        }
+    }
+
+    // --- bare numerics / bool → Just(T) ---
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<SkyMaybe<T>, E> {
+        T::deserialize(serde::de::value::BoolDeserializer::new(v)).map(SkyMaybe::Just)
+    }
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<SkyMaybe<T>, E> {
+        T::deserialize(serde::de::value::I64Deserializer::new(v)).map(SkyMaybe::Just)
+    }
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<SkyMaybe<T>, E> {
+        T::deserialize(serde::de::value::U64Deserializer::new(v)).map(SkyMaybe::Just)
+    }
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<SkyMaybe<T>, E> {
+        T::deserialize(serde::de::value::F64Deserializer::new(v)).map(SkyMaybe::Just)
+    }
 }
 
 impl<T> SkyMaybe<T> {

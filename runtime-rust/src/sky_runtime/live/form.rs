@@ -238,4 +238,73 @@ mod tests {
         let r2: Result<Subscription, String> = decode_form(partial);
         assert!(r2.is_err());
     }
+
+    // #42: a PRESENT optional form field (`note=hello`) must decode to
+    // `Just("hello")`, not decline the whole form. The #37 fix covered the
+    // MISSING case (absent field → Nothing); this covers the PRESENT case.
+    //
+    // Root cause: `SkyMaybe` derives serde with the default externally-tagged repr
+    // (`{"Just":"hello"}` / `"Nothing"`); form data posts a bare string `"hello"`,
+    // which serde_urlencoded passes to `SkyMaybe::deserialize` as a bare string
+    // value — the tagged deserialiser rejects it, and `decode_form_or_warn` returns
+    // None, declining the whole form. Fix: a custom `Deserialize` for `SkyMaybe<T>`
+    // that first tries `Option<T>` (bare value → Some(v) → Just(v); null/absent →
+    // None → Nothing) and falls back to the tagged enum repr for session-store
+    // round-trips (stored `{"Just":"x"}` / `"Nothing"` still deserialise correctly).
+    #[test]
+    fn decode_form_maybe_field_present_is_just() {
+        use crate::sky_runtime::core::SkyMaybe;
+
+        // Present `note=hello` → Just("hello"). Pre-fix: decode declines (None).
+        let mut with_note = FormData::new();
+        with_note.insert("email".to_string(), "a@b.c".to_string());
+        with_note.insert("password".to_string(), "pw".to_string());
+        with_note.insert("note".to_string(), "hello".to_string());
+        let r: Option<CredsWithNote> = decode_form_or_warn(with_note);
+        assert_eq!(
+            r,
+            Some(CredsWithNote {
+                email: "a@b.c".into(),
+                password: "pw".into(),
+                note: SkyMaybe::Just("hello".to_string()),
+            })
+        );
+
+        // Absent `note` still → Nothing (regression from #37).
+        let mut without_note = FormData::new();
+        without_note.insert("email".to_string(), "a@b.c".to_string());
+        without_note.insert("password".to_string(), "pw".to_string());
+        let r2: Option<CredsWithNote> = decode_form_or_warn(without_note);
+        assert_eq!(
+            r2,
+            Some(CredsWithNote {
+                email: "a@b.c".into(),
+                password: "pw".into(),
+                note: SkyMaybe::Nothing,
+            })
+        );
+    }
+
+    // Session-store round-trip: serialize SkyMaybe → JSON → deserialize must
+    // preserve the value. This catches any regression from the #42 Deserialize change.
+    #[test]
+    fn sky_maybe_session_store_round_trip() {
+        use crate::sky_runtime::core::SkyMaybe;
+
+        let just_val: SkyMaybe<String> = SkyMaybe::Just("stored".to_string());
+        let nothing_val: SkyMaybe<String> = SkyMaybe::Nothing;
+
+        // Serialize (what the session store writes).
+        let just_json = serde_json::to_string(&just_val).expect("serialize Just");
+        let nothing_json = serde_json::to_string(&nothing_val).expect("serialize Nothing");
+
+        // Deserialize (what the session store reads back).
+        let just_rt: SkyMaybe<String> =
+            serde_json::from_str(&just_json).expect("deserialize Just round-trip");
+        let nothing_rt: SkyMaybe<String> =
+            serde_json::from_str(&nothing_json).expect("deserialize Nothing round-trip");
+
+        assert_eq!(just_rt, SkyMaybe::Just("stored".to_string()));
+        assert_eq!(nothing_rt, SkyMaybe::Nothing);
+    }
 }
