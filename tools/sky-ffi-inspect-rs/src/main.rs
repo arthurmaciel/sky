@@ -168,6 +168,14 @@ struct Call {
     /// and every arg renders as the bare identifier ([C6] default = direct).
     #[serde(rename = "iterAdapters", skip_serializing_if = "Vec::is_empty")]
     iter_adapters: Vec<usize>,
+    /// #21 UFCS trait qualifier `(selfPath, traitPath)`. When `Some`, the codegen
+    /// renders the callee as `<selfPath as traitPath>::method(recv, args)` (a
+    /// trait method on a concrete type — disambiguated, no `use Trait;` needed).
+    /// `None` (the inherent / free / non-trait case) ⇒ OMITTED from the wire ⇒
+    /// byte-identical to a pre-#21 stub, and the Haskell renderer falls back to
+    /// the historical `path::method` callee (constraint 9).
+    #[serde(rename = "traitQualifier", skip_serializing_if = "Option::is_none")]
+    trait_qualifier: Option<(String, String)>,
 }
 
 /// The receiver of a method call: which wrapper value-arg supplies it + borrow.
@@ -925,13 +933,23 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 fromstr_types.entry(self_sky.clone()).or_insert_with(|| self_rust.clone());
             }
 
-            // C5: the parametric-stub bound-union gathers ONLY from the OWNING
-            // impl block. A TRAIT impl's method bounds can come from the trait
-            // (cross-impl) — out of scope, so the parametric path is attempted
-            // ONLY for an INHERENT impl (empty trait). The impl's own generics
-            // (C1 — where `K: Hash+Eq` lives) + the struct DEFINITION's generics
-            // (C1) feed the union.
+            // #21: the parametric-stub bound-union gathers from the OWNING impl
+            // block; an INHERENT impl is the historical path. A TRAIT impl now
+            // ALSO enters the parametric path (lifting the old inherent-only
+            // restriction), but ONLY when its `Self` is a CONCRETE NAMED type
+            // (constraint 11): a generic-Self impl (`impl<T> Foo for T` /
+            // `impl<T> Foo for Vec<T>`) drops `trait-method-generic-self` below.
+            // A trait impl threads its trait node (for the Q2-A trait-def bound
+            // union + the UFCS qualifier); an inherent impl threads `None`.
             let is_inherent_impl = trait_name.is_empty();
+            let trait_node = impl_data
+                .get("trait")
+                .filter(|_| !is_inherent_impl);
+            // Constraint 11: a TRAIT impl over a generic Self is out of scope.
+            let trait_self_concrete = match for_val {
+                Some(fv) => self_is_concrete_named(fv),
+                None => false,
+            };
             let impl_generics = impl_data.get("generics");
             let struct_generics = for_val.and_then(|v| struct_generics_of(v, index));
 
@@ -952,16 +970,45 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             // monomorphisation and EMIT a parametric stub (or
                             // drop+report). A non-generic method stays on the
                             // existing path unchanged.
-                            if is_inherent_impl
-                                && method_is_generic_bearing(
-                                    fn_data, impl_generics, struct_generics)
-                            {
+                            let generic_bearing = method_is_generic_bearing(
+                                fn_data, impl_generics, struct_generics);
+                            // #21: a generic-bearing TRAIT-impl method over a
+                            // GENERIC Self can never be monomorphised — drop
+                            // `trait-method-generic-self` BEFORE the parametric
+                            // path so it never reaches an unsound emit
+                            // (constraint 11).
+                            if generic_bearing && !is_inherent_impl && !trait_self_concrete {
+                                record_generic_drop(
+                                    method_name,
+                                    GenericDrop::TraitMethodDrop(
+                                        TraitMethodDropTag::GenericSelf,
+                                        format!("generic Self `{self_rust}`"),
+                                    ),
+                                );
+                                continue;
+                            }
+                            // The parametric path now serves BOTH inherent impls
+                            // and concrete-Self trait impls (the lifted gate).
+                            let take_parametric = generic_bearing
+                                && (is_inherent_impl || trait_self_concrete);
+                            if take_parametric {
+                                // Build the trait context for a trait impl: the
+                                // Q2-A trait-def method generics (unioned into the
+                                // bound gate) + the UFCS qualifier (selfPath +
+                                // traitPath). An inherent impl threads `None`.
+                                let trait_ctx = build_trait_ctx(
+                                    trait_node,
+                                    method_name,
+                                    for_val,
+                                    index,
+                                );
                                 match try_parametric_stub(
                                     method_name,
                                     fn_data,
                                     Some((&self_sky, &self_rust)),
                                     impl_generics,
                                     struct_generics,
+                                    trait_ctx.as_ref(),
                                 ) {
                                     Ok(generic) => {
                                         record_generic_bound();
@@ -3708,6 +3755,44 @@ enum GenericDrop {
     /// An iterator-typed param the backend can't model. The tag is the SPECIFIC
     /// iterator coverage reason (epic #30); the `String` is the offending detail.
     IteratorDrop(IteratorDropTag, String),
+    /// A trait-impl method that can't bind (#21). The tag is the SPECIFIC trait-
+    /// method coverage reason; the `String` is the offending detail.
+    TraitMethodDrop(TraitMethodDropTag, String),
+}
+
+/// The distinct reason a trait-impl method could not be bound (#21). Each maps to
+/// a stable coverage tag string flowing through `emit_generic_coverage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraitMethodDropTag {
+    /// The impl's `Self` type is itself generic (`impl<T> Foo for T` /
+    /// `impl<T> Foo for Vec<T>`) — the monomorphiser can't pin the receiver type
+    /// (constraint 11).
+    GenericSelf,
+    /// A method type-param whose bound is declared on the trait DEFINITION (or is
+    /// otherwise unresolvable from the impl + trait-def rustdoc). Q2-A drops here
+    /// rather than emit a bare `<T>` the host call can't satisfy (E0277).
+    BoundCrossImpl,
+    /// The method sig references an associated type (`Self::Assoc`) the impl does
+    /// not bind concretely (constraint 6 / Q3) — no projection inference, direct
+    /// impl-binding lookup only. Constructed by the assoc-type gate (STEP 4);
+    /// the `.tag()` arm exercises it until then (taxonomy-parity precedent —
+    /// mirrors `IteratorDropTag::CompanionUnsatisfiable`).
+    #[allow(dead_code)]
+    AssocUnresolved,
+    /// Trait-method metadata suppressed because the host fn's ABI is not `"Rust"`
+    /// (constraint 10) — mirrors `closure-nonrust-abi` / `iterator-nonrust-abi`.
+    NonRustAbi,
+}
+
+impl TraitMethodDropTag {
+    fn tag(self) -> &'static str {
+        match self {
+            TraitMethodDropTag::GenericSelf => "trait-method-generic-self",
+            TraitMethodDropTag::BoundCrossImpl => "trait-method-bound-cross-impl",
+            TraitMethodDropTag::AssocUnresolved => "trait-method-assoc-unresolved",
+            TraitMethodDropTag::NonRustAbi => "trait-method-nonrust-abi",
+        }
+    }
 }
 
 /// The distinct reason an iterator-typed slot could not be modelled. Each maps
@@ -3790,6 +3875,7 @@ impl GenericDrop {
             GenericDrop::NotBindable(_)         => "not-bindable",
             GenericDrop::ClosureDrop(tag, _)    => tag.tag(),
             GenericDrop::IteratorDrop(tag, _)   => tag.tag(),
+            GenericDrop::TraitMethodDrop(tag, _) => tag.tag(),
         }
     }
     fn detail(&self) -> &str {
@@ -3799,7 +3885,8 @@ impl GenericDrop {
             | GenericDrop::DefaultedBoundParam(d)
             | GenericDrop::NotBindable(d)
             | GenericDrop::ClosureDrop(_, d)
-            | GenericDrop::IteratorDrop(_, d) => d,
+            | GenericDrop::IteratorDrop(_, d)
+            | GenericDrop::TraitMethodDrop(_, d) => d,
         }
     }
 }
@@ -3989,6 +4076,7 @@ fn full_union_bounds(
     method_generics: &serde_json::Value,
     impl_generics: Option<&serde_json::Value>,
     struct_generics: Option<&serde_json::Value>,
+    trait_def_generics: Option<&serde_json::Value>,
     used: &HashSet<String>,
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, GenericDrop> {
     let mut raw: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
@@ -4001,6 +4089,15 @@ fn full_union_bounds(
     if let Some(sg) = struct_generics {
         gather_generics_into(sg, &mut raw)?;
         check_defaulted_params(sg, used)?;
+    }
+    // Q2-A (#21): the trait-DEF method's generics are a FOURTH bound source for
+    // a trait-impl method. A bound declared on the trait def (e.g. `T: Into<f64>`)
+    // but restated BARE in the impl (`fn scaled<T>`) flows in here, so the
+    // modellable gate sees it and the wrapper emits the correct `<T: …>` clause
+    // (or drops if unmodellable) — never an unsound bare `<T>`.
+    if let Some(tdg) = trait_def_generics {
+        gather_generics_into(tdg, &mut raw)?;
+        check_defaulted_params(tdg, used)?;
     }
     // Reduce each USED param's bound list to modellable trait names (C3); an
     // unmodellable / non-reducible bound aborts the whole symbol.
@@ -4472,12 +4569,31 @@ fn try_parametric_stub(
     recv: Option<(&str, &str)>,
     impl_generics: Option<&serde_json::Value>,
     struct_generics: Option<&serde_json::Value>,
+    trait_ctx: Option<&TraitCtx>,
 ) -> Result<Generic, GenericDrop> {
     let sig = fn_data
         .get("sig")
         .or_else(|| fn_data.get("decl"))
         .ok_or_else(|| GenericDrop::NotBindable("no signature".to_string()))?;
     let method_generics = &fn_data["generics"];
+    // Constraint 10: a non-Rust-ABI host trait method can't be called UFCS the
+    // way the wrapper does — drop `trait-method-nonrust-abi` (mirrors the
+    // closure / iterator ABI gates). Only applies to a TRAIT-impl method.
+    if trait_ctx.is_some() && !host_abi_is_rust(fn_data) {
+        return Err(GenericDrop::TraitMethodDrop(
+            TraitMethodDropTag::NonRustAbi,
+            format!("non-Rust ABI trait method `{method_name}`"),
+        ));
+    }
+    // Q2-A (THE soundness gate): for a TRAIT-impl method, the trait DEFINITION's
+    // method generics are unioned into the bound scope BEFORE the modellable
+    // gate. rustdoc does NOT inline a trait method's where-clauses onto the
+    // IMPL's method sig, so an impl may restate `fn scaled<T>` bare while
+    // `T: Into<f64>` lives on the trait def. Without this union the inspector
+    // sees empty bounds and would emit an unsound `<T>` → E0277. The trait-def
+    // generics participate in `all_bounds` + `full_union_bounds` exactly like a
+    // fourth bound source (method ∪ impl ∪ struct ∪ trait-def).
+    let trait_def_generics = trait_ctx.and_then(|tc| tc.trait_def_generics);
 
     // Q1: a const generic ANYWHERE in scope (method/impl/struct) leaves the
     // bindable subset.
@@ -4494,6 +4610,16 @@ fn try_parametric_stub(
     let mut used: HashSet<String> = HashSet::new();
     if let Some(inputs) = sig["inputs"].as_array() {
         for input in inputs {
+            // Skip the `self` receiver input: its type is `&self`/`&mut self`/
+            // `self` (a `{generic:"Self"}` node in rustdoc), and `Self` is the
+            // concrete receiver, NOT a Sky tyvar. Collecting it would make `Self`
+            // an "undeclared type-var" drop. The receiver is handled separately
+            // (recv_ctor + receiver_by_kind). A `Self` appearing in a NON-self
+            // arg/return is still collected below → an undeclared-tyvar drop
+            // (sound over-drop; bare-`Self`-in-arg is out of scope for v1).
+            if input[0].as_str() == Some("self") {
+                continue;
+            }
             collect_generic_names(&input[1], &mut used);
         }
     }
@@ -4515,6 +4641,10 @@ fn try_parametric_stub(
     }
     if let Some(sg) = struct_generics {
         collect_param_bounds_into(sg, &mut all_bounds);
+    }
+    // Q2-A: union the trait-DEF method's bounds (the bare-restated `<T>` case).
+    if let Some(tdg) = trait_def_generics {
+        collect_param_bounds_into(tdg, &mut all_bounds);
     }
     let mut closure_param_bound: HashMap<String, serde_json::Value> = HashMap::new();
     for (name, bounds) in &all_bounds {
@@ -4582,7 +4712,28 @@ fn try_parametric_stub(
     // bounds are consumed into their argType, NOT reduced to a Sky `<F: …>`
     // bound, so they must not reach classify_param_bound (which would drop `Fn`
     // as UnmodellableBound).
-    let bounds_map = full_union_bounds(method_generics, impl_generics, struct_generics, &tyvars)?;
+    let bounds_map = full_union_bounds(
+        method_generics, impl_generics, struct_generics, trait_def_generics, &tyvars)?;
+    // Q2-A soundness backstop (the NEVER-emit-bare-`<T>`-for-a-trait-impl rule):
+    // for a TRAIT-impl method, every Sky-facing tyvar MUST carry a resolved
+    // modellable bound. An empty bound list means the bound lived ONLY on the
+    // trait def AND the trait-def lookup failed (private trait / id missing /
+    // method not found) — emitting `<T>` then is the exact E0277 hazard the
+    // guardian flagged. Drop `trait-method-bound-cross-impl` instead. (An
+    // inherent impl's empty-bound tyvar is a GENUINELY free param — sound to
+    // emit, unchanged.)
+    if trait_ctx.is_some() {
+        for tv in &tyvars {
+            let has_bound = bounds_map.get(tv).map(|b| !b.is_empty()).unwrap_or(false);
+            if !has_bound {
+                return Err(GenericDrop::TraitMethodDrop(
+                    TraitMethodDropTag::BoundCrossImpl,
+                    format!("trait-impl method tyvar `{tv}` has no resolvable bound \
+                             (bound likely declared on the trait def, unresolved)"),
+                ));
+            }
+        }
+    }
 
     // Build the call AST.
     let inputs = sig["inputs"].as_array().cloned().unwrap_or_default();
@@ -4622,14 +4773,21 @@ fn try_parametric_stub(
     // The receiver type as a TypeRef ctor at the stub params, for arg0's type.
     let recv_ctor = TypeRef::Ctor(base.clone(), (0..order.len()).map(TypeRef::Param).collect());
 
-    // Receiver + value args. A method WITH a self input passes the receiver as
-    // value arg0 (owned-FFI convention); a static assoc fn has no receiver.
+    // Receiver + value args. A method WITH a self input passes the receiver at
+    // value arg0; a static assoc fn has no receiver. The BORROW FORM (constraint
+    // 7) is read from the `self` input's rustdoc type: `&self` → by-ref,
+    // `&mut self` → by-mut-ref, `self` → by-value. This is load-bearing for the
+    // UFCS render `<Self as Trait>::method(<by>arg0, …)`: UFCS function-call
+    // syntax does NOT auto-ref the receiver (unlike method-call `recv.m()`), so a
+    // `&self` method passed by value is E0308. The wrapper always OWNS arg0 (the
+    // recv_ctor type is the owned receiver), and the borrow is taken at the call.
+    let recv_by = receiver_by_kind(&inputs);
     let mut arg_types: Vec<TypeRef> = Vec::new();
     let mut next_arg: usize = 0;
     let (receiver, kind): (Option<Receiver>, &str) = if has_self {
         arg_types.push(recv_ctor);
         next_arg += 1;
-        (Some(Receiver { arg: 0, by: "value".to_string() }), "method")
+        (Some(Receiver { arg: 0, by: recv_by.to_string() }), "method")
     } else {
         (None, "function")
     };
@@ -4695,6 +4853,9 @@ fn try_parametric_stub(
             arg_types,
             ret,
             iter_adapters,
+            // #21: the UFCS qualifier for a trait-impl method; `None` for an
+            // inherent impl (byte-identical to a pre-#21 stub).
+            trait_qualifier: trait_ctx.map(|tc| tc.qualifier.clone()),
         },
     })
 }
@@ -4710,6 +4871,147 @@ fn struct_generics_of<'a>(
     let id_s = item_id_to_str(id);
     let item = index.get(&id_s)?;
     item["inner"].get("struct").map(|_| &item["inner"]["struct"]["generics"])
+}
+
+/// The trait-impl context threaded into `try_parametric_stub` for a method that
+/// comes from `impl Trait for ConcreteType` (#21). Carries the Q2-A trait-def
+/// method generics (unioned into the modellable bound gate so a bound restated
+/// BARE in the impl but declared on the trait DEFINITION still resolves) and the
+/// UFCS qualifier `(selfPath, traitPath)` the codegen renders as
+/// `<selfPath as traitPath>::method(recv, args)`. An inherent impl threads `None`
+/// — its methods bind via inherent dispatch (no qualifier, no trait-def union).
+struct TraitCtx<'a> {
+    /// The trait-DEF method's `generics` node (Q2-A), or `None` when the trait
+    /// def / method couldn't be resolved (→ a `trait-method-bound-cross-impl`
+    /// drop if the method carries an empty-bound tyvar).
+    trait_def_generics: Option<&'a serde_json::Value>,
+    /// The UFCS qualifier: `(selfPath, traitPath)`, both fully-qualified
+    /// `::crate::…` public paths resolved id-first (constraint 3 / #25).
+    qualifier: (String, String),
+}
+
+/// Build the trait context (#21) for a generic-bearing method on a CONCRETE-Self
+/// trait impl. Resolves BOTH halves id-first:
+///   * the trait-def method generics (Q2-A) by `trait.id` + method name;
+///   * the UFCS qualifier — selfPath from the `for`-type id, traitPath from the
+///     `trait.id` — both via `reachable_local_path` (the resolved PUBLIC path,
+///     NOT a last-segment string).
+/// Returns `None` for an inherent impl (no `trait_node`) OR when the UFCS
+/// qualifier can't be resolved to reachable public paths (a private/unreachable
+/// trait or Self type → the method can't be called UFCS → drop downstream). The
+/// trait-def-generics half being `None` is NOT fatal here (it becomes a
+/// per-tyvar bound-resolution drop inside `try_parametric_stub`); only an
+/// unresolvable QUALIFIER aborts ctx construction.
+fn build_trait_ctx<'a>(
+    trait_node: Option<&'a serde_json::Value>,
+    method_name: &str,
+    for_val: Option<&serde_json::Value>,
+    index: &'a serde_json::Map<String, serde_json::Value>,
+) -> Option<TraitCtx<'a>> {
+    let trait_node = trait_node?;
+    // selfPath: the concrete `for`-type's reachable public path, id-resolved.
+    let self_path = for_val
+        .and_then(|v| v.get("resolved_path"))
+        .and_then(|rp| rp.get("id"))
+        .and_then(reachable_local_path)?;
+    // traitPath: the trait's reachable public path, id-resolved (NOT the
+    // last-segment `trait.name`/`trait.path` string — constraint 3 / #25).
+    let trait_path = trait_node.get("id").and_then(reachable_local_path)?;
+    let trait_def_generics = trait_def_method_generics(Some(trait_node), method_name, index);
+    Some(TraitCtx {
+        trait_def_generics,
+        qualifier: (ufcs_path(&self_path), ufcs_path(&trait_path)),
+    })
+}
+
+/// Normalise a reachable crate-local path (`mycrate::Mod::Type`) to the crate-
+/// absolute UFCS form (`::mycrate::Mod::Type`). Idempotent — a path that already
+/// starts with `::` is returned unchanged. Matches the `::`-leading convention
+/// `try_parametric_stub` uses for the callee path.
+fn ufcs_path(path: &str) -> String {
+    let t = path.trim();
+    if t.starts_with("::") {
+        t.to_string()
+    } else {
+        format!("::{t}")
+    }
+}
+
+/// Constraint 11 — concrete-Self gate. True ONLY when the impl `for` type is a
+/// concrete NAMED type (`resolved_path`) carrying NO free type-vars anywhere in
+/// its args. `self_sky.is_empty()` (`main.rs:909`) is INSUFFICIENT: `Vec<T>`
+/// renders a non-empty Sky type yet is a generic Self. A blanket `impl<T> Foo
+/// for T` (`for_val` is a bare `{generic:T}` node) and a parametric-Self
+/// `impl<T> Foo for Vec<T>` (a `{generic:T}` nested in the args) BOTH carry a
+/// free type-var → not concrete. Over-restrictive is correct: a generic Self the
+/// monomorphiser can't pin must drop `trait-method-generic-self`, never emit.
+fn self_is_concrete_named(for_val: &serde_json::Value) -> bool {
+    // Must be a named path (not a bare generic / dyn / impl Trait / tuple).
+    if for_val.get("resolved_path").is_none() {
+        return false;
+    }
+    // No `{generic:NAME}` node anywhere in the Self type → no free type-var.
+    let mut free: HashSet<String> = HashSet::new();
+    collect_generic_names(for_val, &mut free);
+    free.is_empty()
+}
+
+/// Q2-A (THE soundness gate) — look up the trait DEFINITION's method generics by
+/// the impl's `trait.id` and the method NAME. rustdoc does NOT inline a trait
+/// method's where-clauses / param bounds onto the IMPL's method sig: an impl may
+/// restate `fn scaled<T>` BARE while the bound `T: Into<f64>` lives on the trait
+/// DEFINITION. Returns the trait-def method's `generics` node (param bounds +
+/// where_predicates) so the caller can UNION it into the modellable gate BEFORE
+/// deciding to emit a `<T>`. `None` when the trait id is missing/private, the
+/// trait item isn't a crate-local trait, or the method isn't found on the trait
+/// — every `None` is a sound DROP signal at the call site (never an empty-bounds
+/// emit for a trait impl).
+fn trait_def_method_generics<'a>(
+    trait_node: Option<&serde_json::Value>,
+    method_name: &str,
+    index: &'a serde_json::Map<String, serde_json::Value>,
+) -> Option<&'a serde_json::Value> {
+    let id = trait_node?.get("id")?;
+    let id_s = item_id_to_str(id);
+    let trait_item = index.get(&id_s)?;
+    let items = trait_item["inner"].get("trait")?.get("items")?.as_array()?;
+    for member_id in items {
+        let mid = item_id_to_str(member_id);
+        let Some(member) = index.get(&mid) else { continue };
+        if member["name"].as_str() != Some(method_name) {
+            continue;
+        }
+        // The trait member must itself be a function carrying `generics`.
+        if let Some(fn_data) = member["inner"].get("function") {
+            return fn_data.get("generics");
+        }
+    }
+    None
+}
+
+/// The receiver borrow form (`"ref"` / `"refmut"` / `"value"`) for a method,
+/// read from its `self` input's rustdoc type (constraint 7). A `&self` renders a
+/// `borrowed_ref` with `mutable=false` → by-ref; `&mut self` → `mutable=true` →
+/// by-mut-ref; a by-value `self` → by-value. Defaults to `"value"` when there is
+/// no `self` input (a static assoc fn — the caller won't build a receiver
+/// anyway). Load-bearing for the UFCS render: function-call syntax never
+/// auto-refs, so the borrow MUST match the `self` form (else E0308).
+fn receiver_by_kind(inputs: &[serde_json::Value]) -> &'static str {
+    let Some(self_input) = inputs.first().filter(|i| i[0].as_str() == Some("self")) else {
+        return "value";
+    };
+    match self_input[1].get("borrowed_ref") {
+        Some(br) => {
+            if br.get("mutable").and_then(|m| m.as_bool()).unwrap_or(false)
+                || br.get("is_mutable").and_then(|m| m.as_bool()).unwrap_or(false)
+            {
+                "refmut"
+            } else {
+                "ref"
+            }
+        }
+        None => "value",
+    }
 }
 
 /// True when a method is GENERIC-BEARING: it (or its owning impl, or the struct
@@ -5826,7 +6128,7 @@ mod tests {
         let struct_g = generics_obj(
             vec![type_param("K", vec![]), type_param("V", vec![])], vec![]);
         let used: HashSet<String> = ["K", "V"].iter().map(|s| s.to_string()).collect();
-        let union = full_union_bounds(&method_g, Some(&impl_g), Some(&struct_g), &used).unwrap();
+        let union = full_union_bounds(&method_g, Some(&impl_g), Some(&struct_g), None, &used).unwrap();
         assert_eq!(union.get("K"), Some(&vec!["Eq".to_string(), "Hash".to_string()]));
         // V has no bound → empty list.
         assert_eq!(union.get("V"), Some(&Vec::<String>::new()));
@@ -5841,7 +6143,7 @@ mod tests {
             "bounds": [trait_bound("Hash", vec![]), trait_bound("Eq", vec![])] } });
         let impl_g = generics_obj(vec![type_param("K", vec![])], vec![wp]);
         let used: HashSet<String> = ["K"].iter().map(|s| s.to_string()).collect();
-        let union = full_union_bounds(&method_g, Some(&impl_g), None, &used).unwrap();
+        let union = full_union_bounds(&method_g, Some(&impl_g), None, None, &used).unwrap();
         assert_eq!(union.get("K"), Some(&vec!["Eq".to_string(), "Hash".to_string()]));
     }
 
@@ -5855,7 +6157,7 @@ mod tests {
             "bounds": [trait_bound("Hash", vec![])] } });
         let impl_g = generics_obj(vec![type_param("K", vec![])], vec![wp]);
         let used: HashSet<String> = ["K"].iter().map(|s| s.to_string()).collect();
-        match full_union_bounds(&method_g, Some(&impl_g), None, &used) {
+        match full_union_bounds(&method_g, Some(&impl_g), None, None, &used) {
             Err(GenericDrop::NonGenericPredicate(_)) => {}
             other => panic!("expected NonGenericPredicate drop, got {other:?}"),
         }
@@ -5868,7 +6170,7 @@ mod tests {
         let method_g = generics_obj(
             vec![type_param("T", vec![trait_bound("Serialize", vec![])])], vec![]);
         let used: HashSet<String> = ["T"].iter().map(|s| s.to_string()).collect();
-        match full_union_bounds(&method_g, None, None, &used) {
+        match full_union_bounds(&method_g, None, None, None, &used) {
             Err(GenericDrop::UnmodellableBound(t)) => assert_eq!(t, "Serialize"),
             other => panic!("expected UnmodellableBound, got {other:?}"),
         }
@@ -5880,7 +6182,7 @@ mod tests {
         let method_g = generics_obj(
             vec![type_param("T", vec![trait_bound("Ord", vec![])])], vec![]);
         let used: HashSet<String> = ["T"].iter().map(|s| s.to_string()).collect();
-        let union = full_union_bounds(&method_g, None, None, &used).unwrap();
+        let union = full_union_bounds(&method_g, None, None, None, &used).unwrap();
         assert_eq!(union.get("T"), Some(&vec!["Ord".to_string()]));
     }
 
@@ -5933,6 +6235,7 @@ mod tests {
             Some(("IndexMap k v", "::indexmap::IndexMap<K, V>")),
             Some(&impl_g),
             Some(&struct_g),
+            None,
         ).expect("IndexMap::get should bind parametrically");
 
         // params in declaration order, USED → [K, V].
@@ -5973,7 +6276,7 @@ mod tests {
             "generics": { "params": [], "where_predicates": [] },
             "sig": { "inputs": [["x", gnode("T")]], "output": gnode("T") }
         });
-        match try_parametric_stub("id", &fd, Some(("Wrap t", "::w::Wrap<T>")), Some(&impl_g), None) {
+        match try_parametric_stub("id", &fd, Some(("Wrap t", "::w::Wrap<T>")), Some(&impl_g), None, None) {
             Err(GenericDrop::UnmodellableBound(t)) => assert_eq!(t, "Serialize"),
             other => panic!("expected UnmodellableBound drop, got {other:?}"),
         }
@@ -6013,6 +6316,7 @@ mod tests {
             &fd,
             Some(("Foo", "::clo::Foo")),
             None, // inherent impl on a non-generic type → no impl/struct generics
+            None,
             None,
         )
         .expect("inherent-assoc Fn(A)->B must bind");
@@ -6066,7 +6370,7 @@ mod tests {
                 ["pred", gnode("F")]
             ], "output": path_with_args("Vec", vec![gnode("A")]) }
         });
-        let stub = try_parametric_stub("keep", &fd_in, Some(("Foo", "::clo::Foo")), None, None)
+        let stub = try_parametric_stub("keep", &fd_in, Some(("Foo", "::clo::Foo")), None, None, None)
             .expect("inherent-assoc Fn(&A)->bool must bind");
         assert_eq!(stub.params, vec!["A".to_string()]);
         let closure_tr = stub
@@ -6088,7 +6392,7 @@ mod tests {
         // gate — closure wiring does NOT unblock the free-fn shape (that needs the
         // separate free-fn-binding work, #20/#24). Documents the boundary.
         let fd = map_each_assoc_fn(closure_bound("Fn", vec![gnode("A")], Some(gnode("B"))));
-        match try_parametric_stub("map_each", &fd, None, None, None) {
+        match try_parametric_stub("map_each", &fd, None, None, None, None) {
             Err(GenericDrop::NotBindable(m)) => assert!(m.contains("free generic fn")),
             other => panic!("expected free-fn NotBindable drop, got {other:?}"),
         }
@@ -6099,7 +6403,7 @@ mod tests {
         // A closure param on a NON-Rust-ABI host → ClosureDrop::NonRustAbi (B3).
         let mut fd = map_each_assoc_fn(closure_bound("Fn", vec![gnode("A")], Some(gnode("B"))));
         fd["header"]["abi"] = serde_json::json!({ "C": { "unwind": false } });
-        match try_parametric_stub("map_each", &fd, Some(("Foo", "::clo::Foo")), None, None) {
+        match try_parametric_stub("map_each", &fd, Some(("Foo", "::clo::Foo")), None, None, None) {
             Err(GenericDrop::ClosureDrop(tag, _)) => assert_eq!(tag.tag(), "closure-nonrust-abi"),
             other => panic!("expected NonRustAbi ClosureDrop, got {other:?}"),
         }
@@ -6129,7 +6433,7 @@ mod tests {
                 ["f", gnode("F")]
             ], "output": path_with_args("Vec", vec![gnode("B")]) }
         });
-        match try_parametric_stub("map_each", &fd, Some(("Foo", "::clo::Foo")), None, None) {
+        match try_parametric_stub("map_each", &fd, Some(("Foo", "::clo::Foo")), None, None, None) {
             Err(GenericDrop::UnmodellableBound(t)) => assert_eq!(t, "Fn"),
             other => panic!("expected UnmodellableBound(\"Fn\") safe drop, got {other:?}"),
         }
@@ -6156,7 +6460,7 @@ mod tests {
                 ["f", gnode("F")]
             ], "output": path_with_args("Vec", vec![gnode("B")]) }
         });
-        let stub = try_parametric_stub("map_each", &fd, Some(("Foo", "::clo::Foo")), None, None)
+        let stub = try_parametric_stub("map_each", &fd, Some(("Foo", "::clo::Foo")), None, None, None)
             .expect("Fn + 'static must still bind");
         assert!(stub.call.arg_types.iter().any(|t| matches!(t, TypeRef::Closure { .. })));
     }
@@ -6260,7 +6564,7 @@ mod tests {
         // `sum_all<I: IntoIterator<Item=i64>>(xs: I) -> i64` binds: I is CONSUMED
         // (no tyvar), the arg is `Vec<i64>`, no into_iter adapter (direct).
         let fd = iter_assoc_fn(iter_bound("IntoIterator", primitive("i64")));
-        let stub = try_parametric_stub("sum_all", &fd, Some(("Foo", "::iter::Foo")), None, None)
+        let stub = try_parametric_stub("sum_all", &fd, Some(("Foo", "::iter::Foo")), None, None, None)
             .expect("IntoIterator param must bind");
         assert!(stub.params.is_empty(), "I is consumed → no Sky tyvar");
         assert!(stub.bounds.is_empty(), "no iterator bound survives as a Sky bound");
@@ -6277,7 +6581,7 @@ mod tests {
         // `count<I: Iterator<Item=i64>>(it: I) -> i64` binds: arg is `Vec<i64>`,
         // and the call form needs `.into_iter()` → adapter at arg index 0 (C6).
         let fd = iter_assoc_fn(iter_bound("Iterator", primitive("i64")));
-        let stub = try_parametric_stub("count", &fd, Some(("Foo", "::iter::Foo")), None, None)
+        let stub = try_parametric_stub("count", &fd, Some(("Foo", "::iter::Foo")), None, None, None)
             .expect("Iterator param must bind");
         assert!(stub.params.is_empty());
         assert_eq!(
@@ -6302,7 +6606,7 @@ mod tests {
                 ["b", gnode("I")]
             ], "output": primitive("i64") }
         });
-        let stub = try_parametric_stub("zip_sum", &fd, Some(("Foo", "::iter::Foo")), None, None)
+        let stub = try_parametric_stub("zip_sum", &fd, Some(("Foo", "::iter::Foo")), None, None, None)
             .expect("shared iterator tyvar must bind both slots");
         assert!(stub.params.is_empty(), "the shared I is consumed in BOTH slots");
         let vec_i64 = TypeRef::Ctor("::Vec".into(), vec![TypeRef::Prim("i64".into())]);
@@ -6324,7 +6628,7 @@ mod tests {
                 ["it", mut_ref(gnode("I"))]
             ], "output": primitive("i64") }
         });
-        match try_parametric_stub("drain", &fd, Some(("Foo", "::iter::Foo")), None, None) {
+        match try_parametric_stub("drain", &fd, Some(("Foo", "::iter::Foo")), None, None, None) {
             Err(GenericDrop::NotBindable(_)) => {}
             other => panic!("expected a NotBindable drop for &mut I, got {other:?}"),
         }
@@ -6352,7 +6656,7 @@ mod tests {
             "sig": { "inputs": [ ["it", gnode("I")] ], "output": primitive("i64") }
         });
         assert!(
-            try_parametric_stub("sorted", &fd, Some(("Foo", "::iter::Foo")), None, None).is_err(),
+            try_parametric_stub("sorted", &fd, Some(("Foo", "::iter::Foo")), None, None, None).is_err(),
             "where I::Item: Ord must DROP (non-generic predicate)"
         );
     }
@@ -6369,7 +6673,7 @@ mod tests {
             ], "where_predicates": [] },
             "sig": { "inputs": [ ["xs", gnode("I")] ], "output": gnode("I") }
         });
-        match try_parametric_stub("ident", &fd, Some(("Foo", "::iter::Foo")), None, None) {
+        match try_parametric_stub("ident", &fd, Some(("Foo", "::iter::Foo")), None, None, None) {
             Err(GenericDrop::NotBindable(m)) => assert!(m.contains("free type-var")),
             other => panic!("expected free-type-var NotBindable drop for -> I, got {other:?}"),
         }
@@ -6386,7 +6690,7 @@ mod tests {
                     { "tuple": [ primitive("i64"), primitive("i64") ] } } } }
             ] } }
         }, "modifier": "none" } }));
-        match try_parametric_stub("sink", &fd, Some(("Foo", "::iter::Foo")), None, None) {
+        match try_parametric_stub("sink", &fd, Some(("Foo", "::iter::Foo")), None, None, None) {
             Err(GenericDrop::IteratorDrop(tag, _)) => {
                 assert_eq!(tag.tag(), "iterator-item-unmodellable")
             }
@@ -6423,6 +6727,7 @@ mod tests {
                 arg_types: vec![TypeRef::Param(0)],
                 ret: TypeRef::Ctor("::c::T".into(), vec![TypeRef::Param(0)]),
                 iter_adapters: vec![],
+                trait_qualifier: None,
             },
         };
         let v = serde_json::to_value(&g).unwrap();
@@ -6628,5 +6933,170 @@ mod tests {
         let d = GenericDrop::ClosureDrop(ClosureDropTag::MutSlot, "x".into());
         assert_eq!(d.reason(), "closure-mut-slot");
         assert_eq!(d.detail(), "x");
+    }
+
+    // ── #21 trait methods on concrete types ─────────────────────────────
+
+    /// A `for`-Self rustdoc node carrying a free type-var nested in its args,
+    /// e.g. `Vec<T>`.
+    fn vec_of_generic(name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "resolved_path": {
+                "name": "Vec", "path": "Vec", "id": 7,
+                "args": { "angle_bracketed": {
+                    "args": [ { "type": { "generic": name } } ], "constraints": []
+                } }
+            }
+        })
+    }
+
+    #[test]
+    fn test_self_is_concrete_named() {
+        // Concrete named type → concrete.
+        assert!(self_is_concrete_named(&path("Circle")));
+        assert!(self_is_concrete_named(&path_with_args("Pair", vec![prim("i64")])));
+        // A blanket `impl<T> Foo for T` — the Self IS the bare type-var.
+        assert!(!self_is_concrete_named(&serde_json::json!({ "generic": "T" })));
+        // `impl<T> Foo for Vec<T>` — a free type-var nested in args (constraint 11
+        // — `self_sky.is_empty()` would be FALSE here, so the bare emptiness check
+        // is insufficient).
+        assert!(!self_is_concrete_named(&vec_of_generic("T")));
+        // A non-path Self (slice / tuple) is not a concrete named type.
+        assert!(!self_is_concrete_named(&prim("i64")));
+    }
+
+    /// Build a tiny rustdoc index for a `trait Scale { fn scaled<T: Into<f64>>(…) }`
+    /// + the trait item, returning (index, trait_node_for_impl). The impl-side
+    /// `trait` node carries `id` pointing at the trait item.
+    fn scale_trait_index() -> (serde_json::Map<String, serde_json::Value>, serde_json::Value) {
+        let into_f64 = trait_bound("Into", vec![prim("f64")]);
+        // The trait-DEF method `scaled<T: Into<f64>>(&self, k: T) -> f64`.
+        let scaled_fn = serde_json::json!({
+            "name": "scaled",
+            "inner": { "function": {
+                "generics": { "params": [ type_param("T", vec![into_f64]) ],
+                              "where_predicates": [] },
+                "sig": { "inputs": [], "output": { "primitive": "f64" } }
+            } }
+        });
+        // The trait item, listing `scaled` as a member by id "100".
+        let trait_item = serde_json::json!({
+            "name": "Scale", "crate_id": 0,
+            "inner": { "trait": { "items": [ 100 ] } }
+        });
+        let mut index = serde_json::Map::new();
+        index.insert("100".to_string(), scaled_fn);
+        index.insert("42".to_string(), trait_item);
+        // The impl-side trait node references the trait by id 42.
+        let trait_node = serde_json::json!({ "id": 42, "name": "Scale", "path": "Scale" });
+        (index, trait_node)
+    }
+
+    /// A trait-impl method `fn keyed<T>(&self, k: T) -> i64` whose `<T>` is
+    /// RESTATED BARE on the impl (the bound `T: Ord` lives on the trait DEF,
+    /// modelled here as not inlined onto the impl-method sig). `Ord` is a
+    /// modellable-5 trait, so the Q2-A union lets the stub EMIT `<T: Ord>` and
+    /// BIND — a row that binds ONLY because it unioned trait-def info
+    /// (constraint 12). (An `Into<f64>`-style *resolve-to-concrete* bound would
+    /// instead need the `resolve_generics` monomorphisation path, which
+    /// `try_parametric_stub` does not run — so `Into`-bare-restate stays a
+    /// `trait-method-bound-cross-impl` drop, the sound over-drop.)
+    fn keyed_impl_method_bare_t() -> serde_json::Value {
+        serde_json::json!({
+            "header": { "is_async": false, "is_unsafe": false, "abi": "Rust" },
+            // BARE `<T>` — no bounds at the impl site.
+            "generics": { "params": [ type_param("T", vec![]) ], "where_predicates": [] },
+            "sig": { "inputs": [
+                ["self", borrowed(serde_json::json!({ "generic": "Self" }))],
+                ["k", serde_json::json!({ "generic": "T" })]
+            ], "output": prim("i64") }
+        })
+    }
+
+    /// A `TraitCtx` whose qualifier is fixed and whose trait-def generics are
+    /// supplied by the caller (so a test can toggle the Q2-A union on/off).
+    fn trait_ctx_with<'a>(trait_def: Option<&'a serde_json::Value>) -> TraitCtx<'a> {
+        TraitCtx {
+            trait_def_generics: trait_def,
+            qualifier: ("::tm::Circle".to_string(), "::tm::Scale".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_q2a_bare_restated_bound_pre_drops_post_binds() {
+        // CONSTRAINT-12 REGRESSION — the row that sinks the naive design.
+        let fd = keyed_impl_method_bare_t();
+
+        // ── PRE (Q2-A OFF): the trait-def union is absent. The impl-method `<T>`
+        //    has EMPTY bounds, so the spec-as-written would emit a bare `<T>`
+        //    (→ E0277 at the host call). The Q2-A backstop instead DROPS
+        //    `trait-method-bound-cross-impl` — sound (never an unsound emit).
+        let pre = try_parametric_stub(
+            "keyed", &fd, Some(("Circle", "::tm::Circle")),
+            None, None, Some(&trait_ctx_with(None)),
+        );
+        match pre {
+            Err(GenericDrop::TraitMethodDrop(TraitMethodDropTag::BoundCrossImpl, _)) => {}
+            other => panic!(
+                "PRE (no trait-def union): a bare-restated `<T>` MUST drop \
+                 trait-method-bound-cross-impl (never emit `<T>`), got {other:?}"),
+        }
+
+        // ── POST (Q2-A ON): union the trait-DEF method's `T: Ord` bound. `Ord` is
+        //    a modellable-5 trait, so `T` stays a Sky tyvar and the stub EMITS
+        //    `<T: Ord>` — the method BINDS solely because of the union.
+        let ord = trait_bound("Ord", vec![]);
+        let trait_def = fn_with_generics(vec![type_param("T", vec![ord])], vec![]);
+        let post = try_parametric_stub(
+            "keyed", &fd, Some(("Circle", "::tm::Circle")),
+            None, None, Some(&trait_ctx_with(Some(&trait_def["generics"]))),
+        );
+        let stub = post.expect(
+            "POST (trait-def union): `T: Ord` resolves → `keyed` must BIND");
+        // T survives as a Sky tyvar carrying the unioned `Ord` bound.
+        assert_eq!(stub.params, vec!["T".to_string()]);
+        assert_eq!(stub.bounds.get("T"), Some(&vec!["Ord".to_string()]));
+        // The UFCS qualifier rode through onto the Call.
+        assert_eq!(
+            stub.call.trait_qualifier,
+            Some(("::tm::Circle".to_string(), "::tm::Scale".to_string())));
+        // The receiver is borrowed (`&self`) — UFCS first-arg by ref.
+        assert_eq!(stub.call.receiver.as_ref().map(|r| r.by.as_str()), Some("ref"));
+    }
+
+    #[test]
+    fn test_trait_method_nonrust_abi_drops() {
+        // Constraint 10: a non-Rust-ABI host trait method drops
+        // `trait-method-nonrust-abi`.
+        let mut fd = keyed_impl_method_bare_t();
+        fd["header"]["abi"] = serde_json::json!({ "C": null });
+        let ord = trait_bound("Ord", vec![]);
+        let trait_def = fn_with_generics(vec![type_param("T", vec![ord])], vec![]);
+        match try_parametric_stub(
+            "keyed", &fd, Some(("Circle", "::tm::Circle")),
+            None, None, Some(&trait_ctx_with(Some(&trait_def["generics"]))),
+        ) {
+            Err(GenericDrop::TraitMethodDrop(TraitMethodDropTag::NonRustAbi, _)) => {}
+            other => panic!("expected trait-method-nonrust-abi drop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_trait_def_method_generics_lookup() {
+        let (index, trait_node) = scale_trait_index();
+        // Q2-A: the trait-def method `scaled` carries the `T: Into<f64>` bound the
+        // impl restated bare — resolve it by `trait.id` + method name.
+        let g = trait_def_method_generics(Some(&trait_node), "scaled", &index)
+            .expect("trait-def method generics must resolve");
+        let params = g["params"].as_array().unwrap();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0]["name"], "T");
+        // A method absent from the trait → None (sound drop).
+        assert!(trait_def_method_generics(Some(&trait_node), "missing", &index).is_none());
+        // A missing trait id → None.
+        let no_id = serde_json::json!({ "name": "Scale" });
+        assert!(trait_def_method_generics(Some(&no_id), "scaled", &index).is_none());
+        // No trait node at all (inherent impl) → None.
+        assert!(trait_def_method_generics(None, "scaled", &index).is_none());
     }
 }
