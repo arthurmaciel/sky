@@ -21,6 +21,7 @@ import Test.Hspec
 
 import qualified Data.Aeson as A
 import qualified Data.Aeson.Types as AT
+import Data.List (isInfixOf)
 
 import Sky.Build.Rust.FfiCall
 
@@ -273,6 +274,47 @@ spec = do
             renderCall c ["k", "v"] `shouldBe`
                 "::mycrate::Pair::<K, V>::left(&arg0)"
             renderRetType c ["k", "v"] `shouldBe` "K"
+
+    describe "#28 — owned-clone bridge for Fn(&A) closure params (Task 3.2, B4)" $ do
+        -- `keep : List a -> (&a -> Bool) -> List a` — the host wants Fn(&A) but
+        -- the Sky closure (arg1) only ever sees an OWNED value. The bridge clones
+        -- the borrowed arg to owned before invoking arg1, so a reference can
+        -- never escape into Sky (B4 invariant — identity-escape impossible).
+        let keepCall byRef = Call
+                { _call_kind     = CallFunction
+                , _call_path     = ["::clo"]
+                , _call_typeArgs = [TRParam 0]
+                , _call_method   = Just "keep"
+                , _call_receiver = Nothing
+                , _call_args     = [0, 1]
+                , _call_argTypes =
+                    [ TRCtor "Vec" [TRParam 0]
+                    , TRClosure FnKind byRef [TRParam 0] (TRPrim "bool") ]
+                , _call_ret      = TRCtor "Vec" [TRParam 0]
+                }
+        it "byRef closure arg passes an owned-clone bridge, not arg1 directly" $
+            renderCall (keepCall True) ["a"] `shouldContain`
+                "move |__r0| { let __v0 = __r0.clone(); arg1(__v0) }"
+        it "a by-value (byRef=False) closure arg passes arg1 directly (no bridge)" $ do
+            let rendered = renderCall (keepCall False) ["a"]
+            rendered `shouldContain` "(arg0, arg1)"
+            (".clone()" `isInfixOf` rendered) `shouldBe` False
+        it "multi-& Fn(&A, &B) clones each borrowed arg independently" $ do
+            let zipCall = Call
+                    { _call_kind     = CallFunction
+                    , _call_path     = ["::clo"]
+                    , _call_typeArgs = [TRParam 0, TRParam 1]
+                    , _call_method   = Just "zip_with"
+                    , _call_receiver = Nothing
+                    , _call_args     = [0]
+                    , _call_argTypes =
+                        [ TRClosure FnKind True
+                            [TRParam 0, TRParam 1] (TRParam 0) ]
+                    , _call_ret      = TRParam 0
+                    }
+            renderCall zipCall ["a", "b"] `shouldContain`
+                "move |__r0, __r1| { let __v0 = __r0.clone(); \
+                \let __v1 = __r1.clone(); arg0(__v0, __v1) }"
   where
     isLeft  = either (const True) (const False)
     isRight = either (const False) (const True)

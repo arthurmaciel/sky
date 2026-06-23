@@ -278,9 +278,28 @@ renderCall c params =
         recvArg = case _call_receiver c of
             Nothing -> []
             Just r  -> [renderBy (_recv_by r) (argName (_recv_arg r))]
-        valArgs = map argName (_call_args c)
+        -- Each value-arg renders as its identifier (`argJ`) UNLESS it is a
+        -- by-ref closure (`Fn(&A) -> R`), in which case the host wants the
+        -- closure to receive a BORROW but the Sky closure only ever takes an
+        -- OWNED value (the closed set has no reference arm). So we pass an
+        -- owned-clone BRIDGE: `move |__r0, …| { let __v0 = __r0.clone(); …
+        -- argJ(__v0, …) }` — each borrowed slot is cloned to owned before the
+        -- Sky closure sees it (B4: a reference can never escape into Sky, so
+        -- identity-escape is structurally impossible). A by-VALUE closure
+        -- (byRef=False) and every non-closure arg pass the bare identifier.
+        valArgs =
+            [ renderValueArg j (argTypeAt j) | j <- _call_args c ]
         allArgs = recvArg ++ valArgs
     in callee ++ "(" ++ intercalate ", " allArgs ++ ")"
+  where
+    -- The declared type of value-arg @j@ (argTypes is indexed by wrapper-arg
+    -- index; validation proved length == arity, so a present index is total).
+    argTypeAt j = case drop j (_call_argTypes c) of
+        (tr : _) -> Just tr
+        []       -> Nothing
+    renderValueArg j (Just (TRClosure _ True borrowedArgTRs _)) =
+        ownedCloneBridge j (length borrowedArgTRs)
+    renderValueArg j _ = argName j
 
 
 -- | Render the wrapper RETURN type (the @_@ inside @SkyResult<SkyError, _>@)
@@ -340,7 +359,7 @@ closureBounds c params =
         ++ "(" ++ intercalate ", " (map (renderTypeRef params) as_) ++ ") -> "
         ++ renderTypeRef params r
         ++ (if closureNeedsClone k then " + ::core::clone::Clone" else "")
-    | (j, TRClosure k _ as_ r) <- zip [0..] (_call_argTypes c)
+    | (j, TRClosure k _ as_ r) <- zip [0 :: Int ..] (_call_argTypes c)
     ]
 
 
@@ -348,6 +367,33 @@ closureBounds c params =
 -- caller emits: @arg0@, @arg1@, …).
 argName :: Int -> String
 argName j = "arg" ++ show j
+
+
+-- | Owned-clone bridge for a by-ref closure wrapper-arg at value-arg index @j@
+-- whose host signature is @Fn(&T0, …, &T{n-1}) -> R@ (Task 3.2, B4). The Sky
+-- closure (the wrapper's @argJ@ param) only ever takes OWNED values, so each
+-- borrowed slot is cloned to an owned value before the Sky closure is invoked:
+--
+-- @
+-- move |__r0, __r1| { let __v0 = __r0.clone(); let __v1 = __r1.clone(); argJ(__v0, __v1) }
+-- @
+--
+-- A reference handed in by the host is consumed entirely inside the bridge and
+-- never reaches Sky, so a borrowed identity cannot escape the FFI boundary. The
+-- @__@-prefixed bind names are hygienic (cannot collide with a wrapper param,
+-- which is always @argK@). The bridge owns @argJ@ (the Sky closure) by @move@;
+-- the @+ Clone@ bound on @Fj@ (from 'closureBounds') keeps the multi-call case
+-- sound (the bridge may be invoked many times).
+ownedCloneBridge :: Int -> Int -> String
+ownedCloneBridge j arity =
+    let idxs       = [0 .. arity - 1] :: [Int]
+        refParams  = intercalate ", " [ "__r" ++ show i | i <- idxs ]
+        cloneStmts = concat
+            [ "let __v" ++ show i ++ " = __r" ++ show i ++ ".clone(); "
+            | i <- idxs ]
+        ownedArgs  = intercalate ", " [ "__v" ++ show i | i <- idxs ]
+    in "move |" ++ refParams ++ "| { " ++ cloneStmts
+        ++ argName j ++ "(" ++ ownedArgs ++ ") }"
 
 
 -- | Apply the receiver borrow form.
