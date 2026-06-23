@@ -814,6 +814,7 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     ALIAS_MAP.with(|c| *c.borrow_mut() = collect_aliases(doc));
     LOCAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_local_type_ids(doc));
     EXTERNAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_external_type_ids(doc));
+    STD_TRAIT_BY_ID.with(|c| *c.borrow_mut() = collect_std_trait_ids(doc));
 
     // Wall #3 coverage accumulators are per-crate — reset so a multi-crate run
     // reports each crate's bind%/drops independently.
@@ -920,18 +921,27 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                 continue;
             }
 
-            // Track Display / FromStr for synthetic bridge functions
+            // Track Display / FromStr for synthetic bridge functions.
             let trait_name = impl_data
                 .get("trait")
                 .and_then(|t| t.as_object())
                 .and_then(|t| t.get("name").or_else(|| t.get("path")))
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
-            if trait_name == "Display" || trait_name.ends_with("::Display") {
+            // [#25] Key the bridge on the RESOLVED std-trait id, not the last path
+            // segment: a crate's OWN `impl Display`/`impl FromStr` (crate_id 0)
+            // resolves to `None` here, so we NEVER synthesize a `to_string`/`parse`
+            // bridge against a look-alike (which would emit a wrong / non-compiling
+            // wrapper). A bare-name impl with no usable id falls back to the
+            // last-segment match inside `std_trait_tag` (pre-#25 behaviour).
+            let bridge_tag = impl_data
+                .get("trait")
+                .and_then(std_trait_tag);
+            if bridge_tag == Some("Display") {
                 // key = Sky type name; value = full Rust type (may have generics)
                 display_types.entry(self_sky.clone()).or_insert_with(|| self_rust.clone());
             }
-            if trait_name == "FromStr" || trait_name.ends_with("::FromStr") {
+            if bridge_tag == Some("FromStr") {
                 fromstr_types.entry(self_sky.clone()).or_insert_with(|| self_rust.clone());
             }
 
@@ -1458,13 +1468,11 @@ fn collect_clone_struct_ids(index: &serde_json::Map<String, serde_json::Value>) 
             continue;
         }
         let Some(impl_data) = item["inner"].get("impl") else { continue };
-        let trait_path = impl_data
-            .get("trait")
-            .and_then(|t| t.as_object())
-            .and_then(|t| t.get("path").or_else(|| t.get("name")))
-            .and_then(|n| n.as_str())
-            .unwrap_or("");
-        if trait_path == "Clone" || trait_path.ends_with("::Clone") {
+        // [#25] Require the impl'd trait to RESOLVE to std `core::clone::Clone`,
+        // not merely end in `::Clone`. A crate's OWN `trait Clone` (crate_id 0)
+        // resolves to `None` → its impl does NOT make the receiver field
+        // getter-eligible via `recv.field.clone()` (that needs the STD Clone).
+        if impl_data.get("trait").and_then(std_trait_tag) == Some("Clone") {
             let for_val = impl_data.get("for").or_else(|| impl_data.get("for_"));
             if let Some(id) = for_val
                 .and_then(|v| v.get("resolved_path"))
@@ -2647,6 +2655,123 @@ thread_local! {
     // parse_rustdoc, next to LOCAL_TYPE_IDS.
     static EXTERNAL_TYPE_IDS: std::cell::RefCell<HashSet<String>> =
         std::cell::RefCell::new(HashSet::new());
+
+    // [#25] Rustdoc id -> canonical std-trait TAG for every trait reference whose
+    // resolved path is a KNOWN std/core/alloc canonical trait path
+    // (`core::clone::Clone`, `core::fmt::Display`, `core::str::FromStr`, …). Built
+    // from `doc["paths"]` (the cross-crate id ⇒ `{path, kind, crate_id}` table) in
+    // parse_rustdoc. KEYED BY RESOLVED ID, NOT last path segment: a crate-local
+    // (`crate_id == 0`) trait named `Clone`/`Display`/`Ord` is NEVER inserted here
+    // (its path is the crate's own, not the std canonical one), so the
+    // modellable-5 + Display/FromStr-bridge checks can't misclassify it as the std
+    // trait. The stored TAG is the std last segment (`Clone`/`Display`/…) — used
+    // to drive the existing name-keyed decision sites once provenance is confirmed.
+    static STD_TRAIT_BY_ID: std::cell::RefCell<HashMap<String, &'static str>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Canonical std/core/alloc trait paths that the modellable-5 + the Display/
+/// FromStr/ToString bridges key on. A trait reference is the std trait ONLY when
+/// its resolved rustdoc path (joined `::`) is one of these — NOT when its last
+/// segment merely matches. The value is the std last-segment TAG threaded back
+/// into the existing name-keyed sites.
+const STD_TRAIT_CANONICAL: &[(&str, &str)] = &[
+    // modellable-5
+    ("core::clone::Clone", "Clone"),
+    ("core::cmp::Eq", "Eq"),
+    ("core::cmp::PartialEq", "PartialEq"),
+    ("core::cmp::Ord", "Ord"),
+    ("core::cmp::PartialOrd", "PartialOrd"),
+    ("core::hash::Hash", "Hash"),
+    ("core::default::Default", "Default"),
+    // Display / ToString / FromStr bridges
+    ("core::fmt::Display", "Display"),
+    ("std::fmt::Display", "Display"),
+    ("alloc::string::ToString", "ToString"),
+    ("std::string::ToString", "ToString"),
+    ("core::str::FromStr", "FromStr"),
+    ("std::str::FromStr", "FromStr"),
+];
+
+/// Build the `STD_TRAIT_BY_ID` map: for every `doc["paths"]` entry whose `kind`
+/// is `trait`, `crate_id > 0` (external — std lives in core/alloc/std, never the
+/// crate under inspection), and whose joined path is a known std canonical trait
+/// path, record `id -> std TAG`. A crate-local trait (`crate_id == 0`) is skipped
+/// entirely, so a crate's OWN `trait Clone` can never resolve to the std tag.
+fn collect_std_trait_ids(doc: &serde_json::Value) -> HashMap<String, &'static str> {
+    let mut out: HashMap<String, &'static str> = HashMap::new();
+    let Some(paths) = doc["paths"].as_object() else {
+        return out;
+    };
+    for (id, entry) in paths {
+        if entry["kind"].as_str() != Some("trait") {
+            continue;
+        }
+        // std/core/alloc are always EXTERNAL to the crate under inspection
+        // (`crate_id > 0`). A `crate_id == 0` trait is the crate's own — never std.
+        if entry["crate_id"].as_u64().unwrap_or(0) == 0 {
+            continue;
+        }
+        let Some(joined) = entry["path"].as_array().map(|segs| {
+            segs.iter()
+                .filter_map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("::")
+        }) else {
+            continue;
+        };
+        if let Some((_, tag)) = STD_TRAIT_CANONICAL.iter().find(|(p, _)| *p == joined) {
+            out.insert(id.clone(), *tag);
+        }
+    }
+    out
+}
+
+/// Resolve a trait reference node (`{ path, name, id, args }`) to the std-trait
+/// TAG it actually denotes, or `None` if it is NOT a confirmed std trait.
+///
+/// Resolution is by RESOLVED ID, not last path segment (#25):
+///   1. id is in `STD_TRAIT_BY_ID` (external, canonical std path) → `Some(tag)`.
+///   2. id is CRATE-LOCAL (`LOCAL_TYPE_IDS`, or a reachable local path) → `None`:
+///      the crate's OWN trait, even if its last segment is `Clone`/`Display`.
+///   3. id has NO usable provenance (absent from every map — the unit-test world
+///      with no `doc["paths"]` loaded, or a std trait rustdoc didn't index) →
+///      fall back to LAST-SEGMENT name matching against `STD_TRAIT_CANONICAL`'s
+///      tags. This preserves the pre-#25 behaviour for real std bounds whose ids
+///      we can't confirm, while the crate-local case (2) is already excluded.
+fn std_trait_tag(trait_node: &serde_json::Value) -> Option<&'static str> {
+    let id = trait_node.get("id");
+    if let Some(id) = id {
+        let key = item_id_to_str(id);
+        // (1) Confirmed std by resolved canonical path.
+        if let Some(tag) = STD_TRAIT_BY_ID.with(|m| m.borrow().get(&key).copied()) {
+            return Some(tag);
+        }
+        // (2) Confirmed crate-local → NOT std (the #25 defect's wrong-admit case).
+        let is_local = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key))
+            || REACHABLE_PATHS.with(|c| c.borrow().contains_key(&key));
+        if is_local {
+            return None;
+        }
+        // (3) An EXTERNAL id we recorded as a type but NOT as a known std trait
+        // (e.g. a foreign crate's own `Display` look-alike) → NOT a std trait.
+        if EXTERNAL_TYPE_IDS.with(|s| s.borrow().contains(&key)) {
+            return None;
+        }
+    }
+    // (4) No usable provenance at all → conservative last-segment fallback so a
+    // real std bound whose id we can't confirm still resolves (and the unit-test
+    // bounds, built with `id: 0` + no `doc["paths"]`, keep working). The
+    // crate-local wrong-admit case was already excluded above.
+    let path = trait_node
+        .get("path")
+        .or_else(|| trait_node.get("name"))
+        .and_then(|p| p.as_str())?;
+    let last = path.rsplit("::").next().unwrap_or(path);
+    STD_TRAIT_CANONICAL
+        .iter()
+        .find(|(_, tag)| *tag == last)
+        .map(|(_, tag)| *tag)
 }
 
 /// True when `rendered` is the rust-type name of a crate-local opaque struct
@@ -3802,7 +3927,17 @@ fn bound_to_concrete(bound: &serde_json::Value, pos: BoundPos) -> Option<serde_j
         .unwrap_or_default();
     match name {
         // No-inner bounds with a known concrete:
-        "Display" | "ToString" => Some(string_node()),
+        // [#25] `T: Display`/`T: ToString` → `String` ONLY when the bound resolves
+        // to the std trait by id. A crate-local `trait Display` (crate_id 0)
+        // resolves to `None` → fall through to the `_ => None` drop rather than
+        // unsoundly substituting `String` for a look-alike. A bound with no usable
+        // id falls back to the last-segment match inside `std_trait_tag`.
+        "Display" | "ToString" => {
+            match std_trait_tag(tr) {
+                Some("Display") | Some("ToString") => Some(string_node()),
+                _ => None,
+            }
+        }
         "Integer" => Some(i64_node()),   // matches num_traits::Integer (last segment)
         "Float"   => Some(f64_node()),   // matches num_traits::Float
         // Single-inner bounds — recurse on the inner arg, BUT with a soundness
@@ -3877,6 +4012,17 @@ const MARKER_TRAITS: &[&str] = &[
     "RefUnwindSafe", "UnwindSafe", "Eq", "PartialEq", "Hash", "Ord", "PartialOrd",
 ];
 
+/// True when a trait reference node's `id` is CONFIRMED crate-local (`crate_id
+/// 0` — in `LOCAL_TYPE_IDS` or a reachable local path). Used as the #25
+/// safe-direction gate: a confirmed crate-local trait named like a std marker
+/// (`Eq`/`Clone`/…) must NOT be silently ignored as a marker.
+fn trait_is_crate_local(tr: &serde_json::Value) -> bool {
+    let Some(id) = tr.get("id") else { return false };
+    let key = item_id_to_str(id);
+    LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key))
+        || REACHABLE_PATHS.with(|c| c.borrow().contains_key(&key))
+}
+
 /// A bound that contributes no type information: a marker/auto trait, or a
 /// lifetime/outlives bound (no `trait_bound` key).
 fn is_marker_bound(bound: &serde_json::Value) -> bool {
@@ -3884,6 +4030,12 @@ fn is_marker_bound(bound: &serde_json::Value) -> bool {
         Some(t) => t,
         None => return true, // outlives/lifetime bound -> ignore
     };
+    // [#25] A CONFIRMED crate-local trait (crate_id 0) named like a std marker is
+    // NOT a marker — ignoring it would silently admit a symbol whose real bound we
+    // can't model. SAFE direction: it stays a non-marker → the caller drops it.
+    if trait_is_crate_local(tr) {
+        return false;
+    }
     let path = tr.get("path").or_else(|| tr.get("name")).and_then(|p| p.as_str()).unwrap_or("");
     let name = path.rsplit("::").next().unwrap_or(path);
     MARKER_TRAITS.contains(&name)
@@ -4114,19 +4266,32 @@ fn classify_param_bound(bound: &serde_json::Value) -> Result<Option<String>, Gen
         None => return Ok(None), // lifetime/outlives — ignore
         Some(n) => n,
     };
+    // [#25] The modellable-5 admission keys on the RESOLVED std-trait identity,
+    // NOT the bare last segment. A crate-local `trait Clone` (crate_id 0) resolves
+    // to `None` here, so it can NEVER be admitted as the modellable std `Clone`;
+    // it falls through to the UnmodellableBound drop below (SAFE direction —
+    // over-drop, never a wrong admit). A confirmed std modellable-5 trait (or one
+    // with no provenance, last-segment fallback) resolves to its tag and admits.
+    if let Some(std_tag) = std_trait_tag(bound.get("trait_bound").and_then(|tb| tb.get("trait")).unwrap_or(&serde_json::Value::Null)) {
+        if is_modellable_5(std_tag) {
+            // super-closure of every modellable-5 trait is marker/modellable.
+            debug_assert!(modellable_5_superclosure_ok(std_tag));
+            return Ok(Some(std_tag.to_string()));
+        }
+        // A confirmed std trait that is NOT modellable-5 (Display / FromStr /
+        // ToString / PartialEq / PartialOrd). PartialEq/PartialOrd are markers
+        // (contribute no `<T: …>` bound); the rest are unmodellable as a param
+        // bound. Both reach the right outcome below via the marker check + drop.
+    }
     if MARKER_TRAITS.contains(&name.as_str()) && !is_modellable_5(&name) {
         // A pure auto/marker trait (Sized/Send/Sync/Copy/Debug/Unpin/…) that is
         // NOT one of the modellable-5 contributes no Sky-facing `<T: …>` bound.
+        // (Marker auto-traits are out of #25's id-keyed set; kept name-based.)
         return Ok(None);
     }
-    if is_modellable_5(&name) {
-        if modellable_5_superclosure_ok(&name) {
-            return Ok(Some(name));
-        }
-        return Err(GenericDrop::UnmodellableBound(name));
-    }
-    // A real, non-marker, non-modellable trait (FromStr / Serialize / a crate
-    // trait / BuildHasher / …) → C3 drop.
+    // A real, non-marker, non-modellable trait — including a crate-local
+    // look-alike named `Clone`/`Display` that `std_trait_tag` refused to confirm
+    // as std (FromStr / Serialize / a crate trait / BuildHasher / …) → C3 drop.
     Err(GenericDrop::UnmodellableBound(name))
 }
 
@@ -6554,6 +6719,179 @@ mod tests {
         assert!(!is_modellable_5("Serialize"));
         // Distinct from the marker SUPERSET — do not conflate.
         assert!(MARKER_TRAITS.len() > MODELLABLE_5.len());
+    }
+
+    // ── #25 — trait identity by RESOLVED ID, not last path segment ──────────
+
+    /// A `trait_bound` whose `trait.id` is `id` (so provenance can be resolved).
+    fn trait_bound_id(name: &str, id: u64) -> serde_json::Value {
+        serde_json::json!({ "trait_bound": { "trait": {
+            "path": name, "name": name, "id": id,
+            "args": { "angle_bracketed": { "args": [], "constraints": [] } }
+        }, "modifier": "none" } })
+    }
+
+    /// Install thread-local provenance maps from a `doc` so the id-based
+    /// resolver sees them, run `f`, then RESTORE empty maps so other tests
+    /// (which assume no `doc` loaded) are unaffected.
+    fn with_doc_provenance<T>(doc: &serde_json::Value, f: impl FnOnce() -> T) -> T {
+        LOCAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_local_type_ids(doc));
+        EXTERNAL_TYPE_IDS.with(|c| *c.borrow_mut() = collect_external_type_ids(doc));
+        STD_TRAIT_BY_ID.with(|c| *c.borrow_mut() = collect_std_trait_ids(doc));
+        REACHABLE_PATHS.with(|c| *c.borrow_mut() = collect_reachable_paths(doc));
+        let out = f();
+        LOCAL_TYPE_IDS.with(|c| c.borrow_mut().clear());
+        EXTERNAL_TYPE_IDS.with(|c| c.borrow_mut().clear());
+        STD_TRAIT_BY_ID.with(|c| c.borrow_mut().clear());
+        REACHABLE_PATHS.with(|c| c.borrow_mut().clear());
+        out
+    }
+
+    /// A rustdoc `doc` whose `paths` table carries:
+    ///   id 100 → external `core::clone::Clone` (the real std trait)
+    ///   id 101 → external `core::fmt::Display`
+    ///   id 102 → external `core::str::FromStr`
+    ///   id  10 → crate-local `Clone`   (the crate's OWN trait, crate_id 0)
+    ///   id  11 → crate-local `Display` (the crate's OWN trait, crate_id 0)
+    fn doc_with_traits() -> serde_json::Value {
+        serde_json::json!({
+            "index": {
+                "10": { "crate_id": 0, "inner": { "trait": {} } },
+                "11": { "crate_id": 0, "inner": { "trait": {} } }
+            },
+            "paths": {
+                "100": { "crate_id": 1, "kind": "trait", "path": ["core", "clone", "Clone"] },
+                "101": { "crate_id": 2, "kind": "trait", "path": ["core", "fmt", "Display"] },
+                "102": { "crate_id": 2, "kind": "trait", "path": ["core", "str", "FromStr"] },
+                "10":  { "crate_id": 0, "kind": "trait", "path": ["mycrate", "Clone"] },
+                "11":  { "crate_id": 0, "kind": "trait", "path": ["mycrate", "Display"] }
+            }
+        })
+    }
+
+    #[test]
+    fn test_std_trait_tag_external_recognized() {
+        // Control: the REAL std Clone/Display/FromStr (crate_id>0, canonical path)
+        // MUST still resolve to their std tag.
+        let doc = doc_with_traits();
+        with_doc_provenance(&doc, || {
+            let clone = trait_bound_id("Clone", 100);
+            let display = trait_bound_id("Display", 101);
+            let fromstr = trait_bound_id("FromStr", 102);
+            assert_eq!(
+                std_trait_tag(clone.get("trait_bound").unwrap().get("trait").unwrap()),
+                Some("Clone")
+            );
+            assert_eq!(
+                std_trait_tag(display.get("trait_bound").unwrap().get("trait").unwrap()),
+                Some("Display")
+            );
+            assert_eq!(
+                std_trait_tag(fromstr.get("trait_bound").unwrap().get("trait").unwrap()),
+                Some("FromStr")
+            );
+        });
+    }
+
+    #[test]
+    fn test_std_trait_tag_crate_local_not_std() {
+        // #25 DEFECT: a crate-local trait named `Clone`/`Display` (crate_id 0) must
+        // NOT resolve to the std tag — its id is in LOCAL_TYPE_IDS.
+        let doc = doc_with_traits();
+        with_doc_provenance(&doc, || {
+            let local_clone = trait_bound_id("Clone", 10);
+            let local_display = trait_bound_id("Display", 11);
+            assert_eq!(
+                std_trait_tag(local_clone.get("trait_bound").unwrap().get("trait").unwrap()),
+                None,
+                "crate-local `Clone` must not be treated as std Clone"
+            );
+            assert_eq!(
+                std_trait_tag(local_display.get("trait_bound").unwrap().get("trait").unwrap()),
+                None,
+                "crate-local `Display` must not be treated as std Display"
+            );
+        });
+    }
+
+    #[test]
+    fn test_classify_param_bound_crate_local_clone_drops() {
+        // #25: a USED param bounded by the crate's OWN `trait Clone` (crate_id 0)
+        // must DROP as UnmodellableBound — NOT be admitted as the modellable std
+        // Clone. RED before the fix (last-segment "Clone" matches is_modellable_5).
+        let doc = doc_with_traits();
+        with_doc_provenance(&doc, || {
+            let local_clone = trait_bound_id("Clone", 10);
+            match classify_param_bound(&local_clone) {
+                Err(GenericDrop::UnmodellableBound(_)) => {}
+                other => panic!(
+                    "crate-local `Clone` must drop as UnmodellableBound, got {other:?}"
+                ),
+            }
+        });
+    }
+
+    #[test]
+    fn test_classify_param_bound_std_clone_admitted() {
+        // Control: the real std Clone (external canonical path) stays modellable.
+        let doc = doc_with_traits();
+        with_doc_provenance(&doc, || {
+            let std_clone = trait_bound_id("Clone", 100);
+            assert_eq!(classify_param_bound(&std_clone), Ok(Some("Clone".to_string())));
+        });
+    }
+
+    #[test]
+    fn test_classify_param_bound_no_doc_fallback() {
+        // With NO doc loaded (id 0, no provenance), the conservative last-segment
+        // fallback keeps the existing unit-test behaviour: a bare `Ord`/`Clone`
+        // bound still admits as modellable. (Crate-local wrong-admit is excluded
+        // by provenance, which is absent here.)
+        let ord = trait_bound("Ord", vec![]);
+        assert_eq!(classify_param_bound(&ord), Ok(Some("Ord".to_string())));
+    }
+
+    #[test]
+    fn test_bridge_tag_crate_local_display_not_synthesized() {
+        // #25: a crate-local `impl Display` (id 10/11 are crate_id 0) must NOT be
+        // recognized as the std Display bridge. std_trait_tag is the single gate
+        // both the modellable check and the Display/FromStr bridge consult.
+        let doc = doc_with_traits();
+        with_doc_provenance(&doc, || {
+            // crate-local Display trait node (as it appears on an impl block).
+            let local = serde_json::json!({ "path": "Display", "name": "Display", "id": 11 });
+            assert_eq!(std_trait_tag(&local), None);
+            // real std Display still recognized.
+            let std_d = serde_json::json!({ "path": "Display", "name": "Display", "id": 101 });
+            assert_eq!(std_trait_tag(&std_d), Some("Display"));
+        });
+    }
+
+    #[test]
+    fn test_is_marker_bound_crate_local_not_marker() {
+        // #25: a crate's OWN trait named `Clone` (crate_id 0) must NOT be silently
+        // treated as a marker — otherwise a defaulted-param / param-bound check
+        // would ignore a bound it can't actually model. SAFE direction = NOT marker.
+        let doc = doc_with_traits();
+        with_doc_provenance(&doc, || {
+            let local_clone = trait_bound_id("Clone", 10);
+            assert!(!is_marker_bound(&local_clone), "crate-local Clone is not a marker");
+        });
+        // No-doc fallback: a bare `Clone` (no provenance) stays a marker (pre-#25).
+        assert!(is_marker_bound(&trait_bound("Clone", vec![])));
+    }
+
+    #[test]
+    fn test_bound_to_concrete_crate_local_display_drops() {
+        // #25: `T: <crate-local Display>` must NOT monomorphise to String.
+        let doc = doc_with_traits();
+        with_doc_provenance(&doc, || {
+            let local = trait_bound_id("Display", 11);
+            assert_eq!(bound_to_concrete(&local, BoundPos::Param), None);
+            // Control: real std Display still → String.
+            let std_d = trait_bound_id("Display", 101);
+            assert_eq!(bound_to_concrete(&std_d, BoundPos::Param), Some(string_node()));
+        });
     }
 
     #[test]
