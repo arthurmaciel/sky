@@ -143,4 +143,99 @@ mod tests {
         let r2: Result<Creds, String> = decode_form(partial);
         assert_eq!(r2, Ok(Creds { email: "a@b.c".into(), password: String::new() }));
     }
+
+    // #37 regression: a form-target record with a `Maybe`-typed optional field
+    // (`note : Maybe String` → `SkyMaybe<String>`) is idiomatic. Pre-fix the
+    // codegen `#[derive(Default)]` on this struct cargo-failed E0277 because
+    // `SkyMaybe<T>` had no `Default`. Part A's `impl Default for SkyMaybe`
+    // (= `Nothing`) makes it qualify for the lenient stamp, so a MISSING `note`
+    // decodes to `Nothing` (the exact case #37 fixes — the missing-field
+    // leniency, Go's `json.Unmarshal` nil parity).
+    //
+    // NB on a PRESENT value: `SkyMaybe` derives serde's default (externally-
+    // tagged) representation, so a bare urlencoded `note=hello` does NOT
+    // round-trip into `SkyMaybe::Just("hello")` — serde expects a `Just`/
+    // `Nothing` tag. Surfacing a present optional form value into `Just` is a
+    // separate serde-representation concern (it would need `#[serde(untagged)]`
+    // / a custom deserialize on `SkyMaybe`, which also touches the session-store
+    // serialization contract) and is OUT OF SCOPE for #37, whose breach is the
+    // missing-field E0277 cargo-fail. We assert the in-scope behaviour: missing
+    // → Nothing (no cargo-fail, Msg dispatches), present-bare → decode declines.
+    #[derive(serde::Deserialize, Default, PartialEq, Debug)]
+    #[serde(default)]
+    struct CredsWithNote {
+        email: String,
+        password: String,
+        note: crate::sky_runtime::core::SkyMaybe<String>,
+    }
+
+    #[test]
+    fn decode_form_maybe_field_missing_is_nothing() {
+        use crate::sky_runtime::core::SkyMaybe;
+
+        // The #37 fix: `note` absent → Nothing (Go decodes a missing nullable to
+        // nil), decode SUCCEEDS, Msg dispatches. Pre-fix this struct could not
+        // even be CONSTRUCTED (its `#[derive(Default)]` was an E0277 cargo-fail).
+        let mut without_note = FormData::new();
+        without_note.insert("email".to_string(), "a@b.c".to_string());
+        without_note.insert("password".to_string(), "pw".to_string());
+        let r: Option<CredsWithNote> = decode_form_or_warn(without_note);
+        assert_eq!(
+            r,
+            Some(CredsWithNote {
+                email: "a@b.c".into(),
+                password: "pw".into(),
+                note: SkyMaybe::Nothing,
+            })
+        );
+    }
+
+    #[test]
+    fn sky_maybe_default_is_nothing() {
+        // Part A contract: the manual `Default` impl yields `Nothing`, and it is
+        // UNBOUNDED in `T` — a `SkyMaybe<NonDefault>` field still has a default.
+        struct NonDefault;
+        assert!(crate::sky_runtime::core::SkyMaybe::<String>::default().is_nothing());
+        let _unbounded: crate::sky_runtime::core::SkyMaybe<NonDefault> = Default::default();
+    }
+
+    // #37 Part B: a form-target carrying a NON-Default field (here a `bool`-keyed
+    // ADT modelled as a Rust enum) does NOT get the lenient `#[derive(Default)]`
+    // stamp in codegen — it keeps the STRICT pre-#37 emission (plain
+    // `serde::Deserialize`, no `Default`/`serde(default)`). That still compiles
+    // and still decodes; it just lacks missing-field leniency. This struct
+    // MIRRORS that strict emission (note: no `Default`, no `#[serde(default)]`).
+    #[derive(serde::Deserialize, PartialEq, Debug)]
+    enum Tier {
+        Free,
+        Pro,
+    }
+
+    #[derive(serde::Deserialize, PartialEq, Debug)]
+    struct Subscription {
+        email: String,
+        tier: Tier,
+    }
+
+    #[test]
+    fn strict_form_target_with_non_default_field_still_decodes() {
+        // All fields present → Ok (strict path works).
+        let mut fd = FormData::new();
+        fd.insert("email".to_string(), "a@b.c".to_string());
+        fd.insert("tier".to_string(), "Pro".to_string());
+        let r: Result<Subscription, String> = decode_form(fd);
+        assert_eq!(
+            r,
+            Ok(Subscription { email: "a@b.c".into(), tier: Tier::Pro })
+        );
+
+        // Missing the non-defaultable `tier` → strict decode ERRORS (no leniency),
+        // exactly the pre-#37 behaviour the strict emission preserves. It does
+        // NOT cargo-fail; it just returns Err — acceptable for the rare
+        // enum/Result-field form.
+        let mut partial = FormData::new();
+        partial.insert("email".to_string(), "a@b.c".to_string());
+        let r2: Result<Subscription, String> = decode_form(partial);
+        assert!(r2.is_err());
+    }
 }

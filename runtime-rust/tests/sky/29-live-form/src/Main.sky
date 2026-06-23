@@ -11,7 +11,7 @@ import Std.Sub as Sub
 import Sky.Core.Error exposing (Error)
 
 
-type alias Creds = { email : String, password : String }
+type alias Creds = { email : String, password : String, note : Maybe String }
 
 
 type Msg = SignIn Creds
@@ -36,6 +36,7 @@ view model =
         [ Html.form [ Ev.onSubmit SignIn ]
             [ Html.input [ Attr.type_ "email", Attr.name "email" ]
             , Html.input [ Attr.type_ "password", Attr.name "password" ]
+            , Html.input [ Attr.type_ "text", Attr.name "note" ]
             , Html.button [ Attr.type_ "submit" ] [ Html.text "Sign in" ]
             ]
         , Html.p [] [ Html.text ("last: " ++ model.lastEmail) ]

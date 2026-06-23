@@ -519,7 +519,22 @@ typeDefToString formTargets serdeTypes fnFieldStructs (RStructDef name gens fiel
         -- `#[derive(…serde::Deserialize…)]` that INTRODUCES the `serde` helper —
         -- a leading position trips `legacy_derive_helpers` (a future-incompat
         -- hard-deny). So append the attribute as a SUFFIX on its own line.
-        isFormTarget = name `Set.member` formTargets
+        --
+        -- BUT `#[derive(Default)]` is STRUCTURAL: it demands EVERY field type
+        -- impl `Default`. A form-target record carrying a field whose Rust type
+        -- is NOT `Default` (`SkyResult<_,_>`, a generated ADT enum, a nested
+        -- generated record, an opaque runtime type) would then fail cargo with
+        -- E0277 (`<T>: Default is not satisfied`) — a "type-checks-but-cargo-
+        -- fails" floor breach, even though a `Maybe`-typed optional field is
+        -- idiomatic. So gate the lenient stamp on `allFieldsDefaultable`:
+        -- "parse, don't validate" — only stamp the leniency on when EVERY field
+        -- is PROVABLY `Default` by its rendered Rust type. When a field isn't,
+        -- DROP the stamp; that form-target keeps its strict pre-#37 emission
+        -- (plain `serde::Deserialize`, no `Default`) — it compiles fine, it just
+        -- doesn't get missing-field leniency (acceptable for the rare
+        -- Result/enum-field form). Either branch CARGO-BUILDS; the floor holds.
+        isFormTargetRaw = name `Set.member` formTargets
+        isFormTarget = isFormTargetRaw && allFieldsDefaultable (map snd fields)
         formDefaultAttr = if isFormTarget then "\n#[serde(default)]" else ""
         formDefaultDerive = if isFormTarget then ", Default" else ""
         derives
@@ -527,7 +542,12 @@ typeDefToString formTargets serdeTypes fnFieldStructs (RStructDef name gens fiel
             | hasCallbackField && isSerde = "#[derive(Clone, serde::Serialize, serde::Deserialize)]"
             | hasCallbackField = "#[derive(Clone)]"
             | isSerde = "#[derive(Clone, Debug, PartialEq" ++ formDefaultDerive ++ ", serde::Serialize, serde::Deserialize)]" ++ formDefaultAttr
+            -- form target, ALL fields Default-able: lenient (Default + serde(default))
             | isFormTarget = "#[derive(Clone, Debug, PartialEq, Default, serde::Deserialize)]" ++ formDefaultAttr
+            -- form target, NOT all fields Default-able: strict pre-#37 emission
+            -- (plain Deserialize, no Default/serde(default)) — still cargo-builds,
+            -- just no missing-field leniency.
+            | isFormTargetRaw = "#[derive(Clone, Debug, PartialEq, serde::Deserialize)]"
             | otherwise = "#[derive(Clone, Debug, PartialEq)]"
         -- A serde struct's field whose TYPE is a fn-field struct can't serialize:
         -- skip it (reconstructed via that struct's Default on deserialize).
@@ -703,6 +723,53 @@ splitTopLevelCommas = go 0 ""
 -- set of function-typed structs.
 fieldTypeBase :: String -> String
 fieldTypeBase = takeWhile (\c -> c /= '<' && c /= ' ')
+
+-- | #37 gate: is EVERY field of a form-target struct rendered to a Rust type
+-- that PROVABLY impls `Default`? Only then may the lenient missing-field
+-- form-decode stamp (`#[derive(Default)] #[serde(default)]`) be applied —
+-- otherwise `#[derive(Default)]` fails cargo with E0277 (the structural derive
+-- demands every field be `Default`).
+--
+-- Conservative by construction ("parse, don't validate"): we say YES only for
+-- types we KNOW impl `Default`, and treat anything we can't prove as NO (the
+-- struct then keeps its strict pre-#37 emission, which still builds). The
+-- judgement is on the already-rendered Rust type string (see
+-- `Sky.Generate.Rust.Builder.TypeRenderer.typeToRustString`):
+--
+--   Default-able (YES):
+--     * scalars: `i64` `f64` `bool` `char` (`char::default()` = '\0') `String`
+--     * unit `()`
+--     * containers with a Default empty value: `Vec<_>` `HashMap<_,_>`
+--       `BTreeSet<_>` `HashSet<_>` `Option<_>`
+--     * `SkyMaybe<_>` — Part A added `impl Default` (= `Nothing`); the inner
+--       `T` need NOT be `Default` (the manual impl is unbounded), so a
+--       `SkyMaybe<NonDefault>` field still qualifies.
+--
+--   NOT Default-able (NO — conservative):
+--     * `SkyResult<_,_>` (no canonical zero — deliberately no `Default` impl),
+--       `SkyError`, `SkyTask<_>`, `SkyCmd<_>`, `SkySub<_>`, `Decoder<_>`
+--     * any nested generated record / generated ADT enum (we don't prove their
+--       `Default` here — an enum has no derivable `Default` without an explicit
+--       `#[default]` variant, and a nested record may itself carry a non-Default
+--       field), runtime opaque types, function/callback fields (`dyn Fn`).
+allFieldsDefaultable :: [String] -> Bool
+allFieldsDefaultable = all fieldIsDefaultable
+
+-- | A single rendered Rust field type → provably `Default`? See
+-- 'allFieldsDefaultable' for the classification rationale.
+fieldIsDefaultable :: String -> Bool
+fieldIsDefaultable raw =
+    let t = dropWhile (== ' ') raw
+        base = fieldTypeBase t           -- strips `<…>` / trailing space
+    in base `elem`
+        [ "i64", "f64", "bool", "char", "String", "()"  -- scalars / unit / String
+        , "Vec", "HashMap", "BTreeSet", "HashSet"        -- containers w/ empty Default
+        , "Option"                                       -- std Option::default = None
+        , "SkyMaybe"                                     -- Part A: Default = Nothing
+        ]
+    -- Everything else (SkyResult, SkyError, SkyTask/Cmd/Sub, Decoder, generated
+    -- records/enums, opaque runtime types, fn fields) is conservatively NOT
+    -- Default-able → drops the lenient stamp.
 
 -- | Count the argument types in the first `Fn(...)` clause of a Rust type string:
 -- `Fn()` -> 0, `Fn(())` -> 1, `Fn(String, T)` -> 2. Balanced-paren / generic

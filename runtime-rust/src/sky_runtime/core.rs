@@ -145,6 +145,24 @@ impl<T> SkyMaybe<T> {
     pub fn is_nothing(&self) -> bool { matches!(self, SkyMaybe::Nothing) }
 }
 
+// `Nothing` is the natural zero of an absent `Maybe`, mirroring Go's
+// `json.Unmarshal` decoding a missing nullable field to nil. This MANUAL impl
+// (the derive would demand `T: Default`, which a `SkyMaybe<NonDefault>` field
+// cannot satisfy) lets a form-target record carrying a `Maybe X` field qualify
+// for the #37 lenient `#[serde(default)]` form-decode stamp without an E0277.
+// Deliberately NOT provided for `SkyResult`: an absent `Result` has no canonical
+// zero (`Ok` vs `Err` is undecidable), so a Result-typed form field keeps the
+// strict (non-Default) emission instead — see Emitter.hs `allFieldsDefaultable`.
+//
+// NOT `#[derive(Default)]` (clippy::derivable_impls): the derive stamps a
+// `T: Default` bound on EVERY type param, which would defeat the point — a
+// `SkyMaybe<NonDefault>` field must still have a default (its inner `T` is never
+// constructed in the `Nothing` zero). This MANUAL impl is unbounded in `T`.
+#[allow(clippy::derivable_impls)]
+impl<T> Default for SkyMaybe<T> {
+    fn default() -> Self { SkyMaybe::Nothing }
+}
+
 pub fn sky_maybe_map<T, U>(m: SkyMaybe<T>, f: impl FnOnce(T) -> U) -> SkyMaybe<U> {
     match m { SkyMaybe::Just(v) => SkyMaybe::Just(f(v)), SkyMaybe::Nothing => SkyMaybe::Nothing }
 }

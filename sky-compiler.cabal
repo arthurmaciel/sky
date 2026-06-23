@@ -406,6 +406,7 @@ test-suite sky-tests
       Sky.Build.Rust.FfiInstanceSpec
       Sky.Build.Rust.FfiCallSpec
       Sky.Generate.Rust.TypeRendererSpec
+      Sky.Generate.Rust.FormDefaultGateSpec
       Sky.Build.TaskResultBridgesSpec
       Sky.Build.CheckIsBuildSpec
       Sky.Build.RecordFieldOrderSpec
