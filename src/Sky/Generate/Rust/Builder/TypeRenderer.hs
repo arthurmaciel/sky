@@ -169,9 +169,16 @@ typeToRustString recordMap t = case t of
     -- in public surfaces, the runtime never constructs a `SkyResult<String, _>`
     -- value, and the only origin is the FFI skyi. `Result Error a` is unchanged.
     Can.TType _ "Result" [e, a] ->
-        let errStr = case typeToRustString recordMap e of
-                         "String" -> "SkyError"
-                         other    -> other
+        -- #34: key on the Can.Type CONSTRUCTOR, not the rendered string.
+        -- An unmatched TRecord also renders "String" via the fallback branch
+        -- (`otherwise -> "String"` below); matching on the rendered string
+        -- would wrongly normalise it to "SkyError". Only a genuine
+        -- `Can.TType _ "String" []` node (= the real Sky String type) triggers
+        -- the normalisation — any other type that happens to render "String"
+        -- (anon-record fallback, named-record fallback, catch-all _) is left as-is.
+        let errStr = case e of
+                         Can.TType _ "String" [] -> "SkyError"
+                         _                       -> typeToRustString recordMap e
         in "SkyResult<" ++ errStr ++ ", " ++ typeToRustString recordMap a ++ ">"
     Can.TType _ "Error" [] -> "SkyError"
     Can.TRecord fields _ ->

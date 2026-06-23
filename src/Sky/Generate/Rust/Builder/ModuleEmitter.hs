@@ -888,13 +888,15 @@ returnTypeWithGenerics recMap ty solved = case ty of
         in ("SkyTask<" ++ innerStr ++ ">", gens)
     Can.TType _ "Result" [e, a] ->
         let (errStr0, gs1) = returnTypeWithGenerics recMap e solved
-            -- #32: normalise a `String` error slot to `SkyError` — see the
-            -- matching note in TypeRenderer.typeToRustString. An FFI `.skyi`
-            -- advertising `Result String a` would otherwise pin a binding's
-            -- return type to `SkyResult<String, _>` while the FFI wrapper value
-            -- is `SkyResult<SkyError, _>` (cargo E0308). `Result Error a` is
-            -- unchanged (already renders `SkyError`).
-            errStr = if errStr0 == "String" then "SkyError" else errStr0
+            -- #32/#34: normalise the error slot to `SkyError` when the error
+            -- type is a genuine `Can.TType _ "String" []` (the real Sky String).
+            -- Key on the AST CONSTRUCTOR before rendering — NOT on the rendered
+            -- string — so that an unmatched TRecord which also falls back to
+            -- "String" in typeToRustString is NOT wrongly coerced to "SkyError".
+            -- `Result Error a` is unchanged (already renders `SkyError`).
+            errStr = case e of
+                         Can.TType _ "String" [] -> "SkyError"
+                         _                       -> errStr0
             (okStr,  gs2) = returnTypeWithGenerics recMap a solved
         in ("SkyResult<" ++ errStr ++ ", " ++ okStr ++ ">", gs1 ++ gs2)
     Can.TType _ "Maybe" [a] ->
