@@ -10368,6 +10368,62 @@ mod tests {
     }
 
     #[test]
+    fn serde_bound_mixed_admissible_and_borrow_vetoes_whole_fn() {
+        // MAKE-OR-BREAK (C-G3 all-or-nothing veto): `fn f<T: Serialize>(a: T, b: &T)`.
+        // The SAME T appears once admissibly (by-value `a: T`) and once
+        // inadmissibly (`b: &T`). A per-occurrence substitution would emit
+        // `&Value` for `b` (type-checks in `sky`, cargo-fails E0277/E0308 — the
+        // cardinal sin). The census MUST drop the entire fn on the single
+        // inadmissible occurrence, regardless of the admissible one preceding it.
+        let fd = fn_data_with_generic_bounds(
+            "T",
+            vec![serde_bound("serde::Serialize")],
+            vec![generic_node("T"), borrowed_generic("T")],
+            serde_json::Value::Null,
+        );
+        assert!(resolve_generics(&fd).is_none(),
+            "f<T: Serialize>(a: T, b: &T) must be DROPPED — one inadmissible \
+             occurrence of T vetoes the whole reduction (no &Value emission)");
+    }
+
+    #[test]
+    fn serde_bound_result_vec_t_in_ok_and_err_admissible() {
+        // `fn f<T: Serialize + DeserializeOwned>() -> Result<Vec<T>, T>` — T
+        // appears in BOTH the Ok (Vec<T>, admissible) and Err (bare T,
+        // admissible) slots. Result/Vec are transparent wrappers, so every
+        // occurrence is admissible → the fn reduces (no drop).
+        let result_ty = path_with_args(
+            "Result",
+            vec![path_with_args("Vec", vec![generic_node("T")]), generic_node("T")],
+        );
+        let fd = fn_data_with_generic_bounds(
+            "T",
+            vec![serde_bound("serde::Serialize"), serde_bound("serde::de::DeserializeOwned")],
+            vec![],
+            result_ty,
+        );
+        let map = resolve_generics(&fd).expect("Result<Vec<T>, T> return must reduce");
+        assert_eq!(map.get("T"), Some(&serde_json_value_node()));
+    }
+
+    #[test]
+    fn serde_bound_vec_of_tuple_drops_fn() {
+        // `fn f<T: Serialize>(v: Vec<(T, T)>)` — Vec is transparent but the
+        // tuple inside is inadmissible. The census must recurse through Vec and
+        // veto on the tuple element (the fixture only covers a bare tuple).
+        let vec_of_tuple = path_with_args("Vec", vec![tuple_of_generics("T")]);
+        let fd = fn_data_with_generic_bounds(
+            "T",
+            vec![serde_bound("serde::Serialize")],
+            vec![vec_of_tuple],
+            serde_json::Value::Null,
+        );
+        assert!(resolve_generics(&fd).is_none(),
+            "f<T: Serialize>(v: Vec<(T,T)>) must be DROPPED — tuple inside a Vec \
+             is still an inadmissible occurrence");
+    }
+
+    #[test]
     fn serde_bound_tuple_drops_fn() {
         // `fn pair<T: serde::Serialize>(_x: (T, T))` → dropped.
         let fd = fn_data_with_generic_bounds(
