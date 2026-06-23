@@ -17,6 +17,29 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-23 — #25 trait identity by resolved rustdoc id (not last path segment)
+
+**What.** The inspector decided trait identity (the modellable-5 bound check + the
+Display/FromStr/ToString bridges + the Clone-derive gate + the marker check) by the
+LAST PATH SEGMENT, so a crate defining its OWN `trait Clone`/`Display`/`Ord` was
+misclassified as the std trait → wrong modellability / a spurious bridge. (#31 already
+closed the call-path half — the UFCS trait qualifier was id-based.) Fix
+(`tools/sky-ffi-inspect-rs/src/main.rs`): `collect_std_trait_ids` builds
+`STD_TRAIT_BY_ID` from `doc["paths"]` (canonical `STD_TRAIT_CANONICAL` paths, both
+`core::`/`std::` re-exports, all four cmp traits); `std_trait_tag` resolves a trait
+ref's id via a provenance ladder — `STD_TRAIT_BY_ID` (crate_id>0 + canonical) → tag;
+`LOCAL_TYPE_IDS`/`REACHABLE_PATHS` (crate_id==0) → None (the crate's own look-alike,
+caught BEFORE any last-segment fallback); external-non-std → None; only a genuinely
+unresolvable ref → conservative last-segment fallback. 6 sites rekeyed. Safe direction
+on ambiguity: over-drop a modellable bound / don't-synthesize a bridge, never admit a
+look-alike. Out-of-scope last-segment sites (Iterator/IntoIterator, Fn/FnMut/FnOnce,
+Integer/Float num_traits, Into/From/AsRef) intentionally left. Guardian-final:
+strict improvement, both directions sound. 102 inspector tests + 8 new #25 (both
+directions at every site); 51b real-crate Display bridge `[ALL OK]`; clippy delta 0.
+Commit `f34ef285`.
+
+---
+
 ## 2026-06-23 — #29 entry-module DCE filter + #19 inspector embed staleness
 
 **#29 — Rust entry-module dead-binding DCE.** The Rust backend filtered DEPENDENCY
