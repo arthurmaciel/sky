@@ -924,6 +924,7 @@ addHandler opts = do
                         Right info -> do
                             names <- RustFfi.generateRustBindings info
                             putStrLn $ "   " ++ crateName ++ ": " ++ show (length names) ++ " bindings"
+                            mapM_ putStrLn (FfiGen._pkgNotes info)
                             return (Right ())
                 _ -> do
                     let inspName = case target of
@@ -979,6 +980,8 @@ addHandler opts = do
                                         ++ "Then call any of the " ++ show (length names) ++ " functions"
                                         ++ " (see " ++ ffiDir ++ slug ++ ".skyi for signatures)."
                             putStrLn outputMsg
+                            -- Print facade-crate guidance notes (if any).
+                            mapM_ putStrLn (FfiGen._pkgNotes info)
                             return (Right ())
 
 -- | For each declared go dep, regenerate the FFI bindings when its

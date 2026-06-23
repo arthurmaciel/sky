@@ -346,6 +346,10 @@ struct PkgInfo {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     modules: Vec<String>,
     errors: Vec<String>,
+    // Diagnostic notes for the user (e.g. facade crate guidance).
+    // Not consumed by FfiGen — printed by the `sky add` CLI.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<String>,
 }
 
 // ── Entry point ────────────────────────────────────────────────────────
@@ -433,6 +437,7 @@ fn main() {
                 functions: vec![],
                 modules: vec![],
                 errors: vec![format!("JSON serialization failed: {}", e)],
+                notes: vec![],
             };
             let body = serde_json::to_string_pretty(&err).unwrap_or_else(|_| {
                 // Last-resort hand-rolled JSON so a serialization failure on the
@@ -1436,6 +1441,11 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
     // summary + the full per-symbol `.coverage.md` when the crate name is safe.
     emit_generic_coverage(crate_name);
 
+    // Facade guidance: when <3 bindings were produced but the crate re-exports
+    // its real API from external sub-crates via `pub use ext_crate::*`, tell
+    // the user which crates to add instead.
+    let notes = facade_guidance(crate_name, functions.len(), doc);
+
     PkgInfo {
         pkg: crate_name.to_string(),
         name: crate_name.to_string(),
@@ -1443,7 +1453,99 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         functions,
         modules: collect_public_modules(doc),
         errors,
+        notes,
     }
+}
+
+/// Facade-crate guidance (#49).
+///
+/// When a crate yields fewer than `FACADE_FN_THRESHOLD` bindable functions
+/// AND its rustdoc index contains at least one `pub use <external>::*` glob
+/// re-export, the crate is almost certainly a pure re-export facade.  We
+/// collect the distinct external crate names from those re-exports and return
+/// a note naming them so the user knows to `sky add` the sub-crates directly.
+///
+/// "External" here means the target of the `use` item has `crate_id > 0` in
+/// the rustdoc index (i.e. it originates from a dependency, not the crate
+/// itself).  We resolve the crate name from `doc["external_crates"]` keyed by
+/// that numeric crate_id.
+const FACADE_FN_THRESHOLD: usize = 3;
+
+fn facade_guidance(crate_name: &str, fn_count: usize, doc: &serde_json::Value) -> Vec<String> {
+    if fn_count >= FACADE_FN_THRESHOLD {
+        return vec![];
+    }
+
+    let index = match doc["index"].as_object() {
+        Some(i) => i,
+        None => return vec![],
+    };
+
+    // Collect the numeric crate_ids of external crates reached by a public
+    // glob `use` item whose own crate_id is 0 (belongs to this crate).
+    let mut ext_ids: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    for item in index.values() {
+        // Only items that belong to this crate (crate_id == 0).
+        let item_crate_id = item["crate_id"].as_u64().unwrap_or(1);
+        if item_crate_id != 0 {
+            continue;
+        }
+        // Must be a `use` item.
+        let use_inner = match item["inner"].get("use") {
+            Some(u) => u,
+            None => continue,
+        };
+        // Must be a glob re-export.
+        if !use_inner["is_glob"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        // The `id` field inside the `use` block names the re-exported item.
+        // In rustdoc JSON it can be an integer or an object with an `index`
+        // field; we accept both shapes.
+        let target_crate_id: Option<u64> = use_inner["id"]
+            .as_u64()
+            .or_else(|| use_inner["id"]["index"].as_u64())
+            .and_then(|target_id| {
+                // Look up the target item in the index; its crate_id tells us
+                // which dependency it belongs to.
+                let target_key = target_id.to_string();
+                index.get(&target_key).and_then(|t| t["crate_id"].as_u64())
+            });
+        if let Some(ext_id) = target_crate_id {
+            if ext_id > 0 {
+                ext_ids.insert(ext_id);
+            }
+        }
+    }
+
+    if ext_ids.is_empty() {
+        return vec![];
+    }
+
+    // Resolve numeric ids → crate names via doc["external_crates"].
+    let external_crates = &doc["external_crates"];
+    let mut names: Vec<String> = ext_ids
+        .iter()
+        .filter_map(|id| {
+            let key = id.to_string();
+            external_crates[&key]["name"].as_str().map(|n| n.to_string())
+        })
+        .collect();
+
+    if names.is_empty() {
+        return vec![];
+    }
+
+    names.sort();
+    names.dedup();
+
+    let crate_list = names.join(", ");
+    let add_cmds: Vec<String> = names.iter().map(|n| format!("sky add {}", n)).collect();
+    let add_hint = add_cmds.join(" / ");
+    vec![format!(
+        "note: '{}' re-exports its API from: {}. Run '{}' to bind them.",
+        crate_name, crate_list, add_hint
+    )]
 }
 
 /// Collect the `::`-joined paths of every PUBLIC module defined in this crate
@@ -4249,6 +4351,7 @@ fn pkg_error(name: &str, msg: &str) -> PkgInfo {
         functions: vec![],
         modules: vec![],
         errors: vec![msg.into()],
+        notes: vec![],
     }
 }
 
@@ -11161,5 +11264,161 @@ mod tests {
             None,
             "bare url::Url is not a Result/Option — inner_owned returns None"
         );
+    }
+
+    // ── #49: facade re-export guidance ───────────────────────────────────────
+
+    /// Facade crate (0 fns) with a public glob `pub use ext_crate::*` →
+    /// guidance names the external crate.
+    #[test]
+    fn test_facade_guidance_names_subcrate() {
+        // Minimal rustdoc JSON:
+        // - item "1" = the crate root module (crate_id=0)
+        // - item "2" = a `use` item (crate_id=0, is_glob=true) whose target id=3
+        // - item "3" = an item from external crate (crate_id=7)
+        // external_crates[7] = { name: "other_crate" }
+        let doc = serde_json::json!({
+            "index": {
+                "1": {
+                    "name": "facade_crate",
+                    "crate_id": 0,
+                    "visibility": "public",
+                    "inner": { "module": { "items": ["2"] } }
+                },
+                "2": {
+                    "name": "",
+                    "crate_id": 0,
+                    "visibility": "public",
+                    "inner": {
+                        "use": {
+                            "source": "other_crate",
+                            "name": "*",
+                            "id": 3,
+                            "is_glob": true
+                        }
+                    }
+                },
+                "3": {
+                    "name": "some_fn",
+                    "crate_id": 7,
+                    "visibility": "public",
+                    "inner": { "function": {} }
+                }
+            },
+            "external_crates": {
+                "7": { "name": "other_crate", "html_root_url": null }
+            },
+            "paths": {},
+            "format_version": 38
+        });
+
+        let notes = facade_guidance("facade_crate", 0, &doc);
+        assert_eq!(notes.len(), 1, "facade with 0 fns must produce exactly one note");
+        let note = &notes[0];
+        assert!(note.contains("other_crate"),
+            "note must name the sub-crate: {}", note);
+        assert!(note.starts_with("note: 'facade_crate' re-exports its API from:"),
+            "note must use the expected prefix format: {}", note);
+        assert!(note.contains("sky add other_crate"),
+            "note must suggest the sky add command: {}", note);
+    }
+
+    /// Normal crate (≥3 fns) → no guidance even if there are re-exports.
+    #[test]
+    fn test_facade_guidance_absent_for_normal_crate() {
+        // Same doc structure but fn_count = 5 → threshold not triggered.
+        let doc = serde_json::json!({
+            "index": {
+                "1": {
+                    "name": "normal_crate",
+                    "crate_id": 0,
+                    "visibility": "public",
+                    "inner": { "module": { "items": ["2"] } }
+                },
+                "2": {
+                    "name": "",
+                    "crate_id": 0,
+                    "visibility": "public",
+                    "inner": {
+                        "use": {
+                            "source": "other_crate",
+                            "name": "*",
+                            "id": 3,
+                            "is_glob": true
+                        }
+                    }
+                },
+                "3": {
+                    "name": "some_fn",
+                    "crate_id": 7,
+                    "visibility": "public",
+                    "inner": { "function": {} }
+                }
+            },
+            "external_crates": {
+                "7": { "name": "other_crate", "html_root_url": null }
+            },
+            "paths": {},
+            "format_version": 38
+        });
+
+        let notes = facade_guidance("normal_crate", 5, &doc);
+        assert!(notes.is_empty(),
+            "normal crate (5 fns) must NOT produce facade guidance: {:?}", notes);
+    }
+
+    /// Facade with 0 fns but NO external glob re-exports → no guidance.
+    #[test]
+    fn test_facade_guidance_absent_when_no_reexports() {
+        let doc = serde_json::json!({
+            "index": {
+                "1": {
+                    "name": "empty_crate",
+                    "crate_id": 0,
+                    "visibility": "public",
+                    "inner": { "module": { "items": [] } }
+                }
+            },
+            "external_crates": {},
+            "paths": {},
+            "format_version": 38
+        });
+
+        let notes = facade_guidance("empty_crate", 0, &doc);
+        assert!(notes.is_empty(),
+            "crate with 0 fns but no re-exports must NOT produce guidance: {:?}", notes);
+    }
+
+    /// Facade naming TWO distinct sub-crates (multiple glob re-exports).
+    #[test]
+    fn test_facade_guidance_multiple_subcrates() {
+        let doc = serde_json::json!({
+            "index": {
+                "1": { "name": "meta", "crate_id": 0, "visibility": "public",
+                       "inner": { "module": { "items": ["2", "4"] } } },
+                "2": { "name": "", "crate_id": 0, "visibility": "public",
+                       "inner": { "use": { "source": "alpha", "name": "*",
+                                           "id": 3, "is_glob": true } } },
+                "3": { "name": "alpha_fn", "crate_id": 10, "visibility": "public",
+                       "inner": { "function": {} } },
+                "4": { "name": "", "crate_id": 0, "visibility": "public",
+                       "inner": { "use": { "source": "beta", "name": "*",
+                                           "id": 5, "is_glob": true } } },
+                "5": { "name": "beta_fn", "crate_id": 11, "visibility": "public",
+                       "inner": { "function": {} } }
+            },
+            "external_crates": {
+                "10": { "name": "alpha", "html_root_url": null },
+                "11": { "name": "beta",  "html_root_url": null }
+            },
+            "paths": {},
+            "format_version": 38
+        });
+
+        let notes = facade_guidance("meta", 0, &doc);
+        assert_eq!(notes.len(), 1);
+        let note = &notes[0];
+        assert!(note.contains("alpha"), "note must contain 'alpha': {}", note);
+        assert!(note.contains("beta"),  "note must contain 'beta': {}", note);
     }
 }

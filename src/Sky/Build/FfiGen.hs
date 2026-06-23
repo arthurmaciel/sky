@@ -162,6 +162,7 @@ data PkgInfo = PkgInfo
     , _pkgFns    :: [FnInfo]
     , _pkgModules :: [String]  -- Rust target: public module paths to glob-import
     , _pkgErrors :: [String]
+    , _pkgNotes  :: [String]  -- diagnostic notes for `sky add` (e.g. facade guidance)
     }
     deriving (Show)
 
@@ -214,6 +215,7 @@ instance A.FromJSON PkgInfo where
         <*> o A..:? "functions" A..!= []
         <*> o A..:? "modules" A..!= []
         <*> o A..:? "errors" A..!= []
+        <*> o A..:? "notes" A..!= []
 
 
 -- | Inspect a single Go package via the Go FFI inspector (run inside sky-out).
