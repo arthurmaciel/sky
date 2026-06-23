@@ -109,7 +109,7 @@ RUN_TMO=25
 #   • CRATES.IO-dep fixtures (47-borrowed-returns) declare ordinary
 #     `["rust.dependencies] url = "2"` deps and need NO setup.sh — the sources
 #     are copied verbatim and cargo fetches the crate from crates.io.
-ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate)
+ALL_FIXTURES=(40-field-getters 41-field-setters 42-enum-variants 43-ffi-dce 44-wide-int 45-async-ffi 46-enum-multifield 47-borrowed-returns 48-ffi-generics 49-ffi-closures 50-ffi-iterators 51-ffi-trait-methods 51b-ffi-trait-methods-realcrate 52-ffi-dce-deadbinding)
 
 # ── stage_workdir <fixture-dir> → echoes a TMPDIR build copy with a portable
 # `file://` URL. Runs the fixture's setup.sh (stages the crate under the real
@@ -468,17 +468,70 @@ PY
   rm -rf "$wd"   # workdir is a copy → committed Main.sky never modified
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 52-ffi-dce-deadbinding — #29: the ENTRY module's DEAD top-level bindings are
+# DCE-filtered before Rust emission, mirroring the Go path's `generateDecls`
+# (`reachableTopLevel`/`keepName`). Pre-fix the Rust backend emitted EVERY
+# entry-module binding; a dead body calling an FFI wrapper that the S4
+# tree-shake pruned → cargo E0425. This suite asserts the three #29 invariants
+# on the DCE-ON build of the generated `main.rs` + bindings:
+#   (1) the DEAD binding `deadSquare` (→ `dead_square`) is DROPPED from main.rs.
+#   (2) its tree-shaken FFI wrapper `unused_3` is ABSENT from the bindings (the
+#       very wrapper whose absence used to E0425 the emitted dead body).
+#   (3) NO over-prune: the TRANSITIVELY-reached helper `livePrefix`
+#       (→ `live_prefix`, reached only via `liveLabel`, never directly by main)
+#       IS still emitted, AND the program runs `[ALL OK]`.
+# Self-contained: stages its OWN workdir (committed fixture untouched).
+# ─────────────────────────────────────────────────────────────────────────────
+run_deadbinding_dce() {
+  local base=52-ffi-dce-deadbinding
+  local src="$FIXROOT/$base"
+  [ -f "$src/src/Main.sky" ] || { _fail "$base-DCE (no such fixture)"; return; }
+
+  local wd; wd="$(stage_workdir "$src")" || { _fail "$base-DCE (stage failed)"; return; }
+  local binds; binds="$(bindings_file "$wd")" || { _fail "$base-DCE (cannot derive bindings path)"; rm -rf "$wd"; return; }
+
+  # DCE-on build (default). Must succeed — pre-fix this build E0425'd.
+  local bin; bin="$(build_fixture "$wd")" || { _fail "$base-DCE (build failed — entry-module dead binding not filtered? E0425)"; rm -rf "$wd"; return; }
+  local mainrs="$wd/sky-out/rust/src/main.rs"
+  [ -f "$mainrs" ] || { _fail "$base-DCE (no main.rs at $mainrs)"; rm -rf "$wd"; return; }
+
+  # (1) dead binding dropped from main.rs.
+  if rg -q 'dead_square' "$mainrs"; then
+    _fail "$base-DCE(1): dead binding deadSquare LEAKED into main.rs (entry-module DCE not applied)"; rm -rf "$wd"; return
+  fi
+  # (2) its tree-shaken wrapper absent from bindings.
+  if [ -f "$binds" ] && rg -q 'unused_3' "$binds"; then
+    _fail "$base-DCE(2): tree-shaken wrapper unused_3 unexpectedly present in bindings"; rm -rf "$wd"; return
+  fi
+  # (3) no over-prune: transitively-reached helper kept.
+  if ! rg -q 'live_prefix' "$mainrs"; then
+    _fail "$base-DCE(3): OVER-PRUNE — transitively-reached livePrefix dropped from main.rs"; rm -rf "$wd"; return
+  fi
+  # (3 cont) runs [ALL OK].
+  local outp="/tmp/ffi-fixture-$base-DCE.out"
+  exercise_cli "$bin" "$outp" "$RUN_TMO" || { _fail "$base-DCE (run panicked/hung)"; rm -rf "$wd"; return; }
+  if rg -q '\[ALL OK\]' "$outp"; then
+    _ok "$base-DCE: dead deadSquare dropped · unused_3 tree-shaken · livePrefix kept (no over-prune) · [ALL OK]"
+  else
+    _fail "$base-DCE (no [ALL OK] — got: $(tr -d '\n' <"$outp"))"
+  fi
+  ( cd "$wd" && rm -rf sky-out/rust/target ) >/dev/null 2>&1
+  rm -rf "$wd"
+}
+
 # ── Drive ────────────────────────────────────────────────────────────────────
 FIXTURES=("$@"); [ ${#FIXTURES[@]} -gt 0 ] || FIXTURES=("${ALL_FIXTURES[@]}")
 
 echo "── Sky→Rust auto-FFI fixture gate ──"
 for n in "${FIXTURES[@]}"; do
   case "$n" in
-    48-ffi-generics)      run_handstub ;;
-    49-ffi-closures)      run_handstub_basic "$n" ;;
-    50-ffi-iterators)     run_handstub_basic "$n" ;;
-    51-ffi-trait-methods) run_handstub_basic "$n" ;;
-    *)                    run_basic "$n" ;;
+    48-ffi-generics)          run_handstub ;;
+    49-ffi-closures)          run_handstub_basic "$n" ;;
+    50-ffi-iterators)         run_handstub_basic "$n" ;;
+    51-ffi-trait-methods)     run_handstub_basic "$n" ;;
+    52-ffi-dce-deadbinding)   run_deadbinding_dce ;;
+    *)                        run_basic "$n" ;;
   esac
 done
 # S4 DCE suite runs iff 43-ffi-dce is in the requested set.

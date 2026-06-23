@@ -1,0 +1,54 @@
+module Main exposing (main)
+
+-- #29 regression: the entry module emits a DEAD top-level binding body that
+-- Go's DCE drops. When that dead body calls an FFI wrapper that the S4
+-- tree-shake prunes (because nothing REACHABLE references it), the emitted
+-- Rust references a nonexistent fn → cargo E0425.
+--
+--   * `liveLabel` IS reachable from `main` (a pure helper) → must stay emitted
+--     (the no-over-prune guard: a reachable top-level binding is never dropped).
+--   * `deadSquare` is a top-level binding NEVER reached from `main`; its body
+--     calls `unused_3`, whose wrapper the tree-shake prunes (unreached). With
+--     the entry-module DCE filter, `deadSquare` is dropped (Go drops it too).
+--
+-- Pre-fix the Rust backend emitted `deadSquare` but dropped the wrapper →
+-- E0425 `cannot find function dcetest_unused_3`.
+import Rust.Dcetest as D
+import Std.Log exposing (println)
+
+
+-- LIVE pure helper: reached from main. Proves a reachable binding stays.
+-- It forwards to `livePrefix`, so `livePrefix` is reached only TRANSITIVELY
+-- (never directly from main) — proving the entry-module filter keeps the whole
+-- transitive closure, not just main's direct callees (no over-prune).
+liveLabel : Int -> String
+liveLabel n =
+    livePrefix ++ String.fromInt n
+
+
+livePrefix : String
+livePrefix =
+    "used_one(41)="
+
+
+-- DEAD: never reached from main. Calls `unused_3`, whose wrapper the
+-- tree-shake prunes. Must NOT be emitted (Go drops it too).
+deadSquare : Int -> Result String Int
+deadSquare x =
+    D.unused_3 x
+
+
+main =
+    case D.used_one 41 of
+
+        Err _ ->
+            println "used_one failed"
+
+        Ok n ->
+            println
+                (liveLabel n
+                    ++ (if n == 42 then
+                           "  [ALL OK]"
+
+                       else
+                           "  [MISMATCH]"))

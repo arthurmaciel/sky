@@ -1,0 +1,10 @@
+[project]
+name = "52-ffi-dce-deadbinding"
+version = "0.1.0"
+entry = "src/Main.sky"
+backend = "rust"
+
+# Same local dcetest crate as 43-ffi-dce, staged at its own cache path so the
+# two fixtures stay independent. setup.sh git-inits ./dcetest-crate there.
+["rust.dependencies"]
+dcetest = { git = "file:///home/arthur/.cache/sky/52-ffi-dce-deadbinding-crate", branch = "master" }

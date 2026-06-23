@@ -1968,6 +1968,39 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                             prunedDeps = [ depMod { Can._decls =
                                                       filterRustDecls (keepRustDecl (Can._name depMod)) (Can._decls depMod) }
                                          | depMod <- map snd validDeps ]
+                            -- #29: the ENTRY module's dead top-level bindings
+                            -- are dropped too, mirroring the Go path's
+                            -- `generateDecls` entry-module DCE (via
+                            -- `reachableTopLevel`/`keepName`). Without this the
+                            -- Rust backend emitted EVERY entry-module binding,
+                            -- including unreached ones; when such a dead body
+                            -- called an FFI wrapper that the S4 tree-shake
+                            -- pruned (unreached), the emitted Rust referenced a
+                            -- nonexistent fn → cargo E0425. The whole-program
+                            -- reachable set keys the entry module's TopRefs by
+                            -- `entryModName` (the key `allModsMap`/
+                            -- `reachableWholeProgram` used above), so the entry
+                            -- filter MUST use that same string — NOT
+                            -- `ModuleName.toString (Can._name canMod)`, which
+                            -- can diverge on the empty-source-name fallback.
+                            -- `main` is the DCE root, so it is always in
+                            -- `reached`; DestructDefs are kept structurally (the
+                            -- `keepRustDecl` DestructDef arm) AND are
+                            -- side-effect roots in the reachable set. The
+                            -- `dceOff || Set.null reached` guard makes a
+                            -- disabled-DCE / pre-fixpoint build emit everything,
+                            -- byte-identical to before (same escape hatch the
+                            -- dep filter + S4 tree-shake use).
+                            entryModName = case mainModuleName entrySrcMod of
+                                Just n  -> n
+                                Nothing -> "Main"
+                            keepEntryDecl d = case d of
+                                Can.DestructDef _ _ -> True
+                                _ -> let dn = rustDeclName d
+                                     in dceOff || Set.null reached
+                                        || Set.member (Dce.TopRef entryModName dn) reached
+                            prunedEntry = canMod { Can._decls =
+                                                     filterRustDecls keepEntryDecl (Can._decls canMod) }
                         -- Wall #2 (demand-driven generic Sky→Rust FFI epic),
                         -- the (A)-model. Two independent gates run HERE, before
                         -- generateRustProject (mirroring the Go branch's
@@ -2041,7 +2074,7 @@ continueCompile config entryPath outDir moduleOrder srcHash = do
                               -- fires the gate's diagnostic appends. So the
                               -- accumulator is fully populated once this returns.
                               genResult <-
-                                  RustProject.generateRustProject config (canMod : prunedDeps)
+                                  RustProject.generateRustProject config (prunedEntry : prunedDeps)
                                       entrySrcMod typesWithDeps rawAliases outDir srcHash
                                       reached dceOff genWrappers
                               gateDiags <- RustExpr.takeFfiClosureGateDiagnostics
