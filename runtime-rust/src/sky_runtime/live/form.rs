@@ -45,7 +45,11 @@ pub fn decode_form_or_warn<T: serde::de::DeserializeOwned>(fd: FormData) -> Opti
 mod tests {
     use super::*;
 
-    #[derive(serde::Deserialize, PartialEq, Debug)]
+    // NB: form-target structs gain `#[derive(Default)] #[serde(default)]` in
+    // codegen (Emitter.hs) so a missing form field decodes to the field's zero
+    // value — Go json.Unmarshal parity (#37). These test structs mirror that.
+    #[derive(serde::Deserialize, Default, PartialEq, Debug)]
+    #[serde(default)]
     struct Creds {
         email: String,
         password: String,
@@ -59,9 +63,49 @@ mod tests {
         let r: Option<Creds> = decode_form_or_warn(fd);
         assert_eq!(r, Some(Creds { email: "a@b.c".into(), password: "pw".into() }));
 
-        let bad = FormData::new(); // missing both fields
-        let r2: Option<Creds> = decode_form_or_warn(bad);
-        assert_eq!(r2, None);
+        // Go json.Unmarshal parity: a form with NEITHER field still decodes —
+        // each field falls to its zero value — so the Msg dispatches (Some).
+        let empty = FormData::new();
+        let r2: Option<Creds> = decode_form_or_warn(empty);
+        assert_eq!(r2, Some(Creds { email: String::new(), password: String::new() }));
+    }
+
+    // The #37 contract record: a String + an i64. Exercises the three cases the
+    // Go json.Unmarshal parity demands.
+    #[derive(serde::Deserialize, Default, PartialEq, Debug)]
+    #[serde(default)]
+    struct RunPayload {
+        code: String,
+        count: i64,
+    }
+
+    #[test]
+    fn decode_form_missing_field_defaults_not_error() {
+        // Neither field present (only an UNKNOWN key, as the playground posts
+        // `ace-mirror`): decode SUCCEEDS with zero values, Msg dispatches.
+        let mut unknown_only = FormData::new();
+        unknown_only.insert("ace-mirror".to_string(), "1+1".to_string());
+        let r: Option<RunPayload> = decode_form_or_warn(unknown_only);
+        assert_eq!(r, Some(RunPayload { code: String::new(), count: 0 }));
+
+        // `code` present, `count` absent → count defaults to 0.
+        let mut partial = FormData::new();
+        partial.insert("code".to_string(), "hello".to_string());
+        let r2: Option<RunPayload> = decode_form_or_warn(partial);
+        assert_eq!(r2, Some(RunPayload { code: "hello".into(), count: 0 }));
+    }
+
+    #[test]
+    fn decode_form_genuine_coercion_failure_still_none() {
+        // A non-numeric string into an i64 field is a GENUINE type error — it
+        // must still fail (None + warn), unchanged from Go (json.Unmarshal also
+        // errors on a malformed number). Only MISSING-field stopped being a
+        // failure; present-but-malformed stays a failure.
+        let mut bad = FormData::new();
+        bad.insert("code".to_string(), "ok".to_string());
+        bad.insert("count".to_string(), "abc".to_string());
+        let r: Option<RunPayload> = decode_form_or_warn(bad);
+        assert_eq!(r, None);
     }
 
     #[derive(serde::Deserialize, PartialEq, Debug)]
@@ -92,9 +136,11 @@ mod tests {
         let r: Result<Creds, String> = decode_form(fd);
         assert_eq!(r, Ok(Creds { email: "a@b.c".into(), password: "pw".into() }));
 
-        let mut bad = FormData::new();
-        bad.insert("email".to_string(), "a@b.c".to_string()); // missing password
-        let r2: Result<Creds, String> = decode_form(bad);
-        assert!(r2.is_err());
+        // Go json.Unmarshal parity: missing `password` → "" (zero value), Ok —
+        // the form-target struct's `#[serde(default)]` supplies it.
+        let mut partial = FormData::new();
+        partial.insert("email".to_string(), "a@b.c".to_string()); // missing password
+        let r2: Result<Creds, String> = decode_form(partial);
+        assert_eq!(r2, Ok(Creds { email: "a@b.c".into(), password: String::new() }));
     }
 }

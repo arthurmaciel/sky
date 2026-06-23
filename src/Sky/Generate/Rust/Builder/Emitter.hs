@@ -497,12 +497,37 @@ typeDefToString formTargets serdeTypes fnFieldStructs (RStructDef name gens fiel
         -- Debug/PartialEq either (the held struct has no Debug/PartialEq) — derive
         -- only Clone + serde (the held field is serde-skipped below).
         hasCallbackField = any (\(_, t) -> fieldTypeBase t `Set.member` fnFieldStructs) fields
+        -- #37: a form-decode target (an `onSubmit` handler's record arg) must
+        -- tolerate a MISSING form field by falling to that field's zero value —
+        -- matching Go's `json.Unmarshal` (missing key → zero value, unknown key
+        -- → ignored, decode SUCCEEDS so the Msg still dispatches). The Go backend
+        -- relies on that to dispatch the Msg even when the posted form-data
+        -- doesn't cover every typed-record field; without it the Rust serde
+        -- decode HARD-ERRORS on the first absent required field and the form
+        -- silently does nothing. We give every form-target struct a derived
+        -- `Default` + a container `#[serde(default)]`: serde then supplies
+        -- `Default::default()` for any absent field instead of erroring. A
+        -- PRESENT-but-malformed field (e.g. "abc" into an i64) still errors —
+        -- only the missing-field case becomes lenient, exactly like Go. The
+        -- attribute is DEserialize-only and changes nothing for a struct whose
+        -- form always carries every field. Form targets are decoded from
+        -- urlencoded data, so they never carry fn/callback fields (which would
+        -- both block `Default` derivation and collide with a manual `impl
+        -- Default`); the `hasFnField`/`hasCallbackField` arms are unreachable for
+        -- them and are left untouched.
+        -- The `serde` helper attribute `#[serde(default)]` must come AFTER the
+        -- `#[derive(…serde::Deserialize…)]` that INTRODUCES the `serde` helper —
+        -- a leading position trips `legacy_derive_helpers` (a future-incompat
+        -- hard-deny). So append the attribute as a SUFFIX on its own line.
+        isFormTarget = name `Set.member` formTargets
+        formDefaultAttr = if isFormTarget then "\n#[serde(default)]" else ""
+        formDefaultDerive = if isFormTarget then ", Default" else ""
         derives
             | hasFnField = "#[derive(Clone)]"
             | hasCallbackField && isSerde = "#[derive(Clone, serde::Serialize, serde::Deserialize)]"
             | hasCallbackField = "#[derive(Clone)]"
-            | isSerde = "#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]"
-            | name `Set.member` formTargets = "#[derive(Clone, Debug, PartialEq, serde::Deserialize)]"
+            | isSerde = "#[derive(Clone, Debug, PartialEq" ++ formDefaultDerive ++ ", serde::Serialize, serde::Deserialize)]" ++ formDefaultAttr
+            | isFormTarget = "#[derive(Clone, Debug, PartialEq, Default, serde::Deserialize)]" ++ formDefaultAttr
             | otherwise = "#[derive(Clone, Debug, PartialEq)]"
         -- A serde struct's field whose TYPE is a fn-field struct can't serialize:
         -- skip it (reconstructed via that struct's Default on deserialize).
