@@ -17,6 +17,121 @@ then a short what/why and an **Affected** list (files / commit).
 
 ---
 
+## 2026-06-23 — Iterators auto-FFI v1 (#30) — bind IntoIterator/Iterator param + fix return-position latent cargo-fail
+
+**What.** A Sky `List T` now passes to a Rust fn taking `impl IntoIterator<Item=T>`,
+`impl Iterator<Item=T>`, or a generic `<I: IntoIterator/Iterator<Item=T>>` param.
+Reduces to a `Vec<ItemT>` arg (no new TypeRef) — `Vec<T>: IntoIterator<Item=T>`
+satisfies the host bound by construction. Reuses the closure-bound seam. Spec:
+`docs/superpowers/specs/2026-06-23-rust-ffi-iterators-design.md` (guardian
+APPROVE-WITH-CONSTRAINTS). Return-position iterators stay DROPPED
+(undecidable finiteness). Subagent-driven, guardian design-review +
+independent guardian-final (APPROVE-FOR-PUSH, adversarial nested-return probes).
+
+- **[C-R] pre-existing latent bug closed FIRST.** A concrete-return
+  `fn f() -> impl IntoIterator<Item=X>` BOUND today (`bound_to_concrete` was
+  position-agnostic) → `-> Vec<X>` wrapper over an `impl IntoIterator` body →
+  latent E0308. Fix: `BoundPos::{Param,Return}` threaded through
+  `bound_to_concrete`/`subst_generic_json`/`impl_traits_resolvable`; return
+  position refuses iterator bounds → whole-fn drop `iterator-return-undecidable`.
+  Verified complete through nested `Result`/`Option` returns; concrete `-> Vec<T>`
+  not over-dropped.
+- **Param seam** (`tools/sky-ffi-inspect-rs`): `iterator_bound_of` +
+  `classify_iterator_param` mirror the closure seam — detect both `IntoIterator`
+  and `Iterator` trait names, companion gate reuses `closure_companion_satisfiable`
+  (Sized+lifetime ONLY → no under-bind), `Item=T` resolved via the param-aware
+  `type_to_typeref`. Shared tyvar across params routes both slots to `Vec`; `&mut I`
+  / borrowed param drops; `where I::Item: Ord` drops (NonGenericPredicate).
+- **Call-form marker** (`FfiCall.hs`): additive `_call_iterAdapters :: [Int]`,
+  default `[]` (`skip_serializing_if` → omitted on wire → Go-byte-identical). An
+  `Iterator`-kind arg renders `arg0.into_iter()` (a `Vec` isn't itself an
+  `Iterator`); `IntoIterator`/un-tagged renders `arg0`. `validateCall`
+  range+Vec-checks the indices (ill-formed kernel.json → hard parse error, never a
+  deferred cargo-fail).
+- **The bare-Iterator under-bind self-correction.** An initial Step-1 widening
+  admitted bare `Iterator` to a direct `Vec` on the concrete path → E0277. Fixed:
+  `bound_to_concrete` resolves ONLY `IntoIterator` (direct Vec); bare `Iterator`
+  binds solely via the adapter-emitting stub seam. Exactly two emission paths, no
+  third leak.
+- **Proof.** Fixture `runtime-rust/tests/sky/50-ffi-iterators` (`sum_all`
+  IntoIterator, `count_iter` Iterator-via-`.into_iter()`, `evens()` return-iterator
+  DROPPED) → `[ALL OK]`, wired into `ffi-fixtures-test.sh`. 69 inspector tests + the
+  6 required constraint negatives (C-R/C1/C2/C3/C4/C5) + `#30` cabal specs green; 0
+  net-new clippy.
+
+**Affected.** `tools/sky-ffi-inspect-rs/src/main.rs`,
+`src/Sky/Build/Rust/FfiCall.hs`,
+`test/Sky/Build/Rust/{FfiCallSpec,FfiInstanceSpec}.hs`,
+`runtime-rust/scripts/ffi-fixtures-test.sh`,
+`runtime-rust/tests/sky/50-ffi-iterators/` (new),
+`docs/superpowers/specs/2026-06-23-rust-ffi-iterators-design.md` (new). Commits
+`39a6f07f..f2b819ff` (6).
+
+---
+
+## 2026-06-23 — Closures/HOFs auto-FFI epic (#28) — bind closure-taking foreign fns
+
+**What.** A Sky lambda now crosses the FFI boundary into a Rust fn that takes a
+closure (`Fn`/`FnMut`/`FnOnce` slot). Zero hand stubs, sound by construction,
+misuse → first-class Sky `E4400` or a coverage drop (never a cargo-fail). Builds
+on Wall #2's (A)-model (one rustc-monomorphised generic wrapper per fn). Spec:
+`docs/superpowers/specs/2026-06-22-rust-ffi-closures-design.md`; plan:
+`docs/superpowers/plans/2026-06-22-rust-ffi-closures.md`. Executed
+subagent-driven, every phase + the final diff under
+`security-soundness-guardian` supervision (settled rule).
+
+- **Data model** (`FfiCall.hs`): `ClosureKind {FnKind,FnMutKind,FnOnceKind}` +
+  `TRClosure !ClosureKind !Bool ![TypeRef] !TypeRef` (kind, byRef, argTypes, ret);
+  `closureBounds`/`renderArgTypeAt` render the wrapper param as
+  `<Fj: Kind(..) -> R + Clone>` (Fn/FnMut get +Clone for multi-call; FnOnce
+  doesn't). `validateCall` rejects a closure nested in a container (would emit `F?`
+  → cargo-fail).
+- **Wrapper synthesis** (`FfiInstance.hs`): closure-carrying body wraps the host
+  call in `catch_unwind(AssertUnwindSafe(|| …))` with a total match → a Sky
+  closure that panics becomes `SkyResult::Err`, never unwinds across the FFI
+  frame (B1). Owned-clone bridge for `Fn(&A)` (`ownedCloneBridge`,
+  `move |__r| { let __v = __r.clone(); argJ(__v) }`) so the Sky closure only ever
+  sees an owned value (B4). Unsound shapes (`Fn(&mut)`, `-> closure`, by-ref
+  non-Clone concrete) drop with a coverage reason (`closureDropReason`).
+- **The capture-gate keystone** (`Compile.hs` + `ExprEmitter.hs`): a call-site Sky
+  lambda's captures must ALL pass `skyCaptureIsClone` (positive closed-Clone
+  allowlist, NEVER a denylist — B5) before a multi-call `Fn`/`FnMut` slot; else
+  `E4400`. Direct-`Can.Lambda`-only (an indirect closure arg drops
+  `closure-indirect-noanalysis`). Trait-kind threaded from the FFI sig to the
+  emit site via a NOINLINE `unsafePerformIO` IORef seam (EmitCtx is built
+  out-of-boundary) — forced-to-NF before the drain, reset per build, key-collision
+  fail-closed (same accepted hazard class as `globalFfiRegistry`).
+- **Inspector** (`tools/sky-ffi-inspect-rs`): `classify_closure_param` emits the
+  `{closure:{kind,byRef,argTypes,ret}}` metadata for Rust-ABI hosts (B3), wired
+  into `try_parametric_stub` so a REAL crate's inherent-method closure fn binds.
+  `closure_companion_satisfiable` admits ONLY `Sized`+lifetime companions (a
+  guardian fix — `Fn()+Send+'static` would otherwise under-bind → E0277). Free
+  closure fns still drop (needs #20/#24 free-generic-fn binding).
+- **The guardian-final BLOCK + fix.** The whole-diff review found a
+  type-checks-but-cargo-fails hole the per-phase reviews missed (the only by-ref
+  fixture carried `A: Clone`): a host `keep<A, F: Fn(&A)->bool>` with no
+  `A: Clone` made the owned-clone bridge clone `&A` → `E0308`. Fix:
+  `borrowedClosureParamIdxs` forces `+Clone` onto every param appearing as a
+  borrowed closure arg, deduped — sound+complete because every concrete closed-set
+  Sky type is Clone. Guardian proved `borrowedClosureParamIdxs` == the bridge's
+  `.clone()` set under drop-first ordering. Regression row `keep_unbounded`
+  (no `A: Clone`) added to the 49 fixture: pre-fix `E0308`, post-fix `[ALL OK]`.
+- **Proof.** Fixture `runtime-rust/tests/sky/49-ffi-closures` (`map_each` by-value
+  Fn, `keep` by-ref Fn, `keep_unbounded` unbounded by-ref) builds + runs
+  `[ALL OK]`, wired into `ffi-fixtures-test.sh`. 76 cabal `#28` specs + 51
+  inspector tests green. Real-crate end-to-end proof (6.2) remains CI-weight.
+
+**Affected.** `src/Sky/Build/Rust/{FfiCall,FfiInstance,Ffi}.hs`,
+`src/Sky/Build/Compile.hs`, `src/Sky/Generate/Rust/Builder/ExprEmitter.hs`,
+`tools/sky-ffi-inspect-rs/src/main.rs`,
+`test/Sky/Build/Rust/{FfiCallSpec,FfiInstanceSpec}.hs`,
+`runtime-rust/scripts/ffi-fixtures-test.sh`,
+`runtime-rust/tests/sky/49-ffi-closures/` (new). Commits `db042a8e..513d24b1`
+(13). Filed follow-up #29 (Rust dead-binding DCE parity gap, found by the
+Phase-4 guardian).
+
+---
+
 ## 2026-06-22 — Wall #2: demand-driven generic Sky→Rust FFI codegen (the (A)-model)
 
 **What.** Implemented Wall #2 of the demand-driven generic Sky→Rust FFI epic
