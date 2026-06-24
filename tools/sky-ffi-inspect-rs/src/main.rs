@@ -583,8 +583,21 @@ edition = "2021"
     // Fetch first (uses cargo cache — fast on repeated calls)
     fetch_dep(&manifest_str)?;
 
+    // [#51] Default to all features for visibility; fall back to default
+    // features if an all-features doc build fails (mutually-exclusive features).
+    let all_features = features.is_empty();
     let (json_content, version) =
-        run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name)?;
+        match run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, all_features) {
+            Ok(r) => r,
+            Err(e) if all_features => {
+                eprintln!(
+                    "[sky-ffi] --all-features doc build failed ({}); retrying with default features",
+                    e.lines().next().unwrap_or("").trim()
+                );
+                run_rustdoc_package(crate_name, &manifest_str, &target_dir, &safe_name, false)?
+            }
+            Err(e) => return Err(e),
+        };
 
     // If 0 public functions were found, the crate may be a thin re-export
     // facade (e.g. `clap` is just `pub use clap_builder::*`).  Detect glob
@@ -594,7 +607,7 @@ edition = "2021"
         if let Some(underlying) = find_glob_reexport_source(&json_content) {
             let under_safe = underlying.replace('-', "_");
             if let Ok((under_json, under_ver)) =
-                run_rustdoc_package(&underlying, &manifest_str, &target_dir, &under_safe)
+                run_rustdoc_package(&underlying, &manifest_str, &target_dir, &under_safe, all_features)
             {
                 if json_has_functions(&under_json) {
                     return Ok((under_json, under_ver));
@@ -612,22 +625,32 @@ fn run_rustdoc_package(
     manifest_str: &str,
     target_dir: &PathBuf,
     safe_name: &str,
+    all_features: bool,
 ) -> Result<(String, String), String> {
-    let output = Command::new("cargo")
-        .args([
-            "+nightly",
-            "rustdoc",
-            "--package",
-            package_name,
-            "--lib",          // pin to library target; avoids "extra arguments"
-                              // errors on crates with binary or example targets.
-            "--manifest-path",
-            manifest_str,
-        ])
-        // Pass the target dir as an OsStr so a non-UTF8 tempdir path can't panic
-        // (an earlier `.to_str().unwrap()` aborted on TMPDIR with invalid bytes).
-        .arg("--target-dir")
-        .arg(target_dir)
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "+nightly",
+        "rustdoc",
+        "--package",
+        package_name,
+        "--lib",          // pin to library target; avoids "extra arguments"
+                          // errors on crates with binary or example targets.
+        "--manifest-path",
+        manifest_str,
+    ])
+    // Pass the target dir as an OsStr so a non-UTF8 tempdir path can't panic
+    // (an earlier `.to_str().unwrap()` aborted on TMPDIR with invalid bytes).
+    .arg("--target-dir")
+    .arg(target_dir);
+    // [#51] With no explicit `--features`, default to ALL features so
+    // feature-gated APIs (the common case — e.g. async-stripe's per-resource
+    // `customer`/`checkout` features hide every `async fn send`) are visible to
+    // the inspector. `run_rustdoc` falls back to default features when an
+    // all-features doc build fails (crates with mutually-exclusive features).
+    if all_features {
+        cmd.arg("--all-features");
+    }
+    let output = cmd
         .args([
             "--quiet",
             "--",
