@@ -1,0 +1,49 @@
+module Main exposing (main)
+
+-- 74-ffi-opaque-client: Sky #52 — opaque-handle threading + concrete-impl
+-- monomorphization. A realistic async-generic op over an OPAQUE, NOT-Clone
+-- client handle binds shim-free (the firestore/stripe shape).
+--
+-- POSITIVE (bind + run end-to-end):
+--   db  = O.db_new "u"                 -- opaque Db handle, returned by value
+--   req = O.req_new () |> O.with_field "hi"
+--   O.send req db |> Task.run          -- C: Wire monomorphizes to Db; Db threads
+--                                      --   by-value as &C; Wire: Send admits it.
+-- Asserts the result is "sent hi via db", then prints [ALL OK].
+--
+-- NEGATIVE (must be ABSENT from the bindings — coverage-dropped):
+--   send_ambiguous  -- C: Transport has TWO impls (Db, Db2) → ambiguous → DROP
+--   recv            -- C: Held over NotSend (Rc) → async future !Send → DROP
+
+import Sky.Core.Prelude exposing (..)
+import Sky.Core.Task as Task
+import Sky.Core.Error as Error
+import Rust.Opaqueffi74 as O
+import Std.Log exposing (println)
+
+
+-- The opaque Db handle threads by value into the async generic op.
+checkSend : Task Error ()
+checkSend =
+    let
+        db =
+            O.new_from_db "u"
+
+        req =
+            O.new_from_req () |> O.with_field_from_req "hi"
+    in
+    O.send req db
+        |> Task.andThen
+            (\s ->
+                if s == "sent hi via db" then
+                    println "send=sent hi via db"
+
+                else
+                    Task.fail (Error.unexpected ("send=UNEXPECTED " ++ s))
+            )
+
+
+main : Task Error ()
+main =
+    checkSend
+        |> Task.andThen (\_ -> println "[ALL OK]")

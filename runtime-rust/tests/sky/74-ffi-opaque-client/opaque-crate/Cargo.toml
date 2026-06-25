@@ -1,0 +1,11 @@
+[package]
+name = "opaqueffi74"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["time", "rt", "rt-multi-thread", "macros"] }
+futures = { version = "0.3", features = ["executor"] }
