@@ -720,9 +720,35 @@ emitRustFile kernelName pkg =
             rawRustResultTypes = _fnRustResultTypes fn
             nRawRustParam = length rawRustParamTypes
             nRawRustResult = length rawRustResultTypes
-            paramTypes = [ resolveRustType crateImport st
-                            (if j < nRawRustParam then rawRustParamTypes !! j else "")
-                         | (j, st) <- zip [0::Int ..] (take nParams paramSkyTypes) ]
+            paramTypesRaw = [ resolveRustType crateImport st
+                                (if j < nRawRustParam then rawRustParamTypes !! j else "")
+                            | (j, st) <- zip [0::Int ..] (take nParams paramSkyTypes) ]
+            -- [#52 Step 1] Async-threaded opaque BORROW param → OWN-BY-VALUE.
+            -- An effectful (async) wrapper captures every non-self param in the
+            -- `async move { … }` block tokio::task::spawn drives, which requires
+            -- `'static`. A `&Opaque` param (the monomorphized `client: &C` → `&Db`)
+            -- would then ESCAPE the wrapper body (E0521 borrowed-data-escapes). So
+            -- for an effectful wrapper, declare such a param as the OWNED type
+            -- (strip the single leading `&`) — the Sky value already owns the
+            -- handle and moves it in — and re-borrow it at the call site (`&argN`,
+            -- handled in `argCall`). Restricted to a single non-`&mut`, non-`&str`/
+            -- `&String`/`&[…]` borrow of an opaque (the slice/str/Option arms own
+            -- their own coercion paths and are untouched). Sync wrappers are
+            -- unchanged (no spawn, no escape).
+            isAsyncOwnRefTy t =
+                _fnEffect fn == "effectful"
+                && "&" `isPrefixOf` t
+                && not ("&mut " `isPrefixOf` t)
+                && (let rest = trimStr (drop 1 t)
+                    in rest /= "str" && rest /= "String"
+                       && not ("&" `isPrefixOf` rest)
+                       && not ("[" `isPrefixOf` rest)
+                       && not (null rest))
+            asyncOwnRefIdx = [ j | (j, t) <- zip [0::Int ..] paramTypesRaw, isAsyncOwnRefTy t ]
+            -- The declared wrapper param types: owned form for async-threaded
+            -- opaque borrows, raw form otherwise.
+            paramTypes = [ if j `elem` asyncOwnRefIdx then trimStr (drop 1 t) else t
+                         | (j, t) <- zip [0::Int ..] paramTypesRaw ]
             -- Display bridge on a generic receiver type (e.g. DateTime<Tz>):
             -- emit `arg0: impl std::fmt::Display` so the wrapper accepts any
             -- concrete instantiation without needing to spell out trait bounds.
@@ -802,7 +828,13 @@ emitRustFile kernelName pkg =
                 let rawTy  = if j < nRawRustParam then rawRustParamTypes !! j else ""
                     declTy = paramTypes !! j
                     base   = arg j
-                in case seqKind rawTy of
+                in if j `elem` asyncOwnRefIdx
+                    -- [#52 Step 1] async-threaded opaque owned by-value in the
+                    -- wrapper sig → re-borrow at the call site so the foreign
+                    -- `&C` (→ `&Db`) param is satisfied while the owned value
+                    -- stays moved into the async block (no escape).
+                    then "&" ++ base
+                    else case seqKind rawTy of
                     Just (SeqKind Slice    ElemU8) -> "&to_u8_vec(&" ++ base ++ ")"
                     Just (SeqKind Owned    ElemU8) -> "to_u8_vec(&" ++ base ++ ")"
                     Just (SeqKind (Arr _)    ElemU8) -> "b" ++ show j        -- prelude local (owned)

@@ -22,25 +22,30 @@ import Rust.Opaqueffi74 as O
 import Std.Log exposing (println)
 
 
--- The opaque Db handle threads by value into the async generic op.
+-- The opaque Db handle threads by value into the async generic op. The opaque
+-- ctors / builder bind SYNC (`Result Error <opaque>`); bridge them into the
+-- async pipeline with `Task.fromResult`.
 checkSend : Task Error ()
 checkSend =
-    let
-        db =
-            O.new_from_db "u"
+    case ( O.new_from_db "u", O.new_from_req () ) of
+        ( Ok db, Ok req0 ) ->
+            case O.with_field_from_req req0 "hi" of
+                Ok req ->
+                    O.send_from_req req db
+                        |> Task.andThen
+                            (\s ->
+                                if s == "sent hi via db" then
+                                    println "send=sent hi via db"
 
-        req =
-            O.new_from_req () |> O.with_field_from_req "hi"
-    in
-    O.send req db
-        |> Task.andThen
-            (\s ->
-                if s == "sent hi via db" then
-                    println "send=sent hi via db"
+                                else
+                                    Task.fail (Error.unexpected ("send=UNEXPECTED " ++ s))
+                            )
 
-                else
-                    Task.fail (Error.unexpected ("send=UNEXPECTED " ++ s))
-            )
+                Err e ->
+                    Task.fail e
+
+        _ ->
+            Task.fail (Error.unexpected "opaque ctor failed")
 
 
 main : Task Error ()

@@ -912,6 +912,14 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
         CLONE_OPAQUE_NAMES.with(|c| *c.borrow_mut() = names);
     }
 
+    // [#52] Concrete-impl index + Send-proof sources. Built after
+    // REACHABLE_PATHS/LOCAL_TYPE_IDS so the filters can consult them.
+    TRAIT_CONCRETE_IMPLS.with(|c| *c.borrow_mut() = collect_trait_concrete_impls(index));
+    SEND_SUPERTRAIT_TRAIT_IDS.with(|c| *c.borrow_mut() = collect_send_supertrait_trait_ids(index));
+    EXPLICIT_SEND_TYPE_IDS.with(|c| *c.borrow_mut() = collect_explicit_send_type_ids(index));
+    ALL_FIELDS_SEND_TYPE_IDS.with(|c| *c.borrow_mut() = collect_all_fields_send_type_ids(index));
+    PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow_mut().clear());
+
     for (item_id, item) in index {
         // Only items from this crate (crate_id == 0); deps have crate_id > 0
         let crate_id = item["crate_id"].as_u64().unwrap_or(1);
@@ -1032,7 +1040,27 @@ fn parse_rustdoc(doc: &serde_json::Value, crate_name: &str, version: &str) -> Pk
                             continue;
                         }
                         let method_name = method_item["name"].as_str().unwrap_or("");
-                        if let Some(fn_data) = method_item["inner"].get("function") {
+                        if let Some(fn_data_raw) = method_item["inner"].get("function") {
+                            // [#52] Concrete-impl monomorphization (BEFORE any
+                            // generic-bearing decision / census — constraint 3). A
+                            // generic param `C: Trait` bounded by a single
+                            // non-modellable crate-local trait with EXACTLY ONE
+                            // concrete impl is substituted to that concrete (`C=Db`)
+                            // and stripped from the generics, so the method flows
+                            // through the ordinary monomorphized `parse_fn_item`
+                            // path (async + Send gate + opaque-by-value threading
+                            // reused). `Some(None)` ⇒ the param matched our shape
+                            // but the impl count is 0/>1 → DROP (already recorded).
+                            let mono_owned: Option<serde_json::Value> =
+                                match monomorphize_concrete_impl_params(
+                                    method_name, fn_data_raw, impl_generics,
+                                ) {
+                                    Some(Some(rewritten)) => Some(rewritten),
+                                    Some(None) => continue, // ambiguous → drop recorded
+                                    None => None,           // nothing matched
+                                };
+                            let fn_data: &serde_json::Value =
+                                mono_owned.as_ref().unwrap_or(fn_data_raw);
                             // Wall #3: if this method is GENERIC-BEARING (its
                             // own / the impl's / the struct's generics declare a
                             // type param used in the sig), retire Alt-1's concrete
@@ -1663,6 +1691,135 @@ fn collect_clone_struct_ids(index: &serde_json::Map<String, serde_json::Value>) 
             {
                 out.insert(item_id_to_str(id));
             }
+        }
+    }
+    out
+}
+
+/// [#52] Build the concrete-impl index: crate-local trait id → list of CONCRETE,
+/// NAMEABLE, NON-GENERIC `for` type nodes of every `impl Trait for T` in this
+/// crate (`crate_id == 0`). Used to monomorphize `C: Trait` to its unique impl.
+///
+/// Soundness filters (constraint 2):
+///   * The impl block, its trait reference, AND the `for` type are all CRATE-LOCAL
+///     (`crate_id == 0`). A cross-crate impl never enters (sound miss).
+///   * The trait reference must carry a usable id (the key); a bare-name impl with
+///     no id is skipped (can't key it soundly).
+///   * The `for` Self must be `self_is_concrete_named` — a generic / blanket /
+///     parametric Self (`impl<T> Foo for T` / `impl<T> Foo for Vec<T>`) is DROPPED
+///     here, so `concrete_for_unique_impl` only ever sees non-generic candidates.
+///   * The `for` id must resolve to a reachable public path — an unreachable
+///     (private) impl target is excluded (the wrapper couldn't name it).
+///
+/// MUST run AFTER `REACHABLE_PATHS`/`LOCAL_TYPE_IDS` are populated.
+fn collect_trait_concrete_impls(
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> HashMap<String, Vec<serde_json::Value>> {
+    let mut out: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    for (_id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let Some(impl_data) = item["inner"].get("impl") else { continue };
+        // Must be a TRAIT impl (not inherent) with a usable trait id.
+        let Some(trait_node) = impl_data.get("trait") else { continue };
+        let Some(trait_id) = trait_node.get("id") else { continue };
+        let trait_key = item_id_to_str(trait_id);
+        // The trait must be CRATE-LOCAL (same-crate-only). A std/external trait
+        // (From/Into/Serialize/…) is handled by other arms and never monomorphized
+        // here. `LOCAL_TYPE_IDS` is the crate-local-type set; a crate-local trait's
+        // id is in it (a trait is a type item) OR reachable.
+        let trait_local = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&trait_key))
+            || REACHABLE_PATHS.with(|c| c.borrow().contains_key(&trait_key));
+        if !trait_local {
+            continue;
+        }
+        let for_val = impl_data.get("for").or_else(|| impl_data.get("for_"));
+        let Some(for_val) = for_val else { continue };
+        // Non-generic, concrete, named Self only (constraint 2).
+        if !self_is_concrete_named(for_val) {
+            continue;
+        }
+        // The Self id must be reachable (the wrapper must be able to name it).
+        let reachable = for_val
+            .get("resolved_path")
+            .and_then(|rp| rp.get("id"))
+            .map(|id| reachable_local_path(id).is_some())
+            .unwrap_or(false);
+        if !reachable {
+            continue;
+        }
+        let entry = out.entry(trait_key).or_default();
+        // Dedup by rendered type so a re-listed impl doesn't count twice.
+        let rendered = rustdoc_type_to_rust_str(for_val);
+        if !entry.iter().any(|e| rustdoc_type_to_rust_str(e) == rendered) {
+            entry.push(for_val.clone());
+        }
+    }
+    out
+}
+
+/// [#52] Crate-local trait ids whose declaration carries a `Send` supertrait
+/// (`trait T: Send` / `trait T: Send + Sync`). Drives the Send-proof's first
+/// source: a param `C: T` with `T: Send` makes `C: Send` a usable fact.
+fn collect_send_supertrait_trait_ids(
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    for (id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let Some(trait_data) = item["inner"].get("trait") else { continue };
+        let Some(bounds) = trait_data.get("bounds").and_then(|b| b.as_array()) else { continue };
+        let has_send = bounds.iter().any(|b| {
+            trait_bound_name(b).as_deref() == Some("Send")
+        });
+        if has_send {
+            out.insert(id.clone());
+        }
+    }
+    out
+}
+
+/// [#52] Crate-local type ids PROVEN `Send` by an explicit `impl Send for T` /
+/// `unsafe impl Send for T`. The Send-proof's second source.
+fn collect_explicit_send_type_ids(
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    for (_id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let Some(impl_data) = item["inner"].get("impl") else { continue };
+        let Some(trait_node) = impl_data.get("trait") else { continue };
+        let tname = trait_node
+            .get("path")
+            .or_else(|| trait_node.get("name"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("");
+        if tname.rsplit("::").next().unwrap_or(tname) != "Send" {
+            continue;
+        }
+        // Only a REAL hand-written `unsafe impl Send for T` proves Send. rustdoc
+        // emits a SYNTHETIC auto-trait impl for EVERY type's Send status — for a
+        // `!Send` type (NotSend's `Rc`) that synthetic impl is a NEGATIVE
+        // `impl !Send`. BOTH must be excluded (a synthetic positive is also not a
+        // proof we should rely on — it's rustdoc's derivation, and a negative one
+        // would wrongly admit). Require non-synthetic AND non-negative.
+        if impl_data.get("is_synthetic").and_then(|b| b.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        if impl_data.get("is_negative").and_then(|b| b.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let for_val = impl_data.get("for").or_else(|| impl_data.get("for_"));
+        if let Some(fid) = for_val
+            .and_then(|v| v.get("resolved_path"))
+            .and_then(|rp| rp.get("id"))
+        {
+            out.insert(item_id_to_str(fid));
         }
     }
     out
@@ -2897,6 +3054,24 @@ fn parse_fn_item(
             if is_async_send_seq(rt) {
                 return true;
             }
+            // [#52 Step 3] A provably-Send opaque concrete (monomorphized from a
+            // `C: Trait` param whose Send was proven — Send-supertrait / explicit
+            // impl Send / all-fields-Send). Strip a single leading borrow; reject
+            // `&mut`/nested. An UNPROVABLE concrete is absent from the set → drops.
+            {
+                let base = rt
+                    .strip_prefix("&mut ")
+                    .map(|_| "") // &mut → never admit (the set holds owned/&T names)
+                    .or_else(|| rt.strip_prefix('&'))
+                    .unwrap_or(rt)
+                    .trim();
+                if !base.is_empty()
+                    && !base.starts_with('&')
+                    && PROVABLY_SEND_OPAQUE_NAMES.with(|c| c.borrow().contains(base))
+                {
+                    return true;
+                }
+            }
             false
         };
         let non_send_param = params
@@ -3020,6 +3195,111 @@ thread_local! {
     // same reason as in `collect_external_trait_paths`.
     static EXTERNAL_TYPE_PATH_BY_ID: std::cell::RefCell<HashMap<String, String>> =
         std::cell::RefCell::new(HashMap::new());
+
+    // [#52] Concrete-impl index for the concrete-impl-monomorphization arm.
+    // Maps a CRATE-LOCAL trait's rustdoc id (`item_id_to_str`) → the set of `for`
+    // type JSON nodes of every concrete `impl Trait for T` in THIS crate. Used by
+    // `concrete_for_unique_impl` to monomorphize a generic param `C: Trait`
+    // (Trait non-modellable, non-serde) to its UNIQUE concrete impl `T`. KEYED BY
+    // RESOLVED TRAIT ID (never last segment) so two distinct traits sharing a
+    // last segment never merge.
+    //
+    // SAME-CRATE ONLY (constraint 2): only impls with `crate_id == 0` are
+    // recorded, and the lookup keys on a crate-local trait id. A cross-crate
+    // facade impl (`impl Trait for Client` in another crate) is NOT in the entry
+    // rustdoc index → absent here → the param drops (sound miss).
+    //
+    // The stored `for` node is the impl's literal Self type JSON (a
+    // `{"resolved_path":{…}}`), which is exactly the concrete substitute
+    // `subst_generic_json` needs. Generic / blanket / parametric Self impls are
+    // FILTERED OUT at collection time (only `self_is_concrete_named` survives),
+    // so every entry is a nameable, non-generic concrete type.
+    static TRAIT_CONCRETE_IMPLS: std::cell::RefCell<HashMap<String, Vec<serde_json::Value>>> =
+        std::cell::RefCell::new(HashMap::new());
+
+    // [#52] Set of CRATE-LOCAL trait ids that themselves carry a `Send` supertrait
+    // bound (declared `trait T: Send` / `trait T: Send + Sync + …`). The Send-proof
+    // (Step 3) consults this: a generic param `C: T` monomorphized to a concrete
+    // opaque is provably-Send-for-the-async-gate when its bound trait `T: Send`,
+    // because the host signature `fn op<C: T>(…)` makes `C: Send` a usable fact.
+    static SEND_SUPERTRAIT_TRAIT_IDS: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+
+    // [#52] Set of CRATE-LOCAL type ids PROVEN `Send` by an explicit
+    // `impl Send for T` / `unsafe impl Send for T`. The Send-proof's second source.
+    static EXPLICIT_SEND_TYPE_IDS: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+
+    // [#52 Step 3] RENDERED rust-type names of concrete opaque handles PROVEN
+    // `Send` (via Send-supertrait bound / explicit impl Send / all-fields-Send)
+    // that were monomorphized into an async-threaded param. The async Send gate
+    // (`param_send_ok` in parse_fn_item) consults this to admit a provably-Send
+    // opaque it would otherwise over-drop. An UNPROVABLE concrete is NEVER here →
+    // the gate keeps dropping it (`async-future-not-send`). Reset per crate.
+    static PROVABLY_SEND_OPAQUE_NAMES: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+
+    // [#52 Step 3] Precomputed crate-local struct ids whose EVERY field is in the
+    // Sky-coercible closed set (primitive/String/Vec/Option/clone-opaque) — all of
+    // which are `Send`, so the struct is `Send` by auto-derivation. The Send-proof's
+    // third source. A struct with an `Rc`/raw-pointer/`RefCell` field is NOT in the
+    // closed set → absent here → not provably-Send → the async gate drops it.
+    static ALL_FIELDS_SEND_TYPE_IDS: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// [#52 Step 3] Build the all-fields-Send id set. A crate-local struct whose every
+/// named field passes `field_type_eligible` (the Sky-coercible closed set, every
+/// member of which is `Send`) is `Send` by auto-derivation. A unit struct (no
+/// fields) is trivially `Send`. CONSERVATIVE: any field outside the set (`Rc` /
+/// raw pointer / `RefCell` / external type) → the struct is excluded.
+fn collect_all_fields_send_type_ids(
+    index: &serde_json::Map<String, serde_json::Value>,
+) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    let clone_ids: HashSet<String> = HashSet::new();
+    for (id, item) in index {
+        if item["crate_id"].as_u64().unwrap_or(1) != 0 {
+            continue;
+        }
+        let Some(struct_data) = item["inner"].get("struct") else { continue };
+        let kind = struct_data.get("kind");
+        // Unit struct → trivially Send.
+        if kind.and_then(|k| k.get("unit")).is_some() {
+            out.insert(id.clone());
+            continue;
+        }
+        let Some(plain) = kind.and_then(|k| k.get("plain")) else { continue };
+        // CRITICAL soundness gate: a struct with PRIVATE / doc-stripped fields has
+        // those fields ABSENT from the `fields` array (rustdoc strips private items
+        // by default and sets `has_stripped_fields`). We CANNOT prove all-fields-Send
+        // when a field is hidden — a stripped `Rc`/raw-pointer field (the `!Send`
+        // NotSend row) would otherwise pass with an empty field list. Refuse.
+        if plain.get("has_stripped_fields").and_then(|b| b.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let Some(field_ids) = plain.get("fields").and_then(|f| f.as_array()) else { continue };
+        let mut all_send = true;
+        for fid in field_ids {
+            let key = item_id_to_str(fid);
+            let Some(field_item) = index.get(&key) else { all_send = false; break };
+            let Some(fty) = field_item["inner"].get("struct_field") else { all_send = false; break };
+            if field_type_eligible(fty, index, &clone_ids).is_err() {
+                all_send = false;
+                break;
+            }
+        }
+        if all_send {
+            out.insert(id.clone());
+        }
+    }
+    out
+}
+
+/// [#52 Step 3] True when the crate-local concrete type `type_id` is provably
+/// `Send` by auto-derivation (all fields Send).
+fn concrete_type_all_fields_send(type_id: &str) -> bool {
+    ALL_FIELDS_SEND_TYPE_IDS.with(|s| s.borrow().contains(type_id))
 }
 
 /// Canonical std/core/alloc trait paths that the modellable-5 + the Display/
@@ -4888,6 +5168,10 @@ enum GenericDrop {
     /// verdict (§3) EVERY non-`dyn-Fn` trait object DROPS — `dyn Fn` is the closure
     /// seam's job and is excluded by `is_dyn_trait_object`. `String` = offending type.
     TraitObjectDrop(String),
+    /// [#52] A generic param bounded by a single non-modellable crate-local trait
+    /// whose CONCRETE-IMPL count is NOT exactly one (0 / >1 / blanket / generic-T).
+    /// Never guess which concrete to monomorphize to — DROP. `String` = trait name.
+    TraitBoundedParamAmbiguous(String),
 }
 
 /// The distinct reason a trait-impl method could not be bound (#21). Each maps to
@@ -5020,6 +5304,7 @@ impl GenericDrop {
             GenericDrop::IteratorDrop(tag, _)   => tag.tag(),
             GenericDrop::TraitMethodDrop(tag, _) => tag.tag(),
             GenericDrop::TraitObjectDrop(_)     => "trait-object-unsupported",
+            GenericDrop::TraitBoundedParamAmbiguous(_) => "trait-bounded-param-ambiguous",
         }
     }
     fn detail(&self) -> &str {
@@ -5031,7 +5316,8 @@ impl GenericDrop {
             | GenericDrop::ClosureDrop(_, d)
             | GenericDrop::IteratorDrop(_, d)
             | GenericDrop::TraitMethodDrop(_, d)
-            | GenericDrop::TraitObjectDrop(d) => d,
+            | GenericDrop::TraitObjectDrop(d)
+            | GenericDrop::TraitBoundedParamAmbiguous(d) => d,
         }
     }
 }
@@ -6856,6 +7142,256 @@ fn resolve_param_bounds(bounds: &[serde_json::Value], pos: BoundPos) -> Option<s
         }
     }
     concrete
+}
+
+/// [#52] Whether a generic-param bound list is EXACTLY one non-modellable,
+/// non-serde, non-marker, CRATE-LOCAL trait — the shape the concrete-impl
+/// monomorphizer handles. Returns the trait's resolved id key when so.
+///
+/// REJECTS (returns None — leave to the existing arms / drop):
+///   * a modellable-5 bound (Hash/Eq/Ord/Clone/Default) → existing `bound_to_concrete`
+///   * a serde bound → the #47 serde arm
+///   * a higher-ranked (`for<'a>`) bound → existing drop
+///   * an external (non-crate-local) trait → not in TRAIT_CONCRETE_IMPLS (sound miss)
+///   * >1 non-marker bound → ambiguous which trait to resolve against → None
+///   * a trait with no usable id → can't key the impl index → None
+fn single_concrete_impl_trait_key(bounds: &[serde_json::Value]) -> Option<String> {
+    let mut found: Option<String> = None;
+    for b in bounds {
+        if is_marker_bound(b) {
+            continue;
+        }
+        if bound_is_higher_ranked(b) {
+            return None;
+        }
+        // A bound the existing arms already resolve (modellable-5 / serde / the
+        // Display/Into/… families) is NOT ours — let them handle it.
+        if resolve_param_bounds(std::slice::from_ref(b), BoundPos::Param).is_some() {
+            return None;
+        }
+        if is_serde_trait_bound(b) {
+            return None;
+        }
+        // Must be a real trait_bound with a usable id.
+        let tr = b.get("trait_bound").and_then(|tb| tb.get("trait"))?;
+        let id = tr.get("id")?;
+        let key = item_id_to_str(id);
+        // Only a CRATE-LOCAL trait (same-crate-only, constraint 2).
+        let local = LOCAL_TYPE_IDS.with(|s| s.borrow().contains(&key))
+            || REACHABLE_PATHS.with(|c| c.borrow().contains_key(&key));
+        if !local {
+            return None;
+        }
+        // A SECOND real bound → ambiguous; refuse (over-drop is sound).
+        if found.is_some() {
+            return None;
+        }
+        found = Some(key);
+    }
+    found
+}
+
+/// [#52] Resolve a generic param bounded by `trait_key` to its UNIQUE concrete
+/// impl's `for` type node (the substitute), or `None` when the count is not
+/// exactly one (0 / >1 → `trait-bounded-param-ambiguous` drop at the caller).
+/// All entries in `TRAIT_CONCRETE_IMPLS` are already nameable+reachable+non-generic
+/// (filtered at collection time), so a unique entry is a sound monomorphization.
+fn concrete_for_unique_impl(trait_key: &str) -> Option<serde_json::Value> {
+    TRAIT_CONCRETE_IMPLS.with(|c| {
+        let map = c.borrow();
+        match map.get(trait_key) {
+            Some(impls) if impls.len() == 1 => impls.first().cloned(),
+            _ => None, // 0 or >1 → ambiguous → drop
+        }
+    })
+}
+
+/// [#52] The concrete `for` node + its rustdoc type-id for a unique-impl trait,
+/// so the Send-proof can check the resolved concrete type. `None` when not unique.
+fn concrete_impl_self_id(trait_key: &str) -> Option<String> {
+    concrete_for_unique_impl(trait_key)
+        .and_then(|fv| fv.get("resolved_path").and_then(|rp| rp.get("id")).cloned())
+        .map(|id| item_id_to_str(&id))
+}
+
+/// [#52] Attempt concrete-impl monomorphization of a method's generic params that
+/// are bounded by a UNIQUE-impl crate-local trait (`C: Wire` → `C = Db`). On
+/// success returns a REWRITTEN `fn_data` clone with (a) each such param
+/// substituted to its concrete type throughout the signature and (b) those params
+/// removed from the `generics.params` list — so the method becomes non-generic
+/// for that param and flows through the ordinary monomorphized path (async + Send
+/// gate + opaque-by-value threading reused).
+///
+/// Returns `None` when NO param matched (nothing to do — caller keeps existing
+/// routing). Returns `Some(Err(()))` ENCODED as a sentinel? No — to keep the
+/// caller simple, an AMBIGUOUS match (the single-impl trait shape but 0/>1 impls)
+/// records the `trait-bounded-param-ambiguous` drop HERE and returns
+/// `Some(None)` to signal "this method must DROP". A clean rewrite returns
+/// `Some(Some(rewritten))`.
+///
+/// ORDERING (constraint 3): this runs BEFORE the serde occurrence census and
+/// before parametric-stub routing, so the substituted `&C` becomes a concrete
+/// `&Db` and never trips the generic walk.
+#[allow(clippy::type_complexity)]
+fn monomorphize_concrete_impl_params(
+    method_name: &str,
+    fn_data: &serde_json::Value,
+    impl_generics: Option<&serde_json::Value>,
+) -> Option<Option<serde_json::Value>> {
+    let params = fn_data.get("generics")?.get("params")?.as_array()?;
+    // where-clause bounds keyed by generic name (same gather as resolve_generics).
+    let mut where_bounds: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    if let Some(wps) = fn_data["generics"]["where_predicates"].as_array() {
+        for wp in wps {
+            if let Some(bp) = wp.get("bound_predicate") {
+                if let Some(g) = bp.get("type").and_then(|t| t.get("generic")).and_then(|g| g.as_str()) {
+                    if let Some(bs) = bp.get("bounds").and_then(|b| b.as_array()) {
+                        where_bounds.entry(g.to_string()).or_default().extend(bs.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
+
+    // Which param names are actually USED in the signature (only those force a
+    // resolution decision; an unused phantom param is harmless to leave).
+    let sig = fn_data.get("sig").or_else(|| fn_data.get("decl"));
+    let mut used: HashSet<String> = HashSet::new();
+    if let Some(sig) = sig {
+        if let Some(inputs) = sig["inputs"].as_array() {
+            for input in inputs {
+                collect_generic_names(&input[1], &mut used);
+            }
+        }
+        collect_generic_names(&sig["output"], &mut used);
+    }
+
+    let mut subst: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut matched_send_keys: Vec<(String, String)> = Vec::new(); // (param, trait_key)
+    let mut removed: HashSet<String> = HashSet::new();
+    for p in params {
+        if p.get("kind").and_then(|k| k.get("type")).is_none() {
+            continue; // lifetime / const — not ours
+        }
+        let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if !used.contains(name) {
+            continue; // unused param — leave it
+        }
+        let mut bounds: Vec<serde_json::Value> = p["kind"]["type"]["bounds"]
+            .as_array().cloned().unwrap_or_default();
+        if let Some(extra) = where_bounds.get(name) { bounds.extend(extra.iter().cloned()); }
+        // Is this the single-non-modellable-crate-local-trait shape we own?
+        let Some(trait_key) = single_concrete_impl_trait_key(&bounds) else {
+            continue; // not our shape — leave to existing routing (may drop)
+        };
+        // It IS our shape → we MUST decide it (resolve or drop). Resolve to the
+        // unique concrete impl.
+        match concrete_for_unique_impl(&trait_key) {
+            Some(concrete) => {
+                subst.insert(name.to_string(), concrete);
+                matched_send_keys.push((name.to_string(), trait_key));
+                removed.insert(name.to_string());
+            }
+            None => {
+                // 0 or >1 concrete impls → never guess (constraint 2).
+                record_generic_drop(
+                    method_name,
+                    GenericDrop::TraitBoundedParamAmbiguous(
+                        trait_bound_name_of_key(&trait_key)
+                            .unwrap_or_else(|| trait_key.clone()),
+                    ),
+                );
+                return Some(None); // signal: DROP this method
+            }
+        }
+    }
+
+    if subst.is_empty() {
+        return None; // nothing matched — caller keeps existing routing
+    }
+
+    // Build the rewritten fn_data: substitute the matched params throughout the
+    // sig, and strip them from the method's generics.params list.
+    let mut rewritten = fn_data.clone();
+    if let Some(sig) = rewritten.get_mut("sig") {
+        *sig = subst_generic_json(sig, &subst, BoundPos::Param);
+    } else if let Some(decl) = rewritten.get_mut("decl") {
+        *decl = subst_generic_json(decl, &subst, BoundPos::Param);
+    }
+    // Remove the resolved params from generics.params + drop where-preds on them.
+    if let Some(gp) = rewritten
+        .get_mut("generics")
+        .and_then(|g| g.get_mut("params"))
+        .and_then(|p| p.as_array_mut())
+    {
+        gp.retain(|p| {
+            let n = p.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            !removed.contains(n)
+        });
+    }
+    if let Some(wps) = rewritten
+        .get_mut("generics")
+        .and_then(|g| g.get_mut("where_predicates"))
+        .and_then(|w| w.as_array_mut())
+    {
+        wps.retain(|wp| {
+            let n = wp
+                .get("bound_predicate")
+                .and_then(|bp| bp.get("type"))
+                .and_then(|t| t.get("generic"))
+                .and_then(|g| g.as_str())
+                .unwrap_or("");
+            !removed.contains(n)
+        });
+    }
+
+    // [#52 Step 3] Send-proof: the substituted concrete is threaded by-value
+    // (`&Db`) into the async future. The async Send gate in `parse_fn_item`
+    // (`param_send_ok`) only admits primitives+String → it would OVER-DROP a
+    // legitimately-Send opaque. Prove Send CONSERVATIVELY here and record the
+    // rendered concrete-type name so the gate can admit it; an UNPROVABLE concrete
+    // (the `!Send` Rc-bearing row) is NOT recorded → the gate still drops it.
+    let _ = impl_generics;
+    for (param_name, trait_key) in &matched_send_keys {
+        let _ = param_name;
+        // Source 1: the bound trait carries a `Send` supertrait (`trait Wire: Send`).
+        let via_send_supertrait =
+            SEND_SUPERTRAIT_TRAIT_IDS.with(|s| s.borrow().contains(trait_key));
+        let concrete = match concrete_for_unique_impl(trait_key) {
+            Some(c) => c,
+            None => continue,
+        };
+        let concrete_id = concrete_impl_self_id(trait_key);
+        // Source 2: explicit `impl Send for T`. Source 3: all fields Send.
+        let via_explicit_impl = concrete_id
+            .as_ref()
+            .map(|id| EXPLICIT_SEND_TYPE_IDS.with(|s| s.borrow().contains(id)))
+            .unwrap_or(false);
+        let via_all_fields = concrete_id
+            .as_ref()
+            .map(|id| concrete_type_all_fields_send(id))
+            .unwrap_or(false);
+        if via_send_supertrait || via_explicit_impl || via_all_fields {
+            let rendered = rustdoc_type_to_rust_str(&concrete);
+            if !rendered.is_empty() {
+                PROVABLY_SEND_OPAQUE_NAMES.with(|c| {
+                    c.borrow_mut().insert(rendered);
+                });
+            }
+        }
+        // else: leave it unrecorded — the async Send gate drops it (conservative).
+    }
+    Some(Some(rewritten))
+}
+
+/// [#52] Last-segment trait NAME for a resolved trait-id key, recovered from the
+/// reachable-path map (for crate-local) — for the ambiguous-drop detail string.
+fn trait_bound_name_of_key(key: &str) -> Option<String> {
+    REACHABLE_PATHS.with(|c| {
+        c.borrow()
+            .get(key)
+            .map(|p| p.rsplit("::").next().unwrap_or(p).to_string())
+    })
 }
 
 /// Recursively replace every `{"generic":"NAME"}` node whose NAME is in `map`
